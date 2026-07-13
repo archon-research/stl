@@ -10,6 +10,8 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/cache"
@@ -72,6 +74,11 @@ type Deps struct {
 
 	DexTelemetry *dextelemetry.Telemetry
 
+	// CanonicalChecker resolves the canonical block hash at a height, so the
+	// block processor can skip (ack) a block that was reorged out after publish
+	// rather than retry it into the DLQ. See dexconsumer.WithCanonicalChecker.
+	CanonicalChecker dexconsumer.CanonicalChecker
+
 	// cleanups runs registered teardown functions in reverse order on Close().
 	cleanups []func()
 }
@@ -79,6 +86,19 @@ type Deps struct {
 // blockNumberer is the subset of the eth client used to read chain head.
 type blockNumberer interface {
 	BlockNumber(ctx context.Context) (uint64, error)
+}
+
+// canonicalChecker adapts the eth client to dexconsumer.CanonicalChecker: it
+// returns the canonical block hash at a height (via HeaderByNumber) so the block
+// processor can recognise a block that was reorged out during backlog replay.
+type canonicalChecker struct{ eth *ethclient.Client }
+
+func (c canonicalChecker) CanonicalHashAt(ctx context.Context, blockNumber int64) (common.Hash, error) {
+	h, err := c.eth.HeaderByNumber(ctx, big.NewInt(blockNumber))
+	if err != nil {
+		return common.Hash{}, err
+	}
+	return h.Hash(), nil
 }
 
 // LatestBlock returns the current chain head as a *big.Int, for callers (e.g. a
@@ -208,6 +228,7 @@ func Bootstrap(ctx context.Context, cfg Config, opts BootstrapOptions) (*Deps, e
 	}
 	d.cleanups = append(d.cleanups, func() { ethClient.Close() })
 	d.blockNumberer = ethClient
+	d.CanonicalChecker = canonicalChecker{eth: ethClient}
 	logger.Info("Ethereum node connected")
 
 	pool, err := postgres.OpenPool(ctx, postgres.WorkerDBConfig(cfg.DBURL))

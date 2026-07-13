@@ -35,6 +35,7 @@ type Telemetry struct {
 	errorsTotal      metric.Int64Counter
 	blockDuration    metric.Float64Histogram
 	stateRowsWritten metric.Int64Counter
+	reorgSkipped     metric.Int64Counter
 }
 
 // NewTelemetry registers three counters (`<prefix>.blocks.processed`,
@@ -94,6 +95,14 @@ func NewTelemetry(prefix string, chainID int64) (*Telemetry, error) {
 		return nil, fmt.Errorf("creating %s.state.rows.written counter: %w", prefix, err)
 	}
 
+	reorgSkipped, err := meter.Int64Counter(
+		prefix+".reorg.skipped",
+		metric.WithDescription("Blocks acked without indexing because they were reorged out of the canonical chain"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating %s.reorg.skipped counter: %w", prefix, err)
+	}
+
 	return &Telemetry{
 		prefix:           prefix,
 		chainAttr:        attribute.String("chain", chainName),
@@ -101,6 +110,7 @@ func NewTelemetry(prefix string, chainID int64) (*Telemetry, error) {
 		errorsTotal:      errs,
 		blockDuration:    dur,
 		stateRowsWritten: stateRows,
+		reorgSkipped:     reorgSkipped,
 	}, nil
 }
 
@@ -133,6 +143,16 @@ func (t *Telemetry) RecordError(ctx context.Context, operation string, err error
 		attribute.String("operation", operation),
 		t.chainAttr,
 	))
+}
+
+// RecordReorgSkip increments reorg_skipped_total: a block that was acked without
+// indexing because it was confirmed reorged out of the canonical chain. Nil
+// receiver is a no-op.
+func (t *Telemetry) RecordReorgSkip(ctx context.Context) {
+	if t == nil {
+		return
+	}
+	t.reorgSkipped.Add(ctx, 1, metric.WithAttributes(t.chainAttr))
 }
 
 // RecordStateRows increments state_rows_written_total by n. Nil receiver or

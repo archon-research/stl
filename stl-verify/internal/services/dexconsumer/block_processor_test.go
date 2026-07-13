@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"go.opentelemetry.io/otel"
 	metricsdk "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -16,6 +17,81 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
+
+// fakeCanonical is a test CanonicalChecker returning a fixed hash / error.
+type fakeCanonical struct {
+	hash  common.Hash
+	err   error
+	calls int
+}
+
+func (f *fakeCanonical) CanonicalHashAt(context.Context, int64) (common.Hash, error) {
+	f.calls++
+	return f.hash, f.err
+}
+
+// errHandler returns a BlockHandler that always fails with err.
+func errHandler(err error) BlockHandler {
+	return func(context.Context, outbound.BlockEvent, []shared.TransactionReceipt) error { return err }
+}
+
+// The version-0 block hash observed reorged out of staging (block 25512663).
+const reorgedEventHashHex = "0x5a94ae0445960dc11f7bf6048201a2ad600f2ad2fac663b4c45fd9ede414424f"
+
+// reorgedEvent builds a well-formed BlockEvent for the reorg tests.
+func reorgedEvent() outbound.BlockEvent {
+	return outbound.BlockEvent{ChainID: 1, BlockNumber: 25512663, Version: 0, BlockHash: reorgedEventHashHex, BlockTimestamp: 1}
+}
+
+// A handler error on a block whose hash is NO LONGER canonical means the block
+// was reorged out after publish: the message is acked (nil), not retried/DLQ'd.
+func TestProcessBlockEvent_SkipsReorgedOutBlockOnHandlerError(t *testing.T) {
+	cache := fakeCacheWithReceipts(t, 1)
+	// Canonical hash at this height differs from the event's -> reorged out.
+	canon := &fakeCanonical{hash: common.HexToHash("0xfd1f26821a60ec9745bfd3269ee949677fd188a6da2a7d9c7b40d2a471182bd0")}
+	bp := NewBlockProcessor(cache, nil, errHandler(errors.New("block not found")), WithCanonicalChecker(canon))
+
+	if err := bp.ProcessBlockEvent(context.Background(), reorgedEvent()); err != nil {
+		t.Fatalf("reorged-out block must be acked (nil), got: %v", err)
+	}
+	if canon.calls != 1 {
+		t.Errorf("canonical checker called %d times, want 1", canon.calls)
+	}
+}
+
+// A handler error on a block that IS still canonical must propagate (retry) —
+// the failure is real (e.g. a transient DB/RPC error), not a reorg.
+func TestProcessBlockEvent_PropagatesErrorWhenBlockIsCanonical(t *testing.T) {
+	cache := fakeCacheWithReceipts(t, 1)
+	canon := &fakeCanonical{hash: common.HexToHash(reorgedEventHashHex)} // matches event hash
+	bp := NewBlockProcessor(cache, nil, errHandler(errors.New("db timeout")), WithCanonicalChecker(canon))
+
+	if err := bp.ProcessBlockEvent(context.Background(), reorgedEvent()); err == nil {
+		t.Fatal("a canonical block's handler error must propagate (retry), got nil")
+	}
+}
+
+// If canonicality cannot be determined (checker errors), never drop the block:
+// propagate the handler error so it retries rather than risk acking a canonical block.
+func TestProcessBlockEvent_PropagatesErrorWhenCanonicalCheckFails(t *testing.T) {
+	cache := fakeCacheWithReceipts(t, 1)
+	canon := &fakeCanonical{err: errors.New("rpc unavailable")}
+	bp := NewBlockProcessor(cache, nil, errHandler(errors.New("block not found")), WithCanonicalChecker(canon))
+
+	if err := bp.ProcessBlockEvent(context.Background(), reorgedEvent()); err == nil {
+		t.Fatal("an inconclusive canonical check must propagate the error (retry), got nil")
+	}
+}
+
+// Without a canonical checker wired, the original always-retry behaviour holds.
+func TestProcessBlockEvent_NoCheckerPropagatesError(t *testing.T) {
+	cache := fakeCacheWithReceipts(t, 1)
+	bp := NewBlockProcessor(cache, nil, errHandler(errors.New("block not found")))
+
+	if err := bp.ProcessBlockEvent(context.Background(), reorgedEvent()); err == nil {
+		t.Fatal("without a canonical checker, a handler error must propagate, got nil")
+	}
+}
 
 // fakeCache implements outbound.BlockCacheReader; only GetReceipts is exercised
 // by the block processor, so the embedded interface leaves the rest unimplemented.

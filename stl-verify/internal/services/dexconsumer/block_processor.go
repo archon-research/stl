@@ -11,12 +11,26 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"time"
+
+	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/dextelemetry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
+
+// CanonicalChecker reports the canonical block hash at a height. BlockProcessor
+// uses it to tell a block that was reorged out after the watcher published it
+// (nothing valid to index — the canonical block at this height is republished as
+// a new version and processed separately) apart from a genuine processing
+// failure (which must retry). Optional: a nil checker disables reorg-skipping,
+// preserving the original always-retry behaviour.
+type CanonicalChecker interface {
+	// CanonicalHashAt returns the hash of the canonical block at blockNumber.
+	CanonicalHashAt(ctx context.Context, blockNumber int64) (common.Hash, error)
+}
 
 // BlockHandler processes every receipt of one block within a single SQS message
 // scope. It is the one protocol-specific seam each DEX worker supplies: match
@@ -38,6 +52,28 @@ type BlockProcessor struct {
 	cache     outbound.BlockCacheReader
 	telemetry *dextelemetry.Telemetry
 	handle    BlockHandler
+	canonical CanonicalChecker // optional; nil disables reorg-skipping
+	logger    *slog.Logger
+}
+
+// Option configures optional BlockProcessor behaviour.
+type Option func(*BlockProcessor)
+
+// WithCanonicalChecker enables reorg-skipping: on a handler error the processor
+// consults the checker and, only when the event's block is positively confirmed
+// non-canonical, acks the message instead of retrying it into the DLQ. A nil
+// checker is ignored (reorg-skipping stays off).
+func WithCanonicalChecker(c CanonicalChecker) Option {
+	return func(p *BlockProcessor) { p.canonical = c }
+}
+
+// WithLogger sets the logger used for reorg-skip notices. A nil logger is ignored.
+func WithLogger(l *slog.Logger) Option {
+	return func(p *BlockProcessor) {
+		if l != nil {
+			p.logger = l
+		}
+	}
 }
 
 // NewBlockProcessor wires the shared block handler. cache must be the
@@ -46,8 +82,12 @@ type BlockProcessor struct {
 // S3 archive; a nil receipts result then means the block is missing from both
 // tiers, not merely from Redis. telemetry may be nil (its methods are nil-safe),
 // e.g. when metrics are disabled.
-func NewBlockProcessor(cache outbound.BlockCacheReader, telemetry *dextelemetry.Telemetry, handle BlockHandler) *BlockProcessor {
-	return &BlockProcessor{cache: cache, telemetry: telemetry, handle: handle}
+func NewBlockProcessor(cache outbound.BlockCacheReader, telemetry *dextelemetry.Telemetry, handle BlockHandler, opts ...Option) *BlockProcessor {
+	p := &BlockProcessor{cache: cache, telemetry: telemetry, handle: handle, logger: slog.Default()}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
 }
 
 // ProcessBlockEvent is the sqsutil.BlockEventHandler for a DEX worker. It reads
@@ -81,7 +121,48 @@ func (p *BlockProcessor) ProcessBlockEvent(ctx context.Context, event outbound.B
 	}
 
 	if err := p.handle(ctx, event, receipts); err != nil {
+		if p.reorgedOut(ctx, event) {
+			// The block we were handed is no longer the canonical block at its
+			// height: it was reorged out after the watcher published it (common
+			// when replaying a multi-day backlog). Its hash-pinned state read can
+			// never succeed and there is nothing valid to index — the watcher
+			// republishes the canonical block at this height as a new version,
+			// which is processed separately. Ack it instead of burning retries
+			// into the DLQ. This is an explicit, observable discard (WARN + metric),
+			// not a swallow, and it fires only on a POSITIVE non-canonical
+			// confirmation (see reorgedOut).
+			p.telemetry.RecordReorgSkip(ctx)
+			p.logger.Warn("skipping reorged-out block: not on the canonical chain; canonical version is indexed separately",
+				"chainID", event.ChainID,
+				"block", event.BlockNumber,
+				"version", event.Version,
+				"blockHash", event.BlockHash,
+				"handlerError", err.Error(),
+			)
+			return nil
+		}
 		return fmt.Errorf("handling block %d (chain=%d, version=%d): %w", event.BlockNumber, event.ChainID, event.Version, err)
 	}
 	return nil
+}
+
+// reorgedOut reports whether the event's block is no longer the canonical block
+// at its height — i.e. it was reorged out after the watcher published it. It
+// returns true ONLY on a positive confirmation (a different canonical hash was
+// fetched). A nil checker, an unparseable event hash, or a failed lookup all
+// return false, so a genuine (retryable) failure is never mistaken for a reorg
+// and dropped: never discard a block we could not prove is non-canonical.
+func (p *BlockProcessor) reorgedOut(ctx context.Context, event outbound.BlockEvent) bool {
+	if p.canonical == nil {
+		return false
+	}
+	want, err := event.ParsedBlockHash()
+	if err != nil {
+		return false
+	}
+	got, err := p.canonical.CanonicalHashAt(ctx, event.BlockNumber)
+	if err != nil {
+		return false
+	}
+	return got != (common.Hash{}) && got != want
 }

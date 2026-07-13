@@ -84,7 +84,9 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("building %s handler: %w", f.Kind(), err)
 	}
 
-	bp := dexconsumer.NewBlockProcessor(deps.CacheReader, deps.DexTelemetry, handler)
+	bp := dexconsumer.NewBlockProcessor(deps.CacheReader, deps.DexTelemetry, handler,
+		dexconsumer.WithCanonicalChecker(deps.CanonicalChecker),
+		dexconsumer.WithLogger(deps.Logger))
 	sqsutil.RunLoop(ctx, sqsutil.Config{
 		Consumer:     deps.SQSConsumer,
 		MaxMessages:  cfg.MaxMessages,
