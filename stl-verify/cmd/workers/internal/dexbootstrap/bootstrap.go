@@ -12,6 +12,7 @@ import (
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	blockchainAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/cache"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
@@ -213,6 +214,7 @@ func Bootstrap(ctx context.Context, cfg Config, opts BootstrapOptions) (*Deps, e
 	}
 	d.cleanups = append(d.cleanups, func() { ethClient.Close() })
 	d.blockNumberer = ethClient
+	d.ReorgChecker = blockchainAdapter.NewReorgChecker(ethClient)
 	logger.Info("Ethereum node connected")
 
 	pool, err := postgres.OpenPool(ctx, postgres.WorkerDBConfig(cfg.DBURL))
@@ -285,13 +287,6 @@ func Bootstrap(ctx context.Context, cfg Config, opts BootstrapOptions) (*Deps, e
 		d.Close()
 		return nil, fmt.Errorf("creating transaction manager: %w", err)
 	}
-	// Reorg-skipping reads the watcher's own orphan marker in block_states (the
-	// authority that published the block and republishes its canonical
-	// replacement), never a live chain-RPC canonical lookup — see
-	// dexconsumer.ReorgChecker.
-	d.ReorgChecker = dexconsumer.NewBlockStateReorgChecker(
-		postgres.NewBlockStateRepository(pool, cfg.ChainID, logger))
-
 	d.ProtocolRepo, err = postgres.NewProtocolRepository(pool, logger, buildReg.BuildID(), defaultRepoBatchSize)
 	if err != nil {
 		d.Close()

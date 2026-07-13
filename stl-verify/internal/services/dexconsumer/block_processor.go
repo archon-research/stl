@@ -21,30 +21,28 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
-// ReorgChecker reports whether a published block was reorged out. BlockProcessor
-// uses it to tell such a block (nothing valid to index — the watcher republishes
-// the canonical block at that height as a new version, which is processed
-// separately) apart from a genuine processing failure, which must retry.
+// ReorgChecker reports whether a published block was reorged out of the
+// canonical chain. BlockProcessor uses it to tell such a block (nothing valid to
+// index — the watcher republishes the canonical block at that height as a new
+// version, which is processed separately) apart from a genuine processing
+// failure, which must retry.
 //
-// The verdict must come from OUR OWN record of the chain (the watcher's orphan
-// marker), not from a live chain-RPC "what is canonical at height N?" query. The
-// watcher decided this block was canonical and published it; it is also what
-// detects the reorg and republishes the replacement. An RPC node is a different
-// authority that can disagree with us — lagging, or transiently on a minority
-// fork — and a false "reorged" verdict would discard a block the watcher
-// considers canonical and never republishes: permanent, silent data loss.
-//
-// An implementation must answer true only on positive proof for the exact hash,
-// and must return false (or an error) whenever it cannot prove it, so the caller
-// retries instead of discarding. See NewBlockStateReorgChecker.
+// The verdict MUST be final: an implementation may only answer true for a block
+// at or below the chain's finalized head. Above that boundary our own RPC node's
+// view of "canonical" can differ from the watcher's (tip churn, a lagging or
+// minority-fork node behind a load balancer), and a false positive there would
+// permanently drop a still-canonical block that the watcher never republishes —
+// the exact data loss this feature must not cause. Below the finalized head the
+// answer is identical on every honest node, so the verdict is safe.
 //
 // Optional: a nil checker disables reorg-skipping, preserving the original
 // always-retry behaviour.
 type ReorgChecker interface {
-	// ReorgedOut reports true only when this exact blockHash is proven to have
-	// been reorged out. It returns false when the block is still canonical or
-	// cannot be proven reorged. A non-nil error means the check could not be
-	// performed — the caller must retry, never skip.
+	// ReorgedOut reports true only when blockHash is provably no longer the
+	// canonical block at blockNumber AND blockNumber is at or below the finalized
+	// head. It returns false for a still-canonical block and for any block it
+	// cannot conclusively judge (e.g. not yet finalized). A non-nil error means
+	// the check could not be performed — the caller must retry, never skip.
 	ReorgedOut(ctx context.Context, blockNumber int64, blockHash common.Hash) (bool, error)
 }
 
