@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS security_master (
     CONSTRAINT sm_currency_fkey FOREIGN KEY (currency) REFERENCES currency_ref(currency_code),
     CONSTRAINT sm_country_risk_fkey FOREIGN KEY (country_of_risk) REFERENCES country_ref(country_code),
     CONSTRAINT sm_country_issue_fkey FOREIGN KEY (country_of_issuance) REFERENCES country_ref(country_code),
+    CONSTRAINT sm_processing_version_chk CHECK (processing_version >= 1),
     CONSTRAINT sm_status_chk CHECK (security_status IN ('ACTIVE','SUSPENDED','MATURED','DELISTED')),
     CONSTRAINT sm_token_standard_chk CHECK (token_standard IS NULL OR is_tokenised IS TRUE),
     CONSTRAINT sm_credit_tranche_chk CHECK (credit_tranche IS NULL OR credit_tranche IN ('AAA','AA','A','BBB','BB','B','EQUITY')),
@@ -71,6 +72,39 @@ CREATE TABLE IF NOT EXISTS security_master (
     CONSTRAINT sm_agency_status_chk CHECK (agency_status IS NULL OR agency_status IN ('AGENCY','NON_AGENCY')),
     CONSTRAINT sm_backing_chk CHECK (backing IS NULL OR backing IN ('CASH','SYNTHETIC','FIAT','CRYPTO','ALGORITHMIC'))
 );
+
+-- Catalog metadata (downstream data-dictionary / schema_master tooling reads pg_catalog comments).
+COMMENT ON TABLE security_master IS 'Append-only SCD2 instrument-classification master (table_type=master). One row per (security_id, processing_version); the latest per security_id is the current classification (security_master_current). Positions resolve to it via security_instrument_bridge.';
+COMMENT ON COLUMN security_master.security_sk IS 'Immutable surrogate key; the value stamped onto positions.';
+COMMENT ON COLUMN security_master.security_id IS 'Natural key (sm-<code>); stable across all SCD2 versions.';
+COMMENT ON COLUMN security_master.processing_version IS 'Monotonic version per security_id (>=1); SCD2 dedup key, loader-assigned.';
+COMMENT ON COLUMN security_master.valid_from IS 'Date this version became effective; only temporal field stored (valid_to derived in security_master_versions).';
+COMMENT ON COLUMN security_master.change_reason IS 'Mandatory: why this version exists.';
+COMMENT ON COLUMN security_master.security_name IS 'Full display name.';
+COMMENT ON COLUMN security_master.ticker IS 'Short trading symbol; stable across renames.';
+COMMENT ON COLUMN security_master.isin IS 'ISO 6166 identifier; n/a for on-chain instruments.';
+COMMENT ON COLUMN security_master.cusip IS 'CUSIP identifier.';
+COMMENT ON COLUMN security_master.sedol IS 'SEDOL identifier.';
+COMMENT ON COLUMN security_master.figi IS 'Bloomberg FIGI.';
+COMMENT ON COLUMN security_master.asset_class IS 'FK asset_class_ref; top classification level.';
+COMMENT ON COLUMN security_master.security_type IS 'FK security_type_ref(asset_class, security_type).';
+COMMENT ON COLUMN security_master.security_subtype IS 'Nullable; FK security_subtype_ref(asset_class, security_type, security_subtype) via MATCH SIMPLE (skipped when NULL).';
+COMMENT ON COLUMN security_master.currency IS 'ISO 4217 denomination; FK currency_ref.';
+COMMENT ON COLUMN security_master.country_of_issuance IS 'FK country_ref; where the instrument was issued.';
+COMMENT ON COLUMN security_master.country_of_risk IS 'FK country_ref; underlying economic-exposure country.';
+COMMENT ON COLUMN security_master.issuer_entity_id IS 'Soft ref to entity_master.entity_id (no FK until VEC-410 lands).';
+COMMENT ON COLUMN security_master.security_status IS 'ACTIVE / SUSPENDED / MATURED / DELISTED.';
+COMMENT ON COLUMN security_master.is_tokenised IS 'TRUE = on-chain tokenised form of a traditional asset.';
+COMMENT ON COLUMN security_master.token_standard IS 'ERC-20 / ERC-1400 / ERC-3643 / BENJI / ...; only when is_tokenised.';
+COMMENT ON COLUMN security_master.credit_tranche IS 'Structured-credit seniority facet (AAA..B, EQUITY).';
+COMMENT ON COLUMN security_master.credit_quality IS 'Credit-quality facet (INVESTMENT_GRADE / HIGH_YIELD / PRIME).';
+COMMENT ON COLUMN security_master.collateral_pool IS 'ABS collateral-pool facet (AUTO / CREDIT_CARD / STUDENT_LOAN / CONSUMER).';
+COMMENT ON COLUMN security_master.agency_status IS 'Agency facet (AGENCY / NON_AGENCY).';
+COMMENT ON COLUMN security_master.backing IS 'Backing facet: securitisation (CASH/SYNTHETIC) or stablecoin (FIAT/CRYPTO/ALGORITHMIC).';
+COMMENT ON COLUMN security_master.source_system IS 'System of record.';
+COMMENT ON COLUMN security_master.created_at IS 'Write timestamp.';
+COMMENT ON COLUMN security_master.created_by IS 'User or service that wrote the row.';
+COMMENT ON COLUMN security_master.approved_by IS '4-eyes approver.';
 
 -- One version per (security_id, processing_version): the SCD2 dedup key. Two same-day corrections are
 -- distinguished by processing_version, and the current view breaks ties on it. Unlike the pipeline
