@@ -95,6 +95,8 @@ data:
   ARCHIVE_SC_CALLS: "true"
   RAW_SC_BUCKET: "stl-sentinelstaging-raw-sc-calls"
 ---
+# uniswap-v3-indexer-config deferred to VEC-329, which re-adds the staging/prod
+# overlay wiring once the dex-indexer image + SQS queue + secret are provisioned.
 apiVersion: v1
 kind: ConfigMap
 metadata:
