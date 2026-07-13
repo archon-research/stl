@@ -11,18 +11,22 @@
 -- FK. instrument_key is the id within the kind; composite keys are joined with ':' (e.g. a token at a
 -- proxy is '<token_id>:<proxy_hex>', a Sky ilk is its ilk_name).
 --
--- SCD2-lite via valid_from: re-pointing an instrument to a different security is a new INSERT with a
--- later valid_from; the prior row is kept. Append-only — UPDATE / DELETE / TRUNCATE are revoked below.
+-- SCD2-lite: re-pointing an instrument to a different security is a new INSERT with a higher
+-- processing_version (and a later valid_from); the prior row is kept. Append-only — UPDATE / DELETE /
+-- TRUNCATE are revoked below. processing_version (not valid_from) is the version axis so two re-points
+-- on the same calendar day are both representable; the loader (VEC-419) owns monotonic assignment per
+-- (instrument_kind, instrument_key), matching security_master.
 SET search_path TO public;
 
 CREATE TABLE security_instrument_bridge (
-    instrument_kind text NOT NULL,   -- which instrument shape (see CHECK); pinned so a typo'd kind fails hard
-    instrument_key  text NOT NULL,   -- id within the kind; composite values joined with ':'
-    security_id     text NOT NULL,   -- soft ref to security_master.security_id (resolve via security_master_current)
-    valid_from      date NOT NULL DEFAULT CURRENT_DATE,
-    change_reason   text NOT NULL,   -- mandatory: why this mapping / re-point exists
-    created_at      timestamp with time zone NOT NULL DEFAULT now(),
-    PRIMARY KEY (instrument_kind, instrument_key, valid_from),
+    instrument_kind    text NOT NULL,   -- which instrument shape (see CHECK); pinned so a typo'd kind fails hard
+    instrument_key     text NOT NULL,   -- id within the kind; composite values joined with ':' (components are ':'-free: hex/int)
+    security_id        text NOT NULL,   -- soft ref to security_master.security_id (resolve via security_master_current)
+    processing_version integer NOT NULL DEFAULT 1,  -- monotonic per (kind,key); dedup + version key
+    valid_from         date NOT NULL DEFAULT CURRENT_DATE,
+    change_reason      text NOT NULL,   -- mandatory: why this mapping / re-point exists
+    created_at         timestamp with time zone NOT NULL DEFAULT now(),
+    PRIMARY KEY (instrument_kind, instrument_key, processing_version),
     -- The 7 shapes (9 kinds). Extending the vocabulary for a new protocol is a deliberate new migration.
     CONSTRAINT sib_kind_chk CHECK (instrument_kind IN (
         'token', 'lending_reserve',            -- Morpho / SparkLend / Aave / prices (token-based)
@@ -37,11 +41,13 @@ CREATE TABLE security_instrument_bridge (
 -- (WHERE instrument_kind = ? AND instrument_key = ?) is served by the leading PK columns.
 CREATE INDEX sib_security_idx ON security_instrument_bridge (security_id);
 
--- Current mapping per instrument: the latest valid_from wins. VEC-420 resolves security_sk against this.
+-- Current mapping per instrument: latest valid_from wins, processing_version breaks same-day ties
+-- (deterministic, matching security_master_current). VEC-420 must resolve security_sk against THIS view,
+-- not the base table, or a historical re-point would fan out to multiple rows.
 CREATE VIEW security_instrument_bridge_current AS
 SELECT DISTINCT ON (instrument_kind, instrument_key) *
 FROM security_instrument_bridge
-ORDER BY instrument_kind, instrument_key, valid_from DESC;
+ORDER BY instrument_kind, instrument_key, valid_from DESC, processing_version DESC;
 
 -- Reads for both roles; append-only writes for the indexer role (INSERT, never UPDATE/DELETE).
 GRANT SELECT ON security_instrument_bridge, security_instrument_bridge_current TO stl_readonly;
