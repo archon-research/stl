@@ -32,7 +32,7 @@ Infrastructure code (Terraform/OpenTofu) lives in a separate repository for secu
 
 ## Where the rest lives (loads on demand)
 
-- **[stl-verify/AGENTS.md](stl-verify/AGENTS.md)** — Go service: architecture, language-agnostic conventions (testing, function composition, comments, registries, external-API lore), build/run, plus the folded-in Go style and database/migration rules.
+- **[stl-verify/AGENTS.md](stl-verify/AGENTS.md)** — Go service: architecture, language-agnostic conventions (testing, function composition, comments, registries, external-API lore), build/run, plus the folded-in Go style rules (database/migration rules are scoped to `stl-verify/db/migrations/`).
 - **[stl-verify/python/AGENTS.md](stl-verify/python/AGENTS.md)** and **[stl-verify/ts/AGENTS.md](stl-verify/ts/AGENTS.md)** — per-language tooling/CI.
 - **[k8s/AGENTS.md](k8s/AGENTS.md)** — Kustomize base/overlays/dev-infra conventions.
 - **[alerts/AGENTS.md](alerts/AGENTS.md)** and **[docs/runbooks/AGENTS.md](docs/runbooks/AGENTS.md)** — alerts + runbooks definition-of-done for new indexers.
