@@ -14,6 +14,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 // TestStableswapHandler_RemoveLiquidityOne_ValidatesCoinIndex: the NG
@@ -360,22 +361,26 @@ func TestStableswapHandler_CorruptKnownEventErrors(t *testing.T) {
 // SnapshotState tests
 // ---------------------------------------------------------------------------
 
-// fakeMulticaller is a test double for outbound.Multicaller that returns
-// pre-built results in order.
-type fakeMulticaller struct {
-	results []outbound.Result
+// curveMC returns a MockMulticaller that serves the given canned results for
+// every Execute/ExecuteAtHash call, recording each call on mc.Invocations so
+// snapshot tests can assert which Target address each sub-call uses.
+func curveMC(results []outbound.Result) *testutil.MockMulticaller {
+	mc := testutil.NewMockMulticaller()
+	mc.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return results, nil
+	}
+	return mc
 }
 
-func (f *fakeMulticaller) Execute(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-	return f.results, nil
-}
-
-func (f *fakeMulticaller) ExecuteAtHash(ctx context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
-	return f.Execute(ctx, calls, nil)
-}
-
-func (f *fakeMulticaller) Address() common.Address {
-	return common.Address{}
+// snapshotCalls returns the calls of the snapshot's multicall batch, pinning the
+// contract that SnapshotState issues exactly one batch: the capturing assertions
+// index into it, and a second batch would otherwise escape them silently.
+func snapshotCalls(t *testing.T, mc *testutil.MockMulticaller) []outbound.Call {
+	t.Helper()
+	if len(mc.Invocations) != 1 {
+		t.Fatalf("snapshot issued %d multicall batches, want exactly 1", len(mc.Invocations))
+	}
+	return mc.Invocations[0].Calls
 }
 
 // packUint256 ABI-encodes a uint256 value as a 32-byte big-endian word.
@@ -488,7 +493,7 @@ func TestStableswapHandler_SnapshotPreNG(t *testing.T) {
 		CoinDecimals: []int{18, 18},
 		HasAPrecise:  true,
 	}
-	mc := &fakeMulticaller{results: stableswapPreNGResults(t, a)}
+	mc := curveMC(stableswapPreNGResults(t, a))
 	ss, err := h.SnapshotState(context.Background(), mc, pool, 100, 0, time.Unix(1, 0).UTC())
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
@@ -563,7 +568,7 @@ func TestStableswapHandler_SnapshotNG(t *testing.T) {
 		CoinDecimals: []int{18, 6},
 		HasAPrecise:  true,
 	}
-	mc := &fakeMulticaller{results: stableswapNGResults(t, a)}
+	mc := curveMC(stableswapNGResults(t, a))
 	ss, err := h.SnapshotState(context.Background(), mc, pool, 200, 0, time.Unix(2, 0).UTC())
 	if err != nil {
 		t.Fatalf("snapshot NG: %v", err)
@@ -612,26 +617,6 @@ func TestStableswapHandler_SnapshotNG(t *testing.T) {
 	}
 }
 
-// capturingMulticaller records the calls it receives and returns preset results.
-// It is used to assert which Target address each call uses.
-type capturingMulticaller struct {
-	captured []outbound.Call
-	results  []outbound.Result
-}
-
-func (c *capturingMulticaller) Execute(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-	c.captured = append(c.captured, calls...)
-	return c.results, nil
-}
-
-func (c *capturingMulticaller) ExecuteAtHash(ctx context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
-	return c.Execute(ctx, calls, nil)
-}
-
-func (c *capturingMulticaller) Address() common.Address {
-	return common.Address{}
-}
-
 // totalSupplyCallIndex returns the index of the totalSupply call in a pre-NG 2-coin
 // call list: balances(0), balances(1), get_virtual_price, totalSupply -> index 3.
 const stableswapPreNG2CoinTotalSupplyIdx = 3
@@ -658,23 +643,24 @@ func TestStableswapHandler_SnapshotTotalSupplyTargetsLpToken(t *testing.T) {
 		HasAPrecise:    true,
 	}
 
-	mc := &capturingMulticaller{results: stableswapPreNGResults(t, a)}
+	mc := curveMC(stableswapPreNGResults(t, a))
 	_, err = h.SnapshotState(context.Background(), mc, pool, 100, 0, time.Unix(1, 0).UTC())
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
 
-	if len(mc.captured) <= stableswapPreNG2CoinTotalSupplyIdx {
-		t.Fatalf("captured %d calls, want at least %d", len(mc.captured), stableswapPreNG2CoinTotalSupplyIdx+1)
+	captured := snapshotCalls(t, mc)
+	if len(captured) <= stableswapPreNG2CoinTotalSupplyIdx {
+		t.Fatalf("captured %d calls, want at least %d", len(captured), stableswapPreNG2CoinTotalSupplyIdx+1)
 	}
 
-	tsCall := mc.captured[stableswapPreNG2CoinTotalSupplyIdx]
+	tsCall := captured[stableswapPreNG2CoinTotalSupplyIdx]
 	if tsCall.Target != lpAddr {
 		t.Errorf("totalSupply call Target = %s, want LP token %s", tsCall.Target, lpAddr)
 	}
 
 	// All other calls must target the pool, not the LP token.
-	for i, c := range mc.captured {
+	for i, c := range captured {
 		if i == stableswapPreNG2CoinTotalSupplyIdx {
 			continue
 		}
@@ -706,17 +692,18 @@ func TestStableswapHandler_SnapshotTotalSupplyTargetsPoolWhenNoLpToken(t *testin
 		HasAPrecise:    true,
 	}
 
-	mc := &capturingMulticaller{results: stableswapNGResults(t, a)}
+	mc := curveMC(stableswapNGResults(t, a))
 	_, err = h.SnapshotState(context.Background(), mc, pool, 100, 0, time.Unix(1, 0).UTC())
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
 
-	if len(mc.captured) <= stableswapPreNG2CoinTotalSupplyIdx {
-		t.Fatalf("captured %d calls, want at least %d", len(mc.captured), stableswapPreNG2CoinTotalSupplyIdx+1)
+	captured := snapshotCalls(t, mc)
+	if len(captured) <= stableswapPreNG2CoinTotalSupplyIdx {
+		t.Fatalf("captured %d calls, want at least %d", len(captured), stableswapPreNG2CoinTotalSupplyIdx+1)
 	}
 
-	tsCall := mc.captured[stableswapPreNG2CoinTotalSupplyIdx]
+	tsCall := captured[stableswapPreNG2CoinTotalSupplyIdx]
 	if tsCall.Target != poolAddr {
 		t.Errorf("totalSupply call Target = %s, want pool %s", tsCall.Target, poolAddr)
 	}
@@ -745,7 +732,7 @@ func TestStableswapHandler_SnapshotRevertErrors(t *testing.T) {
 	}
 	revertResults[0] = outbound.Result{Success: false, ReturnData: nil} // First balances call reverts
 
-	mc := &fakeMulticaller{results: revertResults}
+	mc := curveMC(revertResults)
 	_, err = h.SnapshotState(context.Background(), mc, pool, 100, 0, time.Unix(1, 0).UTC())
 	if err == nil {
 		t.Errorf("snapshot with required call revert should error, got nil")
@@ -772,7 +759,7 @@ func TestStableswapHandler_SnapshotExtendedRevertErrors(t *testing.T) {
 	results := stableswapPreNGResults(t, a)
 	results[preNG2CoinAPreciseIdx] = outbound.Result{Success: false} // A_precise reverts
 
-	mc := &fakeMulticaller{results: results}
+	mc := curveMC(results)
 	_, err := h.SnapshotState(context.Background(), mc, pool, 100, 0, time.Unix(1, 0).UTC())
 	if err == nil {
 		t.Error("reverted extended read (A_precise) must error, got nil")
@@ -790,7 +777,7 @@ func TestStableswapHandler_SnapshotConfigGetterRevertErrors(t *testing.T) {
 	results := stableswapPreNGResults(t, a)
 	results[preNG2CoinInitialAIdx] = outbound.Result{Success: false} // initial_A reverts
 
-	mc := &fakeMulticaller{results: results}
+	mc := curveMC(results)
 	_, err := h.SnapshotState(context.Background(), mc, pool, 100, 0, time.Unix(1, 0).UTC())
 	if err == nil {
 		t.Error("reverted required config getter must error, got nil")
@@ -819,13 +806,13 @@ func TestStableswapHandler_SnapshotNoAPreciseGatesCall(t *testing.T) {
 		t.Fatalf("packing A_precise: %v", err)
 	}
 
-	mc := &capturingMulticaller{results: results}
+	mc := curveMC(results)
 	ss, err := h.SnapshotState(context.Background(), mc, pool, 100, 0, time.Unix(1, 0).UTC())
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
 
-	for i, c := range mc.captured {
+	for i, c := range snapshotCalls(t, mc) {
 		if bytes.Equal(c.CallData, aPreciseData) {
 			t.Errorf("call[%d] is A_precise, but HasAPrecise=false must issue no A_precise call", i)
 		}
