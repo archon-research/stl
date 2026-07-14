@@ -19,6 +19,7 @@ import (
 const (
 	unitLastSuccessMetric   = "oracle.unit.last_success_timestamp_seconds"
 	unitPricesFetchedMetric = "oracle.unit.prices_fetched"
+	unitReadsFailedMetric   = "oracle.unit.reads_failed"
 )
 
 // nowSeconds mirrors the gauge's fractional-second resolution so tests can
@@ -129,6 +130,17 @@ func gaugePointFor(t *testing.T, reader sdkmetric.Reader, oracleName string) met
 		t.Fatalf("%s points for oracle %q = %d, want 1", unitLastSuccessMetric, oracleName, len(found))
 	}
 	return found[0]
+}
+
+// counterPointFor returns the single data point of the named counter, failing
+// the test if it is absent or duplicated.
+func counterPointFor(t *testing.T, reader sdkmetric.Reader, name string) metricdata.DataPoint[int64] {
+	t.Helper()
+	pts := counterPoints(t, reader, name)
+	if len(pts) != 1 {
+		t.Fatalf("%s data points = %d, want 1", name, len(pts))
+	}
+	return pts[0]
 }
 
 // TestStart_BaselinesFreshnessForLoadedUnits pins the startup baseline: a unit
@@ -340,11 +352,7 @@ func TestProcessBlock_FeedOracle_RecordsPricesFetched(t *testing.T) {
 		t.Fatalf("processBlock: %v", err)
 	}
 
-	pts := counterPoints(t, reader, unitPricesFetchedMetric)
-	if len(pts) != 1 {
-		t.Fatalf("%s data points = %d, want 1", unitPricesFetchedMetric, len(pts))
-	}
-	p := pts[0]
+	p := counterPointFor(t, reader, unitPricesFetchedMetric)
 	if v, ok := p.Attributes.Value("oracle.name"); !ok || v.AsString() != "chainlink" {
 		t.Errorf("oracle.name attribute = %q (present=%v), want %q", v.AsString(), ok, "chainlink")
 	}
@@ -353,39 +361,42 @@ func TestProcessBlock_FeedOracle_RecordsPricesFetched(t *testing.T) {
 	}
 }
 
-// TestProcessBlock_MixedFeedResults_CountsOnlySuccessfulFetches pins the
-// counting predicate itself: with one healthy and one reverting feed in the
-// same unit, only the healthy read counts.
-func TestProcessBlock_MixedFeedResults_CountsOnlySuccessfulFetches(t *testing.T) {
-	repo := &mockRepo{}
+// multiFeedOracleSetup extends feedOracleSetup to n feeds on the same unit
+// (addresses 0xF01, 0xF02, ..., token IDs 1..n) so partial-loss scenarios
+// (some healthy, some dark feeds) are expressible.
+func multiFeedOracleSetup(repo *mockRepo, n int) {
 	feedOracleSetup(repo)
-	// Two feeds, but the multicaller only answers the first; the second comes
-	// back Success=false (a reverting feed).
 	repo.getEnabledAssetsFn = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
-		return []*entity.OracleAsset{
-			{
-				ID: 1, OracleID: 1, TokenID: 1, Enabled: true,
-				FeedAddress:  common.HexToAddress("0x0000000000000000000000000000000000000F01"),
+		assets := make([]*entity.OracleAsset, n)
+		for i := range assets {
+			assets[i] = &entity.OracleAsset{
+				ID: int64(i + 1), OracleID: 1, TokenID: int64(i + 1), Enabled: true,
+				FeedAddress:  common.BigToAddress(big.NewInt(int64(0xF01 + i))),
 				FeedDecimals: 8, QuoteCurrency: "USD",
-			},
-			{
-				ID: 2, OracleID: 1, TokenID: 2, Enabled: true,
-				FeedAddress:  common.HexToAddress("0x0000000000000000000000000000000000000F02"),
-				FeedDecimals: 8, QuoteCurrency: "USD",
-			},
-		}, nil
+			}
+		}
+		return assets, nil
 	}
 	repo.getTokenInfosFn = func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
-		return map[int64]outbound.TokenInfo{
-			1: {Address: common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").Bytes()},
-			2: {Address: common.HexToAddress("0x6B175474E89094C44Da98b954EedeAC495271d0F").Bytes()},
-		}, nil
+		infos := make(map[int64]outbound.TokenInfo, n)
+		for i := range n {
+			infos[int64(i+1)] = outbound.TokenInfo{
+				Address: common.BigToAddress(big.NewInt(int64(0x1000 + i))).Bytes(),
+			}
+		}
+		return infos, nil
 	}
-	// Discriminate by call target, not batch index: FetchFeedPrices retries a
-	// failed feed via latestAnswer in a second batch where it sits at index 0,
-	// so an index-keyed mock would let the dark feed "recover" on retry.
+}
+
+// healthyFirstFeedMulticaller answers only feed 0xF01; every other target
+// comes back Success=false (a reverting feed). It discriminates by call
+// target, not batch index: FetchFeedPrices retries a failed feed via
+// latestAnswer in a second batch where it sits at index 0, so an index-keyed
+// mock would let the dark feed "recover" on retry.
+func healthyFirstFeedMulticaller(t *testing.T) *testutil.MockMulticaller {
+	t.Helper()
 	healthyFeed := common.HexToAddress("0x0000000000000000000000000000000000000F01")
-	mc := &testutil.MockMulticaller{
+	return &testutil.MockMulticaller{
 		ExecuteFn: func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 			results := make([]outbound.Result, len(calls))
 			for i, c := range calls {
@@ -402,18 +413,212 @@ func TestProcessBlock_MixedFeedResults_CountsOnlySuccessfulFetches(t *testing.T)
 			return results, nil
 		},
 	}
+}
+
+// TestProcessBlock_MixedFeedResults_CountsOnlySuccessfulFetches pins the
+// counting predicate itself: with one healthy and one reverting feed in the
+// same unit, only the healthy read counts.
+func TestProcessBlock_MixedFeedResults_CountsOnlySuccessfulFetches(t *testing.T) {
+	repo := &mockRepo{}
+	multiFeedOracleSetup(repo, 2)
+	svc, reader := newFreshnessService(t, repo, multicallFactoryFor(healthyFirstFeedMulticaller(t)))
+
+	if err := svc.processBlock(context.Background(), freshnessBlockEvent(18000000)); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+
+	if p := counterPointFor(t, reader, unitPricesFetchedMetric); p.Value != 1 {
+		t.Errorf("counter value = %d, want 1 (only the successful feed counts)", p.Value)
+	}
+}
+
+// TestProcessBlock_MixedFeedResults_RecordsFailedReads pins partial feed
+// loss: one dark feed in a two-feed unit must surface as exactly one failed
+// read per pass, the signature VectorOracleUnitReadsFailing alerts on.
+func TestProcessBlock_MixedFeedResults_RecordsFailedReads(t *testing.T) {
+	repo := &mockRepo{}
+	multiFeedOracleSetup(repo, 2)
+	svc, reader := newFreshnessService(t, repo, multicallFactoryFor(healthyFirstFeedMulticaller(t)))
+
+	if err := svc.processBlock(context.Background(), freshnessBlockEvent(18000000)); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+
+	p := counterPointFor(t, reader, unitReadsFailedMetric)
+	if v, ok := p.Attributes.Value("oracle.name"); !ok || v.AsString() != "chainlink" {
+		t.Errorf("oracle.name attribute = %q (present=%v), want %q", v.AsString(), ok, "chainlink")
+	}
+	if p.Value != 1 {
+		t.Errorf("counter value = %d, want 1 (the dark feed is one failed read)", p.Value)
+	}
+}
+
+// TestProcessBlock_HealthyUnit_RecordsZeroFailedReads pins that a fully
+// healthy pass records an explicit zero: the series must exist so a zero
+// failure rate is queryable and distinguishable from an absent series.
+func TestProcessBlock_HealthyUnit_RecordsZeroFailedReads(t *testing.T) {
+	repo := &mockRepo{}
+	feedOracleSetup(repo)
+	mc := newFeedMulticaller(t, []*big.Int{big.NewInt(200_000_000_000)})
 	svc, reader := newFreshnessService(t, repo, multicallFactoryFor(mc))
 
 	if err := svc.processBlock(context.Background(), freshnessBlockEvent(18000000)); err != nil {
 		t.Fatalf("processBlock: %v", err)
 	}
 
-	pts := counterPoints(t, reader, unitPricesFetchedMetric)
-	if len(pts) != 1 {
-		t.Fatalf("%s data points = %d, want 1", unitPricesFetchedMetric, len(pts))
+	if p := counterPointFor(t, reader, unitReadsFailedMetric); p.Value != 0 {
+		t.Errorf("counter value = %d, want 0 (healthy pass, no failed reads)", p.Value)
 	}
-	if pts[0].Value != 1 {
-		t.Errorf("counter value = %d, want 1 (only the successful feed counts)", pts[0].Value)
+}
+
+// TestProcessBlock_AllFeedsFailing_RecordsFailedReads pins total feed loss:
+// every read of the single-feed unit fails, so failed reads accumulate at one
+// per pass while the pass itself still "succeeds" (reverting feeds are
+// guard-skipped, not errored).
+func TestProcessBlock_AllFeedsFailing_RecordsFailedReads(t *testing.T) {
+	repo := &mockRepo{}
+	feedOracleSetup(repo)
+	mc := newFeedMulticaller(t, nil) // every feed result comes back Success=false
+	svc, reader := newFreshnessService(t, repo, multicallFactoryFor(mc))
+
+	if err := svc.processBlock(context.Background(), freshnessBlockEvent(18000000)); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+
+	if p := counterPointFor(t, reader, unitReadsFailedMetric); p.Value != 1 {
+		t.Errorf("counter value = %d, want 1 (the unit's only feed failed)", p.Value)
+	}
+}
+
+// TestProcessBlock_MostFeedsFailing_RecordsFailedReadMagnitude pins that the
+// counter carries the loss magnitude, not just its presence: two dark feeds
+// of three must record failed = 2, so the failed-read rate sizes the loss
+// instead of merely flagging it.
+func TestProcessBlock_MostFeedsFailing_RecordsFailedReadMagnitude(t *testing.T) {
+	repo := &mockRepo{}
+	multiFeedOracleSetup(repo, 3)
+	svc, reader := newFreshnessService(t, repo, multicallFactoryFor(healthyFirstFeedMulticaller(t)))
+
+	if err := svc.processBlock(context.Background(), freshnessBlockEvent(18000000)); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+
+	if p := counterPointFor(t, reader, unitPricesFetchedMetric); p.Value != 1 {
+		t.Errorf("fetched counter = %d, want 1", p.Value)
+	}
+	if p := counterPointFor(t, reader, unitReadsFailedMetric); p.Value != 2 {
+		t.Errorf("failed counter = %d, want 2 (both dark feeds must count)", p.Value)
+	}
+}
+
+// TestProcessBlock_ERC4626Oracle_PartialVaultFailureRecordsFailedRead pins the
+// erc4626 path's partial loss: one failing vault of two is soft-skipped
+// (Success=false), so it must land on the failed-reads counter while the
+// healthy vault counts as fetched. (Losing ALL vaults instead hard-errors the
+// pass before any reads are recorded; that mode is VectorOracleUnitStale's.)
+func TestProcessBlock_ERC4626Oracle_PartialVaultFailureRecordsFailedRead(t *testing.T) {
+	repo := &mockRepo{}
+	erc4626OracleSetup(repo)
+	// Second vault on the same unit; the mock answers only the first.
+	vault2Addr := common.HexToAddress("0x0000000000000000000000000000000000004626")
+	repo.getEnabledAssetsFn = func(_ context.Context, _ int64) ([]*entity.OracleAsset, error) {
+		return []*entity.OracleAsset{
+			{
+				ID: 1, OracleID: 5, TokenID: 10, Enabled: true,
+				FeedAddress: sUSDSFeedAddr, FeedDecimals: 8, QuoteCurrency: "USD",
+			},
+			{
+				ID: 2, OracleID: 5, TokenID: 11, Enabled: true,
+				FeedAddress: sUSDSFeedAddr, FeedDecimals: 8, QuoteCurrency: "USD",
+			},
+		}, nil
+	}
+	repo.getTokenInfosFn = func(_ context.Context, _ int64) (map[int64]outbound.TokenInfo, error) {
+		return map[int64]outbound.TokenInfo{
+			10: {Address: fsUSDSAddr.Bytes(), Decimals: 18},
+			11: {Address: vault2Addr.Bytes(), Decimals: 18},
+		}, nil
+	}
+	mc := &testutil.MockMulticaller{
+		ExecuteFn: func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			if len(calls) != 4 {
+				t.Fatalf("expected 4 pricing calls (2 vaults x convertToAssets+latestRoundData), got %d", len(calls))
+			}
+			return []outbound.Result{
+				{Success: true, ReturnData: testutil.PackConvertToAssets(t, testutil.E18(1))},
+				{Success: true, ReturnData: testutil.PackLatestRoundData(t,
+					big.NewInt(1), big.NewInt(100_000_000), big.NewInt(1000), big.NewInt(1000), big.NewInt(1))},
+				{Success: false},
+				{Success: false},
+			}, nil
+		},
+	}
+	svc, reader := newFreshnessService(t, repo, multicallFactoryFor(mc))
+
+	if err := svc.processBlock(context.Background(), freshnessBlockEvent(18000000)); err != nil {
+		t.Fatalf("processBlock: %v (partial vault loss must be a soft skip)", err)
+	}
+
+	p := counterPointFor(t, reader, unitReadsFailedMetric)
+	if v, ok := p.Attributes.Value("oracle.name"); !ok || v.AsString() != "fluid_fsusds" {
+		t.Errorf("oracle.name attribute = %q (present=%v), want %q", v.AsString(), ok, "fluid_fsusds")
+	}
+	if p.Value != 1 {
+		t.Errorf("failed counter = %d, want 1 (the dark vault is one failed read)", p.Value)
+	}
+	if p := counterPointFor(t, reader, unitPricesFetchedMetric); p.Value != 1 {
+		t.Errorf("fetched counter = %d, want 1 (the healthy vault)", p.Value)
+	}
+}
+
+// TestProcessBlock_CurveLPNGOracle_RecordsZeroFailedReads pins the curve
+// path's read accounting: the fetcher folds the whole batch (virtual price +
+// coin feeds) into ONE FeedPriceResult and hard-errors on any sub-failure, so
+// a healthy pass is exactly one fetched read and zero failed. Counting the
+// coin feeds as expected reads would record failed >= 1 on every healthy pass
+// and latch VectorOracleUnitReadsFailing permanently for curve units.
+func TestProcessBlock_CurveLPNGOracle_RecordsZeroFailedReads(t *testing.T) {
+	repo := &mockRepo{}
+	curveLPNGOracleSetup(repo)
+	mc := &curveMockMulticaller{
+		executeAtHashFn: curvePriceResultsFn(t,
+			big.NewInt(1_250_000_000_000_000_000),  // virtual_price 1.25
+			big.NewInt(100_000_000),                // USDC $1.00 (8 dec)
+			big.NewInt(1_000_000_000_000_000_000)), // AUSD $1.00 (18 dec)
+	}
+	svc, reader := newFreshnessService(t, repo, multicallFactoryFor(mc))
+
+	if err := svc.processBlock(context.Background(), freshnessBlockEvent(18000000)); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+
+	if p := counterPointFor(t, reader, unitPricesFetchedMetric); p.Value != 1 {
+		t.Errorf("fetched counter = %d, want 1 (the single LP price read)", p.Value)
+	}
+	if p := counterPointFor(t, reader, unitReadsFailedMetric); p.Value != 0 {
+		t.Errorf("failed counter = %d, want 0 (healthy pass; sub-failures hard-error instead)", p.Value)
+	}
+}
+
+// TestProcessBlock_AaveOracle_ZeroQuoteCountsAsFailedRead covers the aave
+// path: a zero quote is unpriceable (guard-skipped by detectChanges), so it
+// must count as a failed read exactly like a reverting feed.
+func TestProcessBlock_AaveOracle_ZeroQuoteCountsAsFailedRead(t *testing.T) {
+	repo := &mockRepo{}
+	defaultRepoSetup(repo)
+	mc := newOracleMulticallerWithT(t, []*big.Int{big.NewInt(250_000_000_000), big.NewInt(0)})
+	svc, reader := newFreshnessService(t, repo, multicallFactoryFor(mc))
+
+	if err := svc.processBlock(context.Background(), freshnessBlockEvent(18000000)); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+
+	p := counterPointFor(t, reader, unitReadsFailedMetric)
+	if v, ok := p.Attributes.Value("oracle.name"); !ok || v.AsString() != "sparklend" {
+		t.Errorf("oracle.name attribute = %q (present=%v), want %q", v.AsString(), ok, "sparklend")
+	}
+	if p.Value != 1 {
+		t.Errorf("counter value = %d, want 1 (the zero quote is one failed read)", p.Value)
 	}
 }
 
@@ -432,12 +637,8 @@ func TestProcessBlock_AllFeedsFailing_RecordsZeroPricesFetched(t *testing.T) {
 		t.Fatalf("processBlock: %v", err)
 	}
 
-	pts := counterPoints(t, reader, unitPricesFetchedMetric)
-	if len(pts) != 1 {
-		t.Fatalf("%s data points = %d, want 1", unitPricesFetchedMetric, len(pts))
-	}
-	if pts[0].Value != 0 {
-		t.Errorf("counter value = %d, want 0", pts[0].Value)
+	if p := counterPointFor(t, reader, unitPricesFetchedMetric); p.Value != 0 {
+		t.Errorf("counter value = %d, want 0", p.Value)
 	}
 }
 
@@ -474,11 +675,7 @@ func TestProcessBlock_AaveOracle_RecordsPricesFetched(t *testing.T) {
 		t.Fatalf("processBlock: %v", err)
 	}
 
-	pts := counterPoints(t, reader, unitPricesFetchedMetric)
-	if len(pts) != 1 {
-		t.Fatalf("%s data points = %d, want 1", unitPricesFetchedMetric, len(pts))
-	}
-	p := pts[0]
+	p := counterPointFor(t, reader, unitPricesFetchedMetric)
 	if v, ok := p.Attributes.Value("oracle.name"); !ok || v.AsString() != "sparklend" {
 		t.Errorf("oracle.name attribute = %q (present=%v), want %q", v.AsString(), ok, "sparklend")
 	}

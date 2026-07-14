@@ -444,7 +444,7 @@ func (s *Service) processBlockForAaveOracle(ctx context.Context, event outbound.
 		return fmt.Errorf("price count mismatch: expected %d, got %d", len(unit.TokenIDs), len(prices))
 	}
 
-	s.telemetry.RecordPricesFetched(ctx, unit.Oracle.Name, countNonZeroPrices(prices))
+	s.telemetry.RecordUnitReads(ctx, unit.Oracle.Name, countNonZeroPrices(prices), len(prices))
 
 	// Detect changes
 	ctx, detectSpan := s.telemetry.StartSpan(ctx, "oracle.detectChanges",
@@ -564,7 +564,13 @@ func (s *Service) processBlockForCurveLPNGOracle(ctx context.Context, event outb
 // logMsg carry the per-path strings; total is the source-collection size for
 // the log line.
 func (s *Service) storeFeedResults(ctx context.Context, event outbound.BlockEvent, blockTimestamp time.Time, unit *oracleUnit, results []blockchain.FeedPriceResult, kind, logMsg string, total int) error {
-	s.telemetry.RecordPricesFetched(ctx, unit.Oracle.Name, countSuccessfulResults(results))
+	// The reads metric's expected count is len(results), NOT total: every
+	// fetcher returns exactly one outcome per read it performs (and errors on
+	// a count mismatch), whereas total is the source-collection size, which
+	// the curve path folds into a single LP-price result; counting its coin
+	// feeds would record phantom failed reads on every healthy pass. Deriving
+	// from the result set keeps future paths correct by construction.
+	s.telemetry.RecordUnitReads(ctx, unit.Oracle.Name, countSuccessfulResults(results), len(results))
 
 	ctx, detectSpan := s.telemetry.StartSpan(ctx, "oracle.detectChanges",
 		attribute.Int("prices.total", len(results)))

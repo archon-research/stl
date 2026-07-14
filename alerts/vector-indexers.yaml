@@ -205,14 +205,27 @@ groups:
         # wedged, in the same spirit as the 15m Stalled rule but with slack for
         # SQS redelivery/backoff bursts.
         #
-        # Gated on the worker still consuming blocks so a whole-worker stall
+        # Gated on the worker still consuming blocks so a whole-worker STALL
         # stays VectorOracleIndexerStalled's page instead of also firing once
-        # per unit here. Known gaps: a dead OTLP export silences BOTH rules
-        # (Stalled is a bare rate()==0, which goes no-data on staleness-expired
-        # series; see the fluid-vault Stalled zero-fill note), and a unit
-        # dropped from the registry stops exporting its series entirely, which
-        # an instant vector cannot age. Both need follow-up (kube-state
-        # zero-fill on Stalled / an expected-units signal).
+        # per unit here. The gate does NOT keep whole-worker error storms out:
+        # a pre-loop failure erroring every block (feed-decimals validation,
+        # block-timestamp resolution) still counts blocks with status="error",
+        # passes the gate, and fires this alert for every unit at once. That
+        # is intended: a single attempt per block on mainnet cadence is
+        # ~0.083 err/s, under ErrorsHigh's 0.1/s threshold, so ErrorsHigh is
+        # unreliable for that storm (SQS redeliveries multiply attempts and
+        # can eventually push it over; avalanche-c cadence trips it outright)
+        # and these warnings may be the first or only page (the runbook's
+        # empty-grep branch covers diagnosis).
+        # Known gaps: a dead OTLP export silences BOTH rules (Stalled is a
+        # bare rate()==0, which goes no-data on staleness-expired series; see
+        # the fluid-vault Stalled zero-fill note), and a unit dropped from the
+        # registry stops exporting its series entirely, which an instant
+        # vector cannot age. Both need follow-up (kube-state zero-fill on
+        # Stalled / an expected-units signal). Also: startup re-baselining
+        # means a worker restarting more often than every ~30m keeps a
+        # never-succeeding unit under threshold forever (an isolated restart
+        # merely delays firing by ~35m).
         expr: |
           (
             time()
@@ -240,6 +253,64 @@ groups:
             the pod logs for per-unit errors and the oracle registry for a
             misconfigured unit.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectororacleunitstale
+
+      - alert: VectorOracleUnitReadsFailing
+        # Per-oracle-unit feed loss (PR #566 review). The staleness rule above
+        # cannot see it: a reverting feed is guard-skipped without erroring,
+        # so the pass "succeeds", freshness advances, and the unit acks blocks
+        # while prices for the dead feed's tokens freeze in TimescaleDB.
+        #
+        # Counter `oracle.unit.reads_failed` (OTel) -> Prometheus
+        # `oracle_unit_reads_failed_total`: per pass, the pass's read-outcome
+        # count minus the usable prices fetched (reverted feeds and zero
+        # quotes both count as failed). A persistently dark feed therefore
+        # accumulates failures at >=1 per processed block, which is what the
+        # expression matches: the unit's failed-read rate exceeding 0.9x the
+        # chain's block rate for 30m. That covers feed-path total loss (every
+        # feed dark scores >=1x; erc4626/curve total loss hard-errors into
+        # the staleness rule instead) and partial loss (one dark feed scores
+        # exactly 1x) generically, with no per-unit feed-count tuning. The
+        # unit's SUMMED failure rate is what fires: sporadic per-feed reverts
+        # stay quiet only while the unit's combined rate stays under ~0.9
+        # per block.
+        #
+        # The block-rate comparison self-gates on the worker being alive: a
+        # stalled worker drives both sides to zero and the strict > cannot
+        # fire. Hard unit errors are the staleness rule's page, not this
+        # one's: erroring at or before the fetch records no reads, and a
+        # pass failing after the fetch (detect/upsert) records its reads
+        # normally (zero failed unless feeds were also dark); either way the
+        # persistent error freezes the freshness gauge. The curve path never
+        # soft-skips (any sub-read failure hard-errors the pass), so curve
+        # units cannot fire here at all. Same known OTLP-export and
+        # dropped-unit gaps as the staleness rule above.
+        expr: |
+          sum by (chain, cluster, oracle_name) (
+            rate(oracle_unit_reads_failed_total{k8s_namespace_name="vector"}[30m])
+          )
+          > on (chain, cluster) group_left ()
+          (
+            0.9 * sum by (chain, cluster) (
+              rate(oracle_blocks_processed_total{k8s_namespace_name="vector"}[30m])
+            )
+          )
+        for: 10m
+        labels:
+          team: vector
+          severity: warning
+          component: oracle-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector oracle unit `{{ $labels.oracle_name }}` losing feed reads on {{ $labels.chain }}"
+          description: |
+            Oracle unit `{{ $labels.oracle_name }}` on chain
+            `{{ $labels.chain }}` has been failing at least one price read on
+            nearly every block for >30m (reverting feed or zero quote,
+            guard-skipped without erroring). Prices for the affected tokens
+            are frozen in TimescaleDB while the worker, the unit's freshness,
+            and every whole-worker signal look healthy. Check the pod logs for
+            "feed call failed" to identify the feed.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectororacleunitreadsfailing
 
       # ---------------------------------------------------------------------
       # Raw SC call archiving (VEC-364 / PR #399)
