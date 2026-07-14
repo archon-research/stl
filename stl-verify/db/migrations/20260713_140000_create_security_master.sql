@@ -76,10 +76,11 @@ CREATE TABLE IF NOT EXISTS security_master (
 );
 
 -- Catalog metadata (downstream data-dictionary / schema_master tooling reads pg_catalog comments).
-COMMENT ON TABLE security_master IS 'Append-only SCD2 instrument-classification master (table_type=master). One row per (security_id, processing_version); the latest per security_id is the current classification (security_master_current). Positions resolve to it via security_instrument_bridge.';
-COMMENT ON COLUMN security_master.security_sk IS 'Immutable surrogate key; the value stamped onto positions.';
-COMMENT ON COLUMN security_master.security_id IS 'Natural key (sm-<code>); stable across all SCD2 versions.';
-COMMENT ON COLUMN security_master.processing_version IS 'Monotonic version per security_id (>=1); SCD2 dedup key, loader-assigned.';
+-- [Type] tag on the table, per-column Roles (PK / FK / Audit), per db/migrations/AGENTS.md.
+COMMENT ON TABLE security_master IS '[Dimension] Append-only SCD2 instrument-classification master. One row per (security_id, processing_version); the current classification per security_id is security_master_current. Positions resolve to it through the natural key security_id (via security_instrument_bridge and security_master_current), not the per-version surrogate.';
+COMMENT ON COLUMN security_master.security_sk IS 'PK. Per-version surrogate (GENERATED ALWAYS), unique per (security_id, processing_version). Do NOT stamp onto positions: it pins to one version and goes stale on the next SCD2 row. Positions resolve through security_id via security_master_current (VEC-420).';
+COMMENT ON COLUMN security_master.security_id IS 'Natural key (sm-<code>); stable across all SCD2 versions. This is what positions resolve against.';
+COMMENT ON COLUMN security_master.processing_version IS 'SCD2 dedup/version key. Monotonic per security_id (>=1), loader-assigned.';
 COMMENT ON COLUMN security_master.valid_from IS 'Date this version became effective; only temporal field stored (valid_to derived in security_master_versions).';
 COMMENT ON COLUMN security_master.change_reason IS 'Mandatory: why this version exists.';
 COMMENT ON COLUMN security_master.security_name IS 'Full display name.';
@@ -88,13 +89,13 @@ COMMENT ON COLUMN security_master.isin IS 'ISO 6166 identifier; n/a for on-chain
 COMMENT ON COLUMN security_master.cusip IS 'CUSIP identifier.';
 COMMENT ON COLUMN security_master.sedol IS 'SEDOL identifier.';
 COMMENT ON COLUMN security_master.figi IS 'Bloomberg FIGI.';
-COMMENT ON COLUMN security_master.asset_class IS 'FK asset_class_ref; top classification level.';
-COMMENT ON COLUMN security_master.security_type IS 'FK security_type_ref(asset_class, security_type).';
-COMMENT ON COLUMN security_master.security_subtype IS 'Nullable; FK security_subtype_ref(asset_class, security_type, security_subtype) via MATCH SIMPLE (skipped when NULL).';
-COMMENT ON COLUMN security_master.currency IS 'ISO 4217 denomination; FK currency_ref.';
-COMMENT ON COLUMN security_master.country_of_issuance IS 'FK country_ref; where the instrument was issued.';
-COMMENT ON COLUMN security_master.country_of_risk IS 'FK country_ref; underlying economic-exposure country.';
-COMMENT ON COLUMN security_master.issuer_entity_id IS 'Soft ref to entity_master.entity_id (no FK until VEC-410 lands).';
+COMMENT ON COLUMN security_master.asset_class IS 'FK->asset_class_ref.asset_class. Top classification level.';
+COMMENT ON COLUMN security_master.security_type IS 'FK->security_type_ref.(asset_class, security_type).';
+COMMENT ON COLUMN security_master.security_subtype IS 'FK->security_subtype_ref.(asset_class, security_type, security_subtype), MATCH SIMPLE (skipped when NULL). Nullable.';
+COMMENT ON COLUMN security_master.currency IS 'FK->currency_ref.currency_code. ISO 4217 denomination.';
+COMMENT ON COLUMN security_master.country_of_issuance IS 'FK->country_ref.country_code. Where the instrument was issued.';
+COMMENT ON COLUMN security_master.country_of_risk IS 'FK->country_ref.country_code. Underlying economic-exposure country.';
+COMMENT ON COLUMN security_master.issuer_entity_id IS 'Soft ref to entity_master.entity_id (no FK: SCD2 key is non-unique; resolve via entity_master_current).';
 COMMENT ON COLUMN security_master.security_status IS 'ACTIVE / SUSPENDED / MATURED / DELISTED.';
 COMMENT ON COLUMN security_master.is_tokenised IS 'TRUE = on-chain tokenised form of a traditional asset.';
 COMMENT ON COLUMN security_master.token_standard IS 'ERC-20 / ERC-1400 / ERC-3643 / BENJI / ...; only when is_tokenised.';
@@ -104,9 +105,9 @@ COMMENT ON COLUMN security_master.collateral_pool IS 'ABS collateral-pool facet 
 COMMENT ON COLUMN security_master.agency_status IS 'Agency facet (AGENCY / NON_AGENCY).';
 COMMENT ON COLUMN security_master.backing IS 'Backing facet: securitisation (CASH/SYNTHETIC) or stablecoin (FIAT/CRYPTO/ALGORITHMIC).';
 COMMENT ON COLUMN security_master.source_system IS 'System of record.';
-COMMENT ON COLUMN security_master.created_at IS 'Write timestamp.';
-COMMENT ON COLUMN security_master.created_by IS 'User or service that wrote the row.';
-COMMENT ON COLUMN security_master.approved_by IS '4-eyes approver.';
+COMMENT ON COLUMN security_master.created_at IS 'Audit. Write timestamp.';
+COMMENT ON COLUMN security_master.created_by IS 'Audit. User or service that wrote the row.';
+COMMENT ON COLUMN security_master.approved_by IS 'Audit. 4-eyes approver.';
 
 -- One version per (security_id, processing_version): the SCD2 dedup key. Two same-day corrections are
 -- distinguished by processing_version, and the current view breaks ties on it. Unlike the pipeline
@@ -116,29 +117,42 @@ COMMENT ON COLUMN security_master.approved_by IS '4-eyes approver.';
 CREATE UNIQUE INDEX IF NOT EXISTS sm_id_version_uidx ON security_master (security_id, processing_version);
 -- Current-version lookup (the ORDER BY of security_master_current).
 CREATE INDEX IF NOT EXISTS sm_current_idx ON security_master (security_id, valid_from DESC, processing_version DESC);
--- FK-support indexes not covered by a leading PK column. The 3-col classification index also serves the
--- (asset_class) and (asset_class, security_type) FKs as a prefix.
+-- Filter indexes for the risk master, justified by query shapes, not FK support: the reference
+-- parents are immutable, so a child-side FK index buys nothing for RI. The 3-col classification
+-- index also serves lookups on (asset_class) and (asset_class, security_type) as a prefix.
 CREATE INDEX IF NOT EXISTS sm_classification_idx ON security_master (asset_class, security_type, security_subtype);
 CREATE INDEX IF NOT EXISTS sm_currency_idx ON security_master (currency);
 CREATE INDEX IF NOT EXISTS sm_country_risk_idx ON security_master (country_of_risk);
 CREATE INDEX IF NOT EXISTS sm_country_issue_idx ON security_master (country_of_issuance);
 
--- Current view: the latest version per security_id.
+-- Current view: the latest EFFECTIVE version per security_id. Bounded on CURRENT_DATE so a
+-- future-dated version (a known maturity or announced status change inserted ahead of time) does
+-- NOT become current until its valid_from arrives.
 CREATE OR REPLACE VIEW security_master_current AS
 SELECT DISTINCT ON (security_id) *
 FROM security_master
+WHERE valid_from <= CURRENT_DATE
 ORDER BY security_id, valid_from DESC, processing_version DESC;
 
 -- Versioned view: derive valid_to (exclusive) and is_current for full-history reads. The validity
--- window is half-open [valid_from, valid_to_exclusive): point-in-time reads must use a strict upper
--- bound (valid_from <= d AND (valid_to_exclusive IS NULL OR d < valid_to_exclusive)). A same-day
--- correction (two versions sharing valid_from) yields a zero-width window on the superseded row, so
--- it is correctly never selected for any date; the strict upper bound is what makes that hold.
+-- window is half-open [valid_from, valid_to_exclusive): point-in-time reads use
+-- valid_from <= d AND (valid_to_exclusive IS NULL OR d < valid_to_exclusive). is_current applies
+-- that predicate at CURRENT_DATE, so a future-dated version is NOT current until effective, and a
+-- same-day correction (two versions sharing valid_from) yields a zero-width window on the superseded
+-- row so it is never current.
 CREATE OR REPLACE VIEW security_master_versions AS
 SELECT *,
-    lead(valid_from) OVER (PARTITION BY security_id ORDER BY valid_from, processing_version) AS valid_to_exclusive,
-    (row_number() OVER (PARTITION BY security_id ORDER BY valid_from DESC, processing_version DESC) = 1) AS is_current
-FROM security_master;
+    (valid_from <= CURRENT_DATE
+        AND (valid_to_exclusive IS NULL OR CURRENT_DATE < valid_to_exclusive)) AS is_current
+FROM (
+    SELECT *,
+        lead(valid_from) OVER (PARTITION BY security_id ORDER BY valid_from, processing_version) AS valid_to_exclusive
+    FROM security_master
+) v;
+
+-- View catalogue metadata (per db/migrations/AGENTS.md).
+COMMENT ON VIEW security_master_current IS '[Dimension] Latest effective version per security_id (valid_from <= today). The classification positions resolve to, via security_id.';
+COMMENT ON VIEW security_master_versions IS '[Dimension] Full SCD2 history per security_id with derived valid_to_exclusive (half-open [valid_from, valid_to_exclusive)) and is_current (effective as of today).';
 
 -- Reads for both roles; append-only writes for the indexer role (INSERT, never UPDATE/DELETE).
 GRANT SELECT ON security_master, security_master_current, security_master_versions TO stl_readonly;
