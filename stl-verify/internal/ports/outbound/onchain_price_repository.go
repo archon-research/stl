@@ -46,16 +46,13 @@ type OnchainPriceRepository interface {
 	// InsertOracle inserts a new oracle and returns it with the generated ID.
 	InsertOracle(ctx context.Context, oracle *entity.Oracle) (*entity.Oracle, error)
 
-	// GetAllActiveProtocolOracles retrieves all active (to_block IS NULL) protocol-oracle bindings.
-	GetAllActiveProtocolOracles(ctx context.Context) ([]*entity.ProtocolOracle, error)
-
 	// InsertProtocolOracleBinding inserts a new protocol-oracle binding.
 	InsertProtocolOracleBinding(ctx context.Context, binding *entity.ProtocolOracle) (*entity.ProtocolOracle, error)
 
 	// CopyOracleAssets copies all oracle_asset rows from one oracle to another.
 	CopyOracleAssets(ctx context.Context, fromOracleID, toOracleID int64) error
 
-	// GetAllProtocolOracleBindings retrieves ALL protocol-oracle bindings (not just active).
-	// Used by backfill to compute when each oracle was superseded.
+	// GetAllProtocolOracleBindings retrieves ALL protocol-oracle bindings.
+	// Used by backfill to compute each oracle's earliest valid block.
 	GetAllProtocolOracleBindings(ctx context.Context) ([]*entity.ProtocolOracle, error)
 }
