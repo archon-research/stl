@@ -5,6 +5,7 @@ package schemamaster_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/archon-research/stl/stl-verify/data_quality/schemamaster"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
@@ -18,12 +19,15 @@ func TestSchemaConformance(t *testing.T) {
 	pool, _, cleanup := testutil.SetupTimescaleDB(t)
 	defer cleanup()
 
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	reg, err := schemamaster.Load()
 	if err != nil {
 		t.Fatalf("load register: %v", err)
 	}
 
-	rows, err := pool.Query(context.Background(), `
+	rows, err := pool.Query(ctx, `
 		SELECT c.table_name, c.column_name, c.data_type, c.is_nullable
 		FROM information_schema.columns c
 		JOIN information_schema.tables t

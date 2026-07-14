@@ -110,6 +110,9 @@ jobs:
     concurrency:
       group: deploy-update-staging
       cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write  # AWS OIDC for the pre-stamp ECR verify
     steps:
       - name: Generate GitHub App token
         id: app-token
@@ -122,6 +125,14 @@ jobs:
         with:
           ref: main
           persist-credentials: false
+
+      # ORB-299: read-only ECR creds so the pre-stamp verify below can confirm
+      # every image the staging overlay references exists before we commit.
+      - name: Configure AWS credentials (staging ECR read)
+        uses: aws-actions/configure-aws-credentials@254c19bd240aabef8777f48595e9d2d7b972184b # v6.2.1
+        with:
+          role-to-assume: arn:aws:iam::579039992622:role/stl-sentinelstaging-github-actions-ecr
+          aws-region: eu-west-1
 
       - name: Commit and push to main (via API for verified commits)
         env:
@@ -145,6 +156,14 @@ jobs:
             if git diff --quiet FETCH_HEAD -- k8s/overlays/staging/kustomization.yaml; then
               echo "No changes to commit"
               exit 0
+            fi
+
+            # ORB-299/ORB-313: verify the exact file about to be committed (this
+            # fetched-and-stamped overlay), not the workflow's initial checkout,
+            # so a concurrent merge cannot slip an unbuilt image past the gate.
+            if ! scripts/deploy/verify-ecr-images.sh --kustomization k8s/overlays/staging/kustomization.yaml; then
+              echo "::error::Refusing to stamp staging: overlay references image(s) missing from ECR."
+              exit 1
             fi
 
             # Get current main HEAD and its tree
@@ -196,7 +215,10 @@ jobs:
     needs: update-staging
     if: ${{ inputs.push && github.event_name != 'workflow_dispatch' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Raised 10 -> 20 min: a brand-new service's first rollout can sit in
+    # ImagePullBackOff (kubelet backoff up to ~5 min) until its first image
+    # lands, so this job must outlast the argocd-wait timeout below. See ORB-313.
+    timeout-minutes: 20
     concurrency:
       group: deploy-wait-staging
       cancel-in-progress: false
@@ -215,7 +237,10 @@ jobs:
         with:
           app: stl-staging
           server: http://argocd-prod-archon
-          timeout: "300"
+          # 900s (was 300s): tolerate a slow first rollout of a brand-new
+          # service image (ImagePullBackOff race) without hard-failing the
+          # gate and silently skipping prod promotion. See ORB-313.
+          timeout: "900"
           min-wait: "30"
           aws-role-arn: arn:aws:iam::030797368798:role/archonprod-github-actions-argocd-wait
           tailscale-secret-id: archon-prod-argocd-ci-tailscale-oauth
@@ -236,8 +261,8 @@ jobs:
       STAGING_ROLE_ARN: arn:aws:iam::579039992622:role/stl-sentinelstaging-github-actions-ecr
       PROD_REGISTRY: 030797368798.dkr.ecr.eu-west-1.amazonaws.com
       PROD_ROLE_ARN: arn:aws:iam::030797368798:role/stl-sentinelprod-github-actions-ecr
-      SERVICES: watcher backup-worker oracle-price-worker sparklend-position-tracker morpho-indexer allocation-tracker prime-debt-indexer psm3-indexer dex-indexer migrate python-api
-      CRONJOBS: anchorage-indexer maple-graphql-indexer offchain-price-indexer watcher-data-validator
+      SERVICES: watcher backup-worker oracle-price-worker sparklend-position-tracker morpho-indexer allocation-tracker prime-debt-indexer psm3-indexer dex-indexer fluid-vault-indexer migrate python-api
+      CRONJOBS: anchorage-indexer maple-graphql-indexer offchain-price-indexer watcher-data-validator transform-worker transform-bootstrap
     permissions:
       id-token: write
     steps:
@@ -297,6 +322,7 @@ jobs:
       cancel-in-progress: false
     permissions:
       contents: read
+      id-token: write  # AWS OIDC for the pre-stamp ECR verify
     outputs:
       deploy_sha: ${{ steps.commit.outputs.deploy_sha }}
       changed: ${{ steps.commit.outputs.changed }}
@@ -312,6 +338,14 @@ jobs:
         with:
           ref: main
           persist-credentials: false
+
+      # ORB-299: read-only ECR creds so the pre-stamp verify can confirm every
+      # image the prod overlay references exists in prod ECR before we commit.
+      - name: Configure AWS credentials (prod ECR read)
+        uses: aws-actions/configure-aws-credentials@254c19bd240aabef8777f48595e9d2d7b972184b # v6.2.1
+        with:
+          role-to-assume: arn:aws:iam::030797368798:role/stl-sentinelprod-github-actions-ecr
+          aws-region: eu-west-1
 
       # Auto-merge the prod image-tag bump straight to main (no PR), guarded so a
       # compromised CI/bot cannot smuggle anything else into a prod deploy:
@@ -401,6 +435,16 @@ jobs:
               exit 1
             fi
 
+            # ORB-299: verify every image the (now SHA-stamped) prod overlay
+            # references exists in prod ECR, against the exact file about to be
+            # committed. Fails closed before the stamp; catches promotion-list
+            # drift and any image a concurrent merge added but this run did not
+            # push.
+            if ! scripts/deploy/verify-ecr-images.sh --kustomization "$KUSTOMIZATION"; then
+              echo "::error::Refusing to stamp prod: overlay references image(s) missing from prod ECR."
+              exit 1
+            fi
+
             SHORT_SHA=${DEPLOY_SHA:0:7}
             MAIN_SHA=$(gh api "repos/${REPO}/git/ref/heads/main" --jq '.object.sha')
             BASE_TREE=$(gh api "repos/${REPO}/git/commits/${MAIN_SHA}" --jq '.tree.sha')
@@ -475,6 +519,30 @@ jobs:
       failed-jobs: |
         Build & Push Images (Prod)=${{ needs.build-push-prod.result }}
         Auto-merge Prod Image Tags=${{ needs.update-prod.result }}
+    secrets:
+      slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_PROD }}
+      gh-actions-deploy-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
+
+  # ORB-313: when the staging health gate fails, build-push-prod is *skipped*
+  # (not failed), so prod promotion silently stops with no alert. Make that
+  # explicit on the prod channel. Fires only when staging built + stamped fine
+  # and the gate itself failed (wait=failure => build-push-staging succeeded).
+  notify-prod-promotion-skipped:
+    name: Notify Prod Promotion Skipped
+    if: ${{ always() && inputs.push && github.event_name != 'workflow_dispatch' && needs.wait-staging-healthy.result == 'failure' && needs.build-push-prod.result == 'skipped' }}
+    needs: [wait-staging-healthy, build-push-prod]
+    uses: ./.github/workflows/slack-notify.yaml
+    with:
+      status: failure
+      context: Prod Promotion Skipped
+      body: |
+        Prod promotion was skipped because the staging health gate did not pass.
+        This is often a slow first rollout of a new service image, not a regression.
+        No prod images were built or promoted.
+
+        Recovery: once `stl-staging` is Healthy and Synced in ArgoCD, re-run the
+        failed jobs on this workflow run. Prod promotion still sits behind the
+        manual `production` approval gate.
     secrets:
       slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_PROD }}
       gh-actions-deploy-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
