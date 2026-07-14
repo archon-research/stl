@@ -64,21 +64,21 @@ CREATE TABLE IF NOT EXISTS entity_master (
 );
 
 -- Catalog metadata (downstream data-dictionary / schema_master tooling reads pg_catalog comments).
-COMMENT ON TABLE entity_master IS 'Append-only SCD2 legal-entity master (table_type=master). One row per (entity_id, processing_version); the latest per entity_id is the current record (entity_master_current). Positions resolve their holder to a single entity_id via the pipeline_* bridges.';
-COMMENT ON COLUMN entity_master.entity_sk IS 'Immutable surrogate key; the value stamped onto positions.';
-COMMENT ON COLUMN entity_master.entity_id IS 'Natural key (em-<code>); stable across all SCD2 versions.';
-COMMENT ON COLUMN entity_master.processing_version IS 'Monotonic version per entity_id (>=1); SCD2 dedup key, loader-assigned.';
+COMMENT ON TABLE entity_master IS '[Dimension] Append-only SCD2 legal-entity master. One row per (entity_id, processing_version); the current record per entity_id is entity_master_current. Positions resolve their holder to a single entity_id (wallets via entity_ref_codes, primes via pipeline_prime_id) through the natural key, not the per-version surrogate.';
+COMMENT ON COLUMN entity_master.entity_sk IS 'PK. Per-version surrogate (GENERATED ALWAYS), unique per (entity_id, processing_version). Do NOT stamp onto positions: it pins to one version and goes stale on the next SCD2 row. Positions resolve through entity_id via entity_master_current (VEC-421).';
+COMMENT ON COLUMN entity_master.entity_id IS 'Natural key (em-<code>); stable across all SCD2 versions. This is what positions resolve against.';
+COMMENT ON COLUMN entity_master.processing_version IS 'SCD2 dedup/version key. Monotonic per entity_id (>=1), loader-assigned.';
 COMMENT ON COLUMN entity_master.valid_from IS 'Date this version became effective; only temporal field stored (valid_to derived in entity_master_versions).';
 COMMENT ON COLUMN entity_master.change_reason IS 'Mandatory: why this version exists.';
 COMMENT ON COLUMN entity_master.legal_name IS 'Full legal name.';
 COMMENT ON COLUMN entity_master.short_name IS 'Short display name.';
-COMMENT ON COLUMN entity_master.entity_type IS 'FK entity_type_ref; what kind of entity this is.';
-COMMENT ON COLUMN entity_master.counterparty_role IS 'Nullable; FK counterparty_role_ref. Per-position roles live in the position layer, not here.';
+COMMENT ON COLUMN entity_master.entity_type IS 'FK->entity_type_ref.entity_type. What kind of entity this is.';
+COMMENT ON COLUMN entity_master.counterparty_role IS 'FK->counterparty_role_ref.counterparty_role. Nullable; per-position roles live in the position layer, not here.';
 COMMENT ON COLUMN entity_master.is_internal IS 'TRUE = within the Sky/Prime group.';
-COMMENT ON COLUMN entity_master.origination_type IS 'FK origination_type_ref.';
-COMMENT ON COLUMN entity_master.domicile_country IS 'FK country_ref; country of domicile.';
-COMMENT ON COLUMN entity_master.country_of_risk IS 'FK country_ref; underlying economic-exposure country.';
-COMMENT ON COLUMN entity_master.sector IS 'FK sector_ref; issuer GICS sector.';
+COMMENT ON COLUMN entity_master.origination_type IS 'FK->origination_type_ref.origination_type.';
+COMMENT ON COLUMN entity_master.domicile_country IS 'FK->country_ref.country_code. Country of domicile.';
+COMMENT ON COLUMN entity_master.country_of_risk IS 'FK->country_ref.country_code. Underlying economic-exposure country.';
+COMMENT ON COLUMN entity_master.sector IS 'FK->sector_ref.sector. Issuer GICS sector.';
 COMMENT ON COLUMN entity_master.lei IS 'Legal Entity Identifier (ISO 17442).';
 COMMENT ON COLUMN entity_master.swift_bic IS 'SWIFT/BIC code.';
 COMMENT ON COLUMN entity_master.cik IS 'SEC Central Index Key.';
@@ -88,9 +88,9 @@ COMMENT ON COLUMN entity_master.entity_status IS 'ACTIVE / DISSOLVED / MERGED / 
 COMMENT ON COLUMN entity_master.pipeline_prime_id IS 'Bridge: prime.id. Maps a prime holder onto this entity for holder unification (VEC-400). Wallet holders resolve by on-chain address via entity_ref_codes (VEC-414).';
 COMMENT ON COLUMN entity_master.pipeline_protocol_id IS 'Bridge: protocol.id.';
 COMMENT ON COLUMN entity_master.source_system IS 'System of record.';
-COMMENT ON COLUMN entity_master.created_at IS 'Write timestamp.';
-COMMENT ON COLUMN entity_master.created_by IS 'User or service that wrote the row.';
-COMMENT ON COLUMN entity_master.approved_by IS '4-eyes approver.';
+COMMENT ON COLUMN entity_master.created_at IS 'Audit. Write timestamp.';
+COMMENT ON COLUMN entity_master.created_by IS 'Audit. User or service that wrote the row.';
+COMMENT ON COLUMN entity_master.approved_by IS 'Audit. 4-eyes approver.';
 
 -- One version per (entity_id, processing_version): the SCD2 dedup key. Two same-day corrections are
 -- distinguished by processing_version, and the current view breaks ties on it. The loader (VEC-418)
@@ -105,20 +105,33 @@ CREATE INDEX IF NOT EXISTS em_prime_idx ON entity_master (pipeline_prime_id) WHE
 CREATE INDEX IF NOT EXISTS em_protocol_idx ON entity_master (pipeline_protocol_id) WHERE pipeline_protocol_id IS NOT NULL;
 
 -- Current view: the latest version per entity_id.
+-- Current view: the latest EFFECTIVE version per entity_id. Bounded on CURRENT_DATE so a
+-- future-dated version does NOT become current until its valid_from arrives.
 CREATE OR REPLACE VIEW entity_master_current AS
 SELECT DISTINCT ON (entity_id) *
 FROM entity_master
+WHERE valid_from <= CURRENT_DATE
 ORDER BY entity_id, valid_from DESC, processing_version DESC;
 
 -- Versioned view: derive valid_to (exclusive) and is_current for full-history reads. The validity
--- window is half-open [valid_from, valid_to_exclusive): point-in-time reads must use a strict upper
--- bound. A same-day correction (two versions sharing valid_from) yields a zero-width window on the
--- superseded row, so it is correctly never selected for any date.
+-- window is half-open [valid_from, valid_to_exclusive): point-in-time reads use
+-- valid_from <= d AND (valid_to_exclusive IS NULL OR d < valid_to_exclusive). is_current applies
+-- that predicate at CURRENT_DATE, so a future-dated version is NOT current until effective, and a
+-- same-day correction (two versions sharing valid_from) yields a zero-width window on the superseded
+-- row so it is never current.
 CREATE OR REPLACE VIEW entity_master_versions AS
 SELECT *,
-    lead(valid_from) OVER (PARTITION BY entity_id ORDER BY valid_from, processing_version) AS valid_to_exclusive,
-    (row_number() OVER (PARTITION BY entity_id ORDER BY valid_from DESC, processing_version DESC) = 1) AS is_current
-FROM entity_master;
+    (valid_from <= CURRENT_DATE
+        AND (valid_to_exclusive IS NULL OR CURRENT_DATE < valid_to_exclusive)) AS is_current
+FROM (
+    SELECT *,
+        lead(valid_from) OVER (PARTITION BY entity_id ORDER BY valid_from, processing_version) AS valid_to_exclusive
+    FROM entity_master
+) v;
+
+-- View catalogue metadata (per db/migrations/AGENTS.md).
+COMMENT ON VIEW entity_master_current IS '[Dimension] Latest effective version per entity_id (valid_from <= today). The record positions resolve their holder/issuer to, via entity_id.';
+COMMENT ON VIEW entity_master_versions IS '[Dimension] Full SCD2 history per entity_id with derived valid_to_exclusive (half-open [valid_from, valid_to_exclusive)) and is_current (effective as of today).';
 
 -- Reads for both roles; append-only writes for the indexer role (INSERT, never UPDATE/DELETE).
 GRANT SELECT ON entity_master, entity_master_current, entity_master_versions TO stl_readonly;
