@@ -557,10 +557,14 @@ class AllocationActivityBucketResponse(BaseModel):
     )
     net_flow_usd: Decimal = Field(
         description=(
-            "Signed net flow valued in USD (inflows positive, outflows negative), using the receipt "
-            "token's latest underlying oracle price for wrapped positions and the token's own latest "
-            "oracle price for direct holdings. Lets clients reconstruct a balance series by anchoring "
-            "at the current total and cumulating net flows backwards."
+            "Signed net flow valued in USD (inflows positive, outflows negative). Only receipt-token "
+            "flows are valued: each is converted to underlying units at its row's share ratio "
+            "(underlying_value / balance), borrowing the nearest same-token row's ratio when the "
+            "row's own is unavailable and falling back to the raw tx_amount only when the token has "
+            "no valued row at all, then priced at the receipt token's latest underlying oracle "
+            "price. Rows whose recorded underlying diverges from the registry's are refused and "
+            "contribute 0, as do direct holdings. Lets clients reconstruct a balance series by "
+            "anchoring at the current total and cumulating net flows backwards."
         ),
         examples=["1234567.89"],
     )
