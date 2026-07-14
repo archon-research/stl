@@ -249,7 +249,11 @@ _LATEST_PRICE_SQL = text(
         FROM onchain_token_price otp
         JOIN oracle o ON o.id = otp.oracle_id
         WHERE otp.token_id = :token_id
-        ORDER BY otp.timestamp DESC, otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC
+        -- oracle_id: deterministic tiebreak (rationale on _DIRECT_ASSET_HOLDINGS_SQL
+        -- in allocation_position_repository.py). Same-block rows from two oracles
+        -- also share the block timestamp, so ties reach this read too.
+        ORDER BY otp.timestamp DESC, otp.block_number DESC, otp.block_version DESC,
+                 otp.processing_version DESC, otp.oracle_id DESC
         LIMIT 1
     ),
     latest_offchain AS (

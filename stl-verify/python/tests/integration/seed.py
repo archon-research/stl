@@ -712,6 +712,114 @@ async def seed_underlying_value_direct_holdings(db_url: str) -> None:
         await conn.close()
 
 
+# ---------------------------------------------------------------------------
+# Oracle price tie seed (frozen-source replant shape)
+#
+# Production shape this reproduces: a protocol bound to TWO oracles where a
+# retired source re-emits rows on republished (reorged) blocks, so both
+# oracles carry a price row for the same underlying at IDENTICAL
+# (block_number, block_version, processing_version) — warehouse-verified at
+# block 25524078/1/0 for the frozen sparklend stables next to chainlink.
+# Ordering by those three keys alone leaves the winner to the executor, so a
+# position's USD value flips between identical API calls. The reads break the
+# tie on oracle_id DESC; these seeds insert the LOWER-oracle_id (stale) row
+# first so an un-tiebroken top-1 sort is biased toward returning it.
+# ---------------------------------------------------------------------------
+
+TIE_PROXY_HEX = "f1" * 20
+_TIE_VAULT_HEX = "f2" * 20
+_TIE_PROTOCOL_HEX = "f3" * 20
+_TIE_STALE_ORACLE_HEX = "f4" * 20
+_TIE_FRESH_ORACLE_HEX = "f5" * 20
+_TIE_UNDERLYING_HEX = "f6" * 20
+_TIE_RECEIPT_HEX = "f7" * 20
+
+# Distinct prices so the winning oracle is observable in every USD figure.
+TIE_STALE_PRICE = Decimal("1.00")
+TIE_FRESH_PRICE = Decimal("1.25")
+TIE_BALANCE = Decimal("100")
+TIE_UNDERLYING_VALUE = Decimal("117.5")
+_TIE_PRICE_BLOCK = 5000
+
+
+async def seed_price_tiebreak_positions(db_url: str) -> None:
+    """Seed one receipt position whose underlying has two tied price rows.
+
+    Everything is seeded locally (protocol, two oracles, both bindings,
+    registry row, position) so the scenario does not lean on migration-seeded
+    registry rows. The stale oracle is created first, so it has the LOWER id;
+    its price row is also inserted first.
+    """
+    conn = await asyncpg.connect(db_url)
+    try:
+        async with conn.transaction():
+            prime_id = await conn.fetchval(
+                "INSERT INTO prime (name, vault_address) VALUES ('price_tiebreak', $1) RETURNING id",
+                bytes.fromhex(_TIE_VAULT_HEX),
+            )
+            protocol_id = await conn.fetchval(
+                "INSERT INTO protocol (chain_id, address, name, protocol_type) "
+                "VALUES (1, $1, 'tieLending', 'lending') RETURNING id",
+                bytes.fromhex(_TIE_PROTOCOL_HEX),
+            )
+            stale_oracle_id = await conn.fetchval(
+                "INSERT INTO oracle (name, display_name, chain_id, address) "
+                "VALUES ('tie_stale', 'Tie stale test oracle', 1, $1) RETURNING id",
+                bytes.fromhex(_TIE_STALE_ORACLE_HEX),
+            )
+            fresh_oracle_id = await conn.fetchval(
+                "INSERT INTO oracle (name, display_name, chain_id, address) "
+                "VALUES ('tie_fresh', 'Tie fresh test oracle', 1, $1) RETURNING id",
+                bytes.fromhex(_TIE_FRESH_ORACLE_HEX),
+            )
+            if not stale_oracle_id < fresh_oracle_id:
+                raise RuntimeError("seed premise broken: stale oracle must have the lower id")
+            for oracle_id in (stale_oracle_id, fresh_oracle_id):
+                await conn.execute(
+                    "INSERT INTO protocol_oracle (protocol_id, oracle_id, from_block) VALUES ($1, $2, 1)",
+                    protocol_id,
+                    oracle_id,
+                )
+
+            underlying_id = await insert_token(conn, "tieUSD", 6, bytes.fromhex(_TIE_UNDERLYING_HEX))
+            receipt_token_id = await insert_token(conn, "tieReceipt", 6, bytes.fromhex(_TIE_RECEIPT_HEX))
+            await insert_receipt_token_row(
+                conn,
+                protocol_id=protocol_id,
+                underlying_token_id=underlying_id,
+                address=bytes.fromhex(_TIE_RECEIPT_HEX),
+                symbol="tieReceipt",
+            )
+
+            # Two price rows at IDENTICAL (block_number, block_version,
+            # processing_version); only oracle_id (and price) differ.
+            for oracle_id, price in ((stale_oracle_id, TIE_STALE_PRICE), (fresh_oracle_id, TIE_FRESH_PRICE)):
+                await conn.execute(
+                    "INSERT INTO onchain_token_price "
+                    "(token_id, oracle_id, block_number, block_version, timestamp, price_usd) "
+                    "VALUES ($1, $2, $3, 1, NOW(), $4)",
+                    underlying_id,
+                    oracle_id,
+                    _TIE_PRICE_BLOCK,
+                    price,
+                )
+
+            await insert_allocation_position(
+                conn,
+                token_id=receipt_token_id,
+                prime_id=prime_id,
+                proxy_hex=TIE_PROXY_HEX,
+                balance=TIE_BALANCE,
+                block=_TIE_PRICE_BLOCK,
+                tx="f9" * 32,
+                direction="in",
+                underlying_value=TIE_UNDERLYING_VALUE,
+                underlying_token_id=underlying_id,
+            )
+    finally:
+        await conn.close()
+
+
 async def seed_ghost_balance(db_url: str) -> None:
     """Seed all ghost-balance proxy scenarios into the given database."""
     conn = await asyncpg.connect(db_url)

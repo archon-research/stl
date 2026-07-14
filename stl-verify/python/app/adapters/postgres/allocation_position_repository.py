@@ -969,7 +969,9 @@ _RECEIPT_TOKEN_POSITIONS_SQL = text("""
         JOIN protocol_oracle po ON po.oracle_id = otp.oracle_id
             AND po.protocol_id = p.protocol_id
         WHERE otp.token_id = p.underlying_token_id
-        ORDER BY otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC
+        -- oracle_id: deterministic tiebreak (rationale on _DIRECT_ASSET_HOLDINGS_SQL).
+        ORDER BY otp.block_number DESC, otp.block_version DESC,
+                 otp.processing_version DESC, otp.oracle_id DESC
         LIMIT 1
     ) lp ON TRUE
     WHERE p.balance > 0
@@ -1029,8 +1031,13 @@ _DIRECT_ASSET_HOLDINGS_SQL = text("""
         SELECT otp.price_usd
         FROM onchain_token_price otp
         WHERE otp.token_id = lp.token_id
-        -- oracle_id breaks ties when multiple oracles price the same token at the
-        -- same block, keeping the chosen price deterministic across calls.
+        -- oracle_id breaks ties when multiple oracles price the same token at
+        -- identical (block_number, block_version, processing_version), e.g. a
+        -- frozen source re-emitted by a republished block next to a live one.
+        -- Deterministic, and the higher id is the later-registered oracle; the
+        -- real ordering signal stays the snapshot keys, because a retired
+        -- source stops producing new rows and loses on recency from then on.
+        -- Every ordered onchain_token_price read carries this tiebreaker.
         ORDER BY otp.block_number DESC, otp.block_version DESC,
                  otp.processing_version DESC, otp.oracle_id DESC
         LIMIT 1
@@ -1074,7 +1081,9 @@ latest_price AS (
     JOIN protocol_oracle po ON po.oracle_id = otp.oracle_id
     JOIN receipt_token rt ON rt.protocol_id = po.protocol_id AND rt.id = :receipt_token_id
     WHERE otp.token_id = rt.underlying_token_id
-    ORDER BY otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC
+    -- oracle_id: deterministic tiebreak (rationale on _DIRECT_ASSET_HOLDINGS_SQL).
+    ORDER BY otp.block_number DESC, otp.block_version DESC,
+             otp.processing_version DESC, otp.oracle_id DESC
     LIMIT 1
 )
 SELECT
@@ -1127,7 +1136,9 @@ LEFT JOIN LATERAL (
     JOIN protocol_oracle po ON po.oracle_id = otp.oracle_id
         AND po.protocol_id = p.protocol_id
     WHERE otp.token_id = p.underlying_token_id
-    ORDER BY otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC
+    -- oracle_id: deterministic tiebreak (rationale on _DIRECT_ASSET_HOLDINGS_SQL).
+    ORDER BY otp.block_number DESC, otp.block_version DESC,
+             otp.processing_version DESC, otp.oracle_id DESC
     LIMIT 1
 ) lp ON TRUE
 WHERE p.balance > 0
@@ -1238,7 +1249,9 @@ WITH receipt_token_price AS (
             JOIN protocol_oracle po ON po.oracle_id = otp.oracle_id
             WHERE po.protocol_id = rt.protocol_id
               AND otp.token_id = rt.underlying_token_id
-            ORDER BY otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC
+            -- oracle_id: deterministic tiebreak (rationale on _DIRECT_ASSET_HOLDINGS_SQL).
+            ORDER BY otp.block_number DESC, otp.block_version DESC,
+                     otp.processing_version DESC, otp.oracle_id DESC
             LIMIT 1
         ) AS price_usd
     FROM receipt_token rt

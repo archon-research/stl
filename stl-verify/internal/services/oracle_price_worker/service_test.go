@@ -126,7 +126,6 @@ type mockRepo struct {
 	getEnabledOraclesByChainFn     func(ctx context.Context, chainID int64) ([]*entity.Oracle, error)
 	getOracleByAddressFn           func(ctx context.Context, chainID int, address []byte) (*entity.Oracle, error)
 	insertOracleFn                 func(ctx context.Context, oracle *entity.Oracle) (*entity.Oracle, error)
-	getAllActiveProtocolOraclesFn  func(ctx context.Context) ([]*entity.ProtocolOracle, error)
 	insertProtocolOracleBindingFn  func(ctx context.Context, binding *entity.ProtocolOracle) (*entity.ProtocolOracle, error)
 	copyOracleAssetsFn             func(ctx context.Context, fromOracleID, toOracleID int64) error
 	getAllProtocolOracleBindingsFn func(ctx context.Context) ([]*entity.ProtocolOracle, error)
@@ -200,13 +199,6 @@ func (m *mockRepo) InsertOracle(ctx context.Context, oracle *entity.Oracle) (*en
 		return m.insertOracleFn(ctx, oracle)
 	}
 	return nil, errors.New("InsertOracle not mocked")
-}
-
-func (m *mockRepo) GetAllActiveProtocolOracles(ctx context.Context) ([]*entity.ProtocolOracle, error) {
-	if m.getAllActiveProtocolOraclesFn != nil {
-		return m.getAllActiveProtocolOraclesFn(ctx)
-	}
-	return nil, errors.New("GetAllActiveProtocolOracles not mocked")
 }
 
 func (m *mockRepo) InsertProtocolOracleBinding(ctx context.Context, binding *entity.ProtocolOracle) (*entity.ProtocolOracle, error) {

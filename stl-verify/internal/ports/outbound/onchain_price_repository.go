@@ -46,9 +46,6 @@ type OnchainPriceRepository interface {
 	// InsertOracle inserts a new oracle and returns it with the generated ID.
 	InsertOracle(ctx context.Context, oracle *entity.Oracle) (*entity.Oracle, error)
 
-	// GetAllActiveProtocolOracles retrieves all active (to_block IS NULL) protocol-oracle bindings.
-	GetAllActiveProtocolOracles(ctx context.Context) ([]*entity.ProtocolOracle, error)
-
 	// InsertProtocolOracleBinding inserts a new protocol-oracle binding.
 	InsertProtocolOracleBinding(ctx context.Context, binding *entity.ProtocolOracle) (*entity.ProtocolOracle, error)
 

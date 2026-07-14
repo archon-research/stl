@@ -283,24 +283,25 @@ BEGIN
 
     -- The bindings only help if chainlink actually prices every underlying the
     -- fixed receipts resolve through: USDC, USDT, USDS, RLUSD (Aave V3) and
-    -- DAI (SparkLend), resolved by token ADDRESS (labels are not
-    -- authoritative). COUNT(DISTINCT t.id): (oracle_id, token_id,
-    -- feed_address) uniqueness allows several enabled feed rows per token, so
-    -- a raw row count could reach 5 with one token duplicated and another
-    -- missing.
+    -- DAI, PYUSD (SparkLend; spPYUSD is the largest re-routed position),
+    -- resolved by token ADDRESS (labels are not authoritative).
+    -- COUNT(DISTINCT t.id): (oracle_id, token_id, feed_address) uniqueness
+    -- allows several enabled feed rows per token, so a raw row count could
+    -- reach 6 with one token duplicated and another missing.
     SELECT COUNT(DISTINCT t.id) INTO cnt
     FROM (VALUES
         ('\xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'::bytea),
         ('\xdac17f958d2ee523a2206206994597c13d831ec7'::bytea),
         ('\xdc035d45d973e3ec169d2276ddab16f1e407384f'::bytea),
         ('\x8292bb45bf1ee4d140127049757c2e0ff06317ed'::bytea),
-        ('\x6b175474e89094c44da98b954eedeac495271d0f'::bytea)
+        ('\x6b175474e89094c44da98b954eedeac495271d0f'::bytea),
+        ('\x6c3ea9036406852006290770bedfcaba0e23a0e8'::bytea)
     ) AS x(token_address)
     JOIN token t ON t.chain_id = 1 AND t.address = x.token_address
     JOIN oracle o ON o.name = 'chainlink'
     JOIN oracle_asset oa ON oa.oracle_id = o.id AND oa.token_id = t.id AND oa.enabled;
-    IF cnt <> 5 THEN
-        RAISE EXCEPTION 'expected enabled chainlink oracle_asset rows for USDC/USDT/USDS/RLUSD/DAI, found %', cnt;
+    IF cnt <> 6 THEN
+        RAISE EXCEPTION 'expected enabled chainlink oracle_asset rows for USDC/USDT/USDS/RLUSD/DAI/PYUSD, found %', cnt;
     END IF;
 
     -- RLUSD row strictness: enabled with the exact verified feed and decimals

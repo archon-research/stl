@@ -33,7 +33,6 @@ type mockRepo struct {
 	getEnabledOraclesByChainFn     func(ctx context.Context, chainID int64) ([]*entity.Oracle, error)
 	getOracleByAddressFn           func(ctx context.Context, chainID int, address []byte) (*entity.Oracle, error)
 	insertOracleFn                 func(ctx context.Context, oracle *entity.Oracle) (*entity.Oracle, error)
-	getAllActiveProtocolOraclesFn  func(ctx context.Context) ([]*entity.ProtocolOracle, error)
 	insertProtocolOracleBindingFn  func(ctx context.Context, binding *entity.ProtocolOracle) (*entity.ProtocolOracle, error)
 	copyOracleAssetsFn             func(ctx context.Context, fromOracleID, toOracleID int64) error
 	getAllProtocolOracleBindingsFn func(ctx context.Context) ([]*entity.ProtocolOracle, error)
@@ -107,13 +106,6 @@ func (m *mockRepo) InsertOracle(ctx context.Context, oracle *entity.Oracle) (*en
 		return m.insertOracleFn(ctx, oracle)
 	}
 	return nil, errors.New("InsertOracle not mocked")
-}
-
-func (m *mockRepo) GetAllActiveProtocolOracles(ctx context.Context) ([]*entity.ProtocolOracle, error) {
-	if m.getAllActiveProtocolOraclesFn != nil {
-		return m.getAllActiveProtocolOraclesFn(ctx)
-	}
-	return nil, errors.New("GetAllActiveProtocolOracles not mocked")
 }
 
 func (m *mockRepo) InsertProtocolOracleBinding(ctx context.Context, binding *entity.ProtocolOracle) (*entity.ProtocolOracle, error) {
@@ -1953,6 +1945,77 @@ func TestComputeOracleValidFromBlocks(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestComputeOracleValidFromBlocks_MigrationSeededBindings pins the union
+// resolution over the ACTUAL protocol_oracle binding sets: one fixture row per
+// INSERT INTO protocol_oracle across db/migrations/ (20260206_100000,
+// 20260305_100000, 20260318_100000, 20260505_135100, 20260702_120000,
+// 20260709_120000, 20260713_150000 — keep this in sync when a migration adds
+// a binding). Two of these shapes would break under a supersession reading
+// (latest from_block per protocol wins): SparkLend's chainlink binding
+// would silently retire the sparklend oracle, and Aave V3's two bindings TIE
+// at from_block 16291127, making a DISTINCT ON pick nondeterministic. The
+// union keeps every binding live: each oracle's validFrom is the MIN
+// from_block across every protocol binding it.
+func TestComputeOracleValidFromBlocks_MigrationSeededBindings(t *testing.T) {
+	// Stand-in ids (real ids are assigned per-environment); what matters is
+	// which bindings share a protocol or an oracle.
+	const (
+		protoSparkLend int64 = 1
+		protoAaveV3    int64 = 2
+		protoAaveAvax  int64 = 3
+		protoAaveLido  int64 = 4
+		protoAaveRWA   int64 = 5
+		protoMaple     int64 = 6
+		protoMorpho    int64 = 7
+
+		oracleSparkLend int64 = 10
+		oracleAaveV3    int64 = 20
+		oracleAaveAvax  int64 = 30
+		oracleAaveLido  int64 = 40
+		oracleAaveRWA   int64 = 50
+		oracleChainlink int64 = 60
+	)
+
+	bindings := []*entity.ProtocolOracle{
+		// 20260206_100000_create_onchain_prices.sql
+		{ProtocolID: protoSparkLend, OracleID: oracleSparkLend, FromBlock: 16664447},
+		// 20260305_100000_add_aave_v3_oracle_feeds.sql
+		{ProtocolID: protoAaveV3, OracleID: oracleAaveV3, FromBlock: 16291127},
+		// 20260318_100000_add_aave_avalanche_oracle.sql
+		{ProtocolID: protoAaveAvax, OracleID: oracleAaveAvax, FromBlock: 11970506},
+		// 20260505_135100_add_aave_lido_horizon_oracles.sql
+		{ProtocolID: protoAaveLido, OracleID: oracleAaveLido, FromBlock: 20262414},
+		{ProtocolID: protoAaveRWA, OracleID: oracleAaveRWA, FromBlock: 23125535},
+		// 20260702_120000_maple_syrup_allocation_exposure.sql
+		{ProtocolID: protoMaple, OracleID: oracleAaveV3, FromBlock: 16291127},
+		// 20260709_120000_add_er_missing_price_feeds.sql
+		{ProtocolID: protoMorpho, OracleID: oracleChainlink, FromBlock: 18883124},
+		{ProtocolID: protoMaple, OracleID: oracleChainlink, FromBlock: 11964925},
+		// 20260713_150000_price_dust_allocation_rows.sql
+		{ProtocolID: protoAaveV3, OracleID: oracleChainlink, FromBlock: 16291127},
+		{ProtocolID: protoSparkLend, OracleID: oracleChainlink, FromBlock: 16776401},
+	}
+
+	want := map[int64]int64{
+		oracleSparkLend: 16664447, // must survive SparkLend's later chainlink binding
+		oracleAaveV3:    16291127,
+		oracleAaveAvax:  11970506,
+		oracleAaveLido:  20262414,
+		oracleAaveRWA:   23125535,
+		oracleChainlink: 11964925, // MIN across maple/Morpho/Aave V3/SparkLend bindings
+	}
+
+	got := computeOracleValidFromBlocks(bindings)
+	if len(got) != len(want) {
+		t.Fatalf("got %d entries, want %d", len(got), len(want))
+	}
+	for oracleID, wantFrom := range want {
+		if got[oracleID] != wantFrom {
+			t.Errorf("oracle %d: validFrom = %d, want %d", oracleID, got[oracleID], wantFrom)
+		}
 	}
 }
 

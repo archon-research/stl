@@ -57,7 +57,10 @@ user_collateral AS (
     WHERE collateral_enabled = true
 ),
 
--- Step 3: Latest USD price per token from the protocol's oracle
+-- Step 3: Latest USD price per token from the protocol's oracles.
+-- oracle_id breaks ties at identical (block_number, block_version, processing_version)
+-- deterministically: the higher id is the later-registered oracle, and a retired
+-- source stops producing new rows, so recency stays the real ordering signal.
 token_prices AS (
     SELECT DISTINCT ON (otp.token_id)
         otp.token_id,
@@ -65,7 +68,7 @@ token_prices AS (
     FROM onchain_token_price otp
     JOIN protocol_oracle po ON po.oracle_id = otp.oracle_id
     WHERE po.protocol_id = :protocol_id
-    ORDER BY otp.token_id, otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC
+    ORDER BY otp.token_id, otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC, otp.oracle_id DESC
 ),
 
 -- Step 4: Target (backed asset) debt per user, only for users who borrowed it.
