@@ -68,9 +68,16 @@ ON CONFLICT (protocol_id, oracle_id, from_block) DO NOTHING;
 --    re-emit fixed-$1 rows at fresh block numbers (warehouse-verified at
 --    block 25524078, block_version 1, 2026-07-13); left enabled they would
 --    intermittently outrank chainlink in the LATEST-across-oracles
---    resolution below. Disabling the six rows removes them from the unit's
+--    resolution below. Disabling the six rows retires them effective
+--    IMMEDIATELY at read time, not merely for future collection: every
+--    current/latest onchain_token_price read across the API repositories
+--    excludes a price whose (oracle_id, token_id) lacks an enabled
+--    oracle_asset mapping (see the enabled-mapping filter on
+--    _DIRECT_ASSET_HOLDINGS_SQL in allocation_position_repository.py), so the
+--    already-written frozen rows — including any reorg-republished at fresh
+--    block heights — stop resolving at once. It also stops fresh collection: the row drops out of the unit's
 --    aave-style multicall (the batch is registry-driven, not reserve-list
---    driven); the sparklend oracle keeps its 12 live reserves (WETH,
+--    driven). The sparklend oracle keeps its 12 live reserves (WETH,
 --    BTC-class, sDAI, sUSDS, ...). chainlink DAI is fresh (1h heartbeat,
 --    verified live).
 --    from_block = SparkLend deploy block 16776401 (later-of-deploys;

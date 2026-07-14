@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.postgres.aave_like_backed_breakdown_repository import AaveLikeBackedBreakdownRepository
 from app.domain.entities.backed_breakdown import BackedBreakdown
-from tests.integration.seed import insert_token, insert_user, store_test_ids
+from tests.integration.seed import insert_oracle_asset, insert_token, insert_user, store_test_ids
 
 
 class ProtocolScopedBackedBreakdownRepository(Protocol):
@@ -21,19 +21,6 @@ class ProtocolScopedBackedBreakdownRepository(Protocol):
 # ---------------------------------------------------------------------------
 # Seed helpers
 # ---------------------------------------------------------------------------
-
-
-async def _insert_oracle_asset(conn: asyncpg.Connection, oracle_id: int, token_id: int) -> None:
-    """Register a token with an oracle (idempotent)."""
-    await conn.execute(
-        """
-        INSERT INTO oracle_asset (oracle_id, token_id, enabled)
-        VALUES ($1, $2, true)
-        ON CONFLICT (oracle_id, token_id) WHERE feed_address IS NULL DO NOTHING
-        """,
-        oracle_id,
-        token_id,
-    )
 
 
 async def _insert_price(
@@ -140,7 +127,7 @@ async def _seed_tokens_and_prices(
     )
 
     for tid in [weth_id, cbbtc_id, sp_usds_id, sp_usdc_id]:
-        await _insert_oracle_asset(conn, oracle_id, tid)
+        await insert_oracle_asset(conn, oracle_id, tid)
 
     for token_id, price in [
         (weth_id, "2000.000000000000000000"),
@@ -294,7 +281,10 @@ async def _seed_user5_tied_price_collateral(
     )
     tie_coll_id = await insert_token(conn, "TIECOLL", 18, b"\x71" * 20)
     tie_debt_id = await insert_token(conn, "TIEDEBT", 18, b"\x72" * 20)
-    await _insert_oracle_asset(conn, sparklend_oracle_id, tie_coll_id)
+    # Both sources need an enabled oracle_asset mapping, or the latest-price read
+    # excludes the unmapped one before the oracle_id tiebreak can apply.
+    await insert_oracle_asset(conn, sparklend_oracle_id, tie_coll_id)
+    await insert_oracle_asset(conn, chainlink_oracle_id, tie_coll_id)
     await _insert_price(conn, tie_coll_id, sparklend_oracle_id, "1.000000000000000000", block_number)
     await _insert_price(conn, tie_coll_id, chainlink_oracle_id, "1.250000000000000000", block_number)
     await _insert_reserve(conn, protocol_id, tie_coll_id, block_number, collateral_enabled=True)
@@ -329,7 +319,7 @@ async def _seed_data(db_url: str) -> None:
             18,
             b"\xde\xad\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01",
         )
-        await _insert_oracle_asset(conn, oracle_id, zero_token_id)
+        await insert_oracle_asset(conn, oracle_id, zero_token_id)
         await _insert_price(conn, zero_token_id, oracle_id, "0.000000000000000000", block)
         await _insert_reserve(conn, protocol_id, zero_token_id, block, collateral_enabled=True)
 

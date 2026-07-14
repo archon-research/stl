@@ -58,9 +58,11 @@ user_collateral AS (
 ),
 
 -- Step 3: Latest USD price per token from the protocol's oracles.
--- oracle_id breaks ties at identical (block_number, block_version, processing_version)
--- deterministically: the higher id is the later-registered oracle, and a retired
--- source stops producing new rows, so recency stays the real ordering signal.
+-- Only rows whose (oracle_id, token_id) still has an ENABLED oracle_asset
+-- mapping are eligible; a retired source is excluded immediately at read time
+-- (canonical rationale, incl. the no-history tradeoff, on _DIRECT_ASSET_HOLDINGS_SQL
+-- in allocation_position_repository.py). oracle_id then breaks any remaining
+-- same-snapshot-key tie deterministically (higher id = later-registered oracle).
 token_prices AS (
     SELECT DISTINCT ON (otp.token_id)
         otp.token_id,
@@ -68,6 +70,12 @@ token_prices AS (
     FROM onchain_token_price otp
     JOIN protocol_oracle po ON po.oracle_id = otp.oracle_id
     WHERE po.protocol_id = :protocol_id
+      AND EXISTS (
+          SELECT 1 FROM oracle_asset oa
+          WHERE oa.oracle_id = otp.oracle_id
+            AND oa.token_id = otp.token_id
+            AND oa.enabled
+      )
     ORDER BY otp.token_id, otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC, otp.oracle_id DESC
 ),
 
