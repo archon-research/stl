@@ -918,7 +918,8 @@ class AllocationRepository:
 # priced as if one share redeemed one underlying unit; NULL (rows written
 # before the column existed) falls back to the balance basis, and 1:1 aTokens
 # are unchanged (their underlying_value equals balance by construction).
-# Flow-level reads (``net_flow_usd``) deliberately stay balance-based; see
+# Flow-level reads (``net_flow_usd``) convert each flow at its row's share
+# ratio, borrowing the nearest same-token row's when the row lacks one; see
 # ``_ALLOCATION_ACTIVITY_BUCKETS_SQL``.
 #
 # The underlying is priced via the registry's ``receipt_token.underlying_token_id``,
@@ -1248,11 +1249,43 @@ LIMIT :limit
 # classification is trustworthy. Flows with no receipt-token oracle price
 # contribute 0.
 #
-# Flows stay balance-based (share units x underlying price) even though the
-# position-valuation reads price by redeemable value: ``underlying_value``
-# describes the position's balance at one block, not individual tx amounts, so
-# converting a flow needs a per-tx share ratio that is not stored. Accepted
-# limitation.
+# Receipt-token flows are valued at a share ratio resolved in three tiers.
+# Every allocation_position row is per-tx (tx_hash, log_index, direction) and
+# carries ``balance`` and ``underlying_value`` read at its own pinned block:
+#
+#   1. Own row usable (``underlying_value`` present, ``balance > 0``):
+#      ``underlying_value / balance`` is the vault's share ratio at that tx's
+#      block, so ``tx_amount x ratio`` converts the share-denominated flow
+#      into underlying units before pricing (a syrupUSDC-like deposit is no
+#      longer understated by its ~1.17 ratio). ``underlying_value = 0`` with
+#      ``balance > 0`` (drained vault) is a real ratio of 0, matching the
+#      position basis.
+#   2. Own row unusable (NULL ``underlying_value`` on rows written before the
+#      column existed, or ``balance = 0`` on a full exit's own row): borrow
+#      the ratio from the nearest same-token row that has a usable one. The
+#      share ratio is a property of the vault, not of any position, so any
+#      proxy's row pins it; sweep snapshots give dense coverage. Nearest by
+#      block distance (the at-or-before row wins ties), then the usual
+#      block_version / processing_version / log_index DESC tiebreaks for
+#      determinism. The borrowed ratio is an approximation whose error is
+#      bounded by the vault's ratio drift across the block gap to the donor
+#      row (basis points per day for a yield vault), though the gap can be
+#      large for flows before the token's first valued row.
+#   3. No usable same-token row at all: fall back to the raw ``tx_amount``
+#      (ratio 1). This genuinely means "never valued" (e.g. a token whose
+#      rows all predate the column), not "this row happened to lack a value".
+#
+# A row whose own ``underlying_token_id`` diverges from the registry's is
+# refused before any tier applies (contributes nothing): its
+# ``underlying_value`` is denominated in a different asset than the registry
+# price multiplies, per the refusal policy on ``_RECEIPT_TOKEN_POSITIONS_SQL``
+# and matching the SUM behavior of ``_TOTAL_USD_EXPOSURE_SQL``. Divergent rows
+# are excluded from tier-2 candidacy for the same reason.
+#
+# Remaining approximation: even a tier-1 ratio is the post-tx position ratio
+# at the flow's block, not a per-leg execution price. Acceptable because a
+# yield vault's share ratio moves slowly, so the same-block position ratio is
+# indistinguishable from the execution price at this read's resolution.
 _ALLOCATION_ACTIVITY_BUCKETS_SQL = text(f"""
 WITH receipt_token_price AS (
     -- Latest underlying oracle price per receipt token, computed ONCE per token
@@ -1261,6 +1294,7 @@ WITH receipt_token_price AS (
     SELECT
         rt.chain_id,
         rt.receipt_token_address,
+        rt.underlying_token_id,
         (
             SELECT otp.price_usd
             FROM onchain_token_price otp
@@ -1271,6 +1305,94 @@ WITH receipt_token_price AS (
             LIMIT 1
         ) AS price_usd
     FROM receipt_token rt
+),
+share_ratio_stream AS (
+    -- One pass over each receipt token's FULL history (deliberately not
+    -- filtered by prime or time window: the nearest valued row may belong to
+    -- any position and sit outside the queried window), keeping donor rows
+    -- (usable, unit-consistent ratio) and rows that need to borrow one.
+    -- donor_key is [block_number, block_version, processing_version,
+    -- log_index, ratio]: lexicographic MAX/MIN picks the nearest donor with
+    -- the usual version tiebreaks, and the ratio rides along as the last
+    -- element. Per-row probes into allocation_position are not an option
+    -- here: it is a columnar-compressed hypertable with no token segmentby,
+    -- so a per-flow LATERAL cannot prune batches and re-scans the token's
+    -- block range per flow row; this stream plus the window pass below
+    -- resolves every needed ratio in one scan.
+    SELECT
+        ap2.token_id,
+        ap2.chain_id,
+        ap2.block_number,
+        CASE
+            WHEN ap2.underlying_value IS NOT NULL
+             AND ap2.balance > 0
+             AND ap2.underlying_token_id = rt2.underlying_token_id
+            THEN ARRAY[
+                ap2.block_number, ap2.block_version,
+                ap2.processing_version, ap2.log_index,
+                ap2.underlying_value / ap2.balance
+            ]
+        END AS donor_key
+    FROM allocation_position ap2
+    JOIN token t2 ON t2.id = ap2.token_id
+    JOIN receipt_token rt2
+        ON rt2.receipt_token_address = t2.address AND rt2.chain_id = ap2.chain_id
+    WHERE (
+            ap2.underlying_value IS NOT NULL
+        AND ap2.balance > 0
+        AND ap2.underlying_token_id = rt2.underlying_token_id
+        )
+       OR (
+            ap2.direction IN ('in', 'out')
+        AND (ap2.underlying_value IS NULL OR ap2.balance = 0)
+        )
+),
+nearest_share_ratio AS MATERIALIZED (
+    -- Tier-2 nearest donor ratio per (token, chain, block). The RANGE frames
+    -- make every row of a block see the same prev/next donor (same-block
+    -- donors count at distance 0 on both sides), so DISTINCT collapses the
+    -- stream to one row per block and the equi-join below cannot fan out.
+    -- prev wins distance ties: the at-or-before row.
+    --
+    -- MATERIALIZED is load-bearing: inlined, the planner merge-joins this map
+    -- on (chain_id, token_id) alone with block_number as a join filter,
+    -- sorting the entire activity scan and rescanning each token's map rows
+    -- per activity row (minutes on the warehouse). Fenced, it builds the map
+    -- once (~tens of thousands of rows) and hash-joins on all three keys.
+    SELECT DISTINCT
+        token_id,
+        chain_id,
+        block_number,
+        CASE
+            WHEN prev_donor IS NULL THEN next_donor[5]
+            WHEN next_donor IS NULL THEN prev_donor[5]
+            WHEN block_number - prev_donor[1] <= next_donor[1] - block_number
+                THEN prev_donor[5]
+            ELSE next_donor[5]
+        END AS ratio
+    FROM (
+        SELECT
+            token_id,
+            chain_id,
+            block_number,
+            MAX(donor_key) OVER (
+                PARTITION BY token_id, chain_id ORDER BY block_number
+                RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+            ) AS prev_donor,
+            -- ORDER BY DESC + UNBOUNDED PRECEDING accumulates from the
+            -- partition's end, covering the same rows (block >= current) as
+            -- CURRENT ROW .. UNBOUNDED FOLLOWING over ASC would; the latter
+            -- is a shrinking frame Postgres recomputes from scratch per row,
+            -- quadratic per partition (measured 64s on the warehouse).
+            MIN(CASE WHEN donor_key IS NOT NULL THEN ARRAY[
+                donor_key[1], -donor_key[2], -donor_key[3], -donor_key[4],
+                donor_key[5]
+            ] END) OVER (
+                PARTITION BY token_id, chain_id ORDER BY block_number DESC
+                RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+            ) AS next_donor
+        FROM share_ratio_stream
+    ) donors
 )
 SELECT
     {time_bucket_expr("ap.created_at")} AS bucket_start,
@@ -1281,7 +1403,15 @@ SELECT
             WHEN 'in' THEN ap.tx_amount
             WHEN 'out' THEN -ap.tx_amount
             ELSE 0
-        END * COALESCE(price.price_usd, 0)
+        END
+        * CASE
+            WHEN ap.underlying_token_id IS NOT NULL
+             AND ap.underlying_token_id <> price.underlying_token_id THEN 0
+            WHEN ap.underlying_value IS NOT NULL AND ap.balance > 0
+                THEN ap.underlying_value / ap.balance
+            ELSE COALESCE(nearest_ratio.ratio, 1)
+        END
+        * COALESCE(price.price_usd, 0)
     ), 0) AS net_flow_usd
 FROM allocation_position ap
 JOIN prime p ON p.id = ap.prime_id
@@ -1306,6 +1436,10 @@ LEFT JOIN LATERAL (
 LEFT JOIN receipt_token_price price
     ON price.receipt_token_address = t.address
     AND price.chain_id = ap.chain_id
+LEFT JOIN nearest_share_ratio nearest_ratio
+    ON nearest_ratio.token_id = ap.token_id
+    AND nearest_ratio.chain_id = ap.chain_id
+    AND nearest_ratio.block_number = ap.block_number
 WHERE (CAST(:prime_hex AS TEXT) IS NULL OR ap.proxy_address = decode(CAST(:prime_hex AS TEXT), 'hex'))
     AND ap.direction IS NOT NULL
     AND ap.tx_amount IS NOT NULL
