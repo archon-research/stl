@@ -19,7 +19,7 @@
             "type": "integer"
           },
           "net_flow_usd": {
-            "description": "Signed net flow valued in USD (inflows positive, outflows negative), using the receipt token's latest underlying oracle price for wrapped positions and the token's own latest oracle price for direct holdings. Lets clients reconstruct a balance series by anchoring at the current total and cumulating net flows backwards.",
+            "description": "Signed net flow valued in USD (inflows positive, outflows negative). Only receipt-token flows are valued: each is converted to underlying units at its row's share ratio (underlying_value / balance), borrowing the nearest same-token row's ratio when the row's own is unavailable and falling back to the raw tx_amount only when the token has no valued row at all, then priced at the receipt token's latest underlying oracle price. Rows whose recorded underlying diverges from the registry's are refused and contribute 0, as do direct holdings. Lets clients reconstruct a balance series by anchoring at the current total and cumulating net flows backwards.",
             "examples": [
               "1234567.89"
             ],
@@ -253,7 +253,7 @@
         "type": "string"
       },
       "AllocationResponse": {
-        "description": "Enriched allocation response with category and metadata.\n\nTwo row shapes share this model:\n- Receipt-token positions (e.g. spUSDT wrapping USDT): all fields populated.\n- Direct asset holdings (e.g. PYUSD held in the proxy with no wrapper):\n  ``receipt_token_id`` / ``receipt_token_address`` / ``protocol_name`` are\n  null; ``symbol`` and ``underlying_symbol`` both name the held asset;\n  ``underlying_token_id`` / ``underlying_token_address`` point at it.\n  ``amount_usd`` is populated when an oracle price exists for the token and\n  null otherwise (e.g. LP/curve shares with no oracle feed).",
+        "description": "Enriched allocation response with category and metadata.\n\nTwo row shapes share this model:\n- Receipt-token positions (e.g. spUSDT wrapping USDT): all fields populated.\n- Direct asset holdings (e.g. PYUSD held in the proxy with no wrapper):\n  ``receipt_token_id`` / ``receipt_token_address`` / ``protocol_name`` are\n  null; ``symbol`` names the held asset. ``underlying_*`` usually point at\n  the held asset itself, except holdings valued on the underlying-value\n  basis (allowlisted, e.g. a Uni V3 pool position valued in USDC) with a\n  resolvable underlying, where they point at that underlying.\n  ``amount_usd`` is populated when an oracle price exists for the pricing\n  basis and null otherwise (e.g. LP/curve shares with no oracle feed).",
         "example": {
           "amount_usd": "1234567.89",
           "balance": "1234567.89",
@@ -375,7 +375,7 @@
             "type": "string"
           },
           "underlying_symbol": {
-            "description": "Underlying-token symbol. For direct holdings, same as ``symbol``.",
+            "description": "Underlying-token symbol. For direct holdings, same as ``symbol``, unless the holding is valued on the underlying-value basis (allowlisted).",
             "examples": [
               "USDC"
             ],
@@ -383,7 +383,7 @@
             "type": "string"
           },
           "underlying_token_address": {
-            "description": "0x-prefixed underlying-token contract address. For direct holdings, this is the held asset itself.",
+            "description": "0x-prefixed underlying-token contract address. For direct holdings, this is the held asset itself, unless the holding is valued on the underlying-value basis (allowlisted).",
             "examples": [
               "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
             ],
@@ -391,7 +391,7 @@
             "type": "string"
           },
           "underlying_token_id": {
-            "description": "Surrogate id of the underlying token. For direct holdings, this is the held asset itself.",
+            "description": "Surrogate id of the underlying token. For direct holdings, this is the held asset itself, unless the holding is valued on the underlying-value basis (allowlisted).",
             "examples": [
               1
             ],

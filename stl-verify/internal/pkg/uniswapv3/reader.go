@@ -3,7 +3,6 @@ package uniswapv3
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"math/big"
 	"strings"
 
@@ -43,7 +42,8 @@ const poolABIJSON = `[
 		{"name":"unlocked","type":"bool"}
 	]},
 	{"name":"token0","type":"function","inputs":[],"outputs":[{"name":"","type":"address"}]},
-	{"name":"token1","type":"function","inputs":[],"outputs":[{"name":"","type":"address"}]}
+	{"name":"token1","type":"function","inputs":[],"outputs":[{"name":"","type":"address"}]},
+	{"name":"fee","type":"function","inputs":[],"outputs":[{"name":"","type":"uint24"}]}
 ]`
 
 // Reader reads Uniswap V3 NFT-based positions from the chain.
@@ -52,19 +52,23 @@ const poolABIJSON = `[
 //  1. balanceOf on NonfungiblePositionManager (mainnet: 0xC36442b4a4522E871399CD717aBDD847Ab11FE88) → NFT count per wallet
 //  2. tokenOfOwnerByIndex → token IDs for each wallet
 //  3. positions(tokenId) → liquidity, ticks, token0/token1 per NFT
-//  4. slot0() + token0() + token1() on each pool → current sqrtPriceX96
+//  4. slot0() + token0() + token1() + fee() on each pool → current sqrtPriceX96 and pool identity
 //
 // Token amounts are computed using Uniswap V3 tick math from the position's
 // liquidity and tick range relative to the pool's current price.
+//
+// Every sub-call is issued expecting success (AllowFailure only keeps the
+// batch from reverting wholesale), so a failed or undecodable result fails
+// the whole read so the caller can retry it; defaulting it to zero or
+// skipping it would hand the caller a partial snapshot that looks healthy.
 type Reader struct {
 	multicaller   outbound.Multicaller
 	nftManagerABI abi.ABI
 	poolABI       abi.ABI
-	logger        *slog.Logger
 }
 
 // NewReader creates a new Uniswap V3 Reader.
-func NewReader(multicaller outbound.Multicaller, logger *slog.Logger) (*Reader, error) {
+func NewReader(multicaller outbound.Multicaller) (*Reader, error) {
 	nftABI, err := abi.JSON(strings.NewReader(nftManagerABIJSON))
 	if err != nil {
 		return nil, fmt.Errorf("parse nft manager abi: %w", err)
@@ -79,7 +83,6 @@ func NewReader(multicaller outbound.Multicaller, logger *slog.Logger) (*Reader, 
 		multicaller:   multicaller,
 		nftManagerABI: nftABI,
 		poolABI:       pABI,
-		logger:        logger.With("component", "uniswapv3-reader"),
 	}, nil
 }
 
@@ -136,14 +139,105 @@ func (m *Reader) GetPositions(
 	return result, nil
 }
 
-// GetPoolStates reads slot0, token0, and token1 for each pool in a single
-// multicall pinned to blockHash (see GetPositions for why).
+// poolStateMethods are the per-pool reads GetPoolStates batches, in call
+// order; parsePoolState decodes results by the same indices.
+var poolStateMethods = []string{"slot0", "token0", "token1", "fee"}
+
+// GetPoolStates reads slot0, token0, token1, and fee for each pool in a
+// single multicall pinned to blockHash (see GetPositions for why).
 func (m *Reader) GetPoolStates(
 	ctx context.Context,
 	pools []common.Address,
 	blockHash common.Hash,
 ) (map[common.Address]*PoolState, error) {
-	return m.fetchSlot0s(ctx, pools, blockHash)
+	calls := make([]outbound.Call, 0, len(pools)*len(poolStateMethods))
+	for _, pool := range pools {
+		for _, method := range poolStateMethods {
+			data, err := m.poolABI.Pack(method)
+			if err != nil {
+				return nil, fmt.Errorf("pack %s: %w", method, err)
+			}
+			calls = append(calls, outbound.Call{Target: pool, AllowFailure: true, CallData: data})
+		}
+	}
+
+	results, err := m.multicaller.ExecuteAtHash(ctx, calls, blockHash)
+	if err != nil {
+		return nil, fmt.Errorf("multicall pool state: %w", err)
+	}
+	if len(results) != len(calls) {
+		return nil, fmt.Errorf("pool state multicall returned %d results for %d calls", len(results), len(calls))
+	}
+
+	states := make(map[common.Address]*PoolState, len(pools))
+	for i, pool := range pools {
+		state, err := m.parsePoolState(pool, results[i*len(poolStateMethods):(i+1)*len(poolStateMethods)])
+		if err != nil {
+			return nil, err
+		}
+		states[pool] = state
+	}
+
+	return states, nil
+}
+
+// parsePoolState decodes one pool's slice of results, ordered as
+// poolStateMethods.
+func (m *Reader) parsePoolState(pool common.Address, results []outbound.Result) (*PoolState, error) {
+	for j, method := range poolStateMethods {
+		if !results[j].Success {
+			return nil, fmt.Errorf("%s sub-call failed for pool %s", method, pool.Hex())
+		}
+	}
+
+	slot0Out, err := m.poolABI.Unpack("slot0", results[0].ReturnData)
+	if err != nil {
+		return nil, fmt.Errorf("unpack slot0 for pool %s: %w", pool.Hex(), err)
+	}
+	sqrtPriceX96, okPrice := slot0Out[0].(*big.Int)
+	tickBig, okTick := slot0Out[1].(*big.Int)
+	if !okPrice || !okTick {
+		return nil, fmt.Errorf("slot0 for pool %s returned unexpected output types", pool.Hex())
+	}
+
+	token0, err := m.unpackPoolAddress("token0", pool, results[1].ReturnData)
+	if err != nil {
+		return nil, err
+	}
+	token1, err := m.unpackPoolAddress("token1", pool, results[2].ReturnData)
+	if err != nil {
+		return nil, err
+	}
+
+	feeOut, err := m.poolABI.Unpack("fee", results[3].ReturnData)
+	if err != nil {
+		return nil, fmt.Errorf("unpack fee for pool %s: %w", pool.Hex(), err)
+	}
+	fee, okFee := feeOut[0].(*big.Int)
+	if !okFee {
+		return nil, fmt.Errorf("fee for pool %s returned %T, want *big.Int", pool.Hex(), feeOut[0])
+	}
+
+	return &PoolState{
+		SqrtPriceX96: sqrtPriceX96,
+		Tick:         int(tickBig.Int64()),
+		Token0:       token0,
+		Token1:       token1,
+		Fee:          fee,
+	}, nil
+}
+
+// unpackPoolAddress decodes a single-address pool getter result.
+func (m *Reader) unpackPoolAddress(method string, pool common.Address, data []byte) (common.Address, error) {
+	out, err := m.poolABI.Unpack(method, data)
+	if err != nil {
+		return common.Address{}, fmt.Errorf("unpack %s for pool %s: %w", method, pool.Hex(), err)
+	}
+	addr, ok := out[0].(common.Address)
+	if !ok {
+		return common.Address{}, fmt.Errorf("%s for pool %s returned %T, want address", method, pool.Hex(), out[0])
+	}
+	return addr, nil
 }
 
 // ── Multicall helpers ──
@@ -172,25 +266,27 @@ func (m *Reader) fetchNFTCounts(
 	if err != nil {
 		return nil, fmt.Errorf("multicall balanceOf: %w", err)
 	}
+	if len(results) != len(calls) {
+		return nil, fmt.Errorf("balanceOf multicall returned %d results for %d calls", len(results), len(calls))
+	}
 
 	counts := make(map[common.Address]int, len(wallets))
 	for i, w := range wallets {
-		if i >= len(results) || !results[i].Success {
-			counts[w] = 0
-			continue
+		if !results[i].Success {
+			return nil, fmt.Errorf("balanceOf(%s) sub-call failed on %s", w.Hex(), nftManager.Hex())
 		}
 
 		out, err := m.nftManagerABI.Unpack("balanceOf", results[i].ReturnData)
 		if err != nil {
-			m.logger.Warn("unpack balanceOf failed", "wallet", w.Hex(), "error", err)
-			counts[w] = 0
-			continue
+			return nil, fmt.Errorf("unpack balanceOf for wallet %s: %w", w.Hex(), err)
 		}
 
 		count, ok := out[0].(*big.Int)
 		if !ok {
-			counts[w] = 0
-			continue
+			return nil, fmt.Errorf("balanceOf for wallet %s returned %T, want *big.Int", w.Hex(), out[0])
+		}
+		if !count.IsInt64() {
+			return nil, fmt.Errorf("balanceOf for wallet %s returned %s, outside int64 range", w.Hex(), count)
 		}
 		counts[w] = int(count.Int64())
 	}
@@ -237,22 +333,24 @@ func (m *Reader) fetchTokenIDs(
 	if err != nil {
 		return nil, fmt.Errorf("multicall tokenOfOwnerByIndex: %w", err)
 	}
+	if len(results) != len(calls) {
+		return nil, fmt.Errorf("tokenOfOwnerByIndex multicall returned %d results for %d calls", len(results), len(calls))
+	}
 
 	tokenIDs := make(map[common.Address][]*big.Int)
 	for i, ref := range refs {
-		if i >= len(results) || !results[i].Success {
-			continue
+		if !results[i].Success {
+			return nil, fmt.Errorf("tokenOfOwnerByIndex(%s, %d) sub-call failed", ref.wallet.Hex(), ref.index)
 		}
 
 		out, err := m.nftManagerABI.Unpack("tokenOfOwnerByIndex", results[i].ReturnData)
 		if err != nil {
-			m.logger.Warn("unpack tokenOfOwnerByIndex failed", "wallet", ref.wallet.Hex(), "index", ref.index, "error", err)
-			continue
+			return nil, fmt.Errorf("unpack tokenOfOwnerByIndex for wallet %s index %d: %w", ref.wallet.Hex(), ref.index, err)
 		}
 
 		tokenID, ok := out[0].(*big.Int)
 		if !ok {
-			continue
+			return nil, fmt.Errorf("tokenOfOwnerByIndex for wallet %s index %d returned %T, want *big.Int", ref.wallet.Hex(), ref.index, out[0])
 		}
 		tokenIDs[ref.wallet] = append(tokenIDs[ref.wallet], tokenID)
 	}
@@ -284,31 +382,36 @@ func (m *Reader) fetchPositions(
 	if err != nil {
 		return nil, fmt.Errorf("multicall positions: %w", err)
 	}
+	if len(results) != len(calls) {
+		return nil, fmt.Errorf("positions multicall returned %d results for %d calls", len(results), len(calls))
+	}
 
 	positions := make(map[string]*Position, len(tokenIDs))
 	for i, id := range tokenIDs {
-		if i >= len(results) || !results[i].Success {
-			continue
+		if !results[i].Success {
+			return nil, fmt.Errorf("positions(%s) sub-call failed", id)
 		}
 
 		out, err := m.nftManagerABI.Unpack("positions", results[i].ReturnData)
 		if err != nil {
-			m.logger.Warn("unpack positions failed", "tokenId", id, "error", err)
-			continue
+			return nil, fmt.Errorf("unpack positions for tokenId %s: %w", id, err)
 		}
 
 		// positions returns: nonce(0), operator(1), token0(2), token1(3), fee(4),
 		//                    tickLower(5), tickUpper(6), liquidity(7), ...
 		if len(out) < 8 {
-			continue
+			return nil, fmt.Errorf("positions for tokenId %s returned %d outputs, want at least 8", id, len(out))
 		}
 
-		token0, _ := out[2].(common.Address)
-		token1, _ := out[3].(common.Address)
-		fee, _ := out[4].(*big.Int)
-		tickLowerBig, _ := out[5].(*big.Int)
-		tickUpperBig, _ := out[6].(*big.Int)
-		liquidity, _ := out[7].(*big.Int)
+		token0, ok0 := out[2].(common.Address)
+		token1, ok1 := out[3].(common.Address)
+		fee, okFee := out[4].(*big.Int)
+		tickLowerBig, okLower := out[5].(*big.Int)
+		tickUpperBig, okUpper := out[6].(*big.Int)
+		liquidity, okLiq := out[7].(*big.Int)
+		if !ok0 || !ok1 || !okFee || !okLower || !okUpper || !okLiq {
+			return nil, fmt.Errorf("positions for tokenId %s returned unexpected output types", id)
+		}
 
 		positions[id.String()] = &Position{
 			TokenID:   id,
@@ -322,86 +425,4 @@ func (m *Reader) fetchPositions(
 	}
 
 	return positions, nil
-}
-
-// fetchSlot0s reads slot0, token0, and token1 for each pool contract.
-func (m *Reader) fetchSlot0s(
-	ctx context.Context,
-	pools []common.Address,
-	blockHash common.Hash,
-) (map[common.Address]*PoolState, error) {
-	// 3 calls per pool: slot0, token0, token1.
-	calls := make([]outbound.Call, 0, len(pools)*3)
-	for _, pool := range pools {
-		slot0Data, err := m.poolABI.Pack("slot0")
-		if err != nil {
-			return nil, fmt.Errorf("pack slot0: %w", err)
-		}
-		token0Data, err := m.poolABI.Pack("token0")
-		if err != nil {
-			return nil, fmt.Errorf("pack token0: %w", err)
-		}
-		token1Data, err := m.poolABI.Pack("token1")
-		if err != nil {
-			return nil, fmt.Errorf("pack token1: %w", err)
-		}
-
-		calls = append(calls,
-			outbound.Call{Target: pool, AllowFailure: true, CallData: slot0Data},
-			outbound.Call{Target: pool, AllowFailure: true, CallData: token0Data},
-			outbound.Call{Target: pool, AllowFailure: true, CallData: token1Data},
-		)
-	}
-
-	results, err := m.multicaller.ExecuteAtHash(ctx, calls, blockHash)
-	if err != nil {
-		return nil, fmt.Errorf("multicall slot0: %w", err)
-	}
-
-	states := make(map[common.Address]*PoolState, len(pools))
-	for i, pool := range pools {
-		baseIdx := i * 3
-
-		if baseIdx+2 >= len(results) {
-			continue
-		}
-
-		if !results[baseIdx].Success || !results[baseIdx+1].Success || !results[baseIdx+2].Success {
-			m.logger.Warn("pool call failed", "pool", pool.Hex())
-			continue
-		}
-
-		// Parse slot0.
-		slot0Out, err := m.poolABI.Unpack("slot0", results[baseIdx].ReturnData)
-		if err != nil {
-			m.logger.Warn("unpack slot0 failed", "pool", pool.Hex(), "error", err)
-			continue
-		}
-
-		sqrtPriceX96, _ := slot0Out[0].(*big.Int)
-		tickBig, _ := slot0Out[1].(*big.Int)
-
-		// Parse token0.
-		token0Out, err := m.poolABI.Unpack("token0", results[baseIdx+1].ReturnData)
-		if err != nil {
-			continue
-		}
-		token0, _ := token0Out[0].(common.Address)
-
-		// Parse token1.
-		token1Out, err := m.poolABI.Unpack("token1", results[baseIdx+2].ReturnData)
-		if err != nil {
-			continue
-		}
-		token1, _ := token1Out[0].(common.Address)
-
-		states[pool] = &PoolState{
-			SqrtPriceX96: sqrtPriceX96,
-			Tick:         int(tickBig.Int64()),
-			Token0:       token0,
-			Token1:       token1,
-		}
-	}
-
-	return states, nil
 }
