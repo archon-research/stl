@@ -1,6 +1,7 @@
 package allocation_tracker
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -349,8 +350,9 @@ var (
 )
 
 // handleUniV3PoolBatch runs a one-snapshot uni_v3_pool batch (hint=USDC, pair
-// AUSD/USDC, both metadata pre-cached) and returns the single saved position.
-func handleUniV3PoolBatch(t *testing.T) *entity.AllocationPosition {
+// AUSD/USDC, both metadata pre-cached) valuing the position at the given
+// value, and returns the single saved position.
+func handleUniV3PoolBatch(t *testing.T, value *big.Int) *entity.AllocationPosition {
 	t.Helper()
 	repo := &fakeAllocRepo{}
 	handler := newTestHandler(repo, &fakeSupplyRepo{},
@@ -372,8 +374,8 @@ func handleUniV3PoolBatch(t *testing.T) *entity.AllocationPosition {
 					Chain:           "mainnet",
 					TokenType:       "uni_v3_pool",
 				},
-				Balance:         new(big.Int).Set(univ3TestValue),
-				UnderlyingValue: new(big.Int).Set(univ3TestValue),
+				Balance:         new(big.Int).Set(value),
+				UnderlyingValue: new(big.Int).Set(value),
 				PoolToken0:      &univ3TestAUSD,
 				PoolToken1:      &univ3TestUSDC,
 				ChainID:         1,
@@ -397,7 +399,7 @@ func handleUniV3PoolBatch(t *testing.T) *entity.AllocationPosition {
 // symbol; reusing the hint asset's symbol mislabeled the row as "USDC") and
 // decimals from the hint asset, the balance's denomination.
 func TestHandleBatch_UniV3Pool_ComposesPoolRowSymbol(t *testing.T) {
-	pos := handleUniV3PoolBatch(t)
+	pos := handleUniV3PoolBatch(t, univ3TestValue)
 	if pos.TokenSymbol != "AUSDUSDC-UNIV3" {
 		t.Errorf("symbol = %q, want AUSDUSDC-UNIV3 (composed from the pool pair)", pos.TokenSymbol)
 	}
@@ -416,12 +418,34 @@ func TestHandleBatch_UniV3Pool_ComposesPoolRowSymbol(t *testing.T) {
 // full position value becomes the underlying valuation, denominated in the
 // hint asset.
 func TestHandleBatch_UniV3Pool_SetsUnderlyingOnPosition(t *testing.T) {
-	pos := handleUniV3PoolBatch(t)
+	pos := handleUniV3PoolBatch(t, univ3TestValue)
 	if pos.Underlying == nil {
 		t.Fatal("Underlying = nil, want the tracker-computed full value")
 	}
 	if pos.Underlying.Value.Cmp(univ3TestValue) != 0 {
 		t.Errorf("Underlying.Value = %s, want %s", pos.Underlying.Value, univ3TestValue)
+	}
+	if pos.Underlying.AssetAddress != univ3TestUSDC {
+		t.Errorf("Underlying.AssetAddress = %s, want %s", pos.Underlying.AssetAddress.Hex(), univ3TestUSDC.Hex())
+	}
+}
+
+// TestHandleBatch_UniV3Pool_ZeroExitRow_PersistsZeroValuation: the source
+// writes an explicit zero row when the wallet's live positions no longer
+// match the pool (exit/burn/transfer); the handler must persist it as balance
+// 0 with a zero valuation still denominated in the hint asset, not drop it or
+// degrade it to a NULL valuation, so the API's latest-row read stops
+// reporting the exposure instead of freezing the last positive row.
+func TestHandleBatch_UniV3Pool_ZeroExitRow_PersistsZeroValuation(t *testing.T) {
+	pos := handleUniV3PoolBatch(t, big.NewInt(0))
+	if pos.Balance == nil || pos.Balance.Sign() != 0 {
+		t.Errorf("Balance = %v, want explicit 0", pos.Balance)
+	}
+	if pos.Underlying == nil {
+		t.Fatal("Underlying = nil, want a zero valuation in the hint asset")
+	}
+	if pos.Underlying.Value.Sign() != 0 {
+		t.Errorf("Underlying.Value = %s, want 0", pos.Underlying.Value)
 	}
 	if pos.Underlying.AssetAddress != univ3TestUSDC {
 		t.Errorf("Underlying.AssetAddress = %s, want %s", pos.Underlying.AssetAddress.Hex(), univ3TestUSDC.Hex())
@@ -528,51 +552,6 @@ func TestHandleBatch_UniV3Pool_MissingPoolTokens_Error(t *testing.T) {
 	}
 }
 
-// TestHandleBatch_UniV3Pool_UnresolvedPairSymbol_Error: the metadata cache
-// falls back to "UNKNOWN" when a symbol() read fails, and the token upsert
-// never refreshes symbol on conflict, so composing with it would permanently
-// bake an impostor-class name (UNKNOWNUSDC-UNIV3) into the registry. The
-// batch must fail so the read is retried instead.
-func TestHandleBatch_UniV3Pool_UnresolvedPairSymbol_Error(t *testing.T) {
-	repo := &fakeAllocRepo{}
-	handler := newTestHandler(repo, &fakeSupplyRepo{},
-		map[string]int64{"grove": 2},
-		map[common.Address]tokenMeta{
-			univ3TestAUSD: {symbol: "UNKNOWN", decimals: 6},
-			univ3TestUSDC: {symbol: "USDC", decimals: 6},
-		},
-	)
-
-	err := handler.HandleBatch(context.Background(), &SnapshotBatch{
-		Snapshots: []*PositionSnapshot{
-			{
-				Entry: &TokenEntry{
-					ContractAddress: univ3TestPool,
-					WalletAddress:   univ3TestWallet,
-					AssetAddress:    &univ3TestUSDC,
-					Star:            "grove",
-					Chain:           "mainnet",
-					TokenType:       "uni_v3_pool",
-				},
-				Balance:         big.NewInt(100),
-				UnderlyingValue: big.NewInt(100),
-				PoolToken0:      &univ3TestAUSD,
-				PoolToken1:      &univ3TestUSDC,
-				ChainID:         1,
-				BlockNumber:     100,
-				TxAmount:        big.NewInt(0),
-				Direction:       DirectionSweep,
-			},
-		},
-	})
-	if err == nil {
-		t.Fatal("expected error when a pool token's symbol is unresolved")
-	}
-	if len(repo.saved) != 0 {
-		t.Errorf("no positions should be saved on error, got %d", len(repo.saved))
-	}
-}
-
 // TestHandleBatch_UniV3Pool_FetchesPoolTokenMetadata drives the real
 // metadataCache with a mocked multicaller to prove HandleBatch requests
 // metadata for the pool pair (not just the hint asset) so the composed symbol
@@ -590,7 +569,7 @@ func TestHandleBatch_UniV3Pool_FetchesPoolTokenMetadata(t *testing.T) {
 	mc := newTokenMetadataMockMulticaller(t, erc20ABI, map[common.Address]tokenMeta{
 		ausd: {symbol: "AUSD", decimals: 6},
 		usdc: {symbol: "USDC", decimals: 6},
-	})
+	}, nil, nil)
 
 	repo := &fakeAllocRepo{}
 	handler := NewPrimePositionHandler(repo, &fakeSupplyRepo{}, &testutil.MockTxManager{},
@@ -631,11 +610,17 @@ func TestHandleBatch_UniV3Pool_FetchesPoolTokenMetadata(t *testing.T) {
 }
 
 // newTokenMetadataMockMulticaller answers decimals()/symbol() calls from the
-// given per-address metadata and fails any other selector.
+// given per-address metadata and fails any other selector. Symbol reads for
+// addresses in failSymbols (nil for none) fail while decimals still succeed;
+// tests can mutate the set between calls to model a transient failure.
+// rawSymbols (nil for none) overrides the symbol return with raw bytes, for
+// non-ABI-string shapes (bytes32 symbols, garbage payloads).
 func newTokenMetadataMockMulticaller(
 	t *testing.T,
 	erc20ABI *abi.ABI,
 	metadata map[common.Address]tokenMeta,
+	failSymbols map[common.Address]bool,
+	rawSymbols map[common.Address][]byte,
 ) *testutil.MockMulticaller {
 	t.Helper()
 	decimalsMethod := erc20ABI.Methods["decimals"]
@@ -658,6 +643,14 @@ func newTokenMetadataMockMulticaller(
 				}
 				results[i] = outbound.Result{Success: true, ReturnData: data}
 			case string(symbolMethod.ID):
+				if failSymbols[call.Target] {
+					results[i] = outbound.Result{Success: false}
+					continue
+				}
+				if raw, ok := rawSymbols[call.Target]; ok {
+					results[i] = outbound.Result{Success: true, ReturnData: raw}
+					continue
+				}
 				data, err := symbolMethod.Outputs.Pack(meta.symbol)
 				if err != nil {
 					t.Fatalf("pack symbol: %v", err)
@@ -670,6 +663,162 @@ func newTokenMetadataMockMulticaller(
 		return results, nil
 	}
 	return mc
+}
+
+// handleERC20BatchWithSymbolShape runs a one-snapshot erc20 batch against the
+// real metadata cache where the token's symbol() answers with the given raw
+// bytes (nil = failed sub-call), returning the repo and the HandleBatch error.
+func handleERC20BatchWithSymbolShape(t *testing.T, rawSymbol []byte) (*fakeAllocRepo, error) {
+	t.Helper()
+	usdc := common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
+	wallet := common.HexToAddress("0x1601843c5e9bc251a3272907010afa41fa18347e")
+
+	erc20ABI, err := abis.GetERC20ABI()
+	if err != nil {
+		t.Fatalf("GetERC20ABI: %v", err)
+	}
+	failSymbols := map[common.Address]bool{}
+	rawSymbols := map[common.Address][]byte{}
+	if rawSymbol == nil {
+		failSymbols[usdc] = true
+	} else {
+		rawSymbols[usdc] = rawSymbol
+	}
+	mc := newTokenMetadataMockMulticaller(t, erc20ABI,
+		map[common.Address]tokenMeta{usdc: {symbol: "USDC", decimals: 6}},
+		failSymbols, rawSymbols,
+	)
+
+	repo := &fakeAllocRepo{}
+	handler := NewPrimePositionHandler(repo, &fakeSupplyRepo{}, &testutil.MockTxManager{},
+		mc, erc20ABI, map[string]int64{"spark": 1}, slog.Default(), nil)
+
+	err = handler.HandleBatch(context.Background(), &SnapshotBatch{
+		Snapshots: []*PositionSnapshot{
+			{
+				Entry: &TokenEntry{
+					ContractAddress: usdc,
+					WalletAddress:   wallet,
+					Star:            "spark",
+					Chain:           "mainnet",
+					TokenType:       "erc20",
+				},
+				Balance:     big.NewInt(1000000),
+				ChainID:     1,
+				BlockNumber: 100,
+				TxAmount:    big.NewInt(0),
+				Direction:   DirectionSweep,
+			},
+		},
+	})
+	return repo, err
+}
+
+// TestHandleBatch_FailedSymbolRead_Error: the symbol() read is issued
+// expecting success, so a failed or undecodable read must fail the batch (SQS
+// redelivers) instead of persisting the row under a fallback symbol: the
+// token upsert never refreshes symbol on conflict, so an impostor-class name
+// would stick forever.
+func TestHandleBatch_FailedSymbolRead_Error(t *testing.T) {
+	tests := []struct {
+		name      string
+		rawSymbol []byte // nil = failed sub-call
+	}{
+		{"failed sub-call", nil},
+		{"undecodable 32-byte payload", bytes.Repeat([]byte{0xff}, 32)},
+		{"undecodable short payload", []byte{0xde, 0xad}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			repo, err := handleERC20BatchWithSymbolShape(t, tc.rawSymbol)
+			if err == nil {
+				t.Fatal("expected error when the symbol read fails")
+			}
+			if len(repo.saved) != 0 {
+				t.Errorf("no positions should be saved on error, got %d", len(repo.saved))
+			}
+		})
+	}
+}
+
+// TestHandleBatch_Bytes32Symbol_Resolves: the ERC20 ABI declares symbol() as
+// string, but MKR-class tokens return bytes32, and uni_v3 pool pair tokens
+// come from on-chain token0()/token1() rather than the curated registry, so
+// hard-failing on that known variant would deterministically poison the queue
+// (the read never changes on redelivery). The shape is gated structurally: an
+// exactly-32-byte payload decodes as a NUL-padded bytes32 symbol.
+func TestHandleBatch_Bytes32Symbol_Resolves(t *testing.T) {
+	mkrBytes32 := make([]byte, 32)
+	copy(mkrBytes32, "MKR")
+
+	repo, err := handleERC20BatchWithSymbolShape(t, mkrBytes32)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(repo.saved) != 1 {
+		t.Fatalf("expected 1 saved position, got %d", len(repo.saved))
+	}
+	if repo.saved[0].TokenSymbol != "MKR" {
+		t.Errorf("symbol = %q, want MKR (decoded from bytes32)", repo.saved[0].TokenSymbol)
+	}
+}
+
+// TestHandleBatch_TransientSymbolFailure_RecoversOnRetry: a failed symbol
+// read must not be cached (the long-lived metadata cache is only consulted
+// for missing addresses), or the SQS redelivery hits the same cached fallback
+// and the block fails forever until a process restart.
+func TestHandleBatch_TransientSymbolFailure_RecoversOnRetry(t *testing.T) {
+	erc20ABI, err := abis.GetERC20ABI()
+	if err != nil {
+		t.Fatalf("GetERC20ABI: %v", err)
+	}
+	failSymbols := map[common.Address]bool{univ3TestAUSD: true}
+	mc := newTokenMetadataMockMulticaller(t, erc20ABI, map[common.Address]tokenMeta{
+		univ3TestAUSD: {symbol: "AUSD", decimals: 6},
+		univ3TestUSDC: {symbol: "USDC", decimals: 6},
+	}, failSymbols, nil)
+
+	repo := &fakeAllocRepo{}
+	handler := NewPrimePositionHandler(repo, &fakeSupplyRepo{}, &testutil.MockTxManager{},
+		mc, erc20ABI, map[string]int64{"grove": 2}, slog.Default(), nil)
+
+	batch := &SnapshotBatch{
+		Snapshots: []*PositionSnapshot{
+			{
+				Entry: &TokenEntry{
+					ContractAddress: univ3TestPool,
+					WalletAddress:   univ3TestWallet,
+					AssetAddress:    &univ3TestUSDC,
+					Star:            "grove",
+					Chain:           "mainnet",
+					TokenType:       "uni_v3_pool",
+				},
+				Balance:         big.NewInt(100),
+				UnderlyingValue: big.NewInt(100),
+				PoolToken0:      &univ3TestAUSD,
+				PoolToken1:      &univ3TestUSDC,
+				ChainID:         1,
+				BlockNumber:     100,
+				TxAmount:        big.NewInt(0),
+				Direction:       DirectionSweep,
+			},
+		},
+	}
+
+	if err := handler.HandleBatch(context.Background(), batch); err == nil {
+		t.Fatal("expected the first delivery to fail while the symbol read fails")
+	}
+
+	delete(failSymbols, univ3TestAUSD)
+	if err := handler.HandleBatch(context.Background(), batch); err != nil {
+		t.Fatalf("retry after the symbol read recovered must succeed, got: %v", err)
+	}
+	if len(repo.saved) != 1 {
+		t.Fatalf("expected 1 saved position after the retry, got %d", len(repo.saved))
+	}
+	if repo.saved[0].TokenSymbol != "AUSDUSDC-UNIV3" {
+		t.Errorf("symbol = %q, want AUSDUSDC-UNIV3", repo.saved[0].TokenSymbol)
+	}
 }
 
 func TestHandleBatch_ERC4626_PreservesTokenUnits(t *testing.T) {

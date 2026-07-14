@@ -21,7 +21,7 @@ type UniV3Source struct {
 
 // NewUniV3Source creates a new UniV3Source backed by a uniswapv3.Reader.
 func NewUniV3Source(multicaller outbound.Multicaller, logger *slog.Logger) (*UniV3Source, error) {
-	mgr, err := uniswapv3.NewReader(multicaller, logger)
+	mgr, err := uniswapv3.NewReader(multicaller)
 	if err != nil {
 		return nil, fmt.Errorf("create uniswapv3 reader: %w", err)
 	}
@@ -117,12 +117,9 @@ func (s *UniV3Source) fetchChainBalances(
 	}
 
 	for _, entry := range entries {
-		balance, ok, err := s.computeEntryBalance(entry, walletPositions, poolStates)
+		balance, err := s.computeEntryBalance(entry, walletPositions, poolStates)
 		if err != nil {
 			return err
-		}
-		if !ok {
-			continue
 		}
 		result[entry.Key()] = balance
 	}
@@ -158,38 +155,31 @@ func uniquePools(entries []*TokenEntry) []common.Address {
 }
 
 // computeEntryBalance values one entry's matched V3 positions fully in the
-// entry's hint asset. ok=false means the wallet holds no live position in the
-// pool (closed or never opened): a structural absence, not an error.
+// entry's hint asset. An empty match (no live matching position: exited,
+// burned, transferred, never opened, or only other pairs/fee tiers) still
+// yields an explicit zero row, like the curve/erc4626 sources: the API's
+// latest-row read has no freshness cutoff, so skipping the entry would freeze
+// the last positive row as current exposure forever. Only a genuinely
+// unreadable pool state is an error (block retried).
 func (s *UniV3Source) computeEntryBalance(
 	entry *TokenEntry,
 	walletPositions map[common.Address][]uniswapv3.Position,
 	poolStates map[common.Address]*uniswapv3.PoolState,
-) (*PositionBalance, bool, error) {
-	positions, ok := walletPositions[entry.WalletAddress]
-	if !ok || len(positions) == 0 {
-		return nil, false, nil
-	}
-
-	// The slot0/token0/token1 read was issued for this pool, so an absent
-	// state is a failed AllowFailure sub-call (or a non-pool address), never a
-	// structural absence. Skipping would freeze the position at its previous
-	// row; failing lets SQS redeliver the block.
+) (*PositionBalance, error) {
+	// The reader fails loudly on any pool sub-call failure, so an absent state
+	// here is an internal invariant break, never a structural absence.
 	state, ok := poolStates[entry.ContractAddress]
 	if !ok {
-		return nil, false, fmt.Errorf(
-			"pool state missing for %s (issued slot0/token0/token1 read failed) while wallet %s holds positions",
+		return nil, fmt.Errorf(
+			"pool state missing for %s despite a successful pool state read (entry wallet %s)",
 			entry.ContractAddress.Hex(), entry.WalletAddress.Hex(),
 		)
 	}
 
-	total, matched := s.sumMatchedPositionAmounts(entry, positions, state)
-	if !matched {
-		return nil, false, nil
-	}
-
+	total := s.sumMatchedPositionAmounts(entry, walletPositions[entry.WalletAddress], state)
 	value, err := valueInHintAsset(entry, state, total)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 
 	token0, token1 := state.Token0, state.Token1
@@ -200,22 +190,25 @@ func (s *UniV3Source) computeEntryBalance(
 		UnderlyingValue: new(big.Int).Set(value),
 		PoolToken0:      &token0,
 		PoolToken1:      &token1,
-	}, true, nil
+	}, nil
 }
 
 // sumMatchedPositionAmounts totals (amount0, amount1) over the wallet's live
-// positions in the entry's pool. matched=false when none has liquidity.
+// positions in the entry's pool; no matching position leaves the total at
+// zero, which flows through valuation as the explicit zero row.
 func (s *UniV3Source) sumMatchedPositionAmounts(
 	entry *TokenEntry,
 	positions []uniswapv3.Position,
 	state *uniswapv3.PoolState,
-) (uniswapv3.PositionAmounts, bool) {
+) uniswapv3.PositionAmounts {
 	total := uniswapv3.PositionAmounts{Amount0: new(big.Int), Amount1: new(big.Int)}
-	matched := false
 
 	for _, pos := range positions {
-		// Match position to this pool by token0/token1 pair.
-		if pos.Token0 != state.Token0 || pos.Token1 != state.Token1 {
+		// Match position to this pool by its full identity (token0, token1,
+		// fee): several live pools share a pair across fee tiers (e.g.
+		// AUSD/USDC at 0.01% and 0.05%), so a pair-only match would sum the
+		// other tiers' NFTs into this entry and double-count exposure.
+		if pos.Token0 != state.Token0 || pos.Token1 != state.Token1 || pos.Fee.Cmp(state.Fee) != 0 {
 			continue
 		}
 
@@ -223,7 +216,6 @@ func (s *UniV3Source) sumMatchedPositionAmounts(
 			continue
 		}
 
-		matched = true
 		amounts := uniswapv3.ComputePositionAmounts(
 			state.SqrtPriceX96,
 			pos.TickLower,
@@ -244,7 +236,7 @@ func (s *UniV3Source) sumMatchedPositionAmounts(
 		)
 	}
 
-	return total, matched
+	return total
 }
 
 // valueInHintAsset converts the summed position amounts into the entry's hint

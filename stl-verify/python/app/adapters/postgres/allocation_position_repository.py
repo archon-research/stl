@@ -303,6 +303,11 @@ class AllocationRepository:
                             else None
                         ),
                         latest_activity_at=row.latest_activity_at,
+                        underlying_token_id=row.underlying_token_id,
+                        underlying_token_address=(
+                            "0x" + row.underlying_token_address if row.underlying_token_address is not None else None
+                        ),
+                        underlying_symbol=row.underlying_symbol,
                     )
                     for row in result
                 ]
@@ -1002,6 +1007,15 @@ _RECEIPT_TOKEN_POSITIONS_SQL = text("""
 # price``. For these tokens ``balance`` is a share count, so the legacy basis
 # would be a silent methodology flip to a wrong value. Every non-allowlisted
 # token keeps the legacy ``balance x px`` valuation, byte-identical to before.
+# Allowlisted rows also project the underlying's identity (underlying_token_id
+# / address / symbol) when the row carries one: ``amount_usd`` derives from the
+# underlying's oracle price and consumers key drilldowns off ``underlying_*``,
+# so the identity must travel with the price basis. All other cases emit NULL
+# and the endpoint falls back to the held token itself. The projection is
+# atomic by construction (allowlist gate + symbol presence live on the ``ut``
+# join): either all three columns emit or none do, because ``token.symbol`` is
+# nullable and a partial identity would let the endpoint compose a hybrid of
+# underlying id/address with the held token's symbol.
 _DIRECT_ASSET_HOLDINGS_SQL = text("""
     WITH latest_positions AS (
         SELECT DISTINCT ON (ap.token_id)
@@ -1028,9 +1042,16 @@ _DIRECT_ASSET_HOLDINGS_SQL = text("""
             THEN lp.underlying_value * up.price_usd
             ELSE lp.balance * px.price_usd
         END AS amount_usd,
+        ut.id                     AS underlying_token_id,
+        encode(ut.address, 'hex') AS underlying_token_address,
+        ut.symbol                 AS underlying_symbol,
         lp.latest_activity_at
     FROM latest_positions lp
     JOIN token t ON t.id = lp.token_id
+    LEFT JOIN token ut
+        ON ut.id = lp.underlying_token_id
+        AND t.address IN :uv_token_addrs
+        AND ut.symbol IS NOT NULL
     LEFT JOIN receipt_token rt
         ON rt.receipt_token_address = t.address AND rt.chain_id = lp.chain_id
     LEFT JOIN LATERAL (

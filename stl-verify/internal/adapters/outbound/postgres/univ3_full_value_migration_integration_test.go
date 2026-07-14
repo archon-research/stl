@@ -32,46 +32,49 @@ func init() {
 	})
 }
 
-// TestUnderlyingValueCommentCoversUniV3 verifies the catalogue comment now
-// documents uni_v3 rows as carrying the full position value and no longer
-// lists uni_v3 among the NULL-by-design types.
-func TestUnderlyingValueCommentCoversUniV3(t *testing.T) {
-	ctx := context.Background()
-
-	var comment string
-	err := univ3FullValuePool.QueryRow(ctx, `
-		SELECT col_description(a.attrelid, a.attnum)
-		FROM pg_attribute a
-		WHERE a.attrelid = 'allocation_position'::regclass
-		  AND a.attname = 'underlying_value'`).Scan(&comment)
-	if err != nil {
-		t.Fatalf("read underlying_value comment: %v", err)
-	}
-
-	if !strings.Contains(comment, "uni_v3_pool/uni_v3_lp: full position value") {
-		t.Errorf("comment %q should document the uni_v3 full position value", comment)
-	}
-	if strings.Contains(comment, "curve/uni_v3") {
-		t.Errorf("comment %q still lists uni_v3 among NULL-by-design types", comment)
-	}
-	if !strings.Contains(comment, "uncollected fees") {
-		t.Errorf("comment %q should state the uncollected-fees exclusion", comment)
-	}
-}
-
-// TestBalanceCommentsCoverUniV3 verifies the sibling balance/scaled_balance
-// catalogue comments also carry the changed uni_v3 semantics: balance is a
-// computed full value (no balanceOf exists on a pool) and scaled_balance is
-// NULL by design.
-func TestBalanceCommentsCoverUniV3(t *testing.T) {
+// TestAllocationPositionCatalogueComments verifies the rewritten catalogue
+// comments describe what the writers actually persist (these comments are the
+// catalogue's source of truth): uni_v3 rows carry the full position value
+// with explicit zero rows on exit, balance no longer claims "never 0"
+// (curve/erc4626/uni_v3 write explicit zeros), scaled_balance no longer
+// claims aToken-only population (curve/erc4626 store share counts), and the
+// NULL-pricing note no longer claims an unconditional balance-based fallback
+// (allowlisted underlying-value tokens surface NULL amount_usd).
+func TestAllocationPositionCatalogueComments(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
 		column   string
-		fragment string
+		want     []string
+		rejected []string
 	}{
-		{"balance", "uni_v3"},
-		{"scaled_balance", "uni_v3"},
+		{
+			column: "underlying_value",
+			want: []string{
+				"uni_v3_pool/uni_v3_lp: full position value",
+				"uncollected fees",
+				"explicit 0",
+				"NULL amount_usd",
+			},
+			rejected: []string{
+				"curve/uni_v3",
+				"consumers fall back to balance-based pricing",
+			},
+		},
+		{
+			column: "balance",
+			want:   []string{"uni_v3", "explicit 0"},
+			rejected: []string{
+				"Populated with the real balance (not 0)",
+			},
+		},
+		{
+			column: "scaled_balance",
+			want:   []string{"uni_v3", "share count"},
+			rejected: []string{
+				"Populated only for aTokens",
+			},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.column, func(t *testing.T) {
@@ -84,8 +87,15 @@ func TestBalanceCommentsCoverUniV3(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read %s comment: %v", tc.column, err)
 			}
-			if !strings.Contains(comment, tc.fragment) {
-				t.Errorf("%s comment %q should document the uni_v3 semantics", tc.column, comment)
+			for _, fragment := range tc.want {
+				if !strings.Contains(comment, fragment) {
+					t.Errorf("%s comment %q should contain %q", tc.column, comment, fragment)
+				}
+			}
+			for _, fragment := range tc.rejected {
+				if strings.Contains(comment, fragment) {
+					t.Errorf("%s comment %q still carries the false claim %q", tc.column, comment, fragment)
+				}
 			}
 		})
 	}

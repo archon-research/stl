@@ -54,13 +54,19 @@ const testV3PoolABI = `[
 		{"name":"unlocked","type":"bool"}
 	]},
 	{"name":"token0","type":"function","inputs":[],"outputs":[{"name":"","type":"address"}]},
-	{"name":"token1","type":"function","inputs":[],"outputs":[{"name":"","type":"address"}]}
+	{"name":"token1","type":"function","inputs":[],"outputs":[{"name":"","type":"address"}]},
+	{"name":"fee","type":"function","inputs":[],"outputs":[{"name":"","type":"uint24"}]}
 ]`
+
+// testV3DefaultFee is the fee tier fixtures use unless a test overrides it
+// (the real AUSD/USDC pool is the 0.01% = 100 tier).
+var testV3DefaultFee = big.NewInt(100)
 
 type fakeV3Position struct {
 	tokenID   *big.Int
 	token0    common.Address
 	token1    common.Address
+	fee       *big.Int // nil → testV3DefaultFee
 	tickLower int
 	tickUpper int
 	liquidity *big.Int
@@ -71,6 +77,7 @@ type fakeV3Pool struct {
 	tick         int
 	token0       common.Address
 	token1       common.Address
+	fee          *big.Int // nil → testV3DefaultFee
 }
 
 type fakeV3Chain struct {
@@ -107,12 +114,18 @@ func newFakeV3Chain(t *testing.T) *fakeV3Chain {
 func (c *fakeV3Chain) addPosition(wallet common.Address, p fakeV3Position) {
 	p.tokenID = big.NewInt(c.nextTokenID)
 	c.nextTokenID++
+	if p.fee == nil {
+		p.fee = testV3DefaultFee
+	}
 	pos := &p
 	c.byWallet[wallet] = append(c.byWallet[wallet], pos)
 	c.byTokenID[pos.tokenID.String()] = pos
 }
 
 func (c *fakeV3Chain) setPool(addr common.Address, pool fakeV3Pool) {
+	if pool.fee == nil {
+		pool.fee = testV3DefaultFee
+	}
 	c.pools[addr] = &pool
 }
 
@@ -152,7 +165,7 @@ func (c *fakeV3Chain) answer(call outbound.Call) outbound.Result {
 			return outbound.Result{Success: false}
 		}
 		return c.packOutputs(c.nftABI.Methods["positions"],
-			big.NewInt(0), common.Address{}, pos.token0, pos.token1, big.NewInt(100),
+			big.NewInt(0), common.Address{}, pos.token0, pos.token1, pos.fee,
 			big.NewInt(int64(pos.tickLower)), big.NewInt(int64(pos.tickUpper)), pos.liquidity,
 			big.NewInt(0), big.NewInt(0), big.NewInt(0), big.NewInt(0))
 	case string(c.poolABI.Methods["slot0"].ID):
@@ -175,6 +188,12 @@ func (c *fakeV3Chain) answer(call outbound.Call) outbound.Result {
 			return outbound.Result{Success: false}
 		}
 		return c.packOutputs(c.poolABI.Methods["token1"], pool.token1)
+	case string(c.poolABI.Methods["fee"].ID):
+		pool, ok := c.pools[call.Target]
+		if !ok {
+			return outbound.Result{Success: false}
+		}
+		return c.packOutputs(c.poolABI.Methods["fee"], pool.fee)
 	default:
 		c.t.Fatalf("fakeV3Chain: unexpected selector %x", call.CallData[:4])
 		return outbound.Result{}
@@ -398,27 +417,41 @@ func TestUniV3Source_FetchBalances_ScaledBalanceNil(t *testing.T) {
 
 // TestUniV3Source_FetchBalances_HintMatchesNeither_Error: adding amount0 and
 // amount1 across different tokens is meaningless, so a hint that matches
-// neither pool side must fail the whole fetch, not fall back to a sum.
+// neither pool side must fail the whole fetch, not fall back to a sum. The
+// misconfiguration fails even while the position is empty (same fail-early
+// rationale as validateUniV3Entries) rather than only once liquidity appears.
 func TestUniV3Source_FetchBalances_HintMatchesNeither_Error(t *testing.T) {
-	other := common.HexToAddress("0xdAC17F958D2ee523a2206206994597C13D831ec7")
-	chain := newAUSDUSDCChain(t, univ3TestPrice4(),
-		fakeV3Position{tickLower: univ3FullRangeL, tickUpper: univ3FullRangeU, liquidity: big.NewInt(1_000_000)})
-	src, err := NewUniV3Source(chain.multicaller(), slog.Default())
-	if err != nil {
-		t.Fatalf("NewUniV3Source: %v", err)
+	tests := []struct {
+		name      string
+		positions []fakeV3Position
+	}{
+		{"with a live position", []fakeV3Position{
+			{tickLower: univ3FullRangeL, tickUpper: univ3FullRangeU, liquidity: big.NewInt(1_000_000)},
+		}},
+		{"with no position", nil},
 	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			other := common.HexToAddress("0xdAC17F958D2ee523a2206206994597C13D831ec7")
+			chain := newAUSDUSDCChain(t, univ3TestPrice4(), tc.positions...)
+			src, err := NewUniV3Source(chain.multicaller(), slog.Default())
+			if err != nil {
+				t.Fatalf("NewUniV3Source: %v", err)
+			}
 
-	_, err = src.FetchBalances(context.Background(), []*TokenEntry{univ3Entry(&other)}, testBlockHash)
-	if err == nil {
-		t.Fatal("expected error when the hint asset matches neither pool token")
-	}
-	for _, fragment := range []string{
-		strings.ToLower(univ3PoolAddr.Hex()),
-		strings.ToLower(other.Hex()),
-	} {
-		if !strings.Contains(strings.ToLower(err.Error()), fragment) {
-			t.Errorf("error %q should mention %s", err, fragment)
-		}
+			_, err = src.FetchBalances(context.Background(), []*TokenEntry{univ3Entry(&other)}, testBlockHash)
+			if err == nil {
+				t.Fatal("expected error when the hint asset matches neither pool token")
+			}
+			for _, fragment := range []string{
+				strings.ToLower(univ3PoolAddr.Hex()),
+				strings.ToLower(other.Hex()),
+			} {
+				if !strings.Contains(strings.ToLower(err.Error()), fragment) {
+					t.Errorf("error %q should mention %s", err, fragment)
+				}
+			}
+		})
 	}
 }
 
@@ -494,20 +527,83 @@ func TestUniV3Source_FetchBalances_ExcludesForeignPairPositions(t *testing.T) {
 	}
 }
 
-func TestUniV3Source_FetchBalances_ZeroLiquidity_NoEntry(t *testing.T) {
-	chain := newAUSDUSDCChain(t, univ3TestPrice4(),
-		fakeV3Position{tickLower: univ3FullRangeL, tickUpper: univ3FullRangeU, liquidity: big.NewInt(0)})
-	src, err := NewUniV3Source(chain.multicaller(), slog.Default())
-	if err != nil {
-		t.Fatalf("NewUniV3Source: %v", err)
-	}
+// TestUniV3Source_FetchBalances_ExcludesOtherFeeTierPositions: a V3 pool is
+// identified by (token0, token1, fee), and a live second AUSD/USDC pool exists
+// at the 0.05% tier (factory getPool(AUSD,USDC,500) =
+// 0xa7E5882349D0eAA19b37A4074107BD1caEE5e502), so matching by pair alone would
+// sum that pool's NFTs into this entry and double-count exposure.
+func TestUniV3Source_FetchBalances_ExcludesOtherFeeTierPositions(t *testing.T) {
+	liquidity := big.NewInt(1_000_000_000_000_000_000)
+	amounts := uniswapv3.ComputePositionAmounts(univ3TestPrice4(), univ3FullRangeL, univ3FullRangeU, liquidity)
+	want := new(big.Int).Add(amounts.Amount1, new(big.Int).Mul(amounts.Amount0, big.NewInt(4)))
 
-	result, err := src.FetchBalances(context.Background(), []*TokenEntry{univ3Entry(&univ3USDC)}, testBlockHash)
-	if err != nil {
-		t.Fatalf("FetchBalances: %v", err)
+	chain := newAUSDUSDCChain(t, univ3TestPrice4(),
+		fakeV3Position{tickLower: univ3FullRangeL, tickUpper: univ3FullRangeU, liquidity: liquidity})
+	// Same wallet, same pair, different fee tier: must be excluded.
+	chain.addPosition(univ3Wallet, fakeV3Position{
+		token0:    univ3AUSD,
+		token1:    univ3USDC,
+		fee:       big.NewInt(500),
+		tickLower: univ3FullRangeL,
+		tickUpper: univ3FullRangeU,
+		liquidity: big.NewInt(9_000_000_000_000_000_000),
+	})
+
+	bal := fetchUniV3Balance(t, chain, univ3Entry(&univ3USDC))
+	if bal.Balance.Cmp(want) != 0 {
+		t.Errorf("Balance = %s, want %s (same-fee-tier position only)", bal.Balance, want)
 	}
-	if len(result.Balances) != 0 {
-		t.Errorf("expected no balance entries for a zero-liquidity position, got %d", len(result.Balances))
+}
+
+// TestUniV3Source_FetchBalances_NoMatchingPosition_WritesZeroRow: when the
+// pool state is readable but the wallet holds no live position matching the
+// entry's pool, the source must write an explicit zero row; rationale on
+// computeEntryBalance.
+func TestUniV3Source_FetchBalances_NoMatchingPosition_WritesZeroRow(t *testing.T) {
+	tests := []struct {
+		name      string
+		positions []fakeV3Position
+	}{
+		{"no NFTs at all (exited/burned/transferred)", nil},
+		{"only a zero-liquidity NFT", []fakeV3Position{
+			{token0: univ3AUSD, token1: univ3USDC, tickLower: univ3FullRangeL, tickUpper: univ3FullRangeU, liquidity: big.NewInt(0)},
+		}},
+		{"only a foreign-pair NFT", []fakeV3Position{
+			{token0: common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"), token1: univ3USDC, tickLower: univ3FullRangeL, tickUpper: univ3FullRangeU, liquidity: big.NewInt(1_000_000)},
+		}},
+		{"only an other-fee-tier NFT", []fakeV3Position{
+			{token0: univ3AUSD, token1: univ3USDC, fee: big.NewInt(500), tickLower: univ3FullRangeL, tickUpper: univ3FullRangeU, liquidity: big.NewInt(1_000_000)},
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			chain := newFakeV3Chain(t)
+			chain.setPool(univ3PoolAddr, fakeV3Pool{
+				sqrtPriceX96: univ3TestPrice4(),
+				token0:       univ3AUSD,
+				token1:       univ3USDC,
+			})
+			for _, p := range tc.positions {
+				chain.addPosition(univ3Wallet, p)
+			}
+
+			bal := fetchUniV3Balance(t, chain, univ3Entry(&univ3USDC))
+			if bal.Balance == nil || bal.Balance.Sign() != 0 {
+				t.Errorf("Balance = %v, want explicit 0", bal.Balance)
+			}
+			if bal.UnderlyingValue == nil || bal.UnderlyingValue.Sign() != 0 {
+				t.Errorf("UnderlyingValue = %v, want explicit 0", bal.UnderlyingValue)
+			}
+			if bal.ScaledBalance != nil {
+				t.Errorf("ScaledBalance = %s, want nil", bal.ScaledBalance)
+			}
+			if bal.PoolToken0 == nil || *bal.PoolToken0 != univ3AUSD {
+				t.Errorf("PoolToken0 = %v, want %s", bal.PoolToken0, univ3AUSD.Hex())
+			}
+			if bal.PoolToken1 == nil || *bal.PoolToken1 != univ3USDC {
+				t.Errorf("PoolToken1 = %v, want %s", bal.PoolToken1, univ3USDC.Hex())
+			}
+		})
 	}
 }
 
@@ -603,41 +699,27 @@ func TestUniV3Source_FetchBalances_UnknownChain_Error(t *testing.T) {
 // state, which can silently disagree with the reorged (older-version) data
 // this fetch is being made for.
 func TestUniV3Source_FetchBalances_PinsToBlockHash(t *testing.T) {
-	// An empty-but-successful result batch sized to the call count lets the test
-	// assert the reader pins state reads to the block hash rather than the block
-	// number, without modelling exact multicall shapes.
-	mc := testutil.NewMockMulticaller()
-	mc.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		return make([]outbound.Result, len(calls)), nil
-	}
+	chain := newAUSDUSDCChain(t, univ3TestPrice4(),
+		fakeV3Position{tickLower: univ3FullRangeL, tickUpper: univ3FullRangeU, liquidity: big.NewInt(1_000_000)})
+	mc := chain.multicaller()
 	src, err := NewUniV3Source(mc, slog.Default())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	entries := []*TokenEntry{
-		{
-			ContractAddress: common.HexToAddress("0x1111"),
-			WalletAddress:   common.HexToAddress("0x2222"),
-			AssetAddress:    &univ3USDC,
-			Star:            "spark",
-			Chain:           "mainnet",
-			TokenType:       "uni_v3_pool",
-		},
-	}
-
-	if _, err := src.FetchBalances(context.Background(), entries, testBlockHash); err != nil {
+	if _, err := src.FetchBalances(context.Background(), []*TokenEntry{univ3Entry(&univ3USDC)}, testBlockHash); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	if len(mc.Invocations) == 0 {
 		t.Fatal("expected at least one multicall")
 	}
-	last := mc.Invocations[len(mc.Invocations)-1]
-	if !last.ViaHash {
-		t.Fatal("multicaller invoked via the number path, want the hash-pinned path")
-	}
-	if last.BlockHash != testBlockHash {
-		t.Fatalf("multicall block hash = %s, want %s", last.BlockHash, testBlockHash)
+	for i, inv := range mc.Invocations {
+		if !inv.ViaHash {
+			t.Fatalf("multicall %d invoked via the number path, want the hash-pinned path", i)
+		}
+		if inv.BlockHash != testBlockHash {
+			t.Fatalf("multicall %d block hash = %s, want %s", i, inv.BlockHash, testBlockHash)
+		}
 	}
 }

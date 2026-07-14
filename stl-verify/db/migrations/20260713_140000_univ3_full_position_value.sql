@@ -2,24 +2,31 @@
 -- tracker: the source converts amount0+amount1 at the pool's own spot price
 -- into the entry's hint asset and writes the result to both balance and
 -- underlying_value/underlying_token_id (previously NULL for uni_v3 rows,
--- with balance carrying only the hint-side amount). Live-forward only: rows
--- written before this deploy are not reprocessed.
+-- with balance carrying only the hint-side amount). Positions are matched by
+-- the pool's full identity (token0, token1, fee), and a wallet with no live
+-- matching position writes an explicit zero row (the API's latest-row read
+-- has no freshness cutoff, so a skipped entry would freeze the last positive
+-- row as current exposure). Live-forward only: rows written before this
+-- deploy are not reprocessed.
 --
--- 1) Refresh the underlying_value catalogue comment (base text from
+-- 1) Rewrite the underlying_value catalogue comment (base text from
 --    20260702_120000_add_allocation_position_underlying_value.sql) and the
 --    sibling balance/scaled_balance comments (base text from
---    20260609_120000_add_schema_comments.sql), whose stated semantics no
---    longer hold for uni_v3 rows.
+--    20260609_120000_add_schema_comments.sql): the uni_v3 semantics changed,
+--    and the old texts also asserted claims the writers never honoured
+--    (balance "not 0" vs curve/erc4626 zero rows; scaled_balance "only for
+--    aTokens" vs curve/erc4626 share counts; an unconditional balance-based
+--    pricing fallback vs the API's underlying_value-only allowlist).
 -- 2) Rename the misleading token row for the AUSD/USDC V3 pool contract.
 
 COMMENT ON COLUMN allocation_position.underlying_value IS
-  'Current position value denominated in underlying_token_id''s asset (decimals-normalised by that asset), read on-chain at (block_number, block_version) at the same pinned block as balance. erc4626: convertToAssets(shares). atoken: balanceOf (1:1 underlying by construction). erc20: balanceOf, deliberately duplicating balance so non-NULL uniformly means "valued"; do not deduplicate. uni_v3_pool/uni_v3_lp: full position value (both sides, converted at the pool''s own spot price) in the hint asset''s units, principal only (uncollected fees excluded); uni_v3 rows written before 2026-07-13 are NULL. NULL: not computable (curve/NAV-token rows this phase, reverting or undecodable convertToAssets, missing asset_address) and every row written before this column (or its type''s valuation) existed. NULL is never zero exposure; consumers fall back to balance-based pricing.';
+  'Current position value denominated in underlying_token_id''s asset (decimals-normalised by that asset), read on-chain at (block_number, block_version) at the same pinned block as balance. erc4626: convertToAssets(shares), an explicit 0 when the wallet holds no shares. atoken: balanceOf (1:1 underlying by construction). erc20: balanceOf, deliberately duplicating balance so non-NULL uniformly means "valued"; do not deduplicate. uni_v3_pool/uni_v3_lp: full position value (both sides, converted at the pool''s own spot price) in the hint asset''s units, principal only (uncollected fees excluded); an explicit 0 once the wallet no longer holds a live matching position (exited/burned/transferred); rows written before the 20260713_140000 deploy are NULL. NULL: not computable (curve/NAV-token rows with no valuation implemented, reverting or undecodable convertToAssets, missing asset_address) and every row written before this column (or its type''s valuation) existed. NULL is never zero exposure: consumers priced by balance fall back to balance-based pricing, while tokens the API prices solely by underlying_value (its allowlisted set, incl. uni_v3 pool rows) surface NULL amount_usd instead of a wrong-basis balance valuation.';
 
 COMMENT ON COLUMN allocation_position.balance IS
-  'On-chain balanceOf reading for the proxy at this block, decimals-normalized to a human-readable value. Populated with the real balance (not 0). uni_v3_pool/uni_v3_lp: no balanceOf exists (the row is keyed by the V3 pool contract); balance is the tracker-computed full position value in the hint asset''s units, equal to underlying_value; rows written before 2026-07-13 held only the hint-side token amount.';
+  'On-chain balanceOf reading for the proxy at this block, decimals-normalized to a human-readable value. An emptied position is an explicit 0 row (every source persists the as-read zero; curve/erc4626/uni_v3 have explicit zero branches), so the latest row never freezes stale exposure. uni_v3_pool/uni_v3_lp: no balanceOf exists (the row is keyed by the V3 pool contract); balance is the tracker-computed full position value in the hint asset''s units, equal to underlying_value; rows written before the 20260713_140000 deploy held only the hint-side token amount.';
 
 COMMENT ON COLUMN allocation_position.scaled_balance IS
-  'Nullable, decimals-normalized. On-chain scaledBalanceOf reading (interest-free balance), not computed from liquidity_index. Populated only for aTokens. uni_v3_pool/uni_v3_lp: NULL since 2026-07-13 (a V3 position has no share count; earlier rows held a meaningless mixed-unit amount0+amount1 sum).';
+  'Nullable, decimals-normalized. atoken: on-chain scaledBalanceOf reading (interest-free balance), not computed from liquidity_index; NULL when that read failed. curve/erc4626: the raw share count, duplicating balance by design (balance is the share-denominated on-chain reading for these types). uni_v3_pool/uni_v3_lp: NULL since the 20260713_140000 deploy (a V3 position has no share count; earlier rows held a meaningless mixed-unit amount0+amount1 sum). NULL for all other types.';
 
 -- The synome export prices the grove AUSD/USDC Uniswap V3 position through an
 -- asset_address hint (USDC), and the tracker used to stamp that hint's symbol

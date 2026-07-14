@@ -1,11 +1,13 @@
 package allocation_tracker
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
 	"math/big"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
@@ -253,22 +255,14 @@ func (h *PrimePositionHandler) univ3RowMeta(s *PositionSnapshot) (tokenMeta, err
 	}, nil
 }
 
-// poolPairSymbol resolves one pool token's symbol for composition. The
-// metadata cache falls back to "UNKNOWN" when a symbol() read fails, and the
-// token upsert never refreshes symbol on conflict, so composing with the
-// fallback would permanently bake an impostor-class name into the registry;
-// failing the batch retries the read instead.
+// poolPairSymbol resolves one pool token's symbol for composition. The cache
+// never holds an unresolved symbol (fetchMissing fails the batch instead of
+// caching a fallback), so a cache hit is always safe to compose with.
 func (h *PrimePositionHandler) poolPairSymbol(token, pool common.Address) (string, error) {
 	meta, ok := h.metadata.get(token)
 	if !ok {
 		return "", fmt.Errorf(
 			"metadata missing for pool token %s (pool %s)",
-			token.Hex(), pool.Hex(),
-		)
-	}
-	if meta.symbol == "UNKNOWN" {
-		return "", fmt.Errorf(
-			"symbol unresolved for pool token %s (pool %s); refusing to compose the pool row symbol from the UNKNOWN fallback",
 			token.Hex(), pool.Hex(),
 		)
 	}
@@ -446,10 +440,16 @@ func (c *metadataCache) fetchMissing(
 		return nil
 	}
 
+	decimalsData, err := c.erc20ABI.Pack("decimals")
+	if err != nil {
+		return fmt.Errorf("pack decimals: %w", err)
+	}
+	symbolData, err := c.erc20ABI.Pack("symbol")
+	if err != nil {
+		return fmt.Errorf("pack symbol: %w", err)
+	}
 	calls := make([]outbound.Call, 0, len(missing)*2)
 	for _, addr := range missing {
-		decimalsData, _ := c.erc20ABI.Pack("decimals")
-		symbolData, _ := c.erc20ABI.Pack("symbol")
 		calls = append(calls,
 			outbound.Call{
 				Target:       addr,
@@ -472,52 +472,96 @@ func (c *metadataCache) fetchMissing(
 	if err != nil {
 		return fmt.Errorf("multicall metadata: %w", err)
 	}
+	if len(results) != len(calls) {
+		return fmt.Errorf("metadata multicall returned %d results for %d calls", len(results), len(calls))
+	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// A failed or undecodable read errors BEFORE anything is cached for the
+	// address: the cache is long-lived and only consulted for missing
+	// addresses, so caching a fallback would make every SQS redelivery reuse
+	// it until a process restart, silently persisting rows and pool-pair
+	// symbols under an impostor-class name that the token upsert never
+	// refreshes on conflict.
 	for i, addr := range missing {
-		decIdx := i * 2
-		symIdx := i*2 + 1
-
-		decimals := -1
-		if decIdx < len(results) &&
-			results[decIdx].Success &&
-			len(results[decIdx].ReturnData) > 0 {
-			unpacked, err := c.erc20ABI.Unpack(
-				"decimals", results[decIdx].ReturnData,
-			)
-			if err == nil && len(unpacked) > 0 {
-				if d, ok := unpacked[0].(uint8); ok {
-					decimals = int(d)
-				}
-			}
+		meta, err := c.decodeTokenMeta(addr, results[i*2], results[i*2+1])
+		if err != nil {
+			return err
 		}
-
-		if decimals < 0 {
-			return fmt.Errorf("decimals fetch failed for %s", addr.Hex())
-		}
-
-		symbol := "UNKNOWN"
-		if symIdx < len(results) &&
-			results[symIdx].Success &&
-			len(results[symIdx].ReturnData) > 0 {
-			unpacked, err := c.erc20ABI.Unpack(
-				"symbol", results[symIdx].ReturnData,
-			)
-			if err == nil && len(unpacked) > 0 {
-				if s, ok := unpacked[0].(string); ok {
-					symbol = s
-				}
-			}
-		}
-
-		c.cache[addr] = tokenMeta{symbol: symbol, decimals: decimals}
+		c.cache[addr] = meta
 		c.logger.Debug("cached metadata",
 			"address", addr.Hex(),
-			"symbol", symbol,
-			"decimals", decimals)
+			"symbol", meta.symbol,
+			"decimals", meta.decimals)
 	}
 
 	return nil
+}
+
+// decodeTokenMeta decodes one address's decimals/symbol result pair.
+func (c *metadataCache) decodeTokenMeta(addr common.Address, decResult, symResult outbound.Result) (tokenMeta, error) {
+	decimals, err := c.decodeDecimals(addr, decResult)
+	if err != nil {
+		return tokenMeta{}, err
+	}
+	symbol, err := c.decodeSymbol(addr, symResult)
+	if err != nil {
+		return tokenMeta{}, err
+	}
+	return tokenMeta{symbol: symbol, decimals: decimals}, nil
+}
+
+func (c *metadataCache) decodeDecimals(addr common.Address, result outbound.Result) (int, error) {
+	if !result.Success || len(result.ReturnData) == 0 {
+		return 0, fmt.Errorf("decimals sub-call failed for %s", addr.Hex())
+	}
+	unpacked, err := c.erc20ABI.Unpack("decimals", result.ReturnData)
+	if err != nil {
+		return 0, fmt.Errorf("unpack decimals for %s: %w", addr.Hex(), err)
+	}
+	d, ok := unpacked[0].(uint8)
+	if !ok {
+		return 0, fmt.Errorf("decimals for %s returned %T, want uint8", addr.Hex(), unpacked[0])
+	}
+	return int(d), nil
+}
+
+// decodeSymbol decodes a symbol() result. The ERC20 ABI declares string, but
+// MKR-class tokens return bytes32, and uni_v3 pool pair tokens come from
+// on-chain token0()/token1() rather than the curated registry, so
+// hard-failing on that known variant would deterministically poison the queue
+// (the read never changes on redelivery). The shape is gated structurally: an
+// ABI string is at least 64 bytes (offset + length words), so an
+// exactly-32-byte payload is unambiguously a bytes32 symbol.
+func (c *metadataCache) decodeSymbol(addr common.Address, result outbound.Result) (string, error) {
+	if !result.Success || len(result.ReturnData) == 0 {
+		return "", fmt.Errorf("symbol sub-call failed for %s", addr.Hex())
+	}
+	unpacked, strErr := c.erc20ABI.Unpack("symbol", result.ReturnData)
+	if strErr == nil {
+		s, ok := unpacked[0].(string)
+		if !ok {
+			return "", fmt.Errorf("symbol for %s returned %T, want string", addr.Hex(), unpacked[0])
+		}
+		return s, nil
+	}
+	if s, ok := decodeBytes32Symbol(result.ReturnData); ok {
+		return s, nil
+	}
+	return "", fmt.Errorf("symbol for %s is neither an ABI string nor a bytes32: %w", addr.Hex(), strErr)
+}
+
+// decodeBytes32Symbol trims trailing NUL padding and accepts only non-empty
+// valid UTF-8 without interior NULs (Postgres text cannot hold NUL bytes).
+func decodeBytes32Symbol(data []byte) (string, bool) {
+	if len(data) != 32 {
+		return "", false
+	}
+	trimmed := bytes.TrimRight(data, "\x00")
+	if len(trimmed) == 0 || !utf8.Valid(trimmed) || bytes.IndexByte(trimmed, 0) >= 0 {
+		return "", false
+	}
+	return string(trimmed), true
 }

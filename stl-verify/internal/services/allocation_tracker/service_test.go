@@ -385,25 +385,26 @@ func TestProcessBlock_MissingBlockHash_ReturnsError(t *testing.T) {
 	}
 }
 
-func TestSweep_ThreadsUnderlyingValueOntoSnapshot(t *testing.T) {
+// runSweepWithBalance runs one sweep block where a single entry of the given
+// token type resolves to the given balance, returning the snapshot the
+// handler received.
+func runSweepWithBalance(t *testing.T, tokenType, sourceName string, bal *PositionBalance) *PositionSnapshot {
+	t.Helper()
 	cache := testutil.NewMockBlockCache()
 	cache.SetReceipts(1, 500, 0, mustMarshalReceipts(t, []TransactionReceipt{}))
 
 	entry := &TokenEntry{
 		ContractAddress: common.HexToAddress("0x1111"),
 		WalletAddress:   common.HexToAddress("0xbbbb"),
-		TokenType:       "erc4626",
+		TokenType:       tokenType,
 	}
 	result := NewFetchResult()
-	result.Balances[entry.Key()] = &PositionBalance{
-		Balance:         big.NewInt(500),
-		UnderlyingValue: big.NewInt(777),
-	}
+	result.Balances[entry.Key()] = bal
 
 	registry := NewSourceRegistry(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	registry.Register(&mockSource{
-		name:       "erc4626",
-		tokenTypes: map[string]bool{"erc4626": true},
+		name:       sourceName,
+		tokenTypes: map[string]bool{tokenType: true},
 		result:     result,
 	})
 
@@ -427,7 +428,14 @@ func TestSweep_ThreadsUnderlyingValueOntoSnapshot(t *testing.T) {
 	if len(handler.batches) != 1 || len(handler.batches[0].Snapshots) != 1 {
 		t.Fatalf("expected 1 batch with 1 snapshot, got %d batches", len(handler.batches))
 	}
-	got := handler.batches[0].Snapshots[0]
+	return handler.batches[0].Snapshots[0]
+}
+
+func TestSweep_ThreadsUnderlyingValueOntoSnapshot(t *testing.T) {
+	got := runSweepWithBalance(t, "erc4626", "erc4626", &PositionBalance{
+		Balance:         big.NewInt(500),
+		UnderlyingValue: big.NewInt(777),
+	})
 	if got.UnderlyingValue == nil || got.UnderlyingValue.Cmp(big.NewInt(777)) != 0 {
 		t.Fatalf("UnderlyingValue = %v, want 777", got.UnderlyingValue)
 	}
@@ -438,57 +446,47 @@ func TestSweep_ThreadsUnderlyingValueOntoSnapshot(t *testing.T) {
 // match), so the pool pair must survive the sweep copy or univ3RowMeta fails
 // every sweep block.
 func TestSweep_ThreadsPoolPairOntoSnapshot(t *testing.T) {
-	cache := testutil.NewMockBlockCache()
-	cache.SetReceipts(1, 500, 0, mustMarshalReceipts(t, []TransactionReceipt{}))
-
 	poolToken0 := common.HexToAddress("0x00000000eFE302BEAA2b3e6e1b18d08D69a9012a")
 	poolToken1 := common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
-	entry := &TokenEntry{
-		ContractAddress: common.HexToAddress("0x1111"),
-		WalletAddress:   common.HexToAddress("0xbbbb"),
-		TokenType:       "uni_v3_pool",
-	}
-	result := NewFetchResult()
-	result.Balances[entry.Key()] = &PositionBalance{
+
+	got := runSweepWithBalance(t, "uni_v3_pool", "uni-v3", &PositionBalance{
 		Balance:         big.NewInt(500),
 		UnderlyingValue: big.NewInt(500),
 		PoolToken0:      &poolToken0,
 		PoolToken1:      &poolToken1,
-	}
-
-	registry := NewSourceRegistry(slog.New(slog.NewTextHandler(io.Discard, nil)))
-	registry.Register(&mockSource{
-		name:       "uni-v3",
-		tokenTypes: map[string]bool{"uni_v3_pool": true},
-		result:     result,
 	})
-
-	handler := &testHandler{}
-	svc := &Service{
-		cache:            cache,
-		extractor:        NewTransferExtractor(nil),
-		registry:         registry,
-		entries:          []*TokenEntry{entry},
-		handler:          handler,
-		logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
-		config:           Config{ChainID: 1, SweepEveryNBlocks: 1},
-		blocksSinceSweep: 0,
-	}
-
-	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 500, Version: 0, BlockTimestamp: 1700000000, BlockHash: testBlockHash.Hex()}
-	if err := svc.processBlock(context.Background(), event); err != nil {
-		t.Fatalf("processBlock: %v", err)
-	}
-
-	if len(handler.batches) != 1 || len(handler.batches[0].Snapshots) != 1 {
-		t.Fatalf("expected 1 batch with 1 snapshot, got %d batches", len(handler.batches))
-	}
-	got := handler.batches[0].Snapshots[0]
 	if got.PoolToken0 == nil || *got.PoolToken0 != poolToken0 {
 		t.Fatalf("PoolToken0 = %v, want %s", got.PoolToken0, poolToken0.Hex())
 	}
 	if got.PoolToken1 == nil || *got.PoolToken1 != poolToken1 {
 		t.Fatalf("PoolToken1 = %v, want %s", got.PoolToken1, poolToken1.Hex())
+	}
+}
+
+// TestSweep_ThreadsZeroExitRowOntoSnapshot: an explicit uni_v3 zero row (see
+// computeEntryBalance) must survive the sweep copy intact, not be skipped as
+// empty.
+func TestSweep_ThreadsZeroExitRowOntoSnapshot(t *testing.T) {
+	poolToken0 := common.HexToAddress("0x00000000eFE302BEAA2b3e6e1b18d08D69a9012a")
+	poolToken1 := common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
+
+	got := runSweepWithBalance(t, "uni_v3_pool", "uni-v3", &PositionBalance{
+		Balance:         big.NewInt(0),
+		UnderlyingValue: big.NewInt(0),
+		PoolToken0:      &poolToken0,
+		PoolToken1:      &poolToken1,
+	})
+	if got.Balance == nil || got.Balance.Sign() != 0 {
+		t.Fatalf("Balance = %v, want explicit 0", got.Balance)
+	}
+	if got.UnderlyingValue == nil || got.UnderlyingValue.Sign() != 0 {
+		t.Fatalf("UnderlyingValue = %v, want explicit 0", got.UnderlyingValue)
+	}
+	if got.PoolToken0 == nil || got.PoolToken1 == nil {
+		t.Fatalf("pool pair should survive the sweep copy, got %v/%v", got.PoolToken0, got.PoolToken1)
+	}
+	if got.Direction != DirectionSweep {
+		t.Fatalf("Direction = %q, want %q", got.Direction, DirectionSweep)
 	}
 }
 

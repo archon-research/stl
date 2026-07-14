@@ -588,6 +588,7 @@ UV_PROXY_NULL_VALUE = "37" * 20
 UV_PROXY_NON_ALLOWLISTED = "47" * 20
 UV_PROXY_PLAIN = "57" * 20
 UV_PROXY_UNIV3_POOL = "77" * 20
+UV_PROXY_SYMBOLLESS_UNDERLYING = "87" * 20
 
 # Real mainnet address: must match the pricing allowlist in the repository.
 _UV_SPARK_PRIME_USDC1_HEX = "38464507e02c983f20428a6e8566693fe9e422a9"
@@ -599,6 +600,9 @@ _UV_UNLISTED_VAULT_HEX = "67" * 20
 _UV_USDC_HEX = "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
 # Synthetic underlying with no oracle row, to exercise the missing-price branch.
 _UV_UNPRICED_UNDERLYING_HEX = "0e" * 20
+# Synthetic underlying with a NULL symbol (token.symbol is nullable), to prove
+# the underlying-identity projection is atomic rather than per-field.
+_UV_SYMBOLLESS_UNDERLYING_HEX = "1e" * 20
 _UV_VAULT_HEX = "88" * 20
 # Real mainnet AUSD/USDC Uniswap V3 pool contract (grove position): not an
 # ERC20 and never has its own oracle, so it must match the pricing allowlist.
@@ -714,6 +718,31 @@ async def seed_underlying_value_direct_holdings(db_url: str) -> None:
                 block=1000,
                 tx="e1" * 32,
                 direction="sweep",
+            )
+
+            # Allowlisted + underlying whose token row has a NULL symbol: the
+            # identity projection must emit all-or-nothing, never a hybrid of
+            # underlying id/address with the held token's symbol.
+            symbolless_id = await conn.fetchval(
+                """
+                INSERT INTO token (chain_id, address, symbol, decimals)
+                VALUES (1, $1, NULL, 18)
+                ON CONFLICT (chain_id, address) DO UPDATE SET symbol = NULL
+                RETURNING id
+                """,
+                bytes.fromhex(_UV_SYMBOLLESS_UNDERLYING_HEX),
+            )
+            await insert_allocation_position(
+                conn,
+                token_id=spark_id,
+                prime_id=prime_id,
+                proxy_hex=UV_PROXY_SYMBOLLESS_UNDERLYING,
+                balance=UV_SPARKPRIME_BALANCE,
+                block=1000,
+                tx="e2" * 32,
+                direction="sweep",
+                underlying_value=UV_SPARKPRIME_UNDERLYING_VALUE,
+                underlying_token_id=symbolless_id,
             )
 
             # Allowlisted Uni V3 pool position: no own oracle possible (the
