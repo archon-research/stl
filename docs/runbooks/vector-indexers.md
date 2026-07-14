@@ -817,11 +817,25 @@ produces no errors, just no state rows.
 This is the data-quality / silent-empty check that `VectorCurveIndexerStalled`
 cannot see.
 
+Gating on blocks processed is sound for curve because the periodic sweep
+(`SWEEP_BLOCKS`) re-snapshots every pool on a fixed block cadence, so a healthy
+worker writes state rows even through a totally quiet market. The rule uses
+`unless`, not `and … == 0`, so it also fires when `curve_state_rows_written_total`
+is **absent** — a deploy that has never once written a state row is exactly the
+case the old `and` form went blind on.
+
 ### First checks
 
 1. **SweepBlocks config** — if `SWEEP_BLOCKS=0` (disabled) and no
    blocks contain Curve events, `buildSnapshotSet` legitimately returns empty.
-   Confirm there is genuine pool activity on-chain or re-enable sweep.
+   Confirm there is genuine pool activity on-chain or re-enable sweep. Note the
+   overlays do **not** set `SWEEP_BLOCKS` — curve relies on the code default of
+   50 blocks (`cmd/workers/internal/dexbootstrap/parseconfig.go`), ~10min on
+   mainnet, so grepping k8s and finding nothing does not mean the sweep is off.
+   With the sweep genuinely off, curve loses the cadence guarantee this alert
+   assumes and will false-positive through quiet windows the way uniswap-v3 did
+   before it was re-gated on `pools_touched` — prefer re-enabling the sweep over
+   widening the window.
 2. **Touched pools** — check whether any registered pool addresses match logs
    in the processed blocks. `kubectl logs -l app=curve-indexer` should show
    pool-touch debug entries (or absence thereof).
@@ -984,59 +998,134 @@ for the affected chain.
 ## VectorUniswapV3IndexerNotWritingState
 
 **Severity:** warning · **For:** 10m
-The 30m rate window tolerates a genuinely quiet block with no Uniswap V3
-events; there is no sweep to guarantee periodic writes the way curve's
-`SWEEP_BLOCKS` does, so 30m of zero on an otherwise-active chain is the
-actionable signal.
+Gated on `uniswap_v3_pools_touched_total`, not on blocks processed. uniswap-v3
+runs `SnapshotTracker(0)` — no sweep — so it writes state rows only for pools an
+event touched in that block, and a quiet market legitimately writes nothing. The
+gate means a quiet window can no longer fire this alert: it fires only when pools
+WERE touched and rows still did not come out.
+
+This is **one half** of the silent-empty guard. It cannot fire when the touched
+set is always empty (that zeroes its own left side) —
+[`VectorUniswapV3IndexerNoPoolsTouched`](#vectoruniswapv3indexernopoolstouched)
+is the other half and covers that class. Neither alone is the whole guard.
 
 ### What it means
 
-Blocks are advancing (`uniswap_v3_blocks_processed_total{status="success"}` is
-non-zero) but no state/tick snapshot rows have been written
-(`uniswap_v3_state_rows_written_total` is zero) for 30 minutes. The error path
-will NOT catch this: a quietly-empty touched-pool set (e.g. `DueSet` always
-returns empty, or every `snapshotDueSet` call silently no-ops) produces no
-errors, just no state rows.
+Decoded events touched registered pools
+(`uniswap_v3_pools_touched_total` is non-zero) but no state/tick snapshot rows
+were written (`uniswap_v3_state_rows_written_total` is zero) for 30 minutes.
+The error path will NOT catch this: a due-set that goes quietly empty (`DueSet`
+returning nothing for a pool that WAS touched, or every `snapshotDueSet` call
+silently no-opping) produces no errors, just no state rows.
+
+Because pools are being touched, **a quiet market is already ruled out** — this
+is not the "no Uniswap V3 activity" case. Something between decode and persist
+is dropping the rows.
 
 This is the data-quality / silent-empty check that `VectorUniswapV3IndexerStalled`
 cannot see.
 
 ### First checks
 
-1. **On-chain activity** — confirm there is genuine Uniswap V3 swap/mint/burn
-   activity on this chain in the window; a real quiet period is not a bug.
-2. **Touched pools** — check whether any registered pool addresses match logs
-   in the processed blocks. `kubectl logs -l app=uniswap-v3-indexer` should
-   show pool-touch debug entries (or absence thereof).
-3. **Pool registry** — if the pool list is empty (`LoadPools` returned 0
-   rows), `DueSet` can never produce entries. Confirm the DB has rows in the
-   Uniswap V3 pool registry for this chain.
-4. **No separate DueSet-size metric** is emitted; use
-   `uniswap_v3_state_rows_written_total` as the proxy. A sudden drop to zero
-   after previously non-zero is more urgent than a fresh deploy with no
-   history.
+1. **SQS replay / redrive** — the most common benign cause (see below). Check
+   the queue for a redrive before assuming a logic stall.
+2. **Due set** — `pools.touched` is recorded from `handleBlock`'s decode-stage
+   `touchedIDs`, upstream of `DueSet`, so a non-zero gate with zero state rows
+   points straight at `DueSet` returning empty for pools that were touched, or
+   at `snapshotDueSet` no-opping.
+3. **Pool registry** — a registry that is empty for this chain cannot produce
+   touches either, so it would NOT fire this alert. If you suspect an empty
+   registry, check `uniswap_v3_pools_touched_total` is flat at zero and confirm
+   the Uniswap V3 pool registry row count for this chain directly.
 
 ### Common causes
 
-- No Uniswap V3 events on this chain in 30m (legitimate low-activity window)
-  -> confirm on-chain before escalating.
-- Pool registry empty (migration not applied, wrong chain ID) -> verify the
-  Uniswap V3 pool registry row count for this chain.
-- Contract address mismatch (new pool deployed at a different address) ->
-  update the pool registry.
 - Sustained SQS replay / redrive over an already-indexed range under one
   `build_id`: every message is a block already persisted at this build (same
   `build_id`, same `block_version`), so each state INSERT hits `ON CONFLICT DO
   NOTHING` (0 rows) and `uniswap_v3_state_rows_written_total` does not advance
-  even though processing succeeds. A redeploy (new `build_id`) or reorg (new
-  `block_version`) inserts fresh rows and clears the alert. Check the queue
-  for a redrive before assuming a logic stall.
+  even though processing succeeds — while `pools_touched` keeps advancing,
+  since the blocks really do touch pools. A redeploy (new `build_id`) or reorg
+  (new `block_version`) inserts fresh rows and clears the alert.
+- `DueSet` silently empty despite touched pools -> a tracker/`SnapshotTracker`
+  regression; this is the bug the alert exists to catch.
+- Contract address mismatch (new pool deployed at a different address) ->
+  update the pool registry. Note this suppresses touches too, so it shows up as
+  a flat-zero `pools_touched`, not as this alert.
 
 ### Verify recovery
 
-`rate(uniswap_v3_state_rows_written_total[30m]) > 0` for the affected chain,
-or confirm on-chain that no Uniswap V3 activity occurred (legitimate quiet
-window).
+`rate(uniswap_v3_state_rows_written_total[30m]) > 0` for the affected chain.
+
+A quiet market no longer needs ruling out — if no pools are being touched the
+alert cannot fire. To sanity-check overall liveness during a lull, confirm
+`rate(uniswap_v3_blocks_processed_total{status="success"}[5m]) > 0`
+(`VectorUniswapV3IndexerStalled` covers this).
+
+### History
+
+Fired on 2026-07-13 (~22:36-22:51 UTC) against a **healthy** indexer, hours
+after the VEC-329 rollout put uniswap-v3 into staging. The rule then gated on
+blocks processed, which advance every 12s on mainnet, while the seeded registry
+(18 wstETH/LST/LRT pools) only produces 3-28 state rows/hour — so any quiet
+half-hour tripped it. The `pools_touched` gate replaced the blocks-processed
+gate to close that false positive. Because that gate is blind to an always-empty
+touched set, `VectorUniswapV3IndexerNoPoolsTouched` was added at the same time to
+cover the class the old rule had covered by accident.
+
+---
+
+## VectorUniswapV3IndexerNoPoolsTouched
+
+**Severity:** warning · **For:** 10m
+The 6h rate window is the one that absorbs a quiet market. It is deliberately
+much wider than the 30m used elsewhere in this group: 30m stretches with zero
+touched pools are normal for this registry and are precisely what made the old
+`NotWritingState` gate a false positive.
+
+### What it means
+
+Blocks are advancing (`uniswap_v3_blocks_processed_total{status="success"}` is
+non-zero) but **not one** registered pool has been touched by a decoded event
+(`uniswap_v3_pools_touched_total` is zero or absent) for 6 hours.
+
+This is the other half of the silent-empty guard, and it covers what
+[`VectorUniswapV3IndexerNotWritingState`](#vectoruniswapv3indexernotwritingstate)
+structurally cannot: that rule gates on `pools_touched`, so a touched set that is
+*always* empty makes its left side absent and the rule un-fireable. Nothing else
+in the group would page — `blocks_processed` keeps advancing happily with a dead
+registry, and no error is ever raised.
+
+Measured cadence in staging is 3-28 state rows/hour, every hour, so 6h of zero
+touches is roughly 30x the worst observed quiet gap. It is not a lull.
+
+### First checks
+
+1. **Pool registry** — the most likely cause. Confirm the Uniswap V3 pool
+   registry actually has rows for this chain; a registry that loads zero pools
+   means `poolsByAddr` is empty and no log can ever match.
+2. **Address matching** — if the registry is populated, suspect
+   `poolsTouchedByReceipt` / `poolsByAddr` (a checksum/casing regression, or
+   pools seeded at the wrong addresses). Cross-check a known-active pool address
+   against a block you can see swaps in on-chain.
+3. **Genuinely dead pool set** — confirm on-chain that the seeded pools really
+   have had no swap/mint/burn in 6h. For the wstETH/LST/LRT set this would be
+   extraordinary, but a chain other than mainnet with a thin registry could
+   legitimately go quiet this long; if so, the window needs widening for that
+   chain rather than the alert silencing.
+
+### Common causes
+
+- Pool registry empty or not seeded for this chain (migration not applied, wrong
+  chain ID) -> verify the registry row count for this chain.
+- Address-match regression in `poolsByAddr` -> no log ever matches a registered
+  pool, so `touchedIDs` is always empty.
+- Contract address mismatch (pools seeded at addresses that were never deployed,
+  or superseded by redeployed pools) -> update the pool registry.
+
+### Verify recovery
+
+`rate(uniswap_v3_pools_touched_total[6h]) > 0` for the affected chain.
 
 ---
 

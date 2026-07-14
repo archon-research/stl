@@ -816,14 +816,28 @@ groups:
         # Counter `curve.state.rows.written` (OTel) -> Prometheus
         # `curve_state_rows_written_total`. Emitted by the Coordinator after
         # each successful WithTransaction that writes at least one state row.
+        #
+        # Gating on blocks processed is sound HERE, unlike uniswap-v3: curve's
+        # periodic sweep (SWEEP_BLOCKS) re-snapshots every pool on a fixed block
+        # cadence, so a healthy curve worker writes state rows through even a
+        # totally quiet market. Zero rows while blocks advance is therefore
+        # genuinely actionable. Do not copy this shape to a sweepless worker.
+        #
+        # `unless`, not `and … == 0`: RecordStateRows is a no-op for n<=0, so
+        # under the exact bug this targets (snapshot loop always empty, or on a
+        # fresh deploy that has never written a row) the state-rows series is
+        # never created, and `and … == 0` yields no match on the empty right
+        # side — the alert could never fire, going blind precisely when curve
+        # has never written state. `A > 0 unless B > 0` fires on an absent OR
+        # zero series. Do not revert to `and`.
         expr: |
           sum by (chain, cluster) (
             rate(curve_blocks_processed_total{status="success", k8s_namespace_name="vector"}[30m])
           ) > 0
-          and
+          unless
           sum by (chain, cluster) (
             rate(curve_state_rows_written_total{k8s_namespace_name="vector"}[30m])
-          ) == 0
+          ) > 0
         for: 10m
         labels:
           team: vector
@@ -928,31 +942,44 @@ groups:
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv3indexerblocklatencyhigh
 
       - alert: VectorUniswapV3IndexerNotWritingState
-        # Silent-empty guard: blocks are advancing (success rate > 0) but no
-        # state/tick snapshot rows are being written. The error path will NOT
-        # catch a quietly-empty DueSet (e.g. touched-pool detection always
-        # returning empty, or every snapshotDueSet call silently no-op). This
-        # alert catches that gap.
+        # Silent-empty guard, HALF ONE of two: pools WERE touched by decoded
+        # events, but no state/tick snapshot rows came out the other side. The
+        # error path will NOT catch a due-set that goes quietly empty (DueSet
+        # returning nothing for a touched pool, every snapshotDueSet call
+        # no-opping, or every state INSERT hitting ON CONFLICT DO NOTHING) —
+        # there is no error, just no rows. This alert catches that.
         #
-        # 30m window (not curve's sweep-driven cadence, since uniswap-v3 has
-        # none) tolerates a genuinely quiet block with no Uniswap V3 events;
-        # a 30m stretch of zero on an active pool set is the actionable
-        # signal.
+        # It deliberately does NOT catch a touched-pool set that is always
+        # empty (dead registry, address-match regression): that zeroes this
+        # rule's own left side and makes it un-fireable. VectorUniswapV3Indexer
+        # NoPoolsTouched below is the other half, and covers exactly that class.
+        # The two are complementary; neither alone is the silent-empty guard.
         #
-        # Counter `uniswap_v3.state.rows.written` (OTel) -> Prometheus
-        # `uniswap_v3_state_rows_written_total`. Emitted by handleBlock after
-        # each successful persistBlock that writes at least one state/tick row.
-        # `unless`, not `and … == 0`: state rows are written only for
-        # event-touched pools (no sweep), and RecordStateRows is a no-op for
-        # n<=0, so under the exact bug this targets (DueSet always empty, or on
-        # a fresh deploy) the state-rows counter series is never created. With
-        # `and … == 0` the empty right side yields no match and the alert can
-        # never fire. `A > 0 unless B > 0` keeps each (chain,cluster) that is
-        # processing blocks unless it is also writing state rows — so an absent
-        # OR zero state-rows series correctly fires. Do not revert to `and`.
+        # The left side gates on `uniswap_v3.pools.touched` (OTel) -> Prometheus
+        # `uniswap_v3_pools_touched_total`, NOT on blocks processed. uniswap-v3
+        # runs SnapshotTracker(0) — no sweep — so state rows are written only for
+        # pools an event touched in that block. Gating on blocks processed made
+        # every quiet market window look identical to a bug: the seeded registry
+        # is 18 wstETH/LST/LRT pools whose real cadence is 3-28 state rows/hour,
+        # so 30m stretches with zero touches occur nightly and the rule fired on
+        # a healthy indexer (VEC-329 rollout, 2026-07-13). No touches now means
+        # no expectation of rows, and the alert stays silent.
+        #
+        # pools.touched is recorded from handleBlock's decode-stage touchedIDs,
+        # upstream of DueSet, and both counters are recorded only after a
+        # successful commit. Sourcing the gate from DueSet instead would zero
+        # both sides under the exact bug this targets and go blind.
+        #
+        # `unless`, not `and … == 0`: RecordStateRows is a no-op for n<=0, so
+        # under that bug (or on a fresh deploy) the state-rows counter series is
+        # never created, and `and … == 0` yields no match on the empty right
+        # side — the alert could never fire. `A > 0 unless B > 0` keeps each
+        # (chain,cluster) that is touching pools unless it is also writing state
+        # rows, so an absent OR zero state-rows series correctly fires. Do not
+        # revert to `and`.
         expr: |
           sum by (chain, cluster) (
-            rate(uniswap_v3_blocks_processed_total{status="success", k8s_namespace_name="vector"}[30m])
+            rate(uniswap_v3_pools_touched_total{k8s_namespace_name="vector"}[30m])
           ) > 0
           unless
           sum by (chain, cluster) (
@@ -967,11 +994,61 @@ groups:
         annotations:
           summary: "Vector uniswap-v3-indexer writing no state rows on {{ $labels.chain }}"
           description: |
-            `uniswap-v3-indexer` on chain `{{ $labels.chain }}` has processed
-            blocks successfully for 30m but written zero state/tick snapshot
-            rows. The touched-pool detection (DueSet) may be silently empty,
-            or the registered pool set may be empty for this chain.
+            `uniswap-v3-indexer` on chain `{{ $labels.chain }}` has decoded
+            events touching registered pools for 30m but written zero
+            state/tick snapshot rows. Pools are being touched, so this is not a
+            quiet market: the due-set (DueSet) is likely silently empty, every
+            snapshotDueSet call is no-opping, or every state INSERT is hitting
+            ON CONFLICT DO NOTHING.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv3indexernotwritingstate
+
+      - alert: VectorUniswapV3IndexerNoPoolsTouched
+        # Silent-empty guard, HALF TWO: blocks are advancing but NOT ONE
+        # registered pool has been touched by a decoded event. Covers the class
+        # NotWritingState structurally cannot (it gates on pools.touched, so an
+        # always-empty touched set makes its left side absent and un-fireable):
+        # an empty/mis-seeded pool registry for this chain, an address-match or
+        # poolsByAddr regression, or a pool set that has gone entirely dead.
+        # None of these raise an error — blocks_processed keeps advancing
+        # happily — so nothing else in this group would ever page.
+        #
+        # 6h window, NOT 30m. This is the window that has to absorb a quiet
+        # market, and the 18 wstETH/LST/LRT pools genuinely produce 30m stretches
+        # with zero touches (that is what made the old blocks-processed gate on
+        # NotWritingState a false positive; see its comment). Measured cadence in
+        # staging is 3-28 state rows/hour, every hour — so 6h with zero touches
+        # is ~30x the worst observed quiet gap and cannot be a lull. Detection is
+        # slower than the old 30m rule, which is the correct trade: the failures
+        # this catches (dead registry, broken address match) are persistent, not
+        # transient, and a rule that pages nightly on healthy data gets muted.
+        #
+        # `unless`, not `and … == 0`: RecordPoolsTouched no-ops for n<=0, so a
+        # worker that never touches a pool never creates the series at all, and
+        # `and … == 0` would find no match on the empty right side — blind in
+        # exactly the case this exists for. Do not revert to `and`.
+        expr: |
+          sum by (chain, cluster) (
+            rate(uniswap_v3_blocks_processed_total{status="success", k8s_namespace_name="vector"}[6h])
+          ) > 0
+          unless
+          sum by (chain, cluster) (
+            rate(uniswap_v3_pools_touched_total{k8s_namespace_name="vector"}[6h])
+          ) > 0
+        for: 10m
+        labels:
+          team: vector
+          severity: warning
+          component: uniswap-v3-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector uniswap-v3-indexer touching no pools on {{ $labels.chain }}"
+          description: |
+            `uniswap-v3-indexer` on chain `{{ $labels.chain }}` has processed
+            blocks successfully for 6h without a single decoded event touching
+            a registered pool. At the seeded registry's normal cadence this is
+            not a quiet market: suspect an empty or mis-seeded pool registry for
+            this chain, or an address-matching regression in poolsByAddr.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv3indexernopoolstouched
 
   # CEX order book indexer (VEC-374). Streams L2 books from an exchange over a
   # WebSocket and persists periodic top-N snapshots. One pod per exchange
