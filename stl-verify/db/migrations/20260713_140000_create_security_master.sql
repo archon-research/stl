@@ -27,7 +27,7 @@
 -- SET would leak onto the pooled connection and desync the schema-isolated integration tests.
 
 CREATE TABLE IF NOT EXISTS security_master (
-    security_sk          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,  -- immutable surrogate, stamped onto positions
+    security_sk          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,  -- per-version surrogate; NOT stamped onto positions (they resolve via security_id)
     security_id          text NOT NULL,                 -- natural key (sm-...), stable across all versions
     processing_version   integer NOT NULL DEFAULT 1,    -- monotonic per security_id; SCD2 dedup key
     valid_from           date NOT NULL DEFAULT CURRENT_DATE,  -- when this version became effective (only temporal field stored)
@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS security_master (
     currency             text,                          -- ISO 4217 denomination
     country_of_issuance  text,
     country_of_risk      text,
-    issuer_entity_id     text,                          -- soft ref to entity_master.entity_id (FK added when VEC-410 lands)
+    issuer_entity_id     text,                          -- soft ref to entity_master.entity_id (no FK: SCD2 key non-unique; resolve via entity_master_current)
     security_status      text NOT NULL DEFAULT 'ACTIVE',
     is_tokenised         boolean,                        -- TRUE = on-chain tokenised form of a traditional asset
     token_standard       text,                           -- ERC-20 / ERC-1400 / ERC-3643 / BENJI / ...; only when tokenised
