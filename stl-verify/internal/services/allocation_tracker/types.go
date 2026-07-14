@@ -42,16 +42,21 @@ func (e *TokenEntry) Key() EntryKey {
 
 // PositionBalance is what a PositionSource returns per entry.
 type PositionBalance struct {
-	Balance       *big.Int // primary tracked balance in the entry's tracked unit (token units for ERC20-like entries; underlying-asset units for pool-style entries like UniV3)
-	ScaledBalance *big.Int // optional auxiliary balance (typically raw shares)
+	Balance       *big.Int // primary tracked balance in the entry's tracked unit (token units for ERC20-like entries; hint-asset units for pool-style entries like UniV3)
+	ScaledBalance *big.Int // optional auxiliary balance (typically raw shares); nil for UniV3, which has no share count
 	// UnderlyingValue is the position's value in underlying-asset raw units,
-	// set only by sources that must read it on-chain (erc4626 convertToAssets).
+	// set only by sources that must compute it from on-chain reads (erc4626
+	// convertToAssets; uni_v3 full position value at pool spot price).
 	// nil = unknown/not applicable; the handler owns the per-token-type
-	// denomination policy and derives balanceOf-type values itself.
-	// Only ERC4626Source sets this; every other source leaves it nil, and the
-	// handler silently ignores a value set for a token type whose policy does
-	// not read it.
+	// denomination policy and derives balanceOf-type values itself, and it
+	// silently ignores a value set for a token type whose policy does not
+	// read it.
 	UnderlyingValue *big.Int
+	// PoolToken0/PoolToken1 are the pool's pair, set only by UniV3Source so
+	// the handler can compose a truthful symbol for the pool's token-registry
+	// row (a V3 pool is not an ERC20 and has no symbol of its own).
+	PoolToken0 *common.Address
+	PoolToken1 *common.Address
 }
 
 // PoolSupply holds the totalSupply and (optionally) scaledTotalSupply of a pool
@@ -85,6 +90,10 @@ type PositionSnapshot struct {
 	Balance         *big.Int
 	ScaledBalance   *big.Int
 	UnderlyingValue *big.Int
+	// Pool pair carried from PositionBalance (uni_v3 only); see the field
+	// comments there.
+	PoolToken0 *common.Address
+	PoolToken1 *common.Address
 
 	ChainID      int64
 	BlockNumber  int64

@@ -34,17 +34,25 @@ from app.domain.proxy_kind import ProxyKind, classify_proxy, subproxy_addresses
 # total capital; this isolates that token from any other SubProxy holding.
 _USDS_ADDRESS_HEX = "dc035d45d973e3ec169d2276ddab16f1e407384f"
 
-# Vault share tokens priced from allocation_position.underlying_value (the
-# on-chain redeemable value, e.g. convertToAssets) x the underlying's oracle
-# price, rather than the legacy balance x own-oracle price that leaves them
-# unpriced. A deliberately curated set (VEC-450): the general widening to
-# every vault, and syrupUSDC, are owned separately. Add addresses here to
-# widen. A token graduates out of this allowlist by being registered in
-# receipt_token, which routes it through the receipt path's redeemable-value
-# pricing instead of this direct-holdings branch.
+# Tokens priced from allocation_position.underlying_value x the underlying's
+# oracle price, rather than the legacy balance x own-oracle price that leaves
+# them unpriced. Two member classes:
+#   * Vault share tokens (underlying_value = on-chain redeemable value, e.g.
+#     convertToAssets). These graduate out of the allowlist by being registered
+#     in receipt_token, which routes them through the receipt path's
+#     redeemable-value pricing instead of this direct-holdings branch.
+#   * Non-ERC20 pool positions (underlying_value = tracker-computed full
+#     position value). The row's address is the pool contract, which can never
+#     be a receipt_token or have its own oracle, so these are permanent
+#     members.
+# A deliberately curated set (VEC-450): the general widening to every vault,
+# and syrupUSDC, are owned separately. Add addresses here to widen.
 _UNDERLYING_VALUE_TOKEN_HEXES = frozenset(
     {
         "38464507e02c983f20428a6e8566693fe9e422a9",  # sparkPrimeUSDC1
+        # AUSD/USDC Uni V3 pool position: not an ERC20, valued by the
+        # tracker-computed underlying_value in USDC units.
+        "bafead7c60ea473758ed6c6021505e8bbd7e8e5d",
     }
 )
 _UNDERLYING_VALUE_TOKEN_ADDRS = [bytes.fromhex(h) for h in _UNDERLYING_VALUE_TOKEN_HEXES]
@@ -295,6 +303,11 @@ class AllocationRepository:
                             else None
                         ),
                         latest_activity_at=row.latest_activity_at,
+                        underlying_token_id=row.underlying_token_id,
+                        underlying_token_address=(
+                            "0x" + row.underlying_token_address if row.underlying_token_address is not None else None
+                        ),
+                        underlying_symbol=row.underlying_symbol,
                     )
                     for row in result
                 ]
@@ -395,7 +408,7 @@ class AllocationRepository:
             "allocations.direct_holdings.allowlisted_unpriced", len(allowlisted_unpriced)
         )
         logger.warning(
-            "Allowlisted vault resolved to no USD value (underlying oracle price missing)",
+            "Allowlisted token resolved to no USD value (underlying_value or underlying oracle price missing)",
             extra={
                 "prime_id": str(prime_id),
                 "allowlisted_unpriced_symbols": [h.symbol for h in allowlisted_unpriced],
@@ -995,6 +1008,15 @@ _RECEIPT_TOKEN_POSITIONS_SQL = text("""
 # price``. For these tokens ``balance`` is a share count, so the legacy basis
 # would be a silent methodology flip to a wrong value. Every non-allowlisted
 # token keeps the legacy ``balance x px`` valuation, byte-identical to before.
+# Allowlisted rows also project the underlying's identity (underlying_token_id
+# / address / symbol) when the row carries one: ``amount_usd`` derives from the
+# underlying's oracle price and consumers key drilldowns off ``underlying_*``,
+# so the identity must travel with the price basis. All other cases emit NULL
+# and the endpoint falls back to the held token itself. The projection is
+# atomic by construction (allowlist gate + symbol presence live on the ``ut``
+# join): either all three columns emit or none do, because ``token.symbol`` is
+# nullable and a partial identity would let the endpoint compose a hybrid of
+# underlying id/address with the held token's symbol.
 _DIRECT_ASSET_HOLDINGS_SQL = text("""
     WITH latest_positions AS (
         SELECT DISTINCT ON (ap.token_id)
@@ -1021,9 +1043,16 @@ _DIRECT_ASSET_HOLDINGS_SQL = text("""
             THEN lp.underlying_value * up.price_usd
             ELSE lp.balance * px.price_usd
         END AS amount_usd,
+        ut.id                     AS underlying_token_id,
+        encode(ut.address, 'hex') AS underlying_token_address,
+        ut.symbol                 AS underlying_symbol,
         lp.latest_activity_at
     FROM latest_positions lp
     JOIN token t ON t.id = lp.token_id
+    LEFT JOIN token ut
+        ON ut.id = lp.underlying_token_id
+        AND t.address IN :uv_token_addrs
+        AND ut.symbol IS NOT NULL
     LEFT JOIN receipt_token rt
         ON rt.receipt_token_address = t.address AND rt.chain_id = lp.chain_id
     LEFT JOIN LATERAL (
