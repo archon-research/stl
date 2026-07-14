@@ -86,9 +86,10 @@ while IFS=$'\t' read -r newName newTag; do
   # newName = <account>.dkr.ecr.<region>.amazonaws.com/<repo>
   host="${newName%%/*}"
   repo="${newName#*/}"
+  account="${host%%.*}"
   region="$(printf '%s' "$host" | sed -E 's/^[0-9]+\.dkr\.ecr\.([a-z0-9-]+)\.amazonaws\.com$/\1/')"
-  if [ "$region" = "$host" ]; then
-    echo "::error::could not parse ECR region from image name: ${newName}" >&2
+  if [ "$region" = "$host" ] || [[ ! "$account" =~ ^[0-9]{12}$ ]]; then
+    echo "::error::could not parse ECR account/region from image name: ${newName}" >&2
     exit 2
   fi
 
@@ -96,8 +97,13 @@ while IFS=$'\t' read -r newName newTag; do
   # ecr:BatchGetImage but not ecr:DescribeImages. It returns 0 even when the
   # tag is absent, so assert on the image count, not the exit code. A missing
   # repo raises RepositoryNotFoundException (non-zero) -> treated as missing.
+  # Pin --registry-id to the account encoded in newName (NOT the caller's
+  # account): an entry naming the wrong registry is then checked against that
+  # registry and fails, instead of silently matching a same-named repo in the
+  # credentials' own account.
   found="$(aws ecr batch-get-image \
         --region "$region" \
+        --registry-id "$account" \
         --repository-name "$repo" \
         --image-ids "imageTag=${newTag}" \
         --query 'length(images)' --output text 2>/dev/null || echo 0)"

@@ -942,10 +942,15 @@ Most of these are also spelled out in [CLAUDE.md](./CLAUDE.md) and
    - **PR 2** adds the `k8s/base/...` Deployment plus overlay wiring that
      references it.
 
-   The pipeline enforces this: `scripts/deploy/verify-ecr-images.sh` fails the
-   deploy if any image an overlay references is missing from ECR, so a single
-   combined PR is blocked with an explicit missing-image list instead of a
-   silent prod `ImagePullBackOff`.
+   This split is a recommendation, not an enforced rule. A combined PR still
+   works: `build-push-staging` builds the new image in the same run before
+   `update-staging` stamps it, and the 900s staging health wait tolerates the
+   brief first-rollout `ImagePullBackOff`. Splitting simply avoids that race.
+   `scripts/deploy/verify-ecr-images.sh` (run before each stamp) is the backstop
+   for what the split does not cover: an image that was never built, or a prod
+   overlay entry missing from the `SERVICES` / `CRONJOBS` promotion list. It
+   fails the deploy with an explicit missing-image list instead of letting a
+   silent prod `ImagePullBackOff` through.
 
 ---
 
