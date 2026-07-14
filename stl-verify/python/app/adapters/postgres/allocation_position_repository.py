@@ -855,6 +855,15 @@ class AllocationRepository:
                 JOIN protocol_oracle po
                     ON po.oracle_id = otp.oracle_id AND po.protocol_id = b.protocol_id
                 WHERE otp.token_id = b.underlying_token_id
+                -- enabled-mapping filter (rationale on _DIRECT_ASSET_HOLDINGS_SQL):
+                -- a retired source's tail must not serve any bucket after
+                -- retirement (nor, given the no-history simplification, before).
+                  AND EXISTS (
+                      SELECT 1 FROM oracle_asset oa
+                      WHERE oa.oracle_id = otp.oracle_id
+                        AND oa.token_id = otp.token_id
+                        AND oa.enabled
+                  )
                 ORDER BY otp.block_number DESC, otp.block_version DESC,
                          otp.processing_version DESC, otp.oracle_id DESC
                 LIMIT 1
@@ -983,7 +992,15 @@ _RECEIPT_TOKEN_POSITIONS_SQL = text("""
         JOIN protocol_oracle po ON po.oracle_id = otp.oracle_id
             AND po.protocol_id = p.protocol_id
         WHERE otp.token_id = p.underlying_token_id
-        ORDER BY otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC
+        -- enabled-mapping filter + oracle_id tiebreak (rationale on _DIRECT_ASSET_HOLDINGS_SQL).
+          AND EXISTS (
+              SELECT 1 FROM oracle_asset oa
+              WHERE oa.oracle_id = otp.oracle_id
+                AND oa.token_id = otp.token_id
+                AND oa.enabled
+          )
+        ORDER BY otp.block_number DESC, otp.block_version DESC,
+                 otp.processing_version DESC, otp.oracle_id DESC
         LIMIT 1
     ) lp ON TRUE
     WHERE p.balance > 0
@@ -1059,8 +1076,35 @@ _DIRECT_ASSET_HOLDINGS_SQL = text("""
         SELECT otp.price_usd
         FROM onchain_token_price otp
         WHERE otp.token_id = lp.token_id
-        -- oracle_id breaks ties when multiple oracles price the same token at the
-        -- same block, keeping the chosen price deterministic across calls.
+        -- Enabled-mapping filter (CANONICAL rationale; every current/latest
+        -- onchain_token_price read across the API repositories carries this
+        -- EXISTS and points here). A price row is eligible only while its
+        -- (oracle_id, token_id) still has an ENABLED oracle_asset mapping.
+        -- Retiring a source (oracle_asset.enabled = false) drops it from every
+        -- latest-price read immediately at read time, not merely from future
+        -- collection. The snapshot-key ordering and the oracle_id tiebreak
+        -- below cannot rescue correctness on their own: a reorg can republish a
+        -- frozen/retired source's row at a FRESH (max) block while a
+        -- change-suppressed live feed writes no newer row, so the retired
+        -- source would otherwise beat the live one indefinitely.
+        -- Tradeoff: oracle_asset.enabled carries no history, so a retired
+        -- source vanishes from ALL price reads including the historical/LOCF
+        -- time-series buckets — even buckets before its retirement that
+        -- legitimately used it. Accepted simplification; per-block temporal
+        -- enablement tracking is out of scope.
+          AND EXISTS (
+              SELECT 1 FROM oracle_asset oa
+              WHERE oa.oracle_id = otp.oracle_id
+                AND oa.token_id = otp.token_id
+                AND oa.enabled
+          )
+        -- oracle_id breaks ties when multiple oracles price the same token at
+        -- identical (block_number, block_version, processing_version), e.g. a
+        -- frozen source re-emitted by a republished block next to a live one.
+        -- Deterministic, and the higher id is the later-registered oracle; the
+        -- real ordering signal stays the snapshot keys, because a retired
+        -- source stops producing new rows and loses on recency from then on.
+        -- Every ordered onchain_token_price read carries this tiebreaker.
         ORDER BY otp.block_number DESC, otp.block_version DESC,
                  otp.processing_version DESC, otp.oracle_id DESC
         LIMIT 1
@@ -1069,6 +1113,13 @@ _DIRECT_ASSET_HOLDINGS_SQL = text("""
         SELECT otp.price_usd
         FROM onchain_token_price otp
         WHERE otp.token_id = lp.underlying_token_id
+        -- enabled-mapping filter + oracle_id tiebreak (rationale on the px LATERAL above).
+          AND EXISTS (
+              SELECT 1 FROM oracle_asset oa
+              WHERE oa.oracle_id = otp.oracle_id
+                AND oa.token_id = otp.token_id
+                AND oa.enabled
+          )
         ORDER BY otp.block_number DESC, otp.block_version DESC,
                  otp.processing_version DESC, otp.oracle_id DESC
         LIMIT 1
@@ -1104,7 +1155,15 @@ latest_price AS (
     JOIN protocol_oracle po ON po.oracle_id = otp.oracle_id
     JOIN receipt_token rt ON rt.protocol_id = po.protocol_id AND rt.id = :receipt_token_id
     WHERE otp.token_id = rt.underlying_token_id
-    ORDER BY otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC
+    -- enabled-mapping filter + oracle_id tiebreak (rationale on _DIRECT_ASSET_HOLDINGS_SQL).
+      AND EXISTS (
+          SELECT 1 FROM oracle_asset oa
+          WHERE oa.oracle_id = otp.oracle_id
+            AND oa.token_id = otp.token_id
+            AND oa.enabled
+      )
+    ORDER BY otp.block_number DESC, otp.block_version DESC,
+             otp.processing_version DESC, otp.oracle_id DESC
     LIMIT 1
 )
 SELECT
@@ -1157,7 +1216,15 @@ LEFT JOIN LATERAL (
     JOIN protocol_oracle po ON po.oracle_id = otp.oracle_id
         AND po.protocol_id = p.protocol_id
     WHERE otp.token_id = p.underlying_token_id
-    ORDER BY otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC
+    -- enabled-mapping filter + oracle_id tiebreak (rationale on _DIRECT_ASSET_HOLDINGS_SQL).
+      AND EXISTS (
+          SELECT 1 FROM oracle_asset oa
+          WHERE oa.oracle_id = otp.oracle_id
+            AND oa.token_id = otp.token_id
+            AND oa.enabled
+      )
+    ORDER BY otp.block_number DESC, otp.block_version DESC,
+             otp.processing_version DESC, otp.oracle_id DESC
     LIMIT 1
 ) lp ON TRUE
 WHERE p.balance > 0
@@ -1301,7 +1368,15 @@ WITH receipt_token_price AS (
             JOIN protocol_oracle po ON po.oracle_id = otp.oracle_id
             WHERE po.protocol_id = rt.protocol_id
               AND otp.token_id = rt.underlying_token_id
-            ORDER BY otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC
+            -- enabled-mapping filter + oracle_id tiebreak (rationale on _DIRECT_ASSET_HOLDINGS_SQL).
+              AND EXISTS (
+                  SELECT 1 FROM oracle_asset oa
+                  WHERE oa.oracle_id = otp.oracle_id
+                    AND oa.token_id = otp.token_id
+                    AND oa.enabled
+              )
+            ORDER BY otp.block_number DESC, otp.block_version DESC,
+                     otp.processing_version DESC, otp.oracle_id DESC
             LIMIT 1
         ) AS price_usd
     FROM receipt_token rt
