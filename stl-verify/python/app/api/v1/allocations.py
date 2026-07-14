@@ -14,7 +14,7 @@ from app.api._validators import EthAddressParam, OptionalEthAddressParam, Option
 from app.api.deps import get_engine
 from app.api.time_series import TimeSeriesWindow, apply_cache_control, build_window, get_time_series_query_params
 from app.config import get_settings
-from app.domain.entities.allocation import EthAddress
+from app.domain.entities.allocation import DirectAssetHolding, EthAddress
 from app.domain.entities.allocation_category import AllocationCategory
 from app.domain.time_series import TimeSeriesQuery, enforce_filter_for_window
 from app.services.allocation_category_service import AllocationCategoryService
@@ -61,10 +61,12 @@ class AllocationResponse(BaseModel):
     - Receipt-token positions (e.g. spUSDT wrapping USDT): all fields populated.
     - Direct asset holdings (e.g. PYUSD held in the proxy with no wrapper):
       ``receipt_token_id`` / ``receipt_token_address`` / ``protocol_name`` are
-      null; ``symbol`` and ``underlying_symbol`` both name the held asset;
-      ``underlying_token_id`` / ``underlying_token_address`` point at it.
-      ``amount_usd`` is populated when an oracle price exists for the token and
-      null otherwise (e.g. LP/curve shares with no oracle feed).
+      null; ``symbol`` names the held asset. ``underlying_*`` usually point at
+      the held asset itself, except holdings valued on the underlying-value
+      basis (allowlisted, e.g. a Uni V3 pool position valued in USDC) with a
+      resolvable underlying, where they point at that underlying.
+      ``amount_usd`` is populated when an oracle price exists for the pricing
+      basis and null otherwise (e.g. LP/curve shares with no oracle feed).
     """
 
     chain_id: int = Field(description="EVM chain id of the position.", examples=[1])
@@ -79,12 +81,16 @@ class AllocationResponse(BaseModel):
         examples=["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"],
     )
     underlying_token_id: int = Field(
-        description="Surrogate id of the underlying token. For direct holdings, this is the held asset itself.",
+        description=(
+            "Surrogate id of the underlying token. For direct holdings, this is the held asset itself, "
+            "unless the holding is valued on the underlying-value basis (allowlisted)."
+        ),
         examples=[1],
     )
     underlying_token_address: str = Field(
         description=(
-            "0x-prefixed underlying-token contract address. For direct holdings, this is the held asset itself."
+            "0x-prefixed underlying-token contract address. For direct holdings, this is the held asset itself, "
+            "unless the holding is valued on the underlying-value basis (allowlisted)."
         ),
         examples=["0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"],
     )
@@ -93,7 +99,10 @@ class AllocationResponse(BaseModel):
         examples=["aUSDC"],
     )
     underlying_symbol: str = Field(
-        description="Underlying-token symbol. For direct holdings, same as ``symbol``.",
+        description=(
+            "Underlying-token symbol. For direct holdings, same as ``symbol``, "
+            "unless the holding is valued on the underlying-value basis (allowlisted)."
+        ),
         examples=["USDC"],
     )
     protocol_name: str | None = Field(
@@ -526,24 +535,41 @@ async def list_allocations(
         )
         for p in positions
     ]
-    direct_rows = [
-        AllocationResponse(
-            chain_id=h.chain_id,
-            receipt_token_id=None,
-            receipt_token_address=None,
-            underlying_token_id=h.token_id,
-            underlying_token_address=h.token_address,
-            symbol=h.symbol,
-            underlying_symbol=h.symbol,
-            protocol_name=None,
-            balance=h.balance,
-            amount_usd=h.amount_usd,
-            latest_activity_at=h.latest_activity_at.isoformat() if h.latest_activity_at else None,
-            category=category_service.classify(None, h.symbol),
+    # Underlying identity travels with the price basis; see
+    # _DIRECT_ASSET_HOLDINGS_SQL.
+    direct_rows = []
+    for h in direct_holdings:
+        underlying_id, underlying_address, underlying_symbol = _direct_underlying_identity(h)
+        direct_rows.append(
+            AllocationResponse(
+                chain_id=h.chain_id,
+                receipt_token_id=None,
+                receipt_token_address=None,
+                underlying_token_id=underlying_id,
+                underlying_token_address=underlying_address,
+                symbol=h.symbol,
+                underlying_symbol=underlying_symbol,
+                protocol_name=None,
+                balance=h.balance,
+                amount_usd=h.amount_usd,
+                latest_activity_at=h.latest_activity_at.isoformat() if h.latest_activity_at else None,
+                category=category_service.classify(None, h.symbol),
+            )
         )
-        for h in direct_holdings
-    ]
     return receipt_rows + direct_rows
+
+
+def _direct_underlying_identity(h: DirectAssetHolding) -> tuple[int, str, str]:
+    """The holding's projected underlying identity, or the held token's own.
+
+    Atomic on purpose: any missing piece falls back entirely, so a partial set
+    (impossible from the repository's all-or-nothing projection, but cheap to
+    guard) can never compose a hybrid of underlying id/address with the held
+    token's symbol.
+    """
+    if h.underlying_token_id is None or h.underlying_token_address is None or h.underlying_symbol is None:
+        return h.token_id, h.token_address, h.symbol
+    return h.underlying_token_id, h.underlying_token_address, h.underlying_symbol
 
 
 class AllocationActivityBucketResponse(BaseModel):

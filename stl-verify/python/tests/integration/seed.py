@@ -591,6 +591,8 @@ UV_PROXY_UNDERLYING_UNPRICED = "27" * 20
 UV_PROXY_NULL_VALUE = "37" * 20
 UV_PROXY_NON_ALLOWLISTED = "47" * 20
 UV_PROXY_PLAIN = "57" * 20
+UV_PROXY_UNIV3_POOL = "77" * 20
+UV_PROXY_SYMBOLLESS_UNDERLYING = "87" * 20
 
 # Real mainnet address: must match the pricing allowlist in the repository.
 _UV_SPARK_PRIME_USDC1_HEX = "38464507e02c983f20428a6e8566693fe9e422a9"
@@ -602,7 +604,13 @@ _UV_UNLISTED_VAULT_HEX = "67" * 20
 _UV_USDC_HEX = "a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
 # Synthetic underlying with no oracle row, to exercise the missing-price branch.
 _UV_UNPRICED_UNDERLYING_HEX = "0e" * 20
+# Synthetic underlying with a NULL symbol (token.symbol is nullable), to prove
+# the underlying-identity projection is atomic rather than per-field.
+_UV_SYMBOLLESS_UNDERLYING_HEX = "1e" * 20
 _UV_VAULT_HEX = "88" * 20
+# Real mainnet AUSD/USDC Uniswap V3 pool contract (grove position): not an
+# ERC20 and never has its own oracle, so it must match the pricing allowlist.
+_UV_UNIV3_POOL_HEX = "bafead7c60ea473758ed6c6021505e8bbd7e8e5d"
 
 UV_USDC_PRICE = Decimal("1.00")
 # sparkPrimeUSDC1's own (share) price. Distinct from the USDC price so that
@@ -614,6 +622,9 @@ UV_SPARKPRIME_UNDERLYING_VALUE = Decimal("20138132.383754")
 UV_UNLISTED_UNDERLYING_VALUE = Decimal("105303042.633792")
 UV_UNLISTED_BALANCE = Decimal("89822198.110408")
 UV_USDC_BALANCE = Decimal("1000")
+# Uni V3 rows carry the tracker-computed full position value in both columns
+# (balance == underlying_value by construction).
+UV_UNIV3_UNDERLYING_VALUE = Decimal("26927207.299715")
 
 
 async def insert_oracle_asset(conn: asyncpg.Connection, oracle_id: int, token_id: int, *, enabled: bool = True) -> None:
@@ -745,6 +756,48 @@ async def seed_underlying_value_direct_holdings(db_url: str) -> None:
                 block=1000,
                 tx="e1" * 32,
                 direction="sweep",
+            )
+
+            # Allowlisted + underlying whose token row has a NULL symbol: the
+            # identity projection must emit all-or-nothing, never a hybrid of
+            # underlying id/address with the held token's symbol.
+            symbolless_id = await conn.fetchval(
+                """
+                INSERT INTO token (chain_id, address, symbol, decimals)
+                VALUES (1, $1, NULL, 18)
+                ON CONFLICT (chain_id, address) DO UPDATE SET symbol = NULL
+                RETURNING id
+                """,
+                bytes.fromhex(_UV_SYMBOLLESS_UNDERLYING_HEX),
+            )
+            await insert_allocation_position(
+                conn,
+                token_id=spark_id,
+                prime_id=prime_id,
+                proxy_hex=UV_PROXY_SYMBOLLESS_UNDERLYING,
+                balance=UV_SPARKPRIME_BALANCE,
+                block=1000,
+                tx="e2" * 32,
+                direction="sweep",
+                underlying_value=UV_SPARKPRIME_UNDERLYING_VALUE,
+                underlying_token_id=symbolless_id,
+            )
+
+            # Allowlisted Uni V3 pool position: no own oracle possible (the
+            # address is the pool contract), priced ONLY by the tracker-computed
+            # underlying_value x the USDC price.
+            univ3_id = await insert_token(conn, "AUSDUSDC-UNIV3", 6, bytes.fromhex(_UV_UNIV3_POOL_HEX))
+            await insert_allocation_position(
+                conn,
+                token_id=univ3_id,
+                prime_id=prime_id,
+                proxy_hex=UV_PROXY_UNIV3_POOL,
+                balance=UV_UNIV3_UNDERLYING_VALUE,
+                block=1000,
+                tx="f1" * 32,
+                direction="sweep",
+                underlying_value=UV_UNIV3_UNDERLYING_VALUE,
+                underlying_token_id=usdc_id,
             )
     finally:
         await conn.close()
