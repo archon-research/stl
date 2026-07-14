@@ -6,9 +6,10 @@
 -- and UPDATE / DELETE / TRUNCATE are revoked so the record is append-only.
 --
 -- Holder unification (VEC-400): a position's holder resolves to a single entity_id here regardless
--- of whether it originated as an on-chain wallet ("user".id) or a prime (prime.id). The two bridge
--- columns below (pipeline_user_id, pipeline_prime_id) map each pipeline source onto one entity, so
--- prime-vs-wallet becomes an attribute of the entity rather than part of the position id.
+-- of whether it originated as an on-chain wallet or a prime, so prime-vs-wallet becomes an attribute
+-- of the entity rather than part of the position id. A wallet resolves by its on-chain address
+-- through entity_ref_codes (VEC-414: BLOCKCHAIN_ADDRESS code -> entity_id), which lets many addresses
+-- map to one entity; the prime path is a direct lookup on pipeline_prime_id below.
 --
 -- Classification is FK-validated against the merged reference vocabulary (20260630_130000):
 --   entity_type       -> entity_type_ref
@@ -46,8 +47,7 @@ CREATE TABLE IF NOT EXISTS entity_master (
     parent_entity_id     text,                          -- soft ref to entity_master.entity_id (SCD2, not unique)
     ultimate_parent_id   text,                          -- soft ref to entity_master.entity_id (SCD2, not unique)
     entity_status        text NOT NULL DEFAULT 'ACTIVE',
-    pipeline_user_id     bigint,                        -- bridge: "user".id (on-chain wallet holder)
-    pipeline_prime_id    bigint,                        -- bridge: prime.id
+    pipeline_prime_id    bigint,                        -- bridge: prime.id (wallet holders resolve via entity_ref_codes, VEC-414)
     pipeline_protocol_id bigint,                        -- bridge: protocol.id
     source_system        text,
     created_at           timestamp with time zone NOT NULL DEFAULT now(),
@@ -85,8 +85,7 @@ COMMENT ON COLUMN entity_master.cik IS 'SEC Central Index Key.';
 COMMENT ON COLUMN entity_master.parent_entity_id IS 'Soft ref to entity_master.entity_id (resolve via entity_master_current; not an FK).';
 COMMENT ON COLUMN entity_master.ultimate_parent_id IS 'Soft ref to entity_master.entity_id (resolve via entity_master_current; not an FK).';
 COMMENT ON COLUMN entity_master.entity_status IS 'ACTIVE / DISSOLVED / MERGED / SUSPENDED.';
-COMMENT ON COLUMN entity_master.pipeline_user_id IS 'Bridge: "user".id. Maps an on-chain wallet holder onto this entity for holder unification (VEC-400).';
-COMMENT ON COLUMN entity_master.pipeline_prime_id IS 'Bridge: prime.id. Maps a prime holder onto this entity for holder unification (VEC-400).';
+COMMENT ON COLUMN entity_master.pipeline_prime_id IS 'Bridge: prime.id. Maps a prime holder onto this entity for holder unification (VEC-400). Wallet holders resolve by on-chain address via entity_ref_codes (VEC-414).';
 COMMENT ON COLUMN entity_master.pipeline_protocol_id IS 'Bridge: protocol.id.';
 COMMENT ON COLUMN entity_master.source_system IS 'System of record.';
 COMMENT ON COLUMN entity_master.created_at IS 'Write timestamp.';
@@ -102,7 +101,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS em_id_version_uidx ON entity_master (entity_id
 CREATE INDEX IF NOT EXISTS em_current_idx ON entity_master (entity_id, valid_from DESC, processing_version DESC);
 -- FK-support and bridge-resolution indexes not covered by a leading PK column.
 CREATE INDEX IF NOT EXISTS em_type_idx ON entity_master (entity_type);
-CREATE INDEX IF NOT EXISTS em_user_idx ON entity_master (pipeline_user_id) WHERE pipeline_user_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS em_prime_idx ON entity_master (pipeline_prime_id) WHERE pipeline_prime_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS em_protocol_idx ON entity_master (pipeline_protocol_id) WHERE pipeline_protocol_id IS NOT NULL;
 
