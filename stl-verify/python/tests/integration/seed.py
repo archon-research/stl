@@ -786,7 +786,7 @@ async def seed_underlying_value_direct_holdings(db_url: str) -> None:
             # Allowlisted Uni V3 pool position: no own oracle possible (the
             # address is the pool contract), priced ONLY by the tracker-computed
             # underlying_value x the USDC price.
-            univ3_id = await insert_token(conn, "AUSDUSDC-UNIV3", 6, bytes.fromhex(_UV_UNIV3_POOL_HEX))
+            univ3_id = await insert_token(conn, "UNIV3-LP-AUSD-USDC", 6, bytes.fromhex(_UV_UNIV3_POOL_HEX))
             await insert_allocation_position(
                 conn,
                 token_id=univ3_id,
