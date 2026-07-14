@@ -44,13 +44,13 @@ CREATE TABLE IF NOT EXISTS entity_ref_codes (
 
 -- Catalog metadata (downstream data-dictionary / schema_master tooling reads pg_catalog comments).
 COMMENT ON TABLE entity_ref_codes IS '[Dimension] Maps an external identifier (code_type, code_value) to an entity_id. Soft ref to entity_master (no FK: entity_id is a non-unique SCD2 key); resolve via entity_master_current. Append-only; latest mapping per code is entity_ref_codes_current. The holder/counterparty resolver (VEC-417) joins through this.';
-COMMENT ON COLUMN entity_ref_codes.code_type IS 'Identifier namespace; one of the CHECK-pinned types (BLOCKCHAIN_ADDRESS, CONTRACT_ADDRESS, LEI, SWIFT_BIC, INTERNAL).';
-COMMENT ON COLUMN entity_ref_codes.code_value IS 'The code within the namespace (e.g. a hex-encoded on-chain address with no 0x prefix, an LEI string).';
+COMMENT ON COLUMN entity_ref_codes.code_type IS 'PK. Identifier namespace; one of the CHECK-pinned types (BLOCKCHAIN_ADDRESS, CONTRACT_ADDRESS, LEI, SWIFT_BIC, INTERNAL).';
+COMMENT ON COLUMN entity_ref_codes.code_value IS 'PK. The code within the namespace (e.g. a hex-encoded on-chain address with no 0x prefix, an LEI string).';
 COMMENT ON COLUMN entity_ref_codes.entity_id IS 'Soft ref to entity_master.entity_id (resolve via entity_master_current; not an FK).';
-COMMENT ON COLUMN entity_ref_codes.processing_version IS 'Monotonic version per (code_type, code_value) (>=1); loader-assigned. Latest is the current mapping.';
+COMMENT ON COLUMN entity_ref_codes.processing_version IS 'PK. Monotonic version per (code_type, code_value) (>=1); loader-assigned. Latest is the current mapping.';
 COMMENT ON COLUMN entity_ref_codes.valid_from IS 'Date this mapping became effective.';
 COMMENT ON COLUMN entity_ref_codes.change_reason IS 'Mandatory: why this mapping / re-point exists.';
-COMMENT ON COLUMN entity_ref_codes.created_at IS 'Write timestamp.';
+COMMENT ON COLUMN entity_ref_codes.created_at IS 'Audit. Write timestamp.';
 
 -- Reverse lookup: every code mapped to a given entity. Forward resolution
 -- (WHERE code_type = ? AND code_value = ?) is served by the leading PK columns.
