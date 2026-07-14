@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS entity_ref_codes (
 );
 
 -- Catalog metadata (downstream data-dictionary / schema_master tooling reads pg_catalog comments).
-COMMENT ON TABLE entity_ref_codes IS 'Maps an external identifier (code_type, code_value) to an entity_id. Soft ref to entity_master (no FK: entity_id is a non-unique SCD2 key); resolve via entity_master_current. Append-only; latest mapping per code is entity_ref_codes_current. The holder/counterparty resolver (VEC-417) joins through this.';
+COMMENT ON TABLE entity_ref_codes IS '[Dimension] Maps an external identifier (code_type, code_value) to an entity_id. Soft ref to entity_master (no FK: entity_id is a non-unique SCD2 key); resolve via entity_master_current. Append-only; latest mapping per code is entity_ref_codes_current. The holder/counterparty resolver (VEC-417) joins through this.';
 COMMENT ON COLUMN entity_ref_codes.code_type IS 'Identifier namespace; one of the CHECK-pinned types (BLOCKCHAIN_ADDRESS, CONTRACT_ADDRESS, LEI, SWIFT_BIC, INTERNAL).';
 COMMENT ON COLUMN entity_ref_codes.code_value IS 'The code within the namespace (e.g. a hex-encoded on-chain address with no 0x prefix, an LEI string).';
 COMMENT ON COLUMN entity_ref_codes.entity_id IS 'Soft ref to entity_master.entity_id (resolve via entity_master_current; not an FK).';
@@ -62,7 +62,9 @@ CREATE INDEX IF NOT EXISTS erc_entity_idx ON entity_ref_codes (entity_id);
 CREATE OR REPLACE VIEW entity_ref_codes_current AS
 SELECT DISTINCT ON (code_type, code_value) *
 FROM entity_ref_codes
+WHERE valid_from <= CURRENT_DATE
 ORDER BY code_type, code_value, valid_from DESC, processing_version DESC;
+COMMENT ON VIEW entity_ref_codes_current IS '[Dimension] Latest effective mapping per (code_type, code_value) (valid_from <= today). What the holder/counterparty resolver (VEC-417) joins through.';
 
 -- Reads for both roles; append-only writes for the indexer role (INSERT, never UPDATE/DELETE).
 GRANT SELECT ON entity_ref_codes, entity_ref_codes_current TO stl_readonly;
