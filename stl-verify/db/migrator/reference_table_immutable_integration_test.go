@@ -41,8 +41,11 @@ func TestReferenceTableImmutable(t *testing.T) {
 	}
 
 	// DELETE also raises.
-	if _, err := pool.Exec(ctx,
-		`DELETE FROM deal_type_ref WHERE deal_type = 'TEST_IMMUTABLE'`); err == nil {
+	_, err = pool.Exec(ctx,
+		`DELETE FROM deal_type_ref WHERE deal_type = 'TEST_IMMUTABLE'`)
+	if err == nil {
 		t.Error("DELETE on a reference table should raise via the immutability trigger")
+	} else if !strings.Contains(err.Error(), "append-only") {
+		t.Errorf("DELETE error = %v, want the append-only immutability message", err)
 	}
 }
