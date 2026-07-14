@@ -14,6 +14,7 @@ Tables checked but skipped (not governed by this register yet):
 - `*_ref` — the reference layer (#515); column-level cataloguing is a follow-up.
 - `curve_*` — the Curve DEX layer, added after this snapshot; cataloguing is a follow-up. The conformance check flagged these as unregistered, exactly as designed.
 - `uniswap_v3_*` — the Uniswap V3 DEX layer (VEC-261), same situation as `curve_*`; column-level cataloguing is a follow-up alongside it.
+- the enrichment master and resolver layer (`security_master`, `security_instrument_bridge`, `entity_master`, `entity_ref_codes`, VEC-410..414) — curated append-only SCD2 masters and instrument/code resolvers, not part of the raw-to-canonical transform layer this register governs. Their columns (surrogate and natural keys, `processing_version`, `valid_from`) are introduced by the enrichment layer, not the transform vocabulary, and are catalogued by each table's own migration `COMMENT`s. The position-side operational tables (`position_classification`, `position_entity_link`) are NOT ignored: they are governed here like any other operational table.
 
 ### `canonical`
 The rulebook: one entry per canonical concept, keyed by column name. `type` is the invariant type the column must have wherever it appears. `class` and `semantics` are defaults; `not_null` marks a column that must be declared NOT NULL (with sanctioned exceptions in `nullable_exempt`).
