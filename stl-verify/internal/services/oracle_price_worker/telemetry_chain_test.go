@@ -26,6 +26,8 @@ func TestOracleTelemetryCarriesChainLabel(t *testing.T) {
 	tel.RecordError(ctx, "fetch", context.DeadlineExceeded)
 	tel.RecordRPCCall(ctx, "eth_call", 5*time.Millisecond, nil)
 	tel.RecordPricesChanged(ctx, "chainlink-eth-usd", 2)
+	tel.RecordUnitSuccess(ctx, "chainlink-eth-usd")
+	tel.RecordUnitReads(ctx, "chainlink-eth-usd", 1, 2)
 
 	var rm metricdata.ResourceMetrics
 	if err := reader.Collect(ctx, &rm); err != nil {
@@ -37,5 +39,8 @@ func TestOracleTelemetryCarriesChainLabel(t *testing.T) {
 		"oracle.errors.total",
 		"oracle.rpc.duration_seconds",
 		"oracle.prices.changed",
+		"oracle.unit.last_success_timestamp_seconds",
+		"oracle.unit.prices_fetched",
+		"oracle.unit.reads_failed",
 	)
 }

@@ -25,7 +25,6 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
 from app.domain.entities.allocation import EthAddress
 from tests.integration.seed import (
-    TIE_BALANCE,
     TIE_FRESH_PRICE,
     TIE_PROXY_HEX,
     TIE_UNDERLYING_VALUE,
@@ -95,8 +94,11 @@ async def test_total_usd_exposure_price_tie_resolves_to_highest_oracle_id(repo) 
 async def test_activity_buckets_net_flow_price_tie_resolves_to_highest_oracle_id(repo) -> None:
     """list_activity_buckets values the seeded inflow at the higher-oracle_id price.
 
-    Flows are balance-based on purpose (see ``_ALLOCATION_ACTIVITY_BUCKETS_SQL``),
-    so the expected figure is tx_amount x price, not underlying_value x price.
+    Flows are valued at the row's share ratio (``underlying_value / balance``;
+    see ``_ALLOCATION_ACTIVITY_BUCKETS_SQL``). The seeded inflow spends its full
+    balance (``tx_amount == balance``), so ``tx_amount x ratio == underlying_value``
+    and the flow equals the position figure; the ratio is folded into the
+    expectation so this pins ONLY the oracle tie (fresh 1.25 beats stale 1.00).
     """
     now = dt.datetime.now(dt.UTC)
     buckets = await repo.list_activity_buckets(
@@ -107,4 +109,4 @@ async def test_activity_buckets_net_flow_price_tie_resolves_to_highest_oracle_id
         limit=10,
     )
     assert len(buckets) == 1
-    assert buckets[0].net_flow_usd == TIE_BALANCE * TIE_FRESH_PRICE
+    assert buckets[0].net_flow_usd == TIE_UNDERLYING_VALUE * TIE_FRESH_PRICE
