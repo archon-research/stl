@@ -81,6 +81,147 @@ downstream lag.
 
 ---
 
+## VectorOracleUnitStale
+
+**Severity:** warning · **For:** 5m (on 30m staleness)
+
+### What it means
+
+The oracle-price-worker on the labelled `chain` is still consuming blocks,
+but the single oracle unit `oracle_name` has not completed a successful
+processing pass for over 30 minutes. Prices for that unit's tokens in
+TimescaleDB are going stale while every whole-worker signal (Stalled,
+ErrorsHigh) can look healthy.
+
+The gauge `oracle_unit_last_success_timestamp_seconds` advances after every
+successful per-unit pass **whether or not any row was written** (writes are
+change-only), so this alert means "the worker stopped successfully
+processing this unit", not "the upstream feed stopped updating". Slow
+heartbeat feeds (daily NAV, e.g. JTRSY, JAAA, STAC, BUIDL-I) do not fire
+this when they are merely quiet. The gauge is baselined per unit at worker
+startup, so a unit that has never succeeded since the last deploy fires
+roughly 30 minutes after startup, and a pod restart re-arms the alert
+rather than resolving it. Note the alert does not cover SQS backlog lag: a
+worker grinding through a deep backlog reads fresh while DB prices lag;
+check queue depth for that.
+
+### First checks (≤5 min)
+
+1. **Per-unit errors in the logs**: a unit hard-erroring on every block is
+   the most likely cause and is logged per pass. Pick the deployment
+   matching the alert's `chain` label:
+   - `chain="mainnet"`:
+     `kubectl -n vector logs deploy/oracle-price-worker | grep "failed to process oracle"`
+   - `chain="avalanche-c"`:
+     `kubectl -n vector logs deploy/avalanche-oracle-price-worker | grep "failed to process oracle"`
+
+   The `oracle` field names the unit. **If the grep comes back empty**, grep
+   the same logs for `"failed to process message"` instead: the failure is
+   then before the per-unit loop (feed-decimals validation or block-timestamp
+   resolution), which errors every block without reaching any unit, so the
+   per-unit log line never appears. In that scenario all of the chain's units
+   fire together, which is itself diagnostic.
+2. **Registry state**: after a recent migration, confirm the unit's oracle
+   row and its assets/feeds are still sane: enabled flags, feed addresses,
+   decimals, oracle type. A misconfigured unit fails every pass with the
+   same error.
+3. **Upstream RPC**: if the errors are timeouts/429s, check
+   `VectorRPCRetryRatioHigh` and `VectorOracleIndexerRPCLatencyHigh` for the
+   same window; a degraded RPC can starve one expensive unit while cheaper
+   units keep succeeding.
+4. **Cross-check the fetched counter**
+   (`rate(oracle_unit_prices_fetched_total{oracle_name="..."}[15m])`):
+   - Fresh gauge + zero fetched: every feed in the unit is reverting
+     (guard-skipped, not errored); this alert stays quiet by design and
+     `VectorOracleUnitReadsFailing` (below) is the alert for that mode.
+   - Stale gauge + nonzero fetched: fetch works but the pass fails after it
+     (change detection or the DB upsert); check upsert errors in the logs.
+
+### Common causes
+
+- Unit hard-erroring every block after a contract / feed upgrade: fix the
+  feed address or ABI handling and redeploy.
+- Registry misconfig introduced by a migration (wrong feed address, wrong
+  oracle type, disabled asset set): correct the registry rows; the worker
+  reloads units on restart.
+- Upstream RPC degradation making the unit's multicall persistently fail:
+  see the RPC alerts above.
+
+### Verify recovery
+
+`time() - oracle_unit_last_success_timestamp_seconds{oracle_name="..."}`
+drops back under a few minutes for the affected unit, and
+`rate(oracle_unit_prices_fetched_total{oracle_name="..."}[15m]) > 0`.
+
+---
+
+## VectorOracleUnitReadsFailing
+
+**Severity:** warning · **For:** 10m (on a 30m failed-read rate)
+
+### What it means
+
+The worker is healthy and the unit `oracle_name` completes every pass, but
+at least one of the unit's configured price reads has produced no usable
+price on nearly every block for over 30 minutes: a feed reverting on every
+call (guard-skipped by design, so nothing errors) or the Aave oracle
+answering a zero quote. Prices for the affected token(s) are frozen in
+TimescaleDB while the worker, the unit's freshness gauge, and every
+whole-worker signal look green.
+
+The counter `oracle_unit_reads_failed_total` accumulates, per pass, the
+pass's read count minus the usable prices it fetched. The alert fires when
+the unit's failed-read rate exceeds 0.9x the chain's block rate, i.e. at
+least one read failing on ~every block. For feed and Aave units it covers
+both total loss (every read failing, fetched rate zero) and partial loss
+(one dark feed inside an otherwise healthy multi-feed unit); erc4626 units
+land here only on partial vault loss. `VectorOracleUnitStale` stays quiet
+in all of these because the pass itself still succeeds. Losing ALL erc4626
+vaults at once, and any failed sub-read of a curve LP unit, hard-error the
+pass instead: those page `VectorOracleUnitStale`, never this alert.
+
+### First checks (≤5 min)
+
+1. **Identify the failing read in the logs**: pick the deployment for the
+   alert's `chain` label exactly as in `VectorOracleUnitStale` step 1, then
+   grep for `"feed call failed"` (warn per failed feed, carries `tokenID`,
+   `feedAddress`, `block`). `"all feeds failed, check configuration"` at
+   error level means total loss. For an Aave-type unit grep for
+   `"skipping unpriceable asset"` instead (a zero quote, carries `tokenID`).
+2. **Check the feed contract on-chain**: `cast call <feedAddress>
+   "latestRoundData()" --rpc-url <chain rpc>` at head. A deprecated or
+   migrated Chainlink aggregator reverts forever; that is the classic cause.
+3. **Registry state**: after a recent migration, confirm the unit's feed
+   address, decimals, and quote currency against the token it should price;
+   a wrong feed address reads as a permanently reverting feed.
+4. **Quantify the loss**: compare
+   `rate(oracle_unit_reads_failed_total{oracle_name="..."}[30m])` with
+   `rate(oracle_unit_prices_fetched_total{oracle_name="..."}[30m])`. Failed
+   rate ≈ the chain's block rate means exactly one dark feed; fetched rate
+   zero means every read of the unit is failing.
+
+### Common causes
+
+- Deprecated / migrated upstream feed (proxy repointed, aggregator turned
+  off) reverting on every call: update the registry row to the successor
+  feed and restart the worker.
+- Registry misconfig introduced by a migration (wrong feed address, wrong
+  decimals): correct the registry rows; the worker reloads units on
+  restart.
+- An Aave-oracle asset answering a zero quote (the `detectChanges` zero
+  guard's safety-net case; a source-less asset with a zero fallback makes
+  the AaveOracle revert the whole batch instead, which pages
+  `VectorOracleUnitStale`): remove the asset from the unit or restore its
+  price source.
+
+### Verify recovery
+
+`rate(oracle_unit_reads_failed_total{oracle_name="..."}[30m])` drops back
+to ~0 for the affected unit and the fetched rate returns to its
+pre-incident level.
+
+---
+
 ## maple-graphql-indexer (VEC-320)
 
 Unlike morpho/oracle, `maple-graphql-indexer` is **not** a block consumer. It
