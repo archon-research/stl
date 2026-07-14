@@ -16,7 +16,9 @@
 -- TRUNCATE are revoked below. processing_version (not valid_from) is the version axis so two re-points
 -- on the same calendar day are both representable; the loader (VEC-419) owns monotonic assignment per
 -- (instrument_kind, instrument_key), matching security_master.
-SET search_path TO public;
+-- No `SET search_path`: a session-level SET leaks onto the migrator's pooled connection and
+-- desyncs the per-test-schema integration harness (see VEC-411). Objects land in the connection's
+-- search_path (public in prod, the per-test schema under tests), like every other table migration.
 
 CREATE TABLE IF NOT EXISTS security_instrument_bridge (
     instrument_kind    text NOT NULL,   -- which instrument shape (see CHECK); pinned so a typo'd kind fails hard
