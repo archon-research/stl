@@ -117,13 +117,13 @@ COMMENT ON COLUMN security_master.approved_by IS 'Audit. 4-eyes approver.';
 CREATE UNIQUE INDEX IF NOT EXISTS sm_id_version_uidx ON security_master (security_id, processing_version);
 -- Current-version lookup (the ORDER BY of security_master_current).
 CREATE INDEX IF NOT EXISTS sm_current_idx ON security_master (security_id, valid_from DESC, processing_version DESC);
--- Filter indexes for the risk master, justified by query shapes, not FK support: the reference
--- parents are immutable, so a child-side FK index buys nothing for RI. The 3-col classification
--- index also serves lookups on (asset_class) and (asset_class, security_type) as a prefix.
+-- Classification filter index for the risk master (a query shape, not FK support: the reference
+-- parents are immutable, so a child-side FK index buys nothing for RI). Also serves lookups on
+-- (asset_class) and (asset_class, security_type) as a prefix. The single-column currency /
+-- country_of_risk / country_of_issuance indexes were dropped (Simon review #5): they were only ever
+-- FK-support, which is pointless against immutable parents, and there is no query consumer yet. Add
+-- them back in a one-line migration when a real query shape needs them.
 CREATE INDEX IF NOT EXISTS sm_classification_idx ON security_master (asset_class, security_type, security_subtype);
-CREATE INDEX IF NOT EXISTS sm_currency_idx ON security_master (currency);
-CREATE INDEX IF NOT EXISTS sm_country_risk_idx ON security_master (country_of_risk);
-CREATE INDEX IF NOT EXISTS sm_country_issue_idx ON security_master (country_of_issuance);
 
 -- Current view: the latest EFFECTIVE version per security_id. Bounded on CURRENT_DATE so a
 -- future-dated version (a known maturity or announced status change inserted ahead of time) does
