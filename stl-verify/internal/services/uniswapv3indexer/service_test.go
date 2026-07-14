@@ -11,9 +11,13 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
+	"go.opentelemetry.io/otel"
+	metricsdk "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/dextelemetry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/dexconsumer"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
@@ -31,9 +35,13 @@ import (
 // (poolID, blockNumber); ticksForPoolCalls records every call so tests can
 // assert the reorg re-read fires only on ver>0.
 type fakeUniswapRepo struct {
-	lastWrites      outbound.UniswapV3BlockWrites
-	saveBlockCalls  int
-	stateRowsReturn int64
+	lastWrites     outbound.UniswapV3BlockWrites
+	saveBlockCalls int
+	// stateRowsReturn overrides SaveBlock's returned row count when non-nil. A
+	// pointer, not a plain int64, so a test can stage the idempotent
+	// ON CONFLICT DO NOTHING replay — an explicit 0 — which a zero-valued int64
+	// could not express (it is indistinguishable from "unset").
+	stateRowsReturn *int64
 	err             error
 
 	priorTicks        map[fakePoolBlockKey][]int32
@@ -65,8 +73,8 @@ func (r *fakeUniswapRepo) SaveBlock(_ context.Context, _ pgx.Tx, w outbound.Unis
 		return 0, r.err
 	}
 	r.lastWrites = w
-	if r.stateRowsReturn != 0 {
-		return r.stateRowsReturn, nil
+	if r.stateRowsReturn != nil {
+		return *r.stateRowsReturn, nil
 	}
 	return int64(len(w.States)), nil
 }
@@ -1231,5 +1239,152 @@ func TestMergeTickSets_DedupsAndSortsOverlappingRanges(t *testing.T) {
 		if got[i] != want[i] {
 			t.Errorf("mergeTickSets()[%d] = %d, want %d (full: got=%v want=%v)", i, got[i], want[i], got, want)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Telemetry: the pools.touched gate
+// ---------------------------------------------------------------------------
+
+// newTelemetryService builds a service wired to a REAL dextelemetry.Telemetry
+// (the rest of the suite passes nil, which makes every Record* call a no-op and
+// would leave the counters below unasserted) plus the ManualReader that collects
+// it. repo is returned so a test can stage SaveBlock's row count.
+func newTelemetryService(t *testing.T, pools []RegisteredPool) (*UniswapV3Service, *fakeUniswapRepo, *metricsdk.ManualReader) {
+	t.Helper()
+
+	reader := metricsdk.NewManualReader()
+	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
+	prev := otel.GetMeterProvider()
+	otel.SetMeterProvider(mp)
+	t.Cleanup(func() {
+		otel.SetMeterProvider(prev)
+		_ = mp.Shutdown(context.Background())
+	})
+
+	// NewTelemetry resolves the global meter at construction, so it must run
+	// after SetMeterProvider above.
+	tel, err := dextelemetry.NewTelemetry("uniswap_v3", testChainID)
+	if err != nil {
+		t.Fatalf("NewTelemetry: %v", err)
+	}
+
+	repo := &fakeUniswapRepo{}
+	svc, err := NewUniswapV3Service(UniswapV3ServiceDeps{
+		Pools: pools,
+		Multicaller: &recordingMulticaller{
+			stateResults: stateResultsFixture(t),
+			tickResults:  map[int32]outbound.Result{},
+		},
+		Repo:        repo,
+		EventWriter: dexconsumer.NewProtocolEventWriter(1, &fakeEventRepo{}),
+		TxManager:   &countingTxManager{},
+		ChainID:     testChainID,
+		Logger:      slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Telemetry:   tel,
+	})
+	if err != nil {
+		t.Fatalf("NewUniswapV3Service: %v", err)
+	}
+	return svc, repo, reader
+}
+
+// sumCounter returns the counter value for name, and whether the metric exists
+// at all. Absent and zero are different states: RecordStateRows/RecordPoolsTouched
+// no-op for n<=0, so a counter that never took a positive value is never created,
+// which is what makes the alerts' `A > 0 unless B > 0` shape necessary.
+func sumCounter(t *testing.T, rm *metricdata.ResourceMetrics, name string) (int64, bool) {
+	t.Helper()
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != name {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("metric %s is %T, want Sum[int64]", name, m.Data)
+			}
+			var total int64
+			for _, dp := range sum.DataPoints {
+				total += dp.Value
+			}
+			return total, true
+		}
+	}
+	return 0, false
+}
+
+// TestBlockHandler_RecordsPoolsTouchedOnZeroRowReplay pins the invariant the
+// VectorUniswapV3IndexerNotWritingState alert is built on: on an idempotent
+// replay (ON CONFLICT DO NOTHING -> 0 state rows) a block that touched a pool
+// must still advance pools_touched. If it did not, the alert's left side would
+// go quiet in exactly the case it exists to detect, and the rule would be blind.
+func TestBlockHandler_RecordsPoolsTouchedOnZeroRowReplay(t *testing.T) {
+	pool := uniswapTestPool()
+	svc, repo, reader := newTelemetryService(t, []RegisteredPool{pool})
+
+	var zero int64 // the replay: every state INSERT hit ON CONFLICT DO NOTHING
+	repo.stateRowsReturn = &zero
+
+	receipt := shared.TransactionReceipt{Logs: []shared.Log{swapLog(t, pool, "0x0")}}
+	if err := svc.BlockHandler()(context.Background(), blockEvent(200), []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("BlockHandler: %v", err)
+	}
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+
+	touched, ok := sumCounter(t, &rm, "uniswap_v3.pools.touched")
+	if !ok {
+		t.Fatal("uniswap_v3.pools.touched absent: the alert's activity gate never fired, so the rule can never detect this replay")
+	}
+	if touched != 1 {
+		t.Errorf("uniswap_v3.pools.touched = %d, want 1 (one registered pool was swapped)", touched)
+	}
+
+	// The other half of the invariant: state rows really did stay at zero, so
+	// this test is staging the alert's firing condition and not a healthy block.
+	if rows, ok := sumCounter(t, &rm, "uniswap_v3.state.rows.written"); ok {
+		t.Errorf("uniswap_v3.state.rows.written = %d, want the counter to be absent (0 rows inserted is a no-op)", rows)
+	}
+}
+
+// TestBlockHandler_PoolsTouchedCountsTouchedNotDue pins pools_touched to the
+// decode-stage touched set rather than the due set. On a reorg redelivery DueSet
+// re-snapshots a pool the new fork never touched, so len(dueSet) > len(touchedIDs);
+// sourcing the gate from dueSet would both over-count here AND — the reason it
+// matters — collapse to zero under the always-empty-DueSet bug the alert targets,
+// blinding it. Without this test, swapping the two still passes the suite.
+func TestBlockHandler_PoolsTouchedCountsTouchedNotDue(t *testing.T) {
+	pool := uniswapTestPool()
+	svc, _, reader := newTelemetryService(t, []RegisteredPool{pool})
+	ctx := context.Background()
+
+	// Block 200 v0 touches the pool: 1 touch, and the tracker records a snapshot
+	// at (200, v0).
+	receipt := shared.TransactionReceipt{Logs: []shared.Log{swapLog(t, pool, "0x0")}}
+	if err := svc.BlockHandler()(ctx, blockEvent(200), []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("BlockHandler v0: %v", err)
+	}
+
+	// Block 200 redelivered at v1 (reorg) with receipts that touch NOTHING. The
+	// pool is still due — DueSet's reorg rule re-snapshots it — but it was not
+	// touched, so pools_touched must not advance.
+	reorg := blockEvent(200)
+	reorg.Version = 1
+	if err := svc.BlockHandler()(ctx, reorg, nil); err != nil {
+		t.Fatalf("BlockHandler v1: %v", err)
+	}
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+
+	touched, _ := sumCounter(t, &rm, "uniswap_v3.pools.touched")
+	if touched != 1 {
+		t.Errorf("uniswap_v3.pools.touched = %d, want 1: the reorg block re-snapshotted a due pool that no receipt touched, so only the v0 block counts (got %d => the counter is sourced from dueSet, not touchedIDs)", touched, touched)
 	}
 }
