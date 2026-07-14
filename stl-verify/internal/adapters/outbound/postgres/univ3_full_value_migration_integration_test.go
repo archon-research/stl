@@ -22,6 +22,11 @@ const univ3PoolAddressHex = "bafead7c60ea473758ed6c6021505e8bbd7e8e5d"
 
 const univ3FullValueMigrationFile = "20260713_140000_univ3_full_position_value.sql"
 
+// 20260714_170000 renames the same row from 'AUSDUSDC-UNIV3' to skyeco's
+// 'UNIV3-LP-AUSD-USDC'; it runs after univ3FullValueMigrationFile, so the two
+// in sequence produce the skyeco end-state.
+const univ3SkyecoRenameMigrationFile = "20260714_170000_rename_univ3_symbol_skyeco.sql"
+
 var univ3FullValuePool *pgxpool.Pool
 
 func init() {
@@ -101,14 +106,18 @@ func TestAllocationPositionCatalogueComments(t *testing.T) {
 	}
 }
 
-// TestUniV3PoolTokenRenameMigration exercises the rename against a seeded
-// impostor row by re-executing the shipped migration file. The fresh-DB 0-row
-// path already ran green during schema setup (the row does not exist then);
-// this proves the 1-row rename and that a further re-run stays green.
+// TestUniV3PoolTokenRenameMigration exercises the two rename migrations in
+// production order against a seeded impostor row: 20260713_140000 renames the
+// old hint-asset symbol to 'AUSDUSDC-UNIV3', then 20260714_170000 renames that
+// to skyeco's 'UNIV3-LP-AUSD-USDC', which is the end-state the token row must
+// carry. The fresh-DB 0-row path of both already ran green during schema setup
+// (the row does not exist then); this proves the 1-row rename through the
+// sequence and that re-running the second migration stays green.
 func TestUniV3PoolTokenRenameMigration(t *testing.T) {
 	ctx := context.Background()
 
-	migrationSQL := readUniV3FullValueMigration(t)
+	fullValueSQL := readMigrationFile(t, univ3FullValueMigrationFile)
+	skyecoRenameSQL := readMigrationFile(t, univ3SkyecoRenameMigrationFile)
 
 	if _, err := univ3FullValuePool.Exec(ctx,
 		`INSERT INTO chain (chain_id, name) VALUES (1, 'mainnet') ON CONFLICT (chain_id) DO NOTHING`,
@@ -127,8 +136,11 @@ func TestUniV3PoolTokenRenameMigration(t *testing.T) {
 		t.Fatalf("seed impostor token row: %v", err)
 	}
 
-	if _, err := univ3FullValuePool.Exec(ctx, migrationSQL); err != nil {
-		t.Fatalf("re-execute migration against impostor row: %v", err)
+	if _, err := univ3FullValuePool.Exec(ctx, fullValueSQL); err != nil {
+		t.Fatalf("re-execute full-value migration against impostor row: %v", err)
+	}
+	if _, err := univ3FullValuePool.Exec(ctx, skyecoRenameSQL); err != nil {
+		t.Fatalf("re-execute skyeco-rename migration: %v", err)
 	}
 
 	var symbol string
@@ -140,15 +152,17 @@ func TestUniV3PoolTokenRenameMigration(t *testing.T) {
 	).Scan(&symbol, &updatedAtAfterRename); err != nil {
 		t.Fatalf("read renamed token row: %v", err)
 	}
-	if symbol != "AUSDUSDC-UNIV3" {
-		t.Fatalf("pool token symbol = %q, want AUSDUSDC-UNIV3", symbol)
+	if symbol != "UNIV3-LP-AUSD-USDC" {
+		t.Fatalf("pool token symbol = %q, want UNIV3-LP-AUSD-USDC", symbol)
 	}
 
-	// Idempotency: a second run must change nothing (the symbol filter makes
-	// the UPDATE a 0-row no-op, so updated_at must not be rewritten) and raise
-	// nothing.
-	if _, err := univ3FullValuePool.Exec(ctx, migrationSQL); err != nil {
-		t.Fatalf("re-execute migration a second time: %v", err)
+	// Idempotency: re-running the skyeco rename must change nothing (the symbol
+	// filter makes the UPDATE a 0-row no-op, so updated_at must not be
+	// rewritten) and raise nothing. The full-value migration is NOT re-run here
+	// because in production the migrator applies each file exactly once, in
+	// order; running it after the skyeco rename would revert the symbol.
+	if _, err := univ3FullValuePool.Exec(ctx, skyecoRenameSQL); err != nil {
+		t.Fatalf("re-execute skyeco-rename migration a second time: %v", err)
 	}
 	var updatedAtAfterRerun string
 	if err := univ3FullValuePool.QueryRow(ctx, `
@@ -164,16 +178,16 @@ func TestUniV3PoolTokenRenameMigration(t *testing.T) {
 	}
 }
 
-func readUniV3FullValueMigration(t *testing.T) string {
+func readMigrationFile(t *testing.T, filename string) string {
 	t.Helper()
 	_, currentFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("resolve current file path")
 	}
-	path := filepath.Join(filepath.Dir(currentFile), "../../../../db/migrations", univ3FullValueMigrationFile)
+	path := filepath.Join(filepath.Dir(currentFile), "../../../../db/migrations", filename)
 	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("read migration file: %v", err)
+		t.Fatalf("read migration file %s: %v", filename, err)
 	}
 	return string(data)
 }

@@ -218,8 +218,10 @@ func (h *PrimePositionHandler) buildPositions(
 // POOL address; a V3 pool contract is not an ERC20 and has no symbol or
 // decimals of its own). Decimals come from the hint asset because the row's
 // balance is denominated in it; the symbol is composed from the pool pair
-// (e.g. AUSDUSDC-UNIV3) because reusing the hint asset's own symbol labeled
-// the pool row as the asset itself (an impostor "USDC" row).
+// (e.g. UNIV3-LP-AUSD-USDC, matching skyeco's line naming) because reusing the
+// hint asset's own symbol labeled the pool row as the asset itself (an impostor
+// "USDC" row). Token order follows the pool's on-chain token0/token1, not
+// alphabetical, so the composed name matches skyeco exactly.
 func (h *PrimePositionHandler) univ3RowMeta(s *PositionSnapshot) (tokenMeta, error) {
 	if s.Entry.AssetAddress == nil {
 		return tokenMeta{}, fmt.Errorf(
@@ -250,7 +252,7 @@ func (h *PrimePositionHandler) univ3RowMeta(s *PositionSnapshot) (tokenMeta, err
 		return tokenMeta{}, err
 	}
 	return tokenMeta{
-		symbol:   fmt.Sprintf("%s%s-UNIV3", token0, token1),
+		symbol:   fmt.Sprintf("UNIV3-LP-%s-%s", token0, token1),
 		decimals: asset.decimals,
 	}, nil
 }
