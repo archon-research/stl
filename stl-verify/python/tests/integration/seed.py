@@ -965,19 +965,36 @@ async def _ruv_seed_morpho_like_position(conn: asyncpg.Connection, *, prime_id: 
 
 
 # ---------------------------------------------------------------------------
-# Flow share-ratio seed (net_flow_usd valued at the per-row share ratio)
+# Flow share-ratio seed (net_flow_usd valued at the share ratio)
 #
-# One prime; one receipt token (a non-1:1 vault share) wrapping frUSDC, priced
-# at 1.03 (not 1.00, so a dropped price multiplication is visible). One proxy
-# per flow-valuation branch of ``_ALLOCATION_ACTIVITY_BUCKETS_SQL``, plus a
-# mixed proxy whose rows must sum within one bucket:
-#   * FR_PROXY_RATIO      deposit at a 1.17 share ratio -> tx_amount x ratio
-#   * FR_PROXY_LEGACY     NULL underlying_value (pre-column row) -> tx_amount
-#   * FR_PROXY_FULL_EXIT  balance = 0 after a full exit -> tx_amount (ratio undefined)
-#   * FR_PROXY_DRAINED    underlying_value = 0 with balance > 0 -> flow worth 0
-#   * FR_PROXY_DIVERGENT  row's own underlying_token_id diverges from the
-#                         registry's -> refused, contributes nothing
-#   * FR_PROXY_MIXED      ratio in + ratio out + legacy in + sweep, one bucket
+# One prime; one receipt token PER SCENARIO (the nearest-ratio lookup is
+# token-global, so sharing a token would let one scenario's rows become
+# another's nearest candidates). All wrap frUSDC, priced at 1.03 (not 1.00,
+# so a dropped price multiplication is visible). Donor rows, the nearest-ratio
+# candidates, sit on ``_FR_PROXY_DONOR``, outside every tested proxy's
+# buckets: the lookup must find them across proxies because the share ratio is
+# a property of the token, not of any position.
+#
+#   * FR_PROXY_RATIO            deposit with a usable own ratio -> own ratio
+#   * FR_PROXY_LEGACY           NULL underlying_value -> nearest donor's ratio
+#   * FR_PROXY_FULL_EXIT        balance = 0 after a full exit; the token's only
+#                               valued row sits AFTER the exit (the warehouse
+#                               shape of the syrupUSDC exit at block 24869871)
+#   * FR_PROXY_NEVER_VALUED     no usable row anywhere (0/0 rows like
+#                               syrupUSDT's don't count) -> raw tx_amount
+#   * FR_PROXY_ATOKEN           legacy row on a 1:1 token: the nearest ratio is
+#                               exactly 1, so the value equals the raw fallback
+#   * FR_PROXY_DRAINED          underlying_value = 0, balance > 0 -> own ratio 0
+#   * FR_PROXY_DIVERGENT        row's own underlying_token_id diverges from the
+#                               registry's -> refused, contributes nothing
+#   * FR_PROXY_DONOR_DIVERGENT  the only valued same-token row is divergent ->
+#                               not a candidate -> raw tx_amount
+#   * FR_PROXY_DISTANCE         donors on both sides at different distances ->
+#                               the closer one wins regardless of side
+#   * FR_PROXY_TIE              donors equidistant -> the at-or-before one wins
+#   * FR_PROXY_MIXED            ratio in + ratio out + legacy in + sweep, one
+#                               bucket; the legacy row borrows the out row's
+#                               ratio (nearest at-or-before)
 # Every row carries the same explicit created_at so each proxy's events land
 # in a single hourly bucket.
 # ---------------------------------------------------------------------------
@@ -988,13 +1005,23 @@ FR_PROXY_FULL_EXIT = "3e" * 20
 FR_PROXY_DRAINED = "4e" * 20
 FR_PROXY_MIXED = "5e" * 20
 FR_PROXY_DIVERGENT = "6e" * 20
+FR_PROXY_NEVER_VALUED = "7e" * 20
+FR_PROXY_ATOKEN = "8e" * 20
+FR_PROXY_DONOR_DIVERGENT = "9e" * 20
+FR_PROXY_DISTANCE = "ae" * 20
+FR_PROXY_TIE = "be" * 20
+_FR_PROXY_DONOR = "fe" * 20
 
 _FR_VAULT_HEX = "97" * 20
 _FR_UNDERLYING_HEX = "e5" * 20
-_FR_RECEIPT_HEX = "e6" * 20
 # Priced like the RUV divergent scenario so the refusal is what keeps the
 # wrong-unit value out, not a missing price.
 _FR_ALT_UNDERLYING_HEX = "e7" * 20
+# Synthetic protocol/oracle registration (like _ruv_seed_morpho_like_position):
+# the scenarios must not lean on migration-seeded registry rows, and protocol
+# display names are not natural keys.
+_FR_PROTOCOL_HEX = "e8" * 20
+_FR_ORACLE_HEX = "e9" * 20
 
 FR_UNDERLYING_PRICE = Decimal("1.03")
 FR_BUCKET_TS = dt.datetime(2026, 3, 5, 0, 30, tzinfo=dt.UTC)
@@ -1005,12 +1032,29 @@ FR_RATIO_TX_AMOUNT = Decimal("100")
 FR_RATIO_BALANCE = Decimal("200")
 FR_RATIO_UNDERLYING_VALUE = Decimal("234")
 
-# Legacy row written before underlying_value existed (both columns NULL).
+# Legacy row written before underlying_value existed (both columns NULL), plus
+# a valued donor sweep one block earlier pinning the token's ratio at 1.17.
 FR_LEGACY_TX_AMOUNT = Decimal("100")
 FR_LEGACY_BALANCE = Decimal("500")
+FR_LEGACY_DONOR_BALANCE = Decimal("200")
+FR_LEGACY_DONOR_UNDERLYING_VALUE = Decimal("234")
 
-# Full exit: the withdrawal leaves balance = 0 on its own row.
+# Full exit: the withdrawal leaves balance = 0 on its own row; the donor sweep
+# AFTER it carries the warehouse-observed syrupUSDC ratio of 1.172241.
 FR_FULL_EXIT_TX_AMOUNT = Decimal("150")
+FR_FULL_EXIT_DONOR_BALANCE = Decimal("1000000")
+FR_FULL_EXIT_DONOR_UNDERLYING_VALUE = Decimal("1172241")
+
+# Never valued: a legacy flow plus a 0/0 sweep (syrupUSDT's shape:
+# underlying_value present but balance = 0 is not a usable ratio).
+FR_NEVER_VALUED_TX_AMOUNT = Decimal("100")
+FR_NEVER_VALUED_BALANCE = Decimal("500")
+
+# 1:1 aToken: the donor's underlying_value equals its balance, so the borrowed
+# ratio is exactly 1 and the flow's value must equal the raw fallback.
+FR_ATOKEN_TX_AMOUNT = Decimal("100")
+FR_ATOKEN_BALANCE = Decimal("300")
+FR_ATOKEN_DONOR_BALANCE = Decimal("300")
 
 # Drained vault: shares outstanding but redeemable value exactly 0.
 FR_DRAINED_TX_AMOUNT = Decimal("80")
@@ -1023,7 +1067,31 @@ FR_DIVERGENT_BALANCE = Decimal("4")
 FR_DIVERGENT_UNDERLYING_VALUE = Decimal("10")
 FR_ALT_UNDERLYING_PRICE = Decimal("5.00")
 
-# Mixed bucket: both ratio rows sit at the same 1.17 share ratio.
+# Donor-divergent: the only valued same-token row is divergent (wrong-unit
+# underlying_value), so the legacy flow must fall back raw.
+FR_DONOR_DIVERGENT_TX_AMOUNT = Decimal("50")
+FR_DONOR_DIVERGENT_BALANCE = Decimal("500")
+
+# Distance: the far donor (two blocks before, ratio 1.10) must lose to the
+# near donor (one block after, ratio 1.20).
+FR_DISTANCE_TX_AMOUNT = Decimal("60")
+FR_DISTANCE_BALANCE = Decimal("500")
+FR_DISTANCE_FAR_DONOR_BALANCE = Decimal("100")
+FR_DISTANCE_FAR_DONOR_UNDERLYING_VALUE = Decimal("110")
+FR_DISTANCE_NEAR_DONOR_BALANCE = Decimal("100")
+FR_DISTANCE_NEAR_DONOR_UNDERLYING_VALUE = Decimal("120")
+
+# Tie: donors one block before (ratio 1.10) and one block after (ratio 1.30);
+# the at-or-before donor must win.
+FR_TIE_TX_AMOUNT = Decimal("70")
+FR_TIE_BALANCE = Decimal("500")
+FR_TIE_BEFORE_DONOR_BALANCE = Decimal("100")
+FR_TIE_BEFORE_DONOR_UNDERLYING_VALUE = Decimal("110")
+FR_TIE_AFTER_DONOR_BALANCE = Decimal("100")
+FR_TIE_AFTER_DONOR_UNDERLYING_VALUE = Decimal("130")
+
+# Mixed bucket: both own-ratio rows sit at the same 1.17 share ratio; the
+# legacy row borrows the out row's ratio (nearest at-or-before, one block).
 FR_MIXED_IN_TX_AMOUNT = Decimal("100")
 FR_MIXED_IN_BALANCE = Decimal("200")
 FR_MIXED_IN_UNDERLYING_VALUE = Decimal("234")
@@ -1044,68 +1112,265 @@ async def seed_flow_share_ratio_activity(db_url: str) -> None:
                 "INSERT INTO prime (name, vault_address) VALUES ('flow_ratio', $1) RETURNING id",
                 bytes.fromhex(_FR_VAULT_HEX),
             )
-            protocol_id = await conn.fetchval("SELECT id FROM protocol WHERE name = 'Aave V3' AND chain_id = 1")
-            oracle_id = await conn.fetchval("SELECT id FROM oracle WHERE name = 'aave_v3'")
-            if protocol_id is None or oracle_id is None:
-                raise RuntimeError("Aave V3 protocol / aave_v3 oracle not seeded by migrations")
+            protocol_id = await conn.fetchval(
+                "INSERT INTO protocol (chain_id, address, name, protocol_type) "
+                "VALUES (1, $1, 'flowRatioLike', 'lending') RETURNING id",
+                bytes.fromhex(_FR_PROTOCOL_HEX),
+            )
+            oracle_id = await conn.fetchval(
+                "INSERT INTO oracle (name, display_name, chain_id, address) "
+                "VALUES ('fr_flow_ratio', 'Flow share-ratio test oracle', 1, $1) RETURNING id",
+                bytes.fromhex(_FR_ORACLE_HEX),
+            )
+            await conn.execute(
+                "INSERT INTO protocol_oracle (protocol_id, oracle_id, from_block) VALUES ($1, $2, 1)",
+                protocol_id,
+                oracle_id,
+            )
 
             underlying_id = await insert_token(conn, "frUSDC", 6, bytes.fromhex(_FR_UNDERLYING_HEX))
             await _insert_price(conn, underlying_id, oracle_id, FR_UNDERLYING_PRICE)
             alt_underlying_id = await insert_token(conn, "frALT", 6, bytes.fromhex(_FR_ALT_UNDERLYING_HEX))
             await _insert_price(conn, alt_underlying_id, oracle_id, FR_ALT_UNDERLYING_PRICE)
-            receipt_id = await insert_token(conn, "frRatioVault", 6, bytes.fromhex(_FR_RECEIPT_HEX))
-            await insert_receipt_token_row(
-                conn,
-                protocol_id=protocol_id,
-                underlying_token_id=underlying_id,
-                address=bytes.fromhex(_FR_RECEIPT_HEX),
-                symbol="frRatioVault",
-            )
 
-            # (proxy, direction, tx_amount, balance, underlying_value); the FK
-            # underlying_token_id follows the both-or-neither invariant.
+            async def receipt(address_hex: str, symbol: str) -> int:
+                token_id = await insert_token(conn, symbol, 6, bytes.fromhex(address_hex))
+                await insert_receipt_token_row(
+                    conn,
+                    protocol_id=protocol_id,
+                    underlying_token_id=underlying_id,
+                    address=bytes.fromhex(address_hex),
+                    symbol=symbol,
+                )
+                return token_id
+
+            ratio_token = await receipt("d2" * 20, "frVaultRatio")
+            legacy_token = await receipt("d3" * 20, "frVaultLegacy")
+            exit_token = await receipt("d4" * 20, "frVaultExit")
+            never_token = await receipt("d5" * 20, "frVaultNever")
+            atoken_token = await receipt("d6" * 20, "frAToken")
+            drained_token = await receipt("d7" * 20, "frVaultDrained")
+            divergent_token = await receipt("d8" * 20, "frVaultDivergent")
+            donor_div_token = await receipt("d9" * 20, "frVaultDonorDiv")
+            distance_token = await receipt("da" * 20, "frVaultDistance")
+            tie_token = await receipt("db" * 20, "frVaultTie")
+            mixed_token = await receipt("dc" * 20, "frVaultMixed")
+
+            donor = _FR_PROXY_DONOR
+            # (token, proxy, direction, tx_amount, balance, underlying_value,
+            # underlying_token_id, block); underlying_value/underlying_token_id
+            # follow the both-or-neither invariant, with the divergent rows
+            # deliberately carrying the wrong-unit alt underlying.
             rows = [
-                (FR_PROXY_RATIO, "in", FR_RATIO_TX_AMOUNT, FR_RATIO_BALANCE, FR_RATIO_UNDERLYING_VALUE),
-                (FR_PROXY_LEGACY, "in", FR_LEGACY_TX_AMOUNT, FR_LEGACY_BALANCE, None),
-                (FR_PROXY_FULL_EXIT, "out", FR_FULL_EXIT_TX_AMOUNT, Decimal(0), Decimal(0)),
-                (FR_PROXY_DRAINED, "in", FR_DRAINED_TX_AMOUNT, FR_DRAINED_BALANCE, Decimal(0)),
-                (FR_PROXY_MIXED, "in", FR_MIXED_IN_TX_AMOUNT, FR_MIXED_IN_BALANCE, FR_MIXED_IN_UNDERLYING_VALUE),
-                (FR_PROXY_MIXED, "out", FR_MIXED_OUT_TX_AMOUNT, FR_MIXED_OUT_BALANCE, FR_MIXED_OUT_UNDERLYING_VALUE),
-                (FR_PROXY_MIXED, "in", FR_MIXED_LEGACY_TX_AMOUNT, FR_MIXED_LEGACY_BALANCE, None),
-                (FR_PROXY_MIXED, "sweep", FR_MIXED_SWEEP_TX_AMOUNT, FR_MIXED_IN_BALANCE, FR_MIXED_IN_UNDERLYING_VALUE),
+                (
+                    ratio_token,
+                    FR_PROXY_RATIO,
+                    "in",
+                    FR_RATIO_TX_AMOUNT,
+                    FR_RATIO_BALANCE,
+                    FR_RATIO_UNDERLYING_VALUE,
+                    underlying_id,
+                    9000,
+                ),
+                (legacy_token, FR_PROXY_LEGACY, "in", FR_LEGACY_TX_AMOUNT, FR_LEGACY_BALANCE, None, None, 9101),
+                (
+                    legacy_token,
+                    donor,
+                    "sweep",
+                    Decimal(0),
+                    FR_LEGACY_DONOR_BALANCE,
+                    FR_LEGACY_DONOR_UNDERLYING_VALUE,
+                    underlying_id,
+                    9100,
+                ),
+                (
+                    exit_token,
+                    FR_PROXY_FULL_EXIT,
+                    "out",
+                    FR_FULL_EXIT_TX_AMOUNT,
+                    Decimal(0),
+                    Decimal(0),
+                    underlying_id,
+                    9200,
+                ),
+                (
+                    exit_token,
+                    donor,
+                    "sweep",
+                    Decimal(0),
+                    FR_FULL_EXIT_DONOR_BALANCE,
+                    FR_FULL_EXIT_DONOR_UNDERLYING_VALUE,
+                    underlying_id,
+                    9201,
+                ),
+                (
+                    never_token,
+                    FR_PROXY_NEVER_VALUED,
+                    "in",
+                    FR_NEVER_VALUED_TX_AMOUNT,
+                    FR_NEVER_VALUED_BALANCE,
+                    None,
+                    None,
+                    9300,
+                ),
+                (never_token, FR_PROXY_NEVER_VALUED, "sweep", Decimal(0), Decimal(0), Decimal(0), underlying_id, 9301),
+                (atoken_token, FR_PROXY_ATOKEN, "in", FR_ATOKEN_TX_AMOUNT, FR_ATOKEN_BALANCE, None, None, 9400),
+                (
+                    atoken_token,
+                    donor,
+                    "sweep",
+                    Decimal(0),
+                    FR_ATOKEN_DONOR_BALANCE,
+                    FR_ATOKEN_DONOR_BALANCE,
+                    underlying_id,
+                    9399,
+                ),
+                (
+                    drained_token,
+                    FR_PROXY_DRAINED,
+                    "in",
+                    FR_DRAINED_TX_AMOUNT,
+                    FR_DRAINED_BALANCE,
+                    Decimal(0),
+                    underlying_id,
+                    9500,
+                ),
+                (
+                    divergent_token,
+                    FR_PROXY_DIVERGENT,
+                    "in",
+                    FR_DIVERGENT_TX_AMOUNT,
+                    FR_DIVERGENT_BALANCE,
+                    FR_DIVERGENT_UNDERLYING_VALUE,
+                    alt_underlying_id,
+                    9600,
+                ),
+                (
+                    donor_div_token,
+                    FR_PROXY_DONOR_DIVERGENT,
+                    "in",
+                    FR_DONOR_DIVERGENT_TX_AMOUNT,
+                    FR_DONOR_DIVERGENT_BALANCE,
+                    None,
+                    None,
+                    9700,
+                ),
+                (
+                    donor_div_token,
+                    donor,
+                    "sweep",
+                    Decimal(0),
+                    FR_DIVERGENT_BALANCE,
+                    FR_DIVERGENT_UNDERLYING_VALUE,
+                    alt_underlying_id,
+                    9699,
+                ),
+                (distance_token, FR_PROXY_DISTANCE, "in", FR_DISTANCE_TX_AMOUNT, FR_DISTANCE_BALANCE, None, None, 9800),
+                (
+                    distance_token,
+                    donor,
+                    "sweep",
+                    Decimal(0),
+                    FR_DISTANCE_FAR_DONOR_BALANCE,
+                    FR_DISTANCE_FAR_DONOR_UNDERLYING_VALUE,
+                    underlying_id,
+                    9798,
+                ),
+                (
+                    distance_token,
+                    donor,
+                    "sweep",
+                    Decimal(0),
+                    FR_DISTANCE_NEAR_DONOR_BALANCE,
+                    FR_DISTANCE_NEAR_DONOR_UNDERLYING_VALUE,
+                    underlying_id,
+                    9801,
+                ),
+                (tie_token, FR_PROXY_TIE, "in", FR_TIE_TX_AMOUNT, FR_TIE_BALANCE, None, None, 9900),
+                (
+                    tie_token,
+                    donor,
+                    "sweep",
+                    Decimal(0),
+                    FR_TIE_BEFORE_DONOR_BALANCE,
+                    FR_TIE_BEFORE_DONOR_UNDERLYING_VALUE,
+                    underlying_id,
+                    9899,
+                ),
+                (
+                    tie_token,
+                    donor,
+                    "sweep",
+                    Decimal(0),
+                    FR_TIE_AFTER_DONOR_BALANCE,
+                    FR_TIE_AFTER_DONOR_UNDERLYING_VALUE,
+                    underlying_id,
+                    9901,
+                ),
+                (
+                    mixed_token,
+                    FR_PROXY_MIXED,
+                    "in",
+                    FR_MIXED_IN_TX_AMOUNT,
+                    FR_MIXED_IN_BALANCE,
+                    FR_MIXED_IN_UNDERLYING_VALUE,
+                    underlying_id,
+                    9010,
+                ),
+                (
+                    mixed_token,
+                    FR_PROXY_MIXED,
+                    "out",
+                    FR_MIXED_OUT_TX_AMOUNT,
+                    FR_MIXED_OUT_BALANCE,
+                    FR_MIXED_OUT_UNDERLYING_VALUE,
+                    underlying_id,
+                    9011,
+                ),
+                (
+                    mixed_token,
+                    FR_PROXY_MIXED,
+                    "in",
+                    FR_MIXED_LEGACY_TX_AMOUNT,
+                    FR_MIXED_LEGACY_BALANCE,
+                    None,
+                    None,
+                    9012,
+                ),
+                (
+                    mixed_token,
+                    FR_PROXY_MIXED,
+                    "sweep",
+                    FR_MIXED_SWEEP_TX_AMOUNT,
+                    FR_MIXED_IN_BALANCE,
+                    FR_MIXED_IN_UNDERLYING_VALUE,
+                    underlying_id,
+                    9013,
+                ),
             ]
-            for index, (proxy_hex, direction, tx_amount, balance, underlying_value) in enumerate(rows):
+            for index, (
+                token_id,
+                proxy_hex,
+                direction,
+                tx_amount,
+                balance,
+                underlying_value,
+                underlying_token_id,
+                block,
+            ) in enumerate(rows):
                 await insert_allocation_position(
                     conn,
-                    token_id=receipt_id,
+                    token_id=token_id,
                     prime_id=prime_id,
                     proxy_hex=proxy_hex,
                     balance=balance,
-                    block=9000 + index,
-                    tx=f"{0xE0 + index:02x}" * 32,
+                    block=block,
+                    tx=f"{0x30 + index:02x}" * 32,
                     direction=direction,
                     underlying_value=underlying_value,
-                    underlying_token_id=underlying_id if underlying_value is not None else None,
+                    underlying_token_id=underlying_token_id,
                     created_at=FR_BUCKET_TS,
                     tx_amount=tx_amount,
                 )
-
-            # The row's own underlying_token_id diverges from the registry's:
-            # its underlying_value is denominated in a different asset, so the
-            # flow read must refuse the ratio rather than mix units.
-            await insert_allocation_position(
-                conn,
-                token_id=receipt_id,
-                prime_id=prime_id,
-                proxy_hex=FR_PROXY_DIVERGENT,
-                balance=FR_DIVERGENT_BALANCE,
-                block=9000 + len(rows),
-                tx=f"{0xE0 + len(rows):02x}" * 32,
-                direction="in",
-                underlying_value=FR_DIVERGENT_UNDERLYING_VALUE,
-                underlying_token_id=alt_underlying_id,
-                created_at=FR_BUCKET_TS,
-                tx_amount=FR_DIVERGENT_TX_AMOUNT,
-            )
     finally:
         await conn.close()
