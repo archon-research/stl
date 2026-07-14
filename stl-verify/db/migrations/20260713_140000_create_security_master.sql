@@ -22,7 +22,9 @@
 -- Facet attributes (credit_tranche / credit_quality / collateral_pool / agency_status / backing) are
 -- carried here as nullable columns with inline CHECK enums. Their reference table (instrument_facet_ref,
 -- VEC-445) was cancelled, so the vocabularies are pinned in the CHECKs rather than a composite FK.
-SET search_path TO public;
+-- No `SET search_path` here: like every other table migration, objects land in the connection's
+-- search_path (public in prod; the per-test schema under the integration harness). A session-level
+-- SET would leak onto the pooled connection and desync the schema-isolated integration tests.
 
 CREATE TABLE IF NOT EXISTS security_master (
     security_sk          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,  -- immutable surrogate, stamped onto positions
