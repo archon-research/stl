@@ -1081,10 +1081,6 @@
       "type": "raw_pipeline",
       "owner": "lending"
     },
-    "migrations": {
-      "type": "infrastructure",
-      "owner": "infra"
-    },
     "morpho_market": {
       "type": "config",
       "owner": "morpho"
