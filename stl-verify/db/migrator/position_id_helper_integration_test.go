@@ -11,8 +11,8 @@ import (
 
 // TestPositionIdHelper is the VEC-400 contract test: after migrations, public.position_key
 // produces the canonical identity string, public.position_id is its 32-byte sha256, and the
-// required-field / mutual-exclusion guards fail hard. Every per-protocol materializer depends
-// on this helper, so the contract is pinned here.
+// required-field guards fail hard. Identity is holder + instrument only (no classifications).
+// Every per-protocol materializer depends on this helper, so the contract is pinned here.
 func TestPositionIdHelper(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupPostgres(ctx, t)
@@ -21,13 +21,13 @@ func TestPositionIdHelper(t *testing.T) {
 		t.Fatalf("migrations: %v", err)
 	}
 
-	// Wallet holder, protocol present, prime empty -> the canonical string per the spec.
+	// Chain + protocol present -> the canonical string per the spec.
 	var key string
 	if err := pool.QueryRow(ctx,
-		`SELECT position_key(1, 3, 'morpho_market', '7', 42, NULL, 'LOAN')`).Scan(&key); err != nil {
+		`SELECT position_key(1, 3, 'morpho_market:7', 'em-000042')`).Scan(&key); err != nil {
 		t.Fatalf("position_key: %v", err)
 	}
-	if want := "1;3;morpho_market:7;42;;LOAN"; key != want {
+	if want := "1;3;morpho_market:7;em-000042"; key != want {
 		t.Errorf("position_key = %q, want %q", key, want)
 	}
 
@@ -35,9 +35,9 @@ func TestPositionIdHelper(t *testing.T) {
 	var idIsSha256 bool
 	var idLen int
 	if err := pool.QueryRow(ctx, `
-		SELECT position_id(1,3,'morpho_market','7',42,NULL,'LOAN')
-		         = sha256(convert_to('1;3;morpho_market:7;42;;LOAN','UTF8')),
-		       length(position_id(1,3,'morpho_market','7',42,NULL,'LOAN'))`).Scan(&idIsSha256, &idLen); err != nil {
+		SELECT position_id(1,3,'morpho_market:7','em-000042')
+		         = sha256(convert_to('1;3;morpho_market:7;em-000042','UTF8')),
+		       length(position_id(1,3,'morpho_market:7','em-000042'))`).Scan(&idIsSha256, &idLen); err != nil {
 		t.Fatalf("position_id: %v", err)
 	}
 	if !idIsSha256 {
@@ -47,21 +47,19 @@ func TestPositionIdHelper(t *testing.T) {
 		t.Errorf("position_id length = %d bytes, want 32", idLen)
 	}
 
-	// Prime holder path renders user_id empty (and protocol empty for Sky).
+	// Nullable structural fields render empty (Sky has no chain-specific protocol id).
 	if err := pool.QueryRow(ctx,
-		`SELECT position_key(1, NULL, 'ilk', 'ALLOCATOR-SPARK-A', NULL, 5, 'BORROW')`).Scan(&key); err != nil {
-		t.Fatalf("position_key (prime): %v", err)
+		`SELECT position_key(1, NULL, 'sky_ilk:ALLOCATOR-SPARK-A', 'em-000005')`).Scan(&key); err != nil {
+		t.Fatalf("position_key (null protocol): %v", err)
 	}
-	if want := "1;;ilk:ALLOCATOR-SPARK-A;;5;BORROW"; key != want {
-		t.Errorf("prime position_key = %q, want %q", key, want)
+	if want := "1;;sky_ilk:ALLOCATOR-SPARK-A;em-000005"; key != want {
+		t.Errorf("null-protocol position_key = %q, want %q", key, want)
 	}
 
 	// Guards must fail hard rather than emit a silently-wrong identity.
 	for _, g := range []struct{ name, sql string }{
-		{"user_id + prime_id both set", `SELECT position_key(1,3,'k','x',42,5,'LOAN')`},
-		{"user_id + prime_id both null", `SELECT position_key(1,3,'k','x',NULL,NULL,'LOAN')`},
-		{"deal_type_code required", `SELECT position_key(1,3,'k','x',42,NULL,NULL)`},
-		{"kind/instrument_key required", `SELECT position_key(1,3,NULL,'x',42,NULL,'LOAN')`},
+		{"instrument_key required", `SELECT position_key(1,3,NULL,'em-000042')`},
+		{"holder_id required", `SELECT position_key(1,3,'morpho_market:7',NULL)`},
 	} {
 		var s string
 		if err := pool.QueryRow(ctx, g.sql).Scan(&s); err == nil {
