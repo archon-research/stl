@@ -56,7 +56,6 @@ func TestNullability(t *testing.T) {
 	live := []Column{
 		{Table: "t", Name: "build_id", DataType: "integer", Nullable: true},
 		{Table: "ex", Name: "build_id", DataType: "integer", Nullable: true},
-		{Table: "t", Name: "build_id", DataType: "integer", Nullable: false},
 		{Table: "t", Name: "note", DataType: "text", Nullable: true},
 	}
 	var flagged []string

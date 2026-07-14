@@ -235,6 +235,21 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
+  name: transform-worker
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  # Drain cadence; the worker defaults to 10m if unset. Not chain-specific, so
+  # no CHAIN_ID (the worker drains every source in transformed._sources).
+  TRANSFORM_INTERVAL: "10m"
+  # Phase the 10m tick off the boundary-aligned producers (maple-graphql-indexer
+  # 10m, offchain-price-indexer 5m) so producer writes do not coincide with the
+  # queue drains, transformed upserts and parity reads.
+  TRANSFORM_SCHEDULE_OFFSET: "2m"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
   name: optimism-watcher-data-validator
 data:
   TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
