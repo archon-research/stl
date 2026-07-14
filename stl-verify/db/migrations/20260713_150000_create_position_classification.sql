@@ -1,13 +1,14 @@
 -- position_classification (VEC-401): the per-position deal-type classification, one row per
--- position_id. It supplies the deal_type_code that feeds position_id() (VEC-400), and records
--- the direction + collateral_status frozen onto the position. Written by the per-protocol
--- materializers (VEC-402..408): each assigns deal_type_code from the raw row's semantics
--- (e.g. morpho_market legs -> LOAN/BORROW/COLLATERAL), sets direction from deal_type_ref, then
--- hashes to position_id.
+-- position_id. deal_type is a mutable classification, so it is NOT part of the position_id hash
+-- (VEC-400: identity is holder + instrument); it is recorded here as a looked-up attribute of the
+-- position, alongside the frozen direction + collateral_status. Written by the per-protocol
+-- materializers (VEC-402..408): each computes position_id from its identity fields, then writes
+-- this row keyed by that position_id, assigning deal_type_code from the raw leg's semantics
+-- (e.g. morpho_market legs -> LOAN/BORROW/COLLATERAL) and direction from deal_type_ref.
 --
--- deal_type_code is FK'd to deal_type_ref(deal_type) (the seeded reference codes, VEC-390);
--- the column is named deal_type_code to match the canonical vocabulary and the position_id()
--- hash input, while the FK target column in deal_type_ref is named deal_type.
+-- deal_type_code is FK'd to deal_type_ref(deal_type) (the seeded reference codes, VEC-390); the
+-- column is named deal_type_code to match the canonical vocabulary, while the FK target column in
+-- deal_type_ref is named deal_type.
 CREATE TABLE IF NOT EXISTS position_classification (
     position_id       bytea       NOT NULL,
     deal_type_code    text        NOT NULL,
@@ -24,11 +25,11 @@ CREATE TABLE IF NOT EXISTS position_classification (
 );
 
 COMMENT ON TABLE position_classification IS
-  '[Operational] Per-position deal-type classification (VEC-401). One row per position_id: the deal_type_code (which feeds position_id()), the frozen direction, and collateral_status. Populated by the per-protocol position materializers.';
+  '[Operational] Per-position deal-type classification (VEC-401). One row per position_id: the deal_type_code, the frozen direction, and collateral_status, all looked-up attributes of the position (not part of the position_id hash). Populated by the per-protocol position materializers.';
 COMMENT ON COLUMN position_classification.position_id IS
   'PK. The bytea(32) position identity from position_id() (VEC-400). No FK to a positions table (positions are materialized per protocol; this row is written alongside them).';
 COMMENT ON COLUMN position_classification.deal_type_code IS
-  'FK->deal_type_ref.deal_type. The position''s deal type (LOAN/BORROW/COLLATERAL/CUSTODY/CUSTODY_COLLATERAL/ALLOCATION/...); part of the position_id hash input.';
+  'FK->deal_type_ref.deal_type. The position''s deal type (LOAN/BORROW/COLLATERAL/CUSTODY/CUSTODY_COLLATERAL/ALLOCATION/...); a looked-up attribute of the position, not part of the position_id.';
 COMMENT ON COLUMN position_classification.direction IS
   'LONG or SHORT, frozen from deal_type_ref.direction at classification time. NULL if the deal type carries no direction.';
 COMMENT ON COLUMN position_classification.collateral_status IS
