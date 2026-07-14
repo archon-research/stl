@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS security_instrument_bridge (
 );
 
 -- Catalog metadata (downstream data-dictionary / schema_master tooling reads pg_catalog comments).
-COMMENT ON TABLE security_instrument_bridge IS 'Maps every on-chain instrument shape (instrument_kind, instrument_key) to a security_id. Soft ref to security_master (no FK: security_id is a non-unique SCD2 key); resolve via security_master_current. Append-only; latest mapping per instrument is security_instrument_bridge_current.';
+COMMENT ON TABLE security_instrument_bridge IS '[Dimension] Maps every on-chain instrument shape (instrument_kind, instrument_key) to a security_id. Soft ref to security_master (no FK: security_id is a non-unique SCD2 key); resolve via security_master_current. Append-only; latest mapping per instrument is security_instrument_bridge_current.';
 COMMENT ON COLUMN security_instrument_bridge.instrument_kind IS 'Instrument shape; one of the CHECK-pinned kinds (token, lending_reserve, morpho_market, morpho_vault, sky_ilk, anchorage_package, maple_loan/pool/strategy).';
 COMMENT ON COLUMN security_instrument_bridge.instrument_key IS 'Id within the kind; composite values joined with '':'' (components are '':''-free: hex/int).';
 COMMENT ON COLUMN security_instrument_bridge.security_id IS 'Soft ref to security_master.security_id (resolve via security_master_current; not an FK).';
@@ -60,7 +60,9 @@ CREATE INDEX IF NOT EXISTS sib_security_idx ON security_instrument_bridge (secur
 CREATE OR REPLACE VIEW security_instrument_bridge_current AS
 SELECT DISTINCT ON (instrument_kind, instrument_key) *
 FROM security_instrument_bridge
+WHERE valid_from <= CURRENT_DATE
 ORDER BY instrument_kind, instrument_key, valid_from DESC, processing_version DESC;
+COMMENT ON VIEW security_instrument_bridge_current IS '[Dimension] Latest effective mapping per (instrument_kind, instrument_key) (valid_from <= today). What VEC-420 resolves security_sk against.';
 
 -- Reads for both roles; append-only writes for the indexer role (INSERT, never UPDATE/DELETE).
 GRANT SELECT ON security_instrument_bridge, security_instrument_bridge_current TO stl_readonly;
