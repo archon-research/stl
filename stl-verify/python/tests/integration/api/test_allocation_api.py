@@ -24,6 +24,7 @@ from tests.integration.seed import (
     GHOST_SWEEP_PROXY_HEX,
     GHOST_TIEBREAK_PROXY_HEX,
     insert_allocation_position,
+    insert_oracle_asset,
     insert_token,
     seed_ghost_balance,
 )
@@ -213,6 +214,9 @@ async def _seed(db_url: str) -> None:
                 oracle_id,
                 Decimal(1),
             )
+            # Enabled oracle_asset mapping keeps this price eligible for the
+            # latest-price reads, which exclude sources with no enabled mapping.
+            await insert_oracle_asset(conn, oracle_id, usdc_id)
 
             # net_flow_usd flow-reconstruction fixture: three aUSDC events in one
             # bucket — +100 in, -40 out, and a 1000 sweep that must net to zero.
@@ -364,6 +368,10 @@ def test_list_allocations_returns_multiple_holdings_for_prime(client: TestClient
     assert ausdc["protocol_name"] == "Aave V3"
     assert isinstance(ausdc["receipt_token_id"], int)
     assert isinstance(ausdc["underlying_token_id"], int)
+    # End-to-end receipt-token pricing: the latest aUSDC balance is 750, the
+    # fixture rows carry no underlying_value, and USDC is priced at 1 USD, so
+    # COALESCE(NULL, 750) * 1 = 750 must surface through the API.
+    assert Decimal(ausdc["amount_usd"]) == Decimal("750")
 
     aweth = by_symbol["aWETH"]
     assert aweth["chain_id"] == 1

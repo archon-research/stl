@@ -2,19 +2,10 @@ package archivingwire
 
 import (
 	"context"
-	"math/big"
 	"testing"
 
-	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
-	"github.com/ethereum/go-ethereum/common"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
-
-type stubMulticaller struct{ addr common.Address }
-
-func (s stubMulticaller) Execute(context.Context, []outbound.Call, *big.Int) ([]outbound.Result, error) {
-	return nil, nil
-}
-func (s stubMulticaller) Address() common.Address { return s.addr }
 
 func TestEnabled(t *testing.T) {
 	tests := []struct {
@@ -61,7 +52,7 @@ func TestBootstrapDisabled(t *testing.T) {
 		t.Fatal("disabled Bootstrap must return non-nil wrap and drain")
 	}
 
-	mc := stubMulticaller{addr: common.HexToAddress("0xabc")}
+	mc := testutil.NewMockMulticaller()
 	if got := wrap(mc); got != mc {
 		t.Fatal("disabled wrap must return the multicaller unchanged")
 	}

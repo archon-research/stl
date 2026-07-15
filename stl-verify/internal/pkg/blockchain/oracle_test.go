@@ -16,18 +16,11 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-// mockMulticaller implements outbound.Multicaller for testing.
-type mockMulticaller struct {
-	executeFn func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error)
-}
-
-func (m *mockMulticaller) Execute(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
-	return m.executeFn(ctx, calls, blockNumber)
-}
-
-func (m *mockMulticaller) Address() common.Address {
-	return common.HexToAddress("0xcA11bde05977b3631167028862bE2a173976CA11")
-}
+// oracleTestBlockHash is the block hash used by the price-fetch tests: with
+// VEC-471 the live fetchers pin reads via ExecuteAtHash, which needs a
+// non-zero hash. Backfill fallback (zero hash → Execute) is covered by its
+// own focused tests.
+var oracleTestBlockHash = common.HexToHash("0xabc123abc123abc123abc123abc123abc123abc123abc123abc123abc123ab")
 
 // testOracleABI loads the oracle ABI. It calls t.Fatal on error.
 func testOracleABI(t *testing.T) *abi.ABI {
@@ -62,7 +55,7 @@ func TestFetchOraclePrices(t *testing.T) {
 	tests := []struct {
 		name        string
 		ctx         context.Context
-		mock        *mockMulticaller
+		mock        *testutil.MockMulticaller
 		wantErr     bool
 		errContains string
 		wantPrices  []*big.Int
@@ -70,8 +63,8 @@ func TestFetchOraclePrices(t *testing.T) {
 		{
 			name: "happy path - prices returned",
 			ctx:  context.Background(),
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			mock: &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					if len(calls) != 1 {
 						t.Fatalf("expected 1 call, got %d", len(calls))
 					}
@@ -86,8 +79,8 @@ func TestFetchOraclePrices(t *testing.T) {
 		{
 			name: "multicall execution error",
 			ctx:  context.Background(),
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			mock: &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					return nil, errors.New("rpc connection refused")
 				},
 			},
@@ -97,8 +90,8 @@ func TestFetchOraclePrices(t *testing.T) {
 		{
 			name: "wrong number of results - zero results",
 			ctx:  context.Background(),
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			mock: &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					return []outbound.Result{}, nil
 				},
 			},
@@ -108,8 +101,8 @@ func TestFetchOraclePrices(t *testing.T) {
 		{
 			name: "wrong number of results - two results",
 			ctx:  context.Background(),
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			mock: &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					return []outbound.Result{
 						{Success: true, ReturnData: abiPackPrices(t, expectedPrices)},
 						{Success: true, ReturnData: nil},
@@ -122,8 +115,8 @@ func TestFetchOraclePrices(t *testing.T) {
 		{
 			name: "getAssetsPrices call failed - Success false",
 			ctx:  context.Background(),
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			mock: &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					return []outbound.Result{
 						{Success: false, ReturnData: nil},
 					}, nil
@@ -135,8 +128,8 @@ func TestFetchOraclePrices(t *testing.T) {
 		{
 			name: "unpack getAssetsPrices error - bad return data",
 			ctx:  context.Background(),
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			mock: &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					return []outbound.Result{
 						{Success: true, ReturnData: []byte{0xde, 0xad, 0xbe, 0xef}},
 					}, nil
@@ -152,8 +145,8 @@ func TestFetchOraclePrices(t *testing.T) {
 				cancel()
 				return ctx
 			}(),
-			mock: &mockMulticaller{
-				executeFn: func(ctx context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			mock: &testutil.MockMulticaller{
+				ExecuteFn: func(ctx context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					return nil, ctx.Err()
 				},
 			},
@@ -171,6 +164,7 @@ func TestFetchOraclePrices(t *testing.T) {
 				oracleAddr,
 				assets,
 				blockNum,
+				oracleTestBlockHash,
 			)
 
 			if tt.wantErr {
@@ -211,8 +205,15 @@ func TestFetchOraclePrices_VerifiesCallTargets(t *testing.T) {
 	assets := []common.Address{common.HexToAddress("0xCC")}
 	prices := []*big.Int{big.NewInt(42)}
 
-	mock := &mockMulticaller{
-		executeFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+	// The read must be pinned to the block hash, not the number: after a reorg
+	// an archive node answers eth_call-by-number with the new canonical price,
+	// which can silently disagree with the reorged block being processed (VEC-471).
+	mock := &testutil.MockMulticaller{
+		ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			t.Fatal("FetchOraclePrices must call ExecuteAtHash for a non-zero block hash, not Execute")
+			return nil, nil
+		},
+		ExecuteAtHashFn: func(_ context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
 			if len(calls) != 1 {
 				t.Fatalf("expected 1 call, got %d", len(calls))
 			}
@@ -222,8 +223,8 @@ func TestFetchOraclePrices_VerifiesCallTargets(t *testing.T) {
 			if calls[0].AllowFailure {
 				t.Error("call[0].AllowFailure = true, want false")
 			}
-			if blockNumber.Int64() != 99 {
-				t.Errorf("blockNumber = %d, want 99", blockNumber.Int64())
+			if blockHash != oracleTestBlockHash {
+				t.Errorf("blockHash = %s, want %s", blockHash, oracleTestBlockHash)
 			}
 			return []outbound.Result{
 				{Success: true, ReturnData: abiPackPrices(t, prices)},
@@ -236,6 +237,7 @@ func TestFetchOraclePrices_VerifiesCallTargets(t *testing.T) {
 		oracleABI,
 		oracleAddr,
 		assets, 99,
+		oracleTestBlockHash,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -254,8 +256,8 @@ func TestFetchOraclePrices_EmptyAssets(t *testing.T) {
 	oracleAddr := common.HexToAddress("0x02")
 	var emptyPrices []*big.Int
 
-	mock := &mockMulticaller{
-		executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	mock := &testutil.MockMulticaller{
+		ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 			return []outbound.Result{
 				{Success: true, ReturnData: abiPackPrices(t, emptyPrices)},
 			}, nil
@@ -267,6 +269,7 @@ func TestFetchOraclePrices_EmptyAssets(t *testing.T) {
 		oracleABI,
 		oracleAddr,
 		[]common.Address{}, 100,
+		oracleTestBlockHash,
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -293,7 +296,7 @@ func TestFetchOraclePricesIndividual(t *testing.T) {
 	tests := []struct {
 		name        string
 		assets      []common.Address
-		mock        *mockMulticaller
+		mock        *testutil.MockMulticaller
 		wantErr     bool
 		errContains string
 		wantResults []AssetPriceResult
@@ -301,8 +304,8 @@ func TestFetchOraclePricesIndividual(t *testing.T) {
 		{
 			name:   "happy path - all tokens succeed",
 			assets: assets,
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			mock: &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					if len(calls) != 2 {
 						t.Fatalf("expected 2 calls, got %d", len(calls))
 					}
@@ -320,8 +323,8 @@ func TestFetchOraclePricesIndividual(t *testing.T) {
 		{
 			name:   "partial failure - second token fails",
 			assets: assets,
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			mock: &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					return []outbound.Result{
 						{Success: true, ReturnData: testutil.PackAssetPrice(t, price1)},
 						{Success: false, ReturnData: nil},
@@ -336,8 +339,8 @@ func TestFetchOraclePricesIndividual(t *testing.T) {
 		{
 			name:   "all tokens fail - no error returned",
 			assets: assets,
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			mock: &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					return []outbound.Result{
 						{Success: false, ReturnData: nil},
 						{Success: false, ReturnData: nil},
@@ -352,8 +355,8 @@ func TestFetchOraclePricesIndividual(t *testing.T) {
 		{
 			name:   "execute error - returns error",
 			assets: assets,
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			mock: &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					return nil, errors.New("rpc connection refused")
 				},
 			},
@@ -363,8 +366,8 @@ func TestFetchOraclePricesIndividual(t *testing.T) {
 		{
 			name:   "result count mismatch - returns error",
 			assets: assets,
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			mock: &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					return []outbound.Result{
 						{Success: true, ReturnData: testutil.PackAssetPrice(t, price1)},
 					}, nil
@@ -376,8 +379,8 @@ func TestFetchOraclePricesIndividual(t *testing.T) {
 		{
 			name:   "bad return data - treated as failure",
 			assets: assets,
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			mock: &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					return []outbound.Result{
 						{Success: true, ReturnData: testutil.PackAssetPrice(t, price1)},
 						{Success: true, ReturnData: []byte{0xde, 0xad}}, // bad data
@@ -392,8 +395,8 @@ func TestFetchOraclePricesIndividual(t *testing.T) {
 		{
 			name:   "empty assets - returns nil",
 			assets: []common.Address{},
-			mock: &mockMulticaller{
-				executeFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+			mock: &testutil.MockMulticaller{
+				ExecuteFn: func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					t.Fatal("Execute should not be called for empty assets")
 					return nil, nil
 				},
@@ -462,8 +465,8 @@ func TestFetchOraclePricesIndividual_VerifiesCallTargets(t *testing.T) {
 	}
 	price := big.NewInt(42)
 
-	mock := &mockMulticaller{
-		executeFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+	mock := &testutil.MockMulticaller{
+		ExecuteFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
 			if len(calls) != 2 {
 				t.Fatalf("expected 2 calls, got %d", len(calls))
 			}

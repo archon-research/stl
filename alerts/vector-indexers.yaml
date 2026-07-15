@@ -1,19 +1,19 @@
 # =============================================================================
 # Vector — indexer alerts (ADR-008 / ORB-200)
 # =============================================================================
-# The morpho and oracle indexers consume blocks from the watcher pipeline and
-# derive product state (positions, prices) into TimescaleDB. They're the last
-# hop before downstream readers see data, so stalls / errors here translate
-# directly into stale customer views.
+# The morpho, oracle and fluid-vault indexers consume blocks from the watcher
+# pipeline and derive product state (positions, prices, vaults) into
+# TimescaleDB. They're the last hop before downstream readers see data, so
+# stalls / errors here translate directly into stale customer views.
 #
-# Two indexers in v1 (morpho, oracle). Each gets its own rules because the
-# Slack-thread spec uses distinct per-indexer metric prefixes
+# Three indexers (morpho, oracle, fluid-vault). Each gets its own rules because
+# the Slack-thread spec uses distinct per-indexer metric prefixes
 # (`morpho_blocks_processed_total`, `oracle_blocks_processed_total`). Once
 # the services are unified onto a single metric name with an `indexer` label,
 # these can collapse into a single rule per signal.
 #
 # Metric source: OTel SDK in each indexer. Series carry:
-#   - service_name="morpho-indexer" | "oracle-price-worker"
+#   - service_name="morpho-indexer" | "oracle-price-worker" | "fluid-vault-indexer"
 #   - k8s_namespace_name="vector"
 #   - cluster="archon-prod" | "archon-staging"  (OTel gateway resource processor)
 #   - chain (for multi-chain indexers)
@@ -25,10 +25,10 @@
 # and `env` as static rule labels (FORBIDDEN_LABELS) but allows `namespace`.
 #
 # Severity → routing (per the alerting routing spec):
-#   critical       → pages (Grafana IRM), prod #at_vector_prod_alerts /
-#                    staging #at_vector_staging_alerts, [CRITICAL], 1h repeat.
-#   warning / info → no page, prod #at_vector_alerts / staging
-#                    #at_vector_staging_alerts, [WARNING]/[INFO], 4h repeat.
+#   critical       → pages (Grafana IRM), prod #at_stl_prod_alerts /
+#                    staging #at_stl_staging_alerts, [CRITICAL], 1h repeat.
+#   warning / info → no page, prod #at_stl_alerts / staging
+#                    #at_stl_staging_alerts, [WARNING]/[INFO], 4h repeat.
 # Per-env routing is automatic via each Mimir tenant's default_webhook_url; no
 # `alert_env` label is needed here — every rule reads objects in its own
 # cluster/tenant (including the kube-state-metrics Down alert), so none cross
@@ -182,6 +182,136 @@ groups:
             latency is `{{ $value | printf "%.2fs" }}` over 15m. Indexer is
             degraded; expect lag in downstream oracle price state.
 
+      - alert: VectorOracleUnitStale
+        # Per-oracle-unit freshness (PR #548 review). The whole-worker Stalled /
+        # ErrorsHigh rules cannot see a single oracle unit going dark: a unit
+        # hard-erroring on every block keeps oracle_blocks_processed_total
+        # advancing (status="error"), a feed reverting forever is guard-skipped
+        # without erroring, and change-only writes mean a frozen upstream
+        # produces no rows anyway.
+        #
+        # Gauge `oracle.unit.last_success_timestamp_seconds` (OTel) ->
+        # Prometheus `oracle_unit_last_success_timestamp_seconds`, set by the
+        # worker after every successful per-unit pass, written rows or not, and
+        # baselined per unit at startup: a unit that never succeeds still
+        # creates the series and goes stale one threshold after a deploy, and a
+        # restart re-arms the alert instead of silencing it. Because the gauge
+        # advances regardless of whether the price CHANGED, the signal is "the
+        # worker stopped successfully processing this unit", NOT "the upstream
+        # feed stopped updating". One tight generic threshold therefore works
+        # for every oracle type, including slow NAV-heartbeat feeds (e.g.
+        # JTRSY/JAAA/STAC/BUIDL-I, ~daily): no per-feed-heartbeat tuning. 30m
+        # of consecutive failure (~150 mainnet blocks at ~12s) is decisively
+        # wedged, in the same spirit as the 15m Stalled rule but with slack for
+        # SQS redelivery/backoff bursts.
+        #
+        # Gated on the worker still consuming blocks so a whole-worker STALL
+        # stays VectorOracleIndexerStalled's page instead of also firing once
+        # per unit here. The gate does NOT keep whole-worker error storms out:
+        # a pre-loop failure erroring every block (feed-decimals validation,
+        # block-timestamp resolution) still counts blocks with status="error",
+        # passes the gate, and fires this alert for every unit at once. That
+        # is intended: a single attempt per block on mainnet cadence is
+        # ~0.083 err/s, under ErrorsHigh's 0.1/s threshold, so ErrorsHigh is
+        # unreliable for that storm (SQS redeliveries multiply attempts and
+        # can eventually push it over; avalanche-c cadence trips it outright)
+        # and these warnings may be the first or only page (the runbook's
+        # empty-grep branch covers diagnosis).
+        # Known gaps: a dead OTLP export silences BOTH rules (Stalled is a
+        # bare rate()==0, which goes no-data on staleness-expired series; see
+        # the fluid-vault Stalled zero-fill note), and a unit dropped from the
+        # registry stops exporting its series entirely, which an instant
+        # vector cannot age. Both need follow-up (kube-state zero-fill on
+        # Stalled / an expected-units signal). Also: startup re-baselining
+        # means a worker restarting more often than every ~30m keeps a
+        # never-succeeding unit under threshold forever (an isolated restart
+        # merely delays firing by ~35m).
+        expr: |
+          (
+            time()
+            - max by (chain, cluster, oracle_name) (
+                oracle_unit_last_success_timestamp_seconds{k8s_namespace_name="vector"}
+              )
+          ) > 1800
+          and on (chain, cluster)
+          sum by (chain, cluster) (
+            rate(oracle_blocks_processed_total{k8s_namespace_name="vector"}[5m])
+          ) > 0
+        for: 5m
+        labels:
+          team: vector
+          severity: warning
+          component: oracle-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector oracle unit `{{ $labels.oracle_name }}` stale on {{ $labels.chain }}"
+          description: |
+            `oracle-price-worker` on chain `{{ $labels.chain }}` is still
+            consuming blocks but has not completed a successful pass for oracle
+            unit `{{ $labels.oracle_name }}` in >30m. Prices from this unit in
+            TimescaleDB are going stale while the worker looks healthy. Check
+            the pod logs for per-unit errors and the oracle registry for a
+            misconfigured unit.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectororacleunitstale
+
+      - alert: VectorOracleUnitReadsFailing
+        # Per-oracle-unit feed loss (PR #566 review). The staleness rule above
+        # cannot see it: a reverting feed is guard-skipped without erroring,
+        # so the pass "succeeds", freshness advances, and the unit acks blocks
+        # while prices for the dead feed's tokens freeze in TimescaleDB.
+        #
+        # Counter `oracle.unit.reads_failed` (OTel) -> Prometheus
+        # `oracle_unit_reads_failed_total`: per pass, the pass's read-outcome
+        # count minus the usable prices fetched (reverted feeds and zero
+        # quotes both count as failed). A persistently dark feed therefore
+        # accumulates failures at >=1 per processed block, which is what the
+        # expression matches: the unit's failed-read rate exceeding 0.9x the
+        # chain's block rate for 30m. That covers feed-path total loss (every
+        # feed dark scores >=1x; erc4626/curve total loss hard-errors into
+        # the staleness rule instead) and partial loss (one dark feed scores
+        # exactly 1x) generically, with no per-unit feed-count tuning. The
+        # unit's SUMMED failure rate is what fires: sporadic per-feed reverts
+        # stay quiet only while the unit's combined rate stays under ~0.9
+        # per block.
+        #
+        # The block-rate comparison self-gates on the worker being alive: a
+        # stalled worker drives both sides to zero and the strict > cannot
+        # fire. Hard unit errors are the staleness rule's page, not this
+        # one's: erroring at or before the fetch records no reads, and a
+        # pass failing after the fetch (detect/upsert) records its reads
+        # normally (zero failed unless feeds were also dark); either way the
+        # persistent error freezes the freshness gauge. The curve path never
+        # soft-skips (any sub-read failure hard-errors the pass), so curve
+        # units cannot fire here at all. Same known OTLP-export and
+        # dropped-unit gaps as the staleness rule above.
+        expr: |
+          sum by (chain, cluster, oracle_name) (
+            rate(oracle_unit_reads_failed_total{k8s_namespace_name="vector"}[30m])
+          )
+          > on (chain, cluster) group_left ()
+          (
+            0.9 * sum by (chain, cluster) (
+              rate(oracle_blocks_processed_total{k8s_namespace_name="vector"}[30m])
+            )
+          )
+        for: 10m
+        labels:
+          team: vector
+          severity: warning
+          component: oracle-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector oracle unit `{{ $labels.oracle_name }}` losing feed reads on {{ $labels.chain }}"
+          description: |
+            Oracle unit `{{ $labels.oracle_name }}` on chain
+            `{{ $labels.chain }}` has been failing at least one price read on
+            nearly every block for >30m (reverting feed or zero quote,
+            guard-skipped without erroring). Prices for the affected tokens
+            are frozen in TimescaleDB while the worker, the unit's freshness,
+            and every whole-worker signal look healthy. Check the pod logs for
+            "feed call failed" to identify the feed.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectororacleunitreadsfailing
+
       # ---------------------------------------------------------------------
       # Raw SC call archiving (VEC-364 / PR #399)
       # ---------------------------------------------------------------------
@@ -293,6 +423,13 @@ groups:
             (Alchemy remains the fallback). A total stall is covered separately by
             VectorArchivingStalled.
 
+  # Own rule GROUP but same file, so it keeps the filename-derived Mimir
+  # namespace `vector-indexers`. Splitting the group (not the file) keeps each
+  # group under Mimir's 20-rules-per-group limit without tripping the
+  # mimir-rules-sync namespace allowlist.
+  - name: vector-maple-indexer
+    interval: 1m
+    rules:
       # =====================================================================
       # maple-graphql-indexer (VEC-320)
       # =====================================================================
@@ -445,6 +582,34 @@ groups:
             and the pools phase before pool state goes stale.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectormaplepoolwriteszero
 
+      - alert: VectorMapleFTLBookActive
+        # The fixed-term-loan book is dormant today (0 live FTLs), so the FTL
+        # phase normally writes 0 rows. There is deliberately NO zero-rows alert
+        # for maple_ftl_loan_state — it would fire constantly (see the note on
+        # VectorMaplePoolWritesZero). The signal worth catching is the inverse:
+        # a NONZERO FTL write means Maple reactivated the product. Fire info so
+        # an operator confirms the FTL path end-to-end and adds the data-quality
+        # alerts (e.g. an FTL silent-empty alert analogous to pools) that only
+        # make sense once the book is live.
+        expr: |
+          sum by (chain, cluster) (
+            increase(maple_sync_rows_written_total{table="maple_ftl_loan_state", k8s_namespace_name="vector"}[1h])
+          ) > 0
+        for: 0m
+        labels:
+          team: vector
+          severity: info
+          component: maple-graphql-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector maple-graphql-indexer wrote fixed-term-loan rows (book reactivated)"
+          description: |
+            `maple_ftl_loan_state` received > 0 rows in 1h. The FTL book was
+            dormant, so a nonzero write means Maple reactivated fixed-term
+            loans. Verify the FTL phase end-to-end and add the FTL
+            data-quality alerts that only apply once the book is live.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectormapleftlbookactive
+
       - alert: VectorMapleSchemaDrift
         # null-downgrade canary. Rather than firing on ANY null (acmRatio, tvl
         # and collateral_value_usd are legitimately null on many loans/pools —
@@ -479,6 +644,80 @@ groups:
             schema change. Cross-check the published SDL.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectormapleschemadrift
 
+      - alert: VectorMapleCollateralUnpriceable
+        # Collateral USD price came back null in a non-pending state — Maple's
+        # oracle layer had no fiat feed for the token, so the client tolerated a
+        # "No fiat value" GraphQL error and persisted asset_value_usd = NULL
+        # (reason="unpriceable"; reason="pending" is the normal DepositPending
+        # null and is NOT alerted). Distinct from VectorMapleSchemaDrift: that
+        # canary watches contractually-populated fields, this watches a
+        # data-quality hole the error path deliberately swallows.
+        #
+        # Baselined off the first live occurrences (staging, 2026-07): the shape
+        # is confirmed — path [openTermLoans collateral assetValueUsd],
+        # extensions.code=INTERNAL_SERVER_ERROR, partial data present — and the
+        # client's temporary diagnostic warn has been removed.
+        #
+        # Persistence, not volume: the counter increments once per unpriceable
+        # loan per cycle, so a rate/count threshold conflates a many-loan single
+        # cycle (a blip on a token backing several loans) with a genuinely chronic
+        # gap. Instead detect persistence — a [20m] window spans ~2 sync cycles
+        # (interval 10m): a lone gap self-heals, so its increase falls back to 0
+        # within 20m (< the 30m `for`) and never fires; a gap recurring every
+        # cycle keeps increase[20m] > 0 continuously and fires after 30m. This is
+        # loan-count-independent. Per-token so one bad token does not mask others.
+        expr: |
+          sum by (chain, cluster, token) (
+            increase(maple_sync_null_downgrades_total{
+              field="collateral_asset_value_usd",
+              reason="unpriceable",
+              k8s_namespace_name="vector"
+            }[20m])
+          ) > 0
+        for: 30m
+        labels:
+          team: vector
+          severity: warning
+          component: maple-graphql-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector maple-graphql-indexer collateral unpriceable: `{{ $labels.token }}`"
+          description: |
+            Collateral token `{{ $labels.token }}` has stayed unpriceable across
+            consecutive cycles for >30m (`{{ $value | printf "%.0f" }}`
+            null-downgrade(s) in the trailing 20m): Maple's oracle had no fiat
+            feed, so its USD value persisted as NULL. A single-cycle blip
+            self-heals and does not fire; a sustained gap is an upstream Maple
+            pricing gap.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectormaplecollateralunpriceable
+
+      - alert: VectorAllocationUnderlyingValueFailures
+        # Silent data-quality hole for VEC-307: the prime-allocation-indexer
+        # wrote allocation_position rows whose underlying_value should be
+        # computable but persisted as NULL. The write path succeeds, so no
+        # error alert fires; this is the only signal for that gap.
+        # `reason` distinguishes the failure mode: convert_failed,
+        # missing_asset_address, asset_metadata_missing.
+        expr: |
+          sum by (chain, cluster, token_type, reason) (
+            increase(allocation_underlying_value_failures_total{k8s_namespace_name="vector"}[1h])
+          ) > 0
+        for: 30m
+        labels:
+          team: vector
+          severity: warning
+          component: prime-allocation-indexer
+          namespace: vector
+        annotations:
+          summary: "Allocation positions persisted with NULL underlying_value ({{ $labels.token_type }}, {{ $labels.reason }}, chain {{ $labels.chain }})"
+          description: >-
+            The prime-allocation-indexer wrote positions whose underlying_value
+            should be computable but persisted as NULL for 30+ minutes. The
+            write path succeeds, so nothing else alerts -- this is the
+            silent-data-quality-hole signal for VEC-307. USD exposure derived
+            from these rows undercounts until resolved.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorallocationunderlyingvaluefailures
+
       - alert: VectorMaplePhaseLatencyHigh
         # Phase p95 duration. Normal p95 is seconds (loans ~4s, others <1s).
         # >30s means the Maple API is degraded; alert well before a phase
@@ -505,3 +744,604 @@ groups:
             `{{ $value | printf "%.1fs" }}` over 15m. The Maple GraphQL API is
             likely degraded; expect lag and possible cycle timeouts.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectormaplephaselatencyhigh
+
+
+  # fluid-vault-indexer (VEC-438) — separate group, NOT more rules in
+  # vector-indexers above: Mimir caps rules per rule group at 20 and
+  # vector-indexers already carries 19. Namespace comes from the file, groups
+  # within it are free, so this still matches the sync allowlist.
+  - name: vector-fluid-vault-indexer
+    interval: 1m
+    rules:
+      # Consumes Ethereum BlockEvents, reads end-of-block Fluid vault state from
+      # the VaultResolver via Multicall3, appends fluid_vault_state snapshots into
+      # TimescaleDB. Mainnet (chain 1) only.
+      #
+      # Rules live in this shared file (not a vector-fluid-vault-indexer.yaml) so
+      # the mimir-rules-sync namespace allowlist
+      # `^vector-(watcher|backup-worker|indexers|postgres|cronjobs)$`
+      # (.github/workflows/alerts.yml) actually syncs them — a vector-fluid-*
+      # namespace would be silently dropped.
+      #
+      # Metric coverage: honest signals available today are:
+      #   - kube_deployment_status_replicas_available (kube-state-metrics) —
+      #     process liveness, independent of the OTel pipeline (see MapleIndexerDown).
+      #   - blocks_processed_total{service_name="fluid-vault-indexer", chain, status} —
+      #     one sample per consumed block (success/error), via the shared
+      #     telemetry.Metrics counter. This is the per-block liveness signal the
+      #     Stalled rule keys on: it advances every ~12s on mainnet regardless of
+      #     whether an in-scope vault was touched, so a flat counter means the
+      #     consume loop stopped (or OTLP broke), not a quiet vault period.
+      #   - multicall_batch_size_count{service_name="fluid-vault-indexer", chain} —
+      #     advances on startup reconcile and on every block touching a known vault
+      #     (vault-activity signal, NOT liveness; can be flat for days).
+      #   - archive_writes_total / archive_object_size_bytes — already covered by
+      #     the VectorArchiving* rules above (keyed by service_name), which include
+      #     this worker once ARCHIVE_SC_CALLS=true. NOT duplicated here.
+      # Error-rate / silent-empty (rows-written==0) / RPC-latency alerts are still
+      # OMITTED: no dedicated metric exists to make them fire honestly yet. Grow this
+      # set with FluidVaultIndexerErrorsHigh / RowsZero / RPCLatencyHigh when the
+      # service is further instrumented (VEC-452 phase 2). See the runbook.
+
+      - alert: VectorFluidVaultIndexerDown
+        # Process liveness from kube-state-metrics (deployment/namespace labels,
+        # NOT the OTel k8s_namespace_name), so it fires even when the OTel pipeline
+        # is the thing that broke. <1 available replica = no pod running, so no
+        # Fluid vault snapshots are written. Keystone freshness signal for a
+        # service with no internal block-progress metric.
+        expr: |
+          max by (cluster) (
+            kube_deployment_status_replicas_available{
+              deployment="fluid-vault-indexer", namespace="vector"
+            }
+          ) < 1
+        for: 10m
+        labels:
+          team: vector
+          severity: critical
+          component: fluid-vault-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector fluid-vault-indexer has no available replica"
+          description: |
+            `fluid-vault-indexer` Deployment has <1 available replica for >10m.
+            The worker is not running; no Fluid vault state is being written and
+            the SQS backlog is growing.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorfluidvaultindexerdown
+
+      - alert: VectorFluidVaultIndexerStalled
+        # No block consumed for 15m. The worker consumes ~1 BlockEvent per mainnet
+        # block (~12s), so blocks_processed_total advances continuously regardless
+        # of vault activity; the only zero states are a wedged consume loop or a
+        # dead OTLP export — both page-worthy, hence CRITICAL (the old multicall
+        # expression was warning because a quiet vault period could legitimately
+        # read zero). The `or (… * 0)` zero-fill keeps the alive-but-export-dead
+        # case firing: when OTLP breaks, the counter series staleness-expires and
+        # a bare `rate(...) == 0` returns no data (silent); zero-filling from
+        # kube-state (independent of the OTel pipeline) makes it fire. Gated on
+        # >=1 replica so it does not double-fire alongside Down on a dead process.
+        expr: |
+          (
+            (
+              sum by (cluster) (
+                rate(blocks_processed_total{
+                  service_name="fluid-vault-indexer", k8s_namespace_name="vector"
+                }[5m])
+              )
+              or
+              max by (cluster) (
+                kube_deployment_status_replicas_available{
+                  deployment="fluid-vault-indexer", namespace="vector"
+                }
+              ) * 0
+            ) == 0
+          )
+          and on (cluster)
+          (
+            max by (cluster) (
+              kube_deployment_status_replicas_available{
+                deployment="fluid-vault-indexer", namespace="vector"
+              }
+            ) >= 1
+          )
+        for: 15m
+        labels:
+          team: vector
+          severity: critical
+          component: fluid-vault-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector fluid-vault-indexer stalled (no block consumed >15m)"
+          description: |
+            `fluid-vault-indexer` is up but has consumed no block for >15m (or its
+            blocks_processed_total series vanished). The SQS consume loop is wedged
+            or the OTLP metric export broke; possibly no Fluid vault state is being
+            written. Check the pod logs and SQS backlog.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorfluidvaultindexerstalled
+
+  # curve-indexer (VEC-260) — Curve DEX pool/swap/liquidity indexer.
+  - name: vector-curve-indexer
+    interval: 1m
+    rules:
+      # ---------------------------------------------------------------------
+      # CRITICAL
+      # ---------------------------------------------------------------------
+
+      - alert: VectorCurveIndexerStalled
+        expr: |
+          sum by (chain, cluster) (
+            rate(curve_blocks_processed_total{status="success", k8s_namespace_name="vector"}[5m])
+          ) == 0
+        for: 15m
+        labels:
+          team: vector
+          severity: critical
+          component: curve-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector curve-indexer stalled on {{ $labels.chain }}"
+          description: |
+            `curve-indexer` on chain `{{ $labels.chain }}` has not
+            advanced for >15m. Curve pool state in TimescaleDB will go
+            stale.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorcurveindexerstalled
+
+      # ---------------------------------------------------------------------
+      # WARNING
+      # ---------------------------------------------------------------------
+
+      - alert: VectorCurveIndexerErrorsHigh
+        expr: |
+          sum by (chain, cluster) (
+            rate(curve_errors_total{k8s_namespace_name="vector"}[10m])
+          ) > 0.1
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: curve-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector curve-indexer error rate >0.1/s on {{ $labels.chain }}"
+          description: |
+            `curve-indexer` on chain `{{ $labels.chain }}` is throwing
+            `{{ $value | printf "%.2f" }}` errors/s over 15m. Investigate
+            pod logs before this turns into a stall.
+
+      - alert: VectorCurveIndexerBlockLatencyHigh
+        # Block processing p99 >3s for 15m. Sustained high latency means the
+        # multicall/RPC path is degraded or pool snapshot decoding is blocking.
+        #
+        # Histogram `curve.block.duration_seconds` (OTel instrument), exported
+        # as `curve_block_duration_seconds_bucket`.
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (chain, cluster, le) (
+              rate(curve_block_duration_seconds_bucket{
+                k8s_namespace_name="vector"
+              }[10m])
+            )
+          ) > 3
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: curve-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector curve-indexer p99 block latency >3s on {{ $labels.chain }}"
+          description: |
+            `curve-indexer` on chain `{{ $labels.chain }}` p99 block
+            processing latency is `{{ $value | printf "%.2fs" }}` over 15m.
+            Indexer is degraded; expect lag in downstream Curve pool state.
+
+      - alert: VectorCurveIndexerNoStateWritten
+        # Silent-empty guard: blocks are advancing (success rate > 0) but no
+        # pool-state snapshot rows are being written. The error path will NOT
+        # catch a quietly-empty snapshot loop (e.g. buildSnapshotSet always
+        # returns empty, or all SnapshotState calls silently no-op). This
+        # alert catches that gap.
+        #
+        # Counter `curve.state.rows.written` (OTel) -> Prometheus
+        # `curve_state_rows_written_total`. Emitted by the Coordinator after
+        # each successful WithTransaction that writes at least one state row.
+        #
+        # Gating on blocks processed is sound HERE, unlike uniswap-v3: curve's
+        # periodic sweep (SWEEP_BLOCKS) re-snapshots every pool on a fixed block
+        # cadence, so a healthy curve worker writes state rows through even a
+        # totally quiet market. Zero rows while blocks advance is therefore
+        # genuinely actionable. Do not copy this shape to a sweepless worker.
+        #
+        # `unless`, not `and … == 0`: RecordStateRows is a no-op for n<=0, so
+        # under the exact bug this targets (snapshot loop always empty, or on a
+        # fresh deploy that has never written a row) the state-rows series is
+        # never created, and `and … == 0` yields no match on the empty right
+        # side — the alert could never fire, going blind precisely when curve
+        # has never written state. `A > 0 unless B > 0` fires on an absent OR
+        # zero series. Do not revert to `and`.
+        expr: |
+          sum by (chain, cluster) (
+            rate(curve_blocks_processed_total{status="success", k8s_namespace_name="vector"}[30m])
+          ) > 0
+          unless
+          sum by (chain, cluster) (
+            rate(curve_state_rows_written_total{k8s_namespace_name="vector"}[30m])
+          ) > 0
+        for: 10m
+        labels:
+          team: vector
+          severity: warning
+          component: curve-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector curve-indexer writing no state rows on {{ $labels.chain }}"
+          description: |
+            `curve-indexer` on chain `{{ $labels.chain }}` has processed
+            blocks successfully for 30m but written zero pool-state snapshot
+            rows. The snapshot loop may be silently empty (all pools skipped,
+            sweep disabled, or snapshotSet always returning empty).
+
+  # uniswap-v3-indexer (VEC-261) — Uniswap V3 DEX pool/swap/liquidity indexer.
+  # Runs via the unified dex-indexer binary (DEX=uniswap-v3); metric prefix
+  # uniswap_v3 (dextelemetry.NewTelemetry("uniswap_v3", ...) in
+  # cmd/workers/dex-indexer/factories.go). Unlike curve, there is no sweep:
+  # state/tick rows are written only for pools touched by decoded events in
+  # the block (dexconsumer.DueSet), so a quiet block with no Uniswap V3
+  # activity legitimately writes zero rows.
+  - name: vector-uniswap-v3-indexer
+    interval: 1m
+    rules:
+      # ---------------------------------------------------------------------
+      # CRITICAL
+      # ---------------------------------------------------------------------
+
+      - alert: VectorUniswapV3IndexerStalled
+        expr: |
+          sum by (chain, cluster) (
+            rate(uniswap_v3_blocks_processed_total{status="success", k8s_namespace_name="vector"}[5m])
+          ) == 0
+        for: 15m
+        labels:
+          team: vector
+          severity: critical
+          component: uniswap-v3-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector uniswap-v3-indexer stalled on {{ $labels.chain }}"
+          description: |
+            `uniswap-v3-indexer` on chain `{{ $labels.chain }}` has not
+            advanced for >15m. Uniswap V3 pool state in TimescaleDB will go
+            stale.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv3indexerstalled
+
+      # ---------------------------------------------------------------------
+      # WARNING
+      # ---------------------------------------------------------------------
+
+      - alert: VectorUniswapV3IndexerErrorsHigh
+        expr: |
+          sum by (chain, cluster) (
+            rate(uniswap_v3_errors_total{k8s_namespace_name="vector"}[10m])
+          ) > 0.1
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: uniswap-v3-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector uniswap-v3-indexer error rate >0.1/s on {{ $labels.chain }}"
+          description: |
+            `uniswap-v3-indexer` on chain `{{ $labels.chain }}` is throwing
+            `{{ $value | printf "%.2f" }}` errors/s over 15m. Investigate
+            pod logs before this turns into a stall.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv3indexererrorshigh
+
+      - alert: VectorUniswapV3IndexerBlockLatencyHigh
+        # Block processing p99 >3s for 15m. Sustained high latency means the
+        # multicall/RPC path (DueSet snapshot reads) is degraded or event
+        # decoding/persistence is blocking.
+        #
+        # Histogram `uniswap_v3.block.duration_seconds` (OTel instrument, with
+        # explicit seconds-scale buckets set in dextelemetry.NewTelemetry —
+        # the ms-scale default would pin histogram_quantile near the top
+        # bucket), exported as `uniswap_v3_block_duration_seconds_bucket`.
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (chain, cluster, le) (
+              rate(uniswap_v3_block_duration_seconds_bucket{
+                k8s_namespace_name="vector"
+              }[10m])
+            )
+          ) > 3
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: uniswap-v3-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector uniswap-v3-indexer p99 block latency >3s on {{ $labels.chain }}"
+          description: |
+            `uniswap-v3-indexer` on chain `{{ $labels.chain }}` p99 block
+            processing latency is `{{ $value | printf "%.2fs" }}` over 15m.
+            Indexer is degraded; expect lag in downstream Uniswap V3 pool
+            state.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv3indexerblocklatencyhigh
+
+      - alert: VectorUniswapV3IndexerNotWritingState
+        # Silent-empty guard, HALF ONE of two: pools WERE touched by decoded
+        # events, but no state/tick snapshot rows came out the other side. The
+        # error path will NOT catch a due-set that goes quietly empty (DueSet
+        # returning nothing for a touched pool, every snapshotDueSet call
+        # no-opping, or every state INSERT hitting ON CONFLICT DO NOTHING) —
+        # there is no error, just no rows. This alert catches that.
+        #
+        # It deliberately does NOT catch a touched-pool set that is always
+        # empty (dead registry, address-match regression): that zeroes this
+        # rule's own left side and makes it un-fireable. VectorUniswapV3Indexer
+        # NoPoolsTouched below is the other half, and covers exactly that class.
+        # The two are complementary; neither alone is the silent-empty guard.
+        #
+        # The left side gates on `uniswap_v3.pools.touched` (OTel) -> Prometheus
+        # `uniswap_v3_pools_touched_total`, NOT on blocks processed. uniswap-v3
+        # runs SnapshotTracker(0) — no sweep — so state rows are written only for
+        # pools an event touched in that block. Gating on blocks processed made
+        # every quiet market window look identical to a bug: the seeded registry
+        # is 18 wstETH/LST/LRT pools whose real cadence is 3-28 state rows/hour,
+        # so 30m stretches with zero touches occur nightly and the rule fired on
+        # a healthy indexer (VEC-329 rollout, 2026-07-13). No touches now means
+        # no expectation of rows, and the alert stays silent.
+        #
+        # pools.touched is recorded from handleBlock's decode-stage touchedIDs,
+        # upstream of DueSet, and both counters are recorded only after a
+        # successful commit. Sourcing the gate from DueSet instead would zero
+        # both sides under the exact bug this targets and go blind.
+        #
+        # `unless`, not `and … == 0`: RecordStateRows is a no-op for n<=0, so
+        # under that bug (or on a fresh deploy) the state-rows counter series is
+        # never created, and `and … == 0` yields no match on the empty right
+        # side — the alert could never fire. `A > 0 unless B > 0` keeps each
+        # (chain,cluster) that is touching pools unless it is also writing state
+        # rows, so an absent OR zero state-rows series correctly fires. Do not
+        # revert to `and`.
+        expr: |
+          sum by (chain, cluster) (
+            rate(uniswap_v3_pools_touched_total{k8s_namespace_name="vector"}[30m])
+          ) > 0
+          unless
+          sum by (chain, cluster) (
+            rate(uniswap_v3_state_rows_written_total{k8s_namespace_name="vector"}[30m])
+          ) > 0
+        for: 10m
+        labels:
+          team: vector
+          severity: warning
+          component: uniswap-v3-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector uniswap-v3-indexer writing no state rows on {{ $labels.chain }}"
+          description: |
+            `uniswap-v3-indexer` on chain `{{ $labels.chain }}` has decoded
+            events touching registered pools for 30m but written zero
+            state/tick snapshot rows. Pools are being touched, so this is not a
+            quiet market: the due-set (DueSet) is likely silently empty, every
+            snapshotDueSet call is no-opping, or every state INSERT is hitting
+            ON CONFLICT DO NOTHING.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv3indexernotwritingstate
+
+      - alert: VectorUniswapV3IndexerNoPoolsTouched
+        # Silent-empty guard, HALF TWO: blocks are advancing but NOT ONE
+        # registered pool has been touched by a decoded event. Covers the class
+        # NotWritingState structurally cannot (it gates on pools.touched, so an
+        # always-empty touched set makes its left side absent and un-fireable):
+        # an empty/mis-seeded pool registry for this chain, an address-match or
+        # poolsByAddr regression, or a pool set that has gone entirely dead.
+        # None of these raise an error — blocks_processed keeps advancing
+        # happily — so nothing else in this group would ever page.
+        #
+        # 6h window, NOT 30m. This is the window that has to absorb a quiet
+        # market, and the 18 wstETH/LST/LRT pools genuinely produce 30m stretches
+        # with zero touches (that is what made the old blocks-processed gate on
+        # NotWritingState a false positive; see its comment). Measured cadence in
+        # staging is 3-28 state rows/hour, every hour — so 6h with zero touches
+        # is ~30x the worst observed quiet gap and cannot be a lull. Detection is
+        # slower than the old 30m rule, which is the correct trade: the failures
+        # this catches (dead registry, broken address match) are persistent, not
+        # transient, and a rule that pages nightly on healthy data gets muted.
+        #
+        # `unless`, not `and … == 0`: RecordPoolsTouched no-ops for n<=0, so a
+        # worker that never touches a pool never creates the series at all, and
+        # `and … == 0` would find no match on the empty right side — blind in
+        # exactly the case this exists for. Do not revert to `and`.
+        expr: |
+          sum by (chain, cluster) (
+            rate(uniswap_v3_blocks_processed_total{status="success", k8s_namespace_name="vector"}[6h])
+          ) > 0
+          unless
+          sum by (chain, cluster) (
+            rate(uniswap_v3_pools_touched_total{k8s_namespace_name="vector"}[6h])
+          ) > 0
+        for: 10m
+        labels:
+          team: vector
+          severity: warning
+          component: uniswap-v3-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector uniswap-v3-indexer touching no pools on {{ $labels.chain }}"
+          description: |
+            `uniswap-v3-indexer` on chain `{{ $labels.chain }}` has processed
+            blocks successfully for 6h without a single decoded event touching
+            a registered pool. At the seeded registry's normal cadence this is
+            not a quiet market: suspect an empty or mis-seeded pool registry for
+            this chain, or an address-matching regression in poolsByAddr.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv3indexernopoolstouched
+
+  # CEX order book indexer (VEC-374). Streams L2 books from an exchange over a
+  # WebSocket and persists periodic top-N snapshots. One pod per exchange
+  # (service_name="cex-orderbook-indexer-<exchange>", label `exchange`). Unlike
+  # the block-driven indexers there is no SQS queue: a failed write is dropped
+  # and the next tick re-samples, so these fire on the modes that don't
+  # self-heal. (The rules-sync contract only allows the fixed set of file
+  # basenames, so the cex rules live here in the shared indexers file.)
+  # =========================================================================
+  - name: vector-cex-orderbook
+    interval: 1m
+    rules:
+      - alert: VectorCexOrderbookPersistFailing
+        # rate>0 sustained 15m = failures recurring throughout the window; a
+        # single transient blip clears within the [10m] window and resets `for`.
+        # Kept interval-independent rather than a cadence-relative threshold
+        # (ORDERBOOK_INTERVAL is configurable per pod).
+        expr: |
+          sum by (exchange, cluster) (
+            rate(orderbook_persist_failures_total{k8s_namespace_name="vector"}[10m])
+          ) > 0
+        for: 15m
+        labels:
+          team: vector
+          severity: critical
+          component: cex-orderbook-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector cex-orderbook-indexer failing to persist on {{ $labels.exchange }}"
+          description: |
+            `cex-orderbook-indexer` for `{{ $labels.exchange }}` has logged
+            snapshot persistence failures continuously for >15m. The WebSocket
+            is likely fine but nothing is reaching TimescaleDB — a silent data
+            hole the drop-and-continue path will not self-heal (e.g. auth, a
+            missing table, or a saturated DB pool).
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorcexorderbookpersistfailing
+
+      - alert: VectorCexOrderbookStreamStalled
+        expr: |
+          max by (exchange, cluster) (
+            orderbook_last_update_age_seconds{k8s_namespace_name="vector"}
+          ) > 120
+        for: 10m
+        labels:
+          team: vector
+          severity: critical
+          component: cex-orderbook-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector cex-orderbook-indexer stream stalled on {{ $labels.exchange }}"
+          description: |
+            The oldest symbol on `{{ $labels.exchange }}` has had no order book
+            update for >120s sustained over 10m. The feed has silently gone
+            dead; persisted snapshots are stale (and stale symbols stop being
+            written, so the series goes flat).
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorcexorderbookstreamstalled
+
+      - alert: VectorCexOrderbookDown
+        # Availability companion to StreamStalled, mirroring the Maple
+        # Stalled/Down pair (VEC-360). orderbook_last_update_age_seconds is a gauge from
+        # the pod's own OTLP export, so it disappears on a pod/exporter outage
+        # and StreamStalled goes silent (no series to compare). kube-state-metrics
+        # is independent of that export, so this still fires when the process or
+        # the metrics pipeline is the thing that died. Regex covers the
+        # per-exchange fleet (coinbase|okx|kraken).
+        expr: |
+          max by (deployment, cluster) (
+            kube_deployment_status_replicas_available{
+              deployment=~"cex-orderbook-indexer-.*", namespace="vector"
+            }
+          ) < 1
+        for: 10m
+        labels:
+          team: vector
+          severity: critical
+          component: cex-orderbook-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector cex-orderbook-indexer `{{ $labels.deployment }}` has no available replica"
+          description: |
+            `{{ $labels.deployment }}` has <1 available replica for >10m. The
+            order book indexer is not running; no snapshots are being taken. If
+            VectorCexOrderbookStreamStalled is firing too, this is the root
+            cause (process down, not a metrics-pipeline issue).
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorcexorderbookdown
+
+      - alert: VectorCexOrderbookPersistLatencyHigh
+        # p99 batch-write latency to TimescaleDB. A top-N JSONB insert is normally
+        # single-digit ms; sustained >1s means the DB/pool is degraded and writes
+        # risk overrunning the snapshot interval (default 5s) and dropping ticks.
+        # Histogram orderbook.persist.duration_seconds. Threshold is a pre-baseline
+        # estimate — tune off a few days of staging data (cf. the maple latency
+        # alert). Warning: a precursor to drops, not yet an outage.
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (exchange, cluster, le) (
+              rate(orderbook_persist_duration_seconds_bucket{
+                k8s_namespace_name="vector"
+              }[10m])
+            )
+          ) > 1
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: cex-orderbook-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector cex-orderbook-indexer p99 persist latency >1s on {{ $labels.exchange }}"
+          description: |
+            `cex-orderbook-indexer` for `{{ $labels.exchange }}` p99 snapshot
+            write latency is `{{ $value | printf "%.2fs" }}` over 10m. The DB or
+            connection pool is degraded; writes risk overrunning the snapshot
+            interval and dropping ticks before it escalates to persist failures.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorcexorderbookpersistlatencyhigh
+
+  # =====================================================================
+  # RPC transport (internal/pkg/rpchttp retry transport) — PR #505
+  # =====================================================================
+  # Cross-cutting: every worker dialing via rpchttp.DialEthereum (oracle /
+  # morpho / sparklend / prime / psm3 indexers, dex bootstrap, and the
+  # backfillers via NewBackfillerClient) emits transport-level retry telemetry:
+  #   rpc_http_attempts_total{server_address,rpc_http_status_code}  (every attempt)
+  #   rpc_http_retries_total{server_address,reason}                 (each retry: 429|5xx|network)
+  # These sit below the per-service logical-RPC metrics above: a slow logical
+  # call times the whole client.Do including silent backoff, so a high retry
+  # ratio attributes that latency tail to its upstream cause. Filed in the
+  # vector-indexers namespace (no dedicated rpc namespace exists); the expr
+  # matches any emitting service via service_name, not just indexers.
+  - name: vector-rpc
+    interval: 1m
+    rules:
+      - alert: VectorRPCRetryRatioHigh
+        # Retries / attempts > 20% over 10m for a (service, rpc host) pair — the
+        # leading indicator of the throttle-driven latency tail (e.g.
+        # VectorOracleIndexerRPCLatencyHigh). clamp_min avoids divide-by-zero
+        # when a worker briefly issues no attempts. <20% is normal retry noise.
+        expr: |
+          sum by (service_name, server_address, cluster) (
+            rate(rpc_http_retries_total{k8s_namespace_name="vector"}[10m])
+          )
+          /
+          clamp_min(
+            sum by (service_name, server_address, cluster) (
+              rate(rpc_http_attempts_total{k8s_namespace_name="vector"}[10m])
+            ),
+            0.001
+          )
+          > 0.2
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: rpc-transport
+          namespace: vector
+        annotations:
+          summary: "Vector RPC retry ratio >20% for {{ $labels.service_name }} → {{ $labels.server_address }}"
+          description: |
+            `{{ $labels.service_name }}` is retrying
+            `{{ $value | humanizePercentage }}` of its RPC attempts to
+            `{{ $labels.server_address }}` over 10m. The transport is masking
+            upstream 429/5xx/network failures as added latency; break down by
+            `reason` on `rpc_http_retries_total` to tell throttling (429) from
+            server errors (5xx) from flaky connections (network).
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorrpcretryratiohigh

@@ -183,6 +183,79 @@ def test_list_allocations_surfaces_latest_activity_action_and_amount():
     assert row["latest_activity_amount"] == "12.5"
 
 
+def test_list_allocations_surfaces_underlying_metadata_when_holding_carries_it():
+    """A direct holding priced from its underlying (allowlisted, e.g. a Uni V3
+    pool position valued in USDC) reports the underlying's identity in the
+    underlying_* fields; ``symbol`` stays the held token's own.
+    """
+    from app.api.v1 import allocations
+
+    holding = make_direct_asset_holding(
+        amount_usd=Decimal("249.5"),
+        underlying_token_id=10,
+        underlying_token_address="0x" + "d" * 40,
+        underlying_symbol="USDC",
+    )
+    service = _make_service(direct_holdings=[holding])
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations")
+
+    assert response.status_code == 200
+    row = response.json()[0]
+    assert row["underlying_token_id"] == 10
+    assert row["underlying_token_address"] == "0x" + "d" * 40
+    assert row["underlying_symbol"] == "USDC"
+    assert row["symbol"] == "PYUSD"
+
+
+def test_list_allocations_falls_back_to_held_token_when_no_underlying_metadata():
+    """A direct holding without underlying metadata keeps the current behavior:
+    underlying_* mirror the held token itself.
+    """
+    from app.api.v1 import allocations
+
+    holding = make_direct_asset_holding()
+    service = _make_service(direct_holdings=[holding])
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations")
+
+    assert response.status_code == 200
+    row = response.json()[0]
+    assert row["underlying_token_id"] == 99
+    assert row["underlying_token_address"] == "0x" + "c" * 40
+    assert row["underlying_symbol"] == "PYUSD"
+
+
+def test_list_allocations_partial_underlying_metadata_falls_back_as_a_unit():
+    """The underlying identity is atomic: a holding carrying only part of it
+    (the repository projects all-or-nothing, so a partial set means a bug or a
+    hand-built entity) must fall back to the held token for ALL three fields,
+    never compose a hybrid such as the underlying's id with the held symbol.
+    """
+    from app.api.v1 import allocations
+
+    holding = make_direct_asset_holding(
+        underlying_token_id=10,
+        underlying_token_address="0x" + "d" * 40,
+        underlying_symbol=None,
+    )
+    service = _make_service(direct_holdings=[holding])
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations")
+
+    assert response.status_code == 200
+    row = response.json()[0]
+    assert row["underlying_token_id"] == 99
+    assert row["underlying_token_address"] == "0x" + "c" * 40
+    assert row["underlying_symbol"] == "PYUSD"
+
+
 def test_list_allocations_combines_receipt_and_direct_rows():
     from app.api.v1 import allocations
 

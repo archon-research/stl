@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: arbitrum-watcher-data-validator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: arbitrum-watcher-data-validator
+  template:
+    metadata:
+      labels:
+        app: arbitrum-watcher-data-validator
+    spec:
+      serviceAccountName: arbitrum-watcher-data-validator
+      containers:
+        - name: arbitrum-watcher-data-validator
+          # Image name used as the Kustomize images transformer key.
+          # The overlay kustomization.yaml overrides newName + newTag.
+          image: arbitrum-watcher-data-validator
+          env:
+            # Inject the deployment name so this validator registers its own
+            # Temporal schedule/task queue (cfg.Name) distinct from other chains.
+            - name: SERVICE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['app']
+          envFrom:
+            - configMapRef:
+                name: otel-config
+            - configMapRef:
+                name: arbitrum-watcher-data-validator
+            - secretRef:
+                name: arbitrum-watcher-data-validator
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+      terminationGracePeriodSeconds: 60

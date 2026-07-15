@@ -16,7 +16,16 @@ spec:
       containers:
         - name: watcher-data-validator
           image: watcher-data-validator
+          env:
+            # Inject the deployment name so this validator registers its own
+            # Temporal schedule/task queue (cfg.Name) distinct from other chains.
+            - name: SERVICE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['app']
           envFrom:
+            - configMapRef:
+                name: otel-config
             - configMapRef:
                 name: watcher-data-validator
             - secretRef:

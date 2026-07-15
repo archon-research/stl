@@ -606,9 +606,7 @@ function AllocationActivityCell({ allocation }: { allocation: Allocation }) {
     <div>
       <div className={flex({ align: 'center', gap: '1.5' })}>
         {actionIcon ? (
-          <span
-            className={css({ display: 'inline-flex', color: actionColor })}
-          >
+          <span className={css({ display: 'inline-flex', color: actionColor })}>
             {actionIcon}
           </span>
         ) : null}
@@ -758,7 +756,8 @@ function createAllocationColumns(
       meta: {
         magnitude: {
           scale: 'linear',
-          getValue: (allocation) => parseNumericValue(allocation.amount_usd) ?? NaN,
+          getValue: (allocation) =>
+            parseNumericValue(allocation.amount_usd) ?? NaN,
           getValueText: () => null,
         },
       },

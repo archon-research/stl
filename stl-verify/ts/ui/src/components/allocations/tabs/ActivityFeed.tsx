@@ -105,7 +105,6 @@ function getRealTxHash(event: AllocationActivity): string | null {
   return isSweepEvent(event) ? null : (event.tx_hash ?? null);
 }
 
-
 function formatEventData(eventData: ProtocolEvent['event_data']): string {
   if (eventData === null) {
     return 'No event data payload.';

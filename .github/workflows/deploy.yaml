@@ -45,12 +45,29 @@ jobs:
       contents: read
       packages: write  # push BuildKit layer cache to GHCR
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      # A short or malformed sha input gets stamped verbatim into every image
+      # tag, and the 40-char-only update regex (update-staging / create-prod-pr)
+      # can never rewrite it again, silently freezing the environment. Reject
+      # anything that is not a full 40-char commit SHA before any build, push, or
+      # tag commit. The automated path always supplies github.sha (40 chars), so
+      # this only ever trips a hand-entered dispatch sha. Gates the whole
+      # workflow: every tag-writing job depends on this one.
+      - name: Validate deploy SHA is a full 40-char commit SHA
+        env:
+          DEPLOY_SHA: ${{ inputs.sha || github.sha }}
+        run: |
+          if [[ ! "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Deploy SHA '$DEPLOY_SHA' is not a full 40-char commit SHA. Pass the full SHA (git rev-parse <ref>); a short SHA poisons every image tag."
+            exit 1
+          fi
+          echo "Deploy SHA OK: $DEPLOY_SHA"
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@06116385d9baf250c9f4dcb4858b16962ea869c3 # v4.1.0
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
         with:
           platforms: arm64
 
@@ -61,7 +78,7 @@ jobs:
       # build-only runs (push=false), which can run from any branch.
       - name: Configure AWS credentials (staging)
         if: ${{ inputs.push }}
-        uses: aws-actions/configure-aws-credentials@ec61189d14ec14c8efccab744f656cffd0e33f37 # v6.1.0
+        uses: aws-actions/configure-aws-credentials@254c19bd240aabef8777f48595e9d2d7b972184b # v6.2.1
         with:
           role-to-assume: ${{ env.STAGING_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
@@ -93,6 +110,9 @@ jobs:
     concurrency:
       group: deploy-update-staging
       cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write  # AWS OIDC for the pre-stamp ECR verify
     steps:
       - name: Generate GitHub App token
         id: app-token
@@ -101,10 +121,18 @@ jobs:
           app-id: ${{ secrets.DEPLOY_APP_ID }}
           private-key: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
 
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: main
           persist-credentials: false
+
+      # ORB-299: read-only ECR creds so the pre-stamp verify below can confirm
+      # every image the staging overlay references exists before we commit.
+      - name: Configure AWS credentials (staging ECR read)
+        uses: aws-actions/configure-aws-credentials@254c19bd240aabef8777f48595e9d2d7b972184b # v6.2.1
+        with:
+          role-to-assume: arn:aws:iam::579039992622:role/stl-sentinelstaging-github-actions-ecr
+          aws-region: eu-west-1
 
       - name: Commit and push to main (via API for verified commits)
         env:
@@ -128,6 +156,14 @@ jobs:
             if git diff --quiet FETCH_HEAD -- k8s/overlays/staging/kustomization.yaml; then
               echo "No changes to commit"
               exit 0
+            fi
+
+            # ORB-299/ORB-313: verify the exact file about to be committed (this
+            # fetched-and-stamped overlay), not the workflow's initial checkout,
+            # so a concurrent merge cannot slip an unbuilt image past the gate.
+            if ! scripts/deploy/verify-ecr-images.sh --kustomization k8s/overlays/staging/kustomization.yaml; then
+              echo "::error::Refusing to stamp staging: overlay references image(s) missing from ECR."
+              exit 1
             fi
 
             # Get current main HEAD and its tree
@@ -179,14 +215,17 @@ jobs:
     needs: update-staging
     if: ${{ inputs.push && github.event_name != 'workflow_dispatch' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Raised 10 -> 20 min: a brand-new service's first rollout can sit in
+    # ImagePullBackOff (kubelet backoff up to ~5 min) until its first image
+    # lands, so this job must outlast the argocd-wait timeout below. See ORB-313.
+    timeout-minutes: 20
     concurrency:
       group: deploy-wait-staging
       cancel-in-progress: false
     permissions:
       id-token: write
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: archon-research/github-actions
           ref: a42ba946a0cb774eef6a0d321a2545d2c1310b29  # argocd-wait (DNS fix #20)
@@ -198,7 +237,10 @@ jobs:
         with:
           app: stl-staging
           server: http://argocd-prod-archon
-          timeout: "300"
+          # 900s (was 300s): tolerate a slow first rollout of a brand-new
+          # service image (ImagePullBackOff race) without hard-failing the
+          # gate and silently skipping prod promotion. See ORB-313.
+          timeout: "900"
           min-wait: "30"
           aws-role-arn: arn:aws:iam::030797368798:role/archonprod-github-actions-argocd-wait
           tailscale-secret-id: archon-prod-argocd-ci-tailscale-oauth
@@ -219,14 +261,14 @@ jobs:
       STAGING_ROLE_ARN: arn:aws:iam::579039992622:role/stl-sentinelstaging-github-actions-ecr
       PROD_REGISTRY: 030797368798.dkr.ecr.eu-west-1.amazonaws.com
       PROD_ROLE_ARN: arn:aws:iam::030797368798:role/stl-sentinelprod-github-actions-ecr
-      SERVICES: watcher backup-worker oracle-price-worker sparklend-position-tracker morpho-indexer allocation-tracker prime-debt-indexer migrate python-api
-      CRONJOBS: anchorage-indexer maple-graphql-indexer offchain-price-indexer watcher-data-validator
+      SERVICES: watcher backup-worker oracle-price-worker sparklend-position-tracker morpho-indexer allocation-tracker prime-debt-indexer psm3-indexer dex-indexer fluid-vault-indexer migrate python-api
+      CRONJOBS: anchorage-indexer maple-graphql-indexer offchain-price-indexer watcher-data-validator transform-worker transform-bootstrap
     permissions:
       id-token: write
     steps:
       # Pull images from staging ECR, retag and push to prod (no build needed)
       - name: Configure AWS credentials (staging)
-        uses: aws-actions/configure-aws-credentials@ec61189d14ec14c8efccab744f656cffd0e33f37 # v6.1.0
+        uses: aws-actions/configure-aws-credentials@254c19bd240aabef8777f48595e9d2d7b972184b # v6.2.1
         with:
           role-to-assume: ${{ env.STAGING_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
@@ -248,7 +290,7 @@ jobs:
 
       # Retag and push to prod ECR
       - name: Configure AWS credentials (prod)
-        uses: aws-actions/configure-aws-credentials@ec61189d14ec14c8efccab744f656cffd0e33f37 # v6.1.0
+        uses: aws-actions/configure-aws-credentials@254c19bd240aabef8777f48595e9d2d7b972184b # v6.2.1
         with:
           role-to-assume: ${{ env.PROD_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
@@ -270,17 +312,20 @@ jobs:
             docker push "$PROD_REGISTRY/stl-sentinelprod-cronjob:$cj-$SHA"
           done
 
-  create-prod-pr:
-    name: Create Prod Deploy PR
+  update-prod:
+    name: Auto-merge Prod Image Tags
     needs: build-push-prod
     if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     concurrency:
-      group: deploy-prod-pr
+      group: deploy-update-prod
       cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write  # AWS OIDC for the pre-stamp ECR verify
     outputs:
-      pr_url: ${{ steps.create-pr.outputs.pr_url }}
-      changelog: ${{ steps.changelog.outputs.changelog }}
+      deploy_sha: ${{ steps.commit.outputs.deploy_sha }}
+      changed: ${{ steps.commit.outputs.changed }}
     steps:
       - name: Generate GitHub App token
         id: app-token
@@ -289,199 +334,160 @@ jobs:
           app-id: ${{ secrets.DEPLOY_APP_ID }}
           private-key: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
 
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          token: ${{ steps.app-token.outputs.token }}
           ref: main
-          fetch-depth: 0
           persist-credentials: false
 
-      - name: Build changelog
-        id: changelog
+      # ORB-299: read-only ECR creds so the pre-stamp verify can confirm every
+      # image the prod overlay references exists in prod ECR before we commit.
+      - name: Configure AWS credentials (prod ECR read)
+        uses: aws-actions/configure-aws-credentials@254c19bd240aabef8777f48595e9d2d7b972184b # v6.2.1
+        with:
+          role-to-assume: arn:aws:iam::030797368798:role/stl-sentinelprod-github-actions-ecr
+          aws-region: eu-west-1
+
+      # Auto-merge the prod image-tag bump straight to main (no PR), guarded so a
+      # compromised CI/bot cannot smuggle anything else into a prod deploy:
+      #   1. the diff must touch ONLY k8s/overlays/prod/kustomization.yaml,
+      #   2. every changed line must be a `newTag:` line, and
+      #   3. every image in the file must resolve to our prod ECR account.
+      # Any violation fails the job closed; nothing is committed. stl-prod stays
+      # on MANUAL sync, so this commit does not roll out until the gated
+      # deploy-prod job runs `argocd app sync` on the approved revision.
+      - name: Bump, validate, and commit prod image tags to main
+        id: commit
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          DEPLOY_SHA: ${{ inputs.sha || github.sha }}
+          REPO: ${{ github.repository }}
+          PROD_ECR_PREFIX: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-
+          KUSTOMIZATION: k8s/overlays/prod/kustomization.yaml
         run: |
-          set -o pipefail
-          SHA=${{ inputs.sha || github.sha }}
-          SHORT_SHA=${SHA:0:7}
-          REPO="${{ github.repository }}"
+          set -euo pipefail
 
-          # Get the SHA currently deployed in prod
-          PROD_SHA=$(grep -m1 -oP '[a-f0-9]{40}' k8s/overlays/prod/kustomization.yaml || echo "")
-          PROD_SHORT=${PROD_SHA:0:7}
-
-          if [ -z "$PROD_SHA" ]; then
-            echo "::error::Could not parse current prod SHA from kustomization.yaml"
+          # Fail closed on a malformed deploy SHA before we touch main.
+          if [[ ! "$DEPLOY_SHA" =~ ^[a-f0-9]{40}$ ]]; then
+            echo "::error::DEPLOY_SHA must be a 40-char lowercase git SHA: ${DEPLOY_SHA}"
             exit 1
           fi
 
-          CHANGELOG=""
+          MAX_RETRIES=3
+          for attempt in $(seq 1 "$MAX_RETRIES"); do
+            echo "Attempt ${attempt}/${MAX_RETRIES}"
 
-          if [ "$PROD_SHA" = "$SHA" ]; then
-            CHANGELOG="No code changes (same SHA as current prod)."
-          else
-            # List merged PRs between the two SHAs
-            TOTAL_PRS=0
-            MERGED_PRS=$(git log --merges --format="%s" "${PROD_SHA}..${SHA}" \
-              | grep -oP '#\d+' | sort -u || echo "")
-            TOTAL_PRS=$(echo "$MERGED_PRS" | grep -c . || echo 0)
-            DISPLAY_PRS=$(echo "$MERGED_PRS" | head -15)
+            git fetch origin main
+            git checkout FETCH_HEAD -- "$KUSTOMIZATION"
 
-            PR_LIST=""
-            for pr_num in $DISPLAY_PRS; do
-              num=${pr_num#\#}
-              PR_INFO=$(gh pr view "$num" --json title,url,author --jq '"- [#'"$num"' \(.title)](\(.url)) by @\(.author.login)"' 2>/dev/null || echo "")
-              if [ -n "$PR_INFO" ]; then
-                PR_LIST="${PR_LIST}${PR_INFO}\n"
-              fi
-            done
+            # Update plain SHA tags (regular services) and prefixed tags
+            # (cronjobs: name-SHA).
+            sed -i -E "s/(newTag: \")(([a-z]+-)*)[a-f0-9]{40}/\1\2${DEPLOY_SHA}/" "$KUSTOMIZATION"
 
-            # List commits between current prod and new SHA (stl-verify/ only).
-            # Use git's -n flag to limit at the source — piping through `head` can
-            # SIGPIPE the upstream `git log`, which `set -o pipefail` + `bash -e`
-            # turn into exit 141.
-            TOTAL_COMMITS=$(git log --oneline --no-merges "${PROD_SHA}..${SHA}" -- stl-verify/ | wc -l | tr -d ' ')
-            COMMITS=$(git log --oneline --no-merges -n 20 "${PROD_SHA}..${SHA}" -- stl-verify/)
-
-            CHANGELOG="### Changes: \`${PROD_SHORT}\` → \`${SHORT_SHA}\`"
-            if [ -n "$PR_LIST" ]; then
-              CHANGELOG="${CHANGELOG}\n\n**Merged PRs:**\n${PR_LIST}"
-              if [ "$TOTAL_PRS" -gt 15 ]; then
-                CHANGELOG="${CHANGELOG}…and $((TOTAL_PRS - 15)) more"
-              fi
+            if git diff --quiet FETCH_HEAD -- "$KUSTOMIZATION"; then
+              echo "Prod already at ${DEPLOY_SHA}; nothing to commit"
+              echo "changed=false" >> "$GITHUB_OUTPUT"
+              exit 0
             fi
-            if [ -n "$COMMITS" ]; then
-              CHANGELOG="${CHANGELOG}\n\n**Commits (stl-verify):**\n\`\`\`\n${COMMITS}\n\`\`\`"
-              if [ "$TOTAL_COMMITS" -gt 20 ]; then
-                CHANGELOG="${CHANGELOG}\n…and $((TOTAL_COMMITS - 20)) more"
-              fi
+
+            # GUARD 1: only the prod kustomization may change.
+            CHANGED_FILES=$(git diff --name-only FETCH_HEAD)
+            if [ "$CHANGED_FILES" != "$KUSTOMIZATION" ]; then
+              echo "::error::Prod deploy diff touches unexpected files:"
+              echo "$CHANGED_FILES"
+              exit 1
             fi
-          fi
 
-          # Write to file to avoid quoting issues, then set output
-          echo -e "$CHANGELOG" > /tmp/changelog.md
-          {
-            echo "changelog<<CHANGELOG_EOF"
-            cat /tmp/changelog.md
-            echo "CHANGELOG_EOF"
-          } >> "$GITHUB_OUTPUT"
+            # GUARD 2: every changed content line must be a `newTag:` line.
+            # -U0 = no context; ignore the +++/--- file headers.
+            OFFENDING=$(git diff -U0 FETCH_HEAD -- "$KUSTOMIZATION" \
+              | grep -E '^[+-]' \
+              | grep -Ev '^(\+\+\+|---)' \
+              | grep -Ev '^[+-][[:space:]]*newTag:' \
+              || true)
+            if [ -n "$OFFENDING" ]; then
+              echo "::error::Prod deploy diff changes non-newTag lines:"
+              echo "$OFFENDING"
+              exit 1
+            fi
 
-      - name: Update prod kustomization image tags
-        run: |
-          SHA=${{ inputs.sha || github.sha }}
-          # Update plain SHA tags (regular services) and prefixed tags (cronjobs: name-SHA)
-          sed -i -E "s/(newTag: \")(([a-z]+-)*)[a-f0-9]{40}/\1\2$SHA/" k8s/overlays/prod/kustomization.yaml
+            # GUARD 3: every image name must START WITH our prod ECR account.
+            # Anchored (not substring) so a name that merely embeds the prefix
+            # elsewhere (e.g. evil.example/030797...) cannot pass.
+            BAD_IMAGES=$(awk -v p="$PROD_ECR_PREFIX" '
+              /^[[:space:]]*newName:/ {
+                v=$0; sub(/^[[:space:]]*newName:[[:space:]]*/,"",v); gsub(/^"|"$/,"",v)
+                if (index(v,p)!=1) print
+              }' "$KUSTOMIZATION")
+            if [ -n "$BAD_IMAGES" ]; then
+              echo "::error::Prod kustomization references images outside the prod ECR account:"
+              echo "$BAD_IMAGES"
+              exit 1
+            fi
 
-      - name: Create or update prod PR
-        id: create-pr
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: |
-          SHA=${{ inputs.sha || github.sha }}
-          SHORT_SHA=${SHA:0:7}
-          BRANCH="deploy/prod-${SHORT_SHA}"
-          REPO="${{ github.repository }}"
+            # GUARD 4: every tag must be (optional name prefix +) exactly this
+            # deploy SHA — fail closed on any unexpected tag value.
+            BAD_TAGS=$(grep -E '^[[:space:]]*newTag:' "$KUSTOMIZATION" \
+              | grep -Ev "^[[:space:]]*newTag:[[:space:]]*\"([a-z0-9]+-)*${DEPLOY_SHA}\"[[:space:]]*$" \
+              || true)
+            if [ -n "$BAD_TAGS" ]; then
+              echo "::error::Prod tags do not all target ${DEPLOY_SHA}:"
+              echo "$BAD_TAGS"
+              exit 1
+            fi
 
-          # Get current main HEAD and its tree
-          MAIN_SHA=$(gh api "repos/${REPO}/git/ref/heads/main" --jq '.object.sha')
-          BASE_TREE=$(gh api "repos/${REPO}/git/commits/${MAIN_SHA}" --jq '.tree.sha')
+            # ORB-299: verify every image the (now SHA-stamped) prod overlay
+            # references exists in prod ECR, against the exact file about to be
+            # committed. Fails closed before the stamp; catches promotion-list
+            # drift and any image a concurrent merge added but this run did not
+            # push.
+            if ! scripts/deploy/verify-ecr-images.sh --kustomization "$KUSTOMIZATION"; then
+              echo "::error::Refusing to stamp prod: overlay references image(s) missing from prod ECR."
+              exit 1
+            fi
 
-          # Create a new tree with the updated file
-          NEW_TREE=$(gh api "repos/${REPO}/git/trees" \
-            --method POST \
-            --input - <<TREE_EOF | jq -r '.sha'
+            SHORT_SHA=${DEPLOY_SHA:0:7}
+            MAIN_SHA=$(gh api "repos/${REPO}/git/ref/heads/main" --jq '.object.sha')
+            BASE_TREE=$(gh api "repos/${REPO}/git/commits/${MAIN_SHA}" --jq '.tree.sha')
+
+            NEW_TREE=$(gh api "repos/${REPO}/git/trees" \
+              --method POST \
+              --input - <<TREE_EOF | jq -r '.sha'
           {
             "base_tree": "${BASE_TREE}",
             "tree": [{
-              "path": "k8s/overlays/prod/kustomization.yaml",
+              "path": "${KUSTOMIZATION}",
               "mode": "100644",
               "type": "blob",
-              "content": $(cat k8s/overlays/prod/kustomization.yaml | jq -Rs .)
+              "content": $(jq -Rs . < "$KUSTOMIZATION")
             }]
           }
           TREE_EOF
-          )
+            )
 
-          # Create a verified commit via the API
-          NEW_COMMIT=$(gh api "repos/${REPO}/git/commits" \
-            --method POST \
-            --field "message=deploy(prod): update image tags to ${SHORT_SHA}" \
-            --field "tree=${NEW_TREE}" \
-            --field "parents[]=${MAIN_SHA}" \
-            --jq '.sha')
+            NEW_COMMIT=$(gh api "repos/${REPO}/git/commits" \
+              --method POST \
+              --field "message=deploy(prod): update image tags to ${SHORT_SHA}" \
+              --field "tree=${NEW_TREE}" \
+              --field "parents[]=${MAIN_SHA}" \
+              --jq '.sha')
 
-          # Create the branch pointing to the new commit
-          gh api "repos/${REPO}/git/refs" \
-            --method POST \
-            --field "ref=refs/heads/${BRANCH}" \
-            --field "sha=${NEW_COMMIT}" || \
-          gh api "repos/${REPO}/git/refs/heads/${BRANCH}" \
-            --method PATCH \
-            --field "sha=${NEW_COMMIT}" \
-            --field "force=true"
+            # Fast-forward main — fails if main moved since we read MAIN_SHA.
+            if REF_OUTPUT=$(gh api "repos/${REPO}/git/refs/heads/main" \
+              --method PATCH \
+              --field "sha=${NEW_COMMIT}" 2>&1); then
+              echo "Committed prod tag bump to main as ${NEW_COMMIT}"
+              echo "deploy_sha=${NEW_COMMIT}" >> "$GITHUB_OUTPUT"
+              echo "changed=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
 
-          # Build the PR body in a file and use --body-file. Avoid passing the
-          # body via $(cat <<EOF ... EOF) — backticks in the changelog (code
-          # fences, inline code) get interpreted as command substitution by
-          # bash inside $(...) and the changelog gets silently dropped.
-          {
-            cat <<HEADER_EOF
-          Automated prod image tag update.
-
-          **Deploy SHA:** [\`${SHORT_SHA}\`](https://github.com/${REPO}/commit/${SHA})
-          **Images pushed to:** prod ECR (\`030797368798\`)
-          **Triggered by:** @${{ github.actor }}
-
-          HEADER_EOF
-            cat /tmp/changelog.md
-            cat <<'FOOTER_EOF'
-
-          ---
-          Merge this PR to update prod kustomization, then sync in ArgoCD.
-          FOOTER_EOF
-          } > /tmp/pr-body.md
-
-          # Create the new prod deploy PR FIRST, so that if `gh pr create`
-          # fails transiently we don't end up with no open prod-deploy PR
-          # (older PRs would have already been closed).
-          gh pr create \
-            --title "deploy(prod): update image tags to ${SHORT_SHA}" \
-            --body-file /tmp/pr-body.md \
-            --head "$BRANCH" \
-            --base main
-
-          PR_URL=$(gh pr view "$BRANCH" --json url --jq .url)
-          echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
-
-          # Now that the new PR exists, close any older open deploy/prod-* PRs
-          # (excluding the one we just created). Branch protection's "strict"
-          # rule plus our concurrency group make this defensive, but it keeps
-          # the PR list clean and removes ambiguity about which deploy is
-          # current.
-          # NOTE: filter by branch prefix — `gh pr list --search` treats `:` as
-          # a search qualifier so the previous title-based search returned 0.
-          EXISTING_PRS=$(gh pr list \
-            --state open \
-            --base main \
-            --json number,headRefName \
-            --jq '.[] | select(.headRefName | startswith("deploy/prod-")) | select(.headRefName != "'"$BRANCH"'") | .number')
-          for pr in $EXISTING_PRS; do
-            gh pr close "$pr" --comment "Superseded by deploy for ${SHORT_SHA}"
+            echo "Ref update failed: ${REF_OUTPUT}"
+            echo "Retrying..."
+            sleep 1
           done
 
-  notify-prod-pr-created:
-    name: Notify Prod Deploy Awaiting Approval
-    needs: create-prod-pr
-    if: ${{ needs.create-prod-pr.result == 'success' }}
-    uses: ./.github/workflows/slack-notify.yaml
-    with:
-      status: pending
-      context: Prod Deploy
-      pr-url: ${{ needs.create-prod-pr.outputs.pr_url }}
-      body: ${{ needs.create-prod-pr.outputs.changelog }}
-    secrets:
-      slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_PROD }}
-      gh-actions-deploy-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
+          echo "::error::Failed to update main after ${MAX_RETRIES} attempts"
+          exit 1
 
   notify-staging-failure:
     name: Notify Staging Deploy Failure
@@ -499,17 +505,44 @@ jobs:
       slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_STAGING }}
       gh-actions-deploy-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
 
-  notify-prod-failure:
-    name: Notify Prod Deploy Failure
-    if: ${{ always() && (needs.build-push-prod.result == 'failure' || needs.create-prod-pr.result == 'failure') }}
-    needs: [build-push-prod, create-prod-pr]
+  # Prod image build + tag bump stay in this workflow (deploy-prod.yaml only owns
+  # the gated ArgoCD sync). Their failures still route to the prod channel, as
+  # they did before the split.
+  notify-prod-build-failure:
+    name: Notify Prod Build Failure
+    if: ${{ always() && (needs.build-push-prod.result == 'failure' || needs.update-prod.result == 'failure') }}
+    needs: [build-push-prod, update-prod]
     uses: ./.github/workflows/slack-notify.yaml
     with:
       status: failure
       context: Prod Deploy
       failed-jobs: |
         Build & Push Images (Prod)=${{ needs.build-push-prod.result }}
-        Create Prod Deploy PR=${{ needs.create-prod-pr.result }}
+        Auto-merge Prod Image Tags=${{ needs.update-prod.result }}
+    secrets:
+      slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_PROD }}
+      gh-actions-deploy-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
+
+  # ORB-313: when the staging health gate fails, build-push-prod is *skipped*
+  # (not failed), so prod promotion silently stops with no alert. Make that
+  # explicit on the prod channel. Fires only when staging built + stamped fine
+  # and the gate itself failed (wait=failure => build-push-staging succeeded).
+  notify-prod-promotion-skipped:
+    name: Notify Prod Promotion Skipped
+    if: ${{ always() && inputs.push && github.event_name != 'workflow_dispatch' && needs.wait-staging-healthy.result == 'failure' && needs.build-push-prod.result == 'skipped' }}
+    needs: [wait-staging-healthy, build-push-prod]
+    uses: ./.github/workflows/slack-notify.yaml
+    with:
+      status: failure
+      context: Prod Promotion Skipped
+      body: |
+        Prod promotion was skipped because the staging health gate did not pass.
+        This is often a slow first rollout of a new service image, not a regression.
+        No prod images were built or promoted.
+
+        Recovery: once `stl-staging` is Healthy and Synced in ArgoCD, re-run the
+        failed jobs on this workflow run. Prod promotion still sits behind the
+        manual `production` approval gate.
     secrets:
       slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_PROD }}
       gh-actions-deploy-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}

@@ -155,33 +155,33 @@ func (r *OnchainPriceRepository) GetLatestBlock(ctx context.Context, oracleID in
 	return *blockNumber, nil
 }
 
-// GetTokenAddresses returns a map of token_id → on-chain address for enabled oracle assets.
-func (r *OnchainPriceRepository) GetTokenAddresses(ctx context.Context, oracleID int64) (map[int64][]byte, error) {
+// GetTokenInfos returns a map of token_id → TokenInfo (address + decimals) for enabled oracle assets.
+func (r *OnchainPriceRepository) GetTokenInfos(ctx context.Context, oracleID int64) (map[int64]outbound.TokenInfo, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT oa.token_id, t.address
+		SELECT oa.token_id, t.address, t.decimals
 		FROM oracle_asset oa
 		JOIN token t ON t.id = oa.token_id
 		WHERE oa.oracle_id = $1 AND oa.enabled = true
 		ORDER BY oa.id
 	`, oracleID)
 	if err != nil {
-		return nil, fmt.Errorf("querying token addresses: %w", err)
+		return nil, fmt.Errorf("querying token infos: %w", err)
 	}
 	defer rows.Close()
 
-	addrs := make(map[int64][]byte)
+	infos := make(map[int64]outbound.TokenInfo)
 	for rows.Next() {
 		var tokenID int64
-		var address []byte
-		if err := rows.Scan(&tokenID, &address); err != nil {
-			return nil, fmt.Errorf("scanning token address: %w", err)
+		var info outbound.TokenInfo
+		if err := rows.Scan(&tokenID, &info.Address, &info.Decimals); err != nil {
+			return nil, fmt.Errorf("scanning token info: %w", err)
 		}
-		addrs[tokenID] = address
+		infos[tokenID] = info
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating token addresses: %w", err)
+		return nil, fmt.Errorf("iterating token infos: %w", err)
 	}
-	return addrs, nil
+	return infos, nil
 }
 
 // UpsertPrices inserts onchain price records in batches.
@@ -327,33 +327,6 @@ func (r *OnchainPriceRepository) InsertOracle(ctx context.Context, oracle *entit
 		return nil, fmt.Errorf("inserting oracle: %w", err)
 	}
 	return oracle, nil
-}
-
-// GetAllActiveProtocolOracles retrieves all active protocol-oracle bindings.
-// Returns only the latest binding per protocol (by from_block DESC).
-func (r *OnchainPriceRepository) GetAllActiveProtocolOracles(ctx context.Context) ([]*entity.ProtocolOracle, error) {
-	rows, err := r.pool.Query(ctx, `
-		SELECT DISTINCT ON (protocol_id) id, protocol_id, oracle_id, from_block, created_at
-		FROM protocol_oracle
-		ORDER BY protocol_id, from_block DESC
-	`)
-	if err != nil {
-		return nil, fmt.Errorf("querying active protocol oracles: %w", err)
-	}
-	defer rows.Close()
-
-	var bindings []*entity.ProtocolOracle
-	for rows.Next() {
-		var po entity.ProtocolOracle
-		if err := rows.Scan(&po.ID, &po.ProtocolID, &po.OracleID, &po.FromBlock, &po.CreatedAt); err != nil {
-			return nil, fmt.Errorf("scanning protocol oracle: %w", err)
-		}
-		bindings = append(bindings, &po)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating protocol oracles: %w", err)
-	}
-	return bindings, nil
 }
 
 // InsertProtocolOracleBinding inserts a new protocol-oracle binding.

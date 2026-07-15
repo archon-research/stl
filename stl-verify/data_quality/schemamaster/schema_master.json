@@ -1,0 +1,1757 @@
+{
+  "ignore_tables": [
+    "migrations",
+    "asset_class_ref",
+    "corporate_action_type_ref",
+    "counterparty_role_ref",
+    "country_ref",
+    "credit_rating_ref",
+    "currency_ref",
+    "deal_type_ref",
+    "entity_type_ref",
+    "industry_group_ref",
+    "origination_type_ref",
+    "sector_ref",
+    "security_subtype_ref",
+    "security_type_ref",
+    "curve_cryptoswap_config",
+    "curve_cryptoswap_state",
+    "curve_liquidity_event",
+    "curve_lp_token_event",
+    "curve_parameter_event",
+    "curve_pool",
+    "curve_pool_coin",
+    "curve_stableswap_config",
+    "curve_stableswap_state",
+    "curve_swap",
+    "uniswap_v3_liquidity_event",
+    "uniswap_v3_pool",
+    "uniswap_v3_pool_event",
+    "uniswap_v3_pool_state",
+    "uniswap_v3_swap",
+    "uniswap_v3_tick"
+  ],
+  "canonical": {
+    "accrued_to_treasury_scaled": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "acm_ratio": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "action": {
+      "type": "text",
+      "class": "S"
+    },
+    "active": {
+      "type": "bool",
+      "class": "S"
+    },
+    "address": {
+      "type": "bytea",
+      "class": "S"
+    },
+    "amount": {
+      "type": "numeric",
+      "class": "D"
+    },
+    "applied_at": {
+      "type": "timestamptz",
+      "class": "A",
+      "semantics": "processing_time"
+    },
+    "apy": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "asks": {
+      "type": "jsonb",
+      "class": "R"
+    },
+    "asset_amount": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "asset_decimals": {
+      "type": "int2",
+      "class": "S"
+    },
+    "asset_price": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "asset_quantity": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "asset_symbol": {
+      "type": "text",
+      "class": "S"
+    },
+    "asset_token_id": {
+      "type": "int8",
+      "class": "R"
+    },
+    "asset_type": {
+      "type": "text",
+      "class": "S"
+    },
+    "asset_value_usd": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "asset_weighted_value": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "assets": {
+      "type": "numeric",
+      "class": "D"
+    },
+    "average_stable_borrow_rate": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "balance": {
+      "type": "numeric",
+      "class": "D"
+    },
+    "base_url": {
+      "type": "text",
+      "class": "S"
+    },
+    "bids": {
+      "type": "jsonb",
+      "class": "R"
+    },
+    "block_number": {
+      "type": "int8",
+      "class": "S"
+    },
+    "block_published": {
+      "type": "bool",
+      "class": "S"
+    },
+    "block_timestamp": {
+      "type": "timestamptz",
+      "class": "S",
+      "semantics": "event_time"
+    },
+    "block_version": {
+      "type": "int4",
+      "class": "S"
+    },
+    "borrow_assets": {
+      "type": "numeric",
+      "class": "D"
+    },
+    "borrow_exchange_price": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "borrow_rate": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "borrow_shares": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "borrower_user_id": {
+      "type": "int8",
+      "class": "R"
+    },
+    "borrowing_enabled": {
+      "type": "bool",
+      "class": "S"
+    },
+    "build_id": {
+      "type": "int4",
+      "class": "A",
+      "not_null": true
+    },
+    "built_at": {
+      "type": "timestamptz",
+      "class": "A",
+      "semantics": "processing_time"
+    },
+    "chain_id": {
+      "type": "int4",
+      "class": "R"
+    },
+    "change": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "checksum": {
+      "type": "text",
+      "class": "S"
+    },
+    "claimable_amount": {
+      "type": "numeric",
+      "class": "A"
+    },
+    "collateral": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "collateral_amount": {
+      "type": "numeric",
+      "class": "A"
+    },
+    "collateral_apy": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "collateral_enabled": {
+      "type": "bool",
+      "class": "S"
+    },
+    "collateral_ratio": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "collateral_required": {
+      "type": "numeric",
+      "class": "A"
+    },
+    "collateral_token_id": {
+      "type": "int8",
+      "class": "R"
+    },
+    "collateral_value_usd": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "contract_address": {
+      "type": "bytea",
+      "class": "S"
+    },
+    "conversion_rate": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "created_at": {
+      "type": "timestamptz",
+      "class": "A",
+      "semantics": "processing_time"
+    },
+    "created_at_block": {
+      "type": "int8",
+      "class": "S"
+    },
+    "critical_ltv": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "current_ltv": {
+      "type": "numeric",
+      "class": "D"
+    },
+    "currently_deployed": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "custodian": {
+      "type": "text",
+      "class": "S"
+    },
+    "custody_type": {
+      "type": "text",
+      "class": "S"
+    },
+    "debt_token_id": {
+      "type": "int8",
+      "class": "R"
+    },
+    "debt_wad": {
+      "type": "numeric",
+      "class": "D"
+    },
+    "decimals": {
+      "type": "int2",
+      "class": "S"
+    },
+    "deployment_block": {
+      "type": "int8",
+      "class": "S"
+    },
+    "deposited_assets": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "depth": {
+      "type": "int4",
+      "class": "S"
+    },
+    "detected_at": {
+      "type": "timestamptz",
+      "class": "A",
+      "semantics": "processing_time"
+    },
+    "direction": {
+      "type": "text",
+      "class": "S"
+    },
+    "display_name": {
+      "type": "text",
+      "class": "S"
+    },
+    "docker_sha": {
+      "type": "text",
+      "class": "S"
+    },
+    "drawdown_amount": {
+      "type": "numeric",
+      "class": "A"
+    },
+    "drips_yield_boost": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "enabled": {
+      "type": "bool",
+      "class": "S"
+    },
+    "event_data": {
+      "type": "jsonb",
+      "class": "S"
+    },
+    "event_name": {
+      "type": "text",
+      "class": "S"
+    },
+    "event_time": {
+      "type": "timestamptz",
+      "class": "R",
+      "semantics": "event_time"
+    },
+    "event_type": {
+      "type": "text",
+      "class": "S"
+    },
+    "exchange": {
+      "type": "text",
+      "class": "R"
+    },
+    "exposure_value": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "fee": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "fee_shares": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "feed_address": {
+      "type": "bytea",
+      "class": "S"
+    },
+    "feed_decimals": {
+      "type": "int2",
+      "class": "S"
+    },
+    "filename": {
+      "type": "text",
+      "class": "S"
+    },
+    "first_seen_at": {
+      "type": "timestamptz",
+      "class": "S",
+      "semantics": "processing_time"
+    },
+    "first_seen_block": {
+      "type": "int8",
+      "class": "S"
+    },
+    "fluid_vault_id": {
+      "type": "int8",
+      "class": "R"
+    },
+    "from_block": {
+      "type": "int8",
+      "class": "S"
+    },
+    "funds_token_id": {
+      "type": "int8",
+      "class": "R"
+    },
+    "git_hash": {
+      "type": "text",
+      "class": "S"
+    },
+    "hash": {
+      "type": "text",
+      "class": "S"
+    },
+    "hashdiff": {
+      "type": "bytea",
+      "class": "R"
+    },
+    "id": {
+      "type": "int8",
+      "class": "A"
+    },
+    "ilk_name": {
+      "type": "text",
+      "class": "S"
+    },
+    "ingested_at": {
+      "type": "timestamptz",
+      "class": "A",
+      "semantics": "processing_time"
+    },
+    "interest_accrued": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "interest_paid": {
+      "type": "numeric",
+      "class": "A"
+    },
+    "interest_rate": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "irm_address": {
+      "type": "bytea",
+      "class": "S"
+    },
+    "is_active": {
+      "type": "bool",
+      "class": "S"
+    },
+    "is_frozen": {
+      "type": "bool",
+      "class": "S"
+    },
+    "is_impaired": {
+      "type": "bool",
+      "class": "R"
+    },
+    "is_internal": {
+      "type": "bool",
+      "class": "S"
+    },
+    "is_orphaned": {
+      "type": "bool",
+      "class": "S"
+    },
+    "is_present": {
+      "type": "bool",
+      "class": "R"
+    },
+    "is_syrup": {
+      "type": "bool",
+      "class": "S"
+    },
+    "last_update_at": {
+      "type": "timestamptz",
+      "class": "S",
+      "semantics": "event_time"
+    },
+    "liquid_assets": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "liquidation_bonus": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "liquidation_level": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "liquidation_threshold": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "liquidity_index": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "liquidity_rate": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "lltv": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "loan_address": {
+      "type": "bytea",
+      "class": "S"
+    },
+    "loan_meta_asset_symbol": {
+      "type": "text",
+      "class": "S"
+    },
+    "loan_meta_dex": {
+      "type": "text",
+      "class": "S"
+    },
+    "loan_meta_location": {
+      "type": "text",
+      "class": "S"
+    },
+    "loan_meta_type": {
+      "type": "text",
+      "class": "S"
+    },
+    "loan_meta_wallet_address": {
+      "type": "text",
+      "class": "S"
+    },
+    "loan_meta_wallet_type": {
+      "type": "text",
+      "class": "S"
+    },
+    "loan_token_id": {
+      "type": "int8",
+      "class": "R"
+    },
+    "loan_type": {
+      "type": "text",
+      "class": "S"
+    },
+    "log_index": {
+      "type": "int4",
+      "class": "S"
+    },
+    "ltv": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "ltv_timestamp": {
+      "type": "timestamptz",
+      "class": "S",
+      "semantics": "api_event_time"
+    },
+    "management_fee_shares": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "maple_ftl_loan_id": {
+      "type": "int8",
+      "class": "R"
+    },
+    "maple_loan_id": {
+      "type": "int8",
+      "class": "R"
+    },
+    "maple_pool_id": {
+      "type": "int8",
+      "class": "R"
+    },
+    "maple_sky_strategy_id": {
+      "type": "int8",
+      "class": "R"
+    },
+    "margin_call_ltv": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "margin_return_ltv": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "market_cap_usd": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "market_id": {
+      "type": "bytea",
+      "class": "R"
+    },
+    "maturity_date": {
+      "type": "timestamptz",
+      "class": "R",
+      "semantics": "event_time"
+    },
+    "metadata": {
+      "type": "jsonb",
+      "class": "S"
+    },
+    "monthly_apy": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "morpho_market_id": {
+      "type": "int8",
+      "class": "R"
+    },
+    "morpho_vault_id": {
+      "type": "int8",
+      "class": "R"
+    },
+    "name": {
+      "type": "text",
+      "class": "S"
+    },
+    "new_hash": {
+      "type": "text",
+      "class": "S"
+    },
+    "new_total_assets": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "next_payment_due": {
+      "type": "timestamptz",
+      "class": "R",
+      "semantics": "event_time"
+    },
+    "notes": {
+      "type": "text",
+      "class": "S"
+    },
+    "old_hash": {
+      "type": "text",
+      "class": "S"
+    },
+    "operation_id": {
+      "type": "text",
+      "class": "R"
+    },
+    "operation_type": {
+      "type": "text",
+      "class": "S"
+    },
+    "oracle_address": {
+      "type": "bytea",
+      "class": "S"
+    },
+    "oracle_id": {
+      "type": "int8",
+      "class": "R"
+    },
+    "oracle_type": {
+      "type": "text",
+      "class": "S"
+    },
+    "package_id": {
+      "type": "text",
+      "class": "R"
+    },
+    "package_value": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "parent_hash": {
+      "type": "text",
+      "class": "S"
+    },
+    "payment_interval_days": {
+      "type": "int8",
+      "class": "R"
+    },
+    "payments_remaining": {
+      "type": "int8",
+      "class": "R"
+    },
+    "persisted_at": {
+      "type": "timestamptz",
+      "class": "A",
+      "semantics": "processing_time"
+    },
+    "pledgor_id": {
+      "type": "text",
+      "class": "R"
+    },
+    "pool_apy": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "prev_borrow_rate": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "previous_total_assets": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "price_decimals": {
+      "type": "int2",
+      "class": "S"
+    },
+    "price_usd": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "prime_id": {
+      "type": "int8",
+      "class": "R"
+    },
+    "principal_out": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "principal_owed": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "processing_version": {
+      "type": "int4",
+      "class": "A",
+      "not_null": true
+    },
+    "protocol_id": {
+      "type": "int8",
+      "class": "R"
+    },
+    "protocol_type": {
+      "type": "text",
+      "class": "S"
+    },
+    "proxy_address": {
+      "type": "bytea",
+      "class": "S"
+    },
+    "quantity": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "quote_currency": {
+      "type": "text",
+      "class": "S"
+    },
+    "rate_limit_per_min": {
+      "type": "int4",
+      "class": "S"
+    },
+    "receipt_token_address": {
+      "type": "bytea",
+      "class": "S"
+    },
+    "received_at": {
+      "type": "timestamptz",
+      "class": "S",
+      "semantics": "processing_time"
+    },
+    "reserve_factor": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "scaled_balance": {
+      "type": "numeric",
+      "class": "D"
+    },
+    "scaled_total_supply": {
+      "type": "numeric",
+      "class": "D"
+    },
+    "secured_party_id": {
+      "type": "text",
+      "class": "R"
+    },
+    "shares": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "snapshot_time": {
+      "type": "timestamptz",
+      "class": "S",
+      "semantics": "snapshot_time"
+    },
+    "source": {
+      "type": "text",
+      "class": "S"
+    },
+    "source_asset_id": {
+      "type": "text",
+      "class": "R"
+    },
+    "source_id": {
+      "type": "int8",
+      "class": "R"
+    },
+    "spot_apy": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "stable_borrow_rate": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "stable_borrow_rate_enabled": {
+      "type": "bool",
+      "class": "S"
+    },
+    "stable_debt_address": {
+      "type": "bytea",
+      "class": "S"
+    },
+    "stable_symbol": {
+      "type": "text",
+      "class": "S"
+    },
+    "state": {
+      "type": "text",
+      "class": "S"
+    },
+    "state_detail": {
+      "type": "text",
+      "class": "R"
+    },
+    "strategy_address": {
+      "type": "bytea",
+      "class": "S"
+    },
+    "strategy_fee_rate": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "supply_assets": {
+      "type": "numeric",
+      "class": "D"
+    },
+    "supply_exchange_price": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "supply_rate": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "supply_shares": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "supports_historical": {
+      "type": "bool",
+      "class": "S"
+    },
+    "susds_balance": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "symbol": {
+      "type": "text",
+      "class": "S"
+    },
+    "term_days": {
+      "type": "int8",
+      "class": "R"
+    },
+    "token_id": {
+      "type": "int8",
+      "class": "R"
+    },
+    "total_a_token": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "total_assets": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "total_borrow_assets": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "total_borrow_shares": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "total_collateral": {
+      "type": "numeric",
+      "class": "A"
+    },
+    "total_debt": {
+      "type": "numeric",
+      "class": "A"
+    },
+    "total_fees_collected": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "total_shares": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "total_stable_debt": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "total_supply": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "total_supply_assets": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "total_supply_shares": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "total_variable_debt": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "tvl": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "tx_amount": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "tx_hash": {
+      "type": "bytea",
+      "class": "S"
+    },
+    "type_id": {
+      "type": "text",
+      "class": "R"
+    },
+    "unbacked": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "underlying_token_id": {
+      "type": "int8",
+      "class": "R"
+    },
+    "underlying_value": {
+      "type": "numeric",
+      "class": "D"
+    },
+    "updated_at": {
+      "type": "timestamptz",
+      "class": "A",
+      "semantics": "processing_time"
+    },
+    "usage_as_collateral_enabled": {
+      "type": "bool",
+      "class": "S"
+    },
+    "usdc_balance": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "usds_balance": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "user_id": {
+      "type": "int8",
+      "class": "R"
+    },
+    "utilization": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "variable_borrow_index": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "variable_borrow_rate": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "variable_debt_address": {
+      "type": "bytea",
+      "class": "S"
+    },
+    "variable_symbol": {
+      "type": "text",
+      "class": "S"
+    },
+    "vault_address": {
+      "type": "bytea",
+      "class": "S"
+    },
+    "vault_type": {
+      "type": "text",
+      "class": "R"
+    },
+    "vault_version": {
+      "type": "int2",
+      "class": "S"
+    },
+    "version": {
+      "type": "int4",
+      "class": "S"
+    },
+    "volume_usd": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "watermark": {
+      "type": "int8",
+      "class": "S"
+    },
+    "withdrawn_assets": {
+      "type": "numeric",
+      "class": "S"
+    }
+  },
+  "tables": {
+    "allocation_position": {
+      "type": "raw_pipeline",
+      "owner": "prime"
+    },
+    "anchorage_operation": {
+      "type": "raw_pipeline",
+      "owner": "prime"
+    },
+    "anchorage_package_snapshot": {
+      "type": "raw_pipeline",
+      "owner": "prime"
+    },
+    "backfill_watermark": {
+      "type": "infrastructure",
+      "owner": "infra"
+    },
+    "block_states": {
+      "type": "infrastructure",
+      "owner": "infra"
+    },
+    "borrower": {
+      "type": "raw_pipeline",
+      "owner": "lending"
+    },
+    "borrower_collateral": {
+      "type": "raw_pipeline",
+      "owner": "lending"
+    },
+    "build_registry": {
+      "type": "infrastructure",
+      "owner": "infra"
+    },
+    "cex_orderbook_snapshots": {
+      "type": "raw_pipeline",
+      "owner": "pricing"
+    },
+    "chain": {
+      "type": "dimension",
+      "owner": "infra"
+    },
+    "debt_token": {
+      "type": "config",
+      "owner": "lending"
+    },
+    "fluid_vault": {
+      "type": "config",
+      "owner": "lending"
+    },
+    "fluid_vault_state": {
+      "type": "raw_pipeline",
+      "owner": "lending"
+    },
+    "maple_ftl_loan": {},
+    "maple_ftl_loan_state": {},
+    "maple_loan": {
+      "type": "config",
+      "owner": "lending"
+    },
+    "maple_loan_collateral": {
+      "type": "raw_pipeline",
+      "owner": "lending"
+    },
+    "maple_loan_meta": {},
+    "maple_loan_state": {
+      "type": "raw_pipeline",
+      "owner": "lending"
+    },
+    "maple_pool": {
+      "type": "config",
+      "owner": "lending"
+    },
+    "maple_pool_meta": {},
+    "maple_pool_state": {
+      "type": "raw_pipeline",
+      "owner": "lending"
+    },
+    "maple_sky_strategy": {
+      "type": "config",
+      "owner": "lending"
+    },
+    "maple_sky_strategy_meta": {},
+    "maple_sky_strategy_state": {
+      "type": "raw_pipeline",
+      "owner": "lending"
+    },
+    "maple_syrup_global_state": {
+      "type": "raw_pipeline",
+      "owner": "lending"
+    },
+    "morpho_market": {
+      "type": "config",
+      "owner": "morpho"
+    },
+    "morpho_market_position": {
+      "type": "raw_pipeline",
+      "owner": "morpho"
+    },
+    "morpho_market_state": {
+      "type": "raw_pipeline",
+      "owner": "morpho"
+    },
+    "morpho_vault": {
+      "type": "config",
+      "owner": "morpho"
+    },
+    "morpho_vault_position": {
+      "type": "raw_pipeline",
+      "owner": "morpho"
+    },
+    "morpho_vault_state": {
+      "type": "raw_pipeline",
+      "owner": "morpho"
+    },
+    "offchain_price_asset": {
+      "type": "config",
+      "owner": "pricing"
+    },
+    "offchain_price_source": {
+      "type": "config",
+      "owner": "pricing"
+    },
+    "offchain_token_price": {
+      "type": "raw_pipeline",
+      "owner": "pricing"
+    },
+    "onchain_token_price": {
+      "type": "raw_pipeline",
+      "owner": "pricing"
+    },
+    "oracle": {
+      "type": "config",
+      "owner": "pricing"
+    },
+    "oracle_asset": {
+      "type": "config",
+      "owner": "pricing"
+    },
+    "prime": {
+      "type": "dimension",
+      "owner": "prime"
+    },
+    "prime_debt": {
+      "type": "raw_pipeline",
+      "owner": "prime"
+    },
+    "protocol": {
+      "type": "dimension",
+      "owner": "infra"
+    },
+    "protocol_event": {
+      "type": "raw_pipeline",
+      "owner": "infra"
+    },
+    "protocol_oracle": {
+      "type": "config",
+      "owner": "pricing"
+    },
+    "psm3_reserves": {
+      "type": "raw_pipeline",
+      "owner": "prime"
+    },
+    "receipt_token": {
+      "type": "config",
+      "owner": "lending"
+    },
+    "reorg_events": {
+      "type": "infrastructure",
+      "owner": "infra"
+    },
+    "sparklend_reserve_data": {
+      "type": "raw_pipeline",
+      "owner": "lending"
+    },
+    "token": {
+      "type": "dimension",
+      "owner": "infra"
+    },
+    "token_total_supply": {
+      "type": "raw_pipeline",
+      "owner": "infra"
+    },
+    "user": {
+      "type": "dimension",
+      "owner": "lending"
+    }
+  },
+  "transforms": [
+    {
+      "table": "block_states",
+      "column": "number",
+      "canonical": "block_number",
+      "action": "rename"
+    },
+    {
+      "table": "block_states",
+      "column": "received_at",
+      "canonical": "received_at",
+      "action": "cast",
+      "from": "int8",
+      "guard_min": 1500000000,
+      "guard_max": 4100000000
+    },
+    {
+      "table": "maple_ftl_loan_state",
+      "column": "synced_at",
+      "canonical": "snapshot_time",
+      "action": "rename"
+    },
+    {
+      "table": "maple_loan_collateral",
+      "column": "synced_at",
+      "canonical": "snapshot_time",
+      "action": "rename"
+    },
+    {
+      "table": "maple_loan_meta",
+      "column": "synced_at",
+      "canonical": "snapshot_time",
+      "action": "rename"
+    },
+    {
+      "table": "maple_loan_state",
+      "column": "synced_at",
+      "canonical": "snapshot_time",
+      "action": "rename"
+    },
+    {
+      "table": "maple_pool_meta",
+      "column": "synced_at",
+      "canonical": "snapshot_time",
+      "action": "rename"
+    },
+    {
+      "table": "maple_pool_state",
+      "column": "synced_at",
+      "canonical": "snapshot_time",
+      "action": "rename"
+    },
+    {
+      "table": "maple_sky_strategy_meta",
+      "column": "synced_at",
+      "canonical": "snapshot_time",
+      "action": "rename"
+    },
+    {
+      "table": "maple_sky_strategy_state",
+      "column": "synced_at",
+      "canonical": "snapshot_time",
+      "action": "rename"
+    },
+    {
+      "table": "maple_syrup_global_state",
+      "column": "synced_at",
+      "canonical": "snapshot_time",
+      "action": "rename"
+    },
+    {
+      "table": "morpho_market_position",
+      "column": "timestamp",
+      "canonical": "block_timestamp",
+      "action": "rename"
+    },
+    {
+      "table": "morpho_market_state",
+      "column": "last_update",
+      "canonical": "last_update_at",
+      "action": "cast",
+      "from": "int8",
+      "guard_min": 1500000000,
+      "guard_max": 4100000000
+    },
+    {
+      "table": "morpho_market_state",
+      "column": "timestamp",
+      "canonical": "block_timestamp",
+      "action": "rename"
+    },
+    {
+      "table": "morpho_vault_position",
+      "column": "timestamp",
+      "canonical": "block_timestamp",
+      "action": "rename"
+    },
+    {
+      "table": "morpho_vault_state",
+      "column": "timestamp",
+      "canonical": "block_timestamp",
+      "action": "rename"
+    },
+    {
+      "table": "offchain_token_price",
+      "column": "source_id",
+      "canonical": "source_id",
+      "action": "cast",
+      "from": "int2"
+    },
+    {
+      "table": "offchain_token_price",
+      "column": "timestamp",
+      "canonical": "snapshot_time",
+      "action": "rename"
+    },
+    {
+      "table": "onchain_token_price",
+      "column": "block_version",
+      "canonical": "block_version",
+      "action": "cast",
+      "from": "int2"
+    },
+    {
+      "table": "onchain_token_price",
+      "column": "oracle_id",
+      "canonical": "oracle_id",
+      "action": "cast",
+      "from": "int2"
+    },
+    {
+      "table": "onchain_token_price",
+      "column": "timestamp",
+      "canonical": "block_timestamp",
+      "action": "rename"
+    },
+    {
+      "table": "prime_debt",
+      "column": "synced_at",
+      "canonical": "block_timestamp",
+      "action": "rename"
+    },
+    {
+      "table": "sparklend_reserve_data",
+      "column": "decimals",
+      "canonical": "decimals",
+      "action": "cast",
+      "from": "numeric"
+    },
+    {
+      "table": "sparklend_reserve_data",
+      "column": "last_update_timestamp",
+      "canonical": "last_update_at",
+      "action": "cast",
+      "from": "int8",
+      "guard_min": 1500000000,
+      "guard_max": 4100000000
+    }
+  ],
+  "overrides": [
+    {
+      "table": "build_registry",
+      "column": "id",
+      "canonical": "id",
+      "accepted_type": "int4",
+      "reason": "Infra surrogate key paired with build_id (int4); deliberately int4, exempt from canonical id=int8. Not flagged by the conformance check."
+    }
+  ],
+  "fills": [
+    {
+      "table": "morpho_market_state",
+      "column": "chain_id",
+      "parent": "morpho_market",
+      "key": "morpho_market_id",
+      "ref": "id"
+    },
+    {
+      "table": "morpho_market_position",
+      "column": "chain_id",
+      "parent": "morpho_market",
+      "key": "morpho_market_id",
+      "ref": "id"
+    },
+    {
+      "table": "morpho_vault_state",
+      "column": "chain_id",
+      "parent": "morpho_vault",
+      "key": "morpho_vault_id",
+      "ref": "id"
+    },
+    {
+      "table": "morpho_vault_position",
+      "column": "chain_id",
+      "parent": "morpho_vault",
+      "key": "morpho_vault_id",
+      "ref": "id"
+    },
+    {
+      "table": "maple_loan_state",
+      "column": "chain_id",
+      "parent": "maple_loan",
+      "key": "maple_loan_id",
+      "ref": "id"
+    },
+    {
+      "table": "maple_loan_collateral",
+      "column": "chain_id",
+      "parent": "maple_loan",
+      "key": "maple_loan_id",
+      "ref": "id"
+    },
+    {
+      "table": "maple_loan_meta",
+      "column": "chain_id",
+      "parent": "maple_loan",
+      "key": "maple_loan_id",
+      "ref": "id"
+    },
+    {
+      "table": "maple_pool_state",
+      "column": "chain_id",
+      "parent": "maple_pool",
+      "key": "maple_pool_id",
+      "ref": "id"
+    },
+    {
+      "table": "maple_pool_meta",
+      "column": "chain_id",
+      "parent": "maple_pool",
+      "key": "maple_pool_id",
+      "ref": "id"
+    },
+    {
+      "table": "maple_sky_strategy_state",
+      "column": "chain_id",
+      "parent": "maple_sky_strategy",
+      "key": "maple_sky_strategy_id",
+      "ref": "id"
+    },
+    {
+      "table": "maple_sky_strategy_meta",
+      "column": "chain_id",
+      "parent": "maple_sky_strategy",
+      "key": "maple_sky_strategy_id",
+      "ref": "id"
+    },
+    {
+      "table": "maple_ftl_loan_state",
+      "column": "chain_id",
+      "parent": "maple_ftl_loan",
+      "key": "maple_ftl_loan_id",
+      "ref": "id"
+    },
+    {
+      "table": "fluid_vault_state",
+      "column": "chain_id",
+      "parent": "fluid_vault",
+      "key": "fluid_vault_id",
+      "ref": "id"
+    },
+    {
+      "table": "onchain_token_price",
+      "column": "chain_id",
+      "parent": "oracle",
+      "key": "oracle_id",
+      "ref": "id"
+    },
+    {
+      "table": "borrower",
+      "column": "chain_id",
+      "parent": "protocol",
+      "key": "protocol_id",
+      "ref": "id"
+    },
+    {
+      "table": "borrower_collateral",
+      "column": "chain_id",
+      "parent": "protocol",
+      "key": "protocol_id",
+      "ref": "id"
+    },
+    {
+      "table": "sparklend_reserve_data",
+      "column": "chain_id",
+      "parent": "protocol",
+      "key": "protocol_id",
+      "ref": "id"
+    },
+    {
+      "table": "prime_debt",
+      "column": "chain_id",
+      "const": 1
+    },
+    {
+      "table": "morpho_market_state",
+      "column": "protocol_id",
+      "parent": "morpho_market",
+      "key": "morpho_market_id",
+      "ref": "id"
+    },
+    {
+      "table": "morpho_market_position",
+      "column": "protocol_id",
+      "parent": "morpho_market",
+      "key": "morpho_market_id",
+      "ref": "id"
+    },
+    {
+      "table": "morpho_vault_state",
+      "column": "protocol_id",
+      "parent": "morpho_vault",
+      "key": "morpho_vault_id",
+      "ref": "id"
+    },
+    {
+      "table": "morpho_vault_position",
+      "column": "protocol_id",
+      "parent": "morpho_vault",
+      "key": "morpho_vault_id",
+      "ref": "id"
+    },
+    {
+      "table": "maple_loan_state",
+      "column": "protocol_id",
+      "parent": "maple_loan",
+      "key": "maple_loan_id",
+      "ref": "id"
+    },
+    {
+      "table": "maple_loan_collateral",
+      "column": "protocol_id",
+      "parent": "maple_loan",
+      "key": "maple_loan_id",
+      "ref": "id"
+    },
+    {
+      "table": "maple_loan_meta",
+      "column": "protocol_id",
+      "parent": "maple_loan",
+      "key": "maple_loan_id",
+      "ref": "id"
+    },
+    {
+      "table": "maple_pool_state",
+      "column": "protocol_id",
+      "parent": "maple_pool",
+      "key": "maple_pool_id",
+      "ref": "id"
+    },
+    {
+      "table": "maple_pool_meta",
+      "column": "protocol_id",
+      "parent": "maple_pool",
+      "key": "maple_pool_id",
+      "ref": "id"
+    },
+    {
+      "table": "maple_ftl_loan_state",
+      "column": "protocol_id",
+      "parent": "maple_ftl_loan",
+      "key": "maple_ftl_loan_id",
+      "ref": "id"
+    },
+    {
+      "table": "fluid_vault_state",
+      "column": "protocol_id",
+      "parent": "fluid_vault",
+      "key": "fluid_vault_id",
+      "ref": "id"
+    },
+    {
+      "table": "maple_sky_strategy_state",
+      "column": "protocol_id",
+      "parent": "maple_sky_strategy",
+      "key": "maple_sky_strategy_id",
+      "ref": "id",
+      "then_parent": "maple_pool",
+      "then_key": "maple_pool_id",
+      "then_ref": "id"
+    },
+    {
+      "table": "maple_sky_strategy_meta",
+      "column": "protocol_id",
+      "parent": "maple_sky_strategy",
+      "key": "maple_sky_strategy_id",
+      "ref": "id",
+      "then_parent": "maple_pool",
+      "then_key": "maple_pool_id",
+      "then_ref": "id"
+    },
+    {
+      "table": "borrower",
+      "column": "block_timestamp",
+      "block_time": true
+    },
+    {
+      "table": "borrower_collateral",
+      "column": "block_timestamp",
+      "block_time": true
+    },
+    {
+      "table": "allocation_position",
+      "column": "block_timestamp",
+      "block_time": true
+    },
+    {
+      "table": "protocol_event",
+      "column": "block_timestamp",
+      "block_time": true
+    },
+    {
+      "table": "sparklend_reserve_data",
+      "column": "block_timestamp",
+      "block_time": true
+    }
+  ],
+  "required_keys": [
+    {
+      "name": "chain",
+      "any_of": [
+        "chain_id"
+      ],
+      "applies_to": [
+        "raw_pipeline"
+      ],
+      "exempt": [
+        "anchorage_operation",
+        "anchorage_package_snapshot",
+        "cex_orderbook_snapshots",
+        "offchain_token_price"
+      ]
+    },
+    {
+      "name": "protocol",
+      "any_of": [
+        "protocol_id"
+      ],
+      "applies_to": [
+        "raw_pipeline"
+      ],
+      "exempt": [
+        "allocation_position",
+        "anchorage_operation",
+        "anchorage_package_snapshot",
+        "cex_orderbook_snapshots",
+        "maple_syrup_global_state",
+        "offchain_token_price",
+        "onchain_token_price",
+        "prime_debt",
+        "psm3_reserves",
+        "token_total_supply"
+      ]
+    },
+    {
+      "name": "observation_time",
+      "any_of": [
+        "block_timestamp",
+        "snapshot_time",
+        "event_time"
+      ],
+      "applies_to": [
+        "raw_pipeline"
+      ],
+      "exempt": [
+        "anchorage_operation"
+      ]
+    }
+  ],
+  "nullable_exempt": [
+    {
+      "table": "allocation_position",
+      "column": "build_id"
+    },
+    {
+      "table": "anchorage_operation",
+      "column": "build_id"
+    },
+    {
+      "table": "anchorage_package_snapshot",
+      "column": "build_id"
+    },
+    {
+      "table": "borrower",
+      "column": "build_id"
+    },
+    {
+      "table": "borrower_collateral",
+      "column": "build_id"
+    },
+    {
+      "table": "morpho_market_position",
+      "column": "build_id"
+    },
+    {
+      "table": "morpho_market_state",
+      "column": "build_id"
+    },
+    {
+      "table": "morpho_vault_position",
+      "column": "build_id"
+    },
+    {
+      "table": "morpho_vault_state",
+      "column": "build_id"
+    },
+    {
+      "table": "offchain_token_price",
+      "column": "build_id"
+    },
+    {
+      "table": "onchain_token_price",
+      "column": "build_id"
+    },
+    {
+      "table": "prime_debt",
+      "column": "build_id"
+    },
+    {
+      "table": "protocol_event",
+      "column": "build_id"
+    },
+    {
+      "table": "sparklend_reserve_data",
+      "column": "build_id"
+    },
+    {
+      "table": "anchorage_operation",
+      "column": "processing_version"
+    },
+    {
+      "table": "anchorage_package_snapshot",
+      "column": "processing_version"
+    },
+    {
+      "table": "prime_debt",
+      "column": "processing_version"
+    },
+    {
+      "table": "sparklend_reserve_data",
+      "column": "processing_version"
+    }
+  ],
+  "transform_config": {
+    "prime_debt": {
+      "key": [
+        "prime_id",
+        "ilk_name",
+        "block_number",
+        "block_version",
+        "processing_version"
+      ]
+    },
+    "anchorage_operation": {
+      "key": [
+        "prime_id",
+        "operation_id",
+        "processing_version"
+      ]
+    },
+    "anchorage_package_snapshot": {
+      "key": [
+        "prime_id",
+        "package_id",
+        "snapshot_time",
+        "processing_version"
+      ]
+    },
+    "cex_orderbook_snapshots": {
+      "key": [
+        "exchange",
+        "symbol",
+        "event_time",
+        "persisted_at"
+      ]
+    }
+  }
+}
