@@ -50,6 +50,10 @@ func TestPositionEntityLink(t *testing.T) {
 			VALUES (sha256('pos2'::bytea), 'NOT_A_ROLE', 'em-1')`},
 		{"PK duplicate", `INSERT INTO position_entity_link (position_id, entity_role, entity_id)
 			VALUES (sha256('pos1'::bytea), 'CUSTODIAN', 'em-x')`},
+		// ISSUER is a seeded role (passes the FK) but the non-issuer CHECK must reject it: the
+		// issuer is resolved on the position itself, not linked here.
+		{"ISSUER excluded", `INSERT INTO position_entity_link (position_id, entity_role, entity_id)
+			VALUES (sha256('pos3'::bytea), 'ISSUER', 'em-issuer')`},
 	} {
 		if _, err := pool.Exec(ctx, g.sql); err == nil {
 			t.Errorf("%s: expected the insert to be rejected, got none", g.name)
