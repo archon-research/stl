@@ -8,26 +8,37 @@
 -- attributes on position_classification (VEC-401), not hashed. The leg split (one Morpho row
 -- into supply/borrow/collateral, an Aave aToken vs debtToken) is preserved by the instrument
 -- itself, which resolves to distinct instruments (VEC-412 bridge / VEC-413 debt_token). The
--- holder is a single id resolved via entity_master, so an on-chain wallet and a prime collapse
--- to one holder; prime-vs-wallet is an attribute, not part of the id.
+-- holder is the native on-chain holder id (a wallet address, or a prime's vault address), NOT a
+-- resolved entity: the wallet/prime -> single entity_master entity mapping happens downstream
+-- (entity_ref_codes / entity_master), so the id stays computable at materialization time without
+-- a master lookup, and never shifts when that mapping is re-curated.
 
 -- position_key: the canonical identity string
 --   chain_id;protocol_id;instrument_key;holder_id
 -- Nullable structural fields (chain_id/protocol_id) render as empty between the ';' delimiters
--- (so field positions are stable); instrument_key and holder_id are required. instrument_key is
--- globally unique (VEC-412 bridge), so it no longer carries a kind namespace prefix.
+-- (so field positions are stable); instrument_key and holder_id are required and non-empty, and
+-- must not contain the ';' delimiter (unescaped, it would collide distinct identities). Global
+-- uniqueness of instrument_key across chains is a construction concern of the VEC-412 bridge key.
 -- IMMUTABLE so it can back a generated column or index. Fail hard on bad inputs rather than
 -- emit a silently-wrong identity.
 CREATE OR REPLACE FUNCTION public.position_key(
   _chain_id integer, _protocol_id bigint, _instrument_key text, _holder_id text
 ) RETURNS text
-  LANGUAGE plpgsql IMMUTABLE AS $$
+  LANGUAGE plpgsql IMMUTABLE
+  SET search_path = pg_catalog, public AS $$
 BEGIN
-  IF _instrument_key IS NULL THEN
-    RAISE EXCEPTION 'position_key: instrument_key is required';
+  IF _instrument_key IS NULL OR _instrument_key = '' THEN
+    RAISE EXCEPTION 'position_key: instrument_key is required and must be non-empty';
   END IF;
-  IF _holder_id IS NULL THEN
-    RAISE EXCEPTION 'position_key: holder_id is required (a position always has a holder; resolve it via entity_master before hashing)';
+  IF _holder_id IS NULL OR _holder_id = '' THEN
+    RAISE EXCEPTION 'position_key: holder_id is required and must be non-empty (use the native holder id; the entity is resolved downstream, not here)';
+  END IF;
+  -- The ';' delimiter is not escaped, so an input containing it could collide two distinct
+  -- identities onto one id: instrument_key='a;b',holder='c' and instrument_key='a',holder='b;c'
+  -- both render '...;a;b;c'. Native ids (hex address, bytes32, registry:ilk, provider:package)
+  -- never contain ';'; reject it rather than emit a silently-ambiguous identity.
+  IF strpos(_instrument_key, ';') > 0 OR strpos(_holder_id, ';') > 0 THEN
+    RAISE EXCEPTION 'position_key: instrument_key/holder_id must not contain the '';'' delimiter';
   END IF;
   RETURN concat_ws(';',
     coalesce(_chain_id::text, ''),
@@ -36,7 +47,7 @@ BEGIN
     _holder_id);
 END $$;
 COMMENT ON FUNCTION public.position_key(integer, bigint, text, text) IS
-  '[Operational] Canonical position identity string (VEC-400): chain_id;protocol_id;instrument_key;holder_id. Human-readable descriptor and the pre-image of position_id(). Identity is holder + instrument only; classifications (deal_type, leg) are looked-up attributes, not part of the key. Nullable structural fields render empty; instrument_key and holder_id required. Holder is the unified entity_master holder id.';
+  '[Operational] Canonical position identity string (VEC-400): chain_id;protocol_id;instrument_key;holder_id. Human-readable descriptor and the pre-image of position_id(). Identity is holder + instrument only; classifications (deal_type, leg) are looked-up attributes, not part of the key. Nullable structural fields render empty; instrument_key and holder_id are required, non-empty, and must not contain '';''. Holder is the native on-chain holder id (wallet or prime vault address); the entity is resolved downstream, not in the key.';
 
 -- position_id: sha256 of the canonical string -> bytea(32), the joinable PK stamped onto every
 -- position and its downstream tables. sha256() is a built-in (PG 11+); no pgcrypto extension.
@@ -44,7 +55,8 @@ COMMENT ON FUNCTION public.position_key(integer, bigint, text, text) IS
 CREATE OR REPLACE FUNCTION public.position_id(
   _chain_id integer, _protocol_id bigint, _instrument_key text, _holder_id text
 ) RETURNS bytea
-  LANGUAGE sql IMMUTABLE AS $$
+  LANGUAGE sql IMMUTABLE
+  SET search_path = pg_catalog, public AS $$
   SELECT sha256(convert_to(
     public.position_key(_chain_id, _protocol_id, _instrument_key, _holder_id),
     'UTF8'));
