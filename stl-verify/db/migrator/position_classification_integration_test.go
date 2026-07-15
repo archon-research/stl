@@ -48,4 +48,11 @@ func TestPositionClassification(t *testing.T) {
 		 VALUES (sha256('valid'::bytea), 'BORROW')`); err == nil {
 		t.Error("expected a primary-key violation for a duplicate position_id")
 	}
+
+	// CHECK: position_id must be exactly 32 bytes (sha256 width); a mis-sized id is rejected.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO position_classification (position_id, deal_type_code)
+		 VALUES ('\x00'::bytea, 'LOAN')`); err == nil {
+		t.Error("expected a check violation for a position_id that is not 32 bytes")
+	}
 }

@@ -21,7 +21,10 @@ CREATE TABLE IF NOT EXISTS position_classification (
     CONSTRAINT position_classification_deal_type_fkey
         FOREIGN KEY (deal_type_code) REFERENCES deal_type_ref (deal_type),
     CONSTRAINT position_classification_direction_chk
-        CHECK (direction IS NULL OR direction = ANY (ARRAY['LONG'::text, 'SHORT'::text]))
+        CHECK (direction IS NULL OR direction = ANY (ARRAY['LONG'::text, 'SHORT'::text])),
+    -- position_id is sha256() output: enforce the 32-byte width rather than assume it (bytea is
+    -- unlength-modified in Postgres), so a mis-sized id can never be stored (Simon review on #572).
+    CONSTRAINT position_classification_id_len_chk CHECK (octet_length(position_id) = 32)
 );
 
 COMMENT ON TABLE position_classification IS
