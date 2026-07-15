@@ -231,15 +231,16 @@ async def test_prime_compute_logs_missing_receipt_token():
     model can price it — still surface as an error rather than a fake zero RRC."""
     from unittest.mock import patch
 
-    import app.services.prime_risk_capital_service as prc
-
     positions = [make_receipt_token_position(receipt_token_id=1, symbol="aWETH", amount_usd=Decimal("100"))]
     reader = AsyncMock(spec=PostgresCryptoLendingReader)
     reader.get_receipt_token.return_value = None  # receipt-token record cannot be resolved
     model = _crypto_lending_service(reader)
     service = _service(_repo(positions, Decimal("1000")), _FakeRegistry([model]))
 
-    with patch.object(prc, "logger") as mock_logger, pytest.raises(ValueError, match="receipt token not found"):
+    with (
+        patch("app.services.prime_risk_capital_service.logger") as mock_logger,
+        pytest.raises(ValueError, match="receipt token not found"),
+    ):
         await service.compute(_PRIME)
 
     reader.batch_get_shares.assert_not_awaited()
