@@ -16,6 +16,7 @@ from decimal import ROUND_HALF_EVEN, Decimal
 
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.prime_risk_capital import AllocationRiskCapital, PrimeRiskCapital
+from app.domain.entities.receipt_token import ReceiptTokenInfo
 from app.logging import get_logger
 from app.ports.allocation_repository import AllocationRepositoryPort
 from app.services.crypto_lending_risk_service import CryptoLendingRiskService
@@ -59,7 +60,7 @@ class PrimeRiskCapitalService:
         # a fan-out of one ``allocation_position`` query per position.
         # Non-crypto-lending models (none today; SURAF/CORE pending) fall
         # through to the unchanged ``model.compute`` path.
-        prefetched_shares = await self._prefetch_crypto_lending_shares(positions, models, prime_id)
+        prefetched_shares, prefetched_infos = await self._prefetch_crypto_lending_shares(positions, models, prime_id)
 
         # Run the per-allocation model computes concurrently. Each compute is
         # still several DB round trips (breakdown + liquidation params), so
@@ -67,7 +68,9 @@ class PrimeRiskCapitalService:
         results = iter(
             await asyncio.gather(
                 *(
-                    self._dispatch_compute(model, position.receipt_token_id, prime_id, prefetched_shares)
+                    self._dispatch_compute(
+                        model, position.receipt_token_id, prime_id, prefetched_shares, prefetched_infos
+                    )
                     for position, model in zip(positions, models)
                     if model is not None
                 )
@@ -138,12 +141,15 @@ class PrimeRiskCapitalService:
         positions,
         models,
         prime_id: EthAddress,
-    ) -> dict[int, Decimal | Exception]:
+    ) -> tuple[dict[int, Decimal | Exception], dict[int, ReceiptTokenInfo]]:
         """Resolve shares for every crypto-lending position in one round-trip.
 
-        Returns ``{receipt_token_id: share-or-error}``. Errors are stored as
-        values (not raised) so the per-position ``compute_with_share`` call
-        re-raises them in the same place the un-batched path would have.
+        Returns ``(shares, infos)`` keyed by ``receipt_token_id``. ``shares`` maps
+        each asset to a resolved share or a stored share-lookup error (re-raised
+        later by ``compute_with_share`` in the same place the un-batched path
+        would have). ``infos`` carries the receipt-token records fetched to build
+        the batch, so the per-allocation compute reuses them instead of
+        re-fetching — one receipt-token lookup per asset, not two.
         """
         # All crypto-lending model instances share the same reader (constructed
         # once at startup), so the first one we see is enough to drive the
@@ -157,7 +163,7 @@ class PrimeRiskCapitalService:
                 asset_ids.append(position.receipt_token_id)
 
         if cl_model is None or not asset_ids:
-            return {}
+            return {}, {}
 
         reader = cl_model.reader
         # Resolve receipt-token infos concurrently; this is the same per-asset
@@ -166,12 +172,15 @@ class PrimeRiskCapitalService:
         # for now — a future change can batch it too.)
         infos = await asyncio.gather(*(reader.get_receipt_token(aid) for aid in asset_ids))
 
-        valid_infos = [info for info in infos if info is not None]
-        if not valid_infos:
-            return {}
+        infos_by_id: dict[int, ReceiptTokenInfo] = {}
+        for asset_id, info in zip(asset_ids, infos):
+            if info is not None:
+                infos_by_id[asset_id] = info
+        if not infos_by_id:
+            return {}, {}
 
-        shares = await reader.batch_get_shares(valid_infos, prime_id)
-        return dict(shares)
+        shares = await reader.batch_get_shares(list(infos_by_id.values()), prime_id)
+        return dict(shares), infos_by_id
 
     async def _dispatch_compute(
         self,
@@ -179,6 +188,7 @@ class PrimeRiskCapitalService:
         asset_id: int,
         prime_id: EthAddress,
         prefetched_shares: dict[int, Decimal | Exception],
+        prefetched_infos: dict[int, ReceiptTokenInfo],
     ):
         """Run a model compute, plumbing a pre-fetched share when available.
 
@@ -187,10 +197,13 @@ class PrimeRiskCapitalService:
         short-circuit inside the model. Assets with no backed-breakdown rows
         return zero items without surfacing the share-lookup error, matching
         the un-batched ``compute`` semantics where ``get_share`` was never
-        called for empty breakdowns.
+        called for empty breakdowns. The receipt-token ``info`` fetched during
+        prefetch is passed through so the model does not re-fetch it.
         """
         if isinstance(model, CryptoLendingRiskService) and asset_id in prefetched_shares:
-            return await model.compute_with_share(asset_id, prime_id, {}, prefetched_shares[asset_id])
+            return await model.compute_with_share(
+                asset_id, prime_id, {}, prefetched_shares[asset_id], info=prefetched_infos.get(asset_id)
+            )
         return await model.compute(asset_id, prime_id, {})
 
     def _default_model_for(self, asset_id: int, prime_id: EthAddress):

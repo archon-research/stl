@@ -202,9 +202,7 @@ async def test_prime_compute_uses_batch_get_shares_and_skips_per_asset_get_share
     ]
     reader = AsyncMock(spec=PostgresCryptoLendingReader)
     infos = {1: _info(1, 777), 2: _info(2, 888)}
-    # AsyncMock with a sync callable side_effect calls it for each invocation
-    # and wraps the return value into a coroutine. Using a callable avoids
-    # StopAsyncIteration when ``compute_with_share`` re-fetches infos.
+    # Map each asset_id to its info for the prefetch's concurrent lookups.
     reader.get_receipt_token.side_effect = lambda aid: infos[aid]
     reader.batch_get_shares.return_value = {1: Decimal("0.4"), 2: Decimal("0.25")}
     reader.get_breakdown.return_value = BackedBreakdown(backed_asset_id=42, items=())
@@ -218,6 +216,9 @@ async def test_prime_compute_uses_batch_get_shares_and_skips_per_asset_get_share
     # batch_get_shares hit once, get_share never hit.
     reader.batch_get_shares.assert_awaited_once()
     reader.get_share.assert_not_awaited()
+    # Each asset's receipt-token info is fetched once during prefetch and reused
+    # by compute_with_share, not re-fetched — N lookups, not 2N.
+    assert reader.get_receipt_token.await_count == 2
     # The result still surfaces the per-allocation entries even though the
     # gap-sweep RRC happens to be zero (no breakdown items in the test fixture).
     assert len(result.per_allocation) == 2

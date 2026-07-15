@@ -84,6 +84,7 @@ class CryptoLendingRiskService:
         prime_id: EthAddress,
         overrides: Mapping[str, Any],
         share_or_err: Decimal | Exception,
+        info: ReceiptTokenInfo | None = None,
     ) -> RrcResult:
         """Compute the RRC reusing a pre-resolved share.
 
@@ -98,12 +99,17 @@ class CryptoLendingRiskService:
         breakdown is fetched and known to be non-empty, mirroring the un-batched
         ``compute`` path where ``get_share`` was never called for assets with
         an empty breakdown.
+
+        ``info`` may carry the receipt-token record the caller already fetched to
+        build the batch, avoiding a redundant ``get_receipt_token`` round-trip; it
+        is fetched here only when not supplied.
         """
         if not self.applies_to(asset_id, prime_id):
             raise ValueError(f"unsupported asset_id={asset_id}")
 
         gap_pct = self._resolve_gap_pct(overrides)
-        info = await self._reader.get_receipt_token(asset_id)
+        if info is None:
+            info = await self._reader.get_receipt_token(asset_id)
         if info is None:
             raise ValueError(f"receipt token not found: {asset_id}")
         _, items = await self._load_enriched_items_for_info(info, prime_id=prime_id, share_override=share_or_err)
