@@ -27,8 +27,7 @@
 -- SET would leak onto the migrator's pooled connection and desync the schema-isolated tests.
 
 CREATE TABLE IF NOT EXISTS entity_master (
-    entity_sk            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,  -- immutable surrogate, stamped onto positions
-    entity_id            text NOT NULL,                 -- natural key (em-...), stable across all versions
+    entity_id            text NOT NULL,                 -- natural key (em-...), stable across all versions; PK with processing_version
     processing_version   integer NOT NULL DEFAULT 1,    -- monotonic per entity_id; SCD2 dedup key
     valid_from           date NOT NULL DEFAULT CURRENT_DATE,  -- when this version became effective (only temporal field stored)
     change_reason        text NOT NULL,                 -- mandatory: why this version exists
@@ -53,6 +52,7 @@ CREATE TABLE IF NOT EXISTS entity_master (
     created_at           timestamp with time zone NOT NULL DEFAULT now(),
     created_by           text NOT NULL DEFAULT 'system',
     approved_by          text,                           -- 4-eyes approver
+    CONSTRAINT entity_master_pkey PRIMARY KEY (entity_id, processing_version),  -- natural key; no surrogate (positions resolve via entity_id)
     CONSTRAINT em_type_fkey FOREIGN KEY (entity_type) REFERENCES entity_type_ref(entity_type),
     CONSTRAINT em_role_fkey FOREIGN KEY (counterparty_role) REFERENCES counterparty_role_ref(counterparty_role),
     CONSTRAINT em_origination_fkey FOREIGN KEY (origination_type) REFERENCES origination_type_ref(origination_type),
@@ -64,9 +64,8 @@ CREATE TABLE IF NOT EXISTS entity_master (
 );
 
 -- Catalog metadata (downstream data-dictionary / schema_master tooling reads pg_catalog comments).
-COMMENT ON TABLE entity_master IS '[Dimension] Append-only SCD2 legal-entity master. One row per (entity_id, processing_version); the current record per entity_id is entity_master_current. Positions resolve their holder to a single entity_id (wallets via entity_ref_codes, primes via pipeline_prime_id) through the natural key, not the per-version surrogate.';
-COMMENT ON COLUMN entity_master.entity_sk IS 'PK. Per-version surrogate (GENERATED ALWAYS), unique per (entity_id, processing_version). Do NOT stamp onto positions: it pins to one version and goes stale on the next SCD2 row. Positions resolve through entity_id via entity_master_current (VEC-421).';
-COMMENT ON COLUMN entity_master.entity_id IS 'Natural key (em-<code>); stable across all SCD2 versions. This is what positions resolve against.';
+COMMENT ON TABLE entity_master IS '[Dimension] Append-only SCD2 legal-entity master. PK (entity_id, processing_version); the current record per entity_id is entity_master_current. Positions resolve their holder to a single entity_id (wallets via entity_ref_codes, primes via pipeline_prime_id) through the natural key; there is no per-version surrogate to stamp.';
+COMMENT ON COLUMN entity_master.entity_id IS 'Natural key (em-<code>); stable across all SCD2 versions. PK together with processing_version. This is what positions resolve against.';
 COMMENT ON COLUMN entity_master.processing_version IS 'SCD2 dedup/version key. Monotonic per entity_id (>=1), loader-assigned.';
 COMMENT ON COLUMN entity_master.valid_from IS 'Date this version became effective; only temporal field stored (valid_to derived in entity_master_versions).';
 COMMENT ON COLUMN entity_master.change_reason IS 'Mandatory: why this version exists.';
@@ -92,11 +91,10 @@ COMMENT ON COLUMN entity_master.created_at IS 'Audit. Write timestamp.';
 COMMENT ON COLUMN entity_master.created_by IS 'Audit. User or service that wrote the row.';
 COMMENT ON COLUMN entity_master.approved_by IS 'Audit. 4-eyes approver.';
 
--- One version per (entity_id, processing_version): the SCD2 dedup key. Two same-day corrections are
--- distinguished by processing_version, and the current view breaks ties on it. The loader (VEC-418)
--- owns monotonic processing_version assignment per entity_id; a collision fails hard on this unique
--- index rather than silently merging.
-CREATE UNIQUE INDEX IF NOT EXISTS em_id_version_uidx ON entity_master (entity_id, processing_version);
+-- One version per (entity_id, processing_version): the SCD2 dedup key, enforced by the primary key
+-- (entity_master_pkey) above. Two same-day corrections are distinguished by processing_version, and
+-- the current view breaks ties on it. The loader (VEC-418) owns monotonic processing_version
+-- assignment per entity_id; a collision fails hard on the primary key rather than silently merging.
 -- Current-version lookup (the ORDER BY of entity_master_current).
 CREATE INDEX IF NOT EXISTS em_current_idx ON entity_master (entity_id, valid_from DESC, processing_version DESC);
 -- FK-support and bridge-resolution indexes not covered by a leading PK column.
