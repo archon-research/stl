@@ -245,6 +245,12 @@ class CryptoLendingRiskService:
             breakdown = await self._reader.get_breakdown(info)
             if not breakdown.items:
                 return breakdown.backed_asset_id, []
+            # NOTE: this branch ignores ``share_override`` and does its own
+            # ``get_share`` round-trip. Only pool-level (non-enriched) protocols
+            # reach here — today just Maple, which has no risk model and so is
+            # never dispatched through the batched ``compute_with_share`` path.
+            # When Maple gains a model, thread ``share_override`` through here too
+            # so the batched path doesn't re-fetch a share it already prefetched.
             share = await self._reader.get_share(info, prime_id) if prime_id is not None else _ONE
             return breakdown.backed_asset_id, self._build_unenriched_items(breakdown, share)
 

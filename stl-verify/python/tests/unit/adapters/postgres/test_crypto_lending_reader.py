@@ -454,6 +454,24 @@ async def test_batch_get_shares_collapses_duplicate_pairs(
     assert out[100] == Decimal("0.4")
 
 
+@pytest.mark.asyncio
+async def test_batch_get_shares_accepts_maple(
+    reader: PostgresCryptoLendingReader,
+) -> None:
+    """Maple resolves through the same lookup as ``get_share``; the batch must not
+    reject it as an unsupported protocol, or the batched path would 500 for an
+    asset the un-batched path prices fine once Maple gains a risk model."""
+    info = replace(_maple_info(), receipt_token_token_id=555)
+
+    with patch(
+        "app.adapters.postgres.crypto_lending_reader.batch_fetch_shares",
+        AsyncMock(return_value={(1, 555): Decimal("0.3")}),
+    ):
+        out = await reader.batch_get_shares([info], DUMMY_PRIME)
+
+    assert out[99] == Decimal("0.3")
+
+
 def test_normalize_maple() -> None:
     assert _normalize_protocol_name("maple") == "maple"
 

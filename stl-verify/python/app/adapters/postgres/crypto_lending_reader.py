@@ -208,7 +208,11 @@ class PostgresCryptoLendingReader:
 
         for info in infos:
             normalized = _normalize_protocol_name(info.protocol_name)
-            if normalized not in _AAVE_LIKE and normalized not in _MORPHO:
+            # Mirror get_share: Maple resolves through the same
+            # (chain_id, receipt_token_token_id) lookup, so it must be accepted here
+            # too — otherwise the batched path would raise for an asset the
+            # un-batched path resolves fine, once Maple gains a risk model.
+            if normalized not in _AAVE_LIKE and normalized not in _MORPHO and normalized not in _MAPLE:
                 results[info.receipt_token_id] = ValueError(
                     f"unsupported protocol: {info.protocol_name!r} (normalized: {normalized!r})"
                 )
