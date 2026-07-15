@@ -27,8 +27,7 @@
 -- SET would leak onto the pooled connection and desync the schema-isolated integration tests.
 
 CREATE TABLE IF NOT EXISTS security_master (
-    security_sk          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,  -- per-version surrogate; NOT stamped onto positions (they resolve via security_id)
-    security_id          text NOT NULL,                 -- natural key (sm-...), stable across all versions
+    security_id          text NOT NULL,                 -- natural key (sm-...), stable across all versions; PK with processing_version
     processing_version   integer NOT NULL DEFAULT 1,    -- monotonic per security_id; SCD2 dedup key
     valid_from           date NOT NULL DEFAULT CURRENT_DATE,  -- when this version became effective (only temporal field stored)
     change_reason        text NOT NULL,                 -- mandatory: why this version exists
@@ -57,6 +56,7 @@ CREATE TABLE IF NOT EXISTS security_master (
     created_at           timestamp with time zone NOT NULL DEFAULT now(),
     created_by           text NOT NULL DEFAULT 'system',
     approved_by          text,                           -- 4-eyes approver
+    CONSTRAINT security_master_pkey PRIMARY KEY (security_id, processing_version),  -- natural key; no surrogate (positions resolve via security_id)
     CONSTRAINT sm_asset_class_fkey FOREIGN KEY (asset_class) REFERENCES asset_class_ref(asset_class),
     CONSTRAINT sm_type_fkey FOREIGN KEY (asset_class, security_type)
         REFERENCES security_type_ref(asset_class, security_type),
@@ -77,9 +77,8 @@ CREATE TABLE IF NOT EXISTS security_master (
 
 -- Catalog metadata (downstream data-dictionary / schema_master tooling reads pg_catalog comments).
 -- [Type] tag on the table, per-column Roles (PK / FK / Audit), per db/migrations/AGENTS.md.
-COMMENT ON TABLE security_master IS '[Dimension] Append-only SCD2 instrument-classification master. One row per (security_id, processing_version); the current classification per security_id is security_master_current. Positions resolve to it through the natural key security_id (via security_instrument_bridge and security_master_current), not the per-version surrogate.';
-COMMENT ON COLUMN security_master.security_sk IS 'PK. Per-version surrogate (GENERATED ALWAYS), unique per (security_id, processing_version). Do NOT stamp onto positions: it pins to one version and goes stale on the next SCD2 row. Positions resolve through security_id via security_master_current (VEC-420).';
-COMMENT ON COLUMN security_master.security_id IS 'Natural key (sm-<code>); stable across all SCD2 versions. This is what positions resolve against.';
+COMMENT ON TABLE security_master IS '[Dimension] Append-only SCD2 instrument-classification master. PK (security_id, processing_version); the current classification per security_id is security_master_current. Positions resolve to it through the natural key security_id (via security_instrument_bridge and security_master_current); there is no per-version surrogate to stamp.';
+COMMENT ON COLUMN security_master.security_id IS 'Natural key (sm-<code>); stable across all SCD2 versions. PK together with processing_version. This is what positions resolve against.';
 COMMENT ON COLUMN security_master.processing_version IS 'SCD2 dedup/version key. Monotonic per security_id (>=1), loader-assigned.';
 COMMENT ON COLUMN security_master.valid_from IS 'Date this version became effective; only temporal field stored (valid_to derived in security_master_versions).';
 COMMENT ON COLUMN security_master.change_reason IS 'Mandatory: why this version exists.';
@@ -109,12 +108,12 @@ COMMENT ON COLUMN security_master.created_at IS 'Audit. Write timestamp.';
 COMMENT ON COLUMN security_master.created_by IS 'Audit. User or service that wrote the row.';
 COMMENT ON COLUMN security_master.approved_by IS 'Audit. 4-eyes approver.';
 
--- One version per (security_id, processing_version): the SCD2 dedup key. Two same-day corrections are
--- distinguished by processing_version, and the current view breaks ties on it. Unlike the pipeline
--- state tables (ADR-0002), there is no auto-increment trigger here: this is a curated master whose
--- inserts are deliberate loader operations (VEC-419), so the loader owns monotonic processing_version
--- assignment per security_id. A collision fails hard on this unique index rather than silently merging.
-CREATE UNIQUE INDEX IF NOT EXISTS sm_id_version_uidx ON security_master (security_id, processing_version);
+-- One version per (security_id, processing_version): the SCD2 dedup key, enforced by the primary key
+-- (security_master_pkey) above. Two same-day corrections are distinguished by processing_version, and
+-- the current view breaks ties on it. Unlike the pipeline state tables (ADR-0002), there is no
+-- auto-increment trigger here: this is a curated master whose inserts are deliberate loader operations
+-- (VEC-419), so the loader owns monotonic processing_version assignment per security_id. A collision
+-- fails hard on the primary key rather than silently merging.
 -- Current-version lookup (the ORDER BY of security_master_current).
 CREATE INDEX IF NOT EXISTS sm_current_idx ON security_master (security_id, valid_from DESC, processing_version DESC);
 -- Classification filter index for the risk master (a query shape, not FK support: the reference
