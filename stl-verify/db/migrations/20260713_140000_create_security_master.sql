@@ -28,7 +28,7 @@
 
 CREATE TABLE IF NOT EXISTS security_master (
     security_id          text NOT NULL,                 -- natural key (sm-...), stable across all versions; PK with processing_version
-    processing_version   integer NOT NULL DEFAULT 1,    -- monotonic per security_id; SCD2 dedup key
+    processing_version   integer NOT NULL DEFAULT 0,    -- monotonic per security_id; SCD2 dedup key (0-based, matching the pipeline processing_version convention)
     valid_from           date NOT NULL DEFAULT CURRENT_DATE,  -- when this version became effective (only temporal field stored)
     change_reason        text NOT NULL,                 -- mandatory: why this version exists
     security_name        text,                          -- full display name
@@ -65,7 +65,7 @@ CREATE TABLE IF NOT EXISTS security_master (
     CONSTRAINT sm_currency_fkey FOREIGN KEY (currency) REFERENCES currency_ref(currency_code),
     CONSTRAINT sm_country_risk_fkey FOREIGN KEY (country_of_risk) REFERENCES country_ref(country_code),
     CONSTRAINT sm_country_issue_fkey FOREIGN KEY (country_of_issuance) REFERENCES country_ref(country_code),
-    CONSTRAINT sm_processing_version_chk CHECK (processing_version >= 1),
+    CONSTRAINT sm_processing_version_chk CHECK (processing_version >= 0),
     CONSTRAINT sm_status_chk CHECK (security_status IN ('ACTIVE','SUSPENDED','MATURED','DELISTED')),
     CONSTRAINT sm_token_standard_chk CHECK (token_standard IS NULL OR is_tokenised IS TRUE),
     CONSTRAINT sm_credit_tranche_chk CHECK (credit_tranche IS NULL OR credit_tranche IN ('AAA','AA','A','BBB','BB','B','EQUITY')),
@@ -79,7 +79,7 @@ CREATE TABLE IF NOT EXISTS security_master (
 -- [Type] tag on the table, per-column Roles (PK / FK / Audit), per db/migrations/AGENTS.md.
 COMMENT ON TABLE security_master IS '[Dimension] Append-only SCD2 instrument-classification master. PK (security_id, processing_version); the current classification per security_id is security_master_current. Positions resolve to it through the natural key security_id (via security_instrument_bridge and security_master_current); there is no per-version surrogate to stamp.';
 COMMENT ON COLUMN security_master.security_id IS 'Natural key (sm-<code>); stable across all SCD2 versions. PK together with processing_version. This is what positions resolve against.';
-COMMENT ON COLUMN security_master.processing_version IS 'SCD2 dedup/version key. Monotonic per security_id (>=1), loader-assigned.';
+COMMENT ON COLUMN security_master.processing_version IS 'SCD2 dedup/version key. Monotonic per security_id (>=0), loader-assigned; 0-based to match the pipeline processing_version convention.';
 COMMENT ON COLUMN security_master.valid_from IS 'Date this version became effective; only temporal field stored (valid_to derived in security_master_versions).';
 COMMENT ON COLUMN security_master.change_reason IS 'Mandatory: why this version exists.';
 COMMENT ON COLUMN security_master.security_name IS 'Full display name.';
