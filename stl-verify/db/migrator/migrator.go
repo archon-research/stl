@@ -233,17 +233,25 @@ func (m *Migrator) applyMigrationNoTx(ctx context.Context, filename string, cont
 
 // splitStatements splits SQL content into individual statements by semicolons.
 // Semicolons inside dollar-quoted string literals (PostgreSQL `$$ ... $$` or
-// `$tag$ ... $tag$`), single-quoted string literals, and `--` line comments are
-// ignored, so DO blocks, function bodies, and literals carrying embedded `;` or
-// `$$` stay intact. This is the shared splitter for every no-transaction
-// migration, so it must not mis-parse a future migration that happens to put a
-// `$$` or `;` inside a string or a trailing comment.
+// `$tag$ ... $tag$`), single-quoted string literals, `--` line comments, and
+// `/* ... */` block comments are ignored, so DO blocks, function bodies, and
+// literals carrying embedded `;` or `$$` stay intact. This is the shared splitter
+// for every no-transaction migration, so it must not mis-parse a future migration
+// that puts a `$$` or `;` inside a string or a comment.
+//
+// It is line-oriented: a statement is recognised when a line's non-comment code
+// ends in `;`. That means every statement must live on its own line — do NOT put
+// two statements on a single line in a no-transaction migration, or they will be
+// executed together (which breaks statements that require standalone execution,
+// e.g. CREATE INDEX CONCURRENTLY or a DO block with COMMIT). Every migration in
+// this repo already follows the one-statement-per-line convention.
 func splitStatements(content string) []string {
 	var statements []string
 	var current strings.Builder
 
 	inDollarQuote := false
 	inSingleQuote := false
+	inBlockComment := false
 	dollarTag := ""
 
 	for line := range strings.SplitSeq(content, "\n") {
@@ -253,7 +261,7 @@ func splitStatements(content string) []string {
 		// Inside a dollar-quoted or single-quoted body, a leading `--` is
 		// legitimate content (a comment inside a PL/pgSQL body, or a literal
 		// that begins with `--`) and must be kept.
-		if !inDollarQuote && !inSingleQuote && strings.HasPrefix(trimmed, "--") {
+		if !inDollarQuote && !inSingleQuote && !inBlockComment && strings.HasPrefix(trimmed, "--") {
 			continue
 		}
 
@@ -262,12 +270,12 @@ func splitStatements(content string) []string {
 		}
 		current.WriteString(line)
 
-		// Advance the quote state across this line and recover the code portion
-		// (any trailing out-of-string `--` comment removed) so the terminating
-		// semicolon is detected on real SQL, not on a `;` inside a comment.
-		code := scanLine(line, &inDollarQuote, &dollarTag, &inSingleQuote)
+		// Advance the quote/comment state across this line and recover the
+		// non-comment code so the terminating semicolon is detected on real SQL,
+		// not on a `;` inside a comment or string.
+		code := scanLine(line, &inDollarQuote, &dollarTag, &inSingleQuote, &inBlockComment)
 
-		if !inDollarQuote && !inSingleQuote && strings.HasSuffix(strings.TrimSpace(code), ";") {
+		if !inDollarQuote && !inSingleQuote && !inBlockComment && strings.HasSuffix(strings.TrimSpace(code), ";") {
 			statements = append(statements, current.String())
 			current.Reset()
 		}
@@ -280,17 +288,29 @@ func splitStatements(content string) []string {
 	return statements
 }
 
-// scanLine walks `line` once, updating the dollar-quote and single-quote state,
-// and returns the leading code portion with any out-of-string `--` comment
-// stripped. PostgreSQL rules honoured: `''` is an escaped quote (stays inside
-// the literal); a `$`, `;`, or `--` inside a single-quoted literal is content,
-// not a delimiter; and a dollar tag only closes on its exact match.
-func scanLine(line string, inDollarQuote *bool, dollarTag *string, inSingleQuote *bool) string {
+// scanLine walks `line` once, updating the dollar-quote, single-quote, and
+// block-comment state, and returns the line's non-comment code (both `--` line
+// comments and `/* ... */` block comments removed). PostgreSQL rules honoured: a
+// doubled single quote is an escaped quote and stays inside the literal; a `$`,
+// `;`, or comment marker inside a single-quoted literal is content, not a
+// delimiter; and a dollar tag only closes on its exact match. Block-comment state
+// is threaded through the pointer because a `/* ... */` may span lines.
+func scanLine(line string, inDollarQuote *bool, dollarTag *string, inSingleQuote, inBlockComment *bool) string {
+	var code strings.Builder
 	for i := 0; i < len(line); {
 		switch {
+		case *inBlockComment:
+			if i+1 < len(line) && line[i] == '*' && line[i+1] == '/' {
+				*inBlockComment = false
+				i += 2
+				continue
+			}
+			i++
 		case *inSingleQuote:
+			code.WriteByte(line[i])
 			if line[i] == '\'' {
 				if i+1 < len(line) && line[i+1] == '\'' {
+					code.WriteByte(line[i+1])
 					i += 2 // escaped quote: remain inside the literal
 					continue
 				}
@@ -303,26 +323,34 @@ func scanLine(line string, inDollarQuote *bool, dollarTag *string, inSingleQuote
 					*inDollarQuote = false
 					*dollarTag = ""
 				}
+				code.WriteString(tag)
 				i += len(tag)
 				continue
 			}
+			code.WriteByte(line[i])
 			i++
 		case line[i] == '\'':
 			*inSingleQuote = true
+			code.WriteByte(line[i])
 			i++
 		case line[i] == '-' && i+1 < len(line) && line[i+1] == '-':
-			return line[:i] // rest of the line is a comment
+			return code.String() // rest of the line is a line comment
+		case line[i] == '/' && i+1 < len(line) && line[i+1] == '*':
+			*inBlockComment = true
+			i += 2
 		default:
 			if tag, ok := matchDollarTag(line, i); ok {
 				*inDollarQuote = true
 				*dollarTag = tag
+				code.WriteString(tag)
 				i += len(tag)
 				continue
 			}
+			code.WriteByte(line[i])
 			i++
 		}
 	}
-	return line
+	return code.String()
 }
 
 // matchDollarTag reports whether a PostgreSQL dollar-quote tag begins at

@@ -162,6 +162,44 @@ SELECT 2;
 				"SELECT 2;",
 			},
 		},
+		{
+			// A trailing /* */ block comment must not hide the terminating `;`.
+			name: "trailing block comment does not hide the semicolon",
+			content: `
+SELECT 1; /* done */
+SELECT 2;
+`,
+			wantStmt: []string{
+				"SELECT 1; /* done */",
+				"SELECT 2;",
+			},
+		},
+		{
+			// A `;` inside a /* */ block comment is not a statement terminator.
+			name: "semicolon inside a block comment does not split",
+			content: `
+SELECT 1 /* not ; a terminator */ FROM t;
+SELECT 2;
+`,
+			wantStmt: []string{
+				"SELECT 1 /* not ; a terminator */ FROM t;",
+				"SELECT 2;",
+			},
+		},
+		{
+			// Block comments span lines; embedded `;` and `$$` stay inert until close.
+			name: "multi-line block comment with embedded semicolon and dollar-dollar",
+			content: `
+SELECT 1 /* start
+still comment ; $$ still
+end */ ;
+SELECT 2;
+`,
+			wantStmt: []string{
+				"SELECT 1 /* start\nstill comment ; $$ still\nend */ ;",
+				"SELECT 2;",
+			},
+		},
 	}
 
 	for _, tt := range tests {
