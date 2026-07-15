@@ -329,33 +329,6 @@ func (r *OnchainPriceRepository) InsertOracle(ctx context.Context, oracle *entit
 	return oracle, nil
 }
 
-// GetAllActiveProtocolOracles retrieves all active protocol-oracle bindings.
-// Returns only the latest binding per protocol (by from_block DESC).
-func (r *OnchainPriceRepository) GetAllActiveProtocolOracles(ctx context.Context) ([]*entity.ProtocolOracle, error) {
-	rows, err := r.pool.Query(ctx, `
-		SELECT DISTINCT ON (protocol_id) id, protocol_id, oracle_id, from_block, created_at
-		FROM protocol_oracle
-		ORDER BY protocol_id, from_block DESC
-	`)
-	if err != nil {
-		return nil, fmt.Errorf("querying active protocol oracles: %w", err)
-	}
-	defer rows.Close()
-
-	var bindings []*entity.ProtocolOracle
-	for rows.Next() {
-		var po entity.ProtocolOracle
-		if err := rows.Scan(&po.ID, &po.ProtocolID, &po.OracleID, &po.FromBlock, &po.CreatedAt); err != nil {
-			return nil, fmt.Errorf("scanning protocol oracle: %w", err)
-		}
-		bindings = append(bindings, &po)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterating protocol oracles: %w", err)
-	}
-	return bindings, nil
-}
-
 // InsertProtocolOracleBinding inserts a new protocol-oracle binding.
 func (r *OnchainPriceRepository) InsertProtocolOracleBinding(ctx context.Context, binding *entity.ProtocolOracle) (*entity.ProtocolOracle, error) {
 	err := r.pool.QueryRow(ctx, `

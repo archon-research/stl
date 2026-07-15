@@ -24,6 +24,7 @@ from tests.integration.seed import (
     GHOST_SWEEP_PROXY_HEX,
     GHOST_TIEBREAK_PROXY_HEX,
     insert_allocation_position,
+    insert_oracle_asset,
     insert_token,
     seed_ghost_balance,
 )
@@ -213,6 +214,9 @@ async def _seed(db_url: str) -> None:
                 oracle_id,
                 Decimal(1),
             )
+            # Enabled oracle_asset mapping keeps this price eligible for the
+            # latest-price reads, which exclude sources with no enabled mapping.
+            await insert_oracle_asset(conn, oracle_id, usdc_id)
 
             # net_flow_usd flow-reconstruction fixture: three aUSDC events in one
             # bucket — +100 in, -40 out, and a 1000 sweep that must net to zero.
@@ -376,6 +380,37 @@ def test_list_allocations_returns_multiple_holdings_for_prime(client: TestClient
     assert aweth["underlying_token_address"] == f"0x{_WETH_HEX}"
     assert aweth["underlying_symbol"] == "WETH"
     assert aweth["protocol_name"] == "Aave V3"
+
+
+def test_list_allocations_surfaces_latest_activity_action_and_amount(
+    client: TestClient,
+) -> None:
+    """The latest event's direction and token-unit magnitude come from the same
+    row that wins the DISTINCT ON. For aUSDC that is the block 2000 ``in`` of 750
+    (the seed sets tx_amount = balance), not the superseded block 1000 rows.
+    """
+    response = client.get(f"/v1/primes/0x{_SPARK_PROXY_HEX}/allocations")
+
+    assert response.status_code == 200
+    ausdc = {item["symbol"]: item for item in response.json()}["aUSDC"]
+    assert ausdc["latest_activity_action"] == "in"
+    assert Decimal(ausdc["latest_activity_amount"]) == Decimal("750")
+
+
+def test_direct_holding_surfaces_latest_activity_action_and_amount(
+    client: TestClient,
+) -> None:
+    """The direct-holding query carries the same latest-activity fields as the
+    receipt-token query. obex's raw USDC was last touched by an ``in`` of 250
+    (the seed sets tx_amount = balance).
+    """
+    response = client.get(f"/v1/primes/0x{_OBEX_PROXY_HEX}/allocations")
+
+    assert response.status_code == 200
+    row = response.json()[0]
+    assert row["symbol"] == "USDC"
+    assert row["latest_activity_action"] == "in"
+    assert Decimal(row["latest_activity_amount"]) == Decimal("250")
 
 
 def test_direct_underlying_holdings_surface_as_their_own_rows(
