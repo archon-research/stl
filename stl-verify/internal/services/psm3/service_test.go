@@ -16,6 +16,8 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/psm3"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 const (
@@ -83,14 +85,18 @@ func (f *fakePSM3Caller) ResolveImmutables(_ context.Context, blockNumber *big.I
 	return nil
 }
 
-func (f *fakePSM3Caller) ReadState(_ context.Context, blockNumber *big.Int) (*entity.PSM3State, error) {
+// ReadState is now hash-pinned (VEC-471). makeBlockEvents encodes the block
+// number into BlockHash as 0x%064x, so decoding the hash back to an int64 lets
+// the existing block-number assertions keep working unchanged while proving the
+// service threaded the block hash through, not the number.
+func (f *fakePSM3Caller) ReadState(_ context.Context, blockHash common.Hash) (*entity.PSM3State, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.readAttempts++
 	if f.readErr != nil {
 		return nil, f.readErr
 	}
-	f.readBlocks = append(f.readBlocks, blockNumber.Int64())
+	f.readBlocks = append(f.readBlocks, blockHash.Big().Int64())
 	state := f.state
 	return &state, nil
 }
@@ -561,6 +567,45 @@ func TestSweep_ReadStateError_NoSaveACKsAndSkips(t *testing.T) {
 	}
 }
 
+// TestSweep_MissingBlockHash_NoCallerReadACKsAndSkips: an event with an empty
+// BlockHash must fail loud before ever reaching the PSM3 caller, instead of
+// silently defaulting to the zero hash (common.HexToHash never errors). Like
+// every other sweep failure, this is logged and ACKed rather than NACKed (see
+// processBlock's cadence-clock rationale), so the observable signal is "no
+// chain read, no snapshot saved" rather than a returned error.
+func TestSweep_MissingBlockHash_NoCallerReadACKsAndSkips(t *testing.T) {
+	caller := newFakePSM3Caller()
+	repo := &fakePSM3Repo{}
+	events := []outbound.BlockEvent{{
+		ChainID:        testChainID,
+		BlockNumber:    testBlockNum,
+		Version:        0,
+		BlockHash:      "",
+		ParentHash:     fmt.Sprintf("0x%064x", testBlockNum-1),
+		BlockTimestamp: 1700000000 + testBlockNum,
+		ReceivedAt:     time.Now(),
+	}}
+	consumer := newFakeSQSConsumer(events)
+	svc := newService(t, defaultConfig(1), caller, repo, consumer)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+
+	waitFor(t, func() bool { return consumer.deleteCount() >= 1 }, "block not ACKed after missing block hash")
+	cancel()
+	_ = svc.Stop()
+
+	if got := caller.attemptCount(); got != 0 {
+		t.Errorf("expected 0 ReadState attempts (guard must fire before the caller), got %d", got)
+	}
+	if got := repo.savedCount(); got != 0 {
+		t.Errorf("expected 0 saved snapshots on missing block hash, got %d", got)
+	}
+}
+
 func TestSweep_SaveReservesError_ACKsAndSkips(t *testing.T) {
 	caller := newFakePSM3Caller()
 	repo := &fakePSM3Repo{saveErr: errors.New("database write failed")}
@@ -580,6 +625,91 @@ func TestSweep_SaveReservesError_ACKsAndSkips(t *testing.T) {
 	if got := repo.savedCount(); got != 0 {
 		t.Errorf("expected 0 saved snapshots, got %d", got)
 	}
+}
+
+func TestSweep_RecordsSuccessMetric(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+	tel, err := psm3.NewTelemetryWithProvider(mp, "base")
+	if err != nil {
+		t.Fatalf("telemetry: %v", err)
+	}
+
+	cfg := defaultConfig(1)
+	cfg.Telemetry = tel
+	consumer := newFakeSQSConsumer(makeBlockEvents(testBlockNum, 1, 0))
+	svc := newService(t, cfg, newFakePSM3Caller(), &fakePSM3Repo{}, consumer)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitFor(t, func() bool { return consumer.deleteCount() >= 1 }, "block not processed")
+	cancel()
+	_ = svc.Stop()
+
+	if got := sweepCount(t, reader, "success"); got != 1 {
+		t.Errorf("psm3.sweeps.total{status=success} = %d, want 1", got)
+	}
+}
+
+func TestSweep_RecordsErrorMetric(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+	tel, err := psm3.NewTelemetryWithProvider(mp, "base")
+	if err != nil {
+		t.Fatalf("telemetry: %v", err)
+	}
+
+	caller := newFakePSM3Caller()
+	caller.readErr = errors.New("multicall RPC failure")
+	cfg := defaultConfig(1)
+	cfg.Telemetry = tel
+	consumer := newFakeSQSConsumer(makeBlockEvents(testBlockNum, 1, 0))
+	svc := newService(t, cfg, caller, &fakePSM3Repo{}, consumer)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitFor(t, func() bool { return consumer.deleteCount() >= 1 }, "block not processed")
+	cancel()
+	_ = svc.Stop()
+
+	if got := sweepCount(t, reader, "error"); got != 1 {
+		t.Errorf("psm3.sweeps.total{status=error} = %d, want 1", got)
+	}
+}
+
+// sweepCount sums psm3.sweeps.total data points matching the given status.
+func sweepCount(t *testing.T, reader sdkmetric.Reader, status string) int64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	var total int64
+	for _, scope := range rm.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != "psm3.sweeps.total" {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("psm3.sweeps.total is %T", m.Data)
+			}
+			for _, dp := range sum.DataPoints {
+				if s, _ := dp.Attributes.Value("status"); s.AsString() == status {
+					total += dp.Value
+				}
+			}
+		}
+	}
+	return total
 }
 
 func TestSweep_InvalidStateFromCaller_NoSave(t *testing.T) {

@@ -3,6 +3,7 @@ package data_validator
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 type mockBlockStateRepository struct {
 	minBlockNumber      int64
 	maxBlockNumber      int64
+	lastBlock           *outbound.BlockState
 	blocks              map[int64]*outbound.BlockState
 	reorgEvents         []outbound.ReorgEvent
 	chainIntegrityError error
@@ -24,6 +26,14 @@ func (m *mockBlockStateRepository) SaveBlock(ctx context.Context, state outbound
 }
 
 func (m *mockBlockStateRepository) GetLastBlock(ctx context.Context) (*outbound.BlockState, error) {
+	if m.lastBlock != nil {
+		return m.lastBlock, nil
+	}
+	// Treat any seeded data as a non-empty DB so existing tests need no edits;
+	// only a repo with no blocks at all reports nil (genuinely empty).
+	if m.maxBlockNumber > 0 || len(m.blocks) > 0 {
+		return &outbound.BlockState{Number: m.maxBlockNumber}, nil
+	}
 	return nil, nil
 }
 
@@ -108,6 +118,9 @@ func (m *mockBlockStateRepository) GetReorgEventsByBlockRange(ctx context.Contex
 type mockBlockVerifier struct {
 	blocks map[int64]*outbound.CanonicalBlock
 	name   string
+	// getBlockByNumber, when set, overrides the map lookup so a test can inject
+	// a per-call error (e.g. a transient canonical-source failure).
+	getBlockByNumber func(ctx context.Context, number int64) (*outbound.CanonicalBlock, error)
 }
 
 func (m *mockBlockVerifier) Name() string {
@@ -118,6 +131,9 @@ func (m *mockBlockVerifier) Name() string {
 }
 
 func (m *mockBlockVerifier) GetBlockByNumber(ctx context.Context, number int64) (*outbound.CanonicalBlock, error) {
+	if m.getBlockByNumber != nil {
+		return m.getBlockByNumber(ctx, number)
+	}
 	if block, ok := m.blocks[number]; ok {
 		return block, nil
 	}
@@ -408,6 +424,119 @@ func TestService_SpotChecks_Mismatch(t *testing.T) {
 	}
 }
 
+func TestService_SpotCheck_TransientCanonicalError_SkipsCheckAndRunSucceeds(t *testing.T) {
+	repo := &mockBlockStateRepository{
+		minBlockNumber: 100,
+		maxBlockNumber: 100,
+		blocks:         map[int64]*outbound.BlockState{100: {Number: 100, Hash: "0xabc"}},
+	}
+	verifier := &mockBlockVerifier{
+		name: "etherscan",
+		getBlockByNumber: func(_ context.Context, _ int64) (*outbound.CanonicalBlock, error) {
+			return nil, fmt.Errorf("fetching block: %w", outbound.ErrCanonicalSourceUnavailable)
+		},
+	}
+
+	config := DefaultConfig()
+	config.ValidateChainIntegrity = false
+	config.ValidateReorgs = false
+	config.SpotCheckCount = 1
+
+	svc, err := NewService(config, repo, verifier)
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+
+	report, err := svc.Validate(context.Background())
+	if err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	if report.Errors != 0 {
+		t.Errorf("Errors = %d, want 0 (transient must be skipped)", report.Errors)
+	}
+	if report.Skipped != 1 {
+		t.Errorf("Skipped = %d, want 1", report.Skipped)
+	}
+	if !report.Success() {
+		t.Error("Success() = false, want true (transient throttle must not fail the run)")
+	}
+}
+
+func TestService_SpotCheck_PermanentCanonicalError_RecordsErrorAndRunFails(t *testing.T) {
+	repo := &mockBlockStateRepository{
+		minBlockNumber: 100,
+		maxBlockNumber: 100,
+		blocks:         map[int64]*outbound.BlockState{100: {Number: 100, Hash: "0xabc"}},
+	}
+	verifier := &mockBlockVerifier{
+		name: "etherscan",
+		getBlockByNumber: func(_ context.Context, _ int64) (*outbound.CanonicalBlock, error) {
+			return nil, fmt.Errorf("API error: invalid api key")
+		},
+	}
+
+	config := DefaultConfig()
+	config.ValidateChainIntegrity = false
+	config.ValidateReorgs = false
+	config.SpotCheckCount = 1
+
+	svc, err := NewService(config, repo, verifier)
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+
+	report, err := svc.Validate(context.Background())
+	if err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	if report.Errors == 0 {
+		t.Error("Errors = 0, want > 0 (a permanent canonical error is a real problem)")
+	}
+	if report.Success() {
+		t.Error("Success() = true, want false")
+	}
+}
+
+func TestService_Reorg_TransientCanonicalError_Skips(t *testing.T) {
+	repo := &mockBlockStateRepository{
+		minBlockNumber: 1,
+		maxBlockNumber: 200,
+		reorgEvents: []outbound.ReorgEvent{
+			{ID: 1, BlockNumber: 100, OldHash: "0xold", NewHash: "0xnew"},
+		},
+	}
+	verifier := &mockBlockVerifier{
+		name: "etherscan",
+		getBlockByNumber: func(_ context.Context, _ int64) (*outbound.CanonicalBlock, error) {
+			return nil, fmt.Errorf("fetching block: %w", outbound.ErrCanonicalSourceUnavailable)
+		},
+	}
+
+	config := DefaultConfig()
+	config.ValidateChainIntegrity = false
+	config.ValidateReorgs = true
+	config.SpotCheckCount = 0
+
+	svc, err := NewService(config, repo, verifier)
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+
+	report, err := svc.Validate(context.Background())
+	if err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	if report.Errors != 0 {
+		t.Errorf("Errors = %d, want 0", report.Errors)
+	}
+	if report.Skipped != 1 {
+		t.Errorf("Skipped = %d, want 1", report.Skipped)
+	}
+	if !report.Success() {
+		t.Error("Success() = false, want true")
+	}
+}
+
 func TestHashesMatch(t *testing.T) {
 	tests := []struct {
 		hash1 string
@@ -521,6 +650,61 @@ func TestReport_FormatJSON(t *testing.T) {
 	}
 	if !strings.Contains(jsonStr, `"status": "passed"`) {
 		t.Error("missing status in JSON")
+	}
+}
+
+func TestService_Validate_EmptyDatabaseErrors(t *testing.T) {
+	repo := &mockBlockStateRepository{
+		minBlockNumber: 0,
+		maxBlockNumber: 0,
+	}
+	verifier := &mockBlockVerifier{}
+
+	svc, err := NewService(DefaultConfig(), repo, verifier)
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+
+	ctx := context.Background()
+	_, err = svc.Validate(ctx)
+	if err == nil {
+		t.Fatal("Validate() expected a non-nil error for empty database, got nil")
+	}
+	if !strings.Contains(err.Error(), "no blocks found") {
+		t.Errorf("error %q should contain %q", err.Error(), "no blocks found")
+	}
+}
+
+func TestService_Validate_GenesisOnlyNotTreatedAsEmpty(t *testing.T) {
+	// A DB whose only canonical block is genesis (block 0) reports max/min == 0,
+	// the same as an empty DB, but it is NOT empty and must be validated, not
+	// rejected with "no blocks found".
+	repo := &mockBlockStateRepository{
+		minBlockNumber: 0,
+		maxBlockNumber: 0,
+		lastBlock:      &outbound.BlockState{Number: 0, Hash: "0xgenesis"},
+		blocks:         map[int64]*outbound.BlockState{0: {Number: 0, Hash: "0xgenesis"}},
+	}
+	verifier := &mockBlockVerifier{
+		blocks: map[int64]*outbound.CanonicalBlock{0: {Number: 0, Hash: "0xgenesis"}},
+	}
+
+	config := DefaultConfig()
+	config.ValidateChainIntegrity = false
+	config.ValidateReorgs = false
+	config.SpotCheckCount = 1
+
+	svc, err := NewService(config, repo, verifier)
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+
+	report, err := svc.Validate(context.Background())
+	if err != nil {
+		t.Fatalf("genesis-only DB must not error, got: %v", err)
+	}
+	if report.Passed != 1 {
+		t.Errorf("got %d passed, want 1 (block 0 spot-checked)", report.Passed)
 	}
 }
 

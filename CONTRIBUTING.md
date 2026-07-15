@@ -55,6 +55,33 @@ pull request.
 You do **not** need AWS credentials to develop locally — the kind cluster
 runs LocalStack to emulate SNS/SQS/S3.
 
+### AI coding assistants (optional)
+
+`AGENTS.md` is the canonical source of repository instructions. The sibling
+`CLAUDE.md` files import it for Claude Code; Codex and other `AGENTS.md`-aware
+tools read it directly. Before an assistant modifies a subtree, it must read
+every `AGENTS.md` from the repository root through that subtree. In particular,
+Codex builds its automatic instruction chain from the repository root through
+its startup directory and does not add nested or sibling guidance later in the
+session.
+
+Repository skills have canonical sources in `skills/` and are deployed to each
+supported tool through the root `Skillfile`. After a fresh clone, run this once
+from the repository root to make the same skills available to Codex, Claude
+Code, and Copilot:
+
+```bash
+make skills-install
+make skills-list
+```
+
+The generated `.codex/skills/` and `.github/skills/` directories are ignored;
+rerun `make skills-install` after pulling a skill change, then start a new
+assistant session so its skill catalogue is refreshed. When adding or editing a
+skill, change its source under `skills/`, update `Skillfile` if needed, deploy it,
+and commit the canonical source plus the checked-in `.claude/skills/` deployment
+copy.
+
 ---
 
 ## 2. Five-minute quick start
@@ -290,7 +317,7 @@ lifecycle:
 | `cmd/workers/` | Long-running SQS consumers — **one message per block** | `oracle-price-indexer`, `morpho-indexer`, `sparklend-indexer`, `raw-data-backup` |
 | `cmd/cronjobs/` | Long-running Temporal workers triggered on a **schedule** | `offchain-price-indexer`, `anchorage-indexer`, `watcher-data-validator` |
 | `cmd/backfillers/` | **One-shot** jobs that fill historical gaps | `oracle-pricing-backfill`, `sparklend-backfill`, `raw-block-bulk-downloader` |
-| `cmd/util/` | Dev tooling (`migrate`, `generate-er`, `cronjob-manifest`, stress-test helpers) | — |
+| `cmd/util/` | Dev tooling (`migrate`, `generate-er`, stress-test helpers) | — |
 
 If you're adding data acquisition, **pick the category first** — it
 determines the plumbing, deployment shape, and tests you'll write.
@@ -354,7 +381,9 @@ func run(ctx context.Context, args []string) error {
 5. **Add k8s manifests** under `k8s/base/<my-worker>/`:
    `deployment.yaml`, `serviceaccount.yaml`, `kustomization.yaml`. Copy
    `k8s/base/oracle-price-worker/` as the template. Wire the new service
-   into `k8s/overlays/{staging,prod}/kustomization.yaml`.
+   into `k8s/overlays/{staging,prod}/kustomization.yaml` and, for local
+   kind, `k8s/overlays/dev/workers/kustomization.yaml` (add the base dir
+   under `resources:` and a `localhost/stl-<name>:local` `images:` entry).
 6. **Add build/deploy targets to the Makefile** (`docker-build-<name>`,
    `docker-release-<name>`, and register the worker in the `run-*` /
    `kind-load-workers` / `kind-deploy-workers` groupings). Grep for an
@@ -469,15 +498,19 @@ Run it locally with `uv run python -m cli.workers.<my_worker>.main` (from `stl-v
    Use the `uv` base image pattern already in the existing Dockerfile
    (`COPY --from=ghcr.io/astral-sh/uv …`, `uv sync --frozen --no-dev`).
 7. **Add Makefile targets** — `docker-build-<name>`,
-   `docker-release-<name>`, `kind-load-<name>`, `kind-deploy-<name>`,
-   and a `run-<name>` target for local dev (invokes `uv run` under
-   the hood). Follow the pattern of `docker-build-python-api` /
-   `docker-release-python-api` in `stl-verify/Makefile`.
+   `docker-release-<name>`, `kind-load-<name>`, and a `run-<name>`
+   target for local dev (invokes `uv run` under the hood). Local deploy
+   goes through the dev overlay (`kind-deploy-apps`, or
+   `kind-deploy-workers` for SQS workers) — there is no per-service
+   `kind-deploy-<name>` target. Follow the pattern of
+   `docker-build-python-api` / `docker-release-python-api` in
+   `stl-verify/Makefile`.
 8. **Add k8s manifests** under `k8s/base/<my-worker>/`
    (`deployment.yaml`, `serviceaccount.yaml`, `kustomization.yaml`).
    Copy `k8s/base/oracle-price-worker/` as the template; update image
    name and any probes. Register in
-   `k8s/overlays/{staging,prod}/kustomization.yaml`.
+   `k8s/overlays/{staging,prod}/kustomization.yaml` and, for local kind,
+   `k8s/overlays/dev/workers/kustomization.yaml`.
 9. **Coordinate with infra.** Same SQS queue / SNS subscription / IAM
    PR as for a Go worker — the plumbing outside the worker is
    language-agnostic.
@@ -543,13 +576,15 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runn
    `k8s/base/offchain-price-indexer/` as the template — cronjob
    Deployments are small (50m/64Mi requests) because the work happens
    inside Temporal activities. Register the service in
-   `k8s/overlays/{staging,prod}/kustomization.yaml`.
-   A skeleton generator is available via
-   `go run ./cmd/util/cronjob-manifest` if you'd rather start from
-   generated YAML.
-4. **Add a `docker-build-cronjob-<name>` target** to the Makefile (follow
-   the pattern — most of the wiring is automatic thanks to the
-   `CRONJOBS := ...` glob in `stl-verify/Makefile`).
+   `k8s/overlays/{staging,prod}/kustomization.yaml` and, for local kind
+   runs, in `k8s/overlays/dev/kustomization.yaml` (add the base dir to
+   `resources:` and a `localhost/stl-<name>:local` entry under `images:`).
+4. **Wire the Makefile.** Image builds auto-discover via the
+   `CRONJOBS := ...` glob, so a `docker-build-cronjob-<name>` target is
+   already covered. Add the k8s Deployment name to `CRONJOB_DEPLOYMENTS`
+   in `stl-verify/Makefile` so `dev-up` rolls it out and waits on it
+   (this list is hand-maintained now that the manifest generator is
+   retired; `make check-dev-overlay-sync` enforces it matches the dev overlay).
 5. **Infra PR** for any new secrets/IAM + a Temporal namespace entry if
    needed.
 
@@ -674,7 +709,9 @@ Run it locally with `uv run python -m cli.cronjobs.<my_cronjob>.main` (from `stl
 7. **Add k8s manifests** under `k8s/base/<my-cronjob>/`. Copy
    `k8s/base/offchain-price-indexer/` as the template (small:
    50m/64Mi, because the work happens inside the activity). Register
-   in `k8s/overlays/{staging,prod}/kustomization.yaml`.
+   in `k8s/overlays/{staging,prod}/kustomization.yaml` and, for local
+   kind, `k8s/overlays/dev/kustomization.yaml` (and add the deployment
+   name to `CRONJOB_DEPLOYMENTS` in `stl-verify/Makefile`).
 8. **Infra PR** for any new secrets / IAM + a Temporal namespace entry
    if needed.
 
@@ -886,8 +923,34 @@ Most of these are also spelled out in [CLAUDE.md](./CLAUDE.md) and
 5. **Merge to `main`** — CI then triggers `.github/workflows/deploy.yaml`,
    which bumps image tags in `k8s/overlays/staging/kustomization.yaml`
    and ArgoCD rolls the change into the `vector` namespace on the
-   staging EKS cluster. Prod is a separate manual promotion (bump the
-   tag in `k8s/overlays/prod/kustomization.yaml`).
+   staging EKS cluster. Once staging is healthy, the same run promotes
+   the images to the prod ECR, auto-commits the prod tag bump to `main`,
+   and posts an "awaiting approval" message to Slack. Prod does **not**
+   roll out until someone approves the `production` GitHub Environment
+   review on that run; on approval the run syncs `stl-prod` in ArgoCD to
+   the approved commit. Rejecting leaves the bump on `main` (it batches
+   into the next approved deploy).
+6. **Adding a brand-new service image? Split it across two PRs.** If one PR
+   both introduces a new image (a new `make docker-*` target, or a base that
+   references an image name never built before) *and* the Deployment/CronJob
+   that runs it, ArgoCD syncs the new manifest on merge *before* the image
+   exists in ECR: the pods sit in `ImagePullBackOff` and the staging health
+   gate can hard-fail and skip prod promotion (see ORB-313). Instead:
+   - **PR 1** adds the build (Makefile target + the `SERVICES` / `CRONJOBS`
+     promotion lists in `.github/workflows/deploy.yaml`) so the image is
+     built and pushed to ECR.
+   - **PR 2** adds the `k8s/base/...` Deployment plus overlay wiring that
+     references it.
+
+   This split is a recommendation, not an enforced rule. A combined PR still
+   works: `build-push-staging` builds the new image in the same run before
+   `update-staging` stamps it, and the 900s staging health wait tolerates the
+   brief first-rollout `ImagePullBackOff`. Splitting simply avoids that race.
+   `scripts/deploy/verify-ecr-images.sh` (run before each stamp) is the backstop
+   for what the split does not cover: an image that was never built, or a prod
+   overlay entry missing from the `SERVICES` / `CRONJOBS` promotion list. It
+   fails the deploy with an explicit missing-image list instead of letting a
+   silent prod `ImagePullBackOff` through.
 
 ---
 

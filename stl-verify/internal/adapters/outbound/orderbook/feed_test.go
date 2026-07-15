@@ -243,6 +243,13 @@ func TestFeedProviderReadyCalledOnceAfterFullGroupSnapshot(t *testing.T) {
 
 	receiveWithin(t, out, 2*time.Second)
 	receiveWithin(t, out, 2*time.Second)
+	// ready() is invoked right after the second snapshot is emitted to `out`, so
+	// it can lag the receive above — wait for it rather than racing cancel()
+	// against it (under -race the test goroutine otherwise wins and sees 0).
+	deadline := time.Now().Add(2 * time.Second)
+	for rec.count() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
 	cancel()
 	if got := rec.count(); got != 1 {
 		t.Errorf("ready called %d times, want exactly 1 (after the full group synced)", got)

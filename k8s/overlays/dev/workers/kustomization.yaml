@@ -1,0 +1,135 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Alchemy-key workers, kept separate from the dev core overlay so the Makefile
+# can apply them only when ALCHEMY_API_KEY is set. Reuses k8s/base; the runtime
+# component handles config sourcing + image pull policy. Per-worker SQS queue
+# (and per-chain) values are layered on as patches.
+namespace: vector
+
+resources:
+  - ../../../base/oracle-price-worker
+  - ../../../base/avalanche-oracle-price-worker
+  - ../../../base/morpho-indexer
+  - ../../../base/sparklend-position-tracker
+  - ../../../base/prime-debt-indexer
+  # Dev covers one representative chain (base); PSM3 does not exist on the mainnet chain dev runs.
+  - ../../../base/base-psm3-indexer
+  # curve-indexer + uniswap-v3-indexer (dex-indexer image) dev wiring is
+  # deferred to VEC-329, which adds the dex-indexer build + kind-load, the
+  # localstack queues, and the dev-up rollout-wait entries. Bases kept; not run
+  # in dev until then.
+
+components:
+  - ../components/runtime
+
+images:
+  - name: oracle-price-worker
+    newName: localhost/stl-oracle-price-worker
+    newTag: local
+  # Shares the oracle-price-worker image — chain selected via CHAIN_ID env.
+  - name: avalanche-oracle-price-worker
+    newName: localhost/stl-oracle-price-worker
+    newTag: local
+  - name: morpho-indexer
+    newName: localhost/stl-morpho-indexer
+    newTag: local
+  - name: sparklend-position-tracker
+    newName: localhost/stl-sparklend-position-tracker
+    newTag: local
+  - name: prime-debt-indexer
+    newName: localhost/stl-prime-debt-indexer
+    newTag: local
+  - name: base-psm3-indexer
+    newName: localhost/stl-psm3-indexer
+    newTag: local
+
+patches:
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: oracle-price-worker
+      spec:
+        template:
+          spec:
+            containers:
+              - name: oracle-price-worker
+                env:
+                  - name: AWS_SQS_QUEUE_URL
+                    value: http://localstack:4566/000000000000/stl-ethereum-oracle-price.fifo
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: avalanche-oracle-price-worker
+      spec:
+        template:
+          spec:
+            containers:
+              - name: avalanche-oracle-price-worker
+                env:
+                  - name: CHAIN_ID
+                    value: "43114"
+                  - name: ALCHEMY_HTTP_URL
+                    value: https://avax-mainnet.g.alchemy.com/v2
+                  - name: AWS_SQS_QUEUE_URL
+                    value: http://localstack:4566/000000000000/stl-avalanche-oracle-price.fifo
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: morpho-indexer
+      spec:
+        template:
+          spec:
+            containers:
+              - name: morpho-indexer
+                env:
+                  - name: AWS_SQS_QUEUE_URL
+                    value: http://localstack:4566/000000000000/stl-ethereum-morpho-indexing.fifo
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: sparklend-position-tracker
+      spec:
+        template:
+          spec:
+            containers:
+              - name: sparklend-position-tracker
+                env:
+                  - name: AWS_SQS_QUEUE_URL
+                    value: http://localstack:4566/000000000000/stl-ethereum-sparklend-position.fifo
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: prime-debt-indexer
+      spec:
+        template:
+          spec:
+            containers:
+              - name: prime-debt-indexer
+                env:
+                  - name: AWS_SQS_QUEUE_URL
+                    value: http://localstack:4566/000000000000/stl-ethereum-prime-debt.fifo
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: base-psm3-indexer
+      spec:
+        template:
+          spec:
+            containers:
+              - name: base-psm3-indexer
+                env:
+                  - name: CHAIN_ID
+                    value: "8453"
+                  - name: ALCHEMY_HTTP_URL
+                    value: https://base-mainnet.g.alchemy.com/v2
+                  - name: SWEEP_BLOCKS
+                    value: "300"
+                  - name: AWS_SQS_QUEUE_URL
+                    value: http://localstack:4566/000000000000/stl-base-psm3-indexer.fifo

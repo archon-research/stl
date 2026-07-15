@@ -6,6 +6,13 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 )
 
+// TokenInfo holds the on-chain address and decimals for a token registry entry.
+// Returned by GetTokenInfos to avoid two round-trips for data from the same join.
+type TokenInfo struct {
+	Address  []byte
+	Decimals int
+}
+
 // OnchainPriceRepository defines the interface for onchain oracle price data persistence.
 type OnchainPriceRepository interface {
 	// UpsertPrices inserts onchain price records in batches.
@@ -25,9 +32,10 @@ type OnchainPriceRepository interface {
 	// Used for resume support in backfill.
 	GetLatestBlock(ctx context.Context, oracleID int64) (int64, error)
 
-	// GetTokenAddresses returns a map of token_id → on-chain address for all enabled
-	// oracle assets of the given oracle. Used to build the asset address list for oracle calls.
-	GetTokenAddresses(ctx context.Context, oracleID int64) (map[int64][]byte, error)
+	// GetTokenInfos returns a map of token_id → TokenInfo (address + decimals) for all
+	// enabled oracle assets of the given oracle. Used to build address lists and scale
+	// convertToAssets output for ERC-4626 vaults.
+	GetTokenInfos(ctx context.Context, oracleID int64) (map[int64]TokenInfo, error)
 
 	// GetEnabledOraclesByChain retrieves all enabled oracles for a given chain.
 	GetEnabledOraclesByChain(ctx context.Context, chainID int64) ([]*entity.Oracle, error)
@@ -38,16 +46,13 @@ type OnchainPriceRepository interface {
 	// InsertOracle inserts a new oracle and returns it with the generated ID.
 	InsertOracle(ctx context.Context, oracle *entity.Oracle) (*entity.Oracle, error)
 
-	// GetAllActiveProtocolOracles retrieves all active (to_block IS NULL) protocol-oracle bindings.
-	GetAllActiveProtocolOracles(ctx context.Context) ([]*entity.ProtocolOracle, error)
-
 	// InsertProtocolOracleBinding inserts a new protocol-oracle binding.
 	InsertProtocolOracleBinding(ctx context.Context, binding *entity.ProtocolOracle) (*entity.ProtocolOracle, error)
 
 	// CopyOracleAssets copies all oracle_asset rows from one oracle to another.
 	CopyOracleAssets(ctx context.Context, fromOracleID, toOracleID int64) error
 
-	// GetAllProtocolOracleBindings retrieves ALL protocol-oracle bindings (not just active).
-	// Used by backfill to compute when each oracle was superseded.
+	// GetAllProtocolOracleBindings retrieves ALL protocol-oracle bindings.
+	// Used by backfill to compute each oracle's earliest valid block.
 	GetAllProtocolOracleBindings(ctx context.Context) ([]*entity.ProtocolOracle, error)
 }

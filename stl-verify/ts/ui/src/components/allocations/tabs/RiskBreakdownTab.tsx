@@ -27,6 +27,7 @@ import { isAbortError, toErrorMessage } from '../../../lib/errors';
 import { logging } from '../../../lib/logging';
 import type {
   Allocation,
+  Prime,
   RiskBreakdown,
   Token,
   TokenPrice,
@@ -39,6 +40,7 @@ type RiskBreakdownTabProps = {
   isEnabled: boolean;
   searchQuery?: string;
   selectedReceiptToken: Allocation | null;
+  selectedPrime: Prime | null;
 };
 
 const tableHeaderTypographyClassName = css({
@@ -117,15 +119,16 @@ function createRiskColumns(chainId: number): ColumnDef<RiskItem>[] {
       accessorKey: 'amount_usd',
       cell: (info: CellContext<RiskItem, unknown>) =>
         formatUsdValue(info.getValue() as string | number | null | undefined),
-    },
-    {
-      id: 'backing_pct',
-      header: 'Backing %',
-      accessorKey: 'backing_pct',
-      cell: (info: CellContext<RiskItem, unknown>) =>
-        formatPercentValue(
-          info.getValue() as string | number | null | undefined,
-        ),
+      // The bar expresses each item's backing share of the position, so the USD
+      // amount and its backing percentage live in one column instead of two.
+      meta: {
+        magnitude: {
+          scale: 'linear',
+          domain: { min: 0, max: 100 },
+          getValue: (item) => parseNumericValue(item.backing_pct),
+          getValueText: (value) => formatPercentValue(value),
+        },
+      },
     },
     {
       id: 'lt',
@@ -190,8 +193,8 @@ function RiskTable({
       <DataTable
         table={table}
         isLoading={isLoading}
-        getRowKey={(item) => String(item.token_id)}
-        skeletonConfig={{ rows: 5, columns: 7, firstColumnTall: false }}
+        getRowKey={(item) => String(item.token_id ?? item.symbol)}
+        skeletonConfig={{ rows: 5, columns: 6, firstColumnTall: false }}
         minWidth="76rem"
         renderCell={(children) => (
           <div
@@ -212,6 +215,7 @@ export function RiskBreakdownTab({
   isEnabled,
   searchQuery = '',
   selectedReceiptToken,
+  selectedPrime,
 }: RiskBreakdownTabProps) {
   const [breakdown, setBreakdown] = useState<RiskBreakdown | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -222,6 +226,7 @@ export function RiskBreakdownTab({
   const [isTokenMetaLoading, setIsTokenMetaLoading] = useState(false);
 
   const receiptTokenId = selectedReceiptToken?.receipt_token_id ?? null;
+  const primeId = selectedPrime?.id ?? null;
 
   useEffect(() => {
     const receiptTokenAddress = selectedReceiptToken?.receipt_token_address;
@@ -246,6 +251,7 @@ export function RiskBreakdownTab({
     void getRiskBreakdown(
       selectedReceiptToken.chain_id,
       receiptTokenAddress,
+      primeId,
       controller.signal,
     )
       .then((response) => {
@@ -274,7 +280,7 @@ export function RiskBreakdownTab({
       });
 
     return () => controller.abort();
-  }, [isEnabled, receiptTokenId, selectedReceiptToken]);
+  }, [isEnabled, receiptTokenId, primeId, selectedReceiptToken]);
 
   useEffect(() => {
     if (!isEnabled || !selectedReceiptToken) {
@@ -354,6 +360,16 @@ export function RiskBreakdownTab({
 
     let weightedThreshold = 0;
     let weightedBonus = 0;
+    // Track whether any item carried liquidation params; protocols without
+    // per-asset params (e.g. Maple) leave these null so the summary shows "—"
+    // rather than a misleading 0%/0x.
+    let thresholdCount = 0;
+    let bonusCount = 0;
+    // USD weight of only the rows that carry each param. Dividing by totalUsd
+    // instead would dilute the average toward 0 on a mixed dataset (rows without
+    // the param would count in the denominator but not the numerator).
+    let thresholdUsd = 0;
+    let bonusUsd = 0;
     let largestItem = breakdown.items[0] ?? null;
     let largestItemUsd = largestItem
       ? (parseNumericValue(largestItem.amount_usd) ?? 0)
@@ -373,18 +389,26 @@ export function RiskBreakdownTab({
 
       if (liquidationThreshold !== null) {
         weightedThreshold += liquidationThreshold * amountUsd;
+        thresholdUsd += amountUsd;
+        thresholdCount += 1;
       }
 
       if (liquidationBonus !== null) {
         weightedBonus += liquidationBonus * amountUsd;
+        bonusUsd += amountUsd;
+        bonusCount += 1;
       }
     }
 
     return {
       assetCount: breakdown.items.length,
       largestItem,
-      weightedBonus: totalUsd > 0 ? weightedBonus / totalUsd : null,
-      weightedThreshold: totalUsd > 0 ? weightedThreshold / totalUsd : null,
+      weightedBonus:
+        bonusUsd > 0 && bonusCount > 0 ? weightedBonus / bonusUsd : null,
+      weightedThreshold:
+        thresholdUsd > 0 && thresholdCount > 0
+          ? weightedThreshold / thresholdUsd
+          : null,
     };
   }, [breakdown, totalUsd]);
 
@@ -565,6 +589,31 @@ export function RiskBreakdownTab({
           isLoading={isLoading}
           searchQuery={searchQuery}
         />
+      ) : null}
+
+      {!errorMessage &&
+      selectedReceiptToken.protocol_name?.toLowerCase() === 'maple' ? (
+        <div
+          className={css({
+            borderRadius: 'md',
+            borderStyle: 'solid',
+            borderWidth: '1px',
+            borderColor: 'border.subtle',
+            bg: 'surface.subtle',
+            p: '4',
+          })}
+        >
+          <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>
+            Source: Maple Finance GraphQL API. Collateral amounts and USD values
+            are attested by Maple/custodians and are not independently verified
+            on-chain. Internal (AMM/strategy) loans are excluded; the breakdown
+            reflects external-loan collateral plus available pool liquidity, so
+            it is less than total supply.
+            {selectedPrime
+              ? ' Per-prime USD values are a pro-rata approximation (each pool asset scaled by the prime’s pool share) and will not match data.spark.fi, which uses a different (coverage-capped) attribution model. Backing % is a pool property and is identical for every prime.'
+              : ''}
+          </p>
+        </div>
       ) : null}
 
       {/* Data Sources & Methodology Footer */}

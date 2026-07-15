@@ -106,11 +106,13 @@ func (c *VatCaller) ResolveIlks(ctx context.Context, vaults []common.Address, bl
 }
 
 // ReadDebts reads rate (via vat.ilks) and art (via vat.urns) for each query
-// in a single multicall at the given block. Per-vault failures are reported
-// via DebtResult.Err rather than failing the entire batch.
+// in a single multicall pinned to blockHash. Per-vault failures are reported
+// via DebtResult.Err rather than failing the entire batch. Hash-pinned so a
+// reorg can't return another fork's debt state (see
+// outbound.Multicaller.ExecuteAtHash / VEC-471).
 //
 // Call layout per query: [ilks(ilk), urns(ilk, vault)] — 2 calls per query.
-func (c *VatCaller) ReadDebts(ctx context.Context, queries []entity.DebtQuery, blockNumber *big.Int) ([]entity.DebtResult, error) {
+func (c *VatCaller) ReadDebts(ctx context.Context, queries []entity.DebtQuery, blockHash common.Hash) ([]entity.DebtResult, error) {
 	if len(queries) == 0 {
 		return nil, nil
 	}
@@ -134,7 +136,7 @@ func (c *VatCaller) ReadDebts(ctx context.Context, queries []entity.DebtQuery, b
 		)
 	}
 
-	mcResults, err := c.multicaller.Execute(ctx, calls, blockNumber)
+	mcResults, err := c.multicaller.ExecuteAtHash(ctx, calls, blockHash)
 	if err != nil {
 		return nil, fmt.Errorf("multicall read debts: %w", err)
 	}

@@ -175,6 +175,7 @@ func (s *Service) processBlock(
 	event outbound.BlockEvent,
 ) error {
 	ctx = archiving.WithBlockVersion(ctx, event.Version)
+	ctx = archiving.WithBlockNumber(ctx, event.BlockNumber)
 	start := time.Now()
 
 	receiptsJSON, err := s.cache.GetReceipts(ctx, event.ChainID, event.BlockNumber, event.Version)
@@ -203,7 +204,11 @@ func (s *Service) processBlock(
 	if len(transfers) > 0 {
 		affected := s.matchTransfers(transfers)
 		if len(affected) > 0 {
-			fetch, err := s.registry.FetchAll(ctx, affected, event.BlockNumber)
+			blockHash, err := event.ParsedBlockHash()
+			if err != nil {
+				return fmt.Errorf("parse block hash: %w", err)
+			}
+			fetch, err := s.registry.FetchAll(ctx, affected, blockHash)
 			if err != nil {
 				return fmt.Errorf("fetch observations for block %d: %w", event.BlockNumber, err)
 			}
@@ -233,7 +238,11 @@ func (s *Service) processBlock(
 	// TestProcessBlock_SweepFetchFailure_ReturnsError.
 	s.blocksSinceSweep++
 	if s.blocksSinceSweep >= s.config.SweepEveryNBlocks {
-		if err := s.sweep(ctx, event.BlockNumber, event.Version, blockTimestamp); err != nil {
+		blockHash, err := event.ParsedBlockHash()
+		if err != nil {
+			return fmt.Errorf("parse block hash: %w", err)
+		}
+		if err := s.sweep(ctx, event.BlockNumber, blockHash, event.Version, blockTimestamp); err != nil {
 			return fmt.Errorf("sweep block %d: %w", event.BlockNumber, err)
 		}
 		s.blocksSinceSweep = 0
@@ -289,13 +298,16 @@ func (s *Service) buildSnapshots(
 		}
 
 		snap := &PositionSnapshot{
-			Entry:          entry,
-			Balance:        bal.Balance,
-			ScaledBalance:  bal.ScaledBalance,
-			ChainID:        event.ChainID,
-			BlockNumber:    event.BlockNumber,
-			BlockVersion:   event.Version,
-			BlockTimestamp: blockTimestamp,
+			Entry:           entry,
+			Balance:         bal.Balance,
+			ScaledBalance:   bal.ScaledBalance,
+			UnderlyingValue: bal.UnderlyingValue,
+			PoolToken0:      bal.PoolToken0,
+			PoolToken1:      bal.PoolToken1,
+			ChainID:         event.ChainID,
+			BlockNumber:     event.BlockNumber,
+			BlockVersion:    event.Version,
+			BlockTimestamp:  blockTimestamp,
 		}
 		if t, ok := tLookup[entry.Key()]; ok {
 			snap.TxHash = t.TxHash
@@ -344,10 +356,10 @@ func buildSupplySnapshots(
 // emit Transfer events — e.g. aToken interest accrual, ERC4626 yield compounding,
 // and BUIDL rebases. Without this, positions would drift between transfer-triggered
 // snapshots.
-func (s *Service) sweep(ctx context.Context, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
+func (s *Service) sweep(ctx context.Context, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) error {
 	start := time.Now()
 
-	fetch, err := s.registry.FetchAll(ctx, s.entries, blockNumber)
+	fetch, err := s.registry.FetchAll(ctx, s.entries, blockHash)
 	if err != nil {
 		return fmt.Errorf("fetch sweep observations for block %d: %w", blockNumber, err)
 	}
@@ -359,15 +371,18 @@ func (s *Service) sweep(ctx context.Context, blockNumber int64, blockVersion int
 			continue
 		}
 		snapshots = append(snapshots, &PositionSnapshot{
-			Entry:          entry,
-			Balance:        bal.Balance,
-			ScaledBalance:  bal.ScaledBalance,
-			ChainID:        s.config.ChainID,
-			BlockNumber:    blockNumber,
-			BlockVersion:   blockVersion,
-			TxAmount:       big.NewInt(0),
-			Direction:      DirectionSweep,
-			BlockTimestamp: blockTimestamp,
+			Entry:           entry,
+			Balance:         bal.Balance,
+			ScaledBalance:   bal.ScaledBalance,
+			UnderlyingValue: bal.UnderlyingValue,
+			PoolToken0:      bal.PoolToken0,
+			PoolToken1:      bal.PoolToken1,
+			ChainID:         s.config.ChainID,
+			BlockNumber:     blockNumber,
+			BlockVersion:    blockVersion,
+			TxAmount:        big.NewInt(0),
+			Direction:       DirectionSweep,
+			BlockTimestamp:  blockTimestamp,
 		})
 	}
 

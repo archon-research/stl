@@ -65,6 +65,7 @@ def _morpho_info() -> ReceiptTokenInfo:
 @pytest.fixture
 def reader() -> MagicMock:
     reader = MagicMock()
+    reader.requires_liquidation_enrichment = MagicMock(return_value=True)
     reader.get_receipt_token = AsyncMock(return_value=_aave_like_info())
     reader.get_breakdown = AsyncMock(
         return_value=_breakdown((_contrib(10, "WETH", "10000", "2000"),), backed_asset_id=UNDERLYING_TOKEN_ID)
@@ -246,6 +247,20 @@ class TestCompute:
             await service.compute(RECEIPT_TOKEN_ID, DUMMY_PRIME, overrides={"gap_pct": bad_gap_pct})
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "bad_gap_pct",
+        [None, "NaN", "Infinity"],
+        ids=["null", "nan", "infinity"],
+    )
+    async def test_compute_rejects_invalid_gap_pct(
+        self,
+        service: CryptoLendingRiskService,
+        bad_gap_pct: object,
+    ) -> None:
+        with pytest.raises(ValueError, match="invalid gap_pct"):
+            await service.compute(RECEIPT_TOKEN_ID, DUMMY_PRIME, overrides={"gap_pct": bad_gap_pct})
+
+    @pytest.mark.asyncio
     async def test_compute_missing_receipt_token_share_propagates(
         self,
         service: CryptoLendingRiskService,
@@ -274,6 +289,55 @@ class TestCompute:
         # collateral basis is also 0, so comparable CRR is 0 (not div-by-zero).
         assert result.rrc_usd == Decimal("0")
         assert result.comparable_crr_pct == Decimal("0.00")
+
+    @pytest.mark.asyncio
+    async def test_compute_items_without_liquidation_params_are_skipped(
+        self,
+        service: CryptoLendingRiskService,
+        reader: MagicMock,
+    ) -> None:
+        reader.get_breakdown.return_value = _breakdown(
+            (_contrib(10, "WETH", "10000", "2000"),),
+            backed_asset_id=UNDERLYING_TOKEN_ID,
+        )
+        # No liquidation params for token 10 -> the item is dropped before enrichment.
+        reader.get_liquidation_params.return_value = {}
+
+        result = await service.compute(RECEIPT_TOKEN_ID, DUMMY_PRIME, overrides={})
+
+        assert result.rrc_usd == Decimal("0")
+        assert result.comparable_crr_pct == Decimal("0.00")
+
+    @pytest.mark.asyncio
+    async def test_compute_excludes_null_token_id_items_from_enrichment(
+        self,
+        service: CryptoLendingRiskService,
+        reader: MagicMock,
+    ) -> None:
+        # An enriched-protocol breakdown that happens to carry a symbol-keyed
+        # (token_id=None) item: it must not be fed to the liquidation-param
+        # lookup and must be dropped, leaving only the real token-keyed item.
+        reader.get_breakdown.return_value = _breakdown(
+            (
+                _contrib(10, "WETH", "10000", "2000"),
+                CollateralContribution(
+                    token_id=None,
+                    symbol="BTC",
+                    backing_value=Decimal("5000"),
+                    backing_pct=Decimal("100"),
+                    price_usd=Decimal("60000"),
+                ),
+            ),
+            backed_asset_id=UNDERLYING_TOKEN_ID,
+        )
+        reader.get_liquidation_params.return_value = {10: _params(10, "0.825", "1.05")}
+
+        result = await service.get_risk_breakdown(RECEIPT_TOKEN_ID, None)
+
+        assert result is not None
+        assert [i.symbol for i in result.items] == ["WETH"]
+        # The null-token_id item never reaches the liquidation lookup.
+        assert reader.get_liquidation_params.await_args.args[2] == [10]
 
     @pytest.mark.asyncio
     async def test_compute_comparable_crr_uses_collateral_sum(
@@ -371,11 +435,11 @@ class TestLegacyMethods:
         reader.get_breakdown.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_get_risk_breakdown_legacy_returns_enriched_items(
+    async def test_get_risk_breakdown_pool_level_returns_enriched_items(
         self,
         service: CryptoLendingRiskService,
     ) -> None:
-        result = await service.get_risk_breakdown_legacy(RECEIPT_TOKEN_ID)
+        result = await service.get_risk_breakdown(RECEIPT_TOKEN_ID, None)
 
         assert isinstance(result, RiskBreakdown)
         assert result.backed_asset_id == UNDERLYING_TOKEN_ID
@@ -384,14 +448,14 @@ class TestLegacyMethods:
         assert result.items[0].amount == Decimal("5")
 
     @pytest.mark.asyncio
-    async def test_get_risk_breakdown_legacy_returns_none_for_unknown_receipt_token(
+    async def test_get_risk_breakdown_pool_level_returns_none_for_unknown_receipt_token(
         self,
         service: CryptoLendingRiskService,
         reader: MagicMock,
     ) -> None:
         reader.get_receipt_token.return_value = None
 
-        assert await service.get_risk_breakdown_legacy(RECEIPT_TOKEN_ID) is None
+        assert await service.get_risk_breakdown(RECEIPT_TOKEN_ID, None) is None
 
 
 class TestComputeWithShare:
@@ -480,3 +544,191 @@ class TestComputeWithShare:
         )
         with pytest.raises(MissingShareError, match="warm-up"):
             await service.compute_with_share(RECEIPT_TOKEN_ID, DUMMY_PRIME, overrides={}, share_or_err=err)
+
+
+def _maple_info() -> ReceiptTokenInfo:
+    return ReceiptTokenInfo(
+        receipt_token_id=RECEIPT_TOKEN_ID,
+        protocol_id=3,
+        underlying_token_id=UNDERLYING_TOKEN_ID,
+        receipt_token_address=bytes.fromhex("80ac24aa929eaf5013f6436cda2a7ba190f5cc0b"),
+        chain_id=1,
+        protocol_name="maple",
+        receipt_token_token_id=None,
+    )
+
+
+class TestMaplePath:
+    @pytest.fixture
+    def maple_reader(self, reader: MagicMock) -> MagicMock:
+        reader.requires_liquidation_enrichment = MagicMock(return_value=False)
+        reader.get_receipt_token = AsyncMock(return_value=_maple_info())
+        reader.get_breakdown = AsyncMock(
+            return_value=_breakdown(
+                (
+                    CollateralContribution(
+                        token_id=None,
+                        symbol="BTC",
+                        backing_value=Decimal("130000"),
+                        backing_pct=Decimal("67"),
+                        price_usd=Decimal("65000"),
+                    ),
+                    CollateralContribution(
+                        token_id=None,
+                        symbol="USDC",
+                        backing_value=Decimal("1000000"),
+                        backing_pct=Decimal("33"),
+                        price_usd=Decimal("1"),
+                    ),
+                ),
+                backed_asset_id=7,
+            )
+        )
+        return reader
+
+    @pytest.fixture
+    def maple_service(self, maple_reader: MagicMock) -> CryptoLendingRiskService:
+        return CryptoLendingRiskService(
+            reader=maple_reader,
+            default_gap_pct=Decimal("0.1"),
+            supported_asset_ids={RECEIPT_TOKEN_ID},
+        )
+
+    @pytest.mark.asyncio
+    async def test_breakdown_enriches_without_liq_params_or_share(
+        self,
+        maple_service: CryptoLendingRiskService,
+        maple_reader: MagicMock,
+    ) -> None:
+        result = await maple_service.get_risk_breakdown(RECEIPT_TOKEN_ID, None)
+
+        assert isinstance(result, RiskBreakdown)
+        assert result.backed_asset_id == 7
+        by_symbol = {i.symbol: i for i in result.items}
+        assert by_symbol["BTC"].token_id is None
+        assert by_symbol["BTC"].liquidation_threshold is None
+        assert by_symbol["BTC"].liquidation_bonus is None
+        assert by_symbol["BTC"].amount_usd == Decimal("130000")
+        assert by_symbol["BTC"].amount == Decimal("2")  # 130000 / 65000
+        # No prime_id: pool-level breakdown, no prime-share scaling and no
+        # liquidation-param enrichment.
+        maple_reader.get_share.assert_not_awaited()
+        maple_reader.get_legacy_share.assert_not_awaited()
+        maple_reader.get_liquidation_params.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_prime_share_scales_maple_breakdown(
+        self,
+        maple_service: CryptoLendingRiskService,
+        maple_reader: MagicMock,
+    ) -> None:
+        maple_reader.get_share.return_value = Decimal("0.25")
+
+        result = await maple_service.get_risk_breakdown(RECEIPT_TOKEN_ID, DUMMY_PRIME)
+
+        assert result is not None
+        by_symbol = {i.symbol: i for i in result.items}
+        # Full collateral value scaled by the prime's 25% pool share; token amount
+        # scales with it, price is unchanged.
+        assert by_symbol["BTC"].amount_usd == Decimal("32500.00")  # 130000 * 0.25
+        assert by_symbol["BTC"].amount == Decimal("0.5")  # 32500 / 65000
+        assert by_symbol["BTC"].price_usd == Decimal("65000")
+        assert by_symbol["USDC"].amount_usd == Decimal("250000.00")  # 1000000 * 0.25
+        maple_reader.get_share.assert_awaited_once_with(_maple_info(), DUMMY_PRIME)
+        maple_reader.get_liquidation_params.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_backing_pct_is_invariant_across_primes(
+        self,
+        maple_service: CryptoLendingRiskService,
+        maple_reader: MagicMock,
+    ) -> None:
+        maple_reader.get_share.return_value = Decimal("1")
+        full = await maple_service.get_risk_breakdown(RECEIPT_TOKEN_ID, DUMMY_PRIME)
+
+        maple_reader.get_share.return_value = Decimal("0.25")
+        quarter = await maple_service.get_risk_breakdown(RECEIPT_TOKEN_ID, DUMMY_PRIME)
+
+        assert full is not None and quarter is not None
+        # backing_pct is a pool property: identical for every prime, only USD scales.
+        assert {i.symbol: i.backing_pct for i in full.items} == {i.symbol: i.backing_pct for i in quarter.items}
+        full_by_symbol = {i.symbol: i for i in full.items}
+        quarter_by_symbol = {i.symbol: i for i in quarter.items}
+        assert quarter_by_symbol["BTC"].amount_usd == full_by_symbol["BTC"].amount_usd * Decimal("0.25")
+
+    @pytest.mark.asyncio
+    async def test_prime_not_in_pool_propagates_missing_share(
+        self,
+        maple_service: CryptoLendingRiskService,
+        maple_reader: MagicMock,
+    ) -> None:
+        maple_reader.get_share.side_effect = MissingShareError("no consistent balance+supply pair")
+
+        with pytest.raises(MissingShareError, match="no consistent balance"):
+            await maple_service.get_risk_breakdown(RECEIPT_TOKEN_ID, DUMMY_PRIME)
+
+    @pytest.mark.asyncio
+    async def test_empty_maple_breakdown_with_prime_skips_share(
+        self,
+        maple_service: CryptoLendingRiskService,
+        maple_reader: MagicMock,
+    ) -> None:
+        maple_reader.get_breakdown = AsyncMock(return_value=_breakdown((), backed_asset_id=0))
+
+        result = await maple_service.get_risk_breakdown(RECEIPT_TOKEN_ID, DUMMY_PRIME)
+
+        assert result is not None
+        assert result.items == ()
+        # An empty breakdown is the graceful "no data yet" signal; the share lookup
+        # (which could raise on a prime-not-in-pool) must be skipped entirely.
+        maple_reader.get_share.assert_not_awaited()
+
+    # A None price and a literal zero price both take the falsy branch in
+    # _build_unenriched_items (uniform truthiness), yielding amount=0 and
+    # price_usd=null; parametrized to document both inputs are handled safely.
+    @pytest.mark.parametrize("price", [None, Decimal("0")])
+    @pytest.mark.asyncio
+    async def test_zero_or_missing_price_yields_zero_amount(
+        self,
+        maple_service: CryptoLendingRiskService,
+        maple_reader: MagicMock,
+        price: Decimal | None,
+    ) -> None:
+        maple_reader.get_breakdown = AsyncMock(
+            return_value=_breakdown(
+                (
+                    CollateralContribution(
+                        token_id=None,
+                        symbol="MYSTERY",
+                        backing_value=Decimal("500"),
+                        backing_pct=Decimal("100"),
+                        price_usd=price,
+                    ),
+                ),
+                backed_asset_id=7,
+            )
+        )
+
+        result = await maple_service.get_risk_breakdown(RECEIPT_TOKEN_ID, None)
+
+        assert result is not None
+        assert result.items[0].amount == Decimal("0")
+        # Missing/zero price surfaces as null (machine-detectable "unpriced"),
+        # not a misleading 0 that would imply amount × price == amount_usd.
+        assert result.items[0].price_usd is None
+        assert result.items[0].amount_usd == Decimal("500")
+
+    @pytest.mark.asyncio
+    async def test_get_bad_debt_legacy_returns_none_without_risk_model(
+        self,
+        maple_service: CryptoLendingRiskService,
+        maple_reader: MagicMock,
+    ) -> None:
+        # Maple has no quantitative risk model: bad debt is not modellable, so the
+        # legacy endpoint must return None (→ 404) rather than a gap-sweep sum of 0
+        # that reads as a genuinely fully-covered position. Short-circuit before any
+        # breakdown/share lookup.
+        assert await maple_service.get_bad_debt_legacy(RECEIPT_TOKEN_ID, Decimal("0.15")) is None
+        maple_reader.get_breakdown.assert_not_awaited()
+        maple_reader.get_share.assert_not_awaited()
+        maple_reader.get_legacy_share.assert_not_awaited()

@@ -1,0 +1,280 @@
+# =============================================================================
+# Vector — Temporal cronjob alerts (ORB-284)
+# =============================================================================
+# Generic failure alerts for every Temporal cronjob. All cronjobs run the
+# shared cronjobWorkflow (stl-verify/internal/adapters/outbound/temporal/) and
+# now emit a single instrumented outcome counter from the shared activity path:
+#
+#   cronjob_runs_total{status="success"|"error"}
+#   cronjob_run_duration_seconds_*  (histogram, for dashboards)
+#
+# RunCronjob initialises OTel with ServiceName=<cronjob name>, so every series
+# carries service_name="anchorage-indexer" | "offchain-price-indexer" | ... .
+# Grouping by service_name gives one alert per cronjob — current AND future —
+# with no per-job rule wiring. A new cronjob is covered the moment it ships.
+#
+# Series carry (set by the OTel SDK + gateway resource processor):
+#   - service_name="<cronjob name>"   (== CronjobConfig.Name)
+#   - k8s_namespace_name="vector"
+#   - cluster="archon-prod" | "archon-staging"
+# `cluster` is preserved through `sum by (...)` so the Alertmanager Slack
+# template's `Cluster:` header is populated. `namespace` is a static rule label
+# (mimir-rules-sync lint forbids `cluster`/`env` as static labels but allows it).
+#
+# maple-graphql-indexer is EXCLUDED here (service_name!=) — it has richer
+# dedicated rules in vector-indexers.yaml (VEC-320). Every other cronjob,
+# including any added later, is covered automatically.
+#
+# Severity → routing (per the alerting routing spec):
+#   critical       → pages, prod #at_stl_prod_alerts / staging
+#                    #at_stl_staging_alerts, [CRITICAL], 1h repeat.
+#   warning / info → no page, prod #at_stl_alerts / staging
+#                    #at_stl_staging_alerts, [WARNING]/[INFO], 4h repeat.
+# Per-env routing is automatic via each Mimir tenant's default_webhook_url; no
+# `alert_env` label is needed — every rule reads objects in its own tenant.
+# =============================================================================
+groups:
+  - name: vector-cronjobs
+    interval: 60s
+    rules:
+      # -----------------------------------------------------------------------
+      # WARNING — a run failed
+      # -----------------------------------------------------------------------
+      - alert: VectorCronjobRunFailing
+        # Any cronjob run returned an error in the last 15m. RecordRun fires
+        # once per activity execution, so a transient failure that the retry
+        # policy later recovers also lands here — that is intentional for a
+        # warning (you want to see flapping). A sustained, total failure is
+        # escalated to a page by VectorCronjobAllRunsFailing below.
+        expr: |
+          sum by (service_name, cluster) (
+            increase(cronjob_runs_total{
+              status="error",
+              service_name!="maple-graphql-indexer",
+              k8s_namespace_name="vector"
+            }[15m])
+          ) > 0
+        for: 0m
+        labels:
+          team: vector
+          severity: warning
+          component: temporal-cronjobs
+          namespace: vector
+        annotations:
+          summary: "Vector cronjob `{{ $labels.service_name }}` run failing"
+          description: |
+            Temporal cronjob `{{ $labels.service_name }}` recorded
+            `{{ $value | printf "%.0f" }}` failed run(s) in 15m. Check the pod
+            logs and the Temporal UI (vector namespace) for the failed
+            execution. If it recovers on retry this is informational; if it
+            persists, VectorCronjobAllRunsFailing will page.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorcronjobrunfailing
+
+      # -----------------------------------------------------------------------
+      # CRITICAL — every run is failing (worker up, but nothing succeeds)
+      # -----------------------------------------------------------------------
+      - alert: VectorCronjobAllRunsFailing
+        # Errors > 0 AND zero successes over 1h => the job is consistently
+        # failing, not flapping. The 1h window spans >=1 cycle for even the
+        # slowest cronjob (watcher-data-validator, 1h) and many cycles for the
+        # faster ones. Distinct from VectorCronjobWorkerDown: here the worker
+        # IS running and emitting metrics, every run just errors.
+        expr: |
+          (
+            sum by (service_name, cluster) (
+              increase(cronjob_runs_total{
+                status="error",
+                service_name!="maple-graphql-indexer",
+                k8s_namespace_name="vector"
+              }[1h])
+            ) > 0
+          )
+          and
+          (
+            sum by (service_name, cluster) (
+              increase(cronjob_runs_total{
+                status="success",
+                service_name!="maple-graphql-indexer",
+                k8s_namespace_name="vector"
+              }[1h])
+            ) == 0
+          )
+        for: 15m
+        labels:
+          team: vector
+          severity: critical
+          component: temporal-cronjobs
+          namespace: vector
+        annotations:
+          summary: "Vector cronjob `{{ $labels.service_name }}` failing every run"
+          description: |
+            Temporal cronjob `{{ $labels.service_name }}` has had zero
+            successful runs and at least one failure over the last 1h. Its
+            output (TimescaleDB snapshots / validations) is going stale. Triage
+            the pod logs and the Temporal UI; if the worker pod itself is gone
+            see VectorCronjobWorkerDown.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorcronjoballrunsfailing
+
+      # -----------------------------------------------------------------------
+      # CRITICAL — the worker isn't running at all (no metrics to read)
+      # -----------------------------------------------------------------------
+      - alert: VectorCronjobWorkerDown
+        # Deployment-availability companion to the metric-based alerts, sourced
+        # from kube-state-metrics so it still fires when the OTLP/metrics
+        # pipeline is the thing that broke (a dead worker emits no
+        # cronjob_runs_total at all, so the metric-based rules above cannot see
+        # it). <1 available replica = no worker pod is running, so the schedule
+        # fires into the void. Guarded on desired replicas > 0 so a deployment that
+        # is intentionally scaled to 0 (e.g. transform-worker before the post-bootstrap
+        # enable step) is not reported as down; a real crash keeps desired >= 1.
+        #
+        # NB: keyed on the kube-state-metrics `deployment` label, NOT the OTel
+        # service_name — anchorage-indexer's Deployment is `spark-anchorage-
+        # indexer`. maple-graphql-indexer is excluded (it has its own
+        # VectorMapleIndexerDown). When a new cronjob ships, add its Deployment
+        # name to both regexes below.
+        expr: |
+          (
+            max by (cluster, deployment) (
+              kube_deployment_status_replicas_available{
+                namespace="vector",
+                deployment=~"spark-anchorage-indexer|offchain-price-indexer|watcher-data-validator|transform-worker"
+              }
+            ) < 1
+          )
+          and on (cluster, deployment) (
+            max by (cluster, deployment) (
+              kube_deployment_spec_replicas{
+                namespace="vector",
+                deployment=~"spark-anchorage-indexer|offchain-price-indexer|watcher-data-validator|transform-worker"
+              }
+            ) > 0
+          )
+        for: 10m
+        labels:
+          team: vector
+          severity: critical
+          component: temporal-cronjobs
+          namespace: vector
+        annotations:
+          summary: "Vector cronjob `{{ $labels.deployment }}` has no available replica"
+          description: |
+            Deployment `{{ $labels.deployment }}` has <1 available replica for
+            >10m. The Temporal cron worker is not running, so its schedule
+            fires with no worker to pick it up and no snapshots/validations are
+            produced. Check the pod (CrashLoopBackOff, OOM, image pull) before
+            data goes stale.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorcronjobworkerdown
+
+      # =======================================================================
+      # transform-worker (VEC-484): queue-drain and parity rules
+      # =======================================================================
+      # These live here, not in a vector-transform-worker.yaml, because the
+      # rules-sync namespace regex only accepts vector-{watcher,backup-worker,
+      # indexers,psm3,postgres,cronjobs}. The transform-worker cronjob drains a
+      # per-source change queue (transformed._pending_<t>) into the transformed
+      # hypertables. Generic run-failure and worker-liveness above already cover
+      # it (service_name / deployment "transform-worker"); these add the
+      # silent-failure cases that path can't see: the worker is up and its runs
+      # "succeed", but a source's queue stops draining, or a row reaches neither
+      # the transformed table nor the queue. Signals (OTel gauges, once per tick):
+      #   transform_queue_oldest_age_seconds{table="<source>"}  (from _queue_status)
+      #   transform_parity_drift{table="<source>"}              (from _parity_status)
+
+      # -----------------------------------------------------------------------
+      # WARNING — a source's queue is lagging (draining slower than it fills)
+      # -----------------------------------------------------------------------
+      - alert: VectorTransformQueueLagging
+        # Oldest un-drained row for some source is older than 30m for 15m. In
+        # steady state the queue drains every tick (default 10m), so a sustained
+        # 30m age means that source is falling behind.
+        expr: |
+          max by (table, cluster) (
+            transform_queue_oldest_age_seconds{
+              service_name="transform-worker",
+              k8s_namespace_name="vector"
+            }
+          ) > 1800
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: transform-worker
+          namespace: vector
+        annotations:
+          summary: "Transform queue for `{{ $labels.table }}` is lagging"
+          description: |
+            The oldest un-drained row in `transformed._pending_{{ $labels.table }}`
+            has been waiting `{{ $value | humanizeDuration }}`. The worker is
+            running but this source is not draining each tick. Check the
+            transform-worker logs and `transformed._queue_status`; if it keeps
+            climbing, VectorTransformQueueStalled will page.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-transform-worker.md#vectortransformqueuelagging
+
+      # -----------------------------------------------------------------------
+      # CRITICAL — a source's queue is stalled (transformed layer going stale)
+      # -----------------------------------------------------------------------
+      - alert: VectorTransformQueueStalled
+        # Oldest un-drained row older than 2h for 30m: the transformed table for
+        # this source is materially behind raw and not recovering.
+        expr: |
+          max by (table, cluster) (
+            transform_queue_oldest_age_seconds{
+              service_name="transform-worker",
+              k8s_namespace_name="vector"
+            }
+          ) > 7200
+        for: 30m
+        labels:
+          team: vector
+          severity: critical
+          component: transform-worker
+          namespace: vector
+        annotations:
+          summary: "Transform queue for `{{ $labels.table }}` is stalled"
+          description: |
+            The oldest un-drained row in `transformed._pending_{{ $labels.table }}`
+            has been waiting `{{ $value | humanizeDuration }}`. `transformed.{{ $labels.table }}`
+            is materially behind raw. The worker is up (else VectorCronjobWorkerDown
+            fires), so the drain itself is failing or wedged — check the
+            transform-worker error logs and for a stuck `transformed._run_{{ $labels.table }}()`.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-transform-worker.md#vectortransformqueuestalled
+
+      # -----------------------------------------------------------------------
+      # WARNING — raw-vs-transformed parity drift (the correctness backstop)
+      # -----------------------------------------------------------------------
+      - alert: VectorTransformParityDrift
+        # drift = raw - transformed - pending, recorded per source each tick from
+        # transformed._parity_status. In a consistent snapshot after bootstrap every
+        # raw row is either transformed or still queued, so drift is exactly 0. A
+        # sustained nonzero value means a row reached neither the transformed table
+        # nor the queue -- a trigger gap or a bootstrap miss -- that the stall alert
+        # cannot see. Note this is a row-count check: an in-place raw UPDATE changes
+        # no count and is NOT caught here (the raw tables are verified INSERT-only, so
+        # that should not occur). Warning (not a page) because it is also nonzero
+        # during the initial bootstrap; it must read 0 once bootstrap completes, and
+        # can be promoted to critical after rollout is stable.
+        expr: |
+          max by (table, cluster) (
+            transform_parity_drift{
+              service_name="transform-worker",
+              k8s_namespace_name="vector"
+            }
+          ) != 0
+        for: 30m
+        labels:
+          team: vector
+          severity: warning
+          component: transform-worker
+          namespace: vector
+        annotations:
+          summary: "Transform parity drift on `{{ $labels.table }}`"
+          description: |
+            `transformed.{{ $labels.table }}` is out of parity with raw by
+            `{{ $value | printf "%.0f" }}` row(s) (raw - transformed - pending). After
+            bootstrap this should be 0. A positive value means raw rows never made it
+            into the transformed layer or its queue (a trigger gap or a bootstrap
+            miss); negative means the transformed table has orphan rows (a raw delete
+            or a bug). An in-place raw UPDATE changes no count and is not caught here.
+            Check `SELECT * FROM transformed._parity_status WHERE source = '{{ $labels.table }}'`.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-transform-worker.md#vectortransformparitydrift

@@ -1,6 +1,6 @@
 # Maple Finance Protocol Specification
 
-**Version:** 1.3
+**Version:** 1.4
 **Last Updated:** June 2026
 **Purpose:** Technical reference for understanding Maple Finance protocol mechanics and data retrieval
 
@@ -305,6 +305,30 @@ There are two ways to query collateral data:
 
 ---
 
+#### Collateral Data Provenance & Trust Boundary
+
+**⚠️ Collateral data is Maple-attested, not independently verifiable on-chain.** When consuming collateral for backing analysis, treat the Maple GraphQL API as the source of truth. This is a deliberate, accepted trust boundary — understand why before relying on the numbers.
+
+**The GraphQL API returns no collateral contract address.** `collateral` exposes only `asset` (a bare symbol string, e.g. `"BTC"`, `"cbBTC"`), `assetAmount`, `assetValueUsd`, `decimals`, `state`, `custodian`, `liquidationLevel` — see the [Individual Loans query](#individual-loans). There is no token/contract address to resolve the collateral to an on-chain asset, and no `assetId`.
+
+**Observed collateral `asset` symbols (live, Syrup pools, 2026-06):** `BTC`, `ETH`, `PYUSD`, `USDC`, `USDT`, `USTB`, `XRP`, `cbBTC`. This is a **mix** of native off-chain assets (`BTC`, `XRP`) and assets that happen to have an Ethereum token (`USDC`, `USDT`, `PYUSD`, `cbBTC`, `USTB`, `ETH`/`WETH`) — but **all** arrive as bare symbols, none with an address.
+
+**Why on-chain verification is not possible:**
+1. **Off-chain custodial collateral.** Much collateral is held off-chain by custodians (`custodian` field, e.g. `FORDEFI`, `ANCHORAGE`; see [Collateral Types](#yield-sources) — `BTC`, `SOL`, `XRP` via custody arrangements). Native BTC/XRP have no Ethereum representation, so there is no on-chain state to read. Unverifiable by nature.
+2. **No address to verify against.** Even for collateral that *is* an EVM token, the API returns no contract address, and Maple tracks the collateral position off-chain by custodian rather than as a readable on-chain balance in the loan contract. Inferring a contract from the symbol would mean inventing data (symbols are not unique or authoritative).
+3. **Valuation is Maple-attested too.** `assetValueUsd` is Maple's own per-unit USD price (8 decimals; multiply by `assetAmount`), **not** sourced from an independent oracle. So both the **amount** and the **USD valuation** of collateral are Maple-supplied.
+
+**This is not a new trust boundary.** The entire Maple integration already trusts the GraphQL API — `principalOwed`, `acmRatio`, pool `tvl`/`assets`/`principalOut`/`collateralValue`, and APYs are all Maple-sourced (the indexer reads GraphQL, never the chain, for these). Collateral provenance is consistent with that. Note that "verify against the live API during development" (top-of-doc note) refers to **schema/encoding** drift, not value attestation.
+
+**Integrity cross-checks available without on-chain reads:**
+- **`poolV2.collateralValue`** is Maple's own aggregate of external-loan collateral USD ([Pool Collateral](#pool-collateral), [PoolData query](#tvl-total-value-locked)). Comparing a per-loan sum of `collateral.assetValueUsd × assetAmount` (external loans only) against `collateralValue` catches aggregation bugs and internal inconsistencies in Maple's own figures.
+- **`acmRatio`** per loan (Collateral Value / Principal Owed) is a per-loan collateralization sanity signal.
+- The real integrity trap is the internal-loan **placeholder collateral** (see the [`loanMeta` warning](#individual-loans)) — neutralised by excluding `is_internal` loans from any backing aggregation, not by on-chain verification.
+
+**Downstream consumers** (e.g. backed-breakdown surfaced in the API/UI) should label collateral provenance explicitly, e.g. "Source: Maple Finance GraphQL API — collateral amounts and USD values attested by Maple/custodians; not independently verified on-chain."
+
+---
+
 #### Pool Collateral
 
 **⚠️ LIMITATION:**
@@ -397,7 +421,7 @@ This query supports pagination (required for >1000 loans) and returns all active
 
 The **only** reliable signal that a loan is an internal Maple position is `loanMeta.type` being `"amm"` or `"strategy"`. Do **not** treat the mere presence of `loanMeta` as an internal-loan indicator: most active loans (internal and external) carry a non-null `loanMeta`, and every field inside it (including `type`) is nullable. External loans commonly have `loanMeta` present with `type: null`.
 
-Observed `loanMeta.type` values across the loan book include `null`, `"amm"`, `"strategy"`, `"tBills"`, `"intercompany"`, `"mapleTrading"`, and `"defi"`. The schema defines a `LoanType` enum (`amm`, `intercompany`, `mapleTrading`, `strategy`), but treat it as approximate: `"tBills"` and `"defi"` (both observed live) are absent from the enum. The semantics of `"tBills"`, `"intercompany"`, and `"defi"` are undocumented and need confirmation from Maple. New values appear over time — but only on **new** loans (a given loan's `type` is fixed at origination; see [Field Stability](#field-stability-registry-identity-is-immutable-per-entity)). `"defi"` in particular may be another internal Maple deployment that `is_internal` does not currently flag (see the `is_internal` note above).
+Observed `loanMeta.type` values across the loan book include `null`, `"amm"`, `"strategy"`, `"tBills"`, `"intercompany"`, `"mapleTrading"`, and `"defi"`. The schema defines a `LoanType` enum (`amm`, `intercompany`, `mapleTrading`, `strategy`), but treat it as approximate: `"tBills"` and `"defi"` (both observed live) are absent from the enum. The semantics of `"tBills"`, `"intercompany"`, and `"defi"` are undocumented and need confirmation from Maple. New values appear over time both on new loans and on existing loans whose `type` was previously `null` — `loanMeta` is off-chain editorial metadata that fills in after origination, so a loan can be reclassified `null → value` mid-life (see [Field Stability](#field-stability-on-chain-identity-immutable-off-chain-loanmeta-fills-late)). `"defi"` in particular may be another internal Maple deployment that `is_internal` does not currently flag (see the `is_internal` note above).
 
 When `loanMeta.type` is `"amm"` or `"strategy"`, the loan represents an **internal Maple position** (e.g., DeFi strategy, LP position).
 
@@ -608,25 +632,36 @@ const sharePrice = await syrupVault.convertToAssets(1e18) / 1e18;
 const syrupUsdcPrice = underlyingPrice * sharePrice;
 ```
 
-### Field Stability (registry identity is immutable per entity)
+### Field Stability (on-chain identity immutable; off-chain loanMeta fills late)
 
-For indexers that split entities into a **registry** (identity/relationships, upserted) and **time-series state** (measurements, snapshotted), it matters which fields can change for an existing entity. Verified empirically via subgraph time-travel: the same field was queried at four historical blocks (≈2025-06, 2025-09, 2026-03, and latest) and diffed per entity.
+It matters which fields can change for an existing entity versus which are fixed for its life. Verified empirically via subgraph time-travel: the same field was queried at four historical blocks (≈2025-06, 2025-09, 2026-03, and latest) and diffed per entity.
 
-**Result: zero changes to any identity/relationship field on an existing entity across ~1 year.**
+**Result: zero changes to any on-chain-derived identity/relationship field on an existing entity across ~1 year.** This holds for fields the subgraph derives from chain state. It does **not** hold for `loanMeta.*`, which is off-chain editorial metadata and fills in late (see the carve-out below).
 
 | Entity | Distinct ids checked | Fields | Changes |
 |---|---|---|---|
-| `openTermLoans` | 355 | `fundingPool.id`, all `loanMeta.*` (`type`, `assetSymbol`, `dexName`, `location`, `walletAddress`, `walletType`) | 0 |
+| `openTermLoans` | 355 | `fundingPool.id` | 0 |
 | `poolV2S` | 21 | `name`, `asset.id`, `syrupRouter` (syrup flag) | 0 |
 | `skyStrategies` | 4 | `pool.id`, `version` | 0 |
 
-Entity counts grew over the window (20→21 pools, 191→355 loans) purely because **new entities arrive pre-populated** — never because a field changed on an existing one. Internal loans carry their `loanMeta.type` from their creation block (set even before the loan reaches `Active`).
+Entity counts grew over the window (20→21 pools, 191→355 loans) purely because **new entities arrive pre-populated** — never because an on-chain-derived field changed on an existing one.
 
 **Implications:**
 
-- A loan's `fundingPool`, a strategy's `pool`, and a pool's underlying `asset` are stable for the life of the entity — consistent with the on-chain protocol (a loan is funded by exactly one pool, a strategy interacts with exactly one Pool Manager, a pool's ERC-4626 `asset()` is fixed at deployment). These are safe to treat as immutable registry keys; a change would signal upstream data corruption rather than a normal event.
-- `loanMeta.type` (hence the `is_internal` classification) is likewise fixed per loan — read-time joins to the registry reproduce historical internal/external splits without needing to snapshot the classification into the state table.
-- `skyStrategy.version` is the one field with a live mutation path (Governor-enabled proxy upgrade) — it simply has not changed yet in the observed window. Treat it as refreshable, not immutable.
+- A loan's `fundingPool`, a strategy's `pool`, and a pool's underlying `asset` are stable for the life of the entity — consistent with the on-chain protocol (a loan is funded by exactly one pool, a strategy interacts with exactly one Pool Manager, a pool's ERC-4626 `asset()` is fixed at deployment). A change would signal upstream data corruption rather than a normal event.
+- `skyStrategy.version` is the one on-chain field with a live mutation path (Governor-enabled proxy upgrade) — it simply has not changed yet in the observed window. Treat it as refreshable, not immutable.
+
+#### `loanMeta.*` is off-chain editorial metadata — mutable, not immutable
+
+All six `loanMeta.*` fields (`type`, `assetSymbol`, `dexName`, `location`, `walletAddress`, `walletType`) are **not** on-chain loan state and can change on an existing loan. Observed live 2026-06-19: loan `0xEE87b60f227149Bf90A627931495b7028db2052D` had `loanMeta.type` go from `null` to `"intercompany"`.
+
+**Why it changes.** `loanMeta` is not loan-contract state. The on-chain `OpenTermLoan` knows borrower, funding pool, principal, collateral, payment schedule, and state — it has no concept of a loan "type", a DEX name, or a custody wallet. None of the `loanMeta.*` fields appear anywhere in Maple's smart-contract reference. They are operational/editorial labels Maple's backend attaches off-chain (the same class of data as `nativeLoans`, which live in Maple's Mongo store, not the subgraph). A loan is served with `loanMeta.type = null` the moment it deploys on-chain; later Maple's finance/ops classifies it (e.g. tags an inter-affiliate book transfer as `"intercompany"`) and the field flips `null → value`. No new block, no contract event — a backend field edit. Changes can go any direction: `null → value`, `value → value`, `value → null`.
+
+**Why a naive time-travel study misses it.** Two compounding gaps make `loanMeta.*` falsely look immutable:
+1. **Time-travel blind spot.** Subgraph `block:` time-travel replays *chain-derived* state at a historical block. A field resolved at query time from a mutable off-chain store returns *today's* value for every historical block argument, so all historical reads are identical → a false "0 changes".
+2. **Coarse sampling.** Quarterly samples miss a `null → value` enrichment that lands in a loan's first days, between origination and the first sample. "0 changes across the sampled blocks" ≠ "never changes".
+
+**Consequence for internal/external classification.** Because `loanMeta.type` fills in late, a loan can be reclassified from external to internal **after** it is first seen — `is_internal` (and any backing aggregation that filters on it) reflects the change only from the point Maple sets the type.
 
 ---
 

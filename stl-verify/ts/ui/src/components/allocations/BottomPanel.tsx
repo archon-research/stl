@@ -17,7 +17,6 @@ import {
   type ChainLabelLookup,
   getAllocationKey,
   getCategoryLabel,
-  getProtocolLabel,
   sortAllocations,
 } from '../../lib/dashboard';
 import { navigateWithParams, PARAMS, useUrlParam } from '../../lib/url-params';
@@ -26,7 +25,6 @@ import type {
   AllocationCategory,
   Prime,
 } from '../../types/allocation';
-import type { LocalProtocolRow } from '../../types/local-data';
 import { ActivityFeed } from './tabs/ActivityFeed';
 import { RiskBreakdownTab } from './tabs/RiskBreakdownTab';
 import { RrcTab } from './tabs/RrcTab';
@@ -37,7 +35,6 @@ type BottomPanelProps = {
   errorMessage: string | null;
   isDrawerOpen: boolean;
   isLoading: boolean;
-  localProtocols: LocalProtocolRow[];
   selectedAllocation: Allocation | null;
   selectedPrime: Prime | null;
 };
@@ -70,13 +67,9 @@ export function BottomPanel({
   errorMessage,
   isDrawerOpen,
   isLoading,
-  localProtocols,
   selectedAllocation,
   selectedPrime,
 }: BottomPanelProps) {
-  const [receiptTokenParam, setReceiptTokenParam] = useUrlParam(
-    PARAMS.receiptToken,
-  );
   const [tabParam, setTabParam] = useUrlParam(PARAMS.tab);
   const [categoryParam, setCategoryParam] = useUrlParam(PARAMS.category);
   const [activityActionParam, setActivityActionParam] = useUrlParam(
@@ -89,9 +82,6 @@ export function BottomPanel({
   );
 
   const previousPrimeIdRef = useRef<string | null>(selectedPrime?.id ?? null);
-  const previousSelectedAllocationIdRef = useRef<string | null>(
-    selectedAllocation ? getAllocationKey(selectedAllocation) : null,
-  );
 
   const activeTab: ActiveTab =
     tabParam === 'rrc' ? 'rrc' : tabParam === 'activity' ? 'activity' : 'risk';
@@ -106,19 +96,13 @@ export function BottomPanel({
     const primeId = selectedPrime?.id ?? null;
 
     if (previousPrimeIdRef.current && previousPrimeIdRef.current !== primeId) {
-      setReceiptTokenParam(null);
       setCategoryFilter('');
       setCategoryParam(null);
       setActivityActionParam(null);
     }
 
     previousPrimeIdRef.current = primeId;
-  }, [
-    selectedPrime?.id,
-    setActivityActionParam,
-    setCategoryParam,
-    setReceiptTokenParam,
-  ]);
+  }, [selectedPrime?.id, setActivityActionParam, setCategoryParam]);
 
   useEffect(() => {
     const normalized = parseCategoryParam(categoryParam);
@@ -141,82 +125,25 @@ export function BottomPanel({
     return sortedAllocations.filter((a) => a.category === categoryFilter);
   }, [sortedAllocations, categoryFilter]);
 
-  useEffect(() => {
-    if (sortedAllocations.length === 0) {
-      if (receiptTokenParam !== null) {
-        setReceiptTokenParam(null);
-      }
-      return;
-    }
-
-    if (filteredAllocations.length === 0) {
-      if (receiptTokenParam !== null) {
-        setReceiptTokenParam(null);
-      }
-      return;
-    }
-
+  // The drawer follows the clicked allocation. When the category filter excludes
+  // it (or nothing is selected), fall back to the first allocation in view so a
+  // tab always has something to render.
+  const focusedAllocation = useMemo(() => {
     if (
-      receiptTokenParam &&
+      selectedAllocation &&
       filteredAllocations.some(
-        (allocation) => getAllocationKey(allocation) === receiptTokenParam,
+        (allocation) =>
+          getAllocationKey(allocation) === getAllocationKey(selectedAllocation),
       )
     ) {
-      return;
+      return selectedAllocation;
     }
+    return filteredAllocations[0] ?? null;
+  }, [selectedAllocation, filteredAllocations]);
 
-    const selectedKey = selectedAllocation
-      ? getAllocationKey(selectedAllocation)
-      : null;
-    const selectedInFiltered =
-      selectedKey !== null &&
-      filteredAllocations.some(
-        (allocation) => getAllocationKey(allocation) === selectedKey,
-      )
-        ? selectedAllocation
-        : null;
-
-    const fallback = selectedInFiltered ?? filteredAllocations[0];
-    if (fallback) {
-      setReceiptTokenParam(getAllocationKey(fallback));
-    }
-  }, [
-    receiptTokenParam,
-    selectedAllocation,
-    setReceiptTokenParam,
-    filteredAllocations,
-    sortedAllocations.length,
-  ]);
-
-  // Sync the URL-backed receipt-token param to the grid's current selection
-  // only when that selection *changes*. The ref guards against clobbering a
-  // manual dropdown pick on unrelated re-renders (e.g. the user changes the
-  // dropdown → receiptTokenParam changes → this effect would otherwise fire
-  // and overwrite the pick back to the grid row's id).
-  useEffect(() => {
-    const currentKey = selectedAllocation
-      ? getAllocationKey(selectedAllocation)
-      : null;
-
-    if (currentKey === previousSelectedAllocationIdRef.current) {
-      return;
-    }
-
-    previousSelectedAllocationIdRef.current = currentKey;
-
-    if (currentKey === null) {
-      return;
-    }
-
-    if (receiptTokenParam !== currentKey) {
-      setReceiptTokenParam(currentKey);
-    }
-  }, [receiptTokenParam, selectedAllocation, setReceiptTokenParam]);
-
-  const focusedAllocation =
-    filteredAllocations.find(
-      (allocation) => getAllocationKey(allocation) === receiptTokenParam,
-    ) ?? null;
+  const focusedAllocationKey = focusedAllocation
+    ? getAllocationKey(focusedAllocation)
+    : null;
 
   const categoryEmptyDescription = `No allocations found in the "${getCategoryLabel(categoryFilter, 'All Categories')}" category.`;
 
@@ -251,7 +178,7 @@ export function BottomPanel({
   useEffect(() => {
     setLocalRiskSearchValue('');
     setRiskSearchValue('');
-  }, [receiptTokenParam]);
+  }, [focusedAllocationKey]);
 
   return (
     <div
@@ -298,52 +225,51 @@ export function BottomPanel({
           </ToggleGroup.Item>
         </ToggleGroup.Root>
 
-        <button
-          type="button"
-          disabled={!focusedAllocation}
-          onClick={() =>
-            navigateWithParams('/activities', {
-              [PARAMS.prime]: selectedPrime?.id ?? null,
-              [PARAMS.network]: focusedAllocation
-                ? String(focusedAllocation.chain_id)
-                : null,
-              [PARAMS.token]: focusedAllocation?.symbol ?? null,
-              [PARAMS.activityAction]: activityActionFilter || null,
-              [PARAMS.showAllPrimes]: '0',
-            })
-          }
-          className={css({
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: '1',
-            bg: 'transparent',
-            border: 'none',
-            p: 0,
-            fontSize: 'sm',
-            fontWeight: 'medium',
-            color: 'interactive.accent',
-            cursor: 'pointer',
-            whiteSpace: 'nowrap',
-            _hover: { textDecoration: 'underline' },
-            _disabled: {
-              color: 'text.subtle',
-              cursor: 'not-allowed',
-              textDecoration: 'none',
-            },
-          })}
-        >
-          View in Activities
-          <ArrowUpRight className={css({ width: '4', height: '4' })} />
-        </button>
+        {activeTab === 'activity' ? (
+          <button
+            type="button"
+            disabled={!focusedAllocation}
+            onClick={() =>
+              navigateWithParams('/activities', {
+                [PARAMS.prime]: selectedPrime?.id ?? null,
+                [PARAMS.network]: focusedAllocation
+                  ? String(focusedAllocation.chain_id)
+                  : null,
+                [PARAMS.token]: focusedAllocation?.symbol ?? null,
+                [PARAMS.activityAction]: activityActionFilter || null,
+                [PARAMS.showAllPrimes]: '0',
+              })
+            }
+            className={css({
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '1',
+              bg: 'transparent',
+              border: 'none',
+              p: 0,
+              fontSize: 'sm',
+              fontWeight: 'medium',
+              color: 'interactive.accent',
+              cursor: 'pointer',
+              whiteSpace: 'nowrap',
+              _hover: { textDecoration: 'underline' },
+              _disabled: {
+                color: 'text.subtle',
+                cursor: 'not-allowed',
+                textDecoration: 'none',
+              },
+            })}
+          >
+            View in Activities
+            <ArrowUpRight className={css({ width: '4', height: '4' })} />
+          </button>
+        ) : null}
       </div>
 
       <div
         className={css({
-          display: 'grid',
-          gridTemplateColumns: {
-            base: '1fr',
-            md: 'repeat(3, minmax(12rem, 1fr)) minmax(18rem, 1fr)',
-          },
+          display: 'flex',
+          flexWrap: 'wrap',
           gap: '4',
           alignItems: 'end',
         })}
@@ -353,6 +279,7 @@ export function BottomPanel({
           className={css({
             display: 'grid',
             gap: '1',
+            flex: '1 1 12rem',
           })}
         >
           <span
@@ -389,52 +316,13 @@ export function BottomPanel({
           </StyledSelect>
         </label>
 
-        <label
-          className={css({
-            display: 'grid',
-            gap: '1',
-          })}
-        >
-          <span
-            className={css({
-              fontSize: 'xs',
-              textTransform: 'uppercase',
-              letterSpacing: '0.1em',
-              color: 'text.muted',
-            })}
-          >
-            Receipt token
-          </span>
-          <StyledSelect
-            value={receiptTokenParam ?? ''}
-            onChange={(event: ChangeEvent<HTMLSelectElement>) =>
-              setReceiptTokenParam(event.target.value || null)
-            }
-            disabled={
-              !selectedPrime ||
-              isLoading ||
-              errorMessage !== null ||
-              filteredAllocations.length === 0
-            }
-          >
-            <option value="">Choose a receipt token</option>
-            {filteredAllocations.map((allocation) => {
-              const key = getAllocationKey(allocation);
-              return (
-                <option key={key} value={key}>
-                  {`${allocation.symbol} · ${getProtocolLabel(allocation.protocol_name, localProtocols, allocation.chain_id)}`}
-                </option>
-              );
-            })}
-          </StyledSelect>
-        </label>
-
         {activeTab === 'activity' ? (
           <label
             htmlFor="activity-action-filter"
             className={css({
               display: 'grid',
               gap: '1',
+              flex: '1 1 12rem',
             })}
           >
             <span
@@ -468,7 +356,7 @@ export function BottomPanel({
         {activeTab === 'risk' || activeTab === 'activity' ? (
           <div
             className={css({
-              width: '100%',
+              flex: '2 1 18rem',
             })}
           >
             <SearchInput
@@ -526,6 +414,7 @@ export function BottomPanel({
                 isEnabled={isDrawerOpen && activeTab === 'risk'}
                 searchQuery={riskSearchValue}
                 selectedReceiptToken={focusedAllocation}
+                selectedPrime={selectedPrime}
               />
             ) : activeTab === 'rrc' ? (
               <RrcTab

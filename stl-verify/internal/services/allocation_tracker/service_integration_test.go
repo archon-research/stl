@@ -92,7 +92,7 @@ func TestIntegration_SubProxyAndAlmProxy_AreIndexedAndQueryable(t *testing.T) {
 	})
 
 	primeLookup := map[string]int64{"spark": sparkID}
-	pgHandler := NewPrimePositionHandler(allocRepo, supplyRepo, txm, mc, erc20ABI, primeLookup, logger)
+	pgHandler := NewPrimePositionHandler(allocRepo, supplyRepo, txm, mc, erc20ABI, primeLookup, logger, nil)
 
 	registry := NewSourceRegistry(logger)
 	registry.Register(NewBalanceOfSource(mc, erc20ABI, atokenABI, logger))
@@ -138,6 +138,7 @@ func TestIntegration_SubProxyAndAlmProxy_AreIndexedAndQueryable(t *testing.T) {
 		BlockNumber:    blockNumber,
 		Version:        0,
 		BlockTimestamp: time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC).Unix(),
+		BlockHash:      testBlockHash.Hex(),
 	}
 	if err := svc.processBlock(ctx, event); err != nil {
 		t.Fatalf("processBlock: %v", err)
@@ -236,7 +237,7 @@ func TestIntegration_SweepPosition_UsesZeroTxHash(t *testing.T) {
 	})
 
 	primeLookup := map[string]int64{"spark": sparkID}
-	pgHandler := NewPrimePositionHandler(allocRepo, supplyRepo, txm, mc, erc20ABI, primeLookup, logger)
+	pgHandler := NewPrimePositionHandler(allocRepo, supplyRepo, txm, mc, erc20ABI, primeLookup, logger, nil)
 
 	registry := NewSourceRegistry(logger)
 	registry.Register(NewBalanceOfSource(mc, erc20ABI, atokenABI, logger))
@@ -275,6 +276,7 @@ func TestIntegration_SweepPosition_UsesZeroTxHash(t *testing.T) {
 		BlockNumber:    blockNumber,
 		Version:        0,
 		BlockTimestamp: time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC).Unix(),
+		BlockHash:      testBlockHash.Hex(),
 	}
 	// Drive the same block twice: idempotent reprocessing must not create
 	// duplicate sweep rows despite the constant (zero) tx_hash.
@@ -368,9 +370,13 @@ func TestIntegration_UsdcTransferToSubProxy_IsIgnored(t *testing.T) {
 		t.Errorf("multicaller invoked with %d sub-calls — no fetch should happen for an unregistered token", len(calls))
 		return make([]outbound.Result, len(calls)), nil
 	}
+	mc.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		t.Errorf("multicaller invoked with %d sub-calls — no fetch should happen for an unregistered token", len(calls))
+		return make([]outbound.Result, len(calls)), nil
+	}
 
 	primeLookup := map[string]int64{"spark": sparkID}
-	pgHandler := NewPrimePositionHandler(allocRepo, supplyRepo, txm, mc, erc20ABI, primeLookup, logger)
+	pgHandler := NewPrimePositionHandler(allocRepo, supplyRepo, txm, mc, erc20ABI, primeLookup, logger, nil)
 
 	registry := NewSourceRegistry(logger)
 	registry.Register(NewBalanceOfSource(mc, erc20ABI, atokenABI, logger))
@@ -414,6 +420,7 @@ func TestIntegration_UsdcTransferToSubProxy_IsIgnored(t *testing.T) {
 		BlockNumber:    blockNumber,
 		Version:        0,
 		BlockTimestamp: time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC).Unix(),
+		BlockHash:      testBlockHash.Hex(),
 	}
 	if err := svc.processBlock(ctx, event); err != nil {
 		t.Fatalf("processBlock: %v", err)
@@ -464,8 +471,7 @@ func newERC20BalanceMockMulticaller(
 	decimalsMethod := erc20ABI.Methods["decimals"]
 	symbolMethod := erc20ABI.Methods["symbol"]
 
-	mc := testutil.NewMockMulticaller()
-	mc.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+	resolve := func(calls []outbound.Call) []outbound.Result {
 		results := make([]outbound.Result, len(calls))
 		for i, c := range calls {
 			if c.Target != tokenAddress {
@@ -518,7 +524,18 @@ func newERC20BalanceMockMulticaller(
 				results[i] = outbound.Result{Success: false}
 			}
 		}
-		return results, nil
+		return results
+	}
+
+	mc := testutil.NewMockMulticaller()
+	// ExecuteFn backs the metadataCache static probe (handler_prime_positions.go),
+	// which intentionally stays number-pinned — see VEC-471. ExecuteAtHashFn backs
+	// BalanceOfSource's state read, which VEC-471 moves to hash-pinned.
+	mc.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return resolve(calls), nil
+	}
+	mc.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		return resolve(calls), nil
 	}
 	return mc
 }
