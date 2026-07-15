@@ -243,6 +243,11 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("creating receipt token repository: %w", err)
 	}
 
+	debtTokenRepo, err := postgres.NewDebtTokenRepository(pool, logger)
+	if err != nil {
+		return fmt.Errorf("creating debt token repository: %w", err)
+	}
+
 	// Initialize OpenTelemetry before constructing any telemetry instruments, so
 	// they bind to the configured meter provider rather than the global no-op one.
 	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
@@ -295,6 +300,7 @@ func run(ctx context.Context, args []string) error {
 		positionRepo,
 		eventRepo,
 		receiptTokenRepo,
+		debtTokenRepo,
 	)
 	if err != nil {
 		return fmt.Errorf("creating service: %w", err)
