@@ -24,6 +24,7 @@ from tests.integration.seed import (
     GHOST_SWEEP_PROXY_HEX,
     GHOST_TIEBREAK_PROXY_HEX,
     insert_allocation_position,
+    insert_oracle_asset,
     insert_token,
     seed_ghost_balance,
 )
@@ -213,6 +214,9 @@ async def _seed(db_url: str) -> None:
                 oracle_id,
                 Decimal(1),
             )
+            # Enabled oracle_asset mapping keeps this price eligible for the
+            # latest-price reads, which exclude sources with no enabled mapping.
+            await insert_oracle_asset(conn, oracle_id, usdc_id)
 
             # net_flow_usd flow-reconstruction fixture: three aUSDC events in one
             # bucket — +100 in, -40 out, and a 1000 sweep that must net to zero.

@@ -283,6 +283,8 @@ func TestTelemetry_NilSafe(t *testing.T) {
 	tel.RecordError(ctx, "op", nil)
 	tel.RecordStateRows(ctx, 5)
 	tel.RecordStateRows(ctx, 0)
+	tel.RecordPoolsTouched(ctx, 5)
+	tel.RecordPoolsTouched(ctx, 0)
 }
 
 func TestRecordStateRows_IncrementsCounter(t *testing.T) {
@@ -314,6 +316,73 @@ func TestRecordStateRows_IncrementsCounter(t *testing.T) {
 	got := readSingleSumCount(t, &rm, "curve.state.rows.written")
 	if got != 8 {
 		t.Errorf("curve.state.rows.written = %d, want 8 (3+5; 0 and -1 are no-ops)", got)
+	}
+}
+
+func TestRecordPoolsTouched_IncrementsCounter(t *testing.T) {
+	reader := metricsdk.NewManualReader()
+	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
+	prev := otel.GetMeterProvider()
+	otel.SetMeterProvider(mp)
+	t.Cleanup(func() {
+		otel.SetMeterProvider(prev)
+		_ = mp.Shutdown(context.Background())
+	})
+
+	tel, err := NewTelemetry("uniswap_v3", 1)
+	if err != nil {
+		t.Fatalf("NewTelemetry: %v", err)
+	}
+
+	ctx := context.Background()
+	tel.RecordPoolsTouched(ctx, 2)
+	tel.RecordPoolsTouched(ctx, 4)
+	tel.RecordPoolsTouched(ctx, 0)  // no-op
+	tel.RecordPoolsTouched(ctx, -1) // no-op
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+
+	got := readSingleSumCount(t, &rm, "uniswap_v3.pools.touched")
+	if got != 6 {
+		t.Errorf("uniswap_v3.pools.touched = %d, want 6 (2+4; 0 and -1 are no-ops)", got)
+	}
+}
+
+// Like the other counters, pools.touched must carry `chain` so the alerts can
+// `sum by (chain, cluster)` without the value spaces fragmenting. (That a
+// touched block still advances this counter when the persist writes zero state
+// rows is a service-level invariant, pinned by
+// uniswapv3indexer.TestBlockHandler_RecordsPoolsTouchedOnZeroRowReplay — the two
+// counters are structurally independent here and cannot be related at this layer.)
+func TestRecordPoolsTouched_AttachesChainLabel(t *testing.T) {
+	reader := metricsdk.NewManualReader()
+	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
+	prev := otel.GetMeterProvider()
+	otel.SetMeterProvider(mp)
+	t.Cleanup(func() {
+		otel.SetMeterProvider(prev)
+		_ = mp.Shutdown(context.Background())
+	})
+
+	tel, err := NewTelemetry("uniswap_v3", 1)
+	if err != nil {
+		t.Fatalf("NewTelemetry: %v", err)
+	}
+
+	ctx := context.Background()
+	tel.RecordPoolsTouched(ctx, 1)
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+
+	const want = "mainnet" // entity.ChainName(1)
+	if got := readChainAttr(t, &rm, "uniswap_v3.pools.touched"); got != want {
+		t.Errorf("uniswap_v3.pools.touched chain attr = %q, want %q", got, want)
 	}
 }
 
