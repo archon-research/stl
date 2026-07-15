@@ -259,6 +259,8 @@
           "balance": "1234567.89",
           "category": "allocation",
           "chain_id": 1,
+          "latest_activity_action": "out",
+          "latest_activity_amount": "12.5",
           "latest_activity_at": "2026-05-07T12:00:00Z",
           "protocol_name": "aave-v3",
           "receipt_token_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
@@ -305,6 +307,37 @@
             ],
             "title": "Chain Id",
             "type": "integer"
+          },
+          "latest_activity_action": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Direction of the most recent activity (`in`, `out`, `sweep`), or `null`.",
+            "examples": [
+              "out"
+            ],
+            "title": "Latest Activity Action"
+          },
+          "latest_activity_amount": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Token-unit magnitude of the most recent activity (unsigned). Decimal serialized as a JSON string. `null` when there is no activity.",
+            "examples": [
+              "12.5"
+            ],
+            "title": "Latest Activity Amount"
           },
           "latest_activity_at": {
             "anyOf": [
