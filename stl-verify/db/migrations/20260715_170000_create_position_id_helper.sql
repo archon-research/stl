@@ -1,6 +1,6 @@
 -- Canonical position_id helper (VEC-400): the single hash + readable-key contract every
 -- per-protocol position materializer uses, so all protocols produce identical ids from the
--- same inputs. Dual key: position_id (sha256 -> bytea(32), the joinable PK/FK) and
+-- same inputs. Dual key: position_id (sha256 -> bytea, 32 bytes, the joinable PK/FK) and
 -- position_key (the readable canonical string, the hash pre-image, for humans/debugging).
 
 -- Identity is holder + instrument. No classifications live in the id: deal_type and the old
@@ -17,8 +17,11 @@
 --   chain_id;protocol_id;instrument_key;holder_id
 -- Nullable structural fields (chain_id/protocol_id) render as empty between the ';' delimiters
 -- (so field positions are stable); instrument_key and holder_id are required and non-empty, and
--- must not contain the ';' delimiter (unescaped, it would collide distinct identities). Global
--- uniqueness of instrument_key across chains is a construction concern of the VEC-412 bridge key.
+-- must not contain the ';' delimiter (unescaped, it would collide distinct identities). chain_id and
+-- protocol_id stay nullable, but each protocol's materializer must use a FIXED, documented NULL-ness
+-- convention for them: two call sites that disagree (one NULL, one a value) for the same position
+-- would fork it into two ids with no error. chain_id is load-bearing, not redundant: when set it
+-- disambiguates the same native instrument_key reused across chains (VEC-412).
 -- IMMUTABLE so it can back a generated column or index. Fail hard on bad inputs rather than
 -- emit a silently-wrong identity.
 CREATE OR REPLACE FUNCTION public.position_key(
@@ -47,9 +50,9 @@ BEGIN
     _holder_id);
 END $$;
 COMMENT ON FUNCTION public.position_key(integer, bigint, text, text) IS
-  '[Operational] Canonical position identity string (VEC-400): chain_id;protocol_id;instrument_key;holder_id. Human-readable descriptor and the pre-image of position_id(). Identity is holder + instrument only; classifications (deal_type, leg) are looked-up attributes, not part of the key. Nullable structural fields render empty; instrument_key and holder_id are required, non-empty, and must not contain '';''. Holder is the native on-chain holder id (wallet or prime vault address); the entity is resolved downstream, not in the key.';
+  '[Operational] Canonical position identity string (VEC-400): chain_id;protocol_id;instrument_key;holder_id. Human-readable descriptor and the pre-image of position_id(). Identity is holder + instrument only; classifications (deal_type, leg) are looked-up attributes, not part of the key. Nullable structural fields render empty; instrument_key and holder_id are required, non-empty, and must not contain '';''. chain_id/protocol_id stay nullable but each protocol materializer must use a fixed, documented NULL-ness convention so the same position never forks into two ids. Holder is the native on-chain holder id (wallet or prime vault address); the entity is resolved downstream, not in the key.';
 
--- position_id: sha256 of the canonical string -> bytea(32), the joinable PK stamped onto every
+-- position_id: sha256 of the canonical string -> bytea, 32 bytes, the joinable PK stamped onto every
 -- position and its downstream tables. sha256() is a built-in (PG 11+); no pgcrypto extension.
 -- Delegates to position_key so the id and the readable key can never diverge.
 CREATE OR REPLACE FUNCTION public.position_id(
@@ -62,6 +65,6 @@ CREATE OR REPLACE FUNCTION public.position_id(
     'UTF8'));
 $$;
 COMMENT ON FUNCTION public.position_id(integer, bigint, text, text) IS
-  '[Operational] Canonical position_id (VEC-400): sha256 of position_key() -> bytea(32). The identity every per-protocol materializer stamps; excludes the time/version axis, so one position_id maps to many observations. Pair with position_key() for the readable form.';
+  '[Operational] Canonical position_id (VEC-400): sha256 of position_key() -> bytea (32 bytes). The identity every per-protocol materializer stamps; excludes the time/version axis, so one position_id maps to many observations. Pair with position_key() for the readable form. Downstream tables enforce the 32-byte width via CHECK (octet_length(position_id) = 32).';
 
-INSERT INTO migrations (filename) VALUES ('20260713_140000_create_position_id_helper.sql') ON CONFLICT (filename) DO NOTHING;
+INSERT INTO migrations (filename) VALUES ('20260715_170000_create_position_id_helper.sql') ON CONFLICT (filename) DO NOTHING;
