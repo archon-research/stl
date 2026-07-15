@@ -28,7 +28,7 @@
 
 CREATE TABLE IF NOT EXISTS entity_master (
     entity_id            text NOT NULL,                 -- natural key (em-...), stable across all versions; PK with processing_version
-    processing_version   integer NOT NULL DEFAULT 1,    -- monotonic per entity_id; SCD2 dedup key
+    processing_version   integer NOT NULL DEFAULT 0,    -- monotonic per entity_id; SCD2 dedup key (0-based, matching the pipeline processing_version convention)
     valid_from           date NOT NULL DEFAULT CURRENT_DATE,  -- when this version became effective (only temporal field stored)
     change_reason        text NOT NULL,                 -- mandatory: why this version exists
     legal_name           text,
@@ -59,14 +59,14 @@ CREATE TABLE IF NOT EXISTS entity_master (
     CONSTRAINT em_domicile_fkey FOREIGN KEY (domicile_country) REFERENCES country_ref(country_code),
     CONSTRAINT em_risk_fkey FOREIGN KEY (country_of_risk) REFERENCES country_ref(country_code),
     CONSTRAINT em_sector_fkey FOREIGN KEY (sector) REFERENCES sector_ref(sector),
-    CONSTRAINT em_processing_version_chk CHECK (processing_version >= 1),
+    CONSTRAINT em_processing_version_chk CHECK (processing_version >= 0),
     CONSTRAINT em_status_chk CHECK (entity_status IN ('ACTIVE','DISSOLVED','MERGED','SUSPENDED'))
 );
 
 -- Catalog metadata (downstream data-dictionary / schema_master tooling reads pg_catalog comments).
 COMMENT ON TABLE entity_master IS '[Dimension] Append-only SCD2 legal-entity master. PK (entity_id, processing_version); the current record per entity_id is entity_master_current. Positions resolve their holder to a single entity_id (wallets via entity_ref_codes, primes via pipeline_prime_id) through the natural key; there is no per-version surrogate to stamp.';
 COMMENT ON COLUMN entity_master.entity_id IS 'Natural key (em-<code>); stable across all SCD2 versions. PK together with processing_version. This is what positions resolve against.';
-COMMENT ON COLUMN entity_master.processing_version IS 'SCD2 dedup/version key. Monotonic per entity_id (>=1), loader-assigned.';
+COMMENT ON COLUMN entity_master.processing_version IS 'SCD2 dedup/version key. Monotonic per entity_id (>=0), loader-assigned; 0-based to match the pipeline processing_version convention.';
 COMMENT ON COLUMN entity_master.valid_from IS 'Date this version became effective; only temporal field stored (valid_to derived in entity_master_versions).';
 COMMENT ON COLUMN entity_master.change_reason IS 'Mandatory: why this version exists.';
 COMMENT ON COLUMN entity_master.legal_name IS 'Full legal name.';
