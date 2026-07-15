@@ -14,13 +14,16 @@
 // cannot silently drift, and the CTAS / _run / _bootstrap projections of one table
 // cannot diverge from each other.
 //
-// Emit status: the projection layer (this file) is complete; the queue-shape
-// statement emitters and the static header/tail are built out incrementally, so
-// GenerateBucket1 is not yet wired. See emit.go.
+// The projection layer lives in this file; the queue-shape statement emitters, the
+// static header/tail, and GenerateBucket1 (the entry point main.go and the
+// conformance test call) live in emit.go.
 package transformgen
 
 import (
+	"cmp"
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/archon-research/stl/stl-verify/data_quality/schemamaster"
 )
@@ -44,11 +47,9 @@ func (s RawSchema) sortedColumns() []RawColumn {
 	out := make([]RawColumn, len(s.Columns))
 	copy(out, s.Columns)
 	// information_schema is queried in ordinal order, but sort defensively.
-	for i := 1; i < len(out); i++ {
-		for j := i; j > 0 && out[j-1].Ordinal > out[j].Ordinal; j-- {
-			out[j-1], out[j] = out[j], out[j-1]
-		}
-	}
+	slices.SortFunc(out, func(a, b RawColumn) int {
+		return cmp.Compare(a.Ordinal, b.Ordinal)
+	})
 	return out
 }
 
@@ -107,7 +108,13 @@ type projection struct {
 // plan resolves the register + raw schema into a projection.
 func plan(reg *schemamaster.Register, schema RawSchema) (projection, error) {
 	fills := fillsFor(reg, schema.Table)
-	joinClause, sourceAlias := joinFor(fills)
+	if err := checkBucket1Fills(schema.Table, fills); err != nil {
+		return projection{}, err
+	}
+	joinClause, sourceAlias, err := joinFor(fills)
+	if err != nil {
+		return projection{}, err
+	}
 
 	filledExprs, filledCols := filledColumns(fills)
 
@@ -175,16 +182,43 @@ func fillsFor(reg *schemamaster.Register, table string) []schemamaster.Fill {
 
 // joinFor derives the single LEFT JOIN clause and source alias. Every single-hop
 // and two-hop fill for a bucket-1 table joins the same parent on the same key, so
-// one join serves them all; with no joins the raw columns are unqualified.
-func joinFor(fills []schemamaster.Fill) (clause, alias string) {
-	for _, f := range fills {
+// one join serves them all; with no joins the raw columns are unqualified. It
+// errors if two joining fills disagree on parent/key/ref (the one-join assumption
+// would otherwise silently drop a fill's join and emit wrong SQL).
+func joinFor(fills []schemamaster.Fill) (clause, alias string, err error) {
+	var first *schemamaster.Fill
+	for i := range fills {
+		f := fills[i]
 		if f.Parent == "" {
 			continue
 		}
-		clause = fmt.Sprintf(` LEFT JOIN public.%s p ON p.%s=s.%s`, quote(f.Parent), quote(f.Ref), quote(f.Key))
-		return clause, "s"
+		if first == nil {
+			first = &fills[i]
+			continue
+		}
+		if f.Parent != first.Parent || f.Key != first.Key || f.Ref != first.Ref {
+			return "", "", fmt.Errorf("fills for %q disagree on join: parent/key/ref %s/%s/%s versus %s/%s/%s (the one-join assumption does not hold)",
+				f.Table, first.Parent, first.Key, first.Ref, f.Parent, f.Key, f.Ref)
+		}
 	}
-	return "", ""
+	if first == nil {
+		return "", "", nil
+	}
+	clause = fmt.Sprintf(` LEFT JOIN public.%s p ON p.%s=s.%s`, quote(first.Parent), quote(first.Ref), quote(first.Key))
+	return clause, "s", nil
+}
+
+// checkBucket1Fills rejects fills that a bucket-1 projection cannot render. A
+// Const or BlockTime fill has no parent join, so fillExpr would emit p."col"
+// referencing an alias that does not exist; those fills belong to bucket 2/3 and
+// must not reach the parent-column path.
+func checkBucket1Fills(table string, fills []schemamaster.Fill) error {
+	for _, f := range fills {
+		if f.Const != nil || f.BlockTime {
+			return fmt.Errorf("fill %s.%s is a Const/BlockTime fill (bucket 2/3) and cannot be rendered by the bucket-1 generator", table, f.Column)
+		}
+	}
+	return nil
 }
 
 // filledColumns renders the filled-column SELECT expressions (in fill order) and
@@ -199,7 +233,8 @@ func filledColumns(fills []schemamaster.Fill) (exprs, cols []string) {
 
 // fillExpr renders one filled column. Single-hop reads from the joined parent p; a
 // two-hop is a correlated subquery keyed on p's column. Const/BlockTime fills are
-// bucket 2/3 and never occur here.
+// bucket 2/3 and are rejected by checkBucket1Fills before reaching here, so the
+// remaining fills always have a parent join and the p."col" reference is valid.
 func fillExpr(f schemamaster.Fill) string {
 	if f.ThenParent != "" {
 		return fmt.Sprintf(`(SELECT l.%s FROM public.%s l WHERE l.%s=p.%s) AS %s`,
@@ -364,7 +399,7 @@ func qualify(alias, col string) string {
 	return alias + "." + quote(col)
 }
 
-// quote double-quotes a SQL identifier.
+// quote double-quotes a SQL identifier, escaping any embedded double-quotes.
 func quote(ident string) string {
-	return `"` + ident + `"`
+	return `"` + strings.ReplaceAll(ident, `"`, `""`) + `"`
 }

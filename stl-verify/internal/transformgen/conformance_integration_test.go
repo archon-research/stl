@@ -77,10 +77,3 @@ func normalizeSQL(s string) string {
 	s = regexp.MustCompile(`\s+`).ReplaceAllString(s, " ")
 	return strings.TrimSpace(s)
 }
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}

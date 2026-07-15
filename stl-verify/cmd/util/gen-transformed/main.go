@@ -4,9 +4,19 @@
 // (internal/transformgen) asserts the committed migration still matches what this
 // produces (normalised), so the register and the migration cannot drift.
 //
-// Usage:
+// Regenerate to a SCRATCH file, then diff and reconcile into the committed
+// migration by hand:
 //
-//	DATABASE_URL=postgres://... gen-transformed > db/migrations/20260706_140000_create_transformed_bucket1.sql
+//	DATABASE_URL=postgres://... gen-transformed > gen.sql
+//	diff gen.sql db/migrations/20260706_140000_create_transformed_bucket1.sql
+//
+// Do NOT redirect over the committed migration. The generator emits only the
+// handful of static COMMENT ON statements, not the ~190 per-table COMMENT ON
+// catalogue entries carried in the committed file, and the regen-diff gate
+// strips comments from both sides before comparing, so it cannot see them go
+// missing. Redirecting over the committed file would silently drop that column
+// and table metadata while still passing the gate. Apply generated structural
+// changes into the committed migration by hand, keeping the COMMENT ON block.
 package main
 
 import (
