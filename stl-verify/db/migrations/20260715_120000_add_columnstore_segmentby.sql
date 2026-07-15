@@ -182,5 +182,5 @@ BEGIN
 END $$;
 
 INSERT INTO migrations (filename)
-VALUES ('20260620_120000_add_columnstore_segmentby.sql')
+VALUES ('20260715_120000_add_columnstore_segmentby.sql')
 ON CONFLICT (filename) DO NOTHING;
