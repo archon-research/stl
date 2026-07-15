@@ -400,8 +400,8 @@ func handleUniV3PoolBatch(t *testing.T, value *big.Int) *entity.AllocationPositi
 // decimals from the hint asset, the balance's denomination.
 func TestHandleBatch_UniV3Pool_ComposesPoolRowSymbol(t *testing.T) {
 	pos := handleUniV3PoolBatch(t, univ3TestValue)
-	if pos.TokenSymbol != "AUSDUSDC-UNIV3" {
-		t.Errorf("symbol = %q, want AUSDUSDC-UNIV3 (composed from the pool pair)", pos.TokenSymbol)
+	if pos.TokenSymbol != "UNIV3-LP-AUSD-USDC" {
+		t.Errorf("symbol = %q, want UNIV3-LP-AUSD-USDC (composed from the pool pair)", pos.TokenSymbol)
 	}
 	if pos.TokenDecimals != 6 {
 		t.Errorf("decimals = %d, want 6 (from the hint asset)", pos.TokenDecimals)
@@ -499,8 +499,8 @@ func TestHandleBatch_UniV3LP_ComposesPoolRowMetadata(t *testing.T) {
 	}
 
 	pos := repo.saved[0]
-	if pos.TokenSymbol != "AUSDWMON-UNIV3" {
-		t.Errorf("symbol = %q, want AUSDWMON-UNIV3 (composed from the pool pair)", pos.TokenSymbol)
+	if pos.TokenSymbol != "UNIV3-LP-AUSD-WMON" {
+		t.Errorf("symbol = %q, want UNIV3-LP-AUSD-WMON (composed from the pool pair)", pos.TokenSymbol)
 	}
 	if pos.TokenDecimals != 18 {
 		t.Errorf("decimals = %d, want 18 (from the hint asset)", pos.TokenDecimals)
@@ -604,8 +604,8 @@ func TestHandleBatch_UniV3Pool_FetchesPoolTokenMetadata(t *testing.T) {
 	if len(repo.saved) != 1 {
 		t.Fatalf("expected 1 saved position, got %d", len(repo.saved))
 	}
-	if repo.saved[0].TokenSymbol != "AUSDUSDC-UNIV3" {
-		t.Errorf("symbol = %q, want AUSDUSDC-UNIV3", repo.saved[0].TokenSymbol)
+	if repo.saved[0].TokenSymbol != "UNIV3-LP-AUSD-USDC" {
+		t.Errorf("symbol = %q, want UNIV3-LP-AUSD-USDC", repo.saved[0].TokenSymbol)
 	}
 }
 
@@ -816,8 +816,8 @@ func TestHandleBatch_TransientSymbolFailure_RecoversOnRetry(t *testing.T) {
 	if len(repo.saved) != 1 {
 		t.Fatalf("expected 1 saved position after the retry, got %d", len(repo.saved))
 	}
-	if repo.saved[0].TokenSymbol != "AUSDUSDC-UNIV3" {
-		t.Errorf("symbol = %q, want AUSDUSDC-UNIV3", repo.saved[0].TokenSymbol)
+	if repo.saved[0].TokenSymbol != "UNIV3-LP-AUSD-USDC" {
+		t.Errorf("symbol = %q, want UNIV3-LP-AUSD-USDC", repo.saved[0].TokenSymbol)
 	}
 }
 

@@ -285,6 +285,11 @@ func run(args []string) error {
 		return fmt.Errorf("creating receipt token repository: %w", err)
 	}
 
+	debtTokenRepo, err := postgres.NewDebtTokenRepository(pool, logger)
+	if err != nil {
+		return fmt.Errorf("creating debt token repository: %w", err)
+	}
+
 	// Create PositionReader directly for batch RPC reads
 	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3)
 	if err != nil {
@@ -322,6 +327,7 @@ func run(args []string) error {
 		positionRepo,
 		eventRepo,
 		receiptTokenRepo,
+		debtTokenRepo,
 	)
 	if err != nil {
 		return fmt.Errorf("creating position tracker service: %w", err)

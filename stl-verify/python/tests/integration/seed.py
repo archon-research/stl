@@ -448,6 +448,7 @@ async def _ghost_seed_reference_rows(conn: asyncpg.Connection) -> tuple[int, int
         oracle_id,
         Decimal(2),
     )
+    await insert_oracle_asset(conn, oracle_id, syrup_id)
     return prime_id, asyrup_id, usds_id
 
 
@@ -626,7 +627,35 @@ UV_USDC_BALANCE = Decimal("1000")
 UV_UNIV3_UNDERLYING_VALUE = Decimal("26927207.299715")
 
 
+async def insert_oracle_asset(conn: asyncpg.Connection, oracle_id: int, token_id: int, *, enabled: bool = True) -> None:
+    """Register a non-feed oracle_asset mapping (idempotent).
+
+    Every seeded onchain price needs an enabled oracle_asset mapping to stay
+    eligible for the latest-price reads, which exclude rows whose
+    ``(oracle_id, token_id)`` has no enabled mapping (rationale on
+    ``_DIRECT_ASSET_HOLDINGS_SQL``). Production never writes a price without one
+    (the worker fetches only enabled assets), so the seeds mirror that; pass
+    ``enabled=False`` to model a retired source whose stale rows must stop
+    surfacing.
+    """
+    await conn.execute(
+        """
+        INSERT INTO oracle_asset (oracle_id, token_id, enabled)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (oracle_id, token_id) WHERE feed_address IS NULL DO NOTHING
+        """,
+        oracle_id,
+        token_id,
+        enabled,
+    )
+
+
 async def _insert_price(conn: asyncpg.Connection, token_id: int, oracle_id: int, price: Decimal) -> None:
+    """Insert a price row AND its enabled oracle_asset mapping (see insert_oracle_asset).
+
+    Retired-source scenarios that need a price without an enabled mapping must
+    insert the price row directly instead of calling this.
+    """
     await conn.execute(
         "INSERT INTO onchain_token_price "
         "(token_id, oracle_id, block_number, block_version, timestamp, price_usd) "
@@ -635,6 +664,7 @@ async def _insert_price(conn: asyncpg.Connection, token_id: int, oracle_id: int,
         oracle_id,
         price,
     )
+    await insert_oracle_asset(conn, oracle_id, token_id)
 
 
 async def seed_underlying_value_direct_holdings(db_url: str) -> None:
@@ -646,11 +676,16 @@ async def seed_underlying_value_direct_holdings(db_url: str) -> None:
                 "INSERT INTO prime (name, vault_address) VALUES ('uv_direct_holdings', $1) RETURNING id",
                 bytes.fromhex(_UV_VAULT_HEX),
             )
-            # Any oracle satisfies the onchain_token_price FK; it never drives an
-            # assertion (one price row per token, so the oracle_id tie-break is inert).
-            oracle_id = await conn.fetchval("SELECT id FROM oracle ORDER BY id LIMIT 1")
-            if oracle_id is None:
-                raise RuntimeError("no oracle seed found")
+            # A dedicated oracle whose mappings this seed enables freshly: reusing
+            # a migration oracle (e.g. sparklend) would inherit its enabled state,
+            # and the dust migration disables sparklend -> USDC, which the
+            # enabled-mapping price filter would then exclude. The oracle never
+            # drives an assertion (one price row per token, tie-break inert).
+            oracle_id = await conn.fetchval(
+                "INSERT INTO oracle (name, display_name, chain_id, address) "
+                "VALUES ('uv_direct_test', 'Underlying-value direct-holdings test oracle', 1, $1) RETURNING id",
+                bytes.fromhex("77" * 20),
+            )
 
             usdc_id = await insert_token(conn, "USDC", 6, bytes.fromhex(_UV_USDC_HEX))
             spark_id = await insert_token(conn, "sparkPrimeUSDC1", 6, bytes.fromhex(_UV_SPARK_PRIME_USDC1_HEX))
@@ -751,7 +786,7 @@ async def seed_underlying_value_direct_holdings(db_url: str) -> None:
             # Allowlisted Uni V3 pool position: no own oracle possible (the
             # address is the pool contract), priced ONLY by the tracker-computed
             # underlying_value x the USDC price.
-            univ3_id = await insert_token(conn, "AUSDUSDC-UNIV3", 6, bytes.fromhex(_UV_UNIV3_POOL_HEX))
+            univ3_id = await insert_token(conn, "UNIV3-LP-AUSD-USDC", 6, bytes.fromhex(_UV_UNIV3_POOL_HEX))
             await insert_allocation_position(
                 conn,
                 token_id=univ3_id,
@@ -763,6 +798,261 @@ async def seed_underlying_value_direct_holdings(db_url: str) -> None:
                 direction="sweep",
                 underlying_value=UV_UNIV3_UNDERLYING_VALUE,
                 underlying_token_id=usdc_id,
+            )
+    finally:
+        await conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Oracle price tie seed (frozen-source replant shape)
+#
+# Production shape this reproduces: a protocol bound to TWO oracles where a
+# retired source re-emits rows on republished (reorged) blocks, so both
+# oracles carry a price row for the same underlying at IDENTICAL
+# (block_number, block_version, processing_version) — warehouse-verified at
+# block 25524078/1/0 for the frozen sparklend stables next to chainlink.
+# Ordering by those three keys alone leaves the winner to the executor, so a
+# position's USD value flips between identical API calls. The reads break the
+# tie on oracle_id DESC; these seeds insert the LOWER-oracle_id (stale) row
+# first so an un-tiebroken top-1 sort is biased toward returning it.
+# ---------------------------------------------------------------------------
+
+TIE_PROXY_HEX = "f1" * 20
+_TIE_VAULT_HEX = "f2" * 20
+_TIE_PROTOCOL_HEX = "f3" * 20
+_TIE_STALE_ORACLE_HEX = "f4" * 20
+_TIE_FRESH_ORACLE_HEX = "f5" * 20
+_TIE_UNDERLYING_HEX = "f6" * 20
+_TIE_RECEIPT_HEX = "f7" * 20
+
+# Distinct prices so the winning oracle is observable in every USD figure.
+TIE_STALE_PRICE = Decimal("1.00")
+TIE_FRESH_PRICE = Decimal("1.25")
+TIE_BALANCE = Decimal("100")
+TIE_UNDERLYING_VALUE = Decimal("117.5")
+_TIE_PRICE_BLOCK = 5000
+
+
+async def seed_price_tiebreak_positions(db_url: str) -> None:
+    """Seed one receipt position whose underlying has two tied price rows.
+
+    Everything is seeded locally (protocol, two oracles, both bindings,
+    registry row, position) so the scenario does not lean on migration-seeded
+    registry rows. The stale oracle is created first, so it has the LOWER id;
+    its price row is also inserted first.
+    """
+    conn = await asyncpg.connect(db_url)
+    try:
+        async with conn.transaction():
+            prime_id = await conn.fetchval(
+                "INSERT INTO prime (name, vault_address) VALUES ('price_tiebreak', $1) RETURNING id",
+                bytes.fromhex(_TIE_VAULT_HEX),
+            )
+            protocol_id = await conn.fetchval(
+                "INSERT INTO protocol (chain_id, address, name, protocol_type) "
+                "VALUES (1, $1, 'tieLending', 'lending') RETURNING id",
+                bytes.fromhex(_TIE_PROTOCOL_HEX),
+            )
+            stale_oracle_id = await conn.fetchval(
+                "INSERT INTO oracle (name, display_name, chain_id, address) "
+                "VALUES ('tie_stale', 'Tie stale test oracle', 1, $1) RETURNING id",
+                bytes.fromhex(_TIE_STALE_ORACLE_HEX),
+            )
+            fresh_oracle_id = await conn.fetchval(
+                "INSERT INTO oracle (name, display_name, chain_id, address) "
+                "VALUES ('tie_fresh', 'Tie fresh test oracle', 1, $1) RETURNING id",
+                bytes.fromhex(_TIE_FRESH_ORACLE_HEX),
+            )
+            if not stale_oracle_id < fresh_oracle_id:
+                raise RuntimeError("seed premise broken: stale oracle must have the lower id")
+            for oracle_id in (stale_oracle_id, fresh_oracle_id):
+                await conn.execute(
+                    "INSERT INTO protocol_oracle (protocol_id, oracle_id, from_block) VALUES ($1, $2, 1)",
+                    protocol_id,
+                    oracle_id,
+                )
+
+            underlying_id = await insert_token(conn, "tieUSD", 6, bytes.fromhex(_TIE_UNDERLYING_HEX))
+            receipt_token_id = await insert_token(conn, "tieReceipt", 6, bytes.fromhex(_TIE_RECEIPT_HEX))
+            await insert_receipt_token_row(
+                conn,
+                protocol_id=protocol_id,
+                underlying_token_id=underlying_id,
+                address=bytes.fromhex(_TIE_RECEIPT_HEX),
+                symbol="tieReceipt",
+            )
+
+            # Two price rows at IDENTICAL (block_number, block_version,
+            # processing_version); only oracle_id (and price) differ. Both
+            # sources stay enabled so the tie is genuine (only oracle_id breaks
+            # it), not resolved by the disabled-mapping filter.
+            for oracle_id, price in ((stale_oracle_id, TIE_STALE_PRICE), (fresh_oracle_id, TIE_FRESH_PRICE)):
+                await conn.execute(
+                    "INSERT INTO onchain_token_price "
+                    "(token_id, oracle_id, block_number, block_version, timestamp, price_usd) "
+                    "VALUES ($1, $2, $3, 1, NOW(), $4)",
+                    underlying_id,
+                    oracle_id,
+                    _TIE_PRICE_BLOCK,
+                    price,
+                )
+                await insert_oracle_asset(conn, oracle_id, underlying_id)
+
+            await insert_allocation_position(
+                conn,
+                token_id=receipt_token_id,
+                prime_id=prime_id,
+                proxy_hex=TIE_PROXY_HEX,
+                balance=TIE_BALANCE,
+                block=_TIE_PRICE_BLOCK,
+                tx="f9" * 32,
+                direction="in",
+                underlying_value=TIE_UNDERLYING_VALUE,
+                underlying_token_id=underlying_id,
+            )
+    finally:
+        await conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Retired-source seed (disabled oracle_asset, higher-block replant shape)
+#
+# A protocol bound to TWO oracles where the RETIRED source holds the HIGHER
+# block (and later timestamp, and higher oracle_id) — the exact shape a reorg
+# leaves when it republishes a frozen sparklend row at a fresh height next to a
+# live chainlink row that change-suppression has not refreshed. Disabling the
+# oracle_asset mapping must retire the source from every latest-price read
+# immediately at read time, not merely from future collection: the enabled
+# source's LOWER-block price must win. Every ordering signal (recency, then
+# oracle_id) favours the disabled source here, so only the enabled-mapping
+# filter can produce the correct answer.
+# ---------------------------------------------------------------------------
+
+DIS_RECEIPT_PROXY_HEX = "e1" * 20
+DIS_DIRECT_PROXY_HEX = "e2" * 20
+_DIS_VAULT_HEX = "e3" * 20
+_DIS_PROTOCOL_HEX = "e4" * 20
+_DIS_ENABLED_ORACLE_HEX = "e5" * 20
+_DIS_DISABLED_ORACLE_HEX = "e6" * 20
+_DIS_UNDERLYING_HEX = "e7" * 20
+_DIS_RECEIPT_HEX = "e8" * 20
+_DIS_DIRECT_HEX = "e9" * 20
+
+DIS_ENABLED_PRICE = Decimal("1.25")  # live source, LOWER block: must win
+DIS_DISABLED_PRICE = Decimal("1.00")  # retired source, HIGHER block: must lose
+DIS_RECEIPT_BALANCE = Decimal("100")
+DIS_RECEIPT_UNDERLYING_VALUE = Decimal("117.5")
+DIS_DIRECT_BALANCE = Decimal("200")
+_DIS_ENABLED_BLOCK = 6000
+_DIS_DISABLED_BLOCK = 6001
+_DIS_BASE_TS = dt.datetime(2026, 3, 1, tzinfo=dt.UTC)
+
+
+async def _insert_disabled_source_prices(
+    conn: asyncpg.Connection, *, token_id: int, enabled_oracle_id: int, disabled_oracle_id: int
+) -> None:
+    """Price one token from both sources; the higher-block source's mapping is disabled."""
+    for oracle_id, block, offset, price, enabled in (
+        (enabled_oracle_id, _DIS_ENABLED_BLOCK, dt.timedelta(0), DIS_ENABLED_PRICE, True),
+        (disabled_oracle_id, _DIS_DISABLED_BLOCK, dt.timedelta(minutes=1), DIS_DISABLED_PRICE, False),
+    ):
+        await conn.execute(
+            "INSERT INTO onchain_token_price "
+            "(token_id, oracle_id, block_number, block_version, timestamp, price_usd) "
+            "VALUES ($1, $2, $3, 0, $4, $5)",
+            token_id,
+            oracle_id,
+            block,
+            _DIS_BASE_TS + offset,
+            price,
+        )
+        await insert_oracle_asset(conn, oracle_id, token_id, enabled=enabled)
+
+
+async def seed_disabled_source_positions(db_url: str) -> None:
+    """Seed a receipt position and a bare direct holding whose retired source holds the higher block.
+
+    One protocol bound to two oracles: the enabled source prices at the LOWER
+    block, the disabled (retired) source at the HIGHER block, later timestamp
+    and higher oracle_id. The receipt-token underlying and a bare directly-held
+    token each get that two-source shape, so the receipt, direct-holding and
+    token-catalog latest-price reads can all be checked against the same seed.
+    Only excluding the disabled mapping yields the enabled source's price.
+    """
+    conn = await asyncpg.connect(db_url)
+    try:
+        async with conn.transaction():
+            prime_id = await conn.fetchval(
+                "INSERT INTO prime (name, vault_address) VALUES ('disabled_source', $1) RETURNING id",
+                bytes.fromhex(_DIS_VAULT_HEX),
+            )
+            protocol_id = await conn.fetchval(
+                "INSERT INTO protocol (chain_id, address, name, protocol_type) "
+                "VALUES (1, $1, 'disLending', 'lending') RETURNING id",
+                bytes.fromhex(_DIS_PROTOCOL_HEX),
+            )
+            # Enabled oracle created first -> lower id; the disabled source is
+            # created second so it also holds the higher oracle_id, making the
+            # tiebreak favour it too.
+            enabled_oracle_id = await conn.fetchval(
+                "INSERT INTO oracle (name, display_name, chain_id, address) "
+                "VALUES ('dis_enabled', 'Disabled-source test: live oracle', 1, $1) RETURNING id",
+                bytes.fromhex(_DIS_ENABLED_ORACLE_HEX),
+            )
+            disabled_oracle_id = await conn.fetchval(
+                "INSERT INTO oracle (name, display_name, chain_id, address) "
+                "VALUES ('dis_disabled', 'Disabled-source test: retired oracle', 1, $1) RETURNING id",
+                bytes.fromhex(_DIS_DISABLED_ORACLE_HEX),
+            )
+            if not enabled_oracle_id < disabled_oracle_id:
+                raise RuntimeError("seed premise broken: disabled oracle must have the higher id")
+            for oracle_id in (enabled_oracle_id, disabled_oracle_id):
+                await conn.execute(
+                    "INSERT INTO protocol_oracle (protocol_id, oracle_id, from_block) VALUES ($1, $2, 1)",
+                    protocol_id,
+                    oracle_id,
+                )
+
+            underlying_id = await insert_token(conn, "disUnderlying", 6, bytes.fromhex(_DIS_UNDERLYING_HEX))
+            direct_id = await insert_token(conn, "disDirect", 6, bytes.fromhex(_DIS_DIRECT_HEX))
+            receipt_token_id = await insert_token(conn, "disReceipt", 6, bytes.fromhex(_DIS_RECEIPT_HEX))
+            await insert_receipt_token_row(
+                conn,
+                protocol_id=protocol_id,
+                underlying_token_id=underlying_id,
+                address=bytes.fromhex(_DIS_RECEIPT_HEX),
+                symbol="disReceipt",
+            )
+
+            for token_id in (underlying_id, direct_id):
+                await _insert_disabled_source_prices(
+                    conn,
+                    token_id=token_id,
+                    enabled_oracle_id=enabled_oracle_id,
+                    disabled_oracle_id=disabled_oracle_id,
+                )
+
+            await insert_allocation_position(
+                conn,
+                token_id=receipt_token_id,
+                prime_id=prime_id,
+                proxy_hex=DIS_RECEIPT_PROXY_HEX,
+                balance=DIS_RECEIPT_BALANCE,
+                block=_DIS_DISABLED_BLOCK,
+                tx="ea" * 32,
+                direction="in",
+                underlying_value=DIS_RECEIPT_UNDERLYING_VALUE,
+                underlying_token_id=underlying_id,
+            )
+            await insert_allocation_position(
+                conn,
+                token_id=direct_id,
+                prime_id=prime_id,
+                proxy_hex=DIS_DIRECT_PROXY_HEX,
+                balance=DIS_DIRECT_BALANCE,
+                block=_DIS_DISABLED_BLOCK,
+                tx="eb" * 32,
+                direction="in",
             )
     finally:
         await conn.close()

@@ -15,6 +15,7 @@
     "sector_ref",
     "security_subtype_ref",
     "security_type_ref",
+    "security_instrument_bridge",
     "curve_cryptoswap_config",
     "curve_cryptoswap_state",
     "curve_liquidity_event",
