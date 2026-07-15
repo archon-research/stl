@@ -174,8 +174,16 @@ class PrimeRiskCapitalService:
 
         infos_by_id: dict[int, ReceiptTokenInfo] = {}
         for asset_id, info in zip(asset_ids, infos):
-            if info is not None:
-                infos_by_id[asset_id] = info
+            if info is None:
+                # A crypto-lending position whose receipt token can't be resolved is
+                # a data gap (the position exists but its receipt-token record is
+                # missing). It drops out of the batch and contributes no RRC — log it
+                # so the gap is visible rather than silently vanishing.
+                logger.warning(
+                    "prime risk-capital: no receipt-token record for asset_id=%s; excluding from RRC", asset_id
+                )
+                continue
+            infos_by_id[asset_id] = info
         if not infos_by_id:
             return {}, {}
 

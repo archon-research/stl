@@ -225,6 +225,30 @@ async def test_prime_compute_uses_batch_get_shares_and_skips_per_asset_get_share
 
 
 @pytest.mark.asyncio
+async def test_prime_compute_logs_missing_receipt_token():
+    """A crypto-lending position whose receipt-token record is missing is a data
+    gap: it must be logged (not silently dropped from the batch), and — since no
+    model can price it — still surface as an error rather than a fake zero RRC."""
+    from unittest.mock import patch
+
+    import app.services.prime_risk_capital_service as prc
+
+    positions = [make_receipt_token_position(receipt_token_id=1, symbol="aWETH", amount_usd=Decimal("100"))]
+    reader = AsyncMock(spec=PostgresCryptoLendingReader)
+    reader.get_receipt_token.return_value = None  # receipt-token record cannot be resolved
+    model = _crypto_lending_service(reader)
+    service = _service(_repo(positions, Decimal("1000")), _FakeRegistry([model]))
+
+    with patch.object(prc, "logger") as mock_logger, pytest.raises(ValueError, match="receipt token not found"):
+        await service.compute(_PRIME)
+
+    reader.batch_get_shares.assert_not_awaited()
+    mock_logger.warning.assert_called_once()
+    fmt, arg = mock_logger.warning.call_args[0][0], mock_logger.warning.call_args[0][1]
+    assert "no receipt-token record" in fmt and arg == 1
+
+
+@pytest.mark.asyncio
 async def test_prime_compute_propagates_per_asset_share_errors():
     """A ``MissingShareError`` from the batch must surface when the asset has a non-empty breakdown.
 
