@@ -48,6 +48,7 @@ resources:
   - ../../base/base-watcher-data-validator
   - ../../base/arbitrum-watcher-data-validator
   - ../../base/avalanche-watcher-data-validator
+  - ../../base/transform-bootstrap
   - ../../base/transform-worker
   - ../../base/migrate
   - ../../base/python-api
@@ -227,3 +228,14 @@ patches:
       - op: replace
         path: /spec/template/spec/containers/0/resources/limits/cpu
         value: "500m"
+  # Temporary: pin the one-off VEC-484 transform-bootstrap image directly (not via
+  # images:) so CI tag-stamping can't mutate the immutable Job. SHA matches the
+  # deployed transform-worker (990e50f6). Removed again in PR B once the backfill
+  # has completed and verified.
+  - target:
+      kind: Job
+      name: transform-bootstrap
+    patch: |
+      - op: replace
+        path: /spec/template/spec/containers/0/image
+        value: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-cronjob:transform-bootstrap-990e50f60b639b75d2a3c61c20d793d07de860a6
