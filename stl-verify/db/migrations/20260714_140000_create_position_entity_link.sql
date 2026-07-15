@@ -35,7 +35,10 @@ CREATE TABLE IF NOT EXISTS position_entity_link (
     -- Non-issuer only: the issuer is resolved on the position itself (via security_master), so an
     -- ISSUER row here would open a second, conflicting issuer channel. counterparty_role_ref seeds
     -- ISSUER for other uses, so the role FK alone does not exclude it (Simon review on #581).
-    CONSTRAINT position_entity_link_not_issuer_chk CHECK (entity_role <> 'ISSUER')
+    CONSTRAINT position_entity_link_not_issuer_chk CHECK (entity_role <> 'ISSUER'),
+    -- position_id is sha256() output: enforce the 32-byte width rather than assume it (bytea is
+    -- unlength-modified in Postgres), so a mis-sized id can never be stored (Simon review on #572).
+    CONSTRAINT position_entity_link_id_len_chk CHECK (octet_length(position_id) = 32)
 );
 
 COMMENT ON TABLE position_entity_link IS

@@ -54,6 +54,9 @@ func TestPositionEntityLink(t *testing.T) {
 		// issuer is resolved on the position itself, not linked here.
 		{"ISSUER excluded", `INSERT INTO position_entity_link (position_id, entity_role, entity_id)
 			VALUES (sha256('pos3'::bytea), 'ISSUER', 'em-issuer')`},
+		// position_id must be exactly 32 bytes (sha256 width); a mis-sized id is rejected.
+		{"position_id wrong length", `INSERT INTO position_entity_link (position_id, entity_role, entity_id)
+			VALUES ('\x00'::bytea, 'CUSTODIAN', 'em-len')`},
 	} {
 		if _, err := pool.Exec(ctx, g.sql); err == nil {
 			t.Errorf("%s: expected the insert to be rejected, got none", g.name)
