@@ -240,6 +240,83 @@ func TestGetOrCreateDebtToken(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "upsert preserves stored symbol, stable address, and lower created_at_block",
+			run: func(t *testing.T, ctx context.Context) {
+				truncateDebtToken(t, ctx)
+				protocolID, tokenID := seedDebtTokenDeps(t, ctx, 1)
+
+				repo, err := NewDebtTokenRepository(debtTokenPool, nil)
+				if err != nil {
+					t.Fatalf("NewDebtTokenRepository: %v", err)
+				}
+
+				variableAddr := common.HexToAddress("0xEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE")
+				stableAddr := common.HexToAddress("0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF")
+
+				// First write at a LOWER block, with both symbols and both addresses.
+				first, err := entity.NewDebtToken(protocolID, tokenID, 500, variableAddr.Bytes(), stableAddr.Bytes(), "variableDebtDAI", "stableDebtDAI")
+				if err != nil {
+					t.Fatalf("NewDebtToken first: %v", err)
+				}
+				tx1, err := debtTokenPool.Begin(ctx)
+				if err != nil {
+					t.Fatalf("Begin tx1: %v", err)
+				}
+				id1, err := repo.GetOrCreateDebtToken(ctx, tx1, *first)
+				if err != nil {
+					t.Fatalf("first GetOrCreateDebtToken: %v", err)
+				}
+				if err := tx1.Commit(ctx); err != nil {
+					t.Fatalf("Commit tx1: %v", err)
+				}
+
+				// Second write at a HIGHER block, with an EMPTY variable symbol and a
+				// NIL stable address. The merge must keep the previously-stored
+				// variable symbol, the stored stable address, and the LOWER block.
+				second, err := entity.NewDebtToken(protocolID, tokenID, 900, variableAddr.Bytes(), nil, "", "")
+				if err != nil {
+					t.Fatalf("NewDebtToken second: %v", err)
+				}
+				tx2, err := debtTokenPool.Begin(ctx)
+				if err != nil {
+					t.Fatalf("Begin tx2: %v", err)
+				}
+				id2, err := repo.GetOrCreateDebtToken(ctx, tx2, *second)
+				if err != nil {
+					t.Fatalf("second GetOrCreateDebtToken: %v", err)
+				}
+				if err := tx2.Commit(ctx); err != nil {
+					t.Fatalf("Commit tx2: %v", err)
+				}
+
+				if id1 != id2 {
+					t.Errorf("expected same id on upsert, got id1=%d id2=%d", id1, id2)
+				}
+
+				var variableSymbol, stableSymbol string
+				var stableDebtAddress []byte
+				var createdAtBlock int64
+				err = debtTokenPool.QueryRow(ctx,
+					`SELECT variable_symbol, stable_symbol, stable_debt_address, created_at_block FROM debt_token WHERE id = $1`, id2,
+				).Scan(&variableSymbol, &stableSymbol, &stableDebtAddress, &createdAtBlock)
+				if err != nil {
+					t.Fatalf("query: %v", err)
+				}
+				if variableSymbol != "variableDebtDAI" {
+					t.Errorf("variable_symbol = %q, want variableDebtDAI (previously stored value must survive empty overwrite)", variableSymbol)
+				}
+				if stableSymbol != "stableDebtDAI" {
+					t.Errorf("stable_symbol = %q, want stableDebtDAI", stableSymbol)
+				}
+				if string(stableDebtAddress) != string(stableAddr.Bytes()) {
+					t.Errorf("stable_debt_address = %x, want %x (nil overwrite must not clear it)", stableDebtAddress, stableAddr.Bytes())
+				}
+				if createdAtBlock != 500 {
+					t.Errorf("created_at_block = %d, want 500 (LEAST must retain the lower block)", createdAtBlock)
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {

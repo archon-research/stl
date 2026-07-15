@@ -58,6 +58,9 @@ func (dt *DebtToken) Validate() error {
 	if dt.VariableDebtAddress == nil && dt.StableDebtAddress == nil {
 		return fmt.Errorf("at least one debt address must be provided")
 	}
+	// Deliberately no "both symbols empty" check: DecodeStringOrBytes32 can
+	// legitimately return "" for an all-null bytes32 symbol, and a missing
+	// symbol must not fail ingestion.
 	return nil
 }
 

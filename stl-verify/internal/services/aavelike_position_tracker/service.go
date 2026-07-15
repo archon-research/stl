@@ -430,10 +430,18 @@ func (s *Service) saveReserveDataSnapshot(ctx context.Context, reserve common.Ad
 		return fmt.Errorf("failed to get reserve data: %w", err)
 	}
 
-	// Batch-fetch token metadata for the reserve and aToken in a single call
+	// Batch-fetch token metadata for the reserve, aToken, and debt tokens in a single call
 	tokensToFetch := map[common.Address]bool{reserve: true}
-	if tokenAddresses != nil && tokenAddresses.ATokenAddress != (common.Address{}) {
-		tokensToFetch[tokenAddresses.ATokenAddress] = true
+	if tokenAddresses != nil {
+		for _, addr := range []common.Address{
+			tokenAddresses.ATokenAddress,
+			tokenAddresses.VariableDebtTokenAddress,
+			tokenAddresses.StableDebtTokenAddress,
+		} {
+			if addr != (common.Address{}) {
+				tokensToFetch[addr] = true
+			}
+		}
 	}
 	metadataMap, err := blockchainSvc.BatchGetTokenMetadata(ctx, tokensToFetch, big.NewInt(blockNumber))
 	if err != nil {

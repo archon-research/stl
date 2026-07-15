@@ -33,8 +33,20 @@ func NewDebtTokenRepository(pool *pgxpool.Pool, logger *slog.Logger) (*DebtToken
 	return &DebtTokenRepository{pool: pool, logger: logger}, nil
 }
 
+// nilIfEmpty returns a pointer to s, or nil when s is empty, so that an absent
+// symbol binds as SQL NULL rather than an empty string.
+func nilIfEmpty(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
 // GetOrCreateDebtToken upserts a debt token and returns its ID.
 func (r *DebtTokenRepository) GetOrCreateDebtToken(ctx context.Context, tx pgx.Tx, token entity.DebtToken) (int64, error) {
+	// Bind symbols as *string so an absent symbol stores as NULL rather than
+	// ''. This keeps the INSERT and DO UPDATE paths in agreement on what
+	// "absent" means, so the COALESCE below can treat missing symbols uniformly.
 	var id int64
 	err := tx.QueryRow(ctx,
 		`INSERT INTO debt_token (protocol_id, underlying_token_id, variable_debt_address, stable_debt_address, variable_symbol, stable_symbol, created_at_block, metadata, updated_at)
@@ -42,12 +54,15 @@ func (r *DebtTokenRepository) GetOrCreateDebtToken(ctx context.Context, tx pgx.T
 		 ON CONFLICT (protocol_id, underlying_token_id) DO UPDATE SET
 		     variable_debt_address = COALESCE(EXCLUDED.variable_debt_address, debt_token.variable_debt_address),
 		     stable_debt_address = COALESCE(EXCLUDED.stable_debt_address, debt_token.stable_debt_address),
-		     variable_symbol = COALESCE(NULLIF(EXCLUDED.variable_symbol, ''), debt_token.variable_symbol),
-		     stable_symbol = COALESCE(NULLIF(EXCLUDED.stable_symbol, ''), debt_token.stable_symbol),
+		     variable_symbol = COALESCE(EXCLUDED.variable_symbol, debt_token.variable_symbol),
+		     stable_symbol = COALESCE(EXCLUDED.stable_symbol, debt_token.stable_symbol),
 		     created_at_block = LEAST(debt_token.created_at_block, EXCLUDED.created_at_block),
-		     updated_at = NOW()
+		     updated_at = CASE
+		         WHEN EXCLUDED.created_at_block < debt_token.created_at_block THEN NOW()
+		         ELSE debt_token.updated_at
+		     END
 		 RETURNING id`,
-		token.ProtocolID, token.UnderlyingTokenID, token.VariableDebtAddress, token.StableDebtAddress, token.VariableSymbol, token.StableSymbol, token.CreatedAtBlock,
+		token.ProtocolID, token.UnderlyingTokenID, token.VariableDebtAddress, token.StableDebtAddress, nilIfEmpty(token.VariableSymbol), nilIfEmpty(token.StableSymbol), token.CreatedAtBlock,
 	).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get or create debt token: %w", err)
