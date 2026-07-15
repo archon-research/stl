@@ -11,8 +11,8 @@ import (
 
 // ChainValue returns the value of the "chain" attribute on the first data point
 // of the named metric in rm, or ("", false) if the metric or the attribute is
-// absent. It handles the int64 counter and float64 histogram shapes the vector
-// pipeline metrics use.
+// absent. It handles the int64 counter, float64 histogram, and float64 gauge
+// shapes the vector pipeline metrics use.
 func ChainValue(rm metricdata.ResourceMetrics, metricName string) (string, bool) {
 	for _, sm := range rm.ScopeMetrics {
 		for _, m := range sm.Metrics {
@@ -27,6 +27,12 @@ func ChainValue(rm metricdata.ResourceMetrics, metricName string) (string, bool)
 					}
 				}
 			case metricdata.Histogram[float64]:
+				for _, dp := range data.DataPoints {
+					if v, ok := dp.Attributes.Value("chain"); ok {
+						return v.AsString(), true
+					}
+				}
+			case metricdata.Gauge[float64]:
 				for _, dp := range data.DataPoints {
 					if v, ok := dp.Attributes.Value("chain"); ok {
 						return v.AsString(), true

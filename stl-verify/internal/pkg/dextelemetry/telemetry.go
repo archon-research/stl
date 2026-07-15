@@ -35,10 +35,12 @@ type Telemetry struct {
 	errorsTotal      metric.Int64Counter
 	blockDuration    metric.Float64Histogram
 	stateRowsWritten metric.Int64Counter
+	poolsTouched     metric.Int64Counter
 }
 
-// NewTelemetry registers three counters (`<prefix>.blocks.processed`,
-// `<prefix>.errors.total`, `<prefix>.state.rows.written`) plus the `<prefix>.block.duration_seconds`
+// NewTelemetry registers four counters (`<prefix>.blocks.processed`,
+// `<prefix>.errors.total`, `<prefix>.state.rows.written`,
+// `<prefix>.pools.touched`) plus the `<prefix>.block.duration_seconds`
 // histogram. The OTel-to-Prometheus exporter normalises the dots to
 // underscores and adds the `_total` suffix, yielding the metric series names
 // the alert rules expect. The chain NAME (via entity.ChainName) is baked into
@@ -94,6 +96,14 @@ func NewTelemetry(prefix string, chainID int64) (*Telemetry, error) {
 		return nil, fmt.Errorf("creating %s.state.rows.written counter: %w", prefix, err)
 	}
 
+	touched, err := meter.Int64Counter(
+		prefix+".pools.touched",
+		metric.WithDescription("Total registered pools touched by decoded events"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating %s.pools.touched counter: %w", prefix, err)
+	}
+
 	return &Telemetry{
 		prefix:           prefix,
 		chainAttr:        attribute.String("chain", chainName),
@@ -101,6 +111,7 @@ func NewTelemetry(prefix string, chainID int64) (*Telemetry, error) {
 		errorsTotal:      errs,
 		blockDuration:    dur,
 		stateRowsWritten: stateRows,
+		poolsTouched:     touched,
 	}, nil
 }
 
@@ -142,4 +153,25 @@ func (t *Telemetry) RecordStateRows(ctx context.Context, n int) {
 		return
 	}
 	t.stateRowsWritten.Add(ctx, int64(n), metric.WithAttributes(t.chainAttr))
+}
+
+// RecordPoolsTouched increments pools_touched_total by n, the number of
+// registered pools that a block's decoded events touched — the activity signal
+// the sweepless silent-empty alerts gate on (rationale in
+// alerts/vector-indexers.yaml, group vector-uniswap-v3-indexer). Nil receiver or
+// n <= 0 are no-ops, so a worker that never touches a pool never creates the
+// series at all; those rules use `unless` rather than `and … == 0` precisely to
+// fire on the absent series.
+//
+// Callers must record it from the touched-pool set decoded off the receipts
+// (upstream of DueSet), never from the due set itself: an always-empty DueSet is
+// precisely the bug those alerts exist to catch, and sourcing the gate from
+// DueSet would zero both sides of the comparison and go blind. The sweep (curve)
+// also puts untouched pools in the due set, which would make it a false activity
+// signal.
+func (t *Telemetry) RecordPoolsTouched(ctx context.Context, n int) {
+	if t == nil || n <= 0 {
+		return
+	}
+	t.poolsTouched.Add(ctx, int64(n), metric.WithAttributes(t.chainAttr))
 }

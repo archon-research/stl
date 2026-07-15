@@ -226,6 +226,12 @@ func (s *Service) initialize(ctx context.Context) error {
 		return fmt.Errorf("no oracles with enabled assets found")
 	}
 
+	// Baseline every loaded unit's freshness gauge; rationale on
+	// Telemetry.RecordUnitLoaded.
+	for _, unit := range s.units {
+		s.telemetry.RecordUnitLoaded(ctx, unit.Oracle.Name)
+	}
+
 	s.logger.Info("initialized", "oracles", len(s.units))
 	return nil
 }
@@ -341,7 +347,11 @@ func (s *Service) processBlock(ctx context.Context, event outbound.BlockEvent) (
 				"block", event.BlockNumber,
 				"error", err)
 			errs = append(errs, fmt.Errorf("oracle %s: %w", unit.Oracle.Name, err))
+			continue
 		}
+		// Freshness advances on every successful pass, written rows or not;
+		// rationale on Telemetry.RecordUnitSuccess.
+		s.telemetry.RecordUnitSuccess(ctx, unit.Oracle.Name)
 	}
 	if len(errs) > 0 {
 		return errors.Join(errs...)
@@ -433,6 +443,8 @@ func (s *Service) processBlockForAaveOracle(ctx context.Context, event outbound.
 	if len(prices) != len(unit.TokenIDs) {
 		return fmt.Errorf("price count mismatch: expected %d, got %d", len(unit.TokenIDs), len(prices))
 	}
+
+	s.telemetry.RecordUnitReads(ctx, unit.Oracle.Name, countNonZeroPrices(prices), len(prices))
 
 	// Detect changes
 	ctx, detectSpan := s.telemetry.StartSpan(ctx, "oracle.detectChanges",
@@ -552,6 +564,14 @@ func (s *Service) processBlockForCurveLPNGOracle(ctx context.Context, event outb
 // logMsg carry the per-path strings; total is the source-collection size for
 // the log line.
 func (s *Service) storeFeedResults(ctx context.Context, event outbound.BlockEvent, blockTimestamp time.Time, unit *oracleUnit, results []blockchain.FeedPriceResult, kind, logMsg string, total int) error {
+	// The reads metric's expected count is len(results), NOT total: every
+	// fetcher returns exactly one outcome per read it performs (and errors on
+	// a count mismatch), whereas total is the source-collection size, which
+	// the curve path folds into a single LP-price result; counting its coin
+	// feeds would record phantom failed reads on every healthy pass. Deriving
+	// from the result set keeps future paths correct by construction.
+	s.telemetry.RecordUnitReads(ctx, unit.Oracle.Name, countSuccessfulResults(results), len(results))
+
 	ctx, detectSpan := s.telemetry.StartSpan(ctx, "oracle.detectChanges",
 		attribute.Int("prices.total", len(results)))
 	changed, err := s.detectFeedChanges(results, event, blockTimestamp, unit)
@@ -668,6 +688,32 @@ func (s *Service) detectFeedChanges(results []blockchain.FeedPriceResult, event 
 	}
 
 	return changed, nil
+}
+
+// countNonZeroPrices counts the quotes the fetched-prices metric treats as
+// usable, mirroring detectChanges' zero-price guard: nil or zero is
+// unpriceable, not a real quote.
+func countNonZeroPrices(prices []*big.Int) int {
+	n := 0
+	for _, p := range prices {
+		if p != nil && p.Sign() != 0 {
+			n++
+		}
+	}
+	return n
+}
+
+// countSuccessfulResults counts the feed reads the fetched-prices metric
+// treats as usable, mirroring detectFeedChanges' !Success skip: a reverting
+// feed is guard-skipped without erroring, so it must not count as fetched.
+func countSuccessfulResults(results []blockchain.FeedPriceResult) int {
+	n := 0
+	for _, r := range results {
+		if r.Success {
+			n++
+		}
+	}
+	return n
 }
 
 // recordPriceChangeEvents adds a span event for each changed price so Jaeger
