@@ -245,6 +245,12 @@ func (m *Migrator) applyMigrationNoTx(ctx context.Context, filename string, cont
 // executed together (which breaks statements that require standalone execution,
 // e.g. CREATE INDEX CONCURRENTLY or a DO block with COMMIT). Every migration in
 // this repo already follows the one-statement-per-line convention.
+//
+// Two SQL constructs are outside the supported grammar (no migration uses either;
+// add handling if one ever needs to): PostgreSQL E-string backslash escapes (a
+// backslash-escaped quote inside an E-string is not recognised, so the literal is
+// mis-read as unterminated) and nested block comments (`/* a /* b */ still */`
+// closes at the first `*/`). Keep both out of no-transaction migrations.
 func splitStatements(content string) []string {
 	var statements []string
 	var current strings.Builder
