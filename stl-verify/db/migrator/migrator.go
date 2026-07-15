@@ -233,21 +233,27 @@ func (m *Migrator) applyMigrationNoTx(ctx context.Context, filename string, cont
 
 // splitStatements splits SQL content into individual statements by semicolons.
 // Semicolons inside dollar-quoted string literals (PostgreSQL `$$ ... $$` or
-// `$tag$ ... $tag$`) are ignored so DO blocks and function bodies stay intact.
+// `$tag$ ... $tag$`), single-quoted string literals, and `--` line comments are
+// ignored, so DO blocks, function bodies, and literals carrying embedded `;` or
+// `$$` stay intact. This is the shared splitter for every no-transaction
+// migration, so it must not mis-parse a future migration that happens to put a
+// `$$` or `;` inside a string or a trailing comment.
 func splitStatements(content string) []string {
 	var statements []string
 	var current strings.Builder
 
 	inDollarQuote := false
+	inSingleQuote := false
 	dollarTag := ""
 
 	for line := range strings.SplitSeq(content, "\n") {
 		trimmed := strings.TrimSpace(line)
 
 		// Pure comment lines are dropped only when we are between statements.
-		// Inside a dollar-quoted body, a leading `--` is legitimate content
-		// (e.g. comments inside a PL/pgSQL function body) and must be kept.
-		if !inDollarQuote && strings.HasPrefix(trimmed, "--") {
+		// Inside a dollar-quoted or single-quoted body, a leading `--` is
+		// legitimate content (a comment inside a PL/pgSQL body, or a literal
+		// that begins with `--`) and must be kept.
+		if !inDollarQuote && !inSingleQuote && strings.HasPrefix(trimmed, "--") {
 			continue
 		}
 
@@ -256,10 +262,12 @@ func splitStatements(content string) []string {
 		}
 		current.WriteString(line)
 
-		// Toggle dollar-quote state for each $...$ tag found on this line.
-		updateDollarQuoteState(line, &inDollarQuote, &dollarTag)
+		// Advance the quote state across this line and recover the code portion
+		// (any trailing out-of-string `--` comment removed) so the terminating
+		// semicolon is detected on real SQL, not on a `;` inside a comment.
+		code := scanLine(line, &inDollarQuote, &dollarTag, &inSingleQuote)
 
-		if !inDollarQuote && strings.HasSuffix(trimmed, ";") {
+		if !inDollarQuote && !inSingleQuote && strings.HasSuffix(strings.TrimSpace(code), ";") {
 			statements = append(statements, current.String())
 			current.Reset()
 		}
@@ -272,49 +280,78 @@ func splitStatements(content string) []string {
 	return statements
 }
 
-// updateDollarQuoteState walks `line` and flips `*inDollarQuote` each time the
-// active dollar-quote opener or its matching closer is found. PostgreSQL
-// dollar-quote tags are `$$` or `$identifier$` where the identifier is letters,
-// digits, or underscores and does not start with a digit.
-func updateDollarQuoteState(line string, inDollarQuote *bool, dollarTag *string) {
-	i := 0
-	for i < len(line) {
-		if line[i] != '$' {
-			i++
-			continue
-		}
-		// Find the matching closing `$` that ends the tag.
-		j := i + 1
-		valid := true
-		for j < len(line) && line[j] != '$' {
-			c := line[j]
-			if !(c == '_' ||
-				(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-				(c >= '0' && c <= '9')) {
-				valid = false
-				break
+// scanLine walks `line` once, updating the dollar-quote and single-quote state,
+// and returns the leading code portion with any out-of-string `--` comment
+// stripped. PostgreSQL rules honoured: `''` is an escaped quote (stays inside
+// the literal); a `$`, `;`, or `--` inside a single-quoted literal is content,
+// not a delimiter; and a dollar tag only closes on its exact match.
+func scanLine(line string, inDollarQuote *bool, dollarTag *string, inSingleQuote *bool) string {
+	for i := 0; i < len(line); {
+		switch {
+		case *inSingleQuote:
+			if line[i] == '\'' {
+				if i+1 < len(line) && line[i+1] == '\'' {
+					i += 2 // escaped quote: remain inside the literal
+					continue
+				}
+				*inSingleQuote = false
 			}
-			// Identifier cannot start with a digit.
-			if j == i+1 && (c >= '0' && c <= '9') {
-				valid = false
-				break
-			}
-			j++
-		}
-		if !valid || j >= len(line) {
 			i++
-			continue
+		case *inDollarQuote:
+			if tag, ok := matchDollarTag(line, i); ok {
+				if tag == *dollarTag {
+					*inDollarQuote = false
+					*dollarTag = ""
+				}
+				i += len(tag)
+				continue
+			}
+			i++
+		case line[i] == '\'':
+			*inSingleQuote = true
+			i++
+		case line[i] == '-' && i+1 < len(line) && line[i+1] == '-':
+			return line[:i] // rest of the line is a comment
+		default:
+			if tag, ok := matchDollarTag(line, i); ok {
+				*inDollarQuote = true
+				*dollarTag = tag
+				i += len(tag)
+				continue
+			}
+			i++
 		}
-		tag := line[i : j+1] // includes both surrounding `$`
-		if !*inDollarQuote {
-			*inDollarQuote = true
-			*dollarTag = tag
-		} else if tag == *dollarTag {
-			*inDollarQuote = false
-			*dollarTag = ""
-		}
-		i = j + 1
 	}
+	return line
+}
+
+// matchDollarTag reports whether a PostgreSQL dollar-quote tag begins at
+// `line[i]`, returning the full tag including both `$` delimiters. A tag is `$$`
+// or `$identifier$` where the identifier is letters, digits, or underscores and
+// does not start with a digit. A lone `$` (e.g. a `$1` parameter, or a `$` with
+// no closing `$` on the line) is not a tag.
+func matchDollarTag(line string, i int) (string, bool) {
+	if line[i] != '$' {
+		return "", false
+	}
+	j := i + 1
+	for j < len(line) && line[j] != '$' {
+		c := line[j]
+		if !(c == '_' ||
+			(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+			(c >= '0' && c <= '9')) {
+			return "", false
+		}
+		// Identifier cannot start with a digit.
+		if j == i+1 && (c >= '0' && c <= '9') {
+			return "", false
+		}
+		j++
+	}
+	if j >= len(line) {
+		return "", false
+	}
+	return line[i : j+1], true
 }
 
 func (m *Migrator) ListApplied(ctx context.Context) ([]string, error) {

@@ -109,6 +109,59 @@ DO $$ BEGIN PERFORM 2; END $$;
 				"DO $$ BEGIN PERFORM 2; END $$;",
 			},
 		},
+		{
+			// `$$` inside a single-quoted literal must not open a dollar quote,
+			// or the first statement would swallow everything after it.
+			name: "dollar-dollar inside a single-quoted literal is not a dollar quote",
+			content: `
+INSERT INTO t VALUES ('costs $$5');
+SELECT 2;
+`,
+			wantStmt: []string{
+				"INSERT INTO t VALUES ('costs $$5');",
+				"SELECT 2;",
+			},
+		},
+		{
+			// A trailing `--` comment (with a `$$` in it) must not open a dollar
+			// quote nor hide the terminating semicolon that precedes it.
+			name: "dollar-dollar inside a trailing line comment is not a dollar quote",
+			content: `
+SELECT 1; -- price is $$ per unit
+SELECT 2;
+`,
+			wantStmt: []string{
+				"SELECT 1; -- price is $$ per unit",
+				"SELECT 2;",
+			},
+		},
+		{
+			// Doubled '' is an escaped quote, so the literal does not close early;
+			// the embedded `$$` stays content.
+			name: "escaped quote inside literal keeps embedded dollar-dollar as content",
+			content: `
+SELECT 'it''s $$ here';
+SELECT 2;
+`,
+			wantStmt: []string{
+				"SELECT 'it''s $$ here';",
+				"SELECT 2;",
+			},
+		},
+		{
+			// A single-quoted literal spanning lines with an embedded `;` must not
+			// split at the in-string semicolon.
+			name: "semicolon inside a multi-line single-quoted literal does not split",
+			content: `
+INSERT INTO t VALUES ('line one;
+still string $$ here');
+SELECT 2;
+`,
+			wantStmt: []string{
+				"INSERT INTO t VALUES ('line one;\nstill string $$ here');",
+				"SELECT 2;",
+			},
+		},
 	}
 
 	for _, tt := range tests {
