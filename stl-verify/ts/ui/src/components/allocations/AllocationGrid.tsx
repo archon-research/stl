@@ -22,6 +22,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
+import { getActionColor, getActionIcon } from '../../lib/activity';
 import {
   type ChainLabelLookup,
   formatDateTime,
@@ -558,6 +559,30 @@ function AllocationBalanceCell({ allocation }: { allocation: Allocation }) {
   );
 }
 
+// Approximate the latest flow's USD value from the position's current implied
+// price (amount_usd / balance) rather than a historical price: the activity
+// row carries only a token-unit tx_amount, and this is a magnitude annotation,
+// not an accounting figure. Falls back to the token amount when unpriced.
+function formatActivityMagnitude(allocation: Allocation): string | null {
+  const amount = parseNumericValue(allocation.latest_activity_amount);
+  // Sweeps are internal reallocations with tx_amount 0; show the icon alone
+  // rather than a misleading "$0.00".
+  if (amount === null || amount === 0) {
+    return null;
+  }
+
+  const action = allocation.latest_activity_action?.toLowerCase();
+  const sign = action === 'in' ? '+' : action === 'out' ? '-' : '';
+
+  const balance = parseNumericValue(allocation.balance);
+  const amountUsd = parseNumericValue(allocation.amount_usd);
+  if (amountUsd !== null && balance !== null && balance > 0) {
+    return `${sign}${formatUsdValue(amount * (amountUsd / balance))}`;
+  }
+
+  return `${sign}${formatTokenAmount(amount)} ${allocation.symbol}`;
+}
+
 function AllocationActivityCell({ allocation }: { allocation: Allocation }) {
   if (!allocation.latest_activity_at) {
     return (
@@ -573,18 +598,40 @@ function AllocationActivityCell({ allocation }: { allocation: Allocation }) {
     );
   }
 
+  const actionColor = getActionColor(allocation.latest_activity_action);
+  const actionIcon = getActionIcon(allocation.latest_activity_action);
+  const magnitude = formatActivityMagnitude(allocation);
+
   return (
     <div>
-      <p
-        className={css({
-          m: 0,
-          fontSize: 'sm',
-          fontWeight: 'semibold',
-          color: 'text.strong',
-        })}
-      >
-        {formatFreshnessLabel(allocation.latest_activity_at)}
-      </p>
+      <div className={flex({ align: 'center', gap: '1.5' })}>
+        {actionIcon ? (
+          <span className={css({ display: 'inline-flex', color: actionColor })}>
+            {actionIcon}
+          </span>
+        ) : null}
+        <span
+          className={css({
+            fontSize: 'sm',
+            fontWeight: 'semibold',
+            color: 'text.strong',
+          })}
+        >
+          {formatFreshnessLabel(allocation.latest_activity_at)}
+        </span>
+        {magnitude ? (
+          <span
+            className={css({
+              fontSize: 'xs',
+              fontWeight: 'medium',
+              color: actionColor,
+              whiteSpace: 'nowrap',
+            })}
+          >
+            {magnitude}
+          </span>
+        ) : null}
+      </div>
       <p
         className={css({
           m: 0,
@@ -634,6 +681,18 @@ function lookupAllocationRiskCapital(
   }
 
   return riskByReceiptTokenId.get(allocation.receipt_token_id);
+}
+
+// Applied required risk capital in USD, or null when none applies. Shared by the
+// column accessor and the magnitude bar so the two cannot diverge on the rule.
+function appliedRiskCapitalUsd(
+  riskByReceiptTokenId: Map<number, AllocationRiskCapital>,
+  allocation: Allocation,
+): number | null {
+  const entry = lookupAllocationRiskCapital(riskByReceiptTokenId, allocation);
+  return entry?.applied
+    ? parseNumericValue(entry.required_risk_capital_usd)
+    : null;
 }
 
 function AllocationRiskCapitalCell({
@@ -690,6 +749,18 @@ function createAllocationColumns(
       header: 'Balance',
       accessorFn: (allocation) => Number(allocation.balance),
       cell: ({ row }) => <AllocationBalanceCell allocation={row.original} />,
+      // Bar reflects USD value so magnitudes compare across heterogeneous
+      // tokens; the cell text keeps the token holding. NaN (not null) suppresses
+      // the bar for unpriced rows: a null here would fall back to the column
+      // accessor (token balance), mixing token units into the USD domain.
+      meta: {
+        magnitude: {
+          scale: 'linear',
+          getValue: (allocation) =>
+            parseNumericValue(allocation.amount_usd) ?? NaN,
+          getValueText: () => null,
+        },
+      },
     },
     {
       id: 'latest_activity_at',
@@ -709,15 +780,8 @@ function createAllocationColumns(
     {
       id: 'risk_capital',
       header: 'Risk capital',
-      accessorFn: (allocation) => {
-        const entry = lookupAllocationRiskCapital(
-          riskByReceiptTokenId,
-          allocation,
-        );
-        return entry?.applied
-          ? (parseNumericValue(entry.required_risk_capital_usd) ?? 0)
-          : 0;
-      },
+      accessorFn: (allocation) =>
+        appliedRiskCapitalUsd(riskByReceiptTokenId, allocation) ?? 0,
       cell: ({ row }) => (
         <AllocationRiskCapitalCell
           entry={lookupAllocationRiskCapital(
@@ -726,6 +790,15 @@ function createAllocationColumns(
           )}
         />
       ),
+      // No bar for n/a rows: NaN suppresses it (see Balance for why not null).
+      meta: {
+        magnitude: {
+          scale: 'linear',
+          getValue: (allocation) =>
+            appliedRiskCapitalUsd(riskByReceiptTokenId, allocation) ?? NaN,
+          getValueText: () => null,
+        },
+      },
     },
   ];
 }

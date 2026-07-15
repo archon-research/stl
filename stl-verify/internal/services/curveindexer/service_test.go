@@ -1274,3 +1274,131 @@ func TestCurveService_TxErrorThenRetry_PersistsOnce(t *testing.T) {
 		t.Errorf("swapSaves after retry = %d, want 1 (no doubling from the failed first attempt)", repo.swapSaves)
 	}
 }
+
+// newTelemetryCurveService builds a curve service wired to a REAL
+// dextelemetry.Telemetry plus the ManualReader that collects it, so the
+// pools.touched assertions below observe an actual counter rather than the
+// nil-telemetry no-op the rest of the suite runs with.
+func newTelemetryCurveService(t *testing.T, sweepBlocks int64) (*CurveService, *metricsdk.ManualReader) {
+	t.Helper()
+
+	reader := metricsdk.NewManualReader()
+	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
+	prev := otel.GetMeterProvider()
+	otel.SetMeterProvider(mp)
+	t.Cleanup(func() {
+		otel.SetMeterProvider(prev)
+		_ = mp.Shutdown(context.Background())
+	})
+
+	// NewTelemetry resolves the global meter at construction, so it must run
+	// after SetMeterProvider above.
+	tel, err := dextelemetry.NewTelemetry("curve", testChainID)
+	if err != nil {
+		t.Fatalf("NewTelemetry: %v", err)
+	}
+
+	a, err := abis.CurveStableswapABI()
+	if err != nil {
+		t.Fatalf("loading ABI: %v", err)
+	}
+	stable := NewStableswapHandler(a)
+
+	c, err := NewCurveService(CurveServiceDeps{
+		Pools: []RegisteredPool{newTestPool()},
+		Handlers: map[PoolKind]PoolClassHandler{
+			KindStableswapPreNG: stable,
+			KindStableswapNG:    stable,
+		},
+		StableHandler: stable,
+		Multicaller:   &fakeMulticaller{results: stableswapPreNGResults(t, a)},
+		Repo:          &fakeCurveRepo{stateRowsReturn: 1},
+		EventWriter:   dexconsumer.NewProtocolEventWriter(1, &fakeEventRepo{}),
+		TxManager:     &fakeTxManager{},
+		SweepBlocks:   sweepBlocks,
+		ChainID:       testChainID,
+		Logger:        slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Telemetry:     tel,
+	})
+	if err != nil {
+		t.Fatalf("NewCurveService: %v", err)
+	}
+	return c, reader
+}
+
+// poolsTouched returns curve.pools.touched, or 0 when the counter was never
+// created (RecordPoolsTouched no-ops for n<=0, so "never touched" leaves the
+// series absent rather than zero).
+func poolsTouched(t *testing.T, rm *metricdata.ResourceMetrics) int64 {
+	t.Helper()
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "curve.pools.touched" {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("curve.pools.touched: unexpected metric type %T", m.Data)
+			}
+			var total int64
+			for _, dp := range sum.DataPoints {
+				total += dp.Value
+			}
+			return total
+		}
+	}
+	return 0
+}
+
+// TestCurveService_PoolsTouchedExcludesSweptPools: pools.touched must count the
+// pools a block's events actually touched, NOT the sweep-inclusive snapshot set.
+// Curve sweeps, so a quiet block still snapshots every due pool — sourcing the
+// counter from the snapshot set would report activity on a chain where nothing
+// happened, which is precisely the false signal the uniswap-v3 alert re-gate
+// exists to eliminate. This is the discriminating case: touched=0, snapshot=1.
+func TestCurveService_PoolsTouchedExcludesSweptPools(t *testing.T) {
+	c, reader := newTelemetryCurveService(t, 1) // sweep every block
+	ctx := context.Background()
+
+	// No receipts: nothing is touched, but the sweep still makes the pool due.
+	if err := c.BlockHandler()(ctx, blockEvent(100), nil); err != nil {
+		t.Fatalf("BlockHandler: %v", err)
+	}
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+
+	if got := poolsTouched(t, &rm); got != 0 {
+		t.Errorf("curve.pools.touched = %d, want 0: no receipt touched a pool, so the sweep-snapshotted pool must not count as activity (got %d => the counter is sourced from the snapshot/due set)", got, got)
+	}
+	// Guard the premise: the sweep really did snapshot, so this block exercised
+	// the divergence rather than trivially doing nothing.
+	if got := stateRowsWritten(t, &rm); got == 0 {
+		t.Fatal("state_rows_written = 0: the sweep did not snapshot, so this test never exercised the touched-vs-swept divergence")
+	}
+}
+
+// TestCurveService_PoolsTouchedCountsTouchedPool: the positive half — a receipt
+// that touches a registered pool advances pools.touched, so the counter is a
+// real activity signal and not merely always-zero.
+func TestCurveService_PoolsTouchedCountsTouchedPool(t *testing.T) {
+	c, reader := newTelemetryCurveService(t, 0) // sweep off: only touched pools count
+	ctx := context.Background()
+
+	event := blockEvent(200)
+	event.BlockTimestamp = 200
+	if err := c.BlockHandler()(ctx, event, []shared.TransactionReceipt{swapReceipt(t)}); err != nil {
+		t.Fatalf("BlockHandler: %v", err)
+	}
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+
+	if got := poolsTouched(t, &rm); got != 1 {
+		t.Errorf("curve.pools.touched = %d, want 1 (one registered pool was swapped)", got)
+	}
+}

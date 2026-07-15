@@ -170,6 +170,10 @@ func (s *UniswapV3Service) handleBlock(ctx context.Context, event outbound.Block
 	}
 
 	s.markSnapshotted(dueSet, baselined, bn, ver)
+	// Recorded only after a successful commit, so the alerts compare pools this
+	// block touched against the rows that same block persisted. Not len(dueSet)
+	// — see RecordPoolsTouched.
+	s.telemetry.RecordPoolsTouched(ctx, len(acc.touchedIDs))
 	s.telemetry.RecordStateRows(ctx, int(stateRows))
 	return nil
 }

@@ -9,7 +9,6 @@ export const PARAMS = {
   protocol: 'protocol',
   category: 'category',
   tab: 'tab',
-  receiptToken: 'rt',
   token: 'token',
   activityAction: 'aa',
   showAllPrimes: 'allp',

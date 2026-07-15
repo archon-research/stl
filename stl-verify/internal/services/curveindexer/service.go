@@ -228,6 +228,12 @@ func (c *CurveService) handleBlock(ctx context.Context, event outbound.BlockEven
 		snapshottedIDs[i] = pool.ID
 	}
 	c.tracker.MarkSnapshotted(snapshottedIDs, bn, ver)
+	// touchedIDs, not len(snapshotSet): the sweep puts untouched pools in the
+	// snapshot set, so the due set is not an activity signal. See
+	// RecordPoolsTouched. Curve's alerts gate on the sweep-guaranteed state-row
+	// cadence rather than on this counter, but emitting it keeps the metric's
+	// meaning identical across every DEX worker sharing dextelemetry.
+	c.telemetry.RecordPoolsTouched(ctx, len(touchedIDs))
 	c.telemetry.RecordStateRows(ctx, int(stateRows))
 	return nil
 }
