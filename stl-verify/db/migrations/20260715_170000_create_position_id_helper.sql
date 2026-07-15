@@ -22,6 +22,11 @@
 -- convention for them: two call sites that disagree (one NULL, one a value) for the same position
 -- would fork it into two ids with no error. chain_id is load-bearing, not redundant: when set it
 -- disambiguates the same native instrument_key reused across chains (VEC-412).
+-- Same fork risk applies to the TEXT of instrument_key/holder_id: raw on-chain addresses feed the
+-- hash, and 0xAbC (EIP-55), 0xabc, and unprefixed hex are distinct pre-images, so materializers must
+-- pass a single canonical form (addresses as lowercase hex, no 0x prefix; the VEC-412 native-key
+-- form). The helper cannot normalize (it is IMMUTABLE and the fields are opaque), so the convention
+-- is the materializer's contract, like the NULL-ness convention above.
 -- IMMUTABLE so it can back a generated column or index. Fail hard on bad inputs rather than
 -- emit a silently-wrong identity.
 CREATE OR REPLACE FUNCTION public.position_key(
