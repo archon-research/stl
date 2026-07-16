@@ -15,9 +15,17 @@ from decimal import Decimal
 class AllocationRiskCapital:
     """Per-allocation risk capital from the default model.
 
-    ``required_risk_capital_usd`` / ``crr_pct`` / ``model`` are ``None`` when
-    the model does not apply to the allocation (``applied`` is then ``False``),
-    e.g. a non-lending or unpriced position.
+    ``required_risk_capital_usd`` / ``crr_pct`` / ``model`` are ``None`` when the
+    allocation is not priced (``applied`` is then ``False``). ``unpriced_reason``
+    says *why* it is unpriced so callers can distinguish a genuinely unmodelled
+    position from a transient data gap:
+
+    - ``None`` — the allocation is priced (``applied`` is ``True``).
+    - ``"no_model"`` — no default model applies (non-lending / zero-exposure).
+    - ``"share_data_missing"`` / ``"share_data_stale"`` — a model applies but its
+      pool-share lookup could not be resolved (e.g. a warm-up window or an
+      un-indexed receipt token); the rest of the prime is still priced. Mirrors
+      the ``AllocationShareError.code`` values used by the ``/v1/risk/*`` 503s.
     """
 
     receipt_token_id: int
@@ -28,6 +36,7 @@ class AllocationRiskCapital:
     required_risk_capital_usd: Decimal | None
     crr_pct: Decimal | None
     model: str | None
+    unpriced_reason: str | None = None
 
 
 @dataclass(frozen=True)

@@ -17,6 +17,7 @@ from decimal import ROUND_HALF_EVEN, Decimal
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.prime_risk_capital import AllocationRiskCapital, PrimeRiskCapital
 from app.domain.entities.receipt_token import ReceiptTokenInfo
+from app.domain.exceptions import AllocationShareError
 from app.logging import get_logger
 from app.ports.allocation_repository import AllocationRepositoryPort
 from app.services.crypto_lending_risk_service import CryptoLendingRiskService
@@ -29,6 +30,11 @@ logger = get_logger(__name__)
 DEFAULT_RISK_MODEL = "gap_sweep"
 
 _RATIO = Decimal("0.0001")  # ratios/percentages to 4 dp
+
+# ``unpriced_reason`` value for an allocation no default model applies to (as
+# opposed to the ``AllocationShareError.code`` values used when a model applies
+# but its share lookup fails).
+_UNPRICED_NO_MODEL = "no_model"
 
 
 class PrimeRiskCapitalService:
@@ -97,11 +103,39 @@ class PrimeRiskCapitalService:
                         required_risk_capital_usd=None,
                         crr_pct=None,
                         model=None,
+                        unpriced_reason=_UNPRICED_NO_MODEL,
                     )
                 )
                 continue
 
             result = next(results)
+            if isinstance(result, AllocationShareError):
+                # A model applies but its pool-share lookup failed (warm-up
+                # window, un-indexed receipt token, ...). Price the rest of the
+                # prime and mark just this allocation unpriced with the reason,
+                # rather than failing the whole request. Logged so a persistent
+                # gap is visible rather than silently masked.
+                logger.warning(
+                    "prime risk-capital: allocation receipt_token_id=%s unpriced (%s): %s",
+                    position.receipt_token_id,
+                    result.code,
+                    result,
+                )
+                per_allocation.append(
+                    AllocationRiskCapital(
+                        receipt_token_id=position.receipt_token_id,
+                        symbol=position.symbol,
+                        protocol_name=position.protocol_name,
+                        exposure_usd=position_exposure,
+                        applied=False,
+                        required_risk_capital_usd=None,
+                        crr_pct=None,
+                        model=None,
+                        unpriced_reason=result.code,
+                    )
+                )
+                continue
+
             required += result.rrc_usd
             modeled_exposure += position_exposure
             per_allocation.append(
@@ -114,6 +148,7 @@ class PrimeRiskCapitalService:
                     required_risk_capital_usd=result.rrc_usd,
                     crr_pct=result.comparable_crr_pct,
                     model=result.risk_model,
+                    unpriced_reason=None,
                 )
             )
 
@@ -207,12 +242,20 @@ class PrimeRiskCapitalService:
         the un-batched ``compute`` semantics where ``get_share`` was never
         called for empty breakdowns. The receipt-token ``info`` fetched during
         prefetch is passed through so the model does not re-fetch it.
+
+        A share-lookup failure for one allocation (a warm-up window, or an
+        un-indexed receipt token) must not sink the whole prime, so it is
+        returned as an ``AllocationShareError`` value for the caller to render as
+        an unpriced allocation. Any other error still propagates.
         """
-        if isinstance(model, CryptoLendingRiskService) and asset_id in prefetched_shares:
-            return await model.compute_with_share(
-                asset_id, prime_id, {}, prefetched_shares[asset_id], info=prefetched_infos.get(asset_id)
-            )
-        return await model.compute(asset_id, prime_id, {})
+        try:
+            if isinstance(model, CryptoLendingRiskService) and asset_id in prefetched_shares:
+                return await model.compute_with_share(
+                    asset_id, prime_id, {}, prefetched_shares[asset_id], info=prefetched_infos.get(asset_id)
+                )
+            return await model.compute(asset_id, prime_id, {})
+        except AllocationShareError as exc:
+            return exc
 
     def _default_model_for(self, asset_id: int, prime_id: EthAddress):
         """Return the default RRC model if it applies to the asset, else None."""

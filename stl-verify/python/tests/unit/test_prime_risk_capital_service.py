@@ -1,11 +1,12 @@
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Protocol, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from app.domain.entities.allocation import EthAddress
+from app.domain.exceptions import MissingShareError, StaleShareError
 from app.ports.allocation_repository import AllocationRepositoryPort
 from app.services.model_registry import ModelRegistry
 from app.services.prime_risk_capital_service import PrimeRiskCapitalService
@@ -229,8 +230,6 @@ async def test_prime_compute_logs_missing_receipt_token():
     """A crypto-lending position whose receipt-token record is missing is a data
     gap: it must be logged (not silently dropped from the batch), and — since no
     model can price it — still surface as an error rather than a fake zero RRC."""
-    from unittest.mock import patch
-
     positions = [make_receipt_token_position(receipt_token_id=1, symbol="aWETH", amount_usd=Decimal("100"))]
     reader = AsyncMock(spec=PostgresCryptoLendingReader)
     reader.get_receipt_token.return_value = None  # receipt-token record cannot be resolved
@@ -249,28 +248,30 @@ async def test_prime_compute_logs_missing_receipt_token():
     assert "no receipt-token record" in fmt and arg == 1
 
 
+@pytest.mark.parametrize(
+    "share_error, expected_reason",
+    [
+        (MissingShareError("no consistent balance+supply pair"), "share_data_missing"),
+        (StaleShareError("supply row too old"), "share_data_stale"),
+    ],
+    ids=["missing", "stale"],
+)
 @pytest.mark.asyncio
-async def test_prime_compute_propagates_per_asset_share_errors():
-    """A ``MissingShareError`` from the batch must surface when the asset has a non-empty breakdown.
-
-    The endpoint translates ``MissingShareError`` to ``503 share_data_missing``;
-    swallowing it for assets that *do* have a backed-breakdown would silently
-    hide the warm-up window from clients. (Assets with an *empty* breakdown
-    are covered by the test below — the un-batched path never called
-    ``get_share`` for those, so the batched path must not surface a 503 for
-    them either.)
+async def test_prime_compute_degrades_share_error_to_unpriced(share_error, expected_reason):
+    """A per-allocation share-lookup failure degrades just that allocation to
+    unpriced (carrying the reason) and prices the rest — it must not fail the
+    whole prime. Only a non-empty breakdown surfaces the error; empty breakdowns
+    never consult the share (covered by the test below).
     """
     from app.domain.entities.backed_breakdown import BackedBreakdown, CollateralContribution
-    from app.domain.exceptions import MissingShareError
 
     positions = [
         make_receipt_token_position(receipt_token_id=1, symbol="aWETH", amount_usd=Decimal("100")),
+        make_receipt_token_position(receipt_token_id=2, symbol="aDAI", amount_usd=Decimal("200")),
     ]
     reader = AsyncMock(spec=PostgresCryptoLendingReader)
-    reader.get_receipt_token.return_value = _info(1, 777)
-    reader.batch_get_shares.return_value = {1: MissingShareError("warm-up")}
-    # Non-empty breakdown means ``_load_enriched_items_for_info`` reaches the
-    # share-consumption branch, where the prefetched error must be raised.
+    reader.get_receipt_token.side_effect = lambda aid: {1: _info(1, 777), 2: _info(2, 888)}[aid]
+    reader.batch_get_shares.return_value = {1: share_error, 2: Decimal("0.5")}
     reader.get_breakdown.return_value = BackedBreakdown(
         backed_asset_id=42,
         items=(
@@ -283,13 +284,22 @@ async def test_prime_compute_propagates_per_asset_share_errors():
             ),
         ),
     )
+    service = _service(_repo(positions, Decimal("1000")), _FakeRegistry([_crypto_lending_service(reader)]))
 
-    model = _crypto_lending_service(reader)
-    registry = _FakeRegistry([model])
-    service = _service(_repo(positions, Decimal("1000")), registry)
+    with patch("app.services.prime_risk_capital_service.logger") as mock_logger:
+        result = await service.compute(_PRIME)  # must not raise
 
-    with pytest.raises(MissingShareError, match="warm-up"):
-        await service.compute(_PRIME)
+    by_id = {a.receipt_token_id: a for a in result.per_allocation}
+    assert by_id[1].applied is False
+    assert by_id[1].required_risk_capital_usd is None
+    assert by_id[1].unpriced_reason == expected_reason
+    assert by_id[2].applied is True
+    assert by_id[2].unpriced_reason is None
+    # The unpriced allocation still counts toward exposure, but not modeled exposure.
+    assert result.exposure_usd == Decimal("300")
+    assert result.modeled_exposure_usd == Decimal("200")
+    # The data gap is logged, not silently masked.
+    mock_logger.warning.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -303,7 +313,6 @@ async def test_prime_compute_swallows_share_error_for_empty_breakdown():
     The batched dispatcher must preserve that semantics.
     """
     from app.domain.entities.backed_breakdown import BackedBreakdown
-    from app.domain.exceptions import MissingShareError
 
     positions = [
         make_receipt_token_position(receipt_token_id=1, symbol="aWETH", amount_usd=Decimal("100")),

@@ -1,19 +1,14 @@
 from fastapi import HTTPException
 
-from app.domain.exceptions import AllocationShareError, MissingShareError, StaleShareError
+from app.domain.exceptions import AllocationShareError
 
 
 def share_error_503(exc: AllocationShareError) -> HTTPException:
-    """Translate an AllocationShareError subtype into a 503 with a distinct code.
+    """Translate an AllocationShareError into a 503 carrying its ``code``.
 
-    Shared by every endpoint that surfaces an allocation-share lookup failure
-    (the ``/v1/risk/*`` endpoints and the prime risk-capital endpoint) so the
-    error contract stays identical across them.
+    Used by the ``/v1/risk/*`` endpoints. The prime risk-capital endpoint no
+    longer 503s on a share failure — it degrades that allocation to unpriced and
+    reports the same ``exc.code`` as its ``unpriced_reason`` — but both read the
+    code off the exception so the contract stays identical.
     """
-    if isinstance(exc, StaleShareError):
-        code = "share_data_stale"
-    elif isinstance(exc, MissingShareError):
-        code = "share_data_missing"
-    else:
-        code = "share_data_unavailable"
-    return HTTPException(status_code=503, detail={"code": code, "message": str(exc)})
+    return HTTPException(status_code=503, detail={"code": exc.code, "message": str(exc)})

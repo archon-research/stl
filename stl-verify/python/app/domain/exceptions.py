@@ -7,15 +7,28 @@ infrastructure module.
 
 
 class AllocationShareError(Exception):
-    """Base class for allocation share lookup failures."""
+    """Base class for allocation share lookup failures.
+
+    ``code`` is a stable machine-readable slug shared by every consumer that
+    surfaces the failure — the ``/v1/risk/*`` 503 responses and the per-allocation
+    ``unpriced_reason`` on the prime risk-capital endpoint — so the two stay in
+    lock-step. It lives here (domain) rather than in the API layer to keep the
+    dependency direction inward.
+    """
+
+    code = "share_data_unavailable"
 
 
 class StaleShareError(AllocationShareError):
     """Raised when the most-recent supply row is older than the configured staleness window."""
 
+    code = "share_data_stale"
+
 
 class MissingShareError(AllocationShareError):
     """Raised when no balance or supply row is available for the (chain, token, wallet) triple."""
+
+    code = "share_data_missing"
 
 
 class InvalidOverrideError(ValueError):
