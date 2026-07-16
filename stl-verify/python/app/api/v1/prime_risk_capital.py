@@ -5,9 +5,11 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
+from app.api._share_errors import share_error_503
 from app.api._validators import EthAddressParam
 from app.api.deps import get_engine, get_model_registry
 from app.domain.entities.allocation import EthAddress
+from app.domain.exceptions import AllocationShareError
 from app.services.model_registry import ModelRegistry
 from app.services.prime_risk_capital_service import PrimeRiskCapitalService
 
@@ -78,7 +80,8 @@ async def _get_service(
         "(sum of per-allocation model RRC), encumbrance, a `modeled_pct` coverage figure, and a "
         "per-allocation breakdown. The figures are model-derived and partial (only allocations the "
         "model can price contribute Required Risk Capital) and will not match Sky's dashboard. "
-        "Returns `404` if the prime is unknown."
+        "Returns `404` if the prime is unknown, and `503` (`share_data_missing` / `share_data_stale`) "
+        "if a backed allocation's share-data lookup fails (e.g. a warm-up window)."
     ),
 )
 async def get_prime_risk_capital(
@@ -89,7 +92,15 @@ async def get_prime_risk_capital(
     if not await service.prime_exists(prime_address):
         raise HTTPException(status_code=404, detail="Prime not found")
 
-    result = await service.compute(prime_address)
+    # A per-allocation share-lookup failure (e.g. a warm-up window where a
+    # position has backing but no consistent balance/supply pair yet) surfaces
+    # as 503 share_data_missing, matching the /v1/risk/* endpoints, rather than
+    # a 500. The batched compute defers this raise past the empty-breakdown
+    # short-circuit, so only allocations that actually have backing trigger it.
+    try:
+        result = await service.compute(prime_address)
+    except AllocationShareError as exc:
+        raise share_error_503(exc) from exc
     return PrimeRiskCapitalResponse(
         prime_id=result.prime_id,
         model=result.model,

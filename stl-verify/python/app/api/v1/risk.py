@@ -4,6 +4,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from app.api._share_errors import share_error_503
 from app.api._validators import (
     ChainIdPath,
     EthAddressParam,
@@ -27,8 +28,6 @@ from app.domain.entities.risk import RrcResult
 from app.domain.exceptions import (
     AllocationShareError,
     InvalidOverrideError,
-    MissingShareError,
-    StaleShareError,
 )
 from app.ports.receipt_token_lookup import ReceiptTokenLookup
 from app.services.crypto_lending_risk_service import CryptoLendingRiskService
@@ -143,17 +142,6 @@ class RiskBreakdownResponse(BaseModel):
     }
 
 
-def _share_error_503(exc: AllocationShareError) -> HTTPException:
-    """Translate an AllocationShareError subtype into a 503 with a distinct code."""
-    if isinstance(exc, StaleShareError):
-        code = "share_data_stale"
-    elif isinstance(exc, MissingShareError):
-        code = "share_data_missing"
-    else:
-        code = "share_data_unavailable"
-    return HTTPException(status_code=503, detail={"code": code, "message": str(exc)})
-
-
 async def _compute_bad_debt(
     receipt_token_id: int,
     gap_pct: Decimal,
@@ -165,7 +153,7 @@ async def _compute_bad_debt(
     try:
         bad_debt = await service.get_bad_debt_legacy(receipt_token_id, gap_pct)
     except AllocationShareError as exc:
-        raise _share_error_503(exc) from exc
+        raise share_error_503(exc) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if bad_debt is None:
@@ -185,7 +173,7 @@ async def _compute_risk_breakdown(
     try:
         breakdown = await service.get_risk_breakdown(receipt_token_id, prime_id)
     except AllocationShareError as exc:
-        raise _share_error_503(exc) from exc
+        raise share_error_503(exc) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if breakdown is None:
@@ -568,7 +556,7 @@ async def _compute_envelope(
         try:
             result = await m.compute(asset_id, prime_id, overrides.get(m.risk_model, {}))
         except AllocationShareError as exc:
-            raise _share_error_503(exc) from exc
+            raise share_error_503(exc) from exc
         except InvalidOverrideError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         results.append(result)

@@ -239,21 +239,19 @@ async def test_get_share_uses_prime_wallet_for_supply_share(
 ) -> None:
     info = _aave_like_info()
 
-    with patch("app.adapters.postgres.crypto_lending_reader.PostgresAllocationShare") as mock_share_cls:
-        mock_share = AsyncMock()
-        mock_share.get_share.return_value = Decimal("0.25")
-        mock_share_cls.return_value = mock_share
-
+    with patch(
+        "app.adapters.postgres.crypto_lending_reader.fetch_share",
+        AsyncMock(return_value=Decimal("0.25")),
+    ) as mock_fetch:
         result = await reader.get_share(info, DUMMY_PRIME)
 
-    mock_share_cls.assert_called_once_with(
+    mock_fetch.assert_awaited_once_with(
         engine=engine,
         chain_id=1,
         token_id=777,
         wallet_address=bytes.fromhex(DUMMY_PRIME.hex),
         max_stale_seconds=600,
     )
-    mock_share.get_share.assert_awaited_once_with()
     assert result == Decimal("0.25")
 
 
@@ -264,21 +262,19 @@ async def test_get_share_uses_prime_wallet_for_morpho_supply_share(
 ) -> None:
     info = replace(_morpho_info(), receipt_token_token_id=888)
 
-    with patch("app.adapters.postgres.crypto_lending_reader.PostgresAllocationShare") as mock_share_cls:
-        mock_share = AsyncMock()
-        mock_share.get_share.return_value = Decimal("0.4")
-        mock_share_cls.return_value = mock_share
-
+    with patch(
+        "app.adapters.postgres.crypto_lending_reader.fetch_share",
+        AsyncMock(return_value=Decimal("0.4")),
+    ) as mock_fetch:
         result = await reader.get_share(info, DUMMY_PRIME)
 
-    mock_share_cls.assert_called_once_with(
+    mock_fetch.assert_awaited_once_with(
         engine=engine,
         chain_id=1,
         token_id=888,
         wallet_address=bytes.fromhex(DUMMY_PRIME.hex),
         max_stale_seconds=600,
     )
-    mock_share.get_share.assert_awaited_once_with()
     assert result == Decimal("0.4")
 
 
@@ -289,21 +285,19 @@ async def test_get_share_uses_prime_wallet_for_maple_supply_share(
 ) -> None:
     info = replace(_maple_info(), receipt_token_token_id=555)
 
-    with patch("app.adapters.postgres.crypto_lending_reader.PostgresAllocationShare") as mock_share_cls:
-        mock_share = AsyncMock()
-        mock_share.get_share.return_value = Decimal("0.1")
-        mock_share_cls.return_value = mock_share
-
+    with patch(
+        "app.adapters.postgres.crypto_lending_reader.fetch_share",
+        AsyncMock(return_value=Decimal("0.1")),
+    ) as mock_fetch:
         result = await reader.get_share(info, DUMMY_PRIME)
 
-    mock_share_cls.assert_called_once_with(
+    mock_fetch.assert_awaited_once_with(
         engine=engine,
         chain_id=1,
         token_id=555,
         wallet_address=bytes.fromhex(DUMMY_PRIME.hex),
         max_stale_seconds=600,
     )
-    mock_share.get_share.assert_awaited_once_with()
     assert result == Decimal("0.1")
 
 
@@ -329,12 +323,12 @@ async def test_get_share_raises_when_receipt_token_token_id_missing(
 async def test_get_legacy_share_returns_one_for_morpho(reader: PostgresCryptoLendingReader) -> None:
     with (
         patch.object(reader, "_lookup_wallet", AsyncMock()) as mock_lookup,
-        patch("app.adapters.postgres.crypto_lending_reader.PostgresAllocationShare") as mock_share_cls,
+        patch("app.adapters.postgres.crypto_lending_reader.fetch_share", AsyncMock()) as mock_fetch,
     ):
         result = await reader.get_legacy_share(_morpho_info())
 
     mock_lookup.assert_not_awaited()
-    mock_share_cls.assert_not_called()
+    mock_fetch.assert_not_awaited()
     assert result == Decimal("1")
 
 
@@ -347,24 +341,135 @@ async def test_get_legacy_share_looks_up_wallet_then_loads_share(
 
     with (
         patch.object(reader, "_lookup_wallet", AsyncMock(return_value=bytes(20))) as mock_lookup,
-        patch("app.adapters.postgres.crypto_lending_reader.PostgresAllocationShare") as mock_share_cls,
+        patch(
+            "app.adapters.postgres.crypto_lending_reader.fetch_share",
+            AsyncMock(return_value=Decimal("0.5")),
+        ) as mock_fetch,
     ):
-        mock_share = AsyncMock()
-        mock_share.get_share.return_value = Decimal("0.5")
-        mock_share_cls.return_value = mock_share
-
         result = await reader.get_legacy_share(info)
 
     mock_lookup.assert_awaited_once_with(info.receipt_token_address, info.chain_id)
-    mock_share_cls.assert_called_once_with(
+    mock_fetch.assert_awaited_once_with(
         engine=engine,
         chain_id=1,
         token_id=777,
         wallet_address=bytes(20),
         max_stale_seconds=600,
     )
-    mock_share.get_share.assert_awaited_once_with()
     assert result == Decimal("0.5")
+
+
+# ----------------------------------------------------------------------
+# batch_get_shares
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_batch_get_shares_delegates_to_batch_fetch_with_one_call(
+    reader: PostgresCryptoLendingReader,
+) -> None:
+    """The adapter must collapse N receipt-token shares into one DB call.
+
+    Per-allocation ``get_share`` was the dominant cost on ``/risk-capital``;
+    if this regresses (e.g. someone re-introduces an in-place ``get_share``
+    loop) the whole fan-out elimination is silently undone.
+    """
+    info_a = _aave_like_info()
+    info_b = replace(info_a, receipt_token_id=100, receipt_token_token_id=888)
+
+    with patch(
+        "app.adapters.postgres.crypto_lending_reader.batch_fetch_shares",
+        AsyncMock(return_value={(1, 777): Decimal("0.25"), (1, 888): Decimal("0.5")}),
+    ) as mock_batch:
+        out = await reader.batch_get_shares([info_a, info_b], DUMMY_PRIME)
+
+    assert mock_batch.await_count == 1
+    assert out == {99: Decimal("0.25"), 100: Decimal("0.5")}
+
+
+@pytest.mark.asyncio
+async def test_batch_get_shares_returns_error_values_for_invalid_inputs(
+    reader: PostgresCryptoLendingReader,
+) -> None:
+    """Validation failures must surface as per-asset *values*, not exceptions.
+
+    A single missing ``receipt_token_token_id`` (warm-up window) or unsupported
+    protocol must not abort the whole batch.
+    """
+    info_morpho_unindexed = replace(_morpho_info(), receipt_token_id=200)  # receipt_token_token_id=None
+    info_unsupported = replace(_aave_like_info(), receipt_token_id=300, protocol_name="curve_stableswap")
+
+    with patch(
+        "app.adapters.postgres.crypto_lending_reader.batch_fetch_shares",
+        AsyncMock(return_value={}),
+    ) as mock_batch:
+        out = await reader.batch_get_shares([info_morpho_unindexed, info_unsupported], DUMMY_PRIME)
+
+    # Neither input could be turned into a (chain_id, token_id) lookup, so the
+    # DB layer should never have been called.
+    mock_batch.assert_not_awaited()
+    assert isinstance(out[200], MissingShareError)
+    assert isinstance(out[300], ValueError)
+
+
+@pytest.mark.asyncio
+async def test_batch_get_shares_empty_input_short_circuits(
+    reader: PostgresCryptoLendingReader,
+) -> None:
+    with patch(
+        "app.adapters.postgres.crypto_lending_reader.batch_fetch_shares",
+        AsyncMock(return_value={}),
+    ) as mock_batch:
+        out = await reader.batch_get_shares([], DUMMY_PRIME)
+    mock_batch.assert_not_awaited()
+    assert out == {}
+
+
+@pytest.mark.asyncio
+async def test_batch_get_shares_collapses_duplicate_pairs(
+    reader: PostgresCryptoLendingReader,
+) -> None:
+    """Two receipt tokens that map to the same (chain_id, token_id) share one DB row.
+
+    Defends the dedup logic: if both copies were re-issued as separate DB
+    queries the batch would silently re-introduce per-asset fan-out.
+    """
+    info_a = _aave_like_info()
+    info_b = replace(info_a, receipt_token_id=100)  # same chain_id+token_id
+
+    captured = {}
+
+    async def fake_batch(*, engine, requests, wallet_address, max_stale_seconds):  # noqa: ARG001
+        captured["n_requests"] = len(list(requests))
+        return {(1, 777): Decimal("0.4")}
+
+    with patch(
+        "app.adapters.postgres.crypto_lending_reader.batch_fetch_shares",
+        side_effect=fake_batch,
+    ):
+        out = await reader.batch_get_shares([info_a, info_b], DUMMY_PRIME)
+
+    assert captured["n_requests"] == 1
+    assert out[99] == Decimal("0.4")
+    assert out[100] == Decimal("0.4")
+
+
+@pytest.mark.asyncio
+async def test_batch_get_shares_accepts_maple(
+    reader: PostgresCryptoLendingReader,
+) -> None:
+    """Maple resolves through the same lookup as ``get_share``; the batch must not
+    reject it as an unsupported protocol, or the batched path would 500 for an
+    asset the un-batched path prices fine once Maple gains a risk model."""
+    info = replace(_maple_info(), receipt_token_token_id=555)
+
+    with patch(
+        "app.adapters.postgres.crypto_lending_reader.batch_fetch_shares",
+        AsyncMock(return_value={(1, 555): Decimal("0.3")}),
+    ):
+        out = await reader.batch_get_shares([info], DUMMY_PRIME)
+
+    assert out[99] == Decimal("0.3")
 
 
 def test_normalize_maple() -> None:

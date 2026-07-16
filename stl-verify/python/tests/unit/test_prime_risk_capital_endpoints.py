@@ -107,6 +107,24 @@ def test_get_prime_risk_capital_returns_404_when_prime_missing():
         app.dependency_overrides.pop(prime_risk_capital._get_service, None)
 
 
+def test_get_prime_risk_capital_returns_503_when_share_data_missing():
+    from app.api.v1 import prime_risk_capital
+    from app.domain.exceptions import MissingShareError
+
+    service = _make_service()
+    service.compute.side_effect = MissingShareError("no consistent balance+supply pair")
+    app.dependency_overrides[prime_risk_capital._get_service] = _override_service(service)
+    try:
+        client = TestClient(app)
+
+        response = client.get(f"/v1/primes/{_VALID_ADDR}/risk-capital")
+
+        assert response.status_code == 503
+        assert response.json()["detail"]["code"] == "share_data_missing"
+    finally:
+        app.dependency_overrides.pop(prime_risk_capital._get_service, None)
+
+
 def test_get_prime_risk_capital_returns_422_for_invalid_prime_id():
     from app.api.v1 import prime_risk_capital
 
