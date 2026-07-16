@@ -173,7 +173,7 @@ export interface paths {
     };
     /**
      * Self-computed prime risk capital
-     * @description Compute the prime's capital metrics from on-chain data and the default RRC model (`gap_sweep`), with no dependency on the upstream Star feed. Returns exposure (priced receipt-token allocations), Total Risk Capital (on-chain treasury), Required Risk Capital (sum of per-allocation model RRC), encumbrance, a `modeled_pct` coverage figure, and a per-allocation breakdown. The figures are model-derived and partial (only allocations the model can price contribute Required Risk Capital) and will not match Sky's dashboard. Returns `404` if the prime is unknown.
+     * @description Compute the prime's capital metrics from on-chain data and the default RRC model (`gap_sweep`), with no dependency on the upstream Star feed. Returns exposure (priced receipt-token allocations), Total Risk Capital (on-chain treasury), Required Risk Capital (sum of per-allocation model RRC), encumbrance, a `modeled_pct` coverage figure, and a per-allocation breakdown. The figures are model-derived and partial (only allocations the model can price contribute Required Risk Capital) and will not match Sky's dashboard. A backed allocation whose pool-share lookup can't be resolved (e.g. a warm-up window or an un-indexed receipt token) is reported as unpriced (`applied=false` with an `unpriced_reason`) rather than failing the whole response. Returns `404` if the prime is unknown.
      */
     get: operations['get_prime_risk_capital_v1_primes__prime_id__risk_capital_get'];
     put?: never;
@@ -859,12 +859,12 @@ export interface components {
     AllocationRiskCapitalResponse: {
       /**
        * Applied
-       * @description Whether the default model could price this allocation.
+       * @description Whether the default model priced this allocation.
        */
       applied: boolean;
       /**
        * Crr Pct
-       * @description Comparable capital-risk ratio (0-100). `null` when the model does not apply.
+       * @description Comparable capital-risk ratio (0-100). `null` when the allocation is unpriced.
        */
       crr_pct?: string | null;
       /**
@@ -889,7 +889,7 @@ export interface components {
       receipt_token_id: number;
       /**
        * Required Risk Capital Usd
-       * @description Per-allocation RRC (USD). `null` when the model does not apply.
+       * @description Per-allocation RRC (USD). `null` when the allocation is unpriced.
        */
       required_risk_capital_usd?: string | null;
       /**
@@ -897,6 +897,11 @@ export interface components {
        * @description Receipt-token symbol.
        */
       symbol: string;
+      /**
+       * Unpriced Reason
+       * @description Why the allocation is unpriced (`null` when `applied`): `no_model` (no default model applies), or `share_data_missing` / `share_data_stale` (a model applies but its pool-share lookup could not be resolved, e.g. a warm-up window or an un-indexed receipt token).
+       */
+      unpriced_reason?: string | null;
     };
     /**
      * BadDebtResponse
