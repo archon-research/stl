@@ -37,6 +37,21 @@ _RATIO = Decimal("0.0001")  # ratios/percentages to 4 dp
 _UNPRICED_NO_MODEL = "no_model"
 
 
+def _unpriced_allocation(position, exposure: Decimal, reason: str) -> AllocationRiskCapital:
+    """Build an unpriced per-allocation entry (no RRC), tagged with ``reason``."""
+    return AllocationRiskCapital(
+        receipt_token_id=position.receipt_token_id,
+        symbol=position.symbol,
+        protocol_name=position.protocol_name,
+        exposure_usd=exposure,
+        applied=False,
+        required_risk_capital_usd=None,
+        crr_pct=None,
+        model=None,
+        unpriced_reason=reason,
+    )
+
+
 class PrimeRiskCapitalService:
     def __init__(self, repository: AllocationRepositoryPort, registry: ModelRegistry) -> None:
         self._repository = repository
@@ -93,19 +108,7 @@ class PrimeRiskCapitalService:
             exposure += position_exposure
 
             if model is None:
-                per_allocation.append(
-                    AllocationRiskCapital(
-                        receipt_token_id=position.receipt_token_id,
-                        symbol=position.symbol,
-                        protocol_name=position.protocol_name,
-                        exposure_usd=position_exposure,
-                        applied=False,
-                        required_risk_capital_usd=None,
-                        crr_pct=None,
-                        model=None,
-                        unpriced_reason=_UNPRICED_NO_MODEL,
-                    )
-                )
+                per_allocation.append(_unpriced_allocation(position, position_exposure, _UNPRICED_NO_MODEL))
                 continue
 
             result = next(results)
@@ -121,19 +124,7 @@ class PrimeRiskCapitalService:
                     result.code,
                     result,
                 )
-                per_allocation.append(
-                    AllocationRiskCapital(
-                        receipt_token_id=position.receipt_token_id,
-                        symbol=position.symbol,
-                        protocol_name=position.protocol_name,
-                        exposure_usd=position_exposure,
-                        applied=False,
-                        required_risk_capital_usd=None,
-                        crr_pct=None,
-                        model=None,
-                        unpriced_reason=result.code,
-                    )
-                )
+                per_allocation.append(_unpriced_allocation(position, position_exposure, result.code))
                 continue
 
             required += result.rrc_usd
