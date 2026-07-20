@@ -14,6 +14,7 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	gethtypes "github.com/ethereum/go-ethereum/core/types"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
@@ -22,27 +23,36 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-// TestIntegration_ERC4626Vault_LandsTotalSupplyRow feeds the service a block
-// whose receipts contain one Transfer of a Morpho Blue vault receipt token to
-// the Spark ALM proxy, and verifies that processing it lands a row in
-// token_total_supply with the vault's totalSupply, a NULL scaled_total_supply,
-// and the "event" source discriminator — exercising the full Service →
-// ERC4626Source → PrimePositionHandler → TokenTotalSupplyRepository → Postgres
-// path with a real DB; only the Alchemy RPC (multicaller) and the block-cache
-// reader are mocked.
-func TestIntegration_ERC4626Vault_LandsTotalSupplyRow(t *testing.T) {
-	ctx := context.Background()
+// erc4626IntegrationFixture is the shared wiring both ERC4626 integration tests
+// build on: a fresh migrated DB, the Service→ERC4626Source→PrimePositionHandler→
+// Postgres registry, and a mock multicaller answering the single vault. The event-
+// and sweep-path tests differ only in SweepEveryNBlocks and the block they feed.
+type erc4626IntegrationFixture struct {
+	pool            *pgxpool.Pool
+	logger          *slog.Logger
+	registry        *SourceRegistry
+	pgHandler       *PrimePositionHandler
+	entries         []*TokenEntry
+	proxies         []ProxyConfig
+	vault           common.Address
+	almProxy        common.Address
+	wantTotalSupply string
+}
+
+// setupERC4626Integration builds the full Service → ERC4626Source →
+// PrimePositionHandler → TokenTotalSupplyRepository → Postgres path against a real
+// DB; only the Alchemy RPC (multicaller) and block-cache reader are mocked. The
+// vault is a stand-in Morpho Blue receipt token (18 decimals) held by the Spark
+// ALM proxy.
+func setupERC4626Integration(t *testing.T, ctx context.Context) *erc4626IntegrationFixture {
+	t.Helper()
 
 	t.Setenv("BUILD_GIT_HASH", "test-integration-erc4626-supply")
 
 	pool, _, dbCleanup := testutil.SetupTimescaleDB(t)
-	defer dbCleanup()
+	t.Cleanup(dbCleanup)
 
-	// The prime table is seeded by db/migrations/20260305_120000_create_prime_debts.sql.
-	var sparkID int64
-	if err := pool.QueryRow(ctx, "SELECT id FROM prime WHERE name = 'spark'").Scan(&sparkID); err != nil {
-		t.Fatalf("read spark prime id: %v", err)
-	}
+	sparkID := seedSparkPrime(t, ctx, pool)
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
@@ -101,24 +111,112 @@ func TestIntegration_ERC4626Vault_LandsTotalSupplyRow(t *testing.T) {
 		{Star: "spark", Chain: "mainnet", Address: almProxy},
 	}
 
+	return &erc4626IntegrationFixture{
+		pool:      pool,
+		logger:    logger,
+		registry:  registry,
+		pgHandler: pgHandler,
+		entries:   entries,
+		proxies:   proxies,
+		vault:     vault,
+		almProxy:  almProxy,
+		// 5,000,000 vault shares persisted as NUMERIC with 18 decimals.
+		wantTotalSupply: "5000000.000000000000000000",
+	}
+}
+
+// seedSparkPrime self-seeds the spark prime row (idempotent upsert) rather than
+// leaning on the migration-seeded row, so a sibling integration test that wipes
+// shared tables can't leave this one without its prime; it returns the row id. The
+// vault_address matches what db/migrations/20260305_120000_create_prime_debts.sql
+// seeds for spark, and prime's natural key is name.
+func seedSparkPrime(t *testing.T, ctx context.Context, pool *pgxpool.Pool) int64 {
+	t.Helper()
+	sparkVault := common.HexToAddress("0x691a6c29e9e96dd897718305427ad5d534db16ba").Bytes()
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO prime (name, vault_address) VALUES ('spark', $1) ON CONFLICT (name) DO NOTHING`,
+		sparkVault,
+	); err != nil {
+		t.Fatalf("seed spark prime: %v", err)
+	}
+	var sparkID int64
+	if err := pool.QueryRow(ctx, "SELECT id FROM prime WHERE name = 'spark'").Scan(&sparkID); err != nil {
+		t.Fatalf("read spark prime id: %v", err)
+	}
+	return sparkID
+}
+
+// assertVaultSupplyRow asserts the vault has exactly one token_total_supply row
+// with the fixture's total_supply, a NULL scaled_total_supply, and wantSource.
+func assertVaultSupplyRow(t *testing.T, ctx context.Context, f *erc4626IntegrationFixture, wantSource string) {
+	t.Helper()
+
+	var rows int
+	if err := f.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM token_total_supply tts
+		 JOIN token t ON t.id = tts.token_id
+		 WHERE t.address = $1`,
+		f.vault.Bytes(),
+	).Scan(&rows); err != nil {
+		t.Fatalf("count supply rows: %v", err)
+	}
+	if rows != 1 {
+		t.Fatalf("token_total_supply rows for vault: got %d, want 1", rows)
+	}
+
+	var (
+		totalSupplyText string
+		scaledIsNull    bool
+		source          string
+	)
+	if err := f.pool.QueryRow(ctx,
+		`SELECT tts.total_supply::text, tts.scaled_total_supply IS NULL, tts.source
+		 FROM token_total_supply tts
+		 JOIN token t ON t.id = tts.token_id
+		 WHERE t.address = $1`,
+		f.vault.Bytes(),
+	).Scan(&totalSupplyText, &scaledIsNull, &source); err != nil {
+		t.Fatalf("query supply row: %v", err)
+	}
+
+	if totalSupplyText != f.wantTotalSupply {
+		t.Errorf("total_supply: got %q, want %q", totalSupplyText, f.wantTotalSupply)
+	}
+	if !scaledIsNull {
+		t.Errorf("scaled_total_supply: got non-NULL, want NULL for an erc4626 vault")
+	}
+	if source != wantSource {
+		t.Errorf("source: got %q, want %q", source, wantSource)
+	}
+}
+
+// TestIntegration_ERC4626Vault_LandsTotalSupplyRow feeds the service a block
+// whose receipts contain one Transfer of a Morpho Blue vault receipt token to
+// the Spark ALM proxy, and verifies that the event path lands a row in
+// token_total_supply with the vault's totalSupply, a NULL scaled_total_supply,
+// and the "event" source discriminator.
+func TestIntegration_ERC4626Vault_LandsTotalSupplyRow(t *testing.T) {
+	ctx := context.Background()
+	f := setupERC4626Integration(t, ctx)
+
 	const blockNumber = int64(19_500_000)
 	externalSender := common.HexToAddress("0x9999999999999999999999999999999999999999")
 	receiptsJSON := mustMarshalReceipts(t, []TransactionReceipt{{
 		Logs: []gethtypes.Log{
-			makeTransferLog(vault, externalSender, almProxy, big.NewInt(500), 0),
+			makeTransferLog(f.vault, externalSender, f.almProxy, big.NewInt(500), 0),
 		},
 	}})
 	cache := testutil.NewMockBlockCache()
 	cache.SetReceipts(1, blockNumber, 0, receiptsJSON)
 
 	svc, err := NewService(
-		Config{ChainID: 1, SweepEveryNBlocks: 1000, Logger: logger},
+		Config{ChainID: 1, SweepEveryNBlocks: 1000, Logger: f.logger},
 		nil,
 		cache,
-		registry,
-		entries,
-		pgHandler,
-		proxies,
+		f.registry,
+		f.entries,
+		f.pgHandler,
+		f.proxies,
 	)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
@@ -135,45 +233,7 @@ func TestIntegration_ERC4626Vault_LandsTotalSupplyRow(t *testing.T) {
 		t.Fatalf("processBlock: %v", err)
 	}
 
-	var rows int
-	if err := pool.QueryRow(ctx,
-		`SELECT COUNT(*) FROM token_total_supply tts
-		 JOIN token t ON t.id = tts.token_id
-		 WHERE t.address = $1`,
-		vault.Bytes(),
-	).Scan(&rows); err != nil {
-		t.Fatalf("count supply rows: %v", err)
-	}
-	if rows != 1 {
-		t.Fatalf("token_total_supply rows for vault: got %d, want 1", rows)
-	}
-
-	var (
-		totalSupplyText string
-		scaledIsNull    bool
-		source          string
-	)
-	if err := pool.QueryRow(ctx,
-		`SELECT tts.total_supply::text, tts.scaled_total_supply IS NULL, tts.source
-		 FROM token_total_supply tts
-		 JOIN token t ON t.id = tts.token_id
-		 WHERE t.address = $1`,
-		vault.Bytes(),
-	).Scan(&totalSupplyText, &scaledIsNull, &source); err != nil {
-		t.Fatalf("query supply row: %v", err)
-	}
-
-	// 5,000,000 vault shares persisted as NUMERIC with 18 decimals.
-	const wantTotalSupply = "5000000.000000000000000000"
-	if totalSupplyText != wantTotalSupply {
-		t.Errorf("total_supply: got %q, want %q", totalSupplyText, wantTotalSupply)
-	}
-	if !scaledIsNull {
-		t.Errorf("scaled_total_supply: got non-NULL, want NULL for an erc4626 vault")
-	}
-	if source != "event" {
-		t.Errorf("source: got %q, want %q", source, "event")
-	}
+	assertVaultSupplyRow(t, ctx, f, "event")
 
 	// Replay the same event under the same build_id: the advisory-locked
 	// assign_processing_version_token_total_supply BEFORE INSERT trigger
@@ -183,17 +243,51 @@ func TestIntegration_ERC4626Vault_LandsTotalSupplyRow(t *testing.T) {
 	if err := svc.processBlock(ctx, event); err != nil {
 		t.Fatalf("processBlock (replay): %v", err)
 	}
-	if err := pool.QueryRow(ctx,
-		`SELECT COUNT(*) FROM token_total_supply tts
-		 JOIN token t ON t.id = tts.token_id
-		 WHERE t.address = $1`,
-		vault.Bytes(),
-	).Scan(&rows); err != nil {
-		t.Fatalf("count supply rows after replay: %v", err)
+	assertVaultSupplyRow(t, ctx, f, "event")
+}
+
+// TestIntegration_ERC4626Vault_SweepLandsTotalSupplyRow drives the sweep path,
+// not the event path: a block with empty receipts emits no Transfer, so only the
+// periodic sweep (SweepEveryNBlocks: 1) runs. It must still read the vault's
+// totalSupply and land a token_total_supply row tagged source = 'sweep', with a
+// NULL scaled_total_supply — the reconciliation path that captures yield changes
+// no Transfer announces.
+func TestIntegration_ERC4626Vault_SweepLandsTotalSupplyRow(t *testing.T) {
+	ctx := context.Background()
+	f := setupERC4626Integration(t, ctx)
+
+	const blockNumber = int64(19_500_000)
+	// Empty receipts: no Transfer to any proxy, so the event path is a no-op and
+	// only the sweep runs.
+	receiptsJSON := mustMarshalReceipts(t, []TransactionReceipt{})
+	cache := testutil.NewMockBlockCache()
+	cache.SetReceipts(1, blockNumber, 0, receiptsJSON)
+
+	svc, err := NewService(
+		Config{ChainID: 1, SweepEveryNBlocks: 1, Logger: f.logger},
+		nil,
+		cache,
+		f.registry,
+		f.entries,
+		f.pgHandler,
+		f.proxies,
+	)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
 	}
-	if rows != 1 {
-		t.Fatalf("token_total_supply rows for vault after replay: got %d, want 1", rows)
+
+	event := outbound.BlockEvent{
+		ChainID:        1,
+		BlockNumber:    blockNumber,
+		Version:        0,
+		BlockTimestamp: time.Date(2026, 5, 11, 12, 0, 0, 0, time.UTC).Unix(),
+		BlockHash:      testBlockHash.Hex(),
 	}
+	if err := svc.processBlock(ctx, event); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+
+	assertVaultSupplyRow(t, ctx, f, "sweep")
 }
 
 // newERC4626MockMulticaller returns a MockMulticaller that dispatches by

@@ -176,15 +176,18 @@ func respondTwoRounds(t *testing.T, src *ERC4626Source, shares, totalSupply *big
 // balanceOf call returns `shares`, every totalSupply call returns `totalSupply`.
 func packRound1(t *testing.T, src *ERC4626Source, calls []outbound.Call, shares, totalSupply *big.Int) []outbound.Result {
 	t.Helper()
-	results, _ := packRound1Vaults(t, src, calls, shares, func(common.Address) *big.Int { return totalSupply })
+	results, _ := packRound1Vaults(t, src, calls, shares, func(common.Address) (*big.Int, bool) { return totalSupply, true })
 	return results
 }
 
 // packRound1Vaults is packRound1 with per-vault totalSupply attribution: every
 // balanceOf returns `shares`, and each totalSupply is answered by supplyFor
-// keyed on Call.Target so distinct vaults return distinct supplies. It also
-// returns how many totalSupply calls it served, so a caller can assert dedup.
-func packRound1Vaults(t *testing.T, src *ERC4626Source, calls []outbound.Call, shares *big.Int, supplyFor func(target common.Address) *big.Int) ([]outbound.Result, int) {
+// keyed on Call.Target so distinct vaults return distinct supplies. supplyFor
+// returns (supply, true) for a normal read or (_, false) to make that vault's
+// totalSupply sub-call fail (Success: false), so a caller can drive a per-target
+// failure. It also returns how many totalSupply calls it served, so a caller can
+// assert dedup.
+func packRound1Vaults(t *testing.T, src *ERC4626Source, calls []outbound.Call, shares *big.Int, supplyFor func(target common.Address) (*big.Int, bool)) ([]outbound.Result, int) {
 	t.Helper()
 	results := make([]outbound.Result, len(calls))
 	supplyCalls := 0
@@ -199,7 +202,12 @@ func packRound1Vaults(t *testing.T, src *ERC4626Source, calls []outbound.Call, s
 			results[i] = outbound.Result{Success: true, ReturnData: rd}
 		case bytes.Equal(sel, src.vaultABI.Methods["totalSupply"].ID):
 			supplyCalls++
-			rd, err := src.vaultABI.Methods["totalSupply"].Outputs.Pack(supplyFor(c.Target))
+			supply, ok := supplyFor(c.Target)
+			if !ok {
+				results[i] = outbound.Result{Success: false}
+				continue
+			}
+			rd, err := src.vaultABI.Methods["totalSupply"].Outputs.Pack(supply)
 			if err != nil {
 				t.Fatalf("pack totalSupply output: %v", err)
 			}
@@ -464,12 +472,12 @@ func TestERC4626Source_FetchBalances_AttributesSupplyToItsVault(t *testing.T) {
 	supplyCalls := 0
 	mc.ExecuteAtHashFn = func(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
 		// Zero shares so no convertToAssets round is scheduled; only round 1 runs.
-		results, n := packRound1Vaults(t, src, calls, big.NewInt(0), func(target common.Address) *big.Int {
+		results, n := packRound1Vaults(t, src, calls, big.NewInt(0), func(target common.Address) (*big.Int, bool) {
 			supply, ok := supplyByVault[target]
 			if !ok {
 				t.Fatalf("round-1 totalSupply for unexpected target %s", target.Hex())
 			}
-			return supply
+			return supply, true
 		})
 		supplyCalls += n
 		return results, nil
@@ -507,6 +515,46 @@ func TestERC4626Source_FetchBalances_AttributesSupplyToItsVault(t *testing.T) {
 	}
 	if supA.ScaledTotalSupply != nil || supB.ScaledTotalSupply != nil {
 		t.Fatalf("scaled total supply must be nil for vaults, got %v / %v", supA.ScaledTotalSupply, supB.ScaledTotalSupply)
+	}
+}
+
+// TestERC4626Source_FetchBalances_MultiVaultMiddleSupplyFailsReturnsError asserts
+// that with three distinct vaults in one batch, a single vault's failed
+// totalSupply (the middle one) fails the whole fetch and leaks no partial
+// Supplies — the failure is not isolated to the bad vault.
+func TestERC4626Source_FetchBalances_MultiVaultMiddleSupplyFailsReturnsError(t *testing.T) {
+	vaultA := common.HexToAddress("0xaaaa000000000000000000000000000000000001")
+	vaultB := common.HexToAddress("0xbbbb000000000000000000000000000000000002")
+	vaultC := common.HexToAddress("0xcccc000000000000000000000000000000000003")
+	wallet := common.HexToAddress("0x1111111111111111111111111111111111111111")
+
+	mc := testutil.NewMockMulticaller()
+	src, err := NewERC4626Source(mc, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	mc.ExecuteAtHashFn = func(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+		// Zero shares so no convertToAssets round is scheduled; only round 1 runs.
+		results, _ := packRound1Vaults(t, src, calls, big.NewInt(0), func(target common.Address) (*big.Int, bool) {
+			if target == vaultB {
+				return nil, false // middle vault's totalSupply reverts
+			}
+			return big.NewInt(1), true
+		})
+		return results, nil
+	}
+
+	entries := []*TokenEntry{
+		{ContractAddress: vaultA, WalletAddress: wallet, TokenType: "erc4626"},
+		{ContractAddress: vaultB, WalletAddress: wallet, TokenType: "erc4626"},
+		{ContractAddress: vaultC, WalletAddress: wallet, TokenType: "erc4626"},
+	}
+	results, err := src.FetchBalances(context.Background(), entries, testBlockHash)
+	if err == nil {
+		t.Fatal("a failed totalSupply on one vault must fail the whole fetch")
+	}
+	if results != nil {
+		t.Fatal("expected nil results (no partial Supplies leak) when a vault's totalSupply fails")
 	}
 }
 

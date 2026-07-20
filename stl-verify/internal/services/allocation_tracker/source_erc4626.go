@@ -137,8 +137,7 @@ func (s *ERC4626Source) fetchUnderlyingValues(ctx context.Context, entries []*To
 		}
 		data, err := s.vaultABI.Pack("convertToAssets", sh)
 		if err != nil {
-			s.logger.Warn("pack convertToAssets failed", "contract", e.ContractAddress.Hex(), "error", err)
-			continue
+			return fmt.Errorf("pack convertToAssets for %s: %w", e.ContractAddress.Hex(), err)
 		}
 		calls = append(calls, outbound.Call{Target: e.ContractAddress, AllowFailure: true, CallData: data})
 		valid = append(valid, e)
@@ -186,8 +185,7 @@ func (s *ERC4626Source) fetchShares(ctx context.Context, entries []*TokenEntry, 
 	for _, e := range entries {
 		data, err := s.vaultABI.Pack("balanceOf", e.WalletAddress)
 		if err != nil {
-			s.logger.Warn("pack balanceOf failed", "contract", e.ContractAddress.Hex(), "error", err)
-			continue
+			return nil, nil, fmt.Errorf("pack balanceOf for %s: %w", e.WalletAddress.Hex(), err)
 		}
 		calls = append(calls, outbound.Call{Target: e.ContractAddress, AllowFailure: true, CallData: data})
 		valid = append(valid, e)
