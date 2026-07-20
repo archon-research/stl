@@ -901,7 +901,10 @@ export interface components {
        * Unpriced Reason
        * @description Why the allocation is unpriced (`null` when `applied`): `no_model` (no default model applies), or `share_data_missing` / `share_data_stale` (a model applies but its pool-share lookup could not be resolved, e.g. a warm-up window or an un-indexed receipt token).
        */
-      unpriced_reason?: string | null;
+      unpriced_reason?:
+        | 'no_model'
+        | ('share_data_missing' | 'share_data_stale')
+        | null;
     };
     /**
      * BadDebtResponse

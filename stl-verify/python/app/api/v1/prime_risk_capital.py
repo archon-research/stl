@@ -8,6 +8,7 @@ from app.adapters.postgres.allocation_position_repository import AllocationRepos
 from app.api._validators import EthAddressParam
 from app.api.deps import get_engine, get_model_registry
 from app.domain.entities.allocation import EthAddress
+from app.domain.entities.prime_risk_capital import UnpricedReason
 from app.services.model_registry import ModelRegistry
 from app.services.prime_risk_capital_service import PrimeRiskCapitalService
 
@@ -29,7 +30,7 @@ class AllocationRiskCapitalResponse(BaseModel):
         default=None, description="Comparable capital-risk ratio (0-100). `null` when the allocation is unpriced."
     )
     model: str | None = Field(default=None, description="Model that produced the figure, or `null`.")
-    unpriced_reason: str | None = Field(
+    unpriced_reason: UnpricedReason | None = Field(
         default=None,
         description=(
             "Why the allocation is unpriced (`null` when `applied`): `no_model` (no default model applies), "

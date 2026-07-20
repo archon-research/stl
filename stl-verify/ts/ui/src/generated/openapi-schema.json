@@ -514,6 +514,14 @@
           "unpriced_reason": {
             "anyOf": [
               {
+                "const": "no_model",
+                "type": "string"
+              },
+              {
+                "enum": [
+                  "share_data_missing",
+                  "share_data_stale"
+                ],
                 "type": "string"
               },
               {

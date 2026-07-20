@@ -16,8 +16,9 @@ from decimal import ROUND_HALF_EVEN, Decimal
 
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.backed_breakdown import BackedBreakdown
-from app.domain.entities.prime_risk_capital import AllocationRiskCapital, PrimeRiskCapital
+from app.domain.entities.prime_risk_capital import AllocationRiskCapital, PrimeRiskCapital, UnpricedReason
 from app.domain.entities.receipt_token import ReceiptTokenInfo
+from app.domain.entities.risk import RrcResult
 from app.domain.exceptions import AllocationShareError
 from app.logging import get_logger
 from app.ports.allocation_repository import AllocationRepositoryPort
@@ -35,10 +36,10 @@ _RATIO = Decimal("0.0001")  # ratios/percentages to 4 dp
 # ``unpriced_reason`` value for an allocation no default model applies to (as
 # opposed to the ``AllocationShareError.code`` values used when a model applies
 # but its share lookup fails).
-_UNPRICED_NO_MODEL = "no_model"
+_UNPRICED_NO_MODEL: UnpricedReason = "no_model"
 
 
-def _unpriced_allocation(position, exposure: Decimal, reason: str) -> AllocationRiskCapital:
+def _unpriced_allocation(position, exposure: Decimal, reason: UnpricedReason) -> AllocationRiskCapital:
     """Build an unpriced per-allocation entry (no RRC), tagged with ``reason``."""
     return AllocationRiskCapital(
         receipt_token_id=position.receipt_token_id,
@@ -51,6 +52,63 @@ def _unpriced_allocation(position, exposure: Decimal, reason: str) -> Allocation
         model=None,
         unpriced_reason=reason,
     )
+
+
+def _priced_allocation(position, exposure: Decimal, result: RrcResult) -> AllocationRiskCapital:
+    """Build a priced per-allocation entry from a model ``result``."""
+    return AllocationRiskCapital(
+        receipt_token_id=position.receipt_token_id,
+        symbol=position.symbol,
+        protocol_name=position.protocol_name,
+        exposure_usd=exposure,
+        applied=True,
+        required_risk_capital_usd=result.rrc_usd,
+        crr_pct=result.comparable_crr_pct,
+        model=result.risk_model,
+        unpriced_reason=None,
+    )
+
+
+def _assemble_allocations(positions, models, results) -> tuple[Decimal, Decimal, Decimal, list[AllocationRiskCapital]]:
+    """Fold per-allocation compute results into totals + a per-allocation list.
+
+    ``results`` yields one entry (an ``RrcResult`` or a share-lookup
+    ``AllocationShareError``) per position whose model is not ``None``, in
+    ``positions`` order. A share error degrades just that allocation to unpriced
+    (logged so a persistent gap stays visible) instead of failing the whole
+    prime; every other error already propagated out of the gather.
+
+    Returns ``(exposure, modeled_exposure, required, per_allocation)``.
+    """
+    exposure = Decimal("0")
+    modeled_exposure = Decimal("0")
+    required = Decimal("0")
+    per_allocation: list[AllocationRiskCapital] = []
+
+    for position, model in zip(positions, models):
+        position_exposure = position.amount_usd or Decimal("0")
+        exposure += position_exposure
+
+        if model is None:
+            per_allocation.append(_unpriced_allocation(position, position_exposure, _UNPRICED_NO_MODEL))
+            continue
+
+        result = next(results)
+        if isinstance(result, AllocationShareError):
+            logger.warning(
+                "prime risk-capital: allocation receipt_token_id=%s unpriced (%s): %s",
+                position.receipt_token_id,
+                result.code,
+                result,
+            )
+            per_allocation.append(_unpriced_allocation(position, position_exposure, result.code))
+            continue
+
+        required += result.rrc_usd
+        modeled_exposure += position_exposure
+        per_allocation.append(_priced_allocation(position, position_exposure, result))
+
+    return exposure, modeled_exposure, required, per_allocation
 
 
 class PrimeRiskCapitalService:
@@ -107,50 +165,7 @@ class PrimeRiskCapitalService:
             )
         )
 
-        exposure = Decimal("0")
-        modeled_exposure = Decimal("0")
-        required = Decimal("0")
-        per_allocation: list[AllocationRiskCapital] = []
-
-        for position, model in zip(positions, models):
-            position_exposure = position.amount_usd or Decimal("0")
-            exposure += position_exposure
-
-            if model is None:
-                per_allocation.append(_unpriced_allocation(position, position_exposure, _UNPRICED_NO_MODEL))
-                continue
-
-            result = next(results)
-            if isinstance(result, AllocationShareError):
-                # A model applies but its pool-share lookup failed (warm-up
-                # window, un-indexed receipt token, ...). Price the rest of the
-                # prime and mark just this allocation unpriced with the reason,
-                # rather than failing the whole request. Logged so a persistent
-                # gap is visible rather than silently masked.
-                logger.warning(
-                    "prime risk-capital: allocation receipt_token_id=%s unpriced (%s): %s",
-                    position.receipt_token_id,
-                    result.code,
-                    result,
-                )
-                per_allocation.append(_unpriced_allocation(position, position_exposure, result.code))
-                continue
-
-            required += result.rrc_usd
-            modeled_exposure += position_exposure
-            per_allocation.append(
-                AllocationRiskCapital(
-                    receipt_token_id=position.receipt_token_id,
-                    symbol=position.symbol,
-                    protocol_name=position.protocol_name,
-                    exposure_usd=position_exposure,
-                    applied=True,
-                    required_risk_capital_usd=result.rrc_usd,
-                    crr_pct=result.comparable_crr_pct,
-                    model=result.risk_model,
-                    unpriced_reason=None,
-                )
-            )
+        exposure, modeled_exposure, required, per_allocation = _assemble_allocations(positions, models, results)
 
         encumbrance_ratio = (
             (required / total_rc).quantize(_RATIO, rounding=ROUND_HALF_EVEN)
@@ -211,12 +226,17 @@ class PrimeRiskCapitalService:
         infos_by_id: dict[int, ReceiptTokenInfo] = {}
         for asset_id, info in zip(asset_ids, infos):
             if info is None:
-                # A crypto-lending position whose receipt token can't be resolved is
-                # a data gap (the position exists but its receipt-token record is
-                # missing). It drops out of the batch and contributes no RRC — log it
-                # so the gap is visible rather than silently vanishing.
+                # A crypto-lending position whose receipt-token record is missing
+                # is a data gap. We drop it from the prefetch batch here, but a
+                # default model still applies to it (``applies_to`` keys off
+                # ``supported_asset_ids``, not the record), so ``compute`` will
+                # re-dispatch it to ``model.compute``, which raises ``ValueError``
+                # → HTTP 500 for the whole prime. This is deliberate: a share-data
+                # gap degrades to a 200 unpriced allocation, but a missing
+                # receipt-token record fails hard rather than being silently
+                # dropped. Logged so the gap is visible either way.
                 logger.warning(
-                    "prime risk-capital: no receipt-token record for asset_id=%s; excluding from RRC", asset_id
+                    "prime risk-capital: no receipt-token record for asset_id=%s; excluding from prefetch", asset_id
                 )
                 continue
             infos_by_id[asset_id] = info

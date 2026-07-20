@@ -92,6 +92,7 @@ async def test_compute_mixes_modeled_and_unmodeled_allocations():
     assert by_id[2].required_risk_capital_usd is None
     assert by_id[2].crr_pct is None
     assert by_id[2].model is None
+    assert by_id[2].unpriced_reason == "no_model"
 
 
 @pytest.mark.asyncio
@@ -139,6 +140,7 @@ async def test_compute_skips_zero_exposure_positions():
     assert model.computed_ids == [2]
     by_id = {a.receipt_token_id: a for a in result.per_allocation}
     assert by_id[1].applied is False
+    assert by_id[1].unpriced_reason == "no_model"
     assert by_id[2].applied is True
     assert result.required_risk_capital_usd == Decimal("30")
     assert result.modeled_exposure_usd == Decimal("600")
@@ -353,8 +355,13 @@ async def test_prime_compute_swallows_share_error_for_empty_breakdown():
 
     assert result.required_risk_capital_usd == Decimal("0")
     # The position is still reported (with zero RRC), matching the un-batched
-    # behaviour for empty breakdowns.
+    # behaviour for empty breakdowns. Crucially it is priced-to-zero, NOT
+    # degraded to unpriced: the swallowed share error must not surface as an
+    # unpriced_reason, or this test would pass even under the regression it guards.
     assert len(result.per_allocation) == 1
+    alloc = result.per_allocation[0]
+    assert alloc.applied is True
+    assert alloc.unpriced_reason is None
 
 
 @pytest.mark.asyncio
