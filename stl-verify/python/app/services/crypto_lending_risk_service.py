@@ -85,6 +85,7 @@ class CryptoLendingRiskService:
         overrides: Mapping[str, Any],
         share_or_err: Decimal | Exception,
         info: ReceiptTokenInfo | None = None,
+        breakdown_override: BackedBreakdown | None = None,
     ) -> RrcResult:
         """Compute the RRC reusing a pre-resolved share.
 
@@ -102,7 +103,9 @@ class CryptoLendingRiskService:
 
         ``info`` may carry the receipt-token record the caller already fetched to
         build the batch, avoiding a redundant ``get_receipt_token`` round-trip; it
-        is fetched here only when not supplied.
+        is fetched here only when not supplied. ``breakdown_override`` likewise
+        carries a pre-fetched backed breakdown (from ``reader.batch_get_breakdowns``)
+        so the per-asset breakdown query is not re-run here.
         """
         if not self.applies_to(asset_id, prime_id):
             raise ValueError(f"unsupported asset_id={asset_id}")
@@ -112,7 +115,9 @@ class CryptoLendingRiskService:
             info = await self._reader.get_receipt_token(asset_id)
         if info is None:
             raise ValueError(f"receipt token not found: {asset_id}")
-        _, items = await self._load_enriched_items_for_info(info, prime_id=prime_id, share_override=share_or_err)
+        _, items = await self._load_enriched_items_for_info(
+            info, prime_id=prime_id, share_override=share_or_err, breakdown_override=breakdown_override
+        )
         return self._build_result(asset_id, prime_id, gap_pct, items)
 
     def _build_result(
@@ -240,6 +245,7 @@ class CryptoLendingRiskService:
         info: ReceiptTokenInfo,
         prime_id: EthAddress | None,
         share_override: Decimal | Exception | None = None,
+        breakdown_override: BackedBreakdown | None = None,
     ) -> tuple[int, list[RiskEnrichedCollateral]]:
         if not self._reader.requires_liquidation_enrichment(info):
             # Pool-level, USD-valued, symbol-keyed breakdown (e.g. Maple Syrup): no
@@ -248,7 +254,7 @@ class CryptoLendingRiskService:
             # no prime_id keep the pool-level view (share = 1). An empty breakdown is
             # the graceful "no data yet" signal, so skip the share lookup — Maple has
             # no warm-up concept and a prime-not-in-pool share error must not mask it.
-            breakdown = await self._reader.get_breakdown(info)
+            breakdown = breakdown_override if breakdown_override is not None else await self._reader.get_breakdown(info)
             if not breakdown.items:
                 return breakdown.backed_asset_id, []
             # NOTE: this branch ignores ``share_override`` and does its own
@@ -266,7 +272,7 @@ class CryptoLendingRiskService:
         if prime_id is None:
             share = await self._reader.get_legacy_share(info)
 
-        breakdown = await self._reader.get_breakdown(info)
+        breakdown = breakdown_override if breakdown_override is not None else await self._reader.get_breakdown(info)
         if not breakdown.items:
             # Mirror the un-batched path: an asset with no backed-breakdown
             # rows contributes zero items, and any share-lookup error is

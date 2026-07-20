@@ -206,7 +206,8 @@ async def test_prime_compute_uses_batch_get_shares_and_skips_per_asset_get_share
     # Map each asset_id to its info for the prefetch's concurrent lookups.
     reader.get_receipt_token.side_effect = lambda aid: infos[aid]
     reader.batch_get_shares.return_value = {1: Decimal("0.4"), 2: Decimal("0.25")}
-    reader.get_breakdown.return_value = BackedBreakdown(backed_asset_id=42, items=())
+    empty_breakdown = BackedBreakdown(backed_asset_id=42, items=())
+    reader.batch_get_breakdowns.return_value = {1: empty_breakdown, 2: empty_breakdown}
 
     model = _crypto_lending_service(reader)
     registry = _FakeRegistry([model])
@@ -223,6 +224,27 @@ async def test_prime_compute_uses_batch_get_shares_and_skips_per_asset_get_share
     # The result still surfaces the per-allocation entries even though the
     # gap-sweep RRC happens to be zero (no breakdown items in the test fixture).
     assert len(result.per_allocation) == 2
+
+
+@pytest.mark.asyncio
+async def test_prime_compute_batches_breakdowns_and_skips_per_asset_fetch():
+    """Backed breakdowns are prefetched in one batch and reused, not fetched once
+    per allocation — the protocol-wide breakdown query must not fan out."""
+    positions = [
+        make_receipt_token_position(receipt_token_id=1, symbol="aWETH", amount_usd=Decimal("100")),
+        make_receipt_token_position(receipt_token_id=2, symbol="aDAI", amount_usd=Decimal("200")),
+    ]
+    reader = AsyncMock(spec=PostgresCryptoLendingReader)
+    reader.get_receipt_token.side_effect = lambda aid: {1: _info(1, 777), 2: _info(2, 888)}[aid]
+    reader.batch_get_shares.return_value = {1: Decimal("0.4"), 2: Decimal("0.25")}
+    empty = BackedBreakdown(backed_asset_id=42, items=())
+    reader.batch_get_breakdowns.return_value = {1: empty, 2: empty}
+    service = _service(_repo(positions, Decimal("1000")), _FakeRegistry([_crypto_lending_service(reader)]))
+
+    await service.compute(_PRIME)
+
+    reader.batch_get_breakdowns.assert_awaited_once()
+    reader.get_breakdown.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -272,7 +294,7 @@ async def test_prime_compute_degrades_share_error_to_unpriced(share_error, expec
     reader = AsyncMock(spec=PostgresCryptoLendingReader)
     reader.get_receipt_token.side_effect = lambda aid: {1: _info(1, 777), 2: _info(2, 888)}[aid]
     reader.batch_get_shares.return_value = {1: share_error, 2: Decimal("0.5")}
-    reader.get_breakdown.return_value = BackedBreakdown(
+    nonempty_breakdown = BackedBreakdown(
         backed_asset_id=42,
         items=(
             CollateralContribution(
@@ -284,6 +306,7 @@ async def test_prime_compute_degrades_share_error_to_unpriced(share_error, expec
             ),
         ),
     )
+    reader.batch_get_breakdowns.return_value = {1: nonempty_breakdown, 2: nonempty_breakdown}
     service = _service(_repo(positions, Decimal("1000")), _FakeRegistry([_crypto_lending_service(reader)]))
 
     with patch("app.services.prime_risk_capital_service.logger") as mock_logger:
@@ -320,7 +343,7 @@ async def test_prime_compute_swallows_share_error_for_empty_breakdown():
     reader = AsyncMock(spec=PostgresCryptoLendingReader)
     reader.get_receipt_token.return_value = _info(1, 777)
     reader.batch_get_shares.return_value = {1: MissingShareError("warm-up")}
-    reader.get_breakdown.return_value = BackedBreakdown(backed_asset_id=42, items=())
+    reader.batch_get_breakdowns.return_value = {1: BackedBreakdown(backed_asset_id=42, items=())}
 
     model = _crypto_lending_service(reader)
     registry = _FakeRegistry([model])

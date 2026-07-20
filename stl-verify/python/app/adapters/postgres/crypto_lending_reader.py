@@ -1,3 +1,4 @@
+import asyncio
 import re
 from collections.abc import Mapping, Sequence
 from decimal import Decimal
@@ -141,6 +142,43 @@ class PostgresCryptoLendingReader:
             return await self._maple_breakdown_repo.get_backed_breakdown(info.receipt_token_address, info.chain_id)
 
         raise ValueError(f"unsupported protocol: {info.protocol_name!r} (normalized: {normalized!r})")
+
+    async def batch_get_breakdowns(self, infos: Sequence[ReceiptTokenInfo]) -> dict[int, BackedBreakdown]:
+        """Resolve backed breakdowns for many receipt tokens, keyed by receipt_token_id.
+
+        Aave-like infos are grouped by protocol and resolved in a single query per
+        protocol (the protocol-wide debt/collateral/price CTEs run once), which is
+        the dominant ``/risk-capital`` cost; Morpho/Maple fall back to their
+        per-token lookups. All lookups run concurrently.
+        """
+        aave_by_protocol: dict[int, list[ReceiptTokenInfo]] = {}
+        others: list[ReceiptTokenInfo] = []
+        for info in infos:
+            if _normalize_protocol_name(info.protocol_name) in _AAVE_LIKE:
+                aave_by_protocol.setdefault(info.protocol_id, []).append(info)
+            else:
+                others.append(info)
+
+        result: dict[int, BackedBreakdown] = {}
+
+        async def _resolve_aave(protocol_id: int, protocol_infos: list[ReceiptTokenInfo]) -> None:
+            breakdowns = await self._aave_breakdown_repo.get_backed_breakdowns(
+                protocol_id, [i.underlying_token_id for i in protocol_infos]
+            )
+            for i in protocol_infos:
+                result[i.receipt_token_id] = breakdowns.get(
+                    i.underlying_token_id,
+                    BackedBreakdown(backed_asset_id=i.underlying_token_id, items=()),
+                )
+
+        async def _resolve_other(info: ReceiptTokenInfo) -> None:
+            result[info.receipt_token_id] = await self.get_breakdown(info)
+
+        await asyncio.gather(
+            *(_resolve_aave(pid, pinfos) for pid, pinfos in aave_by_protocol.items()),
+            *(_resolve_other(info) for info in others),
+        )
+        return result
 
     async def get_liquidation_params(
         self,
