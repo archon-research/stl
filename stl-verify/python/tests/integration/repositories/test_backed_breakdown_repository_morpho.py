@@ -261,6 +261,9 @@ _MUSDC_ADDRESS = b"\xee" * 20  # vault share token for mUSDC
 _MUSDCI_ADDRESS = b"\xff" * 20  # vault share token for mUSDCi
 _WETH_VAULT_ADDRESS = b"\x1a" * 20  # idle-only vault whose loan token is WETH (non-stablecoin)
 _MWETHI_ADDRESS = b"\x1b" * 20  # vault share token for mWETHi
+_UNPRICED_VAULT_ADDRESS = b"\x2a" * 20  # idle-only vault whose loan token has no price
+_MUNPXI_ADDRESS = b"\x2b" * 20  # vault share token for mUNPXi
+_UNPX_ADDRESS = b"\x2c" * 20  # loan token with no onchain price
 
 # WETH loan-token price for the non-stablecoin vault, proving backing_value is
 # scaled to USD rather than left in loan-token units.
@@ -357,6 +360,19 @@ async def _seed_data(db_url: str) -> None:
         await _insert_loan_token_price(conn, weth_id, chainlink_oracle_id, "2000.000000000000000000")
         del weth_vault_user_id
 
+        # Unpriced loan-token vault: 100 UNPX idle, no price seeded for UNPX. Exercises
+        # the null-price fallback — the item keeps raw loan-token units and price_usd is
+        # None, so enrichment drops it rather than treating raw units as USD.
+        unpx_id = await insert_token(conn, "UNPX", 18, _UNPX_ADDRESS)
+        unpriced_vault_user_id = await insert_user(conn, _UNPRICED_VAULT_ADDRESS)
+        munpxi_token_id = await insert_token(conn, "mUNPXi", 18, _MUNPXI_ADDRESS)
+        unpriced_vault_id = await _insert_morpho_vault(
+            conn, protocol_id, _UNPRICED_VAULT_ADDRESS, unpx_id, name="Morpho Unpriced Vault", symbol="mUNPXi"
+        )
+        await _insert_allocation_position(conn, munpxi_token_id, prime_id, _UNPRICED_VAULT_ADDRESS, "100", block)
+        await _insert_morpho_vault_state(conn, unpriced_vault_id, "100000000000000000000", block)  # 100 UNPX (18 dec)
+        del unpriced_vault_user_id
+
         await store_test_ids(
             conn,
             {
@@ -364,11 +380,13 @@ async def _seed_data(db_url: str) -> None:
                 "vault_id": vault_id,
                 "idle_vault_id": idle_vault_id,
                 "weth_idle_vault_id": weth_vault_id,
+                "unpriced_vault_id": unpriced_vault_id,
                 "vault_token_id": musdc_token_id,
                 "idle_vault_token_id": musdci_token_id,
                 "usdc_id": usdc_id,
                 "weth_id": weth_id,
                 "wbtc_id": wbtc_id,
+                "unpx_id": unpx_id,
             },
         )
     finally:
@@ -521,6 +539,26 @@ async def test_nonstablecoin_loan_token_scales_backing_value_to_usd(
     assert item.token_id == test_ids["weth_id"]
     assert item.price_usd == _WETH_PRICE_USD
     assert item.backing_value == Decimal("200000.00")
+    assert item.backing_pct == Decimal("100.00")
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_unpriced_loan_token_keeps_raw_units_and_null_price(
+    repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
+) -> None:
+    """A loan token with no price yields price_usd None and raw (unscaled) backing_value.
+
+    100 UNPX idle, no price -> price_usd None, backing_value 100.00 (loan-token units,
+    NOT USD). Enrichment drops such items, so the raw units never leak as USD.
+    """
+    result = await repository.get_backed_breakdown(test_ids["unpriced_vault_id"])
+
+    assert len(result.items) == 1
+    item = result.items[0]
+    assert item.symbol == "UNPX"
+    assert item.token_id == test_ids["unpx_id"]
+    assert item.price_usd is None
+    assert item.backing_value == Decimal("100.00")
     assert item.backing_pct == Decimal("100.00")
 
 
