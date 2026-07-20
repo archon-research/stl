@@ -259,6 +259,12 @@ _WETH_ADDRESS = b"\xc0\x2a\xaa\x39\xb2\x23\xfe\x8d\x0a\x0e\x5c\x4f\x27\xea\xd9\x
 _WBTC_ADDRESS = b"\x22\x60\xfa\xc5\xe5\x54\x2a\x77\x3a\xa4\x4f\xbc\xfe\xdf\x7c\x19\x3b\xc2\xc5\x99"
 _MUSDC_ADDRESS = b"\xee" * 20  # vault share token for mUSDC
 _MUSDCI_ADDRESS = b"\xff" * 20  # vault share token for mUSDCi
+_WETH_VAULT_ADDRESS = b"\x1a" * 20  # idle-only vault whose loan token is WETH (non-stablecoin)
+_MWETHI_ADDRESS = b"\x1b" * 20  # vault share token for mWETHi
+
+# WETH loan-token price for the non-stablecoin vault, proving backing_value is
+# scaled to USD rather than left in loan-token units.
+_WETH_PRICE_USD = Decimal("2000")
 
 
 @pytest_asyncio.fixture(scope="module", loop_scope="module")
@@ -338,12 +344,26 @@ async def _seed_data(db_url: str) -> None:
         await _insert_morpho_vault_state(conn, idle_vault_id, "500000000000", block)
         del idle_vault_user_id  # user must exist for vault_users CTE; no positions inserted
 
+        # Non-stablecoin loan-token vault: 100 WETH idle, WETH priced at $2,000.
+        # Exercises the loan-token -> USD scaling (100 * 2000 = 200,000) that a
+        # stablecoin vault at ~$1 leaves visually indistinguishable.
+        weth_vault_user_id = await insert_user(conn, _WETH_VAULT_ADDRESS)
+        mwethi_token_id = await insert_token(conn, "mWETHi", 18, _MWETHI_ADDRESS)
+        weth_vault_id = await _insert_morpho_vault(
+            conn, protocol_id, _WETH_VAULT_ADDRESS, weth_id, name="Morpho WETH Idle Vault", symbol="mWETHi"
+        )
+        await _insert_allocation_position(conn, mwethi_token_id, prime_id, _WETH_VAULT_ADDRESS, "100", block)
+        await _insert_morpho_vault_state(conn, weth_vault_id, "100000000000000000000", block)  # 100 WETH (18 dec)
+        await _insert_loan_token_price(conn, weth_id, chainlink_oracle_id, "2000.000000000000000000")
+        del weth_vault_user_id
+
         await store_test_ids(
             conn,
             {
                 "protocol_id": protocol_id,
                 "vault_id": vault_id,
                 "idle_vault_id": idle_vault_id,
+                "weth_idle_vault_id": weth_vault_id,
                 "vault_token_id": musdc_token_id,
                 "idle_vault_token_id": musdci_token_id,
                 "usdc_id": usdc_id,
@@ -393,14 +413,14 @@ async def test_vault_backed_breakdown(
 ) -> None:
     """Vault with two market allocations produces correct collateral and loan token breakdown.
 
-    Vault: 1M USDC total assets
+    Vault: 1M USDC total assets, loan token priced at $1.0001.
       Market A (WETH/USDC): 400K supply, 80% utilization
       Market B (WBTC/USDC): 300K supply, 50% utilization
 
-    Expected:
-      USDC: 530,000 (53%)  — borrowed-but-not-utilized + idle
-      WETH: 320,000 (32%)  — 400K * 0.80
-      WBTC: 150,000 (15%)  — 300K * 0.50
+    backing_value is USD (loan-token units * loan-token price):
+      USDC: 530,000 * 1.0001 = 530,053.00 (53%)  — borrowed-but-not-utilized + idle
+      WETH: 320,000 * 1.0001 = 320,032.00 (32%)  — 400K * 0.80
+      WBTC: 150,000 * 1.0001 = 150,015.00 (15%)  — 300K * 0.50
     """
     result = await repository.get_backed_breakdown(test_ids["vault_id"])
 
@@ -413,13 +433,13 @@ async def test_vault_backed_breakdown(
     assert "WETH" in by_symbol
     assert "WBTC" in by_symbol
 
-    assert by_symbol["USDC"].backing_value == Decimal("530000.00")
+    assert by_symbol["USDC"].backing_value == Decimal("530053.00")
     assert by_symbol["USDC"].backing_pct == Decimal("53.00")
 
-    assert by_symbol["WETH"].backing_value == Decimal("320000.00")
+    assert by_symbol["WETH"].backing_value == Decimal("320032.00")
     assert by_symbol["WETH"].backing_pct == Decimal("32.00")
 
-    assert by_symbol["WBTC"].backing_value == Decimal("150000.00")
+    assert by_symbol["WBTC"].backing_value == Decimal("150015.00")
     assert by_symbol["WBTC"].backing_pct == Decimal("15.00")
 
 
@@ -486,6 +506,25 @@ async def test_items_carry_loan_token_price(
 
 
 @pytest.mark.asyncio(loop_scope="module")
+async def test_nonstablecoin_loan_token_scales_backing_value_to_usd(
+    repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
+) -> None:
+    """A vault whose loan token is not ~$1 has backing_value scaled to USD (VEC-511).
+
+    100 WETH idle, WETH @ $2,000 -> 100% WETH at 200,000.00 USD (not 100 units).
+    """
+    result = await repository.get_backed_breakdown(test_ids["weth_idle_vault_id"])
+
+    assert len(result.items) == 1
+    item = result.items[0]
+    assert item.symbol == "WETH"
+    assert item.token_id == test_ids["weth_id"]
+    assert item.price_usd == _WETH_PRICE_USD
+    assert item.backing_value == Decimal("200000.00")
+    assert item.backing_pct == Decimal("100.00")
+
+
+@pytest.mark.asyncio(loop_scope="module")
 async def test_vault_with_no_market_positions_is_fully_idle(
     repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
 ) -> None:
@@ -496,7 +535,7 @@ async def test_vault_with_no_market_positions_is_fully_idle(
     Expected:
       vault_idle = total_assets - 0 = 500,000 USDC
       breakdown and all_backing second-branch are both empty.
-      Result: USDC 100% at 500,000.00
+      Result: USDC 100% at 500,000 * 1.0001 = 500,050.00 USD
     """
     result = await repository.get_backed_breakdown(test_ids["idle_vault_id"])
 
@@ -504,6 +543,6 @@ async def test_vault_with_no_market_positions_is_fully_idle(
 
     item = result.items[0]
     assert item.symbol == "USDC"
-    assert item.backing_value == Decimal("500000.00")
+    assert item.backing_value == Decimal("500050.00")
     assert item.backing_pct == Decimal("100.00")
     assert item.token_id == test_ids["usdc_id"]

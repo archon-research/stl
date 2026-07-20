@@ -168,18 +168,24 @@ class MorphoBackedBreakdownRepository:
             )
             rows = result.fetchall()
 
-        items = tuple(
-            CollateralContribution(
-                token_id=row.token_id,
-                symbol=row.symbol,
-                backing_value=Decimal(str(row.backed_amount)),
-                backing_pct=Decimal(str(row.backing_pct)),
-                price_usd=Decimal(str(row.price_usd)) if row.price_usd is not None else None,
+        items: list[CollateralContribution] = []
+        for row in rows:
+            price_usd = Decimal(str(row.price_usd)) if row.price_usd is not None else None
+            # backed_amount is in loan-token units; scale by the loan-token price so
+            # backing_value is USD (what enrichment reads as amount_usd), correct even
+            # when the loan token is not ~$1. An unpriced row keeps raw units, but it is
+            # dropped at enrichment (price_usd is None) so that value is never used.
+            backing_value = Decimal(str(row.backed_amount))
+            if price_usd is not None:
+                backing_value *= price_usd
+            items.append(
+                CollateralContribution(
+                    token_id=row.token_id,
+                    symbol=row.symbol,
+                    backing_value=backing_value,
+                    backing_pct=Decimal(str(row.backing_pct)),
+                    price_usd=price_usd,
+                )
             )
-            for row in rows
-        )
 
-        return BackedBreakdown(
-            backed_asset_id=backed_asset_id,
-            items=items,
-        )
+        return BackedBreakdown(backed_asset_id=backed_asset_id, items=tuple(items))
