@@ -7,6 +7,18 @@ import {
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { css } from '#styled-system/css';
+
+import type {
+  ChartDatum,
+  MetricChartKind,
+} from './components/allocations/AllocationGrid';
+import {
+  AllocationGrid,
+  type MetricChartSpec,
+} from './components/allocations/AllocationGrid';
+import { BottomPanel } from './components/allocations/BottomPanel';
+import { RiskDetailDrawer } from './components/allocations/RiskDetailDrawer';
+import { ActivityFeed } from './components/allocations/tabs/ActivityFeed';
 // DEFAULT_RANGE_PRESET / defaultTimeRange come from the local shared barrel so
 // the temporary 24h override in components/shared/index.ts applies here too;
 // see that file for context.
@@ -21,18 +33,6 @@ import {
   type TimeRange,
   TokenLogo,
 } from './components/shared';
-
-import type {
-  ChartDatum,
-  MetricChartKind,
-} from './components/allocations/AllocationGrid';
-import {
-  AllocationGrid,
-  type MetricChartSpec,
-} from './components/allocations/AllocationGrid';
-import { BottomPanel } from './components/allocations/BottomPanel';
-import { RiskDetailDrawer } from './components/allocations/RiskDetailDrawer';
-import { ActivityFeed } from './components/allocations/tabs/ActivityFeed';
 import { PrimeSidebar } from './components/shared/PrimeSidebar';
 import { TopBar } from './components/shared/TopBar';
 import { useUrlSyncedTableState } from './data-table/hooks';
