@@ -114,13 +114,33 @@ WITH morpho_vaults AS (
   ),
   total AS (
       SELECT sum(amount) as total_amount FROM all_backing
+  ),
+  -- Every backing amount above is denominated in the vault's loan token, so the
+  -- loan token's USD price (not each collateral token's) is what converts them.
+  -- Resolved via the vault's Morpho Blue protocol_oracle binding, mirroring the
+  -- Aave repo's token_prices CTE (same enabled-oracle_asset gate + snapshot order).
+  loan_token_price AS (
+      SELECT otp.price_usd
+      FROM morpho_vault v
+      JOIN protocol_oracle po ON po.protocol_id = v.protocol_id
+      JOIN onchain_token_price otp ON otp.oracle_id = po.oracle_id AND otp.token_id = v.asset_token_id
+      WHERE v.id = :backed_asset_id
+        AND EXISTS (
+            SELECT 1 FROM oracle_asset oa
+            WHERE oa.oracle_id = otp.oracle_id AND oa.token_id = otp.token_id AND oa.enabled
+        )
+      ORDER BY otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC, otp.oracle_id DESC
+      LIMIT 1
   )
   SELECT a.token_id,
          a.symbol,
          round(sum(a.amount)::numeric, 2) as backed_amount,
-         round((sum(a.amount) / NULLIF(t.total_amount, 0) * 100)::numeric, 2) as backing_pct
-  FROM all_backing a, total t
-  GROUP BY a.token_id, a.symbol, t.total_amount
+         round((sum(a.amount) / NULLIF(t.total_amount, 0) * 100)::numeric, 2) as backing_pct,
+         ltp.price_usd
+  FROM all_backing a
+  CROSS JOIN total t
+  LEFT JOIN loan_token_price ltp ON true
+  GROUP BY a.token_id, a.symbol, t.total_amount, ltp.price_usd
   HAVING sum(a.amount) > {_MIN_COLLATERAL_AMOUNT}
   ORDER BY backed_amount DESC
 """
@@ -154,7 +174,7 @@ class MorphoBackedBreakdownRepository:
                 symbol=row.symbol,
                 backing_value=Decimal(str(row.backed_amount)),
                 backing_pct=Decimal(str(row.backing_pct)),
-                price_usd=None,
+                price_usd=Decimal(str(row.price_usd)) if row.price_usd is not None else None,
             )
             for row in rows
         )

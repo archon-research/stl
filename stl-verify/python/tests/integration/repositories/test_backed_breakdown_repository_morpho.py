@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.postgres.backed_breakdown_repository_morpho import MorphoBackedBreakdownRepository
 from app.domain.entities.backed_breakdown import BackedBreakdown
-from tests.integration.seed import insert_token, insert_user, store_test_ids
+from tests.integration.seed import insert_oracle_asset, insert_token, insert_user, store_test_ids
 
 
 class ProtocolScopedBackedBreakdownRepository(Protocol):
@@ -23,6 +23,27 @@ class ProtocolScopedBackedBreakdownRepository(Protocol):
 # ---------------------------------------------------------------------------
 
 _SEED_BLOCK_NUMBER = 20_000_000
+
+# The vault's loan token (USDC) USD price seeded via the Morpho Blue -> chainlink
+# oracle binding. Deliberately off $1 so the assertion proves items carry the real
+# fetched price, not a hardcoded 1.
+_LOAN_TOKEN_PRICE_USD = Decimal("1.0001")
+
+
+async def _insert_loan_token_price(conn: asyncpg.Connection, token_id: int, oracle_id: int, price: str) -> None:
+    """Insert an onchain price for the vault's loan token + its enabled oracle_asset mapping."""
+    await conn.execute(
+        """
+        INSERT INTO onchain_token_price
+            (token_id, oracle_id, block_number, block_version, timestamp, price_usd)
+        VALUES ($1, $2, $3, 0, NOW(), $4::numeric(30,18))
+        """,
+        token_id,
+        oracle_id,
+        _SEED_BLOCK_NUMBER,
+        price,
+    )
+    await insert_oracle_asset(conn, oracle_id, token_id)
 
 
 async def _insert_protocol(conn: asyncpg.Connection) -> int:
@@ -259,6 +280,22 @@ async def _seed_data(db_url: str) -> None:
         musdc_token_id = await insert_token(conn, "mUSDC", 18, _MUSDC_ADDRESS)
         musdci_token_id = await insert_token(conn, "mUSDCi", 18, _MUSDCI_ADDRESS)
 
+        # Loan-token (USDC) price via the Morpho Blue -> chainlink binding, so the
+        # breakdown items carry a non-null price_usd (VEC-511). chainlink is
+        # migration-seeded; the breakdown query reaches it through protocol_oracle.
+        chainlink_oracle_id = cast(int, await conn.fetchval("SELECT id FROM oracle WHERE name = 'chainlink'"))
+        await conn.execute(
+            """
+            INSERT INTO protocol_oracle (protocol_id, oracle_id, from_block)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (protocol_id, oracle_id, from_block) DO NOTHING
+            """,
+            protocol_id,
+            chainlink_oracle_id,
+            _SEED_BLOCK_NUMBER,
+        )
+        await _insert_loan_token_price(conn, usdc_id, chainlink_oracle_id, "1.000100000000000000")
+
         # Prime — needed as FK for allocation_position.prime_id
         prime_id = await _insert_prime(conn, "test-prime", _VAULT_ADDRESS)
 
@@ -430,6 +467,22 @@ async def test_token_ids_are_populated(
     assert by_symbol["USDC"].token_id == test_ids["usdc_id"]
     assert by_symbol["WETH"].token_id == test_ids["weth_id"]
     assert by_symbol["WBTC"].token_id == test_ids["wbtc_id"]
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_items_carry_loan_token_price(
+    repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
+) -> None:
+    """Every item carries the vault's loan-token USD price (VEC-511).
+
+    The breakdown amounts are loan-token-denominated, so the loan token's price is
+    what all rows expose. Without a non-null price_usd, CryptoLendingRiskService
+    drops every item at enrichment and gap_sweep RRC collapses to 0.
+    """
+    result = await repository.get_backed_breakdown(test_ids["vault_id"])
+
+    assert result.items
+    assert all(item.price_usd == _LOAN_TOKEN_PRICE_USD for item in result.items)
 
 
 @pytest.mark.asyncio(loop_scope="module")
