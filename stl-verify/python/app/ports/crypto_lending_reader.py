@@ -34,6 +34,14 @@ class CryptoLendingReader(Protocol):
         """Return the resolved backed breakdown for the receipt token's protocol."""
         ...
 
+    async def batch_get_breakdowns(self, infos: Sequence[ReceiptTokenInfo]) -> dict[int, BackedBreakdown]:
+        """Return backed breakdowns for many receipt tokens, keyed by receipt_token_id.
+
+        Batches the protocol-wide work (one query per aave-like protocol) instead
+        of one query per receipt token.
+        """
+        ...
+
     async def get_liquidation_params(
         self,
         info: ReceiptTokenInfo,

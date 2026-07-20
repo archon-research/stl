@@ -66,6 +66,7 @@ def receipt_token_repo() -> MagicMock:
 def aave_breakdown_repo() -> MagicMock:
     repo = MagicMock()
     repo.get_backed_breakdown = AsyncMock(return_value=BackedBreakdown(backed_asset_id=42, items=()))
+    repo.get_backed_breakdowns = AsyncMock(return_value={})
     return repo
 
 
@@ -517,3 +518,33 @@ async def test_list_supported_asset_ids_excludes_maple(
 
     # Maple has no RRC model yet, so it must not be RRC-eligible.
     assert await reader.list_supported_asset_ids() == {1}
+
+
+@pytest.mark.asyncio
+async def test_batch_get_breakdowns_groups_aave_by_protocol(
+    reader: PostgresCryptoLendingReader,
+    aave_breakdown_repo: MagicMock,
+    morpho_breakdown_repo: MagicMock,
+) -> None:
+    """Aave-like infos of one protocol resolve in a single get_backed_breakdowns
+    call (protocol-wide CTEs run once); non-aave protocols fall back to per-token
+    lookups. Results are keyed by receipt_token_id."""
+    info_a = _aave_like_info()  # receipt_token_id=99, protocol_id=1, underlying=42
+    info_b = replace(_aave_like_info(), receipt_token_id=100, underlying_token_id=43)
+    morpho = replace(_morpho_info(), receipt_token_id=101)
+
+    aave_breakdown_repo.get_backed_breakdowns = AsyncMock(
+        return_value={
+            42: BackedBreakdown(backed_asset_id=42, items=()),
+            43: BackedBreakdown(backed_asset_id=43, items=()),
+        }
+    )
+
+    out = await reader.batch_get_breakdowns([info_a, info_b, morpho])
+
+    aave_breakdown_repo.get_backed_breakdowns.assert_awaited_once_with(1, [42, 43])
+    aave_breakdown_repo.get_backed_breakdown.assert_not_awaited()
+    assert out[99].backed_asset_id == 42
+    assert out[100].backed_asset_id == 43
+    # Morpho routed through its own (per-token) resolution.
+    assert out[101].backed_asset_id == 55
