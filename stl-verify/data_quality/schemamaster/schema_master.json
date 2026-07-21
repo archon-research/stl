@@ -11,6 +11,7 @@
     "entity_type_ref",
     "industry_group_ref",
     "origination_type_ref",
+    "position_classification",
     "position_entity_link",
     "sector_ref",
     "security_subtype_ref",
