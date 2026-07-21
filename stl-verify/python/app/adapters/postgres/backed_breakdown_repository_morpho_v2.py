@@ -1,23 +1,15 @@
 # ruff: noqa: E501
 from decimal import Decimal
-from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.adapters.postgres.backed_breakdown_repository_morpho import MorphoVaultRef
-from app.domain.entities.backed_breakdown import (
-    BackedBreakdown,
-    CollateralContribution,
-)
+from app.adapters.postgres._morpho_breakdown_common import MorphoVaultRef, resolve_morpho_vault, to_contribution
+from app.domain.entities.backed_breakdown import BackedBreakdown
 
 # Minimum backing amount in loan-token (vault-asset) units to include; filters dust
 # that would only add noise to the percentage split. Mirrors the V1 repository.
 _MIN_COLLATERAL_AMOUNT = Decimal("0.01")
-
-_VAULT_RESOLVE_SQL = """
-SELECT id, vault_version FROM morpho_vault WHERE address = :addr AND chain_id = :chain_id
-"""
 
 # ---------------------------------------------------------------------------
 # Morpho VaultV2 backed-breakdown walk (VEC-219).
@@ -52,8 +44,9 @@ SELECT id, vault_version FROM morpho_vault WHERE address = :addr AND chain_id = 
 # Every amount is denominated in the vault's underlying asset: type-1 markets and
 # every nested V1 market have that asset as their loan token, so utilisation splits
 # stay in loan-token units and only need the vault asset's decimals to scale to
-# human units. The collateral token_id merely labels the row (as in V1). Prices are
-# intentionally omitted (price_usd = None) exactly as the V1 repository does.
+# human units. The collateral token_id merely labels the row (as in V1). Rows are
+# priced by the same token_prices + loan_token_price CTEs the V1 repository uses, so
+# backing_value is USD; see the shared ``to_contribution`` for the mapping.
 # ---------------------------------------------------------------------------
 _MORPHO_V2_BACKED_BREAKDOWN_SQL = f"""
 WITH v2 AS (
@@ -78,7 +71,7 @@ WITH v2 AS (
   -- walk keys on ADAPTER users: a VaultV2 never supplies to Morpho Blue under its own
   -- address, so any market_position attributed to the vault address itself (e.g. vault
   -- 760 wethpv's single dust row) is a misattributed artifact and is deliberately
-  -- ignored — never unioned in (VEC-219 investigation).
+  -- ignored — never unioned in.
   adapters AS (
       SELECT ma.id AS adapter_id,
              ma.adapter_type,
@@ -313,20 +306,17 @@ class MorphoV2BackedBreakdownRepository:
     def __init__(self, engine: AsyncEngine) -> None:
         self._engine = engine
 
-    async def resolve_vault_id(self, address: bytes, chain_id: int) -> int | None:
-        """Resolve a Morpho vault's internal ID from its onchain address."""
-        ref = await self.resolve_vault(address, chain_id)
-        return ref.id if ref is not None else None
-
     async def resolve_vault(self, address: bytes, chain_id: int) -> MorphoVaultRef | None:
         """Resolve a Morpho vault's internal id and ``vault_version`` from its onchain address."""
-        async with self._engine.connect() as conn:
-            result = await conn.execute(text(_VAULT_RESOLVE_SQL), {"addr": address, "chain_id": chain_id})
-            row = result.fetchone()
-        return MorphoVaultRef(id=row.id, vault_version=row.vault_version) if row is not None else None
+        return await resolve_morpho_vault(self._engine, address, chain_id)
 
     async def get_backed_breakdown(self, backed_asset_id: int) -> BackedBreakdown:
-        """Execute the VaultV2 backed-breakdown walk and return domain objects."""
+        """Execute the VaultV2 backed-breakdown walk and return domain objects.
+
+        Rows map to ``CollateralContribution`` via the shared ``to_contribution`` (same
+        USD-scaling as the V1 repo): backing_value = loan-token amount × loan-token
+        price, price_usd per row, all-None when the loan token is unpriced.
+        """
         async with self._engine.connect() as connection:
             result = await connection.execute(
                 text(_MORPHO_V2_BACKED_BREAKDOWN_SQL),
@@ -334,31 +324,4 @@ class MorphoV2BackedBreakdownRepository:
             )
             rows = result.fetchall()
 
-        items = [self._to_contribution(row) for row in rows]
-        return BackedBreakdown(backed_asset_id=backed_asset_id, items=tuple(items))
-
-    @staticmethod
-    def _to_contribution(row: Any) -> CollateralContribution:
-        # Identical to the V1 repo's _to_contribution: backed_amount is loan-token
-        # units, scaled by the loan-token price to USD; price_usd is each row token's
-        # own price. If the loan token has no price the whole vault is unpriced, so
-        # backing_value stays raw and price_usd is None on every row — the risk service
-        # detects the all-unpriced breakdown and degrades to price_data_missing.
-        backed_amount = Decimal(str(row.backed_amount))
-        loan_token_price = Decimal(str(row.loan_token_price)) if row.loan_token_price is not None else None
-        if loan_token_price is None:
-            return CollateralContribution(
-                token_id=row.token_id,
-                symbol=row.symbol,
-                backing_value=backed_amount,
-                backing_pct=Decimal(str(row.backing_pct)),
-                price_usd=None,
-            )
-        token_price_usd = Decimal(str(row.token_price_usd)) if row.token_price_usd is not None else None
-        return CollateralContribution(
-            token_id=row.token_id,
-            symbol=row.symbol,
-            backing_value=backed_amount * loan_token_price,
-            backing_pct=Decimal(str(row.backing_pct)),
-            price_usd=token_price_usd,
-        )
+        return BackedBreakdown(backed_asset_id=backed_asset_id, items=tuple(to_contribution(row) for row in rows))

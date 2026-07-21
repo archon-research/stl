@@ -56,6 +56,7 @@ from typing import Any, cast
 import httpx
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from app.adapters.postgres.backed_breakdown_repository_morpho_v2 import MorphoV2BackedBreakdownRepository
@@ -146,6 +147,13 @@ def parse_spark_response(payload: Mapping[str, Any]) -> Snapshot:
         if not isinstance(symbol, str) or amount is None:
             continue
         underlying[symbol] = underlying.get(symbol, Decimal(0)) + amount
+
+    if not underlying:
+        # A balance with zero parseable asset rows is exactly the lenient-parser
+        # false-pass this script exists to catch: an empty underlying would compare
+        # equal to an empty our-side and report a spurious PASS. Refuse it so the
+        # schema mismatch (or an empty upstream) surfaces as could-not-run, not pass.
+        raise ValueError("spark response has a balance but no parseable asset rows")
 
     return Snapshot(balance=balance, underlying=underlying)
 
@@ -244,9 +252,9 @@ async def load_our_snapshot(engine: AsyncEngine, *, vault_hex: str, wallet_hex: 
 
     ``balance`` is the wallet's redeemable assets (``morpho_vault_position.assets``
     scaled to human units); ``underlying`` is the whole-vault backed breakdown scaled
-    by the wallet's share of the vault (wallet_assets / vault_total_assets). Since
-    VEC-511, ``CollateralContribution.backing_value`` is a USD value (loan-token amount
-    × loan-token price), so per-asset ``underlying`` here is USD; for the stable
+    by the wallet's share of the vault (wallet_assets / vault_total_assets).
+    ``CollateralContribution.backing_value`` is a USD value (loan-token amount ×
+    loan-token price), so per-asset ``underlying`` here is USD; for the stable
     sparkUSDTbc vault that is ≈ 1:1 with the underlying-token ``balance``. The exact
     Spark-side unit is pinned when the endpoint is reachable (see module docstring).
     """
@@ -276,7 +284,12 @@ async def load_our_snapshot(engine: AsyncEngine, *, vault_hex: str, wallet_hex: 
 
     balance = wallet_assets / scale
     fraction = (wallet_assets / vault_total) if vault_total > 0 else Decimal(0)
-    underlying = {item.symbol: item.backing_value * fraction for item in breakdown.items}
+    # Sum by symbol (do not overwrite): the breakdown groups by token_id, so two
+    # tokens sharing a symbol are distinct rows that must aggregate, matching how the
+    # spark side sums duplicate symbols in parse_spark_response.
+    underlying: dict[str, Decimal] = {}
+    for item in breakdown.items:
+        underlying[item.symbol] = underlying.get(item.symbol, Decimal(0)) + item.backing_value * fraction
     return Snapshot(balance=balance, underlying=underlying)
 
 
@@ -326,7 +339,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         return asyncio.run(run(args))
-    except (httpx.HTTPError, OSError, ValueError) as exc:
+    except (httpx.HTTPError, OSError, SQLAlchemyError, ValueError) as exc:
+        # A DB or network failure means the comparison could not run — exit 2, distinct
+        # from exit 1 (ran, and the two sides disagree).
         print(f"cross-check could not run: {exc}", file=sys.stderr)
         return 2
 
