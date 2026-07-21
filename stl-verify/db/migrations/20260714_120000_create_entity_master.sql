@@ -34,7 +34,7 @@
 CREATE TABLE IF NOT EXISTS entity_master (
     entity_id            text NOT NULL,                 -- natural key (em-...), stable across all versions; PK with processing_version
     processing_version   integer NOT NULL DEFAULT 0,    -- monotonic per entity_id; SCD2 dedup key (0-based, matching the pipeline processing_version convention)
-    valid_from           date NOT NULL DEFAULT CURRENT_DATE,  -- when this version became effective (only temporal field stored)
+    valid_from           date NOT NULL DEFAULT ((now() AT TIME ZONE 'utc')::date),  -- when this version became effective (only temporal field stored); UTC so it doesn't shift with the writer's session TimeZone
     change_reason        text NOT NULL,                 -- mandatory: why this version exists
     legal_name           text,
     short_name           text,
@@ -114,24 +114,27 @@ CREATE INDEX IF NOT EXISTS em_protocol_idx ON entity_master (pipeline_protocol_i
 -- Both views below are SELECT *, so their column list is frozen at creation: a future
 -- ALTER TABLE entity_master ADD COLUMN must also CREATE OR REPLACE both views, or the new column will
 -- silently not appear in them (these views are the intended read surface).
--- Current view: the latest EFFECTIVE version per entity_id. Bounded on CURRENT_DATE so a
--- future-dated version does NOT become current until its valid_from arrives.
+-- Current view: the latest EFFECTIVE version per entity_id. Bounded on UTC "today"
+-- ((now() AT TIME ZONE 'utc')::date), NOT CURRENT_DATE, so which version is current is the same for
+-- every reader regardless of session TimeZone. A future-dated version does NOT become current until
+-- its valid_from arrives.
 CREATE OR REPLACE VIEW entity_master_current AS
 SELECT DISTINCT ON (entity_id) *
 FROM entity_master
-WHERE valid_from <= CURRENT_DATE
+WHERE valid_from <= (now() AT TIME ZONE 'utc')::date
 ORDER BY entity_id, valid_from DESC, processing_version DESC;
 
 -- Versioned view: derive valid_to (exclusive) and is_current for full-history reads. The validity
 -- window is half-open [valid_from, valid_to_exclusive): point-in-time reads use
 -- valid_from <= d AND (valid_to_exclusive IS NULL OR d < valid_to_exclusive). is_current applies
--- that predicate at CURRENT_DATE, so a future-dated version is NOT current until effective, and a
--- same-day correction (two versions sharing valid_from) yields a zero-width window on the superseded
--- row so it is never current.
+-- that predicate at UTC "today" ((now() AT TIME ZONE 'utc')::date, matching entity_master_current so
+-- the two agree for every session TimeZone), so a future-dated version is NOT current until effective,
+-- and a same-day correction (two versions sharing valid_from) yields a zero-width window on the
+-- superseded row so it is never current.
 CREATE OR REPLACE VIEW entity_master_versions AS
 SELECT *,
-    (valid_from <= CURRENT_DATE
-        AND (valid_to_exclusive IS NULL OR CURRENT_DATE < valid_to_exclusive)) AS is_current
+    (valid_from <= (now() AT TIME ZONE 'utc')::date
+        AND (valid_to_exclusive IS NULL OR (now() AT TIME ZONE 'utc')::date < valid_to_exclusive)) AS is_current
 FROM (
     SELECT *,
         lead(valid_from) OVER (PARTITION BY entity_id ORDER BY valid_from, processing_version) AS valid_to_exclusive
