@@ -82,7 +82,7 @@ SELECT EXISTS (
 # VaultV2 never supplies to Morpho Blue under its own address, so the walk keys
 # strictly on adapter users and deliberately ignores any morpho_market_position
 # attributed to the vault address itself (e.g. vault 760 wethpv's single dust row
-# is a misattributed artifact, not a real allocation — VEC-219 investigation).
+# is a misattributed artifact, not a real allocation).
 _SQL = """
 WITH v AS (
     SELECT id AS vault_id, chain_id FROM morpho_vault WHERE id = :backed_asset_id
