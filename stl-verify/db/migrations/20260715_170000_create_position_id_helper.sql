@@ -29,17 +29,23 @@
 -- is the materializer's contract, like the NULL-ness convention above.
 -- IMMUTABLE so it can back a generated column or index. Fail hard on bad inputs rather than
 -- emit a silently-wrong identity.
+-- IMMUTABLE is sound even though concat_ws/convert_to are marked STABLE (provolatile='s') and PG does
+-- not check transitive volatility: every concat_ws argument is already text (int4out/int8out are
+-- immutable, so no stable type-output function is reached), and convert_to(..., 'UTF8') is
+-- deterministic for the life of the database (the server encoding is fixed at createdb).
 CREATE OR REPLACE FUNCTION public.position_key(
   _chain_id integer, _protocol_id bigint, _instrument_key text, _holder_id text
 ) RETURNS text
   LANGUAGE plpgsql IMMUTABLE
   SET search_path = pg_catalog, public AS $$
 BEGIN
-  IF _instrument_key IS NULL OR _instrument_key = '' THEN
-    RAISE EXCEPTION 'position_key: instrument_key is required and must be non-empty';
+  -- Reject NULL, empty, and whitespace-only: an all-blank instrument/holder is almost certainly an
+  -- upstream bug, and hashing it would mint a plausible-looking but silently-wrong identity.
+  IF _instrument_key IS NULL OR _instrument_key ~ '^\s*$' THEN
+    RAISE EXCEPTION 'position_key: instrument_key is required and must be non-blank';
   END IF;
-  IF _holder_id IS NULL OR _holder_id = '' THEN
-    RAISE EXCEPTION 'position_key: holder_id is required and must be non-empty (use the native holder id; the entity is resolved downstream, not here)';
+  IF _holder_id IS NULL OR _holder_id ~ '^\s*$' THEN
+    RAISE EXCEPTION 'position_key: holder_id is required and must be non-blank (use the native holder id; the entity is resolved downstream, not here)';
   END IF;
   -- The ';' delimiter is not escaped, so an input containing it could collide two distinct
   -- identities onto one id: instrument_key='a;b',holder='c' and instrument_key='a',holder='b;c'
@@ -55,7 +61,7 @@ BEGIN
     _holder_id);
 END $$;
 COMMENT ON FUNCTION public.position_key(integer, bigint, text, text) IS
-  '[Operational] Canonical position identity string (VEC-400): chain_id;protocol_id;instrument_key;holder_id. Human-readable descriptor and the pre-image of position_id(). Identity is holder + instrument only; classifications (deal_type, leg) are looked-up attributes, not part of the key. Nullable structural fields render empty; instrument_key and holder_id are required, non-empty, and must not contain '';''. chain_id/protocol_id stay nullable but each protocol materializer must use a fixed, documented NULL-ness convention so the same position never forks into two ids. Holder is the native on-chain holder id (wallet or prime vault address); the entity is resolved downstream, not in the key.';
+  '[Operational] Canonical position identity string (VEC-400): chain_id;protocol_id;instrument_key;holder_id. Human-readable descriptor and the pre-image of position_id(). Identity is holder + instrument only; classifications (deal_type, leg) are looked-up attributes, not part of the key. Nullable structural fields render empty; instrument_key and holder_id are required, non-empty, and must not contain '';''. chain_id/protocol_id stay nullable but each protocol materializer must use a fixed, documented NULL-ness convention so the same position never forks into two ids. Text identity fields (on-chain addresses) are passed as lowercase hex, no 0x prefix (the VEC-412 native-key form), so the same position never forks on address casing. Holder is the native on-chain holder id (wallet or prime vault address); the entity is resolved downstream, not in the key.';
 
 -- position_id: sha256 of the canonical string -> bytea, 32 bytes, the joinable PK stamped onto every
 -- position and its downstream tables. sha256() is a built-in (PG 11+); no pgcrypto extension.
