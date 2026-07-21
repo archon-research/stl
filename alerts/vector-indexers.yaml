@@ -182,6 +182,136 @@ groups:
             latency is `{{ $value | printf "%.2fs" }}` over 15m. Indexer is
             degraded; expect lag in downstream oracle price state.
 
+      - alert: VectorOracleUnitStale
+        # Per-oracle-unit freshness (PR #548 review). The whole-worker Stalled /
+        # ErrorsHigh rules cannot see a single oracle unit going dark: a unit
+        # hard-erroring on every block keeps oracle_blocks_processed_total
+        # advancing (status="error"), a feed reverting forever is guard-skipped
+        # without erroring, and change-only writes mean a frozen upstream
+        # produces no rows anyway.
+        #
+        # Gauge `oracle.unit.last_success_timestamp_seconds` (OTel) ->
+        # Prometheus `oracle_unit_last_success_timestamp_seconds`, set by the
+        # worker after every successful per-unit pass, written rows or not, and
+        # baselined per unit at startup: a unit that never succeeds still
+        # creates the series and goes stale one threshold after a deploy, and a
+        # restart re-arms the alert instead of silencing it. Because the gauge
+        # advances regardless of whether the price CHANGED, the signal is "the
+        # worker stopped successfully processing this unit", NOT "the upstream
+        # feed stopped updating". One tight generic threshold therefore works
+        # for every oracle type, including slow NAV-heartbeat feeds (e.g.
+        # JTRSY/JAAA/STAC/BUIDL-I, ~daily): no per-feed-heartbeat tuning. 30m
+        # of consecutive failure (~150 mainnet blocks at ~12s) is decisively
+        # wedged, in the same spirit as the 15m Stalled rule but with slack for
+        # SQS redelivery/backoff bursts.
+        #
+        # Gated on the worker still consuming blocks so a whole-worker STALL
+        # stays VectorOracleIndexerStalled's page instead of also firing once
+        # per unit here. The gate does NOT keep whole-worker error storms out:
+        # a pre-loop failure erroring every block (feed-decimals validation,
+        # block-timestamp resolution) still counts blocks with status="error",
+        # passes the gate, and fires this alert for every unit at once. That
+        # is intended: a single attempt per block on mainnet cadence is
+        # ~0.083 err/s, under ErrorsHigh's 0.1/s threshold, so ErrorsHigh is
+        # unreliable for that storm (SQS redeliveries multiply attempts and
+        # can eventually push it over; avalanche-c cadence trips it outright)
+        # and these warnings may be the first or only page (the runbook's
+        # empty-grep branch covers diagnosis).
+        # Known gaps: a dead OTLP export silences BOTH rules (Stalled is a
+        # bare rate()==0, which goes no-data on staleness-expired series; see
+        # the fluid-vault Stalled zero-fill note), and a unit dropped from the
+        # registry stops exporting its series entirely, which an instant
+        # vector cannot age. Both need follow-up (kube-state zero-fill on
+        # Stalled / an expected-units signal). Also: startup re-baselining
+        # means a worker restarting more often than every ~30m keeps a
+        # never-succeeding unit under threshold forever (an isolated restart
+        # merely delays firing by ~35m).
+        expr: |
+          (
+            time()
+            - max by (chain, cluster, oracle_name) (
+                oracle_unit_last_success_timestamp_seconds{k8s_namespace_name="vector"}
+              )
+          ) > 1800
+          and on (chain, cluster)
+          sum by (chain, cluster) (
+            rate(oracle_blocks_processed_total{k8s_namespace_name="vector"}[5m])
+          ) > 0
+        for: 5m
+        labels:
+          team: vector
+          severity: warning
+          component: oracle-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector oracle unit `{{ $labels.oracle_name }}` stale on {{ $labels.chain }}"
+          description: |
+            `oracle-price-worker` on chain `{{ $labels.chain }}` is still
+            consuming blocks but has not completed a successful pass for oracle
+            unit `{{ $labels.oracle_name }}` in >30m. Prices from this unit in
+            TimescaleDB are going stale while the worker looks healthy. Check
+            the pod logs for per-unit errors and the oracle registry for a
+            misconfigured unit.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectororacleunitstale
+
+      - alert: VectorOracleUnitReadsFailing
+        # Per-oracle-unit feed loss (PR #566 review). The staleness rule above
+        # cannot see it: a reverting feed is guard-skipped without erroring,
+        # so the pass "succeeds", freshness advances, and the unit acks blocks
+        # while prices for the dead feed's tokens freeze in TimescaleDB.
+        #
+        # Counter `oracle.unit.reads_failed` (OTel) -> Prometheus
+        # `oracle_unit_reads_failed_total`: per pass, the pass's read-outcome
+        # count minus the usable prices fetched (reverted feeds and zero
+        # quotes both count as failed). A persistently dark feed therefore
+        # accumulates failures at >=1 per processed block, which is what the
+        # expression matches: the unit's failed-read rate exceeding 0.9x the
+        # chain's block rate for 30m. That covers feed-path total loss (every
+        # feed dark scores >=1x; erc4626/curve total loss hard-errors into
+        # the staleness rule instead) and partial loss (one dark feed scores
+        # exactly 1x) generically, with no per-unit feed-count tuning. The
+        # unit's SUMMED failure rate is what fires: sporadic per-feed reverts
+        # stay quiet only while the unit's combined rate stays under ~0.9
+        # per block.
+        #
+        # The block-rate comparison self-gates on the worker being alive: a
+        # stalled worker drives both sides to zero and the strict > cannot
+        # fire. Hard unit errors are the staleness rule's page, not this
+        # one's: erroring at or before the fetch records no reads, and a
+        # pass failing after the fetch (detect/upsert) records its reads
+        # normally (zero failed unless feeds were also dark); either way the
+        # persistent error freezes the freshness gauge. The curve path never
+        # soft-skips (any sub-read failure hard-errors the pass), so curve
+        # units cannot fire here at all. Same known OTLP-export and
+        # dropped-unit gaps as the staleness rule above.
+        expr: |
+          sum by (chain, cluster, oracle_name) (
+            rate(oracle_unit_reads_failed_total{k8s_namespace_name="vector"}[30m])
+          )
+          > on (chain, cluster) group_left ()
+          (
+            0.9 * sum by (chain, cluster) (
+              rate(oracle_blocks_processed_total{k8s_namespace_name="vector"}[30m])
+            )
+          )
+        for: 10m
+        labels:
+          team: vector
+          severity: warning
+          component: oracle-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector oracle unit `{{ $labels.oracle_name }}` losing feed reads on {{ $labels.chain }}"
+          description: |
+            Oracle unit `{{ $labels.oracle_name }}` on chain
+            `{{ $labels.chain }}` has been failing at least one price read on
+            nearly every block for >30m (reverting feed or zero quote,
+            guard-skipped without erroring). Prices for the affected tokens
+            are frozen in TimescaleDB while the worker, the unit's freshness,
+            and every whole-worker signal look healthy. Check the pod logs for
+            "feed call failed" to identify the feed.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectororacleunitreadsfailing
+
       # ---------------------------------------------------------------------
       # Raw SC call archiving (VEC-364 / PR #399)
       # ---------------------------------------------------------------------
@@ -816,14 +946,28 @@ groups:
         # Counter `curve.state.rows.written` (OTel) -> Prometheus
         # `curve_state_rows_written_total`. Emitted by the Coordinator after
         # each successful WithTransaction that writes at least one state row.
+        #
+        # Gating on blocks processed is sound HERE, unlike uniswap-v3: curve's
+        # periodic sweep (SWEEP_BLOCKS) re-snapshots every pool on a fixed block
+        # cadence, so a healthy curve worker writes state rows through even a
+        # totally quiet market. Zero rows while blocks advance is therefore
+        # genuinely actionable. Do not copy this shape to a sweepless worker.
+        #
+        # `unless`, not `and … == 0`: RecordStateRows is a no-op for n<=0, so
+        # under the exact bug this targets (snapshot loop always empty, or on a
+        # fresh deploy that has never written a row) the state-rows series is
+        # never created, and `and … == 0` yields no match on the empty right
+        # side — the alert could never fire, going blind precisely when curve
+        # has never written state. `A > 0 unless B > 0` fires on an absent OR
+        # zero series. Do not revert to `and`.
         expr: |
           sum by (chain, cluster) (
             rate(curve_blocks_processed_total{status="success", k8s_namespace_name="vector"}[30m])
           ) > 0
-          and
+          unless
           sum by (chain, cluster) (
             rate(curve_state_rows_written_total{k8s_namespace_name="vector"}[30m])
-          ) == 0
+          ) > 0
         for: 10m
         labels:
           team: vector
@@ -928,31 +1072,44 @@ groups:
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv3indexerblocklatencyhigh
 
       - alert: VectorUniswapV3IndexerNotWritingState
-        # Silent-empty guard: blocks are advancing (success rate > 0) but no
-        # state/tick snapshot rows are being written. The error path will NOT
-        # catch a quietly-empty DueSet (e.g. touched-pool detection always
-        # returning empty, or every snapshotDueSet call silently no-op). This
-        # alert catches that gap.
+        # Silent-empty guard, HALF ONE of two: pools WERE touched by decoded
+        # events, but no state/tick snapshot rows came out the other side. The
+        # error path will NOT catch a due-set that goes quietly empty (DueSet
+        # returning nothing for a touched pool, every snapshotDueSet call
+        # no-opping, or every state INSERT hitting ON CONFLICT DO NOTHING) —
+        # there is no error, just no rows. This alert catches that.
         #
-        # 30m window (not curve's sweep-driven cadence, since uniswap-v3 has
-        # none) tolerates a genuinely quiet block with no Uniswap V3 events;
-        # a 30m stretch of zero on an active pool set is the actionable
-        # signal.
+        # It deliberately does NOT catch a touched-pool set that is always
+        # empty (dead registry, address-match regression): that zeroes this
+        # rule's own left side and makes it un-fireable. VectorUniswapV3Indexer
+        # NoPoolsTouched below is the other half, and covers exactly that class.
+        # The two are complementary; neither alone is the silent-empty guard.
         #
-        # Counter `uniswap_v3.state.rows.written` (OTel) -> Prometheus
-        # `uniswap_v3_state_rows_written_total`. Emitted by handleBlock after
-        # each successful persistBlock that writes at least one state/tick row.
-        # `unless`, not `and … == 0`: state rows are written only for
-        # event-touched pools (no sweep), and RecordStateRows is a no-op for
-        # n<=0, so under the exact bug this targets (DueSet always empty, or on
-        # a fresh deploy) the state-rows counter series is never created. With
-        # `and … == 0` the empty right side yields no match and the alert can
-        # never fire. `A > 0 unless B > 0` keeps each (chain,cluster) that is
-        # processing blocks unless it is also writing state rows — so an absent
-        # OR zero state-rows series correctly fires. Do not revert to `and`.
+        # The left side gates on `uniswap_v3.pools.touched` (OTel) -> Prometheus
+        # `uniswap_v3_pools_touched_total`, NOT on blocks processed. uniswap-v3
+        # runs SnapshotTracker(0) — no sweep — so state rows are written only for
+        # pools an event touched in that block. Gating on blocks processed made
+        # every quiet market window look identical to a bug: the seeded registry
+        # is 18 wstETH/LST/LRT pools whose real cadence is 3-28 state rows/hour,
+        # so 30m stretches with zero touches occur nightly and the rule fired on
+        # a healthy indexer (VEC-329 rollout, 2026-07-13). No touches now means
+        # no expectation of rows, and the alert stays silent.
+        #
+        # pools.touched is recorded from handleBlock's decode-stage touchedIDs,
+        # upstream of DueSet, and both counters are recorded only after a
+        # successful commit. Sourcing the gate from DueSet instead would zero
+        # both sides under the exact bug this targets and go blind.
+        #
+        # `unless`, not `and … == 0`: RecordStateRows is a no-op for n<=0, so
+        # under that bug (or on a fresh deploy) the state-rows counter series is
+        # never created, and `and … == 0` yields no match on the empty right
+        # side — the alert could never fire. `A > 0 unless B > 0` keeps each
+        # (chain,cluster) that is touching pools unless it is also writing state
+        # rows, so an absent OR zero state-rows series correctly fires. Do not
+        # revert to `and`.
         expr: |
           sum by (chain, cluster) (
-            rate(uniswap_v3_blocks_processed_total{status="success", k8s_namespace_name="vector"}[30m])
+            rate(uniswap_v3_pools_touched_total{k8s_namespace_name="vector"}[30m])
           ) > 0
           unless
           sum by (chain, cluster) (
@@ -967,11 +1124,61 @@ groups:
         annotations:
           summary: "Vector uniswap-v3-indexer writing no state rows on {{ $labels.chain }}"
           description: |
-            `uniswap-v3-indexer` on chain `{{ $labels.chain }}` has processed
-            blocks successfully for 30m but written zero state/tick snapshot
-            rows. The touched-pool detection (DueSet) may be silently empty,
-            or the registered pool set may be empty for this chain.
+            `uniswap-v3-indexer` on chain `{{ $labels.chain }}` has decoded
+            events touching registered pools for 30m but written zero
+            state/tick snapshot rows. Pools are being touched, so this is not a
+            quiet market: the due-set (DueSet) is likely silently empty, every
+            snapshotDueSet call is no-opping, or every state INSERT is hitting
+            ON CONFLICT DO NOTHING.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv3indexernotwritingstate
+
+      - alert: VectorUniswapV3IndexerNoPoolsTouched
+        # Silent-empty guard, HALF TWO: blocks are advancing but NOT ONE
+        # registered pool has been touched by a decoded event. Covers the class
+        # NotWritingState structurally cannot (it gates on pools.touched, so an
+        # always-empty touched set makes its left side absent and un-fireable):
+        # an empty/mis-seeded pool registry for this chain, an address-match or
+        # poolsByAddr regression, or a pool set that has gone entirely dead.
+        # None of these raise an error — blocks_processed keeps advancing
+        # happily — so nothing else in this group would ever page.
+        #
+        # 6h window, NOT 30m. This is the window that has to absorb a quiet
+        # market, and the 18 wstETH/LST/LRT pools genuinely produce 30m stretches
+        # with zero touches (that is what made the old blocks-processed gate on
+        # NotWritingState a false positive; see its comment). Measured cadence in
+        # staging is 3-28 state rows/hour, every hour — so 6h with zero touches
+        # is ~30x the worst observed quiet gap and cannot be a lull. Detection is
+        # slower than the old 30m rule, which is the correct trade: the failures
+        # this catches (dead registry, broken address match) are persistent, not
+        # transient, and a rule that pages nightly on healthy data gets muted.
+        #
+        # `unless`, not `and … == 0`: RecordPoolsTouched no-ops for n<=0, so a
+        # worker that never touches a pool never creates the series at all, and
+        # `and … == 0` would find no match on the empty right side — blind in
+        # exactly the case this exists for. Do not revert to `and`.
+        expr: |
+          sum by (chain, cluster) (
+            rate(uniswap_v3_blocks_processed_total{status="success", k8s_namespace_name="vector"}[6h])
+          ) > 0
+          unless
+          sum by (chain, cluster) (
+            rate(uniswap_v3_pools_touched_total{k8s_namespace_name="vector"}[6h])
+          ) > 0
+        for: 10m
+        labels:
+          team: vector
+          severity: warning
+          component: uniswap-v3-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector uniswap-v3-indexer touching no pools on {{ $labels.chain }}"
+          description: |
+            `uniswap-v3-indexer` on chain `{{ $labels.chain }}` has processed
+            blocks successfully for 6h without a single decoded event touching
+            a registered pool. At the seeded registry's normal cadence this is
+            not a quiet market: suspect an empty or mis-seeded pool registry for
+            this chain, or an address-matching regression in poolsByAddr.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv3indexernopoolstouched
 
   # CEX order book indexer (VEC-374). Streams L2 books from an exchange over a
   # WebSocket and persists periodic top-N snapshots. One pod per exchange

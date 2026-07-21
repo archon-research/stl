@@ -25,10 +25,13 @@ from tests.integration.seed import (
     UV_PROXY_NULL_VALUE,
     UV_PROXY_PLAIN,
     UV_PROXY_PRICED,
+    UV_PROXY_SYMBOLLESS_UNDERLYING,
     UV_PROXY_UNDERLYING_UNPRICED,
+    UV_PROXY_UNIV3_POOL,
     UV_SPARK_OWN_PRICE,
     UV_SPARKPRIME_BALANCE,
     UV_SPARKPRIME_UNDERLYING_VALUE,
+    UV_UNIV3_UNDERLYING_VALUE,
     UV_USDC_BALANCE,
     UV_USDC_PRICE,
     seed_underlying_value_direct_holdings,
@@ -73,6 +76,9 @@ async def _holding(repo: AllocationRepository, proxy_hex: str, symbol: str):
         (UV_PROXY_NON_ALLOWLISTED, "unlistedVault", None),
         # Plain token held directly -> legacy balance x own price.
         (UV_PROXY_PLAIN, "USDC", UV_USDC_BALANCE * UV_USDC_PRICE),
+        # Allowlisted Uni V3 pool position (not an ERC20, never has its own
+        # oracle) -> tracker-computed underlying_value x USDC price.
+        (UV_PROXY_UNIV3_POOL, "UNIV3-LP-AUSD-USDC", UV_UNIV3_UNDERLYING_VALUE * UV_USDC_PRICE),
     ],
 )
 @pytest.mark.asyncio
@@ -81,6 +87,55 @@ async def test_direct_holding_amount_usd_by_pricing_branch(repo, proxy_hex, symb
     holding = await _holding(repo, proxy_hex, symbol)
     assert holding is not None
     assert holding.amount_usd == expected_amount_usd
+
+
+@pytest.mark.asyncio
+async def test_allowlisted_holding_carries_underlying_identity(repo) -> None:
+    """An allowlisted holding priced from its underlying reports that underlying's
+    id/address/symbol, so consumers keyed on underlying_* match the price basis."""
+    usdc = await _holding(repo, UV_PROXY_PLAIN, "USDC")
+    univ3 = await _holding(repo, UV_PROXY_UNIV3_POOL, "UNIV3-LP-AUSD-USDC")
+    assert univ3.underlying_token_id == usdc.token_id
+    assert univ3.underlying_token_address == usdc.token_address
+    assert univ3.underlying_symbol == "USDC"
+
+
+@pytest.mark.asyncio
+async def test_allowlisted_unpriced_underlying_still_carries_identity(repo) -> None:
+    """The identity travels with the price basis, not with pricing success: an
+    allowlisted holding whose underlying has no oracle price reports that
+    underlying's identity alongside a NULL amount_usd (a surfaced coverage gap)."""
+    holding = await _holding(repo, UV_PROXY_UNDERLYING_UNPRICED, "sparkPrimeUSDC1")
+    assert holding.amount_usd is None
+    assert holding.underlying_symbol == "NOPRICEUND"
+    assert holding.underlying_token_id is not None
+    assert holding.underlying_token_address is not None
+
+
+@pytest.mark.parametrize(
+    ("proxy_hex", "symbol"),
+    [
+        # The row carries an underlying_token_id, but the token is not allowlisted.
+        (UV_PROXY_NON_ALLOWLISTED, "unlistedVault"),
+        # Plain holding with no underlying on the row at all.
+        (UV_PROXY_PLAIN, "USDC"),
+        # Allowlisted, but the row carries no underlying (e.g. written before
+        # its type's valuation deployed).
+        (UV_PROXY_NULL_VALUE, "sparkPrimeUSDC1"),
+        # Allowlisted with an underlying whose token row has a NULL symbol:
+        # the identity must emit atomically (all three or none), never a
+        # hybrid of underlying id/address with the held token's symbol.
+        (UV_PROXY_SYMBOLLESS_UNDERLYING, "sparkPrimeUSDC1"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_holding_without_projectable_underlying_has_no_identity(repo, proxy_hex, symbol) -> None:
+    """Rows outside the allowlisted-with-resolvable-underlying projection emit no
+    underlying identity, so the endpoint falls back to the held token as a unit."""
+    holding = await _holding(repo, proxy_hex, symbol)
+    assert holding.underlying_token_id is None
+    assert holding.underlying_token_address is None
+    assert holding.underlying_symbol is None
 
 
 @pytest.mark.asyncio

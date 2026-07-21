@@ -65,11 +65,23 @@ class ReceiptTokenPosition:
     balance: Decimal
     amount_usd: Decimal | None = None
     latest_activity_at: datetime | None = None
+    latest_activity_action: str | None = None
+    latest_activity_amount: Decimal | None = None
 
 
 @dataclass(frozen=True)
 class DirectAssetHolding:
-    """A token held directly by a prime that is not a registered receipt-token wrapper."""
+    """A token held directly by a prime that is not a registered receipt-token wrapper.
+
+    The ``underlying_*`` fields are set when the holding is allowlisted for
+    underlying-value pricing and its row carries a resolvable underlying (the
+    pricing basis for ``amount_usd``), and are always set or unset together.
+    For non-allowlisted holdings ``None`` means the token prices by its own
+    oracle and the underlying is the token itself; for allowlisted holdings
+    ``None`` marks a row with no resolvable underlying (e.g. written before
+    the type's valuation deployed), a surfaced coverage gap priced as NULL,
+    never by the share-count balance.
+    """
 
     chain_id: int
     token_id: int
@@ -78,6 +90,11 @@ class DirectAssetHolding:
     balance: Decimal
     amount_usd: Decimal | None = None
     latest_activity_at: datetime | None = None
+    latest_activity_action: str | None = None
+    latest_activity_amount: Decimal | None = None
+    underlying_token_id: int | None = None
+    underlying_token_address: str | None = None
+    underlying_symbol: str | None = None
 
 
 @dataclass(frozen=True)

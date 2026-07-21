@@ -1,4 +1,4 @@
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from decimal import Decimal
 from typing import Any, Protocol, cast
 
@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.postgres.aave_like_backed_breakdown_repository import AaveLikeBackedBreakdownRepository
 from app.domain.entities.backed_breakdown import BackedBreakdown
-from tests.integration.seed import insert_token, insert_user, store_test_ids
+from tests.integration.seed import insert_oracle_asset, insert_token, insert_user, store_test_ids
 
 
 class ProtocolScopedBackedBreakdownRepository(Protocol):
@@ -17,23 +17,14 @@ class ProtocolScopedBackedBreakdownRepository(Protocol):
 
     async def get_backed_breakdown(self, protocol_id: int, backed_asset_id: int) -> BackedBreakdown: ...
 
+    async def get_backed_breakdowns(
+        self, protocol_id: int, backed_asset_ids: Sequence[int]
+    ) -> dict[int, BackedBreakdown]: ...
+
 
 # ---------------------------------------------------------------------------
 # Seed helpers
 # ---------------------------------------------------------------------------
-
-
-async def _insert_oracle_asset(conn: asyncpg.Connection, oracle_id: int, token_id: int) -> None:
-    """Register a token with an oracle (idempotent)."""
-    await conn.execute(
-        """
-        INSERT INTO oracle_asset (oracle_id, token_id, enabled)
-        VALUES ($1, $2, true)
-        ON CONFLICT (oracle_id, token_id) WHERE feed_address IS NULL DO NOTHING
-        """,
-        oracle_id,
-        token_id,
-    )
 
 
 async def _insert_price(
@@ -140,7 +131,7 @@ async def _seed_tokens_and_prices(
     )
 
     for tid in [weth_id, cbbtc_id, sp_usds_id, sp_usdc_id]:
-        await _insert_oracle_asset(conn, oracle_id, tid)
+        await insert_oracle_asset(conn, oracle_id, tid)
 
     for token_id, price in [
         (weth_id, "2000.000000000000000000"),
@@ -263,6 +254,51 @@ async def _seed_user4_zero_price_collateral(
     await _insert_debt(conn, user_id, protocol_id, sp_usds_id, 1_000 * 10**18, block_number)
 
 
+async def _seed_user5_tied_price_collateral(
+    conn: asyncpg.Connection,
+    protocol_id: int,
+    block_number: int,
+    sparklend_oracle_id: int,
+    chainlink_oracle_id: int,
+) -> int:
+    """User 5: collateral with two price rows tied on (block_number, block_version, processing_version).
+
+    The frozen-source replant shape: SparkLend bound to both the sparklend and
+    chainlink oracles, where a republished block leaves each with a price row
+    at identical snapshot keys. The stale (lower-oracle_id, sparklend) row is
+    inserted FIRST so an un-tiebroken DISTINCT ON is biased toward it; the
+    query must pick the chainlink price. The SparkLend -> chainlink binding is
+    seeded here idempotently rather than relied on from a migration. User 5
+    borrows its own debt token so the other users' breakdowns are untouched.
+    Returns the debt token id.
+    """
+    if not sparklend_oracle_id < chainlink_oracle_id:
+        raise RuntimeError("seed premise broken: chainlink must have the higher oracle id")
+    await conn.execute(
+        """
+        INSERT INTO protocol_oracle (protocol_id, oracle_id, from_block)
+        VALUES ($1, $2, 1)
+        ON CONFLICT (protocol_id, oracle_id, from_block) DO NOTHING
+        """,
+        protocol_id,
+        chainlink_oracle_id,
+    )
+    tie_coll_id = await insert_token(conn, "TIECOLL", 18, b"\x71" * 20)
+    tie_debt_id = await insert_token(conn, "TIEDEBT", 18, b"\x72" * 20)
+    # Both sources need an enabled oracle_asset mapping, or the latest-price read
+    # excludes the unmapped one before the oracle_id tiebreak can apply.
+    await insert_oracle_asset(conn, sparklend_oracle_id, tie_coll_id)
+    await insert_oracle_asset(conn, chainlink_oracle_id, tie_coll_id)
+    await _insert_price(conn, tie_coll_id, sparklend_oracle_id, "1.000000000000000000", block_number)
+    await _insert_price(conn, tie_coll_id, chainlink_oracle_id, "1.250000000000000000", block_number)
+    await _insert_reserve(conn, protocol_id, tie_coll_id, block_number, collateral_enabled=True)
+
+    user_id = await insert_user(conn, b"\xee" * 20)
+    await _insert_collateral(conn, user_id, protocol_id, tie_coll_id, str(100 * 10**18), block_number)
+    await _insert_debt(conn, user_id, protocol_id, tie_debt_id, 1_000 * 10**18, block_number)
+    return tie_debt_id
+
+
 # ---------------------------------------------------------------------------
 # Seed and repository fixtures
 # ---------------------------------------------------------------------------
@@ -287,7 +323,7 @@ async def _seed_data(db_url: str) -> None:
             18,
             b"\xde\xad\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01",
         )
-        await _insert_oracle_asset(conn, oracle_id, zero_token_id)
+        await insert_oracle_asset(conn, oracle_id, zero_token_id)
         await _insert_price(conn, zero_token_id, oracle_id, "0.000000000000000000", block)
         await _insert_reserve(conn, protocol_id, zero_token_id, block, collateral_enabled=True)
 
@@ -296,6 +332,8 @@ async def _seed_data(db_url: str) -> None:
         await _seed_user2(conn, protocol_id, block, weth_id, sp_usds_id, sp_usdc_id)
         await _seed_user3(conn, protocol_id, block, weth_id, sp_usds_id)
         await _seed_user4_zero_price_collateral(conn, protocol_id, block, zero_token_id, sp_usds_id)
+        chainlink_oracle_id = await conn.fetchval("SELECT id FROM oracle WHERE name = 'chainlink'")
+        tie_debt_id = await _seed_user5_tied_price_collateral(conn, protocol_id, block, oracle_id, chainlink_oracle_id)
 
         await store_test_ids(
             conn,
@@ -306,6 +344,7 @@ async def _seed_data(db_url: str) -> None:
                 "sp_usds_id": sp_usds_id,
                 "sp_usdc_id": sp_usdc_id,
                 "zero_token_id": zero_token_id,
+                "tie_debt_id": tie_debt_id,
             },
         )
     finally:
@@ -480,3 +519,39 @@ async def test_zero_price_collateral_does_not_cause_division_by_zero(
     # Existing attribution is unaffected
     assert "WETH" in by_symbol
     assert "cbBTC" in by_symbol
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_price_tie_resolves_to_highest_oracle_id(
+    repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
+) -> None:
+    """A price tied on (block_number, block_version, processing_version) resolves deterministically.
+
+    User 5's TIECOLL collateral has two price rows at identical snapshot keys,
+    $1.00 from the lower-id (sparklend) oracle and $1.25 from the higher-id
+    (chainlink) oracle, both bound to SparkLend. The token_prices CTE must pick
+    the higher oracle_id, so the surfaced price is $1.25 on every call.
+    """
+    result = await repository.get_backed_breakdown(test_ids["protocol_id"], test_ids["tie_debt_id"])
+
+    by_symbol = {item.symbol: item for item in result.items}
+    assert "TIECOLL" in by_symbol
+    assert by_symbol["TIECOLL"].price_usd == Decimal("1.25")
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_batched_matches_per_asset(
+    repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
+) -> None:
+    """get_backed_breakdowns over many backed assets equals the per-asset query for
+    each — the protocol-wide CTEs run once but attribution is per backed asset."""
+    protocol_id = test_ids["protocol_id"]
+    ids = [test_ids["sp_usds_id"], test_ids["sp_usdc_id"], test_ids["tie_debt_id"]]
+
+    batched = await repository.get_backed_breakdowns(protocol_id, ids)
+
+    assert set(batched) == set(ids)
+    for aid in ids:
+        single = await repository.get_backed_breakdown(protocol_id, aid)
+        assert batched[aid].backed_asset_id == aid
+        assert batched[aid].items == single.items
