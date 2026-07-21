@@ -206,9 +206,11 @@ entries, each hashing its full natural key:
 - `mas` — `morpho_adapter_state` (`morpho_adapter_id, block_number, block_version, timestamp`)
 - `mvc` — `morpho_vault_cap` (`morpho_vault_id, cap_id, block_number, block_version, timestamp`)
 
-When a single transaction writes both a vault's state and its adapter state / caps, it acquires
-the `mas` and `mvc` locks after the parent vault's `mvs` state lock — a state-first acquisition
-order that keeps concurrent writers on the same vault deadlock-free.
+Today each VaultV2 handler writes exactly one of these tables per transaction, so no
+combined-write lock ordering is exercised yet. The prefixes are registered as a forward-looking
+invariant: any future transaction that writes both a vault's state and its adapter state / caps
+must acquire the `mas` and `mvc` locks after the parent vault's `mvs` state lock — a state-first
+acquisition order that keeps concurrent writers on the same vault deadlock-free.
 
 #### Trigger Examples
 
