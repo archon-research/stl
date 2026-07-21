@@ -2,6 +2,10 @@ go:
   - stl-verify/**
   - '!stl-verify/python/**'
   - '!stl-verify/ts/**'
+  # A Go guardrail (allocation_tracker) parses the prod k8s ConfigMaps, so a
+  # k8s-only unserve must trigger go-ci to catch a now-dropped contract chain.
+  - k8s/base/**
+  - k8s/overlays/**
   - .go-version
   - lefthook.yml
   - stl-verify/lefthook.yml
