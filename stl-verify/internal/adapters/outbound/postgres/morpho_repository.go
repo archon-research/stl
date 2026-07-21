@@ -333,6 +333,214 @@ func (r *MorphoRepository) SaveVaultPosition(ctx context.Context, tx pgx.Tx, pos
 	return nil
 }
 
+// GetOrCreateAdapter retrieves or creates a VaultV2 liquidity adapter registry row.
+func (r *MorphoRepository) GetOrCreateAdapter(ctx context.Context, tx pgx.Tx, adapter *entity.MorphoAdapter) (int64, error) {
+	if err := adapter.Validate(); err != nil {
+		return 0, fmt.Errorf("validating morpho adapter: %w", err)
+	}
+
+	var id int64
+	// The no-op SET is required so that DO UPDATE ... RETURNING id works on conflict.
+	err := tx.QueryRow(ctx,
+		`INSERT INTO morpho_adapter (morpho_vault_id, address, asset_token_id, adapter_type, added_at_block, removed_at_block)
+		 VALUES ($1, $2, $3, $4, $5, $6)
+		 ON CONFLICT (morpho_vault_id, address, added_at_block) DO UPDATE SET id = morpho_adapter.id
+		 RETURNING id`,
+		adapter.MorphoVaultID, adapter.Address, adapter.AssetTokenID, int16(adapter.AdapterType),
+		adapter.AddedAtBlock, adapter.RemovedAtBlock,
+	).Scan(&id)
+
+	if err != nil {
+		return 0, fmt.Errorf("upserting morpho adapter: %w", err)
+	}
+	return id, nil
+}
+
+// MarkAdapterRemoved records the block at which an adapter was de-registered.
+func (r *MorphoRepository) MarkAdapterRemoved(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, removedAtBlock int64) error {
+	// The OR removed_at_block = $3 branch makes backfill replays idempotent: a
+	// second removal at the same block re-matches the already-removed row.
+	tag, err := tx.Exec(ctx,
+		`UPDATE morpho_adapter SET removed_at_block = $3
+		 WHERE morpho_vault_id = $1 AND address = $2
+		   AND (removed_at_block IS NULL OR removed_at_block = $3)`,
+		morphoVaultID, address, removedAtBlock,
+	)
+	if err != nil {
+		return fmt.Errorf("marking morpho adapter removed: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("marking morpho adapter removed: no active adapter for vault %d address %x (unknown adapter or already removed at a different block)",
+			morphoVaultID, address)
+	}
+	return nil
+}
+
+// GetActiveAdapter retrieves the active adapter for a vault and address.
+func (r *MorphoRepository) GetActiveAdapter(ctx context.Context, morphoVaultID int64, address []byte) (*entity.MorphoAdapter, error) {
+	var a entity.MorphoAdapter
+	err := r.pool.QueryRow(ctx,
+		`SELECT id, asset_token_id, adapter_type, added_at_block, removed_at_block
+		 FROM morpho_adapter
+		 WHERE morpho_vault_id = $1 AND address = $2 AND removed_at_block IS NULL`,
+		morphoVaultID, address,
+	).Scan(&a.ID, &a.AssetTokenID, &a.AdapterType, &a.AddedAtBlock, &a.RemovedAtBlock)
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("querying active morpho adapter: %w", err)
+	}
+	a.MorphoVaultID = morphoVaultID
+	a.Address = address
+	return &a, nil
+}
+
+// GetActiveAdaptersByVault retrieves all currently-active adapters for a vault.
+func (r *MorphoRepository) GetActiveAdaptersByVault(ctx context.Context, morphoVaultID int64) ([]*entity.MorphoAdapter, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT id, address, asset_token_id, adapter_type, added_at_block, removed_at_block
+		 FROM morpho_adapter
+		 WHERE morpho_vault_id = $1 AND removed_at_block IS NULL
+		 ORDER BY id`,
+		morphoVaultID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying active morpho adapters: %w", err)
+	}
+	defer rows.Close()
+
+	var adapters []*entity.MorphoAdapter
+	for rows.Next() {
+		a := &entity.MorphoAdapter{MorphoVaultID: morphoVaultID}
+		if err := rows.Scan(&a.ID, &a.Address, &a.AssetTokenID, &a.AdapterType, &a.AddedAtBlock, &a.RemovedAtBlock); err != nil {
+			return nil, fmt.Errorf("scanning morpho adapter: %w", err)
+		}
+		adapters = append(adapters, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating morpho adapters: %w", err)
+	}
+	return adapters, nil
+}
+
+// SaveAdapterState saves an adapter realAssets() snapshot within an external transaction.
+func (r *MorphoRepository) SaveAdapterState(ctx context.Context, tx pgx.Tx, state *entity.MorphoAdapterState) error {
+	realAssets, err := bigIntToNumeric(state.RealAssets)
+	if err != nil {
+		return fmt.Errorf("converting real_assets: %w", err)
+	}
+
+	// processing_version is assigned by the trigger; ON CONFLICT DO NOTHING
+	// dedupes same-build retries (see SaveMarketState for the rationale).
+	_, err = tx.Exec(ctx,
+		`INSERT INTO morpho_adapter_state (morpho_adapter_id, block_number, block_version, timestamp, real_assets, build_id)
+		 VALUES ($1, $2, $3, $4, $5, $6)
+		 ON CONFLICT (morpho_adapter_id, block_number, block_version, timestamp, processing_version) DO NOTHING`,
+		state.MorphoAdapterID, state.BlockNumber, state.BlockVersion, state.Timestamp, realAssets, int(r.buildID),
+	)
+	if err != nil {
+		return fmt.Errorf("saving morpho adapter state: %w", err)
+	}
+	return nil
+}
+
+// SaveVaultCap saves a VaultV2 allocation-cap snapshot within an external transaction.
+func (r *MorphoRepository) SaveVaultCap(ctx context.Context, tx pgx.Tx, vaultCap *entity.MorphoVaultCap) error {
+	absoluteCap, err := bigIntToNumeric(vaultCap.AbsoluteCap)
+	if err != nil {
+		return fmt.Errorf("converting absolute_cap: %w", err)
+	}
+	relativeCap, err := bigIntToNumeric(vaultCap.RelativeCap)
+	if err != nil {
+		return fmt.Errorf("converting relative_cap: %w", err)
+	}
+
+	_, err = tx.Exec(ctx,
+		`INSERT INTO morpho_vault_cap (morpho_vault_id, cap_id, id_data, absolute_cap, relative_cap, block_number, block_version, timestamp, build_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		 ON CONFLICT (morpho_vault_id, cap_id, block_number, block_version, timestamp, processing_version) DO NOTHING`,
+		vaultCap.MorphoVaultID, vaultCap.CapID, vaultCap.IDData, absoluteCap, relativeCap,
+		vaultCap.BlockNumber, vaultCap.BlockVersion, vaultCap.Timestamp, int(r.buildID),
+	)
+	if err != nil {
+		return fmt.Errorf("saving morpho vault cap: %w", err)
+	}
+	return nil
+}
+
+// GetLatestVaultCap retrieves the current cap state for a (vault, cap_id).
+func (r *MorphoRepository) GetLatestVaultCap(ctx context.Context, tx pgx.Tx, morphoVaultID int64, capID []byte) (*entity.MorphoVaultCap, error) {
+	var (
+		c              entity.MorphoVaultCap
+		absoluteCapStr string
+		relativeCapStr string
+	)
+	// Latest-wins: block_number/block_version pick the newest chain view, then
+	// processing_version the newest correction (ADR-0002); never build_id.
+	err := tx.QueryRow(ctx,
+		`SELECT id_data, absolute_cap, relative_cap, block_number, block_version, timestamp
+		 FROM morpho_vault_cap
+		 WHERE morpho_vault_id = $1 AND cap_id = $2
+		 ORDER BY block_number DESC, block_version DESC, processing_version DESC
+		 LIMIT 1`,
+		morphoVaultID, capID,
+	).Scan(&c.IDData, &absoluteCapStr, &relativeCapStr, &c.BlockNumber, &c.BlockVersion, &c.Timestamp)
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("querying latest morpho vault cap: %w", err)
+	}
+
+	absoluteCap, err := numericToBigInt(absoluteCapStr)
+	if err != nil {
+		return nil, fmt.Errorf("converting absolute_cap: %w", err)
+	}
+	relativeCap, err := numericToBigInt(relativeCapStr)
+	if err != nil {
+		return nil, fmt.Errorf("converting relative_cap: %w", err)
+	}
+
+	c.MorphoVaultID = morphoVaultID
+	c.CapID = capID
+	c.AbsoluteCap = absoluteCap
+	c.RelativeCap = relativeCap
+	return &c, nil
+}
+
+// UpdateVaultFeeConfig applies a partial fee-configuration update to a vault.
+func (r *MorphoRepository) UpdateVaultFeeConfig(ctx context.Context, tx pgx.Tx, morphoVaultID int64, update entity.MorphoVaultFeeUpdate) error {
+	if err := update.Validate(); err != nil {
+		return fmt.Errorf("validating vault fee update: %w", err)
+	}
+
+	// COALESCE keeps the stored value when a parameter is NULL, so each Set* fee
+	// event updates only the field it carries without clobbering the others.
+	tag, err := tx.Exec(ctx,
+		`UPDATE morpho_vault SET
+		     performance_fee           = COALESCE($2, performance_fee),
+		     management_fee            = COALESCE($3, management_fee),
+		     performance_fee_recipient = COALESCE($4, performance_fee_recipient),
+		     management_fee_recipient  = COALESCE($5, management_fee_recipient)
+		 WHERE id = $1`,
+		morphoVaultID,
+		optionalNumeric(update.PerformanceFee),
+		optionalNumeric(update.ManagementFee),
+		update.PerformanceFeeRecipient,
+		update.ManagementFeeRecipient,
+	)
+	if err != nil {
+		return fmt.Errorf("updating morpho vault fee config: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("updating morpho vault fee config: no vault with id %d", morphoVaultID)
+	}
+	return nil
+}
+
 // numericToBigInt converts a numeric string from Postgres to *big.Int.
 func numericToBigInt(s string) (*big.Int, error) {
 	n, ok := new(big.Int).SetString(s, 10)

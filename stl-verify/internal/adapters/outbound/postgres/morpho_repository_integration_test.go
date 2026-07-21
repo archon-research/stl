@@ -3,11 +3,13 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"math/big"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -31,12 +33,17 @@ func init() {
 // truncateMorpho clears morpho-related tables for test isolation.
 func truncateMorpho(t *testing.T, ctx context.Context) {
 	t.Helper()
+	// Delete children before parents: morpho_adapter_state FKs morpho_adapter,
+	// morpho_vault_cap and morpho_adapter FK morpho_vault.
 	tables := []string{
 		`morpho_market_state`,
 		`morpho_market_position`,
 		`morpho_vault_state`,
 		`morpho_vault_position`,
+		`morpho_adapter_state`,
+		`morpho_vault_cap`,
 		`morpho_market`,
+		`morpho_adapter`,
 		`morpho_vault`,
 	}
 	for _, table := range tables {
@@ -1458,5 +1465,789 @@ func TestConcurrentWorkers_AllTablesAppendOnly(t *testing.T) {
 	}
 	if got.Int64() < 1000 || got.Int64() > 1000+workers-1 {
 		t.Errorf("total_supply_assets = %s, expected value in range [1000, %d]", totalSupplyAssets, 1000+workers-1)
+	}
+}
+
+// --- VaultV2 Adapter helpers ---
+
+// morphoBlockTime is a fixed snapshot timestamp for adapter-state / cap tests.
+var morphoBlockTime = time.Unix(1700000000, 0).UTC()
+
+// adapterAddr builds a distinct 20-byte adapter address from a seed byte.
+func adapterAddr(seed byte) []byte {
+	addr := make([]byte, 20)
+	addr[0] = seed
+	return addr
+}
+
+// createTestAdapter registers an active adapter on the given vault via the
+// repository and returns its DB ID.
+func (f *morphoTestFixture) createTestAdapter(t *testing.T, ctx context.Context, vaultID int64, address []byte, addedAtBlock int64) int64 {
+	t.Helper()
+
+	adapter := &entity.MorphoAdapter{
+		MorphoVaultID: vaultID,
+		Address:       address,
+		AssetTokenID:  f.loanTokenID,
+		AdapterType:   entity.MorphoAdapterTypeMarketV1,
+		AddedAtBlock:  addedAtBlock,
+	}
+
+	tx, err := f.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("failed to begin transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+
+	id, err := f.repo.GetOrCreateAdapter(ctx, tx, adapter)
+	if err != nil {
+		t.Fatalf("failed to create adapter: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("failed to commit: %v", err)
+	}
+	return id
+}
+
+// --- GetOrCreateAdapter Tests ---
+
+func TestGetOrCreateAdapter_CreateNew(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x30))
+
+	adapter := &entity.MorphoAdapter{
+		MorphoVaultID: vaultID,
+		Address:       adapterAddr(0x01),
+		AssetTokenID:  fixture.loanTokenID,
+		AdapterType:   entity.MorphoAdapterTypeMarketV1,
+		AddedAtBlock:  24481834,
+	}
+
+	tx, err := fixture.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+
+	id, err := fixture.repo.GetOrCreateAdapter(ctx, tx, adapter)
+	if err != nil {
+		t.Fatalf("GetOrCreateAdapter failed: %v", err)
+	}
+	if id <= 0 {
+		t.Errorf("expected positive id, got %d", id)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	got, err := fixture.repo.GetActiveAdapter(ctx, vaultID, adapterAddr(0x01))
+	if err != nil {
+		t.Fatalf("GetActiveAdapter failed: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected adapter, got nil")
+	}
+	if got.ID != id {
+		t.Errorf("ID mismatch: got %d, want %d", got.ID, id)
+	}
+	if got.AdapterType != entity.MorphoAdapterTypeMarketV1 {
+		t.Errorf("AdapterType mismatch: got %d", got.AdapterType)
+	}
+	if got.AddedAtBlock != 24481834 {
+		t.Errorf("AddedAtBlock mismatch: got %d", got.AddedAtBlock)
+	}
+	if got.RemovedAtBlock != nil {
+		t.Errorf("expected nil RemovedAtBlock, got %v", *got.RemovedAtBlock)
+	}
+}
+
+func TestGetOrCreateAdapter_Idempotent(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x10))
+
+	id1 := fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x02), 24481834)
+	id2 := fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x02), 24481834)
+
+	if id1 != id2 {
+		t.Errorf("GetOrCreateAdapter not idempotent: first=%d, second=%d", id1, id2)
+	}
+}
+
+func TestGetOrCreateAdapter_DifferentAddedBlockNewRow(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x11))
+
+	// Same vault + address but a different added_at_block is a distinct
+	// registry row (removed-then-re-added adapter).
+	id1 := fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x03), 24481834)
+	id2 := fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x03), 24500000)
+
+	if id1 == id2 {
+		t.Errorf("expected distinct ids for different added_at_block, got %d twice", id1)
+	}
+}
+
+// --- MarkAdapterRemoved Tests ---
+
+func TestMarkAdapterRemoved_SetsBlock(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x12))
+	fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x04), 24481834)
+
+	tx, err := fixture.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := fixture.repo.MarkAdapterRemoved(ctx, tx, vaultID, adapterAddr(0x04), 24600000); err != nil {
+		t.Fatalf("MarkAdapterRemoved failed: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	var removed *int64
+	err = fixture.pool.QueryRow(ctx,
+		`SELECT removed_at_block FROM morpho_adapter WHERE morpho_vault_id = $1 AND address = $2`,
+		vaultID, adapterAddr(0x04),
+	).Scan(&removed)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if removed == nil || *removed != 24600000 {
+		t.Errorf("removed_at_block mismatch: got %v, want 24600000", removed)
+	}
+}
+
+func TestMarkAdapterRemoved_ReplaySameBlockNoop(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x13))
+	fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x05), 24481834)
+
+	mark := func() error {
+		tx, err := fixture.pool.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback(ctx)
+		if err := fixture.repo.MarkAdapterRemoved(ctx, tx, vaultID, adapterAddr(0x05), 24600000); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}
+
+	if err := mark(); err != nil {
+		t.Fatalf("first MarkAdapterRemoved failed: %v", err)
+	}
+	// Replay at the same block must be an idempotent success (backfill re-run).
+	if err := mark(); err != nil {
+		t.Fatalf("replay MarkAdapterRemoved at same block should succeed, got: %v", err)
+	}
+}
+
+func TestMarkAdapterRemoved_UnknownAddressErrors(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x14))
+
+	tx, err := fixture.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+
+	err = fixture.repo.MarkAdapterRemoved(ctx, tx, vaultID, adapterAddr(0x06), 24600000)
+	if err == nil {
+		t.Fatal("expected error for unknown adapter address, got nil")
+	}
+}
+
+func TestMarkAdapterRemoved_AlreadyRemovedDifferentBlockErrors(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x15))
+	fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x07), 24481834)
+
+	mark := func(block int64) error {
+		tx, err := fixture.pool.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback(ctx)
+		if err := fixture.repo.MarkAdapterRemoved(ctx, tx, vaultID, adapterAddr(0x07), block); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}
+
+	if err := mark(24600000); err != nil {
+		t.Fatalf("first MarkAdapterRemoved failed: %v", err)
+	}
+	// A second removal at a different block is a data bug: no active row and no
+	// row removed at this block, so it must surface an error.
+	if err := mark(24700000); err == nil {
+		t.Fatal("expected error removing already-removed adapter at a different block, got nil")
+	}
+}
+
+// --- GetActiveAdapter / GetActiveAdaptersByVault Tests ---
+
+func TestGetActiveAdapter_Found(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x16))
+	id := fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x08), 24481834)
+
+	got, err := fixture.repo.GetActiveAdapter(ctx, vaultID, adapterAddr(0x08))
+	if err != nil {
+		t.Fatalf("GetActiveAdapter failed: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected adapter, got nil")
+	}
+	if got.ID != id {
+		t.Errorf("ID mismatch: got %d, want %d", got.ID, id)
+	}
+}
+
+func TestGetActiveAdapter_RemovedReturnsNil(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x17))
+	fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x09), 24481834)
+
+	tx, err := fixture.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := fixture.repo.MarkAdapterRemoved(ctx, tx, vaultID, adapterAddr(0x09), 24600000); err != nil {
+		t.Fatalf("MarkAdapterRemoved failed: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	got, err := fixture.repo.GetActiveAdapter(ctx, vaultID, adapterAddr(0x09))
+	if err != nil {
+		t.Fatalf("GetActiveAdapter failed: %v", err)
+	}
+	if got != nil {
+		t.Errorf("expected nil for removed adapter, got %+v", got)
+	}
+}
+
+func TestGetActiveAdapter_NotFound(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x18))
+
+	got, err := fixture.repo.GetActiveAdapter(ctx, vaultID, adapterAddr(0x0a))
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if got != nil {
+		t.Errorf("expected nil for unknown adapter, got %+v", got)
+	}
+}
+
+func TestGetActiveAdaptersByVault_ReturnsActiveExcludesRemoved(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x19))
+
+	fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x0b), 24481834)
+	fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x0c), 24481900)
+	fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x0d), 24482000)
+
+	// Remove one of the three.
+	tx, err := fixture.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := fixture.repo.MarkAdapterRemoved(ctx, tx, vaultID, adapterAddr(0x0d), 24600000); err != nil {
+		t.Fatalf("MarkAdapterRemoved failed: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	got, err := fixture.repo.GetActiveAdaptersByVault(ctx, vaultID)
+	if err != nil {
+		t.Fatalf("GetActiveAdaptersByVault failed: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 active adapters, got %d", len(got))
+	}
+	for _, a := range got {
+		if a.RemovedAtBlock != nil {
+			t.Errorf("active adapter %d has non-nil RemovedAtBlock", a.ID)
+		}
+		if a.MorphoVaultID != vaultID {
+			t.Errorf("adapter %d has wrong vault id %d", a.ID, a.MorphoVaultID)
+		}
+	}
+}
+
+func TestGetActiveAdaptersByVault_Empty(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x1a))
+
+	got, err := fixture.repo.GetActiveAdaptersByVault(ctx, vaultID)
+	if err != nil {
+		t.Fatalf("GetActiveAdaptersByVault failed: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("expected 0 adapters, got %d", len(got))
+	}
+}
+
+// --- SaveAdapterState Tests ---
+
+func TestSaveAdapterState_RoundTrip(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x1b))
+	adapterID := fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x0e), 24481834)
+
+	maxUint256, _ := new(big.Int).SetString("115792089237316195423570985008687907853269984665640564039457584007913129639935", 10)
+	state := &entity.MorphoAdapterState{
+		MorphoAdapterID: adapterID,
+		BlockNumber:     24500000,
+		BlockVersion:    0,
+		Timestamp:       morphoBlockTime,
+		RealAssets:      maxUint256,
+	}
+
+	tx, err := fixture.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	if err := fixture.repo.SaveAdapterState(ctx, tx, state); err != nil {
+		t.Fatalf("SaveAdapterState failed: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	var realAssets string
+	err = fixture.pool.QueryRow(ctx,
+		`SELECT real_assets FROM morpho_adapter_state WHERE morpho_adapter_id = $1 AND block_number = $2 AND block_version = 0`,
+		adapterID, int64(24500000),
+	).Scan(&realAssets)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if realAssets != maxUint256.String() {
+		t.Errorf("real_assets precision lost: got %s, want %s", realAssets, maxUint256.String())
+	}
+}
+
+func TestSaveAdapterState_DuplicateSameBuildDeduped(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x1c))
+	adapterID := fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x0f), 24481834)
+
+	save := func(realAssets *big.Int) {
+		state := &entity.MorphoAdapterState{
+			MorphoAdapterID: adapterID,
+			BlockNumber:     24500100,
+			BlockVersion:    0,
+			Timestamp:       morphoBlockTime,
+			RealAssets:      realAssets,
+		}
+		tx, err := fixture.pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		if err := fixture.repo.SaveAdapterState(ctx, tx, state); err != nil {
+			t.Fatalf("SaveAdapterState failed: %v", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+	}
+
+	// Both saves use the same repo (build_id 0) → trigger reuses
+	// processing_version 0 and ON CONFLICT DO NOTHING dedupes to one row.
+	save(big.NewInt(1000))
+	save(big.NewInt(9999))
+
+	var count int
+	err := fixture.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM morpho_adapter_state WHERE morpho_adapter_id = $1 AND block_number = $2`,
+		adapterID, int64(24500100),
+	).Scan(&count)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 deduped row, got %d", count)
+	}
+}
+
+func TestSaveAdapterState_DifferentBuildNewVersion(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x1d))
+	adapterID := fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x1e), 24481834)
+
+	repoBuild1, err := NewMorphoRepository(morphoPool, nil, 1)
+	if err != nil {
+		t.Fatalf("NewMorphoRepository build 1: %v", err)
+	}
+
+	save := func(repo *MorphoRepository, realAssets *big.Int) {
+		state := &entity.MorphoAdapterState{
+			MorphoAdapterID: adapterID,
+			BlockNumber:     24500200,
+			BlockVersion:    0,
+			Timestamp:       morphoBlockTime,
+			RealAssets:      realAssets,
+		}
+		tx, err := fixture.pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		if err := repo.SaveAdapterState(ctx, tx, state); err != nil {
+			t.Fatalf("SaveAdapterState failed: %v", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+	}
+
+	// Different build_id → reprocessing → a new processing_version, so both rows
+	// survive.
+	save(fixture.repo, big.NewInt(1000))
+	save(repoBuild1, big.NewInt(2000))
+
+	var count, maxVer int
+	err = fixture.pool.QueryRow(ctx,
+		`SELECT COUNT(*), MAX(processing_version) FROM morpho_adapter_state WHERE morpho_adapter_id = $1 AND block_number = $2`,
+		adapterID, int64(24500200),
+	).Scan(&count, &maxVer)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("expected 2 rows for distinct builds, got %d", count)
+	}
+	if maxVer != 1 {
+		t.Errorf("expected max processing_version 1, got %d", maxVer)
+	}
+}
+
+// --- SaveVaultCap / GetLatestVaultCap Tests ---
+
+func capID(seed byte) []byte {
+	id := make([]byte, 32)
+	id[0] = seed
+	id[31] = seed
+	return id
+}
+
+func TestSaveVaultCap_RoundTrip(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x20))
+
+	cid := capID(0x42)
+	cap := &entity.MorphoVaultCap{
+		MorphoVaultID: vaultID,
+		CapID:         cid,
+		IDData:        []byte{0x01, 0x02, 0x03, 0x04},
+		AbsoluteCap:   big.NewInt(1000000000000),
+		RelativeCap:   big.NewInt(500000000000000000),
+		BlockNumber:   24500000,
+		BlockVersion:  0,
+		Timestamp:     morphoBlockTime,
+	}
+
+	tx, err := fixture.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := fixture.repo.SaveVaultCap(ctx, tx, cap); err != nil {
+		t.Fatalf("SaveVaultCap failed: %v", err)
+	}
+	got, err := fixture.repo.GetLatestVaultCap(ctx, tx, vaultID, cid)
+	if err != nil {
+		t.Fatalf("GetLatestVaultCap failed: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	if got == nil {
+		t.Fatal("expected cap, got nil")
+	}
+	if len(got.CapID) != 32 {
+		t.Errorf("cap_id length: got %d, want 32", len(got.CapID))
+	}
+	if !bytes.Equal(got.CapID, cid) {
+		t.Errorf("cap_id round-trip mismatch")
+	}
+	if got.AbsoluteCap.Cmp(big.NewInt(1000000000000)) != 0 {
+		t.Errorf("absolute_cap mismatch: got %s", got.AbsoluteCap)
+	}
+	if got.RelativeCap.Cmp(big.NewInt(500000000000000000)) != 0 {
+		t.Errorf("relative_cap mismatch: got %s", got.RelativeCap)
+	}
+}
+
+func TestGetLatestVaultCap_LatestAcrossBlocks(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x21))
+	cid := capID(0x43)
+
+	saveCap := func(block int64, abs *big.Int) {
+		cap := &entity.MorphoVaultCap{
+			MorphoVaultID: vaultID,
+			CapID:         cid,
+			IDData:        []byte{0xaa},
+			AbsoluteCap:   abs,
+			RelativeCap:   big.NewInt(0),
+			BlockNumber:   block,
+			BlockVersion:  0,
+			Timestamp:     morphoBlockTime.Add(time.Duration(block) * time.Second),
+		}
+		tx, err := fixture.pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		if err := fixture.repo.SaveVaultCap(ctx, tx, cap); err != nil {
+			t.Fatalf("SaveVaultCap failed: %v", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+	}
+
+	saveCap(24500000, big.NewInt(100))
+	saveCap(24500002, big.NewInt(300)) // latest block
+	saveCap(24500001, big.NewInt(200))
+
+	tx, err := fixture.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	got, err := fixture.repo.GetLatestVaultCap(ctx, tx, vaultID, cid)
+	if err != nil {
+		t.Fatalf("GetLatestVaultCap failed: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected cap, got nil")
+	}
+	if got.BlockNumber != 24500002 {
+		t.Errorf("expected latest block 24500002, got %d", got.BlockNumber)
+	}
+	if got.AbsoluteCap.Cmp(big.NewInt(300)) != 0 {
+		t.Errorf("expected absolute_cap 300 from latest block, got %s", got.AbsoluteCap)
+	}
+}
+
+func TestGetLatestVaultCap_LatestAcrossBlockVersions(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x22))
+	cid := capID(0x44)
+
+	saveCap := func(blockVersion int, abs *big.Int) {
+		cap := &entity.MorphoVaultCap{
+			MorphoVaultID: vaultID,
+			CapID:         cid,
+			IDData:        []byte{0xbb},
+			AbsoluteCap:   abs,
+			RelativeCap:   big.NewInt(0),
+			BlockNumber:   24500000,
+			BlockVersion:  blockVersion,
+			Timestamp:     morphoBlockTime,
+		}
+		tx, err := fixture.pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		if err := fixture.repo.SaveVaultCap(ctx, tx, cap); err != nil {
+			t.Fatalf("SaveVaultCap failed: %v", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+	}
+
+	// Same block, reorg produced a higher block_version with a corrected value.
+	saveCap(0, big.NewInt(100))
+	saveCap(1, big.NewInt(999))
+
+	tx, err := fixture.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	got, err := fixture.repo.GetLatestVaultCap(ctx, tx, vaultID, cid)
+	if err != nil {
+		t.Fatalf("GetLatestVaultCap failed: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected cap, got nil")
+	}
+	if got.BlockVersion != 1 {
+		t.Errorf("expected latest block_version 1, got %d", got.BlockVersion)
+	}
+	if got.AbsoluteCap.Cmp(big.NewInt(999)) != 0 {
+		t.Errorf("expected absolute_cap 999 from latest block_version, got %s", got.AbsoluteCap)
+	}
+}
+
+func TestGetLatestVaultCap_NotFound(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x23))
+
+	tx, err := fixture.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	got, err := fixture.repo.GetLatestVaultCap(ctx, tx, vaultID, capID(0x45))
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if got != nil {
+		t.Errorf("expected nil for unknown cap, got %+v", got)
+	}
+}
+
+// --- UpdateVaultFeeConfig Tests ---
+
+func TestUpdateVaultFeeConfig_PartialLeavesOthersNull(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x24))
+
+	tx, err := fixture.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	err = fixture.repo.UpdateVaultFeeConfig(ctx, tx, vaultID, entity.MorphoVaultFeeUpdate{
+		PerformanceFee: big.NewInt(500000000000000000),
+	})
+	if err != nil {
+		t.Fatalf("UpdateVaultFeeConfig failed: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	var perfFee *string
+	var mgmtFee, perfRecipient, mgmtRecipient *string
+	err = fixture.pool.QueryRow(ctx,
+		`SELECT performance_fee::text, management_fee::text, encode(performance_fee_recipient, 'hex'), encode(management_fee_recipient, 'hex')
+		 FROM morpho_vault WHERE id = $1`,
+		vaultID,
+	).Scan(&perfFee, &mgmtFee, &perfRecipient, &mgmtRecipient)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if perfFee == nil || *perfFee != "500000000000000000" {
+		t.Errorf("performance_fee mismatch: got %v", perfFee)
+	}
+	if mgmtFee != nil {
+		t.Errorf("expected management_fee NULL, got %v", *mgmtFee)
+	}
+	if perfRecipient != nil {
+		t.Errorf("expected performance_fee_recipient NULL, got %v", *perfRecipient)
+	}
+	if mgmtRecipient != nil {
+		t.Errorf("expected management_fee_recipient NULL, got %v", *mgmtRecipient)
+	}
+}
+
+func TestUpdateVaultFeeConfig_SecondPartialPreservesFirst(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x25))
+
+	update := func(u entity.MorphoVaultFeeUpdate) {
+		tx, err := fixture.pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		if err := fixture.repo.UpdateVaultFeeConfig(ctx, tx, vaultID, u); err != nil {
+			t.Fatalf("UpdateVaultFeeConfig failed: %v", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+	}
+
+	recipient := adapterAddr(0x99)
+	update(entity.MorphoVaultFeeUpdate{PerformanceFee: big.NewInt(111)})
+	// A later event sets only the management fee + its recipient; the earlier
+	// performance fee must be preserved.
+	update(entity.MorphoVaultFeeUpdate{ManagementFee: big.NewInt(222), ManagementFeeRecipient: recipient})
+
+	var perfFee, mgmtFee string
+	var mgmtRecipient string
+	err := fixture.pool.QueryRow(ctx,
+		`SELECT performance_fee::text, management_fee::text, encode(management_fee_recipient, 'hex')
+		 FROM morpho_vault WHERE id = $1`,
+		vaultID,
+	).Scan(&perfFee, &mgmtFee, &mgmtRecipient)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if perfFee != "111" {
+		t.Errorf("expected performance_fee preserved (111), got %s", perfFee)
+	}
+	if mgmtFee != "222" {
+		t.Errorf("expected management_fee 222, got %s", mgmtFee)
+	}
+	if mgmtRecipient != fmt.Sprintf("%x", recipient) {
+		t.Errorf("management_fee_recipient mismatch: got %s", mgmtRecipient)
+	}
+}
+
+func TestUpdateVaultFeeConfig_AllNilRejected(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x26))
+
+	tx, err := fixture.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+
+	err = fixture.repo.UpdateVaultFeeConfig(ctx, tx, vaultID, entity.MorphoVaultFeeUpdate{})
+	if err == nil {
+		t.Fatal("expected error for all-nil fee update, got nil")
+	}
+}
+
+func TestUpdateVaultFeeConfig_UnknownVaultErrors(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+
+	tx, err := fixture.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+
+	err = fixture.repo.UpdateVaultFeeConfig(ctx, tx, 999999, entity.MorphoVaultFeeUpdate{
+		PerformanceFee: big.NewInt(1),
+	})
+	if err == nil {
+		t.Fatal("expected error for unknown vault, got nil")
 	}
 }
