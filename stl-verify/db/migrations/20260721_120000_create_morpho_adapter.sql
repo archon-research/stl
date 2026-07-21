@@ -7,7 +7,10 @@
 -- is the registry of those adapters, one row per adapter per vault; its
 -- per-block realAssets() readings live in the morpho_adapter_state hypertable
 -- (part 2). This is a Dimension/registry table like morpho_vault / fluid_vault:
--- no hypertable, no processing_version — registry fields are immutable per row.
+-- no hypertable, no processing_version. The identity fields (morpho_vault_id,
+-- address, asset_token_id, adapter_type, added_at_block) are immutable per row;
+-- removed_at_block is the one mutable column, set once when the adapter is
+-- de-registered.
 --
 -- added_at_block / removed_at_block bound each adapter's active lifetime
 -- (removed_at_block NULL = active). A removed-then-re-added adapter is a new
@@ -59,7 +62,7 @@ ALTER TABLE morpho_vault
 -- 20260609_120000_add_schema_comments / 20260626_120000_create_fluid_vault_tables.
 -- ============================================================================
 COMMENT ON TABLE morpho_adapter IS
-  '[Dimension] Registry of Morpho VaultV2 liquidity adapters, one row per adapter per vault. Each adapter wraps one downstream venue; per-block realAssets() readings live in morpho_adapter_state. Registry fields are immutable per row (removed adapters keep their row; re-adds are new rows).';
+  '[Dimension] Registry of Morpho VaultV2 liquidity adapters, one row per adapter per vault. Each adapter wraps one downstream venue; per-block realAssets() readings live in morpho_adapter_state. Identity fields are immutable per row; removed_at_block is set once on de-registration (removed adapters keep their row; re-adds are new rows).';
 COMMENT ON COLUMN morpho_adapter.id IS 'PK. Surrogate id referenced by morpho_adapter_state.';
 COMMENT ON COLUMN morpho_adapter.morpho_vault_id IS 'FK→morpho_vault.id. The parent VaultV2 that registered this adapter.';
 COMMENT ON COLUMN morpho_adapter.address IS 'Adapter contract address (20 bytes). Unique per (morpho_vault_id, address, added_at_block).';
