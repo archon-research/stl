@@ -93,7 +93,7 @@ func TestEntityRefCodes(t *testing.T) {
 		})
 	}
 
-	// A future-dated mapping is not yet effective, so entity_ref_codes_current (bounded on CURRENT_DATE)
+	// A future-dated mapping is not yet effective, so entity_ref_codes_current (bounded on UTC today)
 	// must not resolve it. (The bound was added on review.)
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO entity_ref_codes (code_type, code_value, entity_id, valid_from, change_reason)
