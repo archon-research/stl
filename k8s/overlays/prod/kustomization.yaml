@@ -35,6 +35,11 @@ resources:
   - ../../base/spark-anchorage-indexer
   - ../../base/offchain-price-indexer
   - ../../base/maple-graphql-indexer
+  # CEX L2 order book indexer fleet — one pod per exchange, same binary,
+  # different EXCHANGE/SYMBOLS config (mirrors the staging fleet, VEC-374/VEC-380).
+  - ../../base/cex-orderbook-indexer-coinbase
+  - ../../base/cex-orderbook-indexer-okx
+  - ../../base/cex-orderbook-indexer-kraken
   - ../../base/watcher-data-validator
   - ../../base/optimism-watcher-data-validator
   - ../../base/unichain-watcher-data-validator
@@ -153,6 +158,11 @@ images:
   - name: maple-graphql-indexer
     newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-cronjob
     newTag: "maple-graphql-indexer-7950c6ca31ae7461628441656fedba3941357cb5"
+  - name: cex-orderbook-indexer
+    # One image shared by every per-exchange order book pod (coinbase/okx/kraken),
+    # selected at runtime via the EXCHANGE env var.
+    newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-cex-orderbook-indexer
+    newTag: "7950c6ca31ae7461628441656fedba3941357cb5"
   - name: watcher-data-validator
     newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-cronjob
     newTag: "watcher-data-validator-7950c6ca31ae7461628441656fedba3941357cb5"
@@ -199,3 +209,21 @@ patches:
       - op: add
         path: /metadata/annotations/tailscale.com~1tags
         value: tag:k8s-external
+  # The kraken and coinbase order book pods are CPU-bound above the base 200m
+  # limit (staging measured ~200m coinbase / ~100m kraken sustained, with spikes
+  # throttled at 200m — see the matching staging patch). Ship prod with the same
+  # 500m headroom; okx stays on the base limit (~7m).
+  - target:
+      kind: Deployment
+      name: cex-orderbook-indexer-kraken
+    patch: |
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/cpu
+        value: "500m"
+  - target:
+      kind: Deployment
+      name: cex-orderbook-indexer-coinbase
+    patch: |
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/cpu
+        value: "500m"
