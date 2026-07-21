@@ -160,6 +160,17 @@ func run(ctx context.Context, args []string) error {
 		return err
 	}
 
+	// Resolve and validate the chain before any infra dial or DB write: an undeclared tracker
+	// deployment must fail immediately, not after standing up SQS/Redis/S3/Postgres and writing
+	// a build-registry row. Both calls are pure (chainName is reused downstream).
+	chainName, err := entity.ChainName(cfg.chainID)
+	if err != nil {
+		return fmt.Errorf("resolving chain name: %w", err)
+	}
+	if err := at.AssertServedTrackerChain(chainName); err != nil {
+		return err
+	}
+
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: env.ParseLogLevel(slog.LevelInfo),
 	}))
@@ -254,16 +265,6 @@ func run(ctx context.Context, args []string) error {
 	}
 	defer shutdownOTEL(context.Background())
 
-	chainName, err := entity.ChainName(cfg.chainID)
-	if err != nil {
-		return fmt.Errorf("resolving chain name: %w", err)
-	}
-	// Fail hard if this instance's chain is not declared served: an undeclared tracker
-	// deployment would let the served-chain guardrail keep dropping this chain's contract
-	// entries. Crashing here forces the servedTrackerChains edit before the deploy sticks.
-	if err := at.AssertServedTrackerChain(chainName); err != nil {
-		return err
-	}
 	mcTel, err := multicall.NewTelemetry(chainName)
 	if err != nil {
 		return fmt.Errorf("multicall telemetry: %w", err)

@@ -23,44 +23,60 @@ var acknowledgedUnservedChains = map[string]bool{
 	"plume":  true, // centrifuge_feeder only; not yet served
 }
 
-// servedTrackerChains and acknowledgedUnservedByTrackerChains together declare, per chain in
-// the axis-synome contract, whether a deployed allocation-tracker indexes it. Every contract
-// chain must appear in exactly one of them (validateContractChainsServed enforces this at CI
-// time), so a regeneration that adds a chain forces a deliberate choice instead of a silent
-// drop by entriesForChainID.
+// servedTrackerChains, acknowledgedUnservedByTrackerChains and acknowledgedUnservedChains
+// (above) partition the chains the axis-synome contract can carry: each chain belongs to
+// exactly ONE of them, and the served-chain guardrail (validateContractChainsServed) fails CI
+// if a contract chain belongs to none — turning a regeneration that adds a chain into a
+// deliberate choice instead of a silent drop by entriesForChainID.
 //
-// servedTrackerChains lists the chains a deployed tracker instance serves. It is the
-// deployment-level counterpart to acknowledgedUnservedChains above, which is vocabulary-level
-// (whether the code recognises the chain string at all, i.e. is in entity.ChainIDToName).
-// This declaration is not derived from the k8s manifests — it is kept honest from the other
+//   - servedTrackerChains                 — a deployed tracker instance indexes it.
+//   - acknowledgedUnservedByTrackerChains — the code recognises it (it is in
+//     entity.ChainIDToName) but no tracker is deployed for it yet.
+//   - acknowledgedUnservedChains          — the code does not recognise the chain string at
+//     all (absent from entity.ChainIDToName), so it is unserved a fortiori.
+//
+// The guardrail's notion of "acknowledged unserved" is the union of the two acknowledged sets
+// (allAcknowledgedUnservedChains): a not-in-vocabulary chain is unserved a fortiori, so it is
+// NOT duplicated into the deployment-level set. TestAcknowledgedSetsAreDisjoint keeps the two
+// acknowledged sets disjoint so no chain is double-listed.
+//
+// servedTrackerChains is not derived from the k8s manifests — it is kept honest from the other
 // side by AssertServedTrackerChain, which every tracker instance runs at boot: an instance
 // whose CHAIN_ID chain is not declared here crash-loops immediately, so a real deployment
-// cannot exist without its entry here.
-//
-// Accepted residual: the reverse — deleting a deployment while leaving its chain listed here
-// — is NOT detectable in CI (nothing observes the manifests). The declaration and the k8s
-// manifests must travel in the same PR; this is a convention enforced by review, not by a
-// test.
+// cannot exist without its entry. Accepted residual: the reverse — deleting a deployment while
+// leaving its chain listed here — is NOT detectable in CI (nothing observes the manifests); the
+// declaration and the manifests must travel in the same PR, a convention enforced by review.
 var servedTrackerChains = map[string]bool{
 	"mainnet": true, // prime-allocation-indexer (CHAIN_ID 1)
 }
 
-// acknowledgedUnservedByTrackerChains lists contract chains that a tracker COULD serve but
-// none is deployed for yet: their entries are knowingly dropped by entriesForChainID. A chain
-// moves from here into servedTrackerChains in the same PR that deploys its tracker; the
-// staleness rule in validateContractChainsServed fails CI if a chain is left in both.
+// acknowledgedUnservedByTrackerChains lists vocabulary-known contract chains (in
+// entity.ChainIDToName) that a tracker could index but none is deployed for yet: their entries
+// are knowingly dropped by entriesForChainID. A chain moves from here into servedTrackerChains
+// in the same PR that deploys its tracker; the staleness rule in validateContractChainsServed
+// fails CI if a chain ends up both served and acknowledged. Vocabulary-UNKNOWN unserved chains
+// live in acknowledgedUnservedChains, not here (see the partition note above).
 var acknowledgedUnservedByTrackerChains = map[string]bool{
-	// Recognised chains (in entity.ChainIDToName) a tracker could index, none deployed yet.
 	"avalanche-c": true, // VEC-499 tracker instance in flight
 	"base":        true, // VEC-499 tracker instance in flight
 	"arbitrum":    true, // no allocation-tracker deployed yet
 	"optimism":    true, // no allocation-tracker deployed yet
 	"unichain":    true, // no allocation-tracker deployed yet
-	// Chains absent from entity.ChainIDToName (also in acknowledgedUnservedChains), unserved
-	// a fortiori until enabled.
-	"monad":  true, // VEC-315: enablement pending
-	"plasma": true, // not yet served
-	"plume":  true, // centrifuge_feeder only; not yet served
+}
+
+// allAcknowledgedUnservedChains is the set of chains it is acceptable for no tracker to serve:
+// the union of the vocabulary-unknown acknowledgements (acknowledgedUnservedChains, unserved a
+// fortiori) and the vocabulary-known-but-undeployed ones (acknowledgedUnservedByTrackerChains).
+// validateContractChainsServed takes this as its `acknowledged` argument.
+func allAcknowledgedUnservedChains() map[string]bool {
+	merged := make(map[string]bool, len(acknowledgedUnservedChains)+len(acknowledgedUnservedByTrackerChains))
+	for chain := range acknowledgedUnservedChains {
+		merged[chain] = true
+	}
+	for chain := range acknowledgedUnservedByTrackerChains {
+		merged[chain] = true
+	}
+	return merged
 }
 
 // chainIsConfigurable reports whether a chain resolves to a CHAIN_ID in

@@ -31,23 +31,38 @@ func contractChainNames(t *testing.T) []string {
 // TestEveryContractChainIsServedOrAcknowledged is the deployment-level guardrail: the
 // committed contract carries entries (~$465M today) on chains that no deployed
 // allocation-tracker serves, and EntriesAndProxiesForChainID silently drops them. It fails CI
-// when a contract chain is in neither servedTrackerChains nor acknowledgedUnservedByTrackerChains,
-// forcing a deploy-and-declare or an explicit acknowledgement instead of a silent hole. It runs
-// against the real declarations, so leaving a new contract chain undeclared turns it red.
+// when a contract chain is in neither servedTrackerChains nor the union of the two acknowledged
+// sets, forcing a deploy-and-declare or an explicit acknowledgement instead of a silent hole.
+// It runs against the real declarations, so leaving a new contract chain undeclared turns it red.
 func TestEveryContractChainIsServedOrAcknowledged(t *testing.T) {
 	if err := validateContractChainsServed(
 		servedTrackerChains,
 		contractChainNames(t),
-		acknowledgedUnservedByTrackerChains,
+		allAcknowledgedUnservedChains(),
 	); err != nil {
 		t.Errorf("contract chains are not all served-or-acknowledged: %v", err)
 	}
 }
 
+// TestAcknowledgedSetsAreDisjoint enforces the dedup invariant: a chain is acknowledged as
+// unserved in exactly one place. Because validateContractChainsServed only ever sees the
+// union (allAcknowledgedUnservedChains), a chain double-listed across the two sets would be
+// invisible there — so disjointness is checked directly over the two declarations.
+func TestAcknowledgedSetsAreDisjoint(t *testing.T) {
+	for chain := range acknowledgedUnservedByTrackerChains {
+		if acknowledgedUnservedChains[chain] {
+			t.Errorf("chain %q is in both acknowledgedUnservedChains (vocabulary-level) and "+
+				"acknowledgedUnservedByTrackerChains (deployment-level); keep it in exactly one — "+
+				"vocabulary-unknown chains belong only in acknowledgedUnservedChains", chain)
+		}
+	}
+}
+
 // TestValidateContractChainsServed covers the pure guardrail's three rule branches
 // independently and combined: a served or acknowledged chain passes; an unserved and
-// unacknowledged chain fails; a chain in both sets is flagged stale; a served chain absent
-// from entity.ChainIDToName is unresolvable; and multiple faults are reported together.
+// unacknowledged chain fails; a chain that is both served and acknowledged is flagged stale;
+// a served chain absent from entity.ChainIDToName is unresolvable; and multiple faults are
+// reported together.
 func TestValidateContractChainsServed(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -72,7 +87,7 @@ func TestValidateContractChainsServed(t *testing.T) {
 			want:           []string{"no deployed allocation-tracker serves", "servedTrackerChains"},
 		},
 		{
-			name:           "chain in both sets is stale",
+			name:           "served and acknowledged chain is stale",
 			served:         map[string]bool{"base": true},
 			contractChains: []string{"base"},
 			acknowledged:   map[string]bool{"base": true},
