@@ -18,6 +18,7 @@
     "security_subtype_ref",
     "security_type_ref",
     "security_instrument_bridge",
+    "security_master",
     "curve_cryptoswap_config",
     "curve_cryptoswap_state",
     "curve_liquidity_event",
