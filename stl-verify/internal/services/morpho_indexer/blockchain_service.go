@@ -78,6 +78,7 @@ type blockchainService struct {
 	morphoBlueABI   *abi.ABI
 	metaMorphoABI   *abi.ABI
 	adapterABI      *abi.ABI
+	vaultV2ABI      *abi.ABI
 	erc20ABI        *abi.ABI
 	vaultProber     *VaultProber
 	adapterProber   *AdapterProber
@@ -104,7 +105,12 @@ func newBlockchainService(
 
 	adapterABI, err := abis.GetVaultV2AdapterReadABI()
 	if err != nil {
-		return nil, fmt.Errorf("failed to load VaultV2 adapter read ABI: %w", err)
+		return nil, fmt.Errorf("loading VaultV2 adapter read ABI: %w", err)
+	}
+
+	vaultV2ABI, err := abis.GetVaultV2ReadABI()
+	if err != nil {
+		return nil, fmt.Errorf("loading VaultV2 read ABI: %w", err)
 	}
 
 	vaultProber, err := NewVaultProber()
@@ -122,6 +128,7 @@ func newBlockchainService(
 		morphoBlueABI:   morphoABI,
 		metaMorphoABI:   metaMorphoABI,
 		adapterABI:      adapterABI,
+		vaultV2ABI:      vaultV2ABI,
 		erc20ABI:        erc20ABI,
 		vaultProber:     vaultProber,
 		adapterProber:   adapterProber,
@@ -652,6 +659,70 @@ func (s *blockchainService) getAdapterRealAssets(ctx context.Context, adapter co
 	}
 	if len(unpacked) == 0 {
 		return nil, fmt.Errorf("realAssets() returned no values for adapter %s", adapter.Hex())
+	}
+	return bigIntFromAny(unpacked[0]), nil
+}
+
+// getVaultCaps reads the two current allocation limits for a cap id off the
+// VaultV2, pinned to blockHash. absoluteCap/relativeCap are per-block state (a
+// cap event mutates them), so like getAdapterRealAssets this is a hash-pinned
+// ExecuteAtHash read for reorg-correctness (VEC-471), not number-pinning. Both
+// getters exist on every VaultV2 and cannot fail for a real cap id, so neither
+// call is AllowFailure: a revert is a real error that must stop the event.
+func (s *blockchainService) getVaultCaps(ctx context.Context, vault common.Address, capID [32]byte, blockHash common.Hash) (retAbsolute, retRelative *big.Int, retErr error) {
+	ctx, span := s.telemetry.StartSpan(ctx, "morpho.rpc.getVaultCaps",
+		attribute.String("vault.address", vault.Hex()))
+	defer span.End()
+	start := time.Now()
+	defer func() {
+		s.telemetry.RecordRPCCall(ctx, "getVaultCaps", time.Since(start), retErr)
+		if retErr != nil {
+			telemetry.SetSpanError(span, retErr, "getVaultCaps failed")
+		}
+	}()
+
+	absoluteCallData, err := s.vaultV2ABI.Pack("absoluteCap", capID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("packing absoluteCap call: %w", err)
+	}
+	relativeCallData, err := s.vaultV2ABI.Pack("relativeCap", capID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("packing relativeCap call: %w", err)
+	}
+
+	results, err := s.multicallClient.ExecuteAtHash(ctx, []outbound.Call{
+		{Target: vault, AllowFailure: false, CallData: absoluteCallData},
+		{Target: vault, AllowFailure: false, CallData: relativeCallData},
+	}, blockHash)
+	if err != nil {
+		return nil, nil, fmt.Errorf("multicall absoluteCap()/relativeCap(): %w", err)
+	}
+	if len(results) != 2 {
+		return nil, nil, fmt.Errorf("cap getters returned %d results, want 2", len(results))
+	}
+
+	absolute, err := s.unpackVaultCap("absoluteCap", results[0], vault, capID)
+	if err != nil {
+		return nil, nil, err
+	}
+	relative, err := s.unpackVaultCap("relativeCap", results[1], vault, capID)
+	if err != nil {
+		return nil, nil, err
+	}
+	return absolute, relative, nil
+}
+
+// unpackVaultCap validates and decodes one absoluteCap()/relativeCap() result.
+func (s *blockchainService) unpackVaultCap(method string, result outbound.Result, vault common.Address, capID [32]byte) (*big.Int, error) {
+	if !result.Success || len(result.ReturnData) == 0 {
+		return nil, fmt.Errorf("%s() call failed for vault %s cap %x", method, vault.Hex(), capID)
+	}
+	unpacked, err := s.vaultV2ABI.Unpack(method, result.ReturnData)
+	if err != nil {
+		return nil, fmt.Errorf("unpacking %s() for vault %s: %w", method, vault.Hex(), err)
+	}
+	if len(unpacked) == 0 {
+		return nil, fmt.Errorf("%s() returned no values for vault %s cap %x", method, vault.Hex(), capID)
 	}
 	return bigIntFromAny(unpacked[0]), nil
 }

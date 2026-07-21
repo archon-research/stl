@@ -5,10 +5,13 @@
 -- bytes32 key (cap_id = keccak256(id_data)) identifying a market, collateral
 -- token, or (adapter, marketParams) tuple. Every id carries two limits: an
 -- absolute cap (an asset-amount ceiling) and a relative cap (a WAD fraction of
--- total assets). On-chain the two are set by separate events, but each cap
--- event here APPENDS a row carrying BOTH fields — the newly-set value plus the
--- preserved other — so the latest row per (vault, cap_id) is always the full
--- current cap state, readable without joining across event rows.
+-- total assets), set on-chain by separate events. Each row here is an
+-- end-of-block cap snapshot: when a cap event fires, the indexer reads BOTH
+-- limits (absoluteCap, relativeCap) off the vault on-chain, pinned to the
+-- event's block hash, and writes them together — so the latest row per
+-- (vault, cap_id) is always the full current cap state, readable without
+-- joining across event rows. Sibling cap events in the same block read
+-- identical values and dedupe (trigger + ON CONFLICT) to one row.
 --
 -- Partitioned on timestamp. Cap changes are rare, so chunks are 7 days,
 -- compressed after 14 days, tiered to S3 after 1 year. Auditability follows
@@ -110,7 +113,7 @@ EXECUTE FUNCTION assign_processing_version_morpho_vault_cap();
 -- Catalogue metadata.
 -- ============================================================================
 COMMENT ON TABLE morpho_vault_cap IS
-  '[Hypertable] Per-id VaultV2 allocation-cap snapshot, partitioned on timestamp. Every cap event appends a row carrying BOTH absolute_cap and relative_cap (the newly-set value plus the preserved other), so the latest row per (morpho_vault_id, cap_id) is the full current cap state. Append-only, ADR-0002 versioned.';
+  '[Hypertable] Per-id VaultV2 allocation-cap snapshot, partitioned on timestamp. Each row is an end-of-block snapshot read on-chain (hash-pinned) when a cap event fires: both absolute_cap and relative_cap are read together off the vault, so the latest row per (morpho_vault_id, cap_id) is the full current cap state. Same-block sibling cap events read identical values and dedupe to one row. Append-only, ADR-0002 versioned.';
 COMMENT ON COLUMN morpho_vault_cap.morpho_vault_id IS 'FK→morpho_vault.id. The VaultV2 the cap belongs to. Part of PK.';
 COMMENT ON COLUMN morpho_vault_cap.cap_id IS 'The on-chain cap key (bytes32, 32 bytes) = keccak256(id_data). Part of PK.';
 COMMENT ON COLUMN morpho_vault_cap.id_data IS 'ABI-encoded pre-image of cap_id (decodes to ("this",adapter) | ("collateralToken",token) | ("this/marketParams",adapter,marketParams)). Attribute, not part of the key.';
