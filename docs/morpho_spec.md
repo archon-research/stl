@@ -783,10 +783,9 @@ function withdraw(uint256 assets, address receiver, address onBehalf) returns (u
 function redeem(uint256 shares, address receiver, address onBehalf) returns (uint256 assets)
 
 // Adapter allocation
-function allocate(address adapter, uint256 assets, bytes32[] memory ids) returns (int256 change)
-function deallocate(address adapter, uint256 assets, bytes32[] memory ids) returns (int256 change)
-function forceDeallocate(address adapter, uint256 assets, address onBehalf, bytes32[] memory ids)
-    returns (uint256 penaltyAssets)
+function allocate(address adapter, bytes data, uint256 assets)
+function deallocate(address adapter, bytes data, uint256 assets)
+function forceDeallocate(address adapter, bytes data, uint256 assets, address onBehalf) returns (uint256)
 
 // Adapter management (Owner)
 function addAdapter(address adapter)
@@ -3018,4 +3017,3 @@ const borrowAPY = taylorCompound(borrowRate, SECONDS_PER_YEAR);
 **Last Updated:** January 2026
 
 **Contributors:** Technical specification based on Morpho protocol documentation, smart contract ABIs, and indexing implementation analysis.
-

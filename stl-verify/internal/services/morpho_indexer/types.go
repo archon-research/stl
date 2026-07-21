@@ -477,7 +477,8 @@ func (e *DeallocateEvent) ToJSON() (json.RawMessage, error) {
 }
 
 // ForceDeallocateEvent is emitted on a sentinel-triggered emergency exit. The
-// contract's forceDeallocate() calls deallocate() internally, so a companion
+// contract's forceDeallocate() calls the shared internal deallocate path
+// (deallocateInternal), which emits the Deallocate event, so a companion
 // Deallocate log accompanies every ForceDeallocate in the same transaction.
 type ForceDeallocateEvent struct {
 	metaMorphoBase
