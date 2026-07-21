@@ -101,7 +101,7 @@ func (e *EventExtractor) loadABIs() error {
 	// timelock event surface. Every one is persisted as a protocol_event
 	// audit-log row when emitted by a known vault; the adapter / allocation /
 	// cap / fee subset additionally has typed extraction and structured
-	// handlers (VEC-218), while the rest stay audit-log-only. Without this
+	// handlers, while the rest stay audit-log-only. Without this
 	// registration the events would silently fall through IsMetaMorphoEvent's
 	// filter.
 	v2EventsABI, err := abis.GetVaultV2EventsABI()
@@ -259,7 +259,7 @@ func (e *EventExtractor) ExtractMetaMorphoEvent(log shared.Log) (MetaMorphoEvent
 	// Only events with structured handlers are extracted into strongly-typed
 	// structs: the ERC4626/ERC20 state events (Deposit / Withdraw / Transfer /
 	// AccrueInterest) plus the VaultV2 adapter / allocation / cap / fee surface
-	// that VEC-218 tracks structurally. The remaining registered V2 events
+	// tracked structurally. The remaining registered V2 events
 	// (role / timelock / gate / metadata setters) are recognised so the indexer
 	// audit-logs them, but have no typed handler: they return (nil, nil), which
 	// signals "registered topic, no typed extraction" so the caller saves the
@@ -341,9 +341,16 @@ func parseTopics(event *abi.Event, topics []string, eventData map[string]any) er
 		return nil
 	}
 
+	// abi.ParseTopicsIntoMap indexes hashes[i] for each indexed arg and panics
+	// (index out of range) if the log carries fewer topics than the event
+	// declares indexed params. A registered topic0 on a malformed/truncated log
+	// is data drift we return as an error, not a crash.
 	hashes := make([]common.Hash, 0, len(topics)-1)
 	for i := 1; i < len(topics); i++ {
 		hashes = append(hashes, common.HexToHash(topics[i]))
+	}
+	if len(hashes) != len(indexed) {
+		return fmt.Errorf("event %s declares %d indexed params but log carries %d topic(s) after topic0", event.Name, len(indexed), len(hashes))
 	}
 
 	return abi.ParseTopicsIntoMap(eventData, indexed, hashes)
@@ -400,6 +407,17 @@ func getBigInt(eventData map[string]any, key string) (*big.Int, error) {
 		return nil, fmt.Errorf("invalid type for %s: %T", key, v)
 	}
 	return b, nil
+}
+
+// getOptionalBigInt reads a *big.Int field that may legitimately be absent (a
+// field present only on some ABI variants). A missing key yields (nil, nil); a
+// present-but-wrong-type value is a real decode error and propagates rather than
+// being silently dropped to NULL.
+func getOptionalBigInt(eventData map[string]any, key string) (*big.Int, error) {
+	if _, ok := eventData[key]; !ok {
+		return nil, nil
+	}
+	return getBigInt(eventData, key)
 }
 
 func getBytes(eventData map[string]any, key string) ([]byte, error) {
@@ -852,13 +870,19 @@ func extractVaultAccrueInterest(eventData map[string]any, txHash string) (*Vault
 		FeeShares:      feeShares,
 	}
 
-	// V2 fields (only present when parsed from V2 ABI)
-	if prev, err := getBigInt(eventData, "previousTotalAssets"); err == nil {
-		result.PreviousTotalAssets = prev
+	// V2-only fields: absent on the V1/V1.1 2-field variant (left nil), but a
+	// present-but-mistyped value must surface, not silently persist NULL.
+	prev, err := getOptionalBigInt(eventData, "previousTotalAssets")
+	if err != nil {
+		return nil, err
 	}
-	if mgmt, err := getBigInt(eventData, "managementFeeShares"); err == nil {
-		result.ManagementFeeShares = mgmt
+	result.PreviousTotalAssets = prev
+
+	mgmt, err := getOptionalBigInt(eventData, "managementFeeShares")
+	if err != nil {
+		return nil, err
 	}
+	result.ManagementFeeShares = mgmt
 
 	return result, nil
 }
