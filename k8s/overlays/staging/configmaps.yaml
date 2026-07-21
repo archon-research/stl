@@ -150,6 +150,12 @@ data:
   AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
   ENVIRONMENT: "sentinelstaging"
   ENABLE_BACKFILL: "true"
+  # Avalanche C-Chain produces ~1-2 blocks/s. The 10/30s defaults left no
+  # headroom to drain a backlog when upstream eth_getBlockReceipts null-results
+  # rose (2026-07-21 watermark-lag incident). 100 blocks every 5s = ~20 blk/s,
+  # matching the arbitrum tuning below.
+  BACKFILL_BATCH_SIZE: "100"
+  BACKFILL_POLL_INTERVAL: "5s"
 ---
 apiVersion: v1
 kind: ConfigMap

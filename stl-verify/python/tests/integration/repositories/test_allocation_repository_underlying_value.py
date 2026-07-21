@@ -78,7 +78,7 @@ async def _holding(repo: AllocationRepository, proxy_hex: str, symbol: str):
         (UV_PROXY_PLAIN, "USDC", UV_USDC_BALANCE * UV_USDC_PRICE),
         # Allowlisted Uni V3 pool position (not an ERC20, never has its own
         # oracle) -> tracker-computed underlying_value x USDC price.
-        (UV_PROXY_UNIV3_POOL, "AUSDUSDC-UNIV3", UV_UNIV3_UNDERLYING_VALUE * UV_USDC_PRICE),
+        (UV_PROXY_UNIV3_POOL, "UNIV3-LP-AUSD-USDC", UV_UNIV3_UNDERLYING_VALUE * UV_USDC_PRICE),
     ],
 )
 @pytest.mark.asyncio
@@ -94,7 +94,7 @@ async def test_allowlisted_holding_carries_underlying_identity(repo) -> None:
     """An allowlisted holding priced from its underlying reports that underlying's
     id/address/symbol, so consumers keyed on underlying_* match the price basis."""
     usdc = await _holding(repo, UV_PROXY_PLAIN, "USDC")
-    univ3 = await _holding(repo, UV_PROXY_UNIV3_POOL, "AUSDUSDC-UNIV3")
+    univ3 = await _holding(repo, UV_PROXY_UNIV3_POOL, "UNIV3-LP-AUSD-USDC")
     assert univ3.underlying_token_id == usdc.token_id
     assert univ3.underlying_token_address == usdc.token_address
     assert univ3.underlying_symbol == "USDC"

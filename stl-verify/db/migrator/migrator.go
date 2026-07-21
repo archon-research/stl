@@ -232,39 +232,160 @@ func (m *Migrator) applyMigrationNoTx(ctx context.Context, filename string, cont
 }
 
 // splitStatements splits SQL content into individual statements by semicolons.
-// It handles comments and preserves statement integrity.
+// Semicolons inside dollar-quoted string literals (PostgreSQL `$$ ... $$` or
+// `$tag$ ... $tag$`), single-quoted string literals, `--` line comments, and
+// `/* ... */` block comments are ignored, so DO blocks, function bodies, and
+// literals carrying embedded `;` or `$$` stay intact. This is the shared splitter
+// for every no-transaction migration, so it must not mis-parse a future migration
+// that puts a `$$` or `;` inside a string or a comment.
+//
+// It is line-oriented: a statement is recognised when a line's non-comment code
+// ends in `;`. That means every statement must live on its own line — do NOT put
+// two statements on a single line in a no-transaction migration, or they will be
+// executed together (which breaks statements that require standalone execution,
+// e.g. CREATE INDEX CONCURRENTLY or a DO block with COMMIT). Every migration in
+// this repo already follows the one-statement-per-line convention.
+//
+// Two SQL constructs are outside the supported grammar (no migration uses either;
+// add handling if one ever needs to): PostgreSQL E-string backslash escapes (a
+// backslash-escaped quote inside an E-string is not recognised, so the literal is
+// mis-read as unterminated) and nested block comments (`/* a /* b */ still */`
+// closes at the first `*/`). Keep both out of no-transaction migrations.
 func splitStatements(content string) []string {
 	var statements []string
 	var current strings.Builder
 
-	lines := strings.SplitSeq(content, "\n")
-	for line := range lines {
+	inDollarQuote := false
+	inSingleQuote := false
+	inBlockComment := false
+	dollarTag := ""
+
+	for line := range strings.SplitSeq(content, "\n") {
 		trimmed := strings.TrimSpace(line)
 
-		// Skip pure comment lines
-		if strings.HasPrefix(trimmed, "--") {
+		// Pure comment lines are dropped only when we are between statements.
+		// Inside a dollar-quoted or single-quoted body, a leading `--` is
+		// legitimate content (a comment inside a PL/pgSQL body, or a literal
+		// that begins with `--`) and must be kept.
+		if !inDollarQuote && !inSingleQuote && !inBlockComment && strings.HasPrefix(trimmed, "--") {
 			continue
 		}
 
-		// Add line to current statement
 		if current.Len() > 0 {
 			current.WriteString("\n")
 		}
 		current.WriteString(line)
 
-		// Check if line ends with semicolon (end of statement)
-		if strings.HasSuffix(trimmed, ";") {
+		// Advance the quote/comment state across this line and recover the
+		// non-comment code so the terminating semicolon is detected on real SQL,
+		// not on a `;` inside a comment or string.
+		code := scanLine(line, &inDollarQuote, &dollarTag, &inSingleQuote, &inBlockComment)
+
+		if !inDollarQuote && !inSingleQuote && !inBlockComment && strings.HasSuffix(strings.TrimSpace(code), ";") {
 			statements = append(statements, current.String())
 			current.Reset()
 		}
 	}
 
-	// Add any remaining content as the last statement
 	if current.Len() > 0 {
 		statements = append(statements, current.String())
 	}
 
 	return statements
+}
+
+// scanLine walks `line` once, updating the dollar-quote, single-quote, and
+// block-comment state, and returns the line's non-comment code (both `--` line
+// comments and `/* ... */` block comments removed). PostgreSQL rules honoured: a
+// doubled single quote is an escaped quote and stays inside the literal; a `$`,
+// `;`, or comment marker inside a single-quoted literal is content, not a
+// delimiter; and a dollar tag only closes on its exact match. Block-comment state
+// is threaded through the pointer because a `/* ... */` may span lines.
+func scanLine(line string, inDollarQuote *bool, dollarTag *string, inSingleQuote, inBlockComment *bool) string {
+	var code strings.Builder
+	for i := 0; i < len(line); {
+		switch {
+		case *inBlockComment:
+			if i+1 < len(line) && line[i] == '*' && line[i+1] == '/' {
+				*inBlockComment = false
+				i += 2
+				continue
+			}
+			i++
+		case *inSingleQuote:
+			code.WriteByte(line[i])
+			if line[i] == '\'' {
+				if i+1 < len(line) && line[i+1] == '\'' {
+					code.WriteByte(line[i+1])
+					i += 2 // escaped quote: remain inside the literal
+					continue
+				}
+				*inSingleQuote = false
+			}
+			i++
+		case *inDollarQuote:
+			if tag, ok := matchDollarTag(line, i); ok {
+				if tag == *dollarTag {
+					*inDollarQuote = false
+					*dollarTag = ""
+				}
+				code.WriteString(tag)
+				i += len(tag)
+				continue
+			}
+			code.WriteByte(line[i])
+			i++
+		case line[i] == '\'':
+			*inSingleQuote = true
+			code.WriteByte(line[i])
+			i++
+		case line[i] == '-' && i+1 < len(line) && line[i+1] == '-':
+			return code.String() // rest of the line is a line comment
+		case line[i] == '/' && i+1 < len(line) && line[i+1] == '*':
+			*inBlockComment = true
+			i += 2
+		default:
+			if tag, ok := matchDollarTag(line, i); ok {
+				*inDollarQuote = true
+				*dollarTag = tag
+				code.WriteString(tag)
+				i += len(tag)
+				continue
+			}
+			code.WriteByte(line[i])
+			i++
+		}
+	}
+	return code.String()
+}
+
+// matchDollarTag reports whether a PostgreSQL dollar-quote tag begins at
+// `line[i]`, returning the full tag including both `$` delimiters. A tag is `$$`
+// or `$identifier$` where the identifier is letters, digits, or underscores and
+// does not start with a digit. A lone `$` (e.g. a `$1` parameter, or a `$` with
+// no closing `$` on the line) is not a tag.
+func matchDollarTag(line string, i int) (string, bool) {
+	if line[i] != '$' {
+		return "", false
+	}
+	j := i + 1
+	for j < len(line) && line[j] != '$' {
+		c := line[j]
+		if !(c == '_' ||
+			(c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+			(c >= '0' && c <= '9')) {
+			return "", false
+		}
+		// Identifier cannot start with a digit.
+		if j == i+1 && (c >= '0' && c <= '9') {
+			return "", false
+		}
+		j++
+	}
+	if j >= len(line) {
+		return "", false
+	}
+	return line[i : j+1], true
 }
 
 func (m *Migrator) ListApplied(ctx context.Context) ([]string, error) {

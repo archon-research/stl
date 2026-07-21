@@ -173,7 +173,7 @@ export interface paths {
     };
     /**
      * Self-computed prime risk capital
-     * @description Compute the prime's capital metrics from on-chain data and the default RRC model (`gap_sweep`), with no dependency on the upstream Star feed. Returns exposure (priced receipt-token allocations), Total Risk Capital (on-chain treasury), Required Risk Capital (sum of per-allocation model RRC), encumbrance, a `modeled_pct` coverage figure, and a per-allocation breakdown. The figures are model-derived and partial (only allocations the model can price contribute Required Risk Capital) and will not match Sky's dashboard. Returns `404` if the prime is unknown.
+     * @description Compute the prime's capital metrics from on-chain data and the default RRC model (`gap_sweep`), with no dependency on the upstream Star feed. Returns exposure (priced receipt-token allocations), Total Risk Capital (on-chain treasury), Required Risk Capital (sum of per-allocation model RRC), encumbrance, a `modeled_pct` coverage figure, and a per-allocation breakdown. The figures are model-derived and partial (only allocations the model can price contribute Required Risk Capital) and will not match Sky's dashboard. A backed allocation whose pool-share lookup can't be resolved (e.g. a warm-up window or an un-indexed receipt token) is reported as unpriced (`applied=false` with an `unpriced_reason`) rather than failing the whole response. Returns `404` if the prime is unknown.
      */
     get: operations['get_prime_risk_capital_v1_primes__prime_id__risk_capital_get'];
     put?: never;
@@ -612,7 +612,7 @@ export interface components {
       event_count: number;
       /**
        * Net Flow Usd
-       * @description Signed net flow valued in USD (inflows positive, outflows negative), using the receipt token's latest underlying oracle price for wrapped positions and the token's own latest oracle price for direct holdings. Lets clients reconstruct a balance series by anchoring at the current total and cumulating net flows backwards.
+       * @description Signed net flow valued in USD (inflows positive, outflows negative). Only receipt-token flows are valued: each is converted to underlying units at its row's share ratio (underlying_value / balance), borrowing the nearest same-token row's ratio when the row's own is unavailable and falling back to the raw tx_amount only when the token has no valued row at all, then priced at the receipt token's latest underlying oracle price. Rows whose recorded underlying diverges from the registry's are refused and contribute 0, as do direct holdings. Lets clients reconstruct a balance series by anchoring at the current total and cumulating net flows backwards.
        * @example 1234567.89
        */
       net_flow_usd: string;
@@ -747,15 +747,19 @@ export interface components {
      *     - Receipt-token positions (e.g. spUSDT wrapping USDT): all fields populated.
      *     - Direct asset holdings (e.g. PYUSD held in the proxy with no wrapper):
      *       ``receipt_token_id`` / ``receipt_token_address`` / ``protocol_name`` are
-     *       null; ``symbol`` and ``underlying_symbol`` both name the held asset;
-     *       ``underlying_token_id`` / ``underlying_token_address`` point at it.
-     *       ``amount_usd`` is populated when an oracle price exists for the token and
-     *       null otherwise (e.g. LP/curve shares with no oracle feed).
+     *       null; ``symbol`` names the held asset. ``underlying_*`` usually point at
+     *       the held asset itself, except holdings valued on the underlying-value
+     *       basis (allowlisted, e.g. a Uni V3 pool position valued in USDC) with a
+     *       resolvable underlying, where they point at that underlying.
+     *       ``amount_usd`` is populated when an oracle price exists for the pricing
+     *       basis and null otherwise (e.g. LP/curve shares with no oracle feed).
      * @example {
      *       "amount_usd": "1234567.89",
      *       "balance": "1234567.89",
      *       "category": "allocation",
      *       "chain_id": 1,
+     *       "latest_activity_action": "out",
+     *       "latest_activity_amount": "12.5",
      *       "latest_activity_at": "2026-05-07T12:00:00Z",
      *       "protocol_name": "aave-v3",
      *       "receipt_token_address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
@@ -788,6 +792,18 @@ export interface components {
        */
       chain_id: number;
       /**
+       * Latest Activity Action
+       * @description Direction of the most recent activity (`in`, `out`, `sweep`), or `null`.
+       * @example out
+       */
+      latest_activity_action?: string | null;
+      /**
+       * Latest Activity Amount
+       * @description Token-unit magnitude of the most recent activity (unsigned). Decimal serialized as a JSON string. `null` when there is no activity.
+       * @example 12.5
+       */
+      latest_activity_amount?: string | null;
+      /**
        * Latest Activity At
        * @description ISO-8601 timestamp of the most recent on-chain activity for this position, or `null`.
        * @example 2026-05-07T12:00:00Z
@@ -819,19 +835,19 @@ export interface components {
       symbol: string;
       /**
        * Underlying Symbol
-       * @description Underlying-token symbol. For direct holdings, same as ``symbol``.
+       * @description Underlying-token symbol. For direct holdings, same as ``symbol``, unless the holding is valued on the underlying-value basis (allowlisted).
        * @example USDC
        */
       underlying_symbol: string;
       /**
        * Underlying Token Address
-       * @description 0x-prefixed underlying-token contract address. For direct holdings, this is the held asset itself.
+       * @description 0x-prefixed underlying-token contract address. For direct holdings, this is the held asset itself, unless the holding is valued on the underlying-value basis (allowlisted).
        * @example 0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
        */
       underlying_token_address: string;
       /**
        * Underlying Token Id
-       * @description Surrogate id of the underlying token. For direct holdings, this is the held asset itself.
+       * @description Surrogate id of the underlying token. For direct holdings, this is the held asset itself, unless the holding is valued on the underlying-value basis (allowlisted).
        * @example 1
        */
       underlying_token_id: number;
@@ -843,12 +859,12 @@ export interface components {
     AllocationRiskCapitalResponse: {
       /**
        * Applied
-       * @description Whether the default model could price this allocation.
+       * @description Whether the default model priced this allocation.
        */
       applied: boolean;
       /**
        * Crr Pct
-       * @description Comparable capital-risk ratio (0-100). `null` when the model does not apply.
+       * @description Comparable capital-risk ratio (0-100). `null` when the allocation is unpriced.
        */
       crr_pct?: string | null;
       /**
@@ -873,7 +889,7 @@ export interface components {
       receipt_token_id: number;
       /**
        * Required Risk Capital Usd
-       * @description Per-allocation RRC (USD). `null` when the model does not apply.
+       * @description Per-allocation RRC (USD). `null` when the allocation is unpriced.
        */
       required_risk_capital_usd?: string | null;
       /**
@@ -881,6 +897,14 @@ export interface components {
        * @description Receipt-token symbol.
        */
       symbol: string;
+      /**
+       * Unpriced Reason
+       * @description Why the allocation is unpriced (`null` when `applied`): `no_model` (no default model applies), or `share_data_missing` / `share_data_stale` (a model applies but its pool-share lookup could not be resolved, e.g. a warm-up window or an un-indexed receipt token).
+       */
+      unpriced_reason?:
+        | 'no_model'
+        | ('share_data_missing' | 'share_data_stale')
+        | null;
     };
     /**
      * BadDebtResponse
