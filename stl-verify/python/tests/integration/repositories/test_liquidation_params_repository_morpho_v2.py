@@ -36,6 +36,25 @@ _ADAPTER2 = b"\xa2" * 20  # type 2 (nested V1)
 _ADAPTER3 = b"\xa3" * 20  # type 1 but REMOVED
 _EMPTY_V2_VAULT = b"\xc9" * 20  # v3 vault with no adapters
 
+# has_unwalkable_adapter_value probe scenarios — one dedicated vault + adapter each.
+_WALKABLE_VAULT = b"\xb0" * 20  # state + positions → walkable (False)
+_WALKABLE_ADAPTER = b"\xb1" * 20
+_STATELESS_VAULT = b"\xb2" * 20  # positions but NO adapter_state row → unwalkable (True)
+_STATELESS_ADAPTER = b"\xb3" * 20
+_POSITIONLESS_VAULT = b"\xb4" * 20  # material state, no positions → unwalkable (True)
+_POSITIONLESS_ADAPTER = b"\xb5" * 20
+_MISSING_USER_VAULT = b"\xb6" * 20  # material state, adapter has no "user" row → unwalkable (True)
+_MISSING_USER_ADAPTER = b"\xba" * 20  # deliberately NO insert_user() for this address
+_TYPE99_VAULT = b"\xb7" * 20  # material state, type 99 → unwalkable (True)
+_TYPE99_ADAPTER = b"\xb8" * 20
+_IDLE_VAULT = b"\xb9" * 20  # state present but real_assets ≈ 0 → walkable (False)
+_IDLE_ADAPTER = b"\xbb" * 20
+
+_ADAPTER_TYPE_UNKNOWN = 99
+# Material realAssets() (well above the 0.01 dust floor) in USDC base units.
+_REAL_ASSETS_MATERIAL = "500000000000"  # 500,000 USDC
+_REAL_ASSETS_DUST = "5000"  # 0.005 USDC — below the 0.01 floor
+
 
 async def _insert_protocol(conn: asyncpg.Connection) -> int:
     return cast(
@@ -154,6 +173,45 @@ async def _insert_adapter(
     )
 
 
+async def _insert_adapter_state(conn: asyncpg.Connection, adapter_id: int, real_assets: str) -> None:
+    await conn.execute(
+        """
+        INSERT INTO morpho_adapter_state (morpho_adapter_id, block_number, block_version, timestamp, real_assets)
+        VALUES ($1, $2, 0, NOW(), $3)
+        """,
+        adapter_id,
+        _BLOCK,
+        real_assets,
+    )
+
+
+async def _seed_probe_vault(
+    conn: asyncpg.Connection,
+    protocol_id: int,
+    usdc: int,
+    weth: int,
+    *,
+    vault_addr: bytes,
+    adapter_addr: bytes,
+    adapter_type: int,
+    real_assets: str | None,
+    with_user: bool,
+    with_position: bool,
+    market_index: int,
+) -> int:
+    """Seed a single-adapter v3 vault exercising one has_unwalkable branch."""
+    vault_id = await _insert_vault(conn, protocol_id, vault_addr, usdc, 3)
+    adapter_id = await _insert_adapter(conn, vault_id, adapter_addr, usdc, adapter_type)
+    if real_assets is not None:
+        await _insert_adapter_state(conn, adapter_id, real_assets)
+    if with_user:
+        user_id = await insert_user(conn, adapter_addr)
+        if with_position:
+            market = await _insert_market(conn, protocol_id, market_index, usdc, weth, _LLTV_086)
+            await _insert_market_position(conn, user_id, market)
+    return vault_id
+
+
 # ---------------------------------------------------------------------------
 # Scenario (all lltv WAD): the V2 vault's liquidatable collateral is reachable
 # only through its ACTIVE adapters.
@@ -207,11 +265,97 @@ async def _seed_data(db_url: str) -> None:
         market_xcoll = await _insert_market(conn, protocol_id, 5, usdc, xcoll, _LLTV_050)
         await _insert_market_position(conn, adapter3_user, market_xcoll)
 
+        # has_unwalkable_adapter_value probe scenarios (one single-adapter vault each).
+        walkable_vault = await _seed_probe_vault(
+            conn,
+            protocol_id,
+            usdc,
+            weth,
+            vault_addr=_WALKABLE_VAULT,
+            adapter_addr=_WALKABLE_ADAPTER,
+            adapter_type=_ADAPTER_TYPE_BLUE,
+            real_assets=_REAL_ASSETS_MATERIAL,
+            with_user=True,
+            with_position=True,
+            market_index=6,
+        )
+        stateless_vault = await _seed_probe_vault(
+            conn,
+            protocol_id,
+            usdc,
+            weth,
+            vault_addr=_STATELESS_VAULT,
+            adapter_addr=_STATELESS_ADAPTER,
+            adapter_type=_ADAPTER_TYPE_BLUE,
+            real_assets=None,
+            with_user=True,
+            with_position=True,
+            market_index=7,
+        )
+        positionless_vault = await _seed_probe_vault(
+            conn,
+            protocol_id,
+            usdc,
+            weth,
+            vault_addr=_POSITIONLESS_VAULT,
+            adapter_addr=_POSITIONLESS_ADAPTER,
+            adapter_type=_ADAPTER_TYPE_BLUE,
+            real_assets=_REAL_ASSETS_MATERIAL,
+            with_user=True,
+            with_position=False,
+            market_index=8,
+        )
+        missing_user_vault = await _seed_probe_vault(
+            conn,
+            protocol_id,
+            usdc,
+            weth,
+            vault_addr=_MISSING_USER_VAULT,
+            adapter_addr=_MISSING_USER_ADAPTER,
+            adapter_type=_ADAPTER_TYPE_BLUE,
+            real_assets=_REAL_ASSETS_MATERIAL,
+            with_user=False,
+            with_position=False,
+            market_index=9,
+        )
+        type99_vault = await _seed_probe_vault(
+            conn,
+            protocol_id,
+            usdc,
+            weth,
+            vault_addr=_TYPE99_VAULT,
+            adapter_addr=_TYPE99_ADAPTER,
+            adapter_type=_ADAPTER_TYPE_UNKNOWN,
+            real_assets=_REAL_ASSETS_MATERIAL,
+            with_user=True,
+            with_position=False,
+            market_index=10,
+        )
+        idle_vault = await _seed_probe_vault(
+            conn,
+            protocol_id,
+            usdc,
+            weth,
+            vault_addr=_IDLE_VAULT,
+            adapter_addr=_IDLE_ADAPTER,
+            adapter_type=_ADAPTER_TYPE_BLUE,
+            real_assets=_REAL_ASSETS_DUST,
+            with_user=True,
+            with_position=False,
+            market_index=11,
+        )
+
         await store_test_ids(
             conn,
             {
                 "v2_vault": v2_vault,
                 "empty_v2_vault": empty_v2_vault,
+                "walkable_vault": walkable_vault,
+                "stateless_vault": stateless_vault,
+                "positionless_vault": positionless_vault,
+                "missing_user_vault": missing_user_vault,
+                "type99_vault": type99_vault,
+                "idle_vault": idle_vault,
                 "weth": weth,
                 "wbtc": wbtc,
                 "wsteth": wsteth,
@@ -254,7 +398,7 @@ async def test_resolves_lltv_across_adapter_graph(repository, test_ids: dict[str
 
     weth = result[test_ids["weth"]]
     assert weth.liquidation_threshold == Decimal("0.80")  # MIN(0.86, 0.80)
-    assert abs(weth.liquidation_bonus - compute_lif(Decimal("0.80"))) < Decimal("0.0001")
+    assert weth.liquidation_bonus == compute_lif(Decimal("0.80"))
 
     assert result[test_ids["wbtc"]].liquidation_threshold == Decimal("0.77")
     assert result[test_ids["wsteth"]].liquidation_threshold == Decimal("0.70")
@@ -285,3 +429,48 @@ async def test_empty_adapter_vault_returns_no_params(repository, test_ids: dict[
 @pytest.mark.asyncio(loop_scope="module")
 async def test_empty_token_ids_returns_empty(repository, test_ids: dict[str, int]) -> None:
     assert await repository.get_params(backed_asset_id=test_ids["v2_vault"], token_ids=[]) == {}
+
+
+# ---------------------------------------------------------------------------
+# has_unwalkable_adapter_value probe: distinguishes a deployed-but-unindexed
+# VaultV2 (degrade) from a genuinely idle one (real rrc=0). Adapter-ROW existence
+# is the wrong signal; these seed the partial-index states that break it.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_unwalkable_false_when_state_and_positions_present(repository, test_ids: dict[str, int]) -> None:
+    assert await repository.has_unwalkable_adapter_value(test_ids["walkable_vault"]) is False
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_unwalkable_true_for_stateless_adapter(repository, test_ids: dict[str, int]) -> None:
+    """An active adapter with NO morpho_adapter_state row (state lags positions) is
+    unwalkable: its value is unknown, so the idle computation mis-attributes it."""
+    assert await repository.has_unwalkable_adapter_value(test_ids["stateless_vault"]) is True
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_unwalkable_true_for_positionless_adapter_with_value(repository, test_ids: dict[str, int]) -> None:
+    """Material real_assets but zero market positions (positions lag state)."""
+    assert await repository.has_unwalkable_adapter_value(test_ids["positionless_vault"]) is True
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_unwalkable_true_when_user_row_missing_with_value(repository, test_ids: dict[str, int]) -> None:
+    """A missing "user" row for the adapter address counts as zero markets."""
+    assert await repository.has_unwalkable_adapter_value(test_ids["missing_user_vault"]) is True
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_unwalkable_true_for_type99_adapter_with_value(repository, test_ids: dict[str, int]) -> None:
+    """An unknown-composition (type 99) adapter with material value resolves zero
+    markets by construction and must degrade, not count as riskless."""
+    assert await repository.has_unwalkable_adapter_value(test_ids["type99_vault"]) is True
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_unwalkable_false_for_genuinely_idle_adapter(repository, test_ids: dict[str, int]) -> None:
+    """State present, real_assets ≈ 0 (below the dust floor): a real idle vault, not a
+    data gap — must NOT degrade."""
+    assert await repository.has_unwalkable_adapter_value(test_ids["idle_vault"]) is False

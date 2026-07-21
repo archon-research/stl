@@ -62,15 +62,17 @@ class PriceDataMissingError(AllocationUnpricedError):
 
 
 class AdapterDataMissingError(AllocationUnpricedError):
-    """Raised when a Morpho VaultV2's active adapters are not indexed yet.
+    """Raised when a Morpho VaultV2's adapter composition is not fully indexed.
 
     A VaultV2 holds its assets in liquidity adapters, never directly, so its
     collateral (and thus its liquidation params) is reachable only through those
-    adapters. Until the adapter rows are backfilled, no params resolve and every
-    collateral item would silently drop — a confident ``rrc=0`` with applied=True.
-    Degrade the allocation to unpriced instead. Kept distinct from a genuinely idle
-    v3 vault (adapters present, no collateral markets), which resolves to a real
-    ``rrc=0`` rather than a data gap.
+    adapters. A composition-completeness probe distinguishes deployed-but-unindexed
+    value — no active adapters, or an active adapter with material value whose walk
+    resolves zero markets (state/positions/user row lagging) — from a genuinely idle
+    vault (adapters + state present, value ≈ 0). In the incomplete case every
+    collateral item would silently drop or the breakdown would short-circuit empty,
+    yielding a confident ``rrc=0`` with applied=True; degrade the allocation to
+    unpriced instead. Genuine idleness resolves to a real ``rrc=0``, not this error.
     """
 
     code = "adapter_data_missing"
