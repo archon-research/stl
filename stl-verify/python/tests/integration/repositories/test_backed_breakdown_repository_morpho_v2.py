@@ -48,8 +48,14 @@ def _price_str(price: Decimal) -> str:
     return f"{price:.18f}"
 
 
-async def _insert_token_price(conn: asyncpg.Connection, token_id: int, oracle_id: int, price: Decimal) -> None:
-    """Insert an onchain price for a token plus its enabled oracle_asset mapping."""
+async def _insert_token_price(
+    conn: asyncpg.Connection, token_id: int, oracle_id: int, price: Decimal, *, enabled: bool = True
+) -> None:
+    """Insert an onchain price for a token plus its oracle_asset mapping.
+
+    ``enabled=False`` models a retired source: the breakdown's enabled-oracle gate
+    must exclude the price, leaving the token unpriced.
+    """
     await conn.execute(
         """
         INSERT INTO onchain_token_price (token_id, oracle_id, block_number, block_version, timestamp, price_usd)
@@ -60,7 +66,7 @@ async def _insert_token_price(conn: asyncpg.Connection, token_id: int, oracle_id
         _SEED_BLOCK,
         _price_str(price),
     )
-    await insert_oracle_asset(conn, oracle_id, token_id, enabled=True)
+    await insert_oracle_asset(conn, oracle_id, token_id, enabled=enabled)
 
 
 _V2_VAULT_ADDRESS = b"\xcc" * 20
@@ -72,6 +78,19 @@ _ADAPTER3_ADDRESS = b"\xa3" * 20  # type 1 but REMOVED (must be excluded)
 # Second, isolated V2 vault exercising the type-99 unknown-adapter line.
 _V2B_VAULT_ADDRESS = b"\xc9" * 20
 _ADAPTER99_ADDRESS = b"\xa9" * 20
+
+# Scenario vaults for the #8 coverage additions.
+_SAME_TYPE_VAULT_ADDRESS = b"\xd1" * 20  # two active type-1 adapters into WETH → SUM
+_SAME_TYPE_ADAPTER_A = b"\xd2" * 20
+_SAME_TYPE_ADAPTER_B = b"\xd3" * 20
+_UNPRICED_VAULT_ADDRESS = b"\xd4" * 20  # loan token (UNPX) has no price → all price_usd None
+_UNPRICED_ADAPTER = b"\xd5" * 20
+_UNPX_ADDRESS = b"\xd6" * 20  # loan token with no onchain price
+_DISABLED_VAULT_ADDRESS = b"\xd7" * 20  # loan-token price only via a disabled oracle_asset
+_DISABLED_ADAPTER = b"\xd8" * 20
+_DISX_ADDRESS = b"\xd9" * 20  # loan token priced only through a disabled mapping
+_DUST_VAULT_ADDRESS = b"\xda" * 20  # a vault-own-address position must be ignored (vault-760 shape)
+_DUST_ADAPTER = b"\xdb" * 20
 
 
 async def _insert_protocol(conn: asyncpg.Connection) -> int:
@@ -380,12 +399,82 @@ async def _seed_data(db_url: str) -> None:
         )
         await _insert_morpho_adapter_state(conn, adapter99_id, "250000000000", _SEED_BLOCK)
 
+        # --- #8 coverage scenarios (each a single-market util=100% adapter) ----
+        unpx_id = await insert_token(conn, "UNPX", 6, _UNPX_ADDRESS)  # loan token, deliberately unpriced
+        disx_id = await insert_token(conn, "DISX", 6, _DISX_ADDRESS)  # loan token priced only via disabled mapping
+        await _insert_token_price(conn, disx_id, chainlink_oracle_id, Decimal("1"), enabled=False)
+
+        # A) two active type-1 adapters both supplying WETH → one summed WETH row.
+        same_type_vault = await _insert_morpho_vault(conn, protocol_id, _SAME_TYPE_VAULT_ADDRESS, usdc_id, 3, "sSAME")
+        await _insert_morpho_vault_state(conn, same_type_vault, "500000000000", _SEED_BLOCK)  # 500k, idle 0
+        st_user_a = await insert_user(conn, _SAME_TYPE_ADAPTER_A)
+        st_user_b = await insert_user(conn, _SAME_TYPE_ADAPTER_B)
+        st_a = await _insert_morpho_adapter(
+            conn, same_type_vault, _SAME_TYPE_ADAPTER_A, usdc_id, _ADAPTER_TYPE_BLUE_MARKET, _SEED_BLOCK
+        )
+        st_b = await _insert_morpho_adapter(
+            conn, same_type_vault, _SAME_TYPE_ADAPTER_B, usdc_id, _ADAPTER_TYPE_BLUE_MARKET, _SEED_BLOCK
+        )
+        await _insert_morpho_adapter_state(conn, st_a, "300000000000", _SEED_BLOCK)
+        await _insert_morpho_adapter_state(conn, st_b, "200000000000", _SEED_BLOCK)
+        market_st_a = await _insert_morpho_market(conn, protocol_id, b"\x10" * 32, usdc_id, weth_id)
+        market_st_b = await _insert_morpho_market(conn, protocol_id, b"\x11" * 32, usdc_id, weth_id)
+        await _insert_morpho_market_state(conn, market_st_a, "1000000000000", "1000000000000", _SEED_BLOCK)  # 100% util
+        await _insert_morpho_market_state(conn, market_st_b, "1000000000000", "1000000000000", _SEED_BLOCK)
+        await _insert_morpho_market_position(conn, st_user_a, market_st_a, "300000000000", _SEED_BLOCK)
+        await _insert_morpho_market_position(conn, st_user_b, market_st_b, "200000000000", _SEED_BLOCK)
+
+        # B) unpriced loan token (UNPX): every row's price_usd is None, backing_value raw.
+        unpriced_vault = await _insert_morpho_vault(conn, protocol_id, _UNPRICED_VAULT_ADDRESS, unpx_id, 3, "sUNPX")
+        await _insert_morpho_vault_state(conn, unpriced_vault, "100000000000", _SEED_BLOCK)
+        unp_user = await insert_user(conn, _UNPRICED_ADAPTER)
+        unp_adapter = await _insert_morpho_adapter(
+            conn, unpriced_vault, _UNPRICED_ADAPTER, unpx_id, _ADAPTER_TYPE_BLUE_MARKET, _SEED_BLOCK
+        )
+        await _insert_morpho_adapter_state(conn, unp_adapter, "100000000000", _SEED_BLOCK)
+        market_unp = await _insert_morpho_market(conn, protocol_id, b"\x12" * 32, unpx_id, weth_id)
+        await _insert_morpho_market_state(conn, market_unp, "1000000000000", "1000000000000", _SEED_BLOCK)
+        await _insert_morpho_market_position(conn, unp_user, market_unp, "100000000000", _SEED_BLOCK)
+
+        # C) loan token priced ONLY via a disabled oracle_asset → enabled-gate excludes it.
+        disabled_vault = await _insert_morpho_vault(conn, protocol_id, _DISABLED_VAULT_ADDRESS, disx_id, 3, "sDISX")
+        await _insert_morpho_vault_state(conn, disabled_vault, "100000000000", _SEED_BLOCK)
+        dis_user = await insert_user(conn, _DISABLED_ADAPTER)
+        dis_adapter = await _insert_morpho_adapter(
+            conn, disabled_vault, _DISABLED_ADAPTER, disx_id, _ADAPTER_TYPE_BLUE_MARKET, _SEED_BLOCK
+        )
+        await _insert_morpho_adapter_state(conn, dis_adapter, "100000000000", _SEED_BLOCK)
+        market_dis = await _insert_morpho_market(conn, protocol_id, b"\x13" * 32, disx_id, weth_id)
+        await _insert_morpho_market_state(conn, market_dis, "1000000000000", "1000000000000", _SEED_BLOCK)
+        await _insert_morpho_market_position(conn, dis_user, market_dis, "100000000000", _SEED_BLOCK)
+
+        # D) vault-760 shape: a market_position under the VAULT's OWN address must be ignored.
+        dust_vault = await _insert_morpho_vault(conn, protocol_id, _DUST_VAULT_ADDRESS, usdc_id, 3, "sDUST")
+        await _insert_morpho_vault_state(conn, dust_vault, "200000000000", _SEED_BLOCK)
+        dust_adapter_user = await insert_user(conn, _DUST_ADAPTER)
+        dust_vault_user = await insert_user(conn, _DUST_VAULT_ADDRESS)  # the vault's own address as a "user"
+        dust_adapter = await _insert_morpho_adapter(
+            conn, dust_vault, _DUST_ADAPTER, usdc_id, _ADAPTER_TYPE_BLUE_MARKET, _SEED_BLOCK
+        )
+        await _insert_morpho_adapter_state(conn, dust_adapter, "200000000000", _SEED_BLOCK)
+        market_dust_weth = await _insert_morpho_market(conn, protocol_id, b"\x14" * 32, usdc_id, weth_id)
+        await _insert_morpho_market_state(conn, market_dust_weth, "1000000000000", "1000000000000", _SEED_BLOCK)
+        await _insert_morpho_market_position(conn, dust_adapter_user, market_dust_weth, "200000000000", _SEED_BLOCK)
+        # The misattributed vault-own-address position (WBTC) — must NOT surface.
+        market_dust_wbtc = await _insert_morpho_market(conn, protocol_id, b"\x15" * 32, usdc_id, wbtc_id)
+        await _insert_morpho_market_state(conn, market_dust_wbtc, "1000000000000", "1000000000000", _SEED_BLOCK)
+        await _insert_morpho_market_position(conn, dust_vault_user, market_dust_wbtc, "999999999999", _SEED_BLOCK)
+
         await store_test_ids(
             conn,
             {
                 "v2_vault_id": v2_vault_id,
                 "v1_vault_id": v1_vault_id,
                 "v2b_vault_id": v2b_vault_id,
+                "same_type_vault": same_type_vault,
+                "unpriced_vault": unpriced_vault,
+                "disabled_vault": disabled_vault,
+                "dust_vault": dust_vault,
                 "usdc_id": usdc_id,
                 "weth_id": weth_id,
                 "wbtc_id": wbtc_id,
@@ -496,3 +585,62 @@ async def test_v2_unknown_adapter_is_surfaced(repository: BackedBreakdownReposit
 async def test_v2_nonexistent_vault_returns_empty(repository: BackedBreakdownRepository) -> None:
     result = await repository.get_backed_breakdown(999_999)
     assert result.items == ()
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_v2_two_same_type_adapters_aggregate(
+    repository: BackedBreakdownRepository, test_ids: dict[str, int]
+) -> None:
+    """Two active type-1 adapters both supplying WETH sum into ONE WETH row.
+
+    adapterA 300,000 + adapterB 200,000 = 500,000 raw (util 100% = all collateral);
+    USD-scaled by USDC 1.0001 = 500,050.00. Proves the cross-adapter SUM/grouping math.
+    """
+    result = await repository.get_backed_breakdown(test_ids["same_type_vault"])
+
+    assert len(result.items) == 1
+    item = result.items[0]
+    assert item.symbol == "WETH"
+    assert item.token_id == test_ids["weth_id"]
+    assert item.backing_value == Decimal("500050.00")
+    assert item.backing_pct == Decimal("100.00")
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_v2_unpriced_loan_token_forces_all_prices_none(
+    repository: BackedBreakdownRepository, test_ids: dict[str, int]
+) -> None:
+    """When the vault's loan token has no USD price, backing_value stays in raw
+    loan-token units and price_usd is None on every row (→ price_data_missing)."""
+    result = await repository.get_backed_breakdown(test_ids["unpriced_vault"])
+
+    assert len(result.items) == 1
+    item = result.items[0]
+    assert item.symbol == "WETH"
+    assert item.backing_value == Decimal("100000.00")  # raw, not USD-scaled
+    assert item.price_usd is None
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_v2_disabled_oracle_loan_token_is_unpriced(
+    repository: BackedBreakdownRepository, test_ids: dict[str, int]
+) -> None:
+    """A loan-token price reachable only through a disabled oracle_asset mapping is
+    excluded by the enabled-gate, leaving the vault unpriced (price_usd None)."""
+    result = await repository.get_backed_breakdown(test_ids["disabled_vault"])
+
+    assert len(result.items) == 1
+    assert result.items[0].price_usd is None
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_v2_vault_own_address_position_is_ignored(
+    repository: BackedBreakdownRepository, test_ids: dict[str, int]
+) -> None:
+    """A market_position attributed to the VaultV2's OWN address (vault-760 dust
+    artifact) must never surface: the walk keys strictly on adapter users."""
+    result = await repository.get_backed_breakdown(test_ids["dust_vault"])
+
+    symbols = {item.symbol for item in result.items}
+    assert symbols == {"WETH"}  # the adapter's WETH only; the vault-address WBTC is absent
+    assert "WBTC" not in symbols

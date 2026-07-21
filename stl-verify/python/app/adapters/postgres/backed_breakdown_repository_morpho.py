@@ -1,40 +1,15 @@
 # ruff: noqa: E501
 from decimal import Decimal
-from typing import Any, NamedTuple
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.domain.entities.backed_breakdown import (
-    BackedBreakdown,
-    CollateralContribution,
-)
+from app.adapters.postgres._morpho_breakdown_common import MorphoVaultRef, resolve_morpho_vault, to_contribution
+from app.domain.entities.backed_breakdown import BackedBreakdown
 
 # Minimum collateral amount in loan-token units (not USD) to include in the breakdown.
 # Filters out dust positions that would add noise to the percentage calculation.
 _MIN_COLLATERAL_AMOUNT = Decimal("0.01")
-
-
-class MorphoVaultRef(NamedTuple):
-    """A resolved Morpho vault: its internal id plus its ``vault_version``.
-
-    ``vault_version`` (morpho_vault.vault_version) selects the backed-breakdown
-    walk: 1 = MetaMorpho V1, 2 = MetaMorpho V1.1 (both direct Morpho-Blue
-    allocation, this repository), 3 = Morpho VaultV2 (adapter-based, the
-    ``MorphoV2BackedBreakdownRepository``). Returned by ``resolve_vault`` so the
-    reader can dispatch on version without embedding SQL.
-    """
-
-    id: int
-    vault_version: int
-
-
-# Resolve a vault's internal id AND version in one round trip. Shared by
-# ``resolve_vault`` here and by the V2 repository so both read the same natural
-# key (address, chain_id) — version drives which walk the reader dispatches to.
-_VAULT_RESOLVE_SQL = """
-SELECT id, vault_version FROM morpho_vault WHERE address = :addr AND chain_id = :chain_id
-"""
 
 _MORPHO_BACKED_BREAKDOWN_SQL = f"""
 WITH morpho_vaults AS (
@@ -179,17 +154,9 @@ class MorphoBackedBreakdownRepository:
     def __init__(self, engine: AsyncEngine) -> None:
         self._engine = engine
 
-    async def resolve_vault_id(self, address: bytes, chain_id: int) -> int | None:
-        """Resolve a Morpho vault's internal ID from its onchain address."""
-        ref = await self.resolve_vault(address, chain_id)
-        return ref.id if ref is not None else None
-
     async def resolve_vault(self, address: bytes, chain_id: int) -> MorphoVaultRef | None:
         """Resolve a Morpho vault's internal id and ``vault_version`` from its onchain address."""
-        async with self._engine.connect() as conn:
-            result = await conn.execute(text(_VAULT_RESOLVE_SQL), {"addr": address, "chain_id": chain_id})
-            row = result.fetchone()
-        return MorphoVaultRef(id=row.id, vault_version=row.vault_version) if row is not None else None
+        return await resolve_morpho_vault(self._engine, address, chain_id)
 
     async def get_backed_breakdown(self, backed_asset_id: int) -> BackedBreakdown:
         """Execute the Morpho vault backed breakdown query and return domain objects."""
@@ -200,36 +167,4 @@ class MorphoBackedBreakdownRepository:
             )
             rows = result.fetchall()
 
-        items = [self._to_contribution(row) for row in rows]
-        return BackedBreakdown(backed_asset_id=backed_asset_id, items=tuple(items))
-
-    @staticmethod
-    def _to_contribution(row: Any) -> CollateralContribution:
-        backed_amount = Decimal(str(row.backed_amount))
-        loan_token_price = Decimal(str(row.loan_token_price)) if row.loan_token_price is not None else None
-        if loan_token_price is None:
-            # The vault's loan token has no USD price, so no backing amount can be
-            # converted to USD: the whole vault is unpriced. Keep raw loan-token units
-            # and force price_usd None on every row. The risk service treats an
-            # all-unpriced breakdown as price_data_missing and never reads the raw
-            # value as USD.
-            return CollateralContribution(
-                token_id=row.token_id,
-                symbol=row.symbol,
-                backing_value=backed_amount,
-                backing_pct=Decimal(str(row.backing_pct)),
-                price_usd=None,
-            )
-        # backed_amount is in loan-token units; scale by the loan-token price so
-        # backing_value is USD (what enrichment reads as amount_usd), correct even when
-        # the loan token is not ~$1. price_usd is each row token's own price so amount
-        # and price stay denominated in the row's symbol (as Aave does); it is None for
-        # a collateral token the oracle does not price, and that row drops at enrichment.
-        token_price_usd = Decimal(str(row.token_price_usd)) if row.token_price_usd is not None else None
-        return CollateralContribution(
-            token_id=row.token_id,
-            symbol=row.symbol,
-            backing_value=backed_amount * loan_token_price,
-            backing_pct=Decimal(str(row.backing_pct)),
-            price_usd=token_price_usd,
-        )
+        return BackedBreakdown(backed_asset_id=backed_asset_id, items=tuple(to_contribution(row) for row in rows))
