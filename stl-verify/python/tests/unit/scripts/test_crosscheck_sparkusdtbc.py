@@ -10,10 +10,17 @@ build sandbox, so the true payload is pinned once the endpoint is reachable.
 import json
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
+import httpx
+import pytest
+from sqlalchemy.exc import OperationalError
+
+from scripts import crosscheck_sparkusdtbc as cc
 from scripts.crosscheck_sparkusdtbc import (
     Snapshot,
     compare_snapshots,
+    main,
     parse_spark_response,
     rel_tolerance_from_blocks,
 )
@@ -104,3 +111,45 @@ def test_compare_snapshots_zero_vs_zero_passes() -> None:
     result = compare_snapshots(spark, ours, rel_tolerance=Decimal("0"))
 
     assert result.passed
+
+
+def test_parse_spark_response_refuses_balance_with_no_assets() -> None:
+    """The exact false-pass the script guards: a balance but no parseable asset rows
+    would compare equal to an empty our-side and report a spurious PASS."""
+    with pytest.raises(ValueError, match="no parseable asset rows"):
+        parse_spark_response({"balance": "100", "assets": []})
+
+
+def test_compare_snapshots_tolerance_boundary_is_inclusive() -> None:
+    """A field whose divergence exactly equals tolerance × max passes; just beyond fails."""
+    spark = Snapshot(balance=Decimal("1000"), underlying={"USDT": Decimal("1000")})
+    # diff == 0.001 * max(1000, 999) == 1.0 exactly → inclusive pass.
+    at_edge = Snapshot(balance=Decimal("1000"), underlying={"USDT": Decimal("999")})
+    just_over = Snapshot(balance=Decimal("1000"), underlying={"USDT": Decimal("998.999")})
+
+    assert compare_snapshots(spark, at_edge, rel_tolerance=Decimal("0.001")).passed
+    assert not compare_snapshots(spark, just_over, rel_tolerance=Decimal("0.001")).passed
+
+
+def test_main_returns_0_when_comparison_passes() -> None:
+    with patch.object(cc, "run", AsyncMock(return_value=0)):
+        assert main(["--database-url", "postgresql://x/db"]) == 0
+
+
+def test_main_returns_1_when_comparison_mismatches() -> None:
+    with patch.object(cc, "run", AsyncMock(return_value=1)):
+        assert main(["--database-url", "postgresql://x/db"]) == 1
+
+
+def test_main_returns_2_when_no_database_url() -> None:
+    assert main(["--database-url", ""]) == 2
+
+
+def test_main_returns_2_on_db_error() -> None:
+    with patch.object(cc, "run", AsyncMock(side_effect=OperationalError("stmt", {}, Exception("down")))):
+        assert main(["--database-url", "postgresql://x/db"]) == 2
+
+
+def test_main_returns_2_on_network_error() -> None:
+    with patch.object(cc, "run", AsyncMock(side_effect=httpx.ConnectError("unreachable"))):
+        assert main(["--database-url", "postgresql://x/db"]) == 2
