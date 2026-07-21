@@ -222,15 +222,20 @@ BEGIN
     -- Pricing prerequisite 2: chainlink_base must price Base USDC with an enabled
     -- oracle_asset carrying the exact feed_decimals, resolved by token ADDRESS. A
     -- pre-existing row with enabled=false or wrong decimals would make the ON
-    -- CONFLICT DO NOTHING a silent no-op; fail instead. o.chain_id = 8453 and
-    -- oracle_type 'chainlink_feed' are asserted so the future Base worker (selects
-    -- WHERE chain_id = 8453) actually sees this oracle.
+    -- CONFLICT DO NOTHING a silent no-op; fail instead. o.enabled guards the same
+    -- for the oracle row itself: the oracle INSERT is ON CONFLICT (name) DO NOTHING,
+    -- so a pre-existing DISABLED chainlink_base would win silently and the Base
+    -- worker (GetEnabledOraclesByChain: WHERE enabled AND chain_id = $1) would never
+    -- poll it -> NULL prices. o.chain_id = 8453 and oracle_type 'chainlink_feed'
+    -- are asserted so the future Base worker (selects WHERE chain_id = 8453) actually
+    -- sees this oracle; t.decimals = 6 pins the seeded Base USDC scale.
     SELECT COUNT(*) INTO cnt
     FROM oracle o
     JOIN oracle_asset oa ON oa.oracle_id = o.id
     JOIN token t ON t.id = oa.token_id AND t.chain_id = 8453
                 AND t.address = '\x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'::bytea
-    WHERE o.name = 'chainlink_base' AND o.chain_id = 8453 AND o.oracle_type = 'chainlink_feed'
+                AND t.decimals = 6
+    WHERE o.name = 'chainlink_base' AND o.enabled AND o.chain_id = 8453 AND o.oracle_type = 'chainlink_feed'
       AND oa.enabled AND oa.feed_decimals = 8
       AND oa.feed_address = '\x7e860098F58bBFC8648a4311b374B1D669a2bc6B'::bytea;
     IF cnt <> 1 THEN
