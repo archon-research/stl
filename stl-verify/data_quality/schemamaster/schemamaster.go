@@ -393,7 +393,8 @@ func (r *Register) TransformTargets() []string {
 // or explicitly deferred via TableMeta.TransformDefer, never neither and never both;
 // and that every built source maps back to a governed raw_pipeline table. This is what
 // forbids a raw_pipeline table being added and left silently un-transformed: absent
-// from _sources and without a defer reason fails the check.
+// from _sources and without a defer reason fails the check. It also flags a transform_defer
+// left on a non-raw_pipeline table, so a stale defer reason cannot linger after a type change.
 //
 // builtSources is read from transformed._sources by the caller (the conformance
 // integration test), so this function stays DB-free and unit-testable. An empty result
@@ -422,6 +423,16 @@ func (r *Register) CheckTransformCoverage(builtSources []string) []Violation {
 		if m, ok := r.Tables[s]; !ok || m.Type != "raw_pipeline" {
 			vs = append(vs, Violation{s, "", "orphan_transform_source",
 				"transformed._sources row has no governed raw_pipeline table in the register"})
+		}
+	}
+
+	// A transform_defer only means anything on a transform target. Flag it on a non-raw_pipeline
+	// table so a defer reason left behind after a table's type changes (or added by mistake to a
+	// config/dimension table) does not linger unnoticed, the same way stale_defer is caught.
+	for t, m := range r.Tables {
+		if m.TransformDefer != "" && m.Type != "raw_pipeline" {
+			vs = append(vs, Violation{t, "", "defer_on_non_target",
+				"transform_defer set on a non-raw_pipeline table; only transform targets can be deferred (remove it or fix the table type)"})
 		}
 	}
 

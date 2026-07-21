@@ -104,7 +104,7 @@ func TestTransformCoverageConformance(t *testing.T) {
 		t.Errorf("%s: %s — %s", v.Table, v.Kind, v.Detail)
 	}
 	if len(violations) > 0 {
-		t.Fatalf("%d transform-coverage violation(s); a raw_pipeline table is neither built nor deferred (or an orphan source)", len(violations))
+		t.Fatalf("%d transform-coverage violation(s); see the per-violation kind above (missing_transform / stale_defer / orphan_transform_source / defer_on_non_target)", len(violations))
 	}
 	t.Logf("transform coverage: %d built sources vs %d transform targets, all built or deferred", len(built), len(reg.TransformTargets()))
 }

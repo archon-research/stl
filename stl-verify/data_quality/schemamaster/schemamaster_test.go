@@ -113,6 +113,7 @@ func TestTransformCoverage(t *testing.T) {
 		"both":          {Type: "raw_pipeline", TransformDefer: "still deferred?"},
 		"cfg":           {Type: "config"},
 		"cfg_in_source": {Type: "config"},
+		"cfg_deferred":  {Type: "config", TransformDefer: "defer reason left after a type change"},
 	}}
 	built := []string{"built", "both", "cfg_in_source", "ghost"}
 
@@ -125,6 +126,7 @@ func TestTransformCoverage(t *testing.T) {
 		"both":          "stale_defer",             // built but still marked deferred
 		"cfg_in_source": "orphan_transform_source", // in _sources but type=config
 		"ghost":         "orphan_transform_source", // in _sources but not in the register
+		"cfg_deferred":  "defer_on_non_target",     // transform_defer on a non-raw_pipeline table
 	}
 	if len(got) != len(want) {
 		t.Fatalf("violations = %v, want keys %v", got, want)
