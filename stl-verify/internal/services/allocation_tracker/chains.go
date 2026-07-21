@@ -47,7 +47,8 @@ var acknowledgedUnservedChains = map[string]bool{
 // leaving its chain listed here — is NOT detectable in CI (nothing observes the manifests); the
 // declaration and the manifests must travel in the same PR, a convention enforced by review.
 var servedTrackerChains = map[string]bool{
-	"mainnet": true, // prime-allocation-indexer (CHAIN_ID 1)
+	"mainnet":     true, // prime-allocation-indexer (CHAIN_ID 1)
+	"avalanche-c": true, // avalanche-allocation-tracker (CHAIN_ID 43114, VEC-499)
 }
 
 // acknowledgedUnservedByTrackerChains lists vocabulary-known contract chains (in
@@ -57,11 +58,10 @@ var servedTrackerChains = map[string]bool{
 // fails CI if a chain ends up both served and acknowledged. Vocabulary-UNKNOWN unserved chains
 // live in acknowledgedUnservedChains, not here (see the partition note above).
 var acknowledgedUnservedByTrackerChains = map[string]bool{
-	"avalanche-c": true, // VEC-499 tracker instance in flight
-	"base":        true, // VEC-499 tracker instance in flight
-	"arbitrum":    true, // no allocation-tracker deployed yet
-	"optimism":    true, // no allocation-tracker deployed yet
-	"unichain":    true, // no allocation-tracker deployed yet
+	"base":     true, // VEC-499 tracker instance in flight
+	"arbitrum": true, // no allocation-tracker deployed yet
+	"optimism": true, // no allocation-tracker deployed yet
+	"unichain": true, // no allocation-tracker deployed yet
 }
 
 // allAcknowledgedUnservedChains is the set of chains it is acceptable for no tracker to serve:
