@@ -71,7 +71,7 @@ CREATE TABLE IF NOT EXISTS entity_master (
 -- Catalog metadata (downstream data-dictionary / schema_master tooling reads pg_catalog comments).
 COMMENT ON TABLE entity_master IS '[Dimension] Append-only SCD2 legal-entity master. PK (entity_id, processing_version); the current record per entity_id is entity_master_current. Positions resolve their holder to a single entity_id (wallets via entity_ref_codes, primes via pipeline_prime_id) through the natural key; there is no per-version surrogate to stamp.';
 COMMENT ON COLUMN entity_master.entity_id IS 'Natural key (em-<code>); stable across all SCD2 versions. PK together with processing_version. This is what positions resolve against.';
-COMMENT ON COLUMN entity_master.processing_version IS 'SCD2 dedup/version key. Monotonic per entity_id (>=0), loader-assigned; 0-based to match the pipeline processing_version convention.';
+COMMENT ON COLUMN entity_master.processing_version IS 'PK. SCD2 dedup/version key. Monotonic per entity_id (>=0), loader-assigned; 0-based to match the pipeline processing_version convention.';
 COMMENT ON COLUMN entity_master.valid_from IS 'Date this version became effective; only temporal field stored (valid_to derived in entity_master_versions).';
 COMMENT ON COLUMN entity_master.change_reason IS 'Mandatory: why this version exists.';
 COMMENT ON COLUMN entity_master.legal_name IS 'Full legal name.';
@@ -104,16 +104,21 @@ COMMENT ON COLUMN entity_master.approved_by IS 'Audit. 4-eyes approver.';
 -- (and per BLOCKCHAIN_ADDRESS code, VEC-414). Per-current-version uniqueness is not declaratively
 -- expressible, so the loader (VEC-418) enforces it and covers it with an integration test; a duplicate
 -- would fan out the entity_master_current join and double positions downstream.
+-- valid_from is the primary effective-ordering key (processing_version only breaks same-day ties), so a
+-- backdated correction (higher processing_version but an EARLIER valid_from than the row it supersedes)
+-- would never become current in either view. The VEC-418 loader must therefore assign valid_from
+-- monotonically per entity_id: a correction carries valid_from >= the row it supersedes.
 -- Current-version lookup (the ORDER BY of entity_master_current).
 CREATE INDEX IF NOT EXISTS em_current_idx ON entity_master (entity_id, valid_from DESC, processing_version DESC);
--- FK-support and bridge-resolution indexes not covered by a leading PK column.
+-- Index entity_type (the most-filtered classification) plus the two pipeline bridge columns (holder
+-- resolution rides on them). The other five FK columns (counterparty_role, origination_type,
+-- domicile_country, country_of_risk, sector) are intentionally left unindexed: the reference parents are
+-- immutable (20260714_160000), so there is no parent-mutation child-scan cost, and this is a small
+-- dimension table.
 CREATE INDEX IF NOT EXISTS em_type_idx ON entity_master (entity_type);
 CREATE INDEX IF NOT EXISTS em_prime_idx ON entity_master (pipeline_prime_id) WHERE pipeline_prime_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS em_protocol_idx ON entity_master (pipeline_protocol_id) WHERE pipeline_protocol_id IS NOT NULL;
 
--- Both views below are SELECT *, so their column list is frozen at creation: a future
--- ALTER TABLE entity_master ADD COLUMN must also CREATE OR REPLACE both views, or the new column will
--- silently not appear in them (these views are the intended read surface).
 -- Current view: the latest EFFECTIVE version per entity_id. Bounded on UTC "today"
 -- ((now() AT TIME ZONE 'utc')::date), NOT CURRENT_DATE, so which version is current is the same for
 -- every reader regardless of session TimeZone. A future-dated version does NOT become current until
@@ -131,19 +136,49 @@ ORDER BY entity_id, valid_from DESC, processing_version DESC;
 -- the two agree for every session TimeZone), so a future-dated version is NOT current until effective,
 -- and a same-day correction (two versions sharing valid_from) yields a zero-width window on the
 -- superseded row so it is never current.
+-- Columns are listed explicitly (not SELECT *) so a later ALTER TABLE entity_master ADD COLUMN does not
+-- shift the trailing computed columns (valid_to_exclusive, is_current) in the * expansion and break
+-- CREATE OR REPLACE VIEW (Simon review). A new base column is surfaced here by editing this list.
+-- entity_master_current keeps SELECT * (new columns just append there, so it is unaffected).
 CREATE OR REPLACE VIEW entity_master_versions AS
-SELECT *,
-    (valid_from <= (now() AT TIME ZONE 'utc')::date
-        AND (valid_to_exclusive IS NULL OR (now() AT TIME ZONE 'utc')::date < valid_to_exclusive)) AS is_current
+SELECT
+    v.entity_id,
+    v.processing_version,
+    v.valid_from,
+    v.change_reason,
+    v.legal_name,
+    v.short_name,
+    v.entity_type,
+    v.counterparty_role,
+    v.is_internal,
+    v.origination_type,
+    v.domicile_country,
+    v.country_of_risk,
+    v.sector,
+    v.lei,
+    v.swift_bic,
+    v.cik,
+    v.parent_entity_id,
+    v.ultimate_parent_id,
+    v.entity_status,
+    v.pipeline_prime_id,
+    v.pipeline_protocol_id,
+    v.source_system,
+    v.created_at,
+    v.created_by,
+    v.approved_by,
+    v.valid_to_exclusive,
+    (v.valid_from <= (now() AT TIME ZONE 'utc')::date
+        AND (v.valid_to_exclusive IS NULL OR (now() AT TIME ZONE 'utc')::date < v.valid_to_exclusive)) AS is_current
 FROM (
-    SELECT *,
+    SELECT entity_master.*,
         lead(valid_from) OVER (PARTITION BY entity_id ORDER BY valid_from, processing_version) AS valid_to_exclusive
     FROM entity_master
 ) v;
 
 -- View catalogue metadata (per db/migrations/AGENTS.md).
-COMMENT ON VIEW entity_master_current IS '[Dimension] Latest effective version per entity_id (valid_from <= today). The record positions resolve their holder/issuer to, via entity_id.';
-COMMENT ON VIEW entity_master_versions IS '[Dimension] Full SCD2 history per entity_id with derived valid_to_exclusive (half-open [valid_from, valid_to_exclusive)) and is_current (effective as of today).';
+COMMENT ON VIEW entity_master_current IS '[Dimension] Latest effective version per entity_id (valid_from <= UTC today). The record positions resolve their holder/issuer to, via entity_id.';
+COMMENT ON VIEW entity_master_versions IS '[Dimension] Full SCD2 history per entity_id with derived valid_to_exclusive (half-open [valid_from, valid_to_exclusive)) and is_current (effective as of UTC today).';
 
 -- Reads for both roles; append-only writes for the indexer role (INSERT, never UPDATE/DELETE).
 GRANT SELECT ON entity_master, entity_master_current, entity_master_versions TO stl_readonly;
@@ -151,7 +186,11 @@ GRANT SELECT, INSERT ON entity_master TO stl_readwrite;
 GRANT SELECT ON entity_master_current, entity_master_versions TO stl_readwrite;
 
 -- Append-only guard: revoke mutation on both the indexer role and the table owner so any
--- UPDATE / DELETE / TRUNCATE errors out. Guarded by role existence; mirrors the security_master guard.
+-- UPDATE / DELETE / TRUNCATE errors out. Guarded by role existence. Revoking the OWNER's UPDATE is safe
+-- here only because nothing can FK entity_master (entity_id is a non-unique SCD2 key, so it can't be an
+-- FK target); if a unique key is ever added and something FKs it, this needs the rework 20260714_160000
+-- applied to the reference tables (restore owner UPDATE + a BEFORE UPDATE OR DELETE trigger), or the FK
+-- RI row-lock probe hits the privilege trap.
 DO $$
 DECLARE role text;
 BEGIN
