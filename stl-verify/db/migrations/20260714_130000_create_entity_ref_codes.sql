@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS entity_ref_codes (
     code_value         text NOT NULL,   -- the code within the namespace (e.g. hex address, LEI string)
     entity_id          text NOT NULL,   -- soft ref to entity_master.entity_id (resolve via entity_master_current)
     processing_version integer NOT NULL DEFAULT 1,  -- monotonic per (code_type, code_value); dedup + version key
-    valid_from         date NOT NULL DEFAULT CURRENT_DATE,
+    valid_from         date NOT NULL DEFAULT ((now() AT TIME ZONE 'utc')::date),  -- UTC so the effective date doesn't shift with the writer's session TimeZone
     change_reason      text NOT NULL,   -- mandatory: why this mapping / re-point exists
     created_at         timestamp with time zone NOT NULL DEFAULT now(),
     PRIMARY KEY (code_type, code_value, processing_version),
@@ -67,14 +67,16 @@ CREATE INDEX IF NOT EXISTS erc_current_idx
     ON entity_ref_codes (code_type, code_value, valid_from DESC, processing_version DESC);
 
 -- Current mapping per code: latest valid_from wins, processing_version breaks same-day ties
--- (deterministic, matching security_instrument_bridge_current). VEC-417 resolves against THIS view,
--- not the base table, or a historical re-point would fan out to multiple rows.
+-- (deterministic, matching security_instrument_bridge_current). Bounded on UTC "today"
+-- ((now() AT TIME ZONE 'utc')::date), NOT CURRENT_DATE, so the current mapping is the same for every
+-- reader regardless of session TimeZone. VEC-417 resolves against THIS view, not the base table, or a
+-- historical re-point would fan out to multiple rows.
 CREATE OR REPLACE VIEW entity_ref_codes_current AS
 SELECT DISTINCT ON (code_type, code_value) *
 FROM entity_ref_codes
-WHERE valid_from <= CURRENT_DATE
+WHERE valid_from <= (now() AT TIME ZONE 'utc')::date
 ORDER BY code_type, code_value, valid_from DESC, processing_version DESC;
-COMMENT ON VIEW entity_ref_codes_current IS '[Dimension] Latest effective mapping per (code_type, code_value) (valid_from <= today). What the holder/counterparty resolver (VEC-417) joins through.';
+COMMENT ON VIEW entity_ref_codes_current IS '[Dimension] Latest effective mapping per (code_type, code_value) (valid_from <= UTC today). What the holder/counterparty resolver (VEC-417) joins through.';
 
 -- Reads for both roles; append-only writes for the indexer role (INSERT, never UPDATE/DELETE).
 GRANT SELECT ON entity_ref_codes, entity_ref_codes_current TO stl_readonly;

@@ -97,7 +97,7 @@ func TestEntityRefCodes(t *testing.T) {
 	// must not resolve it. (The bound was added on review.)
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO entity_ref_codes (code_type, code_value, entity_id, valid_from, change_reason)
-		 VALUES ('LEI', '529900T8BM49AURSDO55', 'em-000500', CURRENT_DATE + 1, 'future-dated')`); err != nil {
+		 VALUES ('LEI', '529900T8BM49AURSDO55', 'em-000500', (now() AT TIME ZONE 'utc')::date + 1, 'future-dated')`); err != nil {
 		t.Fatalf("future-dated insert: %v", err)
 	}
 	var futureCount int
