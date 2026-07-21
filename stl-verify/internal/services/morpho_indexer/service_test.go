@@ -412,25 +412,26 @@ func TestProcessBlockEvent_VaultDeposit(t *testing.T) {
 	}
 }
 
-// TestProcessBlockEvent_V2GovernanceEvent_AuditLogged verifies that a V2-only
-// event (AddAdapter — no typed handler today) emitted by a known vault still
-// produces a protocol_event audit-log row labelled with the correct event
-// name. The structured-handling pieces (adapter table etc.) are deferred per
-// docs/vec-198-morpho-v2-followup-plan.md, but operators must see these
-// events landing.
+// TestProcessBlockEvent_V2GovernanceEvent_AuditLogged verifies that a V2 event
+// without a typed handler (SetCurator) emitted by a known vault still produces a
+// protocol_event audit-log row labelled with the correct event name. Adapter /
+// cap / fee events now have structured handlers; the remaining governance /
+// timelock / gate surface stays audit-log-only, but operators must still see
+// those events landing.
 func TestProcessBlockEvent_V2GovernanceEvent_AuditLogged(t *testing.T) {
 	h := newTestHarness(t)
 	h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
 
-	// Chain-verified topic for AddAdapter on sparkUSDTbc (2026-05-06).
-	const addAdapterTopic = "0x8f125a24838c4c23e893904b255b5c672d43d4cb8af7e3d15841eaeabc1e68aa"
-	adapter := common.HexToAddress("0x7481968709b8f155652D42ebf468b22945907dC2") // sparkUSDTbc liquidityAdapter
+	// Chain-verified topic for SetCurator on sparkUSDTbc (2026-05-06); no typed
+	// handler, so this exercises the audit-log-only path.
+	const setCuratorTopic = "0xbd0a63c12948fbc9194a5839019f99c9d71db924e5c70018265bc778b8f1a506"
+	newCurator := common.HexToAddress("0x7481968709b8f155652D42ebf468b22945907dC2")
 
 	log := shared.Log{
 		Address: testVaultAddr.Hex(),
 		Topics: []string{
-			addAdapterTopic,
-			common.BytesToHash(adapter.Bytes()).Hex(),
+			setCuratorTopic,
+			common.BytesToHash(newCurator.Bytes()).Hex(),
 		},
 		Data:            "0x",
 		TransactionHash: testTxHash,
@@ -451,8 +452,8 @@ func TestProcessBlockEvent_V2GovernanceEvent_AuditLogged(t *testing.T) {
 	if savedEvent == nil {
 		t.Fatal("SaveEvent not called for V2 governance event")
 	}
-	if savedEvent.EventName != "AddAdapter" {
-		t.Errorf("EventName = %q, want AddAdapter", savedEvent.EventName)
+	if savedEvent.EventName != "SetCurator" {
+		t.Errorf("EventName = %q, want SetCurator", savedEvent.EventName)
 	}
 	if !bytes.Equal(savedEvent.ContractAddress, testVaultAddr.Bytes()) {
 		t.Errorf("ContractAddress = %x, want %s", savedEvent.ContractAddress, testVaultAddr.Hex())

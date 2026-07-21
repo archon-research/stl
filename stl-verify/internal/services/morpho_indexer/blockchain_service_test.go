@@ -1757,3 +1757,107 @@ func TestGetTokenPairMetadata_BothZero(t *testing.T) {
 		t.Errorf("expected empty metadata on both sides, got mdA=%+v mdB=%+v", mdA, mdB)
 	}
 }
+
+// --- VaultV2 adapter reads ---
+
+// TestGetAdapterRealAssets_PinsToBlockHash asserts realAssets() is a state read
+// pinned via ExecuteAtHash (reorg-correctness, VEC-471), not by block number.
+func TestGetAdapterRealAssets_PinsToBlockHash(t *testing.T) {
+	h := newTestHarness(t)
+	adapter := common.HexToAddress("0x7481968709b8f155652D42ebf468b22945907dC2")
+
+	var gotHash common.Hash
+	viaHash := false
+	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return nil, fmt.Errorf("getAdapterRealAssets must call ExecuteAtHash, not Execute")
+	}
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+		viaHash = true
+		gotHash = blockHash
+		if len(calls) != 1 || calls[0].Target != adapter || calls[0].AllowFailure {
+			t.Errorf("unexpected calls: %+v", calls)
+		}
+		return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(987654321))}}, nil
+	}
+
+	got, err := h.svc.blockchainSvc.getAdapterRealAssets(context.Background(), adapter, testBlockHash)
+	if err != nil {
+		t.Fatalf("getAdapterRealAssets: %v", err)
+	}
+	if !viaHash {
+		t.Fatal("did not call ExecuteAtHash")
+	}
+	if gotHash != testBlockHash {
+		t.Errorf("pinned to %s, want %s", gotHash, testBlockHash)
+	}
+	if got.Int64() != 987654321 {
+		t.Errorf("realAssets = %s, want 987654321", got)
+	}
+}
+
+func TestGetAdapterRealAssets_RevertIsError(t *testing.T) {
+	h := newTestHarness(t)
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		return []outbound.Result{{Success: false, ReturnData: nil}}, nil
+	}
+	if _, err := h.svc.blockchainSvc.getAdapterRealAssets(context.Background(), common.HexToAddress("0x1"), testBlockHash); err == nil {
+		t.Fatal("expected error when realAssets() reverts")
+	}
+}
+
+func TestGetAdapterRealAssets_MalformedReturnDataIsError(t *testing.T) {
+	h := newTestHarness(t)
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		// Success but a return payload too short to decode a uint256.
+		return []outbound.Result{{Success: true, ReturnData: []byte{0x01}}}, nil
+	}
+	if _, err := h.svc.blockchainSvc.getAdapterRealAssets(context.Background(), common.HexToAddress("0x1"), testBlockHash); err == nil {
+		t.Fatal("expected error decoding malformed realAssets() return data")
+	}
+}
+
+func TestGetAdapterRealAssets_MulticallError(t *testing.T) {
+	h := newTestHarness(t)
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		return nil, errors.New("rpc failure")
+	}
+	if _, err := h.svc.blockchainSvc.getAdapterRealAssets(context.Background(), common.HexToAddress("0x1"), testBlockHash); err == nil {
+		t.Fatal("expected error on multicall failure")
+	}
+}
+
+// TestGetAdapterType_NumberPinned asserts adapter classification is a plain
+// (number-pinned) Execute — adapter identity is immutable, same rationale as
+// getMarketParams (VEC-471).
+func TestGetAdapterType_NumberPinned(t *testing.T) {
+	h := newTestHarness(t)
+	adapter := common.HexToAddress("0x7481968709b8f155652D42ebf468b22945907dC2")
+
+	viaNumber := false
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+		viaNumber = true
+		if len(calls) != 2 || blockNumber == nil || blockNumber.Int64() != 20000000 {
+			t.Errorf("unexpected calls=%d blockNumber=%v", len(calls), blockNumber)
+		}
+		// morpho() succeeds, morphoVaultV1() reverts → MarketV1.
+		return []outbound.Result{
+			{Success: true, ReturnData: h.packAddress(MorphoBlueAddress)},
+			{Success: false, ReturnData: nil},
+		}, nil
+	}
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		t.Fatal("getAdapterType must use Execute (number-pinned), not ExecuteAtHash")
+		return nil, nil
+	}
+
+	got, err := h.svc.blockchainSvc.getAdapterType(context.Background(), adapter, 20000000)
+	if err != nil {
+		t.Fatalf("getAdapterType: %v", err)
+	}
+	if !viaNumber {
+		t.Fatal("did not call Execute")
+	}
+	if got != entity.MorphoAdapterTypeMarketV1 {
+		t.Errorf("adapterType = %d, want MarketV1(1)", got)
+	}
+}

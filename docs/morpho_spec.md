@@ -1,7 +1,7 @@
 # Morpho Protocol Specification
 
-**Version:** 1.0  
-**Last Updated:** January 2026  
+**Version:** 1.0
+**Last Updated:** January 2026
 **Purpose:** Technical reference for understanding Morpho protocol mechanics and indexing implementation
 
 ---
@@ -207,7 +207,7 @@ ERC-4626 defines a **dual accounting system**:
 function deposit(uint256 assets, address receiver) returns (uint256 shares)
 function mint(uint256 shares, address receiver) returns (uint256 assets)
 
-// Withdraw assets, burn shares  
+// Withdraw assets, burn shares
 function withdraw(uint256 assets, address receiver, address owner) returns (uint256 shares)
 function redeem(uint256 shares, address receiver, address owner) returns (uint256 assets)
 
@@ -247,7 +247,7 @@ Alice deposits 100 USDC:
 Interest accrues (+10 USDC):
   totalAssets = 1110 USDC
   totalShares = 1100 (unchanged)
-  
+
 Alice withdraws:
   assets = 100 * 1110 / 1100 = 100.909 USDC
   Alice receives: 100.909 USDC (0.909 USDC profit)
@@ -785,18 +785,21 @@ function redeem(uint256 shares, address receiver, address onBehalf) returns (uin
 // Adapter allocation
 function allocate(address adapter, uint256 assets, bytes32[] memory ids) returns (int256 change)
 function deallocate(address adapter, uint256 assets, bytes32[] memory ids) returns (int256 change)
-function forceDeallocate(address adapter, uint256 assets, address onBehalf, bytes32[] memory ids) 
+function forceDeallocate(address adapter, uint256 assets, address onBehalf, bytes32[] memory ids)
     returns (uint256 penaltyAssets)
 
 // Adapter management (Owner)
 function addAdapter(address adapter)
 function removeAdapter(address adapter)
 
-// Configuration (Curator via timelock)
-function increaseAbsoluteCap(bytes32 id, bytes memory idData, uint256 newCap)
-function decreaseAbsoluteCap(address sender, bytes32 id, bytes memory idData, uint256 newCap)
-function increaseRelativeCap(bytes32 id, bytes memory idData, uint256 newCap)
-function decreaseRelativeCap(address sender, bytes32 id, bytes memory idData, uint256 newCap)
+// Configuration (Curator via timelock). The cap key `id = keccak256(idData)` is
+// derived from idData, so it is NOT a function argument; likewise `sender` is
+// msg.sender, not an argument. Both appear only on the emitted EVENTS
+// (Decrease* additionally indexes sender; Increase* has none).
+function increaseAbsoluteCap(bytes memory idData, uint256 newAbsoluteCap)
+function decreaseAbsoluteCap(bytes memory idData, uint256 newAbsoluteCap)
+function increaseRelativeCap(bytes memory idData, uint256 newRelativeCap)
+function decreaseRelativeCap(bytes memory idData, uint256 newRelativeCap)
 
 // Fee management (Owner)
 function setPerformanceFee(uint256 newFee)
@@ -823,9 +826,12 @@ function receiveSharesGate() returns (address)
 function owner() returns (address)
 function curator() returns (address)
 
-// Fee / config reads (V2-only)
-function performanceFee() returns (uint256)          // WAD
-function managementFee() returns (uint256)           // WAD (annual, accrued continuously)
+// Fee / config reads (V2-only). Both are uint96 on chain (widened to uint256
+// here) and WAD-scaled, NOT basis points: performanceFee is a WAD fraction of
+// accrued interest; managementFee is a per-second WAD rate (annualize by
+// multiplying by SECONDS_PER_YEAR), not an annual figure.
+function performanceFee() returns (uint256)          // uint96 WAD fraction of interest
+function managementFee() returns (uint256)           // uint96 WAD, per-second rate
 function maxRate() returns (uint256)                 // Maximum borrow rate this vault will supply to (per-second WAD)
 
 // Per-function timelock reads (V2 timelocks are per-selector, unlike V1's global timelock)
@@ -1092,7 +1098,7 @@ Before implementing an indexer, it's critical to understand **what data sources 
 
 **Approaches:**
 1. **V1/V1.1 vaults**: Event-based native supply APY calculation works perfectly
-2. **V2 vaults**: 
+2. **V2 vaults**:
    - For **current native supply APY**: Calculate from latest `AccrueInterest` event (Method 3 for instantaneous rate)
    - For **historical native supply APY**: Derive from `AccrueInterest` events (vault-level yield only) OR take periodic snapshots
 3. **Rewards APR (all vault versions)**: Never available onchain - always requires Morpho API
@@ -1121,13 +1127,13 @@ This gives you the **previous** borrow rate (what was just used) but neither the
   - ⚠️ `prevBorrowRate` is the rate that was active at the moment of the event, not the rate going forward
   - ⚠️ Utilization must be tracked separately to compute supply APY
   - ⚠️ **This approach is fundamentally sparse.** For continuous APY monitoring, use Option B instead
-  
+
 - **Option B (Complete — both APYs)**: Query market state via archive node and call `borrowRateView()` on the IRM
   - ✅ Provides instantaneous borrow rate at any block
   - ✅ Supply APY derived as `borrowAPY × utilization × (1 − fee)` using accrued state
   - ⚠️ `market()` returns stale state — must accrue interest to snapshot block first
   - See [APY Calculation from Snapshots](#apy-calculation-from-events) section for the full algorithm
-  
+
 - **Option C**: Use Morpho API
   - ✅ Pre-calculated borrow and supply APY time series
   - ✅ Handles IRM calculations and interest accrual automatically
@@ -1215,10 +1221,10 @@ query VaultRewards($address: String!, $chainId: Int!) {
     state {
       # Native APY (before fees)
       apy
-      
+
       # Complete APY (native + all rewards, after fees)
       netApy
-      
+
       # Vault-level rewards (direct campaigns)
       rewards {
         supplyApr
@@ -1230,7 +1236,7 @@ query VaultRewards($address: String!, $chainId: Int!) {
           chain { id }
         }
       }
-      
+
       # Market-level rewards (forwarded from allocations)
       allocation {
         supplyAssetsUsd  # Required for weighted averaging
@@ -1330,14 +1336,14 @@ async function fetchAllUserRewards(userAddress: string) {
     fetch(`https://api.merkl.xyz/v4/userRewards?user=${userAddress}`).then(r => r.json()),
     fetch(`https://rewards.morpho.org/v1/users/${userAddress}/rewards`).then(r => r.json())
   ]);
-  
+
   // Aggregate by token address
   const combinedByToken = new Map<string, { merkl: bigint; urd: bigint; total: bigint }>();
-  
+
   // Process Merkl rewards...
   // Process URD rewards...
   // Combine both sources
-  
+
   return combinedByToken;
 }
 ```
@@ -1427,7 +1433,7 @@ Net APY = Native APY × (1 - Performance Fee) + Underlying Token Yield + ∑Rewa
    - V2 vaults: No historical rewards available (current only)
    - Implement periodic snapshots if historical V2 data needed
 
-**Reference:** 
+**Reference:**
 - [Morpho Rewards Integration Guide](https://docs.morpho.org/morpho/rewards/integration/overview)
 - [Merkl API Documentation](https://docs.merkl.xyz)
 - [Morpho Rewards API](https://rewards.morpho.org/docs)
@@ -1475,7 +1481,7 @@ This makes position backing analysis **dramatically simpler** than in pooled len
 
 The `Allocate` and `Deallocate` events provide:
 - Adapter address
-- Total amount allocated/deallocated  
+- Total amount allocated/deallocated
 - Array of `ids[]` affected
 - Total `change` amount
 
@@ -2787,7 +2793,7 @@ ActiveUser {
 // Update after each transaction:
 hasVaultPosition = Σ(user vault shares) > 0
 
-hasMarketPosition = 
+hasMarketPosition =
   Σ(user supply shares) > 0 ||
   Σ(user borrow shares) > 0 ||
   Σ(user collateral) > 0
@@ -2798,8 +2804,8 @@ hasMarketPosition =
 Query only active users during snapshots:
 
 ```sql
-SELECT user 
-FROM ActiveUser 
+SELECT user
+FROM ActiveUser
 WHERE hasVaultPosition = true OR hasMarketPosition = true
 ```
 
@@ -3008,7 +3014,7 @@ const borrowAPY = taylorCompound(borrowRate, SECONDS_PER_YEAR);
 
 ---
 
-**Document Version:** 1.0  
+**Document Version:** 1.0
 **Last Updated:** January 2026
 
 **Contributors:** Technical specification based on Morpho protocol documentation, smart contract ABIs, and indexing implementation analysis.
