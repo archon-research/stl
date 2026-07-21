@@ -8,6 +8,7 @@ from app.adapters.postgres.allocation_position_repository import AllocationRepos
 from app.api._validators import EthAddressParam
 from app.api.deps import get_engine, get_model_registry
 from app.domain.entities.allocation import EthAddress
+from app.domain.entities.prime_risk_capital import UnpricedReason
 from app.services.model_registry import ModelRegistry
 from app.services.prime_risk_capital_service import PrimeRiskCapitalService
 
@@ -21,14 +22,22 @@ class AllocationRiskCapitalResponse(BaseModel):
     symbol: str = Field(description="Receipt-token symbol.")
     protocol_name: str = Field(description="Protocol the allocation sits in.")
     exposure_usd: Decimal = Field(description="On-chain USD exposure of the allocation.")
-    applied: bool = Field(description="Whether the default model could price this allocation.")
+    applied: bool = Field(description="Whether the default model priced this allocation.")
     required_risk_capital_usd: Decimal | None = Field(
-        default=None, description="Per-allocation RRC (USD). `null` when the model does not apply."
+        default=None, description="Per-allocation RRC (USD). `null` when the allocation is unpriced."
     )
     crr_pct: Decimal | None = Field(
-        default=None, description="Comparable capital-risk ratio (0-100). `null` when the model does not apply."
+        default=None, description="Comparable capital-risk ratio (0-100). `null` when the allocation is unpriced."
     )
     model: str | None = Field(default=None, description="Model that produced the figure, or `null`.")
+    unpriced_reason: UnpricedReason | None = Field(
+        default=None,
+        description=(
+            "Why the allocation is unpriced (`null` when `applied`): `no_model` (no default model applies), "
+            "or `share_data_missing` / `share_data_stale` (a model applies but its pool-share lookup could "
+            "not be resolved, e.g. a warm-up window or an un-indexed receipt token)."
+        ),
+    )
 
 
 class PrimeRiskCapitalResponse(BaseModel):
@@ -78,7 +87,9 @@ async def _get_service(
         "(sum of per-allocation model RRC), encumbrance, a `modeled_pct` coverage figure, and a "
         "per-allocation breakdown. The figures are model-derived and partial (only allocations the "
         "model can price contribute Required Risk Capital) and will not match Sky's dashboard. "
-        "Returns `404` if the prime is unknown."
+        "A backed allocation whose pool-share lookup can't be resolved (e.g. a warm-up window or an "
+        "un-indexed receipt token) is reported as unpriced (`applied=false` with an `unpriced_reason`) "
+        "rather than failing the whole response. Returns `404` if the prime is unknown."
     ),
 )
 async def get_prime_risk_capital(

@@ -7,7 +7,7 @@ from app.domain.entities.allocation import EthAddress
 from app.domain.entities.backed_breakdown import BackedBreakdown, CollateralContribution
 from app.domain.entities.receipt_token import ReceiptTokenInfo
 from app.domain.entities.risk import GapSweepDetails, LiquidationParams, RiskBreakdown, RrcResult
-from app.domain.exceptions import MissingShareError
+from app.domain.exceptions import MissingShareError, PriceDataMissingError
 from app.services.crypto_lending_risk_service import CryptoLendingRiskService
 
 DUMMY_PRIME = EthAddress("0x" + "ab" * 20)
@@ -272,23 +272,45 @@ class TestCompute:
             await service.compute(RECEIPT_TOKEN_ID, DUMMY_PRIME, overrides={})
 
     @pytest.mark.asyncio
-    async def test_compute_items_without_prices_are_skipped(
+    async def test_compute_all_items_unpriced_raises_price_data_missing(
         self,
         service: CryptoLendingRiskService,
         reader: MagicMock,
     ) -> None:
+        # A non-empty breakdown with no priced row means the loan token is unpriced
+        # (Morpho): backing_value is raw loan-token units, not USD. Fail as
+        # price_data_missing so the prime endpoint degrades to unpriced instead of a
+        # misleading fully-covered rrc=0.
         reader.get_breakdown.return_value = _breakdown(
             (_contrib(10, "WETH", "10000", None),),
             backed_asset_id=UNDERLYING_TOKEN_ID,
         )
         reader.get_liquidation_params.return_value = {10: _params(10, "0.825", "1.05")}
 
+        with pytest.raises(PriceDataMissingError):
+            await service.compute(RECEIPT_TOKEN_ID, DUMMY_PRIME, overrides={})
+
+    @pytest.mark.asyncio
+    async def test_compute_partial_prices_keep_priced_rows_and_drop_unpriced(
+        self,
+        service: CryptoLendingRiskService,
+        reader: MagicMock,
+    ) -> None:
+        # A breakdown with at least one priced row is NOT unpriced: the priced row
+        # computes and only the individually unpriced row drops at enrichment
+        # (matching the Aave repo), so rrc is non-zero rather than raising.
+        reader.get_breakdown.return_value = _breakdown(
+            (_contrib(10, "WETH", "10000", "2000"), _contrib(11, "WBTC", "5000", None)),
+            backed_asset_id=UNDERLYING_TOKEN_ID,
+        )
+        reader.get_liquidation_params.return_value = {
+            10: _params(10, "0.825", "1.05"),
+            11: _params(11, "0.7", "1.1"),
+        }
+
         result = await service.compute(RECEIPT_TOKEN_ID, DUMMY_PRIME, overrides={})
 
-        # Item dropped (no price) -> empty enriched list -> rrc=0 and the
-        # collateral basis is also 0, so comparable CRR is 0 (not div-by-zero).
-        assert result.rrc_usd == Decimal("0")
-        assert result.comparable_crr_pct == Decimal("0.00")
+        assert result.rrc_usd > Decimal("0")
 
     @pytest.mark.asyncio
     async def test_compute_items_without_liquidation_params_are_skipped(
@@ -456,6 +478,94 @@ class TestLegacyMethods:
         reader.get_receipt_token.return_value = None
 
         assert await service.get_risk_breakdown(RECEIPT_TOKEN_ID, None) is None
+
+
+class TestComputeWithShare:
+    """``compute_with_share`` is the fast-path used by ``PrimeRiskCapitalService``.
+
+    It must:
+      * never call ``get_share`` (that's the whole point of pre-fetching)
+      * yield the same RrcResult as ``compute`` for a given share value
+      * still validate ``applies_to`` and unknown overrides
+    """
+
+    @pytest.mark.asyncio
+    async def test_compute_with_share_skips_get_share_and_matches_compute(
+        self,
+        service: CryptoLendingRiskService,
+        reader: MagicMock,
+    ) -> None:
+        reader.get_share.return_value = Decimal("0.3")
+        baseline = await service.compute(RECEIPT_TOKEN_ID, DUMMY_PRIME, overrides={})
+
+        reader.get_share.reset_mock()
+        prefetched = await service.compute_with_share(
+            RECEIPT_TOKEN_ID, DUMMY_PRIME, overrides={}, share_or_err=Decimal("0.3")
+        )
+
+        reader.get_share.assert_not_awaited()
+        assert prefetched.rrc_usd == baseline.rrc_usd
+        assert prefetched.comparable_crr_pct == baseline.comparable_crr_pct
+        assert prefetched.risk_model == baseline.risk_model
+
+    @pytest.mark.asyncio
+    async def test_compute_with_share_rejects_unsupported_asset(
+        self,
+        service: CryptoLendingRiskService,
+    ) -> None:
+        with pytest.raises(ValueError, match="unsupported asset_id"):
+            await service.compute_with_share(99999, DUMMY_PRIME, overrides={}, share_or_err=Decimal("1"))
+
+    @pytest.mark.asyncio
+    async def test_compute_with_share_returns_zero_when_breakdown_empty(
+        self,
+        service: CryptoLendingRiskService,
+        reader: MagicMock,
+    ) -> None:
+        reader.get_breakdown.return_value = _breakdown((), backed_asset_id=UNDERLYING_TOKEN_ID)
+        result = await service.compute_with_share(
+            RECEIPT_TOKEN_ID, DUMMY_PRIME, overrides={}, share_or_err=Decimal("1")
+        )
+        reader.get_share.assert_not_awaited()
+        assert result.rrc_usd == Decimal("0.00")
+
+    @pytest.mark.asyncio
+    async def test_compute_with_share_raises_share_error_only_when_breakdown_nonempty(
+        self,
+        service: CryptoLendingRiskService,
+        reader: MagicMock,
+    ) -> None:
+        """Mirror the un-batched semantics for share-lookup failures.
+
+        - Empty breakdown: the error must be swallowed (un-batched path never
+          calls ``get_share`` for empty breakdowns, so a failure there was
+          never observed).
+        - Non-empty breakdown: the error must be raised (un-batched path would
+          have called ``get_share`` and propagated the failure).
+        """
+        from app.domain.exceptions import MissingShareError
+
+        err = MissingShareError("warm-up")
+
+        reader.get_breakdown.return_value = _breakdown((), backed_asset_id=UNDERLYING_TOKEN_ID)
+        result = await service.compute_with_share(RECEIPT_TOKEN_ID, DUMMY_PRIME, overrides={}, share_or_err=err)
+        assert result.rrc_usd == Decimal("0.00")
+        reader.get_share.assert_not_awaited()
+
+        reader.get_breakdown.return_value = _breakdown(
+            (
+                CollateralContribution(
+                    token_id=10,
+                    symbol="WETH",
+                    backing_value=Decimal("1"),
+                    backing_pct=Decimal("1"),
+                    price_usd=Decimal("2000"),
+                ),
+            ),
+            backed_asset_id=UNDERLYING_TOKEN_ID,
+        )
+        with pytest.raises(MissingShareError, match="warm-up"):
+            await service.compute_with_share(RECEIPT_TOKEN_ID, DUMMY_PRIME, overrides={}, share_or_err=err)
 
 
 def _maple_info() -> ReceiptTokenInfo:

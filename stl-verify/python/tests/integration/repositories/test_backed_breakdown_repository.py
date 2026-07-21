@@ -1,4 +1,4 @@
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from decimal import Decimal
 from typing import Any, Protocol, cast
 
@@ -16,6 +16,10 @@ class ProtocolScopedBackedBreakdownRepository(Protocol):
     """Spec contract for the Aave-like backed breakdown repository."""
 
     async def get_backed_breakdown(self, protocol_id: int, backed_asset_id: int) -> BackedBreakdown: ...
+
+    async def get_backed_breakdowns(
+        self, protocol_id: int, backed_asset_ids: Sequence[int]
+    ) -> dict[int, BackedBreakdown]: ...
 
 
 # ---------------------------------------------------------------------------
@@ -533,3 +537,21 @@ async def test_price_tie_resolves_to_highest_oracle_id(
     by_symbol = {item.symbol: item for item in result.items}
     assert "TIECOLL" in by_symbol
     assert by_symbol["TIECOLL"].price_usd == Decimal("1.25")
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_batched_matches_per_asset(
+    repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
+) -> None:
+    """get_backed_breakdowns over many backed assets equals the per-asset query for
+    each — the protocol-wide CTEs run once but attribution is per backed asset."""
+    protocol_id = test_ids["protocol_id"]
+    ids = [test_ids["sp_usds_id"], test_ids["sp_usdc_id"], test_ids["tie_debt_id"]]
+
+    batched = await repository.get_backed_breakdowns(protocol_id, ids)
+
+    assert set(batched) == set(ids)
+    for aid in ids:
+        single = await repository.get_backed_breakdown(protocol_id, aid)
+        assert batched[aid].backed_asset_id == aid
+        assert batched[aid].items == single.items
