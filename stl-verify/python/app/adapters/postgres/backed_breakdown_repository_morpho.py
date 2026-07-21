@@ -1,6 +1,6 @@
 # ruff: noqa: E501
 from decimal import Decimal
-from typing import Any
+from typing import Any, NamedTuple
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -15,8 +15,25 @@ from app.domain.entities.backed_breakdown import (
 _MIN_COLLATERAL_AMOUNT = Decimal("0.01")
 
 
-_VAULT_ID_SQL = """
-SELECT id FROM morpho_vault WHERE address = :addr AND chain_id = :chain_id
+class MorphoVaultRef(NamedTuple):
+    """A resolved Morpho vault: its internal id plus its ``vault_version``.
+
+    ``vault_version`` (morpho_vault.vault_version) selects the backed-breakdown
+    walk: 1 = MetaMorpho V1, 2 = MetaMorpho V1.1 (both direct Morpho-Blue
+    allocation, this repository), 3 = Morpho VaultV2 (adapter-based, the
+    ``MorphoV2BackedBreakdownRepository``). Returned by ``resolve_vault`` so the
+    reader can dispatch on version without embedding SQL.
+    """
+
+    id: int
+    vault_version: int
+
+
+# Resolve a vault's internal id AND version in one round trip. Shared by
+# ``resolve_vault`` here and by the V2 repository so both read the same natural
+# key (address, chain_id) — version drives which walk the reader dispatches to.
+_VAULT_RESOLVE_SQL = """
+SELECT id, vault_version FROM morpho_vault WHERE address = :addr AND chain_id = :chain_id
 """
 
 _MORPHO_BACKED_BREAKDOWN_SQL = f"""
@@ -164,10 +181,15 @@ class MorphoBackedBreakdownRepository:
 
     async def resolve_vault_id(self, address: bytes, chain_id: int) -> int | None:
         """Resolve a Morpho vault's internal ID from its onchain address."""
+        ref = await self.resolve_vault(address, chain_id)
+        return ref.id if ref is not None else None
+
+    async def resolve_vault(self, address: bytes, chain_id: int) -> MorphoVaultRef | None:
+        """Resolve a Morpho vault's internal id and ``vault_version`` from its onchain address."""
         async with self._engine.connect() as conn:
-            result = await conn.execute(text(_VAULT_ID_SQL), {"addr": address, "chain_id": chain_id})
+            result = await conn.execute(text(_VAULT_RESOLVE_SQL), {"addr": address, "chain_id": chain_id})
             row = result.fetchone()
-        return row.id if row is not None else None
+        return MorphoVaultRef(id=row.id, vault_version=row.vault_version) if row is not None else None
 
     async def get_backed_breakdown(self, backed_asset_id: int) -> BackedBreakdown:
         """Execute the Morpho vault backed breakdown query and return domain objects."""
