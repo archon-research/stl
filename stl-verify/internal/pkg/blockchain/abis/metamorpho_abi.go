@@ -194,6 +194,13 @@ func GetVaultV2AdapterReadABI() (*abi.ABI, error) {
 // shares the ERC4626/ERC20 surface with MetaMorpho but reverts on MORPHO() and
 // skimRecipient(). Its presence is identified by curator() and
 // liquidityAdapter() returning addresses successfully.
+//
+// absoluteCap(bytes32) / relativeCap(bytes32) return the two current allocation
+// limits for a cap id (id = keccak256(idData)). Both are declared uint128 on the
+// contract (ABI-encoded as full 32-byte words, decoded into *big.Int) — the
+// indexer reads them at a cap event's block hash to snapshot the full cap state.
+// Chain-verified against sparkUSDTbc: absoluteCap selector 0xbc0dd374,
+// relativeCap selector 0xa68bafa3.
 func GetVaultV2ReadABI() (*abi.ABI, error) {
 	return ParseABI(`[
 		{
@@ -207,6 +214,20 @@ func GetVaultV2ReadABI() (*abi.ABI, error) {
 			"inputs": [],
 			"name": "liquidityAdapter",
 			"outputs": [{"name": "", "type": "address"}],
+			"stateMutability": "view",
+			"type": "function"
+		},
+		{
+			"inputs": [{"name": "id", "type": "bytes32"}],
+			"name": "absoluteCap",
+			"outputs": [{"name": "", "type": "uint128"}],
+			"stateMutability": "view",
+			"type": "function"
+		},
+		{
+			"inputs": [{"name": "id", "type": "bytes32"}],
+			"name": "relativeCap",
+			"outputs": [{"name": "", "type": "uint128"}],
 			"stateMutability": "view",
 			"type": "function"
 		}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"math/big"
+	"strings"
 	"testing"
 	"time"
 
@@ -146,5 +147,28 @@ func TestReplayMetaMorphoLog_UnknownVaultErrors(t *testing.T) {
 	err := h.svc.ReplayMetaMorphoLog(context.Background(), log, 20000000, testBlockHash, 0, time.Unix(1, 0).UTC())
 	if err == nil {
 		t.Fatal("expected an error replaying a log from an unregistered vault")
+	}
+}
+
+// TestReplayMetaMorphoLog_NonStructuredTopicErrors verifies the replay path
+// rejects a share-accounting log (here a V1 Deposit) before dispatch: the replay
+// constructor nils the user/token/cache ports that the deposit handler would
+// dereference, so an unguarded route would panic. The guard must return a clean
+// error and never reach the position-snapshot path.
+func TestReplayMetaMorphoLog_NonStructuredTopicErrors(t *testing.T) {
+	h := newTestHarness(t)
+	h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
+	h.morphoRepo.SaveVaultPositionFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoVaultPosition) error {
+		t.Fatal("a non-structured (Deposit) log must not reach the position-snapshot path")
+		return nil
+	}
+
+	log := h.makeVaultDepositLog(testVaultAddr, testCaller, testOnBehalf, big.NewInt(1000), big.NewInt(900))
+	err := h.svc.ReplayMetaMorphoLog(context.Background(), log, 20000000, testBlockHash, 0, time.Unix(1, 0).UTC())
+	if err == nil {
+		t.Fatal("expected an error replaying a non-structured (Deposit) log")
+	}
+	if !strings.Contains(err.Error(), "not a VaultV2 structured event") {
+		t.Errorf("error %q should explain the topic is not a structured V2 event", err.Error())
 	}
 }

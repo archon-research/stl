@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
@@ -242,7 +243,7 @@ func TestProcessBlockEvent_Allocation(t *testing.T) {
 				gotVaultID int64
 				gotAddr    []byte
 			)
-			h.morphoRepo.GetActiveAdapterFn = func(_ context.Context, vaultID int64, address []byte) (*entity.MorphoAdapter, error) {
+			h.morphoRepo.GetActiveAdapterFn = func(_ context.Context, _ pgx.Tx, vaultID int64, address []byte) (*entity.MorphoAdapter, error) {
 				gotVaultID, gotAddr = vaultID, address
 				return &entity.MorphoAdapter{ID: 55, MorphoVaultID: 7, Address: testAdapterAddr.Bytes(), AssetTokenID: 1, AdapterType: entity.MorphoAdapterTypeMarketV1, AddedAtBlock: 19000000}, nil
 			}
@@ -298,7 +299,7 @@ func TestProcessBlockEvent_Allocation_UnknownAdapterErrors(t *testing.T) {
 	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 		return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(1))}}, nil
 	}
-	h.morphoRepo.GetActiveAdapterFn = func(_ context.Context, _ int64, _ []byte) (*entity.MorphoAdapter, error) {
+	h.morphoRepo.GetActiveAdapterFn = func(_ context.Context, _ pgx.Tx, _ int64, _ []byte) (*entity.MorphoAdapter, error) {
 		return nil, nil // adapter was never AddAdapter'd — missed data
 	}
 	h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterState) error {
@@ -343,69 +344,55 @@ func TestProcessBlockEvent_ForceDeallocate_WarnsWritesNothing(t *testing.T) {
 
 // --- cap changes ---
 
+// maxUint128 is the on-chain "unlimited" absolute cap sentinel (2^128 - 1); it
+// also exercises the full uint128 width of the on-chain read.
+var maxUint128 = new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 128), big.NewInt(1))
+
+// TestProcessBlockEvent_CapChange verifies that any of the 4 cap events snapshots
+// the vault's FULL current cap state — read on-chain (absoluteCap, relativeCap)
+// pinned to the event's block hash — rather than carrying a value forward. The
+// event's own value is irrelevant to what is persisted; the on-chain pair is
+// authoritative.
 func TestProcessBlockEvent_CapChange(t *testing.T) {
-	capID := common.HexToHash("0x00000000000000000000000000000000000000000000000000000000000000ab")
 	idData := []byte{0x01, 0x02, 0x03, 0x04}
+	// capID must equal keccak256(idData): the entity enforces it, mirroring how
+	// the contract derives the id.
+	capID := crypto.Keccak256Hash(idData)
 
 	tests := []struct {
-		name        string
-		event       string
-		indexed     []common.Hash
-		valueKey    string
-		prior       *entity.MorphoVaultCap
-		newValue    *big.Int
-		wantAbsolus *big.Int
-		wantRelativ *big.Int
+		name     string
+		event    string
+		indexed  []common.Hash
+		absolute *big.Int
+		relative *big.Int
 	}{
 		{
-			name:        "IncreaseAbsoluteCap no prior row defaults relative to 0",
-			event:       "IncreaseAbsoluteCap",
-			indexed:     []common.Hash{capID},
-			valueKey:    "newAbsoluteCap",
-			prior:       nil,
-			newValue:    big.NewInt(1_000_000),
-			wantAbsolus: big.NewInt(1_000_000),
-			wantRelativ: big.NewInt(0),
+			name:     "IncreaseAbsoluteCap",
+			event:    "IncreaseAbsoluteCap",
+			indexed:  []common.Hash{capID},
+			absolute: big.NewInt(1_000_000),
+			relative: big.NewInt(1_000_000_000_000_000_000),
 		},
 		{
-			name:        "IncreaseAbsoluteCap preserves prior relative",
-			event:       "IncreaseAbsoluteCap",
-			indexed:     []common.Hash{capID},
-			valueKey:    "newAbsoluteCap",
-			prior:       &entity.MorphoVaultCap{AbsoluteCap: big.NewInt(500), RelativeCap: big.NewInt(700)},
-			newValue:    big.NewInt(1_000_000),
-			wantAbsolus: big.NewInt(1_000_000),
-			wantRelativ: big.NewInt(700),
+			name:     "IncreaseRelativeCap",
+			event:    "IncreaseRelativeCap",
+			indexed:  []common.Hash{capID},
+			absolute: maxUint128,
+			relative: big.NewInt(500_000_000_000_000_000),
 		},
 		{
-			name:        "IncreaseRelativeCap preserves prior absolute",
-			event:       "IncreaseRelativeCap",
-			indexed:     []common.Hash{capID},
-			valueKey:    "newRelativeCap",
-			prior:       &entity.MorphoVaultCap{AbsoluteCap: big.NewInt(500), RelativeCap: big.NewInt(700)},
-			newValue:    big.NewInt(900_000_000_000_000_000),
-			wantAbsolus: big.NewInt(500),
-			wantRelativ: big.NewInt(900_000_000_000_000_000),
+			name:     "DecreaseAbsoluteCap (with sender)",
+			event:    "DecreaseAbsoluteCap",
+			indexed:  []common.Hash{addrTopic(testCaller), capID},
+			absolute: big.NewInt(250),
+			relative: big.NewInt(0),
 		},
 		{
-			name:        "DecreaseAbsoluteCap (with sender) no prior row",
-			event:       "DecreaseAbsoluteCap",
-			indexed:     []common.Hash{addrTopic(testCaller), capID},
-			valueKey:    "newAbsoluteCap",
-			prior:       nil,
-			newValue:    big.NewInt(250),
-			wantAbsolus: big.NewInt(250),
-			wantRelativ: big.NewInt(0),
-		},
-		{
-			name:        "DecreaseRelativeCap (with sender) preserves prior absolute",
-			event:       "DecreaseRelativeCap",
-			indexed:     []common.Hash{addrTopic(testCaller), capID},
-			valueKey:    "newRelativeCap",
-			prior:       &entity.MorphoVaultCap{AbsoluteCap: big.NewInt(500), RelativeCap: big.NewInt(700)},
-			newValue:    big.NewInt(123),
-			wantAbsolus: big.NewInt(500),
-			wantRelativ: big.NewInt(123),
+			name:     "DecreaseRelativeCap (with sender)",
+			event:    "DecreaseRelativeCap",
+			indexed:  []common.Hash{addrTopic(testCaller), capID},
+			absolute: big.NewInt(500),
+			relative: big.NewInt(123),
 		},
 	}
 	for _, tt := range tests {
@@ -413,12 +400,21 @@ func TestProcessBlockEvent_CapChange(t *testing.T) {
 			h := newTestHarness(t)
 			h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
 
-			var gotCapVaultID int64
-			var gotCapID []byte
-			h.morphoRepo.GetLatestVaultCapFn = func(_ context.Context, _ pgx.Tx, vaultID int64, id []byte) (*entity.MorphoVaultCap, error) {
-				gotCapVaultID, gotCapID = vaultID, id
-				return tt.prior, nil
+			var gotHash common.Hash
+			viaHash := false
+			h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+				if len(calls) != 2 || calls[0].Target != testVaultAddr || calls[1].Target != testVaultAddr ||
+					calls[0].AllowFailure || calls[1].AllowFailure {
+					return nil, errTestUnexpectedCall(calls)
+				}
+				viaHash = true
+				gotHash = blockHash
+				return []outbound.Result{
+					{Success: true, ReturnData: h.packUint256(tt.absolute)},
+					{Success: true, ReturnData: h.packUint256(tt.relative)},
+				}, nil
 			}
+
 			var saved *entity.MorphoVaultCap
 			h.morphoRepo.SaveVaultCapFn = func(_ context.Context, _ pgx.Tx, c *entity.MorphoVaultCap) error {
 				saved = c
@@ -426,13 +422,18 @@ func TestProcessBlockEvent_CapChange(t *testing.T) {
 			}
 
 			ev := h.vaultV2EventsABI.Events[tt.event]
-			log := h.makeV2VaultLog(ev, testVaultAddr, tt.indexed, idData, tt.newValue)
+			// The non-indexed (idData, newValue) payload is what the log carries;
+			// newValue is deliberately NOT what gets persisted.
+			log := h.makeV2VaultLog(ev, testVaultAddr, tt.indexed, idData, big.NewInt(999))
 			if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err != nil {
 				t.Fatalf("processBlock: %v", err)
 			}
 
-			if gotCapVaultID != 7 || !bytes.Equal(gotCapID, capID.Bytes()) {
-				t.Errorf("GetLatestVaultCap(%d,%x), want (7,%s)", gotCapVaultID, gotCapID, capID.Hex())
+			if !viaHash {
+				t.Fatal("caps must be read via ExecuteAtHash (state read)")
+			}
+			if gotHash != testBlockHash {
+				t.Errorf("caps pinned to %s, want %s", gotHash, testBlockHash)
 			}
 			if saved == nil {
 				t.Fatal("SaveVaultCap not called")
@@ -446,14 +447,58 @@ func TestProcessBlockEvent_CapChange(t *testing.T) {
 			if !bytes.Equal(saved.IDData, idData) {
 				t.Errorf("IDData = %x, want %x", saved.IDData, idData)
 			}
-			if saved.AbsoluteCap.Cmp(tt.wantAbsolus) != 0 {
-				t.Errorf("AbsoluteCap = %s, want %s", saved.AbsoluteCap, tt.wantAbsolus)
+			if saved.AbsoluteCap.Cmp(tt.absolute) != 0 {
+				t.Errorf("AbsoluteCap = %s, want %s (on-chain read, not the event value)", saved.AbsoluteCap, tt.absolute)
 			}
-			if saved.RelativeCap.Cmp(tt.wantRelativ) != 0 {
-				t.Errorf("RelativeCap = %s, want %s", saved.RelativeCap, tt.wantRelativ)
+			if saved.RelativeCap.Cmp(tt.relative) != 0 {
+				t.Errorf("RelativeCap = %s, want %s (on-chain read, not the event value)", saved.RelativeCap, tt.relative)
 			}
 			if saved.BlockNumber != 20000000 {
 				t.Errorf("BlockNumber = %d, want 20000000", saved.BlockNumber)
+			}
+		})
+	}
+}
+
+// TestProcessBlockEvent_CapChange_ReadErrors verifies the cap snapshot aborts the
+// event when the on-chain read fails — both a transport error and a Success=false
+// sub-result — rather than persisting a partial/defaulted row.
+func TestProcessBlockEvent_CapChange_ReadErrors(t *testing.T) {
+	idData := []byte{0x01, 0x02, 0x03, 0x04}
+	capID := crypto.Keccak256Hash(idData)
+
+	tests := []struct {
+		name    string
+		execute func(_ context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error)
+	}{
+		{
+			name: "transport error",
+			execute: func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+				return nil, errors.New("cap rpc down")
+			},
+		},
+		{
+			name: "Success=false sub-result",
+			execute: func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+				return []outbound.Result{
+					{Success: false, ReturnData: nil},
+					{Success: true, ReturnData: nil},
+				}, nil
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newTestHarness(t)
+			h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
+			h.multicaller.ExecuteAtHashFn = tt.execute
+			h.morphoRepo.SaveVaultCapFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoVaultCap) error {
+				t.Fatal("cap must not be persisted when the on-chain read fails")
+				return nil
+			}
+			log := h.makeV2VaultLog(h.vaultV2EventsABI.Events["IncreaseAbsoluteCap"], testVaultAddr, []common.Hash{capID}, idData, big.NewInt(1))
+			if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err == nil {
+				t.Fatal("expected the block to fail so SQS redelivers")
 			}
 		})
 	}
@@ -562,7 +607,6 @@ func TestProcessBlockEvent_FeeUpdates(t *testing.T) {
 // distinct failing dependency.
 func TestProcessBlockEvent_V2Handlers_ErrorsPropagate(t *testing.T) {
 	adapterIdx := []common.Hash{addrTopic(testCaller), addrTopic(testAdapterAddr)}
-	capID := common.HexToHash("0x00000000000000000000000000000000000000000000000000000000000000ab")
 
 	tests := []struct {
 		name  string
@@ -600,7 +644,7 @@ func TestProcessBlockEvent_V2Handlers_ErrorsPropagate(t *testing.T) {
 				h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 					return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(1))}}, nil
 				}
-				h.morphoRepo.GetActiveAdapterFn = func(_ context.Context, _ int64, _ []byte) (*entity.MorphoAdapter, error) {
+				h.morphoRepo.GetActiveAdapterFn = func(_ context.Context, _ pgx.Tx, _ int64, _ []byte) (*entity.MorphoAdapter, error) {
 					return nil, errors.New("db down")
 				}
 				h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterState) error {
@@ -611,16 +655,19 @@ func TestProcessBlockEvent_V2Handlers_ErrorsPropagate(t *testing.T) {
 			},
 		},
 		{
-			name: "CapChange: GetLatestVaultCap DB error",
+			name: "CapChange: SaveVaultCap DB error",
 			setup: func(h *serviceTestHarness) shared.Log {
-				h.morphoRepo.GetLatestVaultCapFn = func(_ context.Context, _ pgx.Tx, _ int64, _ []byte) (*entity.MorphoVaultCap, error) {
-					return nil, errors.New("db down")
+				capIDData := []byte{0x01}
+				h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+					return []outbound.Result{
+						{Success: true, ReturnData: h.packUint256(big.NewInt(1))},
+						{Success: true, ReturnData: h.packUint256(big.NewInt(1))},
+					}, nil
 				}
 				h.morphoRepo.SaveVaultCapFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoVaultCap) error {
-					t.Fatal("cap must not be persisted on a lookup error")
-					return nil
+					return errors.New("db down")
 				}
-				return h.makeV2VaultLog(h.vaultV2EventsABI.Events["IncreaseAbsoluteCap"], testVaultAddr, []common.Hash{capID}, []byte{0x01}, big.NewInt(1))
+				return h.makeV2VaultLog(h.vaultV2EventsABI.Events["IncreaseAbsoluteCap"], testVaultAddr, []common.Hash{crypto.Keccak256Hash(capIDData)}, capIDData, big.NewInt(1))
 			},
 		},
 		{
