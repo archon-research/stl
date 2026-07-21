@@ -98,11 +98,12 @@ func (e *EventExtractor) loadABIs() error {
 	e.vaultActivitySignatures[v2Event.ID] = &v2Event
 
 	// Register the full VaultV2 governance / allocation / cap / fee / role /
-	// timelock event surface. These are persisted as protocol_event audit-log
-	// rows when emitted by a known vault; structured handling (adapter table,
-	// cap table, fee config columns) is deferred per
-	// docs/vec-198-morpho-v2-followup-plan.md. Without this registration the
-	// events would silently fall through IsMetaMorphoEvent's filter.
+	// timelock event surface. Every one is persisted as a protocol_event
+	// audit-log row when emitted by a known vault; the adapter / allocation /
+	// cap / fee subset additionally has typed extraction and structured
+	// handlers (VEC-218), while the rest stay audit-log-only. Without this
+	// registration the events would silently fall through IsMetaMorphoEvent's
+	// filter.
 	v2EventsABI, err := abis.GetVaultV2EventsABI()
 	if err != nil {
 		return fmt.Errorf("failed to parse VaultV2 events ABI: %w", err)
@@ -255,15 +256,19 @@ func (e *EventExtractor) ExtractMetaMorphoEvent(log shared.Log) (MetaMorphoEvent
 		return nil, fmt.Errorf("not a tracked MetaMorpho event")
 	}
 
-	// Only the events with state-affecting typed handlers are extracted into
-	// strongly-typed structs. The full V2 governance / allocation / cap / fee
-	// / role / timelock surface is registered in metaMorphoSignatures so the
-	// indexer recognises and audit-logs them, but typed extraction is
-	// deferred per docs/vec-198-morpho-v2-followup-plan.md. Returning (nil,
-	// nil) signals "registered topic, no typed extraction" — the caller saves
-	// the audit-log row regardless.
+	// Only events with structured handlers are extracted into strongly-typed
+	// structs: the ERC4626/ERC20 state events (Deposit / Withdraw / Transfer /
+	// AccrueInterest) plus the VaultV2 adapter / allocation / cap / fee surface
+	// that VEC-218 tracks structurally. The remaining registered V2 events
+	// (role / timelock / gate / metadata setters) are recognised so the indexer
+	// audit-logs them, but have no typed handler: they return (nil, nil), which
+	// signals "registered topic, no typed extraction" so the caller saves the
+	// audit-log row without aborting the receipt.
 	switch event.Name {
-	case "Deposit", "Withdraw", "Transfer", "AccrueInterest":
+	case "Deposit", "Withdraw", "Transfer", "AccrueInterest",
+		"AddAdapter", "RemoveAdapter", "Allocate", "Deallocate", "ForceDeallocate",
+		"IncreaseAbsoluteCap", "DecreaseAbsoluteCap", "IncreaseRelativeCap", "DecreaseRelativeCap",
+		"SetPerformanceFee", "SetManagementFee", "SetPerformanceFeeRecipient", "SetManagementFeeRecipient":
 		// fall through to typed extraction below
 	default:
 		return nil, nil
@@ -287,6 +292,32 @@ func (e *EventExtractor) ExtractMetaMorphoEvent(log shared.Log) (MetaMorphoEvent
 		return extractVaultTransfer(eventData, log.TransactionHash)
 	case "AccrueInterest":
 		return extractVaultAccrueInterest(eventData, log.TransactionHash)
+	case "AddAdapter":
+		return extractAddAdapter(eventData, log.TransactionHash)
+	case "RemoveAdapter":
+		return extractRemoveAdapter(eventData, log.TransactionHash)
+	case "Allocate":
+		return extractAllocate(eventData, log.TransactionHash)
+	case "Deallocate":
+		return extractDeallocate(eventData, log.TransactionHash)
+	case "ForceDeallocate":
+		return extractForceDeallocate(eventData, log.TransactionHash)
+	case "IncreaseAbsoluteCap":
+		return extractIncreaseAbsoluteCap(eventData, log.TransactionHash)
+	case "DecreaseAbsoluteCap":
+		return extractDecreaseAbsoluteCap(eventData, log.TransactionHash)
+	case "IncreaseRelativeCap":
+		return extractIncreaseRelativeCap(eventData, log.TransactionHash)
+	case "DecreaseRelativeCap":
+		return extractDecreaseRelativeCap(eventData, log.TransactionHash)
+	case "SetPerformanceFee":
+		return extractSetPerformanceFee(eventData, log.TransactionHash)
+	case "SetManagementFee":
+		return extractSetManagementFee(eventData, log.TransactionHash)
+	case "SetPerformanceFeeRecipient":
+		return extractSetPerformanceFeeRecipient(eventData, log.TransactionHash)
+	case "SetManagementFeeRecipient":
+		return extractSetManagementFeeRecipient(eventData, log.TransactionHash)
 	default:
 		// Unreachable — gated by the switch above.
 		return nil, nil
@@ -369,6 +400,36 @@ func getBigInt(eventData map[string]any, key string) (*big.Int, error) {
 		return nil, fmt.Errorf("invalid type for %s: %T", key, v)
 	}
 	return b, nil
+}
+
+func getBytes(eventData map[string]any, key string) ([]byte, error) {
+	v, ok := eventData[key]
+	if !ok {
+		return nil, fmt.Errorf("missing field: %s", key)
+	}
+	b, ok := v.([]byte)
+	if !ok {
+		return nil, fmt.Errorf("invalid type for %s: %T", key, v)
+	}
+	return b, nil
+}
+
+// getHashSlice reads a bytes32[] field, which the ABI decoder yields as
+// [][32]byte, and returns it as []common.Hash for typed events.
+func getHashSlice(eventData map[string]any, key string) ([]common.Hash, error) {
+	v, ok := eventData[key]
+	if !ok {
+		return nil, fmt.Errorf("missing field: %s", key)
+	}
+	raw, ok := v.([][32]byte)
+	if !ok {
+		return nil, fmt.Errorf("invalid type for %s: %T", key, v)
+	}
+	hashes := make([]common.Hash, len(raw))
+	for i, b := range raw {
+		hashes[i] = common.Hash(b)
+	}
+	return hashes, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -800,4 +861,253 @@ func extractVaultAccrueInterest(eventData map[string]any, txHash string) (*Vault
 	}
 
 	return result, nil
+}
+
+// ---------------------------------------------------------------------------
+// Morpho VaultV2 adapter / allocation / cap / fee extractors
+// ---------------------------------------------------------------------------
+
+func extractAddAdapter(eventData map[string]any, txHash string) (*AddAdapterEvent, error) {
+	account, err := getAddress(eventData, "account")
+	if err != nil {
+		return nil, err
+	}
+	return &AddAdapterEvent{metaMorphoBase: metaMorphoBase{txHash: txHash}, Account: account}, nil
+}
+
+func extractRemoveAdapter(eventData map[string]any, txHash string) (*RemoveAdapterEvent, error) {
+	account, err := getAddress(eventData, "account")
+	if err != nil {
+		return nil, err
+	}
+	return &RemoveAdapterEvent{metaMorphoBase: metaMorphoBase{txHash: txHash}, Account: account}, nil
+}
+
+// allocationFields holds the fields shared by the identically-shaped Allocate
+// and Deallocate events.
+type allocationFields struct {
+	sender  common.Address
+	adapter common.Address
+	assets  *big.Int
+	ids     []common.Hash
+	change  *big.Int
+}
+
+func extractAllocationFields(eventData map[string]any) (allocationFields, error) {
+	sender, err := getAddress(eventData, "sender")
+	if err != nil {
+		return allocationFields{}, err
+	}
+	adapter, err := getAddress(eventData, "adapter")
+	if err != nil {
+		return allocationFields{}, err
+	}
+	assets, err := getBigInt(eventData, "assets")
+	if err != nil {
+		return allocationFields{}, err
+	}
+	ids, err := getHashSlice(eventData, "ids")
+	if err != nil {
+		return allocationFields{}, err
+	}
+	change, err := getBigInt(eventData, "change")
+	if err != nil {
+		return allocationFields{}, err
+	}
+	return allocationFields{sender: sender, adapter: adapter, assets: assets, ids: ids, change: change}, nil
+}
+
+func extractAllocate(eventData map[string]any, txHash string) (*AllocateEvent, error) {
+	f, err := extractAllocationFields(eventData)
+	if err != nil {
+		return nil, err
+	}
+	return &AllocateEvent{
+		metaMorphoBase: metaMorphoBase{txHash: txHash},
+		Sender:         f.sender,
+		Adapter:        f.adapter,
+		Assets:         f.assets,
+		IDs:            f.ids,
+		Change:         f.change,
+	}, nil
+}
+
+func extractDeallocate(eventData map[string]any, txHash string) (*DeallocateEvent, error) {
+	f, err := extractAllocationFields(eventData)
+	if err != nil {
+		return nil, err
+	}
+	return &DeallocateEvent{
+		metaMorphoBase: metaMorphoBase{txHash: txHash},
+		Sender:         f.sender,
+		Adapter:        f.adapter,
+		Assets:         f.assets,
+		IDs:            f.ids,
+		Change:         f.change,
+	}, nil
+}
+
+func extractForceDeallocate(eventData map[string]any, txHash string) (*ForceDeallocateEvent, error) {
+	sender, err := getAddress(eventData, "sender")
+	if err != nil {
+		return nil, err
+	}
+	adapter, err := getAddress(eventData, "adapter")
+	if err != nil {
+		return nil, err
+	}
+	assets, err := getBigInt(eventData, "assets")
+	if err != nil {
+		return nil, err
+	}
+	onBehalf, err := getAddress(eventData, "onBehalf")
+	if err != nil {
+		return nil, err
+	}
+	ids, err := getHashSlice(eventData, "ids")
+	if err != nil {
+		return nil, err
+	}
+	penaltyAssets, err := getBigInt(eventData, "penaltyAssets")
+	if err != nil {
+		return nil, err
+	}
+	return &ForceDeallocateEvent{
+		metaMorphoBase: metaMorphoBase{txHash: txHash},
+		Sender:         sender,
+		Adapter:        adapter,
+		Assets:         assets,
+		OnBehalf:       onBehalf,
+		IDs:            ids,
+		PenaltyAssets:  penaltyAssets,
+	}, nil
+}
+
+// capIdentity holds the (id, idData) pair carried by every cap event; id is
+// keccak256(idData) and is decoded from the indexed topic.
+type capIdentity struct {
+	id     common.Hash
+	idData []byte
+}
+
+func extractCapIdentity(eventData map[string]any) (capIdentity, error) {
+	id, err := getBytes32(eventData, "id")
+	if err != nil {
+		return capIdentity{}, err
+	}
+	idData, err := getBytes(eventData, "idData")
+	if err != nil {
+		return capIdentity{}, err
+	}
+	return capIdentity{id: common.Hash(id), idData: idData}, nil
+}
+
+func extractIncreaseAbsoluteCap(eventData map[string]any, txHash string) (*IncreaseAbsoluteCapEvent, error) {
+	c, err := extractCapIdentity(eventData)
+	if err != nil {
+		return nil, err
+	}
+	newCap, err := getBigInt(eventData, "newAbsoluteCap")
+	if err != nil {
+		return nil, err
+	}
+	return &IncreaseAbsoluteCapEvent{
+		metaMorphoBase: metaMorphoBase{txHash: txHash},
+		ID:             c.id,
+		IDData:         c.idData,
+		NewAbsoluteCap: newCap,
+	}, nil
+}
+
+func extractDecreaseAbsoluteCap(eventData map[string]any, txHash string) (*DecreaseAbsoluteCapEvent, error) {
+	c, err := extractCapIdentity(eventData)
+	if err != nil {
+		return nil, err
+	}
+	sender, err := getAddress(eventData, "sender")
+	if err != nil {
+		return nil, err
+	}
+	newCap, err := getBigInt(eventData, "newAbsoluteCap")
+	if err != nil {
+		return nil, err
+	}
+	return &DecreaseAbsoluteCapEvent{
+		metaMorphoBase: metaMorphoBase{txHash: txHash},
+		Sender:         sender,
+		ID:             c.id,
+		IDData:         c.idData,
+		NewAbsoluteCap: newCap,
+	}, nil
+}
+
+func extractIncreaseRelativeCap(eventData map[string]any, txHash string) (*IncreaseRelativeCapEvent, error) {
+	c, err := extractCapIdentity(eventData)
+	if err != nil {
+		return nil, err
+	}
+	newCap, err := getBigInt(eventData, "newRelativeCap")
+	if err != nil {
+		return nil, err
+	}
+	return &IncreaseRelativeCapEvent{
+		metaMorphoBase: metaMorphoBase{txHash: txHash},
+		ID:             c.id,
+		IDData:         c.idData,
+		NewRelativeCap: newCap,
+	}, nil
+}
+
+func extractDecreaseRelativeCap(eventData map[string]any, txHash string) (*DecreaseRelativeCapEvent, error) {
+	c, err := extractCapIdentity(eventData)
+	if err != nil {
+		return nil, err
+	}
+	sender, err := getAddress(eventData, "sender")
+	if err != nil {
+		return nil, err
+	}
+	newCap, err := getBigInt(eventData, "newRelativeCap")
+	if err != nil {
+		return nil, err
+	}
+	return &DecreaseRelativeCapEvent{
+		metaMorphoBase: metaMorphoBase{txHash: txHash},
+		Sender:         sender,
+		ID:             c.id,
+		IDData:         c.idData,
+		NewRelativeCap: newCap,
+	}, nil
+}
+
+func extractSetPerformanceFee(eventData map[string]any, txHash string) (*SetPerformanceFeeEvent, error) {
+	fee, err := getBigInt(eventData, "newPerformanceFee")
+	if err != nil {
+		return nil, err
+	}
+	return &SetPerformanceFeeEvent{metaMorphoBase: metaMorphoBase{txHash: txHash}, NewPerformanceFee: fee}, nil
+}
+
+func extractSetManagementFee(eventData map[string]any, txHash string) (*SetManagementFeeEvent, error) {
+	fee, err := getBigInt(eventData, "newManagementFee")
+	if err != nil {
+		return nil, err
+	}
+	return &SetManagementFeeEvent{metaMorphoBase: metaMorphoBase{txHash: txHash}, NewManagementFee: fee}, nil
+}
+
+func extractSetPerformanceFeeRecipient(eventData map[string]any, txHash string) (*SetPerformanceFeeRecipientEvent, error) {
+	recipient, err := getAddress(eventData, "newPerformanceFeeRecipient")
+	if err != nil {
+		return nil, err
+	}
+	return &SetPerformanceFeeRecipientEvent{metaMorphoBase: metaMorphoBase{txHash: txHash}, NewPerformanceFeeRecipient: recipient}, nil
+}
+
+func extractSetManagementFeeRecipient(eventData map[string]any, txHash string) (*SetManagementFeeRecipientEvent, error) {
+	recipient, err := getAddress(eventData, "newManagementFeeRecipient")
+	if err != nil {
+		return nil, err
+	}
+	return &SetManagementFeeRecipientEvent{metaMorphoBase: metaMorphoBase{txHash: txHash}, NewManagementFeeRecipient: recipient}, nil
 }

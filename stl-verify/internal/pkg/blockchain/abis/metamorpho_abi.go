@@ -151,6 +151,43 @@ func GetMetaMorphoReadABI() (*abi.ABI, error) {
 	]`)
 }
 
+// GetVaultV2AdapterReadABI returns the ABI for the read functions on a VaultV2
+// liquidity adapter (not the vault itself).
+//
+// A VaultV2 never touches a downstream venue directly: it holds adapter
+// contracts, each wrapping one venue. The two type-discriminating selectors are
+// mutually exclusive on a real adapter — morpho() (0xd8fbc833) succeeds on a
+// MorphoMarketV1AdapterV2 (wraps a Morpho Blue market), morphoVaultV1()
+// (0xe4baaddf) succeeds on a MorphoVaultV1Adapter (wraps a nested MetaMorpho V1
+// vault). realAssets() (0x56c07573) exists on both and returns the adapter's
+// current holdings in the vault's underlying-asset base units. Chain-verified
+// against sparkUSDTbc's adapter.
+func GetVaultV2AdapterReadABI() (*abi.ABI, error) {
+	return ParseABI(`[
+		{
+			"inputs": [],
+			"name": "morpho",
+			"outputs": [{"name": "", "type": "address"}],
+			"stateMutability": "view",
+			"type": "function"
+		},
+		{
+			"inputs": [],
+			"name": "morphoVaultV1",
+			"outputs": [{"name": "", "type": "address"}],
+			"stateMutability": "view",
+			"type": "function"
+		},
+		{
+			"inputs": [],
+			"name": "realAssets",
+			"outputs": [{"name": "", "type": "uint256"}],
+			"stateMutability": "view",
+			"type": "function"
+		}
+	]`)
+}
+
 // GetVaultV2ReadABI returns the ABI for Morpho VaultV2-specific read functions.
 //
 // VaultV2 (deployed by 0xa1d94f746defa1928926b84fb2596c06926c0405 on mainnet)

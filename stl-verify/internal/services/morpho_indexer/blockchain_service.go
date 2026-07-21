@@ -77,8 +77,10 @@ type blockchainService struct {
 	multicallClient outbound.Multicaller
 	morphoBlueABI   *abi.ABI
 	metaMorphoABI   *abi.ABI
+	adapterABI      *abi.ABI
 	erc20ABI        *abi.ABI
 	vaultProber     *VaultProber
+	adapterProber   *AdapterProber
 	metadataCache   map[common.Address]TokenMetadata
 	telemetry       *Telemetry
 	logger          *slog.Logger
@@ -100,17 +102,29 @@ func newBlockchainService(
 		return nil, fmt.Errorf("failed to load MetaMorpho read ABI: %w", err)
 	}
 
+	adapterABI, err := abis.GetVaultV2AdapterReadABI()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load VaultV2 adapter read ABI: %w", err)
+	}
+
 	vaultProber, err := NewVaultProber()
 	if err != nil {
 		return nil, fmt.Errorf("creating vault prober: %w", err)
+	}
+
+	adapterProber, err := NewAdapterProber()
+	if err != nil {
+		return nil, fmt.Errorf("creating adapter prober: %w", err)
 	}
 
 	return &blockchainService{
 		multicallClient: multicallClient,
 		morphoBlueABI:   morphoABI,
 		metaMorphoABI:   metaMorphoABI,
+		adapterABI:      adapterABI,
 		erc20ABI:        erc20ABI,
 		vaultProber:     vaultProber,
+		adapterProber:   adapterProber,
 		metadataCache:   make(map[common.Address]TokenMetadata),
 		telemetry:       telemetry,
 		logger:          logger.With("component", "morpho-blockchain-service"),
@@ -575,6 +589,71 @@ func (s *blockchainService) getVaultStateAndTwoBalances(ctx context.Context, vau
 	}
 
 	return vs, balA, balB, nil
+}
+
+// getAdapterType classifies a VaultV2 liquidity adapter (MarketV1 / VaultV1 /
+// Unknown). Number-pinned intentionally: adapter identity is immutable, same
+// rationale as getMarketParams (see VEC-471). A both-fail / both-succeed probe
+// yields MorphoAdapterTypeUnknown with a nil error (the caller WARNs and still
+// records it); only a transport error propagates.
+func (s *blockchainService) getAdapterType(ctx context.Context, adapter common.Address, blockNumber int64) (retType entity.MorphoAdapterType, retErr error) {
+	ctx, span := s.telemetry.StartSpan(ctx, "morpho.rpc.getAdapterType",
+		attribute.String("adapter.address", adapter.Hex()))
+	defer span.End()
+	start := time.Now()
+	defer func() {
+		s.telemetry.RecordRPCCall(ctx, "getAdapterType", time.Since(start), retErr)
+		if retErr != nil {
+			telemetry.SetSpanError(span, retErr, "getAdapterType failed")
+		}
+	}()
+
+	return s.adapterProber.ProbeAdapterType(ctx, s.multicallClient, adapter, big.NewInt(blockNumber))
+}
+
+// getAdapterRealAssets reads an adapter's realAssets() — the assets it reports
+// holding in its downstream venue — pinned to blockHash. This is versioned
+// per-block state (it changes every allocation / accrual), so it uses
+// ExecuteAtHash for reorg-correctness (see getMarketState / VEC-471), not
+// number-pinning. realAssets() exists on every adapter type, so the call is not
+// AllowFailure: a revert is a real error that must stop the event.
+func (s *blockchainService) getAdapterRealAssets(ctx context.Context, adapter common.Address, blockHash common.Hash) (retAssets *big.Int, retErr error) {
+	ctx, span := s.telemetry.StartSpan(ctx, "morpho.rpc.getAdapterRealAssets",
+		attribute.String("adapter.address", adapter.Hex()))
+	defer span.End()
+	start := time.Now()
+	defer func() {
+		s.telemetry.RecordRPCCall(ctx, "getAdapterRealAssets", time.Since(start), retErr)
+		if retErr != nil {
+			telemetry.SetSpanError(span, retErr, "getAdapterRealAssets failed")
+		}
+	}()
+
+	callData, err := s.adapterABI.Pack("realAssets")
+	if err != nil {
+		return nil, fmt.Errorf("packing realAssets call: %w", err)
+	}
+
+	results, err := s.multicallClient.ExecuteAtHash(ctx, []outbound.Call{{
+		Target:       adapter,
+		AllowFailure: false,
+		CallData:     callData,
+	}}, blockHash)
+	if err != nil {
+		return nil, fmt.Errorf("multicall realAssets(): %w", err)
+	}
+	if len(results) == 0 || !results[0].Success || len(results[0].ReturnData) == 0 {
+		return nil, fmt.Errorf("realAssets() call failed for adapter %s", adapter.Hex())
+	}
+
+	unpacked, err := s.adapterABI.Unpack("realAssets", results[0].ReturnData)
+	if err != nil {
+		return nil, fmt.Errorf("unpacking realAssets() for adapter %s: %w", adapter.Hex(), err)
+	}
+	if len(unpacked) == 0 {
+		return nil, fmt.Errorf("realAssets() returned no values for adapter %s", adapter.Hex())
+	}
+	return bigIntFromAny(unpacked[0]), nil
 }
 
 // getVaultMetadata identifies whether a contract is a Morpho-family vault
