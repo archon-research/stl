@@ -169,19 +169,6 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("creating event extractor: %w", err)
 	}
 
-	// Phase 1: Scan receipts for candidate addresses
-	candidates, err := scanBlockRange(ctx, logger, s3Reader, extractor, cfg.bucket, cfg.from, cfg.to, cfg.goroutines)
-	if err != nil {
-		return fmt.Errorf("scanning block range: %w", err)
-	}
-	logger.Info("scan complete", "uniqueCandidates", len(candidates))
-
-	if len(candidates) == 0 {
-		logger.Info("no candidates found, nothing to probe")
-		return nil
-	}
-
-	// Phase 2: Probe candidates on-chain to confirm vaults
 	prober := &vaultProber{
 		multicaller:  multicaller,
 		sharedProber: sharedProber,
@@ -189,28 +176,68 @@ func run(ctx context.Context, args []string) error {
 		logger:       logger,
 	}
 
+	// Phases 1–3: scan S3 receipts for candidates, probe them on-chain, persist
+	// confirmed vaults.
+	if err := discoverAndPersistVaults(ctx, logger, s3Reader, extractor, prober, pool, buildReg.BuildID(), cfg); err != nil {
+		return err
+	}
+
+	// Phase 4: replay VaultV2 structured (adapter / cap / fee) events for the
+	// persisted V2 vaults, driving each log through the same handler path the
+	// live worker uses. Runs off the vaults in the database (this run's plus
+	// earlier runs'), so it covers a range that only carries governance events
+	// for a pre-existing V2 vault — which produces no discovery candidate.
+	if err := replayV2StructuredEvents(ctx, logger, s3Reader, ethClient, multicaller, pool, buildReg.BuildID(), cfg); err != nil {
+		return fmt.Errorf("replaying VaultV2 structured events: %w", err)
+	}
+
+	logger.Info("backfill complete")
+	return nil
+}
+
+// discoverAndPersistVaults runs the discovery pipeline: scan S3 receipts for
+// candidate addresses (phase 1), probe them on-chain to confirm vaults (phase
+// 2), and persist the confirmed vaults (phase 3). It returns nil when a phase
+// has nothing to carry forward; the caller's V2 replay phase still runs off the
+// vaults already in the database.
+func discoverAndPersistVaults(
+	ctx context.Context,
+	logger *slog.Logger,
+	s3Reader outbound.S3Reader,
+	extractor *morpho_indexer.EventExtractor,
+	prober *vaultProber,
+	pool *pgxpool.Pool,
+	buildID buildregistry.BuildID,
+	cfg config,
+) error {
+	candidates, err := scanBlockRange(ctx, logger, s3Reader, extractor, cfg.bucket, cfg.from, cfg.to, cfg.goroutines)
+	if err != nil {
+		return fmt.Errorf("scanning block range: %w", err)
+	}
+	logger.Info("scan complete", "uniqueCandidates", len(candidates))
+	if len(candidates) == 0 {
+		logger.Info("no candidates found, nothing to probe")
+		return nil
+	}
+
 	vaults, err := prober.probeAllCandidates(ctx, candidates, cfg.to, cfg.probeBatch)
 	if err != nil {
 		return fmt.Errorf("probing candidates: %w", err)
 	}
 	logger.Info("probing complete", "confirmedVaults", len(vaults))
-
 	if len(vaults) == 0 {
 		logger.Info("no vaults confirmed")
 		return nil
 	}
 
-	// Phase 3: Persist confirmed vaults
 	deployBlock, err := morpho_indexer.MorphoBlueDeployBlock(cfg.chainID)
 	if err != nil {
 		return fmt.Errorf("getting deploy block: %w", err)
 	}
-	err = persistVaults(ctx, pool, logger, vaults, cfg.chainID, deployBlock, buildReg.BuildID())
-	if err != nil {
+	if err := persistVaults(ctx, pool, logger, vaults, cfg.chainID, deployBlock, buildID); err != nil {
 		return fmt.Errorf("persisting vaults: %w", err)
 	}
-
-	logger.Info("backfill complete", "vaultsPersisted", len(vaults))
+	logger.Info("vaults persisted", "count", len(vaults))
 	return nil
 }
 
