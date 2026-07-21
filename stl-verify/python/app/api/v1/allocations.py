@@ -6,7 +6,7 @@ from typing import Annotated, Literal
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
@@ -174,6 +174,22 @@ class AllocationResponse(BaseModel):
             }
         }
     }
+
+    @model_validator(mode="after")
+    def _check_underlying_identity_pairing(self) -> "AllocationResponse":
+        # The underlying id and address are two halves of one identity: a receipt
+        # or direct row carries both, an off-chain custody row carries neither.
+        # The domain entities type them non-optional, so relaxing them to
+        # Optional here (for the custody shape) reintroduces the risk of a
+        # contradictory one-set-one-null row that the plain types used to reject
+        # for free. Guard it, mirroring PrimeRiskCapital's pairing invariant.
+        if (self.underlying_token_id is None) != (self.underlying_token_address is None):
+            raise ValueError(
+                "underlying_token_id and underlying_token_address must be set or null together: "
+                f"underlying_token_id={self.underlying_token_id!r}, "
+                f"underlying_token_address={self.underlying_token_address!r}"
+            )
+        return self
 
 
 class CapitalMetricsResponse(BaseModel):
@@ -628,7 +644,7 @@ def _anchorage_custody_row(
         protocol_name=_ANCHORAGE_PROTOCOL_NAME,
         balance=holding.balance,
         amount_usd=holding.amount_usd,
-        latest_activity_at=holding.as_of.isoformat() if holding.as_of else None,
+        latest_activity_at=holding.as_of.isoformat(),
         latest_activity_action=None,
         latest_activity_amount=None,
         category=category_service.classify(_ANCHORAGE_PROTOCOL_NAME, holding.symbol),

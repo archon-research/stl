@@ -82,6 +82,21 @@ async def test_processing_version_correction_supersedes_original(repo) -> None:
 
 
 @pytest.mark.asyncio
+async def test_active_predicate_excludes_inactive_package_in_cohort(repo) -> None:
+    """A package in the latest cohort but flagged active=false is excluded by the
+    ``AND aps.active`` predicate — not the cohort filter, which it shares (same
+    max snapshot_time). Its non-zero values (exposure 88M, BTC 800) would inflate
+    the sums if surfaced, so exposure staying 250,000,000 / BTC 4722.61 proves
+    the predicate is load-bearing.
+    """
+    holdings = await repo.list_anchorage_custody_holdings(EthAddress(f"0x{ANCHORAGE_CUSTODY_PROXY_HEX}"))
+
+    assert len(holdings) == 1
+    assert holdings[0].amount_usd == Decimal("250000000")
+    assert holdings[0].balance == Decimal("4722.61")
+
+
+@pytest.mark.asyncio
 async def test_returns_empty_for_prime_with_no_custody_snapshots(repo) -> None:
     """A known prime with no Anchorage rows yields an empty list, not an error."""
     holdings = await repo.list_anchorage_custody_holdings(EthAddress(f"0x{ANCHORAGE_EMPTY_PROXY_HEX}"))

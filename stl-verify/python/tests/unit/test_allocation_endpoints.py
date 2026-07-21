@@ -5,9 +5,12 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
+from app.api.v1.allocations import AllocationResponse
 from app.domain.entities.allocation import ChainMetadata, EthAddress, Prime, ProtocolMetadata
 from app.domain.entities.allocation_activity import AllocationActivityEvent
+from app.domain.entities.allocation_category import AllocationCategory
 from app.domain.entities.time_series_bucket import AllocationActivityBucket
 from app.main import app
 from app.services.allocation_service import AllocationService
@@ -367,6 +370,51 @@ def test_list_allocations_custody_row_surfaces_frozen_snapshot_time_verbatim():
     assert row["latest_activity_at"] == ANCHORAGE_FROZEN_AS_OF.isoformat()
     assert row["latest_activity_action"] is None
     assert row["latest_activity_amount"] is None
+
+
+@pytest.mark.parametrize(
+    ("underlying_token_id", "underlying_token_address"),
+    [
+        (10, None),  # id set, address null
+        (None, "0x" + "d" * 40),  # address set, id null
+    ],
+)
+def test_allocation_response_rejects_half_set_underlying_identity(underlying_token_id, underlying_token_address):
+    """The underlying id/address are two halves of one identity; a row with only
+    one set is contradictory and rejected at construction.
+    """
+    with pytest.raises(ValidationError, match="must be set or null together"):
+        AllocationResponse(
+            chain_id=1,
+            symbol="X",
+            underlying_symbol="X",
+            balance=Decimal("1"),
+            category=AllocationCategory.ASSET,
+            underlying_token_id=underlying_token_id,
+            underlying_token_address=underlying_token_address,
+        )
+
+
+@pytest.mark.parametrize(
+    ("underlying_token_id", "underlying_token_address"),
+    [
+        (10, "0x" + "d" * 40),  # both set: receipt/direct shape
+        (None, None),  # both null: off-chain custody shape
+    ],
+)
+def test_allocation_response_accepts_paired_underlying_identity(underlying_token_id, underlying_token_address):
+    """Both-set (receipt/direct) and both-null (off-chain custody) are valid."""
+    response = AllocationResponse(
+        chain_id=1,
+        symbol="X",
+        underlying_symbol="X",
+        balance=Decimal("1"),
+        category=AllocationCategory.ASSET,
+        underlying_token_id=underlying_token_id,
+        underlying_token_address=underlying_token_address,
+    )
+    assert response.underlying_token_id == underlying_token_id
+    assert response.underlying_token_address == underlying_token_address
 
 
 def test_list_allocations_returns_empty_when_prime_exists_with_no_holdings():

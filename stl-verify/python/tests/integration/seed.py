@@ -1869,6 +1869,21 @@ async def seed_anchorage_custody(db_url: str) -> None:
                 build_id=1,
             )
 
+            # Inactive package IN the latest cohort: same snapshot_time as the
+            # active packages but active=false. Only the `active` predicate
+            # excludes it (the cohort filter does not, since it shares the max
+            # snapshot_time). Non-zero values so its leak would move every sum.
+            await _insert_anchorage_snapshot(
+                conn,
+                prime_id=prime_id,
+                package_id="PKG-INACTIVE",
+                active=False,
+                exposure_value=Decimal("88000000"),
+                package_value=Decimal("88000000"),
+                asset_quantity=Decimal("800"),
+                snapshot_time=ANCHORAGE_LATEST_SNAPSHOT,
+            )
+
             # Closed cohort: exposure 0 but active=true, polled three days earlier.
             # Residual collateral/BTC that an unscoped read would leak in.
             for package_id, package_value, asset_quantity in [
