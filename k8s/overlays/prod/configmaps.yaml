@@ -150,6 +150,14 @@ data:
   AWS_SNS_ENDPOINT: "https://sns.eu-west-1.amazonaws.com"
   ENVIRONMENT: "sentinelprod"
   ENABLE_BACKFILL: "true"
+  # Avalanche C-Chain produces ~1-2 blocks/s. The 10/30s defaults leave no
+  # headroom to drain a backlog when upstream eth_getBlockReceipts null-results
+  # rise (the 2026-07-21 staging incident, PR #595). 100 blocks every 5s =
+  # ~20 blk/s, matching the arbitrum tuning below. Pre-emptive hardening: prod
+  # runs a different Alchemy key and has not hit this yet, but the config gap
+  # is identical.
+  BACKFILL_BATCH_SIZE: "100"
+  BACKFILL_POLL_INTERVAL: "5s"
 ---
 apiVersion: v1
 kind: ConfigMap
