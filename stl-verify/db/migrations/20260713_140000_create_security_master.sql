@@ -29,7 +29,7 @@
 CREATE TABLE IF NOT EXISTS security_master (
     security_id          text NOT NULL,                 -- natural key (sm-...), stable across all versions; PK with processing_version
     processing_version   integer NOT NULL DEFAULT 0,    -- monotonic per security_id; SCD2 dedup key (0-based, matching the pipeline processing_version convention)
-    valid_from           date NOT NULL DEFAULT CURRENT_DATE,  -- when this version became effective (only temporal field stored)
+    valid_from           date NOT NULL DEFAULT ((now() AT TIME ZONE 'utc')::date),  -- when this version became effective (only temporal field stored); UTC so it doesn't shift with the writer's session TimeZone
     change_reason        text NOT NULL,                 -- mandatory: why this version exists
     security_name        text,                          -- full display name
     ticker               text,
@@ -79,7 +79,7 @@ CREATE TABLE IF NOT EXISTS security_master (
 -- [Type] tag on the table, per-column Roles (PK / FK / Audit), per db/migrations/AGENTS.md.
 COMMENT ON TABLE security_master IS '[Dimension] Append-only SCD2 instrument-classification master. PK (security_id, processing_version); the current classification per security_id is security_master_current. Positions resolve to it through the natural key security_id (via security_instrument_bridge and security_master_current); there is no per-version surrogate to stamp.';
 COMMENT ON COLUMN security_master.security_id IS 'Natural key (sm-<code>); stable across all SCD2 versions. PK together with processing_version. This is what positions resolve against.';
-COMMENT ON COLUMN security_master.processing_version IS 'SCD2 dedup/version key. Monotonic per security_id (>=0), loader-assigned; 0-based to match the pipeline processing_version convention.';
+COMMENT ON COLUMN security_master.processing_version IS 'PK. SCD2 dedup/version key. Monotonic per security_id (>=0), loader-assigned; 0-based to match the pipeline processing_version convention.';
 COMMENT ON COLUMN security_master.valid_from IS 'Date this version became effective; only temporal field stored (valid_to derived in security_master_versions).';
 COMMENT ON COLUMN security_master.change_reason IS 'Mandatory: why this version exists.';
 COMMENT ON COLUMN security_master.security_name IS 'Full display name.';
@@ -114,6 +114,10 @@ COMMENT ON COLUMN security_master.approved_by IS 'Audit. 4-eyes approver.';
 -- auto-increment trigger here: this is a curated master whose inserts are deliberate loader operations
 -- (VEC-419), so the loader owns monotonic processing_version assignment per security_id. A collision
 -- fails hard on the primary key rather than silently merging.
+-- valid_from is the primary effective-ordering key (processing_version only breaks same-day ties), so a
+-- backdated correction (higher processing_version but an EARLIER valid_from than the row it supersedes)
+-- would never become current in either view. The VEC-419 loader must therefore assign valid_from
+-- monotonically per security_id: a correction carries valid_from >= the row it supersedes.
 -- Current-version lookup (the ORDER BY of security_master_current).
 CREATE INDEX IF NOT EXISTS sm_current_idx ON security_master (security_id, valid_from DESC, processing_version DESC);
 -- Classification filter index for the risk master (a query shape, not FK support: the reference
@@ -124,21 +128,24 @@ CREATE INDEX IF NOT EXISTS sm_current_idx ON security_master (security_id, valid
 -- them back in a one-line migration when a real query shape needs them.
 CREATE INDEX IF NOT EXISTS sm_classification_idx ON security_master (asset_class, security_type, security_subtype);
 
--- Current view: the latest EFFECTIVE version per security_id. Bounded on CURRENT_DATE so a
--- future-dated version (a known maturity or announced status change inserted ahead of time) does
--- NOT become current until its valid_from arrives.
+-- Current view: the latest EFFECTIVE version per security_id. Bounded on UTC "today"
+-- ((now() AT TIME ZONE 'utc')::date), NOT CURRENT_DATE, so which version is current is the same for
+-- every reader regardless of session TimeZone and doesn't flip a day around local midnight. A
+-- future-dated version (a known maturity or announced status change inserted ahead of time) does NOT
+-- become current until its valid_from arrives.
 CREATE OR REPLACE VIEW security_master_current AS
 SELECT DISTINCT ON (security_id) *
 FROM security_master
-WHERE valid_from <= CURRENT_DATE
+WHERE valid_from <= (now() AT TIME ZONE 'utc')::date
 ORDER BY security_id, valid_from DESC, processing_version DESC;
 
 -- Versioned view: derive valid_to (exclusive) and is_current for full-history reads. The validity
 -- window is half-open [valid_from, valid_to_exclusive): point-in-time reads use
 -- valid_from <= d AND (valid_to_exclusive IS NULL OR d < valid_to_exclusive). is_current applies
--- that predicate at CURRENT_DATE, so a future-dated version is NOT current until effective, and a
--- same-day correction (two versions sharing valid_from) yields a zero-width window on the superseded
--- row so it is never current.
+-- that predicate at UTC "today" ((now() AT TIME ZONE 'utc')::date, matching security_master_current
+-- so the two agree for every session TimeZone), so a future-dated version is NOT current until
+-- effective, and a same-day correction (two versions sharing valid_from) yields a zero-width window
+-- on the superseded row so it is never current.
 -- Columns are listed explicitly (not SELECT *) so a later ALTER TABLE security_master ADD COLUMN does
 -- not shift the trailing computed columns (valid_to_exclusive, is_current) in the * expansion and break
 -- CREATE OR REPLACE VIEW (Simon review). A new base column is surfaced here by editing this list.
@@ -174,8 +181,8 @@ SELECT
     v.created_by,
     v.approved_by,
     v.valid_to_exclusive,
-    (v.valid_from <= CURRENT_DATE
-        AND (v.valid_to_exclusive IS NULL OR CURRENT_DATE < v.valid_to_exclusive)) AS is_current
+    (v.valid_from <= (now() AT TIME ZONE 'utc')::date
+        AND (v.valid_to_exclusive IS NULL OR (now() AT TIME ZONE 'utc')::date < v.valid_to_exclusive)) AS is_current
 FROM (
     SELECT security_master.*,
         lead(valid_from) OVER (PARTITION BY security_id ORDER BY valid_from, processing_version) AS valid_to_exclusive
@@ -183,8 +190,8 @@ FROM (
 ) v;
 
 -- View catalogue metadata (per db/migrations/AGENTS.md).
-COMMENT ON VIEW security_master_current IS '[Dimension] Latest effective version per security_id (valid_from <= today). The classification positions resolve to, via security_id.';
-COMMENT ON VIEW security_master_versions IS '[Dimension] Full SCD2 history per security_id with derived valid_to_exclusive (half-open [valid_from, valid_to_exclusive)) and is_current (effective as of today).';
+COMMENT ON VIEW security_master_current IS '[Dimension] Latest effective version per security_id (valid_from <= UTC today). The classification positions resolve to, via security_id.';
+COMMENT ON VIEW security_master_versions IS '[Dimension] Full SCD2 history per security_id with derived valid_to_exclusive (half-open [valid_from, valid_to_exclusive)) and is_current (effective as of UTC today).';
 
 -- Reads for both roles; append-only writes for the indexer role (INSERT, never UPDATE/DELETE).
 GRANT SELECT ON security_master, security_master_current, security_master_versions TO stl_readonly;
@@ -192,7 +199,11 @@ GRANT SELECT, INSERT ON security_master TO stl_readwrite;
 GRANT SELECT ON security_master_current, security_master_versions TO stl_readwrite;
 
 -- Append-only guard: revoke mutation on both the indexer role and the table owner so any
--- UPDATE / DELETE / TRUNCATE errors out. Guarded by role existence; mirrors the reference-table guard.
+-- UPDATE / DELETE / TRUNCATE errors out. Guarded by role existence. Revoking the OWNER's UPDATE is
+-- safe here only because nothing FKs security_master (security_id is a non-unique SCD2 key, so it can't
+-- be an FK target); a future FK against this table would hit the RI-probe privilege trap that
+-- 20260714_160000 fixed for the reference tables (restore owner UPDATE + a BEFORE UPDATE OR DELETE
+-- trigger). See security_instrument_bridge (20260713_150000) for the same caveat.
 DO $$
 DECLARE role text;
 BEGIN
