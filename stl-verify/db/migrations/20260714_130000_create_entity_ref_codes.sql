@@ -39,7 +39,13 @@ CREATE TABLE IF NOT EXISTS entity_ref_codes (
         'LEI',                  -- ISO 17442 Legal Entity Identifier
         'SWIFT_BIC',            -- SWIFT/BIC code
         'INTERNAL'              -- internal code (e.g. a prime's vault address / house identifier)
-    ))
+    )),
+    -- Address codes are stored hex-encoded, lowercase, no 0x prefix (the encode(addr,'hex') form), so
+    -- VEC-417's holder join cannot silently miss on a 0x-prefixed or mixed-case value. Length-agnostic
+    -- on purpose (non-EVM address widths); tighten to {40} if this ever becomes EVM-only.
+    CONSTRAINT erc_address_value_chk CHECK (
+        code_type NOT IN ('BLOCKCHAIN_ADDRESS','CONTRACT_ADDRESS') OR code_value ~ '^[0-9a-f]+$'
+    )
 );
 
 -- Catalog metadata (downstream data-dictionary / schema_master tooling reads pg_catalog comments).
@@ -55,6 +61,10 @@ COMMENT ON COLUMN entity_ref_codes.created_at IS 'Audit. Write timestamp.';
 -- Reverse lookup: every code mapped to a given entity. Forward resolution
 -- (WHERE code_type = ? AND code_value = ?) is served by the leading PK columns.
 CREATE INDEX IF NOT EXISTS erc_entity_idx ON entity_ref_codes (entity_id);
+-- Supports entity_ref_codes_current's ORDER BY (the PK can't: valid_from isn't in it). VEC-417 joins
+-- holders through that view, so this is the hot path (mirrors security_instrument_bridge.sib_current_idx).
+CREATE INDEX IF NOT EXISTS erc_current_idx
+    ON entity_ref_codes (code_type, code_value, valid_from DESC, processing_version DESC);
 
 -- Current mapping per code: latest valid_from wins, processing_version breaks same-day ties
 -- (deterministic, matching security_instrument_bridge_current). VEC-417 resolves against THIS view,

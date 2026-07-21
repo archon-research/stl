@@ -4,7 +4,10 @@ package migrator_test
 
 import (
 	"context"
+	"errors"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/archon-research/stl/stl-verify/db/migrator"
 )
@@ -61,17 +64,31 @@ func TestEntityRefCodes(t *testing.T) {
 		t.Errorf("row count = %d, want 2 (both versions retained)", rowCount)
 	}
 
-	// Guards must fail hard rather than accept a silently-wrong mapping.
-	for _, g := range []struct{ name, sql string }{
+	// Guards must fail hard rather than accept a silently-wrong mapping. Assert the specific SQLSTATE
+	// (23514 check_violation / 23505 unique_violation) so a typo in the guard SQL can't make the test
+	// pass for the wrong reason.
+	for _, g := range []struct{ name, sql, code string }{
 		{"code_type CHECK", `INSERT INTO entity_ref_codes (code_type, code_value, entity_id, change_reason)
-			VALUES ('WALLET', 'abc', 'em-1', 'bad type')`},
+			VALUES ('WALLET', 'abc', 'em-1', 'bad type')`, "23514"},
 		{"processing_version CHECK", `INSERT INTO entity_ref_codes (code_type, code_value, entity_id, processing_version, change_reason)
-			VALUES ('LEI', '5493001KJTIIGC8Y1R12', 'em-1', 0, 'bad version')`},
+			VALUES ('LEI', '5493001KJTIIGC8Y1R12', 'em-1', 0, 'bad version')`, "23514"},
+		{"address format CHECK", `INSERT INTO entity_ref_codes (code_type, code_value, entity_id, change_reason)
+			VALUES ('BLOCKCHAIN_ADDRESS', '0xDE0B295669a9FD93d5F28D9Ec85E40f4cb697BAe', 'em-1', 'not lowercase hex')`, "23514"},
 		{"PK duplicate", `INSERT INTO entity_ref_codes (code_type, code_value, entity_id, processing_version, change_reason)
-			VALUES ('BLOCKCHAIN_ADDRESS', 'de0b295669a9fd93d5f28d9ec85e40f4cb697bae', 'em-x', 1, 'dup pv')`},
+			VALUES ('BLOCKCHAIN_ADDRESS', 'de0b295669a9fd93d5f28d9ec85e40f4cb697bae', 'em-x', 1, 'dup pv')`, "23505"},
 	} {
-		if _, err := pool.Exec(ctx, g.sql); err == nil {
-			t.Errorf("%s: expected the insert to be rejected, got none", g.name)
-		}
+		t.Run(g.name, func(t *testing.T) {
+			_, err := pool.Exec(ctx, g.sql)
+			if err == nil {
+				t.Fatalf("expected the insert to be rejected, got none")
+			}
+			var pgErr *pgconn.PgError
+			if !errors.As(err, &pgErr) {
+				t.Fatalf("expected a *pgconn.PgError, got %T: %v", err, err)
+			}
+			if pgErr.Code != g.code {
+				t.Errorf("SQLSTATE = %s, want %s", pgErr.Code, g.code)
+			}
+		})
 	}
 }
