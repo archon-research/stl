@@ -39,6 +39,18 @@ func (s *Service) V2VaultAddresses() map[common.Address]struct{} {
 // replay-tolerant MarkAdapterRemoved), so replaying a log more than once — the
 // resume case after a partially-completed run — is safe.
 func (s *Service) ReplayMetaMorphoLog(ctx context.Context, log shared.Log, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) error {
+	if len(log.Topics) == 0 {
+		return fmt.Errorf("replay log has no topics")
+	}
+	// The replay constructor nils the user/token/cache/consumer/receipt-token
+	// ports, so only the VaultV2 structured events (whose handlers never touch
+	// them) are safe here. A share-accounting log (V1/V2 Deposit/Withdraw/
+	// Transfer/AccrueInterest) would nil-deref saveVaultPositionInTx, so reject
+	// any non-structured topic up front rather than panicking mid-handler.
+	topic0 := common.HexToHash(log.Topics[0])
+	if _, ok := s.v2StructuredTopics[topic0]; !ok {
+		return fmt.Errorf("ReplayMetaMorphoLog: topic %s is not a VaultV2 structured event; replay handles only the adapter/allocation/cap/fee surface", topic0.Hex())
+	}
 	vaultAddress := common.HexToAddress(log.Address)
 	return s.processMetaMorphoLog(ctx, log, vaultAddress, s.config.ChainID, blockNumber, blockHash, blockVersion, blockTimestamp)
 }

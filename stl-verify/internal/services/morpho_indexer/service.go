@@ -95,6 +95,13 @@ type Service struct {
 	vaultRegistry  *VaultRegistry
 	telemetry      *Telemetry
 
+	// v2StructuredTopics gates ReplayMetaMorphoLog: the replay constructor nils
+	// the user/token/cache/consumer/receipt-token ports, so only the VaultV2
+	// structured governance/allocation/cap/fee events (which never touch them)
+	// are safe to replay. Any other MetaMorpho topic (e.g. a V1 Deposit) is
+	// rejected before it can nil-deref the share-accounting path.
+	v2StructuredTopics map[common.Hash]struct{}
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup // tracks the SQS run loop so Stop can drain it
@@ -185,23 +192,29 @@ func newService(
 		return nil, fmt.Errorf("failed to create blockchain service: %w", err)
 	}
 
+	v2StructuredTopics, err := VaultV2StructuredEventTopics()
+	if err != nil {
+		return nil, fmt.Errorf("deriving VaultV2 structured event topics: %w", err)
+	}
+
 	return &Service{
-		config:           config,
-		deployBlock:      deployBlock,
-		consumer:         consumer,
-		cache:            cache,
-		txManager:        txManager,
-		userRepo:         userRepo,
-		protocolRepo:     protocolRepo,
-		tokenRepo:        tokenRepo,
-		morphoRepo:       morphoRepo,
-		eventRepo:        eventRepo,
-		receiptTokenRepo: receiptTokenRepo,
-		blockchainSvc:    blockchainSvc,
-		eventExtractor:   eventExtractor,
-		vaultRegistry:    NewVaultRegistry(config.Logger),
-		telemetry:        config.Telemetry,
-		logger:           config.Logger.With("component", "morpho-indexer"),
+		config:             config,
+		deployBlock:        deployBlock,
+		consumer:           consumer,
+		cache:              cache,
+		txManager:          txManager,
+		userRepo:           userRepo,
+		protocolRepo:       protocolRepo,
+		tokenRepo:          tokenRepo,
+		morphoRepo:         morphoRepo,
+		eventRepo:          eventRepo,
+		receiptTokenRepo:   receiptTokenRepo,
+		blockchainSvc:      blockchainSvc,
+		eventExtractor:     eventExtractor,
+		vaultRegistry:      NewVaultRegistry(config.Logger),
+		telemetry:          config.Telemetry,
+		v2StructuredTopics: v2StructuredTopics,
+		logger:             config.Logger.With("component", "morpho-indexer"),
 	}, nil
 }
 
@@ -684,13 +697,13 @@ func (s *Service) processMetaMorphoLog(ctx context.Context, log shared.Log, vaul
 	case *ForceDeallocateEvent:
 		return s.handleForceDeallocate(ctx, e, vaultAddress, blockNumber)
 	case *IncreaseAbsoluteCapEvent:
-		return s.handleCapChange(ctx, vaultAddress, e.ID, e.IDData, capFieldAbsolute, e.NewAbsoluteCap, blockNumber, blockVersion, blockTimestamp)
+		return s.handleCapChange(ctx, vaultAddress, e.ID, e.IDData, blockNumber, blockHash, blockVersion, blockTimestamp)
 	case *DecreaseAbsoluteCapEvent:
-		return s.handleCapChange(ctx, vaultAddress, e.ID, e.IDData, capFieldAbsolute, e.NewAbsoluteCap, blockNumber, blockVersion, blockTimestamp)
+		return s.handleCapChange(ctx, vaultAddress, e.ID, e.IDData, blockNumber, blockHash, blockVersion, blockTimestamp)
 	case *IncreaseRelativeCapEvent:
-		return s.handleCapChange(ctx, vaultAddress, e.ID, e.IDData, capFieldRelative, e.NewRelativeCap, blockNumber, blockVersion, blockTimestamp)
+		return s.handleCapChange(ctx, vaultAddress, e.ID, e.IDData, blockNumber, blockHash, blockVersion, blockTimestamp)
 	case *DecreaseRelativeCapEvent:
-		return s.handleCapChange(ctx, vaultAddress, e.ID, e.IDData, capFieldRelative, e.NewRelativeCap, blockNumber, blockVersion, blockTimestamp)
+		return s.handleCapChange(ctx, vaultAddress, e.ID, e.IDData, blockNumber, blockHash, blockVersion, blockTimestamp)
 	case *SetPerformanceFeeEvent:
 		return s.updateVaultFee(ctx, vaultAddress, entity.MorphoVaultFeeUpdate{PerformanceFee: e.NewPerformanceFee})
 	case *SetManagementFeeEvent:
@@ -1219,182 +1232,6 @@ func (s *Service) handleVaultAccrueInterest(ctx context.Context, e *VaultAccrueI
 
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
 		return s.saveVaultStateSnapshotInTx(ctx, tx, vault.ID, blockNumber, blockVersion, blockTimestamp, vs, accrueData)
-	})
-}
-
-// resolveV2Vault looks up the vault and asserts it is a VaultV2. The adapter /
-// cap / fee events these handlers serve are emitted only by VaultV2 vaults, so
-// a missing vault, or one recorded as V1/V1.1, is unexpected data drift we fail
-// on rather than silently skip.
-func (s *Service) resolveV2Vault(vaultAddress common.Address) (*entity.MorphoVault, error) {
-	vault := s.vaultRegistry.GetVault(vaultAddress)
-	if vault == nil {
-		return nil, fmt.Errorf("vault not found in registry: %s", vaultAddress.Hex())
-	}
-	if vault.VaultVersion != entity.MorphoVaultV2 {
-		return nil, fmt.Errorf("VaultV2-only event on non-V2 vault %s (version %d)", vaultAddress.Hex(), vault.VaultVersion)
-	}
-	return vault, nil
-}
-
-// handleAddAdapter classifies the new adapter on-chain (outside the tx) and
-// records it in the adapter registry. An unclassifiable adapter is persisted as
-// Unknown behind a WARN, mirroring the VaultShaped discovery sentinel so a
-// future adapter kind surfaces instead of being dropped.
-func (s *Service) handleAddAdapter(ctx context.Context, e *AddAdapterEvent, vaultAddress common.Address, blockNumber int64) error {
-	vault, err := s.resolveV2Vault(vaultAddress)
-	if err != nil {
-		return err
-	}
-
-	adapterType, err := s.blockchainSvc.getAdapterType(ctx, e.Account, blockNumber)
-	if err != nil {
-		return fmt.Errorf("classifying adapter %s: %w", e.Account.Hex(), err)
-	}
-	if adapterType == entity.MorphoAdapterTypeUnknown {
-		s.logger.Warn("VaultV2 adapter of unknown type added — recorded as Unknown for later curation",
-			"vault", vaultAddress.Hex(), "adapter", e.Account.Hex(), "block", blockNumber)
-	}
-
-	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		adapter, err := entity.NewMorphoAdapter(vault.ID, e.Account.Bytes(), vault.AssetTokenID, adapterType, blockNumber, nil)
-		if err != nil {
-			return fmt.Errorf("creating adapter entity: %w", err)
-		}
-		if _, err := s.morphoRepo.GetOrCreateAdapter(ctx, tx, adapter); err != nil {
-			return fmt.Errorf("persisting adapter: %w", err)
-		}
-		return nil
-	})
-}
-
-// handleRemoveAdapter marks the adapter inactive from this block onward.
-func (s *Service) handleRemoveAdapter(ctx context.Context, e *RemoveAdapterEvent, vaultAddress common.Address, blockNumber int64) error {
-	vault, err := s.resolveV2Vault(vaultAddress)
-	if err != nil {
-		return err
-	}
-	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		return s.morphoRepo.MarkAdapterRemoved(ctx, tx, vault.ID, e.Account.Bytes(), blockNumber)
-	})
-}
-
-// handleAllocation snapshots an adapter's realAssets() after an Allocate or
-// Deallocate. The event's `change` is a signed per-id delta, not a running
-// total, so the authoritative per-adapter value is read from realAssets()
-// (hash-pinned, state read). An allocation for an adapter we never saw
-// AddAdapter for is missed data, not a skippable no-op: fail the event so SQS
-// redelivers rather than persisting a state row against a phantom adapter.
-func (s *Service) handleAllocation(ctx context.Context, adapter, vaultAddress common.Address, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) error {
-	vault, err := s.resolveV2Vault(vaultAddress)
-	if err != nil {
-		return err
-	}
-
-	realAssets, err := s.blockchainSvc.getAdapterRealAssets(ctx, adapter, blockHash)
-	if err != nil {
-		return fmt.Errorf("fetching realAssets for adapter %s: %w", adapter.Hex(), err)
-	}
-
-	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		active, err := s.morphoRepo.GetActiveAdapter(ctx, vault.ID, adapter.Bytes())
-		if err != nil {
-			return fmt.Errorf("looking up active adapter %s: %w", adapter.Hex(), err)
-		}
-		if active == nil {
-			return fmt.Errorf("allocation for unknown adapter %s on vault %s (no AddAdapter seen) — failing event", adapter.Hex(), vaultAddress.Hex())
-		}
-
-		state, err := entity.NewMorphoAdapterState(active.ID, blockNumber, blockVersion, blockTimestamp, realAssets)
-		if err != nil {
-			return fmt.Errorf("creating adapter state entity: %w", err)
-		}
-		return s.morphoRepo.SaveAdapterState(ctx, tx, state)
-	})
-}
-
-// handleForceDeallocate emits an ops WARN and writes NO state.
-//
-// The contract's forceDeallocate() calls deallocate() internally, so every
-// ForceDeallocate log is accompanied by a Deallocate log in the same
-// transaction that already triggers the adapter-state snapshot via
-// handleAllocation. Writing a second snapshot here would duplicate it. The WARN
-// is the value this handler adds: a sentinel used the emergency exit path.
-func (s *Service) handleForceDeallocate(ctx context.Context, e *ForceDeallocateEvent, vaultAddress common.Address, blockNumber int64) error {
-	if _, err := s.resolveV2Vault(vaultAddress); err != nil {
-		return err
-	}
-	s.logger.Warn("VaultV2 forceDeallocate — sentinel emergency exit",
-		"vault", vaultAddress.Hex(),
-		"adapter", e.Adapter.Hex(),
-		"assets", e.Assets.String(),
-		"onBehalf", e.OnBehalf.Hex(),
-		"penaltyAssets", e.PenaltyAssets.String(),
-		"block", blockNumber)
-	return nil
-}
-
-// capField selects which of a cap row's two limits a cap event changed.
-type capField int
-
-const (
-	capFieldAbsolute capField = iota
-	capFieldRelative
-)
-
-// handleCapChange appends a full cap-state row for one cap id: the newly-set
-// field carries the event's value, the untouched field is carried forward from
-// the latest prior row (or the contract's storage default of 0 when there is no
-// prior row). The latest row per (vault, cap_id) is therefore always the
-// complete current cap state.
-func (s *Service) handleCapChange(ctx context.Context, vaultAddress common.Address, capID common.Hash, idData []byte, field capField, newValue *big.Int, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
-	vault, err := s.resolveV2Vault(vaultAddress)
-	if err != nil {
-		return err
-	}
-
-	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		prev, err := s.morphoRepo.GetLatestVaultCap(ctx, tx, vault.ID, capID.Bytes())
-		if err != nil {
-			return fmt.Errorf("fetching latest vault cap for %s: %w", capID.Hex(), err)
-		}
-
-		absolute, relative := carriedCapValues(prev)
-		switch field {
-		case capFieldAbsolute:
-			absolute = newValue
-		case capFieldRelative:
-			relative = newValue
-		}
-
-		vaultCap, err := entity.NewMorphoVaultCap(vault.ID, capID.Bytes(), idData, absolute, relative, blockNumber, blockVersion, blockTimestamp)
-		if err != nil {
-			return fmt.Errorf("creating vault cap entity: %w", err)
-		}
-		return s.morphoRepo.SaveVaultCap(ctx, tx, vaultCap)
-	})
-}
-
-// carriedCapValues returns the absolute and relative caps to carry forward from
-// the latest prior row, or (0, 0) — the contract's storage default — when no
-// prior row exists. Values are copied so the new row never aliases the prior.
-func carriedCapValues(prev *entity.MorphoVaultCap) (absolute, relative *big.Int) {
-	if prev == nil {
-		return big.NewInt(0), big.NewInt(0)
-	}
-	return new(big.Int).Set(prev.AbsoluteCap), new(big.Int).Set(prev.RelativeCap)
-}
-
-// updateVaultFee applies a single-field fee-config change to the vault. Only the
-// field carried on the triggering Set* event is set on the update; the others
-// stay nil so UpdateVaultFeeConfig leaves their columns untouched.
-func (s *Service) updateVaultFee(ctx context.Context, vaultAddress common.Address, update entity.MorphoVaultFeeUpdate) error {
-	vault, err := s.resolveV2Vault(vaultAddress)
-	if err != nil {
-		return err
-	}
-	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		return s.morphoRepo.UpdateVaultFeeConfig(ctx, tx, vault.ID, update)
 	})
 }
 

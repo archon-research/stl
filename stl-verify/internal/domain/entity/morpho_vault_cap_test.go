@@ -5,12 +5,15 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ethereum/go-ethereum/crypto"
 )
 
 func TestNewMorphoVaultCap(t *testing.T) {
 	ts := time.Unix(1700000000, 0).UTC()
-	validCapID := make([]byte, 32)
 	validIDData := []byte{0x01, 0x02, 0x03, 0x04}
+	// cap_id = keccak256(id_data) on-chain; the entity enforces it.
+	validCapID := crypto.Keccak256(validIDData)
 
 	tests := []struct {
 		name        string
@@ -49,6 +52,11 @@ func TestNewMorphoVaultCap(t *testing.T) {
 			name: "empty id data", vaultID: 1, capID: validCapID, idData: []byte{},
 			absoluteCap: big.NewInt(1), relativeCap: big.NewInt(1), block: 1, version: 0, timestamp: ts,
 			wantErr: true, errContains: "idData must not be empty",
+		},
+		{
+			name: "cap id not keccak of id data", vaultID: 1, capID: make([]byte, 32), idData: validIDData,
+			absoluteCap: big.NewInt(1), relativeCap: big.NewInt(1), block: 1, version: 0, timestamp: ts,
+			wantErr: true, errContains: "capID must equal keccak256(idData)",
 		},
 		{
 			name: "nil absolute cap", vaultID: 1, capID: validCapID, idData: validIDData,

@@ -360,9 +360,15 @@ func (r *MorphoRepository) GetOrCreateAdapter(ctx context.Context, tx pgx.Tx, ad
 func (r *MorphoRepository) MarkAdapterRemoved(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, removedAtBlock int64) error {
 	// The OR removed_at_block = $3 branch makes backfill replays idempotent: a
 	// second removal at the same block re-matches the already-removed row.
+	//
+	// added_at_block <= $3 scopes the removal to the adapter incarnation that was
+	// live at the removal block. Without it, replaying an old RemoveAdapter@X for
+	// an adapter that was later re-added (added_at_block a2 > X) would match the
+	// active re-added row via the removed_at_block IS NULL arm and wrongly close
+	// it with a removal block earlier than its own registration.
 	tag, err := tx.Exec(ctx,
 		`UPDATE morpho_adapter SET removed_at_block = $3
-		 WHERE morpho_vault_id = $1 AND address = $2
+		 WHERE morpho_vault_id = $1 AND address = $2 AND added_at_block <= $3
 		   AND (removed_at_block IS NULL OR removed_at_block = $3)`,
 		morphoVaultID, address, removedAtBlock,
 	)
@@ -376,10 +382,12 @@ func (r *MorphoRepository) MarkAdapterRemoved(ctx context.Context, tx pgx.Tx, mo
 	return nil
 }
 
-// GetActiveAdapter retrieves the active adapter for a vault and address.
-func (r *MorphoRepository) GetActiveAdapter(ctx context.Context, morphoVaultID int64, address []byte) (*entity.MorphoAdapter, error) {
+// GetActiveAdapter retrieves the active adapter for a vault and address, reading
+// through the caller's transaction so an adapter added earlier in the same tx is
+// visible (read-your-writes).
+func (r *MorphoRepository) GetActiveAdapter(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte) (*entity.MorphoAdapter, error) {
 	var a entity.MorphoAdapter
-	err := r.pool.QueryRow(ctx,
+	err := tx.QueryRow(ctx,
 		`SELECT id, asset_token_id, adapter_type, added_at_block, removed_at_block
 		 FROM morpho_adapter
 		 WHERE morpho_vault_id = $1 AND address = $2 AND removed_at_block IS NULL`,
@@ -427,6 +435,10 @@ func (r *MorphoRepository) GetActiveAdaptersByVault(ctx context.Context, morphoV
 
 // SaveAdapterState saves an adapter realAssets() snapshot within an external transaction.
 func (r *MorphoRepository) SaveAdapterState(ctx context.Context, tx pgx.Tx, state *entity.MorphoAdapterState) error {
+	if err := state.Validate(); err != nil {
+		return fmt.Errorf("validating morpho adapter state: %w", err)
+	}
+
 	realAssets, err := bigIntToNumeric(state.RealAssets)
 	if err != nil {
 		return fmt.Errorf("converting real_assets: %w", err)
@@ -448,6 +460,10 @@ func (r *MorphoRepository) SaveAdapterState(ctx context.Context, tx pgx.Tx, stat
 
 // SaveVaultCap saves a VaultV2 allocation-cap snapshot within an external transaction.
 func (r *MorphoRepository) SaveVaultCap(ctx context.Context, tx pgx.Tx, vaultCap *entity.MorphoVaultCap) error {
+	if err := vaultCap.Validate(); err != nil {
+		return fmt.Errorf("validating morpho vault cap: %w", err)
+	}
+
 	absoluteCap, err := bigIntToNumeric(vaultCap.AbsoluteCap)
 	if err != nil {
 		return fmt.Errorf("converting absolute_cap: %w", err)
@@ -468,47 +484,6 @@ func (r *MorphoRepository) SaveVaultCap(ctx context.Context, tx pgx.Tx, vaultCap
 		return fmt.Errorf("saving morpho vault cap: %w", err)
 	}
 	return nil
-}
-
-// GetLatestVaultCap retrieves the current cap state for a (vault, cap_id).
-func (r *MorphoRepository) GetLatestVaultCap(ctx context.Context, tx pgx.Tx, morphoVaultID int64, capID []byte) (*entity.MorphoVaultCap, error) {
-	var (
-		c              entity.MorphoVaultCap
-		absoluteCapStr string
-		relativeCapStr string
-	)
-	// Latest-wins: block_number/block_version pick the newest chain view, then
-	// processing_version the newest correction (ADR-0002); never build_id.
-	err := tx.QueryRow(ctx,
-		`SELECT id_data, absolute_cap, relative_cap, block_number, block_version, timestamp
-		 FROM morpho_vault_cap
-		 WHERE morpho_vault_id = $1 AND cap_id = $2
-		 ORDER BY block_number DESC, block_version DESC, processing_version DESC
-		 LIMIT 1`,
-		morphoVaultID, capID,
-	).Scan(&c.IDData, &absoluteCapStr, &relativeCapStr, &c.BlockNumber, &c.BlockVersion, &c.Timestamp)
-
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("querying latest morpho vault cap: %w", err)
-	}
-
-	absoluteCap, err := numericToBigInt(absoluteCapStr)
-	if err != nil {
-		return nil, fmt.Errorf("converting absolute_cap: %w", err)
-	}
-	relativeCap, err := numericToBigInt(relativeCapStr)
-	if err != nil {
-		return nil, fmt.Errorf("converting relative_cap: %w", err)
-	}
-
-	c.MorphoVaultID = morphoVaultID
-	c.CapID = capID
-	c.AbsoluteCap = absoluteCap
-	c.RelativeCap = relativeCap
-	return &c, nil
 }
 
 // UpdateVaultFeeConfig applies a partial fee-configuration update to a vault.

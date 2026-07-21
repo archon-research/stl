@@ -23,11 +23,10 @@ type MockMorphoRepository struct {
 
 	GetOrCreateAdapterFn       func(ctx context.Context, tx pgx.Tx, adapter *entity.MorphoAdapter) (int64, error)
 	MarkAdapterRemovedFn       func(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, removedAtBlock int64) error
-	GetActiveAdapterFn         func(ctx context.Context, morphoVaultID int64, address []byte) (*entity.MorphoAdapter, error)
+	GetActiveAdapterFn         func(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte) (*entity.MorphoAdapter, error)
 	GetActiveAdaptersByVaultFn func(ctx context.Context, morphoVaultID int64) ([]*entity.MorphoAdapter, error)
 	SaveAdapterStateFn         func(ctx context.Context, tx pgx.Tx, state *entity.MorphoAdapterState) error
 	SaveVaultCapFn             func(ctx context.Context, tx pgx.Tx, vaultCap *entity.MorphoVaultCap) error
-	GetLatestVaultCapFn        func(ctx context.Context, tx pgx.Tx, morphoVaultID int64, capID []byte) (*entity.MorphoVaultCap, error)
 	UpdateVaultFeeConfigFn     func(ctx context.Context, tx pgx.Tx, morphoVaultID int64, update entity.MorphoVaultFeeUpdate) error
 }
 
@@ -108,9 +107,9 @@ func (m *MockMorphoRepository) MarkAdapterRemoved(ctx context.Context, tx pgx.Tx
 	return nil
 }
 
-func (m *MockMorphoRepository) GetActiveAdapter(ctx context.Context, morphoVaultID int64, address []byte) (*entity.MorphoAdapter, error) {
+func (m *MockMorphoRepository) GetActiveAdapter(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte) (*entity.MorphoAdapter, error) {
 	if m.GetActiveAdapterFn != nil {
-		return m.GetActiveAdapterFn(ctx, morphoVaultID, address)
+		return m.GetActiveAdapterFn(ctx, tx, morphoVaultID, address)
 	}
 	return nil, nil
 }
@@ -134,13 +133,6 @@ func (m *MockMorphoRepository) SaveVaultCap(ctx context.Context, tx pgx.Tx, vaul
 		return m.SaveVaultCapFn(ctx, tx, vaultCap)
 	}
 	return nil
-}
-
-func (m *MockMorphoRepository) GetLatestVaultCap(ctx context.Context, tx pgx.Tx, morphoVaultID int64, capID []byte) (*entity.MorphoVaultCap, error) {
-	if m.GetLatestVaultCapFn != nil {
-		return m.GetLatestVaultCapFn(ctx, tx, morphoVaultID, capID)
-	}
-	return nil, nil
 }
 
 func (m *MockMorphoRepository) UpdateVaultFeeConfig(ctx context.Context, tx pgx.Tx, morphoVaultID int64, update entity.MorphoVaultFeeUpdate) error {

@@ -1,21 +1,26 @@
 package entity
 
 import (
+	"bytes"
 	"fmt"
 	"math/big"
 	"time"
+
+	"github.com/ethereum/go-ethereum/crypto"
 )
 
 // MorphoVaultCap is a snapshot of one allocation cap on a Morpho VaultV2 at a
 // single block. VaultV2 caps are keyed on-chain by an opaque id (bytes32);
 // CapID is that key and IDData is its decodable pre-image (id = keccak256(idData)).
 //
-// AbsoluteCap and RelativeCap are the two limits carried by every cap: both are
-// raw on-chain uint128 WAD-scale values, stored unscaled. AbsoluteCap is an
-// asset-amount ceiling in the vault's underlying base units; RelativeCap is a
-// WAD fraction of total assets (1e18 = 100%). Each cap event appends a row
-// carrying both fields (the newly-set value plus the preserved other), so the
-// latest row per (vault, cap_id) is the full current cap state.
+// AbsoluteCap and RelativeCap are the two limits carried by every cap, stored as
+// raw on-chain uint128 values, unscaled. AbsoluteCap is an asset-amount ceiling
+// in the vault's underlying base units; RelativeCap is a WAD fraction of total
+// assets (1e18 = 100%). Each row is an end-of-block snapshot: when a cap event
+// fires, the indexer reads both limits off the vault at the block hash and
+// writes them together, so the latest row per (vault, cap_id) is the full
+// current cap state. Same-block sibling cap events read identical values and
+// dedupe to one row.
 type MorphoVaultCap struct {
 	MorphoVaultID int64
 	CapID         []byte // 32 bytes, the bytes32 cap id (keccak256 of IDData)
@@ -54,6 +59,12 @@ func (c *MorphoVaultCap) Validate() error {
 	}
 	if len(c.IDData) == 0 {
 		return fmt.Errorf("idData must not be empty")
+	}
+	// The cap id is keccak256(idData) on-chain; enforce it so a row can never
+	// carry an id/pre-image pair that doesn't hash together (id and idData both
+	// come straight from the triggering event).
+	if !bytes.Equal(crypto.Keccak256(c.IDData), c.CapID) {
+		return fmt.Errorf("capID must equal keccak256(idData): capID=%x keccak256(idData)=%x", c.CapID, crypto.Keccak256(c.IDData))
 	}
 	if err := requireNonNegativeBigInt("absoluteCap", c.AbsoluteCap); err != nil {
 		return err
