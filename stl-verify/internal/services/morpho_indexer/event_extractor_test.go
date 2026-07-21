@@ -599,6 +599,71 @@ func makeV2Log(t *testing.T, event abi.Event, indexed []common.Hash, nonIndexed 
 	}
 }
 
+// TestExtractMetaMorphoEvent_TooFewTopicsErrors guards parseTopics: a registered
+// event whose log carries fewer topics than its declared indexed params must
+// return an error, not panic inside abi.ParseTopicsIntoMap.
+func TestExtractMetaMorphoEvent_TooFewTopicsErrors(t *testing.T) {
+	e, err := NewEventExtractor()
+	if err != nil {
+		t.Fatalf("NewEventExtractor: %v", err)
+	}
+	v2 := mustV2EventsABI(t)
+	ev := v2.Events["AddAdapter"] // AddAdapter(address indexed account): 1 indexed
+	// A log with only topic0 (missing the indexed account topic) is malformed.
+	log := shared.Log{Topics: []string{ev.ID.Hex()}, Data: "0x", TransactionHash: "0xf00d"}
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("parseTopics panicked instead of returning an error: %v", r)
+		}
+	}()
+	if _, err := e.ExtractMetaMorphoEvent(log); err == nil {
+		t.Fatal("expected an error for a log with fewer topics than indexed params")
+	}
+}
+
+// TestExtractVaultAccrueInterest_OptionalV2Fields covers the missing-vs-mistyped
+// discrimination on the V2-only accrue fields: absent → left nil, present →
+// carried, present-but-wrong-type → error (never a silent NULL).
+func TestExtractVaultAccrueInterest_OptionalV2Fields(t *testing.T) {
+	t.Run("absent leaves them nil", func(t *testing.T) {
+		got, err := extractVaultAccrueInterest(map[string]any{
+			"newTotalAssets": big.NewInt(1),
+			"feeShares":      big.NewInt(2),
+		}, "0xf00d")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got.PreviousTotalAssets != nil || got.ManagementFeeShares != nil {
+			t.Errorf("absent V2 fields should be nil, got prev=%v mgmt=%v", got.PreviousTotalAssets, got.ManagementFeeShares)
+		}
+	})
+	t.Run("present are carried", func(t *testing.T) {
+		got, err := extractVaultAccrueInterest(map[string]any{
+			"newTotalAssets":       big.NewInt(1),
+			"performanceFeeShares": big.NewInt(2),
+			"previousTotalAssets":  big.NewInt(9),
+			"managementFeeShares":  big.NewInt(7),
+		}, "0xf00d")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got.PreviousTotalAssets.Cmp(big.NewInt(9)) != 0 || got.ManagementFeeShares.Cmp(big.NewInt(7)) != 0 {
+			t.Errorf("prev=%v mgmt=%v, want 9 and 7", got.PreviousTotalAssets, got.ManagementFeeShares)
+		}
+	})
+	t.Run("wrong type propagates", func(t *testing.T) {
+		_, err := extractVaultAccrueInterest(map[string]any{
+			"newTotalAssets":      big.NewInt(1),
+			"feeShares":           big.NewInt(2),
+			"managementFeeShares": "not-a-bigint",
+		}, "0xf00d")
+		if err == nil {
+			t.Fatal("expected an error when managementFeeShares has the wrong type")
+		}
+	})
+}
+
 func addrTopic(a common.Address) common.Hash { return common.BytesToHash(a.Bytes()) }
 
 func hashSlice(hs ...common.Hash) [][32]byte {
