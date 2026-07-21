@@ -24,26 +24,57 @@ class ProtocolScopedBackedBreakdownRepository(Protocol):
 
 _SEED_BLOCK_NUMBER = 20_000_000
 
-# The vault's loan token (USDC) USD price seeded via the Morpho Blue -> chainlink
-# oracle binding. Deliberately off $1 so the assertion proves items carry the real
-# fetched price, not a hardcoded 1.
-_LOAN_TOKEN_PRICE_USD = Decimal("1.0001")
+# Own-token USD prices seeded via the Morpho Blue -> chainlink oracle binding. USDC
+# is deliberately off $1 so assertions prove items carry the real fetched price, not
+# a hardcoded 1; WETH/WBTC give the main vault's collateral rows their own non-$1
+# prices (each row exposes its OWN token's price, as the Aave repo does).
+_USDC_PRICE_USD = Decimal("1.0001")
+_WETH_PRICE_USD = Decimal("2000")
+_WBTC_PRICE_USD = Decimal("60000")
+
+# Two prices for one loan token at different blocks: the latest snapshot must win.
+_LATEST_OLD_PRICE_USD = Decimal("9")
+_LATEST_NEW_PRICE_USD = Decimal("11")
+_OLDER_BLOCK_NUMBER = _SEED_BLOCK_NUMBER - 1
+
+# A loan-token price reachable only through a disabled oracle_asset mapping: the
+# enabled-gate must exclude it, leaving the vault unpriced.
+_DISABLED_PRICE_USD = Decimal("7")
 
 
-async def _insert_loan_token_price(conn: asyncpg.Connection, token_id: int, oracle_id: int, price: str) -> None:
-    """Insert an onchain price for the vault's loan token + its enabled oracle_asset mapping."""
+def _price_str(price: Decimal) -> str:
+    """Render a price as the 18-decimal string onchain_token_price expects."""
+    return f"{price:.18f}"
+
+
+async def _insert_token_price(
+    conn: asyncpg.Connection,
+    token_id: int,
+    oracle_id: int,
+    price: Decimal,
+    *,
+    block_number: int = _SEED_BLOCK_NUMBER,
+    block_version: int = 0,
+    enabled: bool = True,
+) -> None:
+    """Insert an onchain price for a token + its oracle_asset mapping.
+
+    ``enabled=False`` models a retired source: the mapping exists but the breakdown
+    query's enabled-gate must exclude the price.
+    """
     await conn.execute(
         """
         INSERT INTO onchain_token_price
             (token_id, oracle_id, block_number, block_version, timestamp, price_usd)
-        VALUES ($1, $2, $3, 0, NOW(), $4::numeric(30,18))
+        VALUES ($1, $2, $3, $4, NOW(), $5::numeric(30,18))
         """,
         token_id,
         oracle_id,
-        _SEED_BLOCK_NUMBER,
-        price,
+        block_number,
+        block_version,
+        _price_str(price),
     )
-    await insert_oracle_asset(conn, oracle_id, token_id)
+    await insert_oracle_asset(conn, oracle_id, token_id, enabled=enabled)
 
 
 async def _insert_protocol(conn: asyncpg.Connection) -> int:
@@ -228,6 +259,36 @@ async def _insert_allocation_position(
     )
 
 
+async def _seed_idle_vault(
+    conn: asyncpg.Connection,
+    *,
+    protocol_id: int,
+    prime_id: int,
+    vault_address: bytes,
+    share_symbol: str,
+    share_address: bytes,
+    loan_token_id: int,
+    total_assets_raw: str,
+    block: int,
+    name: str,
+) -> int:
+    """Seed an idle-only Morpho vault (no market positions) and return its id.
+
+    An idle-only vault holds its whole balance as the loan token, so the breakdown
+    is a single loan-token row — the shape every non-stablecoin / pricing scenario
+    below reuses. A user row must exist for the vault_users CTE even with no
+    positions.
+    """
+    await insert_user(conn, vault_address)
+    share_token_id = await insert_token(conn, share_symbol, 18, share_address)
+    vault_id = await _insert_morpho_vault(
+        conn, protocol_id, vault_address, loan_token_id, name=name, symbol=share_symbol
+    )
+    await _insert_allocation_position(conn, share_token_id, prime_id, vault_address, "100", block)
+    await _insert_morpho_vault_state(conn, vault_id, total_assets_raw, block)
+    return vault_id
+
+
 # ---------------------------------------------------------------------------
 # Seed data
 #
@@ -264,10 +325,12 @@ _MWETHI_ADDRESS = b"\x1b" * 20  # vault share token for mWETHi
 _UNPRICED_VAULT_ADDRESS = b"\x2a" * 20  # idle-only vault whose loan token has no price
 _MUNPXI_ADDRESS = b"\x2b" * 20  # vault share token for mUNPXi
 _UNPX_ADDRESS = b"\x2c" * 20  # loan token with no onchain price
-
-# WETH loan-token price for the non-stablecoin vault, proving backing_value is
-# scaled to USD rather than left in loan-token units.
-_WETH_PRICE_USD = Decimal("2000")
+_LATEST_VAULT_ADDRESS = b"\x3a" * 20  # idle-only vault whose loan token has two price snapshots
+_MLATEI_ADDRESS = b"\x3b" * 20  # vault share token for mLATEi
+_LATE_ADDRESS = b"\x3c" * 20  # loan token priced twice at different blocks
+_DISABLED_VAULT_ADDRESS = b"\x4a" * 20  # idle-only vault whose loan-token price is via a disabled oracle
+_MDISI_ADDRESS = b"\x4b" * 20  # vault share token for mDISi
+_DIS_ADDRESS = b"\x4c" * 20  # loan token priced only through a disabled oracle_asset mapping
 
 
 @pytest_asyncio.fixture(scope="module", loop_scope="module")
@@ -285,13 +348,12 @@ async def _seed_data(db_url: str) -> None:
         weth_id = await insert_token(conn, "WETH", 18, _WETH_ADDRESS)
         wbtc_id = await insert_token(conn, "WBTC", 8, _WBTC_ADDRESS)
 
-        # Vault share tokens — symbol must match morpho_vault.symbol for the CTE JOIN
+        # Main vault's share token — symbol must match morpho_vault.symbol for the CTE JOIN
         musdc_token_id = await insert_token(conn, "mUSDC", 18, _MUSDC_ADDRESS)
-        musdci_token_id = await insert_token(conn, "mUSDCi", 18, _MUSDCI_ADDRESS)
 
-        # Loan-token (USDC) price via the Morpho Blue -> chainlink binding, so the
-        # breakdown items carry a non-null price_usd (VEC-511). chainlink is
-        # migration-seeded; the breakdown query reaches it through protocol_oracle.
+        # Own-token prices via the Morpho Blue -> chainlink binding, so every row carries
+        # its own token's price_usd. chainlink is migration-seeded; the breakdown query
+        # reaches it through protocol_oracle.
         chainlink_oracle_id = cast(int, await conn.fetchval("SELECT id FROM oracle WHERE name = 'chainlink'"))
         await conn.execute(
             """
@@ -303,7 +365,9 @@ async def _seed_data(db_url: str) -> None:
             chainlink_oracle_id,
             _SEED_BLOCK_NUMBER,
         )
-        await _insert_loan_token_price(conn, usdc_id, chainlink_oracle_id, "1.000100000000000000")
+        await _insert_token_price(conn, usdc_id, chainlink_oracle_id, _USDC_PRICE_USD)
+        await _insert_token_price(conn, weth_id, chainlink_oracle_id, _WETH_PRICE_USD)
+        await _insert_token_price(conn, wbtc_id, chainlink_oracle_id, _WBTC_PRICE_USD)
 
         # Prime — needed as FK for allocation_position.prime_id
         prime_id = await _insert_prime(conn, "test-prime", _VAULT_ADDRESS)
@@ -336,42 +400,94 @@ async def _seed_data(db_url: str) -> None:
         # Vault supplies 300K USDC (raw) to market B
         await _insert_morpho_market_position(conn, vault_user_id, market_b_id, "300000000000", block)
 
-        # Idle-only vault: 500K USDC total_assets, no market positions
-        # This exercises the vault_idle path when breakdown is empty.
-        idle_vault_user_id = await insert_user(conn, _IDLE_VAULT_ADDRESS)
-        idle_vault_id = await _insert_morpho_vault(
-            conn, protocol_id, _IDLE_VAULT_ADDRESS, usdc_id, name="Morpho USDC Idle Vault", symbol="mUSDCi"
+        # Idle-only vault: 500K USDC total_assets, no market positions — exercises the
+        # vault_idle path when the breakdown is empty.
+        idle_vault_id = await _seed_idle_vault(
+            conn,
+            protocol_id=protocol_id,
+            prime_id=prime_id,
+            vault_address=_IDLE_VAULT_ADDRESS,
+            share_symbol="mUSDCi",
+            share_address=_MUSDCI_ADDRESS,
+            loan_token_id=usdc_id,
+            total_assets_raw="500000000000",  # 500K USDC (6 dec)
+            block=block,
+            name="Morpho USDC Idle Vault",
         )
-        await _insert_allocation_position(conn, musdci_token_id, prime_id, _IDLE_VAULT_ADDRESS, "500000", block)
-        # 500K USDC in raw units (500_000 * 10^6)
-        await _insert_morpho_vault_state(conn, idle_vault_id, "500000000000", block)
-        del idle_vault_user_id  # user must exist for vault_users CTE; no positions inserted
 
-        # Non-stablecoin loan-token vault: 100 WETH idle, WETH priced at $2,000.
-        # Exercises the loan-token -> USD scaling (100 * 2000 = 200,000) that a
-        # stablecoin vault at ~$1 leaves visually indistinguishable.
-        weth_vault_user_id = await insert_user(conn, _WETH_VAULT_ADDRESS)
-        mwethi_token_id = await insert_token(conn, "mWETHi", 18, _MWETHI_ADDRESS)
-        weth_vault_id = await _insert_morpho_vault(
-            conn, protocol_id, _WETH_VAULT_ADDRESS, weth_id, name="Morpho WETH Idle Vault", symbol="mWETHi"
+        # Non-stablecoin loan-token vault: 100 WETH idle, WETH priced at $2,000. Exercises
+        # the loan-token -> USD scaling (100 * 2000 = 200,000) that a stablecoin vault at
+        # ~$1 leaves visually indistinguishable.
+        weth_vault_id = await _seed_idle_vault(
+            conn,
+            protocol_id=protocol_id,
+            prime_id=prime_id,
+            vault_address=_WETH_VAULT_ADDRESS,
+            share_symbol="mWETHi",
+            share_address=_MWETHI_ADDRESS,
+            loan_token_id=weth_id,
+            total_assets_raw="100000000000000000000",  # 100 WETH (18 dec)
+            block=block,
+            name="Morpho WETH Idle Vault",
         )
-        await _insert_allocation_position(conn, mwethi_token_id, prime_id, _WETH_VAULT_ADDRESS, "100", block)
-        await _insert_morpho_vault_state(conn, weth_vault_id, "100000000000000000000", block)  # 100 WETH (18 dec)
-        await _insert_loan_token_price(conn, weth_id, chainlink_oracle_id, "2000.000000000000000000")
-        del weth_vault_user_id
 
-        # Unpriced loan-token vault: 100 UNPX idle, no price seeded for UNPX. Exercises
-        # the null-price fallback — the item keeps raw loan-token units and price_usd is
-        # None, so enrichment drops it rather than treating raw units as USD.
+        # Unpriced loan-token vault: 100 UNPX idle, no price seeded for UNPX. The loan
+        # token has no USD price, so backing_value stays raw and price_usd is None on
+        # every row; the risk service treats that as price_data_missing.
         unpx_id = await insert_token(conn, "UNPX", 18, _UNPX_ADDRESS)
-        unpriced_vault_user_id = await insert_user(conn, _UNPRICED_VAULT_ADDRESS)
-        munpxi_token_id = await insert_token(conn, "mUNPXi", 18, _MUNPXI_ADDRESS)
-        unpriced_vault_id = await _insert_morpho_vault(
-            conn, protocol_id, _UNPRICED_VAULT_ADDRESS, unpx_id, name="Morpho Unpriced Vault", symbol="mUNPXi"
+        unpriced_vault_id = await _seed_idle_vault(
+            conn,
+            protocol_id=protocol_id,
+            prime_id=prime_id,
+            vault_address=_UNPRICED_VAULT_ADDRESS,
+            share_symbol="mUNPXi",
+            share_address=_MUNPXI_ADDRESS,
+            loan_token_id=unpx_id,
+            total_assets_raw="100000000000000000000",  # 100 UNPX (18 dec)
+            block=block,
+            name="Morpho Unpriced Vault",
         )
-        await _insert_allocation_position(conn, munpxi_token_id, prime_id, _UNPRICED_VAULT_ADDRESS, "100", block)
-        await _insert_morpho_vault_state(conn, unpriced_vault_id, "100000000000000000000", block)  # 100 UNPX (18 dec)
-        del unpriced_vault_user_id
+
+        # Two-price vault: 100 LATE idle, LATE priced at two blocks. The latest snapshot
+        # ($11 at the newer block) must win over the stale $9 — proving the CTE's ordering
+        # and DISTINCT ON select the current price (and never fan out the join).
+        late_id = await insert_token(conn, "LATE", 18, _LATE_ADDRESS)
+        await _insert_token_price(
+            conn, late_id, chainlink_oracle_id, _LATEST_OLD_PRICE_USD, block_number=_OLDER_BLOCK_NUMBER
+        )
+        await _insert_token_price(
+            conn, late_id, chainlink_oracle_id, _LATEST_NEW_PRICE_USD, block_number=_SEED_BLOCK_NUMBER
+        )
+        latest_vault_id = await _seed_idle_vault(
+            conn,
+            protocol_id=protocol_id,
+            prime_id=prime_id,
+            vault_address=_LATEST_VAULT_ADDRESS,
+            share_symbol="mLATEi",
+            share_address=_MLATEI_ADDRESS,
+            loan_token_id=late_id,
+            total_assets_raw="100000000000000000000",  # 100 LATE (18 dec)
+            block=block,
+            name="Morpho Latest-Price Vault",
+        )
+
+        # Disabled-oracle vault: 100 DIS idle, DIS priced only through a disabled
+        # oracle_asset mapping. The enabled-gate must exclude it, so the vault reads as
+        # unpriced exactly like a token with no price row at all.
+        dis_id = await insert_token(conn, "DIS", 18, _DIS_ADDRESS)
+        await _insert_token_price(conn, dis_id, chainlink_oracle_id, _DISABLED_PRICE_USD, enabled=False)
+        disabled_vault_id = await _seed_idle_vault(
+            conn,
+            protocol_id=protocol_id,
+            prime_id=prime_id,
+            vault_address=_DISABLED_VAULT_ADDRESS,
+            share_symbol="mDISi",
+            share_address=_MDISI_ADDRESS,
+            loan_token_id=dis_id,
+            total_assets_raw="100000000000000000000",  # 100 DIS (18 dec)
+            block=block,
+            name="Morpho Disabled-Oracle Vault",
+        )
 
         await store_test_ids(
             conn,
@@ -381,12 +497,14 @@ async def _seed_data(db_url: str) -> None:
                 "idle_vault_id": idle_vault_id,
                 "weth_idle_vault_id": weth_vault_id,
                 "unpriced_vault_id": unpriced_vault_id,
-                "vault_token_id": musdc_token_id,
-                "idle_vault_token_id": musdci_token_id,
+                "latest_vault_id": latest_vault_id,
+                "disabled_vault_id": disabled_vault_id,
                 "usdc_id": usdc_id,
                 "weth_id": weth_id,
                 "wbtc_id": wbtc_id,
                 "unpx_id": unpx_id,
+                "late_id": late_id,
+                "dis_id": dis_id,
             },
         )
     finally:
@@ -507,39 +625,61 @@ async def test_token_ids_are_populated(
     assert by_symbol["WBTC"].token_id == test_ids["wbtc_id"]
 
 
+async def _assert_single_idle_row(
+    repository: ProtocolScopedBackedBreakdownRepository,
+    vault_id: int,
+    *,
+    symbol: str,
+    token_id: int,
+    price_usd: Decimal | None,
+    backing_value: Decimal,
+) -> None:
+    """Assert an idle-only vault yields exactly one loan-token row with the given values."""
+    result = await repository.get_backed_breakdown(vault_id)
+    assert len(result.items) == 1
+    item = result.items[0]
+    assert item.symbol == symbol
+    assert item.token_id == token_id
+    assert item.price_usd == price_usd
+    assert item.backing_value == backing_value
+    assert item.backing_pct == Decimal("100.00")
+
+
 @pytest.mark.asyncio(loop_scope="module")
-async def test_items_carry_loan_token_price(
+async def test_items_carry_own_token_price(
     repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
 ) -> None:
-    """Every item carries the vault's loan-token USD price (VEC-511).
+    """Each row carries its OWN token's USD price, not the loan token's.
 
-    The breakdown amounts are loan-token-denominated, so the loan token's price is
-    what all rows expose. Without a non-null price_usd, CryptoLendingRiskService
-    drops every item at enrichment and gap_sweep RRC collapses to 0.
+    The main vault's loan token is USDC ($1.0001); its collateral rows expose the
+    collateral token's own price (WETH $2,000, WBTC $60,000) so amount and price stay
+    denominated in the row's symbol, as the Aave repo does. A non-null price_usd is
+    also what keeps CryptoLendingRiskService from dropping the row at enrichment.
     """
     result = await repository.get_backed_breakdown(test_ids["vault_id"])
 
-    assert result.items
-    assert all(item.price_usd == _LOAN_TOKEN_PRICE_USD for item in result.items)
+    by_symbol = {item.symbol: item for item in result.items}
+    assert by_symbol["USDC"].price_usd == _USDC_PRICE_USD
+    assert by_symbol["WETH"].price_usd == _WETH_PRICE_USD
+    assert by_symbol["WBTC"].price_usd == _WBTC_PRICE_USD
 
 
 @pytest.mark.asyncio(loop_scope="module")
 async def test_nonstablecoin_loan_token_scales_backing_value_to_usd(
     repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
 ) -> None:
-    """A vault whose loan token is not ~$1 has backing_value scaled to USD (VEC-511).
+    """A vault whose loan token is not ~$1 has backing_value scaled to USD.
 
     100 WETH idle, WETH @ $2,000 -> 100% WETH at 200,000.00 USD (not 100 units).
     """
-    result = await repository.get_backed_breakdown(test_ids["weth_idle_vault_id"])
-
-    assert len(result.items) == 1
-    item = result.items[0]
-    assert item.symbol == "WETH"
-    assert item.token_id == test_ids["weth_id"]
-    assert item.price_usd == _WETH_PRICE_USD
-    assert item.backing_value == Decimal("200000.00")
-    assert item.backing_pct == Decimal("100.00")
+    await _assert_single_idle_row(
+        repository,
+        test_ids["weth_idle_vault_id"],
+        symbol="WETH",
+        token_id=test_ids["weth_id"],
+        price_usd=_WETH_PRICE_USD,
+        backing_value=Decimal("200000.00"),
+    )
 
 
 @pytest.mark.asyncio(loop_scope="module")
@@ -549,38 +689,76 @@ async def test_unpriced_loan_token_keeps_raw_units_and_null_price(
     """A loan token with no price yields price_usd None and raw (unscaled) backing_value.
 
     100 UNPX idle, no price -> price_usd None, backing_value 100.00 (loan-token units,
-    NOT USD). Enrichment drops such items, so the raw units never leak as USD.
+    NOT USD). The risk service treats an all-unpriced breakdown as price_data_missing,
+    so the raw units never leak as USD.
     """
-    result = await repository.get_backed_breakdown(test_ids["unpriced_vault_id"])
+    await _assert_single_idle_row(
+        repository,
+        test_ids["unpriced_vault_id"],
+        symbol="UNPX",
+        token_id=test_ids["unpx_id"],
+        price_usd=None,
+        backing_value=Decimal("100.00"),
+    )
 
-    assert len(result.items) == 1
-    item = result.items[0]
-    assert item.symbol == "UNPX"
-    assert item.token_id == test_ids["unpx_id"]
-    assert item.price_usd is None
-    assert item.backing_value == Decimal("100.00")
-    assert item.backing_pct == Decimal("100.00")
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_latest_price_snapshot_wins(
+    repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
+) -> None:
+    """Among two price snapshots for the loan token, the latest block wins.
+
+    LATE is priced $9 at an older block then $11 at the newer block: the row must use
+    $11 (and backing_value scales by it, 100 * 11 = 1,100.00), never the stale $9. This
+    exercises the CTE's snapshot ordering and DISTINCT ON — and that the price join
+    never fans the breakdown out across the two rows.
+    """
+    await _assert_single_idle_row(
+        repository,
+        test_ids["latest_vault_id"],
+        symbol="LATE",
+        token_id=test_ids["late_id"],
+        price_usd=_LATEST_NEW_PRICE_USD,
+        backing_value=Decimal("1100.00"),
+    )
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_disabled_oracle_mapping_leaves_vault_unpriced(
+    repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
+) -> None:
+    """A loan-token price reachable only via a disabled oracle_asset is excluded.
+
+    DIS has a price row but its oracle_asset mapping is disabled, so the enabled-gate
+    drops it: the vault reads unpriced (price_usd None, raw backing_value 100.00),
+    identical to a token with no price row at all. Distinct from the no-row case, this
+    proves the gate filters on the mapping, not merely on row existence.
+    """
+    await _assert_single_idle_row(
+        repository,
+        test_ids["disabled_vault_id"],
+        symbol="DIS",
+        token_id=test_ids["dis_id"],
+        price_usd=None,
+        backing_value=Decimal("100.00"),
+    )
 
 
 @pytest.mark.asyncio(loop_scope="module")
 async def test_vault_with_no_market_positions_is_fully_idle(
     repository: ProtocolScopedBackedBreakdownRepository, test_ids: dict[str, int]
 ) -> None:
-    """Vault with total_assets > 0 but no market positions should be 100% the asset token (idle).
+    """Vault with total_assets > 0 but no market positions is 100% the loan token (idle).
 
-    Idle-only vault: 500,000 USDC total_assets, zero market positions.
-
-    Expected:
-      vault_idle = total_assets - 0 = 500,000 USDC
-      breakdown and all_backing second-branch are both empty.
-      Result: USDC 100% at 500,000 * 1.0001 = 500,050.00 USD
+    Idle-only vault: 500,000 USDC total_assets, zero market positions. The whole
+    balance is idle loan token, priced at its own $1.0001:
+    500,000 * 1.0001 = 500,050.00 USD.
     """
-    result = await repository.get_backed_breakdown(test_ids["idle_vault_id"])
-
-    assert len(result.items) == 1
-
-    item = result.items[0]
-    assert item.symbol == "USDC"
-    assert item.backing_value == Decimal("500050.00")
-    assert item.backing_pct == Decimal("100.00")
-    assert item.token_id == test_ids["usdc_id"]
+    await _assert_single_idle_row(
+        repository,
+        test_ids["idle_vault_id"],
+        symbol="USDC",
+        token_id=test_ids["usdc_id"],
+        price_usd=_USDC_PRICE_USD,
+        backing_value=Decimal("500050.00"),
+    )

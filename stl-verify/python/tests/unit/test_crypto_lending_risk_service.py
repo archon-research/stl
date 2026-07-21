@@ -7,7 +7,7 @@ from app.domain.entities.allocation import EthAddress
 from app.domain.entities.backed_breakdown import BackedBreakdown, CollateralContribution
 from app.domain.entities.receipt_token import ReceiptTokenInfo
 from app.domain.entities.risk import GapSweepDetails, LiquidationParams, RiskBreakdown, RrcResult
-from app.domain.exceptions import MissingShareError
+from app.domain.exceptions import MissingShareError, PriceDataMissingError
 from app.services.crypto_lending_risk_service import CryptoLendingRiskService
 
 DUMMY_PRIME = EthAddress("0x" + "ab" * 20)
@@ -272,23 +272,45 @@ class TestCompute:
             await service.compute(RECEIPT_TOKEN_ID, DUMMY_PRIME, overrides={})
 
     @pytest.mark.asyncio
-    async def test_compute_items_without_prices_are_skipped(
+    async def test_compute_all_items_unpriced_raises_price_data_missing(
         self,
         service: CryptoLendingRiskService,
         reader: MagicMock,
     ) -> None:
+        # A non-empty breakdown with no priced row means the loan token is unpriced
+        # (Morpho): backing_value is raw loan-token units, not USD. Fail as
+        # price_data_missing so the prime endpoint degrades to unpriced instead of a
+        # misleading fully-covered rrc=0.
         reader.get_breakdown.return_value = _breakdown(
             (_contrib(10, "WETH", "10000", None),),
             backed_asset_id=UNDERLYING_TOKEN_ID,
         )
         reader.get_liquidation_params.return_value = {10: _params(10, "0.825", "1.05")}
 
+        with pytest.raises(PriceDataMissingError):
+            await service.compute(RECEIPT_TOKEN_ID, DUMMY_PRIME, overrides={})
+
+    @pytest.mark.asyncio
+    async def test_compute_partial_prices_keep_priced_rows_and_drop_unpriced(
+        self,
+        service: CryptoLendingRiskService,
+        reader: MagicMock,
+    ) -> None:
+        # A breakdown with at least one priced row is NOT unpriced: the priced row
+        # computes and only the individually unpriced row drops at enrichment
+        # (matching the Aave repo), so rrc is non-zero rather than raising.
+        reader.get_breakdown.return_value = _breakdown(
+            (_contrib(10, "WETH", "10000", "2000"), _contrib(11, "WBTC", "5000", None)),
+            backed_asset_id=UNDERLYING_TOKEN_ID,
+        )
+        reader.get_liquidation_params.return_value = {
+            10: _params(10, "0.825", "1.05"),
+            11: _params(11, "0.7", "1.1"),
+        }
+
         result = await service.compute(RECEIPT_TOKEN_ID, DUMMY_PRIME, overrides={})
 
-        # Item dropped (no price) -> empty enriched list -> rrc=0 and the
-        # collateral basis is also 0, so comparable CRR is 0 (not div-by-zero).
-        assert result.rrc_usd == Decimal("0")
-        assert result.comparable_crr_pct == Decimal("0.00")
+        assert result.rrc_usd > Decimal("0")
 
     @pytest.mark.asyncio
     async def test_compute_items_without_liquidation_params_are_skipped(

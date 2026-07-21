@@ -1,5 +1,6 @@
 # ruff: noqa: E501
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -115,32 +116,41 @@ WITH morpho_vaults AS (
   total AS (
       SELECT sum(amount) as total_amount FROM all_backing
   ),
-  -- Every backing amount above is denominated in the vault's loan token, so the
-  -- loan token's USD price (not each collateral token's) is what converts them.
-  -- Resolved via the vault's Morpho Blue protocol_oracle binding, mirroring the
-  -- Aave repo's token_prices CTE (same enabled-oracle_asset gate + snapshot order).
+  -- Latest USD price per token from the vault's Morpho Blue protocol_oracle
+  -- binding, mirroring the Aave repo's token_prices CTE (same enabled-oracle_asset
+  -- gate + snapshot order). Each row exposes its OWN token's price so amount/price
+  -- stay denominated in the row's symbol, as Aave does.
+  token_prices AS (
+      SELECT DISTINCT ON (otp.token_id)
+          otp.token_id,
+          otp.price_usd
+      FROM onchain_token_price otp
+      JOIN protocol_oracle po ON po.oracle_id = otp.oracle_id
+      JOIN morpho_vault v ON v.id = :backed_asset_id AND po.protocol_id = v.protocol_id
+      WHERE EXISTS (
+          SELECT 1 FROM oracle_asset oa
+          WHERE oa.oracle_id = otp.oracle_id AND oa.token_id = otp.token_id AND oa.enabled
+      )
+      ORDER BY otp.token_id, otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC, otp.oracle_id DESC
+  ),
+  -- The vault's loan token converts every (loan-token-denominated) backing amount
+  -- to USD, so it is pulled out separately as the scaling factor for backed_amount.
   loan_token_price AS (
-      SELECT otp.price_usd
-      FROM morpho_vault v
-      JOIN protocol_oracle po ON po.protocol_id = v.protocol_id
-      JOIN onchain_token_price otp ON otp.oracle_id = po.oracle_id AND otp.token_id = v.asset_token_id
-      WHERE v.id = :backed_asset_id
-        AND EXISTS (
-            SELECT 1 FROM oracle_asset oa
-            WHERE oa.oracle_id = otp.oracle_id AND oa.token_id = otp.token_id AND oa.enabled
-        )
-      ORDER BY otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC, otp.oracle_id DESC
-      LIMIT 1
+      SELECT tp.price_usd
+      FROM token_prices tp
+      JOIN morpho_vault v ON v.id = :backed_asset_id AND tp.token_id = v.asset_token_id
   )
   SELECT a.token_id,
          a.symbol,
          round(sum(a.amount)::numeric, 2) as backed_amount,
          round((sum(a.amount) / NULLIF(t.total_amount, 0) * 100)::numeric, 2) as backing_pct,
-         ltp.price_usd
+         ltp.price_usd as loan_token_price,
+         tp.price_usd as token_price_usd
   FROM all_backing a
   CROSS JOIN total t
   LEFT JOIN loan_token_price ltp ON true
-  GROUP BY a.token_id, a.symbol, t.total_amount, ltp.price_usd
+  LEFT JOIN token_prices tp ON tp.token_id = a.token_id
+  GROUP BY a.token_id, a.symbol, t.total_amount, ltp.price_usd, tp.price_usd
   HAVING sum(a.amount) > {_MIN_COLLATERAL_AMOUNT}
   ORDER BY backed_amount DESC
 """
@@ -168,24 +178,36 @@ class MorphoBackedBreakdownRepository:
             )
             rows = result.fetchall()
 
-        items: list[CollateralContribution] = []
-        for row in rows:
-            price_usd = Decimal(str(row.price_usd)) if row.price_usd is not None else None
-            # backed_amount is in loan-token units; scale by the loan-token price so
-            # backing_value is USD (what enrichment reads as amount_usd), correct even
-            # when the loan token is not ~$1. An unpriced row keeps raw units, but it is
-            # dropped at enrichment (price_usd is None) so that value is never used.
-            backing_value = Decimal(str(row.backed_amount))
-            if price_usd is not None:
-                backing_value *= price_usd
-            items.append(
-                CollateralContribution(
-                    token_id=row.token_id,
-                    symbol=row.symbol,
-                    backing_value=backing_value,
-                    backing_pct=Decimal(str(row.backing_pct)),
-                    price_usd=price_usd,
-                )
-            )
-
+        items = [self._to_contribution(row) for row in rows]
         return BackedBreakdown(backed_asset_id=backed_asset_id, items=tuple(items))
+
+    @staticmethod
+    def _to_contribution(row: Any) -> CollateralContribution:
+        backed_amount = Decimal(str(row.backed_amount))
+        loan_token_price = Decimal(str(row.loan_token_price)) if row.loan_token_price is not None else None
+        if loan_token_price is None:
+            # The vault's loan token has no USD price, so no backing amount can be
+            # converted to USD: the whole vault is unpriced. Keep raw loan-token units
+            # and force price_usd None on every row. The risk service treats an
+            # all-unpriced breakdown as price_data_missing and never reads the raw
+            # value as USD.
+            return CollateralContribution(
+                token_id=row.token_id,
+                symbol=row.symbol,
+                backing_value=backed_amount,
+                backing_pct=Decimal(str(row.backing_pct)),
+                price_usd=None,
+            )
+        # backed_amount is in loan-token units; scale by the loan-token price so
+        # backing_value is USD (what enrichment reads as amount_usd), correct even when
+        # the loan token is not ~$1. price_usd is each row token's own price so amount
+        # and price stay denominated in the row's symbol (as Aave does); it is None for
+        # a collateral token the oracle does not price, and that row drops at enrichment.
+        token_price_usd = Decimal(str(row.token_price_usd)) if row.token_price_usd is not None else None
+        return CollateralContribution(
+            token_id=row.token_id,
+            symbol=row.symbol,
+            backing_value=backed_amount * loan_token_price,
+            backing_pct=Decimal(str(row.backing_pct)),
+            price_usd=token_price_usd,
+        )
