@@ -258,6 +258,12 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolving chain name: %w", err)
 	}
+	// Fail hard if this instance's chain is not declared served: an undeclared tracker
+	// deployment would let the served-chain guardrail keep dropping this chain's contract
+	// entries. Crashing here forces the servedTrackerChains edit before the deploy sticks.
+	if err := at.AssertServedTrackerChain(chainName); err != nil {
+		return err
+	}
 	mcTel, err := multicall.NewTelemetry(chainName)
 	if err != nil {
 		return fmt.Errorf("multicall telemetry: %w", err)
