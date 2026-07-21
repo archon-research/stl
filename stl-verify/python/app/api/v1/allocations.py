@@ -14,7 +14,7 @@ from app.api._validators import EthAddressParam, OptionalEthAddressParam, Option
 from app.api.deps import get_engine
 from app.api.time_series import TimeSeriesWindow, apply_cache_control, build_window, get_time_series_query_params
 from app.config import get_settings
-from app.domain.entities.allocation import DirectAssetHolding, EthAddress
+from app.domain.entities.allocation import AnchorageCustodyHolding, DirectAssetHolding, EthAddress
 from app.domain.entities.allocation_category import AllocationCategory
 from app.domain.time_series import TimeSeriesQuery, enforce_filter_for_window
 from app.services.allocation_category_service import AllocationCategoryService
@@ -57,7 +57,7 @@ class ProtocolResponse(BaseModel):
 class AllocationResponse(BaseModel):
     """Enriched allocation response with category and metadata.
 
-    Two row shapes share this model:
+    Three row shapes share this model:
     - Receipt-token positions (e.g. spUSDT wrapping USDT): all fields populated.
     - Direct asset holdings (e.g. PYUSD held in the proxy with no wrapper):
       ``receipt_token_id`` / ``receipt_token_address`` / ``protocol_name`` are
@@ -67,6 +67,13 @@ class AllocationResponse(BaseModel):
       resolvable underlying, where they point at that underlying.
       ``amount_usd`` is populated when an oracle price exists for the pricing
       basis and null otherwise (e.g. LP/curve shares with no oracle feed).
+    - Off-chain custody holdings (Anchorage BTC): ``chain_id`` is 0 (the
+      off-chain sentinel), ``protocol_name`` is ``anchorage``, ``symbol`` is the
+      custodied asset (BTC), and both ``underlying_token_id`` and
+      ``underlying_token_address`` are null (off-chain assets have no token-
+      registry row). ``amount_usd`` is the loan drawn against the collateral and
+      ``latest_activity_at`` is the snapshot time — surfaced verbatim even when
+      the upstream feed is frozen, so staleness is visible rather than hidden.
     """
 
     chain_id: int = Field(description="EVM chain id of the position.", examples=[1])
@@ -80,17 +87,21 @@ class AllocationResponse(BaseModel):
         description="0x-prefixed receipt-token contract address. `null` for direct asset holdings.",
         examples=["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"],
     )
-    underlying_token_id: int = Field(
+    underlying_token_id: int | None = Field(
+        default=None,
         description=(
             "Surrogate id of the underlying token. For direct holdings, this is the held asset itself, "
-            "unless the holding is valued on the underlying-value basis (allowlisted)."
+            "unless the holding is valued on the underlying-value basis (allowlisted). `null` for off-chain "
+            "custody holdings (e.g. Anchorage BTC), which have no token-registry row."
         ),
         examples=[1],
     )
-    underlying_token_address: str = Field(
+    underlying_token_address: str | None = Field(
+        default=None,
         description=(
             "0x-prefixed underlying-token contract address. For direct holdings, this is the held asset itself, "
-            "unless the holding is valued on the underlying-value basis (allowlisted)."
+            "unless the holding is valued on the underlying-value basis (allowlisted). `null` for off-chain "
+            "custody holdings (e.g. Anchorage BTC), which have no on-chain address."
         ),
         examples=["0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"],
     )
@@ -138,7 +149,9 @@ class AllocationResponse(BaseModel):
         examples=["12.5"],
     )
     category: AllocationCategory = Field(
-        description="Allocation category derived from protocol/symbol (`allocation`, `pol`, `psm3`, `asset`).",
+        description=(
+            "Allocation category derived from protocol/symbol (`allocation`, `pol`, `psm3`, `asset`, `custody`)."
+        ),
     )
 
     model_config = {
@@ -497,13 +510,15 @@ async def list_protocols(service: AllocationService = Depends(_get_service)):
     tags=["allocations"],
     summary="List a prime's current allocations",
     description=(
-        "Return every current allocation held by the given prime — both receipt-token "
-        "positions (enriched with USD value when a price is available) and direct asset "
+        "Return every current allocation held by the given prime — receipt-token "
+        "positions (enriched with USD value when a price is available), direct asset "
         "holdings (tokens held in the proxy with no registered receipt-token wrapper, "
         "surfaced with `receipt_token_id`, `receipt_token_address` and `protocol_name` "
         "set to `null`, and `amount_usd` valued from the token's oracle price when one "
-        "exists). Each row includes the latest on-chain activity "
-        "timestamp and a derived `category` (`allocation` / `pol` / `psm3` / `asset`)."
+        "exists), and off-chain Anchorage BTC custody (chain_id 0, `protocol_name` "
+        "`anchorage`, `amount_usd` the loan drawn against the collateral). Each row "
+        "includes the latest activity timestamp and a derived `category` "
+        "(`allocation` / `pol` / `psm3` / `asset` / `custody`)."
     ),
 )
 async def list_allocations(
@@ -512,12 +527,15 @@ async def list_allocations(
 ):
     """Return current allocations for ``prime_id``.
 
-    Combines two sources:
+    Combines three sources:
     - Receipt-token positions (e.g. spUSDT wrapping USDT).
     - Direct asset holdings — tokens held in the proxy that are not
       registered as receipt-token wrappers (e.g. PYUSD, syrupUSDT). These
       rows have null ``receipt_token_*`` / ``protocol_name``; ``amount_usd``
       is valued from the token's oracle price when one exists, else null.
+    - Off-chain Anchorage BTC custody — chain_id 0, ``protocol_name``
+      ``anchorage``, null ``underlying_*`` (no token-registry row), with the
+      loan drawn against the collateral as ``amount_usd``.
 
     Errors:
     - 422 if ``prime_id`` is malformed.
@@ -527,9 +545,10 @@ async def list_allocations(
     if not await service.prime_exists(prime_address):
         raise HTTPException(status_code=404, detail="Prime not found")
 
-    positions, direct_holdings = await asyncio.gather(
+    positions, direct_holdings, custody_holdings = await asyncio.gather(
         service.list_receipt_token_positions(prime_address),
         service.list_direct_asset_holdings(prime_address),
+        service.list_anchorage_custody_holdings(prime_address),
     )
     category_service = AllocationCategoryService()
 
@@ -575,7 +594,45 @@ async def list_allocations(
                 category=category_service.classify(None, h.symbol),
             )
         )
-    return receipt_rows + direct_rows
+    custody_rows = [_anchorage_custody_row(h, category_service) for h in custody_holdings]
+    return receipt_rows + direct_rows + custody_rows
+
+
+# chain_id 0 is the off-chain sentinel: Anchorage BTC custody is not on any EVM
+# chain, and chain_id stays non-nullable (a 0 sentinel, not NULL) so every row
+# keeps an int. The protocol name drives the CUSTODY classification.
+_OFFCHAIN_CHAIN_ID = 0
+_ANCHORAGE_PROTOCOL_NAME = "anchorage"
+
+
+def _anchorage_custody_row(
+    holding: AnchorageCustodyHolding, category_service: AllocationCategoryService
+) -> AllocationResponse:
+    """Project an off-chain Anchorage custody holding onto the allocation model.
+
+    BTC has no ``token`` registry row (root AGENTS: off-chain assets get none),
+    so ``underlying_token_id`` / ``underlying_token_address`` are null and the
+    symbol names the asset. ``amount_usd`` is the loan drawn (exposure); the
+    collateral value rides on the domain entity so the surfaced figure can flip
+    without a schema change. ``latest_activity_at`` is the snapshot time,
+    surfaced verbatim so a frozen upstream feed reads as honestly stale.
+    """
+    return AllocationResponse(
+        chain_id=_OFFCHAIN_CHAIN_ID,
+        receipt_token_id=None,
+        receipt_token_address=None,
+        underlying_token_id=None,
+        underlying_token_address=None,
+        symbol=holding.symbol,
+        underlying_symbol=holding.symbol,
+        protocol_name=_ANCHORAGE_PROTOCOL_NAME,
+        balance=holding.balance,
+        amount_usd=holding.amount_usd,
+        latest_activity_at=holding.as_of.isoformat() if holding.as_of else None,
+        latest_activity_action=None,
+        latest_activity_amount=None,
+        category=category_service.classify(_ANCHORAGE_PROTOCOL_NAME, holding.symbol),
+    )
 
 
 def _direct_underlying_identity(h: DirectAssetHolding) -> tuple[int, str, str]:

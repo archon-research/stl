@@ -46,6 +46,7 @@ class AllocationCategoryService:
             AllocationCategory.POL: "Protocol-Owned Liquidity",
             AllocationCategory.PSM3: "Peg Stability Mechanism",
             AllocationCategory.ASSET: "Asset",
+            AllocationCategory.CUSTODY: "Custody",
         }
         return labels.get(category, category.value)
 
@@ -56,5 +57,6 @@ class AllocationCategoryService:
             AllocationCategory.POL: "Protocol-owned liquidity or governance assets",
             AllocationCategory.PSM3: "Peg stability mechanism reserves (Spark PSM3 variant)",
             AllocationCategory.ASSET: "Non-strategy asset holdings or treasury positions",
+            AllocationCategory.CUSTODY: "Off-chain custodied collateral (e.g. Anchorage BTC) securing a prime loan",
         }
         return descriptions.get(category, "")

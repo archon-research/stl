@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -15,6 +15,7 @@ from app.adapters.postgres._time_window import (
     time_bucket_expr,
 )
 from app.domain.entities.allocation import (
+    AnchorageCustodyHolding,
     ChainMetadata,
     DirectAssetHolding,
     EthAddress,
@@ -60,6 +61,11 @@ _UNDERLYING_VALUE_TOKEN_ADDRS = [bytes.fromhex(h) for h in _UNDERLYING_VALUE_TOK
 logger = logging.getLogger(__name__)
 
 _ALLOCATION_ACTIVITY_LIMIT = 1000
+
+# The Anchorage feed polls every ~15 minutes; a cohort older than this means the
+# upstream feed has stalled (it was frozen since 2026-06-16 at ship time), so we
+# emit a telemetry warning while still serving the honestly-stale data.
+_ANCHORAGE_STALE_AFTER = timedelta(hours=1)
 
 
 def _escape_like_pattern(value: str) -> str:
@@ -348,6 +354,75 @@ class AllocationRepository:
                 exc_info=True,
             )
             raise ValueError(f"Database query failed while fetching direct asset holdings: {exc}") from exc
+
+    async def list_anchorage_custody_holdings(self, prime_id: EthAddress) -> list[AnchorageCustodyHolding]:
+        """Return off-chain Anchorage BTC custody collateral for the prime.
+
+        Scoped to the prime's latest snapshot cohort, corrections resolved, then
+        collapsed to one row per ``(asset_type, custody_type)`` — see
+        ``_ANCHORAGE_CUSTODY_HOLDINGS_SQL`` for the cohort-filter rationale and
+        column semantics.
+        """
+        try:
+            async with self._engine.connect() as conn:
+                result = await conn.execute(_ANCHORAGE_CUSTODY_HOLDINGS_SQL, {"proxy_hex": prime_id.hex})
+                rows = result.fetchall()
+            holdings = [
+                AnchorageCustodyHolding(
+                    symbol=row.symbol,
+                    custody_type=row.custody_type,
+                    balance=_safe_decimal(row.balance, "balance", row.symbol),
+                    amount_usd=_safe_decimal(row.amount_usd, "amount_usd", row.symbol),
+                    collateral_usd=_safe_decimal(row.collateral_usd, "collateral_usd", row.symbol),
+                    as_of=row.as_of,
+                )
+                for row in rows
+            ]
+            self._record_stale_custody(prime_id, holdings)
+            return holdings
+        except asyncio.CancelledError:
+            raise
+        except ValueError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "Failed to fetch anchorage custody holdings from database",
+                extra={
+                    "prime_id": str(prime_id),
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+                exc_info=True,
+            )
+            raise ValueError(f"Database query failed while fetching anchorage custody holdings: {exc}") from exc
+
+    @staticmethod
+    def _record_stale_custody(prime_id: EthAddress, holdings: list[AnchorageCustodyHolding]) -> None:
+        """Surface Anchorage custody rows whose snapshot has gone stale.
+
+        The feed polls every ~15 minutes, so a cohort older than an hour means
+        the upstream feed has stalled (it was frozen since 2026-06-16 at ship
+        time). The data is still served — honest staleness beats a hidden hole —
+        but the lag is recorded as a span attribute + warning so it can be
+        alerted on rather than silently trusted. Mirrors
+        ``_record_unpriced_holdings``.
+        """
+        now = datetime.now(timezone.utc)
+        stale = [h for h in holdings if now - h.as_of > _ANCHORAGE_STALE_AFTER]
+        if not stale:
+            return
+        oldest = min(h.as_of for h in stale)
+        age_seconds = (now - oldest).total_seconds()
+        trace.get_current_span().set_attribute("allocations.anchorage_custody.stale_seconds", age_seconds)
+        logger.warning(
+            "Anchorage custody snapshot is stale (upstream feed may be frozen)",
+            extra={
+                "prime_id": str(prime_id),
+                "stale_count": len(stale),
+                "oldest_snapshot_time": oldest.isoformat(),
+                "stale_age_seconds": age_seconds,
+            },
+        )
 
     @staticmethod
     def _record_receipt_valuation_gaps(prime_id: EthAddress, rows: Sequence[Any]) -> None:
@@ -1155,6 +1230,73 @@ _DIRECT_ASSET_HOLDINGS_SQL = text("""
     WHERE rt.id IS NULL AND lp.balance > 0
     ORDER BY lp.balance DESC
 """).bindparams(bindparam("uv_token_addrs", expanding=True))
+
+
+# Off-chain Anchorage BTC custody, collapsed to one row per (asset_type,
+# custody_type). anchorage_package_snapshot has no COMMENTed unit for these
+# columns, so document the semantics here (verified against the live feed
+# 2026-07-21):
+#   * exposure_value  — the loan drawn against the BTC collateral. Package-level,
+#     so it repeats across a package's per-collateral-asset rows. Surfaced as
+#     the allocation's amount_usd (the VEC-499 / skyeco figure).
+#   * package_value   — = asset_weighted_value, the BTC collateral's market value.
+#     Surfaced as collateral_usd.
+#   * asset_quantity  — collateral in native units (BTC).
+#   * current_ltv     — exposure_value / package_value (stored, not recomputed).
+#
+# Cohort-filter rationale (the $521M trap): the snapshot is append-only and a
+# closed package keeps its last row forever, still flagged active=true. An
+# unbounded DISTINCT ON (package_id, asset_type, custody_type) ordered by
+# snapshot_time DESC would therefore pick each closed package's stale last row
+# and leak its residual collateral/BTC into the SUMs (measured $521M vs the true
+# $310M). So we scope to the prime's latest snapshot_time cohort FIRST
+# (latest_poll), keeping only packages present in that poll, and an active
+# filter cannot substitute for this because the closed packages are still
+# active=true. Within the cohort, DISTINCT ON ... processing_version DESC picks
+# the newest correction per package (append-only reprocessing writes a higher
+# processing_version at the same natural key). The leading ORDER BY columns
+# match idx_anchorage_package_snapshot_pv_lookup
+# (prime_id, package_id, asset_type, custody_type, snapshot_time, processing_version DESC).
+# A prime with no snapshots (or no allocation_position row to resolve prime_id)
+# yields an empty result.
+_ANCHORAGE_CUSTODY_HOLDINGS_SQL = text("""
+    WITH target_prime AS (
+        SELECT prime_id
+        FROM allocation_position
+        WHERE proxy_address = decode(:proxy_hex, 'hex')
+        LIMIT 1
+    ),
+    latest_poll AS (
+        SELECT MAX(snapshot_time) AS snapshot_time
+        FROM anchorage_package_snapshot
+        WHERE prime_id = (SELECT prime_id FROM target_prime)
+    ),
+    current_cohort AS (
+        SELECT DISTINCT ON (aps.package_id, aps.asset_type, aps.custody_type)
+            aps.asset_type,
+            aps.custody_type,
+            aps.exposure_value,
+            aps.package_value,
+            aps.asset_quantity,
+            aps.snapshot_time
+        FROM anchorage_package_snapshot aps
+        WHERE aps.prime_id = (SELECT prime_id FROM target_prime)
+          AND aps.snapshot_time = (SELECT snapshot_time FROM latest_poll)
+          AND aps.active
+        ORDER BY aps.package_id, aps.asset_type, aps.custody_type,
+                 aps.snapshot_time DESC, aps.processing_version DESC
+    )
+    SELECT
+        asset_type          AS symbol,
+        custody_type        AS custody_type,
+        SUM(exposure_value) AS amount_usd,
+        SUM(package_value)  AS collateral_usd,
+        SUM(asset_quantity) AS balance,
+        MAX(snapshot_time)  AS as_of
+    FROM current_cohort
+    GROUP BY asset_type, custody_type
+    ORDER BY amount_usd DESC
+""")
 
 
 # Redeemable-value basis; rationale (incl. the divergence refusal) on

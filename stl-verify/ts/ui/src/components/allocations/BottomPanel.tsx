@@ -46,7 +46,8 @@ function parseCategoryParam(value: string | null): AllocationCategory | '' {
     value === 'allocation' ||
     value === 'pol' ||
     value === 'psm3' ||
-    value === 'asset'
+    value === 'asset' ||
+    value === 'custody'
   ) {
     return value;
   }
@@ -313,6 +314,7 @@ export function BottomPanel({
             <option value="pol">Protocol Owned Liquidity</option>
             <option value="psm3">PSM3</option>
             <option value="asset">Asset</option>
+            <option value="custody">Custody</option>
           </StyledSelect>
         </label>
 
