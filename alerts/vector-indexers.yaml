@@ -859,6 +859,154 @@ groups:
             written. Check the pod logs and SQS backlog.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorfluidvaultindexerstalled
 
+  # allocation-tracker (VEC-499) — prime-allocation-indexer: consumes BlockEvents,
+  # tracks ALM-proxy token positions (allocation_position) and total supplies into
+  # TimescaleDB. Mainnet today; avalanche/base instances stack on top (VEC-499).
+  - name: vector-allocation-tracker
+    interval: 1m
+    rules:
+      # Rules live in this shared file (not a vector-allocation-tracker.yaml) so
+      # the mimir-rules-sync namespace allowlist
+      # `^vector-(watcher|backup-worker|indexers|psm3|postgres|cronjobs)$`
+      # (.github/workflows/alerts.yml) syncs them — the sync derives the namespace
+      # from the FILENAME (vector-indexers), so a vector-allocation-tracker.yaml
+      # would map to an unlisted namespace and be silently dropped. This is a
+      # separate GROUP (not appended to vector-indexers) because Mimir caps a group
+      # at 20 rules and the shared vector-indexers group is near that ceiling.
+      #
+      # Two names for one worker:
+      #   - deployment / pod `app` label = `allocation-tracker`  (kube-state-metrics)
+      #   - OTel service_name           = `prime-allocation-indexer`  (InitOTEL resource)
+      # The Down rule keys on the deployment name; the metric rules key on
+      # service_name. Per-chain instances (avalanche/base) run the same binary and
+      # so reuse ONE service_name, differing only by the `chain` label — the metric
+      # rules therefore cover every chain via `by (chain, ...)` with no per-instance
+      # edits, and the Down regex `(avalanche-|base-)?allocation-tracker` pre-covers
+      # their deployment names, so the stacked k8s PRs above need no alert changes.
+      #
+      # Metric source (VEC-499): the shared telemetry.Metrics recorder emits one
+      # sample per consumed block —
+      #   - blocks_processed_total{service_name="prime-allocation-indexer", chain, status}
+      #   - processing_duration_seconds{...,le}: a seconds-bucket histogram
+      #     (telemetry.SecondsDurationBuckets), so histogram_quantile keeps
+      #     sub-second resolution instead of clamping p99 at 4.95s the way the OTel
+      #     ms-scale default buckets would.
+      # blocks_processed_total advances on every block regardless of position
+      # activity (the sweep only fires every SweepEveryNBlocks, and the
+      # underlying-value-failures counter only moves on a data hole), so it is the
+      # honest per-block liveness signal the Stalled rule keys on.
+
+      - alert: VectorAllocationTrackerDown
+        # Process liveness from kube-state-metrics (deployment/namespace labels,
+        # NOT the OTel k8s_namespace_name), so it fires even when the OTel pipeline
+        # is the thing that broke. <1 available replica = no pod, so no positions
+        # or supplies are written and the SQS backlog grows. The regex pre-covers
+        # the future per-chain deployments; `by (deployment, cluster)` raises one
+        # alert per affected instance.
+        expr: |
+          max by (deployment, cluster) (
+            kube_deployment_status_replicas_available{
+              deployment=~"(avalanche-|base-)?allocation-tracker", namespace="vector"
+            }
+          ) < 1
+        for: 10m
+        labels:
+          team: vector
+          severity: critical
+          component: allocation-tracker
+          namespace: vector
+        annotations:
+          summary: "Vector allocation-tracker has no available replica ({{ $labels.deployment }})"
+          description: |
+            `{{ $labels.deployment }}` Deployment has <1 available replica for
+            >10m. The worker is not running; no allocation positions or supplies
+            are being written and the SQS backlog is growing.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorallocationtrackerdown
+
+      - alert: VectorAllocationTrackerStalled
+        # No block consumed for 15m on the labelled chain. The worker consumes ~1
+        # BlockEvent per block (~12s on mainnet) and records one
+        # blocks_processed_total sample per block regardless of position activity,
+        # so a zero rate means the SQS consume loop is wedged — page-worthy, hence
+        # CRITICAL. Residual gap: if the pod is alive but the OTLP export dies, the
+        # series staleness-expires and `rate(...) == 0` returns no data (silent
+        # rather than firing). The common cause of a vanished series — process
+        # death — is caught by VectorAllocationTrackerDown; the alive-but-OTLP-dead
+        # sliver is the accepted residual gap (see the runbook).
+        expr: |
+          sum by (chain, cluster) (
+            rate(blocks_processed_total{
+              service_name="prime-allocation-indexer", k8s_namespace_name="vector"
+            }[5m])
+          ) == 0
+        for: 15m
+        labels:
+          team: vector
+          severity: critical
+          component: allocation-tracker
+          namespace: vector
+        annotations:
+          summary: "Vector allocation-tracker stalled on {{ $labels.chain }} (no block consumed >15m)"
+          description: |
+            `prime-allocation-indexer` on chain `{{ $labels.chain }}` has consumed
+            no block for >15m. The SQS consume loop is likely wedged (or the OTLP
+            export died); allocation positions and supplies in TimescaleDB will go
+            stale. Check the pod logs and SQS backlog.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorallocationtrackerstalled
+
+      - alert: VectorAllocationTrackerErrorsHigh
+        # Per-block processing failures (status="error") above 0.1/s for 15m. The
+        # worker propagates the error so SQS redelivers, so a sustained error rate
+        # means blocks are looping without persisting; it usually precedes a stall.
+        expr: |
+          sum by (chain, cluster) (
+            rate(blocks_processed_total{
+              service_name="prime-allocation-indexer", status="error", k8s_namespace_name="vector"
+            }[10m])
+          ) > 0.1
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: allocation-tracker
+          namespace: vector
+        annotations:
+          summary: "Vector allocation-tracker error rate >0.1/s on {{ $labels.chain }}"
+          description: |
+            `prime-allocation-indexer` on chain `{{ $labels.chain }}` is failing
+            `{{ $value | printf "%.2f" }}` blocks/s over 15m. Blocks are being
+            redelivered without persisting; investigate pod logs before this turns
+            into a stall.
+
+      - alert: VectorAllocationTrackerBlockLatencyHigh
+        # p99 block processing >3s for 15m. Sustained high latency means the
+        # multicall/RPC path is degraded or the periodic sweep (every
+        # SweepEveryNBlocks, reading every entry in one multicall) is slow; blocks
+        # then risk SQS visibility-timeout redelivery. Histogram
+        # processing_duration_seconds (seconds buckets), exported as
+        # processing_duration_seconds_bucket.
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (chain, cluster, le) (
+              rate(processing_duration_seconds_bucket{
+                service_name="prime-allocation-indexer", k8s_namespace_name="vector"
+              }[10m])
+            )
+          ) > 3
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: allocation-tracker
+          namespace: vector
+        annotations:
+          summary: "Vector allocation-tracker p99 block latency >3s on {{ $labels.chain }}"
+          description: |
+            `prime-allocation-indexer` on chain `{{ $labels.chain }}` p99 block
+            processing latency is `{{ $value | printf "%.2fs" }}` over 15m. The
+            indexer is degraded; expect lag in downstream allocation state.
+
   # curve-indexer (VEC-260) — Curve DEX pool/swap/liquidity indexer.
   - name: vector-curve-indexer
     interval: 1m

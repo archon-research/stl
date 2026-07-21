@@ -11,10 +11,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 	"github.com/ethereum/go-ethereum/common"
 	gethtypes "github.com/ethereum/go-ethereum/core/types"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 // ── Mocks ──
@@ -694,4 +699,154 @@ func mustMarshalReceipts(t *testing.T, receipts []TransactionReceipt) json.RawMe
 		t.Fatalf("marshal receipts: %v", err)
 	}
 	return data
+}
+
+// ── per-block liveness/latency metrics ──
+
+// TestProcessBlock_RecordsLivenessMetrics asserts every consumed block emits one
+// blocks_processed_total sample and one processing_duration_seconds observation
+// carrying {chain,status}, on both the success and error paths. These are the
+// per-block liveness + latency signals the VectorAllocationTracker{Stalled,
+// ErrorsHigh,BlockLatencyHigh} alerts key on, so the exact metric and label names
+// must not drift from the alert expressions.
+func TestProcessBlock_RecordsLivenessMetrics(t *testing.T) {
+	tests := []struct {
+		name       string
+		buildSvc   func(t *testing.T, m *telemetry.Metrics) (*Service, outbound.BlockEvent)
+		wantErr    bool
+		wantStatus string
+	}{
+		{
+			name:       "success path records success",
+			buildSvc:   newCleanBlockSvc,
+			wantErr:    false,
+			wantStatus: statusSuccess,
+		},
+		{
+			name:       "error path records error",
+			buildSvc:   newCacheMissSvc,
+			wantErr:    true,
+			wantStatus: statusError,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			metrics, reader := newBlockMetrics(t)
+			svc, event := tt.buildSvc(t, metrics)
+
+			err := svc.processBlock(context.Background(), event)
+			if tt.wantErr != (err != nil) {
+				t.Fatalf("processBlock err = %v, wantErr = %v", err, tt.wantErr)
+			}
+
+			if got := singleStatusCounter(t, reader, "blocks_processed_total", tt.wantStatus); got != 1 {
+				t.Errorf("blocks_processed_total{status=%q} = %d, want 1", tt.wantStatus, got)
+			}
+			if got := singleStatusHistogramCount(t, reader, "processing_duration_seconds", tt.wantStatus); got != 1 {
+				t.Errorf("processing_duration_seconds{status=%q} count = %d, want 1", tt.wantStatus, got)
+			}
+		})
+	}
+}
+
+// newBlockMetrics wires a real telemetry.Metrics to an in-memory reader via the
+// global meter provider (telemetry.NewMetrics reads the global provider), so a
+// processBlock run can be asserted against the exact series the Vector alerts
+// query. Restores the previous global provider on cleanup.
+func newBlockMetrics(t *testing.T) (*telemetry.Metrics, sdkmetric.Reader) {
+	t.Helper()
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	prev := otel.GetMeterProvider()
+	otel.SetMeterProvider(mp)
+	t.Cleanup(func() {
+		otel.SetMeterProvider(prev)
+		_ = mp.Shutdown(context.Background())
+	})
+
+	m, err := telemetry.NewMetrics("prime-allocation-indexer", "mainnet")
+	if err != nil {
+		t.Fatalf("telemetry.NewMetrics: %v", err)
+	}
+	return m, reader
+}
+
+// newCleanBlockSvc builds a service whose processBlock consumes a transfer-free
+// block and skips the sweep (SweepEveryNBlocks high), so it returns nil.
+func newCleanBlockSvc(t *testing.T, m *telemetry.Metrics) (*Service, outbound.BlockEvent) {
+	t.Helper()
+	cache := testutil.NewMockBlockCache()
+	cache.SetReceipts(1, 500, 0, mustMarshalReceipts(t, []TransactionReceipt{}))
+	svc := &Service{
+		cache:       cache,
+		metrics:     m,
+		extractor:   NewTransferExtractor(nil),
+		registry:    NewSourceRegistry(discardLogger()),
+		entryLookup: map[EntryKey]*TokenEntry{},
+		handler:     &testHandler{},
+		logger:      discardLogger(),
+		config:      Config{ChainID: 1, SweepEveryNBlocks: 100},
+	}
+	return svc, outbound.BlockEvent{ChainID: 1, BlockNumber: 500, Version: 0, BlockTimestamp: 1700000000, BlockHash: testBlockHash.Hex()}
+}
+
+// newCacheMissSvc builds a service whose processBlock errors on a cache miss
+// (receipts not found) before any snapshot work.
+func newCacheMissSvc(t *testing.T, m *telemetry.Metrics) (*Service, outbound.BlockEvent) {
+	t.Helper()
+	svc := &Service{
+		cache:   testutil.NewMockBlockCache(),
+		metrics: m,
+		logger:  discardLogger(),
+		config:  Config{ChainID: 1},
+	}
+	return svc, outbound.BlockEvent{ChainID: 1, BlockNumber: 99999, Version: 0}
+}
+
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// singleStatusCounter asserts the counter has exactly one datapoint, carrying
+// chain="mainnet" and the given status, and returns its value.
+func singleStatusCounter(t *testing.T, reader sdkmetric.Reader, name, status string) int64 {
+	t.Helper()
+	m := collectMetric(t, reader, name)
+	sum, ok := m.Data.(metricdata.Sum[int64])
+	if !ok {
+		t.Fatalf("%s is %T, want Sum[int64]", name, m.Data)
+	}
+	if len(sum.DataPoints) != 1 {
+		t.Fatalf("%s has %d datapoints, want 1", name, len(sum.DataPoints))
+	}
+	assertChainStatus(t, sum.DataPoints[0].Attributes, status)
+	return sum.DataPoints[0].Value
+}
+
+// singleStatusHistogramCount asserts the histogram has exactly one datapoint,
+// carrying chain="mainnet" and the given status, and returns its observation
+// count.
+func singleStatusHistogramCount(t *testing.T, reader sdkmetric.Reader, name, status string) uint64 {
+	t.Helper()
+	m := collectMetric(t, reader, name)
+	hist, ok := m.Data.(metricdata.Histogram[float64])
+	if !ok {
+		t.Fatalf("%s is %T, want Histogram[float64]", name, m.Data)
+	}
+	if len(hist.DataPoints) != 1 {
+		t.Fatalf("%s has %d datapoints, want 1", name, len(hist.DataPoints))
+	}
+	assertChainStatus(t, hist.DataPoints[0].Attributes, status)
+	return hist.DataPoints[0].Count
+}
+
+func assertChainStatus(t *testing.T, attrs attribute.Set, status string) {
+	t.Helper()
+	if v, ok := attrs.Value("chain"); !ok || v.AsString() != "mainnet" {
+		t.Errorf("chain attribute = %q (present=%v), want mainnet", v.AsString(), ok)
+	}
+	if v, ok := attrs.Value("status"); !ok || v.AsString() != status {
+		t.Errorf("status attribute = %q (present=%v), want %s", v.AsString(), ok, status)
+	}
 }

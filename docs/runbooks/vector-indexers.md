@@ -1270,6 +1270,211 @@ touches is roughly 30x the worst observed quiet gap. It is not a lull.
 
 ---
 
+## allocation-tracker (VEC-499)
+
+`prime-allocation-indexer` (Deployment / pod `app` label `allocation-tracker`,
+OTel `service_name` `prime-allocation-indexer`) consumes Ethereum BlockEvents,
+extracts ERC-20 transfers to the ALM proxies, reads end-of-block token positions
+and total supplies via Multicall3, and appends `allocation_position` /
+`token_total_supply` snapshots into TimescaleDB. A periodic sweep (every
+`SweepEveryNBlocks`, default 75) re-reads every tracked entry to catch
+transfer-less balance changes (interest accrual, rebases). Mainnet today;
+avalanche/base instances stack on top (VEC-499) and reuse one `service_name`,
+differing only by the `chain` label — so every alert below covers all chains
+without per-instance edits.
+
+**Metric coverage (VEC-499):** the shared `telemetry.Metrics` recorder emits one
+sample per consumed block — `blocks_processed_total{service_name="prime-allocation-indexer",
+chain, status}` and the seconds-bucket histogram `processing_duration_seconds`
+(exported as `processing_duration_seconds_bucket`). `blocks_processed_total`
+advances on every block (~12s on mainnet) regardless of position activity, so it
+is the honest per-block liveness signal. The silent data-quality hole the error
+path cannot catch keeps its own alert (`VectorAllocationUnderlyingValueFailures`,
+below).
+
+---
+
+## VectorAllocationTrackerDown
+
+**Severity:** critical · **For:** 10m
+
+### What it means
+
+The allocation-tracker Deployment (`{{ $labels.deployment }}` —
+`allocation-tracker`, or `avalanche-`/`base-allocation-tracker` for the per-chain
+instances) has <1 available replica for 10 minutes. No pod is running, so no
+allocation positions or supplies are written and the SQS backlog is growing. This
+is process liveness from kube-state-metrics, independent of the OTel pipeline, so
+it fires even when the metrics export is the thing that broke.
+
+### First checks (≤5 min)
+
+1. **Pod status** — `kubectl -n vector get pods -l app=allocation-tracker` (the
+   `app` label is shared across all per-chain instances).
+2. **Why it's not ready** — `kubectl -n vector describe deployment/{{ $labels.deployment }}`
+   and `kubectl -n vector logs -l app=allocation-tracker --previous` for a crash
+   loop (missing queue URL, DB/Redis/RPC dial failure, empty primes table, bad
+   axis-synome contract load).
+3. **Secrets/config present** — the worker requires `AWS_SQS_QUEUE_URL`,
+   `DATABASE_URL`, `ALCHEMY_API_KEY`, `REDIS_ADDR`, `S3_BUCKET`, `DEPLOY_ENV`. A
+   missing key from the `allocation-tracker` ExternalSecret crashes it on startup.
+4. **Node/scheduling** — a pending pod means node capacity / taints.
+
+### Common causes
+
+- ExternalSecret not yet synced (queue URL / DB URL missing) — the deploy ran
+  before the infra apply; re-sync the ExternalSecret.
+- Crash loop on a startup error (DB/Redis/RPC unreachable, `no primes found in
+  database`) — fix the dependency; the worker is fail-fast by design.
+- OOMKilled — check memory limits (`kubectl -n vector describe pod ...`).
+
+### Verify recovery
+
+`kube_deployment_status_replicas_available{deployment="{{ $labels.deployment }}"} >= 1`
+and the pod logs show `running` with a nonzero `entries` count.
+
+---
+
+## VectorAllocationTrackerStalled
+
+**Severity:** critical · **For:** 15m
+
+### What it means
+
+The worker is **up** but has consumed **no block for 15 minutes** on the labelled
+`chain`: `rate(blocks_processed_total{service_name="prime-allocation-indexer"}[5m])`
+is zero. The worker consumes ~1 BlockEvent per block (~12s on mainnet) and records
+one sample per consumed block regardless of whether a position was touched, so
+this is **not** a quiet-market period — the SQS consume loop is wedged (process
+alive but not draining).
+
+**Residual gap — OTLP dead but pod alive:** if the pod is alive but the OTLP
+metric export dies, the `blocks_processed_total` series staleness-expires and
+`rate(...) == 0` returns *no data*, so this alert stays silent rather than firing.
+The common cause of a vanished series — process death — is caught by
+`VectorAllocationTrackerDown` instead; the narrow alive-but-export-dead sliver is
+an accepted gap (a bare `rate == 0` cannot fire on an absent series). If Down is
+NOT firing but other OTel series from the pod are also flat/absent, suspect a dead
+export.
+
+### First checks (≤5 min)
+
+1. **Distinguish the cases** — is `VectorAllocationTrackerDown` also firing? If so
+   the process is down (treat as Down). If not, the pod is alive: a wedged loop or
+   a dead metrics export.
+2. **Recent logs** — `kubectl -n vector logs -l app=allocation-tracker --tail=200`.
+   Look for a repeating error on one message, `context deadline exceeded` against
+   Alchemy, or silence (poll loop stopped).
+3. **SQS backlog** — check the allocation-tracker SQS queue depth. A growing
+   `ApproximateNumberOfMessages` while the counter is flat confirms a wedged loop.
+4. **OTLP export** — if logs show blocks still processing but the counter is flat,
+   the metrics pipeline is the problem; check the OTel collector and whether other
+   series from the pod are flat too.
+5. **Upstream** — confirm the watcher for this chain is still producing blocks; if
+   not, that's the root cause (`VectorWatcherNoBlocks`) and the queue is
+   legitimately empty.
+6. **DB liveness (`db-query`)** —
+   `SELECT max(block_number), max(created_at) FROM allocation_position WHERE chain_id = <id>;`
+   a frozen max block number corroborates the stall.
+
+### Common causes
+
+- Poison message wedging the poll loop — inspect the DLQ; redrive or purge the
+  offending message.
+- Alchemy RPC degraded / rate-limited — per-block multicall reads time out.
+- Broken OTLP export — worker processing but metrics stopped; restart the pod or
+  fix the collector.
+- Per-chain queue outage — the chain's SQS/SNS wiring broke, so no blocks arrive.
+
+### Verify recovery
+
+`rate(blocks_processed_total{service_name="prime-allocation-indexer"}[5m]) > 0`
+for the affected chain, or confirm the SQS backlog is draining.
+
+---
+
+## VectorAllocationTrackerErrorsHigh
+
+**Severity:** warning · **For:** 15m
+
+### What it means
+
+`blocks_processed_total{status="error"}` is above 0.1 errors/sec sustained for 15
+minutes on the labelled `chain`. Every block that fails is propagated and
+redelivered by SQS (a partial failure stops the whole block by design), so a
+sustained error rate means blocks are looping without persisting — it usually
+precedes a stall.
+
+### First checks
+
+1. **Pod logs** — `kubectl -n vector logs -l app=allocation-tracker | grep -i error`.
+   Typical: `fetch observations for block`, `sweep block`, `handler:`,
+   `parse receipts`.
+2. **Recent deploys** — `kubectl -n vector rollout history deploy/{{ $labels.deployment }}`.
+   A source-registry or contract-regen change (a new token type, changed
+   axis-synome entries) is a common trigger.
+3. **RPC health** — sustained multicall failures point at Alchemy; check the
+   Alchemy status and `multicall_batch_size_count{service_name="prime-allocation-indexer"}`.
+4. **DB writes** — FK/constraint errors on `allocation_position` /
+   `token_total_supply`; check the Postgres dashboard and pod logs.
+
+### Common causes
+
+- Contract regeneration / new axis-synome entry with a token type the source
+  registry does not handle -> add the source or fix the entry, then redeploy.
+- Alchemy RPC timeouts / rate limits -> usually self-clears; investigate if
+  sustained.
+- DB write error (constraint, pool exhaustion) -> inspect the failing block.
+- Per-chain queue outage — the chain's SQS/SNS wiring broke; check upstream.
+
+### Verify recovery
+
+`rate(blocks_processed_total{service_name="prime-allocation-indexer", status="error"}[10m]) < 0.1`
+for the affected chain.
+
+---
+
+## VectorAllocationTrackerBlockLatencyHigh
+
+**Severity:** warning · **For:** 15m
+
+### What it means
+
+p99 block processing duration (`processing_duration_seconds`) exceeds 3 seconds
+sustained for 15 minutes on the labelled `chain`. The indexer is degraded; blocks
+risk SQS visibility-timeout redelivery and downstream allocation state lags. The
+histogram uses seconds buckets (`telemetry.SecondsDurationBuckets`), so the p99
+resolves honestly instead of clamping at 4.95s the way the OTel ms-scale default
+buckets would.
+
+### First checks
+
+1. **Multicall/RPC latency** — per-block position reads and the periodic sweep
+   issue batched multicalls to Alchemy; high latency there dominates block
+   duration. Check `multicall_batch_size_count{service_name="prime-allocation-indexer"}`
+   and the Alchemy status.
+2. **Sweep cadence** — the sweep (every `SweepEveryNBlocks`, default 75) reads
+   *every* tracked entry in one multicall, so its blocks are the heaviest and sit
+   at the top of the p99. A larger entry set or a shorter `SWEEP_BLOCKS`
+   multiplies round-trips; check the config and the `entries` count in the startup
+   log.
+3. **DB write latency** — confirm TimescaleDB is not under I/O pressure (Postgres
+   dashboard).
+4. **Pod CPU/memory** — `kubectl top pod -n vector -l app=allocation-tracker`.
+
+### Common causes
+
+- Alchemy RPC degraded -> coordinate with infra; consider a fallback RPC.
+- Sweep interval too short for the entry count -> raise `SWEEP_BLOCKS`.
+- TimescaleDB I/O contention -> investigate concurrent write patterns.
+
+### Verify recovery
+
+`histogram_quantile(0.99, sum by (chain, le) (rate(processing_duration_seconds_bucket{service_name="prime-allocation-indexer"}[10m]))) < 3`
+for the affected chain.
+
+---
+
 ## VectorAllocationUnderlyingValueFailures
 
 **Severity:** warning · **For:** 30m
