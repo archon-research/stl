@@ -20,6 +20,11 @@
 -- parent_entity_id / ultimate_parent_id are soft refs to entity_master.entity_id (an SCD2 natural
 -- key is non-unique, so it cannot be an FK target); resolve them via entity_master_current.
 --
+-- pipeline_prime_id / pipeline_protocol_id are intentionally NOT FK-constrained to prime(id) /
+-- protocol(id): a real FK would delete-couple this append-only master to pipeline reseeds -- the
+-- integration harness runs TRUNCATE protocol CASCADE, which would then try to truncate entity_master
+-- and fail on the revoked TRUNCATE. The bridges are validated by the loader (VEC-418), not declaratively.
+--
 -- Phase 1 is a shell: pipeline_* bridges and the mandatory fields are populated; external attributes
 -- (legal_name, LEI, domicile, the real entity_type) are curated later. Data load is VEC-418.
 -- No `SET search_path` here: like every other table migration, objects land in the connection's
@@ -95,6 +100,10 @@ COMMENT ON COLUMN entity_master.approved_by IS 'Audit. 4-eyes approver.';
 -- (entity_master_pkey) above. Two same-day corrections are distinguished by processing_version, and
 -- the current view breaks ties on it. The loader (VEC-418) owns monotonic processing_version
 -- assignment per entity_id; a collision fails hard on the primary key rather than silently merging.
+-- Holder unification (VEC-400) additionally requires at most ONE current entity per pipeline_prime_id
+-- (and per BLOCKCHAIN_ADDRESS code, VEC-414). Per-current-version uniqueness is not declaratively
+-- expressible, so the loader (VEC-418) enforces it and covers it with an integration test; a duplicate
+-- would fan out the entity_master_current join and double positions downstream.
 -- Current-version lookup (the ORDER BY of entity_master_current).
 CREATE INDEX IF NOT EXISTS em_current_idx ON entity_master (entity_id, valid_from DESC, processing_version DESC);
 -- FK-support and bridge-resolution indexes not covered by a leading PK column.
@@ -102,7 +111,9 @@ CREATE INDEX IF NOT EXISTS em_type_idx ON entity_master (entity_type);
 CREATE INDEX IF NOT EXISTS em_prime_idx ON entity_master (pipeline_prime_id) WHERE pipeline_prime_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS em_protocol_idx ON entity_master (pipeline_protocol_id) WHERE pipeline_protocol_id IS NOT NULL;
 
--- Current view: the latest version per entity_id.
+-- Both views below are SELECT *, so their column list is frozen at creation: a future
+-- ALTER TABLE entity_master ADD COLUMN must also CREATE OR REPLACE both views, or the new column will
+-- silently not appear in them (these views are the intended read surface).
 -- Current view: the latest EFFECTIVE version per entity_id. Bounded on CURRENT_DATE so a
 -- future-dated version does NOT become current until its valid_from arrives.
 CREATE OR REPLACE VIEW entity_master_current AS
