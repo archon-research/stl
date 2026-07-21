@@ -13,7 +13,7 @@ from typing import ClassVar, Literal
 # endpoint — so the two stay in lock-step. Defined in the domain layer (not the
 # API) to keep the dependency direction inward.
 ShareDataUnpricedReason = Literal["share_data_missing", "share_data_stale"]
-AllocationUnpricedReason = ShareDataUnpricedReason | Literal["price_data_missing"]
+AllocationUnpricedReason = ShareDataUnpricedReason | Literal["price_data_missing", "adapter_data_missing"]
 
 
 class AllocationUnpricedError(Exception):
@@ -59,6 +59,21 @@ class PriceDataMissingError(AllocationUnpricedError):
     """
 
     code = "price_data_missing"
+
+
+class AdapterDataMissingError(AllocationUnpricedError):
+    """Raised when a Morpho VaultV2's active adapters are not indexed yet.
+
+    A VaultV2 holds its assets in liquidity adapters, never directly, so its
+    collateral (and thus its liquidation params) is reachable only through those
+    adapters. Until the adapter rows are backfilled, no params resolve and every
+    collateral item would silently drop — a confident ``rrc=0`` with applied=True.
+    Degrade the allocation to unpriced instead. Kept distinct from a genuinely idle
+    v3 vault (adapters present, no collateral markets), which resolves to a real
+    ``rrc=0`` rather than a data gap.
+    """
+
+    code = "adapter_data_missing"
 
 
 class InvalidOverrideError(ValueError):

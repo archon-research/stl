@@ -1,0 +1,12 @@
+{
+  "address": "0xc7cdcfdefc64631ed6799c95e3b110cd42f2bd22",
+  "symbol": "sparkUSDTbc",
+  "network": "ethereum",
+  "wallet_address": "0x1601843c5e9bc251a3272907010afa41fa18347e",
+  "balance": "20000000.00",
+  "assets": [
+    {"symbol": "USDT", "amount": "10000000.00"},
+    {"symbol": "WETH", "amount": "6000000.00"},
+    {"symbol": "WBTC", "amount": "4000000.00"}
+  ]
+}
