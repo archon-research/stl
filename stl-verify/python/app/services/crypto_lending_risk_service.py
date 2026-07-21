@@ -13,7 +13,7 @@ from app.domain.entities.risk import (
     RiskEnrichedCollateral,
     RrcResult,
 )
-from app.domain.exceptions import InvalidOverrideError
+from app.domain.exceptions import InvalidOverrideError, PriceDataMissingError
 from app.logging import get_logger
 from app.ports.crypto_lending_reader import CryptoLendingReader
 from app.risk_engine.crypto_lending import gap_sweep
@@ -280,6 +280,16 @@ class CryptoLendingRiskService:
             # the prefetched share-lookup error here would surface 503s for
             # warm-up/uncovered assets that previously returned 200.
             return breakdown.backed_asset_id, []
+
+        if all(item.price_usd is None for item in breakdown.items):
+            # A non-empty breakdown with no priced row means the backed asset's loan
+            # token has no USD price (Morpho): backing_value is raw loan-token units,
+            # not USD, so nothing here is modellable. Fail as price_data_missing so the
+            # prime endpoint degrades this allocation to *unpriced* rather than a
+            # misleading fully-covered rrc=0. A partially-priced breakdown is not
+            # affected — its priced rows compute, and only individually unpriced rows
+            # drop at enrichment, matching the Aave repo.
+            raise PriceDataMissingError(f"no priced collateral for backed_asset_id={breakdown.backed_asset_id}")
 
         if prime_id is not None:
             # ``compute_with_share`` plumbs a pre-fetched share (or a

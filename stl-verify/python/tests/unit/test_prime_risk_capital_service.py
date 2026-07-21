@@ -365,6 +365,66 @@ async def test_prime_compute_swallows_share_error_for_empty_breakdown():
 
 
 @pytest.mark.asyncio
+async def test_prime_compute_degrades_price_data_missing_to_unpriced():
+    """A vault whose loan token has no USD price degrades to unpriced.
+
+    An all-unpriced breakdown (every ``price_usd`` None) means the loan token
+    itself is unpriced, so backing_value is raw loan-token units, not USD. The
+    allocation must be reported as unpriced (``price_data_missing``) rather than a
+    misleading fully-covered ``rrc=0``, while the rest of the prime still prices.
+    """
+    from app.domain.entities.backed_breakdown import BackedBreakdown, CollateralContribution
+
+    positions = [
+        make_receipt_token_position(receipt_token_id=1, symbol="mUNPX", amount_usd=Decimal("100")),
+        make_receipt_token_position(receipt_token_id=2, symbol="aDAI", amount_usd=Decimal("200")),
+    ]
+    reader = AsyncMock(spec=PostgresCryptoLendingReader)
+    reader.get_receipt_token.side_effect = lambda aid: {1: _info(1, 777), 2: _info(2, 888)}[aid]
+    reader.batch_get_shares.return_value = {1: Decimal("1"), 2: Decimal("1")}
+    unpriced_breakdown = BackedBreakdown(
+        backed_asset_id=1,
+        items=(
+            CollateralContribution(
+                token_id=99,
+                symbol="UNPX",
+                backing_value=Decimal("100"),
+                backing_pct=Decimal("100"),
+                price_usd=None,
+            ),
+        ),
+    )
+    priced_breakdown = BackedBreakdown(
+        backed_asset_id=2,
+        items=(
+            CollateralContribution(
+                token_id=88,
+                symbol="WETH",
+                backing_value=Decimal("1"),
+                backing_pct=Decimal("100"),
+                price_usd=Decimal("2000"),
+            ),
+        ),
+    )
+    reader.batch_get_breakdowns.return_value = {1: unpriced_breakdown, 2: priced_breakdown}
+    service = _service(_repo(positions, Decimal("1000")), _FakeRegistry([_crypto_lending_service(reader)]))
+
+    with patch("app.services.prime_risk_capital_service.logger") as mock_logger:
+        result = await service.compute(_PRIME)  # must not raise
+
+    by_id = {a.receipt_token_id: a for a in result.per_allocation}
+    assert by_id[1].applied is False
+    assert by_id[1].required_risk_capital_usd is None
+    assert by_id[1].unpriced_reason == "price_data_missing"
+    assert by_id[2].applied is True
+    # The unpriced allocation still counts toward exposure, but not modeled exposure.
+    assert result.exposure_usd == Decimal("300")
+    assert result.modeled_exposure_usd == Decimal("200")
+    # The data gap is logged, not silently masked.
+    mock_logger.warning.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_prime_compute_unaffected_for_non_crypto_lending_models():
     """The legacy ``model.compute`` path must remain unchanged for non-crypto-lending models.
 
