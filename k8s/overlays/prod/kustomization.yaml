@@ -209,21 +209,3 @@ patches:
       - op: add
         path: /metadata/annotations/tailscale.com~1tags
         value: tag:k8s-external
-  # The kraken and coinbase order book pods are CPU-bound above the base 200m
-  # limit (staging measured ~200m coinbase / ~100m kraken sustained, with spikes
-  # throttled at 200m — see the matching staging patch). Ship prod with the same
-  # 500m headroom; okx stays on the base limit (~7m).
-  - target:
-      kind: Deployment
-      name: cex-orderbook-indexer-kraken
-    patch: |
-      - op: replace
-        path: /spec/template/spec/containers/0/resources/limits/cpu
-        value: "500m"
-  - target:
-      kind: Deployment
-      name: cex-orderbook-indexer-coinbase
-    patch: |
-      - op: replace
-        path: /spec/template/spec/containers/0/resources/limits/cpu
-        value: "500m"
