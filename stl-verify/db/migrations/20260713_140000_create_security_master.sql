@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS security_master (
     country_of_risk      text,
     issuer_entity_id     text,                          -- soft ref to entity_master.entity_id (no FK: SCD2 key non-unique; resolve via entity_master_current)
     security_status      text NOT NULL DEFAULT 'ACTIVE',
-    is_tokenised         boolean,                        -- TRUE = on-chain tokenised form of a traditional asset
+    is_tokenised         boolean NOT NULL DEFAULT false,  -- TRUE = on-chain tokenised form of a traditional asset (no unknown state)
     token_standard       text,                           -- ERC-20 / ERC-1400 / ERC-3643 / BENJI / ...; only when tokenised
     credit_tranche       text,                           -- structured-credit seniority (facet)
     credit_quality       text,                           -- IG / HY / PRIME (facet)
@@ -96,7 +96,7 @@ COMMENT ON COLUMN security_master.country_of_issuance IS 'FK->country_ref.countr
 COMMENT ON COLUMN security_master.country_of_risk IS 'FK->country_ref.country_code. Underlying economic-exposure country.';
 COMMENT ON COLUMN security_master.issuer_entity_id IS 'Soft ref to entity_master.entity_id (no FK: SCD2 key is non-unique; resolve via entity_master_current).';
 COMMENT ON COLUMN security_master.security_status IS 'ACTIVE / SUSPENDED / MATURED / DELISTED.';
-COMMENT ON COLUMN security_master.is_tokenised IS 'TRUE = on-chain tokenised form of a traditional asset.';
+COMMENT ON COLUMN security_master.is_tokenised IS 'TRUE = on-chain tokenised form of a traditional asset. NOT NULL, defaults false (no unknown tri-state).';
 COMMENT ON COLUMN security_master.token_standard IS 'ERC-20 / ERC-1400 / ERC-3643 / BENJI / ...; only when is_tokenised.';
 COMMENT ON COLUMN security_master.credit_tranche IS 'Structured-credit seniority facet (AAA..B, EQUITY).';
 COMMENT ON COLUMN security_master.credit_quality IS 'Credit-quality facet (INVESTMENT_GRADE / HIGH_YIELD / PRIME).';
@@ -139,12 +139,45 @@ ORDER BY security_id, valid_from DESC, processing_version DESC;
 -- that predicate at CURRENT_DATE, so a future-dated version is NOT current until effective, and a
 -- same-day correction (two versions sharing valid_from) yields a zero-width window on the superseded
 -- row so it is never current.
+-- Columns are listed explicitly (not SELECT *) so a later ALTER TABLE security_master ADD COLUMN does
+-- not shift the trailing computed columns (valid_to_exclusive, is_current) in the * expansion and break
+-- CREATE OR REPLACE VIEW (Simon review). A new base column is surfaced here by editing this list.
 CREATE OR REPLACE VIEW security_master_versions AS
-SELECT *,
-    (valid_from <= CURRENT_DATE
-        AND (valid_to_exclusive IS NULL OR CURRENT_DATE < valid_to_exclusive)) AS is_current
+SELECT
+    v.security_id,
+    v.processing_version,
+    v.valid_from,
+    v.change_reason,
+    v.security_name,
+    v.ticker,
+    v.isin,
+    v.cusip,
+    v.sedol,
+    v.figi,
+    v.asset_class,
+    v.security_type,
+    v.security_subtype,
+    v.currency,
+    v.country_of_issuance,
+    v.country_of_risk,
+    v.issuer_entity_id,
+    v.security_status,
+    v.is_tokenised,
+    v.token_standard,
+    v.credit_tranche,
+    v.credit_quality,
+    v.collateral_pool,
+    v.agency_status,
+    v.backing,
+    v.source_system,
+    v.created_at,
+    v.created_by,
+    v.approved_by,
+    v.valid_to_exclusive,
+    (v.valid_from <= CURRENT_DATE
+        AND (v.valid_to_exclusive IS NULL OR CURRENT_DATE < v.valid_to_exclusive)) AS is_current
 FROM (
-    SELECT *,
+    SELECT security_master.*,
         lead(valid_from) OVER (PARTITION BY security_id ORDER BY valid_from, processing_version) AS valid_to_exclusive
     FROM security_master
 ) v;
