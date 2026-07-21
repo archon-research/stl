@@ -23,6 +23,8 @@ resources:
   - ../../base/avalanche-allocation-tracker
   - ../../base/base-watcher
   - ../../base/base-backup-worker
+  - ../../base/base-allocation-tracker
+  - ../../base/base-oracle-price-worker
   - ../../base/optimism-watcher
   - ../../base/optimism-backup-worker
   - ../../base/unichain-watcher
@@ -124,6 +126,14 @@ images:
   - name: base-backup-worker
     # Shares the backup-worker image — same binary, different chain config via env vars
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-backup-worker
+    newTag: "63c19f312994749b1e71d6e143b7e68da48fdf97"
+  - name: base-allocation-tracker
+    # Shares the allocation-tracker image — same binary, different chain config via env vars
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-allocation-tracker
+    newTag: "63c19f312994749b1e71d6e143b7e68da48fdf97"
+  - name: base-oracle-price-worker
+    # Shares the oracle-price-worker image — same binary, different chain config via env vars
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-oracle-price-worker
     newTag: "63c19f312994749b1e71d6e143b7e68da48fdf97"
   - name: optimism-backup-worker
     # Shares the backup-worker image — same binary, different chain config via env vars
