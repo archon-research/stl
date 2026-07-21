@@ -5,6 +5,7 @@ package migrator_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -88,6 +89,40 @@ func TestEntityRefCodes(t *testing.T) {
 			}
 			if pgErr.Code != g.code {
 				t.Errorf("SQLSTATE = %s, want %s", pgErr.Code, g.code)
+			}
+		})
+	}
+
+	// A future-dated mapping is not yet effective, so entity_ref_codes_current (bounded on CURRENT_DATE)
+	// must not resolve it. (The bound was added on review.)
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO entity_ref_codes (code_type, code_value, entity_id, valid_from, change_reason)
+		 VALUES ('LEI', '529900T8BM49AURSDO55', 'em-000500', CURRENT_DATE + 1, 'future-dated')`); err != nil {
+		t.Fatalf("future-dated insert: %v", err)
+	}
+	var futureCount int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*)::int FROM entity_ref_codes_current
+		 WHERE code_type = 'LEI' AND code_value = '529900T8BM49AURSDO55'`).Scan(&futureCount); err != nil {
+		t.Fatalf("read future-dated current: %v", err)
+	}
+	if futureCount != 0 {
+		t.Errorf("future-dated code resolved as current (count=%d), want 0", futureCount)
+	}
+
+	// Append-only is enforced hard by the immutability trigger, which fires for every role (including
+	// the superuser the harness runs as, unlike the REVOKE), so UPDATE and DELETE both raise.
+	for _, m := range []struct{ name, sql string }{
+		{"UPDATE", `UPDATE entity_ref_codes SET entity_id = 'em-hacked'
+			WHERE code_type = 'BLOCKCHAIN_ADDRESS' AND code_value = 'de0b295669a9fd93d5f28d9ec85e40f4cb697bae'`},
+		{"DELETE", `DELETE FROM entity_ref_codes
+			WHERE code_type = 'BLOCKCHAIN_ADDRESS' AND code_value = 'de0b295669a9fd93d5f28d9ec85e40f4cb697bae'`},
+	} {
+		t.Run("append-only "+m.name, func(t *testing.T) {
+			if _, err := pool.Exec(ctx, m.sql); err == nil {
+				t.Fatalf("expected %s to be rejected, got none", m.name)
+			} else if !strings.Contains(err.Error(), "append-only") {
+				t.Errorf("error = %v, want it to mention append-only", err)
 			}
 		})
 	}

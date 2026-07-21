@@ -93,4 +93,22 @@ BEGIN
     END LOOP;
 END $$;
 
+-- Hard append-only: the REVOKE above is bypassed by a superuser (so it is unverified in CI and does
+-- not bind an owner/superuser session). A BEFORE UPDATE OR DELETE trigger raises for every role,
+-- making immutability enforceable and testable. INSERT is untouched; a re-point is a new INSERT with
+-- a higher processing_version. Owner UPDATE stays revoked (unlike the reference tables in
+-- 20260714_160000): nothing FKs this table, so there is no FK RI row-lock probe needing it (the
+-- security_instrument_bridge carries the same note) -- the trigger also keeps the guard intact if a
+-- future migration ever grants owner UPDATE.
+CREATE OR REPLACE FUNCTION entity_ref_codes_immutable() RETURNS trigger
+  LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'entity_ref_codes is append-only; % is not allowed (re-point via an INSERT with a higher processing_version)', TG_OP;
+END $$;
+COMMENT ON FUNCTION entity_ref_codes_immutable() IS 'Raises on UPDATE/DELETE of entity_ref_codes. Hard append-only guard: fires for every role, unlike the superuser-bypassed REVOKE. Row locks do not fire row triggers, so reads/inserts are untouched.';
+
+DROP TRIGGER IF EXISTS erc_immutable ON entity_ref_codes;
+CREATE TRIGGER erc_immutable BEFORE UPDATE OR DELETE ON entity_ref_codes
+    FOR EACH ROW EXECUTE FUNCTION entity_ref_codes_immutable();
+
 INSERT INTO migrations (filename) VALUES ('20260714_130000_create_entity_ref_codes.sql') ON CONFLICT (filename) DO NOTHING;
