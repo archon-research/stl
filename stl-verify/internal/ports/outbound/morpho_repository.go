@@ -53,8 +53,9 @@ type MorphoRepository interface {
 	MarkAdapterRemoved(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, removedAtBlock int64) error
 
 	// GetActiveAdapter retrieves the active (not-yet-removed) adapter for a vault
-	// and address. Returns nil, nil if there is no active adapter.
-	GetActiveAdapter(ctx context.Context, morphoVaultID int64, address []byte) (*entity.MorphoAdapter, error)
+	// and address, reading within the caller's transaction so it sees writes made
+	// earlier in the same tx. Returns nil, nil if there is no active adapter.
+	GetActiveAdapter(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte) (*entity.MorphoAdapter, error)
 
 	// GetActiveAdaptersByVault retrieves all currently-active adapters for a vault.
 	GetActiveAdaptersByVault(ctx context.Context, morphoVaultID int64) ([]*entity.MorphoAdapter, error)
@@ -64,11 +65,6 @@ type MorphoRepository interface {
 
 	// SaveVaultCap saves a VaultV2 allocation-cap snapshot within an external transaction.
 	SaveVaultCap(ctx context.Context, tx pgx.Tx, vaultCap *entity.MorphoVaultCap) error
-
-	// GetLatestVaultCap retrieves the current cap state for a (vault, cap_id) —
-	// the highest (block_number, block_version, processing_version) row — within
-	// the caller's transaction. Returns nil, nil if the cap doesn't exist.
-	GetLatestVaultCap(ctx context.Context, tx pgx.Tx, morphoVaultID int64, capID []byte) (*entity.MorphoVaultCap, error)
 
 	// UpdateVaultFeeConfig applies a partial fee-configuration update to a vault.
 	// Nil fields in the update leave their columns untouched; an unknown vault errors.

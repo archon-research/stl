@@ -1826,6 +1826,74 @@ func TestGetAdapterRealAssets_MulticallError(t *testing.T) {
 	}
 }
 
+// TestGetVaultCaps_PinsToBlockHash asserts absoluteCap()/relativeCap() are read
+// together off the vault as one hash-pinned state read (VEC-471), and both values
+// round-trip — including a max-uint128 absolute cap.
+func TestGetVaultCaps_PinsToBlockHash(t *testing.T) {
+	h := newTestHarness(t)
+	vault := common.HexToAddress("0xc7CDcFDEfC64631ED6799C95e3b110cd42F2bD22")
+	capID := [32]byte{0x01, 0x02, 0x03}
+	wantAbs := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 128), big.NewInt(1))
+	wantRel := big.NewInt(1_000_000_000_000_000_000)
+
+	var gotHash common.Hash
+	viaHash := false
+	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return nil, fmt.Errorf("getVaultCaps must call ExecuteAtHash, not Execute")
+	}
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+		viaHash = true
+		gotHash = blockHash
+		if len(calls) != 2 || calls[0].Target != vault || calls[1].Target != vault || calls[0].AllowFailure || calls[1].AllowFailure {
+			t.Errorf("unexpected calls: %+v", calls)
+		}
+		return []outbound.Result{
+			{Success: true, ReturnData: h.packUint256(wantAbs)},
+			{Success: true, ReturnData: h.packUint256(wantRel)},
+		}, nil
+	}
+
+	gotAbs, gotRel, err := h.svc.blockchainSvc.getVaultCaps(context.Background(), vault, capID, testBlockHash)
+	if err != nil {
+		t.Fatalf("getVaultCaps: %v", err)
+	}
+	if !viaHash {
+		t.Fatal("did not call ExecuteAtHash")
+	}
+	if gotHash != testBlockHash {
+		t.Errorf("pinned to %s, want %s", gotHash, testBlockHash)
+	}
+	if gotAbs.Cmp(wantAbs) != 0 {
+		t.Errorf("absoluteCap = %s, want %s", gotAbs, wantAbs)
+	}
+	if gotRel.Cmp(wantRel) != 0 {
+		t.Errorf("relativeCap = %s, want %s", gotRel, wantRel)
+	}
+}
+
+func TestGetVaultCaps_SubResultFailureIsError(t *testing.T) {
+	h := newTestHarness(t)
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		return []outbound.Result{
+			{Success: true, ReturnData: h.packUint256(big.NewInt(1))},
+			{Success: false, ReturnData: nil}, // relativeCap reverted
+		}, nil
+	}
+	if _, _, err := h.svc.blockchainSvc.getVaultCaps(context.Background(), common.HexToAddress("0x1"), [32]byte{0x01}, testBlockHash); err == nil {
+		t.Fatal("expected error when a cap getter reverts")
+	}
+}
+
+func TestGetVaultCaps_MulticallError(t *testing.T) {
+	h := newTestHarness(t)
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		return nil, errors.New("rpc failure")
+	}
+	if _, _, err := h.svc.blockchainSvc.getVaultCaps(context.Background(), common.HexToAddress("0x1"), [32]byte{0x01}, testBlockHash); err == nil {
+		t.Fatal("expected error on multicall failure")
+	}
+}
+
 // TestGetAdapterType_NumberPinned asserts adapter classification is a plain
 // (number-pinned) Execute — adapter identity is immutable, same rationale as
 // getMarketParams (VEC-471).
