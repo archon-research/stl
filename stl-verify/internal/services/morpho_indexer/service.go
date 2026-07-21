@@ -44,6 +44,25 @@ func MorphoBlueDeployBlock(chainID int64) (int64, error) {
 	return block, nil
 }
 
+// vaultV2FactoryDeployBlocks maps chain IDs to the block at which the Morpho
+// VaultV2 factory (0xA1D94F746dEfa1928926b84fB2596c06926C0405) was deployed.
+// Verified on-chain: the factory has no code at 23375072 and code at 23375073.
+// Used by the morpho-vault-indexer backfiller's --from-v2-deploy flag to bound
+// a V2 replay to the earliest block any VaultV2 could exist.
+var vaultV2FactoryDeployBlocks = map[int64]int64{
+	1: 23_375_073, // Ethereum mainnet
+}
+
+// VaultV2FactoryDeployBlock returns the VaultV2 factory deploy block for the
+// given chain ID.
+func VaultV2FactoryDeployBlock(chainID int64) (int64, error) {
+	block, ok := vaultV2FactoryDeployBlocks[chainID]
+	if !ok {
+		return 0, fmt.Errorf("unsupported chain ID %d for Morpho VaultV2: no known factory deploy block", chainID)
+	}
+	return block, nil
+}
+
 // Config holds service configuration.
 type Config struct {
 	shared.SQSConsumerConfig
@@ -99,7 +118,48 @@ func NewService(
 	if err := validateDependencies(consumer, cache, multicallClient, txManager, userRepo, protocolRepo, tokenRepo, morphoRepo, eventRepo, receiptTokenRepo); err != nil {
 		return nil, fmt.Errorf("validating dependencies: %w", err)
 	}
+	return newService(config, consumer, cache, multicallClient, txManager, userRepo, protocolRepo, tokenRepo, morphoRepo, eventRepo, receiptTokenRepo)
+}
 
+// NewReplayService builds a Service wired only for offline replay of
+// already-persisted VaultV2 vaults' structured events — the morpho-vault-indexer
+// backfiller's V2 replay phase. It shares NewService's internals but omits the
+// SQS consumer and block cache: replay reads receipts from S3 and drives logs
+// through ReplayMetaMorphoLog directly, never through the live SQS loop, so Start
+// must not be called on the result. userRepo / tokenRepo / receiptTokenRepo are
+// likewise absent because the replayed adapter / cap / fee events never touch
+// them (share-accounting Deposit/Withdraw/Transfer writes are out of the replay's
+// scope).
+func NewReplayService(
+	config Config,
+	multicallClient outbound.Multicaller,
+	txManager outbound.TxManager,
+	protocolRepo outbound.ProtocolRepository,
+	morphoRepo outbound.MorphoRepository,
+	eventRepo outbound.EventRepository,
+) (*Service, error) {
+	if err := validateReplayDependencies(multicallClient, txManager, protocolRepo, morphoRepo, eventRepo); err != nil {
+		return nil, fmt.Errorf("validating replay dependencies: %w", err)
+	}
+	return newService(config, nil, nil, multicallClient, txManager, nil, protocolRepo, nil, morphoRepo, eventRepo, nil)
+}
+
+// newService assembles the Service from dependencies already validated by the
+// live (NewService) or replay (NewReplayService) constructor. Ports the replay
+// path doesn't use may be nil; the replay entry point never dereferences them.
+func newService(
+	config Config,
+	consumer outbound.SQSConsumer,
+	cache outbound.BlockCacheReader,
+	multicallClient outbound.Multicaller,
+	txManager outbound.TxManager,
+	userRepo outbound.UserRepository,
+	protocolRepo outbound.ProtocolRepository,
+	tokenRepo outbound.TokenRepository,
+	morphoRepo outbound.MorphoRepository,
+	eventRepo outbound.EventRepository,
+	receiptTokenRepo outbound.ReceiptTokenRepository,
+) (*Service, error) {
 	config.SQSConsumerConfig.ApplyDefaults()
 	if err := config.SQSConsumerConfig.Validate(); err != nil {
 		return nil, fmt.Errorf("validating config: %w", err)
@@ -149,9 +209,8 @@ func NewService(
 func (s *Service) Start(ctx context.Context) error {
 	s.ctx, s.cancel = context.WithCancel(ctx)
 
-	// Load known vaults from database
-	if err := s.vaultRegistry.LoadFromDB(ctx, s.morphoRepo, s.config.ChainID); err != nil {
-		return fmt.Errorf("loading vault registry: %w", err)
+	if err := s.LoadVaultRegistry(ctx); err != nil {
+		return err
 	}
 
 	s.wg.Go(func() {
@@ -1595,6 +1654,31 @@ func validateDependencies(
 	}
 	if receiptTokenRepo == nil {
 		return fmt.Errorf("receiptTokenRepo is required")
+	}
+	return nil
+}
+
+func validateReplayDependencies(
+	multicallClient outbound.Multicaller,
+	txManager outbound.TxManager,
+	protocolRepo outbound.ProtocolRepository,
+	morphoRepo outbound.MorphoRepository,
+	eventRepo outbound.EventRepository,
+) error {
+	if multicallClient == nil {
+		return fmt.Errorf("multicallClient is required")
+	}
+	if txManager == nil {
+		return fmt.Errorf("txManager is required")
+	}
+	if protocolRepo == nil {
+		return fmt.Errorf("protocolRepo is required")
+	}
+	if morphoRepo == nil {
+		return fmt.Errorf("morphoRepo is required")
+	}
+	if eventRepo == nil {
+		return fmt.Errorf("eventRepo is required")
 	}
 	return nil
 }
