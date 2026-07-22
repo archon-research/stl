@@ -1017,6 +1017,10 @@
       "type": "infrastructure",
       "owner": "infra"
     },
+    "block_time": {
+      "type": "infrastructure",
+      "owner": "infra"
+    },
     "borrower": {
       "type": "raw_pipeline",
       "owner": "lending"
