@@ -18,15 +18,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-// Status labels on the per-block liveness metrics (blocks_processed_total,
-// processing_duration_seconds). success = the block was consumed and its
-// snapshots persisted; error = processing failed and the SQS message is
-// redelivered.
-const (
-	statusSuccess = "success"
-	statusError   = "error"
-)
-
 type TransactionReceipt struct {
 	TransactionHash string      `json:"transactionHash"`
 	BlockNumber     string      `json:"blockNumber"`
@@ -271,9 +262,9 @@ func (s *Service) recordBlockMetrics(ctx context.Context, start time.Time, err e
 	if s.metrics == nil {
 		return
 	}
-	status := statusSuccess
+	status := outbound.StatusSuccess
 	if err != nil {
-		status = statusError
+		status = outbound.StatusError
 	}
 	s.metrics.RecordBlockProcessed(ctx, status)
 	s.metrics.RecordProcessingLatency(ctx, time.Since(start), status)

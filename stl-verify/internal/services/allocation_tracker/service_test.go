@@ -707,8 +707,8 @@ func mustMarshalReceipts(t *testing.T, receipts []TransactionReceipt) json.RawMe
 // blocks_processed_total sample and one processing_duration_seconds observation
 // carrying {chain,status}, on both the success and error paths. These are the
 // per-block liveness + latency signals the VectorAllocationTracker{Stalled,
-// ErrorsHigh,BlockLatencyHigh} alerts key on, so the exact metric and label names
-// must not drift from the alert expressions.
+// ErrorRatioHigh,BlockLatencyHigh} alerts key on, so the exact metric and label
+// names must not drift from the alert expressions.
 func TestProcessBlock_RecordsLivenessMetrics(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -720,13 +720,13 @@ func TestProcessBlock_RecordsLivenessMetrics(t *testing.T) {
 			name:       "success path records success",
 			buildSvc:   newCleanBlockSvc,
 			wantErr:    false,
-			wantStatus: statusSuccess,
+			wantStatus: outbound.StatusSuccess,
 		},
 		{
 			name:       "error path records error",
 			buildSvc:   newCacheMissSvc,
 			wantErr:    true,
-			wantStatus: statusError,
+			wantStatus: outbound.StatusError,
 		},
 	}
 

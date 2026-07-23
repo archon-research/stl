@@ -1292,6 +1292,14 @@ is the honest per-block liveness signal. The silent data-quality hole the error
 path cannot catch keeps its own alert (`VectorAllocationUnderlyingValueFailures`,
 below).
 
+**`<deployment>` / `app` label per chain:** each per-chain instance has its **own**
+Deployment and `app` label equal to its deployment name — mainnet →
+`allocation-tracker`, avalanche → `avalanche-allocation-tracker`, base →
+`base-allocation-tracker`. The Down alert carries a `deployment` label (use
+`{{ $labels.deployment }}` in its commands); the chain-scoped alerts below carry
+only `chain`, so substitute the matching `<deployment>` from this mapping in their
+`kubectl` selectors (`-l app=allocation-tracker` matches mainnet pods only).
+
 ---
 
 ## VectorAllocationTrackerDown
@@ -1309,12 +1317,12 @@ it fires even when the metrics export is the thing that broke.
 
 ### First checks (≤5 min)
 
-1. **Pod status** — `kubectl -n vector get pods -l app=allocation-tracker` (the
-   `app` label is shared across all per-chain instances).
+1. **Pod status** — `kubectl -n vector get pods -l app={{ $labels.deployment }}`
+   (each instance's `app` label equals its deployment name).
 2. **Why it's not ready** — `kubectl -n vector describe deployment/{{ $labels.deployment }}`
-   and `kubectl -n vector logs -l app=allocation-tracker --previous` for a crash
-   loop (missing queue URL, DB/Redis/RPC dial failure, empty primes table, bad
-   axis-synome contract load).
+   and `kubectl -n vector logs -l app={{ $labels.deployment }} --previous` for a
+   crash loop (missing queue URL, DB/Redis/RPC dial failure, empty primes table,
+   bad axis-synome contract load).
 3. **Secrets/config present** — the worker requires `AWS_SQS_QUEUE_URL`,
    `DATABASE_URL`, `ALCHEMY_API_KEY`, `REDIS_ADDR`, `S3_BUCKET`, `DEPLOY_ENV`. A
    missing key from the `allocation-tracker` ExternalSecret crashes it on startup.
@@ -1369,9 +1377,10 @@ every block.
 1. **Distinguish the cases** — is `VectorAllocationTrackerDown` also firing? If so
    the process is down (treat as Down). If not, the pod is alive: a wedged loop or
    a dead metrics export.
-2. **Recent logs** — `kubectl -n vector logs -l app=allocation-tracker --tail=200`.
-   Look for a repeating error on one message, `context deadline exceeded` against
-   Alchemy, or silence (poll loop stopped).
+2. **Recent logs** — `kubectl -n vector logs -l app=<deployment> --tail=200`
+   (see the intro's chain→`<deployment>` mapping). Look for a repeating error on
+   one message, `context deadline exceeded` against Alchemy, or silence (poll loop
+   stopped).
 3. **SQS backlog** — check the allocation-tracker SQS queue depth. A growing
    `ApproximateNumberOfMessages` while the counter is flat confirms a wedged loop.
 4. **All-error loop** — if logs show blocks being consumed but *every* one
@@ -1427,10 +1436,10 @@ fire, but its error ratio is 100% and trips this alert.
 
 ### First checks
 
-1. **Pod logs** — `kubectl -n vector logs -l app=allocation-tracker | grep -i error`.
-   Typical: `fetch observations for block`, `sweep block`, `handler:`,
-   `parse receipts`.
-2. **Recent deploys** — `kubectl -n vector rollout history deploy/{{ $labels.deployment }}`.
+1. **Pod logs** — `kubectl -n vector logs -l app=<deployment> | grep -i error`
+   (see the intro's chain→`<deployment>` mapping). Typical: `fetch observations
+   for block`, `sweep block`, `handler:`, `parse receipts`.
+2. **Recent deploys** — `kubectl -n vector rollout history deploy/<deployment>`.
    A source-registry or contract-regen change (a new token type, changed
    axis-synome entries) is a common trigger.
 3. **RPC health** — sustained multicall failures point at Alchemy; check the
@@ -1481,7 +1490,8 @@ buckets would.
    log.
 3. **DB write latency** — confirm TimescaleDB is not under I/O pressure (Postgres
    dashboard).
-4. **Pod CPU/memory** — `kubectl top pod -n vector -l app=allocation-tracker`.
+4. **Pod CPU/memory** — `kubectl top pod -n vector -l app=<deployment>` (see the
+   intro's chain→`<deployment>` mapping).
 
 ### Common causes
 

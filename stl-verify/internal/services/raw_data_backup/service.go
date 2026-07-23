@@ -33,8 +33,10 @@ var ErrPermanent = errors.New("permanent failure")
 var errCacheMiss = errors.New("cache miss")
 
 // Processing status labels recorded via BackupMetricsRecorder.RecordBlockProcessed.
+// The success label is the shared canonical value; the rest are this worker's own
+// richer outcome vocabulary.
 const (
-	statusSuccess          = "success"
+	statusSuccess          = outbound.StatusSuccess
 	statusAlreadyBackedUp  = "already_backed_up"
 	statusRPCFallback      = "rpc_fallback"
 	statusDeadLettered     = "dead_lettered"
@@ -44,8 +46,8 @@ const (
 
 // Metric labels for processing latency.
 const (
-	latencyStatusSuccess = "success"
-	latencyStatusError   = "error"
+	latencyStatusSuccess = outbound.StatusSuccess
+	latencyStatusError   = outbound.StatusError
 )
 
 // ChainExpectation defines what data is expected for a specific chain.

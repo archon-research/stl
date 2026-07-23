@@ -133,6 +133,16 @@ func parseConfig(args []string) (cliConfig, error) {
 		}
 		cfg.visibilityTimeout = v
 	}
+	// SWEEP_BLOCKS lets the Deployment tune the sweep cadence via its configmap
+	// (it passes no args, so without this the -sweep-blocks flag default is fixed).
+	// Mirrors psm3-indexer; the BlockLatencyHigh runbook points operators here.
+	if sweepBlocksStr := env.Get("SWEEP_BLOCKS", ""); sweepBlocksStr != "" {
+		v, err := strconv.Atoi(sweepBlocksStr)
+		if err != nil {
+			return cliConfig{}, fmt.Errorf("parsing SWEEP_BLOCKS %q: %w", sweepBlocksStr, err)
+		}
+		cfg.sweepBlocks = v
+	}
 
 	chainIDStr := env.Get("CHAIN_ID", "1")
 	chainID, err := strconv.ParseInt(chainIDStr, 10, 64)

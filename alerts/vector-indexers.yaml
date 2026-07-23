@@ -871,8 +871,9 @@ groups:
       # (.github/workflows/alerts.yml) syncs them — the sync derives the namespace
       # from the FILENAME (vector-indexers), so a vector-allocation-tracker.yaml
       # would map to an unlisted namespace and be silently dropped. This is a
-      # separate GROUP (not appended to vector-indexers) because Mimir caps a group
-      # at 20 rules and the shared vector-indexers group is near that ceiling.
+      # separate GROUP (not appended to vector-indexers), matching this file's
+      # per-indexer group convention (and staying clear of Mimir's 20-rule group
+      # cap).
       #
       # Two names for one worker:
       #   - deployment / pod `app` label = `allocation-tracker`  (kube-state-metrics)
@@ -1010,6 +1011,7 @@ groups:
             `{{ $value | humanizePercentage }}` of block-processing attempts over
             10m while still consuming. Blocks are being redelivered without
             persisting; investigate pod logs before this turns into a stall.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorallocationtrackererrorratiohigh
 
       - alert: VectorAllocationTrackerBlockLatencyHigh
         # p99 block processing >3s for 15m. Sustained high latency means the
@@ -1039,6 +1041,7 @@ groups:
             `prime-allocation-indexer` on chain `{{ $labels.chain }}` p99 block
             processing latency is `{{ $value | printf "%.2fs" }}` over 15m. The
             indexer is degraded; expect lag in downstream allocation state.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorallocationtrackerblocklatencyhigh
 
   # curve-indexer (VEC-260) — Curve DEX pool/swap/liquidity indexer.
   - name: vector-curve-indexer
