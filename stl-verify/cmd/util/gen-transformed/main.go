@@ -27,7 +27,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/data_quality/schemamaster"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
-	"github.com/archon-research/stl/stl-verify/internal/transformgen"
+	"github.com/archon-research/stl/stl-verify/cmd/util/gen-transformed/internal/transformgen"
 )
 
 func main() {

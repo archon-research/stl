@@ -11,10 +11,10 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/data_quality/schemamaster"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
-	"github.com/archon-research/stl/stl-verify/internal/transformgen"
+	"github.com/archon-research/stl/stl-verify/cmd/util/gen-transformed/internal/transformgen"
 )
 
-const migrationPath = "../../db/migrations/20260706_140000_create_transformed_bucket1.sql"
+const migrationPath = "../../../../../db/migrations/20260706_140000_create_transformed_bucket1.sql"
 
 // TestRegenDiff is the drift gate: it migrates a fresh DB, reads the raw schema of
 // the bucket-1 tables from information_schema, regenerates the bucket-1 migration
