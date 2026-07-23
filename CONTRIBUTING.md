@@ -75,12 +75,13 @@ make skills-install
 make skills-list
 ```
 
-The generated `.codex/skills/` and `.github/skills/` directories are ignored;
-rerun `make skills-install` after pulling a skill change, then start a new
-assistant session so its skill catalogue is refreshed. When adding or editing a
-skill, change its source under `skills/`, update `Skillfile` if needed, deploy it,
-and commit the canonical source plus the checked-in `.claude/skills/` deployment
-copy.
+The generated deploy directories (`.claude/skills/`, `.codex/skills/`, and
+`.github/skills/`) are all git-ignored; rerun `make skills-install` after cloning
+or pulling a skill change, then start a new assistant session so its skill
+catalogue is refreshed. When adding or editing a skill, change its source under
+`skills/` (local skills) or the `Skillfile` (remote skills), redeploy with
+`make skills-install`, and commit the canonical source plus the
+`Skillfile`/`Skillfile.lock` — never the generated deploy copies.
 
 ---
 
