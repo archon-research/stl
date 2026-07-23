@@ -35,6 +35,9 @@ class AllocationRiskCapital:
     - ``"price_data_missing"`` — a model applies but the backed asset's loan token
       has no USD price, so its loan-token-denominated backing cannot be valued;
       the rest of the prime is still priced.
+    - ``"adapter_data_missing"`` — a model applies to a Morpho VaultV2 whose active
+      liquidity adapters are not indexed yet, so its collateral (and liquidation
+      params) is unknown; the rest of the prime is still priced.
     """
 
     receipt_token_id: int

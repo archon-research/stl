@@ -16,8 +16,10 @@ from app.adapters.postgres.aave_like_liquidation_params_repository import AaveLi
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
 from app.adapters.postgres.backed_breakdown_repository_maple import MapleBackedBreakdownRepository
 from app.adapters.postgres.backed_breakdown_repository_morpho import MorphoBackedBreakdownRepository
+from app.adapters.postgres.backed_breakdown_repository_morpho_v2 import MorphoV2BackedBreakdownRepository
 from app.adapters.postgres.crypto_lending_reader import PostgresCryptoLendingReader
 from app.adapters.postgres.morpho_liquidation_params_repository import MorphoLiquidationParamsRepository
+from app.adapters.postgres.morpho_liquidation_params_repository_v2 import MorphoV2LiquidationParamsRepository
 from app.adapters.postgres.receipt_token_repository import ReceiptTokenRepository, resolve_receipt_token_mapping
 from app.api.v1 import (
     allocations,
@@ -185,9 +187,11 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
                 receipt_token_repo=receipt_token_repo,
                 aave_breakdown_repo=AaveLikeBackedBreakdownRepository(engine),
                 morpho_breakdown_repo=MorphoBackedBreakdownRepository(engine),
+                morpho_v2_breakdown_repo=MorphoV2BackedBreakdownRepository(engine),
                 maple_breakdown_repo=MapleBackedBreakdownRepository(engine),
                 aave_liq_repo=AaveLikeLiquidationParamsRepository(engine),
                 morpho_liq_repo=MorphoLiquidationParamsRepository(engine),
+                morpho_v2_liq_repo=MorphoV2LiquidationParamsRepository(engine),
                 engine=engine,
                 allocation_share_max_stale_seconds=settings.allocation_share_max_stale_seconds,
             )

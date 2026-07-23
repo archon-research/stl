@@ -16,13 +16,15 @@ from app.adapters.postgres.allocation_share_repository import (
 )
 from app.adapters.postgres.backed_breakdown_repository_maple import MapleBackedBreakdownRepository
 from app.adapters.postgres.backed_breakdown_repository_morpho import MorphoBackedBreakdownRepository
+from app.adapters.postgres.backed_breakdown_repository_morpho_v2 import MorphoV2BackedBreakdownRepository
 from app.adapters.postgres.morpho_liquidation_params_repository import MorphoLiquidationParamsRepository
+from app.adapters.postgres.morpho_liquidation_params_repository_v2 import MorphoV2LiquidationParamsRepository
 from app.adapters.postgres.receipt_token_repository import ReceiptTokenRepository
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.backed_breakdown import BackedBreakdown
 from app.domain.entities.receipt_token import ReceiptTokenInfo
 from app.domain.entities.risk import LiquidationParams
-from app.domain.exceptions import MissingShareError
+from app.domain.exceptions import AdapterDataMissingError, AllocationUnpricedError, MissingShareError
 from app.logging import get_logger
 
 logger = get_logger(__name__)
@@ -91,18 +93,22 @@ class PostgresCryptoLendingReader:
         receipt_token_repo: ReceiptTokenRepository,
         aave_breakdown_repo: AaveLikeBackedBreakdownRepository,
         morpho_breakdown_repo: MorphoBackedBreakdownRepository,
+        morpho_v2_breakdown_repo: MorphoV2BackedBreakdownRepository,
         maple_breakdown_repo: MapleBackedBreakdownRepository,
         aave_liq_repo: AaveLikeLiquidationParamsRepository,
         morpho_liq_repo: MorphoLiquidationParamsRepository,
+        morpho_v2_liq_repo: MorphoV2LiquidationParamsRepository,
         engine: AsyncEngine,
         allocation_share_max_stale_seconds: int = 1800,
     ) -> None:
         self._receipt_token_repo = receipt_token_repo
         self._aave_breakdown_repo = aave_breakdown_repo
         self._morpho_breakdown_repo = morpho_breakdown_repo
+        self._morpho_v2_breakdown_repo = morpho_v2_breakdown_repo
         self._maple_breakdown_repo = maple_breakdown_repo
         self._aave_liq_repo = aave_liq_repo
         self._morpho_liq_repo = morpho_liq_repo
+        self._morpho_v2_liq_repo = morpho_v2_liq_repo
         self._engine = engine
         self._allocation_share_max_stale_seconds = allocation_share_max_stale_seconds
 
@@ -131,17 +137,64 @@ class PostgresCryptoLendingReader:
             return await self._aave_breakdown_repo.get_backed_breakdown(info.protocol_id, info.underlying_token_id)
 
         if normalized in _MORPHO:
-            backed_asset_id = await self._morpho_breakdown_repo.resolve_vault_id(
-                info.receipt_token_address, info.chain_id
-            )
-            if backed_asset_id is None:
-                raise ValueError(f"morpho vault not found for receipt token {info.receipt_token_id}")
-            return await self._morpho_breakdown_repo.get_backed_breakdown(backed_asset_id)
+            return await self._get_morpho_breakdown(info)
 
         if normalized in _MAPLE:
             return await self._maple_breakdown_repo.get_backed_breakdown(info.receipt_token_address, info.chain_id)
 
         raise ValueError(f"unsupported protocol: {info.protocol_name!r} (normalized: {normalized!r})")
+
+    async def _get_morpho_breakdown(self, info: ReceiptTokenInfo) -> BackedBreakdown:
+        """Dispatch a Morpho breakdown by the vault's ``vault_version``.
+
+        Versions 1 (MetaMorpho V1) and 2 (V1.1) share the direct Morpho-Blue
+        allocation walk; version 3 (Morpho VaultV2) uses the adapter-based V2 repo.
+        Any other version fails loudly (enum-drift guard) rather than silently
+        resolving through the wrong walk.
+        """
+        ref = await self._morpho_breakdown_repo.resolve_vault(info.receipt_token_address, info.chain_id)
+        if ref is None:
+            raise ValueError(f"morpho vault not found for receipt token {info.receipt_token_id}")
+        if ref.vault_version in (1, 2):
+            return await self._morpho_breakdown_repo.get_backed_breakdown(ref.id)
+        if ref.vault_version == 3:
+            # Fail fast BEFORE returning the breakdown: a partially-indexed VaultV2
+            # can produce an empty (all-dust) breakdown that short-circuits the risk
+            # service before liquidation params run, yielding a confident rrc=0.
+            await self._raise_if_v2_composition_incomplete(ref.id, info)
+            return await self._morpho_v2_breakdown_repo.get_backed_breakdown(ref.id)
+        raise ValueError(
+            f"unexpected morpho vault_version={ref.vault_version} for vault id={ref.id} "
+            f"(receipt token {info.receipt_token_id})"
+        )
+
+    async def _raise_if_v2_composition_incomplete(self, vault_id: int, info: ReceiptTokenInfo) -> None:
+        """Degrade a VaultV2 whose adapter composition is not fully indexed.
+
+        Adapter ROW existence alone is the wrong signal (morpho_adapter and
+        morpho_adapter_state are written by different code paths, and one lagging the
+        other is the expected backfill state). Two probes gate both the breakdown and
+        the liquidation-params paths:
+
+          * no active adapters at all → not indexed yet;
+          * ``has_unwalkable_adapter_value`` → an active adapter holds material value
+            (or has no state row) whose type-specific walk resolves zero markets, so
+            that value is unrepresented and would silently vanish or double-count.
+
+        Either raises ``AdapterDataMissingError`` so the allocation renders as
+        *unpriced* rather than a misleading fully-covered rrc=0. A genuinely idle
+        vault (adapters + state present, value ≈ 0) passes both probes.
+        """
+        if not await self._morpho_v2_liq_repo.has_active_adapters(vault_id):
+            raise AdapterDataMissingError(
+                f"morpho VaultV2 id={vault_id} has no active adapters indexed yet "
+                f"(receipt token {info.receipt_token_id})"
+            )
+        if await self._morpho_v2_liq_repo.has_unwalkable_adapter_value(vault_id):
+            raise AdapterDataMissingError(
+                f"morpho VaultV2 id={vault_id} holds adapter value that cannot be walked "
+                f"into collateral (partial index) (receipt token {info.receipt_token_id})"
+            )
 
     async def batch_get_breakdowns(self, infos: Sequence[ReceiptTokenInfo]) -> dict[int, BackedBreakdown]:
         """Resolve backed breakdowns for many receipt tokens, keyed by receipt_token_id.
@@ -172,7 +225,14 @@ class PostgresCryptoLendingReader:
                 )
 
         async def _resolve_other(info: ReceiptTokenInfo) -> None:
-            result[info.receipt_token_id] = await self.get_breakdown(info)
+            try:
+                result[info.receipt_token_id] = await self.get_breakdown(info)
+            except AllocationUnpricedError:
+                # An unpriceable allocation (e.g. a VaultV2 whose composition is not
+                # fully indexed) must not sink the whole prime's batched prefetch.
+                # Omit it here; compute_with_share re-fetches with no breakdown_override,
+                # re-raises, and renders it as a single unpriced allocation.
+                pass
 
         await asyncio.gather(
             *(_resolve_aave(pid, pinfos) for pid, pinfos in aave_by_protocol.items()),
@@ -192,7 +252,7 @@ class PostgresCryptoLendingReader:
             return await self._aave_liq_repo.get_params(info.protocol_id, token_ids)
 
         if normalized in _MORPHO:
-            return await self._morpho_liq_repo.get_params(backed_asset_id, token_ids)
+            return await self._get_morpho_liquidation_params(info, backed_asset_id, token_ids)
 
         if normalized in _MAPLE:
             # Maple has no per-asset liquidation params. Returning {} (rather than
@@ -203,6 +263,37 @@ class PostgresCryptoLendingReader:
             return {}
 
         raise ValueError(f"unsupported protocol: {info.protocol_name!r} (normalized: {normalized!r})")
+
+    async def _get_morpho_liquidation_params(
+        self, info: ReceiptTokenInfo, backed_asset_id: int, token_ids: list[int]
+    ) -> dict[int, LiquidationParams]:
+        """Dispatch Morpho liquidation params by ``vault_version``.
+
+        Versions 1 (V1) and 2 (V1.1) resolve via the vault address's own market
+        positions (the V1 repo). Version 3 (VaultV2) resolves through the adapter
+        graph (the V2 repo). If a v3 vault yields no params AND has no active
+        adapters, its composition is not indexed yet: raise ``AdapterDataMissingError``
+        so the allocation degrades to *unpriced* rather than dropping every collateral
+        item and reporting a confident ``rrc=0``. Empty params WITH adapters present is
+        a genuinely idle vault (a real ``rrc=0``) and is returned as-is. Any other
+        version fails loudly (enum-drift guard).
+        """
+        ref = await self._morpho_breakdown_repo.resolve_vault(info.receipt_token_address, info.chain_id)
+        if ref is None:
+            raise ValueError(f"morpho vault not found for receipt token {info.receipt_token_id}")
+        if ref.vault_version in (1, 2):
+            return await self._morpho_liq_repo.get_params(backed_asset_id, token_ids)
+        if ref.vault_version == 3:
+            # Gate on composition completeness, not on empty params: a vault with some
+            # walkable and some unwalkable adapters resolves non-empty params yet still
+            # under-represents the unindexed value, so the probe runs regardless. Empty
+            # params that survive the gate are a genuinely idle vault (a real rrc=0).
+            await self._raise_if_v2_composition_incomplete(backed_asset_id, info)
+            return await self._morpho_v2_liq_repo.get_params(backed_asset_id, token_ids)
+        raise ValueError(
+            f"unexpected morpho vault_version={ref.vault_version} for vault id={backed_asset_id} "
+            f"(receipt token {info.receipt_token_id})"
+        )
 
     async def get_share(self, info: ReceiptTokenInfo, prime_id: EthAddress) -> Decimal:
         normalized = _normalize_protocol_name(info.protocol_name)
