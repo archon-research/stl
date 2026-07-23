@@ -10,6 +10,7 @@ on:
   pull_request:
     branches:
       - main
+  merge_group:
   workflow_dispatch:
 
 concurrency:
@@ -28,6 +29,12 @@ permissions:
 jobs:
   detect-changes:
     name: Detect Changes
+    # Skipped on merge_group: change detection is a PR/push-time optimization,
+    # and merge-queue runs must execute every suite so a mis-detected skip
+    # can't land an untested combination on main. The go/python/ts jobs below
+    # use `!cancelled()` instead of the implicit success() so being skipped
+    # here doesn't cascade-skip them (see the call-deploy comment).
+    if: github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     outputs:
       go: ${{ steps.changed-files.outputs.go_any_changed }}
@@ -48,19 +55,25 @@ jobs:
 
   go-ci:
     needs: detect-changes
-    if: needs.detect-changes.outputs.go == 'true'
+    if: |
+      !cancelled() &&
+      (github.event_name == 'merge_group' || needs.detect-changes.outputs.go == 'true')
     uses: ./.github/workflows/go-ci.yml
     secrets: inherit
 
   python-ci:
     needs: detect-changes
-    if: needs.detect-changes.outputs.python == 'true'
+    if: |
+      !cancelled() &&
+      (github.event_name == 'merge_group' || needs.detect-changes.outputs.python == 'true')
     uses: ./.github/workflows/python-ci.yml
     secrets: inherit
 
   ts-ci:
     needs: detect-changes
-    if: needs.detect-changes.outputs.ts == 'true'
+    if: |
+      !cancelled() &&
+      (github.event_name == 'merge_group' || needs.detect-changes.outputs.ts == 'true')
     uses: ./.github/workflows/ts-ci.yml
     secrets: inherit
 

@@ -37,6 +37,7 @@ type Service struct {
 	entryLookup      map[EntryKey]*TokenEntry
 	entries          []*TokenEntry
 	handler          AllocationHandler
+	metrics          outbound.BackupMetricsRecorder
 	ctx              context.Context
 	cancel           context.CancelFunc
 	wg               sync.WaitGroup // tracks the SQS run loop so Stop can drain it
@@ -88,6 +89,7 @@ func NewService(
 		entryLookup: BuildEntryLookup(entries),
 		entries:     entries,
 		handler:     handler,
+		metrics:     config.Metrics,
 		logger:      config.Logger.With("component", "allocation-tracker"),
 	}, nil
 }
@@ -173,10 +175,11 @@ func (s *Service) Stop() error {
 func (s *Service) processBlock(
 	ctx context.Context,
 	event outbound.BlockEvent,
-) error {
+) (retErr error) {
 	ctx = archiving.WithBlockVersion(ctx, event.Version)
 	ctx = archiving.WithBlockNumber(ctx, event.BlockNumber)
 	start := time.Now()
+	defer func() { s.recordBlockMetrics(ctx, start, retErr) }()
 
 	receiptsJSON, err := s.cache.GetReceipts(ctx, event.ChainID, event.BlockNumber, event.Version)
 	if err != nil {
@@ -249,6 +252,22 @@ func (s *Service) processBlock(
 	}
 
 	return nil
+}
+
+// recordBlockMetrics records the per-block liveness + latency sample once per
+// processBlock via defer (see Config.Metrics for why this is the liveness
+// signal). Nil-safe: a service constructed without Config.Metrics (most unit
+// tests) records nothing.
+func (s *Service) recordBlockMetrics(ctx context.Context, start time.Time, err error) {
+	if s.metrics == nil {
+		return
+	}
+	status := outbound.StatusSuccess
+	if err != nil {
+		status = outbound.StatusError
+	}
+	s.metrics.RecordBlockProcessed(ctx, status)
+	s.metrics.RecordProcessingLatency(ctx, time.Since(start), status)
 }
 
 func (s *Service) matchTransfers(
