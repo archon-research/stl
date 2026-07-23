@@ -1718,6 +1718,88 @@ func TestGetOrCreateAdapter_BackfilledAddBeforeRemovalConvergesOntoClosedRow(t *
 	}
 }
 
+// TestGetOrCreateAdapter_BackfilledAddConvergesClosedWindowNotActiveRow pins the
+// decision order for a removed-then-re-added adapter. Two incarnations coexist: a
+// CLOSED window (added 150, removed 200) and a later ACTIVE one (added 300, NULL).
+// A backfilled true AddAdapter@80 belongs to the FIRST incarnation, and the closed
+// window covers it (removed 200 >= 80), so it must converge onto the CLOSED row and
+// leave the re-added active row's lifetime intact. Converging the active row first
+// (matching regardless of window) would corrupt the live incarnation's
+// added_at_block down to 80 and never converge the closed one, silently wrecking
+// VEC-219's adapter-lifetime data.
+func TestGetOrCreateAdapter_BackfilledAddConvergesClosedWindowNotActiveRow(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x2c))
+	addr := adapterAddr(0x2d)
+
+	const (
+		firstAdd    = int64(150)
+		removeBlock = int64(200)
+		reAdd       = int64(300)
+		backfill    = int64(80) // true AddAdapter of the FIRST incarnation, replayed late
+	)
+
+	// Seed the two incarnations via the repo's own methods: add→remove→re-add.
+	closedID := fixture.createTestAdapter(t, ctx, vaultID, addr, firstAdd)
+	tx, err := fixture.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := fixture.repo.MarkAdapterRemoved(ctx, tx, vaultID, addr, removeBlock); err != nil {
+		t.Fatalf("MarkAdapterRemoved: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	activeID := fixture.createTestAdapter(t, ctx, vaultID, addr, reAdd)
+
+	// Backfill the true AddAdapter of the closed incarnation, arriving late.
+	gotID := fixture.createTestAdapter(t, ctx, vaultID, addr, backfill)
+
+	if gotID != closedID {
+		t.Errorf("backfilled add@%d must converge onto the CLOSED incarnation id=%d, got id=%d (active row is id=%d)",
+			backfill, closedID, gotID, activeID)
+	}
+
+	readRow := func(id int64) (int64, *int64) {
+		var added int64
+		var removed *int64
+		if err := fixture.pool.QueryRow(ctx,
+			`SELECT added_at_block, removed_at_block FROM morpho_adapter WHERE id = $1`,
+			id).Scan(&added, &removed); err != nil {
+			t.Fatalf("reading row id=%d: %v", id, err)
+		}
+		return added, removed
+	}
+
+	closedAdded, closedRemoved := readRow(closedID)
+	if closedAdded != backfill {
+		t.Errorf("closed incarnation added_at_block = %d, want %d (converged down to the backfilled add)", closedAdded, backfill)
+	}
+	if closedRemoved == nil || *closedRemoved != removeBlock {
+		t.Errorf("closed incarnation removed_at_block = %v, want %d (window stays closed)", closedRemoved, removeBlock)
+	}
+
+	activeAdded, activeRemoved := readRow(activeID)
+	if activeAdded != reAdd {
+		t.Errorf("re-added incarnation added_at_block = %d, want %d (must stay untouched)", activeAdded, reAdd)
+	}
+	if activeRemoved != nil {
+		t.Errorf("re-added incarnation removed_at_block = %d, want NULL (must stay active)", *activeRemoved)
+	}
+
+	var count int
+	if err := fixture.pool.QueryRow(ctx,
+		`SELECT count(*) FROM morpho_adapter WHERE morpho_vault_id = $1 AND address = $2`,
+		vaultID, addr).Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("want exactly 2 rows (closed + active, no new row), got %d", count)
+	}
+}
+
 // --- MarkAdapterRemoved Tests ---
 
 func TestMarkAdapterRemoved_SetsBlock(t *testing.T) {

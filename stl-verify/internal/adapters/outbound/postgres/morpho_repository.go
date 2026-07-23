@@ -337,18 +337,26 @@ func (r *MorphoRepository) SaveVaultPosition(ctx context.Context, tx pgx.Tx, pos
 // row for (morpho_vault_id, address), converging late-arriving observations onto
 // the incarnation whose lifetime window they belong to rather than duplicating.
 //
-// The candidate's added_at_block is matched against incarnations in three steps:
+// The candidate's added_at_block is matched against incarnations in three ordered
+// steps. The closed-window match MUST run before the active-row match: for a
+// removed-then-re-added adapter a closed row and an active row coexist, and a
+// backfilled add belonging to the earlier (closed) incarnation would otherwise
+// match the active row first — pulling the re-added incarnation's added_at_block
+// down into a prior window and leaving the closed row unconverged.
 //
-//  1. If an ACTIVE row (removed_at_block IS NULL) exists it is reused, its
-//     added_at_block converging downward to LEAST(existing, candidate). This lets
-//     the backfiller replay the TRUE AddAdapter@X for an adapter the live stream
-//     lazily registered at first-seen block Y>X collapse onto one active row.
-//  2. Otherwise, if a CLOSED incarnation covers the candidate (removed_at_block
-//     >= candidate added_at_block), converge onto the earliest-closing such row
-//     (UPDATE its added_at_block down). Without this, replaying the true
-//     AddAdapter@W earlier than a live lazy-register+removal@X (W<X) would find no
-//     active row and INSERT a second, spuriously-ACTIVE incarnation — resurrecting
-//     a de-registered adapter into GetActiveAdaptersByVault / realAssets forever.
+//  1. If a CLOSED incarnation covers the candidate (removed_at_block >= candidate
+//     added_at_block), the candidate is a late observation of that closed window:
+//     converge onto the earliest-closing such row (UPDATE its added_at_block down).
+//     This keeps a backfilled AddAdapter@W replayed earlier than a live
+//     lazy-register+removal@X (W<X) from INSERTing a second, spuriously-ACTIVE
+//     incarnation — resurrecting a de-registered adapter into
+//     GetActiveAdaptersByVault / realAssets forever — and keeps a re-added
+//     adapter's active window intact when the backfilled add belongs to a prior,
+//     already-closed incarnation.
+//  2. Otherwise, if an ACTIVE row (removed_at_block IS NULL) exists it is reused,
+//     its added_at_block converging downward to LEAST(existing, candidate). This
+//     lets the backfiller replay the TRUE AddAdapter@X for an adapter the live
+//     stream lazily registered at first-seen block Y>X collapse onto one active row.
 //  3. Only a candidate added strictly after every prior removal is a genuinely new
 //     incarnation and is INSERTed. The UNIQUE key includes added_at_block, so the
 //     ON CONFLICT no-op SET keeps a same-block backfill re-run idempotent.
@@ -369,26 +377,15 @@ func (r *MorphoRepository) GetOrCreateAdapter(ctx context.Context, tx pgx.Tx, ad
 		return 0, fmt.Errorf("locking %q: %w", lockKey, err)
 	}
 
+	// A CLOSED incarnation whose window covers the candidate (removed_at_block >=
+	// candidate added_at_block) takes precedence over the active row: the candidate
+	// is a late observation of that closed window — converge onto the earliest-closing
+	// such row instead of matching the active row. Matching the active row first
+	// would pull a re-added incarnation's added_at_block down into this prior window
+	// and leave the closed row unconverged; it would also, when no active row exists,
+	// INSERT a spuriously-active duplicate that resurrects a de-registered adapter.
 	var id int64
 	err := tx.QueryRow(ctx,
-		`UPDATE morpho_adapter
-		 SET added_at_block = LEAST(added_at_block, $3)
-		 WHERE morpho_vault_id = $1 AND address = $2 AND removed_at_block IS NULL
-		 RETURNING id`,
-		adapter.MorphoVaultID, adapter.Address, adapter.AddedAtBlock,
-	).Scan(&id)
-	if err == nil {
-		return id, nil
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return 0, fmt.Errorf("converging active morpho adapter: %w", err)
-	}
-
-	// No active incarnation. If a CLOSED incarnation's window covers the candidate
-	// (removed_at_block >= candidate added_at_block), the candidate is a late
-	// observation of that same closed window — converge onto the earliest-closing
-	// such row instead of inserting a spuriously-active duplicate.
-	err = tx.QueryRow(ctx,
 		`UPDATE morpho_adapter
 		 SET added_at_block = LEAST(added_at_block, $3)
 		 WHERE id = (
@@ -406,6 +403,24 @@ func (r *MorphoRepository) GetOrCreateAdapter(ctx context.Context, tx pgx.Tx, ad
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return 0, fmt.Errorf("converging closed morpho adapter incarnation: %w", err)
+	}
+
+	// No closed window covers the candidate. If an ACTIVE row exists reuse it, its
+	// added_at_block converging downward to LEAST(existing, candidate). This lets the
+	// backfiller replay the TRUE AddAdapter@X for an adapter the live stream lazily
+	// registered at first-seen block Y>X collapse onto one active row.
+	err = tx.QueryRow(ctx,
+		`UPDATE morpho_adapter
+		 SET added_at_block = LEAST(added_at_block, $3)
+		 WHERE morpho_vault_id = $1 AND address = $2 AND removed_at_block IS NULL
+		 RETURNING id`,
+		adapter.MorphoVaultID, adapter.Address, adapter.AddedAtBlock,
+	).Scan(&id)
+	if err == nil {
+		return id, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return 0, fmt.Errorf("converging active morpho adapter: %w", err)
 	}
 
 	// Genuinely new incarnation (candidate added after every prior removal): insert
