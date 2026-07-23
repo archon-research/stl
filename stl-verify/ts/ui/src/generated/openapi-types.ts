@@ -113,7 +113,7 @@ export interface paths {
     };
     /**
      * List a prime's current allocations
-     * @description Return every current allocation held by the given prime — both receipt-token positions (enriched with USD value when a price is available) and direct asset holdings (tokens held in the proxy with no registered receipt-token wrapper, surfaced with `receipt_token_id`, `receipt_token_address` and `protocol_name` set to `null`, and `amount_usd` valued from the token's oracle price when one exists). Each row includes the latest on-chain activity timestamp and a derived `category` (`allocation` / `pol` / `psm3` / `asset`).
+     * @description Return every current allocation held by the given prime — receipt-token positions (enriched with USD value when a price is available), direct asset holdings (tokens held in the proxy with no registered receipt-token wrapper, surfaced with `receipt_token_id`, `receipt_token_address` and `protocol_name` set to `null`, and `amount_usd` valued from the token's oracle price when one exists), and off-chain Anchorage BTC custody (chain_id 0, `protocol_name` `anchorage`, `amount_usd` the loan drawn against the collateral). Each row includes the latest activity timestamp and a derived `category` (`allocation` / `pol` / `psm3` / `asset` / `custody`).
      */
     get: operations['list_allocations_v1_primes__prime_id__allocations_get'];
     put?: never;
@@ -173,7 +173,7 @@ export interface paths {
     };
     /**
      * Self-computed prime risk capital
-     * @description Compute the prime's capital metrics from on-chain data and the default RRC model (`gap_sweep`), with no dependency on the upstream Star feed. Returns exposure (priced receipt-token allocations), Total Risk Capital (on-chain treasury), Required Risk Capital (sum of per-allocation model RRC), encumbrance, a `modeled_pct` coverage figure, and a per-allocation breakdown. The figures are model-derived and partial (only allocations the model can price contribute Required Risk Capital) and will not match Sky's dashboard. Returns `404` if the prime is unknown.
+     * @description Compute the prime's capital metrics from on-chain data and the default RRC model (`gap_sweep`), with no dependency on the upstream Star feed. Returns exposure (priced receipt-token allocations), Total Risk Capital (on-chain treasury), Required Risk Capital (sum of per-allocation model RRC), encumbrance, a `modeled_pct` coverage figure, and a per-allocation breakdown. The figures are model-derived and partial (only allocations the model can price contribute Required Risk Capital) and will not match Sky's dashboard. A backed allocation whose pool-share lookup can't be resolved (e.g. a warm-up window or an un-indexed receipt token) is reported as unpriced (`applied=false` with an `unpriced_reason`) rather than failing the whole response. Returns `404` if the prime is unknown.
      */
     get: operations['get_prime_risk_capital_v1_primes__prime_id__risk_capital_get'];
     put?: never;
@@ -738,12 +738,12 @@ export interface components {
      * @description Classification of allocation position types across primes.
      * @enum {string}
      */
-    AllocationCategory: 'allocation' | 'pol' | 'psm3' | 'asset';
+    AllocationCategory: 'allocation' | 'pol' | 'psm3' | 'asset' | 'custody';
     /**
      * AllocationResponse
      * @description Enriched allocation response with category and metadata.
      *
-     *     Two row shapes share this model:
+     *     Three row shapes share this model:
      *     - Receipt-token positions (e.g. spUSDT wrapping USDT): all fields populated.
      *     - Direct asset holdings (e.g. PYUSD held in the proxy with no wrapper):
      *       ``receipt_token_id`` / ``receipt_token_address`` / ``protocol_name`` are
@@ -753,6 +753,13 @@ export interface components {
      *       resolvable underlying, where they point at that underlying.
      *       ``amount_usd`` is populated when an oracle price exists for the pricing
      *       basis and null otherwise (e.g. LP/curve shares with no oracle feed).
+     *     - Off-chain custody holdings (Anchorage BTC): ``chain_id`` is 0 (the
+     *       off-chain sentinel), ``protocol_name`` is ``anchorage``, ``symbol`` is the
+     *       custodied asset (BTC), and both ``underlying_token_id`` and
+     *       ``underlying_token_address`` are null (off-chain assets have no token-
+     *       registry row). ``amount_usd`` is the loan drawn against the collateral and
+     *       ``latest_activity_at`` is the snapshot time — surfaced verbatim even when
+     *       the upstream feed is frozen, so staleness is visible rather than hidden.
      * @example {
      *       "amount_usd": "1234567.89",
      *       "balance": "1234567.89",
@@ -783,7 +790,7 @@ export interface components {
        * @example 1234567.89
        */
       balance: string;
-      /** @description Allocation category derived from protocol/symbol (`allocation`, `pol`, `psm3`, `asset`). */
+      /** @description Allocation category derived from protocol/symbol (`allocation`, `pol`, `psm3`, `asset`, `custody`). */
       category: components['schemas']['AllocationCategory'];
       /**
        * Chain Id
@@ -841,16 +848,16 @@ export interface components {
       underlying_symbol: string;
       /**
        * Underlying Token Address
-       * @description 0x-prefixed underlying-token contract address. For direct holdings, this is the held asset itself, unless the holding is valued on the underlying-value basis (allowlisted).
+       * @description 0x-prefixed underlying-token contract address. For direct holdings, this is the held asset itself, unless the holding is valued on the underlying-value basis (allowlisted). `null` for off-chain custody holdings (e.g. Anchorage BTC), which have no on-chain address.
        * @example 0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2
        */
-      underlying_token_address: string;
+      underlying_token_address?: string | null;
       /**
        * Underlying Token Id
-       * @description Surrogate id of the underlying token. For direct holdings, this is the held asset itself, unless the holding is valued on the underlying-value basis (allowlisted).
+       * @description Surrogate id of the underlying token. For direct holdings, this is the held asset itself, unless the holding is valued on the underlying-value basis (allowlisted). `null` for off-chain custody holdings (e.g. Anchorage BTC), which have no token-registry row.
        * @example 1
        */
-      underlying_token_id: number;
+      underlying_token_id?: number | null;
     };
     /**
      * AllocationRiskCapitalResponse
@@ -859,12 +866,12 @@ export interface components {
     AllocationRiskCapitalResponse: {
       /**
        * Applied
-       * @description Whether the default model could price this allocation.
+       * @description Whether the default model priced this allocation.
        */
       applied: boolean;
       /**
        * Crr Pct
-       * @description Comparable capital-risk ratio (0-100). `null` when the model does not apply.
+       * @description Comparable capital-risk ratio (0-100). `null` when the allocation is unpriced.
        */
       crr_pct?: string | null;
       /**
@@ -889,7 +896,7 @@ export interface components {
       receipt_token_id: number;
       /**
        * Required Risk Capital Usd
-       * @description Per-allocation RRC (USD). `null` when the model does not apply.
+       * @description Per-allocation RRC (USD). `null` when the allocation is unpriced.
        */
       required_risk_capital_usd?: string | null;
       /**
@@ -897,6 +904,15 @@ export interface components {
        * @description Receipt-token symbol.
        */
       symbol: string;
+      /**
+       * Unpriced Reason
+       * @description Why the allocation is unpriced (`null` when `applied`): `no_model` (no default model applies), or `share_data_missing` / `share_data_stale` (a model applies but its pool-share lookup could not be resolved, e.g. a warm-up window or an un-indexed receipt token).
+       */
+      unpriced_reason?:
+        | 'no_model'
+        | ('share_data_missing' | 'share_data_stale')
+        | 'price_data_missing'
+        | null;
     };
     /**
      * BadDebtResponse
