@@ -23,7 +23,7 @@ type DBConfig struct {
 	MaxConns int32
 
 	// MinConns is the minimum number of connections in the pool.
-	// Default: 5
+	// Default: 1
 	MinConns int32
 
 	// MaxConnLifetime is the maximum amount of time a connection may be reused.
@@ -69,7 +69,7 @@ func DefaultDBConfig(url string) DBConfig {
 	return DBConfig{
 		URL:             url,
 		MaxConns:        25,
-		MinConns:        5,
+		MinConns:        1,
 		MaxConnLifetime: 5 * time.Minute,
 		MaxConnIdleTime: 1 * time.Minute,
 	}
