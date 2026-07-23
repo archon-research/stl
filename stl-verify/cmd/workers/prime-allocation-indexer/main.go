@@ -133,6 +133,16 @@ func parseConfig(args []string) (cliConfig, error) {
 		}
 		cfg.visibilityTimeout = v
 	}
+	// SWEEP_BLOCKS lets the Deployment tune the sweep cadence via its configmap
+	// (it passes no args, so without this the -sweep-blocks flag default is fixed).
+	// Mirrors psm3-indexer; the BlockLatencyHigh runbook points operators here.
+	if sweepBlocksStr := env.Get("SWEEP_BLOCKS", ""); sweepBlocksStr != "" {
+		v, err := strconv.Atoi(sweepBlocksStr)
+		if err != nil {
+			return cliConfig{}, fmt.Errorf("parsing SWEEP_BLOCKS %q: %w", sweepBlocksStr, err)
+		}
+		cfg.sweepBlocks = v
+	}
 
 	chainIDStr := env.Get("CHAIN_ID", "1")
 	chainID, err := strconv.ParseInt(chainIDStr, 10, 64)
@@ -279,6 +289,15 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("allocation tracker telemetry: %w", err)
 	}
 
+	// Shared per-block liveness/latency recorder (blocks_processed_total,
+	// processing_duration_seconds), the same telemetry.Metrics fluid-vault-indexer
+	// uses. Chain label = chainName; service_name resolves from the OTEL resource
+	// ("prime-allocation-indexer") set by InitOTEL above.
+	metrics, err := telemetry.NewMetrics("prime-allocation-indexer", chainName)
+	if err != nil {
+		return fmt.Errorf("creating metrics: %w", err)
+	}
+
 	// Optional raw SC call archiving (VEC-81). Off unless ARCHIVE_SC_CALLS=true.
 	archiveWrap, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "prime-allocation")
 	if err != nil {
@@ -347,6 +366,7 @@ func run(ctx context.Context, args []string) error {
 			SweepEveryNBlocks: cfg.sweepBlocks,
 			ChainID:           cfg.chainID,
 			Logger:            logger,
+			Metrics:           metrics,
 		},
 		sqsConsumer,
 		cacheReader,
