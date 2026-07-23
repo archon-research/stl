@@ -894,7 +894,14 @@ groups:
       # blocks_processed_total advances on every block regardless of position
       # activity (the sweep only fires every SweepEveryNBlocks, and the
       # underlying-value-failures counter only moves on a data hole), so it is the
-      # honest per-block liveness signal the Stalled rule keys on.
+      # honest per-block liveness signal. Stalled keys on the status="success"
+      # series (NOT the total): an all-error loop keeps the total advancing but
+      # persists nothing, so a bare total==0 would miss it; success==0 catches it.
+      # ErrorRatioHigh covers the partial-failure middle ground (some succeed, some
+      # fail) that success==0 cannot see. Together they close the dead zone where a
+      # steadily-failing worker at mainnet's ~12s cadence (~0.083 err/s) tripped
+      # neither a total-based stall nor an absolute-rate error alert (CodeRabbit,
+      # PR #601).
 
       - alert: VectorAllocationTrackerDown
         # Process liveness from kube-state-metrics (deployment/namespace labels,
@@ -924,19 +931,23 @@ groups:
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorallocationtrackerdown
 
       - alert: VectorAllocationTrackerStalled
-        # No block consumed for 15m on the labelled chain. The worker consumes ~1
-        # BlockEvent per block (~12s on mainnet) and records one
-        # blocks_processed_total sample per block regardless of position activity,
-        # so a zero rate means the SQS consume loop is wedged — page-worthy, hence
-        # CRITICAL. Residual gap: if the pod is alive but the OTLP export dies, the
-        # series staleness-expires and `rate(...) == 0` returns no data (silent
-        # rather than firing). The common cause of a vanished series — process
-        # death — is caught by VectorAllocationTrackerDown; the alive-but-OTLP-dead
-        # sliver is the accepted residual gap (see the runbook).
+        # No SUCCESSFUL block for 15m on the labelled chain. Keyed on
+        # status="success", NOT the total: the worker records one
+        # blocks_processed_total sample per consumed block (~12s on mainnet), so a
+        # bare total==0 would miss an all-error loop that keeps consuming but
+        # persists nothing (errors still count as processed). success-rate==0 makes
+        # that loop CRITICAL. The only zero-success states are a wedged consume
+        # loop, an all-error loop, or a dead OTLP export — all page-worthy.
+        # Residuals (see runbook): (1) a live pod with a dead OTLP export lets the
+        # success series staleness-expire, so `== 0` returns no data (silent) —
+        # process death, the common cause of a vanished series, is caught by
+        # VectorAllocationTrackerDown; (2) a worker erroring from its very first
+        # block never creates the success series, so this rule stays silent there —
+        # VectorAllocationTrackerErrorRatioHigh (100% ratio) catches that case.
         expr: |
           sum by (chain, cluster) (
             rate(blocks_processed_total{
-              service_name="prime-allocation-indexer", k8s_namespace_name="vector"
+              service_name="prime-allocation-indexer", status="success", k8s_namespace_name="vector"
             }[5m])
           ) == 0
         for: 15m
@@ -946,24 +957,46 @@ groups:
           component: allocation-tracker
           namespace: vector
         annotations:
-          summary: "Vector allocation-tracker stalled on {{ $labels.chain }} (no block consumed >15m)"
+          summary: "Vector allocation-tracker stalled on {{ $labels.chain }} (no successful block >15m)"
           description: |
-            `prime-allocation-indexer` on chain `{{ $labels.chain }}` has consumed
-            no block for >15m. The SQS consume loop is likely wedged (or the OTLP
-            export died); allocation positions and supplies in TimescaleDB will go
-            stale. Check the pod logs and SQS backlog.
+            `prime-allocation-indexer` on chain `{{ $labels.chain }}` has processed
+            no block successfully for >15m — the SQS consume loop is wedged, every
+            block is erroring, or the OTLP export died. Allocation positions and
+            supplies in TimescaleDB will go stale. Check the pod logs and SQS
+            backlog.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorallocationtrackerstalled
 
-      - alert: VectorAllocationTrackerErrorsHigh
-        # Per-block processing failures (status="error") above 0.1/s for 15m. The
-        # worker propagates the error so SQS redelivers, so a sustained error rate
-        # means blocks are looping without persisting; it usually precedes a stall.
+      - alert: VectorAllocationTrackerErrorRatioHigh
+        # PARTIAL/total failure: a majority of block-processing attempts erroring
+        # while some (or none) still succeed. A RATIO (error/total), not an absolute
+        # error rate, because block cadence varies across chains — at mainnet's ~12s
+        # an all-error worker emits only ~0.083 err/s, under any fixed 0.1/s
+        # threshold, so an absolute rate has a dead zone (CodeRabbit, PR #601). The
+        # ratio is cadence-independent and mirrors VectorArchivingErrorRatioHigh
+        # (same 0.5 threshold). The `and total-rate > 0.02` is the minimum-volume
+        # guard: it stops a near-stalled chain (< ~1 block/50s — Stalled/Down
+        # territory) firing on a statistically thin denominator, and since
+        # errors ⊆ total it also keeps the ratio's denominator nonzero.
         expr: |
+          (
+            sum by (chain, cluster) (
+              rate(blocks_processed_total{
+                service_name="prime-allocation-indexer", status="error", k8s_namespace_name="vector"
+              }[10m])
+            )
+            /
+            sum by (chain, cluster) (
+              rate(blocks_processed_total{
+                service_name="prime-allocation-indexer", k8s_namespace_name="vector"
+              }[10m])
+            )
+          ) > 0.5
+          and
           sum by (chain, cluster) (
             rate(blocks_processed_total{
-              service_name="prime-allocation-indexer", status="error", k8s_namespace_name="vector"
+              service_name="prime-allocation-indexer", k8s_namespace_name="vector"
             }[10m])
-          ) > 0.1
+          ) > 0.02
         for: 15m
         labels:
           team: vector
@@ -971,12 +1004,12 @@ groups:
           component: allocation-tracker
           namespace: vector
         annotations:
-          summary: "Vector allocation-tracker error rate >0.1/s on {{ $labels.chain }}"
+          summary: "Vector allocation-tracker error ratio >50% on {{ $labels.chain }}"
           description: |
             `prime-allocation-indexer` on chain `{{ $labels.chain }}` is failing
-            `{{ $value | printf "%.2f" }}` blocks/s over 15m. Blocks are being
-            redelivered without persisting; investigate pod logs before this turns
-            into a stall.
+            `{{ $value | humanizePercentage }}` of block-processing attempts over
+            10m while still consuming. Blocks are being redelivered without
+            persisting; investigate pod logs before this turns into a stall.
 
       - alert: VectorAllocationTrackerBlockLatencyHigh
         # p99 block processing >3s for 15m. Sustained high latency means the

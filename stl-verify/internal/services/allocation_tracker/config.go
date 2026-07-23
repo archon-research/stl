@@ -33,7 +33,7 @@ type Config struct {
 	// liveness and latency stay observable through periods where no in-scope
 	// position is touched (the underlying-value-failures counter only moves on a
 	// data-quality hole, and the sweep only fires every SweepEveryNBlocks). This
-	// is the signal the VectorAllocationTracker{Stalled,ErrorsHigh,BlockLatencyHigh}
+	// is the signal the VectorAllocationTracker{Stalled,ErrorRatioHigh,BlockLatencyHigh}
 	// alerts key on. Optional; nil disables it.
 	Metrics outbound.BackupMetricsRecorder
 }

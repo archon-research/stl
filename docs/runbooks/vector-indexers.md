@@ -1341,21 +1341,28 @@ and the pod logs show `running` with a nonzero `entries` count.
 
 ### What it means
 
-The worker is **up** but has consumed **no block for 15 minutes** on the labelled
-`chain`: `rate(blocks_processed_total{service_name="prime-allocation-indexer"}[5m])`
-is zero. The worker consumes ~1 BlockEvent per block (~12s on mainnet) and records
-one sample per consumed block regardless of whether a position was touched, so
-this is **not** a quiet-market period — the SQS consume loop is wedged (process
-alive but not draining).
+The worker has processed **no block *successfully* for 15 minutes** on the
+labelled `chain`:
+`rate(blocks_processed_total{service_name="prime-allocation-indexer", status="success"}[5m])`
+is zero. The alert keys on the `status="success"` series, **not** the total: the
+worker records one sample per consumed block (~12s on mainnet), so an all-error
+loop keeps the *total* advancing while persisting nothing — a total-based stall
+would miss it. `success == 0` makes that loop critical. The zero-success states
+are all page-worthy: a wedged consume loop, an all-error loop, or a dead OTLP
+export. This is **not** a quiet-market period — a healthy worker records a success
+every block.
 
-**Residual gap — OTLP dead but pod alive:** if the pod is alive but the OTLP
-metric export dies, the `blocks_processed_total` series staleness-expires and
-`rate(...) == 0` returns *no data*, so this alert stays silent rather than firing.
-The common cause of a vanished series — process death — is caught by
-`VectorAllocationTrackerDown` instead; the narrow alive-but-export-dead sliver is
-an accepted gap (a bare `rate == 0` cannot fire on an absent series). If Down is
-NOT firing but other OTel series from the pod are also flat/absent, suspect a dead
-export.
+**Residual gaps (see also `VectorAllocationTrackerErrorRatioHigh` and Down):**
+1. *OTLP dead but pod alive* — if the export dies, the success series
+   staleness-expires and `rate(...) == 0` returns *no data*, so this alert stays
+   silent. The common cause of a vanished series, process death, is caught by
+   `VectorAllocationTrackerDown`; the narrow alive-but-export-dead sliver is
+   accepted (a bare `rate == 0` cannot fire on an absent series). If Down is NOT
+   firing but other OTel series from the pod are also flat/absent, suspect a dead
+   export.
+2. *All-error from the very first block* — the success series is never created, so
+   this rule cannot fire; `VectorAllocationTrackerErrorRatioHigh` (100% error
+   ratio) covers that case.
 
 ### First checks (≤5 min)
 
@@ -1367,13 +1374,17 @@ export.
    Alchemy, or silence (poll loop stopped).
 3. **SQS backlog** — check the allocation-tracker SQS queue depth. A growing
    `ApproximateNumberOfMessages` while the counter is flat confirms a wedged loop.
-4. **OTLP export** — if logs show blocks still processing but the counter is flat,
-   the metrics pipeline is the problem; check the OTel collector and whether other
-   series from the pod are flat too.
-5. **Upstream** — confirm the watcher for this chain is still producing blocks; if
+4. **All-error loop** — if logs show blocks being consumed but *every* one
+   erroring (so `status="success"` is flat while `status="error"` climbs),
+   `VectorAllocationTrackerErrorRatioHigh` should also be firing; treat the error
+   cause (see that runbook) as the root fix.
+5. **OTLP export** — if logs show blocks processing successfully but the success
+   counter is flat, the metrics pipeline is the problem; check the OTel collector
+   and whether other series from the pod are flat too.
+6. **Upstream** — confirm the watcher for this chain is still producing blocks; if
    not, that's the root cause (`VectorWatcherNoBlocks`) and the queue is
    legitimately empty.
-6. **DB liveness (`db-query`)** —
+7. **DB liveness (`db-query`)** —
    `SELECT max(block_number), max(created_at) FROM allocation_position WHERE chain_id = <id>;`
    a frozen max block number corroborates the stall.
 
@@ -1388,22 +1399,31 @@ export.
 
 ### Verify recovery
 
-`rate(blocks_processed_total{service_name="prime-allocation-indexer"}[5m]) > 0`
+`rate(blocks_processed_total{service_name="prime-allocation-indexer", status="success"}[5m]) > 0`
 for the affected chain, or confirm the SQS backlog is draining.
 
 ---
 
-## VectorAllocationTrackerErrorsHigh
+## VectorAllocationTrackerErrorRatioHigh
 
 **Severity:** warning · **For:** 15m
 
 ### What it means
 
-`blocks_processed_total{status="error"}` is above 0.1 errors/sec sustained for 15
-minutes on the labelled `chain`. Every block that fails is propagated and
-redelivered by SQS (a partial failure stops the whole block by design), so a
-sustained error rate means blocks are looping without persisting — it usually
-precedes a stall.
+More than **50% of block-processing attempts are erroring** over 10 minutes on the
+labelled `chain`, with meaningful throughput (`> 0.02` blocks/s — the
+minimum-volume guard). Every block that fails is propagated and redelivered by SQS
+(a partial failure stops the whole block by design), so a sustained majority-error
+ratio means blocks are looping without persisting — it usually precedes a stall.
+
+This is an **error ratio** (`error / total`), not an absolute error rate, on
+purpose: block cadence varies across chains (mainnet ~12s → at most ~0.083 err/s,
+base ~2s → ~0.5 err/s), so a fixed per-second threshold either misses a
+slow-chain failure or false-fires on a fast one. The ratio is cadence-independent
+and mirrors `VectorArchivingErrorRatioHigh`. It also closes the dead zone a
+`status="success"`-based stall leaves at the *start* of a worker's life: a worker
+erroring from its first block never creates a success series, so Stalled cannot
+fire, but its error ratio is 100% and trips this alert.
 
 ### First checks
 
@@ -1429,8 +1449,9 @@ precedes a stall.
 
 ### Verify recovery
 
-`rate(blocks_processed_total{service_name="prime-allocation-indexer", status="error"}[10m]) < 0.1`
-for the affected chain.
+The error ratio drops back under 50%:
+`sum by (chain) (rate(blocks_processed_total{service_name="prime-allocation-indexer", status="error"}[10m])) / sum by (chain) (rate(blocks_processed_total{service_name="prime-allocation-indexer"}[10m])) < 0.5`
+for the affected chain (and `status="success"` is climbing again).
 
 ---
 
