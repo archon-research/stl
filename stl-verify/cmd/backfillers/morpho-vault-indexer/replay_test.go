@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -153,6 +154,106 @@ func TestReplayPartitionPrefixes_AscendingByBlock(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("partition[%d] = %s, want %s (full: %v)", i, got[i], want[i], got)
 		}
+	}
+}
+
+// TestPartitionFullyCovered pins the checkpoint-eligibility rule: a partition is
+// fully covered only when its entire block range lies within [from,to]. A
+// boundary partition (bounds aligned to a partition edge still count as fully
+// covered; only a partition the range partially overlaps does not) and an
+// unparseable prefix are not.
+func TestPartitionFullyCovered(t *testing.T) {
+	tests := []struct {
+		name     string
+		part     string
+		from, to int64
+		want     bool
+	}{
+		{"interior partition fully inside", "3000-3999", 2000, 4999, true},
+		{"fully-covered boundary: from aligned to partition start", "2000-2999", 2000, 4999, true},
+		{"fully-covered boundary: to aligned to partition end", "4000-4999", 2000, 4999, true},
+		{"partially-covered first: from mid-partition", "1000-1999", 1500, 4999, false},
+		{"partially-covered last: to mid-partition", "4000-4999", 2000, 4500, false},
+		{"unparseable prefix", "not-a-range", 0, 10000, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := partitionFullyCovered(tt.part, tt.from, tt.to); got != tt.want {
+				t.Errorf("partitionFullyCovered(%q, %d, %d) = %v, want %v", tt.part, tt.from, tt.to, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestReplayCheckpointsOnlyFullyCoveredPartitions locks the cross-run-hole fix:
+// the replay loop checkpoints a partition only when its full block range lies
+// within [from,to]. A partially-covered boundary partition replays every run but
+// stays out of the checkpoint, so a later run reusing the same progress file
+// with wider bounds still revisits it. Here from=2000 is partition-aligned (so
+// "2000-2999" is a fully-covered boundary) and to=4500 falls mid-"4000-4999"
+// (the partially-covered last partition).
+func TestReplayCheckpointsOnlyFullyCoveredPartitions(t *testing.T) {
+	const from, to = int64(2000), int64(4500)
+	path := t.TempDir() + "/progress.jsonl"
+
+	// Mirror the replayV2StructuredEvents loop: replay every not-yet-done
+	// partition, but checkpoint only the fully-covered ones. Returns the
+	// partitions this pass replayed, in order.
+	replayOnce := func(cp *checkpoint) []string {
+		var replayed []string
+		for _, part := range replayPartitionPrefixes(from, to) {
+			if cp.isDone(part) {
+				continue
+			}
+			replayed = append(replayed, part)
+			if !partitionFullyCovered(part, from, to) {
+				continue
+			}
+			if err := cp.markDone(part); err != nil {
+				t.Fatalf("markDone(%s): %v", part, err)
+			}
+		}
+		return replayed
+	}
+
+	cp1, err := loadCheckpoint(path)
+	if err != nil {
+		t.Fatalf("loadCheckpoint: %v", err)
+	}
+	first := replayOnce(cp1)
+	if err := cp1.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	wantFirst := []string{"2000-2999", "3000-3999", "4000-4999"}
+	if !slices.Equal(first, wantFirst) {
+		t.Fatalf("first pass replayed %v, want %v", first, wantFirst)
+	}
+
+	// Reopen from disk — the cross-run scenario the fix guards. The two
+	// fully-covered partitions are recorded; the partially-covered last partition
+	// is not, so its blocks stay replayable under wider bounds.
+	cp2, err := loadCheckpoint(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	defer cp2.Close()
+
+	if !cp2.isDone("2000-2999") {
+		t.Error(`"2000-2999" (fully-covered boundary) should be checkpointed`)
+	}
+	if !cp2.isDone("3000-3999") {
+		t.Error(`"3000-3999" (interior) should be checkpointed`)
+	}
+	if cp2.isDone("4000-4999") {
+		t.Error(`"4000-4999" (partially-covered last) must not be checkpointed`)
+	}
+
+	// Resume replays ONLY the uncheckpointed boundary partition.
+	second := replayOnce(cp2)
+	wantSecond := []string{"4000-4999"}
+	if !slices.Equal(second, wantSecond) {
+		t.Fatalf("resume replayed %v, want %v", second, wantSecond)
 	}
 }
 

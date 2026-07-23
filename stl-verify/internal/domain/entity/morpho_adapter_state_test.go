@@ -75,6 +75,18 @@ func TestNewMorphoAdapterState(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
+			if got.MorphoAdapterID != tt.adapterID {
+				t.Errorf("MorphoAdapterID = %d, want %d", got.MorphoAdapterID, tt.adapterID)
+			}
+			if got.BlockNumber != tt.block {
+				t.Errorf("BlockNumber = %d, want %d", got.BlockNumber, tt.block)
+			}
+			if got.BlockVersion != tt.version {
+				t.Errorf("BlockVersion = %d, want %d", got.BlockVersion, tt.version)
+			}
+			if !got.Timestamp.Equal(tt.timestamp) {
+				t.Errorf("Timestamp = %v, want %v", got.Timestamp, tt.timestamp)
+			}
 			if got.RealAssets.Cmp(tt.realAssets) != 0 {
 				t.Errorf("RealAssets = %s, want %s", got.RealAssets, tt.realAssets)
 			}

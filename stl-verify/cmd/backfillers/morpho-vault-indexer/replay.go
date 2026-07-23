@@ -86,6 +86,15 @@ func replayV2StructuredEvents(
 		if err := replayPartition(ctx, logger, s3Reader, svc, tsCache, cfg, part, v2Vaults, topics); err != nil {
 			return fmt.Errorf("replaying partition %s: %w", part, err)
 		}
+		// Only a partition whose full range lies within [from,to] may be
+		// checkpointed. A boundary partition is completeness-checked against the
+		// [from,to] intersection alone, so recording it done would let a later run
+		// reusing this progress file with WIDER bounds skip the now-in-scope
+		// blocks — a silent cross-run hole. It replayed above (cheap, idempotent);
+		// it just stays out of the checkpoint and replays again next run.
+		if !partitionFullyCovered(part, cfg.from, cfg.to) {
+			continue
+		}
 		if err := checkpoint.markDone(part); err != nil {
 			return fmt.Errorf("recording partition %s done: %w", part, err)
 		}
@@ -276,6 +285,19 @@ func partitionBlockRange(part string) (start, end int64, ok bool) {
 		return 0, 0, false
 	}
 	return start, end, true
+}
+
+// partitionFullyCovered reports whether the partition's entire block range lies
+// within [from,to]. Only fully-covered partitions may be checkpointed (see the
+// replay loop): a boundary partition the run's bounds only partially overlap is
+// completeness-checked against the intersection alone, so recording it done
+// would hide the blocks a later wider-bounds run brings into scope.
+func partitionFullyCovered(part string, from, to int64) bool {
+	partStart, partEnd, ok := partitionBlockRange(part)
+	if !ok {
+		return false
+	}
+	return partStart >= from && partEnd <= to
 }
 
 // replayPartitionPrefixes returns the S3 partition prefixes covering [from,to]
