@@ -137,6 +137,9 @@ func plan(reg *schemamaster.Register, schema RawSchema) (projection, error) {
 	if err != nil {
 		return projection{}, err
 	}
+	if !slices.Contains(schema.PrimaryKey, rawPart) {
+		return projection{}, fmt.Errorf("observation column %q is not part of the raw primary key for %q", rawPart, schema.Table)
+	}
 
 	// columns are the transformed output names in SELECT emission order: filled
 	// columns first (chain_id/protocol_id), then raw columns (renames applied).

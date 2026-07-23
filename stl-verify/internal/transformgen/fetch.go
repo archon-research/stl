@@ -71,6 +71,7 @@ func fetchPrimaryKeys(ctx context.Context, pool *pgxpool.Pool, tables []string) 
 		JOIN information_schema.key_column_usage kcu
 		  ON tc.constraint_name = kcu.constraint_name
 		  AND tc.table_schema = kcu.table_schema
+		  AND tc.table_name = kcu.table_name
 		WHERE tc.table_schema = 'public'
 		  AND tc.constraint_type = 'PRIMARY KEY'
 		  AND tc.table_name = ANY($1)
