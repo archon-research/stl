@@ -201,6 +201,14 @@ func GetVaultV2AdapterReadABI() (*abi.ABI, error) {
 // indexer reads them at a cap event's block hash to snapshot the full cap state.
 // Chain-verified against sparkUSDTbc: absoluteCap selector 0xbc0dd374,
 // relativeCap selector 0xa68bafa3.
+//
+// adaptersLength() / adapters(uint256) enumerate the vault's registered adapter
+// set. Note the no-arg adapters() returning address[] REVERTS on the deployed
+// VaultV2 (see vault_probe.go); the enumerable form (a length getter plus an
+// index getter) is the working surface. Discovery-time enumeration reads these
+// to seed the adapter registry for a V2 vault found mid-life, whose historical
+// AddAdapter events never replay on the live stream. Chain-verified against
+// sparkUSDTbc: adaptersLength() 0x5aa22bc8, adapters(uint256) 0x4ef501ac.
 func GetVaultV2ReadABI() (*abi.ABI, error) {
 	return ParseABI(`[
 		{
@@ -213,6 +221,20 @@ func GetVaultV2ReadABI() (*abi.ABI, error) {
 		{
 			"inputs": [],
 			"name": "liquidityAdapter",
+			"outputs": [{"name": "", "type": "address"}],
+			"stateMutability": "view",
+			"type": "function"
+		},
+		{
+			"inputs": [],
+			"name": "adaptersLength",
+			"outputs": [{"name": "", "type": "uint256"}],
+			"stateMutability": "view",
+			"type": "function"
+		},
+		{
+			"inputs": [{"name": "", "type": "uint256"}],
+			"name": "adapters",
 			"outputs": [{"name": "", "type": "address"}],
 			"stateMutability": "view",
 			"type": "function"

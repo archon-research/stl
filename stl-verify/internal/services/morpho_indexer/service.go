@@ -468,7 +468,7 @@ func (s *Service) processReceipt(ctx context.Context, receipt shared.Transaction
 	// The V2 IsVaultActivityEvent path stays inline in the default case
 	// below — V2 emits its 4-field AccrueInterest first in every
 	// state-changing transaction, so single-pass discovery there is correct.
-	if err := s.discoverV1V11VaultsInReceipt(ctx, receipt, chainID, blockNumber); err != nil {
+	if err := s.discoverV1V11VaultsInReceipt(ctx, receipt, chainID, blockNumber, blockHash, blockVersion, blockTimestamp); err != nil {
 		return err
 	}
 
@@ -813,15 +813,18 @@ func MorphoBlueVaultCandidates(event MorphoBlueEvent) []common.Address {
 }
 
 // discoverAndRegisterVault probes vaultAddress on-chain, persists the vault
-// and its asset token, and registers the vault in the in-memory registry.
+// and its asset token, enumerates and seeds its adapters if it is a VaultV2,
+// and registers the vault in the in-memory registry.
 // Returns *ErrNotVault if the address is definitively not a Morpho-family
 // vault; transient errors (RPC, DB) propagate as plain errors so the caller
 // can decide whether to retry.
 //
 // Used by both the IsVaultActivityEvent path (V2) via tryDiscoverVault and
 // the Morpho Blue caller/onBehalf path (V1/V1.1) via
-// discoverV1V11VaultsInReceipt.
-func (s *Service) discoverAndRegisterVault(ctx context.Context, vaultAddress common.Address, chainID, blockNumber int64) error {
+// discoverV1V11VaultsInReceipt. blockHash / blockVersion / blockTimestamp are the
+// triggering event's; they are used only by the V2 adapter-state seed (a
+// hash-pinned realAssets snapshot) and are inert for the V1/V1.1 path.
+func (s *Service) discoverAndRegisterVault(ctx context.Context, vaultAddress common.Address, chainID, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) error {
 	metadata, err := s.blockchainSvc.getVaultMetadata(ctx, vaultAddress, blockNumber)
 	if err != nil {
 		return fmt.Errorf("fetching vault metadata: %w", err)
@@ -868,7 +871,57 @@ func (s *Service) discoverAndRegisterVault(ctx context.Context, vaultAddress com
 		return fmt.Errorf("persisting vault: %w", err)
 	}
 
+	// A VaultV2 discovered mid-life carries adapters registered by historical
+	// AddAdapter events that never replay on the live stream. Enumerate and seed
+	// them BEFORE registering the vault in-memory: a transient enumeration failure
+	// then leaves the vault undiscovered, so the next SQS redelivery re-runs
+	// discovery + enumeration rather than treating the vault as known while its
+	// adapters are missing. The GetOrCreate / SaveAdapterState writes are
+	// idempotent, so the retry is safe.
+	if metadata.Version == entity.MorphoVaultV2 {
+		if err := s.enumerateAndSeedV2Adapters(ctx, vault, vaultAddress, blockNumber, blockHash, blockVersion, blockTimestamp); err != nil {
+			return fmt.Errorf("seeding V2 adapters for vault %s: %w", vaultAddress.Hex(), err)
+		}
+	}
+
 	s.vaultRegistry.RegisterVault(vaultAddress, vault)
+	return nil
+}
+
+// enumerateAndSeedV2Adapters reads a freshly-discovered VaultV2's on-chain
+// adapter set and, for each adapter, classifies it, registers it at the discovery
+// block, and seeds one adapter_state row from a hash-pinned realAssets() read at
+// the discovery event's block hash. Seeding at discovery keeps the adapter
+// registry and its state consistent from the first moment (VEC-219's
+// composition-completeness probe treats an active adapter with no state row as
+// adapter_data_missing); subsequent Allocate/Deallocate events append as normal.
+//
+// Per-adapter writes commit in their own transaction and are idempotent; a
+// transport error on any read bubbles so the whole event retries.
+func (s *Service) enumerateAndSeedV2Adapters(ctx context.Context, vault *entity.MorphoVault, vaultAddress common.Address, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) error {
+	adapters, err := s.blockchainSvc.enumerateVaultAdapters(ctx, vaultAddress, blockNumber)
+	if err != nil {
+		return fmt.Errorf("enumerating adapters: %w", err)
+	}
+	for _, adapter := range adapters {
+		realAssets, err := s.blockchainSvc.getAdapterRealAssets(ctx, adapter, blockHash)
+		if err != nil {
+			return fmt.Errorf("seeding realAssets for adapter %s: %w", adapter.Hex(), err)
+		}
+		if err := s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
+			adapterID, err := s.probeAndUpsertAdapter(ctx, tx, vault, vaultAddress, adapter, blockNumber)
+			if err != nil {
+				return err
+			}
+			state, err := entity.NewMorphoAdapterState(adapterID, blockNumber, blockVersion, blockTimestamp, realAssets)
+			if err != nil {
+				return fmt.Errorf("creating adapter state entity: %w", err)
+			}
+			return s.morphoRepo.SaveAdapterState(ctx, tx, state)
+		}); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -888,7 +941,7 @@ func (s *Service) tryDiscoverVault(ctx context.Context, log shared.Log, vaultAdd
 		return &ErrNotVault{Err: fmt.Errorf("event decode failed: %w", err)}
 	}
 
-	if err := s.discoverAndRegisterVault(ctx, vaultAddress, chainID, blockNumber); err != nil {
+	if err := s.discoverAndRegisterVault(ctx, vaultAddress, chainID, blockNumber, blockHash, blockVersion, blockTimestamp); err != nil {
 		return err
 	}
 
@@ -919,7 +972,7 @@ func (s *Service) tryDiscoverVault(ctx context.Context, log shared.Log, vaultAdd
 // logs in the same receipt, only one probe fires per receipt. After the
 // first probe the registry cache (IsKnownVault / IsKnownNotVault) handles
 // further short-circuiting.
-func (s *Service) discoverV1V11VaultsInReceipt(ctx context.Context, receipt shared.TransactionReceipt, chainID, blockNumber int64) error {
+func (s *Service) discoverV1V11VaultsInReceipt(ctx context.Context, receipt shared.TransactionReceipt, chainID, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) error {
 	morphoBlueAddr := MorphoBlueAddress
 	var errs []error
 	seen := make(map[common.Address]bool)
@@ -962,7 +1015,7 @@ func (s *Service) discoverV1V11VaultsInReceipt(ctx context.Context, receipt shar
 			probeCtx, probeSpan := s.telemetry.StartSpan(ctx, "morpho.discoverVault",
 				attribute.String("vault.address", addr.Hex()),
 				attribute.String("discovery.path", "morphoBlue"))
-			probeErr := s.discoverAndRegisterVault(probeCtx, addr, chainID, blockNumber)
+			probeErr := s.discoverAndRegisterVault(probeCtx, addr, chainID, blockNumber, blockHash, blockVersion, blockTimestamp)
 			probeSpan.End()
 			if probeErr == nil {
 				continue
