@@ -143,3 +143,18 @@ func TestPlan_ObservationColumnMustBeInPK(t *testing.T) {
 		t.Errorf("plan err = %v, want 'not part of the raw primary key'", err)
 	}
 }
+
+// TestJoinFor_ConflictingJoins asserts joinFor rejects two joining fills that
+// disagree on parent/key/ref. The one-join assumption would otherwise silently
+// drop a fill's join and emit wrong SQL.
+func TestJoinFor_ConflictingJoins(t *testing.T) {
+	fills := []schemamaster.Fill{
+		{Table: "t", Column: "a", Parent: "p1", Key: "k", Ref: "r"},
+		{Table: "t", Column: "b", Parent: "p2", Key: "k", Ref: "r"},
+	}
+	if _, _, err := joinFor(fills); err == nil {
+		t.Fatal("joinFor: want error for disagreeing joins, got nil")
+	} else if !strings.Contains(err.Error(), "disagree on join") {
+		t.Errorf("joinFor err = %v, want 'disagree on join'", err)
+	}
+}
