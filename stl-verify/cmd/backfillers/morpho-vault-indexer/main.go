@@ -320,7 +320,7 @@ func scanBlockRange(
 	var wg sync.WaitGroup
 	for range numWorkers {
 		wg.Add(1)
-		go downloadWorker(ctx, logger, s3Reader, extractor, bucket, workCh, candidateCh, prog, &firstErr, cancelScan, &wg)
+		go downloadWorker(ctx, s3Reader, extractor, bucket, workCh, candidateCh, prog, &firstErr, cancelScan, &wg)
 	}
 
 	// Feed block keys into the work channel.
@@ -445,7 +445,6 @@ func logBlockGapsFromKeys(logger *slog.Logger, partitionPrefix string, keys []bl
 // downloadWorker pulls block work items from workCh, downloads and processes each one.
 func downloadWorker(
 	ctx context.Context,
-	logger *slog.Logger,
 	s3Reader outbound.S3Reader,
 	extractor *morpho_indexer.EventExtractor,
 	bucket string,
@@ -474,7 +473,11 @@ func downloadWorker(
 		prog.downloadCount.Add(1)
 
 		extractStart := time.Now()
-		extractCandidatesFromReceipts(logger, receipts, extractor, morphoBlueAddr, work.blockNumber, candidateCh)
+		if err := extractCandidatesFromReceipts(receipts, extractor, morphoBlueAddr, work.blockNumber, candidateCh); err != nil {
+			firstErr.CompareAndSwap(nil, fmt.Errorf("extracting candidates from %s: %w", work.key, err))
+			cancelScan()
+			return
+		}
 		prog.extractDurationMs.Add(time.Since(extractStart).Milliseconds())
 		prog.blocksProcessed.Add(1)
 	}
@@ -717,13 +720,12 @@ func downloadReceipts(
 // internal/services/morpho_indexer/event_extractor.go) so the discovery
 // contract stays uniform across the two code paths.
 func extractCandidatesFromReceipts(
-	logger *slog.Logger,
 	receipts []shared.TransactionReceipt,
 	extractor *morpho_indexer.EventExtractor,
 	morphoBlueAddr common.Address,
 	blockNumber int64,
 	candidateCh chan<- candidateEntry,
-) {
+) error {
 	for _, receipt := range receipts {
 		for _, log := range receipt.Logs {
 			logAddr := common.HexToAddress(log.Address)
@@ -731,30 +733,39 @@ func extractCandidatesFromReceipts(
 
 			switch {
 			case isMorphoBlue && extractor.IsMorphoBlueEvent(log):
-				emitMorphoBlueCandidates(logger, extractor, log, blockNumber, candidateCh)
+				if err := emitMorphoBlueCandidates(extractor, log, blockNumber, candidateCh); err != nil {
+					return err
+				}
 			case !isMorphoBlue && extractor.IsVaultActivityEvent(log):
 				candidateCh <- candidateEntry{address: logAddr, firstBlock: blockNumber}
 			}
 		}
 	}
+	return nil
 }
 
 // emitMorphoBlueCandidates extracts caller/onBehalf addresses from a Morpho
 // Blue event log and sends them to candidateCh.
+//
+// The caller only reaches here for a log whose topic0 is a recognised Morpho
+// Blue event (extractor.IsMorphoBlueEvent), so a decode failure is data drift
+// on a known-relevant log, not an uninteresting event — it is returned as a
+// hard error that fails the run. This mirrors the live indexer's
+// processMorphoBlueLog (internal/services/morpho_indexer/service.go), which
+// likewise surfaces an ExtractMorphoBlueEvent failure rather than skipping the
+// log; the live discovery pre-walk can afford to WARN-and-continue only because
+// processMorphoBlueLog re-extracts the same log in the same pass. The backfiller
+// has no such second pass, so swallowing here would silently drop this log's
+// candidate vaults from the backfill.
 func emitMorphoBlueCandidates(
-	logger *slog.Logger,
 	extractor *morpho_indexer.EventExtractor,
 	log shared.Log,
 	blockNumber int64,
 	candidateCh chan<- candidateEntry,
-) {
+) error {
 	event, err := extractor.ExtractMorphoBlueEvent(log)
 	if err != nil {
-		logger.Warn("failed to extract Morpho Blue event",
-			"block", blockNumber,
-			"txHash", log.TransactionHash,
-			"error", err)
-		return
+		return fmt.Errorf("extracting Morpho Blue event (block %d, tx %s): %w", blockNumber, log.TransactionHash, err)
 	}
 
 	for _, addr := range morpho_indexer.MorphoBlueVaultCandidates(event) {
@@ -763,6 +774,7 @@ func emitMorphoBlueCandidates(
 		}
 		candidateCh <- candidateEntry{address: addr, firstBlock: blockNumber}
 	}
+	return nil
 }
 
 // persistVaults stores confirmed vaults in the database, creating the protocol
