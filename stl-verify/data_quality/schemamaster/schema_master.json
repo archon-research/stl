@@ -8,6 +8,7 @@
     "credit_rating_ref",
     "currency_ref",
     "deal_type_ref",
+    "entity_master",
     "entity_type_ref",
     "industry_group_ref",
     "origination_type_ref",
