@@ -20,7 +20,9 @@ CREATE TABLE IF NOT EXISTS block_time (
     PRIMARY KEY (chain_id, block_number)
 );
 
-COMMENT ON TABLE block_time IS 'Canonical (chain_id, block_number) -> on-chain block_timestamp lookup. Source of block_timestamp for bucket-2 transform tables that carry no event-time column (VEC-491). Populated out of band from block_states (canonical rows; created_at is on-chain time) and the native-timestamp pipeline tables.';
+COMMENT ON TABLE block_time IS '[Dimension] Canonical (chain_id, block_number) -> on-chain block_timestamp lookup. Source of block_timestamp for bucket-2 transform tables that carry no event-time column (VEC-491). Populated out of band from block_states (canonical rows; created_at is on-chain time) and the native-timestamp pipeline tables.';
+COMMENT ON COLUMN block_time.chain_id IS 'Chain the block belongs to. Part of the (chain_id, block_number) PK.';
+COMMENT ON COLUMN block_time.block_number IS 'Block height on that chain. Part of the (chain_id, block_number) PK.';
 COMMENT ON COLUMN block_time.block_timestamp IS 'On-chain block-header timestamp (UTC). NOT node receipt time (that is block_states.received_at).';
 
 INSERT INTO migrations (filename) VALUES ('20260722_140000_create_block_time_dimension.sql') ON CONFLICT (filename) DO NOTHING;
