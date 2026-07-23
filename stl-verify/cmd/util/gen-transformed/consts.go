@@ -1,4 +1,4 @@
-package transformgen
+package main
 
 // This file is the static (non-per-table) SQL of the bucket-1 migration, embedded
 // verbatim from db/migrations/20260706_140000_create_transformed_bucket1.sql: the

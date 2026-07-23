@@ -1,6 +1,6 @@
 //go:build integration
 
-package transformgen_test
+package main
 
 import (
 	"context"
@@ -11,10 +11,9 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/data_quality/schemamaster"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
-	"github.com/archon-research/stl/stl-verify/cmd/util/gen-transformed/internal/transformgen"
 )
 
-const migrationPath = "../../../../../db/migrations/20260706_140000_create_transformed_bucket1.sql"
+const migrationPath = "../../../db/migrations/20260706_140000_create_transformed_bucket1.sql"
 
 // TestRegenDiff is the drift gate: it migrates a fresh DB, reads the raw schema of
 // the bucket-1 tables from information_schema, regenerates the bucket-1 migration
@@ -30,11 +29,11 @@ func TestRegenDiff(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load register: %v", err)
 	}
-	raw, err := transformgen.FetchRawSchemas(context.Background(), pool, transformgen.Bucket1Tables())
+	raw, err := FetchRawSchemas(context.Background(), pool, Bucket1Tables())
 	if err != nil {
 		t.Fatalf("fetch raw schemas: %v", err)
 	}
-	got, err := transformgen.GenerateBucket1(reg, raw)
+	got, err := GenerateBucket1(reg, raw)
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}

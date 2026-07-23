@@ -1,4 +1,4 @@
-package transformgen
+package main
 
 import (
 	"context"

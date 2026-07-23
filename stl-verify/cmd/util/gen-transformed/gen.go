@@ -1,4 +1,4 @@
-// Package transformgen is the single source behind the transformation-layer
+// This file is the single source behind the transformation-layer
 // migration. Given the schema_master register and the live raw schema (column
 // lists + primary keys, read from information_schema), it resolves how each
 // transformed row is built from its raw row (rename / cast / dimension-fill, the
@@ -17,7 +17,7 @@
 // The projection layer lives in this file; the queue-shape statement emitters, the
 // static header/tail, and GenerateBucket1 (the entry point main.go and the
 // conformance test call) live in emit.go.
-package transformgen
+package main
 
 import (
 	"cmp"

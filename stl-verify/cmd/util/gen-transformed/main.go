@@ -1,7 +1,7 @@
 // Package main regenerates the bucket-1 transformation-layer migration from the
 // schema_master register and the live raw schema, and prints it to stdout. It is
 // the human-facing entry point to the generator; the regen-diff CI test
-// (internal/transformgen) asserts the committed migration still matches what this
+// asserts the committed migration still matches what this
 // produces (normalised), so the register and the migration cannot drift.
 //
 // Regenerate to a SCRATCH file, then diff and reconcile into the committed
@@ -27,7 +27,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/data_quality/schemamaster"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
-	"github.com/archon-research/stl/stl-verify/cmd/util/gen-transformed/internal/transformgen"
 )
 
 func main() {
@@ -49,11 +48,11 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("loading register: %w", err)
 	}
-	raw, err := transformgen.FetchRawSchemas(ctx, pool, transformgen.Bucket1Tables())
+	raw, err := FetchRawSchemas(ctx, pool, Bucket1Tables())
 	if err != nil {
 		return fmt.Errorf("fetching raw schemas: %w", err)
 	}
-	sql, err := transformgen.GenerateBucket1(reg, raw)
+	sql, err := GenerateBucket1(reg, raw)
 	if err != nil {
 		return fmt.Errorf("generating: %w", err)
 	}
