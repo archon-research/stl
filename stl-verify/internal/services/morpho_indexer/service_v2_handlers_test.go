@@ -180,6 +180,12 @@ func TestProcessBlockEvent_RemoveAdapter(t *testing.T) {
 	h := newTestHarness(t)
 	h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
 
+	// Known adapter: GetActiveAdapter returns the active row, so removal proceeds
+	// directly (no lazy registration).
+	h.morphoRepo.GetActiveAdapterFn = func(_ context.Context, _ pgx.Tx, vaultID int64, address []byte) (*entity.MorphoAdapter, error) {
+		return &entity.MorphoAdapter{ID: 55, MorphoVaultID: vaultID, Address: address, AssetTokenID: 1, AdapterType: entity.MorphoAdapterTypeMarketV1, AddedAtBlock: 19000000}, nil
+	}
+
 	var (
 		gotVaultID int64
 		gotAddr    []byte
@@ -292,28 +298,160 @@ func TestProcessBlockEvent_Allocation(t *testing.T) {
 	}
 }
 
-func TestProcessBlockEvent_Allocation_UnknownAdapterErrors(t *testing.T) {
+// TestProcessBlockEvent_Allocation_UnknownAdapterHeals verifies the self-heal:
+// an Allocate/Deallocate for an adapter we never saw AddAdapter for (it predates
+// the vault's discovery) must NOT hard-fail the event and poison the FIFO queue.
+// Instead the adapter is classified on-chain, registered at the event block, and
+// its state row saved — behind a "registered lazily" WARN. The adapter address
+// comes from the vault's own event and is verified by the probe, so this is a
+// heal, not a phantom write.
+func TestProcessBlockEvent_Allocation_UnknownAdapterHeals(t *testing.T) {
+	tests := []struct {
+		name            string
+		adapterType     entity.MorphoAdapterType
+		wantUnknownWarn bool
+	}{
+		{"MarketV1 probe", entity.MorphoAdapterTypeMarketV1, false},
+		{"both-revert probe records Unknown", entity.MorphoAdapterTypeUnknown, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newTestHarness(t)
+			h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
+			logs := h.captureLogs()
+
+			realAssets := big.NewInt(41_300_000)
+			h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+				if len(calls) == 1 && calls[0].Target == testAdapterAddr {
+					return []outbound.Result{{Success: true, ReturnData: h.packUint256(realAssets)}}, nil
+				}
+				return nil, errTestUnexpectedCall(calls)
+			}
+			// getAdapterType classification (2 number-pinned calls to the adapter).
+			h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+				if len(calls) == 2 && calls[0].Target == testAdapterAddr {
+					return h.adapterProbeResults(tt.adapterType), nil
+				}
+				return nil, errTestUnexpectedCall(calls)
+			}
+
+			h.morphoRepo.GetActiveAdapterFn = func(_ context.Context, _ pgx.Tx, _ int64, _ []byte) (*entity.MorphoAdapter, error) {
+				return nil, nil // adapter predates discovery — never AddAdapter'd
+			}
+			var registered *entity.MorphoAdapter
+			h.morphoRepo.GetOrCreateAdapterFn = func(_ context.Context, _ pgx.Tx, a *entity.MorphoAdapter) (int64, error) {
+				registered = a
+				return 77, nil
+			}
+			var savedState *entity.MorphoAdapterState
+			h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, s *entity.MorphoAdapterState) error {
+				savedState = s
+				return nil
+			}
+
+			ev := h.vaultV2EventsABI.Events["Allocate"]
+			log := h.makeV2VaultLog(ev, testVaultAddr,
+				[]common.Hash{addrTopic(testCaller), addrTopic(testAdapterAddr)},
+				big.NewInt(5000), hashSlice(common.HexToHash("0xaa")), big.NewInt(5000))
+			if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err != nil {
+				t.Fatalf("processBlock must self-heal, not fail: %v", err)
+			}
+
+			if registered == nil {
+				t.Fatal("adapter was not lazily registered")
+			}
+			if registered.MorphoVaultID != 7 {
+				t.Errorf("MorphoVaultID = %d, want 7", registered.MorphoVaultID)
+			}
+			if !bytes.Equal(registered.Address, testAdapterAddr.Bytes()) {
+				t.Errorf("Address = %x, want %s", registered.Address, testAdapterAddr.Hex())
+			}
+			if registered.AdapterType != tt.adapterType {
+				t.Errorf("AdapterType = %d, want %d (probed on-chain)", registered.AdapterType, tt.adapterType)
+			}
+			if registered.AddedAtBlock != 20000000 {
+				t.Errorf("AddedAtBlock = %d, want 20000000 (event block)", registered.AddedAtBlock)
+			}
+			if registered.AssetTokenID != 1 {
+				t.Errorf("AssetTokenID = %d, want 1 (vault asset)", registered.AssetTokenID)
+			}
+			if savedState == nil {
+				t.Fatal("adapter state not saved after heal")
+			}
+			if savedState.MorphoAdapterID != 77 {
+				t.Errorf("MorphoAdapterID = %d, want 77 (the lazily-registered row)", savedState.MorphoAdapterID)
+			}
+			if savedState.RealAssets.Cmp(realAssets) != 0 {
+				t.Errorf("RealAssets = %s, want %s", savedState.RealAssets, realAssets)
+			}
+			if !logs.hasWarnContaining("registered lazily") {
+				t.Error("expected a WARN that the adapter was registered lazily")
+			}
+			if got := logs.hasWarnContaining("unknown type"); got != tt.wantUnknownWarn {
+				t.Errorf("WARN(unknown type) = %v, want %v", got, tt.wantUnknownWarn)
+			}
+		})
+	}
+}
+
+// TestProcessBlockEvent_RemoveAdapter_UnknownAdapterHeals verifies a RemoveAdapter
+// for an adapter that predates discovery lazily registers an audit-consistent row
+// (probed type, event block) and then closes it in the same transaction, rather
+// than failing MarkAdapterRemoved with a 0-rows error and poisoning the queue.
+func TestProcessBlockEvent_RemoveAdapter_UnknownAdapterHeals(t *testing.T) {
 	h := newTestHarness(t)
 	h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
+	logs := h.captureLogs()
 
-	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
-		return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(1))}}, nil
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		if len(calls) == 2 && calls[0].Target == testAdapterAddr {
+			return h.adapterProbeResults(entity.MorphoAdapterTypeVaultV1), nil
+		}
+		return nil, errTestUnexpectedCall(calls)
 	}
 	h.morphoRepo.GetActiveAdapterFn = func(_ context.Context, _ pgx.Tx, _ int64, _ []byte) (*entity.MorphoAdapter, error) {
-		return nil, nil // adapter was never AddAdapter'd — missed data
+		return nil, nil // unknown adapter
 	}
-	h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterState) error {
-		t.Fatal("SaveAdapterState must not be called when the adapter is unknown")
+	var registered *entity.MorphoAdapter
+	h.morphoRepo.GetOrCreateAdapterFn = func(_ context.Context, _ pgx.Tx, a *entity.MorphoAdapter) (int64, error) {
+		registered = a
+		return 88, nil
+	}
+	var (
+		removedVaultID int64
+		removedAddr    []byte
+		removedBlock   int64
+		marked         bool
+	)
+	h.morphoRepo.MarkAdapterRemovedFn = func(_ context.Context, _ pgx.Tx, vaultID int64, address []byte, removedAtBlock int64) error {
+		marked = true
+		removedVaultID, removedAddr, removedBlock = vaultID, address, removedAtBlock
 		return nil
 	}
 
-	ev := h.vaultV2EventsABI.Events["Allocate"]
-	log := h.makeV2VaultLog(ev, testVaultAddr,
-		[]common.Hash{addrTopic(testCaller), addrTopic(testAdapterAddr)},
-		big.NewInt(5000), hashSlice(common.HexToHash("0xaa")), big.NewInt(5000))
-	err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)})
-	if err == nil {
-		t.Fatal("expected error for allocation on an unknown adapter")
+	ev := h.vaultV2EventsABI.Events["RemoveAdapter"]
+	log := h.makeV2VaultLog(ev, testVaultAddr, []common.Hash{addrTopic(testAdapterAddr)})
+	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err != nil {
+		t.Fatalf("processBlock must self-heal, not fail: %v", err)
+	}
+
+	if registered == nil {
+		t.Fatal("unknown adapter was not lazily registered before removal")
+	}
+	if registered.AddedAtBlock != 20000000 {
+		t.Errorf("AddedAtBlock = %d, want 20000000 (event block)", registered.AddedAtBlock)
+	}
+	if registered.AdapterType != entity.MorphoAdapterTypeVaultV1 {
+		t.Errorf("AdapterType = %d, want VaultV1 (probed)", registered.AdapterType)
+	}
+	if !marked {
+		t.Fatal("MarkAdapterRemoved not called after lazy registration")
+	}
+	if removedVaultID != 7 || !bytes.Equal(removedAddr, testAdapterAddr.Bytes()) || removedBlock != 20000000 {
+		t.Errorf("MarkAdapterRemoved(%d,%x,%d), want (7,%s,20000000)", removedVaultID, removedAddr, removedBlock, testAdapterAddr.Hex())
+	}
+	if !logs.hasWarnContaining("registered lazily") {
+		t.Error("expected a WARN that the adapter was registered lazily")
 	}
 }
 
@@ -649,6 +787,32 @@ func TestProcessBlockEvent_V2Handlers_ErrorsPropagate(t *testing.T) {
 				}
 				h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterState) error {
 					t.Fatal("adapter state must not be persisted on a DB lookup error")
+					return nil
+				}
+				return h.makeV2VaultLog(h.vaultV2EventsABI.Events["Allocate"], testVaultAddr, adapterIdx, big.NewInt(1), hashSlice(common.HexToHash("0xaa")), big.NewInt(1))
+			},
+		},
+		{
+			// The heal path must still fail the event on a TRANSPORT probe error:
+			// a momentarily-unreachable adapter is transient and must retry, never
+			// be recorded with a defaulted type.
+			name: "Allocation: lazy-register probe transport error",
+			setup: func(h *serviceTestHarness) shared.Log {
+				h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+					return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(1))}}, nil
+				}
+				h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+					return nil, errors.New("adapter probe rpc down")
+				}
+				h.morphoRepo.GetActiveAdapterFn = func(_ context.Context, _ pgx.Tx, _ int64, _ []byte) (*entity.MorphoAdapter, error) {
+					return nil, nil // unknown adapter → heal path fires, then the probe fails
+				}
+				h.morphoRepo.GetOrCreateAdapterFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapter) (int64, error) {
+					t.Fatal("adapter must not be persisted when the classification probe fails")
+					return 0, nil
+				}
+				h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterState) error {
+					t.Fatal("adapter state must not be persisted when the probe fails")
 					return nil
 				}
 				return h.makeV2VaultLog(h.vaultV2EventsABI.Events["Allocate"], testVaultAddr, adapterIdx, big.NewInt(1), hashSlice(common.HexToHash("0xaa")), big.NewInt(1))

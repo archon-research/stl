@@ -1587,18 +1587,60 @@ func TestGetOrCreateAdapter_Idempotent(t *testing.T) {
 	}
 }
 
-func TestGetOrCreateAdapter_DifferentAddedBlockNewRow(t *testing.T) {
-	fixture := setupMorphoTest(t)
-	ctx := context.Background()
-	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x11))
+// TestGetOrCreateAdapter_ActiveRowConverges verifies the active-row-keyed
+// semantics: a second GetOrCreateAdapter for the same (vault, address) while the
+// first incarnation is still active does NOT create a second active row. It
+// reuses the existing row's id and converges added_at_block to the earliest
+// on-chain observation (LEAST). This is what lets the backfiller replay the TRUE
+// AddAdapter@X after a live lazy-registration at first-seen block Y>X collapse to
+// a single active row keyed at X, rather than leaving two active rows.
+//
+// A genuine re-add (a NEW row) only happens after a removal closes the prior
+// incarnation — covered by TestMarkAdapterRemoved_ReplayOldRemovalSparesReAddedRow.
+func TestGetOrCreateAdapter_ActiveRowConverges(t *testing.T) {
+	tests := []struct {
+		name          string
+		firstBlock    int64
+		secondBlock   int64
+		wantConverged int64
+	}{
+		{"backfill replays the earlier true AddAdapter block", 24500000, 24481834, 24481834},
+		{"a later observation keeps the earlier block", 24481834, 24500000, 24481834},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := setupMorphoTest(t)
+			ctx := context.Background()
+			vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x11))
 
-	// Same vault + address but a different added_at_block is a distinct
-	// registry row (removed-then-re-added adapter).
-	id1 := fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x03), 24481834)
-	id2 := fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x03), 24500000)
+			id1 := fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x03), tt.firstBlock)
+			id2 := fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x03), tt.secondBlock)
 
-	if id1 == id2 {
-		t.Errorf("expected distinct ids for different added_at_block, got %d twice", id1)
+			if id1 != id2 {
+				t.Errorf("active-row convergence must reuse the row: first=%d, second=%d", id1, id2)
+			}
+
+			got, err := fixture.getActiveAdapter(t, ctx, vaultID, adapterAddr(0x03))
+			if err != nil {
+				t.Fatalf("GetActiveAdapter: %v", err)
+			}
+			if got == nil {
+				t.Fatal("expected one active adapter row")
+			}
+			if got.AddedAtBlock != tt.wantConverged {
+				t.Errorf("added_at_block = %d, want %d (LEAST of the two observations)", got.AddedAtBlock, tt.wantConverged)
+			}
+
+			var count int
+			if err := fixture.pool.QueryRow(ctx,
+				`SELECT count(*) FROM morpho_adapter WHERE morpho_vault_id = $1 AND address = $2`,
+				vaultID, adapterAddr(0x03)).Scan(&count); err != nil {
+				t.Fatalf("counting adapter rows: %v", err)
+			}
+			if count != 1 {
+				t.Errorf("want exactly 1 adapter row (no duplicate active rows), got %d", count)
+			}
+		})
 	}
 }
 

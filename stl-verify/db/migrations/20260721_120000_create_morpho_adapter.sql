@@ -14,7 +14,11 @@
 --
 -- added_at_block / removed_at_block bound each adapter's active lifetime
 -- (removed_at_block NULL = active). A removed-then-re-added adapter is a new
--- row, so added_at_block is part of the UNIQUE key.
+-- row, so added_at_block is part of the UNIQUE key. added_at_block is the block
+-- at which we first observed the adapter on-chain; for an adapter that predates
+-- vault discovery it starts at the discovery / first-allocation block and
+-- converges (LEAST) to the true AddAdapter block once the backfiller replays
+-- history, so the active-row upsert never leaves a duplicate active incarnation.
 --
 -- This migration also adds the VaultV2 fee configuration to morpho_vault. These
 -- columns are NULL on V1/V1.1 rows (MetaMorpho has no such config) and are
@@ -68,7 +72,7 @@ COMMENT ON COLUMN morpho_adapter.morpho_vault_id IS 'FK→morpho_vault.id. The p
 COMMENT ON COLUMN morpho_adapter.address IS 'Adapter contract address (20 bytes). Unique per (morpho_vault_id, address, added_at_block).';
 COMMENT ON COLUMN morpho_adapter.asset_token_id IS 'FK→token.id. The vault''s underlying asset ERC-20; the unit of the adapter''s realAssets() reading.';
 COMMENT ON COLUMN morpho_adapter.adapter_type IS 'Adapter kind: 1 = MorphoMarketV1AdapterV2 (Morpho Blue market), 2 = MorphoVaultV1Adapter (nested MetaMorpho V1 vault), 99 = Unknown (unrecognised type, recorded for later curation).';
-COMMENT ON COLUMN morpho_adapter.added_at_block IS 'Block at which the adapter was registered on the vault (first-seen). Part of the UNIQUE key so a re-added adapter is a distinct row.';
+COMMENT ON COLUMN morpho_adapter.added_at_block IS 'Block at which the adapter was first observed on-chain by us: the AddAdapter block when witnessed live or replayed; the vault-discovery or first-allocation block for adapters predating discovery; converges (LEAST) to the true AddAdapter block once history is replayed. Part of the UNIQUE key so a re-added adapter is a distinct row.';
 COMMENT ON COLUMN morpho_adapter.removed_at_block IS 'Block at which the adapter was de-registered; NULL while the adapter is active.';
 
 COMMENT ON COLUMN morpho_vault.performance_fee IS 'VaultV2 performance fee: raw on-chain uint96 WAD fraction of accrued interest (1e18 = 100%). NULL on MetaMorpho V1/V1.1 rows (no such config). Mutated in place on Set* fee events; full change history lives in protocol_event.';

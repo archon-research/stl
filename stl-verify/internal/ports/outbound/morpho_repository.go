@@ -42,9 +42,13 @@ type MorphoRepository interface {
 	// SaveVaultPosition saves a user vault position snapshot within an external transaction.
 	SaveVaultPosition(ctx context.Context, tx pgx.Tx, position *entity.MorphoVaultPosition) error
 
-	// GetOrCreateAdapter retrieves or creates a VaultV2 liquidity adapter registry row.
-	// Idempotent on the (morpho_vault_id, address, added_at_block) natural key.
-	// Returns the adapter's database ID.
+	// GetOrCreateAdapter retrieves or creates a VaultV2 liquidity adapter registry
+	// row, keyed on the ACTIVE incarnation of (morpho_vault_id, address): if an
+	// active row exists it is reused and its added_at_block converges downward to
+	// the earliest observation (LEAST), so a lazily-registered adapter collapses
+	// onto the true AddAdapter block once the backfiller replays it, rather than
+	// creating a second active row. A distinct row is created only for a re-add
+	// after removal (the UNIQUE key includes added_at_block). Returns the row's ID.
 	GetOrCreateAdapter(ctx context.Context, tx pgx.Tx, adapter *entity.MorphoAdapter) (int64, error)
 
 	// MarkAdapterRemoved records the block at which an adapter was de-registered.

@@ -23,8 +23,12 @@ const (
 //
 // AddedAtBlock and RemovedAtBlock bound the adapter's active lifetime: an
 // adapter is active while RemovedAtBlock is nil, and a removed-then-re-added
-// adapter is a new row (the UNIQUE key includes AddedAtBlock). AssetTokenID is
-// the vault's underlying asset, the unit of the adapter's realAssets() reading.
+// adapter is a new row (the UNIQUE key includes AddedAtBlock). AddedAtBlock is
+// the block at which we first observed the adapter on-chain — the AddAdapter
+// block when witnessed live or replayed, or the vault-discovery / first-
+// allocation block for an adapter that predates our discovery; it converges to
+// the true AddAdapter block once history is replayed (see GetOrCreateAdapter).
+// AssetTokenID is the vault's underlying asset, the unit of realAssets().
 type MorphoAdapter struct {
 	ID             int64
 	MorphoVaultID  int64
