@@ -92,3 +92,30 @@ func TestBucket1Tables_MatchConfig(t *testing.T) {
 		t.Errorf("tableConfigs has %d entries, want %d (one per bucket-1 table)", len(tableConfigs), len(Bucket1Tables()))
 	}
 }
+
+// TestCheckBucket1Fills_Rejects covers the fills a bucket-1 projection cannot render:
+// Const/BlockTime fills (bucket 2/3), and a two-hop fill whose first hop is missing
+// (then_parent set, parent empty) — its subquery references the parent alias p, but
+// joinFor emits no join without parent/key/ref, so the SQL would reference an undefined p.
+func TestCheckBucket1Fills_Rejects(t *testing.T) {
+	c := 1
+	cases := []struct {
+		name    string
+		fill    schemamaster.Fill
+		wantErr bool
+	}{
+		{"const is bucket 2/3", schemamaster.Fill{Table: "t", Column: "chain_id", Const: &c}, true},
+		{"block_time is bucket 2/3", schemamaster.Fill{Table: "t", Column: "block_timestamp", BlockTime: true}, true},
+		{"then_parent without parent", schemamaster.Fill{Table: "t", Column: "x", ThenParent: "l", ThenKey: "k", ThenRef: "r"}, true},
+		{"single-hop parent fill is fine", schemamaster.Fill{Table: "t", Column: "y", Parent: "p", Key: "k", Ref: "r"}, false},
+		{"two-hop with first hop is fine", schemamaster.Fill{Table: "t", Column: "z", Parent: "p", Key: "k", Ref: "r", ThenParent: "l", ThenKey: "lk", ThenRef: "lr"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkBucket1Fills("t", []schemamaster.Fill{tc.fill})
+			if (err != nil) != tc.wantErr {
+				t.Errorf("checkBucket1Fills(%+v) err = %v, wantErr %v", tc.fill, err, tc.wantErr)
+			}
+		})
+	}
+}

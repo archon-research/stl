@@ -211,11 +211,17 @@ func joinFor(fills []schemamaster.Fill) (clause, alias string, err error) {
 // checkBucket1Fills rejects fills that a bucket-1 projection cannot render. A
 // Const or BlockTime fill has no parent join, so fillExpr would emit p."col"
 // referencing an alias that does not exist; those fills belong to bucket 2/3 and
-// must not reach the parent-column path.
+// must not reach the parent-column path. A two-hop fill (ThenParent) whose first
+// hop is missing (Parent == "") is the same failure class: its subquery is keyed
+// on p, but joinFor emits no join without parent/key/ref, so the p reference is
+// undefined.
 func checkBucket1Fills(table string, fills []schemamaster.Fill) error {
 	for _, f := range fills {
 		if f.Const != nil || f.BlockTime {
 			return fmt.Errorf("fill %s.%s is a Const/BlockTime fill (bucket 2/3) and cannot be rendered by the bucket-1 generator", table, f.Column)
+		}
+		if f.ThenParent != "" && f.Parent == "" {
+			return fmt.Errorf("fill %s.%s sets then_parent without parent: the two-hop subquery references parent alias p, but no join is emitted without parent/key/ref", table, f.Column)
 		}
 	}
 	return nil
