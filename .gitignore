@@ -41,10 +41,10 @@ htmlcov/
 .gopath/
 
 # Skillfile (github.com/eljulians/skillfile)
-# Skill sources live in skills/. The Claude Code deploy (.claude/skills/) is
-# committed so the skill works on a fresh clone without running any tooling.
-# The other tools' deploy targets and the downloaded CLI binary are regenerated
-# on demand by `make skills-install`, so they are not committed.
+# Skill sources live in skills/ (local) or are pinned by SHA in Skillfile.lock
+# (remote). Every tool's deploy target and the downloaded CLI binary are
+# regenerated on demand by `make skills-install`, so none of them are committed.
+.claude/skills/
 .codex/skills/
 .github/skills/
 .skillfile/cache/

@@ -1,19 +1,11 @@
-# Skillfile: declarative manifest for AI skills shared across coding tools.
-# Managed by the `skillfile` CLI (github.com/eljulians/skillfile).
-#
-#   make skills-install   bootstrap ./bin/skillfile, then deploy to each tool
-#   make skills-list      show skill status from Skillfile / Skillfile.lock
-#   make skills-validate   validate the manifest and checked-in Claude copies
-#
-# Skill sources live in skills/ and are deployed into each tool's own location
-# (.claude/skills/, .codex/skills/, .github/skills/). See CONTRIBUTING for how to
-# add a skill.
-
 # install  <platform>  <scope>
 install  claude-code  local
-install  codex        local
-install  copilot      local
+install  codex  local
+install  copilot  local
 
 # --- Skills ---
-# local  skill  [name]  <path>
-local  skill  stl-review-phase  skills/stl-review-phase
+# github  skill  [name]  <owner/repo[@ref]>  <path-or-dir>  [ref]
+
+github  skill  gh-stack  github/gh-stack  skills/gh-stack/SKILL.md
+
+local  skill  skills/stl-review-phase
