@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"math/big"
@@ -76,6 +77,40 @@ func TestCollectProbeConfirmed(t *testing.T) {
 		case addrNotVault, addrForeignMorpho, addrAssetZero:
 			t.Errorf("address %s should have been skipped, got %+v", c.address.Hex(), c)
 		}
+	}
+}
+
+// TestProbeBatchWithRetry_SingleAddressTransportErrorFailsRun locks in the
+// house invariant that a transient probe failure at the single-address floor
+// fails the run rather than silently black-holing the candidate.
+//
+// By the time the batch has been split down to one address, the only errors
+// reaching this branch are transport failures (429 / timeout / 5xx, already
+// retried to exhaustion by the rpchttp client) or a structural-transport error
+// out of the multicall. ErrNotVault is consumed as a per-result Success:false
+// inside collectProbeConfirmed, so it never surfaces here as an error. Swallowing
+// this into (nil, nil) would drop a real vault while the run exits 0.
+func TestProbeBatchWithRetry_SingleAddressTransportErrorFailsRun(t *testing.T) {
+	t.Parallel()
+
+	prober, mc := newTestVaultProberWithMock(t)
+	transportErr := errors.New("429 Too Many Requests (retries exhausted)")
+	mc.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return nil, transportErr
+	}
+
+	addr := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	firstBlocks := map[common.Address]int64{addr: 100}
+
+	vaults, err := prober.probeBatchWithRetry(context.Background(), []common.Address{addr}, firstBlocks, big.NewInt(100))
+	if err == nil {
+		t.Fatalf("expected single-address transport error to fail the run, got nil (vaults=%+v)", vaults)
+	}
+	if !errors.Is(err, transportErr) {
+		t.Errorf("expected wrapped transport error, got %v", err)
+	}
+	if vaults != nil {
+		t.Errorf("expected no vaults on error, got %+v", vaults)
 	}
 }
 
@@ -157,20 +192,27 @@ func concatResults(slices ...[]outbound.Result) []outbound.Result {
 	return out
 }
 
-// TestFetchVaultMetadata exercises the asset-decimals branch added by VEC-198
-// across three dispositions:
+// TestFetchVaultMetadata exercises fetchVaultMetadata's per-vault dispositions:
 //
 //   - happy path: every sub-call succeeds, vault lands with the asset's
-//     decimals (NOT the vault share's decimals).
+//     decimals (NOT the vault share's decimals) and its decoded symbol.
 //   - decimals call reverts: vault is dropped to avoid persisting an
 //     AssetDecimals=0 row that would block the live indexer's later
 //     correction (token_repository UPSERT preserves existing decimals on
 //     conflict).
 //   - decimals returns malformed bytes: same skip-on-failure outcome.
+//   - bytes32 asset symbol (MKR-style legacy ERC20): decoded via
+//     erc20meta.DecodeStringOrBytes32, so the vault is confirmed with the
+//     resolved symbol instead of being dropped by a string-only type assertion.
+//   - empty asset symbol (reverted symbol() call): the vault is still confirmed
+//     and persisted with an empty AssetSymbol, mirroring the live indexer's
+//     getTokenMetadata — the per-block reconciliation sweep fills the symbol in
+//     later. The asset symbol is display-only and never blocks persistence.
 //
-// The fix is load-bearing: swapping the skip back to "persist with
-// AssetDecimals=0" makes the second and third cases produce a vault in the
-// returned slice, which is what these tests catch.
+// The fixes are load-bearing: swapping the decimals skip back to "persist with
+// AssetDecimals=0" makes the revert/malformed cases produce a vault; reverting
+// the symbol decode to string-only-plus-drop-on-empty makes the bytes32 and
+// empty-symbol cases drop the vault. Both regressions are caught here.
 func TestFetchVaultMetadata(t *testing.T) {
 	t.Parallel()
 
@@ -191,6 +233,22 @@ func TestFetchVaultMetadata(t *testing.T) {
 			assetDecimalsResult: okUint8Result(t, 6),
 			wantConfirmed:       true,
 			wantAssetSymbol:     "USDT",
+			wantAssetDecimals:   6,
+		},
+		{
+			name:                "bytes32 asset symbol (MKR-style) decodes → confirmed",
+			assetSymbolResult:   bytes32SymbolResult(t, "MKR"),
+			assetDecimalsResult: okUint8Result(t, 18),
+			wantConfirmed:       true,
+			wantAssetSymbol:     "MKR",
+			wantAssetDecimals:   18,
+		},
+		{
+			name:                "empty asset symbol (revert) → confirmed with empty symbol",
+			assetSymbolResult:   outbound.Result{Success: false, ReturnData: nil},
+			assetDecimalsResult: okUint8Result(t, 6),
+			wantConfirmed:       true,
+			wantAssetSymbol:     "",
 			wantAssetDecimals:   6,
 		},
 		{
@@ -312,6 +370,19 @@ func okStringResult(t *testing.T, s string) outbound.Result {
 func okUint8Result(t *testing.T, v uint8) outbound.Result {
 	t.Helper()
 	return outbound.Result{Success: true, ReturnData: packUint8(t, v)}
+}
+
+// bytes32SymbolResult returns a successful result whose ReturnData is a raw
+// bytes32 (left-aligned ASCII, null-padded) — the legacy MKR-style symbol()
+// encoding that a string-only decode cannot parse.
+func bytes32SymbolResult(t *testing.T, s string) outbound.Result {
+	t.Helper()
+	if len(s) > 32 {
+		t.Fatalf("bytes32 symbol %q exceeds 32 bytes", s)
+	}
+	var b [32]byte
+	copy(b[:], s)
+	return outbound.Result{Success: true, ReturnData: b[:]}
 }
 
 // packString ABI-encodes a string into multicall ReturnData form.
