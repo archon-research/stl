@@ -409,6 +409,28 @@ func (h *serviceTestHarness) vaultMetadataExecuteFn(name, symbol string, asset c
 	}
 }
 
+// assertMulticallPinnedViaHash asserts the multicaller recorded at least one
+// invocation whose first call matches pred, that it arrived through ExecuteAtHash
+// (not the number-pinned Execute), and that it was pinned to wantHash. Used to
+// prove reorg-sensitive reads (e.g. the versioned adapter-set enumeration) are
+// hash-pinned.
+func (h *serviceTestHarness) assertMulticallPinnedViaHash(t *testing.T, wantHash common.Hash, name string, pred func(outbound.Call) bool) {
+	t.Helper()
+	for _, inv := range h.multicaller.Invocations {
+		if len(inv.Calls) == 0 || !pred(inv.Calls[0]) {
+			continue
+		}
+		if !inv.ViaHash {
+			t.Errorf("%s must be hash-pinned (ExecuteAtHash), but it went through Execute", name)
+		}
+		if inv.BlockHash != wantHash {
+			t.Errorf("%s pinned to %s, want %s", name, inv.BlockHash.Hex(), wantHash.Hex())
+		}
+		return
+	}
+	t.Errorf("%s: no matching multicall invocation was recorded", name)
+}
+
 // hasSameSelector returns true if a and b share the same first 4 bytes (the
 // ABI function selector).
 func hasSameSelector(a, b []byte) bool {
