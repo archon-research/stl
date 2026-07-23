@@ -16,6 +16,8 @@ def default_allocation_category_rules() -> list[AllocationCategoryMapping]:
         # POL: Protocol-owned liquidity and governance positions.
         AllocationCategoryMapping("Aave", "AAVE", AllocationCategory.POL, priority=150),
         AllocationCategoryMapping("Aave", None, AllocationCategory.ALLOCATION, priority=100),
+        # CUSTODY: off-chain custodied collateral surfaced from the Anchorage feed.
+        AllocationCategoryMapping("anchorage", None, AllocationCategory.CUSTODY, priority=200),
         # ASSET: Non-strategy holdings.
         AllocationCategoryMapping("Lido", "stETH", AllocationCategory.ASSET, priority=120),
         AllocationCategoryMapping("Curve", None, AllocationCategory.ALLOCATION, priority=100),

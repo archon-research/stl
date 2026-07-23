@@ -1717,3 +1717,348 @@ async def seed_flow_share_ratio_activity(db_url: str) -> None:
                 )
     finally:
         await conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Anchorage BTC custody seed
+#
+# Encodes the $521M trap: an unbounded DISTINCT ON over every package picks
+# each package's latest row regardless of poll cohort, so three closed packages
+# that stopped being polled at an earlier snapshot_time (2026-06-13) leak their
+# residual collateral into the totals. The correct read scopes to the prime's
+# latest snapshot_time cohort (2026-06-16) FIRST, then DISTINCT ON with
+# processing_version DESC, then GROUP BY (asset_type, custody_type).
+#
+# Current cohort (2026-06-16, three BTC/AnchorageCustody packages):
+#   exposure SUM = 250,000,000 ; package_value SUM = 309,672,229 ; BTC = 4722.61
+# One current package (PKG-C) carries a superseded processing_version: a wrong
+# original (pv 0, build_id 0) and a correction (pv 1, build_id 1). pv DESC must
+# pick the correction, else exposure balloons to 1,199,000,000.
+# Closed cohort (2026-06-13, exposure_value = 0 but active = true): residual
+# collateral that pushes an unscoped package_value SUM to 521,000,000 and BTC to
+# 7222.61.
+# ---------------------------------------------------------------------------
+
+ANCHORAGE_CUSTODY_PROXY_HEX = "ac" * 20  # the ALM proxy the API keys on
+ANCHORAGE_EMPTY_PROXY_HEX = "ad" * 20  # a prime with no anchorage snapshots
+ANCHORAGE_MULTI_PROXY_HEX = "ae" * 20  # multi-asset-type + multi-group fixtures
+ANCHORAGE_OTHER_PROXY_HEX = "af" * 20  # a second prime with its own later cohort
+_ANCHORAGE_VAULT_HEX = "ca" * 20
+_ANCHORAGE_EMPTY_VAULT_HEX = "cb" * 20
+_ANCHORAGE_MULTI_VAULT_HEX = "cd" * 20
+_ANCHORAGE_OTHER_VAULT_HEX = "ce" * 20
+_ANCHORAGE_DUMMY_TOKEN_HEX = "c1" * 20
+_ANCHORAGE_TX = "c2" * 32
+_ANCHORAGE_EMPTY_TX = "c3" * 32
+_ANCHORAGE_MULTI_TX = "c4" * 32
+_ANCHORAGE_OTHER_TX = "c5" * 32
+
+# The live feed is frozen here (upstream outage since 2026-06-16); this is the
+# latest-poll cohort. Closed packages last polled three days earlier.
+ANCHORAGE_LATEST_SNAPSHOT = dt.datetime(2026, 6, 16, 19, 45, 17, tzinfo=dt.timezone.utc)
+_ANCHORAGE_CLOSED_SNAPSHOT = dt.datetime(2026, 6, 13, 12, 0, 0, tzinfo=dt.timezone.utc)
+# A second prime polled LATER than the main prime. If the per-prime scope on
+# MAX(snapshot_time) is dropped, this later cohort becomes the global max and
+# starves the main prime — the prime-isolation test's red signal.
+_ANCHORAGE_OTHER_SNAPSHOT = dt.datetime(2026, 6, 20, 12, 0, 0, tzinfo=dt.timezone.utc)
+
+
+async def _insert_anchorage_snapshot(
+    conn: asyncpg.Connection,
+    *,
+    prime_id: int,
+    package_id: str,
+    active: bool,
+    exposure_value: Decimal,
+    package_value: Decimal,
+    asset_quantity: Decimal,
+    snapshot_time: dt.datetime,
+    build_id: int = 0,
+    asset_type: str = "BTC",
+    custody_type: str = "AnchorageCustody",
+    asset_weighted_value: Decimal | None = None,
+) -> None:
+    """Insert one anchorage_package_snapshot row.
+
+    ``exposure_value``/``package_value`` are package-level (repeated across a
+    package's per-collateral-asset rows); ``asset_quantity`` and
+    ``asset_weighted_value`` are per asset type. ``asset_weighted_value`` defaults
+    to ``package_value`` (correct for a single-asset package). For a multi-asset
+    package, insert one row per ``asset_type`` sharing ``package_id`` /
+    ``snapshot_time`` and the same package-level values, with per-asset
+    ``asset_quantity`` / ``asset_weighted_value``.
+
+    processing_version is trigger-assigned; pass a distinct ``build_id`` to force
+    a new version at the same natural key (the trigger reuses the version for a
+    matching build_id and increments only for a new one).
+    """
+    weighted = asset_weighted_value if asset_weighted_value is not None else package_value
+    await conn.execute(
+        """
+        INSERT INTO anchorage_package_snapshot (
+            prime_id, package_id, pledgor_id, secured_party_id, active, state,
+            current_ltv, exposure_value, package_value,
+            margin_call_ltv, critical_ltv, margin_return_ltv,
+            asset_type, custody_type, asset_price, asset_quantity, asset_weighted_value,
+            ltv_timestamp, snapshot_time, build_id
+        ) VALUES (
+            $1, $2, 'pledgor', 'secured', $3, 'HEALTHY',
+            $4, $5, $6,
+            0.7, 0.85, 0.65,
+            $10, $11, 60000, $7, $12,
+            $8, $8, $9
+        )
+        """,
+        prime_id,
+        package_id,
+        active,
+        (exposure_value / package_value) if package_value else Decimal("0"),
+        exposure_value,
+        package_value,
+        asset_quantity,
+        snapshot_time,
+        build_id,
+        asset_type,
+        custody_type,
+        weighted,
+    )
+
+
+async def seed_anchorage_custody(db_url: str) -> None:
+    """Seed the Anchorage BTC custody cohort + trap rows into the given database."""
+    conn = await asyncpg.connect(db_url)
+    try:
+        async with conn.transaction():
+            prime_id = await conn.fetchval(
+                "INSERT INTO prime (name, vault_address) VALUES ('anchorage_custody', $1) RETURNING id",
+                bytes.fromhex(_ANCHORAGE_VAULT_HEX),
+            )
+            token_id = await insert_token(conn, "ACUSTODY", 18, bytes.fromhex(_ANCHORAGE_DUMMY_TOKEN_HEX))
+            # The API resolves proxy_address -> prime_id via allocation_position
+            # (the list_primes join precedent), so the prime needs one such row.
+            await insert_allocation_position(
+                conn,
+                token_id=token_id,
+                prime_id=prime_id,
+                proxy_hex=ANCHORAGE_CUSTODY_PROXY_HEX,
+                balance=1,
+                block=1000,
+                tx=_ANCHORAGE_TX,
+                direction="in",
+            )
+
+            # Current cohort: PKG-A and PKG-B are single rows; PKG-C carries a
+            # superseded processing_version whose correction (pv 1) must win.
+            await _insert_anchorage_snapshot(
+                conn,
+                prime_id=prime_id,
+                package_id="PKG-A",
+                active=True,
+                exposure_value=Decimal("100000000"),
+                package_value=Decimal("120000000"),
+                asset_quantity=Decimal("2000"),
+                snapshot_time=ANCHORAGE_LATEST_SNAPSHOT,
+            )
+            await _insert_anchorage_snapshot(
+                conn,
+                prime_id=prime_id,
+                package_id="PKG-B",
+                active=True,
+                exposure_value=Decimal("100000000"),
+                package_value=Decimal("120000000"),
+                asset_quantity=Decimal("2000"),
+                snapshot_time=ANCHORAGE_LATEST_SNAPSHOT,
+            )
+            # PKG-C original (pv 0, build_id 0): wrong values that must be superseded.
+            await _insert_anchorage_snapshot(
+                conn,
+                prime_id=prime_id,
+                package_id="PKG-C",
+                active=True,
+                exposure_value=Decimal("999000000"),
+                package_value=Decimal("999000000"),
+                asset_quantity=Decimal("9999"),
+                snapshot_time=ANCHORAGE_LATEST_SNAPSHOT,
+                build_id=0,
+            )
+            # PKG-C correction (pv 1, build_id 1): the values that make the cohort sums.
+            await _insert_anchorage_snapshot(
+                conn,
+                prime_id=prime_id,
+                package_id="PKG-C",
+                active=True,
+                exposure_value=Decimal("50000000"),
+                package_value=Decimal("69672229"),
+                asset_quantity=Decimal("722.61"),
+                snapshot_time=ANCHORAGE_LATEST_SNAPSHOT,
+                build_id=1,
+            )
+
+            # Inactive package IN the latest cohort: same snapshot_time as the
+            # active packages but active=false. Only the `active` predicate
+            # excludes it (the cohort filter does not, since it shares the max
+            # snapshot_time). Non-zero values so its leak would move every sum.
+            await _insert_anchorage_snapshot(
+                conn,
+                prime_id=prime_id,
+                package_id="PKG-INACTIVE",
+                active=False,
+                exposure_value=Decimal("88000000"),
+                package_value=Decimal("88000000"),
+                asset_quantity=Decimal("800"),
+                snapshot_time=ANCHORAGE_LATEST_SNAPSHOT,
+            )
+
+            # Closed cohort: exposure 0 but active=true, polled three days earlier.
+            # Residual collateral/BTC that an unscoped read would leak in.
+            for package_id, package_value, asset_quantity in [
+                ("PKG-X", Decimal("70000000"), Decimal("1000")),
+                ("PKG-Y", Decimal("70000000"), Decimal("1000")),
+                ("PKG-Z", Decimal("71327771"), Decimal("500")),
+            ]:
+                await _insert_anchorage_snapshot(
+                    conn,
+                    prime_id=prime_id,
+                    package_id=package_id,
+                    active=True,
+                    exposure_value=Decimal("0"),
+                    package_value=package_value,
+                    asset_quantity=asset_quantity,
+                    snapshot_time=_ANCHORAGE_CLOSED_SNAPSHOT,
+                )
+
+            # A second prime with an allocation_position but NO anchorage rows.
+            empty_prime_id = await conn.fetchval(
+                "INSERT INTO prime (name, vault_address) VALUES ('anchorage_empty', $1) RETURNING id",
+                bytes.fromhex(_ANCHORAGE_EMPTY_VAULT_HEX),
+            )
+            await insert_allocation_position(
+                conn,
+                token_id=token_id,
+                prime_id=empty_prime_id,
+                proxy_hex=ANCHORAGE_EMPTY_PROXY_HEX,
+                balance=1,
+                block=1000,
+                tx=_ANCHORAGE_EMPTY_TX,
+                direction="in",
+            )
+
+            await _seed_anchorage_multi_asset_prime(conn, token_id)
+            await _seed_anchorage_other_prime(conn, token_id)
+    finally:
+        await conn.close()
+
+
+async def _seed_anchorage_multi_asset_prime(conn: asyncpg.Connection, token_id: int) -> None:
+    """A prime whose latest cohort spans two asset-type groups, one of them a
+    multi-asset package — exercises multi-group output/ordering and the
+    package-level double-count guard.
+
+    Packages (all active, one snapshot_time):
+      * PKG-B1  BTC only   — exposure 130, collateral 150, 10 BTC
+      * PKG-E1  ETH only   — exposure  40, collateral  50,  5 ETH
+      * PKG-MX  BTC + ETH  — one loan (exposure 30 / collateral 45) repeated on
+                             both asset rows; BTC weighted 40 > ETH weighted 15,
+                             so BTC is the package's dominant collateral.
+
+    Correct (deduped) per-group sums:
+      BTC → amount 160 (130 + 30), collateral 195, balance 13 (10 + 3)
+      ETH → amount  40 (40 +  0), collateral  50, balance  7 ( 5 + 2)
+    The package-level 30/45 of PKG-MX is attributed once (to BTC, its dominant
+    asset); an unguarded GROUP BY would add it to ETH too (amount 70 / collateral 95).
+    """
+    prime_id = await conn.fetchval(
+        "INSERT INTO prime (name, vault_address) VALUES ('anchorage_multi', $1) RETURNING id",
+        bytes.fromhex(_ANCHORAGE_MULTI_VAULT_HEX),
+    )
+    await insert_allocation_position(
+        conn,
+        token_id=token_id,
+        prime_id=prime_id,
+        proxy_hex=ANCHORAGE_MULTI_PROXY_HEX,
+        balance=1,
+        block=1000,
+        tx=_ANCHORAGE_MULTI_TX,
+        direction="in",
+    )
+    await _insert_anchorage_snapshot(
+        conn,
+        prime_id=prime_id,
+        package_id="PKG-B1",
+        active=True,
+        exposure_value=Decimal("130"),
+        package_value=Decimal("150"),
+        asset_quantity=Decimal("10"),
+        snapshot_time=ANCHORAGE_LATEST_SNAPSHOT,
+        asset_type="BTC",
+    )
+    await _insert_anchorage_snapshot(
+        conn,
+        prime_id=prime_id,
+        package_id="PKG-E1",
+        active=True,
+        exposure_value=Decimal("40"),
+        package_value=Decimal("50"),
+        asset_quantity=Decimal("5"),
+        snapshot_time=ANCHORAGE_LATEST_SNAPSHOT,
+        asset_type="ETH",
+    )
+    # PKG-MX: two rows, same package_id / package-level loan, different asset types.
+    await _insert_anchorage_snapshot(
+        conn,
+        prime_id=prime_id,
+        package_id="PKG-MX",
+        active=True,
+        exposure_value=Decimal("30"),
+        package_value=Decimal("45"),
+        asset_quantity=Decimal("3"),
+        snapshot_time=ANCHORAGE_LATEST_SNAPSHOT,
+        asset_type="BTC",
+        asset_weighted_value=Decimal("40"),
+    )
+    await _insert_anchorage_snapshot(
+        conn,
+        prime_id=prime_id,
+        package_id="PKG-MX",
+        active=True,
+        exposure_value=Decimal("30"),
+        package_value=Decimal("45"),
+        asset_quantity=Decimal("2"),
+        snapshot_time=ANCHORAGE_LATEST_SNAPSHOT,
+        asset_type="ETH",
+        asset_weighted_value=Decimal("15"),
+    )
+
+
+async def _seed_anchorage_other_prime(conn: asyncpg.Connection, token_id: int) -> None:
+    """A second prime with its own, later-polled BTC cohort (exposure 99).
+
+    Later than the main prime's cohort on purpose: the per-prime scope on
+    ``MAX(snapshot_time)`` must keep this prime's later poll from becoming the
+    main prime's cohort.
+    """
+    prime_id = await conn.fetchval(
+        "INSERT INTO prime (name, vault_address) VALUES ('anchorage_other', $1) RETURNING id",
+        bytes.fromhex(_ANCHORAGE_OTHER_VAULT_HEX),
+    )
+    await insert_allocation_position(
+        conn,
+        token_id=token_id,
+        prime_id=prime_id,
+        proxy_hex=ANCHORAGE_OTHER_PROXY_HEX,
+        balance=1,
+        block=1000,
+        tx=_ANCHORAGE_OTHER_TX,
+        direction="in",
+    )
+    await _insert_anchorage_snapshot(
+        conn,
+        prime_id=prime_id,
+        package_id="PKG-O1",
+        active=True,
+        exposure_value=Decimal("99"),
+        package_value=Decimal("111"),
+        asset_quantity=Decimal("9"),
+        snapshot_time=_ANCHORAGE_OTHER_SNAPSHOT,
+        asset_type="BTC",
+    )
