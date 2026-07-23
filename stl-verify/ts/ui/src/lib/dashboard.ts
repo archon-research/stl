@@ -168,10 +168,15 @@ export function findProtocolMetadata(
   return matches[0]?.localProtocol ?? null;
 }
 
+// chain_id 0 is the off-chain sentinel (e.g. Anchorage BTC custody), which has
+// no EVM chain and so no name in the chain registry or logo CDN.
+export const OFFCHAIN_CHAIN_ID = 0;
+
 export function getChainLabel(
   chainId: number,
   chainLabels?: ChainLabelLookup,
 ): string {
+  if (chainId === OFFCHAIN_CHAIN_ID) return 'Off-chain';
   return chainLabels?.get(chainId) ?? getChainName(chainId);
 }
 
@@ -194,7 +199,10 @@ export function getAllocationKey(allocation: Allocation): string {
     return String(allocation.receipt_token_id);
   }
   // Direct holdings have no receipt token; identify by chain + underlying.
-  return `direct:${allocation.chain_id}:${allocation.underlying_token_id}`;
+  // Off-chain custody rows (Anchorage BTC) carry a null underlying id, so fall
+  // back to the symbol to keep the key unique and stable.
+  const underlyingKey = allocation.underlying_token_id ?? allocation.symbol;
+  return `direct:${allocation.chain_id}:${underlyingKey}`;
 }
 
 export function buildNetworkOptions(
@@ -548,7 +556,14 @@ export function sortByBucketStart<T extends { bucket_start: string }>(
  * Get human-readable label for allocation category.
  */
 export function getCategoryLabel(
-  category: 'allocation' | 'pol' | 'psm3' | 'asset' | '' | undefined,
+  category:
+    | 'allocation'
+    | 'pol'
+    | 'psm3'
+    | 'asset'
+    | 'custody'
+    | ''
+    | undefined,
   fallback: string = 'Unknown',
 ): string {
   const labels: Record<string, string> = {
@@ -556,6 +571,7 @@ export function getCategoryLabel(
     pol: 'Protocol Owned Liquidity',
     psm3: 'PSM3',
     asset: 'Asset',
+    custody: 'Custody',
   };
   return category ? (labels[category] ?? fallback) : fallback;
 }
