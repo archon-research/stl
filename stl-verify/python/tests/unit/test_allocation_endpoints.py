@@ -5,13 +5,21 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
+from app.api.v1.allocations import AllocationResponse
 from app.domain.entities.allocation import ChainMetadata, EthAddress, Prime, ProtocolMetadata
 from app.domain.entities.allocation_activity import AllocationActivityEvent
+from app.domain.entities.allocation_category import AllocationCategory
 from app.domain.entities.time_series_bucket import AllocationActivityBucket
 from app.main import app
 from app.services.allocation_service import AllocationService
-from tests.factories import make_direct_asset_holding, make_receipt_token_position
+from tests.factories import (
+    ANCHORAGE_FROZEN_AS_OF,
+    make_anchorage_custody_holding,
+    make_direct_asset_holding,
+    make_receipt_token_position,
+)
 
 _VALID_ADDR = "0x" + "ab" * 20
 
@@ -22,11 +30,19 @@ def _clear_dependency_overrides():
     app.dependency_overrides.clear()
 
 
-def _make_service(primes=None, positions=None, direct_holdings=None, *, exists: bool = True) -> AsyncMock:
+def _make_service(
+    primes=None,
+    positions=None,
+    direct_holdings=None,
+    anchorage_holdings=None,
+    *,
+    exists: bool = True,
+) -> AsyncMock:
     service = AsyncMock(spec=AllocationService)
     service.list_primes.return_value = primes or []
     service.list_receipt_token_positions.return_value = positions or []
     service.list_direct_asset_holdings.return_value = direct_holdings or []
+    service.list_anchorage_custody_holdings.return_value = anchorage_holdings or []
     service.prime_exists.return_value = exists
     service.list_activity_buckets.return_value = []
     return service
@@ -274,6 +290,131 @@ def test_list_allocations_combines_receipt_and_direct_rows():
     by_symbol = {row["symbol"]: row for row in rows}
     assert by_symbol["aUSDC"]["receipt_token_id"] == 1
     assert by_symbol["PYUSD"]["receipt_token_id"] is None
+
+
+def test_list_allocations_surfaces_anchorage_custody_row():
+    """Off-chain Anchorage BTC custody is a third row shape: BTC symbol, null
+    token/receipt fields, ``anchorage`` protocol, CUSTODY category, chain_id 0
+    (off-chain sentinel), and the loan (exposure) as ``amount_usd``.
+    """
+    from app.api.v1 import allocations
+
+    holding = make_anchorage_custody_holding()
+    service = _make_service(anchorage_holdings=[holding])
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations")
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "chain_id": 0,
+            "receipt_token_id": None,
+            "receipt_token_address": None,
+            "underlying_token_id": None,
+            "underlying_token_address": None,
+            "symbol": "BTC",
+            "underlying_symbol": "BTC",
+            "protocol_name": "anchorage",
+            "balance": "4722.61",
+            "amount_usd": "250000000",
+            "latest_activity_at": ANCHORAGE_FROZEN_AS_OF.isoformat(),
+            "latest_activity_action": None,
+            "latest_activity_amount": None,
+            "category": "custody",
+        }
+    ]
+    service.list_anchorage_custody_holdings.assert_awaited_once_with(EthAddress(_VALID_ADDR))
+
+
+def test_list_allocations_combines_receipt_direct_and_custody_rows():
+    """All three sources union into one response."""
+    from app.api.v1 import allocations
+
+    service = _make_service(
+        positions=[make_receipt_token_position()],
+        direct_holdings=[make_direct_asset_holding()],
+        anchorage_holdings=[make_anchorage_custody_holding()],
+    )
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations")
+
+    assert response.status_code == 200
+    rows = response.json()
+    assert len(rows) == 3
+    by_symbol = {row["symbol"]: row for row in rows}
+    assert by_symbol["aUSDC"]["receipt_token_id"] == 1
+    assert by_symbol["PYUSD"]["receipt_token_id"] is None
+    assert by_symbol["BTC"]["category"] == "custody"
+    assert by_symbol["BTC"]["amount_usd"] == "250000000"
+
+
+def test_list_allocations_custody_row_surfaces_frozen_snapshot_time_verbatim():
+    """The feed is frozen upstream; the stale snapshot_time must surface as-is
+    (honest staleness), not be hidden or replaced with 'now'.
+    """
+    from app.api.v1 import allocations
+
+    holding = make_anchorage_custody_holding(as_of=ANCHORAGE_FROZEN_AS_OF)
+    service = _make_service(anchorage_holdings=[holding])
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations")
+
+    assert response.status_code == 200
+    row = response.json()[0]
+    assert row["latest_activity_at"] == ANCHORAGE_FROZEN_AS_OF.isoformat()
+    assert row["latest_activity_action"] is None
+    assert row["latest_activity_amount"] is None
+
+
+@pytest.mark.parametrize(
+    ("underlying_token_id", "underlying_token_address"),
+    [
+        (10, None),  # id set, address null
+        (None, "0x" + "d" * 40),  # address set, id null
+    ],
+)
+def test_allocation_response_rejects_half_set_underlying_identity(underlying_token_id, underlying_token_address):
+    """The underlying id/address are two halves of one identity; a row with only
+    one set is contradictory and rejected at construction.
+    """
+    with pytest.raises(ValidationError, match="must be set or null together"):
+        AllocationResponse(
+            chain_id=1,
+            symbol="X",
+            underlying_symbol="X",
+            balance=Decimal("1"),
+            category=AllocationCategory.ASSET,
+            underlying_token_id=underlying_token_id,
+            underlying_token_address=underlying_token_address,
+        )
+
+
+@pytest.mark.parametrize(
+    ("underlying_token_id", "underlying_token_address"),
+    [
+        (10, "0x" + "d" * 40),  # both set: receipt/direct shape
+        (None, None),  # both null: off-chain custody shape
+    ],
+)
+def test_allocation_response_accepts_paired_underlying_identity(underlying_token_id, underlying_token_address):
+    """Both-set (receipt/direct) and both-null (off-chain custody) are valid."""
+    response = AllocationResponse(
+        chain_id=1,
+        symbol="X",
+        underlying_symbol="X",
+        balance=Decimal("1"),
+        category=AllocationCategory.ASSET,
+        underlying_token_id=underlying_token_id,
+        underlying_token_address=underlying_token_address,
+    )
+    assert response.underlying_token_id == underlying_token_id
+    assert response.underlying_token_address == underlying_token_address
 
 
 def test_list_allocations_returns_empty_when_prime_exists_with_no_holdings():
