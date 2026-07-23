@@ -1,6 +1,7 @@
 package entity
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 )
@@ -92,8 +93,29 @@ func TestNewMorphoAdapter(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
+			if got.MorphoVaultID != tt.vaultID {
+				t.Errorf("MorphoVaultID = %d, want %d", got.MorphoVaultID, tt.vaultID)
+			}
+			if !bytes.Equal(got.Address, tt.address) {
+				t.Errorf("Address = %x, want %x", got.Address, tt.address)
+			}
+			if got.AssetTokenID != tt.assetToken {
+				t.Errorf("AssetTokenID = %d, want %d", got.AssetTokenID, tt.assetToken)
+			}
 			if got.AdapterType != tt.adapterType {
 				t.Errorf("AdapterType = %d, want %d", got.AdapterType, tt.adapterType)
+			}
+			if got.AddedAtBlock != tt.addedBlock {
+				t.Errorf("AddedAtBlock = %d, want %d", got.AddedAtBlock, tt.addedBlock)
+			}
+			if tt.hasRemoved {
+				if got.RemovedAtBlock == nil {
+					t.Errorf("RemovedAtBlock = nil, want %d", tt.removedBlock)
+				} else if *got.RemovedAtBlock != tt.removedBlock {
+					t.Errorf("RemovedAtBlock = %d, want %d", *got.RemovedAtBlock, tt.removedBlock)
+				}
+			} else if got.RemovedAtBlock != nil {
+				t.Errorf("RemovedAtBlock = %d, want nil", *got.RemovedAtBlock)
 			}
 		})
 	}
