@@ -61,6 +61,53 @@ func (h *serviceTestHarness) captureLogs() *capturingHandler {
 	return handler
 }
 
+// --- transaction / probe observer ---
+
+// txProbeObserver watches whether the adapter type probe (a chain RPC round-trip)
+// ever runs while a DB transaction is open — the pool-pressure hazard the fix
+// removes. A handler legitimately opens a short audit-log transaction that closes
+// before the probe, so the invariant is not "probe before any transaction" but
+// "probe never runs while a transaction is open".
+type txProbeObserver struct {
+	mu             sync.Mutex
+	openTx         int
+	probeCount     int
+	probedInsideTx bool
+}
+
+func (o *txProbeObserver) enterTx() {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.openTx++
+}
+
+func (o *txProbeObserver) exitTx() {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.openTx--
+}
+
+func (o *txProbeObserver) recordProbe() {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.probeCount++
+	if o.openTx > 0 {
+		o.probedInsideTx = true
+	}
+}
+
+func (o *txProbeObserver) requireProbedOutsideTx(t *testing.T) {
+	t.Helper()
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.probeCount != 1 {
+		t.Fatalf("adapter probe count = %d, want exactly 1 (so the outside-tx check is meaningful)", o.probeCount)
+	}
+	if o.probedInsideTx {
+		t.Error("adapter type probe ran while a DB transaction was open; it must complete before the write transaction opens")
+	}
+}
+
 // --- probe / read result helpers ---
 
 // adapterProbeResults returns the 2-call adapter probe response
@@ -174,14 +221,83 @@ func TestProcessBlockEvent_AddAdapter_NonV2VaultErrors(t *testing.T) {
 	}
 }
 
+// TestProcessBlockEvent_AdapterProbeRunsBeforeTransaction pins the pool-pressure
+// fix: an adapter's on-chain type probe (a chain RPC round-trip) must complete
+// BEFORE the write transaction opens, so no pooled DB connection is held idle
+// across the probe. Covers both probe-bearing paths — the live AddAdapter handler
+// (always classifies) and the Allocate lazy self-heal (classifies only when the
+// adapter is unregistered).
+func TestProcessBlockEvent_AdapterProbeRunsBeforeTransaction(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(h *serviceTestHarness) shared.Log
+	}{
+		{
+			name: "AddAdapter classifies before opening the transaction",
+			setup: func(h *serviceTestHarness) shared.Log {
+				return h.makeV2VaultLog(h.vaultV2EventsABI.Events["AddAdapter"], testVaultAddr, []common.Hash{addrTopic(testAdapterAddr)})
+			},
+		},
+		{
+			name: "Allocate lazy-register classifies before opening the transaction",
+			setup: func(h *serviceTestHarness) shared.Log {
+				h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+					if len(calls) == 1 && calls[0].Target == testAdapterAddr {
+						return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(1))}}, nil
+					}
+					return nil, errTestUnexpectedCall(calls)
+				}
+				// Adapter predates discovery, so the pre-transaction membership check
+				// misses and the heal path probes before opening the write tx.
+				h.morphoRepo.GetActiveAdapterFn = func(_ context.Context, _ pgx.Tx, _ int64, _ []byte) (*entity.MorphoAdapter, error) {
+					return nil, nil
+				}
+				return h.makeV2VaultLog(h.vaultV2EventsABI.Events["Allocate"], testVaultAddr,
+					[]common.Hash{addrTopic(testCaller), addrTopic(testAdapterAddr)},
+					big.NewInt(5000), hashSlice(common.HexToHash("0xaa")), big.NewInt(5000))
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newTestHarness(t)
+			h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
+
+			obs := &txProbeObserver{}
+			h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+				if len(calls) == 2 && calls[0].Target == testAdapterAddr {
+					obs.recordProbe()
+					return h.adapterProbeResults(entity.MorphoAdapterTypeMarketV1), nil
+				}
+				return nil, errTestUnexpectedCall(calls)
+			}
+			h.txManager.WithTransactionFn = func(_ context.Context, fn func(tx pgx.Tx) error) error {
+				obs.enterTx()
+				defer obs.exitTx()
+				return fn(nil)
+			}
+
+			log := tt.setup(h)
+			if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err != nil {
+				t.Fatalf("processBlock: %v", err)
+			}
+			obs.requireProbedOutsideTx(t)
+		})
+	}
+}
+
 // --- RemoveAdapter ---
 
 func TestProcessBlockEvent_RemoveAdapter(t *testing.T) {
 	h := newTestHarness(t)
 	h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
 
-	// Known adapter: GetActiveAdapter returns the active row, so removal proceeds
-	// directly (no lazy registration).
+	// Known adapter: the pre-transaction membership check finds it (so no probe
+	// fires) and the in-tx GetActiveAdapter returns the active row, so removal
+	// proceeds directly (no lazy registration).
+	h.morphoRepo.GetActiveAdaptersByVaultFn = func(_ context.Context, _ int64) ([]*entity.MorphoAdapter, error) {
+		return []*entity.MorphoAdapter{{ID: 55, MorphoVaultID: 7, Address: testAdapterAddr.Bytes(), AssetTokenID: 1, AdapterType: entity.MorphoAdapterTypeMarketV1, AddedAtBlock: 19000000}}, nil
+	}
 	h.morphoRepo.GetActiveAdapterFn = func(_ context.Context, _ pgx.Tx, vaultID int64, address []byte) (*entity.MorphoAdapter, error) {
 		return &entity.MorphoAdapter{ID: 55, MorphoVaultID: vaultID, Address: address, AssetTokenID: 1, AdapterType: entity.MorphoAdapterTypeMarketV1, AddedAtBlock: 19000000}, nil
 	}
@@ -245,6 +361,12 @@ func TestProcessBlockEvent_Allocation(t *testing.T) {
 				return []outbound.Result{{Success: true, ReturnData: h.packUint256(realAssets)}}, nil
 			}
 
+			// Known adapter: the pre-transaction membership check finds it, so no
+			// classification probe fires; the in-tx GetActiveAdapter is the decisive
+			// read that yields the id for the state snapshot.
+			h.morphoRepo.GetActiveAdaptersByVaultFn = func(_ context.Context, _ int64) ([]*entity.MorphoAdapter, error) {
+				return []*entity.MorphoAdapter{{ID: 55, MorphoVaultID: 7, Address: testAdapterAddr.Bytes(), AssetTokenID: 1, AdapterType: entity.MorphoAdapterTypeMarketV1, AddedAtBlock: 19000000}}, nil
+			}
 			var (
 				gotVaultID int64
 				gotAddr    []byte
@@ -781,6 +903,11 @@ func TestProcessBlockEvent_V2Handlers_ErrorsPropagate(t *testing.T) {
 			setup: func(h *serviceTestHarness) shared.Log {
 				h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 					return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(1))}}, nil
+				}
+				// Adapter is already registered (pre-tx check finds it), so the
+				// failure under test is the decisive in-tx GetActiveAdapter read.
+				h.morphoRepo.GetActiveAdaptersByVaultFn = func(_ context.Context, _ int64) ([]*entity.MorphoAdapter, error) {
+					return []*entity.MorphoAdapter{{ID: 55, MorphoVaultID: 7, Address: testAdapterAddr.Bytes(), AssetTokenID: 1, AdapterType: entity.MorphoAdapterTypeMarketV1, AddedAtBlock: 19000000}}, nil
 				}
 				h.morphoRepo.GetActiveAdapterFn = func(_ context.Context, _ pgx.Tx, _ int64, _ []byte) (*entity.MorphoAdapter, error) {
 					return nil, errors.New("db down")
