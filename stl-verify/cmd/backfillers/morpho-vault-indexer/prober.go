@@ -11,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/erc20meta"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/morpho_indexer"
 )
@@ -83,6 +84,15 @@ func (p *vaultProber) probeAllCandidates(
 // probeBatchWithRetry tries probeBatch, and on failure retries with progressively
 // smaller sub-batches down to single-address probes. This handles "out of gas"
 // errors from the multicall when a batch contains contracts that consume excessive gas.
+//
+// At the single-address floor there is nothing left to split, so the error is
+// propagated (failing the run) rather than swallowed. By that point the only
+// errors reaching here are transport failures (429 / timeout / 5xx, already
+// retried to exhaustion by the rpchttp client) or a structural-transport error
+// out of the multicall — ErrNotVault is consumed as a per-result Success:false
+// inside collectProbeConfirmed and never surfaces as an error. Swallowing here
+// would permanently black-hole a real vault while the backfill run exits 0;
+// failing loudly is safe because backfiller re-runs are cheap and resumable.
 func (p *vaultProber) probeBatchWithRetry(
 	ctx context.Context,
 	batch []common.Address,
@@ -98,18 +108,14 @@ func (p *vaultProber) probeBatchWithRetry(
 		return nil, ctx.Err()
 	}
 
+	if len(batch) == 1 {
+		return nil, fmt.Errorf("probing candidate %s: %w", batch[0].Hex(), err)
+	}
+
 	// Batch failed — retry with halved batch size, down to individual probes.
 	p.logger.Warn("batch probe failed, retrying with smaller batches",
 		"batchSize", len(batch),
 		"error", err)
-
-	if len(batch) == 1 {
-		// Single address failed — skip it.
-		p.logger.Warn("skipping candidate that fails probe",
-			"address", batch[0].Hex(),
-			"error", err)
-		return nil, nil
-	}
 
 	mid := len(batch) / 2
 	left, err := p.probeBatchWithRetry(ctx, batch[:mid], firstBlocks, blockNum)
@@ -279,25 +285,25 @@ func (p *vaultProber) fetchVaultMetadata(
 			FirstBlock: firstBlocks[pc.address],
 		}
 
+		// Asset symbol is best-effort and display-only. Decode across the modern
+		// (string) and legacy (bytes32, e.g. MKR) ABIs via
+		// erc20meta.DecodeStringOrBytes32, and persist the vault even when it
+		// stays empty (reverted / undecodable symbol()). This mirrors the live
+		// indexer's getTokenMetadata (internal/services/morpho_indexer/
+		// blockchain_service.go): an empty symbol is left for the per-block
+		// reconciliation sweep to fill in later. Dropping the vault over a
+		// missing symbol would silently thin the backfill for no
+		// data-integrity reason — unlike decimals below, symbol drives no
+		// downstream math.
 		assetSymbolResult := results[base+(callsPerMetadata+assetSymbolOffset)]
 		if assetSymbolResult.Success && len(assetSymbolResult.ReturnData) > 0 {
-			if unpacked, err := p.erc20ABI.Unpack("symbol", assetSymbolResult.ReturnData); err == nil && len(unpacked) > 0 {
-				if sym, ok := unpacked[0].(string); ok {
-					v.AssetSymbol = sym
-				}
+			if sym, err := erc20meta.DecodeStringOrBytes32(p.erc20ABI, "symbol", assetSymbolResult.ReturnData); err == nil {
+				v.AssetSymbol = sym
 			}
 		}
 
-		if v.AssetSymbol == "" {
-			p.logger.Warn("skipping vault with empty asset symbol",
-				"address", pc.address.Hex(),
-				"name", v.Name,
-				"asset", v.Asset.Hex())
-			continue
-		}
-
-		// Asset decimals failure → skip the vault, mirroring the asset-symbol
-		// skip above. Rationale: token_repository.GetOrCreateToken UPSERTs on
+		// Asset decimals failure → skip the vault, unlike the best-effort asset
+		// symbol above. Rationale: token_repository.GetOrCreateToken UPSERTs on
 		// (chain_id, address) and on conflict preserves the existing row's
 		// decimals (only created_at_block is reconciled via LEAST). So if we
 		// persist AssetDecimals=0 here, the live indexer's later correct
