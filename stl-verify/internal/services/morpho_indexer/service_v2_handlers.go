@@ -30,44 +30,36 @@ func (s *Service) resolveV2Vault(vaultAddress common.Address) (*entity.MorphoVau
 	return vault, nil
 }
 
-// handleAddAdapter classifies the new adapter on-chain (outside the tx) and
-// records it in the adapter registry. An unclassifiable adapter is persisted as
-// Unknown behind a WARN, mirroring the VaultShaped discovery sentinel so a
-// future adapter kind surfaces instead of being dropped.
+// handleAddAdapter classifies the new adapter on-chain and records it in the
+// adapter registry. An unclassifiable adapter is persisted as Unknown behind a
+// WARN, mirroring the VaultShaped discovery sentinel so a future adapter kind
+// surfaces instead of being dropped.
 func (s *Service) handleAddAdapter(ctx context.Context, e *AddAdapterEvent, vaultAddress common.Address, blockNumber int64) error {
 	vault, err := s.resolveV2Vault(vaultAddress)
 	if err != nil {
 		return err
 	}
-
-	adapterType, err := s.blockchainSvc.getAdapterType(ctx, e.Account, blockNumber)
-	if err != nil {
-		return fmt.Errorf("classifying adapter %s: %w", e.Account.Hex(), err)
-	}
-	if adapterType == entity.MorphoAdapterTypeUnknown {
-		s.logger.Warn("VaultV2 adapter of unknown type added — recorded as Unknown for later curation",
-			"vault", vaultAddress.Hex(), "adapter", e.Account.Hex(), "block", blockNumber)
-	}
-
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		adapter, err := entity.NewMorphoAdapter(vault.ID, e.Account.Bytes(), vault.AssetTokenID, adapterType, blockNumber, nil)
-		if err != nil {
-			return fmt.Errorf("creating adapter entity: %w", err)
-		}
-		if _, err := s.morphoRepo.GetOrCreateAdapter(ctx, tx, adapter); err != nil {
-			return fmt.Errorf("persisting adapter: %w", err)
-		}
-		return nil
+		_, err := s.probeAndUpsertAdapter(ctx, tx, vault, vaultAddress, e.Account, blockNumber)
+		return err
 	})
 }
 
-// handleRemoveAdapter marks the adapter inactive from this block onward.
+// handleRemoveAdapter marks the adapter inactive from this block onward. If we
+// never witnessed the adapter's AddAdapter (it predates the vault's discovery on
+// the live stream — AddAdapter events for mid-life-discovered V2 vaults are
+// always historical and never replayed on SNS/SQS), the adapter is lazily
+// registered first so the removal closes an audit-consistent row, instead of
+// MarkAdapterRemoved failing with a 0-rows error and poisoning the FIFO queue.
 func (s *Service) handleRemoveAdapter(ctx context.Context, e *RemoveAdapterEvent, vaultAddress common.Address, blockNumber int64) error {
 	vault, err := s.resolveV2Vault(vaultAddress)
 	if err != nil {
 		return err
 	}
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
+		if _, err := s.ensureAdapterRegistered(ctx, tx, vault, vaultAddress, e.Account, blockNumber); err != nil {
+			return err
+		}
 		return s.morphoRepo.MarkAdapterRemoved(ctx, tx, vault.ID, e.Account.Bytes(), blockNumber)
 	})
 }
@@ -75,9 +67,10 @@ func (s *Service) handleRemoveAdapter(ctx context.Context, e *RemoveAdapterEvent
 // handleAllocation snapshots an adapter's realAssets() after an Allocate or
 // Deallocate. The event's `change` is a signed per-id delta, not a running
 // total, so the authoritative per-adapter value is read from realAssets()
-// (hash-pinned, state read). An allocation for an adapter we never saw
-// AddAdapter for is missed data, not a skippable no-op: fail the event so SQS
-// redelivers rather than persisting a state row against a phantom adapter.
+// (hash-pinned, state read). An allocation for an adapter we never saw AddAdapter
+// for is not a poison pill: the adapter address comes from the vault's own event
+// and is identity-verified by the on-chain type probe, so it is lazily registered
+// (self-heal) rather than hard-failing and stalling the whole morpho queue.
 func (s *Service) handleAllocation(ctx context.Context, adapter, vaultAddress common.Address, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) error {
 	vault, err := s.resolveV2Vault(vaultAddress)
 	if err != nil {
@@ -90,20 +83,62 @@ func (s *Service) handleAllocation(ctx context.Context, adapter, vaultAddress co
 	}
 
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		active, err := s.morphoRepo.GetActiveAdapter(ctx, tx, vault.ID, adapter.Bytes())
+		adapterID, err := s.ensureAdapterRegistered(ctx, tx, vault, vaultAddress, adapter, blockNumber)
 		if err != nil {
-			return fmt.Errorf("looking up active adapter %s: %w", adapter.Hex(), err)
+			return err
 		}
-		if active == nil {
-			return fmt.Errorf("allocation for unknown adapter %s on vault %s (no AddAdapter seen) — failing event", adapter.Hex(), vaultAddress.Hex())
-		}
-
-		state, err := entity.NewMorphoAdapterState(active.ID, blockNumber, blockVersion, blockTimestamp, realAssets)
+		state, err := entity.NewMorphoAdapterState(adapterID, blockNumber, blockVersion, blockTimestamp, realAssets)
 		if err != nil {
 			return fmt.Errorf("creating adapter state entity: %w", err)
 		}
 		return s.morphoRepo.SaveAdapterState(ctx, tx, state)
 	})
+}
+
+// ensureAdapterRegistered returns the registry id of the active adapter for
+// (vault, adapter), lazily registering it at firstSeenBlock if we never witnessed
+// its AddAdapter. Used by the Allocate/Deallocate and RemoveAdapter paths, which
+// can legitimately reach an adapter that predates the vault's mid-life discovery.
+func (s *Service) ensureAdapterRegistered(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault, vaultAddress, adapter common.Address, firstSeenBlock int64) (int64, error) {
+	active, err := s.morphoRepo.GetActiveAdapter(ctx, tx, vault.ID, adapter.Bytes())
+	if err != nil {
+		return 0, fmt.Errorf("looking up active adapter %s: %w", adapter.Hex(), err)
+	}
+	if active != nil {
+		return active.ID, nil
+	}
+	s.logger.Warn("adapter registered lazily; AddAdapter predates vault discovery",
+		"vault", vaultAddress.Hex(), "adapter", adapter.Hex(), "block", firstSeenBlock)
+	return s.probeAndUpsertAdapter(ctx, tx, vault, vaultAddress, adapter, firstSeenBlock)
+}
+
+// probeAndUpsertAdapter classifies an adapter on-chain, records an unknown type
+// as Unknown behind a WARN (mirroring the VaultShaped discovery sentinel), and
+// upserts the registry row at firstSeenBlock. Shared by the AddAdapter handler,
+// the discovery-time enumeration, and the lazy self-heal on Allocate/RemoveAdapter.
+//
+// A probe TRANSPORT error propagates (transient ⇒ SQS retries); only a clean
+// both-revert probe records type Unknown. The upsert is active-row-keyed
+// (GetOrCreateAdapter), so a later replay of the true AddAdapter converges the
+// row rather than duplicating it.
+func (s *Service) probeAndUpsertAdapter(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault, vaultAddress, adapter common.Address, firstSeenBlock int64) (int64, error) {
+	adapterType, err := s.blockchainSvc.getAdapterType(ctx, adapter, firstSeenBlock)
+	if err != nil {
+		return 0, fmt.Errorf("classifying adapter %s: %w", adapter.Hex(), err)
+	}
+	if adapterType == entity.MorphoAdapterTypeUnknown {
+		s.logger.Warn("VaultV2 adapter of unknown type — recorded as Unknown for later curation",
+			"vault", vaultAddress.Hex(), "adapter", adapter.Hex(), "block", firstSeenBlock)
+	}
+	adapterEntity, err := entity.NewMorphoAdapter(vault.ID, adapter.Bytes(), vault.AssetTokenID, adapterType, firstSeenBlock, nil)
+	if err != nil {
+		return 0, fmt.Errorf("creating adapter entity: %w", err)
+	}
+	id, err := s.morphoRepo.GetOrCreateAdapter(ctx, tx, adapterEntity)
+	if err != nil {
+		return 0, fmt.Errorf("persisting adapter: %w", err)
+	}
+	return id, nil
 }
 
 // handleForceDeallocate emits an ops WARN and writes NO state.
