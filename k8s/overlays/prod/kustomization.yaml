@@ -19,8 +19,11 @@ resources:
   - ../../base/avalanche-backup-worker
   - ../../base/avalanche-sparklend-position-tracker
   - ../../base/avalanche-oracle-price-worker
+  - ../../base/avalanche-allocation-tracker
   - ../../base/base-watcher
   - ../../base/base-backup-worker
+  - ../../base/base-allocation-tracker
+  - ../../base/base-oracle-price-worker
   - ../../base/optimism-watcher
   - ../../base/optimism-backup-worker
   - ../../base/unichain-watcher
@@ -93,6 +96,10 @@ images:
     # Shares the oracle-price-worker image — same binary, different chain config via env vars
     newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-oracle-price-worker
     newTag: "7950c6ca31ae7461628441656fedba3941357cb5"
+  - name: avalanche-allocation-tracker
+    # Shares the allocation-tracker image — same binary, different chain config via env vars
+    newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-allocation-tracker
+    newTag: "7950c6ca31ae7461628441656fedba3941357cb5"
   - name: base-watcher
     # Shares the watcher image — same binary, different chain config via env vars
     newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-watcher
@@ -112,6 +119,14 @@ images:
   - name: base-backup-worker
     # Shares the backup-worker image — same binary, different chain config via env vars
     newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-backup-worker
+    newTag: "7950c6ca31ae7461628441656fedba3941357cb5"
+  - name: base-allocation-tracker
+    # Shares the allocation-tracker image — same binary, different chain config via env vars
+    newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-allocation-tracker
+    newTag: "7950c6ca31ae7461628441656fedba3941357cb5"
+  - name: base-oracle-price-worker
+    # Shares the oracle-price-worker image — same binary, different chain config via env vars
+    newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-oracle-price-worker
     newTag: "7950c6ca31ae7461628441656fedba3941357cb5"
   - name: optimism-backup-worker
     # Shares the backup-worker image — same binary, different chain config via env vars

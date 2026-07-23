@@ -189,6 +189,36 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
+  name: avalanche-allocation-tracker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://avax-mainnet.g.alchemy.com/v2"
+  DEPLOY_ENV: "prod"
+  CHAIN_ID: "43114"
+  ENVIRONMENT: "sentinelprod"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains;
+  # pod identity write policy granted in infrastructure#383.
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: base-allocation-tracker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://base-mainnet.g.alchemy.com/v2"
+  DEPLOY_ENV: "prod"
+  CHAIN_ID: "8453"
+  ENVIRONMENT: "sentinelprod"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains;
+  # pod identity write policy granted in infrastructure#383.
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
   name: prime-debt-indexer
 data:
   CHAIN_ID: "1"
@@ -417,6 +447,21 @@ data:
   AWS_REGION: "eu-west-1"
   ALCHEMY_HTTP_URL: "https://avax-mainnet.g.alchemy.com/v2"
   CHAIN_ID: "43114"
+  ENVIRONMENT: "sentinelprod"
+  DEPLOY_ENV: "prod"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains;
+  # pod identity write policy granted in infrastructure#383.
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: base-oracle-price-worker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://base-mainnet.g.alchemy.com/v2"
+  CHAIN_ID: "8453"
   ENVIRONMENT: "sentinelprod"
   DEPLOY_ENV: "prod"
   # Raw SC call archiving (VEC-81). Single bucket shared across chains;
