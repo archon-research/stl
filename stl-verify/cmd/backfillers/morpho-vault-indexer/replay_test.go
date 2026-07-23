@@ -3,7 +3,8 @@ package main
 import (
 	"context"
 	"errors"
-	"math/big"
+	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +12,9 @@ import (
 	ethtypes "github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/partition"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/morpho_indexer"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
@@ -152,57 +156,161 @@ func TestReplayPartitionPrefixes_AscendingByBlock(t *testing.T) {
 	}
 }
 
+// --- missing-receipt-block guard ---
+
+// fakeReplayS3Reader serves a fixed key listing and per-key JSON bodies so the
+// partition-collection path can be driven without real S3.
+type fakeReplayS3Reader struct {
+	keys      []string
+	bodyByKey map[string]string
+}
+
+func (f *fakeReplayS3Reader) ListFiles(context.Context, string, string) ([]outbound.S3File, error) {
+	return nil, nil
+}
+
+func (f *fakeReplayS3Reader) ListPrefix(_ context.Context, _, prefix string) ([]string, error) {
+	var out []string
+	for _, k := range f.keys {
+		if strings.HasPrefix(k, prefix) {
+			out = append(out, k)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeReplayS3Reader) StreamFile(_ context.Context, _, key string) (io.ReadCloser, error) {
+	body, ok := f.bodyByKey[key]
+	if !ok {
+		return nil, errors.New("no such key: " + key)
+	}
+	return io.NopCloser(strings.NewReader(body)), nil
+}
+
+// TestReplayPartition_MissingReceiptBlockErrorsAndLeavesCheckpointUnwritten:
+// a block in the partition's [from,to] intersection with no receipt key would
+// contribute no logs, yet the partition would still be marked done — silently
+// dropping every event in that block, since a re-run skips the checkpointed
+// partition. collectPartitionV2Logs must hard-fail so the outer loop's guard
+// skips markDone, leaving the checkpoint unwritten for a repaired-S3 re-run.
+func TestReplayPartition_MissingReceiptBlockErrorsAndLeavesCheckpointUnwritten(t *testing.T) {
+	ctx := context.Background()
+	const from, to = int64(100), int64(102) // partition "0-999"; blocks 100..102 all required
+
+	keyFor := func(bn int64) string { return s3key.Build(bn, 0, s3key.Receipts) }
+	// S3 has receipts for 100 and 102 but is missing 101.
+	reader := &fakeReplayS3Reader{
+		keys: []string{keyFor(100), keyFor(102)},
+		bodyByKey: map[string]string{
+			keyFor(100): "[]",
+			keyFor(102): "[]",
+		},
+	}
+	part := partition.GetPartition(from)
+
+	cp, err := loadCheckpoint(t.TempDir() + "/progress.jsonl")
+	if err != nil {
+		t.Fatalf("loadCheckpoint: %v", err)
+	}
+	defer cp.Close()
+
+	// Mirror the replayV2StructuredEvents per-partition guard: only markDone when
+	// collection succeeds.
+	processPartition := func(part string) error {
+		if _, err := collectPartitionV2Logs(ctx, reader, "bucket", part, from, to, map[common.Address]struct{}{}, mustV2Topics(t)); err != nil {
+			return err
+		}
+		return cp.markDone(part)
+	}
+
+	if err := processPartition(part); err == nil {
+		t.Fatal("expected an error for a partition missing a receipt block")
+	}
+	if cp.isDone(part) {
+		t.Fatal("checkpoint must stay unwritten when a partition is missing a receipt block")
+	}
+}
+
+// TestCollectPartitionV2Logs_AllBlocksPresentNoError is the complement: when
+// every block in [from,to] has a receipt, collection succeeds even if no receipt
+// carries a structured V2 log.
+func TestCollectPartitionV2Logs_AllBlocksPresentNoError(t *testing.T) {
+	ctx := context.Background()
+	const from, to = int64(100), int64(102)
+
+	keyFor := func(bn int64) string { return s3key.Build(bn, 0, s3key.Receipts) }
+	reader := &fakeReplayS3Reader{
+		keys: []string{keyFor(100), keyFor(101), keyFor(102)},
+		bodyByKey: map[string]string{
+			keyFor(100): "[]",
+			keyFor(101): "[]",
+			keyFor(102): "[]",
+		},
+	}
+	part := partition.GetPartition(from)
+
+	entries, err := collectPartitionV2Logs(ctx, reader, "bucket", part, from, to, map[common.Address]struct{}{}, mustV2Topics(t))
+	if err != nil {
+		t.Fatalf("unexpected error with all blocks present: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("want 0 entries (empty receipts), got %d", len(entries))
+	}
+}
+
 // --- block timestamp cache ---
 
 type fakeHeaderFetcher struct {
-	calls       map[int64]int
-	timeByBlock map[int64]uint64
-	err         error
+	calls      map[common.Hash]int
+	timeByHash map[common.Hash]uint64
+	err        error
 }
 
-func (f *fakeHeaderFetcher) HeaderByNumber(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
+func (f *fakeHeaderFetcher) HeaderByHash(_ context.Context, hash common.Hash) (*ethtypes.Header, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
-	bn := number.Int64()
-	f.calls[bn]++
-	return &ethtypes.Header{Time: f.timeByBlock[bn]}, nil
+	f.calls[hash]++
+	return &ethtypes.Header{Time: f.timeByHash[hash]}, nil
 }
 
-// TestBlockTimestampCache fetches each distinct block once and reuses the result.
+// TestBlockTimestampCache fetches each distinct block hash once and reuses the
+// result.
 func TestBlockTimestampCache(t *testing.T) {
-	f := &fakeHeaderFetcher{calls: map[int64]int{}, timeByBlock: map[int64]uint64{100: 1_700_000_000, 200: 1_700_000_500}}
+	hashA := common.HexToHash("0xaa")
+	hashB := common.HexToHash("0xbb")
+	f := &fakeHeaderFetcher{calls: map[common.Hash]int{}, timeByHash: map[common.Hash]uint64{hashA: 1_700_000_000, hashB: 1_700_000_500}}
 	c := newBlockTimestampCache(f)
 
-	ts1, err := c.timestampAt(context.Background(), 100)
+	ts1, err := c.timestampAt(context.Background(), hashA)
 	if err != nil {
-		t.Fatalf("timestampAt(100): %v", err)
+		t.Fatalf("timestampAt(hashA): %v", err)
 	}
-	ts2, err := c.timestampAt(context.Background(), 100)
+	ts2, err := c.timestampAt(context.Background(), hashA)
 	if err != nil {
-		t.Fatalf("timestampAt(100) again: %v", err)
+		t.Fatalf("timestampAt(hashA) again: %v", err)
 	}
 	if !ts1.Equal(ts2) || !ts1.Equal(time.Unix(1_700_000_000, 0).UTC()) {
 		t.Errorf("timestamps = %v / %v, want %v", ts1, ts2, time.Unix(1_700_000_000, 0).UTC())
 	}
-	if f.calls[100] != 1 {
-		t.Errorf("block 100 fetched %d times, want 1 (cached)", f.calls[100])
+	if f.calls[hashA] != 1 {
+		t.Errorf("hashA fetched %d times, want 1 (cached)", f.calls[hashA])
 	}
 
-	if _, err := c.timestampAt(context.Background(), 200); err != nil {
-		t.Fatalf("timestampAt(200): %v", err)
+	if _, err := c.timestampAt(context.Background(), hashB); err != nil {
+		t.Fatalf("timestampAt(hashB): %v", err)
 	}
-	if f.calls[200] != 1 {
-		t.Errorf("block 200 fetched %d times, want 1", f.calls[200])
+	if f.calls[hashB] != 1 {
+		t.Errorf("hashB fetched %d times, want 1", f.calls[hashB])
 	}
 }
 
 // TestBlockTimestampCache_FetchErrorPropagates: a header fetch failure must
 // surface (transient RPC failure → stop, retry), never yield a zero timestamp.
 func TestBlockTimestampCache_FetchErrorPropagates(t *testing.T) {
-	f := &fakeHeaderFetcher{calls: map[int64]int{}, err: errors.New("rpc down")}
+	f := &fakeHeaderFetcher{calls: map[common.Hash]int{}, err: errors.New("rpc down")}
 	c := newBlockTimestampCache(f)
-	if _, err := c.timestampAt(context.Background(), 100); err == nil {
+	if _, err := c.timestampAt(context.Background(), common.HexToHash("0xaa")); err == nil {
 		t.Fatal("expected the fetch error to propagate")
 	}
 }

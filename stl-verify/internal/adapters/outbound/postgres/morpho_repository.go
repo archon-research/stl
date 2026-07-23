@@ -334,15 +334,24 @@ func (r *MorphoRepository) SaveVaultPosition(ctx context.Context, tx pgx.Tx, pos
 }
 
 // GetOrCreateAdapter retrieves or creates a VaultV2 liquidity adapter registry
-// row, keyed on the ACTIVE incarnation of (morpho_vault_id, address).
+// row for (morpho_vault_id, address), converging late-arriving observations onto
+// the incarnation whose lifetime window they belong to rather than duplicating.
 //
-// If an active row (removed_at_block IS NULL) already exists it is reused, and
-// its added_at_block converges downward to LEAST(existing, candidate). This lets
-// the backfiller replay the TRUE AddAdapter@X for an adapter the live stream
-// lazily registered at first-seen block Y>X collapse onto one active row keyed at
-// X, instead of leaving two active rows. A genuine re-add (a distinct row) only
-// happens after a removal closes the prior incarnation, since the UNIQUE key
-// includes added_at_block.
+// The candidate's added_at_block is matched against incarnations in three steps:
+//
+//  1. If an ACTIVE row (removed_at_block IS NULL) exists it is reused, its
+//     added_at_block converging downward to LEAST(existing, candidate). This lets
+//     the backfiller replay the TRUE AddAdapter@X for an adapter the live stream
+//     lazily registered at first-seen block Y>X collapse onto one active row.
+//  2. Otherwise, if a CLOSED incarnation covers the candidate (removed_at_block
+//     >= candidate added_at_block), converge onto the earliest-closing such row
+//     (UPDATE its added_at_block down). Without this, replaying the true
+//     AddAdapter@W earlier than a live lazy-register+removal@X (W<X) would find no
+//     active row and INSERT a second, spuriously-ACTIVE incarnation — resurrecting
+//     a de-registered adapter into GetActiveAdaptersByVault / realAssets forever.
+//  3. Only a candidate added strictly after every prior removal is a genuinely new
+//     incarnation and is INSERTed. The UNIQUE key includes added_at_block, so the
+//     ON CONFLICT no-op SET keeps a same-block backfill re-run idempotent.
 func (r *MorphoRepository) GetOrCreateAdapter(ctx context.Context, tx pgx.Tx, adapter *entity.MorphoAdapter) (int64, error) {
 	if err := adapter.Validate(); err != nil {
 		return 0, fmt.Errorf("validating morpho adapter: %w", err)
@@ -375,8 +384,33 @@ func (r *MorphoRepository) GetOrCreateAdapter(ctx context.Context, tx pgx.Tx, ad
 		return 0, fmt.Errorf("converging active morpho adapter: %w", err)
 	}
 
-	// No active incarnation: insert a new row. The ON CONFLICT no-op SET keeps a
-	// same-block replay (backfill re-run of the same AddAdapter) idempotent.
+	// No active incarnation. If a CLOSED incarnation's window covers the candidate
+	// (removed_at_block >= candidate added_at_block), the candidate is a late
+	// observation of that same closed window — converge onto the earliest-closing
+	// such row instead of inserting a spuriously-active duplicate.
+	err = tx.QueryRow(ctx,
+		`UPDATE morpho_adapter
+		 SET added_at_block = LEAST(added_at_block, $3)
+		 WHERE id = (
+		     SELECT id FROM morpho_adapter
+		     WHERE morpho_vault_id = $1 AND address = $2
+		       AND removed_at_block IS NOT NULL AND removed_at_block >= $3
+		     ORDER BY removed_at_block ASC
+		     LIMIT 1
+		 )
+		 RETURNING id`,
+		adapter.MorphoVaultID, adapter.Address, adapter.AddedAtBlock,
+	).Scan(&id)
+	if err == nil {
+		return id, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return 0, fmt.Errorf("converging closed morpho adapter incarnation: %w", err)
+	}
+
+	// Genuinely new incarnation (candidate added after every prior removal): insert
+	// a new row. The ON CONFLICT no-op SET keeps a same-block replay (backfill
+	// re-run of the same AddAdapter) idempotent.
 	err = tx.QueryRow(ctx,
 		`INSERT INTO morpho_adapter (morpho_vault_id, address, asset_token_id, adapter_type, added_at_block, removed_at_block)
 		 VALUES ($1, $2, $3, $4, $5, $6)
