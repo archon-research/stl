@@ -622,6 +622,29 @@ func TestExtractMetaMorphoEvent_TooFewTopicsErrors(t *testing.T) {
 	}
 }
 
+// TestExtractMetaMorphoEvent_TruncatedDataErrors guards the shared parseData
+// path: a registered V2 event whose non-indexed data is truncated must surface a
+// decode error, never a silently zero-filled event. One case suffices — every
+// typed extractor decodes its non-indexed args through the same
+// parseData → UnpackIntoMap call.
+func TestExtractMetaMorphoEvent_TruncatedDataErrors(t *testing.T) {
+	e, err := NewEventExtractor()
+	if err != nil {
+		t.Fatalf("NewEventExtractor: %v", err)
+	}
+	v2 := mustV2EventsABI(t)
+	id := common.HexToHash("0x00000000000000000000000000000000000000000000000000000000000000ab")
+
+	// A valid IncreaseAbsoluteCap log (non-indexed: idData bytes + newCap uint256).
+	log := makeV2Log(t, v2.Events["IncreaseAbsoluteCap"], []common.Hash{id}, []byte{0x01, 0x02, 0x03, 0x04}, big.NewInt(1_000_000))
+	// Truncate the ABI-packed data so the tuple can no longer be decoded.
+	log.Data = log.Data[:8]
+
+	if _, err := e.ExtractMetaMorphoEvent(log); err == nil {
+		t.Fatal("expected a decode error for truncated event data")
+	}
+}
+
 // TestExtractVaultAccrueInterest_OptionalV2Fields covers the missing-vs-mistyped
 // discrimination on the V2-only accrue fields: absent → left nil, present →
 // carried, present-but-wrong-type → error (never a silent NULL).
