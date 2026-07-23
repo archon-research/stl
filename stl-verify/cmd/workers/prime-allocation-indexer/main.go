@@ -168,7 +168,7 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("resolving chain name: %w", err)
 	}
 	if err := at.AssertServedTrackerChain(chainName); err != nil {
-		return err
+		return fmt.Errorf("served-chain assertion: %w", err)
 	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
