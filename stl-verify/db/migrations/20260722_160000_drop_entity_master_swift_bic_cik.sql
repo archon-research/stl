@@ -11,6 +11,11 @@
 -- dropped columns) and entity_master_versions lists columns explicitly, so both depend on the columns.
 -- DROP VIEW also drops the views' grants + comments, restored below. entity_ref_codes' SWIFT_BIC
 -- code_type (in-review #580) is an unused-but-allowed enum value and is left as-is.
+--
+-- Rollback: schema-only, no data to restore (both columns are empty on live). A down migration
+-- re-adds them nullable -- ALTER TABLE entity_master ADD COLUMN swift_bic text; ADD COLUMN cik text; --
+-- then recreates the two views as below with swift_bic/cik restored to entity_master_versions'
+-- explicit column list (entity_master_current is SELECT * and picks them up automatically).
 
 DROP VIEW entity_master_current;
 DROP VIEW entity_master_versions;
