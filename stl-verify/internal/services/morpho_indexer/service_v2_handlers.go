@@ -112,20 +112,29 @@ func (s *Service) ensureAdapterRegistered(ctx context.Context, tx pgx.Tx, vault 
 	return s.probeAndUpsertAdapter(ctx, tx, vault, vaultAddress, adapter, firstSeenBlock)
 }
 
-// probeAndUpsertAdapter classifies an adapter on-chain, records an unknown type
-// as Unknown behind a WARN (mirroring the VaultShaped discovery sentinel), and
-// upserts the registry row at firstSeenBlock. Shared by the AddAdapter handler,
-// the discovery-time enumeration, and the lazy self-heal on Allocate/RemoveAdapter.
+// probeAndUpsertAdapter classifies an adapter on-chain and upserts its registry
+// row at firstSeenBlock. Shared by the live AddAdapter handler and the lazy
+// self-heal on Allocate/RemoveAdapter, which classify inside their transaction.
+// (Discovery-time enumeration classifies up-front, before its atomic persist tx,
+// and calls upsertAdapterRow directly with the already-read type.)
 //
 // A probe TRANSPORT error propagates (transient ⇒ SQS retries); only a clean
-// both-revert probe records type Unknown. The upsert is active-row-keyed
-// (GetOrCreateAdapter), so a later replay of the true AddAdapter converges the
-// row rather than duplicating it.
+// both-revert probe records type Unknown.
 func (s *Service) probeAndUpsertAdapter(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault, vaultAddress, adapter common.Address, firstSeenBlock int64) (int64, error) {
 	adapterType, err := s.blockchainSvc.getAdapterType(ctx, adapter, firstSeenBlock)
 	if err != nil {
 		return 0, fmt.Errorf("classifying adapter %s: %w", adapter.Hex(), err)
 	}
+	return s.upsertAdapterRow(ctx, tx, vault, vaultAddress, adapter, adapterType, firstSeenBlock)
+}
+
+// upsertAdapterRow records an already-classified adapter in the registry within
+// tx, WARNing on an Unknown type (mirroring the VaultShaped discovery sentinel so
+// a future adapter kind surfaces instead of being dropped). The upsert is
+// incarnation-aware (GetOrCreateAdapter), so a later replay of the true AddAdapter
+// converges the row rather than duplicating it. Shared by probeAndUpsertAdapter
+// (type probed inside the tx) and the discovery seed (type probed up-front).
+func (s *Service) upsertAdapterRow(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault, vaultAddress, adapter common.Address, adapterType entity.MorphoAdapterType, firstSeenBlock int64) (int64, error) {
 	if adapterType == entity.MorphoAdapterTypeUnknown {
 		s.logger.Warn("VaultV2 adapter of unknown type — recorded as Unknown for later curation",
 			"vault", vaultAddress.Hex(), "adapter", adapter.Hex(), "block", firstSeenBlock)

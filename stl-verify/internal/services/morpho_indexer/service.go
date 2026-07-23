@@ -812,32 +812,126 @@ func MorphoBlueVaultCandidates(event MorphoBlueEvent) []common.Address {
 	}
 }
 
-// discoverAndRegisterVault probes vaultAddress on-chain, persists the vault
-// and its asset token, enumerates and seeds its adapters if it is a VaultV2,
-// and registers the vault in the in-memory registry.
-// Returns *ErrNotVault if the address is definitively not a Morpho-family
-// vault; transient errors (RPC, DB) propagate as plain errors so the caller
-// can decide whether to retry.
+// discoveredAdapter is one enumerated VaultV2 adapter with everything read
+// on-chain for it BEFORE the discovery persist transaction: its classified type
+// (number-pinned — adapter identity is immutable) and its hash-pinned realAssets()
+// seed. Reading up-front is what lets the vault and all its adapters persist in a
+// single atomic transaction.
+type discoveredAdapter struct {
+	address     common.Address
+	adapterType entity.MorphoAdapterType
+	realAssets  *big.Int
+}
+
+// vaultDiscoveryReads holds every on-chain value discovery needs, read before the
+// persist transaction so the vault row and its adapters commit atomically.
+// adapters is populated only for a VaultV2 (empty for V1/V1.1) and is sorted by
+// address for deterministic advisory-lock acquisition in the persist step.
+type vaultDiscoveryReads struct {
+	metadata      *VaultMetadata
+	assetMetadata TokenMetadata
+	adapters      []discoveredAdapter
+}
+
+// discoverAndRegisterVault probes vaultAddress on-chain, persists the vault, its
+// asset token, and (for a VaultV2) all its enumerated adapters + seeded states in
+// a single transaction, then registers the vault in the in-memory registry.
+// Returns *ErrNotVault if the address is definitively not a Morpho-family vault;
+// transient errors (RPC, DB) propagate as plain errors so the caller can retry.
 //
-// Used by both the IsVaultActivityEvent path (V2) via tryDiscoverVault and
-// the Morpho Blue caller/onBehalf path (V1/V1.1) via
-// discoverV1V11VaultsInReceipt. blockHash / blockVersion / blockTimestamp are the
-// triggering event's; they are used only by the V2 adapter-state seed (a
-// hash-pinned realAssets snapshot) and are inert for the V1/V1.1 path.
+// Used by both the IsVaultActivityEvent path (V2) via tryDiscoverVault and the
+// Morpho Blue caller/onBehalf path (V1/V1.1) via discoverV1V11VaultsInReceipt.
+// blockHash / blockVersion / blockTimestamp are the triggering event's; they feed
+// only the V2 adapter enumeration/seed (hash-pinned reads) and are inert for the
+// V1/V1.1 path.
+//
+// Reads-then-persist ordering is the atomicity guarantee (VEC-218 review): ALL
+// on-chain reads happen first, then everything persists in one WithTransaction.
+// A transient read failure commits nothing, so a worker restart never reloads a
+// discovered-but-adapterless vault (whose historical AddAdapter events never
+// replay on the live stream) and skip its enumeration forever — SQS redelivery
+// re-discovers cleanly.
 func (s *Service) discoverAndRegisterVault(ctx context.Context, vaultAddress common.Address, chainID, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) error {
-	metadata, err := s.blockchainSvc.getVaultMetadata(ctx, vaultAddress, blockNumber)
+	reads, err := s.readVaultForDiscovery(ctx, vaultAddress, blockNumber, blockHash)
 	if err != nil {
-		return fmt.Errorf("fetching vault metadata: %w", err)
+		return err
 	}
 
+	vault, err := s.persistDiscoveredVault(ctx, vaultAddress, chainID, blockNumber, blockVersion, blockTimestamp, reads)
+	if err != nil {
+		return err
+	}
+
+	// Register in-memory only after the atomic persist commits.
+	s.vaultRegistry.RegisterVault(vaultAddress, vault)
+	return nil
+}
+
+// readVaultForDiscovery performs every on-chain read discovery needs, before any
+// DB write: vault metadata, its asset token metadata, and — for a VaultV2 — the
+// full enumerated adapter set with each adapter's type and hash-pinned realAssets
+// seed. A transport error on any read bubbles so nothing is persisted.
+func (s *Service) readVaultForDiscovery(ctx context.Context, vaultAddress common.Address, blockNumber int64, blockHash common.Hash) (*vaultDiscoveryReads, error) {
+	metadata, err := s.blockchainSvc.getVaultMetadata(ctx, vaultAddress, blockNumber)
+	if err != nil {
+		return nil, fmt.Errorf("fetching vault metadata: %w", err)
+	}
+
+	assetMetadata, err := s.blockchainSvc.getTokenMetadata(ctx, metadata.Asset, blockNumber)
+	if err != nil {
+		return nil, fmt.Errorf("fetching asset token metadata: %w", err)
+	}
+
+	reads := &vaultDiscoveryReads{metadata: metadata, assetMetadata: assetMetadata}
+	if metadata.Version == entity.MorphoVaultV2 {
+		adapters, err := s.readV2Adapters(ctx, vaultAddress, blockNumber, blockHash)
+		if err != nil {
+			return nil, err
+		}
+		reads.adapters = adapters
+	}
+	return reads, nil
+}
+
+// readV2Adapters enumerates a freshly-discovered VaultV2's adapter set (hash-pinned
+// — the set is versioned state) and, for each adapter, classifies its type
+// (number-pinned identity) and reads its hash-pinned realAssets() seed. The result
+// is sorted by address so the persist transaction acquires the per-(vault,address)
+// GetOrCreateAdapter advisory locks (and the mas-state trigger locks after them)
+// in a deterministic order (ADR-0002 §3 batch rule).
+func (s *Service) readV2Adapters(ctx context.Context, vaultAddress common.Address, blockNumber int64, blockHash common.Hash) ([]discoveredAdapter, error) {
+	addresses, err := s.blockchainSvc.enumerateVaultAdapters(ctx, vaultAddress, blockHash)
+	if err != nil {
+		return nil, fmt.Errorf("enumerating adapters: %w", err)
+	}
+
+	adapters := make([]discoveredAdapter, 0, len(addresses))
+	for _, adapter := range addresses {
+		adapterType, err := s.blockchainSvc.getAdapterType(ctx, adapter, blockNumber)
+		if err != nil {
+			return nil, fmt.Errorf("classifying adapter %s: %w", adapter.Hex(), err)
+		}
+		realAssets, err := s.blockchainSvc.getAdapterRealAssets(ctx, adapter, blockHash)
+		if err != nil {
+			return nil, fmt.Errorf("seeding realAssets for adapter %s: %w", adapter.Hex(), err)
+		}
+		adapters = append(adapters, discoveredAdapter{address: adapter, adapterType: adapterType, realAssets: realAssets})
+	}
+	slices.SortFunc(adapters, func(a, b discoveredAdapter) int {
+		return bytes.Compare(a.address.Bytes(), b.address.Bytes())
+	})
+	return adapters, nil
+}
+
+// persistDiscoveredVault writes the vault, its asset token, protocol, receipt
+// token, and every enumerated adapter plus its seeded adapter_state row in a
+// SINGLE transaction. Either the whole vault (including adapters) commits or
+// nothing does, so the vault row can never exist without the adapters its
+// historical AddAdapter events would have created.
+func (s *Service) persistDiscoveredVault(ctx context.Context, vaultAddress common.Address, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time, reads *vaultDiscoveryReads) (*entity.MorphoVault, error) {
 	var vault *entity.MorphoVault
 	if err := s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		assetMetadata, err := s.blockchainSvc.getTokenMetadata(ctx, metadata.Asset, blockNumber)
-		if err != nil {
-			return fmt.Errorf("fetching asset token metadata: %w", err)
-		}
-
-		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, metadata.Asset, assetMetadata.Symbol, assetMetadata.Decimals, &blockNumber)
+		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, reads.metadata.Asset, reads.assetMetadata.Symbol, reads.assetMetadata.Decimals, &blockNumber)
 		if err != nil {
 			return fmt.Errorf("getting asset token: %w", err)
 		}
@@ -847,17 +941,17 @@ func (s *Service) discoverAndRegisterVault(ctx context.Context, vaultAddress com
 			return fmt.Errorf("getting protocol: %w", err)
 		}
 
-		vault, err = entity.NewMorphoVault(chainID, protocolID, vaultAddress.Bytes(), metadata.Name, metadata.Symbol, tokenID, metadata.Version, blockNumber)
+		vault, err = entity.NewMorphoVault(chainID, protocolID, vaultAddress.Bytes(), reads.metadata.Name, reads.metadata.Symbol, tokenID, reads.metadata.Version, blockNumber)
 		if err != nil {
 			return fmt.Errorf("creating vault entity: %w", err)
 		}
-
 		vaultID, err := s.morphoRepo.GetOrCreateVault(ctx, tx, vault)
 		if err != nil {
 			return fmt.Errorf("persisting vault: %w", err)
 		}
+		vault.ID = vaultID
 
-		receiptToken, err := entity.NewReceiptToken(chainID, protocolID, tokenID, blockNumber, vaultAddress, metadata.Symbol)
+		receiptToken, err := entity.NewReceiptToken(chainID, protocolID, tokenID, blockNumber, vaultAddress, reads.metadata.Symbol)
 		if err != nil {
 			return fmt.Errorf("creating receipt token entity: %w", err)
 		}
@@ -865,61 +959,32 @@ func (s *Service) discoverAndRegisterVault(ctx context.Context, vaultAddress com
 			return fmt.Errorf("upserting receipt token: %w", err)
 		}
 
-		vault.ID = vaultID
-		return nil
+		return s.seedDiscoveredAdapters(ctx, tx, vault, vaultAddress, blockNumber, blockVersion, blockTimestamp, reads.adapters)
 	}); err != nil {
-		return fmt.Errorf("persisting vault: %w", err)
+		return nil, fmt.Errorf("persisting vault %s: %w", vaultAddress.Hex(), err)
 	}
-
-	// A VaultV2 discovered mid-life carries adapters registered by historical
-	// AddAdapter events that never replay on the live stream. Enumerate and seed
-	// them BEFORE registering the vault in-memory: a transient enumeration failure
-	// then leaves the vault undiscovered, so the next SQS redelivery re-runs
-	// discovery + enumeration rather than treating the vault as known while its
-	// adapters are missing. The GetOrCreate / SaveAdapterState writes are
-	// idempotent, so the retry is safe.
-	if metadata.Version == entity.MorphoVaultV2 {
-		if err := s.enumerateAndSeedV2Adapters(ctx, vault, vaultAddress, blockNumber, blockHash, blockVersion, blockTimestamp); err != nil {
-			return fmt.Errorf("seeding V2 adapters for vault %s: %w", vaultAddress.Hex(), err)
-		}
-	}
-
-	s.vaultRegistry.RegisterVault(vaultAddress, vault)
-	return nil
+	return vault, nil
 }
 
-// enumerateAndSeedV2Adapters reads a freshly-discovered VaultV2's on-chain
-// adapter set and, for each adapter, classifies it, registers it at the discovery
-// block, and seeds one adapter_state row from a hash-pinned realAssets() read at
-// the discovery event's block hash. Seeding at discovery keeps the adapter
-// registry and its state consistent from the first moment (VEC-219's
-// composition-completeness probe treats an active adapter with no state row as
-// adapter_data_missing); subsequent Allocate/Deallocate events append as normal.
-//
-// Per-adapter writes commit in their own transaction and are idempotent; a
-// transport error on any read bubbles so the whole event retries.
-func (s *Service) enumerateAndSeedV2Adapters(ctx context.Context, vault *entity.MorphoVault, vaultAddress common.Address, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) error {
-	adapters, err := s.blockchainSvc.enumerateVaultAdapters(ctx, vaultAddress, blockNumber)
-	if err != nil {
-		return fmt.Errorf("enumerating adapters: %w", err)
-	}
-	for _, adapter := range adapters {
-		realAssets, err := s.blockchainSvc.getAdapterRealAssets(ctx, adapter, blockHash)
+// seedDiscoveredAdapters registers each enumerated adapter and seeds one
+// adapter_state row from its already-read hash-pinned realAssets, within the
+// discovery transaction. Seeding at discovery keeps the adapter registry and its
+// state consistent from the first moment (VEC-219's composition-completeness probe
+// treats an active adapter with no state row as adapter_data_missing); subsequent
+// Allocate/Deallocate events append as normal. adapters arrive address-sorted (see
+// readV2Adapters); V1/V1.1 vaults pass an empty slice.
+func (s *Service) seedDiscoveredAdapters(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault, vaultAddress common.Address, blockNumber int64, blockVersion int, blockTimestamp time.Time, adapters []discoveredAdapter) error {
+	for _, a := range adapters {
+		adapterID, err := s.upsertAdapterRow(ctx, tx, vault, vaultAddress, a.address, a.adapterType, blockNumber)
 		if err != nil {
-			return fmt.Errorf("seeding realAssets for adapter %s: %w", adapter.Hex(), err)
-		}
-		if err := s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-			adapterID, err := s.probeAndUpsertAdapter(ctx, tx, vault, vaultAddress, adapter, blockNumber)
-			if err != nil {
-				return err
-			}
-			state, err := entity.NewMorphoAdapterState(adapterID, blockNumber, blockVersion, blockTimestamp, realAssets)
-			if err != nil {
-				return fmt.Errorf("creating adapter state entity: %w", err)
-			}
-			return s.morphoRepo.SaveAdapterState(ctx, tx, state)
-		}); err != nil {
 			return err
+		}
+		state, err := entity.NewMorphoAdapterState(adapterID, blockNumber, blockVersion, blockTimestamp, a.realAssets)
+		if err != nil {
+			return fmt.Errorf("creating adapter state entity for %s: %w", a.address.Hex(), err)
+		}
+		if err := s.morphoRepo.SaveAdapterState(ctx, tx, state); err != nil {
+			return fmt.Errorf("seeding adapter state for %s: %w", a.address.Hex(), err)
 		}
 	}
 	return nil
