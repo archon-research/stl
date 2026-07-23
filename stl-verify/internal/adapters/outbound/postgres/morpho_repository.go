@@ -333,15 +333,51 @@ func (r *MorphoRepository) SaveVaultPosition(ctx context.Context, tx pgx.Tx, pos
 	return nil
 }
 
-// GetOrCreateAdapter retrieves or creates a VaultV2 liquidity adapter registry row.
+// GetOrCreateAdapter retrieves or creates a VaultV2 liquidity adapter registry
+// row, keyed on the ACTIVE incarnation of (morpho_vault_id, address).
+//
+// If an active row (removed_at_block IS NULL) already exists it is reused, and
+// its added_at_block converges downward to LEAST(existing, candidate). This lets
+// the backfiller replay the TRUE AddAdapter@X for an adapter the live stream
+// lazily registered at first-seen block Y>X collapse onto one active row keyed at
+// X, instead of leaving two active rows. A genuine re-add (a distinct row) only
+// happens after a removal closes the prior incarnation, since the UNIQUE key
+// includes added_at_block.
 func (r *MorphoRepository) GetOrCreateAdapter(ctx context.Context, tx pgx.Tx, adapter *entity.MorphoAdapter) (int64, error) {
 	if err := adapter.Validate(); err != nil {
 		return 0, fmt.Errorf("validating morpho adapter: %w", err)
 	}
 
+	// Serialize the "does an active row already exist?" read-then-write on the
+	// block-free natural key (vault, address): ON CONFLICT alone cannot guard a
+	// decision made before the insert (ADR-0002 §3). Without it two concurrent
+	// live-vs-backfill writers could both observe no active row and insert two
+	// active rows at different added_at_block. The key is deliberately block-free
+	// so every writer of this adapter serializes on the same lock regardless of
+	// the block it carries.
+	lockKey := fmt.Sprintf("morpho_adapter|%d|%x", adapter.MorphoVaultID, adapter.Address)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, lockKey); err != nil {
+		return 0, fmt.Errorf("locking %q: %w", lockKey, err)
+	}
+
 	var id int64
-	// The no-op SET is required so that DO UPDATE ... RETURNING id works on conflict.
 	err := tx.QueryRow(ctx,
+		`UPDATE morpho_adapter
+		 SET added_at_block = LEAST(added_at_block, $3)
+		 WHERE morpho_vault_id = $1 AND address = $2 AND removed_at_block IS NULL
+		 RETURNING id`,
+		adapter.MorphoVaultID, adapter.Address, adapter.AddedAtBlock,
+	).Scan(&id)
+	if err == nil {
+		return id, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return 0, fmt.Errorf("converging active morpho adapter: %w", err)
+	}
+
+	// No active incarnation: insert a new row. The ON CONFLICT no-op SET keeps a
+	// same-block replay (backfill re-run of the same AddAdapter) idempotent.
+	err = tx.QueryRow(ctx,
 		`INSERT INTO morpho_adapter (morpho_vault_id, address, asset_token_id, adapter_type, added_at_block, removed_at_block)
 		 VALUES ($1, $2, $3, $4, $5, $6)
 		 ON CONFLICT (morpho_vault_id, address, added_at_block) DO UPDATE SET id = morpho_adapter.id
@@ -349,7 +385,6 @@ func (r *MorphoRepository) GetOrCreateAdapter(ctx context.Context, tx pgx.Tx, ad
 		adapter.MorphoVaultID, adapter.Address, adapter.AssetTokenID, int16(adapter.AdapterType),
 		adapter.AddedAtBlock, adapter.RemovedAtBlock,
 	).Scan(&id)
-
 	if err != nil {
 		return 0, fmt.Errorf("upserting morpho adapter: %w", err)
 	}

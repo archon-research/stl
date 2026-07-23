@@ -663,6 +663,93 @@ func (s *blockchainService) getAdapterRealAssets(ctx context.Context, adapter co
 	return bigIntFromAny(unpacked[0]), nil
 }
 
+// enumerateVaultAdapters reads a VaultV2's registered adapter set via
+// adaptersLength() then adapters(i). Number-pinned intentionally: the adapter set
+// membership is registry/identity data (same rationale as getMarketParams /
+// getAdapterType, VEC-471), not versioned state — the per-adapter realAssets()
+// snapshot the caller seeds is separately hash-pinned. Used by discovery-time
+// enumeration to seed the registry for a V2 vault found mid-life, whose historical
+// AddAdapter events never replay on the live stream.
+func (s *blockchainService) enumerateVaultAdapters(ctx context.Context, vaultAddress common.Address, blockNumber int64) (retAdapters []common.Address, retErr error) {
+	ctx, span := s.telemetry.StartSpan(ctx, "morpho.rpc.enumerateVaultAdapters",
+		attribute.String("vault.address", vaultAddress.Hex()))
+	defer span.End()
+	start := time.Now()
+	defer func() {
+		s.telemetry.RecordRPCCall(ctx, "enumerateVaultAdapters", time.Since(start), retErr)
+		if retErr != nil {
+			telemetry.SetSpanError(span, retErr, "enumerateVaultAdapters failed")
+		}
+	}()
+
+	block := big.NewInt(blockNumber)
+
+	lengthData, err := s.vaultV2ABI.Pack("adaptersLength")
+	if err != nil {
+		return nil, fmt.Errorf("packing adaptersLength call: %w", err)
+	}
+	lengthResults, err := s.multicallClient.Execute(ctx, []outbound.Call{
+		{Target: vaultAddress, AllowFailure: false, CallData: lengthData},
+	}, block)
+	if err != nil {
+		return nil, fmt.Errorf("multicall adaptersLength(): %w", err)
+	}
+	if len(lengthResults) == 0 || !lengthResults[0].Success || len(lengthResults[0].ReturnData) == 0 {
+		return nil, fmt.Errorf("adaptersLength() call failed for vault %s", vaultAddress.Hex())
+	}
+	lengthUnpacked, err := s.vaultV2ABI.Unpack("adaptersLength", lengthResults[0].ReturnData)
+	if err != nil {
+		return nil, fmt.Errorf("unpacking adaptersLength() for vault %s: %w", vaultAddress.Hex(), err)
+	}
+	if len(lengthUnpacked) == 0 {
+		return nil, fmt.Errorf("adaptersLength() returned no values for vault %s", vaultAddress.Hex())
+	}
+	length := bigIntFromAny(lengthUnpacked[0])
+	if !length.IsInt64() || length.Sign() < 0 {
+		return nil, fmt.Errorf("adaptersLength() returned implausible length %s for vault %s", length.String(), vaultAddress.Hex())
+	}
+	n := int(length.Int64())
+	if n == 0 {
+		return nil, nil
+	}
+
+	calls := make([]outbound.Call, n)
+	for i := range n {
+		callData, err := s.vaultV2ABI.Pack("adapters", big.NewInt(int64(i)))
+		if err != nil {
+			return nil, fmt.Errorf("packing adapters(%d) call: %w", i, err)
+		}
+		calls[i] = outbound.Call{Target: vaultAddress, AllowFailure: false, CallData: callData}
+	}
+	results, err := s.multicallClient.Execute(ctx, calls, block)
+	if err != nil {
+		return nil, fmt.Errorf("multicall adapters(i): %w", err)
+	}
+	if len(results) != n {
+		return nil, fmt.Errorf("adapters(i) returned %d results, want %d for vault %s", len(results), n, vaultAddress.Hex())
+	}
+
+	adapters := make([]common.Address, n)
+	for i, r := range results {
+		if !r.Success || len(r.ReturnData) == 0 {
+			return nil, fmt.Errorf("adapters(%d) call failed for vault %s", i, vaultAddress.Hex())
+		}
+		unpacked, err := s.vaultV2ABI.Unpack("adapters", r.ReturnData)
+		if err != nil {
+			return nil, fmt.Errorf("unpacking adapters(%d) for vault %s: %w", i, vaultAddress.Hex(), err)
+		}
+		if len(unpacked) == 0 {
+			return nil, fmt.Errorf("adapters(%d) returned no values for vault %s", i, vaultAddress.Hex())
+		}
+		addr, ok := unpacked[0].(common.Address)
+		if !ok {
+			return nil, fmt.Errorf("adapters(%d) returned unexpected type %T for vault %s", i, unpacked[0], vaultAddress.Hex())
+		}
+		adapters[i] = addr
+	}
+	return adapters, nil
+}
+
 // getVaultCaps reads the two current allocation limits for a cap id off the
 // VaultV2, pinned to blockHash. absoluteCap/relativeCap are per-block state (a
 // cap event mutates them), so like getAdapterRealAssets this is a hash-pinned
