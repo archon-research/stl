@@ -8,6 +8,10 @@
 /blockwatcher
 dist/mock-blockchain-server
 
+# gen-transformed scratch output (regenerate to a scratch file, never over the committed migration)
+/gen.sql
+/gen.err
+
 # Test artifacts
 *.test
 *.out
