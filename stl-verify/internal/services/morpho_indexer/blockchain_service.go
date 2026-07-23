@@ -664,13 +664,14 @@ func (s *blockchainService) getAdapterRealAssets(ctx context.Context, adapter co
 }
 
 // enumerateVaultAdapters reads a VaultV2's registered adapter set via
-// adaptersLength() then adapters(i). Number-pinned intentionally: the adapter set
-// membership is registry/identity data (same rationale as getMarketParams /
-// getAdapterType, VEC-471), not versioned state — the per-adapter realAssets()
-// snapshot the caller seeds is separately hash-pinned. Used by discovery-time
-// enumeration to seed the registry for a V2 vault found mid-life, whose historical
-// AddAdapter events never replay on the live stream.
-func (s *blockchainService) enumerateVaultAdapters(ctx context.Context, vaultAddress common.Address, blockNumber int64) (retAdapters []common.Address, retErr error) {
+// adaptersLength() then adapters(i), pinned to blockHash. The adapter SET is
+// versioned per-block state — AddAdapter/RemoveAdapter mutate it — NOT immutable
+// identity, so it is hash-pinned (ExecuteAtHash) for reorg-correctness (VEC-471),
+// matching the per-adapter realAssets() seeds the caller reads at the same hash;
+// a number-pinned read could straddle a reorg relative to those seeds. Used by
+// discovery-time enumeration to seed the registry for a V2 vault found mid-life,
+// whose historical AddAdapter events never replay on the live stream.
+func (s *blockchainService) enumerateVaultAdapters(ctx context.Context, vaultAddress common.Address, blockHash common.Hash) (retAdapters []common.Address, retErr error) {
 	ctx, span := s.telemetry.StartSpan(ctx, "morpho.rpc.enumerateVaultAdapters",
 		attribute.String("vault.address", vaultAddress.Hex()))
 	defer span.End()
@@ -682,15 +683,13 @@ func (s *blockchainService) enumerateVaultAdapters(ctx context.Context, vaultAdd
 		}
 	}()
 
-	block := big.NewInt(blockNumber)
-
 	lengthData, err := s.vaultV2ABI.Pack("adaptersLength")
 	if err != nil {
 		return nil, fmt.Errorf("packing adaptersLength call: %w", err)
 	}
-	lengthResults, err := s.multicallClient.Execute(ctx, []outbound.Call{
+	lengthResults, err := s.multicallClient.ExecuteAtHash(ctx, []outbound.Call{
 		{Target: vaultAddress, AllowFailure: false, CallData: lengthData},
-	}, block)
+	}, blockHash)
 	if err != nil {
 		return nil, fmt.Errorf("multicall adaptersLength(): %w", err)
 	}
@@ -721,7 +720,7 @@ func (s *blockchainService) enumerateVaultAdapters(ctx context.Context, vaultAdd
 		}
 		calls[i] = outbound.Call{Target: vaultAddress, AllowFailure: false, CallData: callData}
 	}
-	results, err := s.multicallClient.Execute(ctx, calls, block)
+	results, err := s.multicallClient.ExecuteAtHash(ctx, calls, blockHash)
 	if err != nil {
 		return nil, fmt.Errorf("multicall adapters(i): %w", err)
 	}

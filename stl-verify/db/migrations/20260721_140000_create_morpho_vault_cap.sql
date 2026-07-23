@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS morpho_vault_cap
     morpho_vault_id    BIGINT       NOT NULL REFERENCES morpho_vault (id),
     cap_id             BYTEA        NOT NULL,
     id_data            BYTEA        NOT NULL,
-    absolute_cap       NUMERIC(78, 0) NOT NULL,
+    absolute_cap       NUMERIC(39, 0) NOT NULL,
     relative_cap       NUMERIC(39, 0) NOT NULL,
     block_number       BIGINT       NOT NULL,
     block_version      INT          NOT NULL DEFAULT 0,

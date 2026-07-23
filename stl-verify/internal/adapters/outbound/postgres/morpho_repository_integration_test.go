@@ -1644,6 +1644,80 @@ func TestGetOrCreateAdapter_ActiveRowConverges(t *testing.T) {
 	}
 }
 
+// TestGetOrCreateAdapter_BackfilledAddBeforeRemovalConvergesOntoClosedRow guards
+// against resurrecting a de-registered adapter. The live stream can lazily
+// register an adapter at block X and remove it at the same block (row: added X,
+// removed X). When the backfiller later replays the TRUE AddAdapter@W with W < X,
+// there is no active row — but the candidate belongs to the ALREADY-CLOSED
+// incarnation whose window covers it, so GetOrCreateAdapter must converge onto
+// that row (UPDATE added_at_block down to W, same id, removed_at_block still X),
+// NOT insert a second, spuriously-active incarnation that would feed
+// GetActiveAdaptersByVault / realAssets a de-registered adapter forever.
+func TestGetOrCreateAdapter_BackfilledAddBeforeRemovalConvergesOntoClosedRow(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x2a))
+	addr := adapterAddr(0x2b)
+
+	const (
+		liveBlock     = int64(24600000) // lazy register + removal both land here
+		backfillBlock = int64(24481834) // the true AddAdapter, strictly earlier
+	)
+
+	// Live: lazily register at liveBlock, then remove at the same block.
+	id1 := fixture.createTestAdapter(t, ctx, vaultID, addr, liveBlock)
+	tx, err := fixture.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := fixture.repo.MarkAdapterRemoved(ctx, tx, vaultID, addr, liveBlock); err != nil {
+		t.Fatalf("MarkAdapterRemoved: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	// Backfill replays the true AddAdapter earlier than the removal: it must
+	// converge onto the closed incarnation, not create a new active row.
+	id2 := fixture.createTestAdapter(t, ctx, vaultID, addr, backfillBlock)
+
+	if id1 != id2 {
+		t.Errorf("backfilled add before the removal must converge onto the closed incarnation: id1=%d id2=%d", id1, id2)
+	}
+
+	var count int
+	if err := fixture.pool.QueryRow(ctx,
+		`SELECT count(*) FROM morpho_adapter WHERE morpho_vault_id = $1 AND address = $2`,
+		vaultID, addr).Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("want exactly 1 row (no resurrected active incarnation), got %d", count)
+	}
+
+	var added int64
+	var removed *int64
+	if err := fixture.pool.QueryRow(ctx,
+		`SELECT added_at_block, removed_at_block FROM morpho_adapter WHERE morpho_vault_id = $1 AND address = $2`,
+		vaultID, addr).Scan(&added, &removed); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if added != backfillBlock {
+		t.Errorf("added_at_block = %d, want %d (converged down to the true AddAdapter)", added, backfillBlock)
+	}
+	if removed == nil || *removed != liveBlock {
+		t.Errorf("removed_at_block = %v, want %d (incarnation stays closed)", removed, liveBlock)
+	}
+
+	got, err := fixture.getActiveAdapter(t, ctx, vaultID, addr)
+	if err != nil {
+		t.Fatalf("GetActiveAdapter: %v", err)
+	}
+	if got != nil {
+		t.Errorf("expected NO active adapter (must stay removed), got %+v", got)
+	}
+}
+
 // --- MarkAdapterRemoved Tests ---
 
 func TestMarkAdapterRemoved_SetsBlock(t *testing.T) {
@@ -2172,15 +2246,14 @@ func TestSaveVaultCap_SameBlockDedupesToIdenticalRow(t *testing.T) {
 }
 
 // TestSaveVaultCap_MaxWidthRoundTrip round-trips the numeric column extremes:
-// relative_cap at max uint128 (NUMERIC(39,0)) and absolute_cap at max uint256
-// (NUMERIC(78,0)), guarding against a width/precision regression.
+// both absolute_cap and relative_cap are on-chain uint128 (NUMERIC(39,0)), so
+// max uint128 must survive intact, guarding against a width/precision regression.
 func TestSaveVaultCap_MaxWidthRoundTrip(t *testing.T) {
 	fixture := setupMorphoTest(t)
 	ctx := context.Background()
 	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x25))
 
 	maxU128 := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 128), big.NewInt(1))
-	maxU256 := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewInt(1))
 
 	idData := []byte{0xca, 0xfe}
 	cid := capIDFor(idData)
@@ -2188,7 +2261,7 @@ func TestSaveVaultCap_MaxWidthRoundTrip(t *testing.T) {
 		MorphoVaultID: vaultID,
 		CapID:         cid,
 		IDData:        idData,
-		AbsoluteCap:   maxU256,
+		AbsoluteCap:   maxU128,
 		RelativeCap:   maxU128,
 		BlockNumber:   24500000,
 		BlockVersion:  0,
@@ -2199,11 +2272,82 @@ func TestSaveVaultCap_MaxWidthRoundTrip(t *testing.T) {
 	if !found {
 		t.Fatal("expected cap, got none")
 	}
-	if abs.Cmp(maxU256) != 0 {
-		t.Errorf("absolute_cap max-uint256 round-trip: got %s", abs)
+	if abs.Cmp(maxU128) != 0 {
+		t.Errorf("absolute_cap max-uint128 round-trip: got %s", abs)
 	}
 	if rel.Cmp(maxU128) != 0 {
 		t.Errorf("relative_cap max-uint128 round-trip: got %s", rel)
+	}
+}
+
+// TestSaveVaultCap_DifferentBuildNewVersion mirrors the adapter-state correction
+// path: two writes with the SAME natural key but different build_id are distinct
+// reprocessings, so the mvc trigger assigns a new processing_version to the
+// second rather than deduping it. Both rows survive (processing_version 0 and 1)
+// and the ADR-0002 latest-row read returns the second (build-2) row.
+func TestSaveVaultCap_DifferentBuildNewVersion(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x26))
+
+	repoBuild1, err := NewMorphoRepository(morphoPool, nil, 1)
+	if err != nil {
+		t.Fatalf("NewMorphoRepository build 1: %v", err)
+	}
+	repoBuild2, err := NewMorphoRepository(morphoPool, nil, 2)
+	if err != nil {
+		t.Fatalf("NewMorphoRepository build 2: %v", err)
+	}
+
+	idData := []byte{0x0a, 0x0b, 0x0c}
+	cid := capIDFor(idData)
+	save := func(repo *MorphoRepository, absolute *big.Int) {
+		c := &entity.MorphoVaultCap{
+			MorphoVaultID: vaultID,
+			CapID:         cid,
+			IDData:        idData,
+			AbsoluteCap:   absolute,
+			RelativeCap:   big.NewInt(1000000000000000000),
+			BlockNumber:   24500300,
+			BlockVersion:  0,
+			Timestamp:     morphoBlockTime,
+		}
+		tx, err := fixture.pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		if err := repo.SaveVaultCap(ctx, tx, c); err != nil {
+			t.Fatalf("SaveVaultCap failed: %v", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+	}
+
+	// Different build_id → reprocessing → a new processing_version, so both rows
+	// survive.
+	save(repoBuild1, big.NewInt(1000))
+	save(repoBuild2, big.NewInt(2000))
+
+	var count, maxVer int
+	if err := fixture.pool.QueryRow(ctx,
+		`SELECT COUNT(*), MAX(processing_version) FROM morpho_vault_cap WHERE morpho_vault_id = $1 AND cap_id = $2`,
+		vaultID, cid).Scan(&count, &maxVer); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("expected 2 rows for distinct builds, got %d", count)
+	}
+	if maxVer != 1 {
+		t.Errorf("expected max processing_version 1, got %d", maxVer)
+	}
+
+	abs, _, found := fixture.latestCap(t, ctx, vaultID, cid)
+	if !found {
+		t.Fatal("expected cap, got none")
+	}
+	if abs.Cmp(big.NewInt(2000)) != 0 {
+		t.Errorf("latest-read absolute_cap = %s, want 2000 (the build-2 correction row)", abs)
 	}
 }
 
