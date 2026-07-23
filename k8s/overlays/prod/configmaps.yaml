@@ -189,6 +189,36 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
+  name: avalanche-allocation-tracker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://avax-mainnet.g.alchemy.com/v2"
+  DEPLOY_ENV: "prod"
+  CHAIN_ID: "43114"
+  ENVIRONMENT: "sentinelprod"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains;
+  # pod identity write policy granted in infrastructure#383.
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: base-allocation-tracker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://base-mainnet.g.alchemy.com/v2"
+  DEPLOY_ENV: "prod"
+  CHAIN_ID: "8453"
+  ENVIRONMENT: "sentinelprod"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains;
+  # pod identity write policy granted in infrastructure#383.
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
   name: prime-debt-indexer
 data:
   CHAIN_ID: "1"
@@ -427,6 +457,21 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
+  name: base-oracle-price-worker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://base-mainnet.g.alchemy.com/v2"
+  CHAIN_ID: "8453"
+  ENVIRONMENT: "sentinelprod"
+  DEPLOY_ENV: "prod"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains;
+  # pod identity write policy granted in infrastructure#383.
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
   name: python-api-config
 data:
   ENVIRONMENT: "sentinelprod"
@@ -470,3 +515,43 @@ data:
   CHAIN_ID: "42161"
   ALCHEMY_HTTP_URL: "https://arb-mainnet.g.alchemy.com/v2"
   SWEEP_BLOCKS: "2400"
+---
+# CEX order book indexer — Coinbase. OKX/Kraken get their own configmaps with the
+# venue-specific EXCHANGE and SYMBOLS (OKX uses dash pairs like BTC-USDT; Kraken
+# uses slash pairs with its own asset names like XBT/USD).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cex-orderbook-indexer-coinbase-config
+data:
+  EXCHANGE: "coinbase"
+  SYMBOLS: "BTC-USD,ETH-USD"
+  ORDERBOOK_DEPTH: "100"
+  ORDERBOOK_INTERVAL: "5s"
+  ENVIRONMENT: "sentinelprod"
+---
+# OKX uses dash-separated instrument ids with a USDT quote (no USD spot pairs);
+# BTC-USDT/ETH-USDT verified live against the OKX SPOT instruments API.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cex-orderbook-indexer-okx-config
+data:
+  EXCHANGE: "okx"
+  SYMBOLS: "BTC-USDT,ETH-USDT"
+  ORDERBOOK_DEPTH: "100"
+  ORDERBOOK_INTERVAL: "5s"
+  ENVIRONMENT: "sentinelprod"
+---
+# Kraken uses slash-separated pairs with its own asset names (XBT, not BTC);
+# XBT/USD and ETH/USD verified live against the Kraken AssetPairs "wsname" field.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cex-orderbook-indexer-kraken-config
+data:
+  EXCHANGE: "kraken"
+  SYMBOLS: "XBT/USD,ETH/USD"
+  ORDERBOOK_DEPTH: "100"
+  ORDERBOOK_INTERVAL: "5s"
+  ENVIRONMENT: "sentinelprod"

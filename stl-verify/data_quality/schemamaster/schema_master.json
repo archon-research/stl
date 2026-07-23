@@ -9,6 +9,7 @@
     "ref_currency",
     "ref_deal_type",
     "entity_master",
+    "entity_ref_codes",
     "ref_entity_type",
     "ref_industry_group_l2",
     "ref_origination_type",

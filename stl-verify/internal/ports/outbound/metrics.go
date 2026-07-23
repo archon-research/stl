@@ -93,3 +93,15 @@ type BackupMetricsRecorder interface {
 	// RecordBlockProcessed increments the blocks processed counter.
 	RecordBlockProcessed(ctx context.Context, status string)
 }
+
+// Canonical `status` label values for the two BackupMetricsRecorder methods,
+// shared so every emitter and the alerts that key on them (e.g. Vector's
+// blocks_processed_total{status="error"} rules) stay in lockstep instead of each
+// service inlining its own literal. StatusSuccess = the unit of work completed
+// without error (any due snapshots were persisted); StatusError = it failed and
+// will be retried. Services with a richer outcome vocabulary (e.g.
+// raw_data_backup's already_backed_up / rpc_fallback) define those locally.
+const (
+	StatusSuccess = "success"
+	StatusError   = "error"
+)
