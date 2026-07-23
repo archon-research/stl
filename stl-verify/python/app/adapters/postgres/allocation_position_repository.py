@@ -1232,16 +1232,19 @@ _DIRECT_ASSET_HOLDINGS_SQL = text("""
 """).bindparams(bindparam("uv_token_addrs", expanding=True))
 
 
-# Off-chain Anchorage BTC custody, collapsed to one row per (asset_type,
+# Off-chain Anchorage custody, collapsed to one row per (asset_type,
 # custody_type). anchorage_package_snapshot has no COMMENTed unit for these
 # columns, so document the semantics here (verified against the live feed
-# 2026-07-21):
-#   * exposure_value  — the loan drawn against the BTC collateral. Package-level,
-#     so it repeats across a package's per-collateral-asset rows. Surfaced as
-#     the allocation's amount_usd (the VEC-499 / skyeco figure).
-#   * package_value   — = asset_weighted_value, the BTC collateral's market value.
-#     Surfaced as collateral_usd.
-#   * asset_quantity  — collateral in native units (BTC).
+# 2026-07-21 and against toSnapshots in the anchorage_tracker service):
+#   * exposure_value  — the loan drawn against the package's collateral.
+#     PACKAGE-level: it repeats identically on every per-collateral-asset row of
+#     a package. Surfaced as amount_usd (the VEC-499 / skyeco figure).
+#   * package_value   — the package's total collateral market value, also
+#     PACKAGE-level (repeats across the package's asset rows). Surfaced as
+#     collateral_usd.
+#   * asset_weighted_value — PER-ASSET: this collateral asset's market value
+#     within the package (the asset-level split of package_value).
+#   * asset_quantity  — this asset's collateral in native units (e.g. BTC).
 #   * current_ltv     — exposure_value / package_value (stored, not recomputed).
 #
 # Cohort-filter rationale (the $521M trap): the snapshot is append-only and a
@@ -1259,6 +1262,22 @@ _DIRECT_ASSET_HOLDINGS_SQL = text("""
 # (prime_id, package_id, asset_type, custody_type, snapshot_time, processing_version DESC).
 # A prime with no snapshots (or no allocation_position row to resolve prime_id)
 # yields an empty result.
+#
+# Package-level double-count guard: because exposure_value/package_value repeat
+# on every asset row, a naive SUM(...) GROUP BY asset_type would add a multi-
+# asset package's single loan/collateral to EVERY asset-type group it appears in
+# (a BTC+ETH package would contribute its loan to both the BTC and ETH rows).
+# Attribution decision: a package's package-level loan and collateral belong to
+# exactly ONE asset-type group — its DOMINANT collateral (max
+# asset_weighted_value, asset_type as the deterministic tiebreak).
+# package_primary_asset picks that group per (package, custody_type), and the
+# final SUM ... FILTER counts exposure/collateral only on that primary row, so
+# each package contributes once. balance (asset_quantity) stays a per-asset SUM:
+# a non-dominant asset still surfaces its own quantity, with the loan/collateral
+# attributed to the dominant asset. For the single-collateral-asset book
+# shipping today every package is its own dominant asset, so this is exactly the
+# per-package sum ($250M under BTC); it only diverges — correctly, no double-
+# count — once a package carries a second asset type.
 _ANCHORAGE_CUSTODY_HOLDINGS_SQL = text("""
     WITH target_prime AS (
         SELECT prime_id
@@ -1273,11 +1292,13 @@ _ANCHORAGE_CUSTODY_HOLDINGS_SQL = text("""
     ),
     current_cohort AS (
         SELECT DISTINCT ON (aps.package_id, aps.asset_type, aps.custody_type)
+            aps.package_id,
             aps.asset_type,
             aps.custody_type,
             aps.exposure_value,
             aps.package_value,
             aps.asset_quantity,
+            aps.asset_weighted_value,
             aps.snapshot_time
         FROM anchorage_package_snapshot aps
         WHERE aps.prime_id = (SELECT prime_id FROM target_prime)
@@ -1285,17 +1306,29 @@ _ANCHORAGE_CUSTODY_HOLDINGS_SQL = text("""
           AND aps.active
         ORDER BY aps.package_id, aps.asset_type, aps.custody_type,
                  aps.snapshot_time DESC, aps.processing_version DESC
+    ),
+    package_primary_asset AS (
+        SELECT DISTINCT ON (package_id, custody_type)
+            package_id,
+            custody_type,
+            asset_type AS primary_asset_type
+        FROM current_cohort
+        ORDER BY package_id, custody_type, asset_weighted_value DESC, asset_type
     )
     SELECT
-        asset_type          AS symbol,
-        custody_type        AS custody_type,
-        SUM(exposure_value) AS amount_usd,
-        SUM(package_value)  AS collateral_usd,
-        SUM(asset_quantity) AS balance,
-        MAX(snapshot_time)  AS as_of
-    FROM current_cohort
-    GROUP BY asset_type, custody_type
-    ORDER BY amount_usd DESC
+        c.asset_type   AS symbol,
+        c.custody_type AS custody_type,
+        COALESCE(SUM(c.exposure_value) FILTER (WHERE ppa.primary_asset_type IS NOT NULL), 0) AS amount_usd,
+        COALESCE(SUM(c.package_value)  FILTER (WHERE ppa.primary_asset_type IS NOT NULL), 0) AS collateral_usd,
+        SUM(c.asset_quantity) AS balance,
+        MAX(c.snapshot_time)  AS as_of
+    FROM current_cohort c
+    LEFT JOIN package_primary_asset ppa
+        ON ppa.package_id = c.package_id
+       AND ppa.custody_type = c.custody_type
+       AND ppa.primary_asset_type = c.asset_type
+    GROUP BY c.asset_type, c.custody_type
+    ORDER BY amount_usd DESC, symbol ASC
 """)
 
 

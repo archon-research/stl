@@ -179,10 +179,11 @@ class AllocationResponse(BaseModel):
     def _check_underlying_identity_pairing(self) -> "AllocationResponse":
         # The underlying id and address are two halves of one identity: a receipt
         # or direct row carries both, an off-chain custody row carries neither.
-        # The domain entities type them non-optional, so relaxing them to
-        # Optional here (for the custody shape) reintroduces the risk of a
-        # contradictory one-set-one-null row that the plain types used to reject
-        # for free. Guard it, mirroring PrimeRiskCapital's pairing invariant.
+        # This response model previously typed both non-optional, so relaxing them
+        # to Optional here (for the custody shape) reintroduces the risk of a
+        # contradictory one-set-one-null row that the plain int/str fields used to
+        # reject for free. Guard it, mirroring the both-or-neither pairing
+        # validator on RrcResult (RrcResult._check_risk_model_details_pairing).
         if (self.underlying_token_id is None) != (self.underlying_token_address is None):
             raise ValueError(
                 "underlying_token_id and underlying_token_address must be set or null together: "

@@ -24,6 +24,8 @@ from tests.integration.seed import (
     ANCHORAGE_CUSTODY_PROXY_HEX,
     ANCHORAGE_EMPTY_PROXY_HEX,
     ANCHORAGE_LATEST_SNAPSHOT,
+    ANCHORAGE_MULTI_PROXY_HEX,
+    ANCHORAGE_OTHER_PROXY_HEX,
     seed_anchorage_custody,
 )
 
@@ -102,3 +104,53 @@ async def test_returns_empty_for_prime_with_no_custody_snapshots(repo) -> None:
     holdings = await repo.list_anchorage_custody_holdings(EthAddress(f"0x{ANCHORAGE_EMPTY_PROXY_HEX}"))
 
     assert holdings == []
+
+
+@pytest.mark.asyncio
+async def test_multiple_asset_type_groups_ordered_by_amount_desc(repo) -> None:
+    """A cohort spanning two asset-type groups yields two rows ordered by
+    ``amount_usd`` DESC. Balances are per asset type (not affected by the
+    package-level double-count): BTC 13, ETH 7.
+    """
+    holdings = await repo.list_anchorage_custody_holdings(EthAddress(f"0x{ANCHORAGE_MULTI_PROXY_HEX}"))
+
+    assert [h.symbol for h in holdings] == ["BTC", "ETH"]  # DESC by amount_usd (160 > 40)
+    by_symbol = {h.symbol: h for h in holdings}
+    assert by_symbol["BTC"].balance == Decimal("13")
+    assert by_symbol["ETH"].balance == Decimal("7")
+
+
+@pytest.mark.asyncio
+async def test_multi_asset_package_loan_not_double_counted_across_groups(repo) -> None:
+    """PKG-MX's single package-level loan/collateral (30 / 45) is attributed once —
+    to BTC, its dominant collateral — not added to the ETH group as well. So the
+    ETH group shows amount 40 / collateral 50 (its own single-asset package only),
+    and the cross-group totals equal the true per-package sums (amount 200,
+    collateral 245). An unguarded ``GROUP BY`` double-counts PKG-MX into ETH
+    (amount 70 / collateral 95, totals 230 / 290).
+    """
+    holdings = await repo.list_anchorage_custody_holdings(EthAddress(f"0x{ANCHORAGE_MULTI_PROXY_HEX}"))
+    by_symbol = {h.symbol: h for h in holdings}
+
+    assert by_symbol["ETH"].amount_usd == Decimal("40")
+    assert by_symbol["ETH"].collateral_usd == Decimal("50")
+    assert by_symbol["BTC"].amount_usd == Decimal("160")
+    assert sum(h.amount_usd for h in holdings) == Decimal("200")
+    assert sum(h.collateral_usd for h in holdings) == Decimal("245")
+
+
+@pytest.mark.asyncio
+async def test_cohort_is_scoped_per_prime(repo) -> None:
+    """A second prime with its own later-polled cohort must not perturb the main
+    prime, and returns only its own row. Proves the per-prime ``prime_id`` scope
+    on both ``MAX(snapshot_time)`` and the cohort filter is load-bearing: without
+    it the second prime's later poll would starve the main prime.
+    """
+    main = await repo.list_anchorage_custody_holdings(EthAddress(f"0x{ANCHORAGE_CUSTODY_PROXY_HEX}"))
+    other = await repo.list_anchorage_custody_holdings(EthAddress(f"0x{ANCHORAGE_OTHER_PROXY_HEX}"))
+
+    assert len(main) == 1
+    assert main[0].amount_usd == Decimal("250000000")  # unchanged by the other prime
+    assert len(other) == 1
+    assert other[0].amount_usd == Decimal("99")
+    assert other[0].balance == Decimal("9")
