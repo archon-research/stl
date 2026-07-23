@@ -799,9 +799,10 @@ ALLOCATIONS = {
                     "token_address": "0x58F93d6b1EF2F44eC379Cb975657C132CBeD3B6b",
                     "held_address_ref": "grove.avalanche.alm",
                     "priced_via": "canonical1",
-                    "canonical1": {"type": "chronicle", "address": "0x02cf8C9fBa24d79886dAc40cb620f0930C6E8eC0"},
+                    "canonical1": {"type": "chainlink NAVLink (Ethereum mainnet, cross-chain)", "address": "0x3BbccB2301759D2e4A5692bA72DAb4b75dC43B1a", "network": "ethereum", "feed_decimals": 6, "quote": "USD"},
                     "canonical2": {"type": "centrifuge API"},
                     "alternative": "erc4626 totalAssets from vault contract (not token contract)",
+                    "notes": "CROSS-CHAIN NAV ATTACH — DEVIATES from the same-chain oracle rule in 'Reasoning for Oracle Selection'; FLAGGED FOR MAINTAINER REVIEW (VEC-499, migration 20260721_130000). No JAAA oracle exists on Avalanche: Chronicle's VAO registry lists JAAA only on Ethereum/Base/Monad and the deterministic Chronicle adapter has no code on avax (cast eth_getCode = 0x); Chainlink's avalanche-mainnet registry (92 feeds) has no JAAA. The previously-listed chronicle address 0x02cf8C9fBa24d79886dAc40cb620f0930C6E8eC0 is the MAINNET aggregator only and has NO code on Avalanche. JAAA NAV is fund-level and chain-independent, so avax JAAA is priced from the mainnet Chainlink NAVLink 'JAAA NAV' feed (the same feed as mainnet JAAA) via one oracle_asset row under the existing mainnet 'chainlink' oracle — no new oracle, protocol binding, or worker.",
                     "coingecko_id": "janus-henderson-anemoy-aaa-clo-fund"
                 }
             ],

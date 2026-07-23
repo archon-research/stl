@@ -90,4 +90,15 @@ class DataProvenanceService:
                 role="Risk capital requirements and monitor metrics by star (reference/parity)",
                 caveat="Kept for parity checks; no longer the source of the dashboard's risk-capital figures.",
             ),
+            # Off-chain custody
+            DataSource(
+                name="Anchorage Custody API",
+                host="closed backend (Anchorage Digital)",
+                access_model=SourceAccessModel.CLOSED,
+                role="Off-chain BTC custody package snapshots (collateral, loan exposure, LTV)",
+                caveat=(
+                    "Polled every 15 minutes; surfaced with the snapshot's own timestamp so a "
+                    "frozen upstream feed reads as honestly stale rather than current."
+                ),
+            ),
         ]
