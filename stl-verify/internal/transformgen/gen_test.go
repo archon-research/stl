@@ -2,6 +2,7 @@ package transformgen
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/archon-research/stl/stl-verify/data_quality/schemamaster"
@@ -117,5 +118,28 @@ func TestCheckBucket1Fills_Rejects(t *testing.T) {
 				t.Errorf("checkBucket1Fills(%+v) err = %v, wantErr %v", tc.fill, err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// TestPlan_ObservationColumnMustBeInPK asserts plan rejects a schema whose
+// observation column is present but absent from the raw primary key. Emission
+// reads the observation column back out of rawPK, so its absence is schema drift
+// that must fail hard, not produce invalid queue DDL. Uses a real bucket-1 table
+// (morpho_market_state) with its observation column (timestamp) dropped from the PK.
+func TestPlan_ObservationColumnMustBeInPK(t *testing.T) {
+	reg, err := schemamaster.Load()
+	if err != nil {
+		t.Fatalf("load register: %v", err)
+	}
+	s := rawSchema("morpho_market_state",
+		[]string{"morpho_market_id", "block_number", "block_version", "timestamp", "last_update", "processing_version", "build_id"},
+		[]string{"morpho_market_id", "block_number", "block_version", "processing_version"})
+
+	_, err = plan(reg, s)
+	if err == nil {
+		t.Fatal("plan: want error for observation column absent from raw PK, got nil")
+	}
+	if !strings.Contains(err.Error(), "not part of the raw primary key") {
+		t.Errorf("plan err = %v, want 'not part of the raw primary key'", err)
 	}
 }
