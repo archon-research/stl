@@ -1,6 +1,7 @@
 package morpho_indexer
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"time"
@@ -33,14 +34,19 @@ func (s *Service) resolveV2Vault(vaultAddress common.Address) (*entity.MorphoVau
 // handleAddAdapter classifies the new adapter on-chain and records it in the
 // adapter registry. An unclassifiable adapter is persisted as Unknown behind a
 // WARN, mirroring the VaultShaped discovery sentinel so a future adapter kind
-// surfaces instead of being dropped.
+// surfaces instead of being dropped. The on-chain classification runs before the
+// transaction opens so the chain round-trip never holds a pooled DB connection.
 func (s *Service) handleAddAdapter(ctx context.Context, e *AddAdapterEvent, vaultAddress common.Address, blockNumber int64) error {
 	vault, err := s.resolveV2Vault(vaultAddress)
 	if err != nil {
 		return err
 	}
+	adapterType, err := s.classifyAdapter(ctx, e.Account, blockNumber)
+	if err != nil {
+		return err
+	}
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		_, err := s.probeAndUpsertAdapter(ctx, tx, vault, vaultAddress, e.Account, blockNumber)
+		_, err := s.upsertAdapterRow(ctx, tx, vault, vaultAddress, e.Account, adapterType, blockNumber)
 		return err
 	})
 }
@@ -56,8 +62,12 @@ func (s *Service) handleRemoveAdapter(ctx context.Context, e *RemoveAdapterEvent
 	if err != nil {
 		return err
 	}
+	probedType, err := s.classifyAdapterIfUnregistered(ctx, vault, e.Account, blockNumber)
+	if err != nil {
+		return err
+	}
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		if _, err := s.ensureAdapterRegistered(ctx, tx, vault, vaultAddress, e.Account, blockNumber); err != nil {
+		if _, err := s.ensureAdapterRegistered(ctx, tx, vault, vaultAddress, e.Account, blockNumber, probedType); err != nil {
 			return err
 		}
 		return s.morphoRepo.MarkAdapterRemoved(ctx, tx, vault.ID, e.Account.Bytes(), blockNumber)
@@ -82,8 +92,13 @@ func (s *Service) handleAllocation(ctx context.Context, adapter, vaultAddress co
 		return fmt.Errorf("fetching realAssets for adapter %s: %w", adapter.Hex(), err)
 	}
 
+	probedType, err := s.classifyAdapterIfUnregistered(ctx, vault, adapter, blockNumber)
+	if err != nil {
+		return err
+	}
+
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		adapterID, err := s.ensureAdapterRegistered(ctx, tx, vault, vaultAddress, adapter, blockNumber)
+		adapterID, err := s.ensureAdapterRegistered(ctx, tx, vault, vaultAddress, adapter, blockNumber, probedType)
 		if err != nil {
 			return err
 		}
@@ -96,10 +111,19 @@ func (s *Service) handleAllocation(ctx context.Context, adapter, vaultAddress co
 }
 
 // ensureAdapterRegistered returns the registry id of the active adapter for
-// (vault, adapter), lazily registering it at firstSeenBlock if we never witnessed
-// its AddAdapter. Used by the Allocate/Deallocate and RemoveAdapter paths, which
-// can legitimately reach an adapter that predates the vault's mid-life discovery.
-func (s *Service) ensureAdapterRegistered(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault, vaultAddress, adapter common.Address, firstSeenBlock int64) (int64, error) {
+// (vault, adapter). The GetActiveAdapter read here is the decisive read-your-writes
+// lookup under the GetOrCreateAdapter advisory lock; on a miss it lazily registers
+// the adapter at firstSeenBlock using probedType — the classification already
+// resolved before the transaction opened (see classifyAdapterIfUnregistered). Used
+// by the Allocate/Deallocate and RemoveAdapter paths, which can legitimately reach
+// an adapter that predates the vault's mid-life discovery.
+//
+// A nil probedType means the pre-transaction check found the adapter already
+// registered. If the decisive read then disagrees (the adapter is absent), we have
+// no type to record and no live single-consumer path that could have removed it, so
+// we fail hard rather than record a defaulted type; SQS redelivers and the pre-tx
+// check re-probes.
+func (s *Service) ensureAdapterRegistered(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault, vaultAddress, adapter common.Address, firstSeenBlock int64, probedType *entity.MorphoAdapterType) (int64, error) {
 	active, err := s.morphoRepo.GetActiveAdapter(ctx, tx, vault.ID, adapter.Bytes())
 	if err != nil {
 		return 0, fmt.Errorf("looking up active adapter %s: %w", adapter.Hex(), err)
@@ -107,33 +131,58 @@ func (s *Service) ensureAdapterRegistered(ctx context.Context, tx pgx.Tx, vault 
 	if active != nil {
 		return active.ID, nil
 	}
+	if probedType == nil {
+		return 0, fmt.Errorf("adapter %s absent at transaction time but no type was probed before the transaction", adapter.Hex())
+	}
 	s.logger.Warn("adapter registered lazily; AddAdapter predates vault discovery",
 		"vault", vaultAddress.Hex(), "adapter", adapter.Hex(), "block", firstSeenBlock)
-	return s.probeAndUpsertAdapter(ctx, tx, vault, vaultAddress, adapter, firstSeenBlock)
+	return s.upsertAdapterRow(ctx, tx, vault, vaultAddress, adapter, *probedType, firstSeenBlock)
 }
 
-// probeAndUpsertAdapter classifies an adapter on-chain and upserts its registry
-// row at firstSeenBlock. Shared by the live AddAdapter handler and the lazy
-// self-heal on Allocate/RemoveAdapter, which classify inside their transaction.
-// (Discovery-time enumeration classifies up-front, before its atomic persist tx,
-// and calls upsertAdapterRow directly with the already-read type.)
-//
-// A probe TRANSPORT error propagates (transient ⇒ SQS retries); only a clean
-// both-revert probe records type Unknown.
-func (s *Service) probeAndUpsertAdapter(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault, vaultAddress, adapter common.Address, firstSeenBlock int64) (int64, error) {
-	adapterType, err := s.blockchainSvc.getAdapterType(ctx, adapter, firstSeenBlock)
+// classifyAdapter probes an adapter's on-chain type. A probe TRANSPORT error
+// propagates (transient ⇒ SQS retries); a clean both-revert probe yields
+// MorphoAdapterTypeUnknown (upsertAdapterRow WARNs and records it). The probe is a
+// chain round-trip, so every caller runs it BEFORE opening its write transaction —
+// a pooled DB connection must never sit idle across it.
+func (s *Service) classifyAdapter(ctx context.Context, adapter common.Address, atBlock int64) (entity.MorphoAdapterType, error) {
+	adapterType, err := s.blockchainSvc.getAdapterType(ctx, adapter, atBlock)
 	if err != nil {
-		return 0, fmt.Errorf("classifying adapter %s: %w", adapter.Hex(), err)
+		return entity.MorphoAdapterTypeUnknown, fmt.Errorf("classifying adapter %s: %w", adapter.Hex(), err)
 	}
-	return s.upsertAdapterRow(ctx, tx, vault, vaultAddress, adapter, adapterType, firstSeenBlock)
+	return adapterType, nil
+}
+
+// classifyAdapterIfUnregistered resolves the type the lazy self-heal would need,
+// probing on-chain only when the adapter is not already registered — so the probe
+// (and its idle-connection hazard) is skipped entirely on the hot path where the
+// adapter is known. It returns nil when the adapter is already active: the in-tx
+// GetActiveAdapter will find it and no type is needed. Membership is read from
+// committed state via the pool (GetActiveAdaptersByVault); the decisive
+// read-then-write stays inside the transaction under the advisory lock.
+func (s *Service) classifyAdapterIfUnregistered(ctx context.Context, vault *entity.MorphoVault, adapter common.Address, firstSeenBlock int64) (*entity.MorphoAdapterType, error) {
+	active, err := s.morphoRepo.GetActiveAdaptersByVault(ctx, vault.ID)
+	if err != nil {
+		return nil, fmt.Errorf("looking up active adapters for vault %d: %w", vault.ID, err)
+	}
+	for _, a := range active {
+		if bytes.Equal(a.Address, adapter.Bytes()) {
+			return nil, nil
+		}
+	}
+	adapterType, err := s.classifyAdapter(ctx, adapter, firstSeenBlock)
+	if err != nil {
+		return nil, err
+	}
+	return &adapterType, nil
 }
 
 // upsertAdapterRow records an already-classified adapter in the registry within
 // tx, WARNing on an Unknown type (mirroring the VaultShaped discovery sentinel so
 // a future adapter kind surfaces instead of being dropped). The upsert is
 // incarnation-aware (GetOrCreateAdapter), so a later replay of the true AddAdapter
-// converges the row rather than duplicating it. Shared by probeAndUpsertAdapter
-// (type probed inside the tx) and the discovery seed (type probed up-front).
+// converges the row rather than duplicating it. Every caller — the AddAdapter
+// handler, the Allocate/RemoveAdapter lazy self-heal, and the discovery seed —
+// resolves the type before opening the transaction and passes it in here.
 func (s *Service) upsertAdapterRow(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault, vaultAddress, adapter common.Address, adapterType entity.MorphoAdapterType, firstSeenBlock int64) (int64, error) {
 	if adapterType == entity.MorphoAdapterTypeUnknown {
 		s.logger.Warn("VaultV2 adapter of unknown type — recorded as Unknown for later curation",
