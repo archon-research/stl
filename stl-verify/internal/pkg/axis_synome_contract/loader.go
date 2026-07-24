@@ -26,10 +26,6 @@ type AxisSynomeModel struct {
 }
 
 type SpecModel struct {
-	ASC ASCModel `json:"asc"`
-}
-
-type ASCModel struct {
 	Entities EntitiesModel `json:"entities"`
 }
 
@@ -76,12 +72,12 @@ type TokenEntry struct {
 // chain. Each (star, chain) maps to a list of proxies (canonical ALM proxy plus
 // any additional SubProxy/treasury wallets).
 func (c *Contract) GetAlmProxies() map[string]map[string][]ProxyConfig {
-	return c.AxisSynome.Spec.ASC.Entities.AlmProxies.AlmProxy
+	return c.AxisSynome.Spec.Entities.AlmProxies.AlmProxy
 }
 
 // GetAssetsByPrime returns the token entries keyed by star.
 func (c *Contract) GetAssetsByPrime() map[string][]TokenEntry {
-	return c.AxisSynome.Spec.ASC.Entities.AssetsByPrime.ASSETSByPrime
+	return c.AxisSynome.Spec.Entities.AssetsByPrime.ASSETSByPrime
 }
 
 func LoadDefaultContract() (*Contract, error) {
@@ -112,6 +108,17 @@ func LoadContract(path string) (*Contract, error) {
 	}
 	if err := validateAddresses(&contract); err != nil {
 		return nil, fmt.Errorf("decoding axis-synome contract file %q: %w", path, err)
+	}
+
+	// Strict decoding rejects unknown/renamed fields, but a shape change that
+	// *drops* the entities node (or a child map) decodes cleanly into empty
+	// maps. Reject that here so a structurally-empty contract fails at load
+	// rather than silently letting a worker index nothing.
+	if len(contract.GetAssetsByPrime()) == 0 {
+		return nil, fmt.Errorf("decoding axis-synome contract file %q: no assets_by_prime entries", path)
+	}
+	if len(contract.GetAlmProxies()) == 0 {
+		return nil, fmt.Errorf("decoding axis-synome contract file %q: no alm_proxies entries", path)
 	}
 
 	return &contract, nil

@@ -47,7 +47,9 @@ func TestBalanceOfSource_Supports(t *testing.T) {
 		{"securitize", "", true},
 		{"superstate", "", true},
 		{"proxy", "", true},
-		{"centrifuge", "centrifuge", true},
+		// centrifuge now points at ERC-7540 vault addresses (axis-synome 0.2.0),
+		// which are not balanceOf-able tokens; ERC7540Source owns them.
+		{"centrifuge", "centrifuge", false},
 		{"erc4626", "", false},
 		{"curve", "", false},
 		{"uni_v3_pool", "", false},
