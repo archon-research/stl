@@ -95,7 +95,7 @@ func (h *PrimePositionHandler) HandleBatch(
 			}
 			continue
 		}
-		addrs = append(addrs, s.Entry.ContractAddress)
+		addrs = append(addrs, metadataAddress(s))
 		if s.Entry.AssetAddress != nil {
 			addrs = append(addrs, *s.Entry.AssetAddress)
 		}
@@ -136,6 +136,18 @@ func (h *PrimePositionHandler) HandleBatch(
 	})
 }
 
+// metadataAddress is the address a position's row metadata (decimals/symbol) is
+// read from. For ERC-7540 centrifuge entries the contract_address is a vault
+// with no decimals/symbol, so ERC7540Source resolves the share token and sets
+// ShareToken (equal to the entry address for a direct share); metadata comes
+// from there. Every other entry reads metadata from its own contract_address.
+func metadataAddress(s *PositionSnapshot) common.Address {
+	if s.ShareToken != nil {
+		return *s.ShareToken
+	}
+	return s.Entry.ContractAddress
+}
+
 func (h *PrimePositionHandler) buildPositions(
 	ctx context.Context,
 	snapshots []*PositionSnapshot,
@@ -151,11 +163,12 @@ func (h *PrimePositionHandler) buildPositions(
 			}
 			meta = m
 		} else {
-			m, ok := h.metadata.get(s.Entry.ContractAddress)
+			metaAddr := metadataAddress(s)
+			m, ok := h.metadata.get(metaAddr)
 			if !ok {
 				return nil, fmt.Errorf(
 					"metadata missing for token %s",
-					s.Entry.ContractAddress.Hex(),
+					metaAddr.Hex(),
 				)
 			}
 			meta = m

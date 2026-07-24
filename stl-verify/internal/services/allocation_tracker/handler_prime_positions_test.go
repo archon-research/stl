@@ -124,6 +124,62 @@ func TestHandleBatch_ERC20(t *testing.T) {
 	}
 }
 
+// TestHandleBatch_Centrifuge_MetadataFromShareToken proves the VEC-337-part-2
+// row-metadata fix: an ERC-7540 centrifuge position takes its decimals/symbol
+// from the resolved share token (surfaced as ShareToken), not from its vault
+// contract_address, which reverts on decimals(). The vault address is left out
+// of the seeded metadata cache, so any attempt to read metadata from it would
+// fail the batch (nil multicaller) — the test passes only if the share token is
+// used. The persisted row still keys on the vault address.
+func TestHandleBatch_Centrifuge_MetadataFromShareToken(t *testing.T) {
+	vault := common.HexToAddress("0x4880799ee5200fc58da299e965df644fbf46780b")
+	share := common.HexToAddress("0x1234000000000000000000000000000000005678")
+	wallet := common.HexToAddress("0x1601843c5e9bc251a3272907010afa41fa18347e")
+
+	repo := &fakeAllocRepo{}
+	handler := newTestHandler(repo, &fakeSupplyRepo{},
+		map[string]int64{"grove": 2},
+		map[common.Address]tokenMeta{
+			// Only the share token is known; the vault is intentionally absent.
+			share: {symbol: "JAAA", decimals: 6},
+		},
+	)
+
+	err := handler.HandleBatch(context.Background(), &SnapshotBatch{
+		Snapshots: []*PositionSnapshot{
+			{
+				Entry: &TokenEntry{
+					ContractAddress: vault,
+					WalletAddress:   wallet,
+					Star:            "grove",
+					Chain:           "mainnet",
+					Protocol:        "centrifuge",
+					TokenType:       "centrifuge",
+				},
+				Balance:     big.NewInt(500),
+				ShareToken:  &share,
+				ChainID:     1,
+				BlockNumber: 100,
+				Direction:   DirectionSweep,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(repo.saved) != 1 {
+		t.Fatalf("expected 1 saved position, got %d", len(repo.saved))
+	}
+	pos := repo.saved[0]
+	if pos.TokenAddress != vault {
+		t.Errorf("token_address = %s, want the vault %s", pos.TokenAddress.Hex(), vault.Hex())
+	}
+	if pos.TokenSymbol != "JAAA" || pos.TokenDecimals != 6 {
+		t.Errorf("metadata = (%q, %d), want (JAAA, 6) from the share token", pos.TokenSymbol, pos.TokenDecimals)
+	}
+}
+
 // TestHandleBatch_CreatedAtBlockFloor verifies that a nil/zero CreatedAtBlock
 // (nil when knownCreatedAtBlocks has no entry for the contract — the axis-synome
 // contract omits created_at_block entirely) is floored to the observation block
