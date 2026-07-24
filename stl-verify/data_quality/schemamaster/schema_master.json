@@ -15,6 +15,7 @@
     "ref_origination_type",
     "position_classification",
     "position_entity_link",
+    "position_state",
     "ref_sector_l1",
     "ref_security_subtype_l3",
     "ref_security_type_l2",
