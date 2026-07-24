@@ -64,3 +64,47 @@ func TestSchemaConformance(t *testing.T) {
 	}
 	t.Logf("schema conformance: %d live columns checked, all conform or registered", len(live))
 }
+
+// TestTransformCoverageConformance is the VEC-496 gate: every governed raw_pipeline
+// table must be built (a transformed._sources row) or explicitly deferred (a
+// transform_defer reason), never neither and never both, and every _sources row must
+// map back to a governed raw_pipeline table. Reads the actual _sources rows from the
+// migrated DB, so a raw_pipeline table added without building or deferring it fails here.
+func TestTransformCoverageConformance(t *testing.T) {
+	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	reg, err := schemamaster.Load()
+	if err != nil {
+		t.Fatalf("load register: %v", err)
+	}
+
+	rows, err := pool.Query(ctx, `SELECT source FROM transformed._sources`)
+	if err != nil {
+		t.Fatalf("query transformed._sources: %v", err)
+	}
+	defer rows.Close()
+	var built []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		built = append(built, s)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows: %v", err)
+	}
+
+	violations := reg.CheckTransformCoverage(built)
+	for _, v := range violations {
+		t.Errorf("%s: %s — %s", v.Table, v.Kind, v.Detail)
+	}
+	if len(violations) > 0 {
+		t.Fatalf("%d transform-coverage violation(s); see the per-violation kind above (missing_transform / stale_defer / orphan_transform_source / defer_on_non_target)", len(violations))
+	}
+	t.Logf("transform coverage: %d built sources vs %d transform targets, all built or deferred", len(built), len(reg.TransformTargets()))
+}

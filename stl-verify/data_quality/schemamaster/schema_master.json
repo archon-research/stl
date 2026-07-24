@@ -1000,15 +1000,18 @@
   "tables": {
     "allocation_position": {
       "type": "raw_pipeline",
-      "owner": "prime"
+      "owner": "prime",
+      "transform_defer": "VEC-491: bucket 2 (block-time dimension via block_states)"
     },
     "anchorage_operation": {
       "type": "raw_pipeline",
-      "owner": "prime"
+      "owner": "prime",
+      "transform_defer": "VEC-494: bucket 3 (no natural PK, keyed via transform_config)"
     },
     "anchorage_package_snapshot": {
       "type": "raw_pipeline",
-      "owner": "prime"
+      "owner": "prime",
+      "transform_defer": "VEC-494: bucket 3 (no natural PK, keyed via transform_config)"
     },
     "backfill_watermark": {
       "type": "infrastructure",
@@ -1024,11 +1027,13 @@
     },
     "borrower": {
       "type": "raw_pipeline",
-      "owner": "lending"
+      "owner": "lending",
+      "transform_defer": "VEC-491: bucket 2 (block-time dimension via block_states)"
     },
     "borrower_collateral": {
       "type": "raw_pipeline",
-      "owner": "lending"
+      "owner": "lending",
+      "transform_defer": "VEC-491: bucket 2 (block-time dimension via block_states)"
     },
     "build_registry": {
       "type": "infrastructure",
@@ -1036,7 +1041,8 @@
     },
     "cex_orderbook_snapshots": {
       "type": "raw_pipeline",
-      "owner": "pricing"
+      "owner": "pricing",
+      "transform_defer": "VEC-494: bucket 3 (no natural PK, keyed via transform_config)"
     },
     "chain": {
       "type": "dimension",
@@ -1145,7 +1151,8 @@
     },
     "prime_debt": {
       "type": "raw_pipeline",
-      "owner": "prime"
+      "owner": "prime",
+      "transform_defer": "VEC-494: bucket 3 (no natural PK, keyed via transform_config)"
     },
     "protocol": {
       "type": "dimension",
@@ -1153,7 +1160,8 @@
     },
     "protocol_event": {
       "type": "raw_pipeline",
-      "owner": "infra"
+      "owner": "infra",
+      "transform_defer": "VEC-491: bucket 2 (block-time dimension via block_states)"
     },
     "protocol_oracle": {
       "type": "config",
@@ -1161,7 +1169,8 @@
     },
     "psm3_reserves": {
       "type": "raw_pipeline",
-      "owner": "prime"
+      "owner": "prime",
+      "transform_defer": "VEC-484: native PK, held back pending staging verification"
     },
     "receipt_token": {
       "type": "config",
@@ -1173,7 +1182,8 @@
     },
     "sparklend_reserve_data": {
       "type": "raw_pipeline",
-      "owner": "lending"
+      "owner": "lending",
+      "transform_defer": "VEC-491: bucket 2 (block-time dimension via block_states)"
     },
     "token": {
       "type": "dimension",

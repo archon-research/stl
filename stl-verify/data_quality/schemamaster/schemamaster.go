@@ -30,9 +30,16 @@ type Canonical struct {
 }
 
 // TableMeta is per-table governance (all optional for now).
+//
+// TransformDefer marks a raw_pipeline table that is a transform target but is
+// intentionally not built yet (a later bucket): the value is the reason / ticket.
+// A raw_pipeline table must be either built (a transformed._sources row) or carry a
+// TransformDefer reason; CheckTransformCoverage fails if it is neither or both. It
+// is empty for a built table and for non-raw_pipeline tables.
 type TableMeta struct {
-	Type  string `json:"type"`
-	Owner string `json:"owner"`
+	Type           string `json:"type"`
+	Owner          string `json:"owner"`
+	TransformDefer string `json:"transform_defer"`
 }
 
 // Transform is a column the transformation layer rewrites: rename / cast / fill.
@@ -360,6 +367,78 @@ func (r *Register) Check(live []Column) []Violation {
 		}
 		if vs[i].Column != vs[j].Column {
 			return vs[i].Column < vs[j].Column
+		}
+		return vs[i].Kind < vs[j].Kind
+	})
+	return vs
+}
+
+// TransformTargets returns the governed raw_pipeline tables: the transform targets.
+// The transformed layer canonicalises on-chain / observation data, so raw_pipeline is
+// the type that must be transformed; config / dimension / infrastructure tables are
+// governed but never transformed.
+func (r *Register) TransformTargets() []string {
+	var out []string
+	for t, m := range r.Tables {
+		if m.Type == "raw_pipeline" {
+			out = append(out, t)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// CheckTransformCoverage verifies that every transform target (governed raw_pipeline
+// table) is either built -- present in builtSources, the transformed._sources rows --
+// or explicitly deferred via TableMeta.TransformDefer, never neither and never both;
+// and that every built source maps back to a governed raw_pipeline table. This is what
+// forbids a raw_pipeline table being added and left silently un-transformed: absent
+// from _sources and without a defer reason fails the check. It also flags a transform_defer
+// left on a non-raw_pipeline table, so a stale defer reason cannot linger after a type change.
+//
+// builtSources is read from transformed._sources by the caller (the conformance
+// integration test), so this function stays DB-free and unit-testable. An empty result
+// means transform coverage is consistent.
+func (r *Register) CheckTransformCoverage(builtSources []string) []Violation {
+	built := make(map[string]bool, len(builtSources))
+	for _, s := range builtSources {
+		built[s] = true
+	}
+
+	var vs []Violation
+	for _, t := range r.TransformTargets() {
+		isBuilt := built[t]
+		isDeferred := r.Tables[t].TransformDefer != ""
+		switch {
+		case isBuilt && isDeferred:
+			vs = append(vs, Violation{t, "", "stale_defer",
+				"built (in transformed._sources) but still marked transform_defer; remove the defer reason"})
+		case !isBuilt && !isDeferred:
+			vs = append(vs, Violation{t, "", "missing_transform",
+				"raw_pipeline table is neither built (no transformed._sources row) nor deferred (no transform_defer reason)"})
+		}
+	}
+
+	for _, s := range builtSources {
+		if m, ok := r.Tables[s]; !ok || m.Type != "raw_pipeline" {
+			vs = append(vs, Violation{s, "", "orphan_transform_source",
+				"transformed._sources row has no governed raw_pipeline table in the register"})
+		}
+	}
+
+	// A transform_defer only means anything on a transform target. Flag it on a non-raw_pipeline
+	// table so a defer reason left behind after a table's type changes (or added by mistake to a
+	// config/dimension table) does not linger unnoticed, the same way stale_defer is caught.
+	for t, m := range r.Tables {
+		if m.TransformDefer != "" && m.Type != "raw_pipeline" {
+			vs = append(vs, Violation{t, "", "defer_on_non_target",
+				"transform_defer set on a non-raw_pipeline table; only transform targets can be deferred (remove it or fix the table type)"})
+		}
+	}
+
+	sort.Slice(vs, func(i, j int) bool {
+		if vs[i].Table != vs[j].Table {
+			return vs[i].Table < vs[j].Table
 		}
 		return vs[i].Kind < vs[j].Kind
 	})
