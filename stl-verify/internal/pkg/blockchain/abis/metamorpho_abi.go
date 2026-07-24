@@ -151,12 +151,64 @@ func GetMetaMorphoReadABI() (*abi.ABI, error) {
 	]`)
 }
 
+// GetVaultV2AdapterReadABI returns the ABI for the read functions on a VaultV2
+// liquidity adapter (not the vault itself).
+//
+// A VaultV2 never touches a downstream venue directly: it holds adapter
+// contracts, each wrapping one venue. The two type-discriminating selectors are
+// mutually exclusive on a real adapter — morpho() (0xd8fbc833) succeeds on a
+// MorphoMarketV1AdapterV2 (wraps a Morpho Blue market), morphoVaultV1()
+// (0xe4baaddf) succeeds on a MorphoVaultV1Adapter (wraps a nested MetaMorpho V1
+// vault). realAssets() (0x56c07573) exists on both and returns the adapter's
+// current holdings in the vault's underlying-asset base units. Chain-verified
+// against sparkUSDTbc's adapter.
+func GetVaultV2AdapterReadABI() (*abi.ABI, error) {
+	return ParseABI(`[
+		{
+			"inputs": [],
+			"name": "morpho",
+			"outputs": [{"name": "", "type": "address"}],
+			"stateMutability": "view",
+			"type": "function"
+		},
+		{
+			"inputs": [],
+			"name": "morphoVaultV1",
+			"outputs": [{"name": "", "type": "address"}],
+			"stateMutability": "view",
+			"type": "function"
+		},
+		{
+			"inputs": [],
+			"name": "realAssets",
+			"outputs": [{"name": "", "type": "uint256"}],
+			"stateMutability": "view",
+			"type": "function"
+		}
+	]`)
+}
+
 // GetVaultV2ReadABI returns the ABI for Morpho VaultV2-specific read functions.
 //
 // VaultV2 (deployed by 0xa1d94f746defa1928926b84fb2596c06926c0405 on mainnet)
 // shares the ERC4626/ERC20 surface with MetaMorpho but reverts on MORPHO() and
 // skimRecipient(). Its presence is identified by curator() and
 // liquidityAdapter() returning addresses successfully.
+//
+// absoluteCap(bytes32) / relativeCap(bytes32) return the two current allocation
+// limits for a cap id (id = keccak256(idData)). Both are declared uint128 on the
+// contract (ABI-encoded as full 32-byte words, decoded into *big.Int) — the
+// indexer reads them at a cap event's block hash to snapshot the full cap state.
+// Chain-verified against sparkUSDTbc: absoluteCap selector 0xbc0dd374,
+// relativeCap selector 0xa68bafa3.
+//
+// adaptersLength() / adapters(uint256) enumerate the vault's registered adapter
+// set. Note the no-arg adapters() returning address[] REVERTS on the deployed
+// VaultV2 (see vault_probe.go); the enumerable form (a length getter plus an
+// index getter) is the working surface. Discovery-time enumeration reads these
+// to seed the adapter registry for a V2 vault found mid-life, whose historical
+// AddAdapter events never replay on the live stream. Chain-verified against
+// sparkUSDTbc: adaptersLength() 0x5aa22bc8, adapters(uint256) 0x4ef501ac.
 func GetVaultV2ReadABI() (*abi.ABI, error) {
 	return ParseABI(`[
 		{
@@ -170,6 +222,34 @@ func GetVaultV2ReadABI() (*abi.ABI, error) {
 			"inputs": [],
 			"name": "liquidityAdapter",
 			"outputs": [{"name": "", "type": "address"}],
+			"stateMutability": "view",
+			"type": "function"
+		},
+		{
+			"inputs": [],
+			"name": "adaptersLength",
+			"outputs": [{"name": "", "type": "uint256"}],
+			"stateMutability": "view",
+			"type": "function"
+		},
+		{
+			"inputs": [{"name": "", "type": "uint256"}],
+			"name": "adapters",
+			"outputs": [{"name": "", "type": "address"}],
+			"stateMutability": "view",
+			"type": "function"
+		},
+		{
+			"inputs": [{"name": "id", "type": "bytes32"}],
+			"name": "absoluteCap",
+			"outputs": [{"name": "", "type": "uint128"}],
+			"stateMutability": "view",
+			"type": "function"
+		},
+		{
+			"inputs": [{"name": "id", "type": "bytes32"}],
+			"name": "relativeCap",
+			"outputs": [{"name": "", "type": "uint128"}],
 			"stateMutability": "view",
 			"type": "function"
 		}

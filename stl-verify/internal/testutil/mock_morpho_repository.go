@@ -20,6 +20,14 @@ type MockMorphoRepository struct {
 	GetAllVaultsFn        func(ctx context.Context, chainID int64) (map[common.Address]*entity.MorphoVault, error)
 	SaveVaultStateFn      func(ctx context.Context, tx pgx.Tx, state *entity.MorphoVaultState) error
 	SaveVaultPositionFn   func(ctx context.Context, tx pgx.Tx, position *entity.MorphoVaultPosition) error
+
+	GetOrCreateAdapterFn       func(ctx context.Context, tx pgx.Tx, adapter *entity.MorphoAdapter) (int64, error)
+	MarkAdapterRemovedFn       func(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, removedAtBlock int64) error
+	GetActiveAdapterFn         func(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte) (*entity.MorphoAdapter, error)
+	GetActiveAdaptersByVaultFn func(ctx context.Context, morphoVaultID int64) ([]*entity.MorphoAdapter, error)
+	SaveAdapterStateFn         func(ctx context.Context, tx pgx.Tx, state *entity.MorphoAdapterState) error
+	SaveVaultCapFn             func(ctx context.Context, tx pgx.Tx, vaultCap *entity.MorphoVaultCap) error
+	UpdateVaultFeeConfigFn     func(ctx context.Context, tx pgx.Tx, morphoVaultID int64, update entity.MorphoVaultFeeUpdate) error
 }
 
 func (m *MockMorphoRepository) GetOrCreateMarket(ctx context.Context, tx pgx.Tx, market *entity.MorphoMarket) (int64, error) {
@@ -81,6 +89,55 @@ func (m *MockMorphoRepository) SaveVaultState(ctx context.Context, tx pgx.Tx, st
 func (m *MockMorphoRepository) SaveVaultPosition(ctx context.Context, tx pgx.Tx, position *entity.MorphoVaultPosition) error {
 	if m.SaveVaultPositionFn != nil {
 		return m.SaveVaultPositionFn(ctx, tx, position)
+	}
+	return nil
+}
+
+func (m *MockMorphoRepository) GetOrCreateAdapter(ctx context.Context, tx pgx.Tx, adapter *entity.MorphoAdapter) (int64, error) {
+	if m.GetOrCreateAdapterFn != nil {
+		return m.GetOrCreateAdapterFn(ctx, tx, adapter)
+	}
+	return 1, nil
+}
+
+func (m *MockMorphoRepository) MarkAdapterRemoved(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, removedAtBlock int64) error {
+	if m.MarkAdapterRemovedFn != nil {
+		return m.MarkAdapterRemovedFn(ctx, tx, morphoVaultID, address, removedAtBlock)
+	}
+	return nil
+}
+
+func (m *MockMorphoRepository) GetActiveAdapter(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte) (*entity.MorphoAdapter, error) {
+	if m.GetActiveAdapterFn != nil {
+		return m.GetActiveAdapterFn(ctx, tx, morphoVaultID, address)
+	}
+	return nil, nil
+}
+
+func (m *MockMorphoRepository) GetActiveAdaptersByVault(ctx context.Context, morphoVaultID int64) ([]*entity.MorphoAdapter, error) {
+	if m.GetActiveAdaptersByVaultFn != nil {
+		return m.GetActiveAdaptersByVaultFn(ctx, morphoVaultID)
+	}
+	return nil, nil
+}
+
+func (m *MockMorphoRepository) SaveAdapterState(ctx context.Context, tx pgx.Tx, state *entity.MorphoAdapterState) error {
+	if m.SaveAdapterStateFn != nil {
+		return m.SaveAdapterStateFn(ctx, tx, state)
+	}
+	return nil
+}
+
+func (m *MockMorphoRepository) SaveVaultCap(ctx context.Context, tx pgx.Tx, vaultCap *entity.MorphoVaultCap) error {
+	if m.SaveVaultCapFn != nil {
+		return m.SaveVaultCapFn(ctx, tx, vaultCap)
+	}
+	return nil
+}
+
+func (m *MockMorphoRepository) UpdateVaultFeeConfig(ctx context.Context, tx pgx.Tx, morphoVaultID int64, update entity.MorphoVaultFeeUpdate) error {
+	if m.UpdateVaultFeeConfigFn != nil {
+		return m.UpdateVaultFeeConfigFn(ctx, tx, morphoVaultID, update)
 	}
 	return nil
 }

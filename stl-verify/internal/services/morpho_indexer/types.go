@@ -386,6 +386,296 @@ func (e *VaultAccrueInterestEvent) ToJSON() (json.RawMessage, error) {
 	return marshalEventJSON(data)
 }
 
+// ---------------------------------------------------------------------------
+// Morpho VaultV2 adapter / allocation / cap / fee event types
+// ---------------------------------------------------------------------------
+//
+// These are emitted only by VaultV2 vaults (morpho-org/vault-v2). Field names
+// mirror EventsLib.sol; indexed params are decoded from topics, the rest from
+// data. See event_extractor.go for the extraction and service.go for the
+// structured handlers that consume them.
+
+// AddAdapterEvent is emitted when a liquidity adapter is registered on a VaultV2.
+type AddAdapterEvent struct {
+	metaMorphoBase
+	Account common.Address
+}
+
+func (e *AddAdapterEvent) Type() entity.MorphoEventType { return entity.MorphoEventVaultAddAdapter }
+
+func (e *AddAdapterEvent) ToJSON() (json.RawMessage, error) {
+	return marshalEventJSON(map[string]any{
+		"eventType": string(entity.MorphoEventVaultAddAdapter),
+		"account":   e.Account.Hex(),
+	})
+}
+
+// RemoveAdapterEvent is emitted when a liquidity adapter is removed from a VaultV2.
+type RemoveAdapterEvent struct {
+	metaMorphoBase
+	Account common.Address
+}
+
+func (e *RemoveAdapterEvent) Type() entity.MorphoEventType {
+	return entity.MorphoEventVaultRemoveAdapter
+}
+
+func (e *RemoveAdapterEvent) ToJSON() (json.RawMessage, error) {
+	return marshalEventJSON(map[string]any{
+		"eventType": string(entity.MorphoEventVaultRemoveAdapter),
+		"account":   e.Account.Hex(),
+	})
+}
+
+// AllocateEvent is emitted when a VaultV2 allocates assets into an adapter.
+// Change is a signed per-id delta, not a running total; the adapter's current
+// value is read from realAssets() by the handler.
+type AllocateEvent struct {
+	metaMorphoBase
+	Sender  common.Address
+	Adapter common.Address
+	Assets  *big.Int
+	IDs     []common.Hash
+	Change  *big.Int
+}
+
+func (e *AllocateEvent) Type() entity.MorphoEventType { return entity.MorphoEventVaultAllocate }
+
+func (e *AllocateEvent) ToJSON() (json.RawMessage, error) {
+	return marshalEventJSON(map[string]any{
+		"eventType": string(entity.MorphoEventVaultAllocate),
+		"sender":    e.Sender.Hex(),
+		"adapter":   e.Adapter.Hex(),
+		"assets":    e.Assets.String(),
+		"ids":       hashesToHex(e.IDs),
+		"change":    e.Change.String(),
+	})
+}
+
+// DeallocateEvent is emitted when a VaultV2 withdraws assets from an adapter.
+// Shares AllocateEvent's shape; Change is a signed per-id delta.
+type DeallocateEvent struct {
+	metaMorphoBase
+	Sender  common.Address
+	Adapter common.Address
+	Assets  *big.Int
+	IDs     []common.Hash
+	Change  *big.Int
+}
+
+func (e *DeallocateEvent) Type() entity.MorphoEventType { return entity.MorphoEventVaultDeallocate }
+
+func (e *DeallocateEvent) ToJSON() (json.RawMessage, error) {
+	return marshalEventJSON(map[string]any{
+		"eventType": string(entity.MorphoEventVaultDeallocate),
+		"sender":    e.Sender.Hex(),
+		"adapter":   e.Adapter.Hex(),
+		"assets":    e.Assets.String(),
+		"ids":       hashesToHex(e.IDs),
+		"change":    e.Change.String(),
+	})
+}
+
+// ForceDeallocateEvent is emitted on a sentinel-triggered emergency exit. The
+// contract's forceDeallocate() calls the shared internal deallocate path
+// (deallocateInternal), which emits the Deallocate event, so a companion
+// Deallocate log accompanies every ForceDeallocate in the same transaction.
+type ForceDeallocateEvent struct {
+	metaMorphoBase
+	Sender        common.Address
+	Adapter       common.Address
+	Assets        *big.Int
+	OnBehalf      common.Address
+	IDs           []common.Hash
+	PenaltyAssets *big.Int
+}
+
+func (e *ForceDeallocateEvent) Type() entity.MorphoEventType {
+	return entity.MorphoEventVaultForceDeallocate
+}
+
+func (e *ForceDeallocateEvent) ToJSON() (json.RawMessage, error) {
+	return marshalEventJSON(map[string]any{
+		"eventType":     string(entity.MorphoEventVaultForceDeallocate),
+		"sender":        e.Sender.Hex(),
+		"adapter":       e.Adapter.Hex(),
+		"assets":        e.Assets.String(),
+		"onBehalf":      e.OnBehalf.Hex(),
+		"ids":           hashesToHex(e.IDs),
+		"penaltyAssets": e.PenaltyAssets.String(),
+	})
+}
+
+// IncreaseAbsoluteCapEvent raises the absolute allocation cap for a cap id.
+// ID = keccak256(IDData) is the canonical cap key; IDData is its pre-image.
+type IncreaseAbsoluteCapEvent struct {
+	metaMorphoBase
+	ID             common.Hash
+	IDData         []byte
+	NewAbsoluteCap *big.Int
+}
+
+func (e *IncreaseAbsoluteCapEvent) Type() entity.MorphoEventType {
+	return entity.MorphoEventVaultIncreaseAbsoluteCap
+}
+
+func (e *IncreaseAbsoluteCapEvent) ToJSON() (json.RawMessage, error) {
+	return marshalEventJSON(map[string]any{
+		"eventType":      string(entity.MorphoEventVaultIncreaseAbsoluteCap),
+		"id":             e.ID.Hex(),
+		"idData":         common.Bytes2Hex(e.IDData),
+		"newAbsoluteCap": e.NewAbsoluteCap.String(),
+	})
+}
+
+// DecreaseAbsoluteCapEvent lowers the absolute allocation cap for a cap id.
+// Unlike IncreaseAbsoluteCap it carries the sender that submitted the change.
+type DecreaseAbsoluteCapEvent struct {
+	metaMorphoBase
+	Sender         common.Address
+	ID             common.Hash
+	IDData         []byte
+	NewAbsoluteCap *big.Int
+}
+
+func (e *DecreaseAbsoluteCapEvent) Type() entity.MorphoEventType {
+	return entity.MorphoEventVaultDecreaseAbsoluteCap
+}
+
+func (e *DecreaseAbsoluteCapEvent) ToJSON() (json.RawMessage, error) {
+	return marshalEventJSON(map[string]any{
+		"eventType":      string(entity.MorphoEventVaultDecreaseAbsoluteCap),
+		"sender":         e.Sender.Hex(),
+		"id":             e.ID.Hex(),
+		"idData":         common.Bytes2Hex(e.IDData),
+		"newAbsoluteCap": e.NewAbsoluteCap.String(),
+	})
+}
+
+// IncreaseRelativeCapEvent raises the relative (WAD-fraction) allocation cap.
+type IncreaseRelativeCapEvent struct {
+	metaMorphoBase
+	ID             common.Hash
+	IDData         []byte
+	NewRelativeCap *big.Int
+}
+
+func (e *IncreaseRelativeCapEvent) Type() entity.MorphoEventType {
+	return entity.MorphoEventVaultIncreaseRelativeCap
+}
+
+func (e *IncreaseRelativeCapEvent) ToJSON() (json.RawMessage, error) {
+	return marshalEventJSON(map[string]any{
+		"eventType":      string(entity.MorphoEventVaultIncreaseRelativeCap),
+		"id":             e.ID.Hex(),
+		"idData":         common.Bytes2Hex(e.IDData),
+		"newRelativeCap": e.NewRelativeCap.String(),
+	})
+}
+
+// DecreaseRelativeCapEvent lowers the relative (WAD-fraction) allocation cap.
+// Unlike IncreaseRelativeCap it carries the sender that submitted the change.
+type DecreaseRelativeCapEvent struct {
+	metaMorphoBase
+	Sender         common.Address
+	ID             common.Hash
+	IDData         []byte
+	NewRelativeCap *big.Int
+}
+
+func (e *DecreaseRelativeCapEvent) Type() entity.MorphoEventType {
+	return entity.MorphoEventVaultDecreaseRelativeCap
+}
+
+func (e *DecreaseRelativeCapEvent) ToJSON() (json.RawMessage, error) {
+	return marshalEventJSON(map[string]any{
+		"eventType":      string(entity.MorphoEventVaultDecreaseRelativeCap),
+		"sender":         e.Sender.Hex(),
+		"id":             e.ID.Hex(),
+		"idData":         common.Bytes2Hex(e.IDData),
+		"newRelativeCap": e.NewRelativeCap.String(),
+	})
+}
+
+// SetPerformanceFeeEvent updates a VaultV2's performance fee (uint96 WAD
+// fraction of accrued interest).
+type SetPerformanceFeeEvent struct {
+	metaMorphoBase
+	NewPerformanceFee *big.Int
+}
+
+func (e *SetPerformanceFeeEvent) Type() entity.MorphoEventType {
+	return entity.MorphoEventVaultSetPerformanceFee
+}
+
+func (e *SetPerformanceFeeEvent) ToJSON() (json.RawMessage, error) {
+	return marshalEventJSON(map[string]any{
+		"eventType":         string(entity.MorphoEventVaultSetPerformanceFee),
+		"newPerformanceFee": e.NewPerformanceFee.String(),
+	})
+}
+
+// SetManagementFeeEvent updates a VaultV2's management fee (uint96 WAD
+// per-second rate).
+type SetManagementFeeEvent struct {
+	metaMorphoBase
+	NewManagementFee *big.Int
+}
+
+func (e *SetManagementFeeEvent) Type() entity.MorphoEventType {
+	return entity.MorphoEventVaultSetManagementFee
+}
+
+func (e *SetManagementFeeEvent) ToJSON() (json.RawMessage, error) {
+	return marshalEventJSON(map[string]any{
+		"eventType":        string(entity.MorphoEventVaultSetManagementFee),
+		"newManagementFee": e.NewManagementFee.String(),
+	})
+}
+
+// SetPerformanceFeeRecipientEvent updates who receives performance-fee shares.
+type SetPerformanceFeeRecipientEvent struct {
+	metaMorphoBase
+	NewPerformanceFeeRecipient common.Address
+}
+
+func (e *SetPerformanceFeeRecipientEvent) Type() entity.MorphoEventType {
+	return entity.MorphoEventVaultSetPerformanceFeeRecipient
+}
+
+func (e *SetPerformanceFeeRecipientEvent) ToJSON() (json.RawMessage, error) {
+	return marshalEventJSON(map[string]any{
+		"eventType":                  string(entity.MorphoEventVaultSetPerformanceFeeRecipient),
+		"newPerformanceFeeRecipient": e.NewPerformanceFeeRecipient.Hex(),
+	})
+}
+
+// SetManagementFeeRecipientEvent updates who receives management-fee shares.
+type SetManagementFeeRecipientEvent struct {
+	metaMorphoBase
+	NewManagementFeeRecipient common.Address
+}
+
+func (e *SetManagementFeeRecipientEvent) Type() entity.MorphoEventType {
+	return entity.MorphoEventVaultSetManagementFeeRecipient
+}
+
+func (e *SetManagementFeeRecipientEvent) ToJSON() (json.RawMessage, error) {
+	return marshalEventJSON(map[string]any{
+		"eventType":                 string(entity.MorphoEventVaultSetManagementFeeRecipient),
+		"newManagementFeeRecipient": e.NewManagementFeeRecipient.Hex(),
+	})
+}
+
+// hashesToHex renders a bytes32 id array as hex strings for JSON snapshots.
+func hashesToHex(hashes []common.Hash) []string {
+	out := make([]string, len(hashes))
+	for i, h := range hashes {
+		out[i] = h.Hex()
+	}
+	return out
+}
+
 func marshalEventJSON(data map[string]any) (json.RawMessage, error) {
 	raw, err := json.Marshal(data)
 	if err != nil {

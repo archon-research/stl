@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math/big"
 	"slices"
 	"strings"
@@ -412,25 +413,26 @@ func TestProcessBlockEvent_VaultDeposit(t *testing.T) {
 	}
 }
 
-// TestProcessBlockEvent_V2GovernanceEvent_AuditLogged verifies that a V2-only
-// event (AddAdapter — no typed handler today) emitted by a known vault still
-// produces a protocol_event audit-log row labelled with the correct event
-// name. The structured-handling pieces (adapter table etc.) are deferred per
-// docs/vec-198-morpho-v2-followup-plan.md, but operators must see these
-// events landing.
+// TestProcessBlockEvent_V2GovernanceEvent_AuditLogged verifies that a V2 event
+// without a typed handler (SetCurator) emitted by a known vault still produces a
+// protocol_event audit-log row labelled with the correct event name. Adapter /
+// cap / fee events now have structured handlers; the remaining governance /
+// timelock / gate surface stays audit-log-only, but operators must still see
+// those events landing.
 func TestProcessBlockEvent_V2GovernanceEvent_AuditLogged(t *testing.T) {
 	h := newTestHarness(t)
 	h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
 
-	// Chain-verified topic for AddAdapter on sparkUSDTbc (2026-05-06).
-	const addAdapterTopic = "0x8f125a24838c4c23e893904b255b5c672d43d4cb8af7e3d15841eaeabc1e68aa"
-	adapter := common.HexToAddress("0x7481968709b8f155652D42ebf468b22945907dC2") // sparkUSDTbc liquidityAdapter
+	// Chain-verified topic for SetCurator on sparkUSDTbc (2026-05-06); no typed
+	// handler, so this exercises the audit-log-only path.
+	const setCuratorTopic = "0xbd0a63c12948fbc9194a5839019f99c9d71db924e5c70018265bc778b8f1a506"
+	newCurator := common.HexToAddress("0x7481968709b8f155652D42ebf468b22945907dC2")
 
 	log := shared.Log{
 		Address: testVaultAddr.Hex(),
 		Topics: []string{
-			addAdapterTopic,
-			common.BytesToHash(adapter.Bytes()).Hex(),
+			setCuratorTopic,
+			common.BytesToHash(newCurator.Bytes()).Hex(),
 		},
 		Data:            "0x",
 		TransactionHash: testTxHash,
@@ -451,8 +453,8 @@ func TestProcessBlockEvent_V2GovernanceEvent_AuditLogged(t *testing.T) {
 	if savedEvent == nil {
 		t.Fatal("SaveEvent not called for V2 governance event")
 	}
-	if savedEvent.EventName != "AddAdapter" {
-		t.Errorf("EventName = %q, want AddAdapter", savedEvent.EventName)
+	if savedEvent.EventName != "SetCurator" {
+		t.Errorf("EventName = %q, want SetCurator", savedEvent.EventName)
 	}
 	if !bytes.Equal(savedEvent.ContractAddress, testVaultAddr.Bytes()) {
 		t.Errorf("ContractAddress = %x, want %s", savedEvent.ContractAddress, testVaultAddr.Hex())
@@ -826,6 +828,10 @@ func TestProcessBlockEvent_VaultDiscovery_VaultV2(t *testing.T) {
 
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 		switch len(calls) {
+		case 1:
+			// adaptersLength(): this vault has no adapters, so discovery-time
+			// enumeration is a no-op and no adapter probe/seed calls follow.
+			return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(0))}}, nil
 		case 2:
 			if calls[0].Target == unknownVault {
 				return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult()}, nil
@@ -867,6 +873,411 @@ func TestProcessBlockEvent_VaultDiscovery_VaultV2(t *testing.T) {
 	}
 	if !h.svc.vaultRegistry.IsKnownVault(unknownVault) {
 		t.Error("VaultV2 should be registered in vault registry")
+	}
+}
+
+// adaptersLengthSelector / adaptersSelector are the enumerable-adapter read
+// selectors on VaultV2 (chain-verified against sparkUSDTbc: adaptersLength()
+// 0x5aa22bc8, adapters(uint256) 0x4ef501ac).
+var (
+	adaptersLengthSelector = []byte{0x5a, 0xa2, 0x2b, 0xc8}
+	adaptersSelector       = []byte{0x4e, 0xf5, 0x01, 0xac}
+)
+
+// TestProcessBlockEvent_VaultDiscovery_V2_EnumeratesAndSeedsAdapters verifies
+// that discovering a VaultV2 mid-life enumerates its existing on-chain adapters
+// (adaptersLength()/adapters(i)), classifies each, registers them at the
+// discovery block, AND seeds one adapter_state row per adapter from a hash-pinned
+// realAssets() read. Without this, a discovered-but-quiet vault would carry
+// adapter rows with no state rows until its first allocation, which the VEC-219
+// composition-completeness probe would flag as adapter_data_missing.
+func TestProcessBlockEvent_VaultDiscovery_V2_EnumeratesAndSeedsAdapters(t *testing.T) {
+	h := newTestHarness(t)
+	unknownVault := common.HexToAddress("0xc7CDcFDEfC64631ED6799C95e3b110cd42F2bD22")
+	curator := common.HexToAddress("0x00000000000000000000000000000000000000A3")
+	adapterA := common.HexToAddress("0xAaAa000000000000000000000000000000000001")
+	adapterB := common.HexToAddress("0xbBbB000000000000000000000000000000000002")
+	realAssetsA := big.NewInt(41_300_000)
+	realAssetsB := big.NewInt(7_654_321)
+
+	// Number-pinned reads (identity): vault probe/details, token metadata, and the
+	// per-adapter type probe.
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		switch {
+		case len(calls) == 4 && h.isProbeMulticall(calls):
+			return h.vaultV2ProbeResults(testLoanToken, curator, adapterA), nil
+		case len(calls) == 4 && h.isVaultDetailsMulticall(calls):
+			return h.vaultDetailResults("Spark Blue Chip USDT Vault", "sparkUSDTbc", 6, false), nil
+		case len(calls) == 2 && calls[0].Target == testLoanToken:
+			return h.tokenMetadataResults("USDT", 6), nil
+		case len(calls) == 2 && calls[0].Target == adapterA:
+			return h.adapterProbeResults(entity.MorphoAdapterTypeMarketV1), nil
+		case len(calls) == 2 && calls[0].Target == adapterB:
+			return h.adapterProbeResults(entity.MorphoAdapterTypeVaultV1), nil
+		default:
+			return nil, fmt.Errorf("unexpected Execute shape (%d calls)", len(calls))
+		}
+	}
+	// Hash-pinned reads (versioned state): the adaptersLength()/adapters(i)
+	// enumeration, the per-adapter realAssets() seeds, and the vault-state read of
+	// the triggering AccrueInterest. The adapters(i) batch and the vault-state batch
+	// are both 2 calls to the vault, so discriminate by selector.
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		switch {
+		case len(calls) == 1 && calls[0].Target == unknownVault && hasSameSelector(calls[0].CallData, adaptersLengthSelector):
+			return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(2))}}, nil
+		case len(calls) == 2 && calls[0].Target == unknownVault && hasSameSelector(calls[0].CallData, adaptersSelector):
+			return []outbound.Result{
+				{Success: true, ReturnData: h.packAddress(adapterA)},
+				{Success: true, ReturnData: h.packAddress(adapterB)},
+			}, nil
+		case len(calls) == 1 && calls[0].Target == adapterA:
+			return []outbound.Result{{Success: true, ReturnData: h.packUint256(realAssetsA)}}, nil
+		case len(calls) == 1 && calls[0].Target == adapterB:
+			return []outbound.Result{{Success: true, ReturnData: h.packUint256(realAssetsB)}}, nil
+		case len(calls) == 2 && calls[0].Target == unknownVault:
+			return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult()}, nil
+		default:
+			return nil, fmt.Errorf("unexpected ExecuteAtHash shape (%d calls)", len(calls))
+		}
+	}
+
+	h.morphoRepo.GetOrCreateVaultFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoVault) (int64, error) { return 99, nil }
+	adapterIDByAddr := map[common.Address]int64{adapterA: 101, adapterB: 102}
+	var registered []*entity.MorphoAdapter
+	h.morphoRepo.GetOrCreateAdapterFn = func(_ context.Context, _ pgx.Tx, a *entity.MorphoAdapter) (int64, error) {
+		registered = append(registered, a)
+		return adapterIDByAddr[common.BytesToAddress(a.Address)], nil
+	}
+	var seeded []*entity.MorphoAdapterState
+	h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, s *entity.MorphoAdapterState) error {
+		seeded = append(seeded, s)
+		return nil
+	}
+
+	log := h.makeDiscoveryTriggerLog(unknownVault)
+	if err := h.processBlock(t, 1, 24481834, 2, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+
+	if !h.svc.vaultRegistry.IsKnownVault(unknownVault) {
+		t.Fatal("V2 vault should be registered after enumeration")
+	}
+	if len(registered) != 2 {
+		t.Fatalf("want 2 adapters registered, got %d", len(registered))
+	}
+	byAddr := map[common.Address]*entity.MorphoAdapter{}
+	for _, a := range registered {
+		byAddr[common.BytesToAddress(a.Address)] = a
+		if a.MorphoVaultID != 99 {
+			t.Errorf("adapter %x MorphoVaultID = %d, want 99", a.Address, a.MorphoVaultID)
+		}
+		if a.AddedAtBlock != 24481834 {
+			t.Errorf("adapter %x AddedAtBlock = %d, want 24481834 (discovery block)", a.Address, a.AddedAtBlock)
+		}
+		if a.AssetTokenID != 1 {
+			t.Errorf("adapter %x AssetTokenID = %d, want 1 (vault asset)", a.Address, a.AssetTokenID)
+		}
+	}
+	if byAddr[adapterA].AdapterType != entity.MorphoAdapterTypeMarketV1 {
+		t.Errorf("adapterA type = %d, want MarketV1", byAddr[adapterA].AdapterType)
+	}
+	if byAddr[adapterB].AdapterType != entity.MorphoAdapterTypeVaultV1 {
+		t.Errorf("adapterB type = %d, want VaultV1", byAddr[adapterB].AdapterType)
+	}
+
+	if len(seeded) != 2 {
+		t.Fatalf("want 2 seeded adapter_state rows, got %d", len(seeded))
+	}
+	seededByID := map[int64]*entity.MorphoAdapterState{}
+	for _, s := range seeded {
+		seededByID[s.MorphoAdapterID] = s
+		if s.BlockNumber != 24481834 {
+			t.Errorf("seed BlockNumber = %d, want 24481834", s.BlockNumber)
+		}
+		if s.BlockVersion != 2 {
+			t.Errorf("seed BlockVersion = %d, want 2 (discovery event version)", s.BlockVersion)
+		}
+		if s.Timestamp.IsZero() {
+			t.Error("seed Timestamp must be set")
+		}
+	}
+	if got := seededByID[101]; got == nil || got.RealAssets.Cmp(realAssetsA) != 0 {
+		t.Errorf("adapterA seed realAssets = %v, want %s (hash-pinned)", got, realAssetsA)
+	}
+	if got := seededByID[102]; got == nil || got.RealAssets.Cmp(realAssetsB) != 0 {
+		t.Errorf("adapterB seed realAssets = %v, want %s (hash-pinned)", got, realAssetsB)
+	}
+
+	// The adapter SET is versioned state, so its enumeration must be hash-pinned to
+	// the discovery block (VEC-218 review) — consistent with the realAssets seeds.
+	h.assertMulticallPinnedViaHash(t, testBlockHash, "adaptersLength()", func(c outbound.Call) bool {
+		return c.Target == unknownVault && hasSameSelector(c.CallData, adaptersLengthSelector)
+	})
+	h.assertMulticallPinnedViaHash(t, testBlockHash, "adapters(i)", func(c outbound.Call) bool {
+		return c.Target == unknownVault && hasSameSelector(c.CallData, adaptersSelector)
+	})
+}
+
+// TestProcessBlockEvent_VaultDiscovery_V2_ZeroAdaptersRegistersCleanly verifies a
+// V2 vault with no adapters yet is discovered and registered without any adapter
+// or state write.
+func TestProcessBlockEvent_VaultDiscovery_V2_ZeroAdaptersRegistersCleanly(t *testing.T) {
+	h := newTestHarness(t)
+	unknownVault := common.HexToAddress("0xc7CDcFDEfC64631ED6799C95e3b110cd42F2bD22")
+	curator := common.HexToAddress("0x00000000000000000000000000000000000000A3")
+	liquidityAdapter := common.HexToAddress("0x0000000000000000000000000000000000000B4C")
+
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		switch {
+		case len(calls) == 4 && h.isProbeMulticall(calls):
+			return h.vaultV2ProbeResults(testLoanToken, curator, liquidityAdapter), nil
+		case len(calls) == 4 && h.isVaultDetailsMulticall(calls):
+			return h.vaultDetailResults("Spark Blue Chip USDT Vault", "sparkUSDTbc", 6, false), nil
+		case len(calls) == 2 && calls[0].Target == testLoanToken:
+			return h.tokenMetadataResults("USDT", 6), nil
+		default:
+			return nil, fmt.Errorf("unexpected Execute shape (%d calls)", len(calls))
+		}
+	}
+	// adaptersLength() is hash-pinned (versioned adapter set); the vault-state read
+	// of the triggering AccrueInterest is too.
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		switch {
+		case len(calls) == 1 && calls[0].Target == unknownVault && hasSameSelector(calls[0].CallData, adaptersLengthSelector):
+			return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(0))}}, nil
+		case len(calls) == 2 && calls[0].Target == unknownVault:
+			return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult()}, nil
+		default:
+			return nil, fmt.Errorf("unexpected ExecuteAtHash shape (%d calls)", len(calls))
+		}
+	}
+	h.morphoRepo.GetOrCreateVaultFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoVault) (int64, error) { return 99, nil }
+	h.morphoRepo.GetOrCreateAdapterFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapter) (int64, error) {
+		t.Fatal("no adapter must be registered for a zero-adapter vault")
+		return 0, nil
+	}
+	h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterState) error {
+		t.Fatal("no adapter state must be seeded for a zero-adapter vault")
+		return nil
+	}
+
+	log := h.makeDiscoveryTriggerLog(unknownVault)
+	if err := h.processBlock(t, 1, 24481834, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+	if !h.svc.vaultRegistry.IsKnownVault(unknownVault) {
+		t.Fatal("zero-adapter V2 vault should still be registered")
+	}
+}
+
+// TestProcessBlockEvent_VaultDiscovery_V2_EnumerationTransportErrorRetries
+// verifies a transient enumeration failure bubbles (so SQS redelivers) and
+// leaves the vault UNregistered in-memory, so the redelivery re-runs discovery +
+// enumeration rather than skipping straight to the event handlers. It must also
+// not poison the address as not-a-vault.
+func TestProcessBlockEvent_VaultDiscovery_V2_EnumerationTransportErrorRetries(t *testing.T) {
+	h := newTestHarness(t)
+	unknownVault := common.HexToAddress("0xc7CDcFDEfC64631ED6799C95e3b110cd42F2bD22")
+	curator := common.HexToAddress("0x00000000000000000000000000000000000000A3")
+	liquidityAdapter := common.HexToAddress("0x0000000000000000000000000000000000000B4C")
+
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		switch {
+		case len(calls) == 4 && h.isProbeMulticall(calls):
+			return h.vaultV2ProbeResults(testLoanToken, curator, liquidityAdapter), nil
+		case len(calls) == 4 && h.isVaultDetailsMulticall(calls):
+			return h.vaultDetailResults("Spark Blue Chip USDT Vault", "sparkUSDTbc", 6, false), nil
+		case len(calls) == 2 && calls[0].Target == testLoanToken:
+			return h.tokenMetadataResults("USDT", 6), nil
+		case len(calls) == 1 && calls[0].Target == unknownVault && hasSameSelector(calls[0].CallData, adaptersLengthSelector):
+			return nil, errors.New("adaptersLength rpc down")
+		default:
+			return nil, fmt.Errorf("unexpected Execute shape (%d calls)", len(calls))
+		}
+	}
+	h.morphoRepo.GetOrCreateVaultFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoVault) (int64, error) { return 99, nil }
+
+	log := h.makeDiscoveryTriggerLog(unknownVault)
+	if err := h.processBlock(t, 1, 24481834, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err == nil {
+		t.Fatal("expected the block to fail so SQS redelivers")
+	}
+	if h.svc.vaultRegistry.IsKnownVault(unknownVault) {
+		t.Error("vault must stay unregistered so discovery re-runs on retry")
+	}
+	if h.svc.vaultRegistry.IsKnownNotVault(unknownVault) {
+		t.Error("a transient enumeration error must not mark the address not-a-vault")
+	}
+}
+
+// TestProcessBlockEvent_VaultDiscovery_V2_EnumerationFailureCommitsNothingAndRediscoversAfterRestart
+// is the atomicity guarantee: a V2 vault's row must never be committed without its
+// enumerated adapters. When enumeration fails, the discovery transaction must
+// commit NOTHING (GetOrCreateVault never called), so a worker restart that reloads
+// the registry from the DB does not see a discovered-but-adapterless vault and
+// skip its enumeration forever — the redelivered block re-runs full discovery.
+//
+// The mock morpho repo persists committed vaults so the simulated restart's
+// LoadVaultRegistry sees exactly what the discovery transaction committed. The
+// multicall dispatch is shape-based and wired to both entry points so the read
+// pattern is independent of number- vs hash-pinning.
+func TestProcessBlockEvent_VaultDiscovery_V2_EnumerationFailureCommitsNothingAndRediscoversAfterRestart(t *testing.T) {
+	h := newTestHarness(t)
+	unknownVault := common.HexToAddress("0xc7CDcFDEfC64631ED6799C95e3b110cd42F2bD22")
+	curator := common.HexToAddress("0x00000000000000000000000000000000000000A3")
+	adapterA := common.HexToAddress("0xAaAa000000000000000000000000000000000001")
+	realAssetsA := big.NewInt(41_300_000)
+
+	committed := map[common.Address]*entity.MorphoVault{}
+	var vaultCreates int
+	h.morphoRepo.GetOrCreateVaultFn = func(_ context.Context, _ pgx.Tx, v *entity.MorphoVault) (int64, error) {
+		vaultCreates++
+		v.ID = 99
+		committed[common.BytesToAddress(v.Address)] = v
+		return 99, nil
+	}
+	h.morphoRepo.GetAllVaultsFn = func(_ context.Context, _ int64) (map[common.Address]*entity.MorphoVault, error) {
+		out := make(map[common.Address]*entity.MorphoVault, len(committed))
+		maps.Copy(out, committed)
+		return out, nil
+	}
+	var adapterSeeded bool
+	h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterState) error {
+		adapterSeeded = true
+		return nil
+	}
+	h.morphoRepo.GetOrCreateAdapterFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapter) (int64, error) {
+		return 101, nil
+	}
+
+	enumerationShouldFail := true
+	dispatch := func(calls []outbound.Call) ([]outbound.Result, error) {
+		switch {
+		case len(calls) == 4 && h.isProbeMulticall(calls):
+			return h.vaultV2ProbeResults(testLoanToken, curator, adapterA), nil
+		case len(calls) == 4 && h.isVaultDetailsMulticall(calls):
+			return h.vaultDetailResults("Spark Blue Chip USDT Vault", "sparkUSDTbc", 6, false), nil
+		case len(calls) == 2 && calls[0].Target == testLoanToken:
+			return h.tokenMetadataResults("USDT", 6), nil
+		case len(calls) == 1 && calls[0].Target == unknownVault && hasSameSelector(calls[0].CallData, adaptersLengthSelector):
+			if enumerationShouldFail {
+				return nil, errors.New("adaptersLength rpc down")
+			}
+			return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(1))}}, nil
+		case len(calls) == 1 && calls[0].Target == unknownVault && hasSameSelector(calls[0].CallData, adaptersSelector):
+			return []outbound.Result{{Success: true, ReturnData: h.packAddress(adapterA)}}, nil
+		case len(calls) == 2 && calls[0].Target == adapterA:
+			return h.adapterProbeResults(entity.MorphoAdapterTypeMarketV1), nil
+		case len(calls) == 1 && calls[0].Target == adapterA:
+			return []outbound.Result{{Success: true, ReturnData: h.packUint256(realAssetsA)}}, nil
+		case len(calls) == 2 && calls[0].Target == unknownVault:
+			return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult()}, nil
+		default:
+			return nil, fmt.Errorf("unexpected multicall shape (%d calls)", len(calls))
+		}
+	}
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return dispatch(calls)
+	}
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		return dispatch(calls)
+	}
+
+	log := h.makeDiscoveryTriggerLog(unknownVault)
+
+	// First delivery: enumeration fails, so the discovery transaction must commit
+	// nothing.
+	if err := h.processBlock(t, 1, 24481834, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err == nil {
+		t.Fatal("expected the enumeration failure to fail the block so SQS redelivers")
+	}
+	if vaultCreates != 0 {
+		t.Fatalf("vault must NOT be persisted when enumeration fails (got %d GetOrCreateVault call(s)) — the vault row cannot exist without its adapters", vaultCreates)
+	}
+	if len(committed) != 0 {
+		t.Fatalf("no vault may be committed on an enumeration failure, got %d", len(committed))
+	}
+	if h.svc.vaultRegistry.IsKnownVault(unknownVault) {
+		t.Error("vault must stay unregistered in-memory so discovery re-runs on retry")
+	}
+	if h.svc.vaultRegistry.IsKnownNotVault(unknownVault) {
+		t.Error("a transient enumeration failure must not mark the address not-a-vault")
+	}
+
+	// Simulate a worker restart before SQS redelivery: a fresh registry loads only
+	// what discovery actually committed. Because it committed nothing, the vault is
+	// still undiscovered.
+	h.svc.vaultRegistry = NewVaultRegistry(h.svc.config.Logger)
+	if err := h.svc.LoadVaultRegistry(context.Background()); err != nil {
+		t.Fatalf("LoadVaultRegistry after restart: %v", err)
+	}
+	if h.svc.vaultRegistry.IsKnownVault(unknownVault) {
+		t.Fatal("a restart must not resurrect an undiscovered vault — nothing was committed")
+	}
+
+	// Redelivery after restart with enumeration healthy: discovery re-runs fully.
+	enumerationShouldFail = false
+	if err := h.processBlock(t, 1, 24481834, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err != nil {
+		t.Fatalf("redelivery after restart must re-run discovery cleanly: %v", err)
+	}
+	if !h.svc.vaultRegistry.IsKnownVault(unknownVault) {
+		t.Fatal("redelivery must discover and register the vault")
+	}
+	if vaultCreates == 0 {
+		t.Fatal("redelivery must persist the vault")
+	}
+	if !adapterSeeded {
+		t.Fatal("redelivery must seed the enumerated adapter's state")
+	}
+}
+
+// TestProcessBlockEvent_VaultDiscovery_V2_SeedRealAssetsErrorRetries verifies a
+// transport failure on the per-adapter realAssets() seed read bubbles (transient,
+// retried) and writes no adapter/state rows.
+func TestProcessBlockEvent_VaultDiscovery_V2_SeedRealAssetsErrorRetries(t *testing.T) {
+	h := newTestHarness(t)
+	unknownVault := common.HexToAddress("0xc7CDcFDEfC64631ED6799C95e3b110cd42F2bD22")
+	curator := common.HexToAddress("0x00000000000000000000000000000000000000A3")
+	adapterA := common.HexToAddress("0xAaAa000000000000000000000000000000000001")
+
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		switch {
+		case len(calls) == 4 && h.isProbeMulticall(calls):
+			return h.vaultV2ProbeResults(testLoanToken, curator, adapterA), nil
+		case len(calls) == 4 && h.isVaultDetailsMulticall(calls):
+			return h.vaultDetailResults("Spark Blue Chip USDT Vault", "sparkUSDTbc", 6, false), nil
+		case len(calls) == 2 && calls[0].Target == testLoanToken:
+			return h.tokenMetadataResults("USDT", 6), nil
+		case len(calls) == 2 && calls[0].Target == adapterA:
+			return h.adapterProbeResults(entity.MorphoAdapterTypeMarketV1), nil
+		default:
+			return nil, fmt.Errorf("unexpected Execute shape (%d calls)", len(calls))
+		}
+	}
+	// Enumeration is hash-pinned; the per-adapter realAssets() seed fails here.
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		switch {
+		case len(calls) == 1 && calls[0].Target == unknownVault && hasSameSelector(calls[0].CallData, adaptersLengthSelector):
+			return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(1))}}, nil
+		case len(calls) == 1 && calls[0].Target == unknownVault && hasSameSelector(calls[0].CallData, adaptersSelector):
+			return []outbound.Result{{Success: true, ReturnData: h.packAddress(adapterA)}}, nil
+		case len(calls) == 1 && calls[0].Target == adapterA:
+			return nil, errors.New("realAssets rpc down")
+		default:
+			return nil, fmt.Errorf("unexpected ExecuteAtHash shape (%d calls)", len(calls))
+		}
+	}
+	h.morphoRepo.GetOrCreateVaultFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoVault) (int64, error) { return 99, nil }
+	h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterState) error {
+		t.Fatal("no adapter state must be seeded when the realAssets read fails")
+		return nil
+	}
+
+	log := h.makeDiscoveryTriggerLog(unknownVault)
+	if err := h.processBlock(t, 1, 24481834, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err == nil {
+		t.Fatal("expected the block to fail so SQS redelivers")
+	}
+	if h.svc.vaultRegistry.IsKnownVault(unknownVault) {
+		t.Error("vault must stay unregistered so discovery re-runs on retry")
 	}
 }
 

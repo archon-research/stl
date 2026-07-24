@@ -77,8 +77,11 @@ type blockchainService struct {
 	multicallClient outbound.Multicaller
 	morphoBlueABI   *abi.ABI
 	metaMorphoABI   *abi.ABI
+	adapterABI      *abi.ABI
+	vaultV2ABI      *abi.ABI
 	erc20ABI        *abi.ABI
 	vaultProber     *VaultProber
+	adapterProber   *AdapterProber
 	metadataCache   map[common.Address]TokenMetadata
 	telemetry       *Telemetry
 	logger          *slog.Logger
@@ -100,17 +103,35 @@ func newBlockchainService(
 		return nil, fmt.Errorf("failed to load MetaMorpho read ABI: %w", err)
 	}
 
+	adapterABI, err := abis.GetVaultV2AdapterReadABI()
+	if err != nil {
+		return nil, fmt.Errorf("loading VaultV2 adapter read ABI: %w", err)
+	}
+
+	vaultV2ABI, err := abis.GetVaultV2ReadABI()
+	if err != nil {
+		return nil, fmt.Errorf("loading VaultV2 read ABI: %w", err)
+	}
+
 	vaultProber, err := NewVaultProber()
 	if err != nil {
 		return nil, fmt.Errorf("creating vault prober: %w", err)
+	}
+
+	adapterProber, err := NewAdapterProber()
+	if err != nil {
+		return nil, fmt.Errorf("creating adapter prober: %w", err)
 	}
 
 	return &blockchainService{
 		multicallClient: multicallClient,
 		morphoBlueABI:   morphoABI,
 		metaMorphoABI:   metaMorphoABI,
+		adapterABI:      adapterABI,
+		vaultV2ABI:      vaultV2ABI,
 		erc20ABI:        erc20ABI,
 		vaultProber:     vaultProber,
+		adapterProber:   adapterProber,
 		metadataCache:   make(map[common.Address]TokenMetadata),
 		telemetry:       telemetry,
 		logger:          logger.With("component", "morpho-blockchain-service"),
@@ -575,6 +596,221 @@ func (s *blockchainService) getVaultStateAndTwoBalances(ctx context.Context, vau
 	}
 
 	return vs, balA, balB, nil
+}
+
+// getAdapterType classifies a VaultV2 liquidity adapter (MarketV1 / VaultV1 /
+// Unknown). Number-pinned intentionally: adapter identity is immutable, same
+// rationale as getMarketParams (see VEC-471). A both-fail / both-succeed probe
+// yields MorphoAdapterTypeUnknown with a nil error (the caller WARNs and still
+// records it); only a transport error propagates.
+func (s *blockchainService) getAdapterType(ctx context.Context, adapter common.Address, blockNumber int64) (retType entity.MorphoAdapterType, retErr error) {
+	ctx, span := s.telemetry.StartSpan(ctx, "morpho.rpc.getAdapterType",
+		attribute.String("adapter.address", adapter.Hex()))
+	defer span.End()
+	start := time.Now()
+	defer func() {
+		s.telemetry.RecordRPCCall(ctx, "getAdapterType", time.Since(start), retErr)
+		if retErr != nil {
+			telemetry.SetSpanError(span, retErr, "getAdapterType failed")
+		}
+	}()
+
+	return s.adapterProber.ProbeAdapterType(ctx, s.multicallClient, adapter, big.NewInt(blockNumber))
+}
+
+// getAdapterRealAssets reads an adapter's realAssets() — the assets it reports
+// holding in its downstream venue — pinned to blockHash. This is versioned
+// per-block state (it changes every allocation / accrual), so it uses
+// ExecuteAtHash for reorg-correctness (see getMarketState / VEC-471), not
+// number-pinning. realAssets() exists on every adapter type, so the call is not
+// AllowFailure: a revert is a real error that must stop the event.
+func (s *blockchainService) getAdapterRealAssets(ctx context.Context, adapter common.Address, blockHash common.Hash) (retAssets *big.Int, retErr error) {
+	ctx, span := s.telemetry.StartSpan(ctx, "morpho.rpc.getAdapterRealAssets",
+		attribute.String("adapter.address", adapter.Hex()))
+	defer span.End()
+	start := time.Now()
+	defer func() {
+		s.telemetry.RecordRPCCall(ctx, "getAdapterRealAssets", time.Since(start), retErr)
+		if retErr != nil {
+			telemetry.SetSpanError(span, retErr, "getAdapterRealAssets failed")
+		}
+	}()
+
+	callData, err := s.adapterABI.Pack("realAssets")
+	if err != nil {
+		return nil, fmt.Errorf("packing realAssets call: %w", err)
+	}
+
+	results, err := s.multicallClient.ExecuteAtHash(ctx, []outbound.Call{{
+		Target:       adapter,
+		AllowFailure: false,
+		CallData:     callData,
+	}}, blockHash)
+	if err != nil {
+		return nil, fmt.Errorf("multicall realAssets(): %w", err)
+	}
+	if len(results) == 0 || !results[0].Success || len(results[0].ReturnData) == 0 {
+		return nil, fmt.Errorf("realAssets() call failed for adapter %s", adapter.Hex())
+	}
+
+	unpacked, err := s.adapterABI.Unpack("realAssets", results[0].ReturnData)
+	if err != nil {
+		return nil, fmt.Errorf("unpacking realAssets() for adapter %s: %w", adapter.Hex(), err)
+	}
+	if len(unpacked) == 0 {
+		return nil, fmt.Errorf("realAssets() returned no values for adapter %s", adapter.Hex())
+	}
+	return bigIntFromAny(unpacked[0]), nil
+}
+
+// enumerateVaultAdapters reads a VaultV2's registered adapter set via
+// adaptersLength() then adapters(i), pinned to blockHash. The adapter SET is
+// versioned per-block state — AddAdapter/RemoveAdapter mutate it — NOT immutable
+// identity, so it is hash-pinned (ExecuteAtHash) for reorg-correctness (VEC-471),
+// matching the per-adapter realAssets() seeds the caller reads at the same hash;
+// a number-pinned read could straddle a reorg relative to those seeds. Used by
+// discovery-time enumeration to seed the registry for a V2 vault found mid-life,
+// whose historical AddAdapter events never replay on the live stream.
+func (s *blockchainService) enumerateVaultAdapters(ctx context.Context, vaultAddress common.Address, blockHash common.Hash) (retAdapters []common.Address, retErr error) {
+	ctx, span := s.telemetry.StartSpan(ctx, "morpho.rpc.enumerateVaultAdapters",
+		attribute.String("vault.address", vaultAddress.Hex()))
+	defer span.End()
+	start := time.Now()
+	defer func() {
+		s.telemetry.RecordRPCCall(ctx, "enumerateVaultAdapters", time.Since(start), retErr)
+		if retErr != nil {
+			telemetry.SetSpanError(span, retErr, "enumerateVaultAdapters failed")
+		}
+	}()
+
+	lengthData, err := s.vaultV2ABI.Pack("adaptersLength")
+	if err != nil {
+		return nil, fmt.Errorf("packing adaptersLength call: %w", err)
+	}
+	lengthResults, err := s.multicallClient.ExecuteAtHash(ctx, []outbound.Call{
+		{Target: vaultAddress, AllowFailure: false, CallData: lengthData},
+	}, blockHash)
+	if err != nil {
+		return nil, fmt.Errorf("multicall adaptersLength(): %w", err)
+	}
+	if len(lengthResults) == 0 || !lengthResults[0].Success || len(lengthResults[0].ReturnData) == 0 {
+		return nil, fmt.Errorf("adaptersLength() call failed for vault %s", vaultAddress.Hex())
+	}
+	lengthUnpacked, err := s.vaultV2ABI.Unpack("adaptersLength", lengthResults[0].ReturnData)
+	if err != nil {
+		return nil, fmt.Errorf("unpacking adaptersLength() for vault %s: %w", vaultAddress.Hex(), err)
+	}
+	if len(lengthUnpacked) == 0 {
+		return nil, fmt.Errorf("adaptersLength() returned no values for vault %s", vaultAddress.Hex())
+	}
+	length := bigIntFromAny(lengthUnpacked[0])
+	if !length.IsInt64() || length.Sign() < 0 {
+		return nil, fmt.Errorf("adaptersLength() returned implausible length %s for vault %s", length.String(), vaultAddress.Hex())
+	}
+	n := int(length.Int64())
+	if n == 0 {
+		return nil, nil
+	}
+
+	calls := make([]outbound.Call, n)
+	for i := range n {
+		callData, err := s.vaultV2ABI.Pack("adapters", big.NewInt(int64(i)))
+		if err != nil {
+			return nil, fmt.Errorf("packing adapters(%d) call: %w", i, err)
+		}
+		calls[i] = outbound.Call{Target: vaultAddress, AllowFailure: false, CallData: callData}
+	}
+	results, err := s.multicallClient.ExecuteAtHash(ctx, calls, blockHash)
+	if err != nil {
+		return nil, fmt.Errorf("multicall adapters(i): %w", err)
+	}
+	if len(results) != n {
+		return nil, fmt.Errorf("adapters(i) returned %d results, want %d for vault %s", len(results), n, vaultAddress.Hex())
+	}
+
+	adapters := make([]common.Address, n)
+	for i, r := range results {
+		if !r.Success || len(r.ReturnData) == 0 {
+			return nil, fmt.Errorf("adapters(%d) call failed for vault %s", i, vaultAddress.Hex())
+		}
+		unpacked, err := s.vaultV2ABI.Unpack("adapters", r.ReturnData)
+		if err != nil {
+			return nil, fmt.Errorf("unpacking adapters(%d) for vault %s: %w", i, vaultAddress.Hex(), err)
+		}
+		if len(unpacked) == 0 {
+			return nil, fmt.Errorf("adapters(%d) returned no values for vault %s", i, vaultAddress.Hex())
+		}
+		addr, ok := unpacked[0].(common.Address)
+		if !ok {
+			return nil, fmt.Errorf("adapters(%d) returned unexpected type %T for vault %s", i, unpacked[0], vaultAddress.Hex())
+		}
+		adapters[i] = addr
+	}
+	return adapters, nil
+}
+
+// getVaultCaps reads the two current allocation limits for a cap id off the
+// VaultV2, pinned to blockHash. absoluteCap/relativeCap are per-block state (a
+// cap event mutates them), so like getAdapterRealAssets this is a hash-pinned
+// ExecuteAtHash read for reorg-correctness (VEC-471), not number-pinning. Both
+// getters exist on every VaultV2 and cannot fail for a real cap id, so neither
+// call is AllowFailure: a revert is a real error that must stop the event.
+func (s *blockchainService) getVaultCaps(ctx context.Context, vault common.Address, capID [32]byte, blockHash common.Hash) (retAbsolute, retRelative *big.Int, retErr error) {
+	ctx, span := s.telemetry.StartSpan(ctx, "morpho.rpc.getVaultCaps",
+		attribute.String("vault.address", vault.Hex()))
+	defer span.End()
+	start := time.Now()
+	defer func() {
+		s.telemetry.RecordRPCCall(ctx, "getVaultCaps", time.Since(start), retErr)
+		if retErr != nil {
+			telemetry.SetSpanError(span, retErr, "getVaultCaps failed")
+		}
+	}()
+
+	absoluteCallData, err := s.vaultV2ABI.Pack("absoluteCap", capID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("packing absoluteCap call: %w", err)
+	}
+	relativeCallData, err := s.vaultV2ABI.Pack("relativeCap", capID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("packing relativeCap call: %w", err)
+	}
+
+	results, err := s.multicallClient.ExecuteAtHash(ctx, []outbound.Call{
+		{Target: vault, AllowFailure: false, CallData: absoluteCallData},
+		{Target: vault, AllowFailure: false, CallData: relativeCallData},
+	}, blockHash)
+	if err != nil {
+		return nil, nil, fmt.Errorf("multicall absoluteCap()/relativeCap(): %w", err)
+	}
+	if len(results) != 2 {
+		return nil, nil, fmt.Errorf("cap getters returned %d results, want 2", len(results))
+	}
+
+	absolute, err := s.unpackVaultCap("absoluteCap", results[0], vault, capID)
+	if err != nil {
+		return nil, nil, err
+	}
+	relative, err := s.unpackVaultCap("relativeCap", results[1], vault, capID)
+	if err != nil {
+		return nil, nil, err
+	}
+	return absolute, relative, nil
+}
+
+// unpackVaultCap validates and decodes one absoluteCap()/relativeCap() result.
+func (s *blockchainService) unpackVaultCap(method string, result outbound.Result, vault common.Address, capID [32]byte) (*big.Int, error) {
+	if !result.Success || len(result.ReturnData) == 0 {
+		return nil, fmt.Errorf("%s() call failed for vault %s cap %x", method, vault.Hex(), capID)
+	}
+	unpacked, err := s.vaultV2ABI.Unpack(method, result.ReturnData)
+	if err != nil {
+		return nil, fmt.Errorf("unpacking %s() for vault %s: %w", method, vault.Hex(), err)
+	}
+	if len(unpacked) == 0 {
+		return nil, fmt.Errorf("%s() returned no values for vault %s cap %x", method, vault.Hex(), capID)
+	}
+	return bigIntFromAny(unpacked[0]), nil
 }
 
 // getVaultMetadata identifies whether a contract is a Morpho-family vault

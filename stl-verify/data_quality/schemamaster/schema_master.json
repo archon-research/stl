@@ -38,6 +38,10 @@
     "uniswap_v3_tick"
   ],
   "canonical": {
+    "absolute_cap": {
+      "type": "numeric",
+      "class": "S"
+    },
     "accrued_to_treasury_scaled": {
       "type": "numeric",
       "class": "S"
@@ -52,6 +56,14 @@
     },
     "active": {
       "type": "bool",
+      "class": "S"
+    },
+    "adapter_type": {
+      "type": "int2",
+      "class": "S"
+    },
+    "added_at_block": {
+      "type": "int8",
       "class": "S"
     },
     "address": {
@@ -181,6 +193,10 @@
       "type": "timestamptz",
       "class": "A",
       "semantics": "processing_time"
+    },
+    "cap_id": {
+      "type": "bytea",
+      "class": "R"
     },
     "chain_id": {
       "type": "int4",
@@ -402,6 +418,10 @@
       "type": "int8",
       "class": "A"
     },
+    "id_data": {
+      "type": "bytea",
+      "class": "S"
+    },
     "ilk_name": {
       "type": "text",
       "class": "S"
@@ -537,6 +557,14 @@
       "class": "S",
       "semantics": "api_event_time"
     },
+    "management_fee": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "management_fee_recipient": {
+      "type": "bytea",
+      "class": "S"
+    },
     "management_fee_shares": {
       "type": "numeric",
       "class": "S"
@@ -585,6 +613,10 @@
     "monthly_apy": {
       "type": "numeric",
       "class": "S"
+    },
+    "morpho_adapter_id": {
+      "type": "int8",
+      "class": "R"
     },
     "morpho_market_id": {
       "type": "int8",
@@ -659,6 +691,14 @@
       "type": "int8",
       "class": "R"
     },
+    "performance_fee": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "performance_fee_recipient": {
+      "type": "bytea",
+      "class": "S"
+    },
     "persisted_at": {
       "type": "timestamptz",
       "class": "A",
@@ -729,6 +769,10 @@
       "type": "int4",
       "class": "S"
     },
+    "real_assets": {
+      "type": "numeric",
+      "class": "D"
+    },
     "receipt_token_address": {
       "type": "bytea",
       "class": "S"
@@ -737,6 +781,14 @@
       "type": "timestamptz",
       "class": "S",
       "semantics": "processing_time"
+    },
+    "relative_cap": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "removed_at_block": {
+      "type": "int8",
+      "class": "S"
     },
     "reserve_factor": {
       "type": "numeric",
@@ -1087,6 +1139,14 @@
       "type": "raw_pipeline",
       "owner": "lending"
     },
+    "morpho_adapter": {
+      "type": "config",
+      "owner": "morpho"
+    },
+    "morpho_adapter_state": {
+      "type": "raw_pipeline",
+      "owner": "morpho"
+    },
     "morpho_market": {
       "type": "config",
       "owner": "morpho"
@@ -1101,6 +1161,10 @@
     },
     "morpho_vault": {
       "type": "config",
+      "owner": "morpho"
+    },
+    "morpho_vault_cap": {
+      "type": "raw_pipeline",
       "owner": "morpho"
     },
     "morpho_vault_position": {
@@ -1255,6 +1319,12 @@
       "action": "rename"
     },
     {
+      "table": "morpho_adapter_state",
+      "column": "timestamp",
+      "canonical": "block_timestamp",
+      "action": "rename"
+    },
+    {
       "table": "morpho_market_position",
       "column": "timestamp",
       "canonical": "block_timestamp",
@@ -1271,6 +1341,12 @@
     },
     {
       "table": "morpho_market_state",
+      "column": "timestamp",
+      "canonical": "block_timestamp",
+      "action": "rename"
+    },
+    {
+      "table": "morpho_vault_cap",
       "column": "timestamp",
       "canonical": "block_timestamp",
       "action": "rename"
@@ -1376,6 +1452,23 @@
     },
     {
       "table": "morpho_vault_position",
+      "column": "chain_id",
+      "parent": "morpho_vault",
+      "key": "morpho_vault_id",
+      "ref": "id"
+    },
+    {
+      "table": "morpho_adapter_state",
+      "column": "chain_id",
+      "parent": "morpho_adapter",
+      "key": "morpho_adapter_id",
+      "ref": "id",
+      "then_parent": "morpho_vault",
+      "then_key": "morpho_vault_id",
+      "then_ref": "id"
+    },
+    {
+      "table": "morpho_vault_cap",
       "column": "chain_id",
       "parent": "morpho_vault",
       "key": "morpho_vault_id",
@@ -1500,6 +1593,23 @@
     },
     {
       "table": "morpho_vault_position",
+      "column": "protocol_id",
+      "parent": "morpho_vault",
+      "key": "morpho_vault_id",
+      "ref": "id"
+    },
+    {
+      "table": "morpho_adapter_state",
+      "column": "protocol_id",
+      "parent": "morpho_adapter",
+      "key": "morpho_adapter_id",
+      "ref": "id",
+      "then_parent": "morpho_vault",
+      "then_key": "morpho_vault_id",
+      "then_ref": "id"
+    },
+    {
+      "table": "morpho_vault_cap",
       "column": "protocol_id",
       "parent": "morpho_vault",
       "key": "morpho_vault_id",

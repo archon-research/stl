@@ -169,19 +169,6 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("creating event extractor: %w", err)
 	}
 
-	// Phase 1: Scan receipts for candidate addresses
-	candidates, err := scanBlockRange(ctx, logger, s3Reader, extractor, cfg.bucket, cfg.from, cfg.to, cfg.goroutines)
-	if err != nil {
-		return fmt.Errorf("scanning block range: %w", err)
-	}
-	logger.Info("scan complete", "uniqueCandidates", len(candidates))
-
-	if len(candidates) == 0 {
-		logger.Info("no candidates found, nothing to probe")
-		return nil
-	}
-
-	// Phase 2: Probe candidates on-chain to confirm vaults
 	prober := &vaultProber{
 		multicaller:  multicaller,
 		sharedProber: sharedProber,
@@ -189,28 +176,68 @@ func run(ctx context.Context, args []string) error {
 		logger:       logger,
 	}
 
+	// Phases 1–3: scan S3 receipts for candidates, probe them on-chain, persist
+	// confirmed vaults.
+	if err := discoverAndPersistVaults(ctx, logger, s3Reader, extractor, prober, pool, buildReg.BuildID(), cfg); err != nil {
+		return err
+	}
+
+	// Phase 4: replay VaultV2 structured (adapter / cap / fee) events for the
+	// persisted V2 vaults, driving each log through the same handler path the
+	// live worker uses. Runs off the vaults in the database (this run's plus
+	// earlier runs'), so it covers a range that only carries governance events
+	// for a pre-existing V2 vault — which produces no discovery candidate.
+	if err := replayV2StructuredEvents(ctx, logger, s3Reader, ethClient, multicaller, pool, buildReg.BuildID(), cfg); err != nil {
+		return fmt.Errorf("replaying VaultV2 structured events: %w", err)
+	}
+
+	logger.Info("backfill complete")
+	return nil
+}
+
+// discoverAndPersistVaults runs the discovery pipeline: scan S3 receipts for
+// candidate addresses (phase 1), probe them on-chain to confirm vaults (phase
+// 2), and persist the confirmed vaults (phase 3). It returns nil when a phase
+// has nothing to carry forward; the caller's V2 replay phase still runs off the
+// vaults already in the database.
+func discoverAndPersistVaults(
+	ctx context.Context,
+	logger *slog.Logger,
+	s3Reader outbound.S3Reader,
+	extractor *morpho_indexer.EventExtractor,
+	prober *vaultProber,
+	pool *pgxpool.Pool,
+	buildID buildregistry.BuildID,
+	cfg config,
+) error {
+	candidates, err := scanBlockRange(ctx, logger, s3Reader, extractor, cfg.bucket, cfg.from, cfg.to, cfg.goroutines)
+	if err != nil {
+		return fmt.Errorf("scanning block range: %w", err)
+	}
+	logger.Info("scan complete", "uniqueCandidates", len(candidates))
+	if len(candidates) == 0 {
+		logger.Info("no candidates found, nothing to probe")
+		return nil
+	}
+
 	vaults, err := prober.probeAllCandidates(ctx, candidates, cfg.to, cfg.probeBatch)
 	if err != nil {
 		return fmt.Errorf("probing candidates: %w", err)
 	}
 	logger.Info("probing complete", "confirmedVaults", len(vaults))
-
 	if len(vaults) == 0 {
 		logger.Info("no vaults confirmed")
 		return nil
 	}
 
-	// Phase 3: Persist confirmed vaults
 	deployBlock, err := morpho_indexer.MorphoBlueDeployBlock(cfg.chainID)
 	if err != nil {
 		return fmt.Errorf("getting deploy block: %w", err)
 	}
-	err = persistVaults(ctx, pool, logger, vaults, cfg.chainID, deployBlock, buildReg.BuildID())
-	if err != nil {
+	if err := persistVaults(ctx, pool, logger, vaults, cfg.chainID, deployBlock, buildID); err != nil {
 		return fmt.Errorf("persisting vaults: %w", err)
 	}
-
-	logger.Info("backfill complete", "vaultsPersisted", len(vaults))
+	logger.Info("vaults persisted", "count", len(vaults))
 	return nil
 }
 
@@ -293,7 +320,7 @@ func scanBlockRange(
 	var wg sync.WaitGroup
 	for range numWorkers {
 		wg.Add(1)
-		go downloadWorker(ctx, logger, s3Reader, extractor, bucket, workCh, candidateCh, prog, &firstErr, cancelScan, &wg)
+		go downloadWorker(ctx, s3Reader, extractor, bucket, workCh, candidateCh, prog, &firstErr, cancelScan, &wg)
 	}
 
 	// Feed block keys into the work channel.
@@ -418,7 +445,6 @@ func logBlockGapsFromKeys(logger *slog.Logger, partitionPrefix string, keys []bl
 // downloadWorker pulls block work items from workCh, downloads and processes each one.
 func downloadWorker(
 	ctx context.Context,
-	logger *slog.Logger,
 	s3Reader outbound.S3Reader,
 	extractor *morpho_indexer.EventExtractor,
 	bucket string,
@@ -447,7 +473,11 @@ func downloadWorker(
 		prog.downloadCount.Add(1)
 
 		extractStart := time.Now()
-		extractCandidatesFromReceipts(logger, receipts, extractor, morphoBlueAddr, work.blockNumber, candidateCh)
+		if err := extractCandidatesFromReceipts(receipts, extractor, morphoBlueAddr, work.blockNumber, candidateCh); err != nil {
+			firstErr.CompareAndSwap(nil, fmt.Errorf("extracting candidates from %s: %w", work.key, err))
+			cancelScan()
+			return
+		}
 		prog.extractDurationMs.Add(time.Since(extractStart).Milliseconds())
 		prog.blocksProcessed.Add(1)
 	}
@@ -690,13 +720,12 @@ func downloadReceipts(
 // internal/services/morpho_indexer/event_extractor.go) so the discovery
 // contract stays uniform across the two code paths.
 func extractCandidatesFromReceipts(
-	logger *slog.Logger,
 	receipts []shared.TransactionReceipt,
 	extractor *morpho_indexer.EventExtractor,
 	morphoBlueAddr common.Address,
 	blockNumber int64,
 	candidateCh chan<- candidateEntry,
-) {
+) error {
 	for _, receipt := range receipts {
 		for _, log := range receipt.Logs {
 			logAddr := common.HexToAddress(log.Address)
@@ -704,30 +733,39 @@ func extractCandidatesFromReceipts(
 
 			switch {
 			case isMorphoBlue && extractor.IsMorphoBlueEvent(log):
-				emitMorphoBlueCandidates(logger, extractor, log, blockNumber, candidateCh)
+				if err := emitMorphoBlueCandidates(extractor, log, blockNumber, candidateCh); err != nil {
+					return err
+				}
 			case !isMorphoBlue && extractor.IsVaultActivityEvent(log):
 				candidateCh <- candidateEntry{address: logAddr, firstBlock: blockNumber}
 			}
 		}
 	}
+	return nil
 }
 
 // emitMorphoBlueCandidates extracts caller/onBehalf addresses from a Morpho
 // Blue event log and sends them to candidateCh.
+//
+// The caller only reaches here for a log whose topic0 is a recognised Morpho
+// Blue event (extractor.IsMorphoBlueEvent), so a decode failure is data drift
+// on a known-relevant log, not an uninteresting event — it is returned as a
+// hard error that fails the run. This mirrors the live indexer's
+// processMorphoBlueLog (internal/services/morpho_indexer/service.go), which
+// likewise surfaces an ExtractMorphoBlueEvent failure rather than skipping the
+// log; the live discovery pre-walk can afford to WARN-and-continue only because
+// processMorphoBlueLog re-extracts the same log in the same pass. The backfiller
+// has no such second pass, so swallowing here would silently drop this log's
+// candidate vaults from the backfill.
 func emitMorphoBlueCandidates(
-	logger *slog.Logger,
 	extractor *morpho_indexer.EventExtractor,
 	log shared.Log,
 	blockNumber int64,
 	candidateCh chan<- candidateEntry,
-) {
+) error {
 	event, err := extractor.ExtractMorphoBlueEvent(log)
 	if err != nil {
-		logger.Warn("failed to extract Morpho Blue event",
-			"block", blockNumber,
-			"txHash", log.TransactionHash,
-			"error", err)
-		return
+		return fmt.Errorf("extracting Morpho Blue event (block %d, tx %s): %w", blockNumber, log.TransactionHash, err)
 	}
 
 	for _, addr := range morpho_indexer.MorphoBlueVaultCandidates(event) {
@@ -736,6 +774,7 @@ func emitMorphoBlueCandidates(
 		}
 		candidateCh <- candidateEntry{address: addr, firstBlock: blockNumber}
 	}
+	return nil
 }
 
 // persistVaults stores confirmed vaults in the database, creating the protocol

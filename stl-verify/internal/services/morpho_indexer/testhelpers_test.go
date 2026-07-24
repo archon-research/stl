@@ -43,6 +43,7 @@ type serviceTestHarness struct {
 	morphoBlueEventsABI   *abi.ABI
 	metaMorphoEventsABI   *abi.ABI
 	metaMorphoV2AccrueABI *abi.ABI
+	vaultV2EventsABI      *abi.ABI
 }
 
 func newTestHarness(t *testing.T) *serviceTestHarness {
@@ -124,6 +125,10 @@ func newTestHarness(t *testing.T) *serviceTestHarness {
 	if err != nil {
 		t.Fatalf("GetMetaMorphoV2AccrueInterestABI: %v", err)
 	}
+	vaultV2EventsABI, err := abis.GetVaultV2EventsABI()
+	if err != nil {
+		t.Fatalf("GetVaultV2EventsABI: %v", err)
+	}
 
 	return &serviceTestHarness{
 		t:                t,
@@ -145,6 +150,30 @@ func newTestHarness(t *testing.T) *serviceTestHarness {
 		morphoBlueEventsABI:   morphoBlueEventsABI,
 		metaMorphoEventsABI:   metaMorphoEventsABI,
 		metaMorphoV2AccrueABI: v2AccrueABI,
+		vaultV2EventsABI:      vaultV2EventsABI,
+	}
+}
+
+// makeV2VaultLog builds a VaultV2 event log emitted by vaultAddr: event.ID plus
+// already-encoded indexed topics, with the non-indexed args ABI-packed into
+// data. Mirrors the extractor test's makeV2Log but stamps the vault address and
+// a log index so it flows through processReceipt as a known-vault event.
+func (h *serviceTestHarness) makeV2VaultLog(event abi.Event, vaultAddr common.Address, indexed []common.Hash, nonIndexed ...any) shared.Log {
+	data, err := event.Inputs.NonIndexed().Pack(nonIndexed...)
+	if err != nil {
+		panic(fmt.Sprintf("makeV2VaultLog(%s): %v", event.Name, err))
+	}
+	topics := make([]string, 0, len(indexed)+1)
+	topics = append(topics, event.ID.Hex())
+	for _, hsh := range indexed {
+		topics = append(topics, hsh.Hex())
+	}
+	return shared.Log{
+		Address:         vaultAddr.Hex(),
+		Topics:          topics,
+		Data:            common.Bytes2Hex(data),
+		TransactionHash: testTxHash,
+		LogIndex:        "0x0",
 	}
 }
 
@@ -378,6 +407,28 @@ func (h *serviceTestHarness) vaultMetadataExecuteFn(name, symbol string, asset c
 		}
 		return h.vaultDetailResults(name, symbol, decimals, isV1_1), nil
 	}
+}
+
+// assertMulticallPinnedViaHash asserts the multicaller recorded at least one
+// invocation whose first call matches pred, that it arrived through ExecuteAtHash
+// (not the number-pinned Execute), and that it was pinned to wantHash. Used to
+// prove reorg-sensitive reads (e.g. the versioned adapter-set enumeration) are
+// hash-pinned.
+func (h *serviceTestHarness) assertMulticallPinnedViaHash(t *testing.T, wantHash common.Hash, name string, pred func(outbound.Call) bool) {
+	t.Helper()
+	for _, inv := range h.multicaller.Invocations {
+		if len(inv.Calls) == 0 || !pred(inv.Calls[0]) {
+			continue
+		}
+		if !inv.ViaHash {
+			t.Errorf("%s must be hash-pinned (ExecuteAtHash), but it went through Execute", name)
+		}
+		if inv.BlockHash != wantHash {
+			t.Errorf("%s pinned to %s, want %s", name, inv.BlockHash.Hex(), wantHash.Hex())
+		}
+		return
+	}
+	t.Errorf("%s: no matching multicall invocation was recorded", name)
 }
 
 // hasSameSelector returns true if a and b share the same first 4 bytes (the

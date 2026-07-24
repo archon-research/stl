@@ -41,4 +41,36 @@ type MorphoRepository interface {
 
 	// SaveVaultPosition saves a user vault position snapshot within an external transaction.
 	SaveVaultPosition(ctx context.Context, tx pgx.Tx, position *entity.MorphoVaultPosition) error
+
+	// GetOrCreateAdapter retrieves or creates a VaultV2 liquidity adapter registry
+	// row, keyed on the ACTIVE incarnation of (morpho_vault_id, address): if an
+	// active row exists it is reused and its added_at_block converges downward to
+	// the earliest observation (LEAST), so a lazily-registered adapter collapses
+	// onto the true AddAdapter block once the backfiller replays it, rather than
+	// creating a second active row. A distinct row is created only for a re-add
+	// after removal (the UNIQUE key includes added_at_block). Returns the row's ID.
+	GetOrCreateAdapter(ctx context.Context, tx pgx.Tx, adapter *entity.MorphoAdapter) (int64, error)
+
+	// MarkAdapterRemoved records the block at which an adapter was de-registered.
+	// The removal is idempotent for the same block (backfill replays); an unknown
+	// adapter or one already removed at a different block is a data bug and errors.
+	MarkAdapterRemoved(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, removedAtBlock int64) error
+
+	// GetActiveAdapter retrieves the active (not-yet-removed) adapter for a vault
+	// and address, reading within the caller's transaction so it sees writes made
+	// earlier in the same tx. Returns nil, nil if there is no active adapter.
+	GetActiveAdapter(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte) (*entity.MorphoAdapter, error)
+
+	// GetActiveAdaptersByVault retrieves all currently-active adapters for a vault.
+	GetActiveAdaptersByVault(ctx context.Context, morphoVaultID int64) ([]*entity.MorphoAdapter, error)
+
+	// SaveAdapterState saves an adapter realAssets() snapshot within an external transaction.
+	SaveAdapterState(ctx context.Context, tx pgx.Tx, state *entity.MorphoAdapterState) error
+
+	// SaveVaultCap saves a VaultV2 allocation-cap snapshot within an external transaction.
+	SaveVaultCap(ctx context.Context, tx pgx.Tx, vaultCap *entity.MorphoVaultCap) error
+
+	// UpdateVaultFeeConfig applies a partial fee-configuration update to a vault.
+	// Nil fields in the update leave their columns untouched; an unknown vault errors.
+	UpdateVaultFeeConfig(ctx context.Context, tx pgx.Tx, morphoVaultID int64, update entity.MorphoVaultFeeUpdate) error
 }
