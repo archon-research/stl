@@ -34,6 +34,12 @@ func BuildSourceRegistry(mc outbound.Multicaller, logger *slog.Logger) (*SourceR
 	}
 	registry.Register(NewBalanceOfSource(mc, erc20ABI, atokenReadABI, logger))
 
+	erc7540, err := NewERC7540Source(mc, logger)
+	if err != nil {
+		return nil, fmt.Errorf("erc7540 source: %w", err)
+	}
+	registry.Register(erc7540)
+
 	erc4626, err := NewERC4626Source(mc, logger)
 	if err != nil {
 		return nil, fmt.Errorf("erc4626 source: %w", err)

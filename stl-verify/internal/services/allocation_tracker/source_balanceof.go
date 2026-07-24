@@ -38,11 +38,10 @@ func NewBalanceOfSource(multicaller outbound.Multicaller, erc20ABI *abi.ABI, ato
 			"securitize": true,
 			"superstate": true,
 			"proxy":      true,
-			// Centrifuge entries are balanceOf-able ERC20s: the axis-synome export
-			// resolves each ERC-7540 vault to its share() token, and Spark's JTRSY is
-			// a direct ERC20, so the position is balanceOf of the token itself.
+			// centrifuge is intentionally absent: as of axis-synome 0.2.0 those
+			// entries point at ERC-7540 vault addresses, which are not tokens and
+			// revert on balanceOf/decimals. ERC7540Source owns them (VEC-337 part 2).
 			// (centrifuge_feeder is a different mechanism and stays on the stub source.)
-			"centrifuge": true,
 		},
 	}
 }
