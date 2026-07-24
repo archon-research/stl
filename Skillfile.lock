@@ -1,6 +1,14 @@
 {
+  "github/skill/db-query": {
+    "sha": "107b1354f6fd11381e559f73a4ca80e001655545",
+    "raw_url": "https://api.github.com/repos/archon-research/skills/contents/db-query?ref=107b1354f6fd11381e559f73a4ca80e001655545"
+  },
   "github/skill/gh-stack": {
     "sha": "171d055ff1f01346abfde1a0633ae9f871f39fe7",
     "raw_url": "https://raw.githubusercontent.com/github/gh-stack/171d055ff1f01346abfde1a0633ae9f871f39fe7/skills/gh-stack/SKILL.md"
+  },
+  "github/skill/verify-deploy": {
+    "sha": "107b1354f6fd11381e559f73a4ca80e001655545",
+    "raw_url": "https://api.github.com/repos/archon-research/skills/contents/verify-deploy?ref=107b1354f6fd11381e559f73a4ca80e001655545"
   }
 }
