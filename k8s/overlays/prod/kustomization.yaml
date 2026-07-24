@@ -3,6 +3,16 @@ kind: Kustomization
 
 namespace: vector
 
+# TEMPORARY (VEC-499 incident): the avalanche-allocation-tracker is 100% erroring
+# — its periodic sweep does an on-chain decimals() read of the GACLO-1 CLO's
+# underlying (mainnet USDC, 0xA0b8…) on Avalanche C-Chain, where that address has
+# no code, which fails the whole sweep and stalls the chain. Scaled to 0 to stop
+# the alert churn while the cross-chain-underlying fix lands. Revert (or remove
+# this override) once the tracker is fixed.
+replicas:
+  - name: avalanche-allocation-tracker
+    count: 0
+
 resources:
   - ../../base/watcher
   - ../../base/backup-worker
