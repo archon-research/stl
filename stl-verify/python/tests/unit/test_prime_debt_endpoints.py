@@ -84,6 +84,37 @@ def test_list_prime_debt_snapshots_returns_rows():
         app.dependency_overrides.pop(prime_debts._get_prime_debt_service, None)
 
 
+def test_list_prime_debt_snapshots_serializes_large_wad_as_plain_string():
+    # asyncpg decodes a large trailing-zero NUMERIC into a positive-exponent
+    # Decimal (here 2.570714E+27). It must reach the client as a plain integer
+    # string, not scientific notation — a BigInt consumer reads "2.57...E+27" as 0.
+    from app.api.v1 import prime_debts
+
+    positive_exponent_wad = Decimal((0, (2, 5, 7, 0, 7, 1, 4), 21))
+    assert "E+" in str(positive_exponent_wad)  # guard: the input really is exponential
+
+    snap = PrimeDebtSnapshot(
+        prime_address=_VALID_ADDR,
+        prime_name="grove",
+        ilk_name="ALLOCATOR-BLOOM-A",
+        debt_wad=positive_exponent_wad,
+        block_number=22000123,
+        block_version=0,
+        synced_at=datetime(2026, 3, 5, 12, 0, tzinfo=UTC),
+    )
+    service = _make_service(snapshots=[snap])
+    app.dependency_overrides[prime_debts._get_prime_debt_service] = _override_service(service)
+    try:
+        client = TestClient(app)
+
+        response = client.get(f"/v1/primes/{_VALID_ADDR}/debt")
+
+        assert response.status_code == 200
+        assert response.json()["data"][0]["debt_wad"] == "2570714000000000000000000000"
+    finally:
+        app.dependency_overrides.pop(prime_debts._get_prime_debt_service, None)
+
+
 def test_list_prime_debt_snapshots_returns_empty_when_prime_has_no_snapshots():
     from app.api.v1 import prime_debts
 

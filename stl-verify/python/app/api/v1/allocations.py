@@ -16,6 +16,7 @@ from app.api.time_series import TimeSeriesWindow, apply_cache_control, build_win
 from app.config import get_settings
 from app.domain.entities.allocation import AnchorageCustodyHolding, DirectAssetHolding, EthAddress
 from app.domain.entities.allocation_category import AllocationCategory
+from app.domain.serialization import PlainDecimal
 from app.domain.time_series import TimeSeriesQuery, enforce_filter_for_window
 from app.services.allocation_category_service import AllocationCategoryService
 from app.services.allocation_service import AllocationService
@@ -121,11 +122,11 @@ class AllocationResponse(BaseModel):
         description="Protocol the position is held in. `null` for direct holdings (no registered wrapper).",
         examples=["aave-v3"],
     )
-    balance: Decimal = Field(
+    balance: PlainDecimal = Field(
         description="Balance held by the prime, in token units. Decimal serialized as a JSON string.",
         examples=["1234567.89"],
     )
-    amount_usd: Decimal | None = Field(
+    amount_usd: PlainDecimal | None = Field(
         default=None,
         description="USD value of the position when a price is available; `null` otherwise.",
         examples=["1234567.89"],
@@ -140,7 +141,7 @@ class AllocationResponse(BaseModel):
         description="Direction of the most recent activity (`in`, `out`, `sweep`), or `null`.",
         examples=["out"],
     )
-    latest_activity_amount: Decimal | None = Field(
+    latest_activity_amount: PlainDecimal | None = Field(
         default=None,
         description=(
             "Token-unit magnitude of the most recent activity (unsigned). Decimal serialized as a "
@@ -198,23 +199,23 @@ class CapitalMetricsResponse(BaseModel):
 
     prime_id: str = Field(description="Stable surrogate id for the prime.", examples=["prime-acme"])
     prime_name: str = Field(description="Human-readable prime name.", examples=["Acme Prime"])
-    exposure: Decimal = Field(
+    exposure: PlainDecimal = Field(
         description="Total USD exposure across the prime's allocations (upstream `exposure`).",
         examples=["1900000000"],
     )
-    capital_buffer: Decimal = Field(
+    capital_buffer: PlainDecimal = Field(
         description="`max(total_risk_capital - required_risk_capital, 0)` — unencumbered risk capital (USD).",
         examples=["2500000"],
     )
-    required_risk_capital: Decimal = Field(
+    required_risk_capital: PlainDecimal = Field(
         description="Required Risk Capital (RRC) reported by upstream `financial_rrc` (USD).",
         examples=["7500000"],
     )
-    total_risk_capital: Decimal = Field(
+    total_risk_capital: PlainDecimal = Field(
         description="Total Risk Capital reported by upstream `total_rc` (USD).",
         examples=["10000000"],
     )
-    encumbrance_ratio: Decimal | None = Field(
+    encumbrance_ratio: PlainDecimal | None = Field(
         default=None,
         description=(
             "Required Risk Capital as a share of Total Risk Capital "
@@ -270,11 +271,11 @@ class AllocationActivityResponse(BaseModel):
     token_id: int = Field(description="Surrogate id of the receipt token involved.", examples=[42])
     token_symbol: str | None = Field(default=None, description="Receipt-token symbol, when known.", examples=["aUSDC"])
     action_type: str = Field(description="One of `in`, `out`, `sweep`.", examples=["in"])
-    tx_amount: Decimal = Field(
+    tx_amount: PlainDecimal = Field(
         description="Token-unit amount moved by this event. Decimal serialized as a JSON string.",
         examples=["1000.5"],
     )
-    balance: Decimal = Field(
+    balance: PlainDecimal = Field(
         description="Resulting balance after the event, in token units.",
         examples=["1234567.89"],
     )
@@ -670,11 +671,11 @@ class AllocationActivityBucketResponse(BaseModel):
 
     bucket_start: datetime = Field(description="Inclusive start of the time bucket (UTC).")
     event_count: int = Field(description="Number of activity events in the bucket.", examples=[42])
-    total_tx_amount: Decimal = Field(
+    total_tx_amount: PlainDecimal = Field(
         description="Sum of `tx_amount` across the bucket's events, serialized as a JSON string.",
         examples=["1234567890000000000000"],
     )
-    net_flow_usd: Decimal = Field(
+    net_flow_usd: PlainDecimal = Field(
         description=(
             "Signed net flow valued in USD (inflows positive, outflows negative). Only receipt-token "
             "flows are valued: each is converted to underlying units at its row's share ratio "

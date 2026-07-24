@@ -480,6 +480,49 @@ export function formatDurationFromSeconds(
   return `${days}d ${hours % 24}h`;
 }
 
+// Expand exponential notation ("2.5707140E+27") into a plain decimal string
+// ("2570714000000000000000000000"). BigInt rejects exponents, so a wad value
+// serialized in scientific form would otherwise parse to just its leading digit
+// and render as 0. The API contract promises plain strings; this is a
+// defense-in-depth guard against a Decimal that slips through in scientific
+// form. Returns null for non-numeric input.
+function toPlainDecimalString(value: string): string | null {
+  const trimmed = value.trim();
+  if (!/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(trimmed)) {
+    return null;
+  }
+
+  const [mantissa, expPart] = trimmed.split(/[eE]/);
+  if (expPart === undefined) {
+    return trimmed;
+  }
+
+  // A real 1e18-scaled wad has a tiny exponent; a wildly out-of-range one would
+  // only make `'0'.repeat(...)` below throw. Reject rather than expand it.
+  const exponent = Number(expPart);
+  if (Math.abs(exponent) > 1000) {
+    return null;
+  }
+
+  const negative = mantissa.startsWith('-');
+  const unsigned = mantissa.replace(/^[+-]/, '');
+  const [intRaw, fracRaw = ''] = unsigned.split('.');
+  const digits = intRaw + fracRaw;
+  // Where the decimal point lands, counted in digits from the left of `digits`.
+  const pointPos = intRaw.length + exponent;
+
+  let result: string;
+  if (pointPos <= 0) {
+    result = `0.${'0'.repeat(-pointPos)}${digits}`;
+  } else if (pointPos >= digits.length) {
+    result = digits + '0'.repeat(pointPos - digits.length);
+  } else {
+    result = `${digits.slice(0, pointPos)}.${digits.slice(pointPos)}`;
+  }
+
+  return negative ? `-${result}` : result;
+}
+
 export function formatWadValue(
   value: number | string | null | undefined,
 ): string {
@@ -487,10 +530,16 @@ export function formatWadValue(
     return '—';
   }
 
+  const plain = toPlainDecimalString(String(value));
+  if (plain === null) {
+    logging.warn(`Failed to parse WAD value: "${value}"`, {
+      context: 'formatWadValue',
+    });
+    return '—';
+  }
+
   try {
-    const normalized =
-      typeof value === 'number' ? Math.trunc(value).toString() : String(value);
-    const wei = BigInt(normalized.split('.')[0]);
+    const wei = BigInt(plain.split('.')[0] || '0');
     const wad = 10n ** 18n;
     const whole = wei / wad;
     const fraction = wei % wad;
