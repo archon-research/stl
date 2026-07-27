@@ -1,13 +1,14 @@
 package main
 
-// This file is the static (non-per-table) SQL of the bucket-1 migration, embedded
-// verbatim from db/migrations/20260706_140000_create_transformed_bucket1.sql: the
-// header (schema + _sources registry) and the tail (queue-status view, parity
-// ledger machinery, grants, migration-tracking insert). These do not vary per
-// table, so the generator emits them unchanged; the regen-diff test compares them
-// (normalised) against the committed migration.
+// This file is the static (non-per-table) SQL of each emitted migration, embedded
+// verbatim from the committed file: a header (schema + _sources registry) and a
+// tail (parity ledger machinery, grants, migration-tracking insert). These do not
+// vary per table, so the generator emits them unchanged; the regen-diff test
+// compares them (normalised) against the committed migration. The queue-status
+// view sits between the two and IS generated, from the cumulative source list, so
+// a migration that adds a table cannot forget to list it there.
 
-const header = `-- Transformation layer, bucket 1 (VEC-484): 13 governed tables canonicalised 1:1 from raw
+const bucket1Header = `-- Transformation layer, bucket 1 (VEC-484): 13 governed tables canonicalised 1:1 from raw
 -- (rename / cast / dimension-fill), each a hypertable with a PK derived from the raw PK.
 --
 -- Refresh model: a trigger-maintained change queue (replaces the build_id watermark, which was
@@ -57,33 +58,7 @@ COMMENT ON COLUMN transformed._sources.source IS 'PK. Transformed table name who
 -- ===== morpho_market_state =====
 `
 
-const tail = `CREATE OR REPLACE VIEW transformed._queue_status AS
-SELECT 'morpho_market_state'::text AS source, count(*) AS pending, min(enqueued_at) AS oldest_enqueued_at FROM transformed."_pending_morpho_market_state"
-UNION ALL
-SELECT 'morpho_market_position'::text AS source, count(*) AS pending, min(enqueued_at) AS oldest_enqueued_at FROM transformed."_pending_morpho_market_position"
-UNION ALL
-SELECT 'morpho_vault_state'::text AS source, count(*) AS pending, min(enqueued_at) AS oldest_enqueued_at FROM transformed."_pending_morpho_vault_state"
-UNION ALL
-SELECT 'morpho_vault_position'::text AS source, count(*) AS pending, min(enqueued_at) AS oldest_enqueued_at FROM transformed."_pending_morpho_vault_position"
-UNION ALL
-SELECT 'fluid_vault_state'::text AS source, count(*) AS pending, min(enqueued_at) AS oldest_enqueued_at FROM transformed."_pending_fluid_vault_state"
-UNION ALL
-SELECT 'token_total_supply'::text AS source, count(*) AS pending, min(enqueued_at) AS oldest_enqueued_at FROM transformed."_pending_token_total_supply"
-UNION ALL
-SELECT 'onchain_token_price'::text AS source, count(*) AS pending, min(enqueued_at) AS oldest_enqueued_at FROM transformed."_pending_onchain_token_price"
-UNION ALL
-SELECT 'maple_loan_state'::text AS source, count(*) AS pending, min(enqueued_at) AS oldest_enqueued_at FROM transformed."_pending_maple_loan_state"
-UNION ALL
-SELECT 'maple_loan_collateral'::text AS source, count(*) AS pending, min(enqueued_at) AS oldest_enqueued_at FROM transformed."_pending_maple_loan_collateral"
-UNION ALL
-SELECT 'maple_pool_state'::text AS source, count(*) AS pending, min(enqueued_at) AS oldest_enqueued_at FROM transformed."_pending_maple_pool_state"
-UNION ALL
-SELECT 'maple_sky_strategy_state'::text AS source, count(*) AS pending, min(enqueued_at) AS oldest_enqueued_at FROM transformed."_pending_maple_sky_strategy_state"
-UNION ALL
-SELECT 'maple_syrup_global_state'::text AS source, count(*) AS pending, min(enqueued_at) AS oldest_enqueued_at FROM transformed."_pending_maple_syrup_global_state"
-UNION ALL
-SELECT 'offchain_token_price'::text AS source, count(*) AS pending, min(enqueued_at) AS oldest_enqueued_at FROM transformed."_pending_offchain_token_price";
-COMMENT ON VIEW transformed._queue_status IS '[Operational] Per-source pending-row count and oldest enqueue time across the transform change queues. oldest_enqueued_at lagging wall-clock = a stalled transform.';
+const bucket1Tail = `COMMENT ON VIEW transformed._queue_status IS '[Operational] Per-source pending-row count and oldest enqueue time across the transform change queues. oldest_enqueued_at lagging wall-clock = a stalled transform.';
 
 -- Raw-vs-transformed parity backstop (checkpointed incremental).
 -- A ledger holds a verified (raw, transformed, pending) count per source per UTC
@@ -322,5 +297,54 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA transformed GRANT EXECUTE ON FUNCTIONS TO stl
 
 INSERT INTO migrations (filename)
 VALUES ('20260706_140000_create_transformed_bucket1.sql')
+ON CONFLICT (filename) DO NOTHING;
+`
+
+// The static SQL of the morpho_adapter_state migration (VEC-218). It adds one
+// table to the layer bucket 1 established: the schema, the _sources registry and
+// the parity machinery already exist and are not re-emitted, so only the
+// lock_timeout guard and the grants bracket the generated block.
+
+const morphoAdapterStateHeader = `-- Transformation layer: morpho_adapter_state (VEC-218). One table added to the
+-- bucket-1 layer created by 20260706_140000_create_transformed_bucket1.sql,
+-- following the same recipe (hypertable + change queue + enqueue trigger +
+-- _run_/_bootstrap_ functions + a transformed._sources row), emitted by the same
+-- register-driven generator (cmd/util/gen-transformed) under the same regen-diff
+-- gate. Migrations are immutable, so an added table lands as a NEW file rather
+-- than an edit to bucket 1's; the schema, the _sources registry and the parity
+-- machinery already exist and are not re-created here.
+--
+-- morpho_adapter_state is the first source whose dimension fills are TWO-HOP:
+-- chain_id / protocol_id live on morpho_vault, one join further out than the
+-- adapter, so each is a correlated subquery keyed on the joined morpho_adapter
+-- row rather than a plain parent column.
+--
+-- Its sibling VaultV2 tables (morpho_vault_cap, morpho_vault_fee) stay deferred:
+-- the transform layer's parity backstop (transformed._parity_refresh /
+-- _parity_verify_all) resolves a source's time column from
+-- timescaledb_information.dimensions and raises 'no time dimension' for a
+-- non-hypertable, so a plain raw table cannot be registered in
+-- transformed._sources without failing the worker on every tick.
+--
+-- Idempotent / non-destructive on the same terms as bucket 1: table, queue,
+-- trigger and functions are all created IF NOT EXISTS / OR REPLACE and the PK
+-- ALTER is guarded, so re-applying is a no-op.
+
+-- Fail fast rather than convoy ingestion: a bounded lock_timeout makes the migration abort
+-- and roll back if it cannot acquire a lock promptly, instead of blocking raw writers.
+SET LOCAL lock_timeout = '10s';
+
+-- ===== morpho_adapter_state =====
+`
+
+const morphoAdapterStateTail = `-- Grants: bucket 1's ALTER DEFAULT PRIVILEGES already covers objects this migration
+-- creates, but only for the role that ran it. Re-granting explicitly makes the new
+-- table's access independent of which role applied bucket 1.
+GRANT SELECT ON ALL TABLES IN SCHEMA transformed TO stl_readonly;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA transformed TO stl_readwrite;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA transformed TO stl_readwrite;
+
+INSERT INTO migrations (filename)
+VALUES ('20260727_150000_create_transformed_morpho_adapter_state.sql')
 ON CONFLICT (filename) DO NOTHING;
 `

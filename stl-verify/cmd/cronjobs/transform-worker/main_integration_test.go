@@ -42,10 +42,11 @@ func TestTransformWorker_RunOnce(t *testing.T) {
 		t.Fatalf("second run: %v", err)
 	}
 
-	// The migration must register exactly the bucket-1 source set. This is the
-	// concrete migration's own test, so a missing (or extra) registration is a real
-	// regression that would leave a table unprocessed -- assert the exact set rather
-	// than a lower bound. Update this list when a later bucket actually lands.
+	// The migrations must register exactly this source set: bucket 1 plus every
+	// table a later migration added. This is the concrete migrations' own test, so a
+	// missing (or extra) registration is a real regression that would leave a table
+	// unprocessed -- assert the exact set rather than a lower bound. Update this list
+	// when another table lands.
 	want := []string{
 		"fluid_vault_state",
 		"maple_loan_collateral",
@@ -53,6 +54,7 @@ func TestTransformWorker_RunOnce(t *testing.T) {
 		"maple_pool_state",
 		"maple_sky_strategy_state",
 		"maple_syrup_global_state",
+		"morpho_adapter_state",
 		"morpho_market_position",
 		"morpho_market_state",
 		"morpho_vault_position",

@@ -13,12 +13,12 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-const migrationPath = "../../../db/migrations/20260706_140000_create_transformed_bucket1.sql"
+const migrationsDir = "../../../db/migrations/"
 
 // TestRegenDiff is the drift gate: it migrates a fresh DB, reads the raw schema of
-// the bucket-1 tables from information_schema, regenerates the bucket-1 migration
-// from the register + that schema, and asserts it matches the committed migration
-// after normalisation (SQL comments and whitespace stripped). It fails if the
+// every generated table from information_schema, regenerates each committed
+// migration from the register + that schema, and asserts it matches the committed
+// file after normalisation (SQL comments and whitespace stripped). It fails if the
 // register or a raw table changed without regenerating, or if the CTAS / _run /
 // _bootstrap projections of a table were hand-edited out of sync.
 func TestRegenDiff(t *testing.T) {
@@ -29,20 +29,32 @@ func TestRegenDiff(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load register: %v", err)
 	}
-	raw, err := FetchRawSchemas(context.Background(), pool, Bucket1Tables())
+	raw, err := FetchRawSchemas(context.Background(), pool, AllTables())
 	if err != nil {
 		t.Fatalf("fetch raw schemas: %v", err)
 	}
-	got, err := GenerateBucket1(reg, raw)
-	if err != nil {
-		t.Fatalf("generate: %v", err)
-	}
-	want, err := os.ReadFile(migrationPath)
-	if err != nil {
-		t.Fatalf("read committed migration: %v", err)
-	}
 
-	ng, nw := normalizeSQL(got), normalizeSQL(string(want))
+	for _, spec := range MigrationSpecs() {
+		t.Run(spec.file, func(t *testing.T) {
+			got, err := Generate(spec, reg, raw)
+			if err != nil {
+				t.Fatalf("generate: %v", err)
+			}
+			want, err := os.ReadFile(migrationsDir + spec.file)
+			if err != nil {
+				t.Fatalf("read committed migration: %v", err)
+			}
+			assertSameSQL(t, got, string(want))
+		})
+	}
+}
+
+// assertSameSQL compares the generated and committed SQL after normalisation and,
+// on a mismatch, reports the first diverging offset with surrounding context.
+func assertSameSQL(t *testing.T, got, want string) {
+	t.Helper()
+
+	ng, nw := normalizeSQL(got), normalizeSQL(want)
 	if ng == nw {
 		return
 	}
@@ -50,10 +62,7 @@ func TestRegenDiff(t *testing.T) {
 	for i < len(ng) && i < len(nw) && ng[i] == nw[i] {
 		i++
 	}
-	lo := i - 100
-	if lo < 0 {
-		lo = 0
-	}
+	lo := max(i-100, 0)
 	t.Fatalf("generated migration diverges from the committed file (normalised) at offset %d.\n"+
 		"Regenerate with `gen-transformed` after changing the register or a raw table.\n"+
 		"  context: %q\n  committed: %q\n  generated: %q",

@@ -80,10 +80,72 @@ var bucket1Tables = []string{
 	"offchain_token_price",
 }
 
-// Bucket1Tables returns the fixed set of bucket-1 table names, in migration order.
-func Bucket1Tables() []string {
-	out := make([]string, len(bucket1Tables))
-	copy(out, bucket1Tables)
+// The tables added by the morpho_adapter_state migration (VEC-218).
+var morphoAdapterStateTables = []string{
+	"morpho_adapter_state",
+}
+
+// migrationSpec is one emitted transformation-layer migration: the tables it
+// creates, the static SQL bracketing them, and the committed file the regen-diff
+// gate compares the result against. Migrations are immutable, so a table added
+// after a migration has shipped lands as a NEW spec (and a new file), never as an
+// edit to an existing one; sources accumulates across specs because the
+// _queue_status view the generator emits lists every source registered so far.
+type migrationSpec struct {
+	file    string
+	tables  []string
+	sources []string
+	header  string
+	tail    string
+}
+
+// migrationSpecs are the emitted migrations, oldest first. Adding a table to the
+// layer means appending a spec here, not extending an earlier one.
+var migrationSpecs = []migrationSpec{
+	{
+		file:    "20260706_140000_create_transformed_bucket1.sql",
+		tables:  bucket1Tables,
+		sources: bucket1Tables,
+		header:  bucket1Header,
+		tail:    bucket1Tail,
+	},
+	{
+		file:    "20260727_150000_create_transformed_morpho_adapter_state.sql",
+		tables:  morphoAdapterStateTables,
+		sources: slices.Concat(bucket1Tables, morphoAdapterStateTables),
+		header:  morphoAdapterStateHeader,
+		tail:    morphoAdapterStateTail,
+	},
+}
+
+// MigrationSpecs returns the emitted migrations, oldest first.
+func MigrationSpecs() []migrationSpec {
+	out := make([]migrationSpec, len(migrationSpecs))
+	copy(out, migrationSpecs)
+	return out
+}
+
+// SpecFor returns the spec that emits the named committed migration file.
+func SpecFor(file string) (migrationSpec, error) {
+	for _, s := range migrationSpecs {
+		if s.file == file {
+			return s, nil
+		}
+	}
+	var names []string
+	for _, s := range migrationSpecs {
+		names = append(names, s.file)
+	}
+	return migrationSpec{}, fmt.Errorf("no generated migration named %q; known migrations: %s", file, strings.Join(names, ", "))
+}
+
+// AllTables returns every table the generator emits, across all migrations, in
+// migration order. It is what the raw-schema fetch is keyed on.
+func AllTables() []string {
+	var out []string
+	for _, s := range migrationSpecs {
+		out = append(out, s.tables...)
+	}
 	return out
 }
 
