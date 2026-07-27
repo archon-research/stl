@@ -77,6 +77,15 @@ type replayFixture struct {
 		AbsoluteCap string `json:"absoluteCap"`
 		RelativeCap string `json:"relativeCap"`
 	} `json:"capStates"`
+	// FeeStates is the recorded end-of-block full fee config (both fees + both
+	// recipients), keyed by block HASH — the hash-pinned getVaultFees read the
+	// fee handler issues. Values are real chain data; never hand-edit.
+	FeeStates map[string]struct {
+		PerformanceFee          string `json:"performanceFee"`
+		ManagementFee           string `json:"managementFee"`
+		PerformanceFeeRecipient string `json:"performanceFeeRecipient"`
+		ManagementFeeRecipient  string `json:"managementFeeRecipient"`
+	} `json:"feeStates"`
 	Events []shared.Log `json:"events"`
 }
 
@@ -102,7 +111,7 @@ func TestReplaySparkUSDTbcV2Events(t *testing.T) {
 	assertAdapterRow(t, ctx, pool, vaultID, fx)
 	assertAdapterStateRows(t, ctx, pool, vaultID, fx)
 	assertVaultCapRows(t, ctx, pool, vaultID, fx)
-	assertVaultFeeColumns(t, ctx, pool, vaultID, fx)
+	assertVaultFeeRows(t, ctx, pool, vaultID, fx)
 	assertProtocolEventRows(t, ctx, pool, fx)
 
 	// Idempotency: a second replay with the same service (same build_id) must be
@@ -256,6 +265,28 @@ func newFixtureMulticaller(t *testing.T, fx *replayFixture) *testutil.MockMultic
 		capStates[common.HexToHash(hexHash)] = inner
 	}
 
+	// feeStates[blockHash] = the 4 fee-getter return words (performanceFee,
+	// managementFee, performanceFeeRecipient, managementFeeRecipient), in the
+	// order getVaultFees packs them, mirroring the hash-pinned read the fee
+	// handler issues.
+	feeStates := make(map[common.Hash][4][]byte, len(fx.FeeStates))
+	for hexHash, cfg := range fx.FeeStates {
+		perfFee, ok := new(big.Int).SetString(cfg.PerformanceFee, 10)
+		if !ok {
+			t.Fatalf("fixture performanceFee %q is not a decimal integer", cfg.PerformanceFee)
+		}
+		mgmtFee, ok := new(big.Int).SetString(cfg.ManagementFee, 10)
+		if !ok {
+			t.Fatalf("fixture managementFee %q is not a decimal integer", cfg.ManagementFee)
+		}
+		feeStates[common.HexToHash(hexHash)] = [4][]byte{
+			common.LeftPadBytes(perfFee.Bytes(), 32),
+			common.LeftPadBytes(mgmtFee.Bytes(), 32),
+			common.LeftPadBytes(common.HexToAddress(cfg.PerformanceFeeRecipient).Bytes(), 32),
+			common.LeftPadBytes(common.HexToAddress(cfg.ManagementFeeRecipient).Bytes(), 32),
+		}
+	}
+
 	mc.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 		if len(calls) == 2 && calls[0].Target == adapter && calls[1].Target == adapter &&
 			calls[0].AllowFailure && calls[1].AllowFailure {
@@ -294,6 +325,21 @@ func newFixtureMulticaller(t *testing.T, fx *replayFixture) *testutil.MockMultic
 			return []outbound.Result{
 				{Success: true, ReturnData: common.LeftPadBytes(pair[0].Bytes(), 32)},
 				{Success: true, ReturnData: common.LeftPadBytes(pair[1].Bytes(), 32)},
+			}, nil
+		}
+		// Vault fees: performanceFee + managementFee + performanceFeeRecipient +
+		// managementFeeRecipient, all four to the vault.
+		if len(calls) == 4 && calls[0].Target == vault && calls[1].Target == vault &&
+			calls[2].Target == vault && calls[3].Target == vault {
+			words, ok := feeStates[blockHash]
+			if !ok {
+				return nil, fmt.Errorf("fake multicaller: no fixture feeStates for block hash %s", blockHash.Hex())
+			}
+			return []outbound.Result{
+				{Success: true, ReturnData: words[0]},
+				{Success: true, ReturnData: words[1]},
+				{Success: true, ReturnData: words[2]},
+				{Success: true, ReturnData: words[3]},
 			}, nil
 		}
 		return nil, fmt.Errorf("fake multicaller: unexpected ExecuteAtHash shape (%d calls)", len(calls))
@@ -491,32 +537,48 @@ func assertVaultCapRows(t *testing.T, ctx context.Context, pool *pgxpool.Pool, v
 	}
 }
 
-func assertVaultFeeColumns(t *testing.T, ctx context.Context, pool *pgxpool.Pool, vaultID int64, fx *replayFixture) {
+// assertVaultFeeRows verifies the append-only fee snapshots: sparkUSDTbc fires
+// exactly two fee events (SetPerformanceFeeRecipient @24765788, SetPerformanceFee
+// @24765805), so morpho_vault_fee holds exactly two rows, and the latest row
+// (highest block) equals the recorded current full fee config.
+func assertVaultFeeRows(t *testing.T, ctx context.Context, pool *pgxpool.Pool, vaultID int64, fx *replayFixture) {
 	t.Helper()
 
+	var total int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM morpho_vault_fee WHERE morpho_vault_id = $1`, vaultID).Scan(&total); err != nil {
+		t.Fatalf("counting vault fees: %v", err)
+	}
+	if want := len(fx.FeeStates); total != want {
+		t.Errorf("morpho_vault_fee total rows = %d, want %d (one per fee event block)", total, want)
+	}
+
 	var (
-		perfFee   *string
-		mgmtFee   *string
+		perfFee   string
+		mgmtFee   string
 		perfRecip []byte
 		mgmtRecip []byte
 	)
 	if err := pool.QueryRow(ctx,
 		`SELECT performance_fee::text, management_fee::text, performance_fee_recipient, management_fee_recipient
-		 FROM morpho_vault WHERE id = $1`, vaultID).Scan(&perfFee, &mgmtFee, &perfRecip, &mgmtRecip); err != nil {
-		t.Fatalf("reading vault fee columns: %v", err)
+		 FROM morpho_vault_fee
+		 WHERE morpho_vault_id = $1
+		 ORDER BY block_number DESC, block_version DESC, processing_version DESC
+		 LIMIT 1`, vaultID).Scan(&perfFee, &mgmtFee, &perfRecip, &mgmtRecip); err != nil {
+		t.Fatalf("reading latest vault fee row: %v", err)
 	}
 
-	if perfFee == nil || *perfFee != fx.VaultConfigLatest.PerformanceFee {
-		t.Errorf("performance_fee = %v, want %s", perfFee, fx.VaultConfigLatest.PerformanceFee)
+	if perfFee != fx.VaultConfigLatest.PerformanceFee {
+		t.Errorf("latest performance_fee = %s, want %s", perfFee, fx.VaultConfigLatest.PerformanceFee)
 	}
-	if perfRecip == nil || common.BytesToAddress(perfRecip) != common.HexToAddress(fx.VaultConfigLatest.PerformanceFeeRecipient) {
-		t.Errorf("performance_fee_recipient = %x, want %s", perfRecip, fx.VaultConfigLatest.PerformanceFeeRecipient)
+	if mgmtFee != fx.VaultConfigLatest.ManagementFee {
+		t.Errorf("latest management_fee = %s, want %s", mgmtFee, fx.VaultConfigLatest.ManagementFee)
 	}
-	if mgmtFee != nil {
-		t.Errorf("management_fee = %s, want NULL (no SetManagementFee event)", *mgmtFee)
+	if common.BytesToAddress(perfRecip) != common.HexToAddress(fx.VaultConfigLatest.PerformanceFeeRecipient) {
+		t.Errorf("latest performance_fee_recipient = %x, want %s", perfRecip, fx.VaultConfigLatest.PerformanceFeeRecipient)
 	}
-	if mgmtRecip != nil {
-		t.Errorf("management_fee_recipient = %x, want NULL (no SetManagementFeeRecipient event)", mgmtRecip)
+	if common.BytesToAddress(mgmtRecip) != common.HexToAddress(fx.VaultConfigLatest.ManagementFeeRecipient) {
+		t.Errorf("latest management_fee_recipient = %x, want %s", mgmtRecip, fx.VaultConfigLatest.ManagementFeeRecipient)
 	}
 }
 
@@ -541,6 +603,7 @@ func snapshotRowCounts(t *testing.T, ctx context.Context, pool *pgxpool.Pool, va
 	counts["morpho_adapter_state"] = countRows(t, ctx, pool,
 		`SELECT count(*) FROM morpho_adapter_state s JOIN morpho_adapter a ON a.id = s.morpho_adapter_id WHERE a.morpho_vault_id = $1`, vaultID)
 	counts["morpho_vault_cap"] = countRows(t, ctx, pool, `SELECT count(*) FROM morpho_vault_cap WHERE morpho_vault_id = $1`, vaultID)
+	counts["morpho_vault_fee"] = countRows(t, ctx, pool, `SELECT count(*) FROM morpho_vault_fee WHERE morpho_vault_id = $1`, vaultID)
 	counts["protocol_event"] = countRows(t, ctx, pool,
 		`SELECT count(*) FROM protocol_event pe JOIN morpho_vault v ON v.address = pe.contract_address WHERE v.id = $1`, vaultID)
 	return counts

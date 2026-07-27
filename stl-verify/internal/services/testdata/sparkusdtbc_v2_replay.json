@@ -1,7 +1,8 @@
 {
  "source": {
-  "description": "Real recorded sparkUSDTbc (Morpho VaultV2) mainnet events, curated for the VaultV2 replay integration test.",
+  "description": "Real recorded sparkUSDTbc (Morpho VaultV2) mainnet events, curated for the VaultV2 replay integration test. feeStates carries the full on-chain fee config (performanceFee, managementFee, both recipients) read at each of the two fee-event block hashes.",
   "recorded": "2026-07-21",
+  "feeStatesRecorded": "2026-07-27",
   "chain": "Ethereum mainnet",
   "endpoint": "drpc (https://eth.drpc.org)",
   "headBlock": 25580045,
@@ -220,6 +221,20 @@
     "absoluteCap": "250000000000000",
     "relativeCap": "1000000000000000000"
    }
+  }
+ },
+ "feeStates": {
+  "0xea14dc22ade5273c988ac846024a8549ccfd34f05f4799ffbae8a61c706996f8": {
+   "performanceFee": "0",
+   "managementFee": "0",
+   "performanceFeeRecipient": "0x1601843c5E9bC251A3272907010AFa41Fa18347E",
+   "managementFeeRecipient": "0x0000000000000000000000000000000000000000"
+  },
+  "0xd8a9abbf0d8c314084b7a4a66649c245378136fbac91fb53f4d1e87ec08aa2e7": {
+   "performanceFee": "100000000000000000",
+   "managementFee": "0",
+   "performanceFeeRecipient": "0x1601843c5E9bC251A3272907010AFa41Fa18347E",
+   "managementFeeRecipient": "0x0000000000000000000000000000000000000000"
   }
  },
  "events": [

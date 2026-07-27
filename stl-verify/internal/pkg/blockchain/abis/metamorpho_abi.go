@@ -209,6 +209,15 @@ func GetVaultV2AdapterReadABI() (*abi.ABI, error) {
 // to seed the adapter registry for a V2 vault found mid-life, whose historical
 // AddAdapter events never replay on the live stream. Chain-verified against
 // sparkUSDTbc: adaptersLength() 0x5aa22bc8, adapters(uint256) 0x4ef501ac.
+//
+// performanceFee() / managementFee() (both uint96 WAD, unscaled) and
+// performanceFeeRecipient() / managementFeeRecipient() (address) return the
+// vault's full fee configuration. performanceFee is a WAD fraction of accrued
+// interest (1e18 = 100%); managementFee is a WAD per-second rate. The indexer
+// reads all four at a Set* fee event's block hash to snapshot the full fee
+// state. Chain-verified against sparkUSDTbc: performanceFee() 0x87788782,
+// managementFee() 0xa6f7f5d6, performanceFeeRecipient() 0xed27f7c9,
+// managementFeeRecipient() 0x6d9a3010.
 func GetVaultV2ReadABI() (*abi.ABI, error) {
 	return ParseABI(`[
 		{
@@ -250,6 +259,34 @@ func GetVaultV2ReadABI() (*abi.ABI, error) {
 			"inputs": [{"name": "id", "type": "bytes32"}],
 			"name": "relativeCap",
 			"outputs": [{"name": "", "type": "uint128"}],
+			"stateMutability": "view",
+			"type": "function"
+		},
+		{
+			"inputs": [],
+			"name": "performanceFee",
+			"outputs": [{"name": "", "type": "uint96"}],
+			"stateMutability": "view",
+			"type": "function"
+		},
+		{
+			"inputs": [],
+			"name": "managementFee",
+			"outputs": [{"name": "", "type": "uint96"}],
+			"stateMutability": "view",
+			"type": "function"
+		},
+		{
+			"inputs": [],
+			"name": "performanceFeeRecipient",
+			"outputs": [{"name": "", "type": "address"}],
+			"stateMutability": "view",
+			"type": "function"
+		},
+		{
+			"inputs": [],
+			"name": "managementFeeRecipient",
+			"outputs": [{"name": "", "type": "address"}],
 			"stateMutability": "view",
 			"type": "function"
 		}

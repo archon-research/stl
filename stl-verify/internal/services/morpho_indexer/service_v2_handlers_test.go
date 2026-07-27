@@ -764,83 +764,72 @@ func TestProcessBlockEvent_CapChange_ReadErrors(t *testing.T) {
 	}
 }
 
-// --- fee updates ---
+// --- fee changes ---
 
-func TestProcessBlockEvent_FeeUpdates(t *testing.T) {
-	fee := big.NewInt(100_000_000_000_000_000) // 0.1 WAD
-	recipient := common.HexToAddress("0x5555555555555555555555555555555555555555")
+// feeGetterResults returns the 4-call getVaultFees response in the exact order
+// getVaultFees packs: performanceFee, managementFee, performanceFeeRecipient,
+// managementFeeRecipient.
+func (h *serviceTestHarness) feeGetterResults(perfFee, mgmtFee *big.Int, perfRecip, mgmtRecip common.Address) []outbound.Result {
+	return []outbound.Result{
+		{Success: true, ReturnData: h.packUint256(perfFee)},
+		{Success: true, ReturnData: h.packUint256(mgmtFee)},
+		{Success: true, ReturnData: h.packAddress(perfRecip)},
+		{Success: true, ReturnData: h.packAddress(mgmtRecip)},
+	}
+}
+
+// TestProcessBlockEvent_FeeChange verifies that any of the 4 Set* fee events
+// snapshots the vault's FULL current fee config — read on-chain (performanceFee,
+// managementFee, and both recipients) pinned to the event's block hash — rather
+// than persisting the single field the event carried. The event's own value is
+// deliberately different from the on-chain read; the on-chain config is
+// authoritative.
+func TestProcessBlockEvent_FeeChange(t *testing.T) {
+	// The authoritative on-chain fee config, identical across all 4 events.
+	perfFee := big.NewInt(100_000_000_000_000_000) // 0.1 WAD
+	mgmtFee := big.NewInt(3170979198)              // a WAD per-second rate
+	perfRecip := common.HexToAddress("0x1601843c5E9bC251A3272907010AFa41Fa18347E")
+	mgmtRecip := common.Address{} // zero-address recipient is the contract default
+
+	// A value carried on the event that must NOT be what gets persisted.
+	eventFee := big.NewInt(999)
+	eventRecip := common.HexToAddress("0x5555555555555555555555555555555555555555")
 
 	tests := []struct {
 		name    string
 		event   string
 		indexed []common.Hash
 		data    []any
-		check   func(t *testing.T, u entity.MorphoVaultFeeUpdate)
 	}{
-		{
-			name:  "SetPerformanceFee",
-			event: "SetPerformanceFee",
-			data:  []any{fee},
-			check: func(t *testing.T, u entity.MorphoVaultFeeUpdate) {
-				if u.PerformanceFee == nil || u.PerformanceFee.Cmp(fee) != 0 {
-					t.Errorf("PerformanceFee = %v, want %s", u.PerformanceFee, fee)
-				}
-				if u.ManagementFee != nil || u.PerformanceFeeRecipient != nil || u.ManagementFeeRecipient != nil {
-					t.Error("only PerformanceFee must be set")
-				}
-			},
-		},
-		{
-			name:  "SetManagementFee",
-			event: "SetManagementFee",
-			data:  []any{fee},
-			check: func(t *testing.T, u entity.MorphoVaultFeeUpdate) {
-				if u.ManagementFee == nil || u.ManagementFee.Cmp(fee) != 0 {
-					t.Errorf("ManagementFee = %v, want %s", u.ManagementFee, fee)
-				}
-				if u.PerformanceFee != nil || u.PerformanceFeeRecipient != nil || u.ManagementFeeRecipient != nil {
-					t.Error("only ManagementFee must be set")
-				}
-			},
-		},
-		{
-			name:    "SetPerformanceFeeRecipient",
-			event:   "SetPerformanceFeeRecipient",
-			indexed: []common.Hash{addrTopic(recipient)},
-			check: func(t *testing.T, u entity.MorphoVaultFeeUpdate) {
-				if !bytes.Equal(u.PerformanceFeeRecipient, recipient.Bytes()) {
-					t.Errorf("PerformanceFeeRecipient = %x, want %s", u.PerformanceFeeRecipient, recipient.Hex())
-				}
-				if u.PerformanceFee != nil || u.ManagementFee != nil || u.ManagementFeeRecipient != nil {
-					t.Error("only PerformanceFeeRecipient must be set")
-				}
-			},
-		},
-		{
-			name:    "SetManagementFeeRecipient",
-			event:   "SetManagementFeeRecipient",
-			indexed: []common.Hash{addrTopic(recipient)},
-			check: func(t *testing.T, u entity.MorphoVaultFeeUpdate) {
-				if !bytes.Equal(u.ManagementFeeRecipient, recipient.Bytes()) {
-					t.Errorf("ManagementFeeRecipient = %x, want %s", u.ManagementFeeRecipient, recipient.Hex())
-				}
-				if u.PerformanceFee != nil || u.ManagementFee != nil || u.PerformanceFeeRecipient != nil {
-					t.Error("only ManagementFeeRecipient must be set")
-				}
-			},
-		},
+		{name: "SetPerformanceFee", event: "SetPerformanceFee", data: []any{eventFee}},
+		{name: "SetManagementFee", event: "SetManagementFee", data: []any{eventFee}},
+		{name: "SetPerformanceFeeRecipient", event: "SetPerformanceFeeRecipient", indexed: []common.Hash{addrTopic(eventRecip)}},
+		{name: "SetManagementFeeRecipient", event: "SetManagementFeeRecipient", indexed: []common.Hash{addrTopic(eventRecip)}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			h := newTestHarness(t)
 			h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
 
-			var gotVaultID int64
-			var gotUpdate entity.MorphoVaultFeeUpdate
-			called := false
-			h.morphoRepo.UpdateVaultFeeConfigFn = func(_ context.Context, _ pgx.Tx, vaultID int64, u entity.MorphoVaultFeeUpdate) error {
-				called = true
-				gotVaultID, gotUpdate = vaultID, u
+			var gotHash common.Hash
+			viaHash := false
+			h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+				if len(calls) != 4 {
+					return nil, errTestUnexpectedCall(calls)
+				}
+				for _, c := range calls {
+					if c.Target != testVaultAddr || c.AllowFailure {
+						return nil, errTestUnexpectedCall(calls)
+					}
+				}
+				viaHash = true
+				gotHash = blockHash
+				return h.feeGetterResults(perfFee, mgmtFee, perfRecip, mgmtRecip), nil
+			}
+
+			var saved *entity.MorphoVaultFee
+			h.morphoRepo.SaveVaultFeeFn = func(_ context.Context, _ pgx.Tx, f *entity.MorphoVaultFee) error {
+				saved = f
 				return nil
 			}
 
@@ -850,14 +839,125 @@ func TestProcessBlockEvent_FeeUpdates(t *testing.T) {
 				t.Fatalf("processBlock: %v", err)
 			}
 
-			if !called {
-				t.Fatal("UpdateVaultFeeConfig not called")
+			if !viaHash {
+				t.Fatal("fees must be read via ExecuteAtHash (state read)")
 			}
-			if gotVaultID != 7 {
-				t.Errorf("vaultID = %d, want 7", gotVaultID)
+			if gotHash != testBlockHash {
+				t.Errorf("fees pinned to %s, want %s", gotHash, testBlockHash)
 			}
-			tt.check(t, gotUpdate)
+			if saved == nil {
+				t.Fatal("SaveVaultFee not called")
+			}
+			if saved.MorphoVaultID != 7 {
+				t.Errorf("MorphoVaultID = %d, want 7", saved.MorphoVaultID)
+			}
+			if saved.PerformanceFee.Cmp(perfFee) != 0 {
+				t.Errorf("PerformanceFee = %s, want %s (on-chain read, not the event value)", saved.PerformanceFee, perfFee)
+			}
+			if saved.ManagementFee.Cmp(mgmtFee) != 0 {
+				t.Errorf("ManagementFee = %s, want %s (on-chain read, not the event value)", saved.ManagementFee, mgmtFee)
+			}
+			if !bytes.Equal(saved.PerformanceFeeRecipient, perfRecip.Bytes()) {
+				t.Errorf("PerformanceFeeRecipient = %x, want %s (on-chain read)", saved.PerformanceFeeRecipient, perfRecip.Hex())
+			}
+			if !bytes.Equal(saved.ManagementFeeRecipient, mgmtRecip.Bytes()) {
+				t.Errorf("ManagementFeeRecipient = %x, want %s (on-chain read)", saved.ManagementFeeRecipient, mgmtRecip.Hex())
+			}
+			if saved.BlockNumber != 20000000 {
+				t.Errorf("BlockNumber = %d, want 20000000", saved.BlockNumber)
+			}
+			if saved.BlockVersion != 0 {
+				t.Errorf("BlockVersion = %d, want 0", saved.BlockVersion)
+			}
 		})
+	}
+}
+
+// TestProcessBlockEvent_FeeChange_ReadErrors verifies the fee snapshot aborts the
+// event when the on-chain read fails — both a transport error and a Success=false
+// sub-result — rather than persisting a partial/defaulted row.
+func TestProcessBlockEvent_FeeChange_ReadErrors(t *testing.T) {
+	tests := []struct {
+		name    string
+		execute func(_ context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error)
+	}{
+		{
+			name: "transport error",
+			execute: func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+				return nil, errors.New("fee rpc down")
+			},
+		},
+		{
+			name: "Success=false sub-result",
+			execute: func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+				return []outbound.Result{
+					{Success: true, ReturnData: nil},
+					{Success: false, ReturnData: nil},
+					{Success: true, ReturnData: nil},
+					{Success: true, ReturnData: nil},
+				}, nil
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newTestHarness(t)
+			h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
+			h.multicaller.ExecuteAtHashFn = tt.execute
+			h.morphoRepo.SaveVaultFeeFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoVaultFee) error {
+				t.Fatal("fee must not be persisted when the on-chain read fails")
+				return nil
+			}
+			log := h.makeV2VaultLog(h.vaultV2EventsABI.Events["SetPerformanceFee"], testVaultAddr, nil, big.NewInt(1))
+			if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err == nil {
+				t.Fatal("expected the block to fail so SQS redelivers")
+			}
+		})
+	}
+}
+
+// TestProcessBlockEvent_FeeChange_SameBlockSnapshotsIdentical verifies the
+// snapshot dedup contract at the handler level: two different fee events in the
+// same block (SetPerformanceFee + SetPerformanceFeeRecipient) each read the same
+// on-chain config at the same block hash and build byte-identical MorphoVaultFee
+// snapshots — so the mvf trigger + ON CONFLICT collapse them to one row.
+func TestProcessBlockEvent_FeeChange_SameBlockSnapshotsIdentical(t *testing.T) {
+	h := newTestHarness(t)
+	h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
+
+	perfFee := big.NewInt(100_000_000_000_000_000)
+	mgmtFee := big.NewInt(0)
+	perfRecip := common.HexToAddress("0x1601843c5E9bC251A3272907010AFa41Fa18347E")
+	mgmtRecip := common.Address{}
+
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		if len(calls) != 4 {
+			return nil, errTestUnexpectedCall(calls)
+		}
+		return h.feeGetterResults(perfFee, mgmtFee, perfRecip, mgmtRecip), nil
+	}
+
+	var saved []*entity.MorphoVaultFee
+	h.morphoRepo.SaveVaultFeeFn = func(_ context.Context, _ pgx.Tx, f *entity.MorphoVaultFee) error {
+		saved = append(saved, f)
+		return nil
+	}
+
+	perfLog := h.makeV2VaultLog(h.vaultV2EventsABI.Events["SetPerformanceFee"], testVaultAddr, nil, big.NewInt(1))
+	recipLog := h.makeV2VaultLog(h.vaultV2EventsABI.Events["SetPerformanceFeeRecipient"], testVaultAddr, []common.Hash{addrTopic(perfRecip)})
+	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, perfLog, recipLog)}); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+
+	if len(saved) != 2 {
+		t.Fatalf("expected SaveVaultFee called twice (once per event), got %d", len(saved))
+	}
+	a, b := saved[0], saved[1]
+	if a.PerformanceFee.Cmp(b.PerformanceFee) != 0 || a.ManagementFee.Cmp(b.ManagementFee) != 0 ||
+		!bytes.Equal(a.PerformanceFeeRecipient, b.PerformanceFeeRecipient) ||
+		!bytes.Equal(a.ManagementFeeRecipient, b.ManagementFeeRecipient) ||
+		a.BlockNumber != b.BlockNumber || a.BlockVersion != b.BlockVersion || !a.Timestamp.Equal(b.Timestamp) {
+		t.Errorf("same-block fee events produced differing snapshots:\n  %+v\n  %+v", a, b)
 	}
 }
 
@@ -962,9 +1062,12 @@ func TestProcessBlockEvent_V2Handlers_ErrorsPropagate(t *testing.T) {
 			},
 		},
 		{
-			name: "Fee: UpdateVaultFeeConfig DB error",
+			name: "Fee: SaveVaultFee DB error",
 			setup: func(h *serviceTestHarness) shared.Log {
-				h.morphoRepo.UpdateVaultFeeConfigFn = func(_ context.Context, _ pgx.Tx, _ int64, _ entity.MorphoVaultFeeUpdate) error {
+				h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+					return h.feeGetterResults(big.NewInt(1), big.NewInt(0), common.Address{}, common.Address{}), nil
+				}
+				h.morphoRepo.SaveVaultFeeFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoVaultFee) error {
 					return errors.New("db down")
 				}
 				return h.makeV2VaultLog(h.vaultV2EventsABI.Events["SetPerformanceFee"], testVaultAddr, nil, big.NewInt(1))

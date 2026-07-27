@@ -1179,6 +1179,11 @@
       "owner": "morpho",
       "transform_defer": "VEC-218: new VaultV2 caps, read raw by the VEC-219 risk pipeline; no transformed-layer consumer yet"
     },
+    "morpho_vault_fee": {
+      "type": "raw_pipeline",
+      "owner": "morpho",
+      "transform_defer": "VEC-218: new VaultV2 fee snapshots, read raw; no transformed-layer consumer yet"
+    },
     "morpho_vault_position": {
       "type": "raw_pipeline",
       "owner": "morpho"
@@ -1368,6 +1373,12 @@
       "action": "rename"
     },
     {
+      "table": "morpho_vault_fee",
+      "column": "timestamp",
+      "canonical": "block_timestamp",
+      "action": "rename"
+    },
+    {
       "table": "morpho_vault_position",
       "column": "timestamp",
       "canonical": "block_timestamp",
@@ -1485,6 +1496,13 @@
     },
     {
       "table": "morpho_vault_cap",
+      "column": "chain_id",
+      "parent": "morpho_vault",
+      "key": "morpho_vault_id",
+      "ref": "id"
+    },
+    {
+      "table": "morpho_vault_fee",
       "column": "chain_id",
       "parent": "morpho_vault",
       "key": "morpho_vault_id",
@@ -1626,6 +1644,13 @@
     },
     {
       "table": "morpho_vault_cap",
+      "column": "protocol_id",
+      "parent": "morpho_vault",
+      "key": "morpho_vault_id",
+      "ref": "id"
+    },
+    {
+      "table": "morpho_vault_fee",
       "column": "protocol_id",
       "parent": "morpho_vault",
       "key": "morpho_vault_id",
