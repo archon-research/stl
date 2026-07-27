@@ -1155,7 +1155,8 @@
     },
     "morpho_adapter_state": {
       "type": "raw_pipeline",
-      "owner": "morpho"
+      "owner": "morpho",
+      "transform_defer": "VEC-218: new VaultV2 adapter state, read raw by the VEC-219 risk pipeline; no transformed-layer consumer yet"
     },
     "morpho_market": {
       "type": "config",
@@ -1175,7 +1176,8 @@
     },
     "morpho_vault_cap": {
       "type": "raw_pipeline",
-      "owner": "morpho"
+      "owner": "morpho",
+      "transform_defer": "VEC-218: new VaultV2 caps, read raw by the VEC-219 risk pipeline; no transformed-layer consumer yet"
     },
     "morpho_vault_position": {
       "type": "raw_pipeline",
