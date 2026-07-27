@@ -16,9 +16,7 @@ from app.adapters.postgres.allocation_share_repository import (
 )
 from app.adapters.postgres.backed_breakdown_repository_maple import MapleBackedBreakdownRepository
 from app.adapters.postgres.backed_breakdown_repository_morpho import MorphoBackedBreakdownRepository
-from app.adapters.postgres.backed_breakdown_repository_morpho_v2 import MorphoV2BackedBreakdownRepository
 from app.adapters.postgres.morpho_liquidation_params_repository import MorphoLiquidationParamsRepository
-from app.adapters.postgres.morpho_liquidation_params_repository_v2 import MorphoV2LiquidationParamsRepository
 from app.adapters.postgres.receipt_token_repository import ReceiptTokenRepository
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.backed_breakdown import BackedBreakdown
@@ -93,22 +91,18 @@ class PostgresCryptoLendingReader:
         receipt_token_repo: ReceiptTokenRepository,
         aave_breakdown_repo: AaveLikeBackedBreakdownRepository,
         morpho_breakdown_repo: MorphoBackedBreakdownRepository,
-        morpho_v2_breakdown_repo: MorphoV2BackedBreakdownRepository,
         maple_breakdown_repo: MapleBackedBreakdownRepository,
         aave_liq_repo: AaveLikeLiquidationParamsRepository,
         morpho_liq_repo: MorphoLiquidationParamsRepository,
-        morpho_v2_liq_repo: MorphoV2LiquidationParamsRepository,
         engine: AsyncEngine,
         allocation_share_max_stale_seconds: int = 1800,
     ) -> None:
         self._receipt_token_repo = receipt_token_repo
         self._aave_breakdown_repo = aave_breakdown_repo
         self._morpho_breakdown_repo = morpho_breakdown_repo
-        self._morpho_v2_breakdown_repo = morpho_v2_breakdown_repo
         self._maple_breakdown_repo = maple_breakdown_repo
         self._aave_liq_repo = aave_liq_repo
         self._morpho_liq_repo = morpho_liq_repo
-        self._morpho_v2_liq_repo = morpho_v2_liq_repo
         self._engine = engine
         self._allocation_share_max_stale_seconds = allocation_share_max_stale_seconds
 
@@ -162,7 +156,7 @@ class PostgresCryptoLendingReader:
             # can produce an empty (all-dust) breakdown that short-circuits the risk
             # service before liquidation params run, yielding a confident rrc=0.
             await self._raise_if_v2_composition_incomplete(ref.id, info)
-            return await self._morpho_v2_breakdown_repo.get_backed_breakdown(ref.id)
+            return await self._morpho_breakdown_repo.get_backed_breakdown_v2(ref.id)
         raise ValueError(
             f"unexpected morpho vault_version={ref.vault_version} for vault id={ref.id} "
             f"(receipt token {info.receipt_token_id})"
@@ -185,12 +179,12 @@ class PostgresCryptoLendingReader:
         *unpriced* rather than a misleading fully-covered rrc=0. A genuinely idle
         vault (adapters + state present, value ≈ 0) passes both probes.
         """
-        if not await self._morpho_v2_liq_repo.has_active_adapters(vault_id):
+        if not await self._morpho_liq_repo.has_active_adapters(vault_id):
             raise AdapterDataMissingError(
                 f"morpho VaultV2 id={vault_id} has no active adapters indexed yet "
                 f"(receipt token {info.receipt_token_id})"
             )
-        if await self._morpho_v2_liq_repo.has_unwalkable_adapter_value(vault_id):
+        if await self._morpho_liq_repo.has_unwalkable_adapter_value(vault_id):
             raise AdapterDataMissingError(
                 f"morpho VaultV2 id={vault_id} holds adapter value that cannot be walked "
                 f"into collateral (partial index) (receipt token {info.receipt_token_id})"
@@ -289,7 +283,7 @@ class PostgresCryptoLendingReader:
             # under-represents the unindexed value, so the probe runs regardless. Empty
             # params that survive the gate are a genuinely idle vault (a real rrc=0).
             await self._raise_if_v2_composition_incomplete(backed_asset_id, info)
-            return await self._morpho_v2_liq_repo.get_params(backed_asset_id, token_ids)
+            return await self._morpho_liq_repo.get_params_v2(backed_asset_id, token_ids)
         raise ValueError(
             f"unexpected morpho vault_version={ref.vault_version} for vault id={backed_asset_id} "
             f"(receipt token {info.receipt_token_id})"
