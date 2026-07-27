@@ -6,7 +6,8 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.domain.entities.allocation import EthAddress
-from app.domain.exceptions import MissingShareError, StaleShareError
+from app.domain.entities.risk import LiquidationParams
+from app.domain.exceptions import AdapterDataMissingError, MissingShareError, StaleShareError
 from app.ports.allocation_repository import AllocationRepositoryPort
 from app.services.model_registry import ModelRegistry
 from app.services.prime_risk_capital_service import PrimeRiskCapitalService
@@ -421,6 +422,63 @@ async def test_prime_compute_degrades_price_data_missing_to_unpriced():
     assert result.exposure_usd == Decimal("300")
     assert result.modeled_exposure_usd == Decimal("200")
     # The data gap is logged, not silently masked.
+    mock_logger.warning.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_prime_compute_degrades_adapter_data_missing_to_unpriced():
+    """A Morpho VaultV2 whose adapter graph is not indexed degrades to unpriced.
+
+    ``get_liquidation_params`` raises ``AdapterDataMissingError`` (a priced but
+    liquidation-unresolvable v3 allocation). Rather than dropping every collateral
+    item and reporting a confident ``rrc=0`` with applied=True, that one allocation
+    must render as unpriced (``adapter_data_missing``) while the rest still prices.
+    """
+    from app.domain.entities.backed_breakdown import BackedBreakdown, CollateralContribution
+
+    positions = [
+        make_receipt_token_position(receipt_token_id=1, symbol="grove-bbqUSDC", amount_usd=Decimal("100")),
+        make_receipt_token_position(receipt_token_id=2, symbol="aDAI", amount_usd=Decimal("200")),
+    ]
+    reader = AsyncMock(spec=PostgresCryptoLendingReader)
+    reader.get_receipt_token.side_effect = lambda aid: {1: _info(1, 777), 2: _info(2, 888)}[aid]
+    reader.batch_get_shares.return_value = {1: Decimal("1"), 2: Decimal("1")}
+
+    def _priced_breakdown(backed_asset_id: int) -> BackedBreakdown:
+        return BackedBreakdown(
+            backed_asset_id=backed_asset_id,
+            items=(
+                CollateralContribution(
+                    token_id=99,
+                    symbol="WETH",
+                    backing_value=Decimal("100"),
+                    backing_pct=Decimal("100"),
+                    price_usd=Decimal("2000"),
+                ),
+            ),
+        )
+
+    reader.batch_get_breakdowns.return_value = {1: _priced_breakdown(1), 2: _priced_breakdown(2)}
+
+    async def _liq(info, backed_asset_id, token_ids):  # noqa: ARG001
+        if backed_asset_id == 1:
+            raise AdapterDataMissingError("morpho VaultV2 id=1 has no active adapters indexed yet")
+        return {99: LiquidationParams(99, Decimal("0.8"), Decimal("1.05"))}
+
+    reader.get_liquidation_params.side_effect = _liq
+    service = _service(_repo(positions, Decimal("1000")), _FakeRegistry([_crypto_lending_service(reader)]))
+
+    with patch("app.services.prime_risk_capital_service.logger") as mock_logger:
+        result = await service.compute(_PRIME)  # must not raise
+
+    by_id = {a.receipt_token_id: a for a in result.per_allocation}
+    assert by_id[1].applied is False
+    assert by_id[1].required_risk_capital_usd is None
+    assert by_id[1].unpriced_reason == "adapter_data_missing"
+    assert by_id[2].applied is True
+    # The unpriced allocation still counts toward exposure, but not modeled exposure.
+    assert result.exposure_usd == Decimal("300")
+    assert result.modeled_exposure_usd == Decimal("200")
     mock_logger.warning.assert_called_once()
 
 
