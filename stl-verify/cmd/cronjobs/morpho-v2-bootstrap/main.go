@@ -8,10 +8,10 @@
 // vault_cap or vault_fee rows. Live indexing will never fix them on its own: the
 // worker short-circuits on IsKnownVault before it would enumerate a vault's
 // adapters, and the AddAdapter / cap / fee events that would have built those
-// rows are historical, so they never arrive on SNS/SQS again. One run enumerates
-// every V2 vault's current adapter set at a pinned finalized block, snapshots
-// each adapter's realAssets(), and replays the full VaultV2 governance-event
-// history through the live handler path.
+// rows are historical, so they never arrive on SNS/SQS again. One run replays the
+// full VaultV2 governance-event history through the live handler path, then
+// enumerates every V2 vault's current adapter set at a pinned finalized block and
+// snapshots each adapter's realAssets().
 //
 // # How to trigger it (the button)
 //
@@ -101,13 +101,22 @@ func run(ctx context.Context) error {
 
 // bootstrapActivityTimeouts sizes one run against a full mainnet sweep: ~2M
 // blocks of eth_getLogs plus a per-vault adapter enumeration. The shared 10m
-// default would kill it mid-sweep. MaximumAttempts is 1 because a failed run is
-// something an operator should look at before re-triggering — an automatic retry
-// would just burn another multi-hour attempt against the same cause.
+// default would kill it mid-sweep.
+//
+// StartToClose is a safety ceiling, not an expectation — the sweep is sparse
+// (10 topics over a few hundred chunks), so a healthy run finishes far sooner.
+// The Heartbeat is what makes that ceiling tolerable: without it, a worker
+// killed mid-run (a deploy rolls this Deployment like any other) would hold the
+// activity open until StartToClose expired. With it, Temporal notices in minutes.
+//
+// MaximumAttempts is 1 because a failed run is something an operator should look
+// at before re-triggering — an automatic retry would just burn another long
+// attempt against the same cause.
 var bootstrapActivityTimeouts = temporal.ActivityTimeouts{
-	StartToClose:    12 * time.Hour,
-	ScheduleToClose: 24 * time.Hour,
+	StartToClose:    6 * time.Hour,
+	ScheduleToClose: 12 * time.Hour,
 	MaximumAttempts: 1,
+	Heartbeat:       time.Minute,
 }
 
 func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runner, error) {

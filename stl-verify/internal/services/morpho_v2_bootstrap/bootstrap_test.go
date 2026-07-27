@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"math/big"
+	"strings"
 	"testing"
 	"time"
 
@@ -62,12 +63,12 @@ func TestNewService_RejectsInvalidConfig(t *testing.T) {
 	}
 }
 
-// TestRun_SeedsAdaptersThenReplaysHistory is the end-to-end pass: a persisted V2
-// vault with no adapter rows gets its current adapter set enumerated and
-// snapshotted at the finalized head, and its historical AddAdapter is replayed
-// through the REAL morpho-indexer handler path (NewReplayService →
-// ReplayMetaMorphoLog), not a stand-in.
-func TestRun_SeedsAdaptersThenReplaysHistory(t *testing.T) {
+// TestRun_ReplaysHistoryThenSeedsAdapters is the end-to-end pass: a persisted V2
+// vault with no adapter rows gets its historical AddAdapter replayed through the
+// REAL morpho-indexer handler path (NewReplayService → ReplayMetaMorphoLog), not
+// a stand-in, and then its current adapter set enumerated and snapshotted at the
+// finalized head.
+func TestRun_ReplaysHistoryThenSeedsAdapters(t *testing.T) {
 	h := newBootstrapHarness(t)
 
 	const headBlock = int64(24_000_000)
@@ -83,7 +84,21 @@ func TestRun_SeedsAdaptersThenReplaysHistory(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	// Pass 1 — the seed: enumeration at the pinned head, plus a state row so
+	// Pass 1 — the replay: the historical AddAdapter reached the real handler,
+	// which registered the adapter at its true block and wrote the audit row.
+	replayed := h.adaptersAt(int64(addAdapterBlock))
+	if len(replayed) != 1 {
+		t.Fatalf("adapters registered at the AddAdapter block = %d, want 1 (the replayed event)", len(replayed))
+	}
+	if len(h.auditEvents) != 1 || h.auditEvents[0].EventName != "AddAdapter" {
+		t.Fatalf("audit events = %+v, want a single AddAdapter protocol_event", h.auditEvents)
+	}
+	if h.auditEvents[0].BlockNumber != int64(addAdapterBlock) || h.auditEvents[0].LogIndex != 7 {
+		t.Errorf("audit event coordinates = (block %d, index %d), want (%d, 7)",
+			h.auditEvents[0].BlockNumber, h.auditEvents[0].LogIndex, addAdapterBlock)
+	}
+
+	// Pass 2 — the seed: enumeration at the pinned head, plus a state row so
 	// VEC-219's composition probe no longer sees adapter_data_missing.
 	seeded := h.adaptersAt(headBlock)
 	if len(seeded) != 1 {
@@ -101,20 +116,6 @@ func TestRun_SeedsAdaptersThenReplaysHistory(t *testing.T) {
 	if h.adapterStates[0].BlockNumber != headBlock || h.adapterStates[0].RealAssets.Cmp(realAssets) != 0 {
 		t.Errorf("adapter_state = {block %d, realAssets %s}, want {%d, %s}",
 			h.adapterStates[0].BlockNumber, h.adapterStates[0].RealAssets, headBlock, realAssets)
-	}
-
-	// Pass 2 — the replay: the historical AddAdapter reached the real handler,
-	// which registered the adapter at its true block and wrote the audit row.
-	replayed := h.adaptersAt(int64(addAdapterBlock))
-	if len(replayed) != 1 {
-		t.Fatalf("adapters registered at the AddAdapter block = %d, want 1 (the replayed event)", len(replayed))
-	}
-	if len(h.auditEvents) != 1 || h.auditEvents[0].EventName != "AddAdapter" {
-		t.Fatalf("audit events = %+v, want a single AddAdapter protocol_event", h.auditEvents)
-	}
-	if h.auditEvents[0].BlockNumber != int64(addAdapterBlock) || h.auditEvents[0].LogIndex != 7 {
-		t.Errorf("audit event coordinates = (block %d, index %d), want (%d, 7)",
-			h.auditEvents[0].BlockNumber, h.auditEvents[0].LogIndex, addAdapterBlock)
 	}
 }
 
@@ -153,9 +154,11 @@ func TestRun_SweepsFromTheFactoryDeployBlockToTheFinalizedHead(t *testing.T) {
 	}
 }
 
-// TestRun_NoV2VaultsIsANoOp: a chain with only V1 vaults must not sweep history
-// it has no use for.
-func TestRun_NoV2VaultsIsANoOp(t *testing.T) {
+// TestRun_NoV2VaultsFailsTheRun: this job is only triggered because V2 vaults are
+// known to be missing rows, so finding none means it is pointed at the wrong
+// chain or database. Returning nil there would report a green run that healed
+// nothing — the one failure mode nobody would notice.
+func TestRun_NoV2VaultsFailsTheRun(t *testing.T) {
 	h := newBootstrapHarness(t)
 	h.morphoRepo.GetAllVaultsFn = func(context.Context, int64) (map[common.Address]*entity.MorphoVault, error) {
 		return map[common.Address]*entity.MorphoVault{
@@ -164,18 +167,64 @@ func TestRun_NoV2VaultsIsANoOp(t *testing.T) {
 	}
 	h.chain.setFinalizedHead(24_000_000, 1_770_000_000)
 
-	if err := h.service.Run(context.Background()); err != nil {
-		t.Fatalf("Run: %v", err)
+	err := h.service.Run(context.Background())
+	if err == nil {
+		t.Fatal("expected a run that found no V2 vaults to fail rather than report success")
+	}
+	if !strings.Contains(err.Error(), "no VaultV2 vaults") {
+		t.Errorf("error %q should say no V2 vaults were found", err)
 	}
 	if len(h.chain.queries) != 0 {
 		t.Errorf("issued %d eth_getLogs requests for a chain with no V2 vaults, want 0", len(h.chain.queries))
 	}
 }
 
-// TestRun_SeedFailureStopsBeforeReplay: a failing seed must abort the run rather
-// than proceed into the (far more expensive) history sweep with a vault whose
-// current state was never repaired.
-func TestRun_SeedFailureStopsBeforeReplay(t *testing.T) {
+// TestRun_FinalizedHeadBelowDeployBlockFailsTheRun: an inverted sweep range
+// yields zero chunks, so without this guard the run would replay nothing and
+// still return nil. It means the RPC endpoint is not on the configured chain.
+func TestRun_FinalizedHeadBelowDeployBlockFailsTheRun(t *testing.T) {
+	h := newBootstrapHarness(t)
+	h.chain.setFinalizedHead(mainnetVaultV2DeployBlock-1, 1_770_000_000)
+
+	err := h.service.Run(context.Background())
+	if err == nil {
+		t.Fatal("expected a finalized head below the factory deploy block to fail the run")
+	}
+	if !strings.Contains(err.Error(), "not on the configured chain") {
+		t.Errorf("error %q should point at a chain mismatch", err)
+	}
+	if len(h.chain.queries) != 0 {
+		t.Errorf("issued %d eth_getLogs requests, want 0", len(h.chain.queries))
+	}
+}
+
+// TestRun_ReplayFailureStopsBeforeSeed pins the load-bearing pass order from the
+// other end: the seed converges onto whatever incarnation the replay built, so a
+// failed replay must stop the run before the seed writes anything. Seeding on top
+// of a half-replayed history is how a state row ends up on the wrong adapter
+// incarnation.
+func TestRun_ReplayFailureStopsBeforeSeed(t *testing.T) {
+	h := newBootstrapHarness(t)
+	replayer := &recordingReplayer{v2Vaults: map[common.Address]struct{}{testVaultAddr: {}}}
+	service, err := NewService(h.config, h.chain, replayer)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	h.chain.setFinalizedHead(24_000_000, 1_770_000_000)
+	h.chain.filterErr = errors.New("401 Unauthorized: invalid api key")
+
+	if err := service.Run(context.Background()); err == nil {
+		t.Fatal("expected the replay failure to fail the run")
+	}
+	if len(replayer.seeded) != 0 {
+		t.Errorf("seeded %d vaults after the replay failed, want 0", len(replayer.seeded))
+	}
+}
+
+// TestRun_SeedFailureFailsTheRun: the seed is the last pass, so its failure has
+// nothing left to guard — it just has to fail loudly rather than let the run
+// report success with an adapter left stateless.
+func TestRun_SeedFailureFailsTheRun(t *testing.T) {
 	h := newBootstrapHarness(t)
 	h.chain.setFinalizedHead(24_000_000, 1_770_000_000)
 	h.multicaller.ExecuteAtHashFn = func(context.Context, []outbound.Call, common.Hash) ([]outbound.Result, error) {
@@ -184,9 +233,6 @@ func TestRun_SeedFailureStopsBeforeReplay(t *testing.T) {
 
 	if err := h.service.Run(context.Background()); err == nil {
 		t.Fatal("expected the seed failure to fail the run")
-	}
-	if len(h.chain.queries) != 0 {
-		t.Errorf("issued %d eth_getLogs requests after the seed failed, want 0", len(h.chain.queries))
 	}
 }
 
@@ -378,45 +424,50 @@ func newBootstrapHarness(t *testing.T) *bootstrapHarness {
 	return h
 }
 
+func (h *bootstrapHarness) wireAdapterReads(headHash common.Hash, realAssets *big.Int) {
+	h.t.Helper()
+	wireAdapterReads(h.t, h.multicaller, headHash, testVaultAddr, testAdapterAddr, realAssets)
+}
+
 // wireAdapterReads answers the enumeration + realAssets reads (hash-pinned to
 // headHash) and the number-pinned adapter type probe for a vault holding exactly
 // one MarketV1 adapter.
-func (h *bootstrapHarness) wireAdapterReads(headHash common.Hash, realAssets *big.Int) {
-	h.t.Helper()
+func wireAdapterReads(t *testing.T, mc *testutil.MockMulticaller, headHash common.Hash, vault, adapter common.Address, realAssets *big.Int) {
+	t.Helper()
 	vaultV2ABI, err := abis.GetVaultV2ReadABI()
 	if err != nil {
-		h.t.Fatalf("GetVaultV2ReadABI: %v", err)
+		t.Fatalf("GetVaultV2ReadABI: %v", err)
 	}
 	adapterABI, err := abis.GetVaultV2AdapterReadABI()
 	if err != nil {
-		h.t.Fatalf("GetVaultV2AdapterReadABI: %v", err)
+		t.Fatalf("GetVaultV2AdapterReadABI: %v", err)
 	}
 	pack := func(args abi.Arguments, values ...any) []byte {
 		data, err := args.Pack(values...)
 		if err != nil {
-			h.t.Fatalf("packing return data: %v", err)
+			t.Fatalf("packing return data: %v", err)
 		}
 		return data
 	}
 
-	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+	mc.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
 		if blockHash != headHash {
 			return nil, errors.New("state read is not pinned to the run's finalized head")
 		}
 		switch {
-		case len(calls) == 1 && calls[0].Target == testVaultAddr && hasSelector(calls[0], vaultV2ABI.Methods["adaptersLength"].ID):
+		case len(calls) == 1 && calls[0].Target == vault && hasSelector(calls[0], vaultV2ABI.Methods["adaptersLength"].ID):
 			return []outbound.Result{{Success: true, ReturnData: pack(vaultV2ABI.Methods["adaptersLength"].Outputs, big.NewInt(1))}}, nil
-		case len(calls) == 1 && calls[0].Target == testVaultAddr:
-			return []outbound.Result{{Success: true, ReturnData: pack(vaultV2ABI.Methods["adapters"].Outputs, testAdapterAddr)}}, nil
-		case len(calls) == 1 && calls[0].Target == testAdapterAddr:
+		case len(calls) == 1 && calls[0].Target == vault:
+			return []outbound.Result{{Success: true, ReturnData: pack(vaultV2ABI.Methods["adapters"].Outputs, adapter)}}, nil
+		case len(calls) == 1 && calls[0].Target == adapter:
 			return []outbound.Result{{Success: true, ReturnData: pack(adapterABI.Methods["realAssets"].Outputs, realAssets)}}, nil
 		}
 		return nil, errors.New("unexpected hash-pinned multicall")
 	}
 	// The adapter type probe is number-pinned: morpho() succeeds, morphoVaultV1()
 	// reverts ⇒ MarketV1.
-	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		if len(calls) != 2 || calls[0].Target != testAdapterAddr {
+	mc.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		if len(calls) != 2 || calls[0].Target != adapter {
 			return nil, errors.New("unexpected number-pinned multicall")
 		}
 		return []outbound.Result{

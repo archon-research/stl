@@ -42,17 +42,19 @@ func ContextWithScheduledAt(ctx context.Context, scheduledAt time.Time) context.
 
 // cronjobActivities wraps a Runner for Temporal activity execution.
 type cronjobActivities struct {
-	runner  Runner
-	metrics *cronjobMetrics
+	runner    Runner
+	metrics   *cronjobMetrics
+	heartbeat time.Duration
 }
 
 // newCronjobActivities wraps runner for activity execution. metrics may be nil
-// (it is nil-receiver-safe), e.g. in unit tests that don't wire telemetry.
-func newCronjobActivities(runner Runner, metrics *cronjobMetrics) (*cronjobActivities, error) {
+// (it is nil-receiver-safe), e.g. in unit tests that don't wire telemetry. A
+// zero heartbeat disables liveness reporting.
+func newCronjobActivities(runner Runner, metrics *cronjobMetrics, heartbeat time.Duration) (*cronjobActivities, error) {
 	if runner == nil {
 		return nil, fmt.Errorf("runner cannot be nil")
 	}
-	return &cronjobActivities{runner: runner, metrics: metrics}, nil
+	return &cronjobActivities{runner: runner, metrics: metrics, heartbeat: heartbeat}, nil
 }
 
 // Execute runs the cronjob. scheduledAt is the workflow-recorded timestamp
@@ -63,8 +65,10 @@ func (a *cronjobActivities) Execute(ctx context.Context, scheduledAt time.Time) 
 	logger.Info("starting cronjob execution", "scheduledAt", scheduledAt)
 
 	ctx = ContextWithScheduledAt(ctx, scheduledAt)
+	stopHeartbeat := startHeartbeat(ctx, a.heartbeat)
 	start := time.Now()
 	err := a.runner.Run(ctx)
+	stopHeartbeat()
 	// Recorded per activity execution (so a retried run that ultimately
 	// succeeds emits both an error and a success); the vector-cronjobs alerts
 	// account for this by treating a warning as "any error" and a page as
@@ -79,14 +83,53 @@ func (a *cronjobActivities) Execute(ctx context.Context, scheduledAt time.Time) 
 	return nil
 }
 
-// Defaults every cronjob ran on before timeouts became configurable. A zero
-// ActivityTimeouts resolves to exactly these, so schedules created before the
-// argument existed keep their original behavior.
+// startHeartbeat reports activity liveness every interval until the returned
+// stop function is called, so Temporal notices a worker that died mid-run
+// instead of waiting out StartToCloseTimeout. A zero interval disables it, which
+// is why the returned stop is always safe to call.
+//
+// The Runner interface carries no progress signal, so the heartbeat is a plain
+// liveness ping with no details: it answers "is this worker still alive", not
+// "how far has it got".
+func startHeartbeat(ctx context.Context, interval time.Duration) (stop func()) {
+	if interval <= 0 {
+		return func() {}
+	}
+	done := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				activity.RecordHeartbeat(ctx)
+			}
+		}
+	}()
+	return func() {
+		close(done)
+		<-finished
+	}
+}
+
+// Defaults a cronjob gets when it leaves ActivityTimeouts zero.
 const (
 	defaultStartToCloseTimeout    = 10 * time.Minute
 	defaultScheduleToCloseTimeout = 30 * time.Minute
 	defaultMaximumAttempts        = int32(5)
 )
+
+// heartbeatTimeoutFactor is the grace Temporal allows between heartbeats. The
+// activity pings on ActivityTimeouts.Heartbeat; the server must tolerate a
+// missed ping (GC pause, a slow chunk) before declaring the worker dead, so the
+// timeout is a multiple of the interval rather than equal to it.
+const heartbeatTimeoutFactor = 3
 
 // ActivityTimeouts bounds one cronjob activity execution. A cronjob whose tick
 // can legitimately run for hours (a one-shot historical bootstrap) must raise
@@ -97,10 +140,20 @@ const (
 // mutable process state would make a replay of an older execution
 // non-deterministic. Any zero field falls back to the default above, which is
 // also what a schedule created before this argument existed decodes to.
+//
+// The values are baked into the schedule's action when it is first created.
+// reconcileScheduleSpec deliberately touches only the timing spec, so changing
+// them later requires deleting the schedule in Temporal and restarting the
+// worker — the same caveat that already applies to a changed interval.
 type ActivityTimeouts struct {
 	StartToClose    time.Duration
 	ScheduleToClose time.Duration
 	MaximumAttempts int32
+	// Heartbeat, when non-zero, makes the activity report liveness on this
+	// interval. Without it a worker that dies mid-run is only noticed when
+	// StartToClose expires — hours later for a long-running job. Leave zero for
+	// a short tick, where the timeout is already the detection window.
+	Heartbeat time.Duration
 }
 
 func (t ActivityTimeouts) resolve() ActivityTimeouts {
@@ -125,6 +178,7 @@ func cronjobWorkflow(ctx workflow.Context, timeouts ActivityTimeouts) error {
 	activityOptions := workflow.ActivityOptions{
 		StartToCloseTimeout:    timeouts.StartToClose,
 		ScheduleToCloseTimeout: timeouts.ScheduleToClose,
+		HeartbeatTimeout:       timeouts.Heartbeat * heartbeatTimeoutFactor,
 		RetryPolicy: &temporalsdk.RetryPolicy{
 			InitialInterval:    2 * time.Second,
 			BackoffCoefficient: 2.0,

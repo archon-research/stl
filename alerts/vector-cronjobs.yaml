@@ -87,12 +87,20 @@ groups:
         # slowest cronjob (watcher-data-validator, 1h) and many cycles for the
         # faster ones. Distinct from VectorCronjobWorkerDown: here the worker
         # IS running and emitting metrics, every run just errors.
+        #
+        # ManualOnly cronjobs are excluded because "no success this hour" does
+        # not mean the same thing for them: morpho-v2-bootstrap runs once when an
+        # operator triggers it, so a single failed run is by definition
+        # errors=1/successes=0 and would page critical 15m later — for a job
+        # whose operator is already watching it. VectorCronjobRunFailing (warning)
+        # still fires and is the right severity for that.
         expr: |
           (
             sum by (service_name, cluster) (
               increase(cronjob_runs_total{
                 status="error",
                 service_name!="maple-graphql-indexer",
+                service_name!="morpho-v2-bootstrap",
                 k8s_namespace_name="vector"
               }[1h])
             ) > 0
@@ -103,6 +111,7 @@ groups:
               increase(cronjob_runs_total{
                 status="success",
                 service_name!="maple-graphql-indexer",
+                service_name!="morpho-v2-bootstrap",
                 k8s_namespace_name="vector"
               }[1h])
             ) == 0

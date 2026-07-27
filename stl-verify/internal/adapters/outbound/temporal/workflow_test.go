@@ -3,6 +3,7 @@ package temporal
 import (
 	"context"
 	"errors"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -38,7 +39,7 @@ func TestNewCronjobActivities(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			activities, err := newCronjobActivities(tt.runner, nil)
+			activities, err := newCronjobActivities(tt.runner, nil, 0)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")
@@ -106,7 +107,7 @@ func TestCronjobActivities_Execute(t *testing.T) {
 					gotScheduledAt, gotOK = ScheduledAtFromContext(ctx)
 					return tt.runErr
 				},
-			}, nil)
+			}, nil, 0)
 			if err != nil {
 				t.Fatalf("unexpected error creating activities: %v", err)
 			}
@@ -136,6 +137,61 @@ func TestCronjobActivities_Execute(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestStartHeartbeat_ZeroIntervalIsANoOp: every cronjob that does not opt in
+// keeps today's behavior — no goroutine, no heartbeat — and the returned stop is
+// still safe to call.
+func TestStartHeartbeat_ZeroIntervalIsANoOp(t *testing.T) {
+	stop := startHeartbeat(context.Background(), 0)
+	if stop == nil {
+		t.Fatal("startHeartbeat returned a nil stop function")
+	}
+	stop()
+}
+
+// TestCronjobActivities_Execute_HeartbeatsWithoutLeakingTheReporter runs a
+// heartbeat-enabled activity whose runner outlives many intervals. The activity
+// must still succeed, and Execute must join the reporting goroutine before
+// returning — an unjoined reporter would keep heartbeating into a finished
+// activity's context and leak one goroutine per run.
+//
+// It asserts on the absence of startHeartbeat's own frame rather than a
+// goroutine count: the SDK spawns its own short-lived heartbeat batcher, so a
+// count comparison would be measuring Temporal's internals, not this code's.
+// The number of heartbeats is likewise not asserted — the SDK batches them
+// before they reach any listener, so an exact count would flake.
+func TestCronjobActivities_Execute_HeartbeatsWithoutLeakingTheReporter(t *testing.T) {
+	const interval = 2 * time.Millisecond
+	suite := &testsuite.WorkflowTestSuite{}
+	activityEnv := suite.NewTestActivityEnvironment()
+
+	activities, err := newCronjobActivities(&mockRunner{
+		runFn: func(context.Context) error {
+			time.Sleep(20 * interval)
+			return nil
+		},
+	}, nil, interval)
+	if err != nil {
+		t.Fatalf("newCronjobActivities: %v", err)
+	}
+
+	activityEnv.RegisterActivity(activities.Execute)
+	if _, err := activityEnv.ExecuteActivity(activities.Execute, time.Now().UTC()); err != nil {
+		t.Fatalf("ExecuteActivity: %v", err)
+	}
+
+	// Execute joins the reporter synchronously, so its frame must already be
+	// gone — no sleep-and-hope.
+	if stacks := goroutineStacks(t); strings.Contains(stacks, "startHeartbeat") {
+		t.Errorf("a heartbeat reporter goroutine survived the activity; Execute did not join it:\n%s", stacks)
+	}
+}
+
+func goroutineStacks(t *testing.T) string {
+	t.Helper()
+	buf := make([]byte, 1<<16)
+	return string(buf[:runtime.Stack(buf, true)])
 }
 
 func TestActivityTimeouts_Resolve(t *testing.T) {

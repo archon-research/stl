@@ -87,13 +87,18 @@ func toSharedLog(l ethtypes.Log) shared.Log {
 // blocks", not "this failed". They ride HTTP 200 as JSON-RPC errors, so the
 // rpchttp retry transport (429/5xx/network only) correctly does not retry them
 // and the sweep must narrow its range instead. Everything else bubbles.
+//
+// Each phrase is specific to a cap. A bare "block range" would also match
+// malformed-parameter errors like "invalid block range params", which would then
+// be halved fourteen times before surfacing — burying the real cause under
+// narrowing logs.
 var rangeTooLargeSignals = []string{
 	"more than 10000 results",
 	"log response size exceeded",
-	"block range",
-	"range is too large",
+	"block range is too large",
 	"query returned more than",
 	"reducing your block range",
+	"up to a", // "…requests with up to a 500 block range"
 }
 
 // isRangeTooLargeError reports whether err is a provider result/range cap the
