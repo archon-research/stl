@@ -2,7 +2,7 @@
 
 Owner: vector team · Source rules: [alerts/vector-indexers.yaml](../../alerts/vector-indexers.yaml)
 
-The Vector indexers (`stl-morpho-indexer`, `stl-oracle-indexer`) are the last
+The Vector indexers (`morpho-indexer`, `oracle-price-worker`) are the last
 hop in the pipeline before customer-facing data lands in TimescaleDB. They
 consume blocks from the watcher and derive product state (positions,
 prices). A stall here directly translates to stale downstream reads.
@@ -19,11 +19,26 @@ The labelled indexer on the labelled `chain` has processed zero blocks for
 15 minutes. Downstream TimescaleDB state for Morpho positions / oracle
 prices is going stale.
 
+The morpho rule keys on `status="success"`, not on the total (VEC-218). The
+morpho queue is FIFO: a block that fails blocks its message group, and every SQS
+redelivery of that one poison message keeps `morpho_blocks_processed_total`
+advancing with `status="error"` while nothing is persisted. At
+visibility-timeout cadence that redelivery rate also stays under
+`VectorMorphoIndexerErrorsHigh`'s 0.1/s, so a total-based rule could let the
+whole chain's Morpho data freeze silently. Keying on successes closes that.
+Consequence when it fires: **an all-error loop looks identical to a dead
+consumer here** — check the logs before assuming the pod is wedged.
+
+Residual: a live pod whose OTLP export dies lets the `status="success"` series
+staleness-expire, so `== 0` matches nothing and this rule goes silent. morpho
+has no kube-state-metrics `Down` companion yet (unlike maple / fluid-vault /
+allocation-tracker); adding one is the follow-up that closes this.
+
 ### First checks (≤5 min)
 
 1. **Pod status** — run the one matching the firing alert:
-   - Morpho: `kubectl -n vector get pods -l app=stl-morpho-indexer`
-   - Oracle: `kubectl -n vector get pods -l app=stl-oracle-indexer`
+   - Morpho: `kubectl -n vector get pods -l app=morpho-indexer`
+   - Oracle: `kubectl -n vector get pods -l app=oracle-price-worker`
 2. **Recent logs** — look for decode panics, DB connection errors, or
    `context deadline exceeded` against the watcher's archive RPC.
 3. **Upstream lag** — confirm the watcher is producing for this chain (if
@@ -41,7 +56,8 @@ prices is going stale.
 
 ### Verify recovery
 
-`rate({morpho,oracle}_blocks_processed_total) > 0` for the affected chain.
+`rate(morpho_blocks_processed_total{status="success"}[5m]) > 0` /
+`rate(oracle_blocks_processed_total[5m]) > 0` for the affected chain.
 
 ---
 
@@ -1605,5 +1621,381 @@ USD exposure computed from these rows silently undercounts (VEC-307).
    is append-only; nothing backfills automatically). Consumers fall back to
    balance-based pricing for NULL rows, so impact is undercounted yield, not
    zeroed exposure.
+
+---
+
+## morpho VaultV2 structured tracking (VEC-218)
+
+A Morpho VaultV2 never touches Morpho Blue directly. It holds a set of **adapter**
+contracts, one per downstream venue (`MorphoMarketV1AdapterV2` wraps a Blue
+market, `MorphoVaultV1Adapter` wraps a nested MetaMorpho V1 vault), and the
+`morpho-indexer` derives four structured tables from the vault's own events:
+
+| Table | Written by | Trigger |
+| --- | --- | --- |
+| `morpho_adapter` | adapter registry | discovery enumeration, `AddAdapter`, lazy self-heal |
+| `morpho_adapter_state` | `realAssets()` snapshot | `Allocate` / `Deallocate` |
+| `morpho_vault_cap` | `(absoluteCap, relativeCap)` snapshot | the 4 `*AbsoluteCap` / `*RelativeCap` events |
+| `morpho_vault_fee` | full fee-config snapshot | the 4 `Set*Fee` / `Set*FeeRecipient` events |
+
+**Signals** (all carry `chain` + `cluster`):
+
+- `morpho_v2_adapter_registrations_total{adapter_type, registration_path}` — one
+  sample per registry row written. `adapter_type` is the on-chain classification
+  (`market_v1` | `vault_v1` | `unknown`); `registration_path` is the route that
+  wrote it (`discovery` | `add_adapter` | `lazy_self_heal`).
+- `morpho_v2_snapshots_written_total{snapshot_type}` — one sample per **committed**
+  event-driven snapshot (`adapter_state` | `vault_cap` | `vault_fee`).
+  Discovery-seeded `adapter_state` rows are deliberately excluded: this counter is
+  the liveness signal for the *event-driven* write path.
+- `morpho_events_processed_total{event_type}` — pre-existing; every V2 event name
+  is a registered topic on it, which is why the ForceDeallocate rule needs no new
+  instrument.
+
+### Why there is no VaultV2 state-freshness alert
+
+V2 vault state is **event-driven**: a dormant vault legitimately writes nothing
+for days, and that is correct behaviour, not a gap. Chain-verified in the 2026-07
+vault-631 / vault-630 investigation — the apparent "staleness" moved from one
+vault to the other purely with on-chain activity, the indexer resumed on the
+exact first event of each gap (block 25,583,119) field-for-field correct, and
+vault 630 is chain-verified silent across its whole 6-day gap. A wall-clock
+freshness rule would have false-positived on both. **Do not add one.**
+
+The only honest freshness shape is "the vault emitted an event at block N but has
+no state row at N" — an audit-log comparison, not something PromQL can express
+from these counters. Use it as a manual triage query (`db-query`):
+
+```sql
+-- V2 vault events with no matching vault-state row at the same block.
+-- Only the state-affecting events are expected to produce a vault_state row;
+-- the governance/timelock surface is audit-log only, so filter to those four.
+SELECT '0x' || encode(pe.contract_address, 'hex') AS vault,
+       pe.block_number,
+       pe.event_name
+FROM protocol_event pe
+JOIN morpho_vault mv
+  ON mv.address = pe.contract_address AND mv.chain_id = pe.chain_id
+LEFT JOIN morpho_vault_state mvs
+  ON mvs.morpho_vault_id = mv.id AND mvs.block_number = pe.block_number
+WHERE mv.vault_version = 3
+  AND pe.event_name IN ('Deposit', 'Withdraw', 'Transfer', 'AccrueInterest')
+  AND pe.block_number > <recent_block>
+  AND mvs.morpho_vault_id IS NULL
+ORDER BY pe.block_number DESC
+LIMIT 50;
+```
+
+### Known requirement gap (not a pipeline defect)
+
+VaultV2 `totalAssets()` is a **virtual accruing view**: it climbs with zero
+events (measured +0.053% over 6 event-free days on vault 630).
+`morpho_vault_state.total_assets` has last-event-snapshot semantics — correct as
+of its block, but a dormant vault's *live* TVL drifts above the newest row.
+Consumers that need live TVL need periodic sampling, which is a product decision
+for the team, not something to patch into this pipeline. Flagged here so it is
+not mistaken for a bug during triage.
+
+---
+
+## VectorMorphoV2UnknownAdapters
+
+**Severity:** warning · **For:** 30m (on a 24h window)
+
+### What it means
+
+`morpho-indexer` recorded more than 25 VaultV2 adapters as `adapter_type=unknown`
+in 24 hours on the labelled `chain`. The classifier probes two selectors on every
+adapter — `morpho()` (`0xd8fbc833`) and `morphoVaultV1()` (`0xe4baaddf`) — and
+records Unknown (DB `adapter_type = 99`) when **both revert**. Those adapters are
+still registered and their `realAssets()` still tracked, so this is not data loss;
+what is lost is venue attribution, so nothing downstream can say what backs the
+exposure.
+
+**A non-zero Unknown count is normal.** The VEC-218 ticket originally proposed
+"Unknown count stays 0" as the sentinel; live mainnet validation disproved it —
+real adapters exist whose both getters revert, and one 8-minute discovery window
+produced 7+ Unknown registrations. Only a sustained wave is actionable, which is
+what the threshold encodes: the live registration path (`AddAdapter`) fired just
+5 times in 7 days across *all* types on prod mainnet, so >25/day can only come
+from a mass discovery burst or a genuinely new adapter family.
+
+**Expect one firing during the initial VaultV2 bootstrap**, when every existing V2
+vault is discovered at once. Acknowledge and curate.
+
+### First checks
+
+1. **Which path** — `sum by (registration_path) (increase(morpho_v2_adapter_registrations_total{adapter_type="unknown"}[24h]))`.
+   All `discovery` means a bootstrap/backfill burst (benign, but still curate).
+   Any meaningful `add_adapter` share means a new family is shipping live.
+2. **Identify the adapters** (`db-query`):
+
+   ```sql
+   SELECT '0x' || encode(a.address, 'hex') AS adapter,
+          '0x' || encode(v.address, 'hex') AS vault,
+          a.added_at_block
+   FROM morpho_adapter a
+   JOIN morpho_vault v ON v.id = a.morpho_vault_id
+   WHERE a.adapter_type = 99 AND a.removed_at_block IS NULL
+   ORDER BY a.added_at_block DESC
+   LIMIT 50;
+   ```
+
+3. **Re-probe one on-chain** to confirm the classification is genuinely absent
+   rather than an RPC artefact (a transport error propagates and never reaches
+   Unknown, so it should not be, but confirm):
+
+   ```bash
+   cast call <adapter> "morpho()(address)"         --rpc-url https://ethereum-rpc.publicnode.com
+   cast call <adapter> "morphoVaultV1()(address)"  --rpc-url https://ethereum-rpc.publicnode.com
+   ```
+
+   Both reverting confirms Unknown is correct for this contract.
+4. **Find the real type** — read the contract on Etherscan and look for the
+   marker getter of the new family (e.g. a `compoundV3()` / `erc4626()` style
+   accessor). That selector is the fix.
+5. **Indexer logs** — `kubectl -n vector logs -l app=morpho-indexer | grep "unknown type"`
+   carries vault, adapter and block for every Unknown registration.
+
+### Common causes
+
+- Morpho deployed a new adapter family the 2-selector probe does not model →
+  extend `adapter_probe.go` with the new marker selector and its
+  `entity.MorphoAdapterType`, then re-classify the existing type-99 rows.
+- A mass discovery burst (bootstrap, or a wave of new V2 vaults) surfacing the
+  known long tail of unclassifiable adapters all at once → curate, no code change.
+
+### Verify recovery
+
+`increase(morpho_v2_adapter_registrations_total{adapter_type="unknown"}[24h]) <= 25`
+for the affected chain, and the type-99 query above returns only adapters you
+have consciously accepted.
+
+---
+
+## VectorMorphoV2LazyAdapterRegistrations
+
+**Severity:** warning · **For:** 30m (on a 6h window)
+
+### What it means
+
+More than 3 adapters were registered through the **lazy self-heal** path in 6
+hours on the labelled `chain`. That path fires when an `Allocate` / `Deallocate` /
+`RemoveAdapter` names an adapter that is *not* in our registry: rather than
+hard-failing and poisoning the FIFO queue, the indexer classifies the adapter
+on-chain and registers it at the event block.
+
+The heal itself is correct. What it *signals* is a discovery gap: vault discovery
+enumerates the vault's **current** adapter set (`adaptersLength()` / `adapters(i)`,
+hash-pinned) and seeds every entry, so once a vault is discovered every active
+adapter is already registered and this path's steady-state rate is **zero**.
+
+It also costs data quality: a lazily registered adapter's `added_at_block` is the
+event block, **not** the true `AddAdapter` block, so its lifetime bounds are an
+approximation until history is replayed.
+
+### First checks
+
+1. **Is it one new vault or many?** A vault discovered mid-life whose adapter set
+   changed between the enumeration read and the next event produces a small,
+   one-off burst. Correlate with the discovery path:
+   `sum by (registration_path) (increase(morpho_v2_adapter_registrations_total[6h]))`
+   — lazy registrations with **no** matching `discovery` traffic in the same window
+   are the suspicious case.
+2. **Identify them** — the indexer logs one WARN per heal:
+   `kubectl -n vector logs -l app=morpho-indexer | grep "registered lazily"`
+   (carries vault, adapter, block).
+3. **Was the vault genuinely new?** Compare the adapter's `added_at_block` against
+   its vault's first-seen block (`db-query`):
+
+   ```sql
+   SELECT '0x' || encode(v.address, 'hex') AS vault,
+          v.created_at_block AS vault_first_seen_block,
+          '0x' || encode(a.address, 'hex') AS adapter,
+          a.added_at_block,
+          a.added_at_block - v.created_at_block AS blocks_after_discovery
+   FROM morpho_adapter a
+   JOIN morpho_vault v ON v.id = a.morpho_vault_id
+   WHERE v.vault_version = 3
+   ORDER BY a.added_at_block DESC
+   LIMIT 50;
+   ```
+
+   `blocks_after_discovery` near 0 means the vault was just discovered — benign.
+   A large positive value on a long-known vault means enumeration missed the
+   adapter, which is the bug.
+4. **Cross-check the chain** — for a suspect vault, ask the contract directly and
+   compare with the registry:
+
+   ```bash
+   cast call <vault> "adaptersLength()(uint256)" --rpc-url https://ethereum-rpc.publicnode.com
+   cast call <vault> "adapters(uint256)(address)" <i> --rpc-url https://ethereum-rpc.publicnode.com
+   ```
+
+### Common causes
+
+- A wave of newly discovered V2 vaults (or the initial bootstrap) → benign;
+  confirm via `blocks_after_discovery` and let it clear.
+- `readV2Adapters` enumeration regression (truncated list, wrong selector, a
+  failed sub-read defaulting to empty) → adapters are missing from every newly
+  discovered vault; this is the bug the alert exists to catch.
+- Vault registry losing known vaults (e.g. repeated re-discovery after restarts)
+  → adapters look absent on every restart.
+
+### Verify recovery
+
+`increase(morpho_v2_adapter_registrations_total{registration_path="lazy_self_heal"}[6h]) <= 3`
+for the affected chain. If the cause was an enumeration bug, also replay the
+affected vaults so the healed adapters converge onto their true `AddAdapter`
+block.
+
+---
+
+## VectorMorphoV2ForceDeallocateSurge
+
+**Severity:** warning · **For:** 0m (on a 1h window)
+
+### What it means
+
+More than 20 VaultV2 `ForceDeallocate` events landed in one hour on the labelled
+`chain`. `forceDeallocate()` is the **permissionless emergency exit**: anyone can
+force liquidity out of an adapter, paying a penalty, when the vault's idle balance
+cannot serve a withdrawal.
+
+**This is a protocol-side signal, not an indexer fault.** Individual events are
+routine — measured on prod mainnet over 7 days: 76 events total, peak 24 in a 24h
+window, peak 7 in a 1h window. That is why there is no ">0 sentinel" (it would
+fire ~11x/day and get muted). At >20/h the character changes: that is no longer
+arbitrage trimming the edges, it is depositors paying the penalty *en masse*
+because a vault cannot meet withdrawals from idle liquidity — a liquidity-run
+shape worth handing to risk.
+
+### First checks
+
+1. **Which vault and adapter** (`db-query`) — the events are audit-logged with
+   their raw payload:
+
+   ```sql
+   SELECT '0x' || encode(contract_address, 'hex') AS vault,
+          block_number,
+          event_data
+   FROM protocol_event
+   WHERE event_name = 'ForceDeallocate'
+     AND block_number > <block_1h_ago>
+   ORDER BY block_number DESC;
+   ```
+
+   `event_data` carries the raw topics/data; decode against
+   `stl-verify/internal/pkg/blockchain/abis/vault_v2_events_abi.go` for
+   `adapter`, `assets`, `onBehalf` and `penaltyAssets`.
+2. **Is it one vault or many?** One vault = a vault-specific liquidity squeeze.
+   Many = a market-wide event; check whether the underlying asset is depegging or
+   a large Blue market is at full utilisation.
+3. **Idle liquidity trend** — the accompanying `Deallocate` events snapshot each
+   adapter's `realAssets()`, so the drain is visible in `morpho_adapter_state`:
+
+   ```sql
+   SELECT s.block_number, '0x' || encode(a.address, 'hex') AS adapter, s.real_assets
+   FROM morpho_adapter_state s
+   JOIN morpho_adapter a ON a.id = s.morpho_adapter_id
+   WHERE a.morpho_vault_id = <vault_id>
+   ORDER BY s.block_number DESC
+   LIMIT 100;
+   ```
+
+4. **Indexer logs** — every event is WARNed with full context:
+   `kubectl -n vector logs -l app=morpho-indexer | grep forceDeallocate`.
+
+### Common causes
+
+- A large withdrawal against a vault whose liquidity is fully allocated into
+  adapters → the exit path is working as designed; inform risk, no code action.
+- An underlying Blue market at ~100% utilisation, so normal deallocation cannot
+  source assets → protocol-side, monitor.
+- A depeg / incident on the vault's underlying asset driving a coordinated exit.
+
+**Nothing here is an indexer fix.** Do not silence by raising the threshold
+without a new baseline measurement.
+
+### Verify recovery
+
+`increase(morpho_events_processed_total{event_type="ForceDeallocate"}[1h]) <= 20`
+for the affected chain.
+
+---
+
+## VectorMorphoV2NoSnapshotsWritten
+
+**Severity:** warning · **For:** 15m (on a 6h window)
+
+### What it means
+
+VaultV2 allocation / cap / fee events have been processed for 6 hours on the
+labelled `chain`, but **zero** structured snapshots were committed
+(`morpho_v2_snapshots_written_total` is zero or absent). The events are landing in
+`protocol_event` as audit rows while `morpho_adapter_state` / `morpho_vault_cap` /
+`morpho_vault_fee` quietly stop filling, and **no error is raised** — this is the
+silent-data-hole guard that neither the Stalled nor the ErrorsHigh rule can see.
+
+The classic mechanism is dispatch drift: `processMetaMorphoLog`'s `switch` ends in
+`default: return nil`, so an event whose typed handler is removed or whose case
+stops matching is audit-logged and reported as success.
+
+**Activity-aware by construction.** The left side *is* the gate: no V2 events
+means no expectation of rows and the rule stays silent, so a dormant vault
+population cannot false-positive it. This is deliberately **not** a wall-clock
+staleness rule — see "Why there is no VaultV2 state-freshness alert" above.
+
+Scope: the counters are summed across snapshot types, and Allocate/Deallocate
+traffic on mainnet is continuous (~25k events/7d), so this catches a **total**
+write-path failure. The loss of one snapshot type alone (e.g. caps only, ~104
+events/7d) will not fire it.
+
+### First checks
+
+1. **Rollout ordering first.** The alert fires when the counter series is
+   *absent*, so it fires in the window between the alert rules syncing and the
+   morpho-indexer image that emits `morpho_v2_snapshots_written_total` actually
+   serving. Confirm the running image carries VEC-218 before investigating
+   anything else:
+   `kubectl -n vector get deploy morpho-indexer -o jsonpath='{.spec.template.spec.containers[0].image}'`.
+   If it predates the metric, this is expected and clears ~15m after the rollout.
+2. **Which side is dead** —
+   `sum by (event_type) (increase(morpho_events_processed_total{event_type=~"Allocate|Deallocate|Increase.*Cap|Decrease.*Cap|Set.*Fee.*"}[6h]))`
+   versus
+   `sum by (snapshot_type) (increase(morpho_v2_snapshots_written_total[6h]))`.
+   Events non-zero with snapshots absent confirms the write path, not the feed.
+3. **Confirm against the DB** (`db-query`) — metrics could be lying:
+
+   ```sql
+   SELECT max(block_number) AS last_adapter_state FROM morpho_adapter_state;
+   SELECT max(block_number) AS last_cap FROM morpho_vault_cap;
+   SELECT max(block_number) AS last_fee FROM morpho_vault_fee;
+   ```
+
+   If these are advancing while the counter is flat, the problem is the OTLP
+   export, not the pipeline.
+4. **Dispatch drift** — diff `processMetaMorphoLog`'s `switch` against the
+   registered topic list in `event_extractor.go`. A topic present in the
+   extractor's typed-extraction list but missing a `case` in the handler switch
+   is the bug.
+5. **Vault version guard** — every V2 handler starts at `resolveV2Vault`, which
+   errors on a vault recorded as V1/V1.1. That path *errors* (so it would show up
+   as a stall, not here), but a vault mis-recorded as V2 that never reaches a
+   handler would look like this. Check
+   `SELECT vault_version, count(*) FROM morpho_vault GROUP BY 1;`.
+
+### Common causes
+
+- Alert rules synced ahead of the indexer rollout → expected, self-clears.
+- A typed handler removed or its `case` dropped from `processMetaMorphoLog` →
+  events audit-log without producing rows. This is the bug the alert exists for.
+- Broken OTLP export while the pipeline is healthy → DB max block numbers
+  advance while the counter is flat (check 3 above).
+
+### Verify recovery
+
+`rate(morpho_v2_snapshots_written_total[6h]) > 0` for the affected chain, and the
+three `max(block_number)` queries above tracking the chain head.
 
 ---

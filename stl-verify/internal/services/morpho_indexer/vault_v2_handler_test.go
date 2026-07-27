@@ -831,6 +831,211 @@ func TestProcessBlockEvent_Allocation_UnknownAdapterHeals(t *testing.T) {
 
 // --- ForceDeallocate ---
 
+// --- registration / snapshot telemetry ---
+
+// TestProcessBlockEvent_AdapterRegistration_RecordsPathAndType verifies each
+// live registration path labels morpho.v2.adapter.registrations with the path
+// that produced the row. The path label is what separates an expected
+// AddAdapter registration from a lazy self-heal, which is a discovery gap:
+// discovery enumerates a vault's whole adapter set, so post-discovery every
+// active adapter is already registered and the lazy path should stay at zero.
+// Both cases probe to Unknown so the adapter_type label the unknown-adapter
+// alert selects on is exercised too.
+func TestProcessBlockEvent_AdapterRegistration_RecordsPathAndType(t *testing.T) {
+	tests := []struct {
+		name     string
+		setup    func(h *serviceTestHarness)
+		makeLog  func(h *serviceTestHarness) shared.Log
+		wantPath adapterRegistrationPath
+	}{
+		{
+			name: "AddAdapter event",
+			setup: func(h *serviceTestHarness) {
+				h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+					if len(calls) == 2 && calls[0].Target == testAdapterAddr {
+						return h.adapterProbeResults(entity.MorphoAdapterTypeUnknown), nil
+					}
+					return nil, errTestUnexpectedCall(calls)
+				}
+			},
+			makeLog: func(h *serviceTestHarness) shared.Log {
+				return h.makeV2VaultLog(h.vaultV2EventsABI.Events["AddAdapter"], testVaultAddr, []common.Hash{addrTopic(testAdapterAddr)})
+			},
+			wantPath: adapterPathAddAdapter,
+		},
+		{
+			name: "Allocate for an adapter that predates discovery",
+			setup: func(h *serviceTestHarness) {
+				h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+					if len(calls) == 2 && calls[0].Target == testAdapterAddr {
+						return h.adapterProbeResults(entity.MorphoAdapterTypeUnknown), nil
+					}
+					return nil, errTestUnexpectedCall(calls)
+				}
+				h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+					if len(calls) == 1 && calls[0].Target == testAdapterAddr {
+						return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(41_300_000))}}, nil
+					}
+					return nil, errTestUnexpectedCall(calls)
+				}
+				h.morphoRepo.GetActiveAdapterAtFn = func(_ context.Context, _ int64, _ []byte, _ entity.BlockPosition) (*entity.MorphoAdapterMember, error) {
+					return nil, nil
+				}
+			},
+			makeLog: func(h *serviceTestHarness) shared.Log {
+				return h.makeV2VaultLog(h.vaultV2EventsABI.Events["Allocate"], testVaultAddr,
+					[]common.Hash{addrTopic(testCaller), addrTopic(testAdapterAddr)},
+					big.NewInt(5000), hashSlice(common.HexToHash("0xaa")), big.NewInt(5000))
+			},
+			wantPath: adapterPathLazySelfHeal,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newTestHarness(t)
+			h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
+			reader := h.recordMetrics(t)
+			tt.setup(h)
+			h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterObservation) (int64, bool, error) {
+				return 42, true, nil
+			}
+
+			if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, tt.makeLog(h))}); err != nil {
+				t.Fatalf("processBlock: %v", err)
+			}
+
+			want := map[string]string{"adapter.type": "unknown", "registration.path": string(tt.wantPath)}
+			if got := counterValue(t, reader, "morpho.v2.adapter.registrations", want); got != 1 {
+				t.Errorf("morpho.v2.adapter.registrations%v = %d, want 1", want, got)
+			}
+		})
+	}
+}
+
+// TestProcessBlockEvent_V2Snapshots_RecordSnapshotType verifies every
+// event-driven structured write increments morpho.v2.snapshots.written under its
+// own snapshot.type. VectorMorphoV2NoSnapshotsWritten compares this counter
+// against the V2 events that should have produced it, so a handler that stops
+// writing without erroring (a dispatch case falling through to the audit-log-only
+// default) is otherwise invisible.
+func TestProcessBlockEvent_V2Snapshots_RecordSnapshotType(t *testing.T) {
+	capIDData := []byte{0x01, 0x02, 0x03, 0x04}
+	capID := crypto.Keccak256Hash(capIDData)
+
+	tests := []struct {
+		name     string
+		setup    func(h *serviceTestHarness)
+		makeLog  func(h *serviceTestHarness) shared.Log
+		wantType v2SnapshotType
+	}{
+		{
+			name: "Allocate snapshots adapter realAssets",
+			setup: func(h *serviceTestHarness) {
+				h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+					if len(calls) == 1 && calls[0].Target == testAdapterAddr {
+						return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(123456789))}}, nil
+					}
+					return nil, errTestUnexpectedCall(calls)
+				}
+				h.morphoRepo.GetActiveAdapterAtFn = func(_ context.Context, _ int64, _ []byte, _ entity.BlockPosition) (*entity.MorphoAdapterMember, error) {
+					return testAdapterMember(), nil
+				}
+				h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterObservation) (int64, bool, error) {
+					return 55, false, nil
+				}
+			},
+			makeLog: func(h *serviceTestHarness) shared.Log {
+				return h.makeV2VaultLog(h.vaultV2EventsABI.Events["Allocate"], testVaultAddr,
+					[]common.Hash{addrTopic(testCaller), addrTopic(testAdapterAddr)},
+					big.NewInt(5000), hashSlice(common.HexToHash("0xaa")), big.NewInt(5000))
+			},
+			wantType: v2SnapshotAdapterState,
+		},
+		{
+			name: "IncreaseAbsoluteCap snapshots the cap pair",
+			setup: func(h *serviceTestHarness) {
+				h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+					if len(calls) != 2 {
+						return nil, errTestUnexpectedCall(calls)
+					}
+					return []outbound.Result{
+						{Success: true, ReturnData: h.packUint256(big.NewInt(1_000_000))},
+						{Success: true, ReturnData: h.packUint256(big.NewInt(500))},
+					}, nil
+				}
+			},
+			makeLog: func(h *serviceTestHarness) shared.Log {
+				return h.makeV2VaultLog(h.vaultV2EventsABI.Events["IncreaseAbsoluteCap"], testVaultAddr, []common.Hash{capID}, capIDData, big.NewInt(999))
+			},
+			wantType: v2SnapshotVaultCap,
+		},
+		{
+			name: "SetPerformanceFee snapshots the fee config",
+			setup: func(h *serviceTestHarness) {
+				h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+					if len(calls) != 4 {
+						return nil, errTestUnexpectedCall(calls)
+					}
+					return h.feeGetterResults(big.NewInt(100_000_000_000_000_000), big.NewInt(0),
+						common.HexToAddress("0x1601843c5E9bC251A3272907010AFa41Fa18347E"), common.Address{}), nil
+				}
+			},
+			makeLog: func(h *serviceTestHarness) shared.Log {
+				return h.makeV2VaultLog(h.vaultV2EventsABI.Events["SetPerformanceFee"], testVaultAddr, nil, big.NewInt(1))
+			},
+			wantType: v2SnapshotVaultFee,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newTestHarness(t)
+			h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
+			reader := h.recordMetrics(t)
+			tt.setup(h)
+
+			if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, tt.makeLog(h))}); err != nil {
+				t.Fatalf("processBlock: %v", err)
+			}
+
+			want := map[string]string{"snapshot.type": string(tt.wantType)}
+			if got := counterValue(t, reader, "morpho.v2.snapshots.written", want); got != 1 {
+				t.Errorf("morpho.v2.snapshots.written%v = %d, want 1", want, got)
+			}
+		})
+	}
+}
+
+// TestProcessBlockEvent_V2Snapshot_NotRecordedWhenWriteFails keeps the counter
+// honest: it counts committed snapshots, so a failed write must leave it at zero
+// rather than reporting a row that never landed.
+func TestProcessBlockEvent_V2Snapshot_NotRecordedWhenWriteFails(t *testing.T) {
+	h := newTestHarness(t)
+	h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
+	reader := h.recordMetrics(t)
+
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		if len(calls) != 4 {
+			return nil, errTestUnexpectedCall(calls)
+		}
+		return h.feeGetterResults(big.NewInt(1), big.NewInt(0), common.Address{}, common.Address{}), nil
+	}
+	h.morphoRepo.SaveVaultFeeFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoVaultFee) error {
+		return errors.New("fee write failed")
+	}
+
+	log := h.makeV2VaultLog(h.vaultV2EventsABI.Events["SetPerformanceFee"], testVaultAddr, nil, big.NewInt(1))
+	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err == nil {
+		t.Fatal("expected the block to fail so SQS redelivers")
+	}
+
+	want := map[string]string{"snapshot.type": string(v2SnapshotVaultFee)}
+	if got := counterValue(t, reader, "morpho.v2.snapshots.written", want); got != 0 {
+		t.Errorf("morpho.v2.snapshots.written%v = %d, want 0 (the write failed)", want, got)
+	}
+}
+
+// --- ForceDeallocate ---
+
 func TestProcessBlockEvent_ForceDeallocate_WarnsWritesNothing(t *testing.T) {
 	h := newTestHarness(t)
 	h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)

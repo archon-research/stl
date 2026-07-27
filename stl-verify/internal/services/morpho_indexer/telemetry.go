@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -14,16 +15,57 @@ import (
 
 const instrumentationName = "github.com/archon-research/stl/stl-verify/internal/services/morpho_indexer"
 
+// adapterRegistrationPath names the code path that produced a VaultV2 adapter
+// registry row. The three paths have very different expected volumes, so the
+// alerts distinguish them: discovery seeds a newly-found vault's whole adapter
+// set at once, AddAdapter is the normal live registration, and the lazy
+// self-heal should stay at zero once a vault has been discovered.
+type adapterRegistrationPath string
+
+const (
+	adapterPathDiscovery    adapterRegistrationPath = "discovery"
+	adapterPathAddAdapter   adapterRegistrationPath = "add_adapter"
+	adapterPathLazySelfHeal adapterRegistrationPath = "lazy_self_heal"
+)
+
+// v2SnapshotType names the structured VaultV2 table a snapshot landed in.
+type v2SnapshotType string
+
+const (
+	v2SnapshotAdapterState v2SnapshotType = "adapter_state"
+	v2SnapshotVaultCap     v2SnapshotType = "vault_cap"
+	v2SnapshotVaultFee     v2SnapshotType = "vault_fee"
+)
+
+// adapterTypeLabel renders an adapter classification as a metric label. A value
+// outside the modelled set renders as its numeric form rather than collapsing
+// into "unknown": Unknown (99) is a real classification the alerts count, so
+// masking a newly added enum value as Unknown would corrupt that signal.
+func adapterTypeLabel(t entity.MorphoAdapterType) string {
+	switch t {
+	case entity.MorphoAdapterTypeMarketV1:
+		return "market_v1"
+	case entity.MorphoAdapterTypeVaultV1:
+		return "vault_v1"
+	case entity.MorphoAdapterTypeUnknown:
+		return "unknown"
+	default:
+		return fmt.Sprintf("type_%d", int16(t))
+	}
+}
+
 // Telemetry provides OpenTelemetry metrics and tracing for the Morpho indexer.
 type Telemetry struct {
 	tracer trace.Tracer
 	meter  metric.Meter
 
 	// Counters
-	blocksProcessed metric.Int64Counter
-	eventsProcessed metric.Int64Counter
-	rpcCallsTotal   metric.Int64Counter
-	errorsTotal     metric.Int64Counter
+	blocksProcessed      metric.Int64Counter
+	eventsProcessed      metric.Int64Counter
+	rpcCallsTotal        metric.Int64Counter
+	errorsTotal          metric.Int64Counter
+	adapterRegistrations metric.Int64Counter
+	v2SnapshotsWritten   metric.Int64Counter
 
 	// Histograms
 	blockDuration   metric.Float64Histogram
@@ -93,6 +135,22 @@ func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("creating errorsTotal counter: %w", err)
+	}
+
+	t.adapterRegistrations, err = meter.Int64Counter(
+		"morpho.v2.adapter.registrations",
+		metric.WithDescription("VaultV2 adapter registry rows written, by on-chain classification and the path that registered them"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating adapterRegistrations counter: %w", err)
+	}
+
+	t.v2SnapshotsWritten, err = meter.Int64Counter(
+		"morpho.v2.snapshots.written",
+		metric.WithDescription("VaultV2 structured snapshots committed by the event-driven handlers (adapter realAssets, allocation caps, fee config)"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating v2SnapshotsWritten counter: %w", err)
 	}
 
 	t.symbolsMissing, err = meter.Int64Gauge(
@@ -184,6 +242,36 @@ func (t *Telemetry) RecordError(ctx context.Context, operation string, err error
 	t.errorsTotal.Add(ctx, 1, metric.WithAttributes(
 		t.chainAttr,
 		attribute.String("operation", operation),
+	))
+}
+
+// RecordAdapterRegistration records that a VaultV2 adapter was written to the
+// registry. It is called from inside the write transaction, so a transaction
+// that later rolls back over-counts by one, and the SQS retry counts again.
+// Both are bounded by the block-failure rate the error alerts already cover, and
+// the rules reading this counter threshold over hours rather than single events.
+func (t *Telemetry) RecordAdapterRegistration(ctx context.Context, adapterType entity.MorphoAdapterType, path adapterRegistrationPath) {
+	if t == nil {
+		return
+	}
+	t.adapterRegistrations.Add(ctx, 1, metric.WithAttributes(
+		t.chainAttr,
+		attribute.String("adapter.type", adapterTypeLabel(adapterType)),
+		attribute.String("registration.path", string(path)),
+	))
+}
+
+// RecordV2Snapshot records one committed VaultV2 structured snapshot. Callers
+// record after their write transaction returns, so the counter never claims a
+// row that was rolled back. Discovery-seeded adapter_state rows are deliberately
+// excluded: this counter is the liveness signal for the event-driven write path.
+func (t *Telemetry) RecordV2Snapshot(ctx context.Context, snapshotType v2SnapshotType) {
+	if t == nil {
+		return
+	}
+	t.v2SnapshotsWritten.Add(ctx, 1, metric.WithAttributes(
+		t.chainAttr,
+		attribute.String("snapshot.type", string(snapshotType)),
 	))
 }
 

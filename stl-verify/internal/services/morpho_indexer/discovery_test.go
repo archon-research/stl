@@ -453,6 +453,7 @@ func TestProcessBlockEvent_VaultDiscovery_V2_FeeSurface(t *testing.T) {
 // composition-completeness probe would flag as adapter_data_missing.
 func TestProcessBlockEvent_VaultDiscovery_V2_EnumeratesAndSeedsAdapters(t *testing.T) {
 	h := newTestHarness(t)
+	reader := h.recordMetrics(t)
 	unknownVault := common.HexToAddress("0xc7CDcFDEfC64631ED6799C95e3b110cd42F2bD22")
 	curator := common.HexToAddress("0x00000000000000000000000000000000000000A3")
 	adapterA := common.HexToAddress("0xAaAa000000000000000000000000000000000001")
@@ -580,6 +581,16 @@ func TestProcessBlockEvent_VaultDiscovery_V2_EnumeratesAndSeedsAdapters(t *testi
 	}
 	if got := seededByID[102]; got == nil || got.RealAssets.Cmp(realAssetsB) != 0 {
 		t.Errorf("adapterB seed realAssets = %v, want %s (hash-pinned)", got, realAssetsB)
+	}
+
+	// Registrations seeded here carry registration.path="discovery", which is what
+	// lets VectorMorphoV2LazyAdapterRegistrations treat the lazy path as a defect
+	// signal rather than normal new-vault traffic.
+	for _, wantType := range []string{"market_v1", "vault_v1"} {
+		want := map[string]string{"adapter.type": wantType, "registration.path": string(adapterPathDiscovery)}
+		if got := counterValue(t, reader, "morpho.v2.adapter.registrations", want); got != 1 {
+			t.Errorf("morpho.v2.adapter.registrations%v = %d, want 1", want, got)
+		}
 	}
 
 	// The adapter SET is versioned state, so its enumeration must be hash-pinned to

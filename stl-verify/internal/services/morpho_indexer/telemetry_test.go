@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"go.opentelemetry.io/otel/attribute"
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
@@ -80,6 +81,71 @@ func TestSecondsHistograms_UseSecondsBuckets(t *testing.T) {
 	}
 }
 
+// TestRecordAdapterRegistration_LabelsTypeAndPath pins the label vocabulary the
+// VectorMorphoV2UnknownAdapters and VectorMorphoV2LazyAdapterRegistrations rules
+// select on. Renaming a value here silently un-fires those alerts.
+func TestRecordAdapterRegistration_LabelsTypeAndPath(t *testing.T) {
+	tests := []struct {
+		name        string
+		adapterType entity.MorphoAdapterType
+		path        adapterRegistrationPath
+		wantType    string
+	}{
+		{"market adapter seeded at discovery", entity.MorphoAdapterTypeMarketV1, adapterPathDiscovery, "market_v1"},
+		{"nested vault adapter via AddAdapter", entity.MorphoAdapterTypeVaultV1, adapterPathAddAdapter, "vault_v1"},
+		{"unclassifiable adapter via lazy self-heal", entity.MorphoAdapterTypeUnknown, adapterPathLazySelfHeal, "unknown"},
+		{"adapter type added to the enum but not the label map", entity.MorphoAdapterType(3), adapterPathAddAdapter, "type_3"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tel, reader := newRecordingTelemetry(t)
+			tel.RecordAdapterRegistration(context.Background(), tt.adapterType, tt.path)
+
+			points := counterPoints(t, reader, "morpho.v2.adapter.registrations")
+			if len(points) != 1 {
+				t.Fatalf("got %d data points, want 1", len(points))
+			}
+			want := attribute.NewSet(
+				attribute.String("chain", "mainnet"),
+				attribute.String("adapter.type", tt.wantType),
+				attribute.String("registration.path", string(tt.path)),
+			)
+			if !points[0].Attributes.Equals(&want) {
+				t.Errorf("attributes = %v, want %v", points[0].Attributes.Encoded(attribute.DefaultEncoder()), want.Encoded(attribute.DefaultEncoder()))
+			}
+			if points[0].Value != 1 {
+				t.Errorf("value = %d, want 1", points[0].Value)
+			}
+		})
+	}
+}
+
+// TestRecordV2Snapshot_LabelsSnapshotType pins the label vocabulary the
+// VectorMorphoV2NoSnapshotsWritten rule selects on.
+func TestRecordV2Snapshot_LabelsSnapshotType(t *testing.T) {
+	for _, snapshotType := range []v2SnapshotType{v2SnapshotAdapterState, v2SnapshotVaultCap, v2SnapshotVaultFee} {
+		t.Run(string(snapshotType), func(t *testing.T) {
+			tel, reader := newRecordingTelemetry(t)
+			tel.RecordV2Snapshot(context.Background(), snapshotType)
+
+			points := counterPoints(t, reader, "morpho.v2.snapshots.written")
+			if len(points) != 1 {
+				t.Fatalf("got %d data points, want 1", len(points))
+			}
+			want := attribute.NewSet(
+				attribute.String("chain", "mainnet"),
+				attribute.String("snapshot.type", string(snapshotType)),
+			)
+			if !points[0].Attributes.Equals(&want) {
+				t.Errorf("attributes = %v, want %v", points[0].Attributes.Encoded(attribute.DefaultEncoder()), want.Encoded(attribute.DefaultEncoder()))
+			}
+			if points[0].Value != 1 {
+				t.Errorf("value = %d, want 1", points[0].Value)
+			}
+		})
+	}
+}
+
 func TestNewTelemetry(t *testing.T) {
 	tel, err := NewTelemetry("mainnet")
 	if err != nil {
@@ -116,6 +182,8 @@ func exerciseAllMethods(t *testing.T, tel *Telemetry) {
 	tel.RecordRPCCall(ctx, "getMarketState", time.Millisecond, nil)
 	tel.RecordRPCCall(ctx, "getMarketState", time.Millisecond, someErr)
 	tel.RecordError(ctx, "op", someErr)
+	tel.RecordAdapterRegistration(ctx, entity.MorphoAdapterTypeMarketV1, adapterPathAddAdapter)
+	tel.RecordV2Snapshot(ctx, v2SnapshotAdapterState)
 
 	_, span := tel.StartBlockSpan(ctx, 1)
 	span.End()
@@ -146,6 +214,14 @@ func TestTelemetry_NilSafe(t *testing.T) {
 	t.Run("RecordError", func(t *testing.T) {
 		tel.RecordError(ctx, "processBlock", someErr)
 		tel.RecordError(ctx, "processBlock", nil)
+	})
+
+	t.Run("RecordAdapterRegistration", func(t *testing.T) {
+		tel.RecordAdapterRegistration(ctx, entity.MorphoAdapterTypeUnknown, adapterPathLazySelfHeal)
+	})
+
+	t.Run("RecordV2Snapshot", func(t *testing.T) {
+		tel.RecordV2Snapshot(ctx, v2SnapshotVaultCap)
 	})
 
 	t.Run("StartBlockSpan", func(t *testing.T) {

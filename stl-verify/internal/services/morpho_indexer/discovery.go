@@ -286,6 +286,7 @@ func (s *Service) seedDiscoveredAdapters(ctx context.Context, tx pgx.Tx, vault *
 		if err != nil {
 			return err
 		}
+		s.telemetry.RecordAdapterRegistration(ctx, adapterType, adapterPathDiscovery)
 		if err := s.saveAdapterSeedState(ctx, tx, adapterID, a.realAssets, blockNumber, blockVersion, blockTimestamp); err != nil {
 			return fmt.Errorf("seeding adapter state for %s: %w", a.address.Hex(), err)
 		}

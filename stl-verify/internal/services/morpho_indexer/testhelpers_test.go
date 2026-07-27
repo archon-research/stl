@@ -10,6 +10,9 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
+	"go.opentelemetry.io/otel/attribute"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
@@ -152,6 +155,65 @@ func newTestHarness(t *testing.T) *serviceTestHarness {
 		metaMorphoV2AccrueABI: v2AccrueABI,
 		vaultV2EventsABI:      vaultV2EventsABI,
 	}
+}
+
+// recordMetrics swaps the service's telemetry for one backed by an in-memory
+// reader, so a test can assert the instrument increments a handler emits. The
+// harness leaves telemetry nil by default (the recorders are nil-safe), which
+// hides those increments.
+func (h *serviceTestHarness) recordMetrics(t *testing.T) sdkmetric.Reader {
+	t.Helper()
+	tel, reader := newRecordingTelemetry(t)
+	h.svc.telemetry = tel
+	return reader
+}
+
+// counterPoints collects the named int64 counter's data points. An instrument
+// that was never recorded yields no points instead of failing, so callers can
+// assert absence as well as presence.
+func counterPoints(t *testing.T, reader sdkmetric.Reader, name string) []metricdata.DataPoint[int64] {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collecting metrics: %v", err)
+	}
+	for _, scope := range rm.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != name {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("metric %q is %T, want metricdata.Sum[int64]", name, m.Data)
+			}
+			return sum.DataPoints
+		}
+	}
+	return nil
+}
+
+// counterValue sums the named counter's points whose attributes include every
+// entry of want. Attributes outside want are ignored, so a test asserts only the
+// labels it cares about.
+func counterValue(t *testing.T, reader sdkmetric.Reader, name string, want map[string]string) int64 {
+	t.Helper()
+	var total int64
+	for _, dp := range counterPoints(t, reader, name) {
+		if hasAttributes(dp.Attributes, want) {
+			total += dp.Value
+		}
+	}
+	return total
+}
+
+func hasAttributes(set attribute.Set, want map[string]string) bool {
+	for k, v := range want {
+		got, ok := set.Value(attribute.Key(k))
+		if !ok || got.AsString() != v {
+			return false
+		}
+	}
+	return true
 }
 
 // makeV2VaultLog builds a VaultV2 event log emitted by vaultAddr: event.ID plus
