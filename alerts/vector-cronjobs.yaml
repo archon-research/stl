@@ -59,6 +59,10 @@ groups:
             increase(cronjob_runs_total{
               status="error",
               service_name!="maple-graphql-indexer",
+              # transform-bootstrap is a manual, operator-triggered backfill
+              # (VEC-490): a failed run is watched live in the Temporal UI, so it
+              # should not raise a cronjob alert. WorkerDown still covers the pod.
+              service_name!="transform-bootstrap",
               k8s_namespace_name="vector"
             }[15m])
           ) > 0
@@ -93,6 +97,7 @@ groups:
               increase(cronjob_runs_total{
                 status="error",
                 service_name!="maple-graphql-indexer",
+                service_name!="transform-bootstrap",
                 k8s_namespace_name="vector"
               }[1h])
             ) > 0
@@ -103,6 +108,7 @@ groups:
               increase(cronjob_runs_total{
                 status="success",
                 service_name!="maple-graphql-indexer",
+                service_name!="transform-bootstrap",
                 k8s_namespace_name="vector"
               }[1h])
             ) == 0

@@ -63,6 +63,27 @@ func (a *cronjobActivities) Execute(ctx context.Context, scheduledAt time.Time) 
 	logger.Info("starting cronjob execution", "scheduledAt", scheduledAt)
 
 	ctx = ContextWithScheduledAt(ctx, scheduledAt)
+
+	// Heartbeat on a ticker so that, on a long-running activity with a
+	// HeartbeatTimeout configured (see workflowParams), a crashed worker is
+	// detected in minutes rather than at StartToCloseTimeout. It is harmless
+	// when no HeartbeatTimeout is set (the server just ignores the beats). Kept
+	// here in the wrapper, not the Runner, so runners stay Temporal-free.
+	hbDone := make(chan struct{})
+	defer close(hbDone)
+	go func() {
+		t := time.NewTicker(30 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-hbDone:
+				return
+			case <-t.C:
+				activity.RecordHeartbeat(ctx)
+			}
+		}
+	}()
+
 	start := time.Now()
 	err := a.runner.Run(ctx)
 	// Recorded per activity execution (so a retried run that ultimately
@@ -79,19 +100,53 @@ func (a *cronjobActivities) Execute(ctx context.Context, scheduledAt time.Time) 
 	return nil
 }
 
-// cronjobWorkflow orchestrates a single cronjob activity execution.
-func cronjobWorkflow(ctx workflow.Context) error {
+// workflowParams carries the per-job activity timing/retry into the workflow as
+// input, so it is recorded in workflow history and observed identically on every
+// replay (rather than closing over mutable config). Every field is optional: a
+// zero value falls back to the shared default in cronjobWorkflow, so a schedule
+// that passes no args — including any schedule created before this parameter
+// existed — runs exactly as before. Long-running jobs (e.g. a multi-hour history
+// backfill) raise StartToCloseTimeout and ScheduleToCloseTimeout, usually set
+// MaximumAttempts=1, and set a HeartbeatTimeout so a dead worker is caught fast.
+type workflowParams struct {
+	StartToCloseTimeout    time.Duration
+	ScheduleToCloseTimeout time.Duration
+	HeartbeatTimeout       time.Duration
+	MaximumAttempts        int32
+}
+
+// cronjobWorkflow orchestrates a single cronjob activity execution. The params
+// argument is decoded from schedule input; missing (older/interval schedules
+// that pass no args) decodes to the zero value, and each zero field below falls
+// back to the original default — so this signature change is backward compatible.
+func cronjobWorkflow(ctx workflow.Context, params workflowParams) error {
 	logger := workflow.GetLogger(ctx)
 	logger.Info("starting cronjob workflow")
 
+	startToClose := params.StartToCloseTimeout
+	if startToClose == 0 {
+		startToClose = 10 * time.Minute
+	}
+	scheduleToClose := params.ScheduleToCloseTimeout
+	if scheduleToClose == 0 {
+		scheduleToClose = 30 * time.Minute
+	}
+	maxAttempts := params.MaximumAttempts
+	if maxAttempts == 0 {
+		maxAttempts = 5
+	}
+
 	activityOptions := workflow.ActivityOptions{
-		StartToCloseTimeout:    10 * time.Minute,
-		ScheduleToCloseTimeout: 30 * time.Minute,
+		StartToCloseTimeout:    startToClose,
+		ScheduleToCloseTimeout: scheduleToClose,
+		// Zero HeartbeatTimeout means "no heartbeat requirement" (the default for
+		// short jobs); a long job sets it so a crashed worker is detected quickly.
+		HeartbeatTimeout: params.HeartbeatTimeout,
 		RetryPolicy: &temporalsdk.RetryPolicy{
 			InitialInterval:    2 * time.Second,
 			BackoffCoefficient: 2.0,
 			MaximumInterval:    30 * time.Second,
-			MaximumAttempts:    5,
+			MaximumAttempts:    maxAttempts,
 		},
 	}
 	ctx = workflow.WithActivityOptions(ctx, activityOptions)

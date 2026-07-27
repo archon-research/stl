@@ -1,0 +1,54 @@
+# transform-bootstrap (VEC-490): an idle Temporal worker that copies pre-existing
+# raw history into the transformation layer. The AFTER INSERT triggers only enqueue
+# NEW raw rows, so pre-existing history is copied once by this backfill.
+#
+# It is a Deployment, not a Job, on purpose: a Job is immutable, which forced a
+# JSON-patch image pin (CI tag-stamping would mutate it) and a re-merge to retry.
+# As a normal Deployment the worker is mutable, so standard `images:` stamping
+# works, and the run is decoupled from deploy: the worker registers a PAUSED,
+# no-interval Temporal schedule and then waits. Nothing runs on sync — a human
+# clicks Trigger in the Temporal UI (or `temporal schedule trigger --schedule-id
+# transform-bootstrap`) when ready. Retries are a click, not a re-merge.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: transform-bootstrap
+spec:
+  # 1 replica: the worker must be up to accept a Trigger. It emits no cronjob runs
+  # for long stretches, which is expected — VectorCronjobWorkerDown is guarded on
+  # desired replicas and must not page on "no runs". A redeploy mid-run cancels the
+  # in-flight backfill (idempotent: _bootstrap_* upserts are IS DISTINCT FROM
+  # guarded, so re-triggering is safe), so schedule deploys around an active run.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: transform-bootstrap
+  template:
+    metadata:
+      labels:
+        app: transform-bootstrap
+    spec:
+      serviceAccountName: transform-bootstrap
+      containers:
+        - name: transform-bootstrap
+          image: transform-bootstrap
+          envFrom:
+            - configMapRef:
+                name: otel-config
+            # TEMPORAL_HOST_PORT/NAMESPACE + BOOTSTRAP_FROM/STEP.
+            - configMapRef:
+                name: transform-bootstrap
+            # DATABASE_URL. Reuses the transform-worker Secret (created by the
+            # transform-worker ExternalSecret); bootstrap deploys alongside the worker.
+            - secretRef:
+                name: transform-worker
+          resources:
+            # The backfill runs in-process on Trigger, so keep the old Job's limits;
+            # requests stay low because the worker idles almost always.
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "1000m"
+              memory: "512Mi"
+      terminationGracePeriodSeconds: 60

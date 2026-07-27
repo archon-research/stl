@@ -1,92 +1,61 @@
-// Package main is a one-off job that backfills the transformation layer with
-// pre-existing raw history. Steady-state refresh is queue-driven (an AFTER INSERT
+// Package transform_bootstrap copies pre-existing raw history into the
+// transformation layer. Steady-state refresh is queue-driven (an AFTER INSERT
 // trigger on each raw table enqueues new rows, and the transform-worker drains
 // the queues), but that only covers rows written after the trigger exists. This
-// job copies everything older, by walking each source's observation-time column
-// in windows and calling transformed._bootstrap_<source>(from, to), which upserts
-// ON CONFLICT DO UPDATE guarded by IS DISTINCT FROM.
+// service copies everything older, by walking each source's observation-time
+// column in windows and calling transformed._bootstrap_<source>(from, to), which
+// upserts ON CONFLICT DO UPDATE guarded by IS DISTINCT FROM.
 //
-// Run it once after the migration is applied, out of band from the worker's
-// 10-minute Temporal activity. It enables tiered reads and disables the statement
-// timeout for its own session so S3-tiered history is included and large windows
-// are not cut off. The enqueue triggers are already live, so any rows written
-// while this runs are captured by the queue; the guarded upsert makes the overlap
-// (and re-running the whole job) idempotent.
-//
-// Usage:
-//
-//	transform-bootstrap [-from 2025-01-01] [-step 720h] [-source morpho_market_state]
-package main
+// It is Temporal-free by design (it only needs a *pgxpool.Pool + Params): the
+// transform-bootstrap Temporal worker (cmd/cronjobs/transform-bootstrap) wraps
+// Run in a RunnerFunc, and the integration test drives it directly. Run must be
+// executed out of band from the worker's steady-state activity — it enables
+// tiered reads and disables the statement timeout for its own session so
+// S3-tiered history is included and large windows are not cut off. The enqueue
+// triggers are already live, so any rows written while it runs are captured by
+// the queue; the guarded upsert makes the overlap (and re-running) idempotent.
+package transform_bootstrap
 
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"log/slog"
-	"os"
 	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
-
-	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 )
 
-func main() {
-	if err := run(context.Background()); err != nil {
-		slog.Error("transform-bootstrap failed", "error", err)
-		os.Exit(1)
-	}
+// Params configures a bootstrap run.
+type Params struct {
+	// From is the start of the backfill window. The zero value is the
+	// "derive per source" sentinel: Run starts each source at its own earliest
+	// raw row. A fixed default would silently exclude older history from the
+	// copy while the parity ledger still counts it, so drift would alert.
+	From time.Time
+	// Step is the window size per _bootstrap call. Must be positive.
+	Step time.Duration
+	// Source restricts the run to a single source; empty means all sources.
+	Source string
 }
 
-func run(ctx context.Context) error {
-	fromStr := flag.String("from", "", "start of the backfill window (RFC3339 or YYYY-MM-DD); unset = each source's earliest raw row")
-	step := flag.Duration("step", 30*24*time.Hour, "window size per _bootstrap call")
-	only := flag.String("source", "", "restrict to a single source (default: all)")
-	flag.Parse()
-
+// Run copies each source's pre-existing history into the transformed layer over
+// step-sized windows and seeds the parity ledger, all on ONE acquired connection
+// so the session GUCs (statement_timeout, tiered reads) apply to every query.
+// Setting them via pool.Exec would land each SET on an arbitrary pooled
+// connection and leave the window queries on others with defaults -- and
+// enable_tiered_reads defaults off, so those queries would silently skip
+// S3-tiered history (parity cannot catch it: both sides undercount alike).
+func Run(ctx context.Context, pool *pgxpool.Pool, p Params, logger *slog.Logger) error {
 	// A non-positive step never advances the per-window loop in bootstrapSource,
 	// so guard it here rather than spin forever.
-	if *step <= 0 {
-		return fmt.Errorf("step must be positive, got %v", *step)
+	if p.Step <= 0 {
+		return fmt.Errorf("step must be positive, got %v", p.Step)
 	}
 
-	// A zero from is the "derive per source" sentinel: runBootstrap starts each source
-	// at its own earliest raw row. A fixed default (e.g. 2025-01-01) would silently
-	// exclude older history from the copy while the parity ledger still counts it, so
-	// drift would alert until someone re-ran with an earlier -from.
-	var from time.Time
-	if *fromStr != "" {
-		parsed, err := parseTime(*fromStr)
-		if err != nil {
-			return fmt.Errorf("parsing -from: %w", err)
-		}
-		from = parsed
-	}
-
-	logger := slog.Default()
-	pool, err := openPool(ctx)
-	if err != nil {
-		return fmt.Errorf("opening database: %w", err)
-	}
-	defer pool.Close()
-
-	return runBootstrap(ctx, pool, from, *step, *only, logger)
-}
-
-// runBootstrap copies each source's pre-existing history into the transformed
-// layer over step-sized windows and seeds the parity ledger, all on ONE acquired
-// connection so the session GUCs (statement_timeout, tiered reads) apply to every
-// query. Setting them via pool.Exec would land each SET on an arbitrary pooled
-// connection and leave the window queries on others with defaults -- and
-// enable_tiered_reads defaults off, so those queries would silently skip S3-tiered
-// history (parity cannot catch it: both sides undercount alike). Split out from
-// run so tests can drive it with a pool and explicit params (no flag parsing).
-func runBootstrap(ctx context.Context, pool *pgxpool.Pool, from time.Time, step time.Duration, only string, logger *slog.Logger) error {
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		return fmt.Errorf("acquiring connection: %w", err)
@@ -97,17 +66,17 @@ func runBootstrap(ctx context.Context, pool *pgxpool.Pool, from time.Time, step 
 		return err
 	}
 
-	sources, err := selectSources(ctx, conn, only)
+	sources, err := selectSources(ctx, conn, p.Source)
 	if err != nil {
 		return err
 	}
 
-	end := time.Now().UTC().Add(step) // one step past now so the live tail is included
+	end := time.Now().UTC().Add(p.Step) // one step past now so the live tail is included
 	for _, source := range sources {
-		// A zero from means "start at this source's earliest raw row" (see run). Deriving
-		// it per source avoids both a guessed global start that excludes older history and
-		// a walk from an arbitrary early epoch across empty windows.
-		srcFrom := from
+		// A zero From means "start at this source's earliest raw row". Deriving it
+		// per source avoids both a guessed global start that excludes older history
+		// and a walk from an arbitrary early epoch across empty windows.
+		srcFrom := p.From
 		if srcFrom.IsZero() {
 			srcFrom, err = earliestRawTime(ctx, conn, source)
 			if err != nil {
@@ -118,7 +87,7 @@ func runBootstrap(ctx context.Context, pool *pgxpool.Pool, from time.Time, step 
 		if srcFrom.IsZero() {
 			// No raw rows: nothing to copy, but still verify parity so the ledger is seeded.
 			logger.Info("bootstrap source has no raw rows; nothing to copy", "source", source)
-		} else if total, err = bootstrapSource(ctx, conn, source, srcFrom, end, step, logger); err != nil {
+		} else if total, err = bootstrapSource(ctx, conn, source, srcFrom, end, p.Step, logger); err != nil {
 			return fmt.Errorf("bootstrapping %q: %w", source, err)
 		}
 		// Seed + freeze the parity ledger for this source on the same tiered-reads-on
@@ -209,7 +178,7 @@ func selectSources(ctx context.Context, conn *pgxpool.Conn, only string) ([]stri
 }
 
 // earliestRawTime returns the minimum value of a source's time-dimension column in
-// raw, used as the per-source backfill start when -from is unset. It reads the time
+// raw, used as the per-source backfill start when From is zero. It reads the time
 // column from the hypertable's first dimension (the same lookup the parity functions
 // use) so it does not hardcode per-table column names. A NULL minimum (empty raw
 // table) returns the zero time, which the caller treats as "nothing to copy".
@@ -233,17 +202,9 @@ func earliestRawTime(ctx context.Context, conn *pgxpool.Conn, source string) (ti
 	return earliest.UTC(), nil
 }
 
-func openPool(ctx context.Context) (*pgxpool.Pool, error) {
-	// Require DATABASE_URL: a one-off backfill that silently ran against a local
-	// (empty) database would do nothing and report success.
-	dsn, err := env.Require("DATABASE_URL")
-	if err != nil {
-		return nil, err
-	}
-	return postgres.PoolOpener(postgres.DefaultDBConfig(dsn))(ctx)
-}
-
-func parseTime(s string) (time.Time, error) {
+// ParseTime accepts an RFC3339 or YYYY-MM-DD string and returns it in UTC. Used
+// by the worker to read BOOTSTRAP_FROM from the environment.
+func ParseTime(s string) (time.Time, error) {
 	if t, err := time.Parse(time.RFC3339, s); err == nil {
 		return t.UTC(), nil
 	}

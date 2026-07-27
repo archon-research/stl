@@ -326,6 +326,20 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
+  name: transform-bootstrap
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  # Backfill window params read by the transform-bootstrap worker on Trigger
+  # (VEC-490). BOOTSTRAP_FROM is the known VEC-484 history start; leaving it unset
+  # would derive each source's earliest raw row instead. BOOTSTRAP_STEP is the
+  # per-_bootstrap-call window.
+  BOOTSTRAP_FROM: "2025-01-01"
+  BOOTSTRAP_STEP: "720h"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
   name: optimism-watcher-data-validator
 data:
   TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"

@@ -57,6 +57,71 @@ func TestRunCronjob_InitializesOTEL(t *testing.T) {
 	}
 }
 
+// TestCronjobConfig_Validate covers the Manual-mode relaxation (VEC-490): a
+// trigger-only job needs no IntervalDefault, while every other job still does.
+func TestCronjobConfig_Validate(t *testing.T) {
+	openDB := func(context.Context) (*pgxpool.Pool, error) { return nil, nil }
+	setup := func(context.Context, Dependencies) (Runner, error) { return nil, nil }
+
+	tests := []struct {
+		name    string
+		cfg     CronjobConfig
+		wantErr string
+	}{
+		{
+			name: "manual job needs no interval",
+			cfg:  CronjobConfig{Name: "backfill", Manual: true, OpenDatabase: openDB, Setup: setup},
+		},
+		{
+			name:    "non-manual job requires interval",
+			cfg:     CronjobConfig{Name: "ticker", OpenDatabase: openDB, Setup: setup},
+			wantErr: "IntervalDefault is required",
+		},
+		{
+			name: "interval job with interval is valid",
+			cfg:  CronjobConfig{Name: "ticker", IntervalDefault: "5m", OpenDatabase: openDB, Setup: setup},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.cfg.validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validate() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("validate() = %v, want error containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestCronjobConfig_WorkflowArgs maps the activity overrides into the workflow
+// input verbatim; zero values are preserved (cronjobWorkflow resolves them to
+// defaults), so an interval job with no overrides passes a zero workflowParams.
+func TestCronjobConfig_WorkflowArgs(t *testing.T) {
+	if got := (CronjobConfig{}).workflowArgs(); got != (workflowParams{}) {
+		t.Errorf("workflowArgs() with no overrides = %+v, want zero value", got)
+	}
+	cfg := CronjobConfig{
+		ActivityStartToCloseTimeout:    24 * time.Hour,
+		ActivityScheduleToCloseTimeout: 24 * time.Hour,
+		ActivityHeartbeatTimeout:       2 * time.Minute,
+		ActivityMaxAttempts:            1,
+	}
+	want := workflowParams{
+		StartToCloseTimeout:    24 * time.Hour,
+		ScheduleToCloseTimeout: 24 * time.Hour,
+		HeartbeatTimeout:       2 * time.Minute,
+		MaximumAttempts:        1,
+	}
+	if got := cfg.workflowArgs(); got != want {
+		t.Errorf("workflowArgs() = %+v, want %+v", got, want)
+	}
+}
+
 func TestBuildScheduleSpec_Offset(t *testing.T) {
 	tests := []struct {
 		name       string
