@@ -386,7 +386,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: archon-research/github-actions
-          ref: a1a0e8478192d5014201b00d6db2533ae6d71301 # slack-notify (github-actions #28)
+          ref: 01f058b0afe92a8485728e412c13a4e767fb4595 # github-actions #32 (slack-notify blob identical to #28)
           ssh-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
           path: .github-actions
           persist-credentials: false
@@ -417,6 +417,7 @@ jobs:
       pull-requests: read
     outputs:
       started: ${{ steps.mark-approved.outputs.started }}
+      notified: ${{ steps.notified.outputs.sent }}
     env:
       APP: stl-prod
       PROD_ECR_PREFIX: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-
@@ -602,6 +603,7 @@ jobs:
           thread-ts: ${{ needs.notify-prod-pending.outputs.ts }}
 
       - name: Notify Slack — deploy failed
+        id: notify-failed
         if: ${{ failure() && steps.mark-approved.outputs.started == 'true' }}
         uses: ./.github-actions/slack-notify
         with:
@@ -611,6 +613,23 @@ jobs:
           slack-token-secret-id: archon-prod-slack-bot-token
           aws-role-arn: arn:aws:iam::030797368798:role/archonprod-github-actions-slack-notify
           thread-ts: ${{ needs.notify-prod-pending.outputs.ts }}
+
+      # The threaded notice above is itself a local action from the shared
+      # checkout, so it cannot report a failure of that checkout. Record whether
+      # it actually sent, and let notify-prod-deploy-failed (webhook, no
+      # checkout required) cover the case where it did not.
+      - name: Record whether the failure notice was sent
+        id: notified
+        if: always()
+        env:
+          OUTCOME: ${{ steps.notify-failed.outcome }}
+        run: |
+          set -euo pipefail
+          if [ "$OUTCOME" = "success" ]; then
+            echo "sent=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "sent=false" >> "$GITHUB_OUTPUT"
+          fi
 
   notify-prod-rejected:
     name: Notify Prod Deploy Rejected
@@ -642,12 +661,16 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: archon-research/github-actions
-          ref: a1a0e8478192d5014201b00d6db2533ae6d71301 # slack-notify (github-actions #28)
+          ref: 01f058b0afe92a8485728e412c13a4e767fb4595 # github-actions #32 (slack-notify blob identical to #28)
           ssh-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
           path: .github-actions
           persist-credentials: false
 
+      # always(): a rejected prod deploy must always be visible. If the review
+      # fetch above failed, post with an empty reviewer rather than silently
+      # skipping the notice — this job has no other failure path.
       - name: React to Slack message — rejected
+        if: always()
         uses: ./.github-actions/slack-notify
         with:
           status: rejected
@@ -681,7 +704,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: archon-research/github-actions
-          ref: a1a0e8478192d5014201b00d6db2533ae6d71301 # slack-notify (github-actions #28)
+          ref: 01f058b0afe92a8485728e412c13a4e767fb4595 # github-actions #32 (slack-notify blob identical to #28)
           ssh-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
           path: .github-actions
           persist-credentials: false
@@ -696,6 +719,32 @@ jobs:
           aws-role-arn: arn:aws:iam::030797368798:role/archonprod-github-actions-slack-notify
           message-ts: ${{ needs.notify-prod-pending.outputs.ts }}
           reaction: recycle
+
+  # Fallback for the one failure the threaded notice cannot report: a failure of
+  # the shared-actions checkout the notice itself depends on. `started` excludes
+  # rejections (notify-prod-rejected owns those); `notified != 'true'` means the
+  # threaded notice did not send.
+  #
+  # Partial by construction: slack-notify.yaml performs the same checkout with
+  # the same deploy key, so this covers a transient checkout failure, not a
+  # rotated key. It closes the realistic gap, not every gap.
+  notify-prod-deploy-failed:
+    name: Notify Prod Deploy Failure (fallback)
+    if: >-
+      always() &&
+      needs.deploy-prod.result == 'failure' &&
+      needs.deploy-prod.outputs.started == 'true' &&
+      needs.deploy-prod.outputs.notified != 'true'
+    needs: deploy-prod
+    uses: ./.github/workflows/slack-notify.yaml
+    with:
+      status: failure
+      context: Prod Deploy
+      failed-jobs: |
+        Deploy Prod (ArgoCD sync)=${{ needs.deploy-prod.result }}
+    secrets:
+      slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_PROD }}
+      gh-actions-deploy-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
 
   # Covers the pre-gate prod pipeline in this workflow (supersede + validate +
   # pending). The gated deploy-prod job posts its own threaded success/failure,
