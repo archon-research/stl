@@ -82,15 +82,90 @@ func TestPlan_NoJoin(t *testing.T) {
 	}
 }
 
-// TestBucket1Tables_MatchConfig guards that every bucket-1 table has storage config.
-func TestBucket1Tables_MatchConfig(t *testing.T) {
-	for _, name := range Bucket1Tables() {
+// TestAllTables_MatchConfig guards that every generated table has storage config.
+func TestAllTables_MatchConfig(t *testing.T) {
+	for _, name := range AllTables() {
 		if _, ok := tableConfigs[name]; !ok {
-			t.Errorf("no tableConfigs entry for bucket-1 table %q", name)
+			t.Errorf("no tableConfigs entry for generated table %q", name)
 		}
 	}
-	if len(tableConfigs) != len(Bucket1Tables()) {
-		t.Errorf("tableConfigs has %d entries, want %d (one per bucket-1 table)", len(tableConfigs), len(Bucket1Tables()))
+	if len(tableConfigs) != len(AllTables()) {
+		t.Errorf("tableConfigs has %d entries, want %d (one per generated table)", len(tableConfigs), len(AllTables()))
+	}
+}
+
+// TestMigrationSpecs_SourcesAccumulate asserts each spec's source list is every
+// table created up to and including it. The generator renders _queue_status from
+// that list, so a spec carrying anything less would silently drop an earlier
+// table's queue from the view the stalled-transform alert reads.
+func TestMigrationSpecs_SourcesAccumulate(t *testing.T) {
+	var want []string
+	for _, spec := range MigrationSpecs() {
+		want = append(want, spec.tables...)
+		if !slices.Equal(spec.sources, want) {
+			t.Errorf("%s sources = %v, want %v (every table created so far)", spec.file, spec.sources, want)
+		}
+	}
+}
+
+// TestSpecFor_UnknownMigration asserts an unknown migration name is rejected with
+// the known names, rather than silently regenerating the wrong file.
+func TestSpecFor_UnknownMigration(t *testing.T) {
+	_, err := SpecFor("20990101_000000_not_a_migration.sql")
+	if err == nil {
+		t.Fatal("SpecFor: want error for an unknown migration, got nil")
+	}
+	for _, spec := range MigrationSpecs() {
+		if !strings.Contains(err.Error(), spec.file) {
+			t.Errorf("SpecFor err = %v, want it to list %q", err, spec.file)
+		}
+	}
+}
+
+// TestQueueStatusView_ListsEverySource asserts the generated view has one branch
+// per source, keyed on that source's queue table.
+func TestQueueStatusView_ListsEverySource(t *testing.T) {
+	view := queueStatusView([]string{"alpha", "beta"})
+	for _, want := range []string{
+		`SELECT 'alpha'::text AS source, count(*) AS pending, min(enqueued_at) AS oldest_enqueued_at FROM transformed."_pending_alpha"`,
+		"UNION ALL",
+		`SELECT 'beta'::text AS source, count(*) AS pending, min(enqueued_at) AS oldest_enqueued_at FROM transformed."_pending_beta"`,
+	} {
+		if !strings.Contains(view, want) {
+			t.Errorf("queueStatusView missing %q; got:\n%s", want, view)
+		}
+	}
+}
+
+// TestPlan_TwoHopFill covers morpho_adapter_state, whose chain_id/protocol_id live
+// two joins out (adapter -> vault): the join is on the adapter, and each dimension
+// is a correlated subquery against morpho_vault rather than a parent column.
+func TestPlan_TwoHopFill(t *testing.T) {
+	reg, err := schemamaster.Load()
+	if err != nil {
+		t.Fatalf("load register: %v", err)
+	}
+	s := rawSchema("morpho_adapter_state",
+		[]string{"morpho_adapter_id", "block_number", "block_version", "timestamp", "real_assets", "processing_version", "build_id"},
+		[]string{"morpho_adapter_id", "block_number", "block_version", "timestamp", "processing_version"})
+
+	p, err := plan(reg, s)
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if want := ` LEFT JOIN public."morpho_adapter" p ON p."id"=s."morpho_adapter_id"`; p.joinClause != want {
+		t.Errorf("joinClause = %q, want %q", p.joinClause, want)
+	}
+	for _, want := range []string{
+		`(SELECT l."chain_id" FROM public."morpho_vault" l WHERE l."id"=p."morpho_vault_id") AS "chain_id"`,
+		`(SELECT l."protocol_id" FROM public."morpho_vault" l WHERE l."id"=p."morpho_vault_id") AS "protocol_id"`,
+	} {
+		if !slices.Contains(p.selectExprs, want) {
+			t.Errorf("selectExprs = %v, want it to contain %q", p.selectExprs, want)
+		}
+	}
+	if p.partition != "block_timestamp" || p.rawPartition != "timestamp" {
+		t.Errorf("partition/rawPartition = %q/%q, want block_timestamp/timestamp", p.partition, p.rawPartition)
 	}
 }
 

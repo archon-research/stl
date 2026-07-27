@@ -32,17 +32,22 @@ var tableConfigs = map[string]tableCfg{
 	"maple_sky_strategy_state": {"7 days", "maple_sky_strategy_id", "snapshot_time DESC, processing_version DESC", "2 days"},
 	"maple_syrup_global_state": {"7 days", "chain_id", "snapshot_time DESC, processing_version DESC", "2 days"},
 	"offchain_token_price":     {"1 day", "token_id", "snapshot_time DESC, processing_version DESC", "2 days"},
+	// Mirrors public.morpho_adapter_state's own policies (1-day chunks, compress
+	// after 2 days), with processing_version added to the order-by so the whole
+	// transformed PK is covered.
+	"morpho_adapter_state": {"1 day", "morpho_adapter_id", "block_number DESC, block_version DESC, processing_version DESC", "2 days"},
 }
 
-// GenerateBucket1 renders the full bucket-1 migration from the register and the raw
-// schemas of the 13 bucket-1 tables: the static header, one register-driven block
-// per table, and the static tail. The regen-diff test compares it (normalised:
-// comments and whitespace stripped) against the committed migration.
-func GenerateBucket1(reg *schemamaster.Register, raw map[string]RawSchema) (string, error) {
+// Generate renders one migration from the register and the raw schemas of the
+// tables it creates: the static header, one register-driven block per table, the
+// queue-status view over every source registered so far, and the static tail. The
+// regen-diff test compares it (normalised: comments and whitespace stripped)
+// against the committed migration.
+func Generate(spec migrationSpec, reg *schemamaster.Register, raw map[string]RawSchema) (string, error) {
 	var b strings.Builder
-	b.WriteString(header)
+	b.WriteString(spec.header)
 	b.WriteString("\n")
-	for _, name := range bucket1Tables {
+	for _, name := range spec.tables {
 		schema, ok := raw[name]
 		if !ok {
 			return "", fmt.Errorf("missing raw schema for %q", name)
@@ -53,8 +58,23 @@ func GenerateBucket1(reg *schemamaster.Register, raw map[string]RawSchema) (stri
 		}
 		b.WriteString(blk)
 	}
-	b.WriteString(tail)
+	b.WriteString(queueStatusView(spec.sources))
+	b.WriteString(spec.tail)
 	return b.String(), nil
+}
+
+// queueStatusView renders the per-source backlog view the worker reads. Every
+// migration re-creates it over the full cumulative source list, so a migration
+// that adds a table cannot leave that table's queue unmonitored.
+func queueStatusView(sources []string) string {
+	branches := make([]string, len(sources))
+	for i, s := range sources {
+		branches[i] = fmt.Sprintf(
+			`SELECT '%s'::text AS source, count(*) AS pending, min(enqueued_at) AS oldest_enqueued_at FROM transformed.%s`,
+			s, quote("_pending_"+s))
+	}
+	return "CREATE OR REPLACE VIEW transformed._queue_status AS\n" +
+		strings.Join(branches, "\nUNION ALL\n") + ";\n"
 }
 
 // tableBlock emits one table's full DDL: the empty transformed table, the guarded
