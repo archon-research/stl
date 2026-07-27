@@ -41,7 +41,7 @@ func (s *Service) handleAddAdapter(ctx context.Context, e *AddAdapterEvent, vaul
 	if err != nil {
 		return err
 	}
-	adapterType, err := s.classifyAdapter(ctx, e.Account, blockNumber)
+	adapterType, err := s.resolveAdapterType(ctx, e.Account, blockNumber)
 	if err != nil {
 		return err
 	}
@@ -62,7 +62,7 @@ func (s *Service) handleRemoveAdapter(ctx context.Context, e *RemoveAdapterEvent
 	if err != nil {
 		return err
 	}
-	probedType, err := s.classifyAdapterIfUnregistered(ctx, vault, e.Account, blockNumber)
+	probedType, err := s.resolveAdapterTypeIfUnregistered(ctx, vault, e.Account, blockNumber)
 	if err != nil {
 		return err
 	}
@@ -92,7 +92,7 @@ func (s *Service) handleAllocation(ctx context.Context, adapter, vaultAddress co
 		return fmt.Errorf("fetching realAssets for adapter %s: %w", adapter.Hex(), err)
 	}
 
-	probedType, err := s.classifyAdapterIfUnregistered(ctx, vault, adapter, blockNumber)
+	probedType, err := s.resolveAdapterTypeIfUnregistered(ctx, vault, adapter, blockNumber)
 	if err != nil {
 		return err
 	}
@@ -114,7 +114,7 @@ func (s *Service) handleAllocation(ctx context.Context, adapter, vaultAddress co
 // (vault, adapter). The GetActiveAdapter read here is the decisive read-your-writes
 // lookup under the GetOrCreateAdapter advisory lock; on a miss it lazily registers
 // the adapter at firstSeenBlock using probedType — the classification already
-// resolved before the transaction opened (see classifyAdapterIfUnregistered). Used
+// resolved before the transaction opened (see resolveAdapterTypeIfUnregistered). Used
 // by the Allocate/Deallocate and RemoveAdapter paths, which can legitimately reach
 // an adapter that predates the vault's mid-life discovery.
 //
@@ -139,12 +139,12 @@ func (s *Service) ensureAdapterRegistered(ctx context.Context, tx pgx.Tx, vault 
 	return s.upsertAdapterRow(ctx, tx, vault, vaultAddress, adapter, *probedType, firstSeenBlock)
 }
 
-// classifyAdapter probes an adapter's on-chain type. A probe TRANSPORT error
+// resolveAdapterType probes an adapter's on-chain type. A probe TRANSPORT error
 // propagates (transient ⇒ SQS retries); a clean both-revert probe yields
 // MorphoAdapterTypeUnknown (upsertAdapterRow WARNs and records it). The probe is a
 // chain round-trip, so every caller runs it BEFORE opening its write transaction —
 // a pooled DB connection must never sit idle across it.
-func (s *Service) classifyAdapter(ctx context.Context, adapter common.Address, atBlock int64) (entity.MorphoAdapterType, error) {
+func (s *Service) resolveAdapterType(ctx context.Context, adapter common.Address, atBlock int64) (entity.MorphoAdapterType, error) {
 	adapterType, err := s.blockchainSvc.getAdapterType(ctx, adapter, atBlock)
 	if err != nil {
 		return entity.MorphoAdapterTypeUnknown, fmt.Errorf("classifying adapter %s: %w", adapter.Hex(), err)
@@ -152,14 +152,14 @@ func (s *Service) classifyAdapter(ctx context.Context, adapter common.Address, a
 	return adapterType, nil
 }
 
-// classifyAdapterIfUnregistered resolves the type the lazy self-heal would need,
+// resolveAdapterTypeIfUnregistered resolves the type the lazy self-heal would need,
 // probing on-chain only when the adapter is not already registered — so the probe
 // (and its idle-connection hazard) is skipped entirely on the hot path where the
 // adapter is known. It returns nil when the adapter is already active: the in-tx
 // GetActiveAdapter will find it and no type is needed. Membership is read from
 // committed state via the pool (GetActiveAdaptersByVault); the decisive
 // read-then-write stays inside the transaction under the advisory lock.
-func (s *Service) classifyAdapterIfUnregistered(ctx context.Context, vault *entity.MorphoVault, adapter common.Address, firstSeenBlock int64) (*entity.MorphoAdapterType, error) {
+func (s *Service) resolveAdapterTypeIfUnregistered(ctx context.Context, vault *entity.MorphoVault, adapter common.Address, firstSeenBlock int64) (*entity.MorphoAdapterType, error) {
 	active, err := s.morphoRepo.GetActiveAdaptersByVault(ctx, vault.ID)
 	if err != nil {
 		return nil, fmt.Errorf("looking up active adapters for vault %d: %w", vault.ID, err)
@@ -169,7 +169,7 @@ func (s *Service) classifyAdapterIfUnregistered(ctx context.Context, vault *enti
 			return nil, nil
 		}
 	}
-	adapterType, err := s.classifyAdapter(ctx, adapter, firstSeenBlock)
+	adapterType, err := s.resolveAdapterType(ctx, adapter, firstSeenBlock)
 	if err != nil {
 		return nil, err
 	}
