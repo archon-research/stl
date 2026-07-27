@@ -56,7 +56,7 @@ func (s *Service) handleAddAdapter(ctx context.Context, e *AddAdapterEvent, vaul
 		return err
 	}
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		adapterID, err := s.upsertAdapterRow(ctx, tx, vault, vaultAddress, e.Account, adapterType, blockNumber)
+		adapterID, err := s.upsertAdapterRow(ctx, tx, vault, vaultAddress, e.Account, adapterType, blockNumber, adapterPathAddAdapter)
 		if err != nil {
 			return err
 		}
@@ -156,6 +156,7 @@ func (s *Service) ensureIncarnationToClose(ctx context.Context, tx pgx.Tx, vault
 	s.logger.Warn("adapter registered lazily; AddAdapter predates vault discovery",
 		"vault", vaultAddress.Hex(), "adapter", adapter.Hex(), "block", removedAtBlock)
 	s.warnIfUnknownAdapterType(vaultAddress, adapter, candidate.AdapterType, removedAtBlock)
+	s.telemetry.RecordAdapterRegistration(ctx, candidate.AdapterType, adapterPathLazySelfHeal)
 	return nil
 }
 
@@ -197,7 +198,7 @@ func (s *Service) handleAllocation(ctx context.Context, adapter, vaultAddress co
 		return err
 	}
 
-	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
+	if err := s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
 		adapterID, err := s.ensureAdapterRegistered(ctx, tx, vault, vaultAddress, adapter, blockNumber, probedType)
 		if err != nil {
 			return err
@@ -207,7 +208,11 @@ func (s *Service) handleAllocation(ctx context.Context, adapter, vaultAddress co
 			return fmt.Errorf("creating adapter state entity: %w", err)
 		}
 		return s.morphoRepo.SaveAdapterState(ctx, tx, state)
-	})
+	}); err != nil {
+		return err
+	}
+	s.telemetry.RecordV2Snapshot(ctx, v2SnapshotAdapterState)
+	return nil
 }
 
 // ensureAdapterRegistered returns the registry id of the active adapter for
@@ -240,7 +245,7 @@ func (s *Service) ensureAdapterRegistered(ctx context.Context, tx pgx.Tx, vault 
 	}
 	s.logger.Warn("adapter registered lazily; AddAdapter predates vault discovery",
 		"vault", vaultAddress.Hex(), "adapter", adapter.Hex(), "block", firstSeenBlock)
-	return s.upsertAdapterRow(ctx, tx, vault, vaultAddress, adapter, *probedType, firstSeenBlock)
+	return s.upsertAdapterRow(ctx, tx, vault, vaultAddress, adapter, *probedType, firstSeenBlock, adapterPathLazySelfHeal)
 }
 
 // resolveAdapterType probes an adapter's on-chain type. A probe TRANSPORT error
@@ -285,8 +290,13 @@ func (s *Service) resolveAdapterTypeIfUnregistered(ctx context.Context, vault *e
 // true AddAdapter converges the row rather than duplicating it. Its three callers — the
 // AddAdapter handler, the Allocate lazy self-heal, and the discovery seed — each resolve
 // the type before opening the transaction and pass it in here. The RemoveAdapter heal
-// uses EnsureIncarnationToClose instead: it must not converge anything.
-func (s *Service) upsertAdapterRow(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault, vaultAddress, adapter common.Address, adapterType entity.MorphoAdapterType, firstSeenBlock int64) (int64, error) {
+// uses EnsureIncarnationToClose instead: it must not converge anything, so it records
+// its registration telemetry at its own call site.
+//
+// path names the caller for telemetry; the registration counter the unknown-adapter
+// and lazy-registration alerts read is recorded here for every route that converges
+// on this upsert.
+func (s *Service) upsertAdapterRow(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault, vaultAddress, adapter common.Address, adapterType entity.MorphoAdapterType, firstSeenBlock int64, path adapterRegistrationPath) (int64, error) {
 	s.warnIfUnknownAdapterType(vaultAddress, adapter, adapterType, firstSeenBlock)
 	adapterEntity, err := entity.NewMorphoAdapter(vault.ID, adapter.Bytes(), vault.AssetTokenID, adapterType, firstSeenBlock, nil)
 	if err != nil {
@@ -296,6 +306,7 @@ func (s *Service) upsertAdapterRow(ctx context.Context, tx pgx.Tx, vault *entity
 	if err != nil {
 		return 0, fmt.Errorf("persisting adapter: %w", err)
 	}
+	s.telemetry.RecordAdapterRegistration(ctx, adapterType, path)
 	return id, nil
 }
 
@@ -362,9 +373,13 @@ func (s *Service) handleCapChange(ctx context.Context, vaultAddress common.Addre
 		return fmt.Errorf("creating vault cap entity: %w", err)
 	}
 
-	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
+	if err := s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
 		return s.morphoRepo.SaveVaultCap(ctx, tx, vaultCap)
-	})
+	}); err != nil {
+		return err
+	}
+	s.telemetry.RecordV2Snapshot(ctx, v2SnapshotVaultCap)
+	return nil
 }
 
 // handleFeeChange snapshots the vault's FULL on-chain fee config after any of the
@@ -401,7 +416,11 @@ func (s *Service) handleFeeChange(ctx context.Context, vaultAddress common.Addre
 		return fmt.Errorf("creating vault fee entity: %w", err)
 	}
 
-	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
+	if err := s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
 		return s.morphoRepo.SaveVaultFee(ctx, tx, vaultFee)
-	})
+	}); err != nil {
+		return err
+	}
+	s.telemetry.RecordV2Snapshot(ctx, v2SnapshotVaultFee)
+	return nil
 }
