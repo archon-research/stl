@@ -974,7 +974,7 @@ func (s *Service) persistDiscoveredVault(ctx context.Context, vaultAddress commo
 // readV2Adapters); V1/V1.1 vaults pass an empty slice.
 func (s *Service) seedDiscoveredAdapters(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault, vaultAddress common.Address, blockNumber int64, blockVersion int, blockTimestamp time.Time, adapters []discoveredAdapter) error {
 	for _, a := range adapters {
-		adapterID, err := s.upsertAdapterRow(ctx, tx, vault, vaultAddress, a.address, a.adapterType, blockNumber)
+		adapterID, err := s.upsertAdapterRow(ctx, tx, vault, vaultAddress, a.address, a.adapterType, blockNumber, adapterPathDiscovery)
 		if err != nil {
 			return err
 		}

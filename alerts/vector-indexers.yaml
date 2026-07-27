@@ -51,9 +51,26 @@ groups:
       # ---------------------------------------------------------------------
 
       - alert: VectorMorphoIndexerStalled
+        # Keyed on status="success", NOT the total (VEC-218). RecordBlockProcessed
+        # samples every consumed block with status success|error, so a bare
+        # total==0 cannot see a poison pill: the morpho queue is FIFO, a failing
+        # block blocks its group, and every SQS redelivery of that one message
+        # keeps the TOTAL counter advancing while nothing is persisted. At
+        # visibility-timeout cadence that redelivery also stays well under
+        # VectorMorphoIndexerErrorsHigh's 0.1/s, so the whole chain's Morpho data
+        # could freeze with neither rule firing. success-rate==0 catches it.
+        # Matches the shape curve / uniswap-v3 / allocation-tracker already use.
+        # The VaultV2 structured handlers make this the likeliest morpho failure
+        # mode: resolveV2Vault, ensureAdapterRegistered and MarkAdapterRemoved all
+        # fail hard by design rather than persisting a hole.
+        #
+        # Residual (same as VectorAllocationTrackerStalled): a live pod whose OTLP
+        # export dies lets the success series staleness-expire, so `== 0` returns
+        # no data and this goes silent. morpho has no kube-state Down companion
+        # yet — see the runbook.
         expr: |
           sum by (chain, cluster) (
-            rate(morpho_blocks_processed_total{k8s_namespace_name="vector"}[5m])
+            rate(morpho_blocks_processed_total{status="success", k8s_namespace_name="vector"}[5m])
           ) == 0
         for: 15m
         labels:
@@ -422,6 +439,235 @@ groups:
             over 10m while some still succeed. Replay data is being partially lost
             (Alchemy remains the fallback). A total stall is covered separately by
             VectorArchivingStalled.
+
+  # morpho VaultV2 structured tracking (VEC-218) — the adapter registry, adapter
+  # realAssets snapshots, allocation caps and fee-config snapshots the morpho
+  # indexer derives from VaultV2's own event surface. Own GROUP, same file, so it
+  # keeps the filename-derived Mimir namespace `vector-indexers` and stays clear
+  # of the 20-rules-per-group cap.
+  #
+  # Signals (morpho-indexer OTel instruments, all carrying chain + cluster):
+  #   morpho_v2_adapter_registrations_total{adapter_type,registration_path}
+  #     one sample per adapter registry row written. adapter_type is the on-chain
+  #     classification (market_v1 | vault_v1 | unknown); registration_path is
+  #     which route wrote it (discovery | add_adapter | lazy_self_heal).
+  #   morpho_v2_snapshots_written_total{snapshot_type}
+  #     one sample per COMMITTED event-driven snapshot
+  #     (adapter_state | vault_cap | vault_fee).
+  #   morpho_events_processed_total{event_type}
+  #     already existed; the V2 event names are registered topics on it, so the
+  #     ForceDeallocate and "events seen" signals below need no new instrument.
+  #
+  # NO staleness rule here, deliberately. V2 vault state is event-driven: a
+  # dormant vault legitimately writes nothing for days. Chain-verified in the
+  # 2026-07 vault-631/630 investigation — the apparent "staleness" moved between
+  # vaults purely with on-chain activity, and the indexer resumed on the exact
+  # first event of each gap, field-for-field correct. A wall-clock freshness rule
+  # would have false-positived on both. The only honest freshness shape is "vault
+  # emitted an event at block N but has no state row at N", which is an
+  # audit-log/DB comparison, not something PromQL can express from these
+  # counters; the runbook carries it as a manual triage query instead.
+  - name: vector-morpho-v2
+    interval: 1m
+    rules:
+      - alert: VectorMorphoV2UnknownAdapters
+        # A VaultV2 holds its liquidity in adapter contracts, one per downstream
+        # venue. The indexer classifies each with a 2-getter on-chain probe
+        # (MarketV1 / VaultV1); when BOTH getters revert it records the adapter as
+        # Unknown (type 99) rather than dropping it. Unknown means "we persist the
+        # adapter and its realAssets, but we cannot say what venue backs it", so a
+        # growing Unknown population degrades every downstream composition read.
+        #
+        # THRESHOLD, NOT ZERO. The VEC-218 ticket proposed "Unknown count stays 0"
+        # as the sentinel; live mainnet validation disproved it — real, legitimate
+        # adapters exist whose both probe getters revert, and a single 8-minute
+        # discovery window produced 7+ Unknown registrations. Zero is not the
+        # healthy value, so this alerts on a sustained wave instead.
+        #
+        # Sizing (measured on prod mainnet, morpho_events_processed_total, 7d):
+        # AddAdapter fired 5 times and RemoveAdapter 0 times across ALL adapter
+        # types, so the live registration path cannot produce more than ~1/day
+        # even if every single adapter were unclassifiable. The only bursty source
+        # is registration_path="discovery", which seeds a newly found vault's
+        # entire adapter set in one transaction (the 7+/8min above). 25 per 24h
+        # sits ~3x above that observed burst and ~25x above the live path, so it
+        # can only mean Morpho shipped an adapter family the probe cannot
+        # classify. All three paths are counted: an unclassifiable family that
+        # only ever arrives via discovery must not be invisible here.
+        #
+        # Expect one firing during the initial VaultV2 backfill/bootstrap, when
+        # every existing V2 vault is discovered at once. Acknowledge it, then
+        # curate from the DB query in the runbook.
+        expr: |
+          sum by (chain, cluster) (
+            increase(morpho_v2_adapter_registrations_total{
+              adapter_type="unknown", k8s_namespace_name="vector"
+            }[24h])
+          ) > 25
+        for: 30m
+        labels:
+          team: vector
+          severity: warning
+          component: morpho-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector morpho VaultV2 registered {{ $value | printf \"%.0f\" }} unclassifiable adapters on {{ $labels.chain }}"
+          description: |
+            `morpho-indexer` on chain `{{ $labels.chain }}` recorded
+            `{{ $value | printf "%.0f" }}` VaultV2 adapters as type Unknown in 24h
+            — both on-chain classification getters reverted. Their realAssets are
+            still tracked, but nothing downstream can attribute the exposure to a
+            venue. A sustained wave means a new adapter family needs a third
+            probe selector.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectormorphov2unknownadapters
+
+      - alert: VectorMorphoV2LazyAdapterRegistrations
+        # The lazy self-heal registers an adapter the moment an Allocate /
+        # Deallocate / RemoveAdapter names one that is NOT in our registry. It
+        # exists so such an event cannot poison the FIFO queue, and it is correct
+        # — but it is also the tell for a discovery gap, because vault discovery
+        # enumerates the vault's CURRENT adapter set and seeds every entry. Once a
+        # vault is discovered, every active adapter is already registered, so the
+        # steady-state rate of this path is zero.
+        #
+        # It also costs data quality: a lazily registered adapter's AddedAtBlock
+        # is the event block, not the true AddAdapter block, so its lifetime is an
+        # approximation until history is replayed.
+        #
+        # >3 per 6h absorbs the legitimate one-off (an adapter set that changed
+        # between the discovery enumeration read and the next event, or the
+        # bootstrap tail) without going blind on a real enumeration regression.
+        # Deliberately not >0: a single self-heal is by design not an incident.
+        expr: |
+          sum by (chain, cluster) (
+            increase(morpho_v2_adapter_registrations_total{
+              registration_path="lazy_self_heal", k8s_namespace_name="vector"
+            }[6h])
+          ) > 3
+        for: 30m
+        labels:
+          team: vector
+          severity: warning
+          component: morpho-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector morpho VaultV2 lazily registering adapters on {{ $labels.chain }}"
+          description: |
+            `morpho-indexer` on chain `{{ $labels.chain }}` self-healed
+            `{{ $value | printf "%.0f" }}` VaultV2 adapters in 6h — each one was
+            named by a vault event but missing from the registry. Discovery seeds
+            a vault's whole adapter set, so a sustained rate here means the
+            enumeration is missing adapters or vaults are being discovered
+            incompletely. Affected adapters carry an approximated AddedAtBlock.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectormorphov2lazyadapterregistrations
+
+      - alert: VectorMorphoV2ForceDeallocateSurge
+        # forceDeallocate() is VaultV2's permissionless emergency exit: anyone can
+        # force liquidity out of an adapter, paying a penalty, when the vault's
+        # idle balance cannot serve a withdrawal. Individually it is ROUTINE, not
+        # an incident — measured on prod mainnet over 7d: 76 events, peak 24 in a
+        # 24h window, peak 7 in a 1h window. A ">0 sentinel" would fire ~11 times
+        # a day and get muted, so this alerts on a SURGE.
+        #
+        # >20 in 1h is ~3x the highest hour observed in a week. At that rate the
+        # signal is no longer arbitrage trimming the edges: depositors are paying
+        # the penalty en masse because a vault cannot meet withdrawals from idle
+        # liquidity. That is a risk/exposure event worth a human look at the vault,
+        # not an indexer fault — hence warning, and hence no `for` (the 1h
+        # increase window already provides the smoothing).
+        #
+        # Reuses the existing morpho_events_processed_total counter: ForceDeallocate
+        # is a registered VaultV2 topic and has been counted there since the V2
+        # topics were registered, so no new instrument is needed. Note it is
+        # incremented before the handler runs, so an SQS redelivery double-counts;
+        # irrelevant at a 3x-peak threshold.
+        expr: |
+          sum by (chain, cluster) (
+            increase(morpho_events_processed_total{
+              event_type="ForceDeallocate", k8s_namespace_name="vector"
+            }[1h])
+          ) > 20
+        for: 0m
+        labels:
+          team: vector
+          severity: warning
+          component: morpho-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector morpho VaultV2 forceDeallocate surge on {{ $labels.chain }} ({{ $value | printf \"%.0f\" }}/h)"
+          description: |
+            `{{ $value | printf "%.0f" }}` VaultV2 `ForceDeallocate` events in 1h
+            on chain `{{ $labels.chain }}`, against a 7d peak of ~7/h. Depositors
+            are forcing liquidity out of adapters and paying the penalty, which
+            points at a vault that cannot meet withdrawals from idle liquidity.
+            This is a protocol-side signal, not an indexer fault: identify the
+            vault and adapter from `protocol_event` and hand to risk.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectormorphov2forcedeallocatesurge
+
+      - alert: VectorMorphoV2NoSnapshotsWritten
+        # Silent-empty guard for the structured write path. Every V2 event named
+        # on the left has a typed handler that must produce a snapshot row; if one
+        # loses its handler (a dispatch case falling through processMetaMorphoLog's
+        # `default: return nil`, which audit-logs the event and returns success),
+        # the events keep flowing, no error is raised, and the structured tables
+        # quietly stop filling. Nothing else in this file can see that.
+        #
+        # ACTIVITY-AWARE BY CONSTRUCTION, which is mandatory here: V2 vault state
+        # is event-driven and a dormant vault population legitimately writes
+        # nothing. The left side IS the activity gate — no V2 events, no
+        # expectation of rows, rule stays silent. This is explicitly NOT a
+        # wall-clock staleness rule (see the group header).
+        #
+        # 6h window sized off prod mainnet (7d): Allocate 13.4k + Deallocate 11.7k
+        # keep adapter_state traffic continuous, while caps (~104/7d) and fees
+        # (~15/7d) are sparse — so the window has to be wide enough that a
+        # cap-only or fee-only quiet stretch does not read as a hole. Since the
+        # counters are summed together, ongoing Allocate traffic keeps the right
+        # side non-zero, so this rule catches a TOTAL write-path failure, not the
+        # loss of one snapshot_type. Per-type coverage would need per-type gating
+        # and is not worth the false-positive surface at those volumes.
+        #
+        # `unless`, not `and … == 0`: RecordV2Snapshot never fires under the exact
+        # bug this targets, so the snapshots series is never created and an
+        # `and … == 0` would find no match on the empty right side — blind
+        # precisely when it matters. `A > 0 unless B > 0` fires on an absent OR
+        # zero series. Do not revert to `and`.
+        #
+        # ROLLOUT: firing on an absent series also means this alert fires in the
+        # window between the rules sync and the morpho-indexer rollout that first
+        # emits morpho_v2_snapshots_written_total (the two deploy independently,
+        # both behind manual prod gates). Verified against prod on 2026-07-27: the
+        # left side is live, the right side does not exist yet, so the rule
+        # evaluates true today. Expect one warning per env at rollout; it clears
+        # ~15m after the new image is serving. Do not "fix" it by gating on the
+        # counter's existence — that is the blindness the `unless` removes.
+        expr: |
+          sum by (chain, cluster) (
+            rate(morpho_events_processed_total{
+              event_type=~"Allocate|Deallocate|IncreaseAbsoluteCap|DecreaseAbsoluteCap|IncreaseRelativeCap|DecreaseRelativeCap|SetPerformanceFee|SetManagementFee|SetPerformanceFeeRecipient|SetManagementFeeRecipient",
+              k8s_namespace_name="vector"
+            }[6h])
+          ) > 0
+          unless
+          sum by (chain, cluster) (
+            rate(morpho_v2_snapshots_written_total{k8s_namespace_name="vector"}[6h])
+          ) > 0
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: morpho-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector morpho VaultV2 writing no structured snapshots on {{ $labels.chain }}"
+          description: |
+            `morpho-indexer` on chain `{{ $labels.chain }}` processed VaultV2
+            allocation / cap / fee events for 6h but committed zero structured
+            snapshots. The events are being audit-logged without producing
+            `morpho_adapter_state` / `morpho_vault_cap` / `morpho_vault_fee` rows,
+            and no error is raised — downstream VaultV2 composition and fee reads
+            are silently freezing.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectormorphov2nosnapshotswritten
 
   # Own rule GROUP but same file, so it keeps the filename-derived Mimir
   # namespace `vector-indexers`. Splitting the group (not the file) keeps each
