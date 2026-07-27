@@ -141,6 +141,13 @@ groups:
         # indexer`. maple-graphql-indexer is excluded (it has its own
         # VectorMapleIndexerDown). When a new cronjob ships, add its Deployment
         # name to both regexes below.
+        #
+        # ManualOnly cronjobs are deliberately NOT listed: morpho-v2-bootstrap
+        # (VEC-218) has a paused, interval-less schedule and only runs when an
+        # operator triggers it, so its worker idles ~100% of the time and no data
+        # goes stale while it is down. Paging on its replica count would be pure
+        # noise; its run failures are still covered by the two rules above, which
+        # group by service_name automatically.
         expr: |
           (
             max by (cluster, deployment) (

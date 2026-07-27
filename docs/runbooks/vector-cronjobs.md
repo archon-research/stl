@@ -13,6 +13,7 @@ into TimescaleDB (or validates stored data). Current cronjobs:
 | `offchain-price-indexer` | `offchain-price-indexer` | 5m | CoinGecko token prices |
 | `watcher-data-validator` | `watcher-data-validator` | 1h | Validates stored chain data vs Etherscan |
 | `transform-worker` | `transform-worker` | 10m | Drains the transformed-layer change queues and refreshes the parity ledger |
+| `morpho-v2-bootstrap` | `morpho-v2-bootstrap` | manual only | One-shot repair of Morpho VaultV2 vaults discovered before atomic discovery (VEC-218) |
 
 > `maple-graphql-indexer` is also a cronjob but has its own richer rules — see
 > [vector-indexers.md](vector-indexers.md), not this runbook.
@@ -26,6 +27,15 @@ Deployment name added to its regex.
 > the one-off bootstrap has run. `VectorCronjobWorkerDown` is guarded on
 > `kube_deployment_spec_replicas > 0`, so a deliberately scaled-to-zero deployment
 > does not page (see that section).
+
+> `morpho-v2-bootstrap` is **manual only**: its Temporal schedule is created paused
+> and with no interval, so it produces nothing until an operator triggers it. It is
+> deliberately absent from the `VectorCronjobWorkerDown` regex — its worker idles
+> ~100% of the time and no data goes stale while it is down, so paging on a missing
+> replica would be pure noise. If a trigger does not start, check the pod first
+> (`kubectl -n vector get pods -l app=morpho-v2-bootstrap`). Its run failures are
+> still covered by `VectorCronjobRunFailing` / `VectorCronjobAllRunsFailing`, which
+> group by `service_name` automatically.
 
 General triage:
 
@@ -155,4 +165,6 @@ exclude only maple). Two manual steps:
 1. Add the new **Deployment name** to the `deployment=~"..."` regex in
    `VectorCronjobWorkerDown` (the kube-state-metrics label is the Deployment
    name, which may differ from `service_name` — e.g. `spark-anchorage-indexer`).
+   Skip this for a `ManualOnly` cronjob: it idles until triggered, so a missing
+   replica stales no data and would only add noise (see `morpho-v2-bootstrap`).
 2. Add a row to the table at the top of this runbook.
