@@ -314,6 +314,20 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # MUST stay above the first step that can fail. `Notify Slack — deploy
+      # failed` is a local action from this checkout, so anything that fails
+      # before it lands (the re-validation guard, the freshness check, the
+      # approval-review fetch) leaves the notifier unresolvable and the failure
+      # silent in Slack. notify-prod-failure does not cover this gated job.
+      - name: Checkout shared actions
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: archon-research/github-actions
+          ref: 01f058b0afe92a8485728e412c13a4e767fb4595 # argocd-sync (github-actions #32, server-scheme fix)
+          ssh-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
+          path: .github-actions
+          persist-credentials: false
+
       - name: Re-validate image-tags-only + ECR provenance (fail closed)
         env:
           KUSTOMIZATION: k8s/overlays/prod/kustomization.yaml
@@ -388,15 +402,6 @@ jobs:
         with:
           environment: production
           state: approved
-
-      - name: Checkout shared actions
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          repository: archon-research/github-actions
-          ref: 01f058b0afe92a8485728e412c13a4e767fb4595 # argocd-sync (github-actions #32, server-scheme fix)
-          ssh-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
-          path: .github-actions
-          persist-credentials: false
 
       - name: React to Slack message — superseded
         if: ${{ steps.fresh.outputs.superseded == 'true' }}
