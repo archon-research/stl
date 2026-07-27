@@ -140,7 +140,7 @@ func RunCronjob(ctx context.Context, meta BuildMeta, cfg CronjobConfig) error {
 		return fmt.Errorf("creating cronjob metrics: %w", err)
 	}
 
-	activities, err := newCronjobActivities(runner, metrics)
+	activities, err := newCronjobActivities(runner, metrics, cfg.ActivityTimeouts.Heartbeat)
 	if err != nil {
 		return fmt.Errorf("creating cronjob activities: %w", err)
 	}

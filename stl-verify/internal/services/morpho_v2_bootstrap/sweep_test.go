@@ -243,6 +243,11 @@ func TestIsRangeTooLargeError(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "a malformed-parameter error mentioning a block range must still bubble",
+			err:  errors.New("invalid block range params"),
+			want: false,
+		},
+		{
 			name: "query timeout asking for a smaller range",
 			err:  errors.New("query timeout exceeded. Consider reducing your block range"),
 			want: true,

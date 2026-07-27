@@ -47,9 +47,7 @@ resources:
   - ../../base/reference-capital-indexer
   - ../../base/reference-capital-backfill
   - ../../base/maple-graphql-indexer
-  # One-shot VaultV2 repair job (VEC-218). Its Temporal schedule is created
-  # paused with no interval, so this Deployment only ever runs work when an
-  # operator hits Trigger in the Temporal UI.
+  # Manual-only cronjob — see docs/runbooks/vector-cronjobs.md.
   - ../../base/morpho-v2-bootstrap
   # CEX L2 order book indexer fleet — one pod per exchange, same binary,
   # different EXCHANGE/SYMBOLS config (OKX/Kraken added by copying the coinbase
