@@ -168,4 +168,14 @@ func TestBootstrapActivityTimeouts_AccommodateAMultiHourRun(t *testing.T) {
 		t.Errorf("MaximumAttempts = %d, want 1 — a failed multi-hour run needs an operator, not an automatic retry",
 			bootstrapActivityTimeouts.MaximumAttempts)
 	}
+	// Without a heartbeat, a worker killed mid-run (any deploy rolls this
+	// Deployment) holds the activity open until StartToClose expires — hours of
+	// a job appearing to run with nothing behind it.
+	if bootstrapActivityTimeouts.Heartbeat <= 0 {
+		t.Error("Heartbeat is unset; a killed worker would go undetected until StartToClose expires")
+	}
+	if bootstrapActivityTimeouts.Heartbeat >= bootstrapActivityTimeouts.StartToClose {
+		t.Errorf("Heartbeat (%s) is not shorter than StartToClose (%s), so it detects nothing sooner",
+			bootstrapActivityTimeouts.Heartbeat, bootstrapActivityTimeouts.StartToClose)
+	}
 }

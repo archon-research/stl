@@ -150,7 +150,13 @@ jobs:
             git fetch origin main
             git checkout FETCH_HEAD -- k8s/overlays/staging/kustomization.yaml
             # Update plain SHA tags (regular services) and prefixed tags (cronjobs: name-SHA)
-            sed -i -E "s/(newTag: \")(([a-z]+-)*)[a-f0-9]{40}/\1\2$SHA/" k8s/overlays/staging/kustomization.yaml
+            # The name-prefix class must allow digits (morpho-v2-bootstrap), and
+            # must match the [a-z0-9]+- the GUARD 4 validator below already uses.
+            # A prefix this pattern cannot match leaves a stale tag behind, which
+            # then fails ECR verification here and GUARD 4 in prod — blocking every
+            # prod deploy, not just this service's. The trailing hyphen is what
+            # keeps the group out of the 40-char hex SHA (which has none).
+            sed -i -E "s/(newTag: \")(([a-z0-9]+-)*)[a-f0-9]{40}/\1\2$SHA/" k8s/overlays/staging/kustomization.yaml
 
             # Check if the file actually changed vs current main
             if git diff --quiet FETCH_HEAD -- k8s/overlays/staging/kustomization.yaml; then
@@ -438,7 +444,8 @@ jobs:
 
             # Update plain SHA tags (regular services) and prefixed tags
             # (cronjobs: name-SHA).
-            sed -i -E "s/(newTag: \")(([a-z]+-)*)[a-f0-9]{40}/\1\2${DEPLOY_SHA}/" "$KUSTOMIZATION"
+            # Digits allowed in the name prefix, matching GUARD 4's validator below.
+            sed -i -E "s/(newTag: \")(([a-z0-9]+-)*)[a-f0-9]{40}/\1\2${DEPLOY_SHA}/" "$KUSTOMIZATION"
 
             if git diff --quiet FETCH_HEAD -- "$KUSTOMIZATION"; then
               echo "Prod already at ${DEPLOY_SHA}; nothing to commit"

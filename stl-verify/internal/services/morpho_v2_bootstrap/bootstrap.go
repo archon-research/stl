@@ -7,15 +7,17 @@
 // AddAdapter / cap / fee events are historical, so they never arrive on the live
 // stream again. One run of this service repairs every one of them.
 //
-// It runs in two passes over the V2 vaults of the configured chain:
+// It runs two passes over the V2 vaults of the configured chain, in this order:
 //
-//  1. Seed — enumerate each vault's current adapter set on-chain and write one
-//     registry row plus one realAssets() snapshot per adapter, all pinned to a
-//     single finalized block.
-//  2. Replay — sweep eth_getLogs from the VaultV2 factory deploy block to that
-//     same block for the 10 VaultV2 governance events, and feed each one through
-//     the live handler path (Service.ReplayMetaMorphoLog) in (block, logIndex)
-//     order, rebuilding the adapter/cap/fee history.
+//  1. Replay — sweep eth_getLogs from the VaultV2 factory deploy block to a
+//     pinned finalized block for the 10 VaultV2 governance events, and feed each
+//     one through the live handler path (Service.ReplayMetaMorphoLog) in
+//     (block, logIndex) order, rebuilding the adapter/cap/fee history.
+//  2. Seed — enumerate each vault's current adapter set at that same block and
+//     write one realAssets() snapshot per adapter, so no active adapter is left
+//     without state.
+//
+// The order is load-bearing, not a preference — see seedAdapterState.
 //
 // Every write goes through the same idempotent repository methods live indexing
 // uses, so re-running is safe. Any failure stops the run: a partial pass leaves
@@ -42,10 +44,18 @@ import (
 )
 
 // canonicalBlockVersion is the block_version stamped on every row this job
-// writes. The run pins to a FINALIZED block and reads history from the canonical
-// chain, so there is no reorg incarnation to distinguish: 0 is the first (and
-// here only) version of each block, matching what the watcher publishes for a
-// block it has never had to re-emit.
+// writes. The sweep reads the canonical chain below a finalized head, so the
+// blocks it replays are final and 0 is the version the watcher assigns a block
+// it never had to re-emit.
+//
+// Known gap (VEC-218 follow-up): a block the watcher DID re-emit before it
+// finalized carries version >= 1 in block_states, and block_version is part of
+// the primary key of morpho_vault_cap / morpho_vault_fee. For such a block this
+// job would write a version-0 row beside live indexing's version-1 row rather
+// than deduping against it. Resolving the version from block_states by
+// (chain_id, number, hash) — as the morpho-vault-indexer backfiller does from
+// the S3 key — needs a repository the service does not currently hold, so it is
+// deferred rather than half-solved here.
 const canonicalBlockVersion = 0
 
 // progressLogEvery bounds the run's log volume: with ~313 vaults and thousands
@@ -155,9 +165,12 @@ func (s *Service) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// A repair job that heals nothing must not report success. This job is only
+	// ever triggered because V2 vaults are known to be missing rows, so an empty
+	// set means the run is pointed at the wrong place (wrong CHAIN_ID, wrong
+	// database) — the one outcome nobody would notice if it returned nil.
 	if len(vaults) == 0 {
-		s.logger.Info("no VaultV2 vaults on this chain — nothing to bootstrap", "chainID", s.config.ChainID)
-		return nil
+		return fmt.Errorf("no VaultV2 vaults found for chain %d: the bootstrap has nothing to repair, which means it is pointed at the wrong chain or database", s.config.ChainID)
 	}
 
 	s.logger.Info("starting VaultV2 bootstrap",
@@ -167,10 +180,10 @@ func (s *Service) Run(ctx context.Context) error {
 		"headBlock", head.number,
 		"headHash", head.hash.Hex())
 
-	if err := s.seedAdapterState(ctx, vaults, head); err != nil {
+	if err := s.replayConfigHistory(ctx, vaults, head); err != nil {
 		return err
 	}
-	if err := s.replayConfigHistory(ctx, vaults, head); err != nil {
+	if err := s.seedAdapterState(ctx, vaults, head); err != nil {
 		return err
 	}
 
@@ -199,6 +212,14 @@ func (s *Service) pinFinalizedHead(ctx context.Context) (pinnedBlock, error) {
 	if header == nil {
 		return pinnedBlock{}, fmt.Errorf("node returned no finalized head")
 	}
+	// A finalized head below the VaultV2 factory deploy block would make the
+	// sweep range inverted, which yields zero chunks and therefore a run that
+	// replays nothing and still reports success. It means the node is not on the
+	// configured chain, so fail instead.
+	if number := header.Number.Int64(); number < s.deployBlock {
+		return pinnedBlock{}, fmt.Errorf("finalized head %d is below the chain-%d VaultV2 factory deploy block %d: the RPC endpoint is not on the configured chain",
+			number, s.config.ChainID, s.deployBlock)
+	}
 	return pinnedBlock{
 		number:    header.Number.Int64(),
 		hash:      header.Hash(),
@@ -225,10 +246,18 @@ func (s *Service) loadV2Vaults(ctx context.Context) ([]common.Address, error) {
 }
 
 // seedAdapterState gives every vault its current adapter registry rows and one
-// realAssets snapshot each, all at the run's pinned block. This is the half that
-// clears VEC-219's adapter_data_missing gate, so it runs before the history
-// replay: if the (much longer) replay fails, the current-state repair has
-// already landed.
+// realAssets snapshot each, at the run's pinned block. It clears VEC-219's
+// adapter_data_missing gate: an active adapter with no state row.
+//
+// It must run AFTER replayConfigHistory. GetOrCreateAdapter converges a
+// candidate onto an existing incarnation, so seeding first (when no history
+// exists yet) inserts a single row at the head block that the replay then
+// converges DOWN to the earliest AddAdapter and closes at the first
+// RemoveAdapter — stranding this pass's head-block snapshot on a closed
+// incarnation while the genuinely-active one gets no state row at all. That is
+// worse than not seeding: the vault looks healed and carries an adapter_state
+// dated after its incarnation ended. Replaying first builds the true
+// incarnations, so the seed's GetOrCreateAdapter matches the active one.
 func (s *Service) seedAdapterState(ctx context.Context, vaults []common.Address, head pinnedBlock) error {
 	for i, vault := range vaults {
 		if err := s.replay.SeedV2VaultAdapters(ctx, vault, head.number, head.hash, canonicalBlockVersion, head.timestamp); err != nil {

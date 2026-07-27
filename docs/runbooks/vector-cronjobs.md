@@ -36,9 +36,11 @@ cronjob, `VectorOnDemandWorkerDown` for an on-demand worker.
 > and with no interval, so it produces nothing until an operator triggers it. Its
 > worker idles ~100% of the time and no data goes stale while it is down, so it is
 > classed with the on-demand workers: `VectorOnDemandWorkerDown` (warning) covers
-> its availability, and it is excluded from `VectorCronjobAllRunsFailing` because
-> "no successes in an hour" is its healthy state. A failed manual run still fires
-> `VectorCronjobRunFailing`. If a trigger does not start, check the pod first
+> its availability, and it is excluded from `VectorCronjobAllRunsFailing` — a job
+> that runs once on demand produces `errors=1, successes=0` from a single failure,
+> which would page critical for a run an operator is already watching. That failure
+> still fires `VectorCronjobRunFailing` (warning), the right severity for it. If a
+> trigger does not start, check the pod first
 > (`kubectl -n vector get pods -l app=morpho-v2-bootstrap`).
 
 General triage:
@@ -363,6 +365,33 @@ absent.
 
 Do not "fix" this by relaxing the syncer to accept partial coverage silently.
 The alert exists precisely because a partially-covered cycle looks healthy.
+## morpho-v2-bootstrap fails repeatedly on the same adapter
+
+**Symptom:** the run fails with `marking morpho adapter removed: no active adapter
+for vault <id> address <addr>`, and re-triggering fails identically. This is the
+one known way the bootstrap can wedge — it will not clear on its own.
+
+**Cause.** The replay closes an adapter incarnation by matching the row that is
+active *at the removal block*. If live indexing removed that adapter at a block
+**after** the run's pinned finalized head — i.e. during the ~13-minute finality
+lag, or while the run was in flight — the row already carries that later
+`removed_at_block`. When the replay then reaches the historical `RemoveAdapter`,
+`MarkAdapterRemoved`'s `removed_at_block IS NULL OR removed_at_block = $3`
+predicate matches nothing and the run aborts. It needs an adapter that was
+added → removed → re-added, so it is rare, but it is deterministic once hit.
+
+Nothing is corrupted: the run fails before writing, and the rows live indexing
+produced are correct.
+
+**Recovery.** Re-trigger once — the pinned head advances, and if the live removal
+is now below it the replay reaches the same row in the right order and succeeds.
+If it fails again, the removal block is still ahead of finality; wait for the
+next epoch and re-trigger. Escalate to the Vector team if it persists past two
+attempts, as it then needs the incarnation row reconciling by hand.
+
+This is a property of the shared VaultV2 replay path, not of the bootstrap alone
+— the morpho-vault-indexer backfiller replays through the same handlers and has
+the same exposure.
 
 ---
 
