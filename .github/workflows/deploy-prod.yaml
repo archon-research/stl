@@ -378,22 +378,38 @@ jobs:
           fi
           echo "Re-validation passed: ${DEPLOY_SHA} is a prod-ECR tag-only bump."
 
-      # Freshness: only the latest prod-bump on main may roll out. If a newer
-      # deploy(prod) commit landed while this run waited for approval, this
-      # approval is stale — skip the sync; the newer run's approval rolls
-      # everything out (the changes batch). Concurrency-independent safety.
-      - name: Check this is still the latest prod deploy
+      # Freshness. stl-prod tracks `targetRevision: HEAD`, so the question is
+      # not "is this the newest tag bump?" but "does this revision still render
+      # the same prod output as main HEAD?". Syncing a revision that differs
+      # pins prod to stale manifests AND leaves the app permanently OutOfSync
+      # against HEAD, so the post-sync wait can never observe Synced and burns
+      # its timeout. Both happened in run 30096520501: an approved tag bump
+      # re-applied a replicas override the newer revert had already removed
+      # (scaling avalanche-allocation-tracker back to 0), then failed the wait.
+      #
+      # Comparing against the newest `deploy(prod)` commit — the previous
+      # behaviour — missed this, because that bump WAS the newest of its kind;
+      # main had simply moved two non-bump commits past it. Comparing the
+      # rendered paths instead lets unrelated merges (docs, CI) through while
+      # catching anything ArgoCD would actually see. bootstrap/ is excluded: a
+      # manual-apply overlay the parent kustomization does not reference.
+      - name: Check this revision still matches main HEAD
         id: fresh
         run: |
           set -euo pipefail
           git fetch -q origin main
-          LATEST=$(git log origin/main --grep '^deploy(prod): update image tags' --format='%H' -1 || true)
-          if [ -n "$LATEST" ] && [ "$LATEST" != "$DEPLOY_SHA" ] \
-            && git merge-base --is-ancestor "$DEPLOY_SHA" "$LATEST"; then
-            echo "::warning::Superseded by newer prod deploy ${LATEST}; skipping sync (batches into it)."
-            echo "superseded=true" >> "$GITHUB_OUTPUT"
-          else
+          HEAD_SHA=$(git rev-parse origin/main)
+
+          if [ "$HEAD_SHA" = "$DEPLOY_SHA" ]; then
             echo "superseded=false" >> "$GITHUB_OUTPUT"
+          elif git diff --quiet "$DEPLOY_SHA" "$HEAD_SHA" -- \
+                 k8s/overlays/prod k8s/base ':(exclude)k8s/overlays/prod/bootstrap'; then
+            # main moved on, but nothing ArgoCD renders changed, so syncing this
+            # revision still converges on HEAD.
+            echo "superseded=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::main (${HEAD_SHA}) carries prod-affecting changes beyond ${DEPLOY_SHA}; skipping sync so prod is not pinned to a stale revision. The newer commit's own run rolls everything out."
+            echo "superseded=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Fetch approval review
