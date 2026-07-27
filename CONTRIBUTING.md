@@ -16,7 +16,8 @@ Welcome!
 >   to the data store, and model pipelines to ingest the data needed from
 >   that store.
 > - Every timeseries table must be a hypertable + compressed + S3-tiered,
->   in the same migration that creates it.
+>   in the same migration that creates it (one narrow carve-out for
+>   sparse governance-event tables — see §11 rule 4).
 > - **Never modify an applied migration** — write a new one.
 > - PR title: `TICKET-1234: <description>`. GitHub squash-merges; don't
 >   squash locally.
@@ -817,8 +818,8 @@ ArgoCD PreSync hook in staging/prod.
    file; a changed checksum fails the deploy. To fix a mistake, write a
    new migration.
 4. **Every timeseries table is a hypertable, tiered to S3, and
-   compressed.** Without exception. All three are set up in the same
-   migration that creates the table — don't ship a naked table and
+   compressed.** One narrow exception, below. All three are set up in the
+   same migration that creates the table — don't ship a naked table and
    "add the policies later". Specifically:
    - **Hypertable** via `SELECT create_hypertable(...)` (or the
      distributed-hypertable equivalent). Pick a chunk interval that
@@ -834,6 +835,15 @@ ArgoCD PreSync hook in staging/prod.
    Also: primitives must be compatible with **distributed** hypertables.
    When in doubt, read `docs/data_entities.md` and ADR-0002, or copy
    the most recent timeseries migration as a template.
+
+   **The exception:** sparse governance/config-event tables — those
+   writing on the order of rows per day or less (e.g.
+   `morpho_vault_cap`, `morpho_vault_fee`) — may be plain tables at
+   maintainer discretion, because chunking, compression and tiering buy
+   nothing at that rate. State the decision and its rationale in the
+   table's `COMMENT`; the append-only + `processing_version`/`build_id`
+   + advisory-locked trigger requirements still apply in full. If you
+   are not sure your table qualifies, it doesn't — make it a hypertable.
 5. Use `CREATE INDEX CONCURRENTLY` on big tables. Test on staging first.
 
 ---
