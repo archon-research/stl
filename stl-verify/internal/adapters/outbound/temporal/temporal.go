@@ -317,9 +317,16 @@ func ensureSchedule(ctx context.Context, c client.Client, logger *slog.Logger, t
 			return nil
 		}
 		if grpcstatus.Code(err) == codes.AlreadyExists || strings.Contains(err.Error(), "already registered") {
-			// Leave an existing manual schedule exactly as it is: no interval to
-			// reconcile, and we must not silently unpause it or re-add a spec.
-			logger.Info("manual schedule already exists; leaving paused/trigger-only state intact", "scheduleID", scheduleID)
+			// Reconcile ONLY the action (its Args carry the deployable activity knobs —
+			// timeouts/heartbeat/attempts) so a redeploy that changes them takes effect
+			// without a manual delete+recreate. Spec and State are left untouched, so the
+			// schedule stays paused with no interval (never silently unpaused or given a
+			// spec). Best-effort, like the interval reconcile: a failed update must not
+			// crashloop the worker — log and start against the existing schedule.
+			if reconcileErr := reconcileScheduleAction(ctx, c, logger, scheduleID, action); reconcileErr != nil {
+				logger.Warn("manual schedule action reconcile failed; starting with the existing schedule",
+					"scheduleID", scheduleID, "error", reconcileErr)
+			}
 			return nil
 		}
 		return fmt.Errorf("creating manual schedule %q: %w", scheduleID, err)
@@ -377,6 +384,33 @@ func reconcileScheduleSpec(ctx context.Context, c client.Client, logger *slog.Lo
 	}
 	logger.Info("schedule reconciled", "scheduleID", scheduleID, "spec", want.Intervals[0])
 	return nil
+}
+
+// reconcileScheduleAction updates an existing schedule's action in place (used by
+// the manual/trigger-only path). Only the action is replaced; the timing spec and
+// state (paused, no interval) are left untouched, so it never unpauses or adds a
+// spec — it just carries new Args (the deployable activity knobs) onto redeploy.
+func reconcileScheduleAction(ctx context.Context, c client.Client, logger *slog.Logger, scheduleID string, want client.ScheduleAction) error {
+	handle := c.ScheduleClient().GetHandle(ctx, scheduleID)
+	err := handle.Update(ctx, client.ScheduleUpdateOptions{
+		DoUpdate: func(in client.ScheduleUpdateInput) (*client.ScheduleUpdate, error) {
+			return applyScheduleActionUpdate(in, want), nil
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("reconciling schedule action %q: %w", scheduleID, err)
+	}
+	logger.Info("manual schedule action reconciled", "scheduleID", scheduleID)
+	return nil
+}
+
+// applyScheduleActionUpdate replaces only the action on the current schedule
+// description, preserving the timing spec, policy, and state (so a manual schedule
+// stays paused with no interval). Pure function so the spec/state-preservation
+// guarantee is unit-testable without a live Temporal server.
+func applyScheduleActionUpdate(in client.ScheduleUpdateInput, want client.ScheduleAction) *client.ScheduleUpdate {
+	in.Description.Schedule.Action = want
+	return &client.ScheduleUpdate{Schedule: &in.Description.Schedule}
 }
 
 // applyScheduleSpecUpdate replaces only the timing spec on the current schedule

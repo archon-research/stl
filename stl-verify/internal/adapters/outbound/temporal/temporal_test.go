@@ -219,6 +219,40 @@ func TestApplyScheduleSpecUpdate_PreservesActionReplacesSpec(t *testing.T) {
 	}
 }
 
+// TestApplyScheduleActionUpdate_PreservesSpecAndStateReplacesAction pins the
+// manual (trigger-only) reconcile: the action's Args are patched while the timing
+// spec and paused state are left untouched, so a redeploy never unpauses the
+// schedule or re-adds an interval.
+func TestApplyScheduleActionUpdate_PreservesSpecAndStateReplacesAction(t *testing.T) {
+	paused := true
+	in := client.ScheduleUpdateInput{
+		Description: client.ScheduleDescription{
+			Schedule: client.Schedule{
+				Action: &client.ScheduleWorkflowAction{ID: "scheduled-backfill", TaskQueue: "backfill", Args: []any{"old"}},
+				Spec:   &client.ScheduleSpec{}, // manual: no intervals
+				State:  &client.ScheduleState{Paused: paused},
+			},
+		},
+	}
+	want := &client.ScheduleWorkflowAction{ID: "scheduled-backfill", TaskQueue: "backfill", Args: []any{"new"}}
+
+	upd := applyScheduleActionUpdate(in, want)
+
+	gotAction, ok := upd.Schedule.Action.(*client.ScheduleWorkflowAction)
+	if !ok {
+		t.Fatalf("Action type = %T, want *client.ScheduleWorkflowAction", upd.Schedule.Action)
+	}
+	if len(gotAction.Args) != 1 || gotAction.Args[0] != "new" {
+		t.Fatalf("Args = %v, want [new] (action must be replaced)", gotAction.Args)
+	}
+	if len(upd.Schedule.Spec.Intervals) != 0 {
+		t.Fatalf("Spec.Intervals = %v, want empty (no interval must be added)", upd.Schedule.Spec.Intervals)
+	}
+	if upd.Schedule.State == nil || !upd.Schedule.State.Paused {
+		t.Fatalf("State.Paused = %v, want true (must stay paused)", upd.Schedule.State)
+	}
+}
+
 // TestEnsureSchedule_ReconcileFailureIsNonFatal pins that a failed reconcile of
 // an already-existing schedule does not abort worker startup. ensureSchedule is
 // shared by every cronjob worker; the schedule already exists with a valid spec,

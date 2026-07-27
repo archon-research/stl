@@ -152,7 +152,7 @@ groups:
             max by (cluster, deployment) (
               kube_deployment_status_replicas_available{
                 namespace="vector",
-                deployment=~"spark-anchorage-indexer|offchain-price-indexer|watcher-data-validator|transform-worker"
+                deployment=~"spark-anchorage-indexer|offchain-price-indexer|watcher-data-validator|transform-worker|transform-bootstrap"
               }
             ) < 1
           )
@@ -160,7 +160,7 @@ groups:
             max by (cluster, deployment) (
               kube_deployment_spec_replicas{
                 namespace="vector",
-                deployment=~"spark-anchorage-indexer|offchain-price-indexer|watcher-data-validator|transform-worker"
+                deployment=~"spark-anchorage-indexer|offchain-price-indexer|watcher-data-validator|transform-worker|transform-bootstrap"
               }
             ) > 0
           )
