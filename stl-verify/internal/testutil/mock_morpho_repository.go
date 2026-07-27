@@ -27,7 +27,7 @@ type MockMorphoRepository struct {
 	GetActiveAdaptersByVaultFn func(ctx context.Context, morphoVaultID int64) ([]*entity.MorphoAdapter, error)
 	SaveAdapterStateFn         func(ctx context.Context, tx pgx.Tx, state *entity.MorphoAdapterState) error
 	SaveVaultCapFn             func(ctx context.Context, tx pgx.Tx, vaultCap *entity.MorphoVaultCap) error
-	UpdateVaultFeeConfigFn     func(ctx context.Context, tx pgx.Tx, morphoVaultID int64, update entity.MorphoVaultFeeUpdate) error
+	SaveVaultFeeFn             func(ctx context.Context, tx pgx.Tx, vaultFee *entity.MorphoVaultFee) error
 }
 
 func (m *MockMorphoRepository) GetOrCreateMarket(ctx context.Context, tx pgx.Tx, market *entity.MorphoMarket) (int64, error) {
@@ -135,9 +135,9 @@ func (m *MockMorphoRepository) SaveVaultCap(ctx context.Context, tx pgx.Tx, vaul
 	return nil
 }
 
-func (m *MockMorphoRepository) UpdateVaultFeeConfig(ctx context.Context, tx pgx.Tx, morphoVaultID int64, update entity.MorphoVaultFeeUpdate) error {
-	if m.UpdateVaultFeeConfigFn != nil {
-		return m.UpdateVaultFeeConfigFn(ctx, tx, morphoVaultID, update)
+func (m *MockMorphoRepository) SaveVaultFee(ctx context.Context, tx pgx.Tx, vaultFee *entity.MorphoVaultFee) error {
+	if m.SaveVaultFeeFn != nil {
+		return m.SaveVaultFeeFn(ctx, tx, vaultFee)
 	}
 	return nil
 }

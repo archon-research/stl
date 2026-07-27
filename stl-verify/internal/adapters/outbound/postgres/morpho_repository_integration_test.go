@@ -3,6 +3,7 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"math/big"
@@ -34,7 +35,7 @@ func init() {
 func truncateMorpho(t *testing.T, ctx context.Context) {
 	t.Helper()
 	// Delete children before parents: morpho_adapter_state FKs morpho_adapter,
-	// morpho_vault_cap and morpho_adapter FK morpho_vault.
+	// morpho_vault_cap / morpho_vault_fee and morpho_adapter FK morpho_vault.
 	tables := []string{
 		`morpho_market_state`,
 		`morpho_market_position`,
@@ -42,6 +43,7 @@ func truncateMorpho(t *testing.T, ctx context.Context) {
 		`morpho_vault_position`,
 		`morpho_adapter_state`,
 		`morpho_vault_cap`,
+		`morpho_vault_fee`,
 		`morpho_market`,
 		`morpho_adapter`,
 		`morpho_vault`,
@@ -2433,127 +2435,189 @@ func TestSaveVaultCap_DifferentBuildNewVersion(t *testing.T) {
 	}
 }
 
-// --- UpdateVaultFeeConfig Tests ---
+// --- SaveVaultFee Tests ---
 
-func TestUpdateVaultFeeConfig_PartialLeavesOthersNull(t *testing.T) {
-	fixture := setupMorphoTest(t)
-	ctx := context.Background()
-	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x24))
-
-	tx, err := fixture.pool.Begin(ctx)
+// saveFee persists one MorphoVaultFee in its own committed transaction.
+func (f *morphoTestFixture) saveFee(t *testing.T, ctx context.Context, fee *entity.MorphoVaultFee) {
+	t.Helper()
+	tx, err := f.pool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	err = fixture.repo.UpdateVaultFeeConfig(ctx, tx, vaultID, entity.MorphoVaultFeeUpdate{
-		PerformanceFee: big.NewInt(500000000000000000),
-	})
-	if err != nil {
-		t.Fatalf("UpdateVaultFeeConfig failed: %v", err)
+	if err := f.repo.SaveVaultFee(ctx, tx, fee); err != nil {
+		t.Fatalf("SaveVaultFee failed: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
+}
 
-	var perfFee *string
-	var mgmtFee, perfRecipient, mgmtRecipient *string
-	err = fixture.pool.QueryRow(ctx,
-		`SELECT performance_fee::text, management_fee::text, encode(performance_fee_recipient, 'hex'), encode(management_fee_recipient, 'hex')
-		 FROM morpho_vault WHERE id = $1`,
-		vaultID,
-	).Scan(&perfFee, &mgmtFee, &perfRecipient, &mgmtRecipient)
+// latestFee reads the current full fee config for a vault via the ADR-0002
+// latest-row ordering (block_number, block_version, processing_version DESC),
+// never by build_id — the read shape the downstream consumer uses.
+func (f *morphoTestFixture) latestFee(t *testing.T, ctx context.Context, vaultID int64) (perfFee, mgmtFee *big.Int, perfRecip, mgmtRecip []byte, found bool) {
+	t.Helper()
+	var perfStr, mgmtStr string
+	err := f.pool.QueryRow(ctx,
+		`SELECT performance_fee::text, management_fee::text, performance_fee_recipient, management_fee_recipient
+		 FROM morpho_vault_fee
+		 WHERE morpho_vault_id = $1
+		 ORDER BY block_number DESC, block_version DESC, processing_version DESC
+		 LIMIT 1`, vaultID).Scan(&perfStr, &mgmtStr, &perfRecip, &mgmtRecip)
 	if err != nil {
-		t.Fatalf("query: %v", err)
+		return nil, nil, nil, nil, false
 	}
-	if perfFee == nil || *perfFee != "500000000000000000" {
-		t.Errorf("performance_fee mismatch: got %v", perfFee)
+	p, ok := new(big.Int).SetString(perfStr, 10)
+	if !ok {
+		t.Fatalf("performance_fee %q not decimal", perfStr)
 	}
-	if mgmtFee != nil {
-		t.Errorf("expected management_fee NULL, got %v", *mgmtFee)
+	m, ok := new(big.Int).SetString(mgmtStr, 10)
+	if !ok {
+		t.Fatalf("management_fee %q not decimal", mgmtStr)
 	}
-	if perfRecipient != nil {
-		t.Errorf("expected performance_fee_recipient NULL, got %v", *perfRecipient)
+	return p, m, perfRecip, mgmtRecip, true
+}
+
+func TestSaveVaultFee_RoundTrip(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x30))
+
+	perfRecip := adapterAddr(0x1a)
+	mgmtRecip := make([]byte, 20) // zero-address recipient is the contract default
+	fixture.saveFee(t, ctx, &entity.MorphoVaultFee{
+		MorphoVaultID:           vaultID,
+		PerformanceFee:          big.NewInt(100000000000000000),
+		ManagementFee:           big.NewInt(0),
+		PerformanceFeeRecipient: perfRecip,
+		ManagementFeeRecipient:  mgmtRecip,
+		BlockNumber:             24765805,
+		BlockVersion:            0,
+		Timestamp:               morphoBlockTime,
+	})
+
+	perf, mgmt, gotPerfRecip, gotMgmtRecip, found := fixture.latestFee(t, ctx, vaultID)
+	if !found {
+		t.Fatal("expected fee row, got none")
 	}
-	if mgmtRecipient != nil {
-		t.Errorf("expected management_fee_recipient NULL, got %v", *mgmtRecipient)
+	if perf.Cmp(big.NewInt(100000000000000000)) != 0 {
+		t.Errorf("performance_fee mismatch: got %s", perf)
+	}
+	if mgmt.Sign() != 0 {
+		t.Errorf("management_fee mismatch: got %s, want 0", mgmt)
+	}
+	if !bytes.Equal(gotPerfRecip, perfRecip) {
+		t.Errorf("performance_fee_recipient mismatch: got %x, want %x", gotPerfRecip, perfRecip)
+	}
+	if !bytes.Equal(gotMgmtRecip, mgmtRecip) {
+		t.Errorf("management_fee_recipient mismatch: got %x, want %x", gotMgmtRecip, mgmtRecip)
 	}
 }
 
-func TestUpdateVaultFeeConfig_SecondPartialPreservesFirst(t *testing.T) {
+// TestSaveVaultFee_SameBuildDedupesToOneRow verifies the snapshot contract: two
+// same-block fee events (e.g. SetPerformanceFee + SetPerformanceFeeRecipient)
+// each read the same on-chain config and write a byte-identical row; the mvf
+// trigger (same build → same processing_version) plus ON CONFLICT DO NOTHING
+// collapse them to a single row.
+func TestSaveVaultFee_SameBuildDedupesToOneRow(t *testing.T) {
 	fixture := setupMorphoTest(t)
 	ctx := context.Background()
-	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x25))
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x31))
 
-	update := func(u entity.MorphoVaultFeeUpdate) {
+	row := func() *entity.MorphoVaultFee {
+		return &entity.MorphoVaultFee{
+			MorphoVaultID:           vaultID,
+			PerformanceFee:          big.NewInt(100000000000000000),
+			ManagementFee:           big.NewInt(0),
+			PerformanceFeeRecipient: adapterAddr(0x1a),
+			ManagementFeeRecipient:  make([]byte, 20),
+			BlockNumber:             24765805,
+			BlockVersion:            0,
+			Timestamp:               morphoBlockTime,
+		}
+	}
+	fixture.saveFee(t, ctx, row())
+	fixture.saveFee(t, ctx, row())
+
+	var count int
+	if err := fixture.pool.QueryRow(ctx,
+		`SELECT count(*) FROM morpho_vault_fee WHERE morpho_vault_id = $1`, vaultID).Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("same-build identical fees: expected 1 row, got %d", count)
+	}
+}
+
+// TestSaveVaultFee_DifferentBuildNewVersion mirrors the cap-state correction
+// path: two writes with the SAME natural key but different build_id are distinct
+// reprocessings, so the mvf trigger assigns a new processing_version to the
+// second rather than deduping it. Both rows survive (processing_version 0 and 1)
+// and the ADR-0002 latest-row read returns the second (build-2) row — never
+// ordered by build_id.
+func TestSaveVaultFee_DifferentBuildNewVersion(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x32))
+
+	repoBuild1, err := NewMorphoRepository(morphoPool, nil, 1)
+	if err != nil {
+		t.Fatalf("NewMorphoRepository build 1: %v", err)
+	}
+	repoBuild2, err := NewMorphoRepository(morphoPool, nil, 2)
+	if err != nil {
+		t.Fatalf("NewMorphoRepository build 2: %v", err)
+	}
+
+	save := func(repo *MorphoRepository, perfFee *big.Int) {
+		fee := &entity.MorphoVaultFee{
+			MorphoVaultID:           vaultID,
+			PerformanceFee:          perfFee,
+			ManagementFee:           big.NewInt(0),
+			PerformanceFeeRecipient: adapterAddr(0x1a),
+			ManagementFeeRecipient:  make([]byte, 20),
+			BlockNumber:             24765900,
+			BlockVersion:            0,
+			Timestamp:               morphoBlockTime,
+		}
 		tx, err := fixture.pool.Begin(ctx)
 		if err != nil {
 			t.Fatalf("begin: %v", err)
 		}
-		if err := fixture.repo.UpdateVaultFeeConfig(ctx, tx, vaultID, u); err != nil {
-			t.Fatalf("UpdateVaultFeeConfig failed: %v", err)
+		if err := repo.SaveVaultFee(ctx, tx, fee); err != nil {
+			t.Fatalf("SaveVaultFee failed: %v", err)
 		}
 		if err := tx.Commit(ctx); err != nil {
 			t.Fatalf("commit: %v", err)
 		}
 	}
 
-	recipient := adapterAddr(0x99)
-	update(entity.MorphoVaultFeeUpdate{PerformanceFee: big.NewInt(111)})
-	// A later event sets only the management fee + its recipient; the earlier
-	// performance fee must be preserved.
-	update(entity.MorphoVaultFeeUpdate{ManagementFee: big.NewInt(222), ManagementFeeRecipient: recipient})
+	// build 2 (lower "latest" if ordered by build_id would still be 2 here, so use
+	// a build-1 correction that is chronologically second to prove build_id is not
+	// the ordering key): write build-2 first, then build-1 second.
+	save(repoBuild2, big.NewInt(1000))
+	save(repoBuild1, big.NewInt(2000))
 
-	var perfFee, mgmtFee string
-	var mgmtRecipient string
-	err := fixture.pool.QueryRow(ctx,
-		`SELECT performance_fee::text, management_fee::text, encode(management_fee_recipient, 'hex')
-		 FROM morpho_vault WHERE id = $1`,
-		vaultID,
-	).Scan(&perfFee, &mgmtFee, &mgmtRecipient)
-	if err != nil {
+	var count, maxVer int
+	if err := fixture.pool.QueryRow(ctx,
+		`SELECT COUNT(*), MAX(processing_version) FROM morpho_vault_fee WHERE morpho_vault_id = $1`,
+		vaultID).Scan(&count, &maxVer); err != nil {
 		t.Fatalf("query: %v", err)
 	}
-	if perfFee != "111" {
-		t.Errorf("expected performance_fee preserved (111), got %s", perfFee)
+	if count != 2 {
+		t.Errorf("expected 2 rows for distinct builds, got %d", count)
 	}
-	if mgmtFee != "222" {
-		t.Errorf("expected management_fee 222, got %s", mgmtFee)
+	if maxVer != 1 {
+		t.Errorf("expected max processing_version 1, got %d", maxVer)
 	}
-	if mgmtRecipient != fmt.Sprintf("%x", recipient) {
-		t.Errorf("management_fee_recipient mismatch: got %s", mgmtRecipient)
+
+	// Latest by processing_version is the build-1 row (perf 2000). Ordering by
+	// build_id would wrongly pick the build-2 row (perf 1000).
+	perf, _, _, _, found := fixture.latestFee(t, ctx, vaultID)
+	if !found {
+		t.Fatal("expected fee row, got none")
 	}
-}
-
-func TestUpdateVaultFeeConfig_AllNilRejected(t *testing.T) {
-	fixture := setupMorphoTest(t)
-	ctx := context.Background()
-	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x26))
-
-	tx, err := fixture.pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	defer tx.Rollback(ctx)
-
-	err = fixture.repo.UpdateVaultFeeConfig(ctx, tx, vaultID, entity.MorphoVaultFeeUpdate{})
-	if err == nil {
-		t.Fatal("expected error for all-nil fee update, got nil")
-	}
-}
-
-func TestUpdateVaultFeeConfig_UnknownVaultErrors(t *testing.T) {
-	fixture := setupMorphoTest(t)
-	ctx := context.Background()
-
-	tx, err := fixture.pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	defer tx.Rollback(ctx)
-
-	err = fixture.repo.UpdateVaultFeeConfig(ctx, tx, 999999, entity.MorphoVaultFeeUpdate{
-		PerformanceFee: big.NewInt(1),
-	})
-	if err == nil {
-		t.Fatal("expected error for unknown vault, got nil")
+	if perf.Cmp(big.NewInt(2000)) != 0 {
+		t.Errorf("latest-read performance_fee = %s, want 2000 (highest processing_version, not highest build_id)", perf)
 	}
 }

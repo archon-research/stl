@@ -638,7 +638,8 @@ func (s *Service) processMorphoBlueLog(ctx context.Context, log shared.Log, chai
 //   - AddAdapter / RemoveAdapter → the adapter registry.
 //   - Allocate / Deallocate → an adapter realAssets() state snapshot.
 //   - Increase/DecreaseAbsoluteCap, Increase/DecreaseRelativeCap → vault caps.
-//   - SetPerformanceFee / SetManagementFee (+ their recipients) → fee config.
+//   - SetPerformanceFee / SetManagementFee (+ their recipients) → a full
+//     fee-config snapshot (morpho_vault_fee).
 //   - ForceDeallocate → a WARN only (its companion Deallocate log snapshots).
 //
 // The remaining registered V2 surface (SetCurator, Submit, timelock / gate /
@@ -704,14 +705,12 @@ func (s *Service) processMetaMorphoLog(ctx context.Context, log shared.Log, vaul
 		return s.handleCapChange(ctx, vaultAddress, e.ID, e.IDData, blockNumber, blockHash, blockVersion, blockTimestamp)
 	case *DecreaseRelativeCapEvent:
 		return s.handleCapChange(ctx, vaultAddress, e.ID, e.IDData, blockNumber, blockHash, blockVersion, blockTimestamp)
-	case *SetPerformanceFeeEvent:
-		return s.updateVaultFee(ctx, vaultAddress, entity.MorphoVaultFeeUpdate{PerformanceFee: e.NewPerformanceFee})
-	case *SetManagementFeeEvent:
-		return s.updateVaultFee(ctx, vaultAddress, entity.MorphoVaultFeeUpdate{ManagementFee: e.NewManagementFee})
-	case *SetPerformanceFeeRecipientEvent:
-		return s.updateVaultFee(ctx, vaultAddress, entity.MorphoVaultFeeUpdate{PerformanceFeeRecipient: e.NewPerformanceFeeRecipient.Bytes()})
-	case *SetManagementFeeRecipientEvent:
-		return s.updateVaultFee(ctx, vaultAddress, entity.MorphoVaultFeeUpdate{ManagementFeeRecipient: e.NewManagementFeeRecipient.Bytes()})
+	case *SetPerformanceFeeEvent, *SetManagementFeeEvent,
+		*SetPerformanceFeeRecipientEvent, *SetManagementFeeRecipientEvent:
+		// Every Set* fee event snapshots the vault's FULL on-chain fee config; the
+		// specific field the event changed is irrelevant to what is persisted (the
+		// authoritative full state is the hash-pinned read), mirroring the cap events.
+		return s.handleFeeChange(ctx, vaultAddress, blockNumber, blockHash, blockVersion, blockTimestamp)
 	default:
 		return nil
 	}

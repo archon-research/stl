@@ -813,6 +813,111 @@ func (s *blockchainService) unpackVaultCap(method string, result outbound.Result
 	return bigIntFromAny(unpacked[0]), nil
 }
 
+// vaultFeeConfig is the full on-chain fee configuration of a VaultV2 at a block:
+// both fees (raw uint96 WAD, unscaled) and both recipient addresses.
+type vaultFeeConfig struct {
+	performanceFee          *big.Int
+	managementFee           *big.Int
+	performanceFeeRecipient common.Address
+	managementFeeRecipient  common.Address
+}
+
+// getVaultFees reads the vault's full fee configuration off the VaultV2, pinned
+// to blockHash. The fee config is per-block state (a Set* fee event mutates it),
+// so like getVaultCaps this is a hash-pinned ExecuteAtHash read for
+// reorg-correctness (VEC-471), not number-pinning. All four getters exist on
+// every VaultV2 and cannot fail, so none is AllowFailure: a revert is a real
+// error that must stop the event.
+func (s *blockchainService) getVaultFees(ctx context.Context, vault common.Address, blockHash common.Hash) (retFees *vaultFeeConfig, retErr error) {
+	ctx, span := s.telemetry.StartSpan(ctx, "morpho.rpc.getVaultFees",
+		attribute.String("vault.address", vault.Hex()))
+	defer span.End()
+	start := time.Now()
+	defer func() {
+		s.telemetry.RecordRPCCall(ctx, "getVaultFees", time.Since(start), retErr)
+		if retErr != nil {
+			telemetry.SetSpanError(span, retErr, "getVaultFees failed")
+		}
+	}()
+
+	// Order matches the unpack below: performanceFee, managementFee,
+	// performanceFeeRecipient, managementFeeRecipient.
+	methods := []string{"performanceFee", "managementFee", "performanceFeeRecipient", "managementFeeRecipient"}
+	calls := make([]outbound.Call, len(methods))
+	for i, m := range methods {
+		callData, err := s.vaultV2ABI.Pack(m)
+		if err != nil {
+			return nil, fmt.Errorf("packing %s() call: %w", m, err)
+		}
+		calls[i] = outbound.Call{Target: vault, AllowFailure: false, CallData: callData}
+	}
+
+	results, err := s.multicallClient.ExecuteAtHash(ctx, calls, blockHash)
+	if err != nil {
+		return nil, fmt.Errorf("multicall vault fee getters: %w", err)
+	}
+	if len(results) != len(methods) {
+		return nil, fmt.Errorf("vault fee getters returned %d results, want %d", len(results), len(methods))
+	}
+
+	performanceFee, err := s.unpackVaultFeeUint("performanceFee", results[0], vault)
+	if err != nil {
+		return nil, err
+	}
+	managementFee, err := s.unpackVaultFeeUint("managementFee", results[1], vault)
+	if err != nil {
+		return nil, err
+	}
+	performanceFeeRecipient, err := s.unpackVaultFeeAddress("performanceFeeRecipient", results[2], vault)
+	if err != nil {
+		return nil, err
+	}
+	managementFeeRecipient, err := s.unpackVaultFeeAddress("managementFeeRecipient", results[3], vault)
+	if err != nil {
+		return nil, err
+	}
+	return &vaultFeeConfig{
+		performanceFee:          performanceFee,
+		managementFee:           managementFee,
+		performanceFeeRecipient: performanceFeeRecipient,
+		managementFeeRecipient:  managementFeeRecipient,
+	}, nil
+}
+
+// unpackVaultFeeUint validates and decodes one uint fee getter result.
+func (s *blockchainService) unpackVaultFeeUint(method string, result outbound.Result, vault common.Address) (*big.Int, error) {
+	if !result.Success || len(result.ReturnData) == 0 {
+		return nil, fmt.Errorf("%s() call failed for vault %s", method, vault.Hex())
+	}
+	unpacked, err := s.vaultV2ABI.Unpack(method, result.ReturnData)
+	if err != nil {
+		return nil, fmt.Errorf("unpacking %s() for vault %s: %w", method, vault.Hex(), err)
+	}
+	if len(unpacked) == 0 {
+		return nil, fmt.Errorf("%s() returned no values for vault %s", method, vault.Hex())
+	}
+	return bigIntFromAny(unpacked[0]), nil
+}
+
+// unpackVaultFeeAddress validates and decodes one address fee-recipient getter result.
+func (s *blockchainService) unpackVaultFeeAddress(method string, result outbound.Result, vault common.Address) (common.Address, error) {
+	if !result.Success || len(result.ReturnData) == 0 {
+		return common.Address{}, fmt.Errorf("%s() call failed for vault %s", method, vault.Hex())
+	}
+	unpacked, err := s.vaultV2ABI.Unpack(method, result.ReturnData)
+	if err != nil {
+		return common.Address{}, fmt.Errorf("unpacking %s() for vault %s: %w", method, vault.Hex(), err)
+	}
+	if len(unpacked) == 0 {
+		return common.Address{}, fmt.Errorf("%s() returned no values for vault %s", method, vault.Hex())
+	}
+	addr, ok := unpacked[0].(common.Address)
+	if !ok {
+		return common.Address{}, fmt.Errorf("%s() returned unexpected type %T for vault %s", method, unpacked[0], vault.Hex())
+	}
+	return addr, nil
+}
+
 // getVaultMetadata identifies whether a contract is a Morpho-family vault
 // (MetaMorpho V1 / V1.1 or VaultV2), then fetches its metadata.
 //

@@ -570,32 +570,34 @@ func (r *MorphoRepository) SaveVaultCap(ctx context.Context, tx pgx.Tx, vaultCap
 	return nil
 }
 
-// UpdateVaultFeeConfig applies a partial fee-configuration update to a vault.
-func (r *MorphoRepository) UpdateVaultFeeConfig(ctx context.Context, tx pgx.Tx, morphoVaultID int64, update entity.MorphoVaultFeeUpdate) error {
-	if err := update.Validate(); err != nil {
-		return fmt.Errorf("validating vault fee update: %w", err)
+// SaveVaultFee saves a VaultV2 full fee-config snapshot within an external transaction.
+func (r *MorphoRepository) SaveVaultFee(ctx context.Context, tx pgx.Tx, vaultFee *entity.MorphoVaultFee) error {
+	if err := vaultFee.Validate(); err != nil {
+		return fmt.Errorf("validating morpho vault fee: %w", err)
 	}
 
-	// COALESCE keeps the stored value when a parameter is NULL, so each Set* fee
-	// event updates only the field it carries without clobbering the others.
-	tag, err := tx.Exec(ctx,
-		`UPDATE morpho_vault SET
-		     performance_fee           = COALESCE($2, performance_fee),
-		     management_fee            = COALESCE($3, management_fee),
-		     performance_fee_recipient = COALESCE($4, performance_fee_recipient),
-		     management_fee_recipient  = COALESCE($5, management_fee_recipient)
-		 WHERE id = $1`,
-		morphoVaultID,
-		optionalNumeric(update.PerformanceFee),
-		optionalNumeric(update.ManagementFee),
-		update.PerformanceFeeRecipient,
-		update.ManagementFeeRecipient,
+	performanceFee, err := bigIntToNumeric(vaultFee.PerformanceFee)
+	if err != nil {
+		return fmt.Errorf("converting performance_fee: %w", err)
+	}
+	managementFee, err := bigIntToNumeric(vaultFee.ManagementFee)
+	if err != nil {
+		return fmt.Errorf("converting management_fee: %w", err)
+	}
+
+	// processing_version is assigned by the mvf trigger; ON CONFLICT DO NOTHING
+	// dedupes same-build retries and same-block sibling fee events (see
+	// SaveVaultCap for the rationale).
+	_, err = tx.Exec(ctx,
+		`INSERT INTO morpho_vault_fee (morpho_vault_id, performance_fee, management_fee, performance_fee_recipient, management_fee_recipient, block_number, block_version, timestamp, build_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		 ON CONFLICT (morpho_vault_id, block_number, block_version, timestamp, processing_version) DO NOTHING`,
+		vaultFee.MorphoVaultID, performanceFee, managementFee,
+		vaultFee.PerformanceFeeRecipient, vaultFee.ManagementFeeRecipient,
+		vaultFee.BlockNumber, vaultFee.BlockVersion, vaultFee.Timestamp, int(r.buildID),
 	)
 	if err != nil {
-		return fmt.Errorf("updating morpho vault fee config: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("updating morpho vault fee config: no vault with id %d", morphoVaultID)
+		return fmt.Errorf("saving morpho vault fee: %w", err)
 	}
 	return nil
 }

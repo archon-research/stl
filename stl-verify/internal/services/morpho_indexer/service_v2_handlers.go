@@ -255,15 +255,37 @@ func (s *Service) handleCapChange(ctx context.Context, vaultAddress common.Addre
 	})
 }
 
-// updateVaultFee applies a single-field fee-config change to the vault. Only the
-// field carried on the triggering Set* event is set on the update; the others
-// stay nil so UpdateVaultFeeConfig leaves their columns untouched.
-func (s *Service) updateVaultFee(ctx context.Context, vaultAddress common.Address, update entity.MorphoVaultFeeUpdate) error {
+// handleFeeChange snapshots the vault's FULL on-chain fee config after any of the
+// 4 Set* fee events. Like handleCapChange reads the (absoluteCap, relativeCap)
+// pair, it reads the full config — performanceFee, managementFee and both
+// recipients — directly from the vault at the log's block hash rather than
+// carrying a value forward: the event carries only the single field it changed,
+// so the authoritative full state is the on-chain read. The read is hash-pinned
+// (state read), so the row is an end-of-block snapshot for that block.
+//
+// Sibling fee events in the same block (a Set* fee event and its recipient often
+// land together) each read the same block hash and therefore build byte-identical
+// rows; the mvf trigger's same-build lookup plus SaveVaultFee's ON CONFLICT DO
+// NOTHING correctly dedupe them to one row (same rationale as caps).
+func (s *Service) handleFeeChange(ctx context.Context, vaultAddress common.Address, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) error {
 	vault, err := s.resolveV2Vault(vaultAddress)
 	if err != nil {
 		return err
 	}
+
+	fees, err := s.blockchainSvc.getVaultFees(ctx, vaultAddress, blockHash)
+	if err != nil {
+		return fmt.Errorf("reading fees for vault %s: %w", vaultAddress.Hex(), err)
+	}
+
+	vaultFee, err := entity.NewMorphoVaultFee(vault.ID, fees.performanceFee, fees.managementFee,
+		fees.performanceFeeRecipient.Bytes(), fees.managementFeeRecipient.Bytes(),
+		blockNumber, blockVersion, blockTimestamp)
+	if err != nil {
+		return fmt.Errorf("creating vault fee entity: %w", err)
+	}
+
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		return s.morphoRepo.UpdateVaultFeeConfig(ctx, tx, vault.ID, update)
+		return s.morphoRepo.SaveVaultFee(ctx, tx, vaultFee)
 	})
 }

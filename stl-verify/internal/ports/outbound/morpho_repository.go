@@ -70,7 +70,6 @@ type MorphoRepository interface {
 	// SaveVaultCap saves a VaultV2 allocation-cap snapshot within an external transaction.
 	SaveVaultCap(ctx context.Context, tx pgx.Tx, vaultCap *entity.MorphoVaultCap) error
 
-	// UpdateVaultFeeConfig applies a partial fee-configuration update to a vault.
-	// Nil fields in the update leave their columns untouched; an unknown vault errors.
-	UpdateVaultFeeConfig(ctx context.Context, tx pgx.Tx, morphoVaultID int64, update entity.MorphoVaultFeeUpdate) error
+	// SaveVaultFee saves a VaultV2 full fee-config snapshot within an external transaction.
+	SaveVaultFee(ctx context.Context, tx pgx.Tx, vaultFee *entity.MorphoVaultFee) error
 }
