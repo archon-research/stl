@@ -324,8 +324,14 @@ func ensureSchedule(ctx context.Context, c client.Client, logger *slog.Logger, t
 			// spec). Best-effort, like the interval reconcile: a failed update must not
 			// crashloop the worker — log and start against the existing schedule.
 			if reconcileErr := reconcileScheduleAction(ctx, c, logger, scheduleID, action); reconcileErr != nil {
-				logger.Warn("manual schedule action reconcile failed; starting with the existing schedule",
-					"scheduleID", scheduleID, "error", reconcileErr)
+				// Fail hard rather than start with stale activity Args. Unlike the
+				// interval reconcile (fleet-wide, best-effort so a transient error
+				// can't crashloop many workers), this manual worker's Args drive an
+				// expensive multi-hour backfill, so triggering a run under the wrong
+				// timeout/retry policy is worse than a restart: a transient error
+				// recovers on the next k8s restart, and a persistent one surfaces via
+				// VectorCronjobWorkerDown instead of running silently on stale config.
+				return fmt.Errorf("reconciling manual schedule action %q: %w", scheduleID, reconcileErr)
 			}
 			return nil
 		}
