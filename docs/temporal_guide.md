@@ -68,7 +68,7 @@ composition root.
 | File | Responsibility | Key symbols |
 |------|----------------|-------------|
 | `temporal.go` | worker lifecycle, schedule | `RunCronjob`, `CronjobConfig`, `BuildMeta`, `Dependencies`, `ensureSchedule` |
-| `workflow.go` | generic workflow + activity | `cronjobWorkflow`, `cronjobActivities`, `Runner`, `RunnerFunc`, `ContextWithScheduledAt`, `ScheduledAtFromContext` |
+| `workflow.go` | generic workflow + activity | `cronjobWorkflow`, `cronjobActivities`, `Runner`, `RunnerFunc`, `ActivityTimeouts`, `ContextWithScheduledAt`, `ScheduledAtFromContext` |
 | `metrics.go` | OTel metrics | `cronjob.runs.total{status}`, `cronjob.run.duration_seconds` |
 
 You normally never touch these to add a job.
@@ -81,6 +81,20 @@ You normally never touch these to add a job.
 | `watcher-data-validator` | `DATA_VALIDATION_INTERVAL` | 1h | Cross-check stored block data (per chain; `SERVICE_NAME` sets the queue) |
 | `anchorage-indexer` | `ANCHORAGE_INDEX_INTERVAL` | 15m | Snapshot Anchorage collateral |
 | `maple-graphql-indexer` | `MAPLE_SYNC_INTERVAL` | 10m | Sync Maple positions via GraphQL |
+| `morpho-v2-bootstrap` | — (`ManualOnly`) | never | One-shot repair of Morpho VaultV2 vaults discovered before atomic discovery (VEC-218) |
+
+### Manual-only cronjobs
+
+Set `CronjobConfig.ManualOnly: true` (and no interval) for a job that must never run
+unattended — a one-shot repair, a destructive migration. `ensureSchedule` then creates the
+schedule **paused and with an empty spec**, so redeploying the worker never starts a run.
+The operator starts one from the Temporal UI: **Schedules → `<name>` → Trigger**, which
+fires exactly one workflow and leaves the schedule paused. The pause is a deliberate
+safety property, not a misconfiguration — say so in the job's `Note`.
+
+A job whose single run legitimately takes hours also needs `CronjobConfig.ActivityTimeouts`;
+the shared defaults (10m `StartToClose`, 30m `ScheduleToClose`, 5 attempts) would kill it
+mid-run. A zero `ActivityTimeouts` keeps those defaults, so existing jobs are unaffected.
 
 ## Recipe: add a new cronjob
 

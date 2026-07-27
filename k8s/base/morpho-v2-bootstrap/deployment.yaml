@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: morpho-v2-bootstrap
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: morpho-v2-bootstrap
+  template:
+    metadata:
+      labels:
+        app: morpho-v2-bootstrap
+    spec:
+      serviceAccountName: morpho-v2-bootstrap
+      containers:
+        - name: morpho-v2-bootstrap
+          image: morpho-v2-bootstrap
+          envFrom:
+            - configMapRef:
+                name: otel-config
+            - configMapRef:
+                name: morpho-v2-bootstrap
+            - secretRef:
+                name: morpho-v2-bootstrap
+          # Larger than the other cronjobs (50m/64Mi): this one's activity runs
+          # in-process for hours, holding a full mainnet log sweep's decoded
+          # logs and the run's block-timestamp cache, rather than delegating to
+          # a short external call.
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+      terminationGracePeriodSeconds: 60

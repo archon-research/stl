@@ -79,19 +79,57 @@ func (a *cronjobActivities) Execute(ctx context.Context, scheduledAt time.Time) 
 	return nil
 }
 
+// Defaults every cronjob ran on before timeouts became configurable. A zero
+// ActivityTimeouts resolves to exactly these, so schedules created before the
+// argument existed keep their original behavior.
+const (
+	defaultStartToCloseTimeout    = 10 * time.Minute
+	defaultScheduleToCloseTimeout = 30 * time.Minute
+	defaultMaximumAttempts        = int32(5)
+)
+
+// ActivityTimeouts bounds one cronjob activity execution. A cronjob whose tick
+// can legitimately run for hours (a one-shot historical bootstrap) must raise
+// StartToClose, or Temporal kills it mid-run at the 10m default.
+//
+// It travels as the cronjobWorkflow argument rather than a package-level value
+// because activity options are recorded in workflow history: reading them from
+// mutable process state would make a replay of an older execution
+// non-deterministic. Any zero field falls back to the default above, which is
+// also what a schedule created before this argument existed decodes to.
+type ActivityTimeouts struct {
+	StartToClose    time.Duration
+	ScheduleToClose time.Duration
+	MaximumAttempts int32
+}
+
+func (t ActivityTimeouts) resolve() ActivityTimeouts {
+	if t.StartToClose <= 0 {
+		t.StartToClose = defaultStartToCloseTimeout
+	}
+	if t.ScheduleToClose <= 0 {
+		t.ScheduleToClose = defaultScheduleToCloseTimeout
+	}
+	if t.MaximumAttempts <= 0 {
+		t.MaximumAttempts = defaultMaximumAttempts
+	}
+	return t
+}
+
 // cronjobWorkflow orchestrates a single cronjob activity execution.
-func cronjobWorkflow(ctx workflow.Context) error {
+func cronjobWorkflow(ctx workflow.Context, timeouts ActivityTimeouts) error {
 	logger := workflow.GetLogger(ctx)
 	logger.Info("starting cronjob workflow")
 
+	timeouts = timeouts.resolve()
 	activityOptions := workflow.ActivityOptions{
-		StartToCloseTimeout:    10 * time.Minute,
-		ScheduleToCloseTimeout: 30 * time.Minute,
+		StartToCloseTimeout:    timeouts.StartToClose,
+		ScheduleToCloseTimeout: timeouts.ScheduleToClose,
 		RetryPolicy: &temporalsdk.RetryPolicy{
 			InitialInterval:    2 * time.Second,
 			BackoffCoefficient: 2.0,
 			MaximumInterval:    30 * time.Second,
-			MaximumAttempts:    5,
+			MaximumAttempts:    timeouts.MaximumAttempts,
 		},
 	}
 	ctx = workflow.WithActivityOptions(ctx, activityOptions)

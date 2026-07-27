@@ -75,6 +75,19 @@ type CronjobConfig struct {
 	// external rate limit do not all fire at the same wall-clock instant.
 	IntervalOffsetEnv string
 
+	// ManualOnly makes this cronjob operator-triggered instead of scheduled:
+	// the schedule is created PAUSED and with an empty spec, so it never fires
+	// on its own however many times the worker redeploys. Temporal's UI Trigger
+	// button (and `tctl schedule trigger`) still starts exactly one run against
+	// a paused schedule — that is the intended entry point. Use it for one-shot
+	// repair jobs whose cost or blast radius makes an unattended run wrong.
+	// Mutually exclusive with IntervalDefault / IntervalEnv.
+	ManualOnly bool
+
+	// ActivityTimeouts overrides how long one tick may run (see the type). The
+	// zero value keeps the defaults every existing cronjob uses.
+	ActivityTimeouts ActivityTimeouts
+
 	// OpenDatabase opens a database connection pool. Required.
 	OpenDatabase func(ctx context.Context) (*pgxpool.Pool, error)
 
@@ -87,7 +100,11 @@ func (c CronjobConfig) validate() error {
 	if c.Name == "" {
 		return fmt.Errorf("CronjobConfig.Name is required")
 	}
-	if c.IntervalDefault == "" {
+	if c.ManualOnly {
+		if c.IntervalDefault != "" || c.IntervalEnv != "" || c.IntervalOffsetEnv != "" {
+			return fmt.Errorf("CronjobConfig.ManualOnly cannot be combined with an interval (IntervalDefault/IntervalEnv/IntervalOffsetEnv)")
+		}
+	} else if c.IntervalDefault == "" {
 		return fmt.Errorf("CronjobConfig.IntervalDefault is required")
 	}
 	if c.OpenDatabase == nil {
@@ -294,7 +311,15 @@ func waitForServer(ctx context.Context, c client.Client, logger *slog.Logger) er
 // a Temporal schedule spec. getenv is injected so the resolution is unit-testable.
 // A non-empty interval env overrides IntervalDefault; an empty or unset offset env
 // leaves the offset at zero (fire on the interval boundary).
+//
+// A ManualOnly cronjob gets an empty spec: no interval, no calendar. Combined
+// with creating the schedule paused this makes an unattended run impossible even
+// if someone unpauses it in the UI.
 func buildScheduleSpec(cfg CronjobConfig, getenv func(string) string) (client.ScheduleSpec, error) {
+	if cfg.ManualOnly {
+		return client.ScheduleSpec{}, nil
+	}
+
 	interval := cfg.IntervalDefault
 	intervalSource := "IntervalDefault"
 	if cfg.IntervalEnv != "" {
@@ -337,16 +362,19 @@ func ensureSchedule(ctx context.Context, c client.Client, logger *slog.Logger, t
 	// a race window and also sidesteps the case where Describe returns an internal error
 	// due to a stuck workflow task left over from a previous run.
 	_, err = c.ScheduleClient().Create(ctx, client.ScheduleOptions{
-		ID:   scheduleID,
-		Spec: spec,
+		ID:     scheduleID,
+		Spec:   spec,
+		Paused: cfg.ManualOnly,
+		Note:   scheduleNote(cfg),
 		Action: &client.ScheduleWorkflowAction{
 			Workflow:  cronjobWorkflow,
 			ID:        workflowID,
 			TaskQueue: taskQueue,
+			Args:      []any{cfg.ActivityTimeouts},
 		},
 	})
 	if err == nil {
-		logger.Info("schedule created", "scheduleID", scheduleID, "spec", spec.Intervals[0])
+		logger.Info("schedule created", "scheduleID", scheduleID, "manualOnly", cfg.ManualOnly, "spec", describeSpec(spec))
 		return nil
 	}
 
@@ -381,8 +409,27 @@ func reconcileScheduleSpec(ctx context.Context, c client.Client, logger *slog.Lo
 	if err != nil {
 		return fmt.Errorf("reconciling schedule %q: %w", scheduleID, err)
 	}
-	logger.Info("schedule reconciled", "scheduleID", scheduleID, "spec", want.Intervals[0])
+	logger.Info("schedule reconciled", "scheduleID", scheduleID, "spec", describeSpec(want))
 	return nil
+}
+
+// describeSpec renders a schedule spec for logging. A ManualOnly cronjob's spec
+// carries no intervals, so the interval cannot be indexed unconditionally.
+func describeSpec(spec client.ScheduleSpec) string {
+	if len(spec.Intervals) == 0 {
+		return "no intervals (manual trigger only)"
+	}
+	return fmt.Sprintf("%+v", spec.Intervals[0])
+}
+
+// scheduleNote is the human-readable message Temporal shows next to the
+// schedule. For a manual-only cronjob it is the operator-facing explanation of
+// why the schedule sits paused, so nobody "fixes" it by unpausing.
+func scheduleNote(cfg CronjobConfig) string {
+	if !cfg.ManualOnly {
+		return ""
+	}
+	return "Manual-only cronjob: paused on purpose and has no interval. Use Trigger to start exactly one run."
 }
 
 // applyScheduleSpecUpdate replaces only the timing spec on the current schedule
