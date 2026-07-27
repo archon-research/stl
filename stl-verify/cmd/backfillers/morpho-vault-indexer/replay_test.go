@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	ethtypes "github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/partition"
@@ -425,62 +424,5 @@ func TestCollectPartitionV2Logs_BoundsConcurrencyToWorkers(t *testing.T) {
 	}
 	if maxInFlight.Load() < 2 {
 		t.Error("downloads never overlapped; collection is still serial")
-	}
-}
-
-// --- block timestamp cache ---
-
-type fakeHeaderFetcher struct {
-	calls      map[common.Hash]int
-	timeByHash map[common.Hash]uint64
-	err        error
-}
-
-func (f *fakeHeaderFetcher) HeaderByHash(_ context.Context, hash common.Hash) (*ethtypes.Header, error) {
-	if f.err != nil {
-		return nil, f.err
-	}
-	f.calls[hash]++
-	return &ethtypes.Header{Time: f.timeByHash[hash]}, nil
-}
-
-// TestBlockTimestampCache fetches each distinct block hash once and reuses the
-// result.
-func TestBlockTimestampCache(t *testing.T) {
-	hashA := common.HexToHash("0xaa")
-	hashB := common.HexToHash("0xbb")
-	f := &fakeHeaderFetcher{calls: map[common.Hash]int{}, timeByHash: map[common.Hash]uint64{hashA: 1_700_000_000, hashB: 1_700_000_500}}
-	c := newBlockTimestampCache(f)
-
-	ts1, err := c.timestampAt(context.Background(), hashA)
-	if err != nil {
-		t.Fatalf("timestampAt(hashA): %v", err)
-	}
-	ts2, err := c.timestampAt(context.Background(), hashA)
-	if err != nil {
-		t.Fatalf("timestampAt(hashA) again: %v", err)
-	}
-	if !ts1.Equal(ts2) || !ts1.Equal(time.Unix(1_700_000_000, 0).UTC()) {
-		t.Errorf("timestamps = %v / %v, want %v", ts1, ts2, time.Unix(1_700_000_000, 0).UTC())
-	}
-	if f.calls[hashA] != 1 {
-		t.Errorf("hashA fetched %d times, want 1 (cached)", f.calls[hashA])
-	}
-
-	if _, err := c.timestampAt(context.Background(), hashB); err != nil {
-		t.Fatalf("timestampAt(hashB): %v", err)
-	}
-	if f.calls[hashB] != 1 {
-		t.Errorf("hashB fetched %d times, want 1", f.calls[hashB])
-	}
-}
-
-// TestBlockTimestampCache_FetchErrorPropagates: a header fetch failure must
-// surface (transient RPC failure → stop, retry), never yield a zero timestamp.
-func TestBlockTimestampCache_FetchErrorPropagates(t *testing.T) {
-	f := &fakeHeaderFetcher{calls: map[common.Hash]int{}, err: errors.New("rpc down")}
-	c := newBlockTimestampCache(f)
-	if _, err := c.timestampAt(context.Background(), common.HexToHash("0xaa")); err == nil {
-		t.Fatal("expected the fetch error to propagate")
 	}
 }

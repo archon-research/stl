@@ -318,6 +318,19 @@ data:
   CHAIN_ID: "1"
   OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector-opentelemetry-collector.observability.svc.cluster.local:4317"
 ---
+# One-shot VaultV2 repair job (VEC-218). Manual-only: its Temporal schedule is
+# created paused with no interval, so nothing runs until an operator hits
+# Trigger. ALCHEMY_HTTP_URL is omitted — the binary defaults to eth-mainnet,
+# matching CHAIN_ID below.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: morpho-v2-bootstrap
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "1"
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:

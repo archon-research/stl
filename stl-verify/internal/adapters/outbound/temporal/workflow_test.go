@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.temporal.io/sdk/activity"
+	"go.temporal.io/sdk/converter"
 	"go.temporal.io/sdk/testsuite"
 )
 
@@ -137,6 +138,68 @@ func TestCronjobActivities_Execute(t *testing.T) {
 	}
 }
 
+func TestActivityTimeouts_Resolve(t *testing.T) {
+	tests := []struct {
+		name string
+		in   ActivityTimeouts
+		want ActivityTimeouts
+	}{
+		{
+			name: "zero value keeps the defaults every existing cronjob runs on",
+			in:   ActivityTimeouts{},
+			want: ActivityTimeouts{
+				StartToClose:    defaultStartToCloseTimeout,
+				ScheduleToClose: defaultScheduleToCloseTimeout,
+				MaximumAttempts: defaultMaximumAttempts,
+			},
+		},
+		{
+			name: "each field is overridable independently",
+			in:   ActivityTimeouts{StartToClose: 6 * time.Hour},
+			want: ActivityTimeouts{
+				StartToClose:    6 * time.Hour,
+				ScheduleToClose: defaultScheduleToCloseTimeout,
+				MaximumAttempts: defaultMaximumAttempts,
+			},
+		},
+		{
+			name: "fully specified value passes through",
+			in:   ActivityTimeouts{StartToClose: 6 * time.Hour, ScheduleToClose: 12 * time.Hour, MaximumAttempts: 1},
+			want: ActivityTimeouts{StartToClose: 6 * time.Hour, ScheduleToClose: 12 * time.Hour, MaximumAttempts: 1},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.in.resolve(); got != tc.want {
+				t.Fatalf("resolve() = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCronjobWorkflow_MissingArgDecodesToDefaults pins backward compatibility
+// with the schedules already stored in Temporal: they were created before
+// cronjobWorkflow took a timeouts argument, so their action carries no payload.
+// This exercises the exact decode Temporal performs for such a run
+// (decodeArgsToRawValues → DataConverter.FromPayloads): an absent payload leaves
+// the argument at its zero value, which resolve() maps back to today's defaults.
+// If the SDK ever started rejecting a missing argument instead, every existing
+// cronjob would break on redeploy — this test is the tripwire.
+func TestCronjobWorkflow_MissingArgDecodesToDefaults(t *testing.T) {
+	var decoded ActivityTimeouts
+	if err := converter.GetDefaultDataConverter().FromPayloads(nil, &decoded); err != nil {
+		t.Fatalf("decoding an absent workflow argument: %v", err)
+	}
+	want := ActivityTimeouts{
+		StartToClose:    defaultStartToCloseTimeout,
+		ScheduleToClose: defaultScheduleToCloseTimeout,
+		MaximumAttempts: defaultMaximumAttempts,
+	}
+	if got := decoded.resolve(); got != want {
+		t.Fatalf("resolved timeouts for a pre-existing schedule = %+v, want %+v", got, want)
+	}
+}
+
 func TestCronjobWorkflow(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -170,7 +233,7 @@ func TestCronjobWorkflow(t *testing.T) {
 				activity.RegisterOptions{Name: "Execute"},
 			)
 
-			env.ExecuteWorkflow(cronjobWorkflow)
+			env.ExecuteWorkflow(cronjobWorkflow, ActivityTimeouts{})
 
 			if gotScheduledAt.IsZero() {
 				t.Error("workflow did not pass a scheduledAt to the activity")

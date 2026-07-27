@@ -46,6 +46,10 @@ resources:
   - ../../base/reference-capital-indexer
   - ../../base/reference-capital-backfill
   - ../../base/maple-graphql-indexer
+  # One-shot VaultV2 repair job (VEC-218). Its Temporal schedule is created
+  # paused with no interval, so this Deployment only ever runs work when an
+  # operator hits Trigger in the Temporal UI.
+  - ../../base/morpho-v2-bootstrap
   # CEX L2 order book indexer fleet — one pod per exchange, same binary,
   # different EXCHANGE/SYMBOLS config (mirrors the staging fleet, VEC-374/VEC-380).
   - ../../base/cex-orderbook-indexer-coinbase
@@ -190,6 +194,9 @@ images:
   - name: maple-graphql-indexer
     newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-cronjob
     newTag: "maple-graphql-indexer-f17ad1bfa0221b479b3fc2078370cf25e772f352"
+  - name: morpho-v2-bootstrap
+    newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-cronjob
+    newTag: "morpho-v2-bootstrap-1e7ea976600451881ada03f3b188dccf001a3cc3"
   - name: cex-orderbook-indexer
     # One image shared by every per-exchange order book pod (coinbase/okx/kraken),
     # selected at runtime via the EXCHANGE env var.

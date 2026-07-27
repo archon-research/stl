@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving"
@@ -60,6 +61,35 @@ func (s *Service) ReplayMetaMorphoLog(ctx context.Context, log shared.Log, block
 	return s.processMetaMorphoLog(ctx, log, vaultAddress, s.config.ChainID, blockNumber, blockHash, blockVersion, blockTimestamp)
 }
 
+// SeedV2VaultAdapters enumerates an already-persisted VaultV2's current adapter
+// set at (blockNumber, blockHash) and writes one adapter registry row plus one
+// realAssets() state snapshot per adapter — the same enumerate → classify →
+// upsert → seed path discovery runs, for a vault that already exists and so
+// never goes through discovery again.
+//
+// It exists for the morpho-v2-bootstrap job: the ~313 V2 vaults discovered
+// before discovery became atomic have a vault row but no adapters, and the live
+// stream never revisits them (IsKnownVault short-circuits before enumeration).
+//
+// Reads-then-persist, like discoverAndRegisterVault: every on-chain read
+// completes before the transaction opens, so a transient RPC failure commits
+// nothing and a re-triggered run starts clean. Re-running is safe — the
+// converging GetOrCreateAdapter and the deduped SaveAdapterState are the same
+// idempotent writes live indexing uses.
+func (s *Service) SeedV2VaultAdapters(ctx context.Context, vaultAddress common.Address, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) error {
+	vault, err := s.resolveV2Vault(vaultAddress)
+	if err != nil {
+		return err
+	}
+	adapters, err := s.readV2Adapters(ctx, vaultAddress, blockNumber, blockHash)
+	if err != nil {
+		return fmt.Errorf("reading adapters for vault %s: %w", vaultAddress.Hex(), err)
+	}
+	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
+		return s.seedDiscoveredAdapters(ctx, tx, vault, vaultAddress, blockNumber, blockVersion, blockTimestamp, adapters)
+	})
+}
+
 // vaultV2StructuredEventNames are the VaultV2 events processMetaMorphoLog routes
 // to a typed, structured handler (adapter registry, allocation snapshots, caps,
 // fee config). It is the ExtractMetaMorphoEvent typed set minus the shared
@@ -76,19 +106,48 @@ var vaultV2StructuredEventNames = []string{
 	"SetPerformanceFeeRecipient", "SetManagementFeeRecipient",
 }
 
+// vaultV2ConfigEventNames are the VaultV2 governance events — the structured set
+// minus the three allocation events (Allocate / Deallocate / ForceDeallocate).
+//
+// It is the topic set the morpho-v2-bootstrap job sweeps with eth_getLogs. The
+// allocation events are excluded on purpose: replaying them would issue one
+// hash-pinned realAssets() read per historical allocation across every V2 vault
+// (the dominant cost of a full history walk) to reconstruct a time series
+// nothing consumes today. The bootstrap's adapter seed already establishes each
+// adapter's CURRENT realAssets, and live indexing appends every allocation from
+// the run onwards.
+var vaultV2ConfigEventNames = []string{
+	"AddAdapter", "RemoveAdapter",
+	"IncreaseAbsoluteCap", "DecreaseAbsoluteCap",
+	"IncreaseRelativeCap", "DecreaseRelativeCap",
+	"SetPerformanceFee", "SetManagementFee",
+	"SetPerformanceFeeRecipient", "SetManagementFeeRecipient",
+}
+
 // VaultV2StructuredEventTopics returns the topic0 hashes of the 13 VaultV2
 // structured events, derived from the registered ABI so they never drift from
 // the canonical signatures.
 func VaultV2StructuredEventTopics() (map[common.Hash]struct{}, error) {
+	return vaultV2EventTopics(vaultV2StructuredEventNames)
+}
+
+// VaultV2ConfigEventTopics returns the topic0 hashes of the 10 VaultV2
+// governance (adapter / cap / fee) events. Every one is also a structured topic,
+// so logs matched on this set pass ReplayMetaMorphoLog's guard.
+func VaultV2ConfigEventTopics() (map[common.Hash]struct{}, error) {
+	return vaultV2EventTopics(vaultV2ConfigEventNames)
+}
+
+func vaultV2EventTopics(names []string) (map[common.Hash]struct{}, error) {
 	abiV2, err := abis.GetVaultV2EventsABI()
 	if err != nil {
 		return nil, fmt.Errorf("loading VaultV2 events ABI: %w", err)
 	}
-	topics := make(map[common.Hash]struct{}, len(vaultV2StructuredEventNames))
-	for _, name := range vaultV2StructuredEventNames {
+	topics := make(map[common.Hash]struct{}, len(names))
+	for _, name := range names {
 		ev, ok := abiV2.Events[name]
 		if !ok {
-			return nil, fmt.Errorf("VaultV2 structured event %q not found in ABI", name)
+			return nil, fmt.Errorf("VaultV2 event %q not found in ABI", name)
 		}
 		topics[ev.ID] = struct{}{}
 	}

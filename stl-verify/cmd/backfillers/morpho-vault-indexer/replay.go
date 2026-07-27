@@ -7,16 +7,15 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	ethtypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/blocktime"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/partition"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -65,7 +64,7 @@ func replayV2StructuredEvents(
 		return fmt.Errorf("deriving VaultV2 structured topics: %w", err)
 	}
 
-	tsCache := newBlockTimestampCache(ethClient)
+	tsCache := blocktime.New(ethClient)
 
 	logger.Info("starting VaultV2 structured-event replay",
 		"v2Vaults", len(v2Vaults),
@@ -140,7 +139,7 @@ func replayPartition(
 	logger *slog.Logger,
 	s3Reader outbound.S3Reader,
 	svc *morpho_indexer.Service,
-	tsCache *blockTimestampCache,
+	tsCache *blocktime.Cache,
 	cfg config,
 	part string,
 	v2Vaults map[common.Address]struct{},
@@ -156,7 +155,7 @@ func replayPartition(
 	sortV2LogEntries(entries)
 
 	for _, e := range entries {
-		blockTimestamp, err := tsCache.timestampAt(ctx, e.blockHash)
+		blockTimestamp, err := tsCache.TimestampAt(ctx, e.blockHash)
 		if err != nil {
 			return err
 		}
@@ -393,40 +392,4 @@ func sortV2LogEntries(entries []v2LogEntry) {
 		}
 		return entries[i].logIndex < entries[j].logIndex
 	})
-}
-
-// headerTimeFetcher is the subset of *ethclient.Client the timestamp cache
-// needs, narrowed so the cache can be tested with a fake.
-type headerTimeFetcher interface {
-	HeaderByHash(ctx context.Context, hash common.Hash) (*ethtypes.Header, error)
-}
-
-// blockTimestampCache memoizes block header timestamps for the replay run so a
-// block bearing several events is fetched from the node only once. Timestamps
-// are absent from S3 receipts, so they come from the header.
-//
-// Keyed and fetched by block HASH, not number: the replay pins every state read
-// to the log's block hash (the receipt's canonical block), so its timestamp must
-// come from that exact block. A number-pinned HeaderByNumber could return a
-// different block across a reorg, stamping snapshots with the wrong time.
-type blockTimestampCache struct {
-	fetcher headerTimeFetcher
-	cache   map[common.Hash]time.Time
-}
-
-func newBlockTimestampCache(fetcher headerTimeFetcher) *blockTimestampCache {
-	return &blockTimestampCache{fetcher: fetcher, cache: make(map[common.Hash]time.Time)}
-}
-
-func (c *blockTimestampCache) timestampAt(ctx context.Context, blockHash common.Hash) (time.Time, error) {
-	if ts, ok := c.cache[blockHash]; ok {
-		return ts, nil
-	}
-	header, err := c.fetcher.HeaderByHash(ctx, blockHash)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("fetching header for block %s: %w", blockHash.Hex(), err)
-	}
-	ts := time.Unix(int64(header.Time), 0).UTC()
-	c.cache[blockHash] = ts
-	return ts, nil
 }

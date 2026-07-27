@@ -16,6 +16,7 @@ into TimescaleDB (or validates stored data). Current cronjobs:
 | `offchain-price-backfill` | `offchain-price-backfill` | **on demand** | Backfills CoinGecko price history for a range supplied at trigger time |
 | `reference-capital-indexer` | `reference-capital-indexer` | 15m | Sky Star-monitor reference risk capital; the only writer of forward reference history |
 | `reference-capital-backfill` | `reference-capital-backfill` | **on demand** | Seeds the reference balance-sheet history predating the syncer's first run |
+| `morpho-v2-bootstrap` | `morpho-v2-bootstrap` | **manual only** | One-shot repair of Morpho VaultV2 vaults discovered before atomic discovery (VEC-218) |
 
 > `maple-graphql-indexer` is also a cronjob but has its own richer rules — see
 > [vector-indexers.md](vector-indexers.md), not this runbook.
@@ -30,6 +31,15 @@ cronjob, `VectorOnDemandWorkerDown` for an on-demand worker.
 > the one-off bootstrap has run. `VectorCronjobWorkerDown` is guarded on
 > `kube_deployment_spec_replicas > 0`, so a deliberately scaled-to-zero deployment
 > does not page (see that section).
+
+> `morpho-v2-bootstrap` is **manual only**: its Temporal schedule is created paused
+> and with no interval, so it produces nothing until an operator triggers it. Its
+> worker idles ~100% of the time and no data goes stale while it is down, so it is
+> classed with the on-demand workers: `VectorOnDemandWorkerDown` (warning) covers
+> its availability, and it is excluded from `VectorCronjobAllRunsFailing` because
+> "no successes in an hour" is its healthy state. A failed manual run still fires
+> `VectorCronjobRunFailing`. If a trigger does not start, check the pod first
+> (`kubectl -n vector get pods -l app=morpho-v2-bootstrap`).
 
 General triage:
 
@@ -153,12 +163,14 @@ and a fresh `status="success"` run in `cronjob_runs_total`.
 
 ### What it means
 
-A `temporal.RunWorker` Deployment has had <1 available replica for >30m. These
-workers carry **no schedule**, so unlike `VectorCronjobWorkerDown` nothing is
-ticking into the void and no data is going stale. The only impact is that a new
-run cannot be started until the pod is back. Warning severity for that reason.
+A trigger-only Deployment — a `temporal.RunWorker` job, or a `ManualOnly` cronjob
+whose schedule is paused with no interval — has had <1 available replica for
+>30m. These workers carry **no schedule**, so unlike `VectorCronjobWorkerDown`
+nothing is ticking into the void and no data is going stale. The only impact is
+that a new run cannot be started until the pod is back. Warning severity for that
+reason.
 
-Currently matches: `offchain-price-backfill`, `reference-capital-backfill`.
+Currently matches: `offchain-price-backfill`, `reference-capital-backfill`, `morpho-v2-bootstrap`.
 
 ### First checks
 
@@ -357,15 +369,17 @@ The alert exists precisely because a partially-covered cycle looks healthy.
 ## Adding a new cronjob
 
 Failure + all-failing alerts are automatic (they group by `service_name`).
-`VectorCronjobAllRunsFailing` excludes `maple-graphql-indexer` and
-`offchain-price-backfill`; `VectorCronjobRunFailing` excludes only maple. Two
-manual steps:
+`VectorCronjobAllRunsFailing` excludes `maple-graphql-indexer`,
+`offchain-price-backfill` and `morpho-v2-bootstrap`; `VectorCronjobRunFailing`
+excludes only maple. Two manual steps:
 
 1. Add the new **Deployment name** to the `deployment=~"..."` regex in the
    availability rule that matches its lifecycle — `VectorCronjobWorkerDown` for
-   a scheduled cronjob, `VectorOnDemandWorkerDown` for a `temporal.RunWorker`
-   job. (The kube-state-metrics label is the Deployment name, which may differ
-   from `service_name` — e.g. `spark-anchorage-indexer`.) An on-demand worker
-   must ALSO be added to the `service_name!=` exclusions in
+   a scheduled cronjob, `VectorOnDemandWorkerDown` for anything that only runs
+   when a human triggers it (a `temporal.RunWorker` job, or a `ManualOnly`
+   cronjob with a paused interval-less schedule like `morpho-v2-bootstrap`).
+   (The kube-state-metrics label is the Deployment name, which may differ from
+   `service_name` — e.g. `spark-anchorage-indexer`.) A trigger-only worker must
+   ALSO be added to the `service_name!=` exclusions in
    `VectorCronjobAllRunsFailing`, or its idle state pages.
 2. Add a row to the table at the top of this runbook.
