@@ -10,8 +10,9 @@ What it does:
   1. GET the wallet's position in the sparkUSDTbc VaultV2 from data.spark.fi.
   2. Read our side: the wallet's latest ``morpho_vault_position`` (redeemable
      assets) and the vault's VaultV2 backed breakdown via
-     ``MorphoV2BackedBreakdownRepository``, scaled to the wallet's share of the
-     vault. Both sides are normalised to a ``Snapshot`` (a redeemable-asset
+     ``MorphoBackedBreakdownRepository.get_backed_breakdown_v2``, scaled to the
+     wallet's share of the vault. Both sides are normalised to a ``Snapshot``
+     (a redeemable-asset
      balance + per-underlying amounts, all ``Decimal``).
   3. Compare the balance and every per-asset amount within a relative tolerance,
      print a table, and exit 0 (pass) or 1 (mismatch). A run that could not
@@ -59,7 +60,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-from app.adapters.postgres.backed_breakdown_repository_morpho_v2 import MorphoV2BackedBreakdownRepository
+from app.adapters.postgres.backed_breakdown_repository_morpho import MorphoBackedBreakdownRepository
 
 _SPARK_BASE_URL = "https://data.spark.fi"
 _SPARKUSDTBC_VAULT = "0xc7cdcfdefc64631ed6799c95e3b110cd42f2bd22"
@@ -258,14 +259,14 @@ async def load_our_snapshot(engine: AsyncEngine, *, vault_hex: str, wallet_hex: 
     sparkUSDTbc vault that is ≈ 1:1 with the underlying-token ``balance``. The exact
     Spark-side unit is pinned when the endpoint is reachable (see module docstring).
     """
-    repo = MorphoV2BackedBreakdownRepository(engine)
+    repo = MorphoBackedBreakdownRepository(engine)
     vault_bytes = bytes.fromhex(vault_hex.removeprefix("0x"))
     wallet_bytes = bytes.fromhex(wallet_hex.removeprefix("0x"))
 
     ref = await repo.resolve_vault(vault_bytes, chain_id)
     if ref is None:
         raise ValueError(f"sparkUSDTbc vault {vault_hex} not indexed on chain {chain_id}")
-    breakdown = await repo.get_backed_breakdown(ref.id)
+    breakdown = await repo.get_backed_breakdown_v2(ref.id)
 
     async with engine.connect() as conn:
         row = (
