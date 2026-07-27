@@ -1,5 +1,4 @@
--- Morpho VaultV2 structured tracking, part 1 of 3 (VEC-218): adapter registry +
--- vault fee columns.
+-- Morpho VaultV2 structured tracking, part 1 of 3 (VEC-218): adapter registry.
 --
 -- A VaultV2 (morpho-org/vault-v2) never allocates to Morpho Blue directly. It
 -- holds a set of liquidity-adapter contracts, each wrapping one downstream
@@ -19,13 +18,6 @@
 -- vault discovery it starts at the discovery / first-allocation block and
 -- converges (LEAST) to the true AddAdapter block once the backfiller replays
 -- history, so the active-row upsert never leaves a duplicate active incarnation.
---
--- This migration also adds the VaultV2 fee configuration to morpho_vault. These
--- columns are NULL on V1/V1.1 rows (MetaMorpho has no such config) and are
--- mutated in place on the vault's Set* fee events; the full change history is
--- preserved in protocol_event. Fees are raw on-chain uint96 WAD values, NOT
--- basis points: performanceFee is a WAD fraction of accrued interest
--- (1e18 = 100%), managementFee is a WAD per-second rate.
 
 -- ============================================================================
 -- morpho_adapter: registry of VaultV2 liquidity adapters (one row per adapter).
@@ -52,15 +44,6 @@ CREATE INDEX IF NOT EXISTS idx_morpho_adapter_active
 CREATE INDEX IF NOT EXISTS idx_morpho_adapter_asset_token ON morpho_adapter (asset_token_id);
 
 -- ============================================================================
--- morpho_vault fee configuration (VaultV2 only; NULL on MetaMorpho V1/V1.1).
--- ============================================================================
-ALTER TABLE morpho_vault
-    ADD COLUMN IF NOT EXISTS performance_fee           NUMERIC(30, 0),
-    ADD COLUMN IF NOT EXISTS management_fee            NUMERIC(30, 0),
-    ADD COLUMN IF NOT EXISTS performance_fee_recipient BYTEA,
-    ADD COLUMN IF NOT EXISTS management_fee_recipient  BYTEA;
-
--- ============================================================================
 -- Catalogue metadata (source of truth for column units/scale; see the
 -- "Interpreting numeric columns" convention). Style matches
 -- 20260609_120000_add_schema_comments / 20260626_120000_create_fluid_vault_tables.
@@ -74,11 +57,6 @@ COMMENT ON COLUMN morpho_adapter.asset_token_id IS 'FK→token.id. The vault''s 
 COMMENT ON COLUMN morpho_adapter.adapter_type IS 'Adapter kind: 1 = MorphoMarketV1AdapterV2 (Morpho Blue market), 2 = MorphoVaultV1Adapter (nested MetaMorpho V1 vault), 99 = Unknown (unrecognised type, recorded for later curation).';
 COMMENT ON COLUMN morpho_adapter.added_at_block IS 'Block at which the adapter was first observed on-chain by us: the AddAdapter block when witnessed live or replayed; the vault-discovery or first-allocation block for adapters predating discovery; converges (LEAST) to the true AddAdapter block once history is replayed. Part of the UNIQUE key so a re-added adapter is a distinct row.';
 COMMENT ON COLUMN morpho_adapter.removed_at_block IS 'Block at which the adapter was de-registered; NULL while the adapter is active.';
-
-COMMENT ON COLUMN morpho_vault.performance_fee IS 'VaultV2 performance fee: raw on-chain uint96 WAD fraction of accrued interest (1e18 = 100%). NULL on MetaMorpho V1/V1.1 rows (no such config). Mutated in place on Set* fee events; full change history lives in protocol_event.';
-COMMENT ON COLUMN morpho_vault.management_fee IS 'VaultV2 management fee: raw on-chain uint96 WAD per-second rate (not bps, not annualised). NULL on MetaMorpho V1/V1.1 rows. Mutated in place on Set* fee events; full change history lives in protocol_event.';
-COMMENT ON COLUMN morpho_vault.performance_fee_recipient IS 'VaultV2 performance-fee recipient address (20 bytes). NULL on MetaMorpho V1/V1.1 rows. Mutated in place on Set* events; history in protocol_event.';
-COMMENT ON COLUMN morpho_vault.management_fee_recipient IS 'VaultV2 management-fee recipient address (20 bytes). NULL on MetaMorpho V1/V1.1 rows. Mutated in place on Set* events; history in protocol_event.';
 
 INSERT INTO migrations (filename)
 VALUES ('20260721_120000_create_morpho_adapter.sql')
