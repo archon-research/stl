@@ -85,6 +85,43 @@ func TestCheckpointToleratesTruncatedTrailingLine(t *testing.T) {
 	}
 }
 
+// TestCheckpointRepairsTornTrailingLineBeforeAppending: readCheckpoint tolerates
+// a crash-torn trailing line, but O_APPEND then concatenates the next record
+// onto the fragment into one unparseable line — silently losing that record for
+// good. loadCheckpoint must terminate the fragment before appending.
+func TestCheckpointRepairsTornTrailingLineBeforeAppending(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "progress.jsonl")
+
+	content := recordLine(t, "0-999", testScope()) +
+		`{"partition":"1000-19` // torn by a crash mid-write, no newline
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	c, err := loadCheckpoint(path, testScope())
+	if err != nil {
+		t.Fatalf("loadCheckpoint: %v", err)
+	}
+	if err := c.markDone("2000-2999"); err != nil {
+		t.Fatalf("markDone: %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	reopened, err := loadCheckpoint(path, testScope())
+	if err != nil {
+		t.Fatalf("reopen loadCheckpoint: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if !reopened.isDone("0-999") {
+		t.Error("lost the record written before the torn line")
+	}
+	if !reopened.isDone("2000-2999") {
+		t.Error("the record appended after a torn line did not survive a reload")
+	}
+}
+
 // recordLine renders one JSONL checkpoint line the way markDone writes it, so
 // the scope tests build fixtures without hand-writing the record's JSON shape.
 func recordLine(t *testing.T, part string, scope checkpointScope) string {
