@@ -884,6 +884,77 @@ func TestProcessBlockEvent_VaultDiscovery_VaultV2(t *testing.T) {
 	}
 }
 
+// TestProcessBlockEvent_VaultDiscovery_V2_UnclassifiedAdapterWithoutRealAssets is the
+// discovery-path mirror of TestProcessBlockEvent_AddAdapter_RealAssetsSeedTolerance:
+// enumerating a vault's existing adapter set must not be poison-pilled by one
+// unmodelled adapter that does not serve realAssets(). It is registered as Unknown
+// with no state seed, so VEC-219's composition probe reports it as
+// adapter_data_missing — honest, since an adapter we cannot classify is one we cannot
+// price either.
+func TestProcessBlockEvent_VaultDiscovery_V2_UnclassifiedAdapterWithoutRealAssets(t *testing.T) {
+	h := newTestHarness(t)
+	logs := h.captureLogs()
+	unknownVault := common.HexToAddress("0xc7CDcFDEfC64631ED6799C95e3b110cd42F2bD22")
+	curator := common.HexToAddress("0x00000000000000000000000000000000000000A3")
+	adapter := common.HexToAddress("0xAaAa000000000000000000000000000000000001")
+
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		switch {
+		case len(calls) == 4 && h.isProbeMulticall(calls):
+			return h.vaultV2ProbeResults(testLoanToken, curator, adapter), nil
+		case len(calls) == 4 && h.isVaultDetailsMulticall(calls):
+			return h.vaultDetailResults("Spark Blue Chip USDT Vault", "sparkUSDTbc", 6, false), nil
+		case len(calls) == 2 && calls[0].Target == testLoanToken:
+			return h.tokenMetadataResults("USDT", 6), nil
+		case len(calls) == 2 && calls[0].Target == adapter:
+			return h.adapterProbeResults(entity.MorphoAdapterTypeUnknown), nil
+		default:
+			return nil, fmt.Errorf("unexpected Execute shape (%d calls)", len(calls))
+		}
+	}
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		switch {
+		case len(calls) == 1 && hasSameSelector(calls[0].CallData, adaptersLengthSelector):
+			return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(1))}}, nil
+		case len(calls) == 1 && hasSameSelector(calls[0].CallData, adaptersSelector):
+			return []outbound.Result{{Success: true, ReturnData: h.packAddress(adapter)}}, nil
+		case len(calls) == 1 && calls[0].Target == adapter:
+			return []outbound.Result{{Success: false, ReturnData: nil}}, nil // realAssets() reverts
+		case len(calls) == 4 && calls[0].Target == unknownVault:
+			return h.feeGetterResults(big.NewInt(0), big.NewInt(0), common.Address{}, common.Address{}), nil
+		case len(calls) == 2 && calls[0].Target == unknownVault:
+			return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult()}, nil
+		default:
+			return nil, fmt.Errorf("unexpected ExecuteAtHash shape (%d calls)", len(calls))
+		}
+	}
+
+	var registered []*entity.MorphoAdapter
+	h.morphoRepo.GetOrCreateAdapterFn = func(_ context.Context, _ pgx.Tx, a *entity.MorphoAdapter) (int64, error) {
+		registered = append(registered, a)
+		return int64(len(registered)), nil
+	}
+	h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterState) error {
+		t.Fatal("no state row may be seeded for an adapter that served no realAssets() reading")
+		return nil
+	}
+
+	log := h.makeDiscoveryTriggerLog(unknownVault)
+	if err := h.processBlock(t, 1, 24481834, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err != nil {
+		t.Fatalf("discovery must not be poisoned by an unmodelled adapter: %v", err)
+	}
+
+	if len(registered) != 1 {
+		t.Fatalf("registered %d adapters, want 1", len(registered))
+	}
+	if registered[0].AdapterType != entity.MorphoAdapterTypeUnknown {
+		t.Errorf("AdapterType = %d, want Unknown", registered[0].AdapterType)
+	}
+	if !logs.hasWarnContaining("does not serve realAssets()") {
+		t.Error("expected a WARN naming the adapter that served no realAssets() reading")
+	}
+}
+
 // TestProcessBlockEvent_VaultDiscovery_V2_FeeSurface covers a vault-shaped contract
 // the V2 probe accepts — curator() and liquidityAdapter() answer while MORPHO()
 // reverts — that does NOT serve the four VaultV2 fee getters. The probe never

@@ -1774,7 +1774,11 @@ func TestGetAdapterRealAssets_PinsToBlockHash(t *testing.T) {
 	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
 		viaHash = true
 		gotHash = blockHash
-		if len(calls) != 1 || calls[0].Target != adapter || calls[0].AllowFailure {
+		// AllowFailure is required so a revert comes back as a failed Result the
+		// caller can classify (errAdapterRealAssetsReverted) instead of reverting
+		// the whole batch; it is still an error unless the caller is the seed for an
+		// unclassified adapter.
+		if len(calls) != 1 || calls[0].Target != adapter || !calls[0].AllowFailure {
 			t.Errorf("unexpected calls: %+v", calls)
 		}
 		return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(987654321))}}, nil

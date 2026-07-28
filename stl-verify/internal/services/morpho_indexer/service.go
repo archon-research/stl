@@ -943,9 +943,9 @@ func (s *Service) readV2Adapters(ctx context.Context, vaultAddress common.Addres
 		if err != nil {
 			return nil, fmt.Errorf("classifying adapter %s: %w", adapter.Hex(), err)
 		}
-		realAssets, err := s.blockchainSvc.getAdapterRealAssets(ctx, adapter, blockHash)
+		realAssets, err := s.readSeedRealAssets(ctx, adapter, adapterType, blockHash)
 		if err != nil {
-			return nil, fmt.Errorf("seeding realAssets for adapter %s: %w", adapter.Hex(), err)
+			return nil, err
 		}
 		adapters = append(adapters, discoveredAdapter{address: adapter, adapterType: adapterType, realAssets: realAssets})
 	}
@@ -1025,11 +1025,7 @@ func (s *Service) seedDiscoveredAdapters(ctx context.Context, tx pgx.Tx, vault *
 		if err != nil {
 			return err
 		}
-		state, err := entity.NewMorphoAdapterState(adapterID, blockNumber, blockVersion, blockTimestamp, a.realAssets)
-		if err != nil {
-			return fmt.Errorf("creating adapter state entity for %s: %w", a.address.Hex(), err)
-		}
-		if err := s.morphoRepo.SaveAdapterState(ctx, tx, state); err != nil {
+		if err := s.saveAdapterSeedState(ctx, tx, adapterID, a.realAssets, blockNumber, blockVersion, blockTimestamp); err != nil {
 			return fmt.Errorf("seeding adapter state for %s: %w", a.address.Hex(), err)
 		}
 	}

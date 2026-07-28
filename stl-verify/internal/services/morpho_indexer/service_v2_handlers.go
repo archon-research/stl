@@ -3,7 +3,9 @@ package morpho_indexer
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"math/big"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -49,21 +51,57 @@ func (s *Service) handleAddAdapter(ctx context.Context, e *AddAdapterEvent, vaul
 	if err != nil {
 		return err
 	}
-	realAssets, err := s.blockchainSvc.getAdapterRealAssets(ctx, e.Account, blockHash)
+	realAssets, err := s.readSeedRealAssets(ctx, e.Account, adapterType, blockHash)
 	if err != nil {
-		return fmt.Errorf("seeding realAssets for adapter %s: %w", e.Account.Hex(), err)
+		return err
 	}
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
 		adapterID, err := s.upsertAdapterRow(ctx, tx, vault, vaultAddress, e.Account, adapterType, blockNumber)
 		if err != nil {
 			return err
 		}
-		state, err := entity.NewMorphoAdapterState(adapterID, blockNumber, blockVersion, blockTimestamp, realAssets)
-		if err != nil {
-			return fmt.Errorf("creating adapter state entity: %w", err)
-		}
-		return s.morphoRepo.SaveAdapterState(ctx, tx, state)
+		return s.saveAdapterSeedState(ctx, tx, adapterID, realAssets, blockNumber, blockVersion, blockTimestamp)
 	})
+}
+
+// readSeedRealAssets reads the realAssets() seed for an adapter being registered,
+// returning nil when an adapter the type probe could not classify does not serve the
+// getter at all.
+//
+// The tolerance is gated structurally, not "best effort". For a MODELLED adapter kind
+// realAssets() must answer: the vault itself calls it while allocating, so a revert is
+// contract drift. Registration is different — setIsAdapter never touches
+// realAssets() — so an adapter that classified as Unknown (both type probes reverted)
+// may legitimately not serve it. Hard-failing there defeated the Unknown sentinel,
+// whose entire purpose is to record an unmodelled adapter kind behind a WARN instead
+// of poison-pilling the block forever. Registered with no seed, VEC-219's composition
+// probe reports it as adapter_data_missing, which is the honest answer: an adapter we
+// cannot classify is one we cannot price. A multicall TRANSPORT error still propagates
+// for every type — that is transient and must retry.
+func (s *Service) readSeedRealAssets(ctx context.Context, adapter common.Address, adapterType entity.MorphoAdapterType, blockHash common.Hash) (*big.Int, error) {
+	realAssets, err := s.blockchainSvc.getAdapterRealAssets(ctx, adapter, blockHash)
+	if err == nil {
+		return realAssets, nil
+	}
+	if adapterType == entity.MorphoAdapterTypeUnknown && errors.Is(err, errAdapterRealAssetsReverted) {
+		s.logger.Warn("unclassified VaultV2 adapter does not serve realAssets() — registering it with no state seed",
+			"adapter", adapter.Hex(), "block_hash", blockHash.Hex())
+		return nil, nil
+	}
+	return nil, fmt.Errorf("seeding realAssets for adapter %s: %w", adapter.Hex(), err)
+}
+
+// saveAdapterSeedState writes a freshly registered adapter's first realAssets
+// snapshot, or nothing when the adapter served no reading (see readSeedRealAssets).
+func (s *Service) saveAdapterSeedState(ctx context.Context, tx pgx.Tx, adapterID int64, realAssets *big.Int, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
+	if realAssets == nil {
+		return nil
+	}
+	state, err := entity.NewMorphoAdapterState(adapterID, blockNumber, blockVersion, blockTimestamp, realAssets)
+	if err != nil {
+		return fmt.Errorf("creating adapter state entity: %w", err)
+	}
+	return s.morphoRepo.SaveAdapterState(ctx, tx, state)
 }
 
 // handleRemoveAdapter marks the adapter inactive from this block onward. If we
