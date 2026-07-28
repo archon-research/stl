@@ -76,6 +76,29 @@ type MorphoRepository interface {
 	// PostgreSQL implementation: add→remove→re-add inside a single block.
 	GetOrCreateAdapter(ctx context.Context, tx pgx.Tx, adapter *entity.MorphoAdapter) (int64, error)
 
+	// CreateAdapterIncarnation inserts ONE incarnation row exactly as given, with no
+	// convergence of any kind. The only tolerated conflict is the full UNIQUE key
+	// (morpho_vault_id, address, added_at_block), which returns that exact row
+	// unchanged; it can never fold onto, LEAST, or re-close a DIFFERENT incarnation.
+	//
+	// This is what a removal observed for an incarnation nobody ever recorded must
+	// register through, and the distinction from GetOrCreateAdapter is the whole point.
+	// GetOrCreateAdapter's active-row match converges added_at_block downward, which is
+	// right for an AddAdapter — the earliest observation of a lifetime's START is the
+	// better estimate of it. Applied to a removal heal it is catastrophic: healing a
+	// historical removal at block B drags an on-chain-ACTIVE later incarnation down to
+	// added_at_block = B, and the close then de-registers an adapter that is still
+	// allocating (reproduced in
+	// TestCreateAdapterIncarnation_HealingAnUnobservedRemovalSparesALaterIncarnation).
+	// A removal carries no information about when its lifetime began, so it may not
+	// move any added_at_block.
+	//
+	// Callers set added_at_block = removed_at_block = the observed removal block: a
+	// LOWER BOUND, not a claim that the adapter was added there. A later replay of the
+	// true AddAdapter converges it down through GetOrCreateAdapter's closed-window
+	// match, which is where convergence belongs.
+	CreateAdapterIncarnation(ctx context.Context, tx pgx.Tx, adapter *entity.MorphoAdapter) (int64, error)
+
 	// MarkAdapterRemoved records the block at which an adapter was de-registered,
 	// closing the incarnation live at removedAtBlock — the latest one registered at
 	// or before it. Serializes on the SAME per-(morpho_vault_id, address) advisory

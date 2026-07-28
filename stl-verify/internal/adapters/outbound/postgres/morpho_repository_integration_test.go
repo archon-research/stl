@@ -1646,6 +1646,8 @@ func (f *morphoTestFixture) markAdapterRemovedAtVersion(t *testing.T, ctx contex
 	return tx.Commit(ctx)
 }
 
+func ptrTo[T any](v T) *T { return &v }
+
 // adapterIncarnationAt runs GetAdapterIncarnationAt (which reads through the
 // caller's tx) in a short read transaction that is rolled back afterwards.
 func (f *morphoTestFixture) adapterIncarnationAt(t *testing.T, ctx context.Context, vaultID int64, address []byte, atBlock int64) *entity.MorphoAdapter {
@@ -2265,6 +2267,108 @@ func TestMarkAdapterRemoved_ClosesAndConverges(t *testing.T) {
 				t.Errorf("removed_at_block = %v, want %d", removed, tt.wantRemoved)
 			}
 		})
+	}
+}
+
+// TestCreateAdapterIncarnation_HealingAnUnobservedRemovalSparesALaterIncarnation
+// walks the two steps a RemoveAdapter takes when the adapter has no recorded
+// incarnation covering its block (ensureIncarnationToClose registers one, then
+// MarkAdapterRemoved closes it), and pins that a LATER incarnation of the same
+// address is untouched by both.
+//
+// Registering through the converging GetOrCreateAdapter is what made this unsafe: its
+// active-row match LEAST-converges added_at_block, so healing a historical removal at
+// 1000 dragged an on-chain-ACTIVE [1100, NULL] row down to added=1000 and the close
+// then de-registered it — an adapter still allocating on-chain, silently gone from the
+// registry. With no state rows on that row the orphan guard has nothing to refuse, so
+// this shape is precisely the one convergence cannot be allowed to touch.
+func TestCreateAdapterIncarnation_HealingAnUnobservedRemovalSparesALaterIncarnation(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x52))
+	addr := adapterAddr(0x53)
+
+	const (
+		healedRemoval = int64(1000)
+		laterAdd      = int64(1100)
+	)
+
+	activeID := fixture.createTestAdapter(t, ctx, vaultID, addr, laterAdd)
+	if covering := fixture.adapterIncarnationAt(t, ctx, vaultID, addr, healedRemoval); covering != nil {
+		t.Fatalf("block %d must have no covering incarnation, so the removal takes the heal path", healedRemoval)
+	}
+
+	tx, err := fixture.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	synthetic := &entity.MorphoAdapter{
+		MorphoVaultID:  vaultID,
+		Address:        addr,
+		AssetTokenID:   fixture.loanTokenID,
+		AdapterType:    entity.MorphoAdapterTypeMarketV1,
+		AddedAtBlock:   healedRemoval,
+		RemovedAtBlock: ptrTo(healedRemoval),
+	}
+	syntheticID, err := fixture.repo.CreateAdapterIncarnation(ctx, tx, synthetic)
+	if err != nil {
+		t.Fatalf("CreateAdapterIncarnation: %v", err)
+	}
+	if err := fixture.repo.MarkAdapterRemoved(ctx, tx, vaultID, addr, healedRemoval, 0); err != nil {
+		t.Fatalf("MarkAdapterRemoved after the heal: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	if syntheticID == activeID {
+		t.Errorf("the heal reused the later incarnation (id=%d) instead of inserting its own row", activeID)
+	}
+	want := fmt.Sprintf("id=%d [%d,%d] id=%d [%d,ACTIVE]", syntheticID, healedRemoval, healedRemoval, activeID, laterAdd)
+	if got := fixture.describeIncarnations(t, ctx, vaultID, addr); got != want {
+		t.Errorf("registry = %q, want %q", got, want)
+	}
+}
+
+// TestCreateAdapterIncarnation_ExactKeyReplayReturnsTheRecordedRow pins the only
+// tolerated conflict: a re-run of the same heal must return the row it already
+// inserted, leaving its recorded lifetime bounds alone rather than reopening or
+// re-closing them.
+func TestCreateAdapterIncarnation_ExactKeyReplayReturnsTheRecordedRow(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x54))
+	addr := adapterAddr(0x55)
+
+	const addedAt = int64(900)
+	openID := fixture.createTestAdapter(t, ctx, vaultID, addr, addedAt)
+
+	tx, err := fixture.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	got, err := fixture.repo.CreateAdapterIncarnation(ctx, tx, &entity.MorphoAdapter{
+		MorphoVaultID:  vaultID,
+		Address:        addr,
+		AssetTokenID:   fixture.loanTokenID,
+		AdapterType:    entity.MorphoAdapterTypeMarketV1,
+		AddedAtBlock:   addedAt,
+		RemovedAtBlock: ptrTo(addedAt),
+	})
+	if err != nil {
+		t.Fatalf("CreateAdapterIncarnation: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	if got != openID {
+		t.Errorf("id = %d, want the existing row %d", got, openID)
+	}
+	if want := fmt.Sprintf("id=%d [%d,ACTIVE]", openID, addedAt); fixture.describeIncarnations(t, ctx, vaultID, addr) != want {
+		t.Errorf("registry = %q, want %q: the conflict must not close the existing row", fixture.describeIncarnations(t, ctx, vaultID, addr), want)
 	}
 }
 

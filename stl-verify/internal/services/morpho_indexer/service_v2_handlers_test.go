@@ -717,9 +717,13 @@ func TestProcessBlockEvent_RemoveAdapter_UnknownAdapterHeals(t *testing.T) {
 		return nil, nil // unknown adapter
 	}
 	var registered *entity.MorphoAdapter
-	h.morphoRepo.GetOrCreateAdapterFn = func(_ context.Context, _ pgx.Tx, a *entity.MorphoAdapter) (int64, error) {
+	h.morphoRepo.CreateAdapterIncarnationFn = func(_ context.Context, _ pgx.Tx, a *entity.MorphoAdapter) (int64, error) {
 		registered = a
 		return 88, nil
+	}
+	h.morphoRepo.GetOrCreateAdapterFn = func(_ context.Context, _ pgx.Tx, a *entity.MorphoAdapter) (int64, error) {
+		t.Fatalf("the removal heal must not register through the converging GetOrCreateAdapter (added %d): it would drag a later active incarnation of this address down to the removal block", a.AddedAtBlock)
+		return 0, nil
 	}
 	var (
 		removedVaultID int64
@@ -744,6 +748,9 @@ func TestProcessBlockEvent_RemoveAdapter_UnknownAdapterHeals(t *testing.T) {
 	}
 	if registered.AddedAtBlock != 20000000 {
 		t.Errorf("AddedAtBlock = %d, want 20000000 (event block)", registered.AddedAtBlock)
+	}
+	if registered.RemovedAtBlock == nil || *registered.RemovedAtBlock != 20000000 {
+		t.Errorf("RemovedAtBlock = %v, want 20000000: the synthetic incarnation is born closed so it cannot collide with a later active one", registered.RemovedAtBlock)
 	}
 	if registered.AdapterType != entity.MorphoAdapterTypeVaultV1 {
 		t.Errorf("AdapterType = %d, want VaultV1 (probed)", registered.AdapterType)
@@ -809,7 +816,7 @@ func TestProcessBlockEvent_RemoveAdapter_ReplayAgainstRecordedIncarnationMintsNo
 				return nil, errTestUnexpectedCall(calls)
 			}
 			registered := false
-			h.morphoRepo.GetOrCreateAdapterFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapter) (int64, error) {
+			h.morphoRepo.CreateAdapterIncarnationFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapter) (int64, error) {
 				registered = true
 				return 99, nil
 			}
