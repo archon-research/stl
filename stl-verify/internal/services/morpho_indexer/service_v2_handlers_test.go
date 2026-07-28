@@ -1273,14 +1273,15 @@ func TestProcessBlockEvent_V2Handlers_ErrorsPropagate(t *testing.T) {
 
 	tests := []struct {
 		name string
-		// wantErr, when set, pins WHICH dependency failed the event — without it a
-		// row passes as long as something fails, which hides a swallowed error that
-		// merely trips a later step.
+		// wantErr pins WHICH dependency failed the event. It is required on every
+		// row: without it a row passes as long as something fails, which hides a
+		// swallowed error that merely trips a later step.
 		wantErr string
 		setup   func(h *serviceTestHarness) shared.Log
 	}{
 		{
-			name: "AddAdapter: adapter probe RPC error",
+			name:    "AddAdapter: adapter probe RPC error",
+			wantErr: "classifying adapter",
 			setup: func(h *serviceTestHarness) shared.Log {
 				h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					return nil, errors.New("probe rpc down")
@@ -1293,7 +1294,8 @@ func TestProcessBlockEvent_V2Handlers_ErrorsPropagate(t *testing.T) {
 			},
 		},
 		{
-			name: "Allocation: realAssets RPC error",
+			name:    "Allocation: realAssets RPC error",
+			wantErr: "fetching realAssets",
 			setup: func(h *serviceTestHarness) shared.Log {
 				h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 					return nil, errors.New("realAssets rpc down")
@@ -1352,6 +1354,9 @@ func TestProcessBlockEvent_V2Handlers_ErrorsPropagate(t *testing.T) {
 		},
 		{
 			name: "Allocation: GetActiveAdapter DB error",
+			// "looking up active adapter" is a prefix of the plural membership-read
+			// message, so the address is what pins this row to the in-tx read.
+			wantErr: "looking up active adapter 0x",
 			setup: func(h *serviceTestHarness) shared.Log {
 				h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 					return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(1))}}, nil
@@ -1375,7 +1380,8 @@ func TestProcessBlockEvent_V2Handlers_ErrorsPropagate(t *testing.T) {
 			// The heal path must still fail the event on a TRANSPORT probe error:
 			// a momentarily-unreachable adapter is transient and must retry, never
 			// be recorded with a defaulted type.
-			name: "Allocation: lazy-register probe transport error",
+			name:    "Allocation: lazy-register probe transport error",
+			wantErr: "classifying adapter",
 			setup: func(h *serviceTestHarness) shared.Log {
 				h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 					return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(1))}}, nil
@@ -1398,7 +1404,8 @@ func TestProcessBlockEvent_V2Handlers_ErrorsPropagate(t *testing.T) {
 			},
 		},
 		{
-			name: "CapChange: SaveVaultCap DB error",
+			name:    "CapChange: SaveVaultCap DB error",
+			wantErr: "SaveVaultCap db down",
 			setup: func(h *serviceTestHarness) shared.Log {
 				capIDData := []byte{0x01}
 				h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
@@ -1408,19 +1415,20 @@ func TestProcessBlockEvent_V2Handlers_ErrorsPropagate(t *testing.T) {
 					}, nil
 				}
 				h.morphoRepo.SaveVaultCapFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoVaultCap) error {
-					return errors.New("db down")
+					return errors.New("SaveVaultCap db down")
 				}
 				return h.makeV2VaultLog(h.vaultV2EventsABI.Events["IncreaseAbsoluteCap"], testVaultAddr, []common.Hash{crypto.Keccak256Hash(capIDData)}, capIDData, big.NewInt(1))
 			},
 		},
 		{
-			name: "Fee: SaveVaultFee DB error",
+			name:    "Fee: SaveVaultFee DB error",
+			wantErr: "SaveVaultFee db down",
 			setup: func(h *serviceTestHarness) shared.Log {
 				h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 					return h.feeGetterResults(big.NewInt(1), big.NewInt(0), common.Address{}, common.Address{}), nil
 				}
 				h.morphoRepo.SaveVaultFeeFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoVaultFee) error {
-					return errors.New("db down")
+					return errors.New("SaveVaultFee db down")
 				}
 				return h.makeV2VaultLog(h.vaultV2EventsABI.Events["SetPerformanceFee"], testVaultAddr, nil, big.NewInt(1))
 			},
@@ -1435,7 +1443,10 @@ func TestProcessBlockEvent_V2Handlers_ErrorsPropagate(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected the block to fail so SQS redelivers")
 			}
-			if tt.wantErr != "" && !strings.Contains(err.Error(), tt.wantErr) {
+			if tt.wantErr == "" {
+				t.Fatal("every row must pin its own dependency's error via wantErr")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
 				t.Errorf("error %q should come from the failing dependency (%q)", err.Error(), tt.wantErr)
 			}
 		})
