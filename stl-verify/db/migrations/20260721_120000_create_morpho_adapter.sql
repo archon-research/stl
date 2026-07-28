@@ -37,10 +37,18 @@ CREATE TABLE IF NOT EXISTS morpho_adapter
     UNIQUE (morpho_vault_id, address, added_at_block)
 );
 
--- Active-adapters lookup: the hot query enumerates a vault's currently-active
--- adapters (removed_at_block IS NULL) on every allocation snapshot.
-CREATE INDEX IF NOT EXISTS idx_morpho_adapter_active
-    ON morpho_adapter (morpho_vault_id) WHERE removed_at_block IS NULL;
+-- At most ONE active incarnation per (vault, adapter), enforced by the database.
+-- The application serializes GetOrCreateAdapter's read-then-write on a
+-- pg_advisory_xact_lock, but MarkAdapterRemoved writes the same key WITHOUT that
+-- lock, so under READ COMMITTED a concurrent registration can pass the
+-- closed-window check, have its active-row UPDATE re-checked by EvalPlanQual
+-- against the just-committed removed_at_block, match 0 rows, and fall through to
+-- an INSERT that resurrects a de-registered adapter as a second ACTIVE row. This
+-- index aborts that writer so the retried event re-runs and takes the
+-- closed-window path. It also serves the hot lookup (a vault's currently-active
+-- adapters on every allocation snapshot) via its leading morpho_vault_id column.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_morpho_adapter_active
+    ON morpho_adapter (morpho_vault_id, address) WHERE removed_at_block IS NULL;
 CREATE INDEX IF NOT EXISTS idx_morpho_adapter_asset_token ON morpho_adapter (asset_token_id);
 
 -- ============================================================================

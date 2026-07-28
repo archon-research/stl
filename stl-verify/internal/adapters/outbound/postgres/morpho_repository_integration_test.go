@@ -1802,6 +1802,53 @@ func TestGetOrCreateAdapter_BackfilledAddConvergesClosedWindowNotActiveRow(t *te
 	}
 }
 
+// TestMorphoAdapter_UniqueActiveIncarnationIndexRejectsSecondActiveRow is the
+// database-level backstop for the one race GetOrCreateAdapter's advisory lock
+// cannot cover: MarkAdapterRemoved writes the same (vault, address) key WITHOUT
+// taking that lock, so under READ COMMITTED a concurrent GetOrCreateAdapter can
+// pass the closed-window check, then have its active-row UPDATE re-checked by
+// EvalPlanQual against the just-committed removed_at_block, match 0 rows, and fall
+// through to the INSERT — resurrecting a de-registered adapter as a second ACTIVE
+// row. The partial UNIQUE index makes that INSERT abort so the retried event
+// re-runs and lands in the closed-window path instead.
+func TestMorphoAdapter_UniqueActiveIncarnationIndexRejectsSecondActiveRow(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x2e))
+	addr := adapterAddr(0x2f)
+
+	fixture.createTestAdapter(t, ctx, vaultID, addr, 100)
+
+	insertActive := func(addedAtBlock int64) error {
+		_, err := fixture.pool.Exec(ctx,
+			`INSERT INTO morpho_adapter (morpho_vault_id, address, asset_token_id, adapter_type, added_at_block, removed_at_block)
+			 VALUES ($1, $2, $3, 1, $4, NULL)`,
+			vaultID, addr, fixture.loanTokenID, addedAtBlock)
+		return err
+	}
+
+	if err := insertActive(200); err == nil {
+		t.Fatal("a second ACTIVE row for the same (vault, address) must violate the partial unique index")
+	}
+
+	// The index must not block the legitimate shape: one CLOSED incarnation plus
+	// one ACTIVE one, which is exactly what a removed-then-re-added adapter looks
+	// like.
+	tx, err := fixture.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := fixture.repo.MarkAdapterRemoved(ctx, tx, vaultID, addr, 150); err != nil {
+		t.Fatalf("MarkAdapterRemoved: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if err := insertActive(200); err != nil {
+		t.Fatalf("closed + active incarnations must coexist: %v", err)
+	}
+}
+
 // --- MarkAdapterRemoved Tests ---
 
 func TestMarkAdapterRemoved_SetsBlock(t *testing.T) {
