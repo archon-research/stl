@@ -24,6 +24,7 @@ type MockMorphoRepository struct {
 	GetOrCreateAdapterFn       func(ctx context.Context, tx pgx.Tx, adapter *entity.MorphoAdapter) (int64, error)
 	MarkAdapterRemovedFn       func(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, removedAtBlock int64) error
 	GetActiveAdapterFn         func(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte) (*entity.MorphoAdapter, error)
+	GetAdapterIncarnationAtFn  func(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, atBlock int64) (*entity.MorphoAdapter, error)
 	GetActiveAdaptersByVaultFn func(ctx context.Context, morphoVaultID int64) ([]*entity.MorphoAdapter, error)
 	SaveAdapterStateFn         func(ctx context.Context, tx pgx.Tx, state *entity.MorphoAdapterState) error
 	SaveVaultCapFn             func(ctx context.Context, tx pgx.Tx, vaultCap *entity.MorphoVaultCap) error
@@ -110,6 +111,13 @@ func (m *MockMorphoRepository) MarkAdapterRemoved(ctx context.Context, tx pgx.Tx
 func (m *MockMorphoRepository) GetActiveAdapter(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte) (*entity.MorphoAdapter, error) {
 	if m.GetActiveAdapterFn != nil {
 		return m.GetActiveAdapterFn(ctx, tx, morphoVaultID, address)
+	}
+	return nil, nil
+}
+
+func (m *MockMorphoRepository) GetAdapterIncarnationAt(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, atBlock int64) (*entity.MorphoAdapter, error) {
+	if m.GetAdapterIncarnationAtFn != nil {
+		return m.GetAdapterIncarnationAtFn(ctx, tx, morphoVaultID, address, atBlock)
 	}
 	return nil, nil
 }

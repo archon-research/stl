@@ -2368,6 +2368,103 @@ func TestMarkAdapterRemoved_ReplayOldRemovalSparesReAddedRow(t *testing.T) {
 	}
 }
 
+// --- GetAdapterIncarnationAt Tests ---
+
+// TestGetAdapterIncarnationAt pins the lookup a RemoveAdapter uses to decide whether
+// it already has a row to close. The load-bearing case is the last two rows: an
+// incarnation closed AT the block covers it (so a replayed removal is idempotent
+// against that row instead of minting a zero-length duplicate), while one closed
+// BELOW it does not (that is a later incarnation whose AddAdapter we never saw, and
+// the caller must register it).
+func TestGetAdapterIncarnationAt(t *testing.T) {
+	const (
+		addedAt  = int64(100)
+		closedAt = int64(500)
+	)
+
+	tests := []struct {
+		name    string
+		close   bool
+		atBlock int64
+		wantHit bool
+	}{
+		{name: "an open incarnation covers a later block", atBlock: 900, wantHit: true},
+		{name: "an open incarnation covers its own registration block", atBlock: addedAt, wantHit: true},
+		{name: "no incarnation covers a block before the registration", atBlock: addedAt - 1},
+		{name: "a closed incarnation covers a block inside its window", close: true, atBlock: 300, wantHit: true},
+		{name: "a closed incarnation covers the block it closed at", close: true, atBlock: closedAt, wantHit: true},
+		{name: "a closed incarnation does not cover a block above its close", close: true, atBlock: closedAt + 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := setupMorphoTest(t)
+			ctx := context.Background()
+			vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x42))
+			addr := adapterAddr(0x43)
+
+			adapterID := fixture.createTestAdapter(t, ctx, vaultID, addr, addedAt)
+			if tt.close {
+				if err := fixture.markAdapterRemoved(t, ctx, vaultID, addr, closedAt); err != nil {
+					t.Fatalf("MarkAdapterRemoved: %v", err)
+				}
+			}
+
+			tx, err := fixture.pool.Begin(ctx)
+			if err != nil {
+				t.Fatalf("begin: %v", err)
+			}
+			defer tx.Rollback(ctx)
+
+			got, err := fixture.repo.GetAdapterIncarnationAt(ctx, tx, vaultID, addr, tt.atBlock)
+			if err != nil {
+				t.Fatalf("GetAdapterIncarnationAt(%d): %v", tt.atBlock, err)
+			}
+			if !tt.wantHit {
+				if got != nil {
+					t.Fatalf("expected no incarnation covering block %d, got id=%d", tt.atBlock, got.ID)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatalf("expected the incarnation covering block %d", tt.atBlock)
+			}
+			if got.ID != adapterID || got.AddedAtBlock != addedAt {
+				t.Errorf("incarnation = (id %d, added %d), want (id %d, added %d)", got.ID, got.AddedAtBlock, adapterID, addedAt)
+			}
+		})
+	}
+}
+
+// TestGetAdapterIncarnationAt_PicksTheLatestCoveringIncarnation guards the
+// ORDER BY added_at_block DESC: with a closed [100, 500] and an active [600, …] row
+// coexisting, a removal at 700 must resolve to the active incarnation.
+func TestGetAdapterIncarnationAt_PicksTheLatestCoveringIncarnation(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x44))
+	addr := adapterAddr(0x45)
+
+	fixture.createTestAdapter(t, ctx, vaultID, addr, 100)
+	if err := fixture.markAdapterRemoved(t, ctx, vaultID, addr, 500); err != nil {
+		t.Fatalf("MarkAdapterRemoved: %v", err)
+	}
+	reAddID := fixture.createTestAdapter(t, ctx, vaultID, addr, 600)
+
+	tx, err := fixture.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+
+	got, err := fixture.repo.GetAdapterIncarnationAt(ctx, tx, vaultID, addr, 700)
+	if err != nil {
+		t.Fatalf("GetAdapterIncarnationAt: %v", err)
+	}
+	if got == nil || got.ID != reAddID {
+		t.Fatalf("incarnation = %+v, want the re-added row id=%d", got, reAddID)
+	}
+}
+
 // --- GetActiveAdapter / GetActiveAdaptersByVault Tests ---
 
 func TestGetActiveAdapter_Found(t *testing.T) {

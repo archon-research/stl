@@ -106,6 +106,18 @@ type MorphoRepository interface {
 	// earlier in the same tx. Returns nil, nil if there is no active adapter.
 	GetActiveAdapter(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte) (*entity.MorphoAdapter, error)
 
+	// GetAdapterIncarnationAt retrieves the incarnation whose recorded lifetime
+	// contains atBlock — added at or before it, and either still open or closed at or
+	// after it. Returns nil, nil when the adapter has no recorded incarnation there.
+	//
+	// This is the question a RemoveAdapter must ask before registering anything: a
+	// non-nil answer means MarkAdapterRemoved already has a row to close, so the
+	// removal is idempotent against it. A nil answer means the adapter is unknown at
+	// that block and needs registering first — including the case where a closed
+	// incarnation ends BELOW atBlock, which is a later incarnation whose AddAdapter
+	// was never observed. Reads within the caller's transaction (read-your-writes).
+	GetAdapterIncarnationAt(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, atBlock int64) (*entity.MorphoAdapter, error)
+
 	// GetActiveAdaptersByVault retrieves all currently-active adapters for a vault.
 	GetActiveAdaptersByVault(ctx context.Context, morphoVaultID int64) ([]*entity.MorphoAdapter, error)
 
