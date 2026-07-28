@@ -69,12 +69,36 @@ type MorphoRepository interface {
 	GetOrCreateAdapter(ctx context.Context, tx pgx.Tx, adapter *entity.MorphoAdapter) (int64, error)
 
 	// MarkAdapterRemoved records the block at which an adapter was de-registered,
-	// closing the incarnation that was live at removedAtBlock. removed_at_block
-	// converges to the earliest observation, so a same-block replay is a no-op and a
-	// reorg that re-lands the removal in a neighbouring block converges instead of
-	// poisoning the queue. An adapter with no incarnation registered at or before
-	// the removal block, or a close that would strand adapter_state snapshots after
-	// the removal block, is a data bug and errors.
+	// closing the incarnation live at removedAtBlock — the latest one registered at
+	// or before it. Serializes on the SAME per-(morpho_vault_id, address) advisory
+	// lock as GetOrCreateAdapter, so registrations and removals of one adapter never
+	// interleave (ADR-0002 §3).
+	//
+	// The close block is a converging observation, resolved from the incarnation's
+	// state:
+	//
+	//   - OPEN incarnation (removed_at_block IS NULL): closes at removedAtBlock.
+	//     Refused if the row owns adapter_state snapshots recorded strictly after
+	//     that block — they would be stranded outside the lifetime window, so the
+	//     caller must re-home them onto the incarnation that owns them first.
+	//     Snapshots IN the removal block are inside the window.
+	//   - CLOSED incarnation, removedAtBlock at most 64 blocks (Ethereum's
+	//     finality/reorg bound) above the recorded close, or anywhere below it: the
+	//     same removal, relocated by a reorg or replayed by the backfiller.
+	//     removed_at_block converges to the EARLIEST observation, mirroring
+	//     added_at_block, so the two arrive-in-any-order observations settle on the
+	//     same value; a same-block replay is a no-op. The snapshot guard does NOT
+	//     re-run: it already passed for this row, and a convergence only moves the
+	//     close down, over blocks a relocating reorg re-versioned.
+	//   - CLOSED incarnation, removedAtBlock further above the recorded close: NOT a
+	//     relocation. Converging would silently discard a real de-registration, so it
+	//     errors, naming the likely cause — a later incarnation of this adapter whose
+	//     AddAdapter was never recorded. Callers that legitimately observe a removal
+	//     for an unrecorded incarnation must register it first (see
+	//     GetOrCreateAdapter) rather than pass it here.
+	//
+	// An adapter with no incarnation registered at or before removedAtBlock is a data
+	// bug and errors.
 	MarkAdapterRemoved(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, removedAtBlock int64) error
 
 	// GetActiveAdapter retrieves the active (not-yet-removed) adapter for a vault
