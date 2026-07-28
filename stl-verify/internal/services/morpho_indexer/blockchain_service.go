@@ -2,10 +2,12 @@ package morpho_indexer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -882,12 +884,26 @@ type vaultFeeConfig struct {
 	managementFeeRecipient  common.Address
 }
 
+// errNoVaultFeeSurface reports that a contract serves NONE of the four VaultV2 fee
+// getters. The vault probe only proves curator() and liquidityAdapter() answer, so a
+// vault-shaped address that is not a factory-deployed VaultV2 can pass it and still
+// have no fee surface at all; the discovery seed treats that as "no fee config to
+// record" rather than a failure, because hard-requiring the getters poisoned such an
+// address's discovery forever. Callers reacting to a Set* fee EVENT must still treat
+// it as an error: the event proves the surface exists.
+var errNoVaultFeeSurface = errors.New("contract serves none of the VaultV2 fee getters")
+
 // getVaultFees reads the vault's full fee configuration off the VaultV2, pinned
 // to blockHash. The fee config is per-block state (a Set* fee event mutates it),
 // so like getVaultCaps this is a hash-pinned ExecuteAtHash read for
-// reorg-correctness (VEC-471), not number-pinning. All four getters exist on
-// every VaultV2 and cannot fail, so none is AllowFailure: a revert is a real
-// error that must stop the event.
+// reorg-correctness (VEC-471), not number-pinning.
+//
+// The four getters are AllowFailure so that "this contract has no fee surface at
+// all" is distinguishable from "one getter reverted", which is drift on a contract
+// that does have it. All-or-nothing is the only sane split: a real VaultV2 answers
+// all four, so a partial answer is never a valid shape and errors (see
+// assertFeeSurfaceComplete), while none-of-four returns errNoVaultFeeSurface for the
+// caller to decide on.
 func (s *blockchainService) getVaultFees(ctx context.Context, vault common.Address, blockHash common.Hash) (retFees *vaultFeeConfig, retErr error) {
 	ctx, span := s.telemetry.StartSpan(ctx, "morpho.rpc.getVaultFees",
 		attribute.String("vault.address", vault.Hex()))
@@ -909,7 +925,7 @@ func (s *blockchainService) getVaultFees(ctx context.Context, vault common.Addre
 		if err != nil {
 			return nil, fmt.Errorf("packing %s() call: %w", m, err)
 		}
-		calls[i] = outbound.Call{Target: vault, AllowFailure: false, CallData: callData}
+		calls[i] = outbound.Call{Target: vault, AllowFailure: true, CallData: callData}
 	}
 
 	results, err := s.multicallClient.ExecuteAtHash(ctx, calls, blockHash)
@@ -918,6 +934,9 @@ func (s *blockchainService) getVaultFees(ctx context.Context, vault common.Addre
 	}
 	if len(results) != len(methods) {
 		return nil, fmt.Errorf("vault fee getters returned %d results, want %d", len(results), len(methods))
+	}
+	if err := assertFeeSurfaceComplete(methods, results, vault); err != nil {
+		return nil, err
 	}
 
 	performanceFee, err := s.unpackVaultFeeUint("performanceFee", results[0], vault)
@@ -942,6 +961,28 @@ func (s *blockchainService) getVaultFees(ctx context.Context, vault common.Addre
 		performanceFeeRecipient: performanceFeeRecipient,
 		managementFeeRecipient:  managementFeeRecipient,
 	}, nil
+}
+
+// assertFeeSurfaceComplete classifies a fee-getter batch: all four served is the
+// only shape a real VaultV2 produces, none served means the contract has no fee
+// surface (errNoVaultFeeSurface), and anything in between is drift the caller must
+// stop on — the message names which getters reverted so the vault can be inspected.
+func assertFeeSurfaceComplete(methods []string, results []outbound.Result, vault common.Address) error {
+	var reverted []string
+	for i, m := range methods {
+		if !results[i].Success || len(results[i].ReturnData) == 0 {
+			reverted = append(reverted, m)
+		}
+	}
+	switch len(reverted) {
+	case 0:
+		return nil
+	case len(methods):
+		return fmt.Errorf("vault %s: %w", vault.Hex(), errNoVaultFeeSurface)
+	default:
+		return fmt.Errorf("vault %s served %d of %d VaultV2 fee getters (%s reverted): a VaultV2 serves all four, so this is contract drift, not a missing fee surface",
+			vault.Hex(), len(methods)-len(reverted), len(methods), strings.Join(reverted, ", "))
+	}
 }
 
 // unpackVaultFeeUint validates and decodes one uint fee getter result.
