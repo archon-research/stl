@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -329,10 +332,12 @@ func TestReplayCheckpointsOnlyFullyCoveredPartitions(t *testing.T) {
 // --- missing-receipt-block guard ---
 
 // fakeReplayS3Reader serves a fixed key listing and per-key JSON bodies so the
-// partition-collection path can be driven without real S3.
+// partition-collection path can be driven without real S3. onStream, when set,
+// runs inside StreamFile so a test can observe or stall concurrent downloads.
 type fakeReplayS3Reader struct {
 	keys      []string
 	bodyByKey map[string]string
+	onStream  func(key string)
 }
 
 func (f *fakeReplayS3Reader) ListFiles(context.Context, string, string) ([]outbound.S3File, error) {
@@ -350,6 +355,9 @@ func (f *fakeReplayS3Reader) ListPrefix(_ context.Context, _, prefix string) ([]
 }
 
 func (f *fakeReplayS3Reader) StreamFile(_ context.Context, _, key string) (io.ReadCloser, error) {
+	if f.onStream != nil {
+		f.onStream(key)
+	}
 	body, ok := f.bodyByKey[key]
 	if !ok {
 		return nil, errors.New("no such key: " + key)
@@ -388,7 +396,7 @@ func TestReplayPartition_MissingReceiptBlockErrorsAndLeavesCheckpointUnwritten(t
 	defer cp.Close()
 
 	err = runReplayPartitions(discardLogger(), []string{part}, cp, from, to, func(part string) error {
-		_, collectErr := collectPartitionV2Logs(ctx, reader, "bucket", part, from, to, map[common.Address]struct{}{}, mustV2Topics(t))
+		_, collectErr := collectPartitionV2Logs(ctx, reader, "bucket", part, from, to, 4, map[common.Address]struct{}{}, mustV2Topics(t))
 		return collectErr
 	})
 	if err == nil {
@@ -417,12 +425,111 @@ func TestCollectPartitionV2Logs_AllBlocksPresentNoError(t *testing.T) {
 	}
 	part := partition.GetPartition(from)
 
-	entries, err := collectPartitionV2Logs(ctx, reader, "bucket", part, from, to, map[common.Address]struct{}{}, mustV2Topics(t))
+	entries, err := collectPartitionV2Logs(ctx, reader, "bucket", part, from, to, 4, map[common.Address]struct{}{}, mustV2Topics(t))
 	if err != nil {
 		t.Fatalf("unexpected error with all blocks present: %v", err)
 	}
 	if len(entries) != 0 {
 		t.Fatalf("want 0 entries (empty receipts), got %d", len(entries))
+	}
+}
+
+// v2LogReceiptJSON is a one-receipt receipt file carrying a single AddAdapter
+// log from vault, so a fixture block contributes exactly one collected entry.
+func v2LogReceiptJSON(t *testing.T, vault common.Address, blockNumber int64) string {
+	t.Helper()
+	body, err := json.Marshal([]shared.TransactionReceipt{{
+		TransactionHash: fmt.Sprintf("0x%064x", blockNumber),
+		BlockHash:       fmt.Sprintf("0x%064x", blockNumber),
+		Logs: []shared.Log{
+			{Address: vault.Hex(), Topics: []string{v2EventTopic(t, "AddAdapter").Hex()}, LogIndex: "0x0"},
+		},
+	}})
+	if err != nil {
+		t.Fatalf("marshal receipts: %v", err)
+	}
+	return string(body)
+}
+
+// v2LogPartitionFixture builds a reader serving one AddAdapter-bearing receipt
+// file per block in [from,to].
+func v2LogPartitionFixture(t *testing.T, vault common.Address, from, to int64) *fakeReplayS3Reader {
+	t.Helper()
+	reader := &fakeReplayS3Reader{bodyByKey: map[string]string{}}
+	for bn := from; bn <= to; bn++ {
+		key := s3key.Build(bn, 0, s3key.Receipts)
+		reader.keys = append(reader.keys, key)
+		reader.bodyByKey[key] = v2LogReceiptJSON(t, vault, bn)
+	}
+	return reader
+}
+
+// TestCollectPartitionV2Logs_ConcurrentDownloadsPreserveBlockOrder: the per-block
+// downloads run across the worker pool, but replay ordering is
+// correctness-critical (an AddAdapter must land before that adapter's first
+// Allocate), so completion order must not leak into the result. The fixture
+// stalls low blocks longest, so an append-as-completed collector would return
+// them last.
+func TestCollectPartitionV2Logs_ConcurrentDownloadsPreserveBlockOrder(t *testing.T) {
+	ctx := context.Background()
+	const from, to = int64(100), int64(109)
+	vault := common.HexToAddress("0xaa00000000000000000000000000000000000001")
+
+	reader := v2LogPartitionFixture(t, vault, from, to)
+	reader.onStream = func(key string) {
+		parsed, ok := s3key.Parse(key)
+		if !ok {
+			t.Errorf("unparseable key %q", key)
+			return
+		}
+		time.Sleep(time.Duration(to+1-parsed.BlockNumber) * 2 * time.Millisecond)
+	}
+
+	entries, err := collectPartitionV2Logs(ctx, reader, "bucket", partition.GetPartition(from), from, to, 10, vaultSet(vault), mustV2Topics(t))
+	if err != nil {
+		t.Fatalf("collectPartitionV2Logs: %v", err)
+	}
+	if len(entries) != int(to-from+1) {
+		t.Fatalf("got %d entries, want %d", len(entries), to-from+1)
+	}
+	for i, e := range entries {
+		if want := from + int64(i); e.blockNumber != want {
+			t.Fatalf("entries[%d].blockNumber = %d, want %d (collection order is not block order)", i, e.blockNumber, want)
+		}
+	}
+}
+
+// TestCollectPartitionV2Logs_BoundsConcurrencyToWorkers: the pool size comes from
+// -goroutines, so an unbounded fan-out over a 1000-block partition cannot open a
+// thousand simultaneous S3 downloads.
+func TestCollectPartitionV2Logs_BoundsConcurrencyToWorkers(t *testing.T) {
+	ctx := context.Background()
+	const from, to = int64(100), int64(139)
+	const workers = 3
+	vault := common.HexToAddress("0xaa00000000000000000000000000000000000001")
+
+	var inFlight, maxInFlight atomic.Int64
+	reader := v2LogPartitionFixture(t, vault, from, to)
+	reader.onStream = func(string) {
+		current := inFlight.Add(1)
+		for {
+			observed := maxInFlight.Load()
+			if current <= observed || maxInFlight.CompareAndSwap(observed, current) {
+				break
+			}
+		}
+		time.Sleep(2 * time.Millisecond)
+		inFlight.Add(-1)
+	}
+
+	if _, err := collectPartitionV2Logs(ctx, reader, "bucket", partition.GetPartition(from), from, to, workers, vaultSet(vault), mustV2Topics(t)); err != nil {
+		t.Fatalf("collectPartitionV2Logs: %v", err)
+	}
+	if got := maxInFlight.Load(); got > workers {
+		t.Errorf("peak concurrent downloads = %d, want <= %d", got, workers)
+	}
+	if maxInFlight.Load() < 2 {
+		t.Error("downloads never overlapped; collection is still serial")
 	}
 }
 
