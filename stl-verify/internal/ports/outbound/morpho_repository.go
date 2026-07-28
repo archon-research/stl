@@ -2,12 +2,19 @@ package outbound
 
 import (
 	"context"
+	"errors"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 )
+
+// ErrAdapterUnclassified reports that EnsureIncarnationToClose had to register the
+// incarnation a removal closes but was given no classification to register it with.
+// Distinguished from any other failure because the caller — not the registry — is what
+// has to change: it must supply the on-chain type probe's answer.
+var ErrAdapterUnclassified = errors.New("no adapter classification supplied to register the incarnation a removal closes")
 
 // MorphoRepository defines the interface for Morpho protocol data persistence.
 type MorphoRepository interface {
@@ -89,13 +96,37 @@ type MorphoRepository interface {
 	// PostgreSQL implementation: add→remove→re-add inside a single block.
 	GetOrCreateAdapter(ctx context.Context, tx pgx.Tx, adapter *entity.MorphoAdapter) (int64, error)
 
-	// CreateAdapterIncarnation records ONE incarnation exactly as given, with no
-	// convergence of any kind. An incarnation already recorded for the same vault,
-	// address and added-at block is returned unchanged; nothing else is ever matched, so
-	// this can never fold onto, move, or re-close a DIFFERENT incarnation.
+	// EnsureIncarnationToClose guarantees that a removal at removedAtBlock has exactly
+	// one incarnation for MarkAdapterRemoved to close, registering one only when the
+	// registry holds none. Reports whether it registered.
 	//
-	// This is what a removal observed for an incarnation nobody ever recorded must
-	// register through, and the distinction from GetOrCreateAdapter is the whole point.
+	// This is ONE method, rather than a lookup the caller composes with a create,
+	// because the decision and the insert it authorises must not be separable: the
+	// read-then-write is serialized on the same per-(morpho_vault_id, address) advisory
+	// lock as GetOrCreateAdapter and MarkAdapterRemoved, taken BEFORE the read
+	// (ADR-0002 §3). Two overlapping writers that both read an empty registry mint two
+	// incarnations for one on-chain lifetime, and ON CONFLICT cannot catch it because
+	// their added_at_block differ. MarkAdapterRemoved's own acquisition of the same key
+	// later in the transaction is re-entrant, not a second wait.
+	//
+	// A removal's decisive question is not "is there an ACTIVE row" but "is there an
+	// incarnation COVERING removedAtBlock" — added at or before it and either still open
+	// or closed at or after it. That is what makes a redelivered or replayed removal
+	// idempotent: its incarnation is already closed at that very block, so an active-row
+	// check would miss and register a zero-length incarnation the chain never had.
+	//
+	// Only when nothing covers the block is the adapter genuinely unknown there and a
+	// zero-length incarnation registered from candidate — including the case of a closed
+	// incarnation ending BELOW the removal, which is a later lifetime whose AddAdapter
+	// was never observed.
+	//
+	// candidate is used ONLY on that registration path. A nil candidate means the caller has no
+	// on-chain classification to record (the pre-transaction probe found the adapter
+	// already active), so a registration it cannot honour fails with
+	// ErrAdapterUnclassified rather than recording a defaulted type.
+	//
+	// # Why the registration cannot go through GetOrCreateAdapter
+	//
 	// GetOrCreateAdapter's active-row match converges added_at_block downward, which is
 	// right for an AddAdapter — the earliest observation of a lifetime's START is the
 	// better estimate of it. Applied to a removal heal it is catastrophic: healing a
@@ -103,24 +134,22 @@ type MorphoRepository interface {
 	// added_at_block = B, and the close then de-registers an adapter that is still
 	// allocating (reproduced in
 	// TestCreateAdapterIncarnation_HealingAnUnobservedRemovalSparesALaterIncarnation).
-	// A removal carries no information about when its lifetime began, so it may not
-	// move any added_at_block.
+	// A removal carries no information about when its lifetime began, so it may not move
+	// any added_at_block. What this writes instead is exactly the row it is given and
+	// nothing else: an incarnation already recorded at the same (vault, address, added
+	// block) is left untouched, so it can never fold onto, move, or re-close a DIFFERENT
+	// incarnation.
 	//
-	// Serializes on the SAME per-(morpho_vault_id, address) advisory lock as
-	// GetOrCreateAdapter and MarkAdapterRemoved, so this registration cannot interleave
-	// with either.
+	// removedAtBlock is both bounds of the registered lifetime: added_at_block is set to
+	// it as a LOWER BOUND, not a claim that the adapter was added there. A later replay
+	// of the true AddAdapter converges it down through GetOrCreateAdapter's
+	// closed-window match, which is where convergence belongs.
 	//
-	// removedAtBlock is both bounds of the recorded lifetime: added_at_block is set to it
-	// as a LOWER BOUND, not a claim that the adapter was added there. A later replay of
-	// the true AddAdapter converges it down through GetOrCreateAdapter's closed-window
-	// match, which is where convergence belongs.
-	//
-	// A zero-length lifetime is the only shape this may write, and taking the block as a
-	// parameter is what enforces it. Two properties depend on it: the row is born CLOSED,
-	// so it cannot collide with a still-active later incarnation on the partial unique
-	// index; and it owns no snapshots at insert time, so it needs no orphan check — the
-	// only registration path that skips one.
-	CreateAdapterIncarnation(ctx context.Context, tx pgx.Tx, adapter *entity.MorphoAdapter, removedAtBlock int64) (int64, error)
+	// A zero-length lifetime is the only shape this registers, and two properties depend
+	// on it: the row is born CLOSED, so it cannot collide with a still-active later
+	// incarnation on the partial unique index; and it owns no snapshots at insert time,
+	// so it needs no orphan check — the only registration path that skips one.
+	EnsureIncarnationToClose(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, removedAtBlock int64, candidate *entity.MorphoAdapter) (bool, error)
 
 	// MarkAdapterRemoved records the block at which an adapter was de-registered,
 	// closing the incarnation live at removedAtBlock — the latest one registered at
@@ -180,13 +209,13 @@ type MorphoRepository interface {
 	// from it can be evidence about the same removal.
 	//
 	// The BELOW-window arm is reachable in production, not merely defensive: a bounded
-	// replay of a conflated row hits it whenever GetAdapterIncarnationAt finds a covering
+	// replay of a conflated row hits it whenever EnsureIncarnationToClose finds a covering
 	// incarnation — so it registers nothing, correctly — whose recorded close sits more
 	// than 64 blocks above the removal's own block. Treat it as an operator-facing poison
 	// pill, not an assertion: the event stalls its FIFO queue until the row is repaired.
 	// The ABOVE-window arm has no service route today (a removal above a closed row makes
-	// GetAdapterIncarnationAt return nil, so the caller registers [B,B] first and the
-	// distance is 0); it guards direct and future callers.
+	// EnsureIncarnationToClose register [B,B] first, so the distance is 0); it guards
+	// direct and future callers.
 	//
 	// The real fix is an incarnation-sequence key on morpho_adapter, so a replayed add
 	// or remove names which lifetime it belongs to instead of being matched by block
@@ -199,18 +228,6 @@ type MorphoRepository interface {
 	// and address, reading within the caller's transaction so it sees writes made
 	// earlier in the same tx. Returns nil, nil if there is no active adapter.
 	GetActiveAdapter(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte) (*entity.MorphoAdapter, error)
-
-	// GetAdapterIncarnationAt retrieves the incarnation whose recorded lifetime
-	// contains atBlock — added at or before it, and either still open or closed at or
-	// after it. Returns nil, nil when the adapter has no recorded incarnation there.
-	//
-	// This is the question a RemoveAdapter must ask before registering anything: a
-	// non-nil answer means MarkAdapterRemoved already has a row to close, so the
-	// removal is idempotent against it. A nil answer means the adapter is unknown at
-	// that block and needs registering first — including the case where a closed
-	// incarnation ends BELOW atBlock, which is a later incarnation whose AddAdapter
-	// was never observed. Reads within the caller's transaction (read-your-writes).
-	GetAdapterIncarnationAt(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, atBlock int64) (*entity.MorphoAdapter, error)
 
 	// GetActiveAdaptersByVault retrieves all currently-active adapters for a vault.
 	GetActiveAdaptersByVault(ctx context.Context, morphoVaultID int64) ([]*entity.MorphoAdapter, error)

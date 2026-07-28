@@ -1639,6 +1639,37 @@ func (f *morphoTestFixture) markAdapterRemoved(t *testing.T, ctx context.Context
 	return tx.Commit(ctx)
 }
 
+// removeAdapter runs the whole RemoveAdapter path the worker runs, in ONE
+// transaction: guarantee an incarnation to close, then close it. The lifecycle
+// tests below drive this rather than MarkAdapterRemoved alone, because the
+// registry shape a removal leaves behind is a property of the composition.
+//
+// adapterType is the classification the on-chain probe supplied, used only if the
+// registry turns out to have no incarnation to close.
+func (f *morphoTestFixture) removeAdapter(ctx context.Context, vaultID int64, address []byte, block int64, adapterType entity.MorphoAdapterType) error {
+	tx, err := f.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	candidate := &entity.MorphoAdapter{
+		MorphoVaultID:  vaultID,
+		Address:        address,
+		AssetTokenID:   f.loanTokenID,
+		AdapterType:    adapterType,
+		AddedAtBlock:   block,
+		RemovedAtBlock: &block,
+	}
+	if _, err := f.repo.EnsureIncarnationToClose(ctx, tx, vaultID, address, block, candidate); err != nil {
+		return err
+	}
+	if err := f.repo.MarkAdapterRemoved(ctx, tx, vaultID, address, block); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 // adapterIncarnationAt runs GetAdapterIncarnationAt (which reads through the
 // caller's tx) in a short read transaction that is rolled back afterwards.
 func (f *morphoTestFixture) adapterIncarnationAt(t *testing.T, ctx context.Context, vaultID int64, address []byte, atBlock int64) *entity.MorphoAdapter {
@@ -1648,7 +1679,7 @@ func (f *morphoTestFixture) adapterIncarnationAt(t *testing.T, ctx context.Conte
 		t.Fatalf("begin: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	got, err := f.repo.GetAdapterIncarnationAt(ctx, tx, vaultID, address, atBlock)
+	got, err := f.repo.getAdapterIncarnationAt(ctx, tx, vaultID, address, atBlock)
 	if err != nil {
 		t.Fatalf("GetAdapterIncarnationAt(%d): %v", atBlock, err)
 	}
@@ -2301,7 +2332,7 @@ func TestCreateAdapterIncarnation_HealingAnUnobservedRemovalSparesALaterIncarnat
 		AdapterType:   entity.MorphoAdapterTypeMarketV1,
 		AddedAtBlock:  healedRemoval,
 	}
-	syntheticID, err := fixture.repo.CreateAdapterIncarnation(ctx, tx, synthetic, healedRemoval)
+	syntheticID, err := fixture.repo.createAdapterIncarnation(ctx, tx, synthetic, healedRemoval)
 	if err != nil {
 		t.Fatalf("CreateAdapterIncarnation: %v", err)
 	}
@@ -2340,7 +2371,7 @@ func TestCreateAdapterIncarnation_ExactKeyConflictLeavesTheRecordedRowAlone(t *t
 		t.Fatalf("begin: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	got, err := fixture.repo.CreateAdapterIncarnation(ctx, tx, &entity.MorphoAdapter{
+	got, err := fixture.repo.createAdapterIncarnation(ctx, tx, &entity.MorphoAdapter{
 		MorphoVaultID: vaultID,
 		Address:       addr,
 		AssetTokenID:  fixture.loanTokenID,
@@ -2360,6 +2391,66 @@ func TestCreateAdapterIncarnation_ExactKeyConflictLeavesTheRecordedRowAlone(t *t
 	got2 := fixture.describeIncarnations(t, ctx, vaultID, addr)
 	if want := fmt.Sprintf("id=%d [%d,ACTIVE]", openID, addedAt); got2 != want {
 		t.Errorf("registry = %q, want %q: the conflict must not close the existing row", got2, want)
+	}
+}
+
+// TestEnsureIncarnationToClose_DecidesAndRegistersUnderOneLock pins the read-then-write
+// serialization ADR-0002 §3 requires: the "is there an incarnation to close" read and the
+// registration it authorises must both happen under the adapter's advisory lock, or two
+// overlapping writers each decide "nothing on record" and mint their own incarnation for
+// one on-chain lifetime.
+//
+// The interleaving below is the live-worker-vs-backfiller one. An AddAdapter@900 holds the
+// lock uncommitted while a RemoveAdapter@1000 for the same adapter starts: with the
+// decisive read taken BEFORE the lock, the removal sees an empty registry, waits for the
+// lock only to insert, and lands a second [1000,1000] row beside the add's — leaving the
+// added row ACTIVE forever. Taking the lock first makes the removal read the add and close
+// IT, whichever order the two writers are granted the lock in.
+func TestEnsureIncarnationToClose_DecidesAndRegistersUnderOneLock(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x58))
+	addr := adapterAddr(0x59)
+
+	const (
+		addAt    = int64(900)
+		removeAt = int64(1000)
+	)
+
+	addTx, err := fixture.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the AddAdapter transaction: %v", err)
+	}
+	defer addTx.Rollback(ctx)
+	addedID, err := fixture.repo.GetOrCreateAdapter(ctx, addTx, &entity.MorphoAdapter{
+		MorphoVaultID: vaultID,
+		Address:       addr,
+		AssetTokenID:  fixture.loanTokenID,
+		AdapterType:   entity.MorphoAdapterTypeMarketV1,
+		AddedAtBlock:  addAt,
+	})
+	if err != nil {
+		t.Fatalf("registering the adapter at %d: %v", addAt, err)
+	}
+
+	removed := make(chan error, 1)
+	go func() {
+		removed <- fixture.removeAdapter(ctx, vaultID, addr, removeAt, entity.MorphoAdapterTypeMarketV1)
+	}()
+
+	// Long enough for the removal to reach its decisive read; it can only get past the
+	// registration by waiting for the lock this transaction holds.
+	time.Sleep(500 * time.Millisecond)
+	if err := addTx.Commit(ctx); err != nil {
+		t.Fatalf("commit the AddAdapter transaction: %v", err)
+	}
+	if err := <-removed; err != nil {
+		t.Fatalf("RemoveAdapter@%d: %v", removeAt, err)
+	}
+
+	want := fmt.Sprintf("id=%d [%d,%d]", addedID, addAt, removeAt)
+	if got := fixture.describeIncarnations(t, ctx, vaultID, addr); got != want {
+		t.Errorf("registry = %q, want %q: the removal decided before it held the lock, so it minted its own incarnation instead of closing the one being added", got, want)
 	}
 }
 
@@ -2788,7 +2879,7 @@ func TestGetAdapterIncarnationAt(t *testing.T) {
 			}
 			defer tx.Rollback(ctx)
 
-			got, err := fixture.repo.GetAdapterIncarnationAt(ctx, tx, vaultID, addr, tt.atBlock)
+			got, err := fixture.repo.getAdapterIncarnationAt(ctx, tx, vaultID, addr, tt.atBlock)
 			if err != nil {
 				t.Fatalf("GetAdapterIncarnationAt(%d): %v", tt.atBlock, err)
 			}
@@ -2829,7 +2920,7 @@ func TestGetAdapterIncarnationAt_PicksTheLatestCoveringIncarnation(t *testing.T)
 	}
 	defer tx.Rollback(ctx)
 
-	got, err := fixture.repo.GetAdapterIncarnationAt(ctx, tx, vaultID, addr, 700)
+	got, err := fixture.repo.getAdapterIncarnationAt(ctx, tx, vaultID, addr, 700)
 	if err != nil {
 		t.Fatalf("GetAdapterIncarnationAt: %v", err)
 	}

@@ -480,8 +480,8 @@ func TestProcessBlockEvent_RemoveAdapter(t *testing.T) {
 	h.morphoRepo.GetActiveAdaptersByVaultFn = func(_ context.Context, _ int64) ([]*entity.MorphoAdapter, error) {
 		return []*entity.MorphoAdapter{{ID: 55, MorphoVaultID: 7, Address: testAdapterAddr.Bytes(), AssetTokenID: 1, AdapterType: entity.MorphoAdapterTypeMarketV1, AddedAtBlock: 19000000}}, nil
 	}
-	h.morphoRepo.GetAdapterIncarnationAtFn = func(_ context.Context, _ pgx.Tx, vaultID int64, address []byte, _ int64) (*entity.MorphoAdapter, error) {
-		return &entity.MorphoAdapter{ID: 55, MorphoVaultID: vaultID, Address: address, AssetTokenID: 1, AdapterType: entity.MorphoAdapterTypeMarketV1, AddedAtBlock: 19000000}, nil
+	h.morphoRepo.EnsureIncarnationToCloseFn = func(_ context.Context, _ pgx.Tx, _ int64, _ []byte, _ int64, _ *entity.MorphoAdapter) (bool, error) {
+		return false, nil // the open row already covers the removal block
 	}
 
 	var (
@@ -713,13 +713,10 @@ func TestProcessBlockEvent_RemoveAdapter_UnknownAdapterHeals(t *testing.T) {
 		}
 		return nil, errTestUnexpectedCall(calls)
 	}
-	h.morphoRepo.GetAdapterIncarnationAtFn = func(_ context.Context, _ pgx.Tx, _ int64, _ []byte, _ int64) (*entity.MorphoAdapter, error) {
-		return nil, nil // unknown adapter
-	}
 	var registered *entity.MorphoAdapter
-	h.morphoRepo.CreateAdapterIncarnationFn = func(_ context.Context, _ pgx.Tx, a *entity.MorphoAdapter, _ int64) (int64, error) {
-		registered = a
-		return 88, nil
+	h.morphoRepo.EnsureIncarnationToCloseFn = func(_ context.Context, _ pgx.Tx, _ int64, _ []byte, _ int64, candidate *entity.MorphoAdapter) (bool, error) {
+		registered = candidate // unknown adapter: the registry has nothing to close
+		return true, nil
 	}
 	h.morphoRepo.GetOrCreateAdapterFn = func(_ context.Context, _ pgx.Tx, a *entity.MorphoAdapter) (int64, error) {
 		t.Fatalf("the removal heal must not register through the converging GetOrCreateAdapter (added %d): it would drag a later active incarnation of this address down to the removal block", a.AddedAtBlock)
@@ -766,48 +763,33 @@ func TestProcessBlockEvent_RemoveAdapter_UnknownAdapterHeals(t *testing.T) {
 	}
 }
 
-// TestProcessBlockEvent_RemoveAdapter_ReplayAgainstRecordedIncarnationMintsNoPhantom
-// covers a redelivered or backfill-replayed RemoveAdapter for an adapter whose
-// incarnation is ALREADY closed at that exact block. GetActiveAdapter misses (the row
-// is closed), so the lazy heal used to register the adapter again at the removal
-// block — which GetOrCreateAdapter cannot fold onto the closed row, because its
-// closed-window match is strict by design so a live same-block remove-then-re-add
-// still opens a new incarnation. MarkAdapterRemoved then closed that fresh row at the
-// same block, leaving a zero-length [500, 500] incarnation that never existed
-// on-chain. The removal must instead be idempotent against the recorded row.
-func TestProcessBlockEvent_RemoveAdapter_ReplayAgainstRecordedIncarnationMintsNoPhantom(t *testing.T) {
+// TestProcessBlockEvent_RemoveAdapter_ClosesWhetherOrNotAnIncarnationWasRegistered pins
+// what the handler owes each answer the registry can give it. WHICH answer that is — a
+// covering incarnation, a reorg-relocated close, or a genuinely unknown lifetime — is the
+// registry's decision under its advisory lock and is pinned by the incarnation matrix in
+// morpho_repository_integration_test.go, not mockable from here.
+//
+// Both answers still reach MarkAdapterRemoved: a redelivered or replayed removal whose
+// incarnation is already on record must converge onto it rather than be skipped. Only a
+// registration earns the lazy-registration WARN, which is the ops signal that an
+// AddAdapter predates vault discovery — emitting it on the idempotent path would cry wolf
+// on every SQS redelivery.
+func TestProcessBlockEvent_RemoveAdapter_ClosesWhetherOrNotAnIncarnationWasRegistered(t *testing.T) {
 	tests := []struct {
-		name         string
-		removedAt    int64
-		wantRegister bool
+		name       string
+		registered bool
 	}{
-		{
-			// The replay case: the incarnation ends exactly at the removal block.
-			name: "an incarnation already closed at the removal block absorbs it", removedAt: 20000000,
-		},
-		{
-			// A closed incarnation ending BELOW the removal block does not cover it —
-			// that is a later incarnation whose AddAdapter we never saw, so the heal
-			// must still register it (MarkAdapterRemoved would otherwise reject the
-			// removal as beyond the relocation window).
-			name:      "a removal above a closed incarnation still registers the missed one",
-			removedAt: 20000000, wantRegister: true,
-		},
+		{name: "an incarnation already on record absorbs the removal"},
+		{name: "an unobserved lifetime is registered first", registered: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			h := newTestHarness(t)
 			h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
+			logs := h.captureLogs()
 
-			closedAt := tt.removedAt
-			h.morphoRepo.GetAdapterIncarnationAtFn = func(_ context.Context, _ pgx.Tx, _ int64, _ []byte, atBlock int64) (*entity.MorphoAdapter, error) {
-				if tt.wantRegister {
-					return nil, nil // the recorded incarnation closed below atBlock
-				}
-				return &entity.MorphoAdapter{ID: 55, MorphoVaultID: 7, Address: testAdapterAddr.Bytes(), AssetTokenID: 1, AdapterType: entity.MorphoAdapterTypeMarketV1, AddedAtBlock: 19000000, RemovedAtBlock: &closedAt}, nil
-			}
-			h.morphoRepo.GetActiveAdapterFn = func(_ context.Context, _ pgx.Tx, _ int64, _ []byte) (*entity.MorphoAdapter, error) {
-				return nil, nil // the incarnation is closed, so there is no active row
+			h.morphoRepo.GetActiveAdaptersByVaultFn = func(_ context.Context, _ int64) ([]*entity.MorphoAdapter, error) {
+				return nil, nil // not active, so the type probe runs before the transaction
 			}
 			h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 				if len(calls) == 2 && calls[0].Target == testAdapterAddr {
@@ -815,10 +797,8 @@ func TestProcessBlockEvent_RemoveAdapter_ReplayAgainstRecordedIncarnationMintsNo
 				}
 				return nil, errTestUnexpectedCall(calls)
 			}
-			registered := false
-			h.morphoRepo.CreateAdapterIncarnationFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapter, _ int64) (int64, error) {
-				registered = true
-				return 99, nil
+			h.morphoRepo.EnsureIncarnationToCloseFn = func(_ context.Context, _ pgx.Tx, _ int64, _ []byte, _ int64, _ *entity.MorphoAdapter) (bool, error) {
+				return tt.registered, nil
 			}
 			marked := false
 			h.morphoRepo.MarkAdapterRemovedFn = func(_ context.Context, _ pgx.Tx, _ int64, _ []byte, _ int64) error {
@@ -827,15 +807,15 @@ func TestProcessBlockEvent_RemoveAdapter_ReplayAgainstRecordedIncarnationMintsNo
 			}
 
 			log := h.makeV2VaultLog(h.vaultV2EventsABI.Events["RemoveAdapter"], testVaultAddr, []common.Hash{addrTopic(testAdapterAddr)})
-			if err := h.processBlock(t, 1, tt.removedAt, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err != nil {
+			if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err != nil {
 				t.Fatalf("processBlock: %v", err)
 			}
 
-			if registered != tt.wantRegister {
-				t.Errorf("adapter registered = %v, want %v (registering here mints a zero-length incarnation)", registered, tt.wantRegister)
-			}
 			if !marked {
-				t.Error("MarkAdapterRemoved must still run so the removal converges onto the recorded row")
+				t.Error("MarkAdapterRemoved must run so the removal converges onto whichever row the registry resolved")
+			}
+			if got := logs.hasWarnContaining("registered lazily"); got != tt.registered {
+				t.Errorf("WARN(registered lazily) = %v, want %v", got, tt.registered)
 			}
 		})
 	}
