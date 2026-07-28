@@ -74,33 +74,47 @@ func replayV2StructuredEvents(
 		"to", cfg.to,
 		"checkpoint", cfg.replayProgressFile)
 
-	// A partition is recorded done only after every event in it replays
-	// successfully; the run hard-stops on the first failure. Every write below
-	// goes through the same idempotent repo methods as live indexing, so a
-	// resumed run that reprocesses an in-flight partition is safe.
-	for _, part := range replayPartitionPrefixes(cfg.from, cfg.to) {
-		if checkpoint.isDone(part) {
-			logger.Info("skipping already-replayed partition", "partition", part)
-			continue
-		}
-		if err := replayPartition(ctx, logger, s3Reader, svc, tsCache, cfg, part, v2Vaults, topics); err != nil {
-			return fmt.Errorf("replaying partition %s: %w", part, err)
-		}
-		// Only a partition whose full range lies within [from,to] may be
-		// checkpointed. A boundary partition is completeness-checked against the
-		// [from,to] intersection alone, so recording it done would let a later run
-		// reusing this progress file with WIDER bounds skip the now-in-scope
-		// blocks — a silent cross-run hole. It replayed above (cheap, idempotent);
-		// it just stays out of the checkpoint and replays again next run.
-		if !partitionFullyCovered(part, cfg.from, cfg.to) {
-			continue
-		}
-		if err := checkpoint.markDone(part); err != nil {
-			return fmt.Errorf("recording partition %s done: %w", part, err)
-		}
+	replayOne := func(part string) error {
+		return replayPartition(ctx, logger, s3Reader, svc, tsCache, cfg, part, v2Vaults, topics)
+	}
+	if err := runReplayPartitions(logger, replayPartitionPrefixes(cfg.from, cfg.to), checkpoint, cfg.from, cfg.to, replayOne); err != nil {
+		return err
 	}
 
 	logger.Info("VaultV2 structured-event replay complete")
+	return nil
+}
+
+// runReplayPartitions walks parts in order, replaying each one that the
+// checkpoint does not already record done and recording the eligible ones.
+//
+// A partition is recorded done only after every event in it replays
+// successfully; the run hard-stops on the first failure. Every replay write goes
+// through the same idempotent repo methods as live indexing, so a resumed run
+// that reprocesses an in-flight partition is safe.
+//
+// Only a partition whose full range lies within [from,to] may be checkpointed. A
+// boundary partition is completeness-checked against the [from,to] intersection
+// alone, so recording it done would let a later run reusing this progress file
+// with WIDER bounds skip the now-in-scope blocks — a silent cross-run hole. It
+// still replays (cheap, idempotent); it just stays out of the checkpoint and
+// replays again next run.
+func runReplayPartitions(logger *slog.Logger, parts []string, cp *checkpoint, from, to int64, replay func(part string) error) error {
+	for _, part := range parts {
+		if cp.isDone(part) {
+			logger.Info("skipping already-replayed partition", "partition", part)
+			continue
+		}
+		if err := replay(part); err != nil {
+			return fmt.Errorf("replaying partition %s: %w", part, err)
+		}
+		if !partitionFullyCovered(part, from, to) {
+			continue
+		}
+		if err := cp.markDone(part); err != nil {
+			return fmt.Errorf("recording partition %s done: %w", part, err)
+		}
+	}
 	return nil
 }
 

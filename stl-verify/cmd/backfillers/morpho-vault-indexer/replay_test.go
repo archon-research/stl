@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"slices"
 	"strings"
 	"testing"
@@ -185,6 +186,25 @@ func TestPartitionFullyCovered(t *testing.T) {
 	}
 }
 
+// discardLogger is the logger the replay-loop tests pass: they assert on the
+// loop's effects, not its output.
+func discardLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }
+
+// replayRecorder drives runReplayPartitions and records which partitions the
+// production loop actually handed to the replay callback, in order.
+func replayRecorder(t *testing.T, cp *checkpoint, from, to int64) []string {
+	t.Helper()
+	var replayed []string
+	err := runReplayPartitions(discardLogger(), replayPartitionPrefixes(from, to), cp, from, to, func(part string) error {
+		replayed = append(replayed, part)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("runReplayPartitions: %v", err)
+	}
+	return replayed
+}
+
 // TestReplayCheckpointsOnlyFullyCoveredPartitions locks the cross-run-hole fix:
 // the replay loop checkpoints a partition only when its full block range lies
 // within [from,to]. A partially-covered boundary partition replays every run but
@@ -196,31 +216,11 @@ func TestReplayCheckpointsOnlyFullyCoveredPartitions(t *testing.T) {
 	const from, to = int64(2000), int64(4500)
 	path := t.TempDir() + "/progress.jsonl"
 
-	// Mirror the replayV2StructuredEvents loop: replay every not-yet-done
-	// partition, but checkpoint only the fully-covered ones. Returns the
-	// partitions this pass replayed, in order.
-	replayOnce := func(cp *checkpoint) []string {
-		var replayed []string
-		for _, part := range replayPartitionPrefixes(from, to) {
-			if cp.isDone(part) {
-				continue
-			}
-			replayed = append(replayed, part)
-			if !partitionFullyCovered(part, from, to) {
-				continue
-			}
-			if err := cp.markDone(part); err != nil {
-				t.Fatalf("markDone(%s): %v", part, err)
-			}
-		}
-		return replayed
-	}
-
 	cp1, err := loadCheckpoint(path)
 	if err != nil {
 		t.Fatalf("loadCheckpoint: %v", err)
 	}
-	first := replayOnce(cp1)
+	first := replayRecorder(t, cp1, from, to)
 	if err := cp1.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
@@ -250,7 +250,7 @@ func TestReplayCheckpointsOnlyFullyCoveredPartitions(t *testing.T) {
 	}
 
 	// Resume replays ONLY the uncheckpointed boundary partition.
-	second := replayOnce(cp2)
+	second := replayRecorder(t, cp2, from, to)
 	wantSecond := []string{"4000-4999"}
 	if !slices.Equal(second, wantSecond) {
 		t.Fatalf("resume replayed %v, want %v", second, wantSecond)
@@ -292,20 +292,23 @@ func (f *fakeReplayS3Reader) StreamFile(_ context.Context, _, key string) (io.Re
 // a block in the partition's [from,to] intersection with no receipt key would
 // contribute no logs, yet the partition would still be marked done — silently
 // dropping every event in that block, since a re-run skips the checkpointed
-// partition. collectPartitionV2Logs must hard-fail so the outer loop's guard
-// skips markDone, leaving the checkpoint unwritten for a repaired-S3 re-run.
+// partition. collectPartitionV2Logs must hard-fail so the production loop stops
+// before markDone, leaving the checkpoint unwritten for a repaired-S3 re-run.
+// The range is the whole partition, so the fully-covered guard would otherwise
+// checkpoint it.
 func TestReplayPartition_MissingReceiptBlockErrorsAndLeavesCheckpointUnwritten(t *testing.T) {
 	ctx := context.Background()
-	const from, to = int64(100), int64(102) // partition "0-999"; blocks 100..102 all required
+	const from, to = int64(0), int64(999) // partition "0-999", fully covered
 
 	keyFor := func(bn int64) string { return s3key.Build(bn, 0, s3key.Receipts) }
-	// S3 has receipts for 100 and 102 but is missing 101.
-	reader := &fakeReplayS3Reader{
-		keys: []string{keyFor(100), keyFor(102)},
-		bodyByKey: map[string]string{
-			keyFor(100): "[]",
-			keyFor(102): "[]",
-		},
+	// S3 has a receipt for every block in the partition except 500.
+	reader := &fakeReplayS3Reader{bodyByKey: map[string]string{}}
+	for bn := from; bn <= to; bn++ {
+		if bn == 500 {
+			continue
+		}
+		reader.keys = append(reader.keys, keyFor(bn))
+		reader.bodyByKey[keyFor(bn)] = "[]"
 	}
 	part := partition.GetPartition(from)
 
@@ -315,16 +318,11 @@ func TestReplayPartition_MissingReceiptBlockErrorsAndLeavesCheckpointUnwritten(t
 	}
 	defer cp.Close()
 
-	// Mirror the replayV2StructuredEvents per-partition guard: only markDone when
-	// collection succeeds.
-	processPartition := func(part string) error {
-		if _, err := collectPartitionV2Logs(ctx, reader, "bucket", part, from, to, map[common.Address]struct{}{}, mustV2Topics(t)); err != nil {
-			return err
-		}
-		return cp.markDone(part)
-	}
-
-	if err := processPartition(part); err == nil {
+	err = runReplayPartitions(discardLogger(), []string{part}, cp, from, to, func(part string) error {
+		_, collectErr := collectPartitionV2Logs(ctx, reader, "bucket", part, from, to, map[common.Address]struct{}{}, mustV2Topics(t))
+		return collectErr
+	})
+	if err == nil {
 		t.Fatal("expected an error for a partition missing a receipt block")
 	}
 	if cp.isDone(part) {
