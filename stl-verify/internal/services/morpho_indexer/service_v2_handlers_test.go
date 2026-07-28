@@ -490,7 +490,7 @@ func TestProcessBlockEvent_RemoveAdapter(t *testing.T) {
 		gotBlock   int64
 		called     bool
 	)
-	h.morphoRepo.MarkAdapterRemovedFn = func(_ context.Context, _ pgx.Tx, vaultID int64, address []byte, removedAtBlock int64) error {
+	h.morphoRepo.MarkAdapterRemovedFn = func(_ context.Context, _ pgx.Tx, vaultID int64, address []byte, removedAtBlock int64, _ int) error {
 		called = true
 		gotVaultID, gotAddr, gotBlock = vaultID, address, removedAtBlock
 		return nil
@@ -727,7 +727,7 @@ func TestProcessBlockEvent_RemoveAdapter_UnknownAdapterHeals(t *testing.T) {
 		removedBlock   int64
 		marked         bool
 	)
-	h.morphoRepo.MarkAdapterRemovedFn = func(_ context.Context, _ pgx.Tx, vaultID int64, address []byte, removedAtBlock int64) error {
+	h.morphoRepo.MarkAdapterRemovedFn = func(_ context.Context, _ pgx.Tx, vaultID int64, address []byte, removedAtBlock int64, _ int) error {
 		marked = true
 		removedVaultID, removedAddr, removedBlock = vaultID, address, removedAtBlock
 		return nil
@@ -814,7 +814,7 @@ func TestProcessBlockEvent_RemoveAdapter_ReplayAgainstRecordedIncarnationMintsNo
 				return 99, nil
 			}
 			marked := false
-			h.morphoRepo.MarkAdapterRemovedFn = func(_ context.Context, _ pgx.Tx, _ int64, _ []byte, _ int64) error {
+			h.morphoRepo.MarkAdapterRemovedFn = func(_ context.Context, _ pgx.Tx, _ int64, _ []byte, _ int64, _ int) error {
 				marked = true
 				return nil
 			}
@@ -1506,7 +1506,7 @@ func TestProcessBlockEvent_Allocation_VanishedAdapterFailsHard(t *testing.T) {
 func TestProcessBlockEvent_RemoveAdapter_NonV2VaultErrors(t *testing.T) {
 	h := newTestHarness(t)
 	h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV1)
-	h.morphoRepo.MarkAdapterRemovedFn = func(_ context.Context, _ pgx.Tx, _ int64, _ []byte, _ int64) error {
+	h.morphoRepo.MarkAdapterRemovedFn = func(_ context.Context, _ pgx.Tx, _ int64, _ []byte, _ int64, _ int) error {
 		t.Fatal("MarkAdapterRemoved must not run for a non-V2 vault")
 		return nil
 	}

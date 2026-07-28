@@ -110,7 +110,7 @@ func (s *Service) saveAdapterSeedState(ctx context.Context, tx pgx.Tx, adapterID
 // always historical and never replayed on SNS/SQS), the adapter is lazily
 // registered first so the removal closes an audit-consistent row, instead of
 // MarkAdapterRemoved failing with a 0-rows error and poisoning the FIFO queue.
-func (s *Service) handleRemoveAdapter(ctx context.Context, e *RemoveAdapterEvent, vaultAddress common.Address, blockNumber int64) error {
+func (s *Service) handleRemoveAdapter(ctx context.Context, e *RemoveAdapterEvent, vaultAddress common.Address, blockNumber int64, blockVersion int) error {
 	vault, err := s.resolveV2Vault(vaultAddress)
 	if err != nil {
 		return err
@@ -123,7 +123,7 @@ func (s *Service) handleRemoveAdapter(ctx context.Context, e *RemoveAdapterEvent
 		if err := s.ensureIncarnationToClose(ctx, tx, vault, vaultAddress, e.Account, blockNumber, probedType); err != nil {
 			return err
 		}
-		return s.morphoRepo.MarkAdapterRemoved(ctx, tx, vault.ID, e.Account.Bytes(), blockNumber)
+		return s.morphoRepo.MarkAdapterRemoved(ctx, tx, vault.ID, e.Account.Bytes(), blockNumber, blockVersion)
 	})
 }
 
