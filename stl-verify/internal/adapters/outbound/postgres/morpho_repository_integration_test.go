@@ -1482,16 +1482,23 @@ func adapterAddr(seed byte) []byte {
 	return addr
 }
 
-// createTestAdapter registers an active adapter on the given vault via the
-// repository and returns its DB ID.
+// createTestAdapter registers an active MarketV1 adapter on the given vault via
+// the repository and returns its DB ID.
 func (f *morphoTestFixture) createTestAdapter(t *testing.T, ctx context.Context, vaultID int64, address []byte, addedAtBlock int64) int64 {
+	t.Helper()
+	return f.createTestAdapterOfType(t, ctx, vaultID, address, addedAtBlock, entity.MorphoAdapterTypeMarketV1)
+}
+
+// createTestAdapterOfType is createTestAdapter with an explicit classification, for
+// the adapter_type curation cases.
+func (f *morphoTestFixture) createTestAdapterOfType(t *testing.T, ctx context.Context, vaultID int64, address []byte, addedAtBlock int64, adapterType entity.MorphoAdapterType) int64 {
 	t.Helper()
 
 	adapter := &entity.MorphoAdapter{
 		MorphoVaultID: vaultID,
 		Address:       address,
 		AssetTokenID:  f.loanTokenID,
-		AdapterType:   entity.MorphoAdapterTypeMarketV1,
+		AdapterType:   adapterType,
 		AddedAtBlock:  addedAtBlock,
 	}
 
@@ -1509,6 +1516,16 @@ func (f *morphoTestFixture) createTestAdapter(t *testing.T, ctx context.Context,
 		t.Fatalf("failed to commit: %v", err)
 	}
 	return id
+}
+
+// adapterTypeOf reads the recorded classification of one adapter row.
+func (f *morphoTestFixture) adapterTypeOf(t *testing.T, ctx context.Context, id int64) entity.MorphoAdapterType {
+	t.Helper()
+	var adapterType entity.MorphoAdapterType
+	if err := f.pool.QueryRow(ctx, `SELECT adapter_type FROM morpho_adapter WHERE id = $1`, id).Scan(&adapterType); err != nil {
+		t.Fatalf("reading adapter_type for id %d: %v", id, err)
+	}
+	return adapterType
 }
 
 // seedAdapterStateAt writes one adapter_state snapshot for the given adapter at
@@ -1838,6 +1855,133 @@ func TestGetOrCreateAdapter_BackfilledAddConvergesClosedWindowNotActiveRow(t *te
 	}
 	if count != 2 {
 		t.Errorf("want exactly 2 rows (closed + active, no new row), got %d", count)
+	}
+}
+
+// TestGetOrCreateAdapter_SameBlockReAddOpensANewIncarnation covers a governance
+// multicall that removes and immediately re-adds an adapter in ONE block: the logs
+// are processed in order, so the re-add's added_at_block equals the removal block.
+// The closed-window match must therefore be STRICT — an inclusive
+// removed_at_block >= candidate swallowed the re-add into the row it had just
+// closed, leaving the adapter with no active row on-DB while it is active on-chain.
+func TestGetOrCreateAdapter_SameBlockReAddOpensANewIncarnation(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x35))
+	addr := adapterAddr(0x36)
+
+	const (
+		firstAdd    = int64(100)
+		sameBlockAt = int64(500)
+	)
+
+	closedID := fixture.createTestAdapter(t, ctx, vaultID, addr, firstAdd)
+	if err := fixture.markAdapterRemoved(t, ctx, vaultID, addr, sameBlockAt); err != nil {
+		t.Fatalf("MarkAdapterRemoved: %v", err)
+	}
+
+	reAddID := fixture.createTestAdapter(t, ctx, vaultID, addr, sameBlockAt)
+	if reAddID == closedID {
+		t.Fatalf("the same-block re-add must open a NEW incarnation, got the just-closed row id=%d", closedID)
+	}
+
+	active, err := fixture.getActiveAdapter(t, ctx, vaultID, addr)
+	if err != nil {
+		t.Fatalf("GetActiveAdapter: %v", err)
+	}
+	if active == nil {
+		t.Fatal("expected an ACTIVE adapter row after the same-block re-add")
+	}
+	if active.ID != reAddID || active.AddedAtBlock != sameBlockAt {
+		t.Errorf("active row = (id %d, added %d), want (id %d, added %d)", active.ID, active.AddedAtBlock, reAddID, sameBlockAt)
+	}
+}
+
+// TestGetOrCreateAdapter_BackfilledAddAtExactRemovalBlockStaysClosed is the other
+// side of the strict closed-window boundary: when the live stream lazily registered
+// AND removed an adapter in one block, a backfilled AddAdapter for that same block
+// is a late observation of the incarnation that already exists, not a new one — the
+// UNIQUE (vault, address, added_at_block) key folds it onto the closed row, so the
+// adapter stays de-registered.
+func TestGetOrCreateAdapter_BackfilledAddAtExactRemovalBlockStaysClosed(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x37))
+	addr := adapterAddr(0x38)
+
+	const liveBlock = int64(24600000)
+
+	id1 := fixture.createTestAdapter(t, ctx, vaultID, addr, liveBlock)
+	if err := fixture.markAdapterRemoved(t, ctx, vaultID, addr, liveBlock); err != nil {
+		t.Fatalf("MarkAdapterRemoved: %v", err)
+	}
+
+	if id2 := fixture.createTestAdapter(t, ctx, vaultID, addr, liveBlock); id2 != id1 {
+		t.Errorf("backfilled add at the removal block must fold onto the existing row: got %d, want %d", id2, id1)
+	}
+
+	active, err := fixture.getActiveAdapter(t, ctx, vaultID, addr)
+	if err != nil {
+		t.Fatalf("GetActiveAdapter: %v", err)
+	}
+	if active != nil {
+		t.Errorf("expected NO active adapter, got %+v", active)
+	}
+}
+
+// adapterTypeConvergenceCases pins the curation rule shared by both convergence
+// paths: a row recorded as Unknown (the forward-compatible sentinel written when
+// the on-chain probe cannot classify an adapter) is upgraded when a replay supplies
+// a real type, and a known type is never overwritten. Without this, an adapter that
+// probed Unknown once stayed Unknown forever, and replay — the curation path the
+// schema comment promises — could not fix it.
+var adapterTypeConvergenceCases = []struct {
+	name     string
+	existing entity.MorphoAdapterType
+	replayed entity.MorphoAdapterType
+	want     entity.MorphoAdapterType
+}{
+	{"unknown is upgraded by a replayed known type", entity.MorphoAdapterTypeUnknown, entity.MorphoAdapterTypeMarketV1, entity.MorphoAdapterTypeMarketV1},
+	{"a known type is never downgraded to unknown", entity.MorphoAdapterTypeMarketV1, entity.MorphoAdapterTypeUnknown, entity.MorphoAdapterTypeMarketV1},
+	{"a known type is never replaced by another known type", entity.MorphoAdapterTypeVaultV1, entity.MorphoAdapterTypeMarketV1, entity.MorphoAdapterTypeVaultV1},
+}
+
+func TestGetOrCreateAdapter_ActiveRowConvergenceCuratesAdapterType(t *testing.T) {
+	for _, tt := range adapterTypeConvergenceCases {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := setupMorphoTest(t)
+			ctx := context.Background()
+			vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x39))
+			addr := adapterAddr(0x3a)
+
+			id := fixture.createTestAdapterOfType(t, ctx, vaultID, addr, 200, tt.existing)
+			fixture.createTestAdapterOfType(t, ctx, vaultID, addr, 100, tt.replayed)
+
+			if got := fixture.adapterTypeOf(t, ctx, id); got != tt.want {
+				t.Errorf("adapter_type = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGetOrCreateAdapter_ClosedWindowConvergenceCuratesAdapterType(t *testing.T) {
+	for _, tt := range adapterTypeConvergenceCases {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := setupMorphoTest(t)
+			ctx := context.Background()
+			vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x3b))
+			addr := adapterAddr(0x3c)
+
+			id := fixture.createTestAdapterOfType(t, ctx, vaultID, addr, 200, tt.existing)
+			if err := fixture.markAdapterRemoved(t, ctx, vaultID, addr, 500); err != nil {
+				t.Fatalf("MarkAdapterRemoved: %v", err)
+			}
+			fixture.createTestAdapterOfType(t, ctx, vaultID, addr, 100, tt.replayed)
+
+			if got := fixture.adapterTypeOf(t, ctx, id); got != tt.want {
+				t.Errorf("adapter_type = %d, want %d", got, tt.want)
+			}
+		})
 	}
 }
 

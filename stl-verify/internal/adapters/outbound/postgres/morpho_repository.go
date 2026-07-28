@@ -344,22 +344,32 @@ func (r *MorphoRepository) SaveVaultPosition(ctx context.Context, tx pgx.Tx, pos
 // match the active row first — pulling the re-added incarnation's added_at_block
 // down into a prior window and leaving the closed row unconverged.
 //
-//  1. If a CLOSED incarnation covers the candidate (removed_at_block >= candidate
-//     added_at_block), the candidate is a late observation of that closed window:
-//     converge onto the earliest-closing such row (UPDATE its added_at_block down).
-//     This keeps a backfilled AddAdapter@W replayed earlier than a live
+//  1. If a CLOSED incarnation strictly covers the candidate (removed_at_block >
+//     candidate added_at_block), the candidate is a late observation of that closed
+//     window: converge onto the earliest-closing such row (UPDATE its added_at_block
+//     down). This keeps a backfilled AddAdapter@W replayed earlier than a live
 //     lazy-register+removal@X (W<X) from INSERTing a second, spuriously-ACTIVE
 //     incarnation — resurrecting a de-registered adapter into
 //     GetActiveAdaptersByVault / realAssets forever — and keeps a re-added
 //     adapter's active window intact when the backfilled add belongs to a prior,
-//     already-closed incarnation.
+//     already-closed incarnation. The comparison is STRICT because a governance
+//     multicall can remove and re-add an adapter in ONE block: with `>=` that
+//     re-add folded into the row just closed, leaving the adapter with no active row
+//     on-DB while it is active on-chain.
 //  2. Otherwise, if an ACTIVE row (removed_at_block IS NULL) exists it is reused,
 //     its added_at_block converging downward to LEAST(existing, candidate). This
 //     lets the backfiller replay the TRUE AddAdapter@X for an adapter the live
 //     stream lazily registered at first-seen block Y>X collapse onto one active row.
-//  3. Only a candidate added strictly after every prior removal is a genuinely new
+//  3. Only a candidate added at or after every prior removal is a genuinely new
 //     incarnation and is INSERTed. The UNIQUE key includes added_at_block, so the
-//     ON CONFLICT no-op SET keeps a same-block backfill re-run idempotent.
+//     ON CONFLICT no-op SET keeps a same-block backfill re-run idempotent — and
+//     folds a backfilled add landing exactly on a lazy register+removal block onto
+//     that already-closed row instead of resurrecting it.
+//
+// Both convergence steps also curate adapter_type: a row recorded as Unknown (the
+// sentinel written when the on-chain probe cannot classify an adapter) is upgraded
+// when a replay supplies a real type, and a known type is never overwritten. This
+// is what makes replay the curation path the column's schema comment promises.
 func (r *MorphoRepository) GetOrCreateAdapter(ctx context.Context, tx pgx.Tx, adapter *entity.MorphoAdapter) (int64, error) {
 	if err := adapter.Validate(); err != nil {
 		return 0, fmt.Errorf("validating morpho adapter: %w", err)
@@ -369,26 +379,29 @@ func (r *MorphoRepository) GetOrCreateAdapter(ctx context.Context, tx pgx.Tx, ad
 		return 0, err
 	}
 
-	// A CLOSED incarnation whose window covers the candidate (removed_at_block >=
-	// candidate added_at_block) takes precedence over the active row: the candidate
-	// is a late observation of that closed window — converge onto the earliest-closing
-	// such row instead of matching the active row. Matching the active row first
-	// would pull a re-added incarnation's added_at_block down into this prior window
-	// and leave the closed row unconverged; it would also, when no active row exists,
-	// INSERT a spuriously-active duplicate that resurrects a de-registered adapter.
+	// A CLOSED incarnation whose window strictly covers the candidate
+	// (removed_at_block > candidate added_at_block) takes precedence over the active
+	// row: the candidate is a late observation of that closed window — converge onto
+	// the earliest-closing such row instead of matching the active row. Matching the
+	// active row first would pull a re-added incarnation's added_at_block down into
+	// this prior window and leave the closed row unconverged; it would also, when no
+	// active row exists, INSERT a spuriously-active duplicate that resurrects a
+	// de-registered adapter.
 	var id int64
 	err := tx.QueryRow(ctx,
 		`UPDATE morpho_adapter
-		 SET added_at_block = LEAST(added_at_block, $3)
+		 SET added_at_block = LEAST(added_at_block, $3),
+		     adapter_type = CASE WHEN adapter_type = $4 AND $5 <> $4 THEN $5 ELSE adapter_type END
 		 WHERE id = (
 		     SELECT id FROM morpho_adapter
 		     WHERE morpho_vault_id = $1 AND address = $2
-		       AND removed_at_block IS NOT NULL AND removed_at_block >= $3
+		       AND removed_at_block IS NOT NULL AND removed_at_block > $3
 		     ORDER BY removed_at_block ASC
 		     LIMIT 1
 		 )
 		 RETURNING id`,
 		adapter.MorphoVaultID, adapter.Address, adapter.AddedAtBlock,
+		int16(entity.MorphoAdapterTypeUnknown), int16(adapter.AdapterType),
 	).Scan(&id)
 	if err == nil {
 		return id, nil
@@ -403,10 +416,12 @@ func (r *MorphoRepository) GetOrCreateAdapter(ctx context.Context, tx pgx.Tx, ad
 	// registered at first-seen block Y>X collapse onto one active row.
 	err = tx.QueryRow(ctx,
 		`UPDATE morpho_adapter
-		 SET added_at_block = LEAST(added_at_block, $3)
+		 SET added_at_block = LEAST(added_at_block, $3),
+		     adapter_type = CASE WHEN adapter_type = $4 AND $5 <> $4 THEN $5 ELSE adapter_type END
 		 WHERE morpho_vault_id = $1 AND address = $2 AND removed_at_block IS NULL
 		 RETURNING id`,
 		adapter.MorphoVaultID, adapter.Address, adapter.AddedAtBlock,
+		int16(entity.MorphoAdapterTypeUnknown), int16(adapter.AdapterType),
 	).Scan(&id)
 	if err == nil {
 		return id, nil
