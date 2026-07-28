@@ -1,17 +1,25 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
+
+// testScope is the scope the checkpoint tests record under unless they are
+// exercising a scope mismatch.
+func testScope() checkpointScope {
+	return checkpointScope{ChainID: 1, Bucket: "raw-mainnet", VaultsDigest: "digest-a"}
+}
 
 // TestCheckpointRoundTrip records completed partitions, reopens the file, and
 // confirms the recorded ones are skipped and unrecorded ones are not.
 func TestCheckpointRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "progress.jsonl")
 
-	c, err := loadCheckpoint(path)
+	c, err := loadCheckpoint(path, testScope())
 	if err != nil {
 		t.Fatalf("loadCheckpoint: %v", err)
 	}
@@ -31,7 +39,7 @@ func TestCheckpointRoundTrip(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	reopened, err := loadCheckpoint(path)
+	reopened, err := loadCheckpoint(path, testScope())
 	if err != nil {
 		t.Fatalf("reopen loadCheckpoint: %v", err)
 	}
@@ -53,14 +61,14 @@ func TestCheckpointRoundTrip(t *testing.T) {
 func TestCheckpointToleratesTruncatedTrailingLine(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "progress.jsonl")
 
-	content := `{"partition":"0-999","ts":"2026-07-21T00:00:00Z"}` + "\n" +
-		`{"partition":"1000-1999","ts":"2026-07-21T00:00:01Z"}` + "\n" +
+	content := recordLine(t, "0-999", testScope()) +
+		recordLine(t, "1000-1999", testScope()) +
 		`{"partition":"2000-29` // truncated, no newline
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	c, err := loadCheckpoint(path)
+	c, err := loadCheckpoint(path, testScope())
 	if err != nil {
 		t.Fatalf("loadCheckpoint: %v", err)
 	}
@@ -74,6 +82,52 @@ func TestCheckpointToleratesTruncatedTrailingLine(t *testing.T) {
 	}
 	if c.isDone("2000-2999") {
 		t.Error("counted a truncated partition as done")
+	}
+}
+
+// recordLine renders one JSONL checkpoint line the way markDone writes it, so
+// the scope tests build fixtures without hand-writing the record's JSON shape.
+func recordLine(t *testing.T, part string, scope checkpointScope) string {
+	t.Helper()
+	line, err := json.Marshal(checkpointRecord{Partition: part, Time: time.Unix(0, 0).UTC(), checkpointScope: scope})
+	if err != nil {
+		t.Fatalf("marshal record: %v", err)
+	}
+	return string(line) + "\n"
+}
+
+// TestCheckpointDistrustsRecordsFromAnotherScope: a "partition done" fact is
+// only true for the chain, bucket, and V2 vault set it was replayed under.
+// Reusing a progress file across any of those must not skip the partition —
+// silently losing (for a grown vault set) the new vaults' whole governance
+// history, with no error and no later convergence. A legacy record predating the
+// scope fields carries no scope at all and is distrusted for the same reason.
+func TestCheckpointDistrustsRecordsFromAnotherScope(t *testing.T) {
+	current := testScope()
+	tests := []struct {
+		name     string
+		recorded string
+	}{
+		{"grown vault set", recordLine(t, "0-999", checkpointScope{ChainID: 1, Bucket: "raw-mainnet", VaultsDigest: "digest-a-and-b"})},
+		{"different chain", recordLine(t, "0-999", checkpointScope{ChainID: 8453, Bucket: "raw-mainnet", VaultsDigest: "digest-a"})},
+		{"different bucket", recordLine(t, "0-999", checkpointScope{ChainID: 1, Bucket: "raw-staging", VaultsDigest: "digest-a"})},
+		{"legacy record without scope", `{"partition":"0-999","ts":"2026-07-21T00:00:00Z"}` + "\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "progress.jsonl")
+			if err := os.WriteFile(path, []byte(tt.recorded), 0o644); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+			c, err := loadCheckpoint(path, current)
+			if err != nil {
+				t.Fatalf("loadCheckpoint: %v", err)
+			}
+			t.Cleanup(func() { _ = c.Close() })
+			if c.isDone("0-999") {
+				t.Error("a record from another scope was trusted as done")
+			}
+		})
 	}
 }
 

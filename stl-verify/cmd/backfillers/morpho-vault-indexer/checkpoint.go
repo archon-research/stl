@@ -20,29 +20,54 @@ import (
 // the "no checkpointing" mode (-replay-progress-file unset); all methods are
 // nil-safe.
 type checkpoint struct {
-	file *os.File
-	mu   sync.Mutex
-	done map[string]struct{}
+	file  *os.File
+	scope checkpointScope
+	mu    sync.Mutex
+	done  map[string]struct{}
+}
+
+// checkpointScope is what a "partition done" fact is true FOR. A partition is
+// replayed against one chain's receipts in one S3 bucket for one set of V2
+// vaults, so a record only licenses a skip when all three still match:
+//
+//   - VaultsDigest: a run whose vault set has grown (a vault probe-skipped
+//     earlier, discovered later by the live stream, or first active outside the
+//     range) must revisit every partition. The recorded run never looked at the
+//     new vaults, and nothing else converges them — a later Allocate lazily
+//     self-heals the adapter at the wrong added_at_block, and the skipped
+//     partitions never correct it. Silently losing the new vaults' governance
+//     history is exactly the hole the fully-covered guard closed for bounds.
+//   - ChainID / Bucket: one progress file pointed at another environment must
+//     not read as progress here.
+//
+// A record whose scope does not match the current run — including a legacy
+// record predating these fields, whose scope decodes to the zero value — is
+// treated as NOT done. Re-replaying is cheap and idempotent; skipping is
+// permanent.
+type checkpointScope struct {
+	ChainID      int64  `json:"chain_id"`
+	Bucket       string `json:"bucket"`
+	VaultsDigest string `json:"vaults_digest"`
 }
 
 // loadCheckpoint opens (creating if absent) the JSONL file at path, reads the
-// completed partitions into memory tolerating a truncated trailing line, and
-// leaves the file positioned at the end in append mode.
-func loadCheckpoint(path string) (*checkpoint, error) {
-	done, err := readCheckpoint(path)
+// partitions completed under scope into memory tolerating a truncated trailing
+// line, and leaves the file positioned at the end in append mode.
+func loadCheckpoint(path string, scope checkpointScope) (*checkpoint, error) {
+	done, err := readCheckpoint(path, scope)
 	if err != nil {
 		return nil, fmt.Errorf("reading checkpoint: %w", err)
 	}
 
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("opening checkpoint file: %w", err)
 	}
 
-	return &checkpoint{file: f, done: done}, nil
+	return &checkpoint{file: f, scope: scope, done: done}, nil
 }
 
-func readCheckpoint(path string) (map[string]struct{}, error) {
+func readCheckpoint(path string, scope checkpointScope) (map[string]struct{}, error) {
 	done := make(map[string]struct{})
 
 	f, err := os.Open(path)
@@ -67,7 +92,7 @@ func readCheckpoint(path string) (map[string]struct{}, error) {
 			// excluded any further lines by returning false at EOF.
 			continue
 		}
-		if rec.Partition == "" {
+		if rec.Partition == "" || rec.checkpointScope != scope {
 			continue
 		}
 		done[rec.Partition] = struct{}{}
@@ -78,10 +103,12 @@ func readCheckpoint(path string) (map[string]struct{}, error) {
 	return done, nil
 }
 
-// checkpointRecord is one JSONL line: a partition prefix recorded done.
+// checkpointRecord is one JSONL line: a partition prefix recorded done, and the
+// scope that fact is true for.
 type checkpointRecord struct {
 	Partition string    `json:"partition"`
 	Time      time.Time `json:"ts"`
+	checkpointScope
 }
 
 // isDone reports whether the partition has already been fully replayed.
@@ -105,7 +132,7 @@ func (c *checkpoint) markDone(key string) error {
 		return fmt.Errorf("markDone: empty key")
 	}
 
-	line, err := json.Marshal(checkpointRecord{Partition: key, Time: time.Now().UTC()})
+	line, err := json.Marshal(checkpointRecord{Partition: key, Time: time.Now().UTC(), checkpointScope: c.scope})
 	if err != nil {
 		return fmt.Errorf("marshal checkpoint record: %w", err)
 	}

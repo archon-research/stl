@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -60,7 +62,7 @@ func replayV2StructuredEvents(
 		return fmt.Errorf("deriving VaultV2 structured topics: %w", err)
 	}
 
-	checkpoint, err := openReplayCheckpoint(cfg.replayProgressFile)
+	checkpoint, err := openReplayCheckpoint(cfg.replayProgressFile, replayCheckpointScope(cfg, v2Vaults))
 	if err != nil {
 		return fmt.Errorf("opening replay checkpoint: %w", err)
 	}
@@ -144,11 +146,39 @@ func buildReplayService(logger *slog.Logger, multicaller outbound.Multicaller, p
 
 // openReplayCheckpoint returns a nil (no-op, nil-safe) checkpoint when no
 // progress file is configured, else an append-only JSONL checkpoint at path.
-func openReplayCheckpoint(path string) (*checkpoint, error) {
+func openReplayCheckpoint(path string, scope checkpointScope) (*checkpoint, error) {
 	if path == "" {
 		return nil, nil
 	}
-	return loadCheckpoint(path)
+	return loadCheckpoint(path, scope)
+}
+
+// replayCheckpointScope pins this run's checkpoint records to the chain, bucket,
+// and V2 vault set they were replayed under (see checkpointScope).
+func replayCheckpointScope(cfg config, v2Vaults map[common.Address]struct{}) checkpointScope {
+	return checkpointScope{
+		ChainID:      cfg.chainID,
+		Bucket:       cfg.bucket,
+		VaultsDigest: v2VaultSetDigest(v2Vaults),
+	}
+}
+
+// v2VaultSetDigest is a deterministic sha256 over the V2 vault set, computed
+// from the sorted lowercase addresses so it identifies set membership alone —
+// not Go map iteration order or address checksum casing.
+func v2VaultSetDigest(vaults map[common.Address]struct{}) string {
+	addresses := make([]string, 0, len(vaults))
+	for addr := range vaults {
+		addresses = append(addresses, strings.ToLower(addr.Hex()))
+	}
+	sort.Strings(addresses)
+
+	digest := sha256.New()
+	for _, addr := range addresses {
+		digest.Write([]byte(addr))
+		digest.Write([]byte{'\n'})
+	}
+	return hex.EncodeToString(digest.Sum(nil))
 }
 
 // replayPartition collects, orders, and replays every structured V2 log in one
