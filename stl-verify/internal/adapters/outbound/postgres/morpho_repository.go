@@ -445,8 +445,8 @@ func (r *MorphoRepository) GetOrCreateAdapter(ctx context.Context, tx pgx.Tx, ad
 
 // EnsureIncarnationToClose guarantees a removal at removedAtBlock has exactly one
 // incarnation to close. The contract is on
-// outbound.MorphoRepository.EnsureIncarnationToClose; the mechanics that matter here are
-// the ORDER of the three steps and that all of them run under one lock.
+// outbound.MorphoRepository.EnsureIncarnationToClose; what matters here is that the lock,
+// the decision and the registration are one indivisible step.
 //
 // The advisory lock is taken BEFORE the decisive read, not just before the insert, and
 // that is the whole reason this is one method rather than the caller's composition of a
@@ -840,10 +840,11 @@ func (r *MorphoRepository) GetActiveAdapter(ctx context.Context, tx pgx.Tx, morp
 // contains atBlock, reading through the caller's transaction (read-your-writes).
 //
 // The removed_at_block >= atBlock predicate is what distinguishes this from
-// incarnationLiveAt, whose scope is only added_at_block <= atBlock: an incarnation
-// that already CLOSED below atBlock does not cover it, so this returns nil and the
-// caller registers the unobserved later incarnation instead of letting the removal
-// converge onto — or mint a zero-length duplicate of — the earlier one.
+// incarnationLiveAt, whose scope is only added_at_block <= atBlock: an incarnation that
+// already CLOSED below atBlock does not cover it, so this returns nil rather than letting a
+// removal converge onto — or mint a zero-length duplicate of — the earlier one. Whether
+// that nil means the removal is a relocation of that close or a lifetime of its own is
+// hasIncarnationToClose's next question, not this one.
 //
 // Unexported on purpose: it is one step of EnsureIncarnationToClose's decision and
 // takes no lock of its own, so a caller that could reach it directly would be able to
