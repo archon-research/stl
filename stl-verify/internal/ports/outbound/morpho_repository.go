@@ -182,9 +182,9 @@ type MorphoRepository interface {
 	//
 	// The real fix is an incarnation-sequence key on morpho_adapter, so a replayed add
 	// or remove names which lifetime it belongs to instead of being matched by block
-	// range, and morpho_adapter_state rows can be re-homed between them. That is
-	// ticketed as a follow-up; until it lands, a conflated row is repaired by hand or
-	// by a replay spanning the adapter's whole lifecycle history.
+	// range, and morpho_adapter_state rows can be re-homed between them. That is the
+	// follow-up this change deliberately defers to; until it lands, a conflated row is
+	// repaired by hand or by a replay spanning the adapter's whole lifecycle history.
 	MarkAdapterRemoved(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, removedAtBlock int64, removedAtBlockVersion int) error
 
 	// GetActiveAdapter retrieves the active (not-yet-removed) adapter for a vault

@@ -636,7 +636,7 @@ func (r *MorphoRepository) incarnationLiveAt(ctx context.Context, tx pgx.Tx, mor
 // of different depths can leave a canonical descendant at the same version as an
 // earlier-block event that is not its ancestor, and the guard then refuses a correct
 // removal. That is loud rather than silent; the real fix is the incarnation-sequence key
-// the port doc ticket names.
+// the port doc names as the deferred follow-up.
 //
 // Shape note: morpho_adapter_state is a compressed + S3-tiered hypertable partitioned
 // on timestamp, while this predicate filters block_number, so no chunk exclusion
@@ -682,8 +682,8 @@ func (r *MorphoRepository) orphanedStateError(ctx context.Context, tx pgx.Tx, ad
 	).Scan(&orphaned, &latest); err != nil {
 		return fmt.Errorf("counting adapter_state snapshots after block %d: %w", closeAt, err)
 	}
-	return fmt.Errorf("closing incarnation %d at block %d would orphan %d morpho_adapter_state row(s) recorded after it at block_version >= %d (latest block %d): those snapshots belong to a later incarnation of this adapter and must be re-homed onto it by hand before the removal can be recorded",
-		adapterID, closeAt, orphaned, removedAtBlockVersion, latest)
+	return fmt.Errorf("closing incarnation %d at block %d would orphan %d morpho_adapter_state row(s) recorded after it (latest block %d): they are not dead-chain residue of a reorg that relocated this removal (observed at block_version %d), so they belong to a later incarnation of this adapter and must be re-homed onto it by hand before the removal can be recorded",
+		adapterID, closeAt, orphaned, latest, removedAtBlockVersion)
 }
 
 // GetActiveAdapter retrieves the active adapter for a vault and address, reading
