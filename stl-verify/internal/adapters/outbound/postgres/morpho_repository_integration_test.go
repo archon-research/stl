@@ -1670,6 +1670,22 @@ func (f *morphoTestFixture) removeAdapter(ctx context.Context, vaultID int64, ad
 	return tx.Commit(ctx)
 }
 
+// insertClosedIncarnation writes a zero-length incarnation straight to the table, for the
+// registry shapes no single write path produces (a healed row beside another incarnation
+// whose close it sits between). Returns its DB ID.
+func (f *morphoTestFixture) insertClosedIncarnation(t *testing.T, ctx context.Context, vaultID int64, address []byte, block int64) int64 {
+	t.Helper()
+	var id int64
+	if err := f.pool.QueryRow(ctx,
+		`INSERT INTO morpho_adapter (morpho_vault_id, address, asset_token_id, adapter_type, added_at_block, removed_at_block)
+		 VALUES ($1, $2, $3, $4, $5, $5) RETURNING id`,
+		vaultID, address, f.loanTokenID, int16(entity.MorphoAdapterTypeMarketV1), block,
+	).Scan(&id); err != nil {
+		t.Fatalf("inserting a closed incarnation at block %d: %v", block, err)
+	}
+	return id
+}
+
 // adapterIncarnationAt runs GetAdapterIncarnationAt (which reads through the
 // caller's tx) in a short read transaction that is rolled back afterwards.
 func (f *morphoTestFixture) adapterIncarnationAt(t *testing.T, ctx context.Context, vaultID int64, address []byte, atBlock int64) *entity.MorphoAdapter {
@@ -2451,6 +2467,194 @@ func TestEnsureIncarnationToClose_DecidesAndRegistersUnderOneLock(t *testing.T) 
 	want := fmt.Sprintf("id=%d [%d,%d]", addedID, addAt, removeAt)
 	if got := fixture.describeIncarnations(t, ctx, vaultID, addr); got != want {
 		t.Errorf("registry = %q, want %q: the removal decided before it held the lock, so it minted its own incarnation instead of closing the one being added", got, want)
+	}
+}
+
+// TestEnsureIncarnationToClose_RelocatedRemovalConvergesTheHealedRow is the
+// bounded-reorg-residue convergence for a HEALED removal, the one shape the covering
+// question alone cannot see.
+//
+// A removal for a lifetime nobody recorded heals [R,R]. When a reorg re-lands that same
+// removal a few blocks away, the healed row's added_at_block sits ABOVE the relocated
+// block, so nothing covers it and a second heal mints a second zero-length incarnation for
+// one on-chain removal. Recognising the recorded close as the relocation target instead
+// leaves exactly one row, converged to the earliest observation whichever way the removal
+// moved — and moves the healed row's added_at_block down with it, because that block is a
+// lower-bound placeholder rather than an observation and added_at_block <= removed_at_block
+// must hold.
+func TestEnsureIncarnationToClose_RelocatedRemovalConvergesTheHealedRow(t *testing.T) {
+	const healedAt = int64(1000)
+
+	tests := []struct {
+		name        string
+		relocatedTo int64
+		wantWindow  int64
+	}{
+		{name: "relocated a few blocks earlier", relocatedTo: healedAt - 10, wantWindow: healedAt - 10},
+		{name: "relocated a few blocks later", relocatedTo: healedAt + 10, wantWindow: healedAt},
+		{
+			name:        "relocated to the far lower edge of the reorg window",
+			relocatedTo: healedAt - maxRemovalRelocationDistance, wantWindow: healedAt - maxRemovalRelocationDistance,
+		},
+		{
+			name:        "relocated to the far upper edge of the reorg window",
+			relocatedTo: healedAt + maxRemovalRelocationDistance, wantWindow: healedAt,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := setupMorphoTest(t)
+			ctx := context.Background()
+			vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x5a))
+			addr := adapterAddr(0x5b)
+
+			if err := fixture.removeAdapter(ctx, vaultID, addr, healedAt, entity.MorphoAdapterTypeMarketV1); err != nil {
+				t.Fatalf("healing the unobserved removal at %d: %v", healedAt, err)
+			}
+			var healedID int64
+			if err := fixture.pool.QueryRow(ctx,
+				`SELECT id FROM morpho_adapter WHERE morpho_vault_id = $1 AND address = $2`,
+				vaultID, addr).Scan(&healedID); err != nil {
+				t.Fatalf("reading the healed incarnation: %v", err)
+			}
+
+			if err := fixture.removeAdapter(ctx, vaultID, addr, tt.relocatedTo, entity.MorphoAdapterTypeMarketV1); err != nil {
+				t.Fatalf("re-landing the removal at %d: %v", tt.relocatedTo, err)
+			}
+
+			want := fmt.Sprintf("id=%d [%d,%d]", healedID, tt.wantWindow, tt.wantWindow)
+			if got := fixture.describeIncarnations(t, ctx, vaultID, addr); got != want {
+				t.Errorf("registry = %q, want %q: the re-landed removal is the healed one relocated, not a second lifetime", got, want)
+			}
+		})
+	}
+}
+
+// TestEnsureIncarnationToClose_RemovalBeyondTheReorgWindowHealsAFreshIncarnation is the
+// other side of the relocation bound: too far from the recorded close to be the same
+// removal, so it is a lifetime of its own whose AddAdapter was never observed and it gets
+// its own row. Without this the relocation match above would swallow every unobserved
+// later lifetime into the previous one's close.
+func TestEnsureIncarnationToClose_RemovalBeyondTheReorgWindowHealsAFreshIncarnation(t *testing.T) {
+	const firstHeal = int64(900)
+
+	tests := []struct {
+		name     string
+		removeAt int64
+	}{
+		{name: "further above the recorded close than a reorg reaches", removeAt: firstHeal + maxRemovalRelocationDistance + 1},
+		{name: "further below the recorded close than a reorg reaches", removeAt: firstHeal - maxRemovalRelocationDistance - 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := setupMorphoTest(t)
+			ctx := context.Background()
+			vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x5c))
+			addr := adapterAddr(0x5d)
+
+			if err := fixture.removeAdapter(ctx, vaultID, addr, firstHeal, entity.MorphoAdapterTypeMarketV1); err != nil {
+				t.Fatalf("healing the unobserved removal at %d: %v", firstHeal, err)
+			}
+			if err := fixture.removeAdapter(ctx, vaultID, addr, tt.removeAt, entity.MorphoAdapterTypeMarketV1); err != nil {
+				t.Fatalf("healing the second unobserved removal at %d: %v", tt.removeAt, err)
+			}
+
+			registry := fixture.describeIncarnations(t, ctx, vaultID, addr)
+			for _, window := range []int64{firstHeal, tt.removeAt} {
+				if want := fmt.Sprintf("[%d,%d]", window, window); !strings.Contains(registry, want) {
+					t.Errorf("registry = %q, want an incarnation %s of its own", registry, want)
+				}
+			}
+			if got := strings.Count(registry, "id="); got != 2 {
+				t.Errorf("registry = %q, want 2 incarnations: the two removals are too far apart to be one", registry)
+			}
+		})
+	}
+}
+
+// TestEnsureIncarnationToClose_CoveringIncarnationWinsOverANearerClose pins the precedence
+// between the two ways a removal can already have a row to close. The registry below holds
+// a real lifetime [900, 1000] that CONTAINS the re-landed removal at 990, and a zero-length
+// [995, 995] whose recorded close sits NEARER to it. Containment wins: the removal narrows
+// the lifetime it happened inside, and that row's added_at_block — a real observation, not
+// the healed lower bound — is left where it is.
+func TestEnsureIncarnationToClose_CoveringIncarnationWinsOverANearerClose(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x5e))
+	addr := adapterAddr(0x5f)
+
+	const (
+		addedAt     = int64(900)
+		recorded    = int64(1000)
+		nearerClose = int64(995)
+		relocatedTo = int64(990)
+	)
+
+	coveringID := fixture.createTestAdapter(t, ctx, vaultID, addr, addedAt)
+	if err := fixture.markAdapterRemoved(t, ctx, vaultID, addr, recorded); err != nil {
+		t.Fatalf("recording the removal at %d: %v", recorded, err)
+	}
+	nearerID := fixture.insertClosedIncarnation(t, ctx, vaultID, addr, nearerClose)
+
+	if err := fixture.removeAdapter(ctx, vaultID, addr, relocatedTo, entity.MorphoAdapterTypeMarketV1); err != nil {
+		t.Fatalf("re-landing the removal at %d: %v", relocatedTo, err)
+	}
+
+	want := fmt.Sprintf("id=%d [%d,%d] id=%d [%d,%d]", coveringID, addedAt, relocatedTo, nearerID, nearerClose, nearerClose)
+	if got := fixture.describeIncarnations(t, ctx, vaultID, addr); got != want {
+		t.Errorf("registry = %q, want %q", got, want)
+	}
+}
+
+// TestEnsureIncarnationToClose_RelocationOntoAnAmbiguousRegistryIsRefused pins what happens
+// when the relocation target and the incarnation MarkAdapterRemoved resolves are different
+// rows. The registry holds a fully observed [100, 200] and a healed [1000, 1000]; a removal
+// re-landing at 990 is a relocation of the healed close, but the row registered at or
+// before 990 is the unrelated first lifetime.
+//
+// Nothing here can tell which of the two the removal belongs to — that needs the
+// incarnation-sequence key the port doc defers — so it stops loudly on the relocation bound
+// rather than picking one. Healing a THIRD zero-length row instead, which is what asking
+// only the covering question did, is the outcome this refuses.
+func TestEnsureIncarnationToClose_RelocationOntoAnAmbiguousRegistryIsRefused(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x60))
+	addr := adapterAddr(0x61)
+
+	const (
+		firstAdd    = int64(100)
+		firstRemove = int64(200)
+		healedAt    = int64(1000)
+		relocatedTo = int64(990)
+	)
+
+	firstID := fixture.createTestAdapter(t, ctx, vaultID, addr, firstAdd)
+	if err := fixture.markAdapterRemoved(t, ctx, vaultID, addr, firstRemove); err != nil {
+		t.Fatalf("recording the first removal at %d: %v", firstRemove, err)
+	}
+	if err := fixture.removeAdapter(ctx, vaultID, addr, healedAt, entity.MorphoAdapterTypeMarketV1); err != nil {
+		t.Fatalf("healing the second removal at %d: %v", healedAt, err)
+	}
+	var healedID int64
+	if err := fixture.pool.QueryRow(ctx,
+		`SELECT id FROM morpho_adapter WHERE morpho_vault_id = $1 AND address = $2 AND added_at_block = $3`,
+		vaultID, addr, healedAt).Scan(&healedID); err != nil {
+		t.Fatalf("reading the healed incarnation: %v", err)
+	}
+
+	err := fixture.removeAdapter(ctx, vaultID, addr, relocatedTo, entity.MorphoAdapterTypeMarketV1)
+	if err == nil {
+		t.Fatalf("a removal at %d must not be resolved silently: registry is now %s", relocatedTo, fixture.describeIncarnations(t, ctx, vaultID, addr))
+	}
+	if !strings.Contains(err.Error(), "conflated incarnation") {
+		t.Errorf("error %q should name the conflated-incarnation hypothesis", err.Error())
+	}
+
+	want := fmt.Sprintf("id=%d [%d,%d] id=%d [%d,%d]", firstID, firstAdd, firstRemove, healedID, healedAt, healedAt)
+	if got := fixture.describeIncarnations(t, ctx, vaultID, addr); got != want {
+		t.Errorf("registry = %q, want %q unchanged: the refused removal must write nothing", got, want)
 	}
 }
 

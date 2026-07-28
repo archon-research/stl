@@ -462,11 +462,11 @@ func (r *MorphoRepository) EnsureIncarnationToClose(ctx context.Context, tx pgx.
 	if err := lockAdapterKey(ctx, tx, morphoVaultID, address); err != nil {
 		return false, err
 	}
-	covering, err := r.getAdapterIncarnationAt(ctx, tx, morphoVaultID, address, removedAtBlock)
+	recorded, err := r.hasIncarnationToClose(ctx, tx, morphoVaultID, address, removedAtBlock)
 	if err != nil {
 		return false, err
 	}
-	if covering != nil {
+	if recorded {
 		return false, nil
 	}
 	if candidate == nil {
@@ -477,6 +477,38 @@ func (r *MorphoRepository) EnsureIncarnationToClose(ctx context.Context, tx pgx.
 		return false, err
 	}
 	return true, nil
+}
+
+// hasIncarnationToClose reports whether the registry already holds an incarnation a removal
+// at removedAtBlock can close, asking the two questions in precedence order.
+//
+// A COVERING incarnation is the unambiguous answer and is asked first: a removal inside a
+// recorded lifetime closes THAT lifetime, whatever else the registry holds.
+//
+// Failing that, a recorded close within maxRemovalRelocationDistance of the removal is the
+// same on-chain removal a reorg relocated, so this removal is a re-observation of it rather
+// than evidence of an unrecorded lifetime. Asking only the covering question is what minted
+// a second zero-length row every time a HEALED removal re-landed: the heal records [R,R],
+// whose added_at_block sits above a relocation to R-10, so nothing covers it
+// (TestEnsureIncarnationToClose_RelocatedRemovalConvergesTheHealedRow). Which row that
+// re-observation converges, in which direction, and whether it may converge at all stay
+// MarkAdapterRemoved's decisions — this only declines to register a duplicate in front of
+// them, and when its answer and MarkAdapterRemoved's disagree the relocation bound stops the
+// removal loudly rather than either of them guessing
+// (TestEnsureIncarnationToClose_RelocationOntoAnAmbiguousRegistryIsRefused).
+func (r *MorphoRepository) hasIncarnationToClose(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, removedAtBlock int64) (bool, error) {
+	covering, err := r.getAdapterIncarnationAt(ctx, tx, morphoVaultID, address, removedAtBlock)
+	if err != nil {
+		return false, err
+	}
+	if covering != nil {
+		return true, nil
+	}
+	_, relocated, err := r.nearbyRecordedClose(ctx, tx, morphoVaultID, address, removedAtBlock)
+	if err != nil {
+		return false, err
+	}
+	return relocated != nil, nil
 }
 
 // createAdapterIncarnation inserts the given incarnation and nothing else. The
@@ -564,7 +596,17 @@ func (r *MorphoRepository) closeIncarnationLiveAt(ctx context.Context, tx pgx.Tx
 		}
 	}
 
-	tag, err := tx.Exec(ctx, `UPDATE morpho_adapter SET removed_at_block = $2 WHERE id = $1`, id, closeAt)
+	// The LEAST is what keeps added_at_block <= removed_at_block when a relocation moves the
+	// close BELOW the row's registration block. That only happens to a healed incarnation,
+	// whose added_at_block is the removal block recorded as a lower bound rather than an
+	// observation of the add, so following the close down is the correct reading of it; on
+	// every other path closeAt is at or above added_at_block and this is a no-op. It cannot
+	// collide on UNIQUE (morpho_vault_id, address, added_at_block) either: a row already
+	// registered AT closeAt would have covered the removal, and a covering incarnation is
+	// resolved before any relocation.
+	tag, err := tx.Exec(ctx,
+		`UPDATE morpho_adapter SET removed_at_block = $2, added_at_block = LEAST(added_at_block, $2) WHERE id = $1`,
+		id, closeAt)
 	if err != nil {
 		return fmt.Errorf("writing removed_at_block %d: %w", closeAt, err)
 	}
@@ -627,6 +669,12 @@ func (r *MorphoRepository) convergedCloseBlock(morphoVaultID int64, address []by
 // before that block. The added_at_block scope is what keeps a replayed old
 // RemoveAdapter@X from closing an incarnation re-added after X with a removal block
 // earlier than its own registration.
+//
+// Nothing registered at or before atBlock does NOT mean no incarnation: a healed removal
+// records [R,R], whose added_at_block sits above a reorg that relocates it downward, and
+// that row is the one the removal belongs to. Hence the fallback — and it must stay a
+// fallback, because a row registered at or before atBlock is what routes a removal further
+// than the reorg window from its recorded close into the conflated-incarnation refusal.
 func (r *MorphoRepository) incarnationLiveAt(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, atBlock int64) (int64, *int64, error) {
 	var (
 		id      int64
@@ -639,13 +687,55 @@ func (r *MorphoRepository) incarnationLiveAt(ctx context.Context, tx pgx.Tx, mor
 		 LIMIT 1`,
 		morphoVaultID, address, atBlock,
 	).Scan(&id, &removed)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, nil, fmt.Errorf("no adapter incarnation registered at or before block %d", atBlock)
+	if err == nil {
+		return id, removed, nil
 	}
-	if err != nil {
+	if !errors.Is(err, pgx.ErrNoRows) {
 		return 0, nil, fmt.Errorf("looking up adapter incarnation live at block %d: %w", atBlock, err)
 	}
-	return id, removed, nil
+
+	id, relocated, err := r.nearbyRecordedClose(ctx, tx, morphoVaultID, address, atBlock)
+	if err != nil {
+		return 0, nil, err
+	}
+	if relocated == nil {
+		return 0, nil, fmt.Errorf("no adapter incarnation registered at or before block %d, nor closed within %d blocks of it", atBlock, maxRemovalRelocationDistance)
+	}
+	return id, relocated, nil
+}
+
+// nearbyRecordedClose returns the incarnation whose recorded close sits NEAREST to atBlock
+// among those within maxRemovalRelocationDistance of it, or a nil block when none does. A
+// close that near is the same on-chain removal a reorg relocated, which is the only thing
+// that lets a removal find the incarnation it belongs to when that row's added_at_block is
+// above its own block.
+//
+// Nearest, rather than earliest or latest, because the whole claim being made is "these two
+// observations are one removal that moved", and the closest recorded close is the best
+// candidate for that. The added_at_block tiebreak only settles closes equidistant on either
+// side, and settles them on the later incarnation, mirroring the ORDER BY the covering
+// lookup and incarnationLiveAt both use.
+func (r *MorphoRepository) nearbyRecordedClose(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, atBlock int64) (int64, *int64, error) {
+	var (
+		id      int64
+		removed int64
+	)
+	err := tx.QueryRow(ctx,
+		`SELECT id, removed_at_block FROM morpho_adapter
+		 WHERE morpho_vault_id = $1 AND address = $2
+		   AND removed_at_block IS NOT NULL
+		   AND removed_at_block BETWEEN $3::BIGINT - $4::BIGINT AND $3::BIGINT + $4::BIGINT
+		 ORDER BY abs(removed_at_block - $3::BIGINT), added_at_block DESC
+		 LIMIT 1`,
+		morphoVaultID, address, atBlock, maxRemovalRelocationDistance,
+	).Scan(&id, &removed)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, nil, nil
+	}
+	if err != nil {
+		return 0, nil, fmt.Errorf("looking up an adapter close within %d blocks of %d: %w", maxRemovalRelocationDistance, atBlock, err)
+	}
+	return id, &removed, nil
 }
 
 // assertNoStateAfterRemoval refuses a lifetime-narrowing close when it would strand
