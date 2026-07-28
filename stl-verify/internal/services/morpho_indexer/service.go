@@ -692,7 +692,7 @@ func (s *Service) processMetaMorphoLog(ctx context.Context, log shared.Log, vaul
 	case *AddAdapterEvent:
 		return s.handleAddAdapter(ctx, e, vaultAddress, blockNumber, blockHash, blockVersion, blockTimestamp)
 	case *RemoveAdapterEvent:
-		return s.handleRemoveAdapter(ctx, e, vaultAddress, blockNumber, blockVersion)
+		return s.handleRemoveAdapter(ctx, e, vaultAddress, blockNumber)
 	case *AllocateEvent:
 		return s.handleAllocation(ctx, e.Adapter, vaultAddress, blockNumber, blockHash, blockVersion, blockTimestamp)
 	case *DeallocateEvent:
@@ -1016,11 +1016,10 @@ func (s *Service) persistDiscoveredVault(ctx context.Context, vaultAddress commo
 // single row it seeds here, and hangs the seed snapshot off that row. If the
 // backfiller later replays an add/remove pair that predates discovery, the row
 // converges into that earlier window while still owning snapshots from after it —
-// which MarkAdapterRemoved's orphan guard is there to refuse rather than let the
-// lifetime be silently corrupted. That guard is a backstop with a documented blind
-// spot, not a substitute for the ordering (see assertNoStateAfterRemoval): replaying
-// lifecycle first means every snapshot is written against the incarnation that
-// actually owns it.
+// which MarkAdapterRemoved's orphan guard refuses, because that close is the
+// incarnation's first and so compares block_number alone (assertNoStateAfterRemoval).
+// The guard is a backstop, not a substitute for the ordering: replaying lifecycle first
+// means every snapshot is written against the incarnation that actually owns it.
 func (s *Service) seedDiscoveredAdapters(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault, vaultAddress common.Address, blockNumber int64, blockVersion int, blockTimestamp time.Time, adapters []discoveredAdapter) error {
 	for _, a := range adapters {
 		adapterID, err := s.upsertAdapterRow(ctx, tx, vault, vaultAddress, a.address, a.adapterType, blockNumber)

@@ -22,8 +22,8 @@ type MockMorphoRepository struct {
 	SaveVaultPositionFn   func(ctx context.Context, tx pgx.Tx, position *entity.MorphoVaultPosition) error
 
 	GetOrCreateAdapterFn       func(ctx context.Context, tx pgx.Tx, adapter *entity.MorphoAdapter) (int64, error)
-	CreateAdapterIncarnationFn func(ctx context.Context, tx pgx.Tx, adapter *entity.MorphoAdapter) (int64, error)
-	MarkAdapterRemovedFn       func(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, removedAtBlock int64, removedAtBlockVersion int) error
+	CreateAdapterIncarnationFn func(ctx context.Context, tx pgx.Tx, adapter *entity.MorphoAdapter, removedAtBlock int64) (int64, error)
+	MarkAdapterRemovedFn       func(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, removedAtBlock int64) error
 	GetActiveAdapterFn         func(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte) (*entity.MorphoAdapter, error)
 	GetAdapterIncarnationAtFn  func(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, atBlock int64) (*entity.MorphoAdapter, error)
 	GetActiveAdaptersByVaultFn func(ctx context.Context, morphoVaultID int64) ([]*entity.MorphoAdapter, error)
@@ -102,16 +102,16 @@ func (m *MockMorphoRepository) GetOrCreateAdapter(ctx context.Context, tx pgx.Tx
 	return 1, nil
 }
 
-func (m *MockMorphoRepository) CreateAdapterIncarnation(ctx context.Context, tx pgx.Tx, adapter *entity.MorphoAdapter) (int64, error) {
+func (m *MockMorphoRepository) CreateAdapterIncarnation(ctx context.Context, tx pgx.Tx, adapter *entity.MorphoAdapter, removedAtBlock int64) (int64, error) {
 	if m.CreateAdapterIncarnationFn != nil {
-		return m.CreateAdapterIncarnationFn(ctx, tx, adapter)
+		return m.CreateAdapterIncarnationFn(ctx, tx, adapter, removedAtBlock)
 	}
 	return 1, nil
 }
 
-func (m *MockMorphoRepository) MarkAdapterRemoved(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, removedAtBlock int64, removedAtBlockVersion int) error {
+func (m *MockMorphoRepository) MarkAdapterRemoved(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, removedAtBlock int64) error {
 	if m.MarkAdapterRemovedFn != nil {
-		return m.MarkAdapterRemovedFn(ctx, tx, morphoVaultID, address, removedAtBlock, removedAtBlockVersion)
+		return m.MarkAdapterRemovedFn(ctx, tx, morphoVaultID, address, removedAtBlock)
 	}
 	return nil
 }
