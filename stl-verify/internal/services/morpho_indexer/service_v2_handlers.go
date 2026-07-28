@@ -38,9 +38,8 @@ func (s *Service) resolveV2Vault(vaultAddress common.Address) (*entity.MorphoVau
 // does for the adapters a mid-life-discovered vault already holds. The seed is what
 // keeps a freshly registered adapter from looking like adapter_data_missing to
 // VEC-219's composition probe until the vault's first allocation, which can be many
-// hours later. An unclassifiable adapter is persisted as Unknown behind a WARN,
-// mirroring the VaultShaped discovery sentinel so a future adapter kind surfaces
-// instead of being dropped. Both chain reads run before the transaction opens so a
+// hours later. An unclassifiable adapter is persisted as Unknown behind a WARN
+// (warnIfUnknownAdapterType). Both chain reads run before the transaction opens so a
 // pooled DB connection never sits idle across a chain round-trip.
 func (s *Service) handleAddAdapter(ctx context.Context, e *AddAdapterEvent, vaultAddress common.Address, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) error {
 	vault, err := s.resolveV2Vault(vaultAddress)
@@ -104,13 +103,10 @@ func (s *Service) saveAdapterSeedState(ctx context.Context, tx pgx.Tx, adapterID
 	return s.morphoRepo.SaveAdapterState(ctx, tx, state)
 }
 
-// handleRemoveAdapter marks the adapter inactive from this block onward. If we
-// never witnessed the adapter's AddAdapter (it predates the vault's discovery on
-// the live stream — AddAdapter events for mid-life-discovered V2 vaults are
-// always historical and never replayed on SNS/SQS), the adapter is lazily
-// registered first so the removal closes an audit-consistent row, instead of
-// MarkAdapterRemoved failing with a 0-rows error and poisoning the FIFO queue.
-func (s *Service) handleRemoveAdapter(ctx context.Context, e *RemoveAdapterEvent, vaultAddress common.Address, blockNumber int64, blockVersion int) error {
+// handleRemoveAdapter marks the adapter inactive from this block onward, registering the
+// incarnation to close first when none is on record (see ensureIncarnationToClose for
+// when that happens and why the registration is not the Allocate path's).
+func (s *Service) handleRemoveAdapter(ctx context.Context, e *RemoveAdapterEvent, vaultAddress common.Address, blockNumber int64) error {
 	vault, err := s.resolveV2Vault(vaultAddress)
 	if err != nil {
 		return err
@@ -123,7 +119,7 @@ func (s *Service) handleRemoveAdapter(ctx context.Context, e *RemoveAdapterEvent
 		if err := s.ensureIncarnationToClose(ctx, tx, vault, vaultAddress, e.Account, blockNumber, probedType); err != nil {
 			return err
 		}
-		return s.morphoRepo.MarkAdapterRemoved(ctx, tx, vault.ID, e.Account.Bytes(), blockNumber, blockVersion)
+		return s.morphoRepo.MarkAdapterRemoved(ctx, tx, vault.ID, e.Account.Bytes(), blockNumber)
 	})
 }
 
@@ -168,26 +164,17 @@ func (s *Service) ensureIncarnationToClose(ctx context.Context, tx pgx.Tx, vault
 }
 
 // registerIncarnationForRemoval records the incarnation a removal closes when none was
-// ever observed, as a zero-length lifetime [removedAtBlock, removedAtBlock].
-//
-// added_at_block is a LOWER BOUND here, not an estimate: a RemoveAdapter proves the
-// adapter existed at that block and says nothing about when it was added. A later
-// replay of the true AddAdapter converges it down through GetOrCreateAdapter's
-// closed-window match. That is also why this must NOT register through
-// upsertAdapterRow: its convergence would drag a later, still-active incarnation of
-// the same address down to this block and the close would then de-register an adapter
-// that is live on-chain (see the port doc on CreateAdapterIncarnation).
-//
-// Recording the row already closed is what keeps it from colliding with such a later
-// incarnation on uq_morpho_adapter_active; MarkAdapterRemoved then converges onto it as
-// an idempotent no-op.
+// ever observed. It must NOT go through upsertAdapterRow: a removal is no evidence of
+// when a lifetime began, and that path's convergence would move a later incarnation's
+// added_at_block down to this block — see outbound.MorphoRepository.CreateAdapterIncarnation
+// for the contract and what it prevents.
 func (s *Service) registerIncarnationForRemoval(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault, vaultAddress, adapter common.Address, adapterType entity.MorphoAdapterType, removedAtBlock int64) error {
 	s.warnIfUnknownAdapterType(vaultAddress, adapter, adapterType, removedAtBlock)
 	adapterEntity, err := entity.NewMorphoAdapter(vault.ID, adapter.Bytes(), vault.AssetTokenID, adapterType, removedAtBlock, &removedAtBlock)
 	if err != nil {
 		return fmt.Errorf("creating adapter entity: %w", err)
 	}
-	if _, err := s.morphoRepo.CreateAdapterIncarnation(ctx, tx, adapterEntity); err != nil {
+	if _, err := s.morphoRepo.CreateAdapterIncarnation(ctx, tx, adapterEntity, removedAtBlock); err != nil {
 		return fmt.Errorf("registering the incarnation removed at block %d: %w", removedAtBlock, err)
 	}
 	return nil
@@ -264,7 +251,7 @@ func (s *Service) ensureAdapterRegistered(ctx context.Context, tx pgx.Tx, vault 
 
 // resolveAdapterType probes an adapter's on-chain type. A probe TRANSPORT error
 // propagates (transient ⇒ SQS retries); a clean both-revert probe yields
-// MorphoAdapterTypeUnknown (upsertAdapterRow WARNs and records it). The probe is a
+// MorphoAdapterTypeUnknown, which is recorded behind a WARN (warnIfUnknownAdapterType). The probe is a
 // chain round-trip, so every caller runs it BEFORE opening its write transaction —
 // a pooled DB connection must never sit idle across it.
 func (s *Service) resolveAdapterType(ctx context.Context, adapter common.Address, atBlock int64) (entity.MorphoAdapterType, error) {
@@ -319,8 +306,9 @@ func (s *Service) upsertAdapterRow(ctx context.Context, tx pgx.Tx, vault *entity
 }
 
 // warnIfUnknownAdapterType surfaces an adapter the on-chain type probe could not
-// classify, mirroring the VaultShaped discovery sentinel so a future adapter kind is
-// recorded behind a WARN instead of being dropped.
+// classify. Mirrors the VaultShaped discovery sentinel: an unmodelled adapter kind is
+// recorded behind a WARN rather than dropped, so it can be curated later. Canonical
+// statement of that convention for the adapter registry.
 func (s *Service) warnIfUnknownAdapterType(vaultAddress, adapter common.Address, adapterType entity.MorphoAdapterType, atBlock int64) {
 	if adapterType != entity.MorphoAdapterTypeUnknown {
 		return
