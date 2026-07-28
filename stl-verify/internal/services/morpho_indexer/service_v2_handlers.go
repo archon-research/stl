@@ -82,11 +82,52 @@ func (s *Service) handleRemoveAdapter(ctx context.Context, e *RemoveAdapterEvent
 		return err
 	}
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		if _, err := s.ensureAdapterRegistered(ctx, tx, vault, vaultAddress, e.Account, blockNumber, probedType); err != nil {
+		if err := s.ensureIncarnationToClose(ctx, tx, vault, vaultAddress, e.Account, blockNumber, probedType); err != nil {
 			return err
 		}
 		return s.morphoRepo.MarkAdapterRemoved(ctx, tx, vault.ID, e.Account.Bytes(), blockNumber)
 	})
+}
+
+// ensureIncarnationToClose guarantees MarkAdapterRemoved has a row to close, and
+// registers NOTHING when one already exists.
+//
+// The distinction from the Allocate path's ensureAdapterRegistered is load-bearing.
+// A removal's decisive question is not "is there an ACTIVE row" but "is there a
+// recorded incarnation covering this block": for a redelivered or replayed
+// RemoveAdapter the incarnation is already CLOSED at that very block, so an
+// active-row check misses and registering again mints a zero-length incarnation the
+// chain never had — GetOrCreateAdapter cannot fold it onto the closed row, whose
+// window match is strict so that a live same-block remove-then-re-add still opens a
+// new one. A non-nil incarnation means the removal is already idempotent against it
+// (MarkAdapterRemoved converges), so this returns without writing.
+//
+// A nil incarnation means the adapter is genuinely unknown at removedAtBlock, which
+// includes a closed incarnation ending BELOW it: that is a later incarnation whose
+// AddAdapter we never observed, and registering it here is what lets
+// MarkAdapterRemoved close the right window instead of rejecting the removal as
+// beyond the relocation bound.
+//
+// A nil probedType means the pre-transaction check found the adapter active. If the
+// decisive read then finds no incarnation covering the block, we have no type to
+// record and no live single-consumer path that could explain it, so we fail hard
+// rather than record a defaulted classification; SQS redelivers and the pre-tx check
+// re-probes.
+func (s *Service) ensureIncarnationToClose(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault, vaultAddress, adapter common.Address, removedAtBlock int64, probedType *entity.MorphoAdapterType) error {
+	incarnation, err := s.morphoRepo.GetAdapterIncarnationAt(ctx, tx, vault.ID, adapter.Bytes(), removedAtBlock)
+	if err != nil {
+		return fmt.Errorf("looking up adapter %s incarnation at block %d: %w", adapter.Hex(), removedAtBlock, err)
+	}
+	if incarnation != nil {
+		return nil
+	}
+	if probedType == nil {
+		return fmt.Errorf("adapter %s has no incarnation covering block %d at transaction time but no type was probed before the transaction", adapter.Hex(), removedAtBlock)
+	}
+	s.logger.Warn("adapter registered lazily; AddAdapter predates vault discovery",
+		"vault", vaultAddress.Hex(), "adapter", adapter.Hex(), "block", removedAtBlock)
+	_, err = s.upsertAdapterRow(ctx, tx, vault, vaultAddress, adapter, *probedType, removedAtBlock)
+	return err
 }
 
 // handleAllocation snapshots an adapter's realAssets() after an Allocate or
@@ -132,9 +173,10 @@ func (s *Service) handleAllocation(ctx context.Context, adapter, vaultAddress co
 // the miss path takes the per-(vault, address) advisory lock). On a miss it lazily
 // registers the adapter at firstSeenBlock using probedType — the classification
 // already resolved before the transaction opened (see
-// resolveAdapterTypeIfUnregistered). Used by the Allocate/Deallocate and
-// RemoveAdapter paths, which can legitimately reach an adapter that predates the
-// vault's mid-life discovery.
+// resolveAdapterTypeIfUnregistered). Used by the Allocate/Deallocate path, which can
+// legitimately reach an adapter that predates the vault's mid-life discovery. The
+// RemoveAdapter path needs a different decisive question and uses
+// ensureIncarnationToClose instead.
 //
 // A nil probedType means the pre-transaction check found the adapter already
 // registered. If the decisive read then disagrees (the adapter is absent), we have
