@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"slices"
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -683,40 +684,90 @@ func (s *blockchainService) enumerateVaultAdapters(ctx context.Context, vaultAdd
 		}
 	}()
 
+	n, err := s.readAdaptersLength(ctx, vaultAddress, blockHash)
+	if err != nil {
+		return nil, err
+	}
+	if n == 0 {
+		return nil, nil
+	}
+	return s.readAdapterAddresses(ctx, vaultAddress, blockHash, n)
+}
+
+// maxVaultAdapters bounds adaptersLength() before the value sizes any allocation.
+// It is hostile-input protection, not a chain fact: a VaultV2's adapter set is
+// governance-curated and real vaults hold dozens, but any contract that classifies
+// as a VaultV2 can return an arbitrary uint256 here, and feeding that straight to
+// make() panics in makeslice (or OOMs). The SQS consume path has no recover(), so a
+// panic crashloops the worker and stalls all Morpho indexing; an error above the
+// bound poison-pills just the offending message instead.
+const maxVaultAdapters = 1000
+
+// adaptersPerCall bounds how many adapters(i) sub-calls one multicall aggregate
+// carries, so a vault near maxVaultAdapters cannot build a request that exceeds an
+// RPC provider's request/response/gas caps (same rationale as uniswapv3's
+// ticksPerCall).
+const adaptersPerCall = 500
+
+// readAdaptersLength reads adaptersLength() at blockHash and validates it against
+// maxVaultAdapters before it is used as a length.
+func (s *blockchainService) readAdaptersLength(ctx context.Context, vaultAddress common.Address, blockHash common.Hash) (int, error) {
 	lengthData, err := s.vaultV2ABI.Pack("adaptersLength")
 	if err != nil {
-		return nil, fmt.Errorf("packing adaptersLength call: %w", err)
+		return 0, fmt.Errorf("packing adaptersLength call: %w", err)
 	}
 	lengthResults, err := s.multicallClient.ExecuteAtHash(ctx, []outbound.Call{
 		{Target: vaultAddress, AllowFailure: false, CallData: lengthData},
 	}, blockHash)
 	if err != nil {
-		return nil, fmt.Errorf("multicall adaptersLength(): %w", err)
+		return 0, fmt.Errorf("multicall adaptersLength(): %w", err)
 	}
 	if len(lengthResults) == 0 || !lengthResults[0].Success || len(lengthResults[0].ReturnData) == 0 {
-		return nil, fmt.Errorf("adaptersLength() call failed for vault %s", vaultAddress.Hex())
+		return 0, fmt.Errorf("adaptersLength() call failed for vault %s", vaultAddress.Hex())
 	}
 	lengthUnpacked, err := s.vaultV2ABI.Unpack("adaptersLength", lengthResults[0].ReturnData)
 	if err != nil {
-		return nil, fmt.Errorf("unpacking adaptersLength() for vault %s: %w", vaultAddress.Hex(), err)
+		return 0, fmt.Errorf("unpacking adaptersLength() for vault %s: %w", vaultAddress.Hex(), err)
 	}
 	if len(lengthUnpacked) == 0 {
-		return nil, fmt.Errorf("adaptersLength() returned no values for vault %s", vaultAddress.Hex())
+		return 0, fmt.Errorf("adaptersLength() returned no values for vault %s", vaultAddress.Hex())
 	}
 	length := bigIntFromAny(lengthUnpacked[0])
-	if !length.IsInt64() || length.Sign() < 0 {
-		return nil, fmt.Errorf("adaptersLength() returned implausible length %s for vault %s", length.String(), vaultAddress.Hex())
+	if !length.IsInt64() || length.Sign() < 0 || length.Int64() > maxVaultAdapters {
+		return 0, fmt.Errorf("adaptersLength() returned implausible length %s for vault %s (bound %d)",
+			length.String(), vaultAddress.Hex(), maxVaultAdapters)
 	}
-	n := int(length.Int64())
-	if n == 0 {
-		return nil, nil
+	return int(length.Int64()), nil
+}
+
+// readAdapterAddresses reads adapters(0..n-1) at blockHash in bounded multicall
+// batches (adaptersPerCall), decoding every result positionally so the returned
+// slice keeps the vault's own registry order.
+func (s *blockchainService) readAdapterAddresses(ctx context.Context, vaultAddress common.Address, blockHash common.Hash, n int) ([]common.Address, error) {
+	indices := make([]int, n)
+	for i := range n {
+		indices[i] = i
 	}
 
-	calls := make([]outbound.Call, n)
-	for i := range n {
-		callData, err := s.vaultV2ABI.Pack("adapters", big.NewInt(int64(i)))
+	adapters := make([]common.Address, 0, n)
+	for chunk := range slices.Chunk(indices, adaptersPerCall) {
+		chunkAdapters, err := s.readAdapterAddressChunk(ctx, vaultAddress, blockHash, chunk)
 		if err != nil {
-			return nil, fmt.Errorf("packing adapters(%d) call: %w", i, err)
+			return nil, err
+		}
+		adapters = append(adapters, chunkAdapters...)
+	}
+	return adapters, nil
+}
+
+// readAdapterAddressChunk issues one adapters(i) multicall for a bounded batch of
+// registry indices and decodes every result.
+func (s *blockchainService) readAdapterAddressChunk(ctx context.Context, vaultAddress common.Address, blockHash common.Hash, indices []int) ([]common.Address, error) {
+	calls := make([]outbound.Call, len(indices))
+	for i, index := range indices {
+		callData, err := s.vaultV2ABI.Pack("adapters", big.NewInt(int64(index)))
+		if err != nil {
+			return nil, fmt.Errorf("packing adapters(%d) call: %w", index, err)
 		}
 		calls[i] = outbound.Call{Target: vaultAddress, AllowFailure: false, CallData: callData}
 	}
@@ -724,29 +775,38 @@ func (s *blockchainService) enumerateVaultAdapters(ctx context.Context, vaultAdd
 	if err != nil {
 		return nil, fmt.Errorf("multicall adapters(i): %w", err)
 	}
-	if len(results) != n {
-		return nil, fmt.Errorf("adapters(i) returned %d results, want %d for vault %s", len(results), n, vaultAddress.Hex())
+	if len(results) != len(indices) {
+		return nil, fmt.Errorf("adapters(i) returned %d results, want %d for vault %s", len(results), len(indices), vaultAddress.Hex())
 	}
 
-	adapters := make([]common.Address, n)
+	adapters := make([]common.Address, len(indices))
 	for i, r := range results {
-		if !r.Success || len(r.ReturnData) == 0 {
-			return nil, fmt.Errorf("adapters(%d) call failed for vault %s", i, vaultAddress.Hex())
-		}
-		unpacked, err := s.vaultV2ABI.Unpack("adapters", r.ReturnData)
+		addr, err := s.unpackAdapterAddress(r, indices[i], vaultAddress)
 		if err != nil {
-			return nil, fmt.Errorf("unpacking adapters(%d) for vault %s: %w", i, vaultAddress.Hex(), err)
-		}
-		if len(unpacked) == 0 {
-			return nil, fmt.Errorf("adapters(%d) returned no values for vault %s", i, vaultAddress.Hex())
-		}
-		addr, ok := unpacked[0].(common.Address)
-		if !ok {
-			return nil, fmt.Errorf("adapters(%d) returned unexpected type %T for vault %s", i, unpacked[0], vaultAddress.Hex())
+			return nil, err
 		}
 		adapters[i] = addr
 	}
 	return adapters, nil
+}
+
+// unpackAdapterAddress validates and decodes one adapters(i) result.
+func (s *blockchainService) unpackAdapterAddress(result outbound.Result, index int, vaultAddress common.Address) (common.Address, error) {
+	if !result.Success || len(result.ReturnData) == 0 {
+		return common.Address{}, fmt.Errorf("adapters(%d) call failed for vault %s", index, vaultAddress.Hex())
+	}
+	unpacked, err := s.vaultV2ABI.Unpack("adapters", result.ReturnData)
+	if err != nil {
+		return common.Address{}, fmt.Errorf("unpacking adapters(%d) for vault %s: %w", index, vaultAddress.Hex(), err)
+	}
+	if len(unpacked) == 0 {
+		return common.Address{}, fmt.Errorf("adapters(%d) returned no values for vault %s", index, vaultAddress.Hex())
+	}
+	addr, ok := unpacked[0].(common.Address)
+	if !ok {
+		return common.Address{}, fmt.Errorf("adapters(%d) returned unexpected type %T for vault %s", index, unpacked[0], vaultAddress.Hex())
+	}
+	return addr, nil
 }
 
 // getVaultCaps reads the two current allocation limits for a cap id off the

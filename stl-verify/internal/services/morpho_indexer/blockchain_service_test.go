@@ -1929,3 +1929,86 @@ func TestGetAdapterType_NumberPinned(t *testing.T) {
 		t.Errorf("adapterType = %d, want MarketV1(1)", got)
 	}
 }
+
+// enumerateVaultAdaptersHarness wires a mock that answers adaptersLength() with
+// wantLength and every adapters(i) sub-call with a distinct address, recording the
+// per-batch call counts so a test can assert both the bound and the chunking.
+func enumerateVaultAdaptersHarness(t *testing.T, vault common.Address, wantLength *big.Int) (*serviceTestHarness, *[]int) {
+	t.Helper()
+	h := newTestHarness(t)
+	batchSizes := &[]int{}
+	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return nil, fmt.Errorf("enumerateVaultAdapters must call ExecuteAtHash, not Execute")
+	}
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		if len(calls) == 1 && hasSameSelector(calls[0].CallData, adaptersLengthSelector) {
+			return []outbound.Result{{Success: true, ReturnData: h.packUint256(wantLength)}}, nil
+		}
+		*batchSizes = append(*batchSizes, len(calls))
+		results := make([]outbound.Result, len(calls))
+		for i, c := range calls {
+			if !hasSameSelector(c.CallData, adaptersSelector) {
+				t.Errorf("unexpected call in adapters(i) batch: %x", c.CallData)
+			}
+			results[i] = outbound.Result{Success: true, ReturnData: h.packAddress(common.BigToAddress(big.NewInt(int64(i + 1))))}
+		}
+		return results, nil
+	}
+	return h, batchSizes
+}
+
+// TestEnumerateVaultAdapters_ImplausibleLengthIsError pins the hostile-contract
+// guard. adaptersLength() is attacker-controlled for any address that classifies
+// as a VaultV2, and the returned value used to size a slice directly: 1<<62 made
+// make([]outbound.Call, n) panic in makeslice, and the SQS consume path has no
+// recover(), so one hostile vault crashloops the worker and stalls all Morpho
+// indexing. Anything above the sanity bound must be a plain error so the message
+// poison-pills instead.
+func TestEnumerateVaultAdapters_ImplausibleLengthIsError(t *testing.T) {
+	vault := common.HexToAddress("0xc7CDcFDEfC64631ED6799C95e3b110cd42F2bD22")
+	tests := []struct {
+		name   string
+		length *big.Int
+	}{
+		{"makeslice-panic length", new(big.Int).Lsh(big.NewInt(1), 62)},
+		{"oom-sized length", big.NewInt(100_000_000)},
+		{"one above the bound", big.NewInt(maxVaultAdapters + 1)},
+		{"beyond int64", new(big.Int).Lsh(big.NewInt(1), 100)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, _ := enumerateVaultAdaptersHarness(t, vault, tt.length)
+			got, err := h.svc.blockchainSvc.enumerateVaultAdapters(context.Background(), vault, testBlockHash)
+			if err == nil {
+				t.Fatalf("expected an error for adaptersLength() = %s, got %d adapters", tt.length, len(got))
+			}
+			if !strings.Contains(err.Error(), "implausible") {
+				t.Errorf("error should name the implausible length, got: %v", err)
+			}
+		})
+	}
+}
+
+// TestEnumerateVaultAdapters_AtBoundEnumeratesInChunks asserts the bound is
+// inclusive and that the adapters(i) reads are split into bounded multicall
+// batches (adaptersPerCall) rather than one oversized aggregate call.
+func TestEnumerateVaultAdapters_AtBoundEnumeratesInChunks(t *testing.T) {
+	vault := common.HexToAddress("0xc7CDcFDEfC64631ED6799C95e3b110cd42F2bD22")
+	h, batchSizes := enumerateVaultAdaptersHarness(t, vault, big.NewInt(maxVaultAdapters))
+
+	got, err := h.svc.blockchainSvc.enumerateVaultAdapters(context.Background(), vault, testBlockHash)
+	if err != nil {
+		t.Fatalf("enumerateVaultAdapters at the bound: %v", err)
+	}
+	if len(got) != maxVaultAdapters {
+		t.Fatalf("got %d adapters, want %d", len(got), maxVaultAdapters)
+	}
+	for _, size := range *batchSizes {
+		if size > adaptersPerCall {
+			t.Errorf("adapters(i) batch of %d calls exceeds adaptersPerCall=%d", size, adaptersPerCall)
+		}
+	}
+	if len(*batchSizes) < 2 {
+		t.Errorf("expected the at-bound enumeration to span several batches, got %v", *batchSizes)
+	}
+}
