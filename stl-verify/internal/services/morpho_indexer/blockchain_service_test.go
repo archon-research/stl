@@ -1935,8 +1935,11 @@ func TestGetAdapterType_NumberPinned(t *testing.T) {
 }
 
 // enumerateVaultAdaptersHarness wires a mock that answers adaptersLength() with
-// wantLength and every adapters(i) sub-call with a distinct address, recording the
-// per-batch call counts so a test can assert both the bound and the chunking.
+// wantLength and every adapters(i) sub-call with the address derived from the
+// DECODED index argument (adapterAddressForIndex), recording the per-batch call
+// counts so a test can assert the bound, the chunking, and — via the derived
+// addresses — that each batch requested the right global indices rather than
+// re-reading a prefix.
 func enumerateVaultAdaptersHarness(t *testing.T, vault common.Address, wantLength *big.Int) (*serviceTestHarness, *[]int) {
 	t.Helper()
 	h := newTestHarness(t)
@@ -1946,6 +1949,9 @@ func enumerateVaultAdaptersHarness(t *testing.T, vault common.Address, wantLengt
 	}
 	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 		if len(calls) == 1 && hasSameSelector(calls[0].CallData, adaptersLengthSelector) {
+			if calls[0].Target != vault {
+				t.Errorf("adaptersLength() targeted %s, want %s", calls[0].Target.Hex(), vault.Hex())
+			}
 			return []outbound.Result{{Success: true, ReturnData: h.packUint256(wantLength)}}, nil
 		}
 		*batchSizes = append(*batchSizes, len(calls))
@@ -1954,11 +1960,22 @@ func enumerateVaultAdaptersHarness(t *testing.T, vault common.Address, wantLengt
 			if !hasSameSelector(c.CallData, adaptersSelector) {
 				t.Errorf("unexpected call in adapters(i) batch: %x", c.CallData)
 			}
-			results[i] = outbound.Result{Success: true, ReturnData: h.packAddress(common.BigToAddress(big.NewInt(int64(i + 1))))}
+			if c.Target != vault {
+				t.Errorf("adapters(i) targeted %s, want %s", c.Target.Hex(), vault.Hex())
+			}
+			index := new(big.Int).SetBytes(c.CallData[4:])
+			results[i] = outbound.Result{Success: true, ReturnData: h.packAddress(adapterAddressForIndex(index))}
 		}
 		return results, nil
 	}
 	return h, batchSizes
+}
+
+// adapterAddressForIndex maps a global adapters(i) index to the address the
+// harness answers for it, so tests can assert position k of the enumeration
+// result came from requesting index k on-chain.
+func adapterAddressForIndex(index *big.Int) common.Address {
+	return common.BigToAddress(new(big.Int).Add(index, big.NewInt(1)))
 }
 
 // TestEnumerateVaultAdapters_ImplausibleLengthIsError pins the hostile-contract
@@ -2006,6 +2023,11 @@ func TestEnumerateVaultAdapters_AtBoundEnumeratesInChunks(t *testing.T) {
 	}
 	if len(got) != maxVaultAdapters {
 		t.Fatalf("got %d adapters, want %d", len(got), maxVaultAdapters)
+	}
+	for k, addr := range got {
+		if want := adapterAddressForIndex(big.NewInt(int64(k))); addr != want {
+			t.Fatalf("got[%d] = %s, want %s (batch requested the wrong global index)", k, addr.Hex(), want.Hex())
+		}
 	}
 	for _, size := range *batchSizes {
 		if size > adaptersPerCall {
