@@ -266,6 +266,112 @@ func TestProcessBlockEvent_AddAdapter_SeedsAdapterState(t *testing.T) {
 	}
 }
 
+// TestProcessBlockEvent_AddAdapter_RealAssetsSeedTolerance pins which adapters may
+// be registered without a realAssets() seed.
+//
+// The Unknown sentinel exists to record an adapter kind we do not model behind a
+// WARN rather than drop it. Hard-requiring realAssets() for such an adapter defeated
+// that: an unmodelled adapter that does not serve the getter poison-pilled the block
+// forever. setIsAdapter never calls realAssets(), so an added adapter genuinely need
+// not serve it — while for a MODELLED kind the vault itself calls it while
+// allocating, so a revert there is drift. A multicall TRANSPORT error is transient
+// and must fail the block for every type.
+func TestProcessBlockEvent_AddAdapter_RealAssetsSeedTolerance(t *testing.T) {
+	tests := []struct {
+		name         string
+		adapterType  entity.MorphoAdapterType
+		reverts      bool
+		transportErr bool
+		wantErr      bool
+		wantSeeded   bool
+		wantWarn     bool
+	}{
+		{
+			name: "a modelled adapter is seeded", adapterType: entity.MorphoAdapterTypeMarketV1,
+			wantSeeded: true,
+		},
+		{
+			name: "an unclassified adapter that serves realAssets is seeded too", adapterType: entity.MorphoAdapterTypeUnknown,
+			wantSeeded: true,
+		},
+		{
+			name:        "an unclassified adapter that reverts is registered without a seed",
+			adapterType: entity.MorphoAdapterTypeUnknown, reverts: true, wantWarn: true,
+		},
+		{
+			name:        "a modelled adapter that reverts is drift and fails the block",
+			adapterType: entity.MorphoAdapterTypeMarketV1, reverts: true, wantErr: true,
+		},
+		{
+			name:        "a transport failure fails the block even for an unclassified adapter",
+			adapterType: entity.MorphoAdapterTypeUnknown, transportErr: true, wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newTestHarness(t)
+			h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
+			logs := h.captureLogs()
+
+			h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+				if len(calls) == 2 && calls[0].Target == testAdapterAddr {
+					return h.adapterProbeResults(tt.adapterType), nil
+				}
+				return nil, errTestUnexpectedCall(calls)
+			}
+			h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+				if len(calls) != 1 || calls[0].Target != testAdapterAddr {
+					return nil, errTestUnexpectedCall(calls)
+				}
+				switch {
+				case tt.transportErr:
+					return nil, errors.New("rpc down")
+				case tt.reverts:
+					return []outbound.Result{{Success: false, ReturnData: nil}}, nil
+				default:
+					return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(41_300_000))}}, nil
+				}
+			}
+
+			registered := false
+			h.morphoRepo.GetOrCreateAdapterFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapter) (int64, error) {
+				registered = true
+				return 42, nil
+			}
+			seeded := false
+			h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterState) error {
+				seeded = true
+				return nil
+			}
+
+			log := h.makeV2VaultLog(h.vaultV2EventsABI.Events["AddAdapter"], testVaultAddr, []common.Hash{addrTopic(testAdapterAddr)})
+			err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)})
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected the block to fail so SQS redelivers")
+				}
+				if registered {
+					t.Error("no adapter may be registered when the seed read fails hard")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("processBlock: %v", err)
+			}
+
+			if !registered {
+				t.Error("the adapter must be registered even when it serves no realAssets()")
+			}
+			if seeded != tt.wantSeeded {
+				t.Errorf("adapter state seeded = %v, want %v", seeded, tt.wantSeeded)
+			}
+			if got := logs.hasWarnContaining("does not serve realAssets()"); got != tt.wantWarn {
+				t.Errorf("WARN(does not serve realAssets()) = %v, want %v", got, tt.wantWarn)
+			}
+		})
+	}
+}
+
 func TestProcessBlockEvent_AddAdapter_NonV2VaultErrors(t *testing.T) {
 	h := newTestHarness(t)
 	h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV1)
