@@ -36,6 +36,15 @@ const morphoBlueAddress = "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb"
 // sparkUSDTbc VaultV2 events plus the block metadata and realAssets readings a
 // hash-pinned replay needs. See the file's "source" header — the values are real
 // mainnet chain data and must never be edited by hand.
+//
+// Coverage boundary of the recorded 33-event set: six of the handled V2 event
+// types are ABSENT because sparkUSDTbc never emitted them on-chain —
+// RemoveAdapter, ForceDeallocate, DecreaseAbsoluteCap, DecreaseRelativeCap,
+// SetManagementFee and SetManagementFeeRecipient. Their handler paths are covered
+// only by unit tests; in particular the two Decrease*Cap events have never been
+// decoded from a real mainnet log anywhere, only from ABI-round-tripped
+// synthetics, so this fixture proves nothing about their real log encoding. Do not
+// read a green run here as end-to-end evidence for those six.
 type replayFixture struct {
 	ChainID int64 `json:"chainId"`
 	Vault   struct {
@@ -224,12 +233,18 @@ func buildReplayServiceForTest(t *testing.T, ctx context.Context, pool *pgxpool.
 	return svc
 }
 
-// newFixtureMulticaller returns a fake Multicaller that serves exactly the two
-// chain reads the replay issues: the number-pinned adapter identity probe
-// (morpho() succeeds returning the Morpho Blue singleton, morphoVaultV1()
-// reverts ⇒ MarketV1) and the hash-pinned realAssets() read, keyed by the block
-// hash the handler pins to. Any other call shape is an error, failing the event
-// (and thus the test) rather than defaulting silently.
+// newFixtureMulticaller returns a fake Multicaller that serves exactly the four
+// chain read shapes the replay issues, all from recorded fixture data:
+//
+//   - the number-pinned adapter identity probe (morpho() succeeds returning the
+//     Morpho Blue singleton, morphoVaultV1() reverts ⇒ MarketV1);
+//   - the 1-call hash-pinned realAssets() read;
+//   - the 2-call hash-pinned (absoluteCap, relativeCap) read;
+//   - the 4-call hash-pinned fee-config read (both fees + both recipients).
+//
+// The three hash-pinned shapes are keyed by the block hash the handler pins to.
+// Any other call shape is an error, failing the event (and thus the test) rather
+// than defaulting silently.
 func newFixtureMulticaller(t *testing.T, fx *replayFixture) *testutil.MockMulticaller {
 	t.Helper()
 	mc := testutil.NewMockMulticaller()

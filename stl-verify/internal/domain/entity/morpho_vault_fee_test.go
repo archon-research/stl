@@ -1,6 +1,7 @@
 package entity
 
 import (
+	"bytes"
 	"math/big"
 	"strings"
 	"testing"
@@ -11,6 +12,10 @@ func TestNewMorphoVaultFee(t *testing.T) {
 	ts := time.Unix(1700000000, 0).UTC()
 	addr20 := make([]byte, 20)
 	zeroAddr := make([]byte, 20)
+	// The two recipients must be DISTINCT in the success case, or a constructor
+	// that swapped them would still satisfy every assertion.
+	perfRecipient := bytes.Repeat([]byte{0xa1}, 20)
+	mgmtRecipient := bytes.Repeat([]byte{0xb2}, 20)
 
 	tests := []struct {
 		name        string
@@ -26,9 +31,9 @@ func TestNewMorphoVaultFee(t *testing.T) {
 		errContains string
 	}{
 		{
-			name: "valid full config", vaultID: 1,
+			name: "valid full config", vaultID: 7,
 			perfFee: big.NewInt(100_000_000_000_000_000), mgmtFee: big.NewInt(3170979198),
-			perfRecip: addr20, mgmtRecip: addr20, block: 24765805, version: 0, timestamp: ts,
+			perfRecip: perfRecipient, mgmtRecip: mgmtRecipient, block: 24765805, version: 2, timestamp: ts,
 		},
 		{
 			name: "valid zero fees and zero-address recipients", vaultID: 1,
@@ -112,11 +117,29 @@ func TestNewMorphoVaultFee(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
+			if got.MorphoVaultID != tt.vaultID {
+				t.Errorf("MorphoVaultID = %d, want %d", got.MorphoVaultID, tt.vaultID)
+			}
 			if got.PerformanceFee.Cmp(tt.perfFee) != 0 {
 				t.Errorf("PerformanceFee = %s, want %s", got.PerformanceFee, tt.perfFee)
 			}
 			if got.ManagementFee.Cmp(tt.mgmtFee) != 0 {
 				t.Errorf("ManagementFee = %s, want %s", got.ManagementFee, tt.mgmtFee)
+			}
+			if !bytes.Equal(got.PerformanceFeeRecipient, tt.perfRecip) {
+				t.Errorf("PerformanceFeeRecipient = %x, want %x", got.PerformanceFeeRecipient, tt.perfRecip)
+			}
+			if !bytes.Equal(got.ManagementFeeRecipient, tt.mgmtRecip) {
+				t.Errorf("ManagementFeeRecipient = %x, want %x", got.ManagementFeeRecipient, tt.mgmtRecip)
+			}
+			if got.BlockNumber != tt.block {
+				t.Errorf("BlockNumber = %d, want %d", got.BlockNumber, tt.block)
+			}
+			if got.BlockVersion != tt.version {
+				t.Errorf("BlockVersion = %d, want %d", got.BlockVersion, tt.version)
+			}
+			if !got.Timestamp.Equal(tt.timestamp) {
+				t.Errorf("Timestamp = %v, want %v", got.Timestamp, tt.timestamp)
 			}
 		})
 	}

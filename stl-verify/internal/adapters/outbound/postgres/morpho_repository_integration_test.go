@@ -830,6 +830,69 @@ func TestGetOrCreateVault_Idempotent(t *testing.T) {
 	}
 }
 
+// TestGetOrCreateVault_CreatedAtBlockConvergesDownward mirrors GetOrCreateToken's
+// first-observed semantics. A vault first seen inside a narrowed backfill range
+// (or on the live stream) records that block as created_at_block; without downward
+// convergence the wrong deploy block would persist forever, because the upsert's
+// only conflict action is a no-op SET.
+func TestGetOrCreateVault_CreatedAtBlockConvergesDownward(t *testing.T) {
+	tests := []struct {
+		name          string
+		firstBlock    int64
+		secondBlock   int64
+		wantConverged int64
+	}{
+		{"an earlier observation wins", 24500000, 19000000, 19000000},
+		{"a later observation is ignored", 19000000, 24500000, 19000000},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := setupMorphoTest(t)
+			ctx := context.Background()
+			address := adapterAddr(0x3d)
+
+			upsert := func(block int64) int64 {
+				t.Helper()
+				vault := &entity.MorphoVault{
+					ChainID: 1, ProtocolID: fixture.protocolID, Address: address,
+					Name: "Gauntlet USDC Core", Symbol: "gtUSDCcore",
+					AssetTokenID: fixture.loanTokenID, VaultVersion: entity.MorphoVaultV1,
+					CreatedAtBlock: block,
+				}
+				tx, err := fixture.pool.Begin(ctx)
+				if err != nil {
+					t.Fatalf("begin: %v", err)
+				}
+				defer tx.Rollback(ctx)
+				id, err := fixture.repo.GetOrCreateVault(ctx, tx, vault)
+				if err != nil {
+					t.Fatalf("GetOrCreateVault at block %d: %v", block, err)
+				}
+				if err := tx.Commit(ctx); err != nil {
+					t.Fatalf("commit: %v", err)
+				}
+				return id
+			}
+
+			id1 := upsert(tt.firstBlock)
+			if id2 := upsert(tt.secondBlock); id2 != id1 {
+				t.Fatalf("upsert must reuse the vault row: first=%d second=%d", id1, id2)
+			}
+
+			got, err := fixture.repo.GetVaultByAddress(ctx, 1, common.BytesToAddress(address))
+			if err != nil {
+				t.Fatalf("GetVaultByAddress: %v", err)
+			}
+			if got == nil {
+				t.Fatal("expected the vault row")
+			}
+			if got.CreatedAtBlock != tt.wantConverged {
+				t.Errorf("created_at_block = %d, want %d (LEAST of the two observations)", got.CreatedAtBlock, tt.wantConverged)
+			}
+		})
+	}
+}
+
 func TestGetVaultByAddress_NotFound(t *testing.T) {
 	fixture := setupMorphoTest(t)
 
