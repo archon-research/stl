@@ -72,15 +72,16 @@ type MorphoRepository interface {
 	// upgraded when a replay supplies a real type, and a real type is never
 	// overwritten. Returns the row's ID.
 	//
-	// Step 1 has NO lower bound on added_at_block, deliberately. It is what makes the
-	// single-incarnation mid-life-discovery case work — a row seeded at the discovery
-	// block folding down onto the true AddAdapter block, which is the whole reason the
-	// convergence exists — and no correct lower bound is expressible with this key. The
-	// only candidate is the PREVIOUS incarnation's removed_at_block, and when the
-	// registry has conflated two lifetimes that row does not exist: that is precisely
-	// the shape the bound would need to catch. Bounding it on a guess would break the
-	// legitimate case to half-catch the broken one. Instead the fold stays unbounded and
-	// the consequence is caught downstream, loudly, by MarkAdapterRemoved's symmetric
+	// NEITHER convergence step bounds added_at_block from below, deliberately. Together
+	// they are what make the single-incarnation mid-life-discovery case work — a row
+	// seeded at the discovery block folding down onto the true AddAdapter block, which is
+	// the whole reason the convergence exists (step 2 while that row is still open, step
+	// 1 once it has been closed) — and no correct lower bound is expressible with this
+	// key. The only candidate is the PREVIOUS incarnation's removed_at_block, and when
+	// the registry has conflated two lifetimes that row does not exist: precisely the
+	// shape the bound would need to catch. Bounding on a guess would break the legitimate
+	// case to half-catch the broken one. Instead the fold stays unbounded and the
+	// consequence is caught downstream, loudly, by MarkAdapterRemoved's symmetric
 	// relocation bound — see its "Why the relocation bound is symmetric" section, which
 	// also names the incarnation-sequence key as the real fix.
 	//
@@ -88,10 +89,10 @@ type MorphoRepository interface {
 	// PostgreSQL implementation: add→remove→re-add inside a single block.
 	GetOrCreateAdapter(ctx context.Context, tx pgx.Tx, adapter *entity.MorphoAdapter) (int64, error)
 
-	// CreateAdapterIncarnation inserts ONE incarnation row exactly as given, with no
-	// convergence of any kind. The only tolerated conflict is the full UNIQUE key
-	// (morpho_vault_id, address, added_at_block), which returns that exact row
-	// unchanged; it can never fold onto, LEAST, or re-close a DIFFERENT incarnation.
+	// CreateAdapterIncarnation records ONE incarnation exactly as given, with no
+	// convergence of any kind. An incarnation already recorded for the same vault,
+	// address and added-at block is returned unchanged; nothing else is ever matched, so
+	// this can never fold onto, move, or re-close a DIFFERENT incarnation.
 	//
 	// This is what a removal observed for an incarnation nobody ever recorded must
 	// register through, and the distinction from GetOrCreateAdapter is the whole point.
@@ -105,11 +106,21 @@ type MorphoRepository interface {
 	// A removal carries no information about when its lifetime began, so it may not
 	// move any added_at_block.
 	//
-	// Callers set added_at_block = removed_at_block = the observed removal block: a
-	// LOWER BOUND, not a claim that the adapter was added there. A later replay of the
-	// true AddAdapter converges it down through GetOrCreateAdapter's closed-window
+	// Serializes on the SAME per-(morpho_vault_id, address) advisory lock as
+	// GetOrCreateAdapter and MarkAdapterRemoved, so this registration cannot interleave
+	// with either.
+	//
+	// removedAtBlock is both bounds of the recorded lifetime: added_at_block is set to it
+	// as a LOWER BOUND, not a claim that the adapter was added there. A later replay of
+	// the true AddAdapter converges it down through GetOrCreateAdapter's closed-window
 	// match, which is where convergence belongs.
-	CreateAdapterIncarnation(ctx context.Context, tx pgx.Tx, adapter *entity.MorphoAdapter) (int64, error)
+	//
+	// A zero-length lifetime is the only shape this may write, and taking the block as a
+	// parameter is what enforces it. Two properties depend on it: the row is born CLOSED,
+	// so it cannot collide with a still-active later incarnation on the partial unique
+	// index; and it owns no snapshots at insert time, so it needs no orphan check — the
+	// only registration path that skips one.
+	CreateAdapterIncarnation(ctx context.Context, tx pgx.Tx, adapter *entity.MorphoAdapter, removedAtBlock int64) (int64, error)
 
 	// MarkAdapterRemoved records the block at which an adapter was de-registered,
 	// closing the incarnation live at removedAtBlock — the latest one registered at
@@ -132,28 +143,23 @@ type MorphoRepository interface {
 	//     rewriting the recorded close. See "Why the relocation bound is symmetric"
 	//     below.
 	//
-	// Any close that NARROWS the recorded lifetime — an initial close, or a
-	// convergence downward — is refused if the row owns adapter_state snapshots
-	// recorded strictly after the new close block: they would be stranded outside the
-	// lifetime window. Nothing in this service re-homes them: morpho_adapter_state rows
-	// are keyed by morpho_adapter_id and no code path ever reassigns it, so a refused
-	// close means an operator must move those rows by hand (or replay the adapter's
-	// lifecycle so each snapshot is written against the incarnation that owns it).
-	// Snapshots IN the close block are inside the window. A close that leaves
-	// removed_at_block unchanged skips the guard: it cannot strand anything the guard
-	// did not already vet, and re-running it would turn an at-least-once SQS redelivery
+	// Any close that NARROWS the recorded lifetime — an initial close, or a convergence
+	// downward — is refused if the row owns adapter_state snapshots recorded strictly
+	// after the new close block. Snapshots IN the close block are inside the window. A
+	// close that leaves removed_at_block unchanged skips the check: it cannot strand
+	// anything already vetted, and re-running it would turn an at-least-once redelivery
 	// into a poison pill.
 	//
-	// removedAtBlockVersion is the block_version of the block the removal was observed
-	// in, and scopes that guard: a snapshot within 64 blocks above the new close
-	// carrying a LOWER block_version is dead-chain residue, not an orphan. Replacing a
-	// block forces the watcher to republish every descendant at a bumped version, so
-	// such a snapshot belongs to the chain the relocating reorg replaced. Without this
-	// the guard poison-pilled a CORRECT removal: a reorg that moves a RemoveAdapter one
-	// block earlier leaves the old chain's snapshot sitting just above the new close
-	// forever, and morpho_adapter carries no block_version of its own to compare
-	// against. Beyond 64 blocks every snapshot counts regardless of version — see the
-	// implementation for why block_version cannot be compared across that distance.
+	// The convergence arm is guarded too, and must be. Within the relocation window the
+	// bound below cannot tell a reorg apart from a replay that conflated two lifetimes
+	// only a few blocks apart, so the stranded snapshots are the ONLY remaining evidence
+	// — exempting that arm silently erases the later de-registration. The check compares
+	// block_number alone; the implementation records why block_version cannot arbitrate.
+	//
+	// Refusal is an operator-facing poison pill, not an assertion: nothing in this
+	// service re-homes morpho_adapter_state rows (they are keyed by morpho_adapter_id and
+	// no code path reassigns it) or deletes dead-chain residue, so the event stalls its
+	// FIFO queue until an operator does one or the other by hand.
 	//
 	// An adapter with no incarnation registered at or before removedAtBlock is a data
 	// bug and errors.
@@ -173,19 +179,21 @@ type MorphoRepository interface {
 	// removed_at_block is a recorded fact, and no observation more than a reorg away
 	// from it can be evidence about the same removal.
 	//
-	// This error is REACHABLE from the live and replay paths, not merely defensive. A
-	// caller reaches it whenever GetAdapterIncarnationAt finds a covering incarnation —
-	// so it registers nothing, correctly — and that incarnation's recorded close is
-	// beyond the window from the removal's own block, which is exactly what a conflated
-	// row looks like. Treat it as an operator-facing poison pill, not an assertion: the
-	// event stalls its FIFO queue until the registry row is fixed.
+	// The BELOW-window arm is reachable in production, not merely defensive: a bounded
+	// replay of a conflated row hits it whenever GetAdapterIncarnationAt finds a covering
+	// incarnation — so it registers nothing, correctly — whose recorded close sits more
+	// than 64 blocks above the removal's own block. Treat it as an operator-facing poison
+	// pill, not an assertion: the event stalls its FIFO queue until the row is repaired.
+	// The ABOVE-window arm has no service route today (a removal above a closed row makes
+	// GetAdapterIncarnationAt return nil, so the caller registers [B,B] first and the
+	// distance is 0); it guards direct and future callers.
 	//
 	// The real fix is an incarnation-sequence key on morpho_adapter, so a replayed add
 	// or remove names which lifetime it belongs to instead of being matched by block
-	// range, and morpho_adapter_state rows can be re-homed between them. That is the
-	// follow-up this change deliberately defers to; until it lands, a conflated row is
-	// repaired by hand or by a replay spanning the adapter's whole lifecycle history.
-	MarkAdapterRemoved(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, removedAtBlock int64, removedAtBlockVersion int) error
+	// range, and morpho_adapter_state rows can be re-homed between them. Until that
+	// lands, a conflated row is repaired by hand or by a replay spanning the adapter's
+	// whole lifecycle history.
+	MarkAdapterRemoved(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, removedAtBlock int64) error
 
 	// GetActiveAdapter retrieves the active (not-yet-removed) adapter for a vault
 	// and address, reading within the caller's transaction so it sees writes made
