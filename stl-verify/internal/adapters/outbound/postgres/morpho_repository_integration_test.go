@@ -2497,6 +2497,39 @@ func TestMarkAdapterRemoved_OrphanGuardScopesStateByBlockVersion(t *testing.T) {
 	}
 }
 
+// TestMarkAdapterRemoved_OrphanGuardIgnoresBlockVersionBeyondTheReorgWindow bounds the
+// dead-chain exclusion to the blocks a relocating reorg could actually have rewritten.
+//
+// block_version is a per-block-number counter (MAX+1 on each republish), not a global
+// chain epoch, so "lower version" only means "dead chain" for blocks the same reorg
+// touched. Comparing it across an arbitrary block distance re-opens silent orphaning:
+// the shape seedDiscoveredAdapters' bootstrap contract depends on is a row seeded at a
+// far-later discovery block, and a replayed removal whose own block happens to carry a
+// higher version must not be allowed to close over it.
+func TestMarkAdapterRemoved_OrphanGuardIgnoresBlockVersionBeyondTheReorgWindow(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x4a))
+	addr := adapterAddr(0x4b)
+
+	const (
+		trueAdd     = int64(100)
+		trueRemove  = int64(500)
+		discoveryAt = trueRemove + maxRemovalRelocationDistance + 1
+	)
+
+	adapterID := fixture.createTestAdapter(t, ctx, vaultID, addr, discoveryAt)
+	fixture.seedAdapterStateAtVersion(t, ctx, adapterID, discoveryAt, 0)
+	if got := fixture.createTestAdapter(t, ctx, vaultID, addr, trueAdd); got != adapterID {
+		t.Fatalf("the replayed AddAdapter must fold onto the seeded row: got id=%d want %d", got, adapterID)
+	}
+
+	if err := fixture.markAdapterRemovedAtVersion(t, ctx, vaultID, addr, trueRemove, 1); err == nil {
+		t.Errorf("closing at %d must be refused: the snapshot at (%d, v0) is %d blocks above it, far beyond any reorg that could have relocated this removal; registry is now %s",
+			trueRemove, discoveryAt, discoveryAt-trueRemove, fixture.describeIncarnations(t, ctx, vaultID, addr))
+	}
+}
+
 // TestMarkAdapterRemoved_ConvergingCloseRunsTheOrphanGuard pins that a downward
 // convergence is guarded too, not exempt.
 //
