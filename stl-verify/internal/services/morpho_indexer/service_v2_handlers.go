@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
 // This file holds the Morpho VaultV2 structured-event handlers: the adapter
@@ -124,23 +125,11 @@ func (s *Service) handleRemoveAdapter(ctx context.Context, e *RemoveAdapterEvent
 }
 
 // ensureIncarnationToClose guarantees MarkAdapterRemoved has a row to close, and
-// registers NOTHING when one already exists.
-//
-// The distinction from the Allocate path's ensureAdapterRegistered is load-bearing.
-// A removal's decisive question is not "is there an ACTIVE row" but "is there a
-// recorded incarnation covering this block": for a redelivered or replayed
-// RemoveAdapter the incarnation is already CLOSED at that very block, so an
-// active-row check misses and registering again mints a zero-length incarnation the
-// chain never had — GetOrCreateAdapter cannot fold it onto the closed row, whose
-// window match is strict so that a live same-block remove-then-re-add still opens a
-// new one. A non-nil incarnation means the removal is already idempotent against it
-// (MarkAdapterRemoved converges), so this returns without writing.
-//
-// A nil incarnation means the adapter is genuinely unknown at removedAtBlock, which
-// includes a closed incarnation ending BELOW it: that is a later incarnation whose
-// AddAdapter we never observed, and registering it here is what lets
-// MarkAdapterRemoved close the right window instead of rejecting the removal as
-// beyond the relocation bound.
+// registers NOTHING when one already exists. Which of those happens is
+// EnsureIncarnationToClose's decision, made and acted on under one advisory lock so no
+// concurrent writer can split it; the distinction from the Allocate path's
+// ensureAdapterRegistered (a removal asks about a COVERING incarnation, not an active
+// row) is stated on that port method. This adds the ops narration.
 //
 // A nil probedType means the pre-transaction check found the adapter active. If the
 // decisive read then finds no incarnation covering the block, we have no type to
@@ -148,36 +137,41 @@ func (s *Service) handleRemoveAdapter(ctx context.Context, e *RemoveAdapterEvent
 // rather than record a defaulted classification; SQS redelivers and the pre-tx check
 // re-probes.
 func (s *Service) ensureIncarnationToClose(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault, vaultAddress, adapter common.Address, removedAtBlock int64, probedType *entity.MorphoAdapterType) error {
-	incarnation, err := s.morphoRepo.GetAdapterIncarnationAt(ctx, tx, vault.ID, adapter.Bytes(), removedAtBlock)
+	candidate, err := s.unobservedIncarnation(vault, adapter, removedAtBlock, probedType)
 	if err != nil {
-		return fmt.Errorf("looking up adapter %s incarnation at block %d: %w", adapter.Hex(), removedAtBlock, err)
+		return err
 	}
-	if incarnation != nil {
+
+	registered, err := s.morphoRepo.EnsureIncarnationToClose(ctx, tx, vault.ID, adapter.Bytes(), removedAtBlock, candidate)
+	if errors.Is(err, outbound.ErrAdapterUnclassified) {
+		return fmt.Errorf("adapter %s has no incarnation covering block %d at transaction time but no type was probed before the transaction: %w", adapter.Hex(), removedAtBlock, err)
+	}
+	if err != nil {
+		return fmt.Errorf("ensuring adapter %s has an incarnation to close at block %d: %w", adapter.Hex(), removedAtBlock, err)
+	}
+	if !registered {
 		return nil
 	}
-	if probedType == nil {
-		return fmt.Errorf("adapter %s has no incarnation covering block %d at transaction time but no type was probed before the transaction", adapter.Hex(), removedAtBlock)
-	}
+
 	s.logger.Warn("adapter registered lazily; AddAdapter predates vault discovery",
 		"vault", vaultAddress.Hex(), "adapter", adapter.Hex(), "block", removedAtBlock)
-	return s.registerIncarnationForRemoval(ctx, tx, vault, vaultAddress, adapter, *probedType, removedAtBlock)
+	s.warnIfUnknownAdapterType(vaultAddress, adapter, candidate.AdapterType, removedAtBlock)
+	return nil
 }
 
-// registerIncarnationForRemoval records the incarnation a removal closes when none was
-// ever observed. It must NOT go through upsertAdapterRow: a removal is no evidence of
-// when a lifetime began, and that path's convergence would move a later incarnation's
-// added_at_block down to this block — see outbound.MorphoRepository.CreateAdapterIncarnation
-// for the contract and what it prevents.
-func (s *Service) registerIncarnationForRemoval(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault, vaultAddress, adapter common.Address, adapterType entity.MorphoAdapterType, removedAtBlock int64) error {
-	s.warnIfUnknownAdapterType(vaultAddress, adapter, adapterType, removedAtBlock)
-	adapterEntity, err := entity.NewMorphoAdapter(vault.ID, adapter.Bytes(), vault.AssetTokenID, adapterType, removedAtBlock, &removedAtBlock)
+// unobservedIncarnation builds the incarnation a removal registers when the registry has
+// none to close: a zero-length lifetime at the removal block, whose added_at_block is a
+// lower bound rather than an observation. It is nil when no type was probed, which is how
+// the registry is told to refuse a registration rather than default the classification.
+func (s *Service) unobservedIncarnation(vault *entity.MorphoVault, adapter common.Address, removedAtBlock int64, probedType *entity.MorphoAdapterType) (*entity.MorphoAdapter, error) {
+	if probedType == nil {
+		return nil, nil
+	}
+	adapterEntity, err := entity.NewMorphoAdapter(vault.ID, adapter.Bytes(), vault.AssetTokenID, *probedType, removedAtBlock, &removedAtBlock)
 	if err != nil {
-		return fmt.Errorf("creating adapter entity: %w", err)
+		return nil, fmt.Errorf("creating adapter entity: %w", err)
 	}
-	if _, err := s.morphoRepo.CreateAdapterIncarnation(ctx, tx, adapterEntity, removedAtBlock); err != nil {
-		return fmt.Errorf("registering the incarnation removed at block %d: %w", removedAtBlock, err)
-	}
-	return nil
+	return adapterEntity, nil
 }
 
 // handleAllocation snapshots an adapter's realAssets() after an Allocate or
@@ -291,7 +285,7 @@ func (s *Service) resolveAdapterTypeIfUnregistered(ctx context.Context, vault *e
 // true AddAdapter converges the row rather than duplicating it. Its three callers — the
 // AddAdapter handler, the Allocate lazy self-heal, and the discovery seed — each resolve
 // the type before opening the transaction and pass it in here. The RemoveAdapter heal
-// uses registerIncarnationForRemoval instead: it must not converge anything.
+// uses EnsureIncarnationToClose instead: it must not converge anything.
 func (s *Service) upsertAdapterRow(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault, vaultAddress, adapter common.Address, adapterType entity.MorphoAdapterType, firstSeenBlock int64) (int64, error) {
 	s.warnIfUnknownAdapterType(vaultAddress, adapter, adapterType, firstSeenBlock)
 	adapterEntity, err := entity.NewMorphoAdapter(vault.ID, adapter.Bytes(), vault.AssetTokenID, adapterType, firstSeenBlock, nil)

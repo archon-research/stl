@@ -443,14 +443,50 @@ func (r *MorphoRepository) GetOrCreateAdapter(ctx context.Context, tx pgx.Tx, ad
 	return id, nil
 }
 
-// CreateAdapterIncarnation inserts the given incarnation and nothing else. The
+// EnsureIncarnationToClose guarantees a removal at removedAtBlock has exactly one
+// incarnation to close. The contract is on
+// outbound.MorphoRepository.EnsureIncarnationToClose; the mechanics that matter here are
+// the ORDER of the three steps and that all of them run under one lock.
+//
+// The advisory lock is taken BEFORE the decisive read, not just before the insert, and
+// that is the whole reason this is one method rather than the caller's composition of a
+// read and a create: a read outside the lock lets two overlapping writers each decide
+// "nothing on record" and mint their own incarnation for one on-chain lifetime, which
+// ON CONFLICT cannot catch because their added_at_block differ (ADR-0002 §3, reproduced
+// in TestEnsureIncarnationToClose_DecidesAndRegistersUnderOneLock). The lock is held to
+// COMMIT, so MarkAdapterRemoved's own lockAdapterKey later in the same transaction
+// re-acquires the same key — pg_advisory_xact_lock is re-entrant within a transaction,
+// so that is a no-op rather than a self-deadlock. Both take the single per-(vault,
+// address) key, so lockAdapterKey's sorted-order rule has nothing to order.
+func (r *MorphoRepository) EnsureIncarnationToClose(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, removedAtBlock int64, candidate *entity.MorphoAdapter) (bool, error) {
+	if err := lockAdapterKey(ctx, tx, morphoVaultID, address); err != nil {
+		return false, err
+	}
+	covering, err := r.getAdapterIncarnationAt(ctx, tx, morphoVaultID, address, removedAtBlock)
+	if err != nil {
+		return false, err
+	}
+	if covering != nil {
+		return false, nil
+	}
+	if candidate == nil {
+		return false, fmt.Errorf("adapter %x has no incarnation to close at block %d: %w",
+			address, removedAtBlock, outbound.ErrAdapterUnclassified)
+	}
+	if _, err := r.createAdapterIncarnation(ctx, tx, candidate, removedAtBlock); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// createAdapterIncarnation inserts the given incarnation and nothing else. The
 // contract — and why no convergence may leak in here — is on
-// outbound.MorphoRepository.CreateAdapterIncarnation.
+// outbound.MorphoRepository.EnsureIncarnationToClose.
 //
 // The ON CONFLICT DO UPDATE deliberately touches neither removed_at_block nor
 // adapter_type, so a conflicting row cannot have a closed lifetime reopened or a curated
 // classification overwritten.
-func (r *MorphoRepository) CreateAdapterIncarnation(ctx context.Context, tx pgx.Tx, adapter *entity.MorphoAdapter, removedAtBlock int64) (int64, error) {
+func (r *MorphoRepository) createAdapterIncarnation(ctx context.Context, tx pgx.Tx, adapter *entity.MorphoAdapter, removedAtBlock int64) (int64, error) {
 	adapter.AddedAtBlock = removedAtBlock
 	adapter.RemovedAtBlock = &removedAtBlock
 	if err := adapter.Validate(); err != nil {
@@ -710,7 +746,7 @@ func (r *MorphoRepository) GetActiveAdapter(ctx context.Context, tx pgx.Tx, morp
 	return &a, nil
 }
 
-// GetAdapterIncarnationAt retrieves the incarnation whose recorded lifetime
+// getAdapterIncarnationAt retrieves the incarnation whose recorded lifetime
 // contains atBlock, reading through the caller's transaction (read-your-writes).
 //
 // The removed_at_block >= atBlock predicate is what distinguishes this from
@@ -718,7 +754,11 @@ func (r *MorphoRepository) GetActiveAdapter(ctx context.Context, tx pgx.Tx, morp
 // that already CLOSED below atBlock does not cover it, so this returns nil and the
 // caller registers the unobserved later incarnation instead of letting the removal
 // converge onto — or mint a zero-length duplicate of — the earlier one.
-func (r *MorphoRepository) GetAdapterIncarnationAt(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, atBlock int64) (*entity.MorphoAdapter, error) {
+//
+// Unexported on purpose: it is one step of EnsureIncarnationToClose's decision and
+// takes no lock of its own, so a caller that could reach it directly would be able to
+// put the decision back outside the lock.
+func (r *MorphoRepository) getAdapterIncarnationAt(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, atBlock int64) (*entity.MorphoAdapter, error) {
 	var a entity.MorphoAdapter
 	err := tx.QueryRow(ctx,
 		`SELECT id, asset_token_id, adapter_type, added_at_block, removed_at_block
