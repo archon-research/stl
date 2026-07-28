@@ -597,10 +597,11 @@ func (r *MorphoRepository) closeIncarnationLiveAt(ctx context.Context, tx pgx.Tx
 	}
 
 	// The LEAST is what keeps added_at_block <= removed_at_block when a relocation moves the
-	// close BELOW the row's registration block. That only happens to a healed incarnation,
-	// whose added_at_block is the removal block recorded as a lower bound rather than an
-	// observation of the add, so following the close down is the correct reading of it; on
-	// every other path closeAt is at or above added_at_block and this is a no-op. It cannot
+	// close BELOW the row's registration block. For a healed incarnation that is the correct
+	// reading (its added_at_block is a lower bound, not an observation); a REAL observed
+	// added_at_block resolved by the within-window fallback moves down the same way — the
+	// accepted snapshot-less residual stated on the port. On every other path closeAt is at
+	// or above added_at_block and this is a no-op. It cannot
 	// collide on UNIQUE (morpho_vault_id, address, added_at_block) either: a row already
 	// registered AT closeAt would have covered the removal, and a covering incarnation is
 	// resolved before any relocation.
