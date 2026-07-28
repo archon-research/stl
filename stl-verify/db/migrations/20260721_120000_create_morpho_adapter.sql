@@ -6,10 +6,18 @@
 -- is the registry of those adapters, one row per adapter per vault; its
 -- per-block realAssets() readings live in the morpho_adapter_state hypertable
 -- (part 2). This is a Dimension/registry table like morpho_vault / fluid_vault:
--- no hypertable, no processing_version. The identity fields (morpho_vault_id,
--- address, asset_token_id, adapter_type, added_at_block) are immutable per row;
--- removed_at_block is the one mutable column, set once when the adapter is
--- de-registered.
+-- no hypertable, no processing_version.
+--
+-- Only (morpho_vault_id, address) is immutable per row. The lifetime bounds and
+-- the classification are CONVERGING OBSERVATIONS, not values fixed at insert:
+-- added_at_block and removed_at_block each converge to the earliest block we ever
+-- observed (LEAST) as backfilled history and relocated (reorged) transactions
+-- arrive, and adapter_type is upgraded from the Unknown sentinel the first time a
+-- replay classifies the adapter. None of them is a time-varying on-chain VALUE
+-- needing an audit trail (see the full-auditability rule in
+-- db/migrations/AGENTS.md) — they are our best estimate of when ONE on-chain
+-- lifetime started and ended, which only ever gets more accurate, so they stay
+-- in-place columns.
 --
 -- added_at_block / removed_at_block bound each adapter's active lifetime
 -- (removed_at_block NULL = active). A removed-then-re-added adapter is a new
@@ -55,14 +63,14 @@ CREATE INDEX IF NOT EXISTS idx_morpho_adapter_asset_token ON morpho_adapter (ass
 -- 20260609_120000_add_schema_comments / 20260626_120000_create_fluid_vault_tables.
 -- ============================================================================
 COMMENT ON TABLE morpho_adapter IS
-  '[Dimension] Registry of Morpho VaultV2 liquidity adapters, one row per adapter per vault. Each adapter wraps one downstream venue; per-block realAssets() readings live in morpho_adapter_state. Identity fields are immutable per row; removed_at_block is set once on de-registration (removed adapters keep their row; re-adds are new rows).';
+  '[Dimension] Registry of Morpho VaultV2 liquidity adapters, one row per adapter per vault. Each adapter wraps one downstream venue; per-block realAssets() readings live in morpho_adapter_state. Only (morpho_vault_id, address) is immutable per row: added_at_block and removed_at_block converge to the earliest observed block (LEAST) as backfilled history and reorg-relocated transactions arrive, and adapter_type is curated once from the Unknown sentinel. Removed adapters keep their row; re-adds are new rows.';
 COMMENT ON COLUMN morpho_adapter.id IS 'PK. Surrogate id referenced by morpho_adapter_state.';
 COMMENT ON COLUMN morpho_adapter.morpho_vault_id IS 'FK→morpho_vault.id. The parent VaultV2 that registered this adapter.';
 COMMENT ON COLUMN morpho_adapter.address IS 'Adapter contract address (20 bytes). Unique per (morpho_vault_id, address, added_at_block).';
 COMMENT ON COLUMN morpho_adapter.asset_token_id IS 'FK→token.id. The vault''s underlying asset ERC-20; the unit of the adapter''s realAssets() reading.';
-COMMENT ON COLUMN morpho_adapter.adapter_type IS 'Adapter kind: 1 = MorphoMarketV1AdapterV2 (Morpho Blue market), 2 = MorphoVaultV1Adapter (nested MetaMorpho V1 vault), 99 = Unknown (unrecognised type, recorded for later curation).';
+COMMENT ON COLUMN morpho_adapter.adapter_type IS 'Adapter kind: 1 = MorphoMarketV1AdapterV2 (Morpho Blue market), 2 = MorphoVaultV1Adapter (nested MetaMorpho V1 vault), 99 = Unknown (the on-chain type probe could not classify it). Curated by replay: a row recorded as 99 is upgraded the first time an observation supplies a real type; a real type is never overwritten.';
 COMMENT ON COLUMN morpho_adapter.added_at_block IS 'Block at which the adapter was first observed on-chain by us: the AddAdapter block when witnessed live or replayed; the vault-discovery or first-allocation block for adapters predating discovery; converges (LEAST) to the true AddAdapter block once history is replayed. Part of the UNIQUE key so a re-added adapter is a distinct row.';
-COMMENT ON COLUMN morpho_adapter.removed_at_block IS 'Block at which the adapter was de-registered; NULL while the adapter is active.';
+COMMENT ON COLUMN morpho_adapter.removed_at_block IS 'Block at which the adapter was de-registered; NULL while the adapter is active. Converges (LEAST) to the earliest observed removal block, so a reorg that re-lands the RemoveAdapter transaction in a neighbouring block settles deterministically regardless of arrival order.';
 
 INSERT INTO migrations (filename)
 VALUES ('20260721_120000_create_morpho_adapter.sql')

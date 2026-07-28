@@ -46,8 +46,8 @@ type MorphoRepository interface {
 	// row for (morpho_vault_id, address). The candidate's added_at_block is matched
 	// against the adapter's incarnations in a load-bearing ORDER:
 	//
-	//  1. A CLOSED incarnation whose window covers the candidate wins FIRST. This
-	//     step must precede the active-row match: for a removed-then-re-added
+	//  1. A CLOSED incarnation whose window strictly covers the candidate wins
+	//     FIRST. This step must precede the active-row match: for a removed-then-re-added
 	//     adapter a closed row and an active row coexist, and a backfilled add
 	//     belonging to the earlier (closed) window would otherwise match the active
 	//     row, dragging the re-added incarnation's added_at_block into a prior
@@ -58,10 +58,12 @@ type MorphoRepository interface {
 	//     to the earliest observation (LEAST), so a lazily-registered adapter
 	//     collapses onto the true AddAdapter block once the backfiller replays it
 	//     rather than becoming a second active row.
-	//  3. Only a candidate added after every prior removal is a genuinely new
+	//  3. Only a candidate added at or after every prior removal is a genuinely new
 	//     incarnation and gets its own row (the UNIQUE key includes added_at_block).
 	//
-	// Returns the row's ID.
+	// Both convergence steps also curate adapter_type: a row recorded as Unknown is
+	// upgraded when a replay supplies a real type, and a real type is never
+	// overwritten. Returns the row's ID.
 	GetOrCreateAdapter(ctx context.Context, tx pgx.Tx, adapter *entity.MorphoAdapter) (int64, error)
 
 	// MarkAdapterRemoved records the block at which an adapter was de-registered,
