@@ -72,6 +72,18 @@ type MorphoRepository interface {
 	// upgraded when a replay supplies a real type, and a real type is never
 	// overwritten. Returns the row's ID.
 	//
+	// Step 1 has NO lower bound on added_at_block, deliberately. It is what makes the
+	// single-incarnation mid-life-discovery case work — a row seeded at the discovery
+	// block folding down onto the true AddAdapter block, which is the whole reason the
+	// convergence exists — and no correct lower bound is expressible with this key. The
+	// only candidate is the PREVIOUS incarnation's removed_at_block, and when the
+	// registry has conflated two lifetimes that row does not exist: that is precisely
+	// the shape the bound would need to catch. Bounding it on a guess would break the
+	// legitimate case to half-catch the broken one. Instead the fold stays unbounded and
+	// the consequence is caught downstream, loudly, by MarkAdapterRemoved's symmetric
+	// relocation bound — see its "Why the relocation bound is symmetric" section, which
+	// also names the incarnation-sequence key as the real fix.
+	//
 	// One shape this key cannot represent is documented as a Residual on the
 	// PostgreSQL implementation: add→remove→re-add inside a single block.
 	GetOrCreateAdapter(ctx context.Context, tx pgx.Tx, adapter *entity.MorphoAdapter) (int64, error)
@@ -123,21 +135,25 @@ type MorphoRepository interface {
 	// Any close that NARROWS the recorded lifetime — an initial close, or a
 	// convergence downward — is refused if the row owns adapter_state snapshots
 	// recorded strictly after the new close block: they would be stranded outside the
-	// lifetime window, so the caller must re-home them onto the incarnation that owns
-	// them first. Snapshots IN the close block are inside the window. A close that
-	// leaves removed_at_block unchanged skips the guard: it cannot strand anything the
-	// guard did not already vet, and re-running it would turn an at-least-once SQS
-	// redelivery into a poison pill.
+	// lifetime window. Nothing in this service re-homes them: morpho_adapter_state rows
+	// are keyed by morpho_adapter_id and no code path ever reassigns it, so a refused
+	// close means an operator must move those rows by hand (or replay the adapter's
+	// lifecycle so each snapshot is written against the incarnation that owns it).
+	// Snapshots IN the close block are inside the window. A close that leaves
+	// removed_at_block unchanged skips the guard: it cannot strand anything the guard
+	// did not already vet, and re-running it would turn an at-least-once SQS redelivery
+	// into a poison pill.
 	//
-	// removedAtBlockVersion is the block_version of the block the removal was
-	// observed in, and scopes that guard: snapshots above the new close carrying a
-	// LOWER block_version are dead-chain residue, not orphans. Replacing a block
-	// forces the watcher to republish every descendant at a bumped version, so a
-	// snapshot recorded above the close at an older version belongs to the chain the
-	// relocating reorg replaced. Without this the guard poison-pilled a CORRECT
-	// removal: a reorg that moves a RemoveAdapter one block earlier leaves the old
-	// chain's snapshot sitting just above the new close forever, and morpho_adapter
-	// carries no block_version of its own to compare against.
+	// removedAtBlockVersion is the block_version of the block the removal was observed
+	// in, and scopes that guard: a snapshot within 64 blocks above the new close
+	// carrying a LOWER block_version is dead-chain residue, not an orphan. Replacing a
+	// block forces the watcher to republish every descendant at a bumped version, so
+	// such a snapshot belongs to the chain the relocating reorg replaced. Without this
+	// the guard poison-pilled a CORRECT removal: a reorg that moves a RemoveAdapter one
+	// block earlier leaves the old chain's snapshot sitting just above the new close
+	// forever, and morpho_adapter carries no block_version of its own to compare
+	// against. Beyond 64 blocks every snapshot counts regardless of version — see the
+	// implementation for why block_version cannot be compared across that distance.
 	//
 	// An adapter with no incarnation registered at or before removedAtBlock is a data
 	// bug and errors.
@@ -153,9 +169,16 @@ type MorphoRepository interface {
 	// permanently ACTIVE in the registry, with its snapshots outside the window
 	// (reproduced in
 	// TestMarkAdapterRemoved_ConflatedIncarnationsFromABoundedReplayAreRefused).
-	// Under-repair that is only conditionally sound, a loud stop wins: removed_at_block
-	// is a recorded fact, and no observation more than a reorg away from it can be
-	// evidence about the same removal.
+	// Given a repair that is only conditionally sound, a loud stop wins:
+	// removed_at_block is a recorded fact, and no observation more than a reorg away
+	// from it can be evidence about the same removal.
+	//
+	// This error is REACHABLE from the live and replay paths, not merely defensive. A
+	// caller reaches it whenever GetAdapterIncarnationAt finds a covering incarnation —
+	// so it registers nothing, correctly — and that incarnation's recorded close is
+	// beyond the window from the removal's own block, which is exactly what a conflated
+	// row looks like. Treat it as an operator-facing poison pill, not an assertion: the
+	// event stalls its FIFO queue until the registry row is fixed.
 	//
 	// The real fix is an incarnation-sequence key on morpho_adapter, so a replayed add
 	// or remove names which lifetime it belongs to instead of being matched by block
