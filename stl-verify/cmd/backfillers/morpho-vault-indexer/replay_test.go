@@ -251,6 +251,69 @@ func TestV2VaultSetDigest_IdentifiesTheSetNotItsOrder(t *testing.T) {
 	}
 }
 
+// TestOpenReplayCheckpoint_NoProgressFileDisablesCheckpointing: an unset
+// -replay-progress-file yields the nil (no-op) checkpoint, so every partition
+// replays every run.
+func TestOpenReplayCheckpoint_NoProgressFileDisablesCheckpointing(t *testing.T) {
+	cp, err := openReplayCheckpoint("", checkpointScope{})
+	if err != nil {
+		t.Fatalf("openReplayCheckpoint: %v", err)
+	}
+	if cp != nil {
+		t.Fatal("an empty progress-file path must yield the nil checkpoint")
+	}
+	if cp.isDone("0-999") {
+		t.Error("nil checkpoint reports a partition done")
+	}
+}
+
+// TestOpenReplayCheckpoint_RecordsUnderTheGivenScope: the scope passed at open
+// time is the scope markDone stamps onto every record it writes.
+func TestOpenReplayCheckpoint_RecordsUnderTheGivenScope(t *testing.T) {
+	path := t.TempDir() + "/progress.jsonl"
+	scope := checkpointScope{ChainID: 1, Bucket: "raw-mainnet", VaultsDigest: "digest-a"}
+
+	cp, err := openReplayCheckpoint(path, scope)
+	if err != nil {
+		t.Fatalf("openReplayCheckpoint: %v", err)
+	}
+	if err := cp.markDone("0-999"); err != nil {
+		t.Fatalf("markDone: %v", err)
+	}
+	if err := cp.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	reopened, err := loadCheckpoint(path, scope)
+	if err != nil {
+		t.Fatalf("loadCheckpoint: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if !reopened.isDone("0-999") {
+		t.Error("the record was not written under the scope it was opened with")
+	}
+}
+
+// TestReplayCheckpointScope_TracksTheVaultSet: the scope a run records under
+// carries its chain, bucket, and V2 vault set, so a run whose vault set has
+// grown cannot reuse the earlier run's records.
+func TestReplayCheckpointScope_TracksTheVaultSet(t *testing.T) {
+	cfg := config{chainID: 1, bucket: "raw-mainnet"}
+	vaultA := common.HexToAddress("0xaa00000000000000000000000000000000000001")
+	vaultB := common.HexToAddress("0xbb00000000000000000000000000000000000002")
+
+	scope := replayCheckpointScope(cfg, vaultSet(vaultA))
+	if scope.ChainID != cfg.chainID || scope.Bucket != cfg.bucket {
+		t.Errorf("scope = %+v, want chain %d bucket %q", scope, cfg.chainID, cfg.bucket)
+	}
+	if scope.VaultsDigest != v2VaultSetDigest(vaultSet(vaultA)) {
+		t.Error("scope does not carry the V2 vault set digest")
+	}
+	if grown := replayCheckpointScope(cfg, vaultSet(vaultA, vaultB)); grown == scope {
+		t.Error("a grown vault set produced an identical scope")
+	}
+}
+
 // TestRunReplayPartitions_GrownVaultSetReplaysRecordedPartitions locks the
 // vault-set-hole fix. Run 1 replays and checkpoints every partition with vault
 // set {A}. Run 2 sees {A,B} — B was probe-skipped, discovered later by the live
