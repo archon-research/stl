@@ -19,9 +19,10 @@ const vaultInstrument = "abcd"
 // current deal_type into position_classification.
 //
 // A vault is a single native instrument (no loan/collateral split, no netting), so this pins the
-// behaviours that remain: latest-timestamp dedup of same-(user,vault,block,version) rows, zero-asset
-// observations skipped, many observations per position with one current classification, 32-byte ids,
-// no PK collisions, and idempotency.
+// behaviours that remain: latest-timestamp dedup of same-(user,vault,block,version) rows; closure
+// (VEC-409) — an exit (positive->0) emits one closing zero-row, a deposit never entered emits nothing;
+// many observations per position with one current classification (from the last non-zero row); 32-byte
+// ids, no PK collisions, and idempotency.
 func TestMaterializeMorphoVault(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupPostgres(ctx, t)
@@ -30,11 +31,12 @@ func TestMaterializeMorphoVault(t *testing.T) {
 		t.Fatalf("migrations: %v", err)
 	}
 
-	// Seed one vault (address abcd) and three holders: A deposits (two observations), B is a same-block
-	// dedup case, C has exited (assets 0, must be skipped).
+	// Seed one vault (address abcd) and four holders: A deposits (two observations), B is a same-block
+	// dedup case, C never entered (single assets 0 row, no row emitted), D deposits then exits (open +
+	// one closing zero-row).
 	seed := `
 DO $$
-DECLARE pid bigint; atid bigint; uaid bigint; ubid bigint; ucid bigint; vid bigint;
+DECLARE pid bigint; atid bigint; uaid bigint; ubid bigint; ucid bigint; udid bigint; vid bigint;
 BEGIN
   INSERT INTO chain (chain_id, name) VALUES (1, 'ethereum') ON CONFLICT (chain_id) DO NOTHING;
   INSERT INTO protocol (chain_id, address, name) VALUES (1, '\xfe', 'morpho') RETURNING id INTO pid;
@@ -42,6 +44,7 @@ BEGIN
   INSERT INTO "user" (chain_id, address) VALUES (1, '\xaa') RETURNING id INTO uaid;
   INSERT INTO "user" (chain_id, address) VALUES (1, '\xbb') RETURNING id INTO ubid;
   INSERT INTO "user" (chain_id, address) VALUES (1, '\xcc') RETURNING id INTO ucid;
+  INSERT INTO "user" (chain_id, address) VALUES (1, '\xdd') RETURNING id INTO udid;
   INSERT INTO morpho_vault (chain_id, protocol_id, address, symbol, asset_token_id, vault_version, created_at_block)
     VALUES (1, pid, '\xabcd', 'steakUSDC', atid, 1, 1) RETURNING id INTO vid;
 
@@ -53,9 +56,13 @@ BEGIN
   INSERT INTO morpho_vault_position (user_id, morpho_vault_id, block_number, block_version, timestamp, shares, assets)
     VALUES (ubid, vid, 100, 0, '2026-01-01T00:00:00Z', 9, 10),
            (ubid, vid, 100, 0, '2026-01-01T01:00:00Z', 18, 20);
-  -- C: exited position (assets 0) -> skipped entirely.
+  -- C: never entered (single assets 0 observation) -> no row emitted.
   INSERT INTO morpho_vault_position (user_id, morpho_vault_id, block_number, block_version, timestamp, shares, assets)
     VALUES (ucid, vid, 100, 0, '2026-01-01T00:00:00Z', 0, 0);
+  -- D: deposit (50) then exit to 0 -> open + one closing zero-row.
+  INSERT INTO morpho_vault_position (user_id, morpho_vault_id, block_number, block_version, timestamp, shares, assets)
+    VALUES (udid, vid, 100, 0, '2026-01-01T00:00:00Z', 45, 50),
+           (udid, vid, 200, 0, '2026-01-02T00:00:00Z', 0, 0);
 END $$;`
 	if _, err := pool.Exec(ctx, seed); err != nil {
 		t.Fatalf("seed: %v", err)
@@ -66,7 +73,8 @@ END $$;`
 		t.Fatalf("materialize_morpho_vault: %v", err)
 	}
 
-	// A (2 obs) + B (1, deduped) = 3 rows; C skipped. Distinct positions: A, B = 2.
+	// A (2 obs) + B (1, deduped) + D (open + close = 2) = 5 rows; C never entered, skipped.
+	// Distinct positions: A, B, D = 3.
 	var rows, distinctPositions, collisions, badLen int
 	if err := pool.QueryRow(ctx, `
 		SELECT count(*),
@@ -76,14 +84,14 @@ END $$;`
 		FROM position_state`).Scan(&rows, &distinctPositions, &collisions, &badLen); err != nil {
 		t.Fatalf("position_state summary: %v", err)
 	}
-	if rows != 3 {
-		t.Errorf("position_state rows = %d, want 3", rows)
+	if rows != 5 {
+		t.Errorf("position_state rows = %d, want 5", rows)
 	}
-	if written != 3 {
-		t.Errorf("materialize returned %d, want 3", written)
+	if written != 5 {
+		t.Errorf("materialize returned %d, want 5", written)
 	}
-	if distinctPositions != 2 {
-		t.Errorf("distinct position_id = %d, want 2", distinctPositions)
+	if distinctPositions != 3 {
+		t.Errorf("distinct position_id = %d, want 3", distinctPositions)
 	}
 	if collisions != 0 {
 		t.Errorf("PK collisions = %d, want 0", collisions)
@@ -100,7 +108,8 @@ END $$;`
 	}{
 		{"A deposit, latest of two observations", "aa", "150", 2},
 		{"B same-block dedup keeps latest timestamp", "bb", "20", 1},
-		{"C exited (assets 0) is skipped", "cc", "", 0},
+		{"C never entered (assets 0) emits nothing", "cc", "", 0},
+		{"D exit: deposit + one closing zero-row", "dd", "0", 2},
 	} {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
@@ -126,15 +135,16 @@ END $$;`
 		})
 	}
 
-	// One current classification per position (2), each LOAN/LONG (a vault deposit lends).
+	// One current classification per position (3), each LOAN/LONG (a vault deposit lends). D's classification
+	// comes from its last non-zero observation, so a closed deposit still classifies LOAN/LONG.
 	var classRows int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_classification`).Scan(&classRows); err != nil {
 		t.Fatalf("classification count: %v", err)
 	}
-	if classRows != 2 {
-		t.Errorf("position_classification rows = %d, want 2", classRows)
+	if classRows != 3 {
+		t.Errorf("position_classification rows = %d, want 3", classRows)
 	}
-	for _, holder := range []string{"aa", "bb"} {
+	for _, holder := range []string{"aa", "bb", "dd"} {
 		holder := holder
 		t.Run("classify "+holder, func(t *testing.T) {
 			var dealType, direction string
@@ -161,7 +171,7 @@ END $$;`
 	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM position_state), (SELECT count(*) FROM position_classification)`).Scan(&rows2, &class2); err != nil {
 		t.Fatalf("re-count: %v", err)
 	}
-	if rows2 != 3 || class2 != 2 {
-		t.Errorf("after re-run: position_state=%d (want 3), position_classification=%d (want 2)", rows2, class2)
+	if rows2 != 5 || class2 != 3 {
+		t.Errorf("after re-run: position_state=%d (want 5), position_classification=%d (want 3)", rows2, class2)
 	}
 }

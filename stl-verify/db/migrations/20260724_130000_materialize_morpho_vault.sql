@@ -8,35 +8,52 @@
 -- to the underlying markets and earns yield) — a classification attribute in position_classification,
 -- not part of the id.
 --
--- One data fact drives the projection (verified live 2026-07-24 over 4,410,899 rows): 164
--- (user,vault,block_number,block_version) groups carry two timestamps — the same same-block anomaly as
--- the market table. DISTINCT ON keeps the latest so (position_id, block_number, block_version) stays
--- unique. Zero-asset observations (exited/empty positions) are skipped, matching VEC-402.
+-- Two data facts drive the projection (verified live 2026-07-24; closure re-verified 2026-07-28):
+--   * 164 (user,vault,block_number,block_version) groups carry two timestamps — the same same-block
+--     anomaly as the market table. DISTINCT ON keeps the latest so (position_id, block_number,
+--     block_version) stays unique.
+--   * Positions close: 81,200 vault deposits are observed transitioning from a positive quantity to 0
+--     (of 94,813 zero-asset rows), and morpho_vault_position records that exit as a real row. The
+--     projection must emit ONE closing zero-observation per real transition-to-zero — otherwise
+--     position_current (VEC-409) reports an exited deposit as still open — while dropping leading and
+--     repeated zeros. The LAG filter `quantity > 0 OR prev_quantity > 0` (prev per position, ordered by
+--     block) does exactly this, replacing the earlier blanket `WHERE assets > 0`.
 --
 -- DDL/function only. Population runs out of band (a 4M-row INSERT..SELECT does not belong in the
 -- migrator's single transaction), mirroring block_time, the transform _bootstrap functions, and VEC-402.
 
--- Per-protocol projection: raw Morpho vault positions -> native position rows. VEC-409 unions the
+-- Per-protocol projection: raw Morpho vault positions -> native position rows. VEC-409 reads the
 -- per-protocol outputs from position_state; this view is the materializer's source of truth.
 CREATE OR REPLACE VIEW position_morpho_vault AS
-SELECT DISTINCT ON (p.user_id, p.morpho_vault_id, p.block_number, p.block_version)
-       position_id(v.chain_id, v.protocol_id, encode(v.address, 'hex'), encode(u.address, 'hex')) AS position_id,
-       v.chain_id,
-       v.protocol_id,
-       encode(v.address, 'hex') AS instrument_key,
-       encode(u.address, 'hex') AS holder_id,
-       p.assets                 AS quantity,
-       'LOAN'::text             AS deal_type_code,
-       p.block_number,
-       p.block_version,
-       p.timestamp              AS block_timestamp
-FROM morpho_vault_position p
-JOIN morpho_vault v ON v.id = p.morpho_vault_id
-JOIN "user"       u ON u.id = p.user_id
-WHERE p.assets > 0
-ORDER BY p.user_id, p.morpho_vault_id, p.block_number, p.block_version, p.timestamp DESC;
+WITH obs AS (
+    SELECT DISTINCT ON (p.user_id, p.morpho_vault_id, p.block_number, p.block_version)
+           v.chain_id, v.protocol_id,
+           encode(v.address, 'hex') AS instrument_key,
+           encode(u.address, 'hex') AS holder_id,
+           p.assets                 AS quantity,
+           p.user_id, p.morpho_vault_id,
+           p.block_number, p.block_version, p.timestamp AS block_timestamp
+    FROM morpho_vault_position p
+    JOIN morpho_vault v ON v.id = p.morpho_vault_id
+    JOIN "user"       u ON u.id = p.user_id
+    ORDER BY p.user_id, p.morpho_vault_id, p.block_number, p.block_version, p.timestamp DESC
+),
+-- Previous observation's quantity per position, so a real exit (positive->0) is told apart from a
+-- position never entered.
+series AS (
+    SELECT chain_id, protocol_id, instrument_key, holder_id, quantity,
+           block_number, block_version, block_timestamp,
+           LAG(quantity) OVER (PARTITION BY user_id, morpho_vault_id ORDER BY block_number, block_version) AS prev_qty
+    FROM obs
+)
+SELECT position_id(chain_id, protocol_id, instrument_key, holder_id) AS position_id,
+       chain_id, protocol_id, instrument_key, holder_id, quantity,
+       'LOAN'::text AS deal_type_code,
+       block_number, block_version, block_timestamp
+FROM series
+WHERE quantity > 0 OR prev_qty > 0;
 
-COMMENT ON VIEW position_morpho_vault IS '[Operational] VEC-403 projection: Morpho vault positions as native position rows (one per vault deposit; instrument_key = vault contract address). Source for materialize_morpho_vault(); one row per (position_id, observation).';
+COMMENT ON VIEW position_morpho_vault IS '[Operational] VEC-403 projection: Morpho vault positions as native position rows (one per vault deposit; instrument_key = vault contract address). Source for materialize_morpho_vault(); one row per (position_id, observation), including one closing zero-quantity row on a real exit (VEC-409 closure).';
 
 -- Populate the spine + current classification. Idempotent (ON CONFLICT). Returns rows written to
 -- position_state. Run out of band after deploy; safe to re-run.
@@ -62,12 +79,14 @@ BEGIN
     )
     SELECT count(*) INTO n FROM ins;
 
-    -- Current deal-type per position (latest observation wins); direction frozen from ref_deal_type.
+    -- Current deal-type per position (latest NON-ZERO observation wins), consistent with VEC-402;
+    -- direction frozen from ref_deal_type.
     INSERT INTO position_classification (position_id, deal_type_code, direction, change_reason)
     SELECT DISTINCT ON (r.position_id)
            r.position_id, r.deal_type_code, d.direction, 'VEC-403: morpho_vault materializer'
     FROM position_morpho_vault r
     JOIN ref_deal_type d ON d.deal_type = r.deal_type_code
+    WHERE r.quantity > 0
     ORDER BY r.position_id, r.block_number DESC, r.block_version DESC
     ON CONFLICT (position_id) DO UPDATE
         SET deal_type_code = EXCLUDED.deal_type_code,
