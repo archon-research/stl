@@ -43,17 +43,34 @@ type MorphoRepository interface {
 	SaveVaultPosition(ctx context.Context, tx pgx.Tx, position *entity.MorphoVaultPosition) error
 
 	// GetOrCreateAdapter retrieves or creates a VaultV2 liquidity adapter registry
-	// row, keyed on the ACTIVE incarnation of (morpho_vault_id, address): if an
-	// active row exists it is reused and its added_at_block converges downward to
-	// the earliest observation (LEAST), so a lazily-registered adapter collapses
-	// onto the true AddAdapter block once the backfiller replays it, rather than
-	// creating a second active row. A distinct row is created only for a re-add
-	// after removal (the UNIQUE key includes added_at_block). Returns the row's ID.
+	// row for (morpho_vault_id, address). The candidate's added_at_block is matched
+	// against the adapter's incarnations in a load-bearing ORDER:
+	//
+	//  1. A CLOSED incarnation whose window covers the candidate wins FIRST. This
+	//     step must precede the active-row match: for a removed-then-re-added
+	//     adapter a closed row and an active row coexist, and a backfilled add
+	//     belonging to the earlier (closed) window would otherwise match the active
+	//     row, dragging the re-added incarnation's added_at_block into a prior
+	//     window and leaving the closed row unconverged. With no active row it would
+	//     instead insert a spuriously-active duplicate, resurrecting a de-registered
+	//     adapter into GetActiveAdaptersByVault / realAssets forever.
+	//  2. Otherwise an ACTIVE row is reused, its added_at_block converging downward
+	//     to the earliest observation (LEAST), so a lazily-registered adapter
+	//     collapses onto the true AddAdapter block once the backfiller replays it
+	//     rather than becoming a second active row.
+	//  3. Only a candidate added after every prior removal is a genuinely new
+	//     incarnation and gets its own row (the UNIQUE key includes added_at_block).
+	//
+	// Returns the row's ID.
 	GetOrCreateAdapter(ctx context.Context, tx pgx.Tx, adapter *entity.MorphoAdapter) (int64, error)
 
-	// MarkAdapterRemoved records the block at which an adapter was de-registered.
-	// The removal is idempotent for the same block (backfill replays); an unknown
-	// adapter or one already removed at a different block is a data bug and errors.
+	// MarkAdapterRemoved records the block at which an adapter was de-registered,
+	// closing the incarnation that was live at removedAtBlock. removed_at_block
+	// converges to the earliest observation, so a same-block replay is a no-op and a
+	// reorg that re-lands the removal in a neighbouring block converges instead of
+	// poisoning the queue. An adapter with no incarnation registered at or before
+	// the removal block, or a close that would strand adapter_state snapshots after
+	// the removal block, is a data bug and errors.
 	MarkAdapterRemoved(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, removedAtBlock int64) error
 
 	// GetActiveAdapter retrieves the active (not-yet-removed) adapter for a vault
