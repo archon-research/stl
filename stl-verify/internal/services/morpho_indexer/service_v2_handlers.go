@@ -112,11 +112,14 @@ func (s *Service) handleAllocation(ctx context.Context, adapter, vaultAddress co
 
 // ensureAdapterRegistered returns the registry id of the active adapter for
 // (vault, adapter). The GetActiveAdapter read here is the decisive read-your-writes
-// lookup under the GetOrCreateAdapter advisory lock; on a miss it lazily registers
-// the adapter at firstSeenBlock using probedType — the classification already
-// resolved before the transaction opened (see resolveAdapterTypeIfUnregistered). Used
-// by the Allocate/Deallocate and RemoveAdapter paths, which can legitimately reach
-// an adapter that predates the vault's mid-life discovery.
+// lookup — it runs inside the caller's transaction, so it sees rows this event
+// wrote earlier; it is NOT itself serialized (only the GetOrCreateAdapter call on
+// the miss path takes the per-(vault, address) advisory lock). On a miss it lazily
+// registers the adapter at firstSeenBlock using probedType — the classification
+// already resolved before the transaction opened (see
+// resolveAdapterTypeIfUnregistered). Used by the Allocate/Deallocate and
+// RemoveAdapter paths, which can legitimately reach an adapter that predates the
+// vault's mid-life discovery.
 //
 // A nil probedType means the pre-transaction check found the adapter already
 // registered. If the decisive read then disagrees (the adapter is absent), we have

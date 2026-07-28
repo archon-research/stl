@@ -426,6 +426,14 @@ func (r *MorphoRepository) GetOrCreateAdapter(ctx context.Context, tx pgx.Tx, ad
 	// Genuinely new incarnation (candidate added after every prior removal): insert
 	// a new row. The ON CONFLICT no-op SET keeps a same-block replay (backfill
 	// re-run of the same AddAdapter) idempotent.
+	//
+	// The advisory lock above does not cover MarkAdapterRemoved, which writes the
+	// same key without taking it; under READ COMMITTED a removal committing between
+	// the closed-window check and the active-row UPDATE makes EvalPlanQual re-check
+	// that UPDATE against the new removed_at_block, match 0 rows, and drop us here
+	// with the adapter already de-registered. The partial unique index
+	// uq_morpho_adapter_active backstops exactly that: this INSERT aborts, the event
+	// retries, and the re-run takes the closed-window path.
 	err = tx.QueryRow(ctx,
 		`INSERT INTO morpho_adapter (morpho_vault_id, address, asset_token_id, adapter_type, added_at_block, removed_at_block)
 		 VALUES ($1, $2, $3, $4, $5, $6)
