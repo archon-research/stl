@@ -1045,8 +1045,12 @@ func TestProcessBlockEvent_V2Handlers_ErrorsPropagate(t *testing.T) {
 	adapterIdx := []common.Hash{addrTopic(testCaller), addrTopic(testAdapterAddr)}
 
 	tests := []struct {
-		name  string
-		setup func(h *serviceTestHarness) shared.Log
+		name string
+		// wantErr, when set, pins WHICH dependency failed the event — without it a
+		// row passes as long as something fails, which hides a swallowed error that
+		// merely trips a later step.
+		wantErr string
+		setup   func(h *serviceTestHarness) shared.Log
 	}{
 		{
 			name: "AddAdapter: adapter probe RPC error",
@@ -1069,6 +1073,51 @@ func TestProcessBlockEvent_V2Handlers_ErrorsPropagate(t *testing.T) {
 				}
 				h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterState) error {
 					t.Fatal("adapter state must not be persisted when realAssets fails")
+					return nil
+				}
+				return h.makeV2VaultLog(h.vaultV2EventsABI.Events["Allocate"], testVaultAddr, adapterIdx, big.NewInt(1), hashSlice(common.HexToHash("0xaa")), big.NewInt(1))
+			},
+		},
+		{
+			name:    "AddAdapter: GetOrCreateAdapter DB error",
+			wantErr: "persisting adapter",
+			setup: func(h *serviceTestHarness) shared.Log {
+				h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+					return h.adapterProbeResults(entity.MorphoAdapterTypeMarketV1), nil
+				}
+				h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+					return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(1))}}, nil
+				}
+				h.morphoRepo.GetOrCreateAdapterFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapter) (int64, error) {
+					return 0, errors.New("db down")
+				}
+				h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterState) error {
+					t.Fatal("adapter state must not be persisted when the registry write fails")
+					return nil
+				}
+				return h.makeV2VaultLog(h.vaultV2EventsABI.Events["AddAdapter"], testVaultAddr, []common.Hash{addrTopic(testAdapterAddr)})
+			},
+		},
+		{
+			// The pre-transaction membership read decides whether the heal path needs
+			// to probe at all; a DB failure there must stop the event, not be read as
+			// "adapter not registered".
+			name:    "Allocation: GetActiveAdaptersByVault DB error",
+			wantErr: "looking up active adapters",
+			setup: func(h *serviceTestHarness) shared.Log {
+				h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+					return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(1))}}, nil
+				}
+				// The probe would succeed: the ONLY thing failing this event is the
+				// membership read.
+				h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+					return h.adapterProbeResults(entity.MorphoAdapterTypeMarketV1), nil
+				}
+				h.morphoRepo.GetActiveAdaptersByVaultFn = func(_ context.Context, _ int64) ([]*entity.MorphoAdapter, error) {
+					return nil, errors.New("db down")
+				}
+				h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterState) error {
+					t.Fatal("adapter state must not be persisted on a membership lookup error")
 					return nil
 				}
 				return h.makeV2VaultLog(h.vaultV2EventsABI.Events["Allocate"], testVaultAddr, adapterIdx, big.NewInt(1), hashSlice(common.HexToHash("0xaa")), big.NewInt(1))
@@ -1155,10 +1204,62 @@ func TestProcessBlockEvent_V2Handlers_ErrorsPropagate(t *testing.T) {
 			h := newTestHarness(t)
 			h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
 			log := tt.setup(h)
-			if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err == nil {
+			err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)})
+			if err == nil {
 				t.Fatal("expected the block to fail so SQS redelivers")
 			}
+			if tt.wantErr != "" && !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error %q should come from the failing dependency (%q)", err.Error(), tt.wantErr)
+			}
 		})
+	}
+}
+
+// TestProcessBlockEvent_Allocation_VanishedAdapterFailsHard covers the disagreement
+// between the two adapter reads: the pre-transaction membership check finds the
+// adapter (so nothing is probed and no type is carried into the transaction), but
+// the decisive in-transaction GetActiveAdapter then reports it absent. There is no
+// live single-consumer path that can remove an adapter in between, so this is
+// unexplained drift: with no probed type the only alternatives are recording a
+// defaulted classification or failing. It must fail, and SQS redelivery re-probes.
+func TestProcessBlockEvent_Allocation_VanishedAdapterFailsHard(t *testing.T) {
+	h := newTestHarness(t)
+	h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
+
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		if len(calls) == 1 && calls[0].Target == testAdapterAddr {
+			return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(1))}}, nil
+		}
+		return nil, errTestUnexpectedCall(calls)
+	}
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		t.Fatal("no probe may run: the pre-transaction membership check found the adapter")
+		return nil, errTestUnexpectedCall(calls)
+	}
+	h.morphoRepo.GetActiveAdaptersByVaultFn = func(_ context.Context, _ int64) ([]*entity.MorphoAdapter, error) {
+		return []*entity.MorphoAdapter{{ID: 55, MorphoVaultID: 7, Address: testAdapterAddr.Bytes(), AssetTokenID: 1, AdapterType: entity.MorphoAdapterTypeMarketV1, AddedAtBlock: 19000000}}, nil
+	}
+	h.morphoRepo.GetActiveAdapterFn = func(_ context.Context, _ pgx.Tx, _ int64, _ []byte) (*entity.MorphoAdapter, error) {
+		return nil, nil
+	}
+	h.morphoRepo.GetOrCreateAdapterFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapter) (int64, error) {
+		t.Fatal("an adapter must never be registered with a defaulted type")
+		return 0, nil
+	}
+	h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterState) error {
+		t.Fatal("no adapter state may be written for an adapter that vanished mid-transaction")
+		return nil
+	}
+
+	log := h.makeV2VaultLog(h.vaultV2EventsABI.Events["Allocate"], testVaultAddr,
+		[]common.Hash{addrTopic(testCaller), addrTopic(testAdapterAddr)},
+		big.NewInt(5000), hashSlice(common.HexToHash("0xaa")), big.NewInt(5000))
+	err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)})
+	if err == nil {
+		t.Fatal("expected the block to fail so SQS redelivers and the pre-tx check re-probes")
+	}
+	if !strings.Contains(err.Error(), "no type was probed") {
+		t.Errorf("error should name the missing probed type, got: %v", err)
 	}
 }
 
