@@ -621,12 +621,23 @@ func (s *blockchainService) getAdapterType(ctx context.Context, adapter common.A
 	return s.adapterProber.ProbeAdapterType(ctx, s.multicallClient, adapter, big.NewInt(blockNumber))
 }
 
+// errAdapterRealAssetsReverted reports that the adapter's realAssets() call itself
+// reverted, as opposed to the multicall failing to reach the node. Only the
+// registration seed for an adapter the type probe could not classify treats it as
+// "no reading to record"; every other caller treats it as an error. See
+// Service.readSeedRealAssets for why the distinction is structural rather than
+// best-effort.
+var errAdapterRealAssetsReverted = errors.New("realAssets() reverted")
+
 // getAdapterRealAssets reads an adapter's realAssets() — the assets it reports
 // holding in its downstream venue — pinned to blockHash. This is versioned
 // per-block state (it changes every allocation / accrual), so it uses
 // ExecuteAtHash for reorg-correctness (see getMarketState / VEC-471), not
-// number-pinning. realAssets() exists on every adapter type, so the call is not
-// AllowFailure: a revert is a real error that must stop the event.
+// number-pinning.
+//
+// The call is AllowFailure purely so a revert is reportable as
+// errAdapterRealAssetsReverted rather than reverting the whole batch; it is still an
+// error here, and only one caller is allowed to tolerate that specific error.
 func (s *blockchainService) getAdapterRealAssets(ctx context.Context, adapter common.Address, blockHash common.Hash) (retAssets *big.Int, retErr error) {
 	ctx, span := s.telemetry.StartSpan(ctx, "morpho.rpc.getAdapterRealAssets",
 		attribute.String("adapter.address", adapter.Hex()))
@@ -646,14 +657,17 @@ func (s *blockchainService) getAdapterRealAssets(ctx context.Context, adapter co
 
 	results, err := s.multicallClient.ExecuteAtHash(ctx, []outbound.Call{{
 		Target:       adapter,
-		AllowFailure: false,
+		AllowFailure: true,
 		CallData:     callData,
 	}}, blockHash)
 	if err != nil {
 		return nil, fmt.Errorf("multicall realAssets(): %w", err)
 	}
-	if len(results) == 0 || !results[0].Success || len(results[0].ReturnData) == 0 {
-		return nil, fmt.Errorf("realAssets() call failed for adapter %s", adapter.Hex())
+	if len(results) == 0 {
+		return nil, fmt.Errorf("realAssets() returned no result for adapter %s", adapter.Hex())
+	}
+	if !results[0].Success || len(results[0].ReturnData) == 0 {
+		return nil, fmt.Errorf("adapter %s: %w", adapter.Hex(), errAdapterRealAssetsReverted)
 	}
 
 	unpacked, err := s.adapterABI.Unpack("realAssets", results[0].ReturnData)
