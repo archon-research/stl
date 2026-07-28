@@ -15,6 +15,7 @@ import (
 	ethtypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
@@ -196,7 +197,7 @@ func replayPartition(
 	v2Vaults map[common.Address]struct{},
 	topics map[common.Hash]struct{},
 ) error {
-	entries, err := collectPartitionV2Logs(ctx, s3Reader, cfg.bucket, part, cfg.from, cfg.to, v2Vaults, topics)
+	entries, err := collectPartitionV2Logs(ctx, s3Reader, cfg.bucket, part, cfg.from, cfg.to, cfg.goroutines, v2Vaults, topics)
 	if err != nil {
 		return err
 	}
@@ -219,14 +220,22 @@ func replayPartition(
 	return nil
 }
 
+// receiptFile is one block's highest-version receipt object in a partition.
+type receiptFile struct {
+	key         string
+	blockNumber int64
+	version     int
+}
+
 // collectPartitionV2Logs downloads the highest-version receipt file per block in
-// the partition (ascending) and returns the structured V2 log entries in them,
-// each stamped with the block's S3 version.
+// the partition and returns the structured V2 log entries in them in ascending
+// block order, each stamped with the block's S3 version.
 func collectPartitionV2Logs(
 	ctx context.Context,
 	s3Reader outbound.S3Reader,
 	bucket, part string,
 	from, to int64,
+	workers int,
 	v2Vaults map[common.Address]struct{},
 	topics map[common.Hash]struct{},
 ) ([]v2LogEntry, error) {
@@ -235,20 +244,15 @@ func collectPartitionV2Logs(
 		return nil, fmt.Errorf("listing receipts for partition %s: %w", part, err)
 	}
 
-	type inRangeReceipt struct {
-		key         string
-		blockNumber int64
-		version     int
-	}
 	presentBlocks := make([]int64, 0, len(receiptKeys))
-	inRange := make([]inRangeReceipt, 0, len(receiptKeys))
+	inRange := make([]receiptFile, 0, len(receiptKeys))
 	for _, key := range receiptKeys {
 		parsed, ok := s3key.Parse(key)
 		if !ok || parsed.BlockNumber < from || parsed.BlockNumber > to {
 			continue
 		}
 		presentBlocks = append(presentBlocks, parsed.BlockNumber)
-		inRange = append(inRange, inRangeReceipt{key: key, blockNumber: parsed.BlockNumber, version: parsed.Version})
+		inRange = append(inRange, receiptFile{key: key, blockNumber: parsed.BlockNumber, version: parsed.Version})
 	}
 
 	// A block in the partition's [from,to] intersection with no receipt key would
@@ -260,20 +264,53 @@ func collectPartitionV2Logs(
 		return nil, err
 	}
 
+	return downloadV2LogsConcurrently(ctx, s3Reader, bucket, inRange, workers, v2Vaults, topics)
+}
+
+// downloadV2LogsConcurrently fetches the partition's receipt files across a
+// worker pool of the configured size and concatenates their V2 log entries in
+// listing (ascending block) order. Concurrency belongs here rather than around
+// whole partitions: partitions must replay strictly in block order so an
+// AddAdapter lands before a later Allocate, but the downloads feeding one
+// partition are order-free — each result is parked at its own index, so
+// completion order never reaches the caller.
+func downloadV2LogsConcurrently(
+	ctx context.Context,
+	s3Reader outbound.S3Reader,
+	bucket string,
+	files []receiptFile,
+	workers int,
+	v2Vaults map[common.Address]struct{},
+	topics map[common.Hash]struct{},
+) ([]v2LogEntry, error) {
+	perFile := make([][]v2LogEntry, len(files))
+
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.SetLimit(max(workers, 1))
+	for i, file := range files {
+		group.Go(func() error {
+			receipts, err := downloadReceipts(groupCtx, s3Reader, bucket, file.key)
+			if err != nil {
+				return fmt.Errorf("downloading %s: %w", file.key, err)
+			}
+			entries, err := filterV2Logs(receipts, file.blockNumber, v2Vaults, topics)
+			if err != nil {
+				return fmt.Errorf("filtering %s: %w", file.key, err)
+			}
+			for j := range entries {
+				entries[j].blockVersion = file.version
+			}
+			perFile[i] = entries
+			return nil
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return nil, err
+	}
+
 	var entries []v2LogEntry
-	for _, r := range inRange {
-		receipts, err := downloadReceipts(ctx, s3Reader, bucket, r.key)
-		if err != nil {
-			return nil, fmt.Errorf("downloading %s: %w", r.key, err)
-		}
-		blockEntries, err := filterV2Logs(receipts, r.blockNumber, v2Vaults, topics)
-		if err != nil {
-			return nil, fmt.Errorf("filtering %s: %w", r.key, err)
-		}
-		for i := range blockEntries {
-			blockEntries[i].blockVersion = r.version
-		}
-		entries = append(entries, blockEntries...)
+	for _, fileEntries := range perFile {
+		entries = append(entries, fileEntries...)
 	}
 	return entries, nil
 }
