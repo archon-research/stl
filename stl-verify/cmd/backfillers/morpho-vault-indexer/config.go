@@ -24,7 +24,7 @@ func parseConfig(args []string) (config, error) {
 	fs := flag.NewFlagSet("morpho-vault-backfill", flag.ContinueOnError)
 	from := fs.Int64("from", 0, "Start block number (inclusive). Optional when -from-v2-deploy is set; an explicit -from always wins.")
 	to := fs.Int64("to", 0, "End block number (inclusive)")
-	fromV2Deploy := fs.Bool("from-v2-deploy", false, "Default -from to the VaultV2 factory deploy block for the chain. Ignored when -from is given explicitly.")
+	fromV2Deploy := fs.Bool("from-v2-deploy", false, "Default -from to the VaultV2 factory deploy block for the chain. This narrows the WHOLE pipeline, not just the V2 replay: the phase-1 discovery scan starts there too, so a V1/V1.1 vault whose only Morpho Blue activity predates the factory is not discovered by this run. Ignored when -from is given explicitly.")
 	bucket := fs.String("bucket", "", "S3 bucket name")
 	dbURL := fs.String("db", "", "PostgreSQL connection URL")
 	rpcURL := fs.String("rpc-url", "", "Ethereum HTTP RPC endpoint")
