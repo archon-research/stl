@@ -63,8 +63,42 @@ func loadCheckpoint(path string, scope checkpointScope) (*checkpoint, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening checkpoint file: %w", err)
 	}
+	if err := terminateTornTrailingLine(f); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
 
 	return &checkpoint{file: f, scope: scope, done: done}, nil
+}
+
+// terminateTornTrailingLine writes the newline a crash mid-write left off.
+// readCheckpoint already tolerates the fragment, but O_APPEND would otherwise
+// concatenate the next record onto it into one unparseable line, silently
+// losing that record for good.
+func terminateTornTrailingLine(f *os.File) error {
+	info, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("stat checkpoint file: %w", err)
+	}
+	if info.Size() == 0 {
+		return nil
+	}
+
+	var last [1]byte
+	if _, err := f.ReadAt(last[:], info.Size()-1); err != nil {
+		return fmt.Errorf("reading last checkpoint byte: %w", err)
+	}
+	if last[0] == '\n' {
+		return nil
+	}
+
+	if _, err := f.Write([]byte{'\n'}); err != nil {
+		return fmt.Errorf("terminating torn checkpoint line: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("sync checkpoint file: %w", err)
+	}
+	return nil
 }
 
 func readCheckpoint(path string, scope checkpointScope) (map[string]struct{}, error) {
