@@ -47,8 +47,10 @@ func MorphoBlueDeployBlock(chainID int64) (int64, error) {
 // vaultV2FactoryDeployBlocks maps chain IDs to the block at which the Morpho
 // VaultV2 factory (0xA1D94F746dEfa1928926b84fB2596c06926C0405) was deployed.
 // Verified on-chain: the factory has no code at 23375072 and code at 23375073.
-// Used by the morpho-vault-indexer backfiller's --from-v2-deploy flag to bound
-// a V2 replay to the earliest block any VaultV2 could exist.
+// Used by the morpho-vault-indexer backfiller's --from-v2-deploy flag to default
+// -from to the earliest block any VaultV2 could exist. That bounds the whole
+// backfill pipeline — phase-1 discovery included — not just the V2 replay, so a
+// V1/V1.1 vault whose only activity predates the factory is not discovered.
 var vaultV2FactoryDeployBlocks = map[int64]int64{
 	1: 23_375_073, // Ethereum mainnet
 }
