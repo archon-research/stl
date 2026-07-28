@@ -98,6 +98,12 @@ func TestReplayMetaMorphoLog_RoutesToHandler(t *testing.T) {
 		}
 		return nil, errTestUnexpectedCall(calls)
 	}
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		if len(calls) == 1 && calls[0].Target == testAdapterAddr {
+			return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(41_300_000))}}, nil
+		}
+		return nil, errTestUnexpectedCall(calls)
+	}
 
 	var saved *entity.MorphoAdapter
 	h.morphoRepo.GetOrCreateAdapterFn = func(_ context.Context, _ pgx.Tx, a *entity.MorphoAdapter) (int64, error) {

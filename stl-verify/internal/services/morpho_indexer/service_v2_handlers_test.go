@@ -155,6 +155,12 @@ func TestProcessBlockEvent_AddAdapter(t *testing.T) {
 				}
 				return nil, errTestUnexpectedCall(calls)
 			}
+			h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+				if len(calls) == 1 && calls[0].Target == testAdapterAddr {
+					return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(41_300_000))}}, nil
+				}
+				return nil, errTestUnexpectedCall(calls)
+			}
 
 			var saved *entity.MorphoAdapter
 			h.morphoRepo.GetOrCreateAdapterFn = func(_ context.Context, _ pgx.Tx, a *entity.MorphoAdapter) (int64, error) {
@@ -193,6 +199,70 @@ func TestProcessBlockEvent_AddAdapter(t *testing.T) {
 				t.Errorf("WARN(unknown type) = %v, want %v", got, tt.wantWarn)
 			}
 		})
+	}
+}
+
+// TestProcessBlockEvent_AddAdapter_SeedsAdapterState pins the composition-
+// completeness guarantee at the moment of registration: an AddAdapter must leave
+// behind BOTH the registry row and a realAssets snapshot for it, seeded from a
+// hash-pinned read of the same block. Registering without a state row leaves the
+// adapter looking like adapter_data_missing to VEC-219's composition probe for as
+// long as the vault stays quiet — sparkUSDTbc went 5,517 blocks (~18h) between its
+// AddAdapter and its first Allocate.
+func TestProcessBlockEvent_AddAdapter_SeedsAdapterState(t *testing.T) {
+	h := newTestHarness(t)
+	h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
+
+	realAssets := big.NewInt(41_300_000)
+	var gotHash common.Hash
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		if len(calls) == 2 && calls[0].Target == testAdapterAddr {
+			return h.adapterProbeResults(entity.MorphoAdapterTypeMarketV1), nil
+		}
+		return nil, errTestUnexpectedCall(calls)
+	}
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+		if len(calls) == 1 && calls[0].Target == testAdapterAddr {
+			gotHash = blockHash
+			return []outbound.Result{{Success: true, ReturnData: h.packUint256(realAssets)}}, nil
+		}
+		return nil, errTestUnexpectedCall(calls)
+	}
+	h.morphoRepo.GetOrCreateAdapterFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapter) (int64, error) {
+		return 42, nil
+	}
+	var savedState *entity.MorphoAdapterState
+	h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, s *entity.MorphoAdapterState) error {
+		savedState = s
+		return nil
+	}
+
+	ev := h.vaultV2EventsABI.Events["AddAdapter"]
+	log := h.makeV2VaultLog(ev, testVaultAddr, []common.Hash{addrTopic(testAdapterAddr)})
+	if err := h.processBlock(t, 1, 20000000, 3, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+
+	if savedState == nil {
+		t.Fatal("AddAdapter must seed an adapter_state row for the freshly registered adapter")
+	}
+	if gotHash != testBlockHash {
+		t.Errorf("realAssets seed pinned to %s, want %s", gotHash, testBlockHash)
+	}
+	if savedState.MorphoAdapterID != 42 {
+		t.Errorf("MorphoAdapterID = %d, want 42 (the row GetOrCreateAdapter returned)", savedState.MorphoAdapterID)
+	}
+	if savedState.RealAssets.Cmp(realAssets) != 0 {
+		t.Errorf("RealAssets = %s, want %s", savedState.RealAssets, realAssets)
+	}
+	if savedState.BlockNumber != 20000000 {
+		t.Errorf("BlockNumber = %d, want 20000000", savedState.BlockNumber)
+	}
+	if savedState.BlockVersion != 3 {
+		t.Errorf("BlockVersion = %d, want 3", savedState.BlockVersion)
+	}
+	if savedState.Timestamp.IsZero() {
+		t.Error("Timestamp must be set")
 	}
 }
 
@@ -235,6 +305,12 @@ func TestProcessBlockEvent_AdapterProbeRunsBeforeTransaction(t *testing.T) {
 		{
 			name: "AddAdapter classifies before opening the transaction",
 			setup: func(h *serviceTestHarness) shared.Log {
+				h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+					if len(calls) == 1 && calls[0].Target == testAdapterAddr {
+						return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(41_300_000))}}, nil
+					}
+					return nil, errTestUnexpectedCall(calls)
+				}
 				return h.makeV2VaultLog(h.vaultV2EventsABI.Events["AddAdapter"], testVaultAddr, []common.Hash{addrTopic(testAdapterAddr)})
 			},
 		},
