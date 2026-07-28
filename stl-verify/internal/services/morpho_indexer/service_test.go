@@ -826,26 +826,34 @@ func TestProcessBlockEvent_VaultDiscovery_VaultV2(t *testing.T) {
 	curator := common.HexToAddress("0x0f96000000000000000000000000000000000046A3")
 	liquidityAdapter := common.HexToAddress("0x7481000000000000000000000000000000007dC2")
 
+	// Number-pinned reads (identity): the vault probe/details batches and the asset
+	// token metadata.
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		switch len(calls) {
-		case 1:
-			// adaptersLength(): this vault has no adapters, so discovery-time
-			// enumeration is a no-op and no adapter probe/seed calls follow.
-			return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(0))}}, nil
-		case 2:
-			if calls[0].Target == unknownVault {
-				return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult()}, nil
-			}
-			return h.tokenMetadataResults("USDT", 6), nil
-		case 3:
-			return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult(), h.defaultBalanceOfResult(big.NewInt(100000))}, nil
-		case 4:
-			if h.isProbeMulticall(calls) {
-				return h.vaultV2ProbeResults(testLoanToken, curator, liquidityAdapter), nil
-			}
+		switch {
+		case h.isProbeMulticall(calls):
+			return h.vaultV2ProbeResults(testLoanToken, curator, liquidityAdapter), nil
+		case h.isVaultDetailsMulticall(calls):
 			return h.vaultDetailResults("Spark Blue Chip USDT Vault", "sparkUSDTbc", 18, false), nil
+		case len(calls) == 2 && calls[0].Target == testLoanToken:
+			return h.tokenMetadataResults("USDT", 6), nil
 		default:
-			return nil, fmt.Errorf("unexpected %d calls", len(calls))
+			return nil, fmt.Errorf("unexpected Execute shape (%d calls)", len(calls))
+		}
+	}
+	// Hash-pinned reads (versioned state): the adapter-set enumeration, the fee
+	// config seed, and the vault-state read of the triggering AccrueInterest.
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		switch {
+		case len(calls) == 1 && calls[0].Target == unknownVault && hasSameSelector(calls[0].CallData, adaptersLengthSelector):
+			// This vault has no adapters, so discovery-time enumeration is a no-op
+			// and no adapter probe/seed calls follow.
+			return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(0))}}, nil
+		case len(calls) == 4 && calls[0].Target == unknownVault:
+			return h.feeGetterResults(big.NewInt(0), big.NewInt(0), common.Address{}, common.Address{}), nil
+		case len(calls) == 2 && calls[0].Target == unknownVault:
+			return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult()}, nil
+		default:
+			return nil, fmt.Errorf("unexpected ExecuteAtHash shape (%d calls)", len(calls))
 		}
 	}
 
@@ -935,6 +943,8 @@ func TestProcessBlockEvent_VaultDiscovery_V2_EnumeratesAndSeedsAdapters(t *testi
 			return []outbound.Result{{Success: true, ReturnData: h.packUint256(realAssetsA)}}, nil
 		case len(calls) == 1 && calls[0].Target == adapterB:
 			return []outbound.Result{{Success: true, ReturnData: h.packUint256(realAssetsB)}}, nil
+		case len(calls) == 4 && calls[0].Target == unknownVault:
+			return h.feeGetterResults(big.NewInt(0), big.NewInt(0), common.Address{}, common.Address{}), nil
 		case len(calls) == 2 && calls[0].Target == unknownVault:
 			return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult()}, nil
 		default:
@@ -1019,6 +1029,126 @@ func TestProcessBlockEvent_VaultDiscovery_V2_EnumeratesAndSeedsAdapters(t *testi
 	})
 }
 
+// TestProcessBlockEvent_VaultDiscovery_V2_SeedsFeeConfig verifies discovery
+// snapshots the vault's full on-chain fee config, the same way it seeds each
+// adapter's realAssets. Without the seed, a mid-life-discovered VaultV2 has ZERO
+// morpho_vault_fee rows until a Set* fee event that may never fire again —
+// sparkUSDTbc set its fees once, at blocks 24765788/24765805 — so every
+// fee-dependent read of that vault falls off a cliff for its entire indexed
+// history. Caps are deliberately NOT seeded: cap ids are opaque keccak hashes with
+// no on-chain enumeration getter, so there is nothing to enumerate.
+func TestProcessBlockEvent_VaultDiscovery_V2_SeedsFeeConfig(t *testing.T) {
+	h := newTestHarness(t)
+	unknownVault := common.HexToAddress("0xc7CDcFDEfC64631ED6799C95e3b110cd42F2bD22")
+	curator := common.HexToAddress("0x00000000000000000000000000000000000000A3")
+	liquidityAdapter := common.HexToAddress("0x0000000000000000000000000000000000000B4C")
+
+	perfFee := big.NewInt(100_000_000_000_000_000) // 0.1 WAD
+	mgmtFee := big.NewInt(3170979198)              // a WAD per-second rate
+	perfRecip := common.HexToAddress("0x1601843c5E9bC251A3272907010AFa41Fa18347E")
+	mgmtRecip := common.HexToAddress("0x9999999999999999999999999999999999999999")
+
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		switch {
+		case len(calls) == 4 && h.isProbeMulticall(calls):
+			return h.vaultV2ProbeResults(testLoanToken, curator, liquidityAdapter), nil
+		case len(calls) == 4 && h.isVaultDetailsMulticall(calls):
+			return h.vaultDetailResults("Spark Blue Chip USDT Vault", "sparkUSDTbc", 6, false), nil
+		case len(calls) == 2 && calls[0].Target == testLoanToken:
+			return h.tokenMetadataResults("USDT", 6), nil
+		default:
+			return nil, fmt.Errorf("unexpected Execute shape (%d calls)", len(calls))
+		}
+	}
+	var gotFeeHash common.Hash
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+		switch {
+		case len(calls) == 1 && calls[0].Target == unknownVault && hasSameSelector(calls[0].CallData, adaptersLengthSelector):
+			return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(0))}}, nil
+		case len(calls) == 4 && calls[0].Target == unknownVault:
+			gotFeeHash = blockHash
+			return h.feeGetterResults(perfFee, mgmtFee, perfRecip, mgmtRecip), nil
+		case len(calls) == 2 && calls[0].Target == unknownVault:
+			return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult()}, nil
+		default:
+			return nil, fmt.Errorf("unexpected ExecuteAtHash shape (%d calls)", len(calls))
+		}
+	}
+	h.morphoRepo.GetOrCreateVaultFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoVault) (int64, error) { return 99, nil }
+	var savedFee *entity.MorphoVaultFee
+	h.morphoRepo.SaveVaultFeeFn = func(_ context.Context, _ pgx.Tx, f *entity.MorphoVaultFee) error {
+		savedFee = f
+		return nil
+	}
+
+	log := h.makeDiscoveryTriggerLog(unknownVault)
+	if err := h.processBlock(t, 1, 24481834, 2, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+
+	if savedFee == nil {
+		t.Fatal("discovery must seed a morpho_vault_fee snapshot for a VaultV2")
+	}
+	if gotFeeHash != testBlockHash {
+		t.Errorf("fee seed pinned to %s, want %s", gotFeeHash, testBlockHash)
+	}
+	if savedFee.MorphoVaultID != 99 {
+		t.Errorf("MorphoVaultID = %d, want 99", savedFee.MorphoVaultID)
+	}
+	if savedFee.PerformanceFee.Cmp(perfFee) != 0 || savedFee.ManagementFee.Cmp(mgmtFee) != 0 {
+		t.Errorf("fees = (%s, %s), want (%s, %s)", savedFee.PerformanceFee, savedFee.ManagementFee, perfFee, mgmtFee)
+	}
+	if !bytes.Equal(savedFee.PerformanceFeeRecipient, perfRecip.Bytes()) {
+		t.Errorf("PerformanceFeeRecipient = %x, want %s", savedFee.PerformanceFeeRecipient, perfRecip.Hex())
+	}
+	if !bytes.Equal(savedFee.ManagementFeeRecipient, mgmtRecip.Bytes()) {
+		t.Errorf("ManagementFeeRecipient = %x, want %s", savedFee.ManagementFeeRecipient, mgmtRecip.Hex())
+	}
+	if savedFee.BlockNumber != 24481834 || savedFee.BlockVersion != 2 {
+		t.Errorf("fee seed at (block %d, version %d), want (24481834, 2)", savedFee.BlockNumber, savedFee.BlockVersion)
+	}
+	if savedFee.Timestamp.IsZero() {
+		t.Error("fee seed Timestamp must be set")
+	}
+}
+
+// TestProcessBlockEvent_VaultDiscovery_V1NeverSeedsFeeConfig pins the version
+// gate: morpho_vault_fee is a VaultV2-only table (V1/V1.1 fees live on a different
+// surface), so discovering a V1 vault must not attempt the V2 fee getters.
+func TestProcessBlockEvent_VaultDiscovery_V1NeverSeedsFeeConfig(t *testing.T) {
+	h := newTestHarness(t)
+	unknownVault := common.HexToAddress("0xdddddddddddddddddddddddddddddddddddddddd")
+
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		switch {
+		case len(calls) == 4 && h.isProbeMulticall(calls):
+			return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
+		case len(calls) == 4 && h.isVaultDetailsMulticall(calls):
+			return h.vaultDetailResults("Gauntlet USDC Core", "gtUSDCcore", 18, true), nil
+		case len(calls) == 2 && calls[0].Target == testLoanToken:
+			return h.tokenMetadataResults("USDC", 6), nil
+		default:
+			return nil, fmt.Errorf("unexpected Execute shape (%d calls)", len(calls))
+		}
+	}
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		if len(calls) == 2 && calls[0].Target == unknownVault {
+			return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult()}, nil
+		}
+		return nil, fmt.Errorf("unexpected ExecuteAtHash shape (%d calls)", len(calls))
+	}
+	h.morphoRepo.GetOrCreateVaultFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoVault) (int64, error) { return 99, nil }
+	h.morphoRepo.SaveVaultFeeFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoVaultFee) error {
+		t.Fatal("a V1 vault must not get a VaultV2 fee snapshot")
+		return nil
+	}
+
+	log := h.makeDiscoveryTriggerLog(unknownVault)
+	if err := h.processBlock(t, 1, 24481834, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+}
+
 // TestProcessBlockEvent_VaultDiscovery_V2_ZeroAdaptersRegistersCleanly verifies a
 // V2 vault with no adapters yet is discovered and registered without any adapter
 // or state write.
@@ -1046,6 +1176,8 @@ func TestProcessBlockEvent_VaultDiscovery_V2_ZeroAdaptersRegistersCleanly(t *tes
 		switch {
 		case len(calls) == 1 && calls[0].Target == unknownVault && hasSameSelector(calls[0].CallData, adaptersLengthSelector):
 			return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(0))}}, nil
+		case len(calls) == 4 && calls[0].Target == unknownVault:
+			return h.feeGetterResults(big.NewInt(0), big.NewInt(0), common.Address{}, common.Address{}), nil
 		case len(calls) == 2 && calls[0].Target == unknownVault:
 			return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult()}, nil
 		default:
@@ -1170,6 +1302,8 @@ func TestProcessBlockEvent_VaultDiscovery_V2_EnumerationFailureCommitsNothingAnd
 			return h.adapterProbeResults(entity.MorphoAdapterTypeMarketV1), nil
 		case len(calls) == 1 && calls[0].Target == adapterA:
 			return []outbound.Result{{Success: true, ReturnData: h.packUint256(realAssetsA)}}, nil
+		case len(calls) == 4 && calls[0].Target == unknownVault:
+			return h.feeGetterResults(big.NewInt(0), big.NewInt(0), common.Address{}, common.Address{}), nil
 		case len(calls) == 2 && calls[0].Target == unknownVault:
 			return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult()}, nil
 		default:
