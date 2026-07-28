@@ -197,11 +197,14 @@ type MorphoRepository interface {
 	//     below.
 	//
 	// A close that lands BELOW the incarnation's own added_at_block takes added_at_block
-	// down with it, so added_at_block <= removed_at_block always holds. Only a healed
-	// incarnation can be in that position, and its added_at_block is the removal block
-	// recorded as a LOWER BOUND rather than an observation of the add, so following the
-	// close down is the correct reading of it — a real registration block is never above a
-	// removal that closes its own lifetime, and is never moved here.
+	// down with it, so added_at_block <= removed_at_block always holds. For a healed
+	// incarnation that is the correct reading: its added_at_block is the removal block
+	// recorded as a LOWER BOUND, not an observation of the add. A row holding a REAL
+	// observed added_at_block can also be in that position (any incarnation the
+	// within-window fallback resolves is, by construction), and the same LEAST then moves
+	// the observed block down by up to the relocation bound. That is accepted: with any
+	// snapshot above the new close the narrowing guard refuses first, and the snapshot-less
+	// residual matches GetOrCreateAdapter's documented unbounded downward fold.
 	//
 	// Any close that NARROWS the recorded lifetime — an initial close, or a convergence
 	// downward — is refused if the row owns adapter_state snapshots recorded strictly

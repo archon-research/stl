@@ -3072,12 +3072,12 @@ func TestMarkAdapterRemoved_ReplayOldRemovalSparesReAddedRow(t *testing.T) {
 
 // --- GetAdapterIncarnationAt Tests ---
 
-// TestGetAdapterIncarnationAt pins the lookup a RemoveAdapter uses to decide whether
-// it already has a row to close. The load-bearing case is the last two rows: an
-// incarnation closed AT the block covers it (so a replayed removal is idempotent
-// against that row instead of minting a zero-length duplicate), while one closed
-// BELOW it does not (that is a later incarnation whose AddAdapter we never saw, and
-// the caller must register it).
+// TestGetAdapterIncarnationAt pins the covering lookup a RemoveAdapter's decision
+// starts from. The load-bearing case is the last two rows: an incarnation closed AT
+// the block covers it (so a replayed removal is idempotent against that row instead
+// of minting a zero-length duplicate), while one closed BELOW it does not — the
+// decision then falls through to the nearby-close relocation question, and only a
+// close beyond the relocation bound leads to registering a fresh incarnation.
 func TestGetAdapterIncarnationAt(t *testing.T) {
 	const (
 		addedAt  = int64(100)
