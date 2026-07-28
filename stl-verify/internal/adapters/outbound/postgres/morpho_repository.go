@@ -19,12 +19,12 @@ import (
 // Compile-time check that MorphoRepository implements outbound.MorphoRepository.
 var _ outbound.MorphoRepository = (*MorphoRepository)(nil)
 
-// maxRemovalRelocationDistance bounds how far ABOVE the recorded removal block a
-// re-observed RemoveAdapter can still be that same on-chain removal, relocated by a
-// reorg. Ethereum PoS finalises after 2 epochs — 64 slots — which is the deepest a
-// reorg can rewrite, and therefore the furthest a transaction can move; it is the
-// same bound the block watcher's reorg detection walks back
-// (live_data.LiveConfigDefaults().FinalityBlockCount, set to 64 in
+// maxRemovalRelocationDistance bounds how far — in EITHER direction — a re-observed
+// RemoveAdapter can sit from the recorded removal block and still be that same
+// on-chain removal, relocated by a reorg. Ethereum PoS finalises after 2 epochs — 64
+// slots — which is the deepest a reorg can rewrite, and therefore the furthest a
+// transaction can move; it is the same bound the block watcher's reorg detection
+// walks back (live_data.LiveConfigDefaults().FinalityBlockCount, set to 64 in
 // cmd/base/watcher). That value is a service-layer config field and this is an
 // adapter, so it is restated here rather than imported inward-to-outward.
 const maxRemovalRelocationDistance = 64
@@ -467,11 +467,11 @@ func lockAdapterKey(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address
 // row closed at a block where nothing happened. Nothing self-heals that — the
 // registry carries no lifecycle versioning (removed_at_block has no block_version),
 // so no later observation can contradict the recorded close.
-func (r *MorphoRepository) MarkAdapterRemoved(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, removedAtBlock int64) error {
+func (r *MorphoRepository) MarkAdapterRemoved(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, removedAtBlock int64, removedAtBlockVersion int) error {
 	if err := lockAdapterKey(ctx, tx, morphoVaultID, address); err != nil {
 		return err
 	}
-	if err := r.closeIncarnationLiveAt(ctx, tx, morphoVaultID, address, removedAtBlock); err != nil {
+	if err := r.closeIncarnationLiveAt(ctx, tx, morphoVaultID, address, removedAtBlock, removedAtBlockVersion); err != nil {
 		return fmt.Errorf("marking morpho adapter removed for vault %d address %x: %w", morphoVaultID, address, err)
 	}
 	return nil
@@ -479,7 +479,7 @@ func (r *MorphoRepository) MarkAdapterRemoved(ctx context.Context, tx pgx.Tx, mo
 
 // closeIncarnationLiveAt resolves which incarnation a removal closes, which block it
 // closes at, and whether closing there would strand snapshots, then writes it.
-func (r *MorphoRepository) closeIncarnationLiveAt(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, removedAtBlock int64) error {
+func (r *MorphoRepository) closeIncarnationLiveAt(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, removedAtBlock int64, removedAtBlockVersion int) error {
 	id, recordedRemoval, err := r.incarnationLiveAt(ctx, tx, morphoVaultID, address, removedAtBlock)
 	if err != nil {
 		return err
@@ -490,10 +490,8 @@ func (r *MorphoRepository) closeIncarnationLiveAt(ctx context.Context, tx pgx.Tx
 		return err
 	}
 
-	// The orphan guard belongs to an incarnation's INITIAL close only; see
-	// assertNoStateAfterRemoval for why a convergence must not re-run it.
-	if recordedRemoval == nil {
-		if err := r.assertNoStateAfterRemoval(ctx, tx, id, closeAt); err != nil {
+	if narrowsLifetime(recordedRemoval, closeAt) {
+		if err := r.assertNoStateAfterRemoval(ctx, tx, id, closeAt, removedAtBlockVersion); err != nil {
 			return err
 		}
 	}
@@ -504,25 +502,39 @@ func (r *MorphoRepository) closeIncarnationLiveAt(ctx context.Context, tx pgx.Tx
 	return nil
 }
 
+// narrowsLifetime reports whether writing closeAt shrinks the incarnation's recorded
+// lifetime, which is exactly when the orphan guard has a question to ask: an initial
+// close bounds a previously-unbounded lifetime, and a downward convergence moves the
+// bound below rows that were inside it. A close landing at or above the recorded one
+// leaves removed_at_block unchanged, so it cannot strand anything the guard did not
+// already vet — and re-asking there would fail a write that changes nothing, turning
+// at-least-once SQS redelivery into a poison pill.
+func narrowsLifetime(recordedRemoval *int64, closeAt int64) bool {
+	return recordedRemoval == nil || closeAt < *recordedRemoval
+}
+
 // convergedCloseBlock decides the block a removal closes its incarnation at.
 //
 // An OPEN incarnation closes at the observed block. An already-closed one means the
-// removal is being re-observed, and the distance discriminates between the two
-// causes: within maxRemovalRelocationDistance above the recorded close (or at any
-// block below it) it is that same removal, relocated by a reorg or replayed by the
-// backfiller, so it converges to the earlier of the two observations —
-// deterministic whichever order they arrive in — and WARNs, because a relocation is
-// rare enough to be worth an operator's attention. Further above, it cannot be a
-// relocation of the recorded close, so converging would quietly discard a real
-// de-registration (the close is already at the lower block, so the UPDATE would be a
-// no-op returning success): it errors instead.
+// removal is being re-observed, and the DISTANCE — measured symmetrically — is what
+// discriminates between the two causes. Within maxRemovalRelocationDistance either
+// way it is that same removal, relocated by a reorg or replayed by the backfiller, so
+// it converges to the earlier of the two observations — deterministic whichever order
+// they arrive in — and WARNs, because a relocation is rare enough to be worth an
+// operator's attention.
+//
+// Beyond that window in EITHER direction it errors. Above the recorded close the
+// reason is direct: converging would leave removed_at_block at the lower block, so a
+// real de-registration would be discarded by a no-op UPDATE returning success. Below
+// it the reason is the mirror image and cost a round of silent corruption to learn —
+// see the port doc for the full argument.
 func (r *MorphoRepository) convergedCloseBlock(morphoVaultID int64, address []byte, recordedRemoval *int64, removedAtBlock int64) (int64, error) {
 	if recordedRemoval == nil {
 		return removedAtBlock, nil
 	}
-	if removedAtBlock > *recordedRemoval+maxRemovalRelocationDistance {
-		return 0, fmt.Errorf("removal at block %d is %d blocks above the close already recorded at %d, beyond the %d-block reorg window, so it cannot be that removal relocated: the likely cause is an unrecorded later incarnation of this adapter (an AddAdapter after block %d we never observed) whose de-registration this is — replay the adapter's lifecycle history for this vault, then re-run the removal",
-			removedAtBlock, removedAtBlock-*recordedRemoval, *recordedRemoval, maxRemovalRelocationDistance, *recordedRemoval)
+	if distance := removedAtBlock - *recordedRemoval; distance > maxRemovalRelocationDistance || distance < -maxRemovalRelocationDistance {
+		return 0, fmt.Errorf("removal at block %d is %d blocks from the close already recorded at %d, beyond the %d-block reorg window, so the two cannot be one removal a reorg relocated: the likely cause is a conflated incarnation — this adapter lived several add/remove lifetimes and one registry row now spans more than one of them, so neither close can be converged away without erasing a real de-registration. Repair the row manually, or replay this adapter's full lifecycle history from before its earliest AddAdapter through past its latest RemoveAdapter, then re-run the removal",
+			removedAtBlock, distance, *recordedRemoval, maxRemovalRelocationDistance)
 	}
 	if *recordedRemoval == removedAtBlock {
 		return removedAtBlock, nil
@@ -563,75 +575,72 @@ func (r *MorphoRepository) incarnationLiveAt(ctx context.Context, tx pgx.Tx, mor
 	return id, removed, nil
 }
 
-// assertNoStateAfterRemoval refuses an incarnation's INITIAL close when it would
-// strand realAssets snapshots outside the lifetime window: window-filtered queries
-// drop them, window-ignoring queries double-count them against the next incarnation.
-// That is a hard error on purpose — poison-pilling the event beats silently
-// corrupting adapter lifetimes. Snapshots taken IN the removal block are inside the
-// window (the Deallocate log preceding the RemoveAdapter log in one governance
-// transaction), so the comparison is strict.
+// assertNoStateAfterRemoval refuses a lifetime-narrowing close when it would strand
+// realAssets snapshots outside the window: window-filtered queries drop them,
+// window-ignoring queries double-count them against the next incarnation. That is a
+// hard error on purpose — poison-pilling the event beats silently corrupting adapter
+// lifetimes. Snapshots taken IN the close block are inside the window (the Deallocate
+// log preceding the RemoveAdapter log in one governance transaction), so the
+// block_number comparison is strict.
 //
-// Scoped to the initial close deliberately. On a convergence the row is already
-// closed, that close passed this guard, and a convergence only ever moves the close
-// DOWN — so the rows it would flag sit between the new close and the already-vetted
-// one. They belong to block versions the relocating reorg replaced (moving the
-// removal rewrote those blocks), and readers select the latest block_version, so
-// flagging them fails a CORRECT removal on every redelivery and poisons the morpho
-// FIFO queue forever. The guard cannot tell the difference itself: morpho_adapter
-// carries no block_version, and "the highest version we wrote for that block" does
-// not distinguish a live row from an orphaned one.
+// removedAtBlockVersion scopes WHICH snapshots count, and is what makes the guard safe
+// to run on a downward convergence rather than exempting that arm (see the port doc).
+// A reorg that relocates a removal to an earlier block also republishes every
+// descendant block at a bumped version, so a snapshot above the new close carrying a
+// LOWER version than the event now being processed is residue of the chain that reorg
+// replaced — flagging it would fail a CORRECT removal forever, since nothing ever
+// re-homes or deletes it. Rows at or above the event's version are on the same chain
+// the event is on and genuinely fall outside the window.
 //
-// Residual: a convergence far below the recorded close — the repair path for a
-// registration that conflated two incarnations — can leave snapshots above the new
-// window. They are re-homed only when the later incarnation's AddAdapter is
-// replayed, which is exactly the ordering seedDiscoveredAdapters' bootstrap contract
-// requires.
+// Residual: version numbering is per block_number (MAX+1 on each republish), not a
+// global chain epoch, so two reorgs of different depths can leave a canonical
+// descendant at the SAME version as an earlier-block event that is not its ancestor,
+// and this guard would refuse a correct removal. That is loud rather than silent, and
+// the real fix is the incarnation-sequence key the port doc ticket names: nothing here
+// re-homes morpho_adapter_state.morpho_adapter_id, so a stranded snapshot can only be
+// moved by hand.
 //
-// Shape note: morpho_adapter_state is a compressed + S3-tiered hypertable
-// partitioned on timestamp, while this predicate filters block_number, so no chunk
-// exclusion applies and the read touches every chunk of the adapter's history. The
-// membership probe is therefore an EXISTS that can stop at the first stranded row
-// instead of aggregating them all, and the count/latest the message needs is paid
-// only on the refusal path. Scoping the guard to the initial close is the larger
-// saving: the convergence arm no longer reads the hypertable at all.
-func (r *MorphoRepository) assertNoStateAfterRemoval(ctx context.Context, tx pgx.Tx, adapterID, closeAt int64) error {
+// Shape note: morpho_adapter_state is a compressed + S3-tiered hypertable partitioned
+// on timestamp, while this predicate filters block_number, so no chunk exclusion
+// applies and the read touches every chunk of the adapter's history. The membership
+// probe is therefore an EXISTS that can stop at the first stranded row instead of
+// aggregating them all, and the count/latest the message needs is paid only on the
+// refusal path.
+func (r *MorphoRepository) assertNoStateAfterRemoval(ctx context.Context, tx pgx.Tx, adapterID, closeAt int64, removedAtBlockVersion int) error {
 	var orphaned bool
 	if err := tx.QueryRow(ctx,
 		`SELECT EXISTS (
 		     SELECT 1 FROM morpho_adapter_state
-		     WHERE morpho_adapter_id = $1 AND block_number > $2
+		     WHERE morpho_adapter_id = $1 AND block_number > $2 AND block_version >= $3
 		 )`,
-		adapterID, closeAt,
+		adapterID, closeAt, removedAtBlockVersion,
 	).Scan(&orphaned); err != nil {
 		return fmt.Errorf("checking adapter_state snapshots after block %d: %w", closeAt, err)
 	}
 	if !orphaned {
 		return nil
 	}
-	return r.orphanedStateError(ctx, tx, adapterID, closeAt)
+	return r.orphanedStateError(ctx, tx, adapterID, closeAt, removedAtBlockVersion)
 }
 
 // orphanedStateError builds the refusal message for assertNoStateAfterRemoval,
-// counting the stranded snapshots on this failure path only. Returns nil if the
-// count reads back empty: the two statements are separate READ COMMITTED snapshots,
-// and nothing left to strand is nothing to refuse.
-func (r *MorphoRepository) orphanedStateError(ctx context.Context, tx pgx.Tx, adapterID, closeAt int64) error {
+// counting the stranded snapshots on this failure path only. The EXISTS probe already
+// matched under the same predicate in the same transaction and nothing deletes
+// morpho_adapter_state rows, so the count is at least one.
+func (r *MorphoRepository) orphanedStateError(ctx context.Context, tx pgx.Tx, adapterID, closeAt int64, removedAtBlockVersion int) error {
 	var (
 		orphaned int64
 		latest   int64
 	)
 	if err := tx.QueryRow(ctx,
 		`SELECT count(*), COALESCE(max(block_number), 0) FROM morpho_adapter_state
-		 WHERE morpho_adapter_id = $1 AND block_number > $2`,
-		adapterID, closeAt,
+		 WHERE morpho_adapter_id = $1 AND block_number > $2 AND block_version >= $3`,
+		adapterID, closeAt, removedAtBlockVersion,
 	).Scan(&orphaned, &latest); err != nil {
 		return fmt.Errorf("counting adapter_state snapshots after block %d: %w", closeAt, err)
 	}
-	if orphaned == 0 {
-		return nil
-	}
-	return fmt.Errorf("closing incarnation %d at block %d would orphan %d morpho_adapter_state row(s) recorded after it (latest block %d): those snapshots belong to a later incarnation of this adapter and must be re-homed onto it before the removal can be recorded",
-		adapterID, closeAt, orphaned, latest)
+	return fmt.Errorf("closing incarnation %d at block %d would orphan %d morpho_adapter_state row(s) recorded after it at block_version >= %d (latest block %d): those snapshots belong to a later incarnation of this adapter and must be re-homed onto it by hand before the removal can be recorded",
+		adapterID, closeAt, orphaned, removedAtBlockVersion, latest)
 }
 
 // GetActiveAdapter retrieves the active adapter for a vault and address, reading

@@ -86,28 +86,60 @@ type MorphoRepository interface {
 	// state:
 	//
 	//   - OPEN incarnation (removed_at_block IS NULL): closes at removedAtBlock.
-	//     Refused if the row owns adapter_state snapshots recorded strictly after
-	//     that block — they would be stranded outside the lifetime window, so the
-	//     caller must re-home them onto the incarnation that owns them first.
-	//     Snapshots IN the removal block are inside the window.
-	//   - CLOSED incarnation, removedAtBlock at most 64 blocks (Ethereum's
-	//     finality/reorg bound) above the recorded close, or anywhere below it: the
-	//     same removal, relocated by a reorg or replayed by the backfiller.
+	//   - CLOSED incarnation, removedAtBlock within 64 blocks (Ethereum's
+	//     finality/reorg bound) of the recorded close, in EITHER direction: the same
+	//     removal, relocated by a reorg or replayed by the backfiller.
 	//     removed_at_block converges to the EARLIEST observation, mirroring
 	//     added_at_block, so the two arrive-in-any-order observations settle on the
-	//     same value; a same-block replay is a no-op. The snapshot guard does NOT
-	//     re-run: it already passed for this row, and a convergence only moves the
-	//     close down, over blocks a relocating reorg re-versioned.
-	//   - CLOSED incarnation, removedAtBlock further above the recorded close: NOT a
-	//     relocation. Converging would silently discard a real de-registration, so it
-	//     errors, naming the likely cause — a later incarnation of this adapter whose
-	//     AddAdapter was never recorded. Callers that legitimately observe a removal
-	//     for an unrecorded incarnation must register it first (see
-	//     GetOrCreateAdapter) rather than pass it here.
+	//     same value; a same-block replay is a no-op.
+	//   - CLOSED incarnation, removedAtBlock further than 64 blocks from the recorded
+	//     close, in EITHER direction: NOT a relocation, so it errors rather than
+	//     rewriting the recorded close. See "Why the relocation bound is symmetric"
+	//     below.
+	//
+	// Any close that NARROWS the recorded lifetime — an initial close, or a
+	// convergence downward — is refused if the row owns adapter_state snapshots
+	// recorded strictly after the new close block: they would be stranded outside the
+	// lifetime window, so the caller must re-home them onto the incarnation that owns
+	// them first. Snapshots IN the close block are inside the window. A close that
+	// leaves removed_at_block unchanged skips the guard: it cannot strand anything the
+	// guard did not already vet, and re-running it would turn an at-least-once SQS
+	// redelivery into a poison pill.
+	//
+	// removedAtBlockVersion is the block_version of the block the removal was
+	// observed in, and scopes that guard: snapshots above the new close carrying a
+	// LOWER block_version are dead-chain residue, not orphans. Replacing a block
+	// forces the watcher to republish every descendant at a bumped version, so a
+	// snapshot recorded above the close at an older version belongs to the chain the
+	// relocating reorg replaced. Without this the guard poison-pilled a CORRECT
+	// removal: a reorg that moves a RemoveAdapter one block earlier leaves the old
+	// chain's snapshot sitting just above the new close forever, and morpho_adapter
+	// carries no block_version of its own to compare against.
 	//
 	// An adapter with no incarnation registered at or before removedAtBlock is a data
 	// bug and errors.
-	MarkAdapterRemoved(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, removedAtBlock int64) error
+	//
+	// # Why the relocation bound is symmetric
+	//
+	// A removal far BELOW the recorded close looks like a repair opportunity: the
+	// registry conflated two incarnations, and the earlier removal is the true one, so
+	// converging down would fix the row. It is refused anyway, because that repair is
+	// sound only when the replay ALSO covers the later incarnation's full history, and
+	// nothing enforces that. A bounded replay of a conflated row instead erases the
+	// recorded de-registration and leaves an adapter that is removed on-chain
+	// permanently ACTIVE in the registry, with its snapshots outside the window
+	// (reproduced in
+	// TestMarkAdapterRemoved_ConflatedIncarnationsFromABoundedReplayAreRefused).
+	// Under-repair that is only conditionally sound, a loud stop wins: removed_at_block
+	// is a recorded fact, and no observation more than a reorg away from it can be
+	// evidence about the same removal.
+	//
+	// The real fix is an incarnation-sequence key on morpho_adapter, so a replayed add
+	// or remove names which lifetime it belongs to instead of being matched by block
+	// range, and morpho_adapter_state rows can be re-homed between them. That is
+	// ticketed as a follow-up; until it lands, a conflated row is repaired by hand or
+	// by a replay spanning the adapter's whole lifecycle history.
+	MarkAdapterRemoved(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, removedAtBlock int64, removedAtBlockVersion int) error
 
 	// GetActiveAdapter retrieves the active (not-yet-removed) adapter for a vault
 	// and address, reading within the caller's transaction so it sees writes made

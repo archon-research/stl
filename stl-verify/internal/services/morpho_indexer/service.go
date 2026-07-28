@@ -692,7 +692,7 @@ func (s *Service) processMetaMorphoLog(ctx context.Context, log shared.Log, vaul
 	case *AddAdapterEvent:
 		return s.handleAddAdapter(ctx, e, vaultAddress, blockNumber, blockHash, blockVersion, blockTimestamp)
 	case *RemoveAdapterEvent:
-		return s.handleRemoveAdapter(ctx, e, vaultAddress, blockNumber)
+		return s.handleRemoveAdapter(ctx, e, vaultAddress, blockNumber, blockVersion)
 	case *AllocateEvent:
 		return s.handleAllocation(ctx, e.Adapter, vaultAddress, blockNumber, blockHash, blockVersion, blockTimestamp)
 	case *DeallocateEvent:
