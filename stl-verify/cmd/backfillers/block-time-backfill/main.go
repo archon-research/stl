@@ -10,6 +10,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 
@@ -21,20 +22,28 @@ import (
 )
 
 func main() {
-	if err := run(context.Background()); err != nil {
+	if err := run(context.Background(), os.Args[1:]); err != nil {
 		slog.Error("block-time-backfill failed", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context) error {
+// run is the testable command boundary. The tool is env-driven (DATABASE_URL) and
+// takes no positional arguments, so any are rejected rather than silently ignored.
+func run(ctx context.Context, args []string) error {
+	if len(args) > 0 {
+		return fmt.Errorf("block-time-backfill takes no arguments; got %v", args)
+	}
 	logger := slog.Default()
 	pool, err := openPool(ctx)
 	if err != nil {
 		return err
 	}
 	defer pool.Close()
-	return block_time_backfill.Run(ctx, pool, logger)
+	if err := block_time_backfill.Run(ctx, pool, logger); err != nil {
+		return fmt.Errorf("running block_time backfill: %w", err)
+	}
+	return nil
 }
 
 func openPool(ctx context.Context) (*pgxpool.Pool, error) {
@@ -42,7 +51,11 @@ func openPool(ctx context.Context) (*pgxpool.Pool, error) {
 	// database would do nothing and report success.
 	dsn, err := env.Require("DATABASE_URL")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("requiring DATABASE_URL: %w", err)
 	}
-	return postgres.PoolOpener(postgres.DefaultDBConfig(dsn))(ctx)
+	pool, err := postgres.PoolOpener(postgres.DefaultDBConfig(dsn))(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("opening PostgreSQL pool: %w", err)
+	}
+	return pool, nil
 }
