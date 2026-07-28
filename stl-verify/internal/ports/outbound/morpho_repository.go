@@ -110,15 +110,32 @@ type MorphoRepository interface {
 	// later in the transaction is re-entrant, not a second wait.
 	//
 	// A removal's decisive question is not "is there an ACTIVE row" but "is there an
-	// incarnation COVERING removedAtBlock" — added at or before it and either still open
-	// or closed at or after it. That is what makes a redelivered or replayed removal
-	// idempotent: its incarnation is already closed at that very block, so an active-row
-	// check would miss and register a zero-length incarnation the chain never had.
+	// incarnation this removal can close", and there are two ways for the answer to be
+	// yes, asked in this order:
 	//
-	// Only when nothing covers the block is the adapter genuinely unknown there and a
-	// zero-length incarnation registered from candidate — including the case of a closed
-	// incarnation ending BELOW the removal, which is a later lifetime whose AddAdapter
-	// was never observed.
+	//  1. An incarnation COVERS removedAtBlock — added at or before it, and either still
+	//     open or closed at or after it. This wins: a removal inside a recorded lifetime
+	//     closes THAT lifetime whatever else the registry holds. It is also what makes a
+	//     redelivered or replayed removal idempotent, since its incarnation is already
+	//     closed at that very block; an active-row check would miss and register a
+	//     zero-length incarnation the chain never had.
+	//  2. Otherwise a recorded close sits within 64 blocks of removedAtBlock — the same
+	//     symmetric reorg window MarkAdapterRemoved converges over. That close and this
+	//     removal are ONE on-chain removal, so registering anything would duplicate a
+	//     lifetime already on record. The shape that forces this question is a healed
+	//     removal re-landing: the heal records [R,R], whose added_at_block sits ABOVE a
+	//     relocation to R-10, so question 1 alone misses it and heals a SECOND zero-length
+	//     row for one removal.
+	//
+	// Only when both miss is the adapter genuinely unknown at removedAtBlock, and a
+	// zero-length incarnation is registered from candidate — including the case of a closed
+	// incarnation ending FURTHER than the reorg window below the removal, which is a later
+	// lifetime whose AddAdapter was never observed.
+	//
+	// Question 2 declines to register; it does not choose the row. MarkAdapterRemoved
+	// resolves that independently, and where the two disagree — a relocation target that is
+	// not the incarnation registered at or before the removal — the relocation bound stops
+	// the removal loudly instead of either of them guessing which lifetime it belongs to.
 	//
 	// candidate is used ONLY on that registration path. A nil candidate means the caller has no
 	// on-chain classification to record (the pre-transaction probe found the adapter
@@ -141,9 +158,10 @@ type MorphoRepository interface {
 	// incarnation.
 	//
 	// removedAtBlock is both bounds of the registered lifetime: added_at_block is set to
-	// it as a LOWER BOUND, not a claim that the adapter was added there. A later replay
-	// of the true AddAdapter converges it down through GetOrCreateAdapter's
-	// closed-window match, which is where convergence belongs.
+	// it as a LOWER BOUND, not a claim that the adapter was added there. A later replay of
+	// the true AddAdapter converges it down through GetOrCreateAdapter's closed-window
+	// match, and a reorg that relocates the removal below it takes it down through
+	// MarkAdapterRemoved — convergence belongs to those, never here.
 	//
 	// A zero-length lifetime is the only shape this registers, and two properties depend
 	// on it: the row is born CLOSED, so it cannot collide with a still-active later
@@ -152,10 +170,16 @@ type MorphoRepository interface {
 	EnsureIncarnationToClose(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, removedAtBlock int64, candidate *entity.MorphoAdapter) (bool, error)
 
 	// MarkAdapterRemoved records the block at which an adapter was de-registered,
-	// closing the incarnation live at removedAtBlock — the latest one registered at
-	// or before it. Serializes on the SAME per-(morpho_vault_id, address) advisory
-	// lock as GetOrCreateAdapter, so registrations and removals of one adapter never
-	// interleave (ADR-0002 §3).
+	// closing the incarnation live at removedAtBlock — the latest one registered at or
+	// before it, or, when the adapter has none there, the one whose recorded close sits
+	// NEAREST to removedAtBlock within the 64-block reorg window. That fallback is the
+	// healed-removal case: a heal records [R,R], and a reorg relocating that removal to
+	// R-10 leaves the only row that could own it registered ABOVE the block being closed.
+	// It stays a fallback because a row registered at or before removedAtBlock is what
+	// routes a removal further than the window from its recorded close into the
+	// conflated-incarnation refusal below. Serializes on the SAME per-(morpho_vault_id,
+	// address) advisory lock as GetOrCreateAdapter, so registrations and removals of one
+	// adapter never interleave (ADR-0002 §3).
 	//
 	// The close block is a converging observation, resolved from the incarnation's
 	// state:
@@ -171,6 +195,13 @@ type MorphoRepository interface {
 	//     close, in EITHER direction: NOT a relocation, so it errors rather than
 	//     rewriting the recorded close. See "Why the relocation bound is symmetric"
 	//     below.
+	//
+	// A close that lands BELOW the incarnation's own added_at_block takes added_at_block
+	// down with it, so added_at_block <= removed_at_block always holds. Only a healed
+	// incarnation can be in that position, and its added_at_block is the removal block
+	// recorded as a LOWER BOUND rather than an observation of the add, so following the
+	// close down is the correct reading of it — a real registration block is never above a
+	// removal that closes its own lifetime, and is never moved here.
 	//
 	// Any close that NARROWS the recorded lifetime — an initial close, or a convergence
 	// downward — is refused if the row owns adapter_state snapshots recorded strictly
@@ -190,8 +221,8 @@ type MorphoRepository interface {
 	// no code path reassigns it) or deletes dead-chain residue, so the event stalls its
 	// FIFO queue until an operator does one or the other by hand.
 	//
-	// An adapter with no incarnation registered at or before removedAtBlock is a data
-	// bug and errors.
+	// An adapter with no incarnation registered at or before removedAtBlock and none
+	// closed within the reorg window of it is a data bug and errors.
 	//
 	// # Why the relocation bound is symmetric
 	//
@@ -208,14 +239,22 @@ type MorphoRepository interface {
 	// removed_at_block is a recorded fact, and no observation more than a reorg away
 	// from it can be evidence about the same removal.
 	//
-	// The BELOW-window arm is reachable in production, not merely defensive: a bounded
-	// replay of a conflated row hits it whenever EnsureIncarnationToClose finds a covering
-	// incarnation — so it registers nothing, correctly — whose recorded close sits more
-	// than 64 blocks above the removal's own block. Treat it as an operator-facing poison
-	// pill, not an assertion: the event stalls its FIFO queue until the row is repaired.
-	// The ABOVE-window arm has no service route today (a removal above a closed row makes
-	// EnsureIncarnationToClose register [B,B] first, so the distance is 0); it guards
-	// direct and future callers.
+	// Both arms are reachable in production, not merely defensive, and both are
+	// operator-facing poison pills rather than assertions: the event stalls its FIFO queue
+	// until the row is repaired.
+	//
+	// The BELOW-window arm: a bounded replay of a conflated row hits it whenever
+	// EnsureIncarnationToClose finds a covering incarnation — so it registers nothing,
+	// correctly — whose recorded close sits more than 64 blocks above the removal's own
+	// block.
+	//
+	// The ABOVE-window arm: EnsureIncarnationToClose declines to register when a recorded
+	// close is within the reorg window of the removal, and the incarnation resolved above
+	// need not be the row that close belongs to. A registry holding a fully observed
+	// [100, 200] and a healed [1000, 1000] resolves a removal re-landing at 990 to the
+	// first — 790 blocks from its close — and stops there. Nothing available here can tell
+	// which of the two lifetimes the removal belongs to; that needs the
+	// incarnation-sequence key named below.
 	//
 	// The real fix is an incarnation-sequence key on morpho_adapter, so a replayed add
 	// or remove names which lifetime it belongs to instead of being matched by block
