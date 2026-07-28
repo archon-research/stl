@@ -1596,6 +1596,14 @@ func (f *morphoTestFixture) adapterTypeOf(t *testing.T, ctx context.Context, id 
 // blockNumber, so a test can own state rows inside (or outside) a lifetime window.
 func (f *morphoTestFixture) seedAdapterStateAt(t *testing.T, ctx context.Context, adapterID, blockNumber int64) {
 	t.Helper()
+	f.seedAdapterStateAtVersion(t, ctx, adapterID, blockNumber, 0)
+}
+
+// seedAdapterStateAtVersion writes one adapter_state snapshot at a specific
+// block_version, so a test can distinguish a snapshot the canonical chain owns from
+// dead-chain residue a reorg left behind.
+func (f *morphoTestFixture) seedAdapterStateAtVersion(t *testing.T, ctx context.Context, adapterID, blockNumber int64, blockVersion int) {
+	t.Helper()
 	tx, err := f.pool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin: %v", err)
@@ -1604,31 +1612,90 @@ func (f *morphoTestFixture) seedAdapterStateAt(t *testing.T, ctx context.Context
 	state := &entity.MorphoAdapterState{
 		MorphoAdapterID: adapterID,
 		BlockNumber:     blockNumber,
-		BlockVersion:    0,
+		BlockVersion:    blockVersion,
 		Timestamp:       morphoBlockTime,
 		RealAssets:      big.NewInt(1_000_000),
 	}
 	if err := f.repo.SaveAdapterState(ctx, tx, state); err != nil {
-		t.Fatalf("SaveAdapterState at block %d: %v", blockNumber, err)
+		t.Fatalf("SaveAdapterState at block %d version %d: %v", blockNumber, blockVersion, err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
 }
 
-// markAdapterRemoved runs MarkAdapterRemoved in its own transaction, committing on
-// success and rolling back on error.
+// markAdapterRemoved runs MarkAdapterRemoved for a removal observed in the first
+// version of its block, which is every case except a reorg relocation.
 func (f *morphoTestFixture) markAdapterRemoved(t *testing.T, ctx context.Context, vaultID int64, address []byte, block int64) error {
+	t.Helper()
+	return f.markAdapterRemovedAtVersion(t, ctx, vaultID, address, block, 0)
+}
+
+// markAdapterRemovedAtVersion runs MarkAdapterRemoved in its own transaction,
+// committing on success and rolling back on error.
+func (f *morphoTestFixture) markAdapterRemovedAtVersion(t *testing.T, ctx context.Context, vaultID int64, address []byte, block int64, blockVersion int) error {
 	t.Helper()
 	tx, err := f.pool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	if err := f.repo.MarkAdapterRemoved(ctx, tx, vaultID, address, block); err != nil {
+	if err := f.repo.MarkAdapterRemoved(ctx, tx, vaultID, address, block, blockVersion); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// adapterIncarnationAt runs GetAdapterIncarnationAt (which reads through the
+// caller's tx) in a short read transaction that is rolled back afterwards.
+func (f *morphoTestFixture) adapterIncarnationAt(t *testing.T, ctx context.Context, vaultID int64, address []byte, atBlock int64) *entity.MorphoAdapter {
+	t.Helper()
+	tx, err := f.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	got, err := f.repo.GetAdapterIncarnationAt(ctx, tx, vaultID, address, atBlock)
+	if err != nil {
+		t.Fatalf("GetAdapterIncarnationAt(%d): %v", atBlock, err)
+	}
+	return got
+}
+
+// describeIncarnations renders every recorded incarnation of one adapter as
+// "id=N [added,removed]", oldest first, so a lifecycle assertion can print the
+// whole registry state it is unhappy about instead of one column of it.
+func (f *morphoTestFixture) describeIncarnations(t *testing.T, ctx context.Context, vaultID int64, address []byte) string {
+	t.Helper()
+	rows, err := f.pool.Query(ctx,
+		`SELECT id, added_at_block, removed_at_block FROM morpho_adapter
+		 WHERE morpho_vault_id = $1 AND address = $2 ORDER BY added_at_block`,
+		vaultID, address)
+	if err != nil {
+		t.Fatalf("listing incarnations: %v", err)
+	}
+	defer rows.Close()
+
+	var described []string
+	for rows.Next() {
+		var (
+			id      int64
+			added   int64
+			removed *int64
+		)
+		if err := rows.Scan(&id, &added, &removed); err != nil {
+			t.Fatalf("scanning incarnation: %v", err)
+		}
+		closedAt := "ACTIVE"
+		if removed != nil {
+			closedAt = fmt.Sprintf("%d", *removed)
+		}
+		described = append(described, fmt.Sprintf("id=%d [%d,%s]", id, added, closedAt))
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterating incarnations: %v", err)
+	}
+	return strings.Join(described, " ")
 }
 
 // getActiveAdapter runs GetActiveAdapter (which reads through the caller's tx) in
@@ -1792,7 +1859,7 @@ func TestGetOrCreateAdapter_BackfilledAddBeforeRemovalConvergesOntoClosedRow(t *
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	if err := fixture.repo.MarkAdapterRemoved(ctx, tx, vaultID, addr, liveBlock); err != nil {
+	if err := fixture.repo.MarkAdapterRemoved(ctx, tx, vaultID, addr, liveBlock, 0); err != nil {
 		t.Fatalf("MarkAdapterRemoved: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -1868,7 +1935,7 @@ func TestGetOrCreateAdapter_BackfilledAddConvergesClosedWindowNotActiveRow(t *te
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	if err := fixture.repo.MarkAdapterRemoved(ctx, tx, vaultID, addr, removeBlock); err != nil {
+	if err := fixture.repo.MarkAdapterRemoved(ctx, tx, vaultID, addr, removeBlock, 0); err != nil {
 		t.Fatalf("MarkAdapterRemoved: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -2086,7 +2153,7 @@ func TestMorphoAdapter_UniqueActiveIncarnationIndexRejectsSecondActiveRow(t *tes
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	if err := fixture.repo.MarkAdapterRemoved(ctx, tx, vaultID, addr, 150); err != nil {
+	if err := fixture.repo.MarkAdapterRemoved(ctx, tx, vaultID, addr, 150, 0); err != nil {
 		t.Fatalf("MarkAdapterRemoved: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -2104,12 +2171,12 @@ func TestMorphoAdapter_UniqueActiveIncarnationIndexRejectsSecondActiveRow(t *tes
 //
 // The axes are whether the incarnation is still OPEN (this is its first close) or
 // already CLOSED (the removal is being re-observed), and how far the observed block
-// sits from the recorded one. A re-observation within maxRemovalRelocationDistance
-// above the recorded close — or at any block below it — is the SAME on-chain removal
-// that a reorg relocated or a backfill replayed, so it converges to the earliest
-// observation. Beyond that window it cannot be the same removal: the only
-// explanation is a later incarnation whose AddAdapter we never recorded, and
-// converging would silently discard a real de-registration.
+// sits from the recorded one. A re-observation within maxRemovalRelocationDistance of
+// the recorded close, in EITHER direction, is the SAME on-chain removal that a reorg
+// relocated or a backfill replayed, so it converges to the earliest observation.
+// Beyond that window — either way — it cannot be the same removal: the row has
+// conflated two of the adapter's lifetimes, and converging would rewrite one of two
+// real de-registrations.
 //
 // The orphan guard (snapshots stranded outside the closed window) has its own tests
 // below; it asserts on a refused write rather than on a converged block.
@@ -2143,13 +2210,23 @@ func TestMarkAdapterRemoved_ClosesAndConverges(t *testing.T) {
 			closeFirst: true, removeAt: firstClose - 1, wantRemoved: firstClose - 1,
 		},
 		{
-			name:       "a removal at the far edge of the reorg window still converges",
+			name:       "a removal at the far upper edge of the reorg window still converges",
 			closeFirst: true, removeAt: firstClose + maxRemovalRelocationDistance, wantRemoved: firstClose,
 		},
 		{
-			name:       "a removal beyond the reorg window is a missed incarnation, not a relocation",
+			name:       "a removal at the far lower edge of the reorg window still converges",
+			closeFirst: true, removeAt: firstClose - maxRemovalRelocationDistance,
+			wantRemoved: firstClose - maxRemovalRelocationDistance,
+		},
+		{
+			name:       "a removal above the reorg window is a conflated incarnation, not a relocation",
 			closeFirst: true, removeAt: firstClose + maxRemovalRelocationDistance + 1,
-			wantErr: "unrecorded later incarnation", wantRemoved: firstClose,
+			wantErr: "conflated incarnation", wantRemoved: firstClose,
+		},
+		{
+			name:       "a removal below the reorg window is a conflated incarnation, not a relocation",
+			closeFirst: true, removeAt: firstClose - maxRemovalRelocationDistance - 1,
+			wantErr: "conflated incarnation", wantRemoved: firstClose,
 		},
 	}
 	for _, tt := range tests {
@@ -2172,7 +2249,7 @@ func TestMarkAdapterRemoved_ClosesAndConverges(t *testing.T) {
 					t.Fatalf("removal at %d must not be swallowed as a relocation of the close at %d", tt.removeAt, firstClose)
 				}
 				if !strings.Contains(err.Error(), tt.wantErr) {
-					t.Errorf("error %q should name the missed-incarnation hypothesis (%q)", err.Error(), tt.wantErr)
+					t.Errorf("error %q should name the conflated-incarnation hypothesis (%q)", err.Error(), tt.wantErr)
 				}
 			} else if err != nil {
 				t.Fatalf("MarkAdapterRemoved(%d): %v", tt.removeAt, err)
@@ -2191,43 +2268,220 @@ func TestMarkAdapterRemoved_ClosesAndConverges(t *testing.T) {
 	}
 }
 
-// TestMarkAdapterRemoved_ConvergingCloseIgnoresStateAtTheRecordedClose reproduces
-// the block_version-blind orphan guard: a state snapshot exists in the SAME block as
-// the recorded removal (the legitimate Deallocate-then-RemoveAdapter governance
-// transaction, allowed by the guard's strict boundary), then a reorg relocates the
-// RemoveAdapter one block earlier. Converging the close down to that block made the
-// snapshot look orphaned, so the guard hard-errored on every redelivery — poisoning
-// the morpho FIFO queue for a removal that is correct. The convergence arm must not
-// run the guard at all.
-func TestMarkAdapterRemoved_ConvergingCloseIgnoresStateAtTheRecordedClose(t *testing.T) {
+// TestMarkAdapterRemoved_ConflatedIncarnationsFromABoundedReplayAreRefused walks
+// the full sequence a bounded historical replay puts an adapter through when the
+// registry has conflated two of its incarnations, and pins that it stops loudly
+// instead of erasing the recorded de-registration.
+//
+// True on-chain history is add@1000 / remove@1050 / add@1100 / remove@1200, but the
+// live stream discovered the vault mid-life and recorded only [1100, 1200], with its
+// realAssets snapshots hanging off that row. An operator then replays 1000-1150 — a
+// range that covers the FIRST incarnation's whole life but stops inside the second's.
+// Step by step: the replayed AddAdapter@1000 folds onto the recorded row (legitimate:
+// with no incarnation-sequence key, a mid-life-discovered row is exactly what a
+// backfilled add is supposed to converge), which makes the row cover 1050, so the
+// replayed RemoveAdapter@1050 registers nothing and lands on MarkAdapterRemoved with
+// a recorded close 150 blocks above it. Converging there would erase the real
+// removal at 1200 and leave an adapter that is de-registered on-chain permanently
+// ACTIVE in the registry, its two snapshots outside the window. A replay range that
+// also covered 1200 would repair the row, but nothing enforces that it does, so the
+// close block is a recorded fact this cannot silently rewrite.
+func TestMarkAdapterRemoved_ConflatedIncarnationsFromABoundedReplayAreRefused(t *testing.T) {
 	fixture := setupMorphoTest(t)
 	ctx := context.Background()
-	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x40))
-	addr := adapterAddr(0x41)
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x50))
+	addr := adapterAddr(0x51)
 
+	const (
+		firstAdd     = int64(1000)
+		firstRemove  = int64(1050)
+		secondAdd    = int64(1100)
+		midLifeState = int64(1150)
+		secondRemove = int64(1200)
+	)
+
+	liveID := fixture.createTestAdapter(t, ctx, vaultID, addr, secondAdd)
+	fixture.seedAdapterStateAt(t, ctx, liveID, secondAdd)
+	fixture.seedAdapterStateAt(t, ctx, liveID, midLifeState)
+	if err := fixture.markAdapterRemoved(t, ctx, vaultID, addr, secondRemove); err != nil {
+		t.Fatalf("recording the live removal at %d: %v", secondRemove, err)
+	}
+
+	if got := fixture.createTestAdapter(t, ctx, vaultID, addr, firstAdd); got != liveID {
+		t.Fatalf("replayed AddAdapter@%d created id=%d; this scenario needs it to fold onto the live row %d", firstAdd, got, liveID)
+	}
+	if covering := fixture.adapterIncarnationAt(t, ctx, vaultID, addr, firstRemove); covering == nil {
+		t.Fatalf("the folded row must cover block %d, so the removal reaches MarkAdapterRemoved without registering anything", firstRemove)
+	}
+
+	if err := fixture.markAdapterRemoved(t, ctx, vaultID, addr, firstRemove); err == nil {
+		t.Errorf("removal at %d must be refused as a conflated incarnation, not converged onto the close recorded at %d; registry is now %s",
+			firstRemove, secondRemove, fixture.describeIncarnations(t, ctx, vaultID, addr))
+	} else if !strings.Contains(err.Error(), "conflated incarnation") {
+		t.Errorf("error %q should name the conflated-incarnation hypothesis", err.Error())
+	}
+
+	if got := fixture.describeIncarnations(t, ctx, vaultID, addr); got != fmt.Sprintf("id=%d [%d,%d]", liveID, firstAdd, secondRemove) {
+		t.Errorf("registry = %q, want the folded row still closed at %d: the recorded de-registration must survive the replay", got, secondRemove)
+	}
+}
+
+// TestMarkAdapterRemoved_OrphanGuardScopesStateByBlockVersion is the authoritative
+// matrix for which adapter_state rows above a close block count as orphans.
+//
+// The guard's question is "does this row own snapshots the new lifetime window would
+// strand", and answering it on block_number alone poison-pilled a CORRECT removal: a
+// reorg that relocates a RemoveAdapter one block earlier leaves the replaced chain's
+// snapshot sitting just above the new close forever, and morpho_adapter carries no
+// block_version to compare against. Replacing a block forces the watcher to republish
+// every descendant at a bumped version, so the removal event's own block_version
+// discriminates — a snapshot above the close at a LOWER version belongs to the chain
+// the relocation replaced.
+func TestMarkAdapterRemoved_OrphanGuardScopesStateByBlockVersion(t *testing.T) {
+	const (
+		addedAt   = int64(1000)
+		removeAt  = int64(1009)
+		stateAt   = int64(1010)
+		wantLoud  = true
+		wantClose = false
+	)
+
+	tests := []struct {
+		name           string
+		stateVersion   int
+		removalVersion int
+		wantErr        bool
+	}{
+		{
+			name:         "a snapshot from the chain the relocating reorg replaced is not an orphan",
+			stateVersion: 0, removalVersion: 1, wantErr: wantClose,
+		},
+		{
+			name:         "a snapshot on the same chain version as the removal is an orphan",
+			stateVersion: 1, removalVersion: 1, wantErr: wantLoud,
+		},
+		{
+			name:         "a snapshot on a newer chain version than the removal is an orphan",
+			stateVersion: 2, removalVersion: 1, wantErr: wantLoud,
+		},
+		{
+			name:         "a replay of finalised history counts every snapshot above the close",
+			stateVersion: 0, removalVersion: 0, wantErr: wantLoud,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := setupMorphoTest(t)
+			ctx := context.Background()
+			vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x40))
+			addr := adapterAddr(0x41)
+
+			adapterID := fixture.createTestAdapter(t, ctx, vaultID, addr, addedAt)
+			fixture.seedAdapterStateAtVersion(t, ctx, adapterID, stateAt, tt.stateVersion)
+
+			err := fixture.markAdapterRemovedAtVersion(t, ctx, vaultID, addr, removeAt, tt.removalVersion)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("closing at %d must be refused: the snapshot at (%d, v%d) would be stranded outside the window", removeAt, stateAt, tt.stateVersion)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("closing at %d must proceed: the snapshot at (%d, v%d) is dead-chain residue, not an orphan: %v", removeAt, stateAt, tt.stateVersion, err)
+			}
+		})
+	}
+}
+
+// TestMarkAdapterRemoved_ConvergingCloseRunsTheOrphanGuard pins that a downward
+// convergence is guarded too, not exempt.
+//
+// It narrows the window, so it can strand snapshots the initial close legitimately
+// admitted — here one taken in the SAME block as the recorded removal (the Deallocate
+// log preceding the RemoveAdapter log in one governance transaction, allowed by the
+// guard's strict boundary) before a reorg relocated the removal one block earlier.
+// Exempting the convergence arm is what let a bounded replay silently strand
+// snapshots; the block_version scope, not an exemption, is what keeps the correct
+// relocation from poison-pilling.
+func TestMarkAdapterRemoved_ConvergingCloseRunsTheOrphanGuard(t *testing.T) {
 	const (
 		addedAt     = int64(100)
 		recorded    = int64(500)
 		relocatedTo = int64(499)
 	)
 
+	tests := []struct {
+		name         string
+		stateVersion int
+		wantRemoved  int64
+	}{
+		{
+			name:         "the replaced chain's snapshot does not block the relocation",
+			stateVersion: 0, wantRemoved: relocatedTo,
+		},
+		{
+			name:         "a snapshot on the relocated chain does block it",
+			stateVersion: 1, wantRemoved: recorded,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := setupMorphoTest(t)
+			ctx := context.Background()
+			vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x46))
+			addr := adapterAddr(0x47)
+
+			adapterID := fixture.createTestAdapter(t, ctx, vaultID, addr, addedAt)
+			if err := fixture.markAdapterRemoved(t, ctx, vaultID, addr, recorded); err != nil {
+				t.Fatalf("recording the removal at %d: %v", recorded, err)
+			}
+			fixture.seedAdapterStateAtVersion(t, ctx, adapterID, recorded, tt.stateVersion)
+
+			err := fixture.markAdapterRemovedAtVersion(t, ctx, vaultID, addr, relocatedTo, 1)
+			if tt.wantRemoved == recorded && err == nil {
+				t.Fatalf("converging down to %d must be refused: the snapshot at (%d, v%d) would fall outside the window", relocatedTo, recorded, tt.stateVersion)
+			}
+			if tt.wantRemoved == relocatedTo && err != nil {
+				t.Fatalf("a relocated removal must converge, not poison the queue: %v", err)
+			}
+
+			var removed *int64
+			if err := fixture.pool.QueryRow(ctx,
+				`SELECT removed_at_block FROM morpho_adapter WHERE id = $1`, adapterID).Scan(&removed); err != nil {
+				t.Fatalf("query: %v", err)
+			}
+			if removed == nil || *removed != tt.wantRemoved {
+				t.Errorf("removed_at_block = %v, want %d", removed, tt.wantRemoved)
+			}
+		})
+	}
+}
+
+// TestMarkAdapterRemoved_RedeliveryAboveTheRecordedCloseSkipsTheOrphanGuard pins the
+// one exemption: a close that does not narrow the window. SQS delivers at least once,
+// and a redelivered removal whose block a reorg nudged upward converges to the
+// already-recorded close, leaving removed_at_block untouched. Re-asking the guard
+// there would fail a write that changes nothing, turning every redelivery into a
+// poison pill.
+func TestMarkAdapterRemoved_RedeliveryAboveTheRecordedCloseSkipsTheOrphanGuard(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x48))
+	addr := adapterAddr(0x49)
+
+	const (
+		addedAt  = int64(100)
+		recorded = int64(500)
+	)
+
 	adapterID := fixture.createTestAdapter(t, ctx, vaultID, addr, addedAt)
-	fixture.seedAdapterStateAt(t, ctx, adapterID, recorded)
 	if err := fixture.markAdapterRemoved(t, ctx, vaultID, addr, recorded); err != nil {
 		t.Fatalf("recording the removal at %d: %v", recorded, err)
 	}
+	fixture.seedAdapterStateAtVersion(t, ctx, adapterID, recorded+10, 1)
 
-	if err := fixture.markAdapterRemoved(t, ctx, vaultID, addr, relocatedTo); err != nil {
-		t.Fatalf("a relocated removal must converge, not poison the queue: %v", err)
-	}
-
-	var removed *int64
-	if err := fixture.pool.QueryRow(ctx,
-		`SELECT removed_at_block FROM morpho_adapter WHERE id = $1`, adapterID).Scan(&removed); err != nil {
-		t.Fatalf("query: %v", err)
-	}
-	if removed == nil || *removed != relocatedTo {
-		t.Errorf("removed_at_block = %v, want %d (LEAST of the two observations)", removed, relocatedTo)
+	if err := fixture.markAdapterRemovedAtVersion(t, ctx, vaultID, addr, recorded+1, 1); err != nil {
+		t.Fatalf("a redelivery that leaves removed_at_block at %d must not be refused: %v", recorded, err)
 	}
 }
 
@@ -2242,7 +2496,7 @@ func TestMarkAdapterRemoved_UnknownAddressErrors(t *testing.T) {
 	}
 	defer tx.Rollback(ctx)
 
-	err = fixture.repo.MarkAdapterRemoved(ctx, tx, vaultID, adapterAddr(0x06), 24600000)
+	err = fixture.repo.MarkAdapterRemoved(ctx, tx, vaultID, adapterAddr(0x06), 24600000, 0)
 	if err == nil {
 		t.Fatal("expected error for unknown adapter address, got nil")
 	}
@@ -2335,7 +2589,7 @@ func TestMarkAdapterRemoved_ReplayOldRemovalSparesReAddedRow(t *testing.T) {
 			return err
 		}
 		defer tx.Rollback(ctx)
-		if err := fixture.repo.MarkAdapterRemoved(ctx, tx, vaultID, addr, block); err != nil {
+		if err := fixture.repo.MarkAdapterRemoved(ctx, tx, vaultID, addr, block, 0); err != nil {
 			return err
 		}
 		return tx.Commit(ctx)
@@ -2496,7 +2750,7 @@ func TestGetActiveAdapter_RemovedReturnsNil(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	if err := fixture.repo.MarkAdapterRemoved(ctx, tx, vaultID, adapterAddr(0x09), 24600000); err != nil {
+	if err := fixture.repo.MarkAdapterRemoved(ctx, tx, vaultID, adapterAddr(0x09), 24600000, 0); err != nil {
 		t.Fatalf("MarkAdapterRemoved failed: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -2540,7 +2794,7 @@ func TestGetActiveAdaptersByVault_ReturnsActiveExcludesRemoved(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	if err := fixture.repo.MarkAdapterRemoved(ctx, tx, vaultID, adapterAddr(0x0d), 24600000); err != nil {
+	if err := fixture.repo.MarkAdapterRemoved(ctx, tx, vaultID, adapterAddr(0x0d), 24600000, 0); err != nil {
 		t.Fatalf("MarkAdapterRemoved failed: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
