@@ -682,6 +682,37 @@ func (r *MorphoRepository) GetActiveAdapter(ctx context.Context, tx pgx.Tx, morp
 	return &a, nil
 }
 
+// GetAdapterIncarnationAt retrieves the incarnation whose recorded lifetime
+// contains atBlock, reading through the caller's transaction (read-your-writes).
+//
+// The removed_at_block >= atBlock predicate is what distinguishes this from
+// incarnationLiveAt, whose scope is only added_at_block <= atBlock: an incarnation
+// that already CLOSED below atBlock does not cover it, so this returns nil and the
+// caller registers the unobserved later incarnation instead of letting the removal
+// converge onto — or mint a zero-length duplicate of — the earlier one.
+func (r *MorphoRepository) GetAdapterIncarnationAt(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, atBlock int64) (*entity.MorphoAdapter, error) {
+	var a entity.MorphoAdapter
+	err := tx.QueryRow(ctx,
+		`SELECT id, asset_token_id, adapter_type, added_at_block, removed_at_block
+		 FROM morpho_adapter
+		 WHERE morpho_vault_id = $1 AND address = $2 AND added_at_block <= $3
+		   AND (removed_at_block IS NULL OR removed_at_block >= $3)
+		 ORDER BY added_at_block DESC
+		 LIMIT 1`,
+		morphoVaultID, address, atBlock,
+	).Scan(&a.ID, &a.AssetTokenID, &a.AdapterType, &a.AddedAtBlock, &a.RemovedAtBlock)
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("querying morpho adapter incarnation at block %d: %w", atBlock, err)
+	}
+	a.MorphoVaultID = morphoVaultID
+	a.Address = address
+	return &a, nil
+}
+
 // GetActiveAdaptersByVault retrieves all currently-active adapters for a vault.
 func (r *MorphoRepository) GetActiveAdaptersByVault(ctx context.Context, morphoVaultID int64) ([]*entity.MorphoAdapter, error) {
 	rows, err := r.pool.Query(ctx,
