@@ -164,8 +164,33 @@ func (s *Service) ensureIncarnationToClose(ctx context.Context, tx pgx.Tx, vault
 	}
 	s.logger.Warn("adapter registered lazily; AddAdapter predates vault discovery",
 		"vault", vaultAddress.Hex(), "adapter", adapter.Hex(), "block", removedAtBlock)
-	_, err = s.upsertAdapterRow(ctx, tx, vault, vaultAddress, adapter, *probedType, removedAtBlock)
-	return err
+	return s.registerIncarnationForRemoval(ctx, tx, vault, vaultAddress, adapter, *probedType, removedAtBlock)
+}
+
+// registerIncarnationForRemoval records the incarnation a removal closes when none was
+// ever observed, as a zero-length lifetime [removedAtBlock, removedAtBlock].
+//
+// added_at_block is a LOWER BOUND here, not an estimate: a RemoveAdapter proves the
+// adapter existed at that block and says nothing about when it was added. A later
+// replay of the true AddAdapter converges it down through GetOrCreateAdapter's
+// closed-window match. That is also why this must NOT register through
+// upsertAdapterRow: its convergence would drag a later, still-active incarnation of
+// the same address down to this block and the close would then de-register an adapter
+// that is live on-chain (see the port doc on CreateAdapterIncarnation).
+//
+// Recording the row already closed is what keeps it from colliding with such a later
+// incarnation on uq_morpho_adapter_active; MarkAdapterRemoved then converges onto it as
+// an idempotent no-op.
+func (s *Service) registerIncarnationForRemoval(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault, vaultAddress, adapter common.Address, adapterType entity.MorphoAdapterType, removedAtBlock int64) error {
+	s.warnIfUnknownAdapterType(vaultAddress, adapter, adapterType, removedAtBlock)
+	adapterEntity, err := entity.NewMorphoAdapter(vault.ID, adapter.Bytes(), vault.AssetTokenID, adapterType, removedAtBlock, &removedAtBlock)
+	if err != nil {
+		return fmt.Errorf("creating adapter entity: %w", err)
+	}
+	if _, err := s.morphoRepo.CreateAdapterIncarnation(ctx, tx, adapterEntity); err != nil {
+		return fmt.Errorf("registering the incarnation removed at block %d: %w", removedAtBlock, err)
+	}
+	return nil
 }
 
 // handleAllocation snapshots an adapter's realAssets() after an Allocate or
@@ -282,10 +307,7 @@ func (s *Service) resolveAdapterTypeIfUnregistered(ctx context.Context, vault *e
 // handler, the Allocate/RemoveAdapter lazy self-heal, and the discovery seed —
 // resolves the type before opening the transaction and passes it in here.
 func (s *Service) upsertAdapterRow(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault, vaultAddress, adapter common.Address, adapterType entity.MorphoAdapterType, firstSeenBlock int64) (int64, error) {
-	if adapterType == entity.MorphoAdapterTypeUnknown {
-		s.logger.Warn("VaultV2 adapter of unknown type — recorded as Unknown for later curation",
-			"vault", vaultAddress.Hex(), "adapter", adapter.Hex(), "block", firstSeenBlock)
-	}
+	s.warnIfUnknownAdapterType(vaultAddress, adapter, adapterType, firstSeenBlock)
 	adapterEntity, err := entity.NewMorphoAdapter(vault.ID, adapter.Bytes(), vault.AssetTokenID, adapterType, firstSeenBlock, nil)
 	if err != nil {
 		return 0, fmt.Errorf("creating adapter entity: %w", err)
@@ -295,6 +317,17 @@ func (s *Service) upsertAdapterRow(ctx context.Context, tx pgx.Tx, vault *entity
 		return 0, fmt.Errorf("persisting adapter: %w", err)
 	}
 	return id, nil
+}
+
+// warnIfUnknownAdapterType surfaces an adapter the on-chain type probe could not
+// classify, mirroring the VaultShaped discovery sentinel so a future adapter kind is
+// recorded behind a WARN instead of being dropped.
+func (s *Service) warnIfUnknownAdapterType(vaultAddress, adapter common.Address, adapterType entity.MorphoAdapterType, atBlock int64) {
+	if adapterType != entity.MorphoAdapterTypeUnknown {
+		return
+	}
+	s.logger.Warn("VaultV2 adapter of unknown type — recorded as Unknown for later curation",
+		"vault", vaultAddress.Hex(), "adapter", adapter.Hex(), "block", atBlock)
 }
 
 // handleForceDeallocate emits an ops WARN and writes NO state.

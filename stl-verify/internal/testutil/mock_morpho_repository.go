@@ -22,6 +22,7 @@ type MockMorphoRepository struct {
 	SaveVaultPositionFn   func(ctx context.Context, tx pgx.Tx, position *entity.MorphoVaultPosition) error
 
 	GetOrCreateAdapterFn       func(ctx context.Context, tx pgx.Tx, adapter *entity.MorphoAdapter) (int64, error)
+	CreateAdapterIncarnationFn func(ctx context.Context, tx pgx.Tx, adapter *entity.MorphoAdapter) (int64, error)
 	MarkAdapterRemovedFn       func(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, removedAtBlock int64, removedAtBlockVersion int) error
 	GetActiveAdapterFn         func(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte) (*entity.MorphoAdapter, error)
 	GetAdapterIncarnationAtFn  func(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, atBlock int64) (*entity.MorphoAdapter, error)
@@ -97,6 +98,13 @@ func (m *MockMorphoRepository) SaveVaultPosition(ctx context.Context, tx pgx.Tx,
 func (m *MockMorphoRepository) GetOrCreateAdapter(ctx context.Context, tx pgx.Tx, adapter *entity.MorphoAdapter) (int64, error) {
 	if m.GetOrCreateAdapterFn != nil {
 		return m.GetOrCreateAdapterFn(ctx, tx, adapter)
+	}
+	return 1, nil
+}
+
+func (m *MockMorphoRepository) CreateAdapterIncarnation(ctx context.Context, tx pgx.Tx, adapter *entity.MorphoAdapter) (int64, error) {
+	if m.CreateAdapterIncarnationFn != nil {
+		return m.CreateAdapterIncarnationFn(ctx, tx, adapter)
 	}
 	return 1, nil
 }

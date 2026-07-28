@@ -443,6 +443,37 @@ func (r *MorphoRepository) GetOrCreateAdapter(ctx context.Context, tx pgx.Tx, ad
 	return id, nil
 }
 
+// CreateAdapterIncarnation inserts the given incarnation and nothing else. The
+// contract — and why no convergence may leak in here — is on
+// outbound.MorphoRepository.CreateAdapterIncarnation.
+//
+// The ON CONFLICT target is the full UNIQUE key and its DO UPDATE is a no-op purely so
+// the statement can RETURN the existing row's id; it deliberately touches neither
+// removed_at_block nor adapter_type, so a re-run cannot reopen a closed lifetime or
+// overwrite a curated classification.
+func (r *MorphoRepository) CreateAdapterIncarnation(ctx context.Context, tx pgx.Tx, adapter *entity.MorphoAdapter) (int64, error) {
+	if err := adapter.Validate(); err != nil {
+		return 0, fmt.Errorf("validating morpho adapter: %w", err)
+	}
+	if err := lockAdapterKey(ctx, tx, adapter.MorphoVaultID, adapter.Address); err != nil {
+		return 0, err
+	}
+
+	var id int64
+	err := tx.QueryRow(ctx,
+		`INSERT INTO morpho_adapter (morpho_vault_id, address, asset_token_id, adapter_type, added_at_block, removed_at_block)
+		 VALUES ($1, $2, $3, $4, $5, $6)
+		 ON CONFLICT (morpho_vault_id, address, added_at_block) DO UPDATE SET id = morpho_adapter.id
+		 RETURNING id`,
+		adapter.MorphoVaultID, adapter.Address, adapter.AssetTokenID, int16(adapter.AdapterType),
+		adapter.AddedAtBlock, adapter.RemovedAtBlock,
+	).Scan(&id)
+	if err != nil {
+		return 0, fmt.Errorf("inserting morpho adapter incarnation added at block %d: %w", adapter.AddedAtBlock, err)
+	}
+	return id, nil
+}
+
 // lockAdapterKey serializes every writer of one adapter registry key on a
 // per-transaction advisory lock. ON CONFLICT alone cannot guard a decision made
 // before the insert (ADR-0002 §3): without this, two concurrent live-vs-backfill
