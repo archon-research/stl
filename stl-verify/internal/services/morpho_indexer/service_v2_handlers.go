@@ -299,13 +299,12 @@ func (s *Service) resolveAdapterTypeIfUnregistered(ctx context.Context, vault *e
 	return &adapterType, nil
 }
 
-// upsertAdapterRow records an already-classified adapter in the registry within
-// tx, WARNing on an Unknown type (mirroring the VaultShaped discovery sentinel so
-// a future adapter kind surfaces instead of being dropped). The upsert is
-// incarnation-aware (GetOrCreateAdapter), so a later replay of the true AddAdapter
-// converges the row rather than duplicating it. Every caller — the AddAdapter
-// handler, the Allocate/RemoveAdapter lazy self-heal, and the discovery seed —
-// resolves the type before opening the transaction and passes it in here.
+// upsertAdapterRow records an already-classified adapter as an OPEN incarnation within
+// tx. The upsert is incarnation-aware (GetOrCreateAdapter), so a later replay of the
+// true AddAdapter converges the row rather than duplicating it. Its three callers — the
+// AddAdapter handler, the Allocate lazy self-heal, and the discovery seed — each resolve
+// the type before opening the transaction and pass it in here. The RemoveAdapter heal
+// uses registerIncarnationForRemoval instead: it must not converge anything.
 func (s *Service) upsertAdapterRow(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault, vaultAddress, adapter common.Address, adapterType entity.MorphoAdapterType, firstSeenBlock int64) (int64, error) {
 	s.warnIfUnknownAdapterType(vaultAddress, adapter, adapterType, firstSeenBlock)
 	adapterEntity, err := entity.NewMorphoAdapter(vault.ID, adapter.Bytes(), vault.AssetTokenID, adapterType, firstSeenBlock, nil)
