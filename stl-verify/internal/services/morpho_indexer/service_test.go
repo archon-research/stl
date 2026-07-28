@@ -884,6 +884,119 @@ func TestProcessBlockEvent_VaultDiscovery_VaultV2(t *testing.T) {
 	}
 }
 
+// TestProcessBlockEvent_VaultDiscovery_V2_FeeSurface covers a vault-shaped contract
+// the V2 probe accepts — curator() and liquidityAdapter() answer while MORPHO()
+// reverts — that does NOT serve the four VaultV2 fee getters. The probe never
+// verified those exist, so hard-requiring them at seeding time poisoned discovery
+// forever: the triggering AccrueInterest was retried and the vault never registered.
+//
+// All four reverting means the address has no VaultV2 fee surface: skip the seed
+// behind a WARN, leaving the vault honestly fee-row-less (VEC-219's consumers then
+// see no fee row rather than a fabricated one). A partial answer is genuine drift on
+// a contract that does have the surface, and must still stop the event. A real
+// factory-deployed VaultV2 always answers all four, so its seeding is unchanged.
+func TestProcessBlockEvent_VaultDiscovery_V2_FeeSurface(t *testing.T) {
+	tests := []struct {
+		name       string
+		feeSuccess [4]bool
+		wantErr    string
+		wantSeeded bool
+		wantWarn   bool
+	}{
+		{
+			name:       "all four getters answer, so the fee config is seeded",
+			feeSuccess: [4]bool{true, true, true, true},
+			wantSeeded: true,
+		},
+		{
+			name:       "all four revert, so there is no fee surface to seed",
+			feeSuccess: [4]bool{false, false, false, false},
+			wantWarn:   true,
+		},
+		{
+			name:       "a partially served fee surface is drift and stops the event",
+			feeSuccess: [4]bool{true, true, false, true},
+			wantErr:    "3 of 4",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newTestHarness(t)
+			logs := h.captureLogs()
+			unknownVault := common.HexToAddress("0xc7CDcFDEfC64631ED6799C95e3b110cd42F2bD22")
+			curator := common.HexToAddress("0x00000000000000000000000000000000000000A3")
+			liquidityAdapter := common.HexToAddress("0x00000000000000000000000000000000000000A4")
+
+			h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+				switch {
+				case h.isProbeMulticall(calls):
+					return h.vaultV2ProbeResults(testLoanToken, curator, liquidityAdapter), nil
+				case h.isVaultDetailsMulticall(calls):
+					return h.vaultDetailResults("Partial V2 Vault", "pV2", 18, false), nil
+				case len(calls) == 2 && calls[0].Target == testLoanToken:
+					return h.tokenMetadataResults("USDT", 6), nil
+				default:
+					return nil, fmt.Errorf("unexpected Execute shape (%d calls)", len(calls))
+				}
+			}
+			h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+				switch {
+				case len(calls) == 1 && hasSameSelector(calls[0].CallData, adaptersLengthSelector):
+					return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(0))}}, nil
+				case len(calls) == 4 && calls[0].Target == unknownVault:
+					return h.partialFeeGetterResults(tt.feeSuccess), nil
+				case len(calls) == 2 && calls[0].Target == unknownVault:
+					return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult()}, nil
+				default:
+					return nil, fmt.Errorf("unexpected ExecuteAtHash shape (%d calls)", len(calls))
+				}
+			}
+
+			var savedVault *entity.MorphoVault
+			h.morphoRepo.GetOrCreateVaultFn = func(_ context.Context, _ pgx.Tx, v *entity.MorphoVault) (int64, error) {
+				savedVault = v
+				return 99, nil
+			}
+			seeded := false
+			h.morphoRepo.SaveVaultFeeFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoVaultFee) error {
+				seeded = true
+				return nil
+			}
+
+			log := h.makeDiscoveryTriggerLog(unknownVault)
+			err := h.processBlock(t, 1, 24481834, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)})
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatal("a partially served fee surface must stop the event")
+				}
+				if !strings.Contains(err.Error(), tt.wantErr) {
+					t.Errorf("error %q should say how many getters answered (%q)", err.Error(), tt.wantErr)
+				}
+				if h.svc.vaultRegistry.IsKnownVault(unknownVault) {
+					t.Error("a failed discovery must not register the vault")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("discovery must not be poisoned by a missing fee surface: %v", err)
+			}
+
+			if savedVault == nil {
+				t.Fatal("vault not created")
+			}
+			if !h.svc.vaultRegistry.IsKnownVault(unknownVault) {
+				t.Error("the discovered VaultV2 should be registered")
+			}
+			if seeded != tt.wantSeeded {
+				t.Errorf("fee config seeded = %v, want %v", seeded, tt.wantSeeded)
+			}
+			if got := logs.hasWarnContaining("no VaultV2 fee surface"); got != tt.wantWarn {
+				t.Errorf("WARN(no VaultV2 fee surface) = %v, want %v", got, tt.wantWarn)
+			}
+		})
+	}
+}
+
 // adaptersLengthSelector / adaptersSelector are the enumerable-adapter read
 // selectors on VaultV2 (chain-verified against sparkUSDTbc: adaptersLength()
 // 0x5aa22bc8, adapters(uint256) 0x4ef501ac).

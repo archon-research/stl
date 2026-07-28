@@ -929,6 +929,19 @@ func (h *serviceTestHarness) feeGetterResults(perfFee, mgmtFee *big.Int, perfRec
 	}
 }
 
+// partialFeeGetterResults returns the same 4-call getVaultFees response with a
+// per-getter success flag, so a test can serve a contract that answers only some of
+// the fee surface (or none of it).
+func (h *serviceTestHarness) partialFeeGetterResults(success [4]bool) []outbound.Result {
+	full := h.feeGetterResults(big.NewInt(1), big.NewInt(2), common.HexToAddress("0x9"), common.HexToAddress("0xa"))
+	for i, ok := range success {
+		if !ok {
+			full[i] = outbound.Result{Success: false, ReturnData: nil}
+		}
+	}
+	return full
+}
+
 // TestProcessBlockEvent_FeeChange verifies that any of the 4 Set* fee events
 // snapshots the vault's FULL current fee config — read on-chain (performanceFee,
 // managementFee, and both recipients) pinned to the event's block hash — rather
@@ -968,8 +981,12 @@ func TestProcessBlockEvent_FeeChange(t *testing.T) {
 				if len(calls) != 4 {
 					return nil, errTestUnexpectedCall(calls)
 				}
+				// AllowFailure is required, not tolerated: it is the only way the
+				// batch can report "this contract serves NONE of the fee getters"
+				// instead of the whole multicall reverting. The all-or-nothing
+				// requirement is enforced on the results (assertFeeSurfaceComplete).
 				for _, c := range calls {
-					if c.Target != testVaultAddr || c.AllowFailure {
+					if c.Target != testVaultAddr || !c.AllowFailure {
 						return nil, errTestUnexpectedCall(calls)
 					}
 				}
@@ -1109,6 +1126,35 @@ func TestProcessBlockEvent_FeeChange_SameBlockSnapshotsIdentical(t *testing.T) {
 		!bytes.Equal(a.ManagementFeeRecipient, b.ManagementFeeRecipient) ||
 		a.BlockNumber != b.BlockNumber || a.BlockVersion != b.BlockVersion || !a.Timestamp.Equal(b.Timestamp) {
 		t.Errorf("same-block fee events produced differing snapshots:\n  %+v\n  %+v", a, b)
+	}
+}
+
+// TestProcessBlockEvent_FeeChange_NoFeeSurfaceIsAHardError is the other arm of the
+// fee-surface tolerance: discovery may skip seeding a vault-shaped contract that
+// serves none of the four getters, but a Set* fee EVENT proves the surface exists, so
+// all four reverting there is drift that must stop the block rather than be skipped.
+func TestProcessBlockEvent_FeeChange_NoFeeSurfaceIsAHardError(t *testing.T) {
+	h := newTestHarness(t)
+	h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
+
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		if len(calls) != 4 {
+			return nil, errTestUnexpectedCall(calls)
+		}
+		return h.partialFeeGetterResults([4]bool{}), nil
+	}
+	h.morphoRepo.SaveVaultFeeFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoVaultFee) error {
+		t.Fatal("no fee row may be written when every fee getter reverts")
+		return nil
+	}
+
+	log := h.makeV2VaultLog(h.vaultV2EventsABI.Events["SetPerformanceFee"], testVaultAddr, nil, big.NewInt(1))
+	err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)})
+	if err == nil {
+		t.Fatal("expected the block to fail so SQS redelivers")
+	}
+	if !strings.Contains(err.Error(), "serves none of the VaultV2 fee getters") {
+		t.Errorf("error should name the absent fee surface, got: %v", err)
 	}
 }
 

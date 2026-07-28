@@ -327,6 +327,10 @@ func (s *Service) handleCapChange(ctx context.Context, vaultAddress common.Addre
 // land together) each read the same block hash and therefore build byte-identical
 // rows; the mvf trigger's same-build lookup plus SaveVaultFee's ON CONFLICT DO
 // NOTHING correctly dedupe them to one row (same rationale as caps).
+//
+// Unlike the discovery seed, this path does NOT tolerate errNoVaultFeeSurface: the
+// event itself proves the vault has a fee surface, so getters that all revert is
+// drift that must stop the block.
 func (s *Service) handleFeeChange(ctx context.Context, vaultAddress common.Address, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) error {
 	vault, err := s.resolveV2Vault(vaultAddress)
 	if err != nil {
