@@ -1488,6 +1488,44 @@ func TestProcessBlockEvent_Allocation_VanishedAdapterFailsHard(t *testing.T) {
 	}
 }
 
+// TestProcessBlockEvent_RemoveAdapter_VanishedAdapterFailsHard is the removal path's
+// counterpart to TestProcessBlockEvent_Allocation_VanishedAdapterFailsHard: the
+// pre-transaction membership check finds the adapter, so nothing is probed and no
+// classification enters the transaction, but the registry then reports no incarnation
+// covering the removal block. With no probed type the only alternatives are recording a
+// defaulted classification or failing, so it must fail and let SQS redelivery re-probe.
+func TestProcessBlockEvent_RemoveAdapter_VanishedAdapterFailsHard(t *testing.T) {
+	h := newTestHarness(t)
+	h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
+
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		t.Fatal("no probe may run: the pre-transaction membership check found the adapter")
+		return nil, errTestUnexpectedCall(calls)
+	}
+	h.morphoRepo.GetActiveAdaptersByVaultFn = func(_ context.Context, _ int64) ([]*entity.MorphoAdapter, error) {
+		return []*entity.MorphoAdapter{{ID: 55, MorphoVaultID: 7, Address: testAdapterAddr.Bytes(), AssetTokenID: 1, AdapterType: entity.MorphoAdapterTypeMarketV1, AddedAtBlock: 19000000}}, nil
+	}
+	h.morphoRepo.EnsureIncarnationToCloseFn = func(_ context.Context, _ pgx.Tx, _ int64, _ []byte, _ int64, candidate *entity.MorphoAdapter) (bool, error) {
+		if candidate != nil {
+			t.Errorf("candidate = %+v, want nil: no type was probed, so none may be invented", candidate)
+		}
+		return false, fmt.Errorf("wrapped: %w", outbound.ErrAdapterUnclassified)
+	}
+	h.morphoRepo.MarkAdapterRemovedFn = func(_ context.Context, _ pgx.Tx, _ int64, _ []byte, _ int64) error {
+		t.Fatal("no removal may be recorded against an incarnation the registry could not resolve")
+		return nil
+	}
+
+	log := h.makeV2VaultLog(h.vaultV2EventsABI.Events["RemoveAdapter"], testVaultAddr, []common.Hash{addrTopic(testAdapterAddr)})
+	err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)})
+	if err == nil {
+		t.Fatal("expected the block to fail so SQS redelivers and the pre-tx check re-probes")
+	}
+	if !strings.Contains(err.Error(), "no type was probed") {
+		t.Errorf("error should name the missing probed type, got: %v", err)
+	}
+}
+
 // TestProcessBlockEvent_RemoveAdapter_NonV2VaultErrors exercises resolveV2Vault's
 // version guard through a handler other than AddAdapter.
 func TestProcessBlockEvent_RemoveAdapter_NonV2VaultErrors(t *testing.T) {
