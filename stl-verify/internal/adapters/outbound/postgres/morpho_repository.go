@@ -365,16 +365,8 @@ func (r *MorphoRepository) GetOrCreateAdapter(ctx context.Context, tx pgx.Tx, ad
 		return 0, fmt.Errorf("validating morpho adapter: %w", err)
 	}
 
-	// Serialize the "does an active row already exist?" read-then-write on the
-	// block-free natural key (vault, address): ON CONFLICT alone cannot guard a
-	// decision made before the insert (ADR-0002 §3). Without it two concurrent
-	// live-vs-backfill writers could both observe no active row and insert two
-	// active rows at different added_at_block. The key is deliberately block-free
-	// so every writer of this adapter serializes on the same lock regardless of
-	// the block it carries.
-	lockKey := fmt.Sprintf("morpho_adapter|%d|%x", adapter.MorphoVaultID, adapter.Address)
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, lockKey); err != nil {
-		return 0, fmt.Errorf("locking %q: %w", lockKey, err)
+	if err := lockAdapterKey(ctx, tx, adapter.MorphoVaultID, adapter.Address); err != nil {
+		return 0, err
 	}
 
 	// A CLOSED incarnation whose window covers the candidate (removed_at_block >=
@@ -427,13 +419,13 @@ func (r *MorphoRepository) GetOrCreateAdapter(ctx context.Context, tx pgx.Tx, ad
 	// a new row. The ON CONFLICT no-op SET keeps a same-block replay (backfill
 	// re-run of the same AddAdapter) idempotent.
 	//
-	// The advisory lock above does not cover MarkAdapterRemoved, which writes the
-	// same key without taking it; under READ COMMITTED a removal committing between
-	// the closed-window check and the active-row UPDATE makes EvalPlanQual re-check
-	// that UPDATE against the new removed_at_block, match 0 rows, and drop us here
-	// with the adapter already de-registered. The partial unique index
-	// uq_morpho_adapter_active backstops exactly that: this INSERT aborts, the event
-	// retries, and the re-run takes the closed-window path.
+	// The advisory lock is what keeps a concurrent removal from dropping us here
+	// with the adapter already de-registered (a removal committing between the
+	// closed-window check and the active-row UPDATE would make EvalPlanQual re-check
+	// that UPDATE against the new removed_at_block and match 0 rows). The partial
+	// unique index uq_morpho_adapter_active is the structural backstop for that
+	// invariant: an unlocked writer aborts here rather than resurrecting a removed
+	// adapter as a second active row.
 	err = tx.QueryRow(ctx,
 		`INSERT INTO morpho_adapter (morpho_vault_id, address, asset_token_id, adapter_type, added_at_block, removed_at_block)
 		 VALUES ($1, $2, $3, $4, $5, $6)
@@ -448,30 +440,122 @@ func (r *MorphoRepository) GetOrCreateAdapter(ctx context.Context, tx pgx.Tx, ad
 	return id, nil
 }
 
-// MarkAdapterRemoved records the block at which an adapter was de-registered.
-func (r *MorphoRepository) MarkAdapterRemoved(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, removedAtBlock int64) error {
-	// The OR removed_at_block = $3 branch makes backfill replays idempotent: a
-	// second removal at the same block re-matches the already-removed row.
-	//
-	// added_at_block <= $3 scopes the removal to the adapter incarnation that was
-	// live at the removal block. Without it, replaying an old RemoveAdapter@X for
-	// an adapter that was later re-added (added_at_block a2 > X) would match the
-	// active re-added row via the removed_at_block IS NULL arm and wrongly close
-	// it with a removal block earlier than its own registration.
-	tag, err := tx.Exec(ctx,
-		`UPDATE morpho_adapter SET removed_at_block = $3
-		 WHERE morpho_vault_id = $1 AND address = $2 AND added_at_block <= $3
-		   AND (removed_at_block IS NULL OR removed_at_block = $3)`,
-		morphoVaultID, address, removedAtBlock,
-	)
-	if err != nil {
-		return fmt.Errorf("marking morpho adapter removed: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("marking morpho adapter removed: no active adapter for vault %d address %x (unknown adapter or already removed at a different block)",
-			morphoVaultID, address)
+// lockAdapterKey serializes every writer of one adapter registry key on a
+// per-transaction advisory lock. ON CONFLICT alone cannot guard a decision made
+// before the insert (ADR-0002 §3): without this, two concurrent live-vs-backfill
+// writers could both observe no active row and insert two active incarnations, and
+// a removal committing mid-decision could make a registration fall through to an
+// INSERT that resurrects a de-registered adapter. The key is deliberately
+// block-free so registrations and removals of the same adapter serialize on the
+// same lock regardless of the block they carry.
+func lockAdapterKey(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte) error {
+	lockKey := fmt.Sprintf("morpho_adapter|%d|%x", morphoVaultID, address)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, lockKey); err != nil {
+		return fmt.Errorf("locking %q: %w", lockKey, err)
 	}
 	return nil
+}
+
+// MarkAdapterRemoved records the block at which an adapter was de-registered,
+// closing the incarnation that was live at removedAtBlock.
+//
+// removed_at_block converges to the EARLIEST observation (LEAST), mirroring
+// added_at_block's first-observed semantics: a reorg that re-lands the
+// RemoveAdapter transaction one block over, or a backfill replaying it, then
+// settles on the same value regardless of the order the observations arrive in.
+// Before this converged, a relocated removal matched neither idempotency arm,
+// affected 0 rows and hard-errored on every redelivery — poisoning the FIFO queue
+// forever. A relocation is WARN-logged: it is rare enough to be worth an
+// operator's attention.
+//
+// Residual: a removal that is reorged OUT entirely and never re-lands leaves the
+// row closed at a block where nothing happened. Nothing self-heals that — the
+// registry carries no lifecycle versioning (removed_at_block has no block_version),
+// so no later observation can contradict the recorded close.
+//
+// Closing a row that owns morpho_adapter_state snapshots recorded AFTER the
+// removal block is refused, because those snapshots would be stranded inside the
+// closed window: window-filtered queries drop them, window-ignoring queries
+// double-count them against the next incarnation. That is a hard error on purpose
+// — poison-pilling the event beats silently corrupting adapter lifetimes.
+func (r *MorphoRepository) MarkAdapterRemoved(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, removedAtBlock int64) error {
+	if err := lockAdapterKey(ctx, tx, morphoVaultID, address); err != nil {
+		return err
+	}
+
+	id, recordedRemoval, err := r.incarnationLiveAt(ctx, tx, morphoVaultID, address, removedAtBlock)
+	if err != nil {
+		return fmt.Errorf("marking morpho adapter removed for vault %d address %x: %w", morphoVaultID, address, err)
+	}
+
+	closeAt := removedAtBlock
+	if recordedRemoval != nil && *recordedRemoval != removedAtBlock {
+		closeAt = min(*recordedRemoval, removedAtBlock)
+		r.logger.Warn("VaultV2 adapter removal observed at a different block than recorded — converging to the earliest observation",
+			"vault_id", morphoVaultID,
+			"adapter", fmt.Sprintf("%x", address),
+			"recorded_block", *recordedRemoval,
+			"observed_block", removedAtBlock,
+			"converged_block", closeAt)
+	}
+
+	if err := r.assertNoStateAfterRemoval(ctx, tx, id, closeAt); err != nil {
+		return fmt.Errorf("marking morpho adapter removed for vault %d address %x: %w", morphoVaultID, address, err)
+	}
+
+	if _, err := tx.Exec(ctx, `UPDATE morpho_adapter SET removed_at_block = $2 WHERE id = $1`, id, closeAt); err != nil {
+		return fmt.Errorf("marking morpho adapter removed: %w", err)
+	}
+	return nil
+}
+
+// incarnationLiveAt returns the id and recorded removal block of the adapter
+// incarnation a removal at atBlock closes: the LATEST incarnation registered at or
+// before that block. The added_at_block scope is what keeps a replayed old
+// RemoveAdapter@X from closing an incarnation re-added after X with a removal block
+// earlier than its own registration.
+func (r *MorphoRepository) incarnationLiveAt(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, atBlock int64) (int64, *int64, error) {
+	var (
+		id      int64
+		removed *int64
+	)
+	err := tx.QueryRow(ctx,
+		`SELECT id, removed_at_block FROM morpho_adapter
+		 WHERE morpho_vault_id = $1 AND address = $2 AND added_at_block <= $3
+		 ORDER BY added_at_block DESC
+		 LIMIT 1`,
+		morphoVaultID, address, atBlock,
+	).Scan(&id, &removed)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, nil, fmt.Errorf("no adapter incarnation registered at or before block %d", atBlock)
+	}
+	if err != nil {
+		return 0, nil, fmt.Errorf("looking up adapter incarnation live at block %d: %w", atBlock, err)
+	}
+	return id, removed, nil
+}
+
+// assertNoStateAfterRemoval refuses a close that would strand realAssets snapshots
+// outside the incarnation's lifetime window. Snapshots taken IN the removal block
+// are inside the window (the Deallocate log preceding the RemoveAdapter log in one
+// governance transaction), so the comparison is strict.
+func (r *MorphoRepository) assertNoStateAfterRemoval(ctx context.Context, tx pgx.Tx, adapterID, closeAt int64) error {
+	var (
+		orphaned int64
+		latest   *int64
+	)
+	if err := tx.QueryRow(ctx,
+		`SELECT count(*), max(block_number) FROM morpho_adapter_state
+		 WHERE morpho_adapter_id = $1 AND block_number > $2`,
+		adapterID, closeAt,
+	).Scan(&orphaned, &latest); err != nil {
+		return fmt.Errorf("checking adapter_state snapshots after block %d: %w", closeAt, err)
+	}
+	if orphaned == 0 {
+		return nil
+	}
+	return fmt.Errorf("closing incarnation %d at block %d would orphan %d morpho_adapter_state row(s) recorded after it (latest block %d): those snapshots belong to a later incarnation of this adapter and must be re-homed onto it before the removal can be recorded",
+		adapterID, closeAt, orphaned, *latest)
 }
 
 // GetActiveAdapter retrieves the active adapter for a vault and address, reading

@@ -972,6 +972,17 @@ func (s *Service) persistDiscoveredVault(ctx context.Context, vaultAddress commo
 // treats an active adapter with no state row as adapter_data_missing); subsequent
 // Allocate/Deallocate events append as normal. adapters arrive address-sorted (see
 // readV2Adapters); V1/V1.1 vaults pass an empty slice.
+//
+// Bootstrap ordering contract: for a vault discovered mid-life, the adapter
+// LIFECYCLE history (AddAdapter / RemoveAdapter) must be replayed before any state
+// is seeded for that adapter. Discovery only ever sees the adapters active at the
+// discovery block, so it collapses every prior incarnation of an address into the
+// single row it seeds here, and hangs the seed snapshot off that row. If the
+// backfiller later replays an add/remove pair that predates discovery, the row
+// converges into that earlier window while still owning snapshots from after it —
+// which MarkAdapterRemoved refuses to close (it would orphan them) rather than
+// silently corrupt the lifetime. Replaying lifecycle first means every snapshot is
+// written against the incarnation that actually owns it.
 func (s *Service) seedDiscoveredAdapters(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault, vaultAddress common.Address, blockNumber int64, blockVersion int, blockTimestamp time.Time, adapters []discoveredAdapter) error {
 	for _, a := range adapters {
 		adapterID, err := s.upsertAdapterRow(ctx, tx, vault, vaultAddress, a.address, a.adapterType, blockNumber)
