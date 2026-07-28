@@ -510,8 +510,8 @@ func (r *MorphoRepository) closeIncarnationLiveAt(ctx context.Context, tx pgx.Tx
 // removal is being re-observed, and the distance discriminates between the two
 // causes: within maxRemovalRelocationDistance above the recorded close (or at any
 // block below it) it is that same removal, relocated by a reorg or replayed by the
-// backfiller, so it converges to the earliest observation (LEAST) — deterministic
-// whichever order the observations arrive in — and WARNs, because a relocation is
+// backfiller, so it converges to the earlier of the two observations —
+// deterministic whichever order they arrive in — and WARNs, because a relocation is
 // rare enough to be worth an operator's attention. Further above, it cannot be a
 // relocation of the recorded close, so converging would quietly discard a real
 // de-registration (the close is already at the lower block, so the UPDATE would be a
@@ -612,7 +612,9 @@ func (r *MorphoRepository) assertNoStateAfterRemoval(ctx context.Context, tx pgx
 }
 
 // orphanedStateError builds the refusal message for assertNoStateAfterRemoval,
-// counting the stranded snapshots on this failure path only.
+// counting the stranded snapshots on this failure path only. Returns nil if the
+// count reads back empty: the two statements are separate READ COMMITTED snapshots,
+// and nothing left to strand is nothing to refuse.
 func (r *MorphoRepository) orphanedStateError(ctx context.Context, tx pgx.Tx, adapterID, closeAt int64) error {
 	var (
 		orphaned int64
