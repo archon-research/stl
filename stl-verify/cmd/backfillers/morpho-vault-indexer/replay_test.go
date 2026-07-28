@@ -143,21 +143,48 @@ func TestSortV2LogEntries(t *testing.T) {
 
 // TestReplayPartitionPrefixes_AscendingByBlock locks the partition order the
 // replay depends on: strictly ascending by start block, NOT lexicographic. The
-// range spans single- and five-digit-thousands partitions, where lexicographic
-// order ("10000-10999" < "2000-2999") diverges from numeric block order.
+// wide case spans single- and five-digit-thousands partitions, where
+// lexicographic order ("10000-10999" < "2000-2999") diverges from numeric block
+// order. The unaligned cases pin that the partition holding an off-boundary
+// `to` is enumerated exactly once — the loop starts partition-aligned and steps
+// by a whole partition, so it always lands there on its own.
 func TestReplayPartitionPrefixes_AscendingByBlock(t *testing.T) {
-	got := replayPartitionPrefixes(2000, 10999)
-	want := []string{
-		"2000-2999", "3000-3999", "4000-4999", "5000-5999",
-		"6000-6999", "7000-7999", "8000-8999", "9000-9999", "10000-10999",
+	tests := []struct {
+		name     string
+		from, to int64
+		want     []string
+	}{
+		{
+			name: "aligned range crossing lexicographic divergence",
+			from: 2000, to: 10999,
+			want: []string{
+				"2000-2999", "3000-3999", "4000-4999", "5000-5999",
+				"6000-6999", "7000-7999", "8000-8999", "9000-9999", "10000-10999",
+			},
+		},
+		{
+			name: "both bounds mid-partition",
+			from: 1500, to: 3500,
+			want: []string{"1000-1999", "2000-2999", "3000-3999"},
+		},
+		{
+			name: "single partition, both bounds mid-partition",
+			from: 1200, to: 1800,
+			want: []string{"1000-1999"},
+		},
+		{
+			name: "to on a partition's last block",
+			from: 1000, to: 1999,
+			want: []string{"1000-1999"},
+		},
 	}
-	if len(got) != len(want) {
-		t.Fatalf("got %d partitions %v, want %d %v", len(got), got, len(want), want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("partition[%d] = %s, want %s (full: %v)", i, got[i], want[i], got)
-		}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := replayPartitionPrefixes(tt.from, tt.to)
+			if !slices.Equal(got, tt.want) {
+				t.Fatalf("replayPartitionPrefixes(%d, %d) = %v, want %v", tt.from, tt.to, got, tt.want)
+			}
+		})
 	}
 }
 

@@ -387,20 +387,16 @@ func partitionFullyCovered(part string, from, to int64) bool {
 // Allocate. partitionsForRange sorts lexicographically ("10000-10999" before
 // "2000-2999"), which is fine for the order-agnostic discovery scan but wrong
 // here; building the list from aligned block starts keeps it numeric-ascending.
+//
+// The loop starts partition-aligned and steps by a whole partition, so every
+// iteration yields a distinct prefix and the last one is always to's own
+// partition — no trailing catch-up entry and no de-duplication needed. This is
+// what makes it differ from partitionsForRange, which starts unaligned.
 func replayPartitionPrefixes(from, to int64) []string {
 	var parts []string
-	seen := make(map[string]bool)
-	add := func(block int64) {
-		p := partition.GetPartition(block)
-		if !seen[p] {
-			seen[p] = true
-			parts = append(parts, p)
-		}
-	}
 	for block := from - (from % partition.BlockRangeSize); block <= to; block += partition.BlockRangeSize {
-		add(block)
+		parts = append(parts, partition.GetPartition(block))
 	}
-	add(to)
 	return parts
 }
 
