@@ -183,9 +183,14 @@ func v2VaultSetDigest(vaults map[common.Address]struct{}) string {
 }
 
 // replayPartition collects, orders, and replays every structured V2 log in one
-// S3 partition. Ordering is correctness-critical: handlers hard-error on an
-// Allocate for an adapter they never saw AddAdapter for, so logs replay in
-// strict (blockNumber, logIndex) order.
+// S3 partition, in strict (blockNumber, logIndex) order.
+//
+// Ordering is correctness-critical precisely because breaking it fails
+// SILENTLY. An Allocate for an adapter no AddAdapter was seen for does not
+// error: handleAllocation → ensureAdapterRegistered lazily registers it behind a
+// WARN, stamping added_at_block with the Allocate's block. A mis-ordered replay
+// therefore persists a wrong adapter registration block that no later event
+// corrects — a healthy-looking run with permanently wrong governance history.
 func replayPartition(
 	ctx context.Context,
 	logger *slog.Logger,
