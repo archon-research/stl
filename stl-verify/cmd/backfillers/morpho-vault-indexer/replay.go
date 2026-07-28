@@ -188,9 +188,15 @@ func v2VaultSetDigest(vaults map[common.Address]struct{}) string {
 // Ordering is correctness-critical precisely because breaking it fails
 // SILENTLY. An Allocate for an adapter no AddAdapter was seen for does not
 // error: handleAllocation → ensureAdapterRegistered lazily registers it behind a
-// WARN, stamping added_at_block with the Allocate's block. A mis-ordered replay
-// therefore persists a wrong adapter registration block that no later event
-// corrects — a healthy-looking run with permanently wrong governance history.
+// WARN, stamping added_at_block with the Allocate's block. GetOrCreateAdapter does
+// converge that block back down when the AddAdapter replays afterwards, so the
+// registration block self-heals — but only if the AddAdapter is inside the replayed
+// range at all. What a mis-ordered replay leaves behind regardless is a run whose
+// adapters were all minted through the lazy WARN path: the ops signal that
+// distinguishes a real mid-life discovery from a replay artefact is destroyed, and on
+// the RemoveAdapter path lazily minting a row for a block a recorded incarnation
+// already covers is exactly the zero-length-incarnation hazard
+// ensureIncarnationToClose guards against.
 func replayPartition(
 	ctx context.Context,
 	logger *slog.Logger,
