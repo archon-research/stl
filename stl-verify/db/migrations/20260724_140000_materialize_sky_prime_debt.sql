@@ -15,32 +15,59 @@
 -- chain_id is the Sky mainnet constant 1 (prime_debt carries no chain_id column); protocol_id is NULL
 -- (Sky prime debt is not protocol-scoped — see schema_master required_keys exempt). Unlike Morpho,
 -- prime_debt carries its own processing_version, so it flows into the spine's processing_version.
--- Zero/negative debt rows (repaid) are skipped.
+--
+-- Closure (VEC-409): the projection emits ONE closing zero-observation per real transition-to-zero
+-- (debt repaid), via the LAG filter `quantity > 0 OR prev_quantity > 0` — uniform with VEC-402/403 —
+-- rather than the earlier blanket `WHERE debt_wad > 0`. On live data today this is behaviour-identical:
+-- verified 2026-07-28 there are no negative debt_wad rows and ZERO positive->0 transitions (Sky prime
+-- debt is not observed repaying to 0 in prime_debt; the 3 zero rows are standalone and dropped either
+-- way). The filter is in place so that if a prime ever repays to 0, position_current closes it
+-- automatically instead of reporting stale debt.
 --
 -- DDL/function only. Population runs out of band, mirroring block_time, the transform _bootstrap
 -- functions, and VEC-402/403.
 
--- Per-protocol projection: raw Sky prime debt -> native position rows. VEC-409 unions the per-protocol
+-- Per-protocol projection: raw Sky prime debt -> native position rows. VEC-409 reads the per-protocol
 -- outputs from position_state; this view is the materializer's source of truth.
 CREATE OR REPLACE VIEW position_sky_prime_debt AS
-SELECT DISTINCT ON (pd.prime_id, pd.ilk_name, pd.block_number, pd.block_version, pd.processing_version)
-       position_id(1, NULL, pd.ilk_name, encode(pr.vault_address, 'hex')) AS position_id,
-       1::integer               AS chain_id,
-       NULL::bigint             AS protocol_id,
-       pd.ilk_name              AS instrument_key,
-       encode(pr.vault_address, 'hex') AS holder_id,
-       pd.debt_wad              AS quantity,
-       'BORROW'::text           AS deal_type_code,
-       pd.block_number,
-       pd.block_version,
-       pd.processing_version,
-       pd.synced_at             AS block_timestamp
-FROM prime_debt pd
-JOIN prime pr ON pr.id = pd.prime_id
-WHERE pd.debt_wad > 0
-ORDER BY pd.prime_id, pd.ilk_name, pd.block_number, pd.block_version, pd.processing_version, pd.synced_at DESC;
+WITH obs AS (
+    SELECT DISTINCT ON (pd.prime_id, pd.ilk_name, pd.block_number, pd.block_version, pd.processing_version)
+           pd.ilk_name              AS instrument_key,
+           encode(pr.vault_address, 'hex') AS holder_id,
+           pd.debt_wad              AS quantity,
+           pd.prime_id,
+           pd.block_number,
+           pd.block_version,
+           pd.processing_version,
+           pd.synced_at             AS block_timestamp
+    FROM prime_debt pd
+    JOIN prime pr ON pr.id = pd.prime_id
+    ORDER BY pd.prime_id, pd.ilk_name, pd.block_number, pd.block_version, pd.processing_version, pd.synced_at DESC
+),
+-- Previous observation's debt per position, so a repayment (positive->0) is told apart from a
+-- prime x ilk that never carried debt.
+series AS (
+    SELECT instrument_key, holder_id, quantity,
+           block_number, block_version, processing_version, block_timestamp,
+           LAG(quantity) OVER (PARTITION BY prime_id, instrument_key
+                               ORDER BY block_number, block_version, processing_version) AS prev_qty
+    FROM obs
+)
+SELECT position_id(1, NULL, instrument_key, holder_id) AS position_id,
+       1::integer   AS chain_id,
+       NULL::bigint AS protocol_id,
+       instrument_key,
+       holder_id,
+       quantity,
+       'BORROW'::text AS deal_type_code,
+       block_number,
+       block_version,
+       processing_version,
+       block_timestamp
+FROM series
+WHERE quantity > 0 OR prev_qty > 0;
 
-COMMENT ON VIEW position_sky_prime_debt IS '[Operational] VEC-406 projection: Sky prime debt as native position rows (one per prime x ilk; instrument_key = native ilk_name; holder = prime vault address; deal_type BORROW). Source for materialize_sky_prime_debt().';
+COMMENT ON VIEW position_sky_prime_debt IS '[Operational] VEC-406 projection: Sky prime debt as native position rows (one per prime x ilk; instrument_key = native ilk_name; holder = prime vault address; deal_type BORROW). Source for materialize_sky_prime_debt(); emits one closing zero-quantity row on a real repayment-to-zero (VEC-409 closure; none observed on live data yet).';
 
 -- Populate the spine + current classification. Idempotent (ON CONFLICT). Returns rows written to
 -- position_state. Run out of band after deploy; safe to re-run.
@@ -66,11 +93,13 @@ BEGIN
     )
     SELECT count(*) INTO n FROM ins;
 
+    -- Current deal-type per position (latest NON-ZERO observation wins), consistent with VEC-402/403.
     INSERT INTO position_classification (position_id, deal_type_code, direction, change_reason)
     SELECT DISTINCT ON (r.position_id)
            r.position_id, r.deal_type_code, d.direction, 'VEC-406: sky_prime_debt materializer'
     FROM position_sky_prime_debt r
     JOIN ref_deal_type d ON d.deal_type = r.deal_type_code
+    WHERE r.quantity > 0
     ORDER BY r.position_id, r.block_number DESC, r.block_version DESC, r.processing_version DESC
     ON CONFLICT (position_id) DO UPDATE
         SET deal_type_code = EXCLUDED.deal_type_code,

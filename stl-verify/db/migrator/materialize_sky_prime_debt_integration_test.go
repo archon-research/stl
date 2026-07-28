@@ -15,7 +15,8 @@ import (
 // the prime's vault address — and writes the current deal_type (BORROW) into position_classification.
 //
 // Pins: native ilk_name key, prime vault address as holder, debt_wad as quantity, chain_id constant 1 /
-// protocol_id NULL, prime_debt's own processing_version flowing into the spine, zero-debt rows skipped,
+// protocol_id NULL, prime_debt's own processing_version flowing into the spine, closure (VEC-409) — a
+// repayment (positive->0) emits one closing zero-row, a prime x ilk never in debt emits nothing —
 // multiple observations with one current classification, 32-byte ids, no collisions, idempotency.
 func TestMaterializeSkyPrimeDebt(t *testing.T) {
 	ctx := context.Background()
@@ -25,20 +26,24 @@ func TestMaterializeSkyPrimeDebt(t *testing.T) {
 		t.Fatalf("migrations: %v", err)
 	}
 
-	// Prime A (vault aa) borrows in ILK-A (two observations) and ILK-B; Prime B (vault bb) has repaid
-	// ILK-A (debt 0, skipped).
+	// Prime A (vault aa) borrows in ILK-A (two observations) and ILK-B; Prime B (vault bb) never carried
+	// debt in ILK-A (single debt 0 row -> nothing emitted); Prime C (vault cc) borrows ILK-A then repays
+	// to 0 (open + one closing zero-row).
 	seed := `
 DO $$
-DECLARE paid bigint; pbid bigint;
+DECLARE paid bigint; pbid bigint; pcid bigint;
 BEGIN
   INSERT INTO chain (chain_id, name) VALUES (1, 'ethereum') ON CONFLICT (chain_id) DO NOTHING;
   INSERT INTO prime (name, vault_address) VALUES ('spark', '\xaa') RETURNING id INTO paid;
   INSERT INTO prime (name, vault_address) VALUES ('grove', '\xbb') RETURNING id INTO pbid;
+  INSERT INTO prime (name, vault_address) VALUES ('nova',  '\xcc') RETURNING id INTO pcid;
   INSERT INTO prime_debt (prime_id, ilk_name, debt_wad, block_number, block_version, synced_at, processing_version, build_id) VALUES
     (paid, 'ILK-A', 1000, 100, 0, '2026-01-01T00:00:00Z', 0, 0),
     (paid, 'ILK-A', 1500, 200, 0, '2026-01-02T00:00:00Z', 0, 0),
     (paid, 'ILK-B',  500, 100, 0, '2026-01-01T00:00:00Z', 0, 0),
-    (pbid, 'ILK-A',    0, 100, 0, '2026-01-01T00:00:00Z', 0, 0);
+    (pbid, 'ILK-A',    0, 100, 0, '2026-01-01T00:00:00Z', 0, 0),
+    (pcid, 'ILK-A', 2000, 100, 0, '2026-01-01T00:00:00Z', 0, 0),
+    (pcid, 'ILK-A',    0, 200, 0, '2026-01-02T00:00:00Z', 0, 0);
 END $$;`
 	if _, err := pool.Exec(ctx, seed); err != nil {
 		t.Fatalf("seed: %v", err)
@@ -49,7 +54,8 @@ END $$;`
 		t.Fatalf("materialize_sky_prime_debt: %v", err)
 	}
 
-	// A/ILK-A (2 obs) + A/ILK-B (1) = 3 rows; B/ILK-A skipped (debt 0). Distinct positions = 2.
+	// A/ILK-A (2 obs) + A/ILK-B (1) + C/ILK-A (open + close = 2) = 5 rows; B/ILK-A never entered, skipped.
+	// Distinct positions: A/ILK-A, A/ILK-B, C/ILK-A = 3.
 	var rows, distinctPositions, collisions, badLen int
 	if err := pool.QueryRow(ctx, `
 		SELECT count(*),
@@ -59,14 +65,14 @@ END $$;`
 		FROM position_state`).Scan(&rows, &distinctPositions, &collisions, &badLen); err != nil {
 		t.Fatalf("position_state summary: %v", err)
 	}
-	if rows != 3 {
-		t.Errorf("position_state rows = %d, want 3", rows)
+	if rows != 5 {
+		t.Errorf("position_state rows = %d, want 5", rows)
 	}
-	if written != 3 {
-		t.Errorf("materialize returned %d, want 3", written)
+	if written != 5 {
+		t.Errorf("materialize returned %d, want 5", written)
 	}
-	if distinctPositions != 2 {
-		t.Errorf("distinct position_id = %d, want 2", distinctPositions)
+	if distinctPositions != 3 {
+		t.Errorf("distinct position_id = %d, want 3", distinctPositions)
 	}
 	if collisions != 0 {
 		t.Errorf("PK collisions = %d, want 0", collisions)
@@ -84,7 +90,8 @@ END $$;`
 	}{
 		{"A ILK-A latest of two observations", "ILK-A", "aa", "1500", 2},
 		{"A ILK-B", "ILK-B", "aa", "500", 1},
-		{"B ILK-A repaid (debt 0) skipped", "ILK-A", "bb", "", 0},
+		{"B ILK-A never entered (debt 0) emits nothing", "ILK-A", "bb", "", 0},
+		{"C ILK-A repaid: borrow + one closing zero-row", "ILK-A", "cc", "0", 2},
 	} {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
@@ -108,21 +115,22 @@ END $$;`
 		})
 	}
 
-	// Two positions, both BORROW/SHORT.
+	// Three positions, all BORROW/SHORT. C's classification comes from its last non-zero observation, so a
+	// repaid position still classifies BORROW/SHORT.
 	var classRows int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_classification`).Scan(&classRows); err != nil {
 		t.Fatalf("classification count: %v", err)
 	}
-	if classRows != 2 {
-		t.Errorf("position_classification rows = %d, want 2", classRows)
+	if classRows != 3 {
+		t.Errorf("position_classification rows = %d, want 3", classRows)
 	}
 	var borrowShort int
 	if err := pool.QueryRow(ctx,
 		`SELECT count(*) FROM position_classification WHERE deal_type_code='BORROW' AND direction='SHORT'`).Scan(&borrowShort); err != nil {
 		t.Fatalf("classification check: %v", err)
 	}
-	if borrowShort != 2 {
-		t.Errorf("BORROW/SHORT classifications = %d, want 2", borrowShort)
+	if borrowShort != 3 {
+		t.Errorf("BORROW/SHORT classifications = %d, want 3", borrowShort)
 	}
 
 	// Idempotent.
@@ -133,7 +141,7 @@ END $$;`
 	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM position_state), (SELECT count(*) FROM position_classification)`).Scan(&rows2, &class2); err != nil {
 		t.Fatalf("re-count: %v", err)
 	}
-	if rows2 != 3 || class2 != 2 {
-		t.Errorf("after re-run: position_state=%d (want 3), position_classification=%d (want 2)", rows2, class2)
+	if rows2 != 5 || class2 != 3 {
+		t.Errorf("after re-run: position_state=%d (want 5), position_classification=%d (want 3)", rows2, class2)
 	}
 }
