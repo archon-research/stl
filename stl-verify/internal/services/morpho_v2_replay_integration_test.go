@@ -444,9 +444,10 @@ func assertAdapterRow(t *testing.T, ctx context.Context, pool *pgxpool.Pool, vau
 func assertAdapterStateRows(t *testing.T, ctx context.Context, pool *pgxpool.Pool, vaultID int64, fx *replayFixture) {
 	t.Helper()
 
-	// One adapter_state row per distinct allocation block: same-block allocations
-	// share (block_number, timestamp) and collapse to one snapshot.
-	lowBlock, highBlock, distinctBlocks := allocationBlockBounds(t, fx)
+	// One adapter_state row per distinct snapshotting block — the AddAdapter
+	// registration seed plus each allocation block. Same-block allocations share
+	// (block_number, timestamp) and collapse to one snapshot.
+	lowBlock, highBlock, distinctBlocks := adapterSnapshotBlockBounds(t, fx)
 
 	var count int
 	if err := pool.QueryRow(ctx,
@@ -456,7 +457,12 @@ func assertAdapterStateRows(t *testing.T, ctx context.Context, pool *pgxpool.Poo
 		t.Fatalf("counting adapter states: %v", err)
 	}
 	if count != distinctBlocks {
-		t.Errorf("morpho_adapter_state: want %d rows (distinct allocation blocks), got %d", distinctBlocks, count)
+		t.Errorf("morpho_adapter_state: want %d rows (distinct snapshotting blocks), got %d", distinctBlocks, count)
+	}
+	// The earliest row must be the AddAdapter seed, not the first allocation: a
+	// freshly registered adapter is never left without a state row.
+	if lowBlock != fx.Adapter.AddedAtBlock {
+		t.Errorf("earliest adapter_state block = %d, want the AddAdapter block %d", lowBlock, fx.Adapter.AddedAtBlock)
 	}
 
 	lowWant := fx.RealAssets[fx.Blocks[strconv.FormatInt(lowBlock, 10)].Hash]
@@ -635,18 +641,23 @@ func countRows(t *testing.T, ctx context.Context, pool *pgxpool.Pool, query stri
 
 // allocationBlockBounds returns the lowest and highest allocation-event block
 // numbers and the count of distinct allocation blocks in the fixture.
-func allocationBlockBounds(t *testing.T, fx *replayFixture) (low, high int64, distinct int) {
+func adapterSnapshotBlockBounds(t *testing.T, fx *replayFixture) (low, high int64, distinct int) {
 	t.Helper()
+	// Every event type that makes the replay write an adapter_state row: the
+	// AddAdapter registration seed plus each allocation.
 	const (
+		addAdapterTopic = "0x8f125a24838c4c23e893904b255b5c672d43d4cb8af7e3d15841eaeabc1e68aa"
 		allocateTopic   = "0x2bc7948a96a066968d2a58aaf46eb0b305aa166b1d1951d2f7ef0919746b8c2a"
 		deallocateTopic = "0xd602b36fb24934aef1bc2a658de029b486fa4c664a6e45de1f48e3fd1be25dd9"
 	)
+	snapshotting := map[string]struct{}{addAdapterTopic: {}, allocateTopic: {}, deallocateTopic: {}}
+
 	blocks := map[int64]struct{}{}
 	for _, log := range fx.Events {
 		if len(log.Topics) == 0 {
 			continue
 		}
-		if log.Topics[0] != allocateTopic && log.Topics[0] != deallocateTopic {
+		if _, ok := snapshotting[log.Topics[0]]; !ok {
 			continue
 		}
 		b := parseHexInt(t, log.BlockNumber)
@@ -659,7 +670,7 @@ func allocationBlockBounds(t *testing.T, fx *replayFixture) (low, high int64, di
 		}
 	}
 	if len(blocks) == 0 {
-		t.Fatal("fixture has no allocation events")
+		t.Fatal("fixture has no adapter-snapshotting events")
 	}
 	return low, high, len(blocks)
 }
