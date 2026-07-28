@@ -857,6 +857,12 @@ func TestProcessBlockEvent_AdapterRegistration_RecordsPathAndType(t *testing.T) 
 					}
 					return nil, errTestUnexpectedCall(calls)
 				}
+				h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+					if len(calls) == 1 && calls[0].Target == testAdapterAddr {
+						return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(0))}}, nil
+					}
+					return nil, errTestUnexpectedCall(calls)
+				}
 			},
 			makeLog: func(h *serviceTestHarness) shared.Log {
 				return h.makeV2VaultLog(h.vaultV2EventsABI.Events["AddAdapter"], testVaultAddr, []common.Hash{addrTopic(testAdapterAddr)})
