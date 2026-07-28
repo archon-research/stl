@@ -962,19 +962,29 @@ docker-release-all-staging:
 # Bastion Host Management
 # =============================================================================
 
-# SSH tunnel to TigerData via bastion (after Tailscale is connected)
-# Auto-discovers bastion and TigerData details from AWS
-# Usage: make tigerdata-tunnel ENV=sentineldev
-# Or manual: make tigerdata-tunnel BASTION_IP=<tailscale-ip> TIGERDATA_HOST=<tigerdata-host> [LOCAL_PORT=5432]
-# Then connect locally: psql "postgres://user:pass@localhost:$(LOCAL_PORT)/dbname"
-LOCAL_PORT ?= 5432
-tigerdata-tunnel:
-	@if [ -z "$(BASTION_IP)" ] || [ -z "$(TIGERDATA_HOST)" ]; then \
-		echo "Error: BASTION_IP and TIGERDATA_HOST are required"; \
-		echo "Usage: make $@ BASTION_IP=<ip> TIGERDATA_HOST=<tigerdata-host> [LOCAL_PORT=5432]"; \
-		exit 1; \
-	fi
-	ssh -N -L $(LOCAL_PORT):$(TIGERDATA_HOST):5432 ec2-user@$(BASTION_IP)
+# SSH tunnel to a deployed environment's TigerData pooler, via its Tailscale
+# bastion, for local dev against that database. Everything is auto-derived, so
+# the common case is just `make tigerdata-tunnel`:
+#   BASTION_IP     -- the online $(TIGERDATA_ENV) bastion from `tailscale status`
+#                     (bastions rotate; offline ones are skipped)
+#   TIGERDATA_HOST -- the pooler host from AWS Secrets Manager
+#                     (stl-$(TIGERDATA_ENV)-tigerdata-app .pooler_hostname)
+#   LOCAL_PORT     -- 5436, chosen to avoid the local kind cluster's 5432
+# Override any of them on the command line; set TIGERDATA_ENV=sentinelprod for
+# prod. The app then connects at postgres://<user>:<pass>@localhost:$(LOCAL_PORT)/<db>
+# (configured in python/.env).
+TIGERDATA_ENV ?= sentinelstaging
+LOCAL_PORT ?= 5436
+tigerdata-tunnel: ## Tunnel to a deployed env's TigerData for local dev (auto-derives bastion + pooler host)
+	@set -e; \
+	bastion="$(BASTION_IP)"; \
+	[ -n "$$bastion" ] || bastion="$$(tailscale status 2>/dev/null | grep '$(TIGERDATA_ENV)-bastion' | grep -v offline | awk '{print $$1}' | head -1)"; \
+	host="$(TIGERDATA_HOST)"; \
+	[ -n "$$host" ] || host="$$(aws secretsmanager get-secret-value --secret-id stl-$(TIGERDATA_ENV)-tigerdata-app --query SecretString --output text 2>/dev/null | jq -r '.pooler_hostname // empty')"; \
+	[ -n "$$bastion" ] || { echo "Error: no online $(TIGERDATA_ENV) bastion in 'tailscale status' (is Tailscale up?); pass BASTION_IP=<ip>."; exit 1; }; \
+	[ -n "$$host" ] || { echo "Error: could not read pooler host from AWS (run 'aws sso login'?); pass TIGERDATA_HOST=<host>."; exit 1; }; \
+	echo "==> Tunnel: localhost:$(LOCAL_PORT) -> $$host:5432 via $$bastion ($(TIGERDATA_ENV))"; \
+	exec ssh -N -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new -L "$(LOCAL_PORT):$$host:5432" "ec2-user@$$bastion"
 
 # =============================================================================
 # Database Migrations
