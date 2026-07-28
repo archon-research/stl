@@ -1222,17 +1222,28 @@ func TestProcessBlockEvent_VaultDiscovery_V2_EnumerationTransportErrorRetries(t 
 			return h.vaultDetailResults("Spark Blue Chip USDT Vault", "sparkUSDTbc", 6, false), nil
 		case len(calls) == 2 && calls[0].Target == testLoanToken:
 			return h.tokenMetadataResults("USDT", 6), nil
-		case len(calls) == 1 && calls[0].Target == unknownVault && hasSameSelector(calls[0].CallData, adaptersLengthSelector):
-			return nil, errors.New("adaptersLength rpc down")
 		default:
 			return nil, fmt.Errorf("unexpected Execute shape (%d calls)", len(calls))
 		}
 	}
+	// The enumeration is hash-pinned, so the failure must be injected on the hash
+	// entry point — injecting it on Execute would only reach the code through the
+	// mock's number-to-hash fallback.
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		if len(calls) == 1 && calls[0].Target == unknownVault && hasSameSelector(calls[0].CallData, adaptersLengthSelector) {
+			return nil, errors.New("adaptersLength rpc down")
+		}
+		return nil, fmt.Errorf("unexpected ExecuteAtHash shape (%d calls)", len(calls))
+	}
 	h.morphoRepo.GetOrCreateVaultFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoVault) (int64, error) { return 99, nil }
 
 	log := h.makeDiscoveryTriggerLog(unknownVault)
-	if err := h.processBlock(t, 1, 24481834, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err == nil {
+	err := h.processBlock(t, 1, 24481834, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)})
+	if err == nil {
 		t.Fatal("expected the block to fail so SQS redelivers")
+	}
+	if !strings.Contains(err.Error(), "adaptersLength rpc down") {
+		t.Errorf("the block must fail on the injected enumeration error, got: %v", err)
 	}
 	if h.svc.vaultRegistry.IsKnownVault(unknownVault) {
 		t.Error("vault must stay unregistered so discovery re-runs on retry")
