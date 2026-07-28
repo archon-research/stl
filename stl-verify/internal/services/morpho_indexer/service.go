@@ -894,13 +894,35 @@ func (s *Service) readVaultForDiscovery(ctx context.Context, vaultAddress common
 		}
 		reads.adapters = adapters
 
-		fees, err := s.blockchainSvc.getVaultFees(ctx, vaultAddress, blockHash)
+		fees, err := s.readV2FeeConfigForSeed(ctx, vaultAddress, blockNumber, blockHash)
 		if err != nil {
-			return nil, fmt.Errorf("seeding fee config for vault %s: %w", vaultAddress.Hex(), err)
+			return nil, err
 		}
 		reads.fees = fees
 	}
 	return reads, nil
+}
+
+// readV2FeeConfigForSeed reads the fee config discovery seeds from, returning nil
+// when the contract serves no VaultV2 fee surface at all.
+//
+// The vault probe accepts an address on curator() + liquidityAdapter() alone, so it
+// never proves the fee getters exist. Hard-requiring them here poisoned such an
+// address's discovery forever — its triggering AccrueInterest retried and the vault
+// was never registered. Skipping the seed instead leaves the vault honestly
+// fee-row-less; a partially served surface is drift and still propagates (see
+// getVaultFees).
+func (s *Service) readV2FeeConfigForSeed(ctx context.Context, vaultAddress common.Address, blockNumber int64, blockHash common.Hash) (*vaultFeeConfig, error) {
+	fees, err := s.blockchainSvc.getVaultFees(ctx, vaultAddress, blockHash)
+	if errors.Is(err, errNoVaultFeeSurface) {
+		s.logger.Warn("vault-shaped contract has no VaultV2 fee surface — registering it with no fee config seeded",
+			"vault", vaultAddress.Hex(), "block", blockNumber)
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("seeding fee config for vault %s: %w", vaultAddress.Hex(), err)
+	}
+	return fees, nil
 }
 
 // readV2Adapters enumerates a freshly-discovered VaultV2's adapter set (hash-pinned
