@@ -5,6 +5,7 @@ package postgres
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
@@ -2467,6 +2469,38 @@ func TestEnsureIncarnationToClose_DecidesAndRegistersUnderOneLock(t *testing.T) 
 	want := fmt.Sprintf("id=%d [%d,%d]", addedID, addAt, removeAt)
 	if got := fixture.describeIncarnations(t, ctx, vaultID, addr); got != want {
 		t.Errorf("registry = %q, want %q: the removal decided before it held the lock, so it minted its own incarnation instead of closing the one being added", got, want)
+	}
+}
+
+// TestEnsureIncarnationToClose_UnclassifiedCandidateIsRefused pins that a registration the
+// caller cannot classify is refused rather than recorded with a defaulted adapter_type. Only
+// the decisive read under the lock can tell whether a registration is needed at all, so the
+// caller cannot make this call itself — it hands over a nil candidate and gets a
+// distinguishable error back.
+func TestEnsureIncarnationToClose_UnclassifiedCandidateIsRefused(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x62))
+	addr := adapterAddr(0x63)
+
+	tx, err := fixture.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+
+	registered, err := fixture.repo.EnsureIncarnationToClose(ctx, tx, vaultID, addr, 1000, nil)
+	if !errors.Is(err, outbound.ErrAdapterUnclassified) {
+		t.Fatalf("err = %v, want ErrAdapterUnclassified", err)
+	}
+	if registered {
+		t.Error("a refused registration must not report having registered anything")
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if got := fixture.describeIncarnations(t, ctx, vaultID, addr); got != "" {
+		t.Errorf("registry = %q, want empty: nothing may be recorded with a defaulted type", got)
 	}
 }
 
