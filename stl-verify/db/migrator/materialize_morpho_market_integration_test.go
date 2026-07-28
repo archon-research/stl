@@ -26,6 +26,9 @@ const (
 //   - supply/borrow netting into one loan-token position (a single native instrument holds one position);
 //   - latest-timestamp dedup of same-(user,market,block,version) rows;
 //   - many observations per position_id, one CURRENT classification per position_id;
+//   - closure (VEC-409): a leg observed going from a positive quantity to 0 emits ONE closing
+//     zero-row (so position_current shows it closed); a leg never entered emits nothing; leading and
+//     repeated zeros are dropped; the classification keeps the last NON-ZERO deal_type;
 //   - 32-byte ids, no PK collisions, and idempotency.
 func TestMaterializeMorphoMarket(t *testing.T) {
 	ctx := context.Background()
@@ -41,6 +44,7 @@ func TestMaterializeMorphoMarket(t *testing.T) {
 DO $$
 DECLARE pid bigint; ltid bigint; ctid bigint;
         uaid bigint; ubid bigint; ucid bigint; udid bigint; mid bigint;
+        ueid bigint; ufid bigint; ugid bigint;
 BEGIN
   INSERT INTO chain (chain_id, name) VALUES (1, 'ethereum') ON CONFLICT (chain_id) DO NOTHING;
   INSERT INTO protocol (chain_id, address, name) VALUES (1, '\xff', 'morpho') RETURNING id INTO pid;
@@ -50,6 +54,9 @@ BEGIN
   INSERT INTO "user" (chain_id, address) VALUES (1, '\xbb') RETURNING id INTO ubid;
   INSERT INTO "user" (chain_id, address) VALUES (1, '\xcc') RETURNING id INTO ucid;
   INSERT INTO "user" (chain_id, address) VALUES (1, '\xdd') RETURNING id INTO udid;
+  INSERT INTO "user" (chain_id, address) VALUES (1, '\xee') RETURNING id INTO ueid;
+  INSERT INTO "user" (chain_id, address) VALUES (1, '\xef') RETURNING id INTO ufid;
+  INSERT INTO "user" (chain_id, address) VALUES (1, '\xf0') RETURNING id INTO ugid;
   INSERT INTO morpho_market
     (chain_id, protocol_id, market_id, loan_token_id, collateral_token_id, oracle_address, irm_address, lltv, created_at_block)
     VALUES (1, pid, '\x1234', ltid, ctid, '\x00', '\x01', 0.86, 1) RETURNING id INTO mid;
@@ -68,6 +75,21 @@ BEGIN
   INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, timestamp, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets)
     VALUES (udid, mid, 100, 0, '2026-01-01T00:00:00Z', 0, 0, 0, 10, 0),
            (udid, mid, 100, 0, '2026-01-01T01:00:00Z', 0, 0, 0, 20, 0);
+  -- E: collateral opened (5) then withdrawn to 0 -> collateral leg emits open + one closing zero-row.
+  INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, timestamp, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets)
+    VALUES (ueid, mid, 100, 0, '2026-01-01T00:00:00Z', 0, 0, 5, 0, 0),
+           (ueid, mid, 200, 0, '2026-01-02T00:00:00Z', 0, 0, 0, 0, 0);
+  -- F: loan-token borrowed (30) then repaid to 0 -> loan leg emits open (BORROW) + one closing zero-row.
+  INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, timestamp, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets)
+    VALUES (ufid, mid, 100, 0, '2026-01-01T00:00:00Z', 0, 0, 0, 0, 30),
+           (ufid, mid, 200, 0, '2026-01-02T00:00:00Z', 0, 0, 0, 0, 0);
+  -- G: collateral 0 (never entered) -> 5 (open) -> 0 (close) -> 0 (repeat). Leg emits only the open and
+  -- the first close: leading and repeated zeros are dropped (LAG closure semantics).
+  INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, timestamp, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets)
+    VALUES (ugid, mid, 100, 0, '2026-01-01T00:00:00Z', 0, 0, 0, 0, 0),
+           (ugid, mid, 200, 0, '2026-01-02T00:00:00Z', 0, 0, 5, 0, 0),
+           (ugid, mid, 300, 0, '2026-01-03T00:00:00Z', 0, 0, 0, 0, 0),
+           (ugid, mid, 400, 0, '2026-01-04T00:00:00Z', 0, 0, 0, 0, 0);
 END $$;`
 	if _, err := pool.Exec(ctx, seed); err != nil {
 		t.Fatalf("seed: %v", err)
@@ -79,8 +101,10 @@ END $$;`
 		t.Fatalf("materialize_morpho_market: %v", err)
 	}
 
-	// position_state row shape: A loan (2 obs) + B loan (1) + B coll (1) + C loan (1) + D loan (1) = 6.
-	// Distinct positions: A, B-loan, B-coll, C, D = 5.
+	// position_state row shape:
+	//   A loan (2 obs) + B loan (1) + B coll (1) + C loan (1) + D loan (1)  = 6
+	//   E coll (open + close = 2) + F loan (open + close = 2) + G coll (open + close = 2) = 6
+	// Total 12. Distinct positions: A, B-loan, B-coll, C, D, E-coll, F-loan, G-coll = 8.
 	var rows, distinctPositions, collisions, badLen int
 	if err := pool.QueryRow(ctx, `
 		SELECT count(*),
@@ -90,14 +114,14 @@ END $$;`
 		FROM position_state`).Scan(&rows, &distinctPositions, &collisions, &badLen); err != nil {
 		t.Fatalf("position_state summary: %v", err)
 	}
-	if rows != 6 {
-		t.Errorf("position_state rows = %d, want 6", rows)
+	if rows != 12 {
+		t.Errorf("position_state rows = %d, want 12", rows)
 	}
-	if written != 6 {
-		t.Errorf("materialize returned %d, want 6", written)
+	if written != 12 {
+		t.Errorf("materialize returned %d, want 12", written)
 	}
-	if distinctPositions != 5 {
-		t.Errorf("distinct position_id = %d, want 5", distinctPositions)
+	if distinctPositions != 8 {
+		t.Errorf("distinct position_id = %d, want 8", distinctPositions)
 	}
 	if collisions != 0 {
 		t.Errorf("PK collisions = %d, want 0", collisions)
@@ -119,6 +143,9 @@ END $$;`
 		{"B collateral leg (collateral token)", collInstrument, "bb", "5", 1},
 		{"C supply/borrow netted (|100-40|)", loanInstrument, "cc", "60", 1},
 		{"D same-block dedup keeps latest timestamp", loanInstrument, "dd", "20", 1},
+		{"E collateral closed: open + one closing zero-row", collInstrument, "ee", "0", 2},
+		{"F loan closed: borrow + one closing zero-row", loanInstrument, "ef", "0", 2},
+		{"G leading + repeated zeros dropped: open + one close", collInstrument, "f0", "0", 2},
 	} {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
@@ -142,13 +169,14 @@ END $$;`
 		})
 	}
 
-	// One current classification per position_id (5), each with the right deal_type and frozen direction.
+	// One current classification per position_id (8), each with the right deal_type and frozen direction.
+	// Closed positions (E/F/G) keep the deal_type of their last NON-ZERO observation, not the zero-row.
 	var classRows int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_classification`).Scan(&classRows); err != nil {
 		t.Fatalf("classification count: %v", err)
 	}
-	if classRows != 5 {
-		t.Errorf("position_classification rows = %d, want 5", classRows)
+	if classRows != 8 {
+		t.Errorf("position_classification rows = %d, want 8", classRows)
 	}
 	for _, c := range []struct {
 		name          string
@@ -161,6 +189,8 @@ END $$;`
 		{"B loan -> BORROW/SHORT", loanInstrument, "bb", "BORROW", "SHORT"},
 		{"B coll -> COLLATERAL/LONG", collInstrument, "bb", "COLLATERAL", "LONG"},
 		{"C net-supply -> LOAN/LONG", loanInstrument, "cc", "LOAN", "LONG"},
+		{"E closed collateral keeps COLLATERAL/LONG", collInstrument, "ee", "COLLATERAL", "LONG"},
+		{"F closed loan keeps BORROW/SHORT (last non-zero)", loanInstrument, "ef", "BORROW", "SHORT"},
 	} {
 		c := c
 		t.Run("classify "+c.name, func(t *testing.T) {
@@ -188,7 +218,7 @@ END $$;`
 	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM position_state), (SELECT count(*) FROM position_classification)`).Scan(&rows2, &class2); err != nil {
 		t.Fatalf("re-count: %v", err)
 	}
-	if rows2 != 6 || class2 != 5 {
-		t.Errorf("after re-run: position_state=%d (want 6), position_classification=%d (want 5)", rows2, class2)
+	if rows2 != 12 || class2 != 8 {
+		t.Errorf("after re-run: position_state=%d (want 12), position_classification=%d (want 8)", rows2, class2)
 	}
 }
