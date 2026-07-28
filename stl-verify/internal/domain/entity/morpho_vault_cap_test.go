@@ -1,6 +1,7 @@
 package entity
 
 import (
+	"bytes"
 	"math/big"
 	"strings"
 	"testing"
@@ -110,8 +111,32 @@ func TestNewMorphoVaultCap(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
+			// Every constructed field is asserted: absolute and relative caps are both
+			// unscaled ints of the same type, so checking only one would pass a
+			// constructor that swapped them.
+			if got.MorphoVaultID != tt.vaultID {
+				t.Errorf("MorphoVaultID = %d, want %d", got.MorphoVaultID, tt.vaultID)
+			}
+			if !bytes.Equal(got.CapID, tt.capID) {
+				t.Errorf("CapID = %x, want %x", got.CapID, tt.capID)
+			}
+			if !bytes.Equal(got.IDData, tt.idData) {
+				t.Errorf("IDData = %x, want %x", got.IDData, tt.idData)
+			}
 			if got.AbsoluteCap.Cmp(tt.absoluteCap) != 0 {
 				t.Errorf("AbsoluteCap = %s, want %s", got.AbsoluteCap, tt.absoluteCap)
+			}
+			if got.RelativeCap.Cmp(tt.relativeCap) != 0 {
+				t.Errorf("RelativeCap = %s, want %s", got.RelativeCap, tt.relativeCap)
+			}
+			if got.BlockNumber != tt.block {
+				t.Errorf("BlockNumber = %d, want %d", got.BlockNumber, tt.block)
+			}
+			if got.BlockVersion != tt.version {
+				t.Errorf("BlockVersion = %d, want %d", got.BlockVersion, tt.version)
+			}
+			if !got.Timestamp.Equal(tt.timestamp) {
+				t.Errorf("Timestamp = %v, want %v", got.Timestamp, tt.timestamp)
 			}
 		})
 	}

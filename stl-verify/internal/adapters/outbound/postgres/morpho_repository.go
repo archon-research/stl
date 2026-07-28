@@ -202,14 +202,19 @@ func (r *MorphoRepository) SaveMarketPosition(ctx context.Context, tx pgx.Tx, po
 	return nil
 }
 
-// GetOrCreateVault retrieves or creates a MetaMorpho vault.
+// GetOrCreateVault retrieves or creates a MetaMorpho vault, converging
+// created_at_block downward to the earliest observation (LEAST), mirroring
+// GetOrCreateToken. A vault first seen inside a narrowed backfill range — or on the
+// live stream, long after deployment — records that block; without the merge, that
+// wrong deploy block would persist forever because no later observation can correct
+// it.
 func (r *MorphoRepository) GetOrCreateVault(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault) (int64, error) {
 	var id int64
-	// The no-op SET is required so that DO UPDATE ... RETURNING id works on conflict.
 	err := tx.QueryRow(ctx,
 		`INSERT INTO morpho_vault (chain_id, protocol_id, address, name, symbol, asset_token_id, vault_version, created_at_block)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		 ON CONFLICT (chain_id, address) DO UPDATE SET id = morpho_vault.id
+		 ON CONFLICT (chain_id, address) DO UPDATE SET
+		     created_at_block = LEAST(morpho_vault.created_at_block, EXCLUDED.created_at_block)
 		 RETURNING id`,
 		vault.ChainID, vault.ProtocolID, vault.Address, vault.Name, vault.Symbol,
 		vault.AssetTokenID, vault.VaultVersion, vault.CreatedAtBlock,

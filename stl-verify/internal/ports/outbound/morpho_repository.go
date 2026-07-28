@@ -25,7 +25,9 @@ type MorphoRepository interface {
 	// SaveMarketPosition saves a user market position snapshot within an external transaction.
 	SaveMarketPosition(ctx context.Context, tx pgx.Tx, position *entity.MorphoMarketPosition) error
 
-	// GetOrCreateVault retrieves or creates a MetaMorpho vault.
+	// GetOrCreateVault retrieves or creates a MetaMorpho vault, converging
+	// created_at_block downward to the earliest observation (LEAST) so a vault
+	// first seen mid-life does not keep a wrong deploy block forever.
 	// Returns the vault's database ID.
 	GetOrCreateVault(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault) (int64, error)
 
