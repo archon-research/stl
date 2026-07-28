@@ -1,8 +1,9 @@
 {
  "source": {
-  "description": "Real recorded sparkUSDTbc (Morpho VaultV2) mainnet events, curated for the VaultV2 replay integration test. feeStates carries the full on-chain fee config (performanceFee, managementFee, both recipients) read at each of the two fee-event block hashes.",
+  "description": "Real recorded sparkUSDTbc (Morpho VaultV2) mainnet events, curated for the VaultV2 replay integration test. feeStates carries the full on-chain fee config (performanceFee, managementFee, both recipients) read at each of the two fee-event block hashes. realAssets covers every block where the replay snapshots the adapter: the AddAdapter block (the registration seed) and each allocation block.",
   "recorded": "2026-07-21",
   "feeStatesRecorded": "2026-07-27",
+  "addAdapterBlockRealAssetsRecorded": "2026-07-28",
   "chain": "Ethereum mainnet",
   "endpoint": "drpc (https://eth.drpc.org)",
   "headBlock": 25580045,
@@ -159,6 +160,7 @@
   }
  },
  "realAssets": {
+  "0x3b20ccd8c03c98c4fa7373e29dd060970ccd1f6b661e100d3869968a078d140e": "0",
   "0xe996303f55ce47d9545f7a83f2c3e609c0f384df7b793a98e6034b0874372edc": "39999999996",
   "0x385332768216f26dd9a5b5591d71f096b2f382779456b70cda7ab55b8cce8484": "17051328065",
   "0x7440f75915f0c903595c0624d1a29fc19c8c94733bd3fd130754a5210d56a4ec": "40000290791",
