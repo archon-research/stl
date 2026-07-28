@@ -2050,14 +2050,15 @@ func TestGetOrCreateAdapter_ClosedWindowConvergenceCuratesAdapterType(t *testing
 }
 
 // TestMorphoAdapter_UniqueActiveIncarnationIndexRejectsSecondActiveRow is the
-// database-level backstop for the one race GetOrCreateAdapter's advisory lock
-// cannot cover: MarkAdapterRemoved writes the same (vault, address) key WITHOUT
-// taking that lock, so under READ COMMITTED a concurrent GetOrCreateAdapter can
-// pass the closed-window check, then have its active-row UPDATE re-checked by
-// EvalPlanQual against the just-committed removed_at_block, match 0 rows, and fall
-// through to the INSERT — resurrecting a de-registered adapter as a second ACTIVE
-// row. The partial UNIQUE index makes that INSERT abort so the retried event
-// re-runs and lands in the closed-window path instead.
+// database-level backstop for a writer that reaches morpho_adapter WITHOUT the
+// per-(vault, address) advisory lock both GetOrCreateAdapter and MarkAdapterRemoved
+// take — a future code path, a manual INSERT, or a migration. Unlocked, under READ
+// COMMITTED a registration can pass the closed-window check, then have its
+// active-row UPDATE re-checked by EvalPlanQual against a concurrently committed
+// removed_at_block, match 0 rows, and fall through to the INSERT — resurrecting a
+// de-registered adapter as a second ACTIVE row. The partial UNIQUE index makes that
+// INSERT abort so the retried event re-runs and lands in the closed-window path
+// instead. The raw INSERTs below stand in for such a lockless writer.
 func TestMorphoAdapter_UniqueActiveIncarnationIndexRejectsSecondActiveRow(t *testing.T) {
 	fixture := setupMorphoTest(t)
 	ctx := context.Background()

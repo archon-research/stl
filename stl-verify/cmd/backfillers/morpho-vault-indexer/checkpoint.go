@@ -122,8 +122,11 @@ func readCheckpoint(path string, scope checkpointScope) (map[string]struct{}, er
 		}
 		var rec checkpointRecord
 		if err := json.Unmarshal(line, &rec); err != nil {
-			// Tolerate a partial trailing line from a crash: Scan() has already
-			// excluded any further lines by returning false at EOF.
+			// Any unparseable line is skipped, wherever it sits — a crash-torn
+			// fragment is a mid-file line once terminateTornTrailingLine has closed
+			// it off. Skipping is the safe direction for this file: a record we
+			// cannot read means we do not trust that partition as done, so it is
+			// replayed again, and replay is idempotent.
 			continue
 		}
 		if rec.Partition == "" || rec.checkpointScope != scope {

@@ -30,9 +30,11 @@ func TestNewMorphoVaultCap(t *testing.T) {
 		errContains string
 	}{
 		{
+			// A nonzero block version so the BlockVersion assertion below is not
+			// satisfied by the struct's zero value.
 			name: "valid", vaultID: 1, capID: validCapID, idData: validIDData,
 			absoluteCap: big.NewInt(1_000_000), relativeCap: big.NewInt(500_000_000_000_000_000),
-			block: 24481834, version: 0, timestamp: ts,
+			block: 24481834, version: 3, timestamp: ts,
 		},
 		{
 			name: "valid zero caps", vaultID: 1, capID: validCapID, idData: validIDData,
