@@ -691,6 +691,16 @@ dev-resume:
 	  echo "$$NODES" | xargs docker start; \
 	fi
 
+# Bring the cluster up whichever way is needed: resume it if its nodes already
+# exist (suspended), otherwise create it from scratch. Idempotent entry point
+# for local-dev tooling that just wants "cluster running".
+dev-up-or-resume: ## Resume the kind cluster if it exists, else create it (dev-up)
+	@if [ -n "$$(docker ps -a --filter "label=io.x-k8s.kind.cluster=$(KIND_CLUSTER)" -q)" ]; then \
+	  $(MAKE) dev-resume; \
+	else \
+	  $(MAKE) dev-up; \
+	fi
+
 # Wipe cluster and all persisted data. Cannot be undone.
 dev-wipe:
 	@echo "WARNING: This will tear down the cluster and permanently delete all local database data."
