@@ -48,24 +48,32 @@ type MorphoRepository interface {
 	// row for (morpho_vault_id, address). The candidate's added_at_block is matched
 	// against the adapter's incarnations in a load-bearing ORDER:
 	//
-	//  1. A CLOSED incarnation whose window strictly covers the candidate wins
-	//     FIRST. This step must precede the active-row match: for a removed-then-re-added
-	//     adapter a closed row and an active row coexist, and a backfilled add
-	//     belonging to the earlier (closed) window would otherwise match the active
-	//     row, dragging the re-added incarnation's added_at_block into a prior
-	//     window and leaving the closed row unconverged. With no active row it would
-	//     instead insert a spuriously-active duplicate, resurrecting a de-registered
-	//     adapter into GetActiveAdaptersByVault / realAssets forever.
+	//  1. A CLOSED incarnation whose window STRICTLY covers the candidate (its
+	//     removed_at_block is above the candidate's added_at_block) wins FIRST. This
+	//     step must precede the active-row match: for a removed-then-re-added adapter
+	//     a closed row and an active row coexist, and a backfilled add belonging to
+	//     the earlier (closed) window would otherwise match the active row, dragging
+	//     the re-added incarnation's added_at_block into a prior window and leaving
+	//     the closed row unconverged. With no active row it would instead insert a
+	//     spuriously-active duplicate, resurrecting a de-registered adapter into
+	//     GetActiveAdaptersByVault / realAssets forever. Strict, not inclusive: a
+	//     governance multicall can remove and re-add an adapter in ONE block, and an
+	//     add AT a prior removal block must open a new incarnation rather than fold
+	//     into the row just closed.
 	//  2. Otherwise an ACTIVE row is reused, its added_at_block converging downward
-	//     to the earliest observation (LEAST), so a lazily-registered adapter
+	//     to the earliest observation (SQL LEAST), so a lazily-registered adapter
 	//     collapses onto the true AddAdapter block once the backfiller replays it
 	//     rather than becoming a second active row.
 	//  3. Only a candidate added at or after every prior removal is a genuinely new
-	//     incarnation and gets its own row (the UNIQUE key includes added_at_block).
+	//     incarnation and gets its own row (the UNIQUE key includes added_at_block, so
+	//     a same-block replay is idempotent).
 	//
 	// Both convergence steps also curate adapter_type: a row recorded as Unknown is
 	// upgraded when a replay supplies a real type, and a real type is never
 	// overwritten. Returns the row's ID.
+	//
+	// One shape this key cannot represent is documented as a Residual on the
+	// PostgreSQL implementation: add→remove→re-add inside a single block.
 	GetOrCreateAdapter(ctx context.Context, tx pgx.Tx, adapter *entity.MorphoAdapter) (int64, error)
 
 	// MarkAdapterRemoved records the block at which an adapter was de-registered,
