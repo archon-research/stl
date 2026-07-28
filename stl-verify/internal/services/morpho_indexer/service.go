@@ -688,7 +688,7 @@ func (s *Service) processMetaMorphoLog(ctx context.Context, log shared.Log, vaul
 	case *VaultAccrueInterestEvent:
 		return s.handleVaultAccrueInterest(ctx, e, vaultAddress, chainID, blockNumber, blockHash, blockVersion, blockTimestamp)
 	case *AddAdapterEvent:
-		return s.handleAddAdapter(ctx, e, vaultAddress, blockNumber)
+		return s.handleAddAdapter(ctx, e, vaultAddress, blockNumber, blockHash, blockVersion, blockTimestamp)
 	case *RemoveAdapterEvent:
 		return s.handleRemoveAdapter(ctx, e, vaultAddress, blockNumber)
 	case *AllocateEvent:
@@ -824,12 +824,14 @@ type discoveredAdapter struct {
 
 // vaultDiscoveryReads holds every on-chain value discovery needs, read before the
 // persist transaction so the vault row and its adapters commit atomically.
-// adapters is populated only for a VaultV2 (empty for V1/V1.1) and is sorted by
-// address for deterministic advisory-lock acquisition in the persist step.
+// adapters and fees are populated only for a VaultV2 (nil/empty for V1/V1.1);
+// adapters is sorted by address for deterministic advisory-lock acquisition in the
+// persist step.
 type vaultDiscoveryReads struct {
 	metadata      *VaultMetadata
 	assetMetadata TokenMetadata
 	adapters      []discoveredAdapter
+	fees          *vaultFeeConfig
 }
 
 // discoverAndRegisterVault probes vaultAddress on-chain, persists the vault, its
@@ -869,7 +871,8 @@ func (s *Service) discoverAndRegisterVault(ctx context.Context, vaultAddress com
 // readVaultForDiscovery performs every on-chain read discovery needs, before any
 // DB write: vault metadata, its asset token metadata, and — for a VaultV2 — the
 // full enumerated adapter set with each adapter's type and hash-pinned realAssets
-// seed. A transport error on any read bubbles so nothing is persisted.
+// seed, plus the hash-pinned fee config. A transport error on any read bubbles so
+// nothing is persisted.
 func (s *Service) readVaultForDiscovery(ctx context.Context, vaultAddress common.Address, blockNumber int64, blockHash common.Hash) (*vaultDiscoveryReads, error) {
 	metadata, err := s.blockchainSvc.getVaultMetadata(ctx, vaultAddress, blockNumber)
 	if err != nil {
@@ -888,6 +891,12 @@ func (s *Service) readVaultForDiscovery(ctx context.Context, vaultAddress common
 			return nil, err
 		}
 		reads.adapters = adapters
+
+		fees, err := s.blockchainSvc.getVaultFees(ctx, vaultAddress, blockHash)
+		if err != nil {
+			return nil, fmt.Errorf("seeding fee config for vault %s: %w", vaultAddress.Hex(), err)
+		}
+		reads.fees = fees
 	}
 	return reads, nil
 }
@@ -958,7 +967,10 @@ func (s *Service) persistDiscoveredVault(ctx context.Context, vaultAddress commo
 			return fmt.Errorf("upserting receipt token: %w", err)
 		}
 
-		return s.seedDiscoveredAdapters(ctx, tx, vault, vaultAddress, blockNumber, blockVersion, blockTimestamp, reads.adapters)
+		if err := s.seedDiscoveredAdapters(ctx, tx, vault, vaultAddress, blockNumber, blockVersion, blockTimestamp, reads.adapters); err != nil {
+			return err
+		}
+		return s.seedDiscoveredFees(ctx, tx, vault, blockNumber, blockVersion, blockTimestamp, reads.fees)
 	}); err != nil {
 		return nil, fmt.Errorf("persisting vault %s: %w", vaultAddress.Hex(), err)
 	}
@@ -996,6 +1008,33 @@ func (s *Service) seedDiscoveredAdapters(ctx context.Context, tx pgx.Tx, vault *
 		if err := s.morphoRepo.SaveAdapterState(ctx, tx, state); err != nil {
 			return fmt.Errorf("seeding adapter state for %s: %w", a.address.Hex(), err)
 		}
+	}
+	return nil
+}
+
+// seedDiscoveredFees snapshots a freshly discovered VaultV2's full fee config from
+// the already-read hash-pinned values, within the discovery transaction. Without
+// it a mid-life-discovered vault carries NO fee row until a Set* fee event fires
+// again — and governance typically sets fees once, at deployment (sparkUSDTbc:
+// blocks 24765788 / 24765805), so "again" may be never. fees is nil for V1/V1.1,
+// which have no VaultV2 fee surface.
+//
+// Caps have no equivalent seed and deliberately so: a cap id is an opaque keccak
+// hash of the id-data the curator chose, and the contract exposes no enumeration
+// getter, so there is no set to read. Cap history therefore starts at the first cap
+// event we witness or the backfiller replays.
+func (s *Service) seedDiscoveredFees(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault, blockNumber int64, blockVersion int, blockTimestamp time.Time, fees *vaultFeeConfig) error {
+	if fees == nil {
+		return nil
+	}
+	vaultFee, err := entity.NewMorphoVaultFee(vault.ID, fees.performanceFee, fees.managementFee,
+		fees.performanceFeeRecipient.Bytes(), fees.managementFeeRecipient.Bytes(),
+		blockNumber, blockVersion, blockTimestamp)
+	if err != nil {
+		return fmt.Errorf("creating vault fee entity: %w", err)
+	}
+	if err := s.morphoRepo.SaveVaultFee(ctx, tx, vaultFee); err != nil {
+		return fmt.Errorf("seeding vault fee config: %w", err)
 	}
 	return nil
 }

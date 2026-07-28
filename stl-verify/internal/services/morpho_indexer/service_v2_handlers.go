@@ -31,12 +31,16 @@ func (s *Service) resolveV2Vault(vaultAddress common.Address) (*entity.MorphoVau
 	return vault, nil
 }
 
-// handleAddAdapter classifies the new adapter on-chain and records it in the
-// adapter registry. An unclassifiable adapter is persisted as Unknown behind a
-// WARN, mirroring the VaultShaped discovery sentinel so a future adapter kind
-// surfaces instead of being dropped. The on-chain classification runs before the
-// transaction opens so the chain round-trip never holds a pooled DB connection.
-func (s *Service) handleAddAdapter(ctx context.Context, e *AddAdapterEvent, vaultAddress common.Address, blockNumber int64) error {
+// handleAddAdapter classifies the new adapter on-chain, records it in the adapter
+// registry, and seeds its first realAssets() snapshot — mirroring what discovery
+// does for the adapters a mid-life-discovered vault already holds. The seed is what
+// keeps a freshly registered adapter from looking like adapter_data_missing to
+// VEC-219's composition probe until the vault's first allocation, which can be many
+// hours later. An unclassifiable adapter is persisted as Unknown behind a WARN,
+// mirroring the VaultShaped discovery sentinel so a future adapter kind surfaces
+// instead of being dropped. Both chain reads run before the transaction opens so a
+// pooled DB connection never sits idle across a chain round-trip.
+func (s *Service) handleAddAdapter(ctx context.Context, e *AddAdapterEvent, vaultAddress common.Address, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) error {
 	vault, err := s.resolveV2Vault(vaultAddress)
 	if err != nil {
 		return err
@@ -45,9 +49,20 @@ func (s *Service) handleAddAdapter(ctx context.Context, e *AddAdapterEvent, vaul
 	if err != nil {
 		return err
 	}
+	realAssets, err := s.blockchainSvc.getAdapterRealAssets(ctx, e.Account, blockHash)
+	if err != nil {
+		return fmt.Errorf("seeding realAssets for adapter %s: %w", e.Account.Hex(), err)
+	}
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		_, err := s.upsertAdapterRow(ctx, tx, vault, vaultAddress, e.Account, adapterType, blockNumber)
-		return err
+		adapterID, err := s.upsertAdapterRow(ctx, tx, vault, vaultAddress, e.Account, adapterType, blockNumber)
+		if err != nil {
+			return err
+		}
+		state, err := entity.NewMorphoAdapterState(adapterID, blockNumber, blockVersion, blockTimestamp, realAssets)
+		if err != nil {
+			return fmt.Errorf("creating adapter state entity: %w", err)
+		}
+		return s.morphoRepo.SaveAdapterState(ctx, tx, state)
 	})
 }
 
