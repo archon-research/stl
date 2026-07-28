@@ -615,21 +615,28 @@ func (r *MorphoRepository) incarnationLiveAt(ctx context.Context, tx pgx.Tx, mor
 // block_number comparison is strict.
 //
 // removedAtBlockVersion scopes WHICH snapshots count, and is what makes the guard safe
-// to run on a downward convergence rather than exempting that arm (see the port doc).
-// A reorg that relocates a removal to an earlier block also republishes every
-// descendant block at a bumped version, so a snapshot above the new close carrying a
-// LOWER version than the event now being processed is residue of the chain that reorg
+// to run on a downward convergence rather than exempting that arm (see the port doc). A
+// reorg that relocates a removal to an earlier block also republishes every descendant
+// block at a bumped version, so a snapshot just above the new close carrying a LOWER
+// version than the event now being processed is residue of the chain that reorg
 // replaced — flagging it would fail a CORRECT removal forever, since nothing ever
-// re-homes or deletes it. Rows at or above the event's version are on the same chain
-// the event is on and genuinely fall outside the window.
+// re-homes or deletes it.
 //
-// Residual: version numbering is per block_number (MAX+1 on each republish), not a
-// global chain epoch, so two reorgs of different depths can leave a canonical
-// descendant at the SAME version as an earlier-block event that is not its ancestor,
-// and this guard would refuse a correct removal. That is loud rather than silent, and
-// the real fix is the incarnation-sequence key the port doc ticket names: nothing here
-// re-homes morpho_adapter_state.morpho_adapter_id, so a stranded snapshot can only be
-// moved by hand.
+// That exclusion is bounded to maxRemovalRelocationDistance above the close, because
+// block_version is a per-block_number counter (MAX+1 on each republish), NOT a global
+// chain epoch. "Lower version" only implies "dead chain" for blocks the SAME reorg
+// rewrote, and a reorg that could have relocated this removal reaches at most the
+// reorg window past it. Compared across a longer distance the versions are unrelated
+// counters, and trusting them would silently strand exactly the snapshots
+// seedDiscoveredAdapters' bootstrap contract relies on this guard to catch: a row
+// seeded at a far-later discovery block, then converged into an earlier replayed
+// window.
+//
+// Residual: within the window, version numbering still is not an epoch, so two reorgs
+// of different depths can leave a canonical descendant at the same version as an
+// earlier-block event that is not its ancestor, and the guard then refuses a correct
+// removal. That is loud rather than silent; the real fix is the incarnation-sequence key
+// the port doc ticket names.
 //
 // Shape note: morpho_adapter_state is a compressed + S3-tiered hypertable partitioned
 // on timestamp, while this predicate filters block_number, so no chunk exclusion
@@ -640,11 +647,8 @@ func (r *MorphoRepository) incarnationLiveAt(ctx context.Context, tx pgx.Tx, mor
 func (r *MorphoRepository) assertNoStateAfterRemoval(ctx context.Context, tx pgx.Tx, adapterID, closeAt int64, removedAtBlockVersion int) error {
 	var orphaned bool
 	if err := tx.QueryRow(ctx,
-		`SELECT EXISTS (
-		     SELECT 1 FROM morpho_adapter_state
-		     WHERE morpho_adapter_id = $1 AND block_number > $2 AND block_version >= $3
-		 )`,
-		adapterID, closeAt, removedAtBlockVersion,
+		`SELECT EXISTS (SELECT 1 FROM morpho_adapter_state WHERE `+orphanedStateWhere+`)`,
+		adapterID, closeAt, removedAtBlockVersion, int64(maxRemovalRelocationDistance),
 	).Scan(&orphaned); err != nil {
 		return fmt.Errorf("checking adapter_state snapshots after block %d: %w", closeAt, err)
 	}
@@ -653,6 +657,15 @@ func (r *MorphoRepository) assertNoStateAfterRemoval(ctx context.Context, tx pgx
 	}
 	return r.orphanedStateError(ctx, tx, adapterID, closeAt, removedAtBlockVersion)
 }
+
+// orphanedStateWhere matches the adapter_state rows a close at $2 would strand:
+// everything above it, minus the dead-chain residue $3 and $4 exclude (see
+// assertNoStateAfterRemoval). Shared so the EXISTS probe and the counting query on the
+// refusal path can never disagree about what an orphan is.
+const orphanedStateWhere = `
+	     morpho_adapter_id = $1
+	     AND block_number > $2
+	     AND (block_version >= $3 OR block_number > $2 + $4)`
 
 // orphanedStateError builds the refusal message for assertNoStateAfterRemoval,
 // counting the stranded snapshots on this failure path only. The EXISTS probe already
@@ -664,9 +677,8 @@ func (r *MorphoRepository) orphanedStateError(ctx context.Context, tx pgx.Tx, ad
 		latest   int64
 	)
 	if err := tx.QueryRow(ctx,
-		`SELECT count(*), COALESCE(max(block_number), 0) FROM morpho_adapter_state
-		 WHERE morpho_adapter_id = $1 AND block_number > $2 AND block_version >= $3`,
-		adapterID, closeAt, removedAtBlockVersion,
+		`SELECT count(*), COALESCE(max(block_number), 0) FROM morpho_adapter_state WHERE `+orphanedStateWhere,
+		adapterID, closeAt, removedAtBlockVersion, int64(maxRemovalRelocationDistance),
 	).Scan(&orphaned, &latest); err != nil {
 		return fmt.Errorf("counting adapter_state snapshots after block %d: %w", closeAt, err)
 	}
