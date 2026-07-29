@@ -8,9 +8,9 @@
 --
 -- "Current" = the latest observation. A position that has closed carries a latest
 -- observation with quantity 0 (the per-protocol materializers emit a closing zero-row
--- on a real transition-to-zero, VEC-624 follow-up), so exposure queries filter
--- quantity <> 0; this view does not itself decide open/closed, it just surfaces the
--- latest state.
+-- on a real transition-to-zero — the VEC-409 closure in VEC-402/403/406), so exposure
+-- queries filter quantity <> 0; this view does not itself decide open/closed, it just
+-- surfaces the latest state.
 --
 -- Under the shared-table design, this is a straight DISTINCT ON over position_state
 -- (not a union of per-protocol views), so a new materializer needs no change here.
