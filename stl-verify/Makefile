@@ -978,7 +978,7 @@ docker-release-all-staging:
 #   BASTION_IP     -- the online $(TIGERDATA_ENV) bastion from `tailscale status`
 #                     (bastions rotate; offline ones are skipped)
 #   TIGERDATA_HOST -- the pooler host from AWS Secrets Manager
-#                     (stl-$(TIGERDATA_ENV)-tigerdata-app .pooler_hostname)
+#                     (stl-$(TIGERDATA_ENV)-tigerdata-app, see below)
 #   TIGERDATA_LOCAL_PORT -- 5436, chosen to avoid the local kind cluster's 5432
 # Override any of them on the command line; ENV=sentinelprod (or
 # TIGERDATA_ENV=sentinelprod) switches environment. The app then connects at
@@ -992,12 +992,25 @@ docker-release-all-staging:
 # reports success. Keep the two in agreement.
 TIGERDATA_ENV ?= $(or $(ENV),sentinelstaging)
 TIGERDATA_LOCAL_PORT ?= 5436
+
+# Resolve an environment's pooler host from Secrets Manager.
+# Usage: $(call tigerdata-pooler-host,<env>)
+#
+# Which key holds the endpoint is not something this repo controls (the schema
+# lives in the infrastructure repo), and the app secret is read elsewhere as
+# pooler_url -- see k8s/overlays/*/external-secrets.yaml -- so try the known
+# spellings rather than assuming one. Whatever comes back is reduced to a bare
+# host: drop everything through the last '@' (passwords may contain '@'), then
+# trim at the port, path, or query. A key that is already a bare host is
+# unchanged by both substitutions.
+tigerdata-pooler-host = aws secretsmanager get-secret-value --secret-id stl-$(1)-tigerdata-app --query SecretString --output text 2>/dev/null | jq -r '.pooler_hostname // .pooler_url // .connection_url // empty' | sed -E 's|^.*@||; s|[:/?].*$$||'
+
 tigerdata-tunnel:
 	@set -e; \
 	bastion="$(BASTION_IP)"; \
 	[ -n "$$bastion" ] || bastion="$$(tailscale status 2>/dev/null | grep '$(TIGERDATA_ENV)-bastion' | grep -v offline | awk '{print $$1}' | head -1)"; \
 	host="$(TIGERDATA_HOST)"; \
-	[ -n "$$host" ] || host="$$(aws secretsmanager get-secret-value --secret-id stl-$(TIGERDATA_ENV)-tigerdata-app --query SecretString --output text 2>/dev/null | jq -r '.pooler_hostname // empty')"; \
+	[ -n "$$host" ] || host="$$($(call tigerdata-pooler-host,$(TIGERDATA_ENV)))"; \
 	[ -n "$$bastion" ] || { echo "Error: no online $(TIGERDATA_ENV) bastion in 'tailscale status' (is Tailscale up?); pass BASTION_IP=<ip>."; exit 1; }; \
 	[ -n "$$host" ] || { echo "Error: could not read pooler host from AWS (run 'aws sso login'?); pass TIGERDATA_HOST=<host>."; exit 1; }; \
 	echo "==> Tunnel: localhost:$(TIGERDATA_LOCAL_PORT) -> $$host:5432 via $$bastion ($(TIGERDATA_ENV))"; \
@@ -1006,6 +1019,31 @@ tigerdata-tunnel:
 # =============================================================================
 # Database Migrations
 # =============================================================================
+
+# Refuse to run when the tunnel does not reach $(ENV)'s pooler. The targets
+# below read secrets for their own ENV but write through whatever is listening
+# on TIGERDATA_LOCAL_PORT, so a mismatch silently operates on the wrong
+# database -- psql reports success either way. Checking the ssh process's own
+# -L forward is what makes this an assertion rather than a convention.
+#
+# Fails closed: if the expected host cannot be resolved, or no listener is
+# found, the target stops. SKIP_TUNNEL_CHECK=1 bypasses it for a tunnel opened
+# by other means (a manual ssh, or a forward through something other than ssh).
+define assert-tunnel-matches-env
+@if [ "$(SKIP_TUNNEL_CHECK)" = "1" ]; then \
+	  echo "==> SKIP_TUNNEL_CHECK=1: not verifying the tunnel points at $(ENV)"; \
+	else \
+	  expected="$$($(call tigerdata-pooler-host,$(ENV)))"; \
+	  [ -n "$$expected" ] || { echo "Error: could not resolve the $(ENV) pooler host to verify the tunnel (run 'aws sso login'?); pass SKIP_TUNNEL_CHECK=1 to override."; exit 1; }; \
+	  pid="$$(lsof -nP -iTCP:$(TIGERDATA_LOCAL_PORT) -sTCP:LISTEN -t 2>/dev/null | head -1)"; \
+	  [ -n "$$pid" ] || { echo "Error: nothing is listening on localhost:$(TIGERDATA_LOCAL_PORT); start it with 'make tigerdata-tunnel ENV=$(ENV)'."; exit 1; }; \
+	  ps -o args= -p "$$pid" 2>/dev/null | grep -q "$(TIGERDATA_LOCAL_PORT):$$expected:5432" || { \
+	    echo "Error: the tunnel on localhost:$(TIGERDATA_LOCAL_PORT) does not forward to the $(ENV) pooler ($$expected)."; \
+	    echo "       Restart it with 'make tigerdata-tunnel ENV=$(ENV)', or pass SKIP_TUNNEL_CHECK=1 if you know the forward is correct."; \
+	    exit 1; }; \
+	  echo "==> Verified: localhost:$(TIGERDATA_LOCAL_PORT) forwards to the $(ENV) pooler ($$expected)"; \
+	fi
+endef
 
 # Run database migrations
 # Usage: make db-migrate DATABASE_URL="postgresql://user:pass@localhost:$(TIGERDATA_LOCAL_PORT)/dbname?sslmode=require"
@@ -1038,6 +1076,7 @@ db-set-passwords:
 		echo "Usage: make $@ DATABASE_URL=\"postgresql://tsdbadmin:pass@localhost:$(TIGERDATA_LOCAL_PORT)/tsdb?sslmode=require\" ENV=sentineldev|sentinelstaging|sentinelprod"; \
 		exit 1; \
 	fi
+	$(assert-tunnel-matches-env)
 	@echo "==> Setting database user passwords from Secrets Manager..."
 	@STL_RW_PASS=$$(aws secretsmanager get-secret-value --secret-id stl-$(ENV)-tigerdata-app --query SecretString --output text | jq -r .password) && \
 	STL_RO_PASS=$$(aws secretsmanager get-secret-value --secret-id stl-$(ENV)-tigerdata-readonly --query SecretString --output text | jq -r .password) && \
@@ -1056,8 +1095,9 @@ db-test-app-user:
 		echo "Usage: make $@ ENV=sentineldev|sentinelstaging|sentinelprod"; \
 		exit 1; \
 	fi
+	$(assert-tunnel-matches-env)
 	@echo "==> Testing stl_read_write connection..."
-	@CONNECTION_URL=$$(aws secretsmanager get-secret-value --secret-id stl-$(ENV)-tigerdata-app --query SecretString --output text | jq -r .connection_url | sed 's|@[^:]*:[0-9]*/|@localhost:$(TIGERDATA_LOCAL_PORT)/|') && \
+	@CONNECTION_URL=$$(aws secretsmanager get-secret-value --secret-id stl-$(ENV)-tigerdata-app --query SecretString --output text | jq -r .connection_url | sed -E 's|@[^@/]+:[0-9]+/|@localhost:$(TIGERDATA_LOCAL_PORT)/|') && \
 	psql "$$CONNECTION_URL" -c "SELECT current_user, current_database();" && \
 	echo "" && \
 	echo "==> Testing SELECT permission..." && \
