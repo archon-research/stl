@@ -67,48 +67,18 @@ SELECT position_id(1, NULL, instrument_key, holder_id) AS position_id,
 FROM series
 WHERE quantity > 0 OR prev_qty > 0;
 
-COMMENT ON VIEW position_sky_prime_debt IS '[Operational] VEC-406 projection: Sky prime debt as native position rows (one per prime x ilk; instrument_key = native ilk_name; holder = prime vault address; deal_type BORROW). Source for materialize_sky_prime_debt(); emits one closing zero-quantity row on a real repayment-to-zero (VEC-409 closure; none observed on live data yet).';
+COMMENT ON VIEW position_sky_prime_debt IS '[Operational] VEC-406 projection: Sky prime debt as native position rows (one per prime x ilk; instrument_key = native ilk_name; holder = prime vault address; deal_type BORROW). Emits the shared position_state column contract consumed by materialize_position_projection(); one closing zero-quantity row on a real repayment-to-zero (VEC-409 closure; none observed on live data yet).';
 
 -- Populate the spine + current classification. Idempotent (ON CONFLICT). Returns rows written to
 -- position_state. Run out of band after deploy; safe to re-run.
+-- Populate the spine + current classification via the shared materializer (defined with position_state,
+-- VEC-402 spine). The projection view above holds all the Sky-prime-debt-specific logic; the identical
+-- upsert plumbing is not duplicated here. Idempotent; run out of band; returns position_state rows written.
 CREATE OR REPLACE FUNCTION materialize_sky_prime_debt() RETURNS bigint
-    LANGUAGE plpgsql AS $fn$
-DECLARE n bigint;
-BEGIN
-    WITH ins AS (
-        INSERT INTO position_state
-            (position_id, chain_id, protocol_id, instrument_key, holder_id, quantity,
-             block_number, block_version, processing_version, block_timestamp)
-        SELECT position_id, chain_id, protocol_id, instrument_key, holder_id, quantity,
-               block_number, block_version, processing_version, block_timestamp
-        FROM position_sky_prime_debt
-        ON CONFLICT (position_id, block_number, block_version, processing_version) DO UPDATE
-            SET quantity        = EXCLUDED.quantity,
-                block_timestamp = EXCLUDED.block_timestamp,
-                chain_id        = EXCLUDED.chain_id,
-                protocol_id     = EXCLUDED.protocol_id,
-                instrument_key  = EXCLUDED.instrument_key,
-                holder_id       = EXCLUDED.holder_id
-        RETURNING 1
-    )
-    SELECT count(*) INTO n FROM ins;
+    LANGUAGE sql AS $fn$
+    SELECT materialize_position_projection('position_sky_prime_debt'::regclass, 'VEC-406: sky_prime_debt materializer');
+$fn$;
 
-    -- Current deal-type per position (latest NON-ZERO observation wins), consistent with VEC-402/403.
-    INSERT INTO position_classification (position_id, deal_type_code, direction, change_reason)
-    SELECT DISTINCT ON (r.position_id)
-           r.position_id, r.deal_type_code, d.direction, 'VEC-406: sky_prime_debt materializer'
-    FROM position_sky_prime_debt r
-    JOIN ref_deal_type d ON d.deal_type = r.deal_type_code
-    WHERE r.quantity > 0
-    ORDER BY r.position_id, r.block_number DESC, r.block_version DESC, r.processing_version DESC
-    ON CONFLICT (position_id) DO UPDATE
-        SET deal_type_code = EXCLUDED.deal_type_code,
-            direction      = EXCLUDED.direction,
-            change_reason  = EXCLUDED.change_reason;
-
-    RETURN n;
-END $fn$;
-
-COMMENT ON FUNCTION materialize_sky_prime_debt() IS '[Operational] VEC-406: upsert Sky prime debt into position_state and current deal-type into position_classification, from position_sky_prime_debt. Idempotent; run out of band. Returns position_state rows written.';
+COMMENT ON FUNCTION materialize_sky_prime_debt() IS '[Operational] VEC-406: materialize Sky prime debt into position_state + position_classification, via materialize_position_projection(position_sky_prime_debt). Idempotent; run out of band. Returns position_state rows written.';
 
 INSERT INTO migrations (filename) VALUES ('20260724_140000_materialize_sky_prime_debt.sql') ON CONFLICT (filename) DO NOTHING;
