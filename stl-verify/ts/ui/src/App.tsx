@@ -458,6 +458,17 @@ function App() {
   // waste requests.
   const primaryProxyAddress = selectedPrimeGroup?.primaryProxyAddress ?? null;
 
+  // The bucketed chart series below (debt/exposure/total-capital/activity) are
+  // fetched for the primary proxy only, not fanned out (see the
+  // usePrimeChartData call). For a prime with more than one proxy, that makes
+  // those series describe one chain while the headline figures they sit next
+  // to are prime-wide — real history for one chain would silently look like
+  // real history for the whole prime. Chart specs below suppress the series
+  // in that case rather than render a trend line that contradicts its own
+  // headline number.
+  const isMultiChainPrime =
+    (selectedPrimeGroup?.proxyAddresses.length ?? 0) > 1;
+
   useEffect(() => {
     if (!primaryProxyAddress) {
       setRiskCapital(null);
@@ -704,8 +715,19 @@ function App() {
   // window whose end drifts into the past, so anchoring its newest (past) bucket
   // at the current total would misstate every point. Suppress it for custom
   // ranges until a range-end anchor is available.
+  //
+  // It is also only valid for a single-proxy prime: the anchor
+  // (primeTotalAllocationUsd) is cross-chain, but activityBuckets' net flows
+  // are fetched for the primary proxy only (see usePrimeChartData below), so
+  // for a multi-chain prime every point except the newest would be silently
+  // over- or under-stated by whatever flowed through the other chains.
+  // Suppress it rather than reconstruct a history the inputs can't support.
   const allocationBalanceSeries = useMemo<ChartDatum[]>(() => {
-    if (rangePreset === 'custom' || activityBuckets.length === 0) {
+    if (
+      isMultiChainPrime ||
+      rangePreset === 'custom' ||
+      activityBuckets.length === 0
+    ) {
       return [];
     }
 
@@ -720,7 +742,12 @@ function App() {
       balance -= parseNumericValue(bucket.net_flow_usd) ?? 0;
     }
     return series;
-  }, [activityBuckets, primeTotalAllocationUsd, rangePreset]);
+  }, [
+    activityBuckets,
+    isMultiChainPrime,
+    primeTotalAllocationUsd,
+    rangePreset,
+  ]);
 
   const primeDebtSeries = useMemo<ChartDatum[]>(
     () =>
@@ -815,9 +842,16 @@ function App() {
       },
       {
         // Exposure trend from priced receipt-token balances over time; falls
-        // back to the flat current value when no history is available.
+        // back to the flat current value when no history is available, and
+        // also when the prime spans more than one proxy — exposureSeries is
+        // fetched for the primary proxy only, while the headline number next
+        // to it (prime_exposure_usd) is prime-wide, so a real per-chain
+        // series here would contradict its own headline figure.
         key: 'risk-capital',
-        ...seriesOrFallback(exposureSeries, exposureValue),
+        ...seriesOrFallback(
+          isMultiChainPrime ? [] : exposureSeries,
+          exposureValue,
+        ),
         stroke: 'var(--colors-chart-series-secondary, #14b8a6)',
         formatValue: formatCompactUsd,
       },
@@ -842,6 +876,7 @@ function App() {
     chartFromLabel,
     chartToLabel,
     exposureSeries,
+    isMultiChainPrime,
     primeDebtSeries,
     primeDebtSnapshot?.debt_wad,
     totalCapitalSeries,
@@ -1027,6 +1062,7 @@ function App() {
                 chartsErrorMessage={chartsErrorMessage}
                 riskCapitalErrorMessage={riskCapitalErrorMessage}
                 primeDebtErrorMessage={primeDebtErrorMessage}
+                isMultiChainPrime={isMultiChainPrime}
               />
             ) : (
               <ActivityFeed

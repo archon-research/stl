@@ -421,6 +421,16 @@ export function ActivityFeed({
   onRangeChange: onExternalRangeChange,
 }: ActivityFeedProps) {
   const isPageMode = mode === 'page';
+  // Drawer mode ANDs prime_id (selectedPrime, always the primary proxy) with
+  // the focused allocation's own chain_id server-side. For a non-mainnet
+  // allocation those two no longer describe the same proxy, so the request
+  // matches nothing and silently renders "No Activity Found" — indistinguishable
+  // from a position that genuinely has no history.
+  const isDrawerChainMismatch =
+    !isPageMode &&
+    selectedPrime !== null &&
+    selectedReceiptToken !== null &&
+    selectedReceiptToken.chain_id !== selectedPrime.chain_id;
   const txRequestControllersRef = useRef<Record<string, AbortController>>({});
 
   const [events, setEvents] = useState<AllocationActivityResponse>([]);
@@ -590,7 +600,7 @@ export function ActivityFeed({
     // and we'd issue an unfiltered request the UI never asked for).
     const missingScope = isPageMode
       ? !showAllPrimes && !selectedPrime
-      : !selectedPrime;
+      : !selectedPrime || isDrawerChainMismatch;
 
     if (!isEnabled || missingScope) {
       Object.values(txRequestControllersRef.current).forEach((controller) => {
@@ -641,7 +651,14 @@ export function ActivityFeed({
     void fetchActivity();
 
     return () => abortController.abort();
-  }, [isEnabled, isPageMode, requestFilters, selectedPrime, showAllPrimes]);
+  }, [
+    isDrawerChainMismatch,
+    isEnabled,
+    isPageMode,
+    requestFilters,
+    selectedPrime,
+    showAllPrimes,
+  ]);
 
   useEffect(() => {
     return () => {
@@ -797,6 +814,16 @@ export function ActivityFeed({
       <EmptyState
         title="No Prime Selected"
         description="Select a prime to view its activity feed."
+        stretch
+      />
+    );
+  }
+
+  if (isDrawerChainMismatch) {
+    return (
+      <EmptyState
+        title="Not Available"
+        description="Activity is not yet available for non-mainnet allocations."
         stretch
       />
     );

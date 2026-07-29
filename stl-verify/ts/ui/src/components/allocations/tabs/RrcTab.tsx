@@ -69,13 +69,23 @@ export function RrcTab({
   const receiptTokenAddress =
     selectedReceiptToken?.receipt_token_address ?? null;
   const primeAddress = selectedPrime?.address ?? null;
+  // The RRC endpoint scales a pool share to the exact (chain_id, prime
+  // address) pair, so it only resolves for the chain selectedPrime.address
+  // actually holds a position on — the prime's primary proxy's chain, today
+  // always mainnet. A non-mainnet allocation would 503 (share_data_missing)
+  // or hit an uncaught backend error rather than return a real breakdown.
+  const isChainMismatch =
+    chainId !== null &&
+    selectedPrime !== null &&
+    chainId !== selectedPrime.chain_id;
 
   useEffect(() => {
     if (
       !isEnabled ||
       chainId === null ||
       receiptTokenAddress === null ||
-      primeAddress === null
+      primeAddress === null ||
+      isChainMismatch
     ) {
       setRrc(null);
       setErrorMessage(null);
@@ -115,7 +125,14 @@ export function RrcTab({
       });
 
     return () => controller.abort();
-  }, [chainId, isEnabled, primeAddress, receiptTokenAddress, receiptTokenId]);
+  }, [
+    chainId,
+    isChainMismatch,
+    isEnabled,
+    primeAddress,
+    receiptTokenAddress,
+    receiptTokenId,
+  ]);
 
   const tone = getUsdTone(rrc?.max_rrc_usd);
   const toneStyles = getToneStyles(tone);
@@ -148,6 +165,12 @@ export function RrcTab({
     // hard-coding "no risk model" for every direct holding.
     return (
       <TabSelectionPrompt message="Required risk capital is only computed for receipt-token positions. Direct asset holdings have no risk model." />
+    );
+  }
+
+  if (isChainMismatch) {
+    return (
+      <TabSelectionPrompt message="Required risk capital is not yet available for non-mainnet allocations." />
     );
   }
 

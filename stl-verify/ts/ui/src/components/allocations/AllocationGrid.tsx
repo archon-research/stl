@@ -83,6 +83,7 @@ type AllocationGridProps = {
   chartsErrorMessage: string | null;
   riskCapitalErrorMessage: string | null;
   primeDebtErrorMessage: string | null;
+  isMultiChainPrime: boolean;
 };
 
 export type ChartDatum = {
@@ -833,6 +834,7 @@ export function AllocationGrid({
   chartsErrorMessage,
   riskCapitalErrorMessage,
   primeDebtErrorMessage,
+  isMultiChainPrime,
 }: AllocationGridProps) {
   const [localSearchValue, setLocalSearchValue] = useState(searchValue);
 
@@ -1157,13 +1159,19 @@ export function AllocationGrid({
                         ? `${summary.allocationCount}/${overallSummary.allocationCount} allocations`
                         : `${summary.allocationCount} allocations`}
                     </div>
-                    <MetricCardTrend
-                      chart={allocationActivityChart}
-                      isLoading={isChartsLoading}
-                      // chartsErrorMessage tracks the primary (prime-debt) series
-                      // only; supplementary cards degrade to their own fallback.
-                      errorMessage={null}
-                    />
+                    {isMultiChainPrime ? (
+                      <p className={chartEmptyMessageClassName}>
+                        Trend unavailable for multi-chain primes.
+                      </p>
+                    ) : (
+                      <MetricCardTrend
+                        chart={allocationActivityChart}
+                        isLoading={isChartsLoading}
+                        // chartsErrorMessage tracks the primary (prime-debt) series
+                        // only; supplementary cards degrade to their own fallback.
+                        errorMessage={null}
+                      />
+                    )}
                   </div>
                 }
               />
