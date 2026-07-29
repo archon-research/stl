@@ -74,64 +74,39 @@ legs AS (
     FROM series
     WHERE loan_qty > 0 OR prev_loan_qty > 0
     UNION ALL
-    -- collateral-token exposure
+    -- collateral-token exposure. Guard: when a market's collateral token IS its loan token
+    -- (coll_addr = loan_addr), the two legs share instrument_key mkt:token and therefore the same
+    -- position_id, so emitting both would produce a duplicate (position_id, block axis) and the
+    -- materializer's ON CONFLICT DO UPDATE would abort the whole run ("cannot affect row a second time").
+    -- Such a market is a single native instrument, so the loan leg alone represents it; the collateral
+    -- leg is folded out. 2 such markets exist on prod today (WBTC 795, USDC 885), both with collateral = 0
+    -- on every row, so this drops nothing live. If one ever carries non-zero collateral, netting
+    -- collateral into the loan-token exposure must be revisited (it cannot be a separate position under
+    -- native-only keying — a role classifier must never enter the instrument_key).
     SELECT chain_id, protocol_id,
            mkt || ':' || encode(coll_addr, 'hex'),
            holder_id,
            coll_qty, 'COLLATERAL',
            block_number, block_version, block_timestamp
     FROM series
-    WHERE coll_qty > 0 OR prev_coll_qty > 0
+    WHERE (coll_qty > 0 OR prev_coll_qty > 0)
+      AND coll_addr <> loan_addr
 )
 SELECT position_id(chain_id, protocol_id, instrument_key, holder_id) AS position_id,
        chain_id, protocol_id, instrument_key, holder_id, quantity, deal_type_code,
-       block_number, block_version, block_timestamp
+       block_number, block_version, 0 AS processing_version, block_timestamp
 FROM legs;
 
-COMMENT ON VIEW position_morpho_market IS '[Operational] VEC-402 projection: Morpho market positions as native per-instrument position rows (loan-token and collateral-token legs, composite market_id:token key). Source for materialize_morpho_market(); one row per (position_id, observation), including one closing zero-quantity row on a real transition-to-zero (VEC-409 closure).';
+COMMENT ON VIEW position_morpho_market IS '[Operational] VEC-402 projection: Morpho market positions as native per-instrument position rows (loan-token and collateral-token legs, composite market_id:token key). Emits the shared position_state column contract consumed by materialize_position_projection(); one row per (position_id, observation), including one closing zero-quantity row on a real transition-to-zero (VEC-409 closure).';
 
--- Populate the spine + current classification. Idempotent (ON CONFLICT). Returns rows written to
--- position_state. Run out of band after deploy; safe to re-run.
+-- Populate the spine + current classification via the shared materializer (defined with position_state,
+-- VEC-402 spine). The projection view above holds all the Morpho-market-specific logic; the identical
+-- upsert plumbing is not duplicated here. Idempotent; run out of band; returns position_state rows written.
 CREATE OR REPLACE FUNCTION materialize_morpho_market() RETURNS bigint
-    LANGUAGE plpgsql AS $fn$
-DECLARE n bigint;
-BEGIN
-    WITH ins AS (
-        INSERT INTO position_state
-            (position_id, chain_id, protocol_id, instrument_key, holder_id, quantity,
-             block_number, block_version, processing_version, block_timestamp)
-        SELECT position_id, chain_id, protocol_id, instrument_key, holder_id, quantity,
-               block_number, block_version, 0, block_timestamp
-        FROM position_morpho_market
-        ON CONFLICT (position_id, block_number, block_version, processing_version) DO UPDATE
-            SET quantity        = EXCLUDED.quantity,
-                block_timestamp = EXCLUDED.block_timestamp,
-                chain_id        = EXCLUDED.chain_id,
-                protocol_id     = EXCLUDED.protocol_id,
-                instrument_key  = EXCLUDED.instrument_key,
-                holder_id       = EXCLUDED.holder_id
-        RETURNING 1
-    )
-    SELECT count(*) INTO n FROM ins;
+    LANGUAGE sql AS $fn$
+    SELECT materialize_position_projection('position_morpho_market'::regclass, 'VEC-402: morpho_market materializer');
+$fn$;
 
-    -- Current deal-type per position (latest NON-ZERO observation wins): a closed position keeps the
-    -- deal_type of its last real position, not the ambiguous direction of the closing zero-row.
-    -- Direction frozen from ref_deal_type.
-    INSERT INTO position_classification (position_id, deal_type_code, direction, change_reason)
-    SELECT DISTINCT ON (r.position_id)
-           r.position_id, r.deal_type_code, d.direction, 'VEC-402: morpho_market materializer'
-    FROM position_morpho_market r
-    JOIN ref_deal_type d ON d.deal_type = r.deal_type_code
-    WHERE r.quantity > 0
-    ORDER BY r.position_id, r.block_number DESC, r.block_version DESC
-    ON CONFLICT (position_id) DO UPDATE
-        SET deal_type_code = EXCLUDED.deal_type_code,
-            direction      = EXCLUDED.direction,
-            change_reason  = EXCLUDED.change_reason;
-
-    RETURN n;
-END $fn$;
-
-COMMENT ON FUNCTION materialize_morpho_market() IS '[Operational] VEC-402: upsert Morpho market positions into position_state and current deal-type into position_classification, from position_morpho_market. Idempotent; run out of band. Returns position_state rows written.';
+COMMENT ON FUNCTION materialize_morpho_market() IS '[Operational] VEC-402: materialize Morpho market positions into position_state + position_classification, via materialize_position_projection(position_morpho_market). Idempotent; run out of band. Returns position_state rows written.';
 
 INSERT INTO migrations (filename) VALUES ('20260724_120100_materialize_morpho_market.sql') ON CONFLICT (filename) DO NOTHING;

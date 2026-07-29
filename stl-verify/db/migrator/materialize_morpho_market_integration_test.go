@@ -12,8 +12,9 @@ import (
 // Native instrument keys the seed produces (composite market_id ':' token_address, lowercase hex, no 0x):
 // market 1234, loan token dead, collateral token beef; holders aa/bb/cc/dd.
 const (
-	loanInstrument = "1234:dead" // market : loan-token
-	collInstrument = "1234:beef" // market : collateral-token
+	loanInstrument   = "1234:dead" // market : loan-token
+	collInstrument   = "1234:beef" // market : collateral-token
+	m2LoanInstrument = "5678:dead" // degenerate market M2 (loan == collateral == dead) : loan-token
 )
 
 // TestMaterializeMorphoMarket is the VEC-402 contract test: after migrations,
@@ -28,7 +29,10 @@ const (
 //   - many observations per position_id, one CURRENT classification per position_id;
 //   - closure (VEC-409): a leg observed going from a positive quantity to 0 emits ONE closing
 //     zero-row (so position_current shows it closed); a leg never entered emits nothing; leading and
-//     repeated zeros are dropped; the classification keeps the last NON-ZERO deal_type;
+//     repeated zeros are dropped; a re-open (positive after a close) survives; the classification keeps
+//     the last NON-ZERO deal_type;
+//   - the same-token guard: a market whose collateral token IS its loan token would key both legs on
+//     one position_id; the collateral leg is dropped so the run cannot hit a duplicate-PK abort;
 //   - 32-byte ids, no PK collisions, and idempotency.
 func TestMaterializeMorphoMarket(t *testing.T) {
 	ctx := context.Background()
@@ -44,7 +48,7 @@ func TestMaterializeMorphoMarket(t *testing.T) {
 DO $$
 DECLARE pid bigint; ltid bigint; ctid bigint;
         uaid bigint; ubid bigint; ucid bigint; udid bigint; mid bigint;
-        ueid bigint; ufid bigint; ugid bigint;
+        ueid bigint; ufid bigint; ugid bigint; uhid bigint; uiid bigint; mid2 bigint;
 BEGIN
   INSERT INTO chain (chain_id, name) VALUES (1, 'ethereum') ON CONFLICT (chain_id) DO NOTHING;
   INSERT INTO protocol (chain_id, address, name) VALUES (1, '\xff', 'morpho') RETURNING id INTO pid;
@@ -57,9 +61,17 @@ BEGIN
   INSERT INTO "user" (chain_id, address) VALUES (1, '\xee') RETURNING id INTO ueid;
   INSERT INTO "user" (chain_id, address) VALUES (1, '\xef') RETURNING id INTO ufid;
   INSERT INTO "user" (chain_id, address) VALUES (1, '\xf0') RETURNING id INTO ugid;
+  INSERT INTO "user" (chain_id, address) VALUES (1, '\xf1') RETURNING id INTO uiid;
+  INSERT INTO "user" (chain_id, address) VALUES (1, '\xf2') RETURNING id INTO uhid;
   INSERT INTO morpho_market
     (chain_id, protocol_id, market_id, loan_token_id, collateral_token_id, oracle_address, irm_address, lltv, created_at_block)
     VALUES (1, pid, '\x1234', ltid, ctid, '\x00', '\x01', 0.86, 1) RETURNING id INTO mid;
+  -- M2: a degenerate market whose collateral token IS its loan token (both dead). Both legs would key on
+  -- market:dead -> same position_id; the collateral-leg guard (coll_addr <> loan_addr) must drop the
+  -- collateral leg so the run does not hit a duplicate-PK ON CONFLICT abort.
+  INSERT INTO morpho_market
+    (chain_id, protocol_id, market_id, loan_token_id, collateral_token_id, oracle_address, irm_address, lltv, created_at_block)
+    VALUES (1, pid, '\x5678', ltid, ltid, '\x00', '\x01', 0.86, 1) RETURNING id INTO mid2;
 
   -- A: supplier, two observations (tests multiple observations per position_id -> one current class).
   INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, timestamp, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets)
@@ -90,6 +102,17 @@ BEGIN
            (ugid, mid, 200, 0, '2026-01-02T00:00:00Z', 0, 0, 5, 0, 0),
            (ugid, mid, 300, 0, '2026-01-03T00:00:00Z', 0, 0, 0, 0, 0),
            (ugid, mid, 400, 0, '2026-01-04T00:00:00Z', 0, 0, 0, 0, 0);
+  -- I: re-open — collateral 5 (open) -> 0 (close) -> 7 (re-open). All three survive: a positive after a
+  -- close satisfies quantity > 0 regardless of prev; latest is the re-open (7).
+  INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, timestamp, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets)
+    VALUES (uiid, mid, 100, 0, '2026-01-01T00:00:00Z', 0, 0, 5, 0, 0),
+           (uiid, mid, 200, 0, '2026-01-02T00:00:00Z', 0, 0, 0, 0, 0),
+           (uiid, mid, 300, 0, '2026-01-03T00:00:00Z', 0, 0, 7, 0, 0);
+  -- H: same-token market M2 (loan == collateral == dead). Supplies 100 AND posts 50 collateral. The loan
+  -- leg emits (market2:dead, qty 100); the collateral leg (same key) is dropped by the guard, so there is
+  -- no duplicate-PK abort and H has exactly one position.
+  INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, timestamp, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets)
+    VALUES (uhid, mid2, 100, 0, '2026-01-01T00:00:00Z', 0, 0, 50, 100, 0);
 END $$;`
 	if _, err := pool.Exec(ctx, seed); err != nil {
 		t.Fatalf("seed: %v", err)
@@ -102,9 +125,10 @@ END $$;`
 	}
 
 	// position_state row shape:
-	//   A loan (2 obs) + B loan (1) + B coll (1) + C loan (1) + D loan (1)  = 6
+	//   A loan (2 obs) + B loan (1) + B coll (1) + C loan (1) + D loan (1)          = 6
 	//   E coll (open + close = 2) + F loan (open + close = 2) + G coll (open + close = 2) = 6
-	// Total 12. Distinct positions: A, B-loan, B-coll, C, D, E-coll, F-loan, G-coll = 8.
+	//   I coll (open + close + reopen = 3) + H loan in M2 (1; collateral leg guarded out) = 4
+	// Total 16. Distinct positions: A, B-loan, B-coll, C, D, E-coll, F-loan, G-coll, I-coll, H-loan-M2 = 10.
 	var rows, distinctPositions, collisions, badLen int
 	if err := pool.QueryRow(ctx, `
 		SELECT count(*),
@@ -114,14 +138,14 @@ END $$;`
 		FROM position_state`).Scan(&rows, &distinctPositions, &collisions, &badLen); err != nil {
 		t.Fatalf("position_state summary: %v", err)
 	}
-	if rows != 12 {
-		t.Errorf("position_state rows = %d, want 12", rows)
+	if rows != 16 {
+		t.Errorf("position_state rows = %d, want 16", rows)
 	}
-	if written != 12 {
-		t.Errorf("materialize returned %d, want 12", written)
+	if written != 16 {
+		t.Errorf("materialize returned %d, want 16", written)
 	}
-	if distinctPositions != 8 {
-		t.Errorf("distinct position_id = %d, want 8", distinctPositions)
+	if distinctPositions != 10 {
+		t.Errorf("distinct position_id = %d, want 10", distinctPositions)
 	}
 	if collisions != 0 {
 		t.Errorf("PK collisions = %d, want 0", collisions)
@@ -146,6 +170,8 @@ END $$;`
 		{"E collateral closed: open + one closing zero-row", collInstrument, "ee", "0", 2},
 		{"F loan closed: borrow + one closing zero-row", loanInstrument, "ef", "0", 2},
 		{"G leading + repeated zeros dropped: open + one close", collInstrument, "f0", "0", 2},
+		{"I re-open: open + close + reopen, latest is the reopen", collInstrument, "f1", "7", 3},
+		{"H same-token market: loan leg only, collateral guarded out", m2LoanInstrument, "f2", "100", 1},
 	} {
 		c := c
 		t.Run(c.name, func(t *testing.T) {
@@ -169,14 +195,14 @@ END $$;`
 		})
 	}
 
-	// One current classification per position_id (8), each with the right deal_type and frozen direction.
+	// One current classification per position_id (10), each with the right deal_type and frozen direction.
 	// Closed positions (E/F/G) keep the deal_type of their last NON-ZERO observation, not the zero-row.
 	var classRows int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_classification`).Scan(&classRows); err != nil {
 		t.Fatalf("classification count: %v", err)
 	}
-	if classRows != 8 {
-		t.Errorf("position_classification rows = %d, want 8", classRows)
+	if classRows != 10 {
+		t.Errorf("position_classification rows = %d, want 10", classRows)
 	}
 	for _, c := range []struct {
 		name          string
@@ -191,6 +217,8 @@ END $$;`
 		{"C net-supply -> LOAN/LONG", loanInstrument, "cc", "LOAN", "LONG"},
 		{"E closed collateral keeps COLLATERAL/LONG", collInstrument, "ee", "COLLATERAL", "LONG"},
 		{"F closed loan keeps BORROW/SHORT (last non-zero)", loanInstrument, "ef", "BORROW", "SHORT"},
+		{"I re-opened collateral -> COLLATERAL/LONG", collInstrument, "f1", "COLLATERAL", "LONG"},
+		{"H same-token loan leg -> LOAN/LONG", m2LoanInstrument, "f2", "LOAN", "LONG"},
 	} {
 		c := c
 		t.Run("classify "+c.name, func(t *testing.T) {
@@ -218,7 +246,7 @@ END $$;`
 	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM position_state), (SELECT count(*) FROM position_classification)`).Scan(&rows2, &class2); err != nil {
 		t.Fatalf("re-count: %v", err)
 	}
-	if rows2 != 12 || class2 != 8 {
-		t.Errorf("after re-run: position_state=%d (want 12), position_classification=%d (want 8)", rows2, class2)
+	if rows2 != 16 || class2 != 10 {
+		t.Errorf("after re-run: position_state=%d (want 16), position_classification=%d (want 10)", rows2, class2)
 	}
 }
