@@ -27,9 +27,26 @@ _SPARK_MAINNET_ALM = "0x1601843c5e9bc251a3272907010afa41fa18347e"
 _SPARK_BASE_ALM = "0x2917956eff0b5eaf030abdb4ef4296df775009ca"
 _SPARK_AVALANCHE_ALM = "0xece6b0e8a54c2f44e066fbb9234e7157b15b7fec"
 
+_SPARK_VAULT = "0x691a6c29e9e96dd897718305427ad5d534db16ba"
 
-def _prime(address: str, *, name: str = "spark", chain_id: int = 1, chain: str | None = "mainnet") -> Prime:
-    return Prime(id=address, name=name, address=address, chain_id=chain_id, chain=chain, role="alm")
+
+def _prime(
+    address: str,
+    *,
+    name: str = "spark",
+    chain_id: int = 1,
+    chain: str | None = "mainnet",
+    prime_vault_address: str | None = _SPARK_VAULT,
+) -> Prime:
+    return Prime(
+        id=address,
+        name=name,
+        address=address,
+        chain_id=chain_id,
+        chain=chain,
+        role="alm",
+        prime_vault_address=prime_vault_address,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -97,6 +114,34 @@ def test_list_primes_keeps_the_existing_id_name_address_fields():
     assert row["address"] == _SPARK_MAINNET_ALM
 
 
+def test_list_primes_exposes_the_prime_vault_address_as_a_grouping_key():
+    from app.api.v1 import allocations
+
+    service = _make_service(
+        primes=[
+            _prime(_SPARK_MAINNET_ALM, chain_id=1, chain="mainnet"),
+            _prime(_SPARK_AVALANCHE_ALM, chain_id=43114, chain="avalanche-c"),
+        ]
+    )
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+
+    response = TestClient(app).get("/v1/primes")
+
+    assert {row["prime_vault_address"] for row in response.json()} == {_SPARK_VAULT}
+
+
+def test_list_primes_marks_the_redundant_id_field_deprecated():
+    schema = app.openapi()["components"]["schemas"]["PrimeResponse"]["properties"]
+
+    assert schema["id"]["deprecated"] is True
+
+
+def test_list_primes_does_not_deprecate_the_address_field():
+    schema = app.openapi()["components"]["schemas"]["PrimeResponse"]["properties"]
+
+    assert "deprecated" not in schema["address"]
+
+
 def test_list_primes_returns_200_with_prime_names():
     from app.api.v1 import allocations
 
@@ -113,8 +158,24 @@ def test_list_primes_returns_200_with_prime_names():
 
     assert response.status_code == 200
     assert response.json() == [
-        {"id": "0xaaa", "name": "grove", "address": "0xaaa", "chain_id": 1, "chain": None, "role": "alm"},
-        {"id": "0xbbb", "name": "spark", "address": "0xbbb", "chain_id": 1, "chain": None, "role": "alm"},
+        {
+            "id": "0xaaa",
+            "name": "grove",
+            "address": "0xaaa",
+            "chain_id": 1,
+            "chain": None,
+            "role": "alm",
+            "prime_vault_address": _SPARK_VAULT,
+        },
+        {
+            "id": "0xbbb",
+            "name": "spark",
+            "address": "0xbbb",
+            "chain_id": 1,
+            "chain": None,
+            "role": "alm",
+            "prime_vault_address": _SPARK_VAULT,
+        },
     ]
 
 

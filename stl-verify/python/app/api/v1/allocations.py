@@ -10,7 +10,11 @@ from pydantic import BaseModel, Field, ValidationError, model_validator
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
-from app.api._validators import EthAddressParam, OptionalEthAddressParam, OptionalTxHashParam
+from app.api._validators import (
+    OptionalEthAddressParam,
+    OptionalTxHashParam,
+    ProxyAddressPathParam,
+)
 from app.api.deps import get_engine
 from app.api.time_series import TimeSeriesWindow, apply_cache_control, build_window, get_time_series_query_params
 from app.config import get_settings
@@ -33,7 +37,16 @@ class PrimeResponse(BaseModel):
     which one you address it by.
     """
 
-    id: str = Field(description="Stable surrogate id for the prime.", examples=["prime-acme"])
+    id: str = Field(
+        deprecated=True,
+        description=(
+            "DEPRECATED — despite the name this is the ALM **proxy** address, not a prime "
+            "identifier, and it is byte-identical to `address` in the same row. Its value is "
+            "unchanged for backwards compatibility. Use `address` to address a proxy and "
+            "`prime_vault_address` (or `name`) to group rows by prime."
+        ),
+        examples=["0x1601843c5e9bc251a3272907010afa41fa18347e"],
+    )
     name: str = Field(description="Human-readable prime name.", examples=["Acme Prime"])
     address: str = Field(
         description="0x-prefixed Ethereum address controlled by the prime.",
@@ -42,12 +55,20 @@ class PrimeResponse(BaseModel):
     chain_id: int = Field(description="EVM chain id this proxy holds positions on.", examples=[43114])
     chain: str | None = Field(
         default=None,
-        description="Chain name from the axis-synome contract. `null` for a proxy absent from the contract.",
+        description="Internal chain name derived from `chain_id`. `null` for an untaught chain id.",
         examples=["avalanche-c"],
     )
     role: str = Field(
         description="Proxy role: `alm` (allocation venue) or `sub_proxy` (treasury wallet).",
         examples=["alm"],
+    )
+    prime_vault_address: str | None = Field(
+        default=None,
+        description=(
+            "The owning prime's on-chain vault address — identical across every proxy of a "
+            "prime, so consumers group rows by it. Prime-scoped: dedupe, never sum."
+        ),
+        examples=["0x691a6c29e9e96dd897718305427ad5d534db16ba"],
     )
 
 
@@ -421,8 +442,8 @@ def _to_decimal(value: str, *, field: str, prime_name: str) -> Decimal:
     description=(
         "Return every ALM proxy of every prime tracked by STL, one row per proxy per chain, with its "
         "surrogate id, name, on-chain address, chain, and proxy role. A prime allocates through one ALM "
-        "proxy per chain, so `name` repeats across rows and is not a key; use "
-        "`/v1/primes/{address}/risk-capital` for prime-level figures."
+        "proxy per chain, so `name` repeats across rows and is not a key; group rows by "
+        "`prime_vault_address` instead. Use `/v1/primes/{address}/risk-capital` for prime-level figures."
     ),
 )
 async def list_primes(service: AllocationService = Depends(_get_service)):
@@ -435,6 +456,7 @@ async def list_primes(service: AllocationService = Depends(_get_service)):
             chain_id=p.chain_id,
             chain=p.chain,
             role=p.role,
+            prime_vault_address=p.prime_vault_address,
         )
         for p in primes
     ]
@@ -570,7 +592,7 @@ async def list_protocols(service: AllocationService = Depends(_get_service)):
     ),
 )
 async def list_allocations(
-    prime_id: EthAddressParam,
+    prime_id: ProxyAddressPathParam,
     service: AllocationService = Depends(_get_service),
 ):
     """Return current allocations for ``prime_id``.

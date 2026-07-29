@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
-from app.api._validators import EthAddressParam
+from app.api._validators import ProxyAddressPathParam
 from app.api.deps import get_engine, get_model_registry
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.prime_risk_capital import UnpricedReason
@@ -93,7 +93,7 @@ async def _get_service(
     ),
 )
 async def get_prime_risk_capital(
-    prime_id: EthAddressParam,
+    prime_id: ProxyAddressPathParam,
     service: PrimeRiskCapitalService = Depends(_get_service),
 ) -> PrimeRiskCapitalResponse:
     prime_address = EthAddress(prime_id)

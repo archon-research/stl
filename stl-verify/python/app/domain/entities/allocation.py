@@ -131,8 +131,12 @@ class Prime:
 
     A prime has several of these — one ALM proxy per chain it allocates on — so
     ``name`` is not a key. ``chain_id`` comes from the position rows; ``chain`` is
-    the axis-synome chain string and is ``None`` for a proxy absent from the
-    contract.
+    derived from ``chain_id`` via ``chain_names.chain_name_for`` and is ``None``
+    for a chain the vocabulary has not been taught.
+
+    ``prime_vault_address`` is the owning prime's ``prime.vault_address`` — stable,
+    unique, and the same across every proxy of a prime, so consumers group rows by
+    it. ``None`` when the prime has no vault address on record.
     """
 
     id: str
@@ -141,6 +145,7 @@ class Prime:
     chain_id: int
     chain: str | None
     role: str
+    prime_vault_address: str | None = None
 
 
 @dataclass(frozen=True)

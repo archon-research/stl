@@ -14,6 +14,7 @@ from app.adapters.postgres._time_window import (
     required_time_window_clause,
     time_bucket_expr,
 )
+from app.domain.chain_names import chain_name_for
 from app.domain.entities.allocation import (
     AnchorageCustodyHolding,
     ChainMetadata,
@@ -186,7 +187,8 @@ class AllocationRepository:
                         SELECT DISTINCT ON (proxy_address)
                             p.name,
                             encode(proxy_address, 'hex') AS address,
-                            ap.chain_id
+                            ap.chain_id,
+                            encode(p.vault_address, 'hex') AS vault_address
                         FROM allocation_position ap
                         JOIN prime p ON p.id = ap.prime_id
                         ORDER BY proxy_address, block_number DESC
@@ -209,8 +211,9 @@ class AllocationRepository:
                             name=row.name,
                             address=address,
                             chain_id=row.chain_id,
-                            chain=entry.chain if entry is not None else None,
+                            chain=chain_name_for(row.chain_id),
                             role=kind.value,
+                            prime_vault_address="0x" + row.vault_address if row.vault_address else None,
                         )
                     )
                 return primes
