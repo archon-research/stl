@@ -980,11 +980,17 @@ docker-release-all-staging:
 #   TIGERDATA_HOST -- the pooler host from AWS Secrets Manager
 #                     (stl-$(TIGERDATA_ENV)-tigerdata-app .pooler_hostname)
 #   TIGERDATA_LOCAL_PORT -- 5436, chosen to avoid the local kind cluster's 5432
-# Override any of them on the command line; set TIGERDATA_ENV=sentinelprod for
-# prod. The app then connects at
+# Override any of them on the command line; ENV=sentinelprod (or
+# TIGERDATA_ENV=sentinelprod) switches environment. The app then connects at
 # postgres://<user>:<pass>@localhost:$(TIGERDATA_LOCAL_PORT)/<db>
 # (configured in python/.env).
-TIGERDATA_ENV ?= sentinelstaging
+#
+# Defaulting to $(ENV) matters because the db-* targets below take ENV
+# separately: they read secrets for their own ENV but reach whichever database
+# this tunnel forwards to. A staging tunnel plus ENV=sentinelprod makes
+# db-set-passwords write prod passwords into the staging database, and psql
+# reports success. Keep the two in agreement.
+TIGERDATA_ENV ?= $(or $(ENV),sentinelstaging)
 TIGERDATA_LOCAL_PORT ?= 5436
 tigerdata-tunnel:
 	@set -e; \
@@ -1003,7 +1009,8 @@ tigerdata-tunnel:
 
 # Run database migrations
 # Usage: make db-migrate DATABASE_URL="postgresql://user:pass@localhost:$(TIGERDATA_LOCAL_PORT)/dbname?sslmode=require"
-# Requires tunnel to be running first: make tigerdata-tunnel
+# Requires a tunnel to the same environment as DATABASE_URL:
+#   make tigerdata-tunnel ENV=<the environment DATABASE_URL belongs to>
 db-migrate:
 	@if [ -z "$(DATABASE_URL)" ]; then \
 		echo "Error: DATABASE_URL is required"; \
@@ -1020,7 +1027,9 @@ db-migrate:
 # Set database user passwords from Secrets Manager
 # Usage: make db-set-passwords DATABASE_URL="postgresql://tsdbadmin:pass@localhost:$(TIGERDATA_LOCAL_PORT)/tsdb?sslmode=require" ENV=sentineldev|sentinelstaging|sentinelprod
 # Requires:
-#   1. Tunnel running: make tigerdata-tunnel
+#   1. Tunnel running to this same ENV: make tigerdata-tunnel ENV=<env>
+#      (a tunnel to another environment writes these passwords into that
+#      database instead, and psql still reports success)
 #   2. Terraform applied (from infrastructure repo): make tf-apply ENV=sentineldev|sentinelstaging|sentinelprod (creates secrets with passwords)
 #   3. Migrations run: make db-migrate DATABASE_URL=... (creates users with placeholder passwords)
 db-set-passwords:
@@ -1040,7 +1049,7 @@ db-set-passwords:
 
 # Test database connection with application user
 # Usage: make db-test-app-user ENV=sentineldev|sentinelstaging|sentinelprod
-# Requires tunnel to be running first: make tigerdata-tunnel
+# Requires tunnel running to this same ENV: make tigerdata-tunnel ENV=<env>
 db-test-app-user:
 	@if [ -z "$(ENV)" ]; then \
 		echo "Error: ENV is required"; \
