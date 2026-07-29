@@ -61,6 +61,22 @@ class AllocationRiskCapital:
 
 
 @dataclass(frozen=True)
+class ChainRiskCapital:
+    """One ALM proxy's contribution to its prime's aggregated figures.
+
+    Carried so a consumer can audit the prime-level sum, and so a chain
+    contributing nothing is visibly present at zero rather than absent. ``chain``
+    is ``None`` for a chain id outside the known vocabulary.
+    """
+
+    proxy_address: str
+    chain: str | None
+    exposure_usd: Decimal
+    required_risk_capital_usd: Decimal
+    allocation_count: int
+
+
+@dataclass(frozen=True)
 class PrimeRiskCapital:
     """Self-computed capital metrics for a prime.
 
@@ -69,6 +85,14 @@ class PrimeRiskCapital:
     also includes bare/direct holdings). ``modeled_pct`` is the share of that
     exposure the model could price. ``encumbrance_ratio`` is ``None`` when
     Total Risk Capital is absent or zero.
+
+    Fields without a prefix are scoped to the **queried proxy**. Fields prefixed
+    ``prime_`` are scoped to the whole prime and are identical whichever of its
+    proxies was queried. ``total_risk_capital_usd`` is prime-wide despite carrying
+    no prefix (it predates the convention) and must never be summed.
+    ``encumbrance_ratio`` divides a proxy-scoped numerator by that prime-wide
+    denominator, so it is meaningless; it is retained unchanged for backwards
+    compatibility and superseded by ``prime_encumbrance_ratio``.
     """
 
     prime_id: str
@@ -80,3 +104,11 @@ class PrimeRiskCapital:
     modeled_exposure_usd: Decimal
     modeled_pct: Decimal | None
     per_allocation: list[AllocationRiskCapital]
+    prime_name: str | None = None
+    prime_exposure_usd: Decimal = Decimal("0")
+    prime_required_risk_capital_usd: Decimal = Decimal("0")
+    prime_modeled_exposure_usd: Decimal = Decimal("0")
+    prime_modeled_pct: Decimal | None = None
+    prime_encumbrance_ratio: Decimal | None = None
+    proxies: tuple[str, ...] = ()
+    per_chain: tuple[ChainRiskCapital, ...] = ()

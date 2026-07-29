@@ -12,14 +12,21 @@ The result is model-derived and partial by design (see
 """
 
 import asyncio
+from dataclasses import dataclass
 from decimal import ROUND_HALF_EVEN, Decimal
 
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.backed_breakdown import BackedBreakdown
-from app.domain.entities.prime_risk_capital import AllocationRiskCapital, PrimeRiskCapital, UnpricedReason
+from app.domain.entities.prime_risk_capital import (
+    AllocationRiskCapital,
+    ChainRiskCapital,
+    PrimeRiskCapital,
+    UnpricedReason,
+)
 from app.domain.entities.receipt_token import ReceiptTokenInfo
 from app.domain.entities.risk import RrcResult
 from app.domain.exceptions import AllocationUnpricedError
+from app.domain.prime_registry import alm_proxies_for_prime, prime_name_for
 from app.logging import get_logger
 from app.ports.allocation_repository import AllocationRepositoryPort
 from app.services.crypto_lending_risk_service import CryptoLendingRiskService
@@ -37,6 +44,13 @@ _RATIO = Decimal("0.0001")  # ratios/percentages to 4 dp
 # opposed to the ``AllocationUnpricedError.code`` values used when a model applies
 # but the allocation cannot be priced — a share-data or price-data gap).
 _UNPRICED_NO_MODEL: UnpricedReason = "no_model"
+
+
+def _ratio(numerator: Decimal, denominator: Decimal | None) -> Decimal | None:
+    """Return ``numerator / denominator`` to 4 dp, or ``None`` when undefined."""
+    if denominator is None or denominator <= 0:
+        return None
+    return (numerator / denominator).quantize(_RATIO, rounding=ROUND_HALF_EVEN)
 
 
 def _unpriced_allocation(position, exposure: Decimal, reason: UnpricedReason) -> AllocationRiskCapital:
@@ -112,6 +126,18 @@ def _assemble_allocations(positions, models, results) -> tuple[Decimal, Decimal,
     return exposure, modeled_exposure, required, per_allocation
 
 
+@dataclass(frozen=True)
+class _ProxyTotals:
+    """One proxy's contribution, before folding into the prime-level result."""
+
+    proxy_address: str
+    chain: str | None
+    exposure: Decimal
+    modeled_exposure: Decimal
+    required: Decimal
+    per_allocation: list[AllocationRiskCapital]
+
+
 class PrimeRiskCapitalService:
     def __init__(self, repository: AllocationRepositoryPort, registry: ModelRegistry) -> None:
         self._repository = repository
@@ -121,15 +147,30 @@ class PrimeRiskCapitalService:
         return await self._repository.prime_exists(prime_id)
 
     async def compute(self, prime_id: EthAddress) -> PrimeRiskCapital:
-        positions, total_rc = await asyncio.gather(
-            self._repository.list_receipt_token_positions(prime_id),
+        """Compute the queried proxy's figures plus the prime-wide aggregates.
+
+        The unprefixed fields stay scoped to ``prime_id`` so existing consumers
+        see unchanged numbers. The ``prime_*`` fields sum the numerator across
+        every ALM proxy of the prime so they match ``total_risk_capital_usd``,
+        which is prime-wide and read once.
+        """
+        prime_name, proxies = self._proxies_to_aggregate(prime_id)
+
+        per_proxy, total_rc = await asyncio.gather(
+            asyncio.gather(*(self._compute_for_proxy(proxy, chain) for proxy, chain in proxies)),
             self._repository.get_latest_total_capital_usd(prime_id),
         )
+
+        return self._assemble_result(prime_id, prime_name, per_proxy, total_rc)
+
+    async def _compute_for_proxy(self, proxy_address: EthAddress, chain: str | None) -> _ProxyTotals:
+        """Run the per-allocation model pipeline over one ALM proxy's positions."""
+        positions = await self._repository.list_receipt_token_positions(proxy_address)
 
         # A zero-balance position contributes no required risk capital, so skip
         # its model compute entirely (each compute is several DB round trips).
         models = [
-            self._default_model_for(position.receipt_token_id, prime_id)
+            self._default_model_for(position.receipt_token_id, proxy_address)
             if (position.amount_usd or Decimal("0")) > 0
             else None
             for position in positions
@@ -143,7 +184,7 @@ class PrimeRiskCapitalService:
         # Non-crypto-lending models (none today; SURAF/CORE pending) fall through
         # to the unchanged ``model.compute`` path.
         prefetched_shares, prefetched_infos, prefetched_breakdowns = await self._prefetch_crypto_lending_inputs(
-            positions, models, prime_id
+            positions, models, proxy_address
         )
 
         # Run the per-allocation model computes concurrently. Each compute is
@@ -155,7 +196,7 @@ class PrimeRiskCapitalService:
                     self._dispatch_compute(
                         model,
                         position.receipt_token_id,
-                        prime_id,
+                        proxy_address,
                         prefetched_shares,
                         prefetched_infos,
                         prefetched_breakdowns,
@@ -167,24 +208,80 @@ class PrimeRiskCapitalService:
         )
 
         exposure, modeled_exposure, required, per_allocation = _assemble_allocations(positions, models, results)
-
-        encumbrance_ratio = (
-            (required / total_rc).quantize(_RATIO, rounding=ROUND_HALF_EVEN)
-            if total_rc is not None and total_rc > 0
-            else None
+        return _ProxyTotals(
+            proxy_address=str(proxy_address),
+            chain=chain,
+            exposure=exposure,
+            modeled_exposure=modeled_exposure,
+            required=required,
+            per_allocation=per_allocation,
         )
-        modeled_pct = (modeled_exposure / exposure).quantize(_RATIO, rounding=ROUND_HALF_EVEN) if exposure > 0 else None
+
+    @staticmethod
+    def _proxies_to_aggregate(prime_id: EthAddress) -> tuple[str | None, tuple[tuple[EthAddress, str | None], ...]]:
+        """Resolve the queried proxy to its prime's full set of ALM proxies.
+
+        Returns ``(prime_name, ((proxy, chain), ...))`` with the queried proxy
+        first, so the caller can read its own totals off the head without a
+        second lookup. A proxy absent from the axis-synome contract has no
+        discoverable siblings and aggregates over itself alone.
+        """
+        prime_name = prime_name_for(prime_id)
+        if prime_name is None:
+            return None, ((prime_id, None),)
+
+        siblings = [
+            (EthAddress(entry.address), entry.chain)
+            for entry in alm_proxies_for_prime(prime_name)
+            if entry.address != str(prime_id).lower()
+        ]
+        queried_chain = next(
+            (entry.chain for entry in alm_proxies_for_prime(prime_name) if entry.address == str(prime_id).lower()),
+            None,
+        )
+        return prime_name, ((prime_id, queried_chain), *siblings)
+
+    @staticmethod
+    def _assemble_result(
+        prime_id: EthAddress,
+        prime_name: str | None,
+        per_proxy: list[_ProxyTotals],
+        total_rc: Decimal | None,
+    ) -> PrimeRiskCapital:
+        """Build the response from the queried proxy's totals plus the prime-wide sums."""
+        queried = per_proxy[0]
+
+        prime_exposure = sum((totals.exposure for totals in per_proxy), Decimal("0"))
+        prime_modeled = sum((totals.modeled_exposure for totals in per_proxy), Decimal("0"))
+        prime_required = sum((totals.required for totals in per_proxy), Decimal("0"))
 
         return PrimeRiskCapital(
             prime_id=str(prime_id),
             model=DEFAULT_RISK_MODEL,
-            exposure_usd=exposure,
+            exposure_usd=queried.exposure,
             total_risk_capital_usd=total_rc,
-            required_risk_capital_usd=required,
-            encumbrance_ratio=encumbrance_ratio,
-            modeled_exposure_usd=modeled_exposure,
-            modeled_pct=modeled_pct,
-            per_allocation=per_allocation,
+            required_risk_capital_usd=queried.required,
+            encumbrance_ratio=_ratio(queried.required, total_rc),
+            modeled_exposure_usd=queried.modeled_exposure,
+            modeled_pct=_ratio(queried.modeled_exposure, queried.exposure),
+            per_allocation=queried.per_allocation,
+            prime_name=prime_name,
+            prime_exposure_usd=prime_exposure,
+            prime_required_risk_capital_usd=prime_required,
+            prime_modeled_exposure_usd=prime_modeled,
+            prime_modeled_pct=_ratio(prime_modeled, prime_exposure),
+            prime_encumbrance_ratio=_ratio(prime_required, total_rc),
+            proxies=tuple(totals.proxy_address for totals in per_proxy),
+            per_chain=tuple(
+                ChainRiskCapital(
+                    proxy_address=totals.proxy_address,
+                    chain=totals.chain,
+                    exposure_usd=totals.exposure,
+                    required_risk_capital_usd=totals.required,
+                    allocation_count=len(totals.per_allocation),
+                )
+                for totals in per_proxy
+            ),
         )
 
     async def _prefetch_crypto_lending_inputs(

@@ -40,6 +40,18 @@ class AllocationRiskCapitalResponse(BaseModel):
     )
 
 
+class ChainRiskCapitalResponse(BaseModel):
+    """One ALM proxy's contribution to the prime's aggregated figures."""
+
+    proxy_address: str = Field(description="0x-prefixed ALM proxy address.")
+    chain: str | None = Field(
+        default=None, description="Internal chain name. `null` for an unrecognised chain id.", examples=["avalanche-c"]
+    )
+    exposure_usd: Decimal = Field(description="Priced receipt-token exposure held through this proxy (USD).")
+    required_risk_capital_usd: Decimal = Field(description="Required Risk Capital from this proxy's positions (USD).")
+    allocation_count: int = Field(description="Number of allocations this proxy contributed.")
+
+
 class PrimeRiskCapitalResponse(BaseModel):
     """Self-computed, model-derived capital metrics for a prime.
 
@@ -57,7 +69,13 @@ class PrimeRiskCapitalResponse(BaseModel):
     )
     required_risk_capital_usd: Decimal = Field(description="Σ per-allocation RRC from the default model (USD).")
     encumbrance_ratio: Decimal | None = Field(
-        default=None, description="Required / Total Risk Capital. `null` when total is absent or zero."
+        default=None,
+        deprecated=True,
+        description=(
+            "DEPRECATED — divides this proxy's Required Risk Capital by the whole prime's Total "
+            "Risk Capital, mixing scopes, so the figure is not meaningful for either. Its value "
+            "is unchanged for backwards compatibility. Use `prime_encumbrance_ratio`."
+        ),
     )
     modeled_exposure_usd: Decimal = Field(description="Exposure the default model could price (USD).")
     modeled_pct: Decimal | None = Field(
@@ -65,6 +83,40 @@ class PrimeRiskCapitalResponse(BaseModel):
     )
     per_allocation: list[AllocationRiskCapitalResponse] = Field(
         description="Per-allocation breakdown, newest-exposure first."
+    )
+    prime_name: str | None = Field(
+        default=None,
+        description="Prime this proxy belongs to. `null` for a proxy absent from the axis-synome contract.",
+        examples=["spark"],
+    )
+    prime_exposure_usd: Decimal = Field(
+        default=Decimal("0"),
+        description="Σ priced exposure across every ALM proxy of the prime (USD). Prime-scoped: dedupe, never sum.",
+    )
+    prime_required_risk_capital_usd: Decimal = Field(
+        default=Decimal("0"),
+        description="Σ Required Risk Capital across every ALM proxy of the prime (USD). Prime-scoped.",
+    )
+    prime_modeled_exposure_usd: Decimal = Field(
+        default=Decimal("0"), description="Σ exposure the default model could price, prime-wide (USD)."
+    )
+    prime_modeled_pct: Decimal | None = Field(
+        default=None, description="`prime_modeled_exposure_usd / prime_exposure_usd` (0-1)."
+    )
+    prime_encumbrance_ratio: Decimal | None = Field(
+        default=None,
+        description=(
+            "`prime_required_risk_capital_usd / total_risk_capital_usd` — the prime's true "
+            "encumbrance. Both sides are prime-scoped, so this is identical whichever of the "
+            "prime's proxies is queried. `null` when Total Risk Capital is absent or zero."
+        ),
+        examples=["0.9397"],
+    )
+    proxies: list[str] = Field(
+        default_factory=list, description="ALM proxy addresses the `prime_*` figures were aggregated over."
+    )
+    per_chain: list[ChainRiskCapitalResponse] = Field(
+        default_factory=list, description="Per-proxy breakdown of the aggregated numerator, so the sum is auditable."
     )
 
 
@@ -89,7 +141,13 @@ async def _get_service(
         "model can price contribute Required Risk Capital) and will not match Sky's dashboard. "
         "A backed allocation whose pool-share lookup can't be resolved (e.g. a warm-up window or an "
         "un-indexed receipt token) is reported as unpriced (`applied=false` with an `unpriced_reason`) "
-        "rather than failing the whole response. Returns `404` if the prime is unknown."
+        "rather than failing the whole response. Returns `404` if the prime is unknown.\n\n"
+        "Figures without a prefix are scoped to the proxy in the path and are unchanged from previous "
+        "releases. Figures prefixed `prime_` are scoped to the whole prime — summed across every ALM "
+        "proxy of the prime the given address belongs to — and are therefore identical whichever proxy "
+        "you query; use `per_chain` for the split. `total_risk_capital_usd` is prime-wide despite having "
+        "no prefix. `encumbrance_ratio` is deprecated because it mixes the two scopes; use "
+        "`prime_encumbrance_ratio`."
     ),
 )
 async def get_prime_risk_capital(
@@ -111,4 +169,12 @@ async def get_prime_risk_capital(
         modeled_exposure_usd=result.modeled_exposure_usd,
         modeled_pct=result.modeled_pct,
         per_allocation=[AllocationRiskCapitalResponse(**alloc.__dict__) for alloc in result.per_allocation],
+        prime_name=result.prime_name,
+        prime_exposure_usd=result.prime_exposure_usd,
+        prime_required_risk_capital_usd=result.prime_required_risk_capital_usd,
+        prime_modeled_exposure_usd=result.prime_modeled_exposure_usd,
+        prime_modeled_pct=result.prime_modeled_pct,
+        prime_encumbrance_ratio=result.prime_encumbrance_ratio,
+        proxies=list(result.proxies),
+        per_chain=[ChainRiskCapitalResponse(**row.__dict__) for row in result.per_chain],
     )

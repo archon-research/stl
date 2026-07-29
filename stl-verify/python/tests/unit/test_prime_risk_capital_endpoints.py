@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 from fastapi.testclient import TestClient
 
 from app.domain.entities.allocation import EthAddress
-from app.domain.entities.prime_risk_capital import AllocationRiskCapital, PrimeRiskCapital
+from app.domain.entities.prime_risk_capital import AllocationRiskCapital, ChainRiskCapital, PrimeRiskCapital
 from app.main import app
 from app.services.prime_risk_capital_service import PrimeRiskCapitalService
 
@@ -58,6 +58,22 @@ def _result() -> PrimeRiskCapital:
                 unpriced_reason="no_model",
             ),
         ],
+        prime_name="spark",
+        prime_exposure_usd=Decimal("1400"),
+        prime_required_risk_capital_usd=Decimal("42"),
+        prime_modeled_exposure_usd=Decimal("900"),
+        prime_modeled_pct=Decimal("0.6429"),
+        prime_encumbrance_ratio=Decimal("0.4200"),
+        proxies=(_VALID_ADDR,),
+        per_chain=(
+            ChainRiskCapital(
+                proxy_address=_VALID_ADDR,
+                chain="mainnet",
+                exposure_usd=Decimal("1000"),
+                required_risk_capital_usd=Decimal("30"),
+                allocation_count=2,
+            ),
+        ),
     )
 
 
@@ -168,3 +184,65 @@ def test_get_prime_risk_capital_returns_422_for_invalid_prime_id():
         service.prime_exists.assert_not_awaited()
     finally:
         app.dependency_overrides.pop(prime_risk_capital._get_service, None)
+
+
+def test_get_prime_risk_capital_exposes_the_prime_scoped_figures():
+    from app.api.v1 import prime_risk_capital
+
+    service = _make_service(result=_result())
+    app.dependency_overrides[prime_risk_capital._get_service] = _override_service(service)
+    try:
+        body = TestClient(app).get(f"/v1/primes/{_VALID_ADDR}/risk-capital").json()
+
+        assert body["prime_name"] == "spark"
+        assert body["prime_required_risk_capital_usd"] == "42"
+        assert body["prime_encumbrance_ratio"] == "0.4200"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_get_prime_risk_capital_still_returns_the_proxy_scoped_figures():
+    from app.api.v1 import prime_risk_capital
+
+    service = _make_service(result=_result())
+    app.dependency_overrides[prime_risk_capital._get_service] = _override_service(service)
+    try:
+        body = TestClient(app).get(f"/v1/primes/{_VALID_ADDR}/risk-capital").json()
+
+        assert body["required_risk_capital_usd"] == "30"
+        assert body["encumbrance_ratio"] == "0.3000"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_get_prime_risk_capital_reports_the_per_chain_breakdown():
+    from app.api.v1 import prime_risk_capital
+
+    service = _make_service(result=_result())
+    app.dependency_overrides[prime_risk_capital._get_service] = _override_service(service)
+    try:
+        body = TestClient(app).get(f"/v1/primes/{_VALID_ADDR}/risk-capital").json()
+
+        assert body["per_chain"] == [
+            {
+                "proxy_address": _VALID_ADDR,
+                "chain": "mainnet",
+                "exposure_usd": "1000",
+                "required_risk_capital_usd": "30",
+                "allocation_count": 2,
+            }
+        ]
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_encumbrance_ratio_is_marked_deprecated_in_the_schema():
+    properties = app.openapi()["components"]["schemas"]["PrimeRiskCapitalResponse"]["properties"]
+
+    assert properties["encumbrance_ratio"]["deprecated"] is True
+
+
+def test_prime_encumbrance_ratio_is_not_deprecated():
+    properties = app.openapi()["components"]["schemas"]["PrimeRiskCapitalResponse"]["properties"]
+
+    assert "deprecated" not in properties["prime_encumbrance_ratio"]
