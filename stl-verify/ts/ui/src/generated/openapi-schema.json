@@ -781,7 +781,7 @@
                 "type": "null"
               }
             ],
-            "description": "Internal chain name. `null` for an unrecognised chain id.",
+            "description": "Internal chain name. `null` for a proxy absent from the axis-synome contract.",
             "examples": [
               "avalanche-c"
             ],
@@ -1295,14 +1295,6 @@
             "title": "Per Allocation",
             "type": "array"
           },
-          "per_chain": {
-            "description": "Per-proxy breakdown of the aggregated numerator, so the sum is auditable.",
-            "items": {
-              "$ref": "#/components/schemas/ChainRiskCapitalResponse"
-            },
-            "title": "Per Chain",
-            "type": "array"
-          },
           "prime_encumbrance_ratio": {
             "anyOf": [
               {
@@ -1366,20 +1358,28 @@
             ],
             "title": "Prime Name"
           },
+          "prime_per_chain": {
+            "description": "Per-proxy breakdown of the aggregated numerator, so the sum is auditable.",
+            "items": {
+              "$ref": "#/components/schemas/ChainRiskCapitalResponse"
+            },
+            "title": "Prime Per Chain",
+            "type": "array"
+          },
+          "prime_proxies": {
+            "description": "ALM proxy addresses the `prime_*` figures were aggregated over.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Prime Proxies",
+            "type": "array"
+          },
           "prime_required_risk_capital_usd": {
             "default": "0",
             "description": "\u03a3 Required Risk Capital across every ALM proxy of the prime (USD). Prime-scoped.",
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Prime Required Risk Capital Usd",
             "type": "string"
-          },
-          "proxies": {
-            "description": "ALM proxy addresses the `prime_*` figures were aggregated over.",
-            "items": {
-              "type": "string"
-            },
-            "title": "Proxies",
-            "type": "array"
           },
           "required_risk_capital_usd": {
             "description": "\u03a3 per-allocation RRC from the default model (USD).",
@@ -3131,7 +3131,7 @@
     },
     "/v1/primes/{prime_id}/risk-capital": {
       "get": {
-        "description": "Compute the prime's capital metrics from on-chain data and the default RRC model (`gap_sweep`), with no dependency on the upstream Star feed. Returns exposure (priced receipt-token allocations), Total Risk Capital (on-chain treasury), Required Risk Capital (sum of per-allocation model RRC), encumbrance, a `modeled_pct` coverage figure, and a per-allocation breakdown. The figures are model-derived and partial (only allocations the model can price contribute Required Risk Capital) and will not match Sky's dashboard. A backed allocation whose pool-share lookup can't be resolved (e.g. a warm-up window or an un-indexed receipt token) is reported as unpriced (`applied=false` with an `unpriced_reason`) rather than failing the whole response. Returns `404` if the prime is unknown.\n\nFigures without a prefix are scoped to the proxy in the path and are unchanged from previous releases. Figures prefixed `prime_` are scoped to the whole prime \u2014 summed across every ALM proxy of the prime the given address belongs to \u2014 and are therefore identical whichever proxy you query; use `per_chain` for the split. `total_risk_capital_usd` is prime-wide despite having no prefix. `encumbrance_ratio` is deprecated because it mixes the two scopes; use `prime_encumbrance_ratio`.",
+        "description": "Compute the prime's capital metrics from on-chain data and the default RRC model (`gap_sweep`), with no dependency on the upstream Star feed. Returns exposure (priced receipt-token allocations), Total Risk Capital (on-chain treasury), Required Risk Capital (sum of per-allocation model RRC), encumbrance, a `modeled_pct` coverage figure, and a per-allocation breakdown. The figures are model-derived and partial (only allocations the model can price contribute Required Risk Capital) and will not match Sky's dashboard. A backed allocation whose pool-share lookup can't be resolved (e.g. a warm-up window or an un-indexed receipt token) is reported as unpriced (`applied=false` with an `unpriced_reason`) rather than failing the whole response. Returns `404` if the prime is unknown.\n\nFigures without a prefix are scoped to the proxy in the path and are unchanged from previous releases. Figures prefixed `prime_` are scoped to the whole prime \u2014 summed across every ALM proxy of the prime the given address belongs to \u2014 and are therefore identical whichever proxy you query; use `prime_per_chain` for the split. `total_risk_capital_usd` is prime-wide despite having no prefix. `encumbrance_ratio` is deprecated because it mixes the two scopes; use `prime_encumbrance_ratio`.",
         "operationId": "get_prime_risk_capital_v1_primes__prime_id__risk_capital_get",
         "parameters": [
           {

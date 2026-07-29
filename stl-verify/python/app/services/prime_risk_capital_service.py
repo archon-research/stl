@@ -271,8 +271,8 @@ class PrimeRiskCapitalService:
             prime_modeled_exposure_usd=prime_modeled,
             prime_modeled_pct=_ratio(prime_modeled, prime_exposure),
             prime_encumbrance_ratio=_ratio(prime_required, total_rc),
-            proxies=tuple(totals.proxy_address for totals in per_proxy),
-            per_chain=tuple(
+            prime_proxies=tuple(totals.proxy_address for totals in per_proxy),
+            prime_per_chain=tuple(
                 ChainRiskCapital(
                     proxy_address=totals.proxy_address,
                     chain=totals.chain,

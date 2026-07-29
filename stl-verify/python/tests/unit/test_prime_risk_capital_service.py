@@ -65,6 +65,7 @@ def _service(repo: AllocationRepositoryPort, registry: _FakeRegistry) -> PrimeRi
 
 _SPARK_MAINNET_ALM = "0x1601843c5e9bc251a3272907010afa41fa18347e"
 _SPARK_AVALANCHE_ALM = "0xece6b0e8a54c2f44e066fbb9234e7157b15b7fec"
+_SPARK_MAINNET_ALM_MIXED_CASE = "0x1601843C5E9BC251A3272907010AFA41FA18347E"
 
 
 def _repo_by_proxy(positions_by_proxy: dict[str, list], total_rc: Decimal | None):
@@ -199,7 +200,7 @@ async def test_compute_reports_a_per_chain_breakdown_of_the_aggregation():
 
     result = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
 
-    by_chain = {row.chain: row.required_risk_capital_usd for row in result.per_chain}
+    by_chain = {row.chain: row.required_risk_capital_usd for row in result.prime_per_chain}
     assert by_chain["mainnet"] == Decimal("40")
     assert by_chain["avalanche-c"] == Decimal("2")
 
@@ -219,7 +220,7 @@ async def test_compute_lists_every_proxy_it_aggregated_over():
 
     result = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
 
-    lowered = {address.lower() for address in result.proxies}
+    lowered = {address.lower() for address in result.prime_proxies}
     assert _SPARK_MAINNET_ALM in lowered
     assert _SPARK_AVALANCHE_ALM in lowered
 
@@ -237,7 +238,18 @@ async def test_compute_falls_back_to_the_queried_proxy_when_it_is_not_in_the_con
 
     assert result.prime_required_risk_capital_usd == Decimal("40")
     assert result.prime_name is None
-    assert result.proxies == (unknown,)
+    assert result.prime_proxies == (unknown,)
+
+
+@pytest.mark.asyncio
+async def test_compute_resolves_siblings_for_a_mixed_case_queried_address():
+    assert _SPARK_MAINNET_ALM_MIXED_CASE.lower() == _SPARK_MAINNET_ALM
+    service = _service(_two_chain_spark_repo(), _two_asset_registry())
+
+    result = await service.compute(EthAddress(_SPARK_MAINNET_ALM_MIXED_CASE))
+
+    assert result.prime_name == "spark"
+    assert result.prime_required_risk_capital_usd == Decimal("42")
 
 
 @pytest.mark.asyncio

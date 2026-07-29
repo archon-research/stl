@@ -45,7 +45,9 @@ class ChainRiskCapitalResponse(BaseModel):
 
     proxy_address: str = Field(description="0x-prefixed ALM proxy address.")
     chain: str | None = Field(
-        default=None, description="Internal chain name. `null` for an unrecognised chain id.", examples=["avalanche-c"]
+        default=None,
+        description="Internal chain name. `null` for a proxy absent from the axis-synome contract.",
+        examples=["avalanche-c"],
     )
     exposure_usd: Decimal = Field(description="Priced receipt-token exposure held through this proxy (USD).")
     required_risk_capital_usd: Decimal = Field(description="Required Risk Capital from this proxy's positions (USD).")
@@ -112,10 +114,10 @@ class PrimeRiskCapitalResponse(BaseModel):
         ),
         examples=["0.9397"],
     )
-    proxies: list[str] = Field(
+    prime_proxies: list[str] = Field(
         default_factory=list, description="ALM proxy addresses the `prime_*` figures were aggregated over."
     )
-    per_chain: list[ChainRiskCapitalResponse] = Field(
+    prime_per_chain: list[ChainRiskCapitalResponse] = Field(
         default_factory=list, description="Per-proxy breakdown of the aggregated numerator, so the sum is auditable."
     )
 
@@ -145,7 +147,7 @@ async def _get_service(
         "Figures without a prefix are scoped to the proxy in the path and are unchanged from previous "
         "releases. Figures prefixed `prime_` are scoped to the whole prime — summed across every ALM "
         "proxy of the prime the given address belongs to — and are therefore identical whichever proxy "
-        "you query; use `per_chain` for the split. `total_risk_capital_usd` is prime-wide despite having "
+        "you query; use `prime_per_chain` for the split. `total_risk_capital_usd` is prime-wide despite having "
         "no prefix. `encumbrance_ratio` is deprecated because it mixes the two scopes; use "
         "`prime_encumbrance_ratio`."
     ),
@@ -175,6 +177,6 @@ async def get_prime_risk_capital(
         prime_modeled_exposure_usd=result.prime_modeled_exposure_usd,
         prime_modeled_pct=result.prime_modeled_pct,
         prime_encumbrance_ratio=result.prime_encumbrance_ratio,
-        proxies=list(result.proxies),
-        per_chain=[ChainRiskCapitalResponse(**row.__dict__) for row in result.per_chain],
+        prime_proxies=list(result.prime_proxies),
+        prime_per_chain=[ChainRiskCapitalResponse(**row.__dict__) for row in result.prime_per_chain],
     )

@@ -66,7 +66,8 @@ class ChainRiskCapital:
 
     Carried so a consumer can audit the prime-level sum, and so a chain
     contributing nothing is visibly present at zero rather than absent. ``chain``
-    is ``None`` for a chain id outside the known vocabulary.
+    is ``None`` for a proxy absent from the axis-synome contract, which has no
+    discoverable chain.
     """
 
     proxy_address: str
@@ -110,5 +111,5 @@ class PrimeRiskCapital:
     prime_modeled_exposure_usd: Decimal = Decimal("0")
     prime_modeled_pct: Decimal | None = None
     prime_encumbrance_ratio: Decimal | None = None
-    proxies: tuple[str, ...] = ()
-    per_chain: tuple[ChainRiskCapital, ...] = ()
+    prime_proxies: tuple[str, ...] = ()
+    prime_per_chain: tuple[ChainRiskCapital, ...] = ()

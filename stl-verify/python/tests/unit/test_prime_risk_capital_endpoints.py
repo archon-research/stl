@@ -64,8 +64,8 @@ def _result() -> PrimeRiskCapital:
         prime_modeled_exposure_usd=Decimal("900"),
         prime_modeled_pct=Decimal("0.6429"),
         prime_encumbrance_ratio=Decimal("0.4200"),
-        proxies=(_VALID_ADDR,),
-        per_chain=(
+        prime_proxies=(_VALID_ADDR,),
+        prime_per_chain=(
             ChainRiskCapital(
                 proxy_address=_VALID_ADDR,
                 chain="mainnet",
@@ -223,7 +223,7 @@ def test_get_prime_risk_capital_reports_the_per_chain_breakdown():
     try:
         body = TestClient(app).get(f"/v1/primes/{_VALID_ADDR}/risk-capital").json()
 
-        assert body["per_chain"] == [
+        assert body["prime_per_chain"] == [
             {
                 "proxy_address": _VALID_ADDR,
                 "chain": "mainnet",
