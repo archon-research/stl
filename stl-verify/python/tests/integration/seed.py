@@ -391,8 +391,8 @@ async def insert_allocation_position(
 # migration-seeded primes (spark/grove/obex) in ``/v1/primes``.
 # ---------------------------------------------------------------------------
 
-# The proxy_kind classifier marks an address as ALM unless it matches a known
-# sub-proxy.  Any address that is NOT the Spark sub-proxy will do.
+# app.domain.prime_registry.classify_proxy marks an address as ALM unless it
+# matches a known sub-proxy.  Any address that is NOT the Spark sub-proxy will do.
 GHOST_CLOSED_PROXY_HEX = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"  # all positions closed to zero
 GHOST_SWEEP_PROXY_HEX = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"  # zero sweep rows newer than the non-zero row
 GHOST_OPEN_PROXY_HEX = "cccccccccccccccccccccccccccccccccccccccc"  # open position with older zero rows

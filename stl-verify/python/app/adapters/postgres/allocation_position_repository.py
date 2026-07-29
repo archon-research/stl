@@ -29,7 +29,7 @@ from app.domain.entities.time_series_bucket import (
     ExposureBucket,
     TotalCapitalBucket,
 )
-from app.domain.proxy_kind import ProxyKind, classify_proxy, subproxy_addresses
+from app.domain.prime_registry import ProxyKind, classify_proxy, subproxy_addresses
 
 # USDS (mainnet). A prime's treasury USDS held in its SubProxy wallet is its
 # total capital; this isolates that token from any other SubProxy holding.
