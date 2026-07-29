@@ -5,7 +5,7 @@
 include lint.mk
 
 .PHONY: all test test-race test-integration lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-oracle-price-worker-avax run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-allocation-tracker run-allocation-tracker-avax help ci ci-checks install-hooks format \
-	dev-up dev-up-rebuild dev-up-workers dev-preflight dev-env dev-db dev-down dev-suspend dev-resume dev-wipe dev-ips generate-er \
+	dev-up dev-up-rebuild dev-up-workers dev-up-or-resume dev-preflight dev-env dev-db dev-down dev-suspend dev-resume dev-wipe dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
 		_docker-release-image _docker-release-go-service \
 		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-fluid-vault-indexer-internal _docker-release-dex-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal _docker-release-psm3-indexer-internal _docker-release-cex-orderbook-indexer-internal _docker-release-migrate-internal _docker-release-python-api-internal _docker-release-transform-bootstrap-internal _docker-release-cronjob-%-internal \
@@ -694,7 +694,7 @@ dev-resume:
 # Bring the cluster up whichever way is needed: resume it if its nodes already
 # exist (suspended), otherwise create it from scratch. Idempotent entry point
 # for local-dev tooling that just wants "cluster running".
-dev-up-or-resume: ## Resume the kind cluster if it exists, else create it (dev-up)
+dev-up-or-resume:
 	@if [ -n "$$(docker ps -a --filter "label=io.x-k8s.kind.cluster=$(KIND_CLUSTER)" -q)" ]; then \
 	  $(MAKE) dev-resume; \
 	else \
@@ -985,7 +985,7 @@ docker-release-all-staging:
 # (configured in python/.env).
 TIGERDATA_ENV ?= sentinelstaging
 LOCAL_PORT ?= 5436
-tigerdata-tunnel: ## Tunnel to a deployed env's TigerData for local dev (auto-derives bastion + pooler host)
+tigerdata-tunnel:
 	@set -e; \
 	bastion="$(BASTION_IP)"; \
 	[ -n "$$bastion" ] || bastion="$$(tailscale status 2>/dev/null | grep '$(TIGERDATA_ENV)-bastion' | grep -v offline | awk '{print $$1}' | head -1)"; \
