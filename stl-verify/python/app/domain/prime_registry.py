@@ -8,8 +8,7 @@ name alone is not a proxy identity — consumers need both directions.
 The contract (``axis_synome.export_entities``) already carries
 ``star -> chain -> [{address, role}]``, which is the same data the Go allocation
 tracker configures itself from (``internal/services/allocation_tracker/config.go``).
-Reading it here keeps the two languages on one source of truth; the previous
-hand-maintained address frozenset had to be kept in sync by review.
+Reading it here keeps the two languages on one source of truth.
 
 Entries are keyed by address alone. Every address in the contract is distinct
 (``_index_proxies`` enforces it), which lets callers resolve a proxy without
@@ -101,8 +100,10 @@ def proxy_entry(address: str) -> ProxyEntry | None:
 def classify_proxy(address: str) -> ProxyKind:
     """Return the :class:`ProxyKind` for a 0x-prefixed proxy address.
 
-    An address absent from the contract is treated as ALM, matching the
-    historical behaviour where every tracked proxy was an ALM proxy.
+    An address absent from the contract is treated as ALM: SubProxy is the
+    exception that must be positively identified, so an address the contract
+    hasn't told us about yet defaults to the common case rather than being
+    silently excluded from the ALM set.
     """
     entry = proxy_entry(address)
     return entry.kind if entry is not None else ProxyKind.ALM

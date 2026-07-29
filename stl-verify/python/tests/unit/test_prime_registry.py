@@ -79,12 +79,17 @@ def test_prime_name_for_returns_none_for_unknown_address():
     assert prime_name_for(_UNKNOWN) is None
 
 
-def test_alm_proxies_for_prime_includes_every_chain_and_excludes_subproxies():
+def test_alm_proxies_for_prime_includes_the_proxy_on_every_chain():
     addresses = {entry.address for entry in alm_proxies_for_prime("spark")}
 
     assert _SPARK_MAINNET_ALM in addresses
     assert _SPARK_BASE_ALM in addresses
     assert _SPARK_AVALANCHE_ALM in addresses
+
+
+def test_alm_proxies_for_prime_excludes_subproxy_treasury_wallets():
+    addresses = {entry.address for entry in alm_proxies_for_prime("spark")}
+
     assert _SPARK_SUB_PROXY not in addresses
 
 
