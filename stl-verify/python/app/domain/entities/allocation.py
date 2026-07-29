@@ -127,9 +127,20 @@ class AnchorageCustodyHolding:
 
 @dataclass(frozen=True)
 class Prime:
+    """One of a prime's proxy wallets, as surfaced by ``/v1/primes``.
+
+    A prime has several of these — one ALM proxy per chain it allocates on — so
+    ``name`` is not a key. ``chain_id`` comes from the position rows; ``chain`` is
+    the axis-synome chain string and is ``None`` for a proxy absent from the
+    contract.
+    """
+
     id: str
     name: str
     address: str
+    chain_id: int
+    chain: str | None
+    role: str
 
 
 @dataclass(frozen=True)

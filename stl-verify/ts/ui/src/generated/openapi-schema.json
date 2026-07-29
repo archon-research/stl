@@ -1103,7 +1103,7 @@
         "type": "object"
       },
       "PrimeResponse": {
-        "description": "A prime (capital allocator) tracked by STL.",
+        "description": "One of a prime's proxy wallets tracked by STL.\n\nA prime allocates through one ALM proxy per chain, so `name` repeats across\nrows and is not a key. Use `/v1/primes/{address}/risk-capital` for\nprime-level figures \u2014 it aggregates across a prime's proxies regardless of\nwhich one you address it by.",
         "properties": {
           "address": {
             "description": "0x-prefixed Ethereum address controlled by the prime.",
@@ -1112,6 +1112,29 @@
             ],
             "title": "Address",
             "type": "string"
+          },
+          "chain": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Chain name from the axis-synome contract. `null` for a proxy absent from the contract.",
+            "examples": [
+              "avalanche-c"
+            ],
+            "title": "Chain"
+          },
+          "chain_id": {
+            "description": "EVM chain id this proxy holds positions on.",
+            "examples": [
+              43114
+            ],
+            "title": "Chain Id",
+            "type": "integer"
           },
           "id": {
             "description": "Stable surrogate id for the prime.",
@@ -1128,12 +1151,22 @@
             ],
             "title": "Name",
             "type": "string"
+          },
+          "role": {
+            "description": "Proxy role: `alm` (allocation venue) or `sub_proxy` (treasury wallet).",
+            "examples": [
+              "alm"
+            ],
+            "title": "Role",
+            "type": "string"
           }
         },
         "required": [
           "id",
           "name",
-          "address"
+          "address",
+          "chain_id",
+          "role"
         ],
         "title": "PrimeResponse",
         "type": "object"

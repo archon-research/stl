@@ -29,7 +29,7 @@ from app.domain.entities.time_series_bucket import (
     ExposureBucket,
     TotalCapitalBucket,
 )
-from app.domain.prime_registry import ProxyKind, classify_proxy, subproxy_addresses
+from app.domain.prime_registry import ProxyKind, proxy_entry, subproxy_addresses
 
 # USDS (mainnet). A prime's treasury USDS held in its SubProxy wallet is its
 # total capital; this isolates that token from any other SubProxy holding.
@@ -185,7 +185,8 @@ class AllocationRepository:
                         """
                         SELECT DISTINCT ON (proxy_address)
                             p.name,
-                            encode(proxy_address, 'hex') AS address
+                            encode(proxy_address, 'hex') AS address,
+                            ap.chain_id
                         FROM allocation_position ap
                         JOIN prime p ON p.id = ap.prime_id
                         ORDER BY proxy_address, block_number DESC
@@ -195,11 +196,23 @@ class AllocationRepository:
                 primes: list[Prime] = []
                 for row in result:
                     address = "0x" + row.address
-                    # SubProxy wallets share a prime_id with the ALM proxy; surfacing
-                    # them here would duplicate each prime in /v1/primes.
-                    if classify_proxy(address) is not ProxyKind.ALM:
+                    entry = proxy_entry(address)
+                    kind = entry.kind if entry is not None else ProxyKind.ALM
+                    # SubProxy wallets share a prime_id with the ALM proxy and hold
+                    # the treasury rather than allocations; surfacing them here would
+                    # duplicate each prime in /v1/primes.
+                    if kind is not ProxyKind.ALM:
                         continue
-                    primes.append(Prime(id=address, name=row.name, address=address))
+                    primes.append(
+                        Prime(
+                            id=address,
+                            name=row.name,
+                            address=address,
+                            chain_id=row.chain_id,
+                            chain=entry.chain if entry is not None else None,
+                            role=kind.value,
+                        )
+                    )
                 return primes
         except asyncio.CancelledError:
             raise

@@ -25,13 +25,29 @@ router = APIRouter()
 
 
 class PrimeResponse(BaseModel):
-    """A prime (capital allocator) tracked by STL."""
+    """One of a prime's proxy wallets tracked by STL.
+
+    A prime allocates through one ALM proxy per chain, so `name` repeats across
+    rows and is not a key. Use `/v1/primes/{address}/risk-capital` for
+    prime-level figures — it aggregates across a prime's proxies regardless of
+    which one you address it by.
+    """
 
     id: str = Field(description="Stable surrogate id for the prime.", examples=["prime-acme"])
     name: str = Field(description="Human-readable prime name.", examples=["Acme Prime"])
     address: str = Field(
         description="0x-prefixed Ethereum address controlled by the prime.",
         examples=["0x1234567890abcdef1234567890abcdef12345678"],
+    )
+    chain_id: int = Field(description="EVM chain id this proxy holds positions on.", examples=[43114])
+    chain: str | None = Field(
+        default=None,
+        description="Chain name from the axis-synome contract. `null` for a proxy absent from the contract.",
+        examples=["avalanche-c"],
+    )
+    role: str = Field(
+        description="Proxy role: `alm` (allocation venue) or `sub_proxy` (treasury wallet).",
+        examples=["alm"],
     )
 
 
@@ -406,7 +422,17 @@ def _to_decimal(value: str, *, field: str, prime_name: str) -> Decimal:
 )
 async def list_primes(service: AllocationService = Depends(_get_service)):
     primes = await service.list_primes()
-    return [PrimeResponse(id=p.id, name=p.name, address=p.address) for p in primes]
+    return [
+        PrimeResponse(
+            id=p.id,
+            name=p.name,
+            address=p.address,
+            chain_id=p.chain_id,
+            chain=p.chain,
+            role=p.role,
+        )
+        for p in primes
+    ]
 
 
 @router.get(

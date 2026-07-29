@@ -23,6 +23,14 @@ from tests.factories import (
 
 _VALID_ADDR = "0x" + "ab" * 20
 
+_SPARK_MAINNET_ALM = "0x1601843c5e9bc251a3272907010afa41fa18347e"
+_SPARK_BASE_ALM = "0x2917956eff0b5eaf030abdb4ef4296df775009ca"
+_SPARK_AVALANCHE_ALM = "0xece6b0e8a54c2f44e066fbb9234e7157b15b7fec"
+
+
+def _prime(address: str, *, name: str = "spark", chain_id: int = 1, chain: str | None = "mainnet") -> Prime:
+    return Prime(id=address, name=name, address=address, chain_id=chain_id, chain=chain, role="alm")
+
 
 @pytest.fixture(autouse=True)
 def _clear_dependency_overrides():
@@ -55,13 +63,47 @@ def _override_service(service: AsyncMock):
     return _dep
 
 
+def test_list_primes_labels_each_proxy_with_chain_and_role():
+    from app.api.v1 import allocations
+
+    service = _make_service(
+        primes=[
+            _prime(_SPARK_MAINNET_ALM, chain_id=1, chain="mainnet"),
+            _prime(_SPARK_AVALANCHE_ALM, chain_id=43114, chain="avalanche-c"),
+        ]
+    )
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+
+    response = TestClient(app).get("/v1/primes")
+
+    assert response.status_code == 200
+    assert [(row["name"], row["chain_id"], row["chain"], row["role"]) for row in response.json()] == [
+        ("spark", 1, "mainnet", "alm"),
+        ("spark", 43114, "avalanche-c", "alm"),
+    ]
+
+
+def test_list_primes_keeps_the_existing_id_name_address_fields():
+    from app.api.v1 import allocations
+
+    service = _make_service(primes=[_prime(_SPARK_MAINNET_ALM)])
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+
+    response = TestClient(app).get("/v1/primes")
+
+    row = response.json()[0]
+    assert row["id"] == _SPARK_MAINNET_ALM
+    assert row["name"] == "spark"
+    assert row["address"] == _SPARK_MAINNET_ALM
+
+
 def test_list_primes_returns_200_with_prime_names():
     from app.api.v1 import allocations
 
     service = _make_service(
         primes=[
-            Prime(id="0xaaa", name="grove", address="0xaaa"),
-            Prime(id="0xbbb", name="spark", address="0xbbb"),
+            _prime("0xaaa", name="grove", chain=None),
+            _prime("0xbbb", name="spark", chain=None),
         ]
     )
     app.dependency_overrides[allocations._get_service] = _override_service(service)
@@ -71,8 +113,8 @@ def test_list_primes_returns_200_with_prime_names():
 
     assert response.status_code == 200
     assert response.json() == [
-        {"id": "0xaaa", "name": "grove", "address": "0xaaa"},
-        {"id": "0xbbb", "name": "spark", "address": "0xbbb"},
+        {"id": "0xaaa", "name": "grove", "address": "0xaaa", "chain_id": 1, "chain": None, "role": "alm"},
+        {"id": "0xbbb", "name": "spark", "address": "0xbbb", "chain_id": 1, "chain": None, "role": "alm"},
     ]
 
 
@@ -824,8 +866,8 @@ def test_list_capital_metrics_maps_star_risk_capital_data(monkeypatch):
 
     service = _make_service(
         primes=[
-            Prime(id=grove_addr, name="grove", address=grove_addr),
-            Prime(id=spark_addr, name="spark", address=spark_addr),
+            _prime(grove_addr, name="grove"),
+            _prime(spark_addr, name="spark"),
         ]
     )
     app.dependency_overrides[allocations._get_service] = _override_service(service)
@@ -886,8 +928,8 @@ def test_list_capital_metrics_returns_defaults_for_primes_with_no_star_row(monke
     grove_addr = _VALID_ADDR
     service = _make_service(
         primes=[
-            Prime(id=grove_addr, name="grove", address=grove_addr),
-            Prime(id="0x" + "ee" * 20, name="unknown-prime", address="0x" + "ee" * 20),
+            _prime(grove_addr, name="grove"),
+            _prime("0x" + "ee" * 20, name="unknown-prime"),
         ]
     )
     app.dependency_overrides[allocations._get_service] = _override_service(service)
@@ -936,7 +978,7 @@ def test_list_capital_metrics_returns_502_for_invalid_numeric_payload(monkeypatc
     from app.api.v1 import allocations
 
     grove_addr = _VALID_ADDR
-    service = _make_service(primes=[Prime(id=grove_addr, name="grove", address=grove_addr)])
+    service = _make_service(primes=[_prime(grove_addr, name="grove")])
     app.dependency_overrides[allocations._get_service] = _override_service(service)
 
     async def _fake_payload():
@@ -971,7 +1013,7 @@ def test_list_capital_metrics_returns_502_for_invalid_numeric_payload(monkeypatc
 def test_list_capital_metrics_returns_502_when_upstream_fetch_fails(monkeypatch):
     from app.api.v1 import allocations
 
-    service = _make_service(primes=[Prime(id=_VALID_ADDR, name="grove", address=_VALID_ADDR)])
+    service = _make_service(primes=[_prime(_VALID_ADDR, name="grove")])
     app.dependency_overrides[allocations._get_service] = _override_service(service)
 
     async def _raise_fetch_error():
@@ -989,7 +1031,7 @@ def test_list_capital_metrics_returns_502_when_upstream_fetch_fails(monkeypatch)
 def test_list_capital_metrics_returns_empty_when_payload_has_no_data(monkeypatch):
     from app.api.v1 import allocations
 
-    service = _make_service(primes=[Prime(id=_VALID_ADDR, name="grove", address=_VALID_ADDR)])
+    service = _make_service(primes=[_prime(_VALID_ADDR, name="grove")])
     app.dependency_overrides[allocations._get_service] = _override_service(service)
 
     async def _fake_payload_without_data():
