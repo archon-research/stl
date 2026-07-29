@@ -108,7 +108,7 @@ jobs:
     outputs:
       reviewed: ${{ steps.classify.outputs.reviewed }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           # Full history: the tag-bump contract diffs against the parent commit.
@@ -319,7 +319,7 @@ jobs:
           app-id: ${{ secrets.DEPLOY_APP_ID }}
           private-key: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
@@ -383,7 +383,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Checkout shared actions
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: archon-research/github-actions
           ref: 01f058b0afe92a8485728e412c13a4e767fb4595 # github-actions #32 (slack-notify blob identical to #28)
@@ -430,7 +430,7 @@ jobs:
         id: mark-approved
         run: echo "started=true" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           # Full history: re-validation diffs against the parent commit and the
@@ -444,7 +444,7 @@ jobs:
       # approval-review fetch) leaves the notifier unresolvable and the failure
       # silent in Slack. notify-prod-failure does not cover this gated job.
       - name: Checkout shared actions
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: archon-research/github-actions
           ref: 01f058b0afe92a8485728e412c13a4e767fb4595 # argocd-sync (github-actions #32, server-scheme fix)
@@ -646,7 +646,7 @@ jobs:
       actions: read
       id-token: write
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -658,7 +658,7 @@ jobs:
           state: rejected
 
       - name: Checkout shared actions
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: archon-research/github-actions
           ref: 01f058b0afe92a8485728e412c13a4e767fb4595 # github-actions #32 (slack-notify blob identical to #28)
@@ -701,7 +701,7 @@ jobs:
       id-token: write
     steps:
       - name: Checkout shared actions
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: archon-research/github-actions
           ref: 01f058b0afe92a8485728e412c13a4e767fb4595 # github-actions #32 (slack-notify blob identical to #28)
