@@ -418,7 +418,12 @@ def _to_decimal(value: str, *, field: str, prime_name: str) -> Decimal:
     response_model=list[PrimeResponse],
     tags=["primes"],
     summary="List all primes",
-    description="Return every prime tracked by STL with its surrogate id, name, and on-chain address.",
+    description=(
+        "Return every ALM proxy of every prime tracked by STL, one row per proxy per chain, with its "
+        "surrogate id, name, on-chain address, chain, and proxy role. A prime allocates through one ALM "
+        "proxy per chain, so `name` repeats across rows and is not a key; use "
+        "`/v1/primes/{address}/risk-capital` for prime-level figures."
+    ),
 )
 async def list_primes(service: AllocationService = Depends(_get_service)):
     primes = await service.list_primes()
