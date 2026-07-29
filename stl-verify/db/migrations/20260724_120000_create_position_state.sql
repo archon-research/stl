@@ -63,4 +63,60 @@ CREATE INDEX IF NOT EXISTS position_state_holder_idx ON position_state (holder_i
 GRANT SELECT ON position_state TO stl_readonly;
 GRANT SELECT, INSERT, UPDATE, DELETE ON position_state TO stl_readwrite;
 
+-- Shared materializer body for every per-protocol projection (VEC-402..408). Each projection view
+-- (position_morpho_market, position_morpho_vault, position_sky_prime_debt, ...) holds its own bespoke
+-- projection logic but emits the identical position_state column contract: (position_id, chain_id,
+-- protocol_id, instrument_key, holder_id, quantity, deal_type_code, block_number, block_version,
+-- processing_version, block_timestamp). This function is the identical plumbing shared by all of them
+-- (CLAUDE.md: consolidate duplicated code) — it upserts the observations into the spine and the current
+-- (latest NON-ZERO) deal-type into position_classification (VEC-401). A closed position keeps the
+-- deal_type of its last real observation, not the ambiguous direction of a closing zero-row.
+--
+-- p_view is a regclass, so it must name an existing relation — no SQL injection via the dynamic FROM.
+-- Idempotent (ON CONFLICT); run out of band (a full-table INSERT..SELECT does not belong in the
+-- migrator's single transaction). Returns the number of position_state rows written.
+CREATE OR REPLACE FUNCTION materialize_position_projection(p_view regclass, p_reason text)
+    RETURNS bigint
+    LANGUAGE plpgsql AS $fn$
+DECLARE n bigint;
+BEGIN
+    EXECUTE format($q$
+        WITH ins AS (
+            INSERT INTO position_state
+                (position_id, chain_id, protocol_id, instrument_key, holder_id, quantity,
+                 block_number, block_version, processing_version, block_timestamp)
+            SELECT position_id, chain_id, protocol_id, instrument_key, holder_id, quantity,
+                   block_number, block_version, processing_version, block_timestamp
+            FROM %s
+            ON CONFLICT (position_id, block_number, block_version, processing_version) DO UPDATE
+                SET quantity        = EXCLUDED.quantity,
+                    block_timestamp = EXCLUDED.block_timestamp,
+                    chain_id        = EXCLUDED.chain_id,
+                    protocol_id     = EXCLUDED.protocol_id,
+                    instrument_key  = EXCLUDED.instrument_key,
+                    holder_id       = EXCLUDED.holder_id
+            RETURNING 1
+        )
+        SELECT count(*) FROM ins
+    $q$, p_view) INTO n;
+
+    EXECUTE format($q$
+        INSERT INTO position_classification (position_id, deal_type_code, direction, change_reason)
+        SELECT DISTINCT ON (r.position_id)
+               r.position_id, r.deal_type_code, d.direction, %L
+        FROM %s r
+        JOIN ref_deal_type d ON d.deal_type = r.deal_type_code
+        WHERE r.quantity > 0
+        ORDER BY r.position_id, r.block_number DESC, r.block_version DESC, r.processing_version DESC
+        ON CONFLICT (position_id) DO UPDATE
+            SET deal_type_code = EXCLUDED.deal_type_code,
+                direction      = EXCLUDED.direction,
+                change_reason  = EXCLUDED.change_reason
+    $q$, p_reason, p_view);
+
+    RETURN n;
+END $fn$;
+
+COMMENT ON FUNCTION materialize_position_projection(regclass, text) IS '[Operational] VEC-402..408 shared materializer: upsert a per-protocol projection view (which must emit the position_state column contract) into position_state, and its current latest-non-zero deal-type into position_classification. Idempotent; run out of band. Returns position_state rows written.';
+
 INSERT INTO migrations (filename) VALUES ('20260724_120000_create_position_state.sql') ON CONFLICT (filename) DO NOTHING;
