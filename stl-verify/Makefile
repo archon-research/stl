@@ -978,46 +978,54 @@ docker-release-all-staging:
 # =============================================================================
 
 # SSH tunnel to a deployed environment's TigerData pooler, via its Tailscale
-# bastion, for local dev against that database. Everything is auto-derived, so
-# the common case is just `make tigerdata-tunnel`:
+# bastion, so the app can run locally against that database. Everything is
+# auto-derived, so the common case is just `make tigerdata-tunnel`:
 #   BASTION_IP     -- the online $(TIGERDATA_ENV) bastion from `tailscale status`
-#                     (bastions rotate; offline ones are skipped)
+#                     (bastions rotate, hence discovering it each time)
 #   TIGERDATA_HOST -- the pooler host from AWS Secrets Manager
-#                     (stl-$(TIGERDATA_ENV)-tigerdata-app, see below)
-#   TIGERDATA_LOCAL_PORT -- 5436, chosen to avoid the local kind cluster's 5432
-# Override any of them on the command line; ENV=sentinelprod (or
+#   TIGERDATA_LOCAL_PORT -- avoids the kind cluster's host 5432, which
+#                     k8s/dev-infra/kind.yaml maps to the local database
+# Override any on the command line; ENV=sentinelprod (or
 # TIGERDATA_ENV=sentinelprod) switches environment. The app then connects at
 # postgres://<user>:<pass>@localhost:$(TIGERDATA_LOCAL_PORT)/<db>
-# (configured in python/.env).
+# (python/.env -- gitignored; see .env.default).
 #
-# Defaulting to $(ENV) matters because the db-* targets below take ENV
-# separately: they read secrets for their own ENV but reach whichever database
-# this tunnel forwards to. A staging tunnel plus ENV=sentinelprod makes
-# db-set-passwords write prod passwords into the staging database, and psql
-# reports success. Keep the two in agreement.
+# Interactive use only; the db-* targets below open their own tunnel.
 TIGERDATA_ENV ?= $(or $(ENV),sentinelstaging)
 TIGERDATA_LOCAL_PORT ?= 5436
 
-# Resolve an environment's pooler host from Secrets Manager.
-# Usage: $(call tigerdata-pooler-host,<env>)
+# Usage: $(call tigerdata-bastion-ip,<env>)
+tigerdata-bastion-ip = tailscale status 2>/dev/null | grep -F '$(1)-bastion' | grep -Fv offline | awk '{print $$1}' | head -1
+
+# An environment's pooler DSN, for one of the roles Terraform provisions
+# (app or migrator). Usage: $(call tigerdata-pooler-url,<env>,<role>)
 #
-# Which key holds the endpoint is not something this repo controls (the schema
-# lives in the infrastructure repo), and the app secret is read elsewhere as
-# pooler_url -- see k8s/overlays/*/external-secrets.yaml -- so try the known
-# spellings rather than assuming one. Whatever comes back is reduced to a bare
-# host: drop everything through the last '@' (passwords may contain '@'), then
-# trim at the port, path, or query. A key that is already a bare host is
-# unchanged by both substitutions.
-tigerdata-pooler-host = aws secretsmanager get-secret-value --secret-id stl-$(1)-tigerdata-app --query SecretString --output text 2>/dev/null | jq -r '.pooler_hostname // .pooler_url // .connection_url // empty' | sed -E 's|^.*@||; s|[:/?].*$$||'
+# pooler_url is a complete connection URL, credentials included -- the
+# deployments consume it directly as DATABASE_URL, see
+# k8s/overlays/*/external-secrets.yaml. jq -e exits non-zero when the key is
+# absent, so a schema change in the infrastructure repo fails here rather than
+# yielding the string "null" downstream -- but only where the caller checks the
+# status directly, since a pipe would mask it.
+tigerdata-pooler-url = aws secretsmanager get-secret-value --secret-id stl-$(1)-tigerdata-$(2) --query SecretString --output text | jq -er '.pooler_url'
+
+# Reduce a pooler URL to its bare host. Each step is scoped to the authority
+# (everything before the first '/' or '?'): the scheme has to go first or a
+# credential-less URL trims to "postgres", and userinfo is dropped by its last
+# '@' because a password may contain one -- but only within the authority, so
+# an '@' in a query value is not mistaken for the credential separator.
+tigerdata-host-of = sed -E 's|^[a-z0-9+.-]+://||; s|^[^/?]*@||; s|[:/?].*$$||'
 
 tigerdata-tunnel:
 	@set -e; \
 	bastion="$(BASTION_IP)"; \
-	[ -n "$$bastion" ] || bastion="$$(tailscale status 2>/dev/null | grep '$(TIGERDATA_ENV)-bastion' | grep -v offline | awk '{print $$1}' | head -1)"; \
-	host="$(TIGERDATA_HOST)"; \
-	[ -n "$$host" ] || host="$$($(call tigerdata-pooler-host,$(TIGERDATA_ENV)))"; \
+	[ -n "$$bastion" ] || bastion="$$($(call tigerdata-bastion-ip,$(TIGERDATA_ENV)))"; \
 	[ -n "$$bastion" ] || { echo "Error: no online $(TIGERDATA_ENV) bastion in 'tailscale status' (is Tailscale up?); pass BASTION_IP=<ip>."; exit 1; }; \
-	[ -n "$$host" ] || { echo "Error: could not read pooler host from AWS (run 'aws sso login'?); pass TIGERDATA_HOST=<host>."; exit 1; }; \
+	host="$(TIGERDATA_HOST)"; \
+	if [ -z "$$host" ]; then \
+	  url="$$($(call tigerdata-pooler-url,$(TIGERDATA_ENV),app))" || { echo "Error: could not read pooler_url for $(TIGERDATA_ENV) (see the error above); pass TIGERDATA_HOST=<host>."; exit 1; }; \
+	  host="$$(printf '%s' "$$url" | $(tigerdata-host-of))"; \
+	fi; \
+	[ -n "$$host" ] || { echo "Error: the $(TIGERDATA_ENV) pooler_url yielded no host; pass TIGERDATA_HOST=<host>."; exit 1; }; \
 	echo "==> Tunnel: localhost:$(TIGERDATA_LOCAL_PORT) -> $$host:5432 via $$bastion ($(TIGERDATA_ENV))"; \
 	exec ssh -N -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new -L "$(TIGERDATA_LOCAL_PORT):$$host:5432" "ec2-user@$$bastion"
 
@@ -1025,91 +1033,102 @@ tigerdata-tunnel:
 # Database Migrations
 # =============================================================================
 
-# Refuse to run when the tunnel does not reach $(ENV)'s pooler. The targets
-# below read secrets for their own ENV but write through whatever is listening
-# on TIGERDATA_LOCAL_PORT, so a mismatch silently operates on the wrong
-# database -- psql reports success either way. Checking the ssh process's own
-# -L forward is what makes this an assertion rather than a convention.
+# Only these environments have a bastion and a TigerData pooler. The dev
+# environment's database is the in-cluster kind TimescaleDB (k8s/overlays/dev),
+# so it has no tigerdata-* secrets and cannot be tunnelled to.
+TIGERDATA_ENVS := sentinelstaging sentinelprod
+
+# Its own port, so these targets never contend with an interactive
+# `make tigerdata-tunnel` on TIGERDATA_LOCAL_PORT. A stale forwarder here makes
+# ssh's bind fail under ExitOnForwardFailure, which stops the target.
+TIGERDATA_TUNNEL_PORT ?= 5437
+
+# Open a tunnel to $(ENV)'s pooler, run the rest of the recipe line with
+# DATABASE_URL pointing through it, and tear the tunnel down. Used as a prefix:
 #
-# Fails closed: if the expected host cannot be resolved, or no listener is
-# found, the target stops. SKIP_TUNNEL_CHECK=1 bypasses it for a tunnel opened
-# by other means (a manual ssh, or a forward through something other than ssh).
-define assert-tunnel-matches-env
-@if [ "$(SKIP_TUNNEL_CHECK)" = "1" ]; then \
-	  echo "==> SKIP_TUNNEL_CHECK=1: not verifying the tunnel points at $(ENV)"; \
-	else \
-	  expected="$$($(call tigerdata-pooler-host,$(ENV)))"; \
-	  [ -n "$$expected" ] || { echo "Error: could not resolve the $(ENV) pooler host to verify the tunnel (run 'aws sso login'?); pass SKIP_TUNNEL_CHECK=1 to override."; exit 1; }; \
-	  pid="$$(lsof -nP -iTCP:$(TIGERDATA_LOCAL_PORT) -sTCP:LISTEN -t 2>/dev/null | head -1)"; \
-	  [ -n "$$pid" ] || { echo "Error: nothing is listening on localhost:$(TIGERDATA_LOCAL_PORT); start it with 'make tigerdata-tunnel ENV=$(ENV)'."; exit 1; }; \
-	  ps -o args= -p "$$pid" 2>/dev/null | grep -q "$(TIGERDATA_LOCAL_PORT):$$expected:5432" || { \
-	    echo "Error: the tunnel on localhost:$(TIGERDATA_LOCAL_PORT) does not forward to the $(ENV) pooler ($$expected)."; \
-	    echo "       Restart it with 'make tigerdata-tunnel ENV=$(ENV)', or pass SKIP_TUNNEL_CHECK=1 if you know the forward is correct."; \
-	    exit 1; }; \
-	  echo "==> Verified: localhost:$(TIGERDATA_LOCAL_PORT) forwards to the $(ENV) pooler ($$expected)"; \
-	fi
+#   some-target: override TIGERDATA_ROLE = app
+#   some-target:
+#   	$(with-tigerdata-tunnel) psql "$$DATABASE_URL" -c 'SELECT 1'
+#
+# Opening the tunnel here is what makes a cross-environment write impossible:
+# the credentials and the forward both derive from $(ENV) in one invocation, so
+# they cannot disagree. Do not rework these targets to consume a tunnel started
+# elsewhere.
+#
+# Only the first recipe line gets the tunnel -- there is no .ONESHELL, so a
+# second line runs in a fresh shell after teardown with no DATABASE_URL. The
+# blank line before endef is load-bearing: it is what splices the caller's
+# command onto this one. `make -n <target> ENV=sentinelstaging` shows the result.
+define with-tigerdata-tunnel
+@set -e; \
+	[ -n "$(TIGERDATA_ROLE)" ] || { echo "Error: this target did not set TIGERDATA_ROLE; add 'override TIGERDATA_ROLE = app|migrator'."; exit 1; }; \
+	case " $(TIGERDATA_ENVS) " in \
+	  *" $(ENV) "*) ;; \
+	  *) echo "Error: ENV must be one of: $(TIGERDATA_ENVS) (got '$(ENV)')."; exit 1 ;; \
+	esac; \
+	bastion="$$($(call tigerdata-bastion-ip,$(ENV)))"; \
+	[ -n "$$bastion" ] || { echo "Error: no online $(ENV) bastion in 'tailscale status' (is Tailscale up?)."; exit 1; }; \
+	url="$$($(call tigerdata-pooler-url,$(ENV),$(TIGERDATA_ROLE)))" || { echo "Error: could not read pooler_url from stl-$(ENV)-tigerdata-$(TIGERDATA_ROLE) (see the error above)."; exit 1; }; \
+	host="$$(printf '%s' "$$url" | $(tigerdata-host-of))"; \
+	[ -n "$$host" ] || { echo "Error: the $(ENV) $(TIGERDATA_ROLE) pooler_url yielded no host."; exit 1; }; \
+	local_url="$$(printf '%s' "$$url" | sed -E 's|^([a-z0-9+.-]+://)([^/?]*@)?[^/?]*|\1\2localhost:$(TIGERDATA_TUNNEL_PORT)|')"; \
+	printf '%s' "$$local_url" | grep -qE '^[a-z0-9+.-]+://([^/?]*@)?localhost:$(TIGERDATA_TUNNEL_PORT)([/?]|$$)' || { echo "Error: could not repoint the $(ENV) $(TIGERDATA_ROLE) DSN at the tunnel; it would have connected to the pooler directly."; exit 1; }; \
+	sock="$$(mktemp -u "$${TMPDIR:-/tmp}/stl-tun-$(ENV)-XXXXXX")"; \
+	echo "==> Tunnel: localhost:$(TIGERDATA_TUNNEL_PORT) -> $$host:5432 via $$bastion ($(ENV), $(TIGERDATA_ROLE) role)"; \
+	trap 'st=$$?; if [ -S "$$sock" ]; then ssh -S "$$sock" -O exit "ec2-user@$$bastion" >/dev/null 2>&1 || echo "Warning: could not close the $(ENV) tunnel; check for a stray ssh forwarding localhost:$(TIGERDATA_TUNNEL_PORT) and kill it."; fi; exit $$st' EXIT; \
+	trap 'exit 130' INT; \
+	trap 'exit 143' TERM HUP; \
+	ssh -M -S "$$sock" -fNT -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new -L "127.0.0.1:$(TIGERDATA_TUNNEL_PORT):$$host:5432" "ec2-user@$$bastion"; \
+	export DATABASE_URL="$$local_url"; \
+
 endef
 
+# The migrator role is the one the deployed migrate job uses, so it is also the
+# role that created the app users db-set-passwords goes on to alter.
+#
 # Run database migrations
-# Usage: make db-migrate DATABASE_URL="postgresql://user:pass@localhost:$(TIGERDATA_LOCAL_PORT)/dbname?sslmode=require"
-# Requires a tunnel to the same environment as DATABASE_URL:
-#   make tigerdata-tunnel ENV=<the environment DATABASE_URL belongs to>
+# Usage: make db-migrate ENV=sentinelstaging|sentinelprod
+db-migrate: override TIGERDATA_ROLE = migrator
 db-migrate:
-	@if [ -z "$(DATABASE_URL)" ]; then \
-		echo "Error: DATABASE_URL is required"; \
-		echo "Usage: make $@ DATABASE_URL=\"postgresql://user:pass@localhost:$(TIGERDATA_LOCAL_PORT)/dbname?sslmode=require\""; \
-		echo ""; \
-		echo "First start the tunnel in another terminal:"; \
-		echo "  make tigerdata-tunnel"; \
-		exit 1; \
-	fi
-	@echo "==> Running database migrations..."
-	DATABASE_URL="$(DATABASE_URL)" go run ./cmd/util/migrate
-	@echo "==> Migrations complete"
+	$(with-tigerdata-tunnel) go run ./cmd/util/migrate
 
 # Set database user passwords from Secrets Manager
-# Usage: make db-set-passwords DATABASE_URL="postgresql://tsdbadmin:pass@localhost:$(TIGERDATA_LOCAL_PORT)/tsdb?sslmode=require" ENV=sentineldev|sentinelstaging|sentinelprod
+# Usage: make db-set-passwords ENV=sentinelstaging|sentinelprod
 # Requires:
-#   1. Tunnel running to this same ENV: make tigerdata-tunnel ENV=<env>
-#      (a tunnel to another environment writes these passwords into that
-#      database instead, and psql still reports success)
-#   2. Terraform applied (from infrastructure repo): make tf-apply ENV=sentineldev|sentinelstaging|sentinelprod (creates secrets with passwords)
-#   3. Migrations run: make db-migrate DATABASE_URL=... (creates users with placeholder passwords)
+#   1. Terraform applied (from infrastructure repo): make tf-apply ENV=sentinelstaging|sentinelprod (creates secrets with passwords)
+#   2. Migrations run: make db-migrate ENV=<env> (creates users with placeholder passwords)
+#
+# Both roles rotate in one transaction, so a failure on the second cannot leave
+# the pair half-rotated and disagreeing with Secrets Manager.
+#
+# The statements go in on stdin rather than with -c because psql only expands
+# :'var' in input it lexes itself; -c is sent to the server verbatim. The
+# expansion is what quotes each password as an SQL literal, so one containing a
+# quote cannot terminate the statement early.
+db-set-passwords: override TIGERDATA_ROLE = migrator
 db-set-passwords:
-	@if [ -z "$(DATABASE_URL)" ] || [ -z "$(ENV)" ]; then \
-		echo "Error: DATABASE_URL and ENV are required"; \
-		echo "Usage: make $@ DATABASE_URL=\"postgresql://tsdbadmin:pass@localhost:$(TIGERDATA_LOCAL_PORT)/tsdb?sslmode=require\" ENV=sentineldev|sentinelstaging|sentinelprod"; \
-		exit 1; \
-	fi
-	$(assert-tunnel-matches-env)
-	@echo "==> Setting database user passwords from Secrets Manager..."
-	@STL_RW_PASS=$$(aws secretsmanager get-secret-value --secret-id stl-$(ENV)-tigerdata-app --query SecretString --output text | jq -r .password) && \
-	STL_RO_PASS=$$(aws secretsmanager get-secret-value --secret-id stl-$(ENV)-tigerdata-readonly --query SecretString --output text | jq -r .password) && \
-	echo "Updating stl_read_write password..." && \
-	psql "$(DATABASE_URL)" -c "ALTER USER stl_read_write WITH PASSWORD '$$STL_RW_PASS';" && \
-	echo "Updating stl_read_only password..." && \
-	psql "$(DATABASE_URL)" -c "ALTER USER stl_read_only WITH PASSWORD '$$STL_RO_PASS';" && \
+	$(with-tigerdata-tunnel) echo "==> Setting database user passwords from Secrets Manager..." && \
+	STL_RW_PASS="$$(aws secretsmanager get-secret-value --secret-id stl-$(ENV)-tigerdata-app --query SecretString --output text | jq -er '.password | select(type == "string" and length > 0)')" && \
+	STL_RO_PASS="$$(aws secretsmanager get-secret-value --secret-id stl-$(ENV)-tigerdata-readonly --query SecretString --output text | jq -er '.password | select(type == "string" and length > 0)')" && \
+	printf "ALTER USER stl_read_write WITH PASSWORD :'rw';\nALTER USER stl_read_only WITH PASSWORD :'ro';\n" \
+	  | psql "$$DATABASE_URL" -v rw="$$STL_RW_PASS" -v ro="$$STL_RO_PASS" -v ON_ERROR_STOP=1 --single-transaction -f - && \
 	echo "==> Database user passwords configured successfully"
 
 # Test database connection with application user
-# Usage: make db-test-app-user ENV=sentineldev|sentinelstaging|sentinelprod
-# Requires tunnel running to this same ENV: make tigerdata-tunnel ENV=<env>
+# Usage: make db-test-app-user ENV=sentinelstaging|sentinelprod
+#
+# Asserts the connected role: the grants below are only evidence about the app
+# user, and a more privileged role would pass them while proving nothing.
+db-test-app-user: override TIGERDATA_ROLE = app
 db-test-app-user:
-	@if [ -z "$(ENV)" ]; then \
-		echo "Error: ENV is required"; \
-		echo "Usage: make $@ ENV=sentineldev|sentinelstaging|sentinelprod"; \
-		exit 1; \
-	fi
-	$(assert-tunnel-matches-env)
-	@echo "==> Testing stl_read_write connection..."
-	@CONNECTION_URL=$$(aws secretsmanager get-secret-value --secret-id stl-$(ENV)-tigerdata-app --query SecretString --output text | jq -r .connection_url | sed -E 's|@[^@/]+:[0-9]+/|@localhost:$(TIGERDATA_LOCAL_PORT)/|') && \
-	psql "$$CONNECTION_URL" -c "SELECT current_user, current_database();" && \
-	echo "" && \
+	$(with-tigerdata-tunnel) echo "==> Testing stl_read_write connection..." && \
+	psql "$$DATABASE_URL" -qtAXc "SELECT current_user" | grep -qx stl_read_write \
+	  || { echo "Error: connected as $$(psql "$$DATABASE_URL" -qtAXc 'SELECT current_user'), not stl_read_write; this proves nothing about the app user's grants."; exit 1; } && \
+	psql "$$DATABASE_URL" -c "SELECT current_user, current_database();" && \
 	echo "==> Testing SELECT permission..." && \
-	psql "$$CONNECTION_URL" -c "SELECT COUNT(*) FROM block_states;" && \
-	echo "" && \
+	psql "$$DATABASE_URL" -c "SELECT COUNT(*) FROM block_states;" && \
 	echo "==> Testing INSERT permission (will rollback)..." && \
-	psql "$$CONNECTION_URL" -c "BEGIN; INSERT INTO reorg_events (block_number, old_hash, new_hash, depth) VALUES (0, 'test', 'test', 1); ROLLBACK;" && \
+	psql "$$DATABASE_URL" -c "BEGIN; INSERT INTO reorg_events (block_number, old_hash, new_hash, depth) VALUES (0, 'test', 'test', 1); ROLLBACK;" && \
 	echo "==> All tests passed!"
 
 # =============================================================================
