@@ -979,12 +979,13 @@ docker-release-all-staging:
 #                     (bastions rotate; offline ones are skipped)
 #   TIGERDATA_HOST -- the pooler host from AWS Secrets Manager
 #                     (stl-$(TIGERDATA_ENV)-tigerdata-app .pooler_hostname)
-#   LOCAL_PORT     -- 5436, chosen to avoid the local kind cluster's 5432
+#   TIGERDATA_LOCAL_PORT -- 5436, chosen to avoid the local kind cluster's 5432
 # Override any of them on the command line; set TIGERDATA_ENV=sentinelprod for
-# prod. The app then connects at postgres://<user>:<pass>@localhost:$(LOCAL_PORT)/<db>
+# prod. The app then connects at
+# postgres://<user>:<pass>@localhost:$(TIGERDATA_LOCAL_PORT)/<db>
 # (configured in python/.env).
 TIGERDATA_ENV ?= sentinelstaging
-LOCAL_PORT ?= 5436
+TIGERDATA_LOCAL_PORT ?= 5436
 tigerdata-tunnel:
 	@set -e; \
 	bastion="$(BASTION_IP)"; \
@@ -993,23 +994,23 @@ tigerdata-tunnel:
 	[ -n "$$host" ] || host="$$(aws secretsmanager get-secret-value --secret-id stl-$(TIGERDATA_ENV)-tigerdata-app --query SecretString --output text 2>/dev/null | jq -r '.pooler_hostname // empty')"; \
 	[ -n "$$bastion" ] || { echo "Error: no online $(TIGERDATA_ENV) bastion in 'tailscale status' (is Tailscale up?); pass BASTION_IP=<ip>."; exit 1; }; \
 	[ -n "$$host" ] || { echo "Error: could not read pooler host from AWS (run 'aws sso login'?); pass TIGERDATA_HOST=<host>."; exit 1; }; \
-	echo "==> Tunnel: localhost:$(LOCAL_PORT) -> $$host:5432 via $$bastion ($(TIGERDATA_ENV))"; \
-	exec ssh -N -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new -L "$(LOCAL_PORT):$$host:5432" "ec2-user@$$bastion"
+	echo "==> Tunnel: localhost:$(TIGERDATA_LOCAL_PORT) -> $$host:5432 via $$bastion ($(TIGERDATA_ENV))"; \
+	exec ssh -N -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new -L "$(TIGERDATA_LOCAL_PORT):$$host:5432" "ec2-user@$$bastion"
 
 # =============================================================================
 # Database Migrations
 # =============================================================================
 
 # Run database migrations
-# Usage: make db-migrate DATABASE_URL="postgresql://user:pass@localhost:5432/dbname?sslmode=require"
-# Requires tunnel to be running first: make tigerdata-tunnel BASTION_IP=... TIGERDATA_HOST=...
+# Usage: make db-migrate DATABASE_URL="postgresql://user:pass@localhost:$(TIGERDATA_LOCAL_PORT)/dbname?sslmode=require"
+# Requires tunnel to be running first: make tigerdata-tunnel
 db-migrate:
 	@if [ -z "$(DATABASE_URL)" ]; then \
 		echo "Error: DATABASE_URL is required"; \
-		echo "Usage: make $@ DATABASE_URL=\"postgresql://user:pass@localhost:5432/dbname?sslmode=require\""; \
+		echo "Usage: make $@ DATABASE_URL=\"postgresql://user:pass@localhost:$(TIGERDATA_LOCAL_PORT)/dbname?sslmode=require\""; \
 		echo ""; \
 		echo "First start the tunnel in another terminal:"; \
-		echo "  make tigerdata-tunnel BASTION_IP=stl-sentinelstaging-bastion TIGERDATA_HOST=<pooler-host>"; \
+		echo "  make tigerdata-tunnel"; \
 		exit 1; \
 	fi
 	@echo "==> Running database migrations..."
@@ -1017,15 +1018,15 @@ db-migrate:
 	@echo "==> Migrations complete"
 
 # Set database user passwords from Secrets Manager
-# Usage: make db-set-passwords DATABASE_URL="postgresql://tsdbadmin:pass@localhost:5432/tsdb?sslmode=require" ENV=sentineldev|sentinelstaging|sentinelprod
+# Usage: make db-set-passwords DATABASE_URL="postgresql://tsdbadmin:pass@localhost:$(TIGERDATA_LOCAL_PORT)/tsdb?sslmode=require" ENV=sentineldev|sentinelstaging|sentinelprod
 # Requires:
-#   1. Tunnel running: make tigerdata-tunnel BASTION_IP=... TIGERDATA_HOST=...
+#   1. Tunnel running: make tigerdata-tunnel
 #   2. Terraform applied (from infrastructure repo): make tf-apply ENV=sentineldev|sentinelstaging|sentinelprod (creates secrets with passwords)
 #   3. Migrations run: make db-migrate DATABASE_URL=... (creates users with placeholder passwords)
 db-set-passwords:
 	@if [ -z "$(DATABASE_URL)" ] || [ -z "$(ENV)" ]; then \
 		echo "Error: DATABASE_URL and ENV are required"; \
-		echo "Usage: make $@ DATABASE_URL=\"postgresql://tsdbadmin:pass@localhost:5432/tsdb?sslmode=require\" ENV=sentineldev|sentinelstaging|sentinelprod"; \
+		echo "Usage: make $@ DATABASE_URL=\"postgresql://tsdbadmin:pass@localhost:$(TIGERDATA_LOCAL_PORT)/tsdb?sslmode=require\" ENV=sentineldev|sentinelstaging|sentinelprod"; \
 		exit 1; \
 	fi
 	@echo "==> Setting database user passwords from Secrets Manager..."
@@ -1039,7 +1040,7 @@ db-set-passwords:
 
 # Test database connection with application user
 # Usage: make db-test-app-user ENV=sentineldev|sentinelstaging|sentinelprod
-# Requires tunnel to be running first: make tigerdata-tunnel BASTION_IP=... TIGERDATA_HOST=...
+# Requires tunnel to be running first: make tigerdata-tunnel
 db-test-app-user:
 	@if [ -z "$(ENV)" ]; then \
 		echo "Error: ENV is required"; \
@@ -1047,7 +1048,7 @@ db-test-app-user:
 		exit 1; \
 	fi
 	@echo "==> Testing stl_read_write connection..."
-	@CONNECTION_URL=$$(aws secretsmanager get-secret-value --secret-id stl-$(ENV)-tigerdata-app --query SecretString --output text | jq -r .connection_url | sed 's|@[^:]*:|@localhost:|') && \
+	@CONNECTION_URL=$$(aws secretsmanager get-secret-value --secret-id stl-$(ENV)-tigerdata-app --query SecretString --output text | jq -r .connection_url | sed 's|@[^:]*:[0-9]*/|@localhost:$(TIGERDATA_LOCAL_PORT)/|') && \
 	psql "$$CONNECTION_URL" -c "SELECT current_user, current_database();" && \
 	echo "" && \
 	echo "==> Testing SELECT permission..." && \
