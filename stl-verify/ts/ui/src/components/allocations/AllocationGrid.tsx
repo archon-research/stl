@@ -1174,7 +1174,7 @@ export function AllocationGrid({
                 <SummaryMetric
                   className={metricsCardClassName}
                   label="Exposure"
-                  value={formatUsdValue(riskCapital.exposure_usd)}
+                  value={formatUsdValue(riskCapital.prime_exposure_usd)}
                   detail={
                     <div className={metricDetailClassName}>
                       <MetricCardTrend
@@ -1201,9 +1201,13 @@ export function AllocationGrid({
                       className={css({ fontSize: 'sm', color: 'text.muted' })}
                     >
                       Required{' '}
-                      {formatUsdValue(riskCapital.required_risk_capital_usd)}
-                      {parseNumericValue(riskCapital.encumbrance_ratio) !== null
-                        ? ` · Encumbrance ${formatRatioPercent(riskCapital.encumbrance_ratio)}`
+                      {formatUsdValue(
+                        riskCapital.prime_required_risk_capital_usd,
+                      )}
+                      {parseNumericValue(
+                        riskCapital.prime_encumbrance_ratio,
+                      ) !== null
+                        ? ` · Encumbrance ${formatRatioPercent(riskCapital.prime_encumbrance_ratio)}`
                         : ''}
                     </div>
                     <MetricCardTrend
@@ -1296,8 +1300,8 @@ export function AllocationGrid({
             })}
           >
             Model-derived ({riskCapital.model}, 15% stress) ·{' '}
-            {parseNumericValue(riskCapital.modeled_pct) !== null
-              ? formatRatioPercent(riskCapital.modeled_pct)
+            {parseNumericValue(riskCapital.prime_modeled_pct) !== null
+              ? formatRatioPercent(riskCapital.prime_modeled_pct)
               : 'partial'}{' '}
             of exposure modeled
           </p>

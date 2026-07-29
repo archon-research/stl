@@ -125,6 +125,20 @@ export function getAllocations(
   );
 }
 
+// A prime allocates through one ALM proxy per chain, so its allocations live
+// scattered across several proxy addresses. Promise.all (not allSettled) so a
+// single proxy's failure rejects the whole call rather than silently
+// returning a partial list.
+export async function getAllocationsForProxies(
+  proxyAddresses: string[],
+  signal?: AbortSignal,
+): Promise<AllocationsResponse> {
+  const perProxyAllocations = await Promise.all(
+    proxyAddresses.map((proxyAddress) => getAllocations(proxyAddress, signal)),
+  );
+  return perProxyAllocations.flat();
+}
+
 export function getPrimeRiskCapital(
   primeId: string,
   signal?: AbortSignal,

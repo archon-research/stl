@@ -1,4 +1,4 @@
-import type { Allocation } from '../types/allocation';
+import type { Allocation, Prime } from '../types/allocation';
 import type { LocalChainRow, LocalProtocolRow } from '../types/local-data';
 import { getChainExplorerUrl, getChainName } from './chain-metadata';
 import { logging } from './logging';
@@ -112,6 +112,55 @@ export function buildChainLabelLookup(
   chains: LocalChainRow[],
 ): ChainLabelLookup {
   return new Map(chains.map((chain) => [chain.chain_id, chain.name] as const));
+}
+
+export type PrimeGroup = {
+  key: string;
+  name: string;
+  vaultAddress: string | null;
+  primaryProxyAddress: string;
+  proxyAddresses: string[];
+  chainCount: number;
+};
+
+// A prime allocates through one ALM proxy per chain, so `/v1/primes` returns
+// one row per (prime, chain) pair. `prime_vault_address` is the same across
+// every row of a prime; a row whose prime has no vault address on record
+// falls back to `name` so it still groups rather than getting its own row.
+export function getPrimeGroupKey(prime: Prime): string {
+  return prime.prime_vault_address ?? prime.name;
+}
+
+export function groupPrimesByVault(primes: Prime[]): PrimeGroup[] {
+  const rowsByKey = new Map<string, Prime[]>();
+
+  for (const prime of primes) {
+    const key = getPrimeGroupKey(prime);
+    const rows = rowsByKey.get(key);
+    if (rows) {
+      rows.push(prime);
+    } else {
+      rowsByKey.set(key, [prime]);
+    }
+  }
+
+  return [...rowsByKey.entries()].map(([key, rows]) => {
+    const sortedByAddress = [...rows].sort((left, right) =>
+      left.address.localeCompare(right.address),
+    );
+    // `mainnet` is the prime's canonical chain for aggregate figures (e.g.
+    // risk-capital); fall back to a deterministic pick when no row is on it.
+    const mainnetRow = rows.find((row) => row.chain === 'mainnet');
+
+    return {
+      key,
+      name: rows[0].name,
+      vaultAddress: rows[0].prime_vault_address ?? null,
+      primaryProxyAddress: mainnetRow?.address ?? sortedByAddress[0].address,
+      proxyAddresses: sortedByAddress.map((row) => row.address),
+      chainCount: new Set(rows.map((row) => row.chain_id)).size,
+    };
+  });
 }
 
 function getProtocolMatchScore(
