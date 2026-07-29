@@ -1185,6 +1185,19 @@ def test_capital_metrics_exposes_a_dedupe_key_shared_across_a_primes_rows(monkey
     assert {row["prime_vault_address"] for row in body} == {_SPARK_VAULT}
 
 
+def test_capital_metrics_exposes_the_dedupe_key_when_no_upstream_row_matches(monkeypatch):
+    from app.api.v1 import allocations
+
+    service = _make_service(primes=[_prime(_SPARK_MAINNET_ALM)])
+    _stub_star_payload(monkeypatch, star="someone_else")
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+
+    body = TestClient(app).get("/v1/capital-metrics").json()
+
+    assert body[0]["exposure"] == "0"
+    assert body[0]["prime_vault_address"] == _SPARK_VAULT
+
+
 def test_capital_metrics_prime_id_is_marked_deprecated():
     properties = app.openapi()["components"]["schemas"]["CapitalMetricsResponse"]["properties"]
 
@@ -1194,7 +1207,7 @@ def test_capital_metrics_prime_id_is_marked_deprecated():
 def test_capital_metrics_does_not_deprecate_the_numeric_fields():
     properties = app.openapi()["components"]["schemas"]["CapitalMetricsResponse"]["properties"]
 
-    for field in ("exposure", "capital_buffer", "required_risk_capital", "total_risk_capital"):
+    for field in ("exposure", "capital_buffer", "required_risk_capital", "total_risk_capital", "encumbrance_ratio"):
         assert "deprecated" not in properties[field], field
 
 

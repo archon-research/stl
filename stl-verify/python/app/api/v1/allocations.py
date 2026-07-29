@@ -302,7 +302,7 @@ class CapitalMetricsResponse(BaseModel):
         "json_schema_extra": {
             "example": {
                 "prime_id": "0x1601843c5e9bc251a3272907010afa41fa18347e",
-                "prime_name": "Acme Prime",
+                "prime_name": "spark",
                 "exposure": "1900000000",
                 "capital_buffer": "2500000",
                 "required_risk_capital": "7500000",

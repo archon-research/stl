@@ -611,7 +611,7 @@
           "exposure": "1900000000",
           "is_validated": false,
           "prime_id": "0x1601843c5e9bc251a3272907010afa41fa18347e",
-          "prime_name": "Acme Prime",
+          "prime_name": "spark",
           "prime_vault_address": "0x691a6c29e9e96dd897718305427ad5d534db16ba",
           "required_risk_capital": "7500000",
           "scope": "prime",
