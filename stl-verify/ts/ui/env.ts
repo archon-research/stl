@@ -3,6 +3,14 @@ import path from 'node:path';
 
 import { z } from 'zod';
 
+// An exported-but-empty value means "not set", so `VITE_PORT= npm run dev`
+// behaves the same as not exporting it at all.
+const optionalEnvValue = z
+  .string()
+  .trim()
+  .transform((value) => (value === '' ? undefined : value))
+  .optional();
+
 const envSchema = z.object({
   API_URL: z.url(),
   VITE_API_BASE_URL: z
@@ -13,6 +21,26 @@ const envSchema = z.object({
       (value) => value.length === 0 || z.url().safeParse(value).success,
       'VITE_API_BASE_URL must be an empty string or a valid URL',
     ),
+  // Dev-server overrides, for serving the UI on a fixed port behind a reverse
+  // proxy. Each one stays undefined unless set, so vite.config can fall through
+  // to Vite's own defaults instead of restating them.
+  VITE_PORT: optionalEnvValue.pipe(
+    z.coerce.number<string>().int().min(1).max(65535).optional(),
+  ),
+  VITE_STRICT_PORT: optionalEnvValue.pipe(z.stringbool().optional()),
+  // Either a hostname to bind, or a boolean: true = all interfaces.
+  VITE_HOST: optionalEnvValue.pipe(z.union([z.stringbool(), z.string()]).optional()),
+  VITE_ALLOWED_HOSTS: optionalEnvValue.pipe(
+    z
+      .string()
+      .transform((value) =>
+        value
+          .split(',')
+          .map((host) => host.trim())
+          .filter((host) => host.length > 0),
+      )
+      .optional(),
+  ),
 });
 
 export type AppEnv = z.infer<typeof envSchema>;
