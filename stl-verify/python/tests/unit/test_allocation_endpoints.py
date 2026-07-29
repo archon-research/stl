@@ -80,6 +80,32 @@ def _override_service(service: AsyncMock):
     return _dep
 
 
+def _stub_star_payload(monkeypatch, *, star: str):
+    from app.api.v1 import allocations
+
+    async def _fake_payload():
+        return allocations.StarRiskCapitalResponse.model_validate(
+            {
+                "status": 200,
+                "success": True,
+                "data": {
+                    "results": [
+                        {
+                            "star": star,
+                            "exposure": "100.00",
+                            "total_rc": "50.00",
+                            "financial_rrc": "20.00",
+                            "exposure_share": "10.00%",
+                            "risk_tolerance_ratio": "2.00",
+                        }
+                    ]
+                },
+            }
+        )
+
+    monkeypatch.setattr(allocations, "_fetch_star_risk_capital_payload", _fake_payload)
+
+
 def test_list_primes_labels_each_proxy_with_chain_and_role():
     from app.api.v1 import allocations
 
@@ -1115,6 +1141,61 @@ def test_list_capital_metrics_returns_empty_when_payload_has_no_data(monkeypatch
     assert payload[0]["prime_id"] == _VALID_ADDR
     assert payload[0]["exposure"] == "0"
     assert payload[0]["is_validated"] is False
+
+
+def test_capital_metrics_still_returns_one_row_per_proxy(monkeypatch):
+    from app.api.v1 import allocations
+
+    service = _make_service(
+        primes=[
+            _prime(_SPARK_MAINNET_ALM, chain_id=1, chain="mainnet"),
+            _prime(_SPARK_BASE_ALM, chain_id=8453, chain="base"),
+            _prime(_SPARK_AVALANCHE_ALM, chain_id=43114, chain="avalanche-c"),
+        ]
+    )
+    _stub_star_payload(monkeypatch, star="spark")
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+
+    body = TestClient(app).get("/v1/capital-metrics").json()
+
+    assert len(body) == 3
+
+
+def test_capital_metrics_marks_every_row_as_prime_scoped(monkeypatch):
+    from app.api.v1 import allocations
+
+    service = _make_service(primes=[_prime(_SPARK_MAINNET_ALM), _prime(_SPARK_AVALANCHE_ALM, chain_id=43114)])
+    _stub_star_payload(monkeypatch, star="spark")
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+
+    body = TestClient(app).get("/v1/capital-metrics").json()
+
+    assert {row["scope"] for row in body} == {"prime"}
+
+
+def test_capital_metrics_exposes_a_dedupe_key_shared_across_a_primes_rows(monkeypatch):
+    from app.api.v1 import allocations
+
+    service = _make_service(primes=[_prime(_SPARK_MAINNET_ALM), _prime(_SPARK_AVALANCHE_ALM, chain_id=43114)])
+    _stub_star_payload(monkeypatch, star="spark")
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+
+    body = TestClient(app).get("/v1/capital-metrics").json()
+
+    assert {row["prime_vault_address"] for row in body} == {_SPARK_VAULT}
+
+
+def test_capital_metrics_prime_id_is_marked_deprecated():
+    properties = app.openapi()["components"]["schemas"]["CapitalMetricsResponse"]["properties"]
+
+    assert properties["prime_id"]["deprecated"] is True
+
+
+def test_capital_metrics_does_not_deprecate_the_numeric_fields():
+    properties = app.openapi()["components"]["schemas"]["CapitalMetricsResponse"]["properties"]
+
+    for field in ("exposure", "capital_buffer", "required_risk_capital", "total_risk_capital"):
+        assert "deprecated" not in properties[field], field
 
 
 # --- data-sources endpoint ---

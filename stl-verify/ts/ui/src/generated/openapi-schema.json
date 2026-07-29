@@ -610,9 +610,11 @@
           "encumbrance_ratio": "0.85",
           "exposure": "1900000000",
           "is_validated": false,
-          "prime_id": "prime-acme",
+          "prime_id": "0x1601843c5e9bc251a3272907010afa41fa18347e",
           "prime_name": "Acme Prime",
+          "prime_vault_address": "0x691a6c29e9e96dd897718305427ad5d534db16ba",
           "required_risk_capital": "7500000",
+          "scope": "prime",
           "timestamp": "2026-05-07T12:00:00Z",
           "total_risk_capital": "10000000",
           "validation_note": "Sourced from Star Agents Risk Capital & Requirements Monitor."
@@ -671,9 +673,10 @@
             "type": "boolean"
           },
           "prime_id": {
-            "description": "Stable surrogate id for the prime.",
+            "deprecated": true,
+            "description": "DEPRECATED \u2014 despite the name this is one of the prime's ALM **proxy** addresses, not a prime identifier, and this endpoint returns one row per proxy. Its value is unchanged for backwards compatibility. Use `prime_vault_address` or `prime_name` to identify the prime.",
             "examples": [
-              "prime-acme"
+              "0x1601843c5e9bc251a3272907010afa41fa18347e"
             ],
             "title": "Prime Id",
             "type": "string"
@@ -686,6 +689,21 @@
             "title": "Prime Name",
             "type": "string"
           },
+          "prime_vault_address": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The prime's on-chain vault address \u2014 identical across the prime's rows. Dedupe on this before aggregating.",
+            "examples": [
+              "0x691a6c29e9e96dd897718305427ad5d534db16ba"
+            ],
+            "title": "Prime Vault Address"
+          },
           "required_risk_capital": {
             "description": "Required Risk Capital (RRC) reported by upstream `financial_rrc` (USD).",
             "examples": [
@@ -693,6 +711,15 @@
             ],
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Required Risk Capital",
+            "type": "string"
+          },
+          "scope": {
+            "default": "prime",
+            "description": "Always `prime`: every metric on this row describes the whole prime, not the proxy in `prime_id`. The row repeats once per ALM proxy, so summing rows triple-counts. Dedupe by `prime_vault_address` first.",
+            "examples": [
+              "prime"
+            ],
+            "title": "Scope",
             "type": "string"
           },
           "timestamp": {
@@ -2726,7 +2753,7 @@
     },
     "/v1/capital-metrics": {
       "get": {
-        "description": "Join each tracked prime with the latest row from the upstream Star risk-capital monitor and return derived capital metrics: risk capital, first-loss capital, total capital, and the buffer between them. Primes without a matching upstream row are still returned, with zeroed metrics and a `validation_note` explaining why. A `502` is returned only when the upstream call itself fails.",
+        "description": "Join each tracked prime with the latest row from the upstream Star risk-capital monitor and return derived capital metrics: risk capital, first-loss capital, total capital, and the buffer between them. Primes without a matching upstream row are still returned, with zeroed metrics and a `validation_note` explaining why. A `502` is returned only when the upstream call itself fails.\n\nReturns one row per ALM proxy, but every metric on a row is **prime-level** \u2014 the upstream Star monitor reports per prime, so a prime's rows carry identical figures and are not additive. Dedupe by `prime_vault_address` before aggregating. `prime_id` is deprecated: it holds a proxy address despite its name.",
         "operationId": "list_capital_metrics_v1_capital_metrics_get",
         "responses": {
           "200": {

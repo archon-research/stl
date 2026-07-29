@@ -233,7 +233,16 @@ class AllocationResponse(BaseModel):
 class CapitalMetricsResponse(BaseModel):
     """Prime-level capital metrics for risk and alert management."""
 
-    prime_id: str = Field(description="Stable surrogate id for the prime.", examples=["prime-acme"])
+    prime_id: str = Field(
+        deprecated=True,
+        description=(
+            "DEPRECATED — despite the name this is one of the prime's ALM **proxy** addresses, "
+            "not a prime identifier, and this endpoint returns one row per proxy. Its value is "
+            "unchanged for backwards compatibility. Use `prime_vault_address` or `prime_name` "
+            "to identify the prime."
+        ),
+        examples=["0x1601843c5e9bc251a3272907010afa41fa18347e"],
+    )
     prime_name: str = Field(description="Human-readable prime name.", examples=["Acme Prime"])
     exposure: Decimal = Field(
         description="Total USD exposure across the prime's allocations (upstream `exposure`).",
@@ -272,11 +281,27 @@ class CapitalMetricsResponse(BaseModel):
         default=None,
         description="Human-readable note about validation, e.g. why a row is missing or unmatched.",
     )
+    prime_vault_address: str | None = Field(
+        default=None,
+        description=(
+            "The prime's on-chain vault address — identical across the prime's rows. Dedupe on this before aggregating."
+        ),
+        examples=["0x691a6c29e9e96dd897718305427ad5d534db16ba"],
+    )
+    scope: str = Field(
+        default="prime",
+        description=(
+            "Always `prime`: every metric on this row describes the whole prime, not the proxy in "
+            "`prime_id`. The row repeats once per ALM proxy, so summing rows triple-counts. "
+            "Dedupe by `prime_vault_address` first."
+        ),
+        examples=["prime"],
+    )
 
     model_config = {
         "json_schema_extra": {
             "example": {
-                "prime_id": "prime-acme",
+                "prime_id": "0x1601843c5e9bc251a3272907010afa41fa18347e",
                 "prime_name": "Acme Prime",
                 "exposure": "1900000000",
                 "capital_buffer": "2500000",
@@ -287,6 +312,8 @@ class CapitalMetricsResponse(BaseModel):
                 "benchmark_source": "https://example.com/star-rrc",
                 "is_validated": False,
                 "validation_note": "Sourced from Star Agents Risk Capital & Requirements Monitor.",
+                "prime_vault_address": "0x691a6c29e9e96dd897718305427ad5d534db16ba",
+                "scope": "prime",
             }
         }
     }
@@ -472,7 +499,11 @@ async def list_primes(service: AllocationService = Depends(_get_service)):
         "and return derived capital metrics: risk capital, first-loss capital, total capital, "
         "and the buffer between them. Primes without a matching upstream row are still returned, "
         "with zeroed metrics and a `validation_note` explaining why. A `502` is returned only when "
-        "the upstream call itself fails."
+        "the upstream call itself fails.\n\n"
+        "Returns one row per ALM proxy, but every metric on a row is **prime-level** — the upstream Star "
+        "monitor reports per prime, so a prime's rows carry identical figures and are not additive. Dedupe "
+        "by `prime_vault_address` before aggregating. `prime_id` is deprecated: it holds a proxy address "
+        "despite its name."
     ),
 )
 async def list_capital_metrics(
@@ -511,6 +542,7 @@ async def list_capital_metrics(
                     benchmark_source=settings.star_risk_capital_upstream_url,
                     is_validated=False,
                     validation_note="No upstream Star risk-capital row matched this prime.",
+                    prime_vault_address=prime.prime_vault_address,
                 )
             )
             continue
@@ -536,6 +568,7 @@ async def list_capital_metrics(
                 benchmark_source=settings.star_risk_capital_upstream_url,
                 is_validated=False,
                 validation_note="Sourced from Star Agents Risk Capital & Requirements Monitor.",
+                prime_vault_address=prime.prime_vault_address,
             )
         )
 
