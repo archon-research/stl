@@ -246,6 +246,7 @@ def test_list_allocations_returns_200_with_enriched_holdings():
             "latest_activity_action": None,
             "latest_activity_amount": None,
             "category": "allocation",
+            "scope": "proxy",
         }
     ]
     service.list_receipt_token_positions.assert_awaited_once_with(EthAddress(_VALID_ADDR))
@@ -283,6 +284,7 @@ def test_list_allocations_returns_direct_asset_rows_with_null_receipt_fields():
             "latest_activity_action": None,
             "latest_activity_amount": None,
             "category": "asset",
+            "scope": "proxy",
         }
     ]
     service.list_direct_asset_holdings.assert_awaited_once_with(EthAddress(_VALID_ADDR))
@@ -433,7 +435,7 @@ def test_list_allocations_surfaces_anchorage_custody_row():
     app.dependency_overrides[allocations._get_service] = _override_service(service)
     client = TestClient(app)
 
-    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations")
+    response = client.get(f"/v1/primes/{_SPARK_MAINNET_ALM}/allocations")
 
     assert response.status_code == 200
     assert response.json() == [
@@ -452,9 +454,10 @@ def test_list_allocations_surfaces_anchorage_custody_row():
             "latest_activity_action": None,
             "latest_activity_amount": None,
             "category": "custody",
+            "scope": "prime",
         }
     ]
-    service.list_anchorage_custody_holdings.assert_awaited_once_with(EthAddress(_VALID_ADDR))
+    service.list_anchorage_custody_holdings.assert_awaited_once_with(EthAddress(_SPARK_MAINNET_ALM))
 
 
 def test_list_allocations_combines_receipt_direct_and_custody_rows():
@@ -469,7 +472,7 @@ def test_list_allocations_combines_receipt_direct_and_custody_rows():
     app.dependency_overrides[allocations._get_service] = _override_service(service)
     client = TestClient(app)
 
-    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations")
+    response = client.get(f"/v1/primes/{_SPARK_MAINNET_ALM}/allocations")
 
     assert response.status_code == 200
     rows = response.json()
@@ -492,13 +495,72 @@ def test_list_allocations_custody_row_surfaces_frozen_snapshot_time_verbatim():
     app.dependency_overrides[allocations._get_service] = _override_service(service)
     client = TestClient(app)
 
-    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations")
+    response = client.get(f"/v1/primes/{_SPARK_MAINNET_ALM}/allocations")
 
     assert response.status_code == 200
     row = response.json()[0]
     assert row["latest_activity_at"] == ANCHORAGE_FROZEN_AS_OF.isoformat()
     assert row["latest_activity_action"] is None
     assert row["latest_activity_amount"] is None
+
+
+def test_list_allocations_includes_the_custody_leg_for_the_primary_proxy():
+    from app.api.v1 import allocations
+
+    service = _make_service(anchorage_holdings=[make_anchorage_custody_holding()])
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+
+    response = TestClient(app).get(f"/v1/primes/{_SPARK_MAINNET_ALM}/allocations")
+
+    assert response.status_code == 200
+    rows = [row for row in response.json() if row["symbol"] == "BTC"]
+    assert len(rows) == 1
+
+
+def test_list_allocations_tags_the_custody_leg_as_prime_scoped():
+    from app.api.v1 import allocations
+
+    service = _make_service(anchorage_holdings=[make_anchorage_custody_holding()])
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+
+    response = TestClient(app).get(f"/v1/primes/{_SPARK_MAINNET_ALM}/allocations")
+
+    row = next(row for row in response.json() if row["symbol"] == "BTC")
+    assert row["scope"] == "prime"
+
+
+def test_list_allocations_omits_the_custody_leg_for_a_non_primary_proxy():
+    from app.api.v1 import allocations
+
+    service = _make_service(anchorage_holdings=[make_anchorage_custody_holding()])
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+
+    response = TestClient(app).get(f"/v1/primes/{_SPARK_AVALANCHE_ALM}/allocations")
+
+    assert response.status_code == 200
+    assert [row for row in response.json() if row["symbol"] == "BTC"] == []
+
+
+def test_list_allocations_does_not_query_custody_for_a_non_primary_proxy():
+    from app.api.v1 import allocations
+
+    service = _make_service(anchorage_holdings=[make_anchorage_custody_holding()])
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+
+    TestClient(app).get(f"/v1/primes/{_SPARK_AVALANCHE_ALM}/allocations")
+
+    service.list_anchorage_custody_holdings.assert_not_called()
+
+
+def test_list_allocations_tags_on_chain_rows_as_proxy_scoped():
+    from app.api.v1 import allocations
+
+    service = _make_service(direct_holdings=[make_direct_asset_holding()])
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+
+    response = TestClient(app).get(f"/v1/primes/{_SPARK_MAINNET_ALM}/allocations")
+
+    assert response.json()[0]["scope"] == "proxy"
 
 
 @pytest.mark.parametrize(

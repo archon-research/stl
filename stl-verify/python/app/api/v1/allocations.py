@@ -20,6 +20,7 @@ from app.api.time_series import TimeSeriesWindow, apply_cache_control, build_win
 from app.config import get_settings
 from app.domain.entities.allocation import AnchorageCustodyHolding, DirectAssetHolding, EthAddress
 from app.domain.entities.allocation_category import AllocationCategory
+from app.domain.prime_registry import is_primary_proxy
 from app.domain.time_series import TimeSeriesQuery, enforce_filter_for_window
 from app.services.allocation_category_service import AllocationCategoryService
 from app.services.allocation_service import AllocationService
@@ -190,6 +191,15 @@ class AllocationResponse(BaseModel):
             "Allocation category derived from protocol/symbol (`allocation`, `pol`, `psm3`, `asset`, `custody`)."
         ),
     )
+    scope: str = Field(
+        default="proxy",
+        description=(
+            "Whether the row belongs to the queried proxy (`proxy`) or to the prime as a whole (`prime`). "
+            "A `prime`-scoped row is served under the prime's primary proxy only, so unioning a prime's "
+            "proxies never double-counts it."
+        ),
+        examples=["proxy"],
+    )
 
     model_config = {
         "json_schema_extra": {
@@ -208,6 +218,7 @@ class AllocationResponse(BaseModel):
                 "latest_activity_action": "out",
                 "latest_activity_amount": "12.5",
                 "category": "allocation",
+                "scope": "proxy",
             }
         }
     }
@@ -621,7 +632,9 @@ async def list_protocols(service: AllocationService = Depends(_get_service)):
         "exists), and off-chain Anchorage BTC custody (chain_id 0, `protocol_name` "
         "`anchorage`, `amount_usd` the loan drawn against the collateral). Each row "
         "includes the latest activity timestamp and a derived `category` "
-        "(`allocation` / `pol` / `psm3` / `asset` / `custody`)."
+        "(`allocation` / `pol` / `psm3` / `asset` / `custody`). Rows are proxy-scoped "
+        "except the Anchorage custody leg, which is prime-scoped and returned only "
+        "under the prime's primary (mainnet ALM) proxy — see the `scope` field."
     ),
 )
 async def list_allocations(
@@ -648,10 +661,14 @@ async def list_allocations(
     if not await service.prime_exists(prime_address):
         raise HTTPException(status_code=404, detail="Prime not found")
 
-    positions, direct_holdings, custody_holdings = await asyncio.gather(
+    # The Anchorage custody leg is prime-scoped, not proxy-scoped. Serving it
+    # under every one of a prime's proxies would triple-count $250M of BTC for
+    # any consumer unioning them, so only the primary proxy carries it.
+    custody_applies = is_primary_proxy(prime_address)
+    positions, direct, custody = await asyncio.gather(
         service.list_receipt_token_positions(prime_address),
         service.list_direct_asset_holdings(prime_address),
-        service.list_anchorage_custody_holdings(prime_address),
+        service.list_anchorage_custody_holdings(prime_address) if custody_applies else _no_custody(),
     )
     category_service = AllocationCategoryService()
 
@@ -677,7 +694,7 @@ async def list_allocations(
     # Underlying identity travels with the price basis; see
     # _DIRECT_ASSET_HOLDINGS_SQL.
     direct_rows = []
-    for h in direct_holdings:
+    for h in direct:
         underlying_id, underlying_address, underlying_symbol = _direct_underlying_identity(h)
         direct_rows.append(
             AllocationResponse(
@@ -697,7 +714,7 @@ async def list_allocations(
                 category=category_service.classify(None, h.symbol),
             )
         )
-    custody_rows = [_anchorage_custody_row(h, category_service) for h in custody_holdings]
+    custody_rows = [_anchorage_custody_row(h, category_service) for h in custody]
     return receipt_rows + direct_rows + custody_rows
 
 
@@ -735,7 +752,13 @@ def _anchorage_custody_row(
         latest_activity_action=None,
         latest_activity_amount=None,
         category=category_service.classify(_ANCHORAGE_PROTOCOL_NAME, holding.symbol),
+        scope="prime",
     )
+
+
+async def _no_custody() -> list[AnchorageCustodyHolding]:
+    """Stand in for the custody fetch on a non-primary proxy, keeping the gather uniform."""
+    return []
 
 
 def _direct_underlying_identity(h: DirectAssetHolding) -> tuple[int, str, str]:
