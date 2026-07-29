@@ -694,7 +694,12 @@ dev-resume:
 # Bring the cluster up whichever way is needed: resume it if its nodes already
 # exist (suspended), otherwise create it from scratch. Idempotent entry point
 # for local-dev tooling that just wants "cluster running".
+#
+# dev-preflight runs first so a stopped container machine says so, instead of
+# reaching the probe below as an empty `docker ps` that reads as "no cluster"
+# and routes to a dev-up that cannot work either.
 dev-up-or-resume:
+	@$(MAKE) dev-preflight
 	@if [ -n "$$(docker ps -a --filter "label=io.x-k8s.kind.cluster=$(KIND_CLUSTER)" -q)" ]; then \
 	  $(MAKE) dev-resume; \
 	else \
