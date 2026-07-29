@@ -49,53 +49,20 @@ series AS (
 SELECT position_id(chain_id, protocol_id, instrument_key, holder_id) AS position_id,
        chain_id, protocol_id, instrument_key, holder_id, quantity,
        'LOAN'::text AS deal_type_code,
-       block_number, block_version, block_timestamp
+       block_number, block_version, 0 AS processing_version, block_timestamp
 FROM series
 WHERE quantity > 0 OR prev_qty > 0;
 
-COMMENT ON VIEW position_morpho_vault IS '[Operational] VEC-403 projection: Morpho vault positions as native position rows (one per vault deposit; instrument_key = vault contract address). Source for materialize_morpho_vault(); one row per (position_id, observation), including one closing zero-quantity row on a real exit (VEC-409 closure).';
+COMMENT ON VIEW position_morpho_vault IS '[Operational] VEC-403 projection: Morpho vault positions as native position rows (one per vault deposit; instrument_key = vault contract address). Emits the shared position_state column contract consumed by materialize_position_projection(); one row per (position_id, observation), including one closing zero-quantity row on a real exit (VEC-409 closure).';
 
--- Populate the spine + current classification. Idempotent (ON CONFLICT). Returns rows written to
--- position_state. Run out of band after deploy; safe to re-run.
+-- Populate the spine + current classification via the shared materializer (defined with position_state,
+-- VEC-402 spine). The projection view above holds all the Morpho-vault-specific logic; the identical
+-- upsert plumbing is not duplicated here. Idempotent; run out of band; returns position_state rows written.
 CREATE OR REPLACE FUNCTION materialize_morpho_vault() RETURNS bigint
-    LANGUAGE plpgsql AS $fn$
-DECLARE n bigint;
-BEGIN
-    WITH ins AS (
-        INSERT INTO position_state
-            (position_id, chain_id, protocol_id, instrument_key, holder_id, quantity,
-             block_number, block_version, processing_version, block_timestamp)
-        SELECT position_id, chain_id, protocol_id, instrument_key, holder_id, quantity,
-               block_number, block_version, 0, block_timestamp
-        FROM position_morpho_vault
-        ON CONFLICT (position_id, block_number, block_version, processing_version) DO UPDATE
-            SET quantity        = EXCLUDED.quantity,
-                block_timestamp = EXCLUDED.block_timestamp,
-                chain_id        = EXCLUDED.chain_id,
-                protocol_id     = EXCLUDED.protocol_id,
-                instrument_key  = EXCLUDED.instrument_key,
-                holder_id       = EXCLUDED.holder_id
-        RETURNING 1
-    )
-    SELECT count(*) INTO n FROM ins;
+    LANGUAGE sql AS $fn$
+    SELECT materialize_position_projection('position_morpho_vault'::regclass, 'VEC-403: morpho_vault materializer');
+$fn$;
 
-    -- Current deal-type per position (latest NON-ZERO observation wins), consistent with VEC-402;
-    -- direction frozen from ref_deal_type.
-    INSERT INTO position_classification (position_id, deal_type_code, direction, change_reason)
-    SELECT DISTINCT ON (r.position_id)
-           r.position_id, r.deal_type_code, d.direction, 'VEC-403: morpho_vault materializer'
-    FROM position_morpho_vault r
-    JOIN ref_deal_type d ON d.deal_type = r.deal_type_code
-    WHERE r.quantity > 0
-    ORDER BY r.position_id, r.block_number DESC, r.block_version DESC
-    ON CONFLICT (position_id) DO UPDATE
-        SET deal_type_code = EXCLUDED.deal_type_code,
-            direction      = EXCLUDED.direction,
-            change_reason  = EXCLUDED.change_reason;
-
-    RETURN n;
-END $fn$;
-
-COMMENT ON FUNCTION materialize_morpho_vault() IS '[Operational] VEC-403: upsert Morpho vault positions into position_state and current deal-type into position_classification, from position_morpho_vault. Idempotent; run out of band. Returns position_state rows written.';
+COMMENT ON FUNCTION materialize_morpho_vault() IS '[Operational] VEC-403: materialize Morpho vault positions into position_state + position_classification, via materialize_position_projection(position_morpho_vault). Idempotent; run out of band. Returns position_state rows written.';
 
 INSERT INTO migrations (filename) VALUES ('20260724_130000_materialize_morpho_vault.sql') ON CONFLICT (filename) DO NOTHING;
