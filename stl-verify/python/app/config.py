@@ -35,6 +35,15 @@ class Settings(BaseSettings):
     # treats it as stale and returns HTTP 503.
     allocation_share_max_stale_seconds: int = 1800
     star_risk_capital_upstream_url: str = "https://info-sky.blockanalitica.com/star-monitoring/risk-capital/primes/"
+    # Connection-pool ceiling per replica. Set explicitly rather than left on
+    # SQLAlchemy's 5 + 10: a prime-scoped risk-capital request holds one connection
+    # per ALM proxy of the prime concurrently, so the ceiling is what bounds how
+    # many such requests a replica serves before callers queue on pool_timeout and
+    # surface as a 500. 10 + 20 admits roughly four concurrent fan-outs. Bounding
+    # the fan-out itself — the durable fix, since per-request cost grows with every
+    # chain added — is VEC-532.
+    db_pool_size: int = Field(default=10, ge=1)
+    db_max_overflow: int = Field(default=20, ge=0)
 
     @property
     def async_database_url(self) -> str:
