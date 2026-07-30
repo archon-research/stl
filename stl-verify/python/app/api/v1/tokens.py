@@ -1,5 +1,4 @@
 from datetime import datetime
-from decimal import Decimal
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -11,6 +10,7 @@ from app.api._validators import ChainIdPath, TokenAddressPath
 from app.api.deps import get_engine
 from app.api.v1._resolvers import resolve_token
 from app.domain.entities.token_catalog import TokenMetadata, TokenPriceQuote
+from app.domain.serialization import PlainDecimal
 from app.services.token_catalog_service import TokenCatalogService
 
 router = APIRouter(tags=["tokens"])
@@ -73,7 +73,7 @@ class TokenPriceResponse(BaseModel):
         description="Human-friendly source name when available",
         examples=["CoinGecko"],
     )
-    price_usd: Decimal | None = Field(
+    price_usd: PlainDecimal | None = Field(
         default=None,
         description=(
             "Latest USD price; null when no quote is available. "

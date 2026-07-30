@@ -61,6 +61,53 @@ def _result() -> PrimeRiskCapital:
     )
 
 
+def test_get_prime_risk_capital_serializes_large_usd_as_plain_string():
+    # exposure_usd/total_risk_capital_usd come straight from DB NUMERIC, so
+    # asyncpg can hand back positive-exponent Decimals here just like debt_wad.
+    # They must serialize as plain strings, not scientific notation.
+    from app.api.v1 import prime_risk_capital
+
+    big_usd = Decimal((0, (2, 1, 9, 9), 4))  # 2.199E+7
+    assert "E+" in str(big_usd)
+
+    result = PrimeRiskCapital(
+        prime_id=_VALID_ADDR,
+        model="gap_sweep",
+        exposure_usd=big_usd,
+        total_risk_capital_usd=big_usd,
+        required_risk_capital_usd=Decimal("0"),
+        encumbrance_ratio=None,
+        modeled_exposure_usd=Decimal("0"),
+        modeled_pct=None,
+        per_allocation=[
+            AllocationRiskCapital(
+                receipt_token_id=1,
+                symbol="aHorRwaRLUSD",
+                protocol_name="aave-v3-rwa",
+                exposure_usd=big_usd,
+                applied=True,
+                required_risk_capital_usd=Decimal("0"),
+                crr_pct=Decimal("0"),
+                model="gap_sweep",
+            ),
+        ],
+    )
+    service = _make_service(result=result)
+    app.dependency_overrides[prime_risk_capital._get_service] = _override_service(service)
+    try:
+        client = TestClient(app)
+
+        response = client.get(f"/v1/primes/{_VALID_ADDR}/risk-capital")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["exposure_usd"] == "21990000"
+        assert body["total_risk_capital_usd"] == "21990000"
+        assert body["per_allocation"][0]["exposure_usd"] == "21990000"
+    finally:
+        app.dependency_overrides.pop(prime_risk_capital._get_service, None)
+
+
 def test_get_prime_risk_capital_returns_self_computed_envelope():
     from app.api.v1 import prime_risk_capital
 

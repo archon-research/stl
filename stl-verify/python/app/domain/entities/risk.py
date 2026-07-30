@@ -5,6 +5,7 @@ from typing import Annotated, Literal, Union, get_args
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.domain.entities.allocation import EthAddress
+from app.domain.serialization import PlainDecimal
 
 # ---------------------------------------------------------------------------
 # Discriminated details for RrcResult
@@ -30,9 +31,9 @@ class SurafDetails(BaseModel):
     risk_model: Literal["suraf"]
     rating_id: str
     rating_version: str
-    crr_pct: Decimal
-    unadjusted_crr_pct: Decimal
-    penalty_pp: Decimal
+    crr_pct: PlainDecimal
+    unadjusted_crr_pct: PlainDecimal
+    penalty_pp: PlainDecimal
     source_commit_sha: str
 
 
@@ -52,8 +53,8 @@ class GapSweepDetails(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     risk_model: Literal["gap_sweep"]
-    gap_pct: Decimal
-    loss_usd: Decimal
+    gap_pct: PlainDecimal
+    loss_usd: PlainDecimal
 
 
 RrcDetails = Annotated[Union[SurafDetails, GapSweepDetails], Field(discriminator="risk_model")]
@@ -93,8 +94,8 @@ class RrcResult(BaseModel):
 
     asset_id: int
     prime_id: EthAddress
-    rrc_usd: Decimal
-    comparable_crr_pct: Decimal
+    rrc_usd: PlainDecimal
+    comparable_crr_pct: PlainDecimal
     risk_model: ModelName
     details: RrcDetails
 
