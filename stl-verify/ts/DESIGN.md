@@ -22,8 +22,8 @@ colors:
   colors.text.strong.dark: "#fff"
   colors.text.default.light: "#171717"
   colors.text.default.dark: "#f5f5f5"
-  colors.text.muted.light: "#737373"
-  colors.text.muted.dark: "#a3a3a3"
+  colors.text.muted.light: "#525252"
+  colors.text.muted.dark: "#d4d4d4"
   colors.text.subtle.light: "#737373"
   colors.text.subtle.dark: "#a3a3a3"
   colors.text.inverse.light: "#fafafa"
@@ -167,7 +167,7 @@ STL Verify should feel like an operations desk built for sustained concentration
 
 The visual system favors practical rhythm over decorative flourish. High-value metrics, filters, and tables are separated through spacing cadence and tonal layers, while interaction states stay quiet until users need to act. The interface rejects ornamental gradients, novelty controls, and high-chroma noise that competes with risk signals.
 
-Token provenance for this spec comes from `@archon-research/design-system/panda-preset`, which owns the surface, border, text, interactive, `bg.*`, `chart.*`, shadow, and scrollbar semantic ramps. `stl-verify/ts/ui/panda.config.ts` adds **only** what the preset does not ship — `text.subtle`, `text.inverse`, `text.violet`, `bg.neutral`, `bg.violet`, `overlay.backdrop`, `overlay.tooltip`, `interactive.accent`, `chart.series.quaternary`, `chart.series.quinary` — and shadows nothing. Every hex in the frontmatter below is a resolved value read out of `npx panda cssgen` output, not a hand-maintained copy; regenerate and re-read after any preset upgrade.
+Token provenance for this spec comes from `@archon-research/design-system/panda-preset`, which owns the surface, border, text, interactive, `bg.*`, `chart.*`, shadow, and scrollbar semantic ramps. `stl-verify/ts/ui/panda.config.ts` adds **only** what the preset does not ship — `text.subtle`, `text.inverse`, `text.violet`, `bg.neutral`, `bg.violet`, `overlay.backdrop`, `overlay.tooltip`, `interactive.accent`, `chart.series.quaternary`, `chart.series.quinary` — plus one deliberate shadow of `text.muted`, documented below. Every hex in the frontmatter below is a resolved value read out of `npx panda cssgen` output, not a hand-maintained copy; regenerate and re-read after any preset upgrade.
 
 **Do not re-add local overrides of preset tokens.** A local copy silently reverts upstream token fixes: the previous config redefined `surface.default` to `gray.950` in dark mode, which made a raised panel the darkest thing on the page and inverted the elevation ramp.
 
@@ -206,8 +206,8 @@ The ramp steps forward monotonically in both themes: canvas is furthest back, pa
 - **colors.border.strong** (#737373 / #737373): selection emphasis and selected-row outlines.
 - **colors.text.strong** (#0a0a0a / #ffffff): strong titles and key labels.
 - **colors.text.default** (#171717 / #f5f5f5): core body and table text.
-- **colors.text.muted** (#737373 / #a3a3a3): metadata and supporting copy.
-- **colors.text.subtle** (#737373 / #a3a3a3): the quietest meta tier. Currently pinned to `text.muted`'s value — anything lighter than `neutral.500` on white fails WCAG AA (`neutral.400` on white is 2.52:1), so a genuine fourth step has to be inserted *between* `default` and `muted`, not below `muted`.
+- **colors.text.muted** (#525252 / #d4d4d4): metadata and supporting copy. One step darker than the preset ships, which is the single token this config deliberately shadows: it is how the fourth tier below is made, since `subtle` cannot go lighter and stay AA. Also darkens preset recipes that read `text.muted` (DataTable header cells, `surfaceMessage` bodies, StatTile subs), which is intended.
+- **colors.text.subtle** (#737373 / #a3a3a3): the quietest meta tier, one step under `muted`. This is the floor: `neutral.400` on white is 2.52:1 and fails WCAG AA at the 11px these qualifiers render at, so the tier below `muted` was made by darkening `muted` rather than lightening this. All four tiers clear AA — 7.81:1 / 4.74:1 light, 12.06:1 / 7.11:1 dark.
 - **colors.text.inverse** (#fafafa / #fafafa): theme-invariant light text, for always-dark fills such as `overlay.tooltip`.
 - **colors.text.critical** (#dc2626 / #fca5a5): the absent state on a risk dashboard. Use it; a risk grid that signals only success/warning/interactive is under-reporting.
 

@@ -32,9 +32,15 @@ import type {
   Token,
   TokenPrice,
 } from '../../../types/allocation';
-import { ChainLogo, SummaryMetric, TokenAddress } from '../../shared';
+import {
+  ChainLogo,
+  ErrorPanel,
+  SummaryMetric,
+  TokenAddress,
+  TruncatedLabel,
+} from '../../shared';
 import { MethodologyPanel } from '../../shared/MethodologyPanel';
-import { TabErrorPanel, TabNotePanel } from './TabStatePanels';
+import { TabNotePanel } from './TabStatePanels';
 
 type RiskBreakdownTabProps = {
   isEnabled: boolean;
@@ -89,7 +95,7 @@ function RiskSymbolCell({
 // Threshold" reserved far more room than the percentages beneath it and pushed
 // the last column out of view. Capping the label and letting it ellipsize lets
 // the column size to its data instead; the full text stays in the DOM for
-// assistive tech and comes back as a native tooltip on hover.
+// assistive tech and comes back on hover through `TruncatedLabel`.
 const truncatedHeaderClassName = css({
   display: 'block',
   maxWidth: '7rem',
@@ -102,9 +108,7 @@ const truncatedHeaderClassName = css({
 // would render identically, so it is only applied where it changes something.
 function truncatingHeader(label: string) {
   return () => (
-    <span className={truncatedHeaderClassName} title={label}>
-      {label}
-    </span>
+    <TruncatedLabel label={label} className={truncatedHeaderClassName} />
   );
 }
 
@@ -456,7 +460,7 @@ export function RiskBreakdownTab({
       {isLoading ? <LoadingIndicator message="Loading risk breakdown" /> : null}
 
       {errorMessage ? (
-        <TabErrorPanel
+        <ErrorPanel
           title="Unable to load the risk breakdown."
           message={errorMessage}
         />

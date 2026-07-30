@@ -38,10 +38,31 @@ export default defineConfig({
           // a preset token here: `theme.extend` merges last and wins, so a local
           // copy silently reverts upstream token fixes.
           text: {
-            // A step quieter than `muted`, which is where the preset's text ramp
-            // stops. Pinned to `text.muted`'s value: a genuinely lighter step
-            // fails WCAG AA on white, so the real fix is a design decision (see
-            // DESIGN.md, "Borders and text").
+            // The one deliberate exception to the no-shadowing rule above, and it
+            // is a design decision rather than a workaround.
+            //
+            // This dashboard needs four text tiers: a row title, its body line, a
+            // timestamp, and a quieter qualifier under that. The preset ships
+            // three, and `subtle` below cannot go lighter than `neutral.500` --
+            // `neutral.400` is 2.52:1 on white and fails AA at the 11px these
+            // qualifiers render at. So the fourth tier has to be made by moving
+            // `muted` one step darker instead, which keeps every tier AA
+            // (7.81:1 / 4.74:1 light, 12.06:1 / 7.11:1 dark).
+            //
+            // Note this also darkens preset recipes that read `text.muted` --
+            // DataTable header cells, `surfaceMessage` bodies, StatTile subs --
+            // which is intended: the tier should mean one thing everywhere.
+            // Upstream ask is a less compressed text ramp; until then this
+            // diverges knowingly and will not pick up upstream changes to it.
+            muted: {
+              value: {
+                base: '{colors.neutral.600}',
+                _dark: '{colors.neutral.300}',
+              },
+            },
+            // The fourth tier, one step quieter than `muted`. Held at the
+            // preset's own former `muted` values, which is the lightest grey that
+            // still clears AA on both surfaces.
             subtle: {
               value: {
                 base: '{colors.neutral.500}',

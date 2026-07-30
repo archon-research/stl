@@ -1,4 +1,5 @@
 export { ChainLogo } from './ChainLogo';
+export { ErrorPanel } from './ErrorPanel';
 export { PageShell } from './PageShell';
 export { ProtocolLogo } from './ProtocolLogo';
 export {
@@ -35,4 +36,4 @@ export { StatusBadge } from './StatusBadge';
 export { SummaryMetric } from './SummaryMetric';
 export { TokenAddress } from './TokenAddress';
 export { TokenLogo } from './TokenLogo';
-export { AppTooltip } from './Tooltip';
+export { AppTooltip, TruncatedLabel } from './Tooltip';

@@ -1,7 +1,6 @@
 import {
   AsyncStateRenderer,
   EmptyState,
-  ErrorState,
   SearchInput,
   StyledSelect,
   ToggleGroup,
@@ -25,6 +24,7 @@ import type {
   AllocationCategory,
   Prime,
 } from '../../types/allocation';
+import { ErrorPanel } from '../shared';
 import { ActivityFeed } from './tabs/ActivityFeed';
 import { RiskBreakdownTab } from './tabs/RiskBreakdownTab';
 import { RrcTab } from './tabs/RrcTab';
@@ -403,9 +403,9 @@ export function BottomPanel({
               />
             }
             errorView={
-              <ErrorState
+              <ErrorPanel
                 title="Unable to load receipt tokens"
-                description="An error occurred while fetching receipt token data."
+                message="An error occurred while fetching receipt token data."
                 errorMessage={errorMessage ?? undefined}
               />
             }

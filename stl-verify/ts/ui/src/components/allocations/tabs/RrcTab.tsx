@@ -17,12 +17,13 @@ import { isAbortError, toErrorMessage } from '../../../lib/errors';
 import { logging } from '../../../lib/logging';
 import type { Allocation, Prime, Rrc } from '../../../types/allocation';
 import {
+  ErrorPanel,
   ProtocolLogo,
   StatusBadge,
   SummaryMetric,
   TokenLogo,
 } from '../../shared';
-import { TabErrorPanel, TabNotePanel } from './TabStatePanels';
+import { TabNotePanel } from './TabStatePanels';
 
 type RrcTabProps = {
   isEnabled: boolean;
@@ -181,7 +182,7 @@ export function RrcTab({
       </div>
 
       {errorMessage ? (
-        <TabErrorPanel
+        <ErrorPanel
           title="Unable to compute required risk capital."
           message={errorMessage}
         />

@@ -12,7 +12,6 @@ import {
   type ColumnDef,
   DataTable,
   EmptyState,
-  ErrorState,
   SearchInput,
   type SortingState,
   useDataTable,
@@ -50,6 +49,7 @@ import type { LocalProtocolRow } from '../../types/local-data';
 import {
   AppTooltip,
   ChainLogo,
+  ErrorPanel,
   PageShell,
   ProtocolLogo,
   SummaryMetric,
@@ -370,6 +370,18 @@ const tableHeaderTypographyClassName = css({
     letterSpacing: '0.02em',
     textTransform: 'uppercase',
     color: 'text.default',
+  },
+});
+
+// See PrimeSidebar for why the preset's dark `interactive.selected` is diluted.
+// Here it has to arrive as a descendant override because the fill comes from the
+// `dataTable` recipe's `selected` variant, which the DataTable applies as a
+// hardcoded class name.
+const selectedRowTintClassName = css({
+  _dark: {
+    '& .dataTable__bodyRow--selected_true': {
+      bg: 'interactive.selected/35',
+    },
   },
 });
 
@@ -1327,9 +1339,9 @@ export function AllocationGrid({
           </p>
         ) : null}
         {!showTopMetricsSkeleton && riskCapitalErrorMessage ? (
-          <ErrorState
+          <ErrorPanel
             title="Risk capital is unavailable"
-            description="The risk capital endpoint failed for this session."
+            message="The risk capital endpoint failed for this session."
             errorMessage={riskCapitalErrorMessage}
           />
         ) : null}
@@ -1390,9 +1402,9 @@ export function AllocationGrid({
         ) : null}
 
         {selectedPrime && errorMessage ? (
-          <ErrorState
+          <ErrorPanel
             title="Unable to load allocations"
-            description="An error occurred while fetching allocation data."
+            message="An error occurred while fetching allocation data."
             errorMessage={errorMessage}
           />
         ) : null}
@@ -1423,7 +1435,12 @@ export function AllocationGrid({
         {selectedPrime &&
         !errorMessage &&
         (isLoading || filteredAllocations.length > 0) ? (
-          <div className={tableHeaderTypographyClassName}>
+          <div
+            className={cx(
+              tableHeaderTypographyClassName,
+              selectedRowTintClassName,
+            )}
+          >
             <DataTable
               table={table}
               isLoading={isLoading}

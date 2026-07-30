@@ -1,7 +1,4 @@
-import {
-  Badge,
-  type BadgeColorPalette,
-} from '@archon-research/design-system';
+import { Badge, type BadgeColorPalette } from '@archon-research/design-system';
 
 import type { UsdTone } from '../../lib/dashboard';
 

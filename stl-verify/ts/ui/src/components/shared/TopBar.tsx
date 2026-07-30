@@ -33,9 +33,11 @@ const tabsListClassName = css({
   gap: '7',
 });
 
-// Prominent, well-separated tabs: heavier weight + a thick underline, kept
-// calm with a muted neutral indicator rather than a loud accent. The large
-// list gap guarantees adjacent underlines never touch.
+// Primary navigation, so prominence comes from the weight/colour step between
+// resting and selected plus the underline — not from an oversized type step,
+// which at `lg`/`bold` shouted over the page title beneath it. The muted
+// neutral indicator keeps the accent budget for data. The large list gap
+// guarantees adjacent underlines never touch.
 const tabTriggerClassName = css({
   appearance: 'none',
   bg: 'transparent',
@@ -43,10 +45,10 @@ const tabTriggerClassName = css({
   cursor: 'pointer',
   px: '0.5',
   pb: '2',
-  fontSize: 'lg',
-  fontWeight: 'semibold',
+  fontSize: 'md',
+  fontWeight: 'medium',
   color: 'text.subtle',
-  borderBottomWidth: '3px',
+  borderBottomWidth: '2px',
   borderBottomStyle: 'solid',
   borderBottomColor: 'transparent',
   transitionProperty: 'color, border-color',
@@ -55,8 +57,21 @@ const tabTriggerClassName = css({
   _hover: { color: 'text.default' },
   '&[data-selected]': {
     color: 'text.strong',
-    fontWeight: 'bold',
+    fontWeight: 'semibold',
     borderBottomColor: 'text.strong',
+  },
+});
+
+// RangePicker hardcodes `boxShadow: '0 18px 48px rgba(0, 0, 0, 0.35)'` on its
+// custom-range modal panel as an inline style and accepts no className, so the
+// theme-aware token can only reach it as an `!important` descendant override
+// from here. That fixed black haze is invisible on the dark canvas and rings the
+// dialog with a dirty grey band on the light one. Reported upstream.
+const rangeFieldClassName = css({
+  width: { base: '100%', sm: '14rem' },
+  flexShrink: 0,
+  '& dialog > div': {
+    boxShadow: 'token(shadows.elevation) !important',
   },
 });
 
@@ -184,12 +199,7 @@ export function TopBar({
           value={selectedProtocol}
         />
         {showRangePicker ? (
-          <div
-            className={css({
-              width: { base: '100%', sm: '14rem' },
-              flexShrink: 0,
-            })}
-          >
+          <div className={rangeFieldClassName}>
             <RangePicker
               preset={rangePreset}
               range={timeRange}

@@ -1,7 +1,6 @@
 import {
   AsyncStateRenderer,
   EmptyState,
-  ErrorState,
   SkeletonStack,
   Switch,
   ThemeToggle,
@@ -11,7 +10,7 @@ import { css, cx } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 import { toggleSwitch } from '#styled-system/recipes';
 
-import { ProtocolLogo } from '.';
+import { ErrorPanel, ProtocolLogo } from '.';
 import type { Prime } from '../../types/allocation';
 
 type PrimeSidebarProps = {
@@ -144,9 +143,9 @@ export function PrimeSidebar({
           isEmpty={primes.length === 0}
           loadingView={<SkeletonStack count={6} itemHeight={64} />}
           errorView={
-            <ErrorState
+            <ErrorPanel
               title="Unable to load primes"
-              description="An error occurred while fetching primes data."
+              message="An error occurred while fetching primes data."
               errorMessage={errorMessage ?? undefined}
             />
           }
@@ -178,6 +177,17 @@ export function PrimeSidebar({
                       ? 'interactive.accent'
                       : 'border.subtle',
                     bg: isSelected ? 'interactive.selected' : 'surface.default',
+                    // The preset's dark `interactive.selected` is `blue.900`,
+                    // which on the near-black canvas paints a saturated block
+                    // instead of a selection tint. Diluting the same token keeps
+                    // one source of truth for the selection hue while letting
+                    // the accent border, not the fill, carry the signal.
+                    // Reported upstream.
+                    _dark: {
+                      bg: isSelected
+                        ? 'interactive.selected/35'
+                        : 'surface.default',
+                    },
                     px: '3.5',
                     py: '3.5',
                     cursor: 'pointer',
