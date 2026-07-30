@@ -177,7 +177,7 @@ export interface paths {
      * Self-computed prime risk capital
      * @description Compute the prime's capital metrics from on-chain data and the default RRC model (`gap_sweep`), with no dependency on the upstream Star feed. Returns exposure (priced receipt-token allocations), Total Risk Capital (on-chain treasury), Required Risk Capital (sum of per-allocation model RRC), encumbrance, a `modeled_pct` coverage figure, and a per-allocation breakdown. The figures are model-derived and partial (only allocations the model can price contribute Required Risk Capital) and will not match Sky's dashboard. A backed allocation whose pool-share lookup can't be resolved (e.g. a warm-up window or an un-indexed receipt token) is reported as unpriced (`applied=false` with an `unpriced_reason`) rather than failing the whole response. Returns `404` if the prime is unknown.
      *
-     *     Figures without a prefix are scoped to the proxy in the path and are unchanged from previous releases. Figures prefixed `prime_` are scoped to the whole prime — summed across every ALM proxy of the prime the given address belongs to — and are therefore identical whichever proxy you query; use `prime_per_chain` for the split. `total_risk_capital_usd` is prime-wide despite having no prefix. `encumbrance_ratio` is deprecated because it mixes the two scopes; use `prime_encumbrance_ratio`.
+     *     Figures without a prefix are scoped to the proxy in the path and are unchanged from previous releases. Figures prefixed `prime_` are scoped to the whole prime — summed across every ALM proxy of the prime the given address belongs to — and are therefore identical whichever proxy you query; use `prime_per_chain` for the split. `total_risk_capital_usd` is prime-wide despite having no prefix. `prime_id` is the opposite exception: despite the prefix, it is the queried proxy address, not the prime, and varies per proxy — see its own description. `encumbrance_ratio` is deprecated because it mixes the two scopes; use `prime_encumbrance_ratio`.
      */
     get: operations['get_prime_risk_capital_v1_primes__prime_id__risk_capital_get'];
     put?: never;
@@ -696,7 +696,7 @@ export interface components {
       log_index: number;
       /**
        * Prime Address
-       * @description Prime's 0x-prefixed Ethereum address.
+       * @description 0x-prefixed ALM proxy address the event occurred on.
        * @example 0x1234567890abcdef1234567890abcdef12345678
        */
       prime_address: string;
@@ -1075,6 +1075,13 @@ export interface components {
     /**
      * ChainRiskCapitalResponse
      * @description One ALM proxy's contribution to the prime's aggregated figures.
+     *
+     *     A row exists for every ALM proxy the axis-synome contract lists for this
+     *     prime, including chains STL has no allocation tracker for. On such a
+     *     chain `exposure_usd`, `required_risk_capital_usd`, and `allocation_count`
+     *     read as zero — that reads identically to a proxy STL tracks but that
+     *     genuinely holds nothing, so a `"0"` row here does not by itself mean the
+     *     prime has no exposure on that chain.
      */
     ChainRiskCapitalResponse: {
       /**
@@ -1298,7 +1305,7 @@ export interface components {
       ilk_name: string;
       /**
        * Prime Address
-       * @description Prime's 0x-prefixed Ethereum address.
+       * @description The prime's on-chain vault address — the same value served as `prime_vault_address` elsewhere in this API (e.g. `/v1/primes`).
        * @example 0x1234567890abcdef1234567890abcdef12345678
        */
       prime_address: string;
