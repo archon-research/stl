@@ -21,7 +21,10 @@ class PrimeDebtSnapshotResponse(BaseModel):
     """A single observed prime-debt position at a point in time."""
 
     prime_address: str = Field(
-        description="Prime's 0x-prefixed Ethereum address.",
+        description=(
+            "The prime's on-chain vault address — the same value served as `prime_vault_address` "
+            "elsewhere in this API (e.g. `/v1/primes`)."
+        ),
         examples=["0x1234567890abcdef1234567890abcdef12345678"],
     )
     prime_name: str = Field(description="Human-readable prime name.", examples=["Acme Prime"])

@@ -20,7 +20,7 @@ from app.api.time_series import TimeSeriesWindow, apply_cache_control, build_win
 from app.config import get_settings
 from app.domain.entities.allocation import AnchorageCustodyHolding, DirectAssetHolding, EthAddress
 from app.domain.entities.allocation_category import AllocationCategory
-from app.domain.prime_registry import is_primary_proxy
+from app.domain.prime_registry import is_primary_proxy, proxy_entry
 from app.domain.time_series import TimeSeriesQuery, enforce_filter_for_window
 from app.services.allocation_category_service import AllocationCategoryService
 from app.services.allocation_service import AllocationService
@@ -335,7 +335,7 @@ class AllocationActivityResponse(BaseModel):
 
     chain_id: int = Field(description="EVM chain id where the event occurred.", examples=[1])
     prime_address: str = Field(
-        description="Prime's 0x-prefixed Ethereum address.",
+        description="0x-prefixed ALM proxy address the event occurred on.",
         examples=["0x1234567890abcdef1234567890abcdef12345678"],
     )
     prime_name: str = Field(description="Human-readable prime name.", examples=["Acme Prime"])
@@ -651,7 +651,9 @@ async def list_allocations(
       is valued from the token's oracle price when one exists, else null.
     - Off-chain Anchorage BTC custody — chain_id 0, ``protocol_name``
       ``anchorage``, null ``underlying_*`` (no token-registry row), with the
-      loan drawn against the collateral as ``amount_usd``.
+      loan drawn against the collateral as ``amount_usd``. Gated to the
+      prime's primary (mainnet ALM) proxy, or to any proxy the axis-synome
+      contract doesn't know about (see ``custody_applies`` below).
 
     Errors:
     - 422 if ``prime_id`` is malformed.
@@ -664,7 +666,14 @@ async def list_allocations(
     # The Anchorage custody leg is prime-scoped, not proxy-scoped. Serving it
     # under every one of a prime's proxies would triple-count $250M of BTC for
     # any consumer unioning them, so only the primary proxy carries it.
-    custody_applies = is_primary_proxy(prime_address)
+    # is_primary_proxy fails closed (False for an address the contract has
+    # never heard of), which would silently drop custody for a real mainnet
+    # proxy the contract hasn't been told about yet. Gate on *known
+    # non-primary* instead: an address absent from the contract has no
+    # discoverable siblings, so — mirroring classify_proxy's fail-open
+    # default — it is treated as its own primary.
+    entry = proxy_entry(prime_address)
+    custody_applies = entry is None or is_primary_proxy(prime_address)
     positions, direct, custody = await asyncio.gather(
         service.list_receipt_token_positions(prime_address),
         service.list_direct_asset_holdings(prime_address),

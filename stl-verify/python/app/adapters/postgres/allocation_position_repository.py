@@ -30,7 +30,7 @@ from app.domain.entities.time_series_bucket import (
     ExposureBucket,
     TotalCapitalBucket,
 )
-from app.domain.prime_registry import ProxyKind, proxy_entry, subproxy_addresses
+from app.domain.prime_registry import ProxyKind, classify_proxy, subproxy_addresses
 
 # USDS (mainnet). A prime's treasury USDS held in its SubProxy wallet is its
 # total capital; this isolates that token from any other SubProxy holding.
@@ -198,8 +198,7 @@ class AllocationRepository:
                 primes: list[Prime] = []
                 for row in result:
                     address = "0x" + row.address
-                    entry = proxy_entry(address)
-                    kind = entry.kind if entry is not None else ProxyKind.ALM
+                    kind = classify_proxy(address)
                     # SubProxy wallets share a prime_id with the ALM proxy and hold
                     # the treasury rather than allocations; surfacing them here would
                     # duplicate each prime in /v1/primes.

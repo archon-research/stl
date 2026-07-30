@@ -41,7 +41,15 @@ class AllocationRiskCapitalResponse(BaseModel):
 
 
 class ChainRiskCapitalResponse(BaseModel):
-    """One ALM proxy's contribution to the prime's aggregated figures."""
+    """One ALM proxy's contribution to the prime's aggregated figures.
+
+    A row exists for every ALM proxy the axis-synome contract lists for this
+    prime, including chains STL has no allocation tracker for. On such a
+    chain `exposure_usd`, `required_risk_capital_usd`, and `allocation_count`
+    read as zero — that reads identically to a proxy STL tracks but that
+    genuinely holds nothing, so a `"0"` row here does not by itself mean the
+    prime has no exposure on that chain.
+    """
 
     proxy_address: str = Field(description="0x-prefixed ALM proxy address.")
     chain: str | None = Field(
@@ -148,8 +156,9 @@ async def _get_service(
         "releases. Figures prefixed `prime_` are scoped to the whole prime — summed across every ALM "
         "proxy of the prime the given address belongs to — and are therefore identical whichever proxy "
         "you query; use `prime_per_chain` for the split. `total_risk_capital_usd` is prime-wide despite having "
-        "no prefix. `encumbrance_ratio` is deprecated because it mixes the two scopes; use "
-        "`prime_encumbrance_ratio`."
+        "no prefix. `prime_id` is the opposite exception: despite the prefix, it is the queried proxy "
+        "address, not the prime, and varies per proxy — see its own description. `encumbrance_ratio` is "
+        "deprecated because it mixes the two scopes; use `prime_encumbrance_ratio`."
     ),
 )
 async def get_prime_risk_capital(

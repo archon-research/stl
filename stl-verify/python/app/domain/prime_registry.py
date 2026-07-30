@@ -58,9 +58,12 @@ def _kind_from_role(role: str) -> ProxyKind:
 def _index_proxies() -> dict[str, ProxyEntry]:
     """Flatten the contract's star -> chain -> [proxy] map, keyed by address.
 
-    Raises on a duplicate address: the whole module keys on address alone, and a
-    collision would silently attribute one prime's positions to another. Mirrors
-    the Go loader's duplicate check.
+    Raises on a duplicate address alone, not on duplicate (chain, address) like
+    the Go loader (``proxiesFromAlmProxy``): this module resolves a proxy
+    without knowing its chain (see module docstring), so a bare address must
+    already be a unique key here, and two contract entries sharing one address
+    on different chains would be exactly as ambiguous as sharing it on the same
+    chain.
     """
     contract = build_axis_synome_contract().model_dump(by_alias=True, mode="json")
     alm_proxies = contract["axis_synome"]["spec"]["entities"]["alm_proxies"]["AlmProxy"]
@@ -115,8 +118,18 @@ def subproxy_addresses() -> frozenset[str]:
     These hold a prime's treasury USDS (its total capital), tracked in
     ``allocation_position`` under the prime's ``prime_id`` but a distinct
     ``proxy_address``. Consumers scope to these to read the treasury series.
+
+    Raises if the contract has no SubProxy entries. ``_index_proxies`` only
+    rejects a wholly empty contract, so a regeneration that drops every
+    SubProxy would otherwise return an empty set here — turning every
+    treasury query's ``IN`` predicate always-false and every
+    ``total_risk_capital_usd`` (and the encumbrance ratios built on it)
+    silently ``null`` instead of failing loudly.
     """
-    return frozenset(entry.address for entry in _PROXIES.values() if entry.kind is ProxyKind.SUB_PROXY)
+    addresses = frozenset(entry.address for entry in _PROXIES.values() if entry.kind is ProxyKind.SUB_PROXY)
+    if not addresses:
+        raise ValueError("axis-synome contract carries no SubProxy entries")
+    return addresses
 
 
 def prime_name_for(address: str) -> str | None:

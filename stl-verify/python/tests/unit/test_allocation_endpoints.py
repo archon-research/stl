@@ -30,13 +30,27 @@ _SPARK_AVALANCHE_ALM = "0xece6b0e8a54c2f44e066fbb9234e7157b15b7fec"
 _SPARK_VAULT = "0x691a6c29e9e96dd897718305427ad5d534db16ba"
 
 
+def _vault_address_for(name: str) -> str:
+    """Default vault address for `_prime()`, keyed by prime name.
+
+    `prime.vault_address` is UNIQUE in the schema, so a single shared default
+    across differently-named primes (e.g. spark and grove in the same test)
+    would encode a state the schema forbids. `spark` keeps the realistic
+    `_SPARK_VAULT` constant other tests assert against; every other name gets
+    a value derived from itself so no two names collide.
+    """
+    if name == "spark":
+        return _SPARK_VAULT
+    return "0x" + name.encode().hex().ljust(40, "0")[:40]
+
+
 def _prime(
     address: str,
     *,
     name: str = "spark",
     chain_id: int = 1,
     chain: str | None = "mainnet",
-    prime_vault_address: str | None = _SPARK_VAULT,
+    prime_vault_address: str | None = None,
 ) -> Prime:
     return Prime(
         id=address,
@@ -45,7 +59,7 @@ def _prime(
         chain_id=chain_id,
         chain=chain,
         role="alm",
-        prime_vault_address=prime_vault_address,
+        prime_vault_address=prime_vault_address if prime_vault_address is not None else _vault_address_for(name),
     )
 
 
@@ -191,7 +205,7 @@ def test_list_primes_returns_200_with_prime_names():
             "chain_id": 1,
             "chain": None,
             "role": "alm",
-            "prime_vault_address": _SPARK_VAULT,
+            "prime_vault_address": _vault_address_for("grove"),
         },
         {
             "id": "0xbbb",
@@ -550,6 +564,23 @@ def test_list_allocations_does_not_query_custody_for_a_non_primary_proxy():
     TestClient(app).get(f"/v1/primes/{_SPARK_AVALANCHE_ALM}/allocations")
 
     service.list_anchorage_custody_holdings.assert_not_called()
+
+
+def test_list_allocations_includes_the_custody_leg_for_a_proxy_unknown_to_the_contract():
+    """An address absent from the axis-synome contract has no discoverable
+    siblings, so it is treated as its own primary rather than losing the
+    custody row to a fail-closed default.
+    """
+    from app.api.v1 import allocations
+
+    service = _make_service(anchorage_holdings=[make_anchorage_custody_holding()])
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+
+    response = TestClient(app).get(f"/v1/primes/{_VALID_ADDR}/allocations")
+
+    assert response.status_code == 200
+    rows = [row for row in response.json() if row["symbol"] == "BTC"]
+    assert len(rows) == 1
 
 
 def test_list_allocations_tags_on_chain_rows_as_proxy_scoped():
