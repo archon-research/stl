@@ -27,11 +27,22 @@ type DragState = {
 
 const DEFAULT_DRAWER_WIDTH = 704;
 const MIN_DRAWER_WIDTH = 480;
-const MAX_DRAWER_WIDTH = 1100;
 const DRAWER_STORAGE_KEY = 'risk-detail-drawer-width';
 
 function isBrowser(): boolean {
   return typeof window !== 'undefined';
+}
+
+// Relative to the viewport rather than a fixed pixel ceiling: the drawer hosts
+// the full backing-collateral table, which is wider than any constant that also
+// looks sensible on a laptop. 92vw leaves the grid edge visible behind it so the
+// drawer still reads as an overlay on a wide display.
+function maxDrawerWidth(): number {
+  if (!isBrowser()) {
+    return DEFAULT_DRAWER_WIDTH;
+  }
+
+  return Math.max(MIN_DRAWER_WIDTH, Math.round(window.innerWidth * 0.92));
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -53,7 +64,7 @@ function readStoredWidth(): number {
     return DEFAULT_DRAWER_WIDTH;
   }
 
-  return clamp(parsed, MIN_DRAWER_WIDTH, MAX_DRAWER_WIDTH);
+  return clamp(parsed, MIN_DRAWER_WIDTH, maxDrawerWidth());
 }
 
 export function RiskDetailDrawer({
@@ -96,7 +107,7 @@ export function RiskDetailDrawer({
       const nextWidth = clamp(
         dragState.startSize + delta,
         MIN_DRAWER_WIDTH,
-        MAX_DRAWER_WIDTH,
+        maxDrawerWidth(),
       );
       setDrawerWidth(nextWidth);
     };

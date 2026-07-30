@@ -85,6 +85,29 @@ function RiskSymbolCell({
   );
 }
 
+// A long header otherwise sets the column's min-content width, so "Liquidation
+// Threshold" reserved far more room than the percentages beneath it and pushed
+// the last column out of view. Capping the label and letting it ellipsize lets
+// the column size to its data instead; the full text stays in the DOM for
+// assistive tech and comes back as a native tooltip on hover.
+const truncatedHeaderClassName = css({
+  display: 'block',
+  maxWidth: '7rem',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
+});
+
+// Use this for any header long enough to outgrow the cap above; a short one
+// would render identically, so it is only applied where it changes something.
+function truncatingHeader(label: string) {
+  return () => (
+    <span className={truncatedHeaderClassName} title={label}>
+      {label}
+    </span>
+  );
+}
+
 function createRiskColumns(chainId: number): ColumnDef<RiskItem>[] {
   return [
     {
@@ -132,7 +155,7 @@ function createRiskColumns(chainId: number): ColumnDef<RiskItem>[] {
     },
     {
       id: 'lt',
-      header: 'Liquidation Threshold',
+      header: truncatingHeader('Liquidation Threshold'),
       accessorKey: 'liquidation_threshold',
       cell: (info: CellContext<RiskItem, unknown>) =>
         formatRatioPercent(
@@ -141,7 +164,7 @@ function createRiskColumns(chainId: number): ColumnDef<RiskItem>[] {
     },
     {
       id: 'bonus',
-      header: 'Liquidation Bonus',
+      header: truncatingHeader('Liquidation Bonus'),
       accessorKey: 'liquidation_bonus',
       cell: (info: CellContext<RiskItem, unknown>) =>
         formatMultiplier(info.getValue() as string | number | null | undefined),
@@ -195,7 +218,11 @@ function RiskTable({
         isLoading={isLoading}
         getRowKey={(item) => String(item.token_id ?? item.symbol)}
         skeletonConfig={{ rows: 5, columns: 6, firstColumnTall: false }}
-        minWidth="76rem"
+        // Sized to what the six columns actually need once the long liquidation
+        // headers ellipsize. The old 76rem exceeded the drawer this table lives
+        // in, so the last column was always clipped no matter how wide the
+        // drawer was dragged.
+        minWidth="56rem"
         renderCell={(children) => (
           <div
             className={css({
