@@ -896,11 +896,6 @@ function App() {
     <div
       className={css({
         position: 'relative',
-        // SidebarLayout's recipe declares only a `base` and no variants, so there
-        // is no stacked/narrow mode to ask for and the sub-48rem layout has to be
-        // imposed from outside with !important. Target Ark's `[data-part="panel"]`:
-        // the panels are plain divs, not `aside`/`main`. The preset's breakpoints
-        // are min-width only, hence the raw max-width query.
         '& [data-sidebar-layout] [data-part="panel"]:last-of-type > div': {
           overflow: 'auto !important',
           minHeight: '0 !important',
@@ -913,37 +908,11 @@ function App() {
           {
             opacity: 0,
           },
-        '@media screen and (max-width: 48rem)': {
-          '& [data-sidebar-layout] > div': {
-            display: 'block !important',
-            height: 'auto !important',
-            overflow: 'visible !important',
-          },
-          '& [data-sidebar-layout] [data-part="panel"]:first-of-type': {
-            width: '100% !important',
-            height: 'auto !important',
-            maxHeight: '22rem',
-            borderRight: 'none !important',
-            borderBottom: '1px solid var(--colors-border-subtle)',
-          },
-          '& [data-sidebar-layout] [data-part="panel"]:last-of-type': {
-            width: '100% !important',
-            height: 'auto !important',
-            minHeight: '0 !important',
-          },
-          '& [data-sidebar-layout] [data-part="panel"] > header': {
-            minHeight: '0 !important',
-            justifyContent: 'stretch !important',
-          },
-          '& [data-sidebar-layout] [data-scope="resize-handle"][data-part="root"]':
-            {
-              display: 'none !important',
-            },
-        },
       })}
     >
       <div data-sidebar-layout>
         <SidebarLayout
+          collapseBelow={768}
           sidebar={
             <PrimeSidebar
               primes={primes}

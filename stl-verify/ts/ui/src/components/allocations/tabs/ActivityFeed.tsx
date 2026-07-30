@@ -166,7 +166,7 @@ function ProtocolEventCard({ event }: { event: ProtocolEvent }) {
         <span
           className={css({
             fontSize: 'xs',
-            color: 'text.subtle',
+            color: 'text.muted',
           })}
         >
           •
@@ -182,7 +182,7 @@ function ProtocolEventCard({ event }: { event: ProtocolEvent }) {
         <span
           className={css({
             fontSize: 'xs',
-            color: 'text.subtle',
+            color: 'text.muted',
           })}
         >
           log #{event.log_index}
@@ -190,7 +190,7 @@ function ProtocolEventCard({ event }: { event: ProtocolEvent }) {
         <span
           className={css({
             fontSize: 'xs',
-            color: 'text.subtle',
+            color: 'text.muted',
           })}
         >
           block {event.block_number} v{event.block_version}
@@ -215,7 +215,7 @@ function ProtocolEventCard({ event }: { event: ProtocolEvent }) {
         <span
           className={css({
             fontSize: 'xs',
-            color: 'text.subtle',
+            color: 'text.muted',
           })}
         >
           •
@@ -337,13 +337,13 @@ function ActivityEventRow({
           <span className={css({ fontSize: 'xs', color: 'text.default' })}>
             {formatTokenAmount(event.tx_amount)} {event.token_symbol ?? ''}
           </span>
-          <span className={css({ fontSize: 'xs', color: 'text.subtle' })}>
+          <span className={css({ fontSize: 'xs', color: 'text.muted' })}>
             •
           </span>
           <span className={css({ fontSize: 'xs', color: 'text.default' })}>
             Block {event.block_number}
           </span>
-          <span className={css({ fontSize: 'xs', color: 'text.subtle' })}>
+          <span className={css({ fontSize: 'xs', color: 'text.muted' })}>
             •
           </span>
           <span
@@ -361,7 +361,7 @@ function ActivityEventRow({
           </span>
           {txHash ? (
             <>
-              <span className={css({ fontSize: 'xs', color: 'text.subtle' })}>
+              <span className={css({ fontSize: 'xs', color: 'text.muted' })}>
                 •
               </span>
               <TokenAddress
@@ -377,7 +377,7 @@ function ActivityEventRow({
       <span
         className={css({
           fontSize: 'xs',
-          color: 'text.subtle',
+          color: 'text.muted',
           whiteSpace: 'nowrap',
           textAlign: 'right',
         })}
@@ -391,7 +391,7 @@ function ActivityEventRow({
               display: 'block',
               mt: '0.5',
               fontSize: '2xs',
-              color: 'interactive.accent',
+              color: 'text.link',
               bg: 'transparent',
               border: 'none',
               cursor: 'pointer',
@@ -938,7 +938,7 @@ export function ActivityFeed({
             alignItems: 'center',
             gap: '3',
             fontSize: 'xs',
-            color: 'text.subtle',
+            color: 'text.muted',
           })}
         >
           <span>Server filters active</span>
@@ -1108,7 +1108,7 @@ export function ActivityFeed({
       >
         <span>Showing {filteredEvents.length} events</span>
         {filteredEvents.length >= (filters.limit || 50) ? (
-          <span className={css({ color: 'text.subtle' })}>
+          <span className={css({ color: 'text.muted' })}>
             Limited to most recent {filters.limit || 50}
           </span>
         ) : null}

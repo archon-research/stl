@@ -67,6 +67,9 @@ jobs:
       - name: Panda codegen
         run: npm run prepare -w ui
 
+      - name: Design-system doctor
+        run: npm run doctor
+
       - name: Typecheck workspace
         run: npm run type:check
 

@@ -299,7 +299,7 @@ export function MethodologyPanel({
                     borderRadius: 'sm',
                   },
                   '& a': {
-                    color: 'interactive.accent',
+                    color: 'text.link',
                     textDecoration: 'underline',
                   },
                 })}

@@ -47,7 +47,7 @@ const tabTriggerClassName = css({
   pb: '2',
   fontSize: 'md',
   fontWeight: 'medium',
-  color: 'text.subtle',
+  color: 'text.muted',
   borderBottomWidth: '2px',
   borderBottomStyle: 'solid',
   borderBottomColor: 'transparent',
@@ -62,17 +62,9 @@ const tabTriggerClassName = css({
   },
 });
 
-// RangePicker hardcodes `boxShadow: '0 18px 48px rgba(0, 0, 0, 0.35)'` on its
-// custom-range modal panel as an inline style and accepts no className, so the
-// theme-aware token can only reach it as an `!important` descendant override
-// from here. That fixed black haze is invisible on the dark canvas and rings the
-// dialog with a dirty grey band on the light one. Reported upstream.
 const rangeFieldClassName = css({
   width: { base: '100%', sm: '14rem' },
   flexShrink: 0,
-  '& dialog > div': {
-    boxShadow: 'token(shadows.elevation) !important',
-  },
 });
 
 function FilterField({

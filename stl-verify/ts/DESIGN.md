@@ -20,12 +20,10 @@ colors:
   colors.border.strong.dark: "#737373"
   colors.text.strong.light: "#0a0a0a"
   colors.text.strong.dark: "#fff"
-  colors.text.default.light: "#171717"
-  colors.text.default.dark: "#f5f5f5"
-  colors.text.muted.light: "#525252"
-  colors.text.muted.dark: "#d4d4d4"
-  colors.text.subtle.light: "#737373"
-  colors.text.subtle.dark: "#a3a3a3"
+  colors.text.default.light: "#404040"
+  colors.text.default.dark: "#d4d4d4"
+  colors.text.muted.light: "#737373"
+  colors.text.muted.dark: "#a3a3a3"
   colors.text.inverse.light: "#fafafa"
   colors.text.inverse.dark: "#fafafa"
   colors.text.link.light: "#2563eb"
@@ -34,22 +32,18 @@ colors:
   colors.text.interactive.dark: "#93c5fd"
   colors.text.critical.light: "#dc2626"
   colors.text.critical.dark: "#fca5a5"
-  colors.text.violet.light: "#6d28d9"
-  colors.text.violet.dark: "#c4b5fd"
   colors.interactive.hover.light: "#eff6ff"
   colors.interactive.hover.dark: "#172554"
   colors.interactive.selected.light: "#dbeafe"
-  colors.interactive.selected.dark: "#1e3a8a"
+  colors.interactive.selected.dark: "color-mix(in srgb, #3b82f6 24%, #171717)"
   colors.interactive.accent.light: "#2563eb"
-  colors.interactive.accent.dark: "#93c5fd"
+  colors.interactive.accent.dark: "#2563eb"
   colors.bg.neutral.light: "#f5f5f5"
   colors.bg.neutral.dark: "#262626"
-  colors.bg.violet.light: "#f5f3ff"
-  colors.bg.violet.dark: "#2e1065"
-  colors.overlay.backdrop.light: "rgb(15 23 42 / 0.28)"
-  colors.overlay.backdrop.dark: "rgb(3 7 18 / 0.48)"
-  colors.overlay.tooltip.light: "rgb(15 23 42 / 0.96)"
-  colors.overlay.tooltip.dark: "rgb(3 7 18 / 0.96)"
+  colors.overlay.backdrop.light: "rgba(9, 9, 11, 0.55)"
+  colors.overlay.backdrop.dark: "rgba(0, 0, 0, 0.65)"
+  colors.overlay.tooltip.light: "#262626"
+  colors.overlay.tooltip.dark: "#262626"
   colors.chart.series.primary.light: "#2563eb"
   colors.chart.series.primary.dark: "#93c5fd"
   colors.chart.series.secondary.light: "#0d9488"
@@ -58,8 +52,8 @@ colors:
   colors.chart.series.tertiary.dark: "#c4b5fd"
   colors.chart.series.quaternary.light: "#d97706"
   colors.chart.series.quaternary.dark: "#fcd34d"
-  colors.chart.series.quinary.light: "#ea580c"
-  colors.chart.series.quinary.dark: "#fdba74"
+  colors.chart.series.quinary.light: "#db2777"
+  colors.chart.series.quinary.dark: "#f9a8d4"
 typography:
   display:
     fontFamily: "IBM Plex Sans, SF Pro Text, Segoe UI, sans-serif"
@@ -148,8 +142,8 @@ components:
   # Local to this app: the allocation category chip in `AllocationGrid`. Not a
   # design-system recipe.
   chip-category:
-    backgroundColor: "{colors.colorPalette.subtle.bg}"
-    textColor: "{colors.colorPalette.subtle.fg}"
+    backgroundColor: "{colors.categorical.1.bg}"
+    textColor: "{colors.categorical.1.fg}"
     rounded: "{rounded.md}"
     padding: "0.25rem 0.5rem"
   table-row-selected:
@@ -167,7 +161,7 @@ STL Verify should feel like an operations desk built for sustained concentration
 
 The visual system favors practical rhythm over decorative flourish. High-value metrics, filters, and tables are separated through spacing cadence and tonal layers, while interaction states stay quiet until users need to act. The interface rejects ornamental gradients, novelty controls, and high-chroma noise that competes with risk signals.
 
-Token provenance for this spec comes from `@archon-research/design-system/panda-preset`, which owns the surface, border, text, interactive, `bg.*`, `chart.*`, shadow, and scrollbar semantic ramps. `stl-verify/ts/ui/panda.config.ts` adds **only** what the preset does not ship — `text.subtle`, `text.inverse`, `text.violet`, `bg.neutral`, `bg.violet`, `overlay.backdrop`, `overlay.tooltip`, `interactive.accent`, `chart.series.quaternary`, `chart.series.quinary` — plus one deliberate shadow of `text.muted`, documented below. Every hex in the frontmatter below is a resolved value read out of `npx panda cssgen` output, not a hand-maintained copy; regenerate and re-read after any preset upgrade.
+Token provenance for this spec comes from `@archon-research/design-system/panda-preset`, which owns the surface, border, text, interactive, `bg.*`, `categorical.*`, `chart.*`, `overlay.*`, `zIndex`, shadow, and scrollbar semantic ramps. `stl-verify/ts/ui/panda.config.ts` adds **only** what the preset does not ship — `bg.neutral` — and **shadows nothing**. Every hex in the frontmatter below is a resolved value read out of `npx panda cssgen` output, not a hand-maintained copy; regenerate and re-read after any preset upgrade.
 
 **Do not re-add local overrides of preset tokens.** A local copy silently reverts upstream token fixes: the previous config redefined `surface.default` to `gray.950` in dark mode, which made a raised panel the darkest thing on the page and inverted the elevation ramp.
 
@@ -205,26 +199,27 @@ The ramp steps forward monotonically in both themes: canvas is furthest back, pa
 - **colors.border.default** (#a3a3a3 / #525252): stronger state borders.
 - **colors.border.strong** (#737373 / #737373): selection emphasis and selected-row outlines.
 - **colors.text.strong** (#0a0a0a / #ffffff): strong titles and key labels.
-- **colors.text.default** (#171717 / #f5f5f5): core body and table text.
-- **colors.text.muted** (#525252 / #d4d4d4): metadata and supporting copy. One step darker than the preset ships, which is the single token this config deliberately shadows: it is how the fourth tier below is made, since `subtle` cannot go lighter and stay AA. Also darkens preset recipes that read `text.muted` (DataTable header cells, `surfaceMessage` bodies, StatTile subs), which is intended.
-- **colors.text.subtle** (#737373 / #a3a3a3): the quietest meta tier, one step under `muted`. This is the floor: `neutral.400` on white is 2.52:1 and fails WCAG AA at the 11px these qualifiers render at, so the tier below `muted` was made by darkening `muted` rather than lightening this. All four tiers clear AA — 7.81:1 / 4.74:1 light, 12.06:1 / 7.11:1 dark.
+- **colors.text.default** (#404040 / #d4d4d4): core body and table text.
+- **colors.text.muted** (#737373 / #a3a3a3): metadata, supporting copy, and the quietest qualifier tier. This is the floor: `neutral.400` on white is 2.52:1 and fails WCAG AA at the 11px these qualifiers render at, so there is no tier below it. The ramp is three tiers, all clearing AA — 19.80:1 / 10.37:1 / 4.74:1 light, 17.93:1 / 12.09:1 / 7.11:1 dark. Where a fourth level of quiet is needed, step type size or weight rather than colour.
 - **colors.text.inverse** (#fafafa / #fafafa): theme-invariant light text, for always-dark fills such as `overlay.tooltip`.
 - **colors.text.critical** (#dc2626 / #fca5a5): the absent state on a risk dashboard. Use it; a risk grid that signals only success/warning/interactive is under-reporting.
 
 ### Status fills
-`bg.success`, `bg.warning`, `bg.critical` come from the preset; `bg.neutral` (#f5f5f5 / #262626) completes the status family locally, and `bg.violet` (#f5f3ff / #2e1065) is a status-free categorical fill added for the allocation category chips (see the token comment in `panda.config.ts` for why `colorPalette` cannot supply it).
+`bg.success`, `bg.warning`, `bg.critical` come from the preset; `bg.neutral` (#f5f5f5 / #262626) completes the status family locally.
+
+### Categorical encoding
+`categorical.1..5` (`.bg` + `.fg`, dark-aware) carry grouping that has no status meaning — allocation category chips, legends. Hue order is blue / teal / violet / amber / pink, matching `chart.series`, so a chip and its series line read as the same category. Reach for these, not the `bg.*` status family: its red reads as an alarm on a routine category, and `colorPalette` role sub-tokens exist for only six hues (neutral, gray, green, red, amber, blue), of which gray is indistinguishable from neutral.
 
 `bg.*` is a *fill*; `surface.*` is a *layer*. Do not substitute one for the other. The preset does blur this itself in one place: it ships `bg.canvas` as an exact duplicate of `surface.canvas` (both `neutral.50` / `neutral.950`). Prefer `surface.canvas` for the page layer; `bg.canvas` is not a second, distinct value.
 
 ### Chart series
 Ordinal order is `primary → secondary → tertiary → quaternary → quinary`; `positive` and `critical` are semantic and must not be used to fill out an ordinal scale.
 
-- **primary** #2563eb / #93c5fd — **secondary** #0d9488 / #5eead4 — **tertiary** #7c3aed / #c4b5fd — **quaternary** #d97706 / #fcd34d — **quinary** #ea580c / #fdba74
-- `quaternary` and `quinary` are local additions: the preset's ordinal scale stops at `tertiary` (filed upstream), and the only roles left (`positive`, `critical`) are semantic, so they would mis-signal on a routine capital/debt metric.
+- **primary** #2563eb / #93c5fd — **secondary** #0d9488 / #5eead4 — **tertiary** #7c3aed / #c4b5fd — **quaternary** #d97706 / #fcd34d — **quinary** #db2777 / #f9a8d4
 - Supporting chart tokens, all dark-aware: `chart.axis` (#737373 / #a3a3a3), `chart.grid` (#e5e5e5 / #404040), `chart.area.primary` (#dbeafe / #1e3a8a).
 
-### Overlays
-`overlay.backdrop` and `overlay.tooltip` are local: they are semi-transparent scrims and always-dark fills, which cannot be expressed as a step on the opaque surface ramp. The preset ships no `overlay.*` family.
+### Overlays and layering
+`overlay.backdrop` (scrims) and `overlay.tooltip` (always-dark floating fills, paired with `text.inverse`) come from the preset, as does `shadows.overlay` for floating-overlay elevation. Layer with the preset's `zIndex` scale — `dropdown`/`sticky`/`overlay`/`modal`/`popover`/`toast`/`tooltip` — never a hand-picked number.
 
 ### Named Rules
 **The Signal Budget Rule.** In styles this app writes, accent blue is used only when an element is actionable, selected, or needs immediate operator attention. A row hover is not one of those — that is `surface.hover`. Preset recipes make their own call; do not "correct" them from the outside.
@@ -269,7 +264,7 @@ Three shadow tokens are dark-aware — in dark mode they swap a light-mode drop 
 - **`shadows.xs`** — light `0 1px 2px 0 rgba(15, 23, 42, 0.06)`; dark `0 1px 2px 0 rgba(0, 0, 0, 0.5), inset 0 1px 0 0 rgba(255, 255, 255, 0.05)`. Correct choice for small controls such as a slider thumb.
 - **`shadows.sm`** — light `0 1px 3px 0 rgba(15, 23, 42, 0.10), 0 1px 2px -1px rgba(15, 23, 42, 0.10)`; dark `0 2px 4px 0 rgba(0, 0, 0, 0.6), inset 0 1px 0 0 rgba(255, 255, 255, 0.06)`.
 
-**`md` / `lg` / `xl` / `2xl` are theme-blind** — they keep Panda's `rgb(0 0 0 / 0.1)`–`0.25` defaults with no `.dark` override, so a `2xl` on a `#171717` drawer is effectively invisible. This is an upstream gap, filed. Until it is fixed, treat a large shadow on an overlay as decoration and carry the layering with `border.subtle` plus the surface ramp.
+**`md` / `lg` / `xl` / `2xl` are theme-blind** — they keep Panda's `rgb(0 0 0 / 0.1)`–`0.25` defaults with no `.dark` override, so a `2xl` on a `#171717` drawer is effectively invisible. This is an upstream gap, filed. For a floating overlay reach for `shadows.overlay`, which is dark-aware; elsewhere carry the layering with `border.subtle` plus the surface ramp.
 
 Never hand-write a shadow literal: a `rgba(0, 0, 0, 0.2)` drop shadow disappears on a dark surface, which is exactly the failure the dark-aware tokens exist to prevent.
 
@@ -287,7 +282,7 @@ Never hand-write a shadow literal: a `rgba(0, 0, 0, 0.2)` drop shadow disappears
 
 ### Chips
 - **Style:** `rounded.md` (0.375rem), not pill, and no `textTransform` — the label is sentence-cased at whatever the source gives.
-- **Colour:** a category chip fills from `colorPalette.subtle.bg` / `.subtle.fg`, so it stays dark-aware across every hue that has role sub-tokens. The one exception is the local `bg.violet` / `text.violet` pair, which covers the hue `colorPalette` cannot.
+- **Colour:** a category chip fills from `categorical.N.bg` / `.fg` (see "Categorical encoding"), so it stays dark-aware and carries no status meaning.
 - **State:** used to mark section context and compact taxonomy labels. A status chip drives colour through `colorPalette` + `variant`, not through the deprecated `tone` prop.
 
 ### Cards / Containers
@@ -336,5 +331,5 @@ Never hand-write a shadow literal: a `rgba(0, 0, 0, 0.2)` drop shadow disappears
 
 - `stl-verify/ts/ui/panda.config.ts` — the local `theme.extend` (additions only).
 - `stl-verify/ts/ui/src/index.css` — the `@layer base` app reset and page background.
-- `npx panda cssgen` output against `@archon-research/design-system@0.8.0-rohit-ds-tokens-and-primitives.1` — every resolved hex, font stack, radius, and shadow quoted above.
+- `npx panda cssgen` output against `@archon-research/design-system@0.8.0-rohit-consumer-fixes.1` — every resolved hex, font stack, radius, and shadow quoted above.
 - `@archon-research/design-system/panda-preset` (`dist/panda-preset.js`) — semantic ramp intent and release notes.

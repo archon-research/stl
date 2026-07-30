@@ -37,57 +37,6 @@ export default defineConfig({
           // Only tokens the design-system preset does NOT provide. Never shadow
           // a preset token here: `theme.extend` merges last and wins, so a local
           // copy silently reverts upstream token fixes.
-          text: {
-            // The one deliberate exception to the no-shadowing rule above, and it
-            // is a design decision rather than a workaround.
-            //
-            // This dashboard needs four text tiers: a row title, its body line, a
-            // timestamp, and a quieter qualifier under that. The preset ships
-            // three, and `subtle` below cannot go lighter than `neutral.500` --
-            // `neutral.400` is 2.52:1 on white and fails AA at the 11px these
-            // qualifiers render at. So the fourth tier has to be made by moving
-            // `muted` one step darker instead, which keeps every tier AA
-            // (7.81:1 / 4.74:1 light, 12.06:1 / 7.11:1 dark).
-            //
-            // Note this also darkens preset recipes that read `text.muted` --
-            // DataTable header cells, `surfaceMessage` bodies, StatTile subs --
-            // which is intended: the tier should mean one thing everywhere.
-            // Upstream ask is a less compressed text ramp; until then this
-            // diverges knowingly and will not pick up upstream changes to it.
-            muted: {
-              value: {
-                base: '{colors.neutral.600}',
-                _dark: '{colors.neutral.300}',
-              },
-            },
-            // The fourth tier, one step quieter than `muted`. Held at the
-            // preset's own former `muted` values, which is the lightest grey that
-            // still clears AA on both surfaces.
-            subtle: {
-              value: {
-                base: '{colors.neutral.500}',
-                _dark: '{colors.neutral.400}',
-              },
-            },
-            // Theme-INVARIANT light text for always-dark fills
-            // (`overlay.tooltip`). The preset's nearest token,
-            // `colorPalette.solid.fg` on the neutral palette, flips across
-            // themes by design -- wrong on a fixed dark overlay.
-            inverse: {
-              value: {
-                base: '{colors.neutral.50}',
-                _dark: '{colors.neutral.50}',
-              },
-            },
-            // Foreground for `bg.violet`; see that token for why the palette's
-            // own role tokens are unavailable.
-            violet: {
-              value: {
-                base: '{colors.violet.700}',
-                _dark: '{colors.violet.300}',
-              },
-            },
-          },
           bg: {
             // Completes the preset's `bg.*` status family, which ships
             // success/critical/warning but no neutral fill.
@@ -95,73 +44,6 @@ export default defineConfig({
               value: {
                 base: '{colors.neutral.100}',
                 _dark: '{colors.neutral.800}',
-              },
-            },
-            // A categorical fill carrying no status meaning. The preset's
-            // role-based `colorPalette` tokens (`subtle.bg`/`subtle.fg`) exist for
-            // only six palettes -- neutral, gray, green, red, amber, blue -- while
-            // `ColorPalette` accepts every raw hue, so `colorPalette: 'violet'`
-            // type-checks and then emits no `subtle.bg` at all. Of the six, gray is
-            // indistinguishable from neutral and red reads as an alarm, so a
-            // five-way status-free taxonomy cannot be expressed through
-            // `colorPalette` alone. Filed upstream.
-            violet: {
-              value: {
-                base: '{colors.violet.50}',
-                _dark: '{colors.violet.950}',
-              },
-            },
-          },
-          overlay: {
-            // Semi-transparent, so neither can be expressed as a step on the
-            // opaque surface ramp; the preset ships no `overlay.*` family.
-            backdrop: {
-              value: {
-                base: 'rgb(15 23 42 / 0.28)',
-                _dark: 'rgb(3 7 18 / 0.48)',
-              },
-            },
-            tooltip: {
-              value: {
-                base: 'rgb(15 23 42 / 0.96)',
-                _dark: 'rgb(3 7 18 / 0.96)',
-              },
-            },
-          },
-          interactive: {
-            // Load-bearing on two independent counts, so this token stays
-            // defined whatever upstream does. App code reaches for it directly as
-            // the accent; separately, three shipped design-system components
-            // (ErrorState, ErrorBoundary, RangePicker) read
-            // `var(--colors-interactive-accent, <hex>)` from an inline style
-            // while the preset defines no such token, so leaving it undefined
-            // makes those three fall back to a hardcoded light-mode blue in BOTH
-            // themes -- and to two different blues, since the inline fallbacks
-            // disagree. Values are kept identical to the preset's
-            // `text.interactive` so the app has one accent, not two.
-            accent: {
-              value: { base: '{colors.blue.600}', _dark: '{colors.blue.300}' },
-            },
-          },
-          chart: {
-            series: {
-              // The preset's series scale runs out of ORDINAL roles at
-              // `tertiary`, and the remaining two (`positive`, `critical`) are
-              // semantic -- they would mis-signal on a routine capital/debt
-              // metric. Extending the ordinal scale is the only way to get a 4th
-              // and 5th hue without borrowing a status colour. Filed upstream;
-              // see DESIGN.md, "Chart series".
-              quaternary: {
-                value: {
-                  base: '{colors.amber.600}',
-                  _dark: '{colors.amber.300}',
-                },
-              },
-              quinary: {
-                value: {
-                  base: '{colors.orange.600}',
-                  _dark: '{colors.orange.300}',
-                },
               },
             },
           },

@@ -1,6 +1,5 @@
-import { Tooltip } from '@archon-research/design-system';
+import { Portal, Tooltip } from '@archon-research/design-system';
 import type { ReactNode } from 'react';
-import { createPortal } from 'react-dom';
 
 import { css } from '#styled-system/css';
 
@@ -18,11 +17,8 @@ type TruncatedLabelProps = {
 
 // These wrappers are not a style preference. The design system re-exports Ark's
 // Tooltip, which is headless, and ships no `tooltip` recipe — so an unwrapped
-// Tooltip.Content renders as unstyled, unpositioned text over the page. The
-// correct appearance also needs `overlay.tooltip` and `text.inverse`, which are
-// local tokens with no preset equivalent (a tooltip fill is a semi-transparent
-// always-dark scrim, so it cannot be a step on the opaque surface ramp).
-// Reported upstream; delete this styling once a `tooltip` recipe ships.
+// Tooltip.Content renders as unstyled, unpositioned text over the page. Delete
+// this styling once a `tooltip` recipe ships.
 const tooltipContentClassName = css({
   maxW: '20rem',
   borderRadius: 'sm',
@@ -36,12 +32,7 @@ const tooltipContentClassName = css({
   color: 'text.inverse',
   fontSize: 'xs',
   lineHeight: '1.4',
-  // Neither the preset nor Panda defines a `tooltip` z-index token, so the
-  // token path this used to carry emitted a literal `z-index: tooltip` and
-  // computed to `auto` — a portalled tooltip then painted under the drawer. A
-  // tooltip must clear every overlay the design system ships: `drawer` sits at
-  // 50 and `searchInput`'s menu at 60.
-  zIndex: 70,
+  zIndex: 'tooltip',
 });
 
 const tooltipPositioning = {
@@ -108,16 +99,14 @@ export function TruncatedLabel({ label, className }: TruncatedLabelProps) {
       {/* Portalled, unlike AppTooltip's inline positioner, because the host is a
           table header: DataTable's root scrolls (`overflowX: auto`), which clips
           a tooltip placed above the header row, and the header button would
-          otherwise contain a <div>. Ark's own Portal part is not re-exported, and
-          React portals keep the Tooltip context intact. */}
-      {createPortal(
+          otherwise contain a <div>. */}
+      <Portal>
         <Tooltip.Positioner>
           <Tooltip.Content className={tooltipContentClassName}>
             {label}
           </Tooltip.Content>
-        </Tooltip.Positioner>,
-        document.body,
-      )}
+        </Tooltip.Positioner>
+      </Portal>
     </Tooltip.Root>
   );
 }

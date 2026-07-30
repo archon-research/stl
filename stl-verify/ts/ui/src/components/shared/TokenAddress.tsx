@@ -66,7 +66,7 @@ export function TokenAddress({
     whiteSpace: 'nowrap',
     textAlign: 'left',
     _hover: {
-      color: 'interactive.accent',
+      color: 'text.link',
     },
     _focus: {
       outline: '2px solid',

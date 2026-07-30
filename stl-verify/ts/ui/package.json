@@ -18,13 +18,14 @@
     "preview": "vite preview",
     "test:explorers": "node scripts/check-explorer-urls.mjs",
     "generate:openapi-types": "openapi-typescript ./src/generated/openapi-schema.json --output ./src/generated/openapi-types.ts && uikit-cli format --write ./src/generated/openapi-types.ts",
-    "lint": "uikit-cli lint src panda.config.ts vite.config.ts env.ts"
+    "lint": "uikit-cli lint src panda.config.ts vite.config.ts env.ts",
+    "doctor": "panda cssgen --outfile styled-system/doctor.css && uikit-cli doctor styled-system/doctor.css"
   },
   "dependencies": {
-    "@archon-research/charting": "0.8.0-rohit-ds-tokens-and-primitives.1",
-    "@archon-research/design-system": "0.8.0-rohit-ds-tokens-and-primitives.1",
-    "@archon-research/http-client-core": "0.8.0-rohit-ds-tokens-and-primitives.1",
-    "@archon-research/http-client-react": "0.8.0-rohit-ds-tokens-and-primitives.1",
+    "@archon-research/charting": "0.8.0-rohit-consumer-fixes.1",
+    "@archon-research/design-system": "0.8.0-rohit-consumer-fixes.1",
+    "@archon-research/http-client-core": "0.8.0-rohit-consumer-fixes.1",
+    "@archon-research/http-client-react": "0.8.0-rohit-consumer-fixes.1",
     "@tanstack/react-query": "5.100.14",
     "@tanstack/react-table": "8.21.3",
     "lucide-react": "1.17.0",
@@ -35,9 +36,9 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
-    "@archon-research/oxfmt-config": "0.8.0-rohit-ds-tokens-and-primitives.1",
-    "@archon-research/oxlint-config": "0.8.0-rohit-ds-tokens-and-primitives.1",
-    "@archon-research/tsconfig": "0.8.0-rohit-ds-tokens-and-primitives.1",
+    "@archon-research/oxfmt-config": "0.8.0-rohit-consumer-fixes.1",
+    "@archon-research/oxlint-config": "0.8.0-rohit-consumer-fixes.1",
+    "@archon-research/tsconfig": "0.8.0-rohit-consumer-fixes.1",
     "@pandacss/dev": "1.11.1",
     "@types/node": "24.13.1",
     "@types/react": "19.2.16",

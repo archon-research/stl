@@ -7,29 +7,20 @@ type ErrorPanelProps = {
   errorMessage?: string;
 };
 
-// The upstream `surfaceMessage` recipe already describes this surface exactly:
-// a recessed `surface.subtle` fill inside a `border.subtle` frame at radius
-// `md`, with a semibold `text.strong` title over a `text.muted` body. Applying
-// the recipe rather than the shipped `SurfaceMessage` component is deliberate —
-// that component styles itself with inline `style` objects, so a consumer
-// `className` cannot reach it.
-const surfaceMessageStyles = surfaceMessage();
+// Applying the recipe rather than the shipped `SurfaceMessage` component is
+// deliberate — that component styles itself with inline `style` objects, so a
+// consumer `className` cannot reach it.
+const surfaceMessageStyles = surfaceMessage({ tone: 'critical' });
 
 // Use this, not the design system's `ErrorState`, for a failure inside a panel,
-// a drawer or the prime rail. `ErrorState` is a page-level state: it hardcodes
-// `maxWidth: 840` + `marginInline: auto` in an inline style and takes no
-// className, so inline it centres itself in its container and reads as a
-// floating box — inside a ~250px rail it cannot fit at all. Reported upstream.
+// a drawer or the prime rail. `ErrorState` is a page-level state: a centred
+// 44px icon over an 18px title, and an `errorMessage` block fixed to
+// `whiteSpace: nowrap` by an inline style no consumer prop can reach — so in a
+// ~250px rail a URL-and-status string becomes a horizontal scroll strip. The
+// `className`/`style` escape hatches reach only its root.
 export function ErrorPanel({ title, message, errorMessage }: ErrorPanelProps) {
   return (
-    <div
-      // One step stronger than the recipe's `border.subtle`, so a failed panel
-      // reads as louder than an empty one.
-      className={cx(
-        surfaceMessageStyles.root,
-        css({ borderColor: 'border.default' }),
-      )}
-    >
+    <div className={surfaceMessageStyles.root}>
       <p className={surfaceMessageStyles.title}>{title}</p>
       <p className={surfaceMessageStyles.body}>{message}</p>
       {errorMessage ? (

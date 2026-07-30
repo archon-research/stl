@@ -6,7 +6,7 @@ import {
   ThemeToggle,
 } from '@archon-research/design-system';
 
-import { css, cx } from '#styled-system/css';
+import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 import { toggleSwitch } from '#styled-system/recipes';
 
@@ -25,28 +25,6 @@ type PrimeSidebarProps = {
 };
 
 const switchStyles = toggleSwitch();
-// The shared `toggleSwitch` recipe describes itself as built on Base UI and keys
-// its checked styling off `&[data-checked]`, but the design system re-exports the
-// *Ark* Switch, which emits `data-state="checked"`. The recipe's checked rules
-// therefore never match the component that ships with it, and without these
-// overrides the toggle does not visibly change when switched. Reported upstream;
-// delete this once the recipe matches Ark's attribute (or ships its own Switch
-// component). Neutrals are `neutral.*`, not the recipe's `gray.*` — see
-// DESIGN.md, "Neutral hue".
-const switchControlCheckedClassName = css({
-  '&[data-state="checked"]': {
-    bg: 'neutral.800',
-    borderColor: 'neutral.700',
-    _dark: { bg: 'neutral.600', borderColor: 'neutral.500' },
-  },
-});
-const switchThumbCheckedClassName = css({
-  '[data-state="checked"] &': {
-    transform: 'translateX(calc(2.25rem - 100% - 2px))',
-    bg: 'white',
-    _dark: { bg: 'neutral.100' },
-  },
-});
 
 export function PrimeSidebar({
   primes,
@@ -177,17 +155,6 @@ export function PrimeSidebar({
                       ? 'interactive.accent'
                       : 'border.subtle',
                     bg: isSelected ? 'interactive.selected' : 'surface.default',
-                    // The preset's dark `interactive.selected` is `blue.900`,
-                    // which on the near-black canvas paints a saturated block
-                    // instead of a selection tint. Diluting the same token keeps
-                    // one source of truth for the selection hue while letting
-                    // the accent border, not the fill, carry the signal.
-                    // Reported upstream.
-                    _dark: {
-                      bg: isSelected
-                        ? 'interactive.selected/35'
-                        : 'surface.default',
-                    },
                     px: '3.5',
                     py: '3.5',
                     cursor: 'pointer',
@@ -284,12 +251,8 @@ export function PrimeSidebar({
           >
             Show all primes
           </Switch.Label>
-          <Switch.Control
-            className={cx(switchStyles.root, switchControlCheckedClassName)}
-          >
-            <Switch.Thumb
-              className={cx(switchStyles.thumb, switchThumbCheckedClassName)}
-            />
+          <Switch.Control className={switchStyles.root}>
+            <Switch.Thumb className={switchStyles.thumb} />
           </Switch.Control>
           <Switch.HiddenInput />
         </Switch.Root>

@@ -194,7 +194,7 @@ const chartEmptyMessageClassName = css({
   m: 0,
   mt: '2',
   fontSize: 'xs',
-  color: 'text.subtle',
+  color: 'text.muted',
 });
 
 const CHART_HEIGHT = 236;
@@ -377,48 +377,21 @@ const tableHeaderTypographyClassName = css({
 // Here it has to arrive as a descendant override because the fill comes from the
 // `dataTable` recipe's `selected` variant, which the DataTable applies as a
 // hardcoded class name.
-const selectedRowTintClassName = css({
-  _dark: {
-    '& .dataTable__bodyRow--selected_true': {
-      bg: 'interactive.selected/35',
-    },
-  },
-});
-
 // One literal `css()` call per category, evaluated at module scope, so the cell
 // picks a finished class name: see `lib/activity.tsx` for why Panda cannot
 // extract a token path handed in as a variable.
 //
-// Hues come from the role-based `colorPalette` tokens rather than the
-// `bg.*`/`text.*` status family, which cannot give five strategy categories
-// distinct fills without two colliding. `asset` is the exception: `colorPalette`
-// role sub-tokens exist for only six hues, and violet is not one of them (see
-// the `bg.violet` token in panda.config.ts), so it uses the local
-// `bg.violet`/`text.violet` pair.
+// Hues come from the `categorical.*` tokens, which encode grouping without
+// status meaning — the `bg.*`/`text.*` status family cannot give five strategy
+// categories distinct fills without two colliding, and its red would read as an
+// alarm on a routine category. Hue order matches `chart.series`, so a chip and
+// its series line read as the same category.
 const CATEGORY_CHIP_CLASS: Record<AllocationCategory | 'unknown', string> = {
-  allocation: css({
-    colorPalette: 'green',
-    bg: 'colorPalette.subtle.bg',
-    color: 'colorPalette.subtle.fg',
-  }),
-  pol: css({
-    colorPalette: 'amber',
-    bg: 'colorPalette.subtle.bg',
-    color: 'colorPalette.subtle.fg',
-  }),
-  psm3: css({
-    colorPalette: 'blue',
-    bg: 'colorPalette.subtle.bg',
-    color: 'colorPalette.subtle.fg',
-  }),
-  asset: css({ bg: 'bg.violet', color: 'text.violet' }),
-  // Off-chain custody reads as infrastructure rather than strategy, so it stays
-  // achromatic instead of taking a fifth hue.
-  custody: css({
-    colorPalette: 'neutral',
-    bg: 'colorPalette.subtle.bg',
-    color: 'colorPalette.subtle.fg',
-  }),
+  allocation: css({ bg: 'categorical.1.bg', color: 'categorical.1.fg' }),
+  pol: css({ bg: 'categorical.2.bg', color: 'categorical.2.fg' }),
+  psm3: css({ bg: 'categorical.3.bg', color: 'categorical.3.fg' }),
+  asset: css({ bg: 'categorical.4.bg', color: 'categorical.4.fg' }),
+  custody: css({ bg: 'categorical.5.bg', color: 'categorical.5.fg' }),
   unknown: css({
     colorPalette: 'neutral',
     bg: 'colorPalette.subtle.bg',
@@ -840,6 +813,7 @@ function createAllocationColumns(
         // Single-value USD cell, so the column can take mono + tabular figures
         // wholesale.
         mono: true,
+        align: 'right',
       },
     },
   ];
@@ -1435,12 +1409,7 @@ export function AllocationGrid({
         {selectedPrime &&
         !errorMessage &&
         (isLoading || filteredAllocations.length > 0) ? (
-          <div
-            className={cx(
-              tableHeaderTypographyClassName,
-              selectedRowTintClassName,
-            )}
-          >
+          <div className={tableHeaderTypographyClassName}>
             <DataTable
               table={table}
               isLoading={isLoading}
