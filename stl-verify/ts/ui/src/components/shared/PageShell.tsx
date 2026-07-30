@@ -19,9 +19,8 @@ type PageShellProps = {
 // primitive. Horizontal padding is dropped in favour of the upstream PageShell
 // recipe's own, but `maxWidth="none"` defeats that recipe's ~1160px centring
 // cap, which would otherwise narrow the allocations grid — we want its padding,
-// not its width limit. The `panel` recipe deliberately sets no shadow, so the
-// card's elevation is re-applied here, now from the dark-aware `elevation`
-// token rather than the theme-blind `2xl` shadow used before.
+// not its width limit. The `panel` recipe sets no shadow, so the card's
+// elevation is applied here, from the dark-aware `elevation` token.
 export function PageShell({ children }: PageShellProps) {
   return (
     <div

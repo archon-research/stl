@@ -17,8 +17,6 @@ type AppTooltipProps = {
 // local tokens with no preset equivalent (a tooltip fill is a semi-transparent
 // always-dark scrim, so it cannot be a step on the opaque surface ramp).
 // Reported upstream; delete the Content styling once a `tooltip` recipe ships.
-// The trigger affordance below (`cursor: help`, a 44px minimum target,
-// `aria-label`) is genuinely ours and stays either way.
 export function AppTooltip({
   trigger,
   content,

@@ -47,9 +47,9 @@ export function SummaryMetric({
       label={label}
       value={<span className={valueClassName}>{value}</span>}
       sub={
-        detail == null ? undefined : (
-          <span className={detailClassName}>{detail}</span>
-        )
+        // Falsy, not nullish: `''` and `0` must render nothing, or the tile gains
+        // an empty `sub` slot and the extra grid gap that comes with it.
+        !detail ? undefined : <span className={detailClassName}>{detail}</span>
       }
     />
   );

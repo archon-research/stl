@@ -358,7 +358,8 @@ function MetricCardTrend({
   );
 }
 
-// House header style, louder than the recipe's 12px muted micro-label. Sortable
+// House header style, louder than the 11px (`2xs`) muted micro-label the recipe
+// gives a `density="compact"` table. Sortable
 // headers need no separate rule: the recipe's headerButton slot inherits font,
 // color, text-transform and letter-spacing from the cell.
 const tableHeaderTypographyClassName = css({
@@ -372,20 +373,16 @@ const tableHeaderTypographyClassName = css({
   },
 });
 
-// Panda extracts styles statically, so a token path returned from a function and
-// then handed to `css({ bg: value })` yields no rule at all -- the chips rendered
-// with no fill and no colour. Each category therefore needs its own literal
-// `css()` call, evaluated once at module scope, and the cell picks a finished
-// class name.
+// One literal `css()` call per category, evaluated at module scope, so the cell
+// picks a finished class name: see `lib/activity.tsx` for why Panda cannot
+// extract a token path handed in as a variable.
 //
-// Hues come from the design system's role-based `colorPalette` tokens, which are
-// dark-aware, rather than the `bg.*`/`text.*` status family -- that family cannot
-// give five strategy categories distinct fills without two colliding.
-//
-// Only `neutral`, `gray`, `green`, `red`, `amber` and `blue` have role sub-tokens,
-// though `ColorPalette` accepts every raw hue: `colorPalette: 'violet'` type-checks
-// and then emits no `subtle.bg`, leaving a transparent chip. `asset` therefore uses
-// the local `bg.violet`/`text.violet` pair instead.
+// Hues come from the role-based `colorPalette` tokens rather than the
+// `bg.*`/`text.*` status family, which cannot give five strategy categories
+// distinct fills without two colliding. `asset` is the exception: `colorPalette`
+// role sub-tokens exist for only six hues, and violet is not one of them (see
+// the `bg.violet` token in panda.config.ts), so it uses the local
+// `bg.violet`/`text.violet` pair.
 const CATEGORY_CHIP_CLASS: Record<AllocationCategory | 'unknown', string> = {
   allocation: css({
     colorPalette: 'green',
@@ -623,8 +620,6 @@ function AllocationActivityCell({ allocation }: { allocation: Allocation }) {
     );
   }
 
-  // A finished class name, not a token path: a token path handed to css() as a
-  // variable is invisible to Panda's static extraction and emits no rule.
   const actionColorClass = getActionColorClass(
     allocation.latest_activity_action,
   );
@@ -1438,8 +1433,7 @@ export function AllocationGrid({
               getRowKey={getAllocationKey}
               selectedRowKey={selectedAllocationKey}
               density="compact"
-              // Restores the design-system default that 0.8.0 dropped. Six
-              // nowrap columns push min-content well past this, so it binds
+              // Six nowrap columns push min-content well past this, so it binds
               // only on the loading skeleton, which has no intrinsic width.
               minWidth="48rem"
               skeletonConfig={{ rows: 8, columns: 6, firstColumnTall: true }}

@@ -6,6 +6,7 @@ import { flex } from '#styled-system/patterns';
 
 import { getRrc } from '../../../lib/api';
 import {
+  type UsdTone,
   formatPercentValue,
   formatTokenAmount,
   formatUsdValue,
@@ -34,13 +35,9 @@ const MODEL_LABELS: Record<string, string> = {
   gap_sweep: 'Gap sweep',
 };
 
-// Panda resolves `css()` from source text, so a token path returned by a
-// function is never resolved and no rule is emitted at all — the previous
-// `getToneStyles` left this tab's headline number with no colour declaration in
-// either theme. A map of literal `css()` calls keyed off the tone is
-// statically extractable, and the semantic status tokens it now reaches for are
-// dark-aware, which the raw palette steps it replaced were not.
-const TONE_VALUE_COLOR_CLASS: Record<ReturnType<typeof getUsdTone>, string> = {
+// A map of finished class names rather than a tone-to-token-path helper: see
+// `lib/activity.tsx` for why Panda cannot extract the latter.
+const TONE_VALUE_COLOR_CLASS: Record<UsdTone, string> = {
   green: css({ color: 'text.success' }),
   yellow: css({ color: 'text.warning' }),
   red: css({ color: 'text.critical' }),

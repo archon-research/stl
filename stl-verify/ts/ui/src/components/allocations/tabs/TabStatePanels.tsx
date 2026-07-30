@@ -31,8 +31,8 @@ export function TabNotePanel({ message }: TabNotePanelProps) {
 export function TabErrorPanel({ title, message }: TabErrorPanelProps) {
   return (
     <div
-      // One step stronger than the recipe's hairline, so a failed tab reads as
-      // louder than an empty one.
+      // One step stronger than the recipe's `border.subtle`, so a failed tab
+      // reads as louder than an empty one.
       className={cx(
         surfaceMessageStyles.root,
         css({ borderColor: 'border.default' }),

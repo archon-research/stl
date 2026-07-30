@@ -55,7 +55,7 @@ export function TokenAddress({
     minHeight: '11',
     fontFamily: 'mono',
     fontSize: type === 'tx' ? 'xs' : '2xs',
-    color: { base: 'blue.500', _dark: 'blue.400' },
+    color: 'text.link',
     bg: 'transparent',
     border: 'none',
     cursor: 'pointer',

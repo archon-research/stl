@@ -14,13 +14,17 @@ export default defineConfig({
   gitignore: true,
   outdir: 'styled-system',
   jsxFramework: 'react',
-  // The design system's components build their recipe class names at runtime
-  // (`badge--variant_${variant}`), so Panda's static scan of src/ cannot see
-  // which variants are reachable and emits only the defaults it can infer.
-  // Every variant chosen from data -- which is most of them here, e.g.
-  // StatusBadge -- would then render with a class that has no CSS behind it,
-  // silently. staticCss is a Panda root-config key, so the preset cannot carry
-  // this for us; spreading the exported map is the supported fix.
+  // Panda only emits CSS for recipe usage it can read in source text, and the
+  // design system's components apply their recipes as hardcoded class-name
+  // strings (`badge--variant_${variant}`) rather than calling the recipe fn. So
+  // of the 24 recipes the preset registers, the 21 the app never calls itself
+  // are invisible to the scan of src/ and emit NOTHING -- every design-system
+  // component built on them renders unstyled. For the three the app does call
+  // (`toggleSwitch`, `segmentedControl`, `surfaceMessage`) Panda emits only the
+  // defaults it can infer, so any variant chosen from data still lands on a
+  // class with no CSS behind it. All of it fails silently. staticCss is a Panda
+  // root-config key, so the preset cannot carry this for us; spreading the
+  // exported map is the supported fix.
   staticCss: {
     recipes: {
       ...designSystemStaticCssRecipes,
@@ -30,19 +34,14 @@ export default defineConfig({
     extend: {
       semanticTokens: {
         colors: {
-          // Only tokens the design-system preset does NOT provide. Every
-          // surface/border/text/interactive token this app used to redefine is
-          // gone: the preset now ships an equivalent-or-better value, and a
-          // local copy silently reverts upstream token fixes -- most visibly
-          // the dark elevation ramp, where the old `surface.default:
-          // gray.950` made a "raised" panel the darkest thing on the page.
+          // Only tokens the design-system preset does NOT provide. Never shadow
+          // a preset token here: `theme.extend` merges last and wins, so a local
+          // copy silently reverts upstream token fixes.
           text: {
-            // A 4th step below `muted`. The preset's text ramp stops at
-            // strong/default/muted, but 13 call sites want one step quieter
-            // than `muted`. Pinned to the preset's `text.muted` value for now:
-            // anything lighter than neutral.500 on white fails WCAG AA
-            // (neutral.400 = 2.52:1), so a real 4th step has to be inserted
-            // between `default` and `muted`, which is a design decision.
+            // A step quieter than `muted`, which is where the preset's text ramp
+            // stops. Pinned to `text.muted`'s value: a genuinely lighter step
+            // fails WCAG AA on white, so the real fix is a design decision (see
+            // DESIGN.md, "Borders and text").
             subtle: {
               value: {
                 base: '{colors.neutral.500}',
@@ -93,9 +92,8 @@ export default defineConfig({
             },
           },
           overlay: {
-            // The preset has no `overlay.*` family at all. Scrims and
-            // always-dark tooltip fills are semi-transparent, so they cannot
-            // be expressed as a step on the opaque surface ramp.
+            // Semi-transparent, so neither can be expressed as a step on the
+            // opaque surface ramp; the preset ships no `overlay.*` family.
             backdrop: {
               value: {
                 base: 'rgb(15 23 42 / 0.28)',
@@ -110,16 +108,16 @@ export default defineConfig({
             },
           },
           interactive: {
-            // Compatibility shim, NOT a design choice, and load-bearing: three
-            // shipped components -- ErrorState.js:58, ErrorBoundary.js:63,
-            // RangePicker.js:103 -- read `var(--colors-interactive-accent,
-            // <hex>)` from an inline style, yet the preset defines no such
-            // token. Without this definition the var is unresolved and all
-            // three fall back to a hardcoded light-mode blue in BOTH themes
-            // (and to two different blues, #2563eb vs #1d4ed8). Values are
-            // kept identical to the preset's `text.interactive` so the app has
-            // one accent, not two. Delete once upstream defines the token or
-            // stops reading it.
+            // Load-bearing on two independent counts, so this token stays
+            // defined whatever upstream does. App code reaches for it directly as
+            // the accent; separately, three shipped design-system components
+            // (ErrorState, ErrorBoundary, RangePicker) read
+            // `var(--colors-interactive-accent, <hex>)` from an inline style
+            // while the preset defines no such token, so leaving it undefined
+            // makes those three fall back to a hardcoded light-mode blue in BOTH
+            // themes -- and to two different blues, since the inline fallbacks
+            // disagree. Values are kept identical to the preset's
+            // `text.interactive` so the app has one accent, not two.
             accent: {
               value: { base: '{colors.blue.600}', _dark: '{colors.blue.300}' },
             },
@@ -127,13 +125,11 @@ export default defineConfig({
           chart: {
             series: {
               // The preset's series scale runs out of ORDINAL roles at
-              // `tertiary`; the remaining two (`positive`, `critical`) are
-              // semantic and would mis-signal on a routine capital/debt
-              // metric. The 4-up metric rail needs a 4th ordinal hue, so
-              // extend the scale rather than borrow a status colour. These
-              // preserve the rail's historical amber/orange identity but as
-              // dark-aware palette steps instead of the raw #f59e0b/#f97316.
-              // Filed upstream as a gap in the ordinal scale.
+              // `tertiary`, and the remaining two (`positive`, `critical`) are
+              // semantic -- they would mis-signal on a routine capital/debt
+              // metric. Extending the ordinal scale is the only way to get a 4th
+              // and 5th hue without borrowing a status colour. Filed upstream;
+              // see DESIGN.md, "Chart series".
               quaternary: {
                 value: {
                   base: '{colors.amber.600}',

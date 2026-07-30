@@ -47,11 +47,9 @@
     height: 6px;
   }
 
-  /* Thumb comes from the preset's dark-aware `scrollbar.thumb`, replacing a
-     raw `--colors-gray-300` read plus a hand-written `.dark` duplicate. The
-     track stays transparent on purpose -- these are thin overlay scrollbars
-     over dense data; `scrollbar.track` exists if a visible gutter is ever
-     wanted. */
+  /* Thumb comes from the preset's dark-aware `scrollbar.thumb`. The track stays
+     transparent on purpose -- these are thin overlay scrollbars over dense
+     data; `scrollbar.track` exists if a visible gutter is ever wanted. */
   ::-webkit-scrollbar-track {
     background: transparent;
   }

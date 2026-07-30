@@ -26,17 +26,14 @@ type PrimeSidebarProps = {
 };
 
 const switchStyles = toggleSwitch();
-// LOAD-BEARING — do not "simplify" away. The shared `toggleSwitch` recipe
-// describes itself as built on Base UI and keys its checked styling off
-// `&[data-checked]`, but the design system re-exports the *Ark* Switch, which
-// emits `data-state="checked"`. The recipe's checked rules therefore never
-// match the component that ships with it, and without these overrides the
-// toggle does not visibly change when switched. Reported upstream; delete this
-// once the recipe matches Ark's attribute (or ships its own Switch component).
-//
-// Neutrals are `neutral.*`, not the recipe's `gray.*`: `gray` is blue-tinted
-// and `neutral` is achromatic, and the semantic layer is achromatic, so `gray`
-// here would put cool-tinted greys beside achromatic ones.
+// The shared `toggleSwitch` recipe describes itself as built on Base UI and keys
+// its checked styling off `&[data-checked]`, but the design system re-exports the
+// *Ark* Switch, which emits `data-state="checked"`. The recipe's checked rules
+// therefore never match the component that ships with it, and without these
+// overrides the toggle does not visibly change when switched. Reported upstream;
+// delete this once the recipe matches Ark's attribute (or ships its own Switch
+// component). Neutrals are `neutral.*`, not the recipe's `gray.*` — see
+// DESIGN.md, "Neutral hue".
 const switchControlCheckedClassName = css({
   '&[data-state="checked"]': {
     bg: 'neutral.800',
@@ -188,10 +185,8 @@ export function PrimeSidebar({
                     transitionProperty:
                       'background-color, border-color, transform',
                     _hover: {
-                      // `surface.hover`, not `interactive.hover`: the preset now
-                      // splits the two, and `interactive.hover` became an
-                      // accent-tinted (blue) wash. A row hover wants the neutral
-                      // grey wash.
+                      // Neutral grey wash, not accent-tinted `interactive.hover`
+                      // — see DESIGN.md, "The Signal Budget Rule".
                       bg: 'surface.hover',
                       transform: 'translateY(-1px)',
                     },
@@ -229,7 +224,7 @@ export function PrimeSidebar({
                         className={css({
                           fontFamily: 'mono',
                           fontSize: 'xs',
-                          color: { base: 'blue.500', _dark: 'blue.400' },
+                          color: 'text.link',
                           overflow: 'hidden',
                           textOverflow: 'ellipsis',
                           whiteSpace: 'nowrap',
