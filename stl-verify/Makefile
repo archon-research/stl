@@ -46,6 +46,7 @@ include lint.mk
 		kind-create kind-delete kind-infra kind-config kind-secrets kind-bootstrap-db kind-migrate \
 		kind-load-migrate kind-load-watcher kind-load-workers kind-load-python-api kind-load-cronjobs \
 		kind-deploy-apps kind-deploy-workers kind-deploy-data-validator check-dev-overlay-sync \
+		check-reloader-opt-in \
 		kind-redeploy-watcher kind-redeploy-worker \
 		docker-build-migrate \
 		kind-infra-ci kind-ci-up kind-ci-down \
@@ -1921,6 +1922,32 @@ check-dev-overlay-sync:
 	  echo "       Reconcile CRONJOB_DEPLOYMENTS and k8s/overlays/dev/kustomization.yaml."; \
 	  exit 1; \
 	fi
+
+# Assert every Deployment in the EKS overlays carries the Reloader opt-in
+# annotation exactly once (ADR-013 / ORB-188), and that the local dev overlay
+# carries none (local development runs no Reloader controller).
+#
+# The overlay patch targets `kind: Deployment` with no name selector, so new
+# services are covered automatically — this guard exists to catch the patch block
+# being dropped or a rendering regression, not a forgotten service.
+check-reloader-opt-in:
+	@for env in prod staging; do \
+	  rendered=$$(kubectl kustomize ../k8s/overlays/$$env); \
+	  deploys=$$(printf '%s\n' "$$rendered" | grep -c '^kind: Deployment' || true); \
+	  annots=$$(printf '%s\n' "$$rendered" | grep -c 'reloader.stakater.com/auto: "true"' || true); \
+	  if [ "$$deploys" -eq 0 ] || [ "$$deploys" != "$$annots" ]; then \
+	    echo "ERROR: $$env overlay has $$deploys Deployment(s) but $$annots Reloader opt-in annotation(s)."; \
+	    echo "       Every Deployment must carry reloader.stakater.com/auto exactly once (ADR-013)."; \
+	    exit 1; \
+	  fi; \
+	  echo "✓ $$env: $$deploys/$$annots Deployments opted into Reloader"; \
+	done
+	@dev_annots=$$(kubectl kustomize ../k8s/overlays/dev | grep -c 'reloader.stakater.com/auto' || true); \
+	if [ "$$dev_annots" != "0" ]; then \
+	  echo "ERROR: dev overlay carries $$dev_annots Reloader annotation(s); local runs no controller (ADR-013)."; \
+	  exit 1; \
+	fi
+	@echo "✓ dev: no Reloader annotations (correct — no controller locally)"
 
 # Apply the dev core overlay (watcher, python-api, cronjobs) — reuses k8s/base.
 # Images must already be built + loaded into kind.
