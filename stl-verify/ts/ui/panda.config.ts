@@ -1,3 +1,4 @@
+import { designSystemStaticCssRecipes } from '@archon-research/design-system';
 import { designSystemPreset } from '@archon-research/design-system/panda-preset';
 import { defineConfig } from '@pandacss/dev';
 
@@ -13,6 +14,18 @@ export default defineConfig({
   gitignore: true,
   outdir: 'styled-system',
   jsxFramework: 'react',
+  // The design system's components build their recipe class names at runtime
+  // (`badge--variant_${variant}`), so Panda's static scan of src/ cannot see
+  // which variants are reachable and emits only the defaults it can infer.
+  // Every variant chosen from data -- which is most of them here, e.g.
+  // StatusBadge -- would then render with a class that has no CSS behind it,
+  // silently. staticCss is a Panda root-config key, so the preset cannot carry
+  // this for us; spreading the exported map is the supported fix.
+  staticCss: {
+    recipes: {
+      ...designSystemStaticCssRecipes,
+    },
+  },
   theme: {
     extend: {
       semanticTokens: {
