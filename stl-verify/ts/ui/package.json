@@ -21,6 +21,8 @@
     "lint": "uikit-cli lint src panda.config.ts vite.config.ts env.ts"
   },
   "dependencies": {
+    "@archon-research/charting": "0.8.0-rohit-ds-tokens-and-primitives.1",
+    "@archon-research/design-system": "0.8.0-rohit-ds-tokens-and-primitives.1",
     "@archon-research/http-client-core": "0.8.0-rohit-ds-tokens-and-primitives.1",
     "@archon-research/http-client-react": "0.8.0-rohit-ds-tokens-and-primitives.1",
     "@tanstack/react-query": "5.100.14",
@@ -33,8 +35,6 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
-    "@archon-research/charting": "0.8.0-rohit-ds-tokens-and-primitives.1",
-    "@archon-research/design-system": "0.8.0-rohit-ds-tokens-and-primitives.1",
     "@archon-research/oxfmt-config": "0.8.0-rohit-ds-tokens-and-primitives.1",
     "@archon-research/oxlint-config": "0.8.0-rohit-ds-tokens-and-primitives.1",
     "@archon-research/tsconfig": "0.8.0-rohit-ds-tokens-and-primitives.1",
