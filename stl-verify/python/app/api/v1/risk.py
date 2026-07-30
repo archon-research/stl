@@ -26,7 +26,7 @@ from app.domain.entities.allocation import EthAddress
 from app.domain.entities.receipt_token import ReceiptTokenInfo
 from app.domain.entities.risk import RrcResult
 from app.domain.exceptions import (
-    AllocationShareError,
+    AllocationUnpricedError,
     InvalidOverrideError,
 )
 from app.domain.serialization import PlainDecimal
@@ -153,7 +153,7 @@ async def _compute_bad_debt(
 
     try:
         bad_debt = await service.get_bad_debt_legacy(receipt_token_id, gap_pct)
-    except AllocationShareError as exc:
+    except AllocationUnpricedError as exc:
         raise share_error_503(exc) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -173,7 +173,7 @@ async def _compute_risk_breakdown(
 ) -> RiskBreakdownResponse:
     try:
         breakdown = await service.get_risk_breakdown(receipt_token_id, prime_id)
-    except AllocationShareError as exc:
+    except AllocationUnpricedError as exc:
         raise share_error_503(exc) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -556,7 +556,7 @@ async def _compute_envelope(
     for m in applicable:
         try:
             result = await m.compute(asset_id, prime_id, overrides.get(m.risk_model, {}))
-        except AllocationShareError as exc:
+        except AllocationUnpricedError as exc:
             raise share_error_503(exc) from exc
         except InvalidOverrideError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc

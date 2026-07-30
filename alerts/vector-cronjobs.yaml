@@ -5,8 +5,14 @@
 # shared cronjobWorkflow (stl-verify/internal/adapters/outbound/temporal/) and
 # now emit a single instrumented outcome counter from the shared activity path:
 #
-#   cronjob_runs_total{status="success"|"error"}
+#   cronjob_runs_total{status="success"|"error"|"canceled"}
 #   cronjob_run_duration_seconds_*  (histogram, for dashboards)
+#
+# "canceled" is a run interrupted by activity-context cancellation — worker
+# shutdown during a deploy rollout, or a schedule cancel. Temporal retries the
+# run on the new worker, so it is deliberately NOT status="error" and no rule
+# here keys on it; before this split, every deploy that landed while a run was
+# in flight tripped VectorCronjobRunFailing.
 #
 # RunCronjob initialises OTel with ServiceName=<cronjob name>, so every series
 # carries service_name="anchorage-indexer" | "offchain-price-indexer" | ... .
@@ -44,8 +50,10 @@ groups:
         # Any cronjob run returned an error in the last 15m. RecordRun fires
         # once per activity execution, so a transient failure that the retry
         # policy later recovers also lands here — that is intentional for a
-        # warning (you want to see flapping). A sustained, total failure is
-        # escalated to a page by VectorCronjobAllRunsFailing below.
+        # warning (you want to see flapping). Runs interrupted by worker
+        # shutdown land on status="canceled" instead and do not fire this. A
+        # sustained, total failure is escalated to a page by
+        # VectorCronjobAllRunsFailing below.
         expr: |
           sum by (service_name, cluster) (
             increase(cronjob_runs_total{

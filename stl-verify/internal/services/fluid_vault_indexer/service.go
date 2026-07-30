@@ -309,9 +309,9 @@ func (s *Service) recordBlockProcessed(ctx context.Context, err error) {
 	if s.metrics == nil {
 		return
 	}
-	status := "success"
+	status := outbound.StatusSuccess
 	if err != nil {
-		status = "error"
+		status = outbound.StatusError
 	}
 	s.metrics.RecordBlockProcessed(ctx, status)
 }

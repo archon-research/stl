@@ -50,6 +50,10 @@ once per activity execution, so a transient failure the retry policy later
 recovers also fires this — that is intentional (you want to see flapping). Data
 may be partial or briefly stale.
 
+A run interrupted by worker shutdown (a deploy rollout landing mid-run, or a
+schedule cancel) is recorded as `status="canceled"`, not `status="error"`, and
+does not fire this alert — Temporal retries that run on the new worker.
+
 ### First checks (≤5 min)
 
 1. **Logs** — `kubectl -n vector logs deploy/<deployment> --tail=200`; find the

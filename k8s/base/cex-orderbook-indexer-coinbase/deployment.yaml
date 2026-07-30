@@ -34,7 +34,10 @@ spec:
               cpu: "50m"
               memory: "64Mi"
             limits:
-              cpu: "200m"
+              # 500m, not the fleet's usual 200m: the staging headroom test (VEC-380)
+              # showed this pod CPU-throttled at 200m (per-message full-book clone).
+              # okx stays at 200m — it idles at single-digit millicores.
+              cpu: "500m"
               memory: "256Mi"
           livenessProbe:
             exec:

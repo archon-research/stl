@@ -3,6 +3,7 @@ from decimal import Decimal
 from typing import Protocol
 
 from app.domain.entities.allocation import (
+    AnchorageCustodyHolding,
     ChainMetadata,
     DirectAssetHolding,
     EthAddress,
@@ -58,6 +59,18 @@ class AllocationRepositoryPort(Protocol):
 
         A holding whose latest balance is zero (closed or swept) is excluded,
         even when older non-zero balance records exist in its history.
+        """
+        ...
+
+    async def list_anchorage_custody_holdings(self, prime_id: EthAddress) -> list[AnchorageCustodyHolding]:
+        """Return off-chain Anchorage custody collateral for the prime.
+
+        One row per ``(asset_type, custody_type)``, collapsed across every
+        package in the prime's *latest snapshot cohort* — the packages sharing
+        the most recent ``snapshot_time`` for that prime. Closed packages that
+        froze at an earlier poll (``exposure_value = 0`` but still
+        ``active = true``) are outside the cohort and never inflate the totals.
+        Returns an empty list when the prime has no custody snapshots.
         """
         ...
 

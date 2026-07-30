@@ -57,6 +57,12 @@ type PositionBalance struct {
 	// row (a V3 pool is not an ERC20 and has no symbol of its own).
 	PoolToken0 *common.Address
 	PoolToken1 *common.Address
+	// ShareToken is the ERC-20 token the balance is actually held in, set only
+	// by ERC7540Source. For an ERC-7540 vault it is the vault's share() token
+	// (the vault contract itself has no decimals/symbol); for a direct share
+	// entry it equals the entry's own address. The handler reads row metadata
+	// (decimals/symbol) from it instead of the entry's contract_address.
+	ShareToken *common.Address
 }
 
 // PoolSupply holds the totalSupply and (optionally) scaledTotalSupply of a pool
@@ -94,6 +100,9 @@ type PositionSnapshot struct {
 	// comments there.
 	PoolToken0 *common.Address
 	PoolToken1 *common.Address
+	// ShareToken carried from PositionBalance (centrifuge/erc7540 only); the
+	// address to read row metadata from. See the field comment there.
+	ShareToken *common.Address
 
 	ChainID      int64
 	BlockNumber  int64

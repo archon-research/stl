@@ -32,6 +32,10 @@ spec:
               END
               \$body\$;
               " -c "GRANT CONNECT ON DATABASE stl_verify TO stl_migrator;" -c "GRANT CREATE, USAGE ON SCHEMA public TO stl_migrator;"
+              # CREATE on the database (not just on schema public) lets migrations
+              # create non-public schemas (e.g. 20260706_140000's transformed);
+              # staging/prod get this from the infra repo's bootstrap-db.sh.
+              psql "$ADMIN_DATABASE_URL" -v ON_ERROR_STOP=1 -c "GRANT CREATE ON DATABASE stl_verify TO stl_migrator;"
               echo "Bootstrap complete."
           env:
             - name: ADMIN_DATABASE_URL

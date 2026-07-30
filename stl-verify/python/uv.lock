@@ -102,15 +102,15 @@ wheels = [
 
 [[package]]
 name = "axis-synome"
-version = "0.1.0.dev76"
+version = "0.2.0.dev202607240944"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "eth-hash", extra = ["pycryptodome"] },
     { name = "pydantic" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/7f/b8/b1eb3d78973fb1dfa88ad3ce1b7cdaf3cbe7ca9d7818a81f0f831f0c7ebf/axis_synome-0.1.0.dev76.tar.gz", hash = "sha256:2b9d001199860e8a04996a15e2d9735491271798a5fe8659850098e19e050697", size = 293958, upload-time = "2026-06-09T13:10:01.914Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/c3/5b/41b7ffbd65851fcb5a53f200bf0f889ab00335dee22edc393dfb2086a6ec/axis_synome-0.2.0.dev202607240944.tar.gz", hash = "sha256:9d757d2125a2c7ab9ca3ec20bafcce42068b85dc267f6967732375b7c807d75c", size = 336211, upload-time = "2026-07-24T09:44:46.484Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/0c/7a/882dccad6ea8f3e61a84ddf8164518c753e919223b65a4dec3d3aea0c07b/axis_synome-0.1.0.dev76-py3-none-any.whl", hash = "sha256:dd10b40fb66c84ca58c5fe5702323459f74daa6bc64038643a17b11bc3eff49a", size = 210300, upload-time = "2026-06-09T13:10:00.287Z" },
+    { url = "https://files.pythonhosted.org/packages/5d/4a/409458200638b7c7592135b3f6aa1210127ae99bf949095db31ffa45d6ea/axis_synome-0.2.0.dev202607240944-py3-none-any.whl", hash = "sha256:fa5c8dd7828530554380c2f772f16e292ebd22534ceefbd34eae8704c1aef593", size = 227108, upload-time = "2026-07-24T09:44:45.165Z" },
 ]
 
 [[package]]
@@ -1162,7 +1162,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "asyncpg" },
-    { name = "axis-synome", specifier = "==0.1.0.dev76" },
+    { name = "axis-synome", specifier = "==0.2.0.dev202607240944" },
     { name = "fastapi" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "httpx", marker = "extra == 'dev'" },

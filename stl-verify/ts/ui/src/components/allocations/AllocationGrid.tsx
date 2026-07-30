@@ -387,6 +387,10 @@ function getCategoryColor(category: AllocationCategory | undefined): string {
       return 'bg.interactive';
     case 'asset':
       return 'bg.info';
+    // Off-chain custody: a neutral chip, distinct from the strategy categories
+    // (the semantic accent tokens are all taken).
+    case 'custody':
+      return 'bg.subtle';
     default:
       return 'bg.subtle';
   }
@@ -404,6 +408,8 @@ function getCategoryTextColor(
       return 'text.interactive';
     case 'asset':
       return 'text.info';
+    case 'custody':
+      return 'text.muted';
     default:
       return 'text.default';
   }

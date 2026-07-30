@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: avalanche-allocation-tracker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: avalanche-allocation-tracker
+  template:
+    metadata:
+      labels:
+        app: avalanche-allocation-tracker
+    spec:
+      serviceAccountName: avalanche-allocation-tracker
+      containers:
+        - name: avalanche-allocation-tracker
+          # Distinct image key — overlay maps this to the allocation-tracker ECR repo.
+          # Same binary as allocation-tracker; chain is selected via CHAIN_ID env var.
+          image: avalanche-allocation-tracker
+          envFrom:
+            - configMapRef:
+                name: otel-config
+            - configMapRef:
+                name: avalanche-allocation-tracker-config
+            - secretRef:
+                name: avalanche-allocation-tracker
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pgrep -f allocation"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+      terminationGracePeriodSeconds: 60

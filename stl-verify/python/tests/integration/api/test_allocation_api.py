@@ -18,6 +18,8 @@ from pydantic import SecretStr
 from app.config import Settings
 from app.main import create_app
 from tests.integration.seed import (
+    ANCHORAGE_CUSTODY_PROXY_HEX,
+    ANCHORAGE_LATEST_SNAPSHOT,
     GHOST_CLOSED_PROXY_HEX,
     GHOST_MIXED_PROXY_HEX,
     GHOST_OPEN_PROXY_HEX,
@@ -26,6 +28,7 @@ from tests.integration.seed import (
     insert_allocation_position,
     insert_oracle_asset,
     insert_token,
+    seed_anchorage_custody,
     seed_ghost_balance,
 )
 
@@ -311,6 +314,7 @@ def async_db_url(module_db):
     """
     asyncio.run(_seed(module_db["db_url"]))
     asyncio.run(seed_ghost_balance(module_db["db_url"]))
+    asyncio.run(seed_anchorage_custody(module_db["db_url"]))
     return module_db["async_url"]
 
 
@@ -458,6 +462,29 @@ def test_list_allocations_returns_only_direct_row_when_no_receipt_tokens(
     assert row["protocol_name"] is None
     assert row["amount_usd"] is None
     assert row["category"] == "asset"
+
+
+def test_list_allocations_surfaces_anchorage_btc_custody(client: TestClient) -> None:
+    """End-to-end: the anchorage_custody prime's /allocations response includes a
+    BTC custody row — chain_id 0, `anchorage` protocol, CUSTODY category, the
+    cohort's $250M loan as amount_usd, and the frozen snapshot_time verbatim.
+    The stale closed packages ($521M trap) must not inflate the totals.
+    """
+    response = client.get(f"/v1/primes/0x{ANCHORAGE_CUSTODY_PROXY_HEX}/allocations")
+
+    assert response.status_code == 200
+    by_symbol = {row["symbol"]: row for row in response.json()}
+    btc = by_symbol["BTC"]
+    assert btc["chain_id"] == 0
+    assert btc["protocol_name"] == "anchorage"
+    assert btc["category"] == "custody"
+    assert btc["receipt_token_id"] is None
+    assert btc["underlying_token_id"] is None
+    assert btc["underlying_token_address"] is None
+    assert Decimal(btc["amount_usd"]) == Decimal("250000000")
+    assert Decimal(btc["balance"]) == Decimal("4722.61")
+    assert btc["latest_activity_at"] == ANCHORAGE_LATEST_SNAPSHOT.isoformat()
+    assert btc["latest_activity_action"] is None
 
 
 def test_list_allocations_returns_404_for_unknown_prime(client: TestClient) -> None:

@@ -98,6 +98,34 @@ class DirectAssetHolding:
 
 
 @dataclass(frozen=True)
+class AnchorageCustodyHolding:
+    """Off-chain custodied collateral securing a prime's Anchorage loan.
+
+    One row per ``(asset_type, custody_type)`` after collapsing every package in
+    the prime's latest snapshot cohort. Column semantics come straight from the
+    Anchorage feed (see ``_ANCHORAGE_CUSTODY_HOLDINGS_SQL``):
+
+    * ``amount_usd``     — SUM(exposure_value): the loan drawn against the
+      collateral. This is the figure surfaced as the allocation's USD value
+      (matches VEC-499 / skyeco's concept).
+    * ``collateral_usd`` — SUM(package_value): the BTC collateral's market
+      value. Carried alongside so the surfaced figure can flip from the loan to
+      the collateral in one line at the endpoint, without a schema change.
+    * ``balance``        — SUM(asset_quantity): collateral in native units (BTC).
+    * ``as_of``          — the cohort's ``snapshot_time``. Surfaced verbatim as
+      the row's latest-activity timestamp so a frozen upstream feed reads as
+      honestly stale rather than hiding the staleness.
+    """
+
+    symbol: str
+    custody_type: str
+    balance: Decimal
+    amount_usd: Decimal
+    collateral_usd: Decimal
+    as_of: datetime
+
+
+@dataclass(frozen=True)
 class Prime:
     id: str
     name: str

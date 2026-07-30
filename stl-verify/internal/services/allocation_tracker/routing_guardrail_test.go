@@ -4,6 +4,8 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+
+	"github.com/ethereum/go-ethereum/common"
 )
 
 func quietLogger() *slog.Logger {
@@ -74,6 +76,31 @@ func TestEveryContractEntryRoutes(t *testing.T) {
 			t.Errorf("contract entry routes to a not-yet-implemented stub but token_type %q is not in the allowlist {psm3, centrifuge_feeder, galaxy_clo}: chain=%s protocol=%q contract=%s — implement a real source or add the token_type to stubRoutedAllowlist",
 				e.TokenType, e.Chain, e.Protocol, e.ContractAddress.Hex())
 		}
+	}
+}
+
+// TestCentrifugeRoutesToERC7540 locks the VEC-337-part-2 routing: axis-synome
+// 0.2.0 moved centrifuge entries to ERC-7540 vault addresses, so they must land
+// on ERC7540Source (which resolves share()), never on BalanceOfSource — whose
+// balanceOf/decimals calls revert on a vault and poison-stall the block.
+func TestCentrifugeRoutesToERC7540(t *testing.T) {
+	registry, err := BuildSourceRegistry(nil, quietLogger())
+	if err != nil {
+		t.Fatalf("build source registry: %v", err)
+	}
+
+	source := registry.Route(&TokenEntry{
+		ContractAddress: common.HexToAddress("0x4880799ee5200fc58da299e965df644fbf46780b"),
+		Chain:           "mainnet",
+		Star:            "grove",
+		Protocol:        "centrifuge",
+		TokenType:       "centrifuge",
+	})
+	if source == nil {
+		t.Fatal("centrifuge entry routes to no source")
+	}
+	if got := source.Name(); got != "erc7540" {
+		t.Errorf("centrifuge routed to %q, want %q", got, "erc7540")
 	}
 }
 

@@ -11,11 +11,11 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Literal
 
-from app.domain.exceptions import ShareDataUnpricedReason
+from app.domain.exceptions import AllocationUnpricedReason
 
-# Closed set of ``unpriced_reason`` values. The share-data reasons are reused
-# from ``AllocationShareError`` so the two cannot drift.
-UnpricedReason = Literal["no_model"] | ShareDataUnpricedReason
+# Closed set of ``unpriced_reason`` values. The share-data / price-data reasons
+# are reused from ``AllocationUnpricedError`` so the two cannot drift.
+UnpricedReason = Literal["no_model"] | AllocationUnpricedReason
 
 
 @dataclass(frozen=True)
@@ -32,6 +32,9 @@ class AllocationRiskCapital:
     - ``"share_data_missing"`` / ``"share_data_stale"`` — a model applies but its
       pool-share lookup could not be resolved (e.g. a warm-up window or an
       un-indexed receipt token); the rest of the prime is still priced.
+    - ``"price_data_missing"`` — a model applies but the backed asset's loan token
+      has no USD price, so its loan-token-denominated backing cannot be valued;
+      the rest of the prime is still priced.
     """
 
     receipt_token_id: int

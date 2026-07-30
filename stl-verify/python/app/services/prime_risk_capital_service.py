@@ -19,7 +19,7 @@ from app.domain.entities.backed_breakdown import BackedBreakdown
 from app.domain.entities.prime_risk_capital import AllocationRiskCapital, PrimeRiskCapital, UnpricedReason
 from app.domain.entities.receipt_token import ReceiptTokenInfo
 from app.domain.entities.risk import RrcResult
-from app.domain.exceptions import AllocationShareError
+from app.domain.exceptions import AllocationUnpricedError
 from app.logging import get_logger
 from app.ports.allocation_repository import AllocationRepositoryPort
 from app.services.crypto_lending_risk_service import CryptoLendingRiskService
@@ -34,8 +34,8 @@ DEFAULT_RISK_MODEL = "gap_sweep"
 _RATIO = Decimal("0.0001")  # ratios/percentages to 4 dp
 
 # ``unpriced_reason`` value for an allocation no default model applies to (as
-# opposed to the ``AllocationShareError.code`` values used when a model applies
-# but its share lookup fails).
+# opposed to the ``AllocationUnpricedError.code`` values used when a model applies
+# but the allocation cannot be priced — a share-data or price-data gap).
 _UNPRICED_NO_MODEL: UnpricedReason = "no_model"
 
 
@@ -72,11 +72,12 @@ def _priced_allocation(position, exposure: Decimal, result: RrcResult) -> Alloca
 def _assemble_allocations(positions, models, results) -> tuple[Decimal, Decimal, Decimal, list[AllocationRiskCapital]]:
     """Fold per-allocation compute results into totals + a per-allocation list.
 
-    ``results`` yields one entry (an ``RrcResult`` or a share-lookup
-    ``AllocationShareError``) per position whose model is not ``None``, in
-    ``positions`` order. A share error degrades just that allocation to unpriced
-    (logged so a persistent gap stays visible) instead of failing the whole
-    prime; every other error already propagated out of the gather.
+    ``results`` yields one entry (an ``RrcResult`` or an
+    ``AllocationUnpricedError``) per position whose model is not ``None``, in
+    ``positions`` order. An unpriceable allocation (share-data or price-data gap)
+    degrades just that allocation to unpriced (logged so a persistent gap stays
+    visible) instead of failing the whole prime; every other error already
+    propagated out of the gather.
 
     Returns ``(exposure, modeled_exposure, required, per_allocation)``.
     """
@@ -94,7 +95,7 @@ def _assemble_allocations(positions, models, results) -> tuple[Decimal, Decimal,
             continue
 
         result = next(results)
-        if isinstance(result, AllocationShareError):
+        if isinstance(result, AllocationUnpricedError):
             logger.warning(
                 "prime risk-capital: allocation receipt_token_id=%s unpriced (%s): %s",
                 position.receipt_token_id,
@@ -270,10 +271,11 @@ class PrimeRiskCapitalService:
         ``breakdown`` fetched during prefetch are passed through so the model
         re-fetches neither.
 
-        A share-lookup failure for one allocation (a warm-up window, or an
-        un-indexed receipt token) must not sink the whole prime, so it is
-        returned as an ``AllocationShareError`` value for the caller to render as
-        an unpriced allocation. Any other error still propagates.
+        An unpriceable allocation (a share-data gap — warm-up window or un-indexed
+        receipt token — or a price-data gap where the backed asset's loan token has
+        no USD price) must not sink the whole prime, so it is returned as an
+        ``AllocationUnpricedError`` value for the caller to render as an unpriced
+        allocation. Any other error still propagates.
         """
         try:
             if isinstance(model, CryptoLendingRiskService) and asset_id in prefetched_shares:
@@ -286,7 +288,7 @@ class PrimeRiskCapitalService:
                     breakdown_override=prefetched_breakdowns.get(asset_id),
                 )
             return await model.compute(asset_id, prime_id, {})
-        except AllocationShareError as exc:
+        except AllocationUnpricedError as exc:
             return exc
 
     def _default_model_for(self, asset_id: int, prime_id: EthAddress):

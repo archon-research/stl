@@ -26,14 +26,14 @@ func TestReferenceTableImmutable(t *testing.T) {
 
 	// INSERT of a new code is still allowed (append-only permits deliberate additions).
 	if _, err := pool.Exec(ctx,
-		`INSERT INTO deal_type_ref (deal_type, direction, description)
+		`INSERT INTO ref_deal_type (deal_type, direction, description)
 		 VALUES ('TEST_IMMUTABLE', 'LONG', 'immutability test row')`); err != nil {
 		t.Fatalf("insert into reference table should be allowed: %v", err)
 	}
 
 	// UPDATE raises via the immutability trigger (fires for any role, including superuser).
 	_, err := pool.Exec(ctx,
-		`UPDATE deal_type_ref SET description = 'mutated' WHERE deal_type = 'TEST_IMMUTABLE'`)
+		`UPDATE ref_deal_type SET description = 'mutated' WHERE deal_type = 'TEST_IMMUTABLE'`)
 	if err == nil {
 		t.Error("UPDATE on a reference table should raise via the immutability trigger")
 	} else if !strings.Contains(err.Error(), "append-only") {
@@ -42,7 +42,7 @@ func TestReferenceTableImmutable(t *testing.T) {
 
 	// DELETE also raises.
 	_, err = pool.Exec(ctx,
-		`DELETE FROM deal_type_ref WHERE deal_type = 'TEST_IMMUTABLE'`)
+		`DELETE FROM ref_deal_type WHERE deal_type = 'TEST_IMMUTABLE'`)
 	if err == nil {
 		t.Error("DELETE on a reference table should raise via the immutability trigger")
 	} else if !strings.Contains(err.Error(), "append-only") {

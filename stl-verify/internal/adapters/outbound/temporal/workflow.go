@@ -68,7 +68,8 @@ func (a *cronjobActivities) Execute(ctx context.Context, scheduledAt time.Time) 
 	// Recorded per activity execution (so a retried run that ultimately
 	// succeeds emits both an error and a success); the vector-cronjobs alerts
 	// account for this by treating a warning as "any error" and a page as
-	// "errors with no success over the window".
+	// "errors with no success over the window". A run interrupted by activity
+	// cancellation lands as "canceled", not "error" — see runStatusAttr.
 	a.metrics.RecordRun(ctx, time.Since(start), err)
 	if err != nil {
 		return fmt.Errorf("running cronjob: %w", err)
