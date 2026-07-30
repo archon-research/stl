@@ -9,6 +9,7 @@ from app.api._validators import ProxyAddressPathParam
 from app.api.deps import get_engine, get_model_registry
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.prime_risk_capital import UnpricedReason
+from app.domain.prime_registry import ProxyKind, classify_proxy
 from app.services.model_registry import ModelRegistry
 from app.services.prime_risk_capital_service import PrimeRiskCapitalService
 
@@ -151,7 +152,11 @@ async def _get_service(
         "model can price contribute Required Risk Capital) and will not match Sky's dashboard. "
         "A backed allocation whose pool-share lookup can't be resolved (e.g. a warm-up window or an "
         "un-indexed receipt token) is reported as unpriced (`applied=false` with an `unpriced_reason`) "
-        "rather than failing the whole response. Returns `404` if the prime is unknown.\n\n"
+        "rather than failing the whole response. Returns `404` if the prime is unknown, and also "
+        "if the address is a SubProxy treasury wallet: those hold a prime's treasury rather than "
+        "its allocations, so they have no prime-level risk capital to report. Read the treasury at "
+        "`/v1/primes/{prime_id}/total-capital` with one of the prime's ALM proxies, which "
+        "`/v1/primes` lists.\n\n"
         "Figures without a prefix are scoped to the proxy in the path and are unchanged from previous "
         "releases. Figures prefixed `prime_` are scoped to the whole prime — summed across every ALM "
         "proxy of the prime the given address belongs to — and are therefore identical whichever proxy "
@@ -165,6 +170,32 @@ async def get_prime_risk_capital(
     prime_id: ProxyAddressPathParam,
     service: PrimeRiskCapitalService = Depends(_get_service),
 ) -> PrimeRiskCapitalResponse:
+    # A SubProxy holds the prime's treasury, not its allocations, so it is not a
+    # member of the prime's ALM fan-out set. Answering for one folds the treasury
+    # into prime_exposure_usd and adds a chain-less prime_per_chain row, so the
+    # prime_ fields stop being identical across the prime's proxies — the one
+    # guarantee consumers are told to dedupe on. Checked before prime_exists: a
+    # SubProxy does have allocation_position rows, so that gate cannot catch it,
+    # and classify_proxy is an in-memory lookup that saves the round trip.
+    #
+    # REVERSIBLE — see ARCT-127 follow-ups. Chosen over the alternative (answer,
+    # but aggregate prime_ over ALM proxies only) because nothing reads this path:
+    # a repo-wide grep finds only tests and the contract JSON, and staging logged
+    # zero requests to either SubProxy address across 30 days / 5.4M lines, with a
+    # control query confirming the filter works. No figure becomes unreachable —
+    # the treasury is served at /v1/primes/{alm_proxy}/total-capital. If a consumer
+    # ever needs this path back, drop this gate and instead exclude SubProxies
+    # inside PrimeRiskCapitalService._proxies_to_aggregate, keeping the queried
+    # proxy's own row so _assemble_result's by-address lookup cannot StopIteration.
+    if classify_proxy(prime_id) is ProxyKind.SUB_PROXY:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "SubProxy treasury wallets carry no prime-level risk capital; "
+                "query one of the prime's ALM proxies, or /total-capital for the treasury"
+            ),
+        )
+
     prime_address = EthAddress(prime_id)
     if not await service.prime_exists(prime_address):
         raise HTTPException(status_code=404, detail="Prime not found")

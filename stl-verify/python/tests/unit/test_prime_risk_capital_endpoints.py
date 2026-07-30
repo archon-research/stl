@@ -9,6 +9,9 @@ from app.main import app
 from app.services.prime_risk_capital_service import PrimeRiskCapitalService
 
 _VALID_ADDR = "0x" + "ab" * 20
+# A real axis-synome SubProxy: the gate resolves kind through the contract, so a
+# placeholder address would classify as ALM and not exercise it.
+_SPARK_SUB_PROXY = "0x3300f198988e4c9c63f75df86de36421f06af8c4"
 
 
 def _make_service(*, exists: bool = True, result: PrimeRiskCapital | None = None) -> AsyncMock:
@@ -121,6 +124,30 @@ def test_get_prime_risk_capital_returns_404_when_prime_missing():
 
         assert response.status_code == 404
         assert response.json()["detail"] == "Prime not found"
+        service.compute.assert_not_awaited()
+    finally:
+        app.dependency_overrides.pop(prime_risk_capital._get_service, None)
+
+
+def test_get_prime_risk_capital_returns_404_for_a_subproxy_treasury_wallet():
+    """A SubProxy holds the treasury, not allocations, so it has no prime aggregate.
+
+    ``exists=True`` because a SubProxy does have ``allocation_position`` rows, so
+    the not-found gate above does not catch it: without its own gate the request
+    200s with the treasury folded into the prime-scoped fields, giving one extra
+    ``prime_proxies`` entry and a ``chain: null`` row that no ALM proxy reports.
+    """
+    from app.api.v1 import prime_risk_capital
+
+    service = _make_service(exists=True, result=_result())
+    app.dependency_overrides[prime_risk_capital._get_service] = _override_service(service)
+    try:
+        client = TestClient(app)
+
+        response = client.get(f"/v1/primes/{_SPARK_SUB_PROXY}/risk-capital")
+
+        assert response.status_code == 404
+        assert "SubProxy" in response.json()["detail"]
         service.compute.assert_not_awaited()
     finally:
         app.dependency_overrides.pop(prime_risk_capital._get_service, None)
