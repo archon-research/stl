@@ -464,6 +464,23 @@ export function ActivityFeed({
     networkChainId !== undefined &&
     networkChainId !== selectedPrime.chain_id;
   const isChainMismatch = isDrawerChainMismatch || isPageChainMismatch;
+  // The default state of the case above, and the normal way this page is read:
+  // with no chain picked the request carries prime_id (the primary proxy) and no
+  // chain_id, which still matches that one proxy's rows alone. So a multi-chain
+  // prime's feed is one chain's activity presented as the prime's. Suppressing it
+  // would be wrong — every row shown is real — so it is labelled instead.
+  const isPagePartialChainCoverage =
+    isPageMode &&
+    isMultiChainPrime &&
+    !showAllPrimes &&
+    selectedPrime !== null &&
+    networkChainId === undefined;
+  const coveredChainLabel =
+    selectedPrime !== null
+      ? (chainLabels?.get(selectedPrime.chain_id) ??
+        selectedPrime.chain ??
+        null)
+      : null;
   const txRequestControllersRef = useRef<Record<string, AbortController>>({});
 
   const [events, setEvents] = useState<AllocationActivityResponse>([]);
@@ -888,6 +905,13 @@ export function ActivityFeed({
         {showAllPrimes ? (
           <span className={css({ fontSize: 'sm', color: 'text.muted' })}>
             Across all primes
+          </span>
+        ) : null}
+        {isPagePartialChainCoverage ? (
+          <span className={css({ fontSize: 'sm', color: 'text.muted' })}>
+            {coveredChainLabel === null
+              ? 'One chain only — this prime allocates on several, and the rest are not yet included.'
+              : `${coveredChainLabel} only — this prime's activity on its other chains is not yet included.`}
           </span>
         ) : null}
 

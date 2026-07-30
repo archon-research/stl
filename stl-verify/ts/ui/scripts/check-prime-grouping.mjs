@@ -20,6 +20,13 @@ async function main() {
     appType: 'custom',
     logLevel: 'error',
     server: { middlewareMode: true },
+    // This script only `ssrLoadModule`s one source file, so the dependency
+    // pre-bundling scan has nothing to contribute — and it runs a native
+    // rolldown pass over index.html in the background that segfaults
+    // intermittently (~1 run in 6, exit 139), failing the step for a reason
+    // unrelated to the assertions. Disabling discovery removes the race and the
+    // "Failed to run dependency scan" noise with it.
+    optimizeDeps: { noDiscovery: true },
   });
 
   try {

@@ -25,7 +25,6 @@ from app.domain.entities.allocation import (
     ReceiptTokenPosition,
 )
 from app.domain.entities.allocation_category import AllocationCategory
-from app.domain.prime_registry import is_primary_proxy, proxy_entry
 from app.domain.serialization import PlainDecimal
 from app.domain.time_series import TimeSeriesQuery, enforce_filter_for_window
 from app.services.allocation_category_service import AllocationCategoryService
@@ -643,7 +642,8 @@ async def list_protocols(service: AllocationService = Depends(_get_service)):
         "includes the latest activity timestamp and a derived `category` "
         "(`allocation` / `pol` / `psm3` / `asset` / `custody`). Rows are proxy-scoped "
         "except the Anchorage custody leg, which is prime-scoped and returned only "
-        "under the prime's primary (mainnet ALM) proxy — see the `scope` field."
+        "under the one proxy of the prime that carries its prime-scoped rows (its mainnet proxy when "
+        "indexed, else its lowest-addressed one) — see the `scope` field."
     ),
 )
 async def list_allocations(
@@ -661,8 +661,8 @@ async def list_allocations(
     - Off-chain Anchorage BTC custody — chain_id 0, ``protocol_name``
       ``anchorage``, null ``underlying_*`` (no token-registry row), with the
       loan drawn against the collateral as ``amount_usd``. Gated to the
-      prime's primary (mainnet ALM) proxy, or to any proxy the axis-synome
-      contract doesn't know about (see ``_custody_applies``).
+      one proxy of the prime that carries its prime-scoped rows (see
+      ``_custody_applies``).
 
     Errors:
     - 422 if ``prime_id`` is malformed.
@@ -672,7 +672,7 @@ async def list_allocations(
     if not await service.prime_exists(prime_address):
         raise HTTPException(status_code=404, detail="Prime not found")
 
-    custody_applies = _custody_applies(prime_address)
+    custody_applies = await _custody_applies(prime_address, service)
     positions, direct, custody = await asyncio.gather(
         service.list_receipt_token_positions(prime_address),
         service.list_direct_asset_holdings(prime_address),
@@ -687,19 +687,30 @@ async def list_allocations(
     ]
 
 
-def _custody_applies(prime_address: EthAddress) -> bool:
+async def _custody_applies(prime_address: EthAddress, service: AllocationService) -> bool:
     """Whether this proxy carries the prime-scoped Anchorage custody leg.
 
-    Serving the leg under every one of a prime's proxies would triple-count
-    $250M of BTC for a consumer unioning them, so only the primary proxy
-    carries it. ``is_primary_proxy`` fails closed (False for an address the
-    contract has never heard of), which would silently drop custody for a real
-    mainnet proxy the contract hasn't been told about yet. Gate on *known
-    non-primary* instead: an address absent from the contract has no
-    discoverable siblings, so — mirroring ``classify_proxy``'s fail-open
-    default — it is treated as its own primary.
+    Serving the leg under every one of a prime's proxies would triple-count $250M
+    of BTC for a consumer unioning them, so exactly one proxy carries it. The pick
+    is resolved from ``allocation_position`` (see
+    ``AllocationRepository.primary_proxy_address``) rather than from the
+    axis-synome contract, because the contract cannot answer this safely in either
+    direction: a prime whose mainnet ALM proxy has no rows yet would have the leg
+    attributed to a proxy ``/v1/primes`` does not list, and a proxy the contract
+    has not been told about yet — the state during a chain onboarding — would be
+    treated as its own primary and serve a second copy.
+
+    A prime with no resolvable proxy cannot happen after the ``prime_exists``
+    gate above, so it is logged rather than silently dropping the leg.
     """
-    return proxy_entry(prime_address) is None or is_primary_proxy(prime_address)
+    primary = await service.primary_proxy_address(prime_address)
+    if primary is None:
+        logger.error(
+            "No primary proxy resolved for a prime that exists; withholding the prime-scoped custody leg",
+            extra={"prime_address": str(prime_address)},
+        )
+        return False
+    return primary.lower() == str(prime_address).lower()
 
 
 def _receipt_token_row(

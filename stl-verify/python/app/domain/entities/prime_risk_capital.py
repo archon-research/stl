@@ -65,16 +65,22 @@ class ChainRiskCapital:
     """One ALM proxy's contribution to its prime's aggregated figures.
 
     Carried so a consumer can audit the prime-level sum, and so a chain
-    contributing nothing is visibly present at zero rather than absent. ``chain``
-    is ``None`` for a proxy absent from the axis-synome contract, which has no
+    contributing nothing is visibly present rather than absent. ``chain`` is
+    ``None`` for a proxy absent from the axis-synome contract, which has no
     discoverable chain.
+
+    The figures are ``None`` — not ``0`` — for a proxy on a chain no allocation
+    tracker serves. Such a proxy has no ``allocation_position`` rows at all, so a
+    zero would claim the prime holds nothing there when the truth is that STL does
+    not know: the two must not read alike, because the difference moves the
+    prime's encumbrance in the direction that looks safe.
     """
 
     proxy_address: str
     chain: str | None
-    exposure_usd: Decimal
-    required_risk_capital_usd: Decimal
-    allocation_count: int
+    exposure_usd: Decimal | None
+    required_risk_capital_usd: Decimal | None
+    allocation_count: int | None
 
 
 @dataclass(frozen=True)
@@ -89,7 +95,11 @@ class PrimeRiskCapital:
 
     Fields without a prefix are scoped to the **queried proxy**. Fields prefixed
     ``prime_`` are scoped to the whole prime and are identical whichever of its
-    proxies was queried. ``total_risk_capital_usd`` is prime-wide despite carrying
+    proxies was queried. They aggregate the prime's ALM proxies on chains an
+    allocation tracker serves; the rest contribute nothing and are named in
+    ``prime_unserved_chains``, so a consumer can see that the total is bounded by
+    what STL indexes rather than by what the prime holds.
+    ``total_risk_capital_usd`` is prime-wide despite carrying
     no prefix (it predates the convention) and must never be summed.
     ``encumbrance_ratio`` divides a proxy-scoped numerator by that prime-wide
     denominator, so it is meaningless; it is retained unchanged for backwards
@@ -113,3 +123,4 @@ class PrimeRiskCapital:
     prime_encumbrance_ratio: Decimal | None = None
     prime_proxies: tuple[str, ...] = ()
     prime_per_chain: tuple[ChainRiskCapital, ...] = ()
+    prime_unserved_chains: tuple[str, ...] = ()

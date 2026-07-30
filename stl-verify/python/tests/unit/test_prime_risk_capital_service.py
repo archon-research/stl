@@ -66,6 +66,9 @@ def _service(repo: AllocationRepositoryPort, registry: _FakeRegistry) -> PrimeRi
 _SPARK_MAINNET_ALM = "0x1601843c5e9bc251a3272907010afa41fa18347e"
 _SPARK_AVALANCHE_ALM = "0xece6b0e8a54c2f44e066fbb9234e7157b15b7fec"
 _SPARK_MAINNET_ALM_MIXED_CASE = "0x1601843C5E9BC251A3272907010AFA41FA18347E"
+_SPARK_BASE_ALM = "0x2917956eff0b5eaf030abdb4ef4296df775009ca"
+# On a chain no allocation tracker serves (acknowledgedUnservedByTrackerChains).
+_SPARK_ARBITRUM_ALM = "0x92afd6f2385a90e44da3a8b60fe36f6cbe1d8709"
 
 
 def _repo_by_proxy(positions_by_proxy: dict[str, list], total_rc: Decimal | None):
@@ -268,6 +271,95 @@ async def test_compute_reports_a_per_chain_breakdown_of_the_aggregation():
     by_chain = {row.chain: row.required_risk_capital_usd for row in result.prime_per_chain}
     assert by_chain["mainnet"] == Decimal("40")
     assert by_chain["avalanche-c"] == Decimal("2")
+
+
+@pytest.mark.asyncio
+async def test_compute_reports_null_not_zero_for_a_chain_no_tracker_serves():
+    """The distinction the prime-wide totals rest on.
+
+    Spark's arbitrum, optimism and unichain proxies have no
+    ``allocation_position`` rows because no tracker indexes those chains. Reported
+    as ``0`` they would claim the prime holds nothing there, which understates
+    encumbrance in the direction that looks safe.
+    """
+    service = _service(_two_chain_spark_repo(), _two_asset_registry())
+
+    result = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
+
+    unserved = [row for row in result.prime_per_chain if row.chain == "arbitrum"]
+    assert len(unserved) == 1
+    assert unserved[0].exposure_usd is None
+    assert unserved[0].required_risk_capital_usd is None
+    assert unserved[0].allocation_count is None
+
+
+@pytest.mark.asyncio
+async def test_compute_names_the_chains_its_totals_exclude():
+    service = _service(_two_chain_spark_repo(), _two_asset_registry())
+
+    result = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
+
+    assert result.prime_unserved_chains == ("arbitrum", "optimism", "unichain")
+
+
+@pytest.mark.asyncio
+async def test_compute_does_not_query_a_proxy_on_an_unserved_chain():
+    """Each skipped proxy is a pooled connection not taken; see Settings.db_pool_size."""
+    repo = _two_chain_spark_repo()
+    service = _service(repo, _two_asset_registry())
+
+    await service.compute(EthAddress(_SPARK_MAINNET_ALM))
+
+    queried = {str(call.args[0]).lower() for call in repo.list_receipt_token_positions.await_args_list}
+    assert queried == {_SPARK_MAINNET_ALM, _SPARK_AVALANCHE_ALM, _SPARK_BASE_ALM}
+
+
+@pytest.mark.asyncio
+async def test_compute_covers_every_proxy_of_the_prime_in_the_per_chain_breakdown():
+    """Served or not, a proxy is present: absence would read as "no proxy there"."""
+    service = _service(_two_chain_spark_repo(), _two_asset_registry())
+
+    result = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
+
+    assert len(result.prime_per_chain) == 6
+    assert tuple(row.proxy_address for row in result.prime_per_chain) == result.prime_proxies
+
+
+@pytest.mark.asyncio
+async def test_compute_totals_equal_the_sum_of_the_per_chain_rows_that_carry_figures():
+    """`prime_per_chain` is sold as making the total auditable, so the sum must tie.
+
+    The totals are summed from ``per_proxy`` while the rows are built from the
+    prime's proxy list, so this is two derivations of one figure meeting.
+    """
+    service = _service(_two_chain_spark_repo(), _two_asset_registry())
+
+    result = await service.compute(EthAddress(_SPARK_AVALANCHE_ALM))
+
+    assert sum(row.exposure_usd for row in result.prime_per_chain if row.exposure_usd is not None) == (
+        result.prime_exposure_usd
+    )
+    assert (
+        sum(
+            row.required_risk_capital_usd for row in result.prime_per_chain if row.required_risk_capital_usd is not None
+        )
+        == result.prime_required_risk_capital_usd
+    )
+
+
+@pytest.mark.asyncio
+async def test_compute_warns_when_a_proxy_holds_positions_on_a_chain_declared_unserved():
+    """A stale SERVED_TRACKER_CHAINS silently nulls real per-chain figures."""
+    repo = _repo_by_proxy(
+        {_SPARK_ARBITRUM_ALM: [make_receipt_token_position(receipt_token_id=1, amount_usd=Decimal("400"))]},
+        Decimal("100"),
+    )
+    service = _service(repo, _two_asset_registry())
+
+    with patch("app.services.prime_risk_capital_service.logger") as mock_logger:
+        await service.compute(EthAddress(_SPARK_ARBITRUM_ALM))
+
+    assert "unserved chain" in mock_logger.warning.call_args.args[0]
 
 
 @pytest.mark.asyncio

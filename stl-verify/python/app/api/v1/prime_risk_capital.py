@@ -47,11 +47,11 @@ class ChainRiskCapitalResponse(BaseModel):
     """One ALM proxy's contribution to the prime's aggregated figures.
 
     A row exists for every ALM proxy the axis-synome contract lists for this
-    prime, including chains STL has no allocation tracker for. On such a
-    chain `exposure_usd`, `required_risk_capital_usd`, and `allocation_count`
-    read as zero — that reads identically to a proxy STL tracks but that
-    genuinely holds nothing, so a `"0"` row here does not by itself mean the
-    prime has no exposure on that chain.
+    prime, including chains STL has no allocation tracker for. On such a chain the
+    figures are `null`, not `"0"`: STL holds no positions for it at all, so a zero
+    would assert the prime is empty there when the truth is that it is not
+    indexed. `prime_unserved_chains` names those chains, and the `prime_*` totals
+    exclude them.
     """
 
     proxy_address: str = Field(description="0x-prefixed ALM proxy address.")
@@ -60,11 +60,21 @@ class ChainRiskCapitalResponse(BaseModel):
         description="Internal chain name. `null` for a proxy absent from the axis-synome contract.",
         examples=["avalanche-c"],
     )
-    exposure_usd: PlainDecimal = Field(description="Priced receipt-token exposure held through this proxy (USD).")
-    required_risk_capital_usd: PlainDecimal = Field(
-        description="Required Risk Capital from this proxy's positions (USD)."
+    exposure_usd: PlainDecimal | None = Field(
+        default=None,
+        description=(
+            "Priced receipt-token exposure held through this proxy (USD). `null` when no allocation "
+            "tracker serves this chain, so nothing is known either way."
+        ),
     )
-    allocation_count: int = Field(description="Number of allocations this proxy contributed.")
+    required_risk_capital_usd: PlainDecimal | None = Field(
+        default=None,
+        description="Required Risk Capital from this proxy's positions (USD). `null` when the chain is unserved.",
+    )
+    allocation_count: int | None = Field(
+        default=None,
+        description="Number of allocations this proxy contributed. `null` when the chain is unserved.",
+    )
 
 
 class PrimeRiskCapitalResponse(BaseModel):
@@ -113,11 +123,19 @@ class PrimeRiskCapitalResponse(BaseModel):
     )
     prime_exposure_usd: PlainDecimal = Field(
         default=Decimal("0"),
-        description="Σ priced exposure across every ALM proxy of the prime (USD). Prime-scoped: dedupe, never sum.",
+        description=(
+            "Σ priced exposure across the prime's ALM proxies on chains STL indexes (USD). "
+            "Prime-scoped: dedupe, never sum. Chains listed in `prime_unserved_chains` contribute "
+            "nothing, so this is a lower bound on what the prime holds."
+        ),
     )
     prime_required_risk_capital_usd: PlainDecimal = Field(
         default=Decimal("0"),
-        description="Σ Required Risk Capital across every ALM proxy of the prime (USD). Prime-scoped.",
+        description=(
+            "Σ Required Risk Capital across the prime's ALM proxies on chains STL indexes (USD). "
+            "Prime-scoped. Bounded by `prime_unserved_chains` in the same way as `prime_exposure_usd`, "
+            "so `prime_encumbrance_ratio` built on it reads low rather than high."
+        ),
     )
     prime_modeled_exposure_usd: PlainDecimal = Field(
         default=Decimal("0"), description="Σ exposure the default model could price, prime-wide (USD)."
@@ -135,10 +153,23 @@ class PrimeRiskCapitalResponse(BaseModel):
         examples=["0.9397"],
     )
     prime_proxies: list[str] = Field(
-        default_factory=list, description="ALM proxy addresses the `prime_*` figures were aggregated over."
+        default_factory=list,
+        description=(
+            "Every ALM proxy of the prime, address-sorted. Those on served chains carry the figures the "
+            "`prime_*` totals are aggregated from; see `prime_per_chain` for which did."
+        ),
     )
     prime_per_chain: list[ChainRiskCapitalResponse] = Field(
         default_factory=list, description="Per-proxy breakdown of the aggregated numerator, so the sum is auditable."
+    )
+    prime_unserved_chains: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Chains the prime has an ALM proxy on that no allocation tracker serves, so they contribute "
+            "nothing to the `prime_*` totals and read `null` in `prime_per_chain`. Non-empty means the "
+            "totals are a lower bound."
+        ),
+        examples=[["arbitrum", "optimism", "unichain"]],
     )
 
 
@@ -169,9 +200,10 @@ async def _get_service(
         "`/v1/primes/{prime_id}/total-capital` with one of the prime's ALM proxies, which "
         "`/v1/primes` lists.\n\n"
         "Figures without a prefix are scoped to the proxy in the path. Figures prefixed `prime_` are "
-        "scoped to the whole prime — summed across every ALM proxy of the prime the given address "
-        "belongs to — and are therefore identical whichever proxy you query; use `prime_per_chain` for "
-        "the split. The one exception is an address the axis-synome contract does not list: it has no "
+        "scoped to the whole prime — summed across the ALM proxies of the prime the given address "
+        "belongs to that sit on chains STL indexes — and are therefore identical whichever proxy you "
+        "query; use `prime_per_chain` for the split and `prime_unserved_chains` for what is missing "
+        "from it. The one exception is an address the axis-synome contract does not list: it has no "
         "discoverable siblings, so its `prime_` figures cover that proxy alone and will not agree with "
         "what the prime's known proxies report. `total_risk_capital_usd` is prime-wide despite having "
         "no prefix. `prime_id` is the opposite exception: despite the prefix, it is the queried proxy "
@@ -222,4 +254,5 @@ async def get_prime_risk_capital(
         prime_encumbrance_ratio=result.prime_encumbrance_ratio,
         prime_proxies=list(result.prime_proxies),
         prime_per_chain=[ChainRiskCapitalResponse(**row.__dict__) for row in result.prime_per_chain],
+        prime_unserved_chains=list(result.prime_unserved_chains),
     )

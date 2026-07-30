@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 from decimal import Decimal
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import HTTPException
@@ -76,6 +76,7 @@ def _make_service(
     anchorage_holdings=None,
     *,
     exists: bool = True,
+    primary_proxy: str | None = _SPARK_MAINNET_ALM,
 ) -> AsyncMock:
     service = AsyncMock(spec=AllocationService)
     service.list_primes.return_value = primes or []
@@ -84,6 +85,9 @@ def _make_service(
     service.list_anchorage_custody_holdings.return_value = anchorage_holdings or []
     service.prime_exists.return_value = exists
     service.list_activity_buckets.return_value = []
+    # Which proxy carries the prime's prime-scoped rows is a fact about the
+    # indexed data, so the repository answers it; tests state the answer.
+    service.primary_proxy_address.return_value = primary_proxy
     return service
 
 
@@ -566,14 +570,16 @@ def test_list_allocations_does_not_query_custody_for_a_non_primary_proxy():
     service.list_anchorage_custody_holdings.assert_not_called()
 
 
-def test_list_allocations_includes_the_custody_leg_for_a_proxy_unknown_to_the_contract():
-    """An address absent from the axis-synome contract has no discoverable
-    siblings, so it is treated as its own primary rather than losing the
-    custody row to a fail-closed default.
+def test_list_allocations_includes_the_custody_leg_for_a_primary_proxy_unknown_to_the_contract():
+    """Attribution follows the indexed data, not the contract pin.
+
+    A proxy the pinned axis-synome contract has not been told about — the state
+    during a chain onboarding — still carries the prime-scoped leg when it is the
+    prime's primary, because withholding it there would make the row unreachable.
     """
     from app.api.v1 import allocations
 
-    service = _make_service(anchorage_holdings=[make_anchorage_custody_holding()])
+    service = _make_service(anchorage_holdings=[make_anchorage_custody_holding()], primary_proxy=_VALID_ADDR)
     app.dependency_overrides[allocations._get_service] = _override_service(service)
 
     response = TestClient(app).get(f"/v1/primes/{_VALID_ADDR}/allocations")
@@ -581,6 +587,54 @@ def test_list_allocations_includes_the_custody_leg_for_a_proxy_unknown_to_the_co
     assert response.status_code == 200
     rows = [row for row in response.json() if row["symbol"] == "BTC"]
     assert len(rows) == 1
+
+
+def test_list_allocations_omits_the_custody_leg_for_a_non_primary_proxy_unknown_to_the_contract():
+    """The double-count this gate exists to prevent.
+
+    A proxy absent from the contract but present in the data used to be treated
+    as its own primary, so it served a second copy of the $250M leg while the
+    prime's real primary served the first — and a consumer unioning a prime's
+    proxies counted it twice.
+    """
+    from app.api.v1 import allocations
+
+    service = _make_service(anchorage_holdings=[make_anchorage_custody_holding()], primary_proxy=_SPARK_MAINNET_ALM)
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+
+    response = TestClient(app).get(f"/v1/primes/{_VALID_ADDR}/allocations")
+
+    assert response.status_code == 200
+    assert [row for row in response.json() if row["symbol"] == "BTC"] == []
+
+
+def test_list_allocations_withholds_the_custody_leg_when_no_primary_resolves():
+    """Unreachable after the prime_exists gate, so it is logged rather than guessed."""
+    from app.api.v1 import allocations
+
+    service = _make_service(anchorage_holdings=[make_anchorage_custody_holding()], primary_proxy=None)
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+
+    with patch("app.api.v1.allocations.logger") as mock_logger:
+        response = TestClient(app).get(f"/v1/primes/{_SPARK_MAINNET_ALM}/allocations")
+
+    assert [row for row in response.json() if row["symbol"] == "BTC"] == []
+    mock_logger.error.assert_called_once()
+
+
+def test_list_allocations_matches_the_primary_proxy_case_insensitively():
+    """`/v1/primes` serves lowercase addresses; a caller may checksum-case the path."""
+    from app.api.v1 import allocations
+
+    service = _make_service(
+        anchorage_holdings=[make_anchorage_custody_holding()],
+        primary_proxy=_SPARK_MAINNET_ALM,
+    )
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+
+    response = TestClient(app).get(f"/v1/primes/{_SPARK_MAINNET_ALM.upper().replace('0X', '0x')}/allocations")
+
+    assert [row for row in response.json() if row["symbol"] == "BTC"] != []
 
 
 def test_list_allocations_tags_on_chain_rows_as_proxy_scoped():

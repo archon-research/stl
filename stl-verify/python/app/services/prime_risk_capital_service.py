@@ -15,6 +15,7 @@ import asyncio
 from dataclasses import dataclass
 from decimal import ROUND_HALF_EVEN, Decimal
 
+from app.domain.chain_names import chain_is_served
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.backed_breakdown import BackedBreakdown
 from app.domain.entities.prime_risk_capital import (
@@ -126,6 +127,25 @@ def _assemble_allocations(positions, models, results) -> tuple[Decimal, Decimal,
     return exposure, modeled_exposure, required, per_allocation
 
 
+def _chain_row(proxy_address: str, chain: str | None, totals: "_ProxyTotals | None") -> ChainRiskCapital:
+    """One ``prime_per_chain`` row, ``null`` throughout when the chain went unqueried."""
+    if totals is None:
+        return ChainRiskCapital(
+            proxy_address=proxy_address,
+            chain=chain,
+            exposure_usd=None,
+            required_risk_capital_usd=None,
+            allocation_count=None,
+        )
+    return ChainRiskCapital(
+        proxy_address=proxy_address,
+        chain=chain,
+        exposure_usd=totals.exposure,
+        required_risk_capital_usd=totals.required,
+        allocation_count=len(totals.per_allocation),
+    )
+
+
 @dataclass(frozen=True)
 class _ProxyTotals:
     """One proxy's contribution, before folding into the prime-level result."""
@@ -150,22 +170,56 @@ class PrimeRiskCapitalService:
         """Compute the queried proxy's figures plus the prime-wide aggregates.
 
         The unprefixed fields stay scoped to ``prime_id`` so existing consumers
-        see unchanged numbers. The ``prime_*`` fields sum the numerator across
-        every ALM proxy of the prime so they match ``total_risk_capital_usd``,
-        which is prime-wide and read once.
+        see unchanged numbers. The ``prime_*`` fields sum the numerator across the
+        prime's ALM proxies on served chains so they match
+        ``total_risk_capital_usd``, which is prime-wide and read once.
         """
         prime_name, proxies = self._proxies_to_aggregate(prime_id)
 
         per_proxy, total_rc = await asyncio.gather(
-            asyncio.gather(*(self._compute_for_proxy(proxy, chain) for proxy, chain in proxies)),
+            asyncio.gather(
+                *(self._compute_for_proxy(proxy, chain) for proxy, chain in self._proxies_to_query(prime_id, proxies))
+            ),
             self._repository.get_latest_total_capital_usd(prime_id),
         )
 
-        return self._assemble_result(prime_id, prime_name, per_proxy, total_rc)
+        return self._assemble_result(prime_id, prime_name, proxies, per_proxy, total_rc)
+
+    @staticmethod
+    def _proxies_to_query(
+        prime_id: EthAddress, proxies: tuple[tuple[EthAddress, str | None], ...]
+    ) -> tuple[tuple[EthAddress, str | None], ...]:
+        """Narrow the prime's proxies to the ones a query can answer for.
+
+        A proxy on a chain no allocation tracker serves has no
+        ``allocation_position`` rows at all, so computing it spends a connection
+        per proxy to learn nothing and returns zeros that read as a genuine zero.
+        Skipping it is what lets ``prime_per_chain`` report ``null`` for that chain
+        instead. The queried proxy is always included: the unprefixed fields are
+        its own, and ``prime_exists`` has already established it has rows.
+        """
+        queried = str(prime_id).lower()
+        return tuple(
+            (proxy, chain) for proxy, chain in proxies if chain_is_served(chain) or str(proxy).lower() == queried
+        )
 
     async def _compute_for_proxy(self, proxy_address: EthAddress, chain: str | None) -> _ProxyTotals:
         """Run the per-allocation model pipeline over one ALM proxy's positions."""
         positions = await self._repository.list_receipt_token_positions(proxy_address)
+
+        # Positions on a chain declared unserved mean the declaration is stale: a
+        # tracker is writing rows for a chain SERVED_TRACKER_CHAINS says nothing
+        # indexes, so every sibling on that chain is being skipped and reported as
+        # null. Only reachable for the queried proxy, which is computed regardless.
+        # A proxy absent from the contract has no chain to be stale about.
+        if positions and chain is not None and not chain_is_served(chain):
+            logger.warning(
+                "prime risk-capital: proxy %s has %d positions on unserved chain %s; "
+                "SERVED_TRACKER_CHAINS is stale against the deployed trackers",
+                proxy_address,
+                len(positions),
+                chain,
+            )
 
         # A zero-balance position contributes no required risk capital, so skip
         # its model compute entirely (each compute is several DB round trips).
@@ -252,6 +306,7 @@ class PrimeRiskCapitalService:
     def _assemble_result(
         prime_id: EthAddress,
         prime_name: str | None,
+        proxies: tuple[tuple[EthAddress, str | None], ...],
         per_proxy: list[_ProxyTotals],
         total_rc: Decimal | None,
     ) -> PrimeRiskCapital:
@@ -261,14 +316,18 @@ class PrimeRiskCapitalService:
         # below are address-sorted, and the unprefixed fields must stay pinned to
         # the queried proxy regardless of where that sort places it.
         queried_address = str(prime_id).lower()
-        queried = next(totals for totals in per_proxy if totals.proxy_address.lower() == queried_address)
+        computed = {totals.proxy_address.lower(): totals for totals in per_proxy}
+        queried = computed[queried_address]
 
         # prime_ fields are reconciliation keys: identical from every proxy of a
         # prime, so a consumer can dedupe on them. Sorting by address (matching
         # alm_proxies_for_prime) makes prime_proxies/prime_per_chain identical
         # element-for-element too, not just as sets, regardless of which proxy
-        # was queried.
-        ordered = sorted(per_proxy, key=lambda totals: totals.proxy_address.lower())
+        # was queried. Built from the prime's whole proxy set rather than from the
+        # computed subset, so an unserved chain is present-but-null instead of
+        # missing — its absence would be indistinguishable from a prime that has no
+        # proxy there at all.
+        ordered = sorted(proxies, key=lambda entry: str(entry[0]).lower())
 
         prime_exposure = sum((totals.exposure for totals in per_proxy), Decimal("0"))
         prime_modeled = sum((totals.modeled_exposure for totals in per_proxy), Decimal("0"))
@@ -290,16 +349,12 @@ class PrimeRiskCapitalService:
             prime_modeled_exposure_usd=prime_modeled,
             prime_modeled_pct=_ratio(prime_modeled, prime_exposure),
             prime_encumbrance_ratio=_ratio(prime_required, total_rc),
-            prime_proxies=tuple(totals.proxy_address for totals in ordered),
+            prime_proxies=tuple(str(proxy).lower() for proxy, _ in ordered),
             prime_per_chain=tuple(
-                ChainRiskCapital(
-                    proxy_address=totals.proxy_address,
-                    chain=totals.chain,
-                    exposure_usd=totals.exposure,
-                    required_risk_capital_usd=totals.required,
-                    allocation_count=len(totals.per_allocation),
-                )
-                for totals in ordered
+                _chain_row(str(proxy).lower(), chain, computed.get(str(proxy).lower())) for proxy, chain in ordered
+            ),
+            prime_unserved_chains=tuple(
+                sorted({chain for _, chain in ordered if chain is not None and not chain_is_served(chain)})
             ),
         )
 

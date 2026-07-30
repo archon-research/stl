@@ -196,6 +196,75 @@ def test_risk_capital_prime_encumbrance_ratio_is_non_null(client: TestClient) ->
     assert body["prime_encumbrance_ratio"] is not None
 
 
+def test_risk_capital_reports_null_for_a_chain_no_tracker_serves(client: TestClient) -> None:
+    """Spark's contract proxies on unserved chains have no rows at all.
+
+    Reported as ``"0"`` they would be indistinguishable from a served chain the
+    prime genuinely holds nothing on, which understates encumbrance.
+    """
+    body = client.get(f"/v1/primes/{_SPARK_MAINNET_ALM}/risk-capital").json()
+
+    unserved = [row for row in body["prime_per_chain"] if row["chain"] in body["prime_unserved_chains"]]
+    assert unserved != []
+    assert all(row["exposure_usd"] is None and row["required_risk_capital_usd"] is None for row in unserved)
+
+
+def test_risk_capital_names_the_unserved_chains_identically_from_every_proxy(client: TestClient) -> None:
+    reported = {
+        tuple(client.get(f"/v1/primes/{row['address']}/risk-capital").json()["prime_unserved_chains"])
+        for row in _spark_rows(client)
+    }
+
+    assert reported == {("arbitrum", "optimism", "unichain")}
+
+
+def test_risk_capital_prime_per_chain_sums_to_the_prime_total(client: TestClient) -> None:
+    """The auditability `prime_per_chain` is sold on, over the real seeded data."""
+    body = client.get(f"/v1/primes/{_SPARK_AVALANCHE_ALM}/risk-capital").json()
+
+    per_chain_total = sum(
+        Decimal(row["exposure_usd"]) for row in body["prime_per_chain"] if row["exposure_usd"] is not None
+    )
+    assert per_chain_total == Decimal(body["prime_exposure_usd"])
+
+
+def test_the_whole_prime_scoped_projection_is_identical_from_every_proxy(client: TestClient) -> None:
+    """One assertion over every `prime_*` field, so a new field is covered by default.
+
+    The per-field tests above pin the values; this pins the invariant the fields
+    are sold on — that a consumer can dedupe on them — across the prime's proxies.
+    """
+    projections = {
+        tuple(
+            sorted(
+                (key, str(value))
+                for key, value in client.get(f"/v1/primes/{row['address']}/risk-capital").json().items()
+                if key.startswith("prime_") and key != "prime_id"
+            )
+        )
+        for row in _spark_rows(client)
+    }
+
+    assert len(projections) == 1
+
+
+def test_custody_leg_moves_with_the_data_not_the_contract_pin(client: TestClient) -> None:
+    """Attribution is resolved from `allocation_position`, so it cannot double-serve.
+
+    The seeded prime's mainnet proxy carries the leg; asking as any other proxy of
+    the same prime — contract-known or not — must not produce a second copy.
+    """
+    unknown_to_contract = "0x" + "cd" * 20
+    served = [
+        row["address"]
+        for row in _spark_rows(client)
+        if any(alloc["scope"] == "prime" for alloc in client.get(f"/v1/primes/{row['address']}/allocations").json())
+    ]
+
+    assert served == [_SPARK_MAINNET_ALM]
+    assert client.get(f"/v1/primes/{unknown_to_contract}/allocations").status_code == 404
+
+
 def test_non_primary_proxys_on_chain_holdings_survive_the_custody_drop(client: TestClient) -> None:
     # Only the Anchorage custody row is scoped away from a non-primary proxy;
     # avalanche's own on-chain holding (a direct, non-receipt-token asset) must

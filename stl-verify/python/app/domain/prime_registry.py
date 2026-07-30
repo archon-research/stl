@@ -20,14 +20,11 @@ Chain *ids* therefore come from ``allocation_position.chain_id``, not from here.
 from dataclasses import dataclass
 from enum import Enum
 
-from axis_synome.export_entities import build_axis_synome_contract
-
-# The chain a prime's primary proxy lives on. Prime-level figures — the Star
-# feed row, the SubProxy treasury, the Anchorage custody leg — all sit behind the
-# mainnet ALM proxy, so that is the proxy they are attributed to.
-_PRIMARY_CHAIN = "mainnet"
-
-_CONTRACT_ALM_ROLE = "alm"
+from axis_synome.export_entities import (
+    PROXY_ROLE_ALM,
+    PROXY_ROLE_SUBPROXY,
+    build_axis_synome_contract,
+)
 
 
 class ProxyKind(str, Enum):
@@ -51,8 +48,32 @@ class ProxyEntry:
     kind: ProxyKind
 
 
-def _kind_from_role(role: str) -> ProxyKind:
-    return ProxyKind.ALM if role == _CONTRACT_ALM_ROLE else ProxyKind.SUB_PROXY
+# The contract's role vocabulary, imported rather than spelled out so an upstream
+# rename fails at import instead of silently reclassifying a wallet. Note the
+# vocabularies differ: the contract says ``subproxy``, ``ProxyKind.SUB_PROXY``
+# serializes as ``sub_proxy``.
+_CONTRACT_ROLES: dict[str, ProxyKind] = {
+    PROXY_ROLE_ALM: ProxyKind.ALM,
+    PROXY_ROLE_SUBPROXY: ProxyKind.SUB_PROXY,
+}
+
+
+def _kind_from_role(role: str, address: str) -> ProxyKind:
+    """Map a contract role string to a :class:`ProxyKind`, rejecting the unknown.
+
+    Defaulting an unrecognised role to either kind is unsafe in a way that does
+    not surface: as SubProxy it drops the proxy from ``/v1/primes`` and every
+    ``prime_`` sum *and* folds its balance into the treasury denominator, so a
+    position silently leaves the numerator and reappears below the line. A third
+    role added upstream is a contract change we must be told about.
+    """
+    try:
+        return _CONTRACT_ROLES[role]
+    except KeyError:
+        raise ValueError(
+            f"axis-synome contract proxy {address} has unrecognised role {role!r}; "
+            f"expected one of {sorted(_CONTRACT_ROLES)}"
+        ) from None
 
 
 def _index_proxies() -> dict[str, ProxyEntry]:
@@ -77,7 +98,7 @@ def _index_proxies() -> dict[str, ProxyEntry]:
                     address=address,
                     prime_name=prime_name,
                     chain=chain,
-                    kind=_kind_from_role(proxy["role"]),
+                    kind=_kind_from_role(proxy["role"], address),
                 )
                 existing = entries.get(address)
                 if existing is not None:
@@ -153,18 +174,8 @@ def alm_proxies_for_prime(prime_name: str) -> tuple[ProxyEntry, ...]:
     )
 
 
-def primary_proxy_for_prime(prime_name: str) -> ProxyEntry | None:
-    """Return the prime's mainnet ALM proxy, or ``None`` if it has none."""
-    for entry in alm_proxies_for_prime(prime_name):
-        if entry.chain == _PRIMARY_CHAIN:
-            return entry
-    return None
-
-
-def is_primary_proxy(address: str) -> bool:
-    """Return whether ``address`` is its prime's primary (mainnet ALM) proxy."""
-    entry = proxy_entry(address)
-    if entry is None:
-        return False
-    primary = primary_proxy_for_prime(entry.prime_name)
-    return primary is not None and primary.address == entry.address
+# Which proxy of a prime carries its prime-scoped rows is deliberately NOT
+# answered here: the contract's mainnet ALM proxy may have no allocation_position
+# rows, and attributing a row to a proxy /v1/primes does not list would make it
+# unreachable. AllocationRepository.primary_proxy_address resolves it from the
+# same rows /v1/primes is built from, so server and client cannot disagree.

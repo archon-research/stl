@@ -115,7 +115,7 @@ export interface paths {
     };
     /**
      * List a prime's current allocations
-     * @description Return every current allocation held by the given prime — receipt-token positions (enriched with USD value when a price is available), direct asset holdings (tokens held in the proxy with no registered receipt-token wrapper, surfaced with `receipt_token_id`, `receipt_token_address` and `protocol_name` set to `null`, and `amount_usd` valued from the token's oracle price when one exists), and off-chain Anchorage BTC custody (chain_id 0, `protocol_name` `anchorage`, `amount_usd` the loan drawn against the collateral). Each row includes the latest activity timestamp and a derived `category` (`allocation` / `pol` / `psm3` / `asset` / `custody`). Rows are proxy-scoped except the Anchorage custody leg, which is prime-scoped and returned only under the prime's primary (mainnet ALM) proxy — see the `scope` field.
+     * @description Return every current allocation held by the given prime — receipt-token positions (enriched with USD value when a price is available), direct asset holdings (tokens held in the proxy with no registered receipt-token wrapper, surfaced with `receipt_token_id`, `receipt_token_address` and `protocol_name` set to `null`, and `amount_usd` valued from the token's oracle price when one exists), and off-chain Anchorage BTC custody (chain_id 0, `protocol_name` `anchorage`, `amount_usd` the loan drawn against the collateral). Each row includes the latest activity timestamp and a derived `category` (`allocation` / `pol` / `psm3` / `asset` / `custody`). Rows are proxy-scoped except the Anchorage custody leg, which is prime-scoped and returned only under the one proxy of the prime that carries its prime-scoped rows (its mainnet proxy when indexed, else its lowest-addressed one) — see the `scope` field.
      */
     get: operations['list_allocations_v1_primes__prime_id__allocations_get'];
     put?: never;
@@ -177,7 +177,7 @@ export interface paths {
      * Self-computed prime risk capital
      * @description Compute the prime's capital metrics from on-chain data and the default RRC model (`gap_sweep`), with no dependency on the upstream Star feed. Returns exposure (priced receipt-token allocations), Total Risk Capital (on-chain treasury), Required Risk Capital (sum of per-allocation model RRC), encumbrance, a `modeled_pct` coverage figure, and a per-allocation breakdown. The figures are model-derived and partial (only allocations the model can price contribute Required Risk Capital) and will not match Sky's dashboard. A backed allocation whose pool-share lookup can't be resolved (e.g. a warm-up window or an un-indexed receipt token) is reported as unpriced (`applied=false` with an `unpriced_reason`) rather than failing the whole response. Returns `404` if the prime is unknown, and also if the address is a SubProxy treasury wallet: those hold a prime's treasury rather than its allocations, so they have no prime-level risk capital to report. Read the treasury at `/v1/primes/{prime_id}/total-capital` with one of the prime's ALM proxies, which `/v1/primes` lists.
      *
-     *     Figures without a prefix are scoped to the proxy in the path. Figures prefixed `prime_` are scoped to the whole prime — summed across every ALM proxy of the prime the given address belongs to — and are therefore identical whichever proxy you query; use `prime_per_chain` for the split. The one exception is an address the axis-synome contract does not list: it has no discoverable siblings, so its `prime_` figures cover that proxy alone and will not agree with what the prime's known proxies report. `total_risk_capital_usd` is prime-wide despite having no prefix. `prime_id` is the opposite exception: despite the prefix, it is the queried proxy address, not the prime, and varies per proxy — see its own description. `encumbrance_ratio` is deprecated because it mixes the two scopes; use `prime_encumbrance_ratio`.
+     *     Figures without a prefix are scoped to the proxy in the path. Figures prefixed `prime_` are scoped to the whole prime — summed across the ALM proxies of the prime the given address belongs to that sit on chains STL indexes — and are therefore identical whichever proxy you query; use `prime_per_chain` for the split and `prime_unserved_chains` for what is missing from it. The one exception is an address the axis-synome contract does not list: it has no discoverable siblings, so its `prime_` figures cover that proxy alone and will not agree with what the prime's known proxies report. `total_risk_capital_usd` is prime-wide despite having no prefix. `prime_id` is the opposite exception: despite the prefix, it is the queried proxy address, not the prime, and varies per proxy — see its own description. `encumbrance_ratio` is deprecated because it mixes the two scopes; use `prime_encumbrance_ratio`.
      */
     get: operations['get_prime_risk_capital_v1_primes__prime_id__risk_capital_get'];
     put?: never;
@@ -1079,18 +1079,18 @@ export interface components {
      * @description One ALM proxy's contribution to the prime's aggregated figures.
      *
      *     A row exists for every ALM proxy the axis-synome contract lists for this
-     *     prime, including chains STL has no allocation tracker for. On such a
-     *     chain `exposure_usd`, `required_risk_capital_usd`, and `allocation_count`
-     *     read as zero — that reads identically to a proxy STL tracks but that
-     *     genuinely holds nothing, so a `"0"` row here does not by itself mean the
-     *     prime has no exposure on that chain.
+     *     prime, including chains STL has no allocation tracker for. On such a chain the
+     *     figures are `null`, not `"0"`: STL holds no positions for it at all, so a zero
+     *     would assert the prime is empty there when the truth is that it is not
+     *     indexed. `prime_unserved_chains` names those chains, and the `prime_*` totals
+     *     exclude them.
      */
     ChainRiskCapitalResponse: {
       /**
        * Allocation Count
-       * @description Number of allocations this proxy contributed.
+       * @description Number of allocations this proxy contributed. `null` when the chain is unserved.
        */
-      allocation_count: number;
+      allocation_count?: number | null;
       /**
        * Chain
        * @description Internal chain name. `null` for a proxy absent from the axis-synome contract.
@@ -1099,9 +1099,9 @@ export interface components {
       chain?: string | null;
       /**
        * Exposure Usd
-       * @description Priced receipt-token exposure held through this proxy (USD).
+       * @description Priced receipt-token exposure held through this proxy (USD). `null` when no allocation tracker serves this chain, so nothing is known either way.
        */
-      exposure_usd: string;
+      exposure_usd?: string | null;
       /**
        * Proxy Address
        * @description 0x-prefixed ALM proxy address.
@@ -1109,9 +1109,9 @@ export interface components {
       proxy_address: string;
       /**
        * Required Risk Capital Usd
-       * @description Required Risk Capital from this proxy's positions (USD).
+       * @description Required Risk Capital from this proxy's positions (USD). `null` when the chain is unserved.
        */
-      required_risk_capital_usd: string;
+      required_risk_capital_usd?: string | null;
     };
     /**
      * DataSourceResponse
@@ -1429,7 +1429,7 @@ export interface components {
       prime_encumbrance_ratio?: string | null;
       /**
        * Prime Exposure Usd
-       * @description Σ priced exposure across every ALM proxy of the prime (USD). Prime-scoped: dedupe, never sum.
+       * @description Σ priced exposure across the prime's ALM proxies on chains STL indexes (USD). Prime-scoped: dedupe, never sum. Chains listed in `prime_unserved_chains` contribute nothing, so this is a lower bound on what the prime holds.
        * @default 0
        */
       prime_exposure_usd: string;
@@ -1463,15 +1463,25 @@ export interface components {
       prime_per_chain?: components['schemas']['ChainRiskCapitalResponse'][];
       /**
        * Prime Proxies
-       * @description ALM proxy addresses the `prime_*` figures were aggregated over.
+       * @description Every ALM proxy of the prime, address-sorted. Those on served chains carry the figures the `prime_*` totals are aggregated from; see `prime_per_chain` for which did.
        */
       prime_proxies?: string[];
       /**
        * Prime Required Risk Capital Usd
-       * @description Σ Required Risk Capital across every ALM proxy of the prime (USD). Prime-scoped.
+       * @description Σ Required Risk Capital across the prime's ALM proxies on chains STL indexes (USD). Prime-scoped. Bounded by `prime_unserved_chains` in the same way as `prime_exposure_usd`, so `prime_encumbrance_ratio` built on it reads low rather than high.
        * @default 0
        */
       prime_required_risk_capital_usd: string;
+      /**
+       * Prime Unserved Chains
+       * @description Chains the prime has an ALM proxy on that no allocation tracker serves, so they contribute nothing to the `prime_*` totals and read `null` in `prime_per_chain`. Non-empty means the totals are a lower bound.
+       * @example [
+       *       "arbitrum",
+       *       "optimism",
+       *       "unichain"
+       *     ]
+       */
+      prime_unserved_chains?: string[];
       /**
        * Required Risk Capital Usd
        * @description Σ per-allocation RRC from the default model (USD).

@@ -9,12 +9,11 @@ prime.
 
 import pytest
 
+from app.domain import prime_registry
 from app.domain.prime_registry import (
     ProxyKind,
     alm_proxies_for_prime,
     classify_proxy,
-    is_primary_proxy,
-    primary_proxy_for_prime,
     prime_name_for,
     proxy_entry,
     subproxy_addresses,
@@ -55,6 +54,50 @@ def test_classify_proxy_is_case_insensitive():
 
 def test_subproxy_addresses_returns_the_contract_subproxies():
     assert subproxy_addresses() == frozenset({_SPARK_SUB_PROXY, _GROVE_SUB_PROXY})
+
+
+def test_subproxy_addresses_refuses_a_contract_with_no_subproxies(monkeypatch):
+    # An empty set would turn every treasury query's IN predicate always-false and
+    # every Total Risk Capital silently null, so it has to fail loudly instead.
+    alm_only = {address: entry for address, entry in prime_registry._PROXIES.items() if entry.kind is ProxyKind.ALM}
+    monkeypatch.setattr(prime_registry, "_PROXIES", alm_only)
+
+    with pytest.raises(ValueError, match="no SubProxy entries"):
+        subproxy_addresses()
+
+
+def test_indexing_refuses_a_proxy_whose_role_the_contract_vocabulary_lacks(monkeypatch):
+    # Classifying an unknown role as SubProxy would drop the proxy from every
+    # prime_ sum and fold its balance into the treasury denominator instead — the
+    # position leaves the numerator and reappears below the line, unlogged.
+    contract = _contract_with_role("clearing_agent")
+    monkeypatch.setattr(prime_registry, "build_axis_synome_contract", lambda: contract)
+
+    with pytest.raises(ValueError, match="unrecognised role 'clearing_agent'"):
+        prime_registry._index_proxies()
+
+
+def _contract_with_role(role: str):
+    """A stand-in contract carrying one proxy with the given role."""
+
+    class _Contract:
+        @staticmethod
+        def model_dump(**_kwargs):
+            return {
+                "axis_synome": {
+                    "spec": {
+                        "entities": {
+                            "alm_proxies": {
+                                "AlmProxy": {
+                                    "spark": {"mainnet": [{"address": _UNKNOWN, "role": role}]},
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+    return _Contract()
 
 
 def test_proxy_entry_carries_prime_name_chain_and_kind():
@@ -103,25 +146,13 @@ def test_alm_proxies_for_prime_is_ordered_by_address():
     assert addresses == sorted(addresses)
 
 
-def test_primary_proxy_for_prime_is_the_mainnet_alm_proxy():
-    entry = primary_proxy_for_prime("grove")
+def test_grove_mainnet_alm_proxy_is_not_its_lowest_addressed_one():
+    """Pins the case that makes the mainnet-first tie-break load-bearing.
 
-    assert entry is not None
-    assert entry.address == _GROVE_MAINNET_ALM
-    assert entry.chain == "mainnet"
+    A primary picked by address alone would send grove's prime-scoped rows to its
+    plasma proxy, on a chain no tracker serves.
+    """
+    addresses = [entry.address for entry in alm_proxies_for_prime("grove")]
 
-
-def test_primary_proxy_for_prime_returns_none_for_unknown_prime():
-    assert primary_proxy_for_prime("nonesuch") is None
-
-
-def test_is_primary_proxy_accepts_the_mainnet_alm_proxy():
-    assert is_primary_proxy(_SPARK_MAINNET_ALM) is True
-
-
-@pytest.mark.parametrize(
-    "address",
-    [_SPARK_BASE_ALM, _SPARK_SUB_PROXY, _UNKNOWN],
-)
-def test_is_primary_proxy_rejects_every_other_address(address):
-    assert is_primary_proxy(address) is False
+    assert _GROVE_MAINNET_ALM in addresses
+    assert min(addresses) != _GROVE_MAINNET_ALM

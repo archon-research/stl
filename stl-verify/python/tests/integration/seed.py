@@ -2080,6 +2080,8 @@ async def _seed_anchorage_other_prime(conn: asyncpg.Connection, token_id: int) -
 SPARK_MAINNET_ALM_HEX = "1601843c5e9bc251a3272907010afa41fa18347e"
 SPARK_AVALANCHE_ALM_HEX = "ece6b0e8a54c2f44e066fbb9234e7157b15b7fec"
 SPARK_SUB_PROXY_HEX = "3300f198988e4c9c63f75df86de36421f06af8c4"
+# Absent from the pinned contract, and lower than SPARK_MAINNET_ALM_HEX.
+SPARK_OFF_CONTRACT_ALM_HEX = "0a11ce0000000000000000000000000000000001"
 
 _FAN_OUT_USDC_HEX = "b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0"
 _FAN_OUT_AUSDC_HEX = "c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1"
@@ -2087,6 +2089,7 @@ _FAN_OUT_AVAX_TOKEN_HEX = "d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2"
 _FAN_OUT_TX = "1a" * 32
 _FAN_OUT_TX_AVAX = "1b" * 32
 _FAN_OUT_TX_TREASURY = "1c" * 32
+_FAN_OUT_TX_OFF_CONTRACT = "1d" * 32
 
 # Must match allocation_position_repository._USDS_ADDRESS_HEX: get_latest_total_capital_usd
 # filters the treasury read on this exact address, and migration 20260204_110000 already
@@ -2100,8 +2103,15 @@ FAN_OUT_PROXY_EXPOSURE_USD = "0"
 FAN_OUT_PRIME_EXPOSURE_USD = "1000.000000"
 
 
-async def seed_prime_fan_out(db_url: str) -> None:
-    """Seed spark's real mainnet + avalanche ALM proxies and its SubProxy treasury."""
+async def seed_prime_fan_out(db_url: str, *, with_off_contract_proxy: bool = False) -> None:
+    """Seed spark's real mainnet + avalanche ALM proxies and its SubProxy treasury.
+
+    ``with_off_contract_proxy`` adds a third proxy holding rows under spark's
+    ``prime_id`` at an address the pinned axis-synome contract does not list — the
+    state while a newly deployed tracker runs ahead of the contract pin. Its
+    address sorts *below* the mainnet proxy's, so a primary picked by address
+    alone would attribute spark's prime-scoped rows to it.
+    """
     conn = await asyncpg.connect(db_url)
     try:
         async with conn.transaction():
@@ -2184,5 +2194,18 @@ async def seed_prime_fan_out(db_url: str) -> None:
                 asset_quantity=Decimal("4722.61"),
                 snapshot_time=ANCHORAGE_LATEST_SNAPSHOT,
             )
+
+            if with_off_contract_proxy:
+                await insert_allocation_position(
+                    conn,
+                    token_id=avax_token_id,
+                    prime_id=spark_id,
+                    proxy_hex=SPARK_OFF_CONTRACT_ALM_HEX,
+                    balance=Decimal("7"),
+                    block=1003,
+                    tx=_FAN_OUT_TX_OFF_CONTRACT,
+                    direction="in",
+                    chain_id=8453,
+                )
     finally:
         await conn.close()
