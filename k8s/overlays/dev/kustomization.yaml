@@ -48,3 +48,13 @@ patches:
         name: python-api
       spec:
         replicas: 1
+  # Drop the base PodDisruptionBudget: against the single replica above,
+  # minAvailable: 1 is maxUnavailable: 0 and blocks every voluntary eviction,
+  # so `kubectl drain` on the one kind node would hang. Nothing consolidates a
+  # local cluster, so there is no disruption to budget for. VEC-531.
+  - patch: |
+      apiVersion: policy/v1
+      kind: PodDisruptionBudget
+      metadata:
+        name: python-api
+      $patch: delete

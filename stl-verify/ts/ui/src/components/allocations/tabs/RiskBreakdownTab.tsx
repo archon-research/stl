@@ -426,7 +426,7 @@ export function RiskBreakdownTab({
           ? weightedThreshold / thresholdUsd
           : null,
     };
-  }, [breakdown, totalUsd]);
+  }, [breakdown]);
 
   if (!selectedReceiptToken) {
     return (

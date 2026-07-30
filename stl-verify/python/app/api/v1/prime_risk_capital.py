@@ -10,6 +10,7 @@ from app.api.deps import get_engine, get_model_registry
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.prime_risk_capital import UnpricedReason
 from app.domain.prime_registry import ProxyKind, classify_proxy
+from app.domain.serialization import PlainDecimal
 from app.services.model_registry import ModelRegistry
 from app.services.prime_risk_capital_service import PrimeRiskCapitalService
 
@@ -22,12 +23,12 @@ class AllocationRiskCapitalResponse(BaseModel):
     receipt_token_id: int = Field(description="Surrogate id of the receipt token.")
     symbol: str = Field(description="Receipt-token symbol.")
     protocol_name: str = Field(description="Protocol the allocation sits in.")
-    exposure_usd: Decimal = Field(description="On-chain USD exposure of the allocation.")
+    exposure_usd: PlainDecimal = Field(description="On-chain USD exposure of the allocation.")
     applied: bool = Field(description="Whether the default model priced this allocation.")
-    required_risk_capital_usd: Decimal | None = Field(
+    required_risk_capital_usd: PlainDecimal | None = Field(
         default=None, description="Per-allocation RRC (USD). `null` when the allocation is unpriced."
     )
-    crr_pct: Decimal | None = Field(
+    crr_pct: PlainDecimal | None = Field(
         default=None, description="Comparable capital-risk ratio (0-100). `null` when the allocation is unpriced."
     )
     model: str | None = Field(default=None, description="Model that produced the figure, or `null`.")
@@ -58,8 +59,10 @@ class ChainRiskCapitalResponse(BaseModel):
         description="Internal chain name. `null` for a proxy absent from the axis-synome contract.",
         examples=["avalanche-c"],
     )
-    exposure_usd: Decimal = Field(description="Priced receipt-token exposure held through this proxy (USD).")
-    required_risk_capital_usd: Decimal = Field(description="Required Risk Capital from this proxy's positions (USD).")
+    exposure_usd: PlainDecimal = Field(description="Priced receipt-token exposure held through this proxy (USD).")
+    required_risk_capital_usd: PlainDecimal = Field(
+        description="Required Risk Capital from this proxy's positions (USD)."
+    )
     allocation_count: int = Field(description="Number of allocations this proxy contributed.")
 
 
@@ -74,12 +77,12 @@ class PrimeRiskCapitalResponse(BaseModel):
 
     prime_id: str = Field(description="Prime's 0x-prefixed ALM proxy address.")
     model: str = Field(description="Default RRC model used (e.g. `gap_sweep`).", examples=["gap_sweep"])
-    exposure_usd: Decimal = Field(description="Σ priced receipt-token allocation exposure (USD).")
-    total_risk_capital_usd: Decimal | None = Field(
+    exposure_usd: PlainDecimal = Field(description="Σ priced receipt-token allocation exposure (USD).")
+    total_risk_capital_usd: PlainDecimal | None = Field(
         default=None, description="On-chain SubProxy treasury balance (USD). `null` when absent."
     )
-    required_risk_capital_usd: Decimal = Field(description="Σ per-allocation RRC from the default model (USD).")
-    encumbrance_ratio: Decimal | None = Field(
+    required_risk_capital_usd: PlainDecimal = Field(description="Σ per-allocation RRC from the default model (USD).")
+    encumbrance_ratio: PlainDecimal | None = Field(
         default=None,
         deprecated=True,
         description=(
@@ -88,8 +91,8 @@ class PrimeRiskCapitalResponse(BaseModel):
             "is unchanged for backwards compatibility. Use `prime_encumbrance_ratio`."
         ),
     )
-    modeled_exposure_usd: Decimal = Field(description="Exposure the default model could price (USD).")
-    modeled_pct: Decimal | None = Field(
+    modeled_exposure_usd: PlainDecimal = Field(description="Exposure the default model could price (USD).")
+    modeled_pct: PlainDecimal | None = Field(
         default=None, description="`modeled_exposure_usd / exposure_usd` (0-1). `null` when exposure is zero."
     )
     per_allocation: list[AllocationRiskCapitalResponse] = Field(
@@ -100,21 +103,21 @@ class PrimeRiskCapitalResponse(BaseModel):
         description="Prime this proxy belongs to. `null` for a proxy absent from the axis-synome contract.",
         examples=["spark"],
     )
-    prime_exposure_usd: Decimal = Field(
+    prime_exposure_usd: PlainDecimal = Field(
         default=Decimal("0"),
         description="Σ priced exposure across every ALM proxy of the prime (USD). Prime-scoped: dedupe, never sum.",
     )
-    prime_required_risk_capital_usd: Decimal = Field(
+    prime_required_risk_capital_usd: PlainDecimal = Field(
         default=Decimal("0"),
         description="Σ Required Risk Capital across every ALM proxy of the prime (USD). Prime-scoped.",
     )
-    prime_modeled_exposure_usd: Decimal = Field(
+    prime_modeled_exposure_usd: PlainDecimal = Field(
         default=Decimal("0"), description="Σ exposure the default model could price, prime-wide (USD)."
     )
-    prime_modeled_pct: Decimal | None = Field(
+    prime_modeled_pct: PlainDecimal | None = Field(
         default=None, description="`prime_modeled_exposure_usd / prime_exposure_usd` (0-1)."
     )
-    prime_encumbrance_ratio: Decimal | None = Field(
+    prime_encumbrance_ratio: PlainDecimal | None = Field(
         default=None,
         description=(
             "`prime_required_risk_capital_usd / total_risk_capital_usd` — the prime's true "
