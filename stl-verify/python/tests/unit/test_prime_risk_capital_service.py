@@ -206,6 +206,16 @@ async def test_compute_reports_a_per_chain_breakdown_of_the_aggregation():
 
 
 @pytest.mark.asyncio
+async def test_compute_orders_prime_proxies_identically_regardless_of_which_was_queried():
+    service = _service(_two_chain_spark_repo(), _two_asset_registry())
+
+    from_mainnet = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
+    from_avalanche = await service.compute(EthAddress(_SPARK_AVALANCHE_ALM))
+
+    assert from_avalanche.prime_proxies == from_mainnet.prime_proxies
+
+
+@pytest.mark.asyncio
 async def test_compute_names_the_prime_it_aggregated_over():
     service = _service(_two_chain_spark_repo(), _two_asset_registry())
 

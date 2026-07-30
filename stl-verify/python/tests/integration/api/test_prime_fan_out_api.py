@@ -52,6 +52,40 @@ def _spark_rows(client: TestClient) -> list[dict]:
     return [row for row in client.get("/v1/primes").json() if row["name"] == "spark"]
 
 
+def _stub_star_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stand in for the third-party Star risk-capital fetch with a fixed spark row.
+
+    ``/v1/capital-metrics`` awaits a real ``httpx`` call to Blockanalitica
+    (``_fetch_star_risk_capital_payload``); AGENTS.md only allows integration
+    tests to mock data sources we do not control, and a third party is exactly
+    that. Stubbing only this half keeps the rest of the request (list_primes,
+    the real seeded database) exercising the genuine path.
+    """
+    from app.api.v1 import allocations
+
+    async def _fake_payload() -> allocations.StarRiskCapitalResponse:
+        return allocations.StarRiskCapitalResponse.model_validate(
+            {
+                "status": 200,
+                "success": True,
+                "data": {
+                    "results": [
+                        {
+                            "star": "spark",
+                            "exposure": "100.00",
+                            "total_rc": "50.00",
+                            "financial_rrc": "20.00",
+                            "exposure_share": "10.00%",
+                            "risk_tolerance_ratio": "2.00",
+                        }
+                    ]
+                },
+            }
+        )
+
+    monkeypatch.setattr(allocations, "_fetch_star_risk_capital_payload", _fake_payload)
+
+
 def test_primes_lists_both_of_sparks_alm_proxies(client: TestClient) -> None:
     assert len(_spark_rows(client)) == 2
 
@@ -77,13 +111,19 @@ def test_primes_excludes_the_subproxy_treasury_wallet(client: TestClient) -> Non
     assert addresses == {_SPARK_MAINNET_ALM, _SPARK_AVALANCHE_ALM}
 
 
-def test_backwards_compat_capital_metrics_still_returns_one_row_per_proxy(client: TestClient) -> None:
+def test_backwards_compat_capital_metrics_still_returns_one_row_per_proxy(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_star_payload(monkeypatch)
+
     rows = [row for row in client.get("/v1/capital-metrics").json() if row["prime_name"] == "spark"]
 
     assert len(rows) == 2
 
 
-def test_capital_metrics_rows_carry_a_shared_dedupe_key(client: TestClient) -> None:
+def test_capital_metrics_rows_carry_a_shared_dedupe_key(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_star_payload(monkeypatch)
+
     rows = [row for row in client.get("/v1/capital-metrics").json() if row["prime_name"] == "spark"]
 
     assert {row["prime_vault_address"] for row in rows} == {_SPARK_VAULT}
@@ -137,3 +177,29 @@ def test_custody_leg_is_served_under_the_mainnet_proxy_only(client: TestClient) 
     ]
 
     assert carrying == [_SPARK_MAINNET_ALM]
+
+
+def test_risk_capital_reports_the_same_prime_encumbrance_ratio_from_every_proxy(client: TestClient) -> None:
+    ratios = {
+        client.get(f"/v1/primes/{row['address']}/risk-capital").json()["prime_encumbrance_ratio"]
+        for row in _spark_rows(client)
+    }
+
+    assert len(ratios) == 1
+
+
+def test_risk_capital_prime_encumbrance_ratio_is_non_null(client: TestClient) -> None:
+    # Guards the test above from passing vacuously on a fixture where every
+    # proxy resolves to a null ratio (e.g. a missing SubProxy treasury).
+    body = client.get(f"/v1/primes/{_SPARK_AVALANCHE_ALM}/risk-capital").json()
+
+    assert body["prime_encumbrance_ratio"] is not None
+
+
+def test_non_primary_proxys_on_chain_holdings_survive_the_custody_drop(client: TestClient) -> None:
+    # Only the Anchorage custody row is scoped away from a non-primary proxy;
+    # avalanche's own on-chain holding (a direct, non-receipt-token asset) must
+    # still surface, proving the drop targets the custody row alone.
+    rows = client.get(f"/v1/primes/{_SPARK_AVALANCHE_ALM}/allocations").json()
+
+    assert [row["symbol"] for row in rows] == ["JAAA"]

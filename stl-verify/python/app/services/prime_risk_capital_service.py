@@ -222,9 +222,12 @@ class PrimeRiskCapitalService:
         """Resolve the queried proxy to its prime's full set of ALM proxies.
 
         Returns ``(prime_name, ((proxy, chain), ...))`` with the queried proxy
-        first, so the caller can read its own totals off the head without a
-        second lookup. A proxy absent from the axis-synome contract has no
-        discoverable siblings and aggregates over itself alone.
+        first. Order here is incidental to aggregation (``_assemble_result``
+        locates the queried proxy's own totals by address, not by position) and
+        is re-sorted by address before it reaches ``prime_proxies`` /
+        ``prime_per_chain``, so those prime-scoped fields read identically
+        whichever proxy was queried. A proxy absent from the axis-synome
+        contract has no discoverable siblings and aggregates over itself alone.
         """
         prime_name = prime_name_for(prime_id)
         if prime_name is None:
@@ -249,7 +252,19 @@ class PrimeRiskCapitalService:
         total_rc: Decimal | None,
     ) -> PrimeRiskCapital:
         """Build the response from the queried proxy's totals plus the prime-wide sums."""
-        queried = per_proxy[0]
+        # Looked up by address, not read off index 0: per_proxy puts the queried
+        # proxy first (see _proxies_to_aggregate), but prime_proxies/prime_per_chain
+        # below are address-sorted, and the unprefixed fields must stay pinned to
+        # the queried proxy regardless of where that sort places it.
+        queried_address = str(prime_id).lower()
+        queried = next(totals for totals in per_proxy if totals.proxy_address.lower() == queried_address)
+
+        # prime_ fields are reconciliation keys: identical from every proxy of a
+        # prime, so a consumer can dedupe on them. Sorting by address (matching
+        # alm_proxies_for_prime) makes prime_proxies/prime_per_chain identical
+        # element-for-element too, not just as sets, regardless of which proxy
+        # was queried.
+        ordered = sorted(per_proxy, key=lambda totals: totals.proxy_address.lower())
 
         prime_exposure = sum((totals.exposure for totals in per_proxy), Decimal("0"))
         prime_modeled = sum((totals.modeled_exposure for totals in per_proxy), Decimal("0"))
@@ -271,7 +286,7 @@ class PrimeRiskCapitalService:
             prime_modeled_exposure_usd=prime_modeled,
             prime_modeled_pct=_ratio(prime_modeled, prime_exposure),
             prime_encumbrance_ratio=_ratio(prime_required, total_rc),
-            prime_proxies=tuple(totals.proxy_address for totals in per_proxy),
+            prime_proxies=tuple(totals.proxy_address for totals in ordered),
             prime_per_chain=tuple(
                 ChainRiskCapital(
                     proxy_address=totals.proxy_address,
@@ -280,7 +295,7 @@ class PrimeRiskCapitalService:
                     required_risk_capital_usd=totals.required,
                     allocation_count=len(totals.per_allocation),
                 )
-                for totals in per_proxy
+                for totals in ordered
             ),
         )
 

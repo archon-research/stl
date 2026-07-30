@@ -709,12 +709,21 @@ function appliedRiskCapitalUsd(
 // the two so a real risk capital figure that is merely uncomputed for this
 // chain doesn't read as the same "n/a" as an allocation no risk model
 // applies to.
+//
+// The receipt_token_id check gates this to rows that could ever carry a
+// figure. A null receipt_token_id (the Anchorage custody row, and every
+// direct/bare holding) can never key into riskByReceiptTokenId regardless of
+// chain, so without this check a mainnet-primary prime would flag its own
+// off-chain custody row (chain_id 0) as a cross-chain mismatch and claim a
+// figure exists but merely wasn't fetched, when "n/a" is the correct read.
 function isRiskCapitalChainMismatch(
   selectedPrime: Prime | null,
   allocation: Allocation,
 ): boolean {
   return (
-    selectedPrime !== null && allocation.chain_id !== selectedPrime.chain_id
+    allocation.receipt_token_id != null &&
+    selectedPrime !== null &&
+    allocation.chain_id !== selectedPrime.chain_id
   );
 }
 
