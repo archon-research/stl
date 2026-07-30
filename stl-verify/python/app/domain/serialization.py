@@ -8,12 +8,16 @@ one JSON representation without the domain importing an outer layer.
 from decimal import Decimal
 from typing import Annotated
 
-from pydantic import PlainSerializer, WithJsonSchema
+from pydantic import PlainSerializer, TypeAdapter, WithJsonSchema
 
-# Matches pydantic's own default JSON-schema pattern for a Decimal string, kept
-# so ``WithJsonSchema`` below (which replaces the serialization schema wholesale)
-# still advertises these fields as numeric strings rather than a bare ``string``.
-_DECIMAL_STRING_PATTERN = r"^(?!^[-+.]*$)[+-]?0*\d*\.?\d*$"
+# ``WithJsonSchema`` below replaces the serialization schema wholesale, so these
+# fields would degrade to a bare ``string`` without restating pydantic's own
+# schema for a ``Decimal``. Derived rather than copied: a pydantic upgrade that
+# changes (or drops) the numeric-string ``pattern`` follows through here instead
+# of silently drifting the committed ``openapi-schema.json``, which nothing in
+# CI regenerates. One ``TypeAdapter`` build at import; pydantic hands out a copy
+# per use, so sharing the dict across every field is safe.
+_DECIMAL_SERIALIZATION_SCHEMA = TypeAdapter(Decimal).json_schema(mode="serialization")
 
 
 def _decimal_to_plain_string(value: Decimal) -> str:
@@ -32,7 +36,7 @@ def _decimal_to_plain_string(value: Decimal) -> str:
 PlainDecimal = Annotated[
     Decimal,
     PlainSerializer(_decimal_to_plain_string, return_type=str, when_used="json"),
-    WithJsonSchema({"type": "string", "pattern": _DECIMAL_STRING_PATTERN}, mode="serialization"),
+    WithJsonSchema(_DECIMAL_SERIALIZATION_SCHEMA, mode="serialization"),
 ]
 """A ``Decimal`` that always serializes to a plain (non-exponential) JSON string.
 
