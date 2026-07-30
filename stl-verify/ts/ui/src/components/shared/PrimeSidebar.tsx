@@ -26,22 +26,29 @@ type PrimeSidebarProps = {
 };
 
 const switchStyles = toggleSwitch();
-// The shared toggleSwitch recipe keys its checked styling off `data-checked`
-// (Base UI convention), but the Ark Switch we render emits `data-state="checked"`.
-// These overrides re-apply the track/thumb checked styling on the correct
-// attribute so the control visibly reflects its state.
+// LOAD-BEARING — do not "simplify" away. The shared `toggleSwitch` recipe
+// describes itself as built on Base UI and keys its checked styling off
+// `&[data-checked]`, but the design system re-exports the *Ark* Switch, which
+// emits `data-state="checked"`. The recipe's checked rules therefore never
+// match the component that ships with it, and without these overrides the
+// toggle does not visibly change when switched. Reported upstream; delete this
+// once the recipe matches Ark's attribute (or ships its own Switch component).
+//
+// Neutrals are `neutral.*`, not the recipe's `gray.*`: `gray` is blue-tinted
+// and `neutral` is achromatic, and the semantic layer is achromatic, so `gray`
+// here would put cool-tinted greys beside achromatic ones.
 const switchControlCheckedClassName = css({
   '&[data-state="checked"]': {
-    bg: 'gray.800',
-    borderColor: 'gray.700',
-    _dark: { bg: 'gray.600', borderColor: 'gray.500' },
+    bg: 'neutral.800',
+    borderColor: 'neutral.700',
+    _dark: { bg: 'neutral.600', borderColor: 'neutral.500' },
   },
 });
 const switchThumbCheckedClassName = css({
   '[data-state="checked"] &': {
     transform: 'translateX(calc(2.25rem - 100% - 2px))',
     bg: 'white',
-    _dark: { bg: 'gray.100' },
+    _dark: { bg: 'neutral.100' },
   },
 });
 
@@ -181,7 +188,11 @@ export function PrimeSidebar({
                     transitionProperty:
                       'background-color, border-color, transform',
                     _hover: {
-                      bg: 'interactive.hover',
+                      // `surface.hover`, not `interactive.hover`: the preset now
+                      // splits the two, and `interactive.hover` became an
+                      // accent-tinted (blue) wash. A row hover wants the neutral
+                      // grey wash.
+                      bg: 'surface.hover',
                       transform: 'translateY(-1px)',
                     },
                     _disabled: {

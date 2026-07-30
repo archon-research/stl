@@ -138,8 +138,13 @@ export function RiskDetailDrawer({
   const ariaTitle = typeof title === 'string' ? title : 'Risk details';
 
   return (
+    // The drawer stays mounted while closed (the tabs inside gate their fetches
+    // on `isOpen`), so it is only translated off-screen. `inert` is what removes
+    // it from the tab order as well as the accessibility tree; `aria-hidden`
+    // alone left every control inside the closed drawer keyboard-reachable while
+    // announcing nothing.
     <div
-      aria-hidden={!isOpen}
+      inert={!isOpen}
       className={css({
         pointerEvents: isOpen ? 'auto' : 'none',
       })}
@@ -298,7 +303,7 @@ export function RiskDetailDrawer({
                 transitionProperty: 'background-color, color, border-color',
                 transitionDuration: 'fast',
                 _hover: {
-                  bg: 'interactive.hover',
+                  bg: 'surface.hover',
                   color: 'text.strong',
                 },
               })}

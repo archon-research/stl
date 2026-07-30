@@ -34,7 +34,7 @@ import type {
 } from '../../../types/allocation';
 import { ChainLogo, SummaryMetric, TokenAddress } from '../../shared';
 import { MethodologyPanel } from '../../shared/MethodologyPanel';
-import { TabErrorPanel, TabSelectionPrompt } from './TabStatePanels';
+import { TabErrorPanel, TabNotePanel } from './TabStatePanels';
 
 type RiskBreakdownTabProps = {
   isEnabled: boolean;
@@ -414,26 +414,13 @@ export function RiskBreakdownTab({
 
   if (!selectedReceiptToken) {
     return (
-      <TabSelectionPrompt message="Pick a receipt token to inspect its collateral backing." />
+      <TabNotePanel message="Pick a receipt token to inspect its collateral backing." />
     );
   }
 
   if (receiptTokenId === null) {
     return (
-      <div
-        className={css({
-          borderRadius: 'md',
-          borderStyle: 'solid',
-          borderWidth: '1px',
-          borderColor: 'border.subtle',
-          bg: 'surface.subtle',
-          p: '4',
-        })}
-      >
-        <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>
-          Direct asset holdings have no collateral backing to break down.
-        </p>
-      </div>
+      <TabNotePanel message="Direct asset holdings have no collateral backing to break down." />
     );
   }
 
@@ -565,21 +552,7 @@ export function RiskBreakdownTab({
       !isLoading &&
       breakdown &&
       breakdown.items.length === 0 ? (
-        <div
-          className={css({
-            borderRadius: 'md',
-            borderStyle: 'solid',
-            borderWidth: '1px',
-            borderColor: 'border.subtle',
-            bg: 'surface.subtle',
-            p: '4',
-          })}
-        >
-          <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>
-            This receipt token returned no collateral items for the risk
-            breakdown response.
-          </p>
-        </div>
+        <TabNotePanel message="This receipt token returned no collateral items for the risk breakdown response." />
       ) : null}
 
       {!errorMessage && (isLoading || breakdown) ? (
@@ -593,27 +566,14 @@ export function RiskBreakdownTab({
 
       {!errorMessage &&
       selectedReceiptToken.protocol_name?.toLowerCase() === 'maple' ? (
-        <div
-          className={css({
-            borderRadius: 'md',
-            borderStyle: 'solid',
-            borderWidth: '1px',
-            borderColor: 'border.subtle',
-            bg: 'surface.subtle',
-            p: '4',
-          })}
-        >
-          <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>
-            Source: Maple Finance GraphQL API. Collateral amounts and USD values
-            are attested by Maple/custodians and are not independently verified
-            on-chain. Internal (AMM/strategy) loans are excluded; the breakdown
-            reflects external-loan collateral plus available pool liquidity, so
-            it is less than total supply.
-            {selectedPrime
+        <TabNotePanel
+          message={
+            'Source: Maple Finance GraphQL API. Collateral amounts and USD values are attested by Maple/custodians and are not independently verified on-chain. Internal (AMM/strategy) loans are excluded; the breakdown reflects external-loan collateral plus available pool liquidity, so it is less than total supply.' +
+            (selectedPrime
               ? ' Per-prime USD values are a pro-rata approximation (each pool asset scaled by the prime’s pool share) and will not match data.spark.fi, which uses a different (coverage-capped) attribution model. Backing % is a pool property and is identical for every prime.'
-              : ''}
-          </p>
-        </div>
+              : '')
+          }
+        />
       ) : null}
 
       {/* Data Sources & Methodology Footer */}
