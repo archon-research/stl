@@ -18,15 +18,10 @@ export function getActionIcon(
   }
 }
 
-// Panda extracts styles from the *source text* of a `css()` call, so a caller
-// doing `css({ color: actionColor })` on a value returned from here extracts
-// nothing and emits no rule — Panda cannot resolve a runtime identifier. These
-// four literal `css()` calls are therefore load-bearing: they are the only
-// reason `.c_text\.interactive` (the `sweep` colour) exists in the stylesheet
-// at all. Previously `sweep` rows rendered uncoloured, and the other three
-// branches worked only by coincidence, from unrelated literal
-// `color: 'text.warning'`-style usages in other files — deleting any one of
-// those would have silently dropped an action colour here.
+// Panda extracts styles from the *source text* of a `css()` call, so handing a
+// caller a token path to put in `css({ color: value })` emits no rule at all.
+// These literal calls are load-bearing: they are the only reason
+// `.c_text\.interactive` (the `sweep` colour) exists in the stylesheet.
 const ACTION_COLOR_CLASS = {
   in: css({ color: 'text.success' }),
   out: css({ color: 'text.warning' }),
@@ -39,7 +34,10 @@ export function getActionColorClass(
   actionType: string | null | undefined,
 ): string {
   const key = actionType?.toLowerCase();
-  return key !== undefined && key in ACTION_COLOR_CLASS
+  // Own-property check, not `in`: `action_type` is unvalidated API text, and
+  // `'constructor' in ACTION_COLOR_CLASS` is true, which would return a function
+  // and leave the element with no colour class at all.
+  return key !== undefined && Object.hasOwn(ACTION_COLOR_CLASS, key)
     ? ACTION_COLOR_CLASS[key as keyof typeof ACTION_COLOR_CLASS]
     : DEFAULT_ACTION_COLOR_CLASS;
 }

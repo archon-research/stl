@@ -378,11 +378,14 @@ const tableHeaderTypographyClassName = css({
 // `css()` call, evaluated once at module scope, and the cell picks a finished
 // class name.
 //
-// The hues come from the design system's role-based `colorPalette` tokens rather
-// than the `bg.*`/`text.*` status family: that family has only success, warning,
-// critical, info and neutral, which cannot give five *strategy* categories
-// distinct fills without two of them colliding. `subtle.bg`/`subtle.fg` are
-// dark-aware for every palette, so one declaration covers both themes.
+// Hues come from the design system's role-based `colorPalette` tokens, which are
+// dark-aware, rather than the `bg.*`/`text.*` status family -- that family cannot
+// give five strategy categories distinct fills without two colliding.
+//
+// Only `neutral`, `gray`, `green`, `red`, `amber` and `blue` have role sub-tokens,
+// though `ColorPalette` accepts every raw hue: `colorPalette: 'violet'` type-checks
+// and then emits no `subtle.bg`, leaving a transparent chip. `asset` therefore uses
+// the local `bg.violet`/`text.violet` pair instead.
 const CATEGORY_CHIP_CLASS: Record<AllocationCategory | 'unknown', string> = {
   allocation: css({
     colorPalette: 'green',
@@ -399,11 +402,7 @@ const CATEGORY_CHIP_CLASS: Record<AllocationCategory | 'unknown', string> = {
     bg: 'colorPalette.subtle.bg',
     color: 'colorPalette.subtle.fg',
   }),
-  asset: css({
-    colorPalette: 'violet',
-    bg: 'colorPalette.subtle.bg',
-    color: 'colorPalette.subtle.fg',
-  }),
+  asset: css({ bg: 'bg.violet', color: 'text.violet' }),
   // Off-chain custody reads as infrastructure rather than strategy, so it stays
   // achromatic instead of taking a fifth hue.
   custody: css({
@@ -421,7 +420,14 @@ const CATEGORY_CHIP_CLASS: Record<AllocationCategory | 'unknown', string> = {
 function getCategoryChipClass(
   category: AllocationCategory | undefined,
 ): string {
-  return CATEGORY_CHIP_CLASS[category ?? 'unknown'];
+  // `AllocationCategory` is a compile-time union over an unvalidated API response,
+  // so a category the backend adds later arrives as an unlisted string. Keying on
+  // own-property presence rather than `?? 'unknown'` means that renders the neutral
+  // chip instead of an unstyled one -- matching how getCategoryLabel already
+  // degrades.
+  return category !== undefined && Object.hasOwn(CATEGORY_CHIP_CLASS, category)
+    ? CATEGORY_CHIP_CLASS[category]
+    : CATEGORY_CHIP_CLASS.unknown;
 }
 
 function AllocationAssetCell({

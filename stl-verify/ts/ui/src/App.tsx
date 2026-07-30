@@ -774,13 +774,9 @@ function App() {
 
     const primeDebtValue = wadToUnits(primeDebtSnapshot?.debt_wad);
 
-    // One ordinal series token per card, and deliberately no `var(..., fallback)`
-    // here. Until the design system defined the chart.* family these vars all
-    // resolved to their fallbacks, which hid the fact that two cards named the
-    // same token: `total-capital` asked for `series-primary` with an amber
-    // fallback, so it looked amber while actually being blue. A bare var() means
-    // a wrong or missing token now shows up as an unpainted line instead of
-    // quietly rendering some other card's colour.
+    // One ordinal series token per card, and deliberately no `var(..., fallback)`:
+    // a fallback lets a wrong or missing token render as a plausible colour, which
+    // is how two of these cards came to name the same token unnoticed.
     const charts: MetricChartSpec[] = [
       {
         // Balance reconstructed from signed USD net flows, anchored at the
@@ -900,14 +896,11 @@ function App() {
     <div
       className={css({
         position: 'relative',
-        // These overrides reach into SidebarLayout's internals with !important,
-        // which is normally a smell. They stay because the design system's
-        // `sidebarLayout` recipe declares only a `base` and exposes no variants,
-        // so there is no stacked/narrow mode to ask for -- the sub-48rem layout
-        // below has to be imposed from outside, against the component's own
-        // class-based rules. Filed upstream as a missing responsive variant.
-        // Note the max-width query: the preset's breakpoints are min-width only,
-        // so this cannot be expressed as a normal responsive condition either.
+        // SidebarLayout's recipe declares only a `base` and no variants, so there
+        // is no stacked/narrow mode to ask for and the sub-48rem layout has to be
+        // imposed from outside with !important. Target Ark's `[data-part="panel"]`:
+        // the panels are plain divs, not `aside`/`main`. The preset's breakpoints
+        // are min-width only, hence the raw max-width query.
         '& [data-sidebar-layout] [data-part="panel"]:last-of-type > div': {
           overflow: 'auto !important',
           minHeight: '0 !important',
@@ -926,19 +919,19 @@ function App() {
             height: 'auto !important',
             overflow: 'visible !important',
           },
-          '& [data-sidebar-layout] aside': {
+          '& [data-sidebar-layout] [data-part="panel"]:first-of-type': {
             width: '100% !important',
             height: 'auto !important',
             maxHeight: '22rem',
             borderRight: 'none !important',
             borderBottom: '1px solid var(--colors-border-subtle)',
           },
-          '& [data-sidebar-layout] main': {
+          '& [data-sidebar-layout] [data-part="panel"]:last-of-type': {
             width: '100% !important',
             height: 'auto !important',
             minHeight: '0 !important',
           },
-          '& [data-sidebar-layout] main > header': {
+          '& [data-sidebar-layout] [data-part="panel"] > header': {
             minHeight: '0 !important',
             justifyContent: 'stretch !important',
           },

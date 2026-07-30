@@ -59,17 +59,36 @@ export default defineConfig({
                 _dark: '{colors.neutral.50}',
               },
             },
+            // Foreground for `bg.violet`; see that token for why the palette's
+            // own role tokens are unavailable.
+            violet: {
+              value: {
+                base: '{colors.violet.700}',
+                _dark: '{colors.violet.300}',
+              },
+            },
           },
           bg: {
             // Completes the preset's `bg.*` status family, which ships
-            // success/critical/warning but no informational or neutral fill.
-            info: {
-              value: { base: '{colors.blue.50}', _dark: '{colors.blue.950}' },
-            },
+            // success/critical/warning but no neutral fill.
             neutral: {
               value: {
                 base: '{colors.neutral.100}',
                 _dark: '{colors.neutral.800}',
+              },
+            },
+            // A categorical fill carrying no status meaning. The preset's
+            // role-based `colorPalette` tokens (`subtle.bg`/`subtle.fg`) exist for
+            // only six palettes -- neutral, gray, green, red, amber, blue -- while
+            // `ColorPalette` accepts every raw hue, so `colorPalette: 'violet'`
+            // type-checks and then emits no `subtle.bg` at all. Of the six, gray is
+            // indistinguishable from neutral and red reads as an alarm, so a
+            // five-way status-free taxonomy cannot be expressed through
+            // `colorPalette` alone. Filed upstream.
+            violet: {
+              value: {
+                base: '{colors.violet.50}',
+                _dark: '{colors.violet.950}',
               },
             },
           },
