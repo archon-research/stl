@@ -2,7 +2,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import GetCoreSchemaHandler
 from pydantic_core import CoreSchema, core_schema
@@ -144,7 +144,9 @@ class Prime:
     address: str
     chain_id: int
     chain: str | None
-    role: str
+    # An allocation venue by construction: SubProxy treasury wallets hold no
+    # allocations, so they are excluded rather than listed with another role.
+    role: Literal["alm"]
     prime_vault_address: str | None = None
 
 

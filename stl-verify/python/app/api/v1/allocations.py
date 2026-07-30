@@ -18,7 +18,12 @@ from app.api._validators import (
 from app.api.deps import get_engine
 from app.api.time_series import TimeSeriesWindow, apply_cache_control, build_window, get_time_series_query_params
 from app.config import get_settings
-from app.domain.entities.allocation import AnchorageCustodyHolding, DirectAssetHolding, EthAddress
+from app.domain.entities.allocation import (
+    AnchorageCustodyHolding,
+    DirectAssetHolding,
+    EthAddress,
+    ReceiptTokenPosition,
+)
 from app.domain.entities.allocation_category import AllocationCategory
 from app.domain.prime_registry import is_primary_proxy, proxy_entry
 from app.domain.serialization import PlainDecimal
@@ -60,8 +65,11 @@ class PrimeResponse(BaseModel):
         description="Internal chain name derived from `chain_id`. `null` for an untaught chain id.",
         examples=["avalanche-c"],
     )
-    role: str = Field(
-        description="Proxy role: `alm` (allocation venue) or `sub_proxy` (treasury wallet).",
+    role: Literal["alm"] = Field(
+        description=(
+            "Always `alm`: this endpoint lists allocation venues only. SubProxy treasury wallets share "
+            "a prime's `prime_id` but hold no allocations, so they are excluded rather than labelled."
+        ),
         examples=["alm"],
     )
     prime_vault_address: str | None = Field(
@@ -192,7 +200,7 @@ class AllocationResponse(BaseModel):
             "Allocation category derived from protocol/symbol (`allocation`, `pol`, `psm3`, `asset`, `custody`)."
         ),
     )
-    scope: str = Field(
+    scope: Literal["proxy", "prime"] = Field(
         default="proxy",
         description=(
             "Whether the row belongs to the queried proxy (`proxy`) or to the prime as a whole (`prime`). "
@@ -300,7 +308,7 @@ class CapitalMetricsResponse(BaseModel):
         ),
         examples=["0x691a6c29e9e96dd897718305427ad5d534db16ba"],
     )
-    scope: str = Field(
+    scope: Literal["prime"] = Field(
         default="prime",
         description=(
             "Always `prime`: every metric on this row describes the whole prime, not the proxy in "
@@ -654,7 +662,7 @@ async def list_allocations(
       ``anchorage``, null ``underlying_*`` (no token-registry row), with the
       loan drawn against the collateral as ``amount_usd``. Gated to the
       prime's primary (mainnet ALM) proxy, or to any proxy the axis-synome
-      contract doesn't know about (see ``custody_applies`` below).
+      contract doesn't know about (see ``_custody_applies``).
 
     Errors:
     - 422 if ``prime_id`` is malformed.
@@ -664,68 +672,81 @@ async def list_allocations(
     if not await service.prime_exists(prime_address):
         raise HTTPException(status_code=404, detail="Prime not found")
 
-    # The Anchorage custody leg is prime-scoped, not proxy-scoped. Serving it
-    # under every one of a prime's proxies would triple-count $250M of BTC for
-    # any consumer unioning them, so only the primary proxy carries it.
-    # is_primary_proxy fails closed (False for an address the contract has
-    # never heard of), which would silently drop custody for a real mainnet
-    # proxy the contract hasn't been told about yet. Gate on *known
-    # non-primary* instead: an address absent from the contract has no
-    # discoverable siblings, so — mirroring classify_proxy's fail-open
-    # default — it is treated as its own primary.
-    entry = proxy_entry(prime_address)
-    custody_applies = entry is None or is_primary_proxy(prime_address)
+    custody_applies = _custody_applies(prime_address)
     positions, direct, custody = await asyncio.gather(
         service.list_receipt_token_positions(prime_address),
         service.list_direct_asset_holdings(prime_address),
         service.list_anchorage_custody_holdings(prime_address) if custody_applies else _no_custody(),
     )
-    category_service = AllocationCategoryService()
 
-    receipt_rows = [
-        AllocationResponse(
-            chain_id=p.chain_id,
-            receipt_token_id=p.receipt_token_id,
-            receipt_token_address=p.receipt_token_address,
-            underlying_token_id=p.underlying_token_id,
-            underlying_token_address=p.underlying_token_address,
-            symbol=p.symbol,
-            underlying_symbol=p.underlying_symbol,
-            protocol_name=p.protocol_name,
-            balance=p.balance,
-            amount_usd=p.amount_usd,
-            latest_activity_at=p.latest_activity_at.isoformat() if p.latest_activity_at else None,
-            latest_activity_action=p.latest_activity_action,
-            latest_activity_amount=p.latest_activity_amount,
-            category=category_service.classify(p.protocol_name, p.symbol),
-        )
-        for p in positions
+    category_service = AllocationCategoryService()
+    return [
+        *(_receipt_token_row(position, category_service) for position in positions),
+        *(_direct_asset_row(holding, category_service) for holding in direct),
+        *(_anchorage_custody_row(holding, category_service) for holding in custody),
     ]
-    # Underlying identity travels with the price basis; see
-    # _DIRECT_ASSET_HOLDINGS_SQL.
-    direct_rows = []
-    for h in direct:
-        underlying_id, underlying_address, underlying_symbol = _direct_underlying_identity(h)
-        direct_rows.append(
-            AllocationResponse(
-                chain_id=h.chain_id,
-                receipt_token_id=None,
-                receipt_token_address=None,
-                underlying_token_id=underlying_id,
-                underlying_token_address=underlying_address,
-                symbol=h.symbol,
-                underlying_symbol=underlying_symbol,
-                protocol_name=None,
-                balance=h.balance,
-                amount_usd=h.amount_usd,
-                latest_activity_at=h.latest_activity_at.isoformat() if h.latest_activity_at else None,
-                latest_activity_action=h.latest_activity_action,
-                latest_activity_amount=h.latest_activity_amount,
-                category=category_service.classify(None, h.symbol),
-            )
-        )
-    custody_rows = [_anchorage_custody_row(h, category_service) for h in custody]
-    return receipt_rows + direct_rows + custody_rows
+
+
+def _custody_applies(prime_address: EthAddress) -> bool:
+    """Whether this proxy carries the prime-scoped Anchorage custody leg.
+
+    Serving the leg under every one of a prime's proxies would triple-count
+    $250M of BTC for a consumer unioning them, so only the primary proxy
+    carries it. ``is_primary_proxy`` fails closed (False for an address the
+    contract has never heard of), which would silently drop custody for a real
+    mainnet proxy the contract hasn't been told about yet. Gate on *known
+    non-primary* instead: an address absent from the contract has no
+    discoverable siblings, so — mirroring ``classify_proxy``'s fail-open
+    default — it is treated as its own primary.
+    """
+    return proxy_entry(prime_address) is None or is_primary_proxy(prime_address)
+
+
+def _receipt_token_row(
+    position: ReceiptTokenPosition, category_service: AllocationCategoryService
+) -> AllocationResponse:
+    """Project a receipt-token position onto the allocation model."""
+    return AllocationResponse(
+        chain_id=position.chain_id,
+        receipt_token_id=position.receipt_token_id,
+        receipt_token_address=position.receipt_token_address,
+        underlying_token_id=position.underlying_token_id,
+        underlying_token_address=position.underlying_token_address,
+        symbol=position.symbol,
+        underlying_symbol=position.underlying_symbol,
+        protocol_name=position.protocol_name,
+        balance=position.balance,
+        amount_usd=position.amount_usd,
+        latest_activity_at=position.latest_activity_at.isoformat() if position.latest_activity_at else None,
+        latest_activity_action=position.latest_activity_action,
+        latest_activity_amount=position.latest_activity_amount,
+        category=category_service.classify(position.protocol_name, position.symbol),
+    )
+
+
+def _direct_asset_row(holding: DirectAssetHolding, category_service: AllocationCategoryService) -> AllocationResponse:
+    """Project a direct (unwrapped) token holding onto the allocation model.
+
+    Underlying identity travels with the price basis; see
+    ``_DIRECT_ASSET_HOLDINGS_SQL``.
+    """
+    underlying_id, underlying_address, underlying_symbol = _direct_underlying_identity(holding)
+    return AllocationResponse(
+        chain_id=holding.chain_id,
+        receipt_token_id=None,
+        receipt_token_address=None,
+        underlying_token_id=underlying_id,
+        underlying_token_address=underlying_address,
+        symbol=holding.symbol,
+        underlying_symbol=underlying_symbol,
+        protocol_name=None,
+        balance=holding.balance,
+        amount_usd=holding.amount_usd,
+        latest_activity_at=holding.latest_activity_at.isoformat() if holding.latest_activity_at else None,
+        latest_activity_action=holding.latest_activity_action,
+        latest_activity_amount=holding.latest_activity_amount,
+        category=category_service.classify(None, holding.symbol),
+    )
 
 
 # chain_id 0 is the off-chain sentinel: Anchorage BTC custody is not on any EVM

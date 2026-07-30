@@ -177,7 +177,7 @@ export interface paths {
      * Self-computed prime risk capital
      * @description Compute the prime's capital metrics from on-chain data and the default RRC model (`gap_sweep`), with no dependency on the upstream Star feed. Returns exposure (priced receipt-token allocations), Total Risk Capital (on-chain treasury), Required Risk Capital (sum of per-allocation model RRC), encumbrance, a `modeled_pct` coverage figure, and a per-allocation breakdown. The figures are model-derived and partial (only allocations the model can price contribute Required Risk Capital) and will not match Sky's dashboard. A backed allocation whose pool-share lookup can't be resolved (e.g. a warm-up window or an un-indexed receipt token) is reported as unpriced (`applied=false` with an `unpriced_reason`) rather than failing the whole response. Returns `404` if the prime is unknown, and also if the address is a SubProxy treasury wallet: those hold a prime's treasury rather than its allocations, so they have no prime-level risk capital to report. Read the treasury at `/v1/primes/{prime_id}/total-capital` with one of the prime's ALM proxies, which `/v1/primes` lists.
      *
-     *     Figures without a prefix are scoped to the proxy in the path and are unchanged from previous releases. Figures prefixed `prime_` are scoped to the whole prime — summed across every ALM proxy of the prime the given address belongs to — and are therefore identical whichever proxy you query; use `prime_per_chain` for the split. `total_risk_capital_usd` is prime-wide despite having no prefix. `prime_id` is the opposite exception: despite the prefix, it is the queried proxy address, not the prime, and varies per proxy — see its own description. `encumbrance_ratio` is deprecated because it mixes the two scopes; use `prime_encumbrance_ratio`.
+     *     Figures without a prefix are scoped to the proxy in the path. Figures prefixed `prime_` are scoped to the whole prime — summed across every ALM proxy of the prime the given address belongs to — and are therefore identical whichever proxy you query; use `prime_per_chain` for the split. The one exception is an address the axis-synome contract does not list: it has no discoverable siblings, so its `prime_` figures cover that proxy alone and will not agree with what the prime's known proxies report. `total_risk_capital_usd` is prime-wide despite having no prefix. `prime_id` is the opposite exception: despite the prefix, it is the queried proxy address, not the prime, and varies per proxy — see its own description. `encumbrance_ratio` is deprecated because it mixes the two scopes; use `prime_encumbrance_ratio`.
      */
     get: operations['get_prime_risk_capital_v1_primes__prime_id__risk_capital_get'];
     put?: never;
@@ -844,8 +844,9 @@ export interface components {
        * @description Whether the row belongs to the queried proxy (`proxy`) or to the prime as a whole (`prime`). A `prime`-scoped row is served under the prime's primary proxy only, so unioning a prime's proxies never double-counts it.
        * @default proxy
        * @example proxy
+       * @enum {string}
        */
-      scope: string;
+      scope: 'proxy' | 'prime';
       /**
        * Symbol
        * @description Display symbol: receipt-token symbol for wrapped positions, asset symbol for direct holdings.
@@ -918,7 +919,7 @@ export interface components {
       symbol: string;
       /**
        * Unpriced Reason
-       * @description Why the allocation is unpriced (`null` when `applied`): `no_model` (no default model applies), or `share_data_missing` / `share_data_stale` (a model applies but its pool-share lookup could not be resolved, e.g. a warm-up window or an un-indexed receipt token).
+       * @description Why the allocation is unpriced (`null` when `applied`): `no_model` (no default model applies), `share_data_missing` / `share_data_stale` (a model applies but its pool-share lookup could not be resolved, e.g. a warm-up window or an un-indexed receipt token), or `price_data_missing` (the backed asset's loan token has no USD price).
        */
       unpriced_reason?:
         | 'no_model'
@@ -1034,8 +1035,9 @@ export interface components {
        * @description Always `prime`: every metric on this row describes the whole prime, not the proxy in `prime_id`. The row repeats once per ALM proxy, so summing rows triple-counts. Dedupe by `prime_vault_address` first.
        * @default prime
        * @example prime
+       * @constant
        */
-      scope: string;
+      scope: 'prime';
       /**
        * Timestamp
        * @description ISO-8601 timestamp the snapshot was assembled.
@@ -1371,10 +1373,11 @@ export interface components {
       prime_vault_address?: string | null;
       /**
        * Role
-       * @description Proxy role: `alm` (allocation venue) or `sub_proxy` (treasury wallet).
+       * @description Always `alm`: this endpoint lists allocation venues only. SubProxy treasury wallets share a prime's `prime_id` but hold no allocations, so they are excluded rather than labelled.
        * @example alm
+       * @constant
        */
-      role: string;
+      role: 'alm';
     };
     /**
      * PrimeRiskCapitalResponse
@@ -1432,7 +1435,8 @@ export interface components {
       prime_exposure_usd: string;
       /**
        * Prime Id
-       * @description Prime's 0x-prefixed ALM proxy address.
+       * @description The 0x-prefixed ALM **proxy** address from the path, echoed back. Despite the `prime_` prefix this is proxy-scoped and therefore varies across a prime's proxies — it is not a prime identity. Group by `prime_name` or `prime_proxies` instead.
+       * @example 0x1601843c5e9bc251a3272907010afa41fa18347e
        */
       prime_id: string;
       /**
@@ -2316,7 +2320,7 @@ export interface operations {
       };
       header?: never;
       path: {
-        /** @description A prime's 0x-prefixed ALM **proxy** address on one chain — not a prime identifier. A prime allocates through one proxy per chain; list them via `GET /v1/primes` and group by `prime_vault_address`. */
+        /** @description Either a prime's 0x-prefixed vault address or any of its ALM **proxy** addresses — this endpoint resolves both to the same prime. List the proxies via `GET /v1/primes`; the vault address is their shared `prime_vault_address`. */
         prime_id: string;
       };
       cookie?: never;

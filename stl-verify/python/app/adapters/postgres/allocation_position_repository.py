@@ -211,7 +211,7 @@ class AllocationRepository:
                             address=address,
                             chain_id=row.chain_id,
                             chain=chain_name_for(row.chain_id),
-                            role=kind.value,
+                            role="alm",
                             prime_vault_address="0x" + row.vault_address if row.vault_address else None,
                         )
                     )

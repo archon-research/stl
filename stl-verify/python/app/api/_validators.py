@@ -101,7 +101,26 @@ ProxyAddressPathParam = Annotated[
 """Path-param type for the ``{prime_id}`` segment, which accepts a proxy address.
 
 The segment cannot be renamed without breaking every generated client, so the
-description carries the correction instead.
+description carries the correction instead. Endpoints that resolve the prime and
+so accept either identity use ``PrimeOrProxyAddressPathParam``.
+"""
+
+PrimeOrProxyAddressPathParam = Annotated[
+    str,
+    AfterValidator(_validate_eth_address),
+    Path(
+        description=(
+            "Either a prime's 0x-prefixed vault address or any of its ALM **proxy** addresses — "
+            "this endpoint resolves both to the same prime. List the proxies via `GET /v1/primes`; "
+            "the vault address is their shared `prime_vault_address`."
+        )
+    ),
+]
+"""Path-param type for a ``{prime_id}`` segment that resolves either identity.
+
+Validation is identical to ``ProxyAddressPathParam``; only the published
+description differs, so an endpoint matching on the prime rather than the proxy
+does not advertise the narrower contract.
 """
 
 OptionalEthAddressParam = Annotated[str | None, AfterValidator(_validate_optional_eth_address)]

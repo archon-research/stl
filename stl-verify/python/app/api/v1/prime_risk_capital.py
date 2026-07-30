@@ -36,8 +36,9 @@ class AllocationRiskCapitalResponse(BaseModel):
         default=None,
         description=(
             "Why the allocation is unpriced (`null` when `applied`): `no_model` (no default model applies), "
-            "or `share_data_missing` / `share_data_stale` (a model applies but its pool-share lookup could "
-            "not be resolved, e.g. a warm-up window or an un-indexed receipt token)."
+            "`share_data_missing` / `share_data_stale` (a model applies but its pool-share lookup could "
+            "not be resolved, e.g. a warm-up window or an un-indexed receipt token), or "
+            "`price_data_missing` (the backed asset's loan token has no USD price)."
         ),
     )
 
@@ -75,7 +76,14 @@ class PrimeRiskCapitalResponse(BaseModel):
     Sky's dashboard. `modeled_pct` reports the priced share of exposure.
     """
 
-    prime_id: str = Field(description="Prime's 0x-prefixed ALM proxy address.")
+    prime_id: str = Field(
+        description=(
+            "The 0x-prefixed ALM **proxy** address from the path, echoed back. Despite the `prime_` "
+            "prefix this is proxy-scoped and therefore varies across a prime's proxies — it is not a "
+            "prime identity. Group by `prime_name` or `prime_proxies` instead."
+        ),
+        examples=["0x1601843c5e9bc251a3272907010afa41fa18347e"],
+    )
     model: str = Field(description="Default RRC model used (e.g. `gap_sweep`).", examples=["gap_sweep"])
     exposure_usd: PlainDecimal = Field(description="Σ priced receipt-token allocation exposure (USD).")
     total_risk_capital_usd: PlainDecimal | None = Field(
@@ -160,10 +168,12 @@ async def _get_service(
         "its allocations, so they have no prime-level risk capital to report. Read the treasury at "
         "`/v1/primes/{prime_id}/total-capital` with one of the prime's ALM proxies, which "
         "`/v1/primes` lists.\n\n"
-        "Figures without a prefix are scoped to the proxy in the path and are unchanged from previous "
-        "releases. Figures prefixed `prime_` are scoped to the whole prime — summed across every ALM "
-        "proxy of the prime the given address belongs to — and are therefore identical whichever proxy "
-        "you query; use `prime_per_chain` for the split. `total_risk_capital_usd` is prime-wide despite having "
+        "Figures without a prefix are scoped to the proxy in the path. Figures prefixed `prime_` are "
+        "scoped to the whole prime — summed across every ALM proxy of the prime the given address "
+        "belongs to — and are therefore identical whichever proxy you query; use `prime_per_chain` for "
+        "the split. The one exception is an address the axis-synome contract does not list: it has no "
+        "discoverable siblings, so its `prime_` figures cover that proxy alone and will not agree with "
+        "what the prime's known proxies report. `total_risk_capital_usd` is prime-wide despite having "
         "no prefix. `prime_id` is the opposite exception: despite the prefix, it is the queried proxy "
         "address, not the prime, and varies per proxy — see its own description. `encumbrance_ratio` is "
         "deprecated because it mixes the two scopes; use `prime_encumbrance_ratio`."
@@ -180,16 +190,6 @@ async def get_prime_risk_capital(
     # guarantee consumers are told to dedupe on. Checked before prime_exists: a
     # SubProxy does have allocation_position rows, so that gate cannot catch it,
     # and classify_proxy is an in-memory lookup that saves the round trip.
-    #
-    # REVERSIBLE — see ARCT-127 follow-ups. Chosen over the alternative (answer,
-    # but aggregate prime_ over ALM proxies only) because nothing reads this path:
-    # a repo-wide grep finds only tests and the contract JSON, and staging logged
-    # zero requests to either SubProxy address across 30 days / 5.4M lines, with a
-    # control query confirming the filter works. No figure becomes unreachable —
-    # the treasury is served at /v1/primes/{alm_proxy}/total-capital. If a consumer
-    # ever needs this path back, drop this gate and instead exclude SubProxies
-    # inside PrimeRiskCapitalService._proxies_to_aggregate, keeping the queried
-    # proxy's own row so _assemble_result's by-address lookup cannot StopIteration.
     if classify_proxy(prime_id) is ProxyKind.SUB_PROXY:
         raise HTTPException(
             status_code=404,

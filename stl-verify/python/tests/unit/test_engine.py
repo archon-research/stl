@@ -6,13 +6,14 @@ from app.config import Settings
 
 
 def test_get_engine_sizes_the_connection_pool_from_settings(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The pool ceiling bounds how many fan-out requests a replica can serve at once.
+    """The pool ceiling decides how far a replica gets before callers queue.
 
-    A prime-scoped risk-capital request holds one connection per ALM proxy of the
-    prime concurrently, so on SQLAlchemy's unset defaults (5 + 10 overflow) a
-    replica saturates at roughly two such requests and further callers queue until
-    ``pool_timeout`` turns into a 500. The ceiling has to be a deliberate number,
-    which means it has to be wired through from settings rather than left unset.
+    A prime-scoped risk-capital request opens connections concurrently in
+    proportion to positions × ALM proxies (see ``Settings.db_pool_size``), so on
+    SQLAlchemy's unset defaults (5 + 10 overflow) a replica saturates well inside
+    one such request and further callers queue until ``pool_timeout`` turns into a
+    500. The ceiling has to be a deliberate number, which means it has to be wired
+    through from settings rather than left unset.
     """
     monkeypatch.setenv("DB_POOL_SIZE", "7")
     monkeypatch.setenv("DB_MAX_OVERFLOW", "13")

@@ -27,8 +27,12 @@ async function main() {
       '/src/lib/dashboard.ts',
     );
 
+    // Deliberately the highest-sorting address of the three, so the mainnet
+    // preference and the lowest-address fallback disagree and the assertions
+    // below can tell them apart. This is the real-world shape: grove's mainnet
+    // proxy (0x491e…) is not its lowest (0x0c46…, plasma).
     const sparkMainnet = buildPrimeRow({
-      address: '0xaaaa000000000000000000000000000000000a',
+      address: '0xffff000000000000000000000000000000000f',
       chain: 'mainnet',
       chain_id: 1,
     });
