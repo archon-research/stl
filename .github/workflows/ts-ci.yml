@@ -64,6 +64,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Run prime grouping regression test
+        run: npm run test:prime-grouping -w ui
+
       - name: Panda codegen
         run: npm run prepare -w ui
 

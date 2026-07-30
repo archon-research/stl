@@ -452,10 +452,10 @@ function App() {
     return () => controller.abort();
   }, [selectedPrimeGroup]);
 
-  // The prime_* fields on this response are aggregated prime-wide server-side
-  // (Task 3), so one call against the primary proxy carries the same figures
-  // every other proxy of the prime would return; fanning it out would only
-  // waste requests.
+  // The prime_* fields on this response are aggregated prime-wide server-side,
+  // so one call against the primary proxy carries the same figures every
+  // other proxy of the prime would return; fanning it out would only waste
+  // requests.
   const primaryProxyAddress = selectedPrimeGroup?.primaryProxyAddress ?? null;
 
   // The bucketed chart series below (debt/exposure/total-capital/activity) are
@@ -1073,6 +1073,7 @@ function App() {
                 selectedProtocol={selectedProtocol}
                 showAllPrimes={showAllPrimesInActivities}
                 selectedPrime={selectedPrime}
+                isMultiChainPrime={isMultiChainPrime}
                 tokenOptions={tokenSymbolOptions}
                 tokenFilter={activityTokenParam}
                 onTokenFilterChange={setActivityTokenParam}
