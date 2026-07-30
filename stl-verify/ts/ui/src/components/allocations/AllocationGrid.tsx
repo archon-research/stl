@@ -19,10 +19,10 @@ import {
 } from '@archon-research/design-system';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import { css } from '#styled-system/css';
+import { css, cx } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
-import { getActionColor, getActionIcon } from '../../lib/activity';
+import { getActionColorClass, getActionIcon } from '../../lib/activity';
 import {
   type ChainLabelLookup,
   formatDateTime,
@@ -358,6 +358,9 @@ function MetricCardTrend({
   );
 }
 
+// House header style, louder than the recipe's 12px muted micro-label. Sortable
+// headers need no separate rule: the recipe's headerButton slot inherits font,
+// color, text-transform and letter-spacing from the cell.
 const tableHeaderTypographyClassName = css({
   '& thead th': {
     fontSize: 'sm',
@@ -367,52 +370,58 @@ const tableHeaderTypographyClassName = css({
     textTransform: 'uppercase',
     color: 'text.default',
   },
-  '& thead th button': {
-    fontSize: 'sm',
-    fontWeight: 'semibold',
-    lineHeight: 'shorter',
-    letterSpacing: '0.02em',
-    textTransform: 'uppercase',
-    color: 'text.default',
-  },
 });
 
-function getCategoryColor(category: AllocationCategory | undefined): string {
-  switch (category) {
-    case 'allocation':
-      return 'bg.success';
-    case 'pol':
-      return 'bg.warning';
-    case 'psm3':
-      return 'bg.interactive';
-    case 'asset':
-      return 'bg.info';
-    // Off-chain custody: a neutral chip, distinct from the strategy categories
-    // (the semantic accent tokens are all taken).
-    case 'custody':
-      return 'bg.subtle';
-    default:
-      return 'bg.subtle';
-  }
-}
+// Panda extracts styles statically, so a token path returned from a function and
+// then handed to `css({ bg: value })` yields no rule at all -- the chips rendered
+// with no fill and no colour. Each category therefore needs its own literal
+// `css()` call, evaluated once at module scope, and the cell picks a finished
+// class name.
+//
+// The hues come from the design system's role-based `colorPalette` tokens rather
+// than the `bg.*`/`text.*` status family: that family has only success, warning,
+// critical, info and neutral, which cannot give five *strategy* categories
+// distinct fills without two of them colliding. `subtle.bg`/`subtle.fg` are
+// dark-aware for every palette, so one declaration covers both themes.
+const CATEGORY_CHIP_CLASS: Record<AllocationCategory | 'unknown', string> = {
+  allocation: css({
+    colorPalette: 'green',
+    bg: 'colorPalette.subtle.bg',
+    color: 'colorPalette.subtle.fg',
+  }),
+  pol: css({
+    colorPalette: 'amber',
+    bg: 'colorPalette.subtle.bg',
+    color: 'colorPalette.subtle.fg',
+  }),
+  psm3: css({
+    colorPalette: 'blue',
+    bg: 'colorPalette.subtle.bg',
+    color: 'colorPalette.subtle.fg',
+  }),
+  asset: css({
+    colorPalette: 'violet',
+    bg: 'colorPalette.subtle.bg',
+    color: 'colorPalette.subtle.fg',
+  }),
+  // Off-chain custody reads as infrastructure rather than strategy, so it stays
+  // achromatic instead of taking a fifth hue.
+  custody: css({
+    colorPalette: 'neutral',
+    bg: 'colorPalette.subtle.bg',
+    color: 'colorPalette.subtle.fg',
+  }),
+  unknown: css({
+    colorPalette: 'neutral',
+    bg: 'colorPalette.subtle.bg',
+    color: 'text.default',
+  }),
+};
 
-function getCategoryTextColor(
+function getCategoryChipClass(
   category: AllocationCategory | undefined,
 ): string {
-  switch (category) {
-    case 'allocation':
-      return 'text.success';
-    case 'pol':
-      return 'text.warning';
-    case 'psm3':
-      return 'text.interactive';
-    case 'asset':
-      return 'text.info';
-    case 'custody':
-      return 'text.muted';
-    default:
-      return 'text.default';
-  }
+  return CATEGORY_CHIP_CLASS[category ?? 'unknown'];
 }
 
 function AllocationAssetCell({
@@ -548,6 +557,10 @@ function AllocationBalanceCell({ allocation }: { allocation: Allocation }) {
             overflow: 'hidden',
             textOverflow: 'ellipsis',
             whiteSpace: 'nowrap',
+            // Tabular figures so amounts align down the column. Not the
+            // column's `meta.mono`: this cell is a composite (logo, value,
+            // address) and mono would restyle all of it.
+            fontVariantNumeric: 'tabular-nums',
             m: 0,
           })}
         >
@@ -604,7 +617,11 @@ function AllocationActivityCell({ allocation }: { allocation: Allocation }) {
     );
   }
 
-  const actionColor = getActionColor(allocation.latest_activity_action);
+  // A finished class name, not a token path: a token path handed to css() as a
+  // variable is invisible to Panda's static extraction and emits no rule.
+  const actionColorClass = getActionColorClass(
+    allocation.latest_activity_action,
+  );
   const actionIcon = getActionIcon(allocation.latest_activity_action);
   const magnitude = formatActivityMagnitude(allocation);
 
@@ -612,7 +629,9 @@ function AllocationActivityCell({ allocation }: { allocation: Allocation }) {
     <div>
       <div className={flex({ align: 'center', gap: '1.5' })}>
         {actionIcon ? (
-          <span className={css({ display: 'inline-flex', color: actionColor })}>
+          <span
+            className={cx(css({ display: 'inline-flex' }), actionColorClass)}
+          >
             {actionIcon}
           </span>
         ) : null}
@@ -627,12 +646,14 @@ function AllocationActivityCell({ allocation }: { allocation: Allocation }) {
         </span>
         {magnitude ? (
           <span
-            className={css({
-              fontSize: 'xs',
-              fontWeight: 'medium',
-              color: actionColor,
-              whiteSpace: 'nowrap',
-            })}
+            className={cx(
+              css({
+                fontSize: 'xs',
+                fontWeight: 'medium',
+                whiteSpace: 'nowrap',
+              }),
+              actionColorClass,
+            )}
           >
             {magnitude}
           </span>
@@ -653,22 +674,21 @@ function AllocationActivityCell({ allocation }: { allocation: Allocation }) {
 
 function AllocationCategoryCell({ allocation }: { allocation: Allocation }) {
   const category = allocation.category;
-  const categoryBg = getCategoryColor(category);
-  const categoryText = getCategoryTextColor(category);
 
   return (
     <div
-      className={css({
-        display: 'inline-flex',
-        alignItems: 'center',
-        px: '2',
-        py: '1',
-        borderRadius: 'md',
-        fontSize: 'xs',
-        fontWeight: 'semibold',
-        bg: categoryBg,
-        color: categoryText,
-      })}
+      className={cx(
+        css({
+          display: 'inline-flex',
+          alignItems: 'center',
+          px: '2',
+          py: '1',
+          borderRadius: 'md',
+          fontSize: 'xs',
+          fontWeight: 'semibold',
+        }),
+        getCategoryChipClass(category),
+      )}
     >
       {getCategoryLabel(category)}
     </div>
@@ -804,6 +824,9 @@ function createAllocationColumns(
             appliedRiskCapitalUsd(riskByReceiptTokenId, allocation) ?? NaN,
           getValueText: () => null,
         },
+        // Single-value USD cell, so the column can take mono + tabular figures
+        // wholesale.
+        mono: true,
       },
     },
   ];
@@ -1326,7 +1349,7 @@ export function AllocationGrid({
               width: 'fit-content',
               alignItems: 'center',
               borderRadius: 'full',
-              bg: { _dark: 'gray.700', base: 'gray.200' },
+              bg: 'bg.neutral',
               px: '3',
               py: '1',
               fontSize: 'xs',
@@ -1408,6 +1431,12 @@ export function AllocationGrid({
               }
               getRowKey={getAllocationKey}
               selectedRowKey={selectedAllocationKey}
+              density="compact"
+              // Restores the design-system default that 0.8.0 dropped. Six
+              // nowrap columns push min-content well past this, so it binds
+              // only on the loading skeleton, which has no intrinsic width.
+              minWidth="48rem"
+              skeletonConfig={{ rows: 8, columns: 6, firstColumnTall: true }}
             />
           </div>
         ) : null}

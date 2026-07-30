@@ -7,10 +7,10 @@ import {
 } from '@archon-research/design-system';
 import { type ChangeEvent, useEffect, useMemo, useRef, useState } from 'react';
 
-import { css } from '#styled-system/css';
+import { css, cx } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
-import { getActionColor, getActionIcon } from '../../../lib/activity';
+import { getActionColorClass, getActionIcon } from '../../../lib/activity';
 import {
   getAllocationActivity,
   getProtocolEvents,
@@ -256,7 +256,7 @@ function ActivityEventRow({
   onSelectTx: (event: AllocationActivity) => void;
   chainLabels?: ChainLabelLookup;
 }) {
-  const actionColor = getActionColor(event.action_type);
+  const actionColorClassName = getActionColorClass(event.action_type);
   const actionIcon = getActionIcon(event.action_type);
   const txHash = getRealTxHash(event);
 
@@ -274,17 +274,19 @@ function ActivityEventRow({
       })}
     >
       <div
-        className={css({
-          width: '8',
-          height: '8',
-          borderRadius: 'full',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          bg: 'surface.subtle',
-          color: actionColor,
-          flexShrink: 0,
-        })}
+        className={cx(
+          css({
+            width: '8',
+            height: '8',
+            borderRadius: 'full',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            bg: 'surface.subtle',
+            flexShrink: 0,
+          }),
+          actionColorClassName,
+        )}
       >
         {actionIcon}
       </div>
@@ -301,12 +303,14 @@ function ActivityEventRow({
             {event.token_symbol || 'Unknown'}
           </span>
           <span
-            className={css({
-              fontSize: 'sm',
-              color: actionColor,
-              fontWeight: 'semibold',
-              textTransform: 'capitalize',
-            })}
+            className={cx(
+              css({
+                fontSize: 'sm',
+                fontWeight: 'semibold',
+                textTransform: 'capitalize',
+              }),
+              actionColorClassName,
+            )}
           >
             {event.action_type}
           </span>
@@ -952,7 +956,7 @@ export function ActivityFeed({
               px: '3',
               fontSize: 'xs',
               cursor: 'pointer',
-              _hover: { bg: 'interactive.hover' },
+              _hover: { bg: 'surface.hover' },
             })}
           >
             Clear filters

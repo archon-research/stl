@@ -774,6 +774,13 @@ function App() {
 
     const primeDebtValue = wadToUnits(primeDebtSnapshot?.debt_wad);
 
+    // One ordinal series token per card, and deliberately no `var(..., fallback)`
+    // here. Until the design system defined the chart.* family these vars all
+    // resolved to their fallbacks, which hid the fact that two cards named the
+    // same token: `total-capital` asked for `series-primary` with an amber
+    // fallback, so it looked amber while actually being blue. A bare var() means
+    // a wrong or missing token now shows up as an unpainted line instead of
+    // quietly rendering some other card's colour.
     const charts: MetricChartSpec[] = [
       {
         // Balance reconstructed from signed USD net flows, anchored at the
@@ -782,7 +789,7 @@ function App() {
         key: 'allocation-activity-volume',
         data: allocationBalanceSeries,
         kind: 'series',
-        stroke: 'var(--colors-chart-series-primary, #60a5fa)',
+        stroke: 'var(--colors-chart-series-primary)',
         formatValue: formatCompactUsd,
       },
       {
@@ -790,19 +797,19 @@ function App() {
         // back to the flat current value when no history is available.
         key: 'risk-capital',
         ...seriesOrFallback(exposureSeries, exposureValue),
-        stroke: 'var(--colors-chart-series-secondary, #14b8a6)',
+        stroke: 'var(--colors-chart-series-secondary)',
         formatValue: formatCompactUsd,
       },
       {
         key: 'total-capital',
         ...seriesOrFallback(totalCapitalSeries, totalRiskCapitalValue),
-        stroke: 'var(--colors-chart-series-primary, #f59e0b)',
+        stroke: 'var(--colors-chart-series-quaternary)',
         formatValue: formatCompactUsd,
       },
       {
         key: 'prime-debt-exposure',
         ...seriesOrFallback(primeDebtSeries, primeDebtValue),
-        stroke: '#f97316',
+        stroke: 'var(--colors-chart-series-quinary)',
         formatValue: (value: number) => `${formatCompactNumber(value)} DAI`,
       },
     ];
@@ -893,6 +900,14 @@ function App() {
     <div
       className={css({
         position: 'relative',
+        // These overrides reach into SidebarLayout's internals with !important,
+        // which is normally a smell. They stay because the design system's
+        // `sidebarLayout` recipe declares only a `base` and exposes no variants,
+        // so there is no stacked/narrow mode to ask for -- the sub-48rem layout
+        // below has to be imposed from outside, against the component's own
+        // class-based rules. Filed upstream as a missing responsive variant.
+        // Note the max-width query: the preset's breakpoints are min-width only,
+        // so this cannot be expressed as a normal responsive condition either.
         '& [data-sidebar-layout] [data-part="panel"]:last-of-type > div': {
           overflow: 'auto !important',
           minHeight: '0 !important',
