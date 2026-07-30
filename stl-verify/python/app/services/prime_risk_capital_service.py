@@ -209,7 +209,11 @@ class PrimeRiskCapitalService:
 
         exposure, modeled_exposure, required, per_allocation = _assemble_allocations(positions, models, results)
         return _ProxyTotals(
-            proxy_address=str(proxy_address),
+            # Lowercased so the prime-scoped lists built from these are byte-identical
+            # whichever proxy was queried: EthAddress preserves the caller's casing,
+            # while siblings come from the contract already lowercased. prime_id keeps
+            # the caller's casing — it is proxy-scoped and documented as an echo.
+            proxy_address=str(proxy_address).lower(),
             chain=chain,
             exposure=exposure,
             modeled_exposure=modeled_exposure,
