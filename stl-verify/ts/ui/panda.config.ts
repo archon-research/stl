@@ -30,40 +30,53 @@ export default defineConfig({
     extend: {
       semanticTokens: {
         colors: {
-          surface: {
-            default: {
-              value: { base: '{colors.white}', _dark: '{colors.gray.950}' },
-            },
-            subtle: {
-              value: { base: '{colors.gray.50}', _dark: '{colors.gray.900}' },
-            },
-            elevated: {
-              value: { base: '{colors.white}', _dark: '{colors.gray.900}' },
-            },
-          },
-          border: {
-            subtle: {
-              value: { base: '{colors.gray.200}', _dark: '{colors.gray.800}' },
-            },
-            default: {
-              value: { base: '{colors.gray.300}', _dark: '{colors.gray.700}' },
-            },
-          },
+          // Only tokens the design-system preset does NOT provide. Every
+          // surface/border/text/interactive token this app used to redefine is
+          // gone: the preset now ships an equivalent-or-better value, and a
+          // local copy silently reverts upstream token fixes -- most visibly
+          // the dark elevation ramp, where the old `surface.default:
+          // gray.950` made a "raised" panel the darkest thing on the page.
           text: {
-            muted: {
-              value: { base: '{colors.gray.600}', _dark: '{colors.gray.400}' },
+            // A 4th step below `muted`. The preset's text ramp stops at
+            // strong/default/muted, but 13 call sites want one step quieter
+            // than `muted`. Pinned to the preset's `text.muted` value for now:
+            // anything lighter than neutral.500 on white fails WCAG AA
+            // (neutral.400 = 2.52:1), so a real 4th step has to be inserted
+            // between `default` and `muted`, which is a design decision.
+            subtle: {
+              value: {
+                base: '{colors.neutral.500}',
+                _dark: '{colors.neutral.400}',
+              },
             },
-            default: {
-              value: { base: '{colors.gray.700}', _dark: '{colors.gray.300}' },
-            },
-            strong: {
-              value: { base: '{colors.gray.950}', _dark: '{colors.gray.50}' },
-            },
+            // Theme-INVARIANT light text for always-dark fills
+            // (`overlay.tooltip`). The preset's nearest token,
+            // `colorPalette.solid.fg` on the neutral palette, flips across
+            // themes by design -- wrong on a fixed dark overlay.
             inverse: {
-              value: { base: '{colors.gray.50}', _dark: '{colors.gray.50}' },
+              value: {
+                base: '{colors.neutral.50}',
+                _dark: '{colors.neutral.50}',
+              },
+            },
+          },
+          bg: {
+            // Completes the preset's `bg.*` status family, which ships
+            // success/critical/warning but no informational or neutral fill.
+            info: {
+              value: { base: '{colors.blue.50}', _dark: '{colors.blue.950}' },
+            },
+            neutral: {
+              value: {
+                base: '{colors.neutral.100}',
+                _dark: '{colors.neutral.800}',
+              },
             },
           },
           overlay: {
+            // The preset has no `overlay.*` family at all. Scrims and
+            // always-dark tooltip fills are semi-transparent, so they cannot
+            // be expressed as a step on the opaque surface ramp.
             backdrop: {
               value: {
                 base: 'rgb(15 23 42 / 0.28)',
@@ -78,14 +91,42 @@ export default defineConfig({
             },
           },
           interactive: {
-            hover: {
-              value: { base: '{colors.gray.100}', _dark: '{colors.gray.800}' },
-            },
-            selected: {
-              value: { base: '{colors.gray.200}', _dark: '{colors.gray.700}' },
-            },
+            // Compatibility shim, NOT a design choice, and load-bearing: three
+            // shipped components -- ErrorState.js:58, ErrorBoundary.js:63,
+            // RangePicker.js:103 -- read `var(--colors-interactive-accent,
+            // <hex>)` from an inline style, yet the preset defines no such
+            // token. Without this definition the var is unresolved and all
+            // three fall back to a hardcoded light-mode blue in BOTH themes
+            // (and to two different blues, #2563eb vs #1d4ed8). Values are
+            // kept identical to the preset's `text.interactive` so the app has
+            // one accent, not two. Delete once upstream defines the token or
+            // stops reading it.
             accent: {
               value: { base: '{colors.blue.600}', _dark: '{colors.blue.300}' },
+            },
+          },
+          chart: {
+            series: {
+              // The preset's series scale runs out of ORDINAL roles at
+              // `tertiary`; the remaining two (`positive`, `critical`) are
+              // semantic and would mis-signal on a routine capital/debt
+              // metric. The 4-up metric rail needs a 4th ordinal hue, so
+              // extend the scale rather than borrow a status colour. These
+              // preserve the rail's historical amber/orange identity but as
+              // dark-aware palette steps instead of the raw #f59e0b/#f97316.
+              // Filed upstream as a gap in the ordinal scale.
+              quaternary: {
+                value: {
+                  base: '{colors.amber.600}',
+                  _dark: '{colors.amber.300}',
+                },
+              },
+              quinary: {
+                value: {
+                  base: '{colors.orange.600}',
+                  _dark: '{colors.orange.300}',
+                },
+              },
             },
           },
         },
