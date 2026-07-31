@@ -152,7 +152,12 @@ export function RiskDetailDrawer({
     event.preventDefault();
     setDragState({
       startPosition: event.clientX,
-      startSize: drawerWidth,
+      // Seed the drag from the width actually painted, not from state. After the
+      // viewport narrows, state still holds the wider stored preference, and a
+      // drag anchored there could never reach the new cap -- the handle would be
+      // inert until the window widened again. Clamping here rather than on
+      // resize keeps the preference intact for when it does.
+      startSize: clamp(drawerWidth, MIN_DRAWER_WIDTH, maxDrawerWidth()),
     });
   };
 
@@ -197,7 +202,10 @@ export function RiskDetailDrawer({
           right: 0,
           bottom: 0,
           bg: 'surface.default',
-          boxShadow: '2xl',
+          // `overlay`, not `2xl`: the latter has no dark override, so in dark
+          // theme the drawer had no elevation cue against the page beyond the
+          // backdrop scrim.
+          boxShadow: 'overlay',
           transform: isOpen ? 'translateX(0)' : 'translateX(100%)',
           transitionDuration: 'normal',
           transitionProperty: 'transform',

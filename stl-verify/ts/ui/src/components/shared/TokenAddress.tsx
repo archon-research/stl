@@ -65,8 +65,10 @@ export function TokenAddress({
     textOverflow: 'ellipsis',
     whiteSpace: 'nowrap',
     textAlign: 'left',
+    // Underline rather than a colour shift: `text.link` and `text.interactive`
+    // resolve to the same value, so there is no darker accent step to move to.
     _hover: {
-      color: 'text.link',
+      textDecoration: 'underline',
     },
     _focus: {
       outline: '2px solid',

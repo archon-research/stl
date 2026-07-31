@@ -25,6 +25,12 @@ export default defineConfig({
   // class with no CSS behind it. All of it fails silently. staticCss is a Panda
   // root-config key, so the preset cannot carry this for us; spreading the
   // exported map is the supported fix.
+  //
+  // The spread is wider than this app needs -- `drawer` is never imported, and
+  // dropping it saves ~3kB -- but it is not merely convenient either: doctor's
+  // sentinel check hardcodes `drawer__content--size_lg` as required regardless
+  // of whether the consumer uses Drawer, so a narrowed map fails the gate.
+  // Filed upstream; revisit once the sentinels track the consumer's surface.
   staticCss: {
     recipes: {
       ...designSystemStaticCssRecipes,
