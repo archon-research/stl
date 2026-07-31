@@ -149,7 +149,7 @@ class AllocationRepositoryPort(Protocol):
 
     async def primary_proxy_address(self, prime_address: EthAddress) -> str | None:
         """Return the one proxy of this prime that carries its prime-scoped rows."""
-        ...
+        pass
 
     async def list_exposure_buckets(
         self,
