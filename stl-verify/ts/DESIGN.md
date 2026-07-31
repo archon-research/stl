@@ -200,7 +200,7 @@ The ramp steps forward monotonically in both themes: canvas is furthest back, pa
 - **colors.border.strong** (#737373 / #737373): selection emphasis and selected-row outlines.
 - **colors.text.strong** (#0a0a0a / #ffffff): strong titles and key labels.
 - **colors.text.default** (#404040 / #d4d4d4): core body and table text.
-- **colors.text.muted** (#737373 / #a3a3a3): metadata, supporting copy, and the quietest qualifier tier. This is the floor: `neutral.400` on white is 2.52:1 and fails WCAG AA at the 11px these qualifiers render at, so there is no tier below it. The ramp is three tiers, all clearing AA — 19.80:1 / 10.37:1 / 4.74:1 light, 17.93:1 / 12.09:1 / 7.11:1 dark. Where a fourth level of quiet is needed, step type size or weight rather than colour.
+- **colors.text.muted** (#737373 / #a3a3a3): metadata, supporting copy, and the quietest qualifier tier. This is the floor: `neutral.400` on white is 2.52:1 and fails WCAG AA at the 11px these qualifiers render at, so there is no tier below it. Contrast ratios (as of current snapshot): light 4.74:1 / 10.37:1 / 19.80:1, dark 7.11:1 / 12.09:1 / 17.93:1. **Recompute these ratios after preset version upgrades** — if token hex values change, the ratios decay. Where a fourth level of quiet is needed, step type size or weight rather than colour.
 - **colors.text.inverse** (#fafafa / #fafafa): theme-invariant light text, for always-dark fills such as `overlay.tooltip`.
 - **colors.text.critical** (#dc2626 / #fca5a5): the absent state on a risk dashboard. Use it; a risk grid that signals only success/warning/interactive is under-reporting.
 
@@ -258,7 +258,7 @@ The preset adds a step below `xs` (0.75rem) and **redefines** an existing one:
 Depth is mostly tonal rather than shadow-driven. Most surfaces remain flat, with subtle border contrast and background shifts carrying hierarchy. Shadows appear only in contained overlays and selected-detail emphasis.
 
 ### Shadow Vocabulary
-Three shadow tokens are dark-aware — in dark mode they swap a light-mode drop shadow for a stronger drop plus a `rgba(255, 255, 255, 0.0x)` inset top highlight, which is what makes an edge read as raised on a near-black surface:
+Three shadow tokens are dark-aware — in dark mode they swap a light-mode drop shadow for a stronger drop plus a `rgba(255, 255, 255, 0.05–0.06)` inset top highlight, which is what makes an edge read as raised on a near-black surface:
 
 - **`shadows.elevation`** — the named raised-panel token. Light: `0 1px 2px 0 rgba(15, 23, 42, 0.08), 0 1px 3px 0 rgba(15, 23, 42, 0.06)`. Dark: `0 1px 2px 0 rgba(0, 0, 0, 0.55), inset 0 1px 0 0 rgba(255, 255, 255, 0.06)`. Prefer this over `sm` for panels.
 - **`shadows.xs`** — light `0 1px 2px 0 rgba(15, 23, 42, 0.06)`; dark `0 1px 2px 0 rgba(0, 0, 0, 0.5), inset 0 1px 0 0 rgba(255, 255, 255, 0.05)`. Correct choice for small controls such as a slider thumb.
@@ -323,15 +323,8 @@ Never hand-write a shadow literal: a `rgba(0, 0, 0, 0.2)` drop shadow disappears
 - **Don't** override a preset semantic token in `panda.config.ts`. Local `theme.extend` merges last and wins, so a copy silently reverts upstream fixes. Add only tokens the preset does not ship, and say in a comment why.
 - **Don't** write a raw hex or `rgba()` in application code — those are theme-blind and will not follow the theme switch.
 - **Don't** write a raw `var(--colors-*)` read either, but for a different reason: it *does* follow the theme, because the custom property is redefined per theme. What it loses is validation — Panda never sees the name, so a typo or a future token rename fails silently and `uikit-cli doctor` cannot flag it. Prefer the token path. The chart series in `App.tsx` are the deliberate exception: they are passed to a charting library as string props, which is not a Panda style context.
-- **Don't** give those chart `var()` reads a fallback. `var(--colors-chart-series-primary, #60a5fa)` is exactly how the original collision hid: two cards named the same token, and the differing fallbacks made them *look* correct for a whole release. Without a fallback a wrong token yields no colour, which is still silent but no longer plausible. If `@archon-research/charting` ever accepts a token path instead of a resolved value, use that instead — it is the only way to bring these under validation.
+- **Don't** give those chart `var()` reads a fallback. `var(--colors-chart-series-primary, #60a5fa)` is exactly how the original collision stayed hidden: two cards with the same token name but different fallbacks, making the wrong values look correct for a release. Without a fallback, a wrong token reference becomes an empty custom property — the browser skips the declaration entirely, and the element inherits its parent's color instead. This is still silent, but the missing color is visible and unmissable (no plausible accident can explain it). If `@archon-research/charting` ever accepts a token path instead of a resolved value, use that instead — it is the only way to bring these under validation.
 - **Don't** reach for `gray.*`, `neutral.*`, or any other raw palette step where a semantic token exists.
 - **Don't** compute a token path in a helper and pass it to `css()` as a variable. Panda extracts from **source text**: `bg: getCategoryColor(c)` emits no declaration at all and fails silently. Use a recipe variant, or index a literal lookup inside the `css()` call.
 - **Don't** name a token that does not exist. Panda passes an unknown path through as a literal CSS value, the browser discards the declaration, and the element inherits instead. Sweep for it: `npx panda cssgen --outfile /tmp/x.css && grep -oE '^\s+[a-z-]+: [a-z]+\.[a-zA-Z.]+;' /tmp/x.css` must be empty.
 - **Don't** add an unlayered rule to `src/index.css`. Unlayered CSS beats every layered rule regardless of specificity, so a bare `button { font: inherit }` outranks `@layer recipes` and strips the type step from every design-system control. Everything in that file belongs inside `@layer base`.
-
-## Last refreshed from
-
-- `stl-verify/ts/ui/panda.config.ts` — the local `theme.extend` (additions only).
-- `stl-verify/ts/ui/src/index.css` — the `@layer base` app reset and page background.
-- `npx panda cssgen` output against `@archon-research/design-system@0.8.0-rohit-consumer-fixes.2` — every resolved hex, font stack, radius, and shadow quoted above.
-- `@archon-research/design-system/panda-preset` (`dist/panda-preset.js`) — semantic ramp intent and release notes.

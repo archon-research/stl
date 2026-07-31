@@ -164,11 +164,9 @@ export function RiskDetailDrawer({
   const ariaTitle = typeof title === 'string' ? title : 'Risk details';
 
   return (
-    // The drawer stays mounted while closed (the tabs inside gate their fetches
-    // on `isOpen`), so it is only translated off-screen. `inert` rather than
-    // `aria-hidden`: the closed drawer must leave the tab order as well as the
-    // accessibility tree, and `aria-hidden` alone leaves every control inside it
-    // keyboard-reachable while announcing nothing.
+    // Drawer stays mounted when closed (tabs gate fetches on `isOpen`). `inert` (not
+    // `aria-hidden`) removes from both tab order and accessibility tree. ~95% browser
+    // support; older browsers skip it (drawer stays keyboard-reachable when closed).
     <div
       inert={!isOpen}
       className={css({

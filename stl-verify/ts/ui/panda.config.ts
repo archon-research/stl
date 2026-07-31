@@ -26,11 +26,11 @@ export default defineConfig({
   // root-config key, so the preset cannot carry this for us; spreading the
   // exported map is the supported fix.
   //
-  // The spread is wider than this app needs -- `drawer` is never imported, and
-  // dropping it saves ~3kB -- but it is not merely convenient either: doctor's
-  // sentinel check hardcodes `drawer__content--size_lg` as required regardless
-  // of whether the consumer uses Drawer, so a narrowed map fails the gate.
-  // Filed upstream; revisit once the sentinels track the consumer's surface.
+  // The spread is wider than this app needs — `drawer` is never imported, and
+  // narrowing it saves ~3kB. However, doctor's sentinel check hardcodes
+  // `drawer__content--size_lg` as required, regardless of consumer usage.
+  // This is a known limitation filed upstream; we cannot narrow the map until
+  // doctor's sentinels are updated to reflect actual surface usage (status: pending).
   staticCss: {
     recipes: {
       ...designSystemStaticCssRecipes,

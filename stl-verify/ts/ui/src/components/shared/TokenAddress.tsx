@@ -96,7 +96,8 @@ export function TokenAddress({
     try {
       await navigator.clipboard.writeText(address);
     } catch {
-      // Fallback: create a temporary input
+      // Fallback for older browsers: execCommand is deprecated but still works where Clipboard API is unavailable.
+      // Silently fails if neither method succeeds.
       const textarea = document.createElement('textarea');
       textarea.value = address;
       document.body.appendChild(textarea);
@@ -141,7 +142,7 @@ export function TokenAddress({
               borderStyle: 'solid',
               borderWidth: '1px',
               borderColor: 'border.subtle',
-              boxShadow: 'lg',
+              boxShadow: 'overlay',
               minWidth: '200px',
               overflow: 'hidden',
               zIndex: '50',
