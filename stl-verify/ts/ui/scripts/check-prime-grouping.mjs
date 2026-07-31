@@ -82,6 +82,27 @@ async function main() {
       );
     }
 
+    // One address on two chains is listed once. `/v1/primes` is DISTINCT ON
+    // (proxy_address, chain_id), so this shape is reachable — for a proxy the
+    // axis-synome contract does not know, since `_index_proxies` raises on a
+    // duplicate address for contract-known ones. A repeat here would make
+    // `getAllocationsForProxies` fetch that proxy twice and double-count it.
+    {
+      const offContractMainnet = buildPrimeRow({
+        address: '0xaaaa000000000000000000000000000000000a',
+        chain: 'mainnet',
+        chain_id: 1,
+      });
+      const offContractBase = buildPrimeRow({
+        address: offContractMainnet.address,
+        chain: 'base',
+        chain_id: 8453,
+      });
+      const [group] = groupPrimesByVault([offContractMainnet, offContractBase]);
+      assert.deepEqual(group.proxyAddresses, [offContractMainnet.address]);
+      assert.equal(group.chainCount, 2);
+    }
+
     // A null prime_vault_address still yields an entry, keyed on name instead
     // of vanishing.
     {

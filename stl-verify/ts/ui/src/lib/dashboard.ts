@@ -157,7 +157,13 @@ export function groupPrimesByVault(primes: Prime[]): PrimeGroup[] {
       name: rows[0].name,
       vaultAddress: rows[0].prime_vault_address ?? null,
       primaryProxyAddress: mainnetRow?.address ?? sortedByAddress[0].address,
-      proxyAddresses: sortedByAddress.map((row) => row.address),
+      // Deduped because `/v1/primes` is `DISTINCT ON (proxy_address, chain_id)`,
+      // so one address holding positions on two chains yields two rows. Passing
+      // it twice to `getAllocationsForProxies` would fetch it twice and
+      // double-count every one of its rows in the grid and in `summary.totalUsd`
+      // — `getAllocationKey` gives the copies identical keys, so nothing
+      // downstream would catch it.
+      proxyAddresses: [...new Set(sortedByAddress.map((row) => row.address))],
       chainCount: new Set(rows.map((row) => row.chain_id)).size,
     };
   });
