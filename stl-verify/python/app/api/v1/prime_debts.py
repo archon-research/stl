@@ -1,5 +1,4 @@
 from datetime import datetime
-from decimal import Decimal
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -11,6 +10,7 @@ from app.api._validators import EthAddressParam
 from app.api.deps import get_engine
 from app.api.time_series import TimeSeriesWindow, build_window, get_time_series_query_params
 from app.domain.entities.allocation import EthAddress
+from app.domain.serialization import PlainDecimal
 from app.domain.time_series import TimeSeriesQuery
 from app.services.prime_debt_service import PrimeDebtService
 
@@ -29,7 +29,7 @@ class PrimeDebtSnapshotResponse(BaseModel):
         description="Maker `ilk` (collateral type) the debt is denominated against.",
         examples=["ALLOCATOR-NEXUS-A"],
     )
-    debt_wad: Decimal = Field(
+    debt_wad: PlainDecimal = Field(
         description=(
             "Outstanding debt in MakerDAO `wad` units (1e18 fixed-point). "
             "Decimal serialized as a JSON string to preserve precision."
@@ -62,7 +62,7 @@ class PrimeDebtBucketResponse(BaseModel):
     """Last observed debt within a single time bucket (LOCF gap-filled)."""
 
     bucket_start: datetime = Field(description="Inclusive start of the time bucket (UTC).")
-    debt_wad: Decimal | None = Field(
+    debt_wad: PlainDecimal | None = Field(
         default=None,
         description=(
             "Last observed debt in `wad` units carried forward into the bucket, serialized as a "
