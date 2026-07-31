@@ -29,20 +29,30 @@ const DEFAULT_DRAWER_WIDTH = 704;
 const MIN_DRAWER_WIDTH = 480;
 const DRAWER_STORAGE_KEY = 'risk-detail-drawer-width';
 
+// The drawer hosts the full backing-collateral table, which is wider than any
+// fixed pixel ceiling that also looks sensible on a laptop, so the cap is
+// relative to the viewport. Leaving 8% keeps the grid edge visible behind it so
+// the drawer still reads as an overlay rather than a page.
+//
+// Enforced in CSS as well as here: the stored width is a pixel preference, and
+// only the CSS `min()` keeps the cap true when the viewport is resized after
+// mount -- clamping in JS alone would leave a stale, too-wide value behind.
+const MAX_DRAWER_VIEWPORT_FRACTION = 0.92;
+const MAX_DRAWER_WIDTH_CSS = `${MAX_DRAWER_VIEWPORT_FRACTION * 100}vw`;
+
 function isBrowser(): boolean {
   return typeof window !== 'undefined';
 }
 
-// Relative to the viewport rather than a fixed pixel ceiling: the drawer hosts
-// the full backing-collateral table, which is wider than any constant that also
-// looks sensible on a laptop. 92vw leaves the grid edge visible behind it so the
-// drawer still reads as an overlay on a wide display.
 function maxDrawerWidth(): number {
   if (!isBrowser()) {
     return DEFAULT_DRAWER_WIDTH;
   }
 
-  return Math.max(MIN_DRAWER_WIDTH, Math.round(window.innerWidth * 0.92));
+  return Math.max(
+    MIN_DRAWER_WIDTH,
+    Math.round(window.innerWidth * MAX_DRAWER_VIEWPORT_FRACTION),
+  );
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -135,7 +145,7 @@ export function RiskDetailDrawer({
   }, [dragState]);
 
   const drawerStyle: CSSProperties = {
-    width: `min(${drawerWidth}px, 100vw)`,
+    width: `min(${drawerWidth}px, ${MAX_DRAWER_WIDTH_CSS})`,
   };
 
   const handleResizeStart = (event: MouseEvent<HTMLButtonElement>) => {

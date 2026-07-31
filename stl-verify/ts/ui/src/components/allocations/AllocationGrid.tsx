@@ -1198,6 +1198,23 @@ export function AllocationGrid({
               </>
             ) : null}
 
+            {/* Takes the place of the two cards risk capital feeds, so a failed
+                metric stays one cell wide in the rail instead of becoming a
+                full-width banner under it. */}
+            {!riskCapital && riskCapitalErrorMessage ? (
+              // `alignSelf` so the panel is only as tall as its message: a grid
+              // item would otherwise stretch to the chart cards' height and
+              // render as a large empty block.
+              <ErrorState
+                className={css({ alignSelf: 'start' })}
+                tone="critical"
+                size="inline"
+                title="Risk capital is unavailable"
+                description="The risk capital endpoint failed for this session."
+                errorMessage={riskCapitalErrorMessage}
+              />
+            ) : null}
+
             {riskCapital ? (
               <SummaryMetric
                 className={metricsCardClassName}
@@ -1311,15 +1328,6 @@ export function AllocationGrid({
               : 'partial'}{' '}
             of exposure modeled
           </p>
-        ) : null}
-        {!showTopMetricsSkeleton && riskCapitalErrorMessage ? (
-          <ErrorState
-            title="Risk capital is unavailable"
-            description="The risk capital endpoint failed for this session."
-            errorMessage={riskCapitalErrorMessage}
-            tone="critical"
-            size="inline"
-          />
         ) : null}
         <div
           className={css({

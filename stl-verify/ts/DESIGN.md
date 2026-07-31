@@ -182,7 +182,7 @@ The palette is restrained and operational: achromatic neutrals carry most surfac
 ### Primary
 - **colors.text.interactive** (#2563eb / #93c5fd): the canonical accent — actionable text, focus emphasis, primary fills.
 - **colors.text.link** (#2563eb / #93c5fd): navigation that leaves the current view (explorer links, external docs), so it reads differently in intent from a control accent even where the value matches.
-- **colors.interactive.accent** (#2563eb / #93c5fd): a local addition that stays defined regardless of what upstream does. App code uses it as the accent across the sidebar, addresses, methodology panel, bottom panel, and activity feed; independently, the shipped `ErrorState`, `ErrorBoundary`, and `RangePicker` read `var(--colors-interactive-accent, <hex>)` from inline styles, and the preset defines no such token — undefined, those three fall back to a hardcoded light-mode blue in both themes. Its value is pinned to `text.interactive` so the app has one accent, not two; either token is correct in new code.
+- **colors.interactive.accent** (#2563eb, theme-invariant): now shipped by the preset, so it is no longer a local addition. It is a **fill**, not a text colour — white on it is 5.17:1, but as text on the dark surface it is 3.47:1 and fails AA. Use it for backgrounds, borders and outlines (the sidebar, addresses, methodology panel); for accent *text* use `text.interactive` or `text.link`, both of which are dark-aware.
 
 ### Surface ramp (luminance-ordered, both themes)
 The ramp steps forward monotonically in both themes: canvas is furthest back, panels sit on top of it, insets are a distinct well inside a panel.
@@ -321,7 +321,8 @@ Never hand-write a shadow literal: a `rgba(0, 0, 0, 0.2)` drop shadow disappears
 
 ### Don't (token discipline):
 - **Don't** override a preset semantic token in `panda.config.ts`. Local `theme.extend` merges last and wins, so a copy silently reverts upstream fixes. Add only tokens the preset does not ship, and say in a comment why.
-- **Don't** write a raw hex, `rgba()`, or a `var(--colors-*)` read in application code. Both fail the theme switch, and a raw `var()` read also bypasses any future token rename.
+- **Don't** write a raw hex or `rgba()` in application code — those are theme-blind and will not follow the theme switch.
+- **Don't** write a raw `var(--colors-*)` read either, but for a different reason: it *does* follow the theme, because the custom property is redefined per theme. What it loses is validation — Panda never sees the name, so a typo or a future token rename fails silently and `uikit-cli doctor` cannot flag it. Prefer the token path. The chart series in `App.tsx` are the deliberate exception: they are passed to a charting library as string props, which is not a Panda style context.
 - **Don't** reach for `gray.*`, `neutral.*`, or any other raw palette step where a semantic token exists.
 - **Don't** compute a token path in a helper and pass it to `css()` as a variable. Panda extracts from **source text**: `bg: getCategoryColor(c)` emits no declaration at all and fails silently. Use a recipe variant, or index a literal lookup inside the `css()` call.
 - **Don't** name a token that does not exist. Panda passes an unknown path through as a literal CSS value, the browser discards the declaration, and the element inherits instead. Sweep for it: `npx panda cssgen --outfile /tmp/x.css && grep -oE '^\s+[a-z-]+: [a-z]+\.[a-zA-Z.]+;' /tmp/x.css` must be empty.
@@ -331,5 +332,5 @@ Never hand-write a shadow literal: a `rgba(0, 0, 0, 0.2)` drop shadow disappears
 
 - `stl-verify/ts/ui/panda.config.ts` — the local `theme.extend` (additions only).
 - `stl-verify/ts/ui/src/index.css` — the `@layer base` app reset and page background.
-- `npx panda cssgen` output against `@archon-research/design-system@0.8.0-rohit-consumer-fixes.1` — every resolved hex, font stack, radius, and shadow quoted above.
+- `npx panda cssgen` output against `@archon-research/design-system@0.8.0-rohit-consumer-fixes.2` — every resolved hex, font stack, radius, and shadow quoted above.
 - `@archon-research/design-system/panda-preset` (`dist/panda-preset.js`) — semantic ramp intent and release notes.
