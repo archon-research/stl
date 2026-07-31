@@ -517,6 +517,14 @@ data:
   OTEL_ENABLED: "true"
   OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
   OTEL_SERVICE_NAME: "stl-verify-python-api"
+  # DB pool ceiling for the API, declared here rather than left baked into the
+  # image so it can be raised by editing config and restarting — this ConfigMap is
+  # consumed via envFrom with no hash suffix. A prime-scoped risk-capital request
+  # opens connections in proportion to positions x ALM proxies, so exhaustion
+  # surfaces as 500s once callers queue on pool_timeout; VEC-532 bounds the
+  # fan-out itself.
+  DB_POOL_SIZE: "10"
+  DB_MAX_OVERFLOW: "20"
 ---
 apiVersion: v1
 kind: ConfigMap
