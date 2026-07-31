@@ -1,6 +1,7 @@
 import {
   AsyncStateRenderer,
   EmptyState,
+  ErrorState,
   SkeletonStack,
   StyledSelect,
 } from '@archon-research/design-system';
@@ -36,7 +37,6 @@ import {
   ChainLogo,
   DEFAULT_RANGE_PRESET,
   defaultTimeRange,
-  ErrorPanel,
   PageShell,
   ProtocolLogo,
   RangePicker,
@@ -1123,10 +1123,12 @@ export function ActivityFeed({
       isEmpty={false}
       loadingView={<SkeletonStack count={3} />}
       errorView={
-        <ErrorPanel
+        <ErrorState
           title="Error Loading Activity"
-          message="An error occurred while loading the activity feed."
+          description="An error occurred while loading the activity feed."
           errorMessage={error ?? undefined}
+          tone="critical"
+          size="inline"
         />
       }
       emptyView={

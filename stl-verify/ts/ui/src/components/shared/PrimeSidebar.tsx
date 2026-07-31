@@ -1,6 +1,7 @@
 import {
   AsyncStateRenderer,
   EmptyState,
+  ErrorState,
   SkeletonStack,
   Switch,
   ThemeToggle,
@@ -10,7 +11,7 @@ import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 import { toggleSwitch } from '#styled-system/recipes';
 
-import { ErrorPanel, ProtocolLogo } from '.';
+import { ProtocolLogo } from '.';
 import type { Prime } from '../../types/allocation';
 
 type PrimeSidebarProps = {
@@ -121,10 +122,12 @@ export function PrimeSidebar({
           isEmpty={primes.length === 0}
           loadingView={<SkeletonStack count={6} itemHeight={64} />}
           errorView={
-            <ErrorPanel
+            <ErrorState
               title="Unable to load primes"
-              message="An error occurred while fetching primes data."
+              description="An error occurred while fetching primes data."
               errorMessage={errorMessage ?? undefined}
+              tone="critical"
+              size="inline"
             />
           }
           emptyView={

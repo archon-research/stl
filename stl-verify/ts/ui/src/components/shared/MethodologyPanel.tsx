@@ -1,6 +1,7 @@
 import {
   Badge,
   type BadgeColorPalette,
+  ErrorState,
   Panel,
   SkeletonStack,
 } from '@archon-research/design-system';
@@ -10,7 +11,6 @@ import ReactMarkdown from 'react-markdown';
 
 import { css } from '#styled-system/css';
 
-import { ErrorPanel } from '.';
 import {
   getDataSources,
   getToken,
@@ -256,10 +256,12 @@ export function MethodologyPanel({
 
           {error ? (
             <div className={css({ p: '4' })}>
-              <ErrorPanel
+              <ErrorState
                 title="Failed to load data sources"
-                message="An error occurred while loading data-source transparency metadata."
+                description="An error occurred while loading data-source transparency metadata."
                 errorMessage={error}
+                tone="critical"
+                size="inline"
               />
             </div>
           ) : null}

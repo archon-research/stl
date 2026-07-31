@@ -3,6 +3,7 @@ import {
   type CellContext,
   type ColumnDef,
   DataTable,
+  ErrorState,
   LoadingIndicator,
   matchesSearchQuery,
   SkeletonStack,
@@ -34,7 +35,6 @@ import type {
 } from '../../../types/allocation';
 import {
   ChainLogo,
-  ErrorPanel,
   SummaryMetric,
   TokenAddress,
   TruncatedLabel,
@@ -460,9 +460,11 @@ export function RiskBreakdownTab({
       {isLoading ? <LoadingIndicator message="Loading risk breakdown" /> : null}
 
       {errorMessage ? (
-        <ErrorPanel
+        <ErrorState
           title="Unable to load the risk breakdown."
-          message={errorMessage}
+          description={errorMessage}
+          tone="critical"
+          size="inline"
         />
       ) : null}
 

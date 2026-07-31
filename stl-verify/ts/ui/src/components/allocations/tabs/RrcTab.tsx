@@ -1,4 +1,4 @@
-import { LoadingIndicator } from '@archon-research/design-system';
+import { ErrorState, LoadingIndicator } from '@archon-research/design-system';
 import { useEffect, useMemo, useState } from 'react';
 
 import { css, cx } from '#styled-system/css';
@@ -17,7 +17,6 @@ import { isAbortError, toErrorMessage } from '../../../lib/errors';
 import { logging } from '../../../lib/logging';
 import type { Allocation, Prime, Rrc } from '../../../types/allocation';
 import {
-  ErrorPanel,
   ProtocolLogo,
   StatusBadge,
   SummaryMetric,
@@ -182,9 +181,11 @@ export function RrcTab({
       </div>
 
       {errorMessage ? (
-        <ErrorPanel
+        <ErrorState
           title="Unable to compute required risk capital."
-          message={errorMessage}
+          description={errorMessage}
+          tone="critical"
+          size="inline"
         />
       ) : null}
 

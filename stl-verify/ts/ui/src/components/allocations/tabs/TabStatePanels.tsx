@@ -5,8 +5,9 @@ type TabNotePanelProps = {
   message: string;
 };
 
-// Applied as a recipe rather than through the shipped `SurfaceMessage`
-// component; see `shared/ErrorPanel` for why.
+// Applying the recipe rather than the shipped `SurfaceMessage` component is
+// deliberate — that component styles itself with inline `style` objects, which
+// win over anything a consumer `className` declares.
 const surfaceMessageStyles = surfaceMessage();
 
 export function TabNotePanel({ message }: TabNotePanelProps) {

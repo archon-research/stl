@@ -12,6 +12,7 @@ import {
   type ColumnDef,
   DataTable,
   EmptyState,
+  ErrorState,
   SearchInput,
   type SortingState,
   useDataTable,
@@ -49,7 +50,6 @@ import type { LocalProtocolRow } from '../../types/local-data';
 import {
   AppTooltip,
   ChainLogo,
-  ErrorPanel,
   PageShell,
   ProtocolLogo,
   SummaryMetric,
@@ -1313,10 +1313,12 @@ export function AllocationGrid({
           </p>
         ) : null}
         {!showTopMetricsSkeleton && riskCapitalErrorMessage ? (
-          <ErrorPanel
+          <ErrorState
             title="Risk capital is unavailable"
-            message="The risk capital endpoint failed for this session."
+            description="The risk capital endpoint failed for this session."
             errorMessage={riskCapitalErrorMessage}
+            tone="critical"
+            size="inline"
           />
         ) : null}
         <div
@@ -1376,10 +1378,12 @@ export function AllocationGrid({
         ) : null}
 
         {selectedPrime && errorMessage ? (
-          <ErrorPanel
+          <ErrorState
             title="Unable to load allocations"
-            message="An error occurred while fetching allocation data."
+            description="An error occurred while fetching allocation data."
             errorMessage={errorMessage}
+            tone="critical"
+            size="inline"
           />
         ) : null}
 

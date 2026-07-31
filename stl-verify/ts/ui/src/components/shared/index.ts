@@ -1,5 +1,4 @@
 export { ChainLogo } from './ChainLogo';
-export { ErrorPanel } from './ErrorPanel';
 export { PageShell } from './PageShell';
 export { ProtocolLogo } from './ProtocolLogo';
 export {
