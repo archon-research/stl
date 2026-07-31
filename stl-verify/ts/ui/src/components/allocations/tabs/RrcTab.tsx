@@ -1,11 +1,12 @@
-import { LoadingIndicator } from '@archon-research/design-system';
+import { ErrorState, LoadingIndicator } from '@archon-research/design-system';
 import { useEffect, useMemo, useState } from 'react';
 
-import { css } from '#styled-system/css';
+import { css, cx } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
 import { getRrc } from '../../../lib/api';
 import {
+  type UsdTone,
   formatPercentValue,
   formatTokenAmount,
   formatUsdValue,
@@ -21,7 +22,7 @@ import {
   SummaryMetric,
   TokenLogo,
 } from '../../shared';
-import { TabErrorPanel, TabSelectionPrompt } from './TabStatePanels';
+import { TabNotePanel } from './TabStatePanels';
 
 type RrcTabProps = {
   isEnabled: boolean;
@@ -34,26 +35,14 @@ const MODEL_LABELS: Record<string, string> = {
   gap_sweep: 'Gap sweep',
 };
 
-function getToneStyles(tone: ReturnType<typeof getUsdTone>) {
-  switch (tone) {
-    case 'green':
-      return {
-        valueColor: { _dark: 'green.400', base: 'green.600' },
-      };
-    case 'yellow':
-      return {
-        valueColor: { _dark: 'yellow.400', base: 'yellow.700' },
-      };
-    case 'neutral':
-      return {
-        valueColor: { _dark: 'gray.400', base: 'gray.700' },
-      };
-    default:
-      return {
-        valueColor: { _dark: 'red.400', base: 'red.600' },
-      };
-  }
-}
+// A map of finished class names rather than a tone-to-token-path helper: see
+// `lib/activity.tsx` for why Panda cannot extract the latter.
+const TONE_VALUE_COLOR_CLASS: Record<UsdTone, string> = {
+  green: css({ color: 'text.success' }),
+  yellow: css({ color: 'text.warning' }),
+  red: css({ color: 'text.critical' }),
+  neutral: css({ color: 'text.muted' }),
+};
 
 export function RrcTab({
   isEnabled,
@@ -118,7 +107,6 @@ export function RrcTab({
   }, [chainId, isEnabled, primeAddress, receiptTokenAddress, receiptTokenId]);
 
   const tone = getUsdTone(rrc?.max_rrc_usd);
-  const toneStyles = getToneStyles(tone);
   const maxRrcValue = parseNumericValue(rrc?.max_rrc_usd) ?? 0;
   const hasRiskCapital = maxRrcValue > 0;
 
@@ -137,7 +125,7 @@ export function RrcTab({
 
   if (!selectedReceiptToken) {
     return (
-      <TabSelectionPrompt message="Pick a receipt token to inspect required risk capital." />
+      <TabNotePanel message="Pick a receipt token to inspect required risk capital." />
     );
   }
 
@@ -147,7 +135,7 @@ export function RrcTab({
     // wrapper), so this branch should query that registry instead of
     // hard-coding "no risk model" for every direct holding.
     return (
-      <TabSelectionPrompt message="Required risk capital is only computed for receipt-token positions. Direct asset holdings have no risk model." />
+      <TabNotePanel message="Required risk capital is only computed for receipt-token positions. Direct asset holdings have no risk model." />
     );
   }
 
@@ -193,9 +181,11 @@ export function RrcTab({
       </div>
 
       {errorMessage ? (
-        <TabErrorPanel
+        <ErrorState
           title="Unable to compute required risk capital."
-          message={errorMessage}
+          description={errorMessage}
+          tone="critical"
+          size="inline"
         />
       ) : null}
 
@@ -276,13 +266,15 @@ export function RrcTab({
             Max required risk capital across models
           </p>
           <p
-            className={css({
-              m: 0,
-              mt: '3',
-              fontSize: { base: '3xl', md: '4xl' },
-              fontWeight: 'semibold',
-              color: toneStyles.valueColor,
-            })}
+            className={cx(
+              css({
+                m: 0,
+                mt: '3',
+                fontSize: { base: '3xl', md: '4xl' },
+                fontWeight: 'semibold',
+              }),
+              TONE_VALUE_COLOR_CLASS[tone],
+            )}
           >
             {rrc ? formatUsdValue(rrc.max_rrc_usd) : '—'}
           </p>

@@ -49,7 +49,9 @@ const envSchema = z.object({
       .string()
       .refine(
         (host) =>
-          !/^(?:true|false|on|off|yes|no|y|n|enabled|disabled|\d+)$/iu.test(host),
+          !/^(?:true|false|on|off|yes|no|y|n|enabled|disabled|\d+)$/iu.test(
+            host,
+          ),
         'VITE_HOST must be a hostname or IP address (0.0.0.0 for all interfaces)',
       ),
   ),
@@ -112,7 +114,10 @@ function parseEnvFile(filePath: string): Record<string, string> {
   return parsedEntries;
 }
 
-function loadEnvWithDefaultBase(mode: string, envDir: string): Record<string, string> {
+function loadEnvWithDefaultBase(
+  mode: string,
+  envDir: string,
+): Record<string, string> {
   const modeName = mode.trim();
   const envFileNames = [
     '.env.default',

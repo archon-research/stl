@@ -19,10 +19,10 @@ import {
 } from '@archon-research/design-system';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import { css } from '#styled-system/css';
+import { css, cx } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
-import { getActionColor, getActionIcon } from '../../lib/activity';
+import { getActionColorClass, getActionIcon } from '../../lib/activity';
 import {
   type ChainLabelLookup,
   formatDateTime,
@@ -194,7 +194,7 @@ const chartEmptyMessageClassName = css({
   m: 0,
   mt: '2',
   fontSize: 'xs',
-  color: 'text.subtle',
+  color: 'text.muted',
 });
 
 const CHART_HEIGHT = 236;
@@ -358,6 +358,10 @@ function MetricCardTrend({
   );
 }
 
+// House header style, louder than the 11px (`2xs`) muted micro-label the recipe
+// gives a `density="compact"` table. Sortable
+// headers need no separate rule: the recipe's headerButton slot inherits font,
+// color, text-transform and letter-spacing from the cell.
 const tableHeaderTypographyClassName = css({
   '& thead th': {
     fontSize: 'sm',
@@ -367,52 +371,45 @@ const tableHeaderTypographyClassName = css({
     textTransform: 'uppercase',
     color: 'text.default',
   },
-  '& thead th button': {
-    fontSize: 'sm',
-    fontWeight: 'semibold',
-    lineHeight: 'shorter',
-    letterSpacing: '0.02em',
-    textTransform: 'uppercase',
-    color: 'text.default',
-  },
 });
 
-function getCategoryColor(category: AllocationCategory | undefined): string {
-  switch (category) {
-    case 'allocation':
-      return 'bg.success';
-    case 'pol':
-      return 'bg.warning';
-    case 'psm3':
-      return 'bg.interactive';
-    case 'asset':
-      return 'bg.info';
-    // Off-chain custody: a neutral chip, distinct from the strategy categories
-    // (the semantic accent tokens are all taken).
-    case 'custody':
-      return 'bg.subtle';
-    default:
-      return 'bg.subtle';
-  }
-}
+// See PrimeSidebar for why the preset's dark `interactive.selected` is diluted.
+// Here it has to arrive as a descendant override because the fill comes from the
+// `dataTable` recipe's `selected` variant, which the DataTable applies as a
+// hardcoded class name.
+// One literal `css()` call per category, evaluated at module scope, so the cell
+// picks a finished class name: see `lib/activity.tsx` for why Panda cannot
+// extract a token path handed in as a variable.
+//
+// Hues come from the `categorical.*` tokens, which encode grouping without
+// status meaning — the `bg.*`/`text.*` status family cannot give five strategy
+// categories distinct fills without two colliding, and its red would read as an
+// alarm on a routine category. Hue order matches `chart.series`, so a chip and
+// its series line read as the same category.
+const CATEGORY_CHIP_CLASS: Record<AllocationCategory | 'unknown', string> = {
+  allocation: css({ bg: 'categorical.1.bg', color: 'categorical.1.fg' }),
+  pol: css({ bg: 'categorical.2.bg', color: 'categorical.2.fg' }),
+  psm3: css({ bg: 'categorical.3.bg', color: 'categorical.3.fg' }),
+  asset: css({ bg: 'categorical.4.bg', color: 'categorical.4.fg' }),
+  custody: css({ bg: 'categorical.5.bg', color: 'categorical.5.fg' }),
+  unknown: css({
+    colorPalette: 'neutral',
+    bg: 'colorPalette.subtle.bg',
+    color: 'text.default',
+  }),
+};
 
-function getCategoryTextColor(
+function getCategoryChipClass(
   category: AllocationCategory | undefined,
 ): string {
-  switch (category) {
-    case 'allocation':
-      return 'text.success';
-    case 'pol':
-      return 'text.warning';
-    case 'psm3':
-      return 'text.interactive';
-    case 'asset':
-      return 'text.info';
-    case 'custody':
-      return 'text.muted';
-    default:
-      return 'text.default';
-  }
+  // `AllocationCategory` is a compile-time union over an unvalidated API response,
+  // so a category the backend adds later arrives as an unlisted string. Keying on
+  // own-property presence rather than `?? 'unknown'` means that renders the neutral
+  // chip instead of an unstyled one -- matching how getCategoryLabel already
+  // degrades.
+  return category !== undefined && Object.hasOwn(CATEGORY_CHIP_CLASS, category)
+    ? CATEGORY_CHIP_CLASS[category]
+    : CATEGORY_CHIP_CLASS.unknown;
 }
 
 function AllocationAssetCell({
@@ -548,6 +545,10 @@ function AllocationBalanceCell({ allocation }: { allocation: Allocation }) {
             overflow: 'hidden',
             textOverflow: 'ellipsis',
             whiteSpace: 'nowrap',
+            // Tabular figures so amounts align down the column. Not the
+            // column's `meta.mono`: this cell is a composite (logo, value,
+            // address) and mono would restyle all of it.
+            fontVariantNumeric: 'tabular-nums',
             m: 0,
           })}
         >
@@ -604,7 +605,9 @@ function AllocationActivityCell({ allocation }: { allocation: Allocation }) {
     );
   }
 
-  const actionColor = getActionColor(allocation.latest_activity_action);
+  const actionColorClass = getActionColorClass(
+    allocation.latest_activity_action,
+  );
   const actionIcon = getActionIcon(allocation.latest_activity_action);
   const magnitude = formatActivityMagnitude(allocation);
 
@@ -612,7 +615,9 @@ function AllocationActivityCell({ allocation }: { allocation: Allocation }) {
     <div>
       <div className={flex({ align: 'center', gap: '1.5' })}>
         {actionIcon ? (
-          <span className={css({ display: 'inline-flex', color: actionColor })}>
+          <span
+            className={cx(css({ display: 'inline-flex' }), actionColorClass)}
+          >
             {actionIcon}
           </span>
         ) : null}
@@ -627,12 +632,14 @@ function AllocationActivityCell({ allocation }: { allocation: Allocation }) {
         </span>
         {magnitude ? (
           <span
-            className={css({
-              fontSize: 'xs',
-              fontWeight: 'medium',
-              color: actionColor,
-              whiteSpace: 'nowrap',
-            })}
+            className={cx(
+              css({
+                fontSize: 'xs',
+                fontWeight: 'medium',
+                whiteSpace: 'nowrap',
+              }),
+              actionColorClass,
+            )}
           >
             {magnitude}
           </span>
@@ -653,22 +660,21 @@ function AllocationActivityCell({ allocation }: { allocation: Allocation }) {
 
 function AllocationCategoryCell({ allocation }: { allocation: Allocation }) {
   const category = allocation.category;
-  const categoryBg = getCategoryColor(category);
-  const categoryText = getCategoryTextColor(category);
 
   return (
     <div
-      className={css({
-        display: 'inline-flex',
-        alignItems: 'center',
-        px: '2',
-        py: '1',
-        borderRadius: 'md',
-        fontSize: 'xs',
-        fontWeight: 'semibold',
-        bg: categoryBg,
-        color: categoryText,
-      })}
+      className={cx(
+        css({
+          display: 'inline-flex',
+          alignItems: 'center',
+          px: '2',
+          py: '1',
+          borderRadius: 'md',
+          fontSize: 'xs',
+          fontWeight: 'semibold',
+        }),
+        getCategoryChipClass(category),
+      )}
     >
       {getCategoryLabel(category)}
     </div>
@@ -804,6 +810,10 @@ function createAllocationColumns(
             appliedRiskCapitalUsd(riskByReceiptTokenId, allocation) ?? NaN,
           getValueText: () => null,
         },
+        // Single-value USD cell, so the column can take mono + tabular figures
+        // wholesale.
+        mono: true,
+        align: 'right',
       },
     },
   ];
@@ -1188,6 +1198,23 @@ export function AllocationGrid({
               </>
             ) : null}
 
+            {/* Takes the place of the two cards risk capital feeds, so a failed
+                metric stays one cell wide in the rail instead of becoming a
+                full-width banner under it. */}
+            {!riskCapital && riskCapitalErrorMessage ? (
+              // `alignSelf` so the panel is only as tall as its message: a grid
+              // item would otherwise stretch to the chart cards' height and
+              // render as a large empty block.
+              <ErrorState
+                className={css({ alignSelf: 'start' })}
+                tone="critical"
+                size="inline"
+                title="Risk capital is unavailable"
+                description="The risk capital endpoint failed for this session."
+                errorMessage={riskCapitalErrorMessage}
+              />
+            ) : null}
+
             {riskCapital ? (
               <SummaryMetric
                 className={metricsCardClassName}
@@ -1302,13 +1329,6 @@ export function AllocationGrid({
             of exposure modeled
           </p>
         ) : null}
-        {!showTopMetricsSkeleton && riskCapitalErrorMessage ? (
-          <ErrorState
-            title="Risk capital is unavailable"
-            description="The risk capital endpoint failed for this session."
-            errorMessage={riskCapitalErrorMessage}
-          />
-        ) : null}
         <div
           className={css({
             display: 'grid',
@@ -1326,7 +1346,7 @@ export function AllocationGrid({
               width: 'fit-content',
               alignItems: 'center',
               borderRadius: 'full',
-              bg: { _dark: 'gray.700', base: 'gray.200' },
+              bg: 'bg.neutral',
               px: '3',
               py: '1',
               fontSize: 'xs',
@@ -1370,6 +1390,8 @@ export function AllocationGrid({
             title="Unable to load allocations"
             description="An error occurred while fetching allocation data."
             errorMessage={errorMessage}
+            tone="critical"
+            size="inline"
           />
         ) : null}
 
@@ -1408,6 +1430,11 @@ export function AllocationGrid({
               }
               getRowKey={getAllocationKey}
               selectedRowKey={selectedAllocationKey}
+              density="compact"
+              // Six nowrap columns push min-content well past this, so it binds
+              // only on the loading skeleton, which has no intrinsic width.
+              minWidth="48rem"
+              skeletonConfig={{ rows: 8, columns: 6, firstColumnTall: true }}
             />
           </div>
         ) : null}

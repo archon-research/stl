@@ -67,6 +67,9 @@ jobs:
       - name: Panda codegen
         run: npm run prepare -w ui
 
+      - name: Design-system doctor
+        run: npm run doctor
+
       # After codegen, not before: the script loads src/lib/dashboard.ts through
       # vite, so the day its import graph reaches #styled-system/* it would fail
       # as though its assertions had.
