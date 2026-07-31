@@ -87,10 +87,21 @@ class PrimeRiskCapitalResponse(BaseModel):
     """
 
     prime_id: str = Field(
+        deprecated=True,
         description=(
-            "The 0x-prefixed ALM **proxy** address from the path, echoed back. Despite the `prime_` "
-            "prefix this is proxy-scoped and therefore varies across a prime's proxies — it is not a "
-            "prime identity. Group by `prime_name` or `prime_proxies` instead."
+            "DEPRECATED — despite the `prime_` prefix this is the queried ALM **proxy** address, not a "
+            "prime identity, and it varies across a prime's proxies. It is byte-identical to "
+            "`proxy_address` in the same response. Its value is unchanged for backwards compatibility. "
+            "Use `proxy_address` to identify the proxy these figures are scoped to, and `prime_name` or "
+            "`prime_proxies` to group by prime."
+        ),
+        examples=["0x1601843c5e9bc251a3272907010afa41fa18347e"],
+    )
+    proxy_address: str = Field(
+        description=(
+            "The 0x-prefixed ALM proxy address from the path, echoed back. This is what the unprefixed "
+            "figures are scoped to, so a client fanning out across a prime's proxies can match each "
+            "response to the request it answers."
         ),
         examples=["0x1601843c5e9bc251a3272907010afa41fa18347e"],
     )
@@ -206,9 +217,10 @@ async def _get_service(
         "from it. The one exception is an address the axis-synome contract does not list: it has no "
         "discoverable siblings, so its `prime_` figures cover that proxy alone and will not agree with "
         "what the prime's known proxies report. `total_risk_capital_usd` is prime-wide despite having "
-        "no prefix. `prime_id` is the opposite exception: despite the prefix, it is the queried proxy "
-        "address, not the prime, and varies per proxy — see its own description. `encumbrance_ratio` is "
-        "deprecated because it mixes the two scopes; use `prime_encumbrance_ratio`."
+        "no prefix. `prime_id` breaks the convention the other way — it is the queried proxy address "
+        "rather than the prime — and is deprecated in favour of the identically-valued `proxy_address`. "
+        "`encumbrance_ratio` is deprecated because it mixes the two scopes; use "
+        "`prime_encumbrance_ratio`."
     ),
 )
 async def get_prime_risk_capital(
@@ -237,7 +249,8 @@ async def get_prime_risk_capital(
 
     result = await service.compute(prime_address)
     return PrimeRiskCapitalResponse(
-        prime_id=result.prime_id,
+        prime_id=result.proxy_address,
+        proxy_address=result.proxy_address,
         model=result.model,
         exposure_usd=result.exposure_usd,
         total_risk_capital_usd=result.total_risk_capital_usd,

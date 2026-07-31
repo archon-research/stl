@@ -30,7 +30,7 @@ def _override_service(service: AsyncMock):
 
 def _result() -> PrimeRiskCapital:
     return PrimeRiskCapital(
-        prime_id=_VALID_ADDR,
+        proxy_address=_VALID_ADDR,
         model="gap_sweep",
         exposure_usd=Decimal("1000"),
         total_risk_capital_usd=Decimal("100"),
@@ -90,7 +90,7 @@ def test_get_prime_risk_capital_serializes_large_usd_as_plain_string():
     assert "E+" in str(big_usd)
 
     result = PrimeRiskCapital(
-        prime_id=_VALID_ADDR,
+        proxy_address=_VALID_ADDR,
         model="gap_sweep",
         exposure_usd=big_usd,
         total_risk_capital_usd=big_usd,
@@ -142,7 +142,7 @@ def test_get_prime_risk_capital_serializes_the_prime_scoped_figures_as_plain_str
     assert "E+" in str(big_usd)
 
     result = PrimeRiskCapital(
-        prime_id=_VALID_ADDR,
+        proxy_address=_VALID_ADDR,
         model="gap_sweep",
         exposure_usd=big_usd,
         total_risk_capital_usd=big_usd,
@@ -262,7 +262,7 @@ def test_get_prime_risk_capital_reports_share_missing_allocation_as_unpriced():
     from app.api.v1 import prime_risk_capital
 
     result = PrimeRiskCapital(
-        prime_id=_VALID_ADDR,
+        proxy_address=_VALID_ADDR,
         model="gap_sweep",
         exposure_usd=Decimal("1000"),
         total_risk_capital_usd=Decimal("100"),
@@ -376,3 +376,43 @@ def test_prime_encumbrance_ratio_is_not_deprecated():
     properties = app.openapi()["components"]["schemas"]["PrimeRiskCapitalResponse"]["properties"]
 
     assert "deprecated" not in properties["prime_encumbrance_ratio"]
+
+
+def test_get_prime_risk_capital_names_the_proxy_the_unprefixed_figures_belong_to():
+    """`proxy_address` is what a client fanning out matches responses to requests by."""
+    from app.api.v1 import prime_risk_capital
+
+    service = _make_service(result=_result())
+    app.dependency_overrides[prime_risk_capital._get_service] = _override_service(service)
+    try:
+        response = TestClient(app).get(f"/v1/primes/{_VALID_ADDR}/risk-capital")
+
+        assert response.json()["proxy_address"] == _VALID_ADDR
+    finally:
+        app.dependency_overrides.pop(prime_risk_capital._get_service, None)
+
+
+def test_get_prime_risk_capital_keeps_the_deprecated_prime_id_identical_to_proxy_address():
+    # The value must not move for a consumer still reading the old key.
+    from app.api.v1 import prime_risk_capital
+
+    service = _make_service(result=_result())
+    app.dependency_overrides[prime_risk_capital._get_service] = _override_service(service)
+    try:
+        body = TestClient(app).get(f"/v1/primes/{_VALID_ADDR}/risk-capital").json()
+
+        assert body["prime_id"] == body["proxy_address"]
+    finally:
+        app.dependency_overrides.pop(prime_risk_capital._get_service, None)
+
+
+def test_prime_risk_capital_marks_the_misnamed_prime_id_field_deprecated():
+    schema = app.openapi()["components"]["schemas"]["PrimeRiskCapitalResponse"]["properties"]
+
+    assert schema["prime_id"]["deprecated"] is True
+
+
+def test_prime_risk_capital_does_not_deprecate_the_proxy_address_field():
+    schema = app.openapi()["components"]["schemas"]["PrimeRiskCapitalResponse"]["properties"]
+
+    assert "deprecated" not in schema["proxy_address"]

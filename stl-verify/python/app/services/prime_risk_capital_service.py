@@ -334,7 +334,7 @@ class PrimeRiskCapitalService:
         prime_required = sum((totals.required for totals in per_proxy), Decimal("0"))
 
         return PrimeRiskCapital(
-            prime_id=str(prime_id),
+            proxy_address=str(prime_id),
             model=DEFAULT_RISK_MODEL,
             exposure_usd=queried.exposure,
             total_risk_capital_usd=total_rc,

@@ -184,14 +184,24 @@ class AllocationRepository:
                 result = await conn.execute(
                     text(
                         """
-                        SELECT DISTINCT ON (proxy_address)
+                        -- One row per (proxy, chain), matching what this endpoint
+                        -- documents. chain_id belongs in the key because
+                        -- block_number is not comparable across chains: keyed on
+                        -- proxy_address alone, an address holding positions on two
+                        -- chains (a CREATE2 deployment at the same address) would
+                        -- report whichever chain happened to be further ahead, and
+                        -- the derived chain name and the UI's mainnet pick with it.
+                        -- Cardinality is unchanged while every proxy is
+                        -- single-chain, which prime_registry enforces for contract
+                        -- addresses by refusing to index a duplicate.
+                        SELECT DISTINCT ON (proxy_address, ap.chain_id)
                             p.name,
                             encode(proxy_address, 'hex') AS address,
                             ap.chain_id,
                             encode(p.vault_address, 'hex') AS vault_address
                         FROM allocation_position ap
                         JOIN prime p ON p.id = ap.prime_id
-                        ORDER BY proxy_address, block_number DESC
+                        ORDER BY proxy_address, ap.chain_id, block_number DESC
                         """
                     )
                 )

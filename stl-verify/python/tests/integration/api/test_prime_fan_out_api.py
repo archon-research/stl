@@ -90,6 +90,18 @@ def test_primes_lists_both_of_sparks_alm_proxies(client: TestClient) -> None:
     assert len(_spark_rows(client)) == 2
 
 
+def test_primes_returns_one_row_per_proxy_and_chain(client: TestClient) -> None:
+    """Guards the cardinality the `DISTINCT ON` key promises.
+
+    Keyed on proxy_address alone, a proxy holding positions on two chains would
+    collapse to one row carrying whichever chain had the higher block_number —
+    a number that is not comparable across chains.
+    """
+    rows = _spark_rows(client)
+
+    assert len({(row["address"], row["chain_id"]) for row in rows}) == len(rows)
+
+
 def test_primes_labels_each_proxy_with_its_chain_id(client: TestClient) -> None:
     assert {row["chain_id"] for row in _spark_rows(client)} == {1, 43114}
 

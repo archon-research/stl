@@ -177,7 +177,7 @@ export interface paths {
      * Self-computed prime risk capital
      * @description Compute the prime's capital metrics from on-chain data and the default RRC model (`gap_sweep`), with no dependency on the upstream Star feed. Returns exposure (priced receipt-token allocations), Total Risk Capital (on-chain treasury), Required Risk Capital (sum of per-allocation model RRC), encumbrance, a `modeled_pct` coverage figure, and a per-allocation breakdown. The figures are model-derived and partial (only allocations the model can price contribute Required Risk Capital) and will not match Sky's dashboard. A backed allocation whose pool-share lookup can't be resolved (e.g. a warm-up window or an un-indexed receipt token) is reported as unpriced (`applied=false` with an `unpriced_reason`) rather than failing the whole response. Returns `404` if the prime is unknown, and also if the address is a SubProxy treasury wallet: those hold a prime's treasury rather than its allocations, so they have no prime-level risk capital to report. Read the treasury at `/v1/primes/{prime_id}/total-capital` with one of the prime's ALM proxies, which `/v1/primes` lists.
      *
-     *     Figures without a prefix are scoped to the proxy in the path. Figures prefixed `prime_` are scoped to the whole prime — summed across the ALM proxies of the prime the given address belongs to that sit on chains STL indexes — and are therefore identical whichever proxy you query; use `prime_per_chain` for the split and `prime_unserved_chains` for what is missing from it. The one exception is an address the axis-synome contract does not list: it has no discoverable siblings, so its `prime_` figures cover that proxy alone and will not agree with what the prime's known proxies report. `total_risk_capital_usd` is prime-wide despite having no prefix. `prime_id` is the opposite exception: despite the prefix, it is the queried proxy address, not the prime, and varies per proxy — see its own description. `encumbrance_ratio` is deprecated because it mixes the two scopes; use `prime_encumbrance_ratio`.
+     *     Figures without a prefix are scoped to the proxy in the path. Figures prefixed `prime_` are scoped to the whole prime — summed across the ALM proxies of the prime the given address belongs to that sit on chains STL indexes — and are therefore identical whichever proxy you query; use `prime_per_chain` for the split and `prime_unserved_chains` for what is missing from it. The one exception is an address the axis-synome contract does not list: it has no discoverable siblings, so its `prime_` figures cover that proxy alone and will not agree with what the prime's known proxies report. `total_risk_capital_usd` is prime-wide despite having no prefix. `prime_id` breaks the convention the other way — it is the queried proxy address rather than the prime — and is deprecated in favour of the identically-valued `proxy_address`. `encumbrance_ratio` is deprecated because it mixes the two scopes; use `prime_encumbrance_ratio`.
      */
     get: operations['get_prime_risk_capital_v1_primes__prime_id__risk_capital_get'];
     put?: never;
@@ -1435,7 +1435,8 @@ export interface components {
       prime_exposure_usd: string;
       /**
        * Prime Id
-       * @description The 0x-prefixed ALM **proxy** address from the path, echoed back. Despite the `prime_` prefix this is proxy-scoped and therefore varies across a prime's proxies — it is not a prime identity. Group by `prime_name` or `prime_proxies` instead.
+       * @deprecated
+       * @description DEPRECATED — despite the `prime_` prefix this is the queried ALM **proxy** address, not a prime identity, and it varies across a prime's proxies. It is byte-identical to `proxy_address` in the same response. Its value is unchanged for backwards compatibility. Use `proxy_address` to identify the proxy these figures are scoped to, and `prime_name` or `prime_proxies` to group by prime.
        * @example 0x1601843c5e9bc251a3272907010afa41fa18347e
        */
       prime_id: string;
@@ -1482,6 +1483,12 @@ export interface components {
        *     ]
        */
       prime_unserved_chains?: string[];
+      /**
+       * Proxy Address
+       * @description The 0x-prefixed ALM proxy address from the path, echoed back. This is what the unprefixed figures are scoped to, so a client fanning out across a prime's proxies can match each response to the request it answers.
+       * @example 0x1601843c5e9bc251a3272907010afa41fa18347e
+       */
+      proxy_address: string;
       /**
        * Required Risk Capital Usd
        * @description Σ per-allocation RRC from the default model (USD).

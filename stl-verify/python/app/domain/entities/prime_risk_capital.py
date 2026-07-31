@@ -106,7 +106,10 @@ class PrimeRiskCapital:
     compatibility and superseded by ``prime_encumbrance_ratio``.
     """
 
-    prime_id: str
+    # The proxy the unprefixed figures are scoped to — the address that was
+    # queried, not the prime. Named for what it holds: the API serves it as both
+    # `proxy_address` and, for backwards compatibility, the misnamed `prime_id`.
+    proxy_address: str
     model: str
     exposure_usd: Decimal
     total_risk_capital_usd: Decimal | None
