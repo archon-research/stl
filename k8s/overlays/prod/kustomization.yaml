@@ -214,6 +214,44 @@ images:
     newTag: "f5e4bd91aacb43de423af93f69dd509dcf0c3876"
 
 patches:
+  # ---------------------------------------------------------------------------
+  # Reloader opt-in — ConfigMap/Secret changes roll the workload (ADR-013 / ORB-188)
+  # ---------------------------------------------------------------------------
+  # Kubernetes does not restart a pod when a ConfigMap or Secret it reads through
+  # envFrom/configMapKeyRef/secretKeyRef changes, so before this a merged config
+  # change did nothing until the next image deploy. ORB-188: arbitrum-watcher ran
+  # for weeks on superseded BACKFILL_* values because the ConfigMap edit landed
+  # after the last prod deploy.
+  #
+  # This also covers Secrets that External Secrets Operator refreshes after an AWS
+  # Secrets Manager rotation — there is no commit and no image build in that path,
+  # so a Git-SHA or checksum annotation could not detect it.
+  #
+  # The generic `auto` annotation covers BOTH ConfigMaps and Secrets referenced by
+  # the pod spec. Reloader discovers references itself, so only the workloads that
+  # actually consume the changed object roll; the rest are untouched.
+  #
+  # Strategic merge (not a JSON `add` op) because base Deployments have no
+  # metadata.annotations map — an `add` to /metadata/annotations/... would fail on
+  # a missing parent. `name` is a placeholder; `target` selects the resources.
+  #
+  # Deployments only: the two Jobs (migrate, transform-bootstrap) are out of scope
+  # per ADR-013, and the controller has Job support disabled. No StatefulSets or
+  # DaemonSets exist in this repo.
+  #
+  # Requires the platform controller plus RespectIgnoreDifferences=true on the
+  # stl ArgoCD Applications (both in the infra repo). Harmless without them —
+  # it is an inert annotation until Reloader is running.
+  - target:
+      kind: Deployment
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: reloader-opt-in-placeholder
+        annotations:
+          reloader.stakater.com/auto: "true"
+
   - target:
       kind: Service
       name: python-api
