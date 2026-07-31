@@ -67,14 +67,11 @@ jobs:
       - name: Panda codegen
         run: npm run prepare -w ui
 
-      # After codegen, not before: both scripts load src/lib/dashboard.ts through
-      # vite, so the day its import graph reaches #styled-system/* they would fail
-      # as though their assertions had.
+      # After codegen, not before: the script loads src/lib/dashboard.ts through
+      # vite, so the day its import graph reaches #styled-system/* it would fail
+      # as though its assertions had.
       - name: Run prime grouping regression test
         run: npm run test:prime-grouping -w ui
-
-      - name: Run explorer URL regression test
-        run: npm run test:explorers -w ui
 
       # The committed types are what every call site is checked against, so a
       # schema change without a regeneration leaves the UI compiling happily

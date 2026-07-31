@@ -517,13 +517,6 @@ data:
   OTEL_ENABLED: "true"
   OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
   OTEL_SERVICE_NAME: "stl-verify-python-api"
-  # Same values the image defaults to; declared here so the ceiling can be raised
-  # without rebuilding. A prime-scoped risk-capital request opens connections in
-  # proportion to positions x ALM proxies (see Settings.db_pool_size), so pool
-  # exhaustion surfaces as 500s once callers queue on pool_timeout — VEC-532
-  # bounds the fan-out itself.
-  DB_POOL_SIZE: "10"
-  DB_MAX_OVERFLOW: "20"
 ---
 apiVersion: v1
 kind: ConfigMap
