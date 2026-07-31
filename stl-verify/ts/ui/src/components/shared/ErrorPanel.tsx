@@ -12,12 +12,11 @@ type ErrorPanelProps = {
 // consumer `className` cannot reach it.
 const surfaceMessageStyles = surfaceMessage({ tone: 'critical' });
 
-// Use this, not the design system's `ErrorState`, for a failure inside a panel,
-// a drawer or the prime rail. `ErrorState` is a page-level state: a centred
-// 44px icon over an 18px title, and an `errorMessage` block fixed to
-// `whiteSpace: nowrap` by an inline style no consumer prop can reach — so in a
-// ~250px rail a URL-and-status string becomes a horizontal scroll strip. The
-// `className`/`style` escape hatches reach only its root.
+// Use this, not the design system's `ErrorState`, wherever a failure has to
+// read as an error: `ErrorState` has no `tone`, so its neutral surface and
+// `text.strong` title are set by inline styles a consumer class cannot
+// override, and the red border/title/tint that marks a failure everywhere else
+// in this app would be lost.
 export function ErrorPanel({ title, message, errorMessage }: ErrorPanelProps) {
   return (
     <div className={surfaceMessageStyles.root}>
