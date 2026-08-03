@@ -87,7 +87,7 @@ on the node cannot hold cleanly.
 | `id` | `rel:`-prefixed composite of `rel_type` + `src_id` + `dst_id`, a referenceable handle derived from the row |
 | `src_id`, `dst_id` | the two node ids the edge joins (soft references to the master; no FK, since SCD2 ids are non-unique — same pattern as the existing bridge and `entity_ref_codes`) |
 | `rel_type` | the kind of link: `ISSUED_BY`, `HAS_UNDERLYING`, `SUBSIDIARY_OF`, `RESOLVES_TO`, `HELD_BY`, `BELONGS_TO`, `GOVERNED_BY`, `SCORED_BY`, … |
-| `valid_from` / `valid_to` | when the link is true; `valid_to` blank means current (close-and-open on change) |
+| `valid_from` / `valid_to` | when the link is true; `valid_to` blank means current. A re-point is a new version row, never an in-place update. |
 | `rel_weight` | `FLOAT`, nullable: composition weight, ownership fraction, or a cost for graph algorithms |
 | `processing_version`, `build_id`, `source_system` | version and provenance, per ADR-0002 |
 
@@ -108,9 +108,13 @@ on the node cannot hold cleanly.
   (`SCORED_BY`), so `CONCEPT` is a valid endpoint kind alongside `ENTITY` and `SECURITY`.
 - **Hierarchies are edges, not columns.** A parent link is one `SUBSIDIARY_OF` / `PARENT_OF` edge;
   the ultimate parent is the top of that chain, reached by walking the edges.
-- **Temporal integrity.** One current row per `(src_id, rel_type, dst_id)` is enforced by a partial
-  unique index (over rows where `valid_to` is null), and overlapping windows by an `EXCLUDE`
-  constraint.
+- **Append-only, versioned.** The table is INSERT-only (`UPDATE` / `DELETE` / `TRUNCATE` revoked, the
+  same as `security_master`, `entity_master`, and `security_instrument_bridge`). A correction or
+  re-point is a new row with the next `processing_version`; nothing is mutated. The current edge is
+  derived by a view that takes the latest version per `(src_id, rel_type, dst_id)` and then applies
+  the valid-time window, so a closing version supersedes the open row it replaces. Single-valued
+  links (e.g. `ISSUED_BY`, `REPRESENTS`) are checked by a data-quality view over the current state,
+  not a write-time constraint, because an append-only re-point always overlaps the edge it supersedes.
 
 ### 3. Classification/enrichment happens in the load, into the payload
 
@@ -187,7 +191,7 @@ key or `CHECK`; reverse and graph reads scan every document. Edges must be their
 | New node attribute | Add a key to the node's JSON `payload` | Data only, no migration |
 | A payload field becomes a query/join key | Promote it to a real column | One migration, once |
 | New relationship type | Add the value (and its endpoint rule) to the `CHECK` | One line |
-| New or changed relationship | Insert an edge, or close-and-open the current row | Data only |
+| New or changed relationship | Insert an edge, or append a new version to re-point it | Data only |
 | Corporate action (delist, split, merger) | Status version on the node; a succession edge | Data only |
 | New node type | New `record_type` value | Data only |
 | Wholesale restructure | Rebuild the small, curated dataset | Cheap **as long as the join keys stay stable** |
