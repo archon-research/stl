@@ -1,65 +1,21 @@
-import { css } from '#styled-system/css';
+import { css, cx } from '#styled-system/css';
+import { surfaceMessage } from '#styled-system/recipes';
 
-type TabSelectionPromptProps = {
+type TabNotePanelProps = {
   message: string;
 };
 
-type TabErrorPanelProps = {
-  title: string;
-  message: string;
-};
+// Applying the recipe rather than the shipped `SurfaceMessage` component is
+// deliberate — that component styles itself with inline `style` objects, which
+// win over anything a consumer `className` declares.
+const surfaceMessageStyles = surfaceMessage();
 
-export function TabSelectionPrompt({ message }: TabSelectionPromptProps) {
+export function TabNotePanel({ message }: TabNotePanelProps) {
   return (
-    <div
-      className={css({
-        borderRadius: 'md',
-        borderStyle: 'solid',
-        borderWidth: '1px',
-        borderColor: 'border.subtle',
-        bg: 'surface.subtle',
-        p: '4',
-      })}
-    >
-      <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>
-        {message}
-      </p>
-    </div>
-  );
-}
-
-export function TabErrorPanel({ title, message }: TabErrorPanelProps) {
-  return (
-    <div
-      className={css({
-        borderRadius: 'md',
-        borderStyle: 'solid',
-        borderWidth: '1px',
-        borderColor: 'border.default',
-        bg: 'surface.subtle',
-        p: '4',
-      })}
-    >
-      <p
-        className={css({
-          m: 0,
-          fontSize: 'sm',
-          fontWeight: 'semibold',
-          color: 'text.strong',
-        })}
-      >
-        {title}
-      </p>
-      <p
-        className={css({
-          m: 0,
-          mt: '1.5',
-          fontSize: 'sm',
-          color: 'text.muted',
-        })}
-      >
-        {message}
-      </p>
+    <div className={surfaceMessageStyles.root}>
+      {/* The `body` slot's `mt` exists to clear a preceding title; this panel
+          has none, so the leading gap is removed. */}
+      <p className={cx(surfaceMessageStyles.body, css({ mt: 0 }))}>{message}</p>
     </div>
   );
 }
