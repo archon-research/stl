@@ -1,0 +1,14 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: python-api
+spec:
+  # Caps voluntary disruption (Karpenter consolidation, node drains) at one
+  # replica, and only means anything alongside the hostname spread in
+  # deployment.yaml — co-located replicas satisfy this budget right up until
+  # their shared node goes away. Do not copy this to the single-replica
+  # workloads: minAvailable: 1 there blocks every eviction. VEC-531, ORB-12.
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: python-api

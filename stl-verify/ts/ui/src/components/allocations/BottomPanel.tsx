@@ -250,12 +250,12 @@ export function BottomPanel({
               p: 0,
               fontSize: 'sm',
               fontWeight: 'medium',
-              color: 'interactive.accent',
+              color: 'text.link',
               cursor: 'pointer',
               whiteSpace: 'nowrap',
               _hover: { textDecoration: 'underline' },
               _disabled: {
-                color: 'text.subtle',
+                color: 'text.muted',
                 cursor: 'not-allowed',
                 textDecoration: 'none',
               },
@@ -407,6 +407,8 @@ export function BottomPanel({
                 title="Unable to load receipt tokens"
                 description="An error occurred while fetching receipt token data."
                 errorMessage={errorMessage ?? undefined}
+                tone="critical"
+                size="inline"
               />
             }
             emptyView={emptyStateView}
