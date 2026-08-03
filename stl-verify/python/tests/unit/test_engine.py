@@ -28,3 +28,26 @@ def test_get_engine_sizes_the_connection_pool_from_settings(monkeypatch: pytest.
     assert pool.size() == 7
     # No public accessor for the overflow ceiling; asserted so dropping the kwarg fails.
     assert pool._max_overflow == 13
+
+
+def test_get_engine_bounds_how_long_a_caller_queues_for_a_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exhaustion has to fail fast rather than stall a worker for 30s.
+
+    The pool ceiling above decides when a replica saturates; this decides what
+    happens next. On SQLAlchemy's unset 30s each queued caller holds a worker for
+    half a minute, so one burst on the risk-capital fan-out degrades endpoints
+    that never touch this pool. Wired through from settings so the wait is a
+    deliberate number and can be tuned per environment without a rebuild.
+    """
+    monkeypatch.setenv("DB_POOL_TIMEOUT", "3")
+    settings = Settings.model_validate({})
+
+    engine = get_engine(settings)
+
+    pool = engine.pool
+    assert isinstance(pool, QueuePool)
+    # No public accessor for the queue wait; asserted so dropping the kwarg fails
+    # back to SQLAlchemy's 30s silently.
+    assert pool._timeout == 3
