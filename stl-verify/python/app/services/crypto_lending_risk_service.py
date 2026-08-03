@@ -13,7 +13,7 @@ from app.domain.entities.risk import (
     RiskEnrichedCollateral,
     RrcResult,
 )
-from app.domain.exceptions import InvalidOverrideError, PriceDataMissingError
+from app.domain.exceptions import InvalidOverrideError, LiquidationParamsMissingError, PriceDataMissingError
 from app.logging import get_logger
 from app.ports.crypto_lending_reader import CryptoLendingReader
 from app.risk_engine.crypto_lending import gap_sweep
@@ -306,6 +306,15 @@ class CryptoLendingRiskService:
 
         token_ids = [item.token_id for item in breakdown.items if item.token_id is not None]
         liq_params = await self._reader.get_liquidation_params(info, breakdown.backed_asset_id, token_ids)
+        if not any(item.token_id in liq_params for item in breakdown.items):
+            # Enrichment would drop every item, leaving the model to compute a gap over
+            # an empty collateral set and return a *fully covered* rrc=0. Only protocols
+            # that require liquidation enrichment reach here, so an empty intersection is
+            # a data gap rather than a protocol without params. Same reasoning as the
+            # price guard above; see VEC-538.
+            raise LiquidationParamsMissingError(
+                f"no collateral item has liquidation params for backed_asset_id={breakdown.backed_asset_id}"
+            )
         return breakdown.backed_asset_id, self._build_enriched_items(breakdown, share, liq_params)
 
     @staticmethod
