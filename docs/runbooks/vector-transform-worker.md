@@ -115,8 +115,11 @@ the raw count, so it surfaces as negative drift above.
    `SELECT tgname, tgenabled FROM pg_trigger WHERE tgrelid = 'public.<table>'::regclass AND NOT tgisinternal`
    (expect `_transform_enqueue`, enabled). If missing/disabled, re-apply the
    migration or re-enable, then re-bootstrap the gap window.
-4. Static positive drift after bootstrap: re-run `transform-bootstrap` for the
-   affected source (`-source <table>`); the guarded upsert makes it idempotent.
+4. Static positive drift after bootstrap: re-run the backfill by triggering the
+   `transform-bootstrap` schedule (Temporal UI → Schedules → transform-bootstrap
+   → Trigger, or `temporal schedule trigger --schedule-id transform-bootstrap`),
+   scoping to the affected source via `BOOTSTRAP_SOURCE=<table>` in the
+   transform-bootstrap ConfigMap; the guarded upsert makes it idempotent.
 5. Negative drift: investigate raw deletes / an errant transform; do not ignore.
 
 Enabling: this rule is warning because it is also nonzero during the initial

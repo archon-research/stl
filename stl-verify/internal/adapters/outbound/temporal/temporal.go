@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	enumspb "go.temporal.io/api/enums/v1"
 	workflowservicepb "go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
@@ -68,6 +69,26 @@ type CronjobConfig struct {
 	// external rate limit do not all fire at the same wall-clock instant.
 	IntervalOffsetEnv string
 
+	// Manual, when true, makes this a trigger-only job: the schedule is created
+	// paused with no interval, so it never fires on its own — only an explicit
+	// Trigger (Temporal UI, or `temporal schedule trigger --schedule-id <name>`)
+	// runs it. Use for one-off / operator-driven work such as a history backfill.
+	// IntervalDefault is not required in this mode.
+	Manual bool
+
+	// Activity timing/retry overrides for long-running jobs. Each zero value keeps
+	// the shared default (StartToClose 10m / ScheduleToClose 30m / 5 attempts / no
+	// heartbeat). They are threaded into the workflow as input (see workflowParams),
+	// so existing schedules that pass no args are unaffected. A multi-hour job
+	// should raise BOTH ActivityStartToCloseTimeout and ActivityScheduleToCloseTimeout
+	// (the latter otherwise caps the total at the 30m default), set
+	// ActivityMaxAttempts=1 for expensive-but-idempotent work, and set
+	// ActivityHeartbeatTimeout so a crashed worker is detected in minutes.
+	ActivityStartToCloseTimeout    time.Duration
+	ActivityScheduleToCloseTimeout time.Duration
+	ActivityHeartbeatTimeout       time.Duration
+	ActivityMaxAttempts            int32
+
 	// OpenDatabase opens a database connection pool. Required.
 	OpenDatabase func(ctx context.Context) (*pgxpool.Pool, error)
 
@@ -80,7 +101,9 @@ func (c CronjobConfig) validate() error {
 	if c.Name == "" {
 		return fmt.Errorf("CronjobConfig.Name is required")
 	}
-	if c.IntervalDefault == "" {
+	// A manual (trigger-only) job has no interval by design, so IntervalDefault
+	// is not required for it; every other job still needs one.
+	if !c.Manual && c.IntervalDefault == "" {
 		return fmt.Errorf("CronjobConfig.IntervalDefault is required")
 	}
 	if c.OpenDatabase == nil {
@@ -90,6 +113,18 @@ func (c CronjobConfig) validate() error {
 		return fmt.Errorf("CronjobConfig.Setup is required")
 	}
 	return nil
+}
+
+// workflowArgs builds the per-job workflow input from the config's activity
+// overrides. Zero values are preserved and resolved to defaults inside
+// cronjobWorkflow.
+func (c CronjobConfig) workflowArgs() workflowParams {
+	return workflowParams{
+		StartToCloseTimeout:    c.ActivityStartToCloseTimeout,
+		ScheduleToCloseTimeout: c.ActivityScheduleToCloseTimeout,
+		HeartbeatTimeout:       c.ActivityHeartbeatTimeout,
+		MaximumAttempts:        c.ActivityMaxAttempts,
+	}
 }
 
 // RunCronjob runs a Temporal cronjob worker end-to-end: sets up logging,
@@ -255,26 +290,67 @@ func buildScheduleSpec(cfg CronjobConfig, getenv func(string) string) (client.Sc
 }
 
 func ensureSchedule(ctx context.Context, c client.Client, logger *slog.Logger, taskQueue string, cfg CronjobConfig) error {
+	scheduleID := cfg.Name
+	workflowID := "scheduled-" + cfg.Name
+	action := &client.ScheduleWorkflowAction{
+		Workflow:  cronjobWorkflow,
+		Args:      []any{cfg.workflowArgs()},
+		ID:        workflowID,
+		TaskQueue: taskQueue,
+	}
+
+	// Manual (trigger-only) job: create the schedule PAUSED with no interval, so
+	// it can never fire on its own — an empty spec plus Paused is belt-and-braces.
+	// Overlap SKIP means a double-Trigger can't run two copies concurrently. Pause
+	// only stops spec-driven runs; a manual Trigger still runs on a paused schedule.
+	if cfg.Manual {
+		_, err := c.ScheduleClient().Create(ctx, client.ScheduleOptions{
+			ID:      scheduleID,
+			Spec:    client.ScheduleSpec{}, // no intervals: never fires on its own
+			Paused:  true,
+			Overlap: enumspb.SCHEDULE_OVERLAP_POLICY_SKIP,
+			Note:    "trigger-only (VEC-490): created paused with no interval; run via the Temporal UI Trigger or `temporal schedule trigger --schedule-id " + scheduleID + "`",
+			Action:  action,
+		})
+		if err == nil {
+			logger.Info("manual schedule created (paused, trigger-only)", "scheduleID", scheduleID)
+			return nil
+		}
+		if grpcstatus.Code(err) == codes.AlreadyExists || strings.Contains(err.Error(), "already registered") {
+			// Reconcile ONLY the action (its Args carry the deployable activity knobs —
+			// timeouts/heartbeat/attempts) so a redeploy that changes them takes effect
+			// without a manual delete+recreate. Spec and State are left untouched, so the
+			// schedule stays paused with no interval (never silently unpaused or given a
+			// spec). Best-effort, like the interval reconcile: a failed update must not
+			// crashloop the worker — log and start against the existing schedule.
+			if reconcileErr := reconcileScheduleAction(ctx, c, logger, scheduleID, action); reconcileErr != nil {
+				// Fail hard rather than start with stale activity Args. Unlike the
+				// interval reconcile (fleet-wide, best-effort so a transient error
+				// can't crashloop many workers), this manual worker's Args drive an
+				// expensive multi-hour backfill, so triggering a run under the wrong
+				// timeout/retry policy is worse than a restart: a transient error
+				// recovers on the next k8s restart, and a persistent one surfaces via
+				// VectorCronjobWorkerDown instead of running silently on stale config.
+				return fmt.Errorf("reconciling manual schedule action %q: %w", scheduleID, reconcileErr)
+			}
+			return nil
+		}
+		return fmt.Errorf("creating manual schedule %q: %w", scheduleID, err)
+	}
+
 	spec, err := buildScheduleSpec(cfg, os.Getenv)
 	if err != nil {
 		return fmt.Errorf("building schedule spec for %q: %w", cfg.Name, err)
 	}
-
-	scheduleID := cfg.Name
-	workflowID := "scheduled-" + cfg.Name
 
 	// Attempt to create the schedule directly. Temporal returns AlreadyExists if it is
 	// already present (normal after any restart). Skipping a Describe-first check avoids
 	// a race window and also sidesteps the case where Describe returns an internal error
 	// due to a stuck workflow task left over from a previous run.
 	_, err = c.ScheduleClient().Create(ctx, client.ScheduleOptions{
-		ID:   scheduleID,
-		Spec: spec,
-		Action: &client.ScheduleWorkflowAction{
-			Workflow:  cronjobWorkflow,
-			ID:        workflowID,
-			TaskQueue: taskQueue,
-		},
+		ID:     scheduleID,
+		Spec:   spec,
+		Action: action,
 	})
 	if err == nil {
 		logger.Info("schedule created", "scheduleID", scheduleID, "spec", spec.Intervals[0])
@@ -314,6 +390,33 @@ func reconcileScheduleSpec(ctx context.Context, c client.Client, logger *slog.Lo
 	}
 	logger.Info("schedule reconciled", "scheduleID", scheduleID, "spec", want.Intervals[0])
 	return nil
+}
+
+// reconcileScheduleAction updates an existing schedule's action in place (used by
+// the manual/trigger-only path). Only the action is replaced; the timing spec and
+// state (paused, no interval) are left untouched, so it never unpauses or adds a
+// spec — it just carries new Args (the deployable activity knobs) onto redeploy.
+func reconcileScheduleAction(ctx context.Context, c client.Client, logger *slog.Logger, scheduleID string, want client.ScheduleAction) error {
+	handle := c.ScheduleClient().GetHandle(ctx, scheduleID)
+	err := handle.Update(ctx, client.ScheduleUpdateOptions{
+		DoUpdate: func(in client.ScheduleUpdateInput) (*client.ScheduleUpdate, error) {
+			return applyScheduleActionUpdate(in, want), nil
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("reconciling schedule action %q: %w", scheduleID, err)
+	}
+	logger.Info("manual schedule action reconciled", "scheduleID", scheduleID)
+	return nil
+}
+
+// applyScheduleActionUpdate replaces only the action on the current schedule
+// description, preserving the timing spec, policy, and state (so a manual schedule
+// stays paused with no interval). Pure function so the spec/state-preservation
+// guarantee is unit-testable without a live Temporal server.
+func applyScheduleActionUpdate(in client.ScheduleUpdateInput, want client.ScheduleAction) *client.ScheduleUpdate {
+	in.Description.Schedule.Action = want
+	return &client.ScheduleUpdate{Schedule: &in.Description.Schedule}
 }
 
 // applyScheduleSpecUpdate replaces only the timing spec on the current schedule

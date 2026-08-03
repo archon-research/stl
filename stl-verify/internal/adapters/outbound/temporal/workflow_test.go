@@ -170,7 +170,7 @@ func TestCronjobWorkflow(t *testing.T) {
 				activity.RegisterOptions{Name: "Execute"},
 			)
 
-			env.ExecuteWorkflow(cronjobWorkflow)
+			env.ExecuteWorkflow(cronjobWorkflow, workflowParams{})
 
 			if gotScheduledAt.IsZero() {
 				t.Error("workflow did not pass a scheduledAt to the activity")
