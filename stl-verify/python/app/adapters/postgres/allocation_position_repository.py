@@ -14,6 +14,7 @@ from app.adapters.postgres._time_window import (
     required_time_window_clause,
     time_bucket_expr,
 )
+from app.domain.chain_names import MAINNET_CHAIN_ID, chain_name_for
 from app.domain.entities.allocation import (
     AnchorageCustodyHolding,
     ChainMetadata,
@@ -29,7 +30,7 @@ from app.domain.entities.time_series_bucket import (
     ExposureBucket,
     TotalCapitalBucket,
 )
-from app.domain.proxy_kind import ProxyKind, classify_proxy, subproxy_addresses
+from app.domain.prime_registry import ProxyKind, classify_proxy, subproxy_addresses
 
 # USDS (mainnet). A prime's treasury USDS held in its SubProxy wallet is its
 # total capital; this isolates that token from any other SubProxy holding.
@@ -183,23 +184,47 @@ class AllocationRepository:
                 result = await conn.execute(
                     text(
                         """
-                        SELECT DISTINCT ON (proxy_address)
+                        -- One row per (proxy, chain), matching what this endpoint
+                        -- documents. chain_id belongs in the key because
+                        -- block_number is not comparable across chains: keyed on
+                        -- proxy_address alone, an address holding positions on two
+                        -- chains (a CREATE2 deployment at the same address) would
+                        -- report whichever chain happened to be further ahead, and
+                        -- the derived chain name and the UI's mainnet pick with it.
+                        -- Cardinality is unchanged while every proxy is
+                        -- single-chain, which prime_registry enforces for contract
+                        -- addresses by refusing to index a duplicate.
+                        SELECT DISTINCT ON (proxy_address, ap.chain_id)
                             p.name,
-                            encode(proxy_address, 'hex') AS address
+                            encode(proxy_address, 'hex') AS address,
+                            ap.chain_id,
+                            encode(p.vault_address, 'hex') AS vault_address
                         FROM allocation_position ap
                         JOIN prime p ON p.id = ap.prime_id
-                        ORDER BY proxy_address, block_number DESC
+                        ORDER BY proxy_address, ap.chain_id, block_number DESC
                         """
                     )
                 )
                 primes: list[Prime] = []
                 for row in result:
                     address = "0x" + row.address
-                    # SubProxy wallets share a prime_id with the ALM proxy; surfacing
-                    # them here would duplicate each prime in /v1/primes.
-                    if classify_proxy(address) is not ProxyKind.ALM:
+                    kind = classify_proxy(address)
+                    # SubProxy wallets share a prime_id with the ALM proxy and hold
+                    # the treasury rather than allocations; surfacing them here would
+                    # duplicate each prime in /v1/primes.
+                    if kind is not ProxyKind.ALM:
                         continue
-                    primes.append(Prime(id=address, name=row.name, address=address))
+                    primes.append(
+                        Prime(
+                            id=address,
+                            name=row.name,
+                            address=address,
+                            chain_id=row.chain_id,
+                            chain=chain_name_for(row.chain_id),
+                            role="alm",
+                            prime_vault_address="0x" + row.vault_address if row.vault_address else None,
+                        )
+                    )
                 return primes
         except asyncio.CancelledError:
             raise
@@ -824,6 +849,64 @@ class AllocationRepository:
         ]
         self._record_empty_total_capital(prime_address, buckets)
         return buckets
+
+    async def primary_proxy_address(self, prime_address: EthAddress) -> str | None:
+        """Return the proxy that carries this prime's prime-scoped rows, or ``None``.
+
+        Prime-scoped rows (the Anchorage custody leg) must be attributed to exactly
+        one of a prime's proxies, or a consumer unioning them double-counts. That
+        proxy is resolved from ``allocation_position`` rather than from the
+        axis-synome contract for two reasons: the contract's mainnet ALM proxy may
+        have no rows yet, in which case attributing to it would make the row
+        unreachable; and ``/v1/primes`` — which is what a client groups by — is
+        built from these same rows, so a DB-derived pick cannot disagree with the
+        client's. Mainnet wins when present, else the lowest address, so the pick is
+        deterministic and moves only when the prime's indexed proxy set changes.
+
+        SubProxy treasury wallets are excluded: they hold the denominator, not
+        allocations, and must never carry an allocation row.
+        """
+        subproxies = [bytes.fromhex(address[2:]) for address in subproxy_addresses()]
+        query = text(
+            """
+            SELECT encode(ap.proxy_address, 'hex') AS address
+            FROM allocation_position ap
+            WHERE ap.prime_id = (
+                SELECT prime_id FROM allocation_position
+                WHERE proxy_address = decode(:address_hex, 'hex')
+                LIMIT 1
+            )
+              AND ap.proxy_address NOT IN :subproxy_addrs
+            ORDER BY (ap.chain_id = :mainnet_chain_id) DESC, ap.proxy_address ASC
+            LIMIT 1
+            """
+        ).bindparams(bindparam("subproxy_addrs", expanding=True))
+        params = {
+            "address_hex": prime_address.hex,
+            "subproxy_addrs": subproxies,
+            "mainnet_chain_id": MAINNET_CHAIN_ID,
+        }
+
+        try:
+            async with self._engine.connect() as conn:
+                row = (await conn.execute(query, params)).fetchone()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "Failed to resolve the prime's primary proxy from database",
+                extra={
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                    "prime_address": str(prime_address),
+                },
+                exc_info=True,
+            )
+            raise ValueError(
+                f"Database query failed while resolving the primary proxy for prime {prime_address}: {exc}"
+            ) from exc
+
+        return "0x" + row.address if row is not None else None
 
     async def get_latest_total_capital_usd(self, prime_address: EthAddress) -> Decimal | None:
         """Return the prime's latest treasury USDS balance (Total Risk Capital), or None.

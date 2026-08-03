@@ -8,4 +8,10 @@ from app.config import Settings
 @functools.lru_cache(maxsize=1)
 def get_engine(settings: Settings) -> AsyncEngine:
     """Create or return a cached async SQLAlchemy engine for the given settings."""
-    return create_async_engine(settings.async_database_url, pool_pre_ping=True)
+    return create_async_engine(
+        settings.async_database_url,
+        pool_pre_ping=True,
+        pool_size=settings.db_pool_size,
+        max_overflow=settings.db_max_overflow,
+        pool_timeout=settings.db_pool_timeout,
+    )

@@ -147,6 +147,10 @@ class AllocationRepositoryPort(Protocol):
         """Return the prime's latest treasury USDS balance (Total Risk Capital), or None."""
         ...
 
+    async def primary_proxy_address(self, prime_address: EthAddress) -> str | None:
+        """Return the one proxy of this prime that carries its prime-scoped rows."""
+        ...
+
     async def list_exposure_buckets(
         self,
         prime_address: EthAddress,

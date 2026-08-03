@@ -44,6 +44,9 @@ class AllocationService:
     async def list_anchorage_custody_holdings(self, prime_id: EthAddress) -> list[AnchorageCustodyHolding]:
         return await self._repository.list_anchorage_custody_holdings(prime_id)
 
+    async def primary_proxy_address(self, prime_id: EthAddress) -> str | None:
+        return await self._repository.primary_proxy_address(prime_id)
+
     async def get_total_usd_exposure(self, prime_id: EthAddress) -> Decimal:
         return await self._repository.get_total_usd_exposure(prime_id)
 

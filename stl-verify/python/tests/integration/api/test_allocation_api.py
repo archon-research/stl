@@ -38,7 +38,8 @@ _GROVE_PROXY_HEX = "abcdef1234567890abcdef1234567890abcdef12"
 _OBEX_PROXY_HEX = "fedcba9876543210fedcba9876543210fedcba98"
 _UNKNOWN_PROXY_HEX = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 # Real Spark SubProxy address — used to exercise the ALM-only filter in
-# /v1/primes. Must match app.domain.proxy_kind._SUB_PROXY_HEX.
+# /v1/primes. Must match the subproxy entries in the axis-synome contract
+# (see app.domain.prime_registry.subproxy_addresses).
 _SPARK_SUB_PROXY_HEX = "3300f198988e4c9c63f75df86de36421f06af8c4"
 
 # Underlying tokens seeded by the sparklend migration (all chain_id=1).
