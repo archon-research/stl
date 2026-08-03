@@ -102,6 +102,48 @@ func TestRequiredKeys(t *testing.T) {
 	}
 }
 
+// TestTransformCoverage checks the built-XOR-deferred rule: every governed
+// raw_pipeline table must be built (in transformed._sources) or deferred, never both
+// or neither; a built source with no raw_pipeline table behind it is an orphan.
+func TestTransformCoverage(t *testing.T) {
+	reg := &Register{Tables: map[string]TableMeta{
+		"built":         {Type: "raw_pipeline"},
+		"deferred":      {Type: "raw_pipeline", TransformDefer: "VEC-494 bucket 3"},
+		"neither":       {Type: "raw_pipeline"},
+		"both":          {Type: "raw_pipeline", TransformDefer: "still deferred?"},
+		"cfg":           {Type: "config"},
+		"cfg_in_source": {Type: "config"},
+		"cfg_deferred":  {Type: "config", TransformDefer: "defer reason left after a type change"},
+	}}
+	built := []string{"built", "both", "cfg_in_source", "ghost"}
+
+	got := map[string]string{}
+	for _, v := range reg.CheckTransformCoverage(built) {
+		got[v.Table] = v.Kind
+	}
+	want := map[string]string{
+		"neither":       "missing_transform",       // raw_pipeline, not built, not deferred
+		"both":          "stale_defer",             // built but still marked deferred
+		"cfg_in_source": "orphan_transform_source", // in _sources but type=config
+		"ghost":         "orphan_transform_source", // in _sources but not in the register
+		"cfg_deferred":  "defer_on_non_target",     // transform_defer on a non-raw_pipeline table
+	}
+	if len(got) != len(want) {
+		t.Fatalf("violations = %v, want keys %v", got, want)
+	}
+	for tbl, kind := range want {
+		if got[tbl] != kind {
+			t.Errorf("%s: got %q, want %q", tbl, got[tbl], kind)
+		}
+	}
+	// "built" and "deferred" are the two legal states — must not be flagged.
+	for _, ok := range []string{"built", "deferred", "cfg"} {
+		if _, flagged := got[ok]; flagged {
+			t.Errorf("%s should not be flagged (%s)", ok, got[ok])
+		}
+	}
+}
+
 // TestClassify exercises the per-column decision against real register entries.
 func TestClassify(t *testing.T) {
 	r, err := Load()

@@ -35,19 +35,6 @@
       "title": "AlmProxiesContainer",
       "type": "object"
     },
-    "AscModel": {
-      "additionalProperties": false,
-      "properties": {
-        "entities": {
-          "$ref": "#/$defs/EntitiesModel"
-        }
-      },
-      "required": [
-        "entities"
-      ],
-      "title": "AscModel",
-      "type": "object"
-    },
     "AssetsByPrimeContainer": {
       "additionalProperties": false,
       "properties": {
@@ -131,12 +118,12 @@
     "SpecModel": {
       "additionalProperties": false,
       "properties": {
-        "asc": {
-          "$ref": "#/$defs/AscModel"
+        "entities": {
+          "$ref": "#/$defs/EntitiesModel"
         }
       },
       "required": [
-        "asc"
+        "entities"
       ],
       "title": "SpecModel",
       "type": "object"

@@ -10,8 +10,8 @@ import (
 )
 
 // TestPositionClassification is the VEC-401 contract test: after migrations,
-// position_classification exists, accepts a seeded deal_type_ref code, and rejects an unknown
-// deal_type_code (FK) and a non-LONG/SHORT direction (CHECK). deal_type_ref is seeded by the
+// position_classification exists, accepts a seeded ref_deal_type code, and rejects an unknown
+// deal_type_code (FK) and a non-LONG/SHORT direction (CHECK). ref_deal_type is seeded by the
 // reference-tables migration earlier in the chain.
 func TestPositionClassification(t *testing.T) {
 	ctx := context.Background()
@@ -21,7 +21,7 @@ func TestPositionClassification(t *testing.T) {
 		t.Fatalf("migrations: %v", err)
 	}
 
-	// Valid: a seeded deal_type_ref code (LOAN) with a valid direction inserts.
+	// Valid: a seeded ref_deal_type code (LOAN) with a valid direction inserts.
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO position_classification (position_id, deal_type_code, direction)
 		 VALUES (sha256('valid'::bytea), 'LOAN', 'LONG')`); err != nil {

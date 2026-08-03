@@ -10,8 +10,8 @@ import (
 )
 
 // TestPositionEntityLink is the VEC-415 contract test: after migrations, position_entity_link
-// accepts several roles per position (seeded counterparty_role_ref codes), and rejects an unknown
-// role (FK) and a duplicate (position_id, entity_role) (PK). counterparty_role_ref is seeded by the
+// accepts several roles per position (seeded ref_counterparty_role codes), and rejects an unknown
+// role (FK) and a duplicate (position_id, entity_role) (PK). ref_counterparty_role is seeded by the
 // reference-tables migration earlier in the chain.
 func TestPositionEntityLink(t *testing.T) {
 	ctx := context.Background()

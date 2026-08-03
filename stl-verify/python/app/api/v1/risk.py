@@ -29,6 +29,7 @@ from app.domain.exceptions import (
     AllocationUnpricedError,
     InvalidOverrideError,
 )
+from app.domain.serialization import PlainDecimal
 from app.ports.receipt_token_lookup import ReceiptTokenLookup
 from app.services.crypto_lending_risk_service import CryptoLendingRiskService
 from app.services.model_registry import ModelRegistry
@@ -48,11 +49,11 @@ class BadDebtResponse(BaseModel):
     """Estimated bad debt for a receipt-token position at a given collateral gap."""
 
     receipt_token_id: int = Field(description="Surrogate id of the receipt token.", examples=[42])
-    gap_pct: Decimal = Field(
+    gap_pct: PlainDecimal = Field(
         description="Collateral price gap as a fraction in `[0, 1]`. Decimal serialized as a JSON string.",
         examples=["0.10"],
     )
-    bad_debt_usd: Decimal = Field(
+    bad_debt_usd: PlainDecimal = Field(
         description="Estimated USD bad debt at the given gap. Decimal serialized as a JSON string.",
         examples=["1234567.89"],
     )
@@ -75,19 +76,19 @@ class RiskBreakdownItemResponse(BaseModel):
         examples=[101],
     )
     symbol: str = Field(description="Backing-token symbol.", examples=["WETH"])
-    amount: Decimal = Field(
+    amount: PlainDecimal = Field(
         description="Backing-token amount, expressed in token units. Decimal serialized as a JSON string.",
         examples=["12.345678"],
     )
-    backing_pct: Decimal = Field(
+    backing_pct: PlainDecimal = Field(
         description="Share of the receipt token backed by this row, as a 0–100 percentage.",
         examples=["42.0"],
     )
-    amount_usd: Decimal = Field(
+    amount_usd: PlainDecimal = Field(
         description="USD value of the backing-token row.",
         examples=["41234.56"],
     )
-    price_usd: Decimal | None = Field(
+    price_usd: PlainDecimal | None = Field(
         default=None,
         description=(
             "Latest USD price for the backing token. Null when the price is unavailable "
@@ -96,7 +97,7 @@ class RiskBreakdownItemResponse(BaseModel):
         ),
         examples=["3340.55"],
     )
-    liquidation_threshold: Decimal | None = Field(
+    liquidation_threshold: PlainDecimal | None = Field(
         default=None,
         description=(
             "Lender's liquidation threshold (LTV ratio) for the backing token, in `[0, 1]`. "
@@ -104,7 +105,7 @@ class RiskBreakdownItemResponse(BaseModel):
         ),
         examples=["0.83"],
     )
-    liquidation_bonus: Decimal | None = Field(
+    liquidation_bonus: PlainDecimal | None = Field(
         default=None,
         description=(
             "Liquidation bonus expressed as a multiplier (e.g. `1.05` for a 5% bonus). "
@@ -406,11 +407,11 @@ class RrcEnvelope(BaseModel):
         examples=["0x1234567890abcdef1234567890abcdef12345678"],
     )
     results: list[RrcResult] = Field(description="One entry per applicable risk model.")
-    max_rrc_usd: Decimal = Field(
+    max_rrc_usd: PlainDecimal = Field(
         description="Largest `rrc_usd` across `results`. Decimal serialized as a JSON string.",
         examples=["12300"],
     )
-    max_crr_pct: Decimal = Field(
+    max_crr_pct: PlainDecimal = Field(
         description="Largest `comparable_crr_pct` across `results`, as a 0–100 percentage.",
         examples=["33.7"],
     )

@@ -302,15 +302,6 @@ func TestERC7540Source_FetchBalances_FailureModes(t *testing.T) {
 		expectedRounds int
 	}{
 		{
-			name: "share call reverted",
-			rounds: func(src *ERC7540Source) []func() ([]outbound.Result, error) {
-				return []func() ([]outbound.Result, error){
-					func() ([]outbound.Result, error) { return []outbound.Result{{Success: false}}, nil },
-				}
-			},
-			expectedRounds: 1,
-		},
-		{
 			name: "transport error in share round",
 			rounds: func(src *ERC7540Source) []func() ([]outbound.Result, error) {
 				return []func() ([]outbound.Result, error){
@@ -432,6 +423,79 @@ func TestERC7540Source_FetchBalances_FailureModes(t *testing.T) {
 				t.Fatalf("multicall rounds = %d, want %d", mc.CallCount, tc.expectedRounds)
 			}
 		})
+	}
+}
+
+// TestERC7540Source_FetchBalances_DirectShareTokenFallback covers the mixed
+// axis-synome 0.2.0 centrifuge migration: an entry whose contract has no share()
+// (a clean revert) is a direct ERC-20 share token (e.g. Spark's JTRSY), not an
+// ERC-7540 vault. The source must fall back to reading balanceOf on the address
+// itself rather than hard-failing — otherwise it poison-stalls that block.
+func TestERC7540Source_FetchBalances_DirectShareTokenFallback(t *testing.T) {
+	directShare := common.HexToAddress("0x8c213ee79581ff4984583c6a801e5263418c4b86") // JTRSY
+	wallet := common.HexToAddress("0xbbbb")
+	expected := big.NewInt(4242)
+
+	mc := testutil.NewMockMulticaller()
+	src := newTestERC7540Source(t, mc)
+
+	mc.ExecuteAtHashFn = func(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+		switch mc.CallCount {
+		case 1: // share() reverts: not a vault
+			return []outbound.Result{{Success: false}}, nil
+		case 2: // balanceOf must target the address itself, not a resolved vault share
+			if calls[0].Target != directShare {
+				t.Fatalf("balanceOf target = %s, want the entry address itself %s", calls[0].Target.Hex(), directShare.Hex())
+			}
+			return []outbound.Result{{Success: true, ReturnData: packBalanceOutput(t, src, expected)}}, nil
+		default:
+			t.Fatalf("unexpected multicall round %d", mc.CallCount)
+			return nil, nil
+		}
+	}
+
+	entries := []*TokenEntry{{
+		ContractAddress: directShare,
+		WalletAddress:   wallet,
+		TokenType:       "centrifuge",
+	}}
+
+	results, err := src.FetchBalances(context.Background(), entries, testBlockHash)
+	if err != nil {
+		t.Fatalf("FetchBalances failed: %v", err)
+	}
+	if got := results.Balances[entries[0].Key()]; got == nil || got.Balance.Cmp(expected) != 0 {
+		t.Fatalf("balance = %v, want %s", got, expected)
+	}
+}
+
+// TestERC7540Source_FetchBalances_DeadAddressFailsAtBalanceOf confirms the
+// direct-share fallback does not mask a genuinely dead address: when share() AND
+// balanceOf both revert, the block still fails hard rather than silently dropping
+// the position.
+func TestERC7540Source_FetchBalances_DeadAddressFailsAtBalanceOf(t *testing.T) {
+	mc := testutil.NewMockMulticaller()
+	src := newTestERC7540Source(t, mc)
+
+	mc.ExecuteAtHashFn = func(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+		return []outbound.Result{{Success: false}}, nil // share() reverts, then balanceOf reverts
+	}
+
+	entries := []*TokenEntry{{
+		ContractAddress: common.HexToAddress("0xdead"),
+		WalletAddress:   common.HexToAddress("0xbbbb"),
+		TokenType:       "centrifuge",
+	}}
+
+	results, err := src.FetchBalances(context.Background(), entries, testBlockHash)
+	if err == nil {
+		t.Fatal("expected hard error for a dead address, got nil")
+	}
+	if results != nil {
+		t.Fatal("expected nil results on failure")
+	}
+	if mc.CallCount != 2 {
+		t.Fatalf("multicall rounds = %d, want 2 (share then balanceOf)", mc.CallCount)
 	}
 }
 

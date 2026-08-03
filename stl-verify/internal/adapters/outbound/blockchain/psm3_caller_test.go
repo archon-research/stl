@@ -111,7 +111,7 @@ func TestPSM3ConfigForChain_Unknown(t *testing.T) {
 
 func synomeContract(entries map[string][]axis_synome_contract.TokenEntry) *axis_synome_contract.Contract {
 	var c axis_synome_contract.Contract
-	c.AxisSynome.Spec.ASC.Entities.AssetsByPrime.ASSETSByPrime = entries
+	c.AxisSynome.Spec.Entities.AssetsByPrime.ASSETSByPrime = entries
 	return &c
 }
 
