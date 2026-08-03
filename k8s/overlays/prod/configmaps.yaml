@@ -479,6 +479,17 @@ data:
   OTEL_ENABLED: "true"
   OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
   OTEL_SERVICE_NAME: "stl-verify-python-api"
+  # DB pool for the API, declared here rather than left baked into the image so it
+  # can be tuned by editing config and restarting — this ConfigMap is consumed via
+  # envFrom with no hash suffix. A prime-scoped risk-capital request opens
+  # connections in proportion to positions x ALM proxies: the ceiling decides when
+  # a replica saturates, and the timeout decides what happens next — a queued
+  # caller fails fast instead of holding a worker for SQLAlchemy's unset 30s and
+  # dragging down endpoints that never touch this pool. VEC-532 bounds the fan-out
+  # itself.
+  DB_POOL_SIZE: "10"
+  DB_MAX_OVERFLOW: "20"
+  DB_POOL_TIMEOUT: "10"
 ---
 apiVersion: v1
 kind: ConfigMap
