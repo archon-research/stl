@@ -1,5 +1,4 @@
 from datetime import datetime
-from decimal import Decimal
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
@@ -16,6 +15,7 @@ from app.api.time_series import (
     get_time_series_query_params,
 )
 from app.domain.entities.allocation import EthAddress
+from app.domain.serialization import PlainDecimal
 from app.domain.time_series import TimeSeriesQuery
 from app.services.allocation_service import AllocationService
 
@@ -26,7 +26,7 @@ class TotalCapitalBucketResponse(BaseModel):
     """Last observed treasury balance within a single time bucket (LOCF gap-filled)."""
 
     bucket_start: datetime = Field(description="Inclusive start of the time bucket (UTC).")
-    total_capital_usd: Decimal | None = Field(
+    total_capital_usd: PlainDecimal | None = Field(
         default=None,
         description=(
             "Last observed SubProxy treasury USDS balance carried forward into the bucket "

@@ -14,7 +14,7 @@ If styles look stale, re-run `npm run prepare`.
 There is one primary screen (the allocation dashboard, `src/App.tsx`), composed of:
 - Prime sidebar (`PrimeSidebar`): prime selection, including the selected and active state.
 - Top bar (`TopBar`): network and protocol filters plus allocation search; state is URL-synced (see `src/lib/url-params.ts`).
-- Summary metric rail (`SummaryMetric`): the 4-up metrics above the grid.
+- Summary metric row (`SummaryMetric`): the 4-up metric tiles above the grid.
 - Allocation grid (`AllocationGrid`): the dense data table, including the selected-row state.
 - Bottom panel (`BottomPanel`): segmented tabs for Risk breakdown, Required risk capital, and Activity.
 - Risk detail drawer (`RiskDetailDrawer`): overlay drill-down for a selected allocation.
@@ -26,7 +26,7 @@ For any UI change, confirm:
 1. Token integrity: colors, surfaces, borders, and text resolve via semantic tokens in both themes (no hardcoded values).
 2. Selected and active states: sidebar selection, table selected row (inset outline), and segmented active tab render correctly.
 3. Typography rhythm: table header casing and body density match `DESIGN.md`.
-4. Mono addresses: token and prime addresses render in mono and truncate cleanly (`Address`, `TokenAddress`).
+4. Mono addresses: token and prime addresses render in mono, in `text.link`, and truncate cleanly (`TokenAddress`, and the address line in `PrimeSidebar`).
 5. Logos and fallbacks: `ProtocolLogo`, `ChainLogo`, `TokenLogo`, and `LogoAvatar` show correct fallbacks when an image is missing.
 6. Overlays: drawer and tooltip use tokenized overlay colors and handle focus correctly.
 7. Empty, loading, and error: each data region degrades gracefully.
@@ -47,6 +47,6 @@ Add a dedicated preview route or fixture state when:
 If automated visual regression becomes worthwhile, adopt the uikit preview and Ladle setup rather than reinventing it.
 
 ## Last refreshed from
-- `src/App.tsx`, `src/components/` (`allocations/`, `shared/`), `src/data-table/`
-- `package.json` scripts, `panda.config.ts`, `DESIGN.md`
-- recent UI history (segmented control, table header typography, mono addresses, logo fallbacks)
+- `ui/src/App.tsx`, `ui/src/components/` (`allocations/`, `shared/`), `ui/src/data-table/`
+- `ui/package.json` scripts, `ui/panda.config.ts`, and `DESIGN.md` — all three rewritten for design-system `0.8.0`, so re-read them rather than trusting this list.
+- `npx panda cssgen` output, for the resolved token values the checkpoints above refer to.

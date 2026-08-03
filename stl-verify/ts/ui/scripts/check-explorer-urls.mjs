@@ -20,6 +20,9 @@ const vite = await createServer({
   appType: 'custom',
   logLevel: 'error',
   server: { middlewareMode: true },
+  // Same reason as check-prime-grouping.mjs: the dependency scan contributes
+  // nothing to a single ssrLoadModule and segfaults intermittently.
+  optimizeDeps: { noDiscovery: true },
 });
 
 try {

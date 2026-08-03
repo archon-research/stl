@@ -18,7 +18,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -50,7 +50,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -66,6 +66,15 @@ jobs:
 
       - name: Panda codegen
         run: npm run prepare -w ui
+
+      - name: Design-system doctor
+        run: npm run doctor
+
+      # After codegen, not before: the script loads src/lib/dashboard.ts through
+      # vite, so the day its import graph reaches #styled-system/* it would fail
+      # as though its assertions had.
+      - name: Run explorer URL regression test
+        run: npm run test:explorers -w ui
 
       - name: Typecheck workspace
         run: npm run type:check

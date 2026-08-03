@@ -4,16 +4,28 @@
 # Standalone prod deploy, split out of deploy.yaml so a pending prod approval no
 # longer holds the CI/staging run open. update-prod (in deploy.yaml) commits the
 # prod-kustomization image-tag bump to main using the DEPLOY GitHub App token;
-# App-token pushes DO trigger workflows, and ci.yml path-ignores this file, so
+# App-token pushes DO trigger workflows, and ci.yml path-ignores that file, so
 # this workflow fires exactly once per prod-tag change with no double-run. The
-# push commit IS the prod bump, so github.sha is the deploy revision throughout.
+# push commit IS the deploy revision, so github.sha is used throughout.
+#
+# Two kinds of commit reach prod through here, and they carry different
+# warrants — see validate-revision below.
 name: Deploy Prod
 
 on:
   push:
     branches: [main]
     paths:
-      - k8s/overlays/prod/kustomization.yaml
+      # Everything ArgoCD renders into stl-prod, not just the kustomization.
+      # Until now a change to configmaps.yaml, external-secrets.yaml or a base
+      # manifest triggered no deploy at all: it reached prod only when the next
+      # image-tag bump happened to sweep it in, with no approval naming it
+      # (#596 retuned prod avalanche-watcher throughput and produced no run).
+      - k8s/overlays/prod/**
+      # bootstrap/ is a manual-apply overlay the parent kustomization does not
+      # reference, so ArgoCD never renders it — see its own header.
+      - '!k8s/overlays/prod/bootstrap/**'
+      - k8s/base/**
 
 # Shared across all prod-deploy runs: a newer run cancels an older one that is
 # still waiting for approval, so only the latest revision is pending at a time.
@@ -61,9 +73,118 @@ jobs:
             gh api --method POST "repos/$REPO/actions/runs/${id}/cancel" || true
           done
 
+  # Which trust path did this revision arrive by?
+  #
+  # The `main` ruleset requires a pull request, a CODEOWNERS review, the
+  # required status checks, the merge queue and a signature — for everyone. It
+  # has exactly ONE bypass actor: the deploy GitHub App. So:
+  #
+  #   merged PR into main  -> the commit provably cleared human review
+  #   no merged PR         -> the commit provably came through the App's
+  #                           unreviewed direct-to-main write
+  #
+  # The image-tags-only contract is the compensating control for that second,
+  # unreviewed path — the same four guards run in deploy.yaml's update-prod at
+  # the moment the bot creates the commit. Applying it to reviewed commits
+  # demanded that a CODEOWNERS-approved manifest change look like an unreviewed
+  # tag bump, which is what blocked the #623 revert.
+  #
+  # The control here is the ruleset, not an author string. Someone holding the
+  # App token can push whatever they like, but it lands with no PR and so falls
+  # in the strict branch; reaching the relaxed branch means actually getting a
+  # PR through CODEOWNERS review.
+  #
+  # Runs BEFORE notify-prod-pending so a revision that cannot deploy never
+  # requests an approval. deploy-prod re-derives all of this inside the
+  # privileged job — this copy is fail-fast UX, not a security control.
+  validate-revision:
+    name: Validate deploy revision
+    needs: supersede-predecessors
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      reviewed: ${{ steps.classify.outputs.reviewed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          # Full history: the tag-bump contract diffs against the parent commit.
+          fetch-depth: 0
+          persist-credentials: false
+
+      # KEEP IN SYNC with "Re-validate deploy revision (fail closed)" in
+      # deploy-prod. That copy is authoritative; this one only fails faster.
+      - name: Classify and validate
+        id: classify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          DEPLOY_SHA: ${{ github.sha }}
+          KUSTOMIZATION: k8s/overlays/prod/kustomization.yaml
+          PROD_ECR_PREFIX: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-
+        run: |
+          set -euo pipefail
+
+          REVIEWED=$(gh api "repos/${REPO}/commits/${DEPLOY_SHA}/pulls" \
+            --jq '[.[] | select(.merged_at != null and .base.ref == "main")] | length')
+
+          if [ "$REVIEWED" -gt 0 ]; then
+            echo "reviewed=true" >> "$GITHUB_OUTPUT"
+            echo "${DEPLOY_SHA} arrived via a merged PR: CODEOWNERS-reviewed, tag-only contract not applicable."
+          else
+            echo "reviewed=false" >> "$GITHUB_OUTPUT"
+            echo "${DEPLOY_SHA} has no merged PR: unreviewed App write, enforcing the image-tags-only contract."
+
+            PARENT=$(git rev-parse "${DEPLOY_SHA}^")
+
+            CHANGED_FILES=$(git diff --name-only "${PARENT}" "${DEPLOY_SHA}")
+            if [ "$CHANGED_FILES" != "$KUSTOMIZATION" ]; then
+              echo "::error::Unreviewed revision ${DEPLOY_SHA} changes files beyond ${KUSTOMIZATION}:"
+              echo "$CHANGED_FILES"
+              exit 1
+            fi
+
+            OFFENDING=$(git diff -U0 "${PARENT}" "${DEPLOY_SHA}" -- "$KUSTOMIZATION" \
+              | grep -E '^[+-]' \
+              | grep -Ev '^(\+\+\+|---)' \
+              | grep -Ev '^[+-][[:space:]]*newTag:' \
+              || true)
+            if [ -n "$OFFENDING" ]; then
+              echo "::error::Unreviewed revision ${DEPLOY_SHA} changes non-newTag lines:"
+              echo "$OFFENDING"
+              exit 1
+            fi
+          fi
+
+          # Both paths: every image must resolve to the prod ECR account with a
+          # well-formed tag. Anchored (not substring) so a name that merely
+          # embeds the prefix elsewhere cannot pass.
+          BAD_IMAGES=$(awk -v p="$PROD_ECR_PREFIX" '
+            /^[[:space:]]*newName:/ {
+              v=$0; sub(/^[[:space:]]*newName:[[:space:]]*/,"",v); gsub(/^"|"$/,"",v)
+              if (index(v,p)!=1) print
+            }' "$KUSTOMIZATION")
+          if [ -n "$BAD_IMAGES" ]; then
+            echo "::error::Prod kustomization references images outside the prod ECR account:"
+            echo "$BAD_IMAGES"
+            exit 1
+          fi
+
+          BAD_TAGS=$(grep -E '^[[:space:]]*newTag:' "$KUSTOMIZATION" \
+            | grep -Ev '^[[:space:]]*newTag:[[:space:]]*"([a-z0-9]+-)*[a-f0-9]{40}"[[:space:]]*$' \
+            || true)
+          if [ -n "$BAD_TAGS" ]; then
+            echo "::error::Prod kustomization has malformed image tags:"
+            echo "$BAD_TAGS"
+            exit 1
+          fi
+
   notify-prod-pending:
     name: Notify Prod Deploy Awaiting Approval
-    needs: supersede-predecessors
+    needs: [supersede-predecessors, validate-revision]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -76,7 +197,7 @@ jobs:
       APP: stl-prod
     steps:
       - name: Configure AWS credentials (ArgoCD read-only)
-        uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6.2.2
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
         with:
           role-to-assume: arn:aws:iam::030797368798:role/archonprod-github-actions-argocd-wait
           aws-region: eu-west-1
@@ -198,7 +319,7 @@ jobs:
           app-id: ${{ secrets.DEPLOY_APP_ID }}
           private-key: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
@@ -262,10 +383,10 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Checkout shared actions
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: archon-research/github-actions
-          ref: a1a0e8478192d5014201b00d6db2533ae6d71301 # slack-notify (github-actions #28)
+          ref: 01f058b0afe92a8485728e412c13a4e767fb4595 # github-actions #32 (slack-notify blob identical to #28)
           ssh-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
           path: .github-actions
           persist-credentials: false
@@ -292,8 +413,11 @@ jobs:
       id-token: write
       # get-environment-review reads GET /actions/runs/{run_id}/approvals.
       actions: read
+      # Re-validation reads GET /commits/{sha}/pulls to classify the revision.
+      pull-requests: read
     outputs:
       started: ${{ steps.mark-approved.outputs.started }}
+      notified: ${{ steps.notified.outputs.sent }}
     env:
       APP: stl-prod
       PROD_ECR_PREFIX: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-
@@ -306,7 +430,7 @@ jobs:
         id: mark-approved
         run: echo "started=true" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           # Full history: re-validation diffs against the parent commit and the
@@ -314,30 +438,55 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Re-validate image-tags-only + ECR provenance (fail closed)
+      # MUST stay above the first step that can fail. `Notify Slack — deploy
+      # failed` is a local action from this checkout, so anything that fails
+      # before it lands (the re-validation guard, the freshness check, the
+      # approval-review fetch) leaves the notifier unresolvable and the failure
+      # silent in Slack. notify-prod-failure does not cover this gated job.
+      - name: Checkout shared actions
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: archon-research/github-actions
+          ref: 01f058b0afe92a8485728e412c13a4e767fb4595 # argocd-sync (github-actions #32, server-scheme fix)
+          ssh-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
+          path: .github-actions
+          persist-credentials: false
+
+      - name: Re-validate deploy revision (fail closed)
         env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
           KUSTOMIZATION: k8s/overlays/prod/kustomization.yaml
         run: |
           set -euo pipefail
 
-          # The exact revision being synced must itself be a pure tag bump to our
-          # ECR — re-checked here inside the privileged job, independent of CI.
-          PARENT=$(git rev-parse "${DEPLOY_SHA}^")
+          # Authoritative copy of validate-revision, re-derived here inside the
+          # privileged job so the pre-gate job's verdict is never trusted.
+          # KEEP IN SYNC with "Classify and validate" above.
+          REVIEWED=$(gh api "repos/${REPO}/commits/${DEPLOY_SHA}/pulls" \
+            --jq '[.[] | select(.merged_at != null and .base.ref == "main")] | length')
 
-          CHANGED_FILES=$(git diff --name-only "${PARENT}" "${DEPLOY_SHA}")
-          if [ "$CHANGED_FILES" != "$KUSTOMIZATION" ]; then
-            echo "::error::Deploy revision ${DEPLOY_SHA} changes unexpected files:"
-            echo "$CHANGED_FILES"
-            exit 1
-          fi
+          if [ "$REVIEWED" -gt 0 ]; then
+            echo "${DEPLOY_SHA} cleared CODEOWNERS review via a merged PR; skipping the tag-only contract."
+          else
+            # Unreviewed App write: it may only ever be an image-tag bump.
+            PARENT=$(git rev-parse "${DEPLOY_SHA}^")
 
-          OFFENDING=$(git diff -U0 "${PARENT}" "${DEPLOY_SHA}" -- "$KUSTOMIZATION" \
-            | grep -E '^[+-]' | grep -Ev '^(\+\+\+|---)' \
-            | grep -Ev '^[+-][[:space:]]*newTag:' || true)
-          if [ -n "$OFFENDING" ]; then
-            echo "::error::Deploy revision changes non-newTag lines:"
-            echo "$OFFENDING"
-            exit 1
+            CHANGED_FILES=$(git diff --name-only "${PARENT}" "${DEPLOY_SHA}")
+            if [ "$CHANGED_FILES" != "$KUSTOMIZATION" ]; then
+              echo "::error::Unreviewed revision ${DEPLOY_SHA} changes files beyond ${KUSTOMIZATION}:"
+              echo "$CHANGED_FILES"
+              exit 1
+            fi
+
+            OFFENDING=$(git diff -U0 "${PARENT}" "${DEPLOY_SHA}" -- "$KUSTOMIZATION" \
+              | grep -E '^[+-]' | grep -Ev '^(\+\+\+|---)' \
+              | grep -Ev '^[+-][[:space:]]*newTag:' || true)
+            if [ -n "$OFFENDING" ]; then
+              echo "::error::Unreviewed revision ${DEPLOY_SHA} changes non-newTag lines:"
+              echo "$OFFENDING"
+              exit 1
+            fi
           fi
 
           # Anchored: image name must START WITH the prod ECR prefix, not merely
@@ -362,24 +511,40 @@ jobs:
             echo "$BAD_TAGS"
             exit 1
           fi
-          echo "Re-validation passed: ${DEPLOY_SHA} is a prod-ECR tag-only bump."
+          echo "Re-validation passed for ${DEPLOY_SHA} (reviewed=${REVIEWED})."
 
-      # Freshness: only the latest prod-bump on main may roll out. If a newer
-      # deploy(prod) commit landed while this run waited for approval, this
-      # approval is stale — skip the sync; the newer run's approval rolls
-      # everything out (the changes batch). Concurrency-independent safety.
-      - name: Check this is still the latest prod deploy
+      # Freshness. stl-prod tracks `targetRevision: HEAD`, so the question is
+      # not "is this the newest tag bump?" but "does this revision still render
+      # the same prod output as main HEAD?". Syncing a revision that differs
+      # pins prod to stale manifests AND leaves the app permanently OutOfSync
+      # against HEAD, so the post-sync wait can never observe Synced and burns
+      # its timeout. Both happened in run 30096520501: an approved tag bump
+      # re-applied a replicas override the newer revert had already removed
+      # (scaling avalanche-allocation-tracker back to 0), then failed the wait.
+      #
+      # Comparing against the newest `deploy(prod)` commit — the previous
+      # behaviour — missed this, because that bump WAS the newest of its kind;
+      # main had simply moved two non-bump commits past it. Comparing the
+      # rendered paths instead lets unrelated merges (docs, CI) through while
+      # catching anything ArgoCD would actually see. bootstrap/ is excluded: a
+      # manual-apply overlay the parent kustomization does not reference.
+      - name: Check this revision still matches main HEAD
         id: fresh
         run: |
           set -euo pipefail
           git fetch -q origin main
-          LATEST=$(git log origin/main --grep '^deploy(prod): update image tags' --format='%H' -1 || true)
-          if [ -n "$LATEST" ] && [ "$LATEST" != "$DEPLOY_SHA" ] \
-            && git merge-base --is-ancestor "$DEPLOY_SHA" "$LATEST"; then
-            echo "::warning::Superseded by newer prod deploy ${LATEST}; skipping sync (batches into it)."
-            echo "superseded=true" >> "$GITHUB_OUTPUT"
-          else
+          HEAD_SHA=$(git rev-parse origin/main)
+
+          if [ "$HEAD_SHA" = "$DEPLOY_SHA" ]; then
             echo "superseded=false" >> "$GITHUB_OUTPUT"
+          elif git diff --quiet "$DEPLOY_SHA" "$HEAD_SHA" -- \
+                 k8s/overlays/prod k8s/base ':(exclude)k8s/overlays/prod/bootstrap'; then
+            # main moved on, but nothing ArgoCD renders changed, so syncing this
+            # revision still converges on HEAD.
+            echo "superseded=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::main (${HEAD_SHA}) carries prod-affecting changes beyond ${DEPLOY_SHA}; skipping sync so prod is not pinned to a stale revision. The newer commit's own run rolls everything out."
+            echo "superseded=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Fetch approval review
@@ -388,15 +553,6 @@ jobs:
         with:
           environment: production
           state: approved
-
-      - name: Checkout shared actions
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          repository: archon-research/github-actions
-          ref: 01f058b0afe92a8485728e412c13a4e767fb4595 # argocd-sync (github-actions #32, server-scheme fix)
-          ssh-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
-          path: .github-actions
-          persist-credentials: false
 
       - name: React to Slack message — superseded
         if: ${{ steps.fresh.outputs.superseded == 'true' }}
@@ -447,6 +603,7 @@ jobs:
           thread-ts: ${{ needs.notify-prod-pending.outputs.ts }}
 
       - name: Notify Slack — deploy failed
+        id: notify-failed
         if: ${{ failure() && steps.mark-approved.outputs.started == 'true' }}
         uses: ./.github-actions/slack-notify
         with:
@@ -456,6 +613,23 @@ jobs:
           slack-token-secret-id: archon-prod-slack-bot-token
           aws-role-arn: arn:aws:iam::030797368798:role/archonprod-github-actions-slack-notify
           thread-ts: ${{ needs.notify-prod-pending.outputs.ts }}
+
+      # The threaded notice above is itself a local action from the shared
+      # checkout, so it cannot report a failure of that checkout. Record whether
+      # it actually sent, and let notify-prod-deploy-failed (webhook, no
+      # checkout required) cover the case where it did not.
+      - name: Record whether the failure notice was sent
+        id: notified
+        if: always()
+        env:
+          OUTCOME: ${{ steps.notify-failed.outcome }}
+        run: |
+          set -euo pipefail
+          if [ "$OUTCOME" = "success" ]; then
+            echo "sent=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "sent=false" >> "$GITHUB_OUTPUT"
+          fi
 
   notify-prod-rejected:
     name: Notify Prod Deploy Rejected
@@ -472,7 +646,7 @@ jobs:
       actions: read
       id-token: write
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -484,15 +658,19 @@ jobs:
           state: rejected
 
       - name: Checkout shared actions
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: archon-research/github-actions
-          ref: a1a0e8478192d5014201b00d6db2533ae6d71301 # slack-notify (github-actions #28)
+          ref: 01f058b0afe92a8485728e412c13a4e767fb4595 # github-actions #32 (slack-notify blob identical to #28)
           ssh-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
           path: .github-actions
           persist-credentials: false
 
+      # always(): a rejected prod deploy must always be visible. If the review
+      # fetch above failed, post with an empty reviewer rather than silently
+      # skipping the notice — this job has no other failure path.
       - name: React to Slack message — rejected
+        if: always()
         uses: ./.github-actions/slack-notify
         with:
           status: rejected
@@ -523,10 +701,10 @@ jobs:
       id-token: write
     steps:
       - name: Checkout shared actions
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: archon-research/github-actions
-          ref: a1a0e8478192d5014201b00d6db2533ae6d71301 # slack-notify (github-actions #28)
+          ref: 01f058b0afe92a8485728e412c13a4e767fb4595 # github-actions #32 (slack-notify blob identical to #28)
           ssh-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
           path: .github-actions
           persist-credentials: false
@@ -542,19 +720,48 @@ jobs:
           message-ts: ${{ needs.notify-prod-pending.outputs.ts }}
           reaction: recycle
 
-  # Covers the pre-gate prod pipeline in this workflow (supersede + pending). The
-  # gated deploy-prod job posts its own threaded success/failure, and
-  # notify-prod-rejected handles a rejected review — so those are excluded here.
+  # Fallback for the one failure the threaded notice cannot report: a failure of
+  # the shared-actions checkout the notice itself depends on. `started` excludes
+  # rejections (notify-prod-rejected owns those); `notified != 'true'` means the
+  # threaded notice did not send.
+  #
+  # Partial by construction: slack-notify.yaml performs the same checkout with
+  # the same deploy key, so this covers a transient checkout failure, not a
+  # rotated key. It closes the realistic gap, not every gap.
+  notify-prod-deploy-failed:
+    name: Notify Prod Deploy Failure (fallback)
+    if: >-
+      always() &&
+      needs.deploy-prod.result == 'failure' &&
+      needs.deploy-prod.outputs.started == 'true' &&
+      needs.deploy-prod.outputs.notified != 'true'
+    needs: deploy-prod
+    uses: ./.github/workflows/slack-notify.yaml
+    with:
+      status: failure
+      context: Prod Deploy
+      failed-jobs: |
+        Deploy Prod (ArgoCD sync)=${{ needs.deploy-prod.result }}
+    secrets:
+      slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_PROD }}
+      gh-actions-deploy-key: ${{ secrets.GH_ACTIONS_DEPLOY_KEY }}
+
+  # Covers the pre-gate prod pipeline in this workflow (supersede + validate +
+  # pending). The gated deploy-prod job posts its own threaded success/failure,
+  # and notify-prod-rejected handles a rejected review — both excluded here.
+  # This is the only notice a revision rejected by validate-revision gets, since
+  # it never reaches the approval thread.
   notify-prod-failure:
     name: Notify Prod Deploy Failure
-    if: ${{ always() && (needs.supersede-predecessors.result == 'failure' || needs.notify-prod-pending.result == 'failure') }}
-    needs: [supersede-predecessors, notify-prod-pending]
+    if: ${{ always() && (needs.supersede-predecessors.result == 'failure' || needs.validate-revision.result == 'failure' || needs.notify-prod-pending.result == 'failure') }}
+    needs: [supersede-predecessors, validate-revision, notify-prod-pending]
     uses: ./.github/workflows/slack-notify.yaml
     with:
       status: failure
       context: Prod Deploy
       failed-jobs: |
         Supersede older pending prod runs=${{ needs.supersede-predecessors.result }}
+        Validate deploy revision=${{ needs.validate-revision.result }}
         Notify Prod Deploy Awaiting Approval=${{ needs.notify-prod-pending.result }}
     secrets:
       slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL_PROD }}
