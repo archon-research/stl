@@ -829,6 +829,9 @@ function App() {
 
     const primeDebtValue = wadToUnits(primeDebtSnapshot?.debt_wad);
 
+    // One ordinal series token per card, and deliberately no `var(..., fallback)`:
+    // a fallback lets a wrong or missing token render as a plausible colour, which
+    // is how two of these cards came to name the same token unnoticed.
     const charts: MetricChartSpec[] = [
       {
         // Balance reconstructed from signed USD net flows, anchored at the
@@ -837,7 +840,7 @@ function App() {
         key: 'allocation-activity-volume',
         data: allocationBalanceSeries,
         kind: 'series',
-        stroke: 'var(--colors-chart-series-primary, #60a5fa)',
+        stroke: 'var(--colors-chart-series-primary)',
         formatValue: formatCompactUsd,
       },
       {
@@ -852,19 +855,19 @@ function App() {
           isMultiChainPrime ? [] : exposureSeries,
           exposureValue,
         ),
-        stroke: 'var(--colors-chart-series-secondary, #14b8a6)',
+        stroke: 'var(--colors-chart-series-secondary)',
         formatValue: formatCompactUsd,
       },
       {
         key: 'total-capital',
         ...seriesOrFallback(totalCapitalSeries, totalRiskCapitalValue),
-        stroke: 'var(--colors-chart-series-primary, #f59e0b)',
+        stroke: 'var(--colors-chart-series-quaternary)',
         formatValue: formatCompactUsd,
       },
       {
         key: 'prime-debt-exposure',
         ...seriesOrFallback(primeDebtSeries, primeDebtValue),
-        stroke: '#f97316',
+        stroke: 'var(--colors-chart-series-quinary)',
         formatValue: (value: number) => `${formatCompactNumber(value)} DAI`,
       },
     ];
@@ -968,37 +971,11 @@ function App() {
           {
             opacity: 0,
           },
-        '@media screen and (max-width: 48rem)': {
-          '& [data-sidebar-layout] > div': {
-            display: 'block !important',
-            height: 'auto !important',
-            overflow: 'visible !important',
-          },
-          '& [data-sidebar-layout] aside': {
-            width: '100% !important',
-            height: 'auto !important',
-            maxHeight: '22rem',
-            borderRight: 'none !important',
-            borderBottom: '1px solid var(--colors-border-subtle)',
-          },
-          '& [data-sidebar-layout] main': {
-            width: '100% !important',
-            height: 'auto !important',
-            minHeight: '0 !important',
-          },
-          '& [data-sidebar-layout] main > header': {
-            minHeight: '0 !important',
-            justifyContent: 'stretch !important',
-          },
-          '& [data-sidebar-layout] [data-scope="resize-handle"][data-part="root"]':
-            {
-              display: 'none !important',
-            },
-        },
       })}
     >
       <div data-sidebar-layout>
         <SidebarLayout
+          collapseBelow={768}
           sidebar={
             <PrimeSidebar
               primeGroups={primeGroups}

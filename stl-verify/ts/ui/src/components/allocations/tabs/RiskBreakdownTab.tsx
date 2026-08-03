@@ -3,6 +3,7 @@ import {
   type CellContext,
   type ColumnDef,
   DataTable,
+  ErrorState,
   LoadingIndicator,
   matchesSearchQuery,
   SkeletonStack,
@@ -32,9 +33,14 @@ import type {
   Token,
   TokenPrice,
 } from '../../../types/allocation';
-import { ChainLogo, SummaryMetric, TokenAddress } from '../../shared';
+import {
+  ChainLogo,
+  SummaryMetric,
+  TokenAddress,
+  TruncatedLabel,
+} from '../../shared';
 import { MethodologyPanel } from '../../shared/MethodologyPanel';
-import { TabErrorPanel, TabSelectionPrompt } from './TabStatePanels';
+import { TabNotePanel } from './TabStatePanels';
 
 type RiskBreakdownTabProps = {
   isEnabled: boolean;
@@ -85,6 +91,27 @@ function RiskSymbolCell({
   );
 }
 
+// A long header otherwise sets the column's min-content width, so "Liquidation
+// Threshold" reserved far more room than the percentages beneath it and pushed
+// the last column out of view. Capping the label and letting it ellipsize lets
+// the column size to its data instead; the full text stays in the DOM for
+// assistive tech and comes back on hover through `TruncatedLabel`.
+const truncatedHeaderClassName = css({
+  display: 'block',
+  maxWidth: '7rem',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
+});
+
+// Use this for any header long enough to outgrow the cap above; a short one
+// would render identically, so it is only applied where it changes something.
+function truncatingHeader(label: string) {
+  return () => (
+    <TruncatedLabel label={label} className={truncatedHeaderClassName} />
+  );
+}
+
 function createRiskColumns(chainId: number): ColumnDef<RiskItem>[] {
   return [
     {
@@ -132,7 +159,7 @@ function createRiskColumns(chainId: number): ColumnDef<RiskItem>[] {
     },
     {
       id: 'lt',
-      header: 'Liquidation Threshold',
+      header: truncatingHeader('Liquidation Threshold'),
       accessorKey: 'liquidation_threshold',
       cell: (info: CellContext<RiskItem, unknown>) =>
         formatRatioPercent(
@@ -141,7 +168,7 @@ function createRiskColumns(chainId: number): ColumnDef<RiskItem>[] {
     },
     {
       id: 'bonus',
-      header: 'Liquidation Bonus',
+      header: truncatingHeader('Liquidation Bonus'),
       accessorKey: 'liquidation_bonus',
       cell: (info: CellContext<RiskItem, unknown>) =>
         formatMultiplier(info.getValue() as string | number | null | undefined),
@@ -195,7 +222,11 @@ function RiskTable({
         isLoading={isLoading}
         getRowKey={(item) => String(item.token_id ?? item.symbol)}
         skeletonConfig={{ rows: 5, columns: 6, firstColumnTall: false }}
-        minWidth="76rem"
+        // Sized to what the six columns actually need once the long liquidation
+        // headers ellipsize. The old 76rem exceeded the drawer this table lives
+        // in, so the last column was always clipped no matter how wide the
+        // drawer was dragged.
+        minWidth="56rem"
         renderCell={(children) => (
           <div
             className={css({
@@ -430,32 +461,19 @@ export function RiskBreakdownTab({
 
   if (!selectedReceiptToken) {
     return (
-      <TabSelectionPrompt message="Pick a receipt token to inspect its collateral backing." />
+      <TabNotePanel message="Pick a receipt token to inspect its collateral backing." />
     );
   }
 
   if (receiptTokenId === null) {
     return (
-      <div
-        className={css({
-          borderRadius: 'md',
-          borderStyle: 'solid',
-          borderWidth: '1px',
-          borderColor: 'border.subtle',
-          bg: 'surface.subtle',
-          p: '4',
-        })}
-      >
-        <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>
-          Direct asset holdings have no collateral backing to break down.
-        </p>
-      </div>
+      <TabNotePanel message="Direct asset holdings have no collateral backing to break down." />
     );
   }
 
   if (isChainMismatch) {
     return (
-      <TabSelectionPrompt message="Risk breakdown is not yet available for non-mainnet allocations." />
+      <TabNotePanel message="Risk breakdown is not yet available for non-mainnet allocations." />
     );
   }
 
@@ -464,9 +482,11 @@ export function RiskBreakdownTab({
       {isLoading ? <LoadingIndicator message="Loading risk breakdown" /> : null}
 
       {errorMessage ? (
-        <TabErrorPanel
+        <ErrorState
           title="Unable to load the risk breakdown."
-          message={errorMessage}
+          description={errorMessage}
+          tone="critical"
+          size="inline"
         />
       ) : null}
 
@@ -587,21 +607,7 @@ export function RiskBreakdownTab({
       !isLoading &&
       breakdown &&
       breakdown.items.length === 0 ? (
-        <div
-          className={css({
-            borderRadius: 'md',
-            borderStyle: 'solid',
-            borderWidth: '1px',
-            borderColor: 'border.subtle',
-            bg: 'surface.subtle',
-            p: '4',
-          })}
-        >
-          <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>
-            This receipt token returned no collateral items for the risk
-            breakdown response.
-          </p>
-        </div>
+        <TabNotePanel message="This receipt token returned no collateral items for the risk breakdown response." />
       ) : null}
 
       {!errorMessage && (isLoading || breakdown) ? (
@@ -615,27 +621,14 @@ export function RiskBreakdownTab({
 
       {!errorMessage &&
       selectedReceiptToken.protocol_name?.toLowerCase() === 'maple' ? (
-        <div
-          className={css({
-            borderRadius: 'md',
-            borderStyle: 'solid',
-            borderWidth: '1px',
-            borderColor: 'border.subtle',
-            bg: 'surface.subtle',
-            p: '4',
-          })}
-        >
-          <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>
-            Source: Maple Finance GraphQL API. Collateral amounts and USD values
-            are attested by Maple/custodians and are not independently verified
-            on-chain. Internal (AMM/strategy) loans are excluded; the breakdown
-            reflects external-loan collateral plus available pool liquidity, so
-            it is less than total supply.
-            {selectedPrime
+        <TabNotePanel
+          message={
+            'Source: Maple Finance GraphQL API. Collateral amounts and USD values are attested by Maple/custodians and are not independently verified on-chain. Internal (AMM/strategy) loans are excluded; the breakdown reflects external-loan collateral plus available pool liquidity, so it is less than total supply.' +
+            (selectedPrime
               ? ' Per-prime USD values are a pro-rata approximation (each pool asset scaled by the prime’s pool share) and will not match data.spark.fi, which uses a different (coverage-capped) attribution model. Backing % is a pool property and is identical for every prime.'
-              : ''}
-          </p>
-        </div>
+              : '')
+          }
+        />
       ) : null}
 
       {/* Data Sources & Methodology Footer */}

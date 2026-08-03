@@ -9,7 +9,7 @@ export type FilterOption = {
   count: number;
 };
 
-type UsdTone = 'green' | 'yellow' | 'red' | 'neutral';
+export type UsdTone = 'green' | 'yellow' | 'red' | 'neutral';
 
 export type ChainLabelLookup = ReadonlyMap<number, string>;
 

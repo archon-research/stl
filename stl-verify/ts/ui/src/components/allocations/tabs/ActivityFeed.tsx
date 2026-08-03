@@ -7,10 +7,10 @@ import {
 } from '@archon-research/design-system';
 import { type ChangeEvent, useEffect, useMemo, useRef, useState } from 'react';
 
-import { css } from '#styled-system/css';
+import { css, cx } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
-import { getActionColor, getActionIcon } from '../../../lib/activity';
+import { getActionColorClass, getActionIcon } from '../../../lib/activity';
 import {
   getAllocationActivity,
   getProtocolEvents,
@@ -183,7 +183,7 @@ function ProtocolEventCard({ event }: { event: ProtocolEvent }) {
         <span
           className={css({
             fontSize: 'xs',
-            color: 'text.subtle',
+            color: 'text.muted',
           })}
         >
           •
@@ -199,7 +199,7 @@ function ProtocolEventCard({ event }: { event: ProtocolEvent }) {
         <span
           className={css({
             fontSize: 'xs',
-            color: 'text.subtle',
+            color: 'text.muted',
           })}
         >
           log #{event.log_index}
@@ -207,7 +207,7 @@ function ProtocolEventCard({ event }: { event: ProtocolEvent }) {
         <span
           className={css({
             fontSize: 'xs',
-            color: 'text.subtle',
+            color: 'text.muted',
           })}
         >
           block {event.block_number} v{event.block_version}
@@ -232,7 +232,7 @@ function ProtocolEventCard({ event }: { event: ProtocolEvent }) {
         <span
           className={css({
             fontSize: 'xs',
-            color: 'text.subtle',
+            color: 'text.muted',
           })}
         >
           •
@@ -273,7 +273,7 @@ function ActivityEventRow({
   onSelectTx: (event: AllocationActivity) => void;
   chainLabels?: ChainLabelLookup;
 }) {
-  const actionColor = getActionColor(event.action_type);
+  const actionColorClassName = getActionColorClass(event.action_type);
   const actionIcon = getActionIcon(event.action_type);
   const txHash = getRealTxHash(event);
 
@@ -291,17 +291,19 @@ function ActivityEventRow({
       })}
     >
       <div
-        className={css({
-          width: '8',
-          height: '8',
-          borderRadius: 'full',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          bg: 'surface.subtle',
-          color: actionColor,
-          flexShrink: 0,
-        })}
+        className={cx(
+          css({
+            width: '8',
+            height: '8',
+            borderRadius: 'full',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            bg: 'surface.subtle',
+            flexShrink: 0,
+          }),
+          actionColorClassName,
+        )}
       >
         {actionIcon}
       </div>
@@ -318,12 +320,14 @@ function ActivityEventRow({
             {event.token_symbol || 'Unknown'}
           </span>
           <span
-            className={css({
-              fontSize: 'sm',
-              color: actionColor,
-              fontWeight: 'semibold',
-              textTransform: 'capitalize',
-            })}
+            className={cx(
+              css({
+                fontSize: 'sm',
+                fontWeight: 'semibold',
+                textTransform: 'capitalize',
+              }),
+              actionColorClassName,
+            )}
           >
             {event.action_type}
           </span>
@@ -350,13 +354,13 @@ function ActivityEventRow({
           <span className={css({ fontSize: 'xs', color: 'text.default' })}>
             {formatTokenAmount(event.tx_amount)} {event.token_symbol ?? ''}
           </span>
-          <span className={css({ fontSize: 'xs', color: 'text.subtle' })}>
+          <span className={css({ fontSize: 'xs', color: 'text.muted' })}>
             •
           </span>
           <span className={css({ fontSize: 'xs', color: 'text.default' })}>
             Block {event.block_number}
           </span>
-          <span className={css({ fontSize: 'xs', color: 'text.subtle' })}>
+          <span className={css({ fontSize: 'xs', color: 'text.muted' })}>
             •
           </span>
           <span
@@ -374,7 +378,7 @@ function ActivityEventRow({
           </span>
           {txHash ? (
             <>
-              <span className={css({ fontSize: 'xs', color: 'text.subtle' })}>
+              <span className={css({ fontSize: 'xs', color: 'text.muted' })}>
                 •
               </span>
               <TokenAddress
@@ -390,7 +394,7 @@ function ActivityEventRow({
       <span
         className={css({
           fontSize: 'xs',
-          color: 'text.subtle',
+          color: 'text.muted',
           whiteSpace: 'nowrap',
           textAlign: 'right',
         })}
@@ -404,7 +408,7 @@ function ActivityEventRow({
               display: 'block',
               mt: '0.5',
               fontSize: '2xs',
-              color: 'interactive.accent',
+              color: 'text.link',
               bg: 'transparent',
               border: 'none',
               cursor: 'pointer',
@@ -1012,7 +1016,7 @@ export function ActivityFeed({
             alignItems: 'center',
             gap: '3',
             fontSize: 'xs',
-            color: 'text.subtle',
+            color: 'text.muted',
           })}
         >
           <span>Server filters active</span>
@@ -1030,7 +1034,7 @@ export function ActivityFeed({
               px: '3',
               fontSize: 'xs',
               cursor: 'pointer',
-              _hover: { bg: 'interactive.hover' },
+              _hover: { bg: 'surface.hover' },
             })}
           >
             Clear filters
@@ -1182,7 +1186,7 @@ export function ActivityFeed({
       >
         <span>Showing {filteredEvents.length} events</span>
         {filteredEvents.length >= (filters.limit || 50) ? (
-          <span className={css({ color: 'text.subtle' })}>
+          <span className={css({ color: 'text.muted' })}>
             Limited to most recent {filters.limit || 50}
           </span>
         ) : null}
@@ -1201,6 +1205,8 @@ export function ActivityFeed({
           title="Error Loading Activity"
           description="An error occurred while loading the activity feed."
           errorMessage={error ?? undefined}
+          tone="critical"
+          size="inline"
         />
       }
       emptyView={

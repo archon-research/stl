@@ -18,15 +18,26 @@ export function getActionIcon(
   }
 }
 
-export function getActionColor(actionType: string | null | undefined): string {
-  switch (actionType?.toLowerCase()) {
-    case 'in':
-      return 'text.success';
-    case 'out':
-      return 'text.warning';
-    case 'sweep':
-      return 'text.interactive';
-    default:
-      return 'text.default';
-  }
+// Panda extracts styles from the *source text* of a `css()` call, so handing a
+// caller a token path to put in `css({ color: value })` emits no rule at all.
+// These literal calls are load-bearing: they are the only reason
+// `.c_text\.interactive` (the `sweep` colour) exists in the stylesheet.
+const ACTION_COLOR_CLASS = {
+  in: css({ color: 'text.success' }),
+  out: css({ color: 'text.warning' }),
+  sweep: css({ color: 'text.interactive' }),
+} as const;
+
+const DEFAULT_ACTION_COLOR_CLASS = css({ color: 'text.default' });
+
+export function getActionColorClass(
+  actionType: string | null | undefined,
+): string {
+  const key = actionType?.toLowerCase();
+  // Own-property check, not `in`: `action_type` is unvalidated API text, and
+  // `'constructor' in ACTION_COLOR_CLASS` is true, which would return a function
+  // and leave the element with no colour class at all.
+  return key !== undefined && Object.hasOwn(ACTION_COLOR_CLASS, key)
+    ? ACTION_COLOR_CLASS[key as keyof typeof ACTION_COLOR_CLASS]
+    : DEFAULT_ACTION_COLOR_CLASS;
 }
