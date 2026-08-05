@@ -662,6 +662,17 @@ dev-env:
 		"BUILD_GIT_HASH=dev" \
 		"LOG_LEVEL=debug" \
 		> cmd/cronjobs/maple-graphql-indexer/.env
+	@set -a; . ../.env.secrets; set +a; \
+	printf '%s\n' \
+		"CHAIN_ID=1" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
+		"TEMPORAL_HOST_PORT=127.0.0.1:7233" \
+		"TEMPORAL_NAMESPACE=vector" \
+		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
+		"ALCHEMY_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2" \
+		"BUILD_GIT_HASH=dev" \
+		"LOG_LEVEL=debug" \
+		> cmd/cronjobs/morpho-v2-bootstrap/.env
 	@echo "Environment files generated (.env.secrets updated)."
 
 # Cold start — rebuilds all images from scratch
@@ -2084,7 +2095,7 @@ kind-load-python-api:
 # `make kind-deploy-data-validator` (see k8s/overlays/dev/data-validator), not part of dev-up.
 
 CRONJOBS := $(sort $(notdir $(patsubst %/main.go,%,$(wildcard cmd/cronjobs/*/main.go))))
-CRONJOB_DEPLOYMENTS := spark-anchorage-indexer offchain-price-indexer
+CRONJOB_DEPLOYMENTS := spark-anchorage-indexer offchain-price-indexer morpho-v2-bootstrap
 
 # Pattern rule: docker-build-cronjob-<name> builds any cronjob image.
 docker-build-cronjob-%:

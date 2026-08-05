@@ -39,6 +39,8 @@ resources:
   - ../../base/spark-anchorage-indexer
   - ../../base/offchain-price-indexer
   - ../../base/maple-graphql-indexer
+  # Manual-only cronjob — see docs/runbooks/vector-cronjobs.md.
+  - ../../base/morpho-v2-bootstrap
   # CEX L2 order book indexer fleet — one pod per exchange, same binary,
   # different EXCHANGE/SYMBOLS config (OKX/Kraken added by copying the coinbase
   # base dir + its configmap/external-secret with the exchange-specific values).
@@ -175,6 +177,9 @@ images:
   - name: maple-graphql-indexer
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-cronjob
     newTag: "maple-graphql-indexer-39d930b3238ab9e68ec5d6657c56c0c1ea75133a"
+  - name: morpho-v2-bootstrap
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-cronjob
+    newTag: "morpho-v2-bootstrap-1e7ea976600451881ada03f3b188dccf001a3cc3"
   - name: cex-orderbook-indexer
     # One image shared by every per-exchange order book pod (coinbase/okx/kraken),
     # selected at runtime via the EXCHANGE env var.

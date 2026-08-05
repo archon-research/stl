@@ -248,6 +248,17 @@ data:
   TEMPORAL_NAMESPACE: "vector"
   CHAIN_ID: "1"
 ---
+# Manual-only cronjob — see docs/runbooks/vector-cronjobs.md. ALCHEMY_HTTP_URL is
+# omitted: the binary defaults to eth-mainnet, matching CHAIN_ID below.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: morpho-v2-bootstrap
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "1"
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
