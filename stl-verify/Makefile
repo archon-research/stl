@@ -758,7 +758,10 @@ GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 GIT_COMMIT_FULL ?= $(shell git rev-parse HEAD 2>/dev/null || echo "unknown")
 GIT_BRANCH ?= $(shell git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
 BUILD_TIME ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
-GO_VERSION ?= $(shell cat ../.go-version 2>/dev/null || cat .go-version 2>/dev/null || echo "1.26.3")
+# Keep the literal fallback in step with ../.go-version. It only applies when that
+# file is unreachable, but a stale value here silently builds images on an older
+# toolchain — 1.26.3 shipped the stdlib CVEs that vulncheck flags.
+GO_VERSION ?= $(shell cat ../.go-version 2>/dev/null || cat .go-version 2>/dev/null || echo "1.26.5")
 PYTHON_VERSION ?= $(shell cat ../.python-version 2>/dev/null || cat .python-version 2>/dev/null || echo "3.12")
 
 # Image tag (default to git sha, can override)
