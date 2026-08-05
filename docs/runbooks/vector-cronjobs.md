@@ -170,6 +170,16 @@ scheduled cronjob. Two things differ when it pages:
 
   A one-week window is one chunk and completes in seconds. Because writes are
   additive and conflict-free, running it as a smoke test is safe.
+- **A coverage failure fires no alert at all.** The interceptor records per
+  activity, so a run whose chunks all succeeded but whose *workflow* then failed
+  its `assertCoverage` check — an asset that returned nothing, or a gap after data
+  began — emits only `status="success"` and never trips
+  `VectorCronjobRunFailing`. This is the one failure mode metrics cannot see. It
+  is tolerable only because the job is hand-triggered: the run goes red in the
+  Temporal UI with the offending asset named in the error, in front of the person
+  who started it. **Do not treat a green dashboard as evidence a backfill was
+  complete** — read the workflow's own outcome, or the `progress` query, which is
+  still readable after the run has closed.
 
 `ImagePullBackOff` here most often means the image was never built — the binary
 lives under `cmd/backfillers/`, which is **not** auto-discovered, so it needs its
