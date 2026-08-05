@@ -8,9 +8,7 @@ import (
 	"time"
 
 	"go.temporal.io/sdk/activity"
-	"go.temporal.io/sdk/interceptor"
 	"go.temporal.io/sdk/testsuite"
-	"go.temporal.io/sdk/worker"
 	"go.temporal.io/sdk/workflow"
 
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -64,7 +62,7 @@ func newInterceptedActivityEnv(t *testing.T, fn any) (*testsuite.TestActivityEnv
 	}
 
 	env := (&testsuite.WorkflowTestSuite{}).NewTestActivityEnvironment()
-	env.SetWorkerOptions(workerOptionsWithInterceptor(metrics))
+	env.SetWorkerOptions(workerOptions(metrics))
 	env.RegisterActivityWithOptions(fn, activity.RegisterOptions{Name: "Probe"})
 	return env, reader
 }
@@ -152,7 +150,7 @@ func TestRunMetricsInterceptor_RecordsOncePerActivityExecutionInAWorkflow(t *tes
 	}
 
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
-	env.SetWorkerOptions(workerOptionsWithInterceptor(metrics))
+	env.SetWorkerOptions(workerOptions(metrics))
 	env.RegisterActivityWithOptions(
 		func(context.Context) error { return nil },
 		activity.RegisterOptions{Name: "Probe"},
@@ -188,10 +186,22 @@ func errorContains(err error, substr string) bool {
 	return err != nil && strings.Contains(err.Error(), substr)
 }
 
-// workerOptionsWithInterceptor is the same wiring RunWorker applies, so these
-// tests exercise the production configuration rather than a parallel one.
-func workerOptionsWithInterceptor(metrics *cronjobMetrics) worker.Options {
-	return worker.Options{
-		Interceptors: []interceptor.WorkerInterceptor{newRunMetricsInterceptor(metrics)},
+// The metrics interceptor is what makes on-demand jobs visible to the alerts, and
+// nothing else in the suite notices if RunWorker stops installing it: every other
+// test builds its own worker options. This pins the production wiring itself.
+func TestWorkerOptions_InstallsTheRunMetricsInterceptor(t *testing.T) {
+	metrics, err := newCronjobMetricsWithProvider(sdkmetric.NewMeterProvider())
+	if err != nil {
+		t.Fatalf("creating metrics: %v", err)
+	}
+
+	opts := workerOptions(metrics)
+
+	if len(opts.Interceptors) != 1 {
+		t.Fatalf("worker options carry %d interceptors, want exactly 1", len(opts.Interceptors))
+	}
+	if _, ok := opts.Interceptors[0].(*runMetricsInterceptor); !ok {
+		t.Errorf("interceptor is %T, want *runMetricsInterceptor — without it an on-demand "+
+			"job emits no cronjob.runs.total and the alerts cannot see it", opts.Interceptors[0])
 	}
 }

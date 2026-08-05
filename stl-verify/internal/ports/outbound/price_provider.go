@@ -2,8 +2,18 @@ package outbound
 
 import (
 	"context"
+	"errors"
 	"time"
 )
+
+// ErrRequestRejected marks a request the provider itself refused: a bad API key,
+// a plan that does not cover the resource, an unknown asset path. Retrying
+// reproduces it exactly, so a caller holding a retry budget matches on it to stop
+// on the first attempt instead of spending the whole budget on a fixed answer.
+//
+// Rate limiting is deliberately NOT this. A 429 is transient and worth retrying,
+// so adapters must leave it unwrapped.
+var ErrRequestRejected = errors.New("provider rejected the request")
 
 // PriceData is a source-agnostic price point.
 type PriceData struct {

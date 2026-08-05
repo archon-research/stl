@@ -34,7 +34,9 @@ type BackfillParams struct {
 	To     time.Time `json:"to"`
 }
 
-func (p BackfillParams) validate() error {
+// validate takes now explicitly rather than reading the clock: it runs inside
+// workflow code, where only workflow.Now is deterministic across replay.
+func (p BackfillParams) validate(now time.Time) error {
 	if len(p.Assets) == 0 {
 		return fmt.Errorf("assets must list at least one CoinGecko ID")
 	}
@@ -50,6 +52,16 @@ func (p BackfillParams) validate() error {
 	if !p.From.Before(p.To) {
 		return fmt.Errorf("from (%s) must be before to (%s)",
 			p.From.Format(time.RFC3339), p.To.Format(time.RFC3339))
+	}
+	// A range reaching into the future is served as HTTP 200 with empty arrays,
+	// exactly like a genuine gap. Left unchecked it writes every real point first
+	// and then fails the run with "a real hole in the series" — pointing the
+	// operator at data loss that does not exist. Rejected rather than clamped: a
+	// silently rewritten range is a worse answer than a refused one.
+	if p.To.After(now) {
+		return fmt.Errorf("to (%s) is in the future (now %s): the provider has no prices past now, "+
+			"and the empty windows would be reported as gaps in the series",
+			p.To.Format(time.RFC3339), now.Format(time.RFC3339))
 	}
 	// A dropped digit in a year ("0020-01-01") expands to ~24,000 sequential
 	// activities. Temporal terminates a run whose history outgrows its limit, so
@@ -110,7 +122,17 @@ type chunkWindow struct {
 func backfillWorkflow(ctx workflow.Context, params BackfillParams) (BackfillResult, error) {
 	logger := workflow.GetLogger(ctx)
 
-	if err := params.validate(); err != nil {
+	// Registered before validation so the Query tab answers for every run. Skip it
+	// and a rejected run replies "unknown queryType progress", which reads like a
+	// broken worker rather than a rejected request.
+	state := backfillProgress{Coverage: map[string]assetCoverage{}}
+	if err := workflow.SetQueryHandler(ctx, progressQueryName, func() (backfillProgress, error) {
+		return state, nil
+	}); err != nil {
+		return BackfillResult{}, fmt.Errorf("registering %q query handler: %w", progressQueryName, err)
+	}
+
+	if err := params.validate(workflow.Now(ctx)); err != nil {
 		// Bad input fails identically on every attempt, so retrying it only
 		// obscures the mistake behind five backoffs.
 		return BackfillResult{}, temporalsdk.NewNonRetryableApplicationError(
@@ -118,12 +140,7 @@ func backfillWorkflow(ctx workflow.Context, params BackfillParams) (BackfillResu
 	}
 
 	windows := chunkWindows(params)
-	state := backfillProgress{ChunksTotal: len(windows), Coverage: map[string]assetCoverage{}}
-	if err := workflow.SetQueryHandler(ctx, progressQueryName, func() (backfillProgress, error) {
-		return state, nil
-	}); err != nil {
-		return BackfillResult{}, fmt.Errorf("registering %q query handler: %w", progressQueryName, err)
-	}
+	state.ChunksTotal = len(windows)
 
 	logger.Info("starting backfill",
 		"assets", params.Assets,
@@ -272,6 +289,12 @@ func chunkActivityOptions() workflow.ActivityOptions {
 // chunkWindows splits the request into per-asset windows no wider than the limit
 // that still yields hourly data. Pure and deterministic, so it is safe to call
 // from workflow code and testable without a Temporal test environment.
+//
+// Windows are half-open at the seam. CoinGecko's range is inclusive at BOTH ends
+// — a 30-day request returns 721 points, 720 intervals plus the closing one — so
+// abutting windows that share the seam instant fetch and count that hour twice.
+// The API takes whole seconds and cannot express an exclusive bound, so the next
+// window starts one second past the last, which no hourly point can fall in.
 func chunkWindows(params BackfillParams) []chunkWindow {
 	var windows []chunkWindow
 	for _, asset := range params.Assets {
@@ -281,7 +304,7 @@ func chunkWindows(params BackfillParams) []chunkWindow {
 				end = params.To
 			}
 			windows = append(windows, chunkWindow{Asset: asset, From: start, To: end})
-			start = end
+			start = end.Add(time.Second)
 		}
 	}
 	return windows

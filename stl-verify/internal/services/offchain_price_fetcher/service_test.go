@@ -175,6 +175,15 @@ func (m *mockPriceRepository) GetUpsertPricesCalls() [][]*entity.TokenPrice {
 // Test Fixtures
 // =============================================================================
 
+// pastHour is a range that is always non-empty. Tests that do not care about the
+// window must not build one from two `time.Now()` calls: FetchHistoricalData
+// rejects from == to, so those tests pass or fail on whether the clock ticked
+// between the two calls.
+func pastHour() (from, to time.Time) {
+	now := time.Now()
+	return now.Add(-time.Hour), now
+}
+
 func createAsset(id int64, sourceAssetID, symbol string, tokenID *int64) *entity.PriceAsset {
 	return &entity.PriceAsset{
 		ID:            id,
@@ -686,7 +695,8 @@ func TestFetchHistoricalData_ProviderDoesNotSupportHistorical(t *testing.T) {
 
 	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
-	err := svc.FetchHistoricalData(context.Background(), nil, time.Now(), time.Now())
+	from, to := pastHour()
+	err := svc.FetchHistoricalData(context.Background(), nil, from, to)
 
 	if err == nil {
 		t.Fatal("expected error")
@@ -703,7 +713,8 @@ func TestFetchHistoricalData_NoAssets(t *testing.T) {
 
 	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
-	err := svc.FetchHistoricalData(context.Background(), nil, time.Now(), time.Now())
+	from, to := pastHour()
+	err := svc.FetchHistoricalData(context.Background(), nil, from, to)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -721,10 +732,16 @@ func TestFetchHistoricalData_ResolveAssetsFails(t *testing.T) {
 
 	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
-	err := svc.FetchHistoricalData(context.Background(), nil, time.Now(), time.Now())
+	from, to := pastHour()
+	err := svc.FetchHistoricalData(context.Background(), nil, from, to)
 
 	if err == nil {
 		t.Fatal("expected error")
+	}
+	// Without naming the injected failure this passes on any error, including the
+	// range guard firing before resolveAssets is ever reached.
+	if !strings.Contains(err.Error(), "database error") {
+		t.Errorf("error should carry the injected resolve failure, got: %v", err)
 	}
 }
 
@@ -1016,6 +1033,114 @@ func TestBackfillChunk_RejectsRequestsThatCannotSucceed(t *testing.T) {
 	}
 }
 
+// The ceiling is a maximum, not a forbidden value: exactly MaxHourlyWindow still
+// returns hourly data, and rejecting it would refuse a valid request. Without
+// this case, flipping the guard from `>` to `>=` passes the whole suite.
+func TestBackfillChunk_AcceptsAWindowExactlyAtTheHourlyCeiling(t *testing.T) {
+	from := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	tokenID := int64(100)
+
+	provider := newMockProvider("coingecko", true)
+	provider.historicalDataFunc = func(_ context.Context, id string, f, _ time.Time) (*outbound.HistoricalData, error) {
+		return singlePricePoint(id, f), nil
+	}
+	repo := newMockRepository()
+	repo.assetsByIDs = []*entity.PriceAsset{createAsset(1, "weth", "WETH", &tokenID)}
+
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
+
+	stored, err := svc.BackfillChunk(context.Background(), "weth", from, from.Add(MaxHourlyWindow))
+
+	if err != nil {
+		t.Fatalf("a window of exactly MaxHourlyWindow must be accepted: %v", err)
+	}
+	if stored != 1 {
+		t.Errorf("stored = %d, want 1", stored)
+	}
+}
+
+// Transient faults must stay retryable. ErrInvalidRequest makes a Temporal
+// activity non-retryable, so tagging a provider outage or a database blip with it
+// would turn one bad minute into a permanently failed backfill. Without this,
+// wrapping either error in ErrInvalidRequest passes the suite.
+func TestBackfillChunk_KeepsTransientFailuresRetryable(t *testing.T) {
+	from := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	tokenID := int64(100)
+
+	tests := []struct {
+		name    string
+		failure func(*mockPriceProvider, *mockPriceRepository)
+	}{
+		{
+			name: "provider is unreachable",
+			failure: func(p *mockPriceProvider, _ *mockPriceRepository) {
+				// Replaces the stub rather than setting getHistoricalErr, which
+				// the mock only consults when no func is installed.
+				p.historicalDataFunc = func(context.Context, string, time.Time, time.Time) (*outbound.HistoricalData, error) {
+					return nil, errors.New("connection reset by peer")
+				}
+			},
+		},
+		{
+			name: "the upsert fails",
+			failure: func(_ *mockPriceProvider, r *mockPriceRepository) {
+				r.upsertPricesErr = errors.New("deadlock detected")
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := newMockProvider("coingecko", true)
+			provider.historicalDataFunc = func(_ context.Context, id string, f, _ time.Time) (*outbound.HistoricalData, error) {
+				return singlePricePoint(id, f), nil
+			}
+			repo := newMockRepository()
+			repo.assetsByIDs = []*entity.PriceAsset{createAsset(1, "weth", "WETH", &tokenID)}
+			tc.failure(provider, repo)
+
+			svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
+
+			stored, err := svc.BackfillChunk(context.Background(), "weth", from, from.Add(24*time.Hour))
+
+			if err == nil {
+				t.Fatal("expected the failure to propagate")
+			}
+			if errors.Is(err, ErrInvalidRequest) {
+				t.Errorf("a transient failure must NOT wrap ErrInvalidRequest, or Temporal "+
+					"gives up after one attempt: %v", err)
+			}
+			if stored != 0 {
+				t.Errorf("stored = %d on a failed chunk, want 0", stored)
+			}
+		})
+	}
+}
+
+// A request the provider itself refused (401, 403, 404) cannot succeed on retry,
+// so it has to reach the caller as ErrInvalidRequest. Otherwise a revoked API key
+// costs the full retry budget on every chunk before surfacing.
+func TestBackfillChunk_TreatsAProviderRejectionAsNonRetryable(t *testing.T) {
+	from := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	tokenID := int64(100)
+
+	provider := newMockProvider("coingecko", true)
+	provider.getHistoricalErr = fmt.Errorf("API error (HTTP 401): invalid api key: %w", outbound.ErrRequestRejected)
+	repo := newMockRepository()
+	repo.assetsByIDs = []*entity.PriceAsset{createAsset(1, "weth", "WETH", &tokenID)}
+
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
+
+	_, err := svc.BackfillChunk(context.Background(), "weth", from, from.Add(24*time.Hour))
+
+	if err == nil {
+		t.Fatal("expected the rejection to propagate")
+	}
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Errorf("a provider rejection must wrap ErrInvalidRequest so the first attempt is the last: %v", err)
+	}
+}
+
 func TestBackfillChunk_StoresAndCountsAServedWindow(t *testing.T) {
 	from := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 	tokenID := int64(100)
@@ -1107,11 +1232,30 @@ func TestFetchHistoricalData_ErrorsOnUnknownRequestedAssetID(t *testing.T) {
 
 			err := svc.FetchHistoricalData(context.Background(), tc.requested, time.Now().AddDate(0, 0, -1), time.Now())
 
-			if tc.wantErr && err == nil {
+			if !tc.wantErr {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+
+			if err == nil {
 				t.Fatal("expected an error for an unregistered source asset ID")
 			}
-			if !tc.wantErr && err != nil {
-				t.Fatalf("unexpected error: %v", err)
+			// Asserting only err != nil would survive the regression this guard
+			// exists to prevent: moving the check after fetch+upsert still errors,
+			// but leaves a partial write behind first.
+			if !errors.Is(err, ErrInvalidRequest) {
+				t.Errorf("error must wrap ErrInvalidRequest so the caller fails fast, got: %v", err)
+			}
+			if !strings.Contains(err.Error(), "not-a-coin") {
+				t.Errorf("error should name the unresolved ID, got: %v", err)
+			}
+			if calls := provider.GetHistoricalCalls(); len(calls) != 0 {
+				t.Errorf("provider was called %d times before the ID check; nothing may be fetched or written", len(calls))
+			}
+			if n := repo.upsertPricesCount.Load(); n != 0 {
+				t.Errorf("repository upserted %d times for a rejected request, want 0", n)
 			}
 		})
 	}
@@ -1156,7 +1300,7 @@ func TestFetchHistoricalData_ToleratesEmptyChunkWhenOtherChunksHaveData(t *testi
 		createAsset(1, "weth", "WETH", &tokenID),
 	}
 
-	// 90 days spans four 30-day chunks; only the last one returns data.
+	// 90 days spans three 30-day chunks; only the last one returns data.
 	call := 0
 	provider.historicalDataFunc = func(_ context.Context, assetID string, from, _ time.Time) (*outbound.HistoricalData, error) {
 		call++
@@ -1495,14 +1639,10 @@ func TestFetchHistoricalData_RejectsEmptyOrInvertedRange(t *testing.T) {
 			if err := svc.FetchHistoricalData(context.Background(), nil, tc.from, tc.to); err == nil {
 				t.Fatal("expected an error for a range that spans no time")
 			}
+			if callCount != 0 {
+				t.Errorf("provider was called %d times for a range spanning no time, want 0", callCount)
+			}
 		})
-	}
-	if callCount != 0 {
-		t.Errorf("provider was called %d times for an empty range, want 0", callCount)
-	}
-	// from.Before(to) is false, so no chunks
-	if callCount != 0 {
-		t.Errorf("expected 0 calls when from=to, got %d", callCount)
 	}
 }
 

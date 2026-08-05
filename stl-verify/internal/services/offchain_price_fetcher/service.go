@@ -322,7 +322,7 @@ func (s *Service) fetchAndStoreChunk(ctx context.Context, asset *entity.PriceAss
 
 	data, err := s.provider.GetHistoricalData(ctx, asset.SourceAssetID, from, to)
 	if err != nil {
-		return 0, fmt.Errorf("fetching historical data: %w", err)
+		return 0, fmt.Errorf("fetching historical data: %w", classifyProviderError(err))
 	}
 
 	prices, err := s.convertHistoricalPrices(data, assetMap)
@@ -344,6 +344,21 @@ func (s *Service) fetchAndStoreChunk(ctx context.Context, asset *entity.PriceAss
 	s.logger.Debug("stored prices", "count", len(prices))
 
 	return len(prices), nil
+}
+
+// classifyProviderError re-labels a request the provider refused outright as
+// ErrInvalidRequest, so a caller with a retry budget stops on the first attempt.
+//
+// Without this the only fast-fail path is our own pre-flight validation, and an
+// upstream verdict that cannot change — a revoked API key, a plan that does not
+// cover the range, a coin ID the provider does not know — costs the full retry
+// budget per chunk before surfacing, which reads like a flaky upstream rather
+// than the configuration error it is.
+func classifyProviderError(err error) error {
+	if errors.Is(err, outbound.ErrRequestRejected) {
+		return fmt.Errorf("%w: %w", err, ErrInvalidRequest)
+	}
+	return err
 }
 
 // assertRequestedAssetsResolved reports the explicitly-requested source asset IDs

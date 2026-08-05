@@ -287,13 +287,19 @@ func (c *Client) doRequest(ctx context.Context, endpoint string, params url.Valu
 }
 
 // coinGeckoErrorParser parses CoinGecko-specific error responses.
+//
+// Every 4xx it sees is tagged outbound.ErrRequestRejected: the request was
+// refused for a reason that will not change on retry (401 bad key, 403 plan,
+// 404 unknown coin). 429 never reaches here — the shared client returns it as a
+// plain retryable error before consulting this parser — so the tag cannot
+// mislabel rate limiting as permanent.
 func coinGeckoErrorParser(statusCode int, body []byte) error {
 	if statusCode >= 400 && statusCode < 500 {
 		var apiErr coinGeckoError
 		if jsonErr := json.Unmarshal(body, &apiErr); jsonErr == nil && apiErr.Error != "" {
-			return fmt.Errorf("API error (HTTP %d): %s", statusCode, apiErr.Error)
+			return fmt.Errorf("API error (HTTP %d): %s: %w", statusCode, apiErr.Error, outbound.ErrRequestRejected)
 		}
-		return fmt.Errorf("client error (HTTP %d): %s", statusCode, string(body))
+		return fmt.Errorf("client error (HTTP %d): %s: %w", statusCode, string(body), outbound.ErrRequestRejected)
 	}
 	return nil
 }

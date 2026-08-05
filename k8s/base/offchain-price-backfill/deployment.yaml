@@ -15,6 +15,14 @@ metadata:
   name: offchain-price-backfill
 spec:
   replicas: 1
+  # Recreate, because replicas: 1 above is a correctness bound, not a cost choice.
+  # The default RollingUpdate rounds maxSurge up to 1, so every rollout — including
+  # the Reloader-triggered ones a ConfigMap or rotated secret causes — would run
+  # two pods polling the same task queue until the new one is Ready, which is
+  # exactly the doubled request rate the replica count exists to prevent. The
+  # watchers use Recreate for the same reason.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: offchain-price-backfill

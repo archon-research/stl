@@ -38,6 +38,10 @@ const wethAddress = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
 
 // coinGeckoFixtureServer serves market_chart/range with one point per hour of the
 // requested window, in the live API's array-of-[millis, value] shape.
+//
+// Inclusive at both ends, like the real endpoint: a 30-day range returns 721
+// points, not 720. An exclusive fixture cannot observe a seam hour being fetched
+// by two adjacent chunks, which is exactly the bug chunkWindows guards against.
 func coinGeckoFixtureServer(t *testing.T) *httptest.Server {
 	t.Helper()
 
@@ -54,7 +58,7 @@ func coinGeckoFixtureServer(t *testing.T) *httptest.Server {
 		}{}
 
 		price := 1500.0
-		for ts := fromUnix; ts < toUnix; ts += 3600 {
+		for ts := fromUnix; ts <= toUnix; ts += 3600 {
 			millis := float64(ts) * 1000
 			response.Prices = append(response.Prices, []float64{millis, price})
 			response.MarketCaps = append(response.MarketCaps, []float64{millis, price * 1e6})
@@ -135,6 +139,25 @@ func newActivityEnv(t *testing.T, ctx context.Context, pool *pgxpool.Pool, baseU
 	return env
 }
 
+// newWorkflowEnv drives the real composition root: it registers through register()
+// itself, so the workflow type name and activity wiring under test are the ones
+// the deployed worker installs, not a re-declaration of them.
+func newWorkflowEnv(t *testing.T, ctx context.Context, pool *pgxpool.Pool, baseURL string) *testsuite.TestWorkflowEnvironment {
+	t.Helper()
+
+	t.Setenv("CHAIN_ID", "1")
+	t.Setenv("COINGECKO_API_KEY", "test-api-key")
+	t.Setenv("COINGECKO_BASE_URL", baseURL)
+	t.Setenv("BUILD_GIT_HASH", "integration-test")
+
+	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+	deps := temporal.Dependencies{Pool: pool, Logger: testutil.DiscardLogger()}
+	if err := register(ctx, deps, env); err != nil {
+		t.Fatalf("running the production registration: %v", err)
+	}
+	return env
+}
+
 // fetchChunk runs the activity and decodes the number of points it stored.
 func fetchChunk(t *testing.T, env *testsuite.TestActivityEnvironment, w chunkWindow) (int, error) {
 	t.Helper()
@@ -163,6 +186,39 @@ func countPrices(t *testing.T, ctx context.Context, pool *pgxpool.Pool, tokenID 
 	return n
 }
 
+// The Workflow Type is an operator-facing contract: the runbook tells the on-call
+// to start `--type OffchainPriceBackfill`, and Temporal resolves it by string. So
+// the literal is spelled out here rather than referencing workflowTypeName —
+// using the constant would rename both sides together and pin nothing.
+func TestIntegration_Register_ExposesTheDocumentedWorkflowType(t *testing.T) {
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+	server := coinGeckoFixtureServer(t)
+	t.Cleanup(server.Close)
+
+	tokenID := seedWETHAsset(t, ctx, pool)
+	env := newWorkflowEnv(t, ctx, pool, server.URL)
+
+	from := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	env.ExecuteWorkflow("OffchainPriceBackfill", BackfillParams{
+		Assets: []string{"weth"},
+		From:   from,
+		To:     from.Add(24 * time.Hour),
+	})
+
+	if !env.IsWorkflowCompleted() {
+		t.Fatal("expected the workflow to complete")
+	}
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatalf("running the workflow by its documented type name: %v", err)
+	}
+	if got := countPrices(t, ctx, pool, tokenID); got == 0 {
+		t.Error("the run stored no prices, so it did not reach the real activity")
+	}
+}
+
 func TestIntegration_FetchChunk_StoresHourlyPrices(t *testing.T) {
 	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
 	t.Cleanup(cleanup)
@@ -182,11 +238,12 @@ func TestIntegration_FetchChunk_StoresHourlyPrices(t *testing.T) {
 		t.Fatalf("FetchChunk: %v", err)
 	}
 
-	if stored != 48 {
-		t.Errorf("stored = %d, want 48 hourly points", stored)
+	// 49, not 48: the window is inclusive at both ends, matching the live API.
+	if stored != 49 {
+		t.Errorf("stored = %d, want 49 hourly points", stored)
 	}
-	if got := countPrices(t, ctx, pool, tokenID); got != 48 {
-		t.Errorf("rows in offchain_token_price = %d, want 48", got)
+	if got := countPrices(t, ctx, pool, tokenID); got != 49 {
+		t.Errorf("rows in offchain_token_price = %d, want 49", got)
 	}
 }
 
@@ -212,8 +269,8 @@ func TestIntegration_FetchChunk_IsIdempotentAcrossRuns(t *testing.T) {
 	afterFirst := countPrices(t, ctx, pool, tokenID)
 	// Without this the test passes vacuously on 0 == 0 if the fixture or the write
 	// path ever stops producing rows, proving nothing about idempotency.
-	if afterFirst != 24 {
-		t.Fatalf("first run stored %d rows, want 24; the comparison below would prove nothing", afterFirst)
+	if afterFirst != 25 {
+		t.Fatalf("first run stored %d rows, want 25; the comparison below would prove nothing", afterFirst)
 	}
 
 	if _, err := fetchChunk(t, env, window); err != nil {
@@ -236,7 +293,7 @@ func TestIntegration_FetchChunk_ErrorsOnUnregisteredAsset(t *testing.T) {
 	server := coinGeckoFixtureServer(t)
 	t.Cleanup(server.Close)
 
-	seedWETHAsset(t, ctx, pool)
+	wethTokenID := seedWETHAsset(t, ctx, pool)
 	env := newActivityEnv(t, ctx, pool, server.URL)
 
 	from := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -246,6 +303,11 @@ func TestIntegration_FetchChunk_ErrorsOnUnregisteredAsset(t *testing.T) {
 
 	if err == nil {
 		t.Fatal("expected an error for a CoinGecko ID that is not registered")
+	}
+	// Erroring is only half of it: a rejected ID must not have written anything
+	// under some other token on the way to failing.
+	if got := countPrices(t, ctx, pool, wethTokenID); got != 0 {
+		t.Errorf("stored %d rows while failing on an unregistered ID, want 0", got)
 	}
 }
 

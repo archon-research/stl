@@ -116,14 +116,18 @@ func TestChunkWindows_NeverExceedsHourlyResolutionLimit(t *testing.T) {
 	}
 }
 
-// Consecutive windows must abut exactly: a gap silently skips hours, an overlap
-// re-fetches them.
+// Consecutive windows must be adjacent but not overlapping. CoinGecko's range is
+// inclusive at both ends, so a window starting exactly where the last ended
+// double-counts the seam hour; starting a second later cannot skip an hourly
+// point, because no point falls inside that second.
 func TestChunkWindows_WindowsAbutWithoutGapOrOverlap(t *testing.T) {
 	got := chunkWindows(params([]string{"weth"}, day(2020, time.January, 1), day(2020, time.June, 1)))
 
 	for i := 1; i < len(got); i++ {
-		if !got[i].From.Equal(got[i-1].To) {
-			t.Errorf("window %d starts at %s but previous ended at %s", i, got[i].From, got[i-1].To)
+		gap := got[i].From.Sub(got[i-1].To)
+		if gap != time.Second {
+			t.Errorf("window %d starts %s after the previous window ended, want exactly 1s "+
+				"(0 would re-fetch the seam hour, more could skip a point)", i, gap)
 		}
 	}
 }
@@ -131,36 +135,63 @@ func TestChunkWindows_WindowsAbutWithoutGapOrOverlap(t *testing.T) {
 func TestBackfillParams_Validate(t *testing.T) {
 	from := day(2020, time.January, 1)
 	to := day(2020, time.February, 1)
+	now := day(2026, time.August, 5)
+
+	// chunksWide builds a request expanding to exactly n chunks, so the ceiling
+	// cases stay pinned to maxChunksPerRun rather than to a hand-computed date.
+	// Anchored backwards from now, because n chunks at the ceiling span ~164
+	// years — measured forwards it would trip the future-range guard instead.
+	chunksWide := func(n int) BackfillParams {
+		// Each window past the first starts a second late, so the range has to
+		// carry those seconds to still divide into exactly n chunks.
+		width := time.Duration(n)*offchain_price_fetcher.HistoricalChunkWidth + time.Duration(n-1)*time.Second
+		return params([]string{"weth"}, now.Add(-width), now)
+	}
 
 	tests := []struct {
-		name    string
-		in      BackfillParams
-		wantErr bool
+		name            string
+		in              BackfillParams
+		wantErrContains string
 	}{
 		{name: "valid request", in: params([]string{"weth"}, from, to)},
-		{name: "no assets", in: params(nil, from, to), wantErr: true},
-		{name: "empty asset ID", in: params([]string{""}, from, to), wantErr: true},
-		{name: "missing from", in: params([]string{"weth"}, time.Time{}, to), wantErr: true},
-		{name: "missing to", in: params([]string{"weth"}, from, time.Time{}), wantErr: true},
-		{name: "from after to", in: params([]string{"weth"}, to, from), wantErr: true},
-		{name: "from equals to", in: params([]string{"weth"}, from, from), wantErr: true},
+		{name: "no assets", in: params(nil, from, to), wantErrContains: "at least one CoinGecko ID"},
+		{name: "empty asset ID", in: params([]string{""}, from, to), wantErrContains: "must not contain an empty ID"},
+		{name: "missing from", in: params([]string{"weth"}, time.Time{}, to), wantErrContains: "both required"},
+		{name: "missing to", in: params([]string{"weth"}, from, time.Time{}), wantErrContains: "both required"},
+		{name: "from after to", in: params([]string{"weth"}, to, from), wantErrContains: "must be before"},
+		{name: "from equals to", in: params([]string{"weth"}, from, from), wantErrContains: "must be before"},
 		// A repeated ID would be fetched twice and double-counted into one
 		// coverage entry, so the run would report points it never separately saw.
-		{name: "duplicate asset IDs", in: params([]string{"weth", "weth"}, from, to), wantErr: true},
+		{name: "duplicate asset IDs", in: params([]string{"weth", "weth"}, from, to), wantErrContains: "duplicate ID"},
 		// A dropped digit in the year: the guard exists so this is rejected up
 		// front rather than terminated mid-flight for outgrowing the history limit.
-		{name: "mistyped year expands past the chunk ceiling", in: params([]string{"weth"}, day(20, time.January, 1), to), wantErr: true},
+		{name: "mistyped year expands past the chunk ceiling", in: params([]string{"weth"}, day(20, time.January, 1), to), wantErrContains: "over the 2000 limit"},
+		// A future range is served as 200-with-empty-arrays, indistinguishable
+		// from a genuine hole, so it must not reach the coverage check.
+		{name: "to in the future", in: params([]string{"weth"}, from, now.AddDate(0, 0, 1)), wantErrContains: "in the future"},
+		// Both sides of the ceiling, so the boundary itself is pinned: without
+		// these, flipping `>` to `>=` passes the suite.
+		{name: "exactly at the chunk ceiling is accepted", in: chunksWide(maxChunksPerRun)},
+		{name: "one chunk past the ceiling is rejected", in: chunksWide(maxChunksPerRun + 1), wantErrContains: "over the 2000 limit"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := tc.in.validate()
+			err := tc.in.validate(now)
 
-			if tc.wantErr && err == nil {
-				t.Fatal("expected a validation error")
+			if tc.wantErrContains == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
 			}
-			if !tc.wantErr && err != nil {
-				t.Fatalf("unexpected error: %v", err)
+			if err == nil {
+				t.Fatalf("expected a validation error containing %q", tc.wantErrContains)
+			}
+			// Matching the message, not just non-nil: eight rejection rows span
+			// distinct guards, and a bare wantErr lets a row pass on the wrong one.
+			if !strings.Contains(err.Error(), tc.wantErrContains) {
+				t.Errorf("error = %q, want it to contain %q", err, tc.wantErrContains)
 			}
 		})
 	}
@@ -261,9 +292,12 @@ func TestBackfillWorkflow_SucceedsButReportsTruncationWhenLeadingWindowsAreEmpty
 	if c.EmptyLeading != 1 {
 		t.Errorf("EmptyLeading = %d, want 1 — a truncated range must be visible in the result", c.EmptyLeading)
 	}
-	if c.CoveredFrom == nil || !c.CoveredFrom.Equal(daysAfter(base, 30)) {
+	// The second window, which is where data first appeared. It opens one second
+	// past the first window's close — see chunkWindows on the inclusive seam.
+	wantCoveredFrom := daysAfter(base, 30).Add(time.Second)
+	if c.CoveredFrom == nil || !c.CoveredFrom.Equal(wantCoveredFrom) {
 		t.Errorf("CoveredFrom = %v, want %v so the operator can see the range was truncated",
-			c.CoveredFrom, daysAfter(base, 30))
+			c.CoveredFrom, wantCoveredFrom)
 	}
 }
 

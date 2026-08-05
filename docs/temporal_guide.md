@@ -173,6 +173,8 @@ make run-cronjob-<your-job>              # run locally against the kind Temporal
 
 Cronjob images are discovered automatically from `cmd/cronjobs/*`:
 `make docker-build-cronjob-<your-job>` and `make docker-release-cronjob-<your-job> ENV=...`.
+The image build is automatic; **promotion is not** — add the job to `deploy.yaml`'s
+`CRONJOBS` list or its tag is never stamped.
 
 **Verify:** open the local Temporal UI, select namespace `vector`, confirm a schedule
 named `<your-job>` appears under Schedules and that a workflow execution runs.
@@ -277,7 +279,7 @@ twice. Re-running later means the same form with a new ID.
    long run has got from the UI's Query tab without reading raw event history.
 5. **Judge "did this produce anything" in the workflow, not the activity.** Only the
    workflow sees every unit, so only it can tell a genuinely empty result from one
-   legitimately-empty slice. See `assertEveryAssetProducedData`.
+   legitimately-empty slice. See `assertCoverage`.
 6. **Set `OTEL_EXPORTER_OTLP_ENDPOINT` in the ConfigMap.** `RunWorker` instruments
    every registered activity through an interceptor, so the job emits the same
    `cronjob_runs_total` / `cronjob_run_duration_seconds` series a scheduled cronjob
@@ -295,18 +297,34 @@ twice. Re-running later means the same form with a new ID.
 
 A long-running `Deployment` with `replicas: 1` (not a k8s `Job`): it has to poll the
 task queue to receive a manual trigger. Model it on
-`k8s/base/offchain-price-backfill/`. Backfillers are not auto-discovered like
-cronjobs, so add explicit `docker-build-*` / `docker-release-*` targets; the generic
-`build-backfiller-%` and `run-backfiller-%` pattern rules already work.
+`k8s/base/offchain-price-backfill/` — including its `strategy: {type: Recreate}`, so a
+rollout never runs two pods against the same task queue.
+
+Backfillers are **not** auto-discovered like cronjobs, so the release needs wiring in
+three places. Miss any of them and the tag is promoted without an image ever being
+built, which surfaces as `ImagePullBackOff`:
+
+1. Explicit `docker-build-<name>` / `docker-release-<name>` targets in
+   `stl-verify/Makefile` (the generic `build-backfiller-%` and `run-backfiller-%`
+   pattern rules already work; the docker ones do not).
+2. A `_docker-release-<name>-internal` line in the `docker-release-all` target
+   (`stl-verify/Makefile`), or nothing builds the image on release.
+3. An entry in `deploy.yaml`'s `CRONJOBS` promotion list, or `verify-ecr-images.sh`
+   refuses to stamp the environment — for *every* service, not just this one.
 
 ## Local development
 
 ```bash
 cd stl-verify
 make dev-up                                  # kind cluster incl. Temporal (server, DB, UI)
-make dev-env                                 # generate cmd/cronjobs/*/.env
+make dev-env                                 # generate cmd/cronjobs/*/ and backfiller .env
 make run-cronjob-offchain-price-indexer      # run one cronjob, sourcing its .env
+make run-backfiller-offchain-price-backfill  # run the on-demand worker locally
 ```
+
+An on-demand worker started this way registers nothing on a schedule and simply idles
+on its task queue — it does no work until you start a run from the Temporal UI (or with
+`temporal workflow start`), so an idle log is the expected steady state.
 
 `make dev-up` applies `k8s/dev-infra/temporal*.yaml`. The `temporalio/auto-setup` server
 auto-creates the `vector` namespace and exposes the Temporal UI via a nodePort; open it and

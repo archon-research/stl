@@ -31,6 +31,17 @@ type WorkerConfig struct {
 	Register func(ctx context.Context, deps Dependencies, r worker.Registry) error
 }
 
+// workerOptions is the worker configuration RunWorker applies. It is a named
+// function rather than a literal at the call site so tests exercise the real
+// wiring instead of a copy that can silently drift from it — the interceptor
+// here is the only thing making on-demand jobs visible to the alerts, and a copy
+// in the test file would keep passing after it was dropped from production.
+func workerOptions(metrics *cronjobMetrics) worker.Options {
+	return worker.Options{
+		Interceptors: []interceptor.WorkerInterceptor{newRunMetricsInterceptor(metrics)},
+	}
+}
+
 func (c WorkerConfig) validate() error {
 	if c.Name == "" {
 		return fmt.Errorf("WorkerConfig.Name is required")
@@ -65,11 +76,7 @@ func RunWorker(ctx context.Context, meta BuildMeta, cfg WorkerConfig) error {
 		return fmt.Errorf("creating run metrics: %w", err)
 	}
 
-	// The interceptor instruments whatever the job registers, so a new on-demand
-	// job is covered the moment it ships rather than having to remember to emit.
-	w := worker.New(boot.client, cfg.Name, worker.Options{
-		Interceptors: []interceptor.WorkerInterceptor{newRunMetricsInterceptor(metrics)},
-	})
+	w := worker.New(boot.client, cfg.Name, workerOptions(metrics))
 	if err := cfg.Register(ctx, boot.dependencies(), w); err != nil {
 		return fmt.Errorf("registering %s workflows: %w", cfg.Name, err)
 	}
