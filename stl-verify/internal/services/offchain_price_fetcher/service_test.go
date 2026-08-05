@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -914,6 +915,164 @@ func TestFetchHistoricalData_UpsertPricesFails(t *testing.T) {
 	}
 }
 
+// Every rejection path of BackfillChunk, and the sentinel that lets a caller with
+// a retry budget tell "this will never succeed" from "try again".
+func TestBackfillChunk_RejectsRequestsThatCannotSucceed(t *testing.T) {
+	from := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	tokenID := int64(100)
+
+	tests := []struct {
+		name               string
+		supportsHistorical bool
+		asset              string
+		tokenID            *int64
+		from, to           time.Time
+		wantErrContains    string
+	}{
+		{
+			name:               "provider cannot serve history at all",
+			supportsHistorical: false,
+			asset:              "weth",
+			tokenID:            &tokenID,
+			from:               from,
+			to:                 from.Add(24 * time.Hour),
+			wantErrContains:    "does not support historical data",
+		},
+		{
+			name:               "range spans no time",
+			supportsHistorical: true,
+			asset:              "weth",
+			tokenID:            &tokenID,
+			from:               from,
+			to:                 from,
+			wantErrContains:    "must be before",
+		},
+		{
+			name:               "range is inverted",
+			supportsHistorical: true,
+			asset:              "weth",
+			tokenID:            &tokenID,
+			from:               from.Add(24 * time.Hour),
+			to:                 from,
+			wantErrContains:    "must be before",
+		},
+		{
+			name:               "window past the hourly ceiling would silently return daily",
+			supportsHistorical: true,
+			asset:              "weth",
+			tokenID:            &tokenID,
+			from:               from,
+			to:                 from.Add(MaxHourlyWindow + time.Hour),
+			wantErrContains:    "ceiling for hourly data",
+		},
+		{
+			name:               "asset is not registered for this source",
+			supportsHistorical: true,
+			asset:              "not-a-coin",
+			tokenID:            &tokenID,
+			from:               from,
+			to:                 from.Add(24 * time.Hour),
+			wantErrContains:    "unknown source asset IDs",
+		},
+		{
+			name:               "asset has no token_id to store against",
+			supportsHistorical: true,
+			asset:              "weth",
+			tokenID:            nil,
+			from:               from,
+			to:                 from.Add(24 * time.Hour),
+			wantErrContains:    "no token_id",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := newMockProvider("coingecko", tc.supportsHistorical)
+			provider.historicalDataFunc = func(_ context.Context, id string, f, _ time.Time) (*outbound.HistoricalData, error) {
+				return singlePricePoint(id, f), nil
+			}
+			repo := newMockRepository()
+			repo.assetsByIDs = []*entity.PriceAsset{createAsset(1, "weth", "WETH", tc.tokenID)}
+
+			svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
+
+			stored, err := svc.BackfillChunk(context.Background(), tc.asset, tc.from, tc.to)
+
+			if err == nil {
+				t.Fatalf("expected an error, got stored=%d", stored)
+			}
+			if !strings.Contains(err.Error(), tc.wantErrContains) {
+				t.Errorf("error = %q, want it to contain %q", err, tc.wantErrContains)
+			}
+			// Every one of these is deterministic, so a caller with a retry budget
+			// must be able to recognise it and stop.
+			if !errors.Is(err, ErrInvalidRequest) {
+				t.Errorf("error should wrap ErrInvalidRequest so retrying callers fail fast: %v", err)
+			}
+			if stored != 0 {
+				t.Errorf("stored = %d on a rejected request, want 0", stored)
+			}
+		})
+	}
+}
+
+func TestBackfillChunk_StoresAndCountsAServedWindow(t *testing.T) {
+	from := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	tokenID := int64(100)
+
+	provider := newMockProvider("coingecko", true)
+	provider.historicalDataFunc = func(_ context.Context, id string, f, _ time.Time) (*outbound.HistoricalData, error) {
+		return createHistoricalData(id, []outbound.PricePoint{
+			{Timestamp: f, PriceUSD: 100},
+			{Timestamp: f.Add(time.Hour), PriceUSD: 101},
+		}, nil, nil), nil
+	}
+	repo := newMockRepository()
+	repo.assetsByIDs = []*entity.PriceAsset{createAsset(1, "weth", "WETH", &tokenID)}
+
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
+
+	stored, err := svc.BackfillChunk(context.Background(), "weth", from, from.Add(24*time.Hour))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stored != 2 {
+		t.Errorf("stored = %d, want 2", stored)
+	}
+	if repo.upsertPricesCount.Load() != 1 {
+		t.Errorf("UpsertPrices called %d times, want 1", repo.upsertPricesCount.Load())
+	}
+}
+
+// An empty window is not an error here: only the orchestrator sees every chunk,
+// so only it can tell a coverage boundary from a real hole.
+func TestBackfillChunk_ReportsAnEmptyWindowWithoutError(t *testing.T) {
+	from := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	tokenID := int64(100)
+
+	provider := newMockProvider("coingecko", true)
+	provider.historicalDataFunc = func(_ context.Context, id string, _, _ time.Time) (*outbound.HistoricalData, error) {
+		return createHistoricalData(id, nil, nil, nil), nil
+	}
+	repo := newMockRepository()
+	repo.assetsByIDs = []*entity.PriceAsset{createAsset(1, "weth", "WETH", &tokenID)}
+
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
+
+	stored, err := svc.BackfillChunk(context.Background(), "weth", from, from.Add(24*time.Hour))
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if stored != 0 {
+		t.Errorf("stored = %d, want 0", stored)
+	}
+	if repo.upsertPricesCount.Load() != 0 {
+		t.Error("should not upsert an empty window")
+	}
+}
+
 // A hand-triggered backfill names its assets explicitly, so a mistyped ID must
 // fail loudly. It resolves to zero rows, which would otherwise be indistinguishable
 // from a clean run that had nothing to do.
@@ -1304,7 +1463,10 @@ func TestFetchHistoricalData_VeryShortTimeRange(t *testing.T) {
 	}
 }
 
-func TestFetchHistoricalData_FromEqualsTo(t *testing.T) {
+// An empty or inverted range must error, not succeed quietly: it produces zero
+// chunks, which would otherwise skip the coverage check and report a clean run
+// that fetched nothing.
+func TestFetchHistoricalData_RejectsEmptyOrInvertedRange(t *testing.T) {
 	provider := newMockProvider("coingecko", true)
 	repo := newMockRepository()
 
@@ -1322,10 +1484,21 @@ func TestFetchHistoricalData_FromEqualsTo(t *testing.T) {
 	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
 	now := time.Now()
-	err := svc.FetchHistoricalData(context.Background(), nil, now, now)
-
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	for _, tc := range []struct {
+		name     string
+		from, to time.Time
+	}{
+		{name: "from equals to", from: now, to: now},
+		{name: "from after to", from: now, to: now.AddDate(0, 0, -1)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := svc.FetchHistoricalData(context.Background(), nil, tc.from, tc.to); err == nil {
+				t.Fatal("expected an error for a range that spans no time")
+			}
+		})
+	}
+	if callCount != 0 {
+		t.Errorf("provider was called %d times for an empty range, want 0", callCount)
 	}
 	// from.Before(to) is false, so no chunks
 	if callCount != 0 {

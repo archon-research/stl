@@ -3,6 +3,7 @@ package offchain_price_fetcher
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -12,14 +13,33 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-// HistoricalChunkWidth is the widest window that still returns hourly data.
+// ErrInvalidRequest marks a request that will fail identically no matter how many
+// times it is retried: a mistyped asset ID, an asset with no token_id, an inverted
+// or over-wide window. A caller with a retry budget (a Temporal activity) matches
+// on it to fail fast, so an operator sees "you typed the ID wrong" immediately
+// instead of a generic failure after five backoffs.
+var ErrInvalidRequest = errors.New("invalid request")
+
+// MaxHourlyWindow is the widest range CoinGecko still answers at hourly
+// resolution. Past it the API silently drops to daily and gives no signal.
 //
-// CoinGecko picks resolution from the width of the requested range and gives no
-// signal when it downgrades: measured live, a 30-day request returns 721 hourly
-// points while a multi-year request over the same span returns daily points. So
-// this is a correctness bound, not a tuning knob — exceeding it silently loses
-// 96% of the resolution. Exported because callers that chunk a range themselves
-// (the Temporal backfill workflow) must use the same bound.
+// Measured against the live Pro API on 2026-08-05 for `bitcoin` from 2020-01-01,
+// which puts the boundary exactly at 90 days:
+//
+//	30d -> 721 pts @ 60min      89d -> 2135 pts @ 60min
+//	60d -> 1441 pts @ 60min     90d -> 2159 pts @ 60min
+//	91d -> 92 pts @ 1440min     100d -> 101 pts @ 1440min
+//
+// This is a correctness bound: exceeding it costs 96% of the resolution with no
+// error to notice. Re-measure before changing it — it is an undocumented,
+// unversioned property of a third-party API.
+const MaxHourlyWindow = 90 * 24 * time.Hour
+
+// HistoricalChunkWidth is the window size this package requests when walking a
+// long range. Unlike MaxHourlyWindow it is a *choice*, not a limit: a third of
+// the hourly ceiling, traded for finer retry granularity and a smaller working
+// set per request. Callers that chunk a range themselves (the Temporal backfill
+// workflow) use it so every path requests the same shape.
 const HistoricalChunkWidth = 30 * 24 * time.Hour
 
 // ServiceConfig holds configuration for the price fetcher service.
@@ -121,6 +141,12 @@ func (s *Service) FetchHistoricalData(ctx context.Context, assetIDs []string, fr
 	if !s.provider.SupportsHistorical() {
 		return fmt.Errorf("provider %s does not support historical data", s.provider.Name())
 	}
+	// Without this an inverted range produces zero chunks, which skips the
+	// coverage check below and returns a clean success having fetched nothing.
+	if !from.Before(to) {
+		return fmt.Errorf("from (%s) must be before to (%s)",
+			from.Format(time.RFC3339), to.Format(time.RFC3339))
+	}
 
 	assets, err := s.resolveAssets(ctx, assetIDs)
 	if err != nil {
@@ -183,7 +209,12 @@ func (s *Service) FetchHistoricalData(ctx context.Context, assetIDs []string, fr
 }
 
 // BackfillChunk fetches one window for a single asset and reports how many price
-// points were stored.
+// points the provider returned.
+//
+// That is deliberately "returned", not "written": the repository upserts with
+// ON CONFLICT DO NOTHING and reports no row count, so re-running a filled range
+// yields the same non-zero number having inserted nothing. The count answers
+// "did the provider serve this window", which is what the coverage checks need.
 //
 // It exists for orchestrators that chunk a long range themselves so each chunk
 // can be retried and resumed independently. Unlike FetchHistoricalData it does
@@ -193,15 +224,18 @@ func (s *Service) FetchHistoricalData(ctx context.Context, assetIDs []string, fr
 // predates the asset's listing date", which is legitimate.
 func (s *Service) BackfillChunk(ctx context.Context, assetID string, from, to time.Time) (int, error) {
 	if !s.provider.SupportsHistorical() {
-		return 0, fmt.Errorf("provider %s does not support historical data", s.provider.Name())
+		return 0, fmt.Errorf("provider %s does not support historical data: %w", s.provider.Name(), ErrInvalidRequest)
 	}
 	if !from.Before(to) {
-		return 0, fmt.Errorf("from (%s) must be before to (%s)",
-			from.Format(time.RFC3339), to.Format(time.RFC3339))
+		return 0, fmt.Errorf("from (%s) must be before to (%s): %w",
+			from.Format(time.RFC3339), to.Format(time.RFC3339), ErrInvalidRequest)
 	}
-	if to.Sub(from) > HistoricalChunkWidth {
-		return 0, fmt.Errorf("window %s to %s is %s wide, over the %s limit that still returns hourly data",
-			from.Format(time.DateOnly), to.Format(time.DateOnly), to.Sub(from), HistoricalChunkWidth)
+	// Bounded by the API's real hourly ceiling, not by the narrower chunk size this
+	// package happens to request: a caller asking for anything up to 90 days still
+	// gets hourly data, and rejecting that would be refusing a valid request.
+	if to.Sub(from) > MaxHourlyWindow {
+		return 0, fmt.Errorf("window %s to %s is %s wide, past the %s ceiling for hourly data (it would silently return daily): %w",
+			from.Format(time.DateOnly), to.Format(time.DateOnly), to.Sub(from), MaxHourlyWindow, ErrInvalidRequest)
 	}
 
 	assets, err := s.resolveAssets(ctx, []string{assetID})
@@ -217,7 +251,7 @@ func (s *Service) BackfillChunk(ctx context.Context, assetID string, from, to ti
 	// skip FetchHistoricalData uses when sweeping every enabled asset: an
 	// unmapped token_id here means the request cannot be satisfied at all.
 	if asset.TokenID == nil {
-		return 0, fmt.Errorf("asset %s has no token_id, so its prices have nowhere to go in offchain_token_price", assetID)
+		return 0, fmt.Errorf("asset %s has no token_id, so its prices have nowhere to go in offchain_token_price: %w", assetID, ErrInvalidRequest)
 	}
 
 	return s.fetchAndStoreChunk(ctx, asset, buildAssetMap(assets), from, to)
@@ -225,7 +259,11 @@ func (s *Service) BackfillChunk(ctx context.Context, assetID string, from, to ti
 
 func (s *Service) fetchHistoricalDataForAsset(ctx context.Context, asset *entity.PriceAsset, assetMap map[string]*entity.PriceAsset, from, to time.Time) error {
 	if asset.TokenID == nil {
-		s.logger.Debug("skipping asset without token_id", "asset", asset.SourceAssetID)
+		// Warn, not Debug: deployed pods run at LOG_LEVEL=info, and an enabled
+		// offchain_price_asset row with no token_id means this asset is silently
+		// never backfilled. That is a data-config defect worth seeing.
+		s.logger.Warn("skipping asset with no token_id; it cannot be stored in offchain_token_price",
+			"asset", asset.SourceAssetID)
 		return nil
 	}
 
@@ -273,8 +311,8 @@ func (s *Service) fetchHistoricalDataForAsset(ctx context.Context, asset *entity
 	return nil
 }
 
-// fetchAndStoreChunk returns the number of price points stored so the caller can
-// tell an empty range from a filled one.
+// fetchAndStoreChunk returns how many points the provider returned, so the caller
+// can tell a served window from an empty one. Not a row count — see BackfillChunk.
 func (s *Service) fetchAndStoreChunk(ctx context.Context, asset *entity.PriceAsset, assetMap map[string]*entity.PriceAsset, from, to time.Time) (int, error) {
 	s.logger.Debug("fetching chunk",
 		"asset", asset.SourceAssetID,
@@ -328,7 +366,7 @@ func assertRequestedAssetsResolved(assetIDs []string, resolved []*entity.PriceAs
 		}
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf("unknown source asset IDs %v: they are not registered in offchain_price_asset for this source", missing)
+		return fmt.Errorf("unknown source asset IDs %v: they are not registered in offchain_price_asset for this source: %w", missing, ErrInvalidRequest)
 	}
 	return nil
 }

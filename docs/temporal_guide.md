@@ -1,11 +1,11 @@
 ---
-title: Temporal Cronjobs - Developer Guide
+title: Temporal Jobs (scheduled + on-demand) - Developer Guide
 audience: [developers, ai-agents]
 repo: stl
 applies_to: stl-verify
 shared_package: stl-verify/internal/adapters/outbound/temporal
-entrypoint: temporal.RunCronjob
-job_dir: stl-verify/cmd/cronjobs
+entrypoints: [temporal.RunCronjob, temporal.RunWorker]
+job_dirs: [stl-verify/cmd/cronjobs, stl-verify/cmd/backfillers]
 key_files:
   - stl-verify/internal/adapters/outbound/temporal/temporal.go   # RunCronjob, CronjobConfig, newBootstrap, ensureSchedule
   - stl-verify/internal/adapters/outbound/temporal/ondemand.go   # RunWorker, WorkerConfig (hand-triggered jobs, no schedule)
@@ -18,9 +18,10 @@ related_docs:
 task_recipes: [add-a-new-cronjob, add-an-on-demand-job]
 ---
 
-# Temporal Cronjobs - Developer Guide
+# Temporal Jobs - Developer Guide
 
-How to develop, run, and add Temporal scheduled jobs ("cronjobs") in STL Verify.
+How to develop, run, and add Temporal jobs in STL Verify — both **scheduled**
+("cronjobs") and **on-demand** (hand-triggered, parameterised).
 
 For the platform itself (where the central Temporal server lives, how to provision a
 namespace, how *other* repos onboard) see the infrastructure repo's
@@ -263,8 +264,12 @@ twice. Re-running later means the same form with a new ID.
    The backfill uses one per (asset, 30-day chunk) — about 162 for a six-year range
    — so a failure at chunk 140 retries that chunk instead of redoing 139 good ones.
 2. **Make the unit idempotent.** Activities retry, and an operator will re-run
-   overlapping ranges. The backfill relies on `ON CONFLICT DO NOTHING` against the
-   natural key.
+   overlapping ranges. The backfill upserts `ON CONFLICT DO NOTHING`, which makes a
+   retry free — but note the scope: `offchain_token_price`'s PK includes
+   `processing_version`, and its trigger reuses a version only for the same
+   `build_id`. A re-run from a *different* build appends a new version rather than
+   doing nothing (ADR-0002 §3). Additive, never destructive — but do not read
+   "idempotent" as "byte-identical across deploys".
 3. **Validate parameters in the workflow and fail non-retryably**
    (`temporalsdk.NewNonRetryableApplicationError`). Bad input fails identically on
    every attempt; retrying it just buries the mistake behind five backoffs.

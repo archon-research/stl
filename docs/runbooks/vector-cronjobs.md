@@ -145,6 +145,34 @@ run long. Keep that rollout order explicit in the deploy notes.
 `kube_deployment_status_replicas_available{deployment="<deployment>", namespace="vector"} >= 1`
 and a fresh `status="success"` run in `cronjob_runs_total`.
 
+### Special case: `offchain-price-backfill` (on-demand, no schedule)
+
+This Deployment is an **on-demand** Temporal worker (`temporal.RunWorker`), not a
+scheduled cronjob. Two things differ when it pages:
+
+- **Nothing is missed while it is down.** It has no schedule, so there is no tick
+  firing into the void and no data going stale. The impact is only that a backfill
+  cannot be *started* until it is back. Triage it, but it is not a data-loss page.
+- **`cronjob_runs_total` will never exist for it.** That counter comes from the
+  shared `cronjobActivities` path, which only `RunCronjob` uses. So the
+  "fresh `status=success` run" recovery check above does **not** apply — verify
+  instead that the pod is available and that a test workflow completes:
+
+  ```
+  temporal workflow start --namespace vector \
+    --task-queue offchain-price-backfill --type OffchainPriceBackfill \
+    --workflow-id backfill-smoke-$(date +%s) \
+    --input '{"assets":["weth"],"from":"2026-07-01T00:00:00Z","to":"2026-07-08T00:00:00Z"}'
+  ```
+
+  A one-week window is one chunk and completes in seconds. Because writes are
+  additive and conflict-free, running it as a smoke test is safe.
+
+`ImagePullBackOff` here most often means the image was never built — the binary
+lives under `cmd/backfillers/`, which is **not** auto-discovered, so it needs its
+explicit `_docker-release-offchain-price-backfill-internal` line in
+`docker-release-all` and its entry in `deploy.yaml`'s `CRONJOBS` promotion list.
+
 ---
 
 ## Adding a new cronjob

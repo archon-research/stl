@@ -187,8 +187,12 @@ func TestBackfillWorkflow_RunsEveryChunkAndTotalsPointsPerAsset(t *testing.T) {
 		t.Errorf("ChunksRun = %d, want 6", got.ChunksRun)
 	}
 	for _, asset := range in.Assets {
-		if got.PointsByAsset[asset] != 300 {
-			t.Errorf("PointsByAsset[%s] = %d, want 300", asset, got.PointsByAsset[asset])
+		c := got.Coverage[asset]
+		if c.Points != 300 {
+			t.Errorf("Coverage[%s].Points = %d, want 300", asset, c.Points)
+		}
+		if c.EmptyLeading != 0 || c.EmptyAfterData != 0 {
+			t.Errorf("Coverage[%s] reported empty windows on a fully-covered run: %+v", asset, c)
 		}
 	}
 }
@@ -220,10 +224,11 @@ func TestBackfillWorkflow_FailsWhenAnAssetStoredNothing(t *testing.T) {
 	}
 }
 
-// A run where every asset produced data must not be failed by the guard just
-// because some individual chunk was empty — an asset listed part-way through the
-// range legitimately has none before its listing date.
-func TestBackfillWorkflow_SucceedsWhenOnlySomeChunksAreEmpty(t *testing.T) {
+// A LEADING run of empty windows is genuinely ambiguous — an asset listed
+// part-way through the range has none earlier, and so does a range reaching past
+// the provider's historical entitlement — so it succeeds. But it must not be
+// reported as full coverage: the result has to say where data actually starts.
+func TestBackfillWorkflow_SucceedsButReportsTruncationWhenLeadingWindowsAreEmpty(t *testing.T) {
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
 	call := 0
 	registerChunkActivity(env, func(chunkWindow) (int, error) {
@@ -239,6 +244,89 @@ func TestBackfillWorkflow_SucceedsWhenOnlySomeChunksAreEmpty(t *testing.T) {
 
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatalf("unexpected workflow error: %v", err)
+	}
+
+	var got BackfillResult
+	if err := env.GetWorkflowResult(&got); err != nil {
+		t.Fatalf("reading workflow result: %v", err)
+	}
+
+	c := got.Coverage["weth"]
+	if c.EmptyLeading != 1 {
+		t.Errorf("EmptyLeading = %d, want 1 — a truncated range must be visible in the result", c.EmptyLeading)
+	}
+	if c.CoveredFrom == nil || !c.CoveredFrom.Equal(daysAfter(base, 30)) {
+		t.Errorf("CoveredFrom = %v, want %v so the operator can see the range was truncated",
+			c.CoveredFrom, daysAfter(base, 30))
+	}
+}
+
+// An empty window AFTER data has begun cannot be a coverage boundary — an asset
+// does not un-list itself — so it is a real hole and must fail. Without this, an
+// out-of-entitlement or partially-served range reports a clean success while
+// silently missing years.
+func TestBackfillWorkflow_FailsOnEmptyWindowAfterDataBegan(t *testing.T) {
+	tests := []struct {
+		name       string
+		emptyCalls map[int]bool
+	}{
+		{name: "interior hole", emptyCalls: map[int]bool{2: true}},
+		{name: "trailing hole", emptyCalls: map[int]bool{3: true}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+			call := 0
+			registerChunkActivity(env, func(chunkWindow) (int, error) {
+				call++
+				if tc.emptyCalls[call] {
+					return 0, nil
+				}
+				return 50, nil
+			})
+
+			base := day(2020, time.January, 1)
+			env.ExecuteWorkflow(backfillWorkflow, params([]string{"weth"}, base, daysAfter(base, 75)))
+
+			err := env.GetWorkflowError()
+			if err == nil {
+				t.Fatal("expected the workflow to fail on a gap after data began")
+			}
+			if !strings.Contains(err.Error(), "after data began") {
+				t.Errorf("error should name the gap, got: %v", err)
+			}
+		})
+	}
+}
+
+// A failing run must still return its counts, so an operator can see which assets
+// completed and which need re-running.
+func TestBackfillWorkflow_ReturnsPartialCountsAlongsideFailure(t *testing.T) {
+	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+	registerChunkActivity(env, func(w chunkWindow) (int, error) {
+		if w.Asset == "not-a-coin" {
+			return 0, nil
+		}
+		return 100, nil
+	})
+
+	base := day(2020, time.January, 1)
+	env.ExecuteWorkflow(backfillWorkflow, params(
+		[]string{"weth", "not-a-coin"}, base, daysAfter(base, 30)))
+
+	if env.GetWorkflowError() == nil {
+		t.Fatal("expected failure for the asset that returned nothing")
+	}
+
+	var got BackfillResult
+	if err := env.GetWorkflowResult(&got); err != nil {
+		// A failed workflow may not carry a decodable result on every SDK version;
+		// the counts are a convenience, not the assertion under test.
+		t.Skipf("result not decodable on a failed workflow: %v", err)
+	}
+	if got.Coverage["weth"].Points == 0 {
+		t.Error("the successful asset's counts were discarded on failure")
 	}
 }
 

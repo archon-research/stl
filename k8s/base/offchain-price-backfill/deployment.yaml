@@ -5,8 +5,10 @@
 # the Temporal UI. Unlike the cronjob workers it registers NO schedule, so an
 # always-on pod costs nothing but a poller.
 #
-# replicas: 1 — Temporal serialises a workflow's activities anyway, and a single
-# worker keeps the CoinGecko rate limiter (which is per-process) authoritative.
+# replicas: 1 — the CoinGecko rate limiter is per client instance and this binary
+# builds exactly one, so a second replica would double the effective request rate
+# against the shared 450 req/min budget. (Activity ordering is enforced by the
+# workflow's own sequential loop, not by Temporal.)
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -40,7 +42,8 @@ spec:
               # indexer only ever holds 18 current prices.
               cpu: "500m"
               memory: "512Mi"
-      # A backfill chunk is a single HTTP call plus one upsert, so an in-flight
-      # activity drains well inside this window; Temporal retries anything that
-      # does not.
+      # Generous, but note the worker does NOT drain: it runs with a zero
+      # WorkerStopTimeout, so an in-flight activity is cancelled on shutdown and
+      # Temporal retries that chunk on the next worker. Safe because chunks are
+      # idempotent within a build.
       terminationGracePeriodSeconds: 60

@@ -9,6 +9,8 @@
 dist/mock-blockchain-server
 # Compiled binaries; `make build-*` targets output here (never commit build output)
 stl-verify/dist/
+# A bare `go build ./cmd/...` drops the binary in the package's parent, not dist/
+/stl-verify/offchain-price-backfill
 
 # gen-transformed scratch output (regenerate to a scratch file, never over the committed migration)
 /gen.sql

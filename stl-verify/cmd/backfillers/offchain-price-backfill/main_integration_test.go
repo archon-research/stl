@@ -210,6 +210,11 @@ func TestIntegration_FetchChunk_IsIdempotentAcrossRuns(t *testing.T) {
 		t.Fatalf("first FetchChunk: %v", err)
 	}
 	afterFirst := countPrices(t, ctx, pool, tokenID)
+	// Without this the test passes vacuously on 0 == 0 if the fixture or the write
+	// path ever stops producing rows, proving nothing about idempotency.
+	if afterFirst != 24 {
+		t.Fatalf("first run stored %d rows, want 24; the comparison below would prove nothing", afterFirst)
+	}
 
 	if _, err := fetchChunk(t, env, window); err != nil {
 		t.Fatalf("second FetchChunk: %v", err)
