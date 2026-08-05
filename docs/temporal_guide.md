@@ -7,13 +7,15 @@ shared_package: stl-verify/internal/adapters/outbound/temporal
 entrypoint: temporal.RunCronjob
 job_dir: stl-verify/cmd/cronjobs
 key_files:
-  - stl-verify/internal/adapters/outbound/temporal/temporal.go   # RunCronjob, CronjobConfig, client dial, ensureSchedule
+  - stl-verify/internal/adapters/outbound/temporal/temporal.go   # RunCronjob, CronjobConfig, newBootstrap, ensureSchedule
+  - stl-verify/internal/adapters/outbound/temporal/ondemand.go   # RunWorker, WorkerConfig (hand-triggered jobs, no schedule)
   - stl-verify/internal/adapters/outbound/temporal/workflow.go   # cronjobWorkflow, cronjobActivities, Runner, RunnerFunc, ScheduledAtFromContext
   - stl-verify/internal/adapters/outbound/temporal/metrics.go    # cronjob.runs.total, cronjob.run.duration_seconds
-  - stl-verify/cmd/cronjobs/offchain-price-indexer/main.go       # canonical example to copy
+  - stl-verify/cmd/cronjobs/offchain-price-indexer/main.go       # canonical scheduled cronjob to copy
+  - stl-verify/cmd/backfillers/offchain-price-backfill/          # canonical on-demand job to copy
 related_docs:
   - infrastructure repo: docs/temporal-workflow-automation-guide.md   # platform + cross-repo onboarding
-task_recipes: [add-a-new-cronjob]
+task_recipes: [add-a-new-cronjob, add-an-on-demand-job]
 ---
 
 # Temporal Cronjobs - Developer Guide
@@ -35,6 +37,9 @@ To add or modify a cronjob, load these files (paths are repo-relative from the s
 Do NOT edit the shared package to add a job. Adding a job = one new `main.go` + k8s manifests + a `dev-env` block. The shared package is generic.
 
 ## How it works
+
+This section covers **scheduled** jobs. For a job triggered by hand with parameters
+(a backfill), skip to [On-demand jobs](#on-demand-jobs-no-schedule-triggered-by-hand).
 
 Each cronjob is a small `main.go` under `stl-verify/cmd/cronjobs/<name>/` that calls one
 shared entry point, `temporal.RunCronjob`. All the Temporal plumbing (client connection,
@@ -177,6 +182,108 @@ No new rules are needed for liveness/errors: the shared `cronjob.runs.*` metrics
 already covered by `alerts/vector-cronjobs.yaml`. Add job-specific data-quality alerts and
 matching runbook sections in `docs/runbooks/` only if the generic error path cannot catch a
 silent hole (e.g. "ran successfully but wrote zero rows").
+
+## On-demand jobs (no schedule, triggered by hand)
+
+Some work is not periodic: a backfill's range is an argument, decided by whoever
+runs it. `RunCronjob` cannot express that — `CronjobConfig` requires an interval, it
+always calls `ensureSchedule`, and `cronjobWorkflow` takes no parameters. Use
+`temporal.RunWorker` (`ondemand.go`) instead. It shares the same bootstrap
+(logging, OTel, database, client) but registers **your** workflow and creates **no
+schedule**, so the pod idles on its task queue until a run is started.
+
+| | `RunCronjob` | `RunWorker` |
+|---|---|---|
+| Schedule | created and reconciled | none |
+| Workflow | shared `cronjobWorkflow` | yours, with typed parameters |
+| Interface you implement | `Runner` | `Register` (workflow + activities) |
+| Started by | Temporal schedule | a human, or `temporal workflow start` |
+
+Reference implementation: `stl-verify/cmd/backfillers/offchain-price-backfill/`
+(`main.go` is the composition root; `backfill.go` holds the workflow, params and
+activity).
+
+### Shape of an on-demand job
+
+```go
+func run(ctx context.Context) error {
+	return temporal.RunWorker(ctx, meta, temporal.WorkerConfig{
+		Name:         "<your-job>",   // task queue + OTel service name
+		OpenDatabase: postgres.PoolOpener(...),
+		Register:     register,
+	})
+}
+
+func register(ctx context.Context, deps temporal.Dependencies, r worker.Registry) error {
+	service, err := newService(ctx, deps)
+	if err != nil {
+		return err
+	}
+	// Register with an EXPLICIT name: this string is what an operator types into
+	// the UI's "Workflow Type" box, so it must not drift with Go renames.
+	r.RegisterWorkflowWithOptions(myWorkflow, workflow.RegisterOptions{Name: "MyWorkflow"})
+	r.RegisterActivity(&myActivities{service: service})
+	return nil
+}
+```
+
+### Triggering a run from the Temporal UI
+
+Namespace is **`vector`** — the UI lands on `default`, which is empty for us.
+
+`http://temporal-staging:8080/namespaces/vector/workflows` → **Start Workflow**
+
+| Field | Value |
+|---|---|
+| Task Queue | the job's `Name` (e.g. `offchain-price-backfill`) |
+| Workflow Type | the registered name (e.g. `OffchainPriceBackfill`) |
+| Workflow ID | descriptive and unique, e.g. `backfill-weth-wbtc-2020-01-01` |
+| Input | the params struct as JSON |
+
+```json
+{"assets":["weth","wrapped-bitcoin"],"from":"2020-01-01T00:00:00Z","to":"2026-08-05T00:00:00Z"}
+```
+
+The equivalent CLI call:
+
+```bash
+temporal workflow start --namespace vector \
+  --task-queue offchain-price-backfill --type OffchainPriceBackfill \
+  --workflow-id backfill-weth-wbtc-2020-01-01 \
+  --input '{"assets":["weth","wrapped-bitcoin"],"from":"2020-01-01T00:00:00Z","to":"2026-08-05T00:00:00Z"}'
+```
+
+The **Workflow ID is the concurrency guard**: Temporal rejects a duplicate while a
+run with that ID is in flight, so a double-click cannot launch the same backfill
+twice. Re-running later means the same form with a new ID.
+
+### Design rules for an on-demand job
+
+1. **Fan out one activity per unit of work**, not one activity for the whole job.
+   The backfill uses one per (asset, 30-day chunk) — about 162 for a six-year range
+   — so a failure at chunk 140 retries that chunk instead of redoing 139 good ones.
+2. **Make the unit idempotent.** Activities retry, and an operator will re-run
+   overlapping ranges. The backfill relies on `ON CONFLICT DO NOTHING` against the
+   natural key.
+3. **Validate parameters in the workflow and fail non-retryably**
+   (`temporalsdk.NewNonRetryableApplicationError`). Bad input fails identically on
+   every attempt; retrying it just buries the mistake behind five backoffs.
+4. **Expose a `SetQueryHandler` for progress.** It is the only way to see how far a
+   long run has got from the UI's Query tab without reading raw event history.
+5. **Judge "did this produce anything" in the workflow, not the activity.** Only the
+   workflow sees every unit, so only it can tell a genuinely empty result from one
+   legitimately-empty slice. See `assertEveryAssetProducedData`.
+6. **Set `OTEL_EXPORTER_OTLP_ENDPOINT` in the ConfigMap.** Unset means metrics are
+   silent no-ops — `offchain-price-indexer` omits it and has exported nothing for
+   months while running perfectly.
+
+### Deploying one
+
+A long-running `Deployment` with `replicas: 1` (not a k8s `Job`): it has to poll the
+task queue to receive a manual trigger. Model it on
+`k8s/base/offchain-price-backfill/`. Backfillers are not auto-discovered like
+cronjobs, so add explicit `docker-build-*` / `docker-release-*` targets; the generic
+`build-backfiller-%` and `run-backfiller-%` pattern rules already work.
 
 ## Local development
 

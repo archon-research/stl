@@ -206,6 +206,13 @@ func createHistoricalData(assetID string, prices []outbound.PricePoint, volumes 
 	}
 }
 
+// singlePricePoint is the minimum payload that satisfies the "asset returned no
+// data at all" guard, for tests whose subject is something other than the data
+// (chunk arithmetic, concurrency) and which would otherwise trip it incidentally.
+func singlePricePoint(assetID string, ts time.Time) *outbound.HistoricalData {
+	return createHistoricalData(assetID, []outbound.PricePoint{{Timestamp: ts, PriceUSD: 100}}, nil, nil)
+}
+
 // =============================================================================
 // Tests: NewService
 // =============================================================================
@@ -907,7 +914,55 @@ func TestFetchHistoricalData_UpsertPricesFails(t *testing.T) {
 	}
 }
 
-func TestFetchHistoricalData_EmptyPricesAndVolumes(t *testing.T) {
+// A hand-triggered backfill names its assets explicitly, so a mistyped ID must
+// fail loudly. It resolves to zero rows, which would otherwise be indistinguishable
+// from a clean run that had nothing to do.
+func TestFetchHistoricalData_ErrorsOnUnknownRequestedAssetID(t *testing.T) {
+	tests := []struct {
+		name      string
+		requested []string
+		wantErr   bool
+	}{
+		{name: "all requested IDs known", requested: []string{"weth"}, wantErr: false},
+		{name: "one unknown ID among known", requested: []string{"weth", "not-a-coin"}, wantErr: true},
+		{name: "every requested ID unknown", requested: []string{"not-a-coin"}, wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := newMockProvider("coingecko", true)
+			repo := newMockRepository()
+
+			tokenID := int64(100)
+			known := createAsset(1, "weth", "WETH", &tokenID)
+			// The mock ignores the requested IDs and returns this set, mirroring
+			// the real query returning only rows that actually exist.
+			repo.enabledAssets = []*entity.PriceAsset{known}
+			repo.assetsByIDs = []*entity.PriceAsset{known}
+
+			provider.historicalDataFunc = func(_ context.Context, assetID string, from, _ time.Time) (*outbound.HistoricalData, error) {
+				return singlePricePoint(assetID, from), nil
+			}
+
+			svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
+
+			err := svc.FetchHistoricalData(context.Background(), tc.requested, time.Now().AddDate(0, 0, -1), time.Now())
+
+			if tc.wantErr && err == nil {
+				t.Fatal("expected an error for an unregistered source asset ID")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+// An asset that yields nothing across the whole range is a failure, not an empty
+// result: CoinGecko answers an unknown asset ID or an out-of-entitlement window
+// with HTTP 200 and empty arrays, so reporting success here would silently claim
+// a backfill that wrote no rows.
+func TestFetchHistoricalData_ErrorsWhenAssetReturnsNoDataAtAll(t *testing.T) {
 	provider := newMockProvider("coingecko", true)
 	repo := newMockRepository()
 
@@ -916,19 +971,51 @@ func TestFetchHistoricalData_EmptyPricesAndVolumes(t *testing.T) {
 		createAsset(1, "weth", "WETH", &tokenID),
 	}
 
-	// Empty data
 	provider.historicalData["weth"] = createHistoricalData("weth", nil, nil, nil)
 
 	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
 
 	err := svc.FetchHistoricalData(context.Background(), nil, time.Now().AddDate(0, 0, -1), time.Now())
 
+	if err == nil {
+		t.Fatal("expected an error when the provider returns no data points for the entire range")
+	}
+	if repo.upsertPricesCount.Load() != 0 {
+		t.Error("should not upsert when no prices")
+	}
+}
+
+// A single empty chunk is legitimate — an asset listed part-way through the range
+// has no data before its listing date — so it must warn rather than fail, as long
+// as some other chunk delivered data.
+func TestFetchHistoricalData_ToleratesEmptyChunkWhenOtherChunksHaveData(t *testing.T) {
+	provider := newMockProvider("coingecko", true)
+	repo := newMockRepository()
+
+	tokenID := int64(100)
+	repo.enabledAssets = []*entity.PriceAsset{
+		createAsset(1, "weth", "WETH", &tokenID),
+	}
+
+	// 90 days spans four 30-day chunks; only the last one returns data.
+	call := 0
+	provider.historicalDataFunc = func(_ context.Context, assetID string, from, _ time.Time) (*outbound.HistoricalData, error) {
+		call++
+		if call < 3 {
+			return createHistoricalData(assetID, nil, nil, nil), nil
+		}
+		return singlePricePoint(assetID, from), nil
+	}
+
+	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)
+
+	err := svc.FetchHistoricalData(context.Background(), nil, time.Now().AddDate(0, 0, -90), time.Now())
+
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// No upserts should happen
-	if repo.upsertPricesCount.Load() != 0 {
-		t.Error("should not upsert when no prices")
+	if repo.upsertPricesCount.Load() == 0 {
+		t.Error("expected the non-empty chunks to be upserted")
 	}
 }
 
@@ -1047,7 +1134,7 @@ func TestFetchHistoricalData_ConcurrencyLimit(t *testing.T) {
 		}
 
 		time.Sleep(10 * time.Millisecond) // Simulate work
-		return createHistoricalData(assetID, nil, nil, nil), nil
+		return singlePricePoint(assetID, from), nil
 	}
 
 	svc, _ := NewService(ServiceConfig{ChainID: 1, Concurrency: 3, Logger: testutil.DiscardLogger()}, provider, repo)
@@ -1198,7 +1285,7 @@ func TestFetchHistoricalData_VeryShortTimeRange(t *testing.T) {
 	callCount := 0
 	provider.historicalDataFunc = func(ctx context.Context, assetID string, from, to time.Time) (*outbound.HistoricalData, error) {
 		callCount++
-		return createHistoricalData(assetID, nil, nil, nil), nil
+		return singlePricePoint(assetID, from), nil
 	}
 
 	svc, _ := NewService(ServiceConfig{ChainID: 1, Logger: testutil.DiscardLogger()}, provider, repo)

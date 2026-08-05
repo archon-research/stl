@@ -12,6 +12,16 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
+// HistoricalChunkWidth is the widest window that still returns hourly data.
+//
+// CoinGecko picks resolution from the width of the requested range and gives no
+// signal when it downgrades: measured live, a 30-day request returns 721 hourly
+// points while a multi-year request over the same span returns daily points. So
+// this is a correctness bound, not a tuning knob — exceeding it silently loses
+// 96% of the resolution. Exported because callers that chunk a range themselves
+// (the Temporal backfill workflow) must use the same bound.
+const HistoricalChunkWidth = 30 * 24 * time.Hour
+
 // ServiceConfig holds configuration for the price fetcher service.
 type ServiceConfig struct {
 	// ChainID is the blockchain chain ID (e.g., 1 for Ethereum mainnet).
@@ -117,6 +127,13 @@ func (s *Service) FetchHistoricalData(ctx context.Context, assetIDs []string, fr
 		return fmt.Errorf("resolving assets: %w", err)
 	}
 
+	// A caller that named assets explicitly (a backfill triggered by hand) must
+	// not get a silent no-op from a mistyped ID: an unmatched ID resolves to zero
+	// rows, which would otherwise look like a clean run that stored nothing.
+	if err := assertRequestedAssetsResolved(assetIDs, assets); err != nil {
+		return err
+	}
+
 	if len(assets) == 0 {
 		s.logger.Info("no assets to fetch historical data for")
 		return nil
@@ -165,6 +182,47 @@ func (s *Service) FetchHistoricalData(ctx context.Context, assetIDs []string, fr
 	return nil
 }
 
+// BackfillChunk fetches one window for a single asset and reports how many price
+// points were stored.
+//
+// It exists for orchestrators that chunk a long range themselves so each chunk
+// can be retried and resumed independently. Unlike FetchHistoricalData it does
+// not treat an empty window as an error: only the orchestrator sees every chunk,
+// so only it can distinguish "this asset has no data at all" — a failure, usually
+// a wrong ID or a range outside the provider's entitlement — from "this chunk
+// predates the asset's listing date", which is legitimate.
+func (s *Service) BackfillChunk(ctx context.Context, assetID string, from, to time.Time) (int, error) {
+	if !s.provider.SupportsHistorical() {
+		return 0, fmt.Errorf("provider %s does not support historical data", s.provider.Name())
+	}
+	if !from.Before(to) {
+		return 0, fmt.Errorf("from (%s) must be before to (%s)",
+			from.Format(time.RFC3339), to.Format(time.RFC3339))
+	}
+	if to.Sub(from) > HistoricalChunkWidth {
+		return 0, fmt.Errorf("window %s to %s is %s wide, over the %s limit that still returns hourly data",
+			from.Format(time.DateOnly), to.Format(time.DateOnly), to.Sub(from), HistoricalChunkWidth)
+	}
+
+	assets, err := s.resolveAssets(ctx, []string{assetID})
+	if err != nil {
+		return 0, fmt.Errorf("resolving asset %s: %w", assetID, err)
+	}
+	if err := assertRequestedAssetsResolved([]string{assetID}, assets); err != nil {
+		return 0, err
+	}
+
+	asset := assets[0]
+	// A caller naming one asset explicitly gets an error rather than the silent
+	// skip FetchHistoricalData uses when sweeping every enabled asset: an
+	// unmapped token_id here means the request cannot be satisfied at all.
+	if asset.TokenID == nil {
+		return 0, fmt.Errorf("asset %s has no token_id, so its prices have nowhere to go in offchain_token_price", assetID)
+	}
+
+	return s.fetchAndStoreChunk(ctx, asset, buildAssetMap(assets), from, to)
+}
+
 func (s *Service) fetchHistoricalDataForAsset(ctx context.Context, asset *entity.PriceAsset, assetMap map[string]*entity.PriceAsset, from, to time.Time) error {
 	if asset.TokenID == nil {
 		s.logger.Debug("skipping asset without token_id", "asset", asset.SourceAssetID)
@@ -176,31 +234,48 @@ func (s *Service) fetchHistoricalDataForAsset(ctx context.Context, asset *entity
 		"symbol", asset.Symbol,
 	)
 
-	// Fetch in 30-day chunks to preserve hourly granularity
-	chunkDuration := 30 * 24 * time.Hour
 	chunkStart := from
 
+	var chunks, stored int
 	for chunkStart.Before(to) {
-		chunkEnd := chunkStart.Add(chunkDuration)
+		chunkEnd := chunkStart.Add(HistoricalChunkWidth)
 		if chunkEnd.After(to) {
 			chunkEnd = to
 		}
 
-		if err := s.fetchAndStoreChunk(ctx, asset, assetMap, chunkStart, chunkEnd); err != nil {
+		n, err := s.fetchAndStoreChunk(ctx, asset, assetMap, chunkStart, chunkEnd)
+		if err != nil {
 			return fmt.Errorf("fetching chunk %s to %s: %w",
 				chunkStart.Format(time.DateOnly),
 				chunkEnd.Format(time.DateOnly),
 				err,
 			)
 		}
+		chunks++
+		stored += n
 
 		chunkStart = chunkEnd
+	}
+
+	// CoinGecko answers a range it cannot serve with HTTP 200 and empty arrays
+	// rather than an error — an unknown asset ID, or a window older than the
+	// plan's historical entitlement. Storing nothing across every chunk of a
+	// non-empty range is therefore a failure, not an empty result, and must not
+	// be reported as a successful backfill. Individual empty chunks stay a
+	// warning: an asset listed part-way through the range legitimately has none.
+	if chunks > 0 && stored == 0 {
+		return fmt.Errorf("asset %s returned no data points across %d chunks covering %s to %s: "+
+			"check the asset ID and that the range is within the provider's historical entitlement",
+			asset.SourceAssetID, chunks,
+			from.Format(time.DateOnly), to.Format(time.DateOnly))
 	}
 
 	return nil
 }
 
-func (s *Service) fetchAndStoreChunk(ctx context.Context, asset *entity.PriceAsset, assetMap map[string]*entity.PriceAsset, from, to time.Time) error {
+// fetchAndStoreChunk returns the number of price points stored so the caller can
+// tell an empty range from a filled one.
+func (s *Service) fetchAndStoreChunk(ctx context.Context, asset *entity.PriceAsset, assetMap map[string]*entity.PriceAsset, from, to time.Time) (int, error) {
 	s.logger.Debug("fetching chunk",
 		"asset", asset.SourceAssetID,
 		"from", from.Format(time.DateOnly),
@@ -209,20 +284,52 @@ func (s *Service) fetchAndStoreChunk(ctx context.Context, asset *entity.PriceAss
 
 	data, err := s.provider.GetHistoricalData(ctx, asset.SourceAssetID, from, to)
 	if err != nil {
-		return fmt.Errorf("fetching historical data: %w", err)
+		return 0, fmt.Errorf("fetching historical data: %w", err)
 	}
 
 	prices, err := s.convertHistoricalPrices(data, assetMap)
 	if err != nil {
-		return fmt.Errorf("converting historical prices: %w", err)
+		return 0, fmt.Errorf("converting historical prices: %w", err)
 	}
-	if len(prices) > 0 {
-		if err := s.repo.UpsertPrices(ctx, prices); err != nil {
-			return fmt.Errorf("storing prices: %w", err)
-		}
-		s.logger.Debug("stored prices", "count", len(prices))
+	if len(prices) == 0 {
+		s.logger.Warn("provider returned no price points for chunk",
+			"asset", asset.SourceAssetID,
+			"from", from.Format(time.DateOnly),
+			"to", to.Format(time.DateOnly),
+		)
+		return 0, nil
 	}
 
+	if err := s.repo.UpsertPrices(ctx, prices); err != nil {
+		return 0, fmt.Errorf("storing prices: %w", err)
+	}
+	s.logger.Debug("stored prices", "count", len(prices))
+
+	return len(prices), nil
+}
+
+// assertRequestedAssetsResolved reports the explicitly-requested source asset IDs
+// that matched no row in offchain_price_asset. It is a no-op when assetIDs is
+// empty, because that means "every enabled asset" rather than a specific list.
+func assertRequestedAssetsResolved(assetIDs []string, resolved []*entity.PriceAsset) error {
+	if len(assetIDs) == 0 {
+		return nil
+	}
+
+	found := make(map[string]struct{}, len(resolved))
+	for _, a := range resolved {
+		found[a.SourceAssetID] = struct{}{}
+	}
+
+	var missing []string
+	for _, id := range assetIDs {
+		if _, ok := found[id]; !ok {
+			missing = append(missing, id)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("unknown source asset IDs %v: they are not registered in offchain_price_asset for this source", missing)
+	}
 	return nil
 }
 

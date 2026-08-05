@@ -1,0 +1,46 @@
+# On-demand CoinGecko price backfill worker (VEC-540).
+#
+# A long-running Deployment, not a k8s Job or CronJob: it polls the Temporal task
+# queue "offchain-price-backfill" and stays idle until someone starts a run from
+# the Temporal UI. Unlike the cronjob workers it registers NO schedule, so an
+# always-on pod costs nothing but a poller.
+#
+# replicas: 1 — Temporal serialises a workflow's activities anyway, and a single
+# worker keeps the CoinGecko rate limiter (which is per-process) authoritative.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: offchain-price-backfill
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: offchain-price-backfill
+  template:
+    metadata:
+      labels:
+        app: offchain-price-backfill
+    spec:
+      serviceAccountName: offchain-price-backfill
+      containers:
+        - name: offchain-price-backfill
+          image: offchain-price-backfill
+          envFrom:
+            - configMapRef:
+                name: offchain-price-backfill
+            - secretRef:
+                name: offchain-price-backfill
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "96Mi"
+            limits:
+              # Higher than the 5-minute indexer's: a chunk decodes ~720 hourly
+              # points and batches them into one upsert transaction, where the
+              # indexer only ever holds 18 current prices.
+              cpu: "500m"
+              memory: "512Mi"
+      # A backfill chunk is a single HTTP call plus one upsert, so an in-flight
+      # activity drains well inside this window; Temporal retries anything that
+      # does not.
+      terminationGracePeriodSeconds: 60

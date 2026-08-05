@@ -635,6 +635,15 @@ dev-env:
 		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
 		"TEMPORAL_HOST_PORT=127.0.0.1:7233" \
 		"TEMPORAL_NAMESPACE=vector" \
+		"COINGECKO_API_KEY=$$COINGECKO_API_KEY" \
+		"BUILD_GIT_HASH=dev" \
+		"LOG_LEVEL=debug" \
+		> cmd/backfillers/offchain-price-backfill/.env; \
+	printf '%s\n' \
+		"CHAIN_ID=1" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
+		"TEMPORAL_HOST_PORT=127.0.0.1:7233" \
+		"TEMPORAL_NAMESPACE=vector" \
 		"ETHERSCAN_API_KEY=$$ETHERSCAN_API_KEY" \
 		"BUILD_GIT_HASH=dev" \
 		"LOG_LEVEL=debug" \
@@ -1809,6 +1818,17 @@ run-cronjob-%:
 	@echo "==> Running $*..."
 	@set -a && . cmd/cronjobs/$*/.env && [ -f cmd/cronjobs/$*/.env.local ] && . cmd/cronjobs/$*/.env.local; set +a && go run ./cmd/cronjobs/$*
 
+# Pattern rules for backfiller binaries — work for any backfiller under cmd/backfillers/.
+build-backfiller-%:
+	@echo "==> Building $*..."
+	mkdir -p dist
+	go build -o dist/$* ./cmd/backfillers/$*
+	@echo "==> Built: dist/$*"
+
+run-backfiller-%:
+	@echo "==> Running $*..."
+	@set -a && . cmd/backfillers/$*/.env && [ -f cmd/backfillers/$*/.env.local ] && . cmd/backfillers/$*/.env.local; set +a && go run ./cmd/backfillers/$*
+
 # Build oracle-pricing-backfill binary for ARM64 Linux (to run on Erigon node)
 build-oracle-pricing-backfill-arm64:
 	@echo "==> Building oracle-pricing-backfill for ARM64 Linux..."
@@ -2106,6 +2126,19 @@ docker-release-transform-bootstrap: ecr-login _docker-release-transform-bootstra
 
 _docker-release-transform-bootstrap-internal:
 	@$(MAKE) _docker-release-go-service GO_NAME="Transform Bootstrap" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/backfillers/transform-bootstrap GO_BIN=transform-bootstrap GO_CACHE_KEY="cronjob-transform-bootstrap" GO_TAG="transform-bootstrap-$(IMAGE_TAG)" GO_LATEST_TAG="transform-bootstrap-latest"
+
+# offchain-price-backfill (VEC-540): the on-demand CoinGecko history backfill. Not a
+# cronjob (it registers no Temporal schedule) so it is not auto-discovered, but it is
+# a long-running worker Deployment rather than a one-off Job — it polls its task queue
+# and waits for a run to be started from the Temporal UI. Ships in the shared cronjob
+# ECR repo with a name-prefixed tag.
+docker-build-offchain-price-backfill:
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/offchain-price-backfill --build-arg BIN=offchain-price-backfill -t stl-offchain-price-backfill:local -f Dockerfile.common .
+
+docker-release-offchain-price-backfill: ecr-login _docker-release-offchain-price-backfill-internal
+
+_docker-release-offchain-price-backfill-internal:
+	@$(MAKE) _docker-release-go-service GO_NAME="Offchain Price Backfill" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/backfillers/offchain-price-backfill GO_BIN=offchain-price-backfill GO_CACHE_KEY="cronjob-offchain-price-backfill" GO_TAG="offchain-price-backfill-$(IMAGE_TAG)" GO_LATEST_TAG="offchain-price-backfill-latest"
 
 kind-load-cronjobs:
 	@$(MAKE) --no-print-directory kind-load-images IMAGES="$(foreach cj,$(CRONJOBS),stl-$(cj):local)"
