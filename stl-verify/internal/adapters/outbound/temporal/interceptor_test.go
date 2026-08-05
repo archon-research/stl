@@ -135,9 +135,16 @@ func TestRunMetricsInterceptor_PassesResultAndErrorThrough(t *testing.T) {
 	}
 }
 
-// A workflow-level counter would re-emit on every replay; instrumenting the
-// activity avoids that. Replaying the same history must not add records.
-func TestRunMetricsInterceptor_DoesNotDoubleCountOnWorkflowReplay(t *testing.T) {
+// Instrumenting the activity rather than the workflow is what keeps the counter
+// honest under replay. This pins the half that is observable in-process: when
+// the executions are driven by a workflow, the count still tracks activity
+// executions and nothing else.
+//
+// It does NOT exercise a real replay. TestWorkflowEnvironment exposes no event
+// history, so a worker.WorkflowReplayer pass needs a history captured from a
+// live server; and because replay never invokes activities, such a test asserts
+// that the counter does not move at all rather than that it stays put.
+func TestRunMetricsInterceptor_RecordsOncePerActivityExecutionInAWorkflow(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	metrics, err := newCronjobMetricsWithProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
 	if err != nil {
@@ -151,7 +158,8 @@ func TestRunMetricsInterceptor_DoesNotDoubleCountOnWorkflowReplay(t *testing.T) 
 		activity.RegisterOptions{Name: "Probe"},
 	)
 
-	// Two activity calls, so a per-replay counter would visibly exceed two.
+	// Two calls rather than one, so a counter keyed on the workflow rather than
+	// the activity would land on a visibly different number.
 	wf := func(ctx workflow.Context) error {
 		ctx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 			StartToCloseTimeout: time.Minute,
@@ -171,8 +179,8 @@ func TestRunMetricsInterceptor_DoesNotDoubleCountOnWorkflowReplay(t *testing.T) 
 		t.Fatalf("unexpected workflow error: %v", err)
 	}
 	if counts := runCounts(t, reader); counts["success"] != 2 {
-		t.Errorf("cronjob.runs.total{status=success} = %d, want exactly 2 (one per activity execution, "+
-			"not per replay); got %v", counts["success"], counts)
+		t.Errorf("cronjob.runs.total{status=success} = %d, want exactly 2 (one per activity "+
+			"execution, not per workflow); got %v", counts["success"], counts)
 	}
 }
 

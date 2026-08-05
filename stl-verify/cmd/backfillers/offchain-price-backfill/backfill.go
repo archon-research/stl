@@ -17,8 +17,9 @@ import (
 // maxChunksPerRun bounds one workflow's activity count. Activities run
 // sequentially with no ContinueAsNew, and each contributes several history
 // events, so an unbounded run can outgrow Temporal's history limit and be
-// terminated mid-flight. 2000 chunks is ~160 years of two-asset backfill —
-// far past any real request, but close enough to catch a mistyped year.
+// terminated mid-flight. chunkWindows emits one chunk per asset per 30-day step,
+// so 2000 chunks is ~164 asset-years — ~82 years for a two-asset request. Far
+// past any real request, but close enough to catch a mistyped year.
 const maxChunksPerRun = 2000
 
 // BackfillParams is the JSON an operator supplies in the Temporal UI's Input box:
@@ -131,16 +132,21 @@ func backfillWorkflow(ctx workflow.Context, params BackfillParams) (BackfillResu
 		"chunks", len(windows),
 	)
 
-	result := BackfillResult{Coverage: state.Coverage, ChunksRun: state.ChunksDone}
-	if err := runChunks(ctx, windows, &state); err != nil {
-		return result, err
+	// Read from state at every return point, so the reported count can never lag
+	// the work actually done. On a FAILING run these counts do not reach the
+	// Result panel at all — Temporal discards a workflow's result payload when it
+	// returns a non-nil error — so the progress query is the channel an operator
+	// uses to see which chunks completed before the failure.
+	resultOf := func() BackfillResult {
+		return BackfillResult{Coverage: state.Coverage, ChunksRun: state.ChunksDone}
 	}
-	result.ChunksRun = state.ChunksDone
+
+	if err := runChunks(ctx, windows, &state); err != nil {
+		return resultOf(), err
+	}
 
 	if err := assertCoverage(params, state); err != nil {
-		// Returned alongside the error so a partially-successful run does not lose
-		// the counts an operator needs to decide what to re-run.
-		return result, err
+		return resultOf(), err
 	}
 
 	// A truncated range is a success, but never a quiet one: the operator asked for
@@ -155,7 +161,7 @@ func backfillWorkflow(ctx workflow.Context, params BackfillParams) (BackfillResu
 	}
 
 	logger.Info("backfill complete", "coverage", state.Coverage, "chunks", state.ChunksDone)
-	return result, nil
+	return resultOf(), nil
 }
 
 // runChunks executes the windows one at a time, recording per-asset coverage.
@@ -286,7 +292,7 @@ type backfillActivities struct {
 }
 
 // FetchChunk stores one window and reports how many points landed, leaving the
-// emptiness judgement to the workflow (see assertEveryAssetProducedData).
+// emptiness judgement to the workflow (see assertCoverage).
 //
 // Idempotent *within one build*, which is what makes Temporal's activity retries
 // safe. The write is ON CONFLICT DO NOTHING on the primary key

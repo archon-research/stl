@@ -144,6 +144,12 @@ func TestBackfillParams_Validate(t *testing.T) {
 		{name: "missing to", in: params([]string{"weth"}, from, time.Time{}), wantErr: true},
 		{name: "from after to", in: params([]string{"weth"}, to, from), wantErr: true},
 		{name: "from equals to", in: params([]string{"weth"}, from, from), wantErr: true},
+		// A repeated ID would be fetched twice and double-counted into one
+		// coverage entry, so the run would report points it never separately saw.
+		{name: "duplicate asset IDs", in: params([]string{"weth", "weth"}, from, to), wantErr: true},
+		// A dropped digit in the year: the guard exists so this is rejected up
+		// front rather than terminated mid-flight for outgrowing the history limit.
+		{name: "mistyped year expands past the chunk ceiling", in: params([]string{"weth"}, day(20, time.January, 1), to), wantErr: true},
 	}
 
 	for _, tc := range tests {
@@ -300,33 +306,82 @@ func TestBackfillWorkflow_FailsOnEmptyWindowAfterDataBegan(t *testing.T) {
 	}
 }
 
-// A failing run must still return its counts, so an operator can see which assets
-// completed and which need re-running.
-func TestBackfillWorkflow_ReturnsPartialCountsAlongsideFailure(t *testing.T) {
-	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
-	registerChunkActivity(env, func(w chunkWindow) (int, error) {
-		if w.Asset == "not-a-coin" {
-			return 0, nil
+// A failing run must still expose the counts an operator needs to decide what to
+// re-run.
+//
+// Asserted through the progress query, not the workflow result: Temporal
+// discards the result payload of a workflow that returns a non-nil error, so the
+// query is the only channel that survives a failure. Reading the result here
+// would assert nothing.
+func TestBackfillWorkflow_ExposesPartialCountsAfterFailure(t *testing.T) {
+	base := day(2020, time.January, 1)
+	// Keyed on the window rather than a call counter: the activity is retried, so
+	// a counter-based stub would fail a different window on each attempt.
+	failFromThirdWindow := func(w chunkWindow) (int, error) {
+		if !w.From.Before(daysAfter(base, 60)) {
+			return 0, errors.New("coingecko unreachable")
 		}
 		return 100, nil
-	})
-
-	base := day(2020, time.January, 1)
-	env.ExecuteWorkflow(backfillWorkflow, params(
-		[]string{"weth", "not-a-coin"}, base, daysAfter(base, 30)))
-
-	if env.GetWorkflowError() == nil {
-		t.Fatal("expected failure for the asset that returned nothing")
 	}
 
-	var got BackfillResult
-	if err := env.GetWorkflowResult(&got); err != nil {
-		// A failed workflow may not carry a decodable result on every SDK version;
-		// the counts are a convenience, not the assertion under test.
-		t.Skipf("result not decodable on a failed workflow: %v", err)
+	tests := []struct {
+		name           string
+		in             BackfillParams
+		chunk          func(chunkWindow) (int, error)
+		wantChunksDone int
+		wantPoints     map[string]int
+	}{
+		{
+			name: "the coverage check rejects an asset that returned nothing",
+			in:   params([]string{"weth", "not-a-coin"}, base, daysAfter(base, 30)),
+			chunk: func(w chunkWindow) (int, error) {
+				if w.Asset == "not-a-coin" {
+					return 0, nil
+				}
+				return 100, nil
+			},
+			wantChunksDone: 2,
+			wantPoints:     map[string]int{"weth": 100, "not-a-coin": 0},
+		},
+		{
+			name:           "a chunk fails part-way through the range",
+			in:             params([]string{"weth"}, base, daysAfter(base, 90)),
+			chunk:          failFromThirdWindow,
+			wantChunksDone: 2,
+			wantPoints:     map[string]int{"weth": 200},
+		},
 	}
-	if got.Coverage["weth"].Points == 0 {
-		t.Error("the successful asset's counts were discarded on failure")
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+			registerChunkActivity(env, tc.chunk)
+
+			env.ExecuteWorkflow(backfillWorkflow, tc.in)
+
+			if env.GetWorkflowError() == nil {
+				t.Fatal("expected the run to fail")
+			}
+
+			encoded, err := env.QueryWorkflow(progressQueryName)
+			if err != nil {
+				t.Fatalf("querying %q after a failed run: %v", progressQueryName, err)
+			}
+			var got backfillProgress
+			if err := encoded.Get(&got); err != nil {
+				t.Fatalf("decoding progress: %v", err)
+			}
+
+			if got.ChunksDone != tc.wantChunksDone {
+				t.Errorf("ChunksDone = %d, want %d — chunks that completed before the failure must stay visible",
+					got.ChunksDone, tc.wantChunksDone)
+			}
+			for asset, want := range tc.wantPoints {
+				if p := got.Coverage[asset].Points; p != want {
+					t.Errorf("Coverage[%s].Points = %d, want %d", asset, p, want)
+				}
+			}
+		})
 	}
 }
 
