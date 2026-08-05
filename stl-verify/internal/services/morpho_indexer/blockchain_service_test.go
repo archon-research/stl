@@ -1757,3 +1757,284 @@ func TestGetTokenPairMetadata_BothZero(t *testing.T) {
 		t.Errorf("expected empty metadata on both sides, got mdA=%+v mdB=%+v", mdA, mdB)
 	}
 }
+
+// --- VaultV2 adapter reads ---
+
+// TestGetAdapterRealAssets_PinsToBlockHash asserts realAssets() is a state read
+// pinned via ExecuteAtHash (reorg-correctness, VEC-471), not by block number.
+func TestGetAdapterRealAssets_PinsToBlockHash(t *testing.T) {
+	h := newTestHarness(t)
+	adapter := common.HexToAddress("0x7481968709b8f155652D42ebf468b22945907dC2")
+
+	var gotHash common.Hash
+	viaHash := false
+	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return nil, fmt.Errorf("getAdapterRealAssets must call ExecuteAtHash, not Execute")
+	}
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+		viaHash = true
+		gotHash = blockHash
+		// AllowFailure is required so a revert comes back as a failed Result the
+		// caller can classify (errAdapterRealAssetsReverted) instead of reverting
+		// the whole batch; it is still an error unless the caller is the seed for an
+		// unclassified adapter.
+		if len(calls) != 1 || calls[0].Target != adapter || !calls[0].AllowFailure {
+			t.Errorf("unexpected calls: %+v", calls)
+		}
+		return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(987654321))}}, nil
+	}
+
+	got, err := h.svc.blockchainSvc.getAdapterRealAssets(context.Background(), adapter, testBlockHash)
+	if err != nil {
+		t.Fatalf("getAdapterRealAssets: %v", err)
+	}
+	if !viaHash {
+		t.Fatal("did not call ExecuteAtHash")
+	}
+	if gotHash != testBlockHash {
+		t.Errorf("pinned to %s, want %s", gotHash, testBlockHash)
+	}
+	if got.Int64() != 987654321 {
+		t.Errorf("realAssets = %s, want 987654321", got)
+	}
+}
+
+func TestGetAdapterRealAssets_RevertIsError(t *testing.T) {
+	h := newTestHarness(t)
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		return []outbound.Result{{Success: false, ReturnData: nil}}, nil
+	}
+	if _, err := h.svc.blockchainSvc.getAdapterRealAssets(context.Background(), common.HexToAddress("0x1"), testBlockHash); err == nil {
+		t.Fatal("expected error when realAssets() reverts")
+	}
+}
+
+func TestGetAdapterRealAssets_MalformedReturnDataIsError(t *testing.T) {
+	h := newTestHarness(t)
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		// Success but a return payload too short to decode a uint256.
+		return []outbound.Result{{Success: true, ReturnData: []byte{0x01}}}, nil
+	}
+	if _, err := h.svc.blockchainSvc.getAdapterRealAssets(context.Background(), common.HexToAddress("0x1"), testBlockHash); err == nil {
+		t.Fatal("expected error decoding malformed realAssets() return data")
+	}
+}
+
+func TestGetAdapterRealAssets_MulticallError(t *testing.T) {
+	h := newTestHarness(t)
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		return nil, errors.New("rpc failure")
+	}
+	if _, err := h.svc.blockchainSvc.getAdapterRealAssets(context.Background(), common.HexToAddress("0x1"), testBlockHash); err == nil {
+		t.Fatal("expected error on multicall failure")
+	}
+}
+
+// TestGetVaultCaps_PinsToBlockHash asserts absoluteCap()/relativeCap() are read
+// together off the vault as one hash-pinned state read (VEC-471), and both values
+// round-trip — including a max-uint128 absolute cap.
+func TestGetVaultCaps_PinsToBlockHash(t *testing.T) {
+	h := newTestHarness(t)
+	vault := common.HexToAddress("0xc7CDcFDEfC64631ED6799C95e3b110cd42F2bD22")
+	capID := [32]byte{0x01, 0x02, 0x03}
+	wantAbs := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 128), big.NewInt(1))
+	wantRel := big.NewInt(1_000_000_000_000_000_000)
+
+	var gotHash common.Hash
+	viaHash := false
+	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return nil, fmt.Errorf("getVaultCaps must call ExecuteAtHash, not Execute")
+	}
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+		viaHash = true
+		gotHash = blockHash
+		if len(calls) != 2 || calls[0].Target != vault || calls[1].Target != vault || calls[0].AllowFailure || calls[1].AllowFailure {
+			t.Errorf("unexpected calls: %+v", calls)
+		}
+		return []outbound.Result{
+			{Success: true, ReturnData: h.packUint256(wantAbs)},
+			{Success: true, ReturnData: h.packUint256(wantRel)},
+		}, nil
+	}
+
+	gotAbs, gotRel, err := h.svc.blockchainSvc.getVaultCaps(context.Background(), vault, capID, testBlockHash)
+	if err != nil {
+		t.Fatalf("getVaultCaps: %v", err)
+	}
+	if !viaHash {
+		t.Fatal("did not call ExecuteAtHash")
+	}
+	if gotHash != testBlockHash {
+		t.Errorf("pinned to %s, want %s", gotHash, testBlockHash)
+	}
+	if gotAbs.Cmp(wantAbs) != 0 {
+		t.Errorf("absoluteCap = %s, want %s", gotAbs, wantAbs)
+	}
+	if gotRel.Cmp(wantRel) != 0 {
+		t.Errorf("relativeCap = %s, want %s", gotRel, wantRel)
+	}
+}
+
+func TestGetVaultCaps_SubResultFailureIsError(t *testing.T) {
+	h := newTestHarness(t)
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		return []outbound.Result{
+			{Success: true, ReturnData: h.packUint256(big.NewInt(1))},
+			{Success: false, ReturnData: nil}, // relativeCap reverted
+		}, nil
+	}
+	if _, _, err := h.svc.blockchainSvc.getVaultCaps(context.Background(), common.HexToAddress("0x1"), [32]byte{0x01}, testBlockHash); err == nil {
+		t.Fatal("expected error when a cap getter reverts")
+	}
+}
+
+func TestGetVaultCaps_MulticallError(t *testing.T) {
+	h := newTestHarness(t)
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		return nil, errors.New("rpc failure")
+	}
+	if _, _, err := h.svc.blockchainSvc.getVaultCaps(context.Background(), common.HexToAddress("0x1"), [32]byte{0x01}, testBlockHash); err == nil {
+		t.Fatal("expected error on multicall failure")
+	}
+}
+
+// TestGetAdapterType_NumberPinned asserts adapter classification is a plain
+// (number-pinned) Execute — adapter identity is immutable, same rationale as
+// getMarketParams (VEC-471).
+func TestGetAdapterType_NumberPinned(t *testing.T) {
+	h := newTestHarness(t)
+	adapter := common.HexToAddress("0x7481968709b8f155652D42ebf468b22945907dC2")
+
+	viaNumber := false
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+		viaNumber = true
+		if len(calls) != 2 || blockNumber == nil || blockNumber.Int64() != 20000000 {
+			t.Errorf("unexpected calls=%d blockNumber=%v", len(calls), blockNumber)
+		}
+		// morpho() succeeds, morphoVaultV1() reverts → MarketV1.
+		return []outbound.Result{
+			{Success: true, ReturnData: h.packAddress(MorphoBlueAddress)},
+			{Success: false, ReturnData: nil},
+		}, nil
+	}
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		t.Fatal("getAdapterType must use Execute (number-pinned), not ExecuteAtHash")
+		return nil, nil
+	}
+
+	got, err := h.svc.blockchainSvc.getAdapterType(context.Background(), adapter, 20000000)
+	if err != nil {
+		t.Fatalf("getAdapterType: %v", err)
+	}
+	if !viaNumber {
+		t.Fatal("did not call Execute")
+	}
+	if got != entity.MorphoAdapterTypeMarketV1 {
+		t.Errorf("adapterType = %d, want MarketV1(1)", got)
+	}
+}
+
+// enumerateVaultAdaptersHarness wires a mock that answers adaptersLength() with
+// wantLength and every adapters(i) sub-call with the address derived from the
+// DECODED index argument (adapterAddressForIndex), recording the per-batch call
+// counts so a test can assert the bound, the chunking, and — via the derived
+// addresses — that each batch requested the right global indices rather than
+// re-reading a prefix.
+func enumerateVaultAdaptersHarness(t *testing.T, vault common.Address, wantLength *big.Int) (*serviceTestHarness, *[]int) {
+	t.Helper()
+	h := newTestHarness(t)
+	batchSizes := &[]int{}
+	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return nil, fmt.Errorf("enumerateVaultAdapters must call ExecuteAtHash, not Execute")
+	}
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		if len(calls) == 1 && hasSameSelector(calls[0].CallData, adaptersLengthSelector) {
+			if calls[0].Target != vault {
+				t.Errorf("adaptersLength() targeted %s, want %s", calls[0].Target.Hex(), vault.Hex())
+			}
+			return []outbound.Result{{Success: true, ReturnData: h.packUint256(wantLength)}}, nil
+		}
+		*batchSizes = append(*batchSizes, len(calls))
+		results := make([]outbound.Result, len(calls))
+		for i, c := range calls {
+			if !hasSameSelector(c.CallData, adaptersSelector) {
+				t.Errorf("unexpected call in adapters(i) batch: %x", c.CallData)
+			}
+			if c.Target != vault {
+				t.Errorf("adapters(i) targeted %s, want %s", c.Target.Hex(), vault.Hex())
+			}
+			index := new(big.Int).SetBytes(c.CallData[4:])
+			results[i] = outbound.Result{Success: true, ReturnData: h.packAddress(adapterAddressForIndex(index))}
+		}
+		return results, nil
+	}
+	return h, batchSizes
+}
+
+// adapterAddressForIndex maps a global adapters(i) index to the address the
+// harness answers for it, so tests can assert position k of the enumeration
+// result came from requesting index k on-chain.
+func adapterAddressForIndex(index *big.Int) common.Address {
+	return common.BigToAddress(new(big.Int).Add(index, big.NewInt(1)))
+}
+
+// TestEnumerateVaultAdapters_ImplausibleLengthIsError pins the hostile-contract
+// guard. adaptersLength() is attacker-controlled for any address that classifies
+// as a VaultV2, and the returned value used to size a slice directly: 1<<62 made
+// make([]outbound.Call, n) panic in makeslice, and the SQS consume path has no
+// recover(), so one hostile vault crashloops the worker and stalls all Morpho
+// indexing. Anything above the sanity bound must be a plain error so the message
+// poison-pills instead.
+func TestEnumerateVaultAdapters_ImplausibleLengthIsError(t *testing.T) {
+	vault := common.HexToAddress("0xc7CDcFDEfC64631ED6799C95e3b110cd42F2bD22")
+	tests := []struct {
+		name   string
+		length *big.Int
+	}{
+		{"makeslice-panic length", new(big.Int).Lsh(big.NewInt(1), 62)},
+		{"oom-sized length", big.NewInt(100_000_000)},
+		{"one above the bound", big.NewInt(maxVaultAdapters + 1)},
+		{"beyond int64", new(big.Int).Lsh(big.NewInt(1), 100)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, _ := enumerateVaultAdaptersHarness(t, vault, tt.length)
+			got, err := h.svc.blockchainSvc.enumerateVaultAdapters(context.Background(), vault, testBlockHash)
+			if err == nil {
+				t.Fatalf("expected an error for adaptersLength() = %s, got %d adapters", tt.length, len(got))
+			}
+			if !strings.Contains(err.Error(), "implausible") {
+				t.Errorf("error should name the implausible length, got: %v", err)
+			}
+		})
+	}
+}
+
+// TestEnumerateVaultAdapters_AtBoundEnumeratesInChunks asserts the bound is
+// inclusive and that the adapters(i) reads are split into bounded multicall
+// batches (adaptersPerCall) rather than one oversized aggregate call.
+func TestEnumerateVaultAdapters_AtBoundEnumeratesInChunks(t *testing.T) {
+	vault := common.HexToAddress("0xc7CDcFDEfC64631ED6799C95e3b110cd42F2bD22")
+	h, batchSizes := enumerateVaultAdaptersHarness(t, vault, big.NewInt(maxVaultAdapters))
+
+	got, err := h.svc.blockchainSvc.enumerateVaultAdapters(context.Background(), vault, testBlockHash)
+	if err != nil {
+		t.Fatalf("enumerateVaultAdapters at the bound: %v", err)
+	}
+	if len(got) != maxVaultAdapters {
+		t.Fatalf("got %d adapters, want %d", len(got), maxVaultAdapters)
+	}
+	for k, addr := range got {
+		if want := adapterAddressForIndex(big.NewInt(int64(k))); addr != want {
+			t.Fatalf("got[%d] = %s, want %s (batch requested the wrong global index)", k, addr.Hex(), want.Hex())
+		}
+	}
+	for _, size := range *batchSizes {
+		if size > adaptersPerCall {
+			t.Errorf("adapters(i) batch of %d calls exceeds adaptersPerCall=%d", size, adaptersPerCall)
+		}
+	}
+	if len(*batchSizes) < 2 {
+		t.Errorf("expected the at-bound enumeration to span several batches, got %v", *batchSizes)
+	}
+}

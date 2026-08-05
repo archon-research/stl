@@ -44,6 +44,27 @@ func MorphoBlueDeployBlock(chainID int64) (int64, error) {
 	return block, nil
 }
 
+// vaultV2FactoryDeployBlocks maps chain IDs to the block at which the Morpho
+// VaultV2 factory (0xA1D94F746dEfa1928926b84fB2596c06926C0405) was deployed.
+// Verified on-chain: the factory has no code at 23375072 and code at 23375073.
+// Used by the morpho-vault-indexer backfiller's --from-v2-deploy flag to default
+// -from to the earliest block any VaultV2 could exist. That bounds the whole
+// backfill pipeline — phase-1 discovery included — not just the V2 replay, so a
+// V1/V1.1 vault whose only activity predates the factory is not discovered.
+var vaultV2FactoryDeployBlocks = map[int64]int64{
+	1: 23_375_073, // Ethereum mainnet
+}
+
+// VaultV2FactoryDeployBlock returns the VaultV2 factory deploy block for the
+// given chain ID.
+func VaultV2FactoryDeployBlock(chainID int64) (int64, error) {
+	block, ok := vaultV2FactoryDeployBlocks[chainID]
+	if !ok {
+		return 0, fmt.Errorf("unsupported chain ID %d for Morpho VaultV2: no known factory deploy block", chainID)
+	}
+	return block, nil
+}
+
 // Config holds service configuration.
 type Config struct {
 	shared.SQSConsumerConfig
@@ -76,6 +97,13 @@ type Service struct {
 	vaultRegistry  *VaultRegistry
 	telemetry      *Telemetry
 
+	// v2StructuredTopics gates ReplayMetaMorphoLog: the replay constructor nils
+	// the user/token/cache/consumer/receipt-token ports, so only the VaultV2
+	// structured governance/allocation/cap/fee events (which never touch them)
+	// are safe to replay. Any other MetaMorpho topic (e.g. a V1 Deposit) is
+	// rejected before it can nil-deref the share-accounting path.
+	v2StructuredTopics map[common.Hash]struct{}
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup // tracks the SQS run loop so Stop can drain it
@@ -99,7 +127,48 @@ func NewService(
 	if err := validateDependencies(consumer, cache, multicallClient, txManager, userRepo, protocolRepo, tokenRepo, morphoRepo, eventRepo, receiptTokenRepo); err != nil {
 		return nil, fmt.Errorf("validating dependencies: %w", err)
 	}
+	return newService(config, consumer, cache, multicallClient, txManager, userRepo, protocolRepo, tokenRepo, morphoRepo, eventRepo, receiptTokenRepo)
+}
 
+// NewReplayService builds a Service wired only for offline replay of
+// already-persisted VaultV2 vaults' structured events — the morpho-vault-indexer
+// backfiller's V2 replay phase. It shares NewService's internals but omits the
+// SQS consumer and block cache: replay reads receipts from S3 and drives logs
+// through ReplayMetaMorphoLog directly, never through the live SQS loop, so Start
+// must not be called on the result. userRepo / tokenRepo / receiptTokenRepo are
+// likewise absent because the replayed adapter / cap / fee events never touch
+// them (share-accounting Deposit/Withdraw/Transfer writes are out of the replay's
+// scope).
+func NewReplayService(
+	config Config,
+	multicallClient outbound.Multicaller,
+	txManager outbound.TxManager,
+	protocolRepo outbound.ProtocolRepository,
+	morphoRepo outbound.MorphoRepository,
+	eventRepo outbound.EventRepository,
+) (*Service, error) {
+	if err := validateReplayDependencies(multicallClient, txManager, protocolRepo, morphoRepo, eventRepo); err != nil {
+		return nil, fmt.Errorf("validating replay dependencies: %w", err)
+	}
+	return newService(config, nil, nil, multicallClient, txManager, nil, protocolRepo, nil, morphoRepo, eventRepo, nil)
+}
+
+// newService assembles the Service from dependencies already validated by the
+// live (NewService) or replay (NewReplayService) constructor. Ports the replay
+// path doesn't use may be nil; the replay entry point never dereferences them.
+func newService(
+	config Config,
+	consumer outbound.SQSConsumer,
+	cache outbound.BlockCacheReader,
+	multicallClient outbound.Multicaller,
+	txManager outbound.TxManager,
+	userRepo outbound.UserRepository,
+	protocolRepo outbound.ProtocolRepository,
+	tokenRepo outbound.TokenRepository,
+	morphoRepo outbound.MorphoRepository,
+	eventRepo outbound.EventRepository,
+	receiptTokenRepo outbound.ReceiptTokenRepository,
+) (*Service, error) {
 	config.SQSConsumerConfig.ApplyDefaults()
 	if err := config.SQSConsumerConfig.Validate(); err != nil {
 		return nil, fmt.Errorf("validating config: %w", err)
@@ -125,23 +194,29 @@ func NewService(
 		return nil, fmt.Errorf("failed to create blockchain service: %w", err)
 	}
 
+	v2StructuredTopics, err := VaultV2StructuredEventTopics()
+	if err != nil {
+		return nil, fmt.Errorf("deriving VaultV2 structured event topics: %w", err)
+	}
+
 	return &Service{
-		config:           config,
-		deployBlock:      deployBlock,
-		consumer:         consumer,
-		cache:            cache,
-		txManager:        txManager,
-		userRepo:         userRepo,
-		protocolRepo:     protocolRepo,
-		tokenRepo:        tokenRepo,
-		morphoRepo:       morphoRepo,
-		eventRepo:        eventRepo,
-		receiptTokenRepo: receiptTokenRepo,
-		blockchainSvc:    blockchainSvc,
-		eventExtractor:   eventExtractor,
-		vaultRegistry:    NewVaultRegistry(config.Logger),
-		telemetry:        config.Telemetry,
-		logger:           config.Logger.With("component", "morpho-indexer"),
+		config:             config,
+		deployBlock:        deployBlock,
+		consumer:           consumer,
+		cache:              cache,
+		txManager:          txManager,
+		userRepo:           userRepo,
+		protocolRepo:       protocolRepo,
+		tokenRepo:          tokenRepo,
+		morphoRepo:         morphoRepo,
+		eventRepo:          eventRepo,
+		receiptTokenRepo:   receiptTokenRepo,
+		blockchainSvc:      blockchainSvc,
+		eventExtractor:     eventExtractor,
+		vaultRegistry:      NewVaultRegistry(config.Logger),
+		telemetry:          config.Telemetry,
+		v2StructuredTopics: v2StructuredTopics,
+		logger:             config.Logger.With("component", "morpho-indexer"),
 	}, nil
 }
 
@@ -149,9 +224,8 @@ func NewService(
 func (s *Service) Start(ctx context.Context) error {
 	s.ctx, s.cancel = context.WithCancel(ctx)
 
-	// Load known vaults from database
-	if err := s.vaultRegistry.LoadFromDB(ctx, s.morphoRepo, s.config.ChainID); err != nil {
-		return fmt.Errorf("loading vault registry: %w", err)
+	if err := s.LoadVaultRegistry(ctx); err != nil {
+		return err
 	}
 
 	s.wg.Go(func() {
@@ -396,7 +470,7 @@ func (s *Service) processReceipt(ctx context.Context, receipt shared.Transaction
 	// The V2 IsVaultActivityEvent path stays inline in the default case
 	// below — V2 emits its 4-field AccrueInterest first in every
 	// state-changing transaction, so single-pass discovery there is correct.
-	if err := s.discoverV1V11VaultsInReceipt(ctx, receipt, chainID, blockNumber); err != nil {
+	if err := s.discoverV1V11VaultsInReceipt(ctx, receipt, chainID, blockNumber, blockHash, blockVersion, blockTimestamp); err != nil {
 		return err
 	}
 
@@ -560,14 +634,18 @@ func (s *Service) processMorphoBlueLog(ctx context.Context, log shared.Log, chai
 // processMetaMorphoLog handles a MetaMorpho vault event log.
 //
 // Every recognised vault event lands in protocol_event as an audit-log row,
-// keyed by (tx_hash, log_index). The four events with state-affecting typed
-// handlers — Deposit, Withdraw, Transfer, AccrueInterest — also produce
-// structured snapshot rows in morpho_vault_state / morpho_vault_position via
-// the dispatch below. The full V2 governance / allocation / cap / fee / role
-// / timelock surface (Allocate, Deallocate, AddAdapter, IncreaseAbsoluteCap,
-// SetPerformanceFee, SetCurator, Submit, …) is registered in the event
-// extractor so it lands in the audit log; structured tables for those events
-// are deferred per docs/vec-198-morpho-v2-followup-plan.md.
+// keyed by (tx_hash, log_index). Events with state-affecting typed handlers
+// additionally produce structured rows via the dispatch below:
+//   - Deposit / Withdraw / Transfer / AccrueInterest → vault state + position.
+//   - AddAdapter / RemoveAdapter → the adapter registry.
+//   - Allocate / Deallocate → an adapter realAssets() state snapshot.
+//   - Increase/DecreaseAbsoluteCap, Increase/DecreaseRelativeCap → vault caps.
+//   - SetPerformanceFee / SetManagementFee (+ their recipients) → a full
+//     fee-config snapshot (morpho_vault_fee).
+//   - ForceDeallocate → a WARN only (its companion Deallocate log snapshots).
+//
+// The remaining registered V2 surface (SetCurator, Submit, timelock / gate /
+// metadata setters, …) has no typed handler: it lands in the audit log only.
 func (s *Service) processMetaMorphoLog(ctx context.Context, log shared.Log, vaultAddress common.Address, chainID, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) error {
 	eventName, ok := s.eventExtractor.MetaMorphoEventName(log)
 	if !ok {
@@ -611,6 +689,30 @@ func (s *Service) processMetaMorphoLog(ctx context.Context, log shared.Log, vaul
 		return s.handleVaultTransfer(ctx, e, vaultAddress, chainID, blockNumber, blockHash, blockVersion, blockTimestamp)
 	case *VaultAccrueInterestEvent:
 		return s.handleVaultAccrueInterest(ctx, e, vaultAddress, chainID, blockNumber, blockHash, blockVersion, blockTimestamp)
+	case *AddAdapterEvent:
+		return s.handleAddAdapter(ctx, e, vaultAddress, blockNumber, blockHash, blockVersion, blockTimestamp)
+	case *RemoveAdapterEvent:
+		return s.handleRemoveAdapter(ctx, e, vaultAddress, blockNumber)
+	case *AllocateEvent:
+		return s.handleAllocation(ctx, e.Adapter, vaultAddress, blockNumber, blockHash, blockVersion, blockTimestamp)
+	case *DeallocateEvent:
+		return s.handleAllocation(ctx, e.Adapter, vaultAddress, blockNumber, blockHash, blockVersion, blockTimestamp)
+	case *ForceDeallocateEvent:
+		return s.handleForceDeallocate(ctx, e, vaultAddress, blockNumber)
+	case *IncreaseAbsoluteCapEvent:
+		return s.handleCapChange(ctx, vaultAddress, e.ID, e.IDData, blockNumber, blockHash, blockVersion, blockTimestamp)
+	case *DecreaseAbsoluteCapEvent:
+		return s.handleCapChange(ctx, vaultAddress, e.ID, e.IDData, blockNumber, blockHash, blockVersion, blockTimestamp)
+	case *IncreaseRelativeCapEvent:
+		return s.handleCapChange(ctx, vaultAddress, e.ID, e.IDData, blockNumber, blockHash, blockVersion, blockTimestamp)
+	case *DecreaseRelativeCapEvent:
+		return s.handleCapChange(ctx, vaultAddress, e.ID, e.IDData, blockNumber, blockHash, blockVersion, blockTimestamp)
+	case *SetPerformanceFeeEvent, *SetManagementFeeEvent,
+		*SetPerformanceFeeRecipientEvent, *SetManagementFeeRecipientEvent:
+		// Every Set* fee event snapshots the vault's FULL on-chain fee config; the
+		// specific field the event changed is irrelevant to what is persisted (the
+		// authoritative full state is the hash-pinned read), mirroring the cap events.
+		return s.handleFeeChange(ctx, vaultAddress, blockNumber, blockHash, blockVersion, blockTimestamp)
 	default:
 		return nil
 	}
@@ -711,29 +813,157 @@ func MorphoBlueVaultCandidates(event MorphoBlueEvent) []common.Address {
 	}
 }
 
-// discoverAndRegisterVault probes vaultAddress on-chain, persists the vault
-// and its asset token, and registers the vault in the in-memory registry.
-// Returns *ErrNotVault if the address is definitively not a Morpho-family
-// vault; transient errors (RPC, DB) propagate as plain errors so the caller
-// can decide whether to retry.
+// discoveredAdapter is one enumerated VaultV2 adapter with everything read
+// on-chain for it BEFORE the discovery persist transaction: its classified type
+// (number-pinned — adapter identity is immutable) and its hash-pinned realAssets()
+// seed. Reading up-front is what lets the vault and all its adapters persist in a
+// single atomic transaction.
+type discoveredAdapter struct {
+	address     common.Address
+	adapterType entity.MorphoAdapterType
+	realAssets  *big.Int
+}
+
+// vaultDiscoveryReads holds every on-chain value discovery needs, read before the
+// persist transaction so the vault row and its adapters commit atomically.
+// adapters and fees are populated only for a VaultV2 (nil/empty for V1/V1.1);
+// adapters is sorted by address for deterministic advisory-lock acquisition in the
+// persist step.
+type vaultDiscoveryReads struct {
+	metadata      *VaultMetadata
+	assetMetadata TokenMetadata
+	adapters      []discoveredAdapter
+	fees          *vaultFeeConfig
+}
+
+// discoverAndRegisterVault probes vaultAddress on-chain, persists the vault, its
+// asset token, and (for a VaultV2) all its enumerated adapters + seeded states in
+// a single transaction, then registers the vault in the in-memory registry.
+// Returns *ErrNotVault if the address is definitively not a Morpho-family vault;
+// transient errors (RPC, DB) propagate as plain errors so the caller can retry.
 //
-// Used by both the IsVaultActivityEvent path (V2) via tryDiscoverVault and
-// the Morpho Blue caller/onBehalf path (V1/V1.1) via
-// discoverV1V11VaultsInReceipt.
-func (s *Service) discoverAndRegisterVault(ctx context.Context, vaultAddress common.Address, chainID, blockNumber int64) error {
-	metadata, err := s.blockchainSvc.getVaultMetadata(ctx, vaultAddress, blockNumber)
+// Used by both the IsVaultActivityEvent path (V2) via tryDiscoverVault and the
+// Morpho Blue caller/onBehalf path (V1/V1.1) via discoverV1V11VaultsInReceipt.
+// blockHash / blockVersion / blockTimestamp are the triggering event's; they feed
+// only the V2 adapter enumeration/seed (hash-pinned reads) and are inert for the
+// V1/V1.1 path.
+//
+// Reads-then-persist ordering is the atomicity guarantee (VEC-218 review): ALL
+// on-chain reads happen first, then everything persists in one WithTransaction.
+// A transient read failure commits nothing, so a worker restart never reloads a
+// discovered-but-adapterless vault (whose historical AddAdapter events never
+// replay on the live stream) and skip its enumeration forever — SQS redelivery
+// re-discovers cleanly.
+func (s *Service) discoverAndRegisterVault(ctx context.Context, vaultAddress common.Address, chainID, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) error {
+	reads, err := s.readVaultForDiscovery(ctx, vaultAddress, blockNumber, blockHash)
 	if err != nil {
-		return fmt.Errorf("fetching vault metadata: %w", err)
+		return err
 	}
 
+	vault, err := s.persistDiscoveredVault(ctx, vaultAddress, chainID, blockNumber, blockVersion, blockTimestamp, reads)
+	if err != nil {
+		return err
+	}
+
+	// Register in-memory only after the atomic persist commits.
+	s.vaultRegistry.RegisterVault(vaultAddress, vault)
+	return nil
+}
+
+// readVaultForDiscovery performs every on-chain read discovery needs, before any
+// DB write: vault metadata, its asset token metadata, and — for a VaultV2 — the
+// full enumerated adapter set with each adapter's type and hash-pinned realAssets
+// seed, plus the hash-pinned fee config. A transport error on any read bubbles so
+// nothing is persisted.
+func (s *Service) readVaultForDiscovery(ctx context.Context, vaultAddress common.Address, blockNumber int64, blockHash common.Hash) (*vaultDiscoveryReads, error) {
+	metadata, err := s.blockchainSvc.getVaultMetadata(ctx, vaultAddress, blockNumber)
+	if err != nil {
+		return nil, fmt.Errorf("fetching vault metadata: %w", err)
+	}
+
+	assetMetadata, err := s.blockchainSvc.getTokenMetadata(ctx, metadata.Asset, blockNumber)
+	if err != nil {
+		return nil, fmt.Errorf("fetching asset token metadata: %w", err)
+	}
+
+	reads := &vaultDiscoveryReads{metadata: metadata, assetMetadata: assetMetadata}
+	if metadata.Version == entity.MorphoVaultV2 {
+		adapters, err := s.readV2Adapters(ctx, vaultAddress, blockNumber, blockHash)
+		if err != nil {
+			return nil, err
+		}
+		reads.adapters = adapters
+
+		fees, err := s.readV2FeeConfigForSeed(ctx, vaultAddress, blockNumber, blockHash)
+		if err != nil {
+			return nil, err
+		}
+		reads.fees = fees
+	}
+	return reads, nil
+}
+
+// readV2FeeConfigForSeed reads the fee config discovery seeds from, returning nil
+// when the contract serves no VaultV2 fee surface at all.
+//
+// The vault probe accepts an address on curator() + liquidityAdapter() alone, so it
+// never proves the fee getters exist. Hard-requiring them here poisoned such an
+// address's discovery forever — its triggering AccrueInterest retried and the vault
+// was never registered. Skipping the seed instead leaves the vault honestly
+// fee-row-less; a partially served surface is drift and still propagates (see
+// getVaultFees).
+func (s *Service) readV2FeeConfigForSeed(ctx context.Context, vaultAddress common.Address, blockNumber int64, blockHash common.Hash) (*vaultFeeConfig, error) {
+	fees, err := s.blockchainSvc.getVaultFees(ctx, vaultAddress, blockHash)
+	if errors.Is(err, errNoVaultFeeSurface) {
+		s.logger.Warn("vault-shaped contract has no VaultV2 fee surface — registering it with no fee config seeded",
+			"vault", vaultAddress.Hex(), "block", blockNumber)
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("seeding fee config for vault %s: %w", vaultAddress.Hex(), err)
+	}
+	return fees, nil
+}
+
+// readV2Adapters enumerates a freshly-discovered VaultV2's adapter set (hash-pinned
+// — the set is versioned state) and, for each adapter, classifies its type
+// (number-pinned identity) and reads its hash-pinned realAssets() seed. The result
+// is sorted by address so the persist transaction acquires the per-(vault,address)
+// GetOrCreateAdapter advisory locks (and the mas-state trigger locks after them)
+// in a deterministic order (ADR-0002 §3 batch rule).
+func (s *Service) readV2Adapters(ctx context.Context, vaultAddress common.Address, blockNumber int64, blockHash common.Hash) ([]discoveredAdapter, error) {
+	addresses, err := s.blockchainSvc.enumerateVaultAdapters(ctx, vaultAddress, blockHash)
+	if err != nil {
+		return nil, fmt.Errorf("enumerating adapters: %w", err)
+	}
+
+	adapters := make([]discoveredAdapter, 0, len(addresses))
+	for _, adapter := range addresses {
+		adapterType, err := s.blockchainSvc.getAdapterType(ctx, adapter, blockNumber)
+		if err != nil {
+			return nil, fmt.Errorf("classifying adapter %s: %w", adapter.Hex(), err)
+		}
+		realAssets, err := s.readSeedRealAssets(ctx, adapter, adapterType, blockHash)
+		if err != nil {
+			return nil, err
+		}
+		adapters = append(adapters, discoveredAdapter{address: adapter, adapterType: adapterType, realAssets: realAssets})
+	}
+	slices.SortFunc(adapters, func(a, b discoveredAdapter) int {
+		return bytes.Compare(a.address.Bytes(), b.address.Bytes())
+	})
+	return adapters, nil
+}
+
+// persistDiscoveredVault writes the vault, its asset token, protocol, receipt
+// token, and every enumerated adapter plus its seeded adapter_state row in a
+// SINGLE transaction. Either the whole vault (including adapters) commits or
+// nothing does, so the vault row can never exist without the adapters its
+// historical AddAdapter events would have created.
+func (s *Service) persistDiscoveredVault(ctx context.Context, vaultAddress common.Address, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time, reads *vaultDiscoveryReads) (*entity.MorphoVault, error) {
 	var vault *entity.MorphoVault
 	if err := s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		assetMetadata, err := s.blockchainSvc.getTokenMetadata(ctx, metadata.Asset, blockNumber)
-		if err != nil {
-			return fmt.Errorf("fetching asset token metadata: %w", err)
-		}
-
-		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, metadata.Asset, assetMetadata.Symbol, assetMetadata.Decimals, &blockNumber)
+		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, reads.metadata.Asset, reads.assetMetadata.Symbol, reads.assetMetadata.Decimals, &blockNumber)
 		if err != nil {
 			return fmt.Errorf("getting asset token: %w", err)
 		}
@@ -743,17 +973,17 @@ func (s *Service) discoverAndRegisterVault(ctx context.Context, vaultAddress com
 			return fmt.Errorf("getting protocol: %w", err)
 		}
 
-		vault, err = entity.NewMorphoVault(chainID, protocolID, vaultAddress.Bytes(), metadata.Name, metadata.Symbol, tokenID, metadata.Version, blockNumber)
+		vault, err = entity.NewMorphoVault(chainID, protocolID, vaultAddress.Bytes(), reads.metadata.Name, reads.metadata.Symbol, tokenID, reads.metadata.Version, blockNumber)
 		if err != nil {
 			return fmt.Errorf("creating vault entity: %w", err)
 		}
-
 		vaultID, err := s.morphoRepo.GetOrCreateVault(ctx, tx, vault)
 		if err != nil {
 			return fmt.Errorf("persisting vault: %w", err)
 		}
+		vault.ID = vaultID
 
-		receiptToken, err := entity.NewReceiptToken(chainID, protocolID, tokenID, blockNumber, vaultAddress, metadata.Symbol)
+		receiptToken, err := entity.NewReceiptToken(chainID, protocolID, tokenID, blockNumber, vaultAddress, reads.metadata.Symbol)
 		if err != nil {
 			return fmt.Errorf("creating receipt token entity: %w", err)
 		}
@@ -761,13 +991,72 @@ func (s *Service) discoverAndRegisterVault(ctx context.Context, vaultAddress com
 			return fmt.Errorf("upserting receipt token: %w", err)
 		}
 
-		vault.ID = vaultID
-		return nil
+		if err := s.seedDiscoveredAdapters(ctx, tx, vault, vaultAddress, blockNumber, blockVersion, blockTimestamp, reads.adapters); err != nil {
+			return err
+		}
+		return s.seedDiscoveredFees(ctx, tx, vault, blockNumber, blockVersion, blockTimestamp, reads.fees)
 	}); err != nil {
-		return fmt.Errorf("persisting vault: %w", err)
+		return nil, fmt.Errorf("persisting vault %s: %w", vaultAddress.Hex(), err)
 	}
+	return vault, nil
+}
 
-	s.vaultRegistry.RegisterVault(vaultAddress, vault)
+// seedDiscoveredAdapters registers each enumerated adapter and seeds one
+// adapter_state row from its already-read hash-pinned realAssets, within the
+// discovery transaction. Seeding at discovery keeps the adapter registry and its
+// state consistent from the first moment (VEC-219's composition-completeness probe
+// treats an active adapter with no state row as adapter_data_missing); subsequent
+// Allocate/Deallocate events append as normal. adapters arrive address-sorted (see
+// readV2Adapters); V1/V1.1 vaults pass an empty slice.
+//
+// Bootstrap ordering contract: for a vault discovered mid-life, the adapter
+// LIFECYCLE history (AddAdapter / RemoveAdapter) must be replayed before any state
+// is seeded for that adapter. Discovery only ever sees the adapters active at the
+// discovery block, so it collapses every prior incarnation of an address into the
+// single row it seeds here, and hangs the seed snapshot off that row. If the
+// backfiller later replays an add/remove pair that predates discovery, the row
+// converges into that earlier window while still owning snapshots from after it —
+// which MarkAdapterRemoved's orphan guard refuses, because that close is the
+// incarnation's first and so compares block_number alone (assertNoStateAfterRemoval).
+// The guard is a backstop, not a substitute for the ordering: replaying lifecycle first
+// means every snapshot is written against the incarnation that actually owns it.
+func (s *Service) seedDiscoveredAdapters(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault, vaultAddress common.Address, blockNumber int64, blockVersion int, blockTimestamp time.Time, adapters []discoveredAdapter) error {
+	for _, a := range adapters {
+		adapterID, err := s.upsertAdapterRow(ctx, tx, vault, vaultAddress, a.address, a.adapterType, blockNumber)
+		if err != nil {
+			return err
+		}
+		if err := s.saveAdapterSeedState(ctx, tx, adapterID, a.realAssets, blockNumber, blockVersion, blockTimestamp); err != nil {
+			return fmt.Errorf("seeding adapter state for %s: %w", a.address.Hex(), err)
+		}
+	}
+	return nil
+}
+
+// seedDiscoveredFees snapshots a freshly discovered VaultV2's full fee config from
+// the already-read hash-pinned values, within the discovery transaction. Without
+// it a mid-life-discovered vault carries NO fee row until a Set* fee event fires
+// again — and governance typically sets fees once, at deployment (sparkUSDTbc:
+// blocks 24765788 / 24765805), so "again" may be never. fees is nil for V1/V1.1,
+// which have no VaultV2 fee surface.
+//
+// Caps have no equivalent seed and deliberately so: a cap id is an opaque keccak
+// hash of the id-data the curator chose, and the contract exposes no enumeration
+// getter, so there is no set to read. Cap history therefore starts at the first cap
+// event we witness or the backfiller replays.
+func (s *Service) seedDiscoveredFees(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault, blockNumber int64, blockVersion int, blockTimestamp time.Time, fees *vaultFeeConfig) error {
+	if fees == nil {
+		return nil
+	}
+	vaultFee, err := entity.NewMorphoVaultFee(vault.ID, fees.performanceFee, fees.managementFee,
+		fees.performanceFeeRecipient.Bytes(), fees.managementFeeRecipient.Bytes(),
+		blockNumber, blockVersion, blockTimestamp)
+	if err != nil {
+		return fmt.Errorf("creating vault fee entity: %w", err)
+	}
+	if err := s.morphoRepo.SaveVaultFee(ctx, tx, vaultFee); err != nil {
+		return fmt.Errorf("seeding vault fee config: %w", err)
+	}
 	return nil
 }
 
@@ -787,7 +1076,7 @@ func (s *Service) tryDiscoverVault(ctx context.Context, log shared.Log, vaultAdd
 		return &ErrNotVault{Err: fmt.Errorf("event decode failed: %w", err)}
 	}
 
-	if err := s.discoverAndRegisterVault(ctx, vaultAddress, chainID, blockNumber); err != nil {
+	if err := s.discoverAndRegisterVault(ctx, vaultAddress, chainID, blockNumber, blockHash, blockVersion, blockTimestamp); err != nil {
 		return err
 	}
 
@@ -818,7 +1107,7 @@ func (s *Service) tryDiscoverVault(ctx context.Context, log shared.Log, vaultAdd
 // logs in the same receipt, only one probe fires per receipt. After the
 // first probe the registry cache (IsKnownVault / IsKnownNotVault) handles
 // further short-circuiting.
-func (s *Service) discoverV1V11VaultsInReceipt(ctx context.Context, receipt shared.TransactionReceipt, chainID, blockNumber int64) error {
+func (s *Service) discoverV1V11VaultsInReceipt(ctx context.Context, receipt shared.TransactionReceipt, chainID, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) error {
 	morphoBlueAddr := MorphoBlueAddress
 	var errs []error
 	seen := make(map[common.Address]bool)
@@ -861,7 +1150,7 @@ func (s *Service) discoverV1V11VaultsInReceipt(ctx context.Context, receipt shar
 			probeCtx, probeSpan := s.telemetry.StartSpan(ctx, "morpho.discoverVault",
 				attribute.String("vault.address", addr.Hex()),
 				attribute.String("discovery.path", "morphoBlue"))
-			probeErr := s.discoverAndRegisterVault(probeCtx, addr, chainID, blockNumber)
+			probeErr := s.discoverAndRegisterVault(probeCtx, addr, chainID, blockNumber, blockHash, blockVersion, blockTimestamp)
 			probeSpan.End()
 			if probeErr == nil {
 				continue
@@ -1390,6 +1679,31 @@ func validateDependencies(
 	}
 	if receiptTokenRepo == nil {
 		return fmt.Errorf("receiptTokenRepo is required")
+	}
+	return nil
+}
+
+func validateReplayDependencies(
+	multicallClient outbound.Multicaller,
+	txManager outbound.TxManager,
+	protocolRepo outbound.ProtocolRepository,
+	morphoRepo outbound.MorphoRepository,
+	eventRepo outbound.EventRepository,
+) error {
+	if multicallClient == nil {
+		return fmt.Errorf("multicallClient is required")
+	}
+	if txManager == nil {
+		return fmt.Errorf("txManager is required")
+	}
+	if protocolRepo == nil {
+		return fmt.Errorf("protocolRepo is required")
+	}
+	if morphoRepo == nil {
+		return fmt.Errorf("morphoRepo is required")
+	}
+	if eventRepo == nil {
+		return fmt.Errorf("eventRepo is required")
 	}
 	return nil
 }
