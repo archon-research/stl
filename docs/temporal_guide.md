@@ -278,9 +278,18 @@ twice. Re-running later means the same form with a new ID.
 5. **Judge "did this produce anything" in the workflow, not the activity.** Only the
    workflow sees every unit, so only it can tell a genuinely empty result from one
    legitimately-empty slice. See `assertEveryAssetProducedData`.
-6. **Set `OTEL_EXPORTER_OTLP_ENDPOINT` in the ConfigMap.** Unset means metrics are
-   silent no-ops — `offchain-price-indexer` omits it and has exported nothing for
-   months while running perfectly.
+6. **Set `OTEL_EXPORTER_OTLP_ENDPOINT` in the ConfigMap.** `RunWorker` instruments
+   every registered activity through an interceptor, so the job emits the same
+   `cronjob_runs_total` / `cronjob_run_duration_seconds` series a scheduled cronjob
+   does — one record per activity execution — and inherits the alerts keyed on them
+   with no per-job wiring. But that only reaches a collector if the endpoint is set:
+   unset makes the providers silent no-ops, which is why `offchain-price-indexer`
+   exported nothing for months while running perfectly.
+
+   Note what the coverage does *not* include: `VectorCronjobAllRunsFailing` pages on
+   "errors and no successes in an hour", which is an on-demand job's normal idle
+   state, so such jobs are excluded from it. Liveness comes from
+   `VectorCronjobWorkerDown` instead — add the Deployment name to its regexes.
 
 ### Deploying one
 

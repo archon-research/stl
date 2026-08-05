@@ -153,10 +153,13 @@ scheduled cronjob. Two things differ when it pages:
 - **Nothing is missed while it is down.** It has no schedule, so there is no tick
   firing into the void and no data going stale. The impact is only that a backfill
   cannot be *started* until it is back. Triage it, but it is not a data-loss page.
-- **`cronjob_runs_total` will never exist for it.** That counter comes from the
-  shared `cronjobActivities` path, which only `RunCronjob` uses. So the
-  "fresh `status=success` run" recovery check above does **not** apply — verify
-  instead that the pod is available and that a test workflow completes:
+- **It does emit `cronjob_runs_total`, but one record per *chunk*, not per run.**
+  `RunWorker` instruments activities via an interceptor, so a 162-chunk backfill
+  emits 162 records. `VectorCronjobRunFailing` (warning) therefore covers it, but
+  it is deliberately **excluded from `VectorCronjobAllRunsFailing`** (critical):
+  zero successes in an hour is this job's normal idle state, so that rule would
+  page on any single failed manual trigger. Verify recovery by confirming the pod
+  is available and that a test workflow completes:
 
   ```
   temporal workflow start --namespace vector \

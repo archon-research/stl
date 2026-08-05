@@ -83,7 +83,14 @@ groups:
       # -----------------------------------------------------------------------
       - alert: VectorCronjobAllRunsFailing
         # Errors > 0 AND zero successes over 1h => the job is consistently
-        # failing, not flapping. The 1h window spans >=1 cycle for even the
+        # failing, not flapping.
+        #
+        # On-demand jobs (temporal.RunWorker — offchain-price-backfill) are excluded:
+        # they run only when a human triggers them, so "zero successes in the last
+        # hour" is their normal healthy state and this rule's premise does not hold.
+        # One deliberately-failed manual run would otherwise page the operator who
+        # just triggered it. They still emit cronjob_runs_total and are still covered
+        # by the VectorCronjobRunFailing warning above, plus VectorCronjobWorkerDown. The 1h window spans >=1 cycle for even the
         # slowest cronjob (watcher-data-validator, 1h) and many cycles for the
         # faster ones. Distinct from VectorCronjobWorkerDown: here the worker
         # IS running and emitting metrics, every run just errors.
@@ -93,6 +100,7 @@ groups:
               increase(cronjob_runs_total{
                 status="error",
                 service_name!="maple-graphql-indexer",
+                service_name!="offchain-price-backfill",
                 k8s_namespace_name="vector"
               }[1h])
             ) > 0
@@ -103,6 +111,7 @@ groups:
               increase(cronjob_runs_total{
                 status="success",
                 service_name!="maple-graphql-indexer",
+                service_name!="offchain-price-backfill",
                 k8s_namespace_name="vector"
               }[1h])
             ) == 0

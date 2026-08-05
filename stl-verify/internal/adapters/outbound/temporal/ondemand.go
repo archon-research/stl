@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.temporal.io/sdk/interceptor"
 	"go.temporal.io/sdk/worker"
 )
 
@@ -59,7 +60,16 @@ func RunWorker(ctx context.Context, meta BuildMeta, cfg WorkerConfig) error {
 	}
 	defer boot.close()
 
-	w := worker.New(boot.client, cfg.Name, worker.Options{})
+	metrics, err := newCronjobMetrics()
+	if err != nil {
+		return fmt.Errorf("creating run metrics: %w", err)
+	}
+
+	// The interceptor instruments whatever the job registers, so a new on-demand
+	// job is covered the moment it ships rather than having to remember to emit.
+	w := worker.New(boot.client, cfg.Name, worker.Options{
+		Interceptors: []interceptor.WorkerInterceptor{newRunMetricsInterceptor(metrics)},
+	})
 	if err := cfg.Register(ctx, boot.dependencies(), w); err != nil {
 		return fmt.Errorf("registering %s workflows: %w", cfg.Name, err)
 	}
