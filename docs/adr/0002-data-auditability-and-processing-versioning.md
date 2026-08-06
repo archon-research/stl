@@ -168,14 +168,14 @@ Every such function on a **hypertable** wants `plan_cache_mode = 'force_custom_p
 ALTER FUNCTION assign_processing_version_<table>() SET plan_cache_mode = 'force_custom_plan';
 ```
 
-**Rollout is per table, not all at once.** The mechanism below is shared by all ~36
-functions, but a plan-behaviour change is only applied to ingest paths that have been
-measured and exercised end to end. As of 2026-08-06 the only converted table is
-`offchain_token_price`, where the cost was measured and where a historical backfill made
-it acute. Convert the others individually, each with its own measurement, and add each to
-`pinnedCustomPlanFunctions` in `db/migrator/processing_version_indexes_integration_test.go`
-so a later revert is caught. New versioned hypertables should include the `ALTER FUNCTION`
-in the migration that creates their trigger.
+Applied to all 36 functions: `20260806_120000_processing_version_force_custom_plan.sql`
+covers `offchain_token_price`, where the cost was measured and a historical backfill made
+it acute, and `20260806_130000_set_plan_cache_mode_on_processing_version_triggers.sql`
+covers the rest — the setting is semantics-free (plan choice only), so blanket coverage
+beats waiting for each table to age into the same pathology. New versioned hypertables
+must declare the `SET` inside the `CREATE FUNCTION` that defines their trigger:
+`CREATE OR REPLACE FUNCTION` resets `proconfig`, so a detached `ALTER` does not survive
+a later function edit (see `db/migrations/AGENTS.md`).
 
 This reverses an earlier assumption in this ADR, which treated PL/pgSQL's plan caching as a
 benefit of hardcoding the column names. For a **hypertable** it is the opposite. PL/pgSQL switches
@@ -205,8 +205,8 @@ versions, same locking.
 Preferred over adding a covering index for the `build_id` check: an index fixes one table, costs
 write throughput on the hot ingest path, and still leaves a generic plan unable to prune.
 
-Enforced by `TestProcessingVersionFunctionsPinCustomPlan`, which fails if any
-`assign_processing_version_*` function lacks the setting.
+Enforced by `TestProcessingVersionTriggersForceCustomPlan`, which enumerates
+`assign_processing_version_*` from `pg_proc` and fails if any function lacks the setting.
 
 #### Retry vs. Reprocessing
 

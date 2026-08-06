@@ -4,194 +4,301 @@ package migrator_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"regexp"
-	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/archon-research/stl/stl-verify/db/migrator"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-type processingVersionIndexCase struct {
-	tableName      string
-	indexName      string
-	indexFragment  string
-	prepareSQL     string
-	executeArgsSQL string
-	maxExecBuffers int
+// prime_debt carries the many-chunk fixture: chunk fan-out only shows up once a table has far more
+// chunks than a handful, and spreading every table that wide would cost the suite more than the one
+// signal is worth. Its trigger has the same shape as the other 35, so what holds here holds for them.
+const (
+	manyChunkTable = "prime_debt"
+	manyChunkDays  = 400
+	// A fixture that quietly stopped creating chunks would neuter every fan-out assertion below.
+	minManyChunkCount = 100
+)
+
+// Floor for every other fixture table: enough chunks that pruning to one is a real narrowing.
+const minFixtureChunkCount = 5
+
+// Per-lookup budget, planning included: force_custom_plan re-plans on every execution, so planning
+// is part of the per-row trigger cost and has to stay flat in chunk count too. Measured 25-59 buffers
+// across all 14 tables with the many-chunk table at 401 chunks; the same lookup costs 406 buffers
+// once a generic plan stops pruning.
+const maxTriggerLookupBuffers = 120
+
+// Per-row insert budget for the real trigger on the many-chunk table, in the steady state a
+// long-lived worker connection runs in. Measured 98 buffers/row at 401 chunks under the trigger's
+// configured plan_cache_mode, against 423 once the same trigger plans generically.
+const (
+	triggerInsertRows      = 20
+	maxInsertBuffersPerRow = 200
+)
+
+const processingVersionProbeTimestamp = "timestamptz '2035-01-03 00:00:00.5+00'"
+
+// No seeded row carries this build_id, so the retry lookup has to exhaust the key's index entries
+// exactly as it does on a first write — the case that has to stay cheap.
+const probeBuildID = 7
+
+// A natural-key column of a processing_version lookup, with the PREPARE parameter type and the
+// literal the test probes it with. One declaration feeds both statements the trigger runs per row.
+type processingVersionKeyColumn struct {
+	name    string
+	pgType  string
+	literal string
 }
 
+type processingVersionIndexCase struct {
+	tableName     string
+	indexName     string
+	indexFragment string
+	keyColumns    []processingVersionKeyColumn
+}
+
+// The probe key deliberately lands in an existing chunk without matching a row the retry lookup can
+// return: that is the production shape (a key this build has not written yet), and it stops LIMIT 1
+// from short-circuiting on the first chunk, which would hide fan-out.
 func processingVersionIndexCases() []processingVersionIndexCase {
+	ts := processingVersionProbeTimestamp
 	return []processingVersionIndexCase{
 		{
 			tableName:     "borrower",
 			indexName:     "idx_borrower_pv_lookup",
 			indexFragment: "(user_id, protocol_id, token_id, block_number, block_version, created_at, processing_version DESC)",
-			prepareSQL: `PREPARE pv_borrower(bigint, bigint, bigint, bigint, int, timestamptz) AS
-				SELECT COALESCE(MAX(processing_version), -1)
-				FROM borrower
-				WHERE user_id = $1 AND protocol_id = $2 AND token_id = $3
-				  AND block_number = $4 AND block_version = $5 AND created_at = $6`,
-			executeArgsSQL: "1, 1, 1, 1000000, 0, timestamptz '2035-01-03 00:00:00.5+00'",
-			maxExecBuffers: 200,
+			keyColumns: []processingVersionKeyColumn{
+				{"user_id", "bigint", "1"},
+				{"protocol_id", "bigint", "1"},
+				{"token_id", "bigint", "1"},
+				{"block_number", "bigint", "1000000"},
+				{"block_version", "int", "0"},
+				{"created_at", "timestamptz", ts},
+			},
 		},
 		{
 			tableName:     "borrower_collateral",
 			indexName:     "idx_borrower_collateral_pv_lookup",
 			indexFragment: "(user_id, protocol_id, token_id, block_number, block_version, created_at, processing_version DESC)",
-			prepareSQL: `PREPARE pv_borrower_collateral(bigint, bigint, bigint, bigint, int, timestamptz) AS
-				SELECT COALESCE(MAX(processing_version), -1)
-				FROM borrower_collateral
-				WHERE user_id = $1 AND protocol_id = $2 AND token_id = $3
-				  AND block_number = $4 AND block_version = $5 AND created_at = $6`,
-			executeArgsSQL: "1, 1, 1, 1000000, 0, timestamptz '2035-01-03 00:00:00.5+00'",
-			maxExecBuffers: 200,
+			keyColumns: []processingVersionKeyColumn{
+				{"user_id", "bigint", "1"},
+				{"protocol_id", "bigint", "1"},
+				{"token_id", "bigint", "1"},
+				{"block_number", "bigint", "1000000"},
+				{"block_version", "int", "0"},
+				{"created_at", "timestamptz", ts},
+			},
 		},
 		{
 			tableName:     "sparklend_reserve_data",
 			indexName:     "idx_sparklend_reserve_data_pv_lookup",
 			indexFragment: "(protocol_id, token_id, block_number, block_version, processing_version DESC)",
-			prepareSQL: `PREPARE pv_sparklend_reserve_data(bigint, bigint, bigint, int) AS
-				SELECT COALESCE(MAX(processing_version), -1)
-				FROM sparklend_reserve_data
-				WHERE protocol_id = $1 AND token_id = $2 AND block_number = $3 AND block_version = $4`,
-			executeArgsSQL: "1, 1, 1000000, 0",
-			maxExecBuffers: 200,
+			keyColumns: []processingVersionKeyColumn{
+				{"protocol_id", "bigint", "1"},
+				{"token_id", "bigint", "1"},
+				{"block_number", "bigint", "1000000"},
+				{"block_version", "int", "0"},
+			},
 		},
 		{
 			tableName:     "onchain_token_price",
 			indexName:     "idx_onchain_token_price_pv_lookup",
 			indexFragment: `(token_id, oracle_id, block_number, block_version, "timestamp", processing_version DESC)`,
-			prepareSQL: `PREPARE pv_onchain_token_price(bigint, smallint, bigint, smallint, timestamptz) AS
-				SELECT COALESCE(MAX(processing_version), -1)
-				FROM onchain_token_price
-				WHERE token_id = $1 AND oracle_id = $2 AND block_number = $3
-				  AND block_version = $4 AND timestamp = $5`,
-			executeArgsSQL: "1, 1, 1000000, 0, timestamptz '2035-01-03 00:00:00.5+00'",
-			maxExecBuffers: 200,
+			keyColumns: []processingVersionKeyColumn{
+				{"token_id", "bigint", "1"},
+				{"oracle_id", "smallint", "1"},
+				{"block_number", "bigint", "1000000"},
+				{"block_version", "smallint", "0"},
+				{`"timestamp"`, "timestamptz", ts},
+			},
 		},
 		{
 			tableName:     "morpho_market_state",
 			indexName:     "idx_morpho_market_state_pv_lookup",
 			indexFragment: `(morpho_market_id, block_number, block_version, "timestamp", processing_version DESC)`,
-			prepareSQL: `PREPARE pv_morpho_market_state(bigint, bigint, int, timestamptz) AS
-				SELECT COALESCE(MAX(processing_version), -1)
-				FROM morpho_market_state
-				WHERE morpho_market_id = $1 AND block_number = $2
-				  AND block_version = $3 AND timestamp = $4`,
-			executeArgsSQL: "1, 1000000, 0, timestamptz '2035-01-03 00:00:00.5+00'",
-			maxExecBuffers: 200,
+			keyColumns: []processingVersionKeyColumn{
+				{"morpho_market_id", "bigint", "1"},
+				{"block_number", "bigint", "1000000"},
+				{"block_version", "int", "0"},
+				{`"timestamp"`, "timestamptz", ts},
+			},
 		},
 		{
 			tableName:     "morpho_market_position",
 			indexName:     "idx_morpho_market_position_pv_lookup",
 			indexFragment: `(user_id, morpho_market_id, block_number, block_version, "timestamp", processing_version DESC)`,
-			prepareSQL: `PREPARE pv_morpho_market_position(bigint, bigint, bigint, int, timestamptz) AS
-				SELECT COALESCE(MAX(processing_version), -1)
-				FROM morpho_market_position
-				WHERE user_id = $1 AND morpho_market_id = $2 AND block_number = $3
-				  AND block_version = $4 AND timestamp = $5`,
-			executeArgsSQL: "1, 1, 1000000, 0, timestamptz '2035-01-03 00:00:00.5+00'",
-			maxExecBuffers: 200,
+			keyColumns: []processingVersionKeyColumn{
+				{"user_id", "bigint", "1"},
+				{"morpho_market_id", "bigint", "1"},
+				{"block_number", "bigint", "1000000"},
+				{"block_version", "int", "0"},
+				{`"timestamp"`, "timestamptz", ts},
+			},
 		},
 		{
 			tableName:     "morpho_vault_state",
 			indexName:     "idx_morpho_vault_state_pv_lookup",
 			indexFragment: `(morpho_vault_id, block_number, block_version, "timestamp", processing_version DESC)`,
-			prepareSQL: `PREPARE pv_morpho_vault_state(bigint, bigint, int, timestamptz) AS
-				SELECT COALESCE(MAX(processing_version), -1)
-				FROM morpho_vault_state
-				WHERE morpho_vault_id = $1 AND block_number = $2
-				  AND block_version = $3 AND timestamp = $4`,
-			executeArgsSQL: "1, 1000000, 0, timestamptz '2035-01-03 00:00:00.5+00'",
-			maxExecBuffers: 200,
+			keyColumns: []processingVersionKeyColumn{
+				{"morpho_vault_id", "bigint", "1"},
+				{"block_number", "bigint", "1000000"},
+				{"block_version", "int", "0"},
+				{`"timestamp"`, "timestamptz", ts},
+			},
 		},
 		{
 			tableName:     "morpho_vault_position",
 			indexName:     "idx_morpho_vault_position_pv_lookup",
 			indexFragment: `(user_id, morpho_vault_id, block_number, block_version, "timestamp", processing_version DESC)`,
-			prepareSQL: `PREPARE pv_morpho_vault_position(bigint, bigint, bigint, int, timestamptz) AS
-				SELECT COALESCE(MAX(processing_version), -1)
-				FROM morpho_vault_position
-				WHERE user_id = $1 AND morpho_vault_id = $2 AND block_number = $3
-				  AND block_version = $4 AND timestamp = $5`,
-			executeArgsSQL: "1, 1, 1000000, 0, timestamptz '2035-01-03 00:00:00.5+00'",
-			maxExecBuffers: 200,
+			keyColumns: []processingVersionKeyColumn{
+				{"user_id", "bigint", "1"},
+				{"morpho_vault_id", "bigint", "1"},
+				{"block_number", "bigint", "1000000"},
+				{"block_version", "int", "0"},
+				{`"timestamp"`, "timestamptz", ts},
+			},
 		},
 		{
-			tableName:     "prime_debt",
+			tableName:     manyChunkTable,
 			indexName:     "idx_prime_debt_pv_lookup",
 			indexFragment: "(prime_id, block_number, block_version, synced_at, processing_version DESC)",
-			prepareSQL: `PREPARE pv_prime_debt(bigint, bigint, int, timestamptz) AS
-				SELECT COALESCE(MAX(processing_version), -1)
-				FROM prime_debt
-				WHERE prime_id = $1 AND block_number = $2 AND block_version = $3 AND synced_at = $4`,
-			executeArgsSQL: "1, 1000000, 0, timestamptz '2035-01-03 00:00:00.5+00'",
-			maxExecBuffers: 200,
+			keyColumns: []processingVersionKeyColumn{
+				{"prime_id", "bigint", "1"},
+				{"block_number", "bigint", "1000000"},
+				{"block_version", "int", "0"},
+				{"synced_at", "timestamptz", ts},
+			},
 		},
 		{
 			tableName:     "allocation_position",
 			indexName:     "idx_allocation_position_pv_lookup",
 			indexFragment: "(chain_id, token_id, prime_id, proxy_address, block_number, block_version, tx_hash, log_index, direction, created_at, processing_version DESC)",
-			prepareSQL: `PREPARE pv_allocation_position(int, bigint, bigint, bytea, bigint, int, bytea, int, text, timestamptz) AS
-				SELECT COALESCE(MAX(processing_version), -1)
-				FROM allocation_position
-				WHERE chain_id = $1 AND token_id = $2 AND prime_id = $3 AND proxy_address = $4
-				  AND block_number = $5 AND block_version = $6 AND tx_hash = $7
-				  AND log_index = $8 AND direction = $9 AND created_at = $10`,
-			executeArgsSQL: "1, 1, 1, '\\x01'::bytea, 1000000, 0, '\\x01'::bytea, 1, 'in', timestamptz '2035-01-03 00:00:00.5+00'",
-			maxExecBuffers: 200,
+			keyColumns: []processingVersionKeyColumn{
+				{"chain_id", "int", "1"},
+				{"token_id", "bigint", "1"},
+				{"prime_id", "bigint", "1"},
+				{"proxy_address", "bytea", `'\x01'::bytea`},
+				{"block_number", "bigint", "1000000"},
+				{"block_version", "int", "0"},
+				{"tx_hash", "bytea", `'\x01'::bytea`},
+				{"log_index", "int", "1"},
+				{"direction", "text", "'in'"},
+				{"created_at", "timestamptz", ts},
+			},
 		},
 		{
 			tableName:     "protocol_event",
 			indexName:     "idx_protocol_event_pv_lookup",
 			indexFragment: "(chain_id, block_number, block_version, tx_hash, log_index, created_at, processing_version DESC)",
-			prepareSQL: `PREPARE pv_protocol_event(int, bigint, int, bytea, int, timestamptz) AS
-				SELECT COALESCE(MAX(processing_version), -1)
-				FROM protocol_event
-				WHERE chain_id = $1 AND block_number = $2 AND block_version = $3
-				  AND tx_hash = $4 AND log_index = $5 AND created_at = $6`,
-			executeArgsSQL: "1, 1000000, 0, '\\x01'::bytea, 1, timestamptz '2035-01-03 00:00:00.5+00'",
-			maxExecBuffers: 200,
+			keyColumns: []processingVersionKeyColumn{
+				{"chain_id", "int", "1"},
+				{"block_number", "bigint", "1000000"},
+				{"block_version", "int", "0"},
+				{"tx_hash", "bytea", `'\x01'::bytea`},
+				{"log_index", "int", "1"},
+				{"created_at", "timestamptz", ts},
+			},
 		},
 		{
 			tableName:     "anchorage_package_snapshot",
 			indexName:     "idx_anchorage_package_snapshot_pv_lookup",
 			indexFragment: "(prime_id, package_id, asset_type, custody_type, snapshot_time, processing_version DESC)",
-			prepareSQL: `PREPARE pv_anchorage_package_snapshot(bigint, text, text, text, timestamptz) AS
-				SELECT COALESCE(MAX(processing_version), -1)
-				FROM anchorage_package_snapshot
-				WHERE prime_id = $1 AND package_id = $2 AND asset_type = $3
-				  AND custody_type = $4 AND snapshot_time = $5`,
-			executeArgsSQL: "1, 'pkg', 'BTC', 'AnchorageCustody', timestamptz '2035-01-03 00:00:00.5+00'",
-			maxExecBuffers: 200,
+			keyColumns: []processingVersionKeyColumn{
+				{"prime_id", "bigint", "1"},
+				{"package_id", "text", "'pkg'"},
+				{"asset_type", "text", "'BTC'"},
+				{"custody_type", "text", "'AnchorageCustody'"},
+				{"snapshot_time", "timestamptz", ts},
+			},
 		},
 		{
 			tableName:     "anchorage_operation",
 			indexName:     "idx_anchorage_operation_pv_lookup",
 			indexFragment: "(operation_id, created_at, processing_version DESC)",
-			prepareSQL: `PREPARE pv_anchorage_operation(text, timestamptz) AS
-				SELECT COALESCE(MAX(processing_version), -1)
-				FROM anchorage_operation
-				WHERE operation_id = $1 AND created_at = $2`,
-			executeArgsSQL: "'operation', timestamptz '2035-01-03 00:00:00.5+00'",
-			maxExecBuffers: 200,
+			keyColumns: []processingVersionKeyColumn{
+				{"operation_id", "text", "'operation'"},
+				{"created_at", "timestamptz", ts},
+			},
 		},
 		{
 			tableName:     "offchain_token_price",
 			indexName:     "idx_offchain_token_price_pv_lookup",
 			indexFragment: `(token_id, source_id, "timestamp", processing_version DESC)`,
-			prepareSQL: `PREPARE pv_offchain_token_price(bigint, smallint, timestamptz) AS
-				SELECT COALESCE(MAX(processing_version), -1)
-				FROM offchain_token_price
-				WHERE token_id = $1 AND source_id = $2 AND timestamp = $3`,
-			executeArgsSQL: "1, 1, timestamptz '2035-01-03 00:00:00.5+00'",
-			maxExecBuffers: 200,
+			keyColumns: []processingVersionKeyColumn{
+				{"token_id", "bigint", "1"},
+				{"source_id", "smallint", "1"},
+				{`"timestamp"`, "timestamptz", ts},
+			},
 		},
 	}
+}
+
+// One of the two statements an assign_processing_version_* trigger runs per row.
+type processingVersionLookup struct {
+	label      string
+	prepareSQL string
+	executeSQL string
+}
+
+// Both statements are generated from the same key declaration so they cannot drift apart, and so a
+// table added to the fixture is covered by every assertion below at once.
+func (c processingVersionIndexCase) triggerLookups() []processingVersionLookup {
+	return []processingVersionLookup{c.buildRetryLookup(), c.latestVersionLookup()}
+}
+
+// Q1: has this build already written this key? First statement in every trigger function, and the
+// one that carries build_id — a column no processing_version index covers.
+func (c processingVersionIndexCase) buildRetryLookup() processingVersionLookup {
+	name := "pv_retry_" + c.tableName
+	buildIDParam := len(c.keyColumns) + 1
+	return processingVersionLookup{
+		label: "build_id_retry",
+		prepareSQL: fmt.Sprintf(
+			`PREPARE %s(%s, int) AS SELECT processing_version FROM %s WHERE %s AND build_id = $%d LIMIT 1`,
+			name, strings.Join(c.keyTypes(), ", "), c.tableName, c.keyPredicates(), buildIDParam),
+		executeSQL: fmt.Sprintf("%s(%s, %d)", name, strings.Join(c.keyLiterals(), ", "), probeBuildID),
+	}
+}
+
+// Q2: what is the highest version already stored at this key? Runs whenever Q1 misses.
+func (c processingVersionIndexCase) latestVersionLookup() processingVersionLookup {
+	name := "pv_max_" + c.tableName
+	return processingVersionLookup{
+		label: "max_version",
+		prepareSQL: fmt.Sprintf(
+			`PREPARE %s(%s) AS SELECT COALESCE(MAX(processing_version), -1) FROM %s WHERE %s`,
+			name, strings.Join(c.keyTypes(), ", "), c.tableName, c.keyPredicates()),
+		executeSQL: fmt.Sprintf("%s(%s)", name, strings.Join(c.keyLiterals(), ", ")),
+	}
+}
+
+func (c processingVersionIndexCase) keyPredicates() string {
+	preds := make([]string, len(c.keyColumns))
+	for i, col := range c.keyColumns {
+		preds[i] = fmt.Sprintf("%s = $%d", col.name, i+1)
+	}
+	return strings.Join(preds, " AND ")
+}
+
+func (c processingVersionIndexCase) keyTypes() []string {
+	types := make([]string, len(c.keyColumns))
+	for i, col := range c.keyColumns {
+		types[i] = col.pgType
+	}
+	return types
+}
+
+func (c processingVersionIndexCase) keyLiterals() []string {
+	literals := make([]string, len(c.keyColumns))
+	for i, col := range c.keyColumns {
+		literals[i] = col.literal
+	}
+	return literals
 }
 
 func TestProcessingVersionCoveringIndexesExist(t *testing.T) {
@@ -225,13 +332,17 @@ func TestProcessingVersionCoveringIndexesExist(t *testing.T) {
 	}
 }
 
-func TestProcessingVersionTriggerQueryPlansAreEfficient(t *testing.T) {
+// Both per-row trigger statements must prune to the single chunk that can hold the key, under the
+// plan_cache_mode the trigger functions actually run with (VEC-541). The session SET mirrors the
+// functions' proconfig: a PREPARE/EXECUTE pair goes through the same plancache that decides plpgsql's
+// SPI plans, and the GUC forces the mode outright, so no execution count is needed to reach the
+// decision production makes.
+func TestProcessingVersionTriggerLookupsPruneToOneChunk(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupPostgres(ctx, t)
 	defer cleanup()
 
-	m := migrator.New(pool, getMigrationsPath())
-	if err := m.ApplyAll(ctx); err != nil {
+	if err := migrator.New(pool, getMigrationsPath()).ApplyAll(ctx); err != nil {
 		t.Fatalf("migrations failed: %v", err)
 	}
 	seedProcessingVersionPlanRows(t, ctx, pool, 2_000)
@@ -241,146 +352,137 @@ func TestProcessingVersionTriggerQueryPlansAreEfficient(t *testing.T) {
 		t.Fatalf("acquire conn: %v", err)
 	}
 	defer conn.Release()
-
-	if _, err := conn.Exec(ctx, "SET plan_cache_mode = force_generic_plan"); err != nil {
-		t.Fatalf("force generic plan: %v", err)
+	if _, err := conn.Exec(ctx, "SET plan_cache_mode = "+planCacheModeValue); err != nil {
+		t.Fatalf("set plan_cache_mode: %v", err)
 	}
 	defer resetSessionState(t, ctx, conn, "RESET plan_cache_mode")
 
 	for _, tc := range processingVersionIndexCases() {
-		t.Run(tc.tableName, func(t *testing.T) {
-			planText := explainProcessingVersionPlan(t, ctx, conn, tc)
-			if strings.Contains(planText, "Seq Scan") {
-				t.Fatalf("processing_version trigger query fell back to a sequential scan on %s\nplan:\n%s",
-					tc.tableName, planText)
-			}
-			buffers := parseTotalBuffersFromExplain(planText)
-			if buffers > tc.maxExecBuffers {
-				t.Fatalf("processing_version trigger query for %s touched %d buffers; expected <= %d\nplan:\n%s",
-					tc.tableName, buffers, tc.maxExecBuffers, planText)
-			}
-		})
+		for _, lookup := range tc.triggerLookups() {
+			t.Run(tc.tableName+"/"+lookup.label, func(t *testing.T) {
+				plan := explainWarmedLookup(t, ctx, conn, lookup)
+				if plan.hasNodeType("Seq Scan") {
+					t.Fatalf("%s %s lookup fell back to a sequential scan\nplan:\n%s",
+						tc.tableName, lookup.label, plan.raw)
+				}
+				if chunks := plan.chunkNames(); len(chunks) != 1 {
+					t.Fatalf("%s %s lookup scanned %d chunks, want exactly 1\nplan:\n%s",
+						tc.tableName, lookup.label, len(chunks), plan.raw)
+				}
+				// The assertion above cannot stand alone: a plan that kept every chunk and excluded them
+				// at startup also scans exactly one, and costs few buffers doing it, so it satisfies both
+				// of the other checks while paying the fan-out per row.
+				if excluded := plan.deferredChunkExclusions(); excluded > 0 {
+					t.Fatalf("%s %s lookup deferred exclusion of %d chunks to startup, so it re-derives them "+
+						"on every execution instead of pruning once when the plan is built\nplan:\n%s",
+						tc.tableName, lookup.label, excluded, plan.raw)
+				}
+				if buffers := plan.totalBuffers(); buffers > maxTriggerLookupBuffers {
+					t.Fatalf("%s %s lookup touched %d buffers; expected <= %d\nplan:\n%s",
+						tc.tableName, lookup.label, buffers, maxTriggerLookupBuffers, plan.raw)
+				}
+			})
+		}
 	}
 }
 
-// pinnedCustomPlanFunctions are the processing_version trigger functions that have
-// been deliberately converted to custom plans, each with its own measurement.
-//
-// The list is the point: the mechanism affects every versioned hypertable, but the
-// conversion is per table so a plan-behaviour change only reaches ingest paths that
-// have been exercised. When you convert another table, add it here in the same
-// migration — the test below then guards it against a silent revert, and anything
-// absent from this list is reported as outstanding rather than failed.
-var pinnedCustomPlanFunctions = []string{
-	"assign_processing_version_offchain_token_price",
-}
-
-// The converted functions must stay pinned to custom plans.
-//
-// PL/pgSQL switches a statement to a GENERIC plan after ~5 executions, and a
-// generic plan cannot prune hypertable chunks — the partition value is a
-// placeholder at planning time, so every inserted row re-derives chunk exclusion
-// across the whole table and per-row cost grows with chunk count forever. Measured
-// at 84 s vs 0.6 s for one 721-row batch against 782 chunks.
-func TestProcessingVersionFunctionsPinCustomPlan(t *testing.T) {
+// The negative control for the assertion above: with a generic plan the max-version lookup degrades
+// into a Merge Append across every chunk, which is the cost force_custom_plan exists to avoid. The
+// session GUC forces that mode outright rather than warming the plancache into it. Only the
+// max-version lookup is checked here: the build-id lookup degrades in a different shape and has its
+// own control below.
+func TestProcessingVersionLatestVersionLookupFansOutUnderGenericPlan(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupPostgres(ctx, t)
 	defer cleanup()
 
-	m := migrator.New(pool, getMigrationsPath())
-	if err := m.ApplyAll(ctx); err != nil {
+	if err := migrator.New(pool, getMigrationsPath()).ApplyAll(ctx); err != nil {
 		t.Fatalf("migrations failed: %v", err)
 	}
+	seedProcessingVersionPlanRows(t, ctx, pool, 2_000)
 
-	rows, err := pool.Query(ctx, `
-		SELECT p.proname, COALESCE(array_to_string(p.proconfig, ','), '')
-		FROM pg_proc p
-		JOIN pg_namespace n ON n.oid = p.pronamespace
-		WHERE n.nspname = 'public'
-		  AND p.proname LIKE 'assign\_processing\_version\_%'
-		ORDER BY p.proname
-	`)
+	conn, err := pool.Acquire(ctx)
 	if err != nil {
-		t.Fatalf("query trigger functions: %v", err)
+		t.Fatalf("acquire conn: %v", err)
 	}
-	defer rows.Close()
+	defer conn.Release()
+	if _, err := conn.Exec(ctx, "SET plan_cache_mode = force_generic_plan"); err != nil {
+		t.Fatalf("set plan_cache_mode: %v", err)
+	}
+	defer resetSessionState(t, ctx, conn, "RESET plan_cache_mode")
 
-	pinned := map[string]bool{}
-	total := 0
-	for rows.Next() {
-		var name, config string
-		if err := rows.Scan(&name, &config); err != nil {
-			t.Fatalf("scan function row: %v", err)
-		}
-		total++
-		pinned[name] = strings.Contains(config, "plan_cache_mode=force_custom_plan")
+	plan := explainWarmedLookup(t, ctx, conn, manyChunkCase(t).latestVersionLookup())
+	chunkNodes := len(plan.chunkNames())
+	total := chunkCount(t, ctx, pool, manyChunkTable)
+	if chunkNodes < total/2 {
+		t.Fatalf("generic plan on %s scanned %d of %d chunks; expected it to fan out over most of them, "+
+			"which is the premise of the force_custom_plan setting. If TimescaleDB now prunes generic plans "+
+			"here, this control is obsolete: re-measure the per-row insert budget and delete this test, do not "+
+			"loosen the threshold\nplan:\n%s",
+			manyChunkTable, chunkNodes, total, plan.raw)
 	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("read function rows: %v", err)
+	if buffers := plan.totalBuffers(); buffers <= maxTriggerLookupBuffers {
+		t.Fatalf("generic plan on %s touched only %d buffers (<= the %d pruned budget), so the pruned "+
+			"assertion has nothing to catch\nplan:\n%s",
+			manyChunkTable, buffers, maxTriggerLookupBuffers, plan.raw)
 	}
-
-	if total == 0 {
-		t.Fatal("found no assign_processing_version_* functions; has the naming convention changed?")
-	}
-
-	for _, fn := range pinnedCustomPlanFunctions {
-		got, exists := pinned[fn]
-		if !exists {
-			t.Errorf("%s is listed in pinnedCustomPlanFunctions but no such function exists; "+
-				"was it renamed or dropped?", fn)
-			continue
-		}
-		if !got {
-			t.Errorf("%s has lost plan_cache_mode = force_custom_plan; without it every inserted row "+
-				"re-derives chunk exclusion across the whole hypertable\n"+
-				"restore it with: ALTER FUNCTION %s() SET plan_cache_mode = 'force_custom_plan'", fn, fn)
-		}
-	}
-
-	// Surfaced, not failed: the rest are known-outstanding by design, and a count
-	// that stops shrinking is a nudge rather than a broken build.
-	outstanding := 0
-	for _, isPinned := range pinned {
-		if !isPinned {
-			outstanding++
-		}
-	}
-	t.Logf("%d/%d processing_version functions pinned to custom plans; %d still on the default "+
-		"(convert per table, each with its own measurement — see ADR-0002 §3)",
-		total-outstanding, total, outstanding)
 }
 
-// The build_id retry check is the trigger's FIRST per-row lookup and the one that
-// dominated the cost — ~92% of it — because no covering index serves it. The
-// sibling plan test only exercises the MAX probe, and its fixture puts every row
-// in 5 days (~6 chunks), so neither the query nor the scale that makes it hurt
-// was covered.
-//
-// Asserted as chunk pruning rather than wall-clock, so it is a statement about
-// the plan rather than about how loaded the machine is.
-func TestProcessingVersionBuildIDCheckPrunesChunksAtScale(t *testing.T) {
+// The control for the deferred-exclusion assertion, and the reason that assertion has to exist. The
+// build-id lookup does not fan out visibly under a generic plan: it keeps a ChunkAppend, reports the
+// one surviving chunk, and costs almost nothing in buffers — so the chunk-count and buffer checks in
+// the pruned test both pass on it while every execution still re-derives exclusion over the whole
+// table. Only the startup-exclusion counter tells the two apart, which is what this pins.
+func TestProcessingVersionBuildIDLookupDefersChunkExclusionUnderGenericPlan(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupPostgres(ctx, t)
 	defer cleanup()
 
-	m := migrator.New(pool, getMigrationsPath())
-	if err := m.ApplyAll(ctx); err != nil {
+	if err := migrator.New(pool, getMigrationsPath()).ApplyAll(ctx); err != nil {
 		t.Fatalf("migrations failed: %v", err)
 	}
+	seedProcessingVersionPlanRows(t, ctx, pool, 2_000)
 
-	const wantChunks = 200
-	seedOffchainPriceAcrossChunks(t, ctx, pool, wantChunks)
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire conn: %v", err)
+	}
+	defer conn.Release()
+	if _, err := conn.Exec(ctx, "SET plan_cache_mode = force_generic_plan"); err != nil {
+		t.Fatalf("set plan_cache_mode: %v", err)
+	}
+	defer resetSessionState(t, ctx, conn, "RESET plan_cache_mode")
 
-	var chunks int
-	if err := pool.QueryRow(ctx, `
-		SELECT COUNT(*) FROM timescaledb_information.chunks
-		WHERE hypertable_name = 'offchain_token_price'
-	`).Scan(&chunks); err != nil {
-		t.Fatalf("count chunks: %v", err)
+	plan := explainWarmedLookup(t, ctx, conn, manyChunkCase(t).buildRetryLookup())
+	total := chunkCount(t, ctx, pool, manyChunkTable)
+	if excluded := plan.deferredChunkExclusions(); excluded < total/2 {
+		t.Fatalf("generic plan on the %s build-id lookup deferred exclusion of only %d of %d chunks to "+
+			"startup; the pruned test's deferred-exclusion assertion then has nothing to catch. If "+
+			"TimescaleDB now prunes generic plans at plan time, force_custom_plan is no longer needed: "+
+			"re-measure and retire the setting rather than loosening this\nplan:\n%s",
+			manyChunkTable, excluded, total, plan.raw)
 	}
-	if chunks < wantChunks/2 {
-		t.Fatalf("fixture produced only %d chunks; the test needs many chunks to be meaningful", chunks)
+	if chunks := plan.chunkNames(); len(chunks) != 1 {
+		t.Fatalf("generic plan on the %s build-id lookup named %d chunks; this control exists because it "+
+			"names exactly 1, indistinguishable from a pruned plan\nplan:\n%s",
+			manyChunkTable, len(chunks), plan.raw)
 	}
+}
+
+// End-to-end guard on the real path: rows inserted through the trigger on a many-chunk table, with
+// the trigger function running under its own configured plan_cache_mode. Buffers reported for an
+// INSERT include what its BEFORE trigger reads, so this catches any regression that reintroduces the
+// fan-out — the setting removed, the covering index dropped, or a lookup reshaped past pruning.
+func TestProcessingVersionTriggerInsertStaysUnderPerRowBudget(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupPostgres(ctx, t)
+	defer cleanup()
+
+	if err := migrator.New(pool, getMigrationsPath()).ApplyAll(ctx); err != nil {
+		t.Fatalf("migrations failed: %v", err)
+	}
+	seedProcessingVersionPlanRows(t, ctx, pool, 2_000)
+	primeID := upsertFixturePrime(t, ctx, pool)
 
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
@@ -388,214 +490,203 @@ func TestProcessingVersionBuildIDCheckPrunesChunksAtScale(t *testing.T) {
 	}
 	defer conn.Release()
 
-	generic := explainBuildIDCheck(t, ctx, conn, "force_generic_plan")
-	custom := explainBuildIDCheck(t, ctx, conn, "force_custom_plan")
-
-	// The two modes are distinguished by WHERE pruning happens, which is visible in
-	// the plan shape rather than in a chunk count. A generic plan cannot know the
-	// timestamp, so it emits a ChunkAppend that re-derives the surviving chunk at
-	// every execution ("Chunks excluded during startup: N"). A custom plan knows
-	// the value and goes straight to an index scan on the one chunk.
-	//
-	// That per-execution re-derivation over every chunk is the cost: harmless for a
-	// single row, ruinous when a per-row trigger repeats it 721 times per batch and
-	// the chunk count only grows. Measured on this fixture's real shape: 84 s for a
-	// 721-row batch at 782 chunks, against 0.6 s once pinned to custom plans.
-	customChunks := countChunkReferences(custom)
-	t.Logf("over %d chunks — generic: startup exclusion=%v; custom: startup exclusion=%v, chunks in plan=%d",
-		chunks, hasStartupChunkExclusion(generic), hasStartupChunkExclusion(custom), customChunks)
-
-	// Two assertions, because either alone passes for a bad plan.
-	//
-	// Absence of startup exclusion is also true of a plan that simply kept every
-	// chunk and never excluded anything — the failure mode this fix exists to
-	// prevent. And a low chunk count alone is true of the generic plan too, whose
-	// text names only the chunk that survived runtime exclusion. Together they pin
-	// the property that matters: pruning happened when the plan was BUILT, so it is
-	// not repeated per execution.
-	if hasStartupChunkExclusion(custom) {
-		t.Fatalf("the build_id retry check still defers chunk exclusion to startup under "+
-			"force_custom_plan, so per-row cost will keep scaling with chunk count\nplan:\n%s", custom)
+	// The session asks for generic plans, so the trigger function's own proconfig is the only thing
+	// that can keep the lookup pruning — which is exactly the regression this test has to catch.
+	// Without this, a fresh session's plancache serves custom plans for the handful of executions
+	// below and the assertion passes even with the migration reverted.
+	if _, err := conn.Exec(ctx, "SET plan_cache_mode = force_generic_plan"); err != nil {
+		t.Fatalf("set plan_cache_mode: %v", err)
 	}
-	if customChunks > 4 {
-		t.Fatalf("custom plan references %d chunks for a single-timestamp lookup over %d chunks; "+
-			"it is scanning the hypertable rather than pruning to the matching chunk\nplan:\n%s",
-			customChunks, chunks, custom)
-	}
+	defer resetSessionState(t, ctx, conn, "RESET plan_cache_mode")
 
-	// Informational rather than asserted: it describes PostgreSQL's behaviour, not
-	// ours. But if generic plans ever prune at plan time, the force_custom_plan
-	// migration has become unnecessary and should be revisited rather than carried
-	// forever.
-	if !hasStartupChunkExclusion(generic) {
-		t.Logf("NOTE: generic plans no longer defer chunk exclusion to startup — "+
-			"re-evaluate whether plan_cache_mode = force_custom_plan is still needed\nplan:\n%s", generic)
+	// Both batches run on one connection and only the second is measured: the plancache lives there,
+	// so the measurement is the steady state of a worker that inserts for hours, not a first execution.
+	insertThroughTrigger(t, ctx, conn, primeID, warmupInsertHour)
+	plan := insertThroughTrigger(t, ctx, conn, primeID, measuredInsertHour)
+
+	perRow := plan.totalBuffers() / triggerInsertRows
+	if perRow > maxInsertBuffersPerRow {
+		t.Fatalf("inserting through the %s trigger cost %d buffers/row across %d chunks; expected <= %d\nplan:\n%s",
+			manyChunkTable, perRow, chunkCount(t, ctx, pool, manyChunkTable), maxInsertBuffersPerRow, plan.raw)
 	}
 }
 
-// resetSessionState restores a session GUC before the connection returns to the
-// pool, failing the test if it cannot. Ignoring this is not cosmetic: a connection
-// handed back with session_replication_role still 'replica' silently disables the
-// processing_version triggers for whichever test acquires it next, which would look
-// like a bug in that test rather than leakage from this one.
-func resetSessionState(t *testing.T, ctx context.Context, conn *pgxpool.Conn, sql string, mode ...any) {
+func insertThroughTrigger(t *testing.T, ctx context.Context, conn *pgxpool.Conn, primeID int64, hour int) explainPlan {
 	t.Helper()
-
-	args := append([]any{}, mode...)
-	if _, err := conn.Exec(ctx, sql, args...); err != nil {
-		t.Errorf("cleanup %q failed; this connection is returning to the pool with "+
-			"altered session state: %v", sql, err)
-	}
+	return explainJSON(t, ctx, conn,
+		fmt.Sprintf(manyChunkTriggerInsertStatement, primeID, hour, triggerInsertRows, probeBuildID))
 }
 
-// hasStartupChunkExclusion reports whether the plan re-derives which chunks to
-// scan at execution time, the signature of a plan that could not prune when it was
-// built.
-func hasStartupChunkExclusion(plan string) bool {
-	return strings.Contains(plan, "Chunks excluded during startup")
-}
-
-// countChunkReferences counts the distinct hypertable chunks a plan names, covering
-// both the row-store chunks and the compressed ones a columnar scan reaches through.
-func countChunkReferences(plan string) int {
-	seen := map[string]struct{}{}
-	for _, m := range regexp.MustCompile(`(?:compress_)?_?hyper_\d+_\d+_chunk`).FindAllString(plan, -1) {
-		seen[m] = struct{}{}
-	}
-	return len(seen)
-}
-
-// explainBuildIDCheck prepares the trigger's build_id retry check under planMode,
-// warms the plan cache, and returns the EXPLAIN output.
-//
-// Everything runs through the simple protocol with a mode-specific statement name:
-// pgx keeps its own server-side prepared statements per connection, so sharing one
-// name or issuing DEALLOCATE ALL invalidates them underneath the driver.
-func explainBuildIDCheck(t *testing.T, ctx context.Context, conn *pgxpool.Conn, planMode string) string {
+func manyChunkCase(t *testing.T) processingVersionIndexCase {
 	t.Helper()
-
-	stmt := "pv_buildid_" + planMode
-	const args = "1, 1::smallint, timestamptz '2035-01-03 00:00:00+00', 0"
-
-	if _, err := conn.Exec(ctx, "SET plan_cache_mode = "+planMode, pgx.QueryExecModeSimpleProtocol); err != nil {
-		t.Fatalf("set %s: %v", planMode, err)
-	}
-	defer resetSessionState(t, ctx, conn, "RESET plan_cache_mode", pgx.QueryExecModeSimpleProtocol)
-
-	prepareSQL := fmt.Sprintf(`PREPARE %s(bigint, smallint, timestamptz, int) AS
-		SELECT processing_version
-		FROM offchain_token_price
-		WHERE token_id = $1 AND source_id = $2 AND timestamp = $3 AND build_id = $4
-		LIMIT 1`, stmt)
-	if _, err := conn.Exec(ctx, prepareSQL, pgx.QueryExecModeSimpleProtocol); err != nil {
-		t.Fatalf("prepare build_id check: %v", err)
-	}
-	defer resetSessionState(t, ctx, conn, "DEALLOCATE "+stmt, pgx.QueryExecModeSimpleProtocol)
-
-	// Executed repeatedly because the generic-plan switch only happens once the
-	// plan cache has seen the statement ~5 times — a single EXECUTE would still be
-	// planned custom and the comparison would prove nothing.
-	for range 8 {
-		if _, err := conn.Exec(ctx, fmt.Sprintf("EXECUTE %s(%s)", stmt, args), pgx.QueryExecModeSimpleProtocol); err != nil {
-			t.Fatalf("execute build_id check: %v", err)
+	for _, tc := range processingVersionIndexCases() {
+		if tc.tableName == manyChunkTable {
+			return tc
 		}
 	}
-
-	rows, err := conn.Query(ctx,
-		fmt.Sprintf("EXPLAIN (ANALYZE, BUFFERS) EXECUTE %s(%s)", stmt, args),
-		pgx.QueryExecModeSimpleProtocol)
-	if err != nil {
-		t.Fatalf("explain build_id check: %v", err)
-	}
-	defer rows.Close()
-
-	var lines []string
-	for rows.Next() {
-		var line string
-		if err := rows.Scan(&line); err != nil {
-			t.Fatalf("scan EXPLAIN row: %v", err)
-		}
-		lines = append(lines, line)
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("read EXPLAIN rows: %v", err)
-	}
-	return strings.Join(lines, "\n")
+	t.Fatalf("no fixture case for the many-chunk table %s", manyChunkTable)
+	return processingVersionIndexCase{}
 }
 
-// seedOffchainPriceAcrossChunks writes one row per day so the rows spread across
-// `days` daily chunks, which is what the sibling fixture does not do: it puts
-// every row in 5 days, so a plan that fails to prune still looks cheap.
-func seedOffchainPriceAcrossChunks(t *testing.T, ctx context.Context, pool *pgxpool.Pool, days int) {
+// The measured EXPLAIN is the second execution, not the first. Planning a hypertable's chunks on a cold
+// session reads catalog pages that are not yet in shared buffers — 1,050 planning buffers on borrower's
+// first execution against 30 on every one after it — and that is a session start-up cost, not the
+// per-row cost a worker pays for hours. One warm-up execution settles it; the count is stable from the
+// second onward. It buys nothing plancache-related here: the session GUC forces the plan mode outright,
+// so no execution count is needed to reach it.
+func explainWarmedLookup(t *testing.T, ctx context.Context, conn *pgxpool.Conn, lookup processingVersionLookup) explainPlan {
 	t.Helper()
 
-	conn, err := pool.Acquire(ctx)
-	if err != nil {
-		t.Fatalf("acquire seed conn: %v", err)
+	if _, err := conn.Exec(ctx, lookup.prepareSQL); err != nil {
+		t.Fatalf("prepare %s: %v", lookup.label, err)
 	}
-	defer conn.Release()
-
-	// Triggers off for seeding: they are the thing under test, and leaving them on
-	// would make the fixture itself pay the cost this test exists to measure.
-	if _, err := conn.Exec(ctx, "SET session_replication_role = 'replica'"); err != nil {
-		t.Fatalf("disable triggers for seeding: %v", err)
+	if _, err := conn.Exec(ctx, "EXECUTE "+lookup.executeSQL); err != nil {
+		t.Fatalf("execute %s: %v", lookup.label, err)
 	}
-	defer resetSessionState(t, ctx, conn, "RESET session_replication_role")
+	return explainJSON(t, ctx, conn, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE "+lookup.executeSQL)
+}
 
-	if _, err := conn.Exec(ctx, `
-		INSERT INTO offchain_token_price (token_id, source_id, timestamp, price_usd, processing_version, build_id)
-		SELECT 1, 1, timestamptz '2035-01-01 00:00:00+00' + (g * interval '1 day'), 1, 0, 0
-		FROM generate_series(1, $1) AS g
-	`, days); err != nil {
-		t.Fatalf("seed offchain_token_price across chunks: %v", err)
+// The buffer numbers a plan exposes, plus enough of its shape to tell pruning from fan-out.
+type explainPlan struct {
+	raw   string
+	roots []explainRoot
+}
+
+type explainRoot struct {
+	Plan     explainNode `json:"Plan"`
+	Planning explainBufs `json:"Planning"`
+}
+
+type explainBufs struct {
+	SharedHit  int `json:"Shared Hit Blocks"`
+	SharedRead int `json:"Shared Read Blocks"`
+}
+
+type explainNode struct {
+	NodeType       string        `json:"Node Type"`
+	RelationName   string        `json:"Relation Name"`
+	SharedHit      int           `json:"Shared Hit Blocks"`
+	SharedRead     int           `json:"Shared Read Blocks"`
+	ChunksExcluded int           `json:"Chunks excluded during startup"`
+	Plans          []explainNode `json:"Plans"`
+}
+
+// Planning buffers count: force_custom_plan re-plans on every execution, so they are part of the
+// per-row cost, and the whole point of the setting is that they stay flat as chunks accumulate.
+// A node's own counters already include its children's, so only the roots are summed.
+func (p explainPlan) totalBuffers() int {
+	total := 0
+	for _, root := range p.roots {
+		total += root.Plan.SharedHit + root.Plan.SharedRead + root.Planning.SharedHit + root.Planning.SharedRead
 	}
+	return total
+}
 
-	if _, err := conn.Exec(ctx, "ANALYZE offchain_token_price"); err != nil {
-		t.Fatalf("analyze: %v", err)
+// Compressed chunks are named apart from row-store ones and a columnar scan reaches the hypertable
+// through them, so a count that omitted them would under-report what the plan touches.
+var chunkRelationPattern = regexp.MustCompile(`^(?:_hyper|compress_hyper)_\d+_\d+_chunk$`)
+
+func (p explainPlan) chunkNames() []string {
+	seen := map[string]bool{}
+	var names []string
+	p.walk(func(n explainNode) {
+		if chunkRelationPattern.MatchString(n.RelationName) && !seen[n.RelationName] {
+			seen[n.RelationName] = true
+			names = append(names, n.RelationName)
+		}
+	})
+	return names
+}
+
+// How many chunks the plan discarded at execution time instead of when it was built. A plan that
+// prunes as it is built names the surviving chunk and nothing else; one that defers to startup keeps
+// every chunk in the plan and re-derives the survivor on each execution, which is the per-row cost
+// force_custom_plan exists to remove. Both plans then report the same single chunk scanned, so this
+// is the only counter that separates them.
+func (p explainPlan) deferredChunkExclusions() int {
+	total := 0
+	p.walk(func(n explainNode) { total += n.ChunksExcluded })
+	return total
+}
+
+func (p explainPlan) hasNodeType(nodeType string) bool {
+	found := false
+	p.walk(func(n explainNode) {
+		if n.NodeType == nodeType {
+			found = true
+		}
+	})
+	return found
+}
+
+func (p explainPlan) walk(visit func(explainNode)) {
+	var descend func(explainNode)
+	descend = func(n explainNode) {
+		visit(n)
+		for _, child := range n.Plans {
+			descend(child)
+		}
+	}
+	for _, root := range p.roots {
+		descend(root.Plan)
 	}
 }
 
-func explainProcessingVersionPlan(t *testing.T, ctx context.Context, conn *pgxpool.Conn, tc processingVersionIndexCase) string {
+// Undoes a session GUC before the connection goes back to the pool, and fails the test if it cannot:
+// a forced plan_cache_mode is a property of one measurement, and a connection that carries it onward
+// silently changes how whatever runs next is planned.
+func resetSessionState(t *testing.T, ctx context.Context, conn *pgxpool.Conn, sql string) {
 	t.Helper()
 
-	if _, err := conn.Exec(ctx, "DEALLOCATE ALL"); err != nil {
-		t.Fatalf("deallocate prepared statements: %v", err)
+	if _, err := conn.Exec(ctx, sql); err != nil {
+		t.Errorf("%q failed, so this connection returns to the pool with altered session state: %v", sql, err)
 	}
-	if _, err := conn.Exec(ctx, tc.prepareSQL); err != nil {
-		t.Fatalf("prepare %s: %v", tc.tableName, err)
-	}
-
-	explainSQL := fmt.Sprintf("EXPLAIN (ANALYZE, BUFFERS) EXECUTE %s(%s)",
-		preparedStatementName(tc.prepareSQL), tc.executeArgsSQL)
-	rows, err := conn.Query(ctx, explainSQL)
-	if err != nil {
-		t.Fatalf("explain %s: %v", tc.tableName, err)
-	}
-	defer rows.Close()
-
-	var planLines []string
-	for rows.Next() {
-		var line string
-		if err := rows.Scan(&line); err != nil {
-			t.Fatalf("scan EXPLAIN row: %v", err)
-		}
-		planLines = append(planLines, line)
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("read EXPLAIN rows: %v", err)
-	}
-	return strings.Join(planLines, "\n")
 }
 
-func preparedStatementName(prepareSQL string) string {
-	fields := strings.Fields(prepareSQL)
-	if len(fields) < 2 || fields[0] != "PREPARE" {
-		return ""
+// Pinned to one connection: every caller either runs a prepared statement, which only exists on the
+// connection that declared it, or measures a plancache whose state is per-connection.
+func explainJSON(t *testing.T, ctx context.Context, conn *pgxpool.Conn, sql string) explainPlan {
+	t.Helper()
+
+	var raw string
+	if err := conn.QueryRow(ctx, sql).Scan(&raw); err != nil {
+		t.Fatalf("explain: %v\nsql: %s", err, sql)
 	}
-	if idx := strings.Index(fields[1], "("); idx >= 0 {
-		return fields[1][:idx]
+	var roots []explainRoot
+	if err := json.Unmarshal([]byte(raw), &roots); err != nil {
+		t.Fatalf("decode EXPLAIN json: %v\nraw: %s", err, raw)
 	}
-	return fields[1]
+	if len(roots) == 0 {
+		t.Fatalf("EXPLAIN returned no plan\nraw: %s", raw)
+	}
+	return explainPlan{raw: raw, roots: roots}
+}
+
+func chunkCount(t *testing.T, ctx context.Context, pool *pgxpool.Pool, table string) int {
+	t.Helper()
+
+	var n int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM timescaledb_information.chunks WHERE hypertable_name = $1`, table).Scan(&n); err != nil {
+		t.Fatalf("count chunks of %s: %v", table, err)
+	}
+	return n
+}
+
+// prime_debt's only FK parent. A prime of its own keeps the measured insert on keys nothing else
+// touches, clear of the migration-seeded prime_id = 1 the fan-out fixture writes under.
+func upsertFixturePrime(t *testing.T, ctx context.Context, pool *pgxpool.Pool) int64 {
+	t.Helper()
+
+	var id int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO prime (name, vault_address)
+		VALUES ('pv-plan-cache-fixture', '\xdeadbeef00000000000000000000000000000001')
+		ON CONFLICT (name) DO UPDATE SET vault_address = EXCLUDED.vault_address
+		RETURNING id`).Scan(&id); err != nil {
+		t.Fatalf("upsert fixture prime: %v", err)
+	}
+	return id
 }
 
 func seedProcessingVersionPlanRows(t *testing.T, ctx context.Context, pool *pgxpool.Pool, rows int) {
@@ -629,6 +720,9 @@ func seedProcessingVersionPlanRows(t *testing.T, ctx context.Context, pool *pgxp
 			t.Fatalf("seed processing_version plan rows: %v\nstatement:\n%s", err, stmt)
 		}
 	}
+	if _, err := tx.Exec(ctx, manyChunkSeedStatement, manyChunkDays); err != nil {
+		t.Fatalf("spread %s across chunks: %v", manyChunkTable, err)
+	}
 
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("commit seed tx: %v", err)
@@ -639,8 +733,40 @@ func seedProcessingVersionPlanRows(t *testing.T, ctx context.Context, pool *pgxp
 		if _, err := pool.Exec(ctx, fmt.Sprintf("ANALYZE %s", tc.tableName)); err != nil {
 			t.Fatalf("analyze %s: %v", tc.tableName, err)
 		}
+		// "Pruned to exactly one chunk" asserts nothing about a table that only has one chunk, so every
+		// fixture table has to come out of the seed with several.
+		if n := chunkCount(t, ctx, pool, tc.tableName); n < minFixtureChunkCount {
+			t.Fatalf("%s fixture has %d chunks, want >= %d — the prune assertion is vacuous below that",
+				tc.tableName, n, minFixtureChunkCount)
+		}
+	}
+	if n := chunkCount(t, ctx, pool, manyChunkTable); n < minManyChunkCount {
+		t.Fatalf("%s fixture has %d chunks, want >= %d — fan-out assertions need a wide table",
+			manyChunkTable, n, minManyChunkCount)
 	}
 }
+
+// Rows all land in one existing chunk, so any buffer cost beyond that chunk comes from the trigger
+// failing to prune. Distinct synced_at values keep the trigger on its first-write path per row.
+const manyChunkTriggerInsertStatement = `
+	EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
+	INSERT INTO prime_debt (prime_id, ilk_name, debt_wad, block_number, block_version, synced_at, build_id)
+	SELECT %[1]d, 'plan-cache-fixture', 1, 2000000, 0,
+	       timestamptz '2035-01-03 00:00:00+00' + (%[2]d * interval '1 hour') + (g * interval '1 millisecond'), %[4]d
+	FROM generate_series(1, %[3]d) AS g`
+
+// Two batches an hour apart, both inside the probe key's chunk.
+const (
+	warmupInsertHour   = 12
+	measuredInsertHour = 13
+)
+
+// One row per day, each landing in its own daily chunk.
+const manyChunkSeedStatement = `
+	INSERT INTO prime_debt (prime_id, ilk_name, debt_wad, block_number, block_version, synced_at, processing_version, build_id)
+	SELECT 1, 'ilk', 1, 1000000, 0,
+	       timestamptz '2035-01-01 06:00:00+00' + (g * interval '1 day'), 0, 0
+	FROM generate_series(1, $1) AS g`
 
 func processingVersionSeedStatements() []string {
 	const tsExpr = `timestamptz '2035-01-01 00:00:00+00' + ((g % 5) * interval '1 day') + (g * interval '1 second')`
@@ -655,9 +781,13 @@ func processingVersionSeedStatements() []string {
 			INSERT INTO borrower_collateral (user_id, protocol_id, token_id, block_number, block_version, amount, change, event_type, tx_hash, collateral_enabled, created_at, processing_version, build_id)
 			SELECT 1, 1, 1, 1000000, 0, 1, 1, 'collateral', %s, true, %s, 0, 0
 			FROM generate_series(1, $1) AS g`, hashExpr, tsExpr),
+		// This table partitions on block_number (100,000 blocks to a chunk) and its natural key has no
+		// time column, so the column that varies per row is also the column that picks the chunk — where
+		// the other tables vary a timestamp. Striding one chunk interval every fifth row spreads the
+		// fixture over five chunks, and g = 1 puts a row on the probe key itself inside the first of them.
 		`
 			INSERT INTO sparklend_reserve_data (protocol_id, token_id, block_number, block_version, total_a_token, processing_version, build_id)
-			SELECT 1, 1, 1000000, 0, 1, g, 0
+			SELECT 1, 1, 1000000 + ((g - 1) % 5) * 100000 + ((g - 1) / 5), 0, 1, 0, 0
 			FROM generate_series(1, $1) AS g`,
 		fmt.Sprintf(`
 			INSERT INTO onchain_token_price (token_id, oracle_id, block_number, block_version, timestamp, price_usd, processing_version, build_id)
@@ -704,17 +834,4 @@ func processingVersionSeedStatements() []string {
 			SELECT 1, 1, %s, 1, 0, 0
 			FROM generate_series(1, $1) AS g`, tsExpr),
 	}
-}
-
-func parseTotalBuffersFromExplain(plan string) int {
-	if idx := strings.Index(plan, "\nPlanning:"); idx >= 0 {
-		plan = plan[:idx]
-	}
-	re := regexp.MustCompile(`(?:hit|read)=(\d+)`)
-	total := 0
-	for _, m := range re.FindAllStringSubmatch(plan, -1) {
-		n, _ := strconv.Atoi(m[1])
-		total += n
-	}
-	return total
 }
