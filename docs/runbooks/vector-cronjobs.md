@@ -186,6 +186,10 @@ then start the smoke workflow below and confirm it completes.
 
 ### Special case: `offchain-price-backfill` (on-demand, no schedule)
 
+How to actually run a backfill:
+[docs/backfilling-offchain-prices.md](../backfilling-offchain-prices.md).
+
+
 This Deployment is an **on-demand** Temporal worker (`temporal.RunWorker`), not a
 scheduled cronjob. Two things differ when it pages:
 
