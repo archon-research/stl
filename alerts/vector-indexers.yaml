@@ -1415,9 +1415,12 @@ groups:
           summary: "Vector cex-orderbook-indexer stream stalled on {{ $labels.exchange }}"
           description: |
             The oldest symbol on `{{ $labels.exchange }}` has had no order book
-            update for >120s sustained over 10m. The feed has silently gone
-            dead; persisted snapshots are stale (and stale symbols stop being
-            written, so the series goes flat).
+            update for >120s sustained over 10m. Persisted snapshots are stale
+            (stale symbols stop being written, so the series goes flat). A
+            whole connection going silently dead self-heals via the 90s stale
+            watchdog (see VectorCexOrderbookStaleFeedChurn), so suspect one
+            dead symbol on an otherwise-live connection, a wedged consumer, or
+            a broken watchdog.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorcexorderbookstreamstalled
 
       - alert: VectorCexOrderbookDown
@@ -1479,6 +1482,39 @@ groups:
             connection pool is degraded; writes risk overrunning the snapshot
             interval and dropping ticks before it escalates to persist failures.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorcexorderbookpersistlatencyhigh
+
+      - alert: VectorCexOrderbookStaleFeedChurn
+        # The stale watchdog (VEC-542) closes and re-dials any connection that
+        # delivers no book update for 90s, so a venue-side whole-connection
+        # stall now self-heals in ~90s — before StreamStalled's 120s threshold.
+        # This is the replacement signal: reason="stale_feed" reconnects.
+        # Baseline is ~0. One venue restart-drain is 1 close per connection (a
+        # burst that leaves the [10m] window before `for` elapses); a feed the
+        # watchdog keeps recycling every ~90s sustains ~6+/10m per connection,
+        # so >3 held for 15m separates chronic from one-off.
+        expr: |
+          sum by (exchange, cluster) (
+            increase(orderbook_reconnections_total{
+              k8s_namespace_name="vector", reason="stale_feed"
+            }[10m])
+          ) > 3
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: cex-orderbook-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector cex-orderbook-indexer recycling stale feeds on {{ $labels.exchange }}"
+          description: |
+            The stale-feed watchdog on `{{ $labels.exchange }}` has closed
+            `{{ $value | printf "%.0f" }}` connections in 10m (sustained 15m)
+            because the venue kept the socket alive but sent no book updates.
+            Reconnecting is not fixing it: the feed is chronically dead-on-
+            arrival (venue incident, symbol config, or a subscribe that no
+            longer takes effect). Data continuity degrades on every 90s
+            recycle even though VectorCexOrderbookStreamStalled stays green.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorcexorderbookstalefeedchurn
 
   # =====================================================================
   # RPC transport (internal/pkg/rpchttp retry transport) — PR #505

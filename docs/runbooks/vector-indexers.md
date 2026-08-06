@@ -679,8 +679,16 @@ fresh rows: `SELECT max(persisted_at) FROM cex_orderbook_snapshots WHERE exchang
 ### What it means
 
 The oldest symbol on the labelled `exchange` has had no order book update for
->120s sustained over 10m. The upstream feed has silently gone dead; snapshots
-are stale and stale symbols stop being written, so the series flat-lines.
+>120s sustained over 10m. Snapshots are stale and stale symbols stop being
+written, so the series flat-lines.
+
+Since the 90s stale watchdog (VEC-542), a whole connection going silently dead
+self-heals by reconnect before this alert's 120s threshold — that mode now
+surfaces as `VectorCexOrderbookStaleFeedChurn` instead. If this alert fires
+anyway, suspect the modes the watchdog cannot fix: a single symbol dead while
+the rest of its connection keeps updating (the watchdog is per-connection), a
+consumer wedged after the update is received (age gauge climbs while the
+socket is fine), or the watchdog itself broken.
 
 ### First checks (≤5 min)
 
@@ -766,6 +774,51 @@ connection pool is degraded. The risk: a write slower than the snapshot interval
 ### Verify recovery
 
 `histogram_quantile(0.99, sum by (exchange, le) (rate(orderbook_persist_duration_seconds_bucket[10m]))) < 1`.
+
+---
+
+## VectorCexOrderbookStaleFeedChurn
+
+**Severity:** warning · **For:** 15m
+
+### What it means
+
+The stale-feed watchdog (VEC-542) on the labelled `exchange` keeps closing
+connections that stay open but deliver no book updates for 90s, at a sustained
+rate (>3 `reason="stale_feed"` reconnects per 10m, held 15m). One venue
+restart-drain causes a single stale_feed close per connection and does not
+fire; this firing means every reconnect lands on another dead feed. Because
+the watchdog resets `orderbook_last_update_age_seconds` at ~90s,
+`VectorCexOrderbookStreamStalled` (120s threshold) stays green through this —
+the alerts are complementary, and data continuity is degrading on every
+recycle even though nothing pages.
+
+### First checks (≤5 min)
+
+1. **Pod logs** — `kubectl -n vector logs -l app=cex-orderbook-indexer-<exchange> --tail=200`.
+   Look for the repeating stale-feed close/reconnect cycle and whether any
+   updates arrive at all between reconnects.
+2. **Exchange status** — check the venue's status page; a degraded matching
+   engine or WebSocket incident (e.g. a rolling restart drain that never
+   completes) keeps sockets alive but silent.
+3. **Symbol config** — a bad/renamed symbol can make subscriptions succeed but
+   never produce data (e.g. Kraken `XBT`/`XDG` aliasing); confirm `SYMBOLS`
+   matches the venue's current pairs.
+4. **Scope** — is `orderbook_updates_emitted_total{exchange="<exchange>"}`
+   zero (whole feed dead) or merely reduced (one connection of several
+   recycling)?
+
+### Common causes
+
+- Venue-side incident: sockets accepted and kept alive (heartbeats/pongs) but
+  no book data — wait it out or fail over; the watchdog is already retrying.
+- Subscription no longer effective after the venue changed its protocol or
+  renamed a pair — reconnects "succeed" but subscribe to nothing.
+
+### Verify recovery
+
+`sum by (exchange) (increase(orderbook_reconnections_total{reason="stale_feed", exchange="<exchange>"}[10m])) == 0`
+and `rate(orderbook_updates_emitted_total{exchange="<exchange>"}[5m]) > 0`.
 
 ---
 
