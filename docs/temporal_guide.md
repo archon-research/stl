@@ -232,6 +232,12 @@ func register(ctx context.Context, deps temporal.Dependencies, r worker.Registry
 
 ### Triggering a run from the Temporal UI
 
+> **Just want to backfill prices?** [backfilling-offchain-prices.md](backfilling-offchain-prices.md)
+> is the task-oriented version of this section: valid asset IDs, how to read the
+> result, verification SQL and troubleshooting. The rest of this section is the
+> generic mechanism.
+
+
 Namespace is **`vector`** — the UI lands on `default`, which is empty for us.
 
 `http://temporal-staging:8080/namespaces/vector/workflows` → **Start Workflow**
