@@ -16,6 +16,15 @@ spec:
       containers:
         - name: timescaledb
           image: timescale/timescaledb:2.25.1-pg17
+          # pg_stat_statements is a shared library, so it only exists if it is
+          # preloaded at server start — CREATE EXTENSION alone is not enough. The
+          # image preloads timescaledb via its own config; naming both here keeps
+          # timescaledb loaded while adding the statistics collector the
+          # db-statement-stats cronjob reads (VEC-545).
+          args:
+            - postgres
+            - -c
+            - shared_preload_libraries=timescaledb,pg_stat_statements
           env:
             - name: POSTGRES_USER
               value: postgres

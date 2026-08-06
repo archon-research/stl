@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: db-statement-stats
+spec:
+  # Temporal serializes a schedule's executions, and the delta tracker is
+  # in-process: two replicas would each diff against their own baseline and
+  # publish the same window twice.
+  replicas: 1
+  # Recreate, because replicas: 1 above is a correctness bound, not a cost choice.
+  # The default RollingUpdate rounds maxSurge up to 1, so every rollout — including
+  # the unattended Reloader-triggered ones a ConfigMap edit or a 3m-refreshed
+  # ExternalSecret causes — would run two pods with independent baselines until the
+  # new one is Ready, double-counting the window they overlap. The watchers use
+  # Recreate for the same reason.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: db-statement-stats
+  template:
+    metadata:
+      labels:
+        app: db-statement-stats
+    spec:
+      serviceAccountName: db-statement-stats
+      containers:
+        - name: db-statement-stats
+          image: db-statement-stats
+          envFrom:
+            # otel-config carries OTEL_EXPORTER_OTLP_ENDPOINT. Without it the OTel
+            # providers install as silent no-ops and this job — whose entire output
+            # is metrics — would run perfectly while exporting nothing.
+            - configMapRef:
+                name: otel-config
+            - configMapRef:
+                name: db-statement-stats
+            - secretRef:
+                name: db-statement-stats
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+      terminationGracePeriodSeconds: 60
