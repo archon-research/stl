@@ -1415,9 +1415,12 @@ groups:
           summary: "Vector cex-orderbook-indexer stream stalled on {{ $labels.exchange }}"
           description: |
             The oldest symbol on `{{ $labels.exchange }}` has had no order book
-            update for >120s sustained over 10m. The feed has silently gone
-            dead; persisted snapshots are stale (and stale symbols stop being
-            written, so the series goes flat).
+            update for >120s sustained over 10m. Persisted snapshots are stale
+            (stale symbols stop being written, so the series goes flat). A
+            whole connection going silently dead self-heals via the 90s stale
+            watchdog (see VectorCexOrderbookStaleFeedChurn), so suspect one
+            dead symbol on an otherwise-live connection, a wedged consumer, or
+            a broken watchdog.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectorcexorderbookstreamstalled
 
       - alert: VectorCexOrderbookDown
