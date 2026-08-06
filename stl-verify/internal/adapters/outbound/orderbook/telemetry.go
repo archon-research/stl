@@ -136,6 +136,8 @@ func (m *metrics) reconnected(err error) {
 		reason = "sequence_gap"
 	case errors.Is(err, errUnexpectedSymbol):
 		reason = "unexpected_symbol"
+	case errors.Is(err, errStaleFeed):
+		reason = "stale_feed"
 	}
 	m.reconnectsTotal.Add(context.Background(), 1,
 		metric.WithAttributes(m.exchangeAttr, attribute.String("reason", reason)))

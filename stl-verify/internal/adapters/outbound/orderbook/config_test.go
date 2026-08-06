@@ -9,7 +9,8 @@ func TestConfigWithDefaults(t *testing.T) {
 		t.Error("withDefaults must fill the logger")
 	}
 	if c.InitialBackoff != d.InitialBackoff || c.MaxBackoff != d.MaxBackoff ||
-		c.BackoffFactor != d.BackoffFactor || c.OutputBuffer != d.OutputBuffer {
+		c.BackoffFactor != d.BackoffFactor || c.OutputBuffer != d.OutputBuffer ||
+		c.StaleReconnect != d.StaleReconnect {
 		t.Errorf("withDefaults left a zero field unfilled: %+v", c)
 	}
 	// Transport fields are deliberately left zero here: wsclient applies its own
