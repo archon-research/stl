@@ -263,17 +263,25 @@ func TestProcessingVersionTriggerQueryPlansAreEfficient(t *testing.T) {
 	}
 }
 
-// Every processing_version trigger function must be pinned to custom plans.
+// pinnedCustomPlanFunctions are the processing_version trigger functions that have
+// been deliberately converted to custom plans, each with its own measurement.
+//
+// The list is the point: the mechanism affects every versioned hypertable, but the
+// conversion is per table so a plan-behaviour change only reaches ingest paths that
+// have been exercised. When you convert another table, add it here in the same
+// migration — the test below then guards it against a silent revert, and anything
+// absent from this list is reported as outstanding rather than failed.
+var pinnedCustomPlanFunctions = []string{
+	"assign_processing_version_offchain_token_price",
+}
+
+// The converted functions must stay pinned to custom plans.
 //
 // PL/pgSQL switches a statement to a GENERIC plan after ~5 executions, and a
 // generic plan cannot prune hypertable chunks — the partition value is a
-// placeholder at planning time, so every inserted row scans every chunk and
-// per-row cost grows with chunk count forever. Measured at 84 s vs 0.6 s for one
-// 721-row batch against 782 chunks.
-//
-// This is the executable half of the convention: a new versioned hypertable that
-// forgets the setting fails here rather than being discovered by whoever next
-// runs a large backfill against it.
+// placeholder at planning time, so every inserted row re-derives chunk exclusion
+// across the whole table and per-row cost grows with chunk count forever. Measured
+// at 84 s vs 0.6 s for one 721-row batch against 782 chunks.
 func TestProcessingVersionFunctionsPinCustomPlan(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupPostgres(ctx, t)
@@ -297,7 +305,7 @@ func TestProcessingVersionFunctionsPinCustomPlan(t *testing.T) {
 	}
 	defer rows.Close()
 
-	var missing []string
+	pinned := map[string]bool{}
 	total := 0
 	for rows.Next() {
 		var name, config string
@@ -305,9 +313,7 @@ func TestProcessingVersionFunctionsPinCustomPlan(t *testing.T) {
 			t.Fatalf("scan function row: %v", err)
 		}
 		total++
-		if !strings.Contains(config, "plan_cache_mode=force_custom_plan") {
-			missing = append(missing, name)
-		}
+		pinned[name] = strings.Contains(config, "plan_cache_mode=force_custom_plan")
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatalf("read function rows: %v", err)
@@ -316,11 +322,32 @@ func TestProcessingVersionFunctionsPinCustomPlan(t *testing.T) {
 	if total == 0 {
 		t.Fatal("found no assign_processing_version_* functions; has the naming convention changed?")
 	}
-	if len(missing) > 0 {
-		t.Fatalf("%d/%d processing_version functions are missing plan_cache_mode = force_custom_plan: %v\n"+
-			"add `ALTER FUNCTION <fn>() SET plan_cache_mode = 'force_custom_plan'` in the migration that creates the trigger",
-			len(missing), total, missing)
+
+	for _, fn := range pinnedCustomPlanFunctions {
+		got, exists := pinned[fn]
+		if !exists {
+			t.Errorf("%s is listed in pinnedCustomPlanFunctions but no such function exists; "+
+				"was it renamed or dropped?", fn)
+			continue
+		}
+		if !got {
+			t.Errorf("%s has lost plan_cache_mode = force_custom_plan; without it every inserted row "+
+				"re-derives chunk exclusion across the whole hypertable\n"+
+				"restore it with: ALTER FUNCTION %s() SET plan_cache_mode = 'force_custom_plan'", fn, fn)
+		}
 	}
+
+	// Surfaced, not failed: the rest are known-outstanding by design, and a count
+	// that stops shrinking is a nudge rather than a broken build.
+	outstanding := 0
+	for _, isPinned := range pinned {
+		if !isPinned {
+			outstanding++
+		}
+	}
+	t.Logf("%d/%d processing_version functions pinned to custom plans; %d still on the default "+
+		"(convert per table, each with its own measurement — see ADR-0002 §3)",
+		total-outstanding, total, outstanding)
 }
 
 // The build_id retry check is the trigger's FIRST per-row lookup and the one that

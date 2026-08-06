@@ -160,13 +160,22 @@ Each state table gets a dedicated trigger function that assigns `processing_vers
 on insert. The functions use hardcoded column names rather than dynamic SQL, following the same
 pattern as the existing `assign_block_version` trigger on `block_states`.
 
-#### Plan caching must be disabled (mandatory)
+#### Plan caching must be disabled
 
-Every such function **must** carry `plan_cache_mode = 'force_custom_plan'`:
+Every such function on a **hypertable** wants `plan_cache_mode = 'force_custom_plan'`:
 
 ```sql
 ALTER FUNCTION assign_processing_version_<table>() SET plan_cache_mode = 'force_custom_plan';
 ```
+
+**Rollout is per table, not all at once.** The mechanism below is shared by all ~36
+functions, but a plan-behaviour change is only applied to ingest paths that have been
+measured and exercised end to end. As of 2026-08-06 the only converted table is
+`offchain_token_price`, where the cost was measured and where a historical backfill made
+it acute. Convert the others individually, each with its own measurement, and add each to
+`pinnedCustomPlanFunctions` in `db/migrator/processing_version_indexes_integration_test.go`
+so a later revert is caught. New versioned hypertables should include the `ALTER FUNCTION`
+in the migration that creates their trigger.
 
 This reverses an earlier assumption in this ADR, which treated PL/pgSQL's plan caching as a
 benefit of hardcoding the column names. For a **hypertable** it is the opposite. PL/pgSQL switches

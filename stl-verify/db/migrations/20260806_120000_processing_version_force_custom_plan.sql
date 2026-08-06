@@ -1,18 +1,18 @@
--- Pin every processing_version trigger function to custom (per-execution) query
--- plans, so its per-row lookups can prune hypertable chunks.
+-- Pin offchain_token_price's processing_version trigger to custom (per-execution)
+-- query plans, so its per-row lookups can prune hypertable chunks.
 --
 -- THE PROBLEM
--- Each assign_processing_version_<table>() trigger runs two lookups per row: a
+-- assign_processing_version_offchain_token_price() runs two lookups per row: a
 -- build_id retry check (has this exact build already written this natural key?)
 -- and a MAX(processing_version) probe. PL/pgSQL caches the plans for statements
 -- inside a function and, after ~5 executions of the same statement, switches to a
 -- GENERIC plan whose parameters are placeholders rather than values.
 --
 -- A generic plan cannot prune hypertable chunks: with the partition column
--- unknown at planning time, the plan must keep every chunk in the scan. So each
--- inserted row touches ALL chunks of the table rather than the one its timestamp
--- falls in, and per-row cost grows linearly with chunk count — on a hypertable
--- that only ever grows.
+-- unknown at planning time, the plan keeps every chunk and re-derives the
+-- surviving one at each execution (visible as "Chunks excluded during startup: N"
+-- under a Custom Scan (ChunkAppend)). Per-row cost therefore grows with chunk
+-- count — on a hypertable that only ever gains chunks.
 --
 -- Measured on timescaledb 2.25.1-pg17 with real migrations and the production
 -- UpsertPrices statement, one 721-row batch against 2,071 chunks:
@@ -32,46 +32,41 @@
 -- extra planning is paid back many times over. Semantics are untouched: identical
 -- rows, identical versions, identical locking — only the plan changes.
 --
--- Applied to every such function rather than just the one that surfaced this,
--- because the mechanism is shared by all of them and the next append-heavy
--- backfill would rediscover it on a different table.
---
--- Prefer this over adding a covering index for the build_id check: an index would
+-- Preferred over adding a covering index for the build_id check: an index would
 -- fix one table, cost write throughput on the hot ingest path, and still leave a
 -- generic plan unable to prune.
+--
+-- SCOPE: DELIBERATELY ONE TABLE
+-- The mechanism is shared by all ~36 assign_processing_version_* functions, and
+-- every versioned hypertable will eventually want this. It is applied here to
+-- offchain_token_price alone — the table where the cost was measured and where a
+-- historical backfill makes it acute — rather than to all of them at once, to
+-- keep the blast radius of a plan-behaviour change to the one ingest path that
+-- has been exercised end to end. Convert the others per table, each with its own
+-- measurement, and add each to pinnedCustomPlanFunctions in
+-- db/migrator/processing_version_indexes_integration_test.go so a revert is
+-- caught.
+
+ALTER FUNCTION assign_processing_version_offchain_token_price()
+    SET plan_cache_mode = 'force_custom_plan';
 
 DO $$
-DECLARE
-    fn      record;
-    updated int := 0;
 BEGIN
-    -- Driven off the catalogue, not a hand-maintained list, so a function this
-    -- migration has never heard of cannot be silently skipped.
-    FOR fn IN
-        SELECT p.oid::regprocedure AS sig
+    -- Fail loudly rather than leaving the trigger on generic plans if the function
+    -- was renamed out from under this migration.
+    IF NOT EXISTS (
+        SELECT 1
         FROM pg_proc p
         JOIN pg_namespace n ON n.oid = p.pronamespace
         WHERE n.nspname = 'public'
-          AND p.proname LIKE 'assign\_processing\_version\_%'
-    LOOP
-        EXECUTE format('ALTER FUNCTION %s SET plan_cache_mode = %L',
-                       fn.sig, 'force_custom_plan');
-        updated := updated + 1;
-    END LOOP;
-
-    -- 36 existed when this was written. A floor rather than an equality so a
-    -- later migration adding a versioned table does not break this one, while a
-    -- renaming that silently matches nothing still fails loudly instead of
-    -- leaving every trigger on generic plans.
-    IF updated < 36 THEN
+          AND p.proname = 'assign_processing_version_offchain_token_price'
+          AND 'plan_cache_mode=force_custom_plan' = ANY(p.proconfig)
+    ) THEN
         RAISE EXCEPTION
-            'expected at least 36 assign_processing_version_* functions, configured %; '
-            'has the naming convention changed? every versioned hypertable needs '
-            'plan_cache_mode = force_custom_plan or its per-row trigger lookups '
-            'stop pruning chunks', updated;
+            'assign_processing_version_offchain_token_price() is not pinned to '
+            'force_custom_plan; without it every inserted row re-derives chunk '
+            'exclusion across the whole hypertable';
     END IF;
-
-    RAISE NOTICE 'set plan_cache_mode = force_custom_plan on % processing_version functions', updated;
 END $$;
 
 INSERT INTO migrations (filename)
