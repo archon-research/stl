@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/archon-research/stl/stl-verify/db/migrator"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -244,7 +245,7 @@ func TestProcessingVersionTriggerQueryPlansAreEfficient(t *testing.T) {
 	if _, err := conn.Exec(ctx, "SET plan_cache_mode = force_generic_plan"); err != nil {
 		t.Fatalf("force generic plan: %v", err)
 	}
-	defer conn.Exec(ctx, "RESET plan_cache_mode")
+	defer resetSessionState(t, ctx, conn, "RESET plan_cache_mode")
 
 	for _, tc := range processingVersionIndexCases() {
 		t.Run(tc.tableName, func(t *testing.T) {
@@ -259,6 +260,298 @@ func TestProcessingVersionTriggerQueryPlansAreEfficient(t *testing.T) {
 					tc.tableName, buffers, tc.maxExecBuffers, planText)
 			}
 		})
+	}
+}
+
+// pinnedCustomPlanFunctions are the processing_version trigger functions that have
+// been deliberately converted to custom plans, each with its own measurement.
+//
+// The list is the point: the mechanism affects every versioned hypertable, but the
+// conversion is per table so a plan-behaviour change only reaches ingest paths that
+// have been exercised. When you convert another table, add it here in the same
+// migration — the test below then guards it against a silent revert, and anything
+// absent from this list is reported as outstanding rather than failed.
+var pinnedCustomPlanFunctions = []string{
+	"assign_processing_version_offchain_token_price",
+}
+
+// The converted functions must stay pinned to custom plans.
+//
+// PL/pgSQL switches a statement to a GENERIC plan after ~5 executions, and a
+// generic plan cannot prune hypertable chunks — the partition value is a
+// placeholder at planning time, so every inserted row re-derives chunk exclusion
+// across the whole table and per-row cost grows with chunk count forever. Measured
+// at 84 s vs 0.6 s for one 721-row batch against 782 chunks.
+func TestProcessingVersionFunctionsPinCustomPlan(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupPostgres(ctx, t)
+	defer cleanup()
+
+	m := migrator.New(pool, getMigrationsPath())
+	if err := m.ApplyAll(ctx); err != nil {
+		t.Fatalf("migrations failed: %v", err)
+	}
+
+	rows, err := pool.Query(ctx, `
+		SELECT p.proname, COALESCE(array_to_string(p.proconfig, ','), '')
+		FROM pg_proc p
+		JOIN pg_namespace n ON n.oid = p.pronamespace
+		WHERE n.nspname = 'public'
+		  AND p.proname LIKE 'assign\_processing\_version\_%'
+		ORDER BY p.proname
+	`)
+	if err != nil {
+		t.Fatalf("query trigger functions: %v", err)
+	}
+	defer rows.Close()
+
+	pinned := map[string]bool{}
+	total := 0
+	for rows.Next() {
+		var name, config string
+		if err := rows.Scan(&name, &config); err != nil {
+			t.Fatalf("scan function row: %v", err)
+		}
+		total++
+		pinned[name] = strings.Contains(config, "plan_cache_mode=force_custom_plan")
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read function rows: %v", err)
+	}
+
+	if total == 0 {
+		t.Fatal("found no assign_processing_version_* functions; has the naming convention changed?")
+	}
+
+	for _, fn := range pinnedCustomPlanFunctions {
+		got, exists := pinned[fn]
+		if !exists {
+			t.Errorf("%s is listed in pinnedCustomPlanFunctions but no such function exists; "+
+				"was it renamed or dropped?", fn)
+			continue
+		}
+		if !got {
+			t.Errorf("%s has lost plan_cache_mode = force_custom_plan; without it every inserted row "+
+				"re-derives chunk exclusion across the whole hypertable\n"+
+				"restore it with: ALTER FUNCTION %s() SET plan_cache_mode = 'force_custom_plan'", fn, fn)
+		}
+	}
+
+	// Surfaced, not failed: the rest are known-outstanding by design, and a count
+	// that stops shrinking is a nudge rather than a broken build.
+	outstanding := 0
+	for _, isPinned := range pinned {
+		if !isPinned {
+			outstanding++
+		}
+	}
+	t.Logf("%d/%d processing_version functions pinned to custom plans; %d still on the default "+
+		"(convert per table, each with its own measurement — see ADR-0002 §3)",
+		total-outstanding, total, outstanding)
+}
+
+// The build_id retry check is the trigger's FIRST per-row lookup and the one that
+// dominated the cost — ~92% of it — because no covering index serves it. The
+// sibling plan test only exercises the MAX probe, and its fixture puts every row
+// in 5 days (~6 chunks), so neither the query nor the scale that makes it hurt
+// was covered.
+//
+// Asserted as chunk pruning rather than wall-clock, so it is a statement about
+// the plan rather than about how loaded the machine is.
+func TestProcessingVersionBuildIDCheckPrunesChunksAtScale(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupPostgres(ctx, t)
+	defer cleanup()
+
+	m := migrator.New(pool, getMigrationsPath())
+	if err := m.ApplyAll(ctx); err != nil {
+		t.Fatalf("migrations failed: %v", err)
+	}
+
+	const wantChunks = 200
+	seedOffchainPriceAcrossChunks(t, ctx, pool, wantChunks)
+
+	var chunks int
+	if err := pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM timescaledb_information.chunks
+		WHERE hypertable_name = 'offchain_token_price'
+	`).Scan(&chunks); err != nil {
+		t.Fatalf("count chunks: %v", err)
+	}
+	if chunks < wantChunks/2 {
+		t.Fatalf("fixture produced only %d chunks; the test needs many chunks to be meaningful", chunks)
+	}
+
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire conn: %v", err)
+	}
+	defer conn.Release()
+
+	generic := explainBuildIDCheck(t, ctx, conn, "force_generic_plan")
+	custom := explainBuildIDCheck(t, ctx, conn, "force_custom_plan")
+
+	// The two modes are distinguished by WHERE pruning happens, which is visible in
+	// the plan shape rather than in a chunk count. A generic plan cannot know the
+	// timestamp, so it emits a ChunkAppend that re-derives the surviving chunk at
+	// every execution ("Chunks excluded during startup: N"). A custom plan knows
+	// the value and goes straight to an index scan on the one chunk.
+	//
+	// That per-execution re-derivation over every chunk is the cost: harmless for a
+	// single row, ruinous when a per-row trigger repeats it 721 times per batch and
+	// the chunk count only grows. Measured on this fixture's real shape: 84 s for a
+	// 721-row batch at 782 chunks, against 0.6 s once pinned to custom plans.
+	customChunks := countChunkReferences(custom)
+	t.Logf("over %d chunks — generic: startup exclusion=%v; custom: startup exclusion=%v, chunks in plan=%d",
+		chunks, hasStartupChunkExclusion(generic), hasStartupChunkExclusion(custom), customChunks)
+
+	// Two assertions, because either alone passes for a bad plan.
+	//
+	// Absence of startup exclusion is also true of a plan that simply kept every
+	// chunk and never excluded anything — the failure mode this fix exists to
+	// prevent. And a low chunk count alone is true of the generic plan too, whose
+	// text names only the chunk that survived runtime exclusion. Together they pin
+	// the property that matters: pruning happened when the plan was BUILT, so it is
+	// not repeated per execution.
+	if hasStartupChunkExclusion(custom) {
+		t.Fatalf("the build_id retry check still defers chunk exclusion to startup under "+
+			"force_custom_plan, so per-row cost will keep scaling with chunk count\nplan:\n%s", custom)
+	}
+	if customChunks > 4 {
+		t.Fatalf("custom plan references %d chunks for a single-timestamp lookup over %d chunks; "+
+			"it is scanning the hypertable rather than pruning to the matching chunk\nplan:\n%s",
+			customChunks, chunks, custom)
+	}
+
+	// Informational rather than asserted: it describes PostgreSQL's behaviour, not
+	// ours. But if generic plans ever prune at plan time, the force_custom_plan
+	// migration has become unnecessary and should be revisited rather than carried
+	// forever.
+	if !hasStartupChunkExclusion(generic) {
+		t.Logf("NOTE: generic plans no longer defer chunk exclusion to startup — "+
+			"re-evaluate whether plan_cache_mode = force_custom_plan is still needed\nplan:\n%s", generic)
+	}
+}
+
+// resetSessionState restores a session GUC before the connection returns to the
+// pool, failing the test if it cannot. Ignoring this is not cosmetic: a connection
+// handed back with session_replication_role still 'replica' silently disables the
+// processing_version triggers for whichever test acquires it next, which would look
+// like a bug in that test rather than leakage from this one.
+func resetSessionState(t *testing.T, ctx context.Context, conn *pgxpool.Conn, sql string, mode ...any) {
+	t.Helper()
+
+	args := append([]any{}, mode...)
+	if _, err := conn.Exec(ctx, sql, args...); err != nil {
+		t.Errorf("cleanup %q failed; this connection is returning to the pool with "+
+			"altered session state: %v", sql, err)
+	}
+}
+
+// hasStartupChunkExclusion reports whether the plan re-derives which chunks to
+// scan at execution time, the signature of a plan that could not prune when it was
+// built.
+func hasStartupChunkExclusion(plan string) bool {
+	return strings.Contains(plan, "Chunks excluded during startup")
+}
+
+// countChunkReferences counts the distinct hypertable chunks a plan names, covering
+// both the row-store chunks and the compressed ones a columnar scan reaches through.
+func countChunkReferences(plan string) int {
+	seen := map[string]struct{}{}
+	for _, m := range regexp.MustCompile(`(?:compress_)?_?hyper_\d+_\d+_chunk`).FindAllString(plan, -1) {
+		seen[m] = struct{}{}
+	}
+	return len(seen)
+}
+
+// explainBuildIDCheck prepares the trigger's build_id retry check under planMode,
+// warms the plan cache, and returns the EXPLAIN output.
+//
+// Everything runs through the simple protocol with a mode-specific statement name:
+// pgx keeps its own server-side prepared statements per connection, so sharing one
+// name or issuing DEALLOCATE ALL invalidates them underneath the driver.
+func explainBuildIDCheck(t *testing.T, ctx context.Context, conn *pgxpool.Conn, planMode string) string {
+	t.Helper()
+
+	stmt := "pv_buildid_" + planMode
+	const args = "1, 1::smallint, timestamptz '2035-01-03 00:00:00+00', 0"
+
+	if _, err := conn.Exec(ctx, "SET plan_cache_mode = "+planMode, pgx.QueryExecModeSimpleProtocol); err != nil {
+		t.Fatalf("set %s: %v", planMode, err)
+	}
+	defer resetSessionState(t, ctx, conn, "RESET plan_cache_mode", pgx.QueryExecModeSimpleProtocol)
+
+	prepareSQL := fmt.Sprintf(`PREPARE %s(bigint, smallint, timestamptz, int) AS
+		SELECT processing_version
+		FROM offchain_token_price
+		WHERE token_id = $1 AND source_id = $2 AND timestamp = $3 AND build_id = $4
+		LIMIT 1`, stmt)
+	if _, err := conn.Exec(ctx, prepareSQL, pgx.QueryExecModeSimpleProtocol); err != nil {
+		t.Fatalf("prepare build_id check: %v", err)
+	}
+	defer resetSessionState(t, ctx, conn, "DEALLOCATE "+stmt, pgx.QueryExecModeSimpleProtocol)
+
+	// Executed repeatedly because the generic-plan switch only happens once the
+	// plan cache has seen the statement ~5 times — a single EXECUTE would still be
+	// planned custom and the comparison would prove nothing.
+	for range 8 {
+		if _, err := conn.Exec(ctx, fmt.Sprintf("EXECUTE %s(%s)", stmt, args), pgx.QueryExecModeSimpleProtocol); err != nil {
+			t.Fatalf("execute build_id check: %v", err)
+		}
+	}
+
+	rows, err := conn.Query(ctx,
+		fmt.Sprintf("EXPLAIN (ANALYZE, BUFFERS) EXECUTE %s(%s)", stmt, args),
+		pgx.QueryExecModeSimpleProtocol)
+	if err != nil {
+		t.Fatalf("explain build_id check: %v", err)
+	}
+	defer rows.Close()
+
+	var lines []string
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			t.Fatalf("scan EXPLAIN row: %v", err)
+		}
+		lines = append(lines, line)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read EXPLAIN rows: %v", err)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// seedOffchainPriceAcrossChunks writes one row per day so the rows spread across
+// `days` daily chunks, which is what the sibling fixture does not do: it puts
+// every row in 5 days, so a plan that fails to prune still looks cheap.
+func seedOffchainPriceAcrossChunks(t *testing.T, ctx context.Context, pool *pgxpool.Pool, days int) {
+	t.Helper()
+
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire seed conn: %v", err)
+	}
+	defer conn.Release()
+
+	// Triggers off for seeding: they are the thing under test, and leaving them on
+	// would make the fixture itself pay the cost this test exists to measure.
+	if _, err := conn.Exec(ctx, "SET session_replication_role = 'replica'"); err != nil {
+		t.Fatalf("disable triggers for seeding: %v", err)
+	}
+	defer resetSessionState(t, ctx, conn, "RESET session_replication_role")
+
+	if _, err := conn.Exec(ctx, `
+		INSERT INTO offchain_token_price (token_id, source_id, timestamp, price_usd, processing_version, build_id)
+		SELECT 1, 1, timestamptz '2035-01-01 00:00:00+00' + (g * interval '1 day'), 1, 0, 0
+		FROM generate_series(1, $1) AS g
+	`, days); err != nil {
+		t.Fatalf("seed offchain_token_price across chunks: %v", err)
+	}
+
+	if _, err := conn.Exec(ctx, "ANALYZE offchain_token_price"); err != nil {
+		t.Fatalf("analyze: %v", err)
 	}
 }
 

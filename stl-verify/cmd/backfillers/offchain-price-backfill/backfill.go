@@ -133,8 +133,8 @@ func backfillWorkflow(ctx workflow.Context, params BackfillParams) (BackfillResu
 	}
 
 	if err := params.validate(workflow.Now(ctx)); err != nil {
-		// Bad input fails identically on every attempt, so retrying it only
-		// obscures the mistake behind five backoffs.
+		// Bad input fails identically on every attempt, so retrying it would
+		// only bury the mistake under the retry envelope.
 		return BackfillResult{}, temporalsdk.NewNonRetryableApplicationError(
 			"invalid backfill parameters", "InvalidParams", err)
 	}
@@ -273,15 +273,29 @@ func truncatedAssets(params BackfillParams, state backfillProgress) []string {
 
 func chunkActivityOptions() workflow.ActivityOptions {
 	return workflow.ActivityOptions{
-		// One chunk is a single rate-limited HTTP call plus one batched upsert. The
-		// ceiling is generous because the CoinGecko client spends its own retry and
-		// rate-limit budget inside this window.
-		StartToCloseTimeout: 3 * time.Minute,
+		// Sized off the write path, not the HTTP call. The API answers in ~0.2 s;
+		// what dominates is the 721-row upsert and its per-row processing_version
+		// trigger, measured at 4.4 s per batch against ~2,000 chunks and as bad as
+		// 464 s on the worst batch before the plan_cache_mode fix. A 3-minute
+		// ceiling truncated those mid-write, redid them, and still failed the run.
+		StartToCloseTimeout: 10 * time.Minute,
+
+		// Total time for one chunk INCLUDING retries. This, not a small attempt
+		// cap, is what bounds a pathological chunk: an attempt cap turns
+		// slow-but-progressing work into a hard failure, whereas an envelope lets a
+		// transient blip retry while still refusing to hang the run forever.
+		ScheduleToCloseTimeout: 30 * time.Minute,
+
 		RetryPolicy: &temporalsdk.RetryPolicy{
 			InitialInterval:    2 * time.Second,
 			BackoffCoefficient: 2.0,
 			MaximumInterval:    time.Minute,
-			MaximumAttempts:    5,
+			// Deliberately no MaximumAttempts — ScheduleToCloseTimeout above is the
+			// bound. Nothing retries pointlessly as a result: a verdict that cannot
+			// change (revoked key, unknown asset, malformed window) already fails on
+			// attempt 1, because the provider's 4xx is tagged
+			// outbound.ErrRequestRejected and FetchChunk maps that to a
+			// non-retryable application error.
 		},
 	}
 }
@@ -331,9 +345,9 @@ func (a *backfillActivities) FetchChunk(ctx context.Context, w chunkWindow) (int
 		wrapped := fmt.Errorf("backfilling %s from %s to %s: %w",
 			w.Asset, w.From.Format(time.DateOnly), w.To.Format(time.DateOnly), err)
 
-		// A mistyped ID or a malformed window fails identically on all five
-		// attempts. Retrying buries the real cause under half a minute of backoff
-		// and makes an operator error read like a flaky upstream.
+		// A mistyped ID or a malformed window fails identically on every attempt.
+		// Since there is no attempt cap, retrying one would consume the whole
+		// 30-minute envelope and make an operator error read like a flaky upstream.
 		if errors.Is(err, offchain_price_fetcher.ErrInvalidRequest) {
 			return 0, temporalsdk.NewNonRetryableApplicationError(
 				wrapped.Error(), "InvalidRequest", err)
