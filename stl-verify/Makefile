@@ -9,6 +9,8 @@ include lint.mk
 		ecr-login docker-build docker-push docker-release \
 		_docker-release-image _docker-release-go-service \
 		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-fluid-vault-indexer-internal _docker-release-dex-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal _docker-release-psm3-indexer-internal _docker-release-cex-orderbook-indexer-internal _docker-release-migrate-internal _docker-release-python-api-internal _docker-release-transform-bootstrap-internal _docker-release-cronjob-%-internal \
+		docker-build-offchain-price-backfill docker-release-offchain-price-backfill _docker-release-offchain-price-backfill-internal \
+		build-backfiller-% run-backfiller-% \
         docker-build-watcher docker-push-watcher docker-release-watcher \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
         docker-build-backup docker-push-backup docker-release-backup \
@@ -635,6 +637,15 @@ dev-env:
 		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
 		"TEMPORAL_HOST_PORT=127.0.0.1:7233" \
 		"TEMPORAL_NAMESPACE=vector" \
+		"COINGECKO_API_KEY=$$COINGECKO_API_KEY" \
+		"BUILD_GIT_HASH=dev" \
+		"LOG_LEVEL=debug" \
+		> cmd/backfillers/offchain-price-backfill/.env; \
+	printf '%s\n' \
+		"CHAIN_ID=1" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
+		"TEMPORAL_HOST_PORT=127.0.0.1:7233" \
+		"TEMPORAL_NAMESPACE=vector" \
 		"ETHERSCAN_API_KEY=$$ETHERSCAN_API_KEY" \
 		"BUILD_GIT_HASH=dev" \
 		"LOG_LEVEL=debug" \
@@ -747,7 +758,10 @@ GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 GIT_COMMIT_FULL ?= $(shell git rev-parse HEAD 2>/dev/null || echo "unknown")
 GIT_BRANCH ?= $(shell git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
 BUILD_TIME ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
-GO_VERSION ?= $(shell cat ../.go-version 2>/dev/null || cat .go-version 2>/dev/null || echo "1.26.3")
+# Keep the literal fallback in step with ../.go-version. It only applies when that
+# file is unreachable, but a stale value here silently builds images on an older
+# toolchain — 1.26.3 shipped the stdlib CVEs that vulncheck flags.
+GO_VERSION ?= $(shell cat ../.go-version 2>/dev/null || cat .go-version 2>/dev/null || echo "1.26.5")
 PYTHON_VERSION ?= $(shell cat ../.python-version 2>/dev/null || cat .python-version 2>/dev/null || echo "3.12")
 
 # Image tag (default to git sha, can override)
@@ -963,6 +977,7 @@ docker-release-all:
 	@$(MAKE) _docker-release-python-api-internal ENV=$(ENV)
 	@echo ""
 	@$(MAKE) _docker-release-transform-bootstrap-internal ENV=$(ENV)
+	@$(MAKE) _docker-release-offchain-price-backfill-internal ENV=$(ENV)
 	@echo ""
 	@for cj in $(CRONJOBS); do \
 		$(MAKE) _docker-release-cronjob-$$cj-internal ENV=$(ENV) || { echo "ERROR: Failed to release cronjob $$cj"; exit 1; }; \
@@ -1809,6 +1824,17 @@ run-cronjob-%:
 	@echo "==> Running $*..."
 	@set -a && . cmd/cronjobs/$*/.env && [ -f cmd/cronjobs/$*/.env.local ] && . cmd/cronjobs/$*/.env.local; set +a && go run ./cmd/cronjobs/$*
 
+# Pattern rules for backfiller binaries — work for any backfiller under cmd/backfillers/.
+build-backfiller-%:
+	@echo "==> Building $*..."
+	mkdir -p dist
+	go build -o dist/$* ./cmd/backfillers/$*
+	@echo "==> Built: dist/$*"
+
+run-backfiller-%:
+	@echo "==> Running $*..."
+	@set -a && . cmd/backfillers/$*/.env && [ -f cmd/backfillers/$*/.env.local ] && . cmd/backfillers/$*/.env.local; set +a && go run ./cmd/backfillers/$*
+
 # Build oracle-pricing-backfill binary for ARM64 Linux (to run on Erigon node)
 build-oracle-pricing-backfill-arm64:
 	@echo "==> Building oracle-pricing-backfill for ARM64 Linux..."
@@ -2106,6 +2132,19 @@ docker-release-transform-bootstrap: ecr-login _docker-release-transform-bootstra
 
 _docker-release-transform-bootstrap-internal:
 	@$(MAKE) _docker-release-go-service GO_NAME="Transform Bootstrap" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/backfillers/transform-bootstrap GO_BIN=transform-bootstrap GO_CACHE_KEY="cronjob-transform-bootstrap" GO_TAG="transform-bootstrap-$(IMAGE_TAG)" GO_LATEST_TAG="transform-bootstrap-latest"
+
+# offchain-price-backfill (VEC-540): the on-demand CoinGecko history backfill. Not a
+# cronjob (it registers no Temporal schedule) so it is not auto-discovered, but it is
+# a long-running worker Deployment rather than a one-off Job — it polls its task queue
+# and waits for a run to be started from the Temporal UI. Ships in the shared cronjob
+# ECR repo with a name-prefixed tag.
+docker-build-offchain-price-backfill:
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/offchain-price-backfill --build-arg BIN=offchain-price-backfill -t stl-offchain-price-backfill:local -f Dockerfile.common .
+
+docker-release-offchain-price-backfill: ecr-login _docker-release-offchain-price-backfill-internal
+
+_docker-release-offchain-price-backfill-internal:
+	@$(MAKE) _docker-release-go-service GO_NAME="Offchain Price Backfill" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/backfillers/offchain-price-backfill GO_BIN=offchain-price-backfill GO_CACHE_KEY="cronjob-offchain-price-backfill" GO_TAG="offchain-price-backfill-$(IMAGE_TAG)" GO_LATEST_TAG="offchain-price-backfill-latest"
 
 kind-load-cronjobs:
 	@$(MAKE) --no-print-directory kind-load-images IMAGES="$(foreach cj,$(CRONJOBS),stl-$(cj):local)"

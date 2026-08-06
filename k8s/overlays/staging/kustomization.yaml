@@ -38,6 +38,9 @@ resources:
   - ../../base/arbitrum-psm3-indexer
   - ../../base/spark-anchorage-indexer
   - ../../base/offchain-price-indexer
+  # On-demand CoinGecko backfill worker (VEC-540). No Temporal schedule: idles on
+  # its task queue until a run is started by hand from the Temporal UI.
+  - ../../base/offchain-price-backfill
   - ../../base/maple-graphql-indexer
   # CEX L2 order book indexer fleet — one pod per exchange, same binary,
   # different EXCHANGE/SYMBOLS config (OKX/Kraken added by copying the coinbase
@@ -172,6 +175,9 @@ images:
   - name: offchain-price-indexer
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-cronjob
     newTag: "offchain-price-indexer-39d930b3238ab9e68ec5d6657c56c0c1ea75133a"
+  - name: offchain-price-backfill
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-cronjob
+    newTag: "offchain-price-backfill-39d930b3238ab9e68ec5d6657c56c0c1ea75133a"
   - name: maple-graphql-indexer
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-cronjob
     newTag: "maple-graphql-indexer-39d930b3238ab9e68ec5d6657c56c0c1ea75133a"
