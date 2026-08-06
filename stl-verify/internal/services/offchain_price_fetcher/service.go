@@ -17,7 +17,7 @@ import (
 // times it is retried: a mistyped asset ID, an asset with no token_id, an inverted
 // or over-wide window. A caller with a retry budget (a Temporal activity) matches
 // on it to fail fast, so an operator sees "you typed the ID wrong" immediately
-// instead of a generic failure after five backoffs.
+// rather than after a retry budget has been spent on a fixed answer.
 var ErrInvalidRequest = errors.New("invalid request")
 
 // MaxHourlyWindow is the widest range CoinGecko still answers at hourly

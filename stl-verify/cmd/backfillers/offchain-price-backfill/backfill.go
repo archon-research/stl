@@ -133,8 +133,8 @@ func backfillWorkflow(ctx workflow.Context, params BackfillParams) (BackfillResu
 	}
 
 	if err := params.validate(workflow.Now(ctx)); err != nil {
-		// Bad input fails identically on every attempt, so retrying it only
-		// obscures the mistake behind five backoffs.
+		// Bad input fails identically on every attempt, so retrying it would
+		// only bury the mistake under the retry envelope.
 		return BackfillResult{}, temporalsdk.NewNonRetryableApplicationError(
 			"invalid backfill parameters", "InvalidParams", err)
 	}
@@ -345,9 +345,9 @@ func (a *backfillActivities) FetchChunk(ctx context.Context, w chunkWindow) (int
 		wrapped := fmt.Errorf("backfilling %s from %s to %s: %w",
 			w.Asset, w.From.Format(time.DateOnly), w.To.Format(time.DateOnly), err)
 
-		// A mistyped ID or a malformed window fails identically on all five
-		// attempts. Retrying buries the real cause under half a minute of backoff
-		// and makes an operator error read like a flaky upstream.
+		// A mistyped ID or a malformed window fails identically on every attempt.
+		// Since there is no attempt cap, retrying one would consume the whole
+		// 30-minute envelope and make an operator error read like a flaky upstream.
 		if errors.Is(err, offchain_price_fetcher.ErrInvalidRequest) {
 			return 0, temporalsdk.NewNonRetryableApplicationError(
 				wrapped.Error(), "InvalidRequest", err)

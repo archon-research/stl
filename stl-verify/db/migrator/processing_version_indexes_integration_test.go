@@ -245,7 +245,7 @@ func TestProcessingVersionTriggerQueryPlansAreEfficient(t *testing.T) {
 	if _, err := conn.Exec(ctx, "SET plan_cache_mode = force_generic_plan"); err != nil {
 		t.Fatalf("force generic plan: %v", err)
 	}
-	defer conn.Exec(ctx, "RESET plan_cache_mode")
+	defer resetSessionState(t, ctx, conn, "RESET plan_cache_mode")
 
 	for _, tc := range processingVersionIndexCases() {
 		t.Run(tc.tableName, func(t *testing.T) {
@@ -401,12 +401,26 @@ func TestProcessingVersionBuildIDCheckPrunesChunksAtScale(t *testing.T) {
 	// single row, ruinous when a per-row trigger repeats it 721 times per batch and
 	// the chunk count only grows. Measured on this fixture's real shape: 84 s for a
 	// 721-row batch at 782 chunks, against 0.6 s once pinned to custom plans.
-	t.Logf("over %d chunks — generic startup exclusion: %v, custom startup exclusion: %v",
-		chunks, hasStartupChunkExclusion(generic), hasStartupChunkExclusion(custom))
+	customChunks := countChunkReferences(custom)
+	t.Logf("over %d chunks — generic: startup exclusion=%v; custom: startup exclusion=%v, chunks in plan=%d",
+		chunks, hasStartupChunkExclusion(generic), hasStartupChunkExclusion(custom), customChunks)
 
+	// Two assertions, because either alone passes for a bad plan.
+	//
+	// Absence of startup exclusion is also true of a plan that simply kept every
+	// chunk and never excluded anything — the failure mode this fix exists to
+	// prevent. And a low chunk count alone is true of the generic plan too, whose
+	// text names only the chunk that survived runtime exclusion. Together they pin
+	// the property that matters: pruning happened when the plan was BUILT, so it is
+	// not repeated per execution.
 	if hasStartupChunkExclusion(custom) {
 		t.Fatalf("the build_id retry check still defers chunk exclusion to startup under "+
 			"force_custom_plan, so per-row cost will keep scaling with chunk count\nplan:\n%s", custom)
+	}
+	if customChunks > 4 {
+		t.Fatalf("custom plan references %d chunks for a single-timestamp lookup over %d chunks; "+
+			"it is scanning the hypertable rather than pruning to the matching chunk\nplan:\n%s",
+			customChunks, chunks, custom)
 	}
 
 	// Informational rather than asserted: it describes PostgreSQL's behaviour, not
@@ -419,11 +433,36 @@ func TestProcessingVersionBuildIDCheckPrunesChunksAtScale(t *testing.T) {
 	}
 }
 
+// resetSessionState restores a session GUC before the connection returns to the
+// pool, failing the test if it cannot. Ignoring this is not cosmetic: a connection
+// handed back with session_replication_role still 'replica' silently disables the
+// processing_version triggers for whichever test acquires it next, which would look
+// like a bug in that test rather than leakage from this one.
+func resetSessionState(t *testing.T, ctx context.Context, conn *pgxpool.Conn, sql string, mode ...any) {
+	t.Helper()
+
+	args := append([]any{}, mode...)
+	if _, err := conn.Exec(ctx, sql, args...); err != nil {
+		t.Errorf("cleanup %q failed; this connection is returning to the pool with "+
+			"altered session state: %v", sql, err)
+	}
+}
+
 // hasStartupChunkExclusion reports whether the plan re-derives which chunks to
 // scan at execution time, the signature of a plan that could not prune when it was
 // built.
 func hasStartupChunkExclusion(plan string) bool {
 	return strings.Contains(plan, "Chunks excluded during startup")
+}
+
+// countChunkReferences counts the distinct hypertable chunks a plan names, covering
+// both the row-store chunks and the compressed ones a columnar scan reaches through.
+func countChunkReferences(plan string) int {
+	seen := map[string]struct{}{}
+	for _, m := range regexp.MustCompile(`(?:compress_)?_?hyper_\d+_\d+_chunk`).FindAllString(plan, -1) {
+		seen[m] = struct{}{}
+	}
+	return len(seen)
 }
 
 // explainBuildIDCheck prepares the trigger's build_id retry check under planMode,
@@ -441,7 +480,7 @@ func explainBuildIDCheck(t *testing.T, ctx context.Context, conn *pgxpool.Conn, 
 	if _, err := conn.Exec(ctx, "SET plan_cache_mode = "+planMode, pgx.QueryExecModeSimpleProtocol); err != nil {
 		t.Fatalf("set %s: %v", planMode, err)
 	}
-	defer conn.Exec(ctx, "RESET plan_cache_mode", pgx.QueryExecModeSimpleProtocol)
+	defer resetSessionState(t, ctx, conn, "RESET plan_cache_mode", pgx.QueryExecModeSimpleProtocol)
 
 	prepareSQL := fmt.Sprintf(`PREPARE %s(bigint, smallint, timestamptz, int) AS
 		SELECT processing_version
@@ -451,7 +490,7 @@ func explainBuildIDCheck(t *testing.T, ctx context.Context, conn *pgxpool.Conn, 
 	if _, err := conn.Exec(ctx, prepareSQL, pgx.QueryExecModeSimpleProtocol); err != nil {
 		t.Fatalf("prepare build_id check: %v", err)
 	}
-	defer conn.Exec(ctx, "DEALLOCATE "+stmt, pgx.QueryExecModeSimpleProtocol)
+	defer resetSessionState(t, ctx, conn, "DEALLOCATE "+stmt, pgx.QueryExecModeSimpleProtocol)
 
 	// Executed repeatedly because the generic-plan switch only happens once the
 	// plan cache has seen the statement ~5 times — a single EXECUTE would still be
@@ -501,7 +540,7 @@ func seedOffchainPriceAcrossChunks(t *testing.T, ctx context.Context, pool *pgxp
 	if _, err := conn.Exec(ctx, "SET session_replication_role = 'replica'"); err != nil {
 		t.Fatalf("disable triggers for seeding: %v", err)
 	}
-	defer conn.Exec(ctx, "RESET session_replication_role")
+	defer resetSessionState(t, ctx, conn, "RESET session_replication_role")
 
 	if _, err := conn.Exec(ctx, `
 		INSERT INTO offchain_token_price (token_id, source_id, timestamp, price_usd, processing_version, build_id)
