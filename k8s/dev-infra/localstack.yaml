@@ -27,7 +27,16 @@ data:
     export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-test}"
     export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-test}"
 
-    # Helper: create SNS topic, backup SQS queue, and subscription for a chain.
+    # Deployment environment, injected from stl-config. Raw-block bucket names are
+    # derived from it as stl-sentinel{DEPLOY_ENV}-{chain}-raw, the exact format
+    # chainutil.ValidateS3BucketForChain enforces at worker startup — so the buckets
+    # created here and the S3_BUCKET values the workers get cannot drift apart.
+    DEPLOY_ENV="${DEPLOY_ENV:-development}"
+
+    # Helper: create SNS topic, backup SQS queue, subscription, and raw-block S3
+    # bucket for a chain. Every chain gets its own bucket: workers validate that
+    # S3_BUCKET matches their CHAIN_ID, so a non-Ethereum worker cannot share the
+    # Ethereum bucket.
     # Worker-specific queues (oracle-price, sparklend, etc.) are created separately below.
     create_chain_resources() {
       local CHAIN_NAME=$1
@@ -56,6 +65,9 @@ data:
         --notification-endpoint "arn:aws:sqs:${REGION}:${ACCOUNT_ID}:stl-${CHAIN_NAME}-backup.fifo" \
         --attributes RawMessageDelivery=true \
         --region $REGION
+
+      echo "Creating ${CHAIN_NAME} raw-block S3 bucket..."
+      $AWS s3 mb "s3://stl-sentinel${DEPLOY_ENV}-${CHAIN_NAME}-raw" --region $REGION
     }
 
     # Helper: create a consumer queue (with DLQ) subscribed to a chain's SNS topic.
@@ -207,8 +219,8 @@ data:
       create_consumer_queue "$chain" "psm3-indexer"
     done
 
-    echo "Creating S3 buckets..."
-    $AWS s3 mb s3://${S3_BUCKET} --region $REGION
+    # Per-chain raw-block buckets are created by create_chain_resources above.
+    echo "Creating stress-test S3 bucket..."
     $AWS s3 mb s3://stress-test-data --region $REGION
 
     echo "=== LocalStack initialization complete ==="
@@ -242,11 +254,13 @@ spec:
           env:
             - name: SERVICES
               value: sns,sqs,s3
-            - name: S3_BUCKET
+            # Raw-block bucket names are derived per chain from this value; see
+            # the init script's create_chain_resources helper.
+            - name: DEPLOY_ENV
               valueFrom:
                 configMapKeyRef:
                   name: stl-config
-                  key: S3_BUCKET
+                  key: DEPLOY_ENV
           ports:
             - containerPort: 4566
           volumeMounts:
