@@ -13,7 +13,7 @@ from typing import ClassVar, Literal
 # endpoint — so the two stay in lock-step. Defined in the domain layer (not the
 # API) to keep the dependency direction inward.
 ShareDataUnpricedReason = Literal["share_data_missing", "share_data_stale"]
-AllocationUnpricedReason = ShareDataUnpricedReason | Literal["price_data_missing"]
+AllocationUnpricedReason = ShareDataUnpricedReason | Literal["price_data_missing", "adapter_data_missing"]
 
 
 class AllocationUnpricedError(Exception):
@@ -59,6 +59,23 @@ class PriceDataMissingError(AllocationUnpricedError):
     """
 
     code = "price_data_missing"
+
+
+class AdapterDataMissingError(AllocationUnpricedError):
+    """Raised when a Morpho VaultV2's adapter composition is not fully indexed.
+
+    A VaultV2 holds its assets in liquidity adapters, never directly, so its
+    collateral (and thus its liquidation params) is reachable only through those
+    adapters. A composition-completeness probe distinguishes deployed-but-unindexed
+    value — no active adapters, or an active adapter with material value whose walk
+    resolves zero markets (state/positions/user row lagging) — from a genuinely idle
+    vault (adapters + state present, value ≈ 0). In the incomplete case every
+    collateral item would silently drop or the breakdown would short-circuit empty,
+    yielding a confident ``rrc=0`` with applied=True; degrade the allocation to
+    unpriced instead. Genuine idleness resolves to a real ``rrc=0``, not this error.
+    """
+
+    code = "adapter_data_missing"
 
 
 class InvalidOverrideError(ValueError):
