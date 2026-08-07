@@ -301,6 +301,23 @@ data:
   # queue drains, transformed upserts and parity reads.
   TRANSFORM_SCHEDULE_OFFSET: "2m"
 ---
+# Per-table INSERT write cost from pg_stat_statements (VEC-545). Not
+# chain-specific, so no CHAIN_ID — it measures the database, not a chain.
+#
+# ENVIRONMENT is required: without it the OTel resource attributes fall back to
+# "development" and prod series are indistinguishable from a laptop's.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: db-statement-stats
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  ENVIRONMENT: "sentinelprod"
+  # Sampling cadence. The counters are cumulative, so a tick only reads and
+  # diffs them; 1m keeps the write-cost curve legible without polling cost.
+  DB_STATEMENT_STATS_INTERVAL: "1m"
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:

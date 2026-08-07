@@ -22,7 +22,7 @@ spec:
             - |
               set -e
               echo "Bootstrapping database..."
-              psql "$ADMIN_DATABASE_URL" -v ON_ERROR_STOP=1 -c "CREATE EXTENSION IF NOT EXISTS timescaledb;" -c "
+              psql "$ADMIN_DATABASE_URL" -v ON_ERROR_STOP=1 -c "CREATE EXTENSION IF NOT EXISTS timescaledb;" -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements;" -c "
               DO \$body\$
               BEGIN
                 IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'stl_migrator') THEN
@@ -32,6 +32,12 @@ spec:
               END
               \$body\$;
               " -c "GRANT CONNECT ON DATABASE stl_verify TO stl_migrator;" -c "GRANT CREATE, USAGE ON SCHEMA public TO stl_migrator;"
+              # pg_stat_statements backs the db-statement-stats cronjob (VEC-545). It is
+              # not a trusted extension, so CREATE EXTENSION needs superuser and cannot
+              # live in a migration (those run as stl_migrator); staging/prod get it from
+              # the infra repo's bootstrap-db.sh. It also needs the library preloaded,
+              # which is why timescaledb.yaml passes shared_preload_libraries.
+              #
               # CREATE on the database (not just on schema public) lets migrations
               # create non-public schemas (e.g. 20260706_140000's transformed);
               # staging/prod get this from the infra repo's bootstrap-db.sh.

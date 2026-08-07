@@ -170,7 +170,7 @@ groups:
             max by (cluster, deployment) (
               kube_deployment_status_replicas_available{
                 namespace="vector",
-                deployment=~"spark-anchorage-indexer|offchain-price-indexer|watcher-data-validator|transform-worker"
+                deployment=~"spark-anchorage-indexer|offchain-price-indexer|watcher-data-validator|transform-worker|db-statement-stats"
               }
             ) < 1
           )
@@ -178,7 +178,7 @@ groups:
             max by (cluster, deployment) (
               kube_deployment_spec_replicas{
                 namespace="vector",
-                deployment=~"spark-anchorage-indexer|offchain-price-indexer|watcher-data-validator|transform-worker"
+                deployment=~"spark-anchorage-indexer|offchain-price-indexer|watcher-data-validator|transform-worker|db-statement-stats"
               }
             ) > 0
           )
@@ -355,3 +355,67 @@ groups:
             or a bug). An in-place raw UPDATE changes no count and is not caught here.
             Check `SELECT * FROM transformed._parity_status WHERE source = '{{ $labels.table }}'`.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-transform-worker.md#vectortransformparitydrift
+
+      # =======================================================================
+      # db-statement-stats (VEC-545): the exporter's silent-hole rule
+      # =======================================================================
+      # This cronjob's entire output is metrics, which makes it the one job whose
+      # failure the generic rules above genuinely cannot see: reading
+      # pg_stat_statements and publishing nothing is indistinguishable from a
+      # successful run, so every tick reports status="success" while Grafana
+      # receives no write-cost data. Signals (OTel counters, per tick, per table):
+      #   db_statements_insert_calls_total{table="<t>"}
+      #   db_statements_insert_exec_time_seconds_total{table="<t>"}
+      #   db_statements_insert_rows_total{table="<t>"}
+
+      # -----------------------------------------------------------------------
+      # WARNING — the worker is up but no INSERT activity is reaching the metric
+      # -----------------------------------------------------------------------
+      - alert: VectorDbStatementStatsNoInsertActivity
+        # Written as "the deployment is available UNLESS it is reporting INSERT
+        # activity", which fires both when the rate is zero and when the series is
+        # absent entirely. A plain `rate(...) == 0` cannot catch absence — the
+        # commonest failure here, since a dropped extension, an unset OTLP endpoint
+        # or a wrong DATABASE_URL all yield no series rather than a zero one.
+        #
+        # Guarded on the deployment being available so it does not double-report
+        # with VectorCronjobWorkerDown, which owns the pod-down case.
+        #
+        # The premise is that the app database is continuously written to by the
+        # watcher and the indexers, so zero observed INSERT calls over 15m means the
+        # measurement path is broken, not that the database is idle. Warning, not a
+        # page: this is an observability feed, so a gap costs visibility rather than
+        # customer data.
+        expr: |
+          max by (cluster) (
+            kube_deployment_status_replicas_available{
+              namespace="vector",
+              deployment="db-statement-stats"
+            }
+          ) >= 1
+          unless on (cluster) (
+            sum by (cluster) (
+              rate(db_statements_insert_calls_total{
+                service_name="db-statement-stats",
+                k8s_namespace_name="vector"
+              }[15m])
+            ) > 0
+          )
+        for: 30m
+        labels:
+          team: vector
+          severity: warning
+          component: db-statement-stats
+          namespace: vector
+        annotations:
+          summary: "`db-statement-stats` is exporting no INSERT activity"
+          description: |
+            The `db-statement-stats` worker has been available for >30m but no
+            INSERT calls have been observed in the last 15m — either the counters
+            are flat or the series is missing altogether. The app database is
+            written to continuously, so this is a broken measurement path, not an
+            idle database: check that `pg_stat_statements` still exists and is
+            preloaded, that `OTEL_EXPORTER_OTLP_ENDPOINT` is set, and that
+            `DATABASE_URL` points at the app database. Per-table write-cost
+            dashboards are blind until this clears.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectordbstatementstatsnoinsertactivity

@@ -1,0 +1,423 @@
+# =============================================================================
+# Database INSERT write cost by table
+# =============================================================================
+# Observes the three counters the `db-statement-stats` cronjob exports from
+# pg_stat_statements (VEC-545), one series per target table:
+#   * db_statements_insert_calls_total            -> INSERT executions
+#   * db_statements_insert_exec_time_seconds_total -> server-side execution time
+#   * db_statements_insert_rows_total             -> rows written
+#
+# The counters are fed per-tick deltas, so every panel reads them through rate()
+# or increase(); mean cost per INSERT is rate(exec_time) / rate(calls).
+#
+# That division gates the divisor on `> 0` rather than clamping it. An idle table
+# still reports calls, so a clamped divisor would turn "no writes this interval"
+# into a mean of 0s -- a real-looking value implying free writes. The gate drops
+# the point instead, so the panel shows a gap where there was no data.
+#
+# Every selector is scoped to k8s_namespace_name="vector", matching
+# alerts/vector-cronjobs.yaml, so panels and alert agree on the same series.
+#
+# This makes permanent the measurement that previously existed only as an ad-hoc
+# pg_stat_statements query run by hand against the app database.
+#
+# Two CRs in this file - one per Grafana stack. The
+# `grafana-dashboards-{prod,staging}` ApplicationSets in the infra repo sync
+# this same path into both clusters, so both CRs land in each cluster; the
+# `environment` instanceSelector routes them to the matching Grafana CR at
+# the operator layer. Note the `-prod`/`-staging` suffix on metadata.name -
+# Kubernetes resource identity is (group, kind, namespace, name), so they
+# must differ even though only one is "active" per cluster. The dashboard
+# JSON is identical for both stacks (no cluster-scoped queries) but is
+# duplicated to keep the file self-contained (Grafana Operator does not
+# support YAML anchors inside `spec.json`).
+#
+# The datasource is templated as `${DS_PROM}` rather than a hard-coded UID so
+# it resolves to whichever Prometheus datasource exists in each stack.
+#
+# Folder UID `vector` is owned by Terraform (`infra/18_grafana_rbac.tf`).
+# =============================================================================
+---
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: db-statement-stats-prod
+  namespace: observability
+spec:
+  instanceSelector:
+    matchLabels:
+      app: grafana-operator
+      environment: prod
+  folderUID: vector
+  resyncPeriod: 5m
+  json: |
+    {
+      "title": "Database INSERT Write Cost by Table",
+      "uid": "db-statement-stats",
+      "description": "Per-table INSERT cost from pg_stat_statements, exported by the db-statement-stats cronjob (VEC-545). Mean time per call, call rate, server time spent writing, and the costliest tables.",
+      "tags": ["vector", "postgres", "write-cost"],
+      "schemaVersion": 39,
+      "timezone": "",
+      "time": { "from": "now-6h", "to": "now" },
+      "refresh": "1m",
+      "templating": {
+        "list": [
+          {
+            "name": "DS_PROM",
+            "type": "datasource",
+            "query": "prometheus",
+            "current": { "selected": false, "text": "", "value": "" },
+            "hide": 0
+          },
+          {
+            "name": "table",
+            "type": "query",
+            "label": "table",
+            "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+            "query": { "query": "label_values(db_statements_insert_calls_total{k8s_namespace_name=\"vector\"}, table)", "refId": "table" },
+            "allValue": ".*",
+            "includeAll": true,
+            "multi": true,
+            "refresh": 2,
+            "current": { "text": ["All"], "value": ["$__all"] }
+          }
+        ]
+      },
+      "panels": [
+        {
+          "type": "row",
+          "title": "INSERT Write Cost",
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+          "id": 10,
+          "panels": []
+        },
+        {
+          "type": "timeseries",
+          "title": "Mean INSERT time per call",
+          "description": "rate(exec_time) / rate(calls) — the average server-side cost of one INSERT into each table. This is the headline number the ad-hoc pg_stat_statements query used to give: a table whose mean climbs is getting more expensive to write, independent of how often it is written.",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+          "id": 1,
+          "fieldConfig": {
+            "defaults": {
+              "custom": { "drawStyle": "line", "fillOpacity": 0, "lineWidth": 2, "showPoints": "never" },
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": { "calcs": ["mean", "max", "lastNotNull"], "displayMode": "table", "placement": "bottom", "sortBy": "Max", "sortDesc": true },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+              "expr": "sum by (table) (rate(db_statements_insert_exec_time_seconds_total{k8s_namespace_name=\"vector\", table=~\"$table\"}[$__rate_interval])) / (sum by (table) (rate(db_statements_insert_calls_total{k8s_namespace_name=\"vector\", table=~\"$table\"}[$__rate_interval])) > 0)",
+              "legendFormat": "{{table}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "INSERT calls / sec",
+          "description": "How often each table is written. Read together with the mean-time panel: rising cost with flat calls is a per-write regression, rising cost with rising calls is load.",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+          "id": 2,
+          "fieldConfig": {
+            "defaults": {
+              "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never" },
+              "unit": "reqps"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": { "calcs": ["mean", "max", "lastNotNull"], "displayMode": "table", "placement": "bottom", "sortBy": "Max", "sortDesc": true },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+              "expr": "sum by (table) (rate(db_statements_insert_calls_total{k8s_namespace_name=\"vector\", table=~\"$table\"}[$__rate_interval]))",
+              "legendFormat": "{{table}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Server time spent writing (seconds per second)",
+          "description": "rate(exec_time) alone: server-seconds of INSERT work per wall-clock second, i.e. how much write concurrency each table consumes. A value of 1 means one backend is busy inserting into that table full time. This is the panel that shows which table is actually consuming the database.",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 9 },
+          "id": 3,
+          "fieldConfig": {
+            "defaults": {
+              "custom": { "drawStyle": "line", "fillOpacity": 20, "lineWidth": 1, "showPoints": "never", "stacking": { "mode": "normal", "group": "A" } },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": { "calcs": ["mean", "max", "lastNotNull"], "displayMode": "table", "placement": "bottom", "sortBy": "Max", "sortDesc": true },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+              "expr": "sum by (table) (rate(db_statements_insert_exec_time_seconds_total{k8s_namespace_name=\"vector\", table=~\"$table\"}[$__rate_interval]))",
+              "legendFormat": "{{table}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "bargauge",
+          "title": "Top 10 tables by total INSERT time (selected range)",
+          "description": "Total server-side INSERT seconds accumulated over the dashboard's time range. The ranking to start from when asking where write cost is going.",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 9 },
+          "id": 4,
+          "fieldConfig": {
+            "defaults": { "unit": "s", "color": { "mode": "continuous-GrYlRd" } },
+            "overrides": []
+          },
+          "options": {
+            "displayMode": "gradient",
+            "orientation": "horizontal",
+            "showUnfilled": true,
+            "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+              "expr": "topk(10, sum by (table) (increase(db_statements_insert_exec_time_seconds_total{k8s_namespace_name=\"vector\", table=~\"$table\"}[$__range])))",
+              "instant": true,
+              "legendFormat": "{{table}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Rows inserted / sec",
+          "description": "Row throughput per table. Divide the write-time panel by this to get cost per row, which separates a slow table from a merely busy one.",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 17 },
+          "id": 5,
+          "fieldConfig": {
+            "defaults": {
+              "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" },
+              "unit": "rowsps"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": { "calcs": ["mean", "max", "lastNotNull"], "displayMode": "table", "placement": "bottom", "sortBy": "Max", "sortDesc": true },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+              "expr": "sum by (table) (rate(db_statements_insert_rows_total{k8s_namespace_name=\"vector\", table=~\"$table\"}[$__rate_interval]))",
+              "legendFormat": "{{table}}",
+              "refId": "A"
+            }
+          ]
+        }
+      ]
+    }
+---
+apiVersion: grafana.integreatly.org/v1beta1
+kind: GrafanaDashboard
+metadata:
+  name: db-statement-stats-staging
+  namespace: observability
+spec:
+  instanceSelector:
+    matchLabels:
+      app: grafana-operator
+      environment: staging
+  folderUID: vector
+  resyncPeriod: 5m
+  json: |
+    {
+      "title": "Database INSERT Write Cost by Table",
+      "uid": "db-statement-stats",
+      "description": "Per-table INSERT cost from pg_stat_statements, exported by the db-statement-stats cronjob (VEC-545). Mean time per call, call rate, server time spent writing, and the costliest tables.",
+      "tags": ["vector", "postgres", "write-cost"],
+      "schemaVersion": 39,
+      "timezone": "",
+      "time": { "from": "now-6h", "to": "now" },
+      "refresh": "1m",
+      "templating": {
+        "list": [
+          {
+            "name": "DS_PROM",
+            "type": "datasource",
+            "query": "prometheus",
+            "current": { "selected": false, "text": "", "value": "" },
+            "hide": 0
+          },
+          {
+            "name": "table",
+            "type": "query",
+            "label": "table",
+            "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+            "query": { "query": "label_values(db_statements_insert_calls_total{k8s_namespace_name=\"vector\"}, table)", "refId": "table" },
+            "allValue": ".*",
+            "includeAll": true,
+            "multi": true,
+            "refresh": 2,
+            "current": { "text": ["All"], "value": ["$__all"] }
+          }
+        ]
+      },
+      "panels": [
+        {
+          "type": "row",
+          "title": "INSERT Write Cost",
+          "collapsed": false,
+          "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+          "id": 10,
+          "panels": []
+        },
+        {
+          "type": "timeseries",
+          "title": "Mean INSERT time per call",
+          "description": "rate(exec_time) / rate(calls) — the average server-side cost of one INSERT into each table. This is the headline number the ad-hoc pg_stat_statements query used to give: a table whose mean climbs is getting more expensive to write, independent of how often it is written.",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+          "id": 1,
+          "fieldConfig": {
+            "defaults": {
+              "custom": { "drawStyle": "line", "fillOpacity": 0, "lineWidth": 2, "showPoints": "never" },
+              "unit": "s"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": { "calcs": ["mean", "max", "lastNotNull"], "displayMode": "table", "placement": "bottom", "sortBy": "Max", "sortDesc": true },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+              "expr": "sum by (table) (rate(db_statements_insert_exec_time_seconds_total{k8s_namespace_name=\"vector\", table=~\"$table\"}[$__rate_interval])) / (sum by (table) (rate(db_statements_insert_calls_total{k8s_namespace_name=\"vector\", table=~\"$table\"}[$__rate_interval])) > 0)",
+              "legendFormat": "{{table}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "INSERT calls / sec",
+          "description": "How often each table is written. Read together with the mean-time panel: rising cost with flat calls is a per-write regression, rising cost with rising calls is load.",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+          "id": 2,
+          "fieldConfig": {
+            "defaults": {
+              "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never" },
+              "unit": "reqps"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": { "calcs": ["mean", "max", "lastNotNull"], "displayMode": "table", "placement": "bottom", "sortBy": "Max", "sortDesc": true },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+              "expr": "sum by (table) (rate(db_statements_insert_calls_total{k8s_namespace_name=\"vector\", table=~\"$table\"}[$__rate_interval]))",
+              "legendFormat": "{{table}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Server time spent writing (seconds per second)",
+          "description": "rate(exec_time) alone: server-seconds of INSERT work per wall-clock second, i.e. how much write concurrency each table consumes. A value of 1 means one backend is busy inserting into that table full time. This is the panel that shows which table is actually consuming the database.",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 9 },
+          "id": 3,
+          "fieldConfig": {
+            "defaults": {
+              "custom": { "drawStyle": "line", "fillOpacity": 20, "lineWidth": 1, "showPoints": "never", "stacking": { "mode": "normal", "group": "A" } },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": { "calcs": ["mean", "max", "lastNotNull"], "displayMode": "table", "placement": "bottom", "sortBy": "Max", "sortDesc": true },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+              "expr": "sum by (table) (rate(db_statements_insert_exec_time_seconds_total{k8s_namespace_name=\"vector\", table=~\"$table\"}[$__rate_interval]))",
+              "legendFormat": "{{table}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "bargauge",
+          "title": "Top 10 tables by total INSERT time (selected range)",
+          "description": "Total server-side INSERT seconds accumulated over the dashboard's time range. The ranking to start from when asking where write cost is going.",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 9 },
+          "id": 4,
+          "fieldConfig": {
+            "defaults": { "unit": "s", "color": { "mode": "continuous-GrYlRd" } },
+            "overrides": []
+          },
+          "options": {
+            "displayMode": "gradient",
+            "orientation": "horizontal",
+            "showUnfilled": true,
+            "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+              "expr": "topk(10, sum by (table) (increase(db_statements_insert_exec_time_seconds_total{k8s_namespace_name=\"vector\", table=~\"$table\"}[$__range])))",
+              "instant": true,
+              "legendFormat": "{{table}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Rows inserted / sec",
+          "description": "Row throughput per table. Divide the write-time panel by this to get cost per row, which separates a slow table from a merely busy one.",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 17 },
+          "id": 5,
+          "fieldConfig": {
+            "defaults": {
+              "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" },
+              "unit": "rowsps"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": { "calcs": ["mean", "max", "lastNotNull"], "displayMode": "table", "placement": "bottom", "sortBy": "Max", "sortDesc": true },
+            "tooltip": { "mode": "multi", "sort": "desc" }
+          },
+          "targets": [
+            {
+              "datasource": { "type": "prometheus", "uid": "${DS_PROM}" },
+              "expr": "sum by (table) (rate(db_statements_insert_rows_total{k8s_namespace_name=\"vector\", table=~\"$table\"}[$__rate_interval]))",
+              "legendFormat": "{{table}}",
+              "refId": "A"
+            }
+          ]
+        }
+      ]
+    }

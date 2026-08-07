@@ -673,6 +673,17 @@ dev-env:
 		"BUILD_GIT_HASH=dev" \
 		"LOG_LEVEL=debug" \
 		> cmd/cronjobs/maple-graphql-indexer/.env
+	@printf '%s\n' \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
+		"TEMPORAL_HOST_PORT=127.0.0.1:7233" \
+		"TEMPORAL_NAMESPACE=vector" \
+		"ENVIRONMENT=development" \
+		"DB_STATEMENT_STATS_INTERVAL=1m" \
+		"JAEGER_ENDPOINT=127.0.0.1:4317" \
+		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
+		"BUILD_GIT_HASH=dev" \
+		"LOG_LEVEL=debug" \
+		> cmd/cronjobs/db-statement-stats/.env
 	@echo "Environment files generated (.env.secrets updated)."
 
 # Cold start — rebuilds all images from scratch

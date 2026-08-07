@@ -81,6 +81,7 @@ You normally never touch these to add a job.
 | `watcher-data-validator` | `DATA_VALIDATION_INTERVAL` | 1h | Cross-check stored block data (per chain; `SERVICE_NAME` sets the queue) |
 | `anchorage-indexer` | `ANCHORAGE_INDEX_INTERVAL` | 15m | Snapshot Anchorage collateral |
 | `maple-graphql-indexer` | `MAPLE_SYNC_INTERVAL` | 10m | Sync Maple positions via GraphQL |
+| `db-statement-stats` | `DB_STATEMENT_STATS_INTERVAL` | 1m | Export per-table INSERT write cost from `pg_stat_statements` |
 
 ## Recipe: add a new cronjob
 
