@@ -13,7 +13,7 @@ from typing import ClassVar, Literal
 # endpoint — so the two stay in lock-step. Defined in the domain layer (not the
 # API) to keep the dependency direction inward.
 ShareDataUnpricedReason = Literal["share_data_missing", "share_data_stale"]
-AllocationUnpricedReason = ShareDataUnpricedReason | Literal["price_data_missing"]
+AllocationUnpricedReason = ShareDataUnpricedReason | Literal["price_data_missing", "liquidation_params_missing"]
 
 
 class AllocationUnpricedError(Exception):
@@ -59,6 +59,19 @@ class PriceDataMissingError(AllocationUnpricedError):
     """
 
     code = "price_data_missing"
+
+
+class LiquidationParamsMissingError(AllocationUnpricedError):
+    """Raised when no collateral item in a backed breakdown has liquidation params.
+
+    Enrichment drops every param-less item, so the model would compute a gap over
+    an empty collateral set and return ``rrc=0`` — reported as *fully covered*, and
+    so indistinguishable from a priced position carrying no liquidatable debt. Kept
+    distinct for the same reason as ``PriceDataMissingError``: the prime endpoint
+    must report the allocation unpriced rather than claim it modelled it.
+    """
+
+    code = "liquidation_params_missing"
 
 
 class InvalidOverrideError(ValueError):
