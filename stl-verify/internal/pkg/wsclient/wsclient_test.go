@@ -236,9 +236,15 @@ func TestConnWriteFailsAfterConnectionDrops(t *testing.T) {
 	if err := conn.WriteText([]byte("hello")); err == nil {
 		t.Error("WriteText should fail after the connection drops")
 	}
-	if err := conn.WriteBinary([]byte{0x01}); err == nil {
+	if err := conn.writeBinary([]byte{0x01}); err == nil {
 		t.Error("WriteBinary should fail after the connection drops")
 	}
+}
+
+// writeBinary sends a raw binary frame. It exercises the shared writeMessage
+// path with a non-text message type; no production caller needs binary writes.
+func (c *Conn) writeBinary(data []byte) error {
+	return c.writeMessage(websocket.BinaryMessage, data)
 }
 
 func TestConnBinaryFrameRoundTrip(t *testing.T) {
@@ -267,7 +273,7 @@ func TestConnBinaryFrameRoundTrip(t *testing.T) {
 	}
 	defer conn.Close()
 
-	if err := conn.WriteBinary([]byte{0x01, 0x02, 0x03}); err != nil {
+	if err := conn.writeBinary([]byte{0x01, 0x02, 0x03}); err != nil {
 		t.Fatalf("WriteBinary: %v", err)
 	}
 	select {
@@ -366,7 +372,7 @@ func TestConnWriteFailsAfterClose(t *testing.T) {
 	}{
 		{"WriteJSON", func() error { return conn.WriteJSON(map[string]any{"op": "subscribe"}) }},
 		{"WriteText", func() error { return conn.WriteText([]byte("hello")) }},
-		{"WriteBinary", func() error { return conn.WriteBinary([]byte{0x01}) }},
+		{"WriteBinary", func() error { return conn.writeBinary([]byte{0x01}) }},
 	}
 	for _, tt := range tests {
 		if err := tt.fn(); err == nil {
