@@ -458,8 +458,13 @@ volume**: `increase[20m] > 0` must hold continuously for `90m`, per token.
 
 The two durations compose rather than acting independently. The 20m lookback
 keeps the expression true for 20m *after* the last bad cycle, so the recurrence
-itself only needs to span `90m - 20m` — i.e. the alert fires when a token stays
-unpriceable across **>70m**, roughly 8 consecutive cycles. Shorter gaps, even
+itself only needs to span `90m - 20m` — i.e. the alert fires when a token keeps
+coming back unpriceable for **>70m**.
+
+That does **not** mean every cycle must fail. Because the lookback is 20m and
+cycles run every 10m, failing every *other* cycle already leaves no window empty
+— so the practical bar is **≥4 bad cycles, none more than 20m apart**. One clean
+cycle in between is tolerated; two in a row resets the clock. Shorter gaps, even
 multi-cycle ones, self-heal and never fire. Anything that clears that bar is an
 upstream Maple pricing problem, not our bug. The client no longer emits a
 per-occurrence warn; the metric is the signal.
