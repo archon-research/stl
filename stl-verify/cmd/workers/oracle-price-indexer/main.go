@@ -14,9 +14,9 @@ import (
 	"syscall"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/cache"
@@ -144,9 +144,9 @@ func run(ctx context.Context, args []string) error {
 
 	logger.Info("starting oracle price worker", "queue", cfg.queueURL, "chainID", cfg.chainID)
 
-	awsCfg, err := awsconfig.LoadDefaultConfig(ctx,
-		awsconfig.WithRegion(env.Get("AWS_REGION", "eu-west-1")),
-	)
+	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{
+		StaticCredentialsFromEnv: true,
+	})
 	if err != nil {
 		return fmt.Errorf("loading AWS config: %w", err)
 	}
@@ -158,6 +158,7 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("creating SQS consumer: %w", err)
 	}
+	defer consumer.Close()
 
 	cacheCfg := redisadapter.ConfigDefaults()
 	cacheCfg.Addr = cfg.redisAddr

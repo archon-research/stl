@@ -81,6 +81,11 @@ func parseConfig(args []string) (cliConfig, error) {
 		return cliConfig{}, err
 	}
 
+	// Track which flags were explicitly passed so the env vars below act only as
+	// a fallback (matching queue/db/redis) and never override an explicit flag.
+	explicit := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
+
 	cfg := cliConfig{
 		queueURL:          *queueURL,
 		redisAddr:         *redisAddr,
@@ -119,29 +124,35 @@ func parseConfig(args []string) (cliConfig, error) {
 		return cliConfig{}, fmt.Errorf("redis address not provided (use -redis flag or REDIS_ADDR env var)")
 	}
 
-	if waitTimeStr := env.Get("SQS_WAIT_TIME", ""); waitTimeStr != "" {
-		v, err := strconv.Atoi(waitTimeStr)
-		if err != nil {
-			return cliConfig{}, fmt.Errorf("parsing SQS_WAIT_TIME %q: %w", waitTimeStr, err)
+	if !explicit["wait"] {
+		if waitTimeStr := env.Get("SQS_WAIT_TIME", ""); waitTimeStr != "" {
+			v, err := strconv.Atoi(waitTimeStr)
+			if err != nil {
+				return cliConfig{}, fmt.Errorf("parsing SQS_WAIT_TIME %q: %w", waitTimeStr, err)
+			}
+			cfg.waitTime = v
 		}
-		cfg.waitTime = v
 	}
-	if visTimeStr := env.Get("SQS_VISIBILITY_TIMEOUT", ""); visTimeStr != "" {
-		v, err := strconv.Atoi(visTimeStr)
-		if err != nil {
-			return cliConfig{}, fmt.Errorf("parsing SQS_VISIBILITY_TIMEOUT %q: %w", visTimeStr, err)
+	if !explicit["visibility-timeout"] {
+		if visTimeStr := env.Get("SQS_VISIBILITY_TIMEOUT", ""); visTimeStr != "" {
+			v, err := strconv.Atoi(visTimeStr)
+			if err != nil {
+				return cliConfig{}, fmt.Errorf("parsing SQS_VISIBILITY_TIMEOUT %q: %w", visTimeStr, err)
+			}
+			cfg.visibilityTimeout = v
 		}
-		cfg.visibilityTimeout = v
 	}
 	// SWEEP_BLOCKS lets the Deployment tune the sweep cadence via its configmap
 	// (it passes no args, so without this the -sweep-blocks flag default is fixed).
 	// Mirrors psm3-indexer; the BlockLatencyHigh runbook points operators here.
-	if sweepBlocksStr := env.Get("SWEEP_BLOCKS", ""); sweepBlocksStr != "" {
-		v, err := strconv.Atoi(sweepBlocksStr)
-		if err != nil {
-			return cliConfig{}, fmt.Errorf("parsing SWEEP_BLOCKS %q: %w", sweepBlocksStr, err)
+	if !explicit["sweep-blocks"] {
+		if sweepBlocksStr := env.Get("SWEEP_BLOCKS", ""); sweepBlocksStr != "" {
+			v, err := strconv.Atoi(sweepBlocksStr)
+			if err != nil {
+				return cliConfig{}, fmt.Errorf("parsing SWEEP_BLOCKS %q: %w", sweepBlocksStr, err)
+			}
+			cfg.sweepBlocks = v
 		}
-		cfg.sweepBlocks = v
 	}
 
 	chainIDStr := env.Get("CHAIN_ID", "1")
@@ -213,10 +224,10 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("creating block cache: %w", err)
 	}
+	defer blockCache.Close()
 	if err := blockCache.Ping(ctx); err != nil {
 		return fmt.Errorf("connecting to Redis at %s: %w", cfg.redisAddr, err)
 	}
-	defer blockCache.Close()
 	logger.Info("Redis connected", "addr", cfg.redisAddr)
 
 	// S3 + cache reader with fallback

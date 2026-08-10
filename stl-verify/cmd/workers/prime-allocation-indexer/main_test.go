@@ -373,6 +373,38 @@ func TestParseConfig(t *testing.T) {
 			},
 			wantError: "parsing SWEEP_BLOCKS",
 		},
+		{
+			name: "explicit timing and sweep flags beat their env vars",
+			args: []string{
+				"-queue", "https://sqs.us-east-1.amazonaws.com/123/q",
+				"-db", "postgres://localhost/db",
+				"-redis", "localhost:6379",
+				"-wait", "7",
+				"-visibility-timeout", "90",
+				"-sweep-blocks", "25",
+			},
+			envVars: map[string]string{
+				"ALCHEMY_API_KEY":        "test-key",
+				"S3_BUCKET":              "stl-sentinelstaging-ethereum-raw",
+				"DEPLOY_ENV":             "staging",
+				"SQS_WAIT_TIME":          "5",
+				"SQS_VISIBILITY_TIMEOUT": "60",
+				"SWEEP_BLOCKS":           "150",
+			},
+			wantCfg: cliConfig{
+				queueURL:          "https://sqs.us-east-1.amazonaws.com/123/q",
+				dbURL:             "postgres://localhost/db",
+				redisAddr:         "localhost:6379",
+				alchemyURL:        "https://eth-mainnet.g.alchemy.com/v2/test-key",
+				s3Bucket:          "stl-sentinelstaging-ethereum-raw",
+				deployEnv:         "staging",
+				maxMessages:       10,
+				waitTime:          7,
+				visibilityTimeout: 90,
+				sweepBlocks:       25,
+				chainID:           1,
+			},
+		},
 	}
 
 	for _, tt := range tests {

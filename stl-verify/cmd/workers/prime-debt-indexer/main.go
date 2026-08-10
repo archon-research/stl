@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -78,8 +79,13 @@ func run(ctx context.Context, args []string) error {
 
 	if *rpcURL == "" {
 		// Fallback: compose from legacy ALCHEMY_HTTP_URL + ALCHEMY_API_KEY env vars.
-		alchemyHTTPURL := env.Get("ALCHEMY_HTTP_URL", "https://eth-mainnet.g.alchemy.com/v2")
 		alchemyAPIKey := env.Get("ALCHEMY_API_KEY", "")
+		if alchemyAPIKey == "" {
+			return fmt.Errorf("no RPC endpoint (use -rpc flag or ETH_RPC_URL env var, or set ALCHEMY_API_KEY)")
+		}
+		// Trim a trailing slash so a configured ALCHEMY_HTTP_URL ending in "/" does
+		// not produce a "//" before the API key.
+		alchemyHTTPURL := strings.TrimRight(env.Get("ALCHEMY_HTTP_URL", "https://eth-mainnet.g.alchemy.com/v2"), "/")
 		*rpcURL = fmt.Sprintf("%s/%s", alchemyHTTPURL, alchemyAPIKey)
 	}
 
@@ -93,19 +99,29 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("parsing CHAIN_ID %q: %w", chainIDStr, err)
 	}
 
-	if waitTimeStr := env.Get("SQS_WAIT_TIME", ""); waitTimeStr != "" {
-		v, err := strconv.Atoi(waitTimeStr)
-		if err != nil {
-			return fmt.Errorf("parsing SQS_WAIT_TIME %q: %w", waitTimeStr, err)
+	// Track which timing flags were explicitly passed so the env vars below act
+	// only as a fallback (matching db/rpc/queue, whose env vars are flag defaults)
+	// and never override an explicit flag.
+	explicit := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
+
+	if !explicit["wait"] {
+		if waitTimeStr := env.Get("SQS_WAIT_TIME", ""); waitTimeStr != "" {
+			v, err := strconv.Atoi(waitTimeStr)
+			if err != nil {
+				return fmt.Errorf("parsing SQS_WAIT_TIME %q: %w", waitTimeStr, err)
+			}
+			*waitTime = v
 		}
-		*waitTime = v
 	}
-	if visTimeStr := env.Get("SQS_VISIBILITY_TIMEOUT", ""); visTimeStr != "" {
-		v, err := strconv.Atoi(visTimeStr)
-		if err != nil {
-			return fmt.Errorf("parsing SQS_VISIBILITY_TIMEOUT %q: %w", visTimeStr, err)
+	if !explicit["visibility-timeout"] {
+		if visTimeStr := env.Get("SQS_VISIBILITY_TIMEOUT", ""); visTimeStr != "" {
+			v, err := strconv.Atoi(visTimeStr)
+			if err != nil {
+				return fmt.Errorf("parsing SQS_VISIBILITY_TIMEOUT %q: %w", visTimeStr, err)
+			}
+			*visibilityTimeout = v
 		}
-		*visibilityTimeout = v
 	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
