@@ -116,9 +116,6 @@ type Subscriber struct {
 
 	// wg tracks active goroutines for graceful shutdown
 	wg sync.WaitGroup
-
-	// Reconnect callback - called when connection is re-established
-	onReconnect func()
 }
 
 // NewSubscriber creates a new Alchemy WebSocket subscriber.
@@ -166,12 +163,6 @@ func NewSubscriber(config SubscriberConfig) (*Subscriber, error) {
 		headers:   make(chan outbound.BlockHeader, config.ChannelBufferSize),
 		telemetry: config.Telemetry,
 	}, nil
-}
-
-// SetOnReconnect sets a callback that will be called when the connection is re-established.
-// This allows the application layer to trigger backfill.
-func (s *Subscriber) SetOnReconnect(callback func()) {
-	s.onReconnect = callback
 }
 
 // Subscribe starts listening for new block headers.
@@ -234,13 +225,10 @@ func (s *Subscriber) connectionManager() {
 			s.telemetry.RecordConnectionUp(s.ctx)
 		}
 
-		// Notify caller of reconnection and record metric
+		// Record reconnection metric
 		if !isFirstConnect {
 			if s.telemetry != nil {
 				s.telemetry.RecordReconnection(s.ctx)
-			}
-			if s.onReconnect != nil {
-				s.onReconnect()
 			}
 		}
 		isFirstConnect = false

@@ -1006,28 +1006,6 @@ func (s *Service) resolvePositionTokens(
 	return tokenIDs, nil
 }
 
-// IndexUserPosition queries the current on-chain position for a user and persists
-// a full snapshot (collaterals + debts) to the database. This is the public entry
-// point used by the snapshot indexer CLI.
-//
-// Reads state number-pinned (zero block hash): this CLI entry point has no
-// live BlockEvent to source a hash from, same rationale as ProcessReceipts'
-// backfill path (VEC-471).
-func (s *Service) IndexUserPosition(ctx context.Context, user common.Address, protocolAddress common.Address, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
-	collaterals, debts, err := s.extractUserPositionData(ctx, user, protocolAddress, chainID, blockNumber, common.Hash{}, "")
-	if err != nil {
-		return fmt.Errorf("failed to extract user position data: %w", err)
-	}
-
-	if len(collaterals) == 0 && len(debts) == 0 {
-		return nil
-	}
-
-	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		return s.persistPositionData(ctx, tx, user, protocolAddress, chainID, blockNumber, blockVersion, entity.InternalSnapshot, []byte{}, collaterals, debts, blockTimestamp)
-	})
-}
-
 // PersistUserPosition saves pre-fetched position data to the database.
 // Used by the batch backfill CLI which fetches data separately via
 // PositionReader.GetBatchUserPositionData.

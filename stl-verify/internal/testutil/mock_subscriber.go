@@ -8,13 +8,11 @@ import (
 )
 
 // MockSubscriber is a test subscriber that emits headers on demand.
-// It satisfies the outbound.BlockSubscriber interface plus SetOnReconnect
-// used by tests that exercise reconnection callbacks.
+// It satisfies the outbound.BlockSubscriber interface.
 type MockSubscriber struct {
-	mu       sync.Mutex
-	headers  chan outbound.BlockHeader
-	closed   bool
-	OnReconn func()
+	mu      sync.Mutex
+	headers chan outbound.BlockHeader
+	closed  bool
 }
 
 func NewMockSubscriber() *MockSubscriber {
@@ -39,10 +37,6 @@ func (m *MockSubscriber) Unsubscribe() error {
 
 func (m *MockSubscriber) HealthCheck(ctx context.Context) error {
 	return nil
-}
-
-func (m *MockSubscriber) SetOnReconnect(callback func()) {
-	m.OnReconn = callback
 }
 
 func (m *MockSubscriber) SendHeader(header outbound.BlockHeader) {
