@@ -38,7 +38,12 @@ CREATE TABLE IF NOT EXISTS position_state (
     CONSTRAINT position_state_pkey PRIMARY KEY (position_id, block_number, block_version, processing_version),
     -- position_id is sha256() output: enforce the 32-byte width (bytea is unlength-modified), matching
     -- position_classification (Simon review on #572).
-    CONSTRAINT position_state_id_len_chk CHECK (octet_length(position_id) = 32)
+    CONSTRAINT position_state_id_len_chk CHECK (octet_length(position_id) = 32),
+    -- quantity is a non-negative native magnitude; direction (BORROW/short vs supply/long) lives in
+    -- position_classification, never as a sign here. Every materializer emits abs()/balance/debt >= 0
+    -- (verified: 0 negative rows across morpho/vault/sky on prod). Fail hard if a bad source amount
+    -- would write a negative "exposure" that exposure queries (quantity <> 0) would silently surface.
+    CONSTRAINT position_state_qty_nonneg_chk CHECK (quantity >= 0)
 );
 
 COMMENT ON TABLE position_state IS '[Operational] Shared spine for materialized positions (VEC-402..408). One row per (native position_id, observation): the native resolution keys (instrument_key -> security via the bridge; holder_id -> entity via VEC-417) plus a single canonical quantity. Identity is native-only (VEC-400); classifications live in position_classification. Current state per position is position_current (VEC-409).';
