@@ -163,12 +163,12 @@ func DecodeTick(pool RegisteredPool, tick int32, blockNumber int64, version int,
 	return result, nil
 }
 
-// floorDiv and floorMod implement floored (as opposed to Go's truncated)
-// integer division: e.g. floorDiv(-1, 256) == -1 and floorMod(-1, 256) == 255,
-// whereas Go's native -1/256 == 0 and -1%256 == -1. Uniswap V3's tick bitmap
-// packs ticks using floored semantics (Solidity's compressed >> 8 on a signed
-// int24, an arithmetic shift which floors), so using Go's native operators
-// here would silently misplace every negative tick into the wrong bitmap word.
+// floorDiv implements floored (as opposed to Go's truncated) integer division:
+// e.g. floorDiv(-1, 256) == -1, whereas Go's native -1/256 == 0. Uniswap V3's
+// tick bitmap packs ticks using floored semantics (Solidity's compressed >> 8
+// on a signed int24, an arithmetic shift which floors), so using Go's native
+// operator here would silently misplace every negative tick into the wrong
+// bitmap word.
 func floorDiv(a, b int) int {
 	q := a / b
 	if (a%b != 0) && ((a < 0) != (b < 0)) {
@@ -177,26 +177,9 @@ func floorDiv(a, b int) int {
 	return q
 }
 
-func floorMod(a, b int) int {
-	m := a % b
-	if m != 0 && ((m < 0) != (b < 0)) {
-		m += b
-	}
-	return m
-}
-
-// tickToWordBit maps an on-chain tick (must be a multiple of tickSpacing) to
-// its tickBitmap word position and bit index, inverting Solidity's
-// int16(compressed >> 8) / uint8(compressed % 256) packing.
-func tickToWordBit(tick int32, tickSpacing int) (int16, uint8) {
-	compressed := floorDiv(int(tick), tickSpacing)
-	word := floorDiv(compressed, 256)
-	bit := floorMod(compressed, 256)
-	return int16(word), uint8(bit)
-}
-
-// wordBitToTick is the inverse of tickToWordBit: it recovers the tick at a
-// given bitmap word/bit for a pool with the given tickSpacing.
+// wordBitToTick recovers the tick at a given bitmap word/bit for a pool with
+// the given tickSpacing, inverting Solidity's int16(compressed >> 8) /
+// uint8(compressed % 256) packing.
 func wordBitToTick(word int16, bit uint8, tickSpacing int) int32 {
 	compressed := int(word)*256 + int(bit)
 	return int32(compressed * tickSpacing)

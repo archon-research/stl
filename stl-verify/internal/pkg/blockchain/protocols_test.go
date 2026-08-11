@@ -1,6 +1,7 @@
 package blockchain
 
 import (
+	"maps"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -159,8 +160,15 @@ func TestGetProtocolConfig(t *testing.T) {
 	}
 }
 
+// getProtocolRegistry returns a copy of all known protocol configs.
+func getProtocolRegistry() map[ProtocolKey]ProtocolConfig {
+	registry := make(map[ProtocolKey]ProtocolConfig, len(protocolRegistry))
+	maps.Copy(registry, protocolRegistry)
+	return registry
+}
+
 func TestProtocolRegistryPoolDataProviderHistoryIsSorted(t *testing.T) {
-	registry := GetProtocolRegistry()
+	registry := getProtocolRegistry()
 
 	for key, config := range registry {
 		history := config.PoolDataProviderHistory
