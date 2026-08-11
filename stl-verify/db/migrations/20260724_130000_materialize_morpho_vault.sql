@@ -9,9 +9,11 @@
 -- not part of the id.
 --
 -- Two data facts drive the projection (verified live 2026-07-24; closure re-verified 2026-07-28):
---   * 164 (user,vault,block_number,block_version) groups carry two timestamps — the same same-block
---     anomaly as the market table. DISTINCT ON keeps the latest so (position_id, block_number,
---     block_version) stays unique.
+--   * 164 (user,vault,block_number,block_version) groups carry a second row — reprocessing, not a
+--     duplicate: the rows differ by processing_version (verified: 0 same-pv duplicates on prod).
+--     processing_version is part of the observation axis and position_state PK, so both versions are
+--     retained; position_current picks the latest pv. DISTINCT ON only dedups a genuine same-(...,pv)
+--     collision, keeping the latest timestamp.
 --   * Positions close: 81,200 vault deposits are observed transitioning from a positive quantity to 0
 --     (of 94,813 zero-asset rows), and morpho_vault_position records that exit as a real row. The
 --     projection must emit ONE closing zero-observation per real transition-to-zero — otherwise
@@ -26,30 +28,32 @@
 -- per-protocol outputs from position_state; this view is the materializer's source of truth.
 CREATE OR REPLACE VIEW position_morpho_vault AS
 WITH obs AS (
-    SELECT DISTINCT ON (p.user_id, p.morpho_vault_id, p.block_number, p.block_version)
+    SELECT DISTINCT ON (p.user_id, p.morpho_vault_id, p.block_number, p.block_version, p.processing_version)
            v.chain_id, v.protocol_id,
            encode(v.address, 'hex') AS instrument_key,
            encode(u.address, 'hex') AS holder_id,
            p.assets                 AS quantity,
            p.user_id, p.morpho_vault_id,
-           p.block_number, p.block_version, p.timestamp AS block_timestamp
+           p.block_number, p.block_version, p.processing_version, p.timestamp AS block_timestamp
     FROM morpho_vault_position p
     JOIN morpho_vault v ON v.id = p.morpho_vault_id
     JOIN "user"       u ON u.id = p.user_id
-    ORDER BY p.user_id, p.morpho_vault_id, p.block_number, p.block_version, p.timestamp DESC
+    ORDER BY p.user_id, p.morpho_vault_id, p.block_number, p.block_version, p.processing_version, p.timestamp DESC
 ),
 -- Previous observation's quantity per position, so a real exit (positive->0) is told apart from a
--- position never entered.
+-- position never entered. The observation axis includes processing_version (a reprocessed row is a new
+-- observation, ordered after the one it corrects).
 series AS (
     SELECT chain_id, protocol_id, instrument_key, holder_id, quantity,
-           block_number, block_version, block_timestamp,
-           LAG(quantity) OVER (PARTITION BY user_id, morpho_vault_id ORDER BY block_number, block_version) AS prev_qty
+           block_number, block_version, processing_version, block_timestamp,
+           LAG(quantity) OVER (PARTITION BY user_id, morpho_vault_id
+                               ORDER BY block_number, block_version, processing_version) AS prev_qty
     FROM obs
 )
 SELECT position_id(chain_id, protocol_id, instrument_key, holder_id) AS position_id,
        chain_id, protocol_id, instrument_key, holder_id, quantity,
        'LOAN'::text AS deal_type_code,
-       block_number, block_version, 0 AS processing_version, block_timestamp
+       block_number, block_version, processing_version, block_timestamp
 FROM series
 WHERE quantity > 0 OR prev_qty > 0;
 

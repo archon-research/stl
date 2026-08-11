@@ -19,7 +19,8 @@ const vaultInstrument = "abcd"
 // current deal_type into position_classification.
 //
 // A vault is a single native instrument (no loan/collateral split, no netting), so this pins the
-// behaviours that remain: latest-timestamp dedup of same-(user,vault,block,version) rows; closure
+// behaviours that remain: reprocessing — two processing_versions of one block observation are both
+// retained (latest pv is current); closure
 // (VEC-409) — an exit (positive->0) emits one closing zero-row, a deposit never entered emits nothing;
 // many observations per position with one current classification (from the last non-zero row); 32-byte
 // ids, no PK collisions, and idempotency.
@@ -31,9 +32,9 @@ func TestMaterializeMorphoVault(t *testing.T) {
 		t.Fatalf("migrations: %v", err)
 	}
 
-	// Seed one vault (address abcd) and four holders: A deposits (two observations), B is a same-block
-	// dedup case, C never entered (single assets 0 row, no row emitted), D deposits then exits (open +
-	// one closing zero-row).
+	// Seed one vault (address abcd) and four holders: A deposits (two observations), B is a reprocessing
+	// case (one block observation restamped to a new processing_version), C never entered (single assets
+	// 0 row, no row emitted), D deposits then exits (open + one closing zero-row).
 	seed := `
 DO $$
 DECLARE pid bigint; atid bigint; uaid bigint; ubid bigint; ucid bigint; udid bigint; vid bigint;
@@ -52,7 +53,8 @@ BEGIN
   INSERT INTO morpho_vault_position (user_id, morpho_vault_id, block_number, block_version, timestamp, shares, assets)
     VALUES (uaid, vid, 100, 0, '2026-01-01T00:00:00Z', 90, 100),
            (uaid, vid, 200, 0, '2026-01-02T00:00:00Z', 130, 150);
-  -- B: same (user, vault, block, version), two timestamps -> dedup keeps the latest (assets 20).
+  -- B: one block observation reprocessed -> the assign-pv trigger stamps the rows pv=0 (assets 10) and
+  -- pv=1 (assets 20). processing_version is part of the grain, so both are retained; latest pv (20) is current.
   INSERT INTO morpho_vault_position (user_id, morpho_vault_id, block_number, block_version, timestamp, shares, assets)
     VALUES (ubid, vid, 100, 0, '2026-01-01T00:00:00Z', 9, 10),
            (ubid, vid, 100, 0, '2026-01-01T01:00:00Z', 18, 20);
@@ -73,7 +75,7 @@ END $$;`
 		t.Fatalf("materialize_morpho_vault: %v", err)
 	}
 
-	// A (2 obs) + B (1, deduped) + D (open + close = 2) = 5 rows; C never entered, skipped.
+	// A (2 obs) + B (2 pv: reprocessed) + D (open + close = 2) = 6 rows; C never entered, skipped.
 	// Distinct positions: A, B, D = 3.
 	var rows, distinctPositions, collisions, badLen int
 	if err := pool.QueryRow(ctx, `
@@ -84,11 +86,11 @@ END $$;`
 		FROM position_state`).Scan(&rows, &distinctPositions, &collisions, &badLen); err != nil {
 		t.Fatalf("position_state summary: %v", err)
 	}
-	if rows != 5 {
-		t.Errorf("position_state rows = %d, want 5", rows)
+	if rows != 6 {
+		t.Errorf("position_state rows = %d, want 6", rows)
 	}
-	if written != 5 {
-		t.Errorf("materialize returned %d, want 5", written)
+	if written != 6 {
+		t.Errorf("materialize returned %d, want 6", written)
 	}
 	if distinctPositions != 3 {
 		t.Errorf("distinct position_id = %d, want 3", distinctPositions)
@@ -107,7 +109,7 @@ END $$;`
 		wantRows int
 	}{
 		{"A deposit, latest of two observations", "aa", "150", 2},
-		{"B same-block dedup keeps latest timestamp", "bb", "20", 1},
+		{"B reprocessed: both processing versions retained, latest pv (20) is current", "bb", "20", 2},
 		{"C never entered (assets 0) emits nothing", "cc", "", 0},
 		{"D exit: deposit + one closing zero-row", "dd", "0", 2},
 	} {
@@ -171,7 +173,7 @@ END $$;`
 	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM position_state), (SELECT count(*) FROM position_classification)`).Scan(&rows2, &class2); err != nil {
 		t.Fatalf("re-count: %v", err)
 	}
-	if rows2 != 5 || class2 != 3 {
-		t.Errorf("after re-run: position_state=%d (want 5), position_classification=%d (want 3)", rows2, class2)
+	if rows2 != 6 || class2 != 3 {
+		t.Errorf("after re-run: position_state=%d (want 6), position_classification=%d (want 3)", rows2, class2)
 	}
 }
