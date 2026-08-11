@@ -69,8 +69,6 @@ WHERE quantity > 0 OR prev_qty > 0;
 
 COMMENT ON VIEW position_sky_prime_debt IS '[Operational] VEC-406 projection: Sky prime debt as native position rows (one per prime x ilk; instrument_key = native ilk_name; holder = prime vault address; deal_type BORROW). Emits the shared position_state column contract consumed by materialize_position_projection(); one closing zero-quantity row on a real repayment-to-zero (VEC-409 closure; none observed on live data yet).';
 
--- Populate the spine + current classification. Idempotent (ON CONFLICT). Returns rows written to
--- position_state. Run out of band after deploy; safe to re-run.
 -- Populate the spine + current classification via the shared materializer (defined with position_state,
 -- VEC-402 spine). The projection view above holds all the Sky-prime-debt-specific logic; the identical
 -- upsert plumbing is not duplicated here. Idempotent; run out of band; returns position_state rows written.

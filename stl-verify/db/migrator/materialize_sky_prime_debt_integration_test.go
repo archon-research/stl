@@ -40,7 +40,10 @@ BEGIN
   INSERT INTO prime_debt (prime_id, ilk_name, debt_wad, block_number, block_version, synced_at, processing_version, build_id) VALUES
     (paid, 'ILK-A', 1000, 100, 0, '2026-01-01T00:00:00Z', 0, 0),
     (paid, 'ILK-A', 1500, 200, 0, '2026-01-02T00:00:00Z', 0, 0),
-    (paid, 'ILK-B',  500, 100, 0, '2026-01-01T00:00:00Z', 0, 0),
+    -- Distinct synced_at from A/ILK-A above: prime_debt's UNIQUE key is
+    -- (prime_id, block_number, block_version, processing_version, synced_at) with NO ilk_name, so two
+    -- ilks of one prime at one block must carry different synced_at (as they do in prod) or they collide.
+    (paid, 'ILK-B',  500, 100, 0, '2026-01-01T00:05:00Z', 0, 0),
     (pbid, 'ILK-A',    0, 100, 0, '2026-01-01T00:00:00Z', 0, 0),
     (pcid, 'ILK-A', 2000, 100, 0, '2026-01-01T00:00:00Z', 0, 0),
     (pcid, 'ILK-A',    0, 200, 0, '2026-01-02T00:00:00Z', 0, 0);
