@@ -1,6 +1,7 @@
 package main
 
 import (
+	"maps"
 	"strings"
 	"testing"
 )
@@ -23,9 +24,7 @@ func baseEnv(overrides map[string]string) map[string]string {
 		"S3_BUCKET":       "stl-sentinelstaging-ethereum-raw",
 		"DEPLOY_ENV":      "staging",
 	}
-	for k, v := range overrides {
-		env[k] = v
-	}
+	maps.Copy(env, overrides)
 	return env
 }
 
