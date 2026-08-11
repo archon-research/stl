@@ -83,7 +83,9 @@ BEGIN
   -- C: supply-and-borrow loop of the loan token -> nets to one loan-token position (|100-40| = 60, LOAN).
   INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, timestamp, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets)
     VALUES (ucid, mid, 100, 0, '2026-01-01T00:00:00Z', 0, 0, 0, 100, 40);
-  -- D: same (user, market, block, version), two timestamps -> dedup keeps the latest (supply 20).
+  -- D: one block observation reprocessed -> the assign-pv trigger stamps the two rows pv=0 (supply 10)
+  -- and pv=1 (supply 20). processing_version is part of the grain, so BOTH are retained as observations;
+  -- position_current picks the latest pv (supply 20). (No explicit pv column: the trigger assigns it.)
   INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, timestamp, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets)
     VALUES (udid, mid, 100, 0, '2026-01-01T00:00:00Z', 0, 0, 0, 10, 0),
            (udid, mid, 100, 0, '2026-01-01T01:00:00Z', 0, 0, 0, 20, 0);
@@ -125,10 +127,11 @@ END $$;`
 	}
 
 	// position_state row shape:
-	//   A loan (2 obs) + B loan (1) + B coll (1) + C loan (1) + D loan (1)          = 6
+	//   A loan (2 obs) + B loan (1) + B coll (1) + C loan (1) + D loan (2 pv: reprocessed) = 7
 	//   E coll (open + close = 2) + F loan (open + close = 2) + G coll (open + close = 2) = 6
 	//   I coll (open + close + reopen = 3) + H loan in M2 (1; collateral leg guarded out) = 4
-	// Total 16. Distinct positions: A, B-loan, B-coll, C, D, E-coll, F-loan, G-coll, I-coll, H-loan-M2 = 10.
+	// Total 17. Distinct positions: A, B-loan, B-coll, C, D, E-coll, F-loan, G-coll, I-coll, H-loan-M2 = 10
+	// (D is one position with two observations at the same block, different processing_version).
 	var rows, distinctPositions, collisions, badLen int
 	if err := pool.QueryRow(ctx, `
 		SELECT count(*),
@@ -138,11 +141,11 @@ END $$;`
 		FROM position_state`).Scan(&rows, &distinctPositions, &collisions, &badLen); err != nil {
 		t.Fatalf("position_state summary: %v", err)
 	}
-	if rows != 16 {
-		t.Errorf("position_state rows = %d, want 16", rows)
+	if rows != 17 {
+		t.Errorf("position_state rows = %d, want 17", rows)
 	}
-	if written != 16 {
-		t.Errorf("materialize returned %d, want 16", written)
+	if written != 17 {
+		t.Errorf("materialize returned %d, want 17", written)
 	}
 	if distinctPositions != 10 {
 		t.Errorf("distinct position_id = %d, want 10", distinctPositions)
@@ -166,7 +169,7 @@ END $$;`
 		{"B borrow leg (loan token)", loanInstrument, "bb", "30", 1},
 		{"B collateral leg (collateral token)", collInstrument, "bb", "5", 1},
 		{"C supply/borrow netted (|100-40|)", loanInstrument, "cc", "60", 1},
-		{"D same-block dedup keeps latest timestamp", loanInstrument, "dd", "20", 1},
+		{"D reprocessed: both processing versions retained, latest pv (20) is current", loanInstrument, "dd", "20", 2},
 		{"E collateral closed: open + one closing zero-row", collInstrument, "ee", "0", 2},
 		{"F loan closed: borrow + one closing zero-row", loanInstrument, "ef", "0", 2},
 		{"G leading + repeated zeros dropped: open + one close", collInstrument, "f0", "0", 2},
@@ -246,7 +249,7 @@ END $$;`
 	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM position_state), (SELECT count(*) FROM position_classification)`).Scan(&rows2, &class2); err != nil {
 		t.Fatalf("re-count: %v", err)
 	}
-	if rows2 != 16 || class2 != 10 {
-		t.Errorf("after re-run: position_state=%d (want 16), position_classification=%d (want 10)", rows2, class2)
+	if rows2 != 17 || class2 != 10 {
+		t.Errorf("after re-run: position_state=%d (want 17), position_classification=%d (want 10)", rows2, class2)
 	}
 }

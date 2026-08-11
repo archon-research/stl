@@ -13,8 +13,11 @@
 -- attribute in position_classification, NOT part of the id.
 --
 -- Three data facts drive the projection (verified live 2026-07-24; leg counts re-verified 2026-07-28):
---   * 8 (user,market,block_number,block_version) groups carry two timestamps — a same-block anomaly.
---     DISTINCT ON keeps the latest timestamp so (position_id, block_number, block_version) stays unique.
+--   * 8 (user,market,block_number,block_version) groups carry a second row — reprocessing, not a
+--     duplicate: the two rows differ by processing_version (verified: 0 same-pv duplicates on prod).
+--     processing_version is part of the observation axis and the position_state PK, so both versions are
+--     retained; position_current picks the latest pv. DISTINCT ON only dedups a genuine same-(...,pv)
+--     collision, keeping the latest timestamp.
 --   * 1,853 rows have supply_assets AND borrow_assets both > 0 (leverage loops). A single native
 --     instrument (the loan token) holds one position, so these net: quantity = |supply - borrow|,
 --     deal_type = LOAN when net-supplied, BORROW when net-borrowed.
@@ -34,34 +37,35 @@
 -- per-protocol outputs from position_state; this view is the materializer's source of truth.
 CREATE OR REPLACE VIEW position_morpho_market AS
 WITH obs AS (
-    SELECT DISTINCT ON (p.user_id, p.morpho_market_id, p.block_number, p.block_version)
+    SELECT DISTINCT ON (p.user_id, p.morpho_market_id, p.block_number, p.block_version, p.processing_version)
            m.chain_id, m.protocol_id,
            encode(m.market_id, 'hex') AS mkt,
            encode(u.address, 'hex')   AS holder_id,
            lt.address AS loan_addr,
            ct.address AS coll_addr,
            p.user_id, p.morpho_market_id,
-           p.block_number, p.block_version, p.timestamp AS block_timestamp,
+           p.block_number, p.block_version, p.processing_version, p.timestamp AS block_timestamp,
            p.supply_assets, p.borrow_assets, p.collateral
     FROM morpho_market_position p
     JOIN morpho_market m ON m.id = p.morpho_market_id
     JOIN "user"        u ON u.id = p.user_id
     JOIN token        lt ON lt.id = m.loan_token_id
     JOIN token        ct ON ct.id = m.collateral_token_id
-    ORDER BY p.user_id, p.morpho_market_id, p.block_number, p.block_version, p.timestamp DESC
+    ORDER BY p.user_id, p.morpho_market_id, p.block_number, p.block_version, p.processing_version, p.timestamp DESC
 ),
 -- Per-observation leg quantities plus the previous observation's quantity (per position), so a real
--- transition-to-zero can be told apart from a leg that was never entered.
+-- transition-to-zero can be told apart from a leg that was never entered. The observation axis includes
+-- processing_version (a reprocessed row is a new observation, ordered after the one it corrects).
 series AS (
     SELECT chain_id, protocol_id, mkt, holder_id, loan_addr, coll_addr,
-           block_number, block_version, block_timestamp,
+           block_number, block_version, processing_version, block_timestamp,
            abs(supply_assets - borrow_assets) AS loan_qty,
            (supply_assets >= borrow_assets)   AS loan_is_supply,
            collateral                         AS coll_qty,
            LAG(abs(supply_assets - borrow_assets)) OVER w AS prev_loan_qty,
            LAG(collateral)                         OVER w AS prev_coll_qty
     FROM obs
-    WINDOW w AS (PARTITION BY user_id, morpho_market_id ORDER BY block_number, block_version)
+    WINDOW w AS (PARTITION BY user_id, morpho_market_id ORDER BY block_number, block_version, processing_version)
 ),
 legs AS (
     -- loan-token exposure: net supply vs borrow into one position; emit while open plus one closing zero-row
@@ -70,7 +74,7 @@ legs AS (
            holder_id,
            loan_qty AS quantity,
            CASE WHEN loan_is_supply THEN 'LOAN' ELSE 'BORROW' END AS deal_type_code,
-           block_number, block_version, block_timestamp
+           block_number, block_version, processing_version, block_timestamp
     FROM series
     WHERE loan_qty > 0 OR prev_loan_qty > 0
     UNION ALL
@@ -87,14 +91,14 @@ legs AS (
            mkt || ':' || encode(coll_addr, 'hex'),
            holder_id,
            coll_qty, 'COLLATERAL',
-           block_number, block_version, block_timestamp
+           block_number, block_version, processing_version, block_timestamp
     FROM series
     WHERE (coll_qty > 0 OR prev_coll_qty > 0)
       AND coll_addr <> loan_addr
 )
 SELECT position_id(chain_id, protocol_id, instrument_key, holder_id) AS position_id,
        chain_id, protocol_id, instrument_key, holder_id, quantity, deal_type_code,
-       block_number, block_version, 0 AS processing_version, block_timestamp
+       block_number, block_version, processing_version, block_timestamp
 FROM legs;
 
 COMMENT ON VIEW position_morpho_market IS '[Operational] VEC-402 projection: Morpho market positions as native per-instrument position rows (loan-token and collateral-token legs, composite market_id:token key). Emits the shared position_state column contract consumed by materialize_position_projection(); one row per (position_id, observation), including one closing zero-quantity row on a real transition-to-zero (VEC-409 closure).';
