@@ -14,9 +14,6 @@ import (
 	"strconv"
 	"syscall"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
-
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/cache"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
@@ -84,11 +81,9 @@ func parseConfig(args []string) (cliConfig, error) {
 		return cliConfig{}, fmt.Errorf("parsing CLI flags: %w", err)
 	}
 
-	// Track which timing flags were explicitly passed so the env vars below act
-	// only as a fallback (matching queue/db/redis) and never override an
-	// explicit flag.
-	explicit := map[string]bool{}
-	fs.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
+	// Env vars are fallbacks only; an explicitly-set flag wins over its env var.
+	setFlags := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
 
 	cfg := cliConfig{
 		queueURL:          *queueURL,
@@ -99,23 +94,19 @@ func parseConfig(args []string) (cliConfig, error) {
 		visibilityTimeout: *visibilityTimeout,
 	}
 
-	if !explicit["wait"] {
-		if waitTimeStr := env.Get("SQS_WAIT_TIME", ""); waitTimeStr != "" {
-			v, err := strconv.Atoi(waitTimeStr)
-			if err != nil {
-				return cliConfig{}, fmt.Errorf("parsing SQS_WAIT_TIME %q: %w", waitTimeStr, err)
-			}
-			cfg.waitTime = v
+	if waitTimeStr := env.Get("SQS_WAIT_TIME", ""); waitTimeStr != "" && !setFlags["wait"] {
+		v, err := strconv.Atoi(waitTimeStr)
+		if err != nil {
+			return cliConfig{}, fmt.Errorf("parsing SQS_WAIT_TIME %q: %w", waitTimeStr, err)
 		}
+		cfg.waitTime = v
 	}
-	if !explicit["visibility-timeout"] {
-		if visTimeStr := env.Get("SQS_VISIBILITY_TIMEOUT", ""); visTimeStr != "" {
-			v, err := strconv.Atoi(visTimeStr)
-			if err != nil {
-				return cliConfig{}, fmt.Errorf("parsing SQS_VISIBILITY_TIMEOUT %q: %w", visTimeStr, err)
-			}
-			cfg.visibilityTimeout = v
+	if visTimeStr := env.Get("SQS_VISIBILITY_TIMEOUT", ""); visTimeStr != "" && !setFlags["visibility-timeout"] {
+		v, err := strconv.Atoi(visTimeStr)
+		if err != nil {
+			return cliConfig{}, fmt.Errorf("parsing SQS_VISIBILITY_TIMEOUT %q: %w", visTimeStr, err)
 		}
+		cfg.visibilityTimeout = v
 	}
 
 	if cfg.queueURL == "" {
@@ -210,14 +201,7 @@ func run(ctx context.Context, args []string) error {
 	}
 	logger.Info("Redis connected", "addr", cfg.redisAddr)
 
-	s3Opts := []func(*awss3.Options){}
-	if s3Endpoint := env.Get("AWS_S3_ENDPOINT", ""); s3Endpoint != "" {
-		s3Opts = append(s3Opts, func(o *awss3.Options) {
-			o.BaseEndpoint = aws.String(s3Endpoint)
-			o.UsePathStyle = true
-		})
-	}
-	s3Reader := s3adapter.NewReaderWithOptions(awsCfg, logger, s3Opts...)
+	s3Reader := s3adapter.NewReaderFromEnv(awsCfg, logger)
 	cacheReader, err := cache.NewReaderWithFallback(blockCache, s3Reader, cfg.chainID, cfg.deployEnv, cfg.s3Bucket, logger)
 	if err != nil {
 		return fmt.Errorf("creating cache reader: %w", err)

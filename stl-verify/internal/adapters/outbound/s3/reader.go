@@ -14,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -47,6 +48,30 @@ func NewReaderWithOptions(cfg aws.Config, logger *slog.Logger, optFns ...func(*s
 		client: s3.NewFromConfig(cfg, optFns...),
 		logger: logger,
 	}
+}
+
+// NewReaderFromEnv creates a Reader honouring AWS_S3_ENDPOINT, the LocalStack
+// override every worker needs in kind/dev. Six worker entrypoints previously
+// inlined this same block; sparklend-indexer omitted it and its S3 fallback was
+// silently unreachable in dev as a result, which is why the convention lives
+// here rather than at each call site.
+func NewReaderFromEnv(cfg aws.Config, logger *slog.Logger) *Reader {
+	return NewReaderWithOptions(cfg, logger, EndpointOptionsFromEnv()...)
+}
+
+// EndpointOptionsFromEnv returns the S3 client options implied by
+// AWS_S3_ENDPOINT, or nil when it is unset (i.e. real AWS). Path-style
+// addressing accompanies a custom endpoint because LocalStack does not serve
+// virtual-host-style bucket URLs.
+func EndpointOptionsFromEnv() []func(*s3.Options) {
+	endpoint := env.Get("AWS_S3_ENDPOINT", "")
+	if endpoint == "" {
+		return nil
+	}
+	return []func(*s3.Options){func(o *s3.Options) {
+		o.BaseEndpoint = aws.String(endpoint)
+		o.UsePathStyle = true
+	}}
 }
 
 // NewReaderWithHTTPClient creates a new S3 Reader with a custom HTTP client.
