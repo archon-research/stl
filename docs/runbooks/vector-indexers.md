@@ -439,7 +439,7 @@ decide whether downstream consumers tolerate the gap. The allowlist and the
 
 ## VectorMapleCollateralUnpriceable
 
-**Severity:** warning · **For:** 0m (1h window debounces)
+**Severity:** warning · **For:** 90m (20m lookback window)
 
 ### What it means
 
@@ -454,9 +454,18 @@ is normal and is **not** alerted.
 
 This is expected to self-heal — Maple's pricing layer restores the feed and the
 next 10m cycle writes a real value. The alert detects **persistence, not
-volume**: it fires only when a token's collateral stays unpriceable across
-consecutive cycles for **>30m** (`increase[20m] > 0` held for `30m`, per token).
-A lone gap self-heals within a cycle and never fires; a sustained gap is an
+volume**: `increase[20m] > 0` must hold continuously for `90m`, per token.
+
+The two durations compose rather than acting independently. The 20m lookback
+keeps the expression true for 20m *after* the last bad cycle, so the recurrence
+itself only needs to span `90m - 20m` — i.e. the alert fires when a token keeps
+coming back unpriceable for **>70m**.
+
+That does **not** mean every cycle must fail. Because the lookback is 20m and
+cycles run every 10m, failing every *other* cycle already leaves no window empty
+— so the practical bar is **≥4 bad cycles, none more than 20m apart**. One clean
+cycle in between is tolerated; two in a row resets the clock. Shorter gaps, even
+multi-cycle ones, self-heal and never fire. Anything that clears that bar is an
 upstream Maple pricing problem, not our bug. The client no longer emits a
 per-occurrence warn; the metric is the signal.
 
@@ -471,8 +480,9 @@ per-occurrence warn; the metric is the signal.
 
 ### Action
 
-- **Transient (fires once, resolves within ~1h):** expected self-heal. No
-  action beyond the one-time task below.
+- **Fires once, then resolves within ~20m:** Maple's feed came back. Note that
+  it still means the gap persisted >70m before firing, so record the token and
+  duration, but no code action beyond the one-time task below.
 - **Sustained (fires across many cycles):** upstream Maple pricing gap. Raise
   with Maple; decide whether downstream consumers tolerate the NULL. Not a code
   bug.
@@ -491,7 +501,7 @@ assumptions exactly:
 So the classifier (`tolerableUnpriceableCollateral` / `pathThroughCollateral`)
 classified it correctly; the temporary diagnostic warn has been removed and the
 alert re-baselined from a raw `>0` to a persistence signal
-(`increase[20m] > 0` for `30m`, per token).
+(`increase[20m] > 0` for `90m`, per token).
 
 > Known gap (follow-up): the metric is only recorded when `collateral` is
 > non-null (service.go). If a "No fiat value" error nulls the **whole**
