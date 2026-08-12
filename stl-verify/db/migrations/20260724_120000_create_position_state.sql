@@ -15,9 +15,18 @@
 -- (e.g. a Morpho market row -> its loan-token position and its collateral-token position), never by a
 -- house leg/deal_type classifier.
 --
--- Observation axis: (block_number, block_version, processing_version). processing_version defaults 0
--- for sources that don't carry one (Morpho). The current state per position is position_current
--- (VEC-409, DISTINCT ON position_id) — built once all materializers land.
+-- Observation axis: (block_number, block_version, processing_version), all NOT NULL and part of the
+-- PK. processing_version defaults 0 for sources that don't carry one (Morpho). The current state per
+-- position is position_current (VEC-409, DISTINCT ON position_id) — built once all materializers land.
+--
+-- Scope: block-observed sources only. A snapshot-keyed source (e.g. Anchorage's
+-- anchorage_package_snapshot, keyed by snapshot_time with no block axis) is NOT supported by this
+-- spine as written, and must not be forced onto the block axis by a hack: a constant block_number
+-- collapses every snapshot of a position onto one PK row and the upsert destroys custody history,
+-- and encoding snapshot_time into block_number corrupts the column's semantics. Supporting such a
+-- source requires an explicit, deliberate schema change first (a snapshot/observation-time
+-- discriminator in the PK), decided when the first snapshot-keyed materializer is built — not a
+-- mapping improvised at that materializer's call site.
 --
 -- Plain table, not a hypertable: it is a curated/derived spine populated out of band by the
 -- materializer functions below (mirroring block_time and the transform _bootstrap pattern), not a
@@ -86,6 +95,13 @@ GRANT SELECT, INSERT, UPDATE ON position_state TO stl_readwrite;
 -- (CLAUDE.md: consolidate duplicated code) — it upserts the observations into the spine and the current
 -- (latest NON-ZERO) deal-type into position_classification (VEC-401). A closed position keeps the
 -- deal_type of its last real observation, not the ambiguous direction of a closing zero-row.
+--
+-- Classification channels written here are deal_type_code and direction only. collateral_status is
+-- deliberately NOT a channel of this shared helper: it stays NULL for every position written through
+-- it. A materializer that must distinguish collateral state (e.g. Anchorage CUSTODY vs
+-- CUSTODY_COLLATERAL, VEC-408) sets collateral_status itself in a separate write; the helper signature
+-- is not grown speculatively for a consumer that does not exist yet. Revisit the channel when the
+-- first such materializer lands.
 --
 -- p_view is a regclass, so it must name an existing relation — no SQL injection via the dynamic FROM.
 -- Idempotent (ON CONFLICT); run out of band (a full-table INSERT..SELECT does not belong in the
