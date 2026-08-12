@@ -1,13 +1,15 @@
-import functools
-
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from app.config import Settings
 
 
-@functools.lru_cache(maxsize=1)
-def get_engine(settings: Settings) -> AsyncEngine:
-    """Create or return a cached async SQLAlchemy engine for the given settings."""
+def create_db_engine(settings: Settings) -> AsyncEngine:
+    """Create an async SQLAlchemy engine with the configured connection pool.
+
+    The caller owns the engine's lifecycle (the FastAPI lifespan disposes it on
+    shutdown), so this deliberately returns a fresh engine per call rather than
+    caching one for the process.
+    """
     return create_async_engine(
         settings.async_database_url,
         pool_pre_ping=True,
