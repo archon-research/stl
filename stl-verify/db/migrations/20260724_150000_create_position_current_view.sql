@@ -14,11 +14,18 @@
 --
 -- Under the shared-table design, this is a straight DISTINCT ON over position_state
 -- (not a union of per-protocol views), so a new materializer needs no change here.
+--
+-- ORDER BY is fully DESC (position_id included): position_state carries no dedicated
+-- current-state index, so this DISTINCT ON is served by a backward scan of the PK
+-- (position_id, block_number, block_version, processing_version) as an Index Scan
+-- Backward with no sort. An ascending position_id spelling cannot use that backward
+-- scan and forces a full sort of the table. DISTINCT ON only requires position_id to
+-- lead the ORDER BY; its direction does not change the result (one row per position_id).
 
 CREATE OR REPLACE VIEW position_current AS
 SELECT DISTINCT ON (position_id) *
 FROM position_state
-ORDER BY position_id, block_number DESC, block_version DESC, processing_version DESC;
+ORDER BY position_id DESC, block_number DESC, block_version DESC, processing_version DESC;
 
 COMMENT ON VIEW position_current IS '[Operational] Current state per position (VEC-409): the latest observation per position_id from position_state (DISTINCT ON, ordered by block_number/version/processing_version DESC). Feeds position_enriched (VEC-523). A closed position surfaces with quantity 0; exposure queries filter quantity <> 0.';
 
