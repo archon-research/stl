@@ -61,8 +61,13 @@ COMMENT ON COLUMN position_state.processing_version IS 'PK. Pipeline processing 
 COMMENT ON COLUMN position_state.block_timestamp IS 'On-chain observation time (UTC).';
 COMMENT ON COLUMN position_state.created_at IS 'Audit. Row insert time.';
 
--- Current-state lookup (VEC-409 ORDER BY): latest observation per position_id.
-CREATE INDEX IF NOT EXISTS position_state_current_idx ON position_state (position_id, block_number DESC, block_version DESC, processing_version DESC);
+-- No dedicated current-state index: latest-observation lookups (VEC-409 position_current, and the
+-- per-position WHERE position_id = $1 ORDER BY ... LIMIT 1) are served by a backward scan of the PK
+-- as an Index [Only] Scan Backward with no sort, provided the query spells its ORDER BY descending
+-- (position_id DESC, block_number DESC, block_version DESC, processing_version DESC). A separate
+-- (position_id, block_number DESC, ...) index only serves the ascending spelling, which need not
+-- exist; it would duplicate the PK's key set and add an index write per upsert on the spine's largest
+-- table. VEC-409 must use the descending spelling.
 -- Reverse lookups for resolution/aggregation.
 CREATE INDEX IF NOT EXISTS position_state_instrument_idx ON position_state (instrument_key);
 CREATE INDEX IF NOT EXISTS position_state_holder_idx ON position_state (holder_id);
