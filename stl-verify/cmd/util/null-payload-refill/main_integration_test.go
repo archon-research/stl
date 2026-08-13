@@ -74,7 +74,6 @@ func runRefillScenario(t *testing.T, useKeysFile bool) {
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	// 1. Take the LocalStack (S3+SNS+SQS) the package shares.
 	lsCfg := sharedLocalStackCfg
 
 	const chainID int64 = 43114
@@ -82,11 +81,6 @@ func runRefillScenario(t *testing.T, useKeysFile bool) {
 	const parentHash = "0xfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
 	const blockTimestamp int64 = 1730000000
 
-	// chainutil pins the SNS topic name per chain, so it cannot carry a per-test
-	// suffix and both scenarios publish to the same topic on the shared
-	// LocalStack. The publisher's MessageDeduplicationId is
-	// {chainId}:{blockHash}:{version}, so each scenario needs its own block hash
-	// or SNS silently swallows the second publish as a duplicate.
 	blockHash := scenarioBlockHash(t.Name())
 
 	// 2. Set up AWS clients.
@@ -240,9 +234,10 @@ func runRefillScenario(t *testing.T, useKeysFile bool) {
 
 // ----- helpers ---------------------------------------------------------------
 
-// scenarioBlockHash derives a distinct 32-byte block hash per test name, so the
-// scenarios sharing one SNS FIFO topic do not collide on the publisher's
-// content-derived MessageDeduplicationId.
+// scenarioBlockHash derives a distinct 32-byte block hash per test name. chainutil
+// pins the SNS topic per chain, so scenarios share one FIFO topic and would collide
+// on the publisher's {chainId}:{blockHash}:{version} MessageDeduplicationId — SNS
+// swallows the second publish silently.
 func scenarioBlockHash(testName string) string {
 	sum := sha256.Sum256([]byte(testName))
 	return "0x" + hex.EncodeToString(sum[:])

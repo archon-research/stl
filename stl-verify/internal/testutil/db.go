@@ -36,9 +36,8 @@ func ConnectPool(t *testing.T, dsn string) *pgxpool.Pool {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	// The caller never receives this pool, so nothing else can close it. Leaving
-	// its background goroutines running lets the package's goroutine-leak check
-	// overwrite the exit code and bury this failure.
+	// t.Fatal runs runtime.Goexit and this pool never reaches the caller: its leaked
+	// goroutines would let the package's leak check overwrite the exit code.
 	pool.Close()
 	t.Fatal("timed out waiting for database connection")
 	return nil
@@ -362,9 +361,7 @@ func SetupTestDatabase(t *testing.T, baseDSN string) (pool *pgxpool.Pool, dsn st
 	// A database left behind by a killed run would silently supply its rows to
 	// this one, so drop before create rather than CREATE IF NOT EXISTS.
 	adminPool := ConnectPool(t, baseDSN)
-	// Deferred, not closed inline: the t.Fatalf calls below run runtime.Goexit,
-	// which would otherwise leave the pool's background goroutines alive and let
-	// the package's goroutine-leak check bury the real failure.
+	// Deferred, not closed inline: the t.Fatalf calls below run runtime.Goexit.
 	defer adminPool.Close()
 	if _, err := adminPool.Exec(ctx, dropDatabaseSQL(dbName)); err != nil {
 		t.Fatalf("drop stale database %s: %v", dbName, err)
@@ -375,9 +372,8 @@ func SetupTestDatabase(t *testing.T, baseDSN string) (pool *pgxpool.Pool, dsn st
 
 	dsn = withDatabase(t, baseDSN, dbName)
 	pool = ConnectPool(t, dsn)
-	// Registered now rather than left to the returned cleanup: the t.Fatalf calls
-	// below run runtime.Goexit before that cleanup ever reaches the caller.
-	// pgxpool.Close is once-guarded, so cleanup closing it again is a no-op.
+	// t.Cleanup rather than the returned cleanup, for the same reason; pgxpool.Close
+	// is once-guarded, so cleanup closing it again is a no-op.
 	t.Cleanup(pool.Close)
 
 	// Migrations deliberately do not create the extension (production gets it from

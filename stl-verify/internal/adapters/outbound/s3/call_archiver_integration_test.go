@@ -25,17 +25,14 @@ import (
 // object counts independent of the per-batch hash suffix.
 const chainPrefix = "raw-sc-calls/chain_id=1/"
 
-// archiveHarness is one test's slice of the LocalStack the package shares: its
-// own bucket, plus the archiver and client bound to it. The bucket is per-test
-// because the assertions count objects, which a shared bucket would mix.
 type archiveHarness struct {
 	archiver *s3adapter.CallArchiver
 	client   *awss3.Client
 	bucket   string
 }
 
-// newArchiverOnLocalStack provisions a per-test S3 bucket and returns a
-// CallArchiver writing to it plus the S3 client for assertions.
+// newArchiverOnLocalStack gives each test its own bucket on the shared
+// LocalStack, because these assertions count objects.
 func newArchiverOnLocalStack(t *testing.T, ctx context.Context) *archiveHarness {
 	t.Helper()
 

@@ -203,16 +203,11 @@ tidy-check:
 	@mv go.mod.bak go.mod && mv go.sum.bak go.sum
 	@echo "go.mod is tidy"
 
-# Guard against per-test testcontainers creeping back in. Integration tests must
-# take their infrastructure from the container the package starts once in TestMain
-# (StartTimescaleDBForMain / StartRedisForMain / StartLocalStackForMain), isolating
-# themselves with SetupTestSchema / SetupTestDatabase / a per-test resource name.
-# A test that starts its own container adds a container start to every CI run, and
-# that drift has now cost three clean-up rounds (SEN-191, #257, VEC-564).
-# Benchmarks are exempt: they are not part of make test-integration.
-# The pattern matches the IMPORT PATH, not a call like testcontainers.GenericContainer:
-# only testutil is allowed to depend on testcontainers at all, so an import alias
-# (tc.GenericContainer), testcontainers.Run, or a modules/* helper cannot slip past.
+# Enforces the one-container-per-package rule in AGENTS.md; a test that starts its
+# own container adds a container start to every CI run. Benchmarks are exempt: they
+# are not part of make test-integration. Matching the IMPORT PATH, not a call like
+# testcontainers.GenericContainer, because only testutil may depend on testcontainers
+# at all — so an alias, testcontainers.Run, or a modules/* helper cannot slip past.
 shared-container-check:
 	@echo "==> Checking integration tests share their containers..."
 	@offenders=$$(grep -rl 'testcontainers/testcontainers-go' --include='*_test.go' . \

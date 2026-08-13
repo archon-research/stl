@@ -40,8 +40,6 @@ func TestValidate_BaseChain_Integration(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	// Real Postgres with migrations applied, in this test's own schema on the
-	// container the package shares.
 	pool, _, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
 	defer dbCleanup()
 

@@ -26,24 +26,19 @@ type LocalStackConfig struct {
 }
 
 // S3TestBucketName builds a bucket name unique to the calling test, for suites
-// that share one LocalStack container and so cannot share a bucket. Bucket names
-// allow only lowercase letters, digits, hyphens and dots, must not end in a
-// hyphen, and cap at 63 characters, which is what this fixes up.
+// that share one LocalStack container and so cannot share a bucket.
 func S3TestBucketName(t *testing.T, prefix string) string {
 	t.Helper()
 
 	name := prefix + strings.ReplaceAll(SanitizeTestName(t.Name()), "_", "-")
 	if len(name) > 63 {
 		// Plain truncation would put two sibling subtests sharing a 63-character
-		// prefix on one bucket, and these suites assert object counts — the exact
-		// cross-talk a per-test bucket exists to prevent. Keep the readable head
-		// and spend the tail on a digest of the full name.
+		// prefix on one bucket, so spend the tail on a digest of the full name.
 		sum := sha256.Sum256([]byte(name))
 		name = name[:55] + hex.EncodeToString(sum[:4])
 	}
-	// TrimRight, not TrimSuffix: truncation can land mid-run of separators (a
-	// subtest name with two adjacent non-alphanumerics yields "--"), and S3
-	// rejects a name that does not end in a letter or digit.
+	// TrimRight, not TrimSuffix: truncation can land mid-run of separators, and
+	// S3 rejects a name that does not end in a letter or digit.
 	return strings.TrimRight(name, "-.")
 }
 
