@@ -542,8 +542,10 @@ data:
   # caller fails fast instead of holding a worker for SQLAlchemy's unset 30s and
   # dragging down endpoints that never touch this pool. VEC-532 bounds the fan-out
   # itself.
-  DB_POOL_SIZE: "10"
-  DB_MAX_OVERFLOW: "20"
+  # Held at 5 + 10 to match prod, where 10 + 20 exhausted the TigerData primary
+  # on 2026-08-13; staging runs the same image against the same ceiling.
+  DB_POOL_SIZE: "5"
+  DB_MAX_OVERFLOW: "10"
   DB_POOL_TIMEOUT: "10"
 ---
 apiVersion: v1
