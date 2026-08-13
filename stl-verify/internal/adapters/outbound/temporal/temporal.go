@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -188,8 +189,8 @@ func newBootstrap(
 	// it an early failure would leak the pool or the OTel exporter goroutines.
 	var opened []func()
 	unwind := func() {
-		for i := len(opened) - 1; i >= 0; i-- {
-			opened[i]()
+		for _, v := range slices.Backward(opened) {
+			v()
 		}
 	}
 
@@ -242,8 +243,8 @@ func (b *bootstrap) dependencies() Dependencies {
 
 // close releases everything newBootstrap opened, in reverse order.
 func (b *bootstrap) close() {
-	for i := len(b.opened) - 1; i >= 0; i-- {
-		b.opened[i]()
+	for _, v := range slices.Backward(b.opened) {
+		v()
 	}
 }
 

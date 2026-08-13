@@ -91,7 +91,7 @@ make cover              # Generate coverage report
 go test -race -run 'TestName' ./internal/services/<pkg>/   # single test
 
 # CI (runs all checks)
-make ci                 # test-race, vet, fmt-check, tidy-check, staticcheck, vulncheck, golangci-lint
+make ci                 # test-race, fmt-check, tidy-check, golangci-lint (incl. vet/staticcheck), vulncheck
 
 # Formatting & linting (all languages, run from stl-verify/)
 make install-hooks      # Install lefthook git pre-commit hooks (auto-runs on dev-up)
@@ -113,7 +113,7 @@ See [Makefile](Makefile) for the complete list of targets.
 
 - Pre-commit hooks: gofmt, goimports (staged files only)
 - Pre-push hooks: go vet (full module)
-- CI (`go-ci.yml` → `make ci-checks && make test-race`): vet, staticcheck, golangci-lint, vulncheck, tidy — **source of truth**
+- CI (`go-ci.yml`): fmt/imports/tidy checks + golangci-lint v2 (covers go vet, staticcheck, and go fix's modernizers — config in `.golangci.yml`) + vulncheck — **source of truth**
 - Install tools with `make tools`. Don't bypass hooks.
 
 ## Code Conventions

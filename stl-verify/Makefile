@@ -252,15 +252,17 @@ e2e:
 tools:
 	@echo "==> Installing development tools..."
 	go install honnef.co/go/tools/cmd/staticcheck@latest
-	go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
 	go install golang.org/x/vuln/cmd/govulncheck@latest
 	go install golang.org/x/tools/cmd/goimports@latest
 	go install github.com/go-delve/delve/cmd/dlv@latest
 	go install golang.org/x/tools/gopls@latest
 	go install github.com/evilmartians/lefthook@latest
 
-# CI target for lint/format/static/security checks
-ci-checks: fix-check fmt-check goimports-check tidy-check vet staticcheck golangci-lint vulncheck
+# CI target for lint/format/static/security checks. go vet, staticcheck, and
+# go fix -diff are covered by golangci-lint v2 (govet, staticcheck, modernize
+# linters — see .golangci.yml); running them separately tripled analysis time.
+ci-checks: fmt-check goimports-check tidy-check golangci-lint vulncheck
 
 # CI target: everything with strict checks
 # Order: fast checks first (fail fast), then expensive checks

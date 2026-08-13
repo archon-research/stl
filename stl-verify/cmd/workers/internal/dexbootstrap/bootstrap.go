@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -74,8 +75,8 @@ type Deps struct {
 // Close releases every resource in reverse-registration order. Safe to call
 // on a partially-initialised Deps from a Bootstrap error path.
 func (d *Deps) Close() {
-	for i := len(d.cleanups) - 1; i >= 0; i-- {
-		d.cleanups[i]()
+	for _, v := range slices.Backward(d.cleanups) {
+		v()
 	}
 }
 
