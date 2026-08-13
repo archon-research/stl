@@ -1,11 +1,11 @@
 import pytest
 from sqlalchemy.pool import QueuePool
 
-from app.adapters.postgres.engine import get_engine
+from app.adapters.postgres.engine import create_db_engine
 from app.config import Settings
 
 
-def test_get_engine_sizes_the_connection_pool_from_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_create_db_engine_sizes_the_connection_pool_from_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     """The pool ceiling decides how far a replica gets before callers queue.
 
     A prime-scoped risk-capital request opens connections concurrently in
@@ -19,7 +19,7 @@ def test_get_engine_sizes_the_connection_pool_from_settings(monkeypatch: pytest.
     monkeypatch.setenv("DB_MAX_OVERFLOW", "13")
     settings = Settings.model_validate({})
 
-    engine = get_engine(settings)
+    engine = create_db_engine(settings)
 
     # engine.pool is typed as the Pool base class; the sizing accessors live on
     # QueuePool, which the async engine's AsyncAdaptedQueuePool subclasses.
@@ -30,7 +30,7 @@ def test_get_engine_sizes_the_connection_pool_from_settings(monkeypatch: pytest.
     assert pool._max_overflow == 13
 
 
-def test_get_engine_bounds_how_long_a_caller_queues_for_a_connection(
+def test_create_db_engine_bounds_how_long_a_caller_queues_for_a_connection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Exhaustion has to fail fast rather than stall a worker for 30s.
@@ -44,7 +44,7 @@ def test_get_engine_bounds_how_long_a_caller_queues_for_a_connection(
     monkeypatch.setenv("DB_POOL_TIMEOUT", "3")
     settings = Settings.model_validate({})
 
-    engine = get_engine(settings)
+    engine = create_db_engine(settings)
 
     pool = engine.pool
     assert isinstance(pool, QueuePool)
