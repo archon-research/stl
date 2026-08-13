@@ -20,6 +20,14 @@ type ReorgRecorder interface {
 	// track stale-fork broadcasts, RPC errors during verification, and TOCTOU
 	// races between live ingestion and concurrent writers (VEC-202).
 	RecordReorgDropped(ctx context.Context, reason string)
+
+	// RecordOutOfOrderBlock records that a block arrived with a number at or
+	// below the current canonical head (out-of-order / late delivery from
+	// upstream). The outcome label (OutOfOrderOutcome*) says how it was
+	// classified. This is the direct diagnostic for the VEC-277 trigger:
+	// a sustained nonzero rate means upstream is delivering headers out of
+	// order, which under load misclassifies as reorgs and over-orphans.
+	RecordOutOfOrderBlock(ctx context.Context, outcome string)
 }
 
 // Reason constants for ReorgRecorder.RecordReorgDropped. Stable label values
@@ -41,6 +49,41 @@ const (
 	ReorgDropReasonStateShifted = "state_shifted"
 )
 
+// Outcome labels for RecordOutOfOrderBlock. An out-of-order block is one whose
+// number is at or below the current canonical head (it arrived after a higher
+// block). The outcome distinguishes the benign late-arrival fill from a genuine
+// reorg. A spike in either is the direct signal of out-of-order delivery from
+// upstream (the VEC-277 trigger).
+const (
+	// OutOfOrderOutcomeLateArrival: the low block links cleanly onto the
+	// canonical chain and no competing block holds its height, so it is saved
+	// as a gap fill rather than treated as a reorg.
+	OutOfOrderOutcomeLateArrival = "late_arrival"
+
+	// OutOfOrderOutcomeReorg: the low block conflicts (a different canonical
+	// block holds its height, or it does not link onto our chain), so it is
+	// routed through reorg handling.
+	OutOfOrderOutcomeReorg = "reorg"
+)
+
+// BackfillRecorder records observability events from the backfill gap-fill
+// loop. The single hook today is RecordBackfillGapNoCanonical, fired by the
+// post-cycle invariant check that catches "gap-fill returned success but no
+// canonical row exists" (the silent-failure mode behind VEC-277 arbitrum
+// backfill).
+type BackfillRecorder interface {
+	// RecordBackfillGapNoCanonical increments the counter that fires when a
+	// per-block gap-fill cycle completes without producing a non-orphaned
+	// canonical row. Labelled by chain.
+	RecordBackfillGapNoCanonical(ctx context.Context, chainID int64)
+
+	// RecordWatermarkLag records the current backfill lag (highest known block
+	// minus the backfill watermark) as a gauge. Sustained or growing lag is the
+	// direct symptom that surfaced 26 days late in the VEC-277 incident: the
+	// watermark stayed pinned while head advanced.
+	RecordWatermarkLag(ctx context.Context, lag int64)
+}
+
 // BackupMetricsRecorder records metrics for backup processing.
 // Used by services that process messages from queues (e.g., raw_data_backup).
 type BackupMetricsRecorder interface {
@@ -50,3 +93,15 @@ type BackupMetricsRecorder interface {
 	// RecordBlockProcessed increments the blocks processed counter.
 	RecordBlockProcessed(ctx context.Context, status string)
 }
+
+// Canonical `status` label values for the two BackupMetricsRecorder methods,
+// shared so every emitter and the alerts that key on them (e.g. Vector's
+// blocks_processed_total{status="error"} rules) stay in lockstep instead of each
+// service inlining its own literal. StatusSuccess = the unit of work completed
+// without error (any due snapshots were persisted); StatusError = it failed and
+// will be retried. Services with a richer outcome vocabulary (e.g.
+// raw_data_backup's already_backed_up / rpc_fallback) define those locally.
+const (
+	StatusSuccess = "success"
+	StatusError   = "error"
+)

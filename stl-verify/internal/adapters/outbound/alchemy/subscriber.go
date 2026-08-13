@@ -5,6 +5,8 @@
 //     InitialBackoff, MaxBackoff, BackoffFactor)
 //   - Non-blocking sends to the headers channel; blocks are DROPPED if buffer is full
 //   - Ping/pong keepalive to detect stale connections (PongTimeout configurable)
+//   - Data-freshness watchdog: forces a reconnect if no headers arrive for
+//     HealthTimeout, even while ping/pong keepalive holds the socket open
 //   - Health checks via HealthCheck() to verify blocks are being received
 //   - Thread-safe: All public methods are safe for concurrent use
 //
@@ -17,13 +19,11 @@ package alchemy
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
-	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -31,6 +31,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/hexutil"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/proxytls"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -313,6 +314,13 @@ func (s *Subscriber) readLoop(logger *slog.Logger) error {
 	pingTicker := time.NewTicker(s.config.PingInterval)
 	defer pingTicker.Stop()
 
+	// dataWatchdog forces a reconnect when no newHeads arrive for HealthTimeout.
+	// ReadTimeout cannot catch this alone: the pong handler refreshes the read
+	// deadline on every pong, so a pong-alive connection delivering zero headers
+	// never trips it (VEC-388). Reset on each received header below.
+	dataWatchdog := time.NewTimer(s.config.HealthTimeout)
+	defer dataWatchdog.Stop()
+
 	readErr := make(chan error, 1)
 	blockChan := make(chan outbound.BlockHeader, 10)
 
@@ -388,7 +396,17 @@ func (s *Subscriber) readLoop(logger *slog.Logger) error {
 		case err := <-readErr:
 			s.closeConnection()
 			return fmt.Errorf("read error: %w", err)
+		case <-dataWatchdog.C:
+			logger.Warn("data-freshness watchdog: no newHeads within HealthTimeout, forcing reconnect", "timeout", s.config.HealthTimeout)
+			if s.telemetry != nil {
+				s.telemetry.RecordStall(s.ctx)
+			}
+			s.closeConnection()
+			return fmt.Errorf("no newHeads received for %v, forcing reconnect", s.config.HealthTimeout)
 		case header := <-blockChan:
+			// A header off the wire means the subscription is delivering, so
+			// reset the freshness watchdog whether we forward or drop it.
+			dataWatchdog.Reset(s.config.HealthTimeout)
 			blockNum, err := hexutil.ParseInt64(header.Number)
 			if err != nil {
 				logger.Error("failed to parse block number, ignoring block", "raw", header.Number, "hash", header.Hash, "error", err)
@@ -507,28 +525,8 @@ func (s *Subscriber) HealthCheck(ctx context.Context) error {
 }
 
 // proxyTLSConfig returns a TLS config that trusts an additional CA certificate
-// specified by the SSL_CERT_FILE environment variable.
-//
-// This is needed for local development behind a TLS-intercepting proxy (e.g.
-// Zscaler, corporate firewall). Such proxies terminate the TLS connection to
-// Alchemy's WebSocket endpoint and re-sign it with their own CA. Without adding
-// that CA to the trust pool, the dialer rejects the proxy's certificate.
-//
-// In production (ECS Fargate) SSL_CERT_FILE is not set, so this returns nil and
-// the dialer uses Go's default system cert pool — no behaviour change.
+// specified by the SSL_CERT_FILE environment variable, for local development
+// behind a TLS-intercepting proxy. See package proxytls for the rationale.
 func proxyTLSConfig() *tls.Config {
-	certFile := os.Getenv("SSL_CERT_FILE")
-	if certFile == "" {
-		return nil
-	}
-	pem, err := os.ReadFile(certFile)
-	if err != nil {
-		return nil
-	}
-	pool, err := x509.SystemCertPool()
-	if err != nil {
-		pool = x509.NewCertPool()
-	}
-	pool.AppendCertsFromPEM(pem)
-	return &tls.Config{RootCAs: pool} //nolint:gosec // only adds extra CA
+	return proxytls.Config()
 }

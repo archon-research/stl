@@ -25,14 +25,22 @@ var quoteCurrencyTokenAddr = map[string]common.Address{
 
 // OracleUnit holds everything needed to fetch prices for one oracle.
 type OracleUnit struct {
-	Oracle      *entity.Oracle
-	OracleID    int16
-	OracleAddr  common.Address
-	TokenAddrs  []common.Address        // for aave_oracle: ordered list of token addresses
-	TokenIDs    []int64                 // parallel to TokenAddrs (aave) or Feeds (chainlink_feed)
+	Oracle     *entity.Oracle
+	OracleID   int16
+	OracleAddr common.Address
+	TokenAddrs []common.Address // for aave_oracle: ordered list of token addresses
+	// TokenIDs lists the priced tokens: parallel to TokenAddrs (aave), Feeds
+	// (feed oracles), or ERC4626Vaults (erc4626_share). For curve_lp_ng it is
+	// a single element, the LP token, deliberately NOT parallel to
+	// CurveLPNGPool.CoinFeeds: all coin feeds price that one LP token.
+	TokenIDs    []int64
 	Feeds       []blockchain.FeedConfig // for chainlink_feed: per-feed config
 	RefFeedIdx  map[string]int          // quote currency → index in Feeds[] for USD-denominated reference
 	NonUSDFeeds map[int]string          // feed index → quote currency for non-USD feeds
+
+	ERC4626Vaults []blockchain.ERC4626VaultConfig // for erc4626_share: per-vault config
+
+	CurveLPNGPool *blockchain.CurveLPNGPoolConfig // for curve_lp_ng: the one pool this oracle prices
 }
 
 // LoadOracleUnits loads all enabled oracles from DB, deduplicates by oracle ID,
@@ -69,6 +77,25 @@ func LoadOracleUnits(ctx context.Context, repo outbound.OnchainPriceRepository, 
 	return units, nil
 }
 
+// ValidationFeeds returns the feed configs whose on-chain decimals() must be
+// checked against the registry for the unit's oracle type, and whether the
+// type has any. Single source of truth for the live worker and the backfiller:
+// callers silently skip types with no feeds, so per-service copies of this
+// selection would let a new oracle type validate in one service and silently
+// go unvalidated in the other.
+func ValidationFeeds(unit *OracleUnit) ([]blockchain.FeedConfig, bool) {
+	switch {
+	case unit.Oracle.OracleType.IsERC4626Oracle():
+		return blockchain.ERC4626UnderlyingFeeds(unit.ERC4626Vaults), true
+	case unit.Oracle.OracleType.IsCurveLPNGOracle():
+		return unit.CurveLPNGPool.CoinFeeds, true
+	case unit.Oracle.OracleType.IsFeedOracle():
+		return unit.Feeds, true
+	default:
+		return nil, false
+	}
+}
+
 // ConvertNonUSDPrices converts non-USD feed prices to USD using reference feeds.
 // Returns a new slice with converted prices. Feeds without available reference
 // prices are marked as failed in the returned slice.
@@ -102,9 +129,14 @@ func buildOracleUnit(ctx context.Context, repo outbound.OnchainPriceRepository, 
 		unit *OracleUnit
 		err  error
 	)
-	if oracle.OracleType.IsFeedOracle() {
+	switch {
+	case oracle.OracleType.IsFeedOracle():
 		unit, err = buildFeedUnit(ctx, repo, oracle)
-	} else {
+	case oracle.OracleType.IsERC4626Oracle():
+		unit, err = buildERC4626Unit(ctx, repo, oracle)
+	case oracle.OracleType.IsCurveLPNGOracle():
+		unit, err = buildCurveLPNGUnit(ctx, repo, oracle)
+	default:
 		unit, err = buildAaveUnit(ctx, repo, oracle)
 	}
 	if err != nil {
@@ -128,19 +160,19 @@ func buildAaveUnit(ctx context.Context, repo outbound.OnchainPriceRepository, or
 		return nil, nil
 	}
 
-	tokenAddrBytes, err := repo.GetTokenAddresses(ctx, oracle.ID)
+	tokenInfos, err := repo.GetTokenInfos(ctx, oracle.ID)
 	if err != nil {
-		return nil, fmt.Errorf("getting token addresses: %w", err)
+		return nil, fmt.Errorf("getting token infos: %w", err)
 	}
 
 	tokenAddrs := make([]common.Address, len(assets))
 	tokenIDs := make([]int64, len(assets))
 	for i, asset := range assets {
-		addrBytes, ok := tokenAddrBytes[asset.TokenID]
+		info, ok := tokenInfos[asset.TokenID]
 		if !ok {
 			return nil, fmt.Errorf("token address not found for token_id %d", asset.TokenID)
 		}
-		tokenAddrs[i] = common.BytesToAddress(addrBytes)
+		tokenAddrs[i] = common.BytesToAddress(info.Address)
 		tokenIDs[i] = asset.TokenID
 	}
 
@@ -165,9 +197,9 @@ func buildFeedUnit(ctx context.Context, repo outbound.OnchainPriceRepository, or
 		return nil, nil
 	}
 
-	tokenAddrBytes, err := repo.GetTokenAddresses(ctx, oracle.ID)
+	tokenInfos, err := repo.GetTokenInfos(ctx, oracle.ID)
 	if err != nil {
-		return nil, fmt.Errorf("getting token addresses: %w", err)
+		return nil, fmt.Errorf("getting token infos: %w", err)
 	}
 
 	feeds := make([]blockchain.FeedConfig, len(assets))
@@ -192,7 +224,7 @@ func buildFeedUnit(ctx context.Context, repo outbound.OnchainPriceRepository, or
 		tokenIDs[i] = asset.TokenID
 	}
 
-	tokenAddrs := bytesToAddressMap(tokenAddrBytes)
+	tokenAddrs := tokenInfosToAddressMap(tokenInfos)
 	refFeedIdx, nonUSDFeeds := buildRefFeedIdx(feeds, tokenAddrs)
 
 	if err := validateRefFeeds(nonUSDFeeds, refFeedIdx, oracle.Name); err != nil {
@@ -205,6 +237,135 @@ func buildFeedUnit(ctx context.Context, repo outbound.OnchainPriceRepository, or
 		Feeds:       feeds,
 		RefFeedIdx:  refFeedIdx,
 		NonUSDFeeds: nonUSDFeeds,
+	}, nil
+}
+
+// buildERC4626Unit builds a unit that prices ERC-4626 vault shares. Each enabled
+// asset is a vault token whose USD price is convertToAssets(1 share) in underlying
+// units times the underlying token's USD feed (carried on the asset's feed_address).
+// Underlying decimals equal the vault's share decimals for the peg vaults this
+// oracle type covers (e.g. fsUSDS 18 ⇄ USDS 18), so the single token-decimals value
+// scales both the convertToAssets input and its output.
+func buildERC4626Unit(ctx context.Context, repo outbound.OnchainPriceRepository, oracle *entity.Oracle) (*OracleUnit, error) {
+	assets, err := repo.GetEnabledAssets(ctx, oracle.ID)
+	if err != nil {
+		return nil, fmt.Errorf("getting enabled assets: %w", err)
+	}
+	if len(assets) == 0 {
+		return nil, nil
+	}
+
+	tokenInfos, err := repo.GetTokenInfos(ctx, oracle.ID)
+	if err != nil {
+		return nil, fmt.Errorf("getting token infos: %w", err)
+	}
+
+	vaults := make([]blockchain.ERC4626VaultConfig, len(assets))
+	tokenIDs := make([]int64, len(assets))
+	for i, asset := range assets {
+		info, ok := tokenInfos[asset.TokenID]
+		if !ok {
+			return nil, fmt.Errorf("token address not found for token_id %d", asset.TokenID)
+		}
+		decimals := info.Decimals
+		if decimals == 0 {
+			return nil, fmt.Errorf("token decimals not found for token_id %d", asset.TokenID)
+		}
+		if asset.FeedAddress == (common.Address{}) {
+			return nil, fmt.Errorf("underlying feed address missing for token_id %d", asset.TokenID)
+		}
+		if asset.FeedDecimals <= 0 {
+			return nil, fmt.Errorf("invalid underlying feed decimals for token_id %d: %d", asset.TokenID, asset.FeedDecimals)
+		}
+		if asset.QuoteCurrency != entity.QuoteCurrencyUSD {
+			return nil, fmt.Errorf("erc4626 underlying feed for token_id %d must be USD-denominated, got %q", asset.TokenID, asset.QuoteCurrency)
+		}
+
+		vaults[i] = blockchain.ERC4626VaultConfig{
+			TokenID:            asset.TokenID,
+			VaultAddress:       common.BytesToAddress(info.Address),
+			ShareDecimals:      decimals,
+			UnderlyingFeed:     asset.FeedAddress,
+			UnderlyingDecimals: decimals,
+			FeedDecimals:       asset.FeedDecimals,
+		}
+		tokenIDs[i] = asset.TokenID
+	}
+
+	return &OracleUnit{
+		Oracle:        oracle,
+		TokenIDs:      tokenIDs,
+		ERC4626Vaults: vaults,
+	}, nil
+}
+
+// buildCurveLPNGUnit builds a unit that prices a Curve StableSwap-NG pool's LP
+// token. The registry shape is one oracle row per pool (oracle.Address is the
+// pool, which is also the LP ERC-20) plus one oracle_asset row per pool coin,
+// all carrying the same LP token_id and each coin's USD feed in
+// feed_address/feed_decimals. Every shape violation is an error here rather
+// than at fetch time, so a malformed registry fails the worker at startup
+// instead of poison-stalling block processing.
+func buildCurveLPNGUnit(ctx context.Context, repo outbound.OnchainPriceRepository, oracle *entity.Oracle) (*OracleUnit, error) {
+	assets, err := repo.GetEnabledAssets(ctx, oracle.ID)
+	if err != nil {
+		return nil, fmt.Errorf("getting enabled assets: %w", err)
+	}
+	if len(assets) == 0 {
+		return nil, nil
+	}
+
+	if oracle.Address == (common.Address{}) {
+		return nil, fmt.Errorf("curve_lp_ng oracle %q: oracle address (the pool) is required", oracle.Name)
+	}
+	if len(assets) < 2 {
+		return nil, fmt.Errorf("curve_lp_ng oracle %q: needs at least 2 coin feeds for the min() price guard, got %d", oracle.Name, len(assets))
+	}
+
+	lpTokenID := assets[0].TokenID
+	feeds := make([]blockchain.FeedConfig, len(assets))
+	for i, asset := range assets {
+		if asset.TokenID != lpTokenID {
+			return nil, fmt.Errorf("curve_lp_ng oracle %q: all assets must share the same LP token, got token_ids %d and %d", oracle.Name, lpTokenID, asset.TokenID)
+		}
+		if asset.FeedAddress == (common.Address{}) {
+			return nil, fmt.Errorf("curve_lp_ng oracle %q: coin feed address missing on asset %d", oracle.Name, asset.ID)
+		}
+		if asset.FeedDecimals <= 0 {
+			return nil, fmt.Errorf("curve_lp_ng oracle %q: invalid coin feed decimals on asset %d: %d", oracle.Name, asset.ID, asset.FeedDecimals)
+		}
+		if asset.QuoteCurrency != entity.QuoteCurrencyUSD {
+			return nil, fmt.Errorf("curve_lp_ng oracle %q: coin feed on asset %d must be USD-denominated, got %q", oracle.Name, asset.ID, asset.QuoteCurrency)
+		}
+		feeds[i] = blockchain.FeedConfig{
+			TokenID:       lpTokenID,
+			FeedAddress:   asset.FeedAddress,
+			FeedDecimals:  asset.FeedDecimals,
+			QuoteCurrency: string(asset.QuoteCurrency),
+		}
+	}
+
+	tokenInfos, err := repo.GetTokenInfos(ctx, oracle.ID)
+	if err != nil {
+		return nil, fmt.Errorf("getting token infos: %w", err)
+	}
+	info, ok := tokenInfos[lpTokenID]
+	if !ok {
+		return nil, fmt.Errorf("token address not found for token_id %d", lpTokenID)
+	}
+	if lpAddr := common.BytesToAddress(info.Address); lpAddr != oracle.Address {
+		return nil, fmt.Errorf("curve_lp_ng oracle %q: LP token %d address %s must equal the pool address %s (NG pools are their own LP ERC-20)",
+			oracle.Name, lpTokenID, lpAddr.Hex(), oracle.Address.Hex())
+	}
+
+	return &OracleUnit{
+		Oracle:   oracle,
+		TokenIDs: []int64{lpTokenID},
+		CurveLPNGPool: &blockchain.CurveLPNGPoolConfig{
+			TokenID:     lpTokenID,
+			PoolAddress: oracle.Address,
+			CoinFeeds:   feeds,
+		},
 	}, nil
 }
 
@@ -262,10 +423,10 @@ func buildRefFeedIdx(feeds []blockchain.FeedConfig, tokenAddrs map[int64]common.
 	return refFeedIdx, nonUSDFeeds
 }
 
-func bytesToAddressMap(raw map[int64][]byte) map[int64]common.Address {
-	out := make(map[int64]common.Address, len(raw))
-	for id, b := range raw {
-		out[id] = common.BytesToAddress(b)
+func tokenInfosToAddressMap(infos map[int64]outbound.TokenInfo) map[int64]common.Address {
+	out := make(map[int64]common.Address, len(infos))
+	for id, info := range infos {
+		out[id] = common.BytesToAddress(info.Address)
 	}
 	return out
 }

@@ -331,6 +331,48 @@ func TestParseConfig(t *testing.T) {
 				chainID:           1,
 			},
 		},
+		{
+			name: "SWEEP_BLOCKS env override",
+			args: []string{
+				"-queue", "https://sqs.us-east-1.amazonaws.com/123/q",
+				"-db", "postgres://localhost/db",
+				"-redis", "localhost:6379",
+			},
+			envVars: map[string]string{
+				"ALCHEMY_API_KEY": "test-key",
+				"S3_BUCKET":       "stl-sentinelstaging-ethereum-raw",
+				"DEPLOY_ENV":      "staging",
+				"SWEEP_BLOCKS":    "150",
+			},
+			wantCfg: cliConfig{
+				queueURL:          "https://sqs.us-east-1.amazonaws.com/123/q",
+				dbURL:             "postgres://localhost/db",
+				redisAddr:         "localhost:6379",
+				alchemyURL:        "https://eth-mainnet.g.alchemy.com/v2/test-key",
+				s3Bucket:          "stl-sentinelstaging-ethereum-raw",
+				deployEnv:         "staging",
+				maxMessages:       10,
+				waitTime:          20,
+				visibilityTimeout: 300,
+				sweepBlocks:       150,
+				chainID:           1,
+			},
+		},
+		{
+			name: "invalid SWEEP_BLOCKS",
+			args: []string{
+				"-queue", "https://sqs.us-east-1.amazonaws.com/123/q",
+				"-db", "postgres://localhost/db",
+				"-redis", "localhost:6379",
+			},
+			envVars: map[string]string{
+				"ALCHEMY_API_KEY": "test-key",
+				"S3_BUCKET":       "stl-sentinelstaging-ethereum-raw",
+				"DEPLOY_ENV":      "staging",
+				"SWEEP_BLOCKS":    "abc",
+			},
+			wantError: "parsing SWEEP_BLOCKS",
+		},
 	}
 
 	for _, tt := range tests {
@@ -339,7 +381,7 @@ func TestParseConfig(t *testing.T) {
 			for _, key := range []string{
 				"ALCHEMY_API_KEY", "ALCHEMY_HTTP_URL", "AWS_SQS_QUEUE_URL",
 				"DATABASE_URL", "REDIS_ADDR", "CHAIN_ID",
-				"SQS_WAIT_TIME", "SQS_VISIBILITY_TIMEOUT",
+				"SQS_WAIT_TIME", "SQS_VISIBILITY_TIMEOUT", "SWEEP_BLOCKS",
 				"S3_BUCKET", "DEPLOY_ENV",
 			} {
 				if _, has := tt.envVars[key]; !has {

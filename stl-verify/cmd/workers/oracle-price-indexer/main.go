@@ -27,6 +27,7 @@ import (
 	sqsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving/archivingwire"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
@@ -191,7 +192,7 @@ func run(ctx context.Context, args []string) error {
 	defer ethClient.Close()
 	logger.Info("Ethereum node connected")
 
-	pool, err := postgres.OpenPool(ctx, postgres.DefaultDBConfig(cfg.dbURL))
+	pool, err := postgres.OpenPool(ctx, postgres.WorkerDBConfig(cfg.dbURL))
 	if err != nil {
 		return fmt.Errorf("connecting to database: %w", err)
 	}
@@ -216,10 +217,29 @@ func run(ctx context.Context, args []string) error {
 	defer shutdownOTEL(context.Background())
 
 	// Service telemetry
-	oracleTelemetry, err := oracle_price_worker.NewTelemetry()
+	chainName, err := entity.ChainName(cfg.chainID)
+	if err != nil {
+		return fmt.Errorf("resolving chain name for metrics: %w", err)
+	}
+	mcTel, err := multicall.NewTelemetry(chainName)
+	if err != nil {
+		return fmt.Errorf("multicall telemetry: %w", err)
+	}
+	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3, multicall.WithTelemetry(mcTel))
+	if err != nil {
+		return fmt.Errorf("creating multicall client: %w", err)
+	}
+	oracleTelemetry, err := oracle_price_worker.NewTelemetry(chainName)
 	if err != nil {
 		return fmt.Errorf("creating oracle telemetry: %w", err)
 	}
+
+	// Optional raw SC call archiving (VEC-81). Off unless ARCHIVE_SC_CALLS=true.
+	archiveWrap, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "oracle-price")
+	if err != nil {
+		return err
+	}
+	defer archiveDrain()
 
 	repo, err := postgres.NewOnchainPriceRepository(pool, logger, buildReg.BuildID(), 0)
 	if err != nil {
@@ -235,10 +255,16 @@ func run(ctx context.Context, args []string) error {
 		cacheReader,
 		repo,
 		func(oracleType entity.OracleType) (outbound.Multicaller, error) {
-			if oracleType == entity.OracleTypeChronicle {
-				return multicall.NewDirectCaller(ethClient.Client())
+			if oracleType.RequiresDirectCall() {
+				// Direct path carries no multicall.batch.size telemetry by design.
+				direct, err := multicall.NewDirectCaller(ethClient.Client())
+				if err != nil {
+					return nil, err
+				}
+				return archiveWrap(direct), nil
 			}
-			return multicall.NewClient(ethClient, blockchain.Multicall3)
+			// mc is the telemetry-instrumented client built once at startup.
+			return archiveWrap(mc), nil
 		},
 	)
 	if err != nil {

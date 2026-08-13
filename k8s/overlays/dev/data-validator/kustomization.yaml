@@ -1,0 +1,23 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Opt-in dev cron, kept out of the core overlay (like ./workers). The
+# watcher-data-validator verifies stored blocks against real Etherscan
+# (api.etherscan.io), which only makes sense against real chain data — on the
+# default mock blockchain server every spot check is a guaranteed hash
+# mismatch. Deploy it only when developing the validator itself, with real
+# chain data and an ETHERSCAN_API_KEY:
+#   make kind-use-alchemy          # point the watcher at real Alchemy
+#   make kind-secrets && make kind-deploy-data-validator
+namespace: vector
+
+resources:
+  - ../../../base/watcher-data-validator
+
+components:
+  - ../components/runtime
+
+images:
+  - name: watcher-data-validator
+    newName: localhost/stl-watcher-data-validator
+    newTag: local

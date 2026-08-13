@@ -18,12 +18,12 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Set up Node.js
-        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: '.node-version'
           cache: npm
@@ -50,12 +50,12 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Set up Node.js
-        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: '.node-version'
           cache: npm
@@ -63,6 +63,33 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Panda codegen
+        run: npm run prepare -w ui
+
+      - name: Design-system doctor
+        run: npm run doctor
+
+      # Both scripts run after codegen, not before: each loads
+      # src/lib/dashboard.ts through vite, so the day that import graph reaches
+      # #styled-system/* they would fail as though their assertions had.
+      - name: Run prime grouping regression test
+        run: npm run test:prime-grouping -w ui
+
+      - name: Run explorer URL regression test
+        run: npm run test:explorers -w ui
+
+      # The committed types are what every call site is checked against, so a
+      # schema change without a regeneration leaves the UI compiling happily
+      # against an API that no longer exists. python-ci gates the schema against
+      # the response models; this gates the types against the schema.
+      - name: Generated API types are in sync with the OpenAPI schema
+        run: |
+          npm run generate:openapi-types -w ui
+          if ! git diff --exit-code -- ui/src/generated/openapi-types.ts; then
+            echo "::error::openapi-types.ts is stale — run 'npm run generate:openapi-types -w ui' in stl-verify/ts and commit the result"
+            exit 1
+          fi
 
       - name: Typecheck workspace
         run: npm run type:check

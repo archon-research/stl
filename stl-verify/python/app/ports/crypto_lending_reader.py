@@ -1,3 +1,4 @@
+from collections.abc import Mapping, Sequence
 from decimal import Decimal
 from typing import Protocol
 
@@ -18,8 +19,27 @@ class CryptoLendingReader(Protocol):
         """Return receipt-token routing metadata, or ``None`` if unknown."""
         ...
 
+    def requires_liquidation_enrichment(self, info: ReceiptTokenInfo) -> bool:
+        """Return whether this protocol's breakdown needs per-asset liquidation params.
+
+        ``True`` for protocols with a quantitative risk model (Aave-like, Morpho):
+        their items are enriched with per-asset liquidation params. ``False`` for
+        protocols whose breakdown is already pool-level, USD-valued and symbol-keyed
+        (e.g. Maple Syrup), which carry no liquidation params. Prime-share scaling is
+        orthogonal: both branches scale by ``get_share`` when a ``prime_id`` is given.
+        """
+        ...
+
     async def get_breakdown(self, info: ReceiptTokenInfo) -> BackedBreakdown:
         """Return the resolved backed breakdown for the receipt token's protocol."""
+        ...
+
+    async def batch_get_breakdowns(self, infos: Sequence[ReceiptTokenInfo]) -> dict[int, BackedBreakdown]:
+        """Return backed breakdowns for many receipt tokens, keyed by receipt_token_id.
+
+        Batches the protocol-wide work (one query per aave-like protocol) instead
+        of one query per receipt token.
+        """
         ...
 
     async def get_liquidation_params(
@@ -33,6 +53,23 @@ class CryptoLendingReader(Protocol):
 
     async def get_share(self, info: ReceiptTokenInfo, prime_id: EthAddress) -> Decimal:
         """Return the prime's share of the receipt-token supply."""
+        ...
+
+    async def batch_get_shares(
+        self,
+        infos: Sequence[ReceiptTokenInfo],
+        prime_id: EthAddress,
+    ) -> Mapping[int, Decimal | Exception]:
+        """Resolve shares for many receipt tokens in a single round-trip.
+
+        Returns a mapping keyed by ``receipt_token_id``. Per-asset failures
+        (``MissingShareError``/``StaleShareError``/``ValueError``) are returned
+        as **values** rather than raised, so a single bad asset does not poison
+        the whole batch. Driver-level / unexpected exceptions still propagate.
+
+        Callers that want the eager-raise semantics of ``get_share`` should
+        check ``isinstance(result, Exception)`` and re-raise.
+        """
         ...
 
     async def get_legacy_share(self, info: ReceiptTokenInfo) -> Decimal:

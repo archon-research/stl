@@ -1,4 +1,4 @@
-from app.services.data_provenance_service import DataProvenanceService
+from app.services.data_provenance_service import DataProvenanceService, SourceAccessModel
 
 
 def test_get_sources_returns_copy_not_internal_list() -> None:
@@ -40,3 +40,16 @@ def test_required_sources_exist() -> None:
         and s.host == "https://info.skyeco.com/required-risk-capital"
         for s in sources
     )
+    # The dashboard's risk-capital figures are self-computed on-chain.
+    assert any(s.name == "Self-computed Risk Capital (gap_sweep)" for s in sources)
+
+
+def test_anchorage_custody_source_registered_as_closed_offchain() -> None:
+    service = DataProvenanceService()
+
+    source = next((s for s in service.get_sources() if s.name == "Anchorage Custody API"), None)
+
+    assert source is not None
+    assert source.access_model is SourceAccessModel.CLOSED
+    assert "custody" in source.role.lower()
+    assert source.caveat is not None and "15" in source.caveat

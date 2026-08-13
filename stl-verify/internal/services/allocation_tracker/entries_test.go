@@ -3,6 +3,7 @@ package allocation_tracker
 import (
 	"testing"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/axis_synome_contract"
 	"github.com/ethereum/go-ethereum/common"
 )
 
@@ -50,14 +51,14 @@ func TestBuildEntryLookup_DuplicateOverwrites(t *testing.T) {
 }
 
 func TestDefaultTokenEntries_NotEmpty(t *testing.T) {
-	entries := DefaultTokenEntries()
+	entries := defaultEntries(t)
 	if len(entries) == 0 {
 		t.Fatal("DefaultTokenEntries should not be empty")
 	}
 }
 
 func TestDefaultTokenEntries_AllHaveRequiredFields(t *testing.T) {
-	entries := DefaultTokenEntries()
+	entries := defaultEntries(t)
 	zero := common.Address{}
 
 	for i, e := range entries {
@@ -80,22 +81,96 @@ func TestDefaultTokenEntries_AllHaveRequiredFields(t *testing.T) {
 }
 
 func TestDefaultTokenEntries_NoDuplicateKeys(t *testing.T) {
-	entries := DefaultTokenEntries()
-	seen := make(map[EntryKey]int)
+	entries := defaultEntries(t)
+	seen := make(map[struct {
+		Chain string
+		EntryKey
+	}]int)
 
 	for i, e := range entries {
-		key := e.Key()
+		key := struct {
+			Chain string
+			EntryKey
+		}{Chain: e.Chain, EntryKey: e.Key()}
 		if prev, ok := seen[key]; ok {
-			t.Errorf("duplicate key at entry %d and %d: contract=%s wallet=%s",
-				prev, i, e.ContractAddress.Hex(), e.WalletAddress.Hex())
+			t.Errorf("duplicate key at entry %d and %d: contract=%s wallet=%s chain=%s",
+				prev, i, e.ContractAddress.Hex(), e.WalletAddress.Hex(), e.Chain)
 		}
 		seen[key] = i
 	}
 }
 
+func TestContractTokenEntryToAllocationEntry_NormalizesProtocol(t *testing.T) {
+	tests := []struct {
+		name     string
+		contract axis_synome_contract.TokenEntry
+		want     string
+	}{
+		{
+			name: "aave family collapses to aave",
+			contract: axis_synome_contract.TokenEntry{
+				ContractAddress: "0x0000000000000000000000000000000000000001",
+				WalletAddress:   "0x0000000000000000000000000000000000000002",
+				Chain:           "mainnet",
+				Protocol:        "aave-prime",
+			},
+			want: "aave",
+		},
+		{
+			name: "sparklend protocol keeps legacy name",
+			contract: axis_synome_contract.TokenEntry{
+				ContractAddress: "0x0000000000000000000000000000000000000001",
+				WalletAddress:   "0x0000000000000000000000000000000000000002",
+				Chain:           "mainnet",
+				Protocol:        "sparklend-protocol",
+			},
+			want: "sparklend",
+		},
+		{
+			name: "steakhouse vault keeps legacy name",
+			contract: axis_synome_contract.TokenEntry{
+				ContractAddress: "0x0000000000000000000000000000000000000001",
+				WalletAddress:   "0x0000000000000000000000000000000000000002",
+				Chain:           "mainnet",
+				Protocol:        "grove-x-steakhouse-ausd-morpho-vault",
+			},
+			want: "steakhouse",
+		},
+		{
+			name: "mainnet spark savings stays sky",
+			contract: axis_synome_contract.TokenEntry{
+				ContractAddress: "0x0000000000000000000000000000000000000001",
+				WalletAddress:   "0x0000000000000000000000000000000000000002",
+				Chain:           "mainnet",
+				Protocol:        "spark-savings-protocol",
+			},
+			want: "sky",
+		},
+		{
+			name: "avalanche spark savings keeps spark",
+			contract: axis_synome_contract.TokenEntry{
+				ContractAddress: "0x0000000000000000000000000000000000000001",
+				WalletAddress:   "0x0000000000000000000000000000000000000002",
+				Chain:           "avalanche-c",
+				Protocol:        "spark-savings-protocol",
+			},
+			want: "spark",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := contractTokenEntryToAllocationEntry("spark", &tt.contract)
+			if got.Protocol != tt.want {
+				t.Fatalf("Protocol = %q, want %q", got.Protocol, tt.want)
+			}
+		})
+	}
+}
+
 func TestDefaultTokenEntries_StarsAreValid(t *testing.T) {
 	validStars := map[string]bool{"spark": true, "grove": true}
-	entries := DefaultTokenEntries()
+	entries := defaultEntries(t)
 	for _, e := range entries {
 		if !validStars[e.Star] {
 			t.Errorf("entry %s has invalid star %q", e.ContractAddress.Hex(), e.Star)
@@ -104,21 +179,21 @@ func TestDefaultTokenEntries_StarsAreValid(t *testing.T) {
 }
 
 func TestEntriesForChain(t *testing.T) {
-	entries := DefaultTokenEntries()
-	eth := EntriesForChain(entries, "mainnet")
+	entries := defaultEntries(t)
+	eth := entriesForChain(entries, "mainnet")
 	if len(eth) == 0 {
 		t.Fatal("expected mainnet entries")
 	}
 	for _, e := range eth {
 		if e.Chain != "mainnet" {
-			t.Errorf("EntriesForChain(mainnet) returned entry with chain %q", e.Chain)
+			t.Errorf("entriesForChain(mainnet) returned entry with chain %q", e.Chain)
 		}
 	}
 }
 
 func TestEntriesForChain_UnknownChain(t *testing.T) {
-	entries := DefaultTokenEntries()
-	result := EntriesForChain(entries, "nonexistent")
+	entries := defaultEntries(t)
+	result := entriesForChain(entries, "nonexistent")
 	if len(result) != 0 {
 		t.Errorf("expected 0 entries for unknown chain, got %d", len(result))
 	}

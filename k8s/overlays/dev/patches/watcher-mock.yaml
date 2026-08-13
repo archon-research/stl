@@ -1,0 +1,14 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: watcher
+spec:
+  template:
+    spec:
+      containers:
+        - name: watcher
+          env:
+            - name: ALCHEMY_WS_URL
+              value: ws://mock-blockchain-server:8546
+            - name: ALCHEMY_HTTP_URL
+              value: http://mock-blockchain-server:8546

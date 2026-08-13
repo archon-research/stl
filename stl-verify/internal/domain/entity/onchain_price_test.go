@@ -6,6 +6,41 @@ import (
 	"time"
 )
 
+func TestOracleTypeClassification(t *testing.T) {
+	tests := []struct {
+		name           string
+		oracleType     OracleType
+		wantFeed       bool
+		wantERC4626    bool
+		wantCurveLPNG  bool
+		wantDirectCall bool
+	}{
+		{name: "chainlink is feed", oracleType: OracleTypeChainlinkFeed, wantFeed: true},
+		{name: "chronicle is feed and requires direct call", oracleType: OracleTypeChronicle, wantFeed: true, wantDirectCall: true},
+		{name: "redstone is feed", oracleType: OracleTypeRedstone, wantFeed: true},
+		{name: "aave is neither", oracleType: OracleTypeAave},
+		{name: "erc4626 share requires direct call", oracleType: OracleTypeERC4626Share, wantERC4626: true, wantDirectCall: true},
+		{name: "curve lp ng works through multicall3", oracleType: OracleTypeCurveLPNG, wantCurveLPNG: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.oracleType.IsFeedOracle(); got != tt.wantFeed {
+				t.Errorf("IsFeedOracle() = %v, want %v", got, tt.wantFeed)
+			}
+			if got := tt.oracleType.IsERC4626Oracle(); got != tt.wantERC4626 {
+				t.Errorf("IsERC4626Oracle() = %v, want %v", got, tt.wantERC4626)
+			}
+			if got := tt.oracleType.IsCurveLPNGOracle(); got != tt.wantCurveLPNG {
+				t.Errorf("IsCurveLPNGOracle() = %v, want %v", got, tt.wantCurveLPNG)
+			}
+			if got := tt.oracleType.RequiresDirectCall(); got != tt.wantDirectCall {
+				t.Errorf("RequiresDirectCall() = %v, want %v", got, tt.wantDirectCall)
+			}
+		})
+	}
+}
+
 func TestNewOnchainTokenPrice(t *testing.T) {
 	validTime := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 

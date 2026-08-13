@@ -30,12 +30,16 @@ type Position struct {
 	Liquidity *big.Int
 }
 
-// PoolState holds the current state of a Uniswap V3 pool.
+// PoolState holds the current state of a Uniswap V3 pool. Fee completes the
+// pool's unique key (token0, token1, fee); the consequence for consumers
+// matching positions to pools lives at the match predicate
+// (allocation_tracker's sumMatchedPositionAmounts).
 type PoolState struct {
 	SqrtPriceX96 *big.Int
 	Tick         int
 	Token0       common.Address
 	Token1       common.Address
+	Fee          *big.Int
 }
 
 // PositionAmounts holds the computed underlying token amounts for a position.

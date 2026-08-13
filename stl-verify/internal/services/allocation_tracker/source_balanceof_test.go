@@ -47,10 +47,14 @@ func TestBalanceOfSource_Supports(t *testing.T) {
 		{"securitize", "", true},
 		{"superstate", "", true},
 		{"proxy", "", true},
+		// centrifuge now points at ERC-7540 vault addresses (axis-synome 0.2.0),
+		// which are not balanceOf-able tokens; ERC7540Source owns them.
+		{"centrifuge", "centrifuge", false},
 		{"erc4626", "", false},
 		{"curve", "", false},
 		{"uni_v3_pool", "", false},
 		{"anchorage", "", false},
+		{"centrifuge_feeder", "centrifuge", false},
 	}
 
 	for _, tt := range tests {
@@ -72,7 +76,7 @@ func TestBalanceOfSource_FetchBalances(t *testing.T) {
 	expectedBalance := new(big.Int).Mul(big.NewInt(50000), new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil)) // 50000 USDT
 
 	mc := testutil.NewMockMulticaller()
-	mc.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+	mc.ExecuteAtHashFn = func(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
 		if len(calls) != 1 {
 			t.Fatalf("expected 1 call, got %d", len(calls))
 		}
@@ -100,7 +104,7 @@ func TestBalanceOfSource_FetchBalances(t *testing.T) {
 		},
 	}
 
-	result, err := src.FetchBalances(context.Background(), entries, 24720000)
+	result, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err != nil {
 		t.Fatalf("FetchBalances failed: %v", err)
 	}
@@ -123,7 +127,7 @@ func TestBalanceOfSource_FetchBalances_Empty(t *testing.T) {
 
 	src := NewBalanceOfSource(nil, erc20ABI, atokenReadABI, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
-	result, err := src.FetchBalances(context.Background(), nil, 0)
+	result, err := src.FetchBalances(context.Background(), nil, testBlockHash)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -136,7 +140,7 @@ func TestBalanceOfSource_FetchBalances_FailedCallReturnsError(t *testing.T) {
 	erc20ABI, atokenReadABI := mustGetBalanceOfABIs(t)
 
 	mc := testutil.NewMockMulticaller()
-	mc.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+	mc.ExecuteAtHashFn = func(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
 		return []outbound.Result{{Success: false, ReturnData: nil}}, nil
 	}
 
@@ -150,7 +154,7 @@ func TestBalanceOfSource_FetchBalances_FailedCallReturnsError(t *testing.T) {
 		},
 	}
 
-	result, err := src.FetchBalances(context.Background(), entries, 100)
+	result, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err == nil {
 		t.Fatal("expected error for failed balanceOf call")
 	}
@@ -180,7 +184,7 @@ func TestBalanceOfSource_FetchBalances_Atoken(t *testing.T) {
 	scaledTotalSupply := new(big.Int).Mul(big.NewInt(980), new(big.Int).Exp(big.NewInt(10), big.NewInt(6), nil))
 
 	mc := testutil.NewMockMulticaller()
-	mc.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+	mc.ExecuteAtHashFn = func(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
 		if len(calls) != 4 {
 			t.Fatalf("expected 4 calls (balanceOf + scaledBalanceOf + totalSupply + scaledTotalSupply), got %d", len(calls))
 		}
@@ -226,7 +230,7 @@ func TestBalanceOfSource_FetchBalances_Atoken(t *testing.T) {
 		TokenType:       "atoken",
 	}}
 
-	got, err := src.FetchBalances(context.Background(), entries, 100)
+	got, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err != nil {
 		t.Fatalf("FetchBalances: %v", err)
 	}
@@ -266,7 +270,7 @@ func TestBalanceOfSource_FetchBalances_AtokenSupplyDedup(t *testing.T) {
 	wallet2 := common.HexToAddress("0x2222222222222222222222222222222222222222")
 
 	mc := testutil.NewMockMulticaller()
-	mc.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+	mc.ExecuteAtHashFn = func(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
 		// 2 wallets × (balanceOf + scaledBalanceOf) = 4, plus 1 (totalSupply + scaledTotalSupply) = 2.
 		if len(calls) != 6 {
 			t.Fatalf("expected 6 calls, got %d", len(calls))
@@ -307,7 +311,7 @@ func TestBalanceOfSource_FetchBalances_AtokenSupplyDedup(t *testing.T) {
 		{ContractAddress: atoken, WalletAddress: wallet1, TokenType: "atoken"},
 		{ContractAddress: atoken, WalletAddress: wallet2, TokenType: "atoken"},
 	}
-	got, err := src.FetchBalances(context.Background(), entries, 100)
+	got, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err != nil {
 		t.Fatalf("FetchBalances: %v", err)
 	}
@@ -327,7 +331,7 @@ func TestBalanceOfSource_TotalSupplyFailureDropsSupply(t *testing.T) {
 	wallet := common.HexToAddress("0xbbbb")
 
 	mc := testutil.NewMockMulticaller()
-	mc.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+	mc.ExecuteAtHashFn = func(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
 		results := make([]outbound.Result, len(calls))
 		for i, c := range calls {
 			sel := c.CallData[:4]
@@ -347,7 +351,7 @@ func TestBalanceOfSource_TotalSupplyFailureDropsSupply(t *testing.T) {
 
 	src := NewBalanceOfSource(mc, erc20ABI, atokenReadABI, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	entries := []*TokenEntry{{ContractAddress: atoken, WalletAddress: wallet, TokenType: "atoken"}}
-	got, err := src.FetchBalances(context.Background(), entries, 100)
+	got, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err != nil {
 		t.Fatalf("FetchBalances: %v", err)
 	}
@@ -368,7 +372,7 @@ func TestBalanceOfSource_ScaledTotalSupplyFailureKeepsRowNil(t *testing.T) {
 	wallet := common.HexToAddress("0xbbbb")
 
 	mc := testutil.NewMockMulticaller()
-	mc.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+	mc.ExecuteAtHashFn = func(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
 		results := make([]outbound.Result, len(calls))
 		for i, c := range calls {
 			sel := c.CallData[:4]
@@ -387,7 +391,7 @@ func TestBalanceOfSource_ScaledTotalSupplyFailureKeepsRowNil(t *testing.T) {
 
 	src := NewBalanceOfSource(mc, erc20ABI, atokenReadABI, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	entries := []*TokenEntry{{ContractAddress: atoken, WalletAddress: wallet, TokenType: "atoken"}}
-	got, err := src.FetchBalances(context.Background(), entries, 100)
+	got, err := src.FetchBalances(context.Background(), entries, testBlockHash)
 	if err != nil {
 		t.Fatalf("FetchBalances: %v", err)
 	}
@@ -403,6 +407,44 @@ func TestBalanceOfSource_ScaledTotalSupplyFailureKeepsRowNil(t *testing.T) {
 	}
 }
 
+// TestBalanceOfSource_FetchBalances_PinsToBlockHash asserts the balanceOf read
+// is pinned to the block hash, not the block number: after a reorg an archive
+// node answers eth_call-by-number with the new canonical state, which can
+// silently disagree with the reorged (older-version) data this fetch is for.
+func TestBalanceOfSource_FetchBalances_PinsToBlockHash(t *testing.T) {
+	erc20ABI, atokenReadABI := mustGetBalanceOfABIs(t)
+
+	mc := testutil.NewMockMulticaller()
+	mc.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		t.Fatal("balanceOf must read via ExecuteAtHash (block-hash pinned), not Execute (block-number pinned)")
+		return nil, nil
+	}
+	mc.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+		if blockHash != testBlockHash {
+			t.Fatalf("blockHash = %v, want %v (state read must pin to the block hash, not the number, so a reorg can't return the wrong fork's state)", blockHash, testBlockHash)
+		}
+		rd, err := erc20ABI.Methods["balanceOf"].Outputs.Pack(big.NewInt(1))
+		if err != nil {
+			t.Fatalf("pack balanceOf output: %v", err)
+		}
+		return []outbound.Result{{Success: true, ReturnData: rd}}, nil
+	}
+
+	src := NewBalanceOfSource(mc, erc20ABI, atokenReadABI, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	entries := []*TokenEntry{{
+		ContractAddress: common.HexToAddress("0xaaaa"),
+		WalletAddress:   common.HexToAddress("0xbbbb"),
+		TokenType:       "erc20",
+	}}
+
+	if _, err := src.FetchBalances(context.Background(), entries, testBlockHash); err != nil {
+		t.Fatalf("FetchBalances: %v", err)
+	}
+	if mc.CallCount != 1 {
+		t.Fatalf("expected exactly one multicall, got %d", mc.CallCount)
+	}
+}
+
 // TestBalanceOfSource_NoExtraCallsForNonAtoken verifies that erc20 entries do
 // NOT pull scaledBalanceOf or the totalSupply pair.
 func TestBalanceOfSource_NoExtraCallsForNonAtoken(t *testing.T) {
@@ -412,7 +454,7 @@ func TestBalanceOfSource_NoExtraCallsForNonAtoken(t *testing.T) {
 	wallet := common.HexToAddress("0x1111")
 
 	mc := testutil.NewMockMulticaller()
-	mc.ExecuteFn = func(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+	mc.ExecuteAtHashFn = func(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
 		for _, c := range calls {
 			sel := c.CallData[:4]
 			if bytes.Equal(sel, atokenReadABI.Methods["scaledBalanceOf"].ID) {
@@ -431,7 +473,7 @@ func TestBalanceOfSource_NoExtraCallsForNonAtoken(t *testing.T) {
 
 	src := NewBalanceOfSource(mc, erc20ABI, atokenReadABI, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	entries := []*TokenEntry{{ContractAddress: usdc, WalletAddress: wallet, TokenType: "erc20"}}
-	if _, err := src.FetchBalances(context.Background(), entries, 100); err != nil {
+	if _, err := src.FetchBalances(context.Background(), entries, testBlockHash); err != nil {
 		t.Fatalf("FetchBalances: %v", err)
 	}
 }

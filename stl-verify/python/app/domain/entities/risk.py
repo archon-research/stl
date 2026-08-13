@@ -5,6 +5,7 @@ from typing import Annotated, Literal, Union, get_args
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.domain.entities.allocation import EthAddress
+from app.domain.serialization import PlainDecimal
 
 # ---------------------------------------------------------------------------
 # Discriminated details for RrcResult
@@ -30,9 +31,9 @@ class SurafDetails(BaseModel):
     risk_model: Literal["suraf"]
     rating_id: str
     rating_version: str
-    crr_pct: Decimal
-    unadjusted_crr_pct: Decimal
-    penalty_pp: Decimal
+    crr_pct: PlainDecimal
+    unadjusted_crr_pct: PlainDecimal
+    penalty_pp: PlainDecimal
     source_commit_sha: str
 
 
@@ -52,8 +53,8 @@ class GapSweepDetails(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     risk_model: Literal["gap_sweep"]
-    gap_pct: Decimal
-    loss_usd: Decimal
+    gap_pct: PlainDecimal
+    loss_usd: PlainDecimal
 
 
 class CoreModelDetails(BaseModel):
@@ -117,8 +118,8 @@ class RrcResult(BaseModel):
 
     asset_id: int
     prime_id: EthAddress
-    rrc_usd: Decimal
-    comparable_crr_pct: Decimal
+    rrc_usd: PlainDecimal
+    comparable_crr_pct: PlainDecimal
     risk_model: ModelName
     details: RrcDetails
 
@@ -162,16 +163,24 @@ class LiquidationParams:
 
 @dataclass(frozen=True)
 class RiskEnrichedCollateral:
-    """A single collateral contribution enriched with USD value and liquidation params."""
+    """A single collateral contribution enriched with USD value and liquidation params.
 
-    token_id: int
+    token_id and the liquidation params are None for symbol-keyed collateral whose
+    protocol has no per-asset risk parameters (e.g. Maple custody assets).
+
+    price_usd is None when the price is unavailable (e.g. a Maple custody asset whose
+    attested price is missing); in that case amount is 0 while amount_usd still carries
+    the attested USD value, so amount × price_usd does not reconstruct amount_usd.
+    """
+
+    token_id: int | None
     symbol: str
     amount: Decimal  # human-readable token units
     backing_pct: Decimal  # 0..100
-    amount_usd: Decimal  # amount × price_usd
-    price_usd: Decimal  # USD spot price used
-    liquidation_threshold: Decimal
-    liquidation_bonus: Decimal
+    amount_usd: Decimal  # amount × price_usd (except when price_usd is None; see above)
+    price_usd: Decimal | None  # USD spot price used; None when unavailable
+    liquidation_threshold: Decimal | None
+    liquidation_bonus: Decimal | None
 
 
 @dataclass(frozen=True)

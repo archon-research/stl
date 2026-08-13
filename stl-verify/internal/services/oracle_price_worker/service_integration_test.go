@@ -15,6 +15,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
+	"github.com/ethereum/go-ethereum/common"
 )
 
 // ---------------------------------------------------------------------------
@@ -28,11 +29,14 @@ func integrationMulticaller(t *testing.T, prices []*big.Int) *testutil.MockMulti
 }
 
 // integrationMulticallerBlockDependent creates a mock multicaller where prices depend on block number.
+// The oracle worker pins state reads to the block hash (VEC-471) via ExecuteAtHash,
+// and blockEventMessage encodes the block number as the hash (0x%064x), so recover
+// the number from the hash to keep the returned prices block-dependent.
 func integrationMulticallerBlockDependent(t *testing.T, numTokens int) *testutil.MockMulticaller {
 	t.Helper()
 	return &testutil.MockMulticaller{
-		ExecuteFn: func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
-			bn := blockNumber.Int64()
+		ExecuteAtHashFn: func(_ context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+			bn := blockHash.Big().Int64()
 			prices := make([]*big.Int, numTokens)
 			for i := range numTokens {
 				prices[i] = new(big.Int).Mul(
@@ -241,10 +245,12 @@ func TestIntegration_WorkerChangeDetection(t *testing.T) {
 
 	blockTimestamp := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).Unix()
 
-	// Deliver two messages with the same prices
+	// Deliver two messages with the same prices. Version 0: fresh head blocks;
+	// unchanged-price suppression applies only to those (reorg republishes
+	// always re-emit).
 	batches := [][]outbound.SQSMessage{
-		{blockEventMessage(18000000, 1, blockTimestamp, "receipt-1")},
-		{blockEventMessage(18000001, 1, blockTimestamp+12, "receipt-2")},
+		{blockEventMessage(18000000, 0, blockTimestamp, "receipt-1")},
+		{blockEventMessage(18000001, 0, blockTimestamp+12, "receipt-2")},
 	}
 	consumer := consumerWithSequentialMessages(batches)
 
@@ -576,9 +582,10 @@ func TestIntegration_WorkerGetLatestPricesInitialization(t *testing.T) {
 	price2 := new(big.Int).Mul(big.NewInt(1), big.NewInt(1e8))
 	mc := integrationMulticaller(t, []*big.Int{price1, price2})
 
+	// Version 0: unchanged-price suppression applies only to fresh head blocks.
 	newBlockTimestamp := blockTimestamp.Add(12 * time.Second).Unix()
 	messages := []outbound.SQSMessage{
-		blockEventMessage(18000000, 1, newBlockTimestamp, "receipt-cache"),
+		blockEventMessage(18000000, 0, newBlockTimestamp, "receipt-cache"),
 	}
 	consumer := consumerWithMessages(messages)
 
@@ -614,6 +621,76 @@ func TestIntegration_WorkerGetLatestPricesInitialization(t *testing.T) {
 	}
 	if priceCount != 2 {
 		t.Errorf("expected 2 price records (pre-seeded only, same prices skipped), got %d", priceCount)
+	}
+
+	if err := svc.Stop(); err != nil {
+		t.Errorf("Stop failed: %v", err)
+	}
+}
+
+func TestIntegration_WorkerERC4626SharePrice(t *testing.T) {
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+	logger := testutil.DiscardLogger()
+
+	testutil.DisableAllOracles(t, ctx, pool)
+
+	oracleID := testutil.SeedFeedOracle(t, ctx, pool, "fluid_fsusds_it", "Fluid fsUSDS IT", "erc4626_share", 1, 8)
+	tokenID := testutil.SeedToken(t, ctx, pool, 1, "0x2BBE31d63E6813E3AC858C04dae43FB2a72B0D11", "fsUSDS-IT", 18)
+	testutil.SeedFeedOracleAsset(t, ctx, pool, oracleID, tokenID,
+		"0xfF30586cD0F29eD462364C7e81375FC0C71219b1", 8, "USD")
+
+	repo, err := postgres.NewOnchainPriceRepository(pool, logger, 0, 100)
+	if err != nil {
+		t.Fatalf("failed to create repository: %v", err)
+	}
+
+	// convertToAssets(1e18) = 1.05e18 → ratio 1.05; USDS/USD = 1.0 → $1.05.
+	oneE18 := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+	assets := new(big.Int).Add(oneE18, new(big.Int).Div(oneE18, big.NewInt(20)))
+	mc := newERC4626Multicaller(t, assets, big.NewInt(100_000_000))
+
+	blockTimestamp := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).Unix()
+	messages := []outbound.SQSMessage{
+		blockEventMessage(22000000, 1, blockTimestamp, "receipt-fsusds"),
+	}
+	consumer := consumerWithMessages(messages)
+
+	cfg := shared.SQSConsumerConfig{
+		PollInterval: 1 * time.Millisecond,
+		Logger:       logger,
+		ChainID:      1,
+	}
+
+	svc, err := NewService(cfg, consumer, defaultBlockCacheReader(), repo, multicallFactoryFor(mc))
+	if err != nil {
+		t.Fatalf("NewService failed: %v", err)
+	}
+	if err := svc.Start(ctx); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	testutil.WaitForCondition(t, 30*time.Second, func() bool {
+		var count int
+		pool.QueryRow(ctx, `SELECT COUNT(*) FROM onchain_token_price WHERE oracle_id = $1`, oracleID).Scan(&count)
+		return count >= 1
+	}, "fsUSDS price to be stored")
+
+	var storedPrice float64
+	var storedBlock int64
+	err = pool.QueryRow(ctx,
+		`SELECT price_usd, block_number FROM onchain_token_price WHERE oracle_id = $1 AND token_id = $2`,
+		oracleID, tokenID).Scan(&storedPrice, &storedBlock)
+	if err != nil {
+		t.Fatalf("failed to query fsUSDS price: %v", err)
+	}
+	if storedPrice != 1.05 {
+		t.Errorf("price_usd = %f, want 1.05", storedPrice)
+	}
+	if storedBlock != 22000000 {
+		t.Errorf("block_number = %d, want 22000000", storedBlock)
 	}
 
 	if err := svc.Stop(); err != nil {

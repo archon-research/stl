@@ -131,7 +131,7 @@ func TestGetUserReservesDataBatch_HappyPath(t *testing.T) {
 
 	svc := newTestBlockchainService(t, mock)
 
-	resultsMap, errorsMap, err := svc.getUserReservesDataBatch(context.Background(), users, 100)
+	resultsMap, errorsMap, err := svc.getUserReservesDataBatch(context.Background(), users, 100, common.Hash{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -187,6 +187,70 @@ func TestGetUserReservesDataBatch_HappyPath(t *testing.T) {
 	}
 }
 
+// TestGetUserReservesDataBatch_PinsToBlockHash asserts that a non-zero
+// blockHash routes the state read through ExecuteAtHash pinned to that exact
+// hash, not Execute-by-number: after a reorg an archive node answers
+// eth_call-by-number with the new canonical state, which can silently disagree
+// with the reorged (older-version) data this read is for. See VEC-471.
+func TestGetUserReservesDataBatch_PinsToBlockHash(t *testing.T) {
+	user := common.HexToAddress("0x0000000000000000000000000000000000000001")
+	wantHash := common.HexToHash("0xabc123abc123abc123abc123abc123abc123abc123abc123abc123abc123ab")
+
+	var gotHash common.Hash
+	executedViaHash := false
+	mock := testutil.NewMockMulticaller()
+	mock.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return nil, fmt.Errorf("must call ExecuteAtHash for a non-zero block hash, not Execute")
+	}
+	mock.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+		executedViaHash = true
+		gotHash = blockHash
+		return []outbound.Result{{Success: true, ReturnData: encodeRawUserReserves(nil)}}, nil
+	}
+
+	svc := newTestBlockchainService(t, mock)
+	if _, _, err := svc.getUserReservesDataBatch(context.Background(), []common.Address{user}, 100, wantHash); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !executedViaHash {
+		t.Fatal("getUserReservesDataBatch did not call ExecuteAtHash for a non-zero block hash")
+	}
+	if gotHash != wantHash {
+		t.Errorf("multicall block hash = %s, want %s", gotHash, wantHash)
+	}
+}
+
+// TestGetUserReservesDataBatch_ZeroHashFallsBackToNumber asserts the backfill
+// contract: a zero blockHash keeps the read number-pinned via Execute (no
+// ExecuteAtHash), preserving pre-VEC-471 behavior for callers with no live
+// block-hash source.
+func TestGetUserReservesDataBatch_ZeroHashFallsBackToNumber(t *testing.T) {
+	user := common.HexToAddress("0x0000000000000000000000000000000000000001")
+
+	executedViaNumber := false
+	var gotBlock *big.Int
+	mock := testutil.NewMockMulticaller()
+	mock.ExecuteFn = func(_ context.Context, _ []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+		executedViaNumber = true
+		gotBlock = blockNumber
+		return []outbound.Result{{Success: true, ReturnData: encodeRawUserReserves(nil)}}, nil
+	}
+	mock.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		return nil, fmt.Errorf("zero block hash must fall back to Execute-by-number, not ExecuteAtHash")
+	}
+
+	svc := newTestBlockchainService(t, mock)
+	if _, _, err := svc.getUserReservesDataBatch(context.Background(), []common.Address{user}, 100, common.Hash{}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !executedViaNumber {
+		t.Fatal("zero block hash did not fall back to Execute-by-number")
+	}
+	if gotBlock == nil || gotBlock.Int64() != 100 {
+		t.Errorf("Execute block number = %v, want 100", gotBlock)
+	}
+}
+
 func TestGetUserReservesDataBatch_SubCallFailure(t *testing.T) {
 	userA := common.HexToAddress("0x0000000000000000000000000000000000000001")
 	userB := common.HexToAddress("0x0000000000000000000000000000000000000002")
@@ -207,7 +271,7 @@ func TestGetUserReservesDataBatch_SubCallFailure(t *testing.T) {
 
 	svc := newTestBlockchainService(t, mock)
 
-	resultsMap, errorsMap, err := svc.getUserReservesDataBatch(context.Background(), users, 100)
+	resultsMap, errorsMap, err := svc.getUserReservesDataBatch(context.Background(), users, 100, common.Hash{})
 	if err != nil {
 		t.Fatalf("unexpected top-level error: %v", err)
 	}
@@ -239,7 +303,7 @@ func TestGetUserReservesDataBatch_EmptyUsers(t *testing.T) {
 
 	svc := newTestBlockchainService(t, mock)
 
-	resultsMap, errorsMap, err := svc.getUserReservesDataBatch(context.Background(), []common.Address{}, 100)
+	resultsMap, errorsMap, err := svc.getUserReservesDataBatch(context.Background(), []common.Address{}, 100, common.Hash{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -260,7 +324,7 @@ func TestGetUserReservesDataBatch_MulticallError(t *testing.T) {
 	svc := newTestBlockchainService(t, mock)
 
 	users := []common.Address{common.HexToAddress("0x01")}
-	_, _, err := svc.getUserReservesDataBatch(context.Background(), users, 100)
+	_, _, err := svc.getUserReservesDataBatch(context.Background(), users, 100, common.Hash{})
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -382,7 +446,7 @@ func TestBatchGetUserReserveDataMultiUser_HappyPath(t *testing.T) {
 
 	svc = newTestBlockchainService(t, mock)
 
-	result, err := svc.batchGetUserReserveDataMultiUser(context.Background(), userAssets, 20000000)
+	result, err := svc.batchGetUserReserveDataMultiUser(context.Background(), userAssets, 20000000, common.Hash{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -438,7 +502,7 @@ func TestBatchGetUserReserveDataMultiUser_SubCallFailure(t *testing.T) {
 
 	svc := newTestBlockchainService(t, mock)
 
-	_, err := svc.batchGetUserReserveDataMultiUser(context.Background(), userAssets, 20000000)
+	_, err := svc.batchGetUserReserveDataMultiUser(context.Background(), userAssets, 20000000, common.Hash{})
 	if err == nil {
 		t.Fatal("expected error for failed sub-call, got nil")
 	}
@@ -453,7 +517,7 @@ func TestBatchGetUserReserveDataMultiUser_EmptyInput(t *testing.T) {
 
 	svc := newTestBlockchainService(t, mock)
 
-	result, err := svc.batchGetUserReserveDataMultiUser(context.Background(), map[common.Address][]common.Address{}, 100)
+	result, err := svc.batchGetUserReserveDataMultiUser(context.Background(), map[common.Address][]common.Address{}, 100, common.Hash{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -473,7 +537,7 @@ func TestBatchGetUserReserveDataMultiUser_MulticallError(t *testing.T) {
 	userAssets := map[common.Address][]common.Address{
 		common.HexToAddress("0x01"): {common.HexToAddress("0x02")},
 	}
-	_, err := svc.batchGetUserReserveDataMultiUser(context.Background(), userAssets, 20000000)
+	_, err := svc.batchGetUserReserveDataMultiUser(context.Background(), userAssets, 20000000, common.Hash{})
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -588,7 +652,7 @@ func TestGetBatchUserPositionData(t *testing.T) {
 	results, err := reader.GetBatchUserPositionData(
 		context.Background(),
 		[]common.Address{userA, userB, userC},
-		poolAddress, 1, 20000000,
+		poolAddress, 1, 20000000, common.Hash{},
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -779,7 +843,7 @@ func TestGetBatchUserPositionData_StaleUIPoolDataProvider(t *testing.T) {
 	results, err := reader.GetBatchUserPositionData(
 		context.Background(),
 		[]common.Address{userA},
-		poolAddress, 1, 20000000,
+		poolAddress, 1, 20000000, common.Hash{},
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -829,7 +893,7 @@ func TestGetBatchUserPositionData_EmptyUsers(t *testing.T) {
 	poolAddress := common.HexToAddress("0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2")
 	reader.blockchainServices[blockchain.ProtocolKey{ChainID: 1, PoolAddress: poolAddress}] = svc
 
-	results, err := reader.GetBatchUserPositionData(context.Background(), []common.Address{}, poolAddress, 1, 100)
+	results, err := reader.GetBatchUserPositionData(context.Background(), []common.Address{}, poolAddress, 1, 100, common.Hash{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -880,7 +944,7 @@ func TestGetBatchUserPositionData_ReserveDataFailure(t *testing.T) {
 	_, err := reader.GetBatchUserPositionData(
 		context.Background(),
 		[]common.Address{userA},
-		poolAddress, 1, 20000000,
+		poolAddress, 1, 20000000, common.Hash{},
 	)
 	if err == nil {
 		t.Fatal("expected error when getUserReserveData sub-call fails, got nil")

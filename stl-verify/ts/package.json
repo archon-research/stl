@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "npm run build --workspace=@stl-verify/ui",
+    "doctor": "npm run doctor --workspaces --if-present",
     "format": "npm run format --workspaces --if-present",
     "format:check": "npm run format:check --workspaces --if-present",
     "generate:openapi": "make -C ../python export-openapi-schema && npm run generate:openapi-types --workspace=@stl-verify/ui",
@@ -13,13 +14,9 @@
     "uikit:link": "uikit-cli link",
     "uikit:unlink": "uikit-cli unlink"
   },
-  "dependencies": {
-    "@base-ui/react": "^1.4.1",
-    "@tanstack/react-table": "^8.20.0"
-  },
   "devDependencies": {
-    "@archon-research/uikit-cli": "0.3.2",
-    "typescript": "^5.4.5"
+    "@archon-research/uikit-cli": "0.8.0-rohit-consumer-fixes.2",
+    "@typescript/native-preview": "7.0.0-dev.20260601.1"
   },
   "workspaces": [
     "ui"

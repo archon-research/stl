@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: curve-indexer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: curve-indexer
+  template:
+    metadata:
+      labels:
+        app: curve-indexer
+    spec:
+      serviceAccountName: curve-indexer
+      containers:
+        - name: curve-indexer
+          # Image name used as the Kustomize images transformer key.
+          # The overlay kustomization.yaml overrides newName + newTag.
+          # Runs the shared dex-indexer binary (cmd/workers/dex-indexer) with
+          # DEX=curve from curve-indexer-config, defined per overlay (VEC-329).
+          # Not defined in this base, so this base is not overlay-wired until then.
+          image: dex-indexer
+          envFrom:
+            - configMapRef:
+                name: otel-config
+            - configMapRef:
+                name: curve-indexer-config
+            - secretRef:
+                # Populated by ExternalSecret — secret name mirrors the service.
+                name: curve-indexer
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pgrep -f dex-indexer"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+      terminationGracePeriodSeconds: 60

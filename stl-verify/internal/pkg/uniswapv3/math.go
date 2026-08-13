@@ -1,6 +1,7 @@
 package uniswapv3
 
 import (
+	"fmt"
 	"math"
 	"math/big"
 )
@@ -50,6 +51,54 @@ func ComputePositionAmounts(sqrtPriceX96 *big.Int, tickLower, tickUpper int, liq
 	}
 
 	return PositionAmounts{Amount0: amount0, Amount1: amount1}
+}
+
+// ValueInToken0 returns the position's total value in raw token0 units:
+// amount0 plus amount1 converted at the pool's current spot price.
+// See ValueInToken1 for why no decimals adjustment applies.
+func (a PositionAmounts) ValueInToken0(sqrtPriceX96 *big.Int) (*big.Int, error) {
+	if err := a.validateForValue(sqrtPriceX96); err != nil {
+		return nil, err
+	}
+	// amount1 -> token0: amount1 * 2^192 / sqrtPriceX96^2 (floor).
+	converted := new(big.Int).Lsh(a.Amount1, 192)
+	converted.Div(converted, new(big.Int).Mul(sqrtPriceX96, sqrtPriceX96))
+	return converted.Add(converted, a.Amount0), nil
+}
+
+// ValueInToken1 returns the position's total value in raw token1 units:
+// amount1 plus amount0 converted at the pool's current spot price.
+// sqrtPriceX96 prices RAW units (token1-raw per token0-raw = (sqrtPriceX96 /
+// 2^96)^2), so both tokens' decimals are already embedded in it and no
+// decimals adjustment applies here.
+func (a PositionAmounts) ValueInToken1(sqrtPriceX96 *big.Int) (*big.Int, error) {
+	if err := a.validateForValue(sqrtPriceX96); err != nil {
+		return nil, err
+	}
+	// amount0 -> token1: amount0 * sqrtPriceX96^2 / 2^192 (floor).
+	converted := new(big.Int).Mul(a.Amount0, sqrtPriceX96)
+	converted.Mul(converted, sqrtPriceX96)
+	converted.Rsh(converted, 192)
+	return converted.Add(converted, a.Amount1), nil
+}
+
+// validateForValue rejects inputs that would make a spot conversion silently
+// wrong: a non-positive sqrt price means the pool state read is broken (an
+// initialized V3 pool always has a positive sqrt price), and a nil amount
+// means the position amounts were never computed.
+func (a PositionAmounts) validateForValue(sqrtPriceX96 *big.Int) error {
+	if a.Amount0 == nil || a.Amount1 == nil {
+		return fmt.Errorf("position amounts not set (amount0=%v, amount1=%v)", a.Amount0, a.Amount1)
+	}
+	// Negative amounts cannot come from ComputePositionAmounts; converting one
+	// would return a plausible-but-wrong value for a broken caller.
+	if a.Amount0.Sign() < 0 || a.Amount1.Sign() < 0 {
+		return fmt.Errorf("position amounts must be non-negative (amount0=%s, amount1=%s)", a.Amount0, a.Amount1)
+	}
+	if sqrtPriceX96 == nil || sqrtPriceX96.Sign() <= 0 {
+		return fmt.Errorf("sqrtPriceX96 must be positive, got %v", sqrtPriceX96)
+	}
+	return nil
 }
 
 // getAmount0ForLiquidity computes the amount of token0 for a given liquidity

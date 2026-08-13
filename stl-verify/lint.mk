@@ -7,11 +7,25 @@
 
 .PHONY: install-hooks format lint help
 
+LEFTHOOK_VERSION ?= v1.13.6
+LEFTHOOK := $(shell command -v lefthook 2>/dev/null || echo "$$(go env GOPATH)/bin/lefthook")
+
 # Install lefthook git hooks
 install-hooks: ## Install lefthook pre-commit/push hooks
 	@echo "==> Installing lefthook git hooks..."
-	@command -v lefthook >/dev/null 2>&1 || go install github.com/evilmartians/lefthook@latest
-	@lefthook install
+	@if ! [ -x "$(LEFTHOOK)" ] && ! command -v lefthook >/dev/null 2>&1; then \
+	  echo "    lefthook not found, installing via 'go install'..."; \
+	  go install github.com/evilmartians/lefthook@$(LEFTHOOK_VERSION); \
+	fi
+	@"$(LEFTHOOK)" install
+	@if ! command -v lefthook >/dev/null 2>&1; then \
+	  echo ""; \
+	  echo "WARNING: lefthook is installed at $(LEFTHOOK) but not on PATH."; \
+	  echo "  Git hooks invoke 'lefthook' from PATH, so commits will silently skip hooks."; \
+	  echo "  Add Go's bin directory to your shell PATH, e.g.:"; \
+	  echo "    export PATH=\"\$$(go env GOPATH)/bin:\$$PATH\""; \
+	  echo ""; \
+	fi
 
 # Local development helpers — just delegate to language-specific tooling
 

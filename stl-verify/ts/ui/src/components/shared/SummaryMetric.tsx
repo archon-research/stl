@@ -1,7 +1,7 @@
+import { StatTile } from '@archon-research/design-system';
 import type { ReactNode } from 'react';
 
 import { css } from '#styled-system/css';
-import { flex } from '#styled-system/patterns';
 
 type SummaryMetricProps = {
   label: string;
@@ -10,6 +10,30 @@ type SummaryMetricProps = {
   className?: string;
 };
 
+// `statTile`'s value slot is not a flex container and neither it nor `sub` sets
+// wrapping. Both are needed here: values carry an inline <TokenLogo> beside
+// their text, and USD amounts get long enough to overflow a 4-up grid column.
+// Reported upstream as a gap in the recipe.
+const valueClassName = css({
+  display: 'flex',
+  alignItems: 'center',
+  gap: '2',
+  flexWrap: 'wrap',
+  minWidth: 0,
+  overflowWrap: 'anywhere',
+  wordBreak: 'break-word',
+});
+
+const detailClassName = css({
+  overflowWrap: 'anywhere',
+  wordBreak: 'break-word',
+});
+
+// Thin adapter over StatTile that keeps this component's own prop names, so the
+// metric call sites across the allocations views stay untouched. Note that
+// `className` now *composes* with the tile frame instead of replacing it, which
+// is what StatTile does; callers that pass a full card style still win, because
+// Panda orders the utilities layer after the recipes layer.
 export function SummaryMetric({
   label,
   value,
@@ -17,59 +41,16 @@ export function SummaryMetric({
   className,
 }: SummaryMetricProps) {
   return (
-    <div
-      className={
-        className ??
-        css({
-          borderRadius: 'md',
-          borderStyle: 'solid',
-          borderWidth: '1px',
-          borderColor: 'border.subtle',
-          bg: 'surface.default',
-          p: '3',
-        })
+    <StatTile
+      className={className}
+      labelCase="upper"
+      label={label}
+      value={<span className={valueClassName}>{value}</span>}
+      sub={
+        // Falsy, not nullish: `''` and `0` must render nothing, or the tile gains
+        // an empty `sub` slot and the extra grid gap that comes with it.
+        !detail ? undefined : <span className={detailClassName}>{detail}</span>
       }
-    >
-      <p
-        className={css({
-          m: 0,
-          fontSize: 'xs',
-          textTransform: 'uppercase',
-          letterSpacing: '0.12em',
-          color: 'text.muted',
-        })}
-      >
-        {label}
-      </p>
-      <div
-        className={flex({
-          align: 'center',
-          gap: '2',
-          wrap: 'wrap',
-          mt: '2',
-          fontSize: 'lg',
-          fontWeight: 'semibold',
-          color: 'text.strong',
-          minWidth: 0,
-          overflowWrap: 'anywhere',
-          wordBreak: 'break-word',
-        })}
-      >
-        {value}
-      </div>
-      {detail ? (
-        <div
-          className={css({
-            mt: '1',
-            fontSize: 'xs',
-            color: 'text.muted',
-            overflowWrap: 'anywhere',
-            wordBreak: 'break-word',
-          })}
-        >
-          {detail}
-        </div>
-      ) : null}
-    </div>
+    />
   );
 }

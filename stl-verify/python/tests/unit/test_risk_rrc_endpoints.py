@@ -27,7 +27,7 @@ from app.domain.entities.receipt_token import ReceiptTokenInfo
 from app.domain.entities.risk import GapSweepDetails, ModelName, RrcResult, SurafDetails
 from app.domain.exceptions import InvalidOverrideError, MissingShareError, StaleShareError
 from app.main import app
-from app.ports.allocation_repository import AllocationRepository
+from app.ports.allocation_repository import AllocationRepositoryPort
 from app.ports.crypto_lending_reader import CryptoLendingReader
 from app.risk_engine.suraf.result import SurafResult
 from app.services.crypto_lending_risk_service import CryptoLendingRiskService
@@ -589,7 +589,7 @@ def _real_suraf_service() -> SurafRrcService:
     return SurafRrcService(
         asset_to_rating={_ASSET_ID: "aave_ausdc"},
         suraf_ratings={"aave_ausdc": rating},
-        allocation_repo=AsyncMock(spec=AllocationRepository),
+        allocation_repo=AsyncMock(spec=AllocationRepositoryPort),
     )
 
 

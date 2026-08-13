@@ -4,9 +4,9 @@ import {
   ErrorState,
   SearchInput,
   StyledSelect,
-  Toggle,
   ToggleGroup,
 } from '@archon-research/design-system';
+import { ArrowUpRight } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
 
 import { css } from '#styled-system/css';
@@ -14,28 +14,28 @@ import { flex } from '#styled-system/patterns';
 import { segmentedControl } from '#styled-system/recipes';
 
 import {
+  type ChainLabelLookup,
   getAllocationKey,
   getCategoryLabel,
-  getProtocolLabel,
+  getPrimeGroupKey,
   sortAllocations,
 } from '../../lib/dashboard';
-import { PARAMS, useUrlParam } from '../../lib/url-params';
+import { navigateWithParams, PARAMS, useUrlParam } from '../../lib/url-params';
 import type {
   Allocation,
   AllocationCategory,
   Prime,
 } from '../../types/allocation';
-import type { LocalProtocolRow } from '../../types/local-data';
 import { ActivityFeed } from './tabs/ActivityFeed';
 import { RiskBreakdownTab } from './tabs/RiskBreakdownTab';
 import { RrcTab } from './tabs/RrcTab';
 
 type BottomPanelProps = {
   allocations: Allocation[];
+  chainLabels: ChainLabelLookup;
   errorMessage: string | null;
   isDrawerOpen: boolean;
   isLoading: boolean;
-  localProtocols: LocalProtocolRow[];
   selectedAllocation: Allocation | null;
   selectedPrime: Prime | null;
 };
@@ -47,7 +47,8 @@ function parseCategoryParam(value: string | null): AllocationCategory | '' {
     value === 'allocation' ||
     value === 'pol' ||
     value === 'psm3' ||
-    value === 'asset'
+    value === 'asset' ||
+    value === 'custody'
   ) {
     return value;
   }
@@ -56,22 +57,26 @@ function parseCategoryParam(value: string | null): AllocationCategory | '' {
 
 const segmentedControlStyles = segmentedControl();
 const toggleGroupClassName = `${segmentedControlStyles.group} ${css({ p: '0.25', gap: '0.5' })}`;
-const toggleClassName = `${segmentedControlStyles.item} ${css({ minHeight: '7', px: '2', fontSize: 'xs' })}`;
+const toggleClassName = `${segmentedControlStyles.item} ${css({
+  minHeight: '8',
+  px: '2.5',
+  fontSize: 'sm',
+})}`;
 
 export function BottomPanel({
   allocations,
+  chainLabels,
   errorMessage,
   isDrawerOpen,
   isLoading,
-  localProtocols,
   selectedAllocation,
   selectedPrime,
 }: BottomPanelProps) {
-  const [receiptTokenParam, setReceiptTokenParam] = useUrlParam(
-    PARAMS.receiptToken,
-  );
   const [tabParam, setTabParam] = useUrlParam(PARAMS.tab);
   const [categoryParam, setCategoryParam] = useUrlParam(PARAMS.category);
+  const [activityActionParam, setActivityActionParam] = useUrlParam(
+    PARAMS.activityAction,
+  );
   const [localRiskSearchValue, setLocalRiskSearchValue] = useState('');
   const [riskSearchValue, setRiskSearchValue] = useState('');
   const [categoryFilter, setCategoryFilter] = useState<AllocationCategory | ''>(
@@ -79,24 +84,27 @@ export function BottomPanel({
   );
 
   const previousPrimeIdRef = useRef<string | null>(selectedPrime?.id ?? null);
-  const previousSelectedAllocationIdRef = useRef<string | null>(
-    selectedAllocation ? getAllocationKey(selectedAllocation) : null,
-  );
 
   const activeTab: ActiveTab =
     tabParam === 'rrc' ? 'rrc' : tabParam === 'activity' ? 'activity' : 'risk';
+  const activityActionFilter =
+    activityActionParam === 'in' ||
+    activityActionParam === 'out' ||
+    activityActionParam === 'sweep'
+      ? activityActionParam
+      : '';
 
   useEffect(() => {
     const primeId = selectedPrime?.id ?? null;
 
     if (previousPrimeIdRef.current && previousPrimeIdRef.current !== primeId) {
-      setReceiptTokenParam(null);
       setCategoryFilter('');
       setCategoryParam(null);
+      setActivityActionParam(null);
     }
 
     previousPrimeIdRef.current = primeId;
-  }, [selectedPrime?.id, setCategoryParam, setReceiptTokenParam]);
+  }, [selectedPrime?.id, setActivityActionParam, setCategoryParam]);
 
   useEffect(() => {
     const normalized = parseCategoryParam(categoryParam);
@@ -119,82 +127,25 @@ export function BottomPanel({
     return sortedAllocations.filter((a) => a.category === categoryFilter);
   }, [sortedAllocations, categoryFilter]);
 
-  useEffect(() => {
-    if (sortedAllocations.length === 0) {
-      if (receiptTokenParam !== null) {
-        setReceiptTokenParam(null);
-      }
-      return;
-    }
-
-    if (filteredAllocations.length === 0) {
-      if (receiptTokenParam !== null) {
-        setReceiptTokenParam(null);
-      }
-      return;
-    }
-
+  // The drawer follows the clicked allocation. When the category filter excludes
+  // it (or nothing is selected), fall back to the first allocation in view so a
+  // tab always has something to render.
+  const focusedAllocation = useMemo(() => {
     if (
-      receiptTokenParam &&
+      selectedAllocation &&
       filteredAllocations.some(
-        (allocation) => getAllocationKey(allocation) === receiptTokenParam,
+        (allocation) =>
+          getAllocationKey(allocation) === getAllocationKey(selectedAllocation),
       )
     ) {
-      return;
+      return selectedAllocation;
     }
+    return filteredAllocations[0] ?? null;
+  }, [selectedAllocation, filteredAllocations]);
 
-    const selectedKey = selectedAllocation
-      ? getAllocationKey(selectedAllocation)
-      : null;
-    const selectedInFiltered =
-      selectedKey !== null &&
-      filteredAllocations.some(
-        (allocation) => getAllocationKey(allocation) === selectedKey,
-      )
-        ? selectedAllocation
-        : null;
-
-    const fallback = selectedInFiltered ?? filteredAllocations[0];
-    if (fallback) {
-      setReceiptTokenParam(getAllocationKey(fallback));
-    }
-  }, [
-    receiptTokenParam,
-    selectedAllocation,
-    setReceiptTokenParam,
-    filteredAllocations,
-    sortedAllocations.length,
-  ]);
-
-  // Sync the URL-backed receipt-token param to the grid's current selection
-  // only when that selection *changes*. The ref guards against clobbering a
-  // manual dropdown pick on unrelated re-renders (e.g. the user changes the
-  // dropdown → receiptTokenParam changes → this effect would otherwise fire
-  // and overwrite the pick back to the grid row's id).
-  useEffect(() => {
-    const currentKey = selectedAllocation
-      ? getAllocationKey(selectedAllocation)
-      : null;
-
-    if (currentKey === previousSelectedAllocationIdRef.current) {
-      return;
-    }
-
-    previousSelectedAllocationIdRef.current = currentKey;
-
-    if (currentKey === null) {
-      return;
-    }
-
-    if (receiptTokenParam !== currentKey) {
-      setReceiptTokenParam(currentKey);
-    }
-  }, [receiptTokenParam, selectedAllocation, setReceiptTokenParam]);
-
-  const focusedAllocation =
-    filteredAllocations.find(
-      (allocation) => getAllocationKey(allocation) === receiptTokenParam,
-    ) ?? null;
+  const focusedAllocationKey = focusedAllocation
+    ? getAllocationKey(focusedAllocation)
+    : null;
 
   const categoryEmptyDescription = `No allocations found in the "${getCategoryLabel(categoryFilter, 'All Categories')}" category.`;
 
@@ -229,7 +180,7 @@ export function BottomPanel({
   useEffect(() => {
     setLocalRiskSearchValue('');
     setRiskSearchValue('');
-  }, [receiptTokenParam]);
+  }, [focusedAllocationKey]);
 
   return (
     <div
@@ -244,15 +195,15 @@ export function BottomPanel({
       <div
         className={flex({
           align: 'center',
-          justify: 'flex-start',
-          gap: '2',
+          justify: 'space-between',
+          gap: '3',
           wrap: 'wrap',
         })}
       >
-        <ToggleGroup
+        <ToggleGroup.Root
           value={[activeTab]}
-          onValueChange={(value: readonly string[]) => {
-            const nextValue = value[0];
+          onValueChange={(details: { value: string[] }) => {
+            const nextValue = details.value[0];
 
             if (
               nextValue === 'risk' ||
@@ -265,25 +216,64 @@ export function BottomPanel({
           aria-label="Risk views"
           className={toggleGroupClassName}
         >
-          <Toggle value="risk" className={toggleClassName}>
+          <ToggleGroup.Item value="risk" className={toggleClassName}>
             Risk breakdown
-          </Toggle>
-          <Toggle value="rrc" className={toggleClassName}>
+          </ToggleGroup.Item>
+          <ToggleGroup.Item value="rrc" className={toggleClassName}>
             Required risk capital
-          </Toggle>
-          <Toggle value="activity" className={toggleClassName}>
+          </ToggleGroup.Item>
+          <ToggleGroup.Item value="activity" className={toggleClassName}>
             Activity
-          </Toggle>
-        </ToggleGroup>
+          </ToggleGroup.Item>
+        </ToggleGroup.Root>
+
+        {activeTab === 'activity' ? (
+          <button
+            type="button"
+            disabled={!focusedAllocation}
+            onClick={() =>
+              navigateWithParams('/activities', {
+                [PARAMS.prime]: selectedPrime
+                  ? getPrimeGroupKey(selectedPrime)
+                  : null,
+                [PARAMS.network]: focusedAllocation
+                  ? String(focusedAllocation.chain_id)
+                  : null,
+                [PARAMS.token]: focusedAllocation?.symbol ?? null,
+                [PARAMS.activityAction]: activityActionFilter || null,
+                [PARAMS.showAllPrimes]: '0',
+              })
+            }
+            className={css({
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '1',
+              bg: 'transparent',
+              border: 'none',
+              p: 0,
+              fontSize: 'sm',
+              fontWeight: 'medium',
+              color: 'text.link',
+              cursor: 'pointer',
+              whiteSpace: 'nowrap',
+              _hover: { textDecoration: 'underline' },
+              _disabled: {
+                color: 'text.muted',
+                cursor: 'not-allowed',
+                textDecoration: 'none',
+              },
+            })}
+          >
+            View in Activities
+            <ArrowUpRight className={css({ width: '4', height: '4' })} />
+          </button>
+        ) : null}
       </div>
 
       <div
         className={css({
-          display: 'grid',
-          gridTemplateColumns: {
-            base: '1fr',
-            md: 'repeat(2, minmax(14rem, 1fr)) minmax(18rem, 1fr)',
-          },
+          display: 'flex',
+          flexWrap: 'wrap',
           gap: '4',
           alignItems: 'end',
         })}
@@ -293,13 +283,14 @@ export function BottomPanel({
           className={css({
             display: 'grid',
             gap: '1',
+            flex: '1 1 12rem',
           })}
         >
           <span
             className={css({
               fontSize: 'xs',
               textTransform: 'uppercase',
-              letterSpacing: '0.14em',
+              letterSpacing: '0.1em',
               color: 'text.muted',
             })}
           >
@@ -326,53 +317,51 @@ export function BottomPanel({
             <option value="pol">Protocol Owned Liquidity</option>
             <option value="psm3">PSM3</option>
             <option value="asset">Asset</option>
+            <option value="custody">Custody</option>
           </StyledSelect>
         </label>
 
-        <label
-          className={css({
-            display: 'grid',
-            gap: '1',
-          })}
-        >
-          <span
+        {activeTab === 'activity' ? (
+          <label
+            htmlFor="activity-action-filter"
             className={css({
-              fontSize: 'xs',
-              textTransform: 'uppercase',
-              letterSpacing: '0.14em',
-              color: 'text.muted',
+              display: 'grid',
+              gap: '1',
+              flex: '1 1 12rem',
             })}
           >
-            Receipt token
-          </span>
-          <StyledSelect
-            value={receiptTokenParam ?? ''}
-            onChange={(event: ChangeEvent<HTMLSelectElement>) =>
-              setReceiptTokenParam(event.target.value || null)
-            }
-            disabled={
-              !selectedPrime ||
-              isLoading ||
-              errorMessage !== null ||
-              filteredAllocations.length === 0
-            }
-          >
-            <option value="">Choose a receipt token</option>
-            {filteredAllocations.map((allocation) => {
-              const key = getAllocationKey(allocation);
-              return (
-                <option key={key} value={key}>
-                  {`${allocation.symbol} · ${getProtocolLabel(allocation.protocol_name, localProtocols, allocation.chain_id)}`}
-                </option>
-              );
-            })}
-          </StyledSelect>
-        </label>
+            <span
+              className={css({
+                fontSize: 'xs',
+                textTransform: 'uppercase',
+                letterSpacing: '0.1em',
+                color: 'text.muted',
+              })}
+            >
+              Action
+            </span>
+            <StyledSelect
+              id="activity-action-filter"
+              value={activityActionFilter}
+              onChange={(event: ChangeEvent<HTMLSelectElement>) =>
+                setActivityActionParam(event.target.value || null)
+              }
+              disabled={
+                !focusedAllocation || isLoading || errorMessage !== null
+              }
+            >
+              <option value="">All actions</option>
+              <option value="in">In</option>
+              <option value="out">Out</option>
+              <option value="sweep">Sweep</option>
+            </StyledSelect>
+          </label>
+        ) : null}
 
         {activeTab === 'risk' || activeTab === 'activity' ? (
           <div
             className={css({
-              width: '100%',
+              flex: '2 1 18rem',
             })}
           >
             <SearchInput
@@ -421,6 +410,8 @@ export function BottomPanel({
                 title="Unable to load receipt tokens"
                 description="An error occurred while fetching receipt token data."
                 errorMessage={errorMessage ?? undefined}
+                tone="critical"
+                size="inline"
               />
             }
             emptyView={emptyStateView}
@@ -430,6 +421,7 @@ export function BottomPanel({
                 isEnabled={isDrawerOpen && activeTab === 'risk'}
                 searchQuery={riskSearchValue}
                 selectedReceiptToken={focusedAllocation}
+                selectedPrime={selectedPrime}
               />
             ) : activeTab === 'rrc' ? (
               <RrcTab
@@ -440,7 +432,11 @@ export function BottomPanel({
             ) : (
               <ActivityFeed
                 isEnabled={isDrawerOpen && activeTab === 'activity'}
+                actionFilter={activityActionFilter || undefined}
+                chainLabels={chainLabels}
+                mode="drawer"
                 searchQuery={riskSearchValue}
+                selectedReceiptToken={focusedAllocation}
                 selectedPrime={selectedPrime}
               />
             )}

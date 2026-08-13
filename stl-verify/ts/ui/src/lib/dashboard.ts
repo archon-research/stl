@@ -1,4 +1,4 @@
-import type { Allocation } from '../types/allocation';
+import type { Allocation, Prime } from '../types/allocation';
 import type { LocalChainRow, LocalProtocolRow } from '../types/local-data';
 import { getChainExplorerUrl, getChainName } from './chain-metadata';
 import { logging } from './logging';
@@ -9,7 +9,7 @@ export type FilterOption = {
   count: number;
 };
 
-type UsdTone = 'green' | 'yellow' | 'red' | 'neutral';
+export type UsdTone = 'green' | 'yellow' | 'red' | 'neutral';
 
 export type ChainLabelLookup = ReadonlyMap<number, string>;
 
@@ -21,11 +21,26 @@ export const DIRECT_PROTOCOL_FILTER_VALUE = '__direct__';
 const PROTOCOL_LABELS: Record<string, string> = {
   grove: 'Grove',
   spark: 'SparkLend',
+  maple: 'Maple',
 };
 
 const COMPACT_NUMBER_FORMAT = new Intl.NumberFormat('en-US', {
   maximumFractionDigits: 2,
   notation: 'compact',
+});
+
+// Compact with 2 significant digits, for chart axes and tooltips (e.g. "1.5B",
+// "36M"). Significant digits keep the precision consistent across magnitudes.
+const COMPACT_SIGNIFICANT_FORMAT = new Intl.NumberFormat('en-US', {
+  maximumSignificantDigits: 2,
+  notation: 'compact',
+});
+
+const COMPACT_SIGNIFICANT_CURRENCY_FORMAT = new Intl.NumberFormat('en-US', {
+  currency: 'USD',
+  maximumSignificantDigits: 2,
+  notation: 'compact',
+  style: 'currency',
 });
 
 const TOKEN_NUMBER_FORMAT = new Intl.NumberFormat('en-US', {
@@ -99,6 +114,61 @@ export function buildChainLabelLookup(
   return new Map(chains.map((chain) => [chain.chain_id, chain.name] as const));
 }
 
+export type PrimeGroup = {
+  key: string;
+  name: string;
+  vaultAddress: string | null;
+  primaryProxyAddress: string;
+  proxyAddresses: string[];
+  chainCount: number;
+};
+
+// A prime allocates through one ALM proxy per chain, so `/v1/primes` returns
+// one row per (prime, chain) pair. `prime_vault_address` is the same across
+// every row of a prime; a row whose prime has no vault address on record
+// falls back to `name` so it still groups rather than getting its own row.
+export function getPrimeGroupKey(prime: Prime): string {
+  return prime.prime_vault_address ?? prime.name;
+}
+
+export function groupPrimesByVault(primes: Prime[]): PrimeGroup[] {
+  const rowsByKey = new Map<string, Prime[]>();
+
+  for (const prime of primes) {
+    const key = getPrimeGroupKey(prime);
+    const rows = rowsByKey.get(key);
+    if (rows) {
+      rows.push(prime);
+    } else {
+      rowsByKey.set(key, [prime]);
+    }
+  }
+
+  return [...rowsByKey.entries()].map(([key, rows]) => {
+    const sortedByAddress = [...rows].sort((left, right) =>
+      left.address.localeCompare(right.address),
+    );
+    // `mainnet` is the prime's canonical chain for aggregate figures (e.g.
+    // risk-capital); fall back to a deterministic pick when no row is on it.
+    const mainnetRow = rows.find((row) => row.chain === 'mainnet');
+
+    return {
+      key,
+      name: rows[0].name,
+      vaultAddress: rows[0].prime_vault_address ?? null,
+      primaryProxyAddress: mainnetRow?.address ?? sortedByAddress[0].address,
+      // Deduped because `/v1/primes` is `DISTINCT ON (proxy_address, chain_id)`,
+      // so one address holding positions on two chains yields two rows. Passing
+      // it twice to `getAllocationsForProxies` would fetch it twice and
+      // double-count every one of its rows in the grid and in `summary.totalUsd`
+      // — `getAllocationKey` gives the copies identical keys, so nothing
+      // downstream would catch it.
+      proxyAddresses: [...new Set(sortedByAddress.map((row) => row.address))],
+      chainCount: new Set(rows.map((row) => row.chain_id)).size,
+    };
+  });
+}
+
 function getProtocolMatchScore(
   protocol: string,
   localProtocol: LocalProtocolRow,
@@ -153,10 +223,15 @@ export function findProtocolMetadata(
   return matches[0]?.localProtocol ?? null;
 }
 
+// chain_id 0 is the off-chain sentinel (e.g. Anchorage BTC custody), which has
+// no EVM chain and so no name in the chain registry or logo CDN.
+export const OFFCHAIN_CHAIN_ID = 0;
+
 export function getChainLabel(
   chainId: number,
   chainLabels?: ChainLabelLookup,
 ): string {
+  if (chainId === OFFCHAIN_CHAIN_ID) return 'Off-chain';
   return chainLabels?.get(chainId) ?? getChainName(chainId);
 }
 
@@ -179,7 +254,10 @@ export function getAllocationKey(allocation: Allocation): string {
     return String(allocation.receipt_token_id);
   }
   // Direct holdings have no receipt token; identify by chain + underlying.
-  return `direct:${allocation.chain_id}:${allocation.underlying_token_id}`;
+  // Off-chain custody rows (Anchorage BTC) carry a null underlying id, so fall
+  // back to the symbol to keep the key unique and stable.
+  const underlyingKey = allocation.underlying_token_id ?? allocation.symbol;
+  return `direct:${allocation.chain_id}:${underlyingKey}`;
 }
 
 export function buildNetworkOptions(
@@ -225,6 +303,50 @@ export function buildProtocolOptions(
     }));
 }
 
+// The Activities view spans every prime, so its protocol/network filters are
+// sourced from the full registries rather than a single prime's allocations
+// (which is all the allocation-scoped builders can see). Per-option counts are
+// meaningless across primes here, so they are set to 0 and hidden by the
+// dropdown. The activity API matches `protocol.name` (== `LocalProtocolRow.name`)
+// and `chain_id`, so option values map verbatim.
+export function buildProtocolOptionsFromMetadata(
+  localProtocols: LocalProtocolRow[],
+): FilterOption[] {
+  const names = new Set<string>();
+
+  for (const protocol of localProtocols) {
+    const name = protocol.name?.trim();
+    if (name) {
+      names.add(name);
+    }
+  }
+
+  return [...names]
+    .sort((left, right) => left.localeCompare(right))
+    .map((name) => ({ count: 0, label: name, value: name }));
+}
+
+export function buildNetworkOptionsFromMetadata(
+  localChains: LocalChainRow[],
+): FilterOption[] {
+  const seen = new Set<number>();
+
+  return localChains
+    .filter((chain) => {
+      if (seen.has(chain.chain_id)) {
+        return false;
+      }
+      seen.add(chain.chain_id);
+      return true;
+    })
+    .sort((left, right) => left.chain_id - right.chain_id)
+    .map((chain) => ({
+      count: 0,
+      label: chain.name,
+      value: String(chain.chain_id),
+    }));
+}
+
 export function formatTokenAmount(
   value: number | string | null | undefined,
 ): string {
@@ -263,6 +385,23 @@ export function formatUsdValue(
   return Math.abs(numeric) >= 1_000_000
     ? COMPACT_CURRENCY_FORMAT.format(numeric)
     : CURRENCY_FORMAT.format(numeric);
+}
+
+// Compact, 2-significant-digit formatters for chart axes and tooltips.
+export function formatCompactUsd(
+  value: number | string | null | undefined,
+): string {
+  const numeric = parseNumericValue(value);
+  return numeric === null
+    ? '—'
+    : COMPACT_SIGNIFICANT_CURRENCY_FORMAT.format(numeric);
+}
+
+export function formatCompactNumber(
+  value: number | string | null | undefined,
+): string {
+  const numeric = parseNumericValue(value);
+  return numeric === null ? '—' : COMPACT_SIGNIFICANT_FORMAT.format(numeric);
 }
 
 export function formatPercentValue(
@@ -396,6 +535,49 @@ export function formatDurationFromSeconds(
   return `${days}d ${hours % 24}h`;
 }
 
+// Expand exponential notation ("2.5707140E+27") into a plain decimal string
+// ("2570714000000000000000000000"). BigInt rejects exponents, so a wad value
+// serialized in scientific form would otherwise parse to just its leading digit
+// and render as 0. The API contract promises plain strings; this is a
+// defense-in-depth guard against a Decimal that slips through in scientific
+// form. Returns null for non-numeric input.
+function toPlainDecimalString(value: string): string | null {
+  const trimmed = value.trim();
+  if (!/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(trimmed)) {
+    return null;
+  }
+
+  const [mantissa, expPart] = trimmed.split(/[eE]/);
+  if (expPart === undefined) {
+    return trimmed;
+  }
+
+  // A real 1e18-scaled wad has a tiny exponent; a wildly out-of-range one would
+  // only make `'0'.repeat(...)` below throw. Reject rather than expand it.
+  const exponent = Number(expPart);
+  if (Math.abs(exponent) > 1000) {
+    return null;
+  }
+
+  const negative = mantissa.startsWith('-');
+  const unsigned = mantissa.replace(/^[+-]/, '');
+  const [intRaw, fracRaw = ''] = unsigned.split('.');
+  const digits = intRaw + fracRaw;
+  // Where the decimal point lands, counted in digits from the left of `digits`.
+  const pointPos = intRaw.length + exponent;
+
+  let result: string;
+  if (pointPos <= 0) {
+    result = `0.${'0'.repeat(-pointPos)}${digits}`;
+  } else if (pointPos >= digits.length) {
+    result = digits + '0'.repeat(pointPos - digits.length);
+  } else {
+    result = `${digits.slice(0, pointPos)}.${digits.slice(pointPos)}`;
+  }
+
+  return negative ? `-${result}` : result;
+}
+
 export function formatWadValue(
   value: number | string | null | undefined,
 ): string {
@@ -403,10 +585,16 @@ export function formatWadValue(
     return '—';
   }
 
+  const plain = toPlainDecimalString(String(value));
+  if (plain === null) {
+    logging.warn(`Failed to parse WAD value: "${value}"`, {
+      context: 'formatWadValue',
+    });
+    return '—';
+  }
+
   try {
-    const normalized =
-      typeof value === 'number' ? Math.trunc(value).toString() : String(value);
-    const wei = BigInt(normalized.split('.')[0]);
+    const wei = BigInt(plain.split('.')[0] || '0');
     const wad = 10n ** 18n;
     const whole = wei / wad;
     const fraction = wei % wad;
@@ -433,11 +621,53 @@ export function formatRawWadLabel(
   return `Raw WAD ${truncateMiddle(String(value))}`;
 }
 
+// Float conversion for charting only; use formatWadValue for displayed amounts,
+// which keeps full precision via BigInt.
+export function wadToUnits(
+  value: number | string | null | undefined,
+): number | null {
+  const numeric = parseNumericValue(value, 'wadToUnits');
+  return numeric === null ? null : numeric / 1e18;
+}
+
+export function formatChartTimestampLabel(value: string): string {
+  return new Date(value).toLocaleString([], {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+}
+
+function toTimestampMs(timestamp: string): number {
+  const value = new Date(timestamp).getTime();
+  return Number.isFinite(value) ? value : 0;
+}
+
+// Returns a new array of time-series buckets sorted oldest-first by
+// `bucket_start`. The backend does not guarantee bucket order, and the charts
+// assume ascending time, so callers must sort before rendering.
+export function sortByBucketStart<T extends { bucket_start: string }>(
+  buckets: readonly T[],
+): T[] {
+  return [...buckets].sort(
+    (a, b) => toTimestampMs(a.bucket_start) - toTimestampMs(b.bucket_start),
+  );
+}
+
 /**
  * Get human-readable label for allocation category.
  */
 export function getCategoryLabel(
-  category: 'allocation' | 'pol' | 'psm3' | 'asset' | '' | undefined,
+  category:
+    | 'allocation'
+    | 'pol'
+    | 'psm3'
+    | 'asset'
+    | 'custody'
+    | ''
+    | undefined,
   fallback: string = 'Unknown',
 ): string {
   const labels: Record<string, string> = {
@@ -445,6 +675,7 @@ export function getCategoryLabel(
     pol: 'Protocol Owned Liquidity',
     psm3: 'PSM3',
     asset: 'Asset',
+    custody: 'Custody',
   };
   return category ? (labels[category] ?? fallback) : fallback;
 }
@@ -494,7 +725,7 @@ export function getExplorerUrl(
   if (!base) {
     return null;
   }
-  return `${base}/${type}/${address}`;
+  return `${base.replace(/\/+$/, '')}/${type}/${address}`;
 }
 
 /**

@@ -38,6 +38,10 @@ func NewBalanceOfSource(multicaller outbound.Multicaller, erc20ABI *abi.ABI, ato
 			"securitize": true,
 			"superstate": true,
 			"proxy":      true,
+			// centrifuge is intentionally absent: as of axis-synome 0.2.0 those
+			// entries point at ERC-7540 vault addresses, which are not tokens and
+			// revert on balanceOf/decimals. ERC7540Source owns them (VEC-337 part 2).
+			// (centrifuge_feeder is a different mechanism and stays on the stub source.)
 		},
 	}
 }
@@ -64,7 +68,7 @@ type callContext struct {
 	contract common.Address // for supply calls (entry is nil)
 }
 
-func (s *BalanceOfSource) FetchBalances(ctx context.Context, entries []*TokenEntry, blockNumber int64) (*FetchResult, error) {
+func (s *BalanceOfSource) FetchBalances(ctx context.Context, entries []*TokenEntry, blockHash common.Hash) (*FetchResult, error) {
 	result := NewFetchResult()
 	if len(entries) == 0 {
 		return result, nil
@@ -75,12 +79,7 @@ func (s *BalanceOfSource) FetchBalances(ctx context.Context, entries []*TokenEnt
 		return result, nil
 	}
 
-	var block *big.Int
-	if blockNumber > 0 {
-		block = big.NewInt(blockNumber)
-	}
-
-	mcRes, err := s.multicaller.Execute(ctx, calls, block)
+	mcRes, err := s.multicaller.ExecuteAtHash(ctx, calls, blockHash)
 	if err != nil {
 		return nil, fmt.Errorf("multicall: %w", err)
 	}

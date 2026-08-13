@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -29,24 +29,36 @@ type Telemetry struct {
 	blockDuration   metric.Float64Histogram
 	receiptDuration metric.Float64Histogram
 	rpcDuration     metric.Float64Histogram
+
+	// Gauges
+	symbolsMissing metric.Int64Gauge
+
+	// chainAttr is the constant per-chain attribute attached to every metric.
+	// One indexer process serves one chain, so the value is fixed at
+	// construction. It surfaces as the `chain` Prometheus label that the Vector
+	// indexer alerts group by; without it those alerts render an empty chain.
+	chainAttr attribute.KeyValue
 }
 
 // NewTelemetry creates a new Telemetry instance using the global providers.
-func NewTelemetry() (*Telemetry, error) {
+// chain is the chain name (e.g. "arbitrum") attached as the `chain` label.
+func NewTelemetry(chain string) (*Telemetry, error) {
 	return NewTelemetryWithProviders(
 		otel.GetTracerProvider(),
 		otel.GetMeterProvider(),
+		chain,
 	)
 }
 
 // NewTelemetryWithProviders creates a new Telemetry instance with custom providers.
-func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider) (*Telemetry, error) {
+func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider, chain string) (*Telemetry, error) {
 	tracer := tp.Tracer(instrumentationName)
 	meter := mp.Meter(instrumentationName)
 
 	t := &Telemetry{
-		tracer: tracer,
-		meter:  meter,
+		tracer:    tracer,
+		meter:     meter,
+		chainAttr: attribute.String("chain", chain),
 	}
 
 	var err error
@@ -83,10 +95,19 @@ func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider)
 		return nil, fmt.Errorf("creating errorsTotal counter: %w", err)
 	}
 
+	t.symbolsMissing, err = meter.Int64Gauge(
+		"morpho.token.symbol.missing",
+		metric.WithDescription("Tokens still missing a symbol as seen by the latest reconciliation sweep (capped at the sweep batch size)"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating symbolsMissing gauge: %w", err)
+	}
+
 	t.blockDuration, err = meter.Float64Histogram(
 		"morpho.block.duration_seconds",
 		metric.WithDescription("Duration of block processing in seconds"),
 		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(telemetry.SecondsDurationBuckets...),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("creating blockDuration histogram: %w", err)
@@ -96,6 +117,7 @@ func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider)
 		"morpho.receipt.duration_seconds",
 		metric.WithDescription("Duration of receipt processing in seconds"),
 		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(telemetry.SecondsDurationBuckets...),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("creating receiptDuration histogram: %w", err)
@@ -105,6 +127,7 @@ func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider)
 		"morpho.rpc.duration_seconds",
 		metric.WithDescription("Duration of RPC calls in seconds"),
 		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(telemetry.SecondsDurationBuckets...),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("creating rpcDuration histogram: %w", err)
@@ -119,11 +142,7 @@ func (t *Telemetry) RecordBlockProcessed(ctx context.Context, duration time.Dura
 		return
 	}
 
-	status := "success"
-	if err != nil {
-		status = "error"
-	}
-	attrs := metric.WithAttributes(attribute.String("status", status))
+	attrs := metric.WithAttributes(t.chainAttr, telemetry.StatusAttr(err))
 
 	t.blocksProcessed.Add(ctx, 1, attrs)
 	t.blockDuration.Record(ctx, duration.Seconds(), attrs)
@@ -135,6 +154,7 @@ func (t *Telemetry) RecordEventProcessed(ctx context.Context, eventType string) 
 		return
 	}
 	t.eventsProcessed.Add(ctx, 1, metric.WithAttributes(
+		t.chainAttr,
 		attribute.String("event.type", eventType),
 	))
 }
@@ -146,14 +166,11 @@ func (t *Telemetry) RecordRPCCall(ctx context.Context, method string, duration t
 	}
 
 	attrs := []attribute.KeyValue{
+		t.chainAttr,
 		attribute.String("rpc.method", method),
 	}
 
-	status := "success"
-	if err != nil {
-		status = "error"
-	}
-	attrs = append(attrs, attribute.String("status", status))
+	attrs = append(attrs, telemetry.StatusAttr(err))
 
 	t.rpcCallsTotal.Add(ctx, 1, metric.WithAttributes(attrs...))
 	t.rpcDuration.Record(ctx, duration.Seconds(), metric.WithAttributes(attrs...))
@@ -165,14 +182,26 @@ func (t *Telemetry) RecordError(ctx context.Context, operation string, err error
 		return
 	}
 	t.errorsTotal.Add(ctx, 1, metric.WithAttributes(
+		t.chainAttr,
 		attribute.String("operation", operation),
 	))
+}
+
+// RecordSymbolsMissing records how many tokens the latest reconciliation sweep
+// found still missing a symbol (capped at the sweep batch size). Sustained growth
+// means unresolvable tokens are accumulating; at the batch cap the oldest-first
+// sweep starves newer tokens.
+func (t *Telemetry) RecordSymbolsMissing(ctx context.Context, count int64) {
+	if t == nil {
+		return
+	}
+	t.symbolsMissing.Record(ctx, count, metric.WithAttributes(t.chainAttr))
 }
 
 // StartBlockSpan starts a top-level span for block processing.
 func (t *Telemetry) StartBlockSpan(ctx context.Context, blockNumber int64) (context.Context, trace.Span) {
 	if t == nil {
-		return ctx, noopSpan()
+		return ctx, telemetry.NoopSpan()
 	}
 	return t.tracer.Start(ctx, "morpho.processBlock",
 		trace.WithAttributes(
@@ -184,22 +213,9 @@ func (t *Telemetry) StartBlockSpan(ctx context.Context, blockNumber int64) (cont
 // StartSpan starts a named child span with optional attributes.
 func (t *Telemetry) StartSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
 	if t == nil {
-		return ctx, noopSpan()
+		return ctx, telemetry.NoopSpan()
 	}
 	return t.tracer.Start(ctx, name,
 		trace.WithAttributes(attrs...),
 	)
-}
-
-// SetSpanError records an error on a span and sets its status.
-func SetSpanError(span trace.Span, err error, description string) {
-	if err == nil {
-		return
-	}
-	span.RecordError(err)
-	span.SetStatus(codes.Error, description)
-}
-
-func noopSpan() trace.Span {
-	return trace.SpanFromContext(context.Background())
 }

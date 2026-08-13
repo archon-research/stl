@@ -7,6 +7,15 @@
 # Binary
 /blockwatcher
 dist/mock-blockchain-server
+# Compiled binaries; `make build-*` targets output here (never commit build output)
+stl-verify/dist/
+# `go build` writes to the working directory, not dist/ — this catches the one
+# binary that lands here when built from stl-verify/. Prefer `make build-backfiller-%`.
+/stl-verify/offchain-price-backfill
+
+# gen-transformed scratch output (regenerate to a scratch file, never over the committed migration)
+/gen.sql
+/gen.err
 
 # Test artifacts
 *.test
@@ -26,6 +35,7 @@ dist/mock-blockchain-server
 
 # Claude
 settings.local.json
+.playwright-mcp/
 
 # Python
 __pycache__/
@@ -38,3 +48,14 @@ htmlcov/
 
 # Go
 .gopath/
+
+# Skillfile (github.com/eljulians/skillfile)
+# Skill sources live in skills/ (local) or are pinned by SHA in Skillfile.lock
+# (remote). Every tool's deploy target and the downloaded CLI binary are
+# regenerated on demand by `make skills-install`, so none of them are committed.
+.claude/skills/
+.codex/skills/
+.github/skills/
+.skillfile/cache/
+.skillfile/conflict
+bin/skillfile

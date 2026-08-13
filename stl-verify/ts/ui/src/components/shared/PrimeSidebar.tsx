@@ -3,30 +3,42 @@ import {
   EmptyState,
   ErrorState,
   SkeletonStack,
+  Switch,
   ThemeToggle,
 } from '@archon-research/design-system';
 
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
+import { toggleSwitch } from '#styled-system/recipes';
 
 import { ProtocolLogo } from '.';
-import type { Prime } from '../../types/allocation';
+import { truncateMiddle } from '../../lib/dashboard';
+import type { PrimeGroup } from '../../lib/dashboard';
 
 type PrimeSidebarProps = {
-  primes: Prime[];
+  primeGroups: PrimeGroup[];
   selectedPrimeId: string | null;
   isLoading: boolean;
   errorMessage: string | null;
-  onSelectPrime: (primeId: string) => void;
+  onSelectPrime: (primeKey: string) => void;
+  showAllPrimes: boolean;
+  canShowAllPrimes: boolean;
+  onShowAllPrimesChange: (value: boolean) => void;
 };
 
+const switchStyles = toggleSwitch();
+
 export function PrimeSidebar({
-  primes,
+  primeGroups,
   selectedPrimeId,
   isLoading,
   errorMessage,
   onSelectPrime,
+  showAllPrimes,
+  canShowAllPrimes,
+  onShowAllPrimesChange,
 }: PrimeSidebarProps) {
+  const primeButtonsDisabled = showAllPrimes && canShowAllPrimes;
   return (
     <div
       className={css({
@@ -108,13 +120,15 @@ export function PrimeSidebar({
         <AsyncStateRenderer
           isLoading={isLoading}
           error={errorMessage}
-          isEmpty={primes.length === 0}
+          isEmpty={primeGroups.length === 0}
           loadingView={<SkeletonStack count={6} itemHeight={64} />}
           errorView={
             <ErrorState
               title="Unable to load primes"
               description="An error occurred while fetching primes data."
               errorMessage={errorMessage ?? undefined}
+              tone="critical"
+              size="inline"
             />
           }
           emptyView={
@@ -125,14 +139,15 @@ export function PrimeSidebar({
           }
         >
           <div className={css({ display: 'grid', gap: '2.5' })}>
-            {primes.map((prime) => {
-              const isSelected = prime.id === selectedPrimeId;
+            {primeGroups.map((primeGroup) => {
+              const isSelected = primeGroup.key === selectedPrimeId;
               return (
                 <button
-                  key={prime.id}
+                  key={primeGroup.key}
                   type="button"
                   aria-pressed={isSelected}
-                  onClick={() => onSelectPrime(prime.id)}
+                  disabled={primeButtonsDisabled}
+                  onClick={() => onSelectPrime(primeGroup.key)}
                   className={css({
                     width: '100%',
                     boxSizing: 'border-box',
@@ -151,14 +166,21 @@ export function PrimeSidebar({
                     transitionProperty:
                       'background-color, border-color, transform',
                     _hover: {
-                      bg: 'interactive.hover',
+                      // Neutral grey wash, not accent-tinted `interactive.hover`
+                      // — see DESIGN.md, "The Signal Budget Rule".
+                      bg: 'surface.hover',
                       transform: 'translateY(-1px)',
+                    },
+                    _disabled: {
+                      cursor: 'not-allowed',
+                      opacity: 0.45,
+                      _hover: { bg: 'surface.default', transform: 'none' },
                     },
                   })}
                 >
                   <div className={flex({ align: 'center', gap: '3.5' })}>
                     <ProtocolLogo
-                      protocolName={prime.name}
+                      protocolName={primeGroup.name}
                       isSelected={isSelected}
                       size="8"
                     />
@@ -169,29 +191,47 @@ export function PrimeSidebar({
                         minWidth: 0,
                       })}
                     >
-                      <p
-                        className={css({
-                          m: 0,
-                          fontSize: 'sm',
-                          fontWeight: 'semibold',
-                          color: 'text.strong',
+                      <div
+                        className={flex({
+                          align: 'baseline',
+                          gap: '1.5',
+                          minWidth: 0,
                         })}
                       >
-                        {prime.name}
-                      </p>
+                        <p
+                          className={css({
+                            m: 0,
+                            fontSize: 'sm',
+                            fontWeight: 'semibold',
+                            color: 'text.strong',
+                          })}
+                        >
+                          {primeGroup.name}
+                        </p>
+                        <span
+                          className={css({
+                            fontSize: 'xs',
+                            color: 'text.muted',
+                            whiteSpace: 'nowrap',
+                          })}
+                        >
+                          {primeGroup.chainCount}{' '}
+                          {primeGroup.chainCount === 1 ? 'chain' : 'chains'}
+                        </span>
+                      </div>
                       <span
                         className={css({
                           fontFamily: 'mono',
                           fontSize: 'xs',
-                          color: { base: 'blue.500', _dark: 'blue.400' },
+                          color: 'text.link',
                           overflow: 'hidden',
                           textOverflow: 'ellipsis',
                           whiteSpace: 'nowrap',
                           display: 'block',
                         })}
-                        title={prime.address}
+                        title={primeGroup.vaultAddress ?? undefined}
                       >
-                        {prime.address.slice(0, 6)}...{prime.address.slice(-4)}
+                        {truncateMiddle(primeGroup.vaultAddress, 6, 4)}
                       </span>
                     </div>
                   </div>
@@ -206,11 +246,46 @@ export function PrimeSidebar({
         className={css({
           width: '100%',
           boxSizing: 'border-box',
+          px: '5',
+          pt: '3',
+        })}
+      >
+        <Switch.Root
+          checked={showAllPrimes}
+          disabled={!canShowAllPrimes}
+          onCheckedChange={(details: { checked: boolean }) =>
+            onShowAllPrimesChange(details.checked)
+          }
+          className={flex({
+            align: 'center',
+            justify: 'space-between',
+            gap: '3',
+            width: '100%',
+            cursor: canShowAllPrimes ? 'pointer' : 'not-allowed',
+            opacity: canShowAllPrimes ? 1 : 0.5,
+          })}
+        >
+          <Switch.Label
+            className={css({
+              fontSize: 'sm',
+              color: 'text.muted',
+            })}
+          >
+            Show all primes
+          </Switch.Label>
+          <Switch.Control className={switchStyles.root}>
+            <Switch.Thumb className={switchStyles.thumb} />
+          </Switch.Control>
+          <Switch.HiddenInput />
+        </Switch.Root>
+      </div>
+
+      <div
+        className={css({
+          width: '100%',
+          boxSizing: 'border-box',
           px: '4',
           py: '3',
-          borderTopWidth: '1px',
-          borderTopStyle: 'solid',
-          borderTopColor: 'border.subtle',
           bg: 'surface.default',
         })}
       >

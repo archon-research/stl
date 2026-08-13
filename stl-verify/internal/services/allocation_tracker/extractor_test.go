@@ -10,7 +10,7 @@ import (
 
 func newTestExtractor(t *testing.T) *TransferExtractor {
 	t.Helper()
-	return NewTransferExtractor(DefaultProxies())
+	return NewTransferExtractor(defaultProxies(t))
 }
 
 func makeTransferLog(token, from, to common.Address, amount *big.Int, index uint) types.Log {

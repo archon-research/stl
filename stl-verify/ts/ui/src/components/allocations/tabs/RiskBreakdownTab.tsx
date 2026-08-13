@@ -3,6 +3,7 @@ import {
   type CellContext,
   type ColumnDef,
   DataTable,
+  ErrorState,
   LoadingIndicator,
   matchesSearchQuery,
   SkeletonStack,
@@ -27,21 +28,153 @@ import { isAbortError, toErrorMessage } from '../../../lib/errors';
 import { logging } from '../../../lib/logging';
 import type {
   Allocation,
+  Prime,
   RiskBreakdown,
   Token,
   TokenPrice,
 } from '../../../types/allocation';
-import { ChainLogo, SummaryMetric } from '../../shared';
+import {
+  ChainLogo,
+  SummaryMetric,
+  TokenAddress,
+  TruncatedLabel,
+} from '../../shared';
 import { MethodologyPanel } from '../../shared/MethodologyPanel';
-import { TabErrorPanel, TabSelectionPrompt } from './TabStatePanels';
+import { TabNotePanel } from './TabStatePanels';
 
 type RiskBreakdownTabProps = {
   isEnabled: boolean;
   searchQuery?: string;
   selectedReceiptToken: Allocation | null;
+  selectedPrime: Prime | null;
 };
 
+const tableHeaderTypographyClassName = css({
+  '& thead th': {
+    fontSize: 'sm',
+    fontWeight: 'semibold',
+    lineHeight: 'shorter',
+    letterSpacing: '0.02em',
+    textTransform: 'uppercase',
+    color: 'text.default',
+  },
+  '& thead th button': {
+    fontSize: 'sm',
+    fontWeight: 'semibold',
+    lineHeight: 'shorter',
+    letterSpacing: '0.02em',
+    textTransform: 'uppercase',
+    color: 'text.default',
+  },
+});
+
 type RiskItem = RiskBreakdown['items'][number];
+
+function RiskSymbolCell({
+  chainId,
+  symbol,
+}: {
+  chainId: number;
+  symbol: string;
+}) {
+  return (
+    <div
+      className={css({
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: '2',
+      })}
+    >
+      <ChainLogo chainId={chainId} size="6" />
+      <span>{symbol}</span>
+    </div>
+  );
+}
+
+// A long header otherwise sets the column's min-content width, so "Liquidation
+// Threshold" reserved far more room than the percentages beneath it and pushed
+// the last column out of view. Capping the label and letting it ellipsize lets
+// the column size to its data instead; the full text stays in the DOM for
+// assistive tech and comes back on hover through `TruncatedLabel`.
+const truncatedHeaderClassName = css({
+  display: 'block',
+  maxWidth: '7rem',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
+});
+
+// Use this for any header long enough to outgrow the cap above; a short one
+// would render identically, so it is only applied where it changes something.
+function truncatingHeader(label: string) {
+  return () => (
+    <TruncatedLabel label={label} className={truncatedHeaderClassName} />
+  );
+}
+
+function createRiskColumns(chainId: number): ColumnDef<RiskItem>[] {
+  return [
+    {
+      id: 'symbol',
+      header: 'Symbol',
+      accessorKey: 'symbol',
+      cell: (info: CellContext<RiskItem, unknown>) => (
+        <RiskSymbolCell chainId={chainId} symbol={info.getValue() as string} />
+      ),
+    },
+    {
+      id: 'amount',
+      header: 'Amount',
+      accessorKey: 'amount',
+      cell: (info: CellContext<RiskItem, unknown>) => {
+        const value = info.getValue();
+        return typeof value === 'string'
+          ? parseFloat(value).toFixed(2)
+          : (value as number).toFixed(2);
+      },
+    },
+    {
+      id: 'price_usd',
+      header: 'Price USD',
+      accessorKey: 'price_usd',
+      cell: (info: CellContext<RiskItem, unknown>) =>
+        formatUsdValue(info.getValue() as string | number | null | undefined),
+    },
+    {
+      id: 'amount_usd',
+      header: 'Amount USD',
+      accessorKey: 'amount_usd',
+      cell: (info: CellContext<RiskItem, unknown>) =>
+        formatUsdValue(info.getValue() as string | number | null | undefined),
+      // The bar expresses each item's backing share of the position, so the USD
+      // amount and its backing percentage live in one column instead of two.
+      meta: {
+        magnitude: {
+          scale: 'linear',
+          domain: { min: 0, max: 100 },
+          getValue: (item) => parseNumericValue(item.backing_pct),
+          getValueText: (value) => formatPercentValue(value),
+        },
+      },
+    },
+    {
+      id: 'lt',
+      header: truncatingHeader('Liquidation Threshold'),
+      accessorKey: 'liquidation_threshold',
+      cell: (info: CellContext<RiskItem, unknown>) =>
+        formatRatioPercent(
+          info.getValue() as string | number | null | undefined,
+        ),
+    },
+    {
+      id: 'bonus',
+      header: truncatingHeader('Liquidation Bonus'),
+      accessorKey: 'liquidation_bonus',
+      cell: (info: CellContext<RiskItem, unknown>) =>
+        formatMultiplier(info.getValue() as string | number | null | undefined),
+    },
+  ];
+}
 
 function RiskTable({
   chainId,
@@ -74,80 +207,7 @@ function RiskTable({
   );
 
   const columns = useMemo<ColumnDef<RiskItem>[]>(
-    () => [
-      {
-        id: 'symbol',
-        header: 'Symbol',
-        accessorKey: 'symbol',
-        cell: (info: CellContext<RiskItem, unknown>) => {
-          const symbol = info.getValue() as string;
-          return (
-            <div
-              className={css({
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '2',
-              })}
-            >
-              <ChainLogo chainId={chainId} size="6" />
-              <span>{symbol}</span>
-            </div>
-          );
-        },
-      },
-      {
-        id: 'amount',
-        header: 'Amount',
-        accessorKey: 'amount',
-        cell: (info: CellContext<RiskItem, unknown>) => {
-          const value = info.getValue();
-          return typeof value === 'string'
-            ? parseFloat(value).toFixed(2)
-            : (value as number).toFixed(2);
-        },
-      },
-      {
-        id: 'price_usd',
-        header: 'Price USD',
-        accessorKey: 'price_usd',
-        cell: (info: CellContext<RiskItem, unknown>) =>
-          formatUsdValue(info.getValue() as string | number | null | undefined),
-      },
-      {
-        id: 'amount_usd',
-        header: 'Amount USD',
-        accessorKey: 'amount_usd',
-        cell: (info: CellContext<RiskItem, unknown>) =>
-          formatUsdValue(info.getValue() as string | number | null | undefined),
-      },
-      {
-        id: 'backing_pct',
-        header: 'Backing %',
-        accessorKey: 'backing_pct',
-        cell: (info: CellContext<RiskItem, unknown>) =>
-          formatPercentValue(
-            info.getValue() as string | number | null | undefined,
-          ),
-      },
-      {
-        id: 'lt',
-        header: 'Liquidation Threshold',
-        accessorKey: 'liquidation_threshold',
-        cell: (info: CellContext<RiskItem, unknown>) =>
-          formatRatioPercent(
-            info.getValue() as string | number | null | undefined,
-          ),
-      },
-      {
-        id: 'bonus',
-        header: 'Liquidation Bonus',
-        accessorKey: 'liquidation_bonus',
-        cell: (info: CellContext<RiskItem, unknown>) =>
-          formatMultiplier(
-            info.getValue() as string | number | null | undefined,
-          ),
-      },
-    ],
+    () => createRiskColumns(chainId),
     [chainId],
   );
 
@@ -156,23 +216,29 @@ function RiskTable({
   });
 
   return (
-    <DataTable
-      table={table}
-      isLoading={isLoading}
-      getRowKey={(item) => String(item.token_id)}
-      skeletonConfig={{ rows: 5, columns: 7, firstColumnTall: false }}
-      minWidth="76rem"
-      renderCell={(children) => (
-        <div
-          className={css({
-            fontSize: 'sm',
-            color: 'text.strong',
-          })}
-        >
-          {children}
-        </div>
-      )}
-    />
+    <div className={tableHeaderTypographyClassName}>
+      <DataTable
+        table={table}
+        isLoading={isLoading}
+        getRowKey={(item) => String(item.token_id ?? item.symbol)}
+        skeletonConfig={{ rows: 5, columns: 6, firstColumnTall: false }}
+        // Sized to what the six columns actually need once the long liquidation
+        // headers ellipsize. The old 76rem exceeded the drawer this table lives
+        // in, so the last column was always clipped no matter how wide the
+        // drawer was dragged.
+        minWidth="56rem"
+        renderCell={(children) => (
+          <div
+            className={css({
+              fontSize: 'sm',
+              color: 'text.strong',
+            })}
+          >
+            {children}
+          </div>
+        )}
+      />
+    </div>
   );
 }
 
@@ -180,6 +246,7 @@ export function RiskBreakdownTab({
   isEnabled,
   searchQuery = '',
   selectedReceiptToken,
+  selectedPrime,
 }: RiskBreakdownTabProps) {
   const [breakdown, setBreakdown] = useState<RiskBreakdown | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -190,6 +257,16 @@ export function RiskBreakdownTab({
   const [isTokenMetaLoading, setIsTokenMetaLoading] = useState(false);
 
   const receiptTokenId = selectedReceiptToken?.receipt_token_id ?? null;
+  const primeId = selectedPrime?.id ?? null;
+  // The breakdown scales to the given prime_id's pro-rata pool share on the
+  // allocation's own chain_id, so it only resolves for the chain
+  // selectedPrime actually holds a position on — the prime's primary proxy's
+  // chain, today always mainnet. A non-mainnet allocation would find no
+  // share data for that (chain_id, prime_id) pair.
+  const isChainMismatch =
+    selectedReceiptToken !== null &&
+    selectedPrime !== null &&
+    selectedReceiptToken.chain_id !== selectedPrime.chain_id;
 
   useEffect(() => {
     const receiptTokenAddress = selectedReceiptToken?.receipt_token_address;
@@ -197,7 +274,8 @@ export function RiskBreakdownTab({
       !isEnabled ||
       !selectedReceiptToken ||
       receiptTokenId === null ||
-      !receiptTokenAddress
+      !receiptTokenAddress ||
+      isChainMismatch
     ) {
       setBreakdown(null);
       setErrorMessage(null);
@@ -214,6 +292,7 @@ export function RiskBreakdownTab({
     void getRiskBreakdown(
       selectedReceiptToken.chain_id,
       receiptTokenAddress,
+      primeId,
       controller.signal,
     )
       .then((response) => {
@@ -242,7 +321,13 @@ export function RiskBreakdownTab({
       });
 
     return () => controller.abort();
-  }, [isEnabled, receiptTokenId, selectedReceiptToken]);
+  }, [
+    isChainMismatch,
+    isEnabled,
+    receiptTokenId,
+    primeId,
+    selectedReceiptToken,
+  ]);
 
   useEffect(() => {
     if (!isEnabled || !selectedReceiptToken) {
@@ -322,6 +407,16 @@ export function RiskBreakdownTab({
 
     let weightedThreshold = 0;
     let weightedBonus = 0;
+    // Track whether any item carried liquidation params; protocols without
+    // per-asset params (e.g. Maple) leave these null so the summary shows "—"
+    // rather than a misleading 0%/0x.
+    let thresholdCount = 0;
+    let bonusCount = 0;
+    // USD weight of only the rows that carry each param. Dividing by totalUsd
+    // instead would dilute the average toward 0 on a mixed dataset (rows without
+    // the param would count in the denominator but not the numerator).
+    let thresholdUsd = 0;
+    let bonusUsd = 0;
     let largestItem = breakdown.items[0] ?? null;
     let largestItemUsd = largestItem
       ? (parseNumericValue(largestItem.amount_usd) ?? 0)
@@ -341,43 +436,44 @@ export function RiskBreakdownTab({
 
       if (liquidationThreshold !== null) {
         weightedThreshold += liquidationThreshold * amountUsd;
+        thresholdUsd += amountUsd;
+        thresholdCount += 1;
       }
 
       if (liquidationBonus !== null) {
         weightedBonus += liquidationBonus * amountUsd;
+        bonusUsd += amountUsd;
+        bonusCount += 1;
       }
     }
 
     return {
       assetCount: breakdown.items.length,
       largestItem,
-      weightedBonus: totalUsd > 0 ? weightedBonus / totalUsd : null,
-      weightedThreshold: totalUsd > 0 ? weightedThreshold / totalUsd : null,
+      weightedBonus:
+        bonusUsd > 0 && bonusCount > 0 ? weightedBonus / bonusUsd : null,
+      weightedThreshold:
+        thresholdUsd > 0 && thresholdCount > 0
+          ? weightedThreshold / thresholdUsd
+          : null,
     };
-  }, [breakdown, totalUsd]);
+  }, [breakdown]);
 
   if (!selectedReceiptToken) {
     return (
-      <TabSelectionPrompt message="Pick a receipt token to inspect its collateral backing." />
+      <TabNotePanel message="Pick a receipt token to inspect its collateral backing." />
     );
   }
 
   if (receiptTokenId === null) {
     return (
-      <div
-        className={css({
-          borderRadius: 'md',
-          borderStyle: 'solid',
-          borderWidth: '1px',
-          borderColor: 'border.subtle',
-          bg: 'surface.subtle',
-          p: '4',
-        })}
-      >
-        <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>
-          Direct asset holdings have no collateral backing to break down.
-        </p>
-      </div>
+      <TabNotePanel message="Direct asset holdings have no collateral backing to break down." />
+    );
+  }
+
+  if (isChainMismatch) {
+    return (
+      <TabNotePanel message="Risk breakdown is not yet available for non-mainnet allocations." />
     );
   }
 
@@ -386,9 +482,11 @@ export function RiskBreakdownTab({
       {isLoading ? <LoadingIndicator message="Loading risk breakdown" /> : null}
 
       {errorMessage ? (
-        <TabErrorPanel
+        <ErrorState
           title="Unable to load the risk breakdown."
-          message={errorMessage}
+          description={errorMessage}
+          tone="critical"
+          size="inline"
         />
       ) : null}
 
@@ -448,11 +546,26 @@ export function RiskBreakdownTab({
                   selectedReceiptToken.underlying_symbol)
             }
             detail={
-              isTokenMetaLoading
-                ? 'Fetching token metadata'
-                : tokenCatalog
-                  ? `${tokenCatalog.address} · ${tokenCatalog.decimals ?? 'Unknown'} decimals`
-                  : 'Token metadata unavailable'
+              isTokenMetaLoading ? (
+                'Fetching token metadata'
+              ) : tokenCatalog ? (
+                <span
+                  className={css({
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '1.5',
+                    flexWrap: 'wrap',
+                  })}
+                >
+                  <TokenAddress
+                    address={tokenCatalog.address}
+                    chainId={selectedReceiptToken.chain_id}
+                  />
+                  <span>{tokenCatalog.decimals ?? 'Unknown'} decimals</span>
+                </span>
+              ) : (
+                'Token metadata unavailable'
+              )
             }
           />
           <SummaryMetric
@@ -494,21 +607,7 @@ export function RiskBreakdownTab({
       !isLoading &&
       breakdown &&
       breakdown.items.length === 0 ? (
-        <div
-          className={css({
-            borderRadius: 'md',
-            borderStyle: 'solid',
-            borderWidth: '1px',
-            borderColor: 'border.subtle',
-            bg: 'surface.subtle',
-            p: '4',
-          })}
-        >
-          <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>
-            This receipt token returned no collateral items for the risk
-            breakdown response.
-          </p>
-        </div>
+        <TabNotePanel message="This receipt token returned no collateral items for the risk breakdown response." />
       ) : null}
 
       {!errorMessage && (isLoading || breakdown) ? (
@@ -517,6 +616,18 @@ export function RiskBreakdownTab({
           items={breakdown?.items ?? []}
           isLoading={isLoading}
           searchQuery={searchQuery}
+        />
+      ) : null}
+
+      {!errorMessage &&
+      selectedReceiptToken.protocol_name?.toLowerCase() === 'maple' ? (
+        <TabNotePanel
+          message={
+            'Source: Maple Finance GraphQL API. Collateral amounts and USD values are attested by Maple/custodians and are not independently verified on-chain. Internal (AMM/strategy) loans are excluded; the breakdown reflects external-loan collateral plus available pool liquidity, so it is less than total supply.' +
+            (selectedPrime
+              ? ' Per-prime USD values are a pro-rata approximation (each pool asset scaled by the prime’s pool share) and will not match data.spark.fi, which uses a different (coverage-capped) attribution model. Backing % is a pool property and is identical for every prime.'
+              : '')
+          }
         />
       ) : null}
 

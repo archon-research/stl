@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fluid-vault-indexer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fluid-vault-indexer
+  template:
+    metadata:
+      labels:
+        app: fluid-vault-indexer
+    spec:
+      serviceAccountName: fluid-vault-indexer
+      containers:
+        - name: fluid-vault-indexer
+          image: fluid-vault-indexer
+          envFrom:
+            - configMapRef:
+                name: otel-config
+            - configMapRef:
+                name: fluid-vault-indexer-config
+            - secretRef:
+                name: fluid-vault-indexer
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pgrep -f fluid-vault-indexer"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+      terminationGracePeriodSeconds: 60

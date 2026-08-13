@@ -32,11 +32,19 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rpc"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 )
+
+// meterName scopes the rpchttp transport's metrics in the global meter provider.
+const meterName = "github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
 
 // MaxRetriesUpperBound caps Config.MaxRetries to a sane value to prevent
 // runaway retry loops if a caller passes an absurdly large number. With
@@ -64,6 +72,15 @@ type Config struct {
 
 	// Transport is the underlying round-tripper. nil → http.DefaultTransport.
 	Transport http.RoundTripper
+
+	// Meter, if non-nil, enables per-attempt RPC telemetry: rpc_http_attempts_total
+	// (every attempt, labeled by status code) and rpc_http_retries_total (each
+	// retry, labeled by reason). This is the only place that sees HTTP status
+	// codes and retry counts, so without it a slow logical RPC call (which times
+	// the whole client.Do including silent backoff) cannot be attributed to
+	// throttling (429) vs server errors (5xx) vs a genuinely slow single
+	// response. nil disables it with zero overhead.
+	Meter metric.Meter
 }
 
 // NewBackfillerClient returns an *http.Client tuned for high-throughput
@@ -100,6 +117,9 @@ func NewBackfillerClient(concurrency int) *http.Client {
 		MaxBackoff:  10 * time.Second,
 		Timeout:     120 * time.Second,
 		Transport:   transport,
+		// Match DialEthereum: emit retry telemetry on the high-throughput
+		// backfill path too, so no RPC caller is a blind spot.
+		Meter: otel.GetMeterProvider().Meter(meterName),
 	})
 }
 
@@ -121,15 +141,38 @@ func NewClient(cfg Config) *http.Client {
 	if base == nil {
 		base = http.DefaultTransport
 	}
+	rt := &retryTransport{
+		base:        base,
+		maxRetries:  cfg.MaxRetries,
+		baseBackoff: cfg.BaseBackoff,
+		maxBackoff:  cfg.MaxBackoff,
+		jitterFrac:  0.25,
+	}
+	if cfg.Meter != nil {
+		// Dotted instrument names per repo convention (e.g. alchemy.client.retries.total);
+		// the OTLP→Prometheus pipeline flattens to rpc_http_attempts_total /
+		// rpc_http_retries_total and appends _total for monotonic counters.
+		attempts, attemptsErr := cfg.Meter.Int64Counter(
+			"rpc.http.attempts",
+			metric.WithDescription("HTTP attempts made by the RPC retry transport, labeled by server.address and rpc.http.status_code"),
+		)
+		retries, retriesErr := cfg.Meter.Int64Counter(
+			"rpc.http.retries",
+			metric.WithDescription("HTTP retries triggered by the RPC retry transport, labeled by server.address and reason (429/5xx/network)"),
+		)
+		// Instrument creation only fails on a malformed instrument name — a
+		// programming error our constant names cannot hit (and tests cover the
+		// happy path). On the off chance it ever does, leave telemetry disabled
+		// rather than break the RPC data path; emitting nothing is the safe
+		// degradation for best-effort observability.
+		if err := errors.Join(attemptsErr, retriesErr); err == nil {
+			rt.attempts = attempts
+			rt.retries = retries
+		}
+	}
 	return &http.Client{
-		Timeout: cfg.Timeout,
-		Transport: &retryTransport{
-			base:        base,
-			maxRetries:  cfg.MaxRetries,
-			baseBackoff: cfg.BaseBackoff,
-			maxBackoff:  cfg.MaxBackoff,
-			jitterFrac:  0.25,
-		},
+		Timeout:   cfg.Timeout,
+		Transport: rt,
 	}
 }
 
@@ -141,6 +184,10 @@ type retryTransport struct {
 	// jitterFrac in [0, 1) — fraction of backoff used as ± jitter range.
 	// 0 disables jitter (tests).
 	jitterFrac float64
+
+	// attempts and retries are nil unless a Meter was configured (see Config.Meter).
+	attempts metric.Int64Counter
+	retries  metric.Int64Counter
 }
 
 func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -182,11 +229,70 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		resp, err := t.base.RoundTrip(req)
 		lastResp, lastErr = resp, err
 
+		if t.attempts != nil {
+			t.attempts.Add(req.Context(), 1, metric.WithAttributes(
+				attribute.String("server.address", req.URL.Host),
+				attribute.String("rpc.http.status_code", attemptCode(resp, err)),
+			))
+		}
+
 		if !shouldRetry(resp, err) {
 			return resp, err
 		}
+
+		// shouldRetry is true, but the final allowed attempt won't loop again —
+		// only record a retry when another attempt actually follows.
+		if attempt < t.maxRetries {
+			reason := retryReason(resp, err)
+			if t.retries != nil {
+				t.retries.Add(req.Context(), 1, metric.WithAttributes(
+					attribute.String("server.address", req.URL.Host),
+					attribute.String("reason", reason),
+				))
+			}
+			// Inline the retry on the caller's active span (e.g. oracle.fetchPrices)
+			// so a slow span self-explains without timestamp-correlating metrics.
+			// No-op when tracing is off or unsampled (span not recording).
+			if span := trace.SpanFromContext(req.Context()); span.IsRecording() {
+				span.AddEvent("rpc.retry", trace.WithAttributes(
+					attribute.Int("retry.attempt", attempt+1), // 1-based: this is the Nth retry
+					attribute.String("retry.reason", reason),
+					attribute.String("rpc.http.status_code", attemptCode(resp, err)),
+				))
+			}
+		}
 	}
 	return lastResp, lastErr
+}
+
+// attemptCode labels an attempt for rpc_http_attempts_total. A response's
+// status code wins; a transport error is bucketed by kind so the counter never
+// loses an attempt to a missing label.
+func attemptCode(resp *http.Response, err error) string {
+	if err != nil {
+		switch {
+		case errors.Is(err, context.Canceled):
+			return "canceled"
+		case errors.Is(err, context.DeadlineExceeded):
+			return "deadline"
+		default:
+			return "network_error"
+		}
+	}
+	return strconv.Itoa(resp.StatusCode)
+}
+
+// retryReason labels a retry for rpc_http_retries_total. Only called when
+// shouldRetry is true, so the input is always a 429, a 5xx, or a non-context
+// transport error.
+func retryReason(resp *http.Response, err error) string {
+	if err != nil {
+		return "network"
+	}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return "429"
+	}
+	return "5xx"
 }
 
 func shouldRetry(resp *http.Response, err error) bool {
@@ -245,6 +351,13 @@ func WithTransport(rt http.RoundTripper) Option {
 	return func(c *Config) { c.Transport = rt }
 }
 
+// WithMeter overrides the meter used for retry telemetry. DialEthereum
+// defaults to the global meter provider, so this is only needed to pin a
+// specific meter (e.g. in tests with a manual reader).
+func WithMeter(m metric.Meter) Option {
+	return func(c *Config) { c.Meter = m }
+}
+
 // WithClientTimeout sets the wall-clock budget for the entire request,
 // including all retries. Equivalent to setting http.Client.Timeout. Use
 // this instead of mutating the returned client's Timeout field directly,
@@ -260,11 +373,23 @@ func WithClientTimeout(d time.Duration) Option {
 //
 // Defaults: MaxRetries=5, BaseBackoff=250ms, MaxBackoff=10s, ±25% jitter.
 // Override via With* options.
-func DialEthereum(ctx context.Context, rawURL string, opts ...Option) (*ethclient.Client, error) {
+// defaultDialTimeout bounds the whole request including all retries. The prior
+// default of 0 (no client timeout) let a single hung attempt — or a 429/5xx
+// retry storm — block a per-block worker unbounded. 60s is a safety ceiling,
+// generous enough to let the full retry budget complete on a transient
+// throttle; lower it per service (WithClientTimeout) to trade completeness for
+// freshness.
+const defaultDialTimeout = 60 * time.Second
+
+// dialConfig builds the Config DialEthereum dials with: retry defaults, a
+// bounded client timeout, and the global meter for retry telemetry — each
+// overridable via opts.
+func dialConfig(opts ...Option) Config {
 	cfg := Config{
 		MaxRetries:  5,
 		BaseBackoff: 250 * time.Millisecond,
 		MaxBackoff:  10 * time.Second,
+		Timeout:     defaultDialTimeout,
 	}
 	for _, opt := range opts {
 		if opt == nil {
@@ -275,7 +400,17 @@ func DialEthereum(ctx context.Context, rawURL string, opts ...Option) (*ethclien
 		}
 		opt(&cfg)
 	}
-	rpcClient, err := rpc.DialOptions(ctx, rawURL, rpc.WithHTTPClient(NewClient(cfg)))
+	// Default to the global meter provider so every worker dialing through
+	// DialEthereum emits retry telemetry without opting in. It is a no-op meter
+	// until the process configures OTel, which all our workers do at startup.
+	if cfg.Meter == nil {
+		cfg.Meter = otel.GetMeterProvider().Meter(meterName)
+	}
+	return cfg
+}
+
+func DialEthereum(ctx context.Context, rawURL string, opts ...Option) (*ethclient.Client, error) {
+	rpcClient, err := rpc.DialOptions(ctx, rawURL, rpc.WithHTTPClient(NewClient(dialConfig(opts...))))
 	if err != nil {
 		return nil, fmt.Errorf("rpchttp: dial %s: %w", redactURL(rawURL), err)
 	}

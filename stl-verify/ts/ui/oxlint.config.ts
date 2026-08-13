@@ -1,13 +1,13 @@
-import reactConfig from '@archon-research/oxlint-config/react';
+import boundariesConfig from '@archon-research/oxlint-config/design-system-boundaries';
 
 const config = {
-  ...reactConfig,
+  ...boundariesConfig,
   categories: {
     correctness: 'error',
     suspicious: 'error',
   },
   rules: {
-    ...(reactConfig.rules ?? {}),
+    ...(boundariesConfig.rules ?? {}),
     'import/no-unassigned-import': 'off',
     'no-console': 'error',
   },

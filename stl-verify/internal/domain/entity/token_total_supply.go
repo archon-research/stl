@@ -43,5 +43,10 @@ func (t *TokenTotalSupply) Validate() error {
 	if t.Source != "event" && t.Source != "sweep" {
 		return fmt.Errorf("source must be 'event' or 'sweep', got %q", t.Source)
 	}
+	// created_at_block feeds the registry's LEAST() merge; a 0 ("unknown"
+	// masquerading as genesis) would clobber the stored block.
+	if t.CreatedAtBlock <= 0 {
+		return fmt.Errorf("created_at_block must be positive, got %d", t.CreatedAtBlock)
+	}
 	return nil
 }

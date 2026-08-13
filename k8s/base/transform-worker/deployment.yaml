@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: transform-worker
+spec:
+  # Ships at 0 on purpose: the worker registers its Temporal schedule and starts
+  # ticking as soon as a replica runs, so an ungated rollout would overlap the first
+  # full parity recount with the one-off transform-bootstrap over the whole history.
+  # Rollout is: apply (worker at 0) -> run transform-bootstrap + _parity_verify_all ->
+  # validate parity/load -> bump to 1 in a separate change. VectorCronjobWorkerDown is
+  # guarded on desired replicas > 0, so it does not page while this is intentionally 0.
+  replicas: 0
+  selector:
+    matchLabels:
+      app: transform-worker
+  template:
+    metadata:
+      labels:
+        app: transform-worker
+    spec:
+      serviceAccountName: transform-worker
+      containers:
+        - name: transform-worker
+          image: transform-worker
+          env:
+            # Inject the deployment name so the worker registers its Temporal
+            # schedule/task queue under this name (cfg.Name) and its metrics
+            # carry service_name="transform-worker".
+            - name: SERVICE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['app']
+          envFrom:
+            - configMapRef:
+                name: otel-config
+            - configMapRef:
+                name: transform-worker
+            - secretRef:
+                name: transform-worker
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+      terminationGracePeriodSeconds: 60

@@ -4,13 +4,13 @@ import (
 	"bytes"
 	"cmp"
 	"context"
-	"crypto/sha256"
 	"fmt"
 	"log/slog"
 	"slices"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
@@ -110,7 +110,20 @@ func (r *AllocationRepository) SavePositions(
 		key := tokenCacheKey{ChainID: pos.ChainID, Address: pos.TokenAddress}
 		tokenID := tokenIDs[key]
 
-		query, args, err := r.buildInsertArgs(pos, tokenID)
+		var underlyingTokenID *int64
+		if pos.Underlying != nil {
+			ukey := tokenCacheKey{ChainID: pos.ChainID, Address: pos.Underlying.AssetAddress}
+			id, ok := tokenIDs[ukey]
+			if !ok {
+				return fmt.Errorf(
+					"underlying token ID not resolved for chain=%d address=%s",
+					pos.ChainID, pos.Underlying.AssetAddress.Hex(),
+				)
+			}
+			underlyingTokenID = &id
+		}
+
+		query, args, err := r.buildInsertArgs(pos, tokenID, underlyingTokenID)
 		if err != nil {
 			return fmt.Errorf(
 				"build insert for chain=%d address=%s block=%d: %w",
@@ -143,6 +156,7 @@ func (r *AllocationRepository) SavePositions(
 func (r *AllocationRepository) buildInsertArgs(
 	pos *entity.AllocationPosition,
 	tokenID int64,
+	underlyingTokenID *int64,
 ) (string, []any, error) {
 	balance := toNumeric(pos.Balance, pos.TokenDecimals)
 	scaled := toNullableNumeric(pos.ScaledBalance, pos.TokenDecimals)
@@ -153,13 +167,21 @@ func (r *AllocationRepository) buildInsertArgs(
 		return "", nil, fmt.Errorf("encode tx_hash: %w", err)
 	}
 
+	// NULL by default; the DB CHECK enforces the pair invariant, entity
+	// Validate() guarantees a present valuation is complete.
+	underlyingValue := pgtype.Numeric{}
+	if pos.Underlying != nil {
+		underlyingValue = toNumeric(pos.Underlying.Value, pos.Underlying.AssetDecimals)
+	}
+
 	query := `
 		INSERT INTO allocation_position (
 			chain_id, token_id, prime_id, proxy_address,
 			balance, scaled_balance,
 			block_number, block_version,
-			tx_hash, log_index, tx_amount, direction, created_at, build_id
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+			tx_hash, log_index, tx_amount, direction, created_at, build_id,
+			underlying_value, underlying_token_id
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 		ON CONFLICT (chain_id, token_id, prime_id, proxy_address, block_number, block_version, tx_hash, log_index, direction, processing_version, created_at) DO NOTHING
 	`
 
@@ -178,28 +200,50 @@ func (r *AllocationRepository) buildInsertArgs(
 		pos.Direction,
 		pos.CreatedAt,
 		int(r.buildID),
+		underlyingValue,
+		underlyingTokenID,
 	}
 
 	return query, args, nil
 }
 
+// encodeTxHash returns the on-chain transaction hash for a position, or the
+// zero-hash sentinel for sweeps.
+//
+// Sweep (reconciliation) snapshots have no originating transaction. tx_hash is
+// part of the primary key so it cannot be NULL, but the rest of the key
+// — (chain_id, token_id, prime_id, proxy_address, block_number, block_version,
+// log_index, direction, processing_version, created_at) — already uniquely
+// identifies a sweep observation, so the hash carries no dedup information for
+// them. We therefore store the zero hash as an explicit "no transaction"
+// sentinel: no real transaction hash takes that value in practice (a collision
+// is cryptographically negligible), and it no longer masquerades as a genuine
+// on-chain tx the way the previous content-addressed synthetic hash did
+// (VEC-340).
+//
+// The sentinel is only valid for sweeps. A transaction-driven position without
+// a hash signals an upstream bug, so we reject it rather than silently persist
+// it as "no transaction"; and a present hash must be a full 32-byte value
+// (common.FromHex decodes truncated hex, which we must not store).
 func encodeTxHash(pos *entity.AllocationPosition) ([]byte, error) {
-	if pos.TxHash != "" {
-		b := common.FromHex(pos.TxHash)
-		if len(b) == 0 {
-			return nil, fmt.Errorf("invalid hex tx_hash: %s", pos.TxHash)
+	if pos.TxHash == "" {
+		if pos.Direction != "sweep" {
+			return nil, fmt.Errorf(
+				"missing tx_hash for non-sweep position (direction=%q)",
+				pos.Direction,
+			)
 		}
-		return b, nil
+		return common.Hash{}.Bytes(), nil
 	}
 
-	input := fmt.Sprintf("sweep:%d:%d:%s:%s",
-		pos.ChainID,
-		pos.BlockNumber,
-		pos.TokenAddress.Hex(),
-		pos.ProxyAddress.Hex(),
-	)
-	h := sha256.Sum256([]byte(input))
-	return h[:], nil
+	b := common.FromHex(pos.TxHash)
+	if len(b) != common.HashLength {
+		return nil, fmt.Errorf(
+			"tx_hash must be %d bytes, got %d: %s",
+			common.HashLength, len(b), pos.TxHash,
+		)
+	}
+	return b, nil
 }
 
 func (r *AllocationRepository) resolveTokenIDs(
@@ -211,25 +255,49 @@ func (r *AllocationRepository) resolveTokenIDs(
 
 	for _, pos := range positions {
 		key := tokenCacheKey{ChainID: pos.ChainID, Address: pos.TokenAddress}
-		if _, exists := result[key]; exists {
-			continue
+		if _, exists := result[key]; !exists {
+			tokenID, err := r.tokenRepo.GetOrCreateToken(
+				ctx, tx,
+				pos.ChainID,
+				pos.TokenAddress,
+				pos.TokenSymbol,
+				pos.TokenDecimals,
+				&pos.CreatedAtBlock,
+			)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"GetOrCreateToken chain=%d address=%s: %w",
+					pos.ChainID, pos.TokenAddress.Hex(), err,
+				)
+			}
+			result[key] = tokenID
 		}
 
-		tokenID, err := r.tokenRepo.GetOrCreateToken(
-			ctx, tx,
-			pos.ChainID,
-			pos.TokenAddress,
-			pos.TokenSymbol,
-			pos.TokenDecimals,
-			pos.CreatedAtBlock,
-		)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"GetOrCreateToken chain=%d address=%s: %w",
-				pos.ChainID, pos.TokenAddress.Hex(), err,
-			)
+		if pos.Underlying != nil {
+			ukey := tokenCacheKey{ChainID: pos.ChainID, Address: pos.Underlying.AssetAddress}
+			if _, exists := result[ukey]; !exists {
+				// The underlying's true deploy block is unknown here; the
+				// observation block is a non-zero floor and the token upsert's
+				// LEAST() merge self-corrects downward (same convention as
+				// buildSupplyEntities).
+				createdAtBlock := pos.BlockNumber
+				underlyingID, err := r.tokenRepo.GetOrCreateToken(
+					ctx, tx,
+					pos.ChainID,
+					pos.Underlying.AssetAddress,
+					pos.Underlying.AssetSymbol,
+					pos.Underlying.AssetDecimals,
+					&createdAtBlock,
+				)
+				if err != nil {
+					return nil, fmt.Errorf(
+						"GetOrCreateToken underlying chain=%d address=%s: %w",
+						pos.ChainID, pos.Underlying.AssetAddress.Hex(), err,
+					)
+				}
+				result[ukey] = underlyingID
+			}
 		}
-		result[key] = tokenID
 	}
 
 	return result, nil

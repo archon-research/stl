@@ -27,6 +27,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/aavelike"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving/archivingwire"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
@@ -284,11 +285,24 @@ func run(args []string) error {
 		return fmt.Errorf("creating receipt token repository: %w", err)
 	}
 
+	debtTokenRepo, err := postgres.NewDebtTokenRepository(pool, logger)
+	if err != nil {
+		return fmt.Errorf("creating debt token repository: %w", err)
+	}
+
 	// Create PositionReader directly for batch RPC reads
 	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3)
 	if err != nil {
 		return fmt.Errorf("creating multicall client: %w", err)
 	}
+
+	// Optional raw SC call archiving (VEC-81). Off unless ARCHIVE_SC_CALLS=true.
+	archiveWrap, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "aave-like-snapshot")
+	if err != nil {
+		return err
+	}
+	defer archiveDrain()
+	mc = archiveWrap(mc)
 
 	erc20ABI, err := abis.GetERC20ABI()
 	if err != nil {
@@ -305,6 +319,7 @@ func run(args []string) error {
 		nil, // no SQS consumer
 		nil, // no cache reader
 		ethClient,
+		mc,
 		txManager,
 		userRepo,
 		protocolRepo,
@@ -312,6 +327,7 @@ func run(args []string) error {
 		positionRepo,
 		eventRepo,
 		receiptTokenRepo,
+		debtTokenRepo,
 	)
 	if err != nil {
 		return fmt.Errorf("creating position tracker service: %w", err)
@@ -371,7 +387,7 @@ func run(args []string) error {
 			logger.Info("batch starting", "batch", batchIdx+1, "of", len(batches), "users", len(batch))
 
 			rpcStart := time.Now()
-			results, err := reader.GetBatchUserPositionData(gCtx, batch, cfg.protocolAddress, cfg.chainID, int64(blockNumber))
+			results, err := reader.GetBatchUserPositionData(gCtx, batch, cfg.protocolAddress, cfg.chainID, int64(blockNumber), common.Hash{})
 			if err != nil {
 				return fmt.Errorf("batch %d RPC failed after %s: %w", batchIdx+1, time.Since(rpcStart), err)
 			}

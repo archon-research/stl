@@ -26,6 +26,16 @@ const (
 	tracerName = "github.com/archon-research/stl/stl-verify/internal/services/backfill_gaps"
 )
 
+// errStaleForkSkip is a sentinel returned by processBlockDataInner when the
+// fetched block is intentionally dropped because a different block already
+// exists at the same height (routine stale-fork rejection). The outer
+// processBlockData wrapper treats this as a benign success — the block is
+// already represented canonically by the other-hash row — and skips the
+// post-cycle invariant check so it does not page on routine arbitrum
+// stale-fork broadcast. It MUST stay internal:
+// callers above processBlockData never see it.
+var errStaleForkSkip = errors.New("stale-fork skip: different block already at this height")
+
 // BackfillConfig holds configuration for the BackfillService.
 type BackfillConfig struct {
 	// ChainID is the blockchain chain ID (e.g., 1 for Ethereum mainnet).
@@ -55,6 +65,12 @@ type BackfillConfig struct {
 
 	// Logger is the structured logger.
 	Logger *slog.Logger
+
+	// Metrics is the optional recorder for backfill invariant observability
+	// (see outbound.BackfillRecorder). Nil-safe: if unset the post-cycle
+	// canonical-row invariant check still logs but does not increment a
+	// counter.
+	Metrics outbound.BackfillRecorder
 }
 
 // BackfillConfigDefaults returns default configuration.
@@ -78,6 +94,7 @@ type BackfillService struct {
 	stateRepo outbound.BlockStateRepository
 	cache     outbound.BlockCache
 	eventSink outbound.EventSink
+	metrics   outbound.BackfillRecorder
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -134,6 +151,7 @@ func NewBackfillService(
 		stateRepo: stateRepo,
 		cache:     cache,
 		eventSink: eventSink,
+		metrics:   config.Metrics,
 		logger:    config.Logger.With("component", "backfill-service"),
 	}, nil
 }
@@ -445,8 +463,40 @@ func (s *BackfillService) processBatch(ctx context.Context, from, to int64) erro
 	return nil
 }
 
-// processBlockData processes a single block's data.
+// processBlockData processes a single block's data. It wraps the inner save
+// path with a post-cycle invariant check (Piece 2 / VEC-277): if the inner
+// returned no error but no canonical (non-orphaned) row now exists for the
+// block hash, fire a counter and an ERROR log so the silent-failure mode
+// behind the 2026-06-02 arbitrum backfill incident is visible the next time
+// it appears. The post-check never converts a benign success into an error;
+// it only observes.
 func (s *BackfillService) processBlockData(ctx context.Context, bd outbound.BlockData) error {
+	err := s.processBlockDataInner(ctx, bd)
+	if err == nil {
+		s.assertCanonicalRowExists(ctx, bd)
+		return nil
+	}
+	// Stale-fork rejection: a DIFFERENT canonical block already exists at this
+	// height (e.g. backfill fetched a block that the live path has since
+	// superseded). This is not a silent failure — a canonical row DOES exist
+	// at this height, just under another hash — so asserting on the fetched
+	// hash would always be wrong. Treat as benign success: no invariant check,
+	// no caller-visible error.
+	//
+	// On Arbitrum this happens often, but NOT because the chain reorgs (its
+	// single sequencer effectively never does). It is driven by out-of-order
+	// header delivery under load (VEC-277): the misclassified-reorg head churn
+	// leaves backfill fetching now-superseded blocks.
+	if errors.Is(err, errStaleForkSkip) {
+		return nil
+	}
+	return err
+}
+
+// processBlockDataInner contains the original processBlockData body. It is
+// invoked exclusively by processBlockData so the post-cycle invariant check
+// runs on every successful gap-fill cycle.
+func (s *BackfillService) processBlockDataInner(ctx context.Context, bd outbound.BlockData) error {
 	blockNum := bd.BlockNumber
 
 	// Surface the upstream null / fetch error early so we never advance into
@@ -471,6 +521,33 @@ func (s *BackfillService) processBlockData(ctx context.Context, bd outbound.Bloc
 		return fmt.Errorf("failed to check for existing block %d: %w", blockNum, err)
 	}
 	if existing != nil {
+		// Self-heal: if the only row for this canonical hash is orphaned, clear
+		// the orphan flag rather than silently returning. Otherwise the upstream
+		// over-orphaning in HandleReorgAtomic (see VEC-277 arbitrum diagnosis)
+		// would leave FindGaps reporting the block as missing forever while
+		// this idempotency check kept skipping the insert.
+		if existing.IsOrphaned {
+			// Before un-orphaning, confirm the row's linkage is still consistent
+			// with the chain we just fetched. The stored parent_hash should
+			// match header.ParentHash (same block, byte-identical), and the
+			// surrounding heights should agree. If not, the stored row is from
+			// a different fork than the one we just fetched and un-orphaning
+			// would mask the divergence — bail out without a write.
+			if existing.ParentHash != header.ParentHash {
+				return fmt.Errorf("refusing to un-orphan block %d: stored parent_hash %s differs from fetched %s",
+					blockNum, truncateHash(existing.ParentHash), truncateHash(header.ParentHash))
+			}
+			if err := s.validateBlockLinkage(ctx, blockNum, header.Hash, header.ParentHash); err != nil {
+				return fmt.Errorf("refusing to un-orphan block %d: linkage validation failed: %w", blockNum, err)
+			}
+			if clearErr := s.stateRepo.ClearBlockOrphaned(ctx, header.Hash); clearErr != nil {
+				return fmt.Errorf("failed to clear orphan flag on existing block %d: %w", blockNum, clearErr)
+			}
+			s.logger.Info("cleared stale orphan flag on backfilled block",
+				"block", blockNum,
+				"hash", truncateHash(header.Hash))
+			return nil
+		}
 		s.logger.Debug("block already exists, skipping", "block", blockNum)
 		return nil
 	}
@@ -487,7 +564,12 @@ func (s *BackfillService) processBlockData(ctx context.Context, bd outbound.Bloc
 			"block", blockNum,
 			"existingHash", truncateHash(existingAtHeight.Hash),
 			"fetchedHash", truncateHash(header.Hash))
-		return nil
+		// Return the typed sentinel so the outer wrapper can suppress the
+		// post-cycle invariant check (the canonical row exists under the OTHER
+		// hash; asserting canonicity on the fetched hash would always fail
+		// here and fire VectorWatcherSilentBackfillNoCanonical critically
+		// every 10m on every routine arbitrum stale-fork broadcast).
+		return errStaleForkSkip
 	}
 
 	// Validate that fetched block matches the expected chain.
@@ -550,6 +632,56 @@ func (s *BackfillService) processBlockData(ctx context.Context, bd outbound.Bloc
 	}
 
 	return nil
+}
+
+// assertCanonicalRowExists is the post-cycle invariant check for the
+// backfill gap-fill path. After processBlockDataInner returns nil it
+// confirms that a non-orphaned row now exists for the block's hash. If
+// not — i.e. some future code path produced an orphan-only row the loop
+// cannot heal — it increments backfill.gap_fill.no_canonical.total and
+// emits an ERROR log so the silent-failure mode behind VEC-277 arbitrum
+// backfill is
+// caught the next time it appears. It MUST NOT return an error: this is
+// pure observation; failing the loop here would mask the next real bug.
+func (s *BackfillService) assertCanonicalRowExists(ctx context.Context, bd outbound.BlockData) {
+	if rpcutil.IsNullOrEmpty(bd.Block) {
+		// Inner already errored out on this earlier; nothing to observe.
+		return
+	}
+	var header outbound.BlockHeader
+	if err := shared.ParseBlockHeader(bd.Block, &header); err != nil {
+		// Header parse failed — inner would have also failed earlier; nothing
+		// to do here.
+		return
+	}
+
+	existing, err := s.stateRepo.GetBlockByHash(ctx, header.Hash)
+	if err != nil {
+		s.logger.Warn("post-cycle canonical-row check: GetBlockByHash failed",
+			"block", bd.BlockNumber,
+			"hash", truncateHash(header.Hash),
+			"error", err)
+		return
+	}
+	if existing != nil && !existing.IsOrphaned {
+		return
+	}
+
+	// Either no row at all, or the only row is orphaned — both mean the
+	// gap-fill cycle returned success but did not produce a canonical row.
+	state := "missing"
+	if existing != nil {
+		state = "orphan_only"
+	}
+	if s.metrics != nil {
+		s.metrics.RecordBackfillGapNoCanonical(ctx, s.config.ChainID)
+	}
+	s.logger.Error("backfill completed but no canonical row produced — see incident doc",
+		"chain", s.config.ChainID,
+		"block", bd.BlockNumber,
+		"hash", truncateHash(header.Hash),
+		"existing_row_state", state,
+		"incident_doc", "docs/incidents/2026-06-02-arbitrum-backfill-loop.md")
 }
 
 // validateBlockLinkage checks that the fetched block links correctly with
@@ -842,6 +974,18 @@ func (s *BackfillService) advanceWatermark(ctx context.Context) error {
 
 	if maxBlock == 0 {
 		return nil
+	}
+
+	// Emit the current backfill lag (head minus watermark) as a gauge. In
+	// steady state this sits near zero; a sustained or growing value is the
+	// symptom that went unseen for 26 days in the VEC-277 incident. maxBlock is
+	// the canonical (non-orphaned) head, which can briefly dip below an
+	// already-advanced watermark while blocks are being orphaned, so clamp the
+	// lag at zero rather than emitting a negative gauge that under-reports lag
+	// exactly when the alert should fire.
+	if s.metrics != nil {
+		lag := max(maxBlock-currentWatermark, 0)
+		s.metrics.RecordWatermarkLag(ctx, lag)
 	}
 
 	// Start checking from the block after the current watermark

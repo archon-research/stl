@@ -8,7 +8,6 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -21,7 +20,10 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving/archivingwire"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
@@ -57,16 +59,6 @@ func main() {
 		slog.Error("prime-debt-indexer exited with error", "error", err)
 		os.Exit(1)
 	}
-}
-
-// maskRPCURL redacts the path (which typically contains API keys) from an RPC URL.
-// Example: "https://eth-mainnet.g.alchemy.com/v2/abc123" → "https://eth-mainnet.g.alchemy.com/***"
-func maskRPCURL(rawURL string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return "***"
-	}
-	return fmt.Sprintf("%s://%s/***", u.Scheme, u.Host)
 }
 
 // run is the entry point for the prime-debt-indexer.
@@ -141,7 +133,7 @@ func run(ctx context.Context, args []string) error {
 	defer sqsConsumer.Close()
 
 	// PostgreSQL
-	pool, err := postgres.OpenPool(ctx, postgres.DefaultDBConfig(*dbURL))
+	pool, err := postgres.OpenPool(ctx, postgres.WorkerDBConfig(*dbURL))
 	if err != nil {
 		return fmt.Errorf("database: %w", err)
 	}
@@ -178,13 +170,29 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("eth rpc dial: %w", err)
 	}
 	defer ethClient.Close()
-	logger.Info("eth rpc client connected", "rpc", maskRPCURL(*rpcURL))
+	logger.Info("eth rpc client connected", "rpc", rpchttp.MaskURL(*rpcURL))
 
 	// Multicaller
-	mc, err := multicall.NewClient(ethClient, common.HexToAddress("0xcA11bde05977b3631167028862bE2a173976CA11"))
+	chainName, err := entity.ChainName(chainID)
+	if err != nil {
+		return fmt.Errorf("resolving chain name: %w", err)
+	}
+	mcTel, err := multicall.NewTelemetry(chainName)
+	if err != nil {
+		return fmt.Errorf("multicall telemetry: %w", err)
+	}
+	mc, err := multicall.NewClient(ethClient, blockchain.Multicall3, multicall.WithTelemetry(mcTel))
 	if err != nil {
 		return fmt.Errorf("multicall client: %w", err)
 	}
+
+	// Optional raw SC call archiving (VEC-81). Off unless ARCHIVE_SC_CALLS=true.
+	archiveWrap, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, chainID, int64(buildReg.BuildID()), "prime-debt")
+	if err != nil {
+		return err
+	}
+	defer archiveDrain()
+	mc = archiveWrap(mc)
 
 	// Vat caller (backed by multicall)
 	if !common.IsHexAddress(*vatAddr) {

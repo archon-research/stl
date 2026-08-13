@@ -14,7 +14,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/erc20meta"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/rpcerr"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -63,6 +63,10 @@ type VaultMetadata struct {
 }
 
 // TokenMetadata holds token metadata from on-chain reads.
+// Symbol may be empty when symbol() reverted or could not be decoded at the
+// read block; an empty symbol on a non-error return means "not resolvable at
+// this block — the per-block sweep retries it later". Decimals is always
+// authoritative (a decimals() revert is a hard error).
 type TokenMetadata struct {
 	Symbol   string
 	Decimals int
@@ -199,8 +203,12 @@ func (s *blockchainService) unpackBalance(result outbound.Result, label string, 
 	return bigIntFromAny(unpacked[0]), nil
 }
 
-// getMarketState fetches the market state from Morpho Blue at a specific block.
-func (s *blockchainService) getMarketState(ctx context.Context, marketID [32]byte, blockNumber int64) (retState *MarketState, retErr error) {
+// getMarketState fetches the market state from Morpho Blue, pinned to
+// blockHash: market() is versioned per-block state (totalSupplyAssets etc.
+// change every accrual), so after a reorg an archive node answering
+// eth_call-by-number would silently return the new canonical fork's state
+// instead of the state for the (blockNumber, version) this event belongs to.
+func (s *blockchainService) getMarketState(ctx context.Context, marketID [32]byte, blockHash common.Hash) (retState *MarketState, retErr error) {
 	ctx, span := s.telemetry.StartSpan(ctx, "morpho.rpc.getMarketState",
 		attribute.String("market.id", fmt.Sprintf("%x", marketID[:8])))
 	defer span.End()
@@ -208,7 +216,7 @@ func (s *blockchainService) getMarketState(ctx context.Context, marketID [32]byt
 	defer func() {
 		s.telemetry.RecordRPCCall(ctx, "getMarketState", time.Since(start), retErr)
 		if retErr != nil {
-			SetSpanError(span, retErr, "getMarketState failed")
+			telemetry.SetSpanError(span, retErr, "getMarketState failed")
 		}
 	}()
 
@@ -217,11 +225,11 @@ func (s *blockchainService) getMarketState(ctx context.Context, marketID [32]byt
 		return nil, fmt.Errorf("packing market call: %w", err)
 	}
 
-	results, err := s.multicallClient.Execute(ctx, []outbound.Call{{
+	results, err := s.multicallClient.ExecuteAtHash(ctx, []outbound.Call{{
 		Target:       MorphoBlueAddress,
 		AllowFailure: false,
 		CallData:     callData,
-	}}, big.NewInt(blockNumber))
+	}}, blockHash)
 	if err != nil {
 		return nil, fmt.Errorf("multicall market(): %w", err)
 	}
@@ -233,7 +241,11 @@ func (s *blockchainService) getMarketState(ctx context.Context, marketID [32]byt
 	return s.unpackMarketState(results[0])
 }
 
-// getMarketParams fetches market parameters from Morpho Blue.
+// getMarketParams fetches market parameters from Morpho Blue. Number-pinned
+// intentionally: a market's params (loanToken, collateralToken, oracle, irm,
+// LLTV) are immutable once CreateMarket runs, so this is structurally static
+// identity data, not versioned state — the reorg-correctness concern behind
+// ExecuteAtHash (VEC-471) doesn't apply here.
 func (s *blockchainService) getMarketParams(ctx context.Context, marketID [32]byte, blockNumber int64) (retState *MarketParamsState, retErr error) {
 	ctx, span := s.telemetry.StartSpan(ctx, "morpho.rpc.getMarketParams",
 		attribute.String("market.id", fmt.Sprintf("%x", marketID[:8])))
@@ -242,7 +254,7 @@ func (s *blockchainService) getMarketParams(ctx context.Context, marketID [32]by
 	defer func() {
 		s.telemetry.RecordRPCCall(ctx, "getMarketParams", time.Since(start), retErr)
 		if retErr != nil {
-			SetSpanError(span, retErr, "getMarketParams failed")
+			telemetry.SetSpanError(span, retErr, "getMarketParams failed")
 		}
 	}()
 
@@ -299,8 +311,9 @@ func (s *blockchainService) getMarketParams(ctx context.Context, marketID [32]by
 	}, nil
 }
 
-// getMarketAndPositionState fetches both market and position state in a single Multicall3 batch.
-func (s *blockchainService) getMarketAndPositionState(ctx context.Context, marketID [32]byte, user common.Address, blockNumber int64) (retMS *MarketState, retPS *PositionState, retErr error) {
+// getMarketAndPositionState fetches both market and position state in a
+// single Multicall3 batch, pinned to blockHash (see getMarketState for why).
+func (s *blockchainService) getMarketAndPositionState(ctx context.Context, marketID [32]byte, user common.Address, blockHash common.Hash) (retMS *MarketState, retPS *PositionState, retErr error) {
 	ctx, span := s.telemetry.StartSpan(ctx, "morpho.rpc.getMarketAndPositionState",
 		attribute.String("market.id", fmt.Sprintf("%x", marketID[:8])))
 	defer span.End()
@@ -308,7 +321,7 @@ func (s *blockchainService) getMarketAndPositionState(ctx context.Context, marke
 	defer func() {
 		s.telemetry.RecordRPCCall(ctx, "getMarketAndPositionState", time.Since(start), retErr)
 		if retErr != nil {
-			SetSpanError(span, retErr, "getMarketAndPositionState failed")
+			telemetry.SetSpanError(span, retErr, "getMarketAndPositionState failed")
 		}
 	}()
 
@@ -322,10 +335,10 @@ func (s *blockchainService) getMarketAndPositionState(ctx context.Context, marke
 		return nil, nil, fmt.Errorf("packing position call: %w", err)
 	}
 
-	results, err := s.multicallClient.Execute(ctx, []outbound.Call{
+	results, err := s.multicallClient.ExecuteAtHash(ctx, []outbound.Call{
 		{Target: MorphoBlueAddress, AllowFailure: false, CallData: marketCallData},
 		{Target: MorphoBlueAddress, AllowFailure: false, CallData: positionCallData},
-	}, big.NewInt(blockNumber))
+	}, blockHash)
 	if err != nil {
 		return nil, nil, fmt.Errorf("multicall market+position: %w", err)
 	}
@@ -347,9 +360,10 @@ func (s *blockchainService) getMarketAndPositionState(ctx context.Context, marke
 	return ms, ps, nil
 }
 
-// getMarketAndTwoPositionStates fetches market state and two user positions in a single Multicall3 batch.
+// getMarketAndTwoPositionStates fetches market state and two user positions in
+// a single Multicall3 batch, pinned to blockHash (see getMarketState for why).
 // Used by liquidation events where we need the borrower and liquidator positions.
-func (s *blockchainService) getMarketAndTwoPositionStates(ctx context.Context, marketID [32]byte, userA, userB common.Address, blockNumber int64) (retMS *MarketState, retPSA *PositionState, retPSB *PositionState, retErr error) {
+func (s *blockchainService) getMarketAndTwoPositionStates(ctx context.Context, marketID [32]byte, userA, userB common.Address, blockHash common.Hash) (retMS *MarketState, retPSA *PositionState, retPSB *PositionState, retErr error) {
 	ctx, span := s.telemetry.StartSpan(ctx, "morpho.rpc.getMarketAndTwoPositionStates",
 		attribute.String("market.id", fmt.Sprintf("%x", marketID[:8])))
 	defer span.End()
@@ -357,7 +371,7 @@ func (s *blockchainService) getMarketAndTwoPositionStates(ctx context.Context, m
 	defer func() {
 		s.telemetry.RecordRPCCall(ctx, "getMarketAndTwoPositionStates", time.Since(start), retErr)
 		if retErr != nil {
-			SetSpanError(span, retErr, "getMarketAndTwoPositionStates failed")
+			telemetry.SetSpanError(span, retErr, "getMarketAndTwoPositionStates failed")
 		}
 	}()
 
@@ -376,11 +390,11 @@ func (s *blockchainService) getMarketAndTwoPositionStates(ctx context.Context, m
 		return nil, nil, nil, fmt.Errorf("packing position(B) call: %w", err)
 	}
 
-	results, err := s.multicallClient.Execute(ctx, []outbound.Call{
+	results, err := s.multicallClient.ExecuteAtHash(ctx, []outbound.Call{
 		{Target: MorphoBlueAddress, AllowFailure: false, CallData: marketCallData},
 		{Target: MorphoBlueAddress, AllowFailure: false, CallData: posACallData},
 		{Target: MorphoBlueAddress, AllowFailure: false, CallData: posBCallData},
-	}, big.NewInt(blockNumber))
+	}, blockHash)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("multicall market+position(A)+position(B): %w", err)
 	}
@@ -407,8 +421,9 @@ func (s *blockchainService) getMarketAndTwoPositionStates(ctx context.Context, m
 	return ms, psA, psB, nil
 }
 
-// getVaultState fetches vault total assets and total supply in a single Multicall3 batch.
-func (s *blockchainService) getVaultState(ctx context.Context, vaultAddress common.Address, blockNumber int64) (retState *VaultState, retErr error) {
+// getVaultState fetches vault total assets and total supply in a single
+// Multicall3 batch, pinned to blockHash (see getMarketState for why).
+func (s *blockchainService) getVaultState(ctx context.Context, vaultAddress common.Address, blockHash common.Hash) (retState *VaultState, retErr error) {
 	ctx, span := s.telemetry.StartSpan(ctx, "morpho.rpc.getVaultState",
 		attribute.String("vault.address", vaultAddress.Hex()))
 	defer span.End()
@@ -416,7 +431,7 @@ func (s *blockchainService) getVaultState(ctx context.Context, vaultAddress comm
 	defer func() {
 		s.telemetry.RecordRPCCall(ctx, "getVaultState", time.Since(start), retErr)
 		if retErr != nil {
-			SetSpanError(span, retErr, "getVaultState failed")
+			telemetry.SetSpanError(span, retErr, "getVaultState failed")
 		}
 	}()
 
@@ -430,10 +445,10 @@ func (s *blockchainService) getVaultState(ctx context.Context, vaultAddress comm
 		return nil, fmt.Errorf("packing totalSupply call: %w", err)
 	}
 
-	results, err := s.multicallClient.Execute(ctx, []outbound.Call{
+	results, err := s.multicallClient.ExecuteAtHash(ctx, []outbound.Call{
 		{Target: vaultAddress, AllowFailure: false, CallData: totalAssetsData},
 		{Target: vaultAddress, AllowFailure: false, CallData: totalSupplyData},
-	}, big.NewInt(blockNumber))
+	}, blockHash)
 	if err != nil {
 		return nil, fmt.Errorf("multicall vault state: %w", err)
 	}
@@ -445,8 +460,9 @@ func (s *blockchainService) getVaultState(ctx context.Context, vaultAddress comm
 	return s.unpackVaultState(results[0], results[1], vaultAddress)
 }
 
-// getVaultStateAndBalance fetches vault state and a user's balance in a single Multicall3 batch.
-func (s *blockchainService) getVaultStateAndBalance(ctx context.Context, vaultAddress common.Address, user common.Address, blockNumber int64) (retVS *VaultState, retBalance *big.Int, retErr error) {
+// getVaultStateAndBalance fetches vault state and a user's balance in a
+// single Multicall3 batch, pinned to blockHash (see getMarketState for why).
+func (s *blockchainService) getVaultStateAndBalance(ctx context.Context, vaultAddress common.Address, user common.Address, blockHash common.Hash) (retVS *VaultState, retBalance *big.Int, retErr error) {
 	ctx, span := s.telemetry.StartSpan(ctx, "morpho.rpc.getVaultStateAndBalance",
 		attribute.String("vault.address", vaultAddress.Hex()))
 	defer span.End()
@@ -454,7 +470,7 @@ func (s *blockchainService) getVaultStateAndBalance(ctx context.Context, vaultAd
 	defer func() {
 		s.telemetry.RecordRPCCall(ctx, "getVaultStateAndBalance", time.Since(start), retErr)
 		if retErr != nil {
-			SetSpanError(span, retErr, "getVaultStateAndBalance failed")
+			telemetry.SetSpanError(span, retErr, "getVaultStateAndBalance failed")
 		}
 	}()
 
@@ -471,11 +487,11 @@ func (s *blockchainService) getVaultStateAndBalance(ctx context.Context, vaultAd
 		return nil, nil, fmt.Errorf("packing balanceOf call: %w", err)
 	}
 
-	results, err := s.multicallClient.Execute(ctx, []outbound.Call{
+	results, err := s.multicallClient.ExecuteAtHash(ctx, []outbound.Call{
 		{Target: vaultAddress, AllowFailure: false, CallData: totalAssetsData},
 		{Target: vaultAddress, AllowFailure: false, CallData: totalSupplyData},
 		{Target: vaultAddress, AllowFailure: false, CallData: balanceData},
-	}, big.NewInt(blockNumber))
+	}, blockHash)
 	if err != nil {
 		return nil, nil, fmt.Errorf("multicall vault state+balance: %w", err)
 	}
@@ -497,9 +513,10 @@ func (s *blockchainService) getVaultStateAndBalance(ctx context.Context, vaultAd
 	return vs, balance, nil
 }
 
-// getVaultStateAndTwoBalances fetches vault state and two user balances in a single Multicall3 batch.
+// getVaultStateAndTwoBalances fetches vault state and two user balances in a
+// single Multicall3 batch, pinned to blockHash (see getMarketState for why).
 // Used by vault Transfer events where we need both sender and receiver balances.
-func (s *blockchainService) getVaultStateAndTwoBalances(ctx context.Context, vaultAddress common.Address, userA, userB common.Address, blockNumber int64) (retVS *VaultState, retBalA *big.Int, retBalB *big.Int, retErr error) {
+func (s *blockchainService) getVaultStateAndTwoBalances(ctx context.Context, vaultAddress common.Address, userA, userB common.Address, blockHash common.Hash) (retVS *VaultState, retBalA *big.Int, retBalB *big.Int, retErr error) {
 	ctx, span := s.telemetry.StartSpan(ctx, "morpho.rpc.getVaultStateAndTwoBalances",
 		attribute.String("vault.address", vaultAddress.Hex()))
 	defer span.End()
@@ -507,7 +524,7 @@ func (s *blockchainService) getVaultStateAndTwoBalances(ctx context.Context, vau
 	defer func() {
 		s.telemetry.RecordRPCCall(ctx, "getVaultStateAndTwoBalances", time.Since(start), retErr)
 		if retErr != nil {
-			SetSpanError(span, retErr, "getVaultStateAndTwoBalances failed")
+			telemetry.SetSpanError(span, retErr, "getVaultStateAndTwoBalances failed")
 		}
 	}()
 
@@ -528,12 +545,12 @@ func (s *blockchainService) getVaultStateAndTwoBalances(ctx context.Context, vau
 		return nil, nil, nil, fmt.Errorf("packing balanceOf(B) call: %w", err)
 	}
 
-	results, err := s.multicallClient.Execute(ctx, []outbound.Call{
+	results, err := s.multicallClient.ExecuteAtHash(ctx, []outbound.Call{
 		{Target: vaultAddress, AllowFailure: false, CallData: totalAssetsData},
 		{Target: vaultAddress, AllowFailure: false, CallData: totalSupplyData},
 		{Target: vaultAddress, AllowFailure: false, CallData: balanceAData},
 		{Target: vaultAddress, AllowFailure: false, CallData: balanceBData},
-	}, big.NewInt(blockNumber))
+	}, blockHash)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("multicall vault state+2 balances: %w", err)
 	}
@@ -573,6 +590,10 @@ func (s *blockchainService) getVaultStateAndTwoBalances(ctx context.Context, vau
 // singleton; we reject any MetaMorpho probe whose MORPHO() points elsewhere.
 // VaultV2 has no MORPHO() function and is identified by curator() and
 // liquidityAdapter() in vault_probe.go.
+//
+// Number-pinned intentionally (delegates to vault_probe.go's Execute calls):
+// vault identity (MORPHO/asset/curator/liquidityAdapter, name/symbol/decimals)
+// is structurally static, not versioned state — see VEC-471.
 func (s *blockchainService) getVaultMetadata(ctx context.Context, vaultAddress common.Address, blockNumber int64) (retMD *VaultMetadata, retErr error) {
 	ctx, span := s.telemetry.StartSpan(ctx, "morpho.rpc.getVaultMetadata",
 		attribute.String("vault.address", vaultAddress.Hex()))
@@ -581,7 +602,7 @@ func (s *blockchainService) getVaultMetadata(ctx context.Context, vaultAddress c
 	defer func() {
 		s.telemetry.RecordRPCCall(ctx, "getVaultMetadata", time.Since(start), retErr)
 		if retErr != nil {
-			SetSpanError(span, retErr, "getVaultMetadata failed")
+			telemetry.SetSpanError(span, retErr, "getVaultMetadata failed")
 		}
 	}()
 
@@ -633,15 +654,22 @@ func (s *blockchainService) fetchVaultDetails(ctx context.Context, vaultAddress 
 // zero address returns empty data, which is otherwise treated as an error.
 // Short-circuiting at the metadata layer keeps the rest of the indexer from
 // having to special-case 0x0 downstream.
+//
+// The empty symbol here is final: the zero address is a known sentinel that
+// is excluded from the per-block sweep by address, so it is never retried.
 var zeroAddressTokenMetadata = TokenMetadata{Symbol: "", Decimals: 0}
 
 // getTokenMetadata fetches token symbol and decimals via ERC20 calls.
+// Number-pinned intentionally: symbol/decimals are structurally static
+// identity data (immutable per token contract), not versioned state — the
+// reorg-correctness concern behind ExecuteAtHash (VEC-471) doesn't apply here.
 //
-// Post-VEC-188: any sub-call revert (Success: false) surfaces as an error so
-// callers do not silently persist zero-valued metadata (empty Symbol, 0
-// Decimals) into the token table. A non-string symbol() return (e.g. MKR-style
-// bytes32) is still tolerated with an empty Symbol — that's an unpack concern,
-// not a revert.
+// symbol() is best-effort: a reverted or undecodable symbol() yields
+// Symbol="" with no error; the per-block sweep retries it later.
+// decimals() is mandatory: a reverted decimals() is a hard error because a
+// silent 0-decimals value would corrupt all downstream amount math.
+// A non-string symbol() (e.g. MKR-style bytes32) is handled by
+// erc20meta.DecodeStringOrBytes32 and still yields a resolved symbol.
 //
 // The zero address is short-circuited to zeroAddressTokenMetadata without
 // issuing any sub-call. See zeroAddressTokenMetadata for the rationale.
@@ -657,7 +685,7 @@ func (s *blockchainService) getTokenMetadata(ctx context.Context, tokenAddress c
 	defer func() {
 		s.telemetry.RecordRPCCall(ctx, "getTokenMetadata", time.Since(start), retErr)
 		if retErr != nil {
-			SetSpanError(span, retErr, "getTokenMetadata failed")
+			telemetry.SetSpanError(span, retErr, "getTokenMetadata failed")
 		}
 	}()
 
@@ -685,8 +713,12 @@ func (s *blockchainService) getTokenMetadata(ctx context.Context, tokenAddress c
 	if len(results) != 2 {
 		return TokenMetadata{}, fmt.Errorf("getTokenMetadata(%s): expected 2 results, got %d", tokenAddress.Hex(), len(results))
 	}
-	if err := rpcerr.RequireAllSucceeded(results, fmt.Sprintf("getTokenMetadata(%s)", tokenAddress.Hex())); err != nil {
-		return TokenMetadata{}, err
+	// decimals() (index 1) must succeed — it drives all amount math. A reverted
+	// symbol() (index 0) is tolerated: unpackTokenMetadataResults yields an empty
+	// symbol that the per-block sweep fills in later. Narrows VEC-188
+	// "Finding 3" to decimals only.
+	if !results[1].Success {
+		return TokenMetadata{}, fmt.Errorf("getTokenMetadata(%s): decimals() sub-call reverted", tokenAddress.Hex())
 	}
 
 	md, err := s.unpackTokenMetadataResults(results[0], results[1], tokenAddress)
@@ -699,19 +731,22 @@ func (s *blockchainService) getTokenMetadata(ctx context.Context, tokenAddress c
 }
 
 // unpackTokenMetadataResults unpacks symbol() and decimals() results for a
-// single token. Callers must have already verified that both sub-calls
-// succeeded (Success: true) — this helper only decodes the return data.
+// single token. Callers must have verified that decimals() succeeded
+// (results[decimals index].Success == true) before calling this helper.
 //
+// symbol() is best-effort: a reverted symbol() sub-call (Success: false) yields
+// Symbol="" with no error; the per-block sweep retries it later.
 // symbol() supports both modern (`string`) and legacy (`bytes32`, e.g. MKR)
-// ABIs via erc20meta.DecodeStringOrBytes32; on total decode failure the
-// symbol is left empty rather than failing the whole row, since a missing
-// display symbol doesn't make the rest of the row unusable. decimals()
-// must decode cleanly — a failure here means the contract isn't a
+// ABIs via erc20meta.DecodeStringOrBytes32; on total decode failure (when
+// symbol() succeeded but the return data is neither a valid ABI string nor
+// bytes32) the symbol is left empty — still best-effort, no error returned.
+//
+// decimals() must decode cleanly — a failure here means the contract is not a
 // conformant ERC20 and we surface an error rather than persist 0.
 func (s *blockchainService) unpackTokenMetadataResults(symbolResult, decimalsResult outbound.Result, token common.Address) (TokenMetadata, error) {
 	md := TokenMetadata{}
 
-	if len(symbolResult.ReturnData) > 0 {
+	if symbolResult.Success && len(symbolResult.ReturnData) > 0 {
 		if sym, err := erc20meta.DecodeStringOrBytes32(s.erc20ABI, "symbol", symbolResult.ReturnData); err == nil {
 			md.Symbol = sym
 		}
@@ -735,6 +770,8 @@ func (s *blockchainService) unpackTokenMetadataResults(symbolResult, decimalsRes
 // getTokenPairMetadata fetches metadata for two tokens in a single Multicall3 batch.
 // Respects the metadata cache — if both are cached, no RPC call is made; if one is cached,
 // only the uncached token's calls are included in the batch.
+// Number-pinned intentionally, same rationale as getTokenMetadata: symbol/
+// decimals are static identity data, not versioned state.
 //
 // Either token may be the zero address (Morpho Blue idle markets use
 // collateralToken = 0x0); the zero side is short-circuited to
@@ -770,7 +807,7 @@ func (s *blockchainService) getTokenPairMetadata(ctx context.Context, tokenA, to
 	defer func() {
 		s.telemetry.RecordRPCCall(ctx, "getTokenPairMetadata", time.Since(start), retErr)
 		if retErr != nil {
-			SetSpanError(span, retErr, "getTokenPairMetadata failed")
+			telemetry.SetSpanError(span, retErr, "getTokenPairMetadata failed")
 		}
 	}()
 
@@ -815,8 +852,13 @@ func (s *blockchainService) getTokenPairMetadata(ctx context.Context, tokenA, to
 	if len(results) != 4 {
 		return TokenMetadata{}, TokenMetadata{}, fmt.Errorf("getTokenPairMetadata(%s,%s): expected 4 results, got %d", tokenA.Hex(), tokenB.Hex(), len(results))
 	}
-	if err := rpcerr.RequireAllSucceeded(results, fmt.Sprintf("getTokenPairMetadata(%s,%s)", tokenA.Hex(), tokenB.Hex())); err != nil {
-		return TokenMetadata{}, TokenMetadata{}, err
+	// Only decimals() (indices 1 and 3) must succeed; reverted symbol() calls
+	// (indices 0/2) yield empty symbols for later sweep retry. See unpackTokenMetadataResults.
+	if !results[1].Success {
+		return TokenMetadata{}, TokenMetadata{}, fmt.Errorf("getTokenPairMetadata(%s,%s): decimals() reverted for %s", tokenA.Hex(), tokenB.Hex(), tokenA.Hex())
+	}
+	if !results[3].Success {
+		return TokenMetadata{}, TokenMetadata{}, fmt.Errorf("getTokenPairMetadata(%s,%s): decimals() reverted for %s", tokenA.Hex(), tokenB.Hex(), tokenB.Hex())
 	}
 
 	mdA, err := s.unpackTokenMetadataResults(results[0], results[1], tokenA)
@@ -832,6 +874,54 @@ func (s *blockchainService) getTokenPairMetadata(ctx context.Context, tokenA, to
 	s.metadataCache[tokenB] = mdB
 
 	return mdA, mdB, nil
+}
+
+// resolveSymbolsAt re-reads symbol() for the given tokens at blockNumber (the
+// block currently being processed, never head). It returns only the tokens
+// whose symbol() succeeded and decoded; tokens still reverting are omitted so
+// the caller leaves them pending. The in-process metadata cache is refreshed for
+// resolved tokens that are already cached. Number-pinned intentionally, same
+// rationale as getTokenMetadata: symbol() is static identity data, not
+// versioned state; the sweep also has no BlockEvent in scope to source a hash
+// from (reconcilePendingSymbols runs off chainID+blockNumber alone).
+func (s *blockchainService) resolveSymbolsAt(ctx context.Context, tokens []common.Address, blockNumber int64) (map[common.Address]string, error) {
+	resolved := make(map[common.Address]string, len(tokens))
+	if len(tokens) == 0 {
+		return resolved, nil
+	}
+
+	symbolData, err := s.erc20ABI.Pack("symbol")
+	if err != nil {
+		return nil, fmt.Errorf("packing symbol() call: %w", err)
+	}
+	calls := make([]outbound.Call, len(tokens))
+	for i, t := range tokens {
+		calls[i] = outbound.Call{Target: t, AllowFailure: true, CallData: symbolData}
+	}
+
+	results, err := s.multicallClient.Execute(ctx, calls, big.NewInt(blockNumber))
+	if err != nil {
+		return nil, fmt.Errorf("multicall resolve symbols at block %d: %w", blockNumber, err)
+	}
+	if len(results) != len(tokens) {
+		return nil, fmt.Errorf("resolve symbols: expected %d results, got %d", len(tokens), len(results))
+	}
+
+	for i, r := range results {
+		if !r.Success || len(r.ReturnData) == 0 {
+			continue
+		}
+		sym, decErr := erc20meta.DecodeStringOrBytes32(s.erc20ABI, "symbol", r.ReturnData)
+		if decErr != nil || sym == "" {
+			continue
+		}
+		resolved[tokens[i]] = sym
+		if cached, ok := s.metadataCache[tokens[i]]; ok {
+			cached.Symbol = sym
+			s.metadataCache[tokens[i]] = cached
+		}
+	}
+	return resolved, nil
 }
 
 // bigIntFromAny converts an interface value (typically *big.Int) to *big.Int.

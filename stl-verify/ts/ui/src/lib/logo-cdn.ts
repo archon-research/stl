@@ -27,6 +27,7 @@ const PROTOCOL_SLUG_OVERRIDES: Record<string, string | null> = {
   'aave v3 rwa': 'aave-v3',
   'morpho blue': 'morpho',
   sparklend: 'spark',
+  maple: 'maple',
   grove: null,
 };
 

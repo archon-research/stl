@@ -6,12 +6,15 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -34,8 +37,10 @@ type Service struct {
 	entryLookup      map[EntryKey]*TokenEntry
 	entries          []*TokenEntry
 	handler          AllocationHandler
+	metrics          outbound.BackupMetricsRecorder
 	ctx              context.Context
 	cancel           context.CancelFunc
+	wg               sync.WaitGroup // tracks the SQS run loop so Stop can drain it
 	logger           *slog.Logger
 	blocksSinceSweep int
 }
@@ -66,10 +71,13 @@ func NewService(
 		return nil, fmt.Errorf("chain ID is required")
 	}
 	if len(proxies) == 0 {
-		proxies = ProxiesForChainID(DefaultProxies(), config.ChainID)
+		return nil, fmt.Errorf("at least one proxy is required for chain ID %d", config.ChainID)
 	}
 	if len(entries) == 0 {
-		entries = EntriesForChainID(DefaultTokenEntries(), config.ChainID)
+		return nil, fmt.Errorf("at least one token entry is required for chain ID %d", config.ChainID)
+	}
+	if err := validateScopedEntriesAndProxies(entries, proxies, config.ChainID); err != nil {
+		return nil, fmt.Errorf("validating scoped entries/proxies: %w", err)
 	}
 
 	return &Service{
@@ -81,20 +89,69 @@ func NewService(
 		entryLookup: BuildEntryLookup(entries),
 		entries:     entries,
 		handler:     handler,
+		metrics:     config.Metrics,
 		logger:      config.Logger.With("component", "allocation-tracker"),
 	}, nil
+}
+
+func validateScopedEntriesAndProxies(entries []*TokenEntry, proxies []ProxyConfig, chainID int64) error {
+	chainName, ok := entity.ChainIDToName[chainID]
+	if !ok {
+		return fmt.Errorf("unknown chain ID %d", chainID)
+	}
+
+	seenEntries := make(map[EntryKey]struct{}, len(entries))
+	for i, entry := range entries {
+		if entry == nil {
+			return fmt.Errorf("entry at index %d is nil", i)
+		}
+		if entry.Chain != chainName {
+			return fmt.Errorf(
+				"entry %s/%s has chain %s, want %s",
+				entry.ContractAddress.Hex(),
+				entry.WalletAddress.Hex(),
+				entry.Chain,
+				chainName,
+			)
+		}
+		key := entry.Key()
+		if _, ok := seenEntries[key]; ok {
+			return fmt.Errorf(
+				"duplicate token entry for contract=%s wallet=%s chain=%s",
+				entry.ContractAddress.Hex(),
+				entry.WalletAddress.Hex(),
+				entry.Chain,
+			)
+		}
+		seenEntries[key] = struct{}{}
+	}
+
+	seenProxies := make(map[common.Address]struct{}, len(proxies))
+	for _, proxy := range proxies {
+		if proxy.Chain != chainName {
+			return fmt.Errorf("proxy %s has chain %s, want %s", proxy.Address.Hex(), proxy.Chain, chainName)
+		}
+		if _, ok := seenProxies[proxy.Address]; ok {
+			return fmt.Errorf("duplicate proxy address %s for chain %s", proxy.Address.Hex(), proxy.Chain)
+		}
+		seenProxies[proxy.Address] = struct{}{}
+	}
+
+	return nil
 }
 
 func (s *Service) Start(ctx context.Context) error {
 	s.ctx, s.cancel = context.WithCancel(ctx)
 
-	go sqsutil.RunLoop(s.ctx, sqsutil.Config{
-		Consumer:     s.sqsConsumer,
-		MaxMessages:  s.config.MaxMessages,
-		PollInterval: s.config.PollInterval,
-		Logger:       s.logger,
-		ChainID:      s.config.ChainID,
-	}, s.processBlock)
+	s.wg.Go(func() {
+		sqsutil.RunLoop(s.ctx, sqsutil.Config{
+			Consumer:     s.sqsConsumer,
+			MaxMessages:  s.config.MaxMessages,
+			PollInterval: s.config.PollInterval,
+			Logger:       s.logger,
+			ChainID:      s.config.ChainID,
+		}, s.processBlock)
+	})
 
 	s.logger.Info("started",
 		"chainID", s.config.ChainID,
@@ -103,10 +160,14 @@ func (s *Service) Start(ctx context.Context) error {
 	return nil
 }
 
+// Stop cancels the SQS processing loop and waits for the goroutine to exit, so
+// no in-flight handler outlives shutdown (and no archive write is scheduled
+// after the archiving drain begins).
 func (s *Service) Stop() error {
 	if s.cancel != nil {
 		s.cancel()
 	}
+	s.wg.Wait()
 	s.logger.Info("stopped")
 	return nil
 }
@@ -114,8 +175,11 @@ func (s *Service) Stop() error {
 func (s *Service) processBlock(
 	ctx context.Context,
 	event outbound.BlockEvent,
-) error {
+) (retErr error) {
+	ctx = archiving.WithBlockVersion(ctx, event.Version)
+	ctx = archiving.WithBlockNumber(ctx, event.BlockNumber)
 	start := time.Now()
+	defer func() { s.recordBlockMetrics(ctx, start, retErr) }()
 
 	receiptsJSON, err := s.cache.GetReceipts(ctx, event.ChainID, event.BlockNumber, event.Version)
 	if err != nil {
@@ -143,7 +207,11 @@ func (s *Service) processBlock(
 	if len(transfers) > 0 {
 		affected := s.matchTransfers(transfers)
 		if len(affected) > 0 {
-			fetch, err := s.registry.FetchAll(ctx, affected, event.BlockNumber)
+			blockHash, err := event.ParsedBlockHash()
+			if err != nil {
+				return fmt.Errorf("parse block hash: %w", err)
+			}
+			fetch, err := s.registry.FetchAll(ctx, affected, blockHash)
 			if err != nil {
 				return fmt.Errorf("fetch observations for block %d: %w", event.BlockNumber, err)
 			}
@@ -173,13 +241,33 @@ func (s *Service) processBlock(
 	// TestProcessBlock_SweepFetchFailure_ReturnsError.
 	s.blocksSinceSweep++
 	if s.blocksSinceSweep >= s.config.SweepEveryNBlocks {
-		if err := s.sweep(ctx, event.BlockNumber, event.Version, blockTimestamp); err != nil {
+		blockHash, err := event.ParsedBlockHash()
+		if err != nil {
+			return fmt.Errorf("parse block hash: %w", err)
+		}
+		if err := s.sweep(ctx, event.BlockNumber, blockHash, event.Version, blockTimestamp); err != nil {
 			return fmt.Errorf("sweep block %d: %w", event.BlockNumber, err)
 		}
 		s.blocksSinceSweep = 0
 	}
 
 	return nil
+}
+
+// recordBlockMetrics records the per-block liveness + latency sample once per
+// processBlock via defer (see Config.Metrics for why this is the liveness
+// signal). Nil-safe: a service constructed without Config.Metrics (most unit
+// tests) records nothing.
+func (s *Service) recordBlockMetrics(ctx context.Context, start time.Time, err error) {
+	if s.metrics == nil {
+		return
+	}
+	status := outbound.StatusSuccess
+	if err != nil {
+		status = outbound.StatusError
+	}
+	s.metrics.RecordBlockProcessed(ctx, status)
+	s.metrics.RecordProcessingLatency(ctx, time.Since(start), status)
 }
 
 func (s *Service) matchTransfers(
@@ -229,13 +317,17 @@ func (s *Service) buildSnapshots(
 		}
 
 		snap := &PositionSnapshot{
-			Entry:          entry,
-			Balance:        bal.Balance,
-			ScaledBalance:  bal.ScaledBalance,
-			ChainID:        event.ChainID,
-			BlockNumber:    event.BlockNumber,
-			BlockVersion:   event.Version,
-			BlockTimestamp: blockTimestamp,
+			Entry:           entry,
+			Balance:         bal.Balance,
+			ScaledBalance:   bal.ScaledBalance,
+			UnderlyingValue: bal.UnderlyingValue,
+			PoolToken0:      bal.PoolToken0,
+			PoolToken1:      bal.PoolToken1,
+			ShareToken:      bal.ShareToken,
+			ChainID:         event.ChainID,
+			BlockNumber:     event.BlockNumber,
+			BlockVersion:    event.Version,
+			BlockTimestamp:  blockTimestamp,
 		}
 		if t, ok := tLookup[entry.Key()]; ok {
 			snap.TxHash = t.TxHash
@@ -284,10 +376,10 @@ func buildSupplySnapshots(
 // emit Transfer events — e.g. aToken interest accrual, ERC4626 yield compounding,
 // and BUIDL rebases. Without this, positions would drift between transfer-triggered
 // snapshots.
-func (s *Service) sweep(ctx context.Context, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
+func (s *Service) sweep(ctx context.Context, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) error {
 	start := time.Now()
 
-	fetch, err := s.registry.FetchAll(ctx, s.entries, blockNumber)
+	fetch, err := s.registry.FetchAll(ctx, s.entries, blockHash)
 	if err != nil {
 		return fmt.Errorf("fetch sweep observations for block %d: %w", blockNumber, err)
 	}
@@ -299,15 +391,19 @@ func (s *Service) sweep(ctx context.Context, blockNumber int64, blockVersion int
 			continue
 		}
 		snapshots = append(snapshots, &PositionSnapshot{
-			Entry:          entry,
-			Balance:        bal.Balance,
-			ScaledBalance:  bal.ScaledBalance,
-			ChainID:        s.config.ChainID,
-			BlockNumber:    blockNumber,
-			BlockVersion:   blockVersion,
-			TxAmount:       big.NewInt(0),
-			Direction:      DirectionSweep,
-			BlockTimestamp: blockTimestamp,
+			Entry:           entry,
+			Balance:         bal.Balance,
+			ScaledBalance:   bal.ScaledBalance,
+			UnderlyingValue: bal.UnderlyingValue,
+			PoolToken0:      bal.PoolToken0,
+			PoolToken1:      bal.PoolToken1,
+			ShareToken:      bal.ShareToken,
+			ChainID:         s.config.ChainID,
+			BlockNumber:     blockNumber,
+			BlockVersion:    blockVersion,
+			TxAmount:        big.NewInt(0),
+			Direction:       DirectionSweep,
+			BlockTimestamp:  blockTimestamp,
 		})
 	}
 

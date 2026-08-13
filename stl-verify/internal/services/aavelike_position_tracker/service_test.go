@@ -903,6 +903,69 @@ func TestFetchAndProcessReceipts_CacheMiss_ReturnsError(t *testing.T) {
 	}
 }
 
+// TestProcessBlockEvent_MissingBlockHash_ReturnsError: an event with an empty
+// BlockHash must fail loud before ever reaching the multicaller, instead of
+// silently defaulting to the zero hash (common.HexToHash never errors).
+func TestProcessBlockEvent_MissingBlockHash_ReturnsError(t *testing.T) {
+	cache := testutil.NewMockBlockCache()
+	receiptsJSON, err := json.Marshal([]shared.TransactionReceipt{{
+		TransactionHash: "0xabc",
+		Logs: []shared.Log{{
+			Address:         "0xC13e21B648A5Ee794902342038FF3aDAB66BE987",
+			Topics:          []string{"0x0000000000000000000000000000000000000000000000000000000000000000"},
+			Data:            "0x",
+			TransactionHash: "0xabc",
+			LogIndex:        "0x0",
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("marshal receipts: %v", err)
+	}
+	cache.SetReceipts(1, 99999, 0, receiptsJSON)
+
+	multicaller := testutil.NewMockMulticaller()
+	multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return nil, errors.New("multicaller must not be called")
+	}
+	reader := aavelike.NewPositionReader(nil, multicaller, mustERC20ABI(t), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	eventExtractor, err := NewEventExtractor()
+	if err != nil {
+		t.Fatalf("NewEventExtractor: %v", err)
+	}
+
+	var txCalled int
+	txManager := &testutil.MockTxManager{
+		WithTransactionFn: func(_ context.Context, fn func(tx pgx.Tx) error) error {
+			txCalled++
+			return fn(nil)
+		},
+	}
+	svc := &Service{
+		cacheReader:    cache,
+		reader:         reader,
+		eventExtractor: eventExtractor,
+		txManager:      txManager,
+		userRepo:       &testutil.MockUserRepository{},
+		protocolRepo:   &testutil.MockProtocolRepository{},
+		tokenRepo:      &testutil.MockTokenRepository{},
+		logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	err = svc.processBlockEvent(context.Background(), outbound.BlockEvent{
+		ChainID: 1, BlockNumber: 99999, Version: 0, BlockHash: "",
+	})
+	if err == nil {
+		t.Fatal("expected non-nil error from processBlockEvent when event.BlockHash is empty")
+	}
+
+	if multicaller.CallCount != 0 {
+		t.Errorf("multicaller invoked %d times, want 0", multicaller.CallCount)
+	}
+	if txCalled != 0 {
+		t.Errorf("txManager.WithTransaction invoked %d times, want 0 (block must not be persisted)", txCalled)
+	}
+}
+
 func TestService_IsKnownProtocol_FilterLogic(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -1090,7 +1153,7 @@ func TestExtractUserPositionData_ReturnsDebtAndCollateral(t *testing.T) {
 
 	svc := newServiceWithCachedBlockchainService(t, ethClient, multicaller, chainID, protocolAddress)
 
-	collaterals, debts, err := svc.extractUserPositionData(context.Background(), userAddress, protocolAddress, chainID, blockNumber, "0xabc")
+	collaterals, debts, err := svc.extractUserPositionData(context.Background(), userAddress, protocolAddress, chainID, blockNumber, common.Hash{}, "0xabc")
 	if err != nil {
 		t.Fatalf("extractUserPositionData() failed: %v", err)
 	}
@@ -1480,7 +1543,7 @@ func TestSavePositionSnapshot_AllEventTypesFailWhenPositionExtractionFails(t *te
 				User:      userAddress,
 				Reserve:   wethAddress,
 				Amount:    oneETH,
-			}, protocolAddress, chainID, blockNumber, 0, time.Unix(1700000000, 0).UTC())
+			}, protocolAddress, chainID, blockNumber, common.Hash{}, 0, time.Unix(1700000000, 0).UTC())
 			if err == nil {
 				t.Fatal("expected savePositionSnapshot to fail, got nil")
 			}
@@ -1525,7 +1588,7 @@ func TestSavePositionSnapshot_TokenMetadataFailurePropagatesError(t *testing.T) 
 		User:      userAddress,
 		Reserve:   wethAddress,
 		Amount:    oneETH,
-	}, protocolAddress, chainID, blockNumber, 0, time.Unix(1700000000, 0).UTC())
+	}, protocolAddress, chainID, blockNumber, common.Hash{}, 0, time.Unix(1700000000, 0).UTC())
 	if err == nil {
 		t.Fatal("expected error when token metadata fetch fails, got nil")
 	}
@@ -1665,6 +1728,8 @@ func TestSaveReserveDataSnapshot_CreatesReceiptTokenWithBatchedSymbol(t *testing
 	protocolAddress := common.HexToAddress("0xC13e21B648A5Ee794902342038FF3aDAB66BE987")
 	reserve := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
 	aTokenAddr := common.HexToAddress("0x1234567890123456789012345678901234567890")
+	stableDebtAddr := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	variableDebtAddr := common.HexToAddress("0x3333333333333333333333333333333333333333")
 
 	ethClient, cleanup := newEthClientReturningUserReserves(t, []sparkLendUserReserve{})
 	defer cleanup()
@@ -1684,7 +1749,7 @@ func TestSaveReserveDataSnapshot_CreatesReceiptTokenWithBatchedSymbol(t *testing
 			results := make([]outbound.Result, 3)
 			results[0] = outbound.Result{Success: true, ReturnData: packSparklendReserveDataResponse(t, reserveDataABI)}
 			results[1] = outbound.Result{Success: true, ReturnData: packReserveConfigResponse(t, configABI)}
-			results[2] = outbound.Result{Success: true, ReturnData: packReserveTokenAddrsResponse(t, tokenAddrsABI, aTokenAddr)}
+			results[2] = outbound.Result{Success: true, ReturnData: packReserveTokenAddrsResponse(t, tokenAddrsABI, aTokenAddr, stableDebtAddr, variableDebtAddr)}
 			return results, nil
 		case 2:
 			// BatchGetTokenMetadata for reserve + aToken
@@ -1707,6 +1772,7 @@ func TestSaveReserveDataSnapshot_CreatesReceiptTokenWithBatchedSymbol(t *testing
 			return 42, nil
 		},
 	}
+	debtTokenRepo := &testutil.MockDebtTokenRepository{}
 
 	svc := newServiceWithCachedBlockchainService(t, ethClient, multicaller, chainID, protocolAddress)
 	svc.userRepo = &testutil.MockUserRepository{}
@@ -1714,8 +1780,9 @@ func TestSaveReserveDataSnapshot_CreatesReceiptTokenWithBatchedSymbol(t *testing
 	svc.tokenRepo = &testutil.MockTokenRepository{}
 	svc.txManager = &testutil.MockTxManager{}
 	svc.receiptTokenRepo = receiptTokenRepo
+	svc.debtTokenRepo = debtTokenRepo
 
-	err := svc.saveReserveDataSnapshot(context.Background(), reserve, protocolAddress, chainID, blockNumber, 0, "0xtest")
+	err := svc.saveReserveDataSnapshot(context.Background(), reserve, protocolAddress, chainID, blockNumber, common.Hash{}, 0, "0xtest")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1728,6 +1795,222 @@ func TestSaveReserveDataSnapshot_CreatesReceiptTokenWithBatchedSymbol(t *testing
 	}
 	if capturedToken.ChainID != chainID {
 		t.Errorf("receipt token chainID = %d, want %d", capturedToken.ChainID, chainID)
+	}
+
+	// The debt token write must have recorded the variable and stable addresses.
+	if len(debtTokenRepo.Calls) != 1 {
+		t.Fatalf("expected exactly 1 debt token write, got %d", len(debtTokenRepo.Calls))
+	}
+	debtCall := debtTokenRepo.Calls[0]
+	if string(debtCall.VariableDebtAddress) != string(variableDebtAddr.Bytes()) {
+		t.Errorf("debt token variable address = %x, want %x", debtCall.VariableDebtAddress, variableDebtAddr.Bytes())
+	}
+	if string(debtCall.StableDebtAddress) != string(stableDebtAddr.Bytes()) {
+		t.Errorf("debt token stable address = %x, want %x", debtCall.StableDebtAddress, stableDebtAddr.Bytes())
+	}
+}
+
+// TestSaveReserveDataSnapshot_CreatesDebtTokenWithBatchedSymbols asserts that
+// the debt token is written with the variable and stable symbols resolved from
+// the batched metadata call, so a symbol regression (e.g. debt addresses not
+// added to the metadata batch) is caught.
+func TestSaveReserveDataSnapshot_CreatesDebtTokenWithBatchedSymbols(t *testing.T) {
+	const chainID = int64(1)
+	const blockNumber = int64(24033627)
+
+	protocolAddress := common.HexToAddress("0xC13e21B648A5Ee794902342038FF3aDAB66BE987")
+	reserve := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
+	aTokenAddr := common.HexToAddress("0x1234567890123456789012345678901234567890")
+	stableDebtAddr := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	variableDebtAddr := common.HexToAddress("0x3333333333333333333333333333333333333333")
+
+	ethClient, cleanup := newEthClientReturningUserReserves(t, []sparkLendUserReserve{})
+	defer cleanup()
+
+	erc20ABI := mustERC20ABI(t)
+	reserveDataABI := mustSparklendReserveDataABI(t)
+	configABI := mustReserveConfigABI(t)
+	tokenAddrsABI := mustReserveTokenAddrsABI(t)
+
+	multicaller := testutil.NewMockMulticaller()
+	executeCount := 0
+	multicaller.ExecuteFn = func(ctx context.Context, calls []outbound.Call, bn *big.Int) ([]outbound.Result, error) {
+		executeCount++
+		switch executeCount {
+		case 1:
+			results := make([]outbound.Result, 3)
+			results[0] = outbound.Result{Success: true, ReturnData: packSparklendReserveDataResponse(t, reserveDataABI)}
+			results[1] = outbound.Result{Success: true, ReturnData: packReserveConfigResponse(t, configABI)}
+			results[2] = outbound.Result{Success: true, ReturnData: packReserveTokenAddrsResponse(t, tokenAddrsABI, aTokenAddr, stableDebtAddr, variableDebtAddr)}
+			return results, nil
+		case 2:
+			results := make([]outbound.Result, len(calls))
+			for i, call := range calls {
+				methodID := hex.EncodeToString(call.CallData[:4])
+				results[i] = outbound.Result{Success: true, ReturnData: packERC20MetadataResponse(t, erc20ABI, call.Target, methodID)}
+			}
+			return results, nil
+		default:
+			t.Fatalf("unexpected multicall execution count: %d", executeCount)
+			return nil, nil
+		}
+	}
+
+	debtTokenRepo := &testutil.MockDebtTokenRepository{}
+
+	svc := newServiceWithCachedBlockchainService(t, ethClient, multicaller, chainID, protocolAddress)
+	svc.userRepo = &testutil.MockUserRepository{}
+	svc.protocolRepo = &testutil.MockProtocolRepository{}
+	svc.tokenRepo = &testutil.MockTokenRepository{}
+	svc.txManager = &testutil.MockTxManager{}
+	svc.receiptTokenRepo = &testutil.MockReceiptTokenRepository{}
+	svc.debtTokenRepo = debtTokenRepo
+
+	err := svc.saveReserveDataSnapshot(context.Background(), reserve, protocolAddress, chainID, blockNumber, common.Hash{}, 0, "0xtest")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(debtTokenRepo.Calls) != 1 {
+		t.Fatalf("expected exactly 1 debt token write, got %d", len(debtTokenRepo.Calls))
+	}
+	debtCall := debtTokenRepo.Calls[0]
+	if debtCall.VariableSymbol != "variableDebtWETH" {
+		t.Errorf("debt token variable symbol = %q, want %q (fetched from batched metadata call)", debtCall.VariableSymbol, "variableDebtWETH")
+	}
+	if debtCall.StableSymbol != "stableDebtWETH" {
+		t.Errorf("debt token stable symbol = %q, want %q (fetched from batched metadata call)", debtCall.StableSymbol, "stableDebtWETH")
+	}
+}
+
+// TestSaveReserveDataSnapshot_NoDebtTokenWhenBothDebtAddressesZero asserts that
+// when neither a variable nor a stable debt address is available, no debt_token
+// row is written and ingestion still succeeds.
+func TestSaveReserveDataSnapshot_NoDebtTokenWhenBothDebtAddressesZero(t *testing.T) {
+	const chainID = int64(1)
+	const blockNumber = int64(24033627)
+
+	protocolAddress := common.HexToAddress("0xC13e21B648A5Ee794902342038FF3aDAB66BE987")
+	reserve := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
+	aTokenAddr := common.HexToAddress("0x1234567890123456789012345678901234567890")
+
+	ethClient, cleanup := newEthClientReturningUserReserves(t, []sparkLendUserReserve{})
+	defer cleanup()
+
+	erc20ABI := mustERC20ABI(t)
+	reserveDataABI := mustSparklendReserveDataABI(t)
+	configABI := mustReserveConfigABI(t)
+	tokenAddrsABI := mustReserveTokenAddrsABI(t)
+
+	multicaller := testutil.NewMockMulticaller()
+	executeCount := 0
+	multicaller.ExecuteFn = func(ctx context.Context, calls []outbound.Call, bn *big.Int) ([]outbound.Result, error) {
+		executeCount++
+		switch executeCount {
+		case 1:
+			results := make([]outbound.Result, 3)
+			results[0] = outbound.Result{Success: true, ReturnData: packSparklendReserveDataResponse(t, reserveDataABI)}
+			results[1] = outbound.Result{Success: true, ReturnData: packReserveConfigResponse(t, configABI)}
+			results[2] = outbound.Result{Success: true, ReturnData: packReserveTokenAddrsResponse(t, tokenAddrsABI, aTokenAddr, common.Address{}, common.Address{})}
+			return results, nil
+		case 2:
+			results := make([]outbound.Result, len(calls))
+			for i, call := range calls {
+				methodID := hex.EncodeToString(call.CallData[:4])
+				results[i] = outbound.Result{Success: true, ReturnData: packERC20MetadataResponse(t, erc20ABI, call.Target, methodID)}
+			}
+			return results, nil
+		default:
+			t.Fatalf("unexpected multicall execution count: %d", executeCount)
+			return nil, nil
+		}
+	}
+
+	debtTokenRepo := &testutil.MockDebtTokenRepository{}
+
+	svc := newServiceWithCachedBlockchainService(t, ethClient, multicaller, chainID, protocolAddress)
+	svc.userRepo = &testutil.MockUserRepository{}
+	svc.protocolRepo = &testutil.MockProtocolRepository{}
+	svc.tokenRepo = &testutil.MockTokenRepository{}
+	svc.txManager = &testutil.MockTxManager{}
+	svc.receiptTokenRepo = &testutil.MockReceiptTokenRepository{}
+	svc.debtTokenRepo = debtTokenRepo
+
+	err := svc.saveReserveDataSnapshot(context.Background(), reserve, protocolAddress, chainID, blockNumber, common.Hash{}, 0, "0xtest")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(debtTokenRepo.Calls) != 0 {
+		t.Fatalf("expected no debt token write when both debt addresses are zero, got %d", len(debtTokenRepo.Calls))
+	}
+}
+
+// TestSaveReserveDataSnapshot_DebtTokenRepoErrorPropagates asserts that a
+// failure upserting the debt token surfaces as "failed to upsert debt token"
+// and stops the reserve ingestion.
+func TestSaveReserveDataSnapshot_DebtTokenRepoErrorPropagates(t *testing.T) {
+	const chainID = int64(1)
+	const blockNumber = int64(24033627)
+
+	protocolAddress := common.HexToAddress("0xC13e21B648A5Ee794902342038FF3aDAB66BE987")
+	reserve := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
+	aTokenAddr := common.HexToAddress("0x1234567890123456789012345678901234567890")
+	stableDebtAddr := common.HexToAddress("0x2222222222222222222222222222222222222222")
+	variableDebtAddr := common.HexToAddress("0x3333333333333333333333333333333333333333")
+
+	ethClient, cleanup := newEthClientReturningUserReserves(t, []sparkLendUserReserve{})
+	defer cleanup()
+
+	erc20ABI := mustERC20ABI(t)
+	reserveDataABI := mustSparklendReserveDataABI(t)
+	configABI := mustReserveConfigABI(t)
+	tokenAddrsABI := mustReserveTokenAddrsABI(t)
+
+	multicaller := testutil.NewMockMulticaller()
+	executeCount := 0
+	multicaller.ExecuteFn = func(ctx context.Context, calls []outbound.Call, bn *big.Int) ([]outbound.Result, error) {
+		executeCount++
+		switch executeCount {
+		case 1:
+			results := make([]outbound.Result, 3)
+			results[0] = outbound.Result{Success: true, ReturnData: packSparklendReserveDataResponse(t, reserveDataABI)}
+			results[1] = outbound.Result{Success: true, ReturnData: packReserveConfigResponse(t, configABI)}
+			results[2] = outbound.Result{Success: true, ReturnData: packReserveTokenAddrsResponse(t, tokenAddrsABI, aTokenAddr, stableDebtAddr, variableDebtAddr)}
+			return results, nil
+		case 2:
+			results := make([]outbound.Result, len(calls))
+			for i, call := range calls {
+				methodID := hex.EncodeToString(call.CallData[:4])
+				results[i] = outbound.Result{Success: true, ReturnData: packERC20MetadataResponse(t, erc20ABI, call.Target, methodID)}
+			}
+			return results, nil
+		default:
+			t.Fatalf("unexpected multicall execution count: %d", executeCount)
+			return nil, nil
+		}
+	}
+
+	debtTokenRepo := &testutil.MockDebtTokenRepository{
+		GetOrCreateDebtTokenFn: func(ctx context.Context, tx pgx.Tx, token entity.DebtToken) (int64, error) {
+			return 0, errors.New("debt token repo failure")
+		},
+	}
+
+	svc := newServiceWithCachedBlockchainService(t, ethClient, multicaller, chainID, protocolAddress)
+	svc.userRepo = &testutil.MockUserRepository{}
+	svc.protocolRepo = &testutil.MockProtocolRepository{}
+	svc.tokenRepo = &testutil.MockTokenRepository{}
+	svc.txManager = &testutil.MockTxManager{}
+	svc.receiptTokenRepo = &testutil.MockReceiptTokenRepository{}
+	svc.debtTokenRepo = debtTokenRepo
+
+	err := svc.saveReserveDataSnapshot(context.Background(), reserve, protocolAddress, chainID, blockNumber, common.Hash{}, 0, "0xtest")
+	if err == nil {
+		t.Fatal("expected error when debt token repo fails, got nil")
+	}
+	if !strings.Contains(err.Error(), "failed to upsert debt token") {
+		t.Errorf("expected error to contain 'failed to upsert debt token', got: %v", err)
 	}
 }
 
@@ -1757,7 +2040,7 @@ func TestSaveReserveDataSnapshot_ReceiptTokenRepoErrorPropagates(t *testing.T) {
 			results := make([]outbound.Result, 3)
 			results[0] = outbound.Result{Success: true, ReturnData: packSparklendReserveDataResponse(t, reserveDataABI)}
 			results[1] = outbound.Result{Success: true, ReturnData: packReserveConfigResponse(t, configABI)}
-			results[2] = outbound.Result{Success: true, ReturnData: packReserveTokenAddrsResponse(t, tokenAddrsABI, aTokenAddr)}
+			results[2] = outbound.Result{Success: true, ReturnData: packReserveTokenAddrsResponse(t, tokenAddrsABI, aTokenAddr, common.Address{}, common.Address{})}
 			return results, nil
 		case 2:
 			// BatchGetTokenMetadata for reserve + aToken (decimals, symbol, name for each)
@@ -1787,7 +2070,7 @@ func TestSaveReserveDataSnapshot_ReceiptTokenRepoErrorPropagates(t *testing.T) {
 	svc.txManager = &testutil.MockTxManager{}
 	svc.receiptTokenRepo = receiptTokenRepo
 
-	err := svc.saveReserveDataSnapshot(context.Background(), reserve, protocolAddress, chainID, blockNumber, 0, "0xtest")
+	err := svc.saveReserveDataSnapshot(context.Background(), reserve, protocolAddress, chainID, blockNumber, common.Hash{}, 0, "0xtest")
 	if err == nil {
 		t.Fatal("expected error when receipt token repo fails, got nil")
 	}
@@ -1800,7 +2083,7 @@ func TestSaveReserveDataSnapshot_ReceiptTokenRepoErrorPropagates(t *testing.T) {
 
 func mustSparklendReserveDataABI(t *testing.T) *abi.ABI {
 	t.Helper()
-	parsedABI, err := abis.GetSparklendPoolDataProviderReserveDataABI()
+	parsedABI, err := abis.GetPoolDataProviderReserveData()
 	if err != nil {
 		t.Fatalf("load sparklend reserve data ABI: %v", err)
 	}
@@ -1831,6 +2114,7 @@ func packSparklendReserveDataResponse(t *testing.T, reserveDataABI *abi.ABI) []b
 	return mustPackOutput(t, reserveDataABI, "getReserveData",
 		zero, zero, zero, zero, zero, // unbacked, accruedToTreasuryScaled, totalAToken, totalStableDebt, totalVariableDebt
 		zero, zero, zero, // liquidityRate, variableBorrowRate, stableBorrowRate
+		zero,       // averageStableBorrowRate (stable borrows deprecated on SparkLend)
 		zero, zero, // liquidityIndex, variableBorrowIndex
 		zero, // lastUpdateTimestamp (uint40)
 	)
@@ -1852,12 +2136,12 @@ func packReserveConfigResponse(t *testing.T, configABI *abi.ABI) []byte {
 	)
 }
 
-func packReserveTokenAddrsResponse(t *testing.T, tokenAddrsABI *abi.ABI, aTokenAddr common.Address) []byte {
+func packReserveTokenAddrsResponse(t *testing.T, tokenAddrsABI *abi.ABI, aTokenAddr, stableDebtAddr, variableDebtAddr common.Address) []byte {
 	t.Helper()
 	return mustPackOutput(t, tokenAddrsABI, "getReserveTokensAddresses",
 		aTokenAddr,       // aTokenAddress
-		common.Address{}, // stableDebtTokenAddress
-		common.Address{}, // variableDebtTokenAddress
+		stableDebtAddr,   // stableDebtTokenAddress
+		variableDebtAddr, // variableDebtTokenAddress
 	)
 }
 
@@ -1983,6 +2267,24 @@ func packERC20MetadataResponse(t *testing.T, erc20ABI *abi.ABI, token common.Add
 		case methodIDHex(erc20ABI, "name"):
 			return mustPackOutput(t, erc20ABI, "name", "Spark WETH")
 		}
+	case common.HexToAddress("0x3333333333333333333333333333333333333333"):
+		switch methodID {
+		case methodIDHex(erc20ABI, "decimals"):
+			return mustPackOutput(t, erc20ABI, "decimals", uint8(18))
+		case methodIDHex(erc20ABI, "symbol"):
+			return mustPackOutput(t, erc20ABI, "symbol", "variableDebtWETH")
+		case methodIDHex(erc20ABI, "name"):
+			return mustPackOutput(t, erc20ABI, "name", "Spark Variable Debt WETH")
+		}
+	case common.HexToAddress("0x2222222222222222222222222222222222222222"):
+		switch methodID {
+		case methodIDHex(erc20ABI, "decimals"):
+			return mustPackOutput(t, erc20ABI, "decimals", uint8(18))
+		case methodIDHex(erc20ABI, "symbol"):
+			return mustPackOutput(t, erc20ABI, "symbol", "stableDebtWETH")
+		case methodIDHex(erc20ABI, "name"):
+			return mustPackOutput(t, erc20ABI, "name", "Spark Stable Debt WETH")
+		}
 	}
 
 	t.Fatalf("unexpected metadata request for token %s method %s", token.Hex(), methodID)
@@ -2095,7 +2397,7 @@ func TestResolvePositionTokens_DedupesAcrossCollateralsDebtsAndExtras(t *testing
 		{Asset: tokenA, Symbol: "USDC", Decimals: 6}, // overlaps with collateral
 	}
 	extras := []outbound.TokenInput{
-		{ChainID: 1, Address: tokenB, Symbol: "WETH", Decimals: 18, CreatedAtBlock: 100}, // overlaps with collateral
+		{ChainID: 1, Address: tokenB, Symbol: "WETH", Decimals: 18, CreatedAtBlock: new(int64(100))}, // overlaps with collateral
 	}
 
 	var captured []outbound.TokenInput
@@ -2125,7 +2427,7 @@ func TestResolvePositionTokens_IncludesBorrowReserveExtras(t *testing.T) {
 		{Asset: collateralToken, Symbol: "WETH", Decimals: 18},
 	}
 	extras := []outbound.TokenInput{
-		{ChainID: 1, Address: reserveToken, Symbol: "USDC", Decimals: 6, CreatedAtBlock: 100},
+		{ChainID: 1, Address: reserveToken, Symbol: "USDC", Decimals: 6, CreatedAtBlock: new(int64(100))},
 	}
 
 	var captured []outbound.TokenInput
@@ -2161,4 +2463,86 @@ func TestResolvePositionTokens_EmptyInputs(t *testing.T) {
 	if len(captured) != 0 {
 		t.Errorf("GetOrCreateTokens should not see any inputs; got %d", len(captured))
 	}
+}
+
+// TestNewService covers the multicaller injection introduced for raw SC call
+// archiving (VEC-319): the multicaller now arrives as a dependency rather than
+// being built internally, so the composition root can wrap it for archiving.
+func TestNewService(t *testing.T) {
+	ethClient, cleanup := newEthClientReturningUserReserves(t, []sparkLendUserReserve{})
+	defer cleanup()
+
+	newServiceWith := func(consumer outbound.SQSConsumer, cacheReader outbound.BlockCacheReader, multicaller outbound.Multicaller) (*Service, error) {
+		return NewService(
+			shared.SQSConsumerConfig{ChainID: 1},
+			consumer,
+			cacheReader,
+			ethClient,
+			multicaller,
+			&testutil.MockTxManager{},
+			&testutil.MockUserRepository{},
+			&testutil.MockProtocolRepository{},
+			&testutil.MockTokenRepository{},
+			&mockPositionRepository{},
+			&testutil.MockEventRepository{},
+			&testutil.MockReceiptTokenRepository{},
+			&testutil.MockDebtTokenRepository{},
+		)
+	}
+
+	t.Run("builds the position reader from the injected multicaller", func(t *testing.T) {
+		svc, err := newServiceWith(&testutil.MockSQSConsumer{}, &testutil.MockBlockCache{}, testutil.NewMockMulticaller())
+		if err != nil {
+			t.Fatalf("NewService() unexpected error: %v", err)
+		}
+		if svc == nil || svc.reader == nil {
+			t.Fatal("NewService() did not build a position reader from the injected multicaller")
+		}
+	})
+
+	t.Run("builds in backfill mode with nil consumer and cacheReader", func(t *testing.T) {
+		// Both backfillers pass nil for the SQS consumer and cache reader; this
+		// pins the invariant they depend on (validateDependencies permits both).
+		svc, err := newServiceWith(nil, nil, testutil.NewMockMulticaller())
+		if err != nil {
+			t.Fatalf("NewService() in backfill mode unexpected error: %v", err)
+		}
+		if svc == nil || svc.reader == nil {
+			t.Fatal("NewService() did not build a position reader in backfill mode")
+		}
+	})
+
+	t.Run("fails when the multicaller is missing", func(t *testing.T) {
+		_, err := newServiceWith(&testutil.MockSQSConsumer{}, nil, nil)
+		if err == nil {
+			t.Fatal("NewService() expected an error for a nil multicaller, got nil")
+		}
+		if !strings.Contains(err.Error(), "multicaller is required") {
+			t.Fatalf("NewService() error = %q, want it to mention 'multicaller is required'", err)
+		}
+	})
+
+	t.Run("fails when the debt token repository is missing", func(t *testing.T) {
+		_, err := NewService(
+			shared.SQSConsumerConfig{ChainID: 1},
+			&testutil.MockSQSConsumer{},
+			&testutil.MockBlockCache{},
+			ethClient,
+			testutil.NewMockMulticaller(),
+			&testutil.MockTxManager{},
+			&testutil.MockUserRepository{},
+			&testutil.MockProtocolRepository{},
+			&testutil.MockTokenRepository{},
+			&mockPositionRepository{},
+			&testutil.MockEventRepository{},
+			&testutil.MockReceiptTokenRepository{},
+			nil,
+		)
+		if err == nil {
+			t.Fatal("NewService() expected an error for a nil debtTokenRepo, got nil")
+		}
+		if !strings.Contains(err.Error(), "debtTokenRepo is required") {
+			t.Fatalf("NewService() error = %q, want it to mention 'debtTokenRepo is required'", err)
+		}
+	})
 }

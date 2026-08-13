@@ -47,7 +47,21 @@ def _normalize_metadata(value: Any) -> dict[str, Any] | None:
     return None
 
 
-class PostgresTokenCatalogRepository:
+def _normalize_symbol(value: str | None) -> str | None:
+    """Map the catalog's empty/whitespace symbols to the domain's "absent".
+
+    The token table stores ``''`` for rows whose symbol is unknown, but the
+    domain models an unknown symbol as ``None`` (a present symbol must be
+    non-empty). Translating here keeps that invariant intact and prevents a
+    single blank-symbol row from failing the whole listing.
+    """
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+class TokenCatalogRepository:
     def __init__(self, engine: AsyncEngine) -> None:
         self._engine = engine
 
@@ -57,7 +71,7 @@ class PostgresTokenCatalogRepository:
             id=row.id,
             chain_id=row.chain_id,
             address="0x" + row.address,
-            symbol=row.symbol,
+            symbol=_normalize_symbol(row.symbol),
             decimals=row.decimals,
             updated_at=row.updated_at,
             metadata=_normalize_metadata(row.metadata),
@@ -235,7 +249,19 @@ _LATEST_PRICE_SQL = text(
         FROM onchain_token_price otp
         JOIN oracle o ON o.id = otp.oracle_id
         WHERE otp.token_id = :token_id
-        ORDER BY otp.timestamp DESC, otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC
+        -- enabled-mapping filter + oracle_id tiebreak (canonical rationale, incl.
+        -- the no-history tradeoff, on _DIRECT_ASSET_HOLDINGS_SQL in
+        -- allocation_position_repository.py). A retired source is excluded at
+        -- read time; same-block rows from two oracles also share the block
+        -- timestamp, so ties reach this read too.
+          AND EXISTS (
+              SELECT 1 FROM oracle_asset oa
+              WHERE oa.oracle_id = otp.oracle_id
+                AND oa.token_id = otp.token_id
+                AND oa.enabled
+          )
+        ORDER BY otp.timestamp DESC, otp.block_number DESC, otp.block_version DESC,
+                 otp.processing_version DESC, otp.oracle_id DESC
         LIMIT 1
     ),
     latest_offchain AS (

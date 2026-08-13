@@ -44,13 +44,29 @@ type ethCallArg struct {
 
 // Execute sends all calls in a single JSON-RPC batch request.
 func (c *DirectCaller) Execute(ctx context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
-	if len(calls) == 0 {
-		return []outbound.Result{}, nil
-	}
-
 	blockArg, err := toBlockNumArg(blockNumber)
 	if err != nil {
 		return nil, err
+	}
+	return c.executeAt(ctx, calls, blockArg)
+}
+
+// ExecuteAtHash pins the batch to blockHash instead of a block number. See the
+// outbound.Multicaller doc comment for why hash-pinning matters for reorg
+// correctness.
+func (c *DirectCaller) ExecuteAtHash(ctx context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+	if blockHash == (common.Hash{}) {
+		return nil, fmt.Errorf("block hash is required")
+	}
+	return c.executeAt(ctx, calls, toBlockHashArg(blockHash))
+}
+
+// executeAt sends all calls in a single JSON-RPC batch request pinned to
+// blockArg, which is either a block-number/tag string or a
+// {"blockHash": ...} object per the eth_call JSON-RPC spec.
+func (c *DirectCaller) executeAt(ctx context.Context, calls []outbound.Call, blockArg any) ([]outbound.Result, error) {
+	if len(calls) == 0 {
+		return []outbound.Result{}, nil
 	}
 
 	elems := make([]rpc.BatchElem, len(calls))
@@ -114,4 +130,14 @@ func toBlockNumArg(number *big.Int) (string, error) {
 		return "", fmt.Errorf("negative block number: %s", number)
 	}
 	return hexutil.EncodeBig(number), nil
+}
+
+// blockHashArg mirrors go-ethereum's internal rpcBlockNumberOrHash JSON
+// encoding for an eth_call pinned to a block hash.
+type blockHashArg struct {
+	BlockHash common.Hash `json:"blockHash"`
+}
+
+func toBlockHashArg(hash common.Hash) blockHashArg {
+	return blockHashArg{BlockHash: hash}
 }

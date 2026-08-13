@@ -97,6 +97,13 @@ type BlockStateRepository interface {
 	// The block is kept for historical purposes but excluded from canonical queries.
 	MarkBlockOrphaned(ctx context.Context, hash string) error
 
+	// ClearBlockOrphaned clears the is_orphaned flag on a block identified by hash.
+	// Used by the backfill loop to self-heal rows that were over-orphaned (e.g. a
+	// late-arriving block misclassified as a reorg). Idempotent: clearing an
+	// already-canonical row is a no-op. Returns an error if the block does not
+	// exist; the caller is responsible for verifying the row exists first.
+	ClearBlockOrphaned(ctx context.Context, hash string) error
+
 	// HandleReorgAtomic atomically performs all reorg-related database operations:
 	// 1. Saves the reorg event
 	// 2. Marks all blocks after commonAncestor as orphaned

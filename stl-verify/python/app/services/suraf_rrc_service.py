@@ -13,7 +13,7 @@ from typing import Any
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.risk import ModelName, RrcResult, SurafDetails
 from app.domain.exceptions import InvalidOverrideError
-from app.ports.allocation_repository import AllocationRepository
+from app.ports.allocation_repository import AllocationRepositoryPort
 from app.risk_engine.suraf.result import SurafResult
 
 _HUNDRED = Decimal("100")
@@ -45,7 +45,7 @@ class SurafRrcService:
         self,
         asset_to_rating: dict[int, str],
         suraf_ratings: dict[str, SurafResult],
-        allocation_repo: AllocationRepository,
+        allocation_repo: AllocationRepositoryPort,
     ) -> None:
         self._asset_to_rating = asset_to_rating
         self._suraf_ratings = suraf_ratings

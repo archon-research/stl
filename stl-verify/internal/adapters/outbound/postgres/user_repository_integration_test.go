@@ -4,10 +4,12 @@ package postgres
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
@@ -44,7 +46,7 @@ func TestGetOrCreateUser_CreatesNewUser(t *testing.T) {
 		t.Fatalf("NewUserRepository: %v", err)
 	}
 
-	user := entity.User{ChainID: 1, Address: common.HexToAddress("0x1111111111111111111111111111111111111111"), FirstSeenBlock: 100}
+	user := entity.User{ChainID: 1, Address: common.HexToAddress("0x1111111111111111111111111111111111111111"), FirstSeenBlock: i64(100)}
 
 	tx, err := userPool.Begin(ctx)
 	if err != nil {
@@ -86,7 +88,7 @@ func TestGetOrCreateUser_IdempotentReturnsSameID(t *testing.T) {
 		t.Fatalf("NewUserRepository: %v", err)
 	}
 
-	user := entity.User{ChainID: 1, Address: common.HexToAddress("0x2222222222222222222222222222222222222222"), FirstSeenBlock: 200}
+	user := entity.User{ChainID: 1, Address: common.HexToAddress("0x2222222222222222222222222222222222222222"), FirstSeenBlock: i64(200)}
 
 	tx1, err := userPool.Begin(ctx)
 	if err != nil {
@@ -139,7 +141,7 @@ func TestGetOrCreateUser_FirstSeenBlockUsesLeast(t *testing.T) {
 		t.Fatalf("Begin tx1: %v", err)
 	}
 	defer tx1.Rollback(ctx)
-	if _, err := repo.GetOrCreateUser(ctx, tx1, entity.User{ChainID: 1, Address: addr, FirstSeenBlock: 500}); err != nil {
+	if _, err := repo.GetOrCreateUser(ctx, tx1, entity.User{ChainID: 1, Address: addr, FirstSeenBlock: i64(500)}); err != nil {
 		t.Fatalf("first GetOrCreateUser: %v", err)
 	}
 	if err := tx1.Commit(ctx); err != nil {
@@ -152,7 +154,7 @@ func TestGetOrCreateUser_FirstSeenBlockUsesLeast(t *testing.T) {
 		t.Fatalf("Begin tx2: %v", err)
 	}
 	defer tx2.Rollback(ctx)
-	if _, err := repo.GetOrCreateUser(ctx, tx2, entity.User{ChainID: 1, Address: addr, FirstSeenBlock: 100}); err != nil {
+	if _, err := repo.GetOrCreateUser(ctx, tx2, entity.User{ChainID: 1, Address: addr, FirstSeenBlock: i64(100)}); err != nil {
 		t.Fatalf("second GetOrCreateUser: %v", err)
 	}
 	if err := tx2.Commit(ctx); err != nil {
@@ -207,7 +209,7 @@ func TestGetOrCreateUser_ConcurrentRaceReturnsSameID(t *testing.T) {
 			id, err := repo.GetOrCreateUser(ctx, tx, entity.User{
 				ChainID:        1,
 				Address:        addr,
-				FirstSeenBlock: int64(1000 + idx), // each worker thinks it saw the user at a different block
+				FirstSeenBlock: i64(int64(1000 + idx)), // each worker thinks it saw the user at a different block
 			})
 			if err != nil {
 				tx.Rollback(ctx)
@@ -249,5 +251,203 @@ func TestGetOrCreateUser_ConcurrentRaceReturnsSameID(t *testing.T) {
 	}
 	if firstSeenBlock != 1000 {
 		t.Errorf("first_seen_block = %d, want 1000 (minimum across workers)", firstSeenBlock)
+	}
+}
+
+// TestGetOrCreateUsers_DedupesBatch verifies the batch path deduplicates a
+// duplicate address in the input: a appears twice but yields one row.
+func TestGetOrCreateUsers_DedupesBatch(t *testing.T) {
+	truncateUser(t, context.Background())
+	ctx := context.Background()
+
+	repo, err := NewUserRepository(userPool, nil, 0)
+	if err != nil {
+		t.Fatalf("NewUserRepository: %v", err)
+	}
+
+	a := common.HexToAddress("0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1")
+	b := common.HexToAddress("0xB2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2B2")
+
+	var first map[common.Address]int64
+	inUserTx(t, ctx, func(tx pgx.Tx) error {
+		var err error
+		first, err = repo.GetOrCreateUsers(ctx, tx, []entity.User{
+			{ChainID: 1, Address: a},
+			{ChainID: 1, Address: b},
+			{ChainID: 1, Address: a},
+		})
+		return err
+	})
+	if len(first) != 2 {
+		t.Fatalf("len(first) = %d, want 2", len(first))
+	}
+}
+
+// TestGetOrCreateUsers_MixedChainBatchRejected verifies the batch refuses a
+// mixed-chain input rather than silently dropping the address-colliding row.
+func TestGetOrCreateUsers_MixedChainBatchRejected(t *testing.T) {
+	truncateUser(t, context.Background())
+	ctx := context.Background()
+
+	repo, err := NewUserRepository(userPool, nil, 0)
+	if err != nil {
+		t.Fatalf("NewUserRepository: %v", err)
+	}
+
+	a := common.HexToAddress("0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1")
+
+	inUserTx(t, ctx, func(tx pgx.Tx) error {
+		_, err := repo.GetOrCreateUsers(ctx, tx, []entity.User{
+			{ChainID: 1, Address: a},
+			{ChainID: 137, Address: a},
+		})
+		if err == nil {
+			t.Fatal("expected error for mixed-chain batch, got nil")
+		}
+		if !strings.Contains(err.Error(), "mixed chain IDs") {
+			t.Errorf("error = %q, want it to mention mixed chain IDs", err)
+		}
+		return nil
+	})
+}
+
+// TestGetOrCreateUsers_NilBlockInsertsNull verifies a nil incoming block
+// inserts a NULL first_seen_block rather than a sentinel.
+func TestGetOrCreateUsers_NilBlockInsertsNull(t *testing.T) {
+	truncateUser(t, context.Background())
+	ctx := context.Background()
+
+	repo, err := NewUserRepository(userPool, nil, 0)
+	if err != nil {
+		t.Fatalf("NewUserRepository: %v", err)
+	}
+
+	a := common.HexToAddress("0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1")
+
+	inUserTx(t, ctx, func(tx pgx.Tx) error {
+		_, err := repo.GetOrCreateUsers(ctx, tx, []entity.User{{ChainID: 1, Address: a}})
+		return err
+	})
+
+	var fsb *int64
+	if err := userPool.QueryRow(ctx,
+		`SELECT first_seen_block FROM "user" WHERE chain_id = 1 AND address = $1`,
+		a.Bytes()).Scan(&fsb); err != nil {
+		t.Fatalf("querying user: %v", err)
+	}
+	if fsb != nil {
+		t.Errorf("first_seen_block = %v, want NULL", *fsb)
+	}
+}
+
+// TestGetOrCreateUsers_NilBlockPreservesExisting is the core clobber fix: a
+// user seen on-chain at a real block keeps it when an off-block-context (nil)
+// caller re-upserts it (LEAST ignores NULL).
+func TestGetOrCreateUsers_NilBlockPreservesExisting(t *testing.T) {
+	truncateUser(t, context.Background())
+	ctx := context.Background()
+
+	repo, err := NewUserRepository(userPool, nil, 0)
+	if err != nil {
+		t.Fatalf("NewUserRepository: %v", err)
+	}
+
+	existing := common.HexToAddress("0xC3C3C3C3C3C3C3C3C3C3C3C3C3C3C3C3C3C3C3C3")
+	var existingID int64
+	if err := userPool.QueryRow(ctx,
+		`INSERT INTO "user" (chain_id, address, first_seen_block, created_at, updated_at, metadata)
+		 VALUES (1, $1, 12345, NOW(), NOW(), '{}'::jsonb) RETURNING id`,
+		existing.Bytes()).Scan(&existingID); err != nil {
+		t.Fatalf("seeding existing user: %v", err)
+	}
+
+	var second map[common.Address]int64
+	inUserTx(t, ctx, func(tx pgx.Tx) error {
+		var err error
+		second, err = repo.GetOrCreateUsers(ctx, tx, []entity.User{{ChainID: 1, Address: existing}})
+		return err
+	})
+	if second[existing] != existingID {
+		t.Errorf("existing user id = %d, want %d", second[existing], existingID)
+	}
+	var preserved *int64
+	if err := userPool.QueryRow(ctx,
+		`SELECT first_seen_block FROM "user" WHERE id = $1`, existingID).Scan(&preserved); err != nil {
+		t.Fatalf("querying preserved user: %v", err)
+	}
+	if preserved == nil || *preserved != 12345 {
+		t.Errorf("first_seen_block = %v, want 12345 (must not be clobbered)", preserved)
+	}
+}
+
+// TestGetOrCreateUsers_NullBlockSelfHeals verifies that a user first written
+// with a NULL first_seen_block (off-block-context caller) is healed to a real
+// block when a later on-chain observation supplies one: LEAST(NULL, N) = N.
+func TestGetOrCreateUsers_NullBlockSelfHeals(t *testing.T) {
+	truncateUser(t, context.Background())
+	ctx := context.Background()
+
+	repo, err := NewUserRepository(userPool, nil, 0)
+	if err != nil {
+		t.Fatalf("NewUserRepository: %v", err)
+	}
+
+	addr := common.HexToAddress("0xE5E5E5E5E5E5E5E5E5E5E5E5E5E5E5E5E5E5E5E5")
+
+	// First: nil block -> stored NULL.
+	inUserTx(t, ctx, func(tx pgx.Tx) error {
+		_, err := repo.GetOrCreateUsers(ctx, tx, []entity.User{{ChainID: 1, Address: addr}})
+		return err
+	})
+
+	// Later: a real on-chain block arrives and must heal the NULL.
+	inUserTx(t, ctx, func(tx pgx.Tx) error {
+		_, err := repo.GetOrCreateUsers(ctx, tx, []entity.User{{ChainID: 1, Address: addr, FirstSeenBlock: i64(900)}})
+		return err
+	})
+
+	var fsb *int64
+	if err := userPool.QueryRow(ctx,
+		`SELECT first_seen_block FROM "user" WHERE chain_id = 1 AND address = $1`,
+		addr.Bytes()).Scan(&fsb); err != nil {
+		t.Fatalf("querying user: %v", err)
+	}
+	if fsb == nil || *fsb != 900 {
+		t.Errorf("first_seen_block = %v, want 900 (LEAST should heal NULL to the real block)", fsb)
+	}
+}
+
+// TestUserFirstSeenBlockCheckConstraint verifies the migration guard: a literal
+// first_seen_block of 0 is rejected at the column level.
+func TestUserFirstSeenBlockCheckConstraint(t *testing.T) {
+	truncateUser(t, context.Background())
+	ctx := context.Background()
+
+	addr := common.HexToAddress("0xD4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D4D4")
+	_, err := userPool.Exec(ctx,
+		`INSERT INTO "user" (chain_id, address, first_seen_block, created_at, updated_at, metadata)
+		 VALUES (1, $1, 0, NOW(), NOW(), '{}'::jsonb)`,
+		addr.Bytes())
+	if err == nil {
+		t.Fatal("expected CHECK constraint violation for first_seen_block = 0, got nil")
+	}
+	if !strings.Contains(err.Error(), "user_first_seen_block_positive") {
+		t.Errorf("error %q should name the check constraint", err.Error())
+	}
+}
+
+// inUserTx runs fn inside a committed transaction against userPool.
+func inUserTx(t *testing.T, ctx context.Context, fn func(tx pgx.Tx) error) {
+	t.Helper()
+	tx, err := userPool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if err := fn(tx); err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatalf("tx fn: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
 	}
 }

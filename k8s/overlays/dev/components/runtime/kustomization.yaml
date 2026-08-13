@@ -1,0 +1,27 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# Shared local-runtime concerns applied to every Deployment in an including
+# overlay (dev core + dev/workers). Kept in a Component so the two overlays
+# stay DRY.
+patches:
+  # Collapse base's per-service config (otel-config + <svc>-config + per-svc
+  # Secret) to the single shared local ConfigMap + Secret. stl-config already
+  # carries the OTEL/Jaeger settings that base's otel-config provides.
+  - target:
+      kind: Deployment
+    patch: |
+      - op: replace
+        path: /spec/template/spec/containers/0/envFrom
+        value:
+          - configMapRef:
+              name: stl-config
+          - secretRef:
+              name: stl-secrets
+  # kind loads images locally; never attempt to pull from a registry.
+  - target:
+      kind: Deployment
+    patch: |
+      - op: add
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Never

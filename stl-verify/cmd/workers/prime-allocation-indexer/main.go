@@ -13,7 +13,6 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/cache"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
@@ -21,13 +20,17 @@ import (
 	redisAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	sqsAdapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sqs"
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/axis_synome_contract"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving/archivingwire"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	at "github.com/archon-research/stl/stl-verify/internal/services/allocation_tracker"
 )
 
@@ -130,6 +133,16 @@ func parseConfig(args []string) (cliConfig, error) {
 		}
 		cfg.visibilityTimeout = v
 	}
+	// SWEEP_BLOCKS lets the Deployment tune the sweep cadence via its configmap
+	// (it passes no args, so without this the -sweep-blocks flag default is fixed).
+	// Mirrors psm3-indexer; the BlockLatencyHigh runbook points operators here.
+	if sweepBlocksStr := env.Get("SWEEP_BLOCKS", ""); sweepBlocksStr != "" {
+		v, err := strconv.Atoi(sweepBlocksStr)
+		if err != nil {
+			return cliConfig{}, fmt.Errorf("parsing SWEEP_BLOCKS %q: %w", sweepBlocksStr, err)
+		}
+		cfg.sweepBlocks = v
+	}
 
 	chainIDStr := env.Get("CHAIN_ID", "1")
 	chainID, err := strconv.ParseInt(chainIDStr, 10, 64)
@@ -155,6 +168,17 @@ func run(ctx context.Context, args []string) error {
 	cfg, err := parseConfig(args)
 	if err != nil {
 		return err
+	}
+
+	// Resolve and validate the chain before any infra dial or DB write: an undeclared tracker
+	// deployment must fail immediately, not after standing up SQS/Redis/S3/Postgres and writing
+	// a build-registry row. Both calls are pure (chainName is reused downstream).
+	chainName, err := entity.ChainName(cfg.chainID)
+	if err != nil {
+		return fmt.Errorf("resolving chain name: %w", err)
+	}
+	if err := at.AssertServedTrackerChain(chainName); err != nil {
+		return fmt.Errorf("served-chain assertion: %w", err)
 	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
@@ -217,61 +241,8 @@ func run(ctx context.Context, args []string) error {
 	defer rawClient.Close()
 	logger.Info("Ethereum node connected")
 
-	mc, err := multicall.NewClient(rawClient, blockchain.Multicall3)
-	if err != nil {
-		return fmt.Errorf("multicall client: %w", err)
-	}
-
-	erc20ABI, err := abis.GetERC20ABI()
-	if err != nil {
-		return fmt.Errorf("erc20 abi: %w", err)
-	}
-	atokenReadABI, err := abis.GetATokenReadABI()
-	if err != nil {
-		return fmt.Errorf("atoken read abi: %w", err)
-	}
-
-	// Build source registry
-	registry := at.NewSourceRegistry(logger)
-
-	for _, s := range at.DefaultSkipSources(logger) {
-		registry.Register(s)
-	}
-
-	registry.Register(at.NewBalanceOfSource(mc, erc20ABI, atokenReadABI, logger))
-
-	erc4626, err := at.NewERC4626Source(mc, logger)
-	if err != nil {
-		return fmt.Errorf("erc4626 source: %w", err)
-	}
-	registry.Register(erc4626)
-
-	curveABI, err := abis.GetCurvePoolABI()
-	if err != nil {
-		return fmt.Errorf("curve abi: %w", err)
-	}
-	registry.Register(at.NewCurveSource(mc, curveABI, logger))
-
-	uniV3, err := at.NewUniV3Source(mc, logger)
-	if err != nil {
-		return fmt.Errorf("univ3 source: %w", err)
-	}
-	registry.Register(uniV3)
-
-	for _, s := range at.DefaultStubSources(logger) {
-		registry.Register(s)
-	}
-
-	// Token entries filtered by chain
-	entries := at.EntriesForChainID(at.DefaultTokenEntries(), cfg.chainID)
-	if len(entries) == 0 {
-		return fmt.Errorf("no token entries for chain ID %d", cfg.chainID)
-	}
-
-	proxies := at.ProxiesForChainID(at.DefaultProxies(), cfg.chainID)
-
 	// Database
-	dbPool, err := pgxpool.New(ctx, cfg.dbURL)
+	dbPool, err := postgres.OpenPool(ctx, postgres.WorkerDBConfig(cfg.dbURL))
 	if err != nil {
 		return fmt.Errorf("opening database: %w", err)
 	}
@@ -291,6 +262,73 @@ func run(ctx context.Context, args []string) error {
 		"redis", cfg.redisAddr,
 		"chainID", cfg.chainID,
 		"commit", buildReg.GitHash())
+
+	// OpenTelemetry
+	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
+		ServiceName:    "prime-allocation-indexer",
+		ServiceVersion: buildReg.GitHash(),
+		BuildTime:      BuildTime,
+		Logger:         logger,
+	})
+	if err != nil {
+		return fmt.Errorf("initializing telemetry: %w", err)
+	}
+	defer shutdownOTEL(context.Background())
+
+	mcTel, err := multicall.NewTelemetry(chainName)
+	if err != nil {
+		return fmt.Errorf("multicall telemetry: %w", err)
+	}
+	mc, err := multicall.NewClient(rawClient, blockchain.Multicall3, multicall.WithTelemetry(mcTel))
+	if err != nil {
+		return fmt.Errorf("multicall client: %w", err)
+	}
+
+	atTel, err := at.NewTelemetry(chainName)
+	if err != nil {
+		return fmt.Errorf("allocation tracker telemetry: %w", err)
+	}
+
+	// Shared per-block liveness/latency recorder (blocks_processed_total,
+	// processing_duration_seconds), the same telemetry.Metrics fluid-vault-indexer
+	// uses. Chain label = chainName; service_name resolves from the OTEL resource
+	// ("prime-allocation-indexer") set by InitOTEL above.
+	metrics, err := telemetry.NewMetrics("prime-allocation-indexer", chainName)
+	if err != nil {
+		return fmt.Errorf("creating metrics: %w", err)
+	}
+
+	// Optional raw SC call archiving (VEC-81). Off unless ARCHIVE_SC_CALLS=true.
+	archiveWrap, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "prime-allocation")
+	if err != nil {
+		return err
+	}
+	defer archiveDrain()
+	mc = archiveWrap(mc)
+
+	erc20ABI, err := abis.GetERC20ABI()
+	if err != nil {
+		return fmt.Errorf("erc20 abi: %w", err)
+	}
+
+	// Build source registry. Assembly lives in the allocation_tracker package so the
+	// routing guardrail test and the worker share one definition (see registry_build.go).
+	registry, err := at.BuildSourceRegistry(mc, logger)
+	if err != nil {
+		return fmt.Errorf("build source registry: %w", err)
+	}
+
+	// Load the contract once and derive both entries and proxies for this chain from
+	// the same read.
+	contract, err := axis_synome_contract.LoadDefaultContract()
+	if err != nil {
+		return fmt.Errorf("load axis-synome contract: %w", err)
+	}
+
+	entries, proxies, err := at.EntriesAndProxiesForChainID(contract, cfg.chainID)
+	if err != nil {
+		return fmt.Errorf("derive entries/proxies for contract %s chain %d: %w", contract.Version, cfg.chainID, err)
+	}
 
 	txm, err := postgres.NewTxManager(dbPool, logger)
 	if err != nil {
@@ -318,7 +356,7 @@ func run(ctx context.Context, args []string) error {
 	}
 	allocRepo := postgres.NewAllocationRepository(dbPool, txm, tokenRepo, logger, buildReg.BuildID())
 	supplyRepo := postgres.NewTokenTotalSupplyRepository(dbPool, txm, tokenRepo, logger, buildReg.BuildID())
-	pgHandler := at.NewPrimePositionHandler(allocRepo, supplyRepo, txm, mc, erc20ABI, primeLookup, logger)
+	pgHandler := at.NewPrimePositionHandler(allocRepo, supplyRepo, txm, mc, erc20ABI, primeLookup, logger, atTel)
 
 	handler := at.NewMultiHandler(at.NewLogHandler(logger), pgHandler)
 
@@ -328,6 +366,7 @@ func run(ctx context.Context, args []string) error {
 			SweepEveryNBlocks: cfg.sweepBlocks,
 			ChainID:           cfg.chainID,
 			Logger:            logger,
+			Metrics:           metrics,
 		},
 		sqsConsumer,
 		cacheReader,

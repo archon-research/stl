@@ -2,7 +2,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import GetCoreSchemaHandler
 from pydantic_core import CoreSchema, core_schema
@@ -65,25 +65,89 @@ class ReceiptTokenPosition:
     balance: Decimal
     amount_usd: Decimal | None = None
     latest_activity_at: datetime | None = None
+    latest_activity_action: str | None = None
+    latest_activity_amount: Decimal | None = None
 
 
 @dataclass(frozen=True)
 class DirectAssetHolding:
-    """A token held directly by a prime that is not a registered receipt-token wrapper."""
+    """A token held directly by a prime that is not a registered receipt-token wrapper.
+
+    The ``underlying_*`` fields are set when the holding is allowlisted for
+    underlying-value pricing and its row carries a resolvable underlying (the
+    pricing basis for ``amount_usd``), and are always set or unset together.
+    For non-allowlisted holdings ``None`` means the token prices by its own
+    oracle and the underlying is the token itself; for allowlisted holdings
+    ``None`` marks a row with no resolvable underlying (e.g. written before
+    the type's valuation deployed), a surfaced coverage gap priced as NULL,
+    never by the share-count balance.
+    """
 
     chain_id: int
     token_id: int
     token_address: str
     symbol: str
     balance: Decimal
+    amount_usd: Decimal | None = None
     latest_activity_at: datetime | None = None
+    latest_activity_action: str | None = None
+    latest_activity_amount: Decimal | None = None
+    underlying_token_id: int | None = None
+    underlying_token_address: str | None = None
+    underlying_symbol: str | None = None
+
+
+@dataclass(frozen=True)
+class AnchorageCustodyHolding:
+    """Off-chain custodied collateral securing a prime's Anchorage loan.
+
+    One row per ``(asset_type, custody_type)`` after collapsing every package in
+    the prime's latest snapshot cohort. Column semantics come straight from the
+    Anchorage feed (see ``_ANCHORAGE_CUSTODY_HOLDINGS_SQL``):
+
+    * ``amount_usd``     — SUM(exposure_value): the loan drawn against the
+      collateral. This is the figure surfaced as the allocation's USD value
+      (matches VEC-499 / skyeco's concept).
+    * ``collateral_usd`` — SUM(package_value): the BTC collateral's market
+      value. Carried alongside so the surfaced figure can flip from the loan to
+      the collateral in one line at the endpoint, without a schema change.
+    * ``balance``        — SUM(asset_quantity): collateral in native units (BTC).
+    * ``as_of``          — the cohort's ``snapshot_time``. Surfaced verbatim as
+      the row's latest-activity timestamp so a frozen upstream feed reads as
+      honestly stale rather than hiding the staleness.
+    """
+
+    symbol: str
+    custody_type: str
+    balance: Decimal
+    amount_usd: Decimal
+    collateral_usd: Decimal
+    as_of: datetime
 
 
 @dataclass(frozen=True)
 class Prime:
+    """One of a prime's proxy wallets, as surfaced by ``/v1/primes``.
+
+    A prime has several of these — one ALM proxy per chain it allocates on — so
+    ``name`` is not a key. ``chain_id`` comes from the position rows; ``chain`` is
+    derived from ``chain_id`` via ``chain_names.chain_name_for`` and is ``None``
+    for a chain the vocabulary has not been taught.
+
+    ``prime_vault_address`` is the owning prime's ``prime.vault_address`` — stable,
+    unique, and the same across every proxy of a prime, so consumers group rows by
+    it. ``None`` when the prime has no vault address on record.
+    """
+
     id: str
     name: str
     address: str
+    chain_id: int
+    chain: str | None
+    # An allocation venue by construction: SubProxy treasury wallets hold no
+    # allocations, so they are excluded rather than listed with another role.
+    role: Literal["alm"]
+    prime_vault_address: str | None = None
 
 
 @dataclass(frozen=True)

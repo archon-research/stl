@@ -11,6 +11,7 @@ class AllocationCategory(str, Enum):
     POL = "pol"  # Protocol-owned liquidity
     PSM3 = "psm3"  # Peg stability mechanism (Spark PSM3 variant)
     ASSET = "asset"  # Non-strategy asset holding
+    CUSTODY = "custody"  # Off-chain custodied collateral (e.g. Anchorage BTC)
 
 
 @dataclass(frozen=True)

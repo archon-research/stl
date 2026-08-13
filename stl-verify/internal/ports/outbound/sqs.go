@@ -1,6 +1,9 @@
 package outbound
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // SQSMessage represents a message received from SQS.
 type SQSMessage struct {
@@ -14,6 +17,15 @@ type SQSMessage struct {
 	Body string
 }
 
+// DeadLetterPublisher sends failed message bodies to a dead-letter queue so
+// that permanent failures are preserved for audit/redrive instead of blocking
+// the main queue.
+type DeadLetterPublisher interface {
+	// Publish sends a failed message body to the dead-letter (FIFO) queue.
+	// groupID is the FIFO MessageGroupId.
+	Publish(ctx context.Context, body string, groupID string) error
+}
+
 // SQSConsumer defines the interface for consuming messages from an SQS queue.
 type SQSConsumer interface {
 	// ReceiveMessages fetches up to maxMessages from the queue.
@@ -22,6 +34,11 @@ type SQSConsumer interface {
 
 	// DeleteMessage removes a successfully processed message from the queue.
 	DeleteMessage(ctx context.Context, receiptHandle string) error
+
+	// VisibilityTimeout reports the per-receive visibility timeout configured on
+	// the consumer. The consume loop validates it exceeds the handler budget so a
+	// message is never redelivered while its handler is still running.
+	VisibilityTimeout() time.Duration
 
 	// Close closes the consumer and releases resources.
 	Close() error

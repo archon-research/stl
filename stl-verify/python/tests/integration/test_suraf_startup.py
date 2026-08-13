@@ -25,13 +25,17 @@ from app.main import create_app
 from app.risk_engine.mapping import MappingError
 from app.risk_engine.suraf.result import SurafResult
 from app.risk_engine.suraf.validate import SurafValidationError
-from tests.integration.conftest import composite_mapping_key, insert_receipt_token
+from tests.integration.seed import insert_receipt_token
 
 SAMPLE_PACKAGE = Path(__file__).resolve().parents[1] / "unit" / "risk_engine" / "suraf" / "testdata" / "sample_rating"
 
 # Deterministic test address — used for seeding and mapping.
 _TEST_ADDRESS = bytes.fromhex("Bcca60bB61934080951369a648Fb03DF4F96263C")
 _TEST_CHAIN_ID = 1
+
+
+def _composite_mapping_key(chain_id: int, address: bytes) -> str:
+    return f"{chain_id}:0x{address.hex()}"
 
 
 def _settings(async_db_url: str, suraf_inputs_dir: Path, suraf_mappings_file: Path) -> Settings:
@@ -62,7 +66,7 @@ def test_startup_populates_suraf_ratings(async_db_url: str, db_url: str, tmp_pat
     receipt_token_id = asyncio.run(insert_receipt_token(db_url, _TEST_CHAIN_ID, _TEST_ADDRESS))
 
     inputs_dir = _build_inputs_dir(tmp_path)
-    key = composite_mapping_key(_TEST_CHAIN_ID, _TEST_ADDRESS)
+    key = _composite_mapping_key(_TEST_CHAIN_ID, _TEST_ADDRESS)
     mapping_file = _write_mapping(tmp_path, "{" + f'"{key}": "sample_rating"' + "}")
     app = create_app(_settings(async_db_url, inputs_dir, mapping_file))
 
@@ -108,7 +112,7 @@ def test_startup_fails_when_mapping_references_unknown_rating(async_db_url: str,
     # _check_mapping_refs catches unknown rating_ids before the lifespan
     # starts — no DB seed needed.
     inputs_dir = _build_inputs_dir(tmp_path)
-    key = composite_mapping_key(_TEST_CHAIN_ID, _TEST_ADDRESS)
+    key = _composite_mapping_key(_TEST_CHAIN_ID, _TEST_ADDRESS)
     mapping_file = _write_mapping(tmp_path, "{" + f'"{key}": "does_not_exist"' + "}")
 
     with pytest.raises(MappingError, match="does_not_exist"):
@@ -118,7 +122,7 @@ def test_startup_fails_when_mapping_references_unknown_rating(async_db_url: str,
 def test_startup_fails_when_mapping_references_unknown_address(async_db_url: str, tmp_path: Path) -> None:
     inputs_dir = _build_inputs_dir(tmp_path)
     zero_addr = bytes(20)
-    key = composite_mapping_key(_TEST_CHAIN_ID, zero_addr)
+    key = _composite_mapping_key(_TEST_CHAIN_ID, zero_addr)
     mapping_file = _write_mapping(tmp_path, "{" + f'"{key}": "sample_rating"' + "}")
 
     # DB resolution happens in the lifespan, so the error is raised when

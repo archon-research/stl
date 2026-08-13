@@ -1,9 +1,12 @@
 // Package data_validator provides validation of block chain data stored by the watcher.
-// It verifies reorg events against Etherscan's canonical chain and validates chain integrity.
+// It verifies reorg events against a canonical chain source (provided via the
+// BlockVerifier port) and validates chain integrity. The source is chain-specific
+// and selected by the caller; the service itself is chain-agnostic.
 package data_validator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand"
@@ -21,10 +24,10 @@ type ServiceConfig struct {
 	// ToBlock is the end of the block range to validate (0 = max block in DB).
 	ToBlock int64
 
-	// SpotCheckCount is the number of random blocks to verify against Etherscan.
+	// SpotCheckCount is the number of random blocks to verify against the canonical chain source.
 	SpotCheckCount int
 
-	// ValidateReorgs enables reorg event validation against Etherscan.
+	// ValidateReorgs enables reorg event validation against the canonical chain source.
 	ValidateReorgs bool
 
 	// ValidateChainIntegrity enables parent-hash chain validation.
@@ -130,6 +133,7 @@ func (s *Service) Validate(ctx context.Context) (*Report, error) {
 		"passed", report.Passed,
 		"failed", report.Failed,
 		"errors", report.Errors,
+		"skipped", report.Skipped,
 		"duration", report.Duration,
 	)
 
@@ -138,6 +142,18 @@ func (s *Service) Validate(ctx context.Context) (*Report, error) {
 
 // resolveBlockRange determines the actual block range to validate.
 func (s *Service) resolveBlockRange(ctx context.Context) (int64, int64, error) {
+	// GetMin/MaxBlockNumber return 0 for both an empty table and a genesis-only
+	// table, so emptiness can't be inferred from them. Check existence directly:
+	// a nil last block means nothing has been ingested yet, which is a hard
+	// failure for a validation run.
+	lastBlock, err := s.blockStateRepo.GetLastBlock(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("getting last block: %w", err)
+	}
+	if lastBlock == nil {
+		return 0, 0, fmt.Errorf("no blocks found in database to validate (chain may not be ingested yet)")
+	}
+
 	fromBlock := s.config.FromBlock
 	toBlock := s.config.ToBlock
 
@@ -189,7 +205,7 @@ func (s *Service) validateChainIntegrity(ctx context.Context, fromBlock, toBlock
 	}
 }
 
-// validateReorgs validates each reorg event against Etherscan.
+// validateReorgs validates each reorg event against the canonical chain source.
 func (s *Service) validateReorgs(ctx context.Context, fromBlock, toBlock int64) ([]CheckResult, error) {
 	s.logger.Info("fetching reorg events", "from", fromBlock, "to", toBlock)
 
@@ -221,7 +237,7 @@ func (s *Service) validateReorgs(ctx context.Context, fromBlock, toBlock int64) 
 	return results, nil
 }
 
-// validateSingleReorg validates a single reorg event against Etherscan.
+// validateSingleReorg validates a single reorg event against the canonical chain source.
 func (s *Service) validateSingleReorg(ctx context.Context, event outbound.ReorgEvent) CheckResult {
 	start := time.Now()
 	name := fmt.Sprintf("Reorg %d at block %d", event.ID, event.BlockNumber)
@@ -233,14 +249,14 @@ func (s *Service) validateSingleReorg(ctx context.Context, event outbound.ReorgE
 		"new_hash", event.NewHash,
 	)
 
-	// Fetch the canonical block from Etherscan
+	// Fetch the canonical block from the verifier source
 	canonicalBlock, err := s.blockVerifier.GetBlockByNumber(ctx, event.BlockNumber)
 	duration := time.Since(start)
 
 	if err != nil {
 		return CheckResult{
 			Name:     name,
-			Status:   StatusError,
+			Status:   canonicalCheckStatus(err),
 			Message:  fmt.Sprintf("Failed to fetch block: %v", err),
 			Duration: duration,
 			Details: map[string]any{
@@ -254,7 +270,7 @@ func (s *Service) validateSingleReorg(ctx context.Context, event outbound.ReorgE
 		return CheckResult{
 			Name:     name,
 			Status:   StatusError,
-			Message:  "Block not found on Etherscan",
+			Message:  fmt.Sprintf("Block not found on %s", s.blockVerifier.Name()),
 			Duration: duration,
 			Details: map[string]any{
 				"reorg_id":     event.ID,
@@ -263,7 +279,7 @@ func (s *Service) validateSingleReorg(ctx context.Context, event outbound.ReorgE
 		}
 	}
 
-	// The new_hash from our reorg event should match Etherscan's canonical hash
+	// The new_hash from our reorg event should match the canonical chain source's hash
 	if !hashesMatch(event.NewHash, canonicalBlock.Hash) {
 		return CheckResult{
 			Name:   name,
@@ -318,7 +334,7 @@ func (s *Service) runSpotChecks(ctx context.Context, fromBlock, toBlock int64) [
 	return results
 }
 
-// spotCheckBlock verifies a single block's hash against Etherscan.
+// spotCheckBlock verifies a single block's hash against the canonical chain source.
 func (s *Service) spotCheckBlock(ctx context.Context, blockNum int64) CheckResult {
 	start := time.Now()
 	name := fmt.Sprintf("Spot check block %d", blockNum)
@@ -343,14 +359,14 @@ func (s *Service) spotCheckBlock(ctx context.Context, blockNum int64) CheckResul
 		}
 	}
 
-	// Get canonical block from Etherscan
+	// Get canonical block from the verifier source
 	canonicalBlock, err := s.blockVerifier.GetBlockByNumber(ctx, blockNum)
 	duration := time.Since(start)
 
 	if err != nil {
 		return CheckResult{
 			Name:     name,
-			Status:   StatusError,
+			Status:   canonicalCheckStatus(err),
 			Message:  fmt.Sprintf("Failed to fetch from %s: %v", s.blockVerifier.Name(), err),
 			Duration: duration,
 		}
@@ -414,6 +430,17 @@ func selectRandomBlocks(fromBlock, toBlock int64, n int) []int64 {
 		blocks = append(blocks, block)
 	}
 	return blocks
+}
+
+// canonicalCheckStatus chooses the status for a failed canonical-source fetch.
+// A transient outage (rate-limit, timeout, 5xx) is inconclusive, not a data
+// discrepancy, so it is skipped rather than failing the whole run. A permanent
+// error (bad key, parse failure) stays a hard error.
+func canonicalCheckStatus(err error) string {
+	if errors.Is(err, outbound.ErrCanonicalSourceUnavailable) {
+		return StatusSkipped
+	}
+	return StatusError
 }
 
 // hashesMatch compares two block hashes (case-insensitive, handles 0x prefix).

@@ -1,8 +1,8 @@
 # ADR-0002: Data Auditability and Processing Versioning
 
-**Status**: Accepted  
-**Proposed**: @simonbojeoutzen  
-**Date**: 2026-04-08  
+**Status**: Accepted
+**Proposed**: @simonbojeoutzen
+**Date**: 2026-04-08
 **Deciders**: @vector, @infrastructure
 
 ## Context
@@ -157,8 +157,56 @@ and the constraint is already enforced at the application level — each service
 ### 3. Automatic Version Assignment via Per-Table Triggers
 
 Each state table gets a dedicated trigger function that assigns `processing_version` automatically
-on insert. The functions use hardcoded column names so PostgreSQL can cache the query plan,
-following the same pattern as the existing `assign_block_version` trigger on `block_states`.
+on insert. The functions use hardcoded column names rather than dynamic SQL, following the same
+pattern as the existing `assign_block_version` trigger on `block_states`.
+
+#### Plan caching must be disabled
+
+Every such function on a **hypertable** wants `plan_cache_mode = 'force_custom_plan'`:
+
+```sql
+ALTER FUNCTION assign_processing_version_<table>() SET plan_cache_mode = 'force_custom_plan';
+```
+
+Applied to all 36 functions: `20260806_120000_processing_version_force_custom_plan.sql`
+covers `offchain_token_price`, where the cost was measured and a historical backfill made
+it acute, and `20260806_130000_set_plan_cache_mode_on_processing_version_triggers.sql`
+covers the rest — the setting is semantics-free (plan choice only), so blanket coverage
+beats waiting for each table to age into the same pathology. New versioned hypertables
+must declare the `SET` inside the `CREATE FUNCTION` that defines their trigger:
+`CREATE OR REPLACE FUNCTION` resets `proconfig`, so a detached `ALTER` does not survive
+a later function edit (see `db/migrations/AGENTS.md`).
+
+This reverses an earlier assumption in this ADR, which treated PL/pgSQL's plan caching as a
+benefit of hardcoding the column names. For a **hypertable** it is the opposite. PL/pgSQL switches
+a statement to a *generic* plan after roughly five executions, and a generic plan cannot prune
+chunks — the partition value is a placeholder when the plan is built, so the plan keeps every
+chunk and re-derives the surviving one at each execution ("Chunks excluded during startup: N").
+Per-row cost then grows with chunk count, on tables that only ever gain chunks.
+
+Measured on timescaledb 2.25.1-pg17, one 721-row batch against ~2,000 chunks:
+
+| | Time |
+|---|---|
+| Generic plan (the default after warm-up) | 4,410 ms |
+| Triggers disabled entirely | 8–19 ms |
+| `force_custom_plan` | 148 ms, and flat in chunk count |
+
+About 92% of the cost was the `build_id` retry check, which no covering index serves. A local
+reproduction at 782 chunks on slower storage measured 84,301 ms against 590 ms — a 143× difference.
+
+Note the trigger is `BEFORE INSERT`, so it fires for rows `ON CONFLICT` later discards too: a
+re-run over an already-populated range pays the same per-row floor and is **not** free.
+
+`force_custom_plan` re-plans with real parameter values on every execution. Chunk pruning returns
+and the extra planning is repaid many times over. Semantics are untouched — same rows, same
+versions, same locking.
+
+Preferred over adding a covering index for the `build_id` check: an index fixes one table, costs
+write throughput on the hot ingest path, and still leaves a generic plan unable to prune.
+
+Enforced by `TestProcessingVersionTriggersForceCustomPlan`, which enumerates
+`assign_processing_version_*` from `pg_proc` and fails if any function lacks the setting.
 
 #### Retry vs. Reprocessing
 

@@ -9,11 +9,8 @@
 ARG GO_VERSION
 FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS builder
 
-# Build arguments for cross-compilation and versioning
+# Cross-compilation arg only; this dev image embeds no version ldflags.
 ARG TARGETARCH
-ARG GIT_COMMIT=unknown
-ARG GIT_BRANCH=unknown
-ARG BUILD_TIME=unknown
 
 # Install build dependencies
 RUN apk add --no-cache git ca-certificates

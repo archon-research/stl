@@ -1,6 +1,15 @@
 package outbound
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// ErrCanonicalSourceUnavailable marks a transient failure to reach the canonical
+// chain source (rate-limit, timeout, 5xx) that survived the adapter's own retries.
+// It means "we could not check this block right now", NOT "our stored data is
+// wrong", so the validator records the check as skipped instead of failing the run.
+var ErrCanonicalSourceUnavailable = errors.New("canonical source temporarily unavailable")
 
 // CanonicalBlock represents a block from a canonical chain data source.
 type CanonicalBlock struct {
@@ -14,7 +23,7 @@ type CanonicalBlock struct {
 	Timestamp int64
 }
 
-// BlockVerifier verifies block data against authoritative sources like Etherscan.
+// BlockVerifier fetches canonical block data from an authoritative chain source.
 type BlockVerifier interface {
 	// Name returns the verifier name (e.g., "etherscan").
 	Name() string

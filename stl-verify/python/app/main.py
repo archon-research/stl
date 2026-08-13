@@ -9,17 +9,29 @@ from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.postgres.aave_like_backed_breakdown_repository import AaveLikeBackedBreakdownRepository
 from app.adapters.postgres.aave_like_liquidation_params_repository import AaveLikeLiquidationParamsRepository
-from app.adapters.postgres.allocation_position_repository import PostgresAllocationRepository
+from app.adapters.postgres.allocation_position_repository import AllocationRepository
+from app.adapters.postgres.backed_breakdown_repository_maple import MapleBackedBreakdownRepository
 from app.adapters.postgres.backed_breakdown_repository_morpho import MorphoBackedBreakdownRepository
 from app.adapters.postgres.core_model_results_reader import PostgresCoreModelResultsReader
 from app.adapters.postgres.crypto_lending_reader import PostgresCryptoLendingReader
+from app.adapters.postgres.engine import create_db_engine
 from app.adapters.postgres.morpho_liquidation_params_repository import MorphoLiquidationParamsRepository
 from app.adapters.postgres.receipt_token_repository import ReceiptTokenRepository, resolve_receipt_token_mapping
-from app.api.v1 import allocations, data_sources, prime_debts, protocol_events, risk, status, tokens
+from app.api.v1 import (
+    allocations,
+    data_sources,
+    exposure,
+    prime_debts,
+    prime_risk_capital,
+    protocol_events,
+    risk,
+    status,
+    tokens,
+    total_capital,
+)
 from app.config import Settings, get_settings
 from app.logging import get_logger, setup_logging
 from app.middleware.request_id import RequestIdMiddleware
@@ -165,13 +177,13 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        engine = create_async_engine(settings.async_database_url, pool_pre_ping=True)
+        engine = create_db_engine(settings)
         try:
             async with engine.connect() as conn:
                 await conn.execute(text("SELECT 1"))
 
             asset_to_rating = await resolve_receipt_token_mapping(raw_mapping, engine)
-            allocation_repo = PostgresAllocationRepository(engine)
+            allocation_repo = AllocationRepository(engine)
             suraf_rrc_service = SurafRrcService(asset_to_rating, suraf_ratings, allocation_repo)
 
             receipt_token_repo = ReceiptTokenRepository(engine)
@@ -179,6 +191,7 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
                 receipt_token_repo=receipt_token_repo,
                 aave_breakdown_repo=AaveLikeBackedBreakdownRepository(engine),
                 morpho_breakdown_repo=MorphoBackedBreakdownRepository(engine),
+                maple_breakdown_repo=MapleBackedBreakdownRepository(engine),
                 aave_liq_repo=AaveLikeLiquidationParamsRepository(engine),
                 morpho_liq_repo=MorphoLiquidationParamsRepository(engine),
                 engine=engine,
@@ -278,6 +291,9 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
     application.include_router(tokens.router, prefix="/v1")
     application.include_router(protocol_events.router, prefix="/v1")
     application.include_router(prime_debts.router, prefix="/v1")
+    application.include_router(total_capital.router, prefix="/v1")
+    application.include_router(prime_risk_capital.router, prefix="/v1")
+    application.include_router(exposure.router, prefix="/v1")
     application.include_router(data_sources.router, prefix="/v1")
     application.include_router(risk.router, prefix="/v1")
 

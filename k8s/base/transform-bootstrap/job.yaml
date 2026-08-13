@@ -1,0 +1,46 @@
+# One-off VEC-484 history backfill. The AFTER INSERT triggers only enqueue new
+# raw rows, so pre-existing history is copied in once by transform-bootstrap.
+#
+# Deliberately NOT an argocd PreSync hook and NOT referenced by the staging/prod
+# overlays: it is expensive (reads full history, including S3-tiered chunks) and
+# runs once, so it must not fire on every sync. Run it manually per env:
+#
+#   kustomize build k8s/overlays/<env>/bootstrap | kubectl apply -f -
+#   kubectl -n vector wait --for=condition=complete job/transform-bootstrap --timeout=…
+#   kubectl -n vector delete job transform-bootstrap   # when done
+#
+# Edit -from in the overlay to the earliest raw history to backfill. Re-running is
+# safe: _bootstrap_<t>() upserts with the IS DISTINCT FROM guard, so it is idempotent.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: transform-bootstrap
+spec:
+  backoffLimit: 0 # no auto-retry; on failure inspect and re-run manually (idempotent)
+  template:
+    metadata:
+      labels:
+        app: transform-bootstrap
+    spec:
+      serviceAccountName: transform-bootstrap
+      restartPolicy: Never
+      containers:
+        - name: transform-bootstrap
+          image: transform-bootstrap
+          # -from is the backfill start; override per env in the overlay. -step is
+          # the per-call window. statement_timeout=0 and tiered reads are set by the
+          # tool itself, not here.
+          args: ["-from", "2025-01-01", "-step", "720h"]
+          envFrom:
+            # DATABASE_URL. Reuses the transform-worker Secret (created by the
+            # transform-worker ExternalSecret); bootstrap is run after the worker
+            # is deployed, so the Secret already exists.
+            - secretRef:
+                name: transform-worker
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "1000m"
+              memory: "512Mi"

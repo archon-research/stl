@@ -10,24 +10,31 @@ on:
   pull_request:
     branches:
       - main
+  merge_group:
   workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# id-token: write is needed by deploy.yaml (AWS OIDC). It must be at the
-# workflow level because reusable-workflow callers can't grant permissions
-# at the job level. GitHub blocks OIDC token minting for fork PRs, so this
-# is not an attack vector.
+# Minimal default ceiling for every job: detect-changes and the go/python/ts
+# reusable callers only need read access. The elevated id-token: write (AWS
+# OIDC) and packages: write (GHCR cache push) that deploy.yaml requires are
+# granted on the call-deploy job alone (below), so the other jobs don't inherit
+# them.
 permissions:
   contents: read
   packages: read
-  id-token: write
 
 jobs:
   detect-changes:
     name: Detect Changes
+    # Skipped on merge_group: change detection is a PR/push-time optimization,
+    # and merge-queue runs must execute every suite so a mis-detected skip
+    # can't land an untested combination on main. The go/python/ts jobs below
+    # use `!cancelled()` instead of the implicit success() so being skipped
+    # here doesn't cascade-skip them (see the call-deploy comment).
+    if: github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     outputs:
       go: ${{ steps.changed-files.outputs.go_any_changed }}
@@ -35,7 +42,7 @@ jobs:
       ts: ${{ steps.changed-files.outputs.ts_any_changed }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -48,19 +55,25 @@ jobs:
 
   go-ci:
     needs: detect-changes
-    if: needs.detect-changes.outputs.go == 'true'
+    if: |
+      !cancelled() &&
+      (github.event_name == 'merge_group' || needs.detect-changes.outputs.go == 'true')
     uses: ./.github/workflows/go-ci.yml
     secrets: inherit
 
   python-ci:
     needs: detect-changes
-    if: needs.detect-changes.outputs.python == 'true'
+    if: |
+      !cancelled() &&
+      (github.event_name == 'merge_group' || needs.detect-changes.outputs.python == 'true')
     uses: ./.github/workflows/python-ci.yml
     secrets: inherit
 
   ts-ci:
     needs: detect-changes
-    if: needs.detect-changes.outputs.ts == 'true'
+    if: |
+      !cancelled() &&
+      (github.event_name == 'merge_group' || needs.detect-changes.outputs.ts == 'true')
     uses: ./.github/workflows/ts-ci.yml
     secrets: inherit
 
@@ -88,6 +101,13 @@ jobs:
 
   call-deploy:
     name: Deploy
+    # Grant the elevated permissions deploy.yaml needs here (not workflow-wide):
+    # this job's permissions are the ceiling for the called reusable workflow.
+    permissions:
+      contents: read
+      packages: write  # push BuildKit layer cache to GHCR
+      id-token: write  # AWS OIDC
+      actions: read    # deploy-prod/notify-prod-rejected read run approvals (get-environment-review)
     needs:
       - detect-changes
       - ci-passed
@@ -109,3 +129,4 @@ jobs:
     secrets: inherit
     with:
       sha: ${{ github.sha }}
+      push: true

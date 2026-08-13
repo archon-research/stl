@@ -1,0 +1,159 @@
+package outbound
+
+import (
+	"context"
+	"math/big"
+
+	"github.com/ethereum/go-ethereum/common"
+)
+
+// MapleLoanMeta carries Maple's loan metadata. Loans with Type = "amm" or
+// "strategy" are internal Maple positions. Live data also shows metadata with
+// a null Type and other types ("tBills", "intercompany"); every field may be
+// empty, and LoanMeta itself is nil when the API returns null.
+type MapleLoanMeta struct {
+	Type          string
+	AssetSymbol   string
+	DexName       string
+	Location      string
+	WalletAddress string // may be a non-EVM address (Base/Solana custody wallets); never hex-validated
+	WalletType    string
+}
+
+// MapleLoanCollateral is the single (nullable upstream) collateral of a loan.
+// AssetAmount and AssetValueUSD are nullable in the API schema (plausibly
+// during DepositPending); the client keeps such a collateral with nil values
+// so "collateral pending" stays distinguishable from "no collateral".
+type MapleLoanCollateral struct {
+	Asset            string   // symbol, e.g. "BTC", "USDC", "SOL"
+	AssetAmount      *big.Int // native decimals; nil when the API reports null
+	AssetValueUSD    *big.Int // per-unit USD price, 8 decimals; nil when the API reports null
+	Decimals         int
+	State            string   // "Deposited" | "DepositPending" | ...
+	Custodian        string   // e.g. "FORDEFI", "ANCHORAGE"
+	LiquidationLevel *big.Int // nil when absent
+}
+
+// MapleActiveLoan is one active Open Term Loan as reported by the Maple
+// GraphQL API. The funding pool is referenced by address only; pool details
+// come from GetPools in the same cycle.
+type MapleActiveLoan struct {
+	LoanID        common.Address
+	Borrower      common.Address
+	State         string
+	PrincipalOwed *big.Int
+	AcmRatio      *big.Int             // nil when the API reports none (uncollateralized loans)
+	Collateral    *MapleLoanCollateral // nil only when the API returns null collateral
+	LoanMeta      *MapleLoanMeta       // nil when the API returns null loanMeta
+	PoolAddress   common.Address
+}
+
+// MapleAssetToken is a mainnet ERC-20 referenced by a fixed-term loan
+// (collateralAsset / liquidityAsset). Unlike OTL collateral (off-chain
+// custodied, symbol-only), FTL assets carry a real Ethereum address and FK the
+// token registry.
+type MapleAssetToken struct {
+	Address  common.Address
+	Symbol   string
+	Decimals int
+}
+
+// MapleFixedTermLoan is one live (non-terminal) fixed-term loan as reported by
+// the Maple GraphQL API. The funding pool is referenced by address only; pool
+// details come from GetPools in the same cycle. Collateral and funds are
+// on-chain ERC-20s (MapleAssetToken). MaturityDate and NextPaymentDue are epoch
+// seconds with 0 meaning "none" (pre-funding / no payment due). Amounts are raw
+// integers; AcmRatio is nil and StateDetail is empty when the API reports none.
+type MapleFixedTermLoan struct {
+	LoanID              common.Address
+	Borrower            common.Address
+	PoolAddress         common.Address
+	Collateral          MapleAssetToken
+	Funds               MapleAssetToken
+	State               string
+	StateDetail         string // "" when the API reports null
+	PrincipalOwed       *big.Int
+	InterestRate        *big.Int
+	InterestPaid        *big.Int
+	PaymentsRemaining   int64
+	PaymentIntervalDays int64
+	TermDays            int64
+	MaturityDate        int64 // epoch seconds; 0 = none
+	NextPaymentDue      int64 // epoch seconds; 0 = none
+	CollateralAmount    *big.Int
+	CollateralRequired  *big.Int
+	CollateralRatio     *big.Int
+	DrawdownAmount      *big.Int
+	ClaimableAmount     *big.Int
+	AcmRatio            *big.Int // nil when the API reports null
+	IsImpaired          bool
+}
+
+// MaplePool is one PoolV2 lending pool with its current lending metrics.
+type MaplePool struct {
+	Address       common.Address
+	Name          string
+	AssetAddress  common.Address
+	AssetSymbol   string
+	AssetDecimals int
+	IsSyrup       bool     // syrupRouter != null
+	TVL           *big.Int // nil when the API reports null (schema-nullable)
+	LiquidAssets  *big.Int // poolV2.assets
+	CollateralUSD *big.Int // nil when the API reports null (schema-nullable)
+	PrincipalOut  *big.Int
+	MonthlyAPY    *big.Int // 30 decimals
+	SpotAPY       *big.Int // 30 decimals
+}
+
+// MapleSkyStrategy is one Sky strategy (internal Maple deployment of pool
+// assets) with its current state.
+type MapleSkyStrategy struct {
+	Address            common.Address
+	PoolAddress        common.Address
+	State              string
+	Version            int
+	CurrentlyDeployed  *big.Int
+	DepositedAssets    *big.Int
+	WithdrawnAssets    *big.Int
+	StrategyFeeRate    *big.Int // nil when absent
+	TotalFeesCollected *big.Int // nil when absent
+}
+
+// MapleSyrupGlobals is Maple's protocol-wide Syrup aggregate snapshot.
+type MapleSyrupGlobals struct {
+	TVL             *big.Int
+	APY             *big.Int // 30 decimals
+	CollateralAPY   *big.Int // 30 decimals
+	PoolAPY         *big.Int // 30 decimals
+	DripsYieldBoost *big.Int // nil when absent
+}
+
+// MapleGraphQLClient is the outbound port for the Maple GraphQL API
+// (https://api.maple.finance/v2/graphql). All methods query the latest state
+// (no block argument); the collection methods (GetPools, GetActiveLoans,
+// GetSkyStrategies) paginate transparently, while GetSyrupGlobals fetches a
+// singleton with no pagination. Implementations must fail
+// the whole call on any malformed row rather than skipping it, and must fail
+// hard when the API returns a null top-level collection (data:null) — a null
+// collection is upstream breakage, never an empty result set. API-sanctioned
+// nulls are not malformed: nullable pool metrics and collateral amounts
+// surface as nil.
+type MapleGraphQLClient interface {
+	// GetPools fetches all PoolV2 lending pools.
+	GetPools(ctx context.Context) ([]MaplePool, error)
+
+	// GetActiveLoans fetches all Open Term Loans with state Active.
+	GetActiveLoans(ctx context.Context) ([]MapleActiveLoan, error)
+
+	// GetActiveFixedTermLoans fetches all fixed-term loans in a live
+	// (non-terminal) state. The FTL book is legitimately empty today (the
+	// product is dormant, not retired), so an empty result is a valid snapshot,
+	// not an error.
+	GetActiveFixedTermLoans(ctx context.Context) ([]MapleFixedTermLoan, error)
+
+	// GetSkyStrategies fetches all Sky strategies.
+	GetSkyStrategies(ctx context.Context) ([]MapleSkyStrategy, error)
+
+	// GetSyrupGlobals fetches the protocol-wide Syrup aggregates (singleton).
+	GetSyrupGlobals(ctx context.Context) (*MapleSyrupGlobals, error)
+}

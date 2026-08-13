@@ -46,7 +46,7 @@ func (r *BlockStateRepository) SaveBlock(ctx context.Context, state outbound.Blo
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// Check if block with this hash already exists (matches postgres behavior)
+	// Check if block with this hash already exists (matches postgres behavior).
 	if existing, ok := r.blocks[state.Hash]; ok {
 		return existing.Version, nil
 	}
@@ -165,13 +165,43 @@ func (r *BlockStateRepository) MarkBlockOrphaned(ctx context.Context, hash strin
 	return nil
 }
 
+// ClearBlockOrphaned clears the is_orphaned flag on a block identified by hash.
+// Returns an error if the block does not exist. Mirrors the postgres adapter
+// contract: idempotent on already-canonical rows, and refuses to un-orphan
+// when a different canonical row already occupies the same number.
+func (r *BlockStateRepository) ClearBlockOrphaned(ctx context.Context, hash string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	b, ok := r.blocks[hash]
+	if !ok {
+		return fmt.Errorf("clear orphan flag: block with hash %s not found", hash)
+	}
+	// Idempotent: clearing an already-canonical row is a no-op.
+	if !b.IsOrphaned {
+		return nil
+	}
+	// Guard: refuse to un-orphan if a different canonical row already occupies
+	// this number, mirroring the postgres adapter so unit tests exercise the
+	// same contract (PR #373 review). Leaving the orphan in place keeps the
+	// "highest version = canonical" invariant; the live writer wins.
+	for h, other := range r.blocks {
+		if h != hash && other.Number == b.Number && !other.IsOrphaned {
+			return fmt.Errorf("clear orphan flag: refusing to un-orphan block %d hash %s: another canonical row already exists at this number", b.Number, hash)
+		}
+	}
+	b.IsOrphaned = false
+	r.blocks[hash] = b
+	return nil
+}
+
 // HandleReorgAtomic atomically performs all reorg-related operations.
 // In the memory implementation, this is naturally atomic since we hold the lock.
 func (r *BlockStateRepository) HandleReorgAtomic(ctx context.Context, commonAncestor int64, event outbound.ReorgEvent, newBlock outbound.BlockState) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// Check if block already exists (idempotency)
+	// Check if block already exists (idempotency).
 	if existing, ok := r.blocks[newBlock.Hash]; ok {
 		return existing.Version, nil
 	}

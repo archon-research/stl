@@ -17,7 +17,6 @@ func TestNewDebtToken(t *testing.T) {
 
 	tests := []struct {
 		name                string
-		id                  int64
 		protocolID          int64
 		underlyingTokenID   int64
 		createdAtBlock      int64
@@ -30,7 +29,6 @@ func TestNewDebtToken(t *testing.T) {
 	}{
 		{
 			name:                "valid debt token with both addresses",
-			id:                  1,
 			protocolID:          5,
 			underlyingTokenID:   10,
 			createdAtBlock:      1000,
@@ -42,7 +40,6 @@ func TestNewDebtToken(t *testing.T) {
 		},
 		{
 			name:                "valid with only variable address",
-			id:                  1,
 			protocolID:          5,
 			underlyingTokenID:   10,
 			createdAtBlock:      1000,
@@ -54,7 +51,6 @@ func TestNewDebtToken(t *testing.T) {
 		},
 		{
 			name:                "valid with only stable address",
-			id:                  1,
 			protocolID:          5,
 			underlyingTokenID:   10,
 			createdAtBlock:      1000,
@@ -65,21 +61,18 @@ func TestNewDebtToken(t *testing.T) {
 			wantErr:             false,
 		},
 		{
-			name:                "zero id",
-			id:                  0,
+			name:                "valid with both symbols empty (symbols are optional)",
 			protocolID:          5,
 			underlyingTokenID:   10,
 			createdAtBlock:      1000,
 			variableDebtAddress: validVariableAddr,
 			stableDebtAddress:   validStableAddr,
-			variableSymbol:      "variableDebtDAI",
-			stableSymbol:        "stableDebtDAI",
-			wantErr:             true,
-			errContains:         "id must be positive",
+			variableSymbol:      "",
+			stableSymbol:        "",
+			wantErr:             false,
 		},
 		{
 			name:                "zero protocolID",
-			id:                  1,
 			protocolID:          0,
 			underlyingTokenID:   10,
 			createdAtBlock:      1000,
@@ -92,7 +85,6 @@ func TestNewDebtToken(t *testing.T) {
 		},
 		{
 			name:                "zero underlyingTokenID",
-			id:                  1,
 			protocolID:          5,
 			underlyingTokenID:   0,
 			createdAtBlock:      1000,
@@ -105,7 +97,6 @@ func TestNewDebtToken(t *testing.T) {
 		},
 		{
 			name:                "zero createdAtBlock",
-			id:                  1,
 			protocolID:          5,
 			underlyingTokenID:   10,
 			createdAtBlock:      0,
@@ -118,7 +109,6 @@ func TestNewDebtToken(t *testing.T) {
 		},
 		{
 			name:                "invalid variable address length",
-			id:                  1,
 			protocolID:          5,
 			underlyingTokenID:   10,
 			createdAtBlock:      1000,
@@ -131,7 +121,6 @@ func TestNewDebtToken(t *testing.T) {
 		},
 		{
 			name:                "invalid stable address length",
-			id:                  1,
 			protocolID:          5,
 			underlyingTokenID:   10,
 			createdAtBlock:      1000,
@@ -144,7 +133,6 @@ func TestNewDebtToken(t *testing.T) {
 		},
 		{
 			name:                "both addresses nil",
-			id:                  1,
 			protocolID:          5,
 			underlyingTokenID:   10,
 			createdAtBlock:      1000,
@@ -155,24 +143,11 @@ func TestNewDebtToken(t *testing.T) {
 			wantErr:             true,
 			errContains:         "at least one debt address must be provided",
 		},
-		{
-			name:                "both symbols empty",
-			id:                  1,
-			protocolID:          5,
-			underlyingTokenID:   10,
-			createdAtBlock:      1000,
-			variableDebtAddress: validVariableAddr,
-			stableDebtAddress:   validStableAddr,
-			variableSymbol:      "",
-			stableSymbol:        "",
-			wantErr:             true,
-			errContains:         "at least one symbol must be provided",
-		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dt, err := NewDebtToken(tt.id, tt.protocolID, tt.underlyingTokenID, tt.createdAtBlock, tt.variableDebtAddress, tt.stableDebtAddress, tt.variableSymbol, tt.stableSymbol)
+			dt, err := NewDebtToken(tt.protocolID, tt.underlyingTokenID, tt.createdAtBlock, tt.variableDebtAddress, tt.stableDebtAddress, tt.variableSymbol, tt.stableSymbol)
 			if tt.wantErr {
 				if err == nil {
 					t.Errorf("NewDebtToken() expected error, got nil")
@@ -190,9 +165,6 @@ func TestNewDebtToken(t *testing.T) {
 			if dt == nil {
 				t.Errorf("NewDebtToken() returned nil")
 				return
-			}
-			if dt.ID != tt.id {
-				t.Errorf("NewDebtToken() ID = %v, want %v", dt.ID, tt.id)
 			}
 			if dt.ProtocolID != tt.protocolID {
 				t.Errorf("NewDebtToken() ProtocolID = %v, want %v", dt.ProtocolID, tt.protocolID)
