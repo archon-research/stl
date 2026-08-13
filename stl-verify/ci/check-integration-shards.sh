@@ -35,15 +35,18 @@ if [[ -n "$duplicates" ]]; then
   exit 1
 fi
 
-actual="$(go list -tags=integration ./... \
-  | sed 's#^github.com/archon-research/stl/stl-verify#.#' \
-  | sort)"
+actual="$(find . -type f -name '*_test.go' \
+  -exec grep -lE '^//go:build .*integration' {} + \
+  | while IFS= read -r file; do dirname "$file"; done \
+  | sed 's#^\./##' \
+  | sed 's#^#./#' \
+  | sort -u)"
 
 if ! diff -u \
   <(printf '%s\n' "$actual") \
   <(printf '%s\n' "$configured"); then
-  echo "ERROR: integration shard manifests must contain every package exactly once" >&2
+  echo "ERROR: integration shard manifests must contain every integration-test package exactly once" >&2
   exit 1
 fi
 
-echo "Integration shard manifests cover every package exactly once."
+echo "Integration shard manifests cover every integration-test package exactly once."
