@@ -23,61 +23,18 @@ type LocalStackConfig struct {
 	Region   string
 }
 
-// StartLocalStack creates a LocalStack container with the given AWS services
-// and returns the container and connection config.
-// Services is a comma-separated list (e.g. "sns,sqs" or "sns,sqs,s3").
-//
-// It also ensures the container host is added to NO_PROXY / no_proxy so that
-// HTTP proxy settings present in CI environments do not intercept requests to
-// the LocalStack endpoint.
-func StartLocalStack(t *testing.T, ctx context.Context, services string) (testcontainers.Container, LocalStackConfig) {
+// S3TestBucketName builds a bucket name unique to the calling test, for suites
+// that share one LocalStack container and so cannot share a bucket. Bucket names
+// allow only lowercase letters, digits, hyphens and dots, must not end in a
+// hyphen, and cap at 63 characters, which is what this fixes up.
+func S3TestBucketName(t *testing.T, prefix string) string {
 	t.Helper()
 
-	config := LocalStackConfig{
-		Region: "us-east-1",
+	name := prefix + strings.ReplaceAll(SanitizeTestName(t.Name()), "_", "-")
+	if len(name) > 63 {
+		name = name[:63]
 	}
-
-	req := testcontainers.ContainerRequest{
-		Image:        ImageLocalStack,
-		ExposedPorts: []string{"4566/tcp"},
-		Env: map[string]string{
-			"SERVICES":               services,
-			"DEBUG":                  "0",
-			"DISABLE_EVENTS":         "1",
-			"SKIP_SSL_CERT_DOWNLOAD": "1",
-		},
-		WaitingFor: wait.ForLog("Ready."),
-	}
-
-	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: req,
-		Started:          true,
-	})
-	if err != nil {
-		HandleContainerRuntimeError(t, err, "failed to start localstack")
-	}
-
-	host, err := container.Host(ctx)
-	if err != nil {
-		t.Fatalf("failed to get localstack host: %v", err)
-	}
-	port, err := container.MappedPort(ctx, "4566")
-	if err != nil {
-		t.Fatalf("failed to get localstack port: %v", err)
-	}
-	config.Endpoint = fmt.Sprintf("http://%s:%s", host, port.Port())
-
-	// Ensure the container host bypasses the HTTP proxy. In containerised CI
-	// environments testcontainers resolves the Docker bridge gateway IP (e.g.
-	// 172.17.0.1) which is typically NOT in NO_PROXY.
-	if noProxy := os.Getenv("NO_PROXY"); !strings.Contains(noProxy, host) {
-		t.Setenv("NO_PROXY", noProxy+","+host)
-	}
-	if noProxy := os.Getenv("no_proxy"); !strings.Contains(noProxy, host) {
-		t.Setenv("no_proxy", noProxy+","+host)
-	}
-
-	return container, config
+	return strings.TrimSuffix(name, "-")
 }
 
 // NewS3Client constructs an S3 client pointed at the given LocalStack endpoint.
