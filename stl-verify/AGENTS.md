@@ -112,9 +112,8 @@ See [Makefile](Makefile) for the complete list of targets.
 ### Go linting
 
 - Pre-commit hooks: gofmt, goimports (staged files only)
-- Pre-push hooks: go vet (full module)
 - CI (`go-ci.yml`): fmt/imports/tidy checks + golangci-lint v2 (covers go vet, staticcheck, and go fix's modernizers — config in `.golangci.yml`) + vulncheck — **source of truth**
-- Install tools with `make tools`. Don't bypass hooks.
+- Install tools with `make tools`. Don't bypass hooks. golangci-lint is version-pinned (the config schema is version-coupled); a stale local binary fails on `.golangci.yml`, so rerun `make tools` when that happens.
 
 ## Code Conventions
 
