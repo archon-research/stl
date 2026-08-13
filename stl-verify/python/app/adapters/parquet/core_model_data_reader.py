@@ -44,6 +44,5 @@ class ParquetCoreModelDataReader:
 
     async def get_orderbooks(self, collateral_list: list[str]) -> dict[str, pd.DataFrame]:
         return {
-            token: pd.read_parquet(self._path(f"{token.lower()}_sell_orderbook.parquet"))
-            for token in collateral_list
+            token: pd.read_parquet(self._path(f"{token.lower()}_sell_orderbook.parquet")) for token in collateral_list
         }

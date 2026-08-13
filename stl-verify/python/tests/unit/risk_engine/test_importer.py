@@ -1,6 +1,6 @@
 """Tests for ParquetCoreModelDataReader.get_orderbooks filename normalisation."""
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pandas as pd
 import pytest

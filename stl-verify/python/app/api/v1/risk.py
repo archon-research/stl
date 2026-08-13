@@ -585,16 +585,22 @@ class CoreModelResultResponse(BaseModel):
     """Latest pre-computed CORE model result for a receipt token."""
 
     asset_id: int = Field(description="Surrogate id of the receipt token.", examples=[42])
-    market_key: str = Field(description="Market key used by the core-model-runner cronjob.", examples=["sparklend_usdc"])
+    market_key: str = Field(
+        description="Market key used by the core-model-runner cronjob.", examples=["sparklend_usdc"]
+    )
     crr_el_pct: Decimal = Field(description="Expected-loss CRR as a 0-100 percentage.", examples=["12.5"])
     crr_es_pct: Decimal = Field(description="Expected-shortfall CRR as a 0-100 percentage.", examples=["15.0"])
     crr_var_pct: Decimal = Field(description="Value-at-Risk CRR as a 0-100 percentage.", examples=["10.0"])
-    hhi: Decimal | None = Field(description="Herfindahl-Hirschman Index of borrower concentration (0-100), or null.", examples=["22.3"])
+    hhi: Decimal | None = Field(
+        description="Herfindahl-Hirschman Index of borrower concentration (0-100), or null.", examples=["22.3"]
+    )
     protocol: str = Field(description="Protocol identifier used by the model.", examples=["SPARKLEND"])
     forecast_step: int = Field(description="Forecast horizon in calendar days.", examples=[14])
     n_mc: int = Field(description="Number of Monte Carlo price scenarios.", examples=[10000])
     copula_type: str = Field(description="Cross-asset dependence structure.", examples=["T-COPULA"])
-    computed_at: str = Field(description="UTC timestamp of when this result was computed.", examples=["2026-06-01T12:00:00+00:00"])
+    computed_at: str = Field(
+        description="UTC timestamp of when this result was computed.", examples=["2026-06-01T12:00:00+00:00"]
+    )
 
 
 def _core_model_response(asset_id: int, result: CoreModelResult) -> CoreModelResultResponse:

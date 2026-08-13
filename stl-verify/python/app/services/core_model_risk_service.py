@@ -12,7 +12,7 @@ from typing import Any
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.risk import CoreModelDetails, ModelName, RrcResult
 from app.domain.exceptions import InvalidOverrideError
-from app.ports.allocation_repository import AllocationRepository
+from app.ports.allocation_repository import AllocationRepositoryPort
 from app.ports.core_model_results_reader import CoreModelResult, CoreModelResultsReader
 
 _HUNDRED = Decimal("100")
@@ -35,7 +35,7 @@ class CoreModelRiskService:
         self,
         asset_to_market_key: dict[int, str],
         results_reader: CoreModelResultsReader,
-        allocation_repo: AllocationRepository,
+        allocation_repo: AllocationRepositoryPort,
     ) -> None:
         self._asset_to_market_key = asset_to_market_key
         self._results_reader = results_reader

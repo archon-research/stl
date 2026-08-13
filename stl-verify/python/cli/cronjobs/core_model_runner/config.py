@@ -43,10 +43,7 @@ class RunnerConfig:
         market_configs = _load_market_configs(market_configs_path)
         if market_key not in market_configs:
             available = sorted(market_configs)
-            raise ValueError(
-                f"unknown market_key {market_key!r}; "
-                f"available markets: {available}"
-            )
+            raise ValueError(f"unknown market_key {market_key!r}; available markets: {available}")
         return cls._build(market_key, market_configs, market_configs_path)
 
     @classmethod
