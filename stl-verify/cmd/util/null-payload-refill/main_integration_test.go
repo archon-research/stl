@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,7 +16,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -30,6 +31,19 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
+
+var sharedLocalStackCfg testutil.LocalStackConfig
+
+func TestMain(m *testing.M) {
+	cfg, cleanup := testutil.StartLocalStackForMain("s3,sns,sqs")
+	sharedLocalStackCfg = cfg
+
+	code := m.Run()
+
+	cleanup()
+	code = testutil.CheckGoroutineLeaks(code)
+	os.Exit(code)
+}
 
 // TestRun_EndToEnd exercises the full null-payload-refill flow against
 // LocalStack (S3, SNS, SQS) and a small in-process JSON-RPC mock server. The
@@ -60,14 +74,20 @@ func runRefillScenario(t *testing.T, useKeysFile bool) {
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	// 1. Bring up LocalStack (S3+SNS+SQS).
-	_, lsCfg := testutil.StartLocalStack(t, ctx, "s3,sns,sqs")
+	// 1. Take the LocalStack (S3+SNS+SQS) the package shares.
+	lsCfg := sharedLocalStackCfg
 
 	const chainID int64 = 43114
 	const blockNum int64 = 85149017
-	const blockHash = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	const parentHash = "0xfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
 	const blockTimestamp int64 = 1730000000
+
+	// chainutil pins the SNS topic name per chain, so it cannot carry a per-test
+	// suffix and both scenarios publish to the same topic on the shared
+	// LocalStack. The publisher's MessageDeduplicationId is
+	// {chainId}:{blockHash}:{version}, so each scenario needs its own block hash
+	// or SNS silently swallows the second publish as a duplicate.
+	blockHash := scenarioBlockHash(t.Name())
 
 	// 2. Set up AWS clients.
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx,
@@ -94,8 +114,7 @@ func runRefillScenario(t *testing.T, useKeysFile bool) {
 	//    Validate{S3Bucket,SNSTopic}ForChain — chainID 43114 is avalanche,
 	//    so the bucket name needs the "stl-sentineltest-avalanche-raw"
 	//    prefix and the topic must be "stl-sentineltest-avalanche-blocks.fifo".
-	suffix := strings.ReplaceAll(testutil.SanitizeTestName(t.Name()), "_", "-")
-	bucket := "stl-sentineltest-avalanche-raw-" + suffix
+	bucket := testutil.S3TestBucketName(t, "stl-sentineltest-avalanche-raw-")
 	if _, err := s3c.CreateBucket(ctx, &awsS3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
 		t.Fatalf("create bucket: %v", err)
 	}
@@ -107,7 +126,7 @@ func runRefillScenario(t *testing.T, useKeysFile bool) {
 
 	// 4. Create a FIFO SNS topic and a subscribed FIFO SQS queue.
 	topicArn := createFifoTopic(t, ctx, snsc, "stl-sentineltest-avalanche-blocks.fifo")
-	queueURL := createFifoQueue(t, ctx, sqsc, "refill-queue-"+suffix+".fifo")
+	queueURL := createFifoQueue(t, ctx, sqsc, "refill-queue-"+testutil.SanitizeTestName(t.Name())+".fifo")
 	subscribeQueueToTopic(t, ctx, snsc, sqsc, topicArn, queueURL)
 
 	// 5. Start the in-process JSON-RPC server that mimics Alchemy. The
@@ -220,6 +239,14 @@ func runRefillScenario(t *testing.T, useKeysFile bool) {
 }
 
 // ----- helpers ---------------------------------------------------------------
+
+// scenarioBlockHash derives a distinct 32-byte block hash per test name, so the
+// scenarios sharing one SNS FIFO topic do not collide on the publisher's
+// content-derived MessageDeduplicationId.
+func scenarioBlockHash(testName string) string {
+	sum := sha256.Sum256([]byte(testName))
+	return "0x" + hex.EncodeToString(sum[:])
+}
 
 type mockResponses struct {
 	BlockByNumber json.RawMessage

@@ -9,27 +9,45 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/archon-research/stl/stl-verify/data_quality/schemamaster"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 const migrationPath = "../../../db/migrations/20260706_140000_create_transformed_bucket1.sql"
 
-// TestRegenDiff is the drift gate: it migrates a fresh DB, reads the raw schema of
+// sharedPool points at the public schema of the package's shared container. The
+// gate only reads information_schema, so it needs the migrated public schema
+// itself (the raw tables it inspects are matched on table_schema = 'public') and
+// never writes, which is why one migrated database serves the whole package.
+var sharedPool *pgxpool.Pool
+
+func TestMain(m *testing.M) {
+	dsn, cleanup := testutil.StartTimescaleDBForMain()
+	testutil.EnsurePublicMigrations(dsn)
+	sharedPool = testutil.ConnectPoolForMain(dsn)
+
+	code := m.Run()
+
+	sharedPool.Close()
+	cleanup()
+	code = testutil.CheckGoroutineLeaks(code)
+	os.Exit(code)
+}
+
+// TestRegenDiff is the drift gate: it reads the raw schema of
 // the bucket-1 tables from information_schema, regenerates the bucket-1 migration
 // from the register + that schema, and asserts it matches the committed migration
 // after normalisation (SQL comments and whitespace stripped). It fails if the
 // register or a raw table changed without regenerating, or if the CTAS / _run /
 // _bootstrap projections of a table were hand-edited out of sync.
 func TestRegenDiff(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
-	defer cleanup()
-
 	reg, err := schemamaster.Load()
 	if err != nil {
 		t.Fatalf("load register: %v", err)
 	}
-	raw, err := FetchRawSchemas(context.Background(), pool, Bucket1Tables())
+	raw, err := FetchRawSchemas(context.Background(), sharedPool, Bucket1Tables())
 	if err != nil {
 		t.Fatalf("fetch raw schemas: %v", err)
 	}

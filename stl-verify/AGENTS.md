@@ -178,6 +178,7 @@ Go-only rules for the stl-verify service. Language-agnostic conventions (testing
     - Prefer table-driven tests (each case under `t.Run`).
     - `main.go` entry points should also have 100% coverage. Move the `main.go` body into a `run(ctx, args) error` function and call only that from `main()` so you can test it.
     - For `main.go` files, only create integration tests.
+    - **One container set per test *package*, never per test** — container startup, not the test, dominates integration-test CI time. Start each one in `TestMain` via `testutil.Start{TimescaleDB,Redis,LocalStack}ForMain`, keep it in a package var (`sharedDSN`, `sharedRedisAddr`, `sharedLocalStackCfg`), and isolate each test inside it: `testutil.SetupTestSchema(t, sharedDSN)` for Postgres (`SetupTestDatabase` when the SQL is schema-qualified, so `search_path` cannot isolate it), a `testutil.SanitizeTestName(t.Name())` prefix for Redis keys and SQS/SNS names, `testutil.S3TestBucketName(t, prefix)` for buckets. Anything a test counts (objects, messages, rows) needs its own bucket/queue/schema, not a shared one. `make shared-container-check` enforces this in `ci-checks`.
 - **Comments**:
     - The "standard-library behavior" the reader already knows includes Go zero values, nil-map reads, `json.Unmarshal` of null, `defer` order, etc. — don't comment them.
     - Keep package and exported-API doc comments, but make each say something the signature doesn't.

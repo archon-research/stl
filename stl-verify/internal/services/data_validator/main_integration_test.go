@@ -1,6 +1,6 @@
-//go:build integration || livevalidation
+//go:build integration
 
-package uniswapv3indexer
+package data_validator
 
 import (
 	"os"
@@ -9,9 +9,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-// The livevalidation build tag is served by the same TestMain: that gate is a
-// manual, Alchemy-backed run in this package, and it takes its throwaway
-// database from this container rather than starting one of its own.
 var sharedDSN string
 
 func TestMain(m *testing.M) {
