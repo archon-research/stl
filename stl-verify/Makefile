@@ -4,7 +4,7 @@
 # Include language-agnostic linting targets
 include lint.mk
 
-.PHONY: all test test-race test-integration lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-oracle-price-worker-avax run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-allocation-tracker run-allocation-tracker-avax help ci ci-checks install-hooks format \
+.PHONY: all test test-race test-integration test-integration-shard integration-shard-check lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-oracle-price-worker-avax run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-allocation-tracker run-allocation-tracker-avax help ci ci-checks install-hooks format \
 	dev-up dev-up-rebuild dev-up-workers dev-up-or-resume dev-preflight dev-env dev-db dev-down dev-suspend dev-resume dev-wipe dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
 		_docker-release-image _docker-release-go-service \
@@ -133,9 +133,21 @@ test:
 	@echo "==> Running unit tests..."
 	go test -v ./...
 
-test-integration: 
+test-integration: integration-shard-check
 	@echo "==> Running integration tests..."
 	GOEXPERIMENT=goroutineleakprofile go test -tags=integration -v -timeout=10m -p 4 ./...
+
+test-integration-shard: integration-shard-check
+	@case "$(INTEGRATION_SHARD)" in \
+		1|2) ;; \
+		*) echo "ERROR: INTEGRATION_SHARD must be 1 or 2"; exit 1 ;; \
+	esac
+	@echo "==> Running integration test shard $(INTEGRATION_SHARD)/2..."
+	@packages=$$(grep -hEv '^[[:space:]]*(#|$$)' ci/integration-shards/$(INTEGRATION_SHARD).txt | tr '\n' ' '); \
+		GOEXPERIMENT=goroutineleakprofile go test -tags=integration -v -timeout=10m -p 4 $$packages
+
+integration-shard-check:
+	@bash ci/check-integration-shards.sh
 
 # Run tests with coverage
 cover:
@@ -276,7 +288,7 @@ tools:
 	go install github.com/evilmartians/lefthook@latest
 
 # CI target for lint/format/static/security checks
-ci-checks: fix-check fmt-check goimports-check tidy-check vet shared-container-check staticcheck golangci-lint vulncheck
+ci-checks: fix-check fmt-check goimports-check tidy-check vet shared-container-check integration-shard-check staticcheck golangci-lint vulncheck
 
 # CI target: everything with strict checks
 # Order: fast checks first (fail fast), then expensive checks
