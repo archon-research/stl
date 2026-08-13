@@ -40,6 +40,47 @@ jobs:
             exit 1
           fi
 
+  # Measurement-only twin of `lint`: tests whether one golangci-lint v2 run
+  # (binary install + built-in analysis cache) can replace `make tools` +
+  # fix-check + vet + staticcheck + golangci-lint v1. Reports timing only —
+  # `--issues-exit-code=0` and continue-on-error keep it from gating CI.
+  lint-experiment:
+    name: Lint Experiment (consolidated golangci-lint v2)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: '.go-version'
+          cache: true
+          cache-dependency-path: 'stl-verify/go.sum'
+
+      - name: Install goimports and govulncheck
+        run: |
+          go install golang.org/x/tools/cmd/goimports@latest
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Format and module checks
+        run: make fmt-check goimports-check tidy-check
+
+      - name: golangci-lint v2 (vet + staticcheck + modernize consolidated)
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
+        with:
+          version: v2.12.2
+          working-directory: stl-verify
+          args: --config=.golangci.next.yml --issues-exit-code=0
+
+      - name: govulncheck
+        run: make vulncheck
+
   unit-tests:
     name: Unit Tests
     runs-on: ubuntu-latest

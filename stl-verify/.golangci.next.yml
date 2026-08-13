@@ -1,0 +1,12 @@
+# Experimental golangci-lint v2 config for the lint-experiment CI job
+# (.github/workflows/go-ci.yml). Named .golangci.next.yml so the v1 binary
+# used by the control lint job does not auto-load it.
+#
+# The v2 default (standard) set is errcheck, govet, ineffassign, staticcheck,
+# unused — staticcheck here covers the SA/S/ST/QF groups that the standalone
+# staticcheck binary and the v1 gosimple/stylecheck linters ran. modernize
+# wraps the same x/tools analyzers that `go fix -diff` runs on Go 1.26.
+version: "2"
+linters:
+  enable:
+    - modernize
