@@ -11,10 +11,8 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-// sharedPool points at the public schema of the package's shared container. Both
-// conformance gates only read catalog tables scoped to table_schema = 'public',
-// so they need the migrated public schema itself and never write — one migrated
-// database serves the whole package.
+// The gates read catalog tables scoped to table_schema = 'public' and never
+// write, so they need the migrated public schema itself, not a per-test schema.
 var sharedPool *pgxpool.Pool
 
 func TestMain(m *testing.M) {

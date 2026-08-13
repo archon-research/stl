@@ -80,10 +80,6 @@ func TestLiveValidation(t *testing.T) {
 	pool, _, cleanupDB := testutil.SetupTestSchema(t, sharedDSN)
 	defer cleanupDB()
 
-	// testutil.SetupTestSchema applies every db/migrations/*.sql file,
-	// including 20260701_100000_create_uniswap_v3_tables.sql, so the 18 real
-	// pools + counterparty tokens already exist -- no self-seed needed.
-
 	buildID := buildregistry.BuildID(1)
 	repo := postgres.NewUniswapV3Repository(pool, buildID)
 

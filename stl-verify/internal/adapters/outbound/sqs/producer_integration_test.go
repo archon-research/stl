@@ -43,7 +43,6 @@ func TestIntegration_DeadLetterPublisher_SendsToFifoQueue(t *testing.T) {
 	})
 
 	// Create a FIFO DLQ with content-based deduplication enabled, mirroring prod.
-	// The name carries a per-test suffix because LocalStack is shared package-wide.
 	queueResult, err := sqsClient.CreateQueue(ctx, &sqs.CreateQueueInput{
 		QueueName: aws.String("dlq-producer-" + testutil.SanitizeTestName(t.Name()) + ".fifo"),
 		Attributes: map[string]string{

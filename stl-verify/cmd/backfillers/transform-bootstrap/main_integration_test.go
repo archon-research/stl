@@ -16,10 +16,6 @@ import (
 
 var sharedDSN string
 
-// TestMain shares one container across the package. Each test then gets its own
-// database rather than its own schema: the bootstrap these tests drive is pinned
-// to transformed.* and public.*, so a search_path-scoped schema would not isolate
-// the row counts they assert on.
 func TestMain(m *testing.M) {
 	dsn, cleanup := testutil.StartTimescaleDBForMain()
 	sharedDSN = dsn

@@ -17,10 +17,8 @@ import (
 
 const migrationPath = "../../../db/migrations/20260706_140000_create_transformed_bucket1.sql"
 
-// sharedPool points at the public schema of the package's shared container. The
-// gate only reads information_schema, so it needs the migrated public schema
-// itself (the raw tables it inspects are matched on table_schema = 'public') and
-// never writes, which is why one migrated database serves the whole package.
+// The gate reads information_schema for table_schema = 'public' and never
+// writes, so it needs the migrated public schema itself, not a per-test schema.
 var sharedPool *pgxpool.Pool
 
 func TestMain(m *testing.M) {

@@ -9,9 +9,8 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-// The livevalidation build tag is served by the same TestMain: that gate is a
-// manual, Alchemy-backed run in this package, and it takes its throwaway
-// database from this container rather than starting one of its own.
+// Also tagged livevalidation: that manual, Alchemy-backed gate lives in this
+// package and takes its database from this container rather than starting one.
 var sharedDSN string
 
 func TestMain(m *testing.M) {
