@@ -2,6 +2,8 @@ package testutil
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"os"
@@ -32,9 +34,17 @@ func S3TestBucketName(t *testing.T, prefix string) string {
 
 	name := prefix + strings.ReplaceAll(SanitizeTestName(t.Name()), "_", "-")
 	if len(name) > 63 {
-		name = name[:63]
+		// Plain truncation would put two sibling subtests sharing a 63-character
+		// prefix on one bucket, and these suites assert object counts — the exact
+		// cross-talk a per-test bucket exists to prevent. Keep the readable head
+		// and spend the tail on a digest of the full name.
+		sum := sha256.Sum256([]byte(name))
+		name = name[:55] + hex.EncodeToString(sum[:4])
 	}
-	return strings.TrimSuffix(name, "-")
+	// TrimRight, not TrimSuffix: truncation can land mid-run of separators (a
+	// subtest name with two adjacent non-alphanumerics yields "--"), and S3
+	// rejects a name that does not end in a letter or digit.
+	return strings.TrimRight(name, "-.")
 }
 
 // NewS3Client constructs an S3 client pointed at the given LocalStack endpoint.
