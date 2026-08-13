@@ -143,8 +143,7 @@ test-integration-shard: integration-shard-check
 		*) echo "ERROR: INTEGRATION_SHARD must be 1 or 2"; exit 1 ;; \
 	esac
 	@echo "==> Running integration test shard $(INTEGRATION_SHARD)/2..."
-	@packages=$$(grep -hEv '^[[:space:]]*(#|$$)' ci/integration-shards/$(INTEGRATION_SHARD).txt | tr '\n' ' '); \
-		GOEXPERIMENT=goroutineleakprofile go test -tags=integration -v -timeout=10m -p 4 $$packages
+	@bash ci/run-integration-shard.sh ci/integration-shards/$(INTEGRATION_SHARD).txt
 
 integration-shard-check:
 	@bash ci/check-integration-shards.sh
