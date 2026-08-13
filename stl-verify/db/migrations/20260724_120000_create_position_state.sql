@@ -28,9 +28,13 @@
 -- discriminator in the PK), decided when the first snapshot-keyed materializer is built — not a
 -- mapping improvised at that materializer's call site.
 --
--- Plain table, not a hypertable: it is a curated/derived spine populated out of band by the
--- materializer functions below (mirroring block_time and the transform _bootstrap pattern), not a
--- high-ingest raw pipeline. Add hypertable + tiering in a follow-up if volume warrants.
+-- Hypertable partitioned on block_timestamp (mirrors the transformed bucket1 derived tables): a
+-- curated/derived spine of one row per (position, observation) that grows without bound as blocks
+-- accrue. 1-day chunks; compression after 2 days (segmentby position_id, so a position's observations
+-- compress together, ordered block DESC for latest-first reads); S3 tiering after 1 year. Writes are
+-- the out-of-band full-projection upsert in the materializer helper below (the transform _bootstrap
+-- shape); a trigger-fed incremental _run path is the follow-up for when a scheduled runner and real
+-- volume make the full upsert's decompression cost matter.
 
 CREATE TABLE IF NOT EXISTS position_state (
     position_id        bytea       NOT NULL,
@@ -44,7 +48,11 @@ CREATE TABLE IF NOT EXISTS position_state (
     processing_version integer     NOT NULL DEFAULT 0,
     block_timestamp    timestamptz NOT NULL,          -- on-chain observation time
     created_at         timestamptz NOT NULL DEFAULT now(),
-    CONSTRAINT position_state_pkey PRIMARY KEY (position_id, block_number, block_version, processing_version),
+    -- block_timestamp is in the PK because it is the hypertable partition column (Timescale requires the
+    -- partition column in every unique constraint). It is functionally determined by block_number, so the
+    -- 5-column key is unique over the same observations as (position_id, block_number, block_version,
+    -- processing_version) — the upsert arbiter in the helper below matches it exactly.
+    CONSTRAINT position_state_pkey PRIMARY KEY (position_id, block_number, block_version, processing_version, block_timestamp),
     -- position_id is sha256() output: enforce the 32-byte width (bytea is unlength-modified), matching
     -- position_classification (Simon review on #572).
     CONSTRAINT position_state_id_len_chk CHECK (octet_length(position_id) = 32),
@@ -57,7 +65,7 @@ CREATE TABLE IF NOT EXISTS position_state (
     CONSTRAINT position_state_qty_nonneg_chk CHECK (quantity >= 0 AND quantity <> 'NaN'::numeric)
 );
 
-COMMENT ON TABLE position_state IS '[Operational] Shared spine for materialized positions (VEC-402..408). One row per (native position_id, observation): the native resolution keys (instrument_key -> security via the bridge; holder_id -> entity via VEC-417) plus a single canonical quantity. Identity is native-only (VEC-400); classifications live in position_classification. Current state per position is position_current (VEC-409).';
+COMMENT ON TABLE position_state IS '[Hypertable] Shared spine for materialized positions (VEC-402..408), partitioned on block_timestamp. One row per (native position_id, observation): the native resolution keys (instrument_key -> security via the bridge; holder_id -> entity via VEC-417) plus a single canonical quantity. Identity is native-only (VEC-400); classifications live in position_classification. Current state per position is position_current (VEC-409).';
 COMMENT ON COLUMN position_state.position_id IS 'PK. bytea(32) native identity from position_id() (VEC-400): hash(chain_id, protocol_id, instrument_key, holder_id). No mapped value in the hash.';
 COMMENT ON COLUMN position_state.chain_id IS 'Native chain id. Nullable per the position_id structural-field convention; each materializer uses a fixed NULL-ness convention.';
 COMMENT ON COLUMN position_state.protocol_id IS 'Native protocol id. Nullable per convention.';
@@ -67,8 +75,26 @@ COMMENT ON COLUMN position_state.quantity IS 'Holder balance in the instrument''
 COMMENT ON COLUMN position_state.block_number IS 'PK. Block height of the observation.';
 COMMENT ON COLUMN position_state.block_version IS 'PK. Reorg version of the block.';
 COMMENT ON COLUMN position_state.processing_version IS 'PK. Pipeline processing version; 0 for sources without one (e.g. Morpho).';
-COMMENT ON COLUMN position_state.block_timestamp IS 'On-chain observation time (UTC).';
+COMMENT ON COLUMN position_state.block_timestamp IS 'Partition. On-chain observation time (UTC); the hypertable partition column, and part of the PK.';
 COMMENT ON COLUMN position_state.created_at IS 'Audit. Row insert time.';
+
+-- Hypertable on block_timestamp, 1-day chunks (matches the transformed bucket1 position tables).
+SELECT create_hypertable('position_state', 'block_timestamp', chunk_time_interval => INTERVAL '1 day', if_not_exists => TRUE);
+-- Compress closed chunks: segment by position_id so a position's observations compress together and
+-- latest-first (block DESC) reads stay cheap; compress chunks older than 2 days.
+ALTER TABLE position_state SET (
+    timescaledb.compress,
+    timescaledb.compress_segmentby = 'position_id',
+    timescaledb.compress_orderby   = 'block_number DESC, block_version DESC, processing_version DESC'
+);
+SELECT add_compression_policy('position_state', INTERVAL '2 days', if_not_exists => TRUE);
+-- Tier cold chunks to S3 after 1 year. add_tiering_policy is a Timescale Cloud/TigerData primitive;
+-- guard so the migration still applies on a plain-TimescaleDB (dev/CI) instance that lacks it.
+DO $$ BEGIN
+    PERFORM add_tiering_policy('position_state', INTERVAL '1 year', if_not_exists => TRUE);
+EXCEPTION WHEN undefined_function THEN
+    RAISE NOTICE 'add_tiering_policy not available, skipping tiering for position_state';
+END $$;
 
 -- No dedicated current-state index: latest-observation lookups (VEC-409 position_current, and the
 -- per-position WHERE position_id = $1 ORDER BY ... LIMIT 1) are served by a backward scan of the PK
@@ -147,7 +173,7 @@ BEGIN
             SELECT position_id, chain_id, protocol_id, instrument_key, holder_id, quantity,
                    block_number, block_version, processing_version, block_timestamp
             FROM src
-            ON CONFLICT (position_id, block_number, block_version, processing_version) DO UPDATE
+            ON CONFLICT (position_id, block_number, block_version, processing_version, block_timestamp) DO UPDATE
                 SET quantity        = EXCLUDED.quantity,
                     block_timestamp = EXCLUDED.block_timestamp
                 -- Skip unchanged rows: no dead tuples / WAL / 3-index churn on idempotent reruns, and
