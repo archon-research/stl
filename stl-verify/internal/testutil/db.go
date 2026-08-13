@@ -282,8 +282,7 @@ func CleanupSchemaForMain(baseDSN string, schemaPool *pgxpool.Pool, schemaName s
 
 // SetupTestSchema creates an isolated PostgreSQL schema backed by a shared
 // container whose base DSN is passed in. Public-schema migrations are applied
-// once; the test schema gets its own copy of all tables. This is a drop-in
-// replacement for SetupTimescaleDB that reuses an existing container.
+// once; the test schema gets its own copy of all tables.
 func SetupTestSchema(t *testing.T, baseDSN string) (pool *pgxpool.Pool, dsn string, cleanup func()) {
 	t.Helper()
 
@@ -359,13 +358,16 @@ func SetupTestDatabase(t *testing.T, baseDSN string) (pool *pgxpool.Pool, dsn st
 	// A database left behind by a killed run would silently supply its rows to
 	// this one, so drop before create rather than CREATE IF NOT EXISTS.
 	adminPool := ConnectPool(t, baseDSN)
+	// Deferred, not closed inline: the t.Fatalf calls below run runtime.Goexit,
+	// which would otherwise leave the pool's background goroutines alive and let
+	// the package's goroutine-leak check bury the real failure.
+	defer adminPool.Close()
 	if _, err := adminPool.Exec(ctx, dropDatabaseSQL(dbName)); err != nil {
 		t.Fatalf("drop stale database %s: %v", dbName, err)
 	}
 	if _, err := adminPool.Exec(ctx, fmt.Sprintf("CREATE DATABASE %s", dbName)); err != nil {
 		t.Fatalf("create database %s: %v", dbName, err)
 	}
-	adminPool.Close()
 
 	dsn = withDatabase(t, baseDSN, dbName)
 	pool = ConnectPool(t, dsn)

@@ -210,9 +210,12 @@ tidy-check:
 # A test that starts its own container adds a container start to every CI run, and
 # that drift has now cost three clean-up rounds (SEN-191, #257, VEC-564).
 # Benchmarks are exempt: they are not part of make test-integration.
+# The pattern matches the IMPORT PATH, not a call like testcontainers.GenericContainer:
+# only testutil is allowed to depend on testcontainers at all, so an import alias
+# (tc.GenericContainer), testcontainers.Run, or a modules/* helper cannot slip past.
 shared-container-check:
 	@echo "==> Checking integration tests share their containers..."
-	@offenders=$$(grep -rl 'testcontainers\.GenericContainer' --include='*_test.go' . \
+	@offenders=$$(grep -rl 'testcontainers/testcontainers-go' --include='*_test.go' . \
 	  | grep -v '^\./internal/testutil/' | grep -v '_benchmark_test\.go$$'); \
 	if [ -n "$$offenders" ]; then \
 	  echo "ERROR: these tests start their own container instead of sharing the package's:"; \
