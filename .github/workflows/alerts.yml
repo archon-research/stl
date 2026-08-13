@@ -67,6 +67,12 @@ jobs:
         uses: ./.github-actions/mimir-rules-sync
         with:
           team: vector
+          # `postgres` is kept after alerts/vector-postgres.yaml was retired
+          # (its rules moved to infrastructure's orbit-tigerdata.yaml): the regex
+          # is what lets mimirtool see the now-absent namespace and delete the
+          # live rule group. Dropping it would orphan those rules in the ruler,
+          # firing forever with no source in this repo. Safe to remove once the
+          # sync has reported the deletion.
           namespaces-regex: '^vector-(watcher|backup-worker|indexers|psm3|postgres|cronjobs)$'
           rules-dir: alerts
           mimir-address: ${{ env.GC_MIMIR_ADDRESS }}
@@ -136,6 +142,12 @@ jobs:
         uses: ./.github-actions/mimir-rules-sync
         with:
           team: vector
+          # `postgres` is kept after alerts/vector-postgres.yaml was retired
+          # (its rules moved to infrastructure's orbit-tigerdata.yaml): the regex
+          # is what lets mimirtool see the now-absent namespace and delete the
+          # live rule group. Dropping it would orphan those rules in the ruler,
+          # firing forever with no source in this repo. Safe to remove once the
+          # sync has reported the deletion.
           namespaces-regex: '^vector-(watcher|backup-worker|indexers|psm3|postgres|cronjobs)$'
           rules-dir: alerts
           mimir-address: ${{ env.GC_MIMIR_ADDRESS }}
