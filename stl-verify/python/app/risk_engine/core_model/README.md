@@ -191,14 +191,13 @@ CRR (EL) is the headline metric. It equals `PD × LGD` in Basel notation.
 
 CORE runs as a two-step process: a cronjob pre-computes the CRR and writes results to the `core_model_results` DB table; the API service reads the latest result at request time.
 
-### Step 1 — Seed the local database (dev only)
+### Step 1 — Seed the local database
 
-On a fresh local cluster the `receipt_token` table is empty. Run the seed script before starting the API:
-
-```bash
-DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/stl_verify \
-uv run python scripts/seed_dev_sparklend.py
-```
+Nothing to run: migrations seed the four SparkLend receipt tokens the mapping
+references (`20260604_…_seed_sparklend_spusdt_receipt_token.sql` and
+`20260814_…_seed_sparklend_core_model_receipt_tokens.sql`), so any database
+that has migrations applied — `make dev-up`, integration test containers, a
+plain migrate run — resolves the mapping at startup.
 
 ### Step 2 — Run the pre-compute cronjob
 
