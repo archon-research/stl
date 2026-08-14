@@ -3,7 +3,7 @@
 
   "sparklend_dai": {
     "PROTOCOL": "SPARKLEND",
-    "LOAN_TOKEN": "DAI",
+    "LOAN_TOKEN": "DAI"
   },
   "sparklend_usdc": {
     "PROTOCOL": "SPARKLEND",

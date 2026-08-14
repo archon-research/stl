@@ -10,7 +10,11 @@ from pathlib import Path
 
 import pytest
 
-from cli.cronjobs.core_model_runner.config import RunnerConfig
+from cli.cronjobs.core_model_runner.config import (
+    _MARKET_CONFIGS_DEFAULT,
+    RunnerConfig,
+    _load_market_configs,
+)
 
 
 @pytest.fixture
@@ -108,3 +112,21 @@ def test_all_from_env_preserves_market_specific_params(market_configs_path, monk
     configs = RunnerConfig.all_from_env(market_configs_path=market_configs_path)
     morpho = next(c for c in configs if c.market_key == "morpho_cbbtc-usdc")
     assert morpho.params["MORPHO_MARKET"] == "CBBTC"
+
+
+# Every test above runs against a synthetic tmp_path config. These two load the
+# file the service actually ships, which is how a trailing comma in
+# market_configs.json once left the cronjob unstartable for every market while
+# the whole suite stayed green.
+
+
+def test_shipped_market_configs_parse_and_every_market_declares_a_protocol():
+    configs = _load_market_configs(_MARKET_CONFIGS_DEFAULT)
+    assert configs
+    assert [key for key, params in configs.items() if "PROTOCOL" not in params] == []
+
+
+def test_every_shipped_market_builds_a_runner_config(monkeypatch):
+    monkeypatch.setattr(os, "environ", _env("all"))
+    configs = RunnerConfig.all_from_env()
+    assert {c.market_key for c in configs} == set(_load_market_configs(_MARKET_CONFIGS_DEFAULT))
