@@ -40,7 +40,8 @@
     "PROTOCOL": "ANCHORAGE",
     "LOAN_TOKEN": "ALL"
   },
-  "galaxy": {
+  "_galaxy_disabled": {
+    "_comment": "Galaxy collateral symbols (ETH, SOL, JITOSOL) have no sell-orderbook parquet in inputs/, so this market fails at the liquidity step on every run. Underscore prefix excludes it from the loader. Re-enable by renaming to 'galaxy' once the order books exist (see README, Galaxy section).",
     "PROTOCOL": "GALAXY",
     "LOAN_TOKEN": "ALL"
   }
