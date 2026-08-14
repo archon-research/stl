@@ -14,6 +14,7 @@ resources:
   - ../../base/python-api
   - ../../base/spark-anchorage-indexer
   - ../../base/offchain-price-indexer
+  - ../../base/core-model-runner
   - config.yaml
 
 components:
@@ -33,6 +34,10 @@ images:
     newTag: local
   - name: offchain-price-indexer
     newName: localhost/stl-offchain-price-indexer
+    newTag: local
+  # Not its own image: the runner is a Python entry point inside python-api.
+  - name: core-model-runner
+    newName: localhost/stl-python-api
     newTag: local
 
 patches:

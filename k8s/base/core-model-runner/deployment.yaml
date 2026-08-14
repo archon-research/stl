@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: core-model-runner
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: core-model-runner
+  template:
+    metadata:
+      labels:
+        app: core-model-runner
+    spec:
+      serviceAccountName: core-model-runner
+      containers:
+        - name: core-model-runner
+          # Runs out of the python-api image: the model, its parquet inputs and
+          # the runner entry point all ship inside stl-verify/python.
+          image: core-model-runner
+          command: ["python", "-m", "cli.cronjobs.core_model_runner.main"]
+          envFrom:
+            - configMapRef:
+                name: core-model-runner
+            - secretRef:
+                name: core-model-runner
+          env:
+            - name: CORE_MODEL_MARKET_KEY
+              value: "all"
+          # Deliberately far larger than the other cronjobs. They stay at
+          # 50m/64Mi because their tick is IO against an external API; this
+          # tick is the GARCH fit and Monte Carlo itself, running in-process
+          # on a joblib pool, for hours per full pass.
+          resources:
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+            limits:
+              cpu: "4"
+              memory: "8Gi"
+      terminationGracePeriodSeconds: 60
