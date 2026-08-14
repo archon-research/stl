@@ -26,12 +26,19 @@ def _load_market_configs(path: Path) -> dict[str, dict]:
     return {k: v for k, v in data.items() if not k.startswith("_")}
 
 
+_ORDERBOOK_SOURCES = ("parquet", "postgres")
+
+
 @dataclass(frozen=True)
 class RunnerConfig:
     database_url: str
     market_key: str
     inputs_dir: Path
     params: dict = field(default_factory=dict)
+    # Which source serves get_orderbooks: "parquet" (static snapshots) or
+    # "postgres" (live cex_orderbook_snapshots). Positions and prices stay on
+    # parquet either way until their own adapters land — see DATA_GAPS.md.
+    orderbook_source: str = "parquet"
 
     @classmethod
     def from_env(
@@ -95,11 +102,22 @@ class RunnerConfig:
         env_overrides = {k: _coerce(k, os.environ[env_key]) for k, env_key in _ENV_MAP.items() if env_key in os.environ}
         params.update(env_overrides)
 
+        orderbook_source = os.environ.get("CORE_MODEL_ORDERBOOK_SOURCE", "parquet")
+        if orderbook_source not in _ORDERBOOK_SOURCES:
+            raise ValueError(
+                f"invalid CORE_MODEL_ORDERBOOK_SOURCE {orderbook_source!r}; allowed: {list(_ORDERBOOK_SOURCES)}"
+            )
+        # Recorded in params so every core_model_results row says which book
+        # source produced it — live-book and parquet-book CRRs must never be
+        # indistinguishable in the audit trail.
+        params["ORDERBOOK_SOURCE"] = orderbook_source
+
         return cls(
             database_url=os.environ["DATABASE_URL"],
             market_key=market_key,
             inputs_dir=Path(os.environ.get("CORE_MODEL_INPUTS_DIR", str(_INPUTS_DEFAULT))),
             params=params,
+            orderbook_source=orderbook_source,
         )
 
 

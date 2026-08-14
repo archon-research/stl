@@ -114,6 +114,33 @@ def test_all_from_env_preserves_market_specific_params(market_configs_path, monk
     assert morpho.params["MORPHO_MARKET"] == "CBBTC"
 
 
+# orderbook source selection
+
+
+def test_orderbook_source_defaults_to_parquet(market_configs_path, monkeypatch):
+    monkeypatch.setattr(os, "environ", _env("sparklend_usdt"))
+    cfg = RunnerConfig.from_env(market_configs_path=market_configs_path)
+    assert cfg.orderbook_source == "parquet"
+
+
+def test_orderbook_source_postgres_is_selectable(market_configs_path, monkeypatch):
+    monkeypatch.setattr(os, "environ", _env("sparklend_usdt", {"CORE_MODEL_ORDERBOOK_SOURCE": "postgres"}))
+    cfg = RunnerConfig.from_env(market_configs_path=market_configs_path)
+    assert cfg.orderbook_source == "postgres"
+
+
+def test_orderbook_source_is_recorded_in_params_for_the_audit_trail(market_configs_path, monkeypatch):
+    monkeypatch.setattr(os, "environ", _env("sparklend_usdt", {"CORE_MODEL_ORDERBOOK_SOURCE": "postgres"}))
+    cfg = RunnerConfig.from_env(market_configs_path=market_configs_path)
+    assert cfg.params["ORDERBOOK_SOURCE"] == "postgres"
+
+
+def test_invalid_orderbook_source_is_rejected(market_configs_path, monkeypatch):
+    monkeypatch.setattr(os, "environ", _env("sparklend_usdt", {"CORE_MODEL_ORDERBOOK_SOURCE": "csv"}))
+    with pytest.raises(ValueError, match="CORE_MODEL_ORDERBOOK_SOURCE"):
+        RunnerConfig.from_env(market_configs_path=market_configs_path)
+
+
 # resolve() -- the single entry point shared by the CLI and the Temporal activity
 
 
