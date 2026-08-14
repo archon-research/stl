@@ -1499,7 +1499,7 @@ export function AllocationGrid({
               // Six nowrap columns push min-content well past this, so it binds
               // only on the loading skeleton, which has no intrinsic width.
               minWidth="48rem"
-              skeletonConfig={{ rows: 8, columns: 6, firstColumnTall: true }}
+              skeletonConfig={{ rows: 8, firstColumnTall: true }}
             />
           </div>
         ) : null}

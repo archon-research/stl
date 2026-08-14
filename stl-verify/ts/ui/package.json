@@ -23,11 +23,11 @@
     "doctor": "uikit-cli doctor --codegen"
   },
   "dependencies": {
-    "@archon-research/charting": "0.8.0-rohit-consumer-fixes.2",
-    "@archon-research/design-system": "0.8.0-rohit-consumer-fixes.2",
-    "@archon-research/http-client-core": "0.8.0-rohit-consumer-fixes.2",
-    "@archon-research/http-client-react": "0.8.0-rohit-consumer-fixes.2",
-    "lucide-react": "1.17.0",
+    "@archon-research/charting": "0.9.0-rohit-skeleton-improvements.2",
+    "@archon-research/design-system": "0.9.0-rohit-skeleton-improvements.2",
+    "@archon-research/http-client-core": "0.9.0-rohit-skeleton-improvements.2",
+    "@archon-research/http-client-react": "0.9.0-rohit-skeleton-improvements.2",
+    "lucide-react": "1.28.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "react-markdown": "10.1.0",
@@ -35,10 +35,10 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
-    "@archon-research/oxfmt-config": "0.8.0-rohit-consumer-fixes.2",
-    "@archon-research/oxlint-config": "0.8.0-rohit-consumer-fixes.2",
-    "@archon-research/tsconfig": "0.8.0-rohit-consumer-fixes.2",
-    "@pandacss/dev": "1.11.1",
+    "@archon-research/oxfmt-config": "0.9.0-rohit-skeleton-improvements.2",
+    "@archon-research/oxlint-config": "0.9.0-rohit-skeleton-improvements.2",
+    "@archon-research/tsconfig": "0.9.0-rohit-skeleton-improvements.2",
+    "@pandacss/dev": "1.12.0",
     "@types/node": "26.1.2",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.4",

@@ -221,7 +221,7 @@ function RiskTable({
         table={table}
         isLoading={isLoading}
         getRowKey={(item) => String(item.token_id ?? item.symbol)}
-        skeletonConfig={{ rows: 5, columns: 6, firstColumnTall: false }}
+        skeletonConfig={{ rows: 5, firstColumnTall: false }}
         // Sized to what the six columns actually need once the long liquidation
         // headers ellipsize. The old 76rem exceeded the drawer this table lives
         // in, so the last column was always clipped no matter how wide the
