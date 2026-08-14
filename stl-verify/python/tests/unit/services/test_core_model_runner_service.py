@@ -16,6 +16,7 @@ def _cfg(market_key: str):
     cfg.params = {"PROTOCOL": "SPARKLEND", "N_MC": 10000}
     cfg.orderbook_source = "parquet"
     cfg.price_source = "parquet"
+    cfg.position_source = "parquet"
     return cfg
 
 

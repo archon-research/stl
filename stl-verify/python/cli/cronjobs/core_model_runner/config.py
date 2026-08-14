@@ -47,6 +47,7 @@ class RunnerConfig:
     # their adapter lands — see DATA_GAPS.md.
     orderbook_source: str = "parquet"
     price_source: str = "parquet"
+    position_source: str = "parquet"
 
     @classmethod
     def from_env(
@@ -112,11 +113,13 @@ class RunnerConfig:
 
         orderbook_source = _source_from_env("CORE_MODEL_ORDERBOOK_SOURCE")
         price_source = _source_from_env("CORE_MODEL_PRICE_SOURCE")
+        position_source = _source_from_env("CORE_MODEL_POSITION_SOURCE")
         # Recorded in params so every core_model_results row says which
         # sources produced it — live-data and parquet CRRs must never be
         # indistinguishable in the audit trail.
         params["ORDERBOOK_SOURCE"] = orderbook_source
         params["PRICE_SOURCE"] = price_source
+        params["POSITION_SOURCE"] = position_source
 
         return cls(
             database_url=os.environ["DATABASE_URL"],
@@ -125,6 +128,7 @@ class RunnerConfig:
             params=params,
             orderbook_source=orderbook_source,
             price_source=price_source,
+            position_source=position_source,
         )
 
 

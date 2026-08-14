@@ -9,21 +9,24 @@ import pandas as pd
 
 from app.adapters.parquet.core_model_data_reader import ParquetCoreModelDataReader
 from app.adapters.postgres.core_model_orderbook_reader import PostgresOrderbookReader
+from app.adapters.postgres.core_model_positions_reader import PostgresPositionsReader
 from app.adapters.postgres.core_model_price_reader import PostgresPriceReader
 
 
 class CompositeCoreModelDataReader:
-    """Positions from parquet; order books and prices individually swappable to live."""
+    """Each input layer individually swappable from parquet to its live adapter."""
 
     def __init__(
         self,
         parquet: ParquetCoreModelDataReader,
         orderbooks: PostgresOrderbookReader | None = None,
         prices: PostgresPriceReader | None = None,
+        positions: PostgresPositionsReader | None = None,
     ) -> None:
         self._parquet = parquet
         self._orderbooks = orderbooks
         self._prices = prices
+        self._positions = positions
 
     async def get_protocol_data(
         self,
@@ -33,7 +36,8 @@ class CompositeCoreModelDataReader:
         loan_token: str,
         galaxy_type: str,
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
-        return await self._parquet.get_protocol_data(protocol, network, morpho_market, loan_token, galaxy_type)
+        source = self._positions if self._positions is not None else self._parquet
+        return await source.get_protocol_data(protocol, network, morpho_market, loan_token, galaxy_type)
 
     async def get_prices(self, collateral_list: list[str]) -> pd.DataFrame:
         source = self._prices if self._prices is not None else self._parquet

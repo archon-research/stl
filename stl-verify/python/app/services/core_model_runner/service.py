@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from app.adapters.composite import CompositeCoreModelDataReader
 from app.adapters.parquet.core_model_data_reader import ParquetCoreModelDataReader
 from app.adapters.postgres.core_model_orderbook_reader import PostgresOrderbookReader
+from app.adapters.postgres.core_model_positions_reader import PostgresPositionsReader
 from app.adapters.postgres.core_model_price_reader import PostgresPriceReader
 from app.risk_engine.core_model.runner import CoreModelConfig, CoreModelPipelineResult, run
 from cli.cronjobs.core_model_runner.config import RunnerConfig
@@ -44,7 +45,7 @@ class CoreModelRunnerService:
 
     def _build_reader(self, cfg: RunnerConfig) -> ParquetCoreModelDataReader | CompositeCoreModelDataReader:
         parquet = ParquetCoreModelDataReader(cfg.inputs_dir)
-        if cfg.orderbook_source == "parquet" and cfg.price_source == "parquet":
+        if cfg.orderbook_source == cfg.price_source == cfg.position_source == "parquet":
             return parquet
         return CompositeCoreModelDataReader(
             parquet=parquet,
@@ -52,6 +53,7 @@ class CoreModelRunnerService:
             prices=PostgresPriceReader(self._engine, min_days=int(cfg.params["TRAIN_SIZE"]))
             if cfg.price_source == "postgres"
             else None,
+            positions=PostgresPositionsReader(self._engine) if cfg.position_source == "postgres" else None,
         )
 
     async def run_market(self, cfg: RunnerConfig) -> CoreModelPipelineResult:
@@ -102,12 +104,13 @@ async def run_markets(configs: list[RunnerConfig]) -> None:
             # N_MC is logged so a mistyped override (which falls back to the
             # per-market config silently) is visible in the run output.
             logger.info(
-                "running market_key=%s protocol=%s n_mc=%s orderbook_source=%s price_source=%s",
+                "running market_key=%s protocol=%s n_mc=%s orderbook_source=%s price_source=%s position_source=%s",
                 cfg.market_key,
                 cfg.params["PROTOCOL"],
                 cfg.params["N_MC"],
                 cfg.orderbook_source,
                 cfg.price_source,
+                cfg.position_source,
             )
             try:
                 await service.run_market(cfg)

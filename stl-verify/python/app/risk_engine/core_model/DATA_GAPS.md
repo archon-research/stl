@@ -80,18 +80,32 @@ Note: prod has all six venue books flowing (verified on the replica,
 
 ## 3. Positions — per-protocol tables
 
-Not yet swapped; all markets read `users_*.parquet` / `market_*.parquet`.
-Status of the underlying live data:
+**SparkLend (4 markets): done** behind `CORE_MODEL_POSITION_SOURCE=postgres`.
+The reader builds the wide users frame from `borrower` /
+`borrower_collateral` / `sparklend_reserve_data` / `onchain_token_price`,
+validated against staging: the per-user borrow sum matches the reserve-level
+total debt within 0.6% (interest accrual since each user's last event), and a
+full CRR computed end to end on the live frame.
+
+Known deviations from BA's snapshot semantics (all conservative or negligible;
+also documented in the reader module):
+
+- **e-mode is not indexed**: reserve-level LT/bonus are used for every user,
+  `emode_category` is always 0. E-mode users' HF is understated → the model
+  over-liquidates them → CRR biased up, not down.
+- **Interest accrual**: a user's debt is as of their last on-chain event, so
+  long-idle debts are slightly understated (the 0.6% above).
+- **Zero-collateral borrowers are excluded** (logged with the dropped USD
+  total). They are existing bad debt, not simulatable future liquidations,
+  and they NaN-poison the CRR if kept ($34 total when measured).
+
+Still parquet:
 
 | Market group | Live source | Notes |
 |---|---|---|
-| SparkLend (4) | sparklend indexer tables | indexed; adapter not written |
-| Morpho (2) | morpho indexer tables | indexed; note the model wants *all borrowers of a Blue market*, not vault positions |
+| Morpho (2) | morpho indexer tables | indexed; the model wants *all borrowers of a Blue market*, not vault positions |
 | Syrup (2) | maple-graphql-indexer tables | indexed |
 | Anchorage | anchorage-indexer tables | indexed |
-
-**What brings it back:** a Postgres `get_protocol_data` per protocol,
-replacing the parquet branch in the reader, one market group at a time.
 
 ---
 
