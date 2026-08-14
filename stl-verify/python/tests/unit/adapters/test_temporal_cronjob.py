@@ -5,7 +5,7 @@ from datetime import timedelta
 
 import pytest
 from temporalio import workflow
-from temporalio.client import ScheduleOverlapPolicy
+from temporalio.client import ScheduleAlreadyRunningError, ScheduleOverlapPolicy
 from temporalio.service import RPCError, RPCStatusCode
 
 from app.adapters.temporal.cronjob import CronjobSpec, connect, ensure_schedule
@@ -69,7 +69,10 @@ async def test_ensure_schedule_skips_overlapping_runs():
 
 
 async def test_ensure_schedule_tolerates_a_schedule_left_by_a_previous_run():
-    client = _RecordingClient(error=RPCError("schedule AlreadyExists", RPCStatusCode.ALREADY_EXISTS, b""))
+    # The SDK raises this typed error, not an RPCError carrying "AlreadyExists".
+    # Matching on the string instead crash-loops the pod on every restart after
+    # the first, which is how this was originally shipped.
+    client = _RecordingClient(error=ScheduleAlreadyRunningError())
     await ensure_schedule(client, _spec())  # must not raise
 
 

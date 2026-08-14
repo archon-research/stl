@@ -17,12 +17,12 @@ from temporalio.client import (
     Client,
     Schedule,
     ScheduleActionStartWorkflow,
+    ScheduleAlreadyRunningError,
     ScheduleIntervalSpec,
     ScheduleOverlapPolicy,
     SchedulePolicy,
     ScheduleSpec,
 )
-from temporalio.service import RPCError
 from temporalio.worker import Worker
 
 logger = logging.getLogger(__name__)
@@ -81,9 +81,11 @@ async def ensure_schedule(client: Client, spec: CronjobSpec) -> None:
             ),
         )
         logger.info("schedule created name=%s interval=%s", spec.name, spec.interval)
-    except RPCError as exc:
-        if "AlreadyExists" not in str(exc):
-            raise
+    except ScheduleAlreadyRunningError:
+        # The normal path on every restart after the first. Note this is a
+        # typed SDK error, not the RPCError/"AlreadyExists" string match the
+        # Go runner uses -- matching on the string here silently crash-loops
+        # the pod.
         logger.info("schedule already exists, leaving it untouched name=%s", spec.name)
 
 
