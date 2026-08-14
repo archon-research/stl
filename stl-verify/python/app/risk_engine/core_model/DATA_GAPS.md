@@ -14,7 +14,11 @@ Collateral set required by the 9 enabled markets:
 
 ---
 
-## 1. Prices — `offchain_token_price` (staging, checked 14 Aug 2026)
+## 1. Prices — `offchain_token_price` (staging AND prod, checked 14 Aug 2026)
+
+Prod (via its read replica) is byte-identical to staging: same coverage, same
+gap windows, same missing assets. One cause (shared indexer deploy history +
+the June outage), one backfill campaign — run it once per environment.
 
 Requirement: ≥180 daily closes per collateral (TRAIN_SIZE). More is better:
 the volatility floor uses the full history, and BA's parquet went back to 2014.
@@ -49,13 +53,17 @@ BTC-group (BTC, WBTC, LBTC, TBTC, CBBTC) → BTC book; everything else direct.
 
 | Book needed | Covers | Status in staging |
 |---|---|---|
-| ETH | WETH + 5 LSTs | live (Coinbase, OKX, Kraken) |
-| BTC | BTC + 4 wrappers | live (Coinbase, OKX, Kraken) |
+| ETH | WETH + 5 LSTs | live in staging AND prod (Coinbase, OKX, Kraken) |
+| BTC | BTC + 4 wrappers | live in staging AND prod (Coinbase, OKX, Kraken) |
 | XRP | syrup_usdc, syrup_usdt | **not tracked** — deliberately deferred (Pablo, 14 Aug 2026: "no xrp for now") |
 | HYPE | syrup_usdc | **not trackable on our venues** — BA sourced it from HyperLiquid's native book |
 
 So order books fully cover 7 of 9 enabled markets (4 SparkLend, 2 Morpho,
 Anchorage). The 2 Syrup markets stay on parquet books until XRP/HYPE exist.
+
+Note: prod has all six venue books flowing (verified on the replica,
+14 Aug 2026) even though [VEC-455](https://linear.app/archontech/issue/VEC-455)
+(deploy to prod) is still marked Backlog — the ticket lags reality.
 
 **What brings it back:**
 - XRP → add the pair to the three venue configmaps
