@@ -131,7 +131,7 @@ run-sparklend-position-tracker-avax:
 CORE_MODEL_DB_URL ?= postgresql://postgres:postgres@127.0.0.1:5432/stl_verify
 MARKET ?= all
 run-core-model:
-	@echo "==> Running CORE model (market=$(MARKET))..."
+	@echo "==> Running CORE model (market=$(MARKET), N_MC=$(if $(N_MC),$(N_MC),per-market config))..."
 	@cd python && DATABASE_URL="$(CORE_MODEL_DB_URL)" CORE_MODEL_MARKET_KEY="$(MARKET)" \
 		$(if $(N_MC),CORE_MODEL_N_MC="$(N_MC)",) \
 		uv run python -m cli.cronjobs.core_model_runner.main --once

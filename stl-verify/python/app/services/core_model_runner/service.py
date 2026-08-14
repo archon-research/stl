@@ -84,7 +84,14 @@ async def run_markets(configs: list[RunnerConfig]) -> None:
     failed: list[str] = []
     try:
         for cfg in configs:
-            logger.info("running market_key=%s protocol=%s", cfg.market_key, cfg.params["PROTOCOL"])
+            # N_MC is logged so a mistyped override (which falls back to the
+            # per-market config silently) is visible in the run output.
+            logger.info(
+                "running market_key=%s protocol=%s n_mc=%s",
+                cfg.market_key,
+                cfg.params["PROTOCOL"],
+                cfg.params["N_MC"],
+            )
             try:
                 await service.run_market(cfg)
             except Exception:

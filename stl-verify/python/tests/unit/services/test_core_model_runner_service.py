@@ -13,7 +13,7 @@ def _cfg(market_key: str):
 
     cfg = _Cfg()
     cfg.market_key = market_key
-    cfg.params = {"PROTOCOL": "SPARKLEND"}
+    cfg.params = {"PROTOCOL": "SPARKLEND", "N_MC": 10000}
     return cfg
 
 
