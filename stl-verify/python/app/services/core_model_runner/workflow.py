@@ -1,35 +1,22 @@
-"""Temporal workflow and activity wrapping one CORE model run.
+"""Temporal workflow for one CORE model tick.
 
-The workflow body stays trivial on purpose: Temporal re-imports this module
-inside a sandbox, so the model stack (pandas, arch, sqlalchemy) is imported
-through `imports_passed_through` rather than being re-executed there.
+Deliberately imports nothing from the model stack. Temporal re-imports the
+workflow module inside a sandbox, and numpy cannot be loaded twice in one
+process, so pulling the service in here — even via `imports_passed_through` —
+fails worker startup. The activity is referenced by name instead and lives in
+`activity.py`, which the sandbox never touches.
 """
 
-import asyncio
 from datetime import timedelta
 
-from temporalio import activity, workflow
+from temporalio import workflow
 from temporalio.common import RetryPolicy
 
-with workflow.unsafe.imports_passed_through():
-    from app.services.core_model_runner.service import run_markets
-    from cli.cronjobs.core_model_runner.config import RunnerConfig
+ACTIVITY_NAME = "run_core_model"
 
 # Matches the activeDeadlineSeconds of the k8s CronJob this replaced: a full
 # "all markets" pass at the default N_MC is hours of Monte Carlo, not minutes.
 TICK_TIMEOUT = timedelta(hours=4)
-
-
-@activity.defn(name="run_core_model")
-def run_core_model_activity(market_key: str) -> None:
-    """Run every configured market. Sync on purpose -- see the executor note.
-
-    The harness runs activities on a thread pool, so this blocking call does
-    not stall the worker's event loop. `asyncio.run` is safe here because the
-    thread has no loop of its own.
-    """
-    configs = RunnerConfig.resolve(market_key)
-    asyncio.run(run_markets(configs))
 
 
 @workflow.defn(name="CoreModelRunnerTick")
@@ -37,7 +24,7 @@ class CoreModelRunnerWorkflow:
     @workflow.run
     async def run(self, market_key: str) -> None:
         await workflow.execute_activity(
-            run_core_model_activity,
+            ACTIVITY_NAME,
             market_key,
             start_to_close_timeout=TICK_TIMEOUT,
             # No retries. The inputs are static until the next scheduled window,

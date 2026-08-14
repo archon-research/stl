@@ -1,5 +1,6 @@
-"""CORE model runner service — the body of one cronjob tick."""
+"""CORE model runner service — the body of one cronjob tick.
 
-from app.services.core_model_runner.service import CoreModelRunnerService, run_markets
-
-__all__ = ["CoreModelRunnerService", "run_markets"]
+Intentionally re-exports nothing. Temporal's sandbox re-imports
+`workflow.py`, which imports this package on the way; pulling `service` in
+here would drag numpy into the sandbox and fail worker startup.
+"""

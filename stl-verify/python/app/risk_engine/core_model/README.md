@@ -202,25 +202,33 @@ uv run python scripts/seed_dev_sparklend.py
 
 ### Step 2 — Run the pre-compute cronjob
 
-From `stl-verify/python/`. Market-specific params (`PROTOCOL`, `LOAN_TOKEN`, etc.) are loaded automatically from `inputs/market_configs.json` — only `CORE_MODEL_MARKET_KEY` is required:
+The runner has two modes. Market-specific params (`PROTOCOL`, `LOAN_TOKEN`, etc.) are loaded automatically from `inputs/market_configs.json` — only `CORE_MODEL_MARKET_KEY` is required in both.
+
+**One-shot** — computes, writes, exits. No Temporal. This is what `make dev-up` users want for a quick check, and what a hand-triggered run looks like:
 
 ```bash
-# Single market
+# From stl-verify/ — defaults to every market against the dev-up database
+make run-core-model
+make run-core-model MARKET=sparklend_usdt N_MC=200
+
+# Or directly, from stl-verify/python/
 DATABASE_URL=postgresql://... \
 CORE_MODEL_MARKET_KEY=sparklend_usdt \
-uv run python -m cli.cronjobs.core_model_runner.main
+uv run python -m cli.cronjobs.core_model_runner.main --once
+```
 
-# All configured markets
+**Scheduled worker** — the default mode, and what the `core-model-runner` Deployment runs. It registers a Temporal schedule on startup and then serves its task queue:
+
+```bash
+TEMPORAL_HOST_PORT=localhost:7233 \
 DATABASE_URL=postgresql://... \
 CORE_MODEL_MARKET_KEY=all \
-uv run python -m cli.cronjobs.core_model_runner.main
-
-# Quick smoke test (override N_MC for all markets)
-DATABASE_URL=postgresql://... \
-CORE_MODEL_MARKET_KEY=all \
-CORE_MODEL_N_MC=100 \
 uv run python -m cli.cronjobs.core_model_runner.main
 ```
+
+Scheduling follows the repo convention (`CONTRIBUTING.md` §9): Temporal owns the schedule, not Kubernetes. The interval defaults to 24h and is set by `CORE_MODEL_RUN_INTERVAL_HOURS`, but **changing that variable does not move an existing schedule** — delete the schedule in the Temporal UI or CLI and restart the worker.
+
+A tick runs as a single activity with a 4-hour timeout and no retries: the inputs do not change until the next window, and `core_model_results` is append-only, so retrying a partly-finished pass would duplicate rows for the markets that already succeeded. Overlapping runs are skipped for the same reason.
 
 Params are resolved in three layers (lowest wins):
 1. `inputs/default_params.json` — canonical defaults
@@ -294,9 +302,16 @@ app/adapters/
 
 app/services/core_model_risk_service.py  RiskModel implementation
 
+app/services/core_model_runner/
+├── service.py   The body of one tick: run each market, append results
+└── workflow.py  Temporal workflow + activity wrapping that tick
+
+app/adapters/temporal/
+└── cronjob.py   Shared harness: connect, ensure schedule, run worker
+
 cli/cronjobs/core_model_runner/
-├── config.py    Env-var settings
-└── main.py      Entry point: run pipeline, write to DB
+├── config.py    Param resolution (defaults -> market config -> env)
+└── main.py      Entry point: Temporal worker, or --once. No business logic.
 ```
 
 ---
