@@ -22,7 +22,6 @@ import type {
   TxProtocolEventsResponse,
 } from '../types/allocation';
 import type { LocalChainRow, LocalProtocolRow } from '../types/local-data';
-import { isAbortError } from './errors';
 import { logging } from './logging';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
@@ -263,28 +262,10 @@ export async function getAllocationActivityEnvelope(
 export function getCapitalMetrics(
   signal?: AbortSignal,
 ): Promise<CapitalMetricsListResponse> {
-  const endpointPath = '/v1/capital-metrics';
-  const endpointUrl = API_BASE_URL
-    ? `${API_BASE_URL}${endpointPath}`
-    : endpointPath;
-
-  return fetch(endpointUrl, { signal })
-    .then(async (response) => {
-      if (!response.ok) {
-        const responseText = await response.text().catch(() => '<no body>');
-        throw new Error(
-          `GET ${endpointPath} failed (${response.status}): ${responseText}`,
-        );
-      }
-
-      return response.json() as Promise<CapitalMetricsListResponse>;
-    })
-    .catch((error: unknown) => {
-      if (!isAbortError(error)) {
-        logging.error('Failed to fetch capital metrics list', { error });
-      }
-      throw error;
-    });
+  return requestData(
+    apiClient.GET('/v1/capital-metrics', { signal }),
+    'GET /v1/capital-metrics',
+  );
 }
 
 export function getDataSources(
