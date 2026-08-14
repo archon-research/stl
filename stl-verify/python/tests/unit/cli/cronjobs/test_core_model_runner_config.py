@@ -141,6 +141,26 @@ def test_invalid_orderbook_source_is_rejected(market_configs_path, monkeypatch):
         RunnerConfig.from_env(market_configs_path=market_configs_path)
 
 
+def test_price_source_defaults_to_parquet_and_is_recorded(market_configs_path, monkeypatch):
+    monkeypatch.setattr(os, "environ", _env("sparklend_usdt"))
+    cfg = RunnerConfig.from_env(market_configs_path=market_configs_path)
+    assert cfg.price_source == "parquet"
+    assert cfg.params["PRICE_SOURCE"] == "parquet"
+
+
+def test_price_source_postgres_is_selectable(market_configs_path, monkeypatch):
+    monkeypatch.setattr(os, "environ", _env("sparklend_usdt", {"CORE_MODEL_PRICE_SOURCE": "postgres"}))
+    cfg = RunnerConfig.from_env(market_configs_path=market_configs_path)
+    assert cfg.price_source == "postgres"
+    assert cfg.params["PRICE_SOURCE"] == "postgres"
+
+
+def test_invalid_price_source_is_rejected(market_configs_path, monkeypatch):
+    monkeypatch.setattr(os, "environ", _env("sparklend_usdt", {"CORE_MODEL_PRICE_SOURCE": "csv"}))
+    with pytest.raises(ValueError, match="CORE_MODEL_PRICE_SOURCE"):
+        RunnerConfig.from_env(market_configs_path=market_configs_path)
+
+
 # resolve() -- the single entry point shared by the CLI and the Temporal activity
 
 

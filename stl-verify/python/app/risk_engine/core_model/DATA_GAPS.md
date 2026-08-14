@@ -118,7 +118,11 @@ To re-enable, Galaxy needs all of:
 
 ## Order of re-enablement (cheapest first)
 
-1. Backfill the two price gaps + extend the 129-day assets (backfiller run, no code).
+1. Backfill the two price gaps + extend the 129-day assets (backfiller run, no
+   code). The price adapter is already merged behind
+   `CORE_MODEL_PRICE_SOURCE=postgres`; it validates the window per symbol and
+   fails with the exact missing days until the backfill lands, so flipping the
+   flag is also the check that the backfill worked.
 2. Add BTC/HYPE/XRP price asset rows (small migration) + backfill.
 3. Orderbook adapter switch for the 7 covered markets — **done**: set
    `CORE_MODEL_ORDERBOOK_SOURCE=postgres` (default stays `parquet`). The
