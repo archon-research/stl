@@ -27,7 +27,6 @@
     "@archon-research/design-system": "0.8.0-rohit-consumer-fixes.2",
     "@archon-research/http-client-core": "0.8.0-rohit-consumer-fixes.2",
     "@archon-research/http-client-react": "0.8.0-rohit-consumer-fixes.2",
-    "@tanstack/react-table": "9.0.0",
     "lucide-react": "1.17.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
