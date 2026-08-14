@@ -16,7 +16,7 @@
   },
   "devDependencies": {
     "@archon-research/uikit-cli": "0.8.0-rohit-consumer-fixes.2",
-    "@typescript/native-preview": "7.0.0-dev.20260601.1"
+    "@typescript/native-preview": "7.0.0-dev.20260707.2"
   },
   "workspaces": [
     "ui"
