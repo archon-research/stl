@@ -256,7 +256,7 @@ tools:
 	go install honnef.co/go/tools/cmd/staticcheck@latest
 	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 # keep in sync with .github/workflows/go-ci.yml
 	go install golang.org/x/vuln/cmd/govulncheck@latest
-	go install golang.org/x/tools/cmd/goimports@latest
+	go install golang.org/x/tools/cmd/goimports@v0.49.0 # keep in sync with .github/workflows/go-ci.yml
 	go install github.com/go-delve/delve/cmd/dlv@latest
 	go install golang.org/x/tools/gopls@latest
 	go install github.com/evilmartians/lefthook@latest

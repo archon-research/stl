@@ -91,7 +91,7 @@ make cover              # Generate coverage report
 go test -race -run 'TestName' ./internal/services/<pkg>/   # single test
 
 # CI (runs all checks)
-make ci                 # test-race, fmt-check, tidy-check, golangci-lint (incl. vet/staticcheck), vulncheck
+make ci                 # test-race, fmt/imports/tidy checks, golangci-lint (vet+staticcheck+modernize), vulncheck
 
 # Formatting & linting (all languages, run from stl-verify/)
 make install-hooks      # Install lefthook git pre-commit hooks (auto-runs on dev-up)
