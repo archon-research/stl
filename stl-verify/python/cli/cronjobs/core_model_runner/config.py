@@ -61,6 +61,26 @@ class RunnerConfig:
         return [cls._build(key, market_configs, market_configs_path) for key in market_configs]
 
     @classmethod
+    def resolve(
+        cls,
+        market_key: str,
+        *,
+        market_configs_path: Path = _MARKET_CONFIGS_DEFAULT,
+    ) -> "list[RunnerConfig]":
+        """Resolve a market key -- or the literal "all" -- to the configs to run.
+
+        Both the one-shot CLI and the Temporal activity go through here so a
+        scheduled run and a hand-run cover exactly the same ground.
+        """
+        market_configs = _load_market_configs(market_configs_path)
+        if market_key == "all":
+            return [cls._build(key, market_configs, market_configs_path) for key in market_configs]
+        if market_key not in market_configs:
+            available = sorted(market_configs)
+            raise ValueError(f"unknown market_key {market_key!r}; available markets: {available}")
+        return [cls._build(market_key, market_configs, market_configs_path)]
+
+    @classmethod
     def _build(
         cls,
         market_key: str,

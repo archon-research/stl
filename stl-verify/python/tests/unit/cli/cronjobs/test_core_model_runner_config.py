@@ -114,6 +114,27 @@ def test_all_from_env_preserves_market_specific_params(market_configs_path, monk
     assert morpho.params["MORPHO_MARKET"] == "CBBTC"
 
 
+# resolve() -- the single entry point shared by the CLI and the Temporal activity
+
+
+def test_resolve_returns_one_config_for_a_single_market(market_configs_path, monkeypatch):
+    monkeypatch.setattr(os, "environ", _env("sparklend_usdt"))
+    configs = RunnerConfig.resolve("sparklend_usdt", market_configs_path=market_configs_path)
+    assert [c.market_key for c in configs] == ["sparklend_usdt"]
+
+
+def test_resolve_expands_all_to_every_market(market_configs_path, monkeypatch):
+    monkeypatch.setattr(os, "environ", _env("all"))
+    configs = RunnerConfig.resolve("all", market_configs_path=market_configs_path)
+    assert {c.market_key for c in configs} == {"sparklend_usdt", "morpho_cbbtc-usdc"}
+
+
+def test_resolve_rejects_an_unknown_market(market_configs_path, monkeypatch):
+    monkeypatch.setattr(os, "environ", _env("nope"))
+    with pytest.raises(ValueError, match="unknown market_key"):
+        RunnerConfig.resolve("nope", market_configs_path=market_configs_path)
+
+
 # Every test above runs against a synthetic tmp_path config. These two load the
 # file the service actually ships, which is how a trailing comma in
 # market_configs.json once left the cronjob unstartable for every market while

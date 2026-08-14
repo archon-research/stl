@@ -1,113 +1,80 @@
-"""CORE model runner -- compute CRR for one market or all markets and write to DB.
+"""CORE model runner entry point. Scheduling only -- the tick body is a service.
 
-Usage (single market):
-    DATABASE_URL=postgresql://... \\
-    CORE_MODEL_MARKET_KEY=sparklend_usdt \\
-    uv run python -m cli.cronjobs.core_model_runner.main
+Default mode is a Temporal worker: it registers the schedule and then serves
+the task queue, matching every other cronjob in the repo.
 
-Usage (all markets):
-    DATABASE_URL=postgresql://... \\
+    TEMPORAL_HOST_PORT=localhost:7233 DATABASE_URL=postgresql://... \\
     CORE_MODEL_MARKET_KEY=all \\
     uv run python -m cli.cronjobs.core_model_runner.main
 
-Override any param for all markets in an "all" run (e.g. quick test):
-    DATABASE_URL=... CORE_MODEL_MARKET_KEY=all CORE_MODEL_N_MC=100 uv run python -m ...
+`--once` runs a single pass in-process and exits, with no Temporal involved.
+That is what `make run-core-model` uses, and what a hand-triggered run for one
+market looks like:
+
+    DATABASE_URL=postgresql://... CORE_MODEL_MARKET_KEY=sparklend_usdt \\
+    uv run python -m cli.cronjobs.core_model_runner.main --once
 
 Params inherit: default_params.json -> market_configs.json[key] -> env vars.
+Changing CORE_MODEL_RUN_INTERVAL_HOURS does not move an existing schedule --
+delete it in Temporal and restart the worker (see CONTRIBUTING.md).
 """
 
+import argparse
 import asyncio
-import json
 import logging
+import os
+from datetime import timedelta
 
-from sqlalchemy import text
-from sqlalchemy.engine import make_url
-from sqlalchemy.ext.asyncio import create_async_engine
-
-from app.adapters.parquet.core_model_data_reader import ParquetCoreModelDataReader
-from app.risk_engine.core_model.runner import CoreModelConfig, CoreModelPipelineResult, run
+from app.adapters.temporal import CronjobSpec, run_cronjob
+from app.services.core_model_runner.service import run_markets
+from app.services.core_model_runner.workflow import CoreModelRunnerWorkflow, run_core_model_activity
 from cli.cronjobs.core_model_runner.config import RunnerConfig
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-
-def _async_db_url(database_url: str) -> str:
-    url = make_url(database_url)
-    url = url.set(drivername="postgresql+asyncpg")
-    query = dict(url.query)
-    query.pop("sslmode", None)
-    return url.set(query=query).render_as_string(hide_password=False)
+NAME = "core-model-runner"
+_DEFAULT_INTERVAL_HOURS = "24"
 
 
-async def _write_result(engine, result: CoreModelPipelineResult) -> None:
-    query = text("""
-        INSERT INTO core_model_results
-            (market_key, crr_el_pct, crr_es_pct, crr_var_pct, hhi,
-             protocol, forecast_step, n_mc, copula_type, computed_at, params)
-        VALUES
-            (:market_key, :crr_el_pct, :crr_es_pct, :crr_var_pct, :hhi,
-             :protocol, :forecast_step, :n_mc, :copula_type, :computed_at, :params)
-    """)
-    async with engine.begin() as conn:
-        await conn.execute(
-            query,
-            {
-                "market_key": result.market_key,
-                "crr_el_pct": float(result.crr_el_pct),
-                "crr_es_pct": float(result.crr_es_pct),
-                "crr_var_pct": float(result.crr_var_pct),
-                "hhi": float(result.hhi) if result.hhi is not None else None,
-                "protocol": result.protocol,
-                "forecast_step": result.forecast_step,
-                "n_mc": result.n_mc,
-                "copula_type": result.copula_type,
-                "computed_at": result.computed_at,
-                "params": json.dumps(result.params),
-            },
+def _market_key() -> str:
+    return os.environ["CORE_MODEL_MARKET_KEY"]
+
+
+def _interval() -> timedelta:
+    return timedelta(hours=float(os.getenv("CORE_MODEL_RUN_INTERVAL_HOURS", _DEFAULT_INTERVAL_HOURS)))
+
+
+async def run_once() -> None:
+    configs = RunnerConfig.resolve(_market_key())
+    logger.info("one-shot run for %d market(s)", len(configs))
+    await run_markets(configs)
+
+
+async def run_worker() -> None:
+    market_key = _market_key()
+    logger.info("starting %s worker market_key=%s interval=%s", NAME, market_key, _interval())
+    await run_cronjob(
+        CronjobSpec(
+            name=NAME,
+            interval=_interval(),
+            workflow=CoreModelRunnerWorkflow,
+            activities=[run_core_model_activity],
+            workflow_args=[market_key],
         )
+    )
 
 
-async def _run_one(cfg: RunnerConfig, engine) -> None:
-    data_reader = ParquetCoreModelDataReader(cfg.inputs_dir)
-    config = CoreModelConfig(market_key=cfg.market_key, params=cfg.params)
-    result = await run(config, data_reader, cfg.inputs_dir)
-    logger.info("pipeline complete market_key=%s crr_el_pct=%s", result.market_key, result.crr_el_pct)
-    await _write_result(engine, result)
-    logger.info("result written to core_model_results market_key=%s", result.market_key)
-
-
-async def main() -> None:
-    import os
-
-    market_key = os.environ.get("CORE_MODEL_MARKET_KEY", "")
-
-    if market_key == "all":
-        configs = RunnerConfig.all_from_env()
-        logger.info("starting core-model-runner for all %d markets", len(configs))
-        engine = create_async_engine(_async_db_url(configs[0].database_url), pool_pre_ping=True)
-        failed: list[str] = []
-        try:
-            for cfg in configs:
-                logger.info("running market_key=%s protocol=%s", cfg.market_key, cfg.params["PROTOCOL"])
-                try:
-                    await _run_one(cfg, engine)
-                except Exception:
-                    logger.exception("failed market_key=%s -- continuing", cfg.market_key)
-                    failed.append(cfg.market_key)
-        finally:
-            await engine.dispose()
-        if failed:
-            raise RuntimeError(f"one or more markets failed: {failed}")
-    else:
-        cfg = RunnerConfig.from_env()
-        logger.info("starting core-model-runner market_key=%s protocol=%s", cfg.market_key, cfg.params["PROTOCOL"])
-        engine = create_async_engine(_async_db_url(cfg.database_url), pool_pre_ping=True)
-        try:
-            await _run_one(cfg, engine)
-        finally:
-            await engine.dispose()
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(prog=f"python -m cli.cronjobs.{NAME.replace('-', '_')}.main")
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="run a single pass in-process and exit, without connecting to Temporal",
+    )
+    args = parser.parse_args(argv)
+    asyncio.run(run_once() if args.once else run_worker())
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
