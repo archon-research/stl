@@ -14,6 +14,7 @@ import {
   EmptyState,
   ErrorState,
   SearchInput,
+  SkeletonStack,
   type SortingState,
   useDataTable,
 } from '@archon-research/design-system';
@@ -216,19 +217,14 @@ function MetricCardTrend({
   );
 
   if (isLoading) {
-    // Match the chart's footprint so the placeholder fills the same space and
-    // there's no jump (or floating box) when the real chart loads in.
+    // A single block at the chart's own footprint, so the placeholder fills the
+    // same space and there's no jump (or floating box) when the real chart loads
+    // in.
     return (
-      <div
-        style={{ height: CHART_HEIGHT }}
-        className={css({
-          mt: '2',
-          borderRadius: 'sm',
-          borderWidth: '1px',
-          borderStyle: 'solid',
-          borderColor: 'border.subtle',
-          bg: 'surface.default',
-        })}
+      <SkeletonStack
+        count={1}
+        itemHeight={CHART_HEIGHT}
+        className={css({ mt: '2' })}
       />
     );
   }
@@ -275,13 +271,11 @@ function MetricCardTrend({
       ref={measureRef}
       className={css({ mt: '2', width: 'full', minWidth: 0 })}
     >
+      {/* Holds the chart's footprint for the frame between mount and the first
+          ResizeObserver measurement, so the card doesn't resize under the
+          reader. Same treatment as the loading branch above. */}
       {chartWidth === null ? (
-        <div
-          className={css({
-            height: `${chartHeight}px`,
-            width: 'full',
-          })}
-        />
+        <SkeletonStack count={1} itemHeight={chartHeight} />
       ) : null}
       {chartWidth !== null ? (
         <XYChart

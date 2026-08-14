@@ -3,6 +3,7 @@ import {
   EmptyState,
   ErrorState,
   SearchInput,
+  SkeletonStack,
   StyledSelect,
   ToggleGroup,
 } from '@archon-research/design-system';
@@ -398,13 +399,10 @@ export function BottomPanel({
             isLoading={isLoading}
             error={errorMessage}
             isEmpty={filteredAllocations.length === 0}
-            loadingView={
-              <EmptyState
-                title="Loading receipt tokens"
-                description="Waiting for the selected prime's receipt token holdings."
-                stretch
-              />
-            }
+            // A skeleton, not an EmptyState: this is the shape of the tab body
+            // that is coming, and an "empty" panel titled "Loading" reads as a
+            // terminal state rather than a pending one.
+            loadingView={<SkeletonStack count={3} />}
             errorView={
               <ErrorState
                 title="Unable to load receipt tokens"
