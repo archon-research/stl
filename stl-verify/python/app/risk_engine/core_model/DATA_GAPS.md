@@ -89,10 +89,22 @@ replacing the parquet branch in the reader, one market group at a time.
 
 ## 4. Galaxy (parked separately)
 
-Disabled in `market_configs.json`. Blocked on ETH/SOL/JITOSOL sell books
-(BA never shipped them; the run fails at the liquidity step) and on Galaxy
-position data ([VEC-79](https://linear.app/archontech/issue/VEC-79)).
-SOL is aggregatable from our venues once tracked; JITOSOL needs a DEX source.
+Disabled in `market_configs.json`. Checked against staging on 14 Aug 2026:
+**nothing is available** — no `%galaxy%` table exists and there is no Galaxy
+`protocol` row. [VEC-79](https://linear.app/archontech/issue/VEC-79) (Track
+Galaxy position data, In Review since 27 May) only landed its part-1, the
+DEX-indexing preparation ([PR #345](https://github.com/archon-research/stl/pull/345));
+the position ingestion itself was never built, and the ticket's data-source
+investigation is still open.
+
+To re-enable, Galaxy needs all of:
+- **Positions**: an ingestion pipeline (VEC-79 proper). Off-chain CLO data,
+  so it needs the maintainer-approval step from CONTRIBUTING §5.
+- **Order books**: BTC and ETH are already covered by our live books; XRP is
+  deferred (see §2); SOL needs a `SYMBOLS` addition on our venues; JITOSOL
+  needs a DEX source. BA never shipped the ETH/SOL/JITOSOL parquet books, so
+  there is no parquet fallback either — the market cannot run at all today.
+- **Prices**: SOL/JITOSOL/XRP rows in `offchain_price_asset` plus backfill.
 
 ---
 
