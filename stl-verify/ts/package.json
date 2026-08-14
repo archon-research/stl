@@ -16,7 +16,7 @@
   },
   "devDependencies": {
     "@archon-research/uikit-cli": "0.9.0-rohit-skeleton-improvements.2",
-    "@typescript/native-preview": "7.0.0-dev.20260707.2"
+    "typescript": "7.0.2"
   },
   "workspaces": [
     "ui"
