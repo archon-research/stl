@@ -112,7 +112,9 @@ To re-enable, Galaxy needs all of:
 
 1. Backfill the two price gaps + extend the 129-day assets (backfiller run, no code).
 2. Add BTC/HYPE/XRP price asset rows (small migration) + backfill.
-3. Orderbook adapter switch for the 7 covered markets (code, in progress).
+3. Orderbook adapter switch for the 7 covered markets — **done**: set
+   `CORE_MODEL_ORDERBOOK_SOURCE=postgres` (default stays `parquet`). The
+   stored `params.ORDERBOOK_SOURCE` says which books produced each row.
 4. XRP orderbook symbol (config PR — deferred by decision, see above).
 5. Positions adapters per protocol (code, largest piece).
 6. HYPE book, Galaxy inputs (new sources — separate decisions).
