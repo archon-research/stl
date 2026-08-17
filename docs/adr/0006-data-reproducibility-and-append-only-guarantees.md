@@ -171,21 +171,30 @@ the rows (VEC-551), and a row is stamped at its transaction *start* but becomes 
 - At the start of a calculation, on the **primary**, compute the watermark
 
   ```sql
-  SELECT LEAST(now(), COALESCE(min(xact_start), now())) AS t
+  SELECT LEAST(now() - :epsilon, COALESCE(min(xact_start), now())) AS t,
+         pg_current_wal_lsn()                                        AS t_lsn
   FROM pg_stat_activity
   WHERE xact_start IS NOT NULL AND pid <> pg_backend_pid();
   ```
 
   (include `pg_prepared_xacts` if two-phase commit is ever used). Every writer that started
   before T is already committed or aborted; every writer starting after the check stamps `> T`.
-  So `ingested_at ≤ T` is a **frozen prefix**: exact, and it stays exact forever.
+  So `ingested_at ≤ T` is a **frozen prefix**: exact, and it stays exact forever. `epsilon` (a
+  few seconds) covers the microsecond window between a writer reading the clock for its
+  transaction start and publishing it to `pg_stat_activity`; `t_lsn` is recorded with T so a
+  read on a replica is valid only once `pg_last_wal_replay_lsn() >= t_lsn`.
 - Every read the calculation performs filters `ingested_at ≤ T` (including the latest-wins
   selection), and T is written into the record and manifest (§6). This is per calculation, not
   per API: each request computes its own T; reads may use any connection, replica or shard,
   because T is a plain timestamp — no session, transaction or xid state is carried.
 - Internal replay = the same reads with the same T. A long-running writer transaction pushes T
   back for its duration (correct behaviour — the calculation then sees data up to that far
-  behind); alert on writer transactions older than a few minutes so this stays visible.
+  behind); alert on writer transactions older than a few minutes, and a calculation whose
+  `now() − T` exceeds a configured bound is flagged (or refused) so staleness is never silent.
+- **End-to-end self-check:** the manifest job recomputes the calculation from the manifest it
+  just wrote and compares with the recorded output; a mismatch (a read that skipped the `≤ T`
+  filter, a non-governed input, nondeterminism) raises an alert. This is the guard that catches
+  the whole class, not just the cases listed below.
 
 The watermark is **not** the third-party deliverable — it is what lets us regenerate the
 calculation manifest (§6) exactly, at any later time, off the request path, and what lets the
@@ -296,7 +305,12 @@ prevents each. These are part of the decision, not commentary.
 | Destructive schema migration on a governed table (drop/rename/retype) makes old code unrunnable against a later export | Governed tables are additive-only; deprecations keep the old column/view until no recorded calculation's `build_id` depends on it. |
 | A writer supplies or backdates `ingested_at` (explicit value, or a clock far behind the primary's), so a row lands inside an already-recorded frozen prefix | `ingested_at` is DB-assigned only (no `INSERT` names it — lint + conformance test); T is computed on the primary from the primary's clock and in-flight transactions; shards/replicas stamp with their own DB clock, and skew is bounded by NTP and visible in monitoring. |
 | T or `ingested_at` is rendered or compared without an explicit zone (naive `timestamp`, local-time serialisation, session `TimeZone` other than UTC), so a third party filters a different prefix than the calculation used | `timestamptz` only; `TimeZone = 'UTC'` on the cluster and in every application session; T serialised as RFC 3339 UTC with microseconds; schemamaster check that no governed table has a `timestamp without time zone` column; API/manifest schema test on the T format. |
-| A long writer transaction (backfill) holds T minutes in the past, so calculations silently see stale data | Correct by construction, but alert on writer transactions older than a few minutes; backfills commit per batch. |
+| A writer is descheduled between reading its transaction-start clock and publishing `xact_start`, exactly while T is being computed, so its rows are stamped `≤ T` yet invisible to the scan | `epsilon` (seconds) subtracted from `now()` in the watermark query. |
+| Reads on a replica that has not replayed up to T see an incomplete prefix | `t_lsn` recorded with T; replica reads only when `pg_last_wal_replay_lsn() >= t_lsn`, else read on the primary. |
+| The primary's clock steps backwards (NTP step, VM migration, failover to a standby with a slower clock) and stamps new rows earlier than an already-issued T | Slew-only NTP on the service (confirm with TigerData); monitor `max(ingested_at)` vs `now()`; after failover keep a larger `epsilon` until clocks are confirmed aligned; the self-check catches the residue. |
+| One of a calculation's queries omits the `≤ T` filter | Reads go through a helper/view parameterised by T; lint; end-to-end self-check (§5) compares regenerated output to recorded output. |
+| A long writer transaction (backfill) holds T minutes in the past, so calculations silently see stale data | Correct by construction, but alert on writer transactions older than a few minutes; backfills commit per batch; calculations with `now() − T` over a bound are flagged or refused. |
+| `ingested_at ≤ T` gets no min/max pruning on already-compressed chunks (not in `orderby`/`segmentby`), so heavy calculations slow down | Performance, not correctness: latest-wins indexes still drive the read; measure protocol-wide calculations; add `ingested_at` to `orderby` for new chunks if needed. |
 | Under-specified ordering with real ties (`DISTINCT ON`, `last()`, `locf`, cross-table "latest price ≤ block") returns arbitrary rows; float/parallel/hash-order nondeterminism in code | Every canonical selection has a total order (VEC-549 tie-break pattern); calculation code is deterministic given its inputs. |
 | Retention or `drop_chunks` on a governed table; tiered data with a lifecycle rule | §1 conformance test; tiering means "kept indefinitely". |
 | The image that produced a row or calculation can no longer be rebuilt identically (toolchain/dependency drift, non-reproducible base layers) and the original was pruned from the registry | §2: production images retained indefinitely by digest, `docker_sha` recorded per build; a conformance check that every `build_registry.docker_sha` still resolves in the registry. |
