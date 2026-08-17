@@ -42,7 +42,7 @@ guarantees reproducibility actually needs, and states the boundaries.
 |---|---|---|
 | On-chain data point | Recreatable from source | Raw block/receipts and SC-call archive in S3 (keyed `chain / block / block_version / source`), the build (`build_id` → git hash), the config as of the run |
 | Off-chain data point (CoinGecko, Anchorage, Maple GraphQL, CEX) | **None to source.** Terminal fact: what the source returned, when, which build stored it | — |
-| Calculation | Recreatable from **our stored rows** | The exact visible row set (snapshot), calc build, request/params, config as of the run |
+| Calculation | Recreatable from its **manifest alone** (calc step), and each on-chain input from source | The calculation manifest (self-contained: request, code identities, every input row's identity, provenance and values), our code at the listed commits, S3, an archive node — **no database access** |
 
 Off-chain sources cannot be replayed and we do not claim otherwise. Off-chain tables keep the
 same columns and rules for uniformity (a transform bug on stored off-chain rows can still be
@@ -133,7 +133,7 @@ last. Once converted they fall under §1 and get the guard trigger.
 This is what makes "config as of the run" recoverable: with config append-only, the same snapshot
 mechanism (§5) that pins data rows also pins config rows — no separate config snapshot needed.
 
-### 5. Snapshot-exact reads: `ingest_xid` and recorded snapshots
+### 5. Snapshot-exact reads: `ingest_xid` and recorded snapshots (internal mechanism)
 
 Wall-clock as-of is racy in two ways: a row's assignment time is its transaction *start*, but it
 becomes visible at *commit* (a long batch is invisible to a calc yet included in a later replay);
@@ -151,21 +151,50 @@ Postgres' own visibility primitive avoids both:
   connection calls `pg_export_snapshot()` and workers `SET TRANSACTION SNAPSHOT` to read the
   identical snapshot (same server; snapshots do not cross primary/replica). Read-only
   `REPEATABLE READ` takes no locks; only minutes-long snapshots (vacuum lag) need attention.
-- Replay = `WHERE ingest_xid IS NULL OR pg_visible_in_snapshot(ingest_xid, :snap)` then the
-  ordinary latest-wins rule. `pg_visible_in_snapshot` is a pure function of stored values, so it
-  is exact and evaluable on an export without our cluster.
+- Internal replay = `WHERE ingest_xid IS NULL OR pg_visible_in_snapshot(ingest_xid, :snap)` then
+  the ordinary latest-wins rule. `pg_visible_in_snapshot` is a pure function of stored values.
 
-### 6. Calculation record
+The snapshot is **not** the third-party deliverable — it only resolves against our database. It
+is what lets us generate the calculation manifest (§6) exactly, at any later time, off the
+request path, because governed rows are never removed.
 
-Every calculation (dry-run or not) writes one insert-only row, minimally:
-`id, calculation_type, build_id (calc code), schema_version (last applied migration),
-request/params including the effective "as of" time, snapshot (§5), output, is_dry_run,
-created_at`, and returns `id` in the response. The Python API registers itself in
+### 6. Calculation record and self-contained manifest
+
+Reproducibility must not be gated on access to our database. Every calculation (dry-run or not)
+therefore produces two artefacts:
+
+**a. Record** (insert-only, governed): `id, calculation_type, build_id (calc code),
+schema_version (last applied migration), request/params including the effective "as of" time,
+snapshot (§5), output, manifest_key, manifest_hash, is_dry_run, created_at`; `id` is returned in
+the response. Written in the same transaction as the reads. The Python API registers itself in
 `build_registry` at startup like the Go binaries (it does not today), and calculation logic
 never reads wall-clock time, environment/configmap values, caches, or external services — every
-input is either a governed row visible in the snapshot or a field of the recorded request. With §1, §4 and §5 in place this tuple
-is a complete, race-free description of the inputs; no snapshot store or per-row input list is
-needed. Final shape and API surface are VEC-232's; this ADR only fixes what the record must pin.
+input is either a governed row visible in the snapshot or a field of the recorded request.
+
+**b. Manifest** — one object in the archive bucket (`calc/<id>.jsonl.zst`, alongside the raw
+block and SC-call archives), containing everything a third party needs and nothing that requires
+our database:
+
+- the record header (request, effective time, calc `git_hash`, `schema_version`);
+- **every input row**: table, natural key, `block_number`/`block_version`/`processing_version`
+  where present, `build_id` → `git_hash` of the writer, and the row's **values**;
+- for on-chain rows, the archive location (`chain / block / block_version / source`) from which
+  the row can be re-derived by running the writer's build; off-chain rows are terminal facts and
+  their values are taken as given;
+- the config rows used (they are governed rows too);
+- the output, and `manifest_hash` for integrity.
+
+With the manifest a third party can (i) rerun the calculation step from the manifest values and
+our calc code at `git_hash`, and (ii) independently re-derive each on-chain input from S3 + the
+writer's build. Only off-chain inputs are unverifiable to source, by the stated boundary.
+
+**Generation.** The manifest is produced **asynchronously** by a job that re-selects the
+calculation's inputs under `pg_visible_in_snapshot(ingest_xid, snapshot)` — exact by §5 — and
+writes the object; the request path pays only for the record. Because governed rows are never
+removed, a manifest can be (re)generated at any later time; the record's `snapshot` is the
+fallback pointer, never the deliverable. `manifest_key`/`manifest_hash` are filled by the job
+(insert-only: a second record row referencing the first, or a separate `calculation_manifest`
+table). Final shape and API surface are VEC-232's; this ADR fixes what the two artefacts must pin.
 
 ### 7. Canonical reads are structural, not conventional
 
@@ -184,7 +213,7 @@ prevents each. These are part of the decision, not commentary.
 | Threat | Prevention |
 |---|---|
 | A calculation reads a table that is not governed/append-only — an operational table such as `block_states.is_orphaned` (mutable, 30-day retention), a refreshed materialised view or continuous aggregate, an in-place "current state" read model | Calculation read paths may touch only governed tables (`raw_pipeline`/`dimension`/`config`) and governed, append-only read models carrying `ingest_xid`. Reorg fixes (VEC-553) are corrective rows, never a join to operational state. Schemamaster lint on calculation SQL. |
-| Reads spread across several connections or transactions, or the record written best-effort/afterwards | §5/§6: one `REPEATABLE READ` transaction per calculation, snapshot taken first, record written in the same transaction; fan-out only via `pg_export_snapshot`. |
+| Reads spread across several connections or transactions, or the record written best-effort/afterwards | §5/§6: one `REPEATABLE READ` transaction per calculation, snapshot taken first, record written in the same transaction; fan-out only via `pg_export_snapshot`. Without this the manifest job cannot know which rows the calculation actually saw. |
 | Wall-clock, environment, cache or external-service inputs inside the calculation | §6: forbidden; the effective time is a field of the recorded request. |
 | Calculation code without an identity (Python API today), or schema-resident logic (`_current` views, tie-break rules) not pinned | §6: Python registers a `build_id`; the record carries `schema_version`. A third party rebuilds schema at that migration and code at that commit. |
 | A sanctioned in-place rewrite (`DISABLE TRIGGER` + `UPDATE`, as `20260306`, `20260410_125000`, `20260707` did) changes rows that earlier snapshots point at | Data fixes are new rows at a new `processing_version`. An in-place rewrite of a governed table is exceptional, requires an ADR-referenced migration, and is logged in `processing_version_log` with `reason` naming the calculations it invalidates. |
@@ -193,6 +222,8 @@ prevents each. These are part of the decision, not commentary.
 | A writer inserts `ingest_xid = NULL` explicitly and becomes "always visible" | No `INSERT` names `ingest_xid`; lint plus the conformance test. |
 | Under-specified ordering with real ties (`DISTINCT ON`, `last()`, `locf`, cross-table "latest price ≤ block") returns arbitrary rows; float/parallel/hash-order nondeterminism in code | Every canonical selection has a total order (VEC-549 tie-break pattern); calculation code is deterministic given its inputs. |
 | Retention or `drop_chunks` on a governed table; tiered data with a lifecycle rule | §1 conformance test; tiering means "kept indefinitely". |
+| Manifest never generated (job failure/lag), or generated from a different snapshot than the calculation used | Manifest job is idempotent and retried; `manifest_hash` recorded; regeneration is always possible from the record's snapshot (§5); an alert on records older than N minutes without a manifest. |
+| Manifest omits values for off-chain rows or config rows, forcing a third party back to our database | Manifest schema check: every input row carries identity **and** values; off-chain rows are terminal facts and must be complete in the manifest. |
 
 Reproducing a wrong result exactly is the contract: corrections appear as new versions in later
 snapshots and never change what an earlier calculation saw.
@@ -203,7 +234,7 @@ Ordered by information lost per day of delay; 1–3 make reproducibility *possib
 
 1. **Config append-on-change** (§4), starting with `oracle_asset` and `position_classification`
    — the only item where waiting destroys information.
-2. **`ingest_xid` + `ingested_at`** on governed tables (§5); calculation record, Python `build_id`, `schema_version` (§6).
+2. **`ingest_xid` + `ingested_at`** on governed tables (§5); calculation record + manifest job, Python `build_id`, `schema_version` (§6).
 3. **Append-only enforcement** (§1): app role, guard triggers, conformance test.
 4. **Trigger removal** (§3): one migration drops the 36 functions/triggers, creates and seeds
    `processing_version_log`; delete the plan-cache/lock/sort tests and `db/migrations/AGENTS.md`
@@ -231,8 +262,13 @@ late live retry after a correction would get a higher xid and win.
 **Wall-clock `ingested_at` as the as-of key** — the assignment/commit race and per-statement
 snapshots make replay inexact (§5). Kept as a label only.
 
-**Calculations enumerate every input row** — exact and race-free, but heavy per calculation; the
-recorded snapshot is the compact form of the same thing.
+**Snapshot only, no manifest** — compact and exact, but reproducibility would be gated on access
+to our database. Rejected; the snapshot is kept as the internal mechanism that generates the
+manifest exactly and off the request path.
+
+**Manifest built synchronously inside the request** — the "naive" shape from VEC-244; exact, but
+read amplification lands on the request path. Rejected in favour of asynchronous generation from
+the recorded snapshot, which is equally exact.
 
 **Archive raw off-chain responses** — not required; off-chain data points carry no reproduction
 claim (Boundaries).
@@ -243,8 +279,9 @@ lower cost; `RULE … DO INSTEAD NOTHING` fails silently. Rejected.
 ## Consequences
 
 **Positive**
-- Every on-chain data point and every calculation is reproducible by a third party from S3, the
-  code and a database export, with exact MVCC semantics and no wall-clock races.
+- Every on-chain data point and every calculation is reproducible by a third party from S3 (raw
+  archives + calculation manifests), the code and an archive node — no database access — with
+  exact MVCC semantics and no wall-clock races.
 - Append-only is a Postgres-enforced property, not a convention; corrections are deliberate,
   logged, and cannot happen by accident at a deploy boundary.
 - Removes per-row trigger overhead, advisory locks, plan-cache tuning, sort discipline and 36
@@ -259,6 +296,8 @@ lower cost; `RULE … DO INSTEAD NOTHING` fails silently. Rejected.
 - Calculations must run reads in one transaction on one connection (or an exported snapshot) and persist a record; the API must not use wall-clock, env or cache inputs in calculation logic.
 - Governed tables become additive-only; in-place data rewrites are exceptional and logged.
 - Governed tables can never be retention-pruned; storage is bounded by compression + tiering only.
+- Manifests carry input values, so S3 grows with calculation volume; a background job and its
+  monitoring become part of the calculation path.
 
 ## Appendix: ADR-0002 §3 mechanism (2026-04-08, replaced by §3 above)
 
