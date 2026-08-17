@@ -77,21 +77,50 @@ watermarks, transform queues) are exempt.
 The existing ~880 accidental `processing_version > 0` rows are left in place: they are
 payload-identical, harmless under latest-wins, and deleting them would violate this section.
 
-### 2. Build registry and image retention
+### 2. Code identity: artefacts, writer runs, and image retention
 
-`build_registry(id, git_hash UNIQUE, built_at, docker_sha, notes)`, id 0 = `pre-tracking`.
-Every binary resolves its `build_id` once at startup via `buildregistry.New`
-(`ldflags` → `debug.ReadBuildInfo` → `BUILD_GIT_HASH`, hard error if none). Repository
-constructors take `buildregistry.BuildID`. Unchanged from ADR-0002, plus:
+ADR-0002's `build_registry(id, git_hash UNIQUE, …)` identifies a *commit*, which is not enough:
+one commit produces one image per service, and the same service can be rebuilt from the same
+commit with a different digest. And a row's provenance is not only code — the writer's *config*
+(which oracles/tokens/contracts it was told to poll) is loaded at process start and changes
+without a deploy. Two small tables replace "one int per git hash":
 
-- **Production images are kept indefinitely.** Every image that has run in production (any
-  binary that writes governed rows or performs calculations) is retained in the registry with
-  no lifecycle/expiry rule, keyed by digest, so an auditor can be handed the *original* image
-  when rebuilding one that behaves identically is impossible or impractical (toolchain drift,
-  dependency sources gone, non-reproducible base layers). Rebuilding from `git_hash` is the
-  first path; the retained image is the guaranteed fallback.
-- `build_registry.docker_sha` is populated at registration (from the running image's digest)
-  so a `build_id` resolves to both a commit and a retained artefact.
+```sql
+-- what ran: an immutable deploy artefact
+CREATE TABLE build_registry (               -- kept name; semantics widened
+    id            SERIAL PRIMARY KEY,
+    git_hash      TEXT NOT NULL,
+    service       TEXT NOT NULL,             -- binary/deployment name, e.g. sparklend-indexer
+    image_digest  TEXT NOT NULL,             -- immutable, the retained artefact
+    built_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    notes         TEXT,
+    UNIQUE (git_hash, service, image_digest)
+);
+-- one process start of a writer or calculator
+CREATE TABLE writer_run (
+    id               BIGSERIAL PRIMARY KEY,
+    build_id         INT NOT NULL REFERENCES build_registry(id),
+    started_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    config_snapshot  TEXT NOT NULL,           -- pg_current_snapshot() taken when config was loaded
+    config_effective_at TIMESTAMPTZ NOT NULL  -- the effective-as-of the process used for valid_from
+);
+```
+
+- Every binary registers its artefact and opens a **run** at startup (`buildregistry.New`
+  resolves `git_hash` as today, `service` from the binary name, `image_digest` from the running
+  container; hard error if any is missing) and takes `config_snapshot` in the same transaction in
+  which it loads its config. Governed rows carry **`run_id`** (`BIGINT`, `NULL` = pre-tracking);
+  `build_id` on rows is retained for existing data and derivable through the run for new data.
+  Repository constructors take the run id the way they take `BuildID` today.
+- "Config as of the writer run" is then exact and cheap: the config rows visible in the run's
+  `config_snapshot` (config is append-only, §4) with `valid_from <= config_effective_at`. A
+  process that reloads config opens a new run.
+- **Production images are kept indefinitely.** Every `image_digest` in `build_registry` is
+  retained in the container registry with no lifecycle/expiry rule, so an auditor can be handed
+  the *original* image when rebuilding one that behaves identically is impossible or impractical
+  (toolchain drift, dependency sources gone, non-reproducible base layers). Rebuilding from
+  `git_hash` is the first path; the retained image is the guaranteed fallback. A conformance check
+  verifies every `image_digest` still resolves.
 - Later: `-trimpath`, pinned toolchain and base-image digests so rebuilds are bit-for-bit;
   useful, not required for possibility given the retained images.
 
@@ -113,15 +142,21 @@ assignment:
       processing_version  INT         NOT NULL,
       ticket              TEXT        NOT NULL,
       reason              TEXT        NOT NULL,
-      build_id            INT         NOT NULL,
+      run_id              BIGINT      NOT NULL REFERENCES writer_run(id),
       applied_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-      PRIMARY KEY (table_name, processing_version)
+      PRIMARY KEY (table_name, processing_version),
+      UNIQUE (table_name, ticket)
   );
   ```
 
-  (`N = max(processing_version) + 1` for that table, seeded once at migration time from the
-  current per-table maxima), then writes every row of the run at N. Per-key gaps are expected
-  (a key may have versions 0 and 2). A re-run of the same correction is a retry at N and dedupes.
+  **Allocation contract** (serialised and idempotent): in one transaction,
+  `pg_advisory_xact_lock(hashtext('pvlog:' || table_name))` — one lock per correction *run*,
+  not per row — then `SELECT processing_version WHERE (table_name, ticket)` and return it if
+  present (a retry of the same correction), else `INSERT … (max(processing_version) + 1)` and
+  return that. Two concurrent corrections of one table therefore serialise; a crashed/re-run
+  correction recovers its N by ticket. Seeded once at migration time from the current per-table
+  maxima. Then the run writes every row of the correction at N. Per-key gaps are expected (a key
+  may have versions 0 and 2). A re-run of the same correction is a retry at N and dedupes.
 - **Latest-wins is unchanged**: canonical row per natural key = highest `processing_version`,
   after `block_version DESC` for on-chain tables. `build_id` is never used for ordering.
 - The 36 `assign_processing_version_*` triggers and functions, their advisory locks, the
@@ -141,11 +176,25 @@ Tables whose content decides which rows a reader uses (`oracle_asset`, protocol/
 registries, `position_classification`, …) are converted from update-in-place to append-on-change,
 using the `security_master` pattern (VEC-411): natural key + `processing_version` in the PK,
 `valid_from`, and a `<table>_current` view. Toggling `oracle_asset.enabled` becomes a new row.
-Reads go through the `_current` views. Identity-only registries (`token`, pool hubs) are converted
-last. Once converted they fall under §1 and get the guard trigger.
+Identity-only registries (`token`, pool hubs) are converted last. Once converted they fall under
+§1 and get the guard trigger.
 
-This is what makes "config as of the run" recoverable: with config append-only, the same
-snapshot (§5) that pins data rows also pins config rows — no separate config snapshot needed.
+Config is **bitemporal**, and both axes must be pinned explicitly:
+
+- *Knowledge time* — which config rows existed: the MVCC snapshot (§5) for a calculation, the
+  run's `config_snapshot` (§2) for a writer.
+- *Effective time* — which of those rows applied: `valid_from <= :effective_at`, where
+  `effective_at` is an **explicit, recorded parameter** (the calculation's request "as of", the
+  writer run's `config_effective_at`), never `now()`/`CURRENT_DATE`. The existing
+  `security_master_current` view filters `valid_from <= (now() AT TIME ZONE 'utc')::date`; a
+  future-dated config row visible in the snapshot would therefore flip a later replay. So
+  `_current` views are for operational reads only and are **banned from calculation and writer
+  SQL**; those use `<table>_as_of(effective_at)` functions/views (or the inline predicate) with
+  the recorded value. Schemamaster lint: no `_current` view and no `now()`/`CURRENT_DATE` in
+  calculation SQL.
+
+With both axes recorded, "config as of the run" — for the calculation *and* for the writer of
+each input row — is recoverable exactly, with no separate config snapshot store.
 
 ### 5. Snapshot-exact reads: `ingest_xid` and recorded MVCC snapshots (internal mechanism)
 
@@ -222,11 +271,13 @@ sees; the migration is "add the filter, stop recording the snapshot".
 Reproducibility must not be gated on access to our database. Every calculation (dry-run or not)
 therefore produces two artefacts:
 
-**a. Record** (insert-only, governed): `id, calculation_type, build_id (calc code),
-schema_version (last applied migration), request/params including the effective "as of" time,
+**a. Record** (insert-only, governed): `id, calculation_type, run_id (calc artefact + config
+snapshot), schema_version (last applied migration), request/params including the effective
+"as of" time (`effective_at`, also used for every config `valid_from` predicate),
 snapshot (§5), output, manifest_key, manifest_hash, is_dry_run, created_at`; `id` is returned in
-the response. Written in the same transaction as the reads. The Python API registers itself in
-`build_registry` at startup like the Go binaries (it does not today), and calculation logic
+the response. Written in the same transaction as the reads. The Python API registers its
+artefact and opens a `writer_run` at startup like the Go binaries (it does not today), and
+calculation logic
 never reads wall-clock time, environment/configmap values, caches, or external services — every
 input is either a governed row visible in the snapshot or a field of the recorded request.
 
@@ -237,14 +288,18 @@ our database:
 - the record header (request, effective time, `ingested_at` label of the newest input as RFC 3339
   UTC, calc `git_hash`, `schema_version`);
 - **every input row** as its recipe (§8) plus the row's **values**: table, natural key,
-  `block_number`/`block_version`/`processing_version` where present, `build_id` → `git_hash` of
-  the writer;
-- for on-chain rows, the raw-archive location (`chain / block / block_version / source`) from
-  which the row can be re-derived by running the writer's build. Referencing is sufficient (the
-  archives are immutable and kept indefinitely); the manifest job may additionally copy the
-  referenced raw objects under `calc/<id>/raw/` when a fully self-contained per-calculation
-  folder is wanted, at the cost of duplicated storage. Off-chain rows are terminal facts and their
-  values are taken as given;
+  `block_number`/`block_version`/`processing_version` where present, `run_id` → writer artefact
+  (`git_hash`, `service`, `image_digest`) and the run's `config_snapshot`/`config_effective_at`;
+- for on-chain rows, the **full, immutable raw-archive object key(s)** from which the row can be
+  re-derived by running the writer's build. The SC-call archive key is
+  `raw-sc-calls/chain_id=…/block=…/{block}_{block_version}_{source}_{batch_hash}.jsonl.zst`; the
+  batch hash is known to the writer at write time, so governed rows written from archived calls
+  carry `archive_batch` (the 16-hex batch hash; constant across a batch, dictionary-compresses)
+  and the key is fully derivable — `chain / block / block_version / source` alone is only a
+  listing prefix. Referencing is sufficient (the archives are immutable and kept indefinitely);
+  the manifest job may additionally copy the referenced raw objects under `calc/<id>/raw/` when a
+  fully self-contained per-calculation folder is wanted, at the cost of duplicated storage.
+  Off-chain rows are terminal facts and their values are taken as given;
 - the config rows used (they are governed rows too);
 - a **selection statement**: which rule chose the input rows (identified by the calc `git_hash`
   + `schema_version`, with its parameters — protocol, asset, prime, …) and a **per-chain
@@ -292,16 +347,25 @@ to recreate that one data point without our database:
 | Field | Source |
 |---|---|
 | `table`, natural key, `block_number`, `block_version`, `processing_version` | the row's identity |
-| `git_hash` (and image digest once populated) | `build_registry[build_id]` — the writer's code |
-| `source` and raw-archive locator (`chain / block / block_version / source`) | which binary and which S3 objects the row derives from; on-chain only |
+| `git_hash`, `service`, `image_digest` | `writer_run[run_id] → build_registry` — the writer's exact code artefact (rebuild or retained image) |
+| writer config: `config_snapshot`, `config_effective_at` | `writer_run[run_id]` — the config rows the writer had, resolvable against the append-only config tables (§4) |
+| `source` and the **full raw-archive object key(s)** (`…/{block}_{block_version}_{source}_{archive_batch}.jsonl.zst`) | which binary and exactly which S3 objects the row derives from; on-chain only |
 | `chain_id`, contract addresses/log identity where the row has them | to re-fetch from any archive node instead of our S3 |
 | value hash (or the values) | to compare a reproduction against what we stored |
 
-Off-chain rows have a recipe too (identity, `git_hash`, `source`, fetched-at, values) but no
-raw-archive locator; they are terminal facts.
+Off-chain rows have a recipe too (identity, artefact, run config, `source`, fetched-at, values)
+but no raw-archive key; they are terminal facts.
 
-The recipe is not a new table: it is a projection over columns that already exist plus the
-`build_registry` join, and the manifest (§6) is a list of recipes with values. What this section
+**Archiving is a verified invariant, not best-effort.** Today `archiving/multicaller.go` logs a
+failed archive write as a "permanent, unretried loss" and the row is still written; a recipe that
+names an object which does not exist is worthless. Decision: a data-quality check enumerates
+governed rows with an `archive_batch` and verifies the object exists (`HEAD`), alerting on any
+gap; failures at write time are retried with backoff and counted; if the gap rate is not zero in
+practice, archiving becomes a prerequisite of the row write for the affected sources.
+
+The recipe is not a new table: it is a projection over columns that already exist (`run_id`,
+`archive_batch`) plus the `writer_run`/`build_registry` joins, and the manifest (§6) is a list of
+recipes with values. What this section
 adds is a **delivery obligation**: any API response that returns a data point carries its recipe
 (or a stable reference the third party can resolve to one, e.g. a `provenance` endpoint keyed by
 row identity), so a single data point can be reproduced from the response alone — the API
@@ -318,7 +382,12 @@ prevents each. These are part of the decision, not commentary.
 | A calculation reads a table that is not governed/append-only — an operational table such as `block_states.is_orphaned` (mutable, 30-day retention), a refreshed materialised view or continuous aggregate, an in-place "current state" read model | Calculation read paths may touch only governed tables (`raw_pipeline`/`dimension`/`config`) and governed, append-only read models carrying `ingested_at`. Reorg fixes (VEC-553) are corrective rows, never a join to operational state. Schemamaster lint on calculation SQL. |
 | Reads spread across several connections or transactions, or the record written best-effort/afterwards | §5/§6: one `REPEATABLE READ` transaction per calculation, snapshot taken first, record written in the same transaction; fan-out only via `pg_export_snapshot`. Without this the manifest job cannot know which rows the calculation actually saw. |
 | Wall-clock, environment, cache or external-service inputs inside the calculation | §6: forbidden; the effective time is a field of the recorded request. |
-| Calculation code without an identity (Python API today), or schema-resident logic (`_current` views, tie-break rules) not pinned | §6: Python registers a `build_id`; the record carries `schema_version`. A third party rebuilds schema at that migration and code at that commit. |
+| Calculation code without an identity (Python API today), or schema-resident logic (`_as_of` functions, tie-break rules) not pinned | §6: Python registers an artefact + run; the record carries `schema_version`. A third party rebuilds schema at that migration and code at that commit (or takes the retained image). |
+| A config lookup uses `_current` (`valid_from <= now()`), so a future-dated config row that is visible in the snapshot flips a later replay | §4: config is bitemporal; every calculation/writer config read uses the recorded `effective_at`; `_current` views and `now()`/`CURRENT_DATE` are banned from calculation and writer SQL (schemamaster lint). |
+| A row's recipe names the writer's code but not the config the writer ran with, so "why this row exists / which calls were made" cannot be re-derived from chain | §2: rows carry `run_id`; `writer_run` records `config_snapshot` + `config_effective_at`; config tables are append-only, so the writer's config is exactly recoverable. |
+| One `git_hash` maps to several service images or a rebuilt digest, so the retained-image fallback cannot name the image that wrote a row | §2: `build_registry` keyed by `(git_hash, service, image_digest)`; rows → `run_id` → artefact. |
+| The recipe's archive locator is a listing prefix, not an object key, or the object was never written (best-effort archiver) | §6/§8: rows carry `archive_batch`, the key is fully derivable; archive existence is verified by a data-quality check with alerting, and archiving becomes a write prerequisite where gaps occur. |
+| Two concurrent corrections allocate the same `processing_version`, or a retried correction cannot find its earlier allocation | §3: per-table advisory lock around allocation; `UNIQUE (table_name, ticket)`; allocate-or-return-existing by ticket. |
 | A sanctioned in-place rewrite (`DISABLE TRIGGER` + `UPDATE`, as `20260306`, `20260410_125000`, `20260707` did) changes rows that earlier snapshots point at | Data fixes are new rows at a new `processing_version`. An in-place rewrite of a governed table is exceptional, requires an ADR-referenced migration, and is logged in `processing_version_log` with `reason` naming the calculations it invalidates. |
 | Destructive schema migration on a governed table (drop/rename/retype) makes old code unrunnable against a later export | Governed tables are additive-only; deprecations keep the old column/view until no recorded calculation's `build_id` depends on it. |
 | Cluster migration via dump/restore (logical) restarts `pg_current_xact_id()` low, so rows written afterwards look older than every stored snapshot | Prefer physical restore/fork (xids preserved — TigerData's backup/fork are physical). After any logical migration, `pg_resetwal -x` sets NextXID above the previous maximum before writes resume; the runbook records it. If sharding ever becomes a plan, switch §5 to the watermark alternative. |
@@ -343,9 +412,9 @@ snapshots and never change what an earlier calculation saw.
 
 Ordered by information lost per day of delay; 1–3 make reproducibility *possible*.
 
-1. **Config append-on-change** (§4), starting with `oracle_asset` and `position_classification`
-   — the only item where waiting destroys information.
-2. **`ingest_xid` + `ingested_at`** on governed tables (§5); calculation record + manifest job, Python `build_id`, `schema_version` (§6).
+1. **Config append-on-change** (§4) with `_as_of(effective_at)` reads, starting with `oracle_asset`
+   and `position_classification` — the only item where waiting destroys information.
+2. **`ingest_xid` + `ingested_at`** on governed tables (§5); `build_registry` widened to `(git_hash, service, image_digest)`, `writer_run`, `run_id` and `archive_batch` on governed rows (§2/§8); calculation record + manifest job, Python artefact/run, `schema_version` (§6).
 3. **Append-only enforcement** (§1): app role, guard triggers, conformance test.
 4. **Trigger removal** (§3): one migration drops the 36 functions/triggers, creates and seeds
    `processing_version_log`; delete the plan-cache/lock/sort tests and `db/migrations/AGENTS.md`
@@ -429,6 +498,8 @@ lower cost; `RULE … DO INSTEAD NOTHING` fails silently. Rejected.
   become deliberate (`DISABLE TRIGGER` in a migration).
 - Calculations must run reads in one `REPEATABLE READ` transaction on one connection (or an exported snapshot) and persist a record in it; the API must not use wall-clock, env or cache inputs in calculation logic.
 - Governed tables become additive-only; in-place data rewrites are exceptional and logged.
+- Two more small columns on governed rows (`run_id`, `archive_batch`) and two small registry
+  tables; every binary (including the Python API) opens a run at startup and snapshots its config.
 - Governed tables can never be retention-pruned; storage is bounded by compression + tiering only.
 - Manifests carry input values, so S3 grows with calculation volume; a background job and its
   monitoring become part of the calculation path.
