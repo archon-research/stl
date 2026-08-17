@@ -42,7 +42,7 @@ guarantees reproducibility actually needs, and states the boundaries.
 |---|---|---|
 | On-chain data point | Recreatable from source | Raw block/receipts and SC-call archive in S3 (keyed `chain / block / block_version / source`), the build (`build_id` → git hash), the config as of the run |
 | Off-chain data point (CoinGecko, Anchorage, Maple GraphQL, CEX) | **None to source.** Terminal fact: what the source returned, when, which build stored it | — |
-| Calculation | Recreatable from its **manifest alone** (calc step), and each on-chain input from source | The calculation manifest (self-contained: request, code identities, every input row's identity, provenance and values), our code at the listed commits, S3, an archive node — **no database access** |
+| Calculation | Recreatable from its **manifest alone** (calc step); each on-chain input from source; the input *selection* verifiable from chain history up to the manifest's cutoff | The calculation manifest (self-contained: request, code identities, every input row's identity, provenance and values), our code at the listed commits, S3, an archive node — **no database access** |
 
 Two units of reproduction are supported, and each must be self-contained for a third party
 without database access: a **single data point** (via its recipe, §8) and a **whole calculation
@@ -190,11 +190,22 @@ our database:
   folder is wanted, at the cost of duplicated storage. Off-chain rows are terminal facts and their
   values are taken as given;
 - the config rows used (they are governed rows too);
+- a **selection statement**: which rule chose the input rows (identified by the calc `git_hash`
+  + `schema_version`, with its parameters — protocol, asset, prime, …) and a **per-chain
+  cutoff** (highest `block_number`/`block_version` our governed data was complete to at the
+  snapshot). Protocol-wide models such as gap-sweep read "latest row per user" over what we had
+  indexed — a mixed-block set that is a fact about our database, not about the chain at one
+  block — so the manifest must state how the set was chosen and up to where;
 - the output, and `manifest_hash` for integrity.
 
 With the manifest a third party can (i) rerun the calculation step from the manifest values and
-our calc code at `git_hash`, and (ii) independently re-derive each on-chain input from S3 + the
-writer's build. Only off-chain inputs are unverifiable to source, by the stated boundary.
+our calc code at `git_hash`, (ii) independently re-derive each on-chain input from S3 + the
+writer's build, and (iii) verify the **selection** — completeness of the set and freshness of each
+row — by replaying the selection rule against chain history up to the stated cutoff (event scans
+or our indexer code from genesis/baseline). (iii) needs no database access but is expensive; it
+is the "possible now, easy later" item, and a future "as-of block B" calculation mode (all
+positions evaluated at one block) would reduce it to a chain-state query. Only off-chain inputs
+are unverifiable to source, by the stated boundary.
 
 **Generation.** The manifest is produced **asynchronously** by a job that re-selects the
 calculation's inputs under `pg_visible_in_snapshot(ingest_xid, snapshot)` — exact by §5 — and
@@ -256,6 +267,7 @@ prevents each. These are part of the decision, not commentary.
 | Retention or `drop_chunks` on a governed table; tiered data with a lifecycle rule | §1 conformance test; tiering means "kept indefinitely". |
 | Manifest never generated (job failure/lag), or generated from a different snapshot than the calculation used | Manifest job is idempotent and retried; `manifest_hash` recorded; regeneration is always possible from the record's snapshot (§5); an alert on records older than N minutes without a manifest. |
 | A data point is served without its recipe (API returns values but not `git_hash`/`source`/version identity), so a single-point reproduction needs our database | §8 delivery obligation; response-schema test that every data-point payload carries recipe fields or a resolvable provenance reference. |
+| Manifest lists the selected rows but not the selection rule or chain cutoff, so completeness/freshness of the input set can only be checked against our database | §6 selection statement + per-chain cutoff in every manifest; manifest schema check. |
 | Manifest omits values for off-chain rows or config rows, forcing a third party back to our database | Manifest schema check: every input row carries identity **and** values; off-chain rows are terminal facts and must be complete in the manifest. |
 
 Reproducing a wrong result exactly is the contract: corrections appear as new versions in later
