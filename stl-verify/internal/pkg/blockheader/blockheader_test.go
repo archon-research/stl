@@ -38,6 +38,11 @@ func TestParseTimestamp(t *testing.T) {
 			wantErr: "parse block timestamp",
 		},
 		{
+			name:    "int64 overflow (hex wider than 63 bits)",
+			payload: `{"timestamp":"0xffffffffffffffff"}`,
+			wantErr: "parse block timestamp",
+		},
+		{
 			name:    "malformed json",
 			payload: `{"timestamp":`,
 			wantErr: "decode block header",
