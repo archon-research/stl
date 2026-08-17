@@ -37,11 +37,19 @@ func NewBlockMetaRepository(pool *pgxpool.Pool, logger *slog.Logger) (*BlockMeta
 //   - allocation_position, protocol_event carry chain_id natively.
 //   - prime_debt (Sky) has no chain column and is Ethereum mainnet, so its chain is the constant 1.
 //
-// The (block_number, block_version) > (afterNumber, afterVersion) predicate is a keyset cursor:
-// within a run it advances past each batch so the ordered scan is not re-walked from the start. The
-// NOT EXISTS anti-join keeps the loader resumable across runs (a fresh run restarts the cursor at
-// -1 and the anti-join skips blocks a prior run already loaded). A block newly referenced BELOW the
-// cursor mid-run is picked up on the next run, which is acceptable for a historical backfill.
+// The (block_number, block_version) > (afterNumber, afterVersion) predicate is a keyset cursor: it
+// pages the OUTPUT without re-returning rows already handled this run. The NOT EXISTS anti-join
+// keeps the loader resumable across runs (a fresh run restarts the cursor at -1 and the anti-join
+// skips blocks a prior run already loaded). A block newly referenced BELOW the cursor mid-run is
+// picked up on the next run, which is acceptable for a historical backfill.
+//
+// Cost note: the cursor pages the output, but the INPUT — the 6-table referenced UNION — is still
+// recomputed on every batch, and only protocol_event has an index leading with
+// (block_number, block_version); the other arms lead with user_id/protocol_id/chain_id, so their
+// contribution is a scan. For a millions-of-blocks full-history backfill this is roughly
+// O(N^2/batch). It is correct and fine at moderate scale, but before running against prod-sized
+// history this should be reworked to materialize the referenced set once per run into an indexed
+// temp table and page from that. Tracked as a follow-up (see PR).
 const pendingBlocksQuery = `
 WITH referenced AS (
     SELECT p.chain_id, b.block_number, b.block_version
@@ -102,9 +110,10 @@ func (r *BlockMetaRepository) Upsert(ctx context.Context, rows []outbound.BlockM
 		return 0, nil
 	}
 
-	// The stage columns are all bigint so pgx's CopyFrom binary encoding (which uses the destination
-	// column OIDs) matches the int64 row values exactly; the INSERT below assignment-casts them down
-	// to block_meta's integer columns (chain_id, block_version).
+	// The three integer stage columns are bigint so pgx's CopyFrom binary encoding (which uses the
+	// destination column OIDs) matches the int64 row values exactly; block_timestamp is timestamptz.
+	// The INSERT below assignment-casts the integers down to block_meta's integer columns (chain_id,
+	// block_version).
 	copyRows := make([][]any, len(rows))
 	for i, row := range rows {
 		copyRows[i] = []any{row.ChainID, row.BlockNumber, int64(row.BlockVersion), row.BlockTimestamp}
@@ -114,7 +123,7 @@ func (r *BlockMetaRepository) Upsert(ctx context.Context, rows []outbound.BlockM
 	if err != nil {
 		return 0, fmt.Errorf("begin tx: %w", err)
 	}
-	defer r.rollback(ctx, tx)
+	defer rollback(ctx, tx, r.logger)
 
 	if _, err := tx.Exec(ctx, `CREATE TEMP TABLE block_meta_stage (
 		chain_id        bigint      NOT NULL,
@@ -141,12 +150,4 @@ ON CONFLICT (chain_id, block_number, block_version) DO NOTHING`)
 		return 0, fmt.Errorf("commit: %w", err)
 	}
 	return ct.RowsAffected(), nil
-}
-
-// rollback rolls back tx and logs a genuine failure; a rollback after a successful commit returns
-// pgx.ErrTxClosed and is expected.
-func (r *BlockMetaRepository) rollback(ctx context.Context, tx pgx.Tx) {
-	if err := tx.Rollback(ctx); err != nil && err != pgx.ErrTxClosed {
-		r.logger.Error("rollback block_meta upsert tx", "error", err)
-	}
 }
