@@ -144,8 +144,13 @@ Postgres' own visibility primitive avoids both:
   no default first — metadata-only on compressed hypertables — then `SET DEFAULT`; existing rows
   stay `NULL`, meaning "predates tracking" and always visible). Also `ingested_at TIMESTAMPTZ
   DEFAULT now()` — a human label only, never the audit key (VEC-551).
-- A calculation runs all its reads in one `REPEATABLE READ` (or `SERIALIZABLE READ ONLY
-  DEFERRABLE`) transaction and records `pg_current_snapshot()::text` in the same transaction.
+- A calculation runs all its reads in one `REPEATABLE READ` transaction on one connection,
+  takes `pg_current_snapshot()::text` **first**, and writes its record (§6) in that same
+  transaction. This is per calculation, not per API: each request holds its own pool connection
+  for its own transaction, as today. Fan-out inside one calculation is still possible — the first
+  connection calls `pg_export_snapshot()` and workers `SET TRANSACTION SNAPSHOT` to read the
+  identical snapshot (same server; snapshots do not cross primary/replica). Read-only
+  `REPEATABLE READ` takes no locks; only minutes-long snapshots (vacuum lag) need attention.
 - Replay = `WHERE ingest_xid IS NULL OR pg_visible_in_snapshot(ingest_xid, :snap)` then the
   ordinary latest-wins rule. `pg_visible_in_snapshot` is a pure function of stored values, so it
   is exact and evaluable on an export without our cluster.
@@ -153,8 +158,12 @@ Postgres' own visibility primitive avoids both:
 ### 6. Calculation record
 
 Every calculation (dry-run or not) writes one insert-only row, minimally:
-`id, calculation_type, build_id (calc code), request/params, snapshot (§5), output,
-is_dry_run, created_at`, and returns `id` in the response. With §1, §4 and §5 in place this tuple
+`id, calculation_type, build_id (calc code), schema_version (last applied migration),
+request/params including the effective "as of" time, snapshot (§5), output, is_dry_run,
+created_at`, and returns `id` in the response. The Python API registers itself in
+`build_registry` at startup like the Go binaries (it does not today), and calculation logic
+never reads wall-clock time, environment/configmap values, caches, or external services — every
+input is either a governed row visible in the snapshot or a field of the recorded request. With §1, §4 and §5 in place this tuple
 is a complete, race-free description of the inputs; no snapshot store or per-row input list is
 needed. Final shape and API surface are VEC-232's; this ADR only fixes what the record must pin.
 
@@ -167,13 +176,34 @@ tables are for audit queries. Existing version-blind aggregates (`protocol_event
 schemamaster check flags application SQL that orders a governed table without
 `processing_version`.
 
+## Threats to Reproducibility
+
+Ways a calculation can still become unreproducible once the above is implemented, and what
+prevents each. These are part of the decision, not commentary.
+
+| Threat | Prevention |
+|---|---|
+| A calculation reads a table that is not governed/append-only — an operational table such as `block_states.is_orphaned` (mutable, 30-day retention), a refreshed materialised view or continuous aggregate, an in-place "current state" read model | Calculation read paths may touch only governed tables (`raw_pipeline`/`dimension`/`config`) and governed, append-only read models carrying `ingest_xid`. Reorg fixes (VEC-553) are corrective rows, never a join to operational state. Schemamaster lint on calculation SQL. |
+| Reads spread across several connections or transactions, or the record written best-effort/afterwards | §5/§6: one `REPEATABLE READ` transaction per calculation, snapshot taken first, record written in the same transaction; fan-out only via `pg_export_snapshot`. |
+| Wall-clock, environment, cache or external-service inputs inside the calculation | §6: forbidden; the effective time is a field of the recorded request. |
+| Calculation code without an identity (Python API today), or schema-resident logic (`_current` views, tie-break rules) not pinned | §6: Python registers a `build_id`; the record carries `schema_version`. A third party rebuilds schema at that migration and code at that commit. |
+| A sanctioned in-place rewrite (`DISABLE TRIGGER` + `UPDATE`, as `20260306`, `20260410_125000`, `20260707` did) changes rows that earlier snapshots point at | Data fixes are new rows at a new `processing_version`. An in-place rewrite of a governed table is exceptional, requires an ADR-referenced migration, and is logged in `processing_version_log` with `reason` naming the calculations it invalidates. |
+| Destructive schema migration on a governed table (drop/rename/retype) makes old code unrunnable against a later export | Governed tables are additive-only; deprecations keep the old column/view until no recorded calculation's `build_id` depends on it. |
+| Cluster migration via dump/restore restarts `pg_current_xact_id()` low, so rows written afterwards look older than every stored snapshot | Prefer physical restore/fork (xids preserved). After any logical migration, `pg_resetwal -x` sets NextXID above the previous maximum before writes resume; the runbook records it. |
+| A writer inserts `ingest_xid = NULL` explicitly and becomes "always visible" | No `INSERT` names `ingest_xid`; lint plus the conformance test. |
+| Under-specified ordering with real ties (`DISTINCT ON`, `last()`, `locf`, cross-table "latest price ≤ block") returns arbitrary rows; float/parallel/hash-order nondeterminism in code | Every canonical selection has a total order (VEC-549 tie-break pattern); calculation code is deterministic given its inputs. |
+| Retention or `drop_chunks` on a governed table; tiered data with a lifecycle rule | §1 conformance test; tiering means "kept indefinitely". |
+
+Reproducing a wrong result exactly is the contract: corrections appear as new versions in later
+snapshots and never change what an earlier calculation saw.
+
 ## Migration Plan
 
 Ordered by information lost per day of delay; 1–3 make reproducibility *possible*.
 
 1. **Config append-on-change** (§4), starting with `oracle_asset` and `position_classification`
    — the only item where waiting destroys information.
-2. **`ingest_xid` + `ingested_at`** on governed tables (§5); calculation record (§6).
+2. **`ingest_xid` + `ingested_at`** on governed tables (§5); calculation record, Python `build_id`, `schema_version` (§6).
 3. **Append-only enforcement** (§1): app role, guard triggers, conformance test.
 4. **Trigger removal** (§3): one migration drops the 36 functions/triggers, creates and seeds
    `processing_version_log`; delete the plan-cache/lock/sort tests and `db/migrations/AGENTS.md`
@@ -226,7 +256,8 @@ lower cost; `RULE … DO INSTEAD NOTHING` fails silently. Rejected.
   append-on-change pattern; that is real app-code work, done table by table.
 - Role separation on TigerData and guard triggers add migration/ops surface; one-off data fixes
   become deliberate (`DISABLE TRIGGER` in a migration).
-- Calculations must run reads in one transaction and persist a record; slightly more API work.
+- Calculations must run reads in one transaction on one connection (or an exported snapshot) and persist a record; the API must not use wall-clock, env or cache inputs in calculation logic.
+- Governed tables become additive-only; in-place data rewrites are exceptional and logged.
 - Governed tables can never be retention-pruned; storage is bounded by compression + tiering only.
 
 ## Appendix: ADR-0002 §3 mechanism (2026-04-08, replaced by §3 above)
