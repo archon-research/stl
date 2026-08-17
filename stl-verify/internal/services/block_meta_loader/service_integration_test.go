@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
@@ -178,29 +179,71 @@ func TestRunIntegration_FillsBlockMetaFromS3(t *testing.T) {
 		t.Fatalf("pre-seed block_meta block 300: %v", err)
 	}
 
-	svc, err := New(Config{ChainID: chainID, Bucket: bucket, BatchSize: 100}, pool, newLocalStackReader(t, ctx, logger), logger)
+	// Block 500 referenced by a prime_debt row (Sky — no chain column, so the query maps it to the
+	// constant chain 1). Exercises the prime_debt arm of pendingBlocks.
+	const b500Hex = "0x67c01c20"
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO prime_debt (prime_id, ilk_name, debt_wad, block_number, block_version, synced_at)
+		VALUES ((SELECT id FROM prime WHERE name = 'spark'), 'ETH-A', 0, 500, 0, now())`); err != nil {
+		t.Fatalf("seed prime_debt block 500: %v", err)
+	}
+	uploadBlock(t, ctx, s3Client, bucket, 500, 0, b500Hex)
+
+	// Block 400 is referenced only on a DIFFERENT chain (Base, 8453). The chain-1 loader must
+	// exclude it via WHERE chain_id = $1 — its S3 object is deliberately NOT uploaded, so a broken
+	// chain filter would try to fetch it and fail hard rather than pass silently.
+	var baseProtocolID int64
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO protocol (chain_id, address, name, protocol_type) VALUES (8453, '\xbee5'::bytea, 'test-base', 'lending') RETURNING id`,
+	).Scan(&baseProtocolID); err != nil {
+		t.Fatalf("seed base protocol: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO protocol_event
+			(chain_id, protocol_id, block_number, block_version, tx_hash, log_index, contract_address, event_name, event_data)
+		VALUES (8453, $1, 400, 0, '\x06'::bytea, 0, '\x07'::bytea, 'Borrow', '{}'::jsonb)`,
+		baseProtocolID); err != nil {
+		t.Fatalf("seed base protocol_event block 400: %v", err)
+	}
+
+	repo, err := postgres.NewBlockMetaRepository(pool, logger)
+	if err != nil {
+		t.Fatalf("NewBlockMetaRepository: %v", err)
+	}
+	svc, err := New(Config{ChainID: chainID, Bucket: bucket, BatchSize: 100}, repo, newLocalStackReader(t, ctx, logger), logger)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 
-	// First run: fills 100 and 200 (300 already present, not re-fetched).
+	// First run: fills 100, 200 (native + protocol-join arms) and 500 (prime_debt arm). 300 is
+	// already present and not re-fetched; 400 is on chain 8453 and excluded.
 	upserted, err := svc.Run(ctx)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if upserted != 2 {
-		t.Errorf("expected 2 rows upserted, got %d", upserted)
+	if upserted != 3 {
+		t.Errorf("expected 3 rows upserted, got %d", upserted)
 	}
 
 	assertBlockTimestamp(t, ctx, pool, chainID, 100, hexSeconds(t, b100Hex))
 	assertBlockTimestamp(t, ctx, pool, chainID, 200, hexSeconds(t, b200Hex))
 	assertBlockTimestamp(t, ctx, pool, chainID, 300, b300Seeded) // untouched
+	assertBlockTimestamp(t, ctx, pool, chainID, 500, hexSeconds(t, b500Hex))
 
-	if got := countBlockMeta(t, ctx, pool); got != 3 {
-		t.Errorf("expected 3 block_meta rows after first run, got %d", got)
+	// The other-chain block was excluded, not fetched: no block_meta row for it on any chain.
+	var block400Rows int
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM block_meta WHERE block_number = 400`).Scan(&block400Rows); err != nil {
+		t.Fatalf("count block 400 rows: %v", err)
+	}
+	if block400Rows != 0 {
+		t.Errorf("chain-8453 block 400 leaked into block_meta (%d rows); chain filter is broken", block400Rows)
 	}
 
-	// Rerun: every referenced block is now present, so it is a no-op.
+	if got := countBlockMeta(t, ctx, pool); got != 4 {
+		t.Errorf("expected 4 block_meta rows after first run, got %d", got)
+	}
+
+	// Rerun: every referenced block on chain 1 is now present, so it is a no-op.
 	upserted2, err := svc.Run(ctx)
 	if err != nil {
 		t.Fatalf("rerun Run: %v", err)
@@ -208,8 +251,8 @@ func TestRunIntegration_FillsBlockMetaFromS3(t *testing.T) {
 	if upserted2 != 0 {
 		t.Errorf("expected rerun to upsert 0 rows, got %d", upserted2)
 	}
-	if got := countBlockMeta(t, ctx, pool); got != 3 {
-		t.Errorf("expected 3 block_meta rows after rerun, got %d", got)
+	if got := countBlockMeta(t, ctx, pool); got != 4 {
+		t.Errorf("expected 4 block_meta rows after rerun, got %d", got)
 	}
 }
 
