@@ -119,3 +119,7 @@ The watcher handles `SIGINT` and `SIGTERM` signals gracefully:
 4. Shuts down within 25 seconds (compatible with Fargate's 30s default)
 
 Press `Ctrl+C` to stop the watcher.
+
+## Merge Queue Stack Smoke Test
+
+- Base layer marker for the August 2026 stacked-PR merge-queue reproduction.
