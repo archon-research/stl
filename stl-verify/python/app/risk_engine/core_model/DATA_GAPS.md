@@ -34,9 +34,26 @@ the volatility floor uses the full history, and BA's parquet went back to 2014.
 - 2026-06-18 .. 2026-07-07 (20 days)
 
 **What brings it back:**
-- Gaps + short history → run `cmd/backfillers/offchain-price-backfill`
-  (on-demand Temporal worker; trigger from the Temporal UI with the date
-  range as workflow input). One run per asset/range.
+- Gaps + short history → run `cmd/backfillers/offchain-price-backfill`.
+  This is exactly what [VEC-540](https://linear.app/archontech/issue/VEC-540)
+  built for WETH/WBTC (PRs #660/#664; operator guide:
+  `docs/backfilling-offchain-prices.md`) — WETH/WBTC's longer history *is*
+  that backfill; the other eight assets were simply never run.
+
+  Ready-to-run inputs (Temporal UI, namespace `vector`, task queue
+  `offchain-price-backfill`, type `OffchainPriceBackfill`; assets are
+  CoinGecko ids; slice long ranges per the guide's perf warning):
+
+  1. The eight never-backfilled assets, missing history:
+     `{"assets":["coinbase-wrapped-btc","renzo-restaked-eth","lombard-staked-btc","rocket-pool-eth","kelp-dao-restaked-eth","tbtc","wrapped-eeth","wrapped-steth"],"from":"2025-08-01T00:00:00Z","to":"2026-03-18T00:00:00Z"}`
+  2. All ten SparkLend collaterals, gap window 1:
+     add `weth`,`wrapped-bitcoin` to the list, `"from":"2026-04-17…","to":"2026-04-20…"`
+  3. All ten, gap window 2 (the June outage):
+     same assets, `"from":"2026-06-17…","to":"2026-07-08…"`
+
+  Repeat per environment (staging, then prod — identical gaps). Verification:
+  flip `PRICE_SOURCE` on one market; the adapter's window validation is the
+  check.
 - BTC, HYPE, XRP → add `offchain_price_asset` rows. These have no mainnet
   ERC-20, so per the registry rules they get symbol-keyed rows with
   `token_id` NULL. CoinGecko ids: `bitcoin`, `hyperliquid`, `ripple`.
@@ -129,6 +146,25 @@ To re-enable, Galaxy needs all of:
 - **Prices**: SOL/JITOSOL/XRP rows in `offchain_price_asset` plus backfill.
 
 ---
+
+## SparkLend go-live checklist
+
+Positions and order books are already OK for all four SparkLend markets, so
+SparkLend-only support is: run the three price backfills above, then flip the
+sources **per market** in `market_configs.json` (supported since the sources
+became market-scoped keys):
+
+```json
+"sparklend_usdt": {
+  "PROTOCOL": "SPARKLEND", "LOAN_TOKEN": "USDT",
+  "POSITION_SOURCE": "postgres", "ORDERBOOK_SOURCE": "postgres", "PRICE_SOURCE": "postgres"
+}
+```
+
+The flip is deliberately not committed yet: it belongs in its own commit after
+the backfills verify, and local kind (no indexed data) must keep the global
+env override `CORE_MODEL_*_SOURCE=parquet` or stay on the file defaults.
+Non-SparkLend markets keep parquet; the daily "all" tick keeps succeeding.
 
 ## Order of re-enablement (cheapest first)
 

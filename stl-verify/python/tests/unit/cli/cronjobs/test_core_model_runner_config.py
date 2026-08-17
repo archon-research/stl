@@ -137,8 +137,43 @@ def test_orderbook_source_is_recorded_in_params_for_the_audit_trail(market_confi
 
 def test_invalid_orderbook_source_is_rejected(market_configs_path, monkeypatch):
     monkeypatch.setattr(os, "environ", _env("sparklend_usdt", {"CORE_MODEL_ORDERBOOK_SOURCE": "csv"}))
-    with pytest.raises(ValueError, match="CORE_MODEL_ORDERBOOK_SOURCE"):
+    with pytest.raises(ValueError, match="ORDERBOOK_SOURCE"):
         RunnerConfig.from_env(market_configs_path=market_configs_path)
+
+
+def test_sources_are_market_scoped_via_market_configs(tmp_path, monkeypatch):
+    # Coverage is per market: one market can run live while its neighbours in
+    # the same "all" tick stay on parquet.
+    cfg = {
+        "sparklend_usdt": {"PROTOCOL": "SPARKLEND", "LOAN_TOKEN": "USDT", "POSITION_SOURCE": "postgres"},
+        "syrup_usdt": {"PROTOCOL": "SYRUP", "LOAN_TOKEN": "USDT"},
+    }
+    p = tmp_path / "market_configs.json"
+    p.write_text(json.dumps(cfg))
+    monkeypatch.setattr(os, "environ", _env("all"))
+    configs = {c.market_key: c for c in RunnerConfig.resolve("all", market_configs_path=p)}
+    assert configs["sparklend_usdt"].position_source == "postgres"
+    assert configs["syrup_usdt"].position_source == "parquet"
+
+
+def test_env_var_overrides_the_market_config_source(tmp_path, monkeypatch):
+    # The global env override exists to force parquet everywhere on a cluster
+    # with no indexed data (local kind).
+    cfg = {"sparklend_usdt": {"PROTOCOL": "SPARKLEND", "LOAN_TOKEN": "USDT", "POSITION_SOURCE": "postgres"}}
+    p = tmp_path / "market_configs.json"
+    p.write_text(json.dumps(cfg))
+    monkeypatch.setattr(os, "environ", _env("sparklend_usdt", {"CORE_MODEL_POSITION_SOURCE": "parquet"}))
+    cfg = RunnerConfig.from_env(market_configs_path=p)
+    assert cfg.position_source == "parquet"
+
+
+def test_invalid_source_in_market_config_is_rejected(tmp_path, monkeypatch):
+    cfg = {"sparklend_usdt": {"PROTOCOL": "SPARKLEND", "LOAN_TOKEN": "USDT", "ORDERBOOK_SOURCE": "csv"}}
+    p = tmp_path / "market_configs.json"
+    p.write_text(json.dumps(cfg))
+    monkeypatch.setattr(os, "environ", _env("sparklend_usdt"))
+    with pytest.raises(ValueError, match="ORDERBOOK_SOURCE"):
+        RunnerConfig.from_env(market_configs_path=p)
 
 
 def test_price_source_defaults_to_parquet_and_is_recorded(market_configs_path, monkeypatch):
@@ -157,7 +192,7 @@ def test_price_source_postgres_is_selectable(market_configs_path, monkeypatch):
 
 def test_invalid_price_source_is_rejected(market_configs_path, monkeypatch):
     monkeypatch.setattr(os, "environ", _env("sparklend_usdt", {"CORE_MODEL_PRICE_SOURCE": "csv"}))
-    with pytest.raises(ValueError, match="CORE_MODEL_PRICE_SOURCE"):
+    with pytest.raises(ValueError, match="PRICE_SOURCE"):
         RunnerConfig.from_env(market_configs_path=market_configs_path)
 
 

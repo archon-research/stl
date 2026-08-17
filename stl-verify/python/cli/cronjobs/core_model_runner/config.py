@@ -28,11 +28,22 @@ def _load_market_configs(path: Path) -> dict[str, dict]:
 
 _DATA_SOURCES = ("parquet", "postgres")
 
+# Source keys resolve per market: default -> market_configs.json entry -> env
+# var (global override, e.g. forcing parquet on a cluster with no indexed
+# data). Per-market matters because coverage is per market: SparkLend can run
+# on live tables while markets whose readers or feeds do not exist yet stay on
+# parquet, without the daily "all" tick failing on them.
+_SOURCE_KEYS = {
+    "ORDERBOOK_SOURCE": "CORE_MODEL_ORDERBOOK_SOURCE",
+    "PRICE_SOURCE": "CORE_MODEL_PRICE_SOURCE",
+    "POSITION_SOURCE": "CORE_MODEL_POSITION_SOURCE",
+}
 
-def _source_from_env(env_key: str) -> str:
-    source = os.environ.get(env_key, "parquet")
+
+def _resolve_source(key: str, market_config: dict) -> str:
+    source = os.environ.get(_SOURCE_KEYS[key], market_config.get(key, "parquet"))
     if source not in _DATA_SOURCES:
-        raise ValueError(f"invalid {env_key} {source!r}; allowed: {list(_DATA_SOURCES)}")
+        raise ValueError(f"invalid {key} {source!r}; allowed: {list(_DATA_SOURCES)}")
     return source
 
 
@@ -111,9 +122,10 @@ class RunnerConfig:
         env_overrides = {k: _coerce(k, os.environ[env_key]) for k, env_key in _ENV_MAP.items() if env_key in os.environ}
         params.update(env_overrides)
 
-        orderbook_source = _source_from_env("CORE_MODEL_ORDERBOOK_SOURCE")
-        price_source = _source_from_env("CORE_MODEL_PRICE_SOURCE")
-        position_source = _source_from_env("CORE_MODEL_POSITION_SOURCE")
+        market_config = market_configs[market_key]
+        orderbook_source = _resolve_source("ORDERBOOK_SOURCE", market_config)
+        price_source = _resolve_source("PRICE_SOURCE", market_config)
+        position_source = _resolve_source("POSITION_SOURCE", market_config)
         # Recorded in params so every core_model_results row says which
         # sources produced it — live-data and parquet CRRs must never be
         # indistinguishable in the audit trail.
