@@ -206,29 +206,62 @@ func TestRunIntegration_FillsBlockMetaFromS3(t *testing.T) {
 		t.Fatalf("seed base protocol_event block 400: %v", err)
 	}
 
+	// Block 600 at two re-org versions (v0 and v1), same block number, via protocol_event. With the
+	// small BatchSize below the pending set spans multiple batches and the (600,0)/(600,1) pair
+	// straddles a batch boundary — this is what actually exercises the keyset cursor's
+	// `block_number = $3 AND block_version > $4` branch against real Postgres.
+	const b600v0Hex = "0x67c02710"
+	const b600v1Hex = "0x67c03a98"
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO protocol_event
+			(chain_id, protocol_id, block_number, block_version, tx_hash, log_index, contract_address, event_name, event_data)
+		VALUES ($1, $2, 600, 0, '\x08'::bytea, 0, '\x02'::bytea, 'Borrow', '{}'::jsonb),
+		       ($1, $2, 600, 1, '\x09'::bytea, 0, '\x02'::bytea, 'Borrow', '{}'::jsonb)`,
+		chainID, protocolID); err != nil {
+		t.Fatalf("seed protocol_event block 600 v0/v1: %v", err)
+	}
+	uploadBlock(t, ctx, s3Client, bucket, 600, 0, b600v0Hex)
+	uploadBlock(t, ctx, s3Client, bucket, 600, 1, b600v1Hex)
+
 	repo, err := postgres.NewBlockMetaRepository(pool, logger)
 	if err != nil {
 		t.Fatalf("NewBlockMetaRepository: %v", err)
 	}
-	svc, err := New(Config{ChainID: chainID, Bucket: bucket, BatchSize: 100}, repo, newLocalStackReader(t, ctx, logger), logger)
+	// BatchSize 2 forces multiple batches over the pending set (100, 200, 500, 600/0, 600/1), so the
+	// keyset cursor advances across batch boundaries rather than filling everything in one shot.
+	svc, err := New(Config{ChainID: chainID, Bucket: bucket, BatchSize: 2}, repo, newLocalStackReader(t, ctx, logger), logger)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 
-	// First run: fills 100, 200 (native + protocol-join arms) and 500 (prime_debt arm). 300 is
-	// already present and not re-fetched; 400 is on chain 8453 and excluded.
+	// First run: fills 100, 200 (native + protocol-join arms), 500 (prime_debt arm) and 600 at both
+	// versions, across multiple batches. 300 is already present and not re-fetched; 400 is on chain
+	// 8453 and excluded.
 	upserted, err := svc.Run(ctx)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if upserted != 3 {
-		t.Errorf("expected 3 rows upserted, got %d", upserted)
+	if upserted != 5 {
+		t.Errorf("expected 5 rows upserted, got %d", upserted)
 	}
 
 	assertBlockTimestamp(t, ctx, pool, chainID, 100, hexSeconds(t, b100Hex))
 	assertBlockTimestamp(t, ctx, pool, chainID, 200, hexSeconds(t, b200Hex))
 	assertBlockTimestamp(t, ctx, pool, chainID, 300, b300Seeded) // untouched
 	assertBlockTimestamp(t, ctx, pool, chainID, 500, hexSeconds(t, b500Hex))
+	assertBlockTimestamp(t, ctx, pool, chainID, 600, hexSeconds(t, b600v0Hex)) // v0
+
+	// Version 1 of block 600 is a distinct row filled in a later batch (the keyset version branch).
+	var ts600v1 time.Time
+	if err := pool.QueryRow(ctx,
+		`SELECT block_timestamp FROM block_meta WHERE chain_id = $1 AND block_number = 600 AND block_version = 1`,
+		chainID,
+	).Scan(&ts600v1); err != nil {
+		t.Fatalf("query block 600 v1: %v", err)
+	}
+	if ts600v1.Unix() != hexSeconds(t, b600v1Hex) {
+		t.Errorf("block 600 v1 timestamp = %d, want %d", ts600v1.Unix(), hexSeconds(t, b600v1Hex))
+	}
 
 	// The other-chain block was excluded, not fetched: no block_meta row for it on any chain.
 	var block400Rows int
@@ -239,8 +272,8 @@ func TestRunIntegration_FillsBlockMetaFromS3(t *testing.T) {
 		t.Errorf("chain-8453 block 400 leaked into block_meta (%d rows); chain filter is broken", block400Rows)
 	}
 
-	if got := countBlockMeta(t, ctx, pool); got != 4 {
-		t.Errorf("expected 4 block_meta rows after first run, got %d", got)
+	if got := countBlockMeta(t, ctx, pool); got != 6 {
+		t.Errorf("expected 6 block_meta rows after first run, got %d", got)
 	}
 
 	// Rerun: every referenced block on chain 1 is now present, so it is a no-op.
@@ -251,8 +284,8 @@ func TestRunIntegration_FillsBlockMetaFromS3(t *testing.T) {
 	if upserted2 != 0 {
 		t.Errorf("expected rerun to upsert 0 rows, got %d", upserted2)
 	}
-	if got := countBlockMeta(t, ctx, pool); got != 4 {
-		t.Errorf("expected 4 block_meta rows after rerun, got %d", got)
+	if got := countBlockMeta(t, ctx, pool); got != 6 {
+		t.Errorf("expected 6 block_meta rows after rerun, got %d", got)
 	}
 }
 

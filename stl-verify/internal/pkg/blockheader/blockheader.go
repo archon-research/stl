@@ -4,8 +4,9 @@
 // on-chain time, hex-encoded seconds since the Unix epoch (e.g. "0x67c00000").
 //
 // It lives in internal/pkg so both adapters and services can import it without violating
-// hexagonal architecture — the same rationale hexutil documents. It centralises a decode that
-// was previously copied across block_meta_loader, sparklend_backfill and oracle_price_worker.
+// hexagonal architecture: like internal/pkg/blockchain, it depends only on the outbound port
+// interface (S3Reader), never an adapter. It centralises a decode that was previously copied
+// across block_meta_loader, sparklend_backfill and oracle_price_worker.
 package blockheader
 
 import (
