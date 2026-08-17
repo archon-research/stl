@@ -203,6 +203,22 @@ tidy-check:
 	@mv go.mod.bak go.mod && mv go.sum.bak go.sum
 	@echo "go.mod is tidy"
 
+# Enforces the one-container-per-package rule in AGENTS.md; a test that starts its
+# own container adds a container start to every CI run. Benchmarks are exempt: they
+# are not part of make test-integration. Matching the IMPORT PATH, not a call like
+# testcontainers.GenericContainer, because only testutil may depend on testcontainers
+# at all — so an alias, testcontainers.Run, or a modules/* helper cannot slip past.
+shared-container-check:
+	@echo "==> Checking integration tests share their containers..."
+	@offenders=$$(grep -rl 'testcontainers/testcontainers-go' --include='*_test.go' . \
+	  | grep -v '^\./internal/testutil/' | grep -v '_benchmark_test\.go$$'); \
+	if [ -n "$$offenders" ]; then \
+	  echo "ERROR: these tests start their own container instead of sharing the package's:"; \
+	  echo "$$offenders" | sed 's/^/  /'; \
+	  echo "Start it once in TestMain via testutil.Start<X>ForMain and isolate per test instead."; \
+	  exit 1; \
+	fi
+
 # Run staticcheck with all checks (install if needed)
 staticcheck:
 	@echo "==> Running staticcheck..."
@@ -264,7 +280,7 @@ tools:
 # CI target for lint/format/static/security checks. go vet, staticcheck, and
 # go fix -diff are covered by golangci-lint v2 (govet, staticcheck, modernize
 # linters — see .golangci.yml); running them separately tripled analysis time.
-ci-checks: fmt-check goimports-check tidy-check golangci-lint vulncheck
+ci-checks: fmt-check goimports-check tidy-check shared-container-check golangci-lint vulncheck
 
 # CI target: everything with strict checks
 # Order: fast checks first (fail fast), then expensive checks
