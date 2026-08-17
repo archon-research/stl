@@ -192,9 +192,11 @@ inverted canonical row, and a growing operational tax.
 `processing_version` + `build_id` already carry it; the metadata lives in
 `processing_version_log` instead. Rejected as an extra column for no reproducibility gain.
 
-**`ingest_xid` in the primary key instead of `processing_version`** — every retry is a new
-transaction, so idempotency would need read-then-write + advisory locks again, and a late live
-retry after a correction would win. Rejected.
+**Drop `processing_version` and use `ingest_xid` as the key discriminator** — rejected.
+`processing_version` is kept: `ingest_xid` only answers "which rows were visible to a
+calculation"; it cannot separate retries from corrections. Every retry is a new transaction, so
+with `ingest_xid` in the key idempotency would need read-then-write + advisory locks again, and a
+late live retry after a correction would get a higher xid and win.
 
 **Wall-clock `ingested_at` as the as-of key** — the assignment/commit race and per-statement
 snapshots make replay inexact (§5). Kept as a label only.
