@@ -90,7 +90,7 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	ctx := context.Background()
 
-	_, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	_, dbURL, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
 	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -184,7 +184,7 @@ const (
 func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 	bgCtx := context.Background()
 
-	pool, dbURL, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, dbURL, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	const blockNum = int64(19_000_000)

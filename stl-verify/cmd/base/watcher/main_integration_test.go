@@ -1229,7 +1229,7 @@ func setupTestInfrastructure(t *testing.T, ctx context.Context) *TestInfrastruct
 	var cleanupFuncs []func()
 
 	// Use shared PostgreSQL container with per-test schema isolation
-	pool, _, schemaCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, schemaCleanup := testutil.SetupTestDB(t, sharedDSN)
 	cleanupFuncs = append(cleanupFuncs, schemaCleanup)
 	infra.Pool = pool
 

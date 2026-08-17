@@ -31,7 +31,7 @@ func TestMain(m *testing.M) {
 // ---------------------------------------------------------------------------
 
 func TestRunIntegration_HappyPath(t *testing.T) {
-	pool, dbURL, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, dbURL, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 
 	ctx := context.Background()

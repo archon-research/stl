@@ -15,13 +15,13 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-const txmgrSchemaName = "test_txmgr"
+const txmgrDBName = "test_txmgr"
 
 var txmgrPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(txmgrSchemaName, func() {
-		txmgrPool = testutil.SetupSchemaForMain(sharedDSN, txmgrSchemaName)
+	registerTestFileSetup(txmgrDBName, func() {
+		txmgrPool = testutil.SetupDBForMain(sharedDSN, txmgrDBName)
 		// Create the tx_test table used by transaction manager tests
 		ctx := context.Background()
 		_, err := txmgrPool.Exec(ctx, `CREATE TABLE IF NOT EXISTS tx_test (id SERIAL PRIMARY KEY, value TEXT)`)
@@ -29,7 +29,7 @@ func init() {
 			log.Fatalf("failed to create tx_test table: %v", err)
 		}
 	}, func() {
-		testutil.CleanupSchemaForMain(sharedDSN, txmgrPool, txmgrSchemaName)
+		testutil.CleanupDBForMain(sharedDSN, txmgrPool, txmgrDBName)
 	})
 }
 

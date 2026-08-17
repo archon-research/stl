@@ -13,15 +13,15 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-const protocolSchemaName = "test_protocol"
+const protocolDBName = "test_protocol"
 
 var protocolPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(protocolSchemaName, func() {
-		protocolPool = testutil.SetupSchemaForMain(sharedDSN, protocolSchemaName)
+	registerTestFileSetup(protocolDBName, func() {
+		protocolPool = testutil.SetupDBForMain(sharedDSN, protocolDBName)
 	}, func() {
-		testutil.CleanupSchemaForMain(sharedDSN, protocolPool, protocolSchemaName)
+		testutil.CleanupDBForMain(sharedDSN, protocolPool, protocolDBName)
 	})
 }
 

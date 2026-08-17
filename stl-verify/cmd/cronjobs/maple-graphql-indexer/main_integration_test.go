@@ -69,7 +69,7 @@ func mapleFixtureServer(t *testing.T) *httptest.Server {
 
 func TestSetupRunner_WiresService(t *testing.T) {
 	ctx := context.Background()
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 
 	server := mapleFixtureServer(t)
@@ -108,7 +108,7 @@ func TestSetupRunner_WiresService(t *testing.T) {
 // of multiplying snapshots.
 func TestSetupRunner_UsesScheduledAtFromContext(t *testing.T) {
 	ctx := context.Background()
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 
 	server := mapleFixtureServer(t)
@@ -159,7 +159,7 @@ func TestSetupRunner_UsesScheduledAtFromContext(t *testing.T) {
 
 func TestSetupRunner_RejectsNonMainnetChain(t *testing.T) {
 	ctx := context.Background()
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 
 	t.Setenv("CHAIN_ID", "137")

@@ -60,7 +60,7 @@ func TestMain(m *testing.M) {
 func TestRunIntegration_HappyPath(t *testing.T) {
 	ctx := context.Background()
 
-	pool, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, dbURL, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
 	s3Cfg := sharedLocalStackCfg
@@ -134,7 +134,7 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 func TestRunIntegration_BorrowEvent(t *testing.T) {
 	ctx := context.Background()
 
-	pool, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, dbURL, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
 	s3Cfg := sharedLocalStackCfg
@@ -270,7 +270,7 @@ func TestRunIntegration_BadDatabaseURL(t *testing.T) {
 func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 	ctx := context.Background()
 
-	_, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	_, dbURL, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
 	s3Cfg := sharedLocalStackCfg
@@ -469,7 +469,7 @@ func assertBorrowEventDBState(t *testing.T, ctx context.Context, pool *pgxpool.P
 func TestRunIntegration_BorrowEvent_WithCollateral(t *testing.T) {
 	ctx := context.Background()
 
-	pool, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, dbURL, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
 	s3Cfg := sharedLocalStackCfg

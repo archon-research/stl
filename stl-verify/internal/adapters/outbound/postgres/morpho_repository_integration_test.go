@@ -24,15 +24,15 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-const morphoSchemaName = "test_morpho"
+const morphoDBName = "test_morpho"
 
 var morphoPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(morphoSchemaName, func() {
-		morphoPool = testutil.SetupSchemaForMain(sharedDSN, morphoSchemaName)
+	registerTestFileSetup(morphoDBName, func() {
+		morphoPool = testutil.SetupDBForMain(sharedDSN, morphoDBName)
 	}, func() {
-		testutil.CleanupSchemaForMain(sharedDSN, morphoPool, morphoSchemaName)
+		testutil.CleanupDBForMain(sharedDSN, morphoPool, morphoDBName)
 	})
 }
 

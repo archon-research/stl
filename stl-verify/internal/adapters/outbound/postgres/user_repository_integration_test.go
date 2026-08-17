@@ -16,15 +16,15 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-const userSchemaName = "test_user"
+const userDBName = "test_user"
 
 var userPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(userSchemaName, func() {
-		userPool = testutil.SetupSchemaForMain(sharedDSN, userSchemaName)
+	registerTestFileSetup(userDBName, func() {
+		userPool = testutil.SetupDBForMain(sharedDSN, userDBName)
 	}, func() {
-		testutil.CleanupSchemaForMain(sharedDSN, userPool, userSchemaName)
+		testutil.CleanupDBForMain(sharedDSN, userPool, userDBName)
 	})
 }
 

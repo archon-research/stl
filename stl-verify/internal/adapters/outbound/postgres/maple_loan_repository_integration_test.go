@@ -19,15 +19,15 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-const mapleSchemaName = "test_maple_graphql"
+const mapleDBName = "test_maple_graphql"
 
 var maplePool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(mapleSchemaName, func() {
-		maplePool = testutil.SetupSchemaForMain(sharedDSN, mapleSchemaName)
+	registerTestFileSetup(mapleDBName, func() {
+		maplePool = testutil.SetupDBForMain(sharedDSN, mapleDBName)
 	}, func() {
-		testutil.CleanupSchemaForMain(sharedDSN, maplePool, mapleSchemaName)
+		testutil.CleanupDBForMain(sharedDSN, maplePool, mapleDBName)
 	})
 }
 

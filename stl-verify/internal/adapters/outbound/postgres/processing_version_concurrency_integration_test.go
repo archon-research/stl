@@ -27,7 +27,7 @@ import (
 // function, this race silently drops the loser via ON CONFLICT DO NOTHING.
 // Regression test for VEC-194 (ADR-0002 §3 gap).
 
-const concurrencySchemaName = "test_pv_concurrency"
+const concurrencyDBName = "test_pv_concurrency"
 
 // concurrencyPool is opened per-test (not at package setup) so it doesn't
 // hold idle connections that would starve the rest of the integration suite —
@@ -37,27 +37,22 @@ const concurrencySchemaName = "test_pv_concurrency"
 var concurrencyPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(concurrencySchemaName, func() {
-		// SetupSchemaForMain creates the schema and runs migrations. We
-		// throw away the pool it returns — we'll mint a small short-lived
-		// pool inside each test. Schema and migrations persist across pools.
-		testutil.SetupSchemaForMain(sharedDSN, concurrencySchemaName).Close()
+	registerTestFileSetup(concurrencyDBName, func() {
+		// The pool it returns is thrown away: each test mints its own small
+		// short-lived one. The database outlives them all.
+		testutil.SetupDBForMain(sharedDSN, concurrencyDBName).Close()
 	}, func() {
-		// Reopen a tiny pool just for the cleanup so CleanupSchemaForMain
-		// has something to close.
+		// Reopen a tiny pool just for the cleanup so CleanupDBForMain has
+		// something to close.
 		concurrencyPool = openConcurrencyPool()
-		testutil.CleanupSchemaForMain(sharedDSN, concurrencyPool, concurrencySchemaName)
+		testutil.CleanupDBForMain(sharedDSN, concurrencyPool, concurrencyDBName)
 	})
 }
 
 // openConcurrencyPool mints a small, short-lived pool against the
-// concurrency-test schema. Caller is responsible for closing it.
+// concurrency-test database. Caller is responsible for closing it.
 func openConcurrencyPool() *pgxpool.Pool {
-	separator := "?"
-	if strings.Contains(sharedDSN, "?") {
-		separator = "&"
-	}
-	dsn := fmt.Sprintf("%s%ssearch_path=%s,public&pool_max_conns=2", sharedDSN, separator, concurrencySchemaName)
+	dsn := testutil.DatabaseDSN(sharedDSN, concurrencyDBName) + "&pool_max_conns=2"
 	pool, err := pgxpool.New(context.Background(), dsn)
 	if err != nil {
 		panic(fmt.Sprintf("connect concurrency pool: %v", err))

@@ -62,7 +62,7 @@ func TestMain(m *testing.M) {
 func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 	bgCtx := context.Background()
 
-	pool, dbURL, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, dbURL, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	// SparkLend's PoolDataProvider is active from block 16776400; use a block above it.

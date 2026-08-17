@@ -428,7 +428,7 @@ func TestE2E_VEC242_NullBlockBodyRejected_RetryThenWorkerProcesses(t *testing.T)
 	defer cancel()
 
 	// --- Schema, oracle/token fixtures, repositories ---
-	pool, _, schemaCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, schemaCleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(schemaCleanup)
 
 	logger := testutil.DiscardLogger()
@@ -630,7 +630,7 @@ func TestE2E_VEC242_GapFillRetriesNull(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	pool, _, schemaCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, schemaCleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(schemaCleanup)
 	logger := testutil.DiscardLogger()
 	testutil.DisableAllOracles(t, ctx, pool)

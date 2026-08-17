@@ -11,15 +11,15 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-const curveSchemaName = "test_curve_migration"
+const curveDBName = "test_curve_migration"
 
 var curveTestPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(curveSchemaName, func() {
-		curveTestPool = testutil.SetupSchemaForMain(sharedDSN, curveSchemaName)
+	registerTestFileSetup(curveDBName, func() {
+		curveTestPool = testutil.SetupDBForMain(sharedDSN, curveDBName)
 	}, func() {
-		testutil.CleanupSchemaForMain(sharedDSN, curveTestPool, curveSchemaName)
+		testutil.CleanupDBForMain(sharedDSN, curveTestPool, curveDBName)
 	})
 }
 

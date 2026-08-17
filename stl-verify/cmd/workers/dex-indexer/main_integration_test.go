@@ -93,7 +93,7 @@ func runStartupAndShutdown(t *testing.T, dex string) {
 	// SetupTestSchema applies all migrations, which seed the Curve pools and the
 	// 18 Uniswap V3 pools on chain_id=1. run() calls LoadPools(chainID) and fails
 	// hard on zero pools, so CHAIN_ID must be "1" to match the seeded rows.
-	_, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	_, dbURL, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
 	// After the capability-probe removal, startup makes no chain call, and with no

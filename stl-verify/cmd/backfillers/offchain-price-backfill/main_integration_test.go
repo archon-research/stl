@@ -191,7 +191,7 @@ func countPrices(t *testing.T, ctx context.Context, pool *pgxpool.Pool, tokenID 
 // the literal is spelled out here rather than referencing workflowTypeName —
 // using the constant would rename both sides together and pin nothing.
 func TestIntegration_Register_ExposesTheDocumentedWorkflowType(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -220,7 +220,7 @@ func TestIntegration_Register_ExposesTheDocumentedWorkflowType(t *testing.T) {
 }
 
 func TestIntegration_FetchChunk_StoresHourlyPrices(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -250,7 +250,7 @@ func TestIntegration_FetchChunk_StoresHourlyPrices(t *testing.T) {
 // Re-running the same window must add nothing: an operator will overlap ranges,
 // and Temporal retries activities, so the write path has to be idempotent.
 func TestIntegration_FetchChunk_IsIdempotentAcrossRuns(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -286,7 +286,7 @@ func TestIntegration_FetchChunk_IsIdempotentAcrossRuns(t *testing.T) {
 // A mistyped CoinGecko ID resolves to no row in offchain_price_asset. It must fail
 // rather than look like a clean run that had nothing to do.
 func TestIntegration_FetchChunk_ErrorsOnUnregisteredAsset(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -314,7 +314,7 @@ func TestIntegration_FetchChunk_ErrorsOnUnregisteredAsset(t *testing.T) {
 // The window cap is a correctness bound, not a preference: CoinGecko silently
 // drops to daily resolution beyond it.
 func TestIntegration_FetchChunk_RejectsWindowWiderThanHourlyLimit(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()

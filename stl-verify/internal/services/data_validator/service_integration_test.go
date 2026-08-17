@@ -40,7 +40,7 @@ func TestValidate_BaseChain_Integration(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	pool, _, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
 	repo := postgres.NewBlockStateRepository(pool, baseChainID, logger)

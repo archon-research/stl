@@ -15,15 +15,15 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-const eventSchemaName = "test_event"
+const eventDBName = "test_event"
 
 var eventPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(eventSchemaName, func() {
-		eventPool = testutil.SetupSchemaForMain(sharedDSN, eventSchemaName)
+	registerTestFileSetup(eventDBName, func() {
+		eventPool = testutil.SetupDBForMain(sharedDSN, eventDBName)
 	}, func() {
-		testutil.CleanupSchemaForMain(sharedDSN, eventPool, eventSchemaName)
+		testutil.CleanupDBForMain(sharedDSN, eventPool, eventDBName)
 	})
 }
 

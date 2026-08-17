@@ -15,15 +15,15 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-const orderbookSnapshotSchemaName = "test_cex_orderbook"
+const orderbookSnapshotDBName = "test_cex_orderbook"
 
 var orderbookSnapshotPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(orderbookSnapshotSchemaName, func() {
-		orderbookSnapshotPool = testutil.SetupSchemaForMain(sharedDSN, orderbookSnapshotSchemaName)
+	registerTestFileSetup(orderbookSnapshotDBName, func() {
+		orderbookSnapshotPool = testutil.SetupDBForMain(sharedDSN, orderbookSnapshotDBName)
 	}, func() {
-		testutil.CleanupSchemaForMain(sharedDSN, orderbookSnapshotPool, orderbookSnapshotSchemaName)
+		testutil.CleanupDBForMain(sharedDSN, orderbookSnapshotPool, orderbookSnapshotDBName)
 	})
 }
 

@@ -95,7 +95,7 @@ func setupIntegrationTest(t *testing.T, opts ...setupOption) *integrationEnv {
 		opt(&cfg)
 	}
 
-	pool, dbURL, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, dbURL, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	bgCtx := context.Background()

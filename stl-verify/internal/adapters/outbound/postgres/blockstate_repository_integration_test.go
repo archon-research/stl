@@ -18,16 +18,16 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-const blockstateSchemaName = "test_blockstate"
+const blockstateDBName = "test_blockstate"
 
 var blockstatePool *pgxpool.Pool
 
 func init() {
 	// Register setup function to be called after TestMain sets sharedDSN
-	registerTestFileSetup(blockstateSchemaName, func() {
-		blockstatePool = testutil.SetupSchemaForMain(sharedDSN, blockstateSchemaName)
+	registerTestFileSetup(blockstateDBName, func() {
+		blockstatePool = testutil.SetupDBForMain(sharedDSN, blockstateDBName)
 	}, func() {
-		testutil.CleanupSchemaForMain(sharedDSN, blockstatePool, blockstateSchemaName)
+		testutil.CleanupDBForMain(sharedDSN, blockstatePool, blockstateDBName)
 	})
 }
 

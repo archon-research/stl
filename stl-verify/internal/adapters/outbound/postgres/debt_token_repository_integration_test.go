@@ -13,15 +13,15 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-const debtTokenSchemaName = "test_debt_token"
+const debtTokenDBName = "test_debt_token"
 
 var debtTokenPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(debtTokenSchemaName, func() {
-		debtTokenPool = testutil.SetupSchemaForMain(sharedDSN, debtTokenSchemaName)
+	registerTestFileSetup(debtTokenDBName, func() {
+		debtTokenPool = testutil.SetupDBForMain(sharedDSN, debtTokenDBName)
 	}, func() {
-		testutil.CleanupSchemaForMain(sharedDSN, debtTokenPool, debtTokenSchemaName)
+		testutil.CleanupDBForMain(sharedDSN, debtTokenPool, debtTokenDBName)
 	})
 }
 
