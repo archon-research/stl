@@ -123,3 +123,4 @@ Press `Ctrl+C` to stop the watcher.
 ## Merge Queue Stack Smoke Test
 
 - Base layer marker for the August 2026 stacked-PR merge-queue reproduction.
+- Top layer marker for the August 2026 stacked-PR merge-queue reproduction.
