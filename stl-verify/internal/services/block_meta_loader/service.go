@@ -11,15 +11,13 @@
 //
 // Run PER CHAIN (like raw-data-backup): one invocation, one CHAIN_ID, one S3 bucket. Idempotent
 // (ON CONFLICT DO NOTHING) and resumable (the work-list is only blocks not yet in block_meta).
-//
-// STATUS: first-draft scaffold. Compiles/tests via CI (Go is not in the dev env). TODOs inline.
 package block_meta_loader
 
 import (
-	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"time"
 
@@ -83,7 +81,7 @@ func (s *Service) Run(ctx context.Context) (int64, error) {
 				// must be surfaced (bulk-download it), not silently skipped.
 				return total, fmt.Errorf("chain %d block %d/%d: %w", s.cfg.ChainID, r.Number, r.Version, err)
 			}
-			rows = append(rows, []any{s.cfg.ChainID, r.Number, r.Version, ts})
+			rows = append(rows, []any{s.cfg.ChainID, r.Number, int64(r.Version), ts})
 		}
 		n, err := s.upsert(ctx, rows)
 		if err != nil {
@@ -94,8 +92,9 @@ func (s *Service) Run(ctx context.Context) (int64, error) {
 	}
 }
 
-// blockTimestamp reads {partition}/{block}_{version}_block.json.gz from S3, gunzips it, and parses the
-// on-chain header timestamp (hex, e.g. "0x67c00000").
+// blockTimestamp reads {partition}/{block}_{version}_block.json.gz from S3 and parses the on-chain
+// header timestamp (hex, e.g. "0x67c00000"). The S3Reader adapter auto-decompresses .gz keys, so the
+// stream yields plain JSON — the loader must not gunzip again.
 func (s *Service) blockTimestamp(ctx context.Context, r blockRef) (time.Time, error) {
 	key := s3key.Build(r.Number, r.Version, s3key.Block)
 	rc, err := s.reader.StreamFile(ctx, s.cfg.Bucket, key)
@@ -103,15 +102,14 @@ func (s *Service) blockTimestamp(ctx context.Context, r blockRef) (time.Time, er
 		return time.Time{}, fmt.Errorf("s3 get %s: %w", key, err)
 	}
 	defer rc.Close()
-	gz, err := gzip.NewReader(rc)
+	data, err := io.ReadAll(rc)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("gunzip %s: %w", key, err)
+		return time.Time{}, fmt.Errorf("read %s: %w", key, err)
 	}
-	defer gz.Close()
 	var hdr struct {
 		Timestamp string `json:"timestamp"`
 	}
-	if err := json.NewDecoder(gz).Decode(&hdr); err != nil {
+	if err := json.Unmarshal(data, &hdr); err != nil {
 		return time.Time{}, fmt.Errorf("decode %s: %w", key, err)
 	}
 	if hdr.Timestamp == "" {
@@ -127,9 +125,11 @@ func (s *Service) blockTimestamp(ctx context.Context, r blockRef) (time.Time, er
 // pendingBlocks returns a batch of (block_number, block_version) referenced by the observation tables
 // on this chain but not yet present in block_meta.
 //
-// TODO: finalise the per-table chain resolution — borrower/borrower_collateral/sparklend_reserve_data
-// resolve chain via protocol.chain_id; allocation_position/protocol_event carry chain_id natively;
-// prime_debt is the Sky constant (chain 1). The union below is the shape; verify each arm on live data.
+// Per-table chain resolution (verified against the schemas):
+//   - borrower, borrower_collateral, sparklend_reserve_data carry protocol_id (BIGINT -> protocol.id);
+//     the chain is protocol.chain_id, reached by joining protocol.
+//   - allocation_position, protocol_event carry chain_id natively.
+//   - prime_debt (Sky) has no chain column and is Ethereum mainnet, so its chain is the constant 1.
 func (s *Service) pendingBlocks(ctx context.Context) ([]blockRef, error) {
 	const q = `
 WITH referenced AS (
@@ -174,28 +174,60 @@ SELECT r.block_number, r.block_version
 	return out, rows.Err()
 }
 
+// stageColumns are the block_meta columns the loader fills, in COPY/INSERT order.
+var stageColumns = []string{"chain_id", "block_number", "block_version", "block_timestamp"}
+
 // upsert writes a batch into block_meta, ON CONFLICT DO NOTHING (a block's time is immutable once known).
+//
+// It COPYs the batch into a session-scoped TEMP table (dropped at commit) and then does a single
+// INSERT ... SELECT ... ON CONFLICT DO NOTHING. COPY is an order of magnitude faster than per-row
+// INSERTs at the millions-of-blocks scale of a full-history backfill, and folding the whole batch into
+// one INSERT keeps the conflict check server-side.
 func (s *Service) upsert(ctx context.Context, rows [][]any) (int64, error) {
 	if len(rows) == 0 {
 		return 0, nil
 	}
-	// TODO: switch to COPY into a temp table + INSERT ... SELECT ON CONFLICT for throughput at scale.
-	batch := &pgx.Batch{}
-	for _, r := range rows {
-		batch.Queue(
-			`INSERT INTO block_meta (chain_id, block_number, block_version, block_timestamp)
-			 VALUES ($1, $2, $3, $4) ON CONFLICT (chain_id, block_number, block_version) DO NOTHING`,
-			r...)
+
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("begin tx: %w", err)
 	}
-	br := s.db.SendBatch(ctx, batch)
-	defer br.Close()
-	var n int64
-	for range rows {
-		ct, err := br.Exec()
-		if err != nil {
-			return n, err
-		}
-		n += ct.RowsAffected()
+	defer s.rollback(ctx, tx)
+
+	// The stage columns are all bigint so pgx's CopyFrom binary encoding (which uses the
+	// destination column OIDs) matches the int64/int row values exactly; the INSERT below
+	// assignment-casts them down to block_meta's integer columns.
+	if _, err := tx.Exec(ctx, `CREATE TEMP TABLE block_meta_stage (
+		chain_id        bigint      NOT NULL,
+		block_number    bigint      NOT NULL,
+		block_version   bigint      NOT NULL,
+		block_timestamp timestamptz NOT NULL
+	) ON COMMIT DROP`); err != nil {
+		return 0, fmt.Errorf("create stage table: %w", err)
 	}
-	return n, nil
+
+	if _, err := tx.CopyFrom(ctx, pgx.Identifier{"block_meta_stage"}, stageColumns, pgx.CopyFromRows(rows)); err != nil {
+		return 0, fmt.Errorf("copy into stage: %w", err)
+	}
+
+	ct, err := tx.Exec(ctx, `
+INSERT INTO block_meta (chain_id, block_number, block_version, block_timestamp)
+SELECT chain_id, block_number, block_version, block_timestamp FROM block_meta_stage
+ON CONFLICT (chain_id, block_number, block_version) DO NOTHING`)
+	if err != nil {
+		return 0, fmt.Errorf("insert from stage: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("commit: %w", err)
+	}
+	return ct.RowsAffected(), nil
+}
+
+// rollback rolls back tx and logs a genuine failure; a rollback after a successful commit returns
+// pgx.ErrTxClosed and is expected.
+func (s *Service) rollback(ctx context.Context, tx pgx.Tx) {
+	if err := tx.Rollback(ctx); err != nil && err != pgx.ErrTxClosed {
+		s.logger.Error("rollback block_meta upsert tx", "chain", s.cfg.ChainID, "error", err)
+	}
 }
