@@ -178,9 +178,12 @@ our database:
 - the record header (request, effective time, calc `git_hash`, `schema_version`);
 - **every input row**: table, natural key, `block_number`/`block_version`/`processing_version`
   where present, `build_id` → `git_hash` of the writer, and the row's **values**;
-- for on-chain rows, the archive location (`chain / block / block_version / source`) from which
-  the row can be re-derived by running the writer's build; off-chain rows are terminal facts and
-  their values are taken as given;
+- for on-chain rows, the raw-archive location (`chain / block / block_version / source`) from
+  which the row can be re-derived by running the writer's build. Referencing is sufficient (the
+  archives are immutable and kept indefinitely); the manifest job may additionally copy the
+  referenced raw objects under `calc/<id>/raw/` when a fully self-contained per-calculation
+  folder is wanted, at the cost of duplicated storage. Off-chain rows are terminal facts and their
+  values are taken as given;
 - the config rows used (they are governed rows too);
 - the output, and `manifest_hash` for integrity.
 
