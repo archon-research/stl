@@ -2,9 +2,6 @@
 // raw-block archive (the authoritative block-header timestamp). Run one per chain, out of band.
 //
 // Env: DATABASE_URL (write role), CHAIN_ID, S3_BUCKET (that chain's raw-block bucket), DEPLOY_ENV.
-//
-// STATUS: first-draft scaffold — wiring mirrors cmd/backfillers/morpho-vault-indexer. CI is the
-// compile/lint gate (Go is not in the dev env). TODOs inline.
 package main
 
 import (
