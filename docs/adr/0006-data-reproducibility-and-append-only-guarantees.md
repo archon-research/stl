@@ -178,7 +178,12 @@ none of these problems, so it is the mechanism:
   the ordinary latest-wins rule. `pg_visible_in_snapshot` is a pure function of stored values;
   in-flight writers at snapshot time (a running backfill) are in the snapshot's in-progress list
   and are excluded on replay exactly as they were invisible to the calculation — no staleness,
-  no watermark to push back.
+  no watermark to push back. Replay works on **any node of the same cluster** — primary, an
+  existing replica, or a replica created later — because physical replicas share the xid space
+  and receive `ingest_xid` as data. It also needs no LSN bookkeeping: every input row was
+  committed before the snapshot, and the snapshot before the record (same transaction, snapshot
+  first), so **a node that can read the calculation record has already replayed every row the
+  snapshot can see.**
 - **End-to-end self-check:** the manifest job recomputes the calculation from the manifest it
   just wrote and compares with the recorded output; a mismatch (a read outside the transaction,
   a non-governed input, nondeterminism) raises an alert. This guards the whole class, not just
@@ -319,7 +324,7 @@ prevents each. These are part of the decision, not commentary.
 | Cluster migration via dump/restore (logical) restarts `pg_current_xact_id()` low, so rows written afterwards look older than every stored snapshot | Prefer physical restore/fork (xids preserved — TigerData's backup/fork are physical). After any logical migration, `pg_resetwal -x` sets NextXID above the previous maximum before writes resume; the runbook records it. If sharding ever becomes a plan, switch §5 to the watermark alternative. |
 | A writer inserts `ingest_xid = NULL` explicitly and becomes "always visible" | No `INSERT` names `ingest_xid`; lint plus the conformance test. |
 | One of a calculation's queries runs outside the `REPEATABLE READ` transaction (another connection, autocommit) | Reads go through a helper bound to the calculation's transaction; lint; end-to-end self-check (§5) compares regenerated output to recorded output. |
-| The manifest job runs on a replica lagging behind the snapshot it regenerates | Job runs on the primary, or on a replica whose replay LSN is past the record's commit; the self-check catches the residue. |
+| The manifest job runs on a replica that has not replayed the calculation's inputs | Structurally impossible on a physical replica: the job starts from the calculation record, and a node that can read the record has replayed everything the snapshot can see (§5). Only a logical replica or a different cluster (see dump/restore row) can differ. |
 | A calculation holds its snapshot for many minutes (vacuum lag on hot tables) | Calculations are request-scoped; a bound on calculation transaction duration; alert on old read-only transactions. |
 | `ingested_at`/other time columns rendered without an explicit zone (naive `timestamp`, session `TimeZone` other than UTC) confuse a human or a downstream consumer | `timestamptz` only on governed tables; `TimeZone = 'UTC'` everywhere; RFC 3339 UTC serialisation; schemamaster check for `timestamp without time zone`. |
 | `pg_visible_in_snapshot(ingest_xid, …)` gets no pruning on compressed chunks, so heavy manifest regeneration is slow | Performance, not correctness: latest-wins indexes drive the read; the job is off the request path; measure protocol-wide calculations. |
