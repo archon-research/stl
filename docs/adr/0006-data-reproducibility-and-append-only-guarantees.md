@@ -44,6 +44,10 @@ guarantees reproducibility actually needs, and states the boundaries.
 | Off-chain data point (CoinGecko, Anchorage, Maple GraphQL, CEX) | **None to source.** Terminal fact: what the source returned, when, which build stored it | — |
 | Calculation | Recreatable from its **manifest alone** (calc step), and each on-chain input from source | The calculation manifest (self-contained: request, code identities, every input row's identity, provenance and values), our code at the listed commits, S3, an archive node — **no database access** |
 
+Two units of reproduction are supported, and each must be self-contained for a third party
+without database access: a **single data point** (via its recipe, §8) and a **whole calculation
+with every data point in it** (via its manifest, §6, which is a list of recipes plus values).
+
 Off-chain sources cannot be replayed and we do not claim otherwise. Off-chain tables keep the
 same columns and rules for uniformity (a transform bug on stored off-chain rows can still be
 corrected as a new version), but no archive of raw responses is required.
@@ -176,8 +180,9 @@ block and SC-call archives), containing everything a third party needs and nothi
 our database:
 
 - the record header (request, effective time, calc `git_hash`, `schema_version`);
-- **every input row**: table, natural key, `block_number`/`block_version`/`processing_version`
-  where present, `build_id` → `git_hash` of the writer, and the row's **values**;
+- **every input row** as its recipe (§8) plus the row's **values**: table, natural key,
+  `block_number`/`block_version`/`processing_version` where present, `build_id` → `git_hash` of
+  the writer;
 - for on-chain rows, the raw-archive location (`chain / block / block_version / source`) from
   which the row can be re-derived by running the writer's build. Referencing is sufficient (the
   archives are immutable and kept indefinitely); the manifest job may additionally copy the
@@ -208,6 +213,30 @@ tables are for audit queries. Existing version-blind aggregates (`protocol_event
 schemamaster check flags application SQL that orders a governed table without
 `processing_version`.
 
+### 8. Data-point recipe: the unit a single data point reproduces from
+
+Every governed row has a **recipe** — the minimal self-contained description a third party needs
+to recreate that one data point without our database:
+
+| Field | Source |
+|---|---|
+| `table`, natural key, `block_number`, `block_version`, `processing_version` | the row's identity |
+| `git_hash` (and image digest once populated) | `build_registry[build_id]` — the writer's code |
+| `source` and raw-archive locator (`chain / block / block_version / source`) | which binary and which S3 objects the row derives from; on-chain only |
+| `chain_id`, contract addresses/log identity where the row has them | to re-fetch from any archive node instead of our S3 |
+| value hash (or the values) | to compare a reproduction against what we stored |
+
+Off-chain rows have a recipe too (identity, `git_hash`, `source`, fetched-at, values) but no
+raw-archive locator; they are terminal facts.
+
+The recipe is not a new table: it is a projection over columns that already exist plus the
+`build_registry` join, and the manifest (§6) is a list of recipes with values. What this section
+adds is a **delivery obligation**: any API response that returns a data point carries its recipe
+(or a stable reference the third party can resolve to one, e.g. a `provenance` endpoint keyed by
+row identity), so a single data point can be reproduced from the response alone — the API
+returns `git_hash` and `source`, not our internal `build_id`. `CONTRIBUTING.md` already requires
+`block_version` and `processing_version` on results; this extends it to the full recipe.
+
 ## Threats to Reproducibility
 
 Ways a calculation can still become unreproducible once the above is implemented, and what
@@ -226,6 +255,7 @@ prevents each. These are part of the decision, not commentary.
 | Under-specified ordering with real ties (`DISTINCT ON`, `last()`, `locf`, cross-table "latest price ≤ block") returns arbitrary rows; float/parallel/hash-order nondeterminism in code | Every canonical selection has a total order (VEC-549 tie-break pattern); calculation code is deterministic given its inputs. |
 | Retention or `drop_chunks` on a governed table; tiered data with a lifecycle rule | §1 conformance test; tiering means "kept indefinitely". |
 | Manifest never generated (job failure/lag), or generated from a different snapshot than the calculation used | Manifest job is idempotent and retried; `manifest_hash` recorded; regeneration is always possible from the record's snapshot (§5); an alert on records older than N minutes without a manifest. |
+| A data point is served without its recipe (API returns values but not `git_hash`/`source`/version identity), so a single-point reproduction needs our database | §8 delivery obligation; response-schema test that every data-point payload carries recipe fields or a resolvable provenance reference. |
 | Manifest omits values for off-chain rows or config rows, forcing a third party back to our database | Manifest schema check: every input row carries identity **and** values; off-chain rows are terminal facts and must be complete in the manifest. |
 
 Reproducing a wrong result exactly is the contract: corrections appear as new versions in later
@@ -242,7 +272,8 @@ Ordered by information lost per day of delay; 1–3 make reproducibility *possib
 4. **Trigger removal** (§3): one migration drops the 36 functions/triggers, creates and seeds
    `processing_version_log`; delete the plan-cache/lock/sort tests and `db/migrations/AGENTS.md`
    rules; writers unchanged (they already omit `processing_version`).
-5. **`_current` views / read-model routing** (§7) and the three version-blind read fixes.
+5. **`_current` views / read-model routing** (§7), the three version-blind read fixes, and recipe
+   fields on data-point API responses (§8).
 6. Later: replay tooling (`replay row`, `replay calc`), reproducible builds, `docker_sha`.
 
 Existing rows keep `processing_version`, `build_id` and `NULL ingest_xid`; no backfill.
