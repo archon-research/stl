@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
-from app.api._validators import EthAddressParam
+from app.api._validators import ProxyAddressPathParam
 from app.api.deps import get_engine
 from app.api.time_series import (
     TimeSeriesWindow,
@@ -63,7 +63,7 @@ async def _get_service(engine: AsyncEngine = Depends(get_engine)) -> AllocationS
     ),
 )
 async def list_prime_exposure(
-    prime_id: EthAddressParam,
+    prime_id: ProxyAddressPathParam,
     response: Response,
     time_series: TimeSeriesQuery = Depends(get_time_series_query_params),
     limit: int = Query(100, ge=1, le=500, description="Max buckets returned (default 100, max 500)."),

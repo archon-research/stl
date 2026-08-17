@@ -50,16 +50,16 @@ async def test_list_protocols_returns_all_protocols():
 async def test_list_primes_returns_all_primes():
     repo = AsyncMock()
     repo.list_primes.return_value = [
-        Prime(id="0xaaa", name="grove", address="0xaaa"),
-        Prime(id="0xbbb", name="spark", address="0xbbb"),
+        Prime(id="0xaaa", name="grove", address="0xaaa", chain_id=1, chain=None, role="alm"),
+        Prime(id="0xbbb", name="spark", address="0xbbb", chain_id=1, chain=None, role="alm"),
     ]
     service = AllocationService(repo)
 
     result = await service.list_primes()
 
     assert result == [
-        Prime(id="0xaaa", name="grove", address="0xaaa"),
-        Prime(id="0xbbb", name="spark", address="0xbbb"),
+        Prime(id="0xaaa", name="grove", address="0xaaa", chain_id=1, chain=None, role="alm"),
+        Prime(id="0xbbb", name="spark", address="0xbbb", chain_id=1, chain=None, role="alm"),
     ]
     repo.list_primes.assert_awaited_once()
 

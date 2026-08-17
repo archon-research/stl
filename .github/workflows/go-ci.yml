@@ -26,11 +26,28 @@ jobs:
           cache: true
           cache-dependency-path: 'stl-verify/go.sum'
 
-      - name: Install tools
-        run: make tools
+      # goimports is pinned so an upstream formatting change can't red the
+      # gate on an unrelated PR; govulncheck stays @latest deliberately (the
+      # point is the freshest vuln-DB client).
+      - name: Install goimports and govulncheck
+        run: |
+          go install golang.org/x/tools/cmd/goimports@v0.49.0
+          go install golang.org/x/vuln/cmd/govulncheck@latest
 
-      - name: Run lint/static checks
-        run: make ci-checks
+      - name: Format and module checks
+        run: make fmt-check goimports-check tidy-check shared-container-check
+
+      # Runs the golangci-lint binary directly (not `make golangci-lint`) so
+      # the action can manage the binary install and analysis cache. Covers
+      # go vet, staticcheck, and go fix's modernizers — see .golangci.yml.
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.12.2 # keep in sync with `tools` in stl-verify/Makefile
+          working-directory: stl-verify
+
+      - name: govulncheck
+        run: make vulncheck
 
       - name: Check for uncommitted changes
         run: |

@@ -38,7 +38,7 @@ import { TopBar } from './components/shared/TopBar';
 import { useUrlSyncedTableState } from './data-table/hooks';
 import { usePrimeChartData } from './hooks/usePrimeChartData';
 import {
-  getAllocations,
+  getAllocationsForProxies,
   getChains,
   getDataSources,
   getLatestPrimeDebtSnapshot,
@@ -62,6 +62,7 @@ import {
   getChainLabel,
   getAllocationKey,
   getProtocolLabel,
+  groupPrimesByVault,
   parseNumericValue,
   wadToUnits,
 } from './lib/dashboard';
@@ -356,12 +357,22 @@ function App() {
     return () => controller.abort();
   }, []);
 
+  // One entry per prime (grouped by prime_vault_address), not one per ALM
+  // proxy — a prime allocates through several proxies (one per chain), and
+  // the sidebar/selection model addresses the prime, not a single proxy.
+  const primeGroups = useMemo(() => groupPrimesByVault(primes), [primes]);
+
+  const selectedPrimeGroup = useMemo(
+    () => primeGroups.find((group) => group.key === selectedPrimeId) ?? null,
+    [primeGroups, selectedPrimeId],
+  );
+
   useEffect(() => {
     if (isPrimesLoading) {
       return;
     }
 
-    if (primes.length === 0) {
+    if (primeGroups.length === 0) {
       if (selectedPrimeId !== null) {
         setSelectedPrimeId(null);
       }
@@ -370,11 +381,11 @@ function App() {
 
     if (
       !selectedPrimeId ||
-      !primes.some((prime) => prime.id === selectedPrimeId)
+      !primeGroups.some((group) => group.key === selectedPrimeId)
     ) {
-      setSelectedPrimeId(primes[0]?.id ?? null);
+      setSelectedPrimeId(primeGroups[0]?.key ?? null);
     }
-  }, [isPrimesLoading, selectedPrimeId, setSelectedPrimeId, primes]);
+  }, [isPrimesLoading, selectedPrimeId, setSelectedPrimeId, primeGroups]);
 
   useEffect(() => {
     if (
@@ -396,7 +407,7 @@ function App() {
   ]);
 
   useEffect(() => {
-    if (!selectedPrimeId) {
+    if (!selectedPrimeGroup) {
       setAllocations([]);
       setAllocationsErrorMessage(null);
       setIsAllocationsLoading(false);
@@ -410,7 +421,14 @@ function App() {
     setIsAllocationsLoading(true);
     setAllocationsErrorMessage(null);
 
-    void getAllocations(selectedPrimeId, controller.signal)
+    // Fans out across every ALM proxy of the prime and concatenates; a
+    // failure on any one proxy rejects the whole call (see
+    // getAllocationsForProxies) rather than silently dropping that chain's
+    // positions.
+    void getAllocationsForProxies(
+      selectedPrimeGroup.proxyAddresses,
+      controller.signal,
+    )
       .then((response) => {
         setAllocations(response);
       })
@@ -421,7 +439,7 @@ function App() {
 
         logging.error('Failed to load allocations', {
           error,
-          primeId: selectedPrimeId,
+          primeKey: selectedPrimeGroup.key,
         });
         setAllocationsErrorMessage(toErrorMessage(error));
       })
@@ -432,10 +450,27 @@ function App() {
       });
 
     return () => controller.abort();
-  }, [selectedPrimeId]);
+  }, [selectedPrimeGroup]);
+
+  // The prime_* fields on this response are aggregated prime-wide server-side,
+  // so one call against the primary proxy carries the same figures every
+  // other proxy of the prime would return; fanning it out would only waste
+  // requests.
+  const primaryProxyAddress = selectedPrimeGroup?.primaryProxyAddress ?? null;
+
+  // The bucketed chart series below (debt/exposure/total-capital/activity) are
+  // fetched for the primary proxy only, not fanned out (see the
+  // usePrimeChartData call). For a prime with more than one proxy, that makes
+  // those series describe one chain while the headline figures they sit next
+  // to are prime-wide — real history for one chain would silently look like
+  // real history for the whole prime. Chart specs below suppress the series
+  // in that case rather than render a trend line that contradicts its own
+  // headline number.
+  const isMultiChainPrime =
+    (selectedPrimeGroup?.proxyAddresses.length ?? 0) > 1;
 
   useEffect(() => {
-    if (!selectedPrimeId) {
+    if (!primaryProxyAddress) {
       setRiskCapital(null);
       setIsRiskCapitalLoading(false);
       setRiskCapitalErrorMessage(null);
@@ -448,7 +483,7 @@ function App() {
     setRiskCapital(null);
     setRiskCapitalErrorMessage(null);
 
-    void getPrimeRiskCapital(selectedPrimeId, controller.signal)
+    void getPrimeRiskCapital(primaryProxyAddress, controller.signal)
       .then((response) => {
         if (!controller.signal.aborted) {
           setRiskCapital(response);
@@ -461,7 +496,7 @@ function App() {
 
         logging.warn('Risk capital unavailable for selected prime', {
           error,
-          primeId: selectedPrimeId,
+          primaryProxyAddress,
         });
         setRiskCapital(null);
         setRiskCapitalErrorMessage(toErrorMessage(error));
@@ -473,10 +508,10 @@ function App() {
       });
 
     return () => controller.abort();
-  }, [selectedPrimeId]);
+  }, [primaryProxyAddress]);
 
   useEffect(() => {
-    if (!selectedPrimeId) {
+    if (!primaryProxyAddress) {
       setPrimeDebtSnapshot(null);
       setIsPrimeDebtLoading(false);
       setPrimeDebtErrorMessage(null);
@@ -489,7 +524,7 @@ function App() {
     setPrimeDebtSnapshot(null);
     setPrimeDebtErrorMessage(null);
 
-    void getLatestPrimeDebtSnapshot(selectedPrimeId, controller.signal)
+    void getLatestPrimeDebtSnapshot(primaryProxyAddress, controller.signal)
       .then((snapshot) => {
         if (!controller.signal.aborted) {
           setPrimeDebtSnapshot(snapshot);
@@ -502,7 +537,7 @@ function App() {
 
         logging.warn('Prime debt snapshot unavailable for selected prime', {
           error,
-          primeId: selectedPrimeId,
+          primaryProxyAddress,
         });
         setPrimeDebtSnapshot(null);
         setPrimeDebtErrorMessage(toErrorMessage(error));
@@ -514,11 +549,11 @@ function App() {
       });
 
     return () => controller.abort();
-  }, [selectedPrimeId]);
+  }, [primaryProxyAddress]);
 
   const selectedPrime = useMemo(
-    () => primes.find((prime) => prime.id === selectedPrimeId) ?? null,
-    [selectedPrimeId, primes],
+    () => primes.find((prime) => prime.address === primaryProxyAddress) ?? null,
+    [primaryProxyAddress, primes],
   );
 
   const chartResolution = useMemo(
@@ -534,7 +569,11 @@ function App() {
     isLoading: isChartsLoading,
     errorMessage: chartsErrorMessage,
   } = usePrimeChartData(
-    selectedPrimeId,
+    // These per-bucket time-series endpoints have no prime-wide aggregation
+    // (unlike risk-capital's prime_* fields), so summing them across a
+    // prime's proxies is not well-defined here; scope to the primary proxy
+    // rather than fan out.
+    primaryProxyAddress,
     timeRange.from_timestamp,
     timeRange.to_timestamp,
     chartResolution,
@@ -676,8 +715,19 @@ function App() {
   // window whose end drifts into the past, so anchoring its newest (past) bucket
   // at the current total would misstate every point. Suppress it for custom
   // ranges until a range-end anchor is available.
+  //
+  // It is also only valid for a single-proxy prime: the anchor
+  // (primeTotalAllocationUsd) is cross-chain, but activityBuckets' net flows
+  // are fetched for the primary proxy only (see usePrimeChartData below), so
+  // for a multi-chain prime every point except the newest would be silently
+  // over- or under-stated by whatever flowed through the other chains.
+  // Suppress it rather than reconstruct a history the inputs can't support.
   const allocationBalanceSeries = useMemo<ChartDatum[]>(() => {
-    if (rangePreset === 'custom' || activityBuckets.length === 0) {
+    if (
+      isMultiChainPrime ||
+      rangePreset === 'custom' ||
+      activityBuckets.length === 0
+    ) {
       return [];
     }
 
@@ -692,7 +742,12 @@ function App() {
       balance -= parseNumericValue(bucket.net_flow_usd) ?? 0;
     }
     return series;
-  }, [activityBuckets, primeTotalAllocationUsd, rangePreset]);
+  }, [
+    activityBuckets,
+    isMultiChainPrime,
+    primeTotalAllocationUsd,
+    rangePreset,
+  ]);
 
   const primeDebtSeries = useMemo<ChartDatum[]>(
     () =>
@@ -761,10 +816,10 @@ function App() {
         : { data: fallbackChart(currentValue), kind: 'fallback' };
 
     const exposureValue =
-      riskCapital?.exposure_usd === undefined ||
-      riskCapital?.exposure_usd === null
+      riskCapital?.prime_exposure_usd === undefined ||
+      riskCapital?.prime_exposure_usd === null
         ? null
-        : parseNumericValue(riskCapital.exposure_usd);
+        : parseNumericValue(riskCapital.prime_exposure_usd);
 
     const totalRiskCapitalValue =
       riskCapital?.total_risk_capital_usd === undefined ||
@@ -790,9 +845,16 @@ function App() {
       },
       {
         // Exposure trend from priced receipt-token balances over time; falls
-        // back to the flat current value when no history is available.
+        // back to the flat current value when no history is available, and
+        // also when the prime spans more than one proxy — exposureSeries is
+        // fetched for the primary proxy only, while the headline number next
+        // to it (prime_exposure_usd) is prime-wide, so a real per-chain
+        // series here would contradict its own headline figure.
         key: 'risk-capital',
-        ...seriesOrFallback(exposureSeries, exposureValue),
+        ...seriesOrFallback(
+          isMultiChainPrime ? [] : exposureSeries,
+          exposureValue,
+        ),
         stroke: 'var(--colors-chart-series-secondary)',
         formatValue: formatCompactUsd,
       },
@@ -812,11 +874,12 @@ function App() {
     return charts.filter((chart) => chart.data.length > 0);
   }, [
     allocationBalanceSeries,
-    riskCapital?.exposure_usd,
+    riskCapital?.prime_exposure_usd,
     riskCapital?.total_risk_capital_usd,
     chartFromLabel,
     chartToLabel,
     exposureSeries,
+    isMultiChainPrime,
     primeDebtSeries,
     primeDebtSnapshot?.debt_wad,
     totalCapitalSeries,
@@ -915,7 +978,7 @@ function App() {
           collapseBelow={768}
           sidebar={
             <PrimeSidebar
-              primes={primes}
+              primeGroups={primeGroups}
               selectedPrimeId={selectedPrimeId}
               isLoading={isPrimesLoading}
               errorMessage={primesErrorMessage}
@@ -976,6 +1039,7 @@ function App() {
                 chartsErrorMessage={chartsErrorMessage}
                 riskCapitalErrorMessage={riskCapitalErrorMessage}
                 primeDebtErrorMessage={primeDebtErrorMessage}
+                isMultiChainPrime={isMultiChainPrime}
               />
             ) : (
               <ActivityFeed
@@ -986,6 +1050,7 @@ function App() {
                 selectedProtocol={selectedProtocol}
                 showAllPrimes={showAllPrimesInActivities}
                 selectedPrime={selectedPrime}
+                isMultiChainPrime={isMultiChainPrime}
                 tokenOptions={tokenSymbolOptions}
                 tokenFilter={activityTokenParam}
                 onTokenFilterChange={setActivityTokenParam}

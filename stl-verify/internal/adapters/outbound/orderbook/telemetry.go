@@ -21,7 +21,7 @@ const instrumentationName = "github.com/archon-research/stl/stl-verify/internal/
 //   - orderbook.updates.emitted.total: delivered updates, by type (snapshot|delta)
 //   - orderbook.updates.dropped.total: updates dropped on a full output buffer
 //   - orderbook.reconnections.total: dropped connections, by reason
-//     (sequence_gap|unexpected_symbol|ws_error)
+//     (sequence_gap|unexpected_symbol|stale_feed|ws_error)
 //   - orderbook.connection.state: currently open WebSocket connections
 //   - orderbook.resync.duration: seconds from a connection group losing data
 //     flow to being fully snapshot-synced again
@@ -136,6 +136,8 @@ func (m *metrics) reconnected(err error) {
 		reason = "sequence_gap"
 	case errors.Is(err, errUnexpectedSymbol):
 		reason = "unexpected_symbol"
+	case errors.Is(err, errStaleFeed):
+		reason = "stale_feed"
 	}
 	m.reconnectsTotal.Add(context.Background(), 1,
 		metric.WithAttributes(m.exchangeAttr, attribute.String("reason", reason)))

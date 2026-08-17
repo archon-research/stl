@@ -32,10 +32,17 @@ Follow [Effective Go](https://go.dev/doc/effective_go).
 - `cmd/base/watcher` — source of block events: WebSocket subscribe, reorg handling, Redis cache write, SNS publish.
 - `cmd/workers/` — long-running SQS FIFO consumers, one message per block (sparklend, morpho, curve, oracle-price, psm3, prime-*, raw-data-backup, ...).
 - `cmd/cronjobs/` — **Temporal**-scheduled (not k8s CronJobs): anchorage, maple-graphql, offchain-price, watcher-data-validator. Schedules live in Temporal state; changing an interval env var requires deleting the schedule in Temporal and restarting. Ticks must be idempotent (Temporal retries).
-- `cmd/backfillers/` — one-shot historical gap fillers (sparklend, morpho-vault, oracle-pricing, aave-like-user-snapshot, raw-block-bulk-downloader).
+- `cmd/backfillers/` — historical gap fillers. Mostly one-shot CLI binaries (sparklend,
+  morpho-vault, oracle-pricing, aave-like-user-snapshot, raw-block-bulk-downloader), plus
+  `offchain-price-backfill`, which is a long-running **on-demand Temporal worker**: it polls a
+  task queue and idles until a run is started by hand from the Temporal UI, with the range as
+  workflow input. Grouped here by purpose (backfilling), not by lifecycle.
 - `cmd/util/` — `migrate`, `generate-er`, `null-payload-refill`, `stress-test`.
 
-Every binary extracts a `run(ctx, args) error` from `main()` and runs under `lifecycle.Run` (workers) or `temporal.RunCronjob` (cronjobs) for graceful SIGINT/SIGTERM shutdown (~25s).
+Every binary extracts a `run(ctx, args) error` from `main()` and runs under one of three
+entry points for graceful SIGINT/SIGTERM shutdown (~25s): `lifecycle.Run` (workers),
+`temporal.RunCronjob` (scheduled cronjobs), or `temporal.RunWorker` (on-demand Temporal
+jobs — no schedule, parameters supplied at trigger time; see `docs/temporal_guide.md`).
 
 ### Data flow
 
@@ -84,7 +91,7 @@ make cover              # Generate coverage report
 go test -race -run 'TestName' ./internal/services/<pkg>/   # single test
 
 # CI (runs all checks)
-make ci                 # test-race, vet, fmt-check, tidy-check, staticcheck, vulncheck, golangci-lint
+make ci                 # test-race, fmt/imports/tidy checks, golangci-lint (vet+staticcheck+modernize), vulncheck
 
 # Formatting & linting (all languages, run from stl-verify/)
 make install-hooks      # Install lefthook git pre-commit hooks (auto-runs on dev-up)
@@ -105,9 +112,8 @@ See [Makefile](Makefile) for the complete list of targets.
 ### Go linting
 
 - Pre-commit hooks: gofmt, goimports (staged files only)
-- Pre-push hooks: go vet (full module)
-- CI (`go-ci.yml` → `make ci-checks && make test-race`): vet, staticcheck, golangci-lint, vulncheck, tidy — **source of truth**
-- Install tools with `make tools`. Don't bypass hooks.
+- CI (`go-ci.yml`): fmt/imports/tidy checks + golangci-lint v2 (covers go vet, staticcheck, and go fix's modernizers — config in `.golangci.yml`) + vulncheck — **source of truth**
+- Install tools with `make tools`. Don't bypass hooks. golangci-lint is version-pinned (the config schema is version-coupled); a stale local binary fails on `.golangci.yml`, so rerun `make tools` when that happens.
 
 ## Code Conventions
 
@@ -132,13 +138,15 @@ These apply to every language in the service (Go, Python, TS). Go-specific rules
     - Name helpers for the outcome, not the mechanics (`decodeSwaps`, `snapshotTouchedPools`, `persistBlock`), not (`processLoop`, `handleStuff`).
     - This is strongest for orchestration functions (block/event handlers, coordinators, `main` flows, batch builders): the top-level function must be a readable outline, with detail pushed down into helpers. A single sprawling handler that inlines decode + snapshot + persist is a defect, not a style preference.
     - Enforced in the Review phase: the code-quality reviewer rejects any new or modified function that violates this. Audit EVERY changed function, not a named subset (scoping the review to specific files creates blind spots, which is how a 254-line function once slipped through). Pre-existing functions the PR does not touch are out of scope: refactor them in a separate follow-up PR, not the feature PR that happened to sit next to them.
-- **Comments**: Explain *why*, not *what*; default to none.
-    - Never restate the code or the language: no comments on signatures, field names, or standard-library behavior the reader already knows.
-    - No doc comments on self-evident `Params`/`Config`/`Options` structs or their fields. If such a struct exists for a non-obvious reason (e.g. named fields to block a same-typed arg swap), state it once in the consuming constructor, not on the struct.
-    - DO comment the non-recoverable why: a non-obvious invariant, a workaround and the bug it dodges, a deliberate convention break, a safety/ordering/locking constraint, or units/scale the type can't express.
-    - State each rationale once, at the canonical site (the type, column, or merge it governs). At call sites that depend on it, keep the comment to a short pointer or omit it; don't paste the same "why" at every caller.
-    - When unsure, leave it out: a stale or redundant comment is worse than none.
-    - No history in comments: don't duplicate what git tracks. Describe current code, not what it replaced or why something was removed.
+- **Comments**: Explain *why*, not *what*; default to none. Added comment lines should stay under ~10% of a PR's added lines.
+    - **Two lines max**, constraint first, no preamble. Longer whys go in the doc comment of the thing they govern, an ADR, or the PR description.
+    - **Never restate** the code: a signature, a field name, standard-library behavior (in Go: zero values, nil-map reads, `json.Unmarshal` of null, `defer` order), or a self-evident `Params`/`Config`/`Options` struct (one that exists for a non-obvious reason — e.g. named fields blocking a same-typed arg swap — is explained in the consuming constructor, not on the struct).
+    - **Keep package and exported-API doc comments**, but each must say something the signature doesn't.
+    - **Check the callee first** — if its doc carries the why, write nothing; the call is the pointer. Each rationale lives once, at its canonical site (the type, column, or helper it governs).
+    - **DO comment** the non-recoverable why: non-obvious invariant, workaround plus the bug it dodges, deliberate convention break, safety/ordering/locking constraint, units/scale the type can't express.
+    - **Tests get no exemption** — don't narrate setup. Banner and numbered-step comments (`// 1. …`) are extraction signals, not comments; see Function composition.
+    - **No history** — git tracks it. No ticket archaeology. Describe current code, not what it replaced or why something was removed.
+    - When unsure, leave it out. Enforced in the Review phase: the reviewer deletes comments that restate code or repeat a rationale — deleting is the default.
 - **Libraries**:
     - Use the standard library as much as possible.
     - Instead of duplicating code, create a function containing the shared functionality, and re-use it.
@@ -172,9 +180,7 @@ Go-only rules for the stl-verify service. Language-agnostic conventions (testing
     - Prefer table-driven tests (each case under `t.Run`).
     - `main.go` entry points should also have 100% coverage. Move the `main.go` body into a `run(ctx, args) error` function and call only that from `main()` so you can test it.
     - For `main.go` files, only create integration tests.
-- **Comments**:
-    - The "standard-library behavior" the reader already knows includes Go zero values, nil-map reads, `json.Unmarshal` of null, `defer` order, etc. — don't comment them.
-    - Keep package and exported-API doc comments, but make each say something the signature doesn't.
+    - **One container set per test *package*, never per test** — container startup, not the test, dominates integration-test CI time. Start each one in `TestMain` via `testutil.Start{TimescaleDB,Redis,LocalStack}ForMain`, keep it in a package var (`sharedDSN`, `sharedRedisAddr`, `sharedLocalStackCfg`), and isolate each test inside it: `testutil.SetupTestSchema(t, sharedDSN)` for Postgres (`SetupTestDatabase` when the SQL is schema-qualified, so `search_path` cannot isolate it), a `testutil.SanitizeTestName(t.Name())` prefix for Redis keys and SQS/SNS names, `testutil.S3TestBucketName(t, prefix)` for buckets. Anything a test counts (objects, messages, rows) needs its own bucket/queue/schema, not a shared one. `make shared-container-check` enforces this in `ci-checks`.
 - **Function composition**: a function-length / complexity linter (golangci-lint `funlen`/`gocognit`) is the planned deterministic backstop so an over-long function fails CI automatically rather than relying on a reviewer noticing.
 - **Binaries/Building**: When building binaries using `go build`, output to `stl-verify/dist`
 - **Code structure**: In main.go files, keep main() at the top of the file.

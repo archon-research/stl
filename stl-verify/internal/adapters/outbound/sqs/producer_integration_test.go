@@ -28,7 +28,7 @@ func TestIntegration_DeadLetterPublisher_SendsToFifoQueue(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	_, lsCfg := testutil.StartLocalStack(t, ctx, "sqs")
+	lsCfg := sharedLocalStackCfg
 
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx,
 		awsconfig.WithRegion(lsCfg.Region),
@@ -44,7 +44,7 @@ func TestIntegration_DeadLetterPublisher_SendsToFifoQueue(t *testing.T) {
 
 	// Create a FIFO DLQ with content-based deduplication enabled, mirroring prod.
 	queueResult, err := sqsClient.CreateQueue(ctx, &sqs.CreateQueueInput{
-		QueueName: aws.String("dlq-producer-test.fifo"),
+		QueueName: aws.String("dlq-producer-" + testutil.SanitizeTestName(t.Name()) + ".fifo"),
 		Attributes: map[string]string{
 			string(sqstypes.QueueAttributeNameFifoQueue):                 "true",
 			string(sqstypes.QueueAttributeNameContentBasedDeduplication): "true",

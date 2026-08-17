@@ -67,7 +67,7 @@ const swapLogsScanDepth = 2000
 
 // TestLiveValidation is the B13 contained live-correctness gate: it exercises
 // the real decode/snapshot/tick/persist code paths against REAL Alchemy +
-// REAL mainnet data, in a fully throwaway TimescaleDB testcontainer, without
+// REAL mainnet data, in a throwaway schema on a TimescaleDB testcontainer, without
 // touching the kind cluster or any committed non-test code. See
 // task-B13-brief.md for the full spec this test satisfies.
 func TestLiveValidation(t *testing.T) {
@@ -77,12 +77,8 @@ func TestLiveValidation(t *testing.T) {
 	rep := newLiveReport()
 	defer rep.writeAndLog(t)
 
-	pool, _, cleanupDB := testutil.SetupTimescaleDB(t)
+	pool, _, cleanupDB := testutil.SetupTestSchema(t, sharedDSN)
 	defer cleanupDB()
-
-	// testutil.SetupTimescaleDB applies every db/migrations/*.sql file,
-	// including 20260701_100000_create_uniswap_v3_tables.sql, so the 18 real
-	// pools + counterparty tokens already exist -- no self-seed needed.
 
 	buildID := buildregistry.BuildID(1)
 	repo := postgres.NewUniswapV3Repository(pool, buildID)

@@ -38,7 +38,7 @@ func TestIntegration_SubProxyAndAlmProxy_AreIndexedAndQueryable(t *testing.T) {
 
 	t.Setenv("BUILD_GIT_HASH", "test-integration-subproxy")
 
-	pool, _, dbCleanup := testutil.SetupTimescaleDB(t)
+	pool, _, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
 	defer dbCleanup()
 
 	// The prime table is seeded by db/migrations/20260305_120000_create_prime_debts.sql.
@@ -189,7 +189,7 @@ func TestIntegration_SweepPosition_UsesZeroTxHash(t *testing.T) {
 
 	t.Setenv("BUILD_GIT_HASH", "test-integration-sweep-zero-hash")
 
-	pool, _, dbCleanup := testutil.SetupTimescaleDB(t)
+	pool, _, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
 	defer dbCleanup()
 
 	var sparkID int64
@@ -324,7 +324,7 @@ func TestIntegration_UsdcTransferToSubProxy_IsIgnored(t *testing.T) {
 
 	t.Setenv("BUILD_GIT_HASH", "test-integration-usdc-ignored")
 
-	pool, _, dbCleanup := testutil.SetupTimescaleDB(t)
+	pool, _, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
 	defer dbCleanup()
 
 	var sparkID int64

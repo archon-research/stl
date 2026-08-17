@@ -63,6 +63,380 @@ def _service(repo: AllocationRepositoryPort, registry: _FakeRegistry) -> PrimeRi
     return PrimeRiskCapitalService(repo, cast(ModelRegistry, registry))
 
 
+_SPARK_MAINNET_ALM = "0x1601843c5e9bc251a3272907010afa41fa18347e"
+_SPARK_AVALANCHE_ALM = "0xece6b0e8a54c2f44e066fbb9234e7157b15b7fec"
+_SPARK_MAINNET_ALM_MIXED_CASE = "0x1601843C5E9BC251A3272907010AFA41FA18347E"
+_SPARK_BASE_ALM = "0x2917956eff0b5eaf030abdb4ef4296df775009ca"
+# On a chain no allocation tracker serves (acknowledgedUnservedByTrackerChains).
+_SPARK_ARBITRUM_ALM = "0x92afd6f2385a90e44da3a8b60fe36f6cbe1d8709"
+
+
+def _repo_by_proxy(positions_by_proxy: dict[str, list], total_rc: Decimal | None):
+    """Repository stub that answers per queried proxy address.
+
+    Keys are normalised to lowercase strings because ``EthAddress`` compares
+    case-sensitively against a plain ``str`` despite hashing case-insensitively.
+    """
+    normalised = {address.lower(): positions for address, positions in positions_by_proxy.items()}
+
+    async def _positions(proxy):
+        return normalised.get(str(proxy).lower(), [])
+
+    repo = AsyncMock(spec=AllocationRepositoryPort)
+    repo.list_receipt_token_positions.side_effect = _positions
+    repo.get_latest_total_capital_usd.return_value = total_rc
+    return repo
+
+
+def _two_chain_spark_repo():
+    """Spark with one priced position on mainnet and one on avalanche.
+
+    Mainnet's asset prices to RRC 40, avalanche's to RRC 2, against a prime-wide
+    treasury of 100 — so the correct prime ratio is 42/100 while the mainnet
+    proxy's own (deprecated) ratio stays 40/100.
+    """
+    return _repo_by_proxy(
+        {
+            _SPARK_MAINNET_ALM: [make_receipt_token_position(receipt_token_id=1, amount_usd=Decimal("400"))],
+            _SPARK_AVALANCHE_ALM: [make_receipt_token_position(receipt_token_id=2, amount_usd=Decimal("20"))],
+        },
+        Decimal("100"),
+    )
+
+
+def _two_asset_registry() -> _FakeRegistry:
+    """Two gap_sweep models with disjoint asset sets, so each asset gets its own RRC."""
+    return _FakeRegistry(
+        [
+            _FakeModel("gap_sweep", {1}, rrc=Decimal("40"), crr=Decimal("10")),
+            _FakeModel("gap_sweep", {2}, rrc=Decimal("2"), crr=Decimal("10")),
+        ]
+    )
+
+
+def _partly_modeled_two_chain_spark_repo():
+    """Spark holding an unmodeled position, so modeled exposure differs from exposure.
+
+    Mainnet holds 300 modeled plus 100 unmodeled; avalanche holds 100 modeled. The
+    mainnet proxy is therefore 300/400 modeled while the prime is 400/500, so the
+    proxy-scoped and prime-scoped modeled figures take different values.
+    ``_two_chain_spark_repo`` prices every position, which makes both 1.0000 and
+    cannot tell a prime-scoped modeled field from a proxy-scoped one.
+    """
+    return _repo_by_proxy(
+        {
+            _SPARK_MAINNET_ALM: [
+                make_receipt_token_position(receipt_token_id=1, amount_usd=Decimal("300")),
+                make_receipt_token_position(receipt_token_id=2, amount_usd=Decimal("100")),
+            ],
+            _SPARK_AVALANCHE_ALM: [make_receipt_token_position(receipt_token_id=3, amount_usd=Decimal("100"))],
+        },
+        Decimal("100"),
+    )
+
+
+def _registry_leaving_asset_two_unmodeled() -> _FakeRegistry:
+    """A gap_sweep model for assets 1 and 3 only, so asset 2 stays unmodeled."""
+    return _FakeRegistry([_FakeModel("gap_sweep", {1, 3}, rrc=Decimal("40"), crr=Decimal("10"))])
+
+
+@pytest.mark.asyncio
+async def test_compute_leaves_the_proxy_scoped_required_risk_capital_unchanged():
+    service = _service(_two_chain_spark_repo(), _two_asset_registry())
+
+    result = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
+
+    assert result.required_risk_capital_usd == Decimal("40")
+
+
+@pytest.mark.asyncio
+async def test_compute_leaves_the_proxy_scoped_exposure_unchanged():
+    service = _service(_two_chain_spark_repo(), _two_asset_registry())
+
+    result = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
+
+    assert result.exposure_usd == Decimal("400")
+
+
+@pytest.mark.asyncio
+async def test_compute_leaves_the_deprecated_encumbrance_ratio_unchanged():
+    service = _service(_two_chain_spark_repo(), _two_asset_registry())
+
+    result = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
+
+    assert result.encumbrance_ratio == Decimal("0.4000")
+
+
+@pytest.mark.asyncio
+async def test_compute_leaves_per_allocation_scoped_to_the_queried_proxy():
+    service = _service(_two_chain_spark_repo(), _two_asset_registry())
+
+    result = await service.compute(EthAddress(_SPARK_AVALANCHE_ALM))
+
+    assert {alloc.receipt_token_id for alloc in result.per_allocation} == {2}
+
+
+@pytest.mark.asyncio
+async def test_compute_sums_prime_required_risk_capital_across_the_alm_proxies():
+    service = _service(_two_chain_spark_repo(), _two_asset_registry())
+
+    result = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
+
+    assert result.prime_required_risk_capital_usd == Decimal("42")
+
+
+@pytest.mark.asyncio
+async def test_compute_sums_prime_exposure_across_the_alm_proxies():
+    service = _service(_two_chain_spark_repo(), _two_asset_registry())
+
+    result = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
+
+    assert result.prime_exposure_usd == Decimal("420")
+
+
+@pytest.mark.asyncio
+async def test_compute_sums_prime_modeled_exposure_across_the_alm_proxies():
+    service = _service(_partly_modeled_two_chain_spark_repo(), _registry_leaving_asset_two_unmodeled())
+
+    result = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
+
+    assert result.prime_modeled_exposure_usd == Decimal("400")
+
+
+@pytest.mark.asyncio
+async def test_compute_divides_prime_modeled_exposure_by_prime_exposure():
+    service = _service(_partly_modeled_two_chain_spark_repo(), _registry_leaving_asset_two_unmodeled())
+
+    result = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
+
+    assert result.prime_modeled_pct == Decimal("0.8000")
+
+
+@pytest.mark.asyncio
+async def test_compute_leaves_the_proxy_scoped_modeled_figures_unchanged():
+    service = _service(_partly_modeled_two_chain_spark_repo(), _registry_leaving_asset_two_unmodeled())
+
+    result = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
+
+    assert result.modeled_exposure_usd == Decimal("300")
+    assert result.modeled_pct == Decimal("0.7500")
+
+
+@pytest.mark.asyncio
+async def test_compute_reports_the_same_prime_modeled_figures_from_every_proxy():
+    service = _service(_partly_modeled_two_chain_spark_repo(), _registry_leaving_asset_two_unmodeled())
+
+    from_mainnet = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
+    from_avalanche = await service.compute(EthAddress(_SPARK_AVALANCHE_ALM))
+
+    assert from_avalanche.prime_modeled_exposure_usd == from_mainnet.prime_modeled_exposure_usd
+    assert from_avalanche.prime_modeled_pct == from_mainnet.prime_modeled_pct
+
+
+@pytest.mark.asyncio
+async def test_compute_divides_the_summed_rrc_by_the_prime_wide_treasury():
+    service = _service(_two_chain_spark_repo(), _two_asset_registry())
+
+    result = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
+
+    assert result.prime_encumbrance_ratio == Decimal("0.4200")
+
+
+@pytest.mark.asyncio
+async def test_compute_takes_total_risk_capital_once_rather_than_per_proxy():
+    service = _service(_two_chain_spark_repo(), _two_asset_registry())
+
+    result = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
+
+    assert result.total_risk_capital_usd == Decimal("100")
+
+
+@pytest.mark.asyncio
+async def test_compute_reports_the_same_prime_figures_from_every_proxy():
+    service = _service(_two_chain_spark_repo(), _two_asset_registry())
+
+    from_mainnet = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
+    from_avalanche = await service.compute(EthAddress(_SPARK_AVALANCHE_ALM))
+
+    assert from_avalanche.prime_required_risk_capital_usd == from_mainnet.prime_required_risk_capital_usd
+    assert from_avalanche.prime_encumbrance_ratio == from_mainnet.prime_encumbrance_ratio
+
+
+@pytest.mark.asyncio
+async def test_compute_reports_a_per_chain_breakdown_of_the_aggregation():
+    service = _service(_two_chain_spark_repo(), _two_asset_registry())
+
+    result = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
+
+    by_chain = {row.chain: row.required_risk_capital_usd for row in result.prime_per_chain}
+    assert by_chain["mainnet"] == Decimal("40")
+    assert by_chain["avalanche-c"] == Decimal("2")
+
+
+@pytest.mark.asyncio
+async def test_compute_reports_null_not_zero_for_a_chain_no_tracker_serves():
+    """The distinction the prime-wide totals rest on.
+
+    Spark's arbitrum, optimism and unichain proxies have no
+    ``allocation_position`` rows because no tracker indexes those chains. Reported
+    as ``0`` they would claim the prime holds nothing there, which understates
+    encumbrance in the direction that looks safe.
+    """
+    service = _service(_two_chain_spark_repo(), _two_asset_registry())
+
+    result = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
+
+    unserved = [row for row in result.prime_per_chain if row.chain == "arbitrum"]
+    assert len(unserved) == 1
+    assert unserved[0].exposure_usd is None
+    assert unserved[0].required_risk_capital_usd is None
+    assert unserved[0].allocation_count is None
+
+
+@pytest.mark.asyncio
+async def test_compute_names_the_chains_its_totals_exclude():
+    service = _service(_two_chain_spark_repo(), _two_asset_registry())
+
+    result = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
+
+    assert result.prime_unserved_chains == ("arbitrum", "optimism", "unichain")
+
+
+@pytest.mark.asyncio
+async def test_compute_does_not_query_a_proxy_on_an_unserved_chain():
+    """Each skipped proxy is a pooled connection not taken; see Settings.db_pool_size."""
+    repo = _two_chain_spark_repo()
+    service = _service(repo, _two_asset_registry())
+
+    await service.compute(EthAddress(_SPARK_MAINNET_ALM))
+
+    queried = {str(call.args[0]).lower() for call in repo.list_receipt_token_positions.await_args_list}
+    assert queried == {_SPARK_MAINNET_ALM, _SPARK_AVALANCHE_ALM, _SPARK_BASE_ALM}
+
+
+@pytest.mark.asyncio
+async def test_compute_covers_every_proxy_of_the_prime_in_the_per_chain_breakdown():
+    """Served or not, a proxy is present: absence would read as "no proxy there"."""
+    service = _service(_two_chain_spark_repo(), _two_asset_registry())
+
+    result = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
+
+    assert len(result.prime_per_chain) == 6
+    assert tuple(row.proxy_address for row in result.prime_per_chain) == result.prime_proxies
+
+
+@pytest.mark.asyncio
+async def test_compute_totals_equal_the_sum_of_the_per_chain_rows_that_carry_figures():
+    """`prime_per_chain` is sold as making the total auditable, so the sum must tie.
+
+    The totals are summed from ``per_proxy`` while the rows are built from the
+    prime's proxy list, so this is two derivations of one figure meeting.
+    """
+    service = _service(_two_chain_spark_repo(), _two_asset_registry())
+
+    result = await service.compute(EthAddress(_SPARK_AVALANCHE_ALM))
+
+    assert sum(row.exposure_usd for row in result.prime_per_chain if row.exposure_usd is not None) == (
+        result.prime_exposure_usd
+    )
+    assert (
+        sum(
+            row.required_risk_capital_usd for row in result.prime_per_chain if row.required_risk_capital_usd is not None
+        )
+        == result.prime_required_risk_capital_usd
+    )
+
+
+@pytest.mark.asyncio
+async def test_compute_warns_when_a_proxy_holds_positions_on_a_chain_declared_unserved():
+    """A stale SERVED_TRACKER_CHAINS silently nulls real per-chain figures."""
+    repo = _repo_by_proxy(
+        {_SPARK_ARBITRUM_ALM: [make_receipt_token_position(receipt_token_id=1, amount_usd=Decimal("400"))]},
+        Decimal("100"),
+    )
+    service = _service(repo, _two_asset_registry())
+
+    with patch("app.services.prime_risk_capital_service.logger") as mock_logger:
+        await service.compute(EthAddress(_SPARK_ARBITRUM_ALM))
+
+    assert "unserved chain" in mock_logger.warning.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_compute_orders_prime_proxies_identically_regardless_of_which_was_queried():
+    service = _service(_two_chain_spark_repo(), _two_asset_registry())
+
+    from_mainnet = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
+    from_avalanche = await service.compute(EthAddress(_SPARK_AVALANCHE_ALM))
+
+    assert from_avalanche.prime_proxies == from_mainnet.prime_proxies
+
+
+@pytest.mark.asyncio
+async def test_compute_names_the_prime_it_aggregated_over():
+    service = _service(_two_chain_spark_repo(), _two_asset_registry())
+
+    result = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
+
+    assert result.prime_name == "spark"
+
+
+@pytest.mark.asyncio
+async def test_compute_lists_every_proxy_it_aggregated_over():
+    service = _service(_two_chain_spark_repo(), _two_asset_registry())
+
+    result = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
+
+    lowered = {address.lower() for address in result.prime_proxies}
+    assert _SPARK_MAINNET_ALM in lowered
+    assert _SPARK_AVALANCHE_ALM in lowered
+
+
+@pytest.mark.asyncio
+async def test_compute_falls_back_to_the_queried_proxy_when_it_is_not_in_the_contract():
+    unknown = "0x" + "cd" * 20
+    repo = _repo_by_proxy(
+        {unknown: [make_receipt_token_position(receipt_token_id=1, amount_usd=Decimal("400"))]},
+        Decimal("100"),
+    )
+    service = _service(repo, _two_asset_registry())
+
+    result = await service.compute(EthAddress(unknown))
+
+    assert result.prime_required_risk_capital_usd == Decimal("40")
+    assert result.prime_name is None
+    assert result.prime_proxies == (unknown,)
+
+
+@pytest.mark.asyncio
+async def test_compute_resolves_siblings_for_a_mixed_case_queried_address():
+    assert _SPARK_MAINNET_ALM_MIXED_CASE.lower() == _SPARK_MAINNET_ALM
+    service = _service(_two_chain_spark_repo(), _two_asset_registry())
+
+    result = await service.compute(EthAddress(_SPARK_MAINNET_ALM_MIXED_CASE))
+
+    assert result.prime_name == "spark"
+    assert result.prime_required_risk_capital_usd == Decimal("42")
+
+
+@pytest.mark.asyncio
+async def test_compute_normalises_prime_scoped_addresses_for_a_mixed_case_queried_address():
+    """The prime-scoped lists are reconciliation keys, so they must be byte-identical.
+
+    ``EthAddress`` preserves the caller's casing and siblings come from the
+    contract lowercased, so a checksummed query would otherwise emit one
+    mixed-case element among lowercase ones — leaving a consumer that dedupes by
+    comparing or hashing these lists seeing two different primes.
+    """
+    service = _service(_two_chain_spark_repo(), _two_asset_registry())
+
+    from_mixed_case = await service.compute(EthAddress(_SPARK_MAINNET_ALM_MIXED_CASE))
+    from_lowercase = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
+
+    assert from_mixed_case.prime_proxies == from_lowercase.prime_proxies
+    assert from_mixed_case.prime_per_chain == from_lowercase.prime_per_chain
+
+
 @pytest.mark.asyncio
 async def test_compute_mixes_modeled_and_unmodeled_allocations():
     positions = [

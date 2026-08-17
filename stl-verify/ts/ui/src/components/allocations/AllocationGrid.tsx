@@ -83,6 +83,7 @@ type AllocationGridProps = {
   chartsErrorMessage: string | null;
   riskCapitalErrorMessage: string | null;
   primeDebtErrorMessage: string | null;
+  isMultiChainPrime: boolean;
 };
 
 export type ChartDatum = {
@@ -707,11 +708,49 @@ function appliedRiskCapitalUsd(
     : null;
 }
 
+// riskByReceiptTokenId is built from a risk-capital call scoped to
+// selectedPrime's own chain, so an allocation on a different chain has no
+// entry there for the same reason a genuine non-applicable allocation
+// doesn't: the map simply has nothing for its receipt_token_id. Distinguish
+// the two so a real risk capital figure that is merely uncomputed for this
+// chain doesn't read as the same "n/a" as an allocation no risk model
+// applies to.
+//
+// The receipt_token_id check gates this to rows that could ever carry a
+// figure. A null receipt_token_id (the Anchorage custody row, and every
+// direct/bare holding) can never key into riskByReceiptTokenId regardless of
+// chain, so without this check a mainnet-primary prime would flag its own
+// off-chain custody row (chain_id 0) as a cross-chain mismatch and claim a
+// figure exists but merely wasn't fetched, when "n/a" is the correct read.
+function isRiskCapitalChainMismatch(
+  selectedPrime: Prime | null,
+  allocation: Allocation,
+): boolean {
+  return (
+    allocation.receipt_token_id != null &&
+    selectedPrime !== null &&
+    allocation.chain_id !== selectedPrime.chain_id
+  );
+}
+
 function AllocationRiskCapitalCell({
   entry,
+  isChainMismatch,
 }: {
   entry: AllocationRiskCapital | undefined;
+  isChainMismatch: boolean;
 }) {
+  if (isChainMismatch) {
+    return (
+      <p
+        title="Risk capital is not yet available for non-mainnet allocations."
+        className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}
+      >
+        Not yet available
+      </p>
+    );
+  }
+
   if (!entry?.applied) {
     return (
       <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>n/a</p>
@@ -736,6 +775,7 @@ function createAllocationColumns(
   chainLabels: ChainLabelLookup,
   localProtocols: LocalProtocolRow[],
   riskByReceiptTokenId: Map<number, AllocationRiskCapital>,
+  selectedPrime: Prime | null,
 ): ColumnDef<Allocation>[] {
   return [
     {
@@ -792,22 +832,35 @@ function createAllocationColumns(
     {
       id: 'risk_capital',
       header: 'Risk capital',
+      // A chain-mismatched row sorts below genuine zeroes (-1) rather than
+      // tying with them, since it isn't a real zero — it's a figure this
+      // session never fetched.
       accessorFn: (allocation) =>
-        appliedRiskCapitalUsd(riskByReceiptTokenId, allocation) ?? 0,
+        isRiskCapitalChainMismatch(selectedPrime, allocation)
+          ? -1
+          : (appliedRiskCapitalUsd(riskByReceiptTokenId, allocation) ?? 0),
       cell: ({ row }) => (
         <AllocationRiskCapitalCell
           entry={lookupAllocationRiskCapital(
             riskByReceiptTokenId,
             row.original,
           )}
+          isChainMismatch={isRiskCapitalChainMismatch(
+            selectedPrime,
+            row.original,
+          )}
         />
       ),
-      // No bar for n/a rows: NaN suppresses it (see Balance for why not null).
+      // No bar for n/a or chain-mismatched rows: NaN suppresses it (see
+      // Balance for why not null).
       meta: {
         magnitude: {
           scale: 'linear',
           getValue: (allocation) =>
-            appliedRiskCapitalUsd(riskByReceiptTokenId, allocation) ?? NaN,
+            isRiskCapitalChainMismatch(selectedPrime, allocation)
+              ? NaN
+              : (appliedRiskCapitalUsd(riskByReceiptTokenId, allocation) ??
+                NaN),
           getValueText: () => null,
         },
         // Single-value USD cell, so the column can take mono + tabular figures
@@ -843,6 +896,7 @@ export function AllocationGrid({
   chartsErrorMessage,
   riskCapitalErrorMessage,
   primeDebtErrorMessage,
+  isMultiChainPrime,
 }: AllocationGridProps) {
   const [localSearchValue, setLocalSearchValue] = useState(searchValue);
 
@@ -930,8 +984,9 @@ export function AllocationGrid({
         chainLabels,
         localProtocols,
         riskByReceiptTokenId,
+        selectedPrime,
       ),
-    [chainLabels, localProtocols, riskByReceiptTokenId],
+    [chainLabels, localProtocols, riskByReceiptTokenId, selectedPrime],
   );
 
   const table = useDataTable(filteredAllocations, columns, {
@@ -1167,13 +1222,19 @@ export function AllocationGrid({
                         ? `${summary.allocationCount}/${overallSummary.allocationCount} allocations`
                         : `${summary.allocationCount} allocations`}
                     </div>
-                    <MetricCardTrend
-                      chart={allocationActivityChart}
-                      isLoading={isChartsLoading}
-                      // chartsErrorMessage tracks the primary (prime-debt) series
-                      // only; supplementary cards degrade to their own fallback.
-                      errorMessage={null}
-                    />
+                    {isMultiChainPrime ? (
+                      <p className={chartEmptyMessageClassName}>
+                        Trend unavailable for multi-chain primes.
+                      </p>
+                    ) : (
+                      <MetricCardTrend
+                        chart={allocationActivityChart}
+                        isLoading={isChartsLoading}
+                        // chartsErrorMessage tracks the primary (prime-debt) series
+                        // only; supplementary cards degrade to their own fallback.
+                        errorMessage={null}
+                      />
+                    )}
                   </div>
                 }
               />
@@ -1184,7 +1245,7 @@ export function AllocationGrid({
                 <SummaryMetric
                   className={metricsCardClassName}
                   label="Exposure"
-                  value={formatUsdValue(riskCapital.exposure_usd)}
+                  value={formatUsdValue(riskCapital.prime_exposure_usd)}
                   detail={
                     <div className={metricDetailClassName}>
                       <MetricCardTrend
@@ -1228,9 +1289,13 @@ export function AllocationGrid({
                       className={css({ fontSize: 'sm', color: 'text.muted' })}
                     >
                       Required{' '}
-                      {formatUsdValue(riskCapital.required_risk_capital_usd)}
-                      {parseNumericValue(riskCapital.encumbrance_ratio) !== null
-                        ? ` · Encumbrance ${formatRatioPercent(riskCapital.encumbrance_ratio)}`
+                      {formatUsdValue(
+                        riskCapital.prime_required_risk_capital_usd,
+                      )}
+                      {parseNumericValue(
+                        riskCapital.prime_encumbrance_ratio,
+                      ) !== null
+                        ? ` · Encumbrance ${formatRatioPercent(riskCapital.prime_encumbrance_ratio)}`
                         : ''}
                     </div>
                     <MetricCardTrend
@@ -1323,8 +1388,8 @@ export function AllocationGrid({
             })}
           >
             Model-derived ({riskCapital.model}, 15% stress) ·{' '}
-            {parseNumericValue(riskCapital.modeled_pct) !== null
-              ? formatRatioPercent(riskCapital.modeled_pct)
+            {parseNumericValue(riskCapital.prime_modeled_pct) !== null
+              ? formatRatioPercent(riskCapital.prime_modeled_pct)
               : 'partial'}{' '}
             of exposure modeled
           </p>

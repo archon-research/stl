@@ -1,0 +1,36 @@
+# golangci-lint v2 configuration.
+#
+# One run covers what used to be four separate CI passes: govet (go vet),
+# staticcheck (SA/S/ST/QF — the v1 staticcheck+gosimple+stylecheck split),
+# unused, and modernize (the same x/tools analyzers `go fix -diff` runs on
+# Go 1.26). The exclusion presets restore the v1 default exclusions that the
+# no-config v1 setup relied on (e.g. errcheck on deferred Close).
+version: "2"
+linters:
+  enable:
+    - modernize
+  settings:
+    staticcheck:
+      # The standalone staticcheck binary's default set: the ST exclusions
+      # match both tools' defaults (spelled out so the config doesn't depend
+      # on an exclusion preset for them), and QF (quickfix) checks are
+      # refactoring suggestions standalone staticcheck never enforced.
+      checks:
+        - all
+        - -ST1000
+        - -ST1003
+        - -ST1016
+        - -ST1020
+        - -ST1021
+        - -ST1022
+        - -QF*
+  exclusions:
+    # The presets restore the v1 default exclusions the previous no-config
+    # v1 setup relied on (e.g. errcheck on deferred Close). The `legacy`
+    # preset is deliberately absent: it would also suppress govet
+    # stdmethods/unsafeptr and staticcheck SA4011, which the standalone
+    # `go vet` and `staticcheck` runs this config replaces did enforce.
+    presets:
+      - comments
+      - std-error-handling
+      - common-false-positives

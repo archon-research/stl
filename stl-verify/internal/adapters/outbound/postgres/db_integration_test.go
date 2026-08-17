@@ -6,8 +6,6 @@ import (
 	"context"
 	"testing"
 	"time"
-
-	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 // TestOpenPool_TimeoutsApplied verifies the lock_timeout/statement_timeout GUCs
@@ -24,8 +22,9 @@ import (
 // that rejected the old startup-parameter form; TestBuildPoolConfig_TimeoutsNotStartupParams
 // guards that the timeouts never ride the startup packet again.
 func TestOpenPool_TimeoutsApplied(t *testing.T) {
-	dsn, cleanup := testutil.StartTimescaleDB(t)
-	defer cleanup()
+	// The shared container's base DSN is enough: this only inspects the GUCs of
+	// its own pooled connections, so it needs no schema and writes nothing.
+	dsn := sharedDSN
 	ctx := context.Background()
 
 	worker := WorkerDBConfig(dsn)

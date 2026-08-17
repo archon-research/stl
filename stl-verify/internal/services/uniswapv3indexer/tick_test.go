@@ -383,6 +383,27 @@ func TestDecodeTick_MalformedReturnDataReturnsError(t *testing.T) {
 // Floor-div helpers (tick <-> word/bit)
 // ---------------------------------------------------------------------------
 
+// floorMod implements floored (as opposed to Go's truncated) modulo:
+// floorMod(-1, 256) == 255, whereas Go's native -1%256 == -1.
+func floorMod(a, b int) int {
+	m := a % b
+	if m != 0 && ((m < 0) != (b < 0)) {
+		m += b
+	}
+	return m
+}
+
+// tickToWordBit maps an on-chain tick (must be a multiple of tickSpacing) to
+// its tickBitmap word position and bit index, inverting Solidity's
+// int16(compressed >> 8) / uint8(compressed % 256) packing. It is the
+// test-local reference inverse used to round-trip wordBitToTick.
+func tickToWordBit(tick int32, tickSpacing int) (int16, uint8) {
+	compressed := floorDiv(int(tick), tickSpacing)
+	word := floorDiv(compressed, 256)
+	bit := floorMod(compressed, 256)
+	return int16(word), uint8(bit)
+}
+
 func TestTickToWordBit(t *testing.T) {
 	tests := []struct {
 		name        string
