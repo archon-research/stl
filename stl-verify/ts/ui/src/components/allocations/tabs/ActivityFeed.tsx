@@ -1,6 +1,7 @@
 import {
   AsyncStateRenderer,
   DataTable,
+  type DataTableProps,
   defineIdentifiedColumns,
   EmptyState,
   ErrorState,
@@ -588,7 +589,58 @@ function buildActivityRowIds(
   return ids;
 }
 
-export function ActivityFeed({
+function useActivityTable(
+  events: AllocationActivityResponse,
+  chainLabels?: ChainLabelLookup,
+): DataTableProps<AllocationActivity>['table'] {
+  const columns = useMemo(
+    () => createActivityColumns(chainLabels),
+    [chainLabels],
+  );
+
+  const rowIds = useMemo(() => buildActivityRowIds(events), [events]);
+  const getRowId = useCallback(
+    (event: AllocationActivity) =>
+      rowIds.get(event) ?? buildActivityEventKey(event),
+    [rowIds],
+  );
+
+  return useDataTable(events, columns, {
+    enableSorting: true,
+    // The API returns newest-first and the header says so ("Latest activity"),
+    // so the initial view is the sort the data already carries.
+    defaultSorting: [{ id: 'created_at', desc: true }],
+    getRowId,
+    // A sweep has no transaction to inspect, so its row gets no expander.
+    getRowCanExpand: (row) => getRealTxHash(row.original) !== null,
+  });
+}
+
+type ActivityFeedState = {
+  isPageMode: boolean;
+  isChainMismatch: boolean;
+  isPagePartialChainCoverage: boolean;
+  coveredChainLabel: string | null;
+  events: AllocationActivityResponse;
+  filteredEvents: AllocationActivityResponse;
+  isLoading: boolean;
+  error: string | null;
+  effectivePreset: RangePreset;
+  effectiveRange: TimeRange;
+  updateRangePreset: (preset: RangePreset, range: TimeRange) => void;
+  uniqueTokenOptions: string[];
+  hasActiveFilters: boolean;
+  clearFilters: () => void;
+  rowLimit: number;
+};
+
+/**
+ * Everything the activity view needs from the server and from filter state:
+ * the scope guards that decide whether a request is meaningful at all, the
+ * range plumbing (local in drawer mode, parent-owned in page mode), the fetch
+ * lifecycle, and the client-side search narrowing on top of the fetched rows.
+ */
+function useAllocationActivity({
   actionFilter,
   onActionFilterChange,
   tokenFilter = null,
@@ -607,7 +659,7 @@ export function ActivityFeed({
   externalTimeRange,
   onRangeChange: onExternalRangeChange,
   isMultiChainPrime = false,
-}: ActivityFeedProps) {
+}: ActivityFeedProps): ActivityFeedState {
   const isPageMode = mode === 'page';
   const networkChainId = parseNetworkChainId(selectedNetwork);
   // Drawer mode ANDs prime_id (selectedPrime, always the primary proxy) with
@@ -848,68 +900,47 @@ export function ActivityFeed({
     );
   }, [events, searchQuery]);
 
-  const columns = useMemo(
-    () => createActivityColumns(chainLabels),
-    [chainLabels],
-  );
+  return {
+    isPageMode,
+    isChainMismatch,
+    isPagePartialChainCoverage,
+    coveredChainLabel,
+    events,
+    filteredEvents,
+    isLoading,
+    error,
+    effectivePreset,
+    effectiveRange,
+    updateRangePreset,
+    uniqueTokenOptions,
+    hasActiveFilters,
+    clearFilters,
+    rowLimit: filters.limit ?? 50,
+  };
+}
 
-  const rowIds = useMemo(
-    () => buildActivityRowIds(filteredEvents),
-    [filteredEvents],
-  );
-  const getRowId = useCallback(
-    (event: AllocationActivity) =>
-      rowIds.get(event) ?? buildActivityEventKey(event),
-    [rowIds],
-  );
+type ActivityPageHeaderProps = {
+  isPageMode: boolean;
+  showAllPrimes: boolean;
+  isPagePartialChainCoverage: boolean;
+  coveredChainLabel: string | null;
+  latestActivityAt: string | null;
+  rangePreset: RangePreset;
+  range: TimeRange;
+  onRangeChange: (preset: RangePreset, range: TimeRange) => void;
+};
 
-  const table = useDataTable(filteredEvents, columns, {
-    enableSorting: true,
-    // The API returns newest-first and the header says so ("Latest activity"),
-    // so the initial view is the sort the data already carries.
-    defaultSorting: [{ id: 'created_at', desc: true }],
-    getRowId,
-    // A sweep has no transaction to inspect, so its row gets no expander.
-    getRowCanExpand: (row) => getRealTxHash(row.original) !== null,
-  });
-
-  if (!isEnabled) {
-    return (
-      <EmptyState
-        title={isPageMode ? 'Activity Unavailable' : 'Open Activity Tab'}
-        description={
-          isPageMode
-            ? 'Activity view is currently unavailable.'
-            : 'Activity loads when the drawer is open and the Activity tab is selected.'
-        }
-        stretch
-      />
-    );
-  }
-
-  if (!isPageMode && !selectedPrime) {
-    return (
-      <EmptyState
-        title="No Prime Selected"
-        description="Select a prime to view its activity feed."
-        stretch
-      />
-    );
-  }
-
-  if (isChainMismatch) {
-    return (
-      <EmptyState
-        title="Not Available"
-        description="Activity is not yet available for non-mainnet allocations."
-        stretch
-      />
-    );
-  }
-
-  const latestActivityAt = events[0]?.created_at ?? null;
-
-  const activityHeader = (
+function ActivityPageHeader({
+  isPageMode,
+  showAllPrimes,
+  isPagePartialChainCoverage,
+  coveredChainLabel,
+  latestActivityAt,
+  rangePreset,
+  range,
+  onRangeChange,
+}: ActivityPageHeaderProps) {
+  return (
     <div
       className={flex({
         align: 'flex-start',
@@ -953,9 +984,9 @@ export function ActivityFeed({
           <div className={css({ display: 'grid', gap: '1' })}>
             <span className={filterLabelClassName}>Time range</span>
             <RangePicker
-              preset={effectivePreset}
-              range={effectiveRange}
-              onChange={updateRangePreset}
+              preset={rangePreset}
+              range={range}
+              onChange={onRangeChange}
             />
           </div>
         ) : null}
@@ -985,8 +1016,28 @@ export function ActivityFeed({
       ) : null}
     </div>
   );
+}
 
-  const activityFilters = (
+type ActivityFilterBarProps = {
+  actionFilter?: string;
+  onActionFilterChange?: (value: string | null) => void;
+  tokenFilter: string | null;
+  onTokenFilterChange?: (value: string | null) => void;
+  tokenOptions: string[];
+  hasActiveFilters: boolean;
+  onClearFilters: () => void;
+};
+
+function ActivityFilterBar({
+  actionFilter,
+  onActionFilterChange,
+  tokenFilter,
+  onTokenFilterChange,
+  tokenOptions,
+  hasActiveFilters,
+  onClearFilters,
+}: ActivityFilterBarProps) {
+  return (
     <div className={css({ display: 'grid', gap: '3' })}>
       <div
         className={css({
@@ -1016,7 +1067,7 @@ export function ActivityFeed({
             ))}
           </StyledSelect>
         </label>
-        {uniqueTokenOptions.length > 0 ? (
+        {tokenOptions.length > 0 ? (
           <label className={filterFieldClassName}>
             <span className={filterLabelClassName}>Token</span>
             <StyledSelect
@@ -1029,7 +1080,7 @@ export function ActivityFeed({
               }
             >
               <option value="">All tokens</option>
-              {uniqueTokenOptions.map((symbol) => (
+              {tokenOptions.map((symbol) => (
                 <option key={symbol} value={symbol}>
                   {symbol}
                 </option>
@@ -1052,7 +1103,7 @@ export function ActivityFeed({
           <span>Server filters active</span>
           <button
             type="button"
-            onClick={clearFilters}
+            onClick={onClearFilters}
             className={css({
               h: '8',
               borderRadius: 'md',
@@ -1073,12 +1124,24 @@ export function ActivityFeed({
       ) : null}
     </div>
   );
+}
 
-  const rowLimit = filters.limit ?? 50;
+type ActivityTableProps = {
+  table: DataTableProps<AllocationActivity>['table'];
+  isLoading: boolean;
+  visibleEventCount: number;
+  rowLimit: number;
+};
 
-  const feedBody = (
+function ActivityTable({
+  table,
+  isLoading,
+  visibleEventCount,
+  rowLimit,
+}: ActivityTableProps) {
+  return (
     <div className={css({ display: 'grid', gap: '2' })}>
-      {filteredEvents.length === 0 ? (
+      {visibleEventCount === 0 ? (
         <EmptyState
           title="No Activity Found"
           description="No allocation activity events match your filters."
@@ -1111,8 +1174,8 @@ export function ActivityFeed({
           color: 'text.default',
         })}
       >
-        <span>Showing {filteredEvents.length} events</span>
-        {filteredEvents.length >= rowLimit ? (
+        <span>Showing {visibleEventCount} events</span>
+        {visibleEventCount >= rowLimit ? (
           <span className={css({ color: 'text.muted' })}>
             Limited to most recent {rowLimit}
           </span>
@@ -1120,10 +1183,26 @@ export function ActivityFeed({
       </div>
     </div>
   );
+}
 
-  const feedArea = (
+type ActivityResultsProps = ActivityTableProps & {
+  error: string | null;
+  // Rows fetched before the search filter narrows them: only a first load with
+  // nothing on screen yet shows the skeleton, a refetch keeps the current rows.
+  totalEventCount: number;
+};
+
+function ActivityResults({
+  table,
+  isLoading,
+  error,
+  totalEventCount,
+  visibleEventCount,
+  rowLimit,
+}: ActivityResultsProps) {
+  return (
     <AsyncStateRenderer
-      isLoading={isLoading && events.length === 0}
+      isLoading={isLoading && totalEventCount === 0}
       error={error}
       isEmpty={false}
       loadingView={<SkeletonStack count={3} />}
@@ -1144,19 +1223,120 @@ export function ActivityFeed({
         />
       }
     >
-      {feedBody}
+      <ActivityTable
+        table={table}
+        isLoading={isLoading}
+        visibleEventCount={visibleEventCount}
+        rowLimit={rowLimit}
+      />
     </AsyncStateRenderer>
+  );
+}
+
+export function ActivityFeed(props: ActivityFeedProps) {
+  const {
+    actionFilter,
+    onActionFilterChange,
+    tokenFilter = null,
+    onTokenFilterChange,
+    isEnabled,
+    selectedPrime,
+    showAllPrimes = false,
+    chainLabels,
+  } = props;
+  const {
+    isPageMode,
+    isChainMismatch,
+    isPagePartialChainCoverage,
+    coveredChainLabel,
+    events,
+    filteredEvents,
+    isLoading,
+    error,
+    effectivePreset,
+    effectiveRange,
+    updateRangePreset,
+    uniqueTokenOptions,
+    hasActiveFilters,
+    clearFilters,
+    rowLimit,
+  } = useAllocationActivity(props);
+
+  const table = useActivityTable(filteredEvents, chainLabels);
+
+  if (!isEnabled) {
+    return (
+      <EmptyState
+        title={isPageMode ? 'Activity Unavailable' : 'Open Activity Tab'}
+        description={
+          isPageMode
+            ? 'Activity view is currently unavailable.'
+            : 'Activity loads when the drawer is open and the Activity tab is selected.'
+        }
+        stretch
+      />
+    );
+  }
+
+  if (!isPageMode && !selectedPrime) {
+    return (
+      <EmptyState
+        title="No Prime Selected"
+        description="Select a prime to view its activity feed."
+        stretch
+      />
+    );
+  }
+
+  if (isChainMismatch) {
+    return (
+      <EmptyState
+        title="Not Available"
+        description="Activity is not yet available for non-mainnet allocations."
+        stretch
+      />
+    );
+  }
+
+  const latestActivityAt = events[0]?.created_at ?? null;
+
+  const activityResults = (
+    <ActivityResults
+      table={table}
+      isLoading={isLoading}
+      error={error}
+      totalEventCount={events.length}
+      visibleEventCount={filteredEvents.length}
+      rowLimit={rowLimit}
+    />
   );
 
   if (!isPageMode) {
-    return feedArea;
+    return activityResults;
   }
 
   return (
     <PageShell>
       <div className={css({ display: 'grid', gap: '5' })}>
-        {activityHeader}
-        {activityFilters}
+        <ActivityPageHeader
+          isPageMode={isPageMode}
+          showAllPrimes={showAllPrimes}
+          isPagePartialChainCoverage={isPagePartialChainCoverage}
+          coveredChainLabel={coveredChainLabel}
+          latestActivityAt={latestActivityAt}
+          rangePreset={effectivePreset}
+          range={effectiveRange}
+          onRangeChange={updateRangePreset}
+        />
+        <ActivityFilterBar
+          actionFilter={actionFilter}
+          onActionFilterChange={onActionFilterChange}
+          tokenFilter={tokenFilter}
+          onTokenFilterChange={onTokenFilterChange}
+          tokenOptions={uniqueTokenOptions}
+          hasActiveFilters={hasActiveFilters}
+          onClearFilters={clearFilters}
+        />
         <div
           className={css({
             display: 'flex',
@@ -1164,7 +1344,7 @@ export function ActivityFeed({
             minHeight: '24rem',
           })}
         >
-          {feedArea}
+          {activityResults}
         </div>
       </div>
     </PageShell>
