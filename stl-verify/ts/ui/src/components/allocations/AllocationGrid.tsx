@@ -54,6 +54,7 @@ import {
   PageShell,
   ProtocolLogo,
   SummaryMetric,
+  tableHeaderTypographyClassName,
   TokenAddress,
   TokenLogo,
 } from '../shared';
@@ -352,21 +353,6 @@ function MetricCardTrend({
     </div>
   );
 }
-
-// House header style, louder than the 11px (`2xs`) muted micro-label the recipe
-// gives a `density="compact"` table. Sortable
-// headers need no separate rule: the recipe's headerButton slot inherits font,
-// color, text-transform and letter-spacing from the cell.
-const tableHeaderTypographyClassName = css({
-  '& thead th': {
-    fontSize: 'sm',
-    fontWeight: 'semibold',
-    lineHeight: 'shorter',
-    letterSpacing: '0.02em',
-    textTransform: 'uppercase',
-    color: 'text.default',
-  },
-});
 
 // See PrimeSidebar for why the preset's dark `interactive.selected` is diluted.
 // Here it has to arrive as a descendant override because the fill comes from the

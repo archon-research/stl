@@ -36,6 +36,7 @@ import type {
 import {
   ChainLogo,
   SummaryMetric,
+  tableHeaderTypographyClassName,
   TokenAddress,
   TruncatedLabel,
 } from '../../shared';
@@ -48,25 +49,6 @@ type RiskBreakdownTabProps = {
   selectedReceiptToken: Allocation | null;
   selectedPrime: Prime | null;
 };
-
-const tableHeaderTypographyClassName = css({
-  '& thead th': {
-    fontSize: 'sm',
-    fontWeight: 'semibold',
-    lineHeight: 'shorter',
-    letterSpacing: '0.02em',
-    textTransform: 'uppercase',
-    color: 'text.default',
-  },
-  '& thead th button': {
-    fontSize: 'sm',
-    fontWeight: 'semibold',
-    lineHeight: 'shorter',
-    letterSpacing: '0.02em',
-    textTransform: 'uppercase',
-    color: 'text.default',
-  },
-});
 
 type RiskItem = RiskBreakdown['items'][number];
 
