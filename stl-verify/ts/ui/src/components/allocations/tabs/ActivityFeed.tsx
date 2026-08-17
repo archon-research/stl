@@ -1,11 +1,15 @@
 import {
   AsyncStateRenderer,
+  DataTable,
+  defineIdentifiedColumns,
   EmptyState,
   ErrorState,
+  numericColumnMeta,
   SkeletonStack,
   StyledSelect,
+  useDataTable,
 } from '@archon-research/design-system';
-import { type ChangeEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { type ChangeEvent, useEffect, useMemo, useState } from 'react';
 
 import { css, cx } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
@@ -23,6 +27,7 @@ import {
   formatTokenAmount,
   formatFreshnessLabel,
   getChainLabel,
+  parseNumericValue,
 } from '../../../lib/dashboard';
 import { isAbortError, toErrorMessage } from '../../../lib/errors';
 import { logging } from '../../../lib/logging';
@@ -41,6 +46,7 @@ import {
   ProtocolLogo,
   RangePicker,
   type RangePreset,
+  tableHeaderTypographyClassName,
   type TimeRange,
   TokenAddress,
 } from '../../shared';
@@ -131,10 +137,6 @@ function buildActivityEventKey(event: AllocationActivity): string {
     event.block_number,
     event.created_at,
   ].join(':');
-}
-
-function buildTxCacheKey(txHash: string, chainId: number): string {
-  return `${chainId}:${txHash.toLowerCase()}`;
 }
 
 // Shared by requestFilters and the page-mode chain-mismatch guard so the two
@@ -262,164 +264,283 @@ function ProtocolEventCard({ event }: { event: ProtocolEvent }) {
   );
 }
 
-function ActivityEventRow({
-  event,
-  isExpanded,
-  onSelectTx,
-  chainLabels,
-}: {
-  event: AllocationActivity;
-  isExpanded: boolean;
-  onSelectTx: (event: AllocationActivity) => void;
-  chainLabels?: ChainLabelLookup;
-}) {
-  const actionColorClassName = getActionColorClass(event.action_type);
-  const actionIcon = getActionIcon(event.action_type);
-  const txHash = getRealTxHash(event);
+/**
+ * Protocol events for one transaction, fetched when the row's detail panel
+ * mounts. Expansion mounts and unmounts this component, so the effect's cleanup
+ * is the whole cancellation story: collapsing a row (or unmounting the feed)
+ * aborts an in-flight request, and no request is issued for a row nobody opened.
+ *
+ * `getTxProtocolEvents` is the dedicated endpoint; the generic
+ * `getProtocolEvents` filter is the fallback for deployments that lack it.
+ */
+function TxProtocolEventsPanel({ txHash }: { txHash: string }) {
+  const [events, setEvents] = useState<ProtocolEvent[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const abortController = new AbortController();
+    setEvents(null);
+    setError(null);
+
+    async function fetchTxEvents() {
+      try {
+        setEvents(await getTxProtocolEvents(txHash, abortController.signal));
+      } catch (err) {
+        if (isAbortError(err)) {
+          return;
+        }
+
+        try {
+          setEvents(
+            await getProtocolEvents(
+              { tx_hash: txHash, limit: 200 },
+              abortController.signal,
+            ),
+          );
+        } catch (fallbackErr) {
+          if (isAbortError(fallbackErr)) {
+            return;
+          }
+
+          const errorMessage = toErrorMessage(fallbackErr);
+          setError(errorMessage);
+          logging.error('Failed to fetch tx protocol events', {
+            error: err,
+            fallbackError: fallbackErr,
+            errorMessage,
+            txHash,
+          });
+        }
+      }
+    }
+
+    void fetchTxEvents();
+
+    return () => abortController.abort();
+  }, [txHash]);
 
   return (
-    <div
-      className={css({
-        padding: '3',
-        borderBottom: '1px solid token(colors.surface.subtle)',
-        display: 'flex',
-        alignItems: 'center',
-        gap: '3',
-        _hover: {
-          bg: 'surface.subtle',
-        },
-      })}
-    >
+    <div className={css({ display: 'grid', gap: '2' })}>
       <div
+        className={css({
+          fontSize: 'xs',
+          color: 'text.strong',
+          fontWeight: 'semibold',
+        })}
+      >
+        Protocol Events For TX
+      </div>
+      <AsyncStateRenderer
+        isLoading={events === null && error === null}
+        error={error}
+        isEmpty={events !== null && events.length === 0}
+        loadingView={<SkeletonStack count={2} itemHeight={40} />}
+        errorView={
+          <span className={css({ fontSize: 'xs', color: 'text.warning' })}>
+            Failed to load protocol events: {error}
+          </span>
+        }
+        emptyView={
+          <EmptyState
+            title="No Protocol Events"
+            description="No protocol events were indexed for this transaction."
+            size="compact"
+            stretch
+          />
+        }
+      >
+        {events?.map((protocolEvent) => (
+          <ProtocolEventCard
+            key={`${protocolEvent.tx_hash}:${protocolEvent.log_index}:${protocolEvent.protocol_name}`}
+            event={protocolEvent}
+          />
+        ))}
+      </AsyncStateRenderer>
+    </div>
+  );
+}
+
+const activityStrongCellClassName = css({
+  fontSize: 'sm',
+  fontWeight: 'semibold',
+  color: 'text.strong',
+  whiteSpace: 'nowrap',
+});
+
+const activityMetaCellClassName = css({
+  fontSize: 'xs',
+  color: 'text.muted',
+  whiteSpace: 'nowrap',
+});
+
+const activityInlineCellClassName = css({
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: '1.5',
+  fontSize: 'sm',
+  color: 'text.default',
+  whiteSpace: 'nowrap',
+});
+
+// The action glyph keeps the card's circular badge so direction stays readable
+// as a shape, not only as a colour.
+const actionBadgeClassName = css({
+  width: '6',
+  height: '6',
+  borderRadius: 'full',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  bg: 'surface.subtle',
+  flexShrink: 0,
+});
+
+function ActivityTimeCell({ event }: { event: AllocationActivity }) {
+  return (
+    <div>
+      <div className={activityStrongCellClassName}>
+        {formatFreshnessLabel(event.created_at)}
+      </div>
+      <div className={activityMetaCellClassName}>
+        {formatDateTime(event.created_at)}
+      </div>
+    </div>
+  );
+}
+
+function ActivityActionCell({ event }: { event: AllocationActivity }) {
+  const actionColorClassName = getActionColorClass(event.action_type);
+
+  return (
+    <div className={flex({ align: 'center', gap: '2' })}>
+      <span className={cx(actionBadgeClassName, actionColorClassName)}>
+        {getActionIcon(event.action_type)}
+      </span>
+      <span
         className={cx(
           css({
-            width: '8',
-            height: '8',
-            borderRadius: 'full',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            bg: 'surface.subtle',
-            flexShrink: 0,
+            fontSize: 'sm',
+            fontWeight: 'semibold',
+            textTransform: 'capitalize',
           }),
           actionColorClassName,
         )}
       >
-        {actionIcon}
-      </div>
-
-      <div className={flex({ direction: 'column', gap: '1', flex: 1 })}>
-        <div className={flex({ gap: '2', align: 'center', wrap: 'wrap' })}>
-          <span
-            className={css({
-              fontSize: 'sm',
-              fontWeight: 'semibold',
-              color: 'text.strong',
-            })}
-          >
-            {event.token_symbol || 'Unknown'}
-          </span>
-          <span
-            className={cx(
-              css({
-                fontSize: 'sm',
-                fontWeight: 'semibold',
-                textTransform: 'capitalize',
-              }),
-              actionColorClassName,
-            )}
-          >
-            {event.action_type}
-          </span>
-          {event.protocol_name ? (
-            <span
-              className={css({
-                fontSize: 'xs',
-                color: 'text.default',
-                bg: 'surface.subtle',
-                padding: '1 2',
-                borderRadius: 'md',
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '1',
-                whiteSpace: 'nowrap',
-              })}
-            >
-              <ProtocolLogo protocolName={event.protocol_name} size="4" />
-              {event.protocol_name}
-            </span>
-          ) : null}
-        </div>
-        <div className={flex({ gap: '2', align: 'center', wrap: 'wrap' })}>
-          <span className={css({ fontSize: 'xs', color: 'text.default' })}>
-            {formatTokenAmount(event.tx_amount)} {event.token_symbol ?? ''}
-          </span>
-          <span className={css({ fontSize: 'xs', color: 'text.muted' })}>
-            •
-          </span>
-          <span className={css({ fontSize: 'xs', color: 'text.default' })}>
-            Block {event.block_number}
-          </span>
-          <span className={css({ fontSize: 'xs', color: 'text.muted' })}>
-            •
-          </span>
-          <span
-            className={css({
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: '1',
-              fontSize: 'xs',
-              color: 'text.default',
-              whiteSpace: 'nowrap',
-            })}
-          >
-            <ChainLogo chainId={event.chain_id} size="4" />
-            {getChainLabel(event.chain_id, chainLabels)}
-          </span>
-          {txHash ? (
-            <>
-              <span className={css({ fontSize: 'xs', color: 'text.muted' })}>
-                •
-              </span>
-              <TokenAddress
-                address={txHash}
-                chainId={event.chain_id}
-                type="tx"
-              />
-            </>
-          ) : null}
-        </div>
-      </div>
-
-      <span
-        className={css({
-          fontSize: 'xs',
-          color: 'text.muted',
-          whiteSpace: 'nowrap',
-          textAlign: 'right',
-        })}
-      >
-        {formatFreshnessLabel(event.created_at)}
-        {txHash ? (
-          <button
-            type="button"
-            onClick={() => onSelectTx(event)}
-            className={css({
-              display: 'block',
-              mt: '0.5',
-              fontSize: '2xs',
-              color: 'text.link',
-              bg: 'transparent',
-              border: 'none',
-              cursor: 'pointer',
-            })}
-          >
-            {isExpanded ? 'Hide tx events' : 'Inspect tx events'}
-          </button>
-        ) : null}
+        {event.action_type}
       </span>
     </div>
   );
+}
+
+function ActivityProtocolCell({ event }: { event: AllocationActivity }) {
+  if (!event.protocol_name) {
+    return <span className={activityMetaCellClassName}>—</span>;
+  }
+
+  return (
+    <span className={activityInlineCellClassName}>
+      <ProtocolLogo protocolName={event.protocol_name} size="4" />
+      {event.protocol_name}
+    </span>
+  );
+}
+
+function ActivityChainCell({
+  event,
+  chainLabels,
+}: {
+  event: AllocationActivity;
+  chainLabels?: ChainLabelLookup;
+}) {
+  return (
+    <span className={activityInlineCellClassName}>
+      <ChainLogo chainId={event.chain_id} size="4" />
+      {getChainLabel(event.chain_id, chainLabels)}
+    </span>
+  );
+}
+
+function createActivityColumns(chainLabels?: ChainLabelLookup) {
+  return defineIdentifiedColumns<AllocationActivity>(
+    {
+      id: 'created_at',
+      header: 'Time',
+      accessorFn: (event) => new Date(event.created_at).getTime(),
+      cell: ({ row }) => <ActivityTimeCell event={row.original} />,
+    },
+    {
+      id: 'token_symbol',
+      header: 'Token',
+      accessorFn: (event) => event.token_symbol ?? '',
+      cell: ({ row }) => (
+        <span className={activityStrongCellClassName}>
+          {row.original.token_symbol || 'Unknown'}
+        </span>
+      ),
+    },
+    {
+      id: 'action_type',
+      header: 'Action',
+      accessorFn: (event) => event.action_type ?? '',
+      cell: ({ row }) => <ActivityActionCell event={row.original} />,
+    },
+    {
+      id: 'protocol_name',
+      header: 'Protocol',
+      accessorFn: (event) => event.protocol_name ?? '',
+      cell: ({ row }) => <ActivityProtocolCell event={row.original} />,
+    },
+    {
+      id: 'tx_amount',
+      header: 'Amount',
+      // Sorts on the numeric value, displays the formatted one. The token
+      // symbol is not repeated here — it is already this row's Token column.
+      accessorFn: (event) => parseNumericValue(event.tx_amount) ?? 0,
+      cell: ({ row }) => formatTokenAmount(row.original.tx_amount),
+      meta: { ...numericColumnMeta },
+    },
+    {
+      id: 'block_number',
+      header: 'Block',
+      accessorFn: (event) => event.block_number,
+      meta: { ...numericColumnMeta },
+    },
+    {
+      id: 'chain_id',
+      header: 'Chain',
+      accessorFn: (event) => getChainLabel(event.chain_id, chainLabels),
+      cell: ({ row }) => (
+        <ActivityChainCell event={row.original} chainLabels={chainLabels} />
+      ),
+    },
+    {
+      id: 'tx_hash',
+      header: 'Tx',
+      // Sweeps are internal reallocations with no real transaction;
+      // `TokenAddress` renders the em-dash placeholder for a null address.
+      accessorFn: (event) => getRealTxHash(event) ?? '',
+      cell: ({ row }) => (
+        <TokenAddress
+          address={getRealTxHash(row.original)}
+          chainId={row.original.chain_id}
+          type="tx"
+        />
+      ),
+      enableSorting: false,
+    },
+  );
+}
+
+// Row identity: expansion state, and the DataTable's per-row React key, both
+// key off it. `buildActivityEventKey` alone is not guaranteed unique — a sweep
+// carries neither tx_hash nor log_index, so two sweeps of different tokens in
+// one block collide — and a duplicate id would fuse two rows in the row model.
+// The index breaks that tie; it cannot mis-target a detail panel across a
+// refetch because the content key in front of it has to match as well, and only
+// an event identical in every keyed field can do that. Sweeps are also exactly
+// the rows that cannot expand (no transaction to inspect).
+function buildActivityRowId(event: AllocationActivity, index: number): string {
+  return `${buildActivityEventKey(event)}:${index}`;
 }
 
 export function ActivityFeed({
@@ -485,21 +606,9 @@ export function ActivityFeed({
         selectedPrime.chain ??
         null)
       : null;
-  const txRequestControllersRef = useRef<Record<string, AbortController>>({});
-
   const [events, setEvents] = useState<AllocationActivityResponse>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [selectedEventKey, setSelectedEventKey] = useState<string | null>(null);
-  const [txEventsByHash, setTxEventsByHash] = useState<
-    Record<string, ProtocolEvent[]>
-  >({});
-  const [txEventErrorsByHash, setTxEventErrorsByHash] = useState<
-    Record<string, string>
-  >({});
-  const [txEventsLoadingByHash, setTxEventsLoadingByHash] = useState<
-    Record<string, boolean>
-  >({});
   const [filters, setFilters] = useState<ActivityFilters>(() => {
     const initialRange = defaultTimeRange();
     return {
@@ -521,27 +630,6 @@ export function ActivityFeed({
     }
     return Array.from(symbols).sort((a, b) => a.localeCompare(b));
   }, [tokenOptions, tokenFilter]);
-  const resetTxInspectionState = () => {
-    Object.values(txRequestControllersRef.current).forEach((controller) => {
-      controller.abort();
-    });
-    txRequestControllersRef.current = {};
-    setSelectedEventKey(null);
-    setTxEventsByHash({});
-    setTxEventErrorsByHash({});
-    setTxEventsLoadingByHash({});
-  };
-
-  const updateActionFilter = (value: string | null) => {
-    onActionFilterChange?.(value);
-    resetTxInspectionState();
-  };
-
-  const updateTokenFilter = (value: string | null) => {
-    onTokenFilterChange?.(value);
-    resetTxInspectionState();
-  };
-
   const updateRangePreset = (preset: RangePreset, range: TimeRange) => {
     if (isRangeControlled) {
       onExternalRangeChange?.(preset, range);
@@ -553,7 +641,6 @@ export function ActivityFeed({
         to_timestamp: range.to_timestamp,
       }));
     }
-    resetTxInspectionState();
   };
 
   // When the parent drives range via props, use those values over local state.
@@ -599,7 +686,6 @@ export function ActivityFeed({
       from_timestamp: nextRange.from_timestamp,
       to_timestamp: nextRange.to_timestamp,
     });
-    resetTxInspectionState();
   };
 
   const requestFilters = useMemo(() => {
@@ -651,17 +737,11 @@ export function ActivityFeed({
       : !selectedPrime || isChainMismatch;
 
     if (!isEnabled || missingScope) {
-      Object.values(txRequestControllersRef.current).forEach((controller) => {
-        controller.abort();
-      });
-      txRequestControllersRef.current = {};
+      // Emptying the rows unmounts every open detail panel, and each one aborts
+      // its own in-flight tx-events request on the way out.
       setEvents([]);
       setError(null);
       setIsLoading(false);
-      setSelectedEventKey(null);
-      setTxEventsByHash({});
-      setTxEventErrorsByHash({});
-      setTxEventsLoadingByHash({});
       return;
     }
 
@@ -708,126 +788,6 @@ export function ActivityFeed({
     showAllPrimes,
   ]);
 
-  useEffect(() => {
-    return () => {
-      Object.values(txRequestControllersRef.current).forEach((controller) => {
-        controller.abort();
-      });
-      txRequestControllersRef.current = {};
-    };
-  }, []);
-
-  const handleSelectTx = (event: AllocationActivity) => {
-    const txHash = getRealTxHash(event);
-
-    if (!txHash) {
-      return;
-    }
-
-    const eventKey = buildActivityEventKey(event);
-    const txCacheKey = buildTxCacheKey(txHash, event.chain_id);
-
-    if (selectedEventKey === eventKey) {
-      txRequestControllersRef.current[txCacheKey]?.abort();
-      delete txRequestControllersRef.current[txCacheKey];
-      setTxEventsLoadingByHash((previous) => {
-        if (!previous[txCacheKey]) {
-          return previous;
-        }
-
-        const { [txCacheKey]: _, ...rest } = previous;
-        return rest;
-      });
-      setSelectedEventKey(null);
-      return;
-    }
-
-    setSelectedEventKey(eventKey);
-
-    if (txEventsByHash[txCacheKey] || txEventErrorsByHash[txCacheKey]) {
-      return;
-    }
-
-    if (txEventsLoadingByHash[txCacheKey]) {
-      return;
-    }
-
-    setTxEventsLoadingByHash((previous) => ({
-      ...previous,
-      [txCacheKey]: true,
-    }));
-    setTxEventErrorsByHash((previous) => {
-      if (!previous[txCacheKey]) {
-        return previous;
-      }
-
-      const { [txCacheKey]: _, ...rest } = previous;
-      return rest;
-    });
-
-    const abortController = new AbortController();
-    txRequestControllersRef.current[txCacheKey] = abortController;
-
-    void getTxProtocolEvents(txHash, abortController.signal)
-      .then((result) => {
-        setTxEventsByHash((previous) => ({
-          ...previous,
-          [txCacheKey]: result,
-        }));
-      })
-      .catch(async (err) => {
-        if (isAbortError(err)) {
-          return;
-        }
-
-        try {
-          const fallbackResult = await getProtocolEvents(
-            {
-              tx_hash: txHash,
-              limit: 200,
-            },
-            abortController.signal,
-          );
-
-          setTxEventsByHash((previous) => ({
-            ...previous,
-            [txCacheKey]: fallbackResult,
-          }));
-          return;
-        } catch (fallbackErr) {
-          if (isAbortError(fallbackErr)) {
-            return;
-          }
-
-          const errorMsg = toErrorMessage(fallbackErr);
-          setTxEventErrorsByHash((previous) => ({
-            ...previous,
-            [txCacheKey]: errorMsg,
-          }));
-          logging.error('Failed to fetch tx protocol events', {
-            error: err,
-            fallbackError: fallbackErr,
-            errorMessage: errorMsg,
-            txHash,
-          });
-        }
-      })
-      .finally(() => {
-        if (txRequestControllersRef.current[txCacheKey] === abortController) {
-          delete txRequestControllersRef.current[txCacheKey];
-        }
-
-        setTxEventsLoadingByHash((previous) => {
-          if (!previous[txCacheKey]) {
-            return previous;
-          }
-
-          const { [txCacheKey]: _, ...rest } = previous;
-          return rest;
-        });
-      });
-  };
-
   const filteredEvents = useMemo(() => {
     if (!searchQuery) {
       return events;
@@ -842,6 +802,21 @@ export function ActivityFeed({
         getRealTxHash(event)?.toLowerCase().includes(lowerQuery),
     );
   }, [events, searchQuery]);
+
+  const columns = useMemo(
+    () => createActivityColumns(chainLabels),
+    [chainLabels],
+  );
+
+  const table = useDataTable(filteredEvents, columns, {
+    enableSorting: true,
+    // The API returns newest-first and the header says so ("Latest activity"),
+    // so the initial view is the sort the data already carries.
+    defaultSorting: [{ id: 'created_at', desc: true }],
+    getRowId: buildActivityRowId,
+    // A sweep has no transaction to inspect, so its row gets no expander.
+    getRowCanExpand: (row) => getRealTxHash(row.original) !== null,
+  });
 
   if (!isEnabled) {
     return (
@@ -976,7 +951,7 @@ export function ActivityFeed({
             aria-label="Filter activity by action"
             value={actionFilter ?? ''}
             onChange={(event: ChangeEvent<HTMLSelectElement>) =>
-              updateActionFilter(event.target.value || null)
+              onActionFilterChange?.(event.target.value || null)
             }
           >
             {ACTION_FILTER_OPTIONS.map((option) => (
@@ -993,7 +968,7 @@ export function ActivityFeed({
               aria-label="Filter activity by token symbol"
               value={tokenFilter ?? ''}
               onChange={(event: ChangeEvent<HTMLSelectElement>) =>
-                updateTokenFilter(
+                onTokenFilterChange?.(
                   normalizeFilterValue(event.target.value) ?? null,
                 )
               }
@@ -1044,150 +1019,47 @@ export function ActivityFeed({
     </div>
   );
 
+  const rowLimit = filters.limit ?? 50;
+
   const feedBody = (
-    <div
-      className={css({
-        display: 'flex',
-        flexDirection: 'column',
-        height: '100%',
-        borderRadius: 'lg',
-        overflow: 'hidden',
-      })}
-    >
+    <div className={css({ display: 'grid', gap: '2' })}>
       {filteredEvents.length === 0 ? (
         <EmptyState
           title="No Activity Found"
           description="No allocation activity events match your filters."
           stretch
         />
-      ) : null}
-
-      {filteredEvents.length > 0 ? (
-        <div
-          className={css({
-            flex: 1,
-            overflowY: 'auto',
-            borderRadius: 'lg',
-            border: '1px solid token(colors.surface.subtle)',
-            bg: 'surface.default',
-          })}
-        >
-          {filteredEvents.map((event, idx) => {
-            const eventKey = buildActivityEventKey(event);
-            const txHash = getRealTxHash(event);
-            const txCacheKey = txHash
-              ? buildTxCacheKey(txHash, event.chain_id)
-              : null;
-            const isExpanded = selectedEventKey === eventKey;
-            const txEvents = txCacheKey
-              ? txEventsByHash[txCacheKey]
-              : undefined;
-            const txError = txCacheKey
-              ? txEventErrorsByHash[txCacheKey]
-              : undefined;
-            const isTxLoading =
-              txCacheKey !== null && txEventsLoadingByHash[txCacheKey] === true;
-
-            return (
-              <div key={`${eventKey}:${idx}`}>
-                <ActivityEventRow
-                  event={event}
-                  isExpanded={isExpanded}
-                  onSelectTx={handleSelectTx}
-                  chainLabels={chainLabels}
-                />
-
-                {isExpanded && txHash ? (
-                  <div
-                    className={css({
-                      marginX: '3',
-                      marginBottom: '3',
-                      borderWidth: '1px',
-                      borderStyle: 'solid',
-                      borderColor: 'border.subtle',
-                      borderRadius: 'md',
-                      bg: 'surface.subtle',
-                      padding: '3',
-                      display: 'grid',
-                      gap: '2',
-                    })}
-                  >
-                    <div
-                      className={css({
-                        fontSize: 'xs',
-                        color: 'text.strong',
-                        fontWeight: 'semibold',
-                      })}
-                    >
-                      Protocol Events For TX
-                    </div>
-
-                    {isTxLoading ? (
-                      <span
-                        className={css({
-                          fontSize: 'xs',
-                          color: 'text.default',
-                        })}
-                      >
-                        Loading protocol events...
-                      </span>
-                    ) : null}
-
-                    {!isTxLoading && txError ? (
-                      <span
-                        className={css({
-                          fontSize: 'xs',
-                          color: 'text.warning',
-                        })}
-                      >
-                        Failed to load protocol events: {txError}
-                      </span>
-                    ) : null}
-
-                    {!isTxLoading &&
-                    !txError &&
-                    txEvents &&
-                    txEvents.length === 0 ? (
-                      <EmptyState
-                        title="No Protocol Events"
-                        description="No protocol events were indexed for this transaction."
-                        size="compact"
-                        stretch
-                      />
-                    ) : null}
-
-                    {!isTxLoading && !txError && txEvents && txEvents.length > 0
-                      ? txEvents.map((protocolEvent) => (
-                          <ProtocolEventCard
-                            key={`${protocolEvent.tx_hash}:${protocolEvent.log_index}:${protocolEvent.protocol_name}`}
-                            event={protocolEvent}
-                          />
-                        ))
-                      : null}
-                  </div>
-                ) : null}
-              </div>
-            );
-          })}
+      ) : (
+        <div className={tableHeaderTypographyClassName}>
+          <DataTable
+            table={table}
+            isLoading={isLoading}
+            density="compact"
+            renderDetailPanel={(event) => {
+              const txHash = getRealTxHash(event);
+              return txHash === null ? null : (
+                <TxProtocolEventsPanel txHash={txHash} />
+              );
+            }}
+          />
         </div>
-      ) : null}
+      )}
 
       <div
         className={css({
-          padding: '3',
-          borderTop: '1px solid token(colors.surface.subtle)',
-          bg: 'surface.subtle',
-          fontSize: 'xs',
-          color: 'text.default',
           display: 'flex',
           justifyContent: 'space-between',
           alignItems: 'center',
+          gap: '3',
+          px: '1',
+          fontSize: 'xs',
+          color: 'text.default',
         })}
       >
         <span>Showing {filteredEvents.length} events</span>
-        {filteredEvents.length >= (filters.limit || 50) ? (
+        {filteredEvents.length >= rowLimit ? (
           <span className={css({ color: 'text.muted' })}>
-            Limited to most recent {filters.limit || 50}
+            Limited to most recent {rowLimit}
           </span>
         ) : null}
       </div>
