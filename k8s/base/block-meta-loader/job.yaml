@@ -1,0 +1,43 @@
+# block-meta-loader (VEC-491): a run-to-completion, per-chain Job that fills the block_meta
+# dimension from a chain's S3 raw-block archive (the authoritative block-header timestamp). It is a
+# Job, not a Deployment or CronJob: it exits once no referenced block is missing from block_meta.
+#
+# Chain-agnostic base — one chain per instantiation. Overlays set CHAIN_ID and S3_BUCKET via the
+# block-meta-loader ConfigMap and name-prefix the Job per chain (e.g. base-block-meta-loader), the
+# same way the per-chain backup-workers are wired. Deploy only after the block_meta table exists
+# (migration ships in #695).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: block-meta-loader
+spec:
+  backoffLimit: 3
+  # A full-history backfill over a chain's archive can be long; sized generously and tuned per chain
+  # in the overlay. A referenced block missing from the archive fails the Job (fail-hard), so a
+  # deadline hit is a real signal to investigate, not a silent truncation.
+  activeDeadlineSeconds: 21600
+  template:
+    metadata:
+      labels:
+        app: block-meta-loader
+    spec:
+      serviceAccountName: block-meta-loader
+      restartPolicy: Never
+      containers:
+        - name: block-meta-loader
+          image: block-meta-loader
+          envFrom:
+            # CHAIN_ID, S3_BUCKET, DEPLOY_ENV, AWS_REGION.
+            - configMapRef:
+                name: block-meta-loader
+            # DATABASE_URL (write role).
+            - secretRef:
+                name: block-meta-loader
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "96Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+      terminationGracePeriodSeconds: 60
