@@ -38,7 +38,7 @@
     "@archon-research/oxfmt-config": "0.8.0-rohit-consumer-fixes.2",
     "@archon-research/oxlint-config": "0.8.0-rohit-consumer-fixes.2",
     "@archon-research/tsconfig": "0.8.0-rohit-consumer-fixes.2",
-    "@pandacss/dev": "1.11.1",
+    "@pandacss/dev": "1.12.0",
     "@types/node": "26.1.2",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.4",
