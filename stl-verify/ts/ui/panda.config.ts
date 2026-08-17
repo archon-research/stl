@@ -27,10 +27,9 @@ export default defineConfig({
   // spreading the exported map is the supported fix.
   //
   // Narrowing the spread is allowed since 0.9.0: doctor's gate asks only that
-  // *at least one* design-system recipe stem be present, rather than hardcoding
-  // `drawer__content--size_lg` as required regardless of consumer usage. So this
-  // lists only the recipes this app can actually render, keyed off the upstream
-  // map so the variant lists still come from the package.
+  // *at least one* design-system recipe stem be present. So this lists only the
+  // recipes this app can actually render, keyed off the upstream map so the
+  // variant lists still come from the package.
   //
   // Rule for editing this list: importing a design-system component means
   // adding the recipe(s) it applies. An entry that is present but unused only

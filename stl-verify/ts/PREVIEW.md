@@ -40,7 +40,7 @@ For any UI change, confirm:
 - Data table header typography and selected-row inset (`AllocationGrid`). The header voice is one shared override (`shared/tableStyles.ts`) across all three tables — check them together.
 - Activity feed as a table: column widths in the narrow drawer container, expander discoverability, the detail panel's fit inside a row, and the compact two-line time cell.
 - Category chips: `Badge` padding around short labels, and the neutral fallback an unknown category renders as.
-- Prime chart first paint: width comes from `useContainerWidth`, so verify the pre-measure frame does not flash a wrong-width chart or jump the layout.
+- Metric-card trend chart (`MetricCardChart` in `AllocationGrid`) first paint: width comes from `useContainerWidth`, so verify the pre-measure frame does not flash a wrong-width chart or jump the layout.
 - Mono address formatting and truncation.
 - Logo fallbacks and dashboard metadata hierarchy.
 - Drawer and overlay layering and focus handling.
