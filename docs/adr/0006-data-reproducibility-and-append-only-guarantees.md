@@ -145,60 +145,72 @@ Reads go through the `_current` views. Identity-only registries (`token`, pool h
 last. Once converted they fall under §1 and get the guard trigger.
 
 This is what makes "config as of the run" recoverable: with config append-only, the same
-`ingested_at` watermark (§5) that pins data rows also pins config rows — no separate config
-snapshot needed.
+snapshot (§5) that pins data rows also pins config rows — no separate config snapshot needed.
 
-### 5. Frozen prefix: `ingested_at` and a computed watermark (internal mechanism)
+### 5. Snapshot-exact reads: `ingest_xid` and recorded MVCC snapshots (internal mechanism)
 
-Because governed rows are never updated or removed (§1), the set of rows that were *committed*
-by some instant never changes afterwards. A calculation therefore pins its inputs with one
-timestamp — provided that timestamp is chosen so that no writer could still add a row "before"
-it. Two things make a naive `created_at ≤ now()` unsafe: `created_at` means block time on half
-the rows (VEC-551), and a row is stamped at its transaction *start* but becomes visible at
-*commit*, so a long batch that started before T can appear after T. Both are removed as follows:
+A calculation must be able to say, later and exactly, which rows it saw. Wall-clock "as of"
+cannot: a row is stamped at its transaction *start* but becomes visible at *commit*, so a long
+batch that started before T can appear after T; clocks can step; and a multi-statement calc under
+`READ COMMITTED` sees a different snapshot per statement. Postgres' own visibility primitive has
+none of these problems, so it is the mechanism:
 
-- Every governed table gets `ingested_at TIMESTAMPTZ NOT NULL DEFAULT now()` — DB-assigned
-  ingest time (`now()` = the writer's transaction start), never supplied by a writer (lint;
-  no `INSERT` names the column). **Time zones are explicit:** the column is `timestamptz`
-  (an absolute instant, stored as UTC), the cluster and every application session run with
-  `TimeZone = 'UTC'`, and T is serialised everywhere — record, manifest, API — as RFC 3339 with
-  microseconds and an explicit `Z` (`2026-08-17T09:03:19.444048Z`), never as a naive timestamp
-  or a local time. A `timestamp without time zone` column, or a T rendered without an offset,
-  is a defect: it would make the frozen prefix depend on whoever reads it. (`created_at` on
-  existing tables is `timestamptz` too, but carries the VEC-551 semantic split; it is not used.) Added with a default on compressed hypertables is metadata-only;
-  existing rows are backfilled `NULL` → treated as "predates tracking, always in the prefix", or
-  set to a fixed cutover timestamp — either way they are older than any T a calculation records.
-- At the start of a calculation, on the **primary**, compute the watermark
-
-  ```sql
-  SELECT LEAST(now() - :epsilon, COALESCE(min(xact_start), now())) AS t,
-         pg_current_wal_lsn()                                        AS t_lsn
-  FROM pg_stat_activity
-  WHERE xact_start IS NOT NULL AND pid <> pg_backend_pid();
-  ```
-
-  (include `pg_prepared_xacts` if two-phase commit is ever used). Every writer that started
-  before T is already committed or aborted; every writer starting after the check stamps `> T`.
-  So `ingested_at ≤ T` is a **frozen prefix**: exact, and it stays exact forever. `epsilon` (a
-  few seconds) covers the microsecond window between a writer reading the clock for its
-  transaction start and publishing it to `pg_stat_activity`; `t_lsn` is recorded with T so a
-  read on a replica is valid only once `pg_last_wal_replay_lsn() >= t_lsn`.
-- Every read the calculation performs filters `ingested_at ≤ T` (including the latest-wins
-  selection), and T is written into the record and manifest (§6). This is per calculation, not
-  per API: each request computes its own T; reads may use any connection, replica or shard,
-  because T is a plain timestamp — no session, transaction or xid state is carried.
-- Internal replay = the same reads with the same T. A long-running writer transaction pushes T
-  back for its duration (correct behaviour — the calculation then sees data up to that far
-  behind); alert on writer transactions older than a few minutes, and a calculation whose
-  `now() − T` exceeds a configured bound is flagged (or refused) so staleness is never silent.
+- Every governed table gets `ingest_xid xid8 DEFAULT pg_current_xact_id()` (added nullable with
+  no default first — metadata-only on compressed hypertables — then `SET DEFAULT`; existing rows
+  stay `NULL`, meaning "predates tracking, always visible"). Never supplied by a writer (lint; no
+  `INSERT` names the column).
+- Every governed table also gets `ingested_at TIMESTAMPTZ NOT NULL DEFAULT now()` — a
+  **human label only** (freshness dashboards, "roughly when did we learn this", the manifest
+  header), never the audit key. It is `timestamptz`, the cluster and every application session
+  run `TimeZone = 'UTC'`, and it is serialised as RFC 3339 UTC with microseconds and an explicit
+  `Z`; a naive `timestamp` column on a governed table is a defect (VEC-551 is what happens when
+  time columns are ambiguous).
+- A calculation runs all its reads in one `REPEATABLE READ` transaction on one connection,
+  takes `pg_current_snapshot()::text` **first**, and writes its record (§6) in that same
+  transaction. This is per calculation, not per API: each request holds its own pool connection
+  for its own transaction, as today. Fan-out inside one calculation is still possible — the first
+  connection calls `pg_export_snapshot()` and workers `SET TRANSACTION SNAPSHOT` to read the
+  identical snapshot (same server; snapshots do not cross primary/replica). Read-only
+  `REPEATABLE READ` takes no locks; only minutes-long snapshots (vacuum lag) need attention. A
+  calculation may run entirely on a replica: the replica's snapshot is exact for that replica and
+  every row in it is committed on the primary.
+- Internal replay = `WHERE ingest_xid IS NULL OR pg_visible_in_snapshot(ingest_xid, :snap)` then
+  the ordinary latest-wins rule. `pg_visible_in_snapshot` is a pure function of stored values;
+  in-flight writers at snapshot time (a running backfill) are in the snapshot's in-progress list
+  and are excluded on replay exactly as they were invisible to the calculation — no staleness,
+  no watermark to push back.
 - **End-to-end self-check:** the manifest job recomputes the calculation from the manifest it
-  just wrote and compares with the recorded output; a mismatch (a read that skipped the `≤ T`
-  filter, a non-governed input, nondeterminism) raises an alert. This is the guard that catches
-  the whole class, not just the cases listed below.
+  just wrote and compares with the recorded output; a mismatch (a read outside the transaction,
+  a non-governed input, nondeterminism) raises an alert. This guards the whole class, not just
+  the cases listed under Threats.
 
-The watermark is **not** the third-party deliverable — it is what lets us regenerate the
-calculation manifest (§6) exactly, at any later time, off the request path, and what lets the
-manifest state "all inputs are from the frozen prefix ≤ T".
+The snapshot is **not** the third-party deliverable — it only resolves against our database and
+nobody outside ever sees it. It is what lets us generate the calculation manifest (§6) exactly,
+at any later time, off the request path, because governed rows are never removed.
+
+**Why the MVCC snapshot and not an `ingested_at` watermark.** Both were designed in full (the
+watermark is in Alternatives). The comparison that decided it:
+
+| | MVCC snapshot (`ingest_xid` + `pg_current_snapshot`) — **chosen** | `ingested_at` watermark (`T = LEAST(now()−ε, min(xact_start))`) |
+|---|---|---|
+| Exactness | By construction (commit-time visibility); zero staleness | Exact in practice, but needs ε for the clock-read→`pg_stat_activity` window, and relies on `pg_stat_activity` completeness on the primary |
+| Clocks | Not involved | NTP steps, VM migration, failover skew can stamp rows "before" an issued T; UTC/`timestamptz` discipline required for the key |
+| Long writer transaction (backfill) | Invisible to the calc, excluded on replay; calcs stay fresh | Pushes T back for its duration → every calc that stale; needs alert + cap |
+| Two-phase commit | Handled by MVCC | Needs `pg_prepared_xacts` special-casing |
+| Replica reads | Snapshot taken on the replica is exact for it | Needs `t_lsn` and a replay-LSN guard |
+| Connections | One transaction per calc (or `pg_export_snapshot`) | Any connection; plain filter |
+| Topology | Cluster-local: xid space does not survive dump/restore or sharding | Portable: plain timestamp on shards, restores, exports |
+| Third-party visibility | Opaque — irrelevant, the manifest is the deliverable | Human-readable |
+| Compression pruning | None for `pg_visible_in_snapshot` | None for `≤ T` on existing chunks |
+| Extra columns | `ingest_xid` + `ingested_at` (label) | `ingested_at` only |
+
+The decisive points: the snapshot removes the timing/clock failure modes entirely rather than
+mitigating them, and never stalls calculations behind a backfill; the watermark's only decisive
+advantage — portability across shards and logical restores — is not a current plan (TimescaleDB
+multi-node was removed; TigerData scales with replicas, forks and tiering, which the snapshot
+handles). If sharding or a logical migration ever becomes a plan, §5 can be switched to the
+watermark without changing the manifest format, the record's meaning, or anything a third party
+sees; the migration is "add the filter, stop recording the snapshot".
 
 ### 6. Calculation record and self-contained manifest
 
@@ -207,18 +219,18 @@ therefore produces two artefacts:
 
 **a. Record** (insert-only, governed): `id, calculation_type, build_id (calc code),
 schema_version (last applied migration), request/params including the effective "as of" time,
-watermark T (§5), output, manifest_key, manifest_hash, is_dry_run, created_at`; `id` is returned in
+snapshot (§5), output, manifest_key, manifest_hash, is_dry_run, created_at`; `id` is returned in
 the response. Written in the same transaction as the reads. The Python API registers itself in
 `build_registry` at startup like the Go binaries (it does not today), and calculation logic
 never reads wall-clock time, environment/configmap values, caches, or external services — every
-input is either a governed row in the frozen prefix `ingested_at ≤ T` or a field of the recorded request.
+input is either a governed row visible in the snapshot or a field of the recorded request.
 
 **b. Manifest** — one object in the archive bucket (`calc/<id>.jsonl.zst`, alongside the raw
 block and SC-call archives), containing everything a third party needs and nothing that requires
 our database:
 
-- the record header (request, effective time, watermark T as RFC 3339 UTC, calc `git_hash`,
-  `schema_version`);
+- the record header (request, effective time, `ingested_at` label of the newest input as RFC 3339
+  UTC, calc `git_hash`, `schema_version`);
 - **every input row** as its recipe (§8) plus the row's **values**: table, natural key,
   `block_number`/`block_version`/`processing_version` where present, `build_id` → `git_hash` of
   the writer;
@@ -231,8 +243,8 @@ our database:
 - the config rows used (they are governed rows too);
 - a **selection statement**: which rule chose the input rows (identified by the calc `git_hash`
   + `schema_version`, with its parameters — protocol, asset, prime, …) and a **per-chain
-  cutoff** (highest `block_number`/`block_version` our governed data was complete to at
-  watermark T). Protocol-wide models such as gap-sweep read "latest row per user" over what we had
+  cutoff** (highest `block_number`/`block_version` our governed data was complete to at the
+  snapshot). Protocol-wide models such as gap-sweep read "latest row per user" over what we had
   indexed — a mixed-block set that is a fact about our database, not about the chain at one
   block — so the manifest must state how the set was chosen and up to where;
 - the output, and `manifest_hash` for integrity.
@@ -249,9 +261,10 @@ are unverifiable to source, by the stated boundary.
 **Generation.** The manifest may be written inline when the calculation already holds its
 input rows, or — the default for protocol-wide models whose SQL aggregates tens of thousands of
 rows server-side — **asynchronously**, by a job that re-runs the calculation's input selection
-with `ingested_at ≤ T` (exact by §5) and writes the object; the request path pays only for the
-record. Because governed rows are never removed, a manifest can be (re)generated at any later
-time; the record's T is the fallback pointer, never the deliverable. The job runs on commit of the
+under `pg_visible_in_snapshot(ingest_xid, snapshot)` (exact by §5) and writes the object; the
+request path pays only for the record. Because governed rows are never removed, a manifest can be
+(re)generated at any later time; the record's snapshot is the fallback pointer, never the
+deliverable. The job runs on commit of the
 record (queue or poll on `manifest_key IS NULL`), is idempotent (same record → same key and
 hash), and an alert fires on records older than N minutes without a manifest. `manifest_key`/`manifest_hash` are filled by the job
 (insert-only: a second record row referencing the first, or a separate `calculation_manifest`
@@ -298,19 +311,18 @@ prevents each. These are part of the decision, not commentary.
 | Threat | Prevention |
 |---|---|
 | A calculation reads a table that is not governed/append-only — an operational table such as `block_states.is_orphaned` (mutable, 30-day retention), a refreshed materialised view or continuous aggregate, an in-place "current state" read model | Calculation read paths may touch only governed tables (`raw_pipeline`/`dimension`/`config`) and governed, append-only read models carrying `ingested_at`. Reorg fixes (VEC-553) are corrective rows, never a join to operational state. Schemamaster lint on calculation SQL. |
-| A calculation reads without the watermark filter, or computes T on a replica (which cannot see the primary's in-flight writers), or the record is written best-effort/afterwards | §5/§6: T computed on the primary before any read, every read filters `ingested_at ≤ T`, record written with T in the calculation's own transaction. Without T the manifest job cannot know which rows the calculation actually saw. |
+| Reads spread across several connections or transactions, or the record written best-effort/afterwards | §5/§6: one `REPEATABLE READ` transaction per calculation, snapshot taken first, record written in the same transaction; fan-out only via `pg_export_snapshot`. Without this the manifest job cannot know which rows the calculation actually saw. |
 | Wall-clock, environment, cache or external-service inputs inside the calculation | §6: forbidden; the effective time is a field of the recorded request. |
 | Calculation code without an identity (Python API today), or schema-resident logic (`_current` views, tie-break rules) not pinned | §6: Python registers a `build_id`; the record carries `schema_version`. A third party rebuilds schema at that migration and code at that commit. |
 | A sanctioned in-place rewrite (`DISABLE TRIGGER` + `UPDATE`, as `20260306`, `20260410_125000`, `20260707` did) changes rows that earlier snapshots point at | Data fixes are new rows at a new `processing_version`. An in-place rewrite of a governed table is exceptional, requires an ADR-referenced migration, and is logged in `processing_version_log` with `reason` naming the calculations it invalidates. |
 | Destructive schema migration on a governed table (drop/rename/retype) makes old code unrunnable against a later export | Governed tables are additive-only; deprecations keep the old column/view until no recorded calculation's `build_id` depends on it. |
-| A writer supplies or backdates `ingested_at` (explicit value, or a clock far behind the primary's), so a row lands inside an already-recorded frozen prefix | `ingested_at` is DB-assigned only (no `INSERT` names it — lint + conformance test); T is computed on the primary from the primary's clock and in-flight transactions; shards/replicas stamp with their own DB clock, and skew is bounded by NTP and visible in monitoring. |
-| T or `ingested_at` is rendered or compared without an explicit zone (naive `timestamp`, local-time serialisation, session `TimeZone` other than UTC), so a third party filters a different prefix than the calculation used | `timestamptz` only; `TimeZone = 'UTC'` on the cluster and in every application session; T serialised as RFC 3339 UTC with microseconds; schemamaster check that no governed table has a `timestamp without time zone` column; API/manifest schema test on the T format. |
-| A writer is descheduled between reading its transaction-start clock and publishing `xact_start`, exactly while T is being computed, so its rows are stamped `≤ T` yet invisible to the scan | `epsilon` (seconds) subtracted from `now()` in the watermark query. |
-| Reads on a replica that has not replayed up to T see an incomplete prefix | `t_lsn` recorded with T; replica reads only when `pg_last_wal_replay_lsn() >= t_lsn`, else read on the primary. |
-| The primary's clock steps backwards (NTP step, VM migration, failover to a standby with a slower clock) and stamps new rows earlier than an already-issued T | Slew-only NTP on the service (confirm with TigerData); monitor `max(ingested_at)` vs `now()`; after failover keep a larger `epsilon` until clocks are confirmed aligned; the self-check catches the residue. |
-| One of a calculation's queries omits the `≤ T` filter | Reads go through a helper/view parameterised by T; lint; end-to-end self-check (§5) compares regenerated output to recorded output. |
-| A long writer transaction (backfill) holds T minutes in the past, so calculations silently see stale data | Correct by construction, but alert on writer transactions older than a few minutes; backfills commit per batch; calculations with `now() − T` over a bound are flagged or refused. |
-| `ingested_at ≤ T` gets no min/max pruning on already-compressed chunks (not in `orderby`/`segmentby`), so heavy calculations slow down | Performance, not correctness: latest-wins indexes still drive the read; measure protocol-wide calculations; add `ingested_at` to `orderby` for new chunks if needed. |
+| Cluster migration via dump/restore (logical) restarts `pg_current_xact_id()` low, so rows written afterwards look older than every stored snapshot | Prefer physical restore/fork (xids preserved — TigerData's backup/fork are physical). After any logical migration, `pg_resetwal -x` sets NextXID above the previous maximum before writes resume; the runbook records it. If sharding ever becomes a plan, switch §5 to the watermark alternative. |
+| A writer inserts `ingest_xid = NULL` explicitly and becomes "always visible" | No `INSERT` names `ingest_xid`; lint plus the conformance test. |
+| One of a calculation's queries runs outside the `REPEATABLE READ` transaction (another connection, autocommit) | Reads go through a helper bound to the calculation's transaction; lint; end-to-end self-check (§5) compares regenerated output to recorded output. |
+| The manifest job runs on a replica lagging behind the snapshot it regenerates | Job runs on the primary, or on a replica whose replay LSN is past the record's commit; the self-check catches the residue. |
+| A calculation holds its snapshot for many minutes (vacuum lag on hot tables) | Calculations are request-scoped; a bound on calculation transaction duration; alert on old read-only transactions. |
+| `ingested_at`/other time columns rendered without an explicit zone (naive `timestamp`, session `TimeZone` other than UTC) confuse a human or a downstream consumer | `timestamptz` only on governed tables; `TimeZone = 'UTC'` everywhere; RFC 3339 UTC serialisation; schemamaster check for `timestamp without time zone`. |
+| `pg_visible_in_snapshot(ingest_xid, …)` gets no pruning on compressed chunks, so heavy manifest regeneration is slow | Performance, not correctness: latest-wins indexes drive the read; the job is off the request path; measure protocol-wide calculations. |
 | Under-specified ordering with real ties (`DISTINCT ON`, `last()`, `locf`, cross-table "latest price ≤ block") returns arbitrary rows; float/parallel/hash-order nondeterminism in code | Every canonical selection has a total order (VEC-549 tie-break pattern); calculation code is deterministic given its inputs. |
 | Retention or `drop_chunks` on a governed table; tiered data with a lifecycle rule | §1 conformance test; tiering means "kept indefinitely". |
 | The image that produced a row or calculation can no longer be rebuilt identically (toolchain/dependency drift, non-reproducible base layers) and the original was pruned from the registry | §2: production images retained indefinitely by digest, `docker_sha` recorded per build; a conformance check that every `build_registry.docker_sha` still resolves in the registry. |
@@ -328,7 +340,7 @@ Ordered by information lost per day of delay; 1–3 make reproducibility *possib
 
 1. **Config append-on-change** (§4), starting with `oracle_asset` and `position_classification`
    — the only item where waiting destroys information.
-2. **`ingested_at`** on governed tables + watermark helper (§5); calculation record + manifest job, Python `build_id`, `schema_version` (§6).
+2. **`ingest_xid` + `ingested_at`** on governed tables (§5); calculation record + manifest job, Python `build_id`, `schema_version` (§6).
 3. **Append-only enforcement** (§1): app role, guard triggers, conformance test.
 4. **Trigger removal** (§3): one migration drops the 36 functions/triggers, creates and seeds
    `processing_version_log`; delete the plan-cache/lock/sort tests and `db/migrations/AGENTS.md`
@@ -339,7 +351,7 @@ Ordered by information lost per day of delay; 1–3 make reproducibility *possib
    registration (§2) — small, do early. Later: replay tooling (`replay row`, `replay calc`),
    reproducible builds.
 
-Existing rows keep `processing_version` and `build_id`; `ingested_at` is `NULL`/cutover for them; no other backfill.
+Existing rows keep `processing_version` and `build_id`, with `NULL ingest_xid` (always visible) and `NULL`/cutover `ingested_at`; no other backfill.
 
 ## Alternatives Considered
 
@@ -358,30 +370,34 @@ advisory locks and concurrent writers would still produce byte-identical "versio
 late live retry after a correction would be the newest row and win. `processing_version` (`0` =
 first observation, deduped by construction; `N` = logged deliberate correction) is kept.
 
-**MVCC snapshot instead of the watermark (`ingest_xid xid8 DEFAULT pg_current_xact_id()` on
-rows; each calculation reads in one `REPEATABLE READ` transaction, records
-`pg_current_snapshot()`, replay filters `pg_visible_in_snapshot(ingest_xid, snap)`)** — this was
-the earlier draft of §5. It is exact by Postgres' own visibility rules with zero staleness and
-supports cross-connection fan-out via `pg_export_snapshot`. Rejected in favour of the watermark
-because it is cluster-local (xid spaces do not survive dump/restore or sharding; snapshots do
-not cross primary/replica), Postgres-specific and opaque to a third party (a manifest or export
-cannot be filtered without a live cluster and MVCC knowledge), and constrains every calculation
-to one connection and one transaction. The watermark gives the same frozen-prefix guarantee as
-a plain timestamp filter that any consumer can apply; where a zero-lag calculation ever needs
-it, the snapshot variant can be added for that endpoint without changing the manifest format.
+**`ingested_at` frozen-prefix watermark instead of the MVCC snapshot** — the alternative
+designed in full before deciding (pros/cons table in §5). Mechanism: `ingested_at TIMESTAMPTZ NOT
+NULL DEFAULT now()` on governed tables, DB-assigned only; at calc start, on the primary,
+`T = LEAST(now() − ε, min(xact_start) of other active backends)` (plus `pg_prepared_xacts` under
+2PC) together with `pg_current_wal_lsn()` for replica-read validity; every read filters
+`ingested_at ≤ T`; T is recorded and, because a writer that started before T is committed or
+aborted, `≤ T` is a frozen prefix. Pros: a plain timestamp filter that any connection, replica,
+shard, export or third party can apply; survives logical restore and sharding; human-readable;
+no per-calculation transaction. Cons: needs ε for the clock-read→`pg_stat_activity` window; a
+long writer transaction (backfill) pushes T back and makes every calculation that stale (needs
+alert + cap); clock steps/failover skew can violate the prefix; 2PC and replica lag need
+special-casing; strict UTC/`timestamptz` discipline on the key. Rejected because the snapshot
+removes those failure modes rather than mitigating them, and the watermark's decisive advantage
+(topology portability) is not a current need. Kept as the documented fallback: switching is
+"add the filter, stop recording the snapshot", with no change to the manifest.
 
-**Fixed safety margin (`T = now() − k minutes`) instead of the computed watermark** — simpler,
-but trades exactness for a guess about maximum transaction duration and makes every calculation
-k minutes stale. Rejected; `pg_stat_activity` gives the exact bound for free.
+**Fixed safety margin (`T = now() − k minutes`) as the watermark** — simpler than the computed
+T but trades exactness for a guess about maximum transaction duration and makes every
+calculation k minutes stale. Rejected outright.
 
-**Watermark only, no manifest** — compact and exact, but reproducibility would be gated on access
-to our database. Rejected; the watermark is kept as the internal mechanism that generates the
+**Snapshot only, no manifest** — compact and exact, but reproducibility would be gated on access
+to our database. Rejected; the snapshot is kept as the internal mechanism that generates the
 manifest exactly and off the request path.
 
 **Manifest always built synchronously inside the request** — the "naive" shape from VEC-244;
 exact, but read amplification lands on the request path for protocol-wide models. Allowed where
-the calculation already holds its rows; otherwise asynchronous generation from the recorded T,
-which is equally exact.
+the calculation already holds its rows; otherwise asynchronous generation from the recorded
+snapshot, which is equally exact.
 
 **Archive raw off-chain responses** — not required; off-chain data points carry no reproduction
 claim (Boundaries).
@@ -394,7 +410,7 @@ lower cost; `RULE … DO INSTEAD NOTHING` fails silently. Rejected.
 **Positive**
 - Every on-chain data point and every calculation is reproducible by a third party from S3 (raw
   archives + calculation manifests), the code and an archive node — no database access — and
-  every calculation's inputs are a frozen, timestamp-bounded prefix that any consumer can filter.
+  every calculation's input set is pinned by an exact MVCC snapshot with zero staleness.
 - Append-only is a Postgres-enforced property, not a convention; corrections are deliberate,
   logged, and cannot happen by accident at a deploy boundary.
 - Removes per-row trigger overhead, advisory locks, plan-cache tuning, sort discipline and 36
@@ -406,7 +422,7 @@ lower cost; `RULE … DO INSTEAD NOTHING` fails silently. Rejected.
   append-on-change pattern; that is real app-code work, done table by table.
 - Role separation on TigerData and guard triggers add migration/ops surface; one-off data fixes
   become deliberate (`DISABLE TRIGGER` in a migration).
-- Calculations must compute T first, filter every read by `ingested_at ≤ T`, and persist a record; the API must not use wall-clock, env or cache inputs in calculation logic. Calculations see data up to the age of the oldest in-flight writer transaction (normally sub-second).
+- Calculations must run reads in one `REPEATABLE READ` transaction on one connection (or an exported snapshot) and persist a record in it; the API must not use wall-clock, env or cache inputs in calculation logic.
 - Governed tables become additive-only; in-place data rewrites are exceptional and logged.
 - Governed tables can never be retention-pruned; storage is bounded by compression + tiering only.
 - Manifests carry input values, so S3 grows with calculation volume; a background job and its
