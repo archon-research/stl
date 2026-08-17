@@ -5,6 +5,10 @@
 **Date**: 2026-04-08
 **Deciders**: @vector, @infrastructure
 
+> **Note (2026-08-17):** [ADR-0006](0006-data-reproducibility-and-append-only-guarantees.md)
+> proposes to supersede the version-assignment mechanism in §3 and to extend this ADR to
+> third-party reproducibility. Until ADR-0006 is accepted, this document remains authoritative.
+
 ## Context
 
 We are building risk calculation capabilities on top of our indexed data. Every risk calculation
