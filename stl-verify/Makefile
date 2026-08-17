@@ -4,7 +4,7 @@
 # Include language-agnostic linting targets
 include lint.mk
 
-.PHONY: all test test-race test-integration test-integration-shard integration-shard-check lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-oracle-price-worker-avax run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-allocation-tracker run-allocation-tracker-avax help ci ci-checks install-hooks format \
+.PHONY: all test test-race test-integration test-integration-shard integration-shard-check service-image-check lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-oracle-price-worker-avax run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-allocation-tracker run-allocation-tracker-avax help ci ci-checks install-hooks format \
 	dev-up dev-up-rebuild dev-up-workers dev-up-or-resume dev-preflight dev-env dev-db dev-down dev-suspend dev-resume dev-wipe dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
 		_docker-release-image _docker-release-go-service \
@@ -184,6 +184,9 @@ test-integration-shard: integration-shard-check
 integration-shard-check:
 	@bash ci/check-integration-shards.sh
 
+service-image-check:
+	@bash ci/check-service-images.sh
+
 # Run tests with coverage
 cover:
 	@echo "==> Running tests with coverage..."
@@ -327,7 +330,7 @@ tools:
 # CI target for lint/format/static/security checks. go vet, staticcheck, and
 # go fix -diff are covered by golangci-lint v2 (govet, staticcheck, modernize
 # linters — see .golangci.yml); running them separately tripled analysis time.
-ci-checks: fmt-check goimports-check tidy-check shared-container-check integration-shard-check golangci-lint vulncheck
+ci-checks: fmt-check goimports-check tidy-check shared-container-check integration-shard-check service-image-check golangci-lint vulncheck
 
 # CI target: everything with strict checks
 # Order: fast checks first (fail fast), then expensive checks

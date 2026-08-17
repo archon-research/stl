@@ -59,7 +59,15 @@ func RunMigrations(t *testing.T, pool *pgxpool.Pool) {
 // StartTimescaleDBForMain starts a shared TimescaleDB container for use in
 // TestMain (which receives *testing.M, not *testing.T). On error it calls
 // log.Fatal instead of t.Fatalf.
+//
+// When STL_TEST_POSTGRES_DSN is set it carves a database for this process out of
+// that server instead, so CI can own one TimescaleDB per shard rather than one
+// per package.
 func StartTimescaleDBForMain() (dsn string, cleanup func()) {
+	if shared, ok := sharedService(EnvPostgresDSN); ok {
+		return createProcessDatabase(shared)
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
@@ -102,6 +110,55 @@ func StartTimescaleDBForMain() (dsn string, cleanup func()) {
 
 	dsn = fmt.Sprintf("postgres://test:test@%s:%s/testdb?sslmode=disable", host, port.Port())
 	cleanup = func() { _ = container.Terminate(context.Background()) }
+	return dsn, cleanup
+}
+
+// createProcessDatabase gives this test binary its own database on a server it
+// shares with the other packages of the shard.
+//
+// A database, not a schema: packages assume the public schema is theirs alone —
+// they TRUNCATE registry tables and assert on migration-seeded rows — so sharing
+// one database between packages loses rows out from under them.
+func createProcessDatabase(baseDSN string) (dsn string, cleanup func()) {
+	ctx := context.Background()
+	dbName := "stl_test_" + processTag()
+
+	adminPool := ConnectPoolForMain(baseDSN)
+	defer adminPool.Close()
+
+	// A database left behind by a killed run would silently supply its rows here.
+	if _, err := adminPool.Exec(ctx, dropDatabaseSQL(dbName)); err != nil {
+		log.Fatalf("drop stale database %s: %v", dbName, err)
+	}
+	if _, err := adminPool.Exec(ctx, fmt.Sprintf("CREATE DATABASE %s", dbName)); err != nil {
+		log.Fatalf("create database %s: %v", dbName, err)
+	}
+
+	dsn, err := replaceDatabase(baseDSN, dbName)
+	if err != nil {
+		log.Fatalf("build DSN for %s: %v", dbName, err)
+	}
+
+	// Migrations leave the extension to the infrastructure bootstrap in production,
+	// and a fresh database does not inherit it from template1.
+	pool := ConnectPoolForMain(dsn)
+	defer pool.Close()
+	if _, err := pool.Exec(ctx, "CREATE EXTENSION IF NOT EXISTS timescaledb"); err != nil {
+		log.Fatalf("enable timescaledb in %s: %v", dbName, err)
+	}
+
+	cleanup = func() {
+		dropCtx := context.Background()
+		dropPool, err := pgxpool.New(dropCtx, baseDSN)
+		if err != nil {
+			log.Printf("warning: could not connect to drop database %s: %v", dbName, err)
+			return
+		}
+		defer dropPool.Close()
+		if _, err := dropPool.Exec(dropCtx, dropDatabaseSQL(dbName)); err != nil {
+			log.Printf("warning: could not drop database %s: %v", dbName, err)
+		}
+	}
 	return dsn, cleanup
 }
 
@@ -411,18 +468,32 @@ func dropDatabaseSQL(dbName string) string {
 // query parameters.
 func withDatabase(t *testing.T, baseDSN, dbName string) string {
 	t.Helper()
-	u, err := url.Parse(baseDSN)
+	dsn, err := replaceDatabase(baseDSN, dbName)
 	if err != nil {
 		t.Fatalf("parse base DSN: %v", err)
 	}
+	return dsn
+}
+
+// replaceDatabase points a DSN at another database on the same server.
+func replaceDatabase(baseDSN, dbName string) (string, error) {
+	u, err := url.Parse(baseDSN)
+	if err != nil {
+		return "", fmt.Errorf("parse base DSN: %w", err)
+	}
 	u.Path = "/" + dbName
-	return u.String()
+	return u.String(), nil
 }
 
 // SanitizeTestName converts a test name to a string safe for use as a
 // PostgreSQL identifier, Redis key prefix, or AWS resource name suffix.
 // The result is lowercase alphanumeric + underscores, prefixed with "t_",
-// and truncated to 63 characters (PostgreSQL identifier limit).
+// suffixed with the process tag, and truncated to 63 characters (PostgreSQL
+// identifier limit).
+//
+// The process tag matters once services are shared across packages: test names
+// are unique only within a package, so without it two packages' same-named tests
+// would address one schema, bucket and queue.
 func SanitizeTestName(testName string) string {
 	s := strings.ToLower(testName)
 	var b strings.Builder
@@ -434,9 +505,12 @@ func SanitizeTestName(testName string) string {
 			b.WriteRune('_')
 		}
 	}
+
+	suffix := "_" + processTag()
+	budget := 63 - len(suffix)
 	result := b.String()
-	if len(result) > 63 {
-		result = result[:63]
+	if len(result) > budget {
+		result = result[:budget]
 	}
-	return result
+	return result + suffix
 }

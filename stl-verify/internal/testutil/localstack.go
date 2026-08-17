@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -24,6 +25,8 @@ type LocalStackConfig struct {
 	Endpoint string
 	Region   string
 }
+
+const localStackRegion = "us-east-1"
 
 // S3TestBucketName builds a bucket name unique to the calling test, for suites
 // that share one LocalStack container and so cannot share a bucket.
@@ -63,11 +66,21 @@ func NewS3Client(t *testing.T, ctx context.Context, cfg LocalStackConfig) *s3.Cl
 
 // StartLocalStackForMain starts a LocalStack container for use in TestMain.
 // On error it calls log.Fatal instead of t.Fatal.
+//
+// When STL_TEST_LOCALSTACK_ENDPOINT is set it returns that endpoint instead, so
+// CI can own one LocalStack per shard rather than one per package. The shared
+// instance must enable the union of every services string passed here.
 func StartLocalStackForMain(services string) (cfg LocalStackConfig, cleanup func()) {
+	if endpoint, ok := sharedService(EnvLocalStackEndpoint); ok {
+		cfg = LocalStackConfig{Endpoint: endpoint, Region: localStackRegion}
+		allowDirectConnection(endpointHost(endpoint))
+		return cfg, noopCleanup
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	cfg.Region = "us-east-1"
+	cfg.Region = localStackRegion
 
 	req := testcontainers.ContainerRequest{
 		Image:        ImageLocalStack,
@@ -101,23 +114,38 @@ func StartLocalStackForMain(services string) (cfg LocalStackConfig, cleanup func
 		log.Fatalf("get LocalStack port: %v", err)
 	}
 	cfg.Endpoint = fmt.Sprintf("http://%s:%s", host, port.Port())
-
-	// Ensure the container host bypasses the HTTP proxy.
-	if noProxy := os.Getenv("NO_PROXY"); !strings.Contains(noProxy, host) {
-		if noProxy == "" {
-			os.Setenv("NO_PROXY", host)
-		} else {
-			os.Setenv("NO_PROXY", noProxy+","+host)
-		}
-	}
-	if noProxy := os.Getenv("no_proxy"); !strings.Contains(noProxy, host) {
-		if noProxy == "" {
-			os.Setenv("no_proxy", host)
-		} else {
-			os.Setenv("no_proxy", noProxy+","+host)
-		}
-	}
+	allowDirectConnection(host)
 
 	cleanup = func() { _ = container.Terminate(context.Background()) }
 	return cfg, cleanup
+}
+
+// allowDirectConnection adds host to both spellings of the no-proxy list, so an
+// ambient HTTP proxy does not swallow requests to a local LocalStack.
+func allowDirectConnection(host string) {
+	if host == "" {
+		return
+	}
+	for _, envVar := range []string{"NO_PROXY", "no_proxy"} {
+		noProxy := os.Getenv(envVar)
+		if strings.Contains(noProxy, host) {
+			continue
+		}
+		if noProxy == "" {
+			os.Setenv(envVar, host)
+		} else {
+			os.Setenv(envVar, noProxy+","+host)
+		}
+	}
+}
+
+// endpointHost extracts the hostname from a LocalStack endpoint URL, returning
+// "" when it cannot be parsed — the no-proxy entry is an optimization, not a
+// precondition, so an unparseable endpoint must not fail the suite.
+func endpointHost(endpoint string) string {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
 }

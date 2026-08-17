@@ -189,7 +189,9 @@ func setupIntegrationInfra(t *testing.T, ctx context.Context) *IntegrationTestIn
 	// Use unique resource names per test to avoid cross-test interference.
 	// S3 bucket names require hyphens (no underscores), so replace them.
 	suffix := strings.ReplaceAll(testutil.SanitizeTestName(t.Name()), "_", "-")
-	bucketName := "backup-" + suffix
+	// Via the helper, not "backup-"+suffix: only it keeps the name inside S3's
+	// 63-character limit, which the longest test names here now exceed.
+	bucketName := testutil.S3TestBucketName(t, "backup-")
 	_, err = s3Client.CreateBucket(ctx, &s3.CreateBucketInput{
 		Bucket: aws.String(bucketName),
 	})
