@@ -380,7 +380,7 @@ func (s *Service) resolveBlockTimestamp(ctx context.Context, event outbound.Bloc
 
 	ts, err := blockheader.ParseTimestamp(data)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("block %d (version %d): %w", event.BlockNumber, event.Version, err)
+		return time.Time{}, fmt.Errorf("parsing block %d (version %d) timestamp: %w", event.BlockNumber, event.Version, err)
 	}
 	return ts, nil
 }
