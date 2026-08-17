@@ -14,14 +14,28 @@ Collateral set required by the 9 enabled markets:
 
 ---
 
-## 1. Prices — `offchain_token_price` (staging AND prod, checked 14 Aug 2026)
+## 1. Prices — RESOLVED for CORE by switching to `onchain_token_price` (17 Aug 2026)
 
-Prod (via its read replica) is byte-identical to staging: same coverage, same
-gap windows, same missing assets. One cause (shared indexer deploy history +
-the June outage), one backfill campaign — run it once per environment.
+**The CORE price reader now reads on-chain oracle prices, not the offchain
+feed.** Checked against staging: all 10 SparkLend collaterals have 355 days of
+gap-free daily closes in `onchain_token_price` (block-driven worker + the
+Erigon `oracle-pricing-backfill`; that pipeline never had the outages below).
+BA's original used Yahoo Finance purely for convenience — the model's own
+liquidation mechanics run on oracle prices, so calibrating on the oracle
+series is more self-consistent, and it is the repo's preferred lineage.
 
-Requirement: ≥180 daily closes per collateral (TRAIN_SIZE). More is better:
-the volatility floor uses the full history, and BA's parquet went back to 2014.
+Remaining price limits for CORE:
+- History depth is ~1 year vs BA's 2014+ Yahoo series. TRAIN_SIZE (180) is
+  satisfied; the volatility floor sees less history than BA's, making it
+  somewhat less conservative. Deepening it = extending the Erigon backfill.
+- BTC, HYPE, XRP, SOL, JITOSOL have no on-chain oracle on our chains — the
+  non-SparkLend markets that need them still need the offchain feed (below).
+
+### The offchain feed's own gaps (still real, no longer blocking CORE)
+
+`offchain_token_price` keeps the holes found on 14 Aug — they matter to any
+*other* consumer of that table, and to future CORE markets needing off-chain
+assets. Prod is byte-identical to staging.
 
 | Symbol | History starts | Days in last 180 | Status |
 |---|---|---|---|
@@ -147,24 +161,19 @@ To re-enable, Galaxy needs all of:
 
 ---
 
-## SparkLend go-live checklist
+## SparkLend go-live: DONE (17 Aug 2026)
 
-Positions and order books are already OK for all four SparkLend markets, so
-SparkLend-only support is: run the three price backfills above, then flip the
-sources **per market** in `market_configs.json` (supported since the sources
-became market-scoped keys):
+All four SparkLend markets are flipped to live sources in
+`market_configs.json` (positions from the borrower tables, prices from
+`onchain_token_price`, books from `cex_orderbook_snapshots`). No backfill was
+needed — the price switch to on-chain oracles removed that dependency.
+Verified end to end against staging: `sparklend_usdt` fully live computed
+CRR 0.89% at N_MC=50.
 
-```json
-"sparklend_usdt": {
-  "PROTOCOL": "SPARKLEND", "LOAN_TOKEN": "USDT",
-  "POSITION_SOURCE": "postgres", "ORDERBOOK_SOURCE": "postgres", "PRICE_SOURCE": "postgres"
-}
-```
-
-The flip is deliberately not committed yet: it belongs in its own commit after
-the backfills verify, and local kind (no indexed data) must keep the global
-env override `CORE_MODEL_*_SOURCE=parquet` or stay on the file defaults.
-Non-SparkLend markets keep parquet; the daily "all" tick keeps succeeding.
+Local kind has no indexed data, so its `core-model-runner` Deployment carries
+the global env overrides (`CORE_MODEL_*_SOURCE=parquet`) in the dev overlay —
+local runs stay on the parquet snapshots. Non-SparkLend markets keep parquet
+everywhere; the daily "all" tick keeps succeeding.
 
 ## Order of re-enablement (cheapest first)
 
