@@ -7,6 +7,7 @@ import {
   Axis,
   buildChartTheme,
   chartTokens,
+  useContainerWidth,
 } from '@archon-research/charting';
 import {
   Badge,
@@ -19,7 +20,7 @@ import {
   type SortingState,
   useDataTable,
 } from '@archon-research/design-system';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 import { css, cx } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
@@ -162,38 +163,6 @@ function buildSingleSeriesTheme(stroke: string) {
   });
 }
 
-// Callback-ref based width measurement: a stable ref that wires up a
-// ResizeObserver when the node mounts and tears it down on unmount. A bare
-// useEffect+useRef would miss the mount because the measured node only renders
-// after the loading/empty guards below resolve.
-function useMeasuredWidth(): [
-  (node: HTMLDivElement | null) => void,
-  number | null,
-] {
-  const [width, setWidth] = useState<number | null>(null);
-  const observerRef = useRef<ResizeObserver | null>(null);
-
-  const measureRef = useCallback((node: HTMLDivElement | null) => {
-    observerRef.current?.disconnect();
-
-    if (!node) {
-      return;
-    }
-
-    const measure = () => {
-      const nextWidth = Math.floor(node.getBoundingClientRect().width);
-      setWidth(nextWidth > 0 ? nextWidth : null);
-    };
-
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(node);
-    observerRef.current = observer;
-  }, []);
-
-  return [measureRef, width];
-}
-
 const chartEmptyMessageClassName = css({
   m: 0,
   mt: '2',
@@ -212,12 +181,6 @@ function MetricCardTrend({
   isLoading: boolean;
   errorMessage: string | null;
 }) {
-  const [measureRef, chartWidth] = useMeasuredWidth();
-  const chartTheme = useMemo(
-    () => buildSingleSeriesTheme(chart?.stroke ?? chartTokens.axis),
-    [chart?.stroke],
-  );
-
   if (isLoading) {
     // A single block at the chart's own footprint, so the placeholder fills the
     // same space and there's no jump (or floating box) when the real chart loads
@@ -254,10 +217,25 @@ function MetricCardTrend({
     );
   }
 
+  return <MetricCardChart chart={chart} />;
+}
+
+// Split out of MetricCardTrend so the measured element mounts with the component
+// that measures it: `useContainerWidth` observes on mount, and above the guards
+// there is no node to observe yet.
+function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
+  // Until the first measurement the kit's fallback width applies, which can
+  // overhang a narrow card for a frame — clipped rather than allowed to widen
+  // the card under the reader.
+  const [measureRef, chartWidth] = useContainerWidth();
+  const chartTheme = useMemo(
+    () => buildSingleSeriesTheme(chart.stroke),
+    [chart.stroke],
+  );
+
   const values = chart.data.map((point) => point.value);
   const minValue = Math.min(...values);
   const maxValue = Math.max(...values);
-  const chartHeight = CHART_HEIGHT;
 
   // A constant series (the current-value fallback) has a degenerate [v, v]
   // domain whose area would fill the whole plot as a solid block; pad it so the
@@ -271,86 +249,81 @@ function MetricCardTrend({
   return (
     <div
       ref={measureRef}
-      className={css({ mt: '2', width: 'full', minWidth: 0 })}
+      className={css({
+        mt: '2',
+        width: 'full',
+        minWidth: 0,
+        overflowX: 'hidden',
+      })}
     >
-      {/* Holds the chart's footprint for the frame between mount and the first
-          ResizeObserver measurement, so the card doesn't resize under the
-          reader. Same treatment as the loading branch above. */}
-      {chartWidth === null ? (
-        <SkeletonStack count={1} itemHeight={chartHeight} />
-      ) : null}
-      {chartWidth !== null ? (
-        <XYChart
-          theme={chartTheme}
-          width={chartWidth}
-          height={chartHeight}
-          margin={{ top: 8, right: 24, bottom: 76, left: 64 }}
-          xScale={{ type: 'band', paddingInner: 0.2 }}
-          yScale={{ type: 'linear', domain: yDomain, nice: !isFlat }}
-        >
-          <Grid columns={false} numTicks={3} />
-          <Axis
-            orientation="bottom"
-            numTicks={4}
-            hideTicks
-            tickLabelProps={() => ({
-              fontSize: 10,
-              textAnchor: 'end',
-              angle: -35,
-              dx: '-0.25em',
-              dy: '0.25em',
-              fill: 'var(--colors-text-muted)',
-            })}
-          />
-          {chart.kind === 'fallback' ? null : (
-            <AreaSeries
-              dataKey={`${chart.key}-area`}
-              data={chart.data as ChartDatum[]}
-              xAccessor={(d: ChartDatum) => d.label}
-              yAccessor={(d: ChartDatum) => d.value}
-              fill={chart.stroke}
-              fillOpacity={0.18}
-              lineProps={{ stroke: 'none' }}
-            />
-          )}
-          <LineSeries
-            dataKey={chart.key}
+      <XYChart
+        theme={chartTheme}
+        width={chartWidth}
+        height={CHART_HEIGHT}
+        margin={{ top: 8, right: 24, bottom: 76, left: 64 }}
+        xScale={{ type: 'band', paddingInner: 0.2 }}
+        yScale={{ type: 'linear', domain: yDomain, nice: !isFlat }}
+      >
+        <Grid columns={false} numTicks={3} />
+        <Axis
+          orientation="bottom"
+          numTicks={4}
+          hideTicks
+          tickLabelProps={() => ({
+            fontSize: 10,
+            textAnchor: 'end',
+            angle: -35,
+            dx: '-0.25em',
+            dy: '0.25em',
+            fill: 'var(--colors-text-muted)',
+          })}
+        />
+        {chart.kind === 'fallback' ? null : (
+          <AreaSeries
+            dataKey={`${chart.key}-area`}
             data={chart.data as ChartDatum[]}
             xAccessor={(d: ChartDatum) => d.label}
             yAccessor={(d: ChartDatum) => d.value}
-            stroke={chart.stroke}
+            fill={chart.stroke}
+            fillOpacity={0.18}
+            lineProps={{ stroke: 'none' }}
           />
-          <Tooltip
-            snapTooltipToDatumX
-            snapTooltipToDatumY
-            showVerticalCrosshair
-            showSeriesGlyphs
-            renderTooltip={({
-              tooltipData,
-            }: {
-              tooltipData?: { nearestDatum?: { datum: unknown } };
-            }) => {
-              const datum = tooltipData?.nearestDatum?.datum as
-                | ChartDatum
-                | undefined;
-              if (!datum) return null;
-              return (
-                <div className={chartTooltipSurfaceClassName}>
-                  <div className={chartTooltipTitleClassName}>
-                    {datum.label}
-                  </div>
-                  <div
-                    className={chartTooltipValueClassName}
-                    style={{ color: chart.stroke }}
-                  >
-                    {chart.formatValue(datum.value)}
-                  </div>
+        )}
+        <LineSeries
+          dataKey={chart.key}
+          data={chart.data as ChartDatum[]}
+          xAccessor={(d: ChartDatum) => d.label}
+          yAccessor={(d: ChartDatum) => d.value}
+          stroke={chart.stroke}
+        />
+        <Tooltip
+          snapTooltipToDatumX
+          snapTooltipToDatumY
+          showVerticalCrosshair
+          showSeriesGlyphs
+          renderTooltip={({
+            tooltipData,
+          }: {
+            tooltipData?: { nearestDatum?: { datum: unknown } };
+          }) => {
+            const datum = tooltipData?.nearestDatum?.datum as
+              | ChartDatum
+              | undefined;
+            if (!datum) return null;
+            return (
+              <div className={chartTooltipSurfaceClassName}>
+                <div className={chartTooltipTitleClassName}>{datum.label}</div>
+                <div
+                  className={chartTooltipValueClassName}
+                  style={{ color: chart.stroke }}
+                >
+                  {chart.formatValue(datum.value)}
                 </div>
-              );
-            }}
-          />
-        </XYChart>
-      ) : null}
+              </div>
+            );
+          }}
+        />
+      </XYChart>
     </div>
   );
 }
