@@ -218,9 +218,11 @@ golangci-lint:
 GOVULN_IGNORE := GO-2026-4887|GO-2026-4883
 vulncheck:
 	@echo "==> Running govulncheck..."
-	@$(GOBIN)/govulncheck ./... 2>&1; rc=$$?; \
+	@out=$$($(GOBIN)/govulncheck ./... 2>&1); rc=$$?; printf '%s\n' "$$out"; \
 	if [ $$rc -eq 0 ]; then exit 0; fi; \
-	unmatched=$$($(GOBIN)/govulncheck ./... 2>&1 | grep '^Vulnerability' | grep -v -E '$(GOVULN_IGNORE)'); \
+	vulns=$$(printf '%s\n' "$$out" | grep '^Vulnerability'); \
+	if [ -z "$$vulns" ]; then echo "ERROR: govulncheck failed without reporting vulnerabilities"; exit 1; fi; \
+	unmatched=$$(printf '%s\n' "$$vulns" | grep -v -E '$(GOVULN_IGNORE)'); \
 	if [ -n "$$unmatched" ]; then echo "ERROR: unignored vulnerabilities found"; exit 1; fi; \
 	echo "WARNING: only ignored vulnerabilities found ($(GOVULN_IGNORE)) — passing"
 
@@ -252,15 +254,17 @@ e2e:
 tools:
 	@echo "==> Installing development tools..."
 	go install honnef.co/go/tools/cmd/staticcheck@latest
-	go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 # keep in sync with .github/workflows/go-ci.yml
 	go install golang.org/x/vuln/cmd/govulncheck@latest
-	go install golang.org/x/tools/cmd/goimports@latest
+	go install golang.org/x/tools/cmd/goimports@v0.49.0 # keep in sync with .github/workflows/go-ci.yml
 	go install github.com/go-delve/delve/cmd/dlv@latest
 	go install golang.org/x/tools/gopls@latest
 	go install github.com/evilmartians/lefthook@latest
 
-# CI target for lint/format/static/security checks
-ci-checks: fix-check fmt-check goimports-check tidy-check vet staticcheck golangci-lint vulncheck
+# CI target for lint/format/static/security checks. go vet, staticcheck, and
+# go fix -diff are covered by golangci-lint v2 (govet, staticcheck, modernize
+# linters — see .golangci.yml); running them separately tripled analysis time.
+ci-checks: fmt-check goimports-check tidy-check golangci-lint vulncheck
 
 # CI target: everything with strict checks
 # Order: fast checks first (fail fast), then expensive checks

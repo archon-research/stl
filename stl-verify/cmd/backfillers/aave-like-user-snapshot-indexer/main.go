@@ -12,6 +12,7 @@ import (
 	"math/big"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -178,12 +179,7 @@ func parseCSVUsers(r io.Reader, protocolSlug string) ([]common.Address, error) {
 }
 
 func containsSlug(protocols, slug string) bool {
-	for _, p := range strings.Fields(protocols) {
-		if p == slug {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(strings.Fields(protocols), slug)
 }
 
 func run(args []string) error {
@@ -458,10 +454,7 @@ func run(args []string) error {
 func splitIntoBatches(users []common.Address, batchSize int) [][]common.Address {
 	var batches [][]common.Address
 	for i := 0; i < len(users); i += batchSize {
-		end := i + batchSize
-		if end > len(users) {
-			end = len(users)
-		}
+		end := min(i+batchSize, len(users))
 		batches = append(batches, users[i:end])
 	}
 	return batches
