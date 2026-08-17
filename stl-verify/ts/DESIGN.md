@@ -139,13 +139,14 @@ components:
     rounded: "{rounded.md}"
     padding: "0 0.75rem"
     height: "2.25rem"
-  # Local to this app: the allocation category chip in `AllocationGrid`. Not a
-  # design-system recipe.
+  # The allocation category chip in `AllocationGrid`: the `badge` recipe
+  # (variant="subtle", size="md") with only its fill overridden, because
+  # `colorPalette` has no five-way category-neutral hue set.
   chip-category:
     backgroundColor: "{colors.categorical.1.bg}"
     textColor: "{colors.categorical.1.fg}"
     rounded: "{rounded.md}"
-    padding: "0.25rem 0.5rem"
+    padding: "0.375rem 0.625rem"
   table-row-selected:
     backgroundColor: "{colors.interactive.selected.light}"
     textColor: "{colors.text.default.light}"
@@ -281,8 +282,9 @@ Never hand-write a shadow literal: a `rgba(0, 0, 0, 0.2)` drop shadow disappears
 - **Low emphasis:** the recipe default (`variant="panel"`, no `emphasis`): `surface.default` on a `border.subtle` stroke. There is no `quiet` variant.
 
 ### Chips
+- **Component:** `Badge`, not `Chip`. `Chip` is the removable-filter control — pill radius, padding asymmetric to seat its dismiss `×` — so a non-dismissible taxonomy label would have to override every visual property it sets. `Badge` already is a `rounded.md`, semibold, `xs` label on the same variant × colorPalette model.
 - **Style:** `rounded.md` (0.375rem), not pill, and no `textTransform` — the label is sentence-cased at whatever the source gives.
-- **Colour:** a category chip fills from `categorical.N.bg` / `.fg` (see "Categorical encoding"), so it stays dark-aware and carries no status meaning.
+- **Colour:** a category chip fills from `categorical.N.bg` / `.fg` (see "Categorical encoding"), so it stays dark-aware and carries no status meaning. This is the one property overridden on the recipe, and it is why `useIdentityPalette` is not used here: `identity.1..8` assigns hues by hashing an id, which would scramble the category-to-`chart.series` hue pairing and supplies no matching foreground colour.
 - **State:** used to mark section context and compact taxonomy labels. A status chip drives colour through `colorPalette` + `variant`, not through the deprecated `tone` prop.
 
 ### Cards / Containers

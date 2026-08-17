@@ -9,6 +9,7 @@ import {
   chartTokens,
 } from '@archon-research/charting';
 import {
+  Badge,
   type ColumnDef,
   DataTable,
   EmptyState,
@@ -354,30 +355,25 @@ function MetricCardTrend({
   );
 }
 
-// See PrimeSidebar for why the preset's dark `interactive.selected` is diluted.
-// Here it has to arrive as a descendant override because the fill comes from the
-// `dataTable` recipe's `selected` variant, which the DataTable applies as a
-// hardcoded class name.
+// Fill override for the `Badge` these chips render as: `Badge`'s `colorPalette`
+// ships six status-flavoured hues, so it cannot give five strategy categories
+// distinct fills, and its red would read as an alarm on a routine category. The
+// `categorical.*` tokens encode grouping without status meaning, and their hue
+// order matches `chart.series`, so a chip and its series line read as the same
+// category. Everything else about the chip — radius, weight, size, padding — is
+// the recipe's.
+//
 // One literal `css()` call per category, evaluated at module scope, so the cell
 // picks a finished class name: see `lib/activity.tsx` for why Panda cannot
 // extract a token path handed in as a variable.
-//
-// Hues come from the `categorical.*` tokens, which encode grouping without
-// status meaning — the `bg.*`/`text.*` status family cannot give five strategy
-// categories distinct fills without two colliding, and its red would read as an
-// alarm on a routine category. Hue order matches `chart.series`, so a chip and
-// its series line read as the same category.
 const CATEGORY_CHIP_CLASS: Record<AllocationCategory | 'unknown', string> = {
   allocation: css({ bg: 'categorical.1.bg', color: 'categorical.1.fg' }),
   pol: css({ bg: 'categorical.2.bg', color: 'categorical.2.fg' }),
   psm3: css({ bg: 'categorical.3.bg', color: 'categorical.3.fg' }),
   asset: css({ bg: 'categorical.4.bg', color: 'categorical.4.fg' }),
   custody: css({ bg: 'categorical.5.bg', color: 'categorical.5.fg' }),
-  unknown: css({
-    colorPalette: 'neutral',
-    bg: 'colorPalette.subtle.bg',
-    color: 'text.default',
-  }),
+  // No override: `Badge`'s own subtle × neutral default is this fill.
+  unknown: '',
 };
 
 function getCategoryChipClass(
@@ -643,22 +639,9 @@ function AllocationCategoryCell({ allocation }: { allocation: Allocation }) {
   const category = allocation.category;
 
   return (
-    <div
-      className={cx(
-        css({
-          display: 'inline-flex',
-          alignItems: 'center',
-          px: '2',
-          py: '1',
-          borderRadius: 'md',
-          fontSize: 'xs',
-          fontWeight: 'semibold',
-        }),
-        getCategoryChipClass(category),
-      )}
-    >
+    <Badge className={getCategoryChipClass(category)}>
       {getCategoryLabel(category)}
-    </div>
+    </Badge>
   );
 }
 
