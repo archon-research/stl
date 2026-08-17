@@ -71,6 +71,18 @@ function toErrorBody(error: unknown): string {
   }
 }
 
+// Carries the HTTP status so callers can branch on it (e.g. fall back only on
+// 404) instead of parsing it back out of the message.
+export class ApiRequestError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'ApiRequestError';
+    this.status = status;
+  }
+}
+
 async function requestData<TData, TError>(
   request: ApiResult<TData, TError>,
   label: string,
@@ -88,7 +100,7 @@ async function requestData<TData, TError>(
       error,
     });
 
-    throw new Error(errorMessage);
+    throw new ApiRequestError(errorMessage, response.status);
   }
 
   return data;

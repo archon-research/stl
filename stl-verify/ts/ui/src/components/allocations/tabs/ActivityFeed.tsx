@@ -9,13 +9,20 @@ import {
   StyledSelect,
   useDataTable,
 } from '@archon-research/design-system';
-import { type ChangeEvent, useEffect, useMemo, useState } from 'react';
+import {
+  type ChangeEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from 'react';
 
 import { css, cx } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
 import { getActionColorClass, getActionIcon } from '../../../lib/activity';
 import {
+  ApiRequestError,
   getAllocationActivity,
   getProtocolEvents,
   getTxProtocolEvents,
@@ -111,8 +118,9 @@ function isSweepEvent(event: AllocationActivity): boolean {
 
 function getRealTxHash(event: AllocationActivity): string | null {
   // Defensive client-side guard for stale API responses already loaded before
-  // the backend nulls synthetic sweep tx_hash values.
-  return isSweepEvent(event) ? null : (event.tx_hash ?? null);
+  // the backend nulls synthetic sweep tx_hash values. `||` also maps an empty
+  // string to null so such a row cannot expand into a doomed lookup.
+  return isSweepEvent(event) ? null : event.tx_hash || null;
 }
 
 function formatEventData(eventData: ProtocolEvent['event_data']): string {
@@ -271,16 +279,21 @@ function ProtocolEventCard({ event }: { event: ProtocolEvent }) {
  * aborts an in-flight request, and no request is issued for a row nobody opened.
  *
  * `getTxProtocolEvents` is the dedicated endpoint; the generic
- * `getProtocolEvents` filter is the fallback for deployments that lack it.
+ * `getProtocolEvents` filter is the fallback for deployments that lack it,
+ * gated on 404 so a real outage of the dedicated endpoint still surfaces.
  */
+const FALLBACK_TX_EVENT_LIMIT = 200;
+
 function TxProtocolEventsPanel({ txHash }: { txHash: string }) {
   const [events, setEvents] = useState<ProtocolEvent[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [truncated, setTruncated] = useState(false);
 
   useEffect(() => {
     const abortController = new AbortController();
     setEvents(null);
     setError(null);
+    setTruncated(false);
 
     async function fetchTxEvents() {
       try {
@@ -290,13 +303,24 @@ function TxProtocolEventsPanel({ txHash }: { txHash: string }) {
           return;
         }
 
+        if (!(err instanceof ApiRequestError) || err.status !== 404) {
+          const errorMessage = toErrorMessage(err);
+          setError(errorMessage);
+          logging.error('Failed to fetch tx protocol events', {
+            error: err,
+            errorMessage,
+            txHash,
+          });
+          return;
+        }
+
         try {
-          setEvents(
-            await getProtocolEvents(
-              { tx_hash: txHash, limit: 200 },
-              abortController.signal,
-            ),
+          const fallbackEvents = await getProtocolEvents(
+            { tx_hash: txHash, limit: FALLBACK_TX_EVENT_LIMIT },
+            abortController.signal,
           );
+          setTruncated(fallbackEvents.length >= FALLBACK_TX_EVENT_LIMIT);
+          setEvents(fallbackEvents);
         } catch (fallbackErr) {
           if (isAbortError(fallbackErr)) {
             return;
@@ -355,6 +379,12 @@ function TxProtocolEventsPanel({ txHash }: { txHash: string }) {
             event={protocolEvent}
           />
         ))}
+        {truncated ? (
+          <span className={css({ fontSize: 'xs', color: 'text.muted' })}>
+            Limited to the first {FALLBACK_TX_EVENT_LIMIT} protocol events for
+            this transaction.
+          </span>
+        ) : null}
       </AsyncStateRenderer>
     </div>
   );
@@ -382,8 +412,8 @@ const activityInlineCellClassName = css({
   whiteSpace: 'nowrap',
 });
 
-// The action glyph keeps the card's circular badge so direction stays readable
-// as a shape, not only as a colour.
+// A circular glyph so action direction stays readable as a shape, not only as
+// a colour.
 const actionBadgeClassName = css({
   width: '6',
   height: '6',
@@ -535,12 +565,27 @@ function createActivityColumns(chainLabels?: ChainLabelLookup) {
 // key off it. `buildActivityEventKey` alone is not guaranteed unique — a sweep
 // carries neither tx_hash nor log_index, so two sweeps of different tokens in
 // one block collide — and a duplicate id would fuse two rows in the row model.
-// The index breaks that tie; it cannot mis-target a detail panel across a
-// refetch because the content key in front of it has to match as well, and only
-// an event identical in every keyed field can do that. Sweeps are also exactly
-// the rows that cannot expand (no transaction to inspect).
-function buildActivityRowId(event: AllocationActivity, index: number): string {
-  return `${buildActivityEventKey(event)}:${index}`;
+// A per-key occurrence counter breaks that tie. Unlike the raw array index, it
+// leaves the id of a unique event untouched when the search filter narrows the
+// list, so an expanded row that survives the filter stays expanded; it cannot
+// mis-target a detail panel across a refetch because the content key in front
+// of it has to match as well, and only an event identical in every keyed field
+// can do that. Sweeps are also exactly the rows that cannot expand (no
+// transaction to inspect).
+function buildActivityRowIds(
+  events: readonly AllocationActivity[],
+): Map<AllocationActivity, string> {
+  const occurrences = new Map<string, number>();
+  const ids = new Map<AllocationActivity, string>();
+
+  for (const event of events) {
+    const key = buildActivityEventKey(event);
+    const seen = occurrences.get(key) ?? 0;
+    occurrences.set(key, seen + 1);
+    ids.set(event, seen === 0 ? key : `${key}:${seen}`);
+  }
+
+  return ids;
 }
 
 export function ActivityFeed({
@@ -808,12 +853,22 @@ export function ActivityFeed({
     [chainLabels],
   );
 
+  const rowIds = useMemo(
+    () => buildActivityRowIds(filteredEvents),
+    [filteredEvents],
+  );
+  const getRowId = useCallback(
+    (event: AllocationActivity) =>
+      rowIds.get(event) ?? buildActivityEventKey(event),
+    [rowIds],
+  );
+
   const table = useDataTable(filteredEvents, columns, {
     enableSorting: true,
     // The API returns newest-first and the header says so ("Latest activity"),
     // so the initial view is the sort the data already carries.
     defaultSorting: [{ id: 'created_at', desc: true }],
-    getRowId: buildActivityRowId,
+    getRowId,
     // A sweep has no transaction to inspect, so its row gets no expander.
     getRowCanExpand: (row) => getRealTxHash(row.original) !== null,
   });
