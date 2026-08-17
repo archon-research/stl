@@ -30,11 +30,18 @@
 --
 -- Hypertable partitioned on block_timestamp (mirrors the transformed bucket1 derived tables): a
 -- curated/derived spine of one row per (position, observation) that grows without bound as blocks
--- accrue. 1-day chunks; compression after 2 days (segmentby position_id, so a position's observations
--- compress together, ordered block DESC for latest-first reads); S3 tiering after 1 year. Writes are
--- the out-of-band full-projection upsert in the materializer helper below (the transform _bootstrap
--- shape); a trigger-fed incremental _run path is the follow-up for when a scheduled runner and real
--- volume make the full upsert's decompression cost matter.
+-- accrue. 1-day chunks. Writes are the out-of-band full-projection upsert in the materializer helper
+-- below, which re-projects and re-upserts the whole history every run.
+--
+-- Compression is DEFERRED to VEC-566, not set here, and this is deliberate: the full-projection upsert
+-- re-touches every chunk, and ON CONFLICT decompresses each compressed chunk it checks before the
+-- no-op guard runs — at scale that exceeds max_tuples_decompressed_per_dml_transaction and the run
+-- aborts (SQLSTATE 53400, verified on 2.29.1). Compression only becomes safe once the write path is
+-- incremental (only touches recent, uncompressed chunks), so the compression policy ships WITH the
+-- trigger-fed _run/_bootstrap write path in VEC-566, not before it. The hypertable + PK are set now
+-- (cheap while the table is empty; the PK-ends-in-block_timestamp shape can't be changed cheaply later).
+-- (S3 tiering below is set now but has the same latent full-upsert interaction — it just can't bite
+-- for ~1 year and is Cloud-only, so unverified; revisit alongside VEC-566.)
 
 CREATE TABLE IF NOT EXISTS position_state (
     position_id        bytea       NOT NULL,
@@ -83,14 +90,8 @@ COMMENT ON COLUMN position_state.created_at IS 'Audit. Row insert time.';
 
 -- Hypertable on block_timestamp, 1-day chunks (matches the transformed bucket1 position tables).
 SELECT create_hypertable('position_state', 'block_timestamp', chunk_time_interval => INTERVAL '1 day', if_not_exists => TRUE);
--- Compress closed chunks: segment by position_id so a position's observations compress together and
--- latest-first (block DESC) reads stay cheap; compress chunks older than 2 days.
-ALTER TABLE position_state SET (
-    timescaledb.compress,
-    timescaledb.compress_segmentby = 'position_id',
-    timescaledb.compress_orderby   = 'block_number DESC, block_version DESC, processing_version DESC'
-);
-SELECT add_compression_policy('position_state', INTERVAL '2 days', if_not_exists => TRUE);
+-- Compression is intentionally NOT enabled here — it ships with the incremental write path in VEC-566
+-- (see the table header for why the full-projection upsert and compression are incompatible).
 -- Tier cold chunks to S3 after 1 year. add_tiering_policy is a Timescale Cloud/TigerData primitive;
 -- guard so the migration still applies where it is unavailable: the function is absent on plain
 -- TimescaleDB (undefined_function), and a Cloud service without tiered storage enabled raises a
@@ -105,13 +106,13 @@ END $$;
 -- WHERE position_id = $1 ORDER BY ... LIMIT 1, and VEC-409's global DISTINCT ON) are served by an
 -- Index Scan Backward over each chunk's PK btree (not Index Only — quantity/instrument_key/holder_id are
 -- not in the PK), merged with no Sort, provided the query spells its ORDER BY fully descending
--- (position_id DESC, block_number DESC, block_version DESC, processing_version DESC). NOTE (VEC-409):
--- once chunks compress (2-day policy) the PK btree is gone from them, and the GLOBAL latest-per-position
--- DISTINCT ON degrades to a per-chunk Seq Scan + Sort over columnstore data; only the per-position
--- (segmentby position_id) lookup stays cheap. So position_current needs a different shape for compressed
--- data — a maintained uncompressed current-state table, or the incremental path (VEC-566). No reverse-
--- lookup (instrument_key / holder_id) indexes here: they have no consumer yet (VEC-417/420 unbuilt),
--- cost an index write per row, and exist only on uncompressed chunks — add them in the first consumer PR.
+-- (position_id DESC, block_number DESC, block_version DESC, processing_version DESC). NOTE for when
+-- compression lands (VEC-566): a compressed chunk loses its PK btree, so the GLOBAL latest-per-position
+-- DISTINCT ON will degrade to a per-chunk Seq Scan + Sort over columnstore data (only the per-position
+-- segmentby lookup stays cheap), and position_current will need a different shape then — a maintained
+-- uncompressed current-state table, or the incremental path. That does not bite today (no compression
+-- yet). No reverse-lookup (instrument_key / holder_id) indexes here: no consumer yet (VEC-417/420
+-- unbuilt) and they cost an index write per row — add them in the first consumer PR.
 
 GRANT SELECT ON position_state TO stl_readonly;
 -- Append-only: corrections arrive as new (block_version, processing_version) rows, so no DELETE/TRUNCATE.
