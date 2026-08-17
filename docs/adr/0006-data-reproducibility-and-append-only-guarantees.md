@@ -77,13 +77,23 @@ watermarks, transform queues) are exempt.
 The existing ~880 accidental `processing_version > 0` rows are left in place: they are
 payload-identical, harmless under latest-wins, and deleting them would violate this section.
 
-### 2. Build registry (unchanged from ADR-0002)
+### 2. Build registry and image retention
 
 `build_registry(id, git_hash UNIQUE, built_at, docker_sha, notes)`, id 0 = `pre-tracking`.
 Every binary resolves its `build_id` once at startup via `buildregistry.New`
 (`ldflags` → `debug.ReadBuildInfo` → `BUILD_GIT_HASH`, hard error if none). Repository
-constructors take `buildregistry.BuildID`. Later: populate `docker_sha` and build with
-`-trimpath` so a third party can rebuild the image bit-for-bit; not required for possibility.
+constructors take `buildregistry.BuildID`. Unchanged from ADR-0002, plus:
+
+- **Production images are kept indefinitely.** Every image that has run in production (any
+  binary that writes governed rows or performs calculations) is retained in the registry with
+  no lifecycle/expiry rule, keyed by digest, so an auditor can be handed the *original* image
+  when rebuilding one that behaves identically is impossible or impractical (toolchain drift,
+  dependency sources gone, non-reproducible base layers). Rebuilding from `git_hash` is the
+  first path; the retained image is the guaranteed fallback.
+- `build_registry.docker_sha` is populated at registration (from the running image's digest)
+  so a `build_id` resolves to both a commit and a retained artefact.
+- Later: `-trimpath`, pinned toolchain and base-image digests so rebuilds are bit-for-bit;
+  useful, not required for possibility given the retained images.
 
 ### 3. `processing_version` is caller-assigned, not trigger-inferred
 
@@ -265,6 +275,7 @@ prevents each. These are part of the decision, not commentary.
 | A writer inserts `ingest_xid = NULL` explicitly and becomes "always visible" | No `INSERT` names `ingest_xid`; lint plus the conformance test. |
 | Under-specified ordering with real ties (`DISTINCT ON`, `last()`, `locf`, cross-table "latest price ≤ block") returns arbitrary rows; float/parallel/hash-order nondeterminism in code | Every canonical selection has a total order (VEC-549 tie-break pattern); calculation code is deterministic given its inputs. |
 | Retention or `drop_chunks` on a governed table; tiered data with a lifecycle rule | §1 conformance test; tiering means "kept indefinitely". |
+| The image that produced a row or calculation can no longer be rebuilt identically (toolchain/dependency drift, non-reproducible base layers) and the original was pruned from the registry | §2: production images retained indefinitely by digest, `docker_sha` recorded per build; a conformance check that every `build_registry.docker_sha` still resolves in the registry. |
 | Manifest never generated (job failure/lag), or generated from a different snapshot than the calculation used | Manifest job is idempotent and retried; `manifest_hash` recorded; regeneration is always possible from the record's snapshot (§5); an alert on records older than N minutes without a manifest. |
 | A data point is served without its recipe (API returns values but not `git_hash`/`source`/version identity), so a single-point reproduction needs our database | §8 delivery obligation; response-schema test that every data-point payload carries recipe fields or a resolvable provenance reference. |
 | Manifest lists the selected rows but not the selection rule or chain cutoff, so completeness/freshness of the input set can only be checked against our database | §6 selection statement + per-chain cutoff in every manifest; manifest schema check. |
@@ -286,7 +297,9 @@ Ordered by information lost per day of delay; 1–3 make reproducibility *possib
    rules; writers unchanged (they already omit `processing_version`).
 5. **`_current` views / read-model routing** (§7), the three version-blind read fixes, and recipe
    fields on data-point API responses (§8).
-6. Later: replay tooling (`replay row`, `replay calc`), reproducible builds, `docker_sha`.
+6. Registry retention policy removed for production repositories and `docker_sha` populated at
+   registration (§2) — small, do early. Later: replay tooling (`replay row`, `replay calc`),
+   reproducible builds.
 
 Existing rows keep `processing_version`, `build_id` and `NULL ingest_xid`; no backfill.
 
@@ -344,6 +357,8 @@ lower cost; `RULE … DO INSTEAD NOTHING` fails silently. Rejected.
 - Governed tables can never be retention-pruned; storage is bounded by compression + tiering only.
 - Manifests carry input values, so S3 grows with calculation volume; a background job and its
   monitoring become part of the calculation path.
+- Container-registry storage grows without bound (one image per production build, ~1.6/day
+  today); no lifecycle rules on the production repositories.
 
 ## Appendix: ADR-0002 §3 mechanism (2026-04-08, replaced by §3 above)
 
