@@ -205,6 +205,14 @@ func isSourceInUse(err error) bool {
 	return errors.As(err, &pgErr) && pgErr.Code == "55006"
 }
 
+// isUndefinedObject reports whether Postgres rejected a statement because the
+// object it named does not exist.
+func isUndefinedObject(err error) bool {
+	// SQLSTATE 42704 = undefined_object
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "42704"
+}
+
 // ensureTemplate migrates the template for baseDSN's server if no process has yet,
 // and returns its name.
 func ensureTemplate(ctx context.Context, baseDSN string) (string, error) {
@@ -273,14 +281,22 @@ func ensureTemplate(ctx context.Context, baseDSN string) (string, error) {
 // template, and CREATE DATABASE ... TEMPLATE counts it as a user of the source and
 // refuses to copy — permanently, not transiently. Tests never depend on scheduled
 // jobs; migrations only register the policies, which is a catalog write.
+//
+// The change is server-wide and is never put back, so the server behind
+// EnvPostgresDSN has to be one nobody minds losing scheduled jobs on.
 func disableBackgroundWorkers(ctx context.Context, conn *pgx.Conn) error {
 	var workers int
-	if err := conn.QueryRow(ctx,
+	err := conn.QueryRow(ctx,
 		"SELECT current_setting('timescaledb.max_background_workers')::int",
-	).Scan(&workers); err != nil {
+	).Scan(&workers)
+	switch {
+	case isUndefinedObject(err):
+		// No such setting means the extension is not loaded on this server, so
+		// there is no scheduler session for a clone to trip over.
+		return nil
+	case err != nil:
 		return fmt.Errorf("read timescaledb.max_background_workers: %w", err)
-	}
-	if workers == 0 {
+	case workers == 0:
 		return nil
 	}
 

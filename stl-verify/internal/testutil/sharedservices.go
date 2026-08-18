@@ -8,6 +8,10 @@ import (
 // Environment variables through which CI hands the suite services it owns
 // itself, one set per integration shard. Unset locally, where each package
 // starts its own container from TestMain instead.
+//
+// The Postgres server named here must be disposable: the suite creates and drops
+// databases on it and permanently disables its TimescaleDB background workers
+// (see disableBackgroundWorkers).
 const (
 	EnvPostgresDSN        = "STL_TEST_POSTGRES_DSN"
 	EnvRedisAddr          = "STL_TEST_REDIS_ADDR"
