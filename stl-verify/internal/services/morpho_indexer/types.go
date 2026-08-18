@@ -392,8 +392,8 @@ func (e *VaultAccrueInterestEvent) ToJSON() (json.RawMessage, error) {
 //
 // These are emitted only by VaultV2 vaults (morpho-org/vault-v2). Field names
 // mirror EventsLib.sol; indexed params are decoded from topics, the rest from
-// data. See event_extractor.go for the extraction and service.go for the
-// structured handlers that consume them.
+// data. See event_extractor.go for the extraction and vault_v2_handler.go for
+// the structured handlers that consume them.
 
 // AddAdapterEvent is emitted when a liquidity adapter is registered on a VaultV2.
 type AddAdapterEvent struct {

@@ -87,7 +87,7 @@ func TestV2VaultAddresses(t *testing.T) {
 // TestReplayMetaMorphoLog_RoutesToHandler verifies ReplayMetaMorphoLog drives a
 // V2 structured log into the same typed handler the live SQS path uses (here
 // AddAdapter → GetOrCreateAdapter), rather than only audit-logging it. Reuses
-// the existing mock harness from service_v2_handlers_test.go.
+// the existing mock harness from vault_v2_handler_test.go.
 func TestReplayMetaMorphoLog_RoutesToHandler(t *testing.T) {
 	h := newTestHarness(t)
 	h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
