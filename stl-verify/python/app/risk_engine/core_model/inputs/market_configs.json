@@ -30,16 +30,23 @@
     "PRICE_SOURCE": "postgres",
     "ORDERBOOK_SOURCE": "postgres"
   },
+  "_comment_morpho_scope": "Live Morpho positions are Ethereum-mainnet Blue markets (contract-total-verified). BA's parquet snapshots for these keys were built from Base's much larger markets (their README routes cbBTC liquidity via a Base pool), so live CRRs will NOT reconcile with parquet-era CRRs: different borrower universe, not a data bug.",
   "morpho_cbbtc-usdc": {
     "PROTOCOL": "MORPHO",
     "MORPHO_MARKET": "CBBTC",
     "LOAN_TOKEN": "USDC",
-    "N_MC": 5000
+    "N_MC": 5000,
+    "POSITION_SOURCE": "postgres",
+    "PRICE_SOURCE": "postgres",
+    "ORDERBOOK_SOURCE": "postgres"
   },
   "morpho_weth-usdc": {
     "PROTOCOL": "MORPHO",
     "MORPHO_MARKET": "WETH",
-    "LOAN_TOKEN": "USDC"
+    "LOAN_TOKEN": "USDC",
+    "POSITION_SOURCE": "postgres",
+    "PRICE_SOURCE": "postgres",
+    "ORDERBOOK_SOURCE": "postgres"
   },
   "syrup_usdc": {
     "PROTOCOL": "SYRUP",

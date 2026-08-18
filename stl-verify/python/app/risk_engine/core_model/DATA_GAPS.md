@@ -130,13 +130,27 @@ also documented in the reader module):
   total). They are existing bad debt, not simulatable future liquidations,
   and they NaN-poison the CRR if kept ($34 total when measured).
 
+**Morpho (2 markets): done** behind the same per-market flags (18 Aug 2026).
+`morpho_market_position` holds exactly what the model wants — all borrowers of
+a collateral/loan pair — so the receipt-token n:m mismatch does not apply to
+the model input. All LLTV tranches of the pair are included; the LIF is Morpho
+Blue's closed formula (pinned against BA's own parquet value). Validated the
+same way as SparkLend: per-user borrow sum vs the contract-level market total
+= 1.3% apart (interest accrual), fully-live CRR computed for both markets.
+
+**Scope change, deliberate:** live Morpho is **Ethereum mainnet** (342 cbBTC
+borrowers, $275M). BA's parquet snapshots were built from **Base**'s markets
+(19,804 borrowers, $1.0B — their README routes cbBTC liquidity via a Base
+pool). Live CRRs will not reconcile with parquet-era CRRs for these keys:
+different borrower universe, not a data bug. Modelling Base needs Base Morpho
+market indexing (we index Base Morpho *vault receipts*, not market positions).
+
 Still parquet:
 
 | Market group | Live source | Notes |
 |---|---|---|
-| Morpho (2) | morpho indexer tables | indexed; the model wants *all borrowers of a Blue market*, not vault positions |
-| Syrup (2) | maple-graphql-indexer tables | indexed |
-| Anchorage | anchorage-indexer tables | indexed |
+| Syrup (2) | maple-graphql-indexer tables | indexed; also blocked on XRP/HYPE books + offchain prices |
+| Anchorage | anchorage-indexer tables | indexed; blocked on native-BTC price (no on-chain oracle) |
 
 ---
 
