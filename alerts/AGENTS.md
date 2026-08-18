@@ -13,3 +13,15 @@ Before modifying either side, read both this file and
   holes the error path won't catch, and latency.
 - `critical` must have a `runbook_url` + runbook section; `warning`/`info` must
   have a runbook section.
+
+## Alert ownership
+
+- **You create it, you own it** (for now). Every alert must be actionable and
+  require action when it fires. An alert that fires without needing action is
+  a bug in the alert — fix it (tighten the threshold/window, add the missing
+  condition, or delete it); don't leave it firing. If deletion is the choice,
+  explicitly flag it to the human reviewing.
+- **Silence while you work.** If you are working on an alert, silence it until
+  you are finished so it stops paging/posting and doesn't cause alert fatigue.
+- **Be explicit.** When silencing or deleting an alert, say so explicitly (in
+  the PR / thread) and get human approval first.
