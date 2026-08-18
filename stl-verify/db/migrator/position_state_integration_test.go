@@ -311,4 +311,273 @@ func TestPositionState(t *testing.T) {
 			t.Errorf("advisory lock key differs across search_path: public=(%d,%d) pg_catalog=(%d,%d); the per-view lock would not serialize concurrent runs", c1, o1, c2, o2)
 		}
 	})
+
+	// --- identity integrity (position_key contract, not exercised above) ------------------------
+
+	t.Run("blank holder_id rejected even on a zero-quantity row", func(t *testing.T) {
+		// Identity fields feed position_id() for EVERY row, unlike deal_type_code (pre-flight (4) checks
+		// only non-zero rows). A blank holder must fail regardless of quantity — here on a zero row.
+		body := `SELECT * FROM (VALUES (1::int,10::bigint,'ihb'::text,''::text,0::numeric,'LOAN'::text,100::bigint,0::int,0::int,'2026-01-01'::timestamptz)) ` + mppCols
+		mppErr(t, "vhb", body, "blankholder", "holder_id is required")
+	})
+
+	t.Run("null holder_id rejected", func(t *testing.T) {
+		body := `SELECT * FROM (VALUES (1::int,10::bigint,'ihn'::text,NULL::text,5::numeric,'LOAN'::text,100::bigint,0::int,0::int,'2026-01-01'::timestamptz)) ` + mppCols
+		mppErr(t, "vhn", body, "nullholder", "holder_id is required")
+	})
+
+	t.Run("semicolon in instrument_key rejected (id-collision guard)", func(t *testing.T) {
+		// The ';' delimiter is unescaped in position_key; an instrument_key containing it could collide two
+		// distinct identities onto one id, so it must be rejected rather than hashed.
+		body := `SELECT * FROM (VALUES (1::int,10::bigint,'a;b'::text,'aa'::text,5::numeric,'LOAN'::text,100::bigint,0::int,0::int,'2026-01-01'::timestamptz)) ` + mppCols
+		mppErr(t, "vsemi", body, "semi", "delimiter")
+	})
+
+	t.Run("null chain_id is legal and does not collide with a set chain_id", func(t *testing.T) {
+		// chain_id/protocol_id are nullable structural fields (render empty in position_key). A NULL-chain
+		// position must materialize AND hash distinctly from the same instrument/holder at chain 1.
+		body := `SELECT * FROM (VALUES ` +
+			`(NULL::int,10::bigint,'inc'::text,'aa'::text,5::numeric,'LOAN'::text,100::bigint,0::int,0::int,'2026-01-01'::timestamptz),` +
+			`(1::int,10::bigint,'inc'::text,'aa'::text,9::numeric,'BORROW'::text,100::bigint,0::int,0::int,'2026-01-01'::timestamptz)) ` + mppCols
+		mpp(t, "vnc", body, "nullchain")
+		var nullClass, setClass string
+		if err := pool.QueryRow(ctx, `SELECT deal_type_code FROM position_classification WHERE position_id = position_id(NULL, 10, 'inc', 'aa')`).Scan(&nullClass); err != nil {
+			t.Fatalf("null-chain position not classified: %v", err)
+		}
+		if err := pool.QueryRow(ctx, `SELECT deal_type_code FROM position_classification WHERE position_id = position_id(1, 10, 'inc', 'aa')`).Scan(&setClass); err != nil {
+			t.Fatalf("set-chain position not classified: %v", err)
+		}
+		if nullClass != "LOAN" || setClass != "BORROW" {
+			t.Errorf("null vs set chain collided: null=%q set=%q; want LOAN and BORROW (distinct ids)", nullClass, setClass)
+		}
+	})
+
+	// --- contract edges (missing / extra column, FK) --------------------------------------------
+
+	t.Run("unseeded deal_type_code fails the run (FK, not a silent drop)", func(t *testing.T) {
+		// The cls insert uses a LEFT JOIN + the raw code, so an unseeded/typo'd code must hit the
+		// deal_type_code FK (23503) and fail the run rather than be dropped by an inner join.
+		mppErr(t, "vfk", valuesOf(row("ifk", "aa", 5, "NOPE_NOT_A_CODE", 100, 0, 0)), "fk", "foreign key")
+	})
+
+	t.Run("view missing a contract column is rejected as MISSING", func(t *testing.T) {
+		// Drop deal_type_code from the emitted columns; the contract check must name it MISSING before any write.
+		body := `SELECT * FROM (VALUES (1::int,10::bigint,'imz'::text,'aa'::text,5::numeric,100::bigint,0::int,0::int,'2026-01-01'::timestamptz)) v(chain_id,protocol_id,instrument_key,holder_id,quantity,block_number,block_version,processing_version,block_timestamp)`
+		mppErr(t, "vmz", body, "missing", "MISSING")
+	})
+
+	t.Run("extra column in the view is tolerated", func(t *testing.T) {
+		// The temp projection selects contract columns by name, so an unrelated extra column is ignored.
+		body := `SELECT * FROM (VALUES (1::int,10::bigint,'ix'::text,'aa'::text,5::numeric,'LOAN'::text,100::bigint,0::int,0::int,'2026-01-01'::timestamptz,'ignored'::text)) v(chain_id,protocol_id,instrument_key,holder_id,quantity,deal_type_code,block_number,block_version,processing_version,block_timestamp,extra)`
+		mpp(t, "vx", body, "extra")
+		if got := classOf(t, "ix", "aa"); got != "LOAN" {
+			t.Errorf("extra-column view class = %q; want LOAN (extra columns ignored)", got)
+		}
+	})
+
+	// --- recency guard edges (equal tuple, pv tiebreak) -----------------------------------------
+
+	t.Run("same-coordinate re-emit with a changed code reclassifies", func(t *testing.T) {
+		mpp(t, "vso", valuesOf(row("iso", "aa", 5, "LOAN", 100, 0, 0)), "store")
+		// Identical (bn,bv,pv) and quantity, only the code changes: the quantity upsert is a no-op but the
+		// classification must still move — the guard admits the equal high-water tuple (>=), and cls runs
+		// independently of the position_state insert.
+		mpp(t, "vso", valuesOf(row("iso", "aa", 5, "COLLATERAL", 100, 0, 0)), "reclassify")
+		if got := classOf(t, "iso", "aa"); got != "COLLATERAL" {
+			t.Errorf("same-coordinate re-emit did not reclassify: class = %q; want COLLATERAL", got)
+		}
+	})
+
+	t.Run("processing_version tiebreak within a block closes on the higher pv", func(t *testing.T) {
+		mpp(t, "vpv", valuesOf(row("ipv", "aa", 7, "BORROW", 90, 0, 0), row("ipv", "aa", 5, "LOAN", 100, 0, 0)), "store")
+		// A higher pv at block 100 zeros it; canonical(block 100) must pick pv=1 (zero), so the latest
+		// non-zero observation falls back to block 90 BORROW.
+		mpp(t, "vpv", valuesOf(row("ipv", "aa", 7, "BORROW", 90, 0, 0), row("ipv", "aa", 0, "LOAN", 100, 0, 1)), "pvzero")
+		if got := classOf(t, "ipv", "aa"); got != "BORROW" {
+			t.Errorf("higher-pv zero at block 100 did not close it: class = %q; want BORROW", got)
+		}
+	})
+
+	// --- quantity CHECK (negative, NaN) ---------------------------------------------------------
+
+	t.Run("negative quantity rejected by the CHECK", func(t *testing.T) {
+		mppErr(t, "vneg", valuesOf(row("ineg", "aa", -5, "LOAN", 100, 0, 0)), "neg", "qty_nonneg")
+	})
+
+	t.Run("NaN quantity rejected by the CHECK", func(t *testing.T) {
+		// NaN sorts above every finite numeric, so it clears the quantity > 0 filter (the pre-flight sees a
+		// non-null code and passes); the CHECK must still reject it before it poisons downstream SUMs.
+		body := `SELECT * FROM (VALUES (1::int,10::bigint,'inan'::text,'aa'::text,'NaN'::numeric,'LOAN'::text,100::bigint,0::int,0::int,'2026-01-01'::timestamptz)) ` + mppCols
+		mppErr(t, "vnan", body, "nan", "qty_nonneg")
+	})
+
+	// --- empty projection, return count, multi-view txn, concurrency ----------------------------
+
+	t.Run("empty projection is a no-op and preserves the stored classification", func(t *testing.T) {
+		mpp(t, "vempty", valuesOf(row("iempty", "aa", 5, "LOAN", 100, 0, 0)), "seed")
+		if got := classOf(t, "iempty", "aa"); got != "LOAN" {
+			t.Fatalf("seed class = %q; want LOAN", got)
+		}
+		// A view that emits zero rows (typed by the VALUES, filtered by WHERE false) must not error and must
+		// not delete the stored classification.
+		empty := valuesOf(row("iempty", "aa", 5, "LOAN", 100, 0, 0)) + ` WHERE false`
+		if _, err := pool.Exec(ctx, `CREATE OR REPLACE VIEW vempty AS `+empty); err != nil {
+			t.Fatal(err)
+		}
+		var n int64
+		if err := pool.QueryRow(ctx, `SELECT materialize_position_projection('vempty'::regclass, 'empty')`).Scan(&n); err != nil {
+			t.Fatalf("empty projection errored: %v", err)
+		}
+		if n != 0 {
+			t.Errorf("empty projection changed %d rows; want 0", n)
+		}
+		if got := classOf(t, "iempty", "aa"); got != "LOAN" {
+			t.Errorf("empty projection wiped classification to %q; want LOAN preserved", got)
+		}
+	})
+
+	t.Run("return value counts rows inserted or changed", func(t *testing.T) {
+		if _, err := pool.Exec(ctx, `CREATE OR REPLACE VIEW vrc AS `+valuesOf(row("irc", "aa", 5, "LOAN", 100, 0, 0), row("irc", "aa", 6, "LOAN", 110, 0, 0))); err != nil {
+			t.Fatal(err)
+		}
+		var n int64
+		if err := pool.QueryRow(ctx, `SELECT materialize_position_projection('vrc'::regclass, 'rc')`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 2 {
+			t.Errorf("first run inserted %d; want 2", n)
+		}
+		if err := pool.QueryRow(ctx, `SELECT materialize_position_projection('vrc'::regclass, 'rc')`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 0 {
+			t.Errorf("identical rerun changed %d; want 0", n)
+		}
+		if _, err := pool.Exec(ctx, `CREATE OR REPLACE VIEW vrc AS `+valuesOf(row("irc", "aa", 5, "LOAN", 100, 0, 0), row("irc", "aa", 99, "LOAN", 110, 0, 0))); err != nil {
+			t.Fatal(err)
+		}
+		if err := pool.QueryRow(ctx, `SELECT materialize_position_projection('vrc'::regclass, 'rc')`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 1 {
+			t.Errorf("one changed quantity reported %d; want 1", n)
+		}
+	})
+
+	t.Run("two views in one transaction both materialize (temp reuse + no self-deadlock)", func(t *testing.T) {
+		if _, err := pool.Exec(ctx, `CREATE OR REPLACE VIEW vt1 AS `+valuesOf(row("it1", "aa", 5, "LOAN", 100, 0, 0))); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `CREATE OR REPLACE VIEW vt2 AS `+valuesOf(row("it2", "aa", 6, "BORROW", 100, 0, 0))); err != nil {
+			t.Fatal(err)
+		}
+		conn, err := pool.Acquire(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Release()
+		tx, err := conn.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback(ctx)
+		// Second call's DROP TABLE IF EXISTS pg_temp._mpp_src must clear the first call's temp table (its
+		// ON COMMIT DROP has not fired mid-transaction), and a single caller acquiring two per-view locks
+		// must not self-deadlock.
+		if _, err := tx.Exec(ctx, `SELECT materialize_position_projection('vt1'::regclass, 'multi')`); err != nil {
+			t.Fatalf("first view: %v", err)
+		}
+		if _, err := tx.Exec(ctx, `SELECT materialize_position_projection('vt2'::regclass, 'multi')`); err != nil {
+			t.Fatalf("second view (temp reuse / lock): %v", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if got := classOf(t, "it1", "aa"); got != "LOAN" {
+			t.Errorf("view 1 class = %q; want LOAN", got)
+		}
+		if got := classOf(t, "it2", "aa"); got != "BORROW" {
+			t.Errorf("view 2 class = %q; want BORROW", got)
+		}
+	})
+
+	t.Run("concurrent same-view runs serialize on the advisory lock", func(t *testing.T) {
+		if _, err := pool.Exec(ctx, `CREATE OR REPLACE VIEW vlock AS `+valuesOf(row("ilk2", "aa", 5, "LOAN", 100, 0, 0))); err != nil {
+			t.Fatal(err)
+		}
+		// conn A holds the per-view xact advisory lock (open transaction, uncommitted).
+		connA, err := pool.Acquire(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer connA.Release()
+		txA, err := connA.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer txA.Rollback(ctx)
+		if _, err := txA.Exec(ctx, `SELECT materialize_position_projection('vlock'::regclass, 'A')`); err != nil {
+			t.Fatalf("conn A: %v", err)
+		}
+		// conn B on the same view must block on the advisory lock; statement_timeout interrupts the wait,
+		// proving B was excluded (a broken/absent lock would let B finish instantly).
+		connB, err := pool.Acquire(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer connB.Release()
+		if _, err := connB.Exec(ctx, `SET statement_timeout = '2s'`); err != nil {
+			t.Fatal(err)
+		}
+		_, errB := connB.Exec(ctx, `SELECT materialize_position_projection('vlock'::regclass, 'B')`)
+		connB.Exec(ctx, `RESET statement_timeout`) // don't leak the timeout back to the pool
+		if errB == nil {
+			t.Error("conn B completed while conn A held the lock; the per-view lock did not serialize")
+		} else if !strings.Contains(errB.Error(), "statement timeout") {
+			t.Errorf("conn B failed with %v; want a statement timeout (blocked on the advisory lock)", errB)
+		}
+	})
+
+	// --- atomicity / NOT-NULL observation columns ----------------------------------------------
+
+	t.Run("a within-write failure leaves existing rows untouched (atomicity)", func(t *testing.T) {
+		// Seed a position, then run a view that updates it AND emits a second position with an unseeded code.
+		// The FK failure during the classification write must roll back the WHOLE statement: the seeded
+		// row's quantity and classification unchanged, and the poison position must have written nothing.
+		mpp(t, "vat", valuesOf(row("iat", "aa", 5, "LOAN", 100, 0, 0)), "seed")
+		poison := valuesOf(row("iat", "aa", 50, "LOAN", 100, 0, 0), row("iat2", "aa", 7, "NOPE_CODE", 100, 0, 0))
+		if _, err := pool.Exec(ctx, `CREATE OR REPLACE VIEW vat AS `+poison); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `SELECT materialize_position_projection('vat'::regclass, 'poison')`); err == nil {
+			t.Fatal("expected the unseeded-code run to fail")
+		}
+		var unchanged bool
+		if err := pool.QueryRow(ctx, `SELECT quantity = 5 FROM position_state WHERE position_id = position_id(1,10,'iat','aa')`).Scan(&unchanged); err != nil {
+			t.Fatal(err)
+		}
+		if !unchanged {
+			t.Error("existing quantity changed after a rolled-back run; want 5 (no partial write)")
+		}
+		if got := classOf(t, "iat", "aa"); got != "LOAN" {
+			t.Errorf("existing classification = %q after a rolled-back run; want LOAN", got)
+		}
+		var poisonRows int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_state WHERE position_id = position_id(1,10,'iat2','aa')`).Scan(&poisonRows); err != nil {
+			t.Fatal(err)
+		}
+		if poisonRows != 0 {
+			t.Errorf("poison position wrote %d rows; want 0 (all-or-nothing)", poisonRows)
+		}
+	})
+
+	t.Run("null block_number rejected (NOT NULL observation column)", func(t *testing.T) {
+		body := `SELECT * FROM (VALUES (1::int,10::bigint,'ibn'::text,'aa'::text,5::numeric,'LOAN'::text,NULL::bigint,0::int,0::int,'2026-01-01'::timestamptz)) ` + mppCols
+		mppErr(t, "vbn", body, "bn", "not-null constraint")
+	})
+
+	t.Run("null block_timestamp rejected (NOT NULL partition column)", func(t *testing.T) {
+		body := `SELECT * FROM (VALUES (1::int,10::bigint,'ibt'::text,'aa'::text,5::numeric,'LOAN'::text,100::bigint,0::int,0::int,NULL::timestamptz)) ` + mppCols
+		mppErr(t, "vbt", body, "bt", "not-null constraint")
+	})
 }
