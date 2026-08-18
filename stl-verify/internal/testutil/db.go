@@ -17,25 +17,12 @@ import (
 // ConnectPool creates a pgxpool.Pool for the given DSN with retry logic.
 func ConnectPool(t *testing.T, dsn string) *pgxpool.Pool {
 	t.Helper()
-	ctx := context.Background()
 
-	pool, err := pgxpool.New(ctx, dsn)
+	pool, err := connectPool(context.Background(), dsn)
 	if err != nil {
-		t.Fatalf("connect: %v", err)
+		t.Fatalf("connect pool: %v", err)
 	}
-
-	for range 30 {
-		if pool.Ping(ctx) == nil {
-			return pool
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	// t.Fatal runs runtime.Goexit and this pool never reaches the caller: its leaked
-	// goroutines would let the package's leak check overwrite the exit code.
-	pool.Close()
-	t.Fatal("timed out waiting for database connection")
-	return nil
+	return pool
 }
 
 // StartTimescaleDBForMain starts a shared TimescaleDB container for use in
@@ -121,54 +108,43 @@ func createProcessDatabase(baseDSN string) (dsn string, cleanup func()) {
 		log.Fatalf("build DSN for %s: %v", dbName, err)
 	}
 
-	// Migrations leave the extension to the infrastructure bootstrap in production,
-	// and a fresh database does not inherit it from template1.
-	pool := ConnectPoolForMain(dsn)
-	defer pool.Close()
-	if _, err := pool.Exec(ctx, "CREATE EXTENSION IF NOT EXISTS timescaledb"); err != nil {
-		log.Fatalf("enable timescaledb in %s: %v", dbName, err)
-	}
-
 	cleanup = func() {
-		dropCtx := context.Background()
-		dropPool, err := pgxpool.New(dropCtx, baseDSN)
-		if err != nil {
-			log.Printf("warning: could not connect to drop database %s: %v", dbName, err)
-			return
-		}
-		defer dropPool.Close()
-		if _, err := dropPool.Exec(dropCtx, dropDatabaseSQL(dbName)); err != nil {
-			log.Printf("warning: could not drop database %s: %v", dbName, err)
+		if err := dropDatabase(baseDSN, dbName); err != nil {
+			log.Printf("warning: %v", err)
 		}
 	}
 	return dsn, cleanup
 }
 
-// ConnectPoolForMain connects to the database for use in TestMain.
-// On error it calls log.Fatal instead of t.Fatalf.
+// ConnectPoolForMain is ConnectPool for TestMain, where there is no *testing.T to
+// fail. On error it calls log.Fatal.
 func ConnectPoolForMain(dsn string) *pgxpool.Pool {
-	ctx := context.Background()
-
-	pool, err := pgxpool.New(ctx, dsn)
+	pool, err := connectPool(context.Background(), dsn)
 	if err != nil {
-		log.Fatalf("connect: %v", err)
+		log.Fatalf("connect pool: %v", err)
 	}
-
-	for range 30 {
-		if pool.Ping(ctx) == nil {
-			return pool
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	log.Fatal("timed out waiting for database connection")
-	return nil
+	return pool
 }
 
 // dropDatabaseSQL drops dbName, terminating any backend still attached to it —
 // a pool that outlived its test would otherwise block the drop outright.
 func dropDatabaseSQL(dbName string) string {
 	return fmt.Sprintf("DROP DATABASE IF EXISTS %s WITH (FORCE)", dbName)
+}
+
+// dropDatabase connects to baseDSN solely to remove dbName.
+func dropDatabase(baseDSN, dbName string) error {
+	ctx := context.Background()
+	adminPool, err := pgxpool.New(ctx, baseDSN)
+	if err != nil {
+		return fmt.Errorf("connect to drop database %s: %w", dbName, err)
+	}
+	defer adminPool.Close()
+
+	if _, err := adminPool.Exec(ctx, dropDatabaseSQL(dbName)); err != nil {
+		return fmt.Errorf("drop database %s: %w", dbName, err)
+	}
+	return nil
 }
 
 // replaceDatabase points a DSN at another database on the same server.

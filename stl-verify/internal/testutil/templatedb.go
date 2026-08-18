@@ -79,19 +79,8 @@ func SetupDBForMain(baseDSN, dbName string) *pgxpool.Pool {
 // taking the same dbName it was given. Cleanup is best effort: it warns rather
 // than failing the run.
 func CleanupDBForMain(baseDSN string, pool *pgxpool.Pool, dbName string) {
-	dbName = withProcessTag(dbName)
-	pool.Close()
-
-	ctx := context.Background()
-	adminPool, err := pgxpool.New(ctx, baseDSN)
-	if err != nil {
-		log.Printf("warning: could not connect to drop database %s: %v", dbName, err)
-		return
-	}
-	defer adminPool.Close()
-
-	if _, err := adminPool.Exec(ctx, dropDatabaseSQL(dbName)); err != nil {
-		log.Printf("warning: could not drop database %s: %v", dbName, err)
+	if err := dropClonedDatabase(pool, baseDSN, withProcessTag(dbName)); err != nil {
+		log.Printf("warning: %v", err)
 	}
 }
 
@@ -144,18 +133,7 @@ func setupClonedDatabase(
 // dropClonedDatabase closes the pool and removes the clone.
 func dropClonedDatabase(pool *pgxpool.Pool, baseDSN, dbName string) error {
 	pool.Close()
-
-	ctx := context.Background()
-	adminPool, err := pgxpool.New(ctx, baseDSN)
-	if err != nil {
-		return fmt.Errorf("connect to drop database %s: %w", dbName, err)
-	}
-	defer adminPool.Close()
-
-	if _, err := adminPool.Exec(ctx, dropDatabaseSQL(dbName)); err != nil {
-		return fmt.Errorf("drop database %s: %w", dbName, err)
-	}
-	return nil
+	return dropDatabase(baseDSN, dbName)
 }
 
 // Postgres refuses to copy a template while any other backend is attached to it,
@@ -419,7 +397,9 @@ func migrationsDir() string {
 	return filepath.Join(filepath.Dir(currentFile), "../../db/migrations")
 }
 
-// connectPool opens a pool and waits for the server to answer.
+// connectPool opens a pool and waits for the server to answer. It never hands back
+// a live pool alongside an error: a caller that fails with runtime.Goexit would
+// otherwise leave goroutines for the package's leak check to trip over.
 func connectPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
