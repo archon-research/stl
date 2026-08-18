@@ -50,8 +50,12 @@ CREATE INDEX IF NOT EXISTS idx_morpho_vault_fee_block ON morpho_vault_fee (block
 -- Build-aware processing-version trigger with advisory lock (ADR-0002 §3).
 -- timestamp is wrapped in EXTRACT(epoch FROM …) so the key is
 -- TimeZone/DateStyle-stable.
+-- Pinned to force_custom_plan, required of every assign_processing_version_* function
+-- whether or not its table is a hypertable (VEC-541).
 CREATE OR REPLACE FUNCTION assign_processing_version_morpho_vault_fee()
-RETURNS TRIGGER AS $$
+RETURNS TRIGGER
+SET plan_cache_mode = 'force_custom_plan'
+AS $$
 DECLARE
     existing_ver INT;
     max_ver      INT;

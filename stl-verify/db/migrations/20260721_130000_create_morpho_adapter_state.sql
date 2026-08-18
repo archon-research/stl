@@ -58,8 +58,12 @@ END $$;
 -- Same (adapter, block, block_version, timestamp, build_id) retry → reuse
 -- version (idempotent); a new build_id at the same key → MAX+1. Timestamp is
 -- wrapped in EXTRACT(epoch FROM …) so the lock key is TimeZone/DateStyle-stable.
+-- Pinned to force_custom_plan so the per-row lookups keep pruning chunks instead of
+-- fanning out over every chunk once plpgsql caches a generic plan (VEC-541).
 CREATE OR REPLACE FUNCTION assign_processing_version_morpho_adapter_state()
-RETURNS TRIGGER AS $$
+RETURNS TRIGGER
+SET plan_cache_mode = 'force_custom_plan'
+AS $$
 DECLARE
     existing_ver INT;
     max_ver      INT;
