@@ -7,7 +7,7 @@ type TabNotePanelProps = {
 
 // Applying the recipe rather than the shipped `SurfaceMessage` component is
 // deliberate — that component styles itself with inline `style` objects, which
-// win over anything a consumer `className` declares.
+// win over anything a consumer `className` declares. Tracked as ORB-352.
 const surfaceMessageStyles = surfaceMessage();
 
 export function TabNotePanel({ message }: TabNotePanelProps) {

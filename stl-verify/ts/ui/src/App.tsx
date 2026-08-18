@@ -959,14 +959,9 @@ function App() {
     <div
       className={css({
         position: 'relative',
-        '& [data-sidebar-layout] [data-part="panel"]:last-of-type > div': {
-          overflow: 'auto !important',
-          minHeight: '0 !important',
-        },
-        '& [data-sidebar-layout] [data-scope="resize-handle"][data-part="root"][data-axis="vertical"]':
-          {
-            right: '0 !important',
-          },
+        // Not a workaround: the sidebar splitter's 1px indicator line is
+        // redundant next to the sidebar's own border, so hide it and let the
+        // col-resize cursor carry the affordance.
         '& [data-sidebar-layout] [data-scope="resize-handle"][data-part="indicator"]':
           {
             opacity: 0,

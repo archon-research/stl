@@ -4,7 +4,6 @@ import {
   type ColumnDef,
   DataTable,
   ErrorState,
-  LoadingIndicator,
   matchesSearchQuery,
   SkeletonStack,
   useDataTable,
@@ -36,6 +35,7 @@ import type {
 import {
   ChainLogo,
   SummaryMetric,
+  tableHeaderTypographyClassName,
   TokenAddress,
   TruncatedLabel,
 } from '../../shared';
@@ -48,25 +48,6 @@ type RiskBreakdownTabProps = {
   selectedReceiptToken: Allocation | null;
   selectedPrime: Prime | null;
 };
-
-const tableHeaderTypographyClassName = css({
-  '& thead th': {
-    fontSize: 'sm',
-    fontWeight: 'semibold',
-    lineHeight: 'shorter',
-    letterSpacing: '0.02em',
-    textTransform: 'uppercase',
-    color: 'text.default',
-  },
-  '& thead th button': {
-    fontSize: 'sm',
-    fontWeight: 'semibold',
-    lineHeight: 'shorter',
-    letterSpacing: '0.02em',
-    textTransform: 'uppercase',
-    color: 'text.default',
-  },
-});
 
 type RiskItem = RiskBreakdown['items'][number];
 
@@ -221,7 +202,7 @@ function RiskTable({
         table={table}
         isLoading={isLoading}
         getRowKey={(item) => String(item.token_id ?? item.symbol)}
-        skeletonConfig={{ rows: 5, columns: 6, firstColumnTall: false }}
+        skeletonConfig={{ rows: 5, firstColumnTall: false }}
         // Sized to what the six columns actually need once the long liquidation
         // headers ellipsize. The old 76rem exceeded the drawer this table lives
         // in, so the last column was always clipped no matter how wide the
@@ -479,8 +460,6 @@ export function RiskBreakdownTab({
 
   return (
     <div className={css({ display: 'grid', gap: '4' })}>
-      {isLoading ? <LoadingIndicator message="Loading risk breakdown" /> : null}
-
       {errorMessage ? (
         <ErrorState
           title="Unable to load the risk breakdown."

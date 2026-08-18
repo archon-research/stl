@@ -7,17 +7,20 @@ import {
   Axis,
   buildChartTheme,
   chartTokens,
+  useContainerWidth,
 } from '@archon-research/charting';
 import {
+  Badge,
   type ColumnDef,
   DataTable,
   EmptyState,
   ErrorState,
   SearchInput,
+  SkeletonStack,
   type SortingState,
   useDataTable,
 } from '@archon-research/design-system';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 import { css, cx } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
@@ -53,6 +56,7 @@ import {
   PageShell,
   ProtocolLogo,
   SummaryMetric,
+  tableHeaderTypographyClassName,
   TokenAddress,
   TokenLogo,
 } from '../shared';
@@ -159,38 +163,6 @@ function buildSingleSeriesTheme(stroke: string) {
   });
 }
 
-// Callback-ref based width measurement: a stable ref that wires up a
-// ResizeObserver when the node mounts and tears it down on unmount. A bare
-// useEffect+useRef would miss the mount because the measured node only renders
-// after the loading/empty guards below resolve.
-function useMeasuredWidth(): [
-  (node: HTMLDivElement | null) => void,
-  number | null,
-] {
-  const [width, setWidth] = useState<number | null>(null);
-  const observerRef = useRef<ResizeObserver | null>(null);
-
-  const measureRef = useCallback((node: HTMLDivElement | null) => {
-    observerRef.current?.disconnect();
-
-    if (!node) {
-      return;
-    }
-
-    const measure = () => {
-      const nextWidth = Math.floor(node.getBoundingClientRect().width);
-      setWidth(nextWidth > 0 ? nextWidth : null);
-    };
-
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(node);
-    observerRef.current = observer;
-  }, []);
-
-  return [measureRef, width];
-}
-
 const chartEmptyMessageClassName = css({
   m: 0,
   mt: '2',
@@ -209,26 +181,15 @@ function MetricCardTrend({
   isLoading: boolean;
   errorMessage: string | null;
 }) {
-  const [measureRef, chartWidth] = useMeasuredWidth();
-  const chartTheme = useMemo(
-    () => buildSingleSeriesTheme(chart?.stroke ?? chartTokens.axis),
-    [chart?.stroke],
-  );
-
   if (isLoading) {
-    // Match the chart's footprint so the placeholder fills the same space and
-    // there's no jump (or floating box) when the real chart loads in.
+    // A single block at the chart's own footprint, so the placeholder fills the
+    // same space and there's no jump (or floating box) when the real chart loads
+    // in.
     return (
-      <div
-        style={{ height: CHART_HEIGHT }}
-        className={css({
-          mt: '2',
-          borderRadius: 'sm',
-          borderWidth: '1px',
-          borderStyle: 'solid',
-          borderColor: 'border.subtle',
-          bg: 'surface.default',
-        })}
+      <SkeletonStack
+        count={1}
+        itemHeight={CHART_HEIGHT}
+        className={css({ mt: '2' })}
       />
     );
   }
@@ -256,10 +217,25 @@ function MetricCardTrend({
     );
   }
 
+  return <MetricCardChart chart={chart} />;
+}
+
+// Split out of MetricCardTrend so the measured element mounts with the component
+// that measures it: `useContainerWidth` observes on mount, and above the guards
+// there is no node to observe yet.
+function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
+  // Until the first measurement the kit's fallback width applies, which can
+  // overhang a narrow card for a frame — clipped rather than allowed to widen
+  // the card under the reader.
+  const [measureRef, chartWidth] = useContainerWidth();
+  const chartTheme = useMemo(
+    () => buildSingleSeriesTheme(chart.stroke),
+    [chart.stroke],
+  );
+
   const values = chart.data.map((point) => point.value);
   const minValue = Math.min(...values);
   const maxValue = Math.max(...values);
-  const chartHeight = CHART_HEIGHT;
 
   // A constant series (the current-value fallback) has a degenerate [v, v]
   // domain whose area would fill the whole plot as a solid block; pad it so the
@@ -273,131 +249,104 @@ function MetricCardTrend({
   return (
     <div
       ref={measureRef}
-      className={css({ mt: '2', width: 'full', minWidth: 0 })}
+      className={css({
+        mt: '2',
+        width: 'full',
+        minWidth: 0,
+        overflowX: 'hidden',
+      })}
     >
-      {chartWidth === null ? (
-        <div
-          className={css({
-            height: `${chartHeight}px`,
-            width: 'full',
+      <XYChart
+        theme={chartTheme}
+        width={chartWidth}
+        height={CHART_HEIGHT}
+        margin={{ top: 8, right: 24, bottom: 76, left: 64 }}
+        xScale={{ type: 'band', paddingInner: 0.2 }}
+        yScale={{ type: 'linear', domain: yDomain, nice: !isFlat }}
+      >
+        <Grid columns={false} numTicks={3} />
+        <Axis
+          orientation="bottom"
+          numTicks={4}
+          hideTicks
+          tickLabelProps={() => ({
+            fontSize: 10,
+            textAnchor: 'end',
+            angle: -35,
+            dx: '-0.25em',
+            dy: '0.25em',
+            fill: 'var(--colors-text-muted)',
           })}
         />
-      ) : null}
-      {chartWidth !== null ? (
-        <XYChart
-          theme={chartTheme}
-          width={chartWidth}
-          height={chartHeight}
-          margin={{ top: 8, right: 24, bottom: 76, left: 64 }}
-          xScale={{ type: 'band', paddingInner: 0.2 }}
-          yScale={{ type: 'linear', domain: yDomain, nice: !isFlat }}
-        >
-          <Grid columns={false} numTicks={3} />
-          <Axis
-            orientation="bottom"
-            numTicks={4}
-            hideTicks
-            tickLabelProps={() => ({
-              fontSize: 10,
-              textAnchor: 'end',
-              angle: -35,
-              dx: '-0.25em',
-              dy: '0.25em',
-              fill: 'var(--colors-text-muted)',
-            })}
-          />
-          {chart.kind === 'fallback' ? null : (
-            <AreaSeries
-              dataKey={`${chart.key}-area`}
-              data={chart.data as ChartDatum[]}
-              xAccessor={(d: ChartDatum) => d.label}
-              yAccessor={(d: ChartDatum) => d.value}
-              fill={chart.stroke}
-              fillOpacity={0.18}
-              lineProps={{ stroke: 'none' }}
-            />
-          )}
-          <LineSeries
-            dataKey={chart.key}
+        {chart.kind === 'fallback' ? null : (
+          <AreaSeries
+            dataKey={`${chart.key}-area`}
             data={chart.data as ChartDatum[]}
             xAccessor={(d: ChartDatum) => d.label}
             yAccessor={(d: ChartDatum) => d.value}
-            stroke={chart.stroke}
+            fill={chart.stroke}
+            fillOpacity={0.18}
+            lineProps={{ stroke: 'none' }}
           />
-          <Tooltip
-            snapTooltipToDatumX
-            snapTooltipToDatumY
-            showVerticalCrosshair
-            showSeriesGlyphs
-            renderTooltip={({
-              tooltipData,
-            }: {
-              tooltipData?: { nearestDatum?: { datum: unknown } };
-            }) => {
-              const datum = tooltipData?.nearestDatum?.datum as
-                | ChartDatum
-                | undefined;
-              if (!datum) return null;
-              return (
-                <div className={chartTooltipSurfaceClassName}>
-                  <div className={chartTooltipTitleClassName}>
-                    {datum.label}
-                  </div>
-                  <div
-                    className={chartTooltipValueClassName}
-                    style={{ color: chart.stroke }}
-                  >
-                    {chart.formatValue(datum.value)}
-                  </div>
+        )}
+        <LineSeries
+          dataKey={chart.key}
+          data={chart.data as ChartDatum[]}
+          xAccessor={(d: ChartDatum) => d.label}
+          yAccessor={(d: ChartDatum) => d.value}
+          stroke={chart.stroke}
+        />
+        <Tooltip
+          snapTooltipToDatumX
+          snapTooltipToDatumY
+          showVerticalCrosshair
+          showSeriesGlyphs
+          renderTooltip={({
+            tooltipData,
+          }: {
+            tooltipData?: { nearestDatum?: { datum: unknown } };
+          }) => {
+            const datum = tooltipData?.nearestDatum?.datum as
+              | ChartDatum
+              | undefined;
+            if (!datum) return null;
+            return (
+              <div className={chartTooltipSurfaceClassName}>
+                <div className={chartTooltipTitleClassName}>{datum.label}</div>
+                <div
+                  className={chartTooltipValueClassName}
+                  style={{ color: chart.stroke }}
+                >
+                  {chart.formatValue(datum.value)}
                 </div>
-              );
-            }}
-          />
-        </XYChart>
-      ) : null}
+              </div>
+            );
+          }}
+        />
+      </XYChart>
     </div>
   );
 }
 
-// House header style, louder than the 11px (`2xs`) muted micro-label the recipe
-// gives a `density="compact"` table. Sortable
-// headers need no separate rule: the recipe's headerButton slot inherits font,
-// color, text-transform and letter-spacing from the cell.
-const tableHeaderTypographyClassName = css({
-  '& thead th': {
-    fontSize: 'sm',
-    fontWeight: 'semibold',
-    lineHeight: 'shorter',
-    letterSpacing: '0.02em',
-    textTransform: 'uppercase',
-    color: 'text.default',
-  },
-});
-
-// See PrimeSidebar for why the preset's dark `interactive.selected` is diluted.
-// Here it has to arrive as a descendant override because the fill comes from the
-// `dataTable` recipe's `selected` variant, which the DataTable applies as a
-// hardcoded class name.
+// Fill override for the `Badge` these chips render as: `Badge`'s `colorPalette`
+// ships six status-flavoured hues, so it cannot give five strategy categories
+// distinct fills, and its red would read as an alarm on a routine category. The
+// `categorical.*` tokens encode grouping without status meaning, and their hue
+// order matches `chart.series`, so a chip and its series line read as the same
+// category. Everything else about the chip — radius, weight, size, padding — is
+// the recipe's.
+//
 // One literal `css()` call per category, evaluated at module scope, so the cell
 // picks a finished class name: see `lib/activity.tsx` for why Panda cannot
 // extract a token path handed in as a variable.
-//
-// Hues come from the `categorical.*` tokens, which encode grouping without
-// status meaning — the `bg.*`/`text.*` status family cannot give five strategy
-// categories distinct fills without two colliding, and its red would read as an
-// alarm on a routine category. Hue order matches `chart.series`, so a chip and
-// its series line read as the same category.
 const CATEGORY_CHIP_CLASS: Record<AllocationCategory | 'unknown', string> = {
   allocation: css({ bg: 'categorical.1.bg', color: 'categorical.1.fg' }),
   pol: css({ bg: 'categorical.2.bg', color: 'categorical.2.fg' }),
   psm3: css({ bg: 'categorical.3.bg', color: 'categorical.3.fg' }),
   asset: css({ bg: 'categorical.4.bg', color: 'categorical.4.fg' }),
   custody: css({ bg: 'categorical.5.bg', color: 'categorical.5.fg' }),
-  unknown: css({
-    colorPalette: 'neutral',
-    bg: 'colorPalette.subtle.bg',
-    color: 'text.default',
-  }),
+  // No override: `Badge`'s own subtle × neutral default is this fill.
+  unknown: '',
 };
 
 function getCategoryChipClass(
@@ -663,22 +612,9 @@ function AllocationCategoryCell({ allocation }: { allocation: Allocation }) {
   const category = allocation.category;
 
   return (
-    <div
-      className={cx(
-        css({
-          display: 'inline-flex',
-          alignItems: 'center',
-          px: '2',
-          py: '1',
-          borderRadius: 'md',
-          fontSize: 'xs',
-          fontWeight: 'semibold',
-        }),
-        getCategoryChipClass(category),
-      )}
-    >
+    <Badge className={getCategoryChipClass(category)}>
       {getCategoryLabel(category)}
-    </div>
+    </Badge>
   );
 }
 
@@ -1499,7 +1435,7 @@ export function AllocationGrid({
               // Six nowrap columns push min-content well past this, so it binds
               // only on the loading skeleton, which has no intrinsic width.
               minWidth="48rem"
-              skeletonConfig={{ rows: 8, columns: 6, firstColumnTall: true }}
+              skeletonConfig={{ rows: 8, firstColumnTall: true }}
             />
           </div>
         ) : null}
