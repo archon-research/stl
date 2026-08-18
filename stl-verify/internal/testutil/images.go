@@ -1,8 +1,8 @@
 package testutil
 
-// Container image tags used by integration and benchmark tests.
-// The CI workflow derives its docker pull list from these constants, so
-// updating a tag here is the only change needed to keep CI and tests aligned.
+// Container image tags used by integration and benchmark tests. The integration
+// job runs the same tags from its own `services:` block, so a bump here needs the
+// same bump there; ci/check-service-images.sh fails when the two disagree.
 const (
 	ImageTimescaleDB = "timescale/timescaledb:2.25.1-pg17"
 	ImageRedis       = "redis:8.0.6-alpine"
