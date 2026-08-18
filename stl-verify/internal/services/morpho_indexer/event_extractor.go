@@ -149,7 +149,7 @@ func (e *EventExtractor) IsMetaMorphoEvent(log shared.Log) bool {
 //
 //   - V1/V1.1 vaults are discovered via the Morpho Blue path: their address
 //     appears as caller / onBehalf in Morpho Blue Supply / Withdraw / Borrow /
-//     Repay events when they allocate, and the live indexer (service.go's
+//     Repay events when they allocate, and the live indexer (discovery.go's
 //     discoverV1V11VaultsInReceipt) plus the morpho-vault-indexer
 //     backfiller (emitMorphoBlueCandidates) probe those addresses. The V1/V1.1
 //     factories remain deployed and callable; the live indexer's coverage

@@ -445,6 +445,14 @@ func hasSameSelector(a, b []byte) bool {
 	return true
 }
 
+// adaptersLengthSelector / adaptersSelector are the enumerable-adapter read
+// selectors on VaultV2 (chain-verified against sparkUSDTbc: adaptersLength()
+// 0x5aa22bc8, adapters(uint256) 0x4ef501ac).
+var (
+	adaptersLengthSelector = []byte{0x5a, 0xa2, 0x2b, 0xc8}
+	adaptersSelector       = []byte{0x4e, 0xf5, 0x01, 0xac}
+)
+
 // --- Event log construction helpers ---
 
 var (
