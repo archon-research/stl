@@ -483,10 +483,12 @@ function ActivityChainCell({
   event: AllocationActivity;
   chainLabels?: ChainLabelLookup;
 }) {
+  const chainLabel = getChainLabel(event.chain_id, chainLabels);
+
   return (
     <span className={activityInlineCellClassName}>
-      <ChainLogo chainId={event.chain_id} size="4" />
-      {getChainLabel(event.chain_id, chainLabels)}
+      <ChainLogo chainId={event.chain_id} label={chainLabel} size="4" />
+      {chainLabel}
     </span>
   );
 }

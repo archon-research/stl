@@ -17,7 +17,7 @@ There is one primary screen (the allocation dashboard, `src/App.tsx`), composed 
 - Summary metric row (`SummaryMetric`): the 4-up metric tiles above the grid.
 - Allocation grid (`AllocationGrid`): the dense data table, including the selected-row state and the `Badge` category chips (`categorical.1..5` fills).
 - Bottom panel (`BottomPanel`): segmented tabs for Risk breakdown, Required risk capital, and Activity.
-- Activity feed (`tabs/ActivityFeed`): a `DataTable` — Time / Token / Action / Protocol / Amount / Block / Chain / Tx columns — not the former card list. Each row expands in place through `renderDetailPanel` into the per-transaction protocol-event panel. The drawer-mode feed is the same table and the same columns, in a much narrower container.
+- Activity feed (`tabs/ActivityFeed`): a `DataTable` — Time / Token / Action / Protocol / Amount / Block / Chain / Tx columns, plus the leading expander column — not the former card list. Each row expands in place through `renderDetailPanel` into the per-transaction protocol-event panel. The drawer-mode feed is the same table and the same columns, in a much narrower container.
 - Risk detail drawer (`RiskDetailDrawer`): overlay drill-down for a selected allocation.
 
 Verify each in both light and dark themes.
