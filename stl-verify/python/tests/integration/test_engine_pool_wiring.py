@@ -1,9 +1,8 @@
 """The running app's connection pool must be the configured one.
 
-``tests/unit/test_engine.py`` covers the factory in isolation, which is exactly
-what let the lifespan build its own engine inline and run production on
-SQLAlchemy's 5 + 10 / 30s defaults while those unit tests stayed green. This
-asserts against the engine the app actually serves requests from.
+``tests/unit/test_engine.py`` covers the factory in isolation, so it stays green
+even when the lifespan builds its own engine inline and serves requests on
+SQLAlchemy's defaults. This asserts against the engine the app actually uses.
 """
 
 from collections.abc import Iterator

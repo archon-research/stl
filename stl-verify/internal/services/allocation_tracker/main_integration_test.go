@@ -1,6 +1,6 @@
-//go:build integration || livevalidation
+//go:build integration
 
-package uniswapv3indexer
+package allocation_tracker
 
 import (
 	"os"
@@ -9,8 +9,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-// Also tagged livevalidation: that manual, Alchemy-backed gate lives in this
-// package and takes its database from this container rather than starting one.
 var sharedDSN string
 
 func TestMain(m *testing.M) {

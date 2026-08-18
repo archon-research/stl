@@ -4,7 +4,7 @@
 # Include language-agnostic linting targets
 include lint.mk
 
-.PHONY: all test test-race test-integration lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-oracle-price-worker-avax run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-allocation-tracker run-allocation-tracker-avax help ci ci-checks install-hooks format \
+.PHONY: all test test-race test-integration test-integration-shard integration-shard-check lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-oracle-price-worker-avax run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-allocation-tracker run-allocation-tracker-avax help ci ci-checks install-hooks format \
 	dev-up dev-up-rebuild dev-up-workers dev-up-or-resume dev-preflight dev-env dev-db dev-down dev-suspend dev-resume dev-wipe dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
 		_docker-release-image _docker-release-go-service \
@@ -146,9 +146,21 @@ test:
 	@echo "==> Running unit tests..."
 	go test -v ./...
 
-test-integration: 
+test-integration: integration-shard-check
 	@echo "==> Running integration tests..."
 	GOEXPERIMENT=goroutineleakprofile go test -tags=integration -v -timeout=10m -p 4 ./...
+
+test-integration-shard: integration-shard-check
+	@case "$(INTEGRATION_SHARD)" in \
+		1|2) ;; \
+		*) echo "ERROR: INTEGRATION_SHARD must be 1 or 2"; exit 1 ;; \
+	esac
+	@echo "==> Running integration test shard $(INTEGRATION_SHARD)/2..."
+	@packages=$$(grep -hEv '^[[:space:]]*(#|$$)' ci/integration-shards/$(INTEGRATION_SHARD).txt | tr '\n' ' '); \
+		GOEXPERIMENT=goroutineleakprofile go test -tags=integration -v -timeout=10m -p 4 $$packages
+
+integration-shard-check:
+	@bash ci/check-integration-shards.sh
 
 # Run tests with coverage
 cover:
@@ -216,6 +228,22 @@ tidy-check:
 	@mv go.mod.bak go.mod && mv go.sum.bak go.sum
 	@echo "go.mod is tidy"
 
+# Enforces the one-container-per-package rule in AGENTS.md; a test that starts its
+# own container adds a container start to every CI run. Benchmarks are exempt: they
+# are not part of make test-integration. Matching the IMPORT PATH, not a call like
+# testcontainers.GenericContainer, because only testutil may depend on testcontainers
+# at all — so an alias, testcontainers.Run, or a modules/* helper cannot slip past.
+shared-container-check:
+	@echo "==> Checking integration tests share their containers..."
+	@offenders=$$(grep -rl 'testcontainers/testcontainers-go' --include='*_test.go' . \
+	  | grep -v '^\./internal/testutil/' | grep -v '_benchmark_test\.go$$'); \
+	if [ -n "$$offenders" ]; then \
+	  echo "ERROR: these tests start their own container instead of sharing the package's:"; \
+	  echo "$$offenders" | sed 's/^/  /'; \
+	  echo "Start it once in TestMain via testutil.Start<X>ForMain and isolate per test instead."; \
+	  exit 1; \
+	fi
+
 # Run staticcheck with all checks (install if needed)
 staticcheck:
 	@echo "==> Running staticcheck..."
@@ -231,9 +259,11 @@ golangci-lint:
 GOVULN_IGNORE := GO-2026-4887|GO-2026-4883
 vulncheck:
 	@echo "==> Running govulncheck..."
-	@$(GOBIN)/govulncheck ./... 2>&1; rc=$$?; \
+	@out=$$($(GOBIN)/govulncheck ./... 2>&1); rc=$$?; printf '%s\n' "$$out"; \
 	if [ $$rc -eq 0 ]; then exit 0; fi; \
-	unmatched=$$($(GOBIN)/govulncheck ./... 2>&1 | grep '^Vulnerability' | grep -v -E '$(GOVULN_IGNORE)'); \
+	vulns=$$(printf '%s\n' "$$out" | grep '^Vulnerability'); \
+	if [ -z "$$vulns" ]; then echo "ERROR: govulncheck failed without reporting vulnerabilities"; exit 1; fi; \
+	unmatched=$$(printf '%s\n' "$$vulns" | grep -v -E '$(GOVULN_IGNORE)'); \
 	if [ -n "$$unmatched" ]; then echo "ERROR: unignored vulnerabilities found"; exit 1; fi; \
 	echo "WARNING: only ignored vulnerabilities found ($(GOVULN_IGNORE)) — passing"
 
@@ -265,15 +295,17 @@ e2e:
 tools:
 	@echo "==> Installing development tools..."
 	go install honnef.co/go/tools/cmd/staticcheck@latest
-	go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 # keep in sync with .github/workflows/go-ci.yml
 	go install golang.org/x/vuln/cmd/govulncheck@latest
-	go install golang.org/x/tools/cmd/goimports@latest
+	go install golang.org/x/tools/cmd/goimports@v0.49.0 # keep in sync with .github/workflows/go-ci.yml
 	go install github.com/go-delve/delve/cmd/dlv@latest
 	go install golang.org/x/tools/gopls@latest
 	go install github.com/evilmartians/lefthook@latest
 
-# CI target for lint/format/static/security checks
-ci-checks: fix-check fmt-check goimports-check tidy-check vet staticcheck golangci-lint vulncheck
+# CI target for lint/format/static/security checks. go vet, staticcheck, and
+# go fix -diff are covered by golangci-lint v2 (govet, staticcheck, modernize
+# linters — see .golangci.yml); running them separately tripled analysis time.
+ci-checks: fmt-check goimports-check tidy-check shared-container-check integration-shard-check golangci-lint vulncheck
 
 # CI target: everything with strict checks
 # Order: fast checks first (fail fast), then expensive checks
