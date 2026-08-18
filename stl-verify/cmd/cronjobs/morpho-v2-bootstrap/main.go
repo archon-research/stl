@@ -29,8 +29,25 @@
 // Every write goes through the same idempotent repository methods live indexing
 // uses (converging GetOrCreateAdapter, ON CONFLICT DO NOTHING snapshots), so
 // clicking Trigger again is safe — it redoes the work and converges to the same
-// state. Any failure fails the whole run and shows red in the Temporal UI; the
-// fix is to re-trigger once the cause is addressed.
+// state.
+//
+// # Resuming an interrupted run
+//
+// The sweep records its position in the activity's Temporal heartbeat details
+// after every completed block chunk. A worker killed mid-run (a deploy rolls
+// this Deployment like any other) therefore does not restart at the factory
+// deploy block: the next attempt of the same activity reads the details back and
+// resumes at the next chunk. Resume is chunk-aligned and scoped to the chain,
+// the sweep start, and the V2 vault set it was computed for — a run whose vault
+// set has changed since sweeps the whole range again rather than skip blocks
+// that were never read for the new vault.
+//
+// Heartbeat details belong to one activity execution, so this only spans the
+// automatic attempts within a single run. A run that goes red and is
+// re-triggered by hand is a NEW workflow execution with no heartbeat history: it
+// starts from the beginning, which is safe because every write is idempotent.
+// Any failure past the last attempt shows red in the Temporal UI; the fix is to
+// re-trigger once the cause is addressed.
 package main
 
 import (
@@ -88,6 +105,10 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("startup configuration: %w", err)
 	}
 
+	// One store, shared by the sweep and the liveness heartbeat: the ticker
+	// re-sends what the sweep recorded instead of erasing it with a bare ping.
+	progress := temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]()
+
 	return temporal.RunCronjob(ctx, temporal.BuildMeta{
 		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
 	}, temporal.CronjobConfig{
@@ -95,7 +116,10 @@ func run(ctx context.Context) error {
 		ManualOnly:       true,
 		ActivityTimeouts: bootstrapActivityTimeouts,
 		OpenDatabase:     postgres.PoolOpener(postgres.DefaultDBConfig(dbURL)),
-		Setup:            setupRunner,
+		Progress:         progress,
+		Setup: func(ctx context.Context, deps temporal.Dependencies) (temporal.Runner, error) {
+			return setupRunner(ctx, deps, progress)
+		},
 	})
 }
 
@@ -109,17 +133,26 @@ func run(ctx context.Context) error {
 // killed mid-run (a deploy rolls this Deployment like any other) would hold the
 // activity open until StartToClose expired. With it, Temporal notices in minutes.
 //
-// MaximumAttempts is 1 because a failed run is something an operator should look
-// at before re-triggering — an automatic retry would just burn another long
-// attempt against the same cause.
+// MaximumAttempts is bounded rather than 1: heartbeat details are readable only
+// by a LATER attempt of the same activity, so a single attempt has nothing to
+// resume into and an interrupted run would re-sweep from the factory deploy
+// block. Retrying is cheap for the same reason — an attempt after a
+// deterministic failure restarts at the chunk that failed, not at the beginning.
+// Three keeps the operator signal: a run still red after them has a cause no
+// retry clears, and needs a human.
+//
+// Errors are not classified retryable vs not. Doing that honestly would mean the
+// bootstrap service returning Temporal-typed errors, which would put the SDK
+// inside a service that must not know about it; a small attempt count buys the
+// resume without that.
 var bootstrapActivityTimeouts = temporal.ActivityTimeouts{
 	StartToClose:    6 * time.Hour,
 	ScheduleToClose: 12 * time.Hour,
-	MaximumAttempts: 1,
+	MaximumAttempts: 3,
 	Heartbeat:       time.Minute,
 }
 
-func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runner, error) {
+func setupRunner(ctx context.Context, deps temporal.Dependencies, progress morpho_v2_bootstrap.ProgressStore) (temporal.Runner, error) {
 	chainID, err := chainutil.RequireChainID()
 	if err != nil {
 		return nil, err
@@ -148,7 +181,7 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runn
 		return nil, err
 	}
 
-	service, err := morpho_v2_bootstrap.NewService(sweepConfig, ethClient, replayService)
+	service, err := morpho_v2_bootstrap.NewService(sweepConfig, ethClient, replayService, progress)
 	if err != nil {
 		return nil, fmt.Errorf("creating morpho v2 bootstrap service: %w", err)
 	}

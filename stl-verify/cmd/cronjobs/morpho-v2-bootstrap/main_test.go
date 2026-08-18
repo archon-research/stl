@@ -36,7 +36,7 @@ func TestSetupRunner_RequiresChainID(t *testing.T) {
 	t.Setenv("CHAIN_ID", "")
 	t.Setenv("ALCHEMY_API_KEY", "key")
 
-	_, err := setupRunner(context.Background(), discardDeps())
+	_, err := setupRunner(context.Background(), discardDeps(), temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())
 	if err == nil {
 		t.Fatal("missing CHAIN_ID should error, got nil")
 	}
@@ -49,7 +49,7 @@ func TestSetupRunner_RequiresAlchemyKey(t *testing.T) {
 	t.Setenv("CHAIN_ID", "1")
 	t.Setenv("ALCHEMY_API_KEY", "")
 
-	_, err := setupRunner(context.Background(), discardDeps())
+	_, err := setupRunner(context.Background(), discardDeps(), temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())
 	if err == nil {
 		t.Fatal("missing ALCHEMY_API_KEY should error, got nil")
 	}
@@ -152,6 +152,22 @@ func TestParseSweepConfig(t *testing.T) {
 	}
 }
 
+// TestBootstrapActivityTimeouts_AllowARetryToResumeButStayBounded: heartbeat
+// details are readable only by a LATER ATTEMPT of the same activity, so a single
+// attempt cannot resume — an interrupted run would restart at the deploy block.
+// The count stays small so a run that keeps failing still goes red for an
+// operator instead of retrying all day.
+func TestBootstrapActivityTimeouts_AllowARetryToResumeButStayBounded(t *testing.T) {
+	if bootstrapActivityTimeouts.MaximumAttempts < 2 {
+		t.Errorf("MaximumAttempts = %d, want at least 2 — with one attempt there is no attempt to resume into",
+			bootstrapActivityTimeouts.MaximumAttempts)
+	}
+	if bootstrapActivityTimeouts.MaximumAttempts > 5 {
+		t.Errorf("MaximumAttempts = %d, want at most 5 — a run that keeps failing must reach an operator",
+			bootstrapActivityTimeouts.MaximumAttempts)
+	}
+}
+
 // TestBootstrapActivityTimeouts_AccommodateAMultiHourRun guards the reason this
 // cronjob needed the shared runner extended at all: a full mainnet sweep runs for
 // hours, and the shared 10m StartToClose default would kill it mid-run, leaving
@@ -163,10 +179,6 @@ func TestBootstrapActivityTimeouts_AccommodateAMultiHourRun(t *testing.T) {
 	if bootstrapActivityTimeouts.ScheduleToClose < bootstrapActivityTimeouts.StartToClose {
 		t.Errorf("ScheduleToClose (%s) is below StartToClose (%s); the run would be cut short",
 			bootstrapActivityTimeouts.ScheduleToClose, bootstrapActivityTimeouts.StartToClose)
-	}
-	if bootstrapActivityTimeouts.MaximumAttempts != 1 {
-		t.Errorf("MaximumAttempts = %d, want 1 — a failed multi-hour run needs an operator, not an automatic retry",
-			bootstrapActivityTimeouts.MaximumAttempts)
 	}
 	// Without a heartbeat, a worker killed mid-run (any deploy rolls this
 	// Deployment) holds the activity open until StartToClose expires — hours of

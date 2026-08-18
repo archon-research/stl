@@ -39,7 +39,7 @@ func TestNewCronjobActivities(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			activities, err := newCronjobActivities(tt.runner, nil, 0)
+			activities, err := newCronjobActivities(tt.runner, nil, 0, nil)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")
@@ -107,7 +107,7 @@ func TestCronjobActivities_Execute(t *testing.T) {
 					gotScheduledAt, gotOK = ScheduledAtFromContext(ctx)
 					return tt.runErr
 				},
-			}, nil, 0)
+			}, nil, 0, nil)
 			if err != nil {
 				t.Fatalf("unexpected error creating activities: %v", err)
 			}
@@ -143,7 +143,7 @@ func TestCronjobActivities_Execute(t *testing.T) {
 // keeps today's behavior — no goroutine, no heartbeat — and the returned stop is
 // still safe to call.
 func TestStartHeartbeat_ZeroIntervalIsANoOp(t *testing.T) {
-	stop := startHeartbeat(context.Background(), 0)
+	stop := startHeartbeat(context.Background(), 0, nil)
 	if stop == nil {
 		t.Fatal("startHeartbeat returned a nil stop function")
 	}
@@ -171,7 +171,7 @@ func TestCronjobActivities_Execute_HeartbeatsWithoutLeakingTheReporter(t *testin
 			time.Sleep(20 * interval)
 			return nil
 		},
-	}, nil, interval)
+	}, nil, interval, nil)
 	if err != nil {
 		t.Fatalf("newCronjobActivities: %v", err)
 	}
@@ -187,6 +187,39 @@ func TestCronjobActivities_Execute_HeartbeatsWithoutLeakingTheReporter(t *testin
 		t.Errorf("a heartbeat reporter goroutine survived the activity; Execute did not join it:\n%s", stacks)
 	}
 }
+
+// TestStartHeartbeat_BeatsThroughTheProgressStore: with a progress store the
+// liveness ticker must not ping Temporal directly. A bare ping carries no
+// details, and Temporal keeps only the last heartbeat's, so it would erase the
+// resume point the runner recorded.
+//
+// The plain context is part of the assertion: activity.RecordHeartbeat panics
+// outside an activity, so a ticker that bypassed the store would fail here
+// rather than pass quietly.
+func TestStartHeartbeat_BeatsThroughTheProgressStore(t *testing.T) {
+	beats := make(chan struct{}, 1)
+	store := &fakeProgressHeartbeater{onBeat: func() {
+		select {
+		case beats <- struct{}{}:
+		default:
+		}
+	}}
+
+	stop := startHeartbeat(context.Background(), time.Millisecond, store)
+	defer stop()
+
+	select {
+	case <-beats:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the liveness ticker never beat through the progress store")
+	}
+}
+
+type fakeProgressHeartbeater struct {
+	onBeat func()
+}
+
+func (f *fakeProgressHeartbeater) Beat(context.Context) { f.onBeat() }
 
 func goroutineStacks(t *testing.T) string {
 	t.Helper()

@@ -40,21 +40,30 @@ func ContextWithScheduledAt(ctx context.Context, scheduledAt time.Time) context.
 	return context.WithValue(ctx, scheduledAtKey{}, scheduledAt)
 }
 
+// ProgressHeartbeater owns the activity's heartbeat on behalf of a runner that
+// records progress in the heartbeat details. *ActivityProgress implements it.
+type ProgressHeartbeater interface {
+	// Beat sends one heartbeat carrying the progress recorded so far.
+	Beat(ctx context.Context)
+}
+
 // cronjobActivities wraps a Runner for Temporal activity execution.
 type cronjobActivities struct {
 	runner    Runner
 	metrics   *cronjobMetrics
 	heartbeat time.Duration
+	progress  ProgressHeartbeater
 }
 
 // newCronjobActivities wraps runner for activity execution. metrics may be nil
 // (it is nil-receiver-safe), e.g. in unit tests that don't wire telemetry. A
-// zero heartbeat disables liveness reporting.
-func newCronjobActivities(runner Runner, metrics *cronjobMetrics, heartbeat time.Duration) (*cronjobActivities, error) {
+// zero heartbeat disables liveness reporting; a nil progress store makes the
+// heartbeat a bare liveness ping.
+func newCronjobActivities(runner Runner, metrics *cronjobMetrics, heartbeat time.Duration, progress ProgressHeartbeater) (*cronjobActivities, error) {
 	if runner == nil {
 		return nil, fmt.Errorf("runner cannot be nil")
 	}
-	return &cronjobActivities{runner: runner, metrics: metrics, heartbeat: heartbeat}, nil
+	return &cronjobActivities{runner: runner, metrics: metrics, heartbeat: heartbeat, progress: progress}, nil
 }
 
 // Execute runs the cronjob. scheduledAt is the workflow-recorded timestamp
@@ -65,7 +74,7 @@ func (a *cronjobActivities) Execute(ctx context.Context, scheduledAt time.Time) 
 	logger.Info("starting cronjob execution", "scheduledAt", scheduledAt)
 
 	ctx = ContextWithScheduledAt(ctx, scheduledAt)
-	stopHeartbeat := startHeartbeat(ctx, a.heartbeat)
+	stopHeartbeat := startHeartbeat(ctx, a.heartbeat, a.progress)
 	start := time.Now()
 	err := a.runner.Run(ctx)
 	stopHeartbeat()
@@ -88,10 +97,12 @@ func (a *cronjobActivities) Execute(ctx context.Context, scheduledAt time.Time) 
 // instead of waiting out StartToCloseTimeout. A zero interval disables it, which
 // is why the returned stop is always safe to call.
 //
-// The Runner interface carries no progress signal, so the heartbeat is a plain
-// liveness ping with no details: it answers "is this worker still alive", not
-// "how far has it got".
-func startHeartbeat(ctx context.Context, interval time.Duration) (stop func()) {
+// The Runner interface carries no progress signal, so without a progress store
+// the heartbeat is a plain liveness ping with no details: it answers "is this
+// worker still alive", not "how far has it got". A runner that DOES record
+// progress supplies one, and the ping goes through it — Temporal keeps only the
+// last heartbeat's details, so a bare ping in between would erase them.
+func startHeartbeat(ctx context.Context, interval time.Duration, progress ProgressHeartbeater) (stop func()) {
 	if interval <= 0 {
 		return func() {}
 	}
@@ -108,7 +119,7 @@ func startHeartbeat(ctx context.Context, interval time.Duration) (stop func()) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				activity.RecordHeartbeat(ctx)
+				beat(ctx, progress)
 			}
 		}
 	}()
@@ -116,6 +127,16 @@ func startHeartbeat(ctx context.Context, interval time.Duration) (stop func()) {
 		close(done)
 		<-finished
 	}
+}
+
+// beat sends one liveness heartbeat, through the progress store when there is
+// one so the details it recorded survive the ping.
+func beat(ctx context.Context, progress ProgressHeartbeater) {
+	if progress == nil {
+		activity.RecordHeartbeat(ctx)
+		return
+	}
+	progress.Beat(ctx)
 }
 
 // Defaults a cronjob gets when it leaves ActivityTimeouts zero.
