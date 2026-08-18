@@ -249,7 +249,6 @@ func ensureTemplate(ctx context.Context, baseDSN string) (string, error) {
 		if err := buildTemplate(ctx, conn.Conn(), baseDSN, name); err != nil {
 			return "", err
 		}
-		dropStaleTemplates(ctx, conn.Conn(), name)
 	}
 
 	templateBuilt[baseDSN] = name
@@ -287,55 +286,6 @@ func isLockTimeout(err error) bool {
 	// SQLSTATE 55P03 = lock_not_available
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "55P03"
-}
-
-// dropStaleTemplates removes the templates of other migration sets, so a server
-// that outlives one run keeps one migrated database rather than one per tree.
-//
-// Never forced: a template another process is still building has that process's
-// pool on it, and Postgres refusing the drop is what protects it.
-func dropStaleTemplates(ctx context.Context, conn *pgx.Conn, keep string) {
-	rows, err := conn.Query(ctx,
-		"SELECT datname FROM pg_database WHERE datname LIKE 'stl_tmpl_%' AND datname <> $1", keep)
-	if err != nil {
-		log.Printf("warning: list stale templates: %v", err)
-		return
-	}
-	stale, err := pgx.CollectRows(rows, pgx.RowTo[string])
-	if err != nil {
-		log.Printf("warning: list stale templates: %v", err)
-		return
-	}
-
-	for _, name := range stale {
-		if err := dropStaleTemplate(ctx, conn, name); err != nil {
-			log.Printf("warning: %v", err)
-		}
-	}
-}
-
-// dropStaleTemplate unflags one template and drops it, putting the flag back if the
-// drop is refused: unflagged, it is unclonable for whoever is still using it.
-func dropStaleTemplate(ctx context.Context, conn *pgx.Conn, name string) error {
-	if err := setTemplateFlag(ctx, conn, name, false); err != nil {
-		return err
-	}
-	if _, err := conn.Exec(ctx, fmt.Sprintf("DROP DATABASE IF EXISTS %s", name)); err != nil {
-		return errors.Join(
-			fmt.Errorf("drop stale template %s: %w", name, err),
-			setTemplateFlag(ctx, conn, name, true),
-		)
-	}
-	return nil
-}
-
-func setTemplateFlag(ctx context.Context, conn *pgx.Conn, name string, isTemplate bool) error {
-	if _, err := conn.Exec(ctx,
-		"UPDATE pg_database SET datistemplate = $1 WHERE datname = $2", isTemplate, name,
-	); err != nil {
-		return fmt.Errorf("set template flag on %s to %t: %w", name, isTemplate, err)
-	}
-	return nil
 }
 
 // DisableScheduledJobs stops TimescaleDB's policy jobs from running in this
@@ -431,8 +381,10 @@ func migrateTemplate(ctx context.Context, pool *pgxpool.Pool) error {
 // dropTemplate removes a leftover template. The datistemplate flag has to come off
 // first — Postgres refuses to drop a database while it is marked as a template.
 func dropTemplate(ctx context.Context, conn *pgx.Conn, name string) error {
-	if err := setTemplateFlag(ctx, conn, name, false); err != nil {
-		return err
+	if _, err := conn.Exec(ctx,
+		"UPDATE pg_database SET datistemplate = false WHERE datname = $1", name,
+	); err != nil {
+		return fmt.Errorf("clear template flag on %s: %w", name, err)
 	}
 	if _, err := conn.Exec(ctx, dropDatabaseSQL(name)); err != nil {
 		return fmt.Errorf("drop stale template %s: %w", name, err)
@@ -442,7 +394,10 @@ func dropTemplate(ctx context.Context, conn *pgx.Conn, name string) error {
 
 // migrationsFingerprint digests the migration set, so a template built from an
 // older set is never cloned: the name changes with the contents. This matters on a
-// server that outlives one run, such as a developer's own container.
+// server that outlives one run, such as a developer's own container — where the
+// superseded template stays until `make test-templates-clean` removes it, because
+// collecting it from here would race a sibling process between its readiness check
+// and its clone.
 func migrationsFingerprint() (string, error) {
 	entries, err := filepath.Glob(filepath.Join(migrationsDir(), "*.sql"))
 	if err != nil {
