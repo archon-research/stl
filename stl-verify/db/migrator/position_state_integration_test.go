@@ -261,7 +261,7 @@ func TestPositionState(t *testing.T) {
 			}
 			var classid, objid int64
 			if err := tx.QueryRow(ctx,
-				`SELECT classid, objid FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid() LIMIT 1`).Scan(&classid, &objid); err != nil {
+				`SELECT classid::bigint, objid::bigint FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid() LIMIT 1`).Scan(&classid, &objid); err != nil {
 				t.Fatalf("read advisory lock under %s: %v", searchPath, err)
 			}
 			return classid, objid
