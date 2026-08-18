@@ -165,10 +165,6 @@ func ConnectPoolForMain(dsn string) *pgxpool.Pool {
 	return nil
 }
 
-// --------------------------------------------------------------------------
-// Schema-per-test-file helpers for test isolation
-// --------------------------------------------------------------------------
-
 // dropDatabaseSQL drops dbName, terminating any backend still attached to it —
 // a pool that outlived its test would otherwise block the drop outright.
 func dropDatabaseSQL(dbName string) string {

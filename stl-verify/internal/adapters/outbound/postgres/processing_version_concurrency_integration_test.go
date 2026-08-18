@@ -52,8 +52,15 @@ func init() {
 // openConcurrencyPool mints a small, short-lived pool against the
 // concurrency-test database. Caller is responsible for closing it.
 func openConcurrencyPool() *pgxpool.Pool {
-	dsn := testutil.DatabaseDSN(sharedDSN, concurrencyDBName) + "&pool_max_conns=2"
-	pool, err := pgxpool.New(context.Background(), dsn)
+	// Through the config, not a "&pool_max_conns=2" on the DSN: that assumes the
+	// base DSN already carries a query string, and appends to the path when it does not.
+	cfg, err := pgxpool.ParseConfig(testutil.DatabaseDSN(sharedDSN, concurrencyDBName))
+	if err != nil {
+		panic(fmt.Sprintf("parse concurrency DSN: %v", err))
+	}
+	cfg.MaxConns = 2
+
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
 	if err != nil {
 		panic(fmt.Sprintf("connect concurrency pool: %v", err))
 	}
