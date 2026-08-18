@@ -10,7 +10,7 @@ Note that CRR is an expected loss, not a tail loss by construction. However, the
 
 This directory contains the CORE model as integrated into the STL service. The original standalone version lives in [`core_model_copy/`](https://github.com/TWave-code/core_model_copy). The integration wires CORE as a first-class `RiskModel` backed by a pre-compute cronjob and a thin API service that reads the results.
 
-The model reads static parquet snapshots in this PR; the parquet-to-live-table swaps land later in the stack (see the PR description).
+The model reads static parquet snapshots in this PR; the parquet-to-live-table swaps land in the next PR of the stack (see the PR description).
 
 ---
 
@@ -123,7 +123,7 @@ runner.py             Service entry point — orchestrates the full pipeline
 | `LOAN_TOKEN` | `USDC` | Filter positions by loan token (`ALL` = no filter) |
 | `SEED` | `0` | Global random seed |
 
-All parameters can be overridden via `CORE_MODEL_*` environment variables when running the pre-compute pipeline (the runner entry point lands in the next PR of the stack).
+All parameters can be overridden via environment variables when running the cronjob — see `cli/cronjobs/core_model_runner/config.py` for the full mapping.
 
 ---
 
@@ -201,14 +201,35 @@ references (`20260604_…_seed_sparklend_spusdt_receipt_token.sql` and
 that has migrations applied — `make dev-up`, integration test containers, a
 plain migrate run — resolves the mapping at startup.
 
-### Step 2 — Run the pre-compute pipeline
+### Step 2 — Run the pre-compute cronjob
 
-> This PR ships the model, its readers and the API; the scheduled Temporal
-> runner that populates `core_model_results` lands in the next PR of this
-> stack (see the PR description). Until then, results rows come from tests or
-> a manual `runner.run(...)` invocation.
+The runner has two modes. Market-specific params (`PROTOCOL`, `LOAN_TOKEN`, etc.) are loaded automatically from `inputs/market_configs.json` — only `CORE_MODEL_MARKET_KEY` is required in both.
 
-Market-specific params (`PROTOCOL`, `LOAN_TOKEN`, etc.) are loaded from `inputs/market_configs.json`.
+**One-shot** — computes, writes, exits. No Temporal. This is what `make dev-up` users want for a quick check, and what a hand-triggered run looks like:
+
+```bash
+# From stl-verify/ — defaults to every market against the dev-up database
+make run-core-model
+make run-core-model MARKET=sparklend_usdt N_MC=200
+
+# Or directly, from stl-verify/python/
+DATABASE_URL=postgresql://... \
+CORE_MODEL_MARKET_KEY=sparklend_usdt \
+uv run python -m cli.cronjobs.core_model_runner.main --once
+```
+
+**Scheduled worker** — the default mode, and what the `core-model-runner` Deployment runs. It registers a Temporal schedule on startup and then serves its task queue:
+
+```bash
+TEMPORAL_HOST_PORT=localhost:7233 \
+DATABASE_URL=postgresql://... \
+CORE_MODEL_MARKET_KEY=all \
+uv run python -m cli.cronjobs.core_model_runner.main
+```
+
+Scheduling follows the repo convention (`CONTRIBUTING.md` §9): Temporal owns the schedule, not Kubernetes. The interval defaults to 24h and is set by `CORE_MODEL_RUN_INTERVAL_HOURS`, but **changing that variable does not move an existing schedule** — delete the schedule in the Temporal UI or CLI and restart the worker.
+
+A tick runs as a single activity with a 4-hour timeout and no retries: the inputs do not change until the next window, and `core_model_results` is append-only, so retrying a partly-finished pass would duplicate rows for the markets that already succeeded. Overlapping runs are skipped for the same reason.
 
 Params are resolved in three layers (lowest wins):
 1. `inputs/default_params.json` — canonical defaults
@@ -281,9 +302,18 @@ app/adapters/
 └── postgres/core_model_results_reader.py  Reads core_model_results table
 
 app/services/core_model_risk_service.py  RiskModel implementation
-```
 
-(The Temporal runner and its CLI entry point land in the next PR of the stack.)
+app/services/core_model_runner/
+├── service.py   The body of one tick: run each market, append results
+└── workflow.py  Temporal workflow + activity wrapping that tick
+
+app/adapters/temporal/
+└── cronjob.py   Shared harness: connect, ensure schedule, run worker
+
+cli/cronjobs/core_model_runner/
+├── config.py    Param resolution (defaults -> market config -> env)
+└── main.py      Entry point: Temporal worker, or --once. No business logic.
+```
 
 ---
 
