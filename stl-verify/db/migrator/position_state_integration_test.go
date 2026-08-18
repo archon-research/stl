@@ -287,6 +287,10 @@ func TestPositionState(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer conn.Release()
+			// Reset search_path before the conn returns to the pool: pgxpool reuses connections without
+			// resetting session state, so a leaked `pg_catalog, public` here makes a later test's unqualified
+			// CREATE VIEW resolve to pg_catalog and fail with permission denied. Runs before Release (LIFO).
+			defer conn.Exec(ctx, `RESET search_path`)
 			if _, err := conn.Exec(ctx, `SET search_path = `+searchPath); err != nil {
 				t.Fatal(err)
 			}
