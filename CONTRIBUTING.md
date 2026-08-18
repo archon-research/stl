@@ -616,10 +616,20 @@ scheduler, the worker registers a schedule on startup, and each tick
 runs one activity. Only the language changes. Same `uv` tooling rules
 as the worker section above.
 
-> **No Python Temporal worker exists in the repo yet.** If you're the
-> first, factor the boilerplate (client connect, schedule ensure,
-> worker run) into a shared harness at `app/adapters/temporal/` so the
-> second one is copy-paste.
+> **The shared harness is `app/adapters/temporal/`** (client connect,
+> schedule ensure, worker run), built with `core-model-runner`, the first
+> Python cronjob. Reuse it rather than repeating the skeleton below — the
+> skeleton is kept as an explanation of what the harness does for you.
+
+Two things that only fail once deployed, both handled by the harness:
+
+- **The workflow module is re-imported in a sandbox**, and numpy cannot load
+  twice in one process. Keep the workflow free of the model stack: reference
+  the activity by name and keep it in its own module, and re-export nothing
+  from the package `__init__`.
+- **A CPU-bound tick must be a sync activity** run on the worker's
+  `activity_executor`. An async activity doing the work blocks the event loop;
+  a sync one without an executor is rejected at worker startup.
 
 **Code skeleton** — entry point at `stl-verify/python/cli/cronjobs/<my_cronjob>/main.py`.
 Uses the [`temporalio`](https://pypi.org/project/temporalio/) SDK:
@@ -631,9 +641,8 @@ from datetime import timedelta
 
 from temporalio.client import (
     Client, Schedule, ScheduleActionStartWorkflow,
-    ScheduleIntervalSpec, ScheduleSpec,
+    ScheduleAlreadyRunningError, ScheduleIntervalSpec, ScheduleSpec,
 )
-from temporalio.service import RPCError
 from temporalio.worker import Worker
 
 from app.config import load_config
@@ -660,9 +669,8 @@ async def run() -> None:
                 spec=ScheduleSpec(intervals=[ScheduleIntervalSpec(every=INTERVAL)]),
             ),
         )
-    except RPCError as e:
-        if "AlreadyExists" not in str(e):
-            raise
+    except ScheduleAlreadyRunningError:
+        pass  # normal on every restart after the first
 
     worker = Worker(
         client,
