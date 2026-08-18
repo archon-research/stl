@@ -203,7 +203,10 @@ BEGIN
     -- raw scan + joins + LAG + per-row sha256); the pre-flight checks and both writes all read this
     -- materialized snapshot, so the view is never rescanned (was 3x). position_id() is recomputed here,
     -- keeping identity off the view's contract.
-    DROP TABLE IF EXISTS _mpp_src;
+    -- pg_temp-qualified so an unqualified _mpp_src on the caller's search_path can never resolve to a
+    -- permanent relation of the same name and be dropped; the cleanup still catches a leftover temp
+    -- table from an earlier same-transaction call.
+    DROP TABLE IF EXISTS pg_temp._mpp_src;
     EXECUTE format($q$
         CREATE TEMP TABLE _mpp_src ON COMMIT DROP AS
         SELECT position_id(chain_id, protocol_id, instrument_key, holder_id) AS position_id,
@@ -259,25 +262,27 @@ BEGIN
     ),
     canonical AS (
         SELECT DISTINCT ON (position_id, block_number)
-               position_id, block_number, quantity, deal_type_code
+               position_id, block_number, block_version, processing_version, quantity, deal_type_code
         FROM _mpp_src
         ORDER BY position_id, block_number, block_version DESC, processing_version DESC
     ),
     latest AS (
         SELECT DISTINCT ON (position_id)
-               position_id, deal_type_code, block_number
+               position_id, deal_type_code, block_number, block_version, processing_version
         FROM canonical
         WHERE quantity > 0
-        ORDER BY position_id, block_number DESC
+        ORDER BY position_id, block_number DESC, block_version DESC, processing_version DESC
     ),
-    -- Pre-run latest CLASSIFIABLE (non-zero) block per position. quantity > 0 is essential: a closing
+    -- Pre-run latest CLASSIFIABLE (non-zero) observation per position, carried as the full
+    -- (block_number, block_version, processing_version) tuple. quantity > 0 is essential: a closing
     -- zero-row sits at a higher block than the last non-zero, so counting it here would make the guard
     -- refuse every future reclassification of a closed position (a full-history correction included).
     stored_max AS (
-        SELECT position_id, max(block_number) AS max_blk
+        SELECT DISTINCT ON (position_id)
+               position_id, block_number AS max_bn, block_version AS max_bv, processing_version AS max_pv
         FROM position_state
         WHERE position_id IN (SELECT position_id FROM latest) AND quantity > 0
-        GROUP BY position_id
+        ORDER BY position_id, block_number DESC, block_version DESC, processing_version DESC
     ),
     cls AS (
         INSERT INTO position_classification (position_id, deal_type_code, direction, change_reason)
@@ -288,8 +293,11 @@ BEGIN
         LEFT JOIN stored_max s ON s.position_id = l.position_id
         LEFT JOIN ref_deal_type d ON d.deal_type = l.deal_type_code
         -- Recency guard: only (re)classify from an observation at least as recent as the stored latest
-        -- non-zero, so a windowed backfill run cannot regress a newer live classification.
-        WHERE l.block_number >= COALESCE(s.max_blk, -1)
+        -- non-zero, compared on the full (block_number, block_version, processing_version) tuple. Tuple
+        -- (not block_number alone) so an older block_version/processing_version re-emission at the SAME
+        -- height cannot pass the guard and regress a newer live classification.
+        WHERE (l.block_number, l.block_version, l.processing_version)
+              >= (COALESCE(s.max_bn, -1), COALESCE(s.max_bv, -1), COALESCE(s.max_pv, -1))
         ORDER BY l.position_id
         ON CONFLICT (position_id) DO UPDATE
             SET deal_type_code = EXCLUDED.deal_type_code,
@@ -302,7 +310,7 @@ BEGIN
     )
     SELECT count(*) INTO n FROM ins;
 
-    DROP TABLE _mpp_src;
+    DROP TABLE pg_temp._mpp_src;
 
     RETURN n;
 END $fn$;
