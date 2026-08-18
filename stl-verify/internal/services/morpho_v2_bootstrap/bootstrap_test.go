@@ -34,6 +34,7 @@ const mainnetVaultV2DeployBlock = int64(23_375_073)
 
 var (
 	testVaultAddr   = common.HexToAddress("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
+	secondVaultAddr = common.HexToAddress("0xdddddddddddddddddddddddddddddddddddddddd")
 	testAdapterAddr = common.HexToAddress("0x7481968709b8f155652D42ebf468b22945907dC2")
 	testTxHash      = common.HexToHash("0x3333333333333333333333333333333333333333333333333333333333333333")
 )
@@ -57,7 +58,7 @@ func TestNewService_RejectsInvalidConfig(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := valid
 			tc.mutate(&cfg)
-			if _, err := NewService(cfg, &fakeChainReader{}, &recordingReplayer{}); err == nil {
+			if _, err := NewService(cfg, &fakeChainReader{}, &recordingReplayer{}, &fakeProgressStore{}); err == nil {
 				t.Fatal("expected NewService to reject the config")
 			}
 		})
@@ -214,7 +215,7 @@ func TestRun_FinalizedHeadBelowDeployBlockFailsTheRun(t *testing.T) {
 func TestRun_ReplayFailureStopsBeforeSeed(t *testing.T) {
 	h := newBootstrapHarness(t)
 	replayer := &recordingReplayer{v2Vaults: map[common.Address]struct{}{testVaultAddr: {}}}
-	service, err := NewService(h.config, h.chain, replayer)
+	service, err := NewService(h.config, h.chain, replayer, h.progress)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -250,7 +251,7 @@ func TestRun_SeedFailureFailsTheRun(t *testing.T) {
 func TestRun_ReplayedLogsArriveInChainOrder(t *testing.T) {
 	h := newBootstrapHarness(t)
 	replayer := &recordingReplayer{v2Vaults: map[common.Address]struct{}{testVaultAddr: {}}}
-	service, err := NewService(h.config, h.chain, replayer)
+	service, err := NewService(h.config, h.chain, replayer, h.progress)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -294,7 +295,7 @@ func TestRun_ReplayedLogsArriveInChainOrder(t *testing.T) {
 func TestRun_RemovedLogFailsTheRun(t *testing.T) {
 	h := newBootstrapHarness(t)
 	replayer := &recordingReplayer{v2Vaults: map[common.Address]struct{}{testVaultAddr: {}}}
-	service, err := NewService(h.config, h.chain, replayer)
+	service, err := NewService(h.config, h.chain, replayer, h.progress)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -319,7 +320,7 @@ func TestRun_NarrowsRangeOnProviderCap(t *testing.T) {
 	h := newBootstrapHarness(t)
 	replayer := &recordingReplayer{v2Vaults: map[common.Address]struct{}{testVaultAddr: {}}}
 	h.config.BlockChunkSize = 1_000_000
-	service, err := NewService(h.config, h.chain, replayer)
+	service, err := NewService(h.config, h.chain, replayer, h.progress)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -349,7 +350,7 @@ func TestRun_NarrowsRangeOnProviderCap(t *testing.T) {
 func TestRun_UnrelatedGetLogsErrorBubbles(t *testing.T) {
 	h := newBootstrapHarness(t)
 	replayer := &recordingReplayer{v2Vaults: map[common.Address]struct{}{testVaultAddr: {}}}
-	service, err := NewService(h.config, h.chain, replayer)
+	service, err := NewService(h.config, h.chain, replayer, h.progress)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
@@ -371,6 +372,7 @@ type bootstrapHarness struct {
 	config        Config
 	service       *Service
 	chain         *fakeChainReader
+	progress      *fakeProgressStore
 	multicaller   *testutil.MockMulticaller
 	morphoRepo    *testutil.MockMorphoRepository
 	adapters      []*entity.MorphoAdapter
@@ -380,7 +382,7 @@ type bootstrapHarness struct {
 
 func newBootstrapHarness(t *testing.T) *bootstrapHarness {
 	t.Helper()
-	h := &bootstrapHarness{t: t, chain: newFakeChainReader()}
+	h := &bootstrapHarness{t: t, chain: newFakeChainReader(), progress: &fakeProgressStore{}}
 
 	h.multicaller = testutil.NewMockMulticaller()
 	h.morphoRepo = &testutil.MockMorphoRepository{}
@@ -425,11 +427,54 @@ func newBootstrapHarness(t *testing.T) *bootstrapHarness {
 	h.config.ChainID = 1
 	h.config.Logger = discardLogger()
 
-	h.service, err = NewService(h.config, h.chain, replay)
+	h.service, err = NewService(h.config, h.chain, replay, h.progress)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
 	return h
+}
+
+// wireEmptyAdapterSets answers the seed's enumeration with "no adapters" for
+// every vault, for tests that care about the sweep rather than the seed.
+func (h *bootstrapHarness) wireEmptyAdapterSets(headHash common.Hash) {
+	h.t.Helper()
+	vaultV2ABI, err := abis.GetVaultV2ReadABI()
+	if err != nil {
+		h.t.Fatalf("GetVaultV2ReadABI: %v", err)
+	}
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
+		if blockHash != headHash {
+			return nil, errors.New("state read is not pinned to the run's finalized head")
+		}
+		length, err := vaultV2ABI.Methods["adaptersLength"].Outputs.Pack(big.NewInt(0))
+		if err != nil {
+			return nil, err
+		}
+		results := make([]outbound.Result, len(calls))
+		for i := range results {
+			results[i] = outbound.Result{Success: true, ReturnData: length}
+		}
+		return results, nil
+	}
+}
+
+// addV2Vault extends the registry with another VaultV2, as live indexing would
+// while a bootstrap run is in flight.
+func (h *bootstrapHarness) addV2Vault(address common.Address) {
+	h.t.Helper()
+	previous := h.morphoRepo.GetAllVaultsFn
+	h.morphoRepo.GetAllVaultsFn = func(ctx context.Context, chainID int64) (map[common.Address]*entity.MorphoVault, error) {
+		vaults, err := previous(ctx, chainID)
+		if err != nil {
+			return nil, err
+		}
+		vaults[address] = &entity.MorphoVault{
+			ID: 8, ChainID: 1, ProtocolID: 1, Address: address.Bytes(),
+			Name: "Second Vault", Symbol: "sVAULT", AssetTokenID: 1,
+			VaultVersion: entity.MorphoVaultV2, CreatedAtBlock: 23_400_000,
+		}
+		return vaults, nil
+	}
 }
 
 func (h *bootstrapHarness) wireAdapterReads(headHash common.Hash, realAssets *big.Int) {
@@ -550,6 +595,10 @@ type fakeChainReader struct {
 	// result-cap error, exercising the sweep's range narrowing.
 	maxQueryWidth int64
 	cappedQueries int
+	// failFilterAfter, when non-zero, fails every request past the first N,
+	// standing in for a run that dies part-way through its sweep.
+	failFilterAfter int
+	servedQueries   int
 }
 
 func newFakeChainReader() *fakeChainReader {
@@ -597,6 +646,10 @@ func (f *fakeChainReader) FilterLogs(_ context.Context, q ethereum.FilterQuery) 
 		f.cappedQueries++
 		return nil, errors.New("query returned more than 10000 results")
 	}
+	f.servedQueries++
+	if f.failFilterAfter > 0 && f.servedQueries > f.failFilterAfter {
+		return nil, errors.New("connection reset by peer")
+	}
 	f.queries = append(f.queries, q)
 
 	var out []ethtypes.Log
@@ -635,4 +688,134 @@ func (r *recordingReplayer) SeedV2VaultAdapters(_ context.Context, vaultAddress 
 func (r *recordingReplayer) ReplayMetaMorphoLog(_ context.Context, log shared.Log, blockNumber int64, _ common.Hash, _ int, _ time.Time) error {
 	r.replayed = append(r.replayed, replayedLog{log: log, blockNumber: blockNumber})
 	return nil
+}
+
+// fakeProgressStore stands in for the Temporal heartbeat-details store: it keeps
+// the last record saved, so two Run calls against one harness model two attempts
+// of the same activity.
+type fakeProgressStore struct {
+	record  *SweepProgress
+	saved   []SweepProgress
+	loadErr error
+}
+
+func (f *fakeProgressStore) SaveProgress(_ context.Context, progress SweepProgress) error {
+	stored := progress
+	f.record = &stored
+	f.saved = append(f.saved, progress)
+	return nil
+}
+
+func (f *fakeProgressStore) LoadProgress(context.Context) (SweepProgress, bool, error) {
+	if f.loadErr != nil {
+		return SweepProgress{}, false, f.loadErr
+	}
+	if f.record == nil {
+		return SweepProgress{}, false, nil
+	}
+	return *f.record, true, nil
+}
+
+// savedTo lists the sweep positions recorded, in the order they were recorded.
+func (f *fakeProgressStore) savedTo() []int64 {
+	out := make([]int64, 0, len(f.saved))
+	for _, s := range f.saved {
+		out = append(out, s.LastCompletedTo)
+	}
+	return out
+}
+
+// TestRun_RecordsProgressOnlyAtChunkBoundaries: a chunk is recorded once every
+// log in it has replayed, so a resumed run can never restart mid-chunk — the
+// order guarantee (an AddAdapter before the RemoveAdapter that closes it) holds
+// only when whole chunks are replayed in sequence.
+func TestRun_RecordsProgressOnlyAtChunkBoundaries(t *testing.T) {
+	h := newBootstrapHarness(t)
+	const headBlock = mainnetVaultV2DeployBlock + 25_000
+	head := h.chain.setFinalizedHead(headBlock, 1_770_000_000)
+	h.wireAdapterReads(head.Hash(), big.NewInt(1))
+
+	if err := h.service.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	want := []int64{
+		mainnetVaultV2DeployBlock + 9_999,
+		mainnetVaultV2DeployBlock + 19_999,
+		headBlock,
+	}
+	if got := h.progress.savedTo(); !slices.Equal(got, want) {
+		t.Fatalf("recorded sweep positions %v, want the chunk boundaries %v", got, want)
+	}
+}
+
+// TestRun_ResumesAfterTheLastCompletedChunk: an attempt that dies mid-sweep
+// leaves a record behind, and the next attempt starts at the block after the
+// last chunk that completed rather than redoing hours of eth_getLogs.
+func TestRun_ResumesAfterTheLastCompletedChunk(t *testing.T) {
+	h := newBootstrapHarness(t)
+	const headBlock = mainnetVaultV2DeployBlock + 25_000
+	head := h.chain.setFinalizedHead(headBlock, 1_770_000_000)
+	h.wireAdapterReads(head.Hash(), big.NewInt(1))
+
+	h.chain.failFilterAfter = 1
+	if err := h.service.Run(context.Background()); err == nil {
+		t.Fatal("expected the interrupted attempt to fail")
+	}
+
+	h.chain.failFilterAfter, h.chain.queries = 0, nil
+	if err := h.service.Run(context.Background()); err != nil {
+		t.Fatalf("resumed Run: %v", err)
+	}
+
+	if len(h.chain.queries) == 0 {
+		t.Fatal("the resumed run issued no eth_getLogs request")
+	}
+	if got, want := h.chain.queries[0].FromBlock.Int64(), int64(mainnetVaultV2DeployBlock+10_000); got != want {
+		t.Errorf("resumed sweep starts at block %d, want %d (the block after the completed chunk)", got, want)
+	}
+}
+
+// TestRun_IgnoresProgressRecordedForAnotherVaultSet: the recorded chunks were
+// fetched with an address filter that never mentioned a vault discovered since,
+// so trusting them would silently lose that vault's governance history. A
+// changed vault set must replay the whole range again.
+func TestRun_IgnoresProgressRecordedForAnotherVaultSet(t *testing.T) {
+	h := newBootstrapHarness(t)
+	const headBlock = mainnetVaultV2DeployBlock + 25_000
+	head := h.chain.setFinalizedHead(headBlock, 1_770_000_000)
+	h.wireEmptyAdapterSets(head.Hash())
+
+	h.chain.failFilterAfter = 1
+	if err := h.service.Run(context.Background()); err == nil {
+		t.Fatal("expected the interrupted attempt to fail")
+	}
+
+	h.addV2Vault(secondVaultAddr)
+	h.chain.failFilterAfter, h.chain.queries = 0, nil
+	if err := h.service.Run(context.Background()); err != nil {
+		t.Fatalf("Run after the vault set grew: %v", err)
+	}
+
+	if len(h.chain.queries) == 0 {
+		t.Fatal("the run issued no eth_getLogs request")
+	}
+	if got := h.chain.queries[0].FromBlock.Int64(); got != mainnetVaultV2DeployBlock {
+		t.Errorf("sweep starts at block %d, want the factory deploy block %d — a grown vault set cannot reuse the earlier scope",
+			got, int64(mainnetVaultV2DeployBlock))
+	}
+}
+
+// TestRun_ProgressLoadFailureFailsTheRun: an unreadable record is not "start
+// from the beginning". It means the resume decision cannot be made, and guessing
+// either redoes hours of work or skips blocks that were never swept.
+func TestRun_ProgressLoadFailureFailsTheRun(t *testing.T) {
+	h := newBootstrapHarness(t)
+	head := h.chain.setFinalizedHead(mainnetVaultV2DeployBlock+1_000, 1_770_000_000)
+	h.wireAdapterReads(head.Hash(), big.NewInt(1))
+	h.progress.loadErr = errors.New("details decode failed")
+
+	if err := h.service.Run(context.Background()); err == nil {
+		t.Fatal("expected an unreadable progress record to fail the run")
+	}
 }

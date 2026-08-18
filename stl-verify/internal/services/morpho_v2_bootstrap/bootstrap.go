@@ -22,6 +22,11 @@
 // Every write goes through the same idempotent repository methods live indexing
 // uses, so re-running is safe. Any failure stops the run: a partial pass leaves
 // no silent holes because a re-run simply redoes the work.
+//
+// The replay pass records its position after each completed chunk through a
+// ProgressStore, so an attempt that dies part-way (a pod kill, a deploy) resumes
+// at the next chunk instead of re-sweeping hours of history. Correctness never
+// depends on it: a run that resumes from nothing simply does the work again.
 package morpho_v2_bootstrap
 
 import (
@@ -121,12 +126,13 @@ type Service struct {
 	config       Config
 	chain        ChainReader
 	replay       V2Replayer
+	progress     ProgressStore
 	deployBlock  int64
 	configTopics []common.Hash
 	logger       *slog.Logger
 }
 
-func NewService(config Config, chain ChainReader, replay V2Replayer) (*Service, error) {
+func NewService(config Config, chain ChainReader, replay V2Replayer, progress ProgressStore) (*Service, error) {
 	if err := config.validate(); err != nil {
 		return nil, fmt.Errorf("validating config: %w", err)
 	}
@@ -135,6 +141,9 @@ func NewService(config Config, chain ChainReader, replay V2Replayer) (*Service, 
 	}
 	if replay == nil {
 		return nil, fmt.Errorf("replayer is required")
+	}
+	if progress == nil {
+		return nil, fmt.Errorf("progress store is required")
 	}
 	deployBlock, err := morpho_indexer.VaultV2FactoryDeployBlock(config.ChainID)
 	if err != nil {
@@ -148,6 +157,7 @@ func NewService(config Config, chain ChainReader, replay V2Replayer) (*Service, 
 		config:       config,
 		chain:        chain,
 		replay:       replay,
+		progress:     progress,
 		deployBlock:  deployBlock,
 		configTopics: topics,
 		logger:       config.Logger.With("component", "morpho-v2-bootstrap"),
@@ -271,30 +281,36 @@ func (s *Service) seedAdapterState(ctx context.Context, vaults []common.Address,
 	return nil
 }
 
-// replayConfigHistory walks [factory deploy block, head] in chunks, feeding every
+// replayConfigHistory walks [resume point, head] in chunks, feeding every
 // VaultV2 governance event emitted by a known V2 vault through the live handler
-// path in strict chain order.
+// path in strict chain order, and records each chunk once it is fully replayed.
 func (s *Service) replayConfigHistory(ctx context.Context, vaults []common.Address, head pinnedBlock) error {
+	vaultsDigest := vaultSetDigest(vaults)
+	from, err := s.resumeBlock(ctx, vaultsDigest)
+	if err != nil {
+		return err
+	}
+
 	batches := batchAddresses(vaults, s.config.AddressBatchSize)
-	chunks := chunkBlockRange(s.deployBlock, head.number, s.config.BlockChunkSize)
+	chunks := chunkBlockRange(from, head.number, s.config.BlockChunkSize)
 	timestamps := blocktime.New(s.chain)
 
 	s.logger.Info("starting config-event replay",
+		"fromBlock", from,
 		"chunks", len(chunks),
 		"addressBatches", len(batches),
 		"topics", len(s.configTopics))
 
 	replayed := 0
 	for i, chunk := range chunks {
-		logs, err := s.fetchChunkLogs(ctx, batches, chunk)
+		count, err := s.replayChunk(ctx, batches, chunk, timestamps)
 		if err != nil {
 			return err
 		}
-		sortLogs(logs)
-		if err := s.replayLogs(ctx, logs, timestamps); err != nil {
-			return fmt.Errorf("replaying config events in [%d,%d]: %w", chunk.From, chunk.To, err)
+		if err := s.recordSweepProgress(ctx, vaultsDigest, chunk.To); err != nil {
+			return err
 		}
-		replayed += len(logs)
+		replayed += count
 		if (i+1)%progressLogEvery == 0 {
 			s.logger.Info("replaying config events",
 				"chunksDone", i+1, "chunks", len(chunks), "eventsReplayed", replayed)
@@ -303,6 +319,82 @@ func (s *Service) replayConfigHistory(ctx context.Context, vaults []common.Addre
 
 	s.logger.Info("config-event replay complete", "eventsReplayed", replayed)
 	return nil
+}
+
+// replayChunk fetches one chunk's logs across every address batch and drives
+// them through the live handler path in chain order, returning how many it
+// replayed.
+func (s *Service) replayChunk(ctx context.Context, batches [][]common.Address, chunk blockRange, timestamps *blocktime.Cache) (int, error) {
+	logs, err := s.fetchChunkLogs(ctx, batches, chunk)
+	if err != nil {
+		return 0, err
+	}
+	sortLogs(logs)
+	if err := s.replayLogs(ctx, logs, timestamps); err != nil {
+		return 0, fmt.Errorf("replaying config events in [%d,%d]: %w", chunk.From, chunk.To, err)
+	}
+	return len(logs), nil
+}
+
+// resumeBlock is the first block this run must sweep: the block after the last
+// chunk an earlier attempt completed, or the factory deploy block when no usable
+// record exists.
+//
+// A record is usable only when it was written for this chain, this sweep start,
+// and this exact V2 vault set. The head is deliberately NOT part of that match:
+// it is the finalized head, so it advances between attempts, and resuming under
+// a higher one simply covers the blocks that have finalized since. A CHANGED
+// VAULT SET is the case that must not resume — the recorded chunks were fetched
+// through an address filter that never mentioned the vault that joined, so
+// skipping them would silently lose its whole governance history.
+func (s *Service) resumeBlock(ctx context.Context, vaultsDigest string) (int64, error) {
+	recorded, found, err := s.progress.LoadProgress(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("loading sweep progress: %w", err)
+	}
+	if !found {
+		s.logger.Info("no sweep progress recorded, sweeping the full range", "fromBlock", s.deployBlock)
+		return s.deployBlock, nil
+	}
+	current := s.sweepProgressAt(vaultsDigest, 0)
+	if !recorded.sameScope(current) {
+		s.logger.Warn("recorded sweep progress belongs to another run, sweeping the full range",
+			"fromBlock", s.deployBlock,
+			"chainID", current.ChainID,
+			"recordedChainID", recorded.ChainID,
+			"recordedFromBlock", recorded.FromBlock,
+			"vaultSetChanged", recorded.VaultsDigest != current.VaultsDigest)
+		return s.deployBlock, nil
+	}
+	if recorded.LastCompletedTo < s.deployBlock {
+		s.logger.Warn("recorded sweep progress sits below the factory deploy block, sweeping the full range",
+			"lastCompletedTo", recorded.LastCompletedTo, "fromBlock", s.deployBlock)
+		return s.deployBlock, nil
+	}
+
+	s.logger.Info("resuming the sweep from recorded progress",
+		"lastCompletedTo", recorded.LastCompletedTo, "fromBlock", recorded.LastCompletedTo+1)
+	return recorded.LastCompletedTo + 1, nil
+}
+
+// recordSweepProgress marks every block up to lastCompletedTo replayed. Called
+// only once a whole chunk has landed, so a resumed run restarts on a chunk
+// boundary.
+func (s *Service) recordSweepProgress(ctx context.Context, vaultsDigest string, lastCompletedTo int64) error {
+	if err := s.progress.SaveProgress(ctx, s.sweepProgressAt(vaultsDigest, lastCompletedTo)); err != nil {
+		return fmt.Errorf("recording sweep progress at block %d: %w", lastCompletedTo, err)
+	}
+	return nil
+}
+
+// sweepProgressAt stamps a sweep position with the scope it is true for.
+func (s *Service) sweepProgressAt(vaultsDigest string, lastCompletedTo int64) SweepProgress {
+	return SweepProgress{
+		ChainID:         s.config.ChainID,
+		FromBlock:       s.deployBlock,
+		VaultsDigest:    vaultsDigest,
+		LastCompletedTo: lastCompletedTo,
+	}
 }
 
 // fetchChunkLogs collects one chunk's logs across every address batch. The

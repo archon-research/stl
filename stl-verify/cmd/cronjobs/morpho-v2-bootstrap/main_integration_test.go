@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
+	"github.com/archon-research/stl/stl-verify/internal/services/morpho_v2_bootstrap"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
@@ -28,7 +29,7 @@ func TestSetupRunner_WiresAgainstAMigratedDatabase(t *testing.T) {
 	// to prove the wiring; the run itself is exercised by the service tests.
 	t.Setenv("ALCHEMY_HTTP_URL", "http://127.0.0.1:1/v2")
 
-	runner, err := setupRunner(context.Background(), temporal.Dependencies{Pool: pool, Logger: slog.Default()})
+	runner, err := setupRunner(context.Background(), temporal.Dependencies{Pool: pool, Logger: slog.Default()}, temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]())
 	if err != nil {
 		t.Fatalf("setupRunner: %v", err)
 	}
@@ -49,7 +50,7 @@ func TestSetupRunner_RejectsAnUnsupportedChain(t *testing.T) {
 	t.Setenv("ALCHEMY_API_KEY", "test-key")
 	t.Setenv("ALCHEMY_HTTP_URL", "http://127.0.0.1:1/v2")
 
-	if _, err := setupRunner(context.Background(), temporal.Dependencies{Pool: pool, Logger: slog.Default()}); err == nil {
+	if _, err := setupRunner(context.Background(), temporal.Dependencies{Pool: pool, Logger: slog.Default()}, temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]()); err == nil {
 		t.Fatal("expected setupRunner to reject a chain with no known VaultV2 factory deploy block")
 	}
 }

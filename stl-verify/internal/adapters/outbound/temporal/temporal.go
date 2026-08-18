@@ -94,6 +94,12 @@ type CronjobConfig struct {
 	// Setup returns a Runner (or RunnerFunc) for the cronjob's business logic.
 	// It will be wrapped in Temporal activities automatically.
 	Setup func(ctx context.Context, deps Dependencies) (Runner, error)
+
+	// Progress, when set, is the heartbeat-details store the runner records
+	// through — the SAME instance Setup hands the runner, because the liveness
+	// heartbeat re-sends what it holds rather than erasing it with a bare ping.
+	// Leave nil for a cronjob with no resumable progress.
+	Progress ProgressHeartbeater
 }
 
 func (c CronjobConfig) validate() error {
@@ -140,7 +146,7 @@ func RunCronjob(ctx context.Context, meta BuildMeta, cfg CronjobConfig) error {
 		return fmt.Errorf("creating cronjob metrics: %w", err)
 	}
 
-	activities, err := newCronjobActivities(runner, metrics, cfg.ActivityTimeouts.Heartbeat)
+	activities, err := newCronjobActivities(runner, metrics, cfg.ActivityTimeouts.Heartbeat, cfg.Progress)
 	if err != nil {
 		return fmt.Errorf("creating cronjob activities: %w", err)
 	}

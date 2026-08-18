@@ -67,7 +67,7 @@ func TestRun_SeedThenReplayConvergesAdapterIncarnations(t *testing.T) {
 	multicaller := testutil.NewMockMulticaller()
 	wireAdapterReads(t, multicaller, head.Hash(), vault, adapter, big.NewInt(777))
 
-	service := buildIntegrationService(t, ctx, pool, chain, multicaller)
+	service := buildIntegrationService(t, ctx, pool, chain, multicaller, &fakeProgressStore{})
 	if err := service.Run(ctx); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -127,14 +127,17 @@ func TestRun_IsIdempotent(t *testing.T) {
 	multicaller := testutil.NewMockMulticaller()
 	wireAdapterReads(t, multicaller, head.Hash(), vault, adapter, big.NewInt(777))
 
-	service := buildIntegrationService(t, ctx, pool, chain, multicaller)
+	service := buildIntegrationService(t, ctx, pool, chain, multicaller, &fakeProgressStore{})
 	if err := service.Run(ctx); err != nil {
 		t.Fatalf("first Run: %v", err)
 	}
 	firstAdapters := readAdapterIncarnations(t, ctx, pool, adapter)
 	firstStates := countRows(t, ctx, pool, "morpho_adapter_state")
 
-	if err := service.Run(ctx); err != nil {
+	// A re-trigger is a new workflow execution, so it carries no heartbeat
+	// details: the second run sweeps the whole range again, as in production.
+	reRun := buildIntegrationService(t, ctx, pool, chain, multicaller, &fakeProgressStore{})
+	if err := reRun.Run(ctx); err != nil {
 		t.Fatalf("second Run: %v", err)
 	}
 	secondAdapters := readAdapterIncarnations(t, ctx, pool, adapter)
@@ -149,12 +152,79 @@ func TestRun_IsIdempotent(t *testing.T) {
 	}
 }
 
+// TestRun_ResumesAfterAKilledAttemptAndFinishesTheWork drives the resume path
+// through real SQL: an attempt dies mid-sweep, and the next attempt — the same
+// activity, so it reads back what the first heartbeated — restarts at the next
+// chunk and replays the history the first never reached.
+//
+// The AddAdapter deliberately sits in the LAST chunk, so a resume that quietly
+// skipped the remaining blocks would leave the vault unrepaired rather than
+// merely re-do work.
+func TestRun_ResumesAfterAKilledAttemptAndFinishesTheWork(t *testing.T) {
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	defer cleanup()
+	ctx := context.Background()
+
+	const (
+		addBlock       = uint64(23_398_000)
+		headBlock      = int64(23_400_000)
+		firstChunkTo   = mainnetVaultV2DeployBlock + 9_999
+		secondChunkTop = firstChunkTo + 1
+	)
+	vault := common.HexToAddress("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
+	adapter := common.HexToAddress("0x7481968709b8f155652D42ebf468b22945907dC2")
+
+	seedVaultRow(t, ctx, pool, vault)
+
+	chain := newFakeChainReader()
+	head := chain.setFinalizedHead(headBlock, 1_770_000_000)
+	chain.addBlock(addBlock, 1_760_000_000)
+	chain.logs = []ethtypes.Log{
+		adapterLifecycleLog(t, "AddAdapter", vault, adapter, addBlock, chain.hashOf(addBlock), 0),
+	}
+
+	multicaller := testutil.NewMockMulticaller()
+	wireAdapterReads(t, multicaller, head.Hash(), vault, adapter, big.NewInt(777))
+
+	progress := &fakeProgressStore{}
+	service := buildIntegrationService(t, ctx, pool, chain, multicaller, progress)
+
+	chain.failFilterAfter = 1
+	if err := service.Run(ctx); err == nil {
+		t.Fatal("expected the killed attempt to fail")
+	}
+	if got := progress.savedTo(); len(got) != 1 || got[0] != firstChunkTo {
+		t.Fatalf("recorded sweep positions %v, want just the completed chunk [%d]", got, int64(firstChunkTo))
+	}
+
+	chain.failFilterAfter, chain.queries = 0, nil
+	if err := service.Run(ctx); err != nil {
+		t.Fatalf("resumed Run: %v", err)
+	}
+
+	if len(chain.queries) == 0 {
+		t.Fatal("the resumed attempt issued no eth_getLogs request")
+	}
+	if got := chain.queries[0].FromBlock.Int64(); got != secondChunkTop {
+		t.Errorf("resumed sweep starts at block %d, want %d", got, int64(secondChunkTop))
+	}
+
+	incarnations := readAdapterIncarnations(t, ctx, pool, adapter)
+	if len(incarnations) != 1 {
+		t.Fatalf("adapter incarnations = %+v, want the one the resumed attempt replayed", incarnations)
+	}
+	if incarnations[0].addedAt != int64(addBlock) {
+		t.Errorf("adapter added_at_block = %d, want %d — the resumed attempt did not replay the AddAdapter",
+			incarnations[0].addedAt, addBlock)
+	}
+}
+
 // --- integration helpers -----------------------------------------------------
 
 // buildIntegrationService wires the bootstrap against the REAL postgres
 // repositories and the REAL morpho-indexer replay service, exactly as
 // cmd/cronjobs/morpho-v2-bootstrap does. Only the node is faked.
-func buildIntegrationService(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chain ChainReader, multicaller *testutil.MockMulticaller) *Service {
+func buildIntegrationService(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chain ChainReader, multicaller *testutil.MockMulticaller, progress ProgressStore) *Service {
 	t.Helper()
 	t.Setenv("BUILD_GIT_HASH", "test")
 
@@ -188,7 +258,7 @@ func buildIntegrationService(t *testing.T, ctx context.Context, pool *pgxpool.Po
 	cfg := ConfigDefaults()
 	cfg.ChainID = 1
 	cfg.Logger = logger
-	service, err := NewService(cfg, chain, replay)
+	service, err := NewService(cfg, chain, replay, progress)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}

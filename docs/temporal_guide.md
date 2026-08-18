@@ -96,6 +96,26 @@ A job whose single run legitimately takes hours also needs `CronjobConfig.Activi
 the shared defaults (10m `StartToClose`, 30m `ScheduleToClose`, 5 attempts) would kill it
 mid-run. A zero `ActivityTimeouts` keeps those defaults, so existing jobs are unaffected.
 
+### Resuming a long run after a pod kill
+
+A run measured in hours should not restart from scratch when a deploy rolls its pod.
+`temporal.NewActivityProgress[T]()` records a runner's progress in the activity's heartbeat
+details, which live on the Temporal server:
+
+- pass the SAME instance to `CronjobConfig.Progress` and to the runner (`Setup` closes over
+  it), because the liveness ticker beats through it — Temporal keeps only the last
+  heartbeat's details, so a bare ping in between would erase the resume point;
+- the runner reads `LoadProgress` at the start and `SaveProgress` after each completed unit
+  of work, through a port it declares itself, so the service never imports the Temporal SDK;
+- the details are readable only by a LATER ATTEMPT of the same activity, so
+  `ActivityTimeouts.MaximumAttempts` must allow more than one — and a hand re-trigger is a
+  new workflow execution, so it always starts from the beginning;
+- resume must be alignment-safe: record a position only once the unit that reached it is
+  fully done, and scope the record so a record computed for different inputs is refused.
+
+`morpho-v2-bootstrap` is the worked example. A cronjob with nothing to resume leaves
+`Progress` nil and heartbeats exactly as before.
+
 ## Recipe: add a new cronjob
 
 Replace `<your-job>` with a kebab-case name and `<YOUR_JOB>` with the upper-snake form.

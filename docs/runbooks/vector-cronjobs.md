@@ -37,11 +37,24 @@ cronjob, `VectorOnDemandWorkerDown` for an on-demand worker.
 > worker idles ~100% of the time and no data goes stale while it is down, so it is
 > classed with the on-demand workers: `VectorOnDemandWorkerDown` (warning) covers
 > its availability, and it is excluded from `VectorCronjobAllRunsFailing` — a job
-> that runs once on demand produces `errors=1, successes=0` from a single failure,
-> which would page critical for a run an operator is already watching. That failure
-> still fires `VectorCronjobRunFailing` (warning), the right severity for it. If a
-> trigger does not start, check the pod first
+> that runs once on demand produces only errors and no success from a single failed
+> run (up to one error per attempt, and it is allowed three), which would page
+> critical for a run an operator is already watching. That failure still fires
+> `VectorCronjobRunFailing` (warning), the right severity for it. If a trigger does
+> not start, check the pod first
 > (`kubectl -n vector get pods -l app=morpho-v2-bootstrap`).
+
+> **A killed morpho-v2-bootstrap run resumes; a re-triggered one starts over.** The
+> sweep records its position in the activity's Temporal heartbeat details after
+> every completed block chunk, and the activity is allowed 3 attempts. A worker
+> killed mid-run — any deploy rolls this Deployment — is retried by Temporal and
+> the retry picks up at the next chunk, so an interrupted run costs minutes, not
+> the hours of `eth_getLogs` it had already done. Heartbeat details belong to one
+> workflow execution, so a run that goes red and is **re-triggered by hand starts
+> from the factory deploy block again**: that is a fresh execution with no
+> heartbeat history. It is safe (every write is idempotent), just slow. A run that
+> is red after its attempts is the operator signal — the cause is deterministic and
+> no further retry will clear it.
 
 General triage:
 
@@ -388,6 +401,12 @@ is now below it the replay reaches the same row in the right order and succeeds.
 If it fails again, the removal block is still ahead of finality; wait for the
 next epoch and re-trigger. Escalate to the Vector team if it persists past two
 attempts, as it then needs the incarnation row reconciling by hand.
+
+Temporal's own retries do not clear this one: they start seconds apart, so the
+pinned head barely moves. They are cheap, though — each retry resumes at the
+chunk that failed instead of re-sweeping from the deploy block — so the run still
+goes red within minutes of the first failure. The re-trigger has to come from an
+operator, once enough time has passed for the removal block to finalize.
 
 This is a property of the shared VaultV2 replay path, not of the bootstrap alone
 — the morpho-vault-indexer backfiller replays through the same handlers and has
