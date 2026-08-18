@@ -24,9 +24,9 @@ func ConnectPool(t *testing.T, dsn string) *pgxpool.Pool {
 	return pool
 }
 
-// StartTimescaleDBForMain starts a shared TimescaleDB container for use in
-// TestMain (which receives *testing.M, not *testing.T). On error it calls
-// log.Fatal instead of t.Fatalf.
+// StartTimescaleDBForMain gives this test binary a Postgres to work in, for use in
+// TestMain (which receives *testing.M, not *testing.T). On error it calls log.Fatal
+// instead of t.Fatalf.
 //
 // When STL_TEST_POSTGRES_DSN is set it carves a database for this process out of
 // that server instead, so CI can own one TimescaleDB per shard rather than one

@@ -10,8 +10,8 @@ import (
 // starts its own container from TestMain instead.
 //
 // The Postgres server named here must be disposable: the suite creates and drops
-// databases on it and permanently disables its TimescaleDB background workers
-// (see disableBackgroundWorkers).
+// databases on it freely, and turns off the TimescaleDB policy jobs in every
+// database it makes (see DisableScheduledJobs).
 const (
 	EnvPostgresDSN        = "STL_TEST_POSTGRES_DSN"
 	EnvRedisAddr          = "STL_TEST_REDIS_ADDR"

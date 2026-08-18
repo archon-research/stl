@@ -187,14 +187,6 @@ func isSourceInUse(err error) bool {
 	return errors.As(err, &pgErr) && pgErr.Code == "55006"
 }
 
-// isUndefinedObject reports whether Postgres rejected a statement because the
-// object it named does not exist.
-func isUndefinedObject(err error) bool {
-	// SQLSTATE 42704 = undefined_object
-	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == "42704"
-}
-
 // ensureTemplate migrates the template for baseDSN's server if no process has yet,
 // and returns its name.
 func ensureTemplate(ctx context.Context, baseDSN string) (string, error) {
@@ -243,9 +235,6 @@ func ensureTemplate(ctx context.Context, baseDSN string) (string, error) {
 		}
 	}()
 
-	if err := disableBackgroundWorkers(ctx, conn.Conn()); err != nil {
-		return "", err
-	}
 	ready, err := templateReady(ctx, conn.Conn(), name)
 	if err != nil {
 		return "", err
@@ -260,39 +249,23 @@ func ensureTemplate(ctx context.Context, baseDSN string) (string, error) {
 	return name, nil
 }
 
-// disableBackgroundWorkers stops TimescaleDB attaching a scheduler session to
-// every database on the server.
+// DisableScheduledJobs stops TimescaleDB's policy jobs from running in this
+// database. Compression is the one that bites: a job firing mid-test rewrites a
+// chunk into a columnstore chunk plus a compress_hyper_* twin, and any test
+// asserting on chunk layout then sees two chunks where it seeded one.
 //
-// That session is a background worker, so datallowconn cannot keep it out of the
-// template, and CREATE DATABASE ... TEMPLATE counts it as a user of the source and
-// refuses to copy — permanently, not transiently. Tests never depend on scheduled
-// jobs; migrations only register the policies, which is a catalog write.
-//
-// The change is server-wide and is never put back, so the server behind
-// EnvPostgresDSN has to be one nobody minds losing scheduled jobs on.
-func disableBackgroundWorkers(ctx context.Context, conn *pgx.Conn) error {
-	var workers int
-	err := conn.QueryRow(ctx,
-		"SELECT current_setting('timescaledb.max_background_workers')::int",
-	).Scan(&workers)
-	switch {
-	case isUndefinedObject(err):
-		// No such setting means the extension is not loaded on this server, so
-		// there is no scheduler session for a clone to trip over.
-		return nil
-	case err != nil:
-		return fmt.Errorf("read timescaledb.max_background_workers: %w", err)
-	case workers == 0:
-		return nil
-	}
-
-	// ALTER SYSTEM, because the setting is SIGHUP-scoped: it cannot be set per
-	// session or per database, and `services:` cannot pass a server command line.
-	if _, err := conn.Exec(ctx, "ALTER SYSTEM SET timescaledb.max_background_workers = 0"); err != nil {
-		return fmt.Errorf("disable timescaledb background workers: %w", err)
-	}
-	if _, err := conn.Exec(ctx, "SELECT pg_reload_conf()"); err != nil {
-		return fmt.Errorf("reload config: %w", err)
+// Per database, because the server-wide knob cannot be reached from here:
+// timescaledb.max_background_workers is postmaster-scoped, so ALTER SYSTEM only
+// marks it pending_restart, and a `services:` container takes no command line and
+// cannot be restarted mid-job. Migrations register the policies as a catalog write;
+// no test depends on one running.
+func DisableScheduledJobs(ctx context.Context, pool *pgxpool.Pool) error {
+	// job_id >= 1000 is TimescaleDB's own boundary between policy jobs and its
+	// built-ins, which belong to the extension rather than to our migrations.
+	if _, err := pool.Exec(ctx,
+		"SELECT alter_job(job_id, scheduled => false) FROM timescaledb_information.jobs WHERE job_id >= 1000",
+	); err != nil {
+		return fmt.Errorf("disable scheduled jobs: %w", err)
 	}
 	return nil
 }
@@ -358,7 +331,12 @@ func migrateTemplate(ctx context.Context, pool *pgxpool.Pool) error {
 	if _, err := pool.Exec(ctx, "CREATE EXTENSION IF NOT EXISTS timescaledb"); err != nil {
 		return fmt.Errorf("enable timescaledb: %w", err)
 	}
-	return migrator.New(pool, migrationsDir()).ApplyAll(ctx)
+	if err := migrator.New(pool, migrationsDir()).ApplyAll(ctx); err != nil {
+		return err
+	}
+	// In the template, so every clone inherits it: the job rows are catalog rows,
+	// and a clone is a copy of the catalog too.
+	return DisableScheduledJobs(ctx, pool)
 }
 
 // dropTemplate removes a leftover template. The datistemplate flag has to come off

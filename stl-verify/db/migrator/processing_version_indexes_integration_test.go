@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/archon-research/stl/stl-verify/db/migrator"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -713,6 +714,14 @@ func seedProcessingVersionPlanRows(t *testing.T, ctx context.Context, pool *pgxp
 
 	if _, err := tx.Exec(ctx, "SET LOCAL session_replication_role = 'replica'"); err != nil {
 		t.Fatalf("disable triggers and FK checks: %v", err)
+	}
+
+	// These fixtures assert on chunk layout, and this package migrates its own
+	// databases rather than cloning the template that already has jobs disabled. A
+	// compression job firing here turns a seeded chunk into a columnstore chunk plus
+	// a compress_hyper_* twin, and the plan then scans two chunks where it seeded one.
+	if err := testutil.DisableScheduledJobs(ctx, pool); err != nil {
+		t.Fatalf("%v", err)
 	}
 
 	for _, stmt := range processingVersionSeedStatements() {
