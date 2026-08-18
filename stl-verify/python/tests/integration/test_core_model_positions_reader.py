@@ -21,7 +21,13 @@ _USDT = "0xdAC17F958D2ee523a2206206994597C13D831ec7"
 async def engine(async_db_url: str):
     eng = create_async_engine(async_db_url, pool_pre_ping=True)
     async with eng.begin() as conn:
-        for table in ("borrower", "borrower_collateral", "sparklend_reserve_data", "onchain_token_price"):
+        for table in (
+            "borrower",
+            "borrower_collateral",
+            "sparklend_reserve_data",
+            "onchain_token_price",
+            "morpho_market_position",
+        ):
             await conn.execute(text(f"TRUNCATE {table}"))
     yield eng
     await eng.dispose()
@@ -113,5 +119,57 @@ async def test_latest_row_per_user_token_wins(engine):
 async def test_unsupported_protocol_fails_with_the_data_gaps_pointer(engine):
     with pytest.raises(ValueError, match="DATA_GAPS"):
         await PostgresPositionsReader(engine).get_protocol_data(
-            protocol="MORPHO", network="ETHEREUM", morpho_market="CBBTC", loan_token="USDC", galaxy_type=""
+            protocol="SYRUP", network="ETHEREUM", morpho_market="", loan_token="USDC", galaxy_type=""
+        )
+
+
+async def _seed_morpho_market(conn, ids: dict, lltv_1e18: int, market_id_byte: str) -> int:
+    return (
+        await conn.execute(
+            text("""
+                INSERT INTO morpho_market
+                    (chain_id, protocol_id, market_id, loan_token_id, collateral_token_id,
+                     oracle_address, irm_address, lltv, created_at_block)
+                VALUES (1, (SELECT id FROM protocol WHERE chain_id = 1 AND name = 'Morpho Blue'),
+                        decode(repeat(:mb, 32), 'hex'), :loan, :collateral,
+                        decode(repeat('11', 20), 'hex'), decode(repeat('22', 20), 'hex'), :lltv, 1)
+                RETURNING id
+            """),
+            {"mb": market_id_byte, "loan": ids["usdt"], "collateral": ids["weth"], "lltv": lltv_1e18},
+        )
+    ).scalar_one()
+
+
+async def test_morpho_latest_row_decimals_and_lif(engine):
+    async with engine.begin() as conn:
+        ids = await _ids(conn)
+        user_id = await _seed_user(conn, "cc" * 20)
+        await _seed_market(conn, ids)  # prices for WETH/USDT
+        market = await _seed_morpho_market(conn, ids, 860000000000000000, "ab")
+        for block, collateral, borrow in ((100, 2 * 10**18, 500 * 10**6), (200, 1 * 10**18, 400 * 10**6)):
+            await conn.execute(
+                text("""
+                    INSERT INTO morpho_market_position
+                        (user_id, morpho_market_id, block_number, "timestamp",
+                         supply_shares, borrow_shares, collateral, supply_assets, borrow_assets)
+                    VALUES (:u, :m, :b, now(), 0, 0, :c, 0, :bor)
+                """),
+                {"u": user_id, "m": market, "b": block, "c": collateral, "bor": borrow},
+            )
+
+    users, market_df = await PostgresPositionsReader(engine).get_protocol_data(
+        protocol="MORPHO", network="ETHEREUM", morpho_market="WETH", loan_token="USDT", galaxy_type=""
+    )
+    row = users.iloc[0]
+    assert row["weth_supply"] == 1.0  # block-200 row wins
+    assert row["usdt_borrow"] == 400.0
+    assert row["lltv"] == pytest.approx(0.86)
+    assert row["liquidation_incentive"] == pytest.approx(1.04384134, abs=1e-8)
+    assert list(market_df["token_symbol"]) == ["WETH"]
+
+
+async def test_morpho_unknown_pair_fails_loudly(engine):
+    with pytest.raises(ValueError, match="no morpho_market rows"):
+        await PostgresPositionsReader(engine).get_protocol_data(
+            protocol="MORPHO", network="ETHEREUM", morpho_market="WETH", loan_token="DAI", galaxy_type=""
         )

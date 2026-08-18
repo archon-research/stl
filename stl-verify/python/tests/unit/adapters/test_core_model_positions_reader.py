@@ -1,11 +1,15 @@
 """Unit tests for the positions frame assembly (the model-semantics core)."""
 
+from types import SimpleNamespace
+
 import pytest
 
 from app.adapters.postgres.core_model_positions_reader import (
     PositionRow,
     build_market_frame,
+    build_morpho_users_frame,
     build_users_frame,
+    morpho_liquidation_incentive,
 )
 
 _PRICES = {"WETH": 2000.0, "WSTETH": 2400.0, "USDT": 1.0, "USDS": 1.0, "DAI": 1.0}
@@ -108,3 +112,63 @@ def test_market_frame_contains_only_modeled_collaterals():
 def test_market_frame_fails_on_a_modeled_collateral_without_a_price():
     with pytest.raises(ValueError, match="WBTC"):
         build_market_frame({"WETH", "WBTC"}, _PRICES)
+
+
+# Morpho Blue
+
+
+def _morpho_row(address_bytes=b"\xaa" * 20, lltv=0.86, collateral=430_000, borrow_assets=260_000_000):
+    """One (user, tranche) row as the SQL returns it: raw units, cbBTC 8 dp, USDC 6 dp."""
+    return SimpleNamespace(
+        user_address=address_bytes,
+        lltv=lltv,
+        collateral_symbol="cbBTC",
+        collateral_decimals=8,
+        loan_symbol="USDC",
+        loan_decimals=6,
+        collateral=collateral,
+        borrow_assets=borrow_assets,
+    )
+
+
+_MORPHO_PRICES = {"CBBTC": 70000.0, "USDC": 1.0}
+
+
+def test_morpho_lif_matches_ba_parquet_value():
+    # BA's users_morpho_cbbtc-usdc.parquet carries 1.04384134 for lltv 0.86 —
+    # exactly the whitepaper formula min(1.15, 1/(0.3*lltv + 0.7)).
+    assert morpho_liquidation_incentive(0.86) == pytest.approx(1.04384134, abs=1e-8)
+
+
+def test_morpho_frame_scales_decimals_and_prices():
+    df = build_morpho_users_frame([_morpho_row()], _MORPHO_PRICES)
+    row = df.iloc[0]
+    assert row["cbbtc_supply"] == pytest.approx(0.0043)  # 430_000 / 1e8
+    assert row["cbbtc_supply_usd"] == pytest.approx(301.0)
+    assert row["usdc_borrow"] == pytest.approx(260.0)  # 260_000_000 / 1e6
+    assert row["health_factor"] == pytest.approx(0.86 * 301.0 / 260.0)
+    assert row["lltv"] == pytest.approx(0.86)
+    assert row["wallet_address"] == "0x" + "aa" * 20
+
+
+def test_morpho_wallet_across_two_tranches_collapses_to_one_weighted_row():
+    rows = [
+        _morpho_row(lltv=0.86, collateral=100_000_000, borrow_assets=10_000_000),  # 1 cbBTC
+        _morpho_row(lltv=0.945, collateral=300_000_000, borrow_assets=30_000_000),  # 3 cbBTC
+    ]
+    df = build_morpho_users_frame(rows, _MORPHO_PRICES)
+    assert len(df) == 1
+    row = df.iloc[0]
+    assert row["cbbtc_supply"] == pytest.approx(4.0)
+    assert row["lltv"] == pytest.approx((0.86 * 1 + 0.945 * 3) / 4)  # collateral-weighted
+
+
+def test_morpho_zero_collateral_borrowers_are_excluded():
+    rows = [_morpho_row(), _morpho_row(address_bytes=b"\xbb" * 20, collateral=0)]
+    df = build_morpho_users_frame(rows, _MORPHO_PRICES)
+    assert list(df["wallet_address"]) == ["0x" + "aa" * 20]
+
+
+def test_morpho_unpriced_token_fails_the_build():
+    with pytest.raises(ValueError, match="CBBTC"):
+        build_morpho_users_frame([_morpho_row()], {"USDC": 1.0})
