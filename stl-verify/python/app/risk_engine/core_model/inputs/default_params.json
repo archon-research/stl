@@ -1,0 +1,143 @@
+{
+  "_comment": "CORE — default parameters. Each entry carries the canonical value plus metadata (description, choices or min/max). Edit 'value' fields only; everything else is documentation.",
+
+  "PROTOCOL": {
+    "value": "SYRUP",
+    "description": "Target protocol",
+    "choices": ["SYRUP", "MORPHO", "AAVE", "SPARKLEND", "GALAXY", "ANCHORAGE"]
+  },
+  "NETWORK": {
+    "value": "ETHEREUM",
+    "description": "Target network (relevant for AAVE multi-chain deployments)",
+    "choices": ["ETHEREUM", "ARBITRUM", "OPTIMISM"]
+  },
+  "MORPHO_MARKET": {
+    "value": "CBBTC",
+    "description": "Morpho market to analyse (only when PROTOCOL=MORPHO)",
+    "choices": ["CBBTC", "WETH"]
+  },
+  "GALAXY_TYPE": {
+    "value": "NO CLASS A",
+    "description": "Galaxy loan composition (only when PROTOCOL=GALAXY)",
+    "choices": ["WITH CLASS A", "NO CLASS A"]
+  },
+  "LOAN_TOKEN": {
+    "value": "USDC",
+    "description": "Loan token used to filter borrower positions; ALL = no filter",
+    "choices": ["USDC", "USDT", "USDS", "DAI", "WETH", "WEETH", "ALL"]
+  },
+  "TIME_INTERVAL": {
+    "value": "1d",
+    "description": "Price-history frequency fetched from Yahoo Finance",
+    "choices": ["1d", "1h"]
+  },
+
+  "FORECAST_STEP": {
+    "value": 14,
+    "description": "Forecast horizon in calendar days",
+    "type": "int",
+    "min": 1,
+    "max": 60
+  },
+  "TRAIN_SIZE": {
+    "value": 180,
+    "description": "Rolling GARCH training window in days; longer windows increase stability but reduce responsiveness",
+    "type": "int",
+    "min": 30,
+    "max": 730
+  },
+  "N_MC": {
+    "value": 10000,
+    "description": "Number of Monte Carlo price scenarios; more paths reduce sampling noise but increase runtime",
+    "type": "int",
+    "min": 100,
+    "max": 50000
+  },
+  "PERC": {
+    "value": 0.975,
+    "description": "Confidence level used for VaR/ES diagnostic quantiles (e.g. 0.975 = 97.5%)",
+    "type": "float",
+    "min": 0.90,
+    "max": 0.999
+  },
+  "SEED": {
+    "value": 0,
+    "description": "Global random seed for full reproducibility; 0 = deterministic baseline",
+    "type": "int",
+    "min": 0,
+    "max": 9999
+  },
+
+  "COPULA_TYPE": {
+    "value": "T-COPULA",
+    "description": "Cross-asset dependence structure; T-COPULA captures heavier joint tails than GAUSSIAN",
+    "choices": ["T-COPULA", "GAUSSIAN"]
+  },
+  "USE_LOG_RETURNS": {
+    "value": true,
+    "description": "Use log returns instead of simple returns; recommended for daily frequency"
+  },
+  "JUMPS": {
+    "value": true,
+    "description": "Add a compound Poisson jump component on top of GARCH diffusion; improves tail fit"
+  },
+  "FOCUS_ON_NEGATIVE": {
+    "value": false,
+    "description": "Restrict jump simulation to downside shocks only (more conservative); only applies when JUMPS=true"
+  },
+  "HOURLY_CONV": {
+    "value": false,
+    "description": "Decompose daily returns to hourly resolution via Brownian bridge; increases precision for sub-day liquidation triggers"
+  },
+  "WORST_CASE": {
+    "value": false,
+    "description": "Replace observed borrower LTVs with the market's worst-case (liquidation-threshold) LTVs"
+  },
+  "VOL_FLOOR_PCT": {
+    "value": 0.75,
+    "description": "GARCH conditional vol forecast is floored at this percentile of the full-history 21-day rolling realised vol; prevents capital requirements collapsing in low-vol regimes",
+    "type": "float",
+    "min": 0.50,
+    "max": 1.00
+  },
+
+  "GAS_FEE_USD": {
+    "value": 5.0,
+    "description": "Liquidation gas cost in USD; deducted from liquidator profit to determine viability",
+    "type": "float",
+    "min": 0.0,
+    "max": 100.0
+  },
+  "SWAP_FEE_USD": {
+    "value": 0.005,
+    "description": "DEX swap fee as a decimal (e.g. 0.005 = 0.5%); applied to the collateral leg of each liquidation",
+    "type": "float",
+    "min": 0.0,
+    "max": 0.05
+  },
+
+  "MC_TRIGGER": {
+    "value": 0.05,
+    "description": "Margin-call trigger: fires when LTV >= LiquidationThreshold minus this value (SYRUP/ANCHORAGE only); e.g. 0.05 = 5 pp below LT",
+    "type": "float",
+    "min": 0.01,
+    "max": 0.20
+  },
+  "MC_TARGET_LTV": {
+    "value": null,
+    "description": "LTV the borrower restores to after a successful margin call; null = restore to each borrower's initial LTV (SYRUP/ANCHORAGE only)"
+  },
+  "MC_CURE_PROB": {
+    "value": 0.0,
+    "description": "Probability that a margin-called borrower actually posts additional collateral (0 = never cures, 1 = always cures)",
+    "type": "float",
+    "min": 0.0,
+    "max": 1.0
+  },
+
+  "LIQ_ANALYSIS": {
+    "value": "YES",
+    "description": "Run full liquidation simulation; set NO to generate price paths only",
+    "choices": ["YES", "NO"]
+  }
+}

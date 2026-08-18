@@ -39,11 +39,16 @@ def _composite_mapping_key(chain_id: int, address: bytes) -> str:
 
 
 def _settings(async_db_url: str, suraf_inputs_dir: Path, suraf_mappings_file: Path) -> Settings:
+    # These tests assert SURAF startup behaviour, so the packaged CORE mapping is
+    # emptied out: its receipt tokens are not seeded here and would fail startup first.
+    empty_core_mapping = suraf_mappings_file.parent / "empty_core_model_mapping.json"
+    empty_core_mapping.write_text("{}")
     return Settings.model_validate(
         {
             "database_url": SecretStr(async_db_url),
             "suraf_inputs_dir": suraf_inputs_dir,
             "suraf_mappings_file": suraf_mappings_file,
+            "core_model_mappings_file": empty_core_mapping,
         }
     )
 

@@ -1,0 +1,86 @@
+{
+  "MORPHO": {
+    "description": "Non-custodial lending protocol with isolated markets. No protocol-level insurance fund or quantitative loss absorbers.",
+    "investment_class": null,
+    "loss_waterfall": [],
+    "total_protection_usd": 0,
+    "notes": "Risk is contained at the market level through isolation. Bad debt is socialized pro-rata among lenders within the affected market only."
+  },
+
+  "AAVE": {
+    "description": "Decentralised pooled lending protocol (Aave v3) with a Safety Module backed by staked AAVE tokens. No quantitative first-loss capital directly allocated to this investment.",
+    "investment_class": null,
+    "loss_waterfall": [],
+    "total_protection_usd": 0,
+    "notes": "The Safety Module (stkAAVE / stkABPT) can be slashed by governance up to 30% to cover shortfalls, but is not a pre-committed, quantified absorber for this specific exposure."
+  },
+
+  "SPARKLEND": {
+    "description": "Aave v3 fork governed by MakerDAO / Sky. The Maker surplus buffer and MKR dilution act as backstops, but no quantitative loss absorbers are pre-committed to this investment.",
+    "investment_class": null,
+    "loss_waterfall": [],
+    "total_protection_usd": 0,
+    "notes": "MakerDAO surplus buffer and last-resort MKR dilution provide systemic protection, but are discretionary governance actions rather than contractual absorbers."
+  },
+
+  "SYRUP": {
+    "description": "Maple Finance retail lending product. Pool Cover (first-loss capital) is provided by Pool Delegates, but the specific amount is pool-dependent and not fixed at protocol level.",
+    "investment_class": null,
+    "loss_waterfall": [],
+    "total_protection_usd": 0,
+    "notes": "Pool Cover provides a junior tranche ahead of lender capital, but the amount varies per pool and is not captured as a fixed contractual absorber here."
+  },
+
+  "GALAXY": {
+    "description": "Institutional overcollateralised lending facilitated by Galaxy Digital. The investment is structured as Class B, which is senior to subsidies and junior to Class A. Two quantitative loss absorbers are in place: a subsidy facility (up to $25M) and first-loss capital ($2M).",
+    "investment_class": "B",
+    "loss_waterfall": [
+      {
+        "rank": 1,
+        "name": "First Loss Capital (FLC)",
+        "type": "FLC",
+        "description": "First-loss capital tranche that absorbs losses first, before subsidies and before Class B is impacted.",
+        "amount_usd": 2000000,
+        "present": true,
+        "contractual_cap_usd": 2000000
+      },
+      {
+        "rank": 2,
+        "name": "Subordinated Notes",
+        "type": "SUBORDINATED_NOTES",
+        "description": "Subordinated notes facility that absorbs residual losses after FLC is exhausted and before Class B capital is impacted. Class B is senior to this layer.",
+        "amount_usd": 25000000,
+        "present": true,
+        "contractual_cap_usd": 25000000
+      },
+      {
+        "rank": 3,
+        "name": "Class B (our investment)",
+        "type": "INVESTMENT_CLASS",
+        "description": "Our investment tranche. Absorbs losses only after subsidies and FLC are fully exhausted. Senior to Class A.",
+        "amount_usd": null,
+        "present": true,
+        "contractual_cap_usd": null
+      },
+      {
+        "rank": 4,
+        "name": "Class A",
+        "type": "SENIOR_TRANCHE",
+        "description": "Most senior tranche, absorbs losses last. Not currently deployed.",
+        "amount_usd": null,
+        "present": false,
+        "contractual_cap_usd": null
+      }
+    ],
+    "total_protection_usd": 27000000,
+    "notes": "Example: a gross loss of $50M results in a net loss to Class B of $23M, after $25M subsidies and $2M FLC are applied."
+  },
+
+  "ANCHORAGE": {
+    "description": "Regulated institutional digital asset bank (OCC-chartered). Protection relies on regulatory capital requirements, regulated custody, and enforceable legal agreements. No quantitative loss absorbers pre-committed to this investment.",
+    "investment_class": null,
+    "loss_waterfall": [],
+    "total_protection_usd": 0,
+    "notes": "As an OCC-chartered institution, Anchorage is subject to regulatory capital adequacy requirements, but these are not structured as contractual loss absorbers for a specific investment."
+  }
+}
