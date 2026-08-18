@@ -256,6 +256,16 @@ BEGIN
         RAISE EXCEPTION 'projection % re-emits observations with a changed block_timestamp (a real correction must bump block_version): %', p_view, bad;
     END IF;
 
+    -- (4) Fail hard on a NULL deal_type_code for a NON-ZERO observation: a non-zero position must carry a
+    -- classification code. Surface the projection defect loudly (naming the observation) rather than let it
+    -- hit the NOT NULL classification insert as a raw 23502, or silently leave the position unclassified.
+    SELECT string_agg(msg, '; ') INTO bad FROM (
+        SELECT format('bn=%s bv=%s pv=%s', block_number, block_version, processing_version) AS msg
+        FROM _mpp_src WHERE quantity > 0 AND deal_type_code IS NULL LIMIT 5) z;
+    IF bad IS NOT NULL THEN
+        RAISE EXCEPTION 'projection % emits a NULL deal_type_code on a non-zero observation (every non-zero observation must carry a classification code): %', p_view, bad;
+    END IF;
+
     -- Upsert the observations into the spine and the current latest-non-zero deal-type into
     -- position_classification. Static SQL over the temp snapshot (no view rescan); the data-modifying
     -- cls CTE runs to completion even though the top-level query reads only ins.
@@ -288,10 +298,9 @@ BEGIN
         SELECT DISTINCT ON (position_id)
                position_id, deal_type_code, block_number, block_version, processing_version
         FROM canonical
-        -- deal_type_code IS NOT NULL: a non-zero observation carrying no code cannot classify. Filtering
-        -- it here (rather than letting it reach the NOT NULL cls INSERT and abort the whole run with a
-        -- raw 23502) leaves that position legal-but-unclassified, matching the all-zero-history stance.
-        WHERE quantity > 0 AND deal_type_code IS NOT NULL
+        -- Non-zero observations only. deal_type_code is guaranteed non-null here by pre-flight check (4),
+        -- so no NULL code can reach the NOT NULL classification insert.
+        WHERE quantity > 0
         ORDER BY position_id, block_number DESC, block_version DESC, processing_version DESC
     ),
     -- Recency high-water per position: the latest CLASSIFIABLE (non-zero) observation across the MERGE of

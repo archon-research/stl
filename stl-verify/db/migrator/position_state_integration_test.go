@@ -130,20 +130,59 @@ func TestPositionState(t *testing.T) {
 		}
 	})
 
+	t.Run("two positions in one run stay isolated", func(t *testing.T) {
+		mpp(t, "vmp", valuesOf(row("imA", "aa", 5, "COLLATERAL", 100, 1, 0), row("imB", "ab", 5, "BORROW", 5000, 0, 0)), "store")
+		mpp(t, "vmp", valuesOf(row("imA", "aa", 5, "LOAN", 100, 0, 0), row("imB", "ab", 5, "LOAN", 1500, 0, 0)), "run")
+		if got := classOf(t, "imA", "aa"); got != "COLLATERAL" {
+			t.Errorf("position A regressed to %q; want COLLATERAL", got)
+		}
+		if got := classOf(t, "imB", "ab"); got != "BORROW" {
+			t.Errorf("position B regressed to %q; want BORROW", got)
+		}
+	})
+
+	t.Run("un-zeroing reopens a closed position", func(t *testing.T) {
+		mpp(t, "vuz", valuesOf(row("iuz", "aa", 0, "BORROW", 100, 0, 0)), "closed")
+		if got := classOf(t, "iuz", "aa"); got != "" {
+			t.Errorf("all-zero position classified as %q; want unclassified", got)
+		}
+		mpp(t, "vuz", valuesOf(row("iuz", "aa", 5, "BORROW", 100, 0, 0)), "reopen")
+		if got := classOf(t, "iuz", "aa"); got != "BORROW" {
+			t.Errorf("reopened position = %q; want BORROW", got)
+		}
+	})
+
+	t.Run("deep reorg moves the classification down two blocks", func(t *testing.T) {
+		mpp(t, "vdr", valuesOf(row("idr", "aa", 7, "BORROW", 10, 0, 0), row("idr", "aa", 6, "LOAN", 20, 0, 0), row("idr", "aa", 5, "COLLATERAL", 30, 0, 0)), "store")
+		if got := classOf(t, "idr", "aa"); got != "COLLATERAL" {
+			t.Errorf("store class = %q; want COLLATERAL@30", got)
+		}
+		mpp(t, "vdr", valuesOf(row("idr", "aa", 7, "BORROW", 10, 0, 0), row("idr", "aa", 6, "LOAN", 20, 0, 0), row("idr", "aa", 0, "COLLATERAL", 30, 1, 0)), "reorg")
+		if got := classOf(t, "idr", "aa"); got != "LOAN" {
+			t.Errorf("after reorg zeroing block 30, class = %q; want LOAN@20", got)
+		}
+	})
+
+	t.Run("full close keeps the prior classification (existing semantics)", func(t *testing.T) {
+		mpp(t, "vfc", valuesOf(row("ifc", "aa", 5, "BORROW", 100, 0, 0)), "open")
+		mpp(t, "vfc", valuesOf(row("ifc", "aa", 0, "BORROW", 110, 0, 0)), "close")
+		if got := classOf(t, "ifc", "aa"); got != "BORROW" {
+			t.Errorf("fully-closed position class = %q; want BORROW (last classification kept)", got)
+		}
+	})
+
 	// --- input robustness ------------------------------------------------------------------------
 
-	t.Run("null deal_type_code does not abort; leaves it unclassified (finding :283)", func(t *testing.T) {
-		nullRow := `(1::int,10::bigint,'inl'::text,'aa'::text,5::numeric,NULL::text,100::bigint,0::int,0::int,'2026-01-01'::timestamptz)`
-		mpp(t, "vnull", `SELECT * FROM (VALUES `+nullRow+`) `+mppCols, "nullcode")
-		if got := classOf(t, "inl", "aa"); got != "" {
-			t.Errorf("null-coded position classified as %q; want unclassified", got)
-		}
-		var spine int
-		if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_state WHERE position_id = position_id(1,10,'inl','aa')`).Scan(&spine); err != nil {
-			t.Fatal(err)
-		}
-		if spine != 1 {
-			t.Errorf("spine rows for null-coded position = %d; want 1 (the run must not roll back the spine)", spine)
+	t.Run("null deal_type_code on a non-zero observation raises (finding :283)", func(t *testing.T) {
+		mppErr(t, "vnull",
+			`SELECT * FROM (VALUES (1::int,10::bigint,'inl'::text,'aa'::text,5::numeric,NULL::text,100::bigint,0::int,0::int,'2026-01-01'::timestamptz)) `+mppCols,
+			"nullcode", "NULL deal_type_code")
+	})
+
+	t.Run("null deal_type_code on a zero row is allowed; position unclassified", func(t *testing.T) {
+		mpp(t, "vnz", `SELECT * FROM (VALUES (1::int,10::bigint,'inz'::text,'aa'::text,0::numeric,NULL::text,100::bigint,0::int,0::int,'2026-01-01'::timestamptz)) `+mppCols, "zeronull")
+		if got := classOf(t, "inz", "aa"); got != "" {
+			t.Errorf("zero-row NULL-coded position classified as %q; want unclassified", got)
 		}
 	})
 
