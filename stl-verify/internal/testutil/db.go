@@ -186,14 +186,8 @@ func replaceDatabase(baseDSN, dbName string) (string, error) {
 }
 
 // SanitizeTestName converts a test name to a string safe for use as a
-// PostgreSQL identifier, Redis key prefix, or AWS resource name suffix.
-// The result is lowercase alphanumeric + underscores, prefixed with "t_",
-// suffixed with the process tag, and truncated to 63 characters (PostgreSQL
-// identifier limit).
-//
-// The process tag matters once services are shared across packages: test names
-// are unique only within a package, so without it two packages' same-named tests
-// would address one schema, bucket and queue.
+// PostgreSQL identifier, Redis key prefix, or AWS resource name suffix: lowercase
+// alphanumeric and underscores, prefixed with "t_" and scoped by withProcessTag.
 func SanitizeTestName(testName string) string {
 	s := strings.ToLower(testName)
 	var b strings.Builder
@@ -206,11 +200,5 @@ func SanitizeTestName(testName string) string {
 		}
 	}
 
-	suffix := "_" + processTag()
-	budget := 63 - len(suffix)
-	result := b.String()
-	if len(result) > budget {
-		result = result[:budget]
-	}
-	return result + suffix
+	return withProcessTag(b.String())
 }

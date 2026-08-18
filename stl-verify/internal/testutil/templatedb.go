@@ -64,17 +64,22 @@ func SetupTestDB(t *testing.T, baseDSN string) (pool *pgxpool.Pool, dsn string, 
 
 // SetupDBForMain is SetupTestDB for a TestMain-scoped database shared by one test
 // file, where there is no *testing.T to fail. On error it calls log.Fatal.
+//
+// dbName is scoped by withProcessTag, so a name two test files happen to share
+// cannot make one file's setup drop the other file's live database.
 func SetupDBForMain(baseDSN, dbName string) *pgxpool.Pool {
-	pool, _, _, err := setupClonedDatabase(context.Background(), baseDSN, dbName)
+	pool, _, _, err := setupClonedDatabase(context.Background(), baseDSN, withProcessTag(dbName))
 	if err != nil {
 		log.Fatal(err)
 	}
 	return pool
 }
 
-// CleanupDBForMain closes the pool and drops the database SetupDBForMain created.
-// Cleanup is best effort: it warns rather than failing the run.
+// CleanupDBForMain closes the pool and drops the database SetupDBForMain created,
+// taking the same dbName it was given. Cleanup is best effort: it warns rather
+// than failing the run.
 func CleanupDBForMain(baseDSN string, pool *pgxpool.Pool, dbName string) {
+	dbName = withProcessTag(dbName)
 	pool.Close()
 
 	ctx := context.Background()
@@ -91,9 +96,10 @@ func CleanupDBForMain(baseDSN string, pool *pgxpool.Pool, dbName string) {
 }
 
 // DatabaseDSN points baseDSN at another database on the same server, for tests
-// that mint their own pools against a database SetupDBForMain created.
+// that mint their own pools against a database SetupDBForMain created. It takes
+// the same dbName SetupDBForMain was given.
 func DatabaseDSN(baseDSN, dbName string) string {
-	dsn, err := replaceDatabase(baseDSN, dbName)
+	dsn, err := replaceDatabase(baseDSN, withProcessTag(dbName))
 	if err != nil {
 		log.Fatalf("build DSN for %s: %v", dbName, err)
 	}
