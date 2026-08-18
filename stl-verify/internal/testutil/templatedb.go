@@ -159,20 +159,24 @@ func cloneDatabase(ctx context.Context, adminPool *pgxpool.Pool, dbName, templat
 		if !isSourceInUse(err) {
 			return fmt.Errorf("clone %s from template %s: %w", dbName, template, err)
 		}
-		evictTemplateSessions(ctx, adminPool, template)
+		err = errors.Join(err, evictTemplateSessions(ctx, adminPool, template))
 		time.Sleep(cloneRetryDelay)
 	}
 	return fmt.Errorf("clone %s from template %s after %d attempts: %w",
 		dbName, template, cloneAttempts, err)
 }
 
-// evictTemplateSessions disconnects whatever is holding the template open. Best
-// effort: the next clone attempt is the real check, and the session may already be
-// gone by the time this runs.
-func evictTemplateSessions(ctx context.Context, adminPool *pgxpool.Pool, template string) {
-	_, _ = adminPool.Exec(ctx,
+// evictTemplateSessions disconnects whatever is holding the template open. Failing
+// is not fatal — the session may already be gone, and the next clone attempt is the
+// real check — but the error rides along so an unusable eviction is not silent.
+func evictTemplateSessions(ctx context.Context, adminPool *pgxpool.Pool, template string) error {
+	if _, err := adminPool.Exec(ctx,
 		"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()",
-		template)
+		template,
+	); err != nil {
+		return fmt.Errorf("evict sessions from template %s: %w", template, err)
+	}
+	return nil
 }
 
 // isSourceInUse reports whether Postgres rejected the copy because something else
@@ -242,7 +246,11 @@ func ensureTemplate(ctx context.Context, baseDSN string) (string, error) {
 	if err := disableBackgroundWorkers(ctx, conn.Conn()); err != nil {
 		return "", err
 	}
-	if !templateReady(ctx, conn.Conn(), name) {
+	ready, err := templateReady(ctx, conn.Conn(), name)
+	if err != nil {
+		return "", err
+	}
+	if !ready {
 		if err := buildTemplate(ctx, conn.Conn(), baseDSN, name); err != nil {
 			return "", err
 		}
@@ -292,12 +300,21 @@ func disableBackgroundWorkers(ctx context.Context, conn *pgx.Conn) error {
 // templateReady reports whether a previous process finished building the template.
 // The datistemplate flag goes on only once its migrations are in, so a half-built
 // database from a killed run does not read as ready.
-func templateReady(ctx context.Context, conn *pgx.Conn, name string) bool {
+//
+// Only a missing row means "not ready". Reading any other failure that way would
+// rebuild the template — dropping it under a sibling process mid-clone.
+func templateReady(ctx context.Context, conn *pgx.Conn, name string) (bool, error) {
 	var ready bool
 	err := conn.QueryRow(ctx,
 		"SELECT datistemplate FROM pg_database WHERE datname = $1", name,
 	).Scan(&ready)
-	return err == nil && ready
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("check whether template %s is ready: %w", name, err)
+	}
+	return ready, nil
 }
 
 // buildTemplate creates the template, migrates it, and marks it clonable.
