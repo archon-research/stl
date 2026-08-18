@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -28,8 +26,12 @@ import (
 
 // replayV2StructuredEvents re-walks the S3 receipts over [from,to] and feeds
 // every VaultV2 structured event (adapter / cap / fee) from a persisted V2 vault
-// through the same handler path the live worker uses (via ReplayMetaMorphoLog),
-// bounded by an optional JSONL partition checkpoint.
+// through the same handler path the live worker uses (via ReplayMetaMorphoLog).
+//
+// Every run replays the whole requested range. The backfiller keeps no progress
+// state, so an interrupted run is resumed by re-running the same command: the
+// replay writes go through the same idempotent repo methods as live indexing, so
+// re-replaying a range costs wall clock, not correctness.
 //
 // It runs after discovery/probe/persist so the vault registry, loaded here from
 // the DB, already contains this run's newly-persisted vaults alongside any from
@@ -63,24 +65,17 @@ func replayV2StructuredEvents(
 		return fmt.Errorf("deriving VaultV2 structured topics: %w", err)
 	}
 
-	checkpoint, err := openReplayCheckpoint(cfg.replayProgressFile, replayCheckpointScope(cfg, v2Vaults))
-	if err != nil {
-		return fmt.Errorf("opening replay checkpoint: %w", err)
-	}
-	defer checkpoint.Close()
-
 	tsCache := newBlockTimestampCache(ethClient)
 
 	logger.Info("starting VaultV2 structured-event replay",
 		"v2Vaults", len(v2Vaults),
 		"from", cfg.from,
-		"to", cfg.to,
-		"checkpoint", cfg.replayProgressFile)
+		"to", cfg.to)
 
 	replayOne := func(part string) error {
 		return replayPartition(ctx, logger, s3Reader, svc, tsCache, cfg, part, v2Vaults, topics)
 	}
-	if err := runReplayPartitions(logger, replayPartitionPrefixes(cfg.from, cfg.to), checkpoint, cfg.from, cfg.to, replayOne); err != nil {
+	if err := runReplayPartitions(replayPartitionPrefixes(cfg.from, cfg.to), replayOne); err != nil {
 		return err
 	}
 
@@ -88,34 +83,15 @@ func replayV2StructuredEvents(
 	return nil
 }
 
-// runReplayPartitions walks parts in order, replaying each one that the
-// checkpoint does not already record done and recording the eligible ones.
+// runReplayPartitions replays every partition in parts, in order, and
+// hard-stops on the first failure.
 //
-// A partition is recorded done only after every event in it replays
-// successfully; the run hard-stops on the first failure. Every replay write goes
-// through the same idempotent repo methods as live indexing, so a resumed run
-// that reprocesses an in-flight partition is safe.
-//
-// Only a partition whose full range lies within [from,to] may be checkpointed. A
-// boundary partition is completeness-checked against the [from,to] intersection
-// alone, so recording it done would let a later run reusing this progress file
-// with WIDER bounds skip the now-in-scope blocks — a silent cross-run hole. It
-// still replays (cheap, idempotent); it just stays out of the checkpoint and
-// replays again next run.
-func runReplayPartitions(logger *slog.Logger, parts []string, cp *checkpoint, from, to int64, replay func(part string) error) error {
+// Order is correctness-critical (see replayPartition), so nothing may replay
+// behind a partition that failed.
+func runReplayPartitions(parts []string, replay func(part string) error) error {
 	for _, part := range parts {
-		if cp.isDone(part) {
-			logger.Info("skipping already-replayed partition", "partition", part)
-			continue
-		}
 		if err := replay(part); err != nil {
 			return fmt.Errorf("replaying partition %s: %w", part, err)
-		}
-		if !partitionFullyCovered(part, from, to) {
-			continue
-		}
-		if err := cp.markDone(part); err != nil {
-			return fmt.Errorf("recording partition %s done: %w", part, err)
 		}
 	}
 	return nil
@@ -143,43 +119,6 @@ func buildReplayService(logger *slog.Logger, multicaller outbound.Multicaller, p
 	svcConfig.Logger = logger
 
 	return morpho_indexer.NewReplayService(svcConfig, multicaller, txManager, protocolRepo, morphoRepo, eventRepo)
-}
-
-// openReplayCheckpoint returns a nil (no-op, nil-safe) checkpoint when no
-// progress file is configured, else an append-only JSONL checkpoint at path.
-func openReplayCheckpoint(path string, scope checkpointScope) (*checkpoint, error) {
-	if path == "" {
-		return nil, nil
-	}
-	return loadCheckpoint(path, scope)
-}
-
-// replayCheckpointScope pins this run's checkpoint records to the chain, bucket,
-// and V2 vault set they were replayed under (see checkpointScope).
-func replayCheckpointScope(cfg config, v2Vaults map[common.Address]struct{}) checkpointScope {
-	return checkpointScope{
-		ChainID:      cfg.chainID,
-		Bucket:       cfg.bucket,
-		VaultsDigest: v2VaultSetDigest(v2Vaults),
-	}
-}
-
-// v2VaultSetDigest is a deterministic sha256 over the V2 vault set, computed
-// from the sorted lowercase addresses so it identifies set membership alone —
-// not Go map iteration order or address checksum casing.
-func v2VaultSetDigest(vaults map[common.Address]struct{}) string {
-	addresses := make([]string, 0, len(vaults))
-	for addr := range vaults {
-		addresses = append(addresses, strings.ToLower(addr.Hex()))
-	}
-	sort.Strings(addresses)
-
-	digest := sha256.New()
-	for _, addr := range addresses {
-		digest.Write([]byte(addr))
-		digest.Write([]byte{'\n'})
-	}
-	return hex.EncodeToString(digest.Sum(nil))
 }
 
 // replayPartition collects, orders, and replays every structured V2 log in one
@@ -266,11 +205,10 @@ func collectPartitionV2Logs(
 		inRange = append(inRange, receiptFile{key: key, blockNumber: parsed.BlockNumber, version: parsed.Version})
 	}
 
-	// A block in the partition's [from,to] intersection with no receipt key would
-	// contribute nothing yet still let the partition be marked done — a permanent
-	// silent hole (re-runs skip the checkpointed partition). The discovery scan
-	// only WARNs on such gaps; replay must hard-stop (no silent holes) so the
-	// checkpoint stays unwritten and a repaired-S3 re-run retries.
+	// A block in the partition's [from,to] intersection with no receipt key
+	// contributes nothing, leaving a hole no downstream check can see. The
+	// discovery scan only WARNs on such gaps; replay must hard-stop so the run
+	// fails and a repaired-S3 re-run is what fills them.
 	if err := requireCompletePartition(part, presentBlocks, from, to); err != nil {
 		return nil, err
 	}
@@ -377,19 +315,6 @@ func partitionBlockRange(part string) (start, end int64, ok bool) {
 		return 0, 0, false
 	}
 	return start, end, true
-}
-
-// partitionFullyCovered reports whether the partition's entire block range lies
-// within [from,to]. Only fully-covered partitions may be checkpointed (see the
-// replay loop): a boundary partition the run's bounds only partially overlap is
-// completeness-checked against the intersection alone, so recording it done
-// would hide the blocks a later wider-bounds run brings into scope.
-func partitionFullyCovered(part string, from, to int64) bool {
-	partStart, partEnd, ok := partitionBlockRange(part)
-	if !ok {
-		return false
-	}
-	return partStart >= from && partEnd <= to
 }
 
 // replayPartitionPrefixes returns the S3 partition prefixes covering [from,to]

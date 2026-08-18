@@ -102,30 +102,3 @@ func TestParseConfig(t *testing.T) {
 		})
 	}
 }
-
-func TestParseConfig_ReplayProgressFileDefaultsEmpty(t *testing.T) {
-	t.Setenv("S3_BUCKET", "")
-	t.Setenv("DATABASE_URL", "")
-	t.Setenv("RPC_URL", "")
-
-	cfg, err := parseConfig([]string{
-		"-bucket", "b", "-db", "d", "-rpc-url", "r", "-from", "1", "-to", "2",
-	})
-	if err != nil {
-		t.Fatalf("parseConfig: %v", err)
-	}
-	if cfg.replayProgressFile != "" {
-		t.Errorf("replayProgressFile = %q, want empty (no checkpointing by default)", cfg.replayProgressFile)
-	}
-
-	cfg, err = parseConfig([]string{
-		"-bucket", "b", "-db", "d", "-rpc-url", "r", "-from", "1", "-to", "2",
-		"-replay-progress-file", "/tmp/progress.jsonl",
-	})
-	if err != nil {
-		t.Fatalf("parseConfig: %v", err)
-	}
-	if cfg.replayProgressFile != "/tmp/progress.jsonl" {
-		t.Errorf("replayProgressFile = %q, want /tmp/progress.jsonl", cfg.replayProgressFile)
-	}
-}

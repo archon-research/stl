@@ -2,6 +2,10 @@
 // files stored in S3 for Morpho Blue events. Candidate addresses (caller/onBehalf)
 // are collected, then probed on-chain via multicall (MORPHO() must return the
 // Morpho Blue singleton). Confirmed vaults are stored in the morpho_vault table.
+// A final phase replays the persisted VaultV2 vaults' structured events.
+//
+// A run keeps no progress state: every run redoes the full requested range, and
+// an interrupted run is resumed by re-running the same command.
 //
 // Usage:
 //
