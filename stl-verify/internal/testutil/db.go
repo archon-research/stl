@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"net/url"
-	"strings"
 	"testing"
 	"time"
 
@@ -155,22 +154,4 @@ func replaceDatabase(baseDSN, dbName string) (string, error) {
 	}
 	u.Path = "/" + dbName
 	return u.String(), nil
-}
-
-// SanitizeTestName converts a test name to a string safe for use as a
-// PostgreSQL identifier, Redis key prefix, or AWS resource name suffix: lowercase
-// alphanumeric and underscores, prefixed with "t_" and scoped by withProcessTag.
-func SanitizeTestName(testName string) string {
-	s := strings.ToLower(testName)
-	var b strings.Builder
-	b.WriteString("t_")
-	for _, r := range s {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
-			b.WriteRune(r)
-		} else {
-			b.WriteRune('_')
-		}
-	}
-
-	return withProcessTag(b.String())
 }

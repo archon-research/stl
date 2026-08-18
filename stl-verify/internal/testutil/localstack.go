@@ -2,8 +2,6 @@ package testutil
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"log"
 	"net/url"
@@ -27,23 +25,6 @@ type LocalStackConfig struct {
 }
 
 const localStackRegion = "us-east-1"
-
-// S3TestBucketName builds a bucket name unique to the calling test, for suites
-// that share one LocalStack container and so cannot share a bucket.
-func S3TestBucketName(t *testing.T, prefix string) string {
-	t.Helper()
-
-	name := prefix + strings.ReplaceAll(SanitizeTestName(t.Name()), "_", "-")
-	if len(name) > 63 {
-		// Plain truncation would put two sibling subtests sharing a 63-character
-		// prefix on one bucket, so spend the tail on a digest of the full name.
-		sum := sha256.Sum256([]byte(name))
-		name = name[:55] + hex.EncodeToString(sum[:4])
-	}
-	// TrimRight, not TrimSuffix: truncation can land mid-run of separators, and
-	// S3 rejects a name that does not end in a letter or digit.
-	return strings.TrimRight(name, "-.")
-}
 
 // NewS3Client constructs an S3 client pointed at the given LocalStack endpoint.
 // UsePathStyle is enabled as required by LocalStack.

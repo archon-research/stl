@@ -30,26 +30,8 @@ func sharedService(envVar string) (value string, ok bool) {
 // CI: tearing it down is the job's business, not a test package's.
 func noopCleanup() {}
 
-// maxIdentifierLen is PostgreSQL's identifier limit, which every name handed to a
-// shared server has to fit.
-const maxIdentifierLen = 63
-
 // processTag identifies this test binary among the sibling packages `go test -p`
 // runs concurrently.
 func processTag() string {
 	return fmt.Sprintf("p%d", os.Getpid())
-}
-
-// withProcessTag scopes a name to this test binary, so two packages cannot address
-// — or drop — one another's resources on a server they share.
-//
-// Neither kind of name is unique on its own: Go guarantees test names are unique
-// only within a package, and the names test files pass to SetupDBForMain are
-// hand-written. Tagging here is what keeps that from being each caller's problem.
-func withProcessTag(name string) string {
-	suffix := "_" + processTag()
-	if budget := maxIdentifierLen - len(suffix); len(name) > budget {
-		name = name[:budget]
-	}
-	return name + suffix
 }

@@ -120,7 +120,7 @@ func runRefillScenario(t *testing.T, useKeysFile bool) {
 
 	// 4. Create a FIFO SNS topic and a subscribed FIFO SQS queue.
 	topicArn := createFifoTopic(t, ctx, snsc, "stl-sentineltest-avalanche-blocks.fifo")
-	queueURL := createFifoQueue(t, ctx, sqsc, "refill-queue-"+testutil.SanitizeTestName(t.Name())+".fifo")
+	queueURL := createFifoQueue(t, ctx, sqsc, testutil.SQSTestFifoQueueName(t, "refill-queue-"))
 	subscribeQueueToTopic(t, ctx, snsc, sqsc, topicArn, queueURL)
 
 	// 5. Start the in-process JSON-RPC server that mimics Alchemy. The
