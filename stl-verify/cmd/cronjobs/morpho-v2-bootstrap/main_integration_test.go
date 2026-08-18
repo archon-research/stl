@@ -18,7 +18,7 @@ import (
 // A missing migration or a repository constructor that rejects the wiring shows
 // up here rather than on the first Trigger in the Temporal UI.
 func TestSetupRunner_WiresAgainstAMigratedDatabase(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
 	defer cleanup()
 
 	t.Setenv("BUILD_GIT_HASH", "test")
@@ -41,7 +41,7 @@ func TestSetupRunner_WiresAgainstAMigratedDatabase(t *testing.T) {
 // factory deploy block to bound its sweep. Starting on a chain without one would
 // otherwise mean sweeping from block 0 or silently doing nothing.
 func TestSetupRunner_RejectsAnUnsupportedChain(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
 	defer cleanup()
 
 	t.Setenv("BUILD_GIT_HASH", "test")
