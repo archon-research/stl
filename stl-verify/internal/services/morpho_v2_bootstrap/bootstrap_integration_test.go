@@ -38,7 +38,7 @@ import (
 // Expected end state: one CLOSED incarnation [100,200] plus one ACTIVE row from
 // 300, and an adapter_state row seeded at the head block.
 func TestRun_SeedThenReplayConvergesAdapterIncarnations(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
 	defer cleanup()
 	ctx := context.Background()
 
@@ -106,7 +106,7 @@ func TestRun_SeedThenReplayConvergesAdapterIncarnations(t *testing.T) {
 // run produced. Re-clicking Trigger must converge, not duplicate: the operator
 // is explicitly told a repeat run is safe.
 func TestRun_IsIdempotent(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
 	defer cleanup()
 	ctx := context.Background()
 

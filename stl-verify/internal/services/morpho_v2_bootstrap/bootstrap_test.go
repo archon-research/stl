@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"math/big"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -110,12 +111,19 @@ func TestRun_ReplaysHistoryThenSeedsAdapters(t *testing.T) {
 	if seeded[0].AdapterType != entity.MorphoAdapterTypeMarketV1 {
 		t.Errorf("seeded adapter type = %v, want MarketV1", seeded[0].AdapterType)
 	}
-	if len(h.adapterStates) != 1 {
-		t.Fatalf("adapter_state rows = %d, want 1", len(h.adapterStates))
+	// Two snapshots: the registration path takes one at the AddAdapter's own
+	// block, the seed pass one at the pinned head.
+	stateBlocks := make([]int64, 0, len(h.adapterStates))
+	for _, state := range h.adapterStates {
+		stateBlocks = append(stateBlocks, state.BlockNumber)
+		if state.RealAssets.Cmp(realAssets) != 0 {
+			t.Errorf("adapter_state at block %d has realAssets %s, want %s",
+				state.BlockNumber, state.RealAssets, realAssets)
+		}
 	}
-	if h.adapterStates[0].BlockNumber != headBlock || h.adapterStates[0].RealAssets.Cmp(realAssets) != 0 {
-		t.Errorf("adapter_state = {block %d, realAssets %s}, want {%d, %s}",
-			h.adapterStates[0].BlockNumber, h.adapterStates[0].RealAssets, headBlock, realAssets)
+	slices.Sort(stateBlocks)
+	if want := []int64{int64(addAdapterBlock), headBlock}; !slices.Equal(stateBlocks, want) {
+		t.Errorf("adapter_state blocks = %v, want %v", stateBlocks, want)
 	}
 }
 
@@ -450,14 +458,26 @@ func wireAdapterReads(t *testing.T, mc *testutil.MockMulticaller, headHash commo
 		return data
 	}
 
+	// The seed's enumeration must be pinned to the run's finalized head. An
+	// adapter's realAssets is read on the registration path too, pinned to the
+	// AddAdapter's own block, so only the enumeration is head-checked.
 	mc.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
-		if blockHash != headHash {
-			return nil, errors.New("state read is not pinned to the run's finalized head")
+		requireHeadPinned := func() error {
+			if blockHash != headHash {
+				return errors.New("adapter enumeration is not pinned to the run's finalized head")
+			}
+			return nil
 		}
 		switch {
 		case len(calls) == 1 && calls[0].Target == vault && hasSelector(calls[0], vaultV2ABI.Methods["adaptersLength"].ID):
+			if err := requireHeadPinned(); err != nil {
+				return nil, err
+			}
 			return []outbound.Result{{Success: true, ReturnData: pack(vaultV2ABI.Methods["adaptersLength"].Outputs, big.NewInt(1))}}, nil
 		case len(calls) == 1 && calls[0].Target == vault:
+			if err := requireHeadPinned(); err != nil {
+				return nil, err
+			}
 			return []outbound.Result{{Success: true, ReturnData: pack(vaultV2ABI.Methods["adapters"].Outputs, adapter)}}, nil
 		case len(calls) == 1 && calls[0].Target == adapter:
 			return []outbound.Result{{Success: true, ReturnData: pack(adapterABI.Methods["realAssets"].Outputs, realAssets)}}, nil
