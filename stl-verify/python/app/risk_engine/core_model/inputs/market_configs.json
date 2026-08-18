@@ -1,31 +1,52 @@
 {
   "_comment": "Per-market required params. Each entry overrides default_params.json for that market. Env vars (CORE_MODEL_*) override these at runtime.",
+
+  "_comment_sparklend_sources": "SparkLend runs fully live (verified against staging 17 Aug 2026): positions from borrower/borrower_collateral, prices from onchain_token_price, books from cex_orderbook_snapshots. Clusters without indexed data (local kind) override back to parquet via the global CORE_MODEL_*_SOURCE env vars (set in the dev overlay).",
   "sparklend_dai": {
     "PROTOCOL": "SPARKLEND",
-    "LOAN_TOKEN": "DAI"
+    "LOAN_TOKEN": "DAI",
+    "POSITION_SOURCE": "postgres",
+    "PRICE_SOURCE": "postgres",
+    "ORDERBOOK_SOURCE": "postgres"
   },
   "sparklend_usdc": {
     "PROTOCOL": "SPARKLEND",
-    "LOAN_TOKEN": "USDC"
+    "LOAN_TOKEN": "USDC",
+    "POSITION_SOURCE": "postgres",
+    "PRICE_SOURCE": "postgres",
+    "ORDERBOOK_SOURCE": "postgres"
   },
   "sparklend_usds": {
     "PROTOCOL": "SPARKLEND",
-    "LOAN_TOKEN": "USDS"
+    "LOAN_TOKEN": "USDS",
+    "POSITION_SOURCE": "postgres",
+    "PRICE_SOURCE": "postgres",
+    "ORDERBOOK_SOURCE": "postgres"
   },
   "sparklend_usdt": {
     "PROTOCOL": "SPARKLEND",
-    "LOAN_TOKEN": "USDT"
+    "LOAN_TOKEN": "USDT",
+    "POSITION_SOURCE": "postgres",
+    "PRICE_SOURCE": "postgres",
+    "ORDERBOOK_SOURCE": "postgres"
   },
+  "_comment_morpho_scope": "Live Morpho positions are Ethereum-mainnet Blue markets (contract-total-verified). BA's parquet snapshots for these keys were built from Base's much larger markets (their README routes cbBTC liquidity via a Base pool), so live CRRs will NOT reconcile with parquet-era CRRs: different borrower universe, not a data bug.",
   "morpho_cbbtc-usdc": {
     "PROTOCOL": "MORPHO",
     "MORPHO_MARKET": "CBBTC",
     "LOAN_TOKEN": "USDC",
-    "N_MC": 5000
+    "N_MC": 5000,
+    "POSITION_SOURCE": "postgres",
+    "PRICE_SOURCE": "postgres",
+    "ORDERBOOK_SOURCE": "postgres"
   },
   "morpho_weth-usdc": {
     "PROTOCOL": "MORPHO",
     "MORPHO_MARKET": "WETH",
-    "LOAN_TOKEN": "USDC"
+    "LOAN_TOKEN": "USDC",
+    "POSITION_SOURCE": "postgres",
+    "PRICE_SOURCE": "postgres",
+    "ORDERBOOK_SOURCE": "postgres"
   },
   "syrup_usdc": {
     "PROTOCOL": "SYRUP",
