@@ -97,7 +97,11 @@ COMMENT ON COLUMN position_state.block_timestamp IS 'Partition. On-chain observa
 COMMENT ON COLUMN position_state.created_at IS 'Audit. Row insert time.';
 
 -- Hypertable on block_timestamp, 1-day chunks (matches the transformed bucket1 position tables).
-SELECT create_hypertable('position_state', 'block_timestamp', chunk_time_interval => INTERVAL '1 day', if_not_exists => TRUE);
+-- create_default_indexes => FALSE: the PK does NOT lead with block_timestamp, so Timescale's default
+-- would silently add a block_timestamp-only index on every chunk that no documented access path uses
+-- (all lead with position_id) — an extra index write per upsert. Reverse-lookup indexes are added by
+-- whoever first needs them.
+SELECT create_hypertable('position_state', 'block_timestamp', chunk_time_interval => INTERVAL '1 day', if_not_exists => TRUE, create_default_indexes => FALSE);
 -- Compression is intentionally NOT enabled here — it ships with the incremental write path in VEC-566
 -- (see the table header for why the full-projection upsert and compression are incompatible).
 -- Tier cold chunks to S3 after 1 year. add_tiering_policy is a Timescale Cloud/TigerData primitive;
@@ -176,17 +180,28 @@ CREATE OR REPLACE FUNCTION materialize_position_projection(p_view regclass, p_re
     LANGUAGE plpgsql AS $fn$
 DECLARE n bigint; bad text;
 BEGIN
+    -- p_reason stamps change_reason provenance on every classification write; a NULL/blank would erase
+    -- provenance (and overwrite a prior reason with NULL on the update path). Fail fast on the argument.
+    IF p_reason IS NULL OR btrim(p_reason) = '' THEN
+        RAISE EXCEPTION 'materialize_position_projection(%): p_reason must be a non-empty change_reason', p_view;
+    END IF;
+
     -- Serialize concurrent runs of the SAME projection (cron overlap, scheduled + manual backfill).
     -- Key on the view's CANONICAL schema-qualified name from the catalog, not p_view::text: the regclass
     -- text renders schema-qualified only when the relation is not visible unqualified, so it would hash
     -- differently for the pinned runner (explicit search_path) vs a plain psql session — same view, two
     -- keys, no mutual exclusion. quote_qualified_ident(nspname, relname) is search_path-independent.
+    -- Contract: materialize AT MOST ONE view per transaction (or, if batching several, acquire them in
+    -- canonical-name order) — the xact lock is held to commit, so two callers locking different views in
+    -- different orders would deadlock (40P01) and lose the whole batch.
     PERFORM pg_advisory_xact_lock(hashtextextended(
         (SELECT format('materialize_position_projection.%I.%I', nsp.nspname, cls.relname)
            FROM pg_class cls JOIN pg_namespace nsp ON nsp.oid = cls.relnamespace
           WHERE cls.oid = p_view), 0));
 
-    -- (1) Enforce the column contract (name + exact type) before trusting the view.
+    -- (1) Enforce the column contract (name + BASE type) before trusting the view. Compare on the base
+    -- type with typmod stripped (format_type(atttypid, NULL)) so a losslessly assignment-compatible
+    -- source column such as numeric(30,18) passes instead of failing an exact-string match against 'numeric'.
     SELECT string_agg(e.col || ' (' || COALESCE('is ' || format_type(a.atttypid, a.atttypmod), 'MISSING') || ')', ', ')
       INTO bad
     FROM (VALUES ('chain_id','integer'),('protocol_id','bigint'),('instrument_key','text'),('holder_id','text'),
@@ -194,7 +209,7 @@ BEGIN
                  ('block_version','integer'),('processing_version','integer'),('block_timestamp','timestamp with time zone')
          ) AS e(col, typ)
     LEFT JOIN pg_attribute a ON a.attrelid = p_view AND a.attname = e.col AND a.attnum > 0 AND NOT a.attisdropped
-    WHERE a.attname IS NULL OR format_type(a.atttypid, a.atttypmod) <> e.typ;
+    WHERE a.attname IS NULL OR format_type(a.atttypid, NULL::integer) <> e.typ;
     IF bad IS NOT NULL THEN
         RAISE EXCEPTION 'projection % violates the position_state column contract: %', p_view, bad;
     END IF;
@@ -251,7 +266,10 @@ BEGIN
         SELECT position_id, chain_id, protocol_id, instrument_key, holder_id, quantity,
                block_number, block_version, processing_version, block_timestamp
         FROM _mpp_src
-        -- Insert in PK order so overlapping runs of different views take row locks in the same order.
+        -- Insert in PK order for B-tree bulk-load locality (sequential leaf writes). NOTE: this is NOT a
+        -- cross-view lock-ordering guard — the header's view-disjointness contract makes two views' row
+        -- sets disjoint, so concurrent runs never contend on the same position_state row; ordering here is
+        -- a load-locality benefit, not a deadlock protection.
         ORDER BY position_id, block_number, block_version, processing_version, block_timestamp
         ON CONFLICT (position_id, block_number, block_version, processing_version, block_timestamp) DO UPDATE
             -- quantity is the only mutable non-key column; block_timestamp is invariant for a logical key
@@ -270,18 +288,38 @@ BEGIN
         SELECT DISTINCT ON (position_id)
                position_id, deal_type_code, block_number, block_version, processing_version
         FROM canonical
-        WHERE quantity > 0
+        -- deal_type_code IS NOT NULL: a non-zero observation carrying no code cannot classify. Filtering
+        -- it here (rather than letting it reach the NOT NULL cls INSERT and abort the whole run with a
+        -- raw 23502) leaves that position legal-but-unclassified, matching the all-zero-history stance.
+        WHERE quantity > 0 AND deal_type_code IS NOT NULL
         ORDER BY position_id, block_number DESC, block_version DESC, processing_version DESC
     ),
-    -- Pre-run latest CLASSIFIABLE (non-zero) observation per position, carried as the full
-    -- (block_number, block_version, processing_version) tuple. quantity > 0 is essential: a closing
-    -- zero-row sits at a higher block than the last non-zero, so counting it here would make the guard
-    -- refuse every future reclassification of a closed position (a full-history correction included).
-    stored_max AS (
+    -- Recency high-water per position: the latest CLASSIFIABLE (non-zero) observation across the MERGE of
+    -- already-stored rows AND this run's observations, canonicalised per (position, block) with the run
+    -- winning ties (it may correct or zero a stored row). Two things make this correct where a plain
+    -- max(block_number) over raw stored rows was not:
+    --   (a) canonicalising the merge per block means a reorged-out or run-zeroed block drops out of the
+    --       high-water (fixes the version-blind wedge — a stale non-zero row no longer pins it);
+    --   (b) folding _mpp_src into the input lets the guard see the run's OWN zeroing, which a same-
+    --       statement scan of position_state alone cannot (data-modifying CTEs share the pre-statement
+    --       snapshot) — fixes the self-snapshot suppression.
+    merged_canon AS (
+        SELECT DISTINCT ON (position_id, block_number)
+               position_id, block_number, block_version, processing_version, quantity
+        FROM (
+            SELECT position_id, block_number, block_version, processing_version, quantity, 0 AS src
+              FROM position_state WHERE position_id IN (SELECT position_id FROM latest)
+            UNION ALL
+            SELECT position_id, block_number, block_version, processing_version, quantity, 1 AS src
+              FROM _mpp_src WHERE position_id IN (SELECT position_id FROM latest)
+        ) m
+        ORDER BY position_id, block_number, block_version DESC, processing_version DESC, src DESC
+    ),
+    hwm AS (
         SELECT DISTINCT ON (position_id)
                position_id, block_number AS max_bn, block_version AS max_bv, processing_version AS max_pv
-        FROM position_state
-        WHERE position_id IN (SELECT position_id FROM latest) AND quantity > 0
+        FROM merged_canon
+        WHERE quantity > 0
         ORDER BY position_id, block_number DESC, block_version DESC, processing_version DESC
     ),
     cls AS (
@@ -290,12 +328,12 @@ BEGIN
         -- (23503) and fail the run, not be silently dropped by an inner join (CLAUDE.md: fail hard).
         SELECT l.position_id, l.deal_type_code, d.direction, p_reason
         FROM latest l
-        LEFT JOIN stored_max s ON s.position_id = l.position_id
+        LEFT JOIN hwm s ON s.position_id = l.position_id
         LEFT JOIN ref_deal_type d ON d.deal_type = l.deal_type_code
-        -- Recency guard: only (re)classify from an observation at least as recent as the stored latest
-        -- non-zero, compared on the full (block_number, block_version, processing_version) tuple. Tuple
-        -- (not block_number alone) so an older block_version/processing_version re-emission at the SAME
-        -- height cannot pass the guard and regress a newer live classification.
+        -- Recency guard: (re)classify only when this run's latest classifiable observation is at least as
+        -- recent as the merged high-water, on the full (block_number, block_version, processing_version)
+        -- tuple. So an older version/height re-emission cannot regress a newer live classification, while a
+        -- reorg/zeroing that moves the canonical latest DOWN still reclassifies (hwm dropped that block).
         WHERE (l.block_number, l.block_version, l.processing_version)
               >= (COALESCE(s.max_bn, -1), COALESCE(s.max_bv, -1), COALESCE(s.max_pv, -1))
         ORDER BY l.position_id
@@ -317,4 +355,4 @@ END $fn$;
 
 COMMENT ON FUNCTION materialize_position_projection(regclass, text) IS '[Operational] VEC-402..407 shared materializer: validate a per-protocol projection view against the position_state column contract, fail hard on contract/type drift, double-emitted keys, or a changed block_timestamp, then (evaluating the projection ONCE into a temp table that every check and both writes read) upsert its observations into position_state and its current latest-non-zero deal-type into position_classification (recency-guarded against the stored latest NON-ZERO block, so a backfill window cannot regress a newer classification and a closed position can still be reclassified; an all-zero position stays unclassified). position_id is recomputed via position_id(); runs serialized per view by an advisory lock keyed on the view''s canonical qualified name; guarded upserts skip no-op reruns. Idempotent; run out of band. Returns position_state rows inserted or changed.';
 
-INSERT INTO migrations (filename) VALUES ('20260724_120000_create_position_state.sql') ON CONFLICT (filename) DO NOTHING;
+INSERT INTO migrations (filename) VALUES ('20260818_130000_create_position_state.sql') ON CONFLICT (filename) DO NOTHING;

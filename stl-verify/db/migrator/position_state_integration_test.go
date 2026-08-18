@@ -4,32 +4,21 @@ package migrator_test
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/archon-research/stl/stl-verify/db/migrator"
 )
 
-// materialize_position_projection serializes concurrent runs of one projection view with an
-// advisory lock. The lock key MUST be derived from the view's canonical schema-qualified name
-// (format('%I.%I', nspname, relname) out of the catalog), never p_view::text: p_view::text
-// schema-qualifies a relation only when it is not visible under the current search_path, so the
-// same view hashes to a different key for the pinned runner (explicit search_path) than for a
-// plain psql session — two keys, no mutual exclusion (VEC-402 round-3 finding :169). These tests
-// pin that regression shut cheaply and deterministically, without a flaky concurrency harness.
+// mppCols is the aliased column list the projection-view contract requires.
+const mppCols = `v(chain_id,protocol_id,instrument_key,holder_id,quantity,deal_type_code,block_number,block_version,processing_version,block_timestamp)`
 
-// lockKeyExpr is the exact key materialize_position_projection computes, for a fixed probe view.
-// The behavioural test evaluates it under two search_paths and asserts it is invariant — the
-// property the canonical-name key relies on.
-const lockKeyExpr = `hashtextextended((SELECT format('materialize_position_projection.%I.%I', nsp.nspname, cls.relname)
-	FROM pg_class cls JOIN pg_namespace nsp ON nsp.oid = cls.relnamespace
-	WHERE cls.oid = 'public.lock_key_probe'::regclass), 0)`
-
-// TestPositionState_LockKeyStableAcrossSearchPath asserts the advisory-lock key for a given view
-// is identical under search_path=public and search_path=pg_catalog. A search_path-dependent key
-// (the :169 regression) would produce two different values here and the lock would not serialize
-// two overlapping runs of the same materializer.
-func TestPositionState_LockKeyStableAcrossSearchPath(t *testing.T) {
+// TestPositionState drives the real materialize_position_projection through one shared schema (a single
+// ApplyAll) across the adversarial cases from this PR's review history — every subtest fails on the
+// pre-fix code it guards. Subtests use distinct instrument_keys so they share state safely; setup is
+// shared per stl-verify/AGENTS.md ("Share setup, don't repeat it").
+func TestPositionState(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupPostgres(ctx, t)
 	defer cleanup()
@@ -37,57 +26,250 @@ func TestPositionState_LockKeyStableAcrossSearchPath(t *testing.T) {
 		t.Fatalf("migrations: %v", err)
 	}
 
-	if _, err := pool.Exec(ctx, `CREATE VIEW lock_key_probe AS SELECT 1 AS x`); err != nil {
-		t.Fatalf("create probe view: %v", err)
+	// mpp (re)creates a projection view from a VALUES body and runs the materializer, expecting success.
+	mpp := func(t *testing.T, name, valuesBody, reason string) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, `CREATE OR REPLACE VIEW `+name+` AS `+valuesBody); err != nil {
+			t.Fatalf("create view %s: %v", name, err)
+		}
+		if _, err := pool.Exec(ctx, `SELECT materialize_position_projection($1::regclass, $2)`, name, reason); err != nil {
+			t.Fatalf("materialize %s: %v", name, err)
+		}
+	}
+	// mppErr runs the materializer expecting an error whose text contains want.
+	mppErr := func(t *testing.T, name, valuesBody, reason, want string) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, `CREATE OR REPLACE VIEW `+name+` AS `+valuesBody); err != nil {
+			t.Fatalf("create view %s: %v", name, err)
+		}
+		_, err := pool.Exec(ctx, `SELECT materialize_position_projection($1::regclass, $2)`, name, reason)
+		if err == nil {
+			t.Fatalf("%s: expected an error containing %q, got none", name, want)
+		}
+		if want != "" && !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: error = %v, want it to contain %q", name, err, want)
+		}
+	}
+	// classOf returns the current deal_type_code for position (1,10,ik,holder), or "" if unclassified.
+	classOf := func(t *testing.T, ik, holder string) string {
+		t.Helper()
+		var dt string
+		err := pool.QueryRow(ctx,
+			`SELECT deal_type_code FROM position_classification WHERE position_id = position_id(1, 10, $1, $2)`,
+			ik, holder).Scan(&dt)
+		if err != nil {
+			if strings.Contains(err.Error(), "no rows") {
+				return ""
+			}
+			t.Fatalf("classOf(%s, %s): %v", ik, holder, err)
+		}
+		return dt
+	}
+	row := func(ik, holder string, qty int, code string, bn, bv, pv int) string {
+		return "(1::int,10::bigint,'" + ik + "'::text,'" + holder + "'::text," + strconv.Itoa(qty) + "::numeric,'" + code + "'::text," +
+			strconv.Itoa(bn) + "::bigint," + strconv.Itoa(bv) + "::int," + strconv.Itoa(pv) + "::int,'2026-01-01'::timestamptz)"
+	}
+	valuesOf := func(rows ...string) string {
+		return `SELECT * FROM (VALUES ` + strings.Join(rows, ",") + `) ` + mppCols
 	}
 
-	// One connection so both SETs and both reads share a session.
-	conn, err := pool.Acquire(ctx)
-	if err != nil {
-		t.Fatalf("acquire conn: %v", err)
-	}
-	defer conn.Release()
+	// --- recency guard ---------------------------------------------------------------------------
 
-	var keyPublic, keyCatalog int64
-	if _, err := conn.Exec(ctx, `SET search_path = public`); err != nil {
-		t.Fatalf("set search_path public: %v", err)
-	}
-	if err := conn.QueryRow(ctx, `SELECT `+lockKeyExpr).Scan(&keyPublic); err != nil {
-		t.Fatalf("key under public: %v", err)
-	}
-	if _, err := conn.Exec(ctx, `SET search_path = pg_catalog`); err != nil {
-		t.Fatalf("set search_path pg_catalog: %v", err)
-	}
-	if err := conn.QueryRow(ctx, `SELECT `+lockKeyExpr).Scan(&keyCatalog); err != nil {
-		t.Fatalf("key under pg_catalog: %v", err)
-	}
+	t.Run("same-height older version does not regress (CodeRabbit)", func(t *testing.T) {
+		mpp(t, "vg", valuesOf(row("ig", "aa", 5, "COLLATERAL", 100, 1, 0)), "store")
+		mpp(t, "vg", valuesOf(row("ig", "aa", 5, "LOAN", 100, 0, 0)), "older")
+		if got := classOf(t, "ig", "aa"); got != "COLLATERAL" {
+			t.Errorf("older same-height version regressed to %q; want COLLATERAL (full-tuple recency guard)", got)
+		}
+	})
 
-	if keyPublic != keyCatalog {
-		t.Fatalf("advisory-lock key differs across search_path (public=%d, pg_catalog=%d): the per-view lock would not serialize concurrent materializer runs (:169)",
-			keyPublic, keyCatalog)
-	}
-}
+	t.Run("reorg-wedge reclassifies down (finding :279)", func(t *testing.T) {
+		mpp(t, "vf1", valuesOf(row("if1", "aa", 7, "BORROW", 90, 0, 0), row("if1", "aa", 5, "LOAN", 100, 0, 0)), "store")
+		mpp(t, "vf1", valuesOf(row("if1", "aa", 7, "BORROW", 90, 0, 0), row("if1", "aa", 0, "LOAN", 100, 1, 0)), "reorg")
+		if got := classOf(t, "if1", "aa"); got != "BORROW" {
+			t.Errorf("after a reorg zeroed block 100, class = %q; want BORROW (canonicalised high-water must drop the reorged-out row)", got)
+		}
+	})
 
-// TestPositionState_LockKeysCanonicalName pins the function body itself to the canonical-name key,
-// so a future edit that reverts to a search_path-dependent form (e.g. p_view::text) fails here
-// rather than silently disabling mutual exclusion. The behavioural test above proves the property;
-// this guards the mechanism the function actually uses.
-func TestPositionState_LockKeysCanonicalName(t *testing.T) {
-	ctx := context.Background()
-	pool, cleanup := setupPostgres(ctx, t)
-	defer cleanup()
-	if err := migrator.New(pool, getMigrationsPath()).ApplyAll(ctx); err != nil {
-		t.Fatalf("migrations: %v", err)
-	}
+	t.Run("self-snapshot correction reclassifies (finding :278)", func(t *testing.T) {
+		mpp(t, "vf2", valuesOf(row("if2", "ab", 7, "BORROW", 140, 0, 0), row("if2", "ab", 10, "LOAN", 150, 0, 0)), "store")
+		mpp(t, "vf2", valuesOf(row("if2", "ab", 7, "BORROW", 140, 0, 0), row("if2", "ab", 0, "LOAN", 150, 0, 0)), "zero150")
+		if got := classOf(t, "if2", "ab"); got != "BORROW" {
+			t.Errorf("a run that zeroed its own stored latest did not reclassify: class = %q; want BORROW (high-water must see the run's own writes)", got)
+		}
+	})
 
-	var def string
-	if err := pool.QueryRow(ctx,
-		`SELECT pg_get_functiondef('materialize_position_projection(regclass, text)'::regprocedure)`).Scan(&def); err != nil {
-		t.Fatalf("get function def: %v", err)
-	}
+	t.Run("newer processing_version reclassifies", func(t *testing.T) {
+		mpp(t, "vn", valuesOf(row("in", "aa", 5, "COLLATERAL", 100, 1, 0)), "store")
+		mpp(t, "vn", valuesOf(row("in", "aa", 5, "BORROW", 100, 1, 1)), "newerpv")
+		if got := classOf(t, "in", "aa"); got != "BORROW" {
+			t.Errorf("newer processing_version did not reclassify: class = %q; want BORROW", got)
+		}
+	})
 
-	if !strings.Contains(def, "format('materialize_position_projection.%I.%I'") {
-		t.Errorf("materialize_position_projection no longer keys its advisory lock on the canonical qualified name; " +
-			"a search_path-dependent key would not serialize concurrent runs (:169)")
-	}
+	t.Run("closed position reclassifies (finding :269)", func(t *testing.T) {
+		mpp(t, "vc", valuesOf(row("ic", "ac", 5, "LOAN", 100, 0, 0), row("ic", "ac", 0, "LOAN", 110, 0, 0)), "init")
+		mpp(t, "vc", valuesOf(row("ic", "ac", 5, "COLLATERAL", 100, 0, 1)), "correct")
+		if got := classOf(t, "ic", "ac"); got != "COLLATERAL" {
+			t.Errorf("closed position did not reclassify: class = %q; want COLLATERAL", got)
+		}
+	})
+
+	t.Run("older-block backfill does not regress", func(t *testing.T) {
+		mpp(t, "vb", valuesOf(row("ib", "ad", 100, "BORROW", 5000, 0, 0)), "cur")
+		mpp(t, "vb", valuesOf(row("ib", "ad", 50, "LOAN", 1500, 0, 0)), "backfill")
+		if got := classOf(t, "ib", "ad"); got != "BORROW" {
+			t.Errorf("older-block backfill regressed to %q; want BORROW", got)
+		}
+	})
+
+	t.Run("all-zero history stays unclassified", func(t *testing.T) {
+		mpp(t, "vz", valuesOf(row("iz", "af", 0, "LOAN", 100, 0, 0)), "z")
+		if got := classOf(t, "iz", "af"); got != "" {
+			t.Errorf("all-zero history classified as %q; want unclassified", got)
+		}
+	})
+
+	// --- input robustness ------------------------------------------------------------------------
+
+	t.Run("null deal_type_code does not abort; leaves it unclassified (finding :283)", func(t *testing.T) {
+		nullRow := `(1::int,10::bigint,'inl'::text,'aa'::text,5::numeric,NULL::text,100::bigint,0::int,0::int,'2026-01-01'::timestamptz)`
+		mpp(t, "vnull", `SELECT * FROM (VALUES `+nullRow+`) `+mppCols, "nullcode")
+		if got := classOf(t, "inl", "aa"); got != "" {
+			t.Errorf("null-coded position classified as %q; want unclassified", got)
+		}
+		var spine int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_state WHERE position_id = position_id(1,10,'inl','aa')`).Scan(&spine); err != nil {
+			t.Fatal(err)
+		}
+		if spine != 1 {
+			t.Errorf("spine rows for null-coded position = %d; want 1 (the run must not roll back the spine)", spine)
+		}
+	})
+
+	t.Run("null and blank p_reason are rejected (finding :286)", func(t *testing.T) {
+		if _, err := pool.Exec(ctx, `CREATE OR REPLACE VIEW vpr AS `+valuesOf(row("ipr", "aa", 5, "LOAN", 100, 0, 0))); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `SELECT materialize_position_projection('vpr'::regclass, $1)`, nil); err == nil {
+			t.Error("NULL p_reason was accepted; want a raise")
+		}
+		if _, err := pool.Exec(ctx, `SELECT materialize_position_projection('vpr'::regclass, '   ')`); err == nil {
+			t.Error("blank p_reason was accepted; want a raise")
+		}
+	})
+
+	t.Run("numeric(30,18) quantity passes the contract (finding :197)", func(t *testing.T) {
+		mpp(t, "vtm", `SELECT 1::int chain_id,10::bigint protocol_id,'itm'::text instrument_key,'aa'::text holder_id,`+
+			`5::numeric(30,18) quantity,'LOAN'::text deal_type_code,100::bigint block_number,0::int block_version,`+
+			`0::int processing_version,'2026-01-01'::timestamptz block_timestamp`, "typmod")
+		if got := classOf(t, "itm", "aa"); got != "LOAN" {
+			t.Errorf("numeric(30,18) view: class = %q; want LOAN (contract must compare base type, not typmod)", got)
+		}
+	})
+
+	t.Run("float8 quantity fails the contract", func(t *testing.T) {
+		mppErr(t, "vfl", `SELECT 1::int chain_id,10::bigint protocol_id,'ifl'::text instrument_key,'aa'::text holder_id,`+
+			`1.5::float8 quantity,'LOAN'::text deal_type_code,1::bigint block_number,0::int block_version,`+
+			`0::int processing_version,'2026-01-01'::timestamptz block_timestamp`, "flt", "column contract")
+	})
+
+	t.Run("double-emitted logical key raises", func(t *testing.T) {
+		mppErr(t, "vde", valuesOf(row("ide", "aa", 7, "LOAN", 600, 0, 0), row("ide", "aa", 9, "LOAN", 600, 0, 0)), "de", "double-emit")
+	})
+
+	t.Run("re-emitted observation with a changed block_timestamp raises", func(t *testing.T) {
+		mpp(t, "vts", valuesOf(row("its", "aa", 5, "LOAN", 100, 0, 0)), "store")
+		mppErr(t, "vts", `SELECT * FROM (VALUES (1::int,10::bigint,'its'::text,'aa'::text,5::numeric,'LOAN'::text,100::bigint,0::int,0::int,'2026-09-09'::timestamptz)) `+mppCols, "shift", "changed block_timestamp")
+	})
+
+	t.Run("uppercase holder rejected by the hex CHECK", func(t *testing.T) {
+		mppErr(t, "vuh", `SELECT * FROM (VALUES (1::int,10::bigint,'iuh'::text,'0xAB'::text,5::numeric,'LOAN'::text,100::bigint,0::int,0::int,'2026-01-01'::timestamptz)) `+mppCols, "uh", "position_state_holder_hex_chk")
+	})
+
+	t.Run("Infinity quantity rejected by the CHECK", func(t *testing.T) {
+		mppErr(t, "vinf", `SELECT * FROM (VALUES (1::int,10::bigint,'iinf'::text,'aa'::text,'Infinity'::numeric,'LOAN'::text,100::bigint,0::int,0::int,'2026-01-01'::timestamptz)) `+mppCols, "inf", "qty_nonneg")
+	})
+
+	// --- structure / physical -------------------------------------------------------------------
+
+	t.Run("happy path fills spine + classification; rerun is a no-op", func(t *testing.T) {
+		mpp(t, "vh", valuesOf(row("ih", "aa", 100, "BORROW", 500, 0, 0), row("ih", "aa", 0, "BORROW", 600, 0, 0)), "happy")
+		if got := classOf(t, "ih", "aa"); got != "BORROW" {
+			t.Errorf("happy class = %q; want BORROW", got)
+		}
+		var n int64
+		if err := pool.QueryRow(ctx, `SELECT materialize_position_projection('vh'::regclass, 'happy')`).Scan(&n); err != nil {
+			t.Fatalf("rerun: %v", err)
+		}
+		if n != 0 {
+			t.Errorf("rerun changed %d rows; want 0 (idempotent)", n)
+		}
+	})
+
+	t.Run("temp-table drop spares a permanent _mpp_src (finding :206)", func(t *testing.T) {
+		if _, err := pool.Exec(ctx, `CREATE TABLE public._mpp_src (sentinel int)`); err != nil {
+			t.Fatalf("create permanent _mpp_src: %v", err)
+		}
+		defer pool.Exec(ctx, `DROP TABLE IF EXISTS public._mpp_src`)
+		if _, err := pool.Exec(ctx, `INSERT INTO public._mpp_src VALUES (777)`); err != nil {
+			t.Fatal(err)
+		}
+		mpp(t, "vp", valuesOf(row("ip", "aa", 5, "LOAN", 100, 0, 0)), "perm")
+		var sentinel int
+		if err := pool.QueryRow(ctx, `SELECT sentinel FROM public._mpp_src`).Scan(&sentinel); err != nil {
+			t.Fatalf("the materializer dropped the caller's permanent _mpp_src: %v", err)
+		}
+		if sentinel != 777 {
+			t.Errorf("permanent _mpp_src sentinel = %d; want 777", sentinel)
+		}
+	})
+
+	t.Run("no default block_timestamp index (finding :100)", func(t *testing.T) {
+		var present bool
+		if err := pool.QueryRow(ctx, `SELECT to_regclass('position_state_block_timestamp_idx') IS NOT NULL`).Scan(&present); err != nil {
+			t.Fatal(err)
+		}
+		if present {
+			t.Error("create_hypertable added a default block_timestamp index; expected create_default_indexes => FALSE")
+		}
+	})
+
+	t.Run("advisory lock key is search_path-independent (finding :169/:24, via pg_locks)", func(t *testing.T) {
+		if _, err := pool.Exec(ctx, `CREATE OR REPLACE VIEW lockprobe AS `+valuesOf(row("ilk", "aa", 1, "LOAN", 1, 0, 0))); err != nil {
+			t.Fatal(err)
+		}
+		// Call the REAL function inside a transaction under a given search_path, then read the advisory
+		// lock it is holding (xact lock, still held pre-commit). Comparing the held (classid,objid) across
+		// two search_paths pins the actual key — a hardcoded copy of the expression could not.
+		heldLock := func(searchPath string) (int64, int64) {
+			conn, err := pool.Acquire(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Release()
+			if _, err := conn.Exec(ctx, `SET search_path = `+searchPath); err != nil {
+				t.Fatal(err)
+			}
+			tx, err := conn.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback(ctx)
+			if _, err := tx.Exec(ctx, `SELECT materialize_position_projection('public.lockprobe'::regclass, 'lock')`); err != nil {
+				t.Fatalf("materialize under %s: %v", searchPath, err)
+			}
+			var classid, objid int64
+			if err := tx.QueryRow(ctx,
+				`SELECT classid, objid FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid() LIMIT 1`).Scan(&classid, &objid); err != nil {
+				t.Fatalf("read advisory lock under %s: %v", searchPath, err)
+			}
+			return classid, objid
+		}
+		c1, o1 := heldLock("public")
+		c2, o2 := heldLock("pg_catalog, public")
+		if c1 != c2 || o1 != o2 {
+			t.Errorf("advisory lock key differs across search_path: public=(%d,%d) pg_catalog=(%d,%d); the per-view lock would not serialize concurrent runs", c1, o1, c2, o2)
+		}
+	})
 }
