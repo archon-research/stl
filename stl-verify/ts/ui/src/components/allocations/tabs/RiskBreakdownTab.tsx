@@ -4,7 +4,6 @@ import {
   type ColumnDef,
   DataTable,
   ErrorState,
-  LoadingIndicator,
   matchesSearchQuery,
   SkeletonStack,
   useDataTable,
@@ -461,8 +460,6 @@ export function RiskBreakdownTab({
 
   return (
     <div className={css({ display: 'grid', gap: '4' })}>
-      {isLoading ? <LoadingIndicator message="Loading risk breakdown" /> : null}
-
       {errorMessage ? (
         <ErrorState
           title="Unable to load the risk breakdown."
