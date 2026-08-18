@@ -483,7 +483,7 @@ dev-db:
 # Can be re-run independently to refresh secrets without restarting services.
 dev-env:
 	@ALCHEMY_API_KEY=$$(aws secretsmanager get-secret-value --secret-id stl-sentinelstaging-watcher-config --query SecretString --output text | jq -r '.alchemy_api_key // empty') || \
-		{ echo "WARNING: Failed to fetch ALCHEMY_API_KEY from AWS Secrets Manager. Set it manually in .env.secrets"; ALCHEMY_API_KEY=''; }; \
+		{ echo "WARNING: Could not read ALCHEMY_API_KEY (stl-sentinelstaging-watcher-config) from AWS Secrets Manager -- ArchonDeveloper is read-only as of ORB-343 and this secret is not carved out; set it manually in .env.secrets"; ALCHEMY_API_KEY=''; }; \
 	printf '%s\n' "ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" > ../.env.secrets && chmod 600 ../.env.secrets; \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
@@ -642,17 +642,17 @@ dev-env:
 		"LOG_LEVEL=debug" \
 		> cmd/workers/morpho-indexer/.env
 	@COINGECKO_API_KEY=$$(aws secretsmanager get-secret-value --secret-id coingecko_api_key --query SecretString --output text | jq -r '.coingecko_api_key // empty') || \
-		{ echo "WARNING: Failed to fetch COINGECKO_API_KEY from AWS Secrets Manager."; COINGECKO_API_KEY=''; }; \
+		{ echo "WARNING: Could not read COINGECKO_API_KEY (coingecko_api_key) from AWS Secrets Manager -- ArchonDeveloper is read-only as of ORB-343 and this secret is not carved out; set it manually in .env.secrets"; COINGECKO_API_KEY=''; }; \
 	printf '%s\n' "COINGECKO_API_KEY=$$COINGECKO_API_KEY" >> ../.env.secrets
 	@printf '%s\n' \
 		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
 		"LOG_LEVEL=debug" \
 		> cmd/backfillers/oracle-pricing-backfill/.env
 	@ETHERSCAN_API_KEY=$$(aws secretsmanager get-secret-value --secret-id etherscan_api_key --query SecretString --output text) || \
-		{ echo "WARNING: Failed to fetch ETHERSCAN_API_KEY from AWS Secrets Manager."; ETHERSCAN_API_KEY=''; }; \
+		{ echo "WARNING: Could not read ETHERSCAN_API_KEY (etherscan_api_key) from AWS Secrets Manager -- ArchonDeveloper is read-only as of ORB-343 and this secret is not carved out; set it manually in .env.secrets"; ETHERSCAN_API_KEY=''; }; \
 	printf '%s\n' "ETHERSCAN_API_KEY=$$ETHERSCAN_API_KEY" >> ../.env.secrets
 	@ANCHORAGE_API_KEY=$$(aws secretsmanager get-secret-value --secret-id stl-sentinelstaging-anchorage-api-key --query SecretString --output text 2>/dev/null) || \
-		{ echo "WARNING: Failed to fetch ANCHORAGE_API_KEY from AWS Secrets Manager."; ANCHORAGE_API_KEY=''; }; \
+		{ echo "WARNING: Could not read ANCHORAGE_API_KEY (stl-sentinelstaging-anchorage-api-key) from AWS Secrets Manager -- ArchonDeveloper is read-only as of ORB-343 and this secret is not carved out; set it manually in .env.secrets"; ANCHORAGE_API_KEY=''; }; \
 	printf '%s\n' "ANCHORAGE_API_KEY=$$ANCHORAGE_API_KEY" >> ../.env.secrets
 	@set -a; . ../.env.secrets; set +a; \
 	printf '%s\n' \
@@ -705,7 +705,23 @@ dev-env:
 		"BUILD_GIT_HASH=dev" \
 		"LOG_LEVEL=debug" \
 		> cmd/cronjobs/maple-graphql-indexer/.env
-	@echo "Environment files generated (.env.secrets updated)."
+	@echo "Environment files generated (.env.secrets updated)."; \
+	MISSING=""; \
+	for key in ALCHEMY_API_KEY COINGECKO_API_KEY ETHERSCAN_API_KEY ANCHORAGE_API_KEY; do \
+	  val="$$(grep -m1 "^$$key=" ../.env.secrets | cut -d= -f2-)"; \
+	  [ -n "$$val" ] || MISSING="$$MISSING $$key"; \
+	done; \
+	if [ -n "$$MISSING" ]; then \
+	  echo "=============================================================="; \
+	  echo "WARNING: these secrets came back empty (ArchonDeveloper is"; \
+	  echo "read-only as of ORB-343; only tigerdata-readonly and the"; \
+	  echo "Grafana MCP token are carved out for GetSecretValue):"; \
+	  echo "  $$MISSING"; \
+	  echo "Set them manually in .env.secrets if you need them (e.g."; \
+	  echo "kind-use-alchemy, coingecko/etherscan-backed backfillers, the"; \
+	  echo "anchorage-indexer cronjob)."; \
+	  echo "=============================================================="; \
+	fi
 
 # Cold start — rebuilds all images from scratch
 dev-up-rebuild:
@@ -1070,7 +1086,7 @@ tigerdata-tunnel:
 	[ -n "$$bastion" ] || { echo "Error: no online $(TIGERDATA_ENV) bastion in 'tailscale status' (is Tailscale up?); pass BASTION_IP=<ip>."; exit 1; }; \
 	host="$(TIGERDATA_HOST)"; \
 	if [ -z "$$host" ]; then \
-	  url="$$($(call tigerdata-pooler-url,$(TIGERDATA_ENV),app))" || { echo "Error: could not read pooler_url for $(TIGERDATA_ENV) (see the error above); pass TIGERDATA_HOST=<host>."; exit 1; }; \
+	  url="$$($(call tigerdata-pooler-url,$(TIGERDATA_ENV),readonly))" || { echo "Error: could not read pooler_url for $(TIGERDATA_ENV) (see the error above); pass TIGERDATA_HOST=<host>."; exit 1; }; \
 	  host="$$(printf '%s' "$$url" | $(tigerdata-host-of))"; \
 	fi; \
 	[ -n "$$host" ] || { echo "Error: the $(TIGERDATA_ENV) pooler_url yielded no host; pass TIGERDATA_HOST=<host>."; exit 1; }; \
