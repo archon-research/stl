@@ -187,7 +187,9 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 	pool, dbURL, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
-	const blockNum = int64(19_000_000)
+	// Must differ from every other package's Redis-seeded block: CI shares one Redis
+	// per shard, and the binary's cache key is chain/block/version, not per-test.
+	const blockNum = int64(19_100_000)
 	const version = 1
 
 	// Seed Redis with a USDS Transfer into the Grove proxy so the worker's cache
