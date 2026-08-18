@@ -287,18 +287,18 @@ func TestPositionState(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer conn.Release()
-			// Reset search_path before the conn returns to the pool: pgxpool reuses connections without
-			// resetting session state, so a leaked `pg_catalog, public` here makes a later test's unqualified
-			// CREATE VIEW resolve to pg_catalog and fail with permission denied. Runs before Release (LIFO).
-			defer conn.Exec(ctx, `RESET search_path`)
-			if _, err := conn.Exec(ctx, `SET search_path = `+searchPath); err != nil {
-				t.Fatal(err)
-			}
 			tx, err := conn.Begin(ctx)
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer tx.Rollback(ctx)
+			// SET LOCAL: scoped to this transaction and discarded on rollback, so search_path cannot leak
+			// back to the pooled connection. pgxpool reuses connections without resetting session state, and
+			// a leaked `pg_catalog, public` would make a later test's unqualified CREATE VIEW resolve to
+			// pg_catalog and fail with permission denied (42501).
+			if _, err := tx.Exec(ctx, `SET LOCAL search_path = `+searchPath); err != nil {
+				t.Fatal(err)
+			}
 			if _, err := tx.Exec(ctx, `SELECT materialize_position_projection('public.lockprobe'::regclass, 'lock')`); err != nil {
 				t.Fatalf("materialize under %s: %v", searchPath, err)
 			}
@@ -523,18 +523,24 @@ func TestPositionState(t *testing.T) {
 		if _, err := txA.Exec(ctx, `SELECT materialize_position_projection('vlock'::regclass, 'A')`); err != nil {
 			t.Fatalf("conn A: %v", err)
 		}
-		// conn B on the same view must block on the advisory lock; statement_timeout interrupts the wait,
-		// proving B was excluded (a broken/absent lock would let B finish instantly).
+		// conn B on the same view must block on the advisory lock; a transaction-scoped statement_timeout
+		// interrupts the wait, proving B was excluded (a broken/absent lock would let B finish instantly).
+		// SET LOCAL + the deferred rollback keep the timeout scoped to this tx, so it can't leak back to the
+		// pool the way a session-level SET + ignored RESET could.
 		connB, err := pool.Acquire(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer connB.Release()
-		if _, err := connB.Exec(ctx, `SET statement_timeout = '2s'`); err != nil {
+		txB, err := connB.Begin(ctx)
+		if err != nil {
 			t.Fatal(err)
 		}
-		_, errB := connB.Exec(ctx, `SELECT materialize_position_projection('vlock'::regclass, 'B')`)
-		connB.Exec(ctx, `RESET statement_timeout`) // don't leak the timeout back to the pool
+		defer txB.Rollback(ctx)
+		if _, err := txB.Exec(ctx, `SET LOCAL statement_timeout = '2s'`); err != nil {
+			t.Fatal(err)
+		}
+		_, errB := txB.Exec(ctx, `SELECT materialize_position_projection('vlock'::regclass, 'B')`)
 		if errB == nil {
 			t.Error("conn B completed while conn A held the lock; the per-view lock did not serialize")
 		} else if !strings.Contains(errB.Error(), "statement timeout") {
