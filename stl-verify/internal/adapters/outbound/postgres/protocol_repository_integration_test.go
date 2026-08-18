@@ -18,7 +18,7 @@ const protocolDBName = "test_protocol"
 var protocolPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(protocolDBName, func() {
+	registerTestFileSetup(func() {
 		protocolPool = testutil.SetupDBForMain(sharedDSN, protocolDBName)
 	}, func() {
 		testutil.CleanupDBForMain(sharedDSN, protocolPool, protocolDBName)

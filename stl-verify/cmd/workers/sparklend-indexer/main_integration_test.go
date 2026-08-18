@@ -66,7 +66,7 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	// SparkLend's PoolDataProvider is active from block 16776400; use a block above it.
-	const blockNum = int64(16800000)
+	blockNum := testutil.ReservedBlock(t, "sparklend-indexer")
 	const version = 1
 	const daiAddress = "0x6B175474E89094C44Da98b954EedeAC495271d0F"
 	const sparkLendPool = "0xC13e21B648A5Ee794902342038FF3aDAB66BE987"
@@ -77,9 +77,7 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 
 	s3Client := testutil.NewS3Client(t, bgCtx, sharedLocalStackCfg)
 	for _, b := range []string{testBucket, archiveBucket} {
-		if _, err := s3Client.CreateBucket(bgCtx, &s3.CreateBucketInput{Bucket: aws.String(b)}); err != nil {
-			t.Fatalf("create bucket %s: %v", b, err)
-		}
+		testutil.EnsureBucket(t, bgCtx, s3Client, b)
 	}
 
 	rpcServer := testutil.BuildSparkLendBorrowMockRPC(t, daiAddress)

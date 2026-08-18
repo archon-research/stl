@@ -29,7 +29,7 @@ const morphoDBName = "test_morpho"
 var morphoPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(morphoDBName, func() {
+	registerTestFileSetup(func() {
 		morphoPool = testutil.SetupDBForMain(sharedDSN, morphoDBName)
 	}, func() {
 		testutil.CleanupDBForMain(sharedDSN, morphoPool, morphoDBName)

@@ -18,7 +18,7 @@ const receiptTokenDBName = "test_receipt_token"
 var receiptTokenPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(receiptTokenDBName, func() {
+	registerTestFileSetup(func() {
 		receiptTokenPool = testutil.SetupDBForMain(sharedDSN, receiptTokenDBName)
 	}, func() {
 		testutil.CleanupDBForMain(sharedDSN, receiptTokenPool, receiptTokenDBName)

@@ -16,7 +16,7 @@ const curveDBName = "test_curve_migration"
 var curveTestPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(curveDBName, func() {
+	registerTestFileSetup(func() {
 		curveTestPool = testutil.SetupDBForMain(sharedDSN, curveDBName)
 	}, func() {
 		testutil.CleanupDBForMain(sharedDSN, curveTestPool, curveDBName)

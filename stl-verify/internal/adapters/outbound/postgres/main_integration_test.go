@@ -15,7 +15,6 @@ var sharedDSN string
 
 // testFileSetup holds setup and cleanup functions for each test file's database.
 type testFileSetup struct {
-	dbName  string
 	setup   func()
 	cleanup func()
 }
@@ -24,12 +23,8 @@ var testFileSetups []testFileSetup
 
 // registerTestFileSetup allows each test file to register its database setup/cleanup.
 // Called from init() in each test file.
-func registerTestFileSetup(dbName string, setup, cleanup func()) {
-	testFileSetups = append(testFileSetups, testFileSetup{
-		dbName:  dbName,
-		setup:   setup,
-		cleanup: cleanup,
-	})
+func registerTestFileSetup(setup, cleanup func()) {
+	testFileSetups = append(testFileSetups, testFileSetup{setup: setup, cleanup: cleanup})
 }
 
 func TestMain(m *testing.M) {

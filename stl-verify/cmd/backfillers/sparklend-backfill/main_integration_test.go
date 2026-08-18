@@ -69,9 +69,7 @@ func TestRunIntegration_HappyPath(t *testing.T) {
 	const bucket = "test-sparklend-backfill"
 	const fromBlock = 100
 	const toBlock = 102
-	if _, err := s3Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
-		t.Fatalf("create bucket: %v", err)
-	}
+	testutil.EnsureBucket(t, ctx, s3Client, bucket)
 
 	// Upload gzipped block + receipt files for each block in the range.
 	for blockNum := int64(fromBlock); blockNum <= toBlock; blockNum++ {
@@ -145,9 +143,7 @@ func TestRunIntegration_BorrowEvent(t *testing.T) {
 	const blockNum = int64(16800000)
 	const bucket = "test-sparklend-borrow"
 
-	if _, err := s3Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
-		t.Fatalf("create bucket: %v", err)
-	}
+	testutil.EnsureBucket(t, ctx, s3Client, bucket)
 
 	// DAI address — reserve token for the Borrow event.
 	const daiAddress = "0x6B175474E89094C44Da98b954EedeAC495271d0F"
@@ -231,9 +227,7 @@ func TestRunIntegration_BadDatabaseURL(t *testing.T) {
 	s3Client := testutil.NewS3Client(t, ctx, s3Cfg)
 
 	const bucket = "test-sparklend-backfill-baddb"
-	if _, err := s3Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
-		t.Fatalf("create bucket: %v", err)
-	}
+	testutil.EnsureBucket(t, ctx, s3Client, bucket)
 	uploadBlock(t, ctx, s3Client, bucket, 100, 1)
 	uploadReceipts(t, ctx, s3Client, bucket, 100, 1, []shared.TransactionReceipt{})
 
@@ -283,9 +277,7 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 	const archivePrefix = "raw-sc-calls/chain_id=1/"
 
 	for _, b := range []string{bucket, archiveBucket} {
-		if _, err := s3Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(b)}); err != nil {
-			t.Fatalf("create bucket %s: %v", b, err)
-		}
+		testutil.EnsureBucket(t, ctx, s3Client, b)
 	}
 
 	const daiAddress = "0x6B175474E89094C44Da98b954EedeAC495271d0F"
@@ -478,9 +470,7 @@ func TestRunIntegration_BorrowEvent_WithCollateral(t *testing.T) {
 	const blockNum = int64(16800000)
 	const bucket = "test-sparklend-borrow-collateral"
 
-	if _, err := s3Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
-		t.Fatalf("create bucket: %v", err)
-	}
+	testutil.EnsureBucket(t, ctx, s3Client, bucket)
 
 	const daiAddress = "0x6B175474E89094C44Da98b954EedeAC495271d0F"
 	const wethAddress = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"

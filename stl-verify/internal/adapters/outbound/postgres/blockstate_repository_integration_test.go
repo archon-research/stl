@@ -24,7 +24,7 @@ var blockstatePool *pgxpool.Pool
 
 func init() {
 	// Register setup function to be called after TestMain sets sharedDSN
-	registerTestFileSetup(blockstateDBName, func() {
+	registerTestFileSetup(func() {
 		blockstatePool = testutil.SetupDBForMain(sharedDSN, blockstateDBName)
 	}, func() {
 		testutil.CleanupDBForMain(sharedDSN, blockstatePool, blockstateDBName)

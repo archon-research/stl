@@ -19,7 +19,7 @@ const uniswapV3DBName = "test_uniswap_v3_migration"
 var uniswapV3TestPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(uniswapV3DBName, func() {
+	registerTestFileSetup(func() {
 		uniswapV3TestPool = testutil.SetupDBForMain(sharedDSN, uniswapV3DBName)
 	}, func() {
 		testutil.CleanupDBForMain(sharedDSN, uniswapV3TestPool, uniswapV3DBName)

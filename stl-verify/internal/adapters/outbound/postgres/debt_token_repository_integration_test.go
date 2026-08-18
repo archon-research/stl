@@ -18,7 +18,7 @@ const debtTokenDBName = "test_debt_token"
 var debtTokenPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(debtTokenDBName, func() {
+	registerTestFileSetup(func() {
 		debtTokenPool = testutil.SetupDBForMain(sharedDSN, debtTokenDBName)
 	}, func() {
 		testutil.CleanupDBForMain(sharedDSN, debtTokenPool, debtTokenDBName)

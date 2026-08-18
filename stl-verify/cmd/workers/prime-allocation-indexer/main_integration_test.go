@@ -110,9 +110,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 		deployEnv = "test"
 	)
 
-	if _, err := s3Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
-		t.Fatalf("create S3 bucket: %v", err)
-	}
+	testutil.EnsureBucket(t, ctx, s3Client, bucket)
 
 	t.Setenv("BUILD_GIT_HASH", "test")
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
@@ -187,9 +185,7 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 	pool, dbURL, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
-	// Must differ from every other package's Redis-seeded block: CI shares one Redis
-	// per shard, and the binary's cache key is chain/block/version, not per-test.
-	const blockNum = int64(19_100_000)
+	blockNum := testutil.ReservedBlock(t, "prime-allocation-indexer")
 	const version = 1
 
 	// Seed Redis with a USDS Transfer into the Grove proxy so the worker's cache
@@ -200,9 +196,7 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 	s3Client := testutil.NewS3Client(t, bgCtx, sharedLocalStackCfg)
 	const testBucket = "stl-sentineltest-ethereum-raw"
 	for _, b := range []string{testBucket, archiveBucket} {
-		if _, err := s3Client.CreateBucket(bgCtx, &s3.CreateBucketInput{Bucket: aws.String(b)}); err != nil {
-			t.Fatalf("create bucket %s: %v", b, err)
-		}
+		testutil.EnsureBucket(t, bgCtx, s3Client, b)
 	}
 
 	rpcServer := buildErc20MulticallMockRPC(t)

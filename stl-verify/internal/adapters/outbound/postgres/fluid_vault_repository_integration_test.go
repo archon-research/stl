@@ -21,7 +21,7 @@ const fluidDBName = "test_fluid"
 var fluidPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(fluidDBName, func() {
+	registerTestFileSetup(func() {
 		fluidPool = testutil.SetupDBForMain(sharedDSN, fluidDBName)
 	}, func() {
 		testutil.CleanupDBForMain(sharedDSN, fluidPool, fluidDBName)

@@ -20,7 +20,7 @@ const txmgrDBName = "test_txmgr"
 var txmgrPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(txmgrDBName, func() {
+	registerTestFileSetup(func() {
 		txmgrPool = testutil.SetupDBForMain(sharedDSN, txmgrDBName)
 		// Create the tx_test table used by transaction manager tests
 		ctx := context.Background()

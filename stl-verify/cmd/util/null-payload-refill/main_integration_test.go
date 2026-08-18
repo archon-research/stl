@@ -109,9 +109,7 @@ func runRefillScenario(t *testing.T, useKeysFile bool) {
 	//    so the bucket name needs the "stl-sentineltest-avalanche-raw"
 	//    prefix and the topic must be "stl-sentineltest-avalanche-blocks.fifo".
 	bucket := testutil.S3TestBucketName(t, "stl-sentineltest-avalanche-raw-")
-	if _, err := s3c.CreateBucket(ctx, &awsS3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
-		t.Fatalf("create bucket: %v", err)
-	}
+	testutil.EnsureBucket(t, ctx, s3c, bucket)
 	const key = "85149000-85149999/85149017_0_block.json.gz"
 	putGzippedObject(t, ctx, s3c, bucket, key, []byte("null"))
 	// Large sentinel object so the scan path must filter it out.

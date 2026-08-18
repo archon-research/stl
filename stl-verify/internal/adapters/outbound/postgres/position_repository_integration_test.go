@@ -23,7 +23,7 @@ const positionDBName = "test_position"
 var positionPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(positionDBName, func() {
+	registerTestFileSetup(func() {
 		positionPool = testutil.SetupDBForMain(sharedDSN, positionDBName)
 	}, func() {
 		testutil.CleanupDBForMain(sharedDSN, positionPool, positionDBName)

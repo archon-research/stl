@@ -25,7 +25,7 @@ const tokenDBName = "test_token"
 var tokenPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(tokenDBName, func() {
+	registerTestFileSetup(func() {
 		tokenPool = testutil.SetupDBForMain(sharedDSN, tokenDBName)
 	}, func() {
 		testutil.CleanupDBForMain(sharedDSN, tokenPool, tokenDBName)

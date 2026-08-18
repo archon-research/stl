@@ -624,9 +624,7 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 
 	// Create the archive bucket so the fire-and-forget archiver has somewhere to write.
 	s3Client := testutil.NewS3Client(t, ctx, sharedLocalStackCfg)
-	if _, err := s3Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(archiveBucket)}); err != nil {
-		t.Fatalf("create bucket %s: %v", archiveBucket, err)
-	}
+	testutil.EnsureBucket(t, ctx, s3Client, archiveBucket)
 
 	sqsServer, sqsState := testutil.StartMockSQS(t)
 	defer sqsServer.Close()

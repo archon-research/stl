@@ -21,7 +21,7 @@ const userDBName = "test_user"
 var userPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(userDBName, func() {
+	registerTestFileSetup(func() {
 		userPool = testutil.SetupDBForMain(sharedDSN, userDBName)
 	}, func() {
 		testutil.CleanupDBForMain(sharedDSN, userPool, userDBName)

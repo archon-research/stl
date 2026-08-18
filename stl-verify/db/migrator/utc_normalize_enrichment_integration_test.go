@@ -6,8 +6,6 @@ import (
 	"context"
 	"strings"
 	"testing"
-
-	"github.com/archon-research/stl/stl-verify/db/migrator"
 )
 
 // TestUtcNormalizeEnrichment verifies migration 20260721_120000: business "today" is UTC, not the
@@ -16,11 +14,8 @@ import (
 // future-dated re-point is not yet current for any reader session.
 func TestUtcNormalizeEnrichment(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := setupPostgres(ctx, t)
+	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
-	if err := migrator.New(pool, getMigrationsPath()).ApplyAll(ctx); err != nil {
-		t.Fatalf("migrations: %v", err)
-	}
 
 	// valid_from defaults to the UTC expression on every normalized table (not session CURRENT_DATE).
 	for _, tbl := range []string{"security_instrument_bridge", "position_classification", "position_entity_link"} {

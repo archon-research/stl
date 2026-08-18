@@ -37,7 +37,7 @@ const concurrencyDBName = "test_pv_concurrency"
 var concurrencyPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(concurrencyDBName, func() {
+	registerTestFileSetup(func() {
 		// The pool it returns is thrown away: each test mints its own small
 		// short-lived one. The database outlives them all.
 		testutil.SetupDBForMain(sharedDSN, concurrencyDBName).Close()

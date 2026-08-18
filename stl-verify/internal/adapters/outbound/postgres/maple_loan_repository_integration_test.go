@@ -24,7 +24,7 @@ const mapleDBName = "test_maple_graphql"
 var maplePool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(mapleDBName, func() {
+	registerTestFileSetup(func() {
 		maplePool = testutil.SetupDBForMain(sharedDSN, mapleDBName)
 	}, func() {
 		testutil.CleanupDBForMain(sharedDSN, maplePool, mapleDBName)

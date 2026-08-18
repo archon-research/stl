@@ -192,12 +192,7 @@ func setupIntegrationInfra(t *testing.T, ctx context.Context) *IntegrationTestIn
 	// Via the helper, not "backup-"+suffix: only it keeps the name inside S3's
 	// 63-character limit, which the longest test names here now exceed.
 	bucketName := testutil.S3TestBucketName(t, "backup-")
-	_, err = s3Client.CreateBucket(ctx, &s3.CreateBucketInput{
-		Bucket: aws.String(bucketName),
-	})
-	if err != nil {
-		t.Fatalf("failed to create S3 bucket: %v", err)
-	}
+	testutil.EnsureBucket(t, ctx, s3Client, bucketName)
 	infra.BucketName = bucketName
 	t.Logf("Created S3 bucket: %s", bucketName)
 

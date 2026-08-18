@@ -52,14 +52,20 @@ func SetupTestDB(t *testing.T, baseDSN string) (pool *pgxpool.Pool, dsn string, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	// pgxpool.Close is once-guarded, so cleanup closing it again is a no-op.
-	t.Cleanup(pool.Close)
 
-	return pool, dsn, func() {
-		if err := drop(); err != nil {
-			t.Logf("warning: %v", err)
-		}
+	var once sync.Once
+	discard := func() {
+		once.Do(func() {
+			if err := drop(); err != nil {
+				t.Logf("warning: %v", err)
+			}
+		})
 	}
+	// Registered as well as returned: a caller that forgets the returned cleanup
+	// leaks nothing on a server that outlives the run.
+	t.Cleanup(discard)
+
+	return pool, dsn, discard
 }
 
 // SetupDBForMain is SetupTestDB for a TestMain-scoped database shared by one test
@@ -226,8 +232,8 @@ func ensureTemplate(ctx context.Context, baseDSN string) (string, error) {
 	defer conn.Release()
 
 	lockID := templateLockID(fingerprint)
-	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock($1)", lockID); err != nil {
-		return "", fmt.Errorf("lock template %s: %w", name, err)
+	if err := lockTemplate(ctx, conn.Conn(), name, lockID); err != nil {
+		return "", err
 	}
 	defer func() {
 		if _, err := conn.Exec(ctx, "SELECT pg_advisory_unlock($1)", lockID); err != nil {
@@ -243,10 +249,93 @@ func ensureTemplate(ctx context.Context, baseDSN string) (string, error) {
 		if err := buildTemplate(ctx, conn.Conn(), baseDSN, name); err != nil {
 			return "", err
 		}
+		dropStaleTemplates(ctx, conn.Conn(), name)
 	}
 
 	templateBuilt[baseDSN] = name
 	return name, nil
+}
+
+// Bounded, because a process hung mid-build would otherwise stall every sibling
+// package until the `go test` deadline kills them with no reason given.
+const templateLockTimeout = 3 * time.Minute
+
+// lockTemplate takes the build lock, failing with the reason rather than waiting
+// out the test timeout.
+func lockTemplate(ctx context.Context, conn *pgx.Conn, name string, lockID int64) error {
+	if _, err := conn.Exec(ctx,
+		fmt.Sprintf("SET lock_timeout = %d", templateLockTimeout.Milliseconds()),
+	); err != nil {
+		return fmt.Errorf("set lock timeout for template %s: %w", name, err)
+	}
+	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock($1)", lockID); err != nil {
+		if isLockTimeout(err) {
+			return fmt.Errorf("template %s: another process has been building it for over %s",
+				name, templateLockTimeout)
+		}
+		return fmt.Errorf("lock template %s: %w", name, err)
+	}
+	// Off again: the statements this connection runs next create and drop databases,
+	// and those waits are not the deadlock this timeout is here to surface.
+	if _, err := conn.Exec(ctx, "SET lock_timeout = 0"); err != nil {
+		return fmt.Errorf("clear lock timeout for template %s: %w", name, err)
+	}
+	return nil
+}
+
+func isLockTimeout(err error) bool {
+	// SQLSTATE 55P03 = lock_not_available
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "55P03"
+}
+
+// dropStaleTemplates removes the templates of other migration sets, so a server
+// that outlives one run keeps one migrated database rather than one per tree.
+//
+// Never forced: a template another process is still building has that process's
+// pool on it, and Postgres refusing the drop is what protects it.
+func dropStaleTemplates(ctx context.Context, conn *pgx.Conn, keep string) {
+	rows, err := conn.Query(ctx,
+		"SELECT datname FROM pg_database WHERE datname LIKE 'stl_tmpl_%' AND datname <> $1", keep)
+	if err != nil {
+		log.Printf("warning: list stale templates: %v", err)
+		return
+	}
+	stale, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		log.Printf("warning: list stale templates: %v", err)
+		return
+	}
+
+	for _, name := range stale {
+		if err := dropStaleTemplate(ctx, conn, name); err != nil {
+			log.Printf("warning: %v", err)
+		}
+	}
+}
+
+// dropStaleTemplate unflags one template and drops it, putting the flag back if the
+// drop is refused: unflagged, it is unclonable for whoever is still using it.
+func dropStaleTemplate(ctx context.Context, conn *pgx.Conn, name string) error {
+	if err := setTemplateFlag(ctx, conn, name, false); err != nil {
+		return err
+	}
+	if _, err := conn.Exec(ctx, fmt.Sprintf("DROP DATABASE IF EXISTS %s", name)); err != nil {
+		return errors.Join(
+			fmt.Errorf("drop stale template %s: %w", name, err),
+			setTemplateFlag(ctx, conn, name, true),
+		)
+	}
+	return nil
+}
+
+func setTemplateFlag(ctx context.Context, conn *pgx.Conn, name string, isTemplate bool) error {
+	if _, err := conn.Exec(ctx,
+		"UPDATE pg_database SET datistemplate = $1 WHERE datname = $2", isTemplate, name,
+	); err != nil {
+		return fmt.Errorf("set template flag on %s to %t: %w", name, isTemplate, err)
+	}
+	return nil
 }
 
 // DisableScheduledJobs stops TimescaleDB's policy jobs from running in this
@@ -342,10 +431,8 @@ func migrateTemplate(ctx context.Context, pool *pgxpool.Pool) error {
 // dropTemplate removes a leftover template. The datistemplate flag has to come off
 // first — Postgres refuses to drop a database while it is marked as a template.
 func dropTemplate(ctx context.Context, conn *pgx.Conn, name string) error {
-	if _, err := conn.Exec(ctx,
-		"UPDATE pg_database SET datistemplate = false WHERE datname = $1", name,
-	); err != nil {
-		return fmt.Errorf("clear template flag on %s: %w", name, err)
+	if err := setTemplateFlag(ctx, conn, name, false); err != nil {
+		return err
 	}
 	if _, err := conn.Exec(ctx, dropDatabaseSQL(name)); err != nil {
 		return fmt.Errorf("drop stale template %s: %w", name, err)

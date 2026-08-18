@@ -20,7 +20,7 @@ const eventDBName = "test_event"
 var eventPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(eventDBName, func() {
+	registerTestFileSetup(func() {
 		eventPool = testutil.SetupDBForMain(sharedDSN, eventDBName)
 	}, func() {
 		testutil.CleanupDBForMain(sharedDSN, eventPool, eventDBName)

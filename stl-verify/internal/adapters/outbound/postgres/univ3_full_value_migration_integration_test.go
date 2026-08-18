@@ -30,7 +30,7 @@ const univ3SkyecoRenameMigrationFile = "20260714_170000_rename_univ3_symbol_skye
 var univ3FullValuePool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(univ3FullValueDBName, func() {
+	registerTestFileSetup(func() {
 		univ3FullValuePool = testutil.SetupDBForMain(sharedDSN, univ3FullValueDBName)
 	}, func() {
 		testutil.CleanupDBForMain(sharedDSN, univ3FullValuePool, univ3FullValueDBName)

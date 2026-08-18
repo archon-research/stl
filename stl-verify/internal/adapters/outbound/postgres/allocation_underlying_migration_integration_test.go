@@ -22,7 +22,7 @@ const allocUnderlyingDBName = "test_alloc_underlying"
 var allocUnderlyingPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(allocUnderlyingDBName, func() {
+	registerTestFileSetup(func() {
 		allocUnderlyingPool = testutil.SetupDBForMain(sharedDSN, allocUnderlyingDBName)
 	}, func() {
 		testutil.CleanupDBForMain(sharedDSN, allocUnderlyingPool, allocUnderlyingDBName)

@@ -20,7 +20,7 @@ const orderbookSnapshotDBName = "test_cex_orderbook"
 var orderbookSnapshotPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(orderbookSnapshotDBName, func() {
+	registerTestFileSetup(func() {
 		orderbookSnapshotPool = testutil.SetupDBForMain(sharedDSN, orderbookSnapshotDBName)
 	}, func() {
 		testutil.CleanupDBForMain(sharedDSN, orderbookSnapshotPool, orderbookSnapshotDBName)

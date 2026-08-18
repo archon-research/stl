@@ -35,7 +35,7 @@ jobs:
           go install golang.org/x/vuln/cmd/govulncheck@latest
 
       - name: Format and module checks
-        run: make fmt-check goimports-check tidy-check shared-container-check integration-shard-check service-image-check
+        run: make fmt-check goimports-check tidy-check shared-container-check integration-shard-check ci-service-check
 
       # Runs the golangci-lint binary directly (not `make golangci-lint`) so
       # the action can manage the binary install and analysis cache. Covers
