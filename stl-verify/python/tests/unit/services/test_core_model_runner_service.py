@@ -12,6 +12,9 @@ def _cfg(market_key: str):
         inputs_dir = "/inputs"
         market_key: str = ""
         params: dict = {}
+        orderbook_source = "parquet"
+        price_source = "parquet"
+        position_source = "parquet"
 
     cfg = _Cfg()
     cfg.market_key = market_key
