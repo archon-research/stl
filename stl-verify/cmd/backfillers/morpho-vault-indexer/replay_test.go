@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -188,235 +187,12 @@ func TestReplayPartitionPrefixes_AscendingByBlock(t *testing.T) {
 	}
 }
 
-// TestPartitionFullyCovered pins the checkpoint-eligibility rule: a partition is
-// fully covered only when its entire block range lies within [from,to]. A
-// boundary partition (bounds aligned to a partition edge still count as fully
-// covered; only a partition the range partially overlaps does not) and an
-// unparseable prefix are not.
-func TestPartitionFullyCovered(t *testing.T) {
-	tests := []struct {
-		name     string
-		part     string
-		from, to int64
-		want     bool
-	}{
-		{"interior partition fully inside", "3000-3999", 2000, 4999, true},
-		{"fully-covered boundary: from aligned to partition start", "2000-2999", 2000, 4999, true},
-		{"fully-covered boundary: to aligned to partition end", "4000-4999", 2000, 4999, true},
-		{"partially-covered first: from mid-partition", "1000-1999", 1500, 4999, false},
-		{"partially-covered last: to mid-partition", "4000-4999", 2000, 4500, false},
-		{"unparseable prefix", "not-a-range", 0, 10000, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := partitionFullyCovered(tt.part, tt.from, tt.to); got != tt.want {
-				t.Errorf("partitionFullyCovered(%q, %d, %d) = %v, want %v", tt.part, tt.from, tt.to, got, tt.want)
-			}
-		})
-	}
-}
-
-// discardLogger is the logger the replay-loop tests pass: they assert on the
-// loop's effects, not its output.
-func discardLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }
-
 func vaultSet(addrs ...common.Address) map[common.Address]struct{} {
 	set := make(map[common.Address]struct{}, len(addrs))
 	for _, a := range addrs {
 		set[a] = struct{}{}
 	}
 	return set
-}
-
-// TestV2VaultSetDigest_IdentifiesTheSetNotItsOrder: the digest scopes checkpoint
-// records to the vault set they were replayed for, so it must depend on set
-// membership alone — not on map iteration order or address casing — and must
-// change the moment a vault joins the set.
-func TestV2VaultSetDigest_IdentifiesTheSetNotItsOrder(t *testing.T) {
-	a := common.HexToAddress("0xaa00000000000000000000000000000000000001")
-	b := common.HexToAddress("0xbb00000000000000000000000000000000000002")
-
-	digestA := v2VaultSetDigest(vaultSet(a))
-	if digestA == "" {
-		t.Fatal("digest of a non-empty vault set is empty")
-	}
-	if got := v2VaultSetDigest(vaultSet(common.HexToAddress(strings.ToUpper("0xAA00000000000000000000000000000000000001")))); got != digestA {
-		t.Errorf("digest is casing-sensitive: %s != %s", got, digestA)
-	}
-	if got := v2VaultSetDigest(vaultSet(b, a)); got != v2VaultSetDigest(vaultSet(a, b)) {
-		t.Errorf("digest depends on insertion order: %s != %s", got, v2VaultSetDigest(vaultSet(a, b)))
-	}
-	if got := v2VaultSetDigest(vaultSet(a, b)); got == digestA {
-		t.Error("a grown vault set must not share the smaller set's digest")
-	}
-}
-
-// TestOpenReplayCheckpoint_NoProgressFileDisablesCheckpointing: an unset
-// -replay-progress-file yields the nil (no-op) checkpoint, so every partition
-// replays every run.
-func TestOpenReplayCheckpoint_NoProgressFileDisablesCheckpointing(t *testing.T) {
-	cp, err := openReplayCheckpoint("", checkpointScope{})
-	if err != nil {
-		t.Fatalf("openReplayCheckpoint: %v", err)
-	}
-	if cp != nil {
-		t.Fatal("an empty progress-file path must yield the nil checkpoint")
-	}
-	if cp.isDone("0-999") {
-		t.Error("nil checkpoint reports a partition done")
-	}
-}
-
-// TestOpenReplayCheckpoint_RecordsUnderTheGivenScope: the scope passed at open
-// time is the scope markDone stamps onto every record it writes.
-func TestOpenReplayCheckpoint_RecordsUnderTheGivenScope(t *testing.T) {
-	path := t.TempDir() + "/progress.jsonl"
-	scope := checkpointScope{ChainID: 1, Bucket: "raw-mainnet", VaultsDigest: "digest-a"}
-
-	cp, err := openReplayCheckpoint(path, scope)
-	if err != nil {
-		t.Fatalf("openReplayCheckpoint: %v", err)
-	}
-	if err := cp.markDone("0-999"); err != nil {
-		t.Fatalf("markDone: %v", err)
-	}
-	if err := cp.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-
-	reopened, err := loadCheckpoint(path, scope)
-	if err != nil {
-		t.Fatalf("loadCheckpoint: %v", err)
-	}
-	t.Cleanup(func() { _ = reopened.Close() })
-	if !reopened.isDone("0-999") {
-		t.Error("the record was not written under the scope it was opened with")
-	}
-}
-
-// TestReplayCheckpointScope_TracksTheVaultSet: the scope a run records under
-// carries its chain, bucket, and V2 vault set, so a run whose vault set has
-// grown cannot reuse the earlier run's records.
-func TestReplayCheckpointScope_TracksTheVaultSet(t *testing.T) {
-	cfg := config{chainID: 1, bucket: "raw-mainnet"}
-	vaultA := common.HexToAddress("0xaa00000000000000000000000000000000000001")
-	vaultB := common.HexToAddress("0xbb00000000000000000000000000000000000002")
-
-	scope := replayCheckpointScope(cfg, vaultSet(vaultA))
-	if scope.ChainID != cfg.chainID || scope.Bucket != cfg.bucket {
-		t.Errorf("scope = %+v, want chain %d bucket %q", scope, cfg.chainID, cfg.bucket)
-	}
-	if scope.VaultsDigest != v2VaultSetDigest(vaultSet(vaultA)) {
-		t.Error("scope does not carry the V2 vault set digest")
-	}
-	if grown := replayCheckpointScope(cfg, vaultSet(vaultA, vaultB)); grown == scope {
-		t.Error("a grown vault set produced an identical scope")
-	}
-}
-
-// TestRunReplayPartitions_GrownVaultSetReplaysRecordedPartitions locks the
-// vault-set-hole fix. Run 1 replays and checkpoints every partition with vault
-// set {A}. Run 2 sees {A,B} — B was probe-skipped, discovered later by the live
-// stream, or first active outside run 1's range — and must replay every
-// partition again: run 1's records say nothing about B's governance history, and
-// nothing else ever converges it (a later Allocate lazily self-heals B's adapter
-// at the wrong added_at_block).
-func TestRunReplayPartitions_GrownVaultSetReplaysRecordedPartitions(t *testing.T) {
-	const from, to = int64(2000), int64(3999)
-	path := t.TempDir() + "/progress.jsonl"
-	vaultA := common.HexToAddress("0xaa00000000000000000000000000000000000001")
-	vaultB := common.HexToAddress("0xbb00000000000000000000000000000000000002")
-
-	scopeFor := func(vaults map[common.Address]struct{}) checkpointScope {
-		return checkpointScope{ChainID: 1, Bucket: "raw-mainnet", VaultsDigest: v2VaultSetDigest(vaults)}
-	}
-	runWith := func(scope checkpointScope) []string {
-		cp, err := loadCheckpoint(path, scope)
-		if err != nil {
-			t.Fatalf("loadCheckpoint: %v", err)
-		}
-		defer cp.Close()
-		return replayRecorder(t, cp, from, to)
-	}
-
-	wantAll := []string{"2000-2999", "3000-3999"}
-	if first := runWith(scopeFor(vaultSet(vaultA))); !slices.Equal(first, wantAll) {
-		t.Fatalf("run 1 replayed %v, want %v", first, wantAll)
-	}
-	// Same vault set: the records are trusted, nothing replays again.
-	if resumed := runWith(scopeFor(vaultSet(vaultA))); len(resumed) != 0 {
-		t.Fatalf("same-vault-set resume replayed %v, want nothing", resumed)
-	}
-	if grown := runWith(scopeFor(vaultSet(vaultA, vaultB))); !slices.Equal(grown, wantAll) {
-		t.Fatalf("grown-vault-set run replayed %v, want %v (run 1's records cover neither vault B nor its governance history)", grown, wantAll)
-	}
-}
-
-// replayRecorder drives runReplayPartitions and records which partitions the
-// production loop actually handed to the replay callback, in order.
-func replayRecorder(t *testing.T, cp *checkpoint, from, to int64) []string {
-	t.Helper()
-	var replayed []string
-	err := runReplayPartitions(discardLogger(), replayPartitionPrefixes(from, to), cp, from, to, func(part string) error {
-		replayed = append(replayed, part)
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("runReplayPartitions: %v", err)
-	}
-	return replayed
-}
-
-// TestReplayCheckpointsOnlyFullyCoveredPartitions locks the cross-run-hole fix:
-// the replay loop checkpoints a partition only when its full block range lies
-// within [from,to]. A partially-covered boundary partition replays every run but
-// stays out of the checkpoint, so a later run reusing the same progress file
-// with wider bounds still revisits it. Here from=2000 is partition-aligned (so
-// "2000-2999" is a fully-covered boundary) and to=4500 falls mid-"4000-4999"
-// (the partially-covered last partition).
-func TestReplayCheckpointsOnlyFullyCoveredPartitions(t *testing.T) {
-	const from, to = int64(2000), int64(4500)
-	path := t.TempDir() + "/progress.jsonl"
-
-	cp1, err := loadCheckpoint(path, testScope())
-	if err != nil {
-		t.Fatalf("loadCheckpoint: %v", err)
-	}
-	first := replayRecorder(t, cp1, from, to)
-	if err := cp1.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
-
-	wantFirst := []string{"2000-2999", "3000-3999", "4000-4999"}
-	if !slices.Equal(first, wantFirst) {
-		t.Fatalf("first pass replayed %v, want %v", first, wantFirst)
-	}
-
-	// Reopen from disk — the cross-run scenario the fix guards. The two
-	// fully-covered partitions are recorded; the partially-covered last partition
-	// is not, so its blocks stay replayable under wider bounds.
-	cp2, err := loadCheckpoint(path, testScope())
-	if err != nil {
-		t.Fatalf("reload: %v", err)
-	}
-	defer cp2.Close()
-
-	if !cp2.isDone("2000-2999") {
-		t.Error(`"2000-2999" (fully-covered boundary) should be checkpointed`)
-	}
-	if !cp2.isDone("3000-3999") {
-		t.Error(`"3000-3999" (interior) should be checkpointed`)
-	}
-	if cp2.isDone("4000-4999") {
-		t.Error(`"4000-4999" (partially-covered last) must not be checkpointed`)
-	}
-
-	// Resume replays ONLY the uncheckpointed boundary partition.
-	second := replayRecorder(t, cp2, from, to)
-	wantSecond := []string{"4000-4999"}
-	if !slices.Equal(second, wantSecond) {
-		t.Fatalf("resume replayed %v, want %v", second, wantSecond)
-	}
 }
 
 // --- missing-receipt-block guard ---
@@ -455,17 +231,58 @@ func (f *fakeReplayS3Reader) StreamFile(_ context.Context, _, key string) (io.Re
 	return io.NopCloser(strings.NewReader(body)), nil
 }
 
-// TestReplayPartition_MissingReceiptBlockErrorsAndLeavesCheckpointUnwritten:
-// a block in the partition's [from,to] intersection with no receipt key would
-// contribute no logs, yet the partition would still be marked done — silently
-// dropping every event in that block, since a re-run skips the checkpointed
-// partition. collectPartitionV2Logs must hard-fail so the production loop stops
-// before markDone, leaving the checkpoint unwritten for a repaired-S3 re-run.
-// The range is the whole partition, so the fully-covered guard would otherwise
-// checkpoint it.
-func TestReplayPartition_MissingReceiptBlockErrorsAndLeavesCheckpointUnwritten(t *testing.T) {
+// TestRunReplayPartitions_ReplaysEveryPartitionInBlockOrder: a run replays the
+// full requested range, in ascending block order, so an AddAdapter in an earlier
+// partition always lands before a later partition's Allocate.
+func TestRunReplayPartitions_ReplaysEveryPartitionInBlockOrder(t *testing.T) {
+	const from, to = int64(2000), int64(4500)
+
+	var replayed []string
+	err := runReplayPartitions(replayPartitionPrefixes(from, to), func(part string) error {
+		replayed = append(replayed, part)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("runReplayPartitions: %v", err)
+	}
+
+	want := []string{"2000-2999", "3000-3999", "4000-4999"}
+	if !slices.Equal(replayed, want) {
+		t.Fatalf("replayed %v, want %v", replayed, want)
+	}
+}
+
+// TestRunReplayPartitions_StopsAtTheFirstFailingPartition: a failing partition
+// stops the run there. Continuing would replay later partitions on top of the
+// hole the failure left, and nothing downstream can detect that hole.
+func TestRunReplayPartitions_StopsAtTheFirstFailingPartition(t *testing.T) {
+	var replayed []string
+	err := runReplayPartitions([]string{"0-999", "1000-1999", "2000-2999"}, func(part string) error {
+		replayed = append(replayed, part)
+		if part == "1000-1999" {
+			return errors.New("boom")
+		}
+		return nil
+	})
+
+	if err == nil {
+		t.Fatal("expected a failing partition to fail the run")
+	}
+	if !strings.Contains(err.Error(), "1000-1999") {
+		t.Errorf("error %v does not name the failing partition", err)
+	}
+	if want := []string{"0-999", "1000-1999"}; !slices.Equal(replayed, want) {
+		t.Fatalf("replayed %v, want %v (nothing after the failure)", replayed, want)
+	}
+}
+
+// TestCollectPartitionV2Logs_MissingReceiptBlockErrors: a block in the
+// partition's [from,to] intersection with no receipt key contributes no logs, so
+// collection must hard-fail rather than hand the loop a silently thinned
+// partition.
+func TestCollectPartitionV2Logs_MissingReceiptBlockErrors(t *testing.T) {
 	ctx := context.Background()
-	const from, to = int64(0), int64(999) // partition "0-999", fully covered
+	const from, to = int64(0), int64(999)
 
 	keyFor := func(bn int64) string { return s3key.Build(bn, 0, s3key.Receipts) }
 	// S3 has a receipt for every block in the partition except 500.
@@ -477,23 +294,11 @@ func TestReplayPartition_MissingReceiptBlockErrorsAndLeavesCheckpointUnwritten(t
 		reader.keys = append(reader.keys, keyFor(bn))
 		reader.bodyByKey[keyFor(bn)] = "[]"
 	}
+
 	part := partition.GetPartition(from)
-
-	cp, err := loadCheckpoint(t.TempDir()+"/progress.jsonl", testScope())
-	if err != nil {
-		t.Fatalf("loadCheckpoint: %v", err)
-	}
-	defer cp.Close()
-
-	err = runReplayPartitions(discardLogger(), []string{part}, cp, from, to, func(part string) error {
-		_, collectErr := collectPartitionV2Logs(ctx, reader, "bucket", part, from, to, 4, map[common.Address]struct{}{}, mustV2Topics(t))
-		return collectErr
-	})
+	_, err := collectPartitionV2Logs(ctx, reader, "bucket", part, from, to, 4, map[common.Address]struct{}{}, mustV2Topics(t))
 	if err == nil {
 		t.Fatal("expected an error for a partition missing a receipt block")
-	}
-	if cp.isDone(part) {
-		t.Fatal("checkpoint must stay unwritten when a partition is missing a receipt block")
 	}
 }
 

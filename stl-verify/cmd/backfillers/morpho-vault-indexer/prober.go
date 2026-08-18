@@ -92,7 +92,7 @@ func (p *vaultProber) probeAllCandidates(
 // out of the multicall — ErrNotVault is consumed as a per-result Success:false
 // inside collectProbeConfirmed and never surfaces as an error. Swallowing here
 // would permanently black-hole a real vault while the backfill run exits 0;
-// failing loudly is safe because backfiller re-runs are cheap and resumable.
+// failing loudly is safe because a backfiller re-run is idempotent.
 func (p *vaultProber) probeBatchWithRetry(
 	ctx context.Context,
 	batch []common.Address,

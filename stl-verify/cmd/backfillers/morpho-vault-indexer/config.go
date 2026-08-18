@@ -9,15 +9,14 @@ import (
 )
 
 type config struct {
-	from               int64
-	to                 int64
-	bucket             string
-	dbURL              string
-	rpcURL             string
-	chainID            int64
-	goroutines         int
-	probeBatch         int
-	replayProgressFile string
+	from       int64
+	to         int64
+	bucket     string
+	dbURL      string
+	rpcURL     string
+	chainID    int64
+	goroutines int
+	probeBatch int
 }
 
 func parseConfig(args []string) (config, error) {
@@ -31,21 +30,19 @@ func parseConfig(args []string) (config, error) {
 	chainID := fs.Int64("chain-id", 1, "Chain ID")
 	goroutines := fs.Int("goroutines", 16, "Number of concurrent partition workers")
 	probeBatch := fs.Int("probe-batch", 50, "Number of candidates to probe per multicall batch")
-	replayProgressFile := fs.String("replay-progress-file", "", "Append-only JSONL checkpoint file bounding V2 structured-event replay cost across reruns (empty = no checkpointing)")
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
 	}
 
 	cfg := config{
-		from:               *from,
-		to:                 *to,
-		bucket:             *bucket,
-		dbURL:              *dbURL,
-		rpcURL:             *rpcURL,
-		chainID:            *chainID,
-		goroutines:         *goroutines,
-		probeBatch:         *probeBatch,
-		replayProgressFile: *replayProgressFile,
+		from:       *from,
+		to:         *to,
+		bucket:     *bucket,
+		dbURL:      *dbURL,
+		rpcURL:     *rpcURL,
+		chainID:    *chainID,
+		goroutines: *goroutines,
+		probeBatch: *probeBatch,
 	}
 
 	if cfg.bucket == "" {
