@@ -82,8 +82,8 @@ class PostgresPriceReader:
             series = prices[symbol].dropna()
             # The window ends yesterday: today's close does not exist yet, so a
             # run early in the day must not fail on a day that is not over.
-            end = pd.Timestamp.now("UTC").date() - pd.Timedelta(days=1)
-            window = pd.date_range(end=end, periods=self._min_days, freq="D").date
+            end = (pd.Timestamp.now("UTC") - pd.Timedelta(days=1)).date()
+            window = [ts.date() for ts in pd.date_range(end=end, periods=self._min_days, freq="D")]
             missing = [d for d in window if d not in set(series.index)]
             if missing:
                 problems.append(

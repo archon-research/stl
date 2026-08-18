@@ -2,10 +2,11 @@
 
 import os
 from datetime import timedelta
+from typing import cast
 
 import pytest
 from temporalio import workflow
-from temporalio.client import ScheduleAlreadyRunningError, ScheduleOverlapPolicy
+from temporalio.client import Client, ScheduleAlreadyRunningError, ScheduleOverlapPolicy
 from temporalio.service import RPCError, RPCStatusCode
 
 from app.adapters.temporal.cronjob import CronjobSpec, connect, ensure_schedule
@@ -40,7 +41,7 @@ class _RecordingClient:
 
 async def test_ensure_schedule_uses_the_cronjob_name_as_schedule_id_and_task_queue():
     client = _RecordingClient()
-    await ensure_schedule(client, _spec())
+    await ensure_schedule(cast(Client, client), _spec())
     schedule_id, schedule = client.calls[0]
     assert schedule_id == "my-cronjob"
     assert schedule.action.task_queue == "my-cronjob"
@@ -49,21 +50,21 @@ async def test_ensure_schedule_uses_the_cronjob_name_as_schedule_id_and_task_que
 
 async def test_ensure_schedule_passes_workflow_args_through():
     client = _RecordingClient()
-    await ensure_schedule(client, _spec())
+    await ensure_schedule(cast(Client, client), _spec())
     _, schedule = client.calls[0]
     assert schedule.action.args == ["all"]
 
 
 async def test_ensure_schedule_sets_the_configured_interval():
     client = _RecordingClient()
-    await ensure_schedule(client, _spec())
+    await ensure_schedule(cast(Client, client), _spec())
     _, schedule = client.calls[0]
     assert schedule.spec.intervals[0].every == timedelta(hours=6)
 
 
 async def test_ensure_schedule_skips_overlapping_runs():
     client = _RecordingClient()
-    await ensure_schedule(client, _spec())
+    await ensure_schedule(cast(Client, client), _spec())
     _, schedule = client.calls[0]
     assert schedule.policy.overlap is ScheduleOverlapPolicy.SKIP
 
@@ -73,13 +74,13 @@ async def test_ensure_schedule_tolerates_a_schedule_left_by_a_previous_run():
     # Matching on the string instead crash-loops the pod on every restart after
     # the first, which is how this was originally shipped.
     client = _RecordingClient(error=ScheduleAlreadyRunningError())
-    await ensure_schedule(client, _spec())  # must not raise
+    await ensure_schedule(cast(Client, client), _spec())  # must not raise
 
 
 async def test_ensure_schedule_propagates_any_other_rpc_failure():
     client = _RecordingClient(error=RPCError("connection refused", RPCStatusCode.UNAVAILABLE, b""))
     with pytest.raises(RPCError):
-        await ensure_schedule(client, _spec())
+        await ensure_schedule(cast(Client, client), _spec())
 
 
 async def test_connect_defaults_match_the_go_runner(monkeypatch):

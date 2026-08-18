@@ -10,13 +10,15 @@ def _cfg(market_key: str):
     class _Cfg:
         database_url = "postgresql://u:p@host:5432/db"
         inputs_dir = "/inputs"
+        market_key: str = ""
+        params: dict = {}
+        orderbook_source = "parquet"
+        price_source = "parquet"
+        position_source = "parquet"
 
     cfg = _Cfg()
     cfg.market_key = market_key
     cfg.params = {"PROTOCOL": "SPARKLEND", "N_MC": 10000}
-    cfg.orderbook_source = "parquet"
-    cfg.price_source = "parquet"
-    cfg.position_source = "parquet"
     return cfg
 
 

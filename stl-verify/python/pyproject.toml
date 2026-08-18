@@ -42,7 +42,12 @@ asyncio_mode = "auto"
 
 [tool.ty.src]
 include = ["app", "tests", "scripts"]
-exclude = [".venv", "**/__pycache__", "app/static"]
+# app/risk_engine/core_model is BA's CORE model, kept byte-identical to their
+# upstream (github.com/TWave-code/core_model_copy) so diffs against it stay
+# reviewable and upstream fixes can be ported 1:1. It predates typing and is
+# deliberately excluded rather than annotated or ty:ignore'd in-file.
+# Integration code around it (adapters, services, cli) is fully checked.
+exclude = [".venv", "**/__pycache__", "app/static", "app/risk_engine/core_model"]
 
 [tool.uv]
 # Guard against supply chain attacks from fresh dependencies: ignore any release

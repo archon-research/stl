@@ -1,6 +1,9 @@
 """Unit tests for the live orderbook reader: routing and merge logic."""
 
+from typing import cast
+
 import pytest
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.core_model_orderbook_reader import (
     PostgresOrderbookReader,
@@ -66,6 +69,7 @@ def test_merge_rejects_a_book_with_no_usable_levels():
 
 
 async def test_untracked_book_fails_loudly_and_points_at_data_gaps():
-    reader = PostgresOrderbookReader(engine=None)  # engine untouched on this path
+    # The engine is never touched on this path, so a null stands in for it.
+    reader = PostgresOrderbookReader(engine=cast(AsyncEngine, None))
     with pytest.raises(ValueError, match="DATA_GAPS"):
         await reader.get_orderbooks(["XRP"])

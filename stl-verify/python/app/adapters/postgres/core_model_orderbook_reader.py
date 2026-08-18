@@ -15,6 +15,7 @@ live book fails loudly rather than falling back to a stale parquet file.
 import json
 import logging
 from datetime import timedelta
+from typing import cast
 
 import pandas as pd
 from sqlalchemy import text
@@ -123,4 +124,4 @@ def _as_levels(asks: object) -> list[list[str]]:
     """JSONB arrives as a decoded list or a JSON string depending on the driver path."""
     if isinstance(asks, str):
         return json.loads(asks)
-    return asks  # type: ignore[return-value]
+    return cast(list[list[str]], asks)

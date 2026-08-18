@@ -289,6 +289,7 @@ class TestTokenPriceQuoteValidation:
 def test_core_model_details_in_rrc_result():
     from decimal import Decimal
 
+    from app.domain.entities.allocation import EthAddress
     from app.domain.entities.risk import CoreModelDetails, RrcResult
 
     details = CoreModelDetails(
@@ -304,13 +305,14 @@ def test_core_model_details_in_rrc_result():
     )
     result = RrcResult(
         asset_id=1,
-        prime_id="0xBcca60bB61934080951369a648Fb03DF4F96263C",
+        prime_id=EthAddress("0xBcca60bB61934080951369a648Fb03DF4F96263C"),
         rrc_usd=Decimal("1250.00"),
         comparable_crr_pct=Decimal("12.5"),
         risk_model="core_model",
         details=details,
     )
     assert result.risk_model == "core_model"
+    assert isinstance(result.details, CoreModelDetails)
     assert result.details.crr_el_pct == Decimal("12.5")
 
 

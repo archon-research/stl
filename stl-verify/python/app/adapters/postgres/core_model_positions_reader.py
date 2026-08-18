@@ -26,8 +26,10 @@ Deliberate deviations, documented in DATA_GAPS.md:
 """
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import Any
 
 import pandas as pd
 from sqlalchemy import text
@@ -238,7 +240,7 @@ def morpho_liquidation_incentive(lltv: float) -> float:
     return min(_MORPHO_LIF_CAP, 1.0 / (_MORPHO_BETA * lltv + (1.0 - _MORPHO_BETA)))
 
 
-def build_morpho_users_frame(rows: list, prices: dict[str, float]) -> pd.DataFrame:
+def build_morpho_users_frame(rows: Sequence[Any], prices: dict[str, float]) -> pd.DataFrame:
     """Assemble the Morpho users frame: one row per borrower of the pair.
 
     A wallet borrowing across several LLTV tranches of the same pair collapses
