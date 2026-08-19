@@ -58,7 +58,7 @@ import (
 // the primary key of morpho_vault_cap / morpho_vault_fee. For such a block this
 // job would write a version-0 row beside live indexing's version-1 row rather
 // than deduping against it. Resolving the version from block_states by
-// (chain_id, number, hash) — as the morpho-vault-indexer backfiller does from
+// (chain_id, number, hash) — as the morpho-vault-backfill does from
 // the S3 key — needs a repository the service does not currently hold, so it is
 // deferred rather than half-solved here.
 const canonicalBlockVersion = 0

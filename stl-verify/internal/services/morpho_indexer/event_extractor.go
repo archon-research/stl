@@ -28,7 +28,7 @@ type EventExtractor struct {
 	// Blue, V2 always emits AccrueInterest first in any state-changing
 	// transaction. Same set is consumed by the live indexer
 	// (service.go's processReceipt default branch and hasRelevantEvents)
-	// and by the morpho-vault-indexer backfiller, so changes apply
+	// and by the morpho-vault-backfill, so changes apply
 	// uniformly.
 	vaultActivitySignatures map[common.Hash]*abi.Event
 }
@@ -150,7 +150,7 @@ func (e *EventExtractor) IsMetaMorphoEvent(log shared.Log) bool {
 //   - V1/V1.1 vaults are discovered via the Morpho Blue path: their address
 //     appears as caller / onBehalf in Morpho Blue Supply / Withdraw / Borrow /
 //     Repay events when they allocate, and the live indexer (discovery.go's
-//     discoverV1V11VaultsInReceipt) plus the morpho-vault-indexer
+//     discoverV1V11VaultsInReceipt) plus the morpho-vault-backfill
 //     backfiller (emitMorphoBlueCandidates) probe those addresses. The V1/V1.1
 //     factories remain deployed and callable; the live indexer's coverage
 //     does not assume otherwise.
@@ -165,7 +165,7 @@ func (e *EventExtractor) IsMetaMorphoEvent(log shared.Log) bool {
 //     ERC20s whose fallback runs `INVALID` (0xfe) and trips Multicall3's
 //     gas budget — see VEC-198 multicall-gas-cap fix.
 //   - Same gate is used by both the live indexer (service.go's processReceipt
-//     default branch and hasRelevantEvents) and the morpho-vault-indexer
+//     default branch and hasRelevantEvents) and the morpho-vault-backfill
 //     backfiller's extractCandidatesFromReceipts. Single source of truth for
 //     "what makes an unknown contract worth probing" — narrowing here narrows
 //     both code paths uniformly.

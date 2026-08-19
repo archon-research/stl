@@ -409,7 +409,7 @@ just slow). Escalate to the Vector team if the same non-transient error repeats
 across triggers: that is a code defect, not an operational state.
 
 This is a property of the shared VaultV2 replay path, not of the bootstrap alone
-— the morpho-vault-indexer backfiller replays through the same handlers and has
+— the morpho-vault-backfill replays through the same handlers and has
 the same exposure.
 
 ---

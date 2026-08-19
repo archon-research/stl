@@ -191,7 +191,7 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies, progress morph
 }
 
 // buildReplayService wires the morpho-indexer service in its replay
-// configuration — the same one the morpho-vault-indexer backfiller uses. The
+// configuration — the same one the morpho-vault-backfill uses. The
 // bootstrap drives the real handlers through it rather than reimplementing them.
 func buildReplayService(ctx context.Context, deps temporal.Dependencies, chainID int64, ethClient *ethclient.Client) (*morpho_indexer.Service, error) {
 	buildReg, err := buildregistry.New(ctx, deps.Pool)
