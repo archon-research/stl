@@ -219,9 +219,15 @@ func TestSeedV2VaultAdapters_DeregistersAdaptersAbsentOnChain(t *testing.T) {
 	}
 
 	// The registry holds both; the chain enumeration returns only testAdapterAddr.
-	h.morphoRepo.GetActiveAdaptersByVaultFn = func(_ context.Context, vaultID int64) ([]*entity.MorphoAdapterMember, error) {
+	h.morphoRepo.GetActiveAdaptersByVaultAtFn = func(_ context.Context, vaultID int64, at entity.BlockPosition) ([]*entity.MorphoAdapterMember, error) {
 		if vaultID != 7 {
-			t.Errorf("GetActiveAdaptersByVault(%d), want 7", vaultID)
+			t.Errorf("GetActiveAdaptersByVaultAt(%d), want 7", vaultID)
+		}
+		// The registry must be asked about the block the enumeration was pinned to,
+		// or an adapter added above it looks like one the enumeration dropped.
+		want := entity.BlockPosition{BlockNumber: headBlock, BlockVersion: 0, LogIndex: entity.EndOfBlockLogIndex}
+		if at != want {
+			t.Errorf("read the registry at %+v, want the pinned enumeration position %+v", at, want)
 		}
 		return []*entity.MorphoAdapterMember{
 			{MorphoAdapterIdentity: entity.MorphoAdapterIdentity{ID: 1, MorphoVaultID: 7, Address: testAdapterAddr.Bytes(), AssetTokenID: 1}, AdapterType: entity.MorphoAdapterTypeMarketV1},
@@ -299,7 +305,7 @@ func TestSeedV2VaultAdapters_DeregistersNothingWhenTheSetMatches(t *testing.T) {
 		}
 		return nil, errTestUnexpectedCall(calls)
 	}
-	h.morphoRepo.GetActiveAdaptersByVaultFn = func(_ context.Context, _ int64) ([]*entity.MorphoAdapterMember, error) {
+	h.morphoRepo.GetActiveAdaptersByVaultAtFn = func(_ context.Context, _ int64, _ entity.BlockPosition) ([]*entity.MorphoAdapterMember, error) {
 		return []*entity.MorphoAdapterMember{
 			{MorphoAdapterIdentity: entity.MorphoAdapterIdentity{ID: 1, MorphoVaultID: 7, Address: testAdapterAddr.Bytes(), AssetTokenID: 1}, AdapterType: entity.MorphoAdapterTypeMarketV1},
 		}, nil

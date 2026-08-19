@@ -379,34 +379,34 @@ absent.
 Do not "fix" this by relaxing the syncer to accept partial coverage silently.
 The alert exists precisely because a partially-covered cycle looks healthy.
 ## morpho-v2-bootstrap fails repeatedly on the same adapter
+## morpho-v2-bootstrap fails on an adapter
 
-**Symptom:** the run fails with `marking morpho adapter removed: no active adapter
-for vault <id> address <addr>`, and re-triggering fails identically. This is the
-one known way the bootstrap can wedge — it will not clear on its own.
+**Nothing here needs rows reconciling by hand.** Adapter membership is an
+append-only observation log, so a failed pass writes no lifecycle a later run has
+to walk back, and re-running is always safe. Two things can stop a run:
 
-**Cause.** The replay closes an adapter incarnation by matching the row that is
-active *at the removal block*. If live indexing removed that adapter at a block
-**after** the run's pinned finalized head — i.e. during the ~13-minute finality
-lag, or while the run was in flight — the row already carries that later
-`removed_at_block`. When the replay then reaches the historical `RemoveAdapter`,
-`MarkAdapterRemoved`'s `removed_at_block IS NULL OR removed_at_block = $3`
-predicate matches nothing and the run aborts. It needs an adapter that was
-added → removed → re-added, so it is rare, but it is deterministic once hit.
+**1. A chain or DB error.** `eth_getLogs` 401/429/5xx, an RPC timeout, a DB
+outage. Temporal retries the activity (3 attempts) and each retry resumes from the
+last fully replayed chunk. A wrong or expired RPC credential is the common
+non-clearing case — it retries identically until the secret is fixed.
 
-Nothing is corrupted: the run fails before writing, and the rows live indexing
-produced are correct.
+**2. `no adapter classification supplied to record an observation of membership`**
+(`ErrAdapterUnclassified`), wrapped as `adapter <addr> was a member before the
+transaction but is not at block <N> inside it, so no type was probed`. A replayed
+`Allocate` skips the on-chain type probe when committed state already places its
+adapter in the vault's set at that log's position; if the log stops answering that
+way inside the transaction — a concurrent live-indexer write landing between the
+two reads — the registry refuses to record membership with no classification
+rather than defaulting a type. It clears on retry: the retry re-reads and probes.
 
-**Recovery.** Re-trigger once — the pinned head advances, and if the live removal
-is now below it the replay reaches the same row in the right order and succeeds.
-If it fails again, the removal block is still ahead of finality; wait for the
-next epoch and re-trigger. Escalate to the Vector team if it persists past two
-attempts, as it then needs the incarnation row reconciling by hand.
+**Not a failure:** a `RemoveAdapter` for an adapter the registry has never seen.
+It records one untyped `is_member = false` observation, which is the truthful
+record of learning about an adapter from its own de-registration.
 
-Temporal's own retries do not clear this one: they start seconds apart, so the
-pinned head barely moves. They are cheap, though — each retry resumes at the
-chunk that failed instead of re-sweeping from the deploy block — so the run still
-goes red within minutes of the first failure. The re-trigger has to come from an
-operator, once enough time has passed for the removal block to finalize.
+**Recovery.** Let Temporal's retries run; if the run is still red, re-trigger from
+the Temporal UI (a hand re-trigger starts from the factory deploy block — safe,
+just slow). Escalate to the Vector team if the same non-transient error repeats
+across triggers: that is a code defect, not an operational state.
 
 This is a property of the shared VaultV2 replay path, not of the bootstrap alone
 — the morpho-vault-indexer backfiller replays through the same handlers and has

@@ -23,9 +23,10 @@ type SweepProgress struct {
 	// through an address filter that never mentioned the vaults it lacks.
 	VaultsDigest string `json:"vaults_digest"`
 	// LastCompletedTo is the last block of the last chunk whose every log
-	// replayed. Recording whole chunks only is what keeps a resumed run in
-	// chain order: a mid-chunk restart could replay a RemoveAdapter without the
-	// AddAdapter that opened the incarnation.
+	// replayed. Whole chunks only: the field claims "everything at or below this
+	// block is on record", and a chunk is fetched and replayed as one unit, so a
+	// mid-chunk value would let a resume skip the logs after it in that chunk and
+	// leave a permanent hole.
 	LastCompletedTo int64 `json:"last_completed_to"`
 }
 

@@ -200,6 +200,73 @@ func TestRun_DeregistersAnAdapterTheChainNoLongerHolds(t *testing.T) {
 	}
 }
 
+// TestRun_LeavesAnAdapterAddedAboveThePinnedHeadAlone covers the gap between the
+// run's pinned finalized head and the chain head — roughly 13 minutes of blocks,
+// plus however long the run takes.
+//
+// Live indexing is still writing in that gap. An AddAdapter it records there cannot
+// appear in an enumeration pinned to the finalized head, so a de-registration pass
+// that asked the registry "who is a member NOW" would find that adapter, miss it in
+// the enumeration, and record it as removed at a block where it was on-chain. The
+// ordering tuple would still answer correctly (the real add sits above the false
+// removal), but the run would emit a WARN and a de-registration for an adapter that
+// was never removed. Reading the registry AS OF the pinned head is what avoids it.
+func TestRun_LeavesAnAdapterAddedAboveThePinnedHeadAlone(t *testing.T) {
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	defer cleanup()
+	ctx := context.Background()
+
+	const headBlock = int64(23_700_000)
+	vault := common.HexToAddress("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
+	enumerated := common.HexToAddress("0x7481968709b8f155652D42ebf468b22945907dC2")
+	justAdded := common.HexToAddress("0x00000000000000000000000000000000000000cc")
+
+	seedVaultRow(t, ctx, pool, vault)
+	// What live indexing recorded after the head this run will pin.
+	justAddedID := seedMembershipObservation(t, ctx, pool, vault, justAdded, headBlock+50, true, "add_adapter_event")
+
+	chain := newFakeChainReader()
+	head := chain.setFinalizedHead(headBlock, 1_770_000_000)
+	multicaller := testutil.NewMockMulticaller()
+	wireAdapterReads(t, multicaller, head.Hash(), vault, enumerated, big.NewInt(555))
+
+	if err := buildIntegrationService(t, ctx, pool, chain, multicaller, &fakeProgressStore{}).Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	observations := readAdapterMembership(t, ctx, pool, justAddedID)
+	if len(observations) != 1 {
+		t.Errorf("the seed wrote %d extra observations for an adapter it could not have enumerated: %+v",
+			len(observations)-1, observations)
+	}
+	if !isCurrentAdapter(t, ctx, pool, justAddedID) {
+		t.Error("the adapter added above the pinned head must still be a member")
+	}
+}
+
+// seedMembershipObservation writes an adapter identity row and one membership
+// observation directly, standing in for what live indexing recorded while a run was
+// in flight. Returns the adapter's identity id.
+func seedMembershipObservation(t *testing.T, ctx context.Context, pool *pgxpool.Pool, vault, adapter common.Address, block int64, isMember bool, observedVia string) int64 {
+	t.Helper()
+	var adapterID int64
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO morpho_adapter (morpho_vault_id, address, asset_token_id)
+		 SELECT v.id, $2, v.asset_token_id FROM morpho_vault v WHERE v.address = $1
+		 RETURNING id`,
+		vault.Bytes(), adapter.Bytes()).Scan(&adapterID); err != nil {
+		t.Fatalf("seeding morpho_adapter: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO morpho_adapter_membership
+		     (morpho_adapter_id, block_number, block_version, log_index, timestamp, is_member, adapter_type, observed_via)
+		 VALUES ($1, $2, 0, 0, NOW(), $3, 1, $4)`,
+		adapterID, block, isMember, observedVia); err != nil {
+		t.Fatalf("seeding morpho_adapter_membership: %v", err)
+	}
+	return adapterID
+}
+
 // isCurrentAdapter reports whether the adapter is in the set morpho_adapter_current
 // exposes — the surface VEC-219's readers use.
 func isCurrentAdapter(t *testing.T, ctx context.Context, pool *pgxpool.Pool, adapterID int64) bool {

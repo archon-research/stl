@@ -218,11 +218,12 @@ func TestRun_FinalizedHeadBelowDeployBlockFailsTheRun(t *testing.T) {
 	}
 }
 
-// TestRun_ReplayFailureStopsBeforeSeed pins the load-bearing pass order from the
-// other end: the seed converges onto whatever incarnation the replay built, so a
-// failed replay must stop the run before the seed writes anything. Seeding on top
-// of a half-replayed history is how a state row ends up on the wrong adapter
-// incarnation.
+// TestRun_ReplayFailureStopsBeforeSeed pins that a failed replay ends the run. The
+// pass ORDER is no longer load-bearing (seedAdapterState says why), but stopping is:
+// the seed is the pass that succeeds trivially, so running it after a failed replay
+// would let a run whose history is half-swept end in a green Temporal execution with
+// only the head state on record. The whole point of this job is that its outcome is
+// what an operator reads.
 func TestRun_ReplayFailureStopsBeforeSeed(t *testing.T) {
 	h := newBootstrapHarness(t)
 	replayer := &recordingReplayer{v2Vaults: map[common.Address]struct{}{testVaultAddr: {}}}
@@ -256,9 +257,10 @@ func TestRun_SeedFailureFailsTheRun(t *testing.T) {
 	}
 }
 
-// TestRun_ReplayedLogsArriveInChainOrder: the handlers require an adapter's
-// AddAdapter before its RemoveAdapter, and the per-address-batch requests inside
-// a chunk return interleaved. The service must restore (block, logIndex) order.
+// TestRun_ReplayedLogsArriveInChainOrder: the per-address-batch requests inside a
+// chunk return interleaved, and the service must restore (block, logIndex) order —
+// not for correctness (see sortLogs) but so a replay does not manufacture the
+// inferred-membership WARN that means a discovery gap.
 func TestRun_ReplayedLogsArriveInChainOrder(t *testing.T) {
 	h := newBootstrapHarness(t)
 	replayer := &recordingReplayer{v2Vaults: map[common.Address]struct{}{testVaultAddr: {}}}
@@ -749,10 +751,10 @@ func (f *fakeProgressStore) savedTo() []int64 {
 	return out
 }
 
-// TestRun_RecordsProgressOnlyAtChunkBoundaries: a chunk is recorded once every
-// log in it has replayed, so a resumed run can never restart mid-chunk — the
-// order guarantee (an AddAdapter before the RemoveAdapter that closes it) holds
-// only when whole chunks are replayed in sequence.
+// TestRun_RecordsProgressOnlyAtChunkBoundaries: a chunk is recorded once every log
+// in it has replayed, so a resumed run can never restart mid-chunk. Recording a
+// block partway through would claim coverage the run does not have, and the resume
+// would skip the rest of that chunk for good.
 func TestRun_RecordsProgressOnlyAtChunkBoundaries(t *testing.T) {
 	h := newBootstrapHarness(t)
 	const headBlock = mainnetVaultV2DeployBlock + 25_000
