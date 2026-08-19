@@ -105,8 +105,11 @@ create_chain_resources "unichain"
 create_chain_resources "arbitrum"
 create_chain_resources "robinhood"
 
-# Ethereum-only consumers
-create_consumer_queue "ethereum" "oracle-price"
+# Ethereum-only consumers. curve-indexing / uniswap-v3-indexing / uniswap-v4-indexing
+# feed the shared dex-indexer image — one Deployment per DEX, DEX env selects the factory.
+for queue in oracle-price curve-indexing uniswap-v3-indexing uniswap-v4-indexing; do
+  create_consumer_queue "ethereum" "$queue"
+done
 
 # Multi-chain consumers
 for chain in ethereum avalanche; do
