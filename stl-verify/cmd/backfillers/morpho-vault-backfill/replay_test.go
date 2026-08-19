@@ -99,8 +99,8 @@ func TestFilterV2Logs_MalformedLogIndexErrors(t *testing.T) {
 		},
 	}}
 	_, err := filterV2Logs(receipts, 100, map[common.Address]struct{}{vault: {}}, mustV2Topics(t))
-	if err == nil {
-		t.Fatal("expected an error for a malformed logIndex")
+	if !errors.Is(err, errStructuralData) {
+		t.Fatalf("error = %v, want a structural defect no retry can clear", err)
 	}
 }
 
@@ -116,8 +116,8 @@ func TestFilterV2Logs_MissingBlockHashErrors(t *testing.T) {
 		},
 	}}
 	_, err := filterV2Logs(receipts, 100, map[common.Address]struct{}{vault: {}}, mustV2Topics(t))
-	if err == nil {
-		t.Fatal("expected an error for a matching receipt with an empty block hash")
+	if !errors.Is(err, errStructuralData) {
+		t.Fatalf("error = %v, want a structural defect no retry can clear", err)
 	}
 }
 
@@ -275,8 +275,8 @@ func TestCollectPartitionV2Logs_MissingReceiptBlockErrors(t *testing.T) {
 
 	part := partition.GetPartition(from)
 	_, err := collectPartitionV2Logs(ctx, reader, "bucket", part, from, to, 4, map[common.Address]struct{}{}, mustV2Topics(t))
-	if err == nil {
-		t.Fatal("expected an error for a partition missing a receipt block")
+	if !errors.Is(err, errStructuralData) {
+		t.Fatalf("error = %v, want a structural defect no retry can clear (the runbook repairs S3 and re-runs)", err)
 	}
 }
 

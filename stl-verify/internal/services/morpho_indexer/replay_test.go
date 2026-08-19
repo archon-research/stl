@@ -571,4 +571,7 @@ func TestReplayMetaMorphoLog_NonStructuredTopicErrors(t *testing.T) {
 	if !strings.Contains(err.Error(), "not a VaultV2 structured event") {
 		t.Errorf("error %q should explain the topic is not a structured V2 event", err.Error())
 	}
+	if !errors.Is(err, ErrUnreplayableLog) {
+		t.Error("the guard must be identifiable as unreplayable, so a retrying caller stops on the first attempt")
+	}
 }

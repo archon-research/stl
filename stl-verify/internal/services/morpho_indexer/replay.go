@@ -2,6 +2,7 @@ package morpho_indexer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -13,6 +14,12 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
+
+// ErrUnreplayableLog marks a log the replay path structurally cannot take: it
+// carries no topics, or its topic0 is outside the VaultV2 structured set whose
+// handlers are the only ones a replay Service has ports for. The verdict is the
+// same on every attempt, so a caller with a retry budget stops on the first.
+var ErrUnreplayableLog = errors.New("log is not replayable")
 
 // LoadVaultRegistry loads all known vaults for the configured chain into the
 // in-memory registry. Called by Start before the SQS loop and by the backfiller's
@@ -47,7 +54,7 @@ func (s *Service) ReplayMetaMorphoLog(ctx context.Context, log shared.Log, block
 	ctx = archiving.WithBlockVersion(ctx, blockVersion)
 	ctx = archiving.WithBlockNumber(ctx, blockNumber)
 	if len(log.Topics) == 0 {
-		return fmt.Errorf("replay log has no topics")
+		return fmt.Errorf("replay log has no topics: %w", ErrUnreplayableLog)
 	}
 	// The replay constructor nils the user/token/cache/consumer/receipt-token
 	// ports, so only the VaultV2 structured events (whose handlers never touch
@@ -56,7 +63,7 @@ func (s *Service) ReplayMetaMorphoLog(ctx context.Context, log shared.Log, block
 	// any non-structured topic up front rather than panicking mid-handler.
 	topic0 := common.HexToHash(log.Topics[0])
 	if _, ok := s.v2StructuredTopics[topic0]; !ok {
-		return fmt.Errorf("ReplayMetaMorphoLog: topic %s is not a VaultV2 structured event; replay handles only the adapter/allocation/cap/fee surface", topic0.Hex())
+		return fmt.Errorf("ReplayMetaMorphoLog: topic %s is not a VaultV2 structured event; replay handles only the adapter/allocation/cap/fee surface: %w", topic0.Hex(), ErrUnreplayableLog)
 	}
 	vaultAddress := common.HexToAddress(log.Address)
 	return s.processMetaMorphoLog(ctx, log, vaultAddress, s.config.ChainID, blockNumber, blockHash, blockVersion, blockTimestamp)
