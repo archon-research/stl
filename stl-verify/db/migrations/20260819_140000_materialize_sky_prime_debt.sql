@@ -79,4 +79,4 @@ $fn$;
 
 COMMENT ON FUNCTION materialize_sky_prime_debt() IS '[Operational] VEC-406: materialize Sky prime debt into position_state + position_classification, via materialize_position_projection(position_sky_prime_debt). Idempotent; run out of band. Returns position_state rows written.';
 
-INSERT INTO migrations (filename) VALUES ('20260724_140000_materialize_sky_prime_debt.sql') ON CONFLICT (filename) DO NOTHING;
+INSERT INTO migrations (filename) VALUES ('20260819_140000_materialize_sky_prime_debt.sql') ON CONFLICT (filename) DO NOTHING;
