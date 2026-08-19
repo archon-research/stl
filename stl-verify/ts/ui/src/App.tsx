@@ -67,6 +67,7 @@ import {
   getProtocolLabel,
   groupPrimesByVault,
   parseNumericValue,
+  truncateMiddle,
   wadToUnits,
 } from './lib/dashboard';
 import { isAbortError, toErrorMessage } from './lib/errors';
@@ -193,6 +194,11 @@ function App() {
     string | null
   >(null);
   const [tokenSymbolOptions, setTokenSymbolOptions] = useState<string[]>([]);
+  // Not derived: the URL is replaced with the fallback prime, so afterwards
+  // nothing but this still names the prime that was asked for.
+  const [unknownPrimeMessage, setUnknownPrimeMessage] = useState<string | null>(
+    null,
+  );
   const navigate = useNavigate();
   const matchRoute = useMatchRoute();
   const sharedSearch = useSearch({ from: '__root__' });
@@ -427,27 +433,50 @@ function App() {
       return;
     }
 
-    if (primeGroups.length === 0) {
-      if (selectedPrimeId !== null) {
+    const fallbackGroup = primeGroups[0] ?? null;
+
+    if (fallbackGroup === null) {
+      // A failed prime fetch is not an empty prime list: dropping the prime out
+      // of the URL here would destroy the deep link a retry could still serve.
+      if (primesErrorMessage === null && selectedPrimeId !== null) {
         navigateToView({ view: selectedView, primeKey: null, replace: true });
       }
       return;
     }
 
-    if (
-      !selectedPrimeId ||
-      !primeGroups.some((group) => group.key === selectedPrimeId)
-    ) {
+    if (!selectedPrimeId) {
       navigateToView({
         view: selectedView,
-        primeKey: primeGroups[0]?.key ?? null,
+        primeKey: fallbackGroup.key,
         replace: true,
       });
+      return;
     }
+
+    if (primeGroups.some((group) => group.key === selectedPrimeId)) {
+      return;
+    }
+
+    // Silently swapping primes renders one prime's data under another's link,
+    // and the filters in that link were scoped to the prime that is gone.
+    logging.warn('Requested prime is not in the prime list', {
+      requestedPrimeKey: selectedPrimeId,
+      fallbackPrimeKey: fallbackGroup.key,
+    });
+    setUnknownPrimeMessage(
+      `Prime ${truncateMiddle(selectedPrimeId)} was not found; showing ${fallbackGroup.name}.`,
+    );
+    navigateToView({
+      view: selectedView,
+      primeKey: fallbackGroup.key,
+      patch: PRIME_SCOPED_RESET,
+      replace: true,
+    });
   }, [
     isPrimesLoading,
     navigateToView,
     primeGroups,
+    primesErrorMessage,
     selectedPrimeId,
     selectedView,
   ]);
@@ -649,15 +678,20 @@ function App() {
     [allocations, isActivitiesView, localProtocols],
   );
 
-  // Drop a stale filter only once its option source is ready — otherwise a
-  // valid deep link (e.g. ?network=/?protocol=) is cleared on first render
-  // before chains/protocols metadata has loaded.
+  // Drop a stale filter only once its option source has actually delivered
+  // options: an empty source means "not known yet", and treating it as "no such
+  // option" wipes a valid deep link (?network=/?protocol=) on mount or on a
+  // failed fetch.
+  const allocationOptionsUnready =
+    selectedPrimeGroup === null ||
+    isAllocationsLoading ||
+    allocationsErrorMessage !== null;
   const networkOptionsLoading = isActivitiesView
     ? localChains.length === 0
-    : isAllocationsLoading;
+    : allocationOptionsUnready;
   const protocolOptionsLoading = isActivitiesView
     ? localProtocols.length === 0
-    : isAllocationsLoading;
+    : allocationOptionsUnready;
 
   useEffect(() => {
     if (networkOptionsLoading || !selectedNetwork) {
@@ -978,14 +1012,15 @@ function App() {
               selectedPrimeId={selectedPrimeId}
               isLoading={isPrimesLoading}
               errorMessage={primesErrorMessage}
-              onSelectPrime={(primeKey) =>
+              onSelectPrime={(primeKey) => {
+                setUnknownPrimeMessage(null);
                 navigateToView({
                   view: selectedView,
                   primeKey,
                   patch: PRIME_SCOPED_RESET,
                   replace: true,
-                })
-              }
+                });
+              }}
               showAllPrimes={showAllPrimesInActivities}
               canShowAllPrimes={selectedView === 'activities'}
               onShowAllPrimesChange={(value) =>
@@ -1044,6 +1079,7 @@ function App() {
                 riskCapitalErrorMessage={riskCapitalErrorMessage}
                 primeDebtErrorMessage={primeDebtErrorMessage}
                 isMultiChainPrime={isMultiChainPrime}
+                noticeMessage={unknownPrimeMessage}
               />
             ) : (
               <ActivityFeed
