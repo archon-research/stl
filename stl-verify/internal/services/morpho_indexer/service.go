@@ -44,7 +44,7 @@ func MorphoBlueDeployBlock(chainID int64) (int64, error) {
 // vaultV2FactoryDeployBlocks maps chain IDs to the block at which the Morpho
 // VaultV2 factory (0xA1D94F746dEfa1928926b84fB2596c06926C0405) was deployed.
 // Verified on-chain: the factory has no code at 23375072 and code at 23375073.
-// Used by the morpho-vault-indexer backfiller's --from-v2-deploy flag to default
+// Used by the morpho-vault-backfill's --from-v2-deploy flag to default
 // -from to the earliest block any VaultV2 could exist. That bounds the whole
 // backfill pipeline — phase-1 discovery included — not just the V2 replay, so a
 // V1/V1.1 vault whose only activity predates the factory is not discovered.
@@ -128,7 +128,7 @@ func NewService(
 }
 
 // NewReplayService builds a Service wired only for offline replay of
-// already-persisted VaultV2 vaults' structured events — the morpho-vault-indexer
+// already-persisted VaultV2 vaults' structured events — the morpho-vault-backfill
 // backfiller's V2 replay phase. It shares NewService's internals but omits the
 // SQS consumer and block cache: replay reads receipts from S3 and drives logs
 // through ReplayMetaMorphoLog directly, never through the live SQS loop, so Start
@@ -450,7 +450,7 @@ func (s *Service) processReceipt(ctx context.Context, receipt shared.Transaction
 
 	// Pre-walk: probe Morpho Blue events' caller / onBehalf (or borrower
 	// for Liquidate) for V1/V1.1 vault discovery BEFORE the main loop
-	// processes any log. This mirrors the morpho-vault-indexer backfiller's
+	// processes any log. This mirrors the morpho-vault-backfill's
 	// V1/V1.1 path; it has to live in the live indexer because the
 	// backfiller is recovery-only and IsVaultActivityEvent is narrowed to
 	// the V2 4-field AccrueInterest topic, so V1/V1.1 vaults emitting their
@@ -526,8 +526,8 @@ func (s *Service) processReceipt(ctx context.Context, receipt shared.Transaction
 			// transport error — never reaches `ErrNotVault`, never enters
 			// the negative cache, retries forever.
 			//
-			// Same predicate is used by the morpho-vault-indexer backfiller
-			// (see cmd/backfillers/morpho-vault-indexer/main.go), so the
+			// Same predicate is used by the morpho-vault-backfill
+			// (see cmd/backfillers/morpho-vault-backfill/main.go), so the
 			// live and offline discovery contracts stay aligned.
 			if !s.eventExtractor.IsVaultActivityEvent(log) {
 				continue

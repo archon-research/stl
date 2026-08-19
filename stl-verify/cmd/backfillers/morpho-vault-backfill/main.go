@@ -9,7 +9,7 @@
 //
 // Usage:
 //
-//	go run ./cmd/backfillers/morpho-vault-indexer \
+//	go run ./cmd/backfillers/morpho-vault-backfill \
 //	  -from 18883124 -to 24600000 \
 //	  -bucket stl-sentinelstaging-ethereum-raw-89d540d0 \
 //	  -db "$DATABASE_URL" \

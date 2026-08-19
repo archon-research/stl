@@ -256,7 +256,7 @@ func seedVaultRegistry(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fx
 }
 
 // buildReplayServiceForTest constructs the replay service the same way the
-// morpho-vault-indexer backfiller does (buildReplayService), with real Postgres
+// morpho-vault-backfill does (buildReplayService), with real Postgres
 // repositories and the fixture-backed fake multicaller, then loads the vault
 // registry from the seeded DB.
 func buildReplayServiceForTest(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fx *replayFixture) *morpho_indexer.Service {

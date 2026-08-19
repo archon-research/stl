@@ -27,7 +27,7 @@
 ./internal/adapters/outbound/maple
 ./internal/services/curveindexer
 ./internal/services/aavelike_position_tracker
-./cmd/backfillers/morpho-vault-indexer
+./cmd/backfillers/morpho-vault-backfill
 ./internal/services/oracle_pricing
 ./internal/pkg/aavelike
 ./cmd/util/stress-test/mock-blockchain-server
