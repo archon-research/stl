@@ -2,16 +2,13 @@ from collections.abc import Callable
 from decimal import Decimal
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
-from app.adapters.postgres.receipt_token_repository import ReceiptTokenRepository
-from app.adapters.sky.reference_risk_capital_client import SkyReferenceRiskCapitalClient
 from app.api._validators import ProxyAddressPathParam
-from app.api.deps import get_engine, get_model_registry
-from app.config import get_settings
+from app.api.deps import get_engine, get_model_registry, get_reference_risk_capital_service_factory
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.prime_risk_capital import PrimeRiskCapital, UnpricedReason
 from app.domain.entities.reference_risk_capital import ReferenceAllocation, ReferencePrimeRiskCapital
@@ -289,24 +286,6 @@ async def _get_service(
     return PrimeRiskCapitalService(AllocationRepository(engine), registry)
 
 
-def _get_reference_service_factory(request: Request) -> Callable[[], ReferenceRiskCapitalService]:
-    """Defer building the reference service until a request actually asks for it.
-
-    Returned as a factory rather than the service itself because FastAPI resolves
-    every declared dependency on every request: constructing it eagerly would
-    make a self-mode request reach for the upstream client and the engine it
-    never uses.
-    """
-
-    def build() -> ReferenceRiskCapitalService:
-        return ReferenceRiskCapitalService(
-            SkyReferenceRiskCapitalClient(get_settings().star_risk_capital_base_url),
-            ReceiptTokenRepository(request.app.state.engine),
-        )
-
-    return build
-
-
 @router.get(
     "/primes/{prime_id}/risk-capital",
     response_model=PrimeRiskCapitalResponse,
@@ -353,7 +332,7 @@ async def get_prime_risk_capital(
         ),
     ),
     service: PrimeRiskCapitalService = Depends(_get_service),
-    reference_services: Callable[[], ReferenceRiskCapitalService] = Depends(_get_reference_service_factory),
+    reference_services: Callable[[], ReferenceRiskCapitalService] = Depends(get_reference_risk_capital_service_factory),
 ) -> PrimeRiskCapitalResponse:
     # A SubProxy holds the prime's treasury, not its allocations, so it is not a
     # member of the prime's ALM fan-out set. Answering for one folds the treasury

@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi.testclient import TestClient
 
+from app.api.deps import get_reference_capital_repository_factory
 from app.api.v1 import exposure, total_capital
 from app.domain.entities.reference_risk_capital import ReferenceCapitalBucket
 from app.main import app
@@ -51,7 +52,7 @@ def series(request):
         yield service
 
     app.dependency_overrides[module._get_service] = _service_dep
-    app.dependency_overrides[module._get_reference_repository_factory] = lambda: lambda: repository
+    app.dependency_overrides[get_reference_capital_repository_factory] = lambda: lambda: repository
     try:
         yield TestClient(app), path, field, service, repository
     finally:

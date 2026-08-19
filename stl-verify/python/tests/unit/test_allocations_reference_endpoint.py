@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi.testclient import TestClient
 
+from app.api.deps import get_reference_risk_capital_service_factory
 from app.api.v1 import allocations
 from app.domain.entities.reference_risk_capital import ReferenceAllocation, ReferencePrimeRiskCapital
 from app.domain.exceptions import ReferenceDataUnavailableError
@@ -75,7 +76,7 @@ def reference_client(request):
         yield service
 
     app.dependency_overrides[allocations._get_service] = _service_dep
-    app.dependency_overrides[allocations._get_reference_service_factory] = lambda: lambda: reference_service
+    app.dependency_overrides[get_reference_risk_capital_service_factory] = lambda: lambda: reference_service
     try:
         yield TestClient(app), service
     finally:

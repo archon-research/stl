@@ -6,19 +6,17 @@ from decimal import Decimal, InvalidOperation
 from typing import Annotated, Literal
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field, ValidationError, model_validator
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
-from app.adapters.postgres.receipt_token_repository import ReceiptTokenRepository
-from app.adapters.sky.reference_risk_capital_client import SkyReferenceRiskCapitalClient
 from app.api._validators import (
     OptionalEthAddressParam,
     OptionalTxHashParam,
     ProxyAddressPathParam,
 )
-from app.api.deps import get_engine
+from app.api.deps import get_engine, get_reference_risk_capital_service_factory
 from app.api.time_series import TimeSeriesWindow, apply_cache_control, build_window, get_time_series_query_params
 from app.config import get_settings
 from app.domain.chain_names import UPSTREAM_NETWORK_TO_CHAIN_ID
@@ -409,23 +407,6 @@ async def _get_service(engine: AsyncEngine = Depends(get_engine)) -> AllocationS
     return AllocationService(AllocationRepository(engine))
 
 
-def _get_reference_service_factory(request: Request) -> Callable[[], ReferenceRiskCapitalService]:
-    """Defer building the reference service until a request asks for it.
-
-    FastAPI resolves every declared dependency on every request, so building it
-    eagerly would make a self-mode request construct an upstream HTTP client it
-    never uses.
-    """
-
-    def build() -> ReferenceRiskCapitalService:
-        return ReferenceRiskCapitalService(
-            SkyReferenceRiskCapitalClient(get_settings().star_risk_capital_base_url),
-            ReceiptTokenRepository(request.app.state.engine),
-        )
-
-    return build
-
-
 async def _fetch_star_risk_capital_payload() -> StarRiskCapitalResponse:
     settings = get_settings()
     timeout = httpx.Timeout(connect=5.0, read=15.0, write=10.0, pool=5.0)
@@ -689,7 +670,7 @@ async def list_allocations(
         ),
     ),
     service: AllocationService = Depends(_get_service),
-    reference_services: Callable[[], ReferenceRiskCapitalService] = Depends(_get_reference_service_factory),
+    reference_services: Callable[[], ReferenceRiskCapitalService] = Depends(get_reference_risk_capital_service_factory),
 ):
     """Return current allocations for ``prime_id``.
 

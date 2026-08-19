@@ -2,14 +2,14 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
 from app.adapters.postgres.prime_capital_stack_repository import PrimeCapitalStackRepository
 from app.api._validators import ProxyAddressPathParam
-from app.api.deps import get_engine
+from app.api.deps import get_engine, get_reference_capital_repository_factory
 from app.api.time_series import (
     TimeSeriesWindow,
     apply_cache_control,
@@ -58,16 +58,6 @@ async def _get_service(engine: AsyncEngine = Depends(get_engine)) -> AllocationS
     return AllocationService(AllocationRepository(engine))
 
 
-def _get_reference_repository_factory(request: Request) -> Callable[[], PrimeCapitalStackRepository]:
-    """Defer building the reference reader until a request asks for it.
-
-    FastAPI resolves every declared dependency on every request, so returning
-    the repository directly would make a self-mode request reach for an engine
-    it never uses.
-    """
-    return lambda: PrimeCapitalStackRepository(request.app.state.engine)
-
-
 @router.get(
     "/primes/{prime_id}/total-capital",
     response_model=TotalCapitalEnvelope,
@@ -95,7 +85,9 @@ async def list_prime_total_capital(
         ),
     ),
     service: AllocationService = Depends(_get_service),
-    reference_repositories: Callable[[], PrimeCapitalStackRepository] = Depends(_get_reference_repository_factory),
+    reference_repositories: Callable[[], PrimeCapitalStackRepository] = Depends(
+        get_reference_capital_repository_factory
+    ),
 ) -> TotalCapitalEnvelope:
     prime_address = EthAddress(prime_id)
     if not await service.prime_exists(prime_address):
