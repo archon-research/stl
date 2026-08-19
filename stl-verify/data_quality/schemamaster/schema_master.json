@@ -74,6 +74,14 @@
       "type": "numeric",
       "class": "S"
     },
+    "alm_asset_value": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "alm_shares": {
+      "type": "numeric",
+      "class": "S"
+    },
     "amount": {
       "type": "numeric",
       "class": "D"

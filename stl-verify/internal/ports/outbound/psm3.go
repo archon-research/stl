@@ -21,8 +21,10 @@ type PSM3Caller interface {
 
 	// ReadState reads the reserve state pinned to blockHash: USDS/sUSDS
 	// balances at the PSM3, the USDC balance at the current pocket (resolved
-	// in the same sweep — it is governance-settable), totalAssets, and the
-	// sUSDS conversion rate. Pinning by hash (not number) keeps the read on the
+	// in the same sweep — it is governance-settable), totalAssets, the
+	// sUSDS conversion rate, and the share legs (the ALM proxy's shares, the
+	// total share supply, and the ALM's shares valued at par).
+	// Pinning by hash (not number) keeps the read on the
 	// exact block being processed so a reorg can't return another fork's
 	// reserves (see Multicaller.ExecuteAtHash / VEC-471).
 	ReadState(ctx context.Context, blockHash common.Hash) (*entity.PSM3State, error)

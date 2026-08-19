@@ -24,6 +24,10 @@ type PSM3Config struct {
 	USDS  common.Address
 	SUSDS common.Address
 	USDC  common.Address
+	// ALM is the prime's ALM proxy, the only meaningful LP in the pool. Its
+	// shares are read per block; there is no share token, so the holder cannot
+	// be discovered from chain state alone.
+	ALM common.Address
 }
 
 var psm3Configs = map[int64]PSM3Config{
@@ -32,24 +36,28 @@ var psm3Configs = map[int64]PSM3Config{
 		USDS:  common.HexToAddress("0x820C137fa70C8691f0e44Dc420a5e53c168921Dc"),
 		SUSDS: common.HexToAddress("0x5875eEE11Cf8398102FdAd704C9E96607675467a"),
 		USDC:  common.HexToAddress("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"),
+		ALM:   common.HexToAddress("0x2917956eFF0B5eaF030abDB4EF4296DF775009cA"),
 	},
 	10: { // optimism
 		PSM3:  common.HexToAddress("0xe0F9978b907853F354d79188A3dEfbD41978af62"),
 		USDS:  common.HexToAddress("0x4F13a96EC5C4Cf34e442b46Bbd98a0791F20edC3"),
 		SUSDS: common.HexToAddress("0xb5B2dc7fd34C249F4be7fB1fCea07950784229e0"),
 		USDC:  common.HexToAddress("0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85"),
+		ALM:   common.HexToAddress("0x876664f0c9Ff24D1aa355Ce9f1680AE1A5bf36fB"),
 	},
 	42161: { // arbitrum
 		PSM3:  common.HexToAddress("0x2B05F8e1cACC6974fD79A673a341Fe1f58d27266"),
 		USDS:  common.HexToAddress("0x6491c05A82219b8D1479057361ff1654749b876b"),
 		SUSDS: common.HexToAddress("0xdDb46999F8891663a8F2828d25298f70416d7610"),
 		USDC:  common.HexToAddress("0xaf88d065e77c8cC2239327C5EDb3A432268e5831"),
+		ALM:   common.HexToAddress("0x92afd6F2385a90e44da3a8B60fe36f6cBe1D8709"),
 	},
 	130: { // unichain
 		PSM3:  common.HexToAddress("0x7b42Ed932f26509465F7cE3FAF76FfCe1275312f"),
 		USDS:  common.HexToAddress("0x7E10036Acc4B56d4dFCa3b77810356CE52313F9C"),
 		SUSDS: common.HexToAddress("0xA06b10Db9F390990364A3984C04FaDf1c13691b5"),
 		USDC:  common.HexToAddress("0x078D782b760474a361dDA0AF3839290b0EF57AD6"),
+		ALM:   common.HexToAddress("0x345E368fcCd62266B3f5F37C9a131FD1c39f5869"),
 	},
 }
 
@@ -62,32 +70,50 @@ func PSM3ConfigForChain(chainID int64) (PSM3Config, error) {
 	return cfg, nil
 }
 
-// ValidateAgainstAxisSynome cross-checks the configured PSM3 address against
-// the axis-synome protocol=psm3 entry for the chain so the two registries
-// cannot drift silently.
+// ValidateAgainstAxisSynome cross-checks the configured PSM3 and ALM proxy
+// addresses against the axis-synome protocol=psm3 entry for the chain, and the
+// ALM proxy of the star that owns it, so the two registries cannot drift
+// silently.
 func (cfg PSM3Config) ValidateAgainstAxisSynome(contract *axis_synome_contract.Contract, chainID int64) error {
 	chainName, err := entity.ChainName(chainID)
 	if err != nil {
 		return fmt.Errorf("resolve chain name: %w", err)
 	}
 
-	found := false
+	owningStar := ""
 	for star, entries := range contract.GetAssetsByPrime() {
 		for _, e := range entries {
 			if e.Protocol != "psm3" || e.Chain != chainName {
 				continue
 			}
-			found = true
+			owningStar = star
 			if common.HexToAddress(e.ContractAddress) != cfg.PSM3 {
 				return fmt.Errorf("axis-synome psm3 entry for chain %s (star %s) has contract %s, config has %s",
 					chainName, star, e.ContractAddress, cfg.PSM3.Hex())
 			}
 		}
 	}
-	if !found {
+	if owningStar == "" {
 		return fmt.Errorf("no psm3 entry in axis-synome for chain %s", chainName)
 	}
-	return nil
+
+	return cfg.validateALMAgainstAxisSynome(contract, owningStar, chainName)
+}
+
+// validateALMAgainstAxisSynome checks cfg.ALM against the canonical ALM proxy
+// (role "alm", not a SubProxy/treasury wallet) of the given star and chain.
+func (cfg PSM3Config) validateALMAgainstAxisSynome(contract *axis_synome_contract.Contract, star, chainName string) error {
+	for _, proxy := range contract.GetAlmProxies()[star][chainName] {
+		if proxy.Role != "alm" {
+			continue
+		}
+		if common.HexToAddress(proxy.Address) != cfg.ALM {
+			return fmt.Errorf("axis-synome alm proxy for chain %s (star %s) is %s, config has %s",
+				chainName, star, proxy.Address, cfg.ALM.Hex())
+		}
+		return nil
+	}
+	return fmt.Errorf("no alm proxy in axis-synome for chain %s (star %s)", chainName, star)
 }
 
 // PSM3Caller reads Spark PSM3 reserve state using batched multicall3 reads.
@@ -170,16 +196,50 @@ func (c *PSM3Caller) ResolveImmutables(ctx context.Context, blockNumber *big.Int
 	return nil
 }
 
-// ReadState reads the PSM3 reserve state pinned to blockHash in two rounds:
-// round 1 reads pocket(), USDS/sUSDS balances, totalAssets() and the
-// conversion rate in one multicall; round 2 reads USDC.balanceOf(pocket).
-// The pocket is governance-settable (PocketSet), so it is resolved every call
-// and never cached. Both rounds are hash-pinned (see executeAtHash / VEC-471).
+// ReadState reads the PSM3 reserve and share state pinned to blockHash in two
+// rounds: round 1 reads pocket(), USDS/sUSDS balances, totalAssets(), the
+// conversion rate, shares(alm) and totalShares(); round 2 reads the two values
+// that take a round-1 result as input, USDC.balanceOf(pocket) and
+// convertToAssetValue(shares(alm)). The pocket is governance-settable
+// (PocketSet), so it is resolved every call and never cached. Both rounds are
+// hash-pinned (see executeAtHash / VEC-471).
 func (c *PSM3Caller) ReadState(ctx context.Context, blockHash common.Hash) (*entity.PSM3State, error) {
 	if c.rateProvider == (common.Address{}) {
 		return nil, fmt.Errorf("rate provider not resolved; call ResolveImmutables first")
 	}
 
+	state, pocket, err := c.readReservesAndShares(ctx, blockHash)
+	if err != nil {
+		return nil, err
+	}
+
+	state.USDCBalance, state.ALMAssetValue, err = c.readPocketBalanceAndShareValue(ctx, pocket, state.ALMShares, blockHash)
+	if err != nil {
+		return nil, err
+	}
+
+	return state, nil
+}
+
+// readReservesAndShares runs round 1 and returns the partially-filled state
+// (everything except the two round-2 legs) plus the resolved pocket.
+func (c *PSM3Caller) readReservesAndShares(ctx context.Context, blockHash common.Hash) (*entity.PSM3State, common.Address, error) {
+	calls, err := c.reservesAndSharesCalls()
+	if err != nil {
+		return nil, common.Address{}, err
+	}
+
+	results, err := c.executeAtHash(ctx, calls, blockHash)
+	if err != nil {
+		return nil, common.Address{}, fmt.Errorf("multicall psm3 state: %w", err)
+	}
+
+	return c.decodeReservesAndShares(results)
+}
+
+// reservesAndSharesCalls builds the round-1 calls, in the order
+// decodeReservesAndShares expects.
+func (c *PSM3Caller) reservesAndSharesCalls() ([]outbound.Call, error) {
 	balanceOfPSM3, err := c.erc20ABI.Pack("balanceOf", c.cfg.PSM3)
 	if err != nil {
 		return nil, fmt.Errorf("pack balanceOf(psm3): %w", err)
@@ -196,77 +256,110 @@ func (c *PSM3Caller) ReadState(ctx context.Context, blockHash common.Hash) (*ent
 	if err != nil {
 		return nil, fmt.Errorf("pack getConversionRate: %w", err)
 	}
+	sharesData, err := c.psm3ABI.Pack("shares", c.cfg.ALM)
+	if err != nil {
+		return nil, fmt.Errorf("pack shares(alm): %w", err)
+	}
+	totalSharesData, err := c.psm3ABI.Pack("totalShares")
+	if err != nil {
+		return nil, fmt.Errorf("pack totalShares: %w", err)
+	}
 
-	calls := []outbound.Call{
+	return []outbound.Call{
 		{Target: c.cfg.PSM3, CallData: pocketData},
 		{Target: c.cfg.USDS, CallData: balanceOfPSM3},
 		{Target: c.cfg.SUSDS, CallData: balanceOfPSM3},
 		{Target: c.cfg.PSM3, CallData: totalAssetsData},
 		{Target: c.rateProvider, CallData: rateData},
-	}
+		{Target: c.cfg.PSM3, CallData: sharesData},
+		{Target: c.cfg.PSM3, CallData: totalSharesData},
+	}, nil
+}
 
-	results, err := c.executeAtHash(ctx, calls, blockHash)
-	if err != nil {
-		return nil, fmt.Errorf("multicall psm3 state: %w", err)
-	}
+// decodeReservesAndShares decodes the round-1 results built by
+// reservesAndSharesCalls.
+func (c *PSM3Caller) decodeReservesAndShares(results []outbound.Result) (*entity.PSM3State, common.Address, error) {
+	fail := func(err error) (*entity.PSM3State, common.Address, error) { return nil, common.Address{}, err }
 
 	pocket, err := unpackAddress(&c.psm3ABI, "pocket", results[0])
 	if err != nil {
-		return nil, err
+		return fail(err)
 	}
 	if pocket == (common.Address{}) {
 		// Reading USDC.balanceOf(0x0) would persist a plausible-but-wrong reserve
 		// (the burn address can hold USDC), so fail hard instead.
-		return nil, fmt.Errorf("psm3 pocket() returned the zero address")
+		return fail(fmt.Errorf("psm3 pocket() returned the zero address"))
 	}
 	usdsBalance, err := unpackUint256(&c.erc20ABI, "balanceOf", results[1])
 	if err != nil {
-		return nil, fmt.Errorf("usds balance: %w", err)
+		return fail(fmt.Errorf("usds balance: %w", err))
 	}
 	susdsBalance, err := unpackUint256(&c.erc20ABI, "balanceOf", results[2])
 	if err != nil {
-		return nil, fmt.Errorf("susds balance: %w", err)
+		return fail(fmt.Errorf("susds balance: %w", err))
 	}
 	totalAssets, err := unpackUint256(&c.psm3ABI, "totalAssets", results[3])
 	if err != nil {
-		return nil, err
+		return fail(err)
 	}
 	conversionRate, err := unpackUint256(&c.rateABI, "getConversionRate", results[4])
 	if err != nil {
-		return nil, err
+		return fail(err)
 	}
-
-	usdcBalance, err := c.readUSDCAtPocket(ctx, pocket, blockHash)
+	almShares, err := unpackUint256(&c.psm3ABI, "shares", results[5])
 	if err != nil {
-		return nil, err
+		return fail(err)
+	}
+	totalShares, err := unpackUint256(&c.psm3ABI, "totalShares", results[6])
+	if err != nil {
+		return fail(err)
 	}
 
 	return &entity.PSM3State{
 		USDSBalance:    usdsBalance,
 		SUSDSBalance:   susdsBalance,
-		USDCBalance:    usdcBalance,
 		TotalAssets:    totalAssets,
 		ConversionRate: conversionRate,
-	}, nil
+		ALMShares:      almShares,
+		TotalShares:    totalShares,
+	}, pocket, nil
 }
 
-// readUSDCAtPocket reads USDC.balanceOf(pocket) pinned to blockHash.
-func (c *PSM3Caller) readUSDCAtPocket(ctx context.Context, pocket common.Address, blockHash common.Hash) (*big.Int, error) {
-	data, err := c.erc20ABI.Pack("balanceOf", pocket)
+// readPocketBalanceAndShareValue runs round 2: USDC.balanceOf(pocket) and the
+// par value of almShares, both of which depend on a round-1 result.
+func (c *PSM3Caller) readPocketBalanceAndShareValue(
+	ctx context.Context,
+	pocket common.Address,
+	almShares *big.Int,
+	blockHash common.Hash,
+) (*big.Int, *big.Int, error) {
+	balanceData, err := c.erc20ABI.Pack("balanceOf", pocket)
 	if err != nil {
-		return nil, fmt.Errorf("pack balanceOf(pocket): %w", err)
+		return nil, nil, fmt.Errorf("pack balanceOf(pocket): %w", err)
+	}
+	assetValueData, err := c.psm3ABI.Pack("convertToAssetValue", almShares)
+	if err != nil {
+		return nil, nil, fmt.Errorf("pack convertToAssetValue(almShares): %w", err)
 	}
 
-	results, err := c.executeAtHash(ctx, []outbound.Call{{Target: c.cfg.USDC, CallData: data}}, blockHash)
+	calls := []outbound.Call{
+		{Target: c.cfg.USDC, CallData: balanceData},
+		{Target: c.cfg.PSM3, CallData: assetValueData},
+	}
+	results, err := c.executeAtHash(ctx, calls, blockHash)
 	if err != nil {
-		return nil, fmt.Errorf("multicall usdc balance at pocket %s: %w", pocket.Hex(), err)
+		return nil, nil, fmt.Errorf("multicall usdc balance at pocket %s and alm share value: %w", pocket.Hex(), err)
 	}
 
 	balance, err := unpackUint256(&c.erc20ABI, "balanceOf", results[0])
 	if err != nil {
-		return nil, fmt.Errorf("usdc balance at pocket %s: %w", pocket.Hex(), err)
+		return nil, nil, fmt.Errorf("usdc balance at pocket %s: %w", pocket.Hex(), err)
 	}
-	return balance, nil
+	assetValue, err := unpackUint256(&c.psm3ABI, "convertToAssetValue", results[1])
+	if err != nil {
+		return nil, nil, err
+	}
+	return balance, assetValue, nil
 }
 
 // execute runs a number-pinned multicall and verifies the result count. Callers

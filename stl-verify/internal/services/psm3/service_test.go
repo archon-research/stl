@@ -67,6 +67,9 @@ func newFakePSM3Caller() *fakePSM3Caller {
 			USDCBalance:    big.NewInt(3_000_000),
 			TotalAssets:    big.NewInt(6_000_000),
 			ConversionRate: big.NewInt(1_050_000),
+			ALMShares:      big.NewInt(5_900_000),
+			TotalShares:    big.NewInt(6_000_000),
+			ALMAssetValue:  big.NewInt(5_900_000),
 		},
 	}
 }

@@ -49,11 +49,16 @@ var (
 	usdcAddr         = common.HexToAddress("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913")
 	rateProviderAddr = common.HexToAddress("0x2722C8f8A5F880401Fa5b01eD548d657F5Cd6175")
 
+	almAddr = common.HexToAddress("0x2917956eFF0B5eaF030abDB4EF4296DF775009cA")
+
 	usdsBalance    = big.NewInt(1_000_000_000_000_000_000)
 	susdsBalance   = big.NewInt(2_000_000_000_000_000_000)
 	usdcBalance    = big.NewInt(3_000_000)
 	totalAssetsVal = big.NewInt(6_000_000_000_000_000_000)
 	conversionRate = new(big.Int).Exp(big.NewInt(10), big.NewInt(27), nil)
+	almShares      = big.NewInt(5_000_000_000_000_000_000)
+	totalSharesVal = big.NewInt(6_000_000_000_000_000_000)
+	almAssetValue  = new(big.Int).Div(new(big.Int).Mul(almShares, totalAssetsVal), totalSharesVal)
 )
 
 func addressWord(addr common.Address) []byte {
@@ -113,6 +118,27 @@ func psm3Dispatcher(t *testing.T, usdsMismatch bool) testutil.SubcallDispatcher 
 			return addressWord(usdcAddr), true
 		case selector(psm3ABI, "totalAssets"):
 			return uintWord(totalAssetsVal), true
+		case selector(psm3ABI, "shares"):
+			args, err := psm3ABI.Methods["shares"].Inputs.Unpack(callData[4:])
+			if err != nil {
+				t.Errorf("unpack shares calldata: %v", err)
+				return nil, false
+			}
+			if got := args[0].(common.Address); got != almAddr {
+				t.Errorf("shares arg = %s, want ALM proxy %s", got.Hex(), almAddr.Hex())
+			}
+			return uintWord(almShares), true
+		case selector(psm3ABI, "totalShares"):
+			return uintWord(totalSharesVal), true
+		case selector(psm3ABI, "convertToAssetValue"):
+			// Mirror the contract so a wrong numShares argument changes the result.
+			args, err := psm3ABI.Methods["convertToAssetValue"].Inputs.Unpack(callData[4:])
+			if err != nil {
+				t.Errorf("unpack convertToAssetValue calldata: %v", err)
+				return nil, false
+			}
+			numShares := args[0].(*big.Int)
+			return uintWord(new(big.Int).Div(new(big.Int).Mul(numShares, totalAssetsVal), totalSharesVal)), true
 		case selector(rateABI, "getConversionRate"):
 			return uintWord(conversionRate), true
 		case selector(erc20ABI, "balanceOf"):
@@ -344,14 +370,18 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	var (
 		addrBytes                              []byte
 		usds, susds, usdc, total, rate, source string
+		shares, allShares, shareValue          string
 		blockNumber                            int64
 		blockVer                               int
 	)
 	err := pool.QueryRow(ctx, `
 		SELECT address, usds_balance::text, susds_balance::text, usdc_balance::text,
-		       total_assets::text, conversion_rate::text, block_number, block_version, source
+		       total_assets::text, conversion_rate::text,
+		       alm_shares::text, total_shares::text, alm_asset_value::text,
+		       block_number, block_version, source
 		FROM psm3_reserves ORDER BY block_number LIMIT 1
-	`).Scan(&addrBytes, &usds, &susds, &usdc, &total, &rate, &blockNumber, &blockVer, &source)
+	`).Scan(&addrBytes, &usds, &susds, &usdc, &total, &rate,
+		&shares, &allShares, &shareValue, &blockNumber, &blockVer, &source)
 	if err != nil {
 		t.Fatalf("query snapshot: %v", err)
 	}
@@ -373,6 +403,15 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	}
 	if rate != conversionRate.String() {
 		t.Errorf("conversion_rate = %s, want %s", rate, conversionRate)
+	}
+	if shares != almShares.String() {
+		t.Errorf("alm_shares = %s, want %s", shares, almShares)
+	}
+	if allShares != totalSharesVal.String() {
+		t.Errorf("total_shares = %s, want %s", allShares, totalSharesVal)
+	}
+	if shareValue != almAssetValue.String() {
+		t.Errorf("alm_asset_value = %s, want %s", shareValue, almAssetValue)
 	}
 	if blockNumber != startBlock {
 		t.Errorf("block_number = %d, want %d", blockNumber, startBlock)

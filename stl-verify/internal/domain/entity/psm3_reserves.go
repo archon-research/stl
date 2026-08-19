@@ -15,6 +15,9 @@ type PSM3State struct {
 	USDCBalance    *big.Int // USDC.balanceOf(pocket), raw 1e6
 	TotalAssets    *big.Int // PSM3.totalAssets() par valuation, raw 1e18
 	ConversionRate *big.Int // rateProvider().getConversionRate(), raw 1e27
+	ALMShares      *big.Int // PSM3.shares(almProxy), raw 1e18 internal share units
+	TotalShares    *big.Int // PSM3.totalShares(), raw 1e18 internal share units
+	ALMAssetValue  *big.Int // PSM3.convertToAssetValue(shares(almProxy)) par valuation, raw 1e18
 }
 
 // PSM3Reserves is a single append-only psm3_reserves row.
@@ -45,6 +48,9 @@ func (s *PSM3Reserves) Validate() error {
 		{"usdc_balance", s.State.USDCBalance},
 		{"total_assets", s.State.TotalAssets},
 		{"conversion_rate", s.State.ConversionRate},
+		{"alm_shares", s.State.ALMShares},
+		{"total_shares", s.State.TotalShares},
+		{"alm_asset_value", s.State.ALMAssetValue},
 	}
 	for _, f := range fields {
 		if f.v == nil {

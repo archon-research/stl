@@ -46,9 +46,10 @@ func (r *PSM3ReservesRepository) SaveReserves(ctx context.Context, snap *entity.
 				chain_id, address,
 				usds_balance, susds_balance, usdc_balance,
 				total_assets, conversion_rate,
+				alm_shares, total_shares, alm_asset_value,
 				block_number, block_version, block_timestamp,
 				source, build_id
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 			ON CONFLICT (chain_id, block_number, block_version, processing_version, block_timestamp) DO NOTHING
 		`
 
@@ -60,6 +61,9 @@ func (r *PSM3ReservesRepository) SaveReserves(ctx context.Context, snap *entity.
 			snap.State.USDCBalance.String(),
 			snap.State.TotalAssets.String(),
 			snap.State.ConversionRate.String(),
+			snap.State.ALMShares.String(),
+			snap.State.TotalShares.String(),
+			snap.State.ALMAssetValue.String(),
 			snap.BlockNumber,
 			snap.BlockVersion,
 			snap.BlockTimestamp,
