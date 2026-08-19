@@ -8,5 +8,5 @@ import (
 
 // PrimeCapitalStackRepository persists prime capital stack snapshots.
 type PrimeCapitalStackRepository interface {
-	UpsertPrimeCapitalSnapshots(ctx context.Context, snapshots []entity.PrimeCapitalStackSnapshot) error
+	SavePrimeCapitalSnapshots(ctx context.Context, snapshots []entity.PrimeCapitalStackSnapshot) error
 }

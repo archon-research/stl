@@ -1,3 +1,14 @@
+// Package sky reads Sky's Star Agents Risk Capital & Requirements Monitor.
+//
+// Two routes are used per cycle: the list route enumerates the primes the
+// monitor tracks, and the per-prime detail route carries the figures. The list
+// is not redundant — the detail route answers an unknown star with a 500 that
+// is indistinguishable from a genuine fault, so the list is the only safe way
+// to tell "not covered" from "monitor is down".
+//
+// Upstream query parameters are not trustworthy: ?days_ago=, ?date= and
+// ?order= are accepted and silently ignored (verified by byte-identical
+// responses across values), so none are sent and no ordering is assumed.
 package sky
 
 import (
@@ -12,14 +23,14 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-const defaultPrimesURL = "https://info-sky.blockanalitica.com/star-monitoring/risk-capital/primes/"
+const defaultBaseURL = "https://info-sky.blockanalitica.com/star-monitoring/risk-capital"
 
 // Compile-time check that Client implements outbound.RiskCapitalProvider.
 var _ outbound.RiskCapitalProvider = (*Client)(nil)
 
 // ClientConfig holds configuration for the Sky risk-capital client.
 type ClientConfig struct {
-	PrimesURL      string
+	BaseURL        string
 	Timeout        time.Duration
 	MaxRetries     int
 	InitialBackoff time.Duration
@@ -28,9 +39,9 @@ type ClientConfig struct {
 	Logger         *slog.Logger
 }
 
-// Client fetches risk-capital snapshots from Sky's approved endpoint.
+// Client fetches risk-capital snapshots from Sky's Star monitor.
 type Client struct {
-	primesURL  string
+	baseURL    string
 	httpClient *httpclient.Client
 	logger     *slog.Logger
 }
@@ -40,8 +51,8 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
-	if cfg.PrimesURL == "" {
-		cfg.PrimesURL = defaultPrimesURL
+	if cfg.BaseURL == "" {
+		cfg.BaseURL = defaultBaseURL
 	}
 
 	httpCfg := httpclient.DefaultConfig()
@@ -63,45 +74,113 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 
 	logger := cfg.Logger.With("component", "sky-risk-capital-client")
 	return &Client{
-		primesURL:  cfg.PrimesURL,
+		baseURL:    strings.TrimRight(cfg.BaseURL, "/"),
 		httpClient: httpclient.NewClient(httpCfg, logger, nil),
 		logger:     logger,
 	}, nil
 }
 
-// FetchPrimeRows fetches prime-level risk-capital rows.
-func (c *Client) FetchPrimeRows(ctx context.Context) ([]outbound.RiskCapitalPrimeRow, error) {
+// FetchPrimeSnapshots returns a snapshot for every prime the monitor tracks.
+func (c *Client) FetchPrimeSnapshots(ctx context.Context) ([]outbound.RiskCapitalPrimeSnapshot, error) {
+	stars, err := c.trackedStars(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	snapshots := make([]outbound.RiskCapitalPrimeSnapshot, 0, len(stars))
+	for _, star := range stars {
+		snapshot, err := c.fetchPrimeDetail(ctx, star)
+		if err != nil {
+			return nil, err
+		}
+		snapshots = append(snapshots, snapshot)
+	}
+	return snapshots, nil
+}
+
+func (c *Client) trackedStars(ctx context.Context) ([]string, error) {
 	var payload primesResponse
-	if err := c.httpClient.DoRequest(ctx, httpclient.RequestConfig{URL: c.primesURL}, &payload); err != nil {
+	url := c.baseURL + "/primes/"
+	if err := c.httpClient.DoRequest(ctx, httpclient.RequestConfig{URL: url}, &payload); err != nil {
 		return nil, fmt.Errorf("fetching sky risk-capital primes: %w", err)
 	}
 
-	rows := make([]outbound.RiskCapitalPrimeRow, 0, len(payload.Data.Results))
-	for _, row := range payload.Data.Results {
-		primeName := strings.TrimSpace(row.Star)
-		if primeName == "" {
-			c.logger.Warn("skipping sky row with empty prime name")
-			continue
+	stars := make([]string, 0, len(payload.Data.Results))
+	for i, row := range payload.Data.Results {
+		star := strings.TrimSpace(row.Star)
+		if star == "" {
+			return nil, fmt.Errorf("sky risk-capital primes row %d has an empty star name", i)
 		}
+		stars = append(stars, star)
+	}
+	return stars, nil
+}
 
-		totalRC := strings.TrimSpace(row.TotalRC.String())
-		financialRRC := strings.TrimSpace(row.FinancialRRC.String())
-		exposure := strings.TrimSpace(row.Exposure.String())
-		if totalRC == "" || financialRRC == "" || exposure == "" {
-			c.logger.Warn("skipping sky row with missing numeric fields", "prime", primeName)
-			continue
-		}
-
-		rows = append(rows, outbound.RiskCapitalPrimeRow{
-			PrimeName:          primeName,
-			TotalRC:            totalRC,
-			FinancialRRC:       financialRRC,
-			Exposure:           exposure,
-			RiskToleranceRatio: strings.TrimSpace(row.RiskToleranceRatio.String()),
-		})
+func (c *Client) fetchPrimeDetail(ctx context.Context, star string) (outbound.RiskCapitalPrimeSnapshot, error) {
+	var payload primeDetailResponse
+	url := fmt.Sprintf("%s/primes/%s/", c.baseURL, star)
+	if err := c.httpClient.DoRequest(ctx, httpclient.RequestConfig{URL: url}, &payload); err != nil {
+		return outbound.RiskCapitalPrimeSnapshot{}, fmt.Errorf("fetching sky risk capital for prime %q: %w", star, err)
 	}
 
-	return rows, nil
+	detail := payload.Data
+	snapshot := outbound.RiskCapitalPrimeSnapshot{
+		Star:                       star,
+		Exposure:                   detail.TotalExposure.String(),
+		RequiredRiskCapital:        detail.TotalRRC.String(),
+		TotalRiskCapital:           detail.TotalRC.String(),
+		JuniorRiskCapital:          detail.TotalJRC.String(),
+		SeniorRiskCapital:          detail.TotalSRC.String(),
+		InternalJuniorRiskCapital:  detail.InternalJRC.String(),
+		ExternalJuniorRiskCapital:  detail.ExternalJRC.String(),
+		TokenizedJuniorRiskCapital: detail.TokenizedJRC.String(),
+		InternalSeniorRiskCapital:  detail.InternalSRC.String(),
+		ExternalSeniorRiskCapital:  detail.ExternalSRC.String(),
+		EncumbranceRatio:           optionalNumber(detail.EncumbranceRatio),
+		ExposureShare:              detail.TotalExposureShare.String(),
+		EPIUtilization:             detail.EPIUtilization.String(),
+		SPJUtilization:             detail.SPJUtilization.String(),
+	}
+
+	if err := requireAmounts(star, snapshot); err != nil {
+		return outbound.RiskCapitalPrimeSnapshot{}, err
+	}
+	return snapshot, nil
+}
+
+// requireAmounts rejects a snapshot missing any figure the monitor is expected
+// to report. Persisting a zero in place of an absent value would look like a
+// prime with no capital, so an incomplete payload fails the cycle instead.
+func requireAmounts(star string, s outbound.RiskCapitalPrimeSnapshot) error {
+	required := map[string]string{
+		"total_exposure":       s.Exposure,
+		"total_rrc":            s.RequiredRiskCapital,
+		"total_rc":             s.TotalRiskCapital,
+		"total_jrc":            s.JuniorRiskCapital,
+		"total_src":            s.SeniorRiskCapital,
+		"internal_jrc":         s.InternalJuniorRiskCapital,
+		"external_jrc":         s.ExternalJuniorRiskCapital,
+		"tokenized_jrc":        s.TokenizedJuniorRiskCapital,
+		"internal_src":         s.InternalSeniorRiskCapital,
+		"external_src":         s.ExternalSeniorRiskCapital,
+		"total_exposure_share": s.ExposureShare,
+		"epi_utilization":      s.EPIUtilization,
+		"spj_utilization":      s.SPJUtilization,
+	}
+	for field, value := range required {
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("sky risk capital for prime %q is missing field %q", star, field)
+		}
+	}
+	return nil
+}
+
+func optionalNumber(value json.Number) *string {
+	raw := strings.TrimSpace(value.String())
+	if raw == "" {
+		return nil
+	}
+	return &raw
 }
 
 type primesResponse struct {
@@ -111,9 +190,26 @@ type primesResponse struct {
 }
 
 type primeRow struct {
-	Star               string      `json:"star"`
-	Exposure           json.Number `json:"exposure"`
-	FinancialRRC       json.Number `json:"financial_rrc"`
+	Star string `json:"star"`
+}
+
+type primeDetailResponse struct {
+	Data primeDetail `json:"data"`
+}
+
+type primeDetail struct {
+	TotalExposure      json.Number `json:"total_exposure"`
+	TotalRRC           json.Number `json:"total_rrc"`
 	TotalRC            json.Number `json:"total_rc"`
-	RiskToleranceRatio json.Number `json:"risk_tolerance_ratio"`
+	TotalJRC           json.Number `json:"total_jrc"`
+	TotalSRC           json.Number `json:"total_src"`
+	InternalJRC        json.Number `json:"internal_jrc"`
+	ExternalJRC        json.Number `json:"external_jrc"`
+	TokenizedJRC       json.Number `json:"tokenized_jrc"`
+	InternalSRC        json.Number `json:"internal_src"`
+	ExternalSRC        json.Number `json:"external_src"`
+	EncumbranceRatio   json.Number `json:"encumbrance_ratio"`
+	TotalExposureShare json.Number `json:"total_exposure_share"`
+	EPIUtilization     json.Number `json:"epi_utilization"`
+	SPJUtilization     json.Number `json:"spj_utilization"`
 }

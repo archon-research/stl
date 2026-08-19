@@ -34,8 +34,12 @@ func NewPrimeCapitalStackRepository(pool *pgxpool.Pool, txm *TxManager, logger *
 	}
 }
 
-// UpsertPrimeCapitalSnapshots inserts or updates prime capital stack snapshots in one transaction.
-func (r *PrimeCapitalStackRepository) UpsertPrimeCapitalSnapshots(
+// SavePrimeCapitalSnapshots inserts a cycle's snapshots in one transaction.
+//
+// Insert-only: a row is immutable once written, and the BEFORE INSERT trigger
+// assigns processing_version, so a re-run under the same build_id reuses its
+// version and conflicts away rather than overwriting history.
+func (r *PrimeCapitalStackRepository) SavePrimeCapitalSnapshots(
 	ctx context.Context,
 	snapshots []entity.PrimeCapitalStackSnapshot,
 ) error {
@@ -47,26 +51,26 @@ func (r *PrimeCapitalStackRepository) UpsertPrimeCapitalSnapshots(
 		const q = `
 			INSERT INTO prime_capital_stack (
 				prime_id,
-				capital_buffer,
-				first_loss_capital,
-				timestamp,
+				synced_at,
+				exposure_usd,
+				required_risk_capital_usd,
+				total_risk_capital_usd,
+				junior_risk_capital_usd,
+				senior_risk_capital_usd,
+				internal_junior_risk_capital_usd,
+				external_junior_risk_capital_usd,
+				tokenized_junior_risk_capital_usd,
+				internal_senior_risk_capital_usd,
+				external_senior_risk_capital_usd,
+				encumbrance_ratio,
+				exposure_share,
+				epi_utilization,
+				spj_utilization,
 				source,
-				version,
-				benchmark_source,
-				reconciliation_status,
-				created_by,
-				updated_by
+				build_id
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-			ON CONFLICT (prime_id, timestamp) DO UPDATE SET
-				capital_buffer = EXCLUDED.capital_buffer,
-				first_loss_capital = EXCLUDED.first_loss_capital,
-				source = EXCLUDED.source,
-				version = EXCLUDED.version,
-				benchmark_source = EXCLUDED.benchmark_source,
-				reconciliation_status = EXCLUDED.reconciliation_status,
-				updated_by = EXCLUDED.updated_by,
-				updated_at = now()
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+			ON CONFLICT (prime_id, synced_at, processing_version) DO NOTHING
 		`
 
 		batch := &pgx.Batch{}
@@ -74,15 +78,23 @@ func (r *PrimeCapitalStackRepository) UpsertPrimeCapitalSnapshots(
 			batch.Queue(
 				q,
 				s.PrimeID,
-				s.CapitalBuffer,
-				s.FirstLossCapital,
-				s.Timestamp,
+				s.SyncedAt,
+				s.ExposureUSD,
+				s.RequiredRiskCapitalUSD,
+				s.TotalRiskCapitalUSD,
+				s.JuniorRiskCapitalUSD,
+				s.SeniorRiskCapitalUSD,
+				s.InternalJuniorRiskCapitalUSD,
+				s.ExternalJuniorRiskCapitalUSD,
+				s.TokenizedJuniorRiskCapitalUSD,
+				s.InternalSeniorRiskCapitalUSD,
+				s.ExternalSeniorRiskCapitalUSD,
+				s.EncumbranceRatio,
+				s.ExposureShare,
+				s.EPIUtilization,
+				s.SPJUtilization,
 				s.Source,
-				s.Version,
-				s.BenchmarkSource,
-				s.ReconciliationStatus,
-				s.CreatedBy,
-				s.UpdatedBy,
+				s.BuildID,
 			)
 		}
 
@@ -90,14 +102,14 @@ func (r *PrimeCapitalStackRepository) UpsertPrimeCapitalSnapshots(
 		for i, s := range snapshots {
 			if _, err := results.Exec(); err != nil {
 				_ = results.Close()
-				return fmt.Errorf("upsert capital stack snapshot %d (prime_id=%d): %w", i, s.PrimeID, err)
+				return fmt.Errorf("insert capital stack snapshot %d (prime_id=%d): %w", i, s.PrimeID, err)
 			}
 		}
 		if err := results.Close(); err != nil {
 			return fmt.Errorf("close batch: %w", err)
 		}
 
-		r.logger.Info("upserted prime capital stack snapshots", "count", len(snapshots))
+		r.logger.Info("saved prime capital stack snapshots", "count", len(snapshots))
 		return nil
 	})
 }

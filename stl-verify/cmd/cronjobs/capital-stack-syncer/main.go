@@ -9,8 +9,10 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sky"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
@@ -47,29 +49,30 @@ func main() {
 }
 
 func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runner, error) {
-	// Create repositories.
-	primeRepo := postgres.NewPrimeRepository(deps.Pool)
+	buildReg, err := buildregistry.New(ctx, deps.Pool)
+	if err != nil {
+		return nil, fmt.Errorf("registering build: %w", err)
+	}
+
 	txm, err := postgres.NewTxManager(deps.Pool, deps.Logger)
 	if err != nil {
 		return nil, fmt.Errorf("creating tx manager: %w", err)
 	}
-	capitalRepo := postgres.NewPrimeCapitalStackRepository(deps.Pool, txm, deps.Logger)
 
-	// Create Sky risk-capital provider.
-	skyURL := env.Get("SKY_RISK_CAPITAL_URL", "https://info-sky.blockanalitica.com/star-monitoring/risk-capital/primes/")
 	skyClient, err := sky.NewClient(sky.ClientConfig{
-		PrimesURL: skyURL,
-		Logger:    deps.Logger,
+		BaseURL: env.Get("SKY_RISK_CAPITAL_URL", "https://info-sky.blockanalitica.com/star-monitoring/risk-capital"),
+		Logger:  deps.Logger,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating sky client: %w", err)
 	}
 
-	// Create service and wrap as Runner.
 	service := capital_stack_syncer.NewService(
-		primeRepo,
-		capitalRepo,
+		postgres.NewPrimeRepository(deps.Pool),
+		postgres.NewPrimeCapitalStackRepository(deps.Pool, txm, deps.Logger),
 		skyClient,
+		int(buildReg.BuildID()),
+		time.Now,
 		deps.Logger,
 	)
 
