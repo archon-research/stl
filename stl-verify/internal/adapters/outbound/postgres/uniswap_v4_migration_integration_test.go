@@ -8,10 +8,12 @@ import (
 	"math/big"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
@@ -57,6 +59,15 @@ var uniswapV4Tables = []string{
 // versioned and append-only too, so all 7 carry a processing_version trigger.
 var uniswapV4VersionedTables = uniswapV4Tables
 
+// uniswapV4Hypertables excludes uniswap_v4_tick, which is append-on-change and
+// deliberately a plain table.
+var uniswapV4Hypertables = []string{
+	"uniswap_v4_pool_state",
+	"uniswap_v4_swap",
+	"uniswap_v4_liquidity_event",
+	"uniswap_v4_pool_event",
+}
+
 func TestUniswapV4MigrationCreatesTables(t *testing.T) {
 	ctx := context.Background()
 
@@ -78,13 +89,7 @@ func TestUniswapV4MigrationCreatesTables(t *testing.T) {
 func TestUniswapV4MigrationRegistersHypertables(t *testing.T) {
 	ctx := context.Background()
 
-	hypertables := []string{
-		"uniswap_v4_pool_state",
-		"uniswap_v4_swap",
-		"uniswap_v4_liquidity_event",
-		"uniswap_v4_pool_event",
-	}
-	for _, table := range hypertables {
+	for _, table := range uniswapV4Hypertables {
 		var exists bool
 		if err := uniswapV4TestPool.QueryRow(ctx, `
 			SELECT EXISTS (
@@ -293,7 +298,7 @@ func TestUniswapV4TablesAreAppendOnlyForReadWriteRole(t *testing.T) {
 	// reached these tables, so a false UPDATE/DELETE is the REVOKE, not a gap.
 	for _, table := range uniswapV4Tables {
 		for privilege, want := range map[string]bool{
-			"SELECT": true, "INSERT": true, "UPDATE": false, "DELETE": false,
+			"SELECT": true, "INSERT": true, "UPDATE": false, "DELETE": false, "TRUNCATE": false,
 		} {
 			var granted bool
 			if err := uniswapV4TestPool.QueryRow(ctx,
@@ -387,33 +392,19 @@ func TestUniswapV4ProcessingVersionTriggerAppendsPoolCorrection(t *testing.T) {
 	}
 }
 
-func TestUniswapV4ProcessingVersionTriggerFiresOnPoolState(t *testing.T) {
-	ctx := context.Background()
-	poolID := insertTestUniswapV4Pool(t, ctx, "\\x1100000000000000000000000000000000000000000000000000000000000001")
-
-	var pv int
-	err := uniswapV4TestPool.QueryRow(ctx, `
+// uniswapV4FactInsert is one versioned fact table's INSERT, parameterised on the
+// values its CHECK constraints govern. $1 is always the pool surrogate id and
+// the last placeholder is always build_id.
+const (
+	uniswapV4PoolStateInsertSQL = `
 		INSERT INTO uniswap_v4_pool_state
 		    (pool_id, block_number, block_version, block_timestamp,
 		     sqrt_price_x96, tick, protocol_fee, lp_fee, liquidity,
 		     fee_growth_global0_x128, fee_growth_global1_x128, build_id)
 		VALUES ($1, 22000000, 0, '2025-02-01T00:00:00Z'::timestamptz,
-		        79228162514264337593543950336, 0, 0, 3000, 1000000000000000000, 0, 0, 0)
-		RETURNING processing_version`, poolID).Scan(&pv)
-	if err != nil {
-		t.Fatalf("inserting test pool_state: %v", err)
-	}
-	if pv != 0 {
-		t.Errorf("processing_version = %d after first insert, want 0", pv)
-	}
-}
+		        $2::numeric, $3, $4, $5, 1000000000000000000, 0, 0, $6)`
 
-func TestUniswapV4ProcessingVersionTriggerFiresOnSwap(t *testing.T) {
-	ctx := context.Background()
-	poolID := insertTestUniswapV4Pool(t, ctx, "\\x1100000000000000000000000000000000000000000000000000000000000002")
-
-	var pv int
-	err := uniswapV4TestPool.QueryRow(ctx, `
+	uniswapV4SwapInsertSQL = `
 		INSERT INTO uniswap_v4_swap
 		    (pool_id, block_number, block_version, block_timestamp,
 		     tx_hash, log_index, sender, amount0, amount1,
@@ -422,79 +413,264 @@ func TestUniswapV4ProcessingVersionTriggerFiresOnSwap(t *testing.T) {
 		        '\xaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd'::bytea,
 		        0, '\x3333333333333333333333333333333333333333'::bytea,
 		        -1000000000000000000, 990000000000000000,
-		        79228162514264337593543950336, 1000000000000000000, 0, 3000, 0)
-		RETURNING processing_version`, poolID).Scan(&pv)
-	if err != nil {
-		t.Fatalf("inserting test swap: %v", err)
-	}
-	if pv != 0 {
-		t.Errorf("processing_version = %d after first insert, want 0", pv)
-	}
-}
+		        $2::numeric, 1000000000000000000, $3, $4, $5)`
 
-func TestUniswapV4ProcessingVersionTriggerFiresOnLiquidityEvent(t *testing.T) {
-	ctx := context.Background()
-	poolID := insertTestUniswapV4Pool(t, ctx, "\\x1100000000000000000000000000000000000000000000000000000000000003")
-
-	var pv int
-	err := uniswapV4TestPool.QueryRow(ctx, `
+	uniswapV4LiquidityEventInsertSQL = `
 		INSERT INTO uniswap_v4_liquidity_event
 		    (pool_id, block_number, block_version, block_timestamp,
 		     tx_hash, log_index, sender, tick_lower, tick_upper, liquidity_delta, salt, build_id)
 		VALUES ($1, 22000002, 0, '2025-02-01T00:02:00Z'::timestamptz,
 		        '\xbbccddeebbccddeebbccddeebbccddeebbccddeebbccddeebbccddeebbccddee'::bytea,
 		        0, '\x6666666666666666666666666666666666666666'::bytea,
-		        -120, 120, 1000000000000000000,
-		        '\x0000000000000000000000000000000000000000000000000000000000000000'::bytea, 0)
-		RETURNING processing_version`, poolID).Scan(&pv)
-	if err != nil {
-		t.Fatalf("inserting test liquidity event: %v", err)
-	}
-	if pv != 0 {
-		t.Errorf("processing_version = %d after first insert, want 0", pv)
-	}
-}
+		        $2, $3, 1000000000000000000,
+		        '\x0000000000000000000000000000000000000000000000000000000000000000'::bytea, $4)`
 
-func TestUniswapV4ProcessingVersionTriggerFiresOnTick(t *testing.T) {
-	ctx := context.Background()
-	poolID := insertTestUniswapV4Pool(t, ctx, "\\x1100000000000000000000000000000000000000000000000000000000000004")
-
-	var pv int
-	err := uniswapV4TestPool.QueryRow(ctx, `
+	uniswapV4TickInsertSQL = `
 		INSERT INTO uniswap_v4_tick
 		    (pool_id, tick, block_number, block_version, block_timestamp,
 		     liquidity_gross, liquidity_net, fee_growth_outside0_x128,
 		     fee_growth_outside1_x128, build_id)
-		VALUES ($1, -120, 22000003, 0, '2025-02-01T00:03:00Z'::timestamptz,
-		        1000000000000000000, 1000000000000000000, 0, 0, 0)
-		RETURNING processing_version`, poolID).Scan(&pv)
-	if err != nil {
-		t.Fatalf("inserting test tick: %v", err)
-	}
-	if pv != 0 {
-		t.Errorf("processing_version = %d after first insert, want 0", pv)
-	}
-}
+		VALUES ($1, $2, 22000003, 0, '2025-02-01T00:03:00Z'::timestamptz,
+		        1000000000000000000, 1000000000000000000, 0, 0, $3)`
 
-func TestUniswapV4ProcessingVersionTriggerFiresOnPoolEvent(t *testing.T) {
-	ctx := context.Background()
-	poolID := insertTestUniswapV4Pool(t, ctx, "\\x1100000000000000000000000000000000000000000000000000000000000005")
-
-	var pv int
-	err := uniswapV4TestPool.QueryRow(ctx, `
+	uniswapV4PoolEventInsertSQL = `
 		INSERT INTO uniswap_v4_pool_event
 		    (pool_id, block_number, block_version, block_timestamp,
 		     tx_hash, log_index, event_name, params, build_id)
 		VALUES ($1, 22000004, 0, '2025-02-01T00:04:00Z'::timestamptz,
 		        '\xccddeeffccddeeffccddeeffccddeeffccddeeffccddeeffccddeeffccddeeff'::bytea,
 		        0, 'initialize',
-		        '{"sqrtPriceX96": "79228162514264337593543950336", "tick": 0}'::jsonb, 0)
-		RETURNING processing_version`, poolID).Scan(&pv)
-	if err != nil {
-		t.Fatalf("inserting test pool event: %v", err)
+		        '{"sqrtPriceX96": "79228162514264337593543950336", "tick": 0}'::jsonb, $2)`
+)
+
+// uniswapV4ValidFactRow is one fact table plus in-range values for every column
+// its CHECK constraints govern, ordered as the INSERT expects them between
+// pool_id and build_id.
+type uniswapV4ValidFactRow struct {
+	table     string
+	insert    string
+	poolIDHex string
+	args      []any
+}
+
+// uniswapV4ValidFactRows covers all five versioned fact tables. Each gets its own
+// registry pool so the shared block/log_index values cannot collide.
+var uniswapV4ValidFactRows = []uniswapV4ValidFactRow{
+	{
+		table:     "uniswap_v4_pool_state",
+		insert:    uniswapV4PoolStateInsertSQL,
+		poolIDHex: "\\x1100000000000000000000000000000000000000000000000000000000000001",
+		args:      []any{"79228162514264337593543950336", 0, 0, 3000},
+	},
+	{
+		table:     "uniswap_v4_swap",
+		insert:    uniswapV4SwapInsertSQL,
+		poolIDHex: "\\x1100000000000000000000000000000000000000000000000000000000000002",
+		args:      []any{"79228162514264337593543950336", 0, 3000},
+	},
+	{
+		table:     "uniswap_v4_liquidity_event",
+		insert:    uniswapV4LiquidityEventInsertSQL,
+		poolIDHex: "\\x1100000000000000000000000000000000000000000000000000000000000003",
+		args:      []any{-120, 120},
+	},
+	{
+		table:     "uniswap_v4_tick",
+		insert:    uniswapV4TickInsertSQL,
+		poolIDHex: "\\x1100000000000000000000000000000000000000000000000000000000000004",
+		args:      []any{-120},
+	},
+	{
+		table:     "uniswap_v4_pool_event",
+		insert:    uniswapV4PoolEventInsertSQL,
+		poolIDHex: "\\x1100000000000000000000000000000000000000000000000000000000000005",
+		args:      nil,
+	},
+}
+
+// uniswapV4FactInsertArgs assembles the placeholder list: pool surrogate id,
+// then the constrained values, then build_id.
+func uniswapV4FactInsertArgs(poolID int64, values []any, buildID int) []any {
+	args := make([]any, 0, len(values)+2)
+	args = append(args, poolID)
+	args = append(args, values...)
+	return append(args, buildID)
+}
+
+// A correction is a re-insert under a new build_id, which the trigger turns into
+// an appended version; a re-insert under the same build_id must write nothing.
+func TestUniswapV4ProcessingVersionTriggerAppendsFactCorrection(t *testing.T) {
+	ctx := context.Background()
+
+	for _, tc := range uniswapV4ValidFactRows {
+		t.Run(tc.table, func(t *testing.T) {
+			poolID := insertTestUniswapV4Pool(t, ctx, tc.poolIDHex)
+			insert := tc.insert + `
+		ON CONFLICT DO NOTHING
+		RETURNING processing_version`
+
+			var pv int
+			if err := uniswapV4TestPool.QueryRow(ctx, insert,
+				uniswapV4FactInsertArgs(poolID, tc.args, 0)...).Scan(&pv); err != nil {
+				t.Fatalf("inserting under build 0: %v", err)
+			}
+			if pv != 0 {
+				t.Errorf("processing_version = %d for the first write under build 0, want 0", pv)
+			}
+
+			if err := uniswapV4TestPool.QueryRow(ctx, insert,
+				uniswapV4FactInsertArgs(poolID, tc.args, 1)...).Scan(&pv); err != nil {
+				t.Fatalf("appending a correction under build 1: %v", err)
+			}
+			if pv != 1 {
+				t.Errorf("processing_version = %d for the first write under build 1, want 1", pv)
+			}
+
+			tag, err := uniswapV4TestPool.Exec(ctx, tc.insert+" ON CONFLICT DO NOTHING",
+				uniswapV4FactInsertArgs(poolID, tc.args, 1)...)
+			if err != nil {
+				t.Fatalf("re-inserting under build 1: %v", err)
+			}
+			if tag.RowsAffected() != 0 {
+				t.Errorf("same-build re-insert wrote %d rows, want 0 (it must be an idempotent no-op, not a correction)", tag.RowsAffected())
+			}
+
+			var versions int
+			if err := uniswapV4TestPool.QueryRow(ctx,
+				"SELECT count(*) FROM "+tc.table+" WHERE pool_id = $1", poolID).Scan(&versions); err != nil {
+				t.Fatalf("counting %s versions: %v", tc.table, err)
+			}
+			if versions != 2 {
+				t.Errorf("%s rows for the corrected key = %d, want 2 (original + correction)", tc.table, versions)
+			}
+		})
 	}
-	if pv != 0 {
-		t.Errorf("processing_version = %d after first insert, want 0", pv)
+}
+
+// The CHECKs are the last line of defence for values the decoder derives from
+// int24/uint24 event fields, so each bound gets an explicit rejection case.
+func TestUniswapV4FactTableChecksRejectOutOfRangeValues(t *testing.T) {
+	ctx := context.Background()
+	poolID := insertTestUniswapV4Pool(t, ctx, "\\x1200000000000000000000000000000000000000000000000000000000000001")
+
+	cases := []struct {
+		name   string
+		insert string
+		args   []any
+	}{
+		{"pool_state_zero_sqrt_price", uniswapV4PoolStateInsertSQL, []any{"0", 0, 0, 3000}},
+		{"pool_state_tick_above_max", uniswapV4PoolStateInsertSQL, []any{"79228162514264337593543950336", 887273, 0, 3000}},
+		{"pool_state_tick_below_min", uniswapV4PoolStateInsertSQL, []any{"79228162514264337593543950336", -887273, 0, 3000}},
+		{"pool_state_protocol_fee_above_uint24", uniswapV4PoolStateInsertSQL, []any{"79228162514264337593543950336", 0, 16777216, 3000}},
+		{"pool_state_protocol_fee_zero_for_one_above_1000", uniswapV4PoolStateInsertSQL, []any{"79228162514264337593543950336", 0, 1001, 3000}},
+		{"pool_state_protocol_fee_one_for_zero_above_1000", uniswapV4PoolStateInsertSQL, []any{"79228162514264337593543950336", 0, 1001 << 12, 3000}},
+		{"pool_state_lp_fee_above_100_percent", uniswapV4PoolStateInsertSQL, []any{"79228162514264337593543950336", 0, 0, 1000001}},
+		{"swap_zero_sqrt_price", uniswapV4SwapInsertSQL, []any{"0", 0, 3000}},
+		{"swap_tick_above_max", uniswapV4SwapInsertSQL, []any{"79228162514264337593543950336", 887273, 3000}},
+		{"swap_fee_above_100_percent", uniswapV4SwapInsertSQL, []any{"79228162514264337593543950336", 0, 1000001}},
+		{"liquidity_event_tick_lower_below_min", uniswapV4LiquidityEventInsertSQL, []any{-887273, 120}},
+		{"liquidity_event_tick_upper_above_max", uniswapV4LiquidityEventInsertSQL, []any{-120, 887273}},
+		{"liquidity_event_tick_lower_equals_upper", uniswapV4LiquidityEventInsertSQL, []any{120, 120}},
+		{"liquidity_event_tick_lower_above_upper", uniswapV4LiquidityEventInsertSQL, []any{240, 120}},
+		{"tick_above_max", uniswapV4TickInsertSQL, []any{887273}},
+		{"tick_below_min", uniswapV4TickInsertSQL, []any{-887273}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := uniswapV4TestPool.Exec(ctx, tc.insert,
+				uniswapV4FactInsertArgs(poolID, tc.args, 0)...); err == nil {
+				t.Fatal("out-of-range row was accepted, want a CHECK violation")
+			}
+		})
+	}
+}
+
+// The bounds are inclusive on both ends, so a legal extreme must still insert.
+func TestUniswapV4FactTableChecksAcceptBoundaryValues(t *testing.T) {
+	ctx := context.Background()
+
+	cases := []struct {
+		name      string
+		insert    string
+		poolIDHex string
+		args      []any
+	}{
+		{
+			"pool_state_min_tick_max_packed_protocol_fee",
+			uniswapV4PoolStateInsertSQL,
+			"\\x1300000000000000000000000000000000000000000000000000000000000001",
+			[]any{"1", -887272, (1000 << 12) | 1000, 1000000},
+		},
+		{
+			"swap_max_tick_max_fee",
+			uniswapV4SwapInsertSQL,
+			"\\x1300000000000000000000000000000000000000000000000000000000000002",
+			[]any{"1", 887272, 1000000},
+		},
+		{
+			"liquidity_event_full_tick_range",
+			uniswapV4LiquidityEventInsertSQL,
+			"\\x1300000000000000000000000000000000000000000000000000000000000003",
+			[]any{-887272, 887272},
+		},
+		{
+			"tick_max",
+			uniswapV4TickInsertSQL,
+			"\\x1300000000000000000000000000000000000000000000000000000000000004",
+			[]any{887272},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			poolID := insertTestUniswapV4Pool(t, ctx, tc.poolIDHex)
+			if _, err := uniswapV4TestPool.Exec(ctx, tc.insert,
+				uniswapV4FactInsertArgs(poolID, tc.args, 0)...); err != nil {
+				t.Fatalf("boundary row was rejected: %v", err)
+			}
+		})
+	}
+}
+
+// 8388608 (0x800000) is the dynamic-LP-fee sentinel, the one value above the
+// 100% cap a PoolKey may legally carry.
+func TestUniswapV4PoolFeeCheckAllowsOnlyRatesAndTheDynamicSentinel(t *testing.T) {
+	ctx := context.Background()
+	seedUniswapV4PoolManager(t, ctx)
+	wstETH := seedUniswapV4Token(t, ctx, "\\x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0", "wstETH", 18)
+	usdc := seedUniswapV4Token(t, ctx, "\\xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", "USDC", 6)
+
+	cases := []struct {
+		name       string
+		poolIDHex  string
+		fee        int
+		wantAccept bool
+	}{
+		{"static_max_fee", "\\x1400000000000000000000000000000000000000000000000000000000000001", 1000000, true},
+		{"dynamic_fee_sentinel", "\\x1400000000000000000000000000000000000000000000000000000000000002", 8388608, true},
+		{"above_100_percent", "\\x1400000000000000000000000000000000000000000000000000000000000003", 1000001, false},
+		{"max_uint24", "\\x1400000000000000000000000000000000000000000000000000000000000004", 16777215, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := uniswapV4TestPool.Exec(ctx, `
+				INSERT INTO uniswap_v4_pool
+				    (chain_id, pool_id, currency0, currency1,
+				     currency0_token_id, currency1_token_id, fee, tick_spacing, hooks, deploy_block)
+				VALUES (1, $1::bytea,
+				        '\x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0'::bytea,
+				        '\xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'::bytea,
+				        $2, $3, $4, 60, '\x0000000000000000000000000000000000000000'::bytea, 22000000)`,
+				tc.poolIDHex, wstETH, usdc, tc.fee)
+			if tc.wantAccept && err != nil {
+				t.Fatalf("fee %d was rejected: %v", tc.fee, err)
+			}
+			if !tc.wantAccept && err == nil {
+				t.Fatalf("fee %d was accepted, want a CHECK violation", tc.fee)
+			}
+		})
 	}
 }
 
@@ -695,19 +871,23 @@ func TestUniswapV4PoolManagerHasOneIdentityPerChain(t *testing.T) {
 	}
 }
 
-func TestUniswapV4PoolSeedHasNoNullDeployBlock(t *testing.T) {
+// LoadPools treats a NULL deploy_block as a registry defect, so the schema must
+// make one unrepresentable rather than leave it to the seed.
+func TestUniswapV4DeployBlockIsNotNullable(t *testing.T) {
 	ctx := context.Background()
-	seedUniswapV4Registry(t, ctx)
 
-	var nullCount int
-	if err := uniswapV4TestPool.QueryRow(ctx, `
-		SELECT count(*) FROM uniswap_v4_pool
-		WHERE chain_id = 1 AND pool_id = ANY($1::bytea[]) AND deploy_block IS NULL`,
-		uniswapV4SeededPoolIDs()).Scan(&nullCount); err != nil {
-		t.Fatalf("counting NULL deploy_block rows: %v", err)
-	}
-	if nullCount != 0 {
-		t.Errorf("uniswap_v4_pool rows with NULL deploy_block = %d, want 0", nullCount)
+	for _, table := range []string{"uniswap_v4_pool", "uniswap_v4_pool_manager"} {
+		var isNullable string
+		if err := uniswapV4TestPool.QueryRow(ctx, `
+			SELECT is_nullable
+			FROM information_schema.columns
+			WHERE table_schema = 'public' AND table_name = $1 AND column_name = 'deploy_block'`,
+			table).Scan(&isNullable); err != nil {
+			t.Fatalf("reading %s.deploy_block nullability: %v", table, err)
+		}
+		if isNullable != "NO" {
+			t.Errorf("%s.deploy_block is_nullable = %q, want %q", table, isNullable, "NO")
+		}
 	}
 }
 
@@ -803,7 +983,9 @@ func TestUniswapV4PoolSeedTokensResolveToTheirCurrency(t *testing.T) {
 	placeholder := decodeBytea(t, uniswapV4EthPlaceholderHex)
 	native := decodeBytea(t, uniswapV4NativeCurrencyHex)
 
+	var seen int
 	for rows.Next() {
+		seen++
 		var poolID, currency0, token0Addr, currency1, token1Addr []byte
 		var decimals0, decimals1 *int
 		if err := rows.Scan(&poolID, &currency0, &token0Addr, &decimals0, &currency1, &token1Addr, &decimals1); err != nil {
@@ -814,6 +996,9 @@ func TestUniswapV4PoolSeedTokensResolveToTheirCurrency(t *testing.T) {
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatalf("iterating pool currency mappings: %v", err)
+	}
+	if seen != len(uniswapV4ExpectedPools) {
+		t.Errorf("checked %d pool currency mappings, want %d", seen, len(uniswapV4ExpectedPools))
 	}
 }
 
@@ -927,13 +1112,19 @@ func uniswapV4SeededPoolIDs() []string {
 func seedUniswapV4PoolManager(t *testing.T, ctx context.Context) int64 {
 	t.Helper()
 
-	var protocolID int64
-	if err := uniswapV4TestPool.QueryRow(ctx, `
+	if _, err := uniswapV4TestPool.Exec(ctx, `
 		INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block, metadata)
 		VALUES (1, $1::bytea, 'UniswapV4', 'dex', $2, '{"role":"pool_manager"}'::jsonb)
-		ON CONFLICT (chain_id, address) DO UPDATE SET name = EXCLUDED.name
-		RETURNING id`, uniswapV4PoolManagerHex, uniswapV4DeployBlock).Scan(&protocolID); err != nil {
+		ON CONFLICT (chain_id, address) DO NOTHING`,
+		uniswapV4PoolManagerHex, uniswapV4DeployBlock); err != nil {
 		t.Fatalf("seeding UniswapV4 protocol row: %v", err)
+	}
+
+	var protocolID int64
+	if err := uniswapV4TestPool.QueryRow(ctx,
+		`SELECT id FROM protocol WHERE chain_id = 1 AND address = $1::bytea`,
+		uniswapV4PoolManagerHex).Scan(&protocolID); err != nil {
+		t.Fatalf("reading UniswapV4 protocol id: %v", err)
 	}
 
 	if _, err := uniswapV4TestPool.Exec(ctx, `
@@ -966,13 +1157,17 @@ func currentUniswapV4PoolManagerID(t *testing.T, ctx context.Context) int64 {
 func seedUniswapV4Token(t *testing.T, ctx context.Context, addrHex, symbol string, decimals int) int64 {
 	t.Helper()
 
-	var tokenID int64
-	if err := uniswapV4TestPool.QueryRow(ctx, `
+	if _, err := uniswapV4TestPool.Exec(ctx, `
 		INSERT INTO token (chain_id, address, symbol, decimals)
 		VALUES (1, $1::bytea, $2, $3)
-		ON CONFLICT (chain_id, address) DO UPDATE SET symbol = EXCLUDED.symbol, decimals = EXCLUDED.decimals
-		RETURNING id`, addrHex, symbol, decimals).Scan(&tokenID); err != nil {
+		ON CONFLICT (chain_id, address) DO NOTHING`, addrHex, symbol, decimals); err != nil {
 		t.Fatalf("seeding token %s: %v", symbol, err)
+	}
+
+	var tokenID int64
+	if err := uniswapV4TestPool.QueryRow(ctx,
+		`SELECT id FROM token WHERE chain_id = 1 AND address = $1::bytea`, addrHex).Scan(&tokenID); err != nil {
+		t.Fatalf("reading token %s id: %v", symbol, err)
 	}
 	return tokenID
 }
@@ -1009,4 +1204,235 @@ func insertTestUniswapV4Pool(t *testing.T, ctx context.Context, poolIDHex string
 		t.Fatalf("reading test uniswap_v4_pool id: %v", err)
 	}
 	return poolID
+}
+
+// uniswapV4ViewChainID keeps the pool-manager view test off chain 1, whose
+// single manager identity other tests in this package assert on.
+const uniswapV4ViewChainID = 475001
+
+func TestUniswapV4PoolManagerCurrentViewReturnsOnlyTheLatestVersion(t *testing.T) {
+	ctx := context.Background()
+
+	if _, err := uniswapV4TestPool.Exec(ctx,
+		`INSERT INTO chain (chain_id, name) VALUES ($1, 'uniswap_v4_view_test') ON CONFLICT (chain_id) DO NOTHING`,
+		uniswapV4ViewChainID); err != nil {
+		t.Fatalf("seeding view-test chain: %v", err)
+	}
+	if _, err := uniswapV4TestPool.Exec(ctx, `
+		INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block)
+		VALUES ($1, $2::bytea, 'UniswapV4', 'dex', $3)
+		ON CONFLICT (chain_id, address) DO NOTHING`,
+		uniswapV4ViewChainID, uniswapV4PoolManagerHex, uniswapV4DeployBlock); err != nil {
+		t.Fatalf("seeding view-test protocol: %v", err)
+	}
+
+	var protocolID int64
+	if err := uniswapV4TestPool.QueryRow(ctx,
+		`SELECT id FROM protocol WHERE chain_id = $1 AND address = $2::bytea`,
+		uniswapV4ViewChainID, uniswapV4PoolManagerHex).Scan(&protocolID); err != nil {
+		t.Fatalf("reading view-test protocol id: %v", err)
+	}
+
+	const correctedStateViewHex = "\\x1111111111111111111111111111111111111111"
+	insert := `
+		INSERT INTO uniswap_v4_pool_manager
+		    (chain_id, protocol_id, pool_manager_address, state_view_address, deploy_block, build_id)
+		VALUES ($1, $2, $3::bytea, $4::bytea, $5, $6)
+		ON CONFLICT (chain_id, processing_version) DO NOTHING`
+	for _, seed := range []struct {
+		stateViewHex string
+		buildID      int
+	}{
+		{uniswapV4StateViewHex, 0},
+		{correctedStateViewHex, 1},
+	} {
+		if _, err := uniswapV4TestPool.Exec(ctx, insert,
+			uniswapV4ViewChainID, protocolID, uniswapV4PoolManagerHex,
+			seed.stateViewHex, uniswapV4DeployBlock, seed.buildID); err != nil {
+			t.Fatalf("seeding pool manager version under build %d: %v", seed.buildID, err)
+		}
+	}
+
+	rows, err := uniswapV4TestPool.Query(ctx, `
+		SELECT processing_version, state_view_address
+		FROM uniswap_v4_pool_manager_current
+		WHERE chain_id = $1`, uniswapV4ViewChainID)
+	if err != nil {
+		t.Fatalf("reading uniswap_v4_pool_manager_current: %v", err)
+	}
+	defer rows.Close()
+
+	var seen int
+	for rows.Next() {
+		seen++
+		var pv int
+		var stateView []byte
+		if err := rows.Scan(&pv, &stateView); err != nil {
+			t.Fatalf("scanning uniswap_v4_pool_manager_current row: %v", err)
+		}
+		if pv != 1 {
+			t.Errorf("processing_version = %d, want 1 (the correction)", pv)
+		}
+		if want := decodeBytea(t, correctedStateViewHex); !bytes.Equal(stateView, want) {
+			t.Errorf("state_view_address = %x, want the corrected %x", stateView, want)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterating uniswap_v4_pool_manager_current: %v", err)
+	}
+	if seen != 1 {
+		t.Errorf("uniswap_v4_pool_manager_current rows for chain %d = %d, want 1", uniswapV4ViewChainID, seen)
+	}
+}
+
+func TestUniswapV4PoolCurrentViewReturnsOnlyTheLatestVersion(t *testing.T) {
+	ctx := context.Background()
+
+	const poolIDHex = "\\x1500000000000000000000000000000000000000000000000000000000000001"
+	insertTestUniswapV4Pool(t, ctx, poolIDHex)
+
+	wstETH := seedUniswapV4Token(t, ctx, "\\x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0", "wstETH", 18)
+	usdc := seedUniswapV4Token(t, ctx, "\\xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", "USDC", 6)
+
+	const correctedFee = 500
+	if _, err := uniswapV4TestPool.Exec(ctx, `
+		INSERT INTO uniswap_v4_pool
+		    (chain_id, pool_id, currency0, currency1,
+		     currency0_token_id, currency1_token_id, fee, tick_spacing, hooks, deploy_block, build_id)
+		VALUES (1, $1::bytea,
+		        '\x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0'::bytea,
+		        '\xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'::bytea,
+		        $2, $3, $4, 60, '\x0000000000000000000000000000000000000000'::bytea, 21743144, 1)
+		ON CONFLICT (chain_id, pool_id, processing_version) DO NOTHING`,
+		poolIDHex, wstETH, usdc, correctedFee); err != nil {
+		t.Fatalf("appending a corrected pool version: %v", err)
+	}
+
+	rows, err := uniswapV4TestPool.Query(ctx, `
+		SELECT processing_version, fee
+		FROM uniswap_v4_pool_current
+		WHERE chain_id = 1 AND pool_id = $1::bytea`, poolIDHex)
+	if err != nil {
+		t.Fatalf("reading uniswap_v4_pool_current: %v", err)
+	}
+	defer rows.Close()
+
+	var seen int
+	for rows.Next() {
+		seen++
+		var pv, fee int
+		if err := rows.Scan(&pv, &fee); err != nil {
+			t.Fatalf("scanning uniswap_v4_pool_current row: %v", err)
+		}
+		if pv != 1 {
+			t.Errorf("processing_version = %d, want 1 (the correction)", pv)
+		}
+		if fee != correctedFee {
+			t.Errorf("fee = %d, want the corrected %d", fee, correctedFee)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterating uniswap_v4_pool_current: %v", err)
+	}
+	if seen != 1 {
+		t.Errorf("uniswap_v4_pool_current rows for the corrected pool = %d, want 1", seen)
+	}
+}
+
+// A WITH (tsdb.hypertable, ...) declaration creates its own 1-day compression
+// policy, and add_compression_policy then returns -1 instead of widening it, so
+// the declared 2 days has to be asserted rather than assumed.
+func TestUniswapV4HypertablesCompressAfterTwoDays(t *testing.T) {
+	ctx := context.Background()
+
+	for _, table := range uniswapV4Hypertables {
+		var policies int
+		var compressAfter string
+		if err := uniswapV4TestPool.QueryRow(ctx, `
+			SELECT count(*), COALESCE(min(config->>'compress_after'), '')
+			FROM timescaledb_information.jobs
+			WHERE proc_name = 'policy_compression'
+			  AND hypertable_schema = 'public'
+			  AND hypertable_name = $1`, table).Scan(&policies, &compressAfter); err != nil {
+			t.Fatalf("reading compression policy for %s: %v", table, err)
+		}
+		if policies != 1 {
+			t.Errorf("%s has %d compression policies, want exactly 1", table, policies)
+			continue
+		}
+
+		var isTwoDays bool
+		if err := uniswapV4TestPool.QueryRow(ctx,
+			`SELECT $1::interval = INTERVAL '2 days'`, compressAfter).Scan(&isTwoDays); err != nil {
+			t.Fatalf("comparing compress_after for %s: %v", table, err)
+		}
+		if !isTwoDays {
+			t.Errorf("%s compress_after = %q, want 2 days", table, compressAfter)
+		}
+	}
+}
+
+func TestUniswapV4CreatedAtIsUTCWallClock(t *testing.T) {
+	ctx := context.Background()
+
+	for _, table := range []string{"uniswap_v4_pool_manager", "uniswap_v4_pool"} {
+		var dataType, columnDefault string
+		if err := uniswapV4TestPool.QueryRow(ctx, `
+			SELECT data_type, column_default
+			FROM information_schema.columns
+			WHERE table_schema = 'public' AND table_name = $1 AND column_name = 'created_at'`,
+			table).Scan(&dataType, &columnDefault); err != nil {
+			t.Fatalf("reading %s.created_at definition: %v", table, err)
+		}
+		if want := "timestamp without time zone"; dataType != want {
+			t.Errorf("%s.created_at data_type = %q, want %q", table, dataType, want)
+		}
+		if want := "(now() AT TIME ZONE 'utc'::text)"; columnDefault != want {
+			t.Errorf("%s.created_at column_default = %q, want %q", table, columnDefault, want)
+		}
+	}
+}
+
+// The default must be UTC wall-clock, not the writer's local wall-clock, so a
+// worker running under a non-UTC session TimeZone still stamps comparable rows.
+func TestUniswapV4CreatedAtIgnoresSessionTimeZone(t *testing.T) {
+	ctx := context.Background()
+
+	const poolIDHex = "\\x1600000000000000000000000000000000000000000000000000000000000001"
+	seedUniswapV4PoolManager(t, ctx)
+	wstETH := seedUniswapV4Token(t, ctx, "\\x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0", "wstETH", 18)
+	usdc := seedUniswapV4Token(t, ctx, "\\xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", "USDC", 6)
+
+	conn, err := pgx.Connect(ctx, sharedDSN)
+	if err != nil {
+		t.Fatalf("opening a dedicated connection: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	if _, err := conn.Exec(ctx, `SET TIME ZONE 'America/New_York'`); err != nil {
+		t.Fatalf("setting the session TimeZone: %v", err)
+	}
+
+	var wantUTC time.Time
+	if err := uniswapV4TestPool.QueryRow(ctx, `SELECT now() AT TIME ZONE 'utc'`).Scan(&wantUTC); err != nil {
+		t.Fatalf("reading UTC now: %v", err)
+	}
+
+	var createdAt time.Time
+	if err := conn.QueryRow(ctx, `
+		INSERT INTO uniswap_v4_pool
+		    (chain_id, pool_id, currency0, currency1,
+		     currency0_token_id, currency1_token_id, fee, tick_spacing, hooks, deploy_block)
+		VALUES (1, $1::bytea,
+		        '\x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0'::bytea,
+		        '\xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'::bytea,
+		        $2, $3, 3000, 60, '\x0000000000000000000000000000000000000000'::bytea, 21743144)
+		RETURNING created_at`, poolIDHex, wstETH, usdc).Scan(&createdAt); err != nil {
+		t.Fatalf("inserting under a non-UTC session TimeZone: %v", err)
+	}
+
+	if drift := createdAt.Sub(wantUTC); drift < -10*time.Second || drift > 10*time.Second {
+		t.Errorf("created_at = %s, want within 10s of UTC now %s (drift %s); the default follows the session TimeZone",
+			createdAt, wantUTC, drift)
+	}
 }

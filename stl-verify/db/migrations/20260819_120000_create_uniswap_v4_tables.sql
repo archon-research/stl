@@ -29,8 +29,13 @@
 --   Scale:  sqrt_price_x96 is Q64.96 fixed point:
 --           price(currency1/currency0) = (sqrtPriceX96/2^96)^2, then adjust by
 --           10^(dec0-dec1). fee_growth_*_x128 columns are Q128.128 fixed point.
---           fee / lp_fee / protocol_fee are hundredths of a bip (1e6 = 100%,
---           3000 = 0.30%). tick is a plain integer where price = 1.0001^tick.
+--           fee / lp_fee are hundredths of a bip (1e6 = 100%, 3000 = 0.30%);
+--           uniswap_v4_pool.fee additionally uses 8388608 (0x800000) as the
+--           dynamic-LP-fee sentinel rather than as a rate. protocol_fee is a
+--           PACKED uint24, not a single rate: low 12 bits = the zeroForOne fee,
+--           high 12 bits = the oneForZero fee, each in hundredths of a bip and
+--           each capped at 1000. tick is a plain integer where
+--           price = 1.0001^tick.
 --           liquidity / liquidity_gross / liquidity_net are raw on-chain L
 --           (sqrt(xy) scaled by the pool's currency decimals; not comparable
 --           across pools with different decimals). amount0/amount1 are raw
@@ -38,12 +43,6 @@
 --           (negative = paid into the PoolManager, positive = received) -- the
 --           INVERSE of uniswap_v3_swap, which signs from the pool's side.
 
--- ============================================================================
--- uniswap_v4_pool_manager: the singleton PoolManager per chain, plus the
--- StateView lens the indexer reads pool state through. Append-only and
--- versioned: the current row for a chain is the one with the highest
--- processing_version.
--- ============================================================================
 CREATE TABLE IF NOT EXISTS uniswap_v4_pool_manager
 (
     id                   BIGSERIAL PRIMARY KEY,
@@ -52,7 +51,7 @@ CREATE TABLE IF NOT EXISTS uniswap_v4_pool_manager
     pool_manager_address BYTEA       NOT NULL CHECK (octet_length(pool_manager_address) = 20),
     state_view_address   BYTEA       NOT NULL CHECK (octet_length(state_view_address) = 20),
     deploy_block         BIGINT      NOT NULL,
-    created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_at           TIMESTAMP   NOT NULL DEFAULT (now() AT TIME ZONE 'utc'),
     processing_version   INT         NOT NULL DEFAULT 0,
     build_id             INT         NOT NULL DEFAULT 0,
     UNIQUE (chain_id, processing_version)
@@ -112,21 +111,14 @@ COMMENT ON COLUMN uniswap_v4_pool_manager.pool_manager_address IS
 COMMENT ON COLUMN uniswap_v4_pool_manager.state_view_address IS
   'On-chain StateView contract address, 20 bytes. Read-only lens over PoolManager''s transient/packed storage: getSlot0, getLiquidity, getFeeGrowthGlobals, getTickInfo, getTickBitmap. Deployed after the PoolManager, so its own deploy height is later than deploy_block.';
 COMMENT ON COLUMN uniswap_v4_pool_manager.deploy_block IS
-  'Configuration (load-bearing). Block at which the PoolManager was deployed. Lower bound for every pool under it; no V4 state exists before this height.';
+  'Documentation only. Block at which the PoolManager was deployed, hence a lower bound for every pool under it; no V4 state exists before this height. The indexer never reads it: the deploy gate runs off uniswap_v4_pool.deploy_block, which is the load-bearing one.';
 COMMENT ON COLUMN uniswap_v4_pool_manager.created_at IS
-  'Audit. Row insertion timestamp (bookkeeping only; not an on-chain value).';
+  'Audit. Row insertion time, UTC wall-clock (timestamp without time zone, so it reads the same under any session TimeZone); bookkeeping only, not an on-chain value.';
 COMMENT ON COLUMN uniswap_v4_pool_manager.processing_version IS
   'Audit. Correction version (ADR-0002): 0 for the first write of a chain under a build_id, bumped only when a later build rewrites the same chain; prior versions are retained. Order by processing_version DESC for the current row.';
 COMMENT ON COLUMN uniswap_v4_pool_manager.build_id IS
   'Audit. ID of the build (code+config) that wrote this row; 0 for the migration seed. Never use it to pick the latest row.';
 
--- ============================================================================
--- uniswap_v4_pool: registry of indexed Uniswap V4 pools (one row per PoolKey
--- version). Append-only and versioned: the current row for a PoolKey is the one
--- with the highest processing_version. Migration-seeded and read-only at
--- runtime -- the indexer only LoadPools()s this table. Do not add an
--- UPDATE/DELETE path (or an ON CONFLICT DO UPDATE upsert).
--- ============================================================================
 CREATE TABLE IF NOT EXISTS uniswap_v4_pool
 (
     id                 BIGSERIAL PRIMARY KEY,
@@ -136,11 +128,11 @@ CREATE TABLE IF NOT EXISTS uniswap_v4_pool
     currency1          BYTEA       NOT NULL CHECK (octet_length(currency1) = 20),
     currency0_token_id BIGINT      NOT NULL REFERENCES token (id),
     currency1_token_id BIGINT      NOT NULL REFERENCES token (id),
-    fee                INT         NOT NULL CHECK (fee BETWEEN 0 AND 16777215),
+    fee                INT         NOT NULL CHECK (fee >= 0 AND (fee <= 1000000 OR fee = 8388608)),
     tick_spacing       INT         NOT NULL CHECK (tick_spacing BETWEEN 1 AND 32767),
     hooks              BYTEA       NOT NULL CHECK (octet_length(hooks) = 20),
     deploy_block       BIGINT      NOT NULL,
-    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_at         TIMESTAMP   NOT NULL DEFAULT (now() AT TIME ZONE 'utc'),
     processing_version INT         NOT NULL DEFAULT 0,
     build_id           INT         NOT NULL DEFAULT 0,
     UNIQUE (chain_id, pool_id, processing_version),
@@ -194,7 +186,7 @@ CREATE TRIGGER trigger_assign_processing_version
 EXECUTE FUNCTION assign_processing_version_uniswap_v4_pool();
 
 COMMENT ON TABLE uniswap_v4_pool IS
-  '[Dimension] Append-only, versioned registry of indexed Uniswap V4 pools, one row per PoolKey version; FK target for every uniswap_v4_* fact table. V4 pools have no contract of their own (the singleton PoolManager holds them all), so identity is the 32-byte PoolId, not an address. The current row for a PoolKey is the one with the highest processing_version; there is never an UPDATE. A later migration corrects a row by inserting a new version with a build_id different from the row it supersedes (seeds use 0): the build-aware trigger reuses the existing processing_version for an identical build_id, so a same-build re-insert is an idempotent no-op, not a correction.';
+  '[Dimension] Append-only, versioned registry of indexed Uniswap V4 pools, one row per PoolKey version; FK target for every uniswap_v4_* fact table. V4 pools have no contract of their own (the singleton PoolManager holds them all), so identity is the 32-byte PoolId, not an address. The current row for a PoolKey is the one with the highest processing_version; there is never an UPDATE. A later migration corrects a row by inserting a new version with a build_id different from the row it supersedes (seeds use 0): the build-aware trigger reuses the existing processing_version for an identical build_id, so a same-build re-insert is an idempotent no-op, not a correction. To aggregate a pool''s history across registry corrections, join uniswap_v4_pool and group by (chain_id, pool_id) -- never by uniswap_v4_pool.id, which changes on every correction.';
 COMMENT ON COLUMN uniswap_v4_pool.id IS
   'PK. Surrogate ID of this pool VERSION; FK target for all uniswap_v4_* fact tables (whose pool_id column is this surrogate, NOT the 32-byte on-chain PoolId below). A corrected registry row is a NEW version with a NEW id, so every fact row keeps pointing at the exact registry version that was in force when it was written.';
 COMMENT ON COLUMN uniswap_v4_pool.chain_id IS
@@ -214,31 +206,28 @@ COMMENT ON COLUMN uniswap_v4_pool.fee IS
 COMMENT ON COLUMN uniswap_v4_pool.tick_spacing IS
   'PoolKey.tickSpacing: minimum tick granularity for this pool (1..32767); ticks usable by positions must be a multiple of this value. Chosen freely per pool in V4, not derived from the fee tier as in V3.';
 COMMENT ON COLUMN uniswap_v4_pool.hooks IS
-  'PoolKey.hooks, 20 bytes: the hook contract attached to this pool, or the zero address when the pool has no hooks. The hook''s PERMISSION FLAGS are encoded in the low 14 bits of the address itself (beforeSwap, afterSwap, dynamic-fee, delta-returning, ...), so the address doubles as the capability set.';
+  'PoolKey.hooks, 20 bytes: the hook contract attached to this pool, or the zero address when the pool has no hooks. The hook''s PERMISSION FLAGS are encoded in the low 14 bits of the address itself (beforeSwap, afterSwap, delta-returning, ...), so the address doubles as the capability set. A dynamic fee is not among them: it is signalled by PoolKey.fee = 8388608 (0x800000).';
 COMMENT ON COLUMN uniswap_v4_pool.deploy_block IS
   'Configuration (load-bearing). Block at which the pool was created (its Initialize event; a V4 pool has no contract deployment of its own), used to gate snapshot reads. REQUIRED: LoadPools rejects a NULL deploy_block, since a NULL defeats the reorg deploy-gate. Must be a lower bound of the true initialize block (<= actual height): DueSet hard-errors ("registry bug") when a touched pool reports deploy_block greater than the processed block, and skips sweep scheduling before this height.';
 COMMENT ON COLUMN uniswap_v4_pool.created_at IS
-  'Audit. Row insertion timestamp (bookkeeping only; not an on-chain value).';
+  'Audit. Row insertion time, UTC wall-clock (timestamp without time zone, so it reads the same under any session TimeZone); bookkeeping only, not an on-chain value.';
 COMMENT ON COLUMN uniswap_v4_pool.processing_version IS
   'Audit. Correction version (ADR-0002): 0 for the first write of a (chain_id, pool_id) under a build_id, bumped only when a later build rewrites the same key; prior versions are retained. Order by processing_version DESC for the current row.';
 COMMENT ON COLUMN uniswap_v4_pool.build_id IS
   'Audit. ID of the build (code+config) that wrote this row; 0 for the migration seed. Never use it to pick the latest row.';
 
--- ============================================================================
--- uniswap_v4_pool_state: per-touched-block snapshot of slot0 / liquidity /
--- fee-growth read through StateView.
--- Hypertable partitioned on block_timestamp (1-day chunks), same as V3.
--- ============================================================================
 CREATE TABLE IF NOT EXISTS uniswap_v4_pool_state
 (
     pool_id                 BIGINT      NOT NULL REFERENCES uniswap_v4_pool (id),
     block_number            BIGINT      NOT NULL,
     block_version           INT         NOT NULL DEFAULT 0,
     block_timestamp         TIMESTAMPTZ NOT NULL,
-    sqrt_price_x96          NUMERIC     NOT NULL,
-    tick                    INT         NOT NULL,
-    protocol_fee            INT         NOT NULL,
-    lp_fee                  INT         NOT NULL,
+    sqrt_price_x96          NUMERIC     NOT NULL CHECK (sqrt_price_x96 > 0),
+    tick                    INT         NOT NULL CHECK (tick BETWEEN -887272 AND 887272),
+    protocol_fee            INT         NOT NULL CHECK (protocol_fee BETWEEN 0 AND 16777215
+                                                    AND (protocol_fee & 4095) <= 1000
+                                                    AND (protocol_fee >> 12) <= 1000),
+    lp_fee                  INT         NOT NULL CHECK (lp_fee BETWEEN 0 AND 1000000),
     liquidity               NUMERIC     NOT NULL,
     fee_growth_global0_x128 NUMERIC     NOT NULL,
     fee_growth_global1_x128 NUMERIC     NOT NULL,
@@ -250,7 +239,11 @@ CREATE TABLE IF NOT EXISTS uniswap_v4_pool_state
 ) WITH (
     tsdb.hypertable,
     tsdb.partition_column = 'block_timestamp',
-    tsdb.chunk_interval = '1 day'
+    tsdb.chunk_interval = '1 day',
+    -- Declaring the columnstore off here (every V4 hypertable does) is what makes
+    -- add_compression_policy below effective: tsdb.hypertable otherwise creates a
+    -- 1-day policy up front, and add_compression_policy then returns -1 and keeps it.
+    tsdb.columnstore = false
 );
 
 ALTER TABLE uniswap_v4_pool_state SET (
@@ -314,7 +307,7 @@ EXECUTE FUNCTION assign_processing_version_uniswap_v4_pool_state();
 COMMENT ON TABLE uniswap_v4_pool_state IS
   '[Hypertable] Per-touched-block snapshot of a pool''s slot0 / liquidity / fee-growth state read through StateView, taken only on blocks that touch the pool (V4 state is piecewise-constant; no periodic heartbeat). No balance columns: the singleton PoolManager holds every pool''s currencies in one pot, so a per-pool ERC-20 balance does not exist. No TWAP columns: V4 core has no oracle (a hook may provide one). Partitioned on block_timestamp (1-day chunks); append-only via the processing_version trigger.';
 COMMENT ON COLUMN uniswap_v4_pool_state.pool_id IS
-  'PK, FK->uniswap_v4_pool.id. Surrogate pool ID the snapshot is for (not the 32-byte on-chain PoolId).';
+  'PK, FK->uniswap_v4_pool.id. Surrogate pool ID the snapshot is for (not the 32-byte on-chain PoolId). To aggregate a pool''s history across registry corrections, join uniswap_v4_pool and group by (chain_id, pool_id) -- never by uniswap_v4_pool.id, which changes on every correction.';
 COMMENT ON COLUMN uniswap_v4_pool_state.block_number IS
   'PK. Block height at which the snapshot was read (via multicall pinned to this block''s hash).';
 COMMENT ON COLUMN uniswap_v4_pool_state.block_version IS
@@ -340,10 +333,6 @@ COMMENT ON COLUMN uniswap_v4_pool_state.processing_version IS
 COMMENT ON COLUMN uniswap_v4_pool_state.build_id IS
   'Audit. ID of the indexer build (code+config) that wrote this row.';
 
--- ============================================================================
--- uniswap_v4_swap: on-chain PoolManager Swap events.
--- Hypertable partitioned on block_timestamp (1-day chunks), same as V3.
--- ============================================================================
 CREATE TABLE IF NOT EXISTS uniswap_v4_swap
 (
     pool_id            BIGINT      NOT NULL REFERENCES uniswap_v4_pool (id),
@@ -355,17 +344,18 @@ CREATE TABLE IF NOT EXISTS uniswap_v4_swap
     sender             BYTEA       NOT NULL,
     amount0            NUMERIC     NOT NULL,
     amount1            NUMERIC     NOT NULL,
-    sqrt_price_x96     NUMERIC     NOT NULL,
+    sqrt_price_x96     NUMERIC     NOT NULL CHECK (sqrt_price_x96 > 0),
     liquidity          NUMERIC     NOT NULL,
-    tick               INT         NOT NULL,
-    fee                INT         NOT NULL,
+    tick               INT         NOT NULL CHECK (tick BETWEEN -887272 AND 887272),
+    fee                INT         NOT NULL CHECK (fee BETWEEN 0 AND 1000000),
     processing_version INT         NOT NULL DEFAULT 0,
     build_id           INT         NOT NULL DEFAULT 0,
     PRIMARY KEY (pool_id, block_timestamp, block_number, block_version, log_index, processing_version)
 ) WITH (
     tsdb.hypertable,
     tsdb.partition_column = 'block_timestamp',
-    tsdb.chunk_interval = '1 day'
+    tsdb.chunk_interval = '1 day',
+    tsdb.columnstore = false
 );
 
 ALTER TABLE uniswap_v4_swap SET (
@@ -430,7 +420,7 @@ EXECUTE FUNCTION assign_processing_version_uniswap_v4_swap();
 COMMENT ON TABLE uniswap_v4_swap IS
   '[Hypertable] One row per on-chain PoolManager Swap event. Partitioned on block_timestamp (1-day chunks); append-only via the processing_version trigger.';
 COMMENT ON COLUMN uniswap_v4_swap.pool_id IS
-  'PK, FK->uniswap_v4_pool.id. Surrogate pool ID the swap belongs to (resolved from the event''s topics[1] PoolId).';
+  'PK, FK->uniswap_v4_pool.id. Surrogate pool ID the swap belongs to (resolved from the event''s topics[1] PoolId). To aggregate a pool''s history across registry corrections, join uniswap_v4_pool and group by (chain_id, pool_id) -- never by uniswap_v4_pool.id, which changes on every correction.';
 COMMENT ON COLUMN uniswap_v4_swap.block_number IS
   'PK. Block height at which the swap was emitted.';
 COMMENT ON COLUMN uniswap_v4_swap.block_version IS
@@ -454,16 +444,12 @@ COMMENT ON COLUMN uniswap_v4_swap.liquidity IS
 COMMENT ON COLUMN uniswap_v4_swap.tick IS
   'Pool tick immediately after the swap (plain integer; price = 1.0001^tick before decimal adjustment).';
 COMMENT ON COLUMN uniswap_v4_swap.fee IS
-  'Event field `fee`: the swap fee actually charged on this swap, hundredths of a bip (<= 1000000). It is the LP fee in force combined with the direction''s protocol fee when one is set (protocolFee + lpFee - protocolFee*lpFee/1e6), so it is >= uniswap_v4_pool_state.lp_fee and varies per swap on dynamic-fee and hook-overridden pools.';
+  'Event field `fee`: the swap fee actually charged on this swap, hundredths of a bip (<= 1000000). It is the LP fee in force combined with the direction''s protocol fee when one is set (protocolFee + lpFee - protocolFee*lpFee/1e6), so it is >= the LP fee in force for this swap. It is NOT comparable to uniswap_v4_pool_state.lp_fee: a hook can override the fee for a single swap, and a dynamic fee moves between snapshots.';
 COMMENT ON COLUMN uniswap_v4_swap.processing_version IS
   'PK, Audit. Per-build reprocessing counter (ADR-0002): 0 for the first write of a key under a build_id, bumped only when a later build rewrites the same key; prior versions are retained.';
 COMMENT ON COLUMN uniswap_v4_swap.build_id IS
   'Audit. ID of the indexer build (code+config) that wrote this row.';
 
--- ============================================================================
--- uniswap_v4_liquidity_event: PoolManager ModifyLiquidity events.
--- Hypertable partitioned on block_timestamp (1-day chunks), same as V3.
--- ============================================================================
 CREATE TABLE IF NOT EXISTS uniswap_v4_liquidity_event
 (
     pool_id            BIGINT      NOT NULL REFERENCES uniswap_v4_pool (id),
@@ -473,17 +459,19 @@ CREATE TABLE IF NOT EXISTS uniswap_v4_liquidity_event
     tx_hash            BYTEA       NOT NULL,
     log_index          INT         NOT NULL,
     sender             BYTEA       NOT NULL,
-    tick_lower         INT         NOT NULL,
-    tick_upper         INT         NOT NULL,
+    tick_lower         INT         NOT NULL CHECK (tick_lower BETWEEN -887272 AND 887272),
+    tick_upper         INT         NOT NULL CHECK (tick_upper BETWEEN -887272 AND 887272),
     liquidity_delta    NUMERIC     NOT NULL,
     salt               BYTEA       NOT NULL CHECK (octet_length(salt) = 32),
     processing_version INT         NOT NULL DEFAULT 0,
     build_id           INT         NOT NULL DEFAULT 0,
+    CHECK (tick_lower < tick_upper),
     PRIMARY KEY (pool_id, block_timestamp, block_number, block_version, log_index, processing_version)
 ) WITH (
     tsdb.hypertable,
     tsdb.partition_column = 'block_timestamp',
-    tsdb.chunk_interval = '1 day'
+    tsdb.chunk_interval = '1 day',
+    tsdb.columnstore = false
 );
 
 ALTER TABLE uniswap_v4_liquidity_event SET (
@@ -547,7 +535,7 @@ EXECUTE FUNCTION assign_processing_version_uniswap_v4_liquidity_event();
 COMMENT ON TABLE uniswap_v4_liquidity_event IS
   '[Hypertable] One row per PoolManager ModifyLiquidity event (V4''s single add/remove/poke primitive; there is no Mint/Burn/Collect split). Carries no token amounts: V4 settles through flash accounting, so the moved amounts are not in the event. Partitioned on block_timestamp (1-day chunks); append-only via the processing_version trigger.';
 COMMENT ON COLUMN uniswap_v4_liquidity_event.pool_id IS
-  'PK, FK->uniswap_v4_pool.id. Surrogate pool ID the event belongs to (resolved from the event''s topics[1] PoolId).';
+  'PK, FK->uniswap_v4_pool.id. Surrogate pool ID the event belongs to (resolved from the event''s topics[1] PoolId). To aggregate a pool''s history across registry corrections, join uniswap_v4_pool and group by (chain_id, pool_id) -- never by uniswap_v4_pool.id, which changes on every correction.';
 COMMENT ON COLUMN uniswap_v4_liquidity_event.block_number IS
   'PK. Block height at which the event was emitted.';
 COMMENT ON COLUMN uniswap_v4_liquidity_event.block_version IS
@@ -573,16 +561,10 @@ COMMENT ON COLUMN uniswap_v4_liquidity_event.processing_version IS
 COMMENT ON COLUMN uniswap_v4_liquidity_event.build_id IS
   'Audit. ID of the indexer build (code+config) that wrote this row.';
 
--- ============================================================================
--- uniswap_v4_tick: append-on-change authoritative per-tick state from
--- StateView.getTickInfo. Regular table (NOT a hypertable): ticks are written
--- on-change, not on every touched block. Same shape as uniswap_v3_tick minus
--- the `initialized` column, which V4's TickInfo struct does not have.
--- ============================================================================
 CREATE TABLE IF NOT EXISTS uniswap_v4_tick
 (
     pool_id                  BIGINT      NOT NULL REFERENCES uniswap_v4_pool (id),
-    tick                     INT         NOT NULL,
+    tick                     INT         NOT NULL CHECK (tick BETWEEN -887272 AND 887272),
     block_number             BIGINT      NOT NULL,
     block_version            INT         NOT NULL DEFAULT 0,
     block_timestamp          TIMESTAMPTZ NOT NULL,
@@ -640,9 +622,9 @@ CREATE TRIGGER trigger_assign_processing_version
 EXECUTE FUNCTION assign_processing_version_uniswap_v4_tick();
 
 COMMENT ON TABLE uniswap_v4_tick IS
-  '[Operational] Append-on-change authoritative per-tick state from StateView.getTickInfo(poolId, tick) reads. A new row is written only when a touched tick''s state changes (or on first-seen baseline enumeration for the pool); not a hypertable, since ticks are written on-change rather than on every touched block. There is no `initialized` column: V4''s TickInfo struct has no such field, so a tick is initialized exactly while liquidity_gross > 0, and an all-zero row records a tick that is uninitialized or has been cleared.';
+  '[Operational] Append-on-change authoritative per-tick state from StateView.getTickInfo(poolId, tick) reads. A new row is written only when a touched tick''s state changes (or on first-seen baseline enumeration for the pool); not a hypertable, since ticks are written on-change rather than on every touched block. There is no `initialized` column: V4''s TickInfo struct has no such field, so a tick is initialized exactly while liquidity_gross > 0, and an all-zero row records a tick that is uninitialized or has been cleared. fee_growth_outside0_x128/fee_growth_outside1_x128 are STALE after swap crossings -- see their own comments.';
 COMMENT ON COLUMN uniswap_v4_tick.pool_id IS
-  'PK, FK->uniswap_v4_pool.id. Surrogate pool ID the tick belongs to (not the 32-byte on-chain PoolId).';
+  'PK, FK->uniswap_v4_pool.id. Surrogate pool ID the tick belongs to (not the 32-byte on-chain PoolId). To aggregate a pool''s history across registry corrections, join uniswap_v4_pool and group by (chain_id, pool_id) -- never by uniswap_v4_pool.id, which changes on every correction.';
 COMMENT ON COLUMN uniswap_v4_tick.tick IS
   'PK. Tick index (plain integer, a multiple of the pool''s tick_spacing); price = 1.0001^tick before decimal adjustment.';
 COMMENT ON COLUMN uniswap_v4_tick.block_number IS
@@ -656,19 +638,14 @@ COMMENT ON COLUMN uniswap_v4_tick.liquidity_gross IS
 COMMENT ON COLUMN uniswap_v4_tick.liquidity_net IS
   'TickInfo.liquidityNet: signed raw liquidity L added (positive) or removed (negative) when the pool price crosses this tick left-to-right; sign flips for a right-to-left crossing.';
 COMMENT ON COLUMN uniswap_v4_tick.fee_growth_outside0_x128 IS
-  'TickInfo.feeGrowthOutside0X128: currency0 fee growth on the outside of this tick at the time it was last crossed, Q128.128 fixed point. Only meaningful relative to fee_growth_global0_x128, never absolute.';
+  'TickInfo.feeGrowthOutside0X128: currency0 fee growth on the outside of this tick at the time it was last crossed, Q128.128 fixed point. Only meaningful relative to fee_growth_global0_x128, never absolute. STALE after swap crossings: the row is refreshed only when a ModifyLiquidity touches this tick or on the pool''s first-seen baseline enumeration, never on a swap that crosses it, so do not derive feeGrowthInside from it without an independent read at the block of interest.';
 COMMENT ON COLUMN uniswap_v4_tick.fee_growth_outside1_x128 IS
-  'TickInfo.feeGrowthOutside1X128: currency1 fee growth on the outside of this tick at the time it was last crossed, Q128.128 fixed point.';
+  'TickInfo.feeGrowthOutside1X128: currency1 fee growth on the outside of this tick at the time it was last crossed, Q128.128 fixed point. STALE after swap crossings for the same reason as fee_growth_outside0_x128; do not derive feeGrowthInside from it without an independent read.';
 COMMENT ON COLUMN uniswap_v4_tick.processing_version IS
   'PK, Audit. Per-build reprocessing counter (ADR-0002): 0 for the first write of a key under a build_id, bumped only when a later build rewrites the same key; prior versions are retained.';
 COMMENT ON COLUMN uniswap_v4_tick.build_id IS
   'Audit. ID of the indexer build (code+config) that wrote this row.';
 
--- ============================================================================
--- uniswap_v4_pool_event: typed low-frequency pool-keyed events (Initialize,
--- Donate, ProtocolFeeUpdated).
--- Hypertable partitioned on block_timestamp (1-day chunks), same as V3.
--- ============================================================================
 CREATE TABLE IF NOT EXISTS uniswap_v4_pool_event
 (
     pool_id            BIGINT      NOT NULL REFERENCES uniswap_v4_pool (id),
@@ -687,7 +664,8 @@ CREATE TABLE IF NOT EXISTS uniswap_v4_pool_event
 ) WITH (
     tsdb.hypertable,
     tsdb.partition_column = 'block_timestamp',
-    tsdb.chunk_interval = '1 day'
+    tsdb.chunk_interval = '1 day',
+    tsdb.columnstore = false
 );
 
 ALTER TABLE uniswap_v4_pool_event SET (
@@ -751,7 +729,7 @@ EXECUTE FUNCTION assign_processing_version_uniswap_v4_pool_event();
 COMMENT ON TABLE uniswap_v4_pool_event IS
   '[Hypertable] Decoded low-frequency pool-keyed PoolManager events (Initialize, Donate, ProtocolFeeUpdated); typed counterpart to the raw protocol_event mirror. Singleton-wide governance events (OwnershipTransferred, ProtocolFeeControllerUpdated) are not pool-keyed and live only in protocol_event. Partitioned on block_timestamp (1-day chunks); append-only via the processing_version trigger.';
 COMMENT ON COLUMN uniswap_v4_pool_event.pool_id IS
-  'PK, FK->uniswap_v4_pool.id. Surrogate pool ID the event belongs to (resolved from the event''s topics[1] PoolId).';
+  'PK, FK->uniswap_v4_pool.id. Surrogate pool ID the event belongs to (resolved from the event''s topics[1] PoolId). To aggregate a pool''s history across registry corrections, join uniswap_v4_pool and group by (chain_id, pool_id) -- never by uniswap_v4_pool.id, which changes on every correction.';
 COMMENT ON COLUMN uniswap_v4_pool_event.block_number IS
   'PK. Block height at which the event was emitted.';
 COMMENT ON COLUMN uniswap_v4_pool_event.block_version IS
@@ -771,10 +749,28 @@ COMMENT ON COLUMN uniswap_v4_pool_event.processing_version IS
 COMMENT ON COLUMN uniswap_v4_pool_event.build_id IS
   'Audit. ID of the indexer build (code+config) that wrote this row.';
 
--- ============================================================================
+-- Readers that want "the pool/manager as it stands now" must not re-derive the
+-- highest-processing_version pick per query; these views own that one rule.
+CREATE OR REPLACE VIEW uniswap_v4_pool_manager_current AS
+SELECT DISTINCT ON (chain_id) *
+FROM uniswap_v4_pool_manager
+ORDER BY chain_id, processing_version DESC;
+
+CREATE OR REPLACE VIEW uniswap_v4_pool_current AS
+SELECT DISTINCT ON (chain_id, pool_id) *
+FROM uniswap_v4_pool
+ORDER BY chain_id, pool_id, processing_version DESC;
+
+COMMENT ON VIEW uniswap_v4_pool_manager_current IS
+  '[Dimension] Current PoolManager registry row per chain: the highest processing_version of uniswap_v4_pool_manager for that chain_id. Superseded versions stay in the base table for audit.';
+COMMENT ON VIEW uniswap_v4_pool_current IS
+  '[Dimension] Current pool registry row per (chain_id, pool_id): the highest processing_version of uniswap_v4_pool for that natural key. Its id is the surrogate the CURRENT version writes fact rows under; fact rows written before a correction point at the superseded id, so historical aggregation still joins the base table and groups by (chain_id, pool_id).';
+
+GRANT SELECT ON uniswap_v4_pool_manager_current, uniswap_v4_pool_current TO stl_readonly;
+GRANT SELECT ON uniswap_v4_pool_manager_current, uniswap_v4_pool_current TO stl_readwrite;
+
 -- Append-only enforcement: the application role may SELECT and INSERT but never
--- mutate or delete. (Table owner is unaffected; Postgres owners bypass grants.)
--- ============================================================================
+-- mutate or delete.
 
 REVOKE UPDATE, DELETE, TRUNCATE ON uniswap_v4_pool_manager FROM stl_readwrite;
 REVOKE UPDATE, DELETE, TRUNCATE ON uniswap_v4_pool FROM stl_readwrite;
@@ -784,15 +780,11 @@ REVOKE UPDATE, DELETE, TRUNCATE ON uniswap_v4_liquidity_event FROM stl_readwrite
 REVOKE UPDATE, DELETE, TRUNCATE ON uniswap_v4_tick FROM stl_readwrite;
 REVOKE UPDATE, DELETE, TRUNCATE ON uniswap_v4_pool_event FROM stl_readwrite;
 
--- ============================================================================
--- Protocol / token / PoolManager / pool seed.
---
 -- Every PoolKey below was re-read from its own Initialize log on Ethereum
 -- mainnet (2026-08-19) and its PoolId re-derived as
 -- keccak256(abi.encode(currency0, currency1, fee, tickSpacing, hooks)) before
 -- being written here; the migration integration test recomputes the same keccak
 -- for every seeded row.
--- ============================================================================
 
 INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block, updated_at, metadata)
 VALUES (
@@ -892,9 +884,9 @@ DO $$
 DECLARE
     manager_count      INT;
     pool_count         INT;
-    null_deploy_count  INT;
     bad_mapping_count  INT;
     null_decimal_count INT;
+    bad_token          TEXT;
 BEGIN
     SELECT count(*) INTO manager_count FROM uniswap_v4_pool_manager WHERE chain_id = 1;
     IF manager_count <> 1 THEN
@@ -908,23 +900,21 @@ BEGIN
         RAISE EXCEPTION 'expected exactly 21 UniswapV4 pools, got %', pool_count;
     END IF;
 
-    SELECT count(*) INTO null_deploy_count
-    FROM uniswap_v4_pool p
-    WHERE p.chain_id = 1 AND p.deploy_block IS NULL;
-    IF null_deploy_count <> 0 THEN
-        RAISE EXCEPTION 'expected 0 UniswapV4 pools with NULL deploy_block, got %', null_deploy_count;
-    END IF;
-
+    -- The branches are mutually exclusive on purpose: a non-native currency must
+    -- equal its own token address, and address(0) must land on the 0xEeee...
+    -- placeholder rather than the unrelated address(0) "no token" sentinel row.
     SELECT count(*) INTO bad_mapping_count
     FROM uniswap_v4_pool p
     JOIN token t0 ON t0.id = p.currency0_token_id
     JOIN token t1 ON t1.id = p.currency1_token_id
     WHERE NOT (
-        (t0.address = p.currency0
+        ((p.currency0 <> '\x0000000000000000000000000000000000000000'::bytea
+                AND t0.address = p.currency0)
             OR (p.currency0 = '\x0000000000000000000000000000000000000000'::bytea
                 AND t0.address = '\xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE'::bytea))
         AND
-        (t1.address = p.currency1
+        ((p.currency1 <> '\x0000000000000000000000000000000000000000'::bytea
+                AND t1.address = p.currency1)
             OR (p.currency1 = '\x0000000000000000000000000000000000000000'::bytea
                 AND t1.address = '\xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE'::bytea))
     );
@@ -939,12 +929,44 @@ BEGIN
     IF null_decimal_count <> 0 THEN
         RAISE EXCEPTION 'expected every token referenced by a UniswapV4 pool to have decimals, got % with NULL', null_decimal_count;
     END IF;
+
+    -- A pre-existing registry row with the wrong symbol/decimals would silently
+    -- rescale every amount the V4 tables carry, so pin all 16 here.
+    SELECT format('%s: expected (%s, %s), got (%s, %s)',
+                  encode(e.address, 'hex'), e.symbol, e.decimals, t.symbol, t.decimals)
+    INTO bad_token
+    FROM (VALUES
+        ('\xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE'::bytea, 'ETH', 18),
+        ('\x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0'::bytea, 'wstETH', 18),
+        ('\xae7ab96520DE3A18E5e111B5EaAb095312D7fE84'::bytea, 'stETH', 18),
+        ('\xBe9895146f7AF43049ca1c1AE358B0541Ea49704'::bytea, 'cbETH', 18),
+        ('\x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599'::bytea, 'WBTC', 8),
+        ('\x111111111117dC0aa78b770fA6A738034120C302'::bytea, '1INCH', 18),
+        ('\xf951E335afb289353dc249e82926178EaC7DEd78'::bytea, 'swETH', 18),
+        ('\x93ED3FBe21207Ec2E8f2d3c3de6e058Cb73Bc04d'::bytea, 'PNK', 18),
+        ('\xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'::bytea, 'USDC', 6),
+        ('\xae78736Cd615f374D3085123A210448E74Fc6393'::bytea, 'rETH', 18),
+        ('\xa3931d71877C0E7a3148CB7Eb4463524FEc27fbD'::bytea, 'sUSDS', 18),
+        ('\x6c3ea9036406852006290770BEdFcAbA0e23A0e8'::bytea, 'PYUSD', 6),
+        ('\xdC035D45d973E3EC169d2276DDab16f1e407384F'::bytea, 'USDS', 18),
+        ('\xdAC17F958D2ee523a2206206994597C13D831ec7'::bytea, 'USDT', 6),
+        ('\x56072C95FAA701256059aa122697B133aDEd9279'::bytea, 'SKY', 18),
+        ('\x68749665FF8D2d112Fa859AA293F07A622782F38'::bytea, 'XAUt', 6)
+    ) AS e (address, symbol, decimals)
+    LEFT JOIN token t ON t.chain_id = 1 AND t.address = e.address
+    WHERE t.id IS NULL
+       OR t.symbol IS DISTINCT FROM e.symbol
+       OR t.decimals IS DISTINCT FROM e.decimals
+    ORDER BY e.address
+    LIMIT 1;
+    IF bad_token IS NOT NULL THEN
+        RAISE EXCEPTION 'UniswapV4 seed token mismatch for %', bad_token;
+    END IF;
 END $$;
 
 -- Address-equality spot checks: pool #1 (native ETH/wstETH, exercises the
 -- address(0) -> ETH placeholder mapping), pool #12 (the only hooked pool), and
--- pool #21 (XAUt/sUSDS, the only 6-decimal/18-decimal pair with neither
--- currency being wstETH or a stable).
+-- pool #21 (a 6-decimal currency0 against an 18-decimal currency1).
 DO $$
 DECLARE
     got_currency0 BYTEA;
