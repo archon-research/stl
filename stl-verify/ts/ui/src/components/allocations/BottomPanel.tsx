@@ -205,8 +205,9 @@ export function BottomPanel({
             type="button"
             disabled={!focusedAllocation}
             onClick={() =>
-              // A fresh search, not a patch: this deep link must not inherit
-              // unrelated state from the allocation view it leaves.
+              // A fresh search, not a patch: nothing from the allocation view
+              // rides along — range/from/to included, so the feed opens on its own
+              // default window.
               void navigate({
                 to: '/activities',
                 search: {

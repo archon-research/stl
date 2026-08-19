@@ -232,9 +232,8 @@ function App() {
   const showAllPrimesInActivities =
     selectedView === 'activities' ? activitiesSearch?.allp !== '0' : false;
 
-  // Param edits replace rather than push, so a filter change never lands in the
-  // back-history — the behaviour of the `replaceState` layer this replaced. Only
-  // a view switch pushes.
+  // Param edits replace rather than push: a filter belongs in the URL but not in
+  // the back-history, where it would take a Back press each to undo.
   const updateSearch = useCallback(
     (patch: AppSearchPatch) => {
       void navigate({
@@ -975,9 +974,7 @@ function App() {
     : null;
 
   // Derived, never corrected: a deep link names its row before the allocations
-  // are fetched, so `drawer=1` waits for a row rather than being dropped as
-  // stale — and a filter that hides every row closes the drawer without
-  // discarding the selection it would restore.
+  // are fetched, so `drawer=1` waits for a row instead of being dropped as stale.
   const isDrawerOpen =
     allocationSearch?.drawer === '1' && selectedAllocation !== null;
 

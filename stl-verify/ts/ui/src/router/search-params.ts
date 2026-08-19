@@ -21,8 +21,8 @@ export const ACTIVITY_ACTIONS = ['in', 'out', 'sweep'] as const;
 export type DrawerTab = (typeof DRAWER_TABS)[number];
 export type ActivityAction = (typeof ACTIVITY_ACTIONS)[number];
 
-// The router JSON-parses search values, so `?network=1` arrives as the number 1,
-// and a hand-edited URL must degrade to "absent" rather than fail the route.
+// The router's query decoder coerces numeric and boolean spellings before any
+// parser runs, so `?network=1` arrives as the number 1; unusable values go absent.
 function toSearchText(value: unknown): string | undefined {
   if (typeof value === 'number' || typeof value === 'boolean') {
     return String(value);

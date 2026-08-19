@@ -7,11 +7,13 @@ import { useCallback, useMemo } from 'react';
  * Syncs TanStack table state (sorting, global search) with the allocation
  * route's `sort`/`q` search params, so a table state is shareable.
  *
- * The params belong to the `/allocation` route schema, not to a global
- * namespace: a second table on another route gets its own keys and cannot
- * clobber this one. `sort` is still validated for shape only (upstream
- * `validateSortingState`), never against a column set, so a stale bookmark
- * naming a dropped column renders unsorted while the URL keeps advertising it.
+ * The read is scoped to the `/allocation` route schema, so a table on another
+ * route gets its own keys rather than sharing one namespace with this one. That
+ * scoping is not enforcement: no route sets `search.strict`, so an unvalidated
+ * `sort`/`q` still travels in the URL until the entry-time cleanup drops it.
+ * `sort` is validated for shape only (upstream `validateSortingState`), never
+ * against a column set, so a stale bookmark naming a dropped column renders
+ * unsorted while the URL keeps advertising it.
  */
 export function useUrlSyncedTableState(): UseUrlSyncedTableReturn {
   // Not strict: the drawer hosting this table stays mounted on the activities

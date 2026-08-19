@@ -117,8 +117,7 @@ const indexRoute = createRoute({
   beforeLoad: ({ search }) => redirectToAllocation(search),
 });
 
-// Unknown paths land on the default view rather than a dead end, matching the
-// hand-rolled path layer this replaced.
+// Unknown paths land on the default view rather than a dead end.
 const catchAllRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '$',
