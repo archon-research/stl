@@ -17,6 +17,11 @@ spec:
         - name: spark-anchorage-indexer
           image: spark-anchorage-indexer
           envFrom:
+            # Without otel-config the OTLP endpoint is unset, InitOTEL installs
+            # no-op providers and this worker exports no metrics at all — which
+            # is why cronjob_runs_total has never carried service_name="anchorage-indexer".
+            - configMapRef:
+                name: otel-config
             - configMapRef:
                 name: spark-anchorage-indexer
             - secretRef:
