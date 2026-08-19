@@ -87,10 +87,19 @@ func TestRun_ReplaysHistoryThenSeedsAdapters(t *testing.T) {
 	}
 
 	// Pass 1 — the replay: the historical AddAdapter reached the real handler,
-	// which registered the adapter at its true block and wrote the audit row.
-	replayed := h.adaptersAt(int64(addAdapterBlock))
+	// which recorded the transition at its true block and wrote the audit row.
+	replayed := h.observationsAt(int64(addAdapterBlock))
 	if len(replayed) != 1 {
-		t.Fatalf("adapters registered at the AddAdapter block = %d, want 1 (the replayed event)", len(replayed))
+		t.Fatalf("observations recorded at the AddAdapter block = %d, want 1 (the replayed event)", len(replayed))
+	}
+	if replayed[0].Membership.ObservedVia != entity.MembershipFromAddAdapter {
+		t.Errorf("replayed observedVia = %q, want add_adapter_event", replayed[0].Membership.ObservedVia)
+	}
+	if !bytes.Equal(replayed[0].Identity.Address, testAdapterAddr.Bytes()) {
+		t.Errorf("replayed adapter = %x, want %s", replayed[0].Identity.Address, testAdapterAddr.Hex())
+	}
+	if got := replayed[0].Membership.AdapterType; got == nil || *got != entity.MorphoAdapterTypeMarketV1 {
+		t.Errorf("replayed adapter type = %v, want MarketV1", got)
 	}
 	if len(h.auditEvents) != 1 || h.auditEvents[0].EventName != "AddAdapter" {
 		t.Fatalf("audit events = %+v, want a single AddAdapter protocol_event", h.auditEvents)
@@ -102,15 +111,17 @@ func TestRun_ReplaysHistoryThenSeedsAdapters(t *testing.T) {
 
 	// Pass 2 — the seed: enumeration at the pinned head, plus a state row so
 	// VEC-219's composition probe no longer sees adapter_data_missing.
-	seeded := h.adaptersAt(headBlock)
-	if len(seeded) != 1 {
-		t.Fatalf("adapters registered at the head block = %d, want 1 (the enumeration seed)", len(seeded))
+	//
+	// It records NO membership observation, and that is the point. The seed is an
+	// ASSERTION about what the adapter set contains at the head, and the replay in
+	// pass 1 already established the same answer there — so there is nothing to
+	// add. Under the old registry every run wrote a fresh "added at the finalized
+	// head" row and hung the seed snapshot off it, which is bootstrap issue #1.
+	if seeded := h.observationsAt(headBlock); len(seeded) != 0 {
+		t.Errorf("observations recorded at the head block = %d, want 0: the replay already answered there — got %+v", len(seeded), seeded)
 	}
-	if !bytes.Equal(seeded[0].Address, testAdapterAddr.Bytes()) {
-		t.Errorf("seeded adapter = %x, want %s", seeded[0].Address, testAdapterAddr.Hex())
-	}
-	if seeded[0].AdapterType != entity.MorphoAdapterTypeMarketV1 {
-		t.Errorf("seeded adapter type = %v, want MarketV1", seeded[0].AdapterType)
+	if len(h.adapters) != 1 {
+		t.Errorf("total observations = %d, want 1 (the replayed AddAdapter alone)", len(h.adapters))
 	}
 	// Two snapshots: the registration path takes one at the AddAdapter's own
 	// block, the seed pass one at the pinned head.
@@ -375,7 +386,7 @@ type bootstrapHarness struct {
 	progress      *fakeProgressStore
 	multicaller   *testutil.MockMulticaller
 	morphoRepo    *testutil.MockMorphoRepository
-	adapters      []*entity.MorphoAdapter
+	adapters      []*entity.MorphoAdapterObservation
 	adapterStates []*entity.MorphoAdapterState
 	auditEvents   []*entity.ProtocolEvent
 }
@@ -395,11 +406,24 @@ func newBootstrapHarness(t *testing.T) *bootstrapHarness {
 			},
 		}, nil
 	}
-	var nextAdapterID int64
-	h.morphoRepo.GetOrCreateAdapterFn = func(_ context.Context, _ pgx.Tx, a *entity.MorphoAdapter) (int64, error) {
-		nextAdapterID++
-		h.adapters = append(h.adapters, a)
-		return nextAdapterID, nil
+	// One identity per (vault, address), and an assertion that repeats an answer
+	// the log already gives appends nothing — the same contract the real
+	// repository implements.
+	adapterIDs := map[string]int64{}
+	member := map[string]bool{}
+	h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, obs *entity.MorphoAdapterObservation) (int64, bool, error) {
+		key := string(obs.Identity.Address)
+		id, known := adapterIDs[key]
+		if !known {
+			id = int64(len(adapterIDs) + 1)
+			adapterIDs[key] = id
+		}
+		if !obs.Membership.ObservedVia.IsTransition() && known && member[key] == obs.Membership.IsMember {
+			return id, false, nil
+		}
+		member[key] = obs.Membership.IsMember
+		h.adapters = append(h.adapters, obs)
+		return id, true, nil
 	}
 	h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, s *entity.MorphoAdapterState) error {
 		h.adapterStates = append(h.adapterStates, s)
@@ -561,12 +585,12 @@ func (h *bootstrapHarness) addAdapterLog(blockNumber uint64, blockHash common.Ha
 	}
 }
 
-// adaptersAt returns the adapter rows registered with the given added_at_block.
-func (h *bootstrapHarness) adaptersAt(block int64) []*entity.MorphoAdapter {
-	var out []*entity.MorphoAdapter
-	for _, a := range h.adapters {
-		if a.AddedAtBlock == block {
-			out = append(out, a)
+// observationsAt returns the membership observations recorded at the given block.
+func (h *bootstrapHarness) observationsAt(block int64) []*entity.MorphoAdapterObservation {
+	var out []*entity.MorphoAdapterObservation
+	for _, obs := range h.adapters {
+		if obs.Membership.BlockNumber == block {
+			out = append(out, obs)
 		}
 	}
 	return out

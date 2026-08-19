@@ -139,10 +139,10 @@ func TestSeedV2VaultAdapters_EnumeratesAndSeedsState(t *testing.T) {
 		return nil, errTestUnexpectedCall(calls)
 	}
 
-	var savedAdapter *entity.MorphoAdapter
-	h.morphoRepo.GetOrCreateAdapterFn = func(_ context.Context, _ pgx.Tx, a *entity.MorphoAdapter) (int64, error) {
-		savedAdapter = a
-		return 99, nil
+	var savedAdapter *entity.MorphoAdapterObservation
+	h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, obs *entity.MorphoAdapterObservation) (int64, bool, error) {
+		savedAdapter = obs
+		return 99, true, nil
 	}
 	var savedState *entity.MorphoAdapterState
 	h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, s *entity.MorphoAdapterState) error {
@@ -156,16 +156,28 @@ func TestSeedV2VaultAdapters_EnumeratesAndSeedsState(t *testing.T) {
 	}
 
 	if savedAdapter == nil {
-		t.Fatal("no adapter registered — enumeration did not reach GetOrCreateAdapter")
+		t.Fatal("no adapter recorded — enumeration did not reach ObserveAdapterMembership")
 	}
-	if savedAdapter.MorphoVaultID != 7 {
-		t.Errorf("MorphoVaultID = %d, want 7", savedAdapter.MorphoVaultID)
+	if savedAdapter.Identity.MorphoVaultID != 7 {
+		t.Errorf("MorphoVaultID = %d, want 7", savedAdapter.Identity.MorphoVaultID)
 	}
-	if !bytes.Equal(savedAdapter.Address, testAdapterAddr.Bytes()) {
-		t.Errorf("Address = %x, want %s", savedAdapter.Address, testAdapterAddr.Hex())
+	if !bytes.Equal(savedAdapter.Identity.Address, testAdapterAddr.Bytes()) {
+		t.Errorf("Address = %x, want %s", savedAdapter.Identity.Address, testAdapterAddr.Hex())
 	}
-	if savedAdapter.AdapterType != entity.MorphoAdapterTypeMarketV1 {
-		t.Errorf("AdapterType = %v, want MarketV1", savedAdapter.AdapterType)
+	if got := savedAdapter.Membership.AdapterType; got == nil || *got != entity.MorphoAdapterTypeMarketV1 {
+		t.Errorf("AdapterType = %v, want MarketV1", got)
+	}
+	// The head enumeration is an end-of-block state read, and it must say so: a
+	// bootstrap seed asserts what the set CONTAINS at the pinned head, it never
+	// witnesses an AddAdapter.
+	if savedAdapter.Membership.ObservedVia != entity.MembershipFromBootstrapSeed {
+		t.Errorf("ObservedVia = %q, want bootstrap_seed", savedAdapter.Membership.ObservedVia)
+	}
+	if savedAdapter.Membership.LogIndex != entity.EndOfBlockLogIndex {
+		t.Errorf("LogIndex = %d, want EndOfBlockLogIndex", savedAdapter.Membership.LogIndex)
+	}
+	if !savedAdapter.Membership.IsMember {
+		t.Error("an enumerated adapter is recorded as a member")
 	}
 	if savedState == nil {
 		t.Fatal("no adapter_state seeded — VEC-219's composition probe would report adapter_data_missing")

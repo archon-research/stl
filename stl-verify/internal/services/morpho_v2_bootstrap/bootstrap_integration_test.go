@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"math/big"
+	"slices"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -20,24 +21,25 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-// TestRun_SeedThenReplayConvergesAdapterIncarnations is the correctness test for
-// this job's riskiest property, run against real SQL rather than mock repos.
+// TestRun_SeedAndReplayRecordTheWholeLifecycle is the correctness test for this
+// job's riskiest property, run against real SQL rather than mock repos.
 //
-// The seed writes each currently-active adapter at the run's pinned HEAD block —
-// far later than its true AddAdapter. The replay then walks the real history from
-// the factory deploy block. The two must converge onto the incarnations the chain
-// actually had, using only the repository's own semantics (GetOrCreateAdapter's
-// closed-window-first convergence and MarkAdapterRemoved's added_at_block <= X
-// scoping). Getting this wrong would either leave a de-registered adapter
-// spuriously active or make MarkAdapterRemoved match 0 rows and fail the run.
+// The seed asserts each currently-active adapter at the run's pinned HEAD block —
+// far later than its true AddAdapter. The replay walks the real history from the
+// factory deploy block. Under the old registry the two had to CONVERGE onto the
+// incarnations the chain had, and getting it wrong left a de-registered adapter
+// spuriously active or failed the run outright. There is nothing to converge now:
+// each is an observation at its own position, and the questions consumers ask are
+// answered by ordering them.
 //
 // History exercised (the hardest shape — removed then re-added):
 //
 //	AddAdapter@100 → RemoveAdapter@200 → AddAdapter@300, still active at head.
 //
-// Expected end state: one CLOSED incarnation [100,200] plus one ACTIVE row from
-// 300, and an adapter_state row seeded at the head block.
-func TestRun_SeedThenReplayConvergesAdapterIncarnations(t *testing.T) {
+// Expected end state: ONE identity row, three observations in block order, a
+// latest observation that says "member", and the seed's head-block snapshot
+// hanging off that same identity.
+func TestRun_SeedAndReplayRecordTheWholeLifecycle(t *testing.T) {
 	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
 	defer cleanup()
 	ctx := context.Background()
@@ -72,20 +74,26 @@ func TestRun_SeedThenReplayConvergesAdapterIncarnations(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	incarnations := readAdapterIncarnations(t, ctx, pool, adapter)
-	if len(incarnations) != 2 {
-		t.Fatalf("adapter incarnations = %+v, want exactly 2 (one closed, one active)", incarnations)
+	adapterID := readSingleAdapterID(t, ctx, pool, adapter)
+	observations := readAdapterMembership(t, ctx, pool, adapterID)
+	want := []membershipObservation{
+		{block: int64(addBlock), isMember: true, observedVia: "add_adapter_event"},
+		{block: int64(removeBlock), isMember: false, observedVia: "remove_adapter_event"},
+		{block: int64(reAddBlock), isMember: true, observedVia: "add_adapter_event"},
 	}
-	closed, active := incarnations[0], incarnations[1]
-	if closed.addedAt != int64(addBlock) || closed.removedAt == nil || *closed.removedAt != int64(removeBlock) {
-		t.Errorf("closed incarnation = %+v, want [%d,%d]", closed, addBlock, removeBlock)
-	}
-	if active.addedAt != int64(reAddBlock) || active.removedAt != nil {
-		t.Errorf("active incarnation = %+v, want added_at=%d and still open", active, reAddBlock)
+	if !slices.Equal(observations, want) {
+		t.Errorf("membership log = %+v, want %+v", observations, want)
 	}
 
-	// The seed's snapshot must exist and belong to the currently-active
-	// incarnation — that is what clears VEC-219's adapter_data_missing gate.
+	// The head assertion added nothing: the replayed re-add already answers
+	// "member" there, which is the property that makes a re-run quiet.
+	if got := len(observations); got != 3 {
+		t.Errorf("observations = %d, want 3 — the head seed must not append when the log already agrees", got)
+	}
+
+	// The seed's snapshot must exist and hang off the one identity row — that is
+	// what clears VEC-219's adapter_data_missing gate, and no lifecycle
+	// observation can move the row it points at.
 	var stateBlock int64
 	var stateAdapterID int64
 	err := pool.QueryRow(ctx,
@@ -97,8 +105,17 @@ func TestRun_SeedThenReplayConvergesAdapterIncarnations(t *testing.T) {
 	if stateBlock != headBlock {
 		t.Errorf("adapter_state block = %d, want the pinned head %d", stateBlock, headBlock)
 	}
-	if stateAdapterID != active.id {
-		t.Errorf("adapter_state belongs to adapter %d, want the active incarnation %d", stateAdapterID, active.id)
+	if stateAdapterID != adapterID {
+		t.Errorf("adapter_state belongs to adapter %d, want the identity row %d", stateAdapterID, adapterID)
+	}
+
+	// And the adapter is in the current set the view exposes.
+	var current int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM morpho_adapter_current WHERE id = $1`, adapterID).Scan(&current); err != nil {
+		t.Fatalf("querying morpho_adapter_current: %v", err)
+	}
+	if current != 1 {
+		t.Errorf("morpho_adapter_current holds %d rows for the adapter, want 1", current)
 	}
 }
 
@@ -131,7 +148,8 @@ func TestRun_IsIdempotent(t *testing.T) {
 	if err := service.Run(ctx); err != nil {
 		t.Fatalf("first Run: %v", err)
 	}
-	firstAdapters := readAdapterIncarnations(t, ctx, pool, adapter)
+	firstAdapterID := readSingleAdapterID(t, ctx, pool, adapter)
+	firstObservations := readAdapterMembership(t, ctx, pool, firstAdapterID)
 	firstStates := countRows(t, ctx, pool, "morpho_adapter_state")
 
 	// A re-trigger is a new workflow execution, so it carries no heartbeat
@@ -140,12 +158,16 @@ func TestRun_IsIdempotent(t *testing.T) {
 	if err := reRun.Run(ctx); err != nil {
 		t.Fatalf("second Run: %v", err)
 	}
-	secondAdapters := readAdapterIncarnations(t, ctx, pool, adapter)
-	if len(secondAdapters) != len(firstAdapters) {
-		t.Fatalf("re-running produced %d adapter rows, want the original %d", len(secondAdapters), len(firstAdapters))
+	secondAdapterID := readSingleAdapterID(t, ctx, pool, adapter)
+	if secondAdapterID != firstAdapterID {
+		t.Fatalf("re-running minted a new identity id %d, want the original %d", secondAdapterID, firstAdapterID)
 	}
-	if secondAdapters[0] != firstAdapters[0] {
-		t.Errorf("adapter row changed on re-run: %+v then %+v", firstAdapters[0], secondAdapters[0])
+	secondObservations := readAdapterMembership(t, ctx, pool, secondAdapterID)
+	if len(secondObservations) != len(firstObservations) {
+		t.Fatalf("re-running produced %d observations, want the original %d", len(secondObservations), len(firstObservations))
+	}
+	if !slices.Equal(secondObservations, firstObservations) {
+		t.Errorf("membership log changed on re-run: %+v then %+v", firstObservations, secondObservations)
 	}
 	if got := countRows(t, ctx, pool, "morpho_adapter_state"); got != firstStates {
 		t.Errorf("adapter_state rows = %d after re-run, want the original %d (same build must dedupe)", got, firstStates)
@@ -209,13 +231,14 @@ func TestRun_ResumesAfterAKilledAttemptAndFinishesTheWork(t *testing.T) {
 		t.Errorf("resumed sweep starts at block %d, want %d", got, int64(secondChunkTop))
 	}
 
-	incarnations := readAdapterIncarnations(t, ctx, pool, adapter)
-	if len(incarnations) != 1 {
-		t.Fatalf("adapter incarnations = %+v, want the one the resumed attempt replayed", incarnations)
+	adapterID := readSingleAdapterID(t, ctx, pool, adapter)
+	observations := readAdapterMembership(t, ctx, pool, adapterID)
+	if len(observations) != 1 {
+		t.Fatalf("membership log = %+v, want the one observation the resumed attempt replayed", observations)
 	}
-	if incarnations[0].addedAt != int64(addBlock) {
-		t.Errorf("adapter added_at_block = %d, want %d — the resumed attempt did not replay the AddAdapter",
-			incarnations[0].addedAt, addBlock)
+	if observations[0].block != int64(addBlock) || observations[0].observedVia != "add_adapter_event" {
+		t.Errorf("observation = %+v, want the AddAdapter at block %d — the resumed attempt did not replay it",
+			observations[0], addBlock)
 	}
 }
 
@@ -322,36 +345,66 @@ func adapterLifecycleLog(t *testing.T, event string, vault, adapter common.Addre
 	}
 }
 
-// adapterIncarnation is one morpho_adapter row's lifetime window.
-type adapterIncarnation struct {
-	id        int64
-	addedAt   int64
-	removedAt *int64
+// membershipObservation is one morpho_adapter_membership row, reduced to what a
+// bootstrap test asserts on.
+type membershipObservation struct {
+	block       int64
+	isMember    bool
+	observedVia string
 }
 
-// readAdapterIncarnations returns every row for an adapter address, oldest window
-// first, so a test can assert on the full lifetime history rather than only the
-// active row.
-func readAdapterIncarnations(t *testing.T, ctx context.Context, pool *pgxpool.Pool, adapter common.Address) []adapterIncarnation {
+// readSingleAdapterID returns the adapter's one identity row id, failing if the
+// registry holds anything other than exactly one — the invariant that replaced
+// the incarnation model.
+func readSingleAdapterID(t *testing.T, ctx context.Context, pool *pgxpool.Pool, adapter common.Address) int64 {
 	t.Helper()
-	rows, err := pool.Query(ctx,
-		`SELECT id, added_at_block, removed_at_block FROM morpho_adapter WHERE address = $1 ORDER BY added_at_block`,
-		adapter.Bytes())
+	rows, err := pool.Query(ctx, `SELECT id FROM morpho_adapter WHERE address = $1`, adapter.Bytes())
 	if err != nil {
 		t.Fatalf("querying morpho_adapter: %v", err)
 	}
 	defer rows.Close()
-
-	var out []adapterIncarnation
+	var ids []int64
 	for rows.Next() {
-		var a adapterIncarnation
-		if err := rows.Scan(&a.id, &a.addedAt, &a.removedAt); err != nil {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
 			t.Fatalf("scanning morpho_adapter: %v", err)
 		}
-		out = append(out, a)
+		ids = append(ids, id)
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatalf("iterating morpho_adapter: %v", err)
+	}
+	if len(ids) != 1 {
+		t.Fatalf("morpho_adapter rows for %s = %d, want exactly 1 forever", adapter.Hex(), len(ids))
+	}
+	return ids[0]
+}
+
+// readAdapterMembership returns an adapter's observations in selection order
+// (oldest first), so a test can assert on the whole lifecycle rather than only
+// the current answer.
+func readAdapterMembership(t *testing.T, ctx context.Context, pool *pgxpool.Pool, adapterID int64) []membershipObservation {
+	t.Helper()
+	rows, err := pool.Query(ctx,
+		`SELECT block_number, is_member, observed_via FROM morpho_adapter_membership
+		 WHERE morpho_adapter_id = $1
+		 ORDER BY block_number, block_version, log_index, processing_version`,
+		adapterID)
+	if err != nil {
+		t.Fatalf("querying morpho_adapter_membership: %v", err)
+	}
+	defer rows.Close()
+
+	var out []membershipObservation
+	for rows.Next() {
+		var o membershipObservation
+		if err := rows.Scan(&o.block, &o.isMember, &o.observedVia); err != nil {
+			t.Fatalf("scanning morpho_adapter_membership: %v", err)
+		}
+		out = append(out, o)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterating morpho_adapter_membership: %v", err)
 	}
 	return out
 }

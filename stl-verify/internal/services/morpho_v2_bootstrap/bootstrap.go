@@ -259,15 +259,14 @@ func (s *Service) loadV2Vaults(ctx context.Context) ([]common.Address, error) {
 // realAssets snapshot each, at the run's pinned block. It clears VEC-219's
 // adapter_data_missing gate: an active adapter with no state row.
 //
-// It must run AFTER replayConfigHistory. GetOrCreateAdapter converges a
-// candidate onto an existing incarnation, so seeding first (when no history
-// exists yet) inserts a single row at the head block that the replay then
-// converges DOWN to the earliest AddAdapter and closes at the first
-// RemoveAdapter — stranding this pass's head-block snapshot on a closed
-// incarnation while the genuinely-active one gets no state row at all. That is
-// worse than not seeding: the vault looks healed and carries an adapter_state
-// dated after its incarnation ended. Replaying first builds the true
-// incarnations, so the seed's GetOrCreateAdapter matches the active one.
+// It runs after replayConfigHistory, but no longer has to. Membership is an
+// append-only log of observations at their own block positions, so the seed's
+// head-block ASSERTION and the replay's historical transitions cannot corrupt
+// each other in either order: whichever arrives second is simply another row (or,
+// for an assertion whose answer the log already gives, no row at all), and every
+// snapshot hangs off an identity id that no lifecycle observation can move.
+// Replaying first is kept because it is cheaper — with the history already on
+// record the head assertion usually writes nothing.
 func (s *Service) seedAdapterState(ctx context.Context, vaults []common.Address, head pinnedBlock) error {
 	for i, vault := range vaults {
 		if err := s.replay.SeedV2VaultAdapters(ctx, vault, head.number, head.hash, canonicalBlockVersion, head.timestamp); err != nil {
