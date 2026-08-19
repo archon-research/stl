@@ -184,7 +184,7 @@ func TestIntegration_Register_ExposesTheDocumentedWorkflowType(t *testing.T) {
 	}
 	// Mocked so the run proves the registered names resolve, not that S3 holds
 	// this range: the phases themselves are exercised by the activity tests below.
-	env.OnActivity("DiscoverVaults", mock.Anything, mock.Anything).Return(discoveryResult{Vaults: 1}, nil)
+	env.OnActivity("DiscoverVaults", mock.Anything, mock.Anything).Return(discoveryResult{Vaults: 1, KnownV2Vaults: 1}, nil)
 	env.OnActivity("ReplayPartition", mock.Anything, mock.Anything).Return(2, nil)
 
 	env.ExecuteWorkflow("MorphoVaultBackfill", BackfillParams{From: 2000, To: 2500})
@@ -251,6 +251,9 @@ func TestIntegration_DiscoverVaults_FindsNoCandidatesInAnUnrelatedRange(t *testi
 	}
 	if got.Vaults != 0 {
 		t.Errorf("Vaults = %d, want 0", got.Vaults)
+	}
+	if got.KnownV2Vaults != 0 {
+		t.Errorf("KnownV2Vaults = %d, want 0 against a database with no vault at all", got.KnownV2Vaults)
 	}
 }
 

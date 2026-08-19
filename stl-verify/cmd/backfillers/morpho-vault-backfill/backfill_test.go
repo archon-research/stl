@@ -59,7 +59,11 @@ func registerActivityStubs(
 	return &replayed
 }
 
-func noVaultsDiscovered(blockRange) (discoveryResult, error) { return discoveryResult{}, nil }
+// noNewVaultsDiscovered: the range added no vault, but the database already
+// holds one, so the replay phase still has something to run against.
+func noNewVaultsDiscovered(blockRange) (discoveryResult, error) {
+	return discoveryResult{KnownV2Vaults: 1}, nil
+}
 
 func noEventsReplayed(partitionWork) (int, error) { return 0, nil }
 
@@ -184,7 +188,9 @@ func TestBackfillParams_Resolve(t *testing.T) {
 func TestBackfillWorkflow_ReplaysEveryPartitionInBlockOrder(t *testing.T) {
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
 	replayed := registerActivityStubs(env,
-		func(blockRange) (discoveryResult, error) { return discoveryResult{Candidates: 9, Vaults: 2}, nil },
+		func(blockRange) (discoveryResult, error) {
+			return discoveryResult{Candidates: 9, Vaults: 2, KnownV2Vaults: 2}, nil
+		},
 		func(partitionWork) (int, error) { return 3, nil },
 	)
 
@@ -217,7 +223,7 @@ func TestBackfillWorkflow_ReplaysEveryPartitionInBlockOrder(t *testing.T) {
 // detect that hole.
 func TestBackfillWorkflow_StopsAtTheFirstFailingPartition(t *testing.T) {
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
-	replayed := registerActivityStubs(env, noVaultsDiscovered, func(work partitionWork) (int, error) {
+	replayed := registerActivityStubs(env, noNewVaultsDiscovered, func(work partitionWork) (int, error) {
 		if work.Partition == "1000-1999" {
 			return 0, errors.New("boom")
 		}
@@ -233,6 +239,26 @@ func TestBackfillWorkflow_StopsAtTheFirstFailingPartition(t *testing.T) {
 	// what must not appear is anything after it.
 	if slices.Contains(*replayed, "2000-2999") {
 		t.Errorf("replayed %v, want nothing after the failing partition", *replayed)
+	}
+}
+
+// With no VaultV2 vault in the database there is nothing for any partition to
+// replay, and each activity would still pay a replay-service build and a
+// registry read per 1000 blocks before finding that out for itself.
+func TestBackfillWorkflow_SkipsReplayWhenNoV2VaultIsKnown(t *testing.T) {
+	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+	replayed := registerActivityStubs(env,
+		func(blockRange) (discoveryResult, error) { return discoveryResult{Candidates: 4}, nil },
+		noEventsReplayed,
+	)
+
+	executeBackfill(env, BackfillParams{From: 2000, To: 4500})
+
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatalf("unexpected workflow error: %v", err)
+	}
+	if len(*replayed) != 0 {
+		t.Errorf("replayed %v with no V2 vault known, want none", *replayed)
 	}
 }
 
@@ -260,7 +286,7 @@ func TestBackfillWorkflow_SkipsReplayWhenDiscoveryFails(t *testing.T) {
 // retry envelope instead of being reported back to them.
 func TestBackfillWorkflow_RejectsInvalidParams(t *testing.T) {
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
-	replayed := registerActivityStubs(env, noVaultsDiscovered, noEventsReplayed)
+	replayed := registerActivityStubs(env, noNewVaultsDiscovered, noEventsReplayed)
 
 	executeBackfill(env, BackfillParams{To: 200})
 
@@ -286,7 +312,7 @@ func TestBackfillWorkflow_RejectsInvalidParams(t *testing.T) {
 // and CrashLoops the worker instead of returning this error.
 func TestBackfillWorkflow_RejectsAnAbsurdRangeBeforeBuildingItsPartitionList(t *testing.T) {
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
-	replayed := registerActivityStubs(env, noVaultsDiscovered, noEventsReplayed)
+	replayed := registerActivityStubs(env, noNewVaultsDiscovered, noEventsReplayed)
 
 	executeBackfill(env, BackfillParams{From: 1, To: 1_750_000_000_000})
 
@@ -306,7 +332,7 @@ func TestBackfillWorkflow_RejectsAnAbsurdRangeBeforeBuildingItsPartitionList(t *
 // got from the UI without reading raw event history.
 func TestBackfillWorkflow_ExposesProgressQuery(t *testing.T) {
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
-	registerActivityStubs(env, noVaultsDiscovered, func(partitionWork) (int, error) { return 2, nil })
+	registerActivityStubs(env, noNewVaultsDiscovered, func(partitionWork) (int, error) { return 2, nil })
 
 	executeBackfill(env, BackfillParams{From: 2000, To: 4500})
 
@@ -327,7 +353,7 @@ func TestBackfillWorkflow_ExposesProgressQuery(t *testing.T) {
 // the result payload of a workflow that returns a non-nil error.
 func TestBackfillWorkflow_ExposesPartialCountsAfterFailure(t *testing.T) {
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
-	registerActivityStubs(env, noVaultsDiscovered, func(work partitionWork) (int, error) {
+	registerActivityStubs(env, noNewVaultsDiscovered, func(work partitionWork) (int, error) {
 		if work.Partition == "4000-4999" {
 			return 0, errors.New("boom")
 		}
