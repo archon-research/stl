@@ -11,8 +11,7 @@ import asyncio
 import dataclasses
 import logging
 
-from app.domain.chain_names import CHAIN_ID_TO_NAME, UPSTREAM_NETWORK_TO_CHAIN_ID
-from app.domain.entities.allocation import EthAddress
+from app.domain.entities.allocation import EthAddress, as_address
 from app.domain.entities.reference_risk_capital import (
     ReferenceAllocation,
     ReferencePrimeRiskCapital,
@@ -57,27 +56,15 @@ class ReferenceRiskCapitalService:
         return dataclasses.replace(snapshot, per_allocation=tuple(resolved))
 
     async def _resolve(self, row: ReferenceAllocation) -> ReferenceAllocation:
-        """Attach STL's receipt-token id and internal chain name to an upstream row."""
-        chain_id = UPSTREAM_NETWORK_TO_CHAIN_ID.get(row.network)
-        if chain_id is None:
+        """Attach STL's receipt-token id to an upstream row.
+
+        The chain is already resolved at the adapter boundary; only the registry
+        join is left, and it is skipped structurally where it cannot succeed
+        rather than issued and allowed to miss.
+        """
+        address = as_address(row.token_address)
+        if row.chain_id is None or address is None:
             return row
 
-        chain = CHAIN_ID_TO_NAME.get(chain_id)
-        address = _as_address(row.token_address)
-        if address is None:
-            # A Uniswap V4 position identifies itself by 32-byte pool id in the
-            # address field, so there is nothing to look up. Gated here rather
-            # than left to fail in the repository, which would read as a missing
-            # token instead of a value that was never an address.
-            return dataclasses.replace(row, chain=chain)
-
-        info = await self._receipt_tokens.get_by_chain_and_address(chain_id, address)
-        return dataclasses.replace(row, chain=chain, receipt_token_id=info.receipt_token_id if info else None)
-
-
-def _as_address(value: str) -> EthAddress | None:
-    """Return ``value`` as an address, or ``None`` if it is not one."""
-    try:
-        return EthAddress(value)
-    except ValueError:
-        return None
+        info = await self._receipt_tokens.get_by_chain_and_address(row.chain_id, address)
+        return dataclasses.replace(row, receipt_token_id=info.receipt_token_id if info else None)

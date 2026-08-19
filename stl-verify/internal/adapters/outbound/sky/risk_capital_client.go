@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strings"
 	"time"
 
@@ -54,6 +55,10 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = defaultBaseURL
 	}
+	baseURL, err := validateBaseURL(cfg.BaseURL)
+	if err != nil {
+		return nil, err
+	}
 
 	httpCfg := httpclient.DefaultConfig()
 	if cfg.Timeout > 0 {
@@ -74,10 +79,30 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 
 	logger := cfg.Logger.With("component", "sky-risk-capital-client")
 	return &Client{
-		baseURL:    strings.TrimRight(cfg.BaseURL, "/"),
+		baseURL:    baseURL,
 		httpClient: httpclient.NewClient(httpCfg, logger, nil),
 		logger:     logger,
 	}, nil
+}
+
+// validateBaseURL returns the risk-capital root, rejecting the shapes that fail
+// silently. A URL already ending in /primes is the likely mistake — the routes
+// append it, so it would request /primes/primes/, which upstream answers with a
+// 500 that reads as an outage rather than as misconfiguration.
+func validateBaseURL(raw string) (string, error) {
+	trimmed := strings.TrimRight(strings.TrimSpace(raw), "/")
+
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return "", fmt.Errorf("parsing sky base URL %q: %w", raw, err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", fmt.Errorf("sky base URL %q must be an absolute http(s) URL", raw)
+	}
+	if strings.HasSuffix(parsed.Path, "/primes") {
+		return "", fmt.Errorf("sky base URL %q must be the risk-capital root, without the /primes route", raw)
+	}
+	return trimmed, nil
 }
 
 // FetchPrimeSnapshots returns a snapshot for each of `stars` the monitor covers.

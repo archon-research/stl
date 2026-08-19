@@ -23,6 +23,7 @@ from decimal import Decimal, InvalidOperation
 
 import httpx
 
+from app.domain.chain_names import CHAIN_ID_TO_NAME
 from app.domain.entities.reference_risk_capital import (
     ReferenceAllocation,
     ReferencePrimeRiskCapital,
@@ -33,15 +34,27 @@ logger = logging.getLogger(__name__)
 
 _TIMEOUT = httpx.Timeout(connect=5.0, read=15.0, write=10.0, pool=5.0)
 
-# Upstream paginates at 20 by default and reports 12 rows for the largest prime
-# today. Asked for explicitly so a prime growing past the default page does not
-# silently lose allocations from its breakdown.
-_ALLOCATION_PAGE_LIMIT = 500
+# Upstream paginates at 20 by default. Asked for explicitly, and the reported
+# total is checked against what arrives, so a set outgrowing the page fails
+# rather than silently losing rows.
+_PAGE_LIMIT = 500
 
 # Upstream reports the comparable capital-risk ratio as a 0-1 fraction
 # (confirmed: crr == rrc / exposure exactly). Every consumer here reads a 0-100
 # percentage, so the rescale happens once, at this boundary.
 _FRACTION_TO_PCT = Decimal("100")
+
+# The monitor spells networks its own way — "ethereum" where the axis-synome
+# contract and the allocation trackers say "mainnet". Translated here with the
+# other upstream encodings so no consumer has to know the vendor's vocabulary.
+_NETWORK_TO_CHAIN_ID: dict[str, int] = {
+    "ethereum": 1,
+    "optimism": 10,
+    "unichain": 130,
+    "base": 8453,
+    "arbitrum": 42161,
+    "avalanche": 43114,
+}
 
 
 class SkyReferenceRiskCapitalClient:
@@ -53,7 +66,7 @@ class SkyReferenceRiskCapitalClient:
 
     async def get_prime(self, star: str) -> ReferencePrimeRiskCapital | None:
         """Return ``star``'s upstream snapshot, or ``None`` if the monitor does not track it."""
-        if star not in await self._tracked_stars():
+        if star.strip().lower() not in await self._tracked_stars():
             logger.info(
                 "Prime is not tracked by the upstream Star monitor; no reference data",
                 extra={"star": star, "upstream_url": self._base_url},
@@ -65,14 +78,27 @@ class SkyReferenceRiskCapitalClient:
         # reconcile only to ~1e-6 relative, so neither is derived from the other.
         detail, allocations = await asyncio.gather(
             self._get_data(f"{self._base_url}/primes/{star}/"),
-            self._get_data(f"{self._base_url}/primes/{star}/allocations/?limit={_ALLOCATION_PAGE_LIMIT}"),
+            self._get_data(f"{self._base_url}/primes/{star}/allocations/?limit={_PAGE_LIMIT}"),
         )
         return _build_snapshot(star, detail, allocations)
 
     async def _tracked_stars(self) -> frozenset[str]:
-        url = f"{self._base_url}/primes/"
-        results = _require_results(await self._get_data(url), url=url)
-        return frozenset(str(row["star"]) for row in results if row.get("star"))
+        url = f"{self._base_url}/primes/?limit={_PAGE_LIMIT}"
+        data = await self._get_data(url)
+        results = _require_results(data, url=url)
+        if not results:
+            # Every prime would read as untracked, and each would be served as a
+            # 404 "not covered" — an outage wearing the shape of a real answer.
+            raise ReferenceDataUnavailableError(f"Star monitor listed no primes at all: {url}")
+        _require_full_page(data, len(results), url=url)
+
+        stars = set()
+        for index, row in enumerate(results):
+            star = str(row.get("star") or "").strip().lower()
+            if not star:
+                raise ReferenceDataUnavailableError(f"Star monitor listed a prime with no name at row {index}: {url}")
+            stars.add(star)
+        return frozenset(stars)
 
     async def _get_data(self, url: str) -> dict:
         """GET ``url`` and return its ``data`` object, or raise ``ReferenceDataUnavailableError``."""
@@ -117,11 +143,38 @@ def _require_results(data: dict, *, url: str) -> list:
     return results
 
 
+def _require_full_page(data: dict, received: int, *, url: str) -> None:
+    """Reject a truncated page, which would read as rows that do not exist.
+
+    Upstream paginates and reports the true count; an explicit limit is sent, so
+    a short page means the set outgrew it rather than that the extra rows are
+    absent.
+    """
+    pagination = data.get("pagination")
+    total = pagination.get("total") if isinstance(pagination, dict) else None
+    if isinstance(total, int) and total > received:
+        raise ReferenceDataUnavailableError(
+            f"Star monitor reported {total} rows but returned {received}; the page limit is too low: {url}"
+        )
+
+
 def _build_snapshot(star: str, detail: dict, allocations: dict) -> ReferencePrimeRiskCapital:
-    rows = _require_results(allocations, url=f"allocations/{star}")
+    url = f"allocations/{star}"
+    rows = _require_results(allocations, url=url)
+    _require_full_page(allocations, len(rows), url=url)
+
+    exposure = _decimal(detail, "total_exposure", star=star)
+    if not rows and exposure != 0:
+        # The two routes are separate snapshots, so an empty breakdown beside a
+        # live total is upstream disagreeing with itself — and serving it would
+        # publish "this prime holds nothing" against real exposure.
+        raise ReferenceDataUnavailableError(
+            f"Star monitor reported exposure {exposure} for prime '{star}' but an empty breakdown"
+        )
+
     return ReferencePrimeRiskCapital(
         star=star,
-        exposure_usd=_decimal(detail, "total_exposure", star=star),
+        exposure_usd=exposure,
         required_risk_capital_usd=_decimal(detail, "total_rrc", star=star),
         total_risk_capital_usd=_decimal(detail, "total_rc", star=star),
         encumbrance_ratio=_optional_decimal(detail, "encumbrance_ratio", star=star),
@@ -149,9 +202,11 @@ def _by_exposure_desc(rows: list, *, star: str) -> list:
 
 
 def _allocation(row: dict, *, star: str) -> ReferenceAllocation:
+    network = _required_text(row, "network", star=star)
+    chain_id = _NETWORK_TO_CHAIN_ID.get(network)
     return ReferenceAllocation(
         protocol_name=_required_text(row, "protocol", star=star),
-        network=_required_text(row, "network", star=star),
+        network=network,
         symbol=_required_text(row, "symbol", star=star),
         name=_text(row, "name"),
         token_address=_required_text(row, "token_address", star=star),
@@ -160,6 +215,8 @@ def _allocation(row: dict, *, star: str) -> ReferenceAllocation:
         exposure_usd=_decimal(row, "exposure", star=star),
         required_risk_capital_usd=_decimal(row, "rrc", star=star),
         crr_pct=_decimal(row, "crr", star=star) * _FRACTION_TO_PCT,
+        chain_id=chain_id,
+        chain=CHAIN_ID_TO_NAME.get(chain_id) if chain_id is not None else None,
     )
 
 
@@ -197,8 +254,15 @@ def _optional_decimal(row: dict, field: str, *, star: str) -> Decimal | None:
         # Upstream mixes plain decimal strings with E-notation (e.g. a crr of
         # "4.646E-15"); Decimal accepts both, float would lose the precision the
         # 18-decimal figures carry.
-        return Decimal(str(raw))
+        value = Decimal(str(raw))
     except (InvalidOperation, TypeError, ValueError) as exc:
         raise ReferenceDataUnavailableError(
             f"Star monitor returned a non-numeric '{field}' for prime '{star}': {raw!r}"
         ) from exc
+
+    # Decimal accepts "NaN" and "Infinity" without complaint. Left through, a
+    # NaN silently poisons every total it reaches and makes sorting the
+    # breakdown raise, so it is rejected at the parse rather than downstream.
+    if not value.is_finite():
+        raise ReferenceDataUnavailableError(f"Star monitor returned a non-finite '{field}' for prime '{star}': {raw!r}")
+    return value

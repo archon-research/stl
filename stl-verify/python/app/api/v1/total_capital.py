@@ -7,7 +7,6 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
-from app.adapters.postgres.prime_capital_stack_repository import PrimeCapitalStackRepository
 from app.api._validators import ProxyAddressPathParam
 from app.api.deps import get_engine, get_reference_capital_repository_factory
 from app.api.time_series import (
@@ -19,6 +18,7 @@ from app.api.time_series import (
 from app.domain.entities.allocation import EthAddress
 from app.domain.serialization import PlainDecimal
 from app.domain.time_series import TimeSeriesQuery
+from app.ports.reference_capital_repository import ReferenceCapitalRepository
 from app.services.allocation_service import AllocationService
 
 router = APIRouter(tags=["primes", "capital"])
@@ -85,7 +85,7 @@ async def list_prime_total_capital(
         ),
     ),
     service: AllocationService = Depends(_get_service),
-    reference_repositories: Callable[[], PrimeCapitalStackRepository] = Depends(
+    reference_repositories: Callable[[], ReferenceCapitalRepository] = Depends(
         get_reference_capital_repository_factory
     ),
 ) -> TotalCapitalEnvelope:

@@ -137,5 +137,5 @@ COMMENT ON COLUMN prime_capital_stack.processing_version IS 'Correction version:
 COMMENT ON COLUMN prime_capital_stack.build_id IS 'Audit. Deployment build that wrote the row; never use to pick the latest row.';
 
 INSERT INTO migrations (filename)
-VALUES ('20260506_193000_create_prime_capital_stack.sql')
+VALUES ('20260819_120000_create_prime_capital_stack.sql')
 ON CONFLICT (filename) DO NOTHING;

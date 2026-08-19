@@ -15,7 +15,9 @@ _TOKEN = "0x" + "cd" * 20
 _V4_POOL_ID = "0x" + "ef" * 32
 
 
-def _allocation(*, network: str = "ethereum", token_address: str = _TOKEN) -> ReferenceAllocation:
+def _allocation(
+    *, network: str = "ethereum", token_address: str = _TOKEN, chain_id: int | None = 1
+) -> ReferenceAllocation:
     return ReferenceAllocation(
         protocol_name="sparklend",
         network=network,
@@ -27,6 +29,8 @@ def _allocation(*, network: str = "ethereum", token_address: str = _TOKEN) -> Re
         exposure_usd=Decimal("100"),
         required_risk_capital_usd=Decimal("1"),
         crr_pct=Decimal("1"),
+        chain_id=chain_id,
+        chain="mainnet" if chain_id == 1 else None,
     )
 
 
@@ -97,7 +101,7 @@ async def test_get_leaves_a_uniswap_v4_pool_id_unresolved_without_querying_the_r
 
 async def test_get_leaves_a_row_on_an_unmapped_network_unresolved():
     lookup = AsyncMock()
-    service, _, _ = _service(_snapshot(_allocation(network="solana")), lookup)
+    service, _, _ = _service(_snapshot(_allocation(network="solana", chain_id=None)), lookup)
 
     result = await service.get(EthAddress(_SPARK_ALM))
 

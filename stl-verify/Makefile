@@ -707,7 +707,7 @@ dev-env:
 		> cmd/cronjobs/maple-graphql-indexer/.env
 	@printf '%s\n' \
 		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
-		"SKY_RISK_CAPITAL_URL=https://info-sky.blockanalitica.com/star-monitoring/risk-capital/primes/" \
+		"SKY_RISK_CAPITAL_URL=https://info-sky.blockanalitica.com/star-monitoring/risk-capital" \
 		"CAPITAL_STACK_SYNC_INTERVAL=15m" \
 		"TEMPORAL_HOST_PORT=127.0.0.1:7233" \
 		"TEMPORAL_NAMESPACE=vector" \

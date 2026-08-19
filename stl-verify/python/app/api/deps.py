@@ -8,6 +8,7 @@ from app.adapters.postgres.receipt_token_repository import ReceiptTokenRepositor
 from app.adapters.sky.reference_risk_capital_client import SkyReferenceRiskCapitalClient
 from app.config import get_settings
 from app.ports.receipt_token_lookup import ReceiptTokenLookup
+from app.ports.reference_capital_repository import ReferenceCapitalRepository
 from app.risk_engine.suraf.result import SurafResult
 from app.services.crypto_lending_risk_service import CryptoLendingRiskService
 from app.services.model_registry import ModelRegistry
@@ -65,6 +66,6 @@ def get_reference_risk_capital_service_factory(
 
 def get_reference_capital_repository_factory(
     request: Request,
-) -> Callable[[], PrimeCapitalStackRepository]:
+) -> Callable[[], ReferenceCapitalRepository]:
     """Build the stored-reference-snapshot reader on demand, for the same reason."""
     return lambda: PrimeCapitalStackRepository(request.app.state.engine)

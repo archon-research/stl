@@ -34,6 +34,7 @@ def _reference_allocation(
         required_risk_capital_usd=Decimal("990048.94"),
         crr_pct=Decimal("0.28764051"),
         receipt_token_id=receipt_token_id,
+        chain_id=1,
         chain="mainnet",
     )
 

@@ -37,10 +37,7 @@ class AllocationRiskCapital:
       the rest of the prime is still priced.
     """
 
-    # ``None`` only for a reference-sourced allocation whose upstream position
-    # does not resolve to a receipt token — a Uniswap V4 row carries a 32-byte
-    # pool id where an address is expected, so it can never resolve.
-    receipt_token_id: int | None
+    receipt_token_id: int
     symbol: str
     protocol_name: str
     exposure_usd: Decimal

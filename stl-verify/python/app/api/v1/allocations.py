@@ -19,12 +19,12 @@ from app.api._validators import (
 from app.api.deps import get_engine, get_reference_risk_capital_service_factory
 from app.api.time_series import TimeSeriesWindow, apply_cache_control, build_window, get_time_series_query_params
 from app.config import get_settings
-from app.domain.chain_names import UPSTREAM_NETWORK_TO_CHAIN_ID
 from app.domain.entities.allocation import (
     AnchorageCustodyHolding,
     DirectAssetHolding,
     EthAddress,
     ReceiptTokenPosition,
+    as_address,
 )
 from app.domain.entities.allocation_category import AllocationCategory
 from app.domain.entities.reference_risk_capital import ReferenceAllocation
@@ -761,12 +761,18 @@ def _reference_allocation_row(
     row: ReferenceAllocation, category_service: AllocationCategoryService
 ) -> AllocationResponse:
     """Project an upstream position onto the allocation model."""
+    if row.chain_id is None:
+        # 0 is this endpoint's off-chain-custody sentinel, so a network STL
+        # cannot map has no representable id: serving one would file an EVM
+        # position as custodied BTC.
+        raise ReferenceDataUnavailableError(
+            f"Star monitor reported a position on network {row.network!r}, which maps to no known chain"
+        )
+
     return AllocationResponse(
-        chain_id=UPSTREAM_NETWORK_TO_CHAIN_ID.get(row.network, 0),
+        chain_id=row.chain_id,
         receipt_token_id=row.receipt_token_id,
-        # Withheld unless it really is an address: a Uniswap V4 row carries a
-        # 32-byte pool id in the same upstream field.
-        receipt_token_address=row.token_address if _is_address(row.token_address) else None,
+        receipt_token_address=row.token_address if as_address(row.token_address) else None,
         # Both or neither, per the model's invariant. Upstream names the loan
         # token but carries no registry id for it, and resolving one here would
         # be a second lookup for a field `underlying_symbol` already identifies.
@@ -783,14 +789,6 @@ def _reference_allocation_row(
         category=category_service.classify(row.protocol_name, row.symbol),
         scope="prime",
     )
-
-
-def _is_address(value: str) -> bool:
-    try:
-        EthAddress(value)
-    except ValueError:
-        return False
-    return True
 
 
 def _receipt_token_row(

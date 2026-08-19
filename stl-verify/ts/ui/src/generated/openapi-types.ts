@@ -1405,12 +1405,17 @@ export interface components {
     };
     /**
      * PrimeRiskCapitalResponse
-     * @description Self-computed, model-derived capital metrics for a prime.
+     * @description Capital metrics for a prime, from one of two provenances — see `source`.
      *
-     *     Independent of the upstream Star feed. `required_risk_capital_usd` is the
-     *     sum of per-allocation RRC from the default model (`model`); it is **partial**
-     *     (only allocations the model can price contribute) and **will not** match
-     *     Sky's dashboard. `modeled_pct` reports the priced share of exposure.
+     *     Under `source: "self"` (the default) the figures are model-derived from
+     *     on-chain data: `required_risk_capital_usd` sums per-allocation RRC from the
+     *     default model (`model`), so it is **partial** — only allocations the model
+     *     can price contribute — and **will not** match Sky's dashboard.
+     *
+     *     Under `source: "reference"` they are Sky's own published figures, and every
+     *     figure is **prime-scoped**: upstream reports per prime, so the unprefixed
+     *     fields carry the same values as their `prime_`-prefixed counterparts. Do not
+     *     sum them across a prime's proxies — dedupe, as for any `prime_` field.
      */
     PrimeRiskCapitalResponse: {
       /**
@@ -1431,7 +1436,7 @@ export interface components {
       exposure_share?: string | null;
       /**
        * Exposure Usd
-       * @description Σ priced receipt-token allocation exposure (USD).
+       * @description Σ priced receipt-token allocation exposure (USD). Under `reference=true` this is upstream's own total, which deliberately does not equal the sum of `per_allocation` — the two come from separately-computed snapshots and reconcile only to about 1e-6.
        */
       exposure_usd: string;
       /**
@@ -1467,7 +1472,7 @@ export interface components {
       model: string | null;
       /**
        * Modeled Exposure Usd
-       * @description Exposure the default model could price (USD).
+       * @description Exposure the default model could price (USD). Under `reference=true` it equals `exposure_usd`: the monitor publishes only positions it has already priced.
        */
       modeled_exposure_usd: string;
       /**
@@ -1550,7 +1555,7 @@ export interface components {
       proxy_address: string;
       /**
        * Required Risk Capital Usd
-       * @description Σ per-allocation RRC from the default model (USD).
+       * @description Σ per-allocation RRC from the default model (USD). Under `reference=true` this is upstream's own Required Risk Capital total; no model runs.
        */
       required_risk_capital_usd: string;
       /**
@@ -1577,7 +1582,7 @@ export interface components {
       tokenized_junior_risk_capital_usd?: string | null;
       /**
        * Total Risk Capital Usd
-       * @description On-chain SubProxy treasury balance (USD). `null` when absent.
+       * @description On-chain SubProxy treasury balance (USD). `null` when absent. Under `reference=true` this is upstream's Total Risk Capital, which is neither on-chain nor a treasury balance.
        */
       total_risk_capital_usd?: string | null;
     };
@@ -2503,7 +2508,7 @@ export interface operations {
   get_prime_risk_capital_v1_primes__prime_id__risk_capital_get: {
     parameters: {
       query?: {
-        /** @description Answer from Sky's upstream Star monitor instead of STL's own model. The response shape is unchanged; `source` reports which provenance produced it, and the reference-only fields (`junior_risk_capital_usd`, `senior_risk_capital_usd`, the internal/external/tokenized splits, the utilization ratios and `exposure_share`) are populated only in this mode. Returns `404` when the monitor does not track the prime, and `502` when it cannot be read — the two are held apart so an outage is never served as an absence of exposure. */
+        /** @description Answer from Sky's upstream Star monitor instead of STL's own model. The response shape is unchanged; `source` reports which provenance produced it, and the reference-only fields (`junior_risk_capital_usd`, `senior_risk_capital_usd`, the internal/external/tokenized splits, the utilization ratios and `exposure_share`) are populated only in this mode. **Every figure becomes prime-scoped**, because the monitor reports per prime: the unprefixed fields carry the same values as their `prime_` counterparts, so a client fanning out across a prime's proxies must dedupe rather than sum. Returns `404` when the monitor does not track the prime, and `502` when it cannot be read — the two are held apart so an outage is never served as an absence of exposure. */
         reference?: boolean;
       };
       header?: never;

@@ -39,9 +39,13 @@ class ReferenceAllocation:
     # consumer in this codebase reads a 0-100 percentage.
     crr_pct: Decimal
     # Resolved against STL's token registry by the service, not the adapter.
-    # ``None`` whenever the join cannot be made — an unmapped network, a pool id
-    # in place of an address, or a token STL does not index.
+    # ``None`` whenever the join cannot be made — a pool id in place of an
+    # address, an unmapped network, or a token STL does not index.
     receipt_token_id: int | None = None
+    # Both ``None`` for a network upstream has added that STL has no chain id
+    # for. Callers must not substitute a placeholder id: 0 already means
+    # off-chain custody, so an unmapped EVM position would read as one.
+    chain_id: int | None = None
     chain: str | None = None
 
 

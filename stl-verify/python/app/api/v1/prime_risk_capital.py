@@ -125,12 +125,17 @@ class ChainRiskCapitalResponse(BaseModel):
 
 
 class PrimeRiskCapitalResponse(BaseModel):
-    """Self-computed, model-derived capital metrics for a prime.
+    """Capital metrics for a prime, from one of two provenances — see `source`.
 
-    Independent of the upstream Star feed. `required_risk_capital_usd` is the
-    sum of per-allocation RRC from the default model (`model`); it is **partial**
-    (only allocations the model can price contribute) and **will not** match
-    Sky's dashboard. `modeled_pct` reports the priced share of exposure.
+    Under `source: "self"` (the default) the figures are model-derived from
+    on-chain data: `required_risk_capital_usd` sums per-allocation RRC from the
+    default model (`model`), so it is **partial** — only allocations the model
+    can price contribute — and **will not** match Sky's dashboard.
+
+    Under `source: "reference"` they are Sky's own published figures, and every
+    figure is **prime-scoped**: upstream reports per prime, so the unprefixed
+    fields carry the same values as their `prime_`-prefixed counterparts. Do not
+    sum them across a prime's proxies — dedupe, as for any `prime_` field.
     """
 
     prime_id: str = Field(
@@ -164,11 +169,26 @@ class PrimeRiskCapitalResponse(BaseModel):
         description="Default RRC model used (e.g. `gap_sweep`). `null` under `reference=true`, which runs no model.",
         examples=["gap_sweep"],
     )
-    exposure_usd: PlainDecimal = Field(description="Σ priced receipt-token allocation exposure (USD).")
-    total_risk_capital_usd: PlainDecimal | None = Field(
-        default=None, description="On-chain SubProxy treasury balance (USD). `null` when absent."
+    exposure_usd: PlainDecimal = Field(
+        description=(
+            "Σ priced receipt-token allocation exposure (USD). Under `reference=true` this is upstream's "
+            "own total, which deliberately does not equal the sum of `per_allocation` — the two come "
+            "from separately-computed snapshots and reconcile only to about 1e-6."
+        )
     )
-    required_risk_capital_usd: PlainDecimal = Field(description="Σ per-allocation RRC from the default model (USD).")
+    total_risk_capital_usd: PlainDecimal | None = Field(
+        default=None,
+        description=(
+            "On-chain SubProxy treasury balance (USD). `null` when absent. Under `reference=true` this "
+            "is upstream's Total Risk Capital, which is neither on-chain nor a treasury balance."
+        ),
+    )
+    required_risk_capital_usd: PlainDecimal = Field(
+        description=(
+            "Σ per-allocation RRC from the default model (USD). Under `reference=true` this is upstream's "
+            "own Required Risk Capital total; no model runs."
+        )
+    )
     encumbrance_ratio: PlainDecimal | None = Field(
         default=None,
         deprecated=True,
@@ -178,7 +198,12 @@ class PrimeRiskCapitalResponse(BaseModel):
             "is unchanged for backwards compatibility. Use `prime_encumbrance_ratio`."
         ),
     )
-    modeled_exposure_usd: PlainDecimal = Field(description="Exposure the default model could price (USD).")
+    modeled_exposure_usd: PlainDecimal = Field(
+        description=(
+            "Exposure the default model could price (USD). Under `reference=true` it equals "
+            "`exposure_usd`: the monitor publishes only positions it has already priced."
+        )
+    )
     modeled_pct: PlainDecimal | None = Field(
         default=None, description="`modeled_exposure_usd / exposure_usd` (0-1). `null` when exposure is zero."
     )
@@ -327,6 +352,9 @@ async def get_prime_risk_capital(
             "unchanged; `source` reports which provenance produced it, and the reference-only fields "
             "(`junior_risk_capital_usd`, `senior_risk_capital_usd`, the internal/external/tokenized "
             "splits, the utilization ratios and `exposure_share`) are populated only in this mode. "
+            "**Every figure becomes prime-scoped**, because the monitor reports per prime: the "
+            "unprefixed fields carry the same values as their `prime_` counterparts, so a client "
+            "fanning out across a prime's proxies must dedupe rather than sum. "
             "Returns `404` when the monitor does not track the prime, and `502` when it cannot be read "
             "— the two are held apart so an outage is never served as an absence of exposure."
         ),
@@ -410,7 +438,10 @@ def _project_reference(prime_address: EthAddress, snapshot: ReferencePrimeRiskCa
     `prime_per_chain` stays empty because upstream publishes no proxy topology,
     so there is no per-proxy split to audit the total against.
     """
-    modeled = sum((row.exposure_usd for row in snapshot.per_allocation), Decimal("0"))
+    # Upstream publishes only positions it has already priced, so its coverage
+    # is complete by construction. Deriving a ratio from its own two endpoints
+    # would land at ~1.0 with a ~1e-6 wobble that can exceed the documented
+    # 0-1 range, and would read as "STL priced all of this" — which no model did.
     return PrimeRiskCapitalResponse(
         source="reference",
         prime_id=str(prime_address),
@@ -420,14 +451,14 @@ def _project_reference(prime_address: EthAddress, snapshot: ReferencePrimeRiskCa
         total_risk_capital_usd=snapshot.total_risk_capital_usd,
         required_risk_capital_usd=snapshot.required_risk_capital_usd,
         encumbrance_ratio=snapshot.encumbrance_ratio,
-        modeled_exposure_usd=modeled,
-        modeled_pct=_ratio(modeled, snapshot.exposure_usd),
+        modeled_exposure_usd=snapshot.exposure_usd,
+        modeled_pct=Decimal("1"),
         per_allocation=[_reference_allocation(row) for row in snapshot.per_allocation],
         prime_name=snapshot.star,
         prime_exposure_usd=snapshot.exposure_usd,
         prime_required_risk_capital_usd=snapshot.required_risk_capital_usd,
-        prime_modeled_exposure_usd=modeled,
-        prime_modeled_pct=_ratio(modeled, snapshot.exposure_usd),
+        prime_modeled_exposure_usd=snapshot.exposure_usd,
+        prime_modeled_pct=Decimal("1"),
         prime_encumbrance_ratio=snapshot.encumbrance_ratio,
         prime_proxies=[entry.address for entry in alm_proxies_for_prime(snapshot.star)],
         prime_per_chain=[],

@@ -50,6 +50,19 @@ class EthAddress(str):
         return core_schema.no_info_after_validator_function(cls, core_schema.str_schema())
 
 
+def as_address(value: str) -> EthAddress | None:
+    """Return ``value`` as an address, or ``None`` when it is not one.
+
+    For identifiers from outside STL, where "not an address" is an expected
+    answer rather than a fault — a Uniswap V4 position names itself by 32-byte
+    pool id in the field an address would occupy.
+    """
+    try:
+        return EthAddress(value)
+    except ValueError:
+        return None
+
+
 @dataclass(frozen=True)
 class ReceiptTokenPosition:
     """A receipt token held by a prime, enriched with its underlying token info."""
