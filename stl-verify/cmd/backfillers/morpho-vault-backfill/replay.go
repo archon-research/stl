@@ -46,6 +46,20 @@ func buildReplayService(logger *slog.Logger, multicaller outbound.Multicaller, p
 	return morpho_indexer.NewReplayService(svcConfig, multicaller, txManager, protocolRepo, morphoRepo, eventRepo)
 }
 
+// knownV2VaultCount reports how many VaultV2 vaults the database holds, read
+// through the same registry load every replay activity performs — so a zero here
+// is exactly the answer each of them would reach on its own.
+func knownV2VaultCount(ctx context.Context, logger *slog.Logger, multicaller outbound.Multicaller, pool *pgxpool.Pool, buildID buildregistry.BuildID, chainID int64) (int, error) {
+	svc, err := buildReplayService(logger, multicaller, pool, buildID, chainID)
+	if err != nil {
+		return 0, fmt.Errorf("building replay service: %w", err)
+	}
+	if err := svc.LoadVaultRegistry(ctx); err != nil {
+		return 0, err
+	}
+	return len(svc.V2VaultAddresses()), nil
+}
+
 // replayPartition collects, orders, and replays every structured V2 log in one
 // S3 partition, in strict (blockNumber, logIndex) order.
 //

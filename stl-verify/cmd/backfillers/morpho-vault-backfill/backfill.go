@@ -111,6 +111,11 @@ type partitionWork struct {
 type discoveryResult struct {
 	Candidates int `json:"candidates"`
 	Vaults     int `json:"vaults"`
+
+	// KnownV2Vaults is every VaultV2 in the database once this run's finds are
+	// persisted, not just this run's own — it is what decides whether the replay
+	// phase has anything to run against.
+	KnownV2Vaults int `json:"knownV2Vaults"`
 }
 
 // BackfillResult is the workflow's return value, shown in the UI's Result panel.
@@ -218,6 +223,14 @@ func discoverVaults(ctx workflow.Context, rng blockRange, state *backfillProgres
 // replayPartition) — but a partition that failed leaves a hole, and continuing
 // past it would end the run reporting success over incomplete data.
 func replayPartitions(ctx workflow.Context, rng blockRange, parts []string, state *backfillProgress) error {
+	// Discovery persists before it counts, so a zero here is the post-persist
+	// answer every partition's own registry load would reach after paying for it.
+	if state.Discovered.KnownV2Vaults == 0 {
+		workflow.GetLogger(ctx).Info("no VaultV2 vault is known; skipping the replay phase",
+			"partitions", len(parts))
+		return nil
+	}
+
 	ctx = workflow.WithActivityOptions(ctx, replayActivityOptions())
 
 	var activities *backfillActivities
@@ -320,8 +333,14 @@ func (a *backfillActivities) DiscoverVaults(ctx context.Context, rng blockRange)
 		return discoveryResult{}, fmt.Errorf("discovering vaults over blocks %d-%d: %w", rng.From, rng.To, err)
 	}
 
-	activity.GetLogger(ctx).Info("discovery complete",
-		"from", rng.From, "to", rng.To, "candidates", got.Candidates, "vaults", got.Vaults)
+	// Counted after persisting, so this run's finds are already in it.
+	got.KnownV2Vaults, err = knownV2VaultCount(ctx, a.logger, a.multicaller, a.pool, a.buildID, a.cfg.chainID)
+	if err != nil {
+		return discoveryResult{}, fmt.Errorf("counting the known VaultV2 vaults: %w", err)
+	}
+
+	activity.GetLogger(ctx).Info("discovery complete", "from", rng.From, "to", rng.To,
+		"candidates", got.Candidates, "vaults", got.Vaults, "knownV2Vaults", got.KnownV2Vaults)
 	return got, nil
 }
 
