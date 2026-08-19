@@ -18,15 +18,17 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/morpho_indexer"
 )
 
-// maxPartitionsPerRun bounds one workflow's activity count. Activities run
-// sequentially with no ContinueAsNew and each contributes ~6 history events, so
-// an unbounded run can outgrow Temporal's 51,200-event history limit and be
-// terminated mid-flight. 2500 partitions is 2.5M blocks — the whole VaultV2 era
-// with headroom, at ~15k events — so a full-history run still fits in one go.
-// What it does catch is a mistyped `from`: a dropped digit expands the range to
-// tens of thousands of partitions, which is rejected up front rather than
-// terminated hours in.
-const maxPartitionsPerRun = 2500
+// maxPartitionsPerRun rejects a mistyped range up front — a dropped digit in
+// `from`, or a millisecond timestamp pasted into `to`, expands to millions of
+// partitions — rather than letting one be terminated hours in. It is not a
+// promise that a run at the ceiling fits: activities are sequential with no
+// ContinueAsNew at ~6 history events each, so Temporal's 51,200-event limit
+// bites around 8,500 partitions.
+//
+// 10,000 partitions is 10M blocks, which keeps the runbook's whole-era form
+// ({"to":<head>,"fromV2Deploy":true}) accepted until the head passes block
+// 33,374,999, some time in 2029. At 2,500 it stopped being accepted in 2026.
+const maxPartitionsPerRun = 10_000
 
 // heartbeatInterval keeps the discovery scan visible to Temporal. Its
 // StartToClose ceiling is hours, so without a heartbeat a worker killed mid-scan
