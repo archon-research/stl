@@ -17,8 +17,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-const sourceSlug = "skyeco:star-monitoring:risk-capital"
-
 // Clock returns the current time; injected so a cycle's synced_at is testable.
 type Clock func() time.Time
 
@@ -156,7 +154,7 @@ func (s *Service) toSnapshot(
 		ExposureShare:                 row.ExposureShare,
 		EPIUtilization:                row.EPIUtilization,
 		SPJUtilization:                row.SPJUtilization,
-		Source:                        sourceSlug,
+		Source:                        entity.ReferenceDataSource,
 		BuildID:                       s.buildID,
 	}
 }

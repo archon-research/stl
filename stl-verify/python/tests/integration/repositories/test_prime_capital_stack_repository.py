@@ -71,8 +71,10 @@ async def seeded(db_url: str):
             created_at=_FIRST_OBSERVATION,
         )
         await conn.execute("DELETE FROM prime_capital_stack WHERE prime_id = $1", prime_id)
+        await conn.execute("DELETE FROM prime_reference_balance_sheet WHERE prime_id = $1", prime_id)
         yield conn, prime_id
         await conn.execute("DELETE FROM prime_capital_stack WHERE prime_id = $1", prime_id)
+        await conn.execute("DELETE FROM prime_reference_balance_sheet WHERE prime_id = $1", prime_id)
         await conn.execute("DELETE FROM allocation_position WHERE proxy_address = $1", _PROXY)
     finally:
         await conn.close()
@@ -137,6 +139,59 @@ async def test_returns_all_null_buckets_when_the_syncer_has_never_run(seeded, as
 
     assert buckets
     assert all(b.total_capital_usd is None and b.exposure_usd is None for b in buckets)
+
+
+async def _insert_history(conn: asyncpg.Connection, prime_id: int, observed_at: datetime, *, treasury: str) -> None:
+    await conn.execute(
+        """
+        INSERT INTO prime_reference_balance_sheet (
+            prime_id, observed_at, treasury_balance_usd, assets_usd, allocated_assets_usd,
+            idle_assets_usd, debt_usd, backstop_capital_usd, source, build_id
+        ) VALUES ($1, $2, $3, '1', '1', '0', '0', '0', 'skyeco:reference', 1)
+        """,
+        prime_id,
+        observed_at,
+        Decimal(treasury),
+    )
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_serves_backfilled_history_from_before_the_syncer_first_ran(seeded, async_db_url: str):
+    conn, prime_id = seeded
+    await _insert_history(conn, prime_id, _WINDOW_START, treasury="111")
+
+    buckets = await _buckets(async_db_url)
+
+    observed = [b for b in buckets if b.total_capital_usd is not None]
+    assert observed, "expected the backfilled day to populate the series"
+    assert all(b.total_capital_usd == Decimal("111") for b in observed)
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_prefers_a_snapshot_over_backfilled_history_at_the_same_instant(seeded, async_db_url: str):
+    # The two feeds overlap only where the syncer has taken over, and the
+    # snapshot is the finer cadence, so it must win.
+    conn, prime_id = seeded
+    await _insert_history(conn, prime_id, _FIRST_OBSERVATION, treasury="111")
+    await _insert_snapshot(conn, prime_id, _FIRST_OBSERVATION, total_rc="222", exposure="5")
+
+    buckets = await _buckets(async_db_url)
+
+    observed = [b for b in buckets if b.total_capital_usd is not None]
+    assert observed[0].total_capital_usd == Decimal("222")
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_never_serves_backfilled_allocated_assets_as_exposure(seeded, async_db_url: str):
+    # The feed's allocated_assets is a different measurement from the monitor's
+    # exposure, so a history-only window must report exposure as unobserved.
+    conn, prime_id = seeded
+    await _insert_history(conn, prime_id, _WINDOW_START, treasury="111")
+
+    buckets = await _buckets(async_db_url)
+
+    assert any(b.total_capital_usd is not None for b in buckets)
+    assert all(b.exposure_usd is None for b in buckets)
 
 
 @pytest.mark.asyncio(loop_scope="module")

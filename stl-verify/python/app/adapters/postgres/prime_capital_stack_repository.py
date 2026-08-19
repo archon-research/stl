@@ -1,4 +1,10 @@
-"""Reads the reference risk-capital snapshots the capital-stack syncer writes."""
+"""Reads STL's stored reference capital series.
+
+Two feeds back one series. The capital-stack syncer appends forward from its
+first run; the balance-sheet backfill holds the year before it, which is the
+only source of reference history since the Star monitor publishes none. They
+are one provenance to consumers, so they are read as one series here.
+"""
 
 import asyncio
 import logging
@@ -27,9 +33,9 @@ _REFERENCE_CAPITAL_BUCKETS_SQL = text(
         FROM allocation_position
         WHERE proxy_address = decode(:address_hex, 'hex')
         LIMIT 1
-    ), corrected AS (
+    ), snapshots AS (
         SELECT DISTINCT ON (pcs.synced_at)
-            pcs.synced_at,
+            pcs.synced_at AS observed_at,
             pcs.total_risk_capital_usd,
             pcs.exposure_usd
         FROM prime_capital_stack pcs
@@ -38,16 +44,45 @@ _REFERENCE_CAPITAL_BUCKETS_SQL = text(
     + required_time_window_clause("pcs.synced_at")
     + """
         ORDER BY pcs.synced_at, pcs.processing_version DESC
+    ), history AS (
+        SELECT DISTINCT ON (pbs.observed_at)
+            pbs.observed_at,
+            pbs.treasury_balance_usd AS total_risk_capital_usd,
+            -- Exposure is deliberately absent. This feed's allocated_assets is a
+            -- different measurement from the monitor's total_exposure (+32% for
+            -- spark at the same instant), so splicing it would step the series.
+            NULL::NUMERIC AS exposure_usd
+        FROM prime_reference_balance_sheet pbs
+        WHERE pbs.prime_id = (SELECT prime_id FROM target)
+        """
+    + required_time_window_clause("pbs.observed_at")
+    + """
+        ORDER BY pbs.observed_at, pbs.processing_version DESC
+    ), corrected AS (
+        -- One series from two feeds. `last()` has no defined order among rows
+        -- sharing a timestamp, so precedence is explicit rather than left to
+        -- chance: a backfilled day and a snapshot can land on the same instant
+        -- when a cycle runs at midnight, and the snapshot is the finer cadence.
+        SELECT DISTINCT ON (merged.observed_at)
+            merged.observed_at,
+            merged.total_risk_capital_usd,
+            merged.exposure_usd
+        FROM (
+            SELECT observed_at, total_risk_capital_usd, exposure_usd, 0 AS precedence FROM snapshots
+            UNION ALL
+            SELECT observed_at, total_risk_capital_usd, exposure_usd, 1 AS precedence FROM history
+        ) merged
+        ORDER BY merged.observed_at, merged.precedence
     )
     SELECT
         time_bucket_gapfill(
             make_interval(secs => :bucket_seconds),
-            corrected.synced_at,
+            corrected.observed_at,
             CAST(:from_timestamp AS TIMESTAMPTZ),
             CAST(:to_timestamp AS TIMESTAMPTZ)
         ) AS bucket_start,
-        locf(last(corrected.total_risk_capital_usd, corrected.synced_at)) AS total_capital_usd,
-        locf(last(corrected.exposure_usd, corrected.synced_at)) AS exposure_usd
+        locf(last(corrected.total_risk_capital_usd, corrected.observed_at)) AS total_capital_usd,
+        locf(last(corrected.exposure_usd, corrected.observed_at)) AS exposure_usd
     FROM corrected
     GROUP BY bucket_start
     ORDER BY bucket_start DESC
@@ -57,7 +92,7 @@ _REFERENCE_CAPITAL_BUCKETS_SQL = text(
 
 
 class PrimeCapitalStackRepository:
-    """Reads bucketed reference capital series from ``prime_capital_stack``."""
+    """Reads the bucketed reference capital series."""
 
     def __init__(self, engine: AsyncEngine) -> None:
         self._engine = engine
@@ -117,4 +152,4 @@ def _optional_decimal(value: Any, field_name: str) -> Decimal | None:
     try:
         return Decimal(value)
     except (InvalidOperation, TypeError, ValueError) as exc:
-        raise ValueError(f"Non-numeric {field_name} in prime_capital_stack: {value!r}") from exc
+        raise ValueError(f"Non-numeric {field_name} in the reference capital series: {value!r}") from exc

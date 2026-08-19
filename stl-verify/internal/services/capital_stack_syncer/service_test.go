@@ -143,7 +143,7 @@ func TestRunCarriesEveryUpstreamFigureOntoTheSnapshot(t *testing.T) {
 		{"JuniorRiskCapitalUSD", got.JuniorRiskCapitalUSD, "48142491.08"},
 		{"SeniorRiskCapitalUSD", got.SeniorRiskCapitalUSD, "0"},
 		{"ExposureShare", got.ExposureShare, "0.0084"},
-		{"Source", got.Source, sourceSlug},
+		{"Source", got.Source, entity.ReferenceDataSource},
 	} {
 		if tc.got != tc.want {
 			t.Errorf("%s = %q, want %q", tc.field, tc.got, tc.want)
