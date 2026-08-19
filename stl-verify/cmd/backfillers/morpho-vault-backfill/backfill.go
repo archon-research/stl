@@ -204,7 +204,7 @@ func discoverVaults(ctx workflow.Context, rng blockRange, state *backfillProgres
 	var activities *backfillActivities
 	var got discoveryResult
 	if err := workflow.ExecuteActivity(ctx, activities.DiscoverVaults, rng).Get(ctx, &got); err != nil {
-		return fmt.Errorf("discovering vaults over blocks %d-%d: %w", rng.From, rng.To, err)
+		return err
 	}
 	state.Discovered = &got
 	return nil
@@ -227,7 +227,7 @@ func replayPartitions(ctx workflow.Context, rng blockRange, parts []string, stat
 		work := partitionWork{Range: rng, Partition: part}
 		var events int
 		if err := workflow.ExecuteActivity(ctx, activities.ReplayPartition, work).Get(ctx, &events); err != nil {
-			return fmt.Errorf("replaying partition %s: %w", part, err)
+			return err
 		}
 		state.PartitionsDone++
 		state.EventsReplayed += events
