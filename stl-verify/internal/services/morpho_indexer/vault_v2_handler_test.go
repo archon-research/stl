@@ -833,20 +833,62 @@ func TestProcessBlockEvent_Allocation_UnknownAdapterHeals(t *testing.T) {
 
 // --- registration / snapshot telemetry ---
 
-// TestProcessBlockEvent_AdapterRegistration_RecordsPathAndType verifies each
-// live registration path labels morpho.v2.adapter.registrations with the path
-// that produced the row. The path label is what separates an expected
-// AddAdapter registration from a lazy self-heal, which is a discovery gap:
-// discovery enumerates a vault's whole adapter set, so post-discovery every
-// active adapter is already registered and the lazy path should stay at zero.
-// Both cases probe to Unknown so the adapter_type label the unknown-adapter
-// alert selects on is exercised too.
-func TestProcessBlockEvent_AdapterRegistration_RecordsPathAndType(t *testing.T) {
+// TestProcessBlockEvent_AdapterRegistration_CountsOnlyAppendedObservations pins the
+// counter's meaning to "observations recorded", not "write attempts". Every Allocate
+// asserts membership — thousands per day — but only the ones that add something the
+// log did not already hold are observations. Counting attempts instead would put
+// VectorMorphoV2LazyAdapterRegistrations (>3 in 6h under observed_via="allocation_event")
+// permanently in alarm, which is the same as deleting it.
+func TestProcessBlockEvent_AdapterRegistration_CountsOnlyAppendedObservations(t *testing.T) {
+	h := newTestHarness(t)
+	h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
+	reader := h.recordMetrics(t)
+
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		if len(calls) == 1 && calls[0].Target == testAdapterAddr {
+			return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(41_300_000))}}, nil
+		}
+		return nil, errTestUnexpectedCall(calls)
+	}
+	// Already a member at this position, so nothing is probed and nothing is appended.
+	h.morphoRepo.GetActiveAdapterAtFn = func(_ context.Context, _ int64, _ []byte, _ entity.BlockPosition) (*entity.MorphoAdapterMember, error) {
+		return testAdapterMember(), nil
+	}
+	h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterObservation) (int64, bool, error) {
+		return 55, false, nil
+	}
+
+	log := h.makeV2VaultLog(h.vaultV2EventsABI.Events["Allocate"], testVaultAddr,
+		[]common.Hash{addrTopic(testCaller), addrTopic(testAdapterAddr)},
+		big.NewInt(5000), hashSlice(common.HexToHash("0xaa")), big.NewInt(5000))
+	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+
+	want := map[string]string{"observed_via": string(entity.MembershipFromAllocation)}
+	if got := counterValue(t, reader, "morpho.v2.adapter.registrations", want); got != 0 {
+		t.Errorf("morpho.v2.adapter.registrations%v = %d, want 0: an assertion that appended nothing is not an observation", want, got)
+	}
+	// The snapshot itself is still written and still counted.
+	if got := counterValue(t, reader, "morpho.v2.snapshots.written", map[string]string{"snapshot.type": string(v2SnapshotAdapterState)}); got != 1 {
+		t.Errorf("morpho.v2.snapshots.written = %d, want 1", got)
+	}
+}
+
+// TestProcessBlockEvent_AdapterRegistration_RecordsProvenanceAndType verifies each
+// live write path labels morpho.v2.adapter.registrations with how the membership
+// was observed. observed_via is what separates an expected AddAdapter transition
+// from a membership inferred from an Allocate, which is a discovery gap: discovery
+// enumerates a vault's whole adapter set, so post-discovery every active adapter is
+// already on record and allocation_event should stay at zero. Both cases probe to
+// Unknown so the adapter_type label the unknown-adapter alert selects on is
+// exercised too.
+func TestProcessBlockEvent_AdapterRegistration_RecordsProvenanceAndType(t *testing.T) {
 	tests := []struct {
-		name     string
-		setup    func(h *serviceTestHarness)
-		makeLog  func(h *serviceTestHarness) shared.Log
-		wantPath adapterRegistrationPath
+		name    string
+		setup   func(h *serviceTestHarness)
+		makeLog func(h *serviceTestHarness) shared.Log
+		wantVia entity.MembershipSource
 	}{
 		{
 			name: "AddAdapter event",
@@ -867,7 +909,7 @@ func TestProcessBlockEvent_AdapterRegistration_RecordsPathAndType(t *testing.T) 
 			makeLog: func(h *serviceTestHarness) shared.Log {
 				return h.makeV2VaultLog(h.vaultV2EventsABI.Events["AddAdapter"], testVaultAddr, []common.Hash{addrTopic(testAdapterAddr)})
 			},
-			wantPath: adapterPathAddAdapter,
+			wantVia: entity.MembershipFromAddAdapter,
 		},
 		{
 			name: "Allocate for an adapter that predates discovery",
@@ -893,7 +935,7 @@ func TestProcessBlockEvent_AdapterRegistration_RecordsPathAndType(t *testing.T) 
 					[]common.Hash{addrTopic(testCaller), addrTopic(testAdapterAddr)},
 					big.NewInt(5000), hashSlice(common.HexToHash("0xaa")), big.NewInt(5000))
 			},
-			wantPath: adapterPathLazySelfHeal,
+			wantVia: entity.MembershipFromAllocation,
 		},
 	}
 	for _, tt := range tests {
@@ -910,7 +952,7 @@ func TestProcessBlockEvent_AdapterRegistration_RecordsPathAndType(t *testing.T) 
 				t.Fatalf("processBlock: %v", err)
 			}
 
-			want := map[string]string{"adapter.type": "unknown", "registration.path": string(tt.wantPath)}
+			want := map[string]string{"adapter.type": "unknown", "observed_via": string(tt.wantVia)}
 			if got := counterValue(t, reader, "morpho.v2.adapter.registrations", want); got != 1 {
 				t.Errorf("morpho.v2.adapter.registrations%v = %d, want 1", want, got)
 			}

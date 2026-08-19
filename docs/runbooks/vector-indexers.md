@@ -1640,10 +1640,16 @@ market, `MorphoVaultV1Adapter` wraps a nested MetaMorpho V1 vault), and the
 
 **Signals** (all carry `chain` + `cluster`):
 
-- `morpho_v2_adapter_registrations_total{adapter_type, registration_path}` — one
-  sample per registry row written. `adapter_type` is the on-chain classification
-  (`market_v1` | `vault_v1` | `unknown`); `registration_path` is the route that
-  wrote it (`discovery` | `add_adapter` | `lazy_self_heal`).
+- `morpho_v2_adapter_registrations_total{adapter_type, observed_via}` — one
+  sample per adapter-membership observation **appended** to
+  `morpho_adapter_membership` (an assertion that changes nothing is not counted).
+  `adapter_type` is the classification the observation carried (`market_v1` |
+  `vault_v1` | `unknown` = probed and unclassifiable | `unprobed` = the
+  observation carried no probe, which is what a de-registration looks like);
+  `observed_via` is how the membership was observed and takes the same five
+  values as the DB column (`add_adapter_event` | `remove_adapter_event` |
+  `allocation_event` | `vault_discovery` | `bootstrap_seed`), so the same
+  question can be asked in PromQL and in SQL.
 - `morpho_v2_snapshots_written_total{snapshot_type}` — one sample per **committed**
   event-driven snapshot (`adapter_state` | `vault_cap` | `vault_fee`).
   Discovery-seeded `adapter_state` rows are deliberately excluded: this counter is
@@ -1725,9 +1731,10 @@ vault is discovered at once. Acknowledge and curate.
 
 ### First checks
 
-1. **Which path** — `sum by (registration_path) (increase(morpho_v2_adapter_registrations_total{adapter_type="unknown"}[24h]))`.
-   All `discovery` means a bootstrap/backfill burst (benign, but still curate).
-   Any meaningful `add_adapter` share means a new family is shipping live.
+1. **Which provenance** — `sum by (observed_via) (increase(morpho_v2_adapter_registrations_total{adapter_type="unknown"}[24h]))`.
+   All `vault_discovery` (or `bootstrap_seed`) means a bootstrap/backfill burst
+   (benign, but still curate). Any meaningful `add_adapter_event` share means a
+   new family is shipping live.
 2. **Identify the adapters** (`db-query`):
 
    ```sql
@@ -1799,11 +1806,11 @@ approximation until history is replayed.
 1. **Is it one new vault or many?** A vault discovered mid-life whose adapter set
    changed between the enumeration read and the next event produces a small,
    one-off burst. Correlate with the discovery path:
-   `sum by (registration_path) (increase(morpho_v2_adapter_registrations_total[6h]))`
-   — lazy registrations with **no** matching `discovery` traffic in the same window
-   are the suspicious case.
+   `sum by (observed_via) (increase(morpho_v2_adapter_registrations_total[6h]))`
+   — `allocation_event` observations with **no** matching `vault_discovery`
+   traffic in the same window are the suspicious case.
 2. **Identify them** — the indexer logs one WARN per heal:
-   `kubectl -n vector logs -l app=morpho-indexer | grep "registered lazily"`
+   `kubectl -n vector logs -l app=morpho-indexer | grep "membership inferred from an Allocate"`
    (carries vault, adapter, block).
 3. **Was the vault genuinely new?** Compare the adapter's `added_at_block` against
    its vault's first-seen block (`db-query`):
@@ -1844,7 +1851,7 @@ approximation until history is replayed.
 
 ### Verify recovery
 
-`increase(morpho_v2_adapter_registrations_total{registration_path="lazy_self_heal"}[6h]) <= 3`
+`increase(morpho_v2_adapter_registrations_total{observed_via="allocation_event"}[6h]) <= 3`
 for the affected chain. If the cause was an enumeration bug, also replay the
 affected vaults so the healed adapters converge onto their true `AddAdapter`
 block.

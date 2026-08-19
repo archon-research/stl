@@ -73,7 +73,6 @@ func (s *Service) handleAddAdapter(ctx context.Context, e *AddAdapterEvent, vaul
 		if err != nil {
 			return err
 		}
-		s.telemetry.RecordAdapterRegistration(ctx, adapterType, adapterPathAddAdapter)
 		return s.saveAdapterSeedState(ctx, tx, adapterID, realAssets, blockNumber, blockVersion, blockTimestamp)
 	})
 }
@@ -92,6 +91,12 @@ func (s *Service) observeAdapterMembership(ctx context.Context, tx pgx.Tx, vault
 	})
 	if err != nil {
 		return 0, false, fmt.Errorf("recording adapter %s membership at block %d: %w", adapter.Hex(), membership.BlockNumber, err)
+	}
+	// Counted here, at the one point every write path converges on, and only when
+	// a row was actually appended — an assertion that changes nothing is not an
+	// observation the log gained.
+	if appended {
+		s.telemetry.RecordAdapterMembershipObservation(ctx, membership.AdapterType, membership.ObservedVia)
 	}
 	return adapterID, appended, nil
 }
@@ -249,7 +254,6 @@ func (s *Service) assertAllocatedAdapterIsMember(ctx context.Context, tx pgx.Tx,
 			"vault", vaultAddress.Hex(), "adapter", adapter.Hex(), "block", at.BlockNumber)
 		if probedType != nil {
 			s.warnIfUnknownAdapterType(vaultAddress, adapter, *probedType, at.BlockNumber)
-			s.telemetry.RecordAdapterRegistration(ctx, *probedType, adapterPathLazySelfHeal)
 		}
 	}
 	return adapterID, nil

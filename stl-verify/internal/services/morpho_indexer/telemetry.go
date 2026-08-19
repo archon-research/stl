@@ -15,19 +15,6 @@ import (
 
 const instrumentationName = "github.com/archon-research/stl/stl-verify/internal/services/morpho_indexer"
 
-// adapterRegistrationPath names the code path that produced a VaultV2 adapter
-// registry row. The three paths have very different expected volumes, so the
-// alerts distinguish them: discovery seeds a newly-found vault's whole adapter
-// set at once, AddAdapter is the normal live registration, and the lazy
-// self-heal should stay at zero once a vault has been discovered.
-type adapterRegistrationPath string
-
-const (
-	adapterPathDiscovery    adapterRegistrationPath = "discovery"
-	adapterPathAddAdapter   adapterRegistrationPath = "add_adapter"
-	adapterPathLazySelfHeal adapterRegistrationPath = "lazy_self_heal"
-)
-
 // v2SnapshotType names the structured VaultV2 table a snapshot landed in.
 type v2SnapshotType string
 
@@ -41,8 +28,18 @@ const (
 // outside the modelled set renders as its numeric form rather than collapsing
 // into "unknown": Unknown (99) is a real classification the alerts count, so
 // masking a newly added enum value as Unknown would corrupt that signal.
-func adapterTypeLabel(t entity.MorphoAdapterType) string {
-	switch t {
+//
+// A nil classification renders as "unprobed", which is a THIRD state and not a
+// synonym for "unknown": 99 means an on-chain probe ran and could not classify
+// the adapter, while unprobed means the observation carried no probe at all —
+// the shape a de-registration takes, since an adapter first seen by its own
+// removal has no known type. VectorMorphoV2UnknownAdapters counts only the
+// former, so collapsing the two would make removals look like probe failures.
+func adapterTypeLabel(t *entity.MorphoAdapterType) string {
+	if t == nil {
+		return "unprobed"
+	}
+	switch *t {
 	case entity.MorphoAdapterTypeMarketV1:
 		return "market_v1"
 	case entity.MorphoAdapterTypeVaultV1:
@@ -50,7 +47,7 @@ func adapterTypeLabel(t entity.MorphoAdapterType) string {
 	case entity.MorphoAdapterTypeUnknown:
 		return "unknown"
 	default:
-		return fmt.Sprintf("type_%d", int16(t))
+		return fmt.Sprintf("type_%d", int16(*t))
 	}
 }
 
@@ -139,7 +136,7 @@ func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider,
 
 	t.adapterRegistrations, err = meter.Int64Counter(
 		"morpho.v2.adapter.registrations",
-		metric.WithDescription("VaultV2 adapter registry rows written, by on-chain classification and the path that registered them"),
+		metric.WithDescription("VaultV2 adapter-membership observations appended, by on-chain classification and how the membership was observed"),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("creating adapterRegistrations counter: %w", err)
@@ -245,19 +242,30 @@ func (t *Telemetry) RecordError(ctx context.Context, operation string, err error
 	))
 }
 
-// RecordAdapterRegistration records that a VaultV2 adapter was written to the
-// registry. It is called from inside the write transaction, so a transaction
-// that later rolls back over-counts by one, and the SQS retry counts again.
-// Both are bounded by the block-failure rate the error alerts already cover, and
-// the rules reading this counter threshold over hours rather than single events.
-func (t *Telemetry) RecordAdapterRegistration(ctx context.Context, adapterType entity.MorphoAdapterType, path adapterRegistrationPath) {
+// RecordAdapterMembershipObservation records that one VaultV2 adapter-membership
+// observation was APPENDED to the log. Callers must not record when the
+// repository appended nothing, so the counter means "observations recorded"
+// rather than "write attempts" — otherwise every Allocate would increment it,
+// thousands per day, and VectorMorphoV2LazyAdapterRegistrations would fire
+// permanently.
+//
+// observed_via carries the same five values as
+// morpho_adapter_membership.observed_via, so a PromQL question and a SQL question
+// about provenance have the same vocabulary. adapter.type is the classification
+// the observation carried, with "unprobed" for the removals that carry none.
+//
+// It is called from inside the write transaction, so a transaction that later
+// rolls back over-counts by one, and the SQS retry counts again. Both are bounded
+// by the block-failure rate the error alerts already cover, and the rules reading
+// this counter threshold over hours rather than single events.
+func (t *Telemetry) RecordAdapterMembershipObservation(ctx context.Context, adapterType *entity.MorphoAdapterType, observedVia entity.MembershipSource) {
 	if t == nil {
 		return
 	}
 	t.adapterRegistrations.Add(ctx, 1, metric.WithAttributes(
 		t.chainAttr,
 		attribute.String("adapter.type", adapterTypeLabel(adapterType)),
-		attribute.String("registration.path", string(path)),
+		attribute.String("observed_via", string(observedVia)),
 	))
 }
 

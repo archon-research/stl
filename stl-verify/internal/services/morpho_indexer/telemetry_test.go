@@ -81,25 +81,30 @@ func TestSecondsHistograms_UseSecondsBuckets(t *testing.T) {
 	}
 }
 
-// TestRecordAdapterRegistration_LabelsTypeAndPath pins the label vocabulary the
-// VectorMorphoV2UnknownAdapters and VectorMorphoV2LazyAdapterRegistrations rules
-// select on. Renaming a value here silently un-fires those alerts.
-func TestRecordAdapterRegistration_LabelsTypeAndPath(t *testing.T) {
+// TestRecordAdapterMembershipObservation_LabelsTypeAndProvenance pins the label
+// vocabulary the VectorMorphoV2UnknownAdapters and
+// VectorMorphoV2LazyAdapterRegistrations rules select on. Renaming a value here
+// silently un-fires those alerts. observed_via deliberately carries the same five
+// values as morpho_adapter_membership.observed_via, so the metric and the table
+// answer provenance questions in one vocabulary.
+func TestRecordAdapterMembershipObservation_LabelsTypeAndProvenance(t *testing.T) {
 	tests := []struct {
 		name        string
-		adapterType entity.MorphoAdapterType
-		path        adapterRegistrationPath
+		adapterType *entity.MorphoAdapterType
+		observedVia entity.MembershipSource
 		wantType    string
 	}{
-		{"market adapter seeded at discovery", entity.MorphoAdapterTypeMarketV1, adapterPathDiscovery, "market_v1"},
-		{"nested vault adapter via AddAdapter", entity.MorphoAdapterTypeVaultV1, adapterPathAddAdapter, "vault_v1"},
-		{"unclassifiable adapter via lazy self-heal", entity.MorphoAdapterTypeUnknown, adapterPathLazySelfHeal, "unknown"},
-		{"adapter type added to the enum but not the label map", entity.MorphoAdapterType(3), adapterPathAddAdapter, "type_3"},
+		{"market adapter seeded at discovery", adapterTypeFor(entity.MorphoAdapterTypeMarketV1), entity.MembershipFromDiscovery, "market_v1"},
+		{"nested vault adapter via AddAdapter", adapterTypeFor(entity.MorphoAdapterTypeVaultV1), entity.MembershipFromAddAdapter, "vault_v1"},
+		{"unclassifiable adapter inferred from an Allocate", adapterTypeFor(entity.MorphoAdapterTypeUnknown), entity.MembershipFromAllocation, "unknown"},
+		{"a removal carries no classification at all", nil, entity.MembershipFromRemoveAdapter, "unprobed"},
+		{"adapter seeded by the bootstrap", adapterTypeFor(entity.MorphoAdapterTypeMarketV1), entity.MembershipFromBootstrapSeed, "market_v1"},
+		{"adapter type added to the enum but not the label map", adapterTypeFor(entity.MorphoAdapterType(3)), entity.MembershipFromAddAdapter, "type_3"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tel, reader := newRecordingTelemetry(t)
-			tel.RecordAdapterRegistration(context.Background(), tt.adapterType, tt.path)
+			tel.RecordAdapterMembershipObservation(context.Background(), tt.adapterType, tt.observedVia)
 
 			points := counterPoints(t, reader, "morpho.v2.adapter.registrations")
 			if len(points) != 1 {
@@ -108,7 +113,7 @@ func TestRecordAdapterRegistration_LabelsTypeAndPath(t *testing.T) {
 			want := attribute.NewSet(
 				attribute.String("chain", "mainnet"),
 				attribute.String("adapter.type", tt.wantType),
-				attribute.String("registration.path", string(tt.path)),
+				attribute.String("observed_via", string(tt.observedVia)),
 			)
 			if !points[0].Attributes.Equals(&want) {
 				t.Errorf("attributes = %v, want %v", points[0].Attributes.Encoded(attribute.DefaultEncoder()), want.Encoded(attribute.DefaultEncoder()))
@@ -182,7 +187,7 @@ func exerciseAllMethods(t *testing.T, tel *Telemetry) {
 	tel.RecordRPCCall(ctx, "getMarketState", time.Millisecond, nil)
 	tel.RecordRPCCall(ctx, "getMarketState", time.Millisecond, someErr)
 	tel.RecordError(ctx, "op", someErr)
-	tel.RecordAdapterRegistration(ctx, entity.MorphoAdapterTypeMarketV1, adapterPathAddAdapter)
+	tel.RecordAdapterMembershipObservation(ctx, adapterTypeFor(entity.MorphoAdapterTypeMarketV1), entity.MembershipFromAddAdapter)
 	tel.RecordV2Snapshot(ctx, v2SnapshotAdapterState)
 
 	_, span := tel.StartBlockSpan(ctx, 1)
@@ -216,8 +221,8 @@ func TestTelemetry_NilSafe(t *testing.T) {
 		tel.RecordError(ctx, "processBlock", nil)
 	})
 
-	t.Run("RecordAdapterRegistration", func(t *testing.T) {
-		tel.RecordAdapterRegistration(ctx, entity.MorphoAdapterTypeUnknown, adapterPathLazySelfHeal)
+	t.Run("RecordAdapterMembershipObservation", func(t *testing.T) {
+		tel.RecordAdapterMembershipObservation(ctx, adapterTypeFor(entity.MorphoAdapterTypeUnknown), entity.MembershipFromAllocation)
 	})
 
 	t.Run("RecordV2Snapshot", func(t *testing.T) {
@@ -253,3 +258,6 @@ func TestTelemetry_NilSafe(t *testing.T) {
 		telemetry.SetSpanError(span, someErr, "test error description")
 	})
 }
+
+// adapterTypeFor is the address-of helper the nil-able classification label needs.
+func adapterTypeFor(t entity.MorphoAdapterType) *entity.MorphoAdapterType { return new(t) }

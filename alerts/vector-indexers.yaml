@@ -447,10 +447,15 @@ groups:
   # of the 20-rules-per-group cap.
   #
   # Signals (morpho-indexer OTel instruments, all carrying chain + cluster):
-  #   morpho_v2_adapter_registrations_total{adapter_type,registration_path}
-  #     one sample per adapter registry row written. adapter_type is the on-chain
-  #     classification (market_v1 | vault_v1 | unknown); registration_path is
-  #     which route wrote it (discovery | add_adapter | lazy_self_heal).
+  #   morpho_v2_adapter_registrations_total{adapter_type,observed_via}
+  #     one sample per adapter-membership observation APPENDED to
+  #     morpho_adapter_membership; an assertion that changes nothing is not
+  #     counted, so this means "observations recorded", not "write attempts".
+  #     adapter_type is the classification the observation carried (market_v1 |
+  #     vault_v1 | unknown = probed and unclassifiable | unprobed = no probe, the
+  #     shape a de-registration takes); observed_via mirrors the DB column
+  #     (add_adapter_event | remove_adapter_event | allocation_event |
+  #     vault_discovery | bootstrap_seed).
   #   morpho_v2_snapshots_written_total{snapshot_type}
   #     one sample per COMMITTED event-driven snapshot
   #     (adapter_state | vault_cap | vault_fee).
@@ -488,12 +493,14 @@ groups:
         # AddAdapter fired 5 times and RemoveAdapter 0 times across ALL adapter
         # types, so the live registration path cannot produce more than ~1/day
         # even if every single adapter were unclassifiable. The only bursty source
-        # is registration_path="discovery", which seeds a newly found vault's
-        # entire adapter set in one transaction (the 7+/8min above). 25 per 24h
-        # sits ~3x above that observed burst and ~25x above the live path, so it
-        # can only mean Morpho shipped an adapter family the probe cannot
-        # classify. All three paths are counted: an unclassifiable family that
-        # only ever arrives via discovery must not be invisible here.
+        # is observed_via="vault_discovery" (and its bootstrap_seed twin), which
+        # seeds a newly found vault's entire adapter set in one transaction (the
+        # 7+/8min above). 25 per 24h sits ~3x above that observed burst and ~25x
+        # above the live path, so it can only mean Morpho shipped an adapter
+        # family the probe cannot classify. Every provenance is counted: an
+        # unclassifiable family that only ever arrives via discovery must not be
+        # invisible here. adapter_type="unknown" excludes "unprobed" by
+        # construction, so removals cannot inflate this.
         #
         # Expect one firing during the initial VaultV2 backfill/bootstrap, when
         # every existing V2 vault is discovered at once. Acknowledge it, then
@@ -522,17 +529,20 @@ groups:
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectormorphov2unknownadapters
 
       - alert: VectorMorphoV2LazyAdapterRegistrations
-        # The lazy self-heal registers an adapter the moment an Allocate /
-        # Deallocate / RemoveAdapter names one that is NOT in our registry. It
-        # exists so such an event cannot poison the FIFO queue, and it is correct
-        # — but it is also the tell for a discovery gap, because vault discovery
-        # enumerates the vault's CURRENT adapter set and seeds every entry. Once a
-        # vault is discovered, every active adapter is already registered, so the
-        # steady-state rate of this path is zero.
+        # An Allocate / Deallocate proves its adapter is in the vault's set, so
+        # when the membership log has no answer at that position we record the
+        # membership it implies rather than poison the FIFO queue. That is
+        # correct — but it is also the tell for a discovery gap, because vault
+        # discovery enumerates the vault's CURRENT adapter set and records every
+        # entry. Once a vault is discovered the log already answers, and since
+        # the counter only counts observations that were actually APPENDED, the
+        # steady-state rate of observed_via="allocation_event" is zero rather
+        # than one per allocation.
         #
-        # It also costs data quality: a lazily registered adapter's AddedAtBlock
-        # is the event block, not the true AddAdapter block, so its lifetime is an
-        # approximation until history is replayed.
+        # It also costs data quality: an adapter known only from an Allocate has
+        # no add_adapter_event observation at all, so MIN(block_number) FILTER
+        # (WHERE observed_via = 'add_adapter_event') is NULL for it until its
+        # history is replayed.
         #
         # >3 per 6h absorbs the legitimate one-off (an adapter set that changed
         # between the discovery enumeration read and the next event, or the
@@ -541,7 +551,7 @@ groups:
         expr: |
           sum by (chain, cluster) (
             increase(morpho_v2_adapter_registrations_total{
-              registration_path="lazy_self_heal", k8s_namespace_name="vector"
+              observed_via="allocation_event", k8s_namespace_name="vector"
             }[6h])
           ) > 3
         for: 30m

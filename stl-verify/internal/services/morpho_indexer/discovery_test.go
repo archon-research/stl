@@ -583,11 +583,11 @@ func TestProcessBlockEvent_VaultDiscovery_V2_EnumeratesAndSeedsAdapters(t *testi
 		t.Errorf("adapterB seed realAssets = %v, want %s (hash-pinned)", got, realAssetsB)
 	}
 
-	// Registrations seeded here carry registration.path="discovery", which is what
-	// lets VectorMorphoV2LazyAdapterRegistrations treat the lazy path as a defect
-	// signal rather than normal new-vault traffic.
+	// Observations seeded here carry observed_via="vault_discovery", which is what
+	// lets VectorMorphoV2LazyAdapterRegistrations treat the allocation_event path as
+	// a defect signal rather than normal new-vault traffic.
 	for _, wantType := range []string{"market_v1", "vault_v1"} {
-		want := map[string]string{"adapter.type": wantType, "registration.path": string(adapterPathDiscovery)}
+		want := map[string]string{"adapter.type": wantType, "observed_via": string(entity.MembershipFromDiscovery)}
 		if got := counterValue(t, reader, "morpho.v2.adapter.registrations", want); got != 1 {
 			t.Errorf("morpho.v2.adapter.registrations%v = %d, want 1", want, got)
 		}
