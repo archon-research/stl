@@ -344,7 +344,8 @@ func (a *backfillActivities) ReplayPartition(ctx context.Context, work partition
 		return 0, fmt.Errorf("replaying partition %s: %w", work.Partition, err)
 	}
 
-	activity.GetLogger(ctx).Info("replayed partition", "partition", work.Partition, "events", events)
+	activity.GetLogger(ctx).Info("replayed partition",
+		"partition", work.Partition, "events", events, "v2Vaults", len(v2Vaults))
 	return events, nil
 }
 
