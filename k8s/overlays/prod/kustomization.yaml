@@ -26,10 +26,13 @@ resources:
   - ../../base/base-oracle-price-worker
   - ../../base/optimism-watcher
   - ../../base/optimism-backup-worker
+  - ../../base/optimism-allocation-tracker
   - ../../base/unichain-watcher
   - ../../base/unichain-backup-worker
+  - ../../base/unichain-allocation-tracker
   - ../../base/arbitrum-watcher
   - ../../base/arbitrum-backup-worker
+  - ../../base/arbitrum-allocation-tracker
   - ../../base/prime-debt-indexer
   - ../../base/base-psm3-indexer
   - ../../base/optimism-psm3-indexer
@@ -141,14 +144,26 @@ images:
     # Shares the backup-worker image — same binary, different chain config via env vars
     newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-backup-worker
     newTag: "29f1a118a5dd13ea62104e866f13fcc663ce118c"
+  - name: optimism-allocation-tracker
+    # Shares the allocation-tracker image — same binary, different chain config via env vars
+    newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-allocation-tracker
+    newTag: "e77e8fc0e6b74f0d387ac9994973bd13110011e4"
   - name: unichain-backup-worker
     # Shares the backup-worker image — same binary, different chain config via env vars
     newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-backup-worker
     newTag: "29f1a118a5dd13ea62104e866f13fcc663ce118c"
+  - name: unichain-allocation-tracker
+    # Shares the allocation-tracker image — same binary, different chain config via env vars
+    newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-allocation-tracker
+    newTag: "e77e8fc0e6b74f0d387ac9994973bd13110011e4"
   - name: arbitrum-backup-worker
     # Shares the backup-worker image — same binary, different chain config via env vars
     newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-backup-worker
     newTag: "29f1a118a5dd13ea62104e866f13fcc663ce118c"
+  - name: arbitrum-allocation-tracker
+    # Shares the allocation-tracker image — same binary, different chain config via env vars
+    newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-allocation-tracker
+    newTag: "e77e8fc0e6b74f0d387ac9994973bd13110011e4"
   - name: prime-debt-indexer
     newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-prime-debt-indexer
     newTag: "29f1a118a5dd13ea62104e866f13fcc663ce118c"
