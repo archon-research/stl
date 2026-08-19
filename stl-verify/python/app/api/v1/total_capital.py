@@ -25,7 +25,12 @@ router = APIRouter(tags=["primes", "capital"])
 
 
 class TotalCapitalBucketResponse(BaseModel):
-    """Last observed treasury balance within a single time bucket (LOCF gap-filled)."""
+    """Last observed capital figures within a single time bucket (LOCF gap-filled).
+
+    Only ``total_capital_usd`` is served in both modes. The other two are
+    reference-only and come from two different upstream feeds, so each is null
+    outside the range its own feed covers.
+    """
 
     bucket_start: datetime = Field(description="Inclusive start of the time bucket (UTC).")
     total_capital_usd: PlainDecimal | None = Field(
@@ -70,7 +75,9 @@ class TotalCapitalEnvelope(BaseModel):
         ),
     )
     window: TimeSeriesWindow = Field(description="The window and resolution applied to this response.")
-    data: list[TotalCapitalBucketResponse] = Field(description="Last treasury balance per time bucket.")
+    data: list[TotalCapitalBucketResponse] = Field(
+        description="Last observed capital figures per time bucket, newest first."
+    )
 
 
 async def _get_service(engine: AsyncEngine = Depends(get_engine)) -> AllocationService:
@@ -85,7 +92,9 @@ async def _get_service(engine: AsyncEngine = Depends(get_engine)) -> AllocationS
         "Return the prime's total capital over time, gap-filled (LOCF) into buckets. Total "
         "capital is the treasury USDS held in the prime's SubProxy wallet (USDS is "
         "dollar-pegged, so the balance is the USD figure); it matches the upstream Star "
-        "`total_capital`. Returns `404` if the prime is unknown. Defaults to the last 24h; "
+        "`total_capital`. Under `reference=true` each bucket also carries `assets_usd` "
+        "(the upstream PRIME COLLATERAL figure) and the monitor's `encumbrance_ratio`. "
+        "Returns `404` if the prime is unknown. Defaults to the last 24h; "
         "pass a window and `resolution` for longer ranges."
     ),
 )

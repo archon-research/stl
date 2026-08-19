@@ -245,3 +245,20 @@ async def test_history_carries_assets_but_no_encumbrance(seeded, async_db_url: s
 
     assert any(b.assets_usd == Decimal("1") for b in buckets)
     assert all(b.encumbrance_ratio is None for b in buckets)
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_keeps_assets_when_a_later_snapshot_lands_in_the_same_window(seeded, async_db_url: str):
+    # The balance sheet is stamped at midnight and the monitor runs intraday, so
+    # any live window holds a history row followed by snapshots. Each figure must
+    # survive the other feed's rows rather than being nulled by the later one.
+    conn, prime_id = seeded
+    await _insert_history(conn, prime_id, _WINDOW_START, treasury="111")
+    await _insert_snapshot(conn, prime_id, _FIRST_OBSERVATION, total_rc="222", exposure="5")
+
+    buckets = await _buckets(async_db_url)
+
+    latest = [b for b in buckets if b.bucket_start >= _FIRST_OBSERVATION]
+    assert latest, "expected buckets at or after the snapshot"
+    assert all(b.assets_usd == Decimal("1") for b in latest)
+    assert all(b.encumbrance_ratio == Decimal("0.37") for b in latest)

@@ -92,9 +92,26 @@ _REFERENCE_CAPITAL_BUCKETS_SQL = text(
             CAST(:to_timestamp AS TIMESTAMPTZ)
         ) AS bucket_start,
         locf(last(corrected.total_risk_capital_usd, corrected.observed_at)) AS total_capital_usd,
-        locf(last(corrected.exposure_usd, corrected.observed_at)) AS exposure_usd,
-        locf(last(corrected.encumbrance_ratio, corrected.observed_at)) AS encumbrance_ratio,
-        locf(last(corrected.assets_usd, corrected.observed_at)) AS assets_usd
+        -- FILTER, not just treat_null_as_missing: the two feeds NULL each other's
+        -- columns, so without it last() returns the NULL of whichever feed wrote
+        -- the bucket's newest row and locf then carries that NULL forever. The
+        -- daily balance sheet is stamped at midnight and the monitor runs
+        -- intraday, so that is every live bucket.
+        locf(
+            last(corrected.exposure_usd, corrected.observed_at)
+                FILTER (WHERE corrected.exposure_usd IS NOT NULL),
+            treat_null_as_missing => true
+        ) AS exposure_usd,
+        locf(
+            last(corrected.encumbrance_ratio, corrected.observed_at)
+                FILTER (WHERE corrected.encumbrance_ratio IS NOT NULL),
+            treat_null_as_missing => true
+        ) AS encumbrance_ratio,
+        locf(
+            last(corrected.assets_usd, corrected.observed_at)
+                FILTER (WHERE corrected.assets_usd IS NOT NULL),
+            treat_null_as_missing => true
+        ) AS assets_usd
     FROM corrected
     GROUP BY bucket_start
     ORDER BY bucket_start DESC

@@ -197,7 +197,7 @@ export interface paths {
     };
     /**
      * Prime total-capital (treasury) time series
-     * @description Return the prime's total capital over time, gap-filled (LOCF) into buckets. Total capital is the treasury USDS held in the prime's SubProxy wallet (USDS is dollar-pegged, so the balance is the USD figure); it matches the upstream Star `total_capital`. Returns `404` if the prime is unknown. Defaults to the last 24h; pass a window and `resolution` for longer ranges.
+     * @description Return the prime's total capital over time, gap-filled (LOCF) into buckets. Total capital is the treasury USDS held in the prime's SubProxy wallet (USDS is dollar-pegged, so the balance is the USD figure); it matches the upstream Star `total_capital`. Under `reference=true` each bucket also carries `assets_usd` (the upstream PRIME COLLATERAL figure) and the monitor's `encumbrance_ratio`. Returns `404` if the prime is unknown. Defaults to the last 24h; pass a window and `resolution` for longer ranges.
      */
     get: operations['list_prime_total_capital_v1_primes__prime_id__total_capital_get'];
     put?: never;
@@ -2326,7 +2326,11 @@ export interface components {
     };
     /**
      * TotalCapitalBucketResponse
-     * @description Last observed treasury balance within a single time bucket (LOCF gap-filled).
+     * @description Last observed capital figures within a single time bucket (LOCF gap-filled).
+     *
+     *     Only ``total_capital_usd`` is served in both modes. The other two are
+     *     reference-only and come from two different upstream feeds, so each is null
+     *     outside the range its own feed covers.
      */
     TotalCapitalBucketResponse: {
       /**
@@ -2361,7 +2365,7 @@ export interface components {
     TotalCapitalEnvelope: {
       /**
        * Data
-       * @description Last treasury balance per time bucket.
+       * @description Last observed capital figures per time bucket, newest first.
        */
       data: components['schemas']['TotalCapitalBucketResponse'][];
       /**

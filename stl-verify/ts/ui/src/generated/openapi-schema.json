@@ -2876,7 +2876,7 @@
         "type": "object"
       },
       "TotalCapitalBucketResponse": {
-        "description": "Last observed treasury balance within a single time bucket (LOCF gap-filled).",
+        "description": "Last observed capital figures within a single time bucket (LOCF gap-filled).\n\nOnly ``total_capital_usd`` is served in both modes. The other two are\nreference-only and come from two different upstream feeds, so each is null\noutside the range its own feed covers.",
         "properties": {
           "assets_usd": {
             "anyOf": [
@@ -2943,7 +2943,7 @@
         "description": "Per-prime total-capital time series, gap-filled into buckets.",
         "properties": {
           "data": {
-            "description": "Last treasury balance per time bucket.",
+            "description": "Last observed capital figures per time bucket, newest first.",
             "items": {
               "$ref": "#/components/schemas/TotalCapitalBucketResponse"
             },
@@ -3773,7 +3773,7 @@
     },
     "/v1/primes/{prime_id}/total-capital": {
       "get": {
-        "description": "Return the prime's total capital over time, gap-filled (LOCF) into buckets. Total capital is the treasury USDS held in the prime's SubProxy wallet (USDS is dollar-pegged, so the balance is the USD figure); it matches the upstream Star `total_capital`. Returns `404` if the prime is unknown. Defaults to the last 24h; pass a window and `resolution` for longer ranges.",
+        "description": "Return the prime's total capital over time, gap-filled (LOCF) into buckets. Total capital is the treasury USDS held in the prime's SubProxy wallet (USDS is dollar-pegged, so the balance is the USD figure); it matches the upstream Star `total_capital`. Under `reference=true` each bucket also carries `assets_usd` (the upstream PRIME COLLATERAL figure) and the monitor's `encumbrance_ratio`. Returns `404` if the prime is unknown. Defaults to the last 24h; pass a window and `resolution` for longer ranges.",
         "operationId": "list_prime_total_capital_v1_primes__prime_id__total_capital_get",
         "parameters": [
           {
