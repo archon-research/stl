@@ -3,6 +3,7 @@ from collections.abc import Callable
 from fastapi import Request
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.adapters.postgres.allocation_position_repository import AllocationRepository
 from app.adapters.postgres.prime_capital_stack_repository import PrimeCapitalStackRepository
 from app.adapters.postgres.receipt_token_repository import ReceiptTokenRepository
 from app.adapters.sky.reference_risk_capital_client import SkyReferenceRiskCapitalClient
@@ -59,6 +60,7 @@ def get_reference_risk_capital_service_factory(
         return ReferenceRiskCapitalService(
             SkyReferenceRiskCapitalClient(get_settings().star_risk_capital_base_url),
             ReceiptTokenRepository(request.app.state.engine),
+            AllocationRepository(request.app.state.engine),
         )
 
     return build
