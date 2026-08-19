@@ -80,15 +80,25 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	}, nil
 }
 
-// FetchPrimeSnapshots returns a snapshot for every prime the monitor tracks.
-func (c *Client) FetchPrimeSnapshots(ctx context.Context) ([]outbound.RiskCapitalPrimeSnapshot, error) {
-	stars, err := c.trackedStars(ctx)
+// FetchPrimeSnapshots returns a snapshot for each of `stars` the monitor covers.
+func (c *Client) FetchPrimeSnapshots(
+	ctx context.Context,
+	stars []string,
+) ([]outbound.RiskCapitalPrimeSnapshot, error) {
+	covered, err := c.coveredStars(ctx)
 	if err != nil {
 		return nil, err
 	}
 
 	snapshots := make([]outbound.RiskCapitalPrimeSnapshot, 0, len(stars))
 	for _, star := range stars {
+		if !covered[star] {
+			// The monitor covers a subset of the primes STL tracks. Absence is a
+			// fact about its coverage, so the cycle records the rest rather than
+			// failing; a zero here would read as a prime holding nothing.
+			c.logger.Info("prime is not covered by the Star monitor; no reference snapshot", "star", star)
+			continue
+		}
 		snapshot, err := c.fetchPrimeDetail(ctx, star)
 		if err != nil {
 			return nil, err
@@ -98,22 +108,25 @@ func (c *Client) FetchPrimeSnapshots(ctx context.Context) ([]outbound.RiskCapita
 	return snapshots, nil
 }
 
-func (c *Client) trackedStars(ctx context.Context) ([]string, error) {
+// coveredStars lists the primes the monitor reports, so a star it does not know
+// is never asked for directly: the detail route answers an unknown star with a
+// 500 indistinguishable from a genuine fault.
+func (c *Client) coveredStars(ctx context.Context) (map[string]bool, error) {
 	var payload primesResponse
 	url := c.baseURL + "/primes/"
 	if err := c.httpClient.DoRequest(ctx, httpclient.RequestConfig{URL: url}, &payload); err != nil {
 		return nil, fmt.Errorf("fetching sky risk-capital primes: %w", err)
 	}
 
-	stars := make([]string, 0, len(payload.Data.Results))
+	covered := make(map[string]bool, len(payload.Data.Results))
 	for i, row := range payload.Data.Results {
 		star := strings.TrimSpace(row.Star)
 		if star == "" {
 			return nil, fmt.Errorf("sky risk-capital primes row %d has an empty star name", i)
 		}
-		stars = append(stars, star)
+		covered[star] = true
 	}
-	return stars, nil
+	return covered, nil
 }
 
 func (c *Client) fetchPrimeDetail(ctx context.Context, star string) (outbound.RiskCapitalPrimeSnapshot, error) {

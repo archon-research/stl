@@ -11,9 +11,10 @@ import (
 )
 
 var (
-	errProvider = errors.New("provider boom")
-	errRepo     = errors.New("repo boom")
-	syncedAt    = time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
+	errProvider  = errors.New("provider boom")
+	errRepo      = errors.New("repo boom")
+	syncedAt     = time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC)
+	trackedStars = []string{"grove", "spark"}
 )
 
 type mockPrimeRepo struct {
@@ -48,11 +49,16 @@ func (m *mockCapitalRepo) SavePrimeCapitalSnapshots(_ context.Context, snapshots
 }
 
 type mockRiskProvider struct {
-	rows []outbound.RiskCapitalPrimeSnapshot
-	err  error
+	rows      []outbound.RiskCapitalPrimeSnapshot
+	err       error
+	requested []string
 }
 
-func (m *mockRiskProvider) FetchPrimeSnapshots(_ context.Context) ([]outbound.RiskCapitalPrimeSnapshot, error) {
+func (m *mockRiskProvider) FetchPrimeSnapshots(
+	_ context.Context,
+	stars []string,
+) ([]outbound.RiskCapitalPrimeSnapshot, error) {
+	m.requested = stars
 	return m.rows, m.err
 }
 
@@ -78,7 +84,7 @@ func upstreamRow(star string) outbound.RiskCapitalPrimeSnapshot {
 }
 
 func newService(primes *mockPrimeRepo, capital *mockCapitalRepo, provider *mockRiskProvider) *Service {
-	return NewService(primes, capital, provider, 7, func() time.Time { return syncedAt }, nil)
+	return NewService(primes, capital, provider, trackedStars, 7, func() time.Time { return syncedAt }, nil)
 }
 
 func TestRunPersistsASnapshotPerUpstreamPrime(t *testing.T) {
@@ -193,6 +199,56 @@ func TestRunFailsOnAPrimeTheRegistryDoesNotKnow(t *testing.T) {
 	}
 	if len(capital.snapshots) != 0 {
 		t.Errorf("saved %d snapshots, want 0 — a failed cycle must persist nothing", len(capital.snapshots))
+	}
+}
+
+// The monitor reports primes STL does not track (obex, osero today). Asking
+// only for the tracked ones keeps their snapshots out of the table entirely,
+// rather than relying on the prime table to exclude them — it still carries a
+// row for a prime STL has stopped tracking.
+func TestRunAsksTheMonitorOnlyForTheTrackedPrimes(t *testing.T) {
+	primes := &mockPrimeRepo{primes: []entity.Prime{{ID: 1, Name: "spark"}, {ID: 2, Name: "grove"}}}
+	provider := &mockRiskProvider{rows: []outbound.RiskCapitalPrimeSnapshot{upstreamRow("spark"), upstreamRow("grove")}}
+
+	if err := newService(primes, &mockCapitalRepo{}, provider).Run(context.Background()); err != nil {
+		t.Fatalf("Run() = %v, want nil", err)
+	}
+
+	if len(provider.requested) != 2 || provider.requested[0] != "grove" || provider.requested[1] != "spark" {
+		t.Errorf("requested = %v, want [grove spark]", provider.requested)
+	}
+}
+
+func TestRunRecordsTheTrackedPrimesTheMonitorDoesCover(t *testing.T) {
+	// A tracked prime the monitor omits is a coverage fact, not a failure, so
+	// the rest of the cycle is still recorded.
+	primes := &mockPrimeRepo{primes: []entity.Prime{{ID: 1, Name: "spark"}, {ID: 2, Name: "grove"}}}
+	capital := &mockCapitalRepo{}
+	provider := &mockRiskProvider{rows: []outbound.RiskCapitalPrimeSnapshot{upstreamRow("spark")}}
+
+	if err := newService(primes, capital, provider).Run(context.Background()); err != nil {
+		t.Fatalf("Run() = %v, want nil", err)
+	}
+
+	if len(capital.snapshots) != 1 || capital.snapshots[0].PrimeID != 1 {
+		t.Errorf("snapshots = %+v, want one for spark", capital.snapshots)
+	}
+}
+
+func TestRunFailsWhenNoPrimesAreTracked(t *testing.T) {
+	provider := &mockRiskProvider{rows: []outbound.RiskCapitalPrimeSnapshot{upstreamRow("spark")}}
+	service := NewService(
+		&mockPrimeRepo{primes: []entity.Prime{{ID: 1, Name: "spark"}}},
+		&mockCapitalRepo{},
+		provider,
+		nil,
+		7,
+		func() time.Time { return syncedAt },
+		nil,
+	)
+
+	if err := service.Run(context.Background()); err == nil {
+		t.Fatal("Run() = nil, want an error")
 	}
 }
 

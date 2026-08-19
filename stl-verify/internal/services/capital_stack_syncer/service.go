@@ -27,16 +27,22 @@ type Service struct {
 	primeRepo    outbound.PrimeRepository
 	capitalRepo  outbound.PrimeCapitalStackRepository
 	riskProvider outbound.RiskCapitalProvider
+	trackedStars []string
 	buildID      int
 	now          Clock
 	logger       *slog.Logger
 }
 
 // NewService creates a capital stack sync service.
+//
+// trackedStars names the primes to record, and comes from the axis-synome
+// contract rather than the prime table: the table still carries rows for primes
+// STL has stopped tracking, so using it would accumulate snapshots nobody reads.
 func NewService(
 	primeRepo outbound.PrimeRepository,
 	capitalRepo outbound.PrimeCapitalStackRepository,
 	riskProvider outbound.RiskCapitalProvider,
+	trackedStars []string,
 	buildID int,
 	now Clock,
 	logger *slog.Logger,
@@ -51,6 +57,7 @@ func NewService(
 		primeRepo:    primeRepo,
 		capitalRepo:  capitalRepo,
 		riskProvider: riskProvider,
+		trackedStars: trackedStars,
 		buildID:      buildID,
 		now:          now,
 		logger:       logger.With("component", "capital-stack-syncer"),
@@ -59,19 +66,24 @@ func NewService(
 
 // Run observes the upstream monitor once and appends what it reported.
 func (s *Service) Run(ctx context.Context) error {
+	if len(s.trackedStars) == 0 {
+		return fmt.Errorf("no tracked primes configured; nothing to observe")
+	}
+
 	primeIDs, err := s.primeIDsByName(ctx)
 	if err != nil {
 		return err
 	}
 
-	rows, err := s.riskProvider.FetchPrimeSnapshots(ctx)
+	rows, err := s.riskProvider.FetchPrimeSnapshots(ctx, s.trackedStars)
 	if err != nil {
 		return fmt.Errorf("fetching prime snapshots: %w", err)
 	}
 	if len(rows) == 0 {
-		// The monitor always tracks at least one prime; an empty list means the
-		// shape changed or the feed broke, which must not read as "nothing to do".
-		return fmt.Errorf("upstream monitor reported no primes")
+		// The monitor covers every prime STL tracks today, so covering none means
+		// the feed broke or its vocabulary drifted. That must not read as
+		// "nothing to do", which would leave a silent hole in the series.
+		return fmt.Errorf("upstream monitor covered none of the %d tracked primes", len(s.trackedStars))
 	}
 
 	snapshots, err := s.toSnapshots(rows, primeIDs, s.now().UTC())

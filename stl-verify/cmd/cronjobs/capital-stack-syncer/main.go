@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sort"
 	"syscall"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sky"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/axis_synome_contract"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/services/capital_stack_syncer"
@@ -67,10 +69,16 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runn
 		return nil, fmt.Errorf("creating sky client: %w", err)
 	}
 
+	trackedStars, err := trackedStarsFromContract()
+	if err != nil {
+		return nil, err
+	}
+
 	service := capital_stack_syncer.NewService(
 		postgres.NewPrimeRepository(deps.Pool),
 		postgres.NewPrimeCapitalStackRepository(deps.Pool, txm, deps.Logger),
 		skyClient,
+		trackedStars,
 		int(buildReg.BuildID()),
 		time.Now,
 		deps.Logger,
@@ -79,4 +87,24 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runn
 	return temporal.RunnerFunc(func(ctx context.Context) error {
 		return service.Run(ctx)
 	}), nil
+}
+
+// trackedStarsFromContract names the primes STL tracks, sorted so a cycle's
+// upstream calls are issued in a stable order.
+func trackedStarsFromContract() ([]string, error) {
+	contract, err := axis_synome_contract.LoadDefaultContract()
+	if err != nil {
+		return nil, fmt.Errorf("loading axis-synome contract: %w", err)
+	}
+
+	almProxies := contract.GetAlmProxies()
+	stars := make([]string, 0, len(almProxies))
+	for star := range almProxies {
+		stars = append(stars, star)
+	}
+	if len(stars) == 0 {
+		return nil, fmt.Errorf("axis-synome contract names no primes")
+	}
+	sort.Strings(stars)
+	return stars, nil
 }
