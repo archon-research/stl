@@ -82,11 +82,17 @@ class ReferencePrimeRiskCapital:
 class ReferenceCapitalBucket:
     """Last observed upstream figures within a single time bucket (LOCF).
 
-    Both figures ride one bucket because they come from one snapshot row, so
+    The figures ride one bucket because they come from one snapshot row, so
     splitting them across two queries could straddle a sync cycle and pair an
     exposure with a treasury observed at a different instant.
+
+    They do not all come from the same feed, and each is ``None`` outside the
+    range its own feed covers: ``encumbrance_ratio`` exists only where the
+    monitor has been observed, ``assets_usd`` only where the balance sheet has.
     """
 
     bucket_start: datetime
     total_capital_usd: Decimal | None
     exposure_usd: Decimal | None
+    encumbrance_ratio: Decimal | None = None
+    assets_usd: Decimal | None = None

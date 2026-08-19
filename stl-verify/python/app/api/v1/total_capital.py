@@ -37,6 +37,25 @@ class TotalCapitalBucketResponse(BaseModel):
         ),
         examples=["36359440.25"],
     )
+    assets_usd: PlainDecimal | None = Field(
+        default=None,
+        description=(
+            "Total assets the prime holds, as published upstream — the figure Sky's dashboard "
+            "labels PRIME COLLATERAL. Reference mode only, and `null` outside the range the "
+            "balance-sheet feed covers. STL computes no equivalent: its own asset total omits "
+            "sources it does not index (PSM3, Curve LP valuations), so it is not served here."
+        ),
+        examples=["3190000000.00"],
+    )
+    encumbrance_ratio: PlainDecimal | None = Field(
+        default=None,
+        description=(
+            "`required_risk_capital / total_risk_capital` as the monitor reported it (0-1). "
+            "Reference mode only, and `null` for buckets covered by backfilled history alone: "
+            "the balance-sheet feed carries no encumbrance figure."
+        ),
+        examples=["0.9397"],
+    )
 
 
 class TotalCapitalEnvelope(BaseModel):
@@ -111,7 +130,12 @@ async def list_prime_total_capital(
             source="reference",
             window=window,
             data=[
-                TotalCapitalBucketResponse(bucket_start=bucket.bucket_start, total_capital_usd=bucket.total_capital_usd)
+                TotalCapitalBucketResponse(
+                    bucket_start=bucket.bucket_start,
+                    total_capital_usd=bucket.total_capital_usd,
+                    assets_usd=bucket.assets_usd,
+                    encumbrance_ratio=bucket.encumbrance_ratio,
+                )
                 for bucket in reference_buckets
             ],
         )

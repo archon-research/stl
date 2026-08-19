@@ -208,3 +208,40 @@ async def test_pairs_each_bucket_from_one_snapshot_row(seeded, async_db_url: str
 
     assert (Decimal("10"), Decimal("20")) in pairs
     assert (Decimal("30"), Decimal("40")) in pairs
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_carries_the_monitors_encumbrance_ratio(seeded, async_db_url: str):
+    conn, prime_id = seeded
+    await _insert_snapshot(conn, prime_id, _FIRST_OBSERVATION, total_rc="10", exposure="20")
+
+    buckets = await _buckets(async_db_url)
+
+    observed = [b for b in buckets if b.encumbrance_ratio is not None]
+    assert observed, "the snapshot's encumbrance ratio should reach the series"
+    assert all(b.encumbrance_ratio == Decimal("0.37") for b in observed)
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_serves_assets_only_from_the_balance_sheet_feed(seeded, async_db_url: str):
+    # A snapshot-only window has no assets figure: the monitor does not report
+    # one, and deriving it from risk capital would invent a measurement.
+    conn, prime_id = seeded
+    await _insert_snapshot(conn, prime_id, _FIRST_OBSERVATION, total_rc="10", exposure="20")
+
+    buckets = await _buckets(async_db_url)
+
+    assert all(b.assets_usd is None for b in buckets)
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_history_carries_assets_but_no_encumbrance(seeded, async_db_url: str):
+    # The balance-sheet feed reports assets and no encumbrance, so a
+    # history-only window must not fabricate the latter.
+    conn, prime_id = seeded
+    await _insert_history(conn, prime_id, _WINDOW_START, treasury="111")
+
+    buckets = await _buckets(async_db_url)
+
+    assert any(b.assets_usd == Decimal("1") for b in buckets)
+    assert all(b.encumbrance_ratio is None for b in buckets)

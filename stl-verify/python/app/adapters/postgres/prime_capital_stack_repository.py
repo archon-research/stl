@@ -37,7 +37,9 @@ _REFERENCE_CAPITAL_BUCKETS_SQL = text(
         SELECT DISTINCT ON (pcs.synced_at)
             pcs.synced_at AS observed_at,
             pcs.total_risk_capital_usd,
-            pcs.exposure_usd
+            pcs.exposure_usd,
+            pcs.encumbrance_ratio,
+            NULL::NUMERIC AS assets_usd
         FROM prime_capital_stack pcs
         WHERE pcs.prime_id = (SELECT prime_id FROM target)
         """
@@ -51,7 +53,11 @@ _REFERENCE_CAPITAL_BUCKETS_SQL = text(
             -- Exposure is deliberately absent. This feed's allocated_assets is a
             -- different measurement from the monitor's total_exposure (+32% for
             -- spark at the same instant), so splicing it would step the series.
-            NULL::NUMERIC AS exposure_usd
+            NULL::NUMERIC AS exposure_usd,
+            -- The balance-sheet feed reports no encumbrance; it is the monitor's
+            -- figure, so history leaves it unobserved rather than deriving one.
+            NULL::NUMERIC AS encumbrance_ratio,
+            pbs.assets_usd
         FROM prime_reference_balance_sheet pbs
         WHERE pbs.prime_id = (SELECT prime_id FROM target)
         """
@@ -66,11 +72,15 @@ _REFERENCE_CAPITAL_BUCKETS_SQL = text(
         SELECT DISTINCT ON (merged.observed_at)
             merged.observed_at,
             merged.total_risk_capital_usd,
-            merged.exposure_usd
+            merged.exposure_usd,
+            merged.encumbrance_ratio,
+            merged.assets_usd
         FROM (
-            SELECT observed_at, total_risk_capital_usd, exposure_usd, 0 AS precedence FROM snapshots
+            SELECT observed_at, total_risk_capital_usd, exposure_usd, encumbrance_ratio, assets_usd,
+                   0 AS precedence FROM snapshots
             UNION ALL
-            SELECT observed_at, total_risk_capital_usd, exposure_usd, 1 AS precedence FROM history
+            SELECT observed_at, total_risk_capital_usd, exposure_usd, encumbrance_ratio, assets_usd,
+                   1 AS precedence FROM history
         ) merged
         ORDER BY merged.observed_at, merged.precedence
     )
@@ -82,7 +92,9 @@ _REFERENCE_CAPITAL_BUCKETS_SQL = text(
             CAST(:to_timestamp AS TIMESTAMPTZ)
         ) AS bucket_start,
         locf(last(corrected.total_risk_capital_usd, corrected.observed_at)) AS total_capital_usd,
-        locf(last(corrected.exposure_usd, corrected.observed_at)) AS exposure_usd
+        locf(last(corrected.exposure_usd, corrected.observed_at)) AS exposure_usd,
+        locf(last(corrected.encumbrance_ratio, corrected.observed_at)) AS encumbrance_ratio,
+        locf(last(corrected.assets_usd, corrected.observed_at)) AS assets_usd
     FROM corrected
     GROUP BY bucket_start
     ORDER BY bucket_start DESC
@@ -140,6 +152,8 @@ class PrimeCapitalStackRepository:
                 bucket_start=row.bucket_start,
                 total_capital_usd=_optional_decimal(row.total_capital_usd, "total_capital_usd"),
                 exposure_usd=_optional_decimal(row.exposure_usd, "exposure_usd"),
+                encumbrance_ratio=_optional_decimal(row.encumbrance_ratio, "encumbrance_ratio"),
+                assets_usd=_optional_decimal(row.assets_usd, "assets_usd"),
             )
             for row in rows
         ]
