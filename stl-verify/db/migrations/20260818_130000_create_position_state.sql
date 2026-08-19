@@ -80,7 +80,23 @@ CREATE TABLE IF NOT EXISTS position_state (
     -- non-conforming holder silently fails the VEC-417 lowercase-hex holder join (entity_ref_codes
     -- CHECK-enforces the same pattern on the other side). instrument_key stays unchecked — heterogeneous
     -- native forms (registry:ilk, provider:package) are legitimate there.
-    CONSTRAINT position_state_holder_hex_chk CHECK (holder_id ~ '^[0-9a-f]+$')
+    CONSTRAINT position_state_holder_hex_chk CHECK (holder_id ~ '^[0-9a-f]+$'),
+    -- Observation coordinates are non-negative by definition (genesis is block 0; versions count from 0).
+    -- quantity had a CHECK but the coordinates did not, so a source bug emitting a negative height was
+    -- stored silently and — because the recency guard orders on these columns — became the position's
+    -- "oldest" observation and skewed classification recency. Reject at the chokepoint instead.
+    CONSTRAINT position_state_coord_nonneg_chk
+        CHECK (block_number >= 0 AND block_version >= 0 AND processing_version >= 0),
+    -- chain_id / protocol_id are nullable structural fields (see position_key), but when present they are
+    -- registry ids and strictly positive; 0 or negative is an upstream default/corruption, and because the
+    -- value feeds the position_id hash a wrong-but-accepted id forks the position permanently.
+    CONSTRAINT position_state_chain_pos_chk    CHECK (chain_id IS NULL OR chain_id > 0),
+    CONSTRAINT position_state_protocol_pos_chk CHECK (protocol_id IS NULL OR protocol_id > 0),
+    -- block_timestamp is the partition column: a corrupted epoch-zero/1970 value (e.g. a hex-parse bug in
+    -- a loader) would silently create a 1970 chunk and poison time-ordered reads. No blockchain predates
+    -- Bitcoin's genesis (2009-01-03), so anything earlier is corruption, not data. Deliberately no upper
+    -- bound: now()-relative CHECKs are non-immutable and would reject legitimate clock-skewed live blocks.
+    CONSTRAINT position_state_ts_sane_chk CHECK (block_timestamp >= '2009-01-03 00:00:00+00'::timestamptz)
 );
 
 COMMENT ON TABLE position_state IS '[Hypertable] Shared spine for materialized positions (VEC-402..407), partitioned on block_timestamp. One row per (native position_id, observation): the native resolution keys (instrument_key -> security via the bridge; holder_id -> entity via VEC-417) plus a single canonical quantity. Identity is native-only (VEC-400); classifications live in position_classification. Current state per position is position_current (VEC-409).';
@@ -129,10 +145,26 @@ END $$;
 GRANT SELECT ON position_state TO stl_readonly;
 -- Append-only: corrections arrive as new (block_version, processing_version) rows, so no DELETE/TRUNCATE.
 -- The roles migration's ALTER DEFAULT PRIVILEGES grants stl_readwrite full DML on every stl_migrator
--- table, so the narrowed GRANT below does not remove DELETE by itself — the explicit REVOKE does. (A
+-- table, so narrowed GRANTs below do not remove anything by themselves — the explicit REVOKEs do. (A
 -- dedicated narrow materializer role, VEC-562, is the broader least-privilege fix and pins search_path.)
-GRANT SELECT, INSERT, UPDATE ON position_state TO stl_readwrite;
-REVOKE DELETE, TRUNCATE ON position_state FROM stl_readwrite;
+--
+-- UPDATE is COLUMN-SCOPED to quantity: the materializer's ON CONFLICT touches only quantity, and a
+-- table-wide UPDATE would let the app role rewrite identity/coordinate columns (holder_id, block_number,
+-- ...) on any historical row — "append-only" must hold against silent history rewrites, not just DELETE.
+GRANT SELECT, INSERT ON position_state TO stl_readwrite;
+REVOKE UPDATE, DELETE, TRUNCATE ON position_state FROM stl_readwrite;
+GRANT UPDATE (quantity) ON position_state TO stl_readwrite;
+
+-- Same narrowing for position_classification (created by an applied migration, so re-granted here, in the
+-- migration that defines its only sanctioned writer). The cls upsert below SETs exactly deal_type_code,
+-- direction, change_reason, valid_from. collateral_status is deliberately NOT grantable: nothing writes it
+-- yet (see the collateral_status note below), and an out-of-band write would go stale across the next
+-- reclassification with nothing to clear it — the future materializer PR that handles it adds the column
+-- grant together with the upsert logic that keeps it consistent. position_id (identity) stays unwritable.
+GRANT SELECT, INSERT ON position_classification TO stl_readwrite;   -- the upsert's INSERT arm (idempotent re-grant)
+GRANT SELECT ON ref_deal_type TO stl_readwrite;                      -- the direction lookup join (idempotent re-grant)
+REVOKE UPDATE, DELETE, TRUNCATE ON position_classification FROM stl_readwrite;
+GRANT UPDATE (deal_type_code, direction, change_reason, valid_from) ON position_classification TO stl_readwrite;
 
 -- Shared materializer body for every per-protocol projection (VEC-402..407). Each projection view
 -- (position_morpho_market, position_morpho_vault, position_sky_prime_debt, ...) holds its own bespoke

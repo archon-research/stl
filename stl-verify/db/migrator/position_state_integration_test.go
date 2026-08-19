@@ -590,4 +590,91 @@ func TestPositionState(t *testing.T) {
 		body := `SELECT * FROM (VALUES (1::int,10::bigint,'ibt'::text,'aa'::text,5::numeric,'LOAN'::text,100::bigint,0::int,0::int,NULL::timestamptz)) ` + mppCols
 		mppErr(t, "vbt", body, "bt", "not-null constraint")
 	})
+
+	// --- coordinate / structural-id CHECKs (round 5; each fails on the pre-fix code, which stored these) --
+
+	t.Run("negative block_number rejected (coordinate CHECK)", func(t *testing.T) {
+		// Pre-fix this was stored silently and — the guard orders on these columns — became the
+		// position's "oldest" observation, skewing classification recency.
+		mppErr(t, "vnbn", valuesOf(row("inbn", "aa", 5, "LOAN", -42, 0, 0)), "nbn", "coord_nonneg")
+	})
+
+	t.Run("negative block_version and processing_version rejected", func(t *testing.T) {
+		mppErr(t, "vnbv", valuesOf(row("inbv", "aa", 5, "LOAN", 100, -1, 0)), "nbv", "coord_nonneg")
+		mppErr(t, "vnpv", valuesOf(row("inpv", "aa", 5, "LOAN", 100, 0, -1)), "npv", "coord_nonneg")
+	})
+
+	t.Run("zero or negative chain_id / protocol_id rejected (NULL stays legal)", func(t *testing.T) {
+		// Registry ids are strictly positive; 0 is an upstream zero-value default, and because the value
+		// feeds the position_id hash a wrong-but-accepted id forks the position permanently.
+		body := `SELECT * FROM (VALUES (0::int,10::bigint,'izc'::text,'aa'::text,5::numeric,'LOAN'::text,100::bigint,0::int,0::int,'2026-01-01'::timestamptz)) ` + mppCols
+		mppErr(t, "vzc", body, "zc", "chain_pos")
+		body = `SELECT * FROM (VALUES (1::int,0::bigint,'izp'::text,'aa'::text,5::numeric,'LOAN'::text,100::bigint,0::int,0::int,'2026-01-01'::timestamptz)) ` + mppCols
+		mppErr(t, "vzp", body, "zp", "protocol_pos")
+	})
+
+	t.Run("pre-blockchain block_timestamp rejected (epoch-corruption guard)", func(t *testing.T) {
+		// A hex-parse bug writing epoch-zero would otherwise silently create a 1970 chunk on the
+		// partition column and poison time-ordered reads.
+		body := `SELECT * FROM (VALUES (1::int,10::bigint,'iep'::text,'aa'::text,5::numeric,'LOAN'::text,100::bigint,0::int,0::int,'1970-01-01+00'::timestamptz)) ` + mppCols
+		mppErr(t, "vep", body, "ep", "ts_sane")
+	})
+
+	// --- narrowed grants (round 5): append-only must hold against history REWRITES, not just DELETE ---
+
+	t.Run("narrowed grants: writer path intact, history rewrite denied (stl_readwrite)", func(t *testing.T) {
+		if _, err := pool.Exec(ctx, `CREATE OR REPLACE VIEW aclv AS `+valuesOf(row("iaclr", "aa", 5, "LOAN", 100, 0, 0))); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `GRANT SELECT ON aclv TO stl_readwrite`); err != nil {
+			t.Fatal(err)
+		}
+		// asRole runs stmts in one transaction under SET LOCAL ROLE (role scope ends with the tx, so
+		// nothing leaks back to the pooled connection), returning the first error.
+		asRole := func(stmts ...string) error {
+			conn, err := pool.Acquire(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Release()
+			tx, err := conn.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback(ctx)
+			if _, err := tx.Exec(ctx, `SET LOCAL ROLE stl_readwrite`); err != nil {
+				t.Fatal(err)
+			}
+			for _, s := range stmts {
+				if _, err := tx.Exec(ctx, s); err != nil {
+					return err
+				}
+			}
+			return tx.Commit(ctx)
+		}
+		// The one sanctioned writer path — the full materializer — must run under the narrowed grants.
+		if err := asRole(`SELECT materialize_position_projection('aclv'::regclass, 'role-run')`); err != nil {
+			t.Fatalf("materializer as stl_readwrite failed under narrowed grants: %v", err)
+		}
+		if got := classOf(t, "iaclr", "aa"); got != "LOAN" {
+			t.Errorf("role-run classification = %q; want LOAN", got)
+		}
+		// Rewrites of identity/coordinate/history columns must be denied; quantity stays sanctioned.
+		denied := [][2]string{
+			{"position_state identity", `UPDATE position_state SET holder_id = 'bb' WHERE true`},
+			{"position_state coordinates", `UPDATE position_state SET block_number = 1 WHERE true`},
+			{"position_state delete", `DELETE FROM position_state WHERE true`},
+			{"classification identity", `UPDATE position_classification SET position_id = '\x00'::bytea WHERE true`},
+			{"classification collateral_status", `UPDATE position_classification SET collateral_status = 'PLEDGED' WHERE true`},
+			{"classification delete", `DELETE FROM position_classification WHERE true`},
+		}
+		for _, d := range denied {
+			if err := asRole(d[1]); err == nil || !strings.Contains(err.Error(), "permission denied") {
+				t.Errorf("%s: want permission denied, got %v", d[0], err)
+			}
+		}
+		if err := asRole(`UPDATE position_state SET quantity = quantity WHERE false`); err != nil {
+			t.Errorf("quantity update (the sanctioned column) denied: %v", err)
+		}
+	})
 }
