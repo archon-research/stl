@@ -13,7 +13,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
-	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 const userDBName = "test_user"
@@ -21,11 +20,7 @@ const userDBName = "test_user"
 var userPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(func() {
-		userPool = testutil.SetupDBForMain(sharedDSN, userDBName)
-	}, func() {
-		testutil.CleanupDBForMain(sharedDSN, userPool, userDBName)
-	})
+	useFileDatabase(userDBName, &userPool)
 }
 
 // truncateUser clears the user table for test isolation.

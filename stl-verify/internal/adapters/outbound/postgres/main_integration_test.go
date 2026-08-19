@@ -6,6 +6,8 @@ import (
 	"os"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
@@ -21,29 +23,38 @@ type testFileSetup struct {
 
 var testFileSetups []testFileSetup
 
-// registerTestFileSetup allows each test file to register its database setup/cleanup.
-// Called from init() in each test file.
+// registerTestFileSetup takes work that needs sharedDSN, for a file whose setup is
+// more than one database — useFileDatabase below covers that case.
 func registerTestFileSetup(setup, cleanup func()) {
 	testFileSetups = append(testFileSetups, testFileSetup{setup: setup, cleanup: cleanup})
 }
 
-func TestMain(m *testing.M) {
-	dsn, cleanup := testutil.StartTimescaleDBForMain()
-	sharedDSN = dsn
+// useFileDatabase gives the calling file its own database and publishes a pool for
+// it. Registered rather than done here because init() runs before sharedDSN exists.
+func useFileDatabase(dbName string, pool **pgxpool.Pool) {
+	registerTestFileSetup(func() {
+		*pool = testutil.SetupDBForMain(sharedDSN, dbName)
+	}, func() {
+		testutil.CleanupDBForMain(sharedDSN, *pool, dbName)
+	})
+}
 
+func TestMain(m *testing.M) {
+	os.Exit(testutil.RunShared(m, testutil.Shared{
+		TimescaleDSN: &sharedDSN,
+		BeforeRun:    setUpTestFileDatabases,
+		AfterRun:     tearDownTestFileDatabases,
+	}))
+}
+
+func setUpTestFileDatabases() {
 	for _, ts := range testFileSetups {
 		ts.setup()
 	}
+}
 
-	code := m.Run()
-
+func tearDownTestFileDatabases() {
 	for _, ts := range testFileSetups {
 		ts.cleanup()
 	}
-
-	cleanup()
-
-	code = testutil.CheckGoroutineLeaks(code)
-
-	os.Exit(code)
 }

@@ -13,16 +13,17 @@ import (
 
 // The gates read catalog tables scoped to table_schema = 'public' and never
 // write, so they run against one migrated database for the whole package.
-var sharedPool *pgxpool.Pool
+var (
+	sharedDSN  string
+	sharedPool *pgxpool.Pool
+)
+
+const packageDBName = "test_schemamaster"
 
 func TestMain(m *testing.M) {
-	dsn, cleanup := testutil.StartTimescaleDBForMain()
-	sharedPool = testutil.SetupDBForMain(dsn, "test_schemamaster")
-
-	code := m.Run()
-
-	testutil.CleanupDBForMain(dsn, sharedPool, "test_schemamaster")
-	cleanup()
-	code = testutil.CheckGoroutineLeaks(code)
-	os.Exit(code)
+	os.Exit(testutil.RunShared(m, testutil.Shared{
+		TimescaleDSN: &sharedDSN,
+		BeforeRun:    func() { sharedPool = testutil.SetupDBForMain(sharedDSN, packageDBName) },
+		AfterRun:     func() { testutil.CleanupDBForMain(sharedDSN, sharedPool, packageDBName) },
+	}))
 }

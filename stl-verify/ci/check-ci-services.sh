@@ -52,11 +52,16 @@ if [[ -n "$unknown_images" ]]; then
 fi
 
 # The shared LocalStack must enable the union of what every package asks for; a
-# package whose service is missing fails with an opaque AWS error instead.
-requested_services="$(grep -rhoE 'StartLocalStackForMain\("[^"]*"' --include='*_test.go' . \
-  | sed -E 's/^[^"]*"//; s/"$//' | tr ',' '\n' | sed '/^$/d' | sort -u)"
+# package whose service is missing fails with an opaque AWS error instead. Packages
+# name their services in the Shared declaration they hand to testutil.RunShared;
+# the direct helper call is still valid, so both spellings count. Neither grep may
+# sink the script under pipefail before the emptiness check below reports it.
+requested_services="$({
+    grep -rhoE 'LocalStackServices:[[:space:]]*"[^"]*"' --include='*_test.go' . || true
+    grep -rhoE 'StartLocalStackForMain\("[^"]*"' --include='*_test.go' . || true
+  } | sed -E 's/^[^"]*"//; s/"$//' | tr ',' '\n' | sed '/^$/d' | sort -u)"
 if [[ -z "$requested_services" ]]; then
-  echo "ERROR: no StartLocalStackForMain calls found -- check the grep pattern" >&2
+  echo "ERROR: no LocalStack service requests found -- check the grep patterns" >&2
   exit 1
 fi
 

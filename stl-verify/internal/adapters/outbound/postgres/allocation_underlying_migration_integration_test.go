@@ -14,7 +14,6 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
-	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 const allocUnderlyingDBName = "test_alloc_underlying"
@@ -22,11 +21,7 @@ const allocUnderlyingDBName = "test_alloc_underlying"
 var allocUnderlyingPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(func() {
-		allocUnderlyingPool = testutil.SetupDBForMain(sharedDSN, allocUnderlyingDBName)
-	}, func() {
-		testutil.CleanupDBForMain(sharedDSN, allocUnderlyingPool, allocUnderlyingDBName)
-	})
+	useFileDatabase(allocUnderlyingDBName, &allocUnderlyingPool)
 }
 
 func TestAllocationPositionUnderlyingColumnsExist(t *testing.T) {

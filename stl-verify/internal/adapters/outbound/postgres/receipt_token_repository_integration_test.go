@@ -10,7 +10,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
-	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 const receiptTokenDBName = "test_receipt_token"
@@ -18,11 +17,7 @@ const receiptTokenDBName = "test_receipt_token"
 var receiptTokenPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(func() {
-		receiptTokenPool = testutil.SetupDBForMain(sharedDSN, receiptTokenDBName)
-	}, func() {
-		testutil.CleanupDBForMain(sharedDSN, receiptTokenPool, receiptTokenDBName)
-	})
+	useFileDatabase(receiptTokenDBName, &receiptTokenPool)
 }
 
 // truncateReceiptToken clears the receipt_token table and its dependencies for test isolation.

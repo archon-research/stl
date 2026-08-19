@@ -13,7 +13,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
-	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 const fluidDBName = "test_fluid"
@@ -21,11 +20,7 @@ const fluidDBName = "test_fluid"
 var fluidPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(func() {
-		fluidPool = testutil.SetupDBForMain(sharedDSN, fluidDBName)
-	}, func() {
-		testutil.CleanupDBForMain(sharedDSN, fluidPool, fluidDBName)
-	})
+	useFileDatabase(fluidDBName, &fluidPool)
 }
 
 // truncateFluid clears only the fluid-owned tables. The shared protocol and

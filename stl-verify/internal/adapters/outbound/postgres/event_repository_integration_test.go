@@ -12,7 +12,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
-	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 const eventDBName = "test_event"
@@ -20,11 +19,7 @@ const eventDBName = "test_event"
 var eventPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(func() {
-		eventPool = testutil.SetupDBForMain(sharedDSN, eventDBName)
-	}, func() {
-		testutil.CleanupDBForMain(sharedDSN, eventPool, eventDBName)
-	})
+	useFileDatabase(eventDBName, &eventPool)
 }
 
 // truncateEvents clears the protocol_event table for test isolation.
