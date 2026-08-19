@@ -19,6 +19,10 @@ const fifoSuffix = ".fifo"
 // SanitizeTestName converts a test name to a string safe for use as a
 // PostgreSQL identifier, Redis key prefix, or AWS resource name suffix: lowercase
 // alphanumeric and underscores, prefixed with "t_" and scoped by withProcessTag.
+//
+// Go keeps test names distinct, but this mapping does not: every rune outside the
+// safe set becomes "_", so "TestA/B_C" and "TestA_B/C" arrive as one string. A
+// digest of the name as given is what keeps them on separate resources.
 func SanitizeTestName(testName string) string {
 	s := strings.ToLower(testName)
 	var b strings.Builder
@@ -30,6 +34,8 @@ func SanitizeTestName(testName string) string {
 			b.WriteRune('_')
 		}
 	}
+	b.WriteByte('_')
+	b.WriteString(shortDigest(testName))
 
 	return withProcessTag(b.String())
 }
@@ -61,6 +67,8 @@ func SQSTestFifoQueueName(t *testing.T, prefix string) string {
 // Neither kind of name is unique on its own: Go guarantees test names are unique
 // only within a package, and the names test files pass to SetupDBForMain are
 // hand-written. Tagging here is what keeps that from being each caller's problem.
+// It separates packages only — one process's own names are settled by shortDigest
+// above and by claimMainDBName.
 func withProcessTag(name string) string {
 	suffix := "_" + processTag()
 	return fitName(name, maxIdentifierLen-len(suffix)) + suffix
@@ -73,7 +81,16 @@ func fitName(name string, limit int) string {
 	if len(name) <= limit {
 		return name
 	}
-	const digestLen = 8
+	return name[:limit-digestLen] + shortDigest(name)
+}
+
+// Long enough that no suite collides by accident, short enough to leave a readable
+// prefix inside a 63-character identifier.
+const digestLen = 8
+
+// shortDigest is the tail that keeps two names apart once whatever produced them —
+// truncation, or sanitizing — has collapsed them onto one string.
+func shortDigest(name string) string {
 	sum := sha256.Sum256([]byte(name))
-	return name[:limit-digestLen] + hex.EncodeToString(sum[:digestLen/2])
+	return hex.EncodeToString(sum[:digestLen/2])
 }

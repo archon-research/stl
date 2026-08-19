@@ -71,14 +71,41 @@ func SetupTestDB(t *testing.T, baseDSN string) (pool *pgxpool.Pool, dsn string, 
 // SetupDBForMain is SetupTestDB for a TestMain-scoped database shared by one test
 // file, where there is no *testing.T to fail. On error it calls log.Fatal.
 //
-// dbName is scoped by withProcessTag, so a name two test files happen to share
-// cannot make one file's setup drop the other file's live database.
+// withProcessTag settles the sibling packages sharing the server; dbName is claimed
+// to settle the sibling files inside this one, which the tag cannot separate because
+// they run in the same process.
 func SetupDBForMain(baseDSN, dbName string) *pgxpool.Pool {
+	if err := claimMainDBName(dbName); err != nil {
+		log.Fatal(err)
+	}
 	pool, _, _, err := setupClonedDatabase(context.Background(), baseDSN, withProcessTag(dbName))
 	if err != nil {
 		log.Fatal(err)
 	}
 	return pool
+}
+
+var (
+	mainDBNamesMu sync.Mutex
+	mainDBNames   = map[string]bool{}
+)
+
+// claimMainDBName reserves dbName for this test binary, rejecting a second claim.
+// The names are hand-written string constants, so nothing stops two files in a
+// package choosing one name — and the loser's live database would go out under it,
+// dropped as stale by the winner's setup.
+func claimMainDBName(dbName string) error {
+	mainDBNamesMu.Lock()
+	defer mainDBNamesMu.Unlock()
+
+	if mainDBNames[dbName] {
+		return fmt.Errorf(
+			"database name %q is already taken by another test file in this package, pick a distinct one",
+			dbName,
+		)
+	}
+	mainDBNames[dbName] = true
+	return nil
 }
 
 // CleanupDBForMain closes the pool and drops the database SetupDBForMain created,
@@ -123,6 +150,16 @@ func setupClonedDatabase(
 	if err := cloneDatabase(ctx, adminPool, dbName, template); err != nil {
 		return nil, "", nil, err
 	}
+	// The database exists from here on, so every later failure has to take it back
+	// out: its name carries this process's pid, so no rerun reclaims it as stale.
+	defer func() {
+		if err == nil {
+			return
+		}
+		if dropErr := dropDatabase(baseDSN, dbName); dropErr != nil {
+			log.Printf("warning: %v", dropErr)
+		}
+	}()
 
 	dsn, err = replaceDatabase(baseDSN, dbName)
 	if err != nil {
@@ -196,7 +233,7 @@ func isSourceInUse(err error) bool {
 // ensureTemplate migrates the template for baseDSN's server if no process has yet,
 // and returns its name.
 func ensureTemplate(ctx context.Context, baseDSN string) (string, error) {
-	fingerprint, err := migrationsFingerprint()
+	fingerprint, err := templateFingerprint()
 	if err != nil {
 		return "", err
 	}
@@ -392,13 +429,20 @@ func dropTemplate(ctx context.Context, conn *pgx.Conn, name string) error {
 	return nil
 }
 
-// migrationsFingerprint digests the migration set, so a template built from an
-// older set is never cloned: the name changes with the contents. This matters on a
-// server that outlives one run, such as a developer's own container — where the
-// superseded template stays until `make test-templates-clean` removes it, because
-// collecting it from here would race a sibling process between its readiness check
-// and its clone.
-func migrationsFingerprint() (string, error) {
+// Bump whenever buildTemplate changes what a finished template contains — a new
+// bootstrap step, a dropped one, different flags. The migration digest below cannot
+// see any of that, so without this a server outliving one tree would keep handing
+// out templates built under the old semantics: the run that introduced
+// DisableScheduledJobs would have cloned policy jobs back in.
+const templateFormat = 1
+
+// templateFingerprint digests everything a finished template is made of, so one
+// built from an older tree is never cloned: the name changes with the contents.
+// This matters on a server that outlives one run, such as a developer's own
+// container — where the superseded template stays until `make test-templates-clean`
+// removes it, because collecting it from here would race a sibling process between
+// its readiness check and its clone.
+func templateFingerprint() (string, error) {
 	entries, err := filepath.Glob(filepath.Join(migrationsDir(), "*.sql"))
 	if err != nil {
 		return "", fmt.Errorf("list migrations: %w", err)
@@ -409,6 +453,7 @@ func migrationsFingerprint() (string, error) {
 	sort.Strings(entries)
 
 	digest := sha256.New()
+	fmt.Fprintf(digest, "format=%d\n", templateFormat)
 	for _, entry := range entries {
 		contents, err := os.ReadFile(entry)
 		if err != nil {

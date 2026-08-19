@@ -55,3 +55,13 @@ func TestFitName_KeepsNamesSharingAPrefixApart(t *testing.T) {
 		t.Errorf("fitted lengths %d and %d, want %d", len(enabled), len(disabled), limit)
 	}
 }
+
+// Sanitizing maps every rune outside [a-z0-9_] to "_", so two test names Go kept
+// distinct can arrive as one string — and one database, bucket or queue.
+func TestSanitizeTestName_KeepsNamesThatSanitizeAlikeApart(t *testing.T) {
+	slash, underscore := SanitizeTestName("TestA/B_C"), SanitizeTestName("TestA_B/C")
+
+	if slash == underscore {
+		t.Errorf("both names sanitized to %q", slash)
+	}
+}
