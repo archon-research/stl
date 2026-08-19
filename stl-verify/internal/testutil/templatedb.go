@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"sync"
@@ -90,11 +91,20 @@ var (
 	mainDBNames   = map[string]bool{}
 )
 
-// claimMainDBName reserves dbName for this test binary, rejecting a second claim.
-// The names are hand-written string constants, so nothing stops two files in a
-// package choosing one name — and the loser's live database would go out under it,
-// dropped as stale by the winner's setup.
+// What an unquoted identifier accepts. The names reach SQL by interpolation, so a
+// stray dash would arrive as a syntax error inside CREATE DATABASE rather than as a
+// rejected argument.
+var mainDBNamePattern = regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
+
+// claimMainDBName checks dbName and reserves it for this test binary, rejecting a
+// second claim. The names are hand-written string constants, so nothing stops two
+// files in a package choosing one name — and the loser's live database would go out
+// under it, dropped as stale by the winner's setup.
 func claimMainDBName(dbName string) error {
+	if !mainDBNamePattern.MatchString(dbName) {
+		return fmt.Errorf("database name %q must match %s", dbName, mainDBNamePattern)
+	}
+
 	mainDBNamesMu.Lock()
 	defer mainDBNamesMu.Unlock()
 
@@ -393,20 +403,26 @@ func buildTemplate(ctx context.Context, conn *pgx.Conn, baseDSN, name string) er
 	pool.Close()
 
 	if _, err := conn.Exec(ctx,
-		"UPDATE pg_database SET datistemplate = true, datallowconn = false WHERE datname = $1", name,
+		fmt.Sprintf("ALTER DATABASE %s IS_TEMPLATE true ALLOW_CONNECTIONS false", name),
 	); err != nil {
 		return fmt.Errorf("mark template %s clonable: %w", name, err)
 	}
 	return nil
 }
 
-// migrateTemplate enables the extension and applies every migration.
-func migrateTemplate(ctx context.Context, pool *pgxpool.Pool) error {
-	// Migrations leave the extension to the infrastructure bootstrap in production,
-	// and a database created from template1 does not inherit it.
-	if _, err := pool.Exec(ctx, "CREATE EXTENSION IF NOT EXISTS timescaledb"); err != nil {
-		return fmt.Errorf("enable timescaledb: %w", err)
+// databaseExists reports whether name is present on the server conn is attached to.
+func databaseExists(ctx context.Context, conn *pgx.Conn, name string) (bool, error) {
+	var exists bool
+	if err := conn.QueryRow(ctx,
+		"SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)", name,
+	).Scan(&exists); err != nil {
+		return false, fmt.Errorf("check whether database %s exists: %w", name, err)
 	}
+	return exists, nil
+}
+
+// migrateTemplate applies every migration.
+func migrateTemplate(ctx context.Context, pool *pgxpool.Pool) error {
 	if err := migrator.New(pool, migrationsDir()).ApplyAll(ctx); err != nil {
 		return err
 	}
@@ -415,11 +431,20 @@ func migrateTemplate(ctx context.Context, pool *pgxpool.Pool) error {
 	return DisableScheduledJobs(ctx, pool)
 }
 
-// dropTemplate removes a leftover template. The datistemplate flag has to come off
-// first — Postgres refuses to drop a database while it is marked as a template.
+// dropTemplate removes a leftover template. The template flag has to come off first
+// — Postgres refuses to drop a database while it is marked as a template — and
+// ALTER DATABASE needs a database to exist, so nothing there is nothing to do.
 func dropTemplate(ctx context.Context, conn *pgx.Conn, name string) error {
+	exists, err := databaseExists(ctx, conn, name)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+
 	if _, err := conn.Exec(ctx,
-		"UPDATE pg_database SET datistemplate = false WHERE datname = $1", name,
+		fmt.Sprintf("ALTER DATABASE %s IS_TEMPLATE false", name),
 	); err != nil {
 		return fmt.Errorf("clear template flag on %s: %w", name, err)
 	}
@@ -434,7 +459,7 @@ func dropTemplate(ctx context.Context, conn *pgx.Conn, name string) error {
 // see any of that, so without this a server outliving one tree would keep handing
 // out templates built under the old semantics: the run that introduced
 // DisableScheduledJobs would have cloned policy jobs back in.
-const templateFormat = 1
+const templateFormat = 2
 
 // templateFingerprint digests everything a finished template is made of, so one
 // built from an older tree is never cloned: the name changes with the contents.

@@ -12,6 +12,9 @@ import "testing"
 //
 // Reusing a key is a compile error; reusing a block fails
 // TestReservedBlocks_AreDistinct.
+//
+// Interim: VEC-569 gives the binaries a configurable key prefix, which removes the
+// need to reserve anything.
 var reservedBlocks = map[string]int64{
 	"sparklend-indexer":        16_800_000,
 	"oracle-price-indexer":     18_000_000,

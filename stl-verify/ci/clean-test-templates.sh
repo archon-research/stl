@@ -27,8 +27,7 @@ fi
 
 for template in $templates; do
   # The flag first: Postgres refuses to drop a database while it is marked template.
-  psql "$dsn" -qtAXc \
-    "UPDATE pg_database SET datistemplate = false WHERE datname = '$template'" >/dev/null
+  psql "$dsn" -qtAXc "ALTER DATABASE $template IS_TEMPLATE false" >/dev/null
   psql "$dsn" -qtAXc "DROP DATABASE IF EXISTS $template" >/dev/null
   echo "dropped $template"
 done

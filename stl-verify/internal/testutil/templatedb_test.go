@@ -12,3 +12,9 @@ func TestClaimMainDBName_RejectsASecondClaim(t *testing.T) {
 		t.Error("second claim succeeded, so one file's setup would drop the other file's database")
 	}
 }
+
+func TestClaimMainDBName_RejectsANameCreateDatabaseCannotTake(t *testing.T) {
+	if err := claimMainDBName("test-dashed"); err == nil {
+		t.Error("claim accepted a name that would reach CREATE DATABASE as a syntax error")
+	}
+}

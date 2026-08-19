@@ -9,9 +9,9 @@ import (
 // itself, one set per integration shard. Unset locally, where each package
 // starts its own container from TestMain instead.
 //
-// The Postgres server named here must be disposable: the suite creates and drops
-// databases on it freely, and turns off the TimescaleDB policy jobs in every
-// database it makes (see DisableScheduledJobs).
+// The Postgres server named here must be disposable, and reached as a superuser: the
+// suite creates and drops databases freely, flips template flags, evicts sessions it
+// does not own, and turns off the TimescaleDB policy jobs (see DisableScheduledJobs).
 const (
 	EnvPostgresDSN        = "STL_TEST_POSTGRES_DSN"
 	EnvRedisAddr          = "STL_TEST_REDIS_ADDR"
