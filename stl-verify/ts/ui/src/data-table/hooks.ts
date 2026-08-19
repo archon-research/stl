@@ -1,30 +1,45 @@
 import { useUrlSyncedTableStateAdapter } from '@archon-research/design-system';
 import type { UseUrlSyncedTableReturn } from '@archon-research/design-system';
-import { useMemo } from 'react';
-
-import { useUrlParam } from '../lib/url-params';
+import { useNavigate, useSearch } from '@tanstack/react-router';
+import { useCallback, useMemo } from 'react';
 
 /**
- * Hook to sync TanStack table state (sorting, global search) with URL query params.
- * Enables shareable/bookmarkable table states.
+ * Syncs TanStack table state (sorting, global search) with the allocation
+ * route's `sort`/`q` search params, so a table state is shareable.
  *
- * The sort param is validated for shape only (upstream `validateSortingState`),
- * never against a table's column set, and `sort`/`q` are one namespace shared by
- * every table (see `PARAMS`). So a stale bookmark or a sibling table's column id
- * renders unsorted while the URL keeps advertising the sort. Stripping the param
- * here is not the fix: whichever table mounted first would clobber the other's
- * sort. Splitting the keys per table is, and that needs both tables' owners.
- *
- * @param sortParamKey - URL param name for sorting (e.g. 'sort')
- * @param searchParamKey - URL param name for search (e.g. 'q')
- * @returns Object with current sorting/filter state and setters
+ * The params belong to the `/allocation` route schema, not to a global
+ * namespace: a second table on another route gets its own keys and cannot
+ * clobber this one. `sort` is still validated for shape only (upstream
+ * `validateSortingState`), never against a column set, so a stale bookmark
+ * naming a dropped column renders unsorted while the URL keeps advertising it.
  */
-export function useUrlSyncedTableState(
-  sortParamKey: string = 'sort',
-  searchParamKey: string = 'q',
-): UseUrlSyncedTableReturn {
-  const [sortParam, setSortParam] = useUrlParam(sortParamKey);
-  const [searchParam, setSearchParam] = useUrlParam(searchParamKey);
+export function useUrlSyncedTableState(): UseUrlSyncedTableReturn {
+  // Not strict: the drawer hosting this table stays mounted on the activities
+  // route, where the allocation search does not exist.
+  const search = useSearch({ from: '/allocation', shouldThrow: false });
+  const navigate = useNavigate();
+
+  const setSortParam = useCallback(
+    (value: string | null) => {
+      void navigate({
+        to: '.',
+        search: (previous) => ({ ...previous, sort: value ?? undefined }),
+        replace: true,
+      });
+    },
+    [navigate],
+  );
+
+  const setSearchParam = useCallback(
+    (value: string | null) => {
+      void navigate({
+        to: '.',
+        search: (previous) => ({ ...previous, q: value ?? undefined }),
+        replace: true,
+      });
+    },
+    [navigate],
+  );
 
   // The adapter identity is load-bearing: `useUrlSyncedTableStateAdapter`
   // memoises the setters it returns on this object, so a fresh literal per
@@ -33,8 +48,13 @@ export function useUrlSyncedTableState(
   // torn down and re-armed on every unrelated re-render (a resolving fetch, a
   // URL param change) and never commit the search to the URL under a burst.
   const adapter = useMemo(
-    () => ({ sortParam, setSortParam, searchParam, setSearchParam }),
-    [sortParam, setSortParam, searchParam, setSearchParam],
+    () => ({
+      sortParam: search?.sort ?? null,
+      setSortParam,
+      searchParam: search?.q ?? null,
+      setSearchParam,
+    }),
+    [search?.q, search?.sort, setSearchParam, setSortParam],
   );
 
   return useUrlSyncedTableStateAdapter(adapter);
