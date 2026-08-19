@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/sync/errgroup"
 
@@ -22,81 +21,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/morpho_indexer"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
-
-// replayV2StructuredEvents re-walks the S3 receipts over [from,to] and feeds
-// every VaultV2 structured event (adapter / cap / fee) from a persisted V2 vault
-// through the same handler path the live worker uses (via ReplayMetaMorphoLog).
-//
-// Every run replays the whole requested range. The backfiller keeps no progress
-// state, so an interrupted run is resumed by re-running the same command: the
-// replay writes go through the same idempotent repo methods as live indexing, so
-// re-replaying a range costs wall clock, not correctness.
-//
-// It runs after discovery/probe/persist so the vault registry, loaded here from
-// the DB, already contains this run's newly-persisted vaults alongside any from
-// earlier runs.
-func replayV2StructuredEvents(
-	ctx context.Context,
-	logger *slog.Logger,
-	s3Reader outbound.S3Reader,
-	ethClient *ethclient.Client,
-	multicaller outbound.Multicaller,
-	pool *pgxpool.Pool,
-	buildID buildregistry.BuildID,
-	cfg config,
-) error {
-	svc, err := buildReplayService(logger, multicaller, pool, buildID, cfg.chainID)
-	if err != nil {
-		return fmt.Errorf("building replay service: %w", err)
-	}
-	if err := svc.LoadVaultRegistry(ctx); err != nil {
-		return err
-	}
-
-	v2Vaults := svc.V2VaultAddresses()
-	if len(v2Vaults) == 0 {
-		logger.Info("no VaultV2 vaults known — skipping structured-event replay")
-		return nil
-	}
-
-	topics, err := morpho_indexer.VaultV2StructuredEventTopics()
-	if err != nil {
-		return fmt.Errorf("deriving VaultV2 structured topics: %w", err)
-	}
-
-	tsCache := blocktime.New(ethClient)
-
-	logger.Info("starting VaultV2 structured-event replay",
-		"v2Vaults", len(v2Vaults),
-		"from", cfg.from,
-		"to", cfg.to)
-
-	replayOne := func(part string) error {
-		return replayPartition(ctx, logger, s3Reader, svc, tsCache, cfg, part, v2Vaults, topics)
-	}
-	if err := runReplayPartitions(replayPartitionPrefixes(cfg.from, cfg.to), replayOne); err != nil {
-		return err
-	}
-
-	logger.Info("VaultV2 structured-event replay complete")
-	return nil
-}
-
-// runReplayPartitions replays every partition in parts, in order, and
-// hard-stops on the first failure.
-//
-// The hard stop is not about ordering — replaying out of order still reaches the
-// same answers (see replayPartition). It is the usual rule: a partition that
-// failed leaves a hole, and continuing past it would end the run reporting
-// success over incomplete data.
-func runReplayPartitions(parts []string, replay func(part string) error) error {
-	for _, part := range parts {
-		if err := replay(part); err != nil {
-			return fmt.Errorf("replaying partition %s: %w", part, err)
-		}
-	}
-	return nil
-}
 
 // buildReplayService constructs the morpho-indexer Service wired for replay
 // (no SQS consumer, no block cache) plus the repositories it needs.
@@ -141,31 +65,32 @@ func replayPartition(
 	svc *morpho_indexer.Service,
 	tsCache *blocktime.Cache,
 	cfg config,
+	rng blockRange,
 	part string,
 	v2Vaults map[common.Address]struct{},
 	topics map[common.Hash]struct{},
-) error {
-	entries, err := collectPartitionV2Logs(ctx, s3Reader, cfg.bucket, part, cfg.from, cfg.to, cfg.goroutines, v2Vaults, topics)
+) (int, error) {
+	entries, err := collectPartitionV2Logs(ctx, s3Reader, cfg.bucket, part, rng.From, rng.To, cfg.goroutines, v2Vaults, topics)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if len(entries) == 0 {
-		return nil
+		return 0, nil
 	}
 	sortV2LogEntries(entries)
 
 	for _, e := range entries {
 		blockTimestamp, err := tsCache.TimestampAt(ctx, e.blockHash)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		if err := svc.ReplayMetaMorphoLog(ctx, e.log, e.blockNumber, e.blockHash, e.blockVersion, blockTimestamp); err != nil {
-			return fmt.Errorf("replaying log tx=%s index=%d block=%d: %w", e.log.TransactionHash, e.logIndex, e.blockNumber, err)
+			return 0, fmt.Errorf("replaying log tx=%s index=%d block=%d: %w", e.log.TransactionHash, e.logIndex, e.blockNumber, err)
 		}
 	}
 
-	logger.Info("replayed partition", "partition", part, "events", len(entries))
-	return nil
+	logger.Debug("replayed partition", "partition", part, "events", len(entries))
+	return len(entries), nil
 }
 
 // receiptFile is one block's highest-version receipt object in a partition.
@@ -320,7 +245,8 @@ func partitionBlockRange(part string) (start, end int64, ok bool) {
 // replayPartitionPrefixes returns the S3 partition prefixes covering [from,to]
 // in ascending start-block order, so an AddAdapter in an earlier partition lands
 // before a later partition's Allocate (desirable rather than required — see
-// replayPartition). partitionsForRange sorts lexicographically ("10000-10999" before
+// replayPartition). Pure and deterministic, so the workflow can call it to build
+// its activity list. partitionsForRange sorts lexicographically ("10000-10999" before
 // "2000-2999"), which is fine for the order-agnostic discovery scan but wrong
 // here; building the list from aligned block starts keeps it numeric-ascending.
 //

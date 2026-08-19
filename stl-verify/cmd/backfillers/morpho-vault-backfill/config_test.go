@@ -5,99 +5,113 @@ import (
 	"testing"
 )
 
-func TestParseConfig(t *testing.T) {
-	// Neutralise any ambient env fallbacks so the flag-only cases are
-	// deterministic across machines/CI.
-	t.Setenv("S3_BUCKET", "")
-	t.Setenv("DATABASE_URL", "")
-	t.Setenv("RPC_URL", "")
-
-	const (
-		bucket = "test-bucket"
-		db     = "postgres://localhost/test"
-		rpc    = "http://localhost:8545"
-	)
-	// withConns returns a fresh args slice with the three required connection
-	// flags plus the given extras, avoiding shared-backing-array aliasing.
-	withConns := func(extra ...string) []string {
-		return append([]string{"-bucket", bucket, "-db", db, "-rpc-url", rpc}, extra...)
+func TestLoadConfig(t *testing.T) {
+	// The complete valid environment; each case overrides one key, and an empty
+	// value stands for "unset" (env.Require and env.Get both read empty as unset).
+	valid := map[string]string{
+		"CHAIN_ID":             "1",
+		"S3_BUCKET":            "stl-sentinelstaging-ethereum-raw-89d540d0",
+		"ALCHEMY_API_KEY":      "test-key",
+		"ALCHEMY_HTTP_URL":     "",
+		"BACKFILL_GOROUTINES":  "",
+		"BACKFILL_PROBE_BATCH": "",
 	}
-
-	// VaultV2 factory deploy block on Ethereum mainnet (chain 1).
-	const v2DeployBlockMainnet = 23_375_073
 
 	tests := []struct {
-		name     string
-		args     []string
-		wantFrom int64
-		wantTo   int64
-		wantErr  bool
-		errSub   string
+		name            string
+		override        map[string]string
+		want            config
+		wantErrContains string
 	}{
 		{
-			name:     "explicit from and to",
-			args:     withConns("-from", "100", "-to", "200"),
-			wantFrom: 100,
-			wantTo:   200,
+			name: "defaults fill the optional knobs",
+			want: config{
+				bucket:     "stl-sentinelstaging-ethereum-raw-89d540d0",
+				rpcURL:     defaultAlchemyHTTPURL + "/test-key",
+				chainID:    1,
+				goroutines: defaultGoroutines,
+				probeBatch: defaultProbeBatch,
+			},
 		},
 		{
-			name:     "from-v2-deploy defaults from on chain 1",
-			args:     withConns("-from-v2-deploy", "-to", "23500000"),
-			wantFrom: v2DeployBlockMainnet,
-			wantTo:   23500000,
+			name:     "ALCHEMY_HTTP_URL overrides the mainnet default",
+			override: map[string]string{"ALCHEMY_HTTP_URL": "https://eth-sepolia.g.alchemy.com/v2"},
+			want: config{
+				bucket:     "stl-sentinelstaging-ethereum-raw-89d540d0",
+				rpcURL:     "https://eth-sepolia.g.alchemy.com/v2/test-key",
+				chainID:    1,
+				goroutines: defaultGoroutines,
+				probeBatch: defaultProbeBatch,
+			},
 		},
 		{
-			name:     "explicit from wins over from-v2-deploy",
-			args:     withConns("-from-v2-deploy", "-from", "23400000", "-to", "23500000"),
-			wantFrom: 23400000,
-			wantTo:   23500000,
+			name:     "tuning knobs are overridable",
+			override: map[string]string{"BACKFILL_GOROUTINES": "64", "BACKFILL_PROBE_BATCH": "25"},
+			want: config{
+				bucket:     "stl-sentinelstaging-ethereum-raw-89d540d0",
+				rpcURL:     defaultAlchemyHTTPURL + "/test-key",
+				chainID:    1,
+				goroutines: 64,
+				probeBatch: 25,
+			},
 		},
 		{
-			name:    "from-v2-deploy on unsupported chain errors",
-			args:    withConns("-from-v2-deploy", "-to", "200", "-chain-id", "8453"),
-			wantErr: true,
-			errSub:  "from-v2-deploy",
+			name:            "missing CHAIN_ID",
+			override:        map[string]string{"CHAIN_ID": ""},
+			wantErrContains: "CHAIN_ID",
 		},
 		{
-			name:    "missing from without from-v2-deploy errors",
-			args:    withConns("-to", "200"),
-			wantErr: true,
-			errSub:  "-from",
+			name:            "missing S3_BUCKET",
+			override:        map[string]string{"S3_BUCKET": ""},
+			wantErrContains: "S3_BUCKET",
 		},
 		{
-			name:    "missing bucket errors",
-			args:    []string{"-db", db, "-rpc-url", rpc, "-from", "1", "-to", "2"},
-			wantErr: true,
-			errSub:  "bucket",
+			name:            "missing ALCHEMY_API_KEY",
+			override:        map[string]string{"ALCHEMY_API_KEY": ""},
+			wantErrContains: "ALCHEMY_API_KEY",
 		},
 		{
-			name:    "from greater than to errors",
-			args:    withConns("-from", "300", "-to", "200"),
-			wantErr: true,
-			errSub:  "-from",
+			name:            "unparseable goroutine count",
+			override:        map[string]string{"BACKFILL_GOROUTINES": "lots"},
+			wantErrContains: "BACKFILL_GOROUTINES",
+		},
+		{
+			name:            "zero goroutines",
+			override:        map[string]string{"BACKFILL_GOROUTINES": "0"},
+			wantErrContains: "must be positive",
+		},
+		{
+			name:            "negative probe batch",
+			override:        map[string]string{"BACKFILL_PROBE_BATCH": "-1"},
+			wantErrContains: "must be positive",
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg, err := parseConfig(tt.args)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatalf("expected error, got nil (cfg=%+v)", cfg)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			for key, value := range valid {
+				if override, ok := tc.override[key]; ok {
+					value = override
 				}
-				if tt.errSub != "" && !strings.Contains(err.Error(), tt.errSub) {
-					t.Errorf("error %q does not contain %q", err.Error(), tt.errSub)
+				t.Setenv(key, value)
+			}
+
+			got, err := loadConfig()
+
+			if tc.wantErrContains != "" {
+				if err == nil {
+					t.Fatalf("expected an error containing %q, got %+v", tc.wantErrContains, got)
+				}
+				if !strings.Contains(err.Error(), tc.wantErrContains) {
+					t.Errorf("error = %q, want it to contain %q", err, tc.wantErrContains)
 				}
 				return
 			}
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if cfg.from != tt.wantFrom {
-				t.Errorf("from = %d, want %d", cfg.from, tt.wantFrom)
-			}
-			if cfg.to != tt.wantTo {
-				t.Errorf("to = %d, want %d", cfg.to, tt.wantTo)
+			if got != tc.want {
+				t.Errorf("config = %+v, want %+v", got, tc.want)
 			}
 		})
 	}
