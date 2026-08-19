@@ -71,6 +71,11 @@ reviews:
     enabled: true
     auto_incremental_review: true
     drafts: false
+    # Only the default branch is a review base by default, so stacked PRs got
+    # "Review skipped: reviews are disabled for this base branch". `.*` opts in
+    # every base rather than encoding the branch-naming convention here.
+    base_branches:
+      - ".*"
     ignore_title_keywords:
       - "wip"
       - "WIP"
