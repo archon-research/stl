@@ -47,6 +47,25 @@ pre-commit:
           fi
         done
 
+    # Never commit a compiled executable, whatever its size or name: the size check
+    # below misses small binaries and the .gitignore list misses renamed ones. Detects
+    # by content (Mach-O / ELF / PE magic), so a `go build` artifact staged by any
+    # path is rejected. Build output belongs in dist/ (`make build-*`).
+    check-no-binaries:
+      glob: "**/*"
+      exclude: *exclude_dirs
+      run: |
+        rc=0
+        for file in {staged_files}; do
+          [ -f "$file" ] || continue
+          case "$(file -b --mime-type "$file" 2>/dev/null)" in
+            application/x-mach-binary|application/x-executable|application/x-sharedlib|application/x-pie-executable|application/x-dosexec|application/vnd.microsoft.portable-executable)
+              echo "Error: $file is a compiled executable — build output is never committed (use dist/, see AGENTS.md)"
+              rc=1 ;;
+          esac
+        done
+        exit $rc
+
     check-large-files:
       glob: "**/*"
       exclude: *exclude_dirs

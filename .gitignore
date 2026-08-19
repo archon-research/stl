@@ -9,9 +9,68 @@
 dist/mock-blockchain-server
 # Compiled binaries; `make build-*` targets output here (never commit build output)
 stl-verify/dist/
-# `go build` writes to the working directory, not dist/ — this catches the one
-# binary that lands here when built from stl-verify/. Prefer `make build-backfiller-%`.
+# Loose Go binaries: `go build ./cmd/<group>/<name>` drops an executable named <name>
+# in the working directory (stl-verify/ or the repo root). Build output belongs in
+# stl-verify/dist/ (`make build-*`), never in the tree. One pattern per cmd/ entry,
+# anchored to the two roots builds run from. Regenerate when cmd/ gains an entry:
+#   ls -d stl-verify/cmd/*/*/ | xargs -n1 basename | sort -u
+# Deliberately NOT listed: `internal` and `stress-test` — those names are also tracked
+# directories at stl-verify/, and an ignore on the bare name would hide new files
+# inside them. Build those two with -o dist/ (the Makefile targets already do).
+/stl-verify/aave-like-user-snapshot-indexer
+/aave-like-user-snapshot-indexer
+/stl-verify/anchorage-indexer
+/anchorage-indexer
+/stl-verify/cex-orderbook-indexer
+/cex-orderbook-indexer
+/stl-verify/dex-indexer
+/dex-indexer
+/stl-verify/fluid-vault-indexer
+/fluid-vault-indexer
+/stl-verify/gen-transformed
+/gen-transformed
+/stl-verify/generate-er
+/generate-er
+/stl-verify/maple-graphql-indexer
+/maple-graphql-indexer
+/stl-verify/migrate
+/migrate
+/stl-verify/morpho-indexer
+/morpho-indexer
+/stl-verify/morpho-vault-indexer
+/morpho-vault-indexer
+/stl-verify/null-payload-refill
+/null-payload-refill
 /stl-verify/offchain-price-backfill
+/offchain-price-backfill
+/stl-verify/offchain-price-indexer
+/offchain-price-indexer
+/stl-verify/oracle-price-indexer
+/oracle-price-indexer
+/stl-verify/oracle-pricing-backfill
+/oracle-pricing-backfill
+/stl-verify/prime-allocation-indexer
+/prime-allocation-indexer
+/stl-verify/prime-debt-indexer
+/prime-debt-indexer
+/stl-verify/psm3-indexer
+/psm3-indexer
+/stl-verify/raw-block-bulk-downloader
+/raw-block-bulk-downloader
+/stl-verify/raw-data-backup
+/raw-data-backup
+/stl-verify/sparklend-backfill
+/sparklend-backfill
+/stl-verify/sparklend-indexer
+/sparklend-indexer
+/stl-verify/transform-bootstrap
+/transform-bootstrap
+/stl-verify/transform-worker
+/transform-worker
+/stl-verify/watcher
+/watcher
+/stl-verify/watcher-data-validator
+/watcher-data-validator
 
 # gen-transformed scratch output (regenerate to a scratch file, never over the committed migration)
 /gen.sql
