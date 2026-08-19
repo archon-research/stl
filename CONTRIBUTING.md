@@ -997,3 +997,5 @@ Most of these are also spelled out in [CLAUDE.md](./CLAUDE.md) and
 
 Thanks for contributing — ship data-correct code and we'll all sleep
 better.
+
+<!-- ci-stack-probe: throwaway, delete with the branch -->
