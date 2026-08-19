@@ -137,7 +137,7 @@ func TestBackfillParams_Resolve(t *testing.T) {
 		{
 			name:            "one partition past the ceiling is rejected",
 			in:              partitionsWide(maxPartitionsPerRun + 1),
-			wantErrContains: "over the 10000 limit",
+			wantErrContains: "over the 8000 limit",
 		},
 		// math.MaxInt64 overflows a partition walk that steps by BlockRangeSize —
 		// the cursor goes negative and the loop never terminates — so the ceiling

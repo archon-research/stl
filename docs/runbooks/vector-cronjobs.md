@@ -415,11 +415,10 @@ range (scan S3 receipts → probe candidates on-chain → persist vaults), then 
 activity per 1000-block S3 partition replaying that partition's VaultV2
 structured events, sequentially and in ascending block order. Measured on
 mainnet: ~11.5 s per partition for discovery and ~20 s per partition for replay,
-so a whole-V2-era run is measured in hours. A range wider than 10000 partitions
-is rejected up front — that catches a mistyped `from` or a millisecond timestamp
-pasted into `to`. It is not a history-limit guarantee: a run past ~8500
-partitions can still be terminated mid-flight for outgrowing Temporal's history,
-so split a range that wide.
+so a whole-V2-era run is measured in hours. A range wider than 8000 partitions is
+rejected up front — that catches a mistyped `from` or a millisecond timestamp
+pasted into `to`, and keeps every accepted run inside Temporal's 51,200-event
+history limit (~6 events per activity), so none is terminated mid-flight.
 
 **Reading progress and re-running.** The `progress` query (UI → Query tab) shows
 `partitionsDone` / `partitionsTotal` mid-run and survives a failed run, whose
