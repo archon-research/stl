@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -127,6 +128,14 @@ func TestBackfillParams_Resolve(t *testing.T) {
 			name:            "one partition past the ceiling is rejected",
 			in:              partitionsWide(maxPartitionsPerRun + 1),
 			wantErrContains: "over the 2500 limit",
+		},
+		// math.MaxInt64 overflows a partition walk that steps by BlockRangeSize —
+		// the cursor goes negative and the loop never terminates — so the ceiling
+		// has to be measured without walking.
+		{
+			name:            "to at the int64 ceiling is rejected",
+			in:              BackfillParams{From: 1, To: math.MaxInt64},
+			wantErrContains: "partitions, over the",
 		},
 	}
 
@@ -255,6 +264,28 @@ func TestBackfillWorkflow_RejectsInvalidParams(t *testing.T) {
 	}
 	if len(*replayed) != 0 {
 		t.Errorf("replayed %v for invalid params, want none", *replayed)
+	}
+}
+
+// A pasted millisecond timestamp in `to` spans ~1.75 billion partitions. The
+// ceiling has to be measured arithmetically, so the run is rejected before the
+// prefix list is built: building it first exhausts the single replica's memory
+// and CrashLoops the worker instead of returning this error.
+func TestBackfillWorkflow_RejectsAnAbsurdRangeBeforeBuildingItsPartitionList(t *testing.T) {
+	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+	replayed := registerActivityStubs(env, noVaultsDiscovered, noEventsReplayed)
+
+	executeBackfill(env, BackfillParams{From: 1, To: 1_750_000_000_000})
+
+	err := env.GetWorkflowError()
+	if err == nil {
+		t.Fatal("expected a range of billions of partitions to be rejected")
+	}
+	if !strings.Contains(err.Error(), "partitions, over the") {
+		t.Errorf("error = %v, want it to name the partition ceiling", err)
+	}
+	if len(*replayed) != 0 {
+		t.Errorf("replayed %v for a rejected range, want none", *replayed)
 	}
 }
 

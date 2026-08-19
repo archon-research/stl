@@ -186,6 +186,30 @@ func TestReplayPartitionPrefixes_AscendingByBlock(t *testing.T) {
 	}
 }
 
+// The ceiling is checked against replayPartitionCount but the run walks
+// replayPartitionPrefixes, so the two must agree on every shape of range or the
+// guard is measuring something the run does not do.
+func TestReplayPartitionCount_MatchesTheBuiltPrefixList(t *testing.T) {
+	tests := []struct {
+		name     string
+		from, to int64
+	}{
+		{name: "aligned range", from: 2000, to: 10999},
+		{name: "both bounds mid-partition", from: 1500, to: 3500},
+		{name: "single partition", from: 1200, to: 1800},
+		{name: "to on a partition's last block", from: 1000, to: 1999},
+		{name: "from and to in the same block", from: 1234, to: 1234},
+		{name: "from below the first partition boundary", from: 1, to: 5000},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got, want := replayPartitionCount(tt.from, tt.to), int64(len(replayPartitionPrefixes(tt.from, tt.to))); got != want {
+				t.Errorf("replayPartitionCount(%d, %d) = %d, want %d", tt.from, tt.to, got, want)
+			}
+		})
+	}
+}
+
 func vaultSet(addrs ...common.Address) map[common.Address]struct{} {
 	set := make(map[common.Address]struct{}, len(addrs))
 	for _, a := range addrs {

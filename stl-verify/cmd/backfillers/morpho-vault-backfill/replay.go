@@ -262,6 +262,16 @@ func replayPartitionPrefixes(from, to int64) []string {
 	return parts
 }
 
+// replayPartitionCount reports how many prefixes replayPartitionPrefixes would
+// return, without building any of them. The count is what the run's ceiling is
+// checked against, and `to` is operator-supplied: walking the range to measure it
+// allocates a string per 1000 blocks, so a pasted millisecond timestamp exhausts
+// the worker before the ceiling can reject it, and math.MaxInt64 overflows the
+// walk's cursor and never terminates at all.
+func replayPartitionCount(from, to int64) int64 {
+	return to/partition.BlockRangeSize - from/partition.BlockRangeSize + 1
+}
+
 // v2LogEntry is a single VaultV2 structured-event log queued for replay, carrying
 // the block coordinates processMetaMorphoLog needs.
 type v2LogEntry struct {
