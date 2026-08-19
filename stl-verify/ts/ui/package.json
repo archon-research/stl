@@ -27,6 +27,7 @@
     "@archon-research/design-system": "0.9.0",
     "@archon-research/http-client-core": "0.9.0",
     "@archon-research/http-client-react": "0.9.0",
+    "@tanstack/react-router": "1.170.25",
     "lucide-react": "1.28.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
