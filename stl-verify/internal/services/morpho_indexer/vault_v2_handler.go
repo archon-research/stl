@@ -136,9 +136,10 @@ func (s *Service) saveAdapterSeedState(ctx context.Context, tx pgx.Tx, adapterID
 }
 
 // handleRemoveAdapter records that the adapter was NOT in the vault's set from this log
-// onward. It is an unconditional append with no lookup and no decision: a removal for an
-// adapter we have never seen creates the identity row and records one untyped
-// observation, which is the truthful record rather than an error.
+// onward. It is an unconditional append with no membership decision — the registry still
+// resolves the identity row, creating it when a removal is the first we hear of an
+// adapter, and records one untyped observation against it, which is the truthful record
+// rather than an error.
 //
 // Deliberately no type probe and no pre-transaction membership read. Both existed only to
 // satisfy "the incarnation a removal closes must be registered with a type"; there is no

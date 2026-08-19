@@ -378,10 +378,11 @@ func (r *MorphoRepository) ObserveAdapterMembership(ctx context.Context, tx pgx.
 			obs.Identity.Address, obs.Identity.MorphoVaultID, obs.Membership.BlockNumber, outbound.ErrAdapterUnclassified)
 	}
 
-	if err := r.appendMembership(ctx, tx, adapterID, &obs.Membership); err != nil {
+	appended, err := r.appendMembership(ctx, tx, adapterID, &obs.Membership)
+	if err != nil {
 		return 0, false, err
 	}
-	return adapterID, true, nil
+	return adapterID, appended, nil
 }
 
 // adapterIdentityID returns the stable id of the (vault, address) identity row,
@@ -458,16 +459,18 @@ func (r *MorphoRepository) membershipAt(ctx context.Context, tx pgx.Tx, adapterI
 	return &isMember, nil
 }
 
-// appendMembership writes one observation. processing_version is assigned by the mam
-// trigger; ON CONFLICT DO NOTHING dedupes a same-build retry (see SaveMarketState for
-// the rationale), so a redelivery or an exact replay converges on the same single row.
-func (r *MorphoRepository) appendMembership(ctx context.Context, tx pgx.Tx, adapterID int64, m *entity.MorphoAdapterMembership) error {
+// appendMembership writes one observation and reports whether a row was actually added.
+// processing_version is assigned by the mam trigger; ON CONFLICT DO NOTHING dedupes a
+// same-build retry (see SaveMarketState for the rationale), so a redelivery or an exact
+// replay converges on the same single row — and returns false, because the log gained
+// nothing. The command tag is the only thing that distinguishes the two outcomes.
+func (r *MorphoRepository) appendMembership(ctx context.Context, tx pgx.Tx, adapterID int64, m *entity.MorphoAdapterMembership) (bool, error) {
 	var adapterType *int16
 	if m.AdapterType != nil {
 		t := int16(*m.AdapterType)
 		adapterType = &t
 	}
-	_, err := tx.Exec(ctx,
+	tag, err := tx.Exec(ctx,
 		`INSERT INTO morpho_adapter_membership
 		     (morpho_adapter_id, block_number, block_version, log_index, timestamp,
 		      is_member, adapter_type, observed_via, build_id)
@@ -477,9 +480,9 @@ func (r *MorphoRepository) appendMembership(ctx context.Context, tx pgx.Tx, adap
 		m.IsMember, adapterType, string(m.ObservedVia), int(r.buildID),
 	)
 	if err != nil {
-		return fmt.Errorf("recording adapter %d membership at block %d: %w", adapterID, m.BlockNumber, err)
+		return false, fmt.Errorf("recording adapter %d membership at block %d: %w", adapterID, m.BlockNumber, err)
 	}
-	return nil
+	return tag.RowsAffected() == 1, nil
 }
 
 // lockAdapterKey serializes the writers that make a decision about one adapter on a
@@ -560,17 +563,25 @@ func scanAdapterMember(row pgx.Row, morphoVaultID int64, address []byte) (*entit
 	return member, nil
 }
 
-// GetActiveAdaptersByVault returns every adapter whose latest observation says it is a
-// member of the vault's set.
-func (r *MorphoRepository) GetActiveAdaptersByVault(ctx context.Context, morphoVaultID int64) ([]*entity.MorphoAdapterMember, error) {
+// GetActiveAdaptersByVaultAt returns every adapter the log calls a member of the vault's
+// set AS OF a block position — the whole-set counterpart of GetActiveAdapterAt, sharing
+// its LATERAL shape so the bound folds into the index condition and each adapter still
+// costs one backward index descent.
+//
+// There is deliberately no unbounded variant. Its only caller diffs this answer against
+// an enumeration pinned to a block, and an unbounded read would answer about the chain
+// head instead: an adapter added above the pinned block would come back a member, be
+// absent from the enumeration, and be recorded as removed at a block where it was not.
+func (r *MorphoRepository) GetActiveAdaptersByVaultAt(ctx context.Context, morphoVaultID int64, at entity.BlockPosition) ([]*entity.MorphoAdapterMember, error) {
 	rows, err := r.pool.Query(ctx,
 		`SELECT a.id, a.address, a.asset_token_id, m.adapter_type, m.block_number, m.observed_via
 		 FROM morpho_adapter a
-		 JOIN LATERAL (`+latestMembershipLateral+latestMembershipOrder+`
+		 JOIN LATERAL (`+latestMembershipLateral+`
+		       AND (block_number, block_version, log_index) <= ($2, $3, $4)`+latestMembershipOrder+`
 		 ) m ON TRUE
 		 WHERE a.morpho_vault_id = $1 AND m.is_member
 		 ORDER BY a.id`,
-		morphoVaultID,
+		morphoVaultID, at.BlockNumber, at.BlockVersion, at.LogIndex,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("querying active morpho adapters: %w", err)

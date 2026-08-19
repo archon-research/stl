@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1685,6 +1686,19 @@ func (f *morphoTestFixture) isMemberAt(t *testing.T, ctx context.Context, vaultI
 	return member != nil
 }
 
+// activeAdaptersAt reads the vault's whole adapter set as of the END of a block on the
+// latest chain we have indexed, the same position isMemberAt asks about.
+func (f *morphoTestFixture) activeAdaptersAt(t *testing.T, ctx context.Context, vaultID int64, block int64) []*entity.MorphoAdapterMember {
+	t.Helper()
+	adapters, err := f.repo.GetActiveAdaptersByVaultAt(ctx, vaultID, entity.BlockPosition{
+		BlockNumber: block, BlockVersion: math.MaxInt32, LogIndex: entity.EndOfBlockLogIndex,
+	})
+	if err != nil {
+		t.Fatalf("GetActiveAdaptersByVaultAt(%d): %v", block, err)
+	}
+	return adapters
+}
+
 // describeMembership renders an adapter's whole observation log in selection order
 // (latest first), so a failure message shows what the registry actually holds.
 func (f *morphoTestFixture) describeMembership(t *testing.T, ctx context.Context, adapterID int64) string {
@@ -1866,7 +1880,10 @@ func TestObserveAdapterMembership_LatestTransitionWinsUnderReorgVersions(t *test
 
 	t.Run("a higher block_version at the same block wins", func(t *testing.T) {
 		addr := adapterAddr(0x32)
-		id, _ := fixture.observe(t, ctx, vaultID, addr, addedAt(1000, 0, 2, entity.MorphoAdapterTypeMarketV1))
+		// The removal carries a LOWER log index than the add it supersedes, so only
+		// block_version can order them: an ordering tuple that dropped it would pick
+		// the add and call the adapter a member.
+		id, _ := fixture.observe(t, ctx, vaultID, addr, addedAt(1000, 0, 9, entity.MorphoAdapterTypeMarketV1))
 		fixture.observe(t, ctx, vaultID, addr, removedAt(1000, 1, 2))
 
 		if fixture.isMemberAt(t, ctx, vaultID, addr, 1000) {
@@ -1889,6 +1906,51 @@ func TestObserveAdapterMembership_LatestTransitionWinsUnderReorgVersions(t *test
 			t.Errorf("as of 1000 the adapter was still gone: %s", fixture.describeMembership(t, ctx, id))
 		}
 	})
+}
+
+// TestMembershipPrimaryKeyColumnOrder pins the PRIMARY KEY's column sequence, which the
+// behavioural tests above cannot see. latestMembershipOrder is deliberately identical to
+// it so "the latest observation" is one backward scan of the PK index with no sort; a
+// migration that reorders the key — putting log_index before block_version, say — leaves
+// every answer correct while silently turning that scan into a sort over the adapter's
+// whole history. This is the only test that fails on such a reorder.
+func TestMembershipPrimaryKeyColumnOrder(t *testing.T) {
+	setupMorphoTest(t)
+	ctx := context.Background()
+
+	rows, err := morphoPool.Query(ctx,
+		`SELECT c.relname, a.attname
+		 FROM pg_index i
+		 JOIN pg_class c ON c.oid = i.indexrelid
+		 CROSS JOIN LATERAL unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord)
+		 JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+		 WHERE i.indrelid = 'morpho_adapter_membership'::regclass AND i.indisprimary
+		 ORDER BY k.ord`)
+	if err != nil {
+		t.Fatalf("reading the primary key of morpho_adapter_membership: %v", err)
+	}
+	defer rows.Close()
+
+	var indexName string
+	var columns []string
+	for rows.Next() {
+		var column string
+		if err := rows.Scan(&indexName, &column); err != nil {
+			t.Fatalf("scanning primary key column: %v", err)
+		}
+		columns = append(columns, column)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterating primary key columns: %v", err)
+	}
+
+	if indexName != "morpho_adapter_membership_pkey" {
+		t.Errorf("primary key index = %q, want morpho_adapter_membership_pkey", indexName)
+	}
+	want := []string{"morpho_adapter_id", "block_number", "block_version", "log_index", "processing_version"}
+	if !slices.Equal(columns, want) {
+		t.Errorf("primary key columns = %v, want %v — latestMembershipOrder no longer matches the key it scans", columns, want)
+	}
 }
 
 // TestObserveAdapterMembership_SameBlockAddRemoveReAdd covers the shape the previous
@@ -1975,6 +2037,31 @@ func TestObserveAdapterMembership_IdempotentReAppendAndNewBuild(t *testing.T) {
 	}
 	if !fixture.isMemberAt(t, ctx, vaultID, addr, 3000) {
 		t.Error("the reprocessed row carries the same answer, so membership is unchanged")
+	}
+}
+
+// TestObserveAdapterMembership_RedeliveredTransitionReportsNothingAppended pins the
+// second return value on the transition path, which the row counts above cannot see. A
+// transition is INSERTed unconditionally, but "insert attempted" is not "row appended":
+// a redelivery inside one build hits the PK and adds nothing. Callers key an ops signal
+// off that flag — the registration metric, the inferred-membership WARN — so reporting
+// true here would count one on-chain event once per SQS redelivery.
+func TestObserveAdapterMembership_RedeliveredTransitionReportsNothingAppended(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x3a))
+	addr := adapterAddr(0x3b)
+
+	observation := addedAt(4000, 0, 6, entity.MorphoAdapterTypeMarketV1)
+	id, appended := fixture.observe(t, ctx, vaultID, addr, observation)
+	if !appended {
+		t.Fatal("the first observation of a transition must report an append")
+	}
+	if _, appended := fixture.observe(t, ctx, vaultID, addr, observation); appended {
+		t.Error("a redelivered transition reported an append, but the primary key deduped it")
+	}
+	if got := fixture.countMembership(t, ctx, id); got != 1 {
+		t.Errorf("membership rows = %d, want 1: %s", got, fixture.describeMembership(t, ctx, id))
 	}
 }
 
@@ -2300,7 +2387,7 @@ func TestGetActiveAdapter_NotFound(t *testing.T) {
 	}
 }
 
-func TestGetActiveAdaptersByVault_ReturnsActiveExcludesRemoved(t *testing.T) {
+func TestGetActiveAdaptersByVaultAt_ReturnsActiveExcludesRemoved(t *testing.T) {
 	fixture := setupMorphoTest(t)
 	ctx := context.Background()
 	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x19))
@@ -2312,10 +2399,7 @@ func TestGetActiveAdaptersByVault_ReturnsActiveExcludesRemoved(t *testing.T) {
 	// Remove one of the three.
 	fixture.observe(t, ctx, vaultID, adapterAddr(0x0d), removedAt(24600000, 0, 1))
 
-	got, err := fixture.repo.GetActiveAdaptersByVault(ctx, vaultID)
-	if err != nil {
-		t.Fatalf("GetActiveAdaptersByVault failed: %v", err)
-	}
+	got := fixture.activeAdaptersAt(t, ctx, vaultID, 24600000)
 	if len(got) != 2 {
 		t.Fatalf("expected 2 active adapters, got %d", len(got))
 	}
@@ -2329,17 +2413,39 @@ func TestGetActiveAdaptersByVault_ReturnsActiveExcludesRemoved(t *testing.T) {
 	}
 }
 
-func TestGetActiveAdaptersByVault_Empty(t *testing.T) {
+func TestGetActiveAdaptersByVaultAt_Empty(t *testing.T) {
 	fixture := setupMorphoTest(t)
 	ctx := context.Background()
 	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x1a))
 
-	got, err := fixture.repo.GetActiveAdaptersByVault(ctx, vaultID)
-	if err != nil {
-		t.Fatalf("GetActiveAdaptersByVault failed: %v", err)
-	}
-	if len(got) != 0 {
+	if got := fixture.activeAdaptersAt(t, ctx, vaultID, 24600000); len(got) != 0 {
 		t.Errorf("expected 0 adapters, got %d", len(got))
+	}
+}
+
+// TestGetActiveAdaptersByVaultAt_IgnoresObservationsAboveThePosition is why this read
+// takes a position at all. Its caller diffs the answer against an adapters(i)
+// enumeration pinned to a block, so an adapter added ABOVE that block must not come back
+// a member: it would be absent from the enumeration and recorded as removed at a block
+// where it was still on-chain.
+func TestGetActiveAdaptersByVaultAt_IgnoresObservationsAboveThePosition(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x1c))
+	pinned := int64(24500000)
+
+	fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x1d), pinned-1000)
+	fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x1e), pinned+1)
+
+	got := fixture.activeAdaptersAt(t, ctx, vaultID, pinned)
+	if len(got) != 1 {
+		t.Fatalf("as of block %d the vault had 1 adapter, got %d", pinned, len(got))
+	}
+	if !bytes.Equal(got[0].Address, adapterAddr(0x1d)) {
+		t.Errorf("returned adapter %x, want the one added at or below the pinned block", got[0].Address)
+	}
+	if later := fixture.activeAdaptersAt(t, ctx, vaultID, pinned+1); len(later) != 2 {
+		t.Errorf("as of block %d both adapters are members, got %d", pinned+1, len(later))
 	}
 }
 
@@ -2385,10 +2491,7 @@ func TestMorphoAdapterCurrentView_MatchesTheRepositoryRead(t *testing.T) {
 		t.Errorf("view adapter_type = %d, want %d", viewed[kept], entity.MorphoAdapterTypeVaultV1)
 	}
 
-	active, err := fixture.repo.GetActiveAdaptersByVault(ctx, vaultID)
-	if err != nil {
-		t.Fatalf("GetActiveAdaptersByVault: %v", err)
-	}
+	active := fixture.activeAdaptersAt(t, ctx, vaultID, math.MaxInt32)
 	if len(active) != len(viewed) {
 		t.Errorf("the view and the repository disagree: %d vs %d adapters", len(viewed), len(active))
 	}

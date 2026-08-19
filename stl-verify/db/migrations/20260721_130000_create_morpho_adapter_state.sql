@@ -1,5 +1,8 @@
--- Morpho VaultV2 structured tracking, part 2 of 3 (VEC-218): adapter state
--- hypertable.
+-- Morpho VaultV2 structured tracking (VEC-218): adapter state hypertable.
+--
+-- Sibling migrations: morpho_adapter (20260721_120000, identity),
+-- morpho_adapter_membership (20260721_125000, the membership log),
+-- morpho_vault_cap (20260721_140000) and morpho_vault_fee (20260727_120000).
 --
 -- morpho_adapter_state is a per-adapter snapshot: the assets a VaultV2 liquidity
 -- adapter reports it holds in its downstream venue (adapter.realAssets()) at a

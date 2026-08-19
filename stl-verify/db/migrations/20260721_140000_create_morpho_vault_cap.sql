@@ -1,5 +1,8 @@
--- Morpho VaultV2 structured tracking, part 3 of 3 (VEC-218): vault allocation
--- caps.
+-- Morpho VaultV2 structured tracking (VEC-218): vault allocation caps.
+--
+-- Sibling migrations: morpho_adapter (20260721_120000, identity),
+-- morpho_adapter_membership (20260721_125000, the membership log),
+-- morpho_adapter_state (20260721_130000) and morpho_vault_fee (20260727_120000).
 --
 -- A VaultV2 limits how much it will allocate against each "id" — an opaque
 -- bytes32 key (cap_id = keccak256(id_data)) identifying a market, collateral

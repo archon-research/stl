@@ -262,9 +262,11 @@ func (s *Service) persistDiscoveredVault(ctx context.Context, vaultAddress commo
 // What it records is an ASSERTION, not an add: an adapters(i) enumeration witnesses no
 // transition, it reads the set's contents at the end of the discovery block — which is why
 // it carries entity.EndOfBlockLogIndex, ordering above every log in that block, and why a
-// re-run whose answer already matches the log writes nothing. A later replay of the true
-// AddAdapter appends its own transition at its own, lower block, and the add block is a MIN
-// over those; nothing here has to be converged or walked back.
+// re-run whose answer already matches the log appends no membership row. The realAssets
+// seed below is unconditional either way — a snapshot at a new block is new information
+// whatever the membership log already says. A later replay of the true AddAdapter appends
+// its own transition at its own, lower block, and the add block is a MIN over those;
+// nothing here has to be converged or walked back.
 //
 // observedVia distinguishes a mid-life discovery from the Temporal bootstrap's head seed,
 // which drives the same loop.

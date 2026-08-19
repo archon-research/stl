@@ -21,13 +21,13 @@ type MockMorphoRepository struct {
 	SaveVaultStateFn      func(ctx context.Context, tx pgx.Tx, state *entity.MorphoVaultState) error
 	SaveVaultPositionFn   func(ctx context.Context, tx pgx.Tx, position *entity.MorphoVaultPosition) error
 
-	ObserveAdapterMembershipFn func(ctx context.Context, tx pgx.Tx, obs *entity.MorphoAdapterObservation) (int64, bool, error)
-	GetActiveAdapterFn         func(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte) (*entity.MorphoAdapterMember, error)
-	GetActiveAdapterAtFn       func(ctx context.Context, morphoVaultID int64, address []byte, at entity.BlockPosition) (*entity.MorphoAdapterMember, error)
-	GetActiveAdaptersByVaultFn func(ctx context.Context, morphoVaultID int64) ([]*entity.MorphoAdapterMember, error)
-	SaveAdapterStateFn         func(ctx context.Context, tx pgx.Tx, state *entity.MorphoAdapterState) error
-	SaveVaultCapFn             func(ctx context.Context, tx pgx.Tx, vaultCap *entity.MorphoVaultCap) error
-	SaveVaultFeeFn             func(ctx context.Context, tx pgx.Tx, vaultFee *entity.MorphoVaultFee) error
+	ObserveAdapterMembershipFn   func(ctx context.Context, tx pgx.Tx, obs *entity.MorphoAdapterObservation) (int64, bool, error)
+	GetActiveAdapterFn           func(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte) (*entity.MorphoAdapterMember, error)
+	GetActiveAdapterAtFn         func(ctx context.Context, morphoVaultID int64, address []byte, at entity.BlockPosition) (*entity.MorphoAdapterMember, error)
+	GetActiveAdaptersByVaultAtFn func(ctx context.Context, morphoVaultID int64, at entity.BlockPosition) ([]*entity.MorphoAdapterMember, error)
+	SaveAdapterStateFn           func(ctx context.Context, tx pgx.Tx, state *entity.MorphoAdapterState) error
+	SaveVaultCapFn               func(ctx context.Context, tx pgx.Tx, vaultCap *entity.MorphoVaultCap) error
+	SaveVaultFeeFn               func(ctx context.Context, tx pgx.Tx, vaultFee *entity.MorphoVaultFee) error
 }
 
 func (m *MockMorphoRepository) GetOrCreateMarket(ctx context.Context, tx pgx.Tx, market *entity.MorphoMarket) (int64, error) {
@@ -114,9 +114,9 @@ func (m *MockMorphoRepository) GetActiveAdapterAt(ctx context.Context, morphoVau
 	return nil, nil
 }
 
-func (m *MockMorphoRepository) GetActiveAdaptersByVault(ctx context.Context, morphoVaultID int64) ([]*entity.MorphoAdapterMember, error) {
-	if m.GetActiveAdaptersByVaultFn != nil {
-		return m.GetActiveAdaptersByVaultFn(ctx, morphoVaultID)
+func (m *MockMorphoRepository) GetActiveAdaptersByVaultAt(ctx context.Context, morphoVaultID int64, at entity.BlockPosition) ([]*entity.MorphoAdapterMember, error) {
+	if m.GetActiveAdaptersByVaultAtFn != nil {
+		return m.GetActiveAdaptersByVaultAtFn(ctx, morphoVaultID, at)
 	}
 	return nil, nil
 }

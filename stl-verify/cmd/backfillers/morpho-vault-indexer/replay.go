@@ -86,8 +86,10 @@ func replayV2StructuredEvents(
 // runReplayPartitions replays every partition in parts, in order, and
 // hard-stops on the first failure.
 //
-// Order is correctness-critical (see replayPartition), so nothing may replay
-// behind a partition that failed.
+// The hard stop is not about ordering — replaying out of order still reaches the
+// same answers (see replayPartition). It is the usual rule: a partition that
+// failed leaves a hole, and continuing past it would end the run reporting
+// success over incomplete data.
 func runReplayPartitions(parts []string, replay func(part string) error) error {
 	for _, part := range parts {
 		if err := replay(part); err != nil {

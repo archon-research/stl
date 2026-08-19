@@ -143,10 +143,12 @@ func TestReplaySparkUSDTbcV2Events(t *testing.T) {
 // the same 33 events in the exact REVERSE order reaches the same answers — current
 // membership, current classification, the true add block, and every realAssets snapshot.
 //
-// The membership LOG legitimately differs by one row (the reverse pass records the
-// allocation_event assertion the forward pass never needed), which is why this compares
-// answers rather than row counts. That extra row is the honest record of an event that
-// really did prove membership before we had seen the add.
+// The membership LOG legitimately differs: in reverse every allocation log lands before
+// any lower-block observation exists, so each one records the allocation_event assertion
+// the forward pass never needed — 12 extra rows for this fixture (6 Allocate + 6
+// Deallocate above the single AddAdapter). That is why this compares answers rather than
+// row counts; the extra rows are the honest record of events that really did prove
+// membership before we had seen the add.
 func TestReplaySparkUSDTbcV2Events_ReverseOrderReachesTheSameState(t *testing.T) {
 	ctx := context.Background()
 	fx := loadReplayFixture(t)
@@ -563,9 +565,9 @@ func assertAdapterRow(t *testing.T, ctx context.Context, pool *pgxpool.Pool, vau
 // adapterAnswers is everything an adapter-registry consumer can actually ask, which is
 // what a replay must reproduce regardless of the order the events arrive in. It
 // deliberately excludes the membership ROW COUNT: an out-of-order replay records one
-// extra allocation_event assertion (the Allocate arrives before the AddAdapter that
-// would have answered it), and that extra row is a faithful record of what was
-// observed, not a discrepancy.
+// extra allocation_event assertion per allocation log that arrives before the AddAdapter
+// that would have answered it (12 of them in the reverse pass of the fixture), and those
+// rows are a faithful record of what was observed, not a discrepancy.
 type adapterAnswers struct {
 	identityRows int
 	isMember     bool

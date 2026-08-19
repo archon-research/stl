@@ -360,11 +360,11 @@ func v2LogPartitionFixture(t *testing.T, vault common.Address, from, to int64) *
 }
 
 // TestCollectPartitionV2Logs_ConcurrentDownloadsPreserveBlockOrder: the per-block
-// downloads run across the worker pool, but replay ordering is
-// correctness-critical (an AddAdapter must land before that adapter's first
-// Allocate), so completion order must not leak into the result. The fixture
-// stalls low blocks longest, so an append-as-completed collector would return
-// them last.
+// downloads run across the worker pool, and completion order must not leak into the
+// result. Order no longer decides the answers (see replayPartition), but it decides
+// whether an Allocate replayed ahead of its AddAdapter manufactures the
+// inferred-membership WARN that otherwise means a discovery gap. The fixture stalls
+// low blocks longest, so an append-as-completed collector would return them last.
 func TestCollectPartitionV2Logs_ConcurrentDownloadsPreserveBlockOrder(t *testing.T) {
 	ctx := context.Background()
 	const from, to = int64(100), int64(109)
