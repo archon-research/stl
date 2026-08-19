@@ -20,7 +20,6 @@ import type {
 } from './components/allocations/AllocationGrid';
 import {
   AllocationGrid,
-  ENCUMBRANCE_WARNING_THRESHOLD,
   type MetricChartSpec,
 } from './components/allocations/AllocationGrid';
 import { BottomPanel } from './components/allocations/BottomPanel';
@@ -59,6 +58,7 @@ import {
   buildProtocolOptions,
   buildProtocolOptionsFromMetadata,
   DIRECT_PROTOCOL_FILTER_VALUE,
+  ENCUMBRANCE_WARNING_THRESHOLD,
   formatChartTimestampLabel,
   formatCompactNumber,
   formatCompactUsd,
@@ -550,7 +550,7 @@ function App() {
   // requests.
   const primaryProxyAddress = selectedPrimeGroup?.primaryProxyAddress ?? null;
 
-  // The bucketed chart series below (debt/exposure/total-capital/activity) are
+  // The bucketed chart series below (debt/exposure/total-capital) are
   // fetched for the primary proxy only, not fanned out (see the
   // usePrimeChartData call). For a prime with more than one proxy, that makes
   // those series describe one chain while the headline figures they sit next
@@ -810,7 +810,6 @@ function App() {
   // window whose end drifts into the past, so anchoring its newest (past) bucket
   // at the current total would misstate every point. Suppress it for custom
   // ranges until a range-end anchor is available.
-  //
   const allocationBalanceSeries = useMemo<ChartDatum[]>(() => {
     if (rangePreset === 'custom' || activityBuckets.length === 0) {
       return [];
@@ -943,11 +942,9 @@ function App() {
 
     const primeDebtValue = wadToUnits(primeDebtSnapshot?.debt_wad);
 
-    const encumbranceValue =
-      riskCapital?.prime_encumbrance_ratio === undefined ||
-      riskCapital?.prime_encumbrance_ratio === null
-        ? null
-        : parseNumericValue(riskCapital.prime_encumbrance_ratio);
+    const encumbranceValue = parseNumericValue(
+      riskCapital?.prime_encumbrance_ratio,
+    );
 
     // One ordinal series token per card, and deliberately no `var(..., fallback)`:
     // a fallback lets a wrong or missing token render as a plausible colour, which
@@ -999,11 +996,11 @@ function App() {
       {
         key: 'encumbrance-ratio',
         ...seriesOrFallback(encumbranceSeries, encumbranceValue),
-        stroke: 'var(--colors-chart-series-secondary)',
+        stroke: 'var(--colors-chart-series-critical)',
         formatValue: formatRatioPercent,
         threshold: {
           value: ENCUMBRANCE_WARNING_THRESHOLD,
-          label: formatRatioPercent(ENCUMBRANCE_WARNING_THRESHOLD),
+          label: formatRatioPercent(ENCUMBRANCE_WARNING_THRESHOLD, 0),
         },
       },
     ];

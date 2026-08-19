@@ -417,6 +417,11 @@ export function formatPercentValue(
   return `${numeric.toFixed(digits)}%`;
 }
 
+// Warning level for required-over-total risk capital: the prime is close to
+// having no unencumbered capital left. Deliberately below the structural limit
+// of 1.0, so it reads before the buffer is gone rather than as it goes.
+export const ENCUMBRANCE_WARNING_THRESHOLD = 0.95;
+
 export function formatRatioPercent(
   value: number | string | null | undefined,
   digits = 2,

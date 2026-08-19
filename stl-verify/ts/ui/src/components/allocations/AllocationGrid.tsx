@@ -29,6 +29,7 @@ import { flex } from '#styled-system/patterns';
 import { getActionColorClass, getActionIcon } from '../../lib/activity';
 import {
   type ChainLabelLookup,
+  ENCUMBRANCE_WARNING_THRESHOLD,
   formatDateTime,
   formatFreshnessLabel,
   formatRawWadLabel,
@@ -182,10 +183,6 @@ const chartEmptyMessageClassName = css({
 
 const CHART_HEIGHT = 236;
 
-// Warning level for required-over-total risk capital: the prime is close to
-// having no unencumbered capital left. Deliberately below the structural limit
-// of 1.0, so it reads before the buffer is gone rather than as it goes.
-export const ENCUMBRANCE_WARNING_THRESHOLD = 0.95;
 
 function MetricCardTrend({
   chart,
@@ -256,19 +253,28 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
   // domain whose area would fill the whole plot as a solid block; pad it so the
   // line sits centered, and drop the area fill so it reads as a flat baseline.
   const isFlat = minValue === maxValue;
-  const flatPad = Math.max(Math.abs(minValue) * 0.5, 1);
+  // Proportional, so a 0-1 ratio does not get a whole unit of padding; the
+  // literal is only reached when the value is exactly zero.
+  const flatPad = Math.abs(minValue) * 0.5 || 1;
   const [domainMin, domainMax] = isFlat
     ? [minValue - flatPad, maxValue + flatPad]
     : [minValue, maxValue];
 
-  // A limit the series never approaches would otherwise fall outside the
-  // domain and render off-plot, reading as "no threshold" rather than "well
-  // within it".
   const threshold = chart.threshold?.value;
-  const yDomain: [number, number] =
-    threshold === undefined
-      ? [domainMin, domainMax]
-      : [Math.min(domainMin, threshold), Math.max(domainMax, threshold)];
+  const yDomain: [number, number] = (() => {
+    if (threshold === undefined) {
+      return [domainMin, domainMax];
+    }
+    // A limit outside the domain renders off-plot, reading as "no threshold"
+    // rather than "well within it" — but pinning it to the domain edge is no
+    // better: ReferenceBand drops the whole band, dashed line and label
+    // included, once its breach region has zero height. So the series-below-
+    // the-limit case, which is the one worth showing, needs headroom above it.
+    const low = Math.min(domainMin, threshold);
+    const high = Math.max(domainMax, threshold);
+    const headroom = (high - low) * 0.1 || Math.abs(threshold) * 0.1 || 1;
+    return [low, high === threshold ? high + headroom : high];
+  })();
 
   return (
     <div
@@ -1286,11 +1292,6 @@ export function AllocationGrid({
                       {formatUsdValue(
                         riskCapital.prime_required_risk_capital_usd,
                       )}
-                      {parseNumericValue(
-                        riskCapital.prime_encumbrance_ratio,
-                      ) !== null
-                        ? ` · Encumbrance ${formatRatioPercent(riskCapital.prime_encumbrance_ratio)}`
-                        : ''}
                     </div>
                     <MetricCardTrend
                       chart={totalCapitalChart}
@@ -1307,9 +1308,7 @@ export function AllocationGrid({
                 className={metricsCardClassName}
                 label="Prime collateral"
                 value={
-                  primeCollateralUsd === null
-                    ? '—'
-                    : formatUsdValue(String(primeCollateralUsd))
+                  isLoading ? 'Loading...' : formatUsdValue(primeCollateralUsd)
                 }
                 detail={
                   <div className={metricDetailClassName}>
