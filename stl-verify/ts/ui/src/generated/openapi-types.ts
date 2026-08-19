@@ -135,7 +135,7 @@ export interface paths {
     };
     /**
      * List prime debt snapshots
-     * @description Return debt snapshots for a prime, newest first, inside a `{mode, window, data}` envelope. Results are time-windowed (default last 24h). Returns `404` if the prime is unknown. Each snapshot carries the `block_number`/`block_version` it was observed at; consumers can use `block_version` to detect reorg-driven re-emissions. Set `aggregate=true` for the last debt value per time bucket (gap-filled).
+     * @description Return debt snapshots for a prime, newest first, inside a `{mode, window, data}` envelope. Results are time-windowed (default last 24h). Returns `404` if the prime is unknown. Each snapshot carries the `block_number`/`block_version` it was observed at; consumers can use `block_version` to detect reorg-driven re-emissions. Set `aggregate=true` for the last debt value per time bucket (gap-filled). Pass `reference=true` (with `aggregate=true`) for Sky's own reported debt instead of the on-chain per-ilk figure; `source` reports which provenance answered.
      */
     get: operations['list_prime_debt_snapshots_v1_primes__prime_id__debt_get'];
     put?: never;
@@ -1288,6 +1288,13 @@ export interface components {
        * @enum {string}
        */
       mode: 'raw' | 'aggregated';
+      /**
+       * Source
+       * @description Provenance of the figures. `self` is the on-chain per-ilk debt; `reference` is Sky's own reported debt, returned when `reference=true`.
+       * @default self
+       * @enum {string}
+       */
+      source: 'self' | 'reference';
       /** @description The window and resolution applied to this response. */
       window: components['schemas']['TimeSeriesWindow'];
     };
@@ -2422,6 +2429,8 @@ export interface operations {
       query?: {
         /** @description Max snapshots returned (default 100, max 500). */
         limit?: number;
+        /** @description Serve Sky's own reported debt instead of the on-chain per-ilk debt. Requires `aggregate=true`: upstream publishes one figure per prime per day and carries no ilk, block number or block version, so it cannot fill a raw snapshot — asking for one returns `400` rather than inventing those fields. `debt_wad` keeps its unit in both modes, so dividing by 1e18 gives USDS units either way. */
+        reference?: boolean;
         /** @description Inclusive lower timestamp bound (ISO-8601). Defaults to 24h before `to_timestamp`. */
         from_timestamp?: string | null;
         /** @description Inclusive upper timestamp bound (ISO-8601). Defaults to the current UTC time. */

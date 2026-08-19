@@ -1185,6 +1185,16 @@
             "title": "Mode",
             "type": "string"
           },
+          "source": {
+            "default": "self",
+            "description": "Provenance of the figures. `self` is the on-chain per-ilk debt; `reference` is Sky's own reported debt, returned when `reference=true`.",
+            "enum": [
+              "self",
+              "reference"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
           "window": {
             "$ref": "#/components/schemas/TimeSeriesWindow",
             "description": "The window and resolution applied to this response."
@@ -3200,7 +3210,7 @@
     },
     "/v1/primes/{prime_id}/debt": {
       "get": {
-        "description": "Return debt snapshots for a prime, newest first, inside a `{mode, window, data}` envelope. Results are time-windowed (default last 24h). Returns `404` if the prime is unknown. Each snapshot carries the `block_number`/`block_version` it was observed at; consumers can use `block_version` to detect reorg-driven re-emissions. Set `aggregate=true` for the last debt value per time bucket (gap-filled).",
+        "description": "Return debt snapshots for a prime, newest first, inside a `{mode, window, data}` envelope. Results are time-windowed (default last 24h). Returns `404` if the prime is unknown. Each snapshot carries the `block_number`/`block_version` it was observed at; consumers can use `block_version` to detect reorg-driven re-emissions. Set `aggregate=true` for the last debt value per time bucket (gap-filled). Pass `reference=true` (with `aggregate=true`) for Sky's own reported debt instead of the on-chain per-ilk figure; `source` reports which provenance answered.",
         "operationId": "list_prime_debt_snapshots_v1_primes__prime_id__debt_get",
         "parameters": [
           {
@@ -3226,6 +3236,18 @@
               "minimum": 1,
               "title": "Limit",
               "type": "integer"
+            }
+          },
+          {
+            "description": "Serve Sky's own reported debt instead of the on-chain per-ilk debt. Requires `aggregate=true`: upstream publishes one figure per prime per day and carries no ilk, block number or block version, so it cannot fill a raw snapshot \u2014 asking for one returns `400` rather than inventing those fields. `debt_wad` keeps its unit in both modes, so dividing by 1e18 gives USDS units either way.",
+            "in": "query",
+            "name": "reference",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Serve Sky's own reported debt instead of the on-chain per-ilk debt. Requires `aggregate=true`: upstream publishes one figure per prime per day and carries no ilk, block number or block version, so it cannot fill a raw snapshot \u2014 asking for one returns `400` rather than inventing those fields. `debt_wad` keeps its unit in both modes, so dividing by 1e18 gives USDS units either way.",
+              "title": "Reference",
+              "type": "boolean"
             }
           },
           {
