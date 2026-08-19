@@ -83,6 +83,11 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runn
 	}
 	deps.Logger.Info("resolved prime", "name", primeName, "id", primeID)
 
+	telemetry, err := tracker.NewTelemetry()
+	if err != nil {
+		return nil, fmt.Errorf("creating telemetry: %w", err)
+	}
+
 	client := tracker.NewClient(apiURL, apiKey)
-	return tracker.NewService(client, repo, repo, primeID, deps.Logger), nil
+	return tracker.NewService(client, repo, repo, primeID, deps.Logger, telemetry), nil
 }
