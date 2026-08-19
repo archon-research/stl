@@ -74,6 +74,7 @@ All commands run from `stl-verify/`:
 ```bash
 # Development
 make dev-up              # Start kind cluster with full pipeline (mock blockchain server by default)
+KIND_CLUSTER=<name> KIND_PORT_OFFSET=<n> make dev-up   # Isolated second cluster: own name, host ports +n, image tags, data dir
 make dev-suspend         # Suspend local kind nodes (local dev only; do not use in CI/prod)
 make dev-resume          # Resume suspended local kind nodes (local dev only; do not use in CI/prod)
 make dev-down            # Delete local kind cluster (dev-wipe also nukes volumes)
@@ -107,7 +108,9 @@ make erigon-status ERIGON_USER=<user> ERIGON_IP=<ip>
 make deploy-bulk-download ERIGON_USER=<user> ERIGON_IP=<ip>
 ```
 
-See [Makefile](Makefile) for the complete list of targets.
+See [Makefile](Makefile) for the complete list of targets. Every `run-*`, `dev-*` and
+`kind-*` target honours `KIND_CLUSTER` / `KIND_PORT_OFFSET`, so two agents can each run
+a full cluster on one machine without colliding on ports, image tags or data dirs.
 
 ### Go linting
 
