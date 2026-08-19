@@ -294,9 +294,11 @@ type backfillActivities struct {
 // re-running an overlapping range — re-reaches the same rows rather than adding
 // any.
 func (a *backfillActivities) DiscoverVaults(ctx context.Context, rng blockRange) (discoveryResult, error) {
-	defer a.archiveDrain()
+	// Deferred before the drain so it stops LAST: the drain blocks on in-flight
+	// archive writes, and an unheartbeated wait there reads as a dead worker.
 	stopHeartbeat := startHeartbeat(ctx, heartbeatInterval)
 	defer stopHeartbeat()
+	defer a.archiveDrain()
 
 	got, err := discoverAndPersistVaults(ctx, a.logger, a.s3Reader, a.extractor, a.prober, a.pool, a.buildID, a.cfg, rng)
 	if err != nil {
