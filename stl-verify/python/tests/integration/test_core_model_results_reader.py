@@ -7,6 +7,7 @@ Each test case exercises a distinct behaviour of ``get_latest``:
 - Returns a result with ``hhi=None`` when the DB row has a NULL hhi column.
 """
 
+import json
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -56,8 +57,8 @@ async def _insert_row(
             """
             INSERT INTO core_model_results
                 (market_key, crr_el_pct, crr_es_pct, crr_var_pct,
-                 hhi, protocol, forecast_step, n_mc, copula_type, computed_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                 hhi, protocol, forecast_step, n_mc, copula_type, computed_at, params)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
             """,
             market_key,
             Decimal(str(crr_el_pct)),
@@ -69,6 +70,7 @@ async def _insert_row(
             n_mc,
             copula_type,
             computed_at,
+            json.dumps({"N_MC": n_mc, "COPULA_TYPE": copula_type, "FORECAST_STEP": forecast_step}),
         )
     finally:
         await conn.close()

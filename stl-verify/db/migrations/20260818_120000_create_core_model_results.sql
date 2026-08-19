@@ -3,7 +3,6 @@
 -- The API service reads the latest row per market_key at request time.
 
 CREATE TABLE IF NOT EXISTS core_model_results (
-    id             BIGSERIAL,
     market_key     TEXT        NOT NULL,
     crr_el_pct     NUMERIC     NOT NULL,
     crr_es_pct     NUMERIC     NOT NULL,
@@ -14,18 +13,18 @@ CREATE TABLE IF NOT EXISTS core_model_results (
     n_mc           INT         NOT NULL,
     copula_type    TEXT        NOT NULL,
     computed_at    TIMESTAMPTZ NOT NULL,
-    params         JSONB       NOT NULL DEFAULT '{}',
-    PRIMARY KEY (id, computed_at)
+    params         JSONB       NOT NULL,
+    PRIMARY KEY (market_key, computed_at)
 );
 
-SELECT create_hypertable('core_model_results', 'computed_at');
+SELECT create_hypertable('core_model_results', 'computed_at', if_not_exists => TRUE);
 
 ALTER TABLE core_model_results SET (
     timescaledb.compress,
     timescaledb.compress_segmentby = 'market_key'
 );
 
-SELECT add_compression_policy('core_model_results', INTERVAL '7 days');
+SELECT add_compression_policy('core_model_results', INTERVAL '7 days', if_not_exists => TRUE);
 
 DO $$
 BEGIN
@@ -36,10 +35,8 @@ END $$;
 
 COMMENT ON TABLE core_model_results IS
   '[Hypertable] CORE model output: one CRR result per (market_key, computed_at) run. Append-only; the API serves the latest row per market_key. Model output, not ingest -- registered as model_output in the schema master.';
-COMMENT ON COLUMN core_model_results.id IS
-  'Roles: PK (with computed_at). Surrogate row id.';
 COMMENT ON COLUMN core_model_results.market_key IS
-  'CORE market identifier (e.g. sparklend_usdt) = one protocol + one loan token. Matches inputs/market_configs.json keys and the asset_to_market_key.json mapping values; not an FK -- markets live in config, not in a table.';
+  'Roles: PK (with computed_at). CORE market identifier (e.g. sparklend_usdt) = one protocol + one loan token. Matches inputs/market_configs.json keys and the asset_to_market_key.json mapping values; not an FK -- markets live in config, not in a table. A market run in parameter variants needs one key per variant (Galaxy''s WITH CLASS A / NO CLASS A are the known case): variants sharing a key collide on the primary key and only the first is kept.';
 COMMENT ON COLUMN core_model_results.crr_el_pct IS
   'Roles: Derived. Headline CRR: expected loss as a 0-100 percentage of total market exposure (mean of net bad debt / exposure across Monte Carlo scenarios).';
 COMMENT ON COLUMN core_model_results.crr_es_pct IS
