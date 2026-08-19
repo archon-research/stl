@@ -1,11 +1,9 @@
-// Package dextelemetry exposes a small per-worker OpenTelemetry helper for
-// the three DEX SQS workers (curve, uniswap-v3, balancer). The structure
-// mirrors the per-package telemetry in services/morpho_indexer and
-// services/oracle_price_worker but accepts a prefix so the three workers can
-// share one implementation instead of duplicating it. Metric names follow the
-// established `<prefix>_blocks_processed_total` / `<prefix>_errors_total`
-// convention so the existing alert rule shape in alerts/vector-indexers.yaml
-// applies unchanged.
+// Package dextelemetry exposes a small per-worker OpenTelemetry helper shared
+// by the DEX SQS workers the dex-indexer binary can run (curve, uniswap-v3,
+// uniswap-v4). The metric prefix is a parameter so one implementation serves
+// every DEX; names follow the `<prefix>_blocks_processed_total` /
+// `<prefix>_errors_total` convention the rules in alerts/vector-indexers.yaml
+// are written against.
 package dextelemetry
 
 import (

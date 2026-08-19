@@ -18,14 +18,11 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/dextelemetry"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/tickbitmap"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/dexconsumer"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
-
-// ---------------------------------------------------------------------------
-// Fakes
-// ---------------------------------------------------------------------------
 
 // fakeUniswapRepo records the writes SaveBlock received; ignores the pgx.Tx
 // (nil is fine). err, when set, makes SaveBlock fail so tests can exercise the
@@ -43,6 +40,10 @@ type fakeUniswapRepo struct {
 	priorTicks        map[fakePoolBlockKey][]int32
 	ticksForPoolCalls []fakePoolBlockKey
 	ticksForPoolErr   error
+
+	poolsWithState      map[int64][]int64
+	poolsWithStateCalls []int64
+	poolsWithStateErr   error
 }
 
 type fakePoolBlockKey struct {
@@ -61,6 +62,14 @@ func (r *fakeUniswapRepo) TicksForPoolAtBlock(_ context.Context, poolID int64, b
 		return nil, r.ticksForPoolErr
 	}
 	return r.priorTicks[key], nil
+}
+
+func (r *fakeUniswapRepo) PoolIDsWithStateAtBlock(_ context.Context, blockNumber int64) ([]int64, error) {
+	r.poolsWithStateCalls = append(r.poolsWithStateCalls, blockNumber)
+	if r.poolsWithStateErr != nil {
+		return nil, r.poolsWithStateErr
+	}
+	return r.poolsWithState[blockNumber], nil
 }
 
 func (r *fakeUniswapRepo) SaveBlock(_ context.Context, _ pgx.Tx, w outbound.UniswapV4BlockWrites) (int64, error) {
@@ -119,6 +128,7 @@ type recordingMulticaller struct {
 	executeAtHashCalls int
 	stateCalls         int
 	tickBatchCalls     int
+	tickBatchSizes     []int
 	baselineCalls      int
 
 	stateErr    error
@@ -145,6 +155,7 @@ func (m *recordingMulticaller) ExecuteAtHash(_ context.Context, calls []outbound
 		return m.stateResults, nil
 	case "getTickInfo":
 		m.tickBatchCalls++
+		m.tickBatchSizes = append(m.tickBatchSizes, len(calls))
 		if m.tickErr != nil {
 			return nil, m.tickErr
 		}
@@ -236,10 +247,6 @@ func (m *recordingMulticaller) tickBitmapResults(calls []outbound.Call) ([]outbo
 }
 
 func (m *recordingMulticaller) Address() common.Address { return common.Address{} }
-
-// ---------------------------------------------------------------------------
-// Fixture factories
-// ---------------------------------------------------------------------------
 
 const testChainID = int64(1)
 
@@ -368,16 +375,20 @@ func newTestService(t *testing.T, pools ...RegisteredPool) (*UniswapV4Service, *
 	return svc, repo, mc, txMgr
 }
 
-// ---------------------------------------------------------------------------
-// Construction validation
-// ---------------------------------------------------------------------------
-
 func TestNewUniswapV4Service_RejectsInvalidDeps(t *testing.T) {
 	tests := []struct {
 		name    string
 		mutate  func(d UniswapV4ServiceDeps) UniswapV4ServiceDeps
 		wantSub string
 	}{
+		{name: "empty pool registry", wantSub: "at least one pool", mutate: func(d UniswapV4ServiceDeps) UniswapV4ServiceDeps {
+			d.Pools = nil
+			return d
+		}},
+		{name: "non-positive chain id", wantSub: "chainID", mutate: func(d UniswapV4ServiceDeps) UniswapV4ServiceDeps {
+			d.ChainID = 0
+			return d
+		}},
 		{name: "nil multicaller", wantSub: "multicaller", mutate: func(d UniswapV4ServiceDeps) UniswapV4ServiceDeps {
 			d.Multicaller = nil
 			return d
@@ -437,17 +448,6 @@ func TestNewUniswapV4Service_RejectsInvalidDeps(t *testing.T) {
 		})
 	}
 }
-
-func TestNewUniswapV4Service_EmptyPoolsIsAllowed(t *testing.T) {
-	deps, _, _, _ := validServiceDeps(t, nil)
-	if _, err := NewUniswapV4Service(deps); err != nil {
-		t.Fatalf("NewUniswapV4Service: want no error with nil Pools, got %v", err)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// BlockHandler: core orchestration
-// ---------------------------------------------------------------------------
 
 func TestBlockHandler_MixedEventsPersistsBlockWrites(t *testing.T) {
 	pool := servicePool()
@@ -550,45 +550,50 @@ func TestBlockHandler_MultiPoolReceiptDecodesEveryTouchedPool(t *testing.T) {
 	}
 }
 
-// TestBlockHandler_OnlyUnregisteredPoolLogs_NoTransaction is the V4-specific
-// quiet block: the PoolManager did emit, but for a PoolId outside the registry,
-// so nothing may be read, written, or captured.
-func TestBlockHandler_OnlyUnregisteredPoolLogs_NoTransaction(t *testing.T) {
-	pool := servicePool()
-	svc, repo, mc, txMgr := newTestService(t, pool)
+// TestBlockHandler_QuietBlock_NoTransaction covers the two shapes of block the
+// indexer must leave no trace of: a PoolManager log for a PoolId outside the
+// registry, and a V4-looking log from another contract entirely.
+func TestBlockHandler_QuietBlock_NoTransaction(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		log  func(t *testing.T, pool RegisteredPool) shared.Log
+	}{
+		{
+			name: "unregistered pool id",
+			log: func(t *testing.T, _ RegisteredPool) shared.Log {
+				untracked := servicePool()
+				untracked.PoolIDHash = common.HexToHash("0xdeadbeef")
+				return swapLog(t, untracked, "0x0")
+			},
+		},
+		{
+			name: "log from another contract",
+			log: func(t *testing.T, pool RegisteredPool) shared.Log {
+				log := swapLog(t, pool, "0x0")
+				log.Address = "0x1F98431c8aD98523631AE4a59f267346ea31F984"
+				return log
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := servicePool()
+			svc, repo, mc, txMgr := newTestService(t, pool)
 
-	untracked := servicePool()
-	untracked.PoolIDHash = common.HexToHash("0xdeadbeef")
-	receipt := shared.TransactionReceipt{Logs: []shared.Log{swapLog(t, untracked, "0x0")}}
+			receipt := shared.TransactionReceipt{Logs: []shared.Log{tc.log(t, pool)}}
+			if err := svc.BlockHandler()(context.Background(), blockEvent(200), []shared.TransactionReceipt{receipt}); err != nil {
+				t.Fatalf("BlockHandler: %v", err)
+			}
 
-	if err := svc.BlockHandler()(context.Background(), blockEvent(200), []shared.TransactionReceipt{receipt}); err != nil {
-		t.Fatalf("BlockHandler: %v", err)
-	}
-
-	if txMgr.calls != 0 {
-		t.Errorf("WithTransaction calls = %d, want 0", txMgr.calls)
-	}
-	if mc.executeAtHashCalls != 0 {
-		t.Errorf("ExecuteAtHash calls = %d, want 0 (no RPC for an untouched registry)", mc.executeAtHashCalls)
-	}
-	if repo.saveBlockCalls != 0 {
-		t.Errorf("SaveBlock calls = %d, want 0", repo.saveBlockCalls)
-	}
-}
-
-func TestBlockHandler_LogFromAnotherContract_NoTransaction(t *testing.T) {
-	pool := servicePool()
-	svc, repo, _, txMgr := newTestService(t, pool)
-
-	log := swapLog(t, pool, "0x0")
-	log.Address = "0x1F98431c8aD98523631AE4a59f267346ea31F984"
-	receipt := shared.TransactionReceipt{Logs: []shared.Log{log}}
-
-	if err := svc.BlockHandler()(context.Background(), blockEvent(200), []shared.TransactionReceipt{receipt}); err != nil {
-		t.Fatalf("BlockHandler: %v", err)
-	}
-	if txMgr.calls != 0 || repo.saveBlockCalls != 0 {
-		t.Errorf("tx calls = %d, SaveBlock calls = %d, want 0 and 0", txMgr.calls, repo.saveBlockCalls)
+			if txMgr.calls != 0 {
+				t.Errorf("WithTransaction calls = %d, want 0", txMgr.calls)
+			}
+			if mc.executeAtHashCalls != 0 {
+				t.Errorf("ExecuteAtHash calls = %d, want 0 (no RPC for an untouched registry)", mc.executeAtHashCalls)
+			}
+			if repo.saveBlockCalls != 0 {
+				t.Errorf("SaveBlock calls = %d, want 0", repo.saveBlockCalls)
+			}
+		})
 	}
 }
 
@@ -610,18 +615,29 @@ func TestBlockHandler_TouchedBelowDeployBlock_Errors(t *testing.T) {
 	}
 }
 
-func TestBlockHandler_EmptyBlockHash_Errors(t *testing.T) {
-	pool := servicePool()
-	svc, repo, mc, txMgr := newTestService(t, pool)
+func TestBlockHandler_UnusableBlockHash_Errors(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		blockHash string
+	}{
+		{name: "empty", blockHash: ""},
+		{name: "missing 0x prefix", blockHash: strings.Repeat("a", 64)},
+		{name: "too short", blockHash: "0xabc1"},
+		{name: "non-hex digits", blockHash: "0x" + strings.Repeat("z", 64)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, repo, mc, txMgr := newTestService(t, servicePool())
 
-	event := blockEvent(200)
-	event.BlockHash = ""
+			event := blockEvent(200)
+			event.BlockHash = tc.blockHash
 
-	if err := svc.BlockHandler()(context.Background(), event, nil); err == nil {
-		t.Fatal("BlockHandler: want error for an empty BlockHash, got nil")
-	}
-	if mc.executeAtHashCalls != 0 || txMgr.calls != 0 || repo.saveBlockCalls != 0 {
-		t.Errorf("side effects before the hash check: rpc=%d tx=%d save=%d", mc.executeAtHashCalls, txMgr.calls, repo.saveBlockCalls)
+			if err := svc.BlockHandler()(context.Background(), event, nil); err == nil {
+				t.Fatalf("BlockHandler: want error for BlockHash %q, got nil", tc.blockHash)
+			}
+			if mc.executeAtHashCalls != 0 || txMgr.calls != 0 || repo.saveBlockCalls != 0 {
+				t.Errorf("side effects before the hash check: rpc=%d tx=%d save=%d", mc.executeAtHashCalls, txMgr.calls, repo.saveBlockCalls)
+			}
+		})
 	}
 }
 
@@ -656,10 +672,6 @@ func TestBlockHandler_MalformedLog_Errors(t *testing.T) {
 		t.Errorf("tx calls = %d, SaveBlock calls = %d, want 0 and 0", txMgr.calls, repo.saveBlockCalls)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Read-path failures: nothing persists on a partial read
-// ---------------------------------------------------------------------------
 
 func TestBlockHandler_ReadFailures_NoPersist(t *testing.T) {
 	tests := []struct {
@@ -777,10 +789,6 @@ func TestBlockHandler_PriorTickReadError_NoPersist(t *testing.T) {
 		t.Errorf("WithTransaction calls = %d, want 1 (only the successful v0 block)", txMgr.calls)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Baseline enumeration and persist-failure bookkeeping
-// ---------------------------------------------------------------------------
 
 func TestBlockHandler_FirstTouchReadsBaselineTicksOnce(t *testing.T) {
 	pool := servicePool()
@@ -991,10 +999,6 @@ func TestBlockHandler_EventBatchPersistError_DoesNotMarkBaseline(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Reorg reconciliation (VEC-487)
-// ---------------------------------------------------------------------------
-
 func TestBlockHandler_NormalBlock_DoesNotReadPriorTicks(t *testing.T) {
 	pool := servicePool()
 	svc, repo, mc, _ := newTestService(t, pool)
@@ -1044,9 +1048,167 @@ func TestBlockHandler_ReorgRedelivery_RereadsPriorVersionTicks(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Telemetry
-// ---------------------------------------------------------------------------
+// TestBlockHandler_ReorgAfterRestart_ResnapshotsPoolsWithStateAtThatBlock pins
+// the half of reorg reconciliation the in-memory tracker cannot cover: a fresh
+// process redelivered block N at v1 has no record of the orphaned fork, so the
+// due set has to come from the rows already persisted at that height.
+func TestBlockHandler_ReorgAfterRestart_ResnapshotsPoolsWithStateAtThatBlock(t *testing.T) {
+	pool := servicePool()
+	svc, repo, mc, txMgr := newTestService(t, pool)
+
+	const priorTick = int32(300)
+	mc.tickResults[priorTick] = goodTickResult(t)
+	repo.poolsWithState = map[int64][]int64{200: {pool.ID}}
+	repo.priorTicks = map[fakePoolBlockKey][]int32{{poolID: pool.ID, blockNumber: 200}: {priorTick}}
+
+	reorg := blockEvent(200)
+	reorg.Version = 1
+	if err := svc.BlockHandler()(context.Background(), reorg, nil); err != nil {
+		t.Fatalf("BlockHandler (v1 reorg redelivery on a fresh service): %v", err)
+	}
+
+	if !slices.Contains(repo.poolsWithStateCalls, int64(200)) {
+		t.Fatalf("PoolIDsWithStateAtBlock calls = %v, want to include block 200", repo.poolsWithStateCalls)
+	}
+	if len(repo.lastWrites.States) != 1 || repo.lastWrites.States[0].PoolID != pool.ID {
+		t.Fatalf("v1 States = %+v, want one snapshot of pool %d", repo.lastWrites.States, pool.ID)
+	}
+	want := fakePoolBlockKey{poolID: pool.ID, blockNumber: 200}
+	if !slices.Contains(repo.ticksForPoolCalls, want) {
+		t.Fatalf("TicksForPoolAtBlock calls = %v, want to include %v", repo.ticksForPoolCalls, want)
+	}
+	if len(repo.lastWrites.Ticks) != 1 || repo.lastWrites.Ticks[0].Tick != int(priorTick) {
+		t.Errorf("v1 tick writes = %+v, want exactly the re-read prior tick %d", repo.lastWrites.Ticks, priorTick)
+	}
+	if txMgr.calls != 1 {
+		t.Errorf("tx calls = %d, want 1", txMgr.calls)
+	}
+}
+
+// TestBlockHandler_ReorgWithUnregisteredPriorState_Errors keeps the registry
+// authoritative: a persisted pool the registry no longer names cannot be
+// snapshotted, and guessing past it would leave the orphaned fork canonical.
+func TestBlockHandler_ReorgWithUnregisteredPriorState_Errors(t *testing.T) {
+	pool := servicePool()
+	svc, repo, _, txMgr := newTestService(t, pool)
+	repo.poolsWithState = map[int64][]int64{200: {pool.ID + 1000}}
+
+	reorg := blockEvent(200)
+	reorg.Version = 1
+	err := svc.BlockHandler()(context.Background(), reorg, nil)
+	if err == nil {
+		t.Fatal("BlockHandler: want error for a persisted pool absent from the registry, got nil")
+	}
+	if !strings.Contains(err.Error(), "registry bug") {
+		t.Errorf("error %q does not identify the registry bug", err)
+	}
+	if txMgr.calls != 0 || repo.saveBlockCalls != 0 {
+		t.Errorf("tx calls = %d, SaveBlock calls = %d, want 0 and 0", txMgr.calls, repo.saveBlockCalls)
+	}
+}
+
+func TestBlockHandler_ReorgPriorStateReadError_NoPersist(t *testing.T) {
+	pool := servicePool()
+	svc, repo, _, txMgr := newTestService(t, pool)
+	repo.poolsWithStateErr = fmt.Errorf("db down")
+
+	reorg := blockEvent(200)
+	reorg.Version = 1
+	if err := svc.BlockHandler()(context.Background(), reorg, nil); err == nil {
+		t.Fatal("BlockHandler: want error when the prior-state read fails, got nil")
+	}
+	if txMgr.calls != 0 || repo.saveBlockCalls != 0 {
+		t.Errorf("tx calls = %d, SaveBlock calls = %d, want 0 and 0", txMgr.calls, repo.saveBlockCalls)
+	}
+}
+
+// TestBlockHandler_GovernanceOnlyBlockPersistsCapturedLogsOnly covers a block
+// touching no pool: the singleton's non-pool-keyed logs still have to reach
+// protocol_event, and nothing may be read from the chain.
+func TestBlockHandler_GovernanceOnlyBlockPersistsCapturedLogsOnly(t *testing.T) {
+	pool := servicePool()
+	deps, repo, mc, txMgr := validServiceDeps(t, []RegisteredPool{pool})
+	eventRepo := &fakeEventRepo{}
+	deps.EventWriter = dexconsumer.NewProtocolEventWriter(1, eventRepo)
+	svc, err := NewUniswapV4Service(deps)
+	if err != nil {
+		t.Fatalf("NewUniswapV4Service: %v", err)
+	}
+
+	ownership := buildLog(t, "OwnershipTransferred",
+		[]common.Hash{addrTopic(common.HexToAddress("0xaaa")), addrTopic(common.HexToAddress("0xbbb"))})
+	ownership.LogIndex = "0x0"
+	unknown := rawLog([]string{common.HexToHash("0xdeadbeef").Hex()}, "0x", "0x1")
+	unknown.Address = poolManagerAddr
+
+	receipt := shared.TransactionReceipt{Logs: []shared.Log{ownership, unknown}}
+	if err := svc.BlockHandler()(context.Background(), blockEvent(200), []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("BlockHandler: %v", err)
+	}
+
+	if mc.executeAtHashCalls != 0 {
+		t.Errorf("state reads = %d, want 0 (no pool was touched)", mc.executeAtHashCalls)
+	}
+	if txMgr.calls != 1 || repo.saveBlockCalls != 1 {
+		t.Errorf("tx calls = %d, SaveBlock calls = %d, want 1 and 1", txMgr.calls, repo.saveBlockCalls)
+	}
+	w := repo.lastWrites
+	if len(w.States) != 0 || len(w.Swaps) != 0 || len(w.LiquidityEvents) != 0 || len(w.Ticks) != 0 || len(w.PoolEvents) != 0 {
+		t.Errorf("block writes = %+v, want every slice empty", w)
+	}
+	if len(eventRepo.events) != 2 {
+		t.Errorf("protocol events = %d, want 2 (the governance log and the unknown topic0)", len(eventRepo.events))
+	}
+}
+
+// TestBlockHandler_BaselineAboveTicksPerCallIsChunked pins the tick-read
+// batching: a dense pool's first touch must be split into bounded multicalls
+// and reassembled without losing or duplicating a tick.
+func TestBlockHandler_BaselineAboveTicksPerCallIsChunked(t *testing.T) {
+	pool := servicePool()
+	svc, repo, mc, _ := newTestService(t, pool)
+
+	const fullWords = 3
+	allBits := make([]uint, 0, 256)
+	for bit := range 256 {
+		allBits = append(allBits, uint(bit))
+	}
+	wantTicks := make([]int, 0, fullWords*256)
+	mc.baselineResults = map[int16]outbound.Result{}
+	for word := range int16(fullWords) {
+		mc.baselineResults[word] = bitmapWordResult(t, allBits...)
+		for _, bit := range allBits {
+			tick := tickbitmap.WordBitToTick(word, uint8(bit), pool.TickSpacing)
+			wantTicks = append(wantTicks, int(tick))
+			mc.tickResults[tick] = goodTickResult(t)
+		}
+	}
+
+	receipt := shared.TransactionReceipt{Logs: []shared.Log{swapLog(t, pool, "0x0")}}
+	if err := svc.BlockHandler()(context.Background(), blockEvent(200), []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("BlockHandler: %v", err)
+	}
+
+	wantBatches := (len(wantTicks) + ticksPerCall - 1) / ticksPerCall
+	if mc.tickBatchCalls != wantBatches {
+		t.Errorf("getTickInfo batches = %d, want %d (ceil(%d/%d))", mc.tickBatchCalls, wantBatches, len(wantTicks), ticksPerCall)
+	}
+	for i, size := range mc.tickBatchSizes {
+		if size > ticksPerCall {
+			t.Errorf("batch %d packed %d calls, want at most %d", i, size, ticksPerCall)
+		}
+	}
+
+	got := make([]int, 0, len(repo.lastWrites.Ticks))
+	for _, row := range repo.lastWrites.Ticks {
+		got = append(got, row.Tick)
+	}
+	slices.Sort(got)
+	slices.Sort(wantTicks)
+	if !slices.Equal(got, wantTicks) {
+		t.Errorf("persisted %d ticks, want the %d-tick union of every chunk", len(got), len(wantTicks))
+	}
+}
 
 // newTelemetryService builds a service wired to a REAL dextelemetry.Telemetry
 // (the rest of the suite passes nil, making every Record* call a no-op) plus

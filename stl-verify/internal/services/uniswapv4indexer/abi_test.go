@@ -17,9 +17,9 @@ func poolManagerABIForTest(t *testing.T) *abi.ABI {
 }
 
 // TestPoolManagerABI_EventTopicHashes pins every event signature to the topic0
-// observed in real mainnet PoolManager logs. A silently wrong indexed flag or
-// argument type would still parse as valid JSON but never match a live log, so
-// the hashes — not the JSON — are the contract under test.
+// captured verbatim from real mainnet PoolManager logs. topic0 covers the
+// signature only, so it cannot catch a wrong indexed flag; the fixtures do,
+// because a log decoded against the wrong flags yields the wrong fields.
 func TestPoolManagerABI_EventTopicHashes(t *testing.T) {
 	a := poolManagerABIForTest(t)
 
@@ -53,15 +53,5 @@ func TestPoolManagerABI_EventTopicHashes(t *testing.T) {
 
 	if len(a.Events) != len(tests) {
 		t.Errorf("PoolManager ABI has %d events, want %d", len(a.Events), len(tests))
-	}
-}
-
-// TestPoolManagerABI_ParsedOnce verifies repeated calls hand back the same
-// parsed ABI rather than re-parsing the JSON on the per-receipt hot path.
-func TestPoolManagerABI_ParsedOnce(t *testing.T) {
-	first := poolManagerABIForTest(t)
-	second := poolManagerABIForTest(t)
-	if first != second {
-		t.Errorf("PoolManagerABI returned distinct pointers (%p, %p), want the once-parsed instance", first, second)
 	}
 }

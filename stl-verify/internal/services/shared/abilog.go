@@ -14,9 +14,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-// Pure helpers for ABI-log decoding and multicall-result unpacking shared by
-// the per-DEX worker packages (Curve, Uniswap V3, Balancer).
-
 // LogBelongsTo reports whether a log emitted by addr should be routed to a
 // pool/pair watched under any of addrs. A pool may be watched under more than
 // one address (e.g. a pre-NG Curve pool's separate LP-token contract), so
@@ -87,6 +84,21 @@ func GetBigIntField(data map[string]any, key string) (*big.Int, error) {
 		return nil, fmt.Errorf("field %s: unexpected type %T", key, v)
 	}
 	return b, nil
+}
+
+// GetHashField reads key from a DecodeLog result map as a common.Hash.
+// go-ethereum decodes a bytes32 argument — indexed or not — into a [32]byte
+// array rather than any named type.
+func GetHashField(data map[string]any, key string) (common.Hash, error) {
+	v, ok := data[key]
+	if !ok {
+		return common.Hash{}, fmt.Errorf("missing field: %s", key)
+	}
+	b, ok := v.([32]byte)
+	if !ok {
+		return common.Hash{}, fmt.Errorf("field %s: unexpected type %T", key, v)
+	}
+	return common.Hash(b), nil
 }
 
 // GetBigIntSliceField reads key from a DecodeLog result map as a []*big.Int.

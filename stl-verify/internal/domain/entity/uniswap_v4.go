@@ -20,9 +20,17 @@ const (
 	v4ProtocolFeeHalfShift = 12
 )
 
-// validateV4BlockKey checks the versioned block coordinates that every
-// uniswap_v4 row carries as part of its primary key.
-func validateV4BlockKey(poolID, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
+// v4-core's TickMath bounds, tighter than the int24 wire range: no pool can
+// reach a tick outside them, so anything wider is a decode or read defect.
+const (
+	minV4Tick = -887272
+	maxV4Tick = 887272
+)
+
+// validatePoolBlockKey checks the versioned block coordinates that every
+// uniswap_v4 row carries as part of its primary key. poolID is the
+// uniswap_v4_pool surrogate id, not the on-chain PoolId hash.
+func validatePoolBlockKey(poolID, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
 	if poolID <= 0 {
 		return fmt.Errorf("poolID must be positive, got %d", poolID)
 	}
@@ -38,9 +46,9 @@ func validateV4BlockKey(poolID, blockNumber int64, blockVersion int, blockTimest
 	return nil
 }
 
-// validateV4LogKey checks the log coordinates that make an event row unique
+// validatePoolLogKey checks the log coordinates that make an event row unique
 // within its block.
-func validateV4LogKey(txHash common.Hash, logIndex int) error {
+func validatePoolLogKey(txHash common.Hash, logIndex int) error {
 	if txHash == (common.Hash{}) {
 		return fmt.Errorf("txHash is required")
 	}
@@ -58,12 +66,43 @@ func validateV4LpFee(field string, fee int) error {
 	return nil
 }
 
+func validateV4TickRange(field string, tick int) error {
+	if tick < minV4Tick || tick > maxV4Tick {
+		return fmt.Errorf("%s must be within TickMath range [%d, %d], got %d", field, minV4Tick, maxV4Tick, tick)
+	}
+	return nil
+}
+
+// validateV4Ticks enforces the ordered, in-range tick pair Pool.checkTicks
+// requires, so a bad pair is a decode defect rather than a real position.
+func validateV4Ticks(tickLower, tickUpper int) error {
+	if err := validateV4TickRange("tickLower", tickLower); err != nil {
+		return err
+	}
+	if err := validateV4TickRange("tickUpper", tickUpper); err != nil {
+		return err
+	}
+	if tickLower >= tickUpper {
+		return fmt.Errorf("tickLower (%d) must be less than tickUpper (%d)", tickLower, tickUpper)
+	}
+	return nil
+}
+
+// requireBigInt rejects a nil numeric field: every uniswap_v4 numeric column is
+// NOT NULL, so a nil here would surface as an opaque driver error at insert.
+func requireBigInt(field string, v *big.Int) error {
+	if v == nil {
+		return fmt.Errorf("%s must not be nil", field)
+	}
+	return nil
+}
+
 // UniswapV4PoolState is a per-touched-block snapshot of one pool's StateView
 // slot0, liquidity and global fee growth. LpFee is only refreshed on blocks the
 // pool is touched: updateDynamicLPFee emits no event, so a dynamic-fee pool's
 // fee can move unobserved between snapshots.
 type UniswapV4PoolState struct {
-	PoolID               int64
+	PoolID               int64 // uniswap_v4_pool surrogate id
 	BlockNumber          int64
 	BlockVersion         int
 	BlockTimestamp       time.Time
@@ -80,16 +119,13 @@ type UniswapV4PoolState struct {
 // an unknown PoolId instead of reverting, so a zero price means the registry row
 // points at a pool this PoolManager never initialized.
 func (s *UniswapV4PoolState) Validate() error {
-	if err := validateV4BlockKey(s.PoolID, s.BlockNumber, s.BlockVersion, s.BlockTimestamp); err != nil {
+	if err := validatePoolBlockKey(s.PoolID, s.BlockNumber, s.BlockVersion, s.BlockTimestamp); err != nil {
 		return err
 	}
-	if s.SqrtPriceX96 == nil {
-		return fmt.Errorf("sqrtPriceX96 must not be nil")
+	if err := requirePositiveSqrtPrice(s.SqrtPriceX96); err != nil {
+		return err
 	}
-	if s.SqrtPriceX96.Sign() <= 0 {
-		return fmt.Errorf("sqrtPriceX96 must be positive, got %s", s.SqrtPriceX96)
-	}
-	if err := validateTickRange("tick", s.Tick); err != nil {
+	if err := validateV4TickRange("tick", s.Tick); err != nil {
 		return err
 	}
 	if err := s.validateProtocolFee(); err != nil {
@@ -98,14 +134,23 @@ func (s *UniswapV4PoolState) Validate() error {
 	if err := validateV4LpFee("lpFee", s.LpFee); err != nil {
 		return err
 	}
-	if s.Liquidity == nil {
-		return fmt.Errorf("liquidity must not be nil")
+	if err := requireBigInt("liquidity", s.Liquidity); err != nil {
+		return err
 	}
-	if s.FeeGrowthGlobal0X128 == nil {
-		return fmt.Errorf("feeGrowthGlobal0X128 must not be nil")
+	if err := requireBigInt("feeGrowthGlobal0X128", s.FeeGrowthGlobal0X128); err != nil {
+		return err
 	}
-	if s.FeeGrowthGlobal1X128 == nil {
-		return fmt.Errorf("feeGrowthGlobal1X128 must not be nil")
+	return requireBigInt("feeGrowthGlobal1X128", s.FeeGrowthGlobal1X128)
+}
+
+// requirePositiveSqrtPrice rejects the all-zeros a StateView getter returns for
+// an unknown PoolId, which no initialized pool can ever report.
+func requirePositiveSqrtPrice(v *big.Int) error {
+	if err := requireBigInt("sqrtPriceX96", v); err != nil {
+		return err
+	}
+	if v.Sign() <= 0 {
+		return fmt.Errorf("sqrtPriceX96 must be positive, got %s", v)
 	}
 	return nil
 }
@@ -127,7 +172,7 @@ func (s *UniswapV4PoolState) validateProtocolFee() error {
 // BalanceDelta — negative was paid into the PoolManager, positive was received —
 // the inverse of the pool-perspective signs on UniswapV3Swap.
 type UniswapV4Swap struct {
-	PoolID         int64
+	PoolID         int64 // uniswap_v4_pool surrogate id
 	BlockNumber    int64
 	BlockVersion   int
 	BlockTimestamp time.Time
@@ -148,28 +193,28 @@ type UniswapV4Swap struct {
 }
 
 func (s *UniswapV4Swap) Validate() error {
-	if err := validateV4BlockKey(s.PoolID, s.BlockNumber, s.BlockVersion, s.BlockTimestamp); err != nil {
+	if err := validatePoolBlockKey(s.PoolID, s.BlockNumber, s.BlockVersion, s.BlockTimestamp); err != nil {
 		return err
 	}
-	if err := validateV4LogKey(s.TxHash, s.LogIndex); err != nil {
+	if err := validatePoolLogKey(s.TxHash, s.LogIndex); err != nil {
 		return err
 	}
 	if s.Sender == (common.Address{}) {
 		return fmt.Errorf("sender is required")
 	}
-	if s.Amount0 == nil {
-		return fmt.Errorf("amount0 must not be nil")
+	if err := requireBigInt("amount0", s.Amount0); err != nil {
+		return err
 	}
-	if s.Amount1 == nil {
-		return fmt.Errorf("amount1 must not be nil")
+	if err := requireBigInt("amount1", s.Amount1); err != nil {
+		return err
 	}
-	if s.SqrtPriceX96 == nil {
-		return fmt.Errorf("sqrtPriceX96 must not be nil")
+	if err := requirePositiveSqrtPrice(s.SqrtPriceX96); err != nil {
+		return err
 	}
-	if s.Liquidity == nil {
-		return fmt.Errorf("liquidity must not be nil")
+	if err := requireBigInt("liquidity", s.Liquidity); err != nil {
+		return err
 	}
-	if err := validateTickRange("tick", s.Tick); err != nil {
+	if err := validateV4TickRange("tick", s.Tick); err != nil {
 		return err
 	}
 	return validateV4LpFee("fee", s.Fee)
@@ -179,7 +224,7 @@ func (s *UniswapV4Swap) Validate() error {
 // through flash accounting, so the log carries no token amounts; the position it
 // touches is identified by (Sender, TickLower, TickUpper, Salt).
 type UniswapV4LiquidityEvent struct {
-	PoolID         int64
+	PoolID         int64 // uniswap_v4_pool surrogate id
 	BlockNumber    int64
 	BlockVersion   int
 	BlockTimestamp time.Time
@@ -193,31 +238,26 @@ type UniswapV4LiquidityEvent struct {
 }
 
 func (e *UniswapV4LiquidityEvent) Validate() error {
-	if err := validateV4BlockKey(e.PoolID, e.BlockNumber, e.BlockVersion, e.BlockTimestamp); err != nil {
+	if err := validatePoolBlockKey(e.PoolID, e.BlockNumber, e.BlockVersion, e.BlockTimestamp); err != nil {
 		return err
 	}
-	if err := validateV4LogKey(e.TxHash, e.LogIndex); err != nil {
+	if err := validatePoolLogKey(e.TxHash, e.LogIndex); err != nil {
 		return err
 	}
 	if e.Sender == (common.Address{}) {
 		return fmt.Errorf("sender is required")
 	}
-	// modifyLiquidity always routes through Pool.checkTicks, which reverts on a
-	// bad pair, so an out-of-order or out-of-range log cannot exist on-chain.
-	if err := validateTicks(e.TickLower, e.TickUpper); err != nil {
+	if err := validateV4Ticks(e.TickLower, e.TickUpper); err != nil {
 		return err
 	}
-	if e.LiquidityDelta == nil {
-		return fmt.Errorf("liquidityDelta must not be nil")
-	}
-	return nil
+	return requireBigInt("liquidityDelta", e.LiquidityDelta)
 }
 
 // UniswapV4Tick is the append-on-change authoritative per-tick state. It carries
 // no Initialized flag because v4-core's TickInfo has none: a tick is initialized
 // exactly when LiquidityGross > 0, so an all-zero row records a cleared tick.
 type UniswapV4Tick struct {
-	PoolID                int64
+	PoolID                int64 // uniswap_v4_pool surrogate id
 	Tick                  int
 	BlockNumber           int64
 	BlockVersion          int
@@ -229,25 +269,22 @@ type UniswapV4Tick struct {
 }
 
 func (t *UniswapV4Tick) Validate() error {
-	if err := validateV4BlockKey(t.PoolID, t.BlockNumber, t.BlockVersion, t.BlockTimestamp); err != nil {
+	if err := validatePoolBlockKey(t.PoolID, t.BlockNumber, t.BlockVersion, t.BlockTimestamp); err != nil {
 		return err
 	}
-	if err := validateTickRange("tick", t.Tick); err != nil {
+	if err := validateV4TickRange("tick", t.Tick); err != nil {
 		return err
 	}
-	if t.LiquidityGross == nil {
-		return fmt.Errorf("liquidityGross must not be nil")
+	if err := requireBigInt("liquidityGross", t.LiquidityGross); err != nil {
+		return err
 	}
-	if t.LiquidityNet == nil {
-		return fmt.Errorf("liquidityNet must not be nil")
+	if err := requireBigInt("liquidityNet", t.LiquidityNet); err != nil {
+		return err
 	}
-	if t.FeeGrowthOutside0X128 == nil {
-		return fmt.Errorf("feeGrowthOutside0X128 must not be nil")
+	if err := requireBigInt("feeGrowthOutside0X128", t.FeeGrowthOutside0X128); err != nil {
+		return err
 	}
-	if t.FeeGrowthOutside1X128 == nil {
-		return fmt.Errorf("feeGrowthOutside1X128 must not be nil")
-	}
-	return nil
+	return requireBigInt("feeGrowthOutside1X128", t.FeeGrowthOutside1X128)
 }
 
 // UniswapV4PoolEventName identifies which typed low-frequency PoolManager event
@@ -271,7 +308,7 @@ var validUniswapV4PoolEventNames = map[UniswapV4PoolEventName]struct{}{
 // UniswapV4PoolEvent is a typed low-frequency pool event whose decoded arguments
 // are kept verbatim in Params rather than promoted to columns.
 type UniswapV4PoolEvent struct {
-	PoolID         int64
+	PoolID         int64 // uniswap_v4_pool surrogate id
 	BlockNumber    int64
 	BlockVersion   int
 	BlockTimestamp time.Time
@@ -282,10 +319,10 @@ type UniswapV4PoolEvent struct {
 }
 
 func (e *UniswapV4PoolEvent) Validate() error {
-	if err := validateV4BlockKey(e.PoolID, e.BlockNumber, e.BlockVersion, e.BlockTimestamp); err != nil {
+	if err := validatePoolBlockKey(e.PoolID, e.BlockNumber, e.BlockVersion, e.BlockTimestamp); err != nil {
 		return err
 	}
-	if err := validateV4LogKey(e.TxHash, e.LogIndex); err != nil {
+	if err := validatePoolLogKey(e.TxHash, e.LogIndex); err != nil {
 		return err
 	}
 	if _, ok := validUniswapV4PoolEventNames[e.EventName]; !ok {

@@ -54,9 +54,9 @@ func tickViewABI() (*abi.ABI, error) {
 // liquidityGross/Net and feeGrowthOutside untouched. Reading those ticks would
 // be wasted work, and including them would let a permissionless zero-delta call
 // with arbitrary bounds amplify into junk uninitialized-tick rows.
-func TouchedTicks(evs DecodedEvents) []int32 {
-	seen := make(map[int32]struct{}, len(evs.LiquidityEvents)*2)
-	for _, e := range evs.LiquidityEvents {
+func TouchedTicks(events []*entity.UniswapV4LiquidityEvent) []int32 {
+	seen := make(map[int32]struct{}, len(events)*2)
+	for _, e := range events {
 		if e.LiquidityDelta.Sign() == 0 {
 			continue
 		}
@@ -177,8 +177,6 @@ func BaselineTicks(ctx context.Context, mc outbound.Multicaller, pool Registered
 	return ticks, nil
 }
 
-// scanBitmapWords reads one bounded batch of bitmap words and expands every set
-// bit back into its tick position.
 func scanBitmapWords(ctx context.Context, mc outbound.Multicaller, a *abi.ABI, pool RegisteredPool, blockHash common.Hash, firstWord, lastWord int) ([]int32, error) {
 	words := make([]int16, 0, lastWord-firstWord+1)
 	calls := make([]outbound.Call, 0, cap(words))

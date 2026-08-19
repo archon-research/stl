@@ -128,13 +128,27 @@ func decodePayload(t *testing.T, raw json.RawMessage) map[string]any {
 	return m
 }
 
-// ---------------------------------------------------------------------------
-// Pool-keyed events, decoded from real mainnet log bytes
-// ---------------------------------------------------------------------------
-
 // swapFixtureLog is a verbatim mainnet PoolManager Swap log: amount0 positive
 // (the swapper received currency0), amount1 negative (paid in), tick 94759,
 // swap fee 10990 hundredths of a bip.
+// swapDataWithTick repacks the Swap fixture's non-indexed block with a
+// substituted tick, so a test can drive a value the int24 width cannot hold.
+func swapDataWithTick(t *testing.T, tick *big.Int) string {
+	t.Helper()
+	a := poolManagerABIForTest(t)
+	var nonIndexed abi.Arguments
+	for _, arg := range a.Events["Swap"].Inputs {
+		if !arg.Indexed {
+			nonIndexed = append(nonIndexed, arg)
+		}
+	}
+	packed, err := nonIndexed.Pack(big.NewInt(-100), big.NewInt(200), big.NewInt(1234567890), big.NewInt(999), tick, big.NewInt(2500))
+	if err != nil {
+		t.Fatalf("packing Swap data: %v", err)
+	}
+	return "0x" + hex.EncodeToString(packed)
+}
+
 func swapFixtureLog() shared.Log {
 	return rawLog(
 		[]string{
@@ -364,10 +378,6 @@ func TestDecodeEvents_ProtocolFeeUpdated(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Routing rules
-// ---------------------------------------------------------------------------
-
 // TestDecodeEvents_UnregisteredPoolIsSkipped pins the load-bearing filter: the
 // PoolManager is a singleton emitting for thousands of pools, so a log for a
 // PoolId we do not track must produce nothing at all — not even a capture-net
@@ -544,10 +554,6 @@ func TestDecodeEvents_MultipleReceiptLogsAccumulate(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Failure paths: nothing is silently dropped
-// ---------------------------------------------------------------------------
-
 func TestDecodeEvents_MalformedLogsReturnError(t *testing.T) {
 	pool := decodeTestPool(7, swapFixturePoolID)
 
@@ -588,6 +594,42 @@ func TestDecodeEvents_MalformedLogsReturnError(t *testing.T) {
 			}(),
 			wantSub: "pool id",
 		},
+		{
+			name: "short pool id topic",
+			log: func() shared.Log {
+				l := swapFixtureLog()
+				l.Topics[1] = "0x01"
+				return l
+			}(),
+			wantSub: "32-byte hex word",
+		},
+		{
+			name: "pool id topic without the 0x prefix",
+			log: func() shared.Log {
+				l := swapFixtureLog()
+				l.Topics[1] = strings.TrimPrefix(l.Topics[1], "0x") + "00"
+				return l
+			}(),
+			wantSub: "32-byte hex word",
+		},
+		{
+			name: "tick wider than int64",
+			log: func() shared.Log {
+				l := swapFixtureLog()
+				l.Data = swapDataWithTick(t, new(big.Int).Lsh(big.NewInt(1), 200))
+				return l
+			}(),
+			wantSub: "tick does not fit in an int64",
+		},
+		{
+			name: "tick outside int24",
+			log: func() shared.Log {
+				l := swapFixtureLog()
+				l.Data = swapDataWithTick(t, big.NewInt(1<<23))
+				return l
+			}(),
+			wantSub: "tick must be within",
+		},
 	}
 
 	for _, tt := range tests {
@@ -603,21 +645,87 @@ func TestDecodeEvents_MalformedLogsReturnError(t *testing.T) {
 	}
 }
 
-// TestDecodeEvents_EntityValidationFailureIsAnError proves a decoded log that
-// cannot form a valid entity stops the block instead of being dropped: a Swap
-// whose sender is the zero address is not a real PoolManager log.
-func TestDecodeEvents_EntityValidationFailureIsAnError(t *testing.T) {
+// TestDecodeEvents_EmptyDataIsAnError proves a log whose data block is missing
+// stops the block: DecodeLog skips the non-indexed arguments entirely when data
+// is empty, which would otherwise persist a Donate whose amounts are simply
+// absent from params.
+func TestDecodeEvents_EmptyDataIsAnError(t *testing.T) {
 	pool := decodeTestPool(7, ethWstethPoolID)
-	log := buildLog(t, "Swap",
-		[]common.Hash{common.HexToHash(ethWstethPoolID), addrTopic(common.Address{})},
-		big.NewInt(1), big.NewInt(-1), big.NewInt(100), big.NewInt(1), big.NewInt(0), big.NewInt(500),
+	log := buildLog(t, "Donate",
+		[]common.Hash{common.HexToHash(ethWstethPoolID), addrTopic(common.HexToAddress("0xccc"))},
+		big.NewInt(10), big.NewInt(20),
 	)
+	log.Data = "0x"
 
 	_, _, err := DecodeEvents(receiptOf(log), poolsByIDOf(pool), poolManagerAddress(), blockNumber, blockVer, blockTS)
 	if err == nil {
-		t.Fatal("DecodeEvents: want error for a Swap with a zero sender, got nil")
+		t.Fatal("DecodeEvents: want error for a Donate log with no data, got nil")
 	}
-	if !strings.Contains(err.Error(), "sender") {
-		t.Errorf("error %q does not mention the invalid sender", err)
+	if !strings.Contains(err.Error(), "amount0") {
+		t.Errorf("error %q does not name the missing field", err)
+	}
+}
+
+// TestPoolManagerABI_RoutesOnlyEventsItDefines pins the routing tables to the
+// ABI: a name in one of them that the ABI does not define would silently divert
+// real logs into the unknown-topic0 capture net.
+func TestPoolManagerABI_RoutesOnlyEventsItDefines(t *testing.T) {
+	if err := assertRoutedEventsExist(poolManagerABIForTest(t)); err != nil {
+		t.Fatalf("assertRoutedEventsExist on the real ABI: %v", err)
+	}
+
+	if err := assertRoutedEventsExist(&abi.ABI{Events: map[string]abi.Event{}}); err == nil {
+		t.Fatal("assertRoutedEventsExist on an ABI defining no events: want error, got nil")
+	}
+}
+
+// TestDecodeEvents_EntityValidationFailureIsAnError proves a decoded log that
+// cannot form a valid entity stops the block instead of being dropped, for
+// every builder: a partially-valid block would look healthy while leaving holes.
+func TestDecodeEvents_EntityValidationFailureIsAnError(t *testing.T) {
+	poolIDTopic := common.HexToHash(ethWstethPoolID)
+	sender := addrTopic(common.HexToAddress("0xaaa"))
+
+	for _, tc := range []struct {
+		name    string
+		log     func(t *testing.T) shared.Log
+		wantSub string
+	}{
+		{
+			name: "swap with a zero sender",
+			log: func(t *testing.T) shared.Log {
+				return buildLog(t, "Swap", []common.Hash{poolIDTopic, addrTopic(common.Address{})},
+					big.NewInt(1), big.NewInt(-1), big.NewInt(100), big.NewInt(1), big.NewInt(0), big.NewInt(500))
+			},
+			wantSub: "sender",
+		},
+		{
+			name: "modify liquidity with an inverted tick range",
+			log: func(t *testing.T) shared.Log {
+				return buildLog(t, "ModifyLiquidity", []common.Hash{poolIDTopic, sender},
+					big.NewInt(200), big.NewInt(-100), big.NewInt(5000), [32]byte{})
+			},
+			wantSub: "tickLower",
+		},
+		{
+			name: "donate without a transaction hash",
+			log: func(t *testing.T) shared.Log {
+				log := buildLog(t, "Donate", []common.Hash{poolIDTopic, sender}, big.NewInt(10), big.NewInt(20))
+				log.TransactionHash = common.Hash{}.Hex()
+				return log
+			},
+			wantSub: "txHash",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := decodeTestPool(7, ethWstethPoolID)
+			_, _, err := DecodeEvents(receiptOf(tc.log(t)), poolsByIDOf(pool), poolManagerAddress(), blockNumber, blockVer, blockTS)
+			if err == nil {
+				t.Fatalf("DecodeEvents: want error for %s, got nil", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.wantSub) {
+				t.Errorf("error %q does not mention %q", err, tc.wantSub)
+			}
+		})
 	}
 }
