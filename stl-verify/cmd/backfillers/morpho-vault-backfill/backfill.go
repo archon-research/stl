@@ -75,7 +75,7 @@ func (p BackfillParams) resolve(chainID int64) (BackfillParams, error) {
 	if p.From > p.To {
 		return BackfillParams{}, fmt.Errorf("from (%d) must be <= to (%d)", p.From, p.To)
 	}
-	if n := len(replayPartitionPrefixes(p.From, p.To)); n > maxPartitionsPerRun {
+	if n := replayPartitionCount(p.From, p.To); n > maxPartitionsPerRun {
 		return BackfillParams{}, fmt.Errorf(
 			"this range expands to %d partitions, over the %d limit: split it into narrower ranges", n, maxPartitionsPerRun)
 	}
