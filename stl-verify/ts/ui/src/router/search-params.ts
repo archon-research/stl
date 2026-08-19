@@ -121,7 +121,9 @@ export const sharedSearchSchema = z
 export const allocationSearchSchema = z.object({
   category: oneOfParam(ALLOCATION_CATEGORIES),
   tab: oneOfParam(DRAWER_TABS),
-  aa: oneOfParam(ACTIVITY_ACTIONS),
+  // `daa` (drawer action), not `aa`: sharing one key with the activities view
+  // leaked whichever filter was set last across every switch between them.
+  daa: oneOfParam(ACTIVITY_ACTIONS),
   sort: textParam(),
   q: textParam(),
   drawer: oneOfParam(['1']),

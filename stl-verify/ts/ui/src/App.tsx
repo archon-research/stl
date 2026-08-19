@@ -163,7 +163,10 @@ const PRIME_SCOPED_RESET: AppSearchPatch = {
   network: undefined,
   protocol: undefined,
   category: undefined,
+  // Both action filters: each view owns its own key, and either may be the one
+  // the departing prime left behind.
   aa: undefined,
+  daa: undefined,
   drawer: undefined,
   row: undefined,
 };

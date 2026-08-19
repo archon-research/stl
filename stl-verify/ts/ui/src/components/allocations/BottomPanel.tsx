@@ -52,7 +52,7 @@ type BottomPanelProps = {
 type DrawerSearchPatch = {
   tab?: DrawerTab | undefined;
   category?: AllocationCategory | undefined;
-  aa?: ActivityAction | undefined;
+  daa?: ActivityAction | undefined;
 };
 
 const segmentedControlStyles = segmentedControl();
@@ -81,7 +81,7 @@ export function BottomPanel({
 
   const activeTab: DrawerTab = search?.tab ?? 'risk';
   const categoryFilter: AllocationCategory | '' = search?.category ?? '';
-  const activityActionFilter = search?.aa ?? '';
+  const activityActionFilter = search?.daa ?? '';
 
   const updateDrawerSearch = (patch: DrawerSearchPatch) => {
     void navigate({
@@ -325,7 +325,7 @@ export function BottomPanel({
               value={activityActionFilter}
               onChange={(event: ChangeEvent<HTMLSelectElement>) =>
                 updateDrawerSearch({
-                  aa: toSearchOption(event.target.value, ACTIVITY_ACTIONS),
+                  daa: toSearchOption(event.target.value, ACTIVITY_ACTIONS),
                 })
               }
               disabled={
