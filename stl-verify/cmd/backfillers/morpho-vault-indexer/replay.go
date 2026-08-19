@@ -178,7 +178,9 @@ type receiptFile struct {
 
 // collectPartitionV2Logs downloads the highest-version receipt file per block in
 // the partition and returns the structured V2 log entries in them in ascending
-// block order, each stamped with the block's S3 version.
+// block order, each stamped with the block's S3 version. On bulk-downloaded
+// history that version is 1 with no reorg behind it — see
+// listHighestVersionReceipts for the rule and why that is benign.
 func collectPartitionV2Logs(
 	ctx context.Context,
 	s3Reader outbound.S3Reader,

@@ -249,17 +249,28 @@ Two concurrent transactions inserting overlapping rows in different order would 
 Batch repository methods must sort rows by natural key before building the INSERT to ensure
 consistent lock acquisition order across transactions.
 
-**VaultV2 lock prefixes:** The Morpho VaultV2 tables extend the prefix registry with three more
+**VaultV2 lock prefixes:** The Morpho VaultV2 tables extend the prefix registry with four more
 entries, each hashing its full natural key:
 - `mas` — `morpho_adapter_state` (`morpho_adapter_id, block_number, block_version, timestamp`)
+- `mam` — `morpho_adapter_membership` (`morpho_adapter_id, block_number, block_version, log_index`;
+  no `timestamp` — it is a plain table whose key is the latest-row ordering tuple, so the
+  lock string is all-integer and needs no epoch stabilisation)
 - `mvc` — `morpho_vault_cap` (`morpho_vault_id, cap_id, block_number, block_version, timestamp`)
 - `mvf` — `morpho_vault_fee` (`morpho_vault_id, block_number, block_version, timestamp`)
 
+`morpho_adapter` itself (the identity table) has deliberately **no** trigger and no prefix:
+identity rows are written once with no `(key, version)` series to decide about, so
+`INSERT … ON CONFLICT DO NOTHING` needs no lock. The repository additionally serializes the
+membership *assertion* path on a per-`(vault, address)` advisory key (`lockAdapterKey`) — that
+is an application-level lock guarding a different decision ("what does the log say at this
+position"), not a trigger prefix, and is documented on the port.
+
 Today each VaultV2 handler writes exactly one of these tables per transaction, so no
 combined-write lock ordering is exercised yet. The prefixes are registered as a forward-looking
-invariant: any future transaction that writes both a vault's state and its adapter state / caps /
-fees must acquire the `mas`, `mvc` and `mvf` locks after the parent vault's `mvs` state lock — a
-state-first acquisition order that keeps concurrent writers on the same vault deadlock-free.
+invariant: any future transaction that writes both a vault's state and its adapter state /
+membership / caps / fees must acquire the `mas`, `mam`, `mvc` and `mvf` locks after the parent
+vault's `mvs` state lock — a state-first acquisition order that keeps concurrent writers on the
+same vault deadlock-free.
 
 #### Trigger Examples
 
