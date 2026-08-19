@@ -255,14 +255,25 @@ func TestBackfillWorkflow_SkipsReplayWhenDiscoveryFails(t *testing.T) {
 	}
 }
 
+// Bad input fails identically on every attempt, so the rejection must reach
+// Temporal as non-retryable — otherwise the operator's typo is buried under the
+// retry envelope instead of being reported back to them.
 func TestBackfillWorkflow_RejectsInvalidParams(t *testing.T) {
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
 	replayed := registerActivityStubs(env, noVaultsDiscovered, noEventsReplayed)
 
 	executeBackfill(env, BackfillParams{To: 200})
 
-	if err := env.GetWorkflowError(); err == nil {
+	err := env.GetWorkflowError()
+	if err == nil {
 		t.Fatal("expected an error for parameters that fail validation")
+	}
+	var appErr *temporalsdk.ApplicationError
+	if !errors.As(err, &appErr) {
+		t.Fatalf("want a Temporal application error, got %v", err)
+	}
+	if !appErr.NonRetryable() {
+		t.Error("invalid parameters must be rejected non-retryably")
 	}
 	if len(*replayed) != 0 {
 		t.Errorf("replayed %v for invalid params, want none", *replayed)
