@@ -117,7 +117,7 @@ func TestVaultV2ConfigEventTopics_SubsetOfStructured(t *testing.T) {
 }
 
 // TestSeedV2VaultAdapters_EnumeratesAndSeedsState verifies the bootstrap's
-// adapter-seed entry point drives the same enumerate → classify → upsert → seed
+// adapter-seed entry point drives the same enumerate → classify → record → seed
 // path discovery uses, for a vault that is ALREADY persisted (so it never goes
 // through discovery again).
 func TestSeedV2VaultAdapters_EnumeratesAndSeedsState(t *testing.T) {
@@ -187,6 +187,132 @@ func TestSeedV2VaultAdapters_EnumeratesAndSeedsState(t *testing.T) {
 	}
 	if savedState.RealAssets.Cmp(realAssets) != 0 {
 		t.Errorf("RealAssets = %s, want %s", savedState.RealAssets, realAssets)
+	}
+}
+
+// TestSeedV2VaultAdapters_DeregistersAdaptersAbsentOnChain covers the half of the
+// seed that asserting presence alone can never fix (R2). The bootstrap enumerates
+// adapters(i) at the pinned head; an adapter that is in our registry but NOT in
+// that enumeration was de-registered while we were not watching, and unless the
+// seed says so nothing ever will: a missed RemoveAdapter is not self-healing,
+// because every other write path only ever asserts that an adapter IS a member.
+//
+// Under the old registry this needed MarkAdapterRemoved, with its relocation bound
+// and its orphan guard — which is why it did not exist. It is now one more append
+// in the loop that is already there.
+func TestSeedV2VaultAdapters_DeregistersAdaptersAbsentOnChain(t *testing.T) {
+	h := newTestHarness(t)
+	h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
+
+	const headBlock = int64(24_000_000)
+	goneAdapter := common.HexToAddress("0x00000000000000000000000000000000000000aa")
+	realAssets := big.NewInt(4242)
+
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		return h.vaultAdapterEnumerationResults(calls, testVaultAddr, testAdapterAddr, realAssets)
+	}
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		if len(calls) == adapterProbeCallsPerAdapter && calls[0].Target == testAdapterAddr {
+			return h.adapterProbeResults(entity.MorphoAdapterTypeMarketV1), nil
+		}
+		return nil, errTestUnexpectedCall(calls)
+	}
+
+	// The registry holds both; the chain enumeration returns only testAdapterAddr.
+	h.morphoRepo.GetActiveAdaptersByVaultFn = func(_ context.Context, vaultID int64) ([]*entity.MorphoAdapterMember, error) {
+		if vaultID != 7 {
+			t.Errorf("GetActiveAdaptersByVault(%d), want 7", vaultID)
+		}
+		return []*entity.MorphoAdapterMember{
+			{MorphoAdapterIdentity: entity.MorphoAdapterIdentity{ID: 1, MorphoVaultID: 7, Address: testAdapterAddr.Bytes(), AssetTokenID: 1}, AdapterType: entity.MorphoAdapterTypeMarketV1},
+			{MorphoAdapterIdentity: entity.MorphoAdapterIdentity{ID: 2, MorphoVaultID: 7, Address: goneAdapter.Bytes(), AssetTokenID: 1}, AdapterType: entity.MorphoAdapterTypeVaultV1},
+		}, nil
+	}
+
+	var observed []*entity.MorphoAdapterObservation
+	h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, obs *entity.MorphoAdapterObservation) (int64, bool, error) {
+		observed = append(observed, obs)
+		return 99, true, nil
+	}
+	seededStates := 0
+	h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterState) error {
+		seededStates++
+		return nil
+	}
+
+	blockTS := time.Unix(1_760_000_000, 0).UTC()
+	if err := h.svc.SeedV2VaultAdapters(context.Background(), testVaultAddr, headBlock, testBlockHash, 0, blockTS); err != nil {
+		t.Fatalf("SeedV2VaultAdapters: %v", err)
+	}
+
+	var deregistered []*entity.MorphoAdapterObservation
+	for _, obs := range observed {
+		if !obs.Membership.IsMember {
+			deregistered = append(deregistered, obs)
+		}
+	}
+	if len(deregistered) != 1 {
+		t.Fatalf("de-registrations recorded = %d, want 1 (the adapter absent from the enumeration); all observations: %+v", len(deregistered), observed)
+	}
+	gone := deregistered[0]
+	if !bytes.Equal(gone.Identity.Address, goneAdapter.Bytes()) {
+		t.Errorf("de-registered adapter = %x, want %s", gone.Identity.Address, goneAdapter.Hex())
+	}
+	if gone.Membership.ObservedVia != entity.MembershipFromBootstrapSeed {
+		t.Errorf("observedVia = %q, want bootstrap_seed", gone.Membership.ObservedVia)
+	}
+	// The enumeration is an end-of-block state read, so its absence claim must
+	// order above every log in the head block — including a RemoveAdapter we are
+	// about to replay from that same block.
+	if gone.Membership.LogIndex != entity.EndOfBlockLogIndex {
+		t.Errorf("logIndex = %d, want EndOfBlockLogIndex", gone.Membership.LogIndex)
+	}
+	if gone.Membership.BlockNumber != headBlock {
+		t.Errorf("blockNumber = %d, want the pinned head %d", gone.Membership.BlockNumber, headBlock)
+	}
+	// An absence carries no classification: we did not probe the adapter, we
+	// merely failed to find it in the set.
+	if gone.Membership.AdapterType != nil {
+		t.Errorf("adapterType = %v, want nil: absence from the set is not a probe", *gone.Membership.AdapterType)
+	}
+	// And nothing is seeded for it — a de-registered adapter gets no state row.
+	if seededStates != 1 {
+		t.Errorf("adapter_state rows = %d, want 1 (only the still-present adapter)", seededStates)
+	}
+}
+
+// TestSeedV2VaultAdapters_DeregistersNothingWhenTheSetMatches is the other half of
+// the same contract: the sweep must be quiet. A re-run whose enumeration matches
+// the registry has no absence to report, and appending "not a member" rows for
+// adapters that are still there would be a fabrication, not a correction.
+func TestSeedV2VaultAdapters_DeregistersNothingWhenTheSetMatches(t *testing.T) {
+	h := newTestHarness(t)
+	h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
+
+	realAssets := big.NewInt(4242)
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		return h.vaultAdapterEnumerationResults(calls, testVaultAddr, testAdapterAddr, realAssets)
+	}
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		if len(calls) == adapterProbeCallsPerAdapter && calls[0].Target == testAdapterAddr {
+			return h.adapterProbeResults(entity.MorphoAdapterTypeMarketV1), nil
+		}
+		return nil, errTestUnexpectedCall(calls)
+	}
+	h.morphoRepo.GetActiveAdaptersByVaultFn = func(_ context.Context, _ int64) ([]*entity.MorphoAdapterMember, error) {
+		return []*entity.MorphoAdapterMember{
+			{MorphoAdapterIdentity: entity.MorphoAdapterIdentity{ID: 1, MorphoVaultID: 7, Address: testAdapterAddr.Bytes(), AssetTokenID: 1}, AdapterType: entity.MorphoAdapterTypeMarketV1},
+		}, nil
+	}
+	h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, obs *entity.MorphoAdapterObservation) (int64, bool, error) {
+		if !obs.Membership.IsMember {
+			t.Errorf("recorded a de-registration for %x, which the enumeration DID return", obs.Identity.Address)
+		}
+		return 99, false, nil
+	}
+
+	if err := h.svc.SeedV2VaultAdapters(context.Background(), testVaultAddr, 24_000_000, testBlockHash, 0, time.Unix(1_760_000_000, 0).UTC()); err != nil {
+		t.Fatalf("SeedV2VaultAdapters: %v", err)
 	}
 }
 
