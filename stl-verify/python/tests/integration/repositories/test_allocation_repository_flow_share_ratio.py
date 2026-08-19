@@ -219,3 +219,43 @@ async def test_mixed_bucket_sums_ratio_and_nearest_row_flows(repo) -> None:
     bucket = await _single_bucket(repo, FR_PROXY_MIXED)
     assert bucket.event_count == 4
     assert bucket.net_flow_usd == _EXPECTED_MIXED_NET_FLOW
+
+
+@pytest.mark.asyncio
+async def test_resolves_a_prime_to_every_one_of_its_proxies(repo: AllocationRepository):
+    """The widening behind the prime-wide activity trend.
+
+    Resolved from allocation_position, not the axis-synome contract: /v1/primes
+    is built from these same rows, so a contract that has not been told about a
+    proxy yet would make server and client disagree about what a prime is. None
+    of the seeded flow-ratio proxies is in the contract, so a contract-based
+    lookup would silently return just the address it was given.
+    """
+    resolved = await repo.list_prime_proxy_addresses(EthAddress(f"0x{FR_PROXY_RATIO}"))
+
+    hexes = {str(a)[2:] for a in resolved}
+    assert FR_PROXY_RATIO in hexes
+    assert FR_PROXY_ATOKEN in hexes, "a sibling proxy of the same prime must be included"
+
+
+@pytest.mark.asyncio
+async def test_an_address_with_no_rows_resolves_to_itself(repo: AllocationRepository):
+    """Never empty — downstream an empty filter is indistinguishable from none."""
+    unknown = EthAddress("0x" + "ab" * 20)
+
+    assert await repo.list_prime_proxy_addresses(unknown) == [unknown]
+
+
+@pytest.mark.asyncio
+async def test_an_empty_proxy_filter_matches_nothing_rather_than_everything(
+    repo: AllocationRepository,
+):
+    buckets = await repo.list_activity_buckets(
+        proxy_addresses=[],
+        from_timestamp=FR_BUCKET_TS - dt.timedelta(minutes=30),
+        to_timestamp=FR_BUCKET_TS + dt.timedelta(minutes=30),
+        bucket_seconds=3600.0,
+        limit=10,
+    )
+
+    assert all(b.event_count == 0 for b in buckets)

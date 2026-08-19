@@ -112,7 +112,11 @@ class AllocationRepositoryPort(Protocol):
         to_timestamp: datetime | None = None,
         limit: int = 100,
     ) -> list[AllocationActivityEvent]:
-        """Return allocation activity events with optional filters."""
+        """Return allocation activity events with optional filters.
+
+        ``proxy_addresses`` is ``None`` for unscoped; an empty list matches
+        nothing and must never be read as unscoped.
+        """
         ...
 
     async def list_activity_buckets(
@@ -129,7 +133,10 @@ class AllocationRepositoryPort(Protocol):
         bucket_seconds: float,
         limit: int = 100,
     ) -> list[AllocationActivityBucket]:
-        """Return allocation activity aggregated into time buckets."""
+        """Return allocation activity aggregated into time buckets.
+
+        ``proxy_addresses`` follows ``list_allocation_activity``'s contract.
+        """
         ...
 
     async def list_total_capital_buckets(
@@ -146,6 +153,13 @@ class AllocationRepositoryPort(Protocol):
 
     async def get_latest_total_capital_usd(self, prime_address: EthAddress) -> Decimal | None:
         """Return the prime's latest treasury USDS balance (Total Risk Capital), or None."""
+        ...
+
+    async def list_prime_proxy_addresses(self, prime_address: EthAddress) -> list[EthAddress]:
+        """Return every allocation proxy of the prime that owns ``prime_address``.
+
+        Never empty: an address with no rows resolves to itself.
+        """
         ...
 
     async def primary_proxy_address(self, prime_address: EthAddress) -> str | None:

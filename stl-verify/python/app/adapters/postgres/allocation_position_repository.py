@@ -644,7 +644,7 @@ class AllocationRepository:
     ) -> list[AllocationActivityEvent]:
         # Escape LIKE metacharacters to prevent pattern injection
         params = {
-            "prime_hexes": ",".join(a.hex for a in proxy_addresses) if proxy_addresses else None,
+            "proxy_addrs": (None if proxy_addresses is None else [a.to_bytes() for a in proxy_addresses]),
             "chain_id": chain_id,
             "protocol_name": _escape_like_pattern(protocol_name) if protocol_name else None,
             "action_type": action_type,
@@ -658,7 +658,7 @@ class AllocationRepository:
         logger.debug(
             "Executing allocation activity query",
             extra={
-                "proxy_addresses": [str(a) for a in proxy_addresses] if proxy_addresses else None,
+                "proxy_addresses": (None if proxy_addresses is None else [str(a) for a in proxy_addresses]),
                 "chain_id": chain_id,
                 "limit": params["limit"],
                 "has_time_filter": from_timestamp is not None,
@@ -718,7 +718,7 @@ class AllocationRepository:
     ) -> list[AllocationActivityBucket]:
         """Return allocation activity counts and tx-amount sums per time bucket."""
         params = {
-            "prime_hexes": ",".join(a.hex for a in proxy_addresses) if proxy_addresses else None,
+            "proxy_addrs": (None if proxy_addresses is None else [a.to_bytes() for a in proxy_addresses]),
             "chain_id": chain_id,
             "protocol_name": _escape_like_pattern(protocol_name) if protocol_name else None,
             "action_type": action_type,
@@ -849,6 +849,47 @@ class AllocationRepository:
         ]
         self._record_empty_total_capital(prime_address, buckets)
         return buckets
+
+    async def list_prime_proxy_addresses(self, prime_address: EthAddress) -> list[EthAddress]:
+        """Return every allocation proxy of the prime that owns ``prime_address``.
+
+        Resolved from ``allocation_position``, not the axis-synome contract, for
+        the reason given below ``alm_proxies_for_prime``: ``/v1/primes`` is built
+        from these same rows, so a contract that has not yet been told about a
+        proxy would make server and client disagree about what a prime is.
+
+        SubProxy treasury wallets are excluded — they hold total capital, not
+        allocations. Returns ``[prime_address]`` for an address with no rows, so
+        the caller narrows to it rather than widening to everything.
+        """
+        subproxies = [bytes.fromhex(address[2:]) for address in subproxy_addresses()]
+        query = text("""
+            SELECT DISTINCT encode(ap.proxy_address, 'hex') AS address
+            FROM allocation_position ap
+            WHERE ap.prime_id = (
+                SELECT prime_id FROM allocation_position
+                WHERE proxy_address = decode(:address_hex, 'hex')
+                LIMIT 1
+            )
+              AND ap.proxy_address NOT IN :subproxy_addrs
+            ORDER BY address
+        """).bindparams(bindparam("subproxy_addrs", expanding=True))
+
+        try:
+            async with self._engine.connect() as conn:
+                result = await conn.execute(query, {"address_hex": prime_address.hex, "subproxy_addrs": subproxies})
+                rows = result.fetchall()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "Failed to resolve a prime's proxy addresses",
+                extra={"prime_address": str(prime_address), "error_type": type(exc).__name__},
+                exc_info=True,
+            )
+            raise ValueError(f"Database query failed while resolving proxies for {prime_address}: {exc}") from exc
+
+        return [EthAddress(f"0x{row.address}") for row in rows] or [prime_address]
 
     async def primary_proxy_address(self, prime_address: EthAddress) -> str | None:
         """Return the proxy that carries this prime's prime-scoped rows, or ``None``.
@@ -1568,8 +1609,7 @@ LEFT JOIN LATERAL (
     ORDER BY match_priority
     LIMIT 1
 ) AS protocol_match ON TRUE
-WHERE (CAST(:prime_hexes AS TEXT) IS NULL OR ap.proxy_address = ANY(
-        SELECT decode(hex, 'hex') FROM unnest(string_to_array(CAST(:prime_hexes AS TEXT), ',')) AS hex))
+WHERE (CAST(:proxy_addrs AS BYTEA[]) IS NULL OR ap.proxy_address = ANY(CAST(:proxy_addrs AS BYTEA[])))
     AND ap.direction IS NOT NULL
     AND ap.tx_amount IS NOT NULL
     AND ap.balance IS NOT NULL
@@ -1817,8 +1857,7 @@ LEFT JOIN nearest_share_ratio nearest_ratio
     ON nearest_ratio.token_id = ap.token_id
     AND nearest_ratio.chain_id = ap.chain_id
     AND nearest_ratio.block_number = ap.block_number
-WHERE (CAST(:prime_hexes AS TEXT) IS NULL OR ap.proxy_address = ANY(
-        SELECT decode(hex, 'hex') FROM unnest(string_to_array(CAST(:prime_hexes AS TEXT), ',')) AS hex))
+WHERE (CAST(:proxy_addrs AS BYTEA[]) IS NULL OR ap.proxy_address = ANY(CAST(:proxy_addrs AS BYTEA[])))
     AND ap.direction IS NOT NULL
     AND ap.tx_amount IS NOT NULL
     AND ap.created_at IS NOT NULL
