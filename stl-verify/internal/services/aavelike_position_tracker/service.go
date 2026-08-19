@@ -854,102 +854,6 @@ func (s *Service) extractUserPositionData(ctx context.Context, user common.Addre
 	return s.reader.GetUserPositionData(ctx, user, protocolAddress, chainID, blockNumber, blockHash)
 }
 
-// persistPositionData saves a full position snapshot (collaterals + debts) within an
-// existing transaction. Callers are responsible for wrapping this in WithTransaction.
-//
-// All Postgres writes go through batched repository methods
-// (GetOrCreateTokens, SaveBorrowers, SaveBorrowerCollaterals), each of which
-// sorts its inputs by natural key before issuing per-row writes. This is what
-// keeps concurrent cross-build reprocesses from deadlocking on the
-// assign_processing_version_* trigger lock — see ADR-0002 §3.
-func (s *Service) persistPositionData(
-	ctx context.Context,
-	tx pgx.Tx,
-	user common.Address,
-	protocolAddress common.Address,
-	chainID, blockNumber int64,
-	blockVersion int,
-	eventType entity.EventType,
-	txHash []byte,
-	collaterals []aavelike.CollateralData,
-	debts []aavelike.DebtData,
-	blockTimestamp time.Time,
-) error {
-	userID, err := s.userRepo.GetOrCreateUser(ctx, tx, entity.User{
-		ChainID:        chainID,
-		Address:        user,
-		FirstSeenBlock: &blockNumber,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to ensure user: %w", err)
-	}
-
-	protocolConfig, exists := blockchain.GetProtocolConfig(chainID, protocolAddress)
-	if !exists {
-		return fmt.Errorf("unknown protocol: chainID=%d address=%s", chainID, protocolAddress.Hex())
-	}
-
-	protocolID, err := s.protocolRepo.GetOrCreateProtocol(ctx, tx, chainID, protocolAddress, protocolConfig.Name, normalizeProtocolType(protocolConfig.ProtocolType), blockNumber)
-	if err != nil {
-		return fmt.Errorf("failed to get protocol: %w", err)
-	}
-
-	tokenIDs, err := s.resolvePositionTokens(ctx, tx, chainID, blockNumber, collaterals, debts)
-	if err != nil {
-		return fmt.Errorf("resolving tokens for user %s persist snapshot: %w", user.Hex(), err)
-	}
-
-	borrowers := make([]*entity.Borrower, 0, len(debts))
-	for _, d := range debts {
-		tokenID, ok := tokenIDs[d.Asset]
-		if !ok {
-			return fmt.Errorf("missing token ID for debt asset %s", d.Asset.Hex())
-		}
-		borrowers = append(borrowers, &entity.Borrower{
-			UserID:       userID,
-			ProtocolID:   protocolID,
-			TokenID:      tokenID,
-			BlockNumber:  blockNumber,
-			BlockVersion: blockVersion,
-			Amount:       d.CurrentDebt,
-			Change:       big.NewInt(0),
-			EventType:    eventType,
-			TxHash:       txHash,
-			CreatedAt:    blockTimestamp,
-		})
-	}
-	if err := s.positionRepo.SaveBorrowers(ctx, tx, borrowers); err != nil {
-		return fmt.Errorf("failed to save borrowers: %w", err)
-	}
-
-	collateralEntities := make([]*entity.BorrowerCollateral, 0, len(collaterals))
-	for _, col := range collaterals {
-		tokenID, ok := tokenIDs[col.Asset]
-		if !ok {
-			return fmt.Errorf("missing token ID for collateral asset %s", col.Asset.Hex())
-		}
-		collateralEntities = append(collateralEntities, &entity.BorrowerCollateral{
-			UserID:            userID,
-			ProtocolID:        protocolID,
-			TokenID:           tokenID,
-			BlockNumber:       blockNumber,
-			BlockVersion:      blockVersion,
-			Amount:            col.ActualBalance,
-			Change:            big.NewInt(0),
-			EventType:         eventType,
-			TxHash:            txHash,
-			CollateralEnabled: col.CollateralEnabled,
-			CreatedAt:         blockTimestamp,
-		})
-	}
-
-	if err := s.positionRepo.SaveBorrowerCollaterals(ctx, tx, collateralEntities); err != nil {
-		return fmt.Errorf("failed to save collaterals: %w", err)
-	}
-
-	return nil
-}
-
 // resolvePositionTokens upserts every distinct token referenced by a user's
 // collaterals, debts, or extra inputs in a single batched call and returns
 // address→id. GetOrCreateTokens sorts by address internally, so the
@@ -1006,46 +910,6 @@ func (s *Service) resolvePositionTokens(
 	return tokenIDs, nil
 }
 
-// IndexUserPosition queries the current on-chain position for a user and persists
-// a full snapshot (collaterals + debts) to the database. This is the public entry
-// point used by the snapshot indexer CLI.
-//
-// Reads state number-pinned (zero block hash): this CLI entry point has no
-// live BlockEvent to source a hash from, same rationale as ProcessReceipts'
-// backfill path (VEC-471).
-func (s *Service) IndexUserPosition(ctx context.Context, user common.Address, protocolAddress common.Address, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
-	collaterals, debts, err := s.extractUserPositionData(ctx, user, protocolAddress, chainID, blockNumber, common.Hash{}, "")
-	if err != nil {
-		return fmt.Errorf("failed to extract user position data: %w", err)
-	}
-
-	if len(collaterals) == 0 && len(debts) == 0 {
-		return nil
-	}
-
-	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		return s.persistPositionData(ctx, tx, user, protocolAddress, chainID, blockNumber, blockVersion, entity.InternalSnapshot, []byte{}, collaterals, debts, blockTimestamp)
-	})
-}
-
-// PersistUserPosition saves pre-fetched position data to the database.
-// Used by the batch backfill CLI which fetches data separately via
-// PositionReader.GetBatchUserPositionData.
-func (s *Service) PersistUserPosition(
-	ctx context.Context,
-	user common.Address,
-	protocolAddress common.Address,
-	chainID, blockNumber int64,
-	blockVersion int,
-	collaterals []aavelike.CollateralData,
-	debts []aavelike.DebtData,
-	blockTimestamp time.Time,
-) error {
-	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		return s.persistPositionData(ctx, tx, user, protocolAddress, chainID, blockNumber, blockVersion, entity.InternalSnapshot, []byte{}, collaterals, debts, blockTimestamp)
-	})
-}
-
 // UserPositionData holds position data for a single user, used by PersistUserPositionBatch.
 type UserPositionData struct {
 	User        common.Address
@@ -1055,7 +919,7 @@ type UserPositionData struct {
 
 // PersistUserPositionBatch saves position data for multiple users in a single transaction,
 // using bulk upserts for users, tokens, borrowers, and collaterals. This dramatically
-// reduces DB round trips compared to calling PersistUserPosition per user.
+// reduces DB round trips compared to persisting each user in its own transaction.
 func (s *Service) PersistUserPositionBatch(
 	ctx context.Context,
 	positions []UserPositionData,

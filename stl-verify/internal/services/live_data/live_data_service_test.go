@@ -1743,8 +1743,6 @@ func (f *failingSubscriber) HealthCheck(ctx context.Context) error {
 	return nil
 }
 
-func (f *failingSubscriber) SetOnReconnect(callback func()) {}
-
 func TestStart_Success_SetsContext(t *testing.T) {
 	stateRepo := newMockStateRepo()
 	cache := memory.NewBlockCache()
