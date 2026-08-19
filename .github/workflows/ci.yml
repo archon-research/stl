@@ -7,9 +7,11 @@ on:
     paths-ignore:
       - 'k8s/overlays/staging/kustomization.yaml'
       - 'k8s/overlays/prod/kustomization.yaml'
+  # No base-branch filter. A stacked PR's base is the parent PR's branch, not
+  # main, so `branches: [main]` skipped CI entirely on stacked PRs and left
+  # them mergeable on local test runs alone. `push` stays scoped to main, so
+  # this costs one run per PR update (not one per branch push).
   pull_request:
-    branches:
-      - main
   merge_group:
   workflow_dispatch:
 

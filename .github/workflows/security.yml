@@ -11,10 +11,14 @@ on:
     branches: [main]
     paths:
       - ".github/**"
+  # No base-branch filter (see ci.yml): a `branches: [main]` filter skipped
+  # workflow hygiene on stacked PRs -- including PRs whose whole diff is
+  # workflow changes. merge_group ignores `paths`, so queue entries always run
+  # these three (cheap) jobs rather than never running them.
   pull_request:
-    branches: [main]
     paths:
       - ".github/**"
+  merge_group:
 
 concurrency:
   group: security-${{ github.ref }}
