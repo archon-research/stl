@@ -3,6 +3,7 @@ import {
   XYChart,
   LineSeries,
   AreaSeries,
+  ReferenceBand,
   Tooltip,
   Axis,
   buildChartTheme,
@@ -92,6 +93,7 @@ type AllocationGridProps = {
   riskCapitalErrorMessage: string | null;
   primeDebtErrorMessage: string | null;
   noticeMessage: string | null;
+  primeCollateralUsd: number | null;
 };
 
 export type ChartDatum = {
@@ -103,7 +105,9 @@ export type MetricChartKey =
   | 'allocation-activity-volume'
   | 'risk-capital'
   | 'total-capital'
-  | 'prime-debt-exposure';
+  | 'prime-debt-exposure'
+  | 'prime-collateral'
+  | 'encumbrance-ratio';
 
 // 'fallback' is a synthetic constant placeholder (current value repeated)
 // shown when no real history is available; 'series' is a real time series.
@@ -117,6 +121,8 @@ export type MetricChartSpec = {
   stroke: string;
   formatValue: (value: number) => string;
   kind: MetricChartKind;
+  // Draws a dashed limit line with the region past it shaded as a breach.
+  threshold?: { value: number; label: string };
 };
 
 function findMetricChart(
@@ -175,6 +181,11 @@ const chartEmptyMessageClassName = css({
 });
 
 const CHART_HEIGHT = 236;
+
+// Warning level for required-over-total risk capital: the prime is close to
+// having no unencumbered capital left. Deliberately below the structural limit
+// of 1.0, so it reads before the buffer is gone rather than as it goes.
+export const ENCUMBRANCE_WARNING_THRESHOLD = 0.95;
 
 function MetricCardTrend({
   chart,
@@ -246,9 +257,18 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
   // line sits centered, and drop the area fill so it reads as a flat baseline.
   const isFlat = minValue === maxValue;
   const flatPad = Math.max(Math.abs(minValue) * 0.5, 1);
-  const yDomain: [number, number] = isFlat
+  const [domainMin, domainMax] = isFlat
     ? [minValue - flatPad, maxValue + flatPad]
     : [minValue, maxValue];
+
+  // A limit the series never approaches would otherwise fall outside the
+  // domain and render off-plot, reading as "no threshold" rather than "well
+  // within it".
+  const threshold = chart.threshold?.value;
+  const yDomain: [number, number] =
+    threshold === undefined
+      ? [domainMin, domainMax]
+      : [Math.min(domainMin, threshold), Math.max(domainMax, threshold)];
 
   return (
     <div
@@ -300,6 +320,14 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
           yAccessor={(d: ChartDatum) => d.value}
           stroke={chart.stroke}
         />
+        {chart.threshold ? (
+          <ReferenceBand
+            mode="threshold"
+            value={chart.threshold.value}
+            breach="above"
+            label={chart.threshold.label}
+          />
+        ) : null}
         <Tooltip
           snapTooltipToDatumX
           snapTooltipToDatumY
@@ -838,6 +866,7 @@ export function AllocationGrid({
   riskCapitalErrorMessage,
   primeDebtErrorMessage,
   noticeMessage,
+  primeCollateralUsd,
 }: AllocationGridProps) {
   const [localSearchValue, setLocalSearchValue] = useState(searchValue);
 
@@ -991,6 +1020,14 @@ export function AllocationGrid({
   const riskCapitalChart = findMetricChart(metricCharts, 'risk-capital');
   const totalCapitalChart = findMetricChart(metricCharts, 'total-capital');
   const primeDebtChart = findMetricChart(metricCharts, 'prime-debt-exposure');
+  const primeCollateralChart = findMetricChart(metricCharts, 'prime-collateral');
+  const encumbranceChart = findMetricChart(metricCharts, 'encumbrance-ratio');
+  const encumbranceRatio = parseNumericValue(
+    riskCapital?.prime_encumbrance_ratio,
+  );
+  const isEncumbranceBreaching =
+    encumbranceRatio !== null &&
+    encumbranceRatio >= ENCUMBRANCE_WARNING_THRESHOLD;
 
   return (
     <PageShell>
@@ -1257,6 +1294,63 @@ export function AllocationGrid({
                     </div>
                     <MetricCardTrend
                       chart={totalCapitalChart}
+                      isLoading={isChartsLoading}
+                      errorMessage={null}
+                    />
+                  </div>
+                }
+              />
+            ) : null}
+
+            {selectedPrime ? (
+              <SummaryMetric
+                className={metricsCardClassName}
+                label="Prime collateral"
+                value={
+                  primeCollateralUsd === null
+                    ? '—'
+                    : formatUsdValue(String(primeCollateralUsd))
+                }
+                detail={
+                  <div className={metricDetailClassName}>
+                    <div
+                      className={css({ fontSize: 'sm', color: 'text.muted' })}
+                    >
+                      {REFERENCE_MODE
+                        ? 'Total assets as published by Sky'
+                        : 'STL-indexed positions · excludes PSM3 and unpriced LP'}
+                    </div>
+                    <MetricCardTrend
+                      chart={primeCollateralChart}
+                      isLoading={isChartsLoading}
+                      errorMessage={null}
+                    />
+                  </div>
+                }
+              />
+            ) : null}
+
+            {riskCapital && encumbranceRatio !== null ? (
+              <SummaryMetric
+                className={metricsCardClassName}
+                label="Encumbrance"
+                value={formatRatioPercent(encumbranceRatio)}
+                detail={
+                  <div className={metricDetailClassName}>
+                    <div
+                      className={css({
+                        fontSize: 'sm',
+                        color: isEncumbranceBreaching
+                          ? 'text.warning'
+                          : 'text.muted',
+                      })}
+                    >
+                      {isEncumbranceBreaching
+                        ? `Above the ${formatRatioPercent(ENCUMBRANCE_WARNING_THRESHOLD)} warning level`
+                        : `Warning at ${formatRatioPercent(ENCUMBRANCE_WARNING_THRESHOLD)}`}
+                    </div>
+                    <MetricCardTrend
+                      chart={encumbranceChart}
                       isLoading={isChartsLoading}
                       errorMessage={null}
                     />

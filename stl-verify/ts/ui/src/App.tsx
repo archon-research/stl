@@ -20,6 +20,7 @@ import type {
 } from './components/allocations/AllocationGrid';
 import {
   AllocationGrid,
+  ENCUMBRANCE_WARNING_THRESHOLD,
   type MetricChartSpec,
 } from './components/allocations/AllocationGrid';
 import { BottomPanel } from './components/allocations/BottomPanel';
@@ -61,6 +62,7 @@ import {
   formatChartTimestampLabel,
   formatCompactNumber,
   formatCompactUsd,
+  formatRatioPercent,
   formatTokenAmount,
   formatUsdValue,
   getChainLabel,
@@ -850,6 +852,40 @@ function App() {
     [totalCapitalBuckets],
   );
 
+  // Both ride the total-capital buckets: assets_usd and encumbrance_ratio come
+  // from the same two upstream feeds, so a separate request could pair figures
+  // observed at different instants. Reference mode only — self mode reports
+  // them null, which filters to an empty series and a flat fallback card.
+  const collateralSeries = useMemo<ChartDatum[]>(
+    () =>
+      totalCapitalBuckets
+        .map((bucket) => ({
+          label: formatChartTimestampLabel(bucket.bucket_start),
+          value: parseNumericValue(bucket.assets_usd) ?? Number.NaN,
+        }))
+        .filter((point) => Number.isFinite(point.value)),
+    [totalCapitalBuckets],
+  );
+
+  const encumbranceSeries = useMemo<ChartDatum[]>(
+    () =>
+      totalCapitalBuckets
+        .map((bucket) => ({
+          label: formatChartTimestampLabel(bucket.bucket_start),
+          value: parseNumericValue(bucket.encumbrance_ratio) ?? Number.NaN,
+        }))
+        .filter((point) => Number.isFinite(point.value)),
+    [totalCapitalBuckets],
+  );
+
+  // Reference mode publishes a real total-assets figure. Self mode has no
+  // equivalent — STL does not index PSM3 and prices no Curve LP position — so
+  // it shows what STL actually holds records for, captioned as such.
+  // Buckets are oldest-first, so the newest observation is the last point.
+  const primeCollateralValue = REFERENCE_MODE
+    ? (collateralSeries.at(-1)?.value ?? null)
+    : primeTotalAllocationUsd;
+
   // Priced receipt-token exposure over time; drives the Exposure card trend
   // (falls back to the flat current value below when no history is available).
   const exposureSeries = useMemo<ChartDatum[]>(
@@ -907,6 +943,12 @@ function App() {
 
     const primeDebtValue = wadToUnits(primeDebtSnapshot?.debt_wad);
 
+    const encumbranceValue =
+      riskCapital?.prime_encumbrance_ratio === undefined ||
+      riskCapital?.prime_encumbrance_ratio === null
+        ? null
+        : parseNumericValue(riskCapital.prime_encumbrance_ratio);
+
     // One ordinal series token per card, and deliberately no `var(..., fallback)`:
     // a fallback lets a wrong or missing token render as a plausible colour, which
     // is how two of these cards came to name the same token unnoticed.
@@ -948,11 +990,28 @@ function App() {
         stroke: 'var(--colors-chart-series-quinary)',
         formatValue: (value: number) => `${formatCompactNumber(value)} DAI`,
       },
+      {
+        key: 'prime-collateral',
+        ...seriesOrFallback(collateralSeries, primeCollateralValue),
+        stroke: 'var(--colors-chart-series-tertiary)',
+        formatValue: formatCompactUsd,
+      },
+      {
+        key: 'encumbrance-ratio',
+        ...seriesOrFallback(encumbranceSeries, encumbranceValue),
+        stroke: 'var(--colors-chart-series-secondary)',
+        formatValue: formatRatioPercent,
+        threshold: {
+          value: ENCUMBRANCE_WARNING_THRESHOLD,
+          label: formatRatioPercent(ENCUMBRANCE_WARNING_THRESHOLD),
+        },
+      },
     ];
     return charts.filter((chart) => chart.data.length > 0);
   }, [
     allocationBalanceSeries,
     riskCapital?.prime_exposure_usd,
+    riskCapital?.prime_encumbrance_ratio,
     riskCapital?.total_risk_capital_usd,
     chartFromLabel,
     chartToLabel,
@@ -961,6 +1020,9 @@ function App() {
     primeDebtSeries,
     primeDebtSnapshot?.debt_wad,
     totalCapitalSeries,
+    collateralSeries,
+    encumbranceSeries,
+    primeCollateralValue,
   ]);
 
   // `row` restores a drawer deep link; anything the current filters exclude falls
@@ -1087,6 +1149,7 @@ function App() {
                 riskCapitalErrorMessage={riskCapitalErrorMessage}
                 primeDebtErrorMessage={primeDebtErrorMessage}
                 noticeMessage={unknownPrimeMessage}
+                primeCollateralUsd={primeCollateralValue}
               />
             ) : (
               <ActivityFeed
