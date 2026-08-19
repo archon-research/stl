@@ -61,3 +61,5 @@
 ./internal/services/sparklend
 ./internal/testutil
 ./internal/testutil/dataexport
+./internal/services/capital_stack_syncer
+./cmd/cronjobs/capital-stack-syncer

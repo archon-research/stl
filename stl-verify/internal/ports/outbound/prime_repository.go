@@ -1,8 +1,10 @@
 package outbound
 
-import "context"
+import (
+	"context"
 
-import "github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+)
 
 // PrimeRepository defines the interface for looking up prime agents.
 type PrimeRepository interface {
