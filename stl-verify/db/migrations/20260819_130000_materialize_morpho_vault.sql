@@ -69,4 +69,4 @@ $fn$;
 
 COMMENT ON FUNCTION materialize_morpho_vault() IS '[Operational] VEC-403: materialize Morpho vault positions into position_state + position_classification, via materialize_position_projection(position_morpho_vault). Idempotent; run out of band. Returns position_state rows written.';
 
-INSERT INTO migrations (filename) VALUES ('20260724_130000_materialize_morpho_vault.sql') ON CONFLICT (filename) DO NOTHING;
+INSERT INTO migrations (filename) VALUES ('20260819_130000_materialize_morpho_vault.sql') ON CONFLICT (filename) DO NOTHING;
