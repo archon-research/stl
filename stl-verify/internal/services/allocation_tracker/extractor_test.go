@@ -100,6 +100,9 @@ func TestTransferExtractor_Extract_TransferToProxy(t *testing.T) {
 	if ev.LogIndex != 5 {
 		t.Errorf("expected logIndex 5, got %d", ev.LogIndex)
 	}
+	if ev.Counterparty != sender {
+		t.Errorf("expected counterparty %s (the sender), got %s", sender.Hex(), ev.Counterparty.Hex())
+	}
 }
 
 func TestTransferExtractor_Extract_TransferFromProxy(t *testing.T) {
@@ -123,6 +126,9 @@ func TestTransferExtractor_Extract_TransferFromProxy(t *testing.T) {
 	}
 	if events[0].Direction != DirectionOut {
 		t.Errorf("expected direction OUT, got %s", events[0].Direction)
+	}
+	if events[0].Counterparty != receiver {
+		t.Errorf("expected counterparty %s (the receiver), got %s", receiver.Hex(), events[0].Counterparty.Hex())
 	}
 }
 
@@ -151,6 +157,14 @@ func TestTransferExtractor_Extract_ProxyToProxy(t *testing.T) {
 	}
 	if events[1].Direction != DirectionIn || events[1].Star != "grove" {
 		t.Errorf("second event should be IN/grove, got %s/%s", events[1].Direction, events[1].Star)
+	}
+
+	// Each side's counterparty is the other proxy, not itself.
+	if events[0].Counterparty != groveProxy {
+		t.Errorf("OUT counterparty = %s, want %s", events[0].Counterparty.Hex(), groveProxy.Hex())
+	}
+	if events[1].Counterparty != sparkProxy {
+		t.Errorf("IN counterparty = %s, want %s", events[1].Counterparty.Hex(), sparkProxy.Hex())
 	}
 }
 

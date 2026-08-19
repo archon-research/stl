@@ -25,6 +25,9 @@ func validPosition() *AllocationPosition {
 }
 
 func TestAllocationPosition_Validate(t *testing.T) {
+	counterparty := common.HexToAddress("0x9999999999999999999999999999999999999999")
+	mintBurn := common.Address{}
+
 	cases := []struct {
 		name    string
 		mut     func(*AllocationPosition)
@@ -42,6 +45,15 @@ func TestAllocationPosition_Validate(t *testing.T) {
 		{"missing block number", func(p *AllocationPosition) { p.BlockNumber = 0 }, true},
 		{"zero created_at_block", func(p *AllocationPosition) { p.CreatedAtBlock = 0 }, true},
 		{"negative created_at_block", func(p *AllocationPosition) { p.CreatedAtBlock = -1 }, true},
+		{"transfer without counterparty", func(p *AllocationPosition) { p.Direction = "in" }, true},
+		{"transfer with counterparty", func(p *AllocationPosition) {
+			p.Direction = "in"
+			p.Counterparty = &counterparty
+		}, false},
+		{"zero-address counterparty is a mint or burn, not a missing value", func(p *AllocationPosition) {
+			p.Direction = "out"
+			p.Counterparty = &mintBurn
+		}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -124,6 +124,51 @@ func TestHandleBatch_ERC20(t *testing.T) {
 	}
 }
 
+func TestHandleBatch_ThreadsCounterpartyOntoPosition(t *testing.T) {
+	usdc := common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
+	wallet := common.HexToAddress("0x1601843c5e9bc251a3272907010afa41fa18347e")
+	counterparty := common.HexToAddress("0x9999999999999999999999999999999999999999")
+
+	repo := &fakeAllocRepo{}
+	handler := newTestHandler(repo, &fakeSupplyRepo{},
+		map[string]int64{"spark": 1},
+		map[common.Address]tokenMeta{usdc: {symbol: "USDC", decimals: 6}},
+	)
+
+	err := handler.HandleBatch(context.Background(), &SnapshotBatch{
+		Snapshots: []*PositionSnapshot{
+			{
+				Entry: &TokenEntry{
+					ContractAddress: usdc,
+					WalletAddress:   wallet,
+					Star:            "spark",
+					Chain:           "mainnet",
+					TokenType:       "erc20",
+				},
+				Balance:      big.NewInt(1000000),
+				ChainID:      1,
+				BlockNumber:  100,
+				TxHash:       "0xda50e73f9d4722402ae4ec6e506c3726a78fc5f6146b4957bfadc2c1fffc8f8c",
+				LogIndex:     3,
+				TxAmount:     big.NewInt(1000000),
+				Direction:    DirectionIn,
+				Counterparty: &counterparty,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(repo.saved) != 1 {
+		t.Fatalf("expected 1 saved position, got %d", len(repo.saved))
+	}
+	got := repo.saved[0].Counterparty
+	if got == nil || *got != counterparty {
+		t.Errorf("counterparty_address = %v, want %s", got, counterparty.Hex())
+	}
+}
+
 // TestHandleBatch_Centrifuge_MetadataFromShareToken proves the VEC-337-part-2
 // row-metadata fix: an ERC-7540 centrifuge position takes its decimals/symbol
 // from the resolved share token (surfaced as ShareToken), not from its vault

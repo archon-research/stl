@@ -275,6 +275,10 @@
       "type": "text",
       "class": "S"
     },
+    "counterparty_address": {
+      "type": "bytea",
+      "class": "S"
+    },
     "created_at": {
       "type": "timestamptz",
       "class": "A",

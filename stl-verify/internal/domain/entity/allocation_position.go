@@ -38,6 +38,7 @@ type AllocationPosition struct {
 	LogIndex       int
 	TxAmount       *big.Int
 	Direction      string
+	Counterparty   *common.Address // other side of the triggering Transfer; nil for a sweep
 	CreatedAtBlock int64
 	CreatedAt      time.Time // block timestamp — deterministic for hypertable dedup
 }
@@ -63,6 +64,12 @@ func (p *AllocationPosition) Validate() error {
 	}
 	if p.Direction != "in" && p.Direction != "out" && p.Direction != "sweep" {
 		return fmt.Errorf("direction must be 'in', 'out', or 'sweep', got %q", p.Direction)
+	}
+	// A NULL counterparty_address means "no transfer to read one from", so only a
+	// sweep may write it; a transfer-driven row without one would masquerade as a
+	// sweep. Mirrors the tx_hash rule in encodeTxHash.
+	if p.Counterparty == nil && p.Direction != "sweep" {
+		return fmt.Errorf("counterparty is required for a transfer-driven position (direction=%q)", p.Direction)
 	}
 	if p.PrimeID == 0 {
 		return fmt.Errorf("prime_id is required")

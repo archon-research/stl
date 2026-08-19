@@ -220,6 +220,7 @@ func (h *PrimePositionHandler) buildPositions(
 			LogIndex:       s.LogIndex,
 			TxAmount:       s.TxAmount,
 			Direction:      string(s.Direction),
+			Counterparty:   s.Counterparty,
 			CreatedAtBlock: createdAtBlock,
 			CreatedAt:      s.BlockTimestamp,
 		})

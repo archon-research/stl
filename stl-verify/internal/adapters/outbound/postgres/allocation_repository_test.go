@@ -232,6 +232,62 @@ func TestBuildInsertArgs_UnderlyingValueUsesAssetDecimals(t *testing.T) {
 	}
 }
 
+func TestBuildInsertArgs_CounterpartyAddress(t *testing.T) {
+	counterparty := common.HexToAddress("0x9999999999999999999999999999999999999999")
+
+	newPos := func(direction string, cp *common.Address, txHash string) *entity.AllocationPosition {
+		return &entity.AllocationPosition{
+			ChainID:       1,
+			TokenAddress:  common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"),
+			TokenDecimals: 6,
+			Balance:       big.NewInt(1),
+			TxHash:        txHash,
+			TxAmount:      big.NewInt(1),
+			Direction:     direction,
+			Counterparty:  cp,
+		}
+	}
+
+	tests := []struct {
+		name string
+		pos  *entity.AllocationPosition
+		want []byte
+	}{
+		{
+			name: "transfer row stores the other side of the log",
+			pos:  newPos("in", &counterparty, "0xda50e73f9d4722402ae4ec6e506c3726a78fc5f6146b4957bfadc2c1fffc8f8c"),
+			want: counterparty.Bytes(),
+		},
+		{
+			name: "mint or burn stores 20 zero bytes, not NULL",
+			pos:  newPos("in", &common.Address{}, "0xda50e73f9d4722402ae4ec6e506c3726a78fc5f6146b4957bfadc2c1fffc8f8c"),
+			want: make([]byte, common.AddressLength),
+		},
+		{
+			name: "sweep row stores NULL",
+			pos:  newPos("sweep", nil, ""),
+			want: nil,
+		},
+	}
+
+	r := &AllocationRepository{}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, args, err := r.buildInsertArgs(tt.pos, 1, nil)
+			if err != nil {
+				t.Fatalf("buildInsertArgs: %v", err)
+			}
+			got, ok := args[16].([]byte) // $17
+			if !ok {
+				t.Fatalf("expected args[16] to be []byte, got %T", args[16])
+			}
+			if !bytes.Equal(got, tt.want) {
+				t.Errorf("counterparty_address = %x, want %x", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestBuildInsertArgs_NilUnderlyingWritesBothNull(t *testing.T) {
 	r := &AllocationRepository{}
 	pos := &entity.AllocationPosition{

@@ -99,6 +99,7 @@ func TestSavePositions_PersistsUnderlyingValuation(t *testing.T) {
 	vaultAddr := common.HexToAddress("0x38464507e02c983f20428a6e8566693fe9e422a9")
 	proxyAddr := common.HexToAddress("0x1111111111111111111111111111111111111111")
 	usdcAddr := common.HexToAddress("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")
+	counterparty := common.HexToAddress("0x9999999999999999999999999999999999999999")
 	blockTime := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 
 	// Position A: vault share with USDC underlying valuation.
@@ -116,6 +117,7 @@ func TestSavePositions_PersistsUnderlyingValuation(t *testing.T) {
 		LogIndex:       1,
 		TxAmount:       big.NewInt(1_000_000_000_000_000_000),
 		Direction:      "in",
+		Counterparty:   &counterparty,
 		CreatedAtBlock: 24_584_100,
 		CreatedAt:      blockTime,
 		Underlying: &entity.UnderlyingValuation{
@@ -141,6 +143,7 @@ func TestSavePositions_PersistsUnderlyingValuation(t *testing.T) {
 		LogIndex:       2,
 		TxAmount:       big.NewInt(500_000_000_000_000_000),
 		Direction:      "out",
+		Counterparty:   &counterparty,
 		CreatedAtBlock: 24_584_100,
 		CreatedAt:      blockTime,
 	}
@@ -246,6 +249,7 @@ func TestSavePositions_ResolvesUnderlyingWhenShareTokenAlreadySeen(t *testing.T)
 	walletA := common.HexToAddress("0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
 	walletB := common.HexToAddress("0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")
 	usdcAddr := common.HexToAddress("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")
+	counterparty := common.HexToAddress("0x9999999999999999999999999999999999999999")
 	blockTime := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 
 	// Position 1: same vault, walletA, Underlying == nil (valuation failed).
@@ -265,6 +269,7 @@ func TestSavePositions_ResolvesUnderlyingWhenShareTokenAlreadySeen(t *testing.T)
 		LogIndex:       10,
 		TxAmount:       big.NewInt(1_000_000_000_000_000_000),
 		Direction:      "in",
+		Counterparty:   &counterparty,
 		CreatedAtBlock: 24_584_300,
 		CreatedAt:      blockTime,
 		Underlying:     nil,
@@ -288,6 +293,7 @@ func TestSavePositions_ResolvesUnderlyingWhenShareTokenAlreadySeen(t *testing.T)
 		LogIndex:       20,
 		TxAmount:       big.NewInt(2_000_000_000_000_000_000),
 		Direction:      "in",
+		Counterparty:   &counterparty,
 		CreatedAtBlock: 24_584_400,
 		CreatedAt:      blockTime,
 		Underlying: &entity.UnderlyingValuation{

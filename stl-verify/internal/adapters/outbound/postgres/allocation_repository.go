@@ -174,14 +174,19 @@ func (r *AllocationRepository) buildInsertArgs(
 		underlyingValue = toNumeric(pos.Underlying.Value, pos.Underlying.AssetDecimals)
 	}
 
+	var counterparty []byte
+	if pos.Counterparty != nil {
+		counterparty = pos.Counterparty.Bytes()
+	}
+
 	query := `
 		INSERT INTO allocation_position (
 			chain_id, token_id, prime_id, proxy_address,
 			balance, scaled_balance,
 			block_number, block_version,
 			tx_hash, log_index, tx_amount, direction, created_at, build_id,
-			underlying_value, underlying_token_id
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+			underlying_value, underlying_token_id, counterparty_address
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 		ON CONFLICT (chain_id, token_id, prime_id, proxy_address, block_number, block_version, tx_hash, log_index, direction, processing_version, created_at) DO NOTHING
 	`
 
@@ -202,6 +207,7 @@ func (r *AllocationRepository) buildInsertArgs(
 		int(r.buildID),
 		underlyingValue,
 		underlyingTokenID,
+		counterparty,
 	}
 
 	return query, args, nil

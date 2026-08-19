@@ -609,8 +609,9 @@ func TestBuildSnapshots_Basic(t *testing.T) {
 		},
 	}
 
+	counterparty := common.HexToAddress("0xcccc")
 	transfers := []*TransferEvent{
-		{TokenAddress: contract, ProxyAddress: wallet, Amount: big.NewInt(500), Direction: DirectionIn, TxHash: "0xabc", LogIndex: 3},
+		{TokenAddress: contract, ProxyAddress: wallet, Counterparty: counterparty, Amount: big.NewInt(500), Direction: DirectionIn, TxHash: "0xabc", LogIndex: 3},
 	}
 
 	event := outbound.BlockEvent{ChainID: 1, BlockNumber: 100, Version: 0}
@@ -653,6 +654,9 @@ func TestBuildSnapshots_Basic(t *testing.T) {
 	if s.Direction != DirectionIn {
 		t.Errorf("expected direction IN, got %s", s.Direction)
 	}
+	if s.Counterparty == nil || *s.Counterparty != counterparty {
+		t.Errorf("expected counterparty %s, got %v", counterparty.Hex(), s.Counterparty)
+	}
 }
 
 func TestBuildSnapshots_SkipsMissingBalance(t *testing.T) {
@@ -689,6 +693,9 @@ func TestBuildSnapshots_NoTransferContext(t *testing.T) {
 	}
 	if snapshots[0].TxHash != "" {
 		t.Errorf("expected empty txHash for sweep-style snapshot, got %s", snapshots[0].TxHash)
+	}
+	if snapshots[0].Counterparty != nil {
+		t.Errorf("expected nil counterparty without a transfer, got %s", snapshots[0].Counterparty.Hex())
 	}
 }
 
