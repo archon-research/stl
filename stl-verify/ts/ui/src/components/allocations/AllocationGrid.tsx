@@ -1327,11 +1327,23 @@ export function AllocationGrid({
               color: 'text.muted',
             })}
           >
-            Model-derived ({riskCapital.model}, 15% stress) ·{' '}
-            {parseNumericValue(riskCapital.prime_modeled_pct) !== null
-              ? formatRatioPercent(riskCapital.prime_modeled_pct)
-              : 'partial'}{' '}
-            of exposure modeled
+            {riskCapital.source === 'reference' ? (
+              // No model ran, so the coverage figure below would read as "STL
+              // priced all of this" when nothing of STL's did. Attribute the
+              // figures to their source instead.
+              <>
+                Reported by Sky&apos;s Star Agents Risk Capital &amp;
+                Requirements Monitor · not STL&apos;s model
+              </>
+            ) : (
+              <>
+                Model-derived ({riskCapital.model}, 15% stress) ·{' '}
+                {parseNumericValue(riskCapital.prime_modeled_pct) !== null
+                  ? formatRatioPercent(riskCapital.prime_modeled_pct)
+                  : 'partial'}{' '}
+                of exposure modeled
+              </>
+            )}
           </p>
         ) : null}
         <div
