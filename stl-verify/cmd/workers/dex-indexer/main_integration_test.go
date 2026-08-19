@@ -68,12 +68,13 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 
 // TestRunIntegration_StartupAndShutdown exercises the full cmd-level boot path
 // (Bootstrap -> factory.BuildHandler -> LoadPools over the seeded registry ->
-// RunLoop) for BOTH DEX factories. Running only DEX=curve would let a
-// uniswap-v3-specific wiring regression (nil dep, chain-ID plumbing, seed drift
-// in RegisteredPoolsFromRows) ship green, since the registry-map unit test only
-// checks ServiceName/MetricPrefix, not the production build path.
+// RunLoop) for EVERY DEX factory. Running only DEX=curve would let a
+// per-DEX wiring regression (nil dep, chain-ID plumbing, seed drift in
+// RegisteredPoolsFromRows, a PoolId that disagrees with its seeded key) ship
+// green, since the registry-map unit test only checks ServiceName/MetricPrefix,
+// not the production build path.
 func TestRunIntegration_StartupAndShutdown(t *testing.T) {
-	for _, dex := range []string{"curve", "uniswap-v3"} {
+	for _, dex := range []string{"curve", "uniswap-v3", "uniswap-v4"} {
 		t.Run(dex, func(t *testing.T) {
 			runStartupAndShutdown(t, dex)
 		})
@@ -91,9 +92,9 @@ func setupDexRunEnv(t *testing.T, dex string) dexRunEnv {
 	t.Helper()
 	ctx := context.Background()
 
-	// The template SetupTestDB clones carries every migration, so the Curve and
-	// Uniswap V3 pools are seeded on chain_id=1. run() fails hard on zero pools,
-	// so CHAIN_ID must be "1" to match the seeded rows.
+	// The template SetupTestDB clone carries every migration, so the Curve and
+	// Uniswap V3/V4 pools are seeded on chain_id=1. run() calls LoadPools(chainID)
+	// and fails hard on zero pools, so CHAIN_ID must be "1" to match the seeded rows.
 	_, dbURL, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(dbCleanup)
 
