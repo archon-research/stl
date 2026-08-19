@@ -41,11 +41,13 @@ import {
   getProtocolLabel,
   parseNumericValue,
 } from '../../lib/dashboard';
+import { REFERENCE_MODE } from '../../lib/referenceMode';
 import type {
   Allocation,
   AllocationCategory,
   AllocationRiskCapital,
   Prime,
+  PrimeDebtBucket,
   PrimeDebtSnapshot,
   PrimeRiskCapital,
 } from '../../types/allocation';
@@ -74,6 +76,7 @@ type AllocationGridProps = {
   localProtocols: LocalProtocolRow[];
   onSelectAllocation: (allocationKey: string) => void;
   primeDebtSnapshot: PrimeDebtSnapshot | null;
+  referenceDebt: PrimeDebtBucket | null;
   onSearchChange: (value: string) => void;
   onSortingChange: (
     sorting: SortingState | ((old: SortingState) => SortingState),
@@ -821,6 +824,7 @@ export function AllocationGrid({
   localProtocols,
   onSelectAllocation,
   primeDebtSnapshot,
+  referenceDebt,
   onSearchChange,
   onSortingChange,
   searchValue,
@@ -903,6 +907,16 @@ export function AllocationGrid({
       totalUsd,
     };
   }, [allocations]);
+
+  const debtWad = REFERENCE_MODE
+    ? referenceDebt?.debt_wad
+    : primeDebtSnapshot?.debt_wad;
+  const debtObservedAt = REFERENCE_MODE
+    ? referenceDebt?.bucket_start
+    : primeDebtSnapshot?.synced_at;
+  const debtIlkLabel = REFERENCE_MODE
+    ? 'Sky-reported'
+    : `Ilk ${primeDebtSnapshot?.ilk_name ?? 'Unknown'}`;
 
   const hasSearchQuery = searchValue.trim().length > 0;
 
@@ -1081,8 +1095,8 @@ export function AllocationGrid({
                       ? 'Loading...'
                       : primeDebtErrorMessage
                         ? 'Error'
-                        : primeDebtSnapshot?.synced_at
-                          ? formatFreshnessLabel(primeDebtSnapshot.synced_at)
+                        : debtObservedAt
+                          ? formatFreshnessLabel(debtObservedAt)
                           : '—'}
                   </span>
                   <span
@@ -1096,8 +1110,8 @@ export function AllocationGrid({
                       ? 'Waiting for sync timestamp'
                       : primeDebtErrorMessage
                         ? primeDebtErrorMessage
-                        : primeDebtSnapshot?.synced_at
-                          ? formatDateTime(primeDebtSnapshot.synced_at)
+                        : debtObservedAt
+                          ? formatDateTime(debtObservedAt)
                           : 'No debt sync timestamp'}
                   </span>
                 </div>
@@ -1254,9 +1268,7 @@ export function AllocationGrid({
                   className={metricsCardClassName}
                   label="Prime debt exposure"
                   value={
-                    isPrimeDebtLoading
-                      ? 'Loading...'
-                      : formatWadValue(primeDebtSnapshot?.debt_wad)
+                    isPrimeDebtLoading ? 'Loading...' : formatWadValue(debtWad)
                   }
                   detail={
                     isPrimeDebtLoading ? (
@@ -1278,14 +1290,12 @@ export function AllocationGrid({
                             '& button': { minHeight: 'auto', py: '0' },
                           })}
                         >
-                          <span>
-                            Ilk {primeDebtSnapshot?.ilk_name ?? 'Unknown'}
-                          </span>
+                          <span>{debtIlkLabel}</span>
                           <span aria-hidden="true">·</span>
                           <AppTooltip
                             ariaLabel={
-                              primeDebtSnapshot?.debt_wad
-                                ? `Exact raw WAD ${primeDebtSnapshot.debt_wad}`
+                              debtWad
+                                ? `Exact raw WAD ${debtWad}`
                                 : 'Raw WAD unavailable'
                             }
                             trigger={
@@ -1296,12 +1306,12 @@ export function AllocationGrid({
                                   textUnderlineOffset: '2px',
                                 })}
                               >
-                                {formatRawWadLabel(primeDebtSnapshot?.debt_wad)}
+                                {formatRawWadLabel(debtWad)}
                               </span>
                             }
                             content={
-                              primeDebtSnapshot?.debt_wad
-                                ? `Exact raw WAD: ${primeDebtSnapshot.debt_wad}`
+                              debtWad
+                                ? `Exact raw WAD: ${debtWad}`
                                 : 'Raw WAD unavailable'
                             }
                           />

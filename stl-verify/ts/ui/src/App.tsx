@@ -42,6 +42,7 @@ import {
   getChains,
   getDataSources,
   getLatestPrimeDebtSnapshot,
+  getLatestReferenceDebtBucket,
   getPrimeRiskCapital,
   getPrimes,
   getProtocols,
@@ -68,6 +69,7 @@ import {
 } from './lib/dashboard';
 import { isAbortError, toErrorMessage } from './lib/errors';
 import { logging } from './lib/logging';
+import { REFERENCE_MODE } from './lib/referenceMode';
 import {
   PARAMS,
   setPathname as replacePathname,
@@ -78,6 +80,7 @@ import type {
   Allocation,
   DataSource,
   Prime,
+  PrimeDebtBucket,
   PrimeDebtSnapshot,
   PrimeRiskCapital,
   TimeSeriesResolution,
@@ -166,6 +169,9 @@ function App() {
   const [localChains, setLocalChains] = useState<LocalChainRow[]>([]);
   const [localProtocols, setLocalProtocols] = useState<LocalProtocolRow[]>([]);
   const [riskCapital, setRiskCapital] = useState<PrimeRiskCapital | null>(null);
+  const [referenceDebt, setReferenceDebt] = useState<PrimeDebtBucket | null>(
+    null,
+  );
   const [primeDebtSnapshot, setPrimeDebtSnapshot] =
     useState<PrimeDebtSnapshot | null>(null);
   const [isPrimeDebtLoading, setIsPrimeDebtLoading] = useState(false);
@@ -524,10 +530,19 @@ function App() {
     setPrimeDebtSnapshot(null);
     setPrimeDebtErrorMessage(null);
 
-    void getLatestPrimeDebtSnapshot(primaryProxyAddress, controller.signal)
-      .then((snapshot) => {
-        if (!controller.signal.aborted) {
-          setPrimeDebtSnapshot(snapshot);
+    void (
+      REFERENCE_MODE
+        ? getLatestReferenceDebtBucket(primaryProxyAddress, controller.signal)
+        : getLatestPrimeDebtSnapshot(primaryProxyAddress, controller.signal)
+    )
+      .then((latest) => {
+        if (controller.signal.aborted) {
+          return;
+        }
+        if (REFERENCE_MODE) {
+          setReferenceDebt(latest as PrimeDebtBucket | null);
+        } else {
+          setPrimeDebtSnapshot(latest as PrimeDebtSnapshot | null);
         }
       })
       .catch((error: unknown) => {
@@ -1023,6 +1038,7 @@ function App() {
                   setIsDrawerOpenParam('1');
                 }}
                 primeDebtSnapshot={primeDebtSnapshot}
+                referenceDebt={referenceDebt}
                 onSearchChange={setGlobalFilter}
                 onSortingChange={setSorting}
                 searchValue={globalFilter}
