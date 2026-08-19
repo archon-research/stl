@@ -119,6 +119,98 @@ func TestRun_SeedAndReplayRecordTheWholeLifecycle(t *testing.T) {
 	}
 }
 
+// TestRun_DeregistersAnAdapterTheChainNoLongerHolds drives R2 through real SQL:
+// the registry says an adapter is a member, the head enumeration does not return
+// it, and the run must record that absence.
+//
+// This is the one correction the rest of the system cannot make. Every other
+// write path asserts that an adapter IS a member — an AddAdapter, an Allocate, an
+// enumeration — so a RemoveAdapter we never witnessed would otherwise stay
+// invisible forever and the adapter would keep being priced. The enumeration is
+// the only read that sees the whole set.
+func TestRun_DeregistersAnAdapterTheChainNoLongerHolds(t *testing.T) {
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	defer cleanup()
+	ctx := context.Background()
+
+	const addBlock = uint64(23_400_000)
+	const headBlock = int64(23_700_000)
+	vault := common.HexToAddress("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
+	gone := common.HexToAddress("0x7481968709b8f155652D42ebf468b22945907dC2")
+	kept := common.HexToAddress("0x00000000000000000000000000000000000000bb")
+
+	seedVaultRow(t, ctx, pool, vault)
+
+	chain := newFakeChainReader()
+	head := chain.setFinalizedHead(headBlock, 1_770_000_000)
+	chain.addBlock(addBlock, 1_760_000_000)
+	chain.logs = []ethtypes.Log{
+		adapterLifecycleLog(t, "AddAdapter", vault, gone, addBlock, chain.hashOf(addBlock), 0),
+	}
+
+	// Run 1: the chain still holds `gone`, so it is recorded as a member.
+	multicaller := testutil.NewMockMulticaller()
+	wireAdapterReads(t, multicaller, head.Hash(), vault, gone, big.NewInt(777))
+	if err := buildIntegrationService(t, ctx, pool, chain, multicaller, &fakeProgressStore{}).Run(ctx); err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	goneID := readSingleAdapterID(t, ctx, pool, gone)
+	if !isCurrentAdapter(t, ctx, pool, goneID) {
+		t.Fatal("the adapter must be a member after the first run")
+	}
+
+	// Run 2: the curator removed it while we were not watching — the enumeration
+	// now returns a different adapter, and the RemoveAdapter log is NOT replayed.
+	chain.logs = nil
+	secondCaller := testutil.NewMockMulticaller()
+	wireAdapterReads(t, secondCaller, head.Hash(), vault, kept, big.NewInt(555))
+	if err := buildIntegrationService(t, ctx, pool, chain, secondCaller, &fakeProgressStore{}).Run(ctx); err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+
+	if isCurrentAdapter(t, ctx, pool, goneID) {
+		t.Errorf("adapter %s is still a member after an enumeration that did not return it: %+v",
+			gone.Hex(), readAdapterMembership(t, ctx, pool, goneID))
+	}
+	observations := readAdapterMembership(t, ctx, pool, goneID)
+	last := observations[len(observations)-1]
+	if last.isMember || last.observedVia != "bootstrap_seed" || last.block != headBlock {
+		t.Errorf("last observation = %+v, want a bootstrap_seed non-membership at the head block %d", last, headBlock)
+	}
+	// The identity row survives the de-registration — that is what keeps its
+	// realAssets snapshots attached to something.
+	if got := readSingleAdapterID(t, ctx, pool, gone); got != goneID {
+		t.Errorf("identity id moved from %d to %d", goneID, got)
+	}
+	// And the adapter the chain DOES hold is a member.
+	if !isCurrentAdapter(t, ctx, pool, readSingleAdapterID(t, ctx, pool, kept)) {
+		t.Error("the enumerated adapter must be recorded as a member")
+	}
+
+	// Run 3: nothing changed, so the sweep must be quiet — a de-registration is
+	// recorded once, not on every run.
+	before := countRows(t, ctx, pool, "morpho_adapter_membership")
+	thirdCaller := testutil.NewMockMulticaller()
+	wireAdapterReads(t, thirdCaller, head.Hash(), vault, kept, big.NewInt(555))
+	if err := buildIntegrationService(t, ctx, pool, chain, thirdCaller, &fakeProgressStore{}).Run(ctx); err != nil {
+		t.Fatalf("third Run: %v", err)
+	}
+	if after := countRows(t, ctx, pool, "morpho_adapter_membership"); after != before {
+		t.Errorf("membership rows = %d after an unchanged re-run, want the original %d", after, before)
+	}
+}
+
+// isCurrentAdapter reports whether the adapter is in the set morpho_adapter_current
+// exposes — the surface VEC-219's readers use.
+func isCurrentAdapter(t *testing.T, ctx context.Context, pool *pgxpool.Pool, adapterID int64) bool {
+	t.Helper()
+	var n int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM morpho_adapter_current WHERE id = $1`, adapterID).Scan(&n); err != nil {
+		t.Fatalf("querying morpho_adapter_current: %v", err)
+	}
+	return n == 1
+}
+
 // TestRun_IsIdempotent re-runs the whole bootstrap against the state the first
 // run produced. Re-clicking Trigger must converge, not duplicate: the operator
 // is explicitly told a repeat run is safe.

@@ -65,7 +65,7 @@ func (s *Service) ReplayMetaMorphoLog(ctx context.Context, log shared.Log, block
 // SeedV2VaultAdapters enumerates an already-persisted VaultV2's current adapter
 // set at (blockNumber, blockHash) and writes one adapter registry row plus one
 // realAssets() state snapshot per adapter — the same enumerate → classify →
-// upsert → seed path discovery runs, for a vault that already exists and so
+// record → seed path discovery runs, for a vault that already exists and so
 // never goes through discovery again.
 //
 // It exists for the morpho-v2-bootstrap job: the ~313 V2 vaults discovered
@@ -90,9 +90,67 @@ func (s *Service) SeedV2VaultAdapters(ctx context.Context, vaultAddress common.A
 	if err != nil {
 		return fmt.Errorf("reading adapters for vault %s: %w", vaultAddress.Hex(), err)
 	}
+	// Read the registry's current answer before the transaction opens: it is the
+	// other half of the diff below, and reading it here keeps the pattern the rest
+	// of this service follows — no pooled connection is held across the chain reads
+	// above.
+	registered, err := s.morphoRepo.GetActiveAdaptersByVault(ctx, vault.ID)
+	if err != nil {
+		return fmt.Errorf("reading the recorded adapter set for vault %s: %w", vaultAddress.Hex(), err)
+	}
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		return s.seedDiscoveredAdapters(ctx, tx, vault, vaultAddress, blockNumber, blockVersion, blockTimestamp, adapters, entity.MembershipFromBootstrapSeed)
+		if err := s.seedDiscoveredAdapters(ctx, tx, vault, vaultAddress, blockNumber, blockVersion, blockTimestamp, adapters, entity.MembershipFromBootstrapSeed); err != nil {
+			return err
+		}
+		return s.deregisterAdaptersAbsentOnChain(ctx, tx, vault, vaultAddress, blockNumber, blockVersion, blockTimestamp, adapters, registered)
 	})
+}
+
+// deregisterAdaptersAbsentOnChain records that every adapter our registry still
+// calls a member, but the head enumeration did NOT return, has left the vault's
+// set — the one correction asserting presence can never make.
+//
+// A missed RemoveAdapter is otherwise permanent: every other write path only ever
+// asserts that an adapter IS a member (an AddAdapter, an Allocate, an
+// enumeration), so nothing in the system can ever contradict a membership we
+// recorded and the chain has since dropped. The enumeration is the only read that
+// sees the whole set, which makes it the only place absence is observable.
+//
+// What it records is an ABSENCE, not a probe: adapter_type is nil, because we did
+// not classify the adapter, we merely failed to find it. The block position is
+// the pinned head at entity.EndOfBlockLogIndex — the enumeration is an
+// end-of-block state read, so its answer is authoritative over every log in that
+// block. And it is an assertion, so a run whose enumeration already matches the
+// registry appends nothing at all.
+func (s *Service) deregisterAdaptersAbsentOnChain(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault, vaultAddress common.Address, blockNumber int64, blockVersion int, blockTimestamp time.Time, onChain []discoveredAdapter, registered []*entity.MorphoAdapterMember) error {
+	enumerated := make(map[common.Address]struct{}, len(onChain))
+	for _, a := range onChain {
+		enumerated[a.address] = struct{}{}
+	}
+
+	for _, member := range registered {
+		address := common.BytesToAddress(member.Address)
+		if _, stillThere := enumerated[address]; stillThere {
+			continue
+		}
+		_, appended, err := s.observeAdapterMembership(ctx, tx, vault, address, entity.MorphoAdapterMembership{
+			BlockNumber:  blockNumber,
+			BlockVersion: blockVersion,
+			LogIndex:     entity.EndOfBlockLogIndex,
+			Timestamp:    blockTimestamp,
+			IsMember:     false,
+			AdapterType:  nil,
+			ObservedVia:  entity.MembershipFromBootstrapSeed,
+		})
+		if err != nil {
+			return err
+		}
+		if appended {
+			s.logger.Warn("adapter de-registered by the head enumeration; its RemoveAdapter was never observed",
+				"vault", vaultAddress.Hex(), "adapter", address.Hex(), "block", blockNumber)
+		}
+	}
+	return nil
 }
 
 // vaultV2StructuredEventNames are the VaultV2 events processMetaMorphoLog routes
