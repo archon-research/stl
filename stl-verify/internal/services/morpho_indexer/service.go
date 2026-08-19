@@ -527,7 +527,7 @@ func (s *Service) processReceipt(ctx context.Context, receipt shared.Transaction
 			// the negative cache, retries forever.
 			//
 			// Same predicate is used by the morpho-vault-backfill
-			// (see cmd/backfillers/morpho-vault-backfill/main.go), so the
+			// (see cmd/backfillers/morpho-vault-backfill/discovery.go), so the
 			// live and offline discovery contracts stay aligned.
 			if !s.eventExtractor.IsVaultActivityEvent(log) {
 				continue
