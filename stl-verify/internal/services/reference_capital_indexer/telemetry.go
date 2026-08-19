@@ -1,4 +1,4 @@
-package capital_stack_syncer
+package reference_capital_indexer
 
 import (
 	"context"
@@ -9,7 +9,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
-const instrumentationName = "github.com/archon-research/stl/stl-verify/internal/services/capital_stack_syncer"
+const instrumentationName = "github.com/archon-research/stl/stl-verify/internal/services/reference_capital_indexer"
 
 // Telemetry records what a cycle wrote, which the shared cronjob outcome
 // counter cannot express.
@@ -39,7 +39,7 @@ func NewTelemetryWithProvider(mp metric.MeterProvider) (*Telemetry, error) {
 
 	var err error
 	t.snapshotsWritten, err = t.meter.Int64Counter(
-		"capital_stack.sync.snapshots.written.total",
+		"reference_capital.sync.snapshots.written.total",
 		metric.WithDescription("Reference capital snapshots persisted, per cycle"),
 	)
 	if err != nil {
@@ -47,7 +47,7 @@ func NewTelemetryWithProvider(mp metric.MeterProvider) (*Telemetry, error) {
 	}
 
 	t.primesUncovered, err = t.meter.Int64Counter(
-		"capital_stack.sync.primes.uncovered.total",
+		"reference_capital.sync.primes.uncovered.total",
 		metric.WithDescription("Tracked primes the upstream monitor did not cover, per cycle"),
 	)
 	if err != nil {

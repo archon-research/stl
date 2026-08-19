@@ -1,19 +1,19 @@
-# Manual-apply overlay for the one-off balance-sheet-backfill Job in kind.
+# Manual-apply overlay for the one-off reference-capital-backfill Job in kind.
 # NOT referenced by ../kustomization.yaml, so `make dev-up` never runs it.
-#   make docker-build-balance-sheet-backfill
-#   make kind-load-images IMAGES="stl-balance-sheet-backfill:local"
-#   kubectl kustomize k8s/overlays/dev/bootstrap-balance-sheet | kubectl apply -f -
+#   make docker-build-reference-capital-backfill
+#   make kind-load-images IMAGES="stl-reference-capital-backfill:local"
+#   kubectl kustomize k8s/overlays/dev/bootstrap-reference-capital | kubectl apply -f -
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 namespace: vector
 
 resources:
-  - ../../../base/balance-sheet-backfill
+  - ../../../base/reference-capital-backfill
 
 images:
-  - name: balance-sheet-backfill
-    newName: localhost/stl-balance-sheet-backfill
+  - name: reference-capital-backfill
+    newName: localhost/stl-reference-capital-backfill
     newTag: local
 
 patches:
@@ -22,7 +22,7 @@ patches:
   # names for EKS.
   - target:
       kind: Job
-      name: balance-sheet-backfill
+      name: reference-capital-backfill
     patch: |
       - op: replace
         path: /spec/template/spec/containers/0/envFrom

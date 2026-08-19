@@ -1,10 +1,10 @@
-// Package capital_stack_syncer accumulates reference risk-capital snapshots.
+// Package reference_capital_indexer accumulates reference risk-capital snapshots.
 //
 // Sky's Star monitor publishes only a current snapshot and no history at any
 // granularity, so a reference figure can never be reconstructed for a past
 // instant. This service is the only way a reference time series comes to exist:
 // it observes the monitor each cycle and appends what it saw.
-package capital_stack_syncer
+package reference_capital_indexer
 
 import (
 	"context"
@@ -61,7 +61,7 @@ func NewService(
 		buildID:      buildID,
 		now:          now,
 		telemetry:    telemetry,
-		logger:       logger.With("component", "capital-stack-syncer"),
+		logger:       logger.With("component", "reference-capital-indexer"),
 	}
 }
 

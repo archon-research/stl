@@ -19,7 +19,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/axis_synome_contract"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
-	"github.com/archon-research/stl/stl-verify/internal/services/capital_stack_syncer"
+	"github.com/archon-research/stl/stl-verify/internal/services/reference_capital_indexer"
 )
 
 var (
@@ -39,8 +39,8 @@ func main() {
 	if err := temporal.RunCronjob(ctx, temporal.BuildMeta{
 		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
 	}, temporal.CronjobConfig{
-		Name:            "capital-stack-syncer",
-		IntervalEnv:     "CAPITAL_STACK_SYNC_INTERVAL",
+		Name:            "reference-capital-indexer",
+		IntervalEnv:     "REFERENCE_CAPITAL_SYNC_INTERVAL",
 		IntervalDefault: "15m",
 		OpenDatabase:    postgres.PoolOpener(postgres.DefaultDBConfig(env.Get("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable"))),
 		Setup:           setupRunner,
@@ -76,12 +76,12 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runn
 		return nil, err
 	}
 
-	syncTelemetry, err := capital_stack_syncer.NewTelemetry()
+	syncTelemetry, err := reference_capital_indexer.NewTelemetry()
 	if err != nil {
 		return nil, fmt.Errorf("creating telemetry: %w", err)
 	}
 
-	service := capital_stack_syncer.NewService(
+	service := reference_capital_indexer.NewService(
 		postgres.NewPrimeRepository(deps.Pool),
 		postgres.NewPrimeCapitalStackRepository(deps.Pool, txm, deps.Logger),
 		skyClient,

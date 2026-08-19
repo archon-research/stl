@@ -22,7 +22,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/skydata"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/axis_synome_contract"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
-	"github.com/archon-research/stl/stl-verify/internal/services/balance_sheet_backfill"
+	"github.com/archon-research/stl/stl-verify/internal/services/reference_capital_backfill"
 )
 
 func main() {
@@ -36,7 +36,7 @@ func main() {
 }
 
 func run(ctx context.Context, args []string) error {
-	flags := flag.NewFlagSet("balance-sheet-backfill", flag.ContinueOnError)
+	flags := flag.NewFlagSet("reference-capital-backfill", flag.ContinueOnError)
 	daysAgo := flags.Int("days-ago", 365, "How many days of history to request from the feed.")
 	if err := flags.Parse(args); err != nil {
 		return fmt.Errorf("parsing flags: %w", err)
@@ -75,7 +75,7 @@ func run(ctx context.Context, args []string) error {
 		return err
 	}
 
-	service := balance_sheet_backfill.NewService(
+	service := reference_capital_backfill.NewService(
 		postgres.NewPrimeRepository(pool),
 		postgres.NewPrimeBalanceSheetRepository(pool, txm, logger),
 		client,

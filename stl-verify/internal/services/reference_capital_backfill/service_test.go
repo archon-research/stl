@@ -1,4 +1,4 @@
-package balance_sheet_backfill
+package reference_capital_backfill
 
 import (
 	"context"

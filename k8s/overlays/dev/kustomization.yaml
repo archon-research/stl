@@ -14,7 +14,7 @@ resources:
   - ../../base/python-api
   - ../../base/spark-anchorage-indexer
   - ../../base/offchain-price-indexer
-  - ../../base/capital-stack-syncer
+  - ../../base/reference-capital-indexer
   - config.yaml
 
 components:
@@ -35,8 +35,8 @@ images:
   - name: offchain-price-indexer
     newName: localhost/stl-offchain-price-indexer
     newTag: local
-  - name: capital-stack-syncer
-    newName: localhost/stl-capital-stack-syncer
+  - name: reference-capital-indexer
+    newName: localhost/stl-reference-capital-indexer
     newTag: local
 
 patches:

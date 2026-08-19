@@ -1,6 +1,6 @@
 # One-off seed of the reference capital history that predates STL's own
 # observation of Sky's Star monitor. The monitor publishes no history, so
-# capital-stack-syncer can only accumulate forward from its first run; this
+# reference-capital-indexer can only accumulate forward from its first run; this
 # fills the year before it from Sky's balance-sheet feed.
 #
 # Deliberately NOT referenced by the staging/prod overlays and NOT an ArgoCD
@@ -8,39 +8,39 @@
 # must not fire on every sync. Run it manually per env, after the syncer is
 # deployed (it reuses that Secret):
 #
-#   kustomize build k8s/overlays/<env>/bootstrap-balance-sheet | kubectl apply -f -
-#   kubectl -n vector wait --for=condition=complete job/balance-sheet-backfill --timeout=10m
-#   kubectl -n vector delete job balance-sheet-backfill   # when done
+#   kustomize build k8s/overlays/<env>/bootstrap-reference-capital | kubectl apply -f -
+#   kubectl -n vector wait --for=condition=complete job/reference-capital-backfill --timeout=10m
+#   kubectl -n vector delete job reference-capital-backfill   # when done
 #
 # Re-running is safe: rows are insert-only and conflict away within a build.
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: balance-sheet-backfill
+  name: reference-capital-backfill
 spec:
   backoffLimit: 0 # no auto-retry; on failure inspect and re-run manually (idempotent)
   template:
     metadata:
       labels:
-        app: balance-sheet-backfill
+        app: reference-capital-backfill
     spec:
-      serviceAccountName: balance-sheet-backfill
+      serviceAccountName: reference-capital-backfill
       restartPolicy: Never
       containers:
-        - name: balance-sheet-backfill
-          image: balance-sheet-backfill
+        - name: reference-capital-backfill
+          image: reference-capital-backfill
           # How far back to seed. The feed holds roughly a year; asking for more
           # than it has is harmless, asking for less silently shortens the
           # series, so override per env rather than trimming this default.
           args: ["-days-ago", "365"]
           envFrom:
-            # DATABASE_URL and the upstream URL. Reuses the capital-stack-syncer
+            # DATABASE_URL and the upstream URL. Reuses the reference-capital-indexer
             # Secret and ConfigMap: the backfill seeds the same series and runs
             # after that service is deployed, so both already exist.
             - configMapRef:
-                name: capital-stack-syncer
+                name: reference-capital-indexer
             - secretRef:
-                name: capital-stack-syncer
+                name: reference-capital-indexer
           resources:
             requests:
               cpu: "100m"

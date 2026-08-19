@@ -1,4 +1,4 @@
-// Package balance_sheet_backfill seeds the reference history that predates
+// Package reference_capital_backfill seeds the reference history that predates
 // STL's own observation of Sky.
 //
 // The Star monitor publishes no history, so the capital-stack syncer can only
@@ -6,7 +6,7 @@
 // before that from Sky's balance-sheet feed, which is the only source that
 // holds it. It is one-shot by design: the range it covers stops growing once
 // the syncer takes over.
-package balance_sheet_backfill
+package reference_capital_backfill
 
 import (
 	"context"
@@ -51,7 +51,7 @@ func NewService(
 		trackedStars: trackedStars,
 		daysAgo:      daysAgo,
 		buildID:      buildID,
-		logger:       logger.With("component", "balance-sheet-backfill"),
+		logger:       logger.With("component", "reference-capital-backfill"),
 	}
 }
 

@@ -1,4 +1,4 @@
-package capital_stack_syncer
+package reference_capital_indexer
 
 import (
 	"context"

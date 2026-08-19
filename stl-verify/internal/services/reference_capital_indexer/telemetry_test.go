@@ -1,4 +1,4 @@
-package capital_stack_syncer
+package reference_capital_indexer
 
 import (
 	"context"
@@ -9,7 +9,7 @@ import (
 )
 
 // The alert rules key on these exact names; renaming one silently stops
-// VectorCapitalStackSyncerWritesZero / PrimeUncovered from ever firing.
+// VectorReferenceCapitalIndexerWritesZero / PrimeUncovered from ever firing.
 func TestTelemetryEmitsTheMetricNamesTheAlertsQuery(t *testing.T) {
 	reader := metric.NewManualReader()
 	provider := metric.NewMeterProvider(metric.WithReader(reader))
@@ -36,8 +36,8 @@ func TestTelemetryEmitsTheMetricNamesTheAlertsQuery(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		"capital_stack.sync.snapshots.written.total",
-		"capital_stack.sync.primes.uncovered.total",
+		"reference_capital.sync.snapshots.written.total",
+		"reference_capital.sync.primes.uncovered.total",
 	} {
 		if !names[want] {
 			t.Errorf("metric %q not emitted; got %v", want, names)

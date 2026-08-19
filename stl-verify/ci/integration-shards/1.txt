@@ -50,5 +50,5 @@
 ./internal/pkg/rawsckey
 ./internal/adapters/outbound/sky
 ./internal/adapters/outbound/skydata
-./internal/services/balance_sheet_backfill
-./cmd/backfillers/balance-sheet-backfill
+./internal/services/reference_capital_backfill
+./cmd/backfillers/reference-capital-backfill
