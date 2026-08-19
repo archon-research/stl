@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -70,6 +71,10 @@ func (s *Service) Run(ctx context.Context) error {
 		return fmt.Errorf("fetching balance-sheet history: %w", err)
 	}
 
+	if err := requireEveryStarCovered(s.trackedStars, days); err != nil {
+		return err
+	}
+
 	snapshots, err := s.toSnapshots(days, primeIDs)
 	if err != nil {
 		return err
@@ -80,6 +85,29 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	s.logger.Info("balance sheet backfill complete", "snapshots", len(snapshots), "daysAgo", s.daysAgo)
+	return nil
+}
+
+// requireEveryStarCovered refuses a backfill that would seed only some of the
+// tracked primes. This runs once, and the write is ON CONFLICT DO NOTHING, so a
+// prime missing here keeps a permanent hole that a later re-run cannot repair —
+// unlike the syncer, whose partial coverage recurs every cycle and is alerted on.
+func requireEveryStarCovered(tracked []string, days []outbound.BalanceSheetDay) error {
+	covered := make(map[string]bool, len(days))
+	for _, day := range days {
+		covered[strings.ToLower(strings.TrimSpace(day.Star))] = true
+	}
+
+	missing := make([]string, 0, len(tracked))
+	for _, star := range tracked {
+		if !covered[strings.ToLower(strings.TrimSpace(star))] {
+			missing = append(missing, star)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		return fmt.Errorf("balance-sheet history has no rows for %v; refusing to seed a partial backfill", missing)
+	}
 	return nil
 }
 

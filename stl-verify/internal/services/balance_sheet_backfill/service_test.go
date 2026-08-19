@@ -3,6 +3,7 @@ package balance_sheet_backfill
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,7 +14,7 @@ import (
 var (
 	errProvider  = errors.New("provider boom")
 	errRepo      = errors.New("repo boom")
-	trackedStars = []string{"grove", "spark"}
+	trackedStars = []string{"spark"}
 )
 
 type mockPrimeRepo struct {
@@ -123,9 +124,12 @@ func TestRunRecordsTheSharedReferenceProvenance(t *testing.T) {
 
 func TestRunRequestsOnlyTheTrackedPrimes(t *testing.T) {
 	primes := &mockPrimeRepo{primes: []entity.Prime{{ID: 1, Name: "spark"}, {ID: 2, Name: "grove"}}}
-	provider := &mockProvider{days: []outbound.BalanceSheetDay{day("spark", "2025-08-19")}}
+	provider := &mockProvider{days: []outbound.BalanceSheetDay{
+		day("spark", "2025-08-19"), day("grove", "2025-08-19"),
+	}}
+	service := NewService(primes, &mockSheetRepo{}, provider, []string{"grove", "spark"}, 365, 7, nil)
 
-	if err := newService(primes, &mockSheetRepo{}, provider).Run(context.Background()); err != nil {
+	if err := service.Run(context.Background()); err != nil {
 		t.Fatalf("Run() = %v", err)
 	}
 
@@ -198,5 +202,26 @@ func TestRunPropagatesAPrimeListingFailure(t *testing.T) {
 
 	if !errors.Is(err, errRepo) {
 		t.Fatalf("Run() = %v, want it to wrap %v", err, errRepo)
+	}
+}
+
+func TestRunRefusesToSeedWhenATrackedPrimeHasNoHistory(t *testing.T) {
+	// One-shot, and the write is ON CONFLICT DO NOTHING: seeding spark alone
+	// would leave grove's year permanently absent with nothing to signal it.
+	primes := &mockPrimeRepo{primes: []entity.Prime{{ID: 1, Name: "spark"}, {ID: 2, Name: "grove"}}}
+	sheets := &mockSheetRepo{}
+	provider := &mockProvider{days: []outbound.BalanceSheetDay{day("spark", "2025-08-19")}}
+	service := NewService(primes, sheets, provider, []string{"grove", "spark"}, 365, 7, nil)
+
+	err := service.Run(context.Background())
+
+	if err == nil {
+		t.Fatal("Run() = nil, want an error naming the uncovered prime")
+	}
+	if !strings.Contains(err.Error(), "grove") {
+		t.Errorf("Run() = %v, want the error to name grove", err)
+	}
+	if len(sheets.snapshots) != 0 {
+		t.Errorf("saved %d snapshots, want 0 — a partial backfill must persist nothing", len(sheets.snapshots))
 	}
 }
