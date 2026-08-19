@@ -20,17 +20,9 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/morpho_indexer"
 )
 
-// maxPartitionsPerRun rejects a mistyped range up front — a dropped digit in
-// `from`, or a millisecond timestamp pasted into `to`, expands to millions of
-// partitions — rather than letting one be terminated hours in. It is not a
-// promise that a run at the ceiling fits: activities are sequential with no
-// ContinueAsNew at ~6 history events each, so Temporal's 51,200-event limit
-// bites around 8,500 partitions.
-//
-// 10,000 partitions is 10M blocks, which keeps the runbook's whole-era form
-// ({"to":<head>,"fromV2Deploy":true}) accepted until the head passes block
-// 33,374,999, some time in 2029. At 2,500 it stopped being accepted in 2026.
-const maxPartitionsPerRun = 10_000
+// maxPartitionsPerRun catches a mistyped range and keeps a run inside Temporal's
+// 51,200-event history (~6 events/activity caps it at ~8,500); 8M blocks reaches 2028.
+const maxPartitionsPerRun = 8_000
 
 // errStructuralData marks a failure that reproduces identically on every
 // attempt: an S3 gap, an unparseable partition prefix, a log the archive cannot
