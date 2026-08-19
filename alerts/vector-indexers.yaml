@@ -61,8 +61,10 @@ groups:
         # could freeze with neither rule firing. success-rate==0 catches it.
         # Matches the shape curve / uniswap-v3 / allocation-tracker already use.
         # The VaultV2 structured handlers make this the likeliest morpho failure
-        # mode: resolveV2Vault, ensureAdapterRegistered and MarkAdapterRemoved all
-        # fail hard by design rather than persisting a hole.
+        # mode: resolveV2Vault, the on-chain type probe and every repository write
+        # fail hard by design rather than persisting a hole. (A RemoveAdapter for
+        # an adapter we have never seen is deliberately NOT one of them — it is a
+        # recordable observation, not an error.)
         #
         # Residual (same as VectorAllocationTrackerStalled): a live pod whose OTLP
         # export dies lets the success series staleness-expire, so `== 0` returns
@@ -568,7 +570,8 @@ groups:
             named by a vault event but missing from the registry. Discovery seeds
             a vault's whole adapter set, so a sustained rate here means the
             enumeration is missing adapters or vaults are being discovered
-            incompletely. Affected adapters carry an approximated AddedAtBlock.
+            incompletely. Affected adapters have no add block at all until their
+            history is replayed.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectormorphov2lazyadapterregistrations
 
       - alert: VectorMorphoV2ForceDeallocateSurge

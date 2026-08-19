@@ -1629,14 +1629,22 @@ USD exposure computed from these rows silently undercounts (VEC-307).
 A Morpho VaultV2 never touches Morpho Blue directly. It holds a set of **adapter**
 contracts, one per downstream venue (`MorphoMarketV1AdapterV2` wraps a Blue
 market, `MorphoVaultV1Adapter` wraps a nested MetaMorpho V1 vault), and the
-`morpho-indexer` derives four structured tables from the vault's own events:
+`morpho-indexer` derives five structured tables from the vault's own events:
 
 | Table | Written by | Trigger |
 | --- | --- | --- |
-| `morpho_adapter` | adapter registry | discovery enumeration, `AddAdapter`, lazy self-heal |
+| `morpho_adapter` | adapter **identity** only — `(vault, address)` and the asset, written once and never updated | first sight of the adapter on any path |
+| `morpho_adapter_membership` | append-only **observations** of whether an adapter is in the vault's set (`is_member`, `adapter_type`, `observed_via`) | `AddAdapter` / `RemoveAdapter` (transitions), `Allocate` / discovery enumeration / bootstrap seed (assertions) |
 | `morpho_adapter_state` | `realAssets()` snapshot | `Allocate` / `Deallocate` |
 | `morpho_vault_cap` | `(absoluteCap, relativeCap)` snapshot | the 4 `*AbsoluteCap` / `*RelativeCap` events |
 | `morpho_vault_fee` | full fee-config snapshot | the 4 `Set*Fee` / `Set*FeeRecipient` events |
+
+There is no lifecycle column anywhere. **Query `morpho_adapter_current`** for the
+set an adapter is in now (it is the latest membership row per adapter, filtered to
+`is_member`); the block an adapter was added at is
+`MIN(block_number) FILTER (WHERE is_member AND observed_via = 'add_adapter_event')`
+over `morpho_adapter_membership`, and it is **NULL** for an adapter whose
+`AddAdapter` we have never witnessed until its history is replayed.
 
 **Signals** (all carry `chain` + `cluster`):
 
@@ -1738,15 +1746,23 @@ vault is discovered at once. Acknowledge and curate.
 2. **Identify the adapters** (`db-query`):
 
    ```sql
-   SELECT '0x' || encode(a.address, 'hex') AS adapter,
+   SELECT '0x' || encode(c.address, 'hex') AS adapter,
           '0x' || encode(v.address, 'hex') AS vault,
-          a.added_at_block
-   FROM morpho_adapter a
-   JOIN morpho_vault v ON v.id = a.morpho_vault_id
-   WHERE a.adapter_type = 99 AND a.removed_at_block IS NULL
-   ORDER BY a.added_at_block DESC
+          c.as_of_block,
+          (SELECT MIN(m.block_number) FILTER (WHERE m.is_member AND m.observed_via = 'add_adapter_event')
+           FROM morpho_adapter_membership m
+           WHERE m.morpho_adapter_id = c.id) AS added_at_block
+   FROM morpho_adapter_current c
+   JOIN morpho_vault v ON v.id = c.morpho_vault_id
+   WHERE c.adapter_type = 99
+   ORDER BY c.as_of_block DESC
    LIMIT 50;
    ```
+
+   `morpho_adapter_current` is already restricted to adapters currently in their
+   vault's set, so no "not removed" predicate is needed. `added_at_block` is NULL
+   for an adapter whose `AddAdapter` we never witnessed (discovered mid-life, or
+   seeded by the bootstrap); that is expected, not a gap in this triage.
 
 3. **Re-probe one on-chain** to confirm the classification is genuinely absent
    rather than an RPC artefact (a transport error propagates and never reaches
@@ -1786,20 +1802,27 @@ have consciously accepted.
 
 ### What it means
 
-More than 3 adapters were registered through the **lazy self-heal** path in 6
-hours on the labelled `chain`. That path fires when an `Allocate` / `Deallocate` /
-`RemoveAdapter` names an adapter that is *not* in our registry: rather than
-hard-failing and poisoning the FIFO queue, the indexer classifies the adapter
-on-chain and registers it at the event block.
+More than 3 adapter memberships were **inferred from an allocation** in 6 hours on
+the labelled `chain`. An `Allocate` / `Deallocate` proves its adapter is in the
+vault's set — the contract cannot allocate to an unregistered adapter — so when the
+membership log has no answer at that position the indexer classifies the adapter
+on-chain and records the membership the event implies, rather than hard-failing and
+poisoning the FIFO queue.
 
-The heal itself is correct. What it *signals* is a discovery gap: vault discovery
-enumerates the vault's **current** adapter set (`adaptersLength()` / `adapters(i)`,
-hash-pinned) and seeds every entry, so once a vault is discovered every active
-adapter is already registered and this path's steady-state rate is **zero**.
+A `RemoveAdapter` for an unknown adapter is **not** part of this path and does not
+count here: it is recorded as one untyped `is_member = false` observation, which is
+the truthful record and needs no classification.
 
-It also costs data quality: a lazily registered adapter's `added_at_block` is the
-event block, **not** the true `AddAdapter` block, so its lifetime bounds are an
-approximation until history is replayed.
+The inference itself is correct. What it *signals* is a discovery gap: vault
+discovery enumerates the vault's **current** adapter set (`adaptersLength()` /
+`adapters(i)`, hash-pinned) and records every entry, so once a vault is discovered
+the log already answers every allocation, nothing is appended, and this counter's
+steady-state rate is **zero**.
+
+It also costs data quality — but not the way a mutable registry did. Nothing is
+approximated: an adapter known only from an `Allocate` simply has **no**
+`add_adapter_event` observation, so its add block is NULL until its history is
+replayed. Current membership and classification are correct in the meantime.
 
 ### First checks
 
@@ -1809,28 +1832,34 @@ approximation until history is replayed.
    `sum by (observed_via) (increase(morpho_v2_adapter_registrations_total[6h]))`
    — `allocation_event` observations with **no** matching `vault_discovery`
    traffic in the same window are the suspicious case.
-2. **Identify them** — the indexer logs one WARN per heal:
+2. **Identify them** — the indexer logs one WARN per inference:
    `kubectl -n vector logs -l app=morpho-indexer | grep "membership inferred from an Allocate"`
    (carries vault, adapter, block).
-3. **Was the vault genuinely new?** Compare the adapter's `added_at_block` against
-   its vault's first-seen block (`db-query`):
+3. **Was the vault genuinely new?** Compare the block the membership was inferred
+   at against its vault's first-seen block (`db-query`):
 
    ```sql
    SELECT '0x' || encode(v.address, 'hex') AS vault,
           v.created_at_block AS vault_first_seen_block,
           '0x' || encode(a.address, 'hex') AS adapter,
-          a.added_at_block,
-          a.added_at_block - v.created_at_block AS blocks_after_discovery
-   FROM morpho_adapter a
+          MIN(m.block_number) FILTER (WHERE m.observed_via = 'allocation_event') AS inferred_at_block,
+          MIN(m.block_number) FILTER (WHERE m.is_member AND m.observed_via = 'add_adapter_event') AS added_at_block,
+          MIN(m.block_number) FILTER (WHERE m.observed_via = 'allocation_event') - v.created_at_block
+              AS blocks_after_discovery
+   FROM morpho_adapter_membership m
+   JOIN morpho_adapter a ON a.id = m.morpho_adapter_id
    JOIN morpho_vault v ON v.id = a.morpho_vault_id
    WHERE v.vault_version = 3
-   ORDER BY a.added_at_block DESC
+   GROUP BY v.address, v.created_at_block, a.address
+   HAVING MIN(m.block_number) FILTER (WHERE m.observed_via = 'allocation_event') IS NOT NULL
+   ORDER BY blocks_after_discovery DESC
    LIMIT 50;
    ```
 
    `blocks_after_discovery` near 0 means the vault was just discovered — benign.
    A large positive value on a long-known vault means enumeration missed the
-   adapter, which is the bug.
+   adapter, which is the bug. A NULL `added_at_block` is the replay backlog, not a
+   second fault.
 4. **Cross-check the chain** — for a suspect vault, ask the contract directly and
    compare with the registry:
 
@@ -1853,8 +1882,8 @@ approximation until history is replayed.
 
 `increase(morpho_v2_adapter_registrations_total{observed_via="allocation_event"}[6h]) <= 3`
 for the affected chain. If the cause was an enumeration bug, also replay the
-affected vaults so the healed adapters converge onto their true `AddAdapter`
-block.
+affected vaults: the replay appends each adapter's real `AddAdapter` observation
+at its own block, which is what turns a NULL add block into the true one.
 
 ---
 

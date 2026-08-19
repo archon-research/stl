@@ -834,44 +834,82 @@ func TestProcessBlockEvent_Allocation_UnknownAdapterHeals(t *testing.T) {
 // --- registration / snapshot telemetry ---
 
 // TestProcessBlockEvent_AdapterRegistration_CountsOnlyAppendedObservations pins the
-// counter's meaning to "observations recorded", not "write attempts". Every Allocate
-// asserts membership — thousands per day — but only the ones that add something the
-// log did not already hold are observations. Counting attempts instead would put
-// VectorMorphoV2LazyAdapterRegistrations (>3 in 6h under observed_via="allocation_event")
-// permanently in alarm, which is the same as deleting it.
+// counter's meaning to "observations the log gained", not "write attempts". The
+// registry reports that per write, and both live shapes of "wrote nothing" must leave
+// the counter alone: an Allocate whose membership the log already answers (thousands
+// per day), and an SQS redelivery of a transition the primary key already holds.
+// Counting attempts instead would put VectorMorphoV2LazyAdapterRegistrations (>3 in 6h
+// under observed_via="allocation_event") permanently in alarm, and would inflate
+// add_adapter_event by one per redelivery.
 func TestProcessBlockEvent_AdapterRegistration_CountsOnlyAppendedObservations(t *testing.T) {
-	h := newTestHarness(t)
-	h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
-	reader := h.recordMetrics(t)
+	tests := []struct {
+		name    string
+		setup   func(h *serviceTestHarness)
+		makeLog func(h *serviceTestHarness) shared.Log
+		wantVia entity.MembershipSource
+	}{
+		{
+			name: "Allocate whose membership the log already answers",
+			setup: func(h *serviceTestHarness) {
+				h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+					if len(calls) == 1 && calls[0].Target == testAdapterAddr {
+						return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(41_300_000))}}, nil
+					}
+					return nil, errTestUnexpectedCall(calls)
+				}
+				// Already a member at this position, so nothing is probed.
+				h.morphoRepo.GetActiveAdapterAtFn = func(_ context.Context, _ int64, _ []byte, _ entity.BlockPosition) (*entity.MorphoAdapterMember, error) {
+					return testAdapterMember(), nil
+				}
+			},
+			makeLog: func(h *serviceTestHarness) shared.Log {
+				return h.makeV2VaultLog(h.vaultV2EventsABI.Events["Allocate"], testVaultAddr,
+					[]common.Hash{addrTopic(testCaller), addrTopic(testAdapterAddr)},
+					big.NewInt(5000), hashSlice(common.HexToHash("0xaa")), big.NewInt(5000))
+			},
+			wantVia: entity.MembershipFromAllocation,
+		},
+		{
+			name: "redelivered AddAdapter the primary key already holds",
+			setup: func(h *serviceTestHarness) {
+				h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+					if len(calls) == 2 && calls[0].Target == testAdapterAddr {
+						return h.adapterProbeResults(entity.MorphoAdapterTypeMarketV1), nil
+					}
+					return nil, errTestUnexpectedCall(calls)
+				}
+				h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+					if len(calls) == 1 && calls[0].Target == testAdapterAddr {
+						return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(41_300_000))}}, nil
+					}
+					return nil, errTestUnexpectedCall(calls)
+				}
+			},
+			makeLog: func(h *serviceTestHarness) shared.Log {
+				return h.makeV2VaultLog(h.vaultV2EventsABI.Events["AddAdapter"], testVaultAddr, []common.Hash{addrTopic(testAdapterAddr)})
+			},
+			wantVia: entity.MembershipFromAddAdapter,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newTestHarness(t)
+			h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
+			reader := h.recordMetrics(t)
+			tt.setup(h)
+			h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterObservation) (int64, bool, error) {
+				return 55, false, nil
+			}
 
-	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
-		if len(calls) == 1 && calls[0].Target == testAdapterAddr {
-			return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(41_300_000))}}, nil
-		}
-		return nil, errTestUnexpectedCall(calls)
-	}
-	// Already a member at this position, so nothing is probed and nothing is appended.
-	h.morphoRepo.GetActiveAdapterAtFn = func(_ context.Context, _ int64, _ []byte, _ entity.BlockPosition) (*entity.MorphoAdapterMember, error) {
-		return testAdapterMember(), nil
-	}
-	h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterObservation) (int64, bool, error) {
-		return 55, false, nil
-	}
+			if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, tt.makeLog(h))}); err != nil {
+				t.Fatalf("processBlock: %v", err)
+			}
 
-	log := h.makeV2VaultLog(h.vaultV2EventsABI.Events["Allocate"], testVaultAddr,
-		[]common.Hash{addrTopic(testCaller), addrTopic(testAdapterAddr)},
-		big.NewInt(5000), hashSlice(common.HexToHash("0xaa")), big.NewInt(5000))
-	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err != nil {
-		t.Fatalf("processBlock: %v", err)
-	}
-
-	want := map[string]string{"observed_via": string(entity.MembershipFromAllocation)}
-	if got := counterValue(t, reader, "morpho.v2.adapter.registrations", want); got != 0 {
-		t.Errorf("morpho.v2.adapter.registrations%v = %d, want 0: an assertion that appended nothing is not an observation", want, got)
-	}
-	// The snapshot itself is still written and still counted.
-	if got := counterValue(t, reader, "morpho.v2.snapshots.written", map[string]string{"snapshot.type": string(v2SnapshotAdapterState)}); got != 1 {
-		t.Errorf("morpho.v2.snapshots.written = %d, want 1", got)
+			want := map[string]string{"observed_via": string(tt.wantVia)}
+			if got := counterValue(t, reader, "morpho.v2.adapter.registrations", want); got != 0 {
+				t.Errorf("morpho.v2.adapter.registrations%v = %d, want 0: nothing was appended, so the log gained no observation", want, got)
+			}
+		})
 	}
 }
 
