@@ -744,17 +744,22 @@ async def _reference_allocations(
     """List the positions the upstream monitor reports for this prime."""
     try:
         snapshot = await reference_service.get(prime_address)
+
+        if snapshot is None:
+            # Not a ReferenceDataUnavailableError, so this propagates past the
+            # handler below rather than being rewritten to a 502.
+            raise HTTPException(
+                status_code=404,
+                detail="The upstream Star monitor does not track this prime, so it reports no allocations",
+            )
+
+        # The projection stays inside the guard: _reference_allocation_row
+        # raises ReferenceDataUnavailableError for an unmappable network, which
+        # is still an upstream-data problem (502), not a server fault (500).
+        category_service = AllocationCategoryService()
+        return [_reference_allocation_row(row, category_service) for row in snapshot.per_allocation]
     except ReferenceDataUnavailableError as exc:
         raise HTTPException(status_code=502, detail=f"Reference allocations upstream unavailable: {exc}") from exc
-
-    if snapshot is None:
-        raise HTTPException(
-            status_code=404,
-            detail="The upstream Star monitor does not track this prime, so it reports no allocations",
-        )
-
-    category_service = AllocationCategoryService()
-    return [_reference_allocation_row(row, category_service) for row in snapshot.per_allocation]
 
 
 def _reference_allocation_row(

@@ -8,7 +8,7 @@
 # must not fire on every sync. Run it manually per env, after the syncer is
 # deployed (it reuses that Secret):
 #
-#   kustomize build k8s/overlays/<env>/bootstrap | kubectl apply -f -
+#   kustomize build k8s/overlays/<env>/bootstrap-balance-sheet | kubectl apply -f -
 #   kubectl -n vector wait --for=condition=complete job/balance-sheet-backfill --timeout=10m
 #   kubectl -n vector delete job balance-sheet-backfill   # when done
 #

@@ -202,8 +202,9 @@ async def test_pairs_each_bucket_from_one_snapshot_row(seeded, async_db_url: str
 
     buckets = await _buckets(async_db_url)
 
-    for bucket in buckets:
-        if bucket.total_capital_usd == Decimal("10"):
-            assert bucket.exposure_usd == Decimal("20")
-        if bucket.total_capital_usd == Decimal("30"):
-            assert bucket.exposure_usd == Decimal("40")
+    # Asserted by membership, not by a guarded loop: a query that dropped either
+    # snapshot would satisfy a per-bucket conditional vacuously.
+    pairs = {(bucket.total_capital_usd, bucket.exposure_usd) for bucket in buckets}
+
+    assert (Decimal("10"), Decimal("20")) in pairs
+    assert (Decimal("30"), Decimal("40")) in pairs

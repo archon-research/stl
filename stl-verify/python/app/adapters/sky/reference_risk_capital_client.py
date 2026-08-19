@@ -136,10 +136,15 @@ class SkyReferenceRiskCapitalClient:
             raise ReferenceDataUnavailableError(f"Star monitor request failed: {url}") from exc
 
 
-def _require_results(data: dict, *, url: str) -> list:
+def _require_results(data: dict, *, url: str) -> list[dict]:
     results = data.get("results")
     if not isinstance(results, list):
         raise ReferenceDataUnavailableError(f"Star monitor response had no results array: {url}")
+    for index, row in enumerate(results):
+        # Callers read every row with .get(); a primitive here would surface as
+        # an AttributeError (500) instead of a bad-upstream-payload 502.
+        if not isinstance(row, dict):
+            raise ReferenceDataUnavailableError(f"Star monitor returned a non-object row at index {index}: {url}")
     return results
 
 
@@ -152,9 +157,20 @@ def _require_full_page(data: dict, received: int, *, url: str) -> None:
     """
     pagination = data.get("pagination")
     total = pagination.get("total") if isinstance(pagination, dict) else None
-    if isinstance(total, int) and total > received:
+    if isinstance(total, int):
+        if total > received:
+            raise ReferenceDataUnavailableError(
+                f"Star monitor reported {total} rows but returned {received}; the page limit is too low: {url}"
+            )
+        return
+
+    # No usable count to check against. A page shorter than the limit we asked
+    # for is complete by construction, but a full one may have been truncated
+    # and we cannot tell — so refuse rather than serve a silent partial set.
+    if received >= _PAGE_LIMIT:
         raise ReferenceDataUnavailableError(
-            f"Star monitor reported {total} rows but returned {received}; the page limit is too low: {url}"
+            f"Star monitor returned a full page of {received} rows with no usable total; "
+            f"the set may be truncated: {url}"
         )
 
 

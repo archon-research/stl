@@ -911,9 +911,14 @@ export function AllocationGrid({
   const debtWad = REFERENCE_MODE
     ? referenceDebt?.debt_wad
     : primeDebtSnapshot?.debt_wad;
+  // Reference mode has no observation time: upstream publishes one figure per
+  // prime per day, so the closest thing is the bucket the figure falls in. The
+  // label says "as of" rather than "sync" so a boundary is not read as a
+  // moment we observed the value.
   const debtObservedAt = REFERENCE_MODE
     ? referenceDebt?.bucket_start
     : primeDebtSnapshot?.synced_at;
+  const debtTimestampLabel = REFERENCE_MODE ? 'Debt as of' : 'Debt sync';
   const debtIlkLabel = REFERENCE_MODE
     ? 'Sky-reported'
     : `Ilk ${primeDebtSnapshot?.ilk_name ?? 'Unknown'}`;
@@ -1090,7 +1095,7 @@ export function AllocationGrid({
                       color: 'text.strong',
                     })}
                   >
-                    Debt sync{' '}
+                    {debtTimestampLabel}{' '}
                     {isPrimeDebtLoading
                       ? 'Loading...'
                       : primeDebtErrorMessage
@@ -1112,7 +1117,7 @@ export function AllocationGrid({
                         ? primeDebtErrorMessage
                         : debtObservedAt
                           ? formatDateTime(debtObservedAt)
-                          : 'No debt sync timestamp'}
+                          : 'No debt timestamp'}
                   </span>
                 </div>
               ) : null}

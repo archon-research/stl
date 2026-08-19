@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -30,12 +31,20 @@ func row(star, date string, overrides map[string]any) map[string]any {
 	return r
 }
 
-func newTestClient(t *testing.T, rows []map[string]any) (*Client, *string) {
+// The returned accessor reads the recorded query under the same lock the
+// handler writes it with: the handler runs on the server's goroutine, so
+// handing back a bare pointer would race the assertion.
+func newTestClient(t *testing.T, rows []map[string]any) (*Client, func() string) {
 	t.Helper()
-	var lastQuery string
+	var (
+		mu        sync.Mutex
+		lastQuery string
+	)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
 		lastQuery = r.URL.RawQuery
+		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(map[string]any{"data": rows}); err != nil {
 			t.Errorf("encoding response: %v", err)
@@ -47,7 +56,11 @@ func newTestClient(t *testing.T, rows []map[string]any) (*Client, *string) {
 	if err != nil {
 		t.Fatalf("NewClient() = %v", err)
 	}
-	return client, &lastQuery
+	return client, func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return lastQuery
+	}
 }
 
 // The route returns every prime it holds, so the star list filters the response
@@ -81,8 +94,8 @@ func TestFetchHistoryRequestsTheGivenWindow(t *testing.T) {
 		t.Fatalf("FetchHistory() = %v", err)
 	}
 
-	if !strings.Contains(*query, "days_ago=90") {
-		t.Errorf("query = %q, want it to request days_ago=90", *query)
+	if got := query(); !strings.Contains(got, "days_ago=90") {
+		t.Errorf("query = %q, want it to request days_ago=90", got)
 	}
 }
 

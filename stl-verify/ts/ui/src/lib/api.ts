@@ -455,6 +455,12 @@ export async function getTotalCapitalEnvelope(
   return envelope as TotalCapitalEnvelope;
 }
 
+// How far back to look for the newest reference debt bucket. The endpoint
+// defaults to the last 24h, but this series is a daily upstream feed seeded by
+// a one-shot backfill, so the most recent bucket is routinely older than that
+// and the default window returns nothing at all.
+const REFERENCE_DEBT_LOOKBACK_DAYS = 90;
+
 // Reference debt is aggregate-only: upstream reports one figure per prime per
 // day and carries no ilk or block identity, so the API rejects a raw request
 // rather than inventing them. The latest bucket is the closest thing to a
@@ -463,9 +469,13 @@ export async function getLatestReferenceDebtBucket(
   primeId: string,
   signal?: AbortSignal,
 ): Promise<PrimeDebtBucket | null> {
+  const from = new Date(
+    Date.now() - REFERENCE_DEBT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000,
+  ).toISOString();
+
   const envelope = await getPrimeDebtEnvelope(
     primeId,
-    { aggregate: true, limit: 1, reference: true },
+    { aggregate: true, limit: 1, reference: true, from_timestamp: from },
     signal,
   );
   return ((envelope.data ?? [])[0] as PrimeDebtBucket | undefined) ?? null;

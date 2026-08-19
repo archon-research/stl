@@ -20,7 +20,12 @@ _V4_POOL_ID = "0x" + "ef" * 32
 
 
 def _reference_allocation(
-    *, network: str = "ethereum", token_address: str = _TOKEN, receipt_token_id: int | None = 41
+    *,
+    network: str = "ethereum",
+    token_address: str = _TOKEN,
+    receipt_token_id: int | None = 41,
+    chain_id: int | None = 1,
+    chain: str | None = "mainnet",
 ) -> ReferenceAllocation:
     return ReferenceAllocation(
         protocol_name="sparklend",
@@ -34,8 +39,8 @@ def _reference_allocation(
         required_risk_capital_usd=Decimal("990048.94"),
         crr_pct=Decimal("0.28764051"),
         receipt_token_id=receipt_token_id,
-        chain_id=1,
-        chain="mainnet",
+        chain_id=chain_id,
+        chain=chain,
     )
 
 
@@ -153,6 +158,21 @@ def test_reference_mode_returns_404_when_the_monitor_does_not_track_the_prime(re
 
 @pytest.mark.parametrize("reference_client", [ReferenceDataUnavailableError("boom")], indirect=True)
 def test_reference_mode_returns_502_when_the_monitor_cannot_be_read(reference_client):
+    client, _ = reference_client
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations?reference=true")
+
+    assert response.status_code == 502
+
+
+@pytest.mark.parametrize(
+    "reference_client",
+    [_snapshot(_reference_allocation(network="solana", chain_id=None, chain=None))],
+    indirect=True,
+)
+def test_reference_mode_returns_502_when_a_position_sits_on_an_unmappable_network(reference_client):
+    # The projection raises the same upstream-data error as the fetch, so it has
+    # to be reported as a bad upstream payload rather than a server fault.
     client, _ = reference_client
 
     response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations?reference=true")

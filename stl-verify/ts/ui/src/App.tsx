@@ -519,6 +519,7 @@ function App() {
   useEffect(() => {
     if (!primaryProxyAddress) {
       setPrimeDebtSnapshot(null);
+      setReferenceDebt(null);
       setIsPrimeDebtLoading(false);
       setPrimeDebtErrorMessage(null);
       return;
@@ -528,6 +529,7 @@ function App() {
 
     setIsPrimeDebtLoading(true);
     setPrimeDebtSnapshot(null);
+    setReferenceDebt(null);
     setPrimeDebtErrorMessage(null);
 
     void (
@@ -555,6 +557,7 @@ function App() {
           primaryProxyAddress,
         });
         setPrimeDebtSnapshot(null);
+        setReferenceDebt(null);
         setPrimeDebtErrorMessage(toErrorMessage(error));
       })
       .finally(() => {

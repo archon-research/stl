@@ -117,7 +117,7 @@ func (c *Client) FetchPrimeSnapshots(
 
 	snapshots := make([]outbound.RiskCapitalPrimeSnapshot, 0, len(stars))
 	for _, star := range stars {
-		if !covered[star] {
+		if !covered[normalizeStar(star)] {
 			// The monitor covers a subset of the primes STL tracks. Absence is a
 			// fact about its coverage, so the cycle records the rest rather than
 			// failing; a zero here would read as a prime holding nothing.
@@ -138,14 +138,14 @@ func (c *Client) FetchPrimeSnapshots(
 // 500 indistinguishable from a genuine fault.
 func (c *Client) coveredStars(ctx context.Context) (map[string]bool, error) {
 	var payload primesResponse
-	url := c.baseURL + "/primes/"
-	if err := c.httpClient.DoRequest(ctx, httpclient.RequestConfig{URL: url}, &payload); err != nil {
+	requestURL := c.baseURL + "/primes/"
+	if err := c.httpClient.DoRequest(ctx, httpclient.RequestConfig{URL: requestURL}, &payload); err != nil {
 		return nil, fmt.Errorf("fetching sky risk-capital primes: %w", err)
 	}
 
 	covered := make(map[string]bool, len(payload.Data.Results))
 	for i, row := range payload.Data.Results {
-		star := strings.TrimSpace(row.Star)
+		star := normalizeStar(row.Star)
 		if star == "" {
 			return nil, fmt.Errorf("sky risk-capital primes row %d has an empty star name", i)
 		}
@@ -154,10 +154,18 @@ func (c *Client) coveredStars(ctx context.Context) (map[string]bool, error) {
 	return covered, nil
 }
 
+// normalizeStar folds a star name for comparison. Both sides of the coverage
+// lookup go through it, so a difference in case or padding between the contract
+// and the monitor cannot silently mark a tracked prime uncovered. Matches the
+// balance-sheet client and the Python reference client.
+func normalizeStar(star string) string {
+	return strings.ToLower(strings.TrimSpace(star))
+}
+
 func (c *Client) fetchPrimeDetail(ctx context.Context, star string) (outbound.RiskCapitalPrimeSnapshot, error) {
 	var payload primeDetailResponse
-	url := fmt.Sprintf("%s/primes/%s/", c.baseURL, star)
-	if err := c.httpClient.DoRequest(ctx, httpclient.RequestConfig{URL: url}, &payload); err != nil {
+	requestURL := fmt.Sprintf("%s/primes/%s/", c.baseURL, url.PathEscape(star))
+	if err := c.httpClient.DoRequest(ctx, httpclient.RequestConfig{URL: requestURL}, &payload); err != nil {
 		return outbound.RiskCapitalPrimeSnapshot{}, fmt.Errorf("fetching sky risk capital for prime %q: %w", star, err)
 	}
 

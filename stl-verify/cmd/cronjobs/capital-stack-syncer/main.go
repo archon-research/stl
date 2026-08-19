@@ -61,8 +61,10 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runn
 		return nil, fmt.Errorf("creating tx manager: %w", err)
 	}
 
+	// Empty falls through to the client's own default, so the URL is not
+	// duplicated here where the two could drift apart.
 	skyClient, err := sky.NewClient(sky.ClientConfig{
-		BaseURL: env.Get("SKY_RISK_CAPITAL_URL", "https://info-sky.blockanalitica.com/star-monitoring/risk-capital"),
+		BaseURL: env.Get("SKY_RISK_CAPITAL_URL", ""),
 		Logger:  deps.Logger,
 	})
 	if err != nil {

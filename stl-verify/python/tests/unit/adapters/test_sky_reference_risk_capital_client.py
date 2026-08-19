@@ -244,6 +244,32 @@ async def test_get_prime_raises_when_upstream_reports_more_rows_than_it_returned
         await client.get_prime("spark")
 
 
+async def test_get_prime_raises_when_a_full_page_carries_no_usable_total():
+    # Without a total there is nothing to compare against, and a page at the
+    # limit may have been cut off — so completeness cannot be claimed.
+    from app.adapters.sky.reference_risk_capital_client import _PAGE_LIMIT
+
+    client = _client(
+        responses={
+            "/primes/spark/allocations/": httpx.Response(
+                200,
+                json=_wrap({"results": [_allocation(str(i), "1") for i in range(_PAGE_LIMIT)]}),
+            )
+        }
+    )
+
+    with pytest.raises(ReferenceDataUnavailableError, match="may be truncated"):
+        await client.get_prime("spark")
+
+
+async def test_get_prime_raises_when_a_row_is_not_an_object():
+    # A primitive row would otherwise reach .get() and surface as a 500.
+    client = _client(responses={"/primes/": httpx.Response(200, json=_wrap({"results": ["spark"]}))})
+
+    with pytest.raises(ReferenceDataUnavailableError, match="non-object row"):
+        await client.get_prime("spark")
+
+
 async def test_get_prime_matches_a_star_the_monitor_spells_differently():
     client = _client(stars=["Spark"])
 
