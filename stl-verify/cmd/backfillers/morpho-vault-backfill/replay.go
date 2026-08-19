@@ -196,7 +196,7 @@ func downloadV2LogsConcurrently(
 func requireCompletePartition(part string, presentBlocks []int64, from, to int64) error {
 	partStart, partEnd, ok := partitionBlockRange(part)
 	if !ok {
-		return fmt.Errorf("cannot parse partition range from prefix %q", part)
+		return fmt.Errorf("cannot parse partition range from prefix %q: %w", part, errStructuralData)
 	}
 	if partStart < from {
 		partStart = from
@@ -222,7 +222,7 @@ func requireCompletePartition(part string, presentBlocks []int64, from, to int64
 		}
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf("partition %s missing receipt block(s) in [%d,%d] (S3 gap): %v", part, partStart, partEnd, missing)
+		return fmt.Errorf("partition %s is missing receipt block(s) %v in [%d,%d] (S3 gap): %w", part, missing, partStart, partEnd, errStructuralData)
 	}
 	return nil
 }
@@ -300,11 +300,11 @@ func filterV2Logs(receipts []shared.TransactionReceipt, blockNumber int64, v2Vau
 				continue
 			}
 			if receipt.BlockHash == "" {
-				return nil, fmt.Errorf("receipt %s at block %d carries a V2 structured log with no block hash", receipt.TransactionHash, blockNumber)
+				return nil, fmt.Errorf("receipt %s at block %d carries a V2 structured log with no block hash: %w", receipt.TransactionHash, blockNumber, errStructuralData)
 			}
 			logIndex, err := strconv.ParseInt(log.LogIndex, 0, 64)
 			if err != nil {
-				return nil, fmt.Errorf("parsing log index %q (tx %s): %w", log.LogIndex, receipt.TransactionHash, err)
+				return nil, fmt.Errorf("parsing log index %q (tx %s): %w: %w", log.LogIndex, receipt.TransactionHash, err, errStructuralData)
 			}
 			entries = append(entries, v2LogEntry{
 				log:         log,

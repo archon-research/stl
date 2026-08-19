@@ -67,7 +67,7 @@ func discoverAndPersistVaults(
 
 	deployBlock, err := morpho_indexer.MorphoBlueDeployBlock(cfg.chainID)
 	if err != nil {
-		return discoveryResult{}, fmt.Errorf("getting deploy block: %w", err)
+		return discoveryResult{}, fmt.Errorf("getting deploy block: %w: %w", err, errStructuralData)
 	}
 	if err := persistVaults(ctx, pool, logger, vaults, cfg.chainID, deployBlock, buildID); err != nil {
 		return discoveryResult{}, fmt.Errorf("persisting vaults: %w", err)
@@ -609,7 +609,7 @@ func emitMorphoBlueCandidates(
 ) error {
 	event, err := extractor.ExtractMorphoBlueEvent(log)
 	if err != nil {
-		return fmt.Errorf("extracting Morpho Blue event (block %d, tx %s): %w", blockNumber, log.TransactionHash, err)
+		return fmt.Errorf("extracting Morpho Blue event (block %d, tx %s): %w: %w", blockNumber, log.TransactionHash, err, errStructuralData)
 	}
 
 	for _, addr := range morpho_indexer.MorphoBlueVaultCandidates(event) {

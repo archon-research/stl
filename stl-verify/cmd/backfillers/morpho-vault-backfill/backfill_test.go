@@ -3,15 +3,18 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"slices"
 	"strings"
 	"testing"
 
 	"go.temporal.io/sdk/activity"
+	temporalsdk "go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/partition"
+	"github.com/archon-research/stl/stl-verify/internal/services/morpho_indexer"
 )
 
 // mainnetChainID is the only chain with a known VaultV2 factory deploy block, so
@@ -332,6 +335,56 @@ func TestBackfillWorkflow_ExposesPartialCountsAfterFailure(t *testing.T) {
 	}
 	if got.EventsReplayed != 10 {
 		t.Errorf("EventsReplayed = %d, want 10", got.EventsReplayed)
+	}
+}
+
+// Neither activity caps its attempts, so a deterministic defect that stays
+// retryable is redone at up to a minute's backoff until the ScheduleToClose
+// envelope runs out — surfacing a ~20s partition failure two hours late, and a
+// discovery failure a day late.
+func TestNonRetryableIfStructural_MarksDeterministicFailuresNonRetryable(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "an S3 gap inside a partition", err: requireCompletePartition("1000-1999", []int64{1000}, 1000, 1002)},
+		{name: "an unparseable partition prefix", err: requireCompletePartition("not-a-range", nil, 0, 999)},
+		{name: "a log the replay path cannot take", err: fmt.Errorf("replaying log: %w", morpho_indexer.ErrUnreplayableLog)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.err == nil {
+				t.Fatal("the fixture produced no error to classify")
+			}
+			var appErr *temporalsdk.ApplicationError
+			if !errors.As(nonRetryableIfStructural(tc.err), &appErr) {
+				t.Fatalf("want a Temporal application error, got %v", tc.err)
+			}
+			if !appErr.NonRetryable() {
+				t.Error("this failure reproduces on every attempt, so the activity must not be retried")
+			}
+		})
+	}
+}
+
+// The mirror image, and the more expensive mistake of the two: a transient
+// S3/RPC/DB fault must keep its retries, or a blip fails a run that would have
+// succeeded on the next attempt.
+func TestNonRetryableIfStructural_LeavesTransientFailuresRetryable(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "a request that timed out", err: fmt.Errorf("streaming s3 object: %w", context.DeadlineExceeded)},
+		{name: "an upstream that was throttling", err: errors.New("SlowDown: please reduce your request rate")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var appErr *temporalsdk.ApplicationError
+			if errors.As(nonRetryableIfStructural(tc.err), &appErr) && appErr.NonRetryable() {
+				t.Error("a transient fault must stay retryable; the retry envelope is what absorbs it")
+			}
+		})
 	}
 }
 

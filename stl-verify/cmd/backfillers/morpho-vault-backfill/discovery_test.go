@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
@@ -52,7 +53,8 @@ func TestExtractCandidatesFromReceipts_CorruptMorphoBlueLogFailsRun(t *testing.T
 	receipts := []shared.TransactionReceipt{{Logs: []shared.Log{corruptLog}}}
 	candidateCh := make(chan candidateEntry, 8)
 
-	if err := extractCandidatesFromReceipts(receipts, extractor, morpho_indexer.MorphoBlueAddress, 123, candidateCh); err == nil {
-		t.Fatal("expected a recognised-but-undecodable Morpho Blue log to fail the run, got nil")
+	err = extractCandidatesFromReceipts(receipts, extractor, morpho_indexer.MorphoBlueAddress, 123, candidateCh)
+	if !errors.Is(err, errStructuralData) {
+		t.Fatalf("error = %v, want a structural defect the retry envelope must not absorb", err)
 	}
 }

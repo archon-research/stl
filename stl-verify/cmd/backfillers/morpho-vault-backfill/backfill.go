@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -29,6 +30,13 @@ import (
 // ({"to":<head>,"fromV2Deploy":true}) accepted until the head passes block
 // 33,374,999, some time in 2029. At 2,500 it stopped being accepted in 2026.
 const maxPartitionsPerRun = 10_000
+
+// errStructuralData marks a failure that reproduces identically on every
+// attempt: an S3 gap, an unparseable partition prefix, a log the archive cannot
+// give coordinates for. A transient fault (S3/RPC/DB network error, timeout,
+// throttling) must never wrap it — surviving those is what the retry envelope
+// is for.
+var errStructuralData = errors.New("structural data defect")
 
 // heartbeatInterval keeps the discovery scan visible to Temporal. Its
 // StartToClose ceiling is hours, so without a heartbeat a worker killed mid-scan
@@ -295,7 +303,10 @@ type backfillActivities struct {
 // Idempotent: every write goes through GetOrCreate, so a retry — or an operator
 // re-running an overlapping range — re-reaches the same rows rather than adding
 // any.
-func (a *backfillActivities) DiscoverVaults(ctx context.Context, rng blockRange) (discoveryResult, error) {
+func (a *backfillActivities) DiscoverVaults(ctx context.Context, rng blockRange) (result discoveryResult, err error) {
+	// Classified on the way out so no return path can escape it.
+	defer func() { err = nonRetryableIfStructural(err) }()
+
 	// Deferred before the drain so it stops LAST: the drain blocks on in-flight
 	// archive writes, and an unheartbeated wait there reads as a dead worker.
 	stopHeartbeat := startHeartbeat(ctx, heartbeatInterval)
@@ -318,7 +329,9 @@ func (a *backfillActivities) DiscoverVaults(ctx context.Context, rng blockRange)
 // The vault registry is reloaded per partition rather than cached on the struct:
 // a retry may land on a worker that never ran DiscoverVaults, so reading it here
 // is what makes the activity self-contained.
-func (a *backfillActivities) ReplayPartition(ctx context.Context, work partitionWork) (int, error) {
+func (a *backfillActivities) ReplayPartition(ctx context.Context, work partitionWork) (events int, err error) {
+	// Classified on the way out so no return path can escape it.
+	defer func() { err = nonRetryableIfStructural(err) }()
 	defer a.archiveDrain()
 
 	svc, err := buildReplayService(a.logger, a.multicaller, a.pool, a.buildID, a.cfg.chainID)
@@ -340,7 +353,7 @@ func (a *backfillActivities) ReplayPartition(ctx context.Context, work partition
 		return 0, fmt.Errorf("deriving VaultV2 structured topics: %w", err)
 	}
 
-	events, err := replayPartition(ctx, a.logger, a.s3Reader, svc, blocktime.New(a.ethClient),
+	events, err = replayPartition(ctx, a.logger, a.s3Reader, svc, blocktime.New(a.ethClient),
 		a.cfg, work.Range, work.Partition, v2Vaults, topics)
 	if err != nil {
 		return 0, fmt.Errorf("replaying partition %s: %w", work.Partition, err)
@@ -349,6 +362,18 @@ func (a *backfillActivities) ReplayPartition(ctx context.Context, work partition
 	activity.GetLogger(ctx).Info("replayed partition",
 		"partition", work.Partition, "events", events, "v2Vaults", len(v2Vaults))
 	return events, nil
+}
+
+// nonRetryableIfStructural stops Temporal retrying a verdict that cannot change.
+// Neither activity caps its attempts, so an unclassified structural failure
+// burns the whole ScheduleToClose envelope — 2h for a partition, 24h for
+// discovery — before an operator sees a fault only an S3 repair or a code change
+// can clear.
+func nonRetryableIfStructural(err error) error {
+	if errors.Is(err, errStructuralData) || errors.Is(err, morpho_indexer.ErrUnreplayableLog) {
+		return temporalsdk.NewNonRetryableApplicationError(err.Error(), "StructuralData", err)
+	}
+	return err
 }
 
 // startHeartbeat reports activity liveness every interval until the returned
