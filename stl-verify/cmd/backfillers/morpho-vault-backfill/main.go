@@ -138,7 +138,6 @@ func newBackfillActivities(ctx context.Context, deps temporal.Dependencies, cfg 
 		return nil, fmt.Errorf("creating multicall client: %w", err)
 	}
 
-	// Optional raw SC call archiving (VEC-81). Off unless ARCHIVE_SC_CALLS=true.
 	archiveWrap, archiveDrain, err := archivingwire.Bootstrap(ctx, deps.Logger, cfg.chainID, int64(buildReg.BuildID()), "morpho-vault")
 	if err != nil {
 		return nil, err

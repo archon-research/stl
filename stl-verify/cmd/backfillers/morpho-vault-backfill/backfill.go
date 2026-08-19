@@ -185,9 +185,6 @@ func (w *backfillWorkflows) Backfill(ctx workflow.Context, params BackfillParams
 		return resultOf(), err
 	}
 
-	// No "did this produce anything" assertion, unlike the CoinGecko backfill: a
-	// range holding no VaultV2 governance events is an ordinary outcome here (the
-	// events are sparse), so zero cannot be told from a silent hole by count.
 	logger.Info("morpho vault backfill complete",
 		"discovered", state.Discovered, "partitions", state.PartitionsDone, "events", state.EventsReplayed)
 	return resultOf(), nil
@@ -384,9 +381,8 @@ func nonRetryableIfStructural(err error) error {
 	return err
 }
 
-// startHeartbeat reports activity liveness every interval until the returned
-// stop function is called. stop joins the goroutine rather than just signalling
-// it, so no ping can land after the activity has reported its result.
+// startHeartbeat's stop joins the goroutine rather than just signalling it, so
+// no ping can land after the activity has reported its result.
 func startHeartbeat(ctx context.Context, interval time.Duration) (stop func()) {
 	done := make(chan struct{})
 	finished := make(chan struct{})
