@@ -48,10 +48,13 @@ func batchAddresses(addresses []common.Address, size int) [][]common.Address {
 
 // sortLogs orders logs strictly by (block number, log index).
 //
-// Ordering is correctness-critical: the handlers require an adapter's
-// AddAdapter to land before the RemoveAdapter that closes it. Each chunk is
-// fetched as several per-address-batch requests whose results interleave, so the
-// node's per-response ordering is not enough.
+// Ordering is desirable, not correctness-critical: membership is an append-only
+// log keyed on each observation's own position, so an out-of-order replay reaches
+// the same answers. What the sort buys is a clean ops signal — an Allocate
+// replayed ahead of its AddAdapter records a redundant allocation_event row and a
+// WARN that otherwise means "discovery missed an adapter". Each chunk is fetched
+// as several per-address-batch requests whose results interleave, so the node's
+// per-response ordering is not enough.
 func sortLogs(logs []ethtypes.Log) {
 	slices.SortFunc(logs, func(a, b ethtypes.Log) int {
 		if a.BlockNumber != b.BlockNumber {

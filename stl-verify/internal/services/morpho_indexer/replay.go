@@ -76,11 +76,12 @@ func (s *Service) ReplayMetaMorphoLog(ctx context.Context, log shared.Log, block
 // completes before the transaction opens, so a transient RPC failure commits
 // nothing and a re-triggered run starts clean.
 //
-// Re-running is safe, and it is now also QUIET. The enumeration is an ASSERTION
-// recorded as observed_via = bootstrap_seed, so a re-run whose head-block answer
-// already matches the membership log appends nothing at all — where the old
-// registry recorded a fresh "added at the finalized head" every time and hung the
-// seed snapshot off it.
+// Re-running is safe, and it is now also QUIET on the registry. The enumeration is
+// an ASSERTION recorded as observed_via = bootstrap_seed, so a re-run whose
+// head-block answer already matches the membership log appends no membership row —
+// where the old registry recorded a fresh "added at the finalized head" every time
+// and hung the seed snapshot off it. The realAssets snapshot is still written: it
+// is a reading at the new head, which is new information regardless.
 func (s *Service) SeedV2VaultAdapters(ctx context.Context, vaultAddress common.Address, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) error {
 	vault, err := s.resolveV2Vault(vaultAddress)
 	if err != nil {
@@ -90,11 +91,15 @@ func (s *Service) SeedV2VaultAdapters(ctx context.Context, vaultAddress common.A
 	if err != nil {
 		return fmt.Errorf("reading adapters for vault %s: %w", vaultAddress.Hex(), err)
 	}
-	// Read the registry's current answer before the transaction opens: it is the
-	// other half of the diff below, and reading it here keeps the pattern the rest
-	// of this service follows — no pooled connection is held across the chain reads
-	// above.
-	registered, err := s.morphoRepo.GetActiveAdaptersByVault(ctx, vault.ID)
+	// Read the registry's answer AT THE PINNED BLOCK, the same position the
+	// enumeration above read — the diff below is only meaningful between two answers
+	// about one position. Asking about the chain head instead would report an adapter
+	// added in the (pinned head, chain head] gap as a member the enumeration failed to
+	// return, and de-register it at a block where it was still on-chain. Read before
+	// the transaction opens, like every other read here, so no pooled connection is
+	// held across the chain round-trips above.
+	at := entity.BlockPosition{BlockNumber: blockNumber, BlockVersion: blockVersion, LogIndex: entity.EndOfBlockLogIndex}
+	registered, err := s.morphoRepo.GetActiveAdaptersByVaultAt(ctx, vault.ID, at)
 	if err != nil {
 		return fmt.Errorf("reading the recorded adapter set for vault %s: %w", vaultAddress.Hex(), err)
 	}
