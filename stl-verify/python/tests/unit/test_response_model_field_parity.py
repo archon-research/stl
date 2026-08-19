@@ -10,6 +10,12 @@ service computed and intended to publish goes missing.
 ``additionalProperties: false`` into the published schema — a promise never to add
 a field, which this API does regularly. Asserting the field sets here keeps the
 failure in CI and out of the contract.
+
+The check runs one way only. A response model may carry fields its entity does
+not, because the same model also serves values built by an explicit constructor
+rather than the splat — the reference-sourced allocation fields, which STL's own
+model has no equivalent for. The direction that silently loses data is an entity
+field absent from the response, and that is what fails here.
 """
 
 import dataclasses
@@ -50,9 +56,9 @@ _SPLAT_CONSTRUCTED_PAIRS = [
 )
 def test_response_model_publishes_every_field_of_the_entity_it_projects(model, entity):
     entity_fields = {field.name for field in dataclasses.fields(entity)}
+    dropped = entity_fields - set(model.model_fields)
 
-    assert set(model.model_fields) == entity_fields, (
-        f"{model.__name__} and {entity.__name__} have drifted: "
-        f"dropped from the API {sorted(entity_fields - set(model.model_fields))}, "
-        f"absent from the entity {sorted(set(model.model_fields) - entity_fields)}"
+    assert not dropped, (
+        f"{model.__name__} does not publish {sorted(dropped)} from {entity.__name__}, "
+        "so the splat silently drops them from the API"
     )

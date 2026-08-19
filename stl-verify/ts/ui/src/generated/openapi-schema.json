@@ -472,12 +472,27 @@
         "type": "object"
       },
       "AllocationRiskCapitalResponse": {
-        "description": "Per-allocation risk capital from the default model.",
+        "description": "Per-allocation risk capital from the default model, or from the reference feed.",
         "properties": {
           "applied": {
-            "description": "Whether the default model priced this allocation.",
+            "description": "Whether the figure is priced. Always `true` under `reference=true`: the upstream monitor reports only positions it has already priced.",
             "title": "Applied",
             "type": "boolean"
+          },
+          "chain": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Internal chain name the position sits on. Reference-only: `null` in self mode, and `null` under `reference=true` for a network STL has no chain id for.",
+            "examples": [
+              "mainnet"
+            ],
+            "title": "Chain"
           },
           "crr_pct": {
             "anyOf": [
@@ -489,7 +504,7 @@
                 "type": "null"
               }
             ],
-            "description": "Comparable capital-risk ratio (0-100). `null` when the allocation is unpriced.",
+            "description": "Comparable capital-risk ratio (0-100). `null` when the allocation is unpriced. Under `reference=true` this is upstream's `crr` rescaled from its native 0-1 fraction, so the scale matches self mode.",
             "title": "Crr Pct"
           },
           "exposure_usd": {
@@ -497,6 +512,21 @@
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Exposure Usd",
             "type": "string"
+          },
+          "loan_token_symbol": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Symbol of the loan token the exposure is denominated against. Reference-only.",
+            "examples": [
+              "USDS"
+            ],
+            "title": "Loan Token Symbol"
           },
           "model": {
             "anyOf": [
@@ -507,7 +537,7 @@
                 "type": "null"
               }
             ],
-            "description": "Model that produced the figure, or `null`.",
+            "description": "Model that produced the figure. `null` when unpriced, and always `null` under `reference=true`.",
             "title": "Model"
           },
           "protocol_name": {
@@ -516,9 +546,16 @@
             "type": "string"
           },
           "receipt_token_id": {
-            "description": "Surrogate id of the receipt token.",
-            "title": "Receipt Token Id",
-            "type": "integer"
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Surrogate id of the receipt token. Always set in self mode. Under `reference=true` it is `null` when the upstream position does not join to STL's token registry \u2014 an unmapped network, a token STL does not index, or a Uniswap V4 position, which identifies itself by 32-byte pool id where an address is expected and so can never resolve. `token_address` carries the raw upstream value in that case.",
+            "title": "Receipt Token Id"
           },
           "required_risk_capital_usd": {
             "anyOf": [
@@ -537,6 +574,18 @@
             "description": "Receipt-token symbol.",
             "title": "Symbol",
             "type": "string"
+          },
+          "token_address": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Upstream's raw position identifier, normally the receipt-token address. Reference-only (`null` in self mode). Not always an address: a Uniswap V4 row carries a 66-character pool id here, which is why `receipt_token_id` can be `null`.",
+            "title": "Token Address"
           },
           "unpriced_reason": {
             "anyOf": [
@@ -1315,19 +1364,117 @@
             "description": "DEPRECATED \u2014 divides this proxy's Required Risk Capital by the whole prime's Total Risk Capital, mixing scopes, so the figure is not meaningful for either. Its value is unchanged for backwards compatibility. Use `prime_encumbrance_ratio`.",
             "title": "Encumbrance Ratio"
           },
+          "epi_utilization": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Upstream EPI utilization ratio. Reference-only.",
+            "title": "Epi Utilization"
+          },
+          "exposure_share": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The prime's share of total protocol exposure, as reported upstream. Reference-only.",
+            "title": "Exposure Share"
+          },
           "exposure_usd": {
             "description": "\u03a3 priced receipt-token allocation exposure (USD).",
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Exposure Usd",
             "type": "string"
           },
+          "external_junior_risk_capital_usd": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Junior risk capital held externally (USD). Reference-only.",
+            "title": "External Junior Risk Capital Usd"
+          },
+          "external_senior_risk_capital_usd": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Senior risk capital held externally (USD). Reference-only.",
+            "title": "External Senior Risk Capital Usd"
+          },
+          "internal_junior_risk_capital_usd": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Junior risk capital held internally (USD). Reference-only.",
+            "title": "Internal Junior Risk Capital Usd"
+          },
+          "internal_senior_risk_capital_usd": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Senior risk capital held internally (USD). Reference-only.",
+            "title": "Internal Senior Risk Capital Usd"
+          },
+          "junior_risk_capital_usd": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Junior (first-loss) risk capital (USD). Reference-only \u2014 `null` unless `reference=true`. This is the measured junior/senior split, which self mode has no equivalent for: it can only approximate a buffer as `total_risk_capital_usd - required_risk_capital_usd`.",
+            "title": "Junior Risk Capital Usd"
+          },
           "model": {
-            "description": "Default RRC model used (e.g. `gap_sweep`).",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Default RRC model used (e.g. `gap_sweep`). `null` under `reference=true`, which runs no model.",
             "examples": [
               "gap_sweep"
             ],
-            "title": "Model",
-            "type": "string"
+            "title": "Model"
           },
           "modeled_exposure_usd": {
             "description": "Exposure the default model could price (USD).",
@@ -1447,7 +1594,7 @@
             "type": "string"
           },
           "prime_unserved_chains": {
-            "description": "Chains the prime has an ALM proxy on that no allocation tracker serves, so they contribute nothing to the `prime_*` totals and read `null` in `prime_per_chain`. Non-empty means the totals are a lower bound.",
+            "description": "Chains the prime has an ALM proxy on that no allocation tracker serves, so they contribute nothing to the `prime_*` totals and read `null` in `prime_per_chain`. Non-empty means the totals are a lower bound. Always empty under `reference=true`: upstream's totals are not bounded by what STL indexes, so the caveat does not apply to them.",
             "examples": [
               [
                 "arbitrum",
@@ -1474,6 +1621,55 @@
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Required Risk Capital Usd",
             "type": "string"
+          },
+          "senior_risk_capital_usd": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Senior risk capital (USD). Reference-only.",
+            "title": "Senior Risk Capital Usd"
+          },
+          "source": {
+            "default": "self",
+            "description": "Provenance of every figure in this response. `self` is STL's own on-chain model; `reference` is Sky's Star Agents Risk Capital & Requirements Monitor, returned when `reference=true`. Never mixed: one response is entirely one or the other.",
+            "enum": [
+              "self",
+              "reference"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "spj_utilization": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Upstream SPJ utilization ratio. Reference-only.",
+            "title": "Spj Utilization"
+          },
+          "tokenized_junior_risk_capital_usd": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Tokenized junior risk capital (USD). Reference-only.",
+            "title": "Tokenized Junior Risk Capital Usd"
           },
           "total_risk_capital_usd": {
             "anyOf": [
@@ -3232,6 +3428,18 @@
               "description": "A prime's 0x-prefixed ALM **proxy** address on one chain \u2014 not a prime identifier. A prime allocates through one proxy per chain; list them via `GET /v1/primes` and group by `prime_vault_address`.",
               "title": "Prime Id",
               "type": "string"
+            }
+          },
+          {
+            "description": "Answer from Sky's upstream Star monitor instead of STL's own model. The response shape is unchanged; `source` reports which provenance produced it, and the reference-only fields (`junior_risk_capital_usd`, `senior_risk_capital_usd`, the internal/external/tokenized splits, the utilization ratios and `exposure_share`) are populated only in this mode. Returns `404` when the monitor does not track the prime, and `502` when it cannot be read \u2014 the two are held apart so an outage is never served as an absence of exposure.",
+            "in": "query",
+            "name": "reference",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Answer from Sky's upstream Star monitor instead of STL's own model. The response shape is unchanged; `source` reports which provenance produced it, and the reference-only fields (`junior_risk_capital_usd`, `senior_risk_capital_usd`, the internal/external/tokenized splits, the utilization ratios and `exposure_share`) are populated only in this mode. Returns `404` when the monitor does not track the prime, and `502` when it cannot be read \u2014 the two are held apart so an outage is never served as an absence of exposure.",
+              "title": "Reference",
+              "type": "boolean"
             }
           }
         ],

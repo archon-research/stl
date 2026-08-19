@@ -909,6 +909,10 @@ export function AllocationGrid({
   const riskByReceiptTokenId = useMemo(() => {
     const map = new Map<number, AllocationRiskCapital>();
     for (const entry of riskCapital?.per_allocation ?? []) {
+      // A reference-sourced row that did not resolve to a receipt token has
+      // nothing on this grid to attach to, and every such row shares the null
+      // key — so keying on it would collapse them onto one another.
+      if (entry.receipt_token_id === null) continue;
       map.set(entry.receipt_token_id, entry);
     }
     return map;
