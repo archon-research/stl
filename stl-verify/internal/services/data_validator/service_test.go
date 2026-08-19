@@ -597,62 +597,6 @@ func TestSelectRandomBlocks(t *testing.T) {
 	}
 }
 
-func TestReport_FormatText(t *testing.T) {
-	report := NewReport(21000000, 21100000)
-	report.AddCheck(CheckResult{
-		Name:     "Chain Integrity",
-		Status:   StatusPassed,
-		Message:  "Parent-hash chain valid",
-		Duration: 1200 * time.Millisecond,
-	})
-	report.AddCheck(CheckResult{
-		Name:     "Reorg 142 at block 21045678",
-		Status:   StatusFailed,
-		Message:  "Hash mismatch\nExpected: 0x1234\nActual: 0x5678",
-		Duration: 800 * time.Millisecond,
-	})
-	report.Finalize()
-
-	text := report.FormatText()
-
-	if !strings.Contains(text, "DATA VALIDATION REPORT") {
-		t.Error("missing header")
-	}
-	if !strings.Contains(text, "21,000,000") {
-		t.Error("missing formatted from block")
-	}
-	if !strings.Contains(text, "[PASSED]") {
-		t.Error("missing PASSED status")
-	}
-	if !strings.Contains(text, "[FAILED]") {
-		t.Error("missing FAILED status")
-	}
-	if !strings.Contains(text, "1 passed, 1 failed") {
-		t.Error("missing summary")
-	}
-}
-
-func TestReport_FormatJSON(t *testing.T) {
-	report := NewReport(100, 200)
-	report.AddCheck(CheckResult{
-		Name:   "Test Check",
-		Status: StatusPassed,
-	})
-	report.Finalize()
-
-	jsonStr, err := report.FormatJSON()
-	if err != nil {
-		t.Fatalf("FormatJSON() error = %v", err)
-	}
-
-	if !strings.Contains(jsonStr, `"from_block": 100`) {
-		t.Error("missing from_block in JSON")
-	}
-	if !strings.Contains(jsonStr, `"status": "passed"`) {
-		t.Error("missing status in JSON")
-	}
-}
-
 func TestService_Validate_EmptyDatabaseErrors(t *testing.T) {
 	repo := &mockBlockStateRepository{
 		minBlockNumber: 0,

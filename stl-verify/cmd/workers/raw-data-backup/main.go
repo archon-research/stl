@@ -15,8 +15,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/aws/aws-sdk-go-v2/config"
-
+	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/chainutil"
 
@@ -212,8 +211,10 @@ func run(ctx context.Context, logger *slog.Logger, workers int) error {
 		return err
 	}
 
-	// Load AWS config
-	awsCfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(cfg.awsRegion))
+	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{
+		Region:                   cfg.awsRegion,
+		StaticCredentialsFromEnv: true,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to load AWS config: %w", err)
 	}

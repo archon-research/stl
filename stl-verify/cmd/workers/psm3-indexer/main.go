@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -78,12 +79,21 @@ func run(ctx context.Context, args []string) error {
 	fs.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
 
 	if *rpcURL == "" {
-		// Fallback: compose from ALCHEMY_HTTP_URL + ALCHEMY_API_KEY env vars.
+		// Fallback: compose from ALCHEMY_HTTP_URL + ALCHEMY_API_KEY env vars. Unlike
+		// the mainnet-only workers there is no default base URL, because psm3 runs on
+		// four chains and a mainnet default would silently index the wrong one.
 		alchemyHTTPURL := env.Get("ALCHEMY_HTTP_URL", "")
 		if alchemyHTTPURL == "" {
 			return fmt.Errorf("RPC endpoint not provided (use -rpc flag, ETH_RPC_URL or ALCHEMY_HTTP_URL+ALCHEMY_API_KEY env vars)")
 		}
-		*rpcURL = fmt.Sprintf("%s/%s", alchemyHTTPURL, env.Get("ALCHEMY_API_KEY", ""))
+		// The key is required for the same reason prime-debt-indexer requires it: an
+		// empty key composes a URL ending in "/" that dials fine and then 401s on
+		// every call, which is indistinguishable from an RPC outage.
+		alchemyAPIKey := env.Get("ALCHEMY_API_KEY", "")
+		if alchemyAPIKey == "" {
+			return fmt.Errorf("ALCHEMY_API_KEY is required when composing the RPC endpoint from ALCHEMY_HTTP_URL")
+		}
+		*rpcURL = fmt.Sprintf("%s/%s", strings.TrimRight(alchemyHTTPURL, "/"), alchemyAPIKey)
 	}
 
 	if *queueURL == "" {
@@ -166,7 +176,7 @@ func run(ctx context.Context, args []string) error {
 	defer sqsConsumer.Close()
 
 	// PostgreSQL
-	pool, err := postgres.OpenPool(ctx, postgres.DefaultDBConfig(*dbURL))
+	pool, err := postgres.OpenPool(ctx, postgres.WorkerDBConfig(*dbURL))
 	if err != nil {
 		return fmt.Errorf("database: %w", err)
 	}
