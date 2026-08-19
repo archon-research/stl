@@ -349,8 +349,8 @@ func TestCollectPartitionV2Logs_ConcurrentDownloadsPreserveBlockOrder(t *testing
 }
 
 // TestCollectPartitionV2Logs_BoundsConcurrencyToWorkers: the pool size comes from
-// -goroutines, so an unbounded fan-out over a 1000-block partition cannot open a
-// thousand simultaneous S3 downloads.
+// BACKFILL_GOROUTINES, so an unbounded fan-out over a 1000-block partition cannot
+// open a thousand simultaneous S3 downloads.
 func TestCollectPartitionV2Logs_BoundsConcurrencyToWorkers(t *testing.T) {
 	ctx := context.Background()
 	const from, to = int64(100), int64(139)
