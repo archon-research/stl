@@ -11,6 +11,7 @@ include lint.mk
 		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-fluid-vault-indexer-internal _docker-release-dex-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal _docker-release-psm3-indexer-internal _docker-release-cex-orderbook-indexer-internal _docker-release-migrate-internal _docker-release-python-api-internal _docker-release-transform-bootstrap-internal _docker-release-cronjob-%-internal \
 		docker-build-offchain-price-backfill docker-release-offchain-price-backfill _docker-release-offchain-price-backfill-internal \
 		docker-build-reference-capital-backfill docker-release-reference-capital-backfill _docker-release-reference-capital-backfill-internal \
+		docker-build-morpho-vault-backfill docker-release-morpho-vault-backfill _docker-release-morpho-vault-backfill-internal \
 		build-backfiller-% run-backfiller-% \
         docker-build-watcher docker-push-watcher docker-release-watcher \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
@@ -766,7 +767,19 @@ dev-env:
 		"ALCHEMY_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2" \
 		"BUILD_GIT_HASH=dev" \
 		"LOG_LEVEL=debug" \
-		> cmd/cronjobs/morpho-v2-bootstrap/.env
+		> cmd/cronjobs/morpho-v2-bootstrap/.env; \
+	printf '%s\n' \
+		"CHAIN_ID=1" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
+		"TEMPORAL_HOST_PORT=127.0.0.1:7233" \
+		"TEMPORAL_NAMESPACE=vector" \
+		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
+		"ALCHEMY_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2" \
+		"S3_BUCKET=stl-sentinelstaging-ethereum-raw-89d540d0" \
+		"AWS_REGION=eu-west-1" \
+		"BUILD_GIT_HASH=dev" \
+		"LOG_LEVEL=debug" \
+		> cmd/backfillers/morpho-vault-backfill/.env
 	@echo "Environment files generated (.env.secrets updated)."; \
 	MISSING=""; \
 	for key in ALCHEMY_API_KEY COINGECKO_API_KEY ETHERSCAN_API_KEY ANCHORAGE_API_KEY; do \
@@ -1090,6 +1103,7 @@ docker-release-all:
 	@$(MAKE) _docker-release-offchain-price-backfill-internal ENV=$(ENV)
 	@echo ""
 	@$(MAKE) _docker-release-reference-capital-backfill-internal ENV=$(ENV)
+	@$(MAKE) _docker-release-morpho-vault-backfill-internal ENV=$(ENV)
 	@echo ""
 	@for cj in $(CRONJOBS); do \
 		$(MAKE) _docker-release-cronjob-$$cj-internal ENV=$(ENV) || { echo "ERROR: Failed to release cronjob $$cj"; exit 1; }; \
@@ -2282,6 +2296,18 @@ docker-release-offchain-price-backfill: ecr-login _docker-release-offchain-price
 
 _docker-release-offchain-price-backfill-internal:
 	@$(MAKE) _docker-release-go-service GO_NAME="Offchain Price Backfill" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/backfillers/offchain-price-backfill GO_BIN=offchain-price-backfill GO_CACHE_KEY="cronjob-offchain-price-backfill" GO_TAG="offchain-price-backfill-$(IMAGE_TAG)" GO_LATEST_TAG="offchain-price-backfill-latest"
+
+# morpho-vault-backfill (VEC-218): the on-demand Morpho vault + VaultV2 replay
+# backfill. Same lifecycle as offchain-price-backfill above — a long-running
+# worker Deployment that polls its task queue and waits for a run to be started
+# from the Temporal UI — so it needs the same explicit release wiring.
+docker-build-morpho-vault-backfill:
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/morpho-vault-backfill --build-arg BIN=morpho-vault-backfill -t stl-morpho-vault-backfill:local -f Dockerfile.common .
+
+docker-release-morpho-vault-backfill: ecr-login _docker-release-morpho-vault-backfill-internal
+
+_docker-release-morpho-vault-backfill-internal:
+	@$(MAKE) _docker-release-go-service GO_NAME="Morpho Vault Backfill" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/backfillers/morpho-vault-backfill GO_BIN=morpho-vault-backfill GO_CACHE_KEY="cronjob-morpho-vault-backfill" GO_TAG="morpho-vault-backfill-$(IMAGE_TAG)" GO_LATEST_TAG="morpho-vault-backfill-latest"
 
 kind-load-cronjobs:
 	@$(MAKE) --no-print-directory kind-load-images IMAGES="$(foreach cj,$(CRONJOBS),stl-$(cj):$(LOCAL_TAG))"
