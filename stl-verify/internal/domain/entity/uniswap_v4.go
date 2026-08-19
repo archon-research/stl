@@ -99,8 +99,9 @@ func requireBigInt(field string, v *big.Int) error {
 
 // UniswapV4PoolState is a per-touched-block snapshot of one pool's StateView
 // slot0, liquidity and global fee growth. LpFee is only refreshed on blocks the
-// pool is touched: updateDynamicLPFee emits no event, so a dynamic-fee pool's
-// fee can move unobserved between snapshots.
+// pool is touched, which is sound only for static-fee pools: updateDynamicLPFee
+// emits no event, so dynamic-fee pools are refused at boot (ValidatePoolKeys)
+// until lp_fee has a refresh path.
 type UniswapV4PoolState struct {
 	PoolID               int64 // uniswap_v4_pool surrogate id
 	BlockNumber          int64
@@ -168,9 +169,12 @@ func (s *UniswapV4PoolState) validateProtocolFee() error {
 	return nil
 }
 
-// UniswapV4Swap is a PoolManager Swap event. Amount0/Amount1 are the swapper's
-// BalanceDelta — negative was paid into the PoolManager, positive was received —
-// the inverse of the pool-perspective signs on UniswapV3Swap.
+// UniswapV4Swap is a PoolManager Swap event. Amount0/Amount1 are the pool's swap
+// BalanceDelta as emitted — negative is owed to the PoolManager, positive is
+// owed to the swapper — the inverse of the pool-perspective signs on
+// UniswapV3Swap. PoolManager emits the delta before afterSwap applies any hook
+// delta, so it equals what the swapper settled only when the pool's hooks carry
+// no *_RETURNS_DELTA permission.
 type UniswapV4Swap struct {
 	PoolID         int64 // uniswap_v4_pool surrogate id
 	BlockNumber    int64

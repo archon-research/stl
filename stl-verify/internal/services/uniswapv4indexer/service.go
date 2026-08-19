@@ -14,6 +14,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/dextelemetry"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/tickbitmap"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/dexconsumer"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
@@ -80,14 +81,16 @@ func (d UniswapV4ServiceDeps) validate() error {
 
 // NewUniswapV4Service validates deps and builds a UniswapV4Service. It refuses
 // to boot on an empty registry, on a registry whose PoolIds disagree with their
-// keys (see ValidatePoolKeys), or on one spanning more than one PoolManager:
-// each would silently produce an indexer that never matches a log.
+// keys or which registers a dynamic-fee pool (see ValidatePoolKeys), or on one
+// spanning more than one PoolManager: each would leave an indexer that looks
+// healthy while silently writing wrong or no rows.
 //
-// The snapshot tracker is built with sweepBlocks=0: V4 pool state is
-// piecewise-constant between touches — every field this indexer snapshots
-// changes only through a PoolManager log keyed by the pool's own PoolId — so
-// unlike Curve there is no periodic heartbeat snapshot to keep quiet pools
-// fresh.
+// The snapshot tracker is built with sweepBlocks=0: for a static-fee pool V4
+// state is piecewise-constant between touches — every field this indexer
+// snapshots changes only through a PoolManager log keyed by the pool's own
+// PoolId — so unlike Curve there is no periodic heartbeat snapshot to keep quiet
+// pools fresh. That is exactly why ValidatePoolKeys refuses dynamic-fee pools:
+// their lp_fee has no log to ride on, and no sweep to fall back to.
 func NewUniswapV4Service(deps UniswapV4ServiceDeps) (*UniswapV4Service, error) {
 	if err := deps.validate(); err != nil {
 		return nil, err
@@ -176,26 +179,28 @@ func (s *UniswapV4Service) BlockHandler() dexconsumer.BlockHandler {
 // redelivery; nil is returned only after a successful commit. All per-block
 // state is local, so a redelivery reprocesses from scratch with no carryover.
 func (s *UniswapV4Service) handleBlock(ctx context.Context, event outbound.BlockEvent, receipts []shared.TransactionReceipt) error {
-	bn := event.BlockNumber
-	ver := event.Version
-	ts := time.Unix(event.BlockTimestamp, 0).UTC()
-
 	blockHash, err := event.ParsedBlockHash()
 	if err != nil {
 		return err
 	}
+	coords := blockCoords{
+		hash:    blockHash,
+		number:  event.BlockNumber,
+		version: event.Version,
+		ts:      time.Unix(event.BlockTimestamp, 0).UTC(),
+	}
 
-	acc, err := s.decodeBlockEvents(ctx, receipts, bn, ver, ts)
+	acc, err := s.decodeBlockEvents(ctx, receipts, coords.number, coords.version, coords.ts)
 	if err != nil {
 		return err
 	}
 
-	dueSet, err := s.dueSetForBlock(ctx, acc.touchedIDs, bn, ver)
+	dueSet, err := s.dueSetForBlock(ctx, acc.touchedIDs, coords.number, coords.version)
 	if err != nil {
 		return err
 	}
 
-	states, ticks, baselined, err := s.snapshotDueSet(ctx, dueSet, acc, blockHash, bn, ver, ts)
+	states, ticks, baselined, err := s.snapshotDueSet(ctx, dueSet, acc, coords)
 	if err != nil {
 		return err
 	}
@@ -204,14 +209,14 @@ func (s *UniswapV4Service) handleBlock(ctx context.Context, event outbound.Block
 		return nil
 	}
 
-	writes, capturedIns := s.buildBlockWrites(acc, states, ticks, bn, ver, ts)
+	writes, capturedIns := s.buildBlockWrites(acc, states, ticks, coords.number, coords.version, coords.ts)
 
-	stateRows, err := s.persistBlock(ctx, writes, capturedIns, bn)
+	stateRows, err := s.persistBlock(ctx, writes, capturedIns, coords.number)
 	if err != nil {
 		return err
 	}
 
-	s.markSnapshotted(dueSet, baselined, bn, ver)
+	s.markSnapshotted(dueSet, baselined, coords.number, coords.version)
 	// Recorded only after a successful commit, so the alerts compare pools this
 	// block touched against the rows that same block persisted.
 	s.telemetry.RecordPoolsTouched(ctx, len(acc.touchedIDs))
@@ -263,6 +268,17 @@ func (s *UniswapV4Service) withRegisteredPools(due []RegisteredPool, ids []int64
 	return due, nil
 }
 
+// blockCoords is the block identity a hash-pinned read needs: the hash the read
+// is pinned to plus the height/version/timestamp its rows are stamped with. It
+// travels as one value so the snapshot helpers take the pool and the work
+// instead of repeating a four-argument tail (same shape as receiptDecoder).
+type blockCoords struct {
+	hash    common.Hash
+	number  int64
+	version int
+	ts      time.Time
+}
+
 type blockAccumulators struct {
 	swaps      []*entity.UniswapV4Swap
 	liquidity  []*entity.UniswapV4LiquidityEvent
@@ -307,24 +323,24 @@ func (s *UniswapV4Service) decodeBlockEvents(ctx context.Context, receipts []sha
 }
 
 // snapshotDueSet reads each due pool's state and tick rows via multicall,
-// pinned to blockHash so the read cannot silently answer from a post-reorg
+// pinned to coords.hash so the read cannot silently answer from a post-reorg
 // fork. It must run BEFORE the DB transaction opens, so archive-RPC latency
 // never pins a pgx connection (pool exhaustion is a stall cause). Returns the
 // pool IDs whose baseline ticks were read this call, so the caller can mark
 // baselineSeen only after a successful persist.
-func (s *UniswapV4Service) snapshotDueSet(ctx context.Context, dueSet []RegisteredPool, acc blockAccumulators, blockHash common.Hash, bn int64, ver int, ts time.Time) ([]*entity.UniswapV4PoolState, []*entity.UniswapV4Tick, []int64, error) {
+func (s *UniswapV4Service) snapshotDueSet(ctx context.Context, dueSet []RegisteredPool, acc blockAccumulators, coords blockCoords) ([]*entity.UniswapV4PoolState, []*entity.UniswapV4Tick, []int64, error) {
 	var states []*entity.UniswapV4PoolState
 	var ticks []*entity.UniswapV4Tick
 	var baselined []int64
 
 	for _, pool := range dueSet {
-		state, err := SnapshotState(ctx, s.multicaller, pool, blockHash, bn, ver, ts)
+		state, err := SnapshotState(ctx, s.multicaller, pool, coords.hash, coords.number, coords.version, coords.ts)
 		if err != nil {
-			return nil, nil, nil, fmt.Errorf("snapshotting pool %s block %d: %w", pool.PoolIDHash, bn, err)
+			return nil, nil, nil, fmt.Errorf("snapshotting pool %s block %d: %w", pool.PoolIDHash, coords.number, err)
 		}
 		states = append(states, state)
 
-		poolTicks, isFirstSeen, err := s.snapshotPoolTicks(ctx, pool, blockHash, bn, ver, ts, acc.liqByPool[pool.ID])
+		poolTicks, isFirstSeen, err := s.snapshotPoolTicks(ctx, pool, coords, acc.liqByPool[pool.ID])
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -343,61 +359,54 @@ func (s *UniswapV4Service) snapshotDueSet(ctx context.Context, dueSet []Register
 // so a failed block re-enumerates the baseline on redelivery instead of
 // silently skipping it forever.
 //
-// On a reorg redelivery (ver > 0) it additionally re-reads every tick that
-// already has a row at this block height. dueSetForBlock re-snapshots a pool at
+// On a reorg redelivery (coords.version > 0) it additionally re-reads every
+// tick that already has a row at this block height. dueSetForBlock re-snapshots a pool at
 // (N, v_new) even when the new fork's receipts don't touch it, but TouchedTicks
 // is then empty and the baseline (bitmap scan) only enumerates ticks still
 // initialized on v_new — so a tick initialized only on the orphaned fork would
 // never be re-read and its stale (N, v0) row would stay canonical-latest
-// forever. Re-reading the prior version's ticks at blockHash produces a
+// forever. Re-reading the prior version's ticks at coords.hash produces a
 // superseding (N, v_new) row for each: a now-cleared tick reads back zeroed
 // (getTickInfo never reverts), a still-initialized one gets its v_new value.
-func (s *UniswapV4Service) snapshotPoolTicks(ctx context.Context, pool RegisteredPool, blockHash common.Hash, bn int64, ver int, ts time.Time, liqEvents []*entity.UniswapV4LiquidityEvent) ([]*entity.UniswapV4Tick, bool, error) {
+func (s *UniswapV4Service) snapshotPoolTicks(ctx context.Context, pool RegisteredPool, coords blockCoords, liqEvents []*entity.UniswapV4LiquidityEvent) ([]*entity.UniswapV4Tick, bool, error) {
 	ticksToRead := TouchedTicks(liqEvents)
 
 	isFirstSeen := !s.baselineSeen[pool.ID]
 	if isFirstSeen {
-		baseline, err := BaselineTicks(ctx, s.multicaller, pool, blockHash)
+		baseline, err := BaselineTicks(ctx, s.multicaller, pool, coords.hash)
 		if err != nil {
-			return nil, false, fmt.Errorf("enumerating baseline ticks for pool %s block %d: %w", pool.PoolIDHash, bn, err)
+			return nil, false, fmt.Errorf("enumerating baseline ticks for pool %s block %d: %w", pool.PoolIDHash, coords.number, err)
 		}
-		ticksToRead = mergeTickSets(ticksToRead, baseline)
+		ticksToRead = tickbitmap.MergeTickSets(ticksToRead, baseline)
 	}
 
-	if ver > 0 {
-		prior, err := s.repo.TicksForPoolAtBlock(ctx, pool.ID, bn)
+	if coords.version > 0 {
+		prior, err := s.repo.TicksForPoolAtBlock(ctx, pool.ID, coords.number)
 		if err != nil {
-			return nil, false, fmt.Errorf("reading prior-version ticks for pool %s block %d: %w", pool.PoolIDHash, bn, err)
+			return nil, false, fmt.Errorf("reading prior-version ticks for pool %s block %d: %w", pool.PoolIDHash, coords.number, err)
 		}
-		ticksToRead = mergeTickSets(ticksToRead, prior)
+		ticksToRead = tickbitmap.MergeTickSets(ticksToRead, prior)
 	}
 
-	rows, err := s.readTicks(ctx, pool, blockHash, bn, ver, ts, ticksToRead)
+	rows, err := s.readTicks(ctx, pool, coords, ticksToRead)
 	if err != nil {
 		return nil, false, err
 	}
 	return rows, isFirstSeen, nil
 }
 
-// ticksPerCall bounds how many getTickInfo sub-calls readTicks packs into a
-// single multicall3 aggregate call. A dense pool's first touch can enumerate
-// O(10³) initialized ticks; sending them all in one aggregate call risks
-// exceeding an RPC provider's request/response/gas caps, the same worst case
-// BaselineTicks chunks against.
-const ticksPerCall = 500
-
 // readTicks reads the given tick positions in bounded multicall batches (see
-// ticksPerCall), decoding every result into an authoritative
+// tickbitmap.TicksPerCall), decoding every result into an authoritative
 // entity.UniswapV4Tick. Batches are issued in order and their rows concatenated
 // so the returned slice stays aligned with ticksToRead.
-func (s *UniswapV4Service) readTicks(ctx context.Context, pool RegisteredPool, blockHash common.Hash, bn int64, ver int, ts time.Time, ticksToRead []int32) ([]*entity.UniswapV4Tick, error) {
+func (s *UniswapV4Service) readTicks(ctx context.Context, pool RegisteredPool, coords blockCoords, ticksToRead []int32) ([]*entity.UniswapV4Tick, error) {
 	if len(ticksToRead) == 0 {
 		return nil, nil
 	}
 
 	rows := make([]*entity.UniswapV4Tick, 0, len(ticksToRead))
-	for chunk := range slices.Chunk(ticksToRead, ticksPerCall) {
-		chunkRows, err := s.readTickChunk(ctx, pool, blockHash, bn, ver, ts, chunk)
+	for chunk := range slices.Chunk(ticksToRead, tickbitmap.TicksPerCall) {
+		chunkRows, err := s.readTickChunk(ctx, pool, coords, chunk)
 		if err != nil {
 			return nil, err
 		}
@@ -408,47 +417,28 @@ func (s *UniswapV4Service) readTicks(ctx context.Context, pool RegisteredPool, b
 
 // readTickChunk issues one getTickInfo multicall for a single bounded batch of
 // tick positions and decodes every result positionally.
-func (s *UniswapV4Service) readTickChunk(ctx context.Context, pool RegisteredPool, blockHash common.Hash, bn int64, ver int, ts time.Time, chunk []int32) ([]*entity.UniswapV4Tick, error) {
+func (s *UniswapV4Service) readTickChunk(ctx context.Context, pool RegisteredPool, coords blockCoords, chunk []int32) ([]*entity.UniswapV4Tick, error) {
 	calls, err := BuildTickCalls(pool, chunk)
 	if err != nil {
-		return nil, fmt.Errorf("building tick calls for pool %s block %d: %w", pool.PoolIDHash, bn, err)
+		return nil, fmt.Errorf("building tick calls for pool %s block %d: %w", pool.PoolIDHash, coords.number, err)
 	}
-	results, err := s.multicaller.ExecuteAtHash(ctx, calls, blockHash)
+	results, err := s.multicaller.ExecuteAtHash(ctx, calls, coords.hash)
 	if err != nil {
-		return nil, fmt.Errorf("executing tick multicall for pool %s block %d: %w", pool.PoolIDHash, bn, err)
+		return nil, fmt.Errorf("executing tick multicall for pool %s block %d: %w", pool.PoolIDHash, coords.number, err)
 	}
 	if len(results) != len(chunk) {
-		return nil, fmt.Errorf("pool %s block %d: got %d tick results, want %d", pool.PoolIDHash, bn, len(results), len(chunk))
+		return nil, fmt.Errorf("pool %s block %d: got %d tick results, want %d", pool.PoolIDHash, coords.number, len(results), len(chunk))
 	}
 
 	rows := make([]*entity.UniswapV4Tick, 0, len(chunk))
 	for i, tick := range chunk {
-		row, err := DecodeTick(pool, tick, bn, ver, ts, results[i])
+		row, err := DecodeTick(pool, tick, coords.number, coords.version, coords.ts, results[i])
 		if err != nil {
-			return nil, fmt.Errorf("decoding tick %d for pool %s block %d: %w", tick, pool.PoolIDHash, bn, err)
+			return nil, fmt.Errorf("decoding tick %d for pool %s block %d: %w", tick, pool.PoolIDHash, coords.number, err)
 		}
 		rows = append(rows, row)
 	}
 	return rows, nil
-}
-
-// mergeTickSets returns the deduplicated, ascending-sorted union of two tick
-// sets: the pool's first-touch persist must write every initialized tick
-// exactly once, even where the baseline and this block's own bounds overlap.
-func mergeTickSets(a, b []int32) []int32 {
-	seen := make(map[int32]struct{}, len(a)+len(b))
-	out := make([]int32, 0, len(a)+len(b))
-	for _, set := range [][]int32{a, b} {
-		for _, tick := range set {
-			if _, ok := seen[tick]; ok {
-				continue
-			}
-			seen[tick] = struct{}{}
-			out = append(out, tick)
-		}
-	}
-	slices.Sort(out)
-	return out
 }
 
 // buildBlockWrites runs before the transaction opens, so any future conversion

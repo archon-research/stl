@@ -22,9 +22,11 @@ const (
 	poolManagerAddr = "0x000000000004444c5dc75cB358380D2e3dE08A90"
 	stateViewAddr   = "0x7fFE42C4a5DEeA5b0feC41C94C136Cf115597227"
 	// PoolIds of the real mainnet logs replayed as decode fixtures.
-	swapFixturePoolID   = "0xb86b55a845bae916f4d6b15087ec7f734276714652182f929817a8a177d3f837"
-	modifyFixturePoolID = "0x5244a02f00c673477f6bf1aef0f6b7f4af9cf50ebc22339f20a64f8a8cecba25"
-	fixtureTxHash       = "0xfeed000000000000000000000000000000000000000000000000000000000001"
+	swapFixturePoolID     = "0xb86b55a845bae916f4d6b15087ec7f734276714652182f929817a8a177d3f837"
+	modifyFixturePoolID   = "0x5244a02f00c673477f6bf1aef0f6b7f4af9cf50ebc22339f20a64f8a8cecba25"
+	donateFixturePoolID   = "0xbd5baafef9eb4fcbc7e592b1b8e14d4a03716c705517baab4121a67b47017b97"
+	protoFeeFixturePoolID = "0x864c2a36e2b28626149a99c3bd72fa57b197c15be63c7b7212d8095455edb090"
+	fixtureTxHash         = "0xfeed000000000000000000000000000000000000000000000000000000000001"
 )
 
 var blockTS = time.Unix(1700000000, 0).UTC()
@@ -277,6 +279,40 @@ func TestDecodeEvents_ModifyLiquidity(t *testing.T) {
 	}
 }
 
+// TestDecodeEvents_CapturesBytes32FieldsAsHex pins the capture net's encoding of
+// the ABI kind go-ethereum decodes as a bare [32]byte: a decimal byte array
+// would leave params->>'id' unjoinable against uniswap_v4_pool.pool_id.
+func TestDecodeEvents_CapturesBytes32FieldsAsHex(t *testing.T) {
+	pool := decodeTestPool(11, modifyFixturePoolID)
+	got, _ := decodeFixture(t, modifyLiquidityFixtureLog(), poolsByIDOf(pool))
+
+	if len(got.Captured) != 1 {
+		t.Fatalf("Captured = %d, want 1", len(got.Captured))
+	}
+	params := decodePayload(t, got.Captured[0].Payload)
+
+	tests := []struct {
+		key  string
+		want string
+	}{
+		{key: "id", want: modifyFixturePoolID},
+		{key: "salt", want: "0xb219073c4ff49f0783bdeaf4d0e56adae19d2a87a11c63be935f1c021f923b4b"},
+	}
+	for _, tt := range tests {
+		got, ok := params[tt.key].(string)
+		if !ok {
+			t.Errorf("params[%q] = %v (%T), want a hex string", tt.key, params[tt.key], params[tt.key])
+			continue
+		}
+		if got != tt.want {
+			t.Errorf("params[%q] = %q, want %q", tt.key, got, tt.want)
+		}
+		if len(got) != 66 {
+			t.Errorf("params[%q] = %q, want 0x plus 64 hex digits", tt.key, got)
+		}
+	}
+}
+
 // initializeFixtureLog is a verbatim mainnet Initialize log for the ETH/wstETH
 // 0.01% pool: native ETH as currency0, tickSpacing 1, no hooks, opening tick
 // -1750.
@@ -321,6 +357,7 @@ func TestDecodeEvents_Initialize(t *testing.T) {
 		"currency0":    "0x0000000000000000000000000000000000000000",
 		// common.Address marshals through hexutil, i.e. lowercase, not EIP-55.
 		"currency1": strings.ToLower(wstethAddress),
+		"id":        ethWstethPoolID,
 	}
 	for key, want := range wantParams {
 		if params[key] != want {
@@ -332,49 +369,94 @@ func TestDecodeEvents_Initialize(t *testing.T) {
 	}
 }
 
-func TestDecodeEvents_Donate(t *testing.T) {
-	pool := decodeTestPool(4, ethWstethPoolID)
-	sender := common.HexToAddress("0x1111111111111111111111111111111111111111")
-	log := buildLog(t, "Donate",
-		[]common.Hash{common.HexToHash(ethWstethPoolID), addrTopic(sender)},
-		big.NewInt(1000), big.NewInt(2000),
+// donateFixtureLog is a verbatim mainnet Donate log: 1528 wei of currency0 and
+// nothing of currency1, so the fixture also pins which amount is which.
+func donateFixtureLog() shared.Log {
+	return rawLog(
+		[]string{
+			"0x29ef05caaff9404b7cb6d1c0e9bbae9eaa7ab2541feba1a9c4248594c08156cb",
+			donateFixturePoolID,
+			"0x0000000000000000000000007f6a0f0612d9e3a08bcd16772524d14bfa518888",
+		},
+		"0x00000000000000000000000000000000000000000000000000000000000005f8"+
+			"0000000000000000000000000000000000000000000000000000000000000000",
+		"0x2f1",
 	)
+}
 
-	got, touched := decodeFixture(t, log, poolsByIDOf(pool))
+func TestDecodeEvents_Donate(t *testing.T) {
+	pool := decodeTestPool(4, donateFixturePoolID)
+
+	got, touched := decodeFixture(t, donateFixtureLog(), poolsByIDOf(pool))
 
 	if len(got.PoolEvents) != 1 {
 		t.Fatalf("PoolEvents = %d, want 1", len(got.PoolEvents))
 	}
 	ev := got.PoolEvents[0]
+	if err := ev.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
 	if ev.EventName != entity.UniswapV4PoolEventDonate {
 		t.Errorf("EventName = %q, want %q", ev.EventName, entity.UniswapV4PoolEventDonate)
 	}
+	if ev.LogIndex != 753 {
+		t.Errorf("LogIndex = %d, want 753", ev.LogIndex)
+	}
 	params := decodePayload(t, ev.Params)
-	if params["amount0"] != "1000" || params["amount1"] != "2000" {
-		t.Errorf("params = %v, want amount0=1000 amount1=2000", params)
+	wantParams := map[string]any{
+		"id":      donateFixturePoolID,
+		"sender":  "0x7f6a0f0612d9e3a08bcd16772524d14bfa518888",
+		"amount0": "1528",
+		"amount1": "0",
+	}
+	for key, want := range wantParams {
+		if params[key] != want {
+			t.Errorf("params[%q] = %v, want %v", key, params[key], want)
+		}
 	}
 	if !touched[pool.ID] {
 		t.Errorf("touched = %v, want pool %d marked", touched, pool.ID)
 	}
 }
 
-func TestDecodeEvents_ProtocolFeeUpdated(t *testing.T) {
-	pool := decodeTestPool(5, ethWstethPoolID)
-	log := buildLog(t, "ProtocolFeeUpdated",
-		[]common.Hash{common.HexToHash(ethWstethPoolID)},
-		big.NewInt(1000),
+// protocolFeeUpdatedFixtureLog is a verbatim mainnet ProtocolFeeUpdated log:
+// 0x3e83e8 packs the maximum 1000 pips in both 12-bit halves.
+func protocolFeeUpdatedFixtureLog() shared.Log {
+	return rawLog(
+		[]string{
+			"0xe9c42593e71f84403b84352cd168d693e2c9fcd1fdbcc3feb21d92b43e6696f9",
+			protoFeeFixturePoolID,
+		},
+		"0x00000000000000000000000000000000000000000000000000000000003e83e8",
+		"0x1aa",
 	)
+}
 
-	got, _ := decodeFixture(t, log, poolsByIDOf(pool))
+func TestDecodeEvents_ProtocolFeeUpdated(t *testing.T) {
+	pool := decodeTestPool(5, protoFeeFixturePoolID)
+
+	got, touched := decodeFixture(t, protocolFeeUpdatedFixtureLog(), poolsByIDOf(pool))
 
 	if len(got.PoolEvents) != 1 {
 		t.Fatalf("PoolEvents = %d, want 1", len(got.PoolEvents))
 	}
-	if got.PoolEvents[0].EventName != entity.UniswapV4PoolEventProtocolFeeUpdated {
-		t.Errorf("EventName = %q, want %q", got.PoolEvents[0].EventName, entity.UniswapV4PoolEventProtocolFeeUpdated)
+	ev := got.PoolEvents[0]
+	if err := ev.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
 	}
-	if params := decodePayload(t, got.PoolEvents[0].Params); params["protocolFee"] != "1000" {
-		t.Errorf("params.protocolFee = %v, want 1000", params["protocolFee"])
+	if ev.EventName != entity.UniswapV4PoolEventProtocolFeeUpdated {
+		t.Errorf("EventName = %q, want %q", ev.EventName, entity.UniswapV4PoolEventProtocolFeeUpdated)
+	}
+	if ev.LogIndex != 426 {
+		t.Errorf("LogIndex = %d, want 426", ev.LogIndex)
+	}
+	params := decodePayload(t, ev.Params)
+	// 1000 pips zeroForOne in the low 12 bits, 1000 oneForZero in the high 12.
+	if params["protocolFee"] != "4097000" || params["id"] != protoFeeFixturePoolID {
+		t.Errorf("params = %v, want protocolFee=4097000 id=%s", params, protoFeeFixturePoolID)
+	}
+	if !touched[pool.ID] {
+		t.Errorf("touched = %v, want pool %d marked", touched, pool.ID)
 	}
 }
 

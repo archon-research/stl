@@ -27,6 +27,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/tickbitmap"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/dexconsumer"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
@@ -972,7 +973,7 @@ func readAllTicks(t *testing.T, ctx context.Context, mc outbound.Multicaller, po
 	t.Helper()
 
 	rows := make([]*entity.UniswapV4Tick, 0, len(ticks))
-	for chunk := range slices.Chunk(ticks, ticksPerCall) {
+	for chunk := range slices.Chunk(ticks, tickbitmap.TicksPerCall) {
 		calls, err := BuildTickCalls(pool, chunk)
 		if err != nil {
 			t.Fatalf("BuildTickCalls(baseline chunk): %v", err)

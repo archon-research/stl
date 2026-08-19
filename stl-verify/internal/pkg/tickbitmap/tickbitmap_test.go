@@ -2,6 +2,7 @@ package tickbitmap
 
 import (
 	"fmt"
+	"slices"
 	"testing"
 )
 
@@ -93,5 +94,26 @@ func TestWordBounds_CoversUsableRange(t *testing.T) {
 				t.Errorf("WordBounds(%d) spans %d words, want far fewer than a full int16 scan", tickSpacing, words)
 			}
 		})
+	}
+}
+
+// TestMergeTickSets_DedupsAndSortsOverlappingRanges pins the union both
+// indexers rely on: a first-touch persist must write each initialized tick once
+// even when the bitmap baseline and the block's own bounds interleave.
+func TestMergeTickSets_DedupsAndSortsOverlappingRanges(t *testing.T) {
+	touched := []int32{180, -120}
+	baseline := []int32{60, -120, 300}
+
+	got := MergeTickSets(touched, baseline)
+
+	want := []int32{-120, 60, 180, 300}
+	if !slices.Equal(got, want) {
+		t.Errorf("MergeTickSets() = %v, want %v", got, want)
+	}
+}
+
+func TestMergeTickSets_EmptyInputs(t *testing.T) {
+	if got := MergeTickSets(nil, nil); len(got) != 0 {
+		t.Errorf("MergeTickSets(nil, nil) = %v, want empty", got)
 	}
 }

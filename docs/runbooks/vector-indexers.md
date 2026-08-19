@@ -1401,10 +1401,16 @@ Pool state is not read from the pool (there isn't one). It is read from the
 (`ExecuteAtHash`), never by block number.
 
 Like `uniswap-v3-indexer` and unlike `curve-indexer` there is no periodic sweep
-(`SnapshotTracker(0)`): V4 pool state can only change through a PoolManager log
-keyed by PoolId, so `handleBlock` decodes events per block, derives the touched
-pool set via `dexconsumer.DueSet`, and snapshots only those pools before the
-transaction commit. The reads are per pool, not per block: one `getSlot0` +
+(`SnapshotTracker(0)`): for a **static-fee** pool V4 state can only change
+through a PoolManager log keyed by PoolId, so `handleBlock` decodes events per
+block, derives the touched pool set via `dexconsumer.DueSet`, and snapshots only
+those pools before the transaction commit. The exception is the dynamic LP fee
+(`PoolKey.fee == 0x800000`): `updateDynamicLPFee` rewrites `slot0.lpFee` and
+emits nothing, so `uniswap_v4_pool_state.lp_fee` would go stale between touches.
+`ValidatePoolKeys` therefore refuses a dynamic-fee pool at boot (the worker
+crash-loops naming the pool) until `lp_fee` has a refresh path — see VEC-573.
+
+The reads are per pool, not per block: one `getSlot0` +
 `getLiquidity` + `getFeeGrowthGlobals` multicall for each due pool, then that
 pool's `getTickInfo` reads batched 500 positions per call (and, on a pool's
 first touch, a `getTickBitmap` baseline scan batched 500 words per call). A

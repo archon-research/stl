@@ -308,8 +308,8 @@ func TestBaselineTicks_ChunksWideWordRange(t *testing.T) {
 
 	minWord, maxWord := tickbitmap.WordBounds(pool.TickSpacing)
 	totalWords := int(maxWord) - int(minWord) + 1
-	if totalWords <= baselineTickBitmapWordsPerCall {
-		t.Fatalf("fixture invalid: %d words, want more than %d", totalWords, baselineTickBitmapWordsPerCall)
+	if totalWords <= tickbitmap.BitmapWordsPerCall {
+		t.Fatalf("fixture invalid: %d words, want more than %d", totalWords, tickbitmap.BitmapWordsPerCall)
 	}
 
 	var (
@@ -338,8 +338,8 @@ func TestBaselineTicks_ChunksWideWordRange(t *testing.T) {
 		t.Fatalf("batches = %d, want more than one for a %d-word range", len(batchSizes), totalWords)
 	}
 	for i, size := range batchSizes {
-		if size > baselineTickBitmapWordsPerCall {
-			t.Errorf("batch %d has %d calls, want at most %d", i, size, baselineTickBitmapWordsPerCall)
+		if size > tickbitmap.BitmapWordsPerCall {
+			t.Errorf("batch %d has %d calls, want at most %d", i, size, tickbitmap.BitmapWordsPerCall)
 		}
 	}
 	if len(seenWords) != totalWords {
