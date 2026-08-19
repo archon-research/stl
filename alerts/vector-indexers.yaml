@@ -1928,8 +1928,14 @@ groups:
 
   # uniswap-v4-indexer (VEC-475) — Uniswap V4 DEX pool/swap/liquidity indexer.
   # Runs via the unified dex-indexer binary (DEX=uniswap-v4); metric prefix
-  # uniswap_v4 (dextelemetry.NewTelemetry("uniswap_v4", ...) in
-  # cmd/workers/dex-indexer/factories.go).
+  # uniswap_v4, declared by uniswapV4Factory.MetricPrefix() in
+  # cmd/workers/dex-indexer/factories.go and passed to
+  # dextelemetry.NewTelemetry by dexbootstrap.Bootstrap
+  # (cmd/workers/internal/dexbootstrap/bootstrap.go).
+  #
+  # NOT DEPLOYED YET: the k8s workload (Deployment + SQS queue) lands in the
+  # stacked follow-up PR. Until it merges no uniswap_v4_* series exist, so none
+  # of these rules can fire.
   #
   # V4 is a SINGLETON: every pool lives inside one PoolManager contract
   # (mainnet 0x000000000004444c5dc75cB358380D2e3dE08A90) and is identified by a
@@ -1995,10 +2001,10 @@ groups:
 
       - alert: VectorUniswapV4IndexerBlockLatencyHigh
         # Block processing p99 >3s for 15m. Sustained high latency means the
-        # StateView read path (the DueSet snapshot multicall: getSlot0 +
-        # getLiquidity + getFeeGrowthGlobals per due pool, plus getTickInfo /
-        # getTickBitmap for touched ticks) is degraded, or event decoding /
-        # persistence is blocking.
+        # StateView read path (one getSlot0 + getLiquidity + getFeeGrowthGlobals
+        # multicall per due pool, then that pool's getTickInfo reads and any
+        # getTickBitmap baseline scan in batches of 500) is degraded, or event
+        # decoding / persistence is blocking.
         #
         # Histogram `uniswap_v4.block.duration_seconds` (OTel instrument, with
         # explicit seconds-scale buckets set in dextelemetry.NewTelemetry —
@@ -2030,19 +2036,19 @@ groups:
 
       - alert: VectorUniswapV4IndexerNotWritingState
         # Silent-empty guard, HALF ONE of two: pools WERE touched by decoded
-        # PoolManager events, but no state/tick snapshot rows came out the
-        # other side. The error path will NOT catch a due-set that goes
-        # quietly empty (DueSet returning nothing for a touched pool, every
-        # snapshotDueSet call no-opping, or every state INSERT hitting ON
-        # CONFLICT DO NOTHING) — there is no error, just no rows. This alert
-        # catches that.
+        # PoolManager events, but no pool-state snapshot rows came out the other
+        # side. The error path will NOT catch that: a snapshotDueSet call that
+        # no-ops, or state INSERTs that all hit ON CONFLICT DO NOTHING, raise no
+        # error — there are simply no rows. (DueSet itself is not one of the
+        # silent paths: a touched pool it cannot resolve, or one below its
+        # deploy_block, is a hard error and surfaces as ErrorsHigh/Stalled.)
         #
         # It deliberately does NOT catch a touched-pool set that is always
-        # empty (dead registry, mis-seeded PoolId, PoolManager address
-        # regression): that zeroes this rule's own left side and makes it
-        # un-fireable. VectorUniswapV4IndexerNoPoolsTouched below is the other
-        # half, and covers exactly that class. The two are complementary;
-        # neither alone is the silent-empty guard.
+        # empty (mis-seeded pool key, PoolManager address regression): that
+        # zeroes this rule's own left side and makes it un-fireable.
+        # VectorUniswapV4IndexerNoPoolsTouched below is the other half, and
+        # covers exactly that class. The two are complementary; neither alone
+        # is the silent-empty guard.
         #
         # The left side gates on `uniswap_v4.pools.touched` (OTel) -> Prometheus
         # `uniswap_v4_pools_touched_total`, NOT on blocks processed. uniswap-v4
@@ -2085,10 +2091,11 @@ groups:
           description: |
             `uniswap-v4-indexer` on chain `{{ $labels.chain }}` has decoded
             PoolManager events touching registered PoolIds for 30m but written
-            zero state/tick snapshot rows. Pools are being touched, so this is
-            not a quiet market: the due-set (DueSet) is likely silently empty,
-            every snapshotDueSet call is no-opping, or every state INSERT is
-            hitting ON CONFLICT DO NOTHING.
+            zero pool-state snapshot rows (the counter tracks
+            uniswap_v4_pool_state inserts only, never ticks). Pools are being
+            touched, so this is not a quiet market: suspect snapshotDueSet
+            no-opping, or every state INSERT hitting ON CONFLICT DO NOTHING
+            (a replay of an already-indexed range under one build_id).
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4indexernotwritingstate
 
       - alert: VectorUniswapV4IndexerNoPoolsTouched
@@ -2096,23 +2103,25 @@ groups:
         # registered PoolId has been touched by a decoded PoolManager event.
         # Covers the class NotWritingState structurally cannot (it gates on
         # pools.touched, so an always-empty touched set makes its left side
-        # absent and un-fireable): an empty or mis-seeded pool registry for this
-        # chain, a wrong PoolManager address in uniswap_v4_pool_manager, a
+        # absent and un-fireable): a mis-seeded pool key for this chain (an
+        # empty registry cannot reach here — the factory refuses to boot with
+        # zero pools), a wrong PoolManager address in uniswap_v4_pool_manager, a
         # topics[1] / poolsByID lookup regression, or a pool set that has gone
         # entirely dead. None of these raise an error — blocks_processed keeps
         # advancing happily — so nothing else in this group would ever page.
         #
-        # 6h window, NOT 30m. This is the window that has to absorb a quiet
-        # market: a curated registry genuinely produces 30m stretches with zero
-        # touches (that is what made the old blocks-processed gate on
-        # NotWritingState a false positive; see its comment). 6h is a real
-        # signal for THIS registry because the seeded set includes the busiest
-        # mainnet V4 pools — ETH/wstETH and PYUSD/USDS — which do not go six
-        # hours without a swap; a chain or registry without that property would
-        # need its own window rather than this one. Detection is slower than a
-        # 30m rule, which is the correct trade: the failures this catches (dead
-        # registry, mis-seeded PoolId, wrong PoolManager) are persistent, not
-        # transient, and a rule that pages nightly on healthy data gets muted.
+        # 6h window, NOT 30m. The window is set by the FAILURE CLASS, not by a
+        # measured touch rate: every failure this catches (mis-seeded pool key,
+        # wrong PoolManager, poolsByID regression) is permanent — once the
+        # touched set is empty it stays empty until a registry row changes or a
+        # fix ships — so a wide window costs detection speed and no detections
+        # at all. The counter-pressure is false positives: a curated registry
+        # genuinely produces 30m stretches with zero touches (that is what made
+        # the old blocks-processed gate on NotWritingState a false positive; see
+        # its comment), and the seeded pools were picked for liquidity DEPTH,
+        # not for swap frequency, so their true quiet-period distribution is
+        # unmeasured. 6h buys margin against that. If a chain's registry proves
+        # quieter still, widen the window for that chain rather than silencing.
         #
         # `unless`, not `and … == 0`: RecordPoolsTouched no-ops for n<=0, so a
         # worker that never touches a pool never creates the series at all, and
@@ -2137,11 +2146,10 @@ groups:
           description: |
             `uniswap-v4-indexer` on chain `{{ $labels.chain }}` has processed
             blocks successfully for 6h without a single decoded PoolManager
-            event touching a registered PoolId. The seeded registry includes
-            the busiest mainnet V4 pools, so this is not a quiet market:
-            suspect an empty or mis-seeded pool registry for this chain, a
-            wrong PoolManager address, or a PoolId-matching regression in
-            poolsByID.
+            event touching a registered PoolId. Six hours of silence across the
+            whole registry points at a permanent matching failure rather than a
+            lull: suspect a mis-seeded pool key, a wrong PoolManager address,
+            or a PoolId-matching regression in poolsByID.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4indexernopoolstouched
 
   # CEX order book indexer (VEC-374). Streams L2 books from an exchange over a

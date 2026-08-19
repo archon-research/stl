@@ -1373,10 +1373,18 @@ touches is roughly 30x the worst observed quiet gap. It is not a lull.
 
 ## uniswap-v4-indexer (VEC-475)
 
+> **Not deployed yet.** The k8s workload for this indexer — its Deployment and
+> its SQS queue — lands in the stacked follow-up PR. Until that merges no
+> `uniswap_v4_*` series exist, so none of the alerts below can fire and the
+> `kubectl` commands in this section select nothing.
+
 Runs via the unified `dex-indexer` binary/image (`DEX=uniswap-v4`), metric prefix
-`uniswap_v4` (set by `uniswapV4Factory` in
-`cmd/workers/dex-indexer/factories.go`). Same shape as `uniswap-v3-indexer`, with
-one structural difference that changes every triage step below.
+`uniswap_v4` — declared by `uniswapV4Factory.MetricPrefix()` in
+`cmd/workers/dex-indexer/factories.go` and passed to `dextelemetry.NewTelemetry`
+by `dexbootstrap.Bootstrap`
+(`cmd/workers/internal/dexbootstrap/bootstrap.go`). Same shape as
+`uniswap-v3-indexer`, with one structural difference that changes every triage
+step below.
 
 **V4 is a singleton.** There is no per-pool contract: every pool lives inside one
 `PoolManager` (mainnet `0x000000000004444c5dc75cB358380D2e3dE08A90`, deployed at
@@ -1395,14 +1403,20 @@ Pool state is not read from the pool (there isn't one). It is read from the
 Like `uniswap-v3-indexer` and unlike `curve-indexer` there is no periodic sweep
 (`SnapshotTracker(0)`): V4 pool state can only change through a PoolManager log
 keyed by PoolId, so `handleBlock` decodes events per block, derives the touched
-pool set via `dexconsumer.DueSet`, and snapshots only those pools through one
-multicall before the transaction commit. A block with no Uniswap V4 activity
-legitimately writes zero state rows.
+pool set via `dexconsumer.DueSet`, and snapshots only those pools before the
+transaction commit. The reads are per pool, not per block: one `getSlot0` +
+`getLiquidity` + `getFeeGrowthGlobals` multicall for each due pool, then that
+pool's `getTickInfo` reads batched 500 positions per call (and, on a pool's
+first touch, a `getTickBitmap` baseline scan batched 500 words per call). A
+block with no Uniswap V4 activity legitimately writes zero state rows.
 
 **Tables:** `uniswap_v4_pool_state`, `uniswap_v4_swap`,
 `uniswap_v4_liquidity_event`, `uniswap_v4_tick`, `uniswap_v4_pool_event`.
-**Registry:** `uniswap_v4_pool` joined to `uniswap_v4_pool_manager` (which holds
-the PoolManager and StateView addresses and the chain filter).
+**Registry:** `uniswap_v4_pool`, keyed by `chain_id` + the 32-byte `pool_id`,
+plus `uniswap_v4_pool_manager`, which holds that chain's PoolManager and
+StateView addresses. There is no FK between them: both are append-only version
+histories matched on `chain_id`, and "current" always means the highest
+`processing_version` per natural key — never the newest `id` or `build_id`.
 
 Two invariants worth knowing before you debug anything here:
 
@@ -1412,8 +1426,8 @@ Two invariants worth knowing before you debug anything here:
   only signal that the registry is pointing at a PoolId that does not exist on
   chain. If you ever see that error in the logs, it is a registry bug, not an RPC
   blip.
-- **A mis-seeded PoolId cannot reach production silently.** The worker recomputes
-  `keccak256(abi.encode(PoolKey))` for every registry row at startup
+- **A PoolId that disagrees with its key cannot reach production.** The worker
+  recomputes `keccak256(abi.encode(PoolKey))` for every registry row at startup
   (`ValidatePoolKeys`) and refuses to boot on a mismatch. A pool whose *key* is
   right but whose *PoolId* is wrong is therefore impossible; a pool whose key is
   wrong (wrong currency, fee, tickSpacing, or hooks address) is self-consistent
@@ -1425,23 +1439,39 @@ Handy commands, used by several sections below.
 Registry, as the worker loads it:
 
 ```sql
+-- Current registry for chain 1. uniswap_v4_pool is an append-only version
+-- history keyed by (chain_id, pool_id), so the current row for a pool is its
+-- highest processing_version -- hence DISTINCT ON, not a plain SELECT.
 SELECT '0x' || encode(p.pool_id, 'hex')    AS pool_id,
        '0x' || encode(p.currency0, 'hex')  AS currency0,
        '0x' || encode(p.currency1, 'hex')  AS currency1,
        p.fee, p.tick_spacing,
        '0x' || encode(p.hooks, 'hex')      AS hooks,
-       p.deploy_block
-FROM uniswap_v4_pool p
-JOIN uniswap_v4_pool_manager m ON m.id = p.pool_manager_id
-WHERE m.chain_id = 1
+       p.deploy_block, p.processing_version
+FROM (
+    SELECT DISTINCT ON (pool_id) *
+    FROM uniswap_v4_pool
+    WHERE chain_id = 1
+    ORDER BY pool_id, processing_version DESC
+) p
 ORDER BY p.deploy_block;
 
-SELECT chain_id,
+-- uniswap_v4_pool_manager is versioned the same way, one current row per chain.
+SELECT DISTINCT ON (chain_id)
+       chain_id,
        '0x' || encode(pool_manager_address, 'hex') AS pool_manager,
        '0x' || encode(state_view_address, 'hex')   AS state_view,
-       deploy_block
-FROM uniswap_v4_pool_manager;
+       deploy_block, processing_version
+FROM uniswap_v4_pool_manager
+ORDER BY chain_id, processing_version DESC;
 ```
+
+The migration ships `uniswap_v4_pool_current` and
+`uniswap_v4_pool_manager_current`, views that apply exactly those `DISTINCT ON`
+picks, so `SELECT * FROM uniswap_v4_pool_current WHERE chain_id = 1` is the
+short form. Query the base tables without the wrapper to see a pool's full
+correction history — that is how you check whether a bad row has already been
+superseded.
 
 Recompute a PoolId from its key (this is exactly what `ValidatePoolKeys` does;
 the example is the seeded ETH/wstETH `fee=100, tickSpacing=1, hooks=0` pool):
@@ -1491,7 +1521,9 @@ going stale; no swaps, liquidity events, or tick updates are being recorded.
 3. **Did it ever start?** — a startup `ValidatePoolKeys` mismatch makes the
    worker exit rather than index a wrong pool, so a CrashLoopBackOff right after
    a migration or deploy is the registry refusing to load, not a runtime stall:
-   `kubectl -n vector logs -l app=uniswap-v4-indexer --previous | grep -i "pool key\|pool id"`
+   `kubectl -n vector logs -l app=uniswap-v4-indexer --previous | grep -E "registry bug|PoolId"`
+   (every `ValidatePoolKeys` rejection names `PoolId` and ends `: registry bug`;
+   `DueSet`'s runtime deploy-gate error carries the same `registry bug` suffix)
 4. **Upstream lag** — confirm the watcher is producing blocks for this chain
    (if not, the root cause is upstream — see `VectorWatcherNoBlocks`).
 5. **SQS queue depth** — check the uniswap-v4-indexer SQS queue. A depth of 0
@@ -1503,9 +1535,10 @@ going stale; no swaps, liquidity events, or tick updates are being recorded.
 ### Common causes
 
 - `ValidatePoolKeys` mismatch after a registry migration -> the recomputed
-  PoolId does not match the seeded one. Fix the migration row (recompute with
-  the `cast keccak` snippet above); the worker is doing its job by refusing to
-  boot.
+  PoolId does not match the seeded one. Recompute the id with the `cast keccak`
+  snippet above, then correct the registry by *appending* a superseding row
+  ([Fixing a bad registry row](#fixing-a-bad-registry-row)) — never by editing
+  the seeded one. The worker is doing its job by refusing to boot.
 - StateView reads failing hard (`AllowFailure=false` everywhere, by design) ->
   every block errors out and nothing commits; see
   `VectorUniswapV4IndexerErrorsHigh`.
@@ -1529,10 +1562,17 @@ affected chain.
 ### What it means
 
 `uniswap_v4_errors_total` is above 0.1 errors/sec sustained for 15 minutes.
-Errors are counted per operation (attribute `operation`, currently
-`blockHandler` — recorded once at the `BlockHandler` boundary on any non-nil
-error); the indexer continues processing but errors at this rate often
-precede a full stall.
+Errors carry an `operation` attribute with one of three values:
+
+- `fetchReceipts` — the shared `dexconsumer` block processor could not read the
+  block's receipts from the cache/S3 payload (upstream, before any V4 code runs).
+- `unmarshalReceipts` — the payload was fetched but would not decode.
+- `blockHandler` — recorded once at the `BlockHandler` boundary for any non-nil
+  error out of the V4 handler itself: event decode, `DueSet`, the StateView
+  snapshot reads, or persistence.
+
+The indexer continues processing, but errors at this rate often precede a full
+stall.
 
 ### First checks
 
@@ -1542,8 +1582,9 @@ precede a full stall.
 3. **Zero sqrt price** — a `sqrt_price_x96` validation error names a registry
    bug, not a transient fault. StateView returns zeros (no revert) for a PoolId
    it has never seen, and `Validate` rejects that rather than persisting a fake
-   price. Confirm with the `getSlot0` snippet in the service intro, then fix the
-   registry row.
+   price. Confirm with the `getSlot0` snippet in the service intro, then append
+   a superseding registry row
+   ([Fixing a bad registry row](#fixing-a-bad-registry-row)).
 4. **Recent deploys** — `kubectl rollout history deploy/uniswap-v4-indexer -n vector`.
 5. **Chain reorgs** — check watcher logs; a reorg delivers blocks the indexer
    may reject until the version advances.
@@ -1551,8 +1592,12 @@ precede a full stall.
 ### Common causes
 
 - Registry row pointing at a PoolId that does not exist on chain -> `Validate`
-  rejects `sqrt_price_x96 = 0` on every touched block for that pool. Fix or
-  remove the row.
+  rejects `sqrt_price_x96 = 0` on every touched block for that pool.
+- `deploy_block` seeded above the blocks being processed -> `dexconsumer.DueSet`
+  returns a hard error (`pool N touched at block B but registry deploy block is
+  D: registry bug`), so the block fails and is redelivered forever. This is the
+  symptom of a bad `deploy_block`; it never shows up as
+  `VectorUniswapV4IndexerNotWritingState`.
 - ABI decode failure on a PoolManager log -> the PoolManager is not upgradeable,
   so this should not happen from a contract change; treat an unknown `topics[0]`
   as a decoder gap and inspect the raw captured log.
@@ -1560,6 +1605,23 @@ precede a full stall.
   block number.
 - Transient RPC timeout on the StateView multicall -> usually self-clears;
   investigate if sustained.
+
+### Fixing a bad registry row
+
+`uniswap_v4_pool` and `uniswap_v4_pool_manager` are strictly append-only:
+`UPDATE` and `DELETE` are revoked on both. A correction is a new migration that
+`INSERT`s a superseding row for the same natural key — `(chain_id, pool_id)` for
+a pool, `chain_id` for a manager — carrying a `build_id` different from the row
+it supersedes. The table's `BEFORE INSERT` trigger then assigns the next
+`processing_version`, `LoadPools` reads that version on the next boot, and every
+fact row already written keeps pointing at the registry version that was in
+force when it was written.
+
+Two things this rules out: re-inserting under the *same* `build_id` is an
+idempotent no-op (the trigger reuses the existing version), not a correction;
+and `UPDATE`/`DELETE` on the bad row is never the answer, because it would
+rewrite the history the fact tables reference. Deploying the migration is the
+whole fix — restart the worker so `LoadPools` re-reads the registry.
 
 ### Verify recovery
 
@@ -1579,12 +1641,14 @@ lag in Uniswap V4 pool state.
 
 ### First checks
 
-1. **StateView / RPC latency** — `snapshotDueSet` issues one batched multicall
-   per block covering `getSlot0` + `getLiquidity` + `getFeeGrowthGlobals` for
-   every due pool, plus `getTickInfo` for touched ticks and `getTickBitmap` for
-   pools being baselined. All of it is pinned to the block hash, so it goes to an
-   archive node. High latency there dominates block duration; check archive RPC
-   pod health and CPU.
+1. **StateView / RPC latency** — `snapshotDueSet` walks the due pools one at a
+   time, so round-trips scale with the due-pool count and the tick count, not
+   with the block: one `getSlot0` + `getLiquidity` + `getFeeGrowthGlobals`
+   multicall **per due pool**, then that pool's `getTickInfo` reads chunked 500
+   positions per call, plus `getTickBitmap` word scans (500 words per call) for
+   a pool being baselined. All of it is pinned to the block hash, so it goes to
+   an archive node. High latency there dominates block duration; check archive
+   RPC pod health and CPU.
 2. **Baseline blocks** — the first block that touches a pool baselines its tick
    set via `getTickBitmap` word scans (chunked), which is far heavier than a
    steady-state block. A latency spike right after a deploy or a newly seeded
@@ -1631,11 +1695,16 @@ is the other half and covers that class. Neither alone is the whole guard.
 ### What it means
 
 Decoded PoolManager events touched registered PoolIds
-(`uniswap_v4_pools_touched_total` is non-zero) but no state/tick snapshot rows
-were written (`uniswap_v4_state_rows_written_total` is zero) for 30 minutes.
-The error path will NOT catch this: a due-set that goes quietly empty (`DueSet`
-returning nothing for a pool that WAS touched, or every `snapshotDueSet` call
-silently no-opping) produces no errors, just no state rows.
+(`uniswap_v4_pools_touched_total` is non-zero) but no pool-state snapshot rows
+were written for 30 minutes. `uniswap_v4_state_rows_written_total` counts
+`uniswap_v4_pool_state` inserts only — never `uniswap_v4_tick` rows — so this
+alert is about the state snapshot, not the tick writer.
+
+The error path will NOT catch this: `snapshotDueSet` silently no-opping, or
+every state `INSERT` hitting `ON CONFLICT DO NOTHING`, produces no error — just
+no rows. `DueSet` is *not* one of those silent paths: a touched pool it cannot
+resolve in the registry, or one whose `deploy_block` is above the block being
+processed, is a hard error that fails the block.
 
 Because pools are being touched, **a quiet market is already ruled out** — this
 is not the "no Uniswap V4 activity" case. Something between decode and persist
@@ -1648,21 +1717,25 @@ cannot see.
 
 1. **SQS replay / redrive** — the most common benign cause (see below). Check
    the queue for a redrive before assuming a logic stall.
-2. **Due set** — `pools.touched` is recorded from `handleBlock`'s decode-stage
-   `touchedIDs`, upstream of `DueSet`, so a non-zero gate with zero state rows
-   points straight at `DueSet` returning empty for pools that were touched, or
-   at `snapshotDueSet` no-opping.
-3. **Deploy gate** — `DueSet` will not snapshot a pool below its
-   `uniswap_v4_pool.deploy_block` (the pool's `Initialize` block). A registry row
-   seeded with a `deploy_block` far in the future would be touched by logs and
-   still never snapshotted. Compare `deploy_block` against the block numbers
-   currently being processed.
+2. **Snapshot path** — `pools.touched` is recorded from `handleBlock`'s
+   decode-stage `touchedIDs`, upstream of `DueSet`, so a non-zero gate with zero
+   state rows points at everything after it: `snapshotDueSet` no-opping,
+   `buildBlockWrites` dropping the states, or the insert conflicting away.
+3. **Not the deploy gate** — a `deploy_block` seeded above the blocks being
+   processed cannot cause this alert. `DueSet` hard-errors on that pool
+   (`... touched at block B but registry deploy block is D: registry bug`), the
+   block fails, and the symptom is
+   [`VectorUniswapV4IndexerErrorsHigh`](#vectoruniswapv4indexererrorshigh) or
+   [`VectorUniswapV4IndexerStalled`](#vectoruniswapv4indexerstalled). Rule it
+   out there, not here.
 4. **Latest state rows** — confirm directly whether anything is landing:
    `SELECT pool_id, max(block_number) FROM uniswap_v4_pool_state GROUP BY 1;`
-5. **Pool registry** — a registry that is empty for this chain cannot produce
-   touches either, so it would NOT fire this alert. If you suspect an empty
-   registry, check `uniswap_v4_pools_touched_total` is flat at zero and confirm
-   the `uniswap_v4_pool` row count for this chain directly.
+5. **Not an empty registry** — a chain with no `uniswap_v4_pool` rows never
+   boots (`uniswapV4Factory` errors with `no uniswap v4 pools registered for
+   chain N`), and a registry that loads but matches nothing produces no touches,
+   which zeroes this alert's own gate. Either way the symptom is `Stalled` or
+   [`VectorUniswapV4IndexerNoPoolsTouched`](#vectoruniswapv4indexernopoolstouched),
+   not this alert.
 
 ### Common causes
 
@@ -1673,12 +1746,11 @@ cannot see.
   even though processing succeeds — while `pools_touched` keeps advancing,
   since the blocks really do touch pools. A redeploy (new `build_id`) or reorg
   (new `block_version`) inserts fresh rows and clears the alert.
-- `DueSet` silently empty despite touched pools -> a tracker/`SnapshotTracker`
-  regression; this is the bug the alert exists to catch.
-- `deploy_block` seeded above the blocks being processed -> the deploy gate
-  suppresses every snapshot. Correct the registry row to the pool's `Initialize`
-  block.
-- Mis-seeded PoolId in the registry -> note this suppresses touches too, so it
+- A regression between the due set and the insert -> `snapshotDueSet` returning
+  no states for a non-empty due set, or `buildBlockWrites` dropping them. This
+  is the bug class the alert exists to catch. `DueSet` itself is not a
+  candidate: it either resolves every touched pool or returns a hard error.
+- Mis-seeded pool key in the registry -> note this suppresses touches too, so it
   shows up as a flat-zero `pools_touched` and fires the *other* alert, not this
   one.
 
@@ -1696,13 +1768,18 @@ alert cannot fire. To sanity-check overall liveness during a lull, confirm
 ## VectorUniswapV4IndexerNoPoolsTouched
 
 **Severity:** warning · **For:** 10m
-The 6h rate window is the one that absorbs a quiet market. It is deliberately
-much wider than the 30m used elsewhere in this group: 30m stretches with zero
-touched pools are normal for a curated registry, and that is exactly what made
-the equivalent uniswap-v3 `NotWritingState` gate a false positive on 2026-07-13.
-6h is a real signal for *this* registry because the seeded set includes the
-busiest mainnet V4 pools — ETH/wstETH and PYUSD/USDS — which do not go six hours
-without a swap.
+The 6h rate window is set by the *failure class*, not by a measured touch rate.
+Everything this rule catches — a mis-seeded pool key, a wrong PoolManager
+address, a `poolsByID` matching regression — is permanent: once the touched set
+is empty it stays empty until a registry row changes or a fix ships, so a wide
+window costs detection speed and no detections at all. The pressure in the other
+direction is false positives: 30m stretches with zero touched pools are normal
+for a curated registry, which is exactly what made the equivalent uniswap-v3
+`NotWritingState` gate a false positive on 2026-07-13. The seeded pools were
+chosen for liquidity *depth*, not for swap frequency, and their quiet-period
+length has never been measured — 6h is margin against that unknown, not a
+measurement. If a chain's registry turns out to be quieter still, widen the
+window for that chain rather than silencing the alert.
 
 ### What it means
 
@@ -1715,8 +1792,8 @@ This is the other half of the silent-empty guard, and it covers what
 [`VectorUniswapV4IndexerNotWritingState`](#vectoruniswapv4indexernotwritingstate)
 structurally cannot: that rule gates on `pools_touched`, so a touched set that is
 *always* empty makes its left side absent and the rule un-fireable. Nothing else
-in the group would page — `blocks_processed` keeps advancing happily with a dead
-registry, and no error is ever raised.
+in the group would page — `blocks_processed` keeps advancing happily while
+nothing matches, and no error is ever raised.
 
 Because V4 matching is two-stage (log address == PoolManager, then
 `topics[1]` == a registered PoolId), there are two independent ways for the
@@ -1730,23 +1807,30 @@ touched set to be permanently empty, and they need different fixes.
    however good the pool rows are:
 
    ```sql
-   SELECT chain_id,
+   -- Versioned table: the current row per chain is the highest
+   -- processing_version, so read it through DISTINCT ON.
+   SELECT DISTINCT ON (chain_id)
+          chain_id,
           '0x' || encode(pool_manager_address, 'hex') AS pool_manager,
           '0x' || encode(state_view_address, 'hex')   AS state_view
-   FROM uniswap_v4_pool_manager;
+   FROM uniswap_v4_pool_manager
+   ORDER BY chain_id, processing_version DESC;
    -- mainnet: 0x000000000004444c5dc75cb358380d2e3de08a90
    --          0x7ffe42c4a5deea5b0fec41c94c136cf115597227
    ```
 
-2. **Pool registry** — confirm `uniswap_v4_pool` actually has rows joined to that
-   PoolManager for this chain (query in the service intro). A registry that loads
-   zero pools means `poolsByID` is empty and no log can ever match.
-3. **Mis-seeded PoolId (mis-seeded *key*)** — the worker recomputes every PoolId
-   at startup, so the id and the key are guaranteed consistent with each other;
-   what startup validation cannot catch is a key that is internally consistent
-   but does not describe a real pool (wrong `tickSpacing` for the fee, currencies
-   swapped, a hooks address of zero on a hooked pool). Recompute the id from the
-   key you *believe* is right and compare:
+2. **Pool registry** — confirm `uniswap_v4_pool` actually has current-version
+   rows for this chain's `chain_id` (query in the service intro; the two
+   registry tables are matched on `chain_id`, not by an FK). A chain with zero
+   rows would not have booted at all, so what you are looking for here is a
+   registry that loads but describes the wrong pools.
+3. **Mis-seeded pool key** — the worker recomputes every PoolId at startup, so
+   the id and the key are guaranteed consistent with each other; what startup
+   validation cannot catch is a key that is internally consistent but does not
+   describe a real pool (a `tickSpacing` that isn't the real pool's — in V4 it
+   is chosen freely per pool, not derived from the fee as in V3 — currencies
+   swapped, or a hooks address of zero on a hooked pool). Recompute the id from
+   the key you *believe* is right and compare:
 
    ```bash
    cast keccak "$(cast abi-encode 'f(address,address,uint24,int24,address)' \
@@ -1768,21 +1852,23 @@ touched set to be permanently empty, and they need different fixes.
    `common.Hash` conversion regression). Cross-check a PoolManager `Swap` log you
    can see on-chain for a seeded pool against what the decoder does with it.
 5. **Genuinely dead pool set** — confirm on-chain that the seeded pools really
-   have had no `Swap` / `ModifyLiquidity` / `Donate` in 6h. For a set containing
-   ETH/wstETH and PYUSD/USDS on mainnet this would be extraordinary; a chain other
-   than mainnet with a thin registry could legitimately go quiet this long, in
-   which case the window needs widening for that chain rather than the alert
-   silencing.
+   have had no `Swap` / `ModifyLiquidity` / `Donate` in 6h. A chain with a thin
+   registry can legitimately go quiet this long, in which case the window needs
+   widening for that chain rather than the alert silencing.
 
 ### Common causes
 
 - Wrong or missing `uniswap_v4_pool_manager` row for this chain (wrong address,
   wrong `chain_id`) -> no PoolManager log is ever considered.
-- Pool registry empty or not seeded for this chain (migration not applied, wrong
-  chain ID) -> verify the `uniswap_v4_pool` row count for this chain.
+- Registry seeded under the wrong `chain_id` -> the worker loads a non-empty
+  registry for its own chain only if rows exist there; with none it refuses to
+  boot, so what fires this alert is rows that exist but describe other chains'
+  pools.
 - Mis-seeded pool *key* -> a self-consistent key/PoolId pair that no on-chain
   pool has. Passes `ValidatePoolKeys`, never matches a log, and StateView returns
-  zeros for it.
+  zeros for it. Correct it by appending a superseding registry row, never by
+  editing the bad one
+  ([Fixing a bad registry row](#fixing-a-bad-registry-row)).
 - PoolId-matching regression in `poolsByID` -> no log ever matches a registered
   pool, so `touchedIDs` is always empty.
 
