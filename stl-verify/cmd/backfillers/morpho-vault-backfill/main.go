@@ -1,20 +1,23 @@
-// Backfill discovers MetaMorpho vaults by scanning historical Ethereum receipt
-// files stored in S3 for Morpho Blue events. Candidate addresses (caller/onBehalf)
-// are collected, then probed on-chain via multicall (MORPHO() must return the
-// Morpho Blue singleton). Confirmed vaults are stored in the morpho_vault table.
-// A final phase replays the persisted VaultV2 vaults' structured events.
+// Package main implements an on-demand Temporal worker that backfills Morpho
+// vaults from the archived Ethereum receipts in S3.
 //
-// A run keeps no progress state: every run redoes the full requested range, and
-// an interrupted run is resumed by re-running the same command.
+// A run has two phases. Discovery scans the range's receipt files for Morpho
+// Blue events and VaultV2 AccrueInterest events, probes the candidate addresses
+// on-chain via multicall (MORPHO() must return the Morpho Blue singleton) and
+// stores the confirmed vaults in morpho_vault. Replay then re-walks the same
+// range, one S3 partition at a time in ascending block order, driving every
+// persisted VaultV2 vault's structured events (adapter / cap / fee) through the
+// handler path the live worker uses.
 //
-// Usage:
+// It carries no schedule. The worker idles on its task queue until someone
+// starts a run and supplies the range, either from the Temporal UI ("Start
+// Workflow", Workflow Type "MorphoVaultBackfill") or via `temporal workflow
+// start`. That is the whole reason it is not a cronjob: a backfill's window is
+// an argument, and cronjobWorkflow accepts none.
 //
-//	go run ./cmd/backfillers/morpho-vault-backfill \
-//	  -from 18883124 -to 24600000 \
-//	  -bucket stl-sentinelstaging-ethereum-raw-89d540d0 \
-//	  -db "$DATABASE_URL" \
-//	  -rpc-url "$RPC_URL" \
-//	  -goroutines 64
+// A run keeps no progress state of its own. Every completed partition is in the
+// workflow's event history, so a retry resumes there; everything a run writes is
+// an idempotent append, so redoing one costs wall clock, not correctness.
 package main
 
 import (
@@ -28,158 +31,210 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rpc"
+	"go.temporal.io/sdk/worker"
+	"go.temporal.io/sdk/workflow"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving/archivingwire"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/morpho_indexer"
 )
+
+const (
+	jobName = "morpho-vault-backfill"
+
+	// workflowTypeName is what an operator types into the Temporal UI's "Workflow
+	// Type" field, so it is registered explicitly rather than derived from the Go
+	// method name — a rename must not invalidate the runbook or muscle memory.
+	workflowTypeName = "MorphoVaultBackfill"
+
+	// progressQueryName is queryable mid-run from the UI's Query tab, which is the
+	// only way to see how far a long backfill has got without reading raw history.
+	progressQueryName = "progress"
+
+	defaultDatabaseURL = "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable"
+
+	// rpcConcurrency is the historical RPC budget for this pipeline, deliberately
+	// decoupled from config.goroutines (which sizes the S3 reader pool).
+	rpcConcurrency = 10
+)
+
+var (
+	GitCommit string
+	GitBranch string
+	BuildTime string
+)
+
+func init() { buildinfo.PopulateFromVCS(&GitCommit, &BuildTime) }
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	if err := run(ctx, os.Args[1:]); err != nil {
-		slog.Error("fatal error", "error", err)
+	if err := run(ctx); err != nil {
+		slog.Error("fatal", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, args []string) error {
-	cfg, err := parseConfig(args)
-	if err != nil {
-		return err
-	}
-
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: env.ParseLogLevel(slog.LevelInfo),
-	}))
-	slog.SetDefault(logger)
-
-	logger.Info("starting morpho vault backfill",
-		"from", cfg.from,
-		"to", cfg.to,
-		"bucket", cfg.bucket,
-		"chainID", cfg.chainID,
-		"goroutines", cfg.goroutines)
-
-	// AWS + S3
-	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{
-		StaticCredentialsFromEnv: true,
+func run(ctx context.Context) error {
+	return temporal.RunWorker(ctx, temporal.BuildMeta{
+		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
+	}, temporal.WorkerConfig{
+		Name:         jobName,
+		OpenDatabase: postgres.PoolOpener(postgres.DefaultDBConfig(env.Get("DATABASE_URL", defaultDatabaseURL))),
+		Register:     register,
 	})
+}
+
+func register(ctx context.Context, deps temporal.Dependencies, r worker.Registry) error {
+	cfg, err := loadConfig()
 	if err != nil {
-		return fmt.Errorf("loading AWS config: %w", err)
+		return fmt.Errorf("loading configuration: %w", err)
 	}
-	s3HTTPClient := &http.Client{
+
+	activities, err := newBackfillActivities(ctx, deps, cfg)
+	if err != nil {
+		return fmt.Errorf("wiring the backfill activities: %w", err)
+	}
+
+	workflows := &backfillWorkflows{chainID: cfg.chainID}
+	r.RegisterWorkflowWithOptions(workflows.Backfill, workflow.RegisterOptions{Name: workflowTypeName})
+	r.RegisterActivity(activities)
+	return nil
+}
+
+func newBackfillActivities(ctx context.Context, deps temporal.Dependencies, cfg config) (*backfillActivities, error) {
+	buildReg, err := buildregistry.New(ctx, deps.Pool)
+	if err != nil {
+		return nil, fmt.Errorf("registering build: %w", err)
+	}
+
+	s3Reader, err := newS3Reader(ctx, deps.Logger, cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	ethClient, err := dialChain(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	multicaller, err := multicall.NewClient(ethClient, blockchain.Multicall3)
+	if err != nil {
+		return nil, fmt.Errorf("creating multicall client: %w", err)
+	}
+
+	// Optional raw SC call archiving (VEC-81). Off unless ARCHIVE_SC_CALLS=true.
+	archiveWrap, archiveDrain, err := archivingwire.Bootstrap(ctx, deps.Logger, cfg.chainID, int64(buildReg.BuildID()), "morpho-vault")
+	if err != nil {
+		return nil, err
+	}
+	multicaller = archiveWrap(multicaller)
+
+	prober, err := newVaultProber(deps.Logger, multicaller)
+	if err != nil {
+		return nil, err
+	}
+
+	extractor, err := morpho_indexer.NewEventExtractor()
+	if err != nil {
+		return nil, fmt.Errorf("creating event extractor: %w", err)
+	}
+
+	return &backfillActivities{
+		cfg:          cfg,
+		logger:       deps.Logger,
+		pool:         deps.Pool,
+		buildID:      buildReg.BuildID(),
+		s3Reader:     s3Reader,
+		extractor:    extractor,
+		prober:       prober,
+		ethClient:    ethClient,
+		multicaller:  multicaller,
+		archiveDrain: archiveDrain,
+	}, nil
+}
+
+// newS3Reader sizes its connection pool off the scan's worker count, which is
+// what saturates it; the default transport's 2 idle conns per host would
+// serialise them. AWS_S3_ENDPOINT is honoured alongside that so the worker can
+// be pointed at LocalStack in kind and in the integration tests.
+func newS3Reader(ctx context.Context, logger *slog.Logger, cfg config) (*s3adapter.Reader, error) {
+	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{StaticCredentialsFromEnv: true})
+	if err != nil {
+		return nil, fmt.Errorf("loading AWS config: %w", err)
+	}
+
+	conns := cfg.goroutines + 64
+	httpClient := &http.Client{
 		Transport: &http.Transport{
 			Proxy: http.ProxyFromEnvironment,
 			DialContext: (&net.Dialer{
 				Timeout:   30 * time.Second,
 				KeepAlive: 30 * time.Second,
 			}).DialContext,
-			MaxIdleConns:          cfg.goroutines + 64,
-			MaxIdleConnsPerHost:   cfg.goroutines + 64,
-			MaxConnsPerHost:       cfg.goroutines + 64,
+			MaxIdleConns:          conns,
+			MaxIdleConnsPerHost:   conns,
+			MaxConnsPerHost:       conns,
 			IdleConnTimeout:       90 * time.Second,
 			TLSHandshakeTimeout:   10 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
 		},
 	}
-	s3Reader := s3adapter.NewReaderWithHTTPClient(awsCfg, s3HTTPClient, logger)
+	options := append([]func(*s3.Options){func(o *s3.Options) { o.HTTPClient = httpClient }},
+		s3adapter.EndpointOptionsFromEnv()...)
+	return s3adapter.NewReaderWithOptions(awsCfg, logger, options...), nil
+}
 
-	// PostgreSQL
-	pool, err := postgres.OpenPool(ctx, postgres.DefaultDBConfig(cfg.dbURL))
+// dialChain connects to the node and refuses a chain that disagrees with
+// CHAIN_ID: every block number in a run's range is meaningless on another chain,
+// and the mismatch would surface as missing S3 keys rather than as itself.
+func dialChain(ctx context.Context, cfg config) (*ethclient.Client, error) {
+	// Retry 429/5xx/network errors via rpchttp so transient RPC failures don't
+	// fail a partition that would have succeeded.
+	rpcClient, err := rpc.DialOptions(ctx, cfg.rpcURL, rpc.WithHTTPClient(rpchttp.NewBackfillerClient(rpcConcurrency)))
 	if err != nil {
-		return fmt.Errorf("opening database: %w", err)
-	}
-	defer pool.Close()
-	logger.Info("PostgreSQL connected")
-
-	buildReg, err := buildregistry.New(ctx, pool)
-	if err != nil {
-		return fmt.Errorf("registering build: %w", err)
+		return nil, fmt.Errorf("connecting to RPC: %w", err)
 	}
 
-	// Ethereum RPC. Retry 429/5xx/network errors via rpchttp so transient
-	// RPC failures don't mark blocks bad. RPC-side concurrency is
-	// deliberately decoupled from cfg.goroutines (which sizes the S3
-	// reader pool above) — 10 is the historical RPC budget here.
-	rpcClient, err := rpc.DialOptions(ctx, cfg.rpcURL, rpc.WithHTTPClient(rpchttp.NewBackfillerClient(10)))
-	if err != nil {
-		return fmt.Errorf("connecting to RPC: %w", err)
-	}
-	defer rpcClient.Close()
 	ethClient := ethclient.NewClient(rpcClient)
-	logger.Info("Ethereum RPC connected")
-
 	rpcChainID, err := ethClient.ChainID(ctx)
 	if err != nil {
-		return fmt.Errorf("fetching RPC chain ID: %w", err)
+		return nil, fmt.Errorf("fetching RPC chain ID: %w", err)
 	}
 	if rpcChainID.Int64() != cfg.chainID {
-		return fmt.Errorf("RPC chain ID mismatch: RPC reports %d, config says %d", rpcChainID.Int64(), cfg.chainID)
+		return nil, fmt.Errorf("RPC chain ID mismatch: RPC reports %d, config says %d", rpcChainID.Int64(), cfg.chainID)
 	}
+	return ethClient, nil
+}
 
-	multicaller, err := multicall.NewClient(ethClient, blockchain.Multicall3)
-	if err != nil {
-		return fmt.Errorf("creating multicall client: %w", err)
-	}
-
-	// Optional raw SC call archiving (VEC-81). Off unless ARCHIVE_SC_CALLS=true.
-	archiveWrap, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "morpho-vault")
-	if err != nil {
-		return err
-	}
-	defer archiveDrain()
-	multicaller = archiveWrap(multicaller)
-
-	// Shared vault prober (handles MetaMorpho ABI internally)
+func newVaultProber(logger *slog.Logger, multicaller outbound.Multicaller) (*vaultProber, error) {
 	sharedProber, err := morpho_indexer.NewVaultProber()
 	if err != nil {
-		return fmt.Errorf("creating vault prober: %w", err)
+		return nil, fmt.Errorf("creating vault prober: %w", err)
 	}
 	erc20ABI, err := abis.GetERC20ABI()
 	if err != nil {
-		return fmt.Errorf("loading ERC20 ABI: %w", err)
+		return nil, fmt.Errorf("loading ERC20 ABI: %w", err)
 	}
-
-	// Event extractor (thread-safe, read-only after init)
-	extractor, err := morpho_indexer.NewEventExtractor()
-	if err != nil {
-		return fmt.Errorf("creating event extractor: %w", err)
-	}
-
-	prober := &vaultProber{
+	return &vaultProber{
 		multicaller:  multicaller,
 		sharedProber: sharedProber,
 		erc20ABI:     erc20ABI,
 		logger:       logger,
-	}
-
-	// Phases 1–3: scan S3 receipts for candidates, probe them on-chain, persist
-	// confirmed vaults.
-	if err := discoverAndPersistVaults(ctx, logger, s3Reader, extractor, prober, pool, buildReg.BuildID(), cfg); err != nil {
-		return err
-	}
-
-	// Phase 4: replay VaultV2 structured (adapter / cap / fee) events for the
-	// persisted V2 vaults, driving each log through the same handler path the
-	// live worker uses. Runs off the vaults in the database (this run's plus
-	// earlier runs'), so it covers a range that only carries governance events
-	// for a pre-existing V2 vault — which produces no discovery candidate.
-	if err := replayV2StructuredEvents(ctx, logger, s3Reader, ethClient, multicaller, pool, buildReg.BuildID(), cfg); err != nil {
-		return fmt.Errorf("replaying VaultV2 structured events: %w", err)
-	}
-
-	logger.Info("backfill complete")
-	return nil
+	}, nil
 }

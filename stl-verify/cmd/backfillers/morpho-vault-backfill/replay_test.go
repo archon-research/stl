@@ -230,51 +230,6 @@ func (f *fakeReplayS3Reader) StreamFile(_ context.Context, _, key string) (io.Re
 	return io.NopCloser(strings.NewReader(body)), nil
 }
 
-// TestRunReplayPartitions_ReplaysEveryPartitionInBlockOrder: a run replays the
-// full requested range, in ascending block order, so an AddAdapter in an earlier
-// partition always lands before a later partition's Allocate.
-func TestRunReplayPartitions_ReplaysEveryPartitionInBlockOrder(t *testing.T) {
-	const from, to = int64(2000), int64(4500)
-
-	var replayed []string
-	err := runReplayPartitions(replayPartitionPrefixes(from, to), func(part string) error {
-		replayed = append(replayed, part)
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("runReplayPartitions: %v", err)
-	}
-
-	want := []string{"2000-2999", "3000-3999", "4000-4999"}
-	if !slices.Equal(replayed, want) {
-		t.Fatalf("replayed %v, want %v", replayed, want)
-	}
-}
-
-// TestRunReplayPartitions_StopsAtTheFirstFailingPartition: a failing partition
-// stops the run there. Continuing would replay later partitions on top of the
-// hole the failure left, and nothing downstream can detect that hole.
-func TestRunReplayPartitions_StopsAtTheFirstFailingPartition(t *testing.T) {
-	var replayed []string
-	err := runReplayPartitions([]string{"0-999", "1000-1999", "2000-2999"}, func(part string) error {
-		replayed = append(replayed, part)
-		if part == "1000-1999" {
-			return errors.New("boom")
-		}
-		return nil
-	})
-
-	if err == nil {
-		t.Fatal("expected a failing partition to fail the run")
-	}
-	if !strings.Contains(err.Error(), "1000-1999") {
-		t.Errorf("error %v does not name the failing partition", err)
-	}
-	if want := []string{"0-999", "1000-1999"}; !slices.Equal(replayed, want) {
-		t.Fatalf("replayed %v, want %v (nothing after the failure)", replayed, want)
-	}
-}
-
 // TestCollectPartitionV2Logs_MissingReceiptBlockErrors: a block in the
 // partition's [from,to] intersection with no receipt key contributes no logs, so
 // collection must hard-fail rather than hand the loop a silently thinned

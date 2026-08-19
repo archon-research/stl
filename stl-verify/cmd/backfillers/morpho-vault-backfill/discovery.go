@@ -29,9 +29,9 @@ import (
 
 // discoverAndPersistVaults runs the discovery pipeline: scan S3 receipts for
 // candidate addresses (phase 1), probe them on-chain to confirm vaults (phase
-// 2), and persist the confirmed vaults (phase 3). It returns nil when a phase
-// has nothing to carry forward; the caller's V2 replay phase still runs off the
-// vaults already in the database.
+// 2), and persist the confirmed vaults (phase 3). A phase with nothing to carry
+// forward returns what it did reach rather than an error; the caller's V2 replay
+// phase still runs off the vaults already in the database.
 func discoverAndPersistVaults(
 	ctx context.Context,
 	logger *slog.Logger,
@@ -41,36 +41,39 @@ func discoverAndPersistVaults(
 	pool *pgxpool.Pool,
 	buildID buildregistry.BuildID,
 	cfg config,
-) error {
-	candidates, err := scanBlockRange(ctx, logger, s3Reader, extractor, cfg.bucket, cfg.from, cfg.to, cfg.goroutines)
+	rng blockRange,
+) (discoveryResult, error) {
+	candidates, err := scanBlockRange(ctx, logger, s3Reader, extractor, cfg.bucket, rng.From, rng.To, cfg.goroutines)
 	if err != nil {
-		return fmt.Errorf("scanning block range: %w", err)
+		return discoveryResult{}, fmt.Errorf("scanning block range: %w", err)
 	}
-	logger.Info("scan complete", "uniqueCandidates", len(candidates))
+	got := discoveryResult{Candidates: len(candidates)}
+	logger.Info("scan complete", "uniqueCandidates", got.Candidates)
 	if len(candidates) == 0 {
 		logger.Info("no candidates found, nothing to probe")
-		return nil
+		return got, nil
 	}
 
-	vaults, err := prober.probeAllCandidates(ctx, candidates, cfg.to, cfg.probeBatch)
+	vaults, err := prober.probeAllCandidates(ctx, candidates, rng.To, cfg.probeBatch)
 	if err != nil {
-		return fmt.Errorf("probing candidates: %w", err)
+		return discoveryResult{}, fmt.Errorf("probing candidates: %w", err)
 	}
-	logger.Info("probing complete", "confirmedVaults", len(vaults))
+	got.Vaults = len(vaults)
+	logger.Info("probing complete", "confirmedVaults", got.Vaults)
 	if len(vaults) == 0 {
 		logger.Info("no vaults confirmed")
-		return nil
+		return got, nil
 	}
 
 	deployBlock, err := morpho_indexer.MorphoBlueDeployBlock(cfg.chainID)
 	if err != nil {
-		return fmt.Errorf("getting deploy block: %w", err)
+		return discoveryResult{}, fmt.Errorf("getting deploy block: %w", err)
 	}
 	if err := persistVaults(ctx, pool, logger, vaults, cfg.chainID, deployBlock, buildID); err != nil {
-		return fmt.Errorf("persisting vaults: %w", err)
+		return discoveryResult{}, fmt.Errorf("persisting vaults: %w", err)
 	}
-	logger.Info("vaults persisted", "count", len(vaults))
-	return nil
+	logger.Info("vaults persisted", "count", got.Vaults)
+	return got, nil
 }
 
 // candidateEntry represents a candidate address and the earliest block it was seen.
