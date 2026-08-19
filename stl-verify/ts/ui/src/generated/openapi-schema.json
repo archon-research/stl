@@ -290,13 +290,20 @@
             "title": "Amount Usd"
           },
           "balance": {
-            "description": "Balance held by the prime, in token units. Decimal serialized as a JSON string.",
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Balance held by the prime, in token units. Decimal serialized as a JSON string. Always present in self mode. Always `null` under `reference=true`: the upstream Star monitor reports USD exposure only and never a token quantity, so there is no balance to report \u2014 read `amount_usd` instead.",
             "examples": [
               "1234567.89"
             ],
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Balance",
-            "type": "string"
+            "title": "Balance"
           },
           "category": {
             "$ref": "#/components/schemas/AllocationCategory",
@@ -1050,6 +1057,16 @@
             "const": "aggregated",
             "description": "Always `aggregated`: a gap-filled time series.",
             "title": "Mode",
+            "type": "string"
+          },
+          "source": {
+            "default": "self",
+            "description": "Provenance of the series. `self` is STL's priced receipt-token exposure; `reference` is Sky's Star monitor as observed by STL's syncer, returned when `reference=true`.",
+            "enum": [
+              "self",
+              "reference"
+            ],
+            "title": "Source",
             "type": "string"
           },
           "window": {
@@ -2705,6 +2722,16 @@
             "title": "Mode",
             "type": "string"
           },
+          "source": {
+            "default": "self",
+            "description": "Provenance of the series. `self` is the on-chain SubProxy treasury; `reference` is Sky's Star monitor as observed by STL's syncer, returned when `reference=true`.",
+            "enum": [
+              "self",
+              "reference"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
           "window": {
             "$ref": "#/components/schemas/TimeSeriesWindow",
             "description": "The window and resolution applied to this response."
@@ -3125,6 +3152,18 @@
               "title": "Prime Id",
               "type": "string"
             }
+          },
+          {
+            "description": "List the positions Sky's Star monitor reports for this prime instead of the ones STL indexes on-chain. The row shape is unchanged, but every row is prime-scoped (`scope=\"prime\"`) because the monitor reports per prime, not per proxy \u2014 so a client fanning out across a prime's proxies must dedupe rather than sum. `balance` is `null` throughout: the monitor reports USD exposure only. Returns `404` when the monitor does not track the prime and `502` when it cannot be read.",
+            "in": "query",
+            "name": "reference",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "List the positions Sky's Star monitor reports for this prime instead of the ones STL indexes on-chain. The row shape is unchanged, but every row is prime-scoped (`scope=\"prime\"`) because the monitor reports per prime, not per proxy \u2014 so a client fanning out across a prime's proxies must dedupe rather than sum. `balance` is `null` throughout: the monitor reports USD exposure only. Returns `404` when the monitor does not track the prime and `502` when it cannot be read.",
+              "title": "Reference",
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
@@ -3317,6 +3356,18 @@
             }
           },
           {
+            "description": "Serve Sky's Star monitor exposure instead of STL's priced receipt-token exposure. The shape is unchanged; `source` reports the provenance. The reference series only extends back to when STL first observed the monitor \u2014 it publishes no history of its own \u2014 so earlier buckets are `null`, meaning not yet observed rather than zero.",
+            "in": "query",
+            "name": "reference",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Serve Sky's Star monitor exposure instead of STL's priced receipt-token exposure. The shape is unchanged; `source` reports the provenance. The reference series only extends back to when STL first observed the monitor \u2014 it publishes no history of its own \u2014 so earlier buckets are `null`, meaning not yet observed rather than zero.",
+              "title": "Reference",
+              "type": "boolean"
+            }
+          },
+          {
             "description": "Inclusive lower timestamp bound (ISO-8601). Defaults to 24h before `to_timestamp`.",
             "in": "query",
             "name": "from_timestamp",
@@ -3502,6 +3553,18 @@
               "minimum": 1,
               "title": "Limit",
               "type": "integer"
+            }
+          },
+          {
+            "description": "Serve Sky's Star monitor figures instead of the on-chain treasury. The shape is unchanged; `source` reports the provenance. The reference series only extends back to when STL first observed the monitor \u2014 it publishes no history of its own \u2014 so earlier buckets are `null`, meaning not yet observed rather than zero.",
+            "in": "query",
+            "name": "reference",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Serve Sky's Star monitor figures instead of the on-chain treasury. The shape is unchanged; `source` reports the provenance. The reference series only extends back to when STL first observed the monitor \u2014 it publishes no history of its own \u2014 so earlier buckets are `null`, meaning not yet observed rather than zero.",
+              "title": "Reference",
+              "type": "boolean"
             }
           },
           {

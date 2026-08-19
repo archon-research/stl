@@ -1,11 +1,13 @@
+from collections.abc import Callable
 from datetime import datetime
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
+from app.adapters.postgres.prime_capital_stack_repository import PrimeCapitalStackRepository
 from app.api._validators import ProxyAddressPathParam
 from app.api.deps import get_engine
 from app.api.time_series import (
@@ -41,12 +43,29 @@ class ExposureEnvelope(BaseModel):
     """Per-prime exposure time series, gap-filled into buckets."""
 
     mode: Literal["aggregated"] = Field(description="Always `aggregated`: a gap-filled time series.")
+    source: Literal["self", "reference"] = Field(
+        default="self",
+        description=(
+            "Provenance of the series. `self` is STL's priced receipt-token exposure; `reference` is "
+            "Sky's Star monitor as observed by STL's syncer, returned when `reference=true`."
+        ),
+    )
     window: TimeSeriesWindow = Field(description="The window and resolution applied to this response.")
     data: list[ExposureBucketResponse] = Field(description="Priced exposure per time bucket.")
 
 
 async def _get_service(engine: AsyncEngine = Depends(get_engine)) -> AllocationService:
     return AllocationService(AllocationRepository(engine))
+
+
+def _get_reference_repository_factory(request: Request) -> Callable[[], PrimeCapitalStackRepository]:
+    """Defer building the reference reader until a request asks for it.
+
+    FastAPI resolves every declared dependency on every request, so returning
+    the repository directly would make a self-mode request reach for an engine
+    it never uses.
+    """
+    return lambda: PrimeCapitalStackRepository(request.app.state.engine)
 
 
 @router.get(
@@ -67,7 +86,17 @@ async def list_prime_exposure(
     response: Response,
     time_series: TimeSeriesQuery = Depends(get_time_series_query_params),
     limit: int = Query(100, ge=1, le=500, description="Max buckets returned (default 100, max 500)."),
+    reference: bool = Query(
+        False,
+        description=(
+            "Serve Sky's Star monitor exposure instead of STL's priced receipt-token exposure. The "
+            "shape is unchanged; `source` reports the provenance. The reference series only extends "
+            "back to when STL first observed the monitor — it publishes no history of its own — so "
+            "earlier buckets are `null`, meaning not yet observed rather than zero."
+        ),
+    ),
     service: AllocationService = Depends(_get_service),
+    reference_repositories: Callable[[], PrimeCapitalStackRepository] = Depends(_get_reference_repository_factory),
 ) -> ExposureEnvelope:
     prime_address = EthAddress(prime_id)
     if not await service.prime_exists(prime_address):
@@ -77,6 +106,25 @@ async def list_prime_exposure(
     # is safely cacheable; a defaulted (now-relative) window is not.
     apply_cache_control(response, time_series)
     window = build_window(time_series)
+
+    if reference:
+        reference_buckets = await reference_repositories().list_reference_capital_buckets(
+            prime_address,
+            from_timestamp=time_series.from_timestamp,
+            to_timestamp=time_series.to_timestamp,
+            bucket_seconds=time_series.bucket.total_seconds(),
+            limit=limit,
+        )
+        return ExposureEnvelope(
+            mode="aggregated",
+            source="reference",
+            window=window,
+            data=[
+                ExposureBucketResponse(bucket_start=bucket.bucket_start, exposure_usd=bucket.exposure_usd)
+                for bucket in reference_buckets
+            ],
+        )
+
     buckets = await service.list_exposure_buckets(
         prime_address,
         from_timestamp=time_series.from_timestamp,
@@ -86,6 +134,7 @@ async def list_prime_exposure(
     )
     return ExposureEnvelope(
         mode="aggregated",
+        source="self",
         window=window,
         data=[ExposureBucketResponse(**bucket.__dict__) for bucket in buckets],
     )

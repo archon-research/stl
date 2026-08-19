@@ -11,7 +11,7 @@ import asyncio
 import dataclasses
 import logging
 
-from app.domain.chain_names import CHAIN_ID_TO_NAME
+from app.domain.chain_names import CHAIN_ID_TO_NAME, UPSTREAM_NETWORK_TO_CHAIN_ID
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.reference_risk_capital import (
     ReferenceAllocation,
@@ -22,19 +22,6 @@ from app.ports.receipt_token_lookup import ReceiptTokenLookup
 from app.ports.reference_risk_capital import ReferenceRiskCapitalProvider
 
 logger = logging.getLogger(__name__)
-
-# Upstream's network vocabulary is its own: it says "ethereum" where the
-# axis-synome contract and the allocation trackers say "mainnet". Mapped
-# explicitly rather than normalised by hand, so a network upstream adds is an
-# unresolved join (a null id) instead of a wrong one.
-_UPSTREAM_NETWORK_TO_CHAIN_ID: dict[str, int] = {
-    "ethereum": 1,
-    "optimism": 10,
-    "unichain": 130,
-    "base": 8453,
-    "arbitrum": 42161,
-    "avalanche": 43114,
-}
 
 
 class ReferenceRiskCapitalService:
@@ -71,7 +58,7 @@ class ReferenceRiskCapitalService:
 
     async def _resolve(self, row: ReferenceAllocation) -> ReferenceAllocation:
         """Attach STL's receipt-token id and internal chain name to an upstream row."""
-        chain_id = _UPSTREAM_NETWORK_TO_CHAIN_ID.get(row.network)
+        chain_id = UPSTREAM_NETWORK_TO_CHAIN_ID.get(row.network)
         if chain_id is None:
             return row
 

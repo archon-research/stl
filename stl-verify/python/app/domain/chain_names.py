@@ -19,6 +19,20 @@ CHAIN_ID_TO_NAME: dict[int, str] = {
 }
 
 
+# Sky's Star monitor keeps its own network vocabulary: it says "ethereum" where
+# the axis-synome contract and the allocation trackers say "mainnet". Mapped
+# explicitly rather than normalised by hand, so a network added upstream reads
+# as an unresolved join rather than a wrong one.
+UPSTREAM_NETWORK_TO_CHAIN_ID: dict[str, int] = {
+    "ethereum": 1,
+    "optimism": 10,
+    "unichain": 130,
+    "base": 8453,
+    "arbitrum": 42161,
+    "avalanche": 43114,
+}
+
+
 MAINNET_CHAIN_ID = 1
 """Ethereum mainnet, the chain a prime's prime-scoped rows are attributed to."""
 

@@ -25,7 +25,6 @@ from app.domain.entities.allocation import (
     ReceiptTokenPosition,
 )
 from app.domain.entities.allocation_activity import AllocationActivityEvent
-from app.domain.entities.capital_stack import CapitalStackSnapshot
 from app.domain.entities.time_series_bucket import (
     AllocationActivityBucket,
     ExposureBucket,
@@ -629,41 +628,6 @@ class AllocationRepository:
                 exc_info=True,
             )
             raise ValueError(f"Database query failed while fetching total USD exposure: {exc}") from exc
-
-    async def get_latest_capital_stack(self, prime_id: EthAddress) -> CapitalStackSnapshot | None:
-        """Return the latest capital stack snapshot for the given prime address."""
-        try:
-            async with self._engine.connect() as conn:
-                result = await conn.execute(_LATEST_CAPITAL_STACK_SQL, {"proxy_hex": prime_id.hex})
-                row = result.fetchone()
-
-            if row is None:
-                return None
-
-            return CapitalStackSnapshot(
-                capital_buffer=_safe_decimal(row.capital_buffer, "capital_buffer", f"prime_id={prime_id}"),
-                first_loss_capital=_safe_decimal(
-                    row.first_loss_capital,
-                    "first_loss_capital",
-                    f"prime_id={prime_id}",
-                ),
-                timestamp=row.timestamp,
-                source=row.source,
-                reconciliation_status=row.reconciliation_status,
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.error(
-                "Failed to fetch latest capital stack from database",
-                extra={
-                    "prime_id": str(prime_id),
-                    "error_type": type(exc).__name__,
-                    "error_message": str(exc),
-                },
-                exc_info=True,
-            )
-            raise ValueError(f"Database query failed while fetching latest capital stack: {exc}") from exc
 
     async def list_allocation_activity(
         self,
@@ -1550,21 +1514,6 @@ LEFT JOIN LATERAL (
     LIMIT 1
 ) lp ON TRUE
 WHERE p.balance > 0
-""")
-
-
-_LATEST_CAPITAL_STACK_SQL = text("""
-SELECT
-    pcs.capital_buffer,
-    pcs.first_loss_capital,
-    pcs.timestamp,
-    pcs.source,
-    pcs.reconciliation_status
-FROM prime_capital_stack pcs
-JOIN prime p ON p.id = pcs.prime_id
-WHERE p.vault_address = decode(:proxy_hex, 'hex')
-ORDER BY pcs.timestamp DESC
-LIMIT 1
 """)
 
 

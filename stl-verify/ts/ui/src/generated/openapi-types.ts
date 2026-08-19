@@ -791,10 +791,10 @@ export interface components {
       amount_usd?: string | null;
       /**
        * Balance
-       * @description Balance held by the prime, in token units. Decimal serialized as a JSON string.
+       * @description Balance held by the prime, in token units. Decimal serialized as a JSON string. Always present in self mode. Always `null` under `reference=true`: the upstream Star monitor reports USD exposure only and never a token quantity, so there is no balance to report — read `amount_usd` instead.
        * @example 1234567.89
        */
-      balance: string;
+      balance: string | null;
       /** @description Allocation category derived from protocol/symbol (`allocation`, `pol`, `psm3`, `asset`, `custody`). */
       category: components['schemas']['AllocationCategory'];
       /**
@@ -1213,6 +1213,13 @@ export interface components {
        * @constant
        */
       mode: 'aggregated';
+      /**
+       * Source
+       * @description Provenance of the series. `self` is STL's priced receipt-token exposure; `reference` is Sky's Star monitor as observed by STL's syncer, returned when `reference=true`.
+       * @default self
+       * @enum {string}
+       */
+      source: 'self' | 'reference';
       /** @description The window and resolution applied to this response. */
       window: components['schemas']['TimeSeriesWindow'];
     };
@@ -2206,6 +2213,13 @@ export interface components {
        * @constant
        */
       mode: 'aggregated';
+      /**
+       * Source
+       * @description Provenance of the series. `self` is the on-chain SubProxy treasury; `reference` is Sky's Star monitor as observed by STL's syncer, returned when `reference=true`.
+       * @default self
+       * @enum {string}
+       */
+      source: 'self' | 'reference';
       /** @description The window and resolution applied to this response. */
       window: components['schemas']['TimeSeriesWindow'];
     };
@@ -2365,7 +2379,10 @@ export interface operations {
   };
   list_allocations_v1_primes__prime_id__allocations_get: {
     parameters: {
-      query?: never;
+      query?: {
+        /** @description List the positions Sky's Star monitor reports for this prime instead of the ones STL indexes on-chain. The row shape is unchanged, but every row is prime-scoped (`scope="prime"`) because the monitor reports per prime, not per proxy — so a client fanning out across a prime's proxies must dedupe rather than sum. `balance` is `null` throughout: the monitor reports USD exposure only. Returns `404` when the monitor does not track the prime and `502` when it cannot be read. */
+        reference?: boolean;
+      };
       header?: never;
       path: {
         /** @description A prime's 0x-prefixed ALM **proxy** address on one chain — not a prime identifier. A prime allocates through one proxy per chain; list them via `GET /v1/primes` and group by `prime_vault_address`. */
@@ -2443,6 +2460,8 @@ export interface operations {
       query?: {
         /** @description Max buckets returned (default 100, max 500). */
         limit?: number;
+        /** @description Serve Sky's Star monitor exposure instead of STL's priced receipt-token exposure. The shape is unchanged; `source` reports the provenance. The reference series only extends back to when STL first observed the monitor — it publishes no history of its own — so earlier buckets are `null`, meaning not yet observed rather than zero. */
+        reference?: boolean;
         /** @description Inclusive lower timestamp bound (ISO-8601). Defaults to 24h before `to_timestamp`. */
         from_timestamp?: string | null;
         /** @description Inclusive upper timestamp bound (ISO-8601). Defaults to the current UTC time. */
@@ -2521,6 +2540,8 @@ export interface operations {
       query?: {
         /** @description Max buckets returned (default 100, max 500). */
         limit?: number;
+        /** @description Serve Sky's Star monitor figures instead of the on-chain treasury. The shape is unchanged; `source` reports the provenance. The reference series only extends back to when STL first observed the monitor — it publishes no history of its own — so earlier buckets are `null`, meaning not yet observed rather than zero. */
+        reference?: boolean;
         /** @description Inclusive lower timestamp bound (ISO-8601). Defaults to 24h before `to_timestamp`. */
         from_timestamp?: string | null;
         /** @description Inclusive upper timestamp bound (ISO-8601). Defaults to the current UTC time. */

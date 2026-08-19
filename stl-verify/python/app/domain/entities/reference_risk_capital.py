@@ -12,6 +12,7 @@ for a past instant — only observed going forward.
 """
 
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 
 
@@ -71,3 +72,17 @@ class ReferencePrimeRiskCapital:
     epi_utilization: Decimal
     spj_utilization: Decimal
     per_allocation: tuple[ReferenceAllocation, ...]
+
+
+@dataclass(frozen=True)
+class ReferenceCapitalBucket:
+    """Last observed upstream figures within a single time bucket (LOCF).
+
+    Both figures ride one bucket because they come from one snapshot row, so
+    splitting them across two queries could straddle a sync cycle and pair an
+    exposure with a treasury observed at a different instant.
+    """
+
+    bucket_start: datetime
+    total_capital_usd: Decimal | None
+    exposure_usd: Decimal | None

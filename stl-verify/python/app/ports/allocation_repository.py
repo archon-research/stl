@@ -12,7 +12,6 @@ from app.domain.entities.allocation import (
     ReceiptTokenPosition,
 )
 from app.domain.entities.allocation_activity import AllocationActivityEvent
-from app.domain.entities.capital_stack import CapitalStackSnapshot
 from app.domain.entities.time_series_bucket import (
     AllocationActivityBucket,
     ExposureBucket,
@@ -97,10 +96,6 @@ class AllocationRepositoryPort(Protocol):
         Positions whose latest balance is zero (closed or swept) are excluded
         from the total.
         """
-        ...
-
-    async def get_latest_capital_stack(self, prime_id: EthAddress) -> CapitalStackSnapshot | None:
-        """Return the latest capital stack snapshot for a prime, if available."""
         ...
 
     async def list_allocation_activity(
