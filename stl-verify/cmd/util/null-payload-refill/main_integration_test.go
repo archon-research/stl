@@ -35,14 +35,7 @@ import (
 var sharedLocalStackCfg testutil.LocalStackConfig
 
 func TestMain(m *testing.M) {
-	cfg, cleanup := testutil.StartLocalStackForMain("s3,sns,sqs")
-	sharedLocalStackCfg = cfg
-
-	code := m.Run()
-
-	cleanup()
-	code = testutil.CheckGoroutineLeaks(code)
-	os.Exit(code)
+	os.Exit(testutil.NewIntegrationMain(m).WithLocalStack("s3,sns,sqs", &sharedLocalStackCfg).Run())
 }
 
 // TestRun_EndToEnd exercises the full null-payload-refill flow against

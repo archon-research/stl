@@ -12,12 +12,5 @@ import (
 var sharedLocalStackCfg testutil.LocalStackConfig
 
 func TestMain(m *testing.M) {
-	cfg, cleanup := testutil.StartLocalStackForMain("s3")
-	sharedLocalStackCfg = cfg
-
-	code := m.Run()
-
-	cleanup()
-	code = testutil.CheckGoroutineLeaks(code)
-	os.Exit(code)
+	os.Exit(testutil.NewIntegrationMain(m).WithLocalStack("s3", &sharedLocalStackCfg).Run())
 }

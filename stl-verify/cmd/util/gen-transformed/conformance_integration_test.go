@@ -22,16 +22,15 @@ const migrationPath = "../../../db/migrations/20260706_140000_create_transformed
 var sharedPool *pgxpool.Pool
 
 func TestMain(m *testing.M) {
-	dsn, cleanup := testutil.StartTimescaleDBForMain()
-	testutil.EnsurePublicMigrations(dsn)
-	sharedPool = testutil.ConnectPoolForMain(dsn)
-
-	code := m.Run()
-
-	sharedPool.Close()
-	cleanup()
-	code = testutil.CheckGoroutineLeaks(code)
-	os.Exit(code)
+	var dsn string
+	os.Exit(testutil.NewIntegrationMain(m).
+		WithTimescaleDB(&dsn).
+		BeforeRun(func() {
+			testutil.EnsurePublicMigrations(dsn)
+			sharedPool = testutil.ConnectPoolForMain(dsn)
+		}).
+		AfterRun(func() { sharedPool.Close() }).
+		Run())
 }
 
 // TestRegenDiff is the drift gate: it reads the raw schema of

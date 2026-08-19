@@ -33,24 +33,21 @@ func registerTestFileSetup(schemaName string, setup, cleanup func()) {
 }
 
 func TestMain(m *testing.M) {
-	dsn, cleanup := testutil.StartTimescaleDBForMain()
-	sharedDSN = dsn
+	os.Exit(testutil.NewIntegrationMain(m).
+		WithTimescaleDB(&sharedDSN).
+		BeforeRun(setUpTestFileSchemas).
+		AfterRun(cleanUpTestFileSchemas).
+		Run())
+}
 
-	// Run all registered schema setups
+func setUpTestFileSchemas() {
 	for _, ts := range testFileSetups {
 		ts.setup()
 	}
+}
 
-	code := m.Run()
-
-	// Run all registered schema cleanups
+func cleanUpTestFileSchemas() {
 	for _, ts := range testFileSetups {
 		ts.cleanup()
 	}
-
-	cleanup()
-
-	code = testutil.CheckGoroutineLeaks(code)
-
-	os.Exit(code)
 }

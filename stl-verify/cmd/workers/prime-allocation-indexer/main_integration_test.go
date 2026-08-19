@@ -42,20 +42,11 @@ const (
 )
 
 func TestMain(m *testing.M) {
-	dsn, dbCleanup := testutil.StartTimescaleDBForMain()
-	sharedDSN = dsn
-	redisAddr, redisCleanup := testutil.StartRedisForMain()
-	sharedRedisAddr = redisAddr
-	lsCfg, lsCleanup := testutil.StartLocalStackForMain("s3")
-	sharedLocalStackCfg = lsCfg
-
-	code := m.Run()
-
-	lsCleanup()
-	redisCleanup()
-	dbCleanup()
-	code = testutil.CheckGoroutineLeaks(code)
-	os.Exit(code)
+	os.Exit(testutil.NewIntegrationMain(m).
+		WithTimescaleDB(&sharedDSN).
+		WithRedis(&sharedRedisAddr).
+		WithLocalStack("s3", &sharedLocalStackCfg).
+		Run())
 }
 
 // ---------------------------------------------------------------------------

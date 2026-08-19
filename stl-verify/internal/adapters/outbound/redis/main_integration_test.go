@@ -12,12 +12,5 @@ import (
 var sharedRedisAddr string
 
 func TestMain(m *testing.M) {
-	addr, cleanup := testutil.StartRedisForMain()
-	sharedRedisAddr = addr
-
-	code := m.Run()
-
-	cleanup()
-	code = testutil.CheckGoroutineLeaks(code)
-	os.Exit(code)
+	os.Exit(testutil.NewIntegrationMain(m).WithRedis(&sharedRedisAddr).Run())
 }

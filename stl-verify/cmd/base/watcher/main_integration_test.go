@@ -35,22 +35,11 @@ var (
 )
 
 func TestMain(m *testing.M) {
-	dsn, dbCleanup := testutil.StartTimescaleDBForMain()
-	sharedDSN = dsn
-
-	redisAddr, redisCleanup := testutil.StartRedisForMain()
-	sharedRedisAddr = redisAddr
-
-	lsCfg, lsCleanup := testutil.StartLocalStackForMain("sns,sqs")
-	sharedLocalStackCfg = lsCfg
-
-	code := m.Run()
-
-	lsCleanup()
-	redisCleanup()
-	dbCleanup()
-	code = testutil.CheckGoroutineLeaks(code)
-	os.Exit(code)
+	os.Exit(testutil.NewIntegrationMain(m).
+		WithTimescaleDB(&sharedDSN).
+		WithRedis(&sharedRedisAddr).
+		WithLocalStack("sns,sqs", &sharedLocalStackCfg).
+		Run())
 }
 
 // newTestBlockchainClient returns a MockBlockchainClient configured for
