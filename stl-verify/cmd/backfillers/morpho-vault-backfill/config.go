@@ -31,6 +31,11 @@ func loadConfig() (config, error) {
 	if err != nil {
 		return config{}, err
 	}
+	// RequireChainID parses but does not range-check, and a non-positive id would
+	// otherwise surface far downstream as an RPC chain-ID mismatch.
+	if chainID <= 0 {
+		return config{}, fmt.Errorf("CHAIN_ID must be a positive chain ID, got %d", chainID)
+	}
 
 	bucket, err := env.Require("S3_BUCKET")
 	if err != nil {
