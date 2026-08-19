@@ -552,7 +552,10 @@
                 "type": "string"
               },
               {
-                "const": "price_data_missing",
+                "enum": [
+                  "price_data_missing",
+                  "adapter_data_missing"
+                ],
                 "type": "string"
               },
               {

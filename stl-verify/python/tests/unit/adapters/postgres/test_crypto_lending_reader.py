@@ -4,12 +4,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.adapters.postgres.backed_breakdown_repository_morpho import MorphoVaultRef
 from app.adapters.postgres.crypto_lending_reader import PostgresCryptoLendingReader, _normalize_protocol_name
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.backed_breakdown import BackedBreakdown, CollateralContribution
 from app.domain.entities.receipt_token import ReceiptTokenInfo, ReceiptTokenProtocolPair
 from app.domain.entities.risk import LiquidationParams
-from app.domain.exceptions import MissingShareError
+from app.domain.exceptions import AdapterDataMissingError, MissingShareError
 
 DUMMY_PRIME = EthAddress("0x" + "ab" * 20)
 
@@ -73,8 +74,12 @@ def aave_breakdown_repo() -> MagicMock:
 @pytest.fixture
 def morpho_breakdown_repo() -> MagicMock:
     repo = MagicMock()
-    repo.resolve_vault_id = AsyncMock(return_value=55)
+    # Default: a MetaMorpho V1 vault (vault_version=1) resolving to internal id 55.
+    repo.resolve_vault = AsyncMock(return_value=MorphoVaultRef(id=55, vault_version=1))
     repo.get_backed_breakdown = AsyncMock(return_value=BackedBreakdown(backed_asset_id=55, items=()))
+    # V2 walk lives on the same repo. Distinct backed_asset_id (77) so a test can tell
+    # the v3 method apart from the v1/v1.1 method (55).
+    repo.get_backed_breakdown_v2 = AsyncMock(return_value=BackedBreakdown(backed_asset_id=77, items=()))
     return repo
 
 
@@ -109,6 +114,13 @@ def aave_liq_repo() -> MagicMock:
 def morpho_liq_repo() -> MagicMock:
     repo = MagicMock()
     repo.get_params = AsyncMock(return_value={1: LiquidationParams(1, Decimal("0.8"), Decimal("1.05"))})
+    # V2 params + composition probes live on the same repo. Distinct params dict so a
+    # test can tell the v3 method apart from the v1/v1.1 method.
+    repo.get_params_v2 = AsyncMock(return_value={2: LiquidationParams(2, Decimal("0.9"), Decimal("1.02"))})
+    # Defaults describe a fully-indexed, walkable v3 vault: adapters present and
+    # every adapter's value walks into collateral. Degrade tests flip these.
+    repo.has_active_adapters = AsyncMock(return_value=True)
+    repo.has_unwalkable_adapter_value = AsyncMock(return_value=False)
     return repo
 
 
@@ -180,13 +192,131 @@ async def test_get_breakdown_uses_morpho_repository(
     reader: PostgresCryptoLendingReader,
     morpho_breakdown_repo: MagicMock,
 ) -> None:
-    info = _morpho_info()
+    info = _morpho_info()  # resolve_vault → MorphoVaultRef(id=55, vault_version=1)
 
     result = await reader.get_breakdown(info)
 
-    morpho_breakdown_repo.resolve_vault_id.assert_awaited_once_with(info.receipt_token_address, info.chain_id)
+    morpho_breakdown_repo.resolve_vault.assert_awaited_once_with(info.receipt_token_address, info.chain_id)
     morpho_breakdown_repo.get_backed_breakdown.assert_awaited_once_with(55)
+    morpho_breakdown_repo.get_backed_breakdown_v2.assert_not_awaited()
     assert result.backed_asset_id == 55
+
+
+@pytest.mark.asyncio
+async def test_get_breakdown_morpho_v1_1_uses_v1_repository(
+    reader: PostgresCryptoLendingReader,
+    morpho_breakdown_repo: MagicMock,
+) -> None:
+    """vault_version=2 (MetaMorpho V1.1) shares the V1 direct-allocation walk."""
+    info = _morpho_info()
+    morpho_breakdown_repo.resolve_vault.return_value = MorphoVaultRef(id=55, vault_version=2)
+
+    result = await reader.get_breakdown(info)
+
+    morpho_breakdown_repo.get_backed_breakdown.assert_awaited_once_with(55)
+    morpho_breakdown_repo.get_backed_breakdown_v2.assert_not_awaited()
+    assert result.backed_asset_id == 55
+
+
+@pytest.mark.asyncio
+async def test_get_breakdown_morpho_v2_uses_v2_repository(
+    reader: PostgresCryptoLendingReader,
+    morpho_breakdown_repo: MagicMock,
+    morpho_liq_repo: MagicMock,
+) -> None:
+    """vault_version=3, fully-indexed and walkable: routes to the v3 method after the
+    composition-completeness gate passes."""
+    info = _morpho_info()
+    morpho_breakdown_repo.resolve_vault.return_value = MorphoVaultRef(id=66, vault_version=3)
+
+    result = await reader.get_breakdown(info)
+
+    # The gate is consulted before the breakdown is returned (fail fast).
+    morpho_liq_repo.has_active_adapters.assert_awaited_once_with(66)
+    morpho_liq_repo.has_unwalkable_adapter_value.assert_awaited_once_with(66)
+    morpho_breakdown_repo.get_backed_breakdown_v2.assert_awaited_once_with(66)
+    morpho_breakdown_repo.get_backed_breakdown.assert_not_awaited()
+    assert result.backed_asset_id == 77
+
+
+@pytest.mark.asyncio
+async def test_get_breakdown_morpho_v2_no_adapters_raises(
+    reader: PostgresCryptoLendingReader,
+    morpho_breakdown_repo: MagicMock,
+    morpho_liq_repo: MagicMock,
+) -> None:
+    """A v3 vault with no active adapters is not indexed yet: get_breakdown must
+    degrade (AdapterDataMissingError) rather than return a 100%-idle breakdown."""
+    info = _morpho_info()
+    morpho_breakdown_repo.resolve_vault.return_value = MorphoVaultRef(id=66, vault_version=3)
+    morpho_liq_repo.has_active_adapters.return_value = False
+
+    with pytest.raises(AdapterDataMissingError, match="adapter"):
+        await reader.get_breakdown(info)
+
+    morpho_breakdown_repo.get_backed_breakdown_v2.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_breakdown_morpho_v2_unwalkable_value_raises(
+    reader: PostgresCryptoLendingReader,
+    morpho_breakdown_repo: MagicMock,
+    morpho_liq_repo: MagicMock,
+) -> None:
+    """A v3 vault holding adapter value that cannot be walked into collateral (partial
+    index: adapter/state present, positions missing) must degrade at get_breakdown —
+    otherwise its breakdown short-circuits empty and reports a confident rrc=0."""
+    info = _morpho_info()
+    morpho_breakdown_repo.resolve_vault.return_value = MorphoVaultRef(id=66, vault_version=3)
+    morpho_liq_repo.has_unwalkable_adapter_value.return_value = True
+
+    with pytest.raises(AdapterDataMissingError, match="walk"):
+        await reader.get_breakdown(info)
+
+    morpho_breakdown_repo.get_backed_breakdown_v2.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_batch_get_breakdowns_omits_unwalkable_v2_without_sinking_batch(
+    reader: PostgresCryptoLendingReader,
+    aave_breakdown_repo: MagicMock,
+    morpho_breakdown_repo: MagicMock,
+    morpho_liq_repo: MagicMock,
+) -> None:
+    """An unwalkable v3 allocation must not sink the whole prime's batched prefetch.
+
+    It is omitted from the batch result (re-fetched and degraded per-allocation in
+    compute_with_share), while every other allocation still resolves.
+    """
+    aave = _aave_like_info()  # receipt_token_id=99, underlying=42
+    morpho_v3 = replace(_morpho_info(), receipt_token_id=101)
+    morpho_breakdown_repo.resolve_vault.return_value = MorphoVaultRef(id=66, vault_version=3)
+    morpho_liq_repo.has_unwalkable_adapter_value.return_value = True
+    aave_breakdown_repo.get_backed_breakdowns = AsyncMock(
+        return_value={42: BackedBreakdown(backed_asset_id=42, items=())}
+    )
+
+    out = await reader.batch_get_breakdowns([aave, morpho_v3])
+
+    assert out[99].backed_asset_id == 42
+    assert 101 not in out  # omitted, not raised
+
+
+@pytest.mark.asyncio
+async def test_get_breakdown_morpho_unexpected_version_raises(
+    reader: PostgresCryptoLendingReader,
+    morpho_breakdown_repo: MagicMock,
+) -> None:
+    """An unknown vault_version must fail loudly (enum drift guard), never silently
+    fall through to a wrong walk."""
+    info = _morpho_info()
+    morpho_breakdown_repo.resolve_vault.return_value = MorphoVaultRef(id=55, vault_version=4)
+
+    with pytest.raises(ValueError, match="vault_version"):
+        await reader.get_breakdown(info)
+
+    morpho_breakdown_repo.get_backed_breakdown.assert_not_awaited()
+    morpho_breakdown_repo.get_backed_breakdown_v2.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -195,7 +325,7 @@ async def test_get_breakdown_raises_when_morpho_vault_missing(
     morpho_breakdown_repo: MagicMock,
 ) -> None:
     info = _morpho_info()
-    morpho_breakdown_repo.resolve_vault_id.return_value = None
+    morpho_breakdown_repo.resolve_vault.return_value = None
 
     with pytest.raises(ValueError, match="morpho vault not found"):
         await reader.get_breakdown(info)
@@ -225,12 +355,123 @@ async def test_get_liquidation_params_uses_morpho_repository(
     reader: PostgresCryptoLendingReader,
     morpho_liq_repo: MagicMock,
 ) -> None:
-    info = _morpho_info()
+    """vault_version=1 (MetaMorpho V1) uses the V1 liquidation-params method."""
+    info = _morpho_info()  # resolve_vault → MorphoVaultRef(id=55, vault_version=1)
 
     result = await reader.get_liquidation_params(info, backed_asset_id=55, token_ids=[1, 2])
 
     morpho_liq_repo.get_params.assert_awaited_once_with(55, [1, 2])
+    morpho_liq_repo.get_params_v2.assert_not_awaited()
     assert result == morpho_liq_repo.get_params.return_value
+
+
+@pytest.mark.asyncio
+async def test_get_liquidation_params_morpho_v1_1_uses_v1_repository(
+    reader: PostgresCryptoLendingReader,
+    morpho_breakdown_repo: MagicMock,
+    morpho_liq_repo: MagicMock,
+) -> None:
+    """vault_version=2 (MetaMorpho V1.1) shares the V1 liquidation-params walk."""
+    info = _morpho_info()
+    morpho_breakdown_repo.resolve_vault.return_value = MorphoVaultRef(id=55, vault_version=2)
+
+    result = await reader.get_liquidation_params(info, backed_asset_id=55, token_ids=[1, 2])
+
+    morpho_liq_repo.get_params.assert_awaited_once_with(55, [1, 2])
+    morpho_liq_repo.get_params_v2.assert_not_awaited()
+    assert result == morpho_liq_repo.get_params.return_value
+
+
+@pytest.mark.asyncio
+async def test_get_liquidation_params_morpho_v2_uses_v2_repository(
+    reader: PostgresCryptoLendingReader,
+    morpho_breakdown_repo: MagicMock,
+    morpho_liq_repo: MagicMock,
+) -> None:
+    """vault_version=3, fully-indexed and walkable: the composition gate passes and
+    the adapter-graph v3 method resolves params."""
+    info = _morpho_info()
+    morpho_breakdown_repo.resolve_vault.return_value = MorphoVaultRef(id=66, vault_version=3)
+
+    result = await reader.get_liquidation_params(info, backed_asset_id=66, token_ids=[1, 2])
+
+    morpho_liq_repo.has_active_adapters.assert_awaited_once_with(66)
+    morpho_liq_repo.has_unwalkable_adapter_value.assert_awaited_once_with(66)
+    morpho_liq_repo.get_params_v2.assert_awaited_once_with(66, [1, 2])
+    morpho_liq_repo.get_params.assert_not_awaited()
+    assert result == morpho_liq_repo.get_params_v2.return_value
+
+
+@pytest.mark.asyncio
+async def test_get_liquidation_params_morpho_v2_no_adapters_raises(
+    reader: PostgresCryptoLendingReader,
+    morpho_breakdown_repo: MagicMock,
+    morpho_liq_repo: MagicMock,
+) -> None:
+    """A v3 vault with no active adapters is not indexed yet — degrade, never resolve
+    (and never drop every item into a confident rrc=0)."""
+    info = _morpho_info()
+    morpho_breakdown_repo.resolve_vault.return_value = MorphoVaultRef(id=66, vault_version=3)
+    morpho_liq_repo.has_active_adapters.return_value = False
+
+    with pytest.raises(AdapterDataMissingError, match="adapter"):
+        await reader.get_liquidation_params(info, backed_asset_id=66, token_ids=[1, 2])
+
+    morpho_liq_repo.has_active_adapters.assert_awaited_once_with(66)
+    morpho_liq_repo.get_params_v2.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_liquidation_params_morpho_v2_unwalkable_value_raises(
+    reader: PostgresCryptoLendingReader,
+    morpho_breakdown_repo: MagicMock,
+    morpho_liq_repo: MagicMock,
+) -> None:
+    """Adapters present but some adapter's value cannot be walked into collateral
+    (partial index): degrade even though params may be non-empty (a partially-walkable
+    vault would otherwise report a confident rrc=0 for the unindexed value)."""
+    info = _morpho_info()
+    morpho_breakdown_repo.resolve_vault.return_value = MorphoVaultRef(id=66, vault_version=3)
+    morpho_liq_repo.has_unwalkable_adapter_value.return_value = True
+
+    with pytest.raises(AdapterDataMissingError, match="walk"):
+        await reader.get_liquidation_params(info, backed_asset_id=66, token_ids=[1, 2])
+
+    morpho_liq_repo.has_unwalkable_adapter_value.assert_awaited_once_with(66)
+    morpho_liq_repo.get_params_v2.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_liquidation_params_morpho_v2_genuinely_idle_is_not_degraded(
+    reader: PostgresCryptoLendingReader,
+    morpho_breakdown_repo: MagicMock,
+    morpho_liq_repo: MagicMock,
+) -> None:
+    """Adapters present, every adapter's value walked (not unwalkable), but no
+    collateral markets — a genuinely idle vault returns empty params (a real rrc=0),
+    NOT a degradation."""
+    info = _morpho_info()
+    morpho_breakdown_repo.resolve_vault.return_value = MorphoVaultRef(id=66, vault_version=3)
+    morpho_liq_repo.get_params_v2.return_value = {}
+    morpho_liq_repo.has_active_adapters.return_value = True
+    morpho_liq_repo.has_unwalkable_adapter_value.return_value = False
+
+    result = await reader.get_liquidation_params(info, backed_asset_id=66, token_ids=[1, 2])
+
+    assert result == {}
+    morpho_liq_repo.has_unwalkable_adapter_value.assert_awaited_once_with(66)
+
+
+@pytest.mark.asyncio
+async def test_get_liquidation_params_morpho_unexpected_version_raises(
+    reader: PostgresCryptoLendingReader,
+    morpho_breakdown_repo: MagicMock,
+) -> None:
+    info = _morpho_info()
+    morpho_breakdown_repo.resolve_vault.return_value = MorphoVaultRef(id=55, vault_version=4)
+
+    with pytest.raises(ValueError, match="vault_version"):
+        await reader.get_liquidation_params(info, backed_asset_id=55, token_ids=[1, 2])
 
 
 @pytest.mark.asyncio

@@ -249,6 +249,18 @@ Two concurrent transactions inserting overlapping rows in different order would 
 Batch repository methods must sort rows by natural key before building the INSERT to ensure
 consistent lock acquisition order across transactions.
 
+**VaultV2 lock prefixes:** The Morpho VaultV2 tables extend the prefix registry with three more
+entries, each hashing its full natural key:
+- `mas` — `morpho_adapter_state` (`morpho_adapter_id, block_number, block_version, timestamp`)
+- `mvc` — `morpho_vault_cap` (`morpho_vault_id, cap_id, block_number, block_version, timestamp`)
+- `mvf` — `morpho_vault_fee` (`morpho_vault_id, block_number, block_version, timestamp`)
+
+Today each VaultV2 handler writes exactly one of these tables per transaction, so no
+combined-write lock ordering is exercised yet. The prefixes are registered as a forward-looking
+invariant: any future transaction that writes both a vault's state and its adapter state / caps /
+fees must acquire the `mas`, `mvc` and `mvf` locks after the parent vault's `mvs` state lock — a
+state-first acquisition order that keeps concurrent writers on the same vault deadlock-free.
+
 #### Trigger Examples
 
 ```sql
@@ -343,6 +355,7 @@ EXECUTE FUNCTION assign_processing_version_onchain_token_price();
 
 -- Same pattern for: borrower, borrower_collateral, sparklend_reserve_data,
 -- morpho_market_position, morpho_vault_state, morpho_vault_position,
+-- morpho_adapter_state, morpho_vault_cap, morpho_vault_fee,
 -- prime_debt, allocation_position, protocol_event
 -- (each with its own natural key columns in the WHERE clause)
 
@@ -525,6 +538,9 @@ triggers:
 | `morpho_market_position` | `user_id, morpho_market_id, block_number, block_version, timestamp` | Hypertable (compression) |
 | `morpho_vault_state` | `morpho_vault_id, block_number, block_version, timestamp` | Hypertable (compression) |
 | `morpho_vault_position` | `user_id, morpho_vault_id, block_number, block_version, timestamp` | Hypertable (compression) |
+| `morpho_adapter_state` | `morpho_adapter_id, block_number, block_version, timestamp` | Hypertable (compression) |
+| `morpho_vault_cap` | `morpho_vault_id, cap_id, block_number, block_version, timestamp` | Plain table, natural PK |
+| `morpho_vault_fee` | `morpho_vault_id, block_number, block_version, timestamp` | Plain table, natural PK |
 | `prime_debt` | `prime_id, block_number, block_version, synced_at` | Hypertable, UNIQUE only (no PK) |
 | `allocation_position` | `chain_id, token_id, prime_id, proxy_address, block_number, block_version, tx_hash, log_index, direction, created_at` | Hypertable (columnstore), natural PK |
 | `protocol_event` | `chain_id, block_number, block_version, tx_hash, log_index, created_at` | Hypertable (columnstore), natural PK |
@@ -538,7 +554,9 @@ triggers:
 | `offchain_token_price` | `token_id, source_id, timestamp` | Hypertable (compression) |
 
 **Notes:**
-- All state tables are now hypertables. Tables using the old compression API
+- All state tables are hypertables except the sparse governance-event tables marked
+  "Plain table" above (`morpho_vault_cap`, `morpho_vault_fee`), whose write rate makes
+  chunking pure overhead (CONTRIBUTING §11 rule 4). Tables using the old compression API
   (`timescaledb.compress`) require `remove_compression_policy` + `decompress_chunk` before
   constraint alteration. Tables using the columnstore API (`timescaledb.enable_columnstore`)
   require pausing the job, decompressing, and disabling columnstore before alteration.
