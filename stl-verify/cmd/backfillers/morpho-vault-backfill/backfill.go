@@ -274,6 +274,10 @@ func replayActivityOptions() workflow.ActivityOptions {
 		// hang the run forever.
 		ScheduleToCloseTimeout: 2 * time.Hour,
 
+		// The deployment rolls with strategy Recreate, so without this a rollout
+		// mid-partition leaves the in-flight attempt undetected until StartToClose.
+		HeartbeatTimeout: heartbeatTimeoutFactor * heartbeatInterval,
+
 		RetryPolicy: &temporalsdk.RetryPolicy{
 			InitialInterval:    2 * time.Second,
 			BackoffCoefficient: 2.0,
@@ -333,6 +337,9 @@ func (a *backfillActivities) DiscoverVaults(ctx context.Context, rng blockRange)
 func (a *backfillActivities) ReplayPartition(ctx context.Context, work partitionWork) (events int, err error) {
 	// Classified on the way out so no return path can escape it.
 	defer func() { err = nonRetryableIfStructural(err) }()
+
+	stopHeartbeat := startHeartbeat(ctx, heartbeatInterval)
+	defer stopHeartbeat()
 	defer a.archiveDrain()
 
 	svc, err := buildReplayService(a.logger, a.multicaller, a.pool, a.buildID, a.cfg.chainID)
