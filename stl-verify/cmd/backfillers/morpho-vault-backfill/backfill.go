@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/ethclient"
@@ -296,7 +295,8 @@ type backfillActivities struct {
 // any.
 func (a *backfillActivities) DiscoverVaults(ctx context.Context, rng blockRange) (discoveryResult, error) {
 	defer a.archiveDrain()
-	defer startHeartbeat(ctx, heartbeatInterval)()
+	stopHeartbeat := startHeartbeat(ctx, heartbeatInterval)
+	defer stopHeartbeat()
 
 	got, err := discoverAndPersistVaults(ctx, a.logger, a.s3Reader, a.extractor, a.prober, a.pool, a.buildID, a.cfg, rng)
 	if err != nil {
@@ -346,10 +346,14 @@ func (a *backfillActivities) ReplayPartition(ctx context.Context, work partition
 	return events, nil
 }
 
-// startHeartbeat pings Temporal every interval until the returned stop is called.
+// startHeartbeat reports activity liveness every interval until the returned
+// stop function is called. stop joins the goroutine rather than just signalling
+// it, so no ping can land after the activity has reported its result.
 func startHeartbeat(ctx context.Context, interval time.Duration) (stop func()) {
 	done := make(chan struct{})
+	finished := make(chan struct{})
 	go func() {
+		defer close(finished)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
@@ -363,5 +367,8 @@ func startHeartbeat(ctx context.Context, interval time.Duration) (stop func()) {
 			}
 		}
 	}()
-	return sync.OnceFunc(func() { close(done) })
+	return func() {
+		close(done)
+		<-finished
+	}
 }
