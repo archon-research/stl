@@ -61,6 +61,16 @@ func TestLoadConfig(t *testing.T) {
 			wantErrContains: "CHAIN_ID",
 		},
 		{
+			name:            "zero CHAIN_ID",
+			override:        map[string]string{"CHAIN_ID": "0"},
+			wantErrContains: "CHAIN_ID must be a positive",
+		},
+		{
+			name:            "negative CHAIN_ID",
+			override:        map[string]string{"CHAIN_ID": "-7"},
+			wantErrContains: "CHAIN_ID must be a positive",
+		},
+		{
 			name:            "missing S3_BUCKET",
 			override:        map[string]string{"S3_BUCKET": ""},
 			wantErrContains: "S3_BUCKET",
