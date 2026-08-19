@@ -14,6 +14,7 @@ import (
 	"go.temporal.io/sdk/activity"
 	temporalsdk "go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
+	"go.temporal.io/sdk/workflow"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/partition"
 	"github.com/archon-research/stl/stl-verify/internal/services/morpho_indexer"
@@ -381,6 +382,31 @@ func TestNonRetryableIfStructural_LeavesTransientFailuresRetryable(t *testing.T)
 			var appErr *temporalsdk.ApplicationError
 			if errors.As(nonRetryableIfStructural(tc.err), &appErr) && appErr.NonRetryable() {
 				t.Error("a transient fault must stay retryable; the retry envelope is what absorbs it")
+			}
+		})
+	}
+}
+
+// Both activities heartbeat, so both must declare a timeout: without one
+// Temporal notices a worker killed mid-activity only at StartToClose — 30
+// minutes for a partition, 12 hours for discovery.
+func TestActivityOptions_DeclareAHeartbeatTimeoutWithGraceOverTheTicker(t *testing.T) {
+	tests := []struct {
+		name string
+		opts workflow.ActivityOptions
+	}{
+		{name: "discovery", opts: discoverActivityOptions()},
+		{name: "replay", opts: replayActivityOptions()},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.opts.HeartbeatTimeout <= heartbeatInterval {
+				t.Errorf("HeartbeatTimeout = %s, want more than the %s ticker so one late ping cannot fail the activity",
+					tc.opts.HeartbeatTimeout, heartbeatInterval)
+			}
+			if tc.opts.HeartbeatTimeout >= tc.opts.StartToCloseTimeout {
+				t.Errorf("HeartbeatTimeout %s is not tighter than StartToCloseTimeout %s, so it detects nothing sooner",
+					tc.opts.HeartbeatTimeout, tc.opts.StartToCloseTimeout)
 			}
 		})
 	}
