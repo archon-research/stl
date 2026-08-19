@@ -1,0 +1,60 @@
+# On-demand Morpho vault backfill worker (VEC-218).
+#
+# A long-running Deployment, not a k8s Job or CronJob: it polls the Temporal task
+# queue "morpho-vault-backfill" and stays idle until someone starts a run from
+# the Temporal UI. Unlike the cronjob workers it registers NO schedule, so an
+# always-on pod costs nothing but a poller.
+#
+# S3 read access to the per-chain raw bucket comes from an EKS Pod Identity
+# association on this ServiceAccount, granted in the infra repo (k8s/README.md).
+# That association must exist before the first run, or discovery fails on
+# AccessDenied listing the partition prefixes.
+#
+# replicas: 1 — the S3 connection pool and the RPC concurrency budget are both
+# per-process, so a second replica doubles the effective request rate against the
+# same bucket and the same Alchemy key. (Partition ordering is enforced by the
+# workflow's own sequential loop, not by Temporal.)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: morpho-vault-backfill
+spec:
+  replicas: 1
+  # Recreate, because replicas: 1 above is a rate bound, not a cost choice. The
+  # default RollingUpdate rounds maxSurge up to 1, so every rollout — including
+  # the Reloader-triggered ones a ConfigMap or rotated secret causes — would run
+  # two pods polling the same task queue until the new one is Ready.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: morpho-vault-backfill
+  template:
+    metadata:
+      labels:
+        app: morpho-vault-backfill
+    spec:
+      serviceAccountName: morpho-vault-backfill
+      containers:
+        - name: morpho-vault-backfill
+          image: morpho-vault-backfill
+          envFrom:
+            - configMapRef:
+                name: morpho-vault-backfill
+            - secretRef:
+                name: morpho-vault-backfill
+          # Far above the other Temporal workers': the discovery activity holds
+          # one candidate address per Morpho Blue caller across the whole range
+          # in memory, plus a decompressed receipt file per scan goroutine.
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              cpu: "2000m"
+              memory: "2Gi"
+      # Generous, but note the worker does NOT drain: it runs with a zero
+      # WorkerStopTimeout, so an in-flight activity is cancelled on shutdown and
+      # Temporal retries it on the next worker. Safe because every write is an
+      # idempotent append.
+      terminationGracePeriodSeconds: 60
