@@ -150,11 +150,11 @@ def _by_exposure_desc(rows: list, *, star: str) -> list:
 
 def _allocation(row: dict, *, star: str) -> ReferenceAllocation:
     return ReferenceAllocation(
-        protocol_name=_text(row, "protocol"),
-        network=_text(row, "network"),
-        symbol=_text(row, "symbol"),
+        protocol_name=_required_text(row, "protocol", star=star),
+        network=_required_text(row, "network", star=star),
+        symbol=_required_text(row, "symbol", star=star),
         name=_text(row, "name"),
-        token_address=_text(row, "token_address"),
+        token_address=_required_text(row, "token_address", star=star),
         loan_token_address=_text(row, "loan_token_address"),
         loan_token_symbol=_text(row, "loan_token_symbol"),
         exposure_usd=_decimal(row, "exposure", star=star),
@@ -163,7 +163,21 @@ def _allocation(row: dict, *, star: str) -> ReferenceAllocation:
     )
 
 
+def _required_text(row: dict, field: str, *, star: str) -> str:
+    """Read a field that identifies the position, rejecting an absent one.
+
+    Defaulting these to "" would not surface: an absent ``network`` reads as a
+    network STL cannot map, and an absent ``symbol`` is served as a real symbol.
+    Both look like ordinary answers rather than a feed that changed shape.
+    """
+    value = _text(row, field)
+    if not value:
+        raise ReferenceDataUnavailableError(f"Star monitor omitted required field '{field}' for prime '{star}'")
+    return value
+
+
 def _text(row: dict, field: str) -> str:
+    """Read a descriptive field, which upstream may legitimately leave empty."""
     value = row.get(field)
     return "" if value is None else str(value)
 

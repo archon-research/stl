@@ -156,6 +156,29 @@ async def test_get_prime_raises_when_a_figure_is_not_numeric():
         await client.get_prime("spark")
 
 
+@pytest.mark.parametrize("field", ["protocol", "network", "symbol", "token_address"])
+async def test_get_prime_raises_when_a_position_identity_field_is_absent(field):
+    # Defaulting these would not surface: an absent network reads as one STL
+    # cannot map, and an absent symbol is served as a real symbol.
+    row = _allocation("spUSDT", "100")
+    row[field] = None
+    client = _client(allocations=[row])
+
+    with pytest.raises(ReferenceDataUnavailableError, match=field):
+        await client.get_prime("spark")
+
+
+async def test_get_prime_tolerates_an_absent_descriptive_field():
+    row = _allocation("spUSDT", "100")
+    row["loan_token_symbol"] = None
+    client = _client(allocations=[row])
+
+    snapshot = await client.get_prime("spark")
+
+    assert snapshot is not None
+    assert snapshot.per_allocation[0].loan_token_symbol == ""
+
+
 async def test_get_prime_raises_when_the_breakdown_has_no_results_array():
     client = _client(responses={"/primes/spark/allocations/": httpx.Response(200, json=_wrap({}))})
 

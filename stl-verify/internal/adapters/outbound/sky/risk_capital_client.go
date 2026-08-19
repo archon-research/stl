@@ -152,24 +152,26 @@ func (c *Client) fetchPrimeDetail(ctx context.Context, star string) (outbound.Ri
 // to report. Persisting a zero in place of an absent value would look like a
 // prime with no capital, so an incomplete payload fails the cycle instead.
 func requireAmounts(star string, s outbound.RiskCapitalPrimeSnapshot) error {
-	required := map[string]string{
-		"total_exposure":       s.Exposure,
-		"total_rrc":            s.RequiredRiskCapital,
-		"total_rc":             s.TotalRiskCapital,
-		"total_jrc":            s.JuniorRiskCapital,
-		"total_src":            s.SeniorRiskCapital,
-		"internal_jrc":         s.InternalJuniorRiskCapital,
-		"external_jrc":         s.ExternalJuniorRiskCapital,
-		"tokenized_jrc":        s.TokenizedJuniorRiskCapital,
-		"internal_src":         s.InternalSeniorRiskCapital,
-		"external_src":         s.ExternalSeniorRiskCapital,
-		"total_exposure_share": s.ExposureShare,
-		"epi_utilization":      s.EPIUtilization,
-		"spj_utilization":      s.SPJUtilization,
+	// Ordered, not a map: which field a broken payload is blamed on must be
+	// reproducible across runs, or the same fault reads as a different bug.
+	required := []struct{ field, value string }{
+		{"total_exposure", s.Exposure},
+		{"total_rrc", s.RequiredRiskCapital},
+		{"total_rc", s.TotalRiskCapital},
+		{"total_jrc", s.JuniorRiskCapital},
+		{"total_src", s.SeniorRiskCapital},
+		{"internal_jrc", s.InternalJuniorRiskCapital},
+		{"external_jrc", s.ExternalJuniorRiskCapital},
+		{"tokenized_jrc", s.TokenizedJuniorRiskCapital},
+		{"internal_src", s.InternalSeniorRiskCapital},
+		{"external_src", s.ExternalSeniorRiskCapital},
+		{"total_exposure_share", s.ExposureShare},
+		{"epi_utilization", s.EPIUtilization},
+		{"spj_utilization", s.SPJUtilization},
 	}
-	for field, value := range required {
-		if strings.TrimSpace(value) == "" {
-			return fmt.Errorf("sky risk capital for prime %q is missing field %q", star, field)
+	for _, r := range required {
+		if strings.TrimSpace(r.value) == "" {
+			return fmt.Errorf("sky risk capital for prime %q is missing field %q", star, r.field)
 		}
 	}
 	return nil
