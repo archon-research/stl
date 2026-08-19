@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -72,8 +73,9 @@ func NewDecodedCapturedLog(addr common.Address, logIndex uint, txHash common.Has
 }
 
 // MarshalDecodedParams JSON-encodes a shared.DecodeLog result map, recursively
-// stringifying every *big.Int (addresses and other scalars marshal as their
-// natural JSON form) so uint256/int256/int24 values keep full precision in JSONB.
+// stringifying every *big.Int and hex-encoding every bare byte array (addresses
+// and other scalars marshal as their natural JSON form) so uint256/int256/int24
+// values keep full precision and bytes32 values stay joinable in JSONB.
 // Exported for typed-entity params (e.g. UniswapV3PoolEvent.Params) that share
 // the capture net's lossless encoding.
 func MarshalDecodedParams(data map[string]any) (json.RawMessage, error) {
@@ -89,10 +91,11 @@ func MarshalDecodedParams(data map[string]any) (json.RawMessage, error) {
 }
 
 // stringifyBigInts returns v with every *big.Int (v itself, or elements of a
-// slice/array however deeply nested) replaced by its decimal string; all other
-// values are returned unchanged. ABI-decoded event fields are scalars, addresses,
-// or fixed/dynamic uint256 arrays — no maps or structs — so slice/array recursion
-// covers every big.Int the decode path can produce.
+// slice/array however deeply nested) replaced by its decimal string and every
+// raw byte array/slice replaced by its 0x-prefixed hex; all other values are
+// returned unchanged. ABI-decoded event fields are scalars, addresses, byte
+// arrays, or fixed/dynamic uint256 arrays — no maps or structs — so slice/array
+// recursion covers every big.Int the decode path can produce.
 //
 // Values that carry their own JSON encoding (common.Address / common.Hash are
 // [N]byte arrays implementing encoding.TextMarshaler) are left intact so they
@@ -108,6 +111,9 @@ func stringifyBigInts(v any) any {
 		return v
 	}
 	rv := reflect.ValueOf(v)
+	if encoded, ok := hexBytes(rv); ok {
+		return encoded
+	}
 	if rv.Kind() == reflect.Slice || rv.Kind() == reflect.Array {
 		out := make([]any, rv.Len())
 		for i := range out {
@@ -116,6 +122,25 @@ func stringifyBigInts(v any) any {
 		return out
 	}
 	return v
+}
+
+// hexBytes renders a bare byte array/slice — go-ethereum decodes bytes32 (a V4
+// PoolId or ModifyLiquidity salt) as [32]byte, which carries no JSON encoding of
+// its own — as lowercase 0x hex. Left as a decimal byte array it would be
+// unjoinable against the hex-keyed pool registry.
+func hexBytes(rv reflect.Value) (string, bool) {
+	kind := rv.Kind()
+	if kind != reflect.Array && kind != reflect.Slice {
+		return "", false
+	}
+	if rv.Type().Elem().Kind() != reflect.Uint8 {
+		return "", false
+	}
+	b := make([]byte, rv.Len())
+	for i := range b {
+		b[i] = byte(rv.Index(i).Uint())
+	}
+	return hexutil.Encode(b), true
 }
 
 // NewRawCapturedLog builds a CapturedLog holding the raw {topics, data} of a log

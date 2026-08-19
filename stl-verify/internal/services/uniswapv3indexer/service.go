@@ -13,6 +13,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/dextelemetry"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/tickbitmap"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/dexconsumer"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
@@ -310,7 +311,7 @@ func (s *UniswapV3Service) snapshotPoolTicks(ctx context.Context, pool Registere
 		if err != nil {
 			return nil, false, fmt.Errorf("enumerating baseline ticks for pool %s block %d: %w", pool.Address, bn, err)
 		}
-		ticksToRead = mergeTickSets(touched, baseline)
+		ticksToRead = tickbitmap.MergeTickSets(touched, baseline)
 	}
 
 	if ver > 0 {
@@ -318,7 +319,7 @@ func (s *UniswapV3Service) snapshotPoolTicks(ctx context.Context, pool Registere
 		if err != nil {
 			return nil, false, fmt.Errorf("reading prior-version ticks for pool %s block %d: %w", pool.Address, bn, err)
 		}
-		ticksToRead = mergeTickSets(ticksToRead, prior)
+		ticksToRead = tickbitmap.MergeTickSets(ticksToRead, prior)
 	}
 
 	rows, err := s.readTicks(ctx, pool, blockHash, bn, ver, ts, ticksToRead)
@@ -328,15 +329,8 @@ func (s *UniswapV3Service) snapshotPoolTicks(ctx context.Context, pool Registere
 	return rows, isFirstSeen, nil
 }
 
-// ticksPerCall bounds how many ticks(int24) sub-calls readTicks packs into a
-// single multicall3 aggregate call. A dense pool's first touch can enumerate
-// O(10³) initialized ticks; sending them all in one aggregate call risks
-// exceeding an RPC provider's request/response/gas caps, the same worst case
-// BaselineTicks chunks against (see baselineTickBitmapWordsPerCall).
-const ticksPerCall = 500
-
 // readTicks reads the given tick positions in bounded multicall batches (see
-// ticksPerCall), decoding every result into an authoritative
+// tickbitmap.TicksPerCall), decoding every result into an authoritative
 // entity.UniswapV3Tick. Batches are issued in order and their rows concatenated
 // so the returned slice stays aligned with ticksToRead.
 func (s *UniswapV3Service) readTicks(ctx context.Context, pool RegisteredPool, blockHash common.Hash, bn int64, ver int, ts time.Time, ticksToRead []int32) ([]*entity.UniswapV3Tick, error) {
@@ -345,7 +339,7 @@ func (s *UniswapV3Service) readTicks(ctx context.Context, pool RegisteredPool, b
 	}
 
 	rows := make([]*entity.UniswapV3Tick, 0, len(ticksToRead))
-	for chunk := range slices.Chunk(ticksToRead, ticksPerCall) {
+	for chunk := range slices.Chunk(ticksToRead, tickbitmap.TicksPerCall) {
 		chunkRows, err := s.readTickChunk(ctx, pool, blockHash, bn, ver, ts, chunk)
 		if err != nil {
 			return nil, err
@@ -379,26 +373,6 @@ func (s *UniswapV3Service) readTickChunk(ctx context.Context, pool RegisteredPoo
 		rows = append(rows, row)
 	}
 	return rows, nil
-}
-
-// mergeTickSets returns the deduplicated, ascending-sorted union of touched
-// and baseline: the pool's first-touch persist must write every initialized
-// tick exactly once, even where the baseline and this block's own mint/burn
-// bounds overlap.
-func mergeTickSets(touched, baseline []int32) []int32 {
-	seen := make(map[int32]struct{}, len(touched)+len(baseline))
-	out := make([]int32, 0, len(touched)+len(baseline))
-	for _, sets := range [][]int32{touched, baseline} {
-		for _, tick := range sets {
-			if _, ok := seen[tick]; ok {
-				continue
-			}
-			seen[tick] = struct{}{}
-			out = append(out, tick)
-		}
-	}
-	slices.Sort(out)
-	return out
 }
 
 // buildBlockWrites converts decoded accumulators and snapshots into the typed

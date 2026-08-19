@@ -871,8 +871,8 @@ func TestUniswapV4PoolManagerHasOneIdentityPerChain(t *testing.T) {
 	}
 }
 
-// LoadPools treats a NULL deploy_block as a registry defect, so the schema must
-// make one unrepresentable rather than leave it to the seed.
+// deploy_block gates every snapshot read, so the schema makes a NULL
+// unrepresentable rather than leaving it to the seed or a runtime check.
 func TestUniswapV4DeployBlockIsNotNullable(t *testing.T) {
 	ctx := context.Background()
 

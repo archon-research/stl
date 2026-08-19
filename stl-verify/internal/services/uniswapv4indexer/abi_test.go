@@ -17,9 +17,10 @@ func poolManagerABIForTest(t *testing.T) *abi.ABI {
 }
 
 // TestPoolManagerABI_EventTopicHashes pins every event signature to the topic0
-// captured verbatim from real mainnet PoolManager logs. topic0 covers the
-// signature only, so it cannot catch a wrong indexed flag; the fixtures do,
-// because a log decoded against the wrong flags yields the wrong fields.
+// captured verbatim from real mainnet PoolManager logs. topic0 hashes the
+// signature only, so no assertion here can catch a wrong indexed flag; the
+// verbatim-log decode fixtures in event_decode_test.go pin that half, because a
+// log decoded against the wrong flags yields the wrong fields.
 func TestPoolManagerABI_EventTopicHashes(t *testing.T) {
 	a := poolManagerABIForTest(t)
 

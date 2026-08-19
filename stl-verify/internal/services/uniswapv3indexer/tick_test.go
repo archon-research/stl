@@ -448,7 +448,7 @@ func TestBaselineTicks_DecodesSetBitsToTicks(t *testing.T) {
 }
 
 // TestBaselineTicks_ChunksMultipleWordBatches uses tickSpacing=1, which
-// widens the word range past baselineTickBitmapWordsPerCall, to prove
+// widens the word range past tickbitmap.BitmapWordsPerCall, to prove
 // BaselineTicks splits the scan into multiple ExecuteAtHash batches rather
 // than firing one multicall covering the entire word range.
 func TestBaselineTicks_ChunksMultipleWordBatches(t *testing.T) {
@@ -458,8 +458,8 @@ func TestBaselineTicks_ChunksMultipleWordBatches(t *testing.T) {
 
 	minWord, maxWord := tickbitmap.WordBounds(pool.TickSpacing)
 	totalWords := int(maxWord) - int(minWord) + 1
-	if totalWords <= baselineTickBitmapWordsPerCall {
-		t.Fatalf("test fixture invalid: totalWords = %d, want > baselineTickBitmapWordsPerCall = %d", totalWords, baselineTickBitmapWordsPerCall)
+	if totalWords <= tickbitmap.BitmapWordsPerCall {
+		t.Fatalf("test fixture invalid: totalWords = %d, want > tickbitmap.BitmapWordsPerCall = %d", totalWords, tickbitmap.BitmapWordsPerCall)
 	}
 
 	var (
@@ -511,8 +511,8 @@ func TestBaselineTicks_ChunksMultipleWordBatches(t *testing.T) {
 		t.Fatalf("ExecuteAtHash invocation count = %d, want > 1 (word range must be chunked)", executeCalls)
 	}
 	for i, size := range batchSizes {
-		if size > baselineTickBitmapWordsPerCall {
-			t.Errorf("batch %d size = %d, want <= baselineTickBitmapWordsPerCall = %d", i, size, baselineTickBitmapWordsPerCall)
+		if size > tickbitmap.BitmapWordsPerCall {
+			t.Errorf("batch %d size = %d, want <= tickbitmap.BitmapWordsPerCall = %d", i, size, tickbitmap.BitmapWordsPerCall)
 		}
 	}
 	if len(seenWords) != totalWords {

@@ -797,6 +797,68 @@ func TestUniswapV4Repository_SaveBlock_IdenticalReplayInsertsNothing(t *testing.
 	}
 }
 
+// TestUniswapV4Repository_SaveBlock_ReorgVersionAppendsAtProcessingVersionZero
+// pins block_version as part of every fact row's identity: the same logical row
+// re-observed on a new fork appends beside the old one at processing_version 0,
+// so a reorg is never mistaken for a correction of the orphaned row.
+func TestUniswapV4Repository_SaveBlock_ReorgVersionAppendsAtProcessingVersionZero(t *testing.T) {
+	ctx := context.Background()
+	poolID := seedUniswapV4RepoTestPool(t, ctx, 0x16)
+
+	const blockNumber = int64(21800030)
+	repo := newUniswapV4Repo(t)
+	for _, blockVersion := range []int{0, 1} {
+		writes := newUniswapV4TestBlockWrites(t, poolID, blockNumber, blockVersion)
+		withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
+			if _, err := repo.SaveBlock(ctx, tx, writes); err != nil {
+				t.Fatalf("SaveBlock at block_version %d: %v", blockVersion, err)
+			}
+		})
+	}
+
+	for _, table := range []string{
+		"uniswap_v4_pool_state",
+		"uniswap_v4_swap",
+		"uniswap_v4_liquidity_event",
+		"uniswap_v4_pool_event",
+	} {
+		t.Run(table, func(t *testing.T) {
+			got := uniswapV4RowVersions(t, ctx, table, poolID, blockNumber)
+			want := [][2]int{{0, 0}, {1, 0}}
+			if !slices.Equal(got, want) {
+				t.Errorf("(block_version, processing_version) = %v, want %v (the reorg version is part of the key, so processing_version must not bump)", got, want)
+			}
+		})
+	}
+}
+
+// uniswapV4RowVersions returns the (block_version, processing_version) pair of
+// every row table holds for the pool at blockNumber, ordered by block_version.
+func uniswapV4RowVersions(t *testing.T, ctx context.Context, table string, poolID int64, blockNumber int64) [][2]int {
+	t.Helper()
+	rows, err := uniswapV4TestPool.Query(ctx, fmt.Sprintf(
+		`SELECT block_version, processing_version FROM %s
+		 WHERE pool_id=$1 AND block_number=$2 ORDER BY block_version`, table),
+		poolID, blockNumber)
+	if err != nil {
+		t.Fatalf("query %s versions: %v", table, err)
+	}
+	defer rows.Close()
+
+	var versions [][2]int
+	for rows.Next() {
+		var blockVersion, processingVersion int
+		if err := rows.Scan(&blockVersion, &processingVersion); err != nil {
+			t.Fatalf("scan %s versions: %v", table, err)
+		}
+		versions = append(versions, [2]int{blockVersion, processingVersion})
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate %s versions: %v", table, err)
+	}
+	return versions
+}
+
 func TestUniswapV4Repository_SaveBlock_NewBuildBumpsProcessingVersion(t *testing.T) {
 	ctx := context.Background()
 	poolID := seedUniswapV4RepoTestPool(t, ctx, 0x03)
@@ -881,17 +943,19 @@ func (f uniswapV4TickFixture) rowCount(tick int) int {
 	return count
 }
 
-func (f uniswapV4TickFixture) latestLiquidityGross(tick int) string {
+// latestValue reads one value column off the canonical-latest row at tick, the
+// row a consumer asking "what is this tick now" would get.
+func (f uniswapV4TickFixture) latestValue(tick int, column string) string {
 	f.t.Helper()
-	var gross string
-	if err := uniswapV4TestPool.QueryRow(f.ctx,
-		`SELECT liquidity_gross::text FROM uniswap_v4_tick WHERE pool_id=$1 AND tick=$2
-		 ORDER BY block_number DESC, block_version DESC, processing_version DESC LIMIT 1`,
+	var value string
+	if err := uniswapV4TestPool.QueryRow(f.ctx, fmt.Sprintf(
+		`SELECT %s::text FROM uniswap_v4_tick WHERE pool_id=$1 AND tick=$2
+		 ORDER BY block_number DESC, block_version DESC, processing_version DESC LIMIT 1`, column),
 		f.poolID, tick,
-	).Scan(&gross); err != nil {
-		f.t.Fatalf("query latest tick at %d: %v", tick, err)
+	).Scan(&value); err != nil {
+		f.t.Fatalf("query latest %s at tick %d: %v", column, tick, err)
 	}
-	return gross
+	return value
 }
 
 func TestUniswapV4Repository_WriteTicks_FirstWriteInserts(t *testing.T) {
@@ -917,20 +981,40 @@ func TestUniswapV4Repository_WriteTicks_UnchangedValuesDoNotAppend(t *testing.T)
 	}
 }
 
+// TestUniswapV4Repository_WriteTicks_ChangedValueAppends covers every value
+// column: a change in any one of the four must append, or that column's history
+// silently flatlines.
 func TestUniswapV4Repository_WriteTicks_ChangedValueAppends(t *testing.T) {
 	ctx := context.Background()
-	f := newUniswapV4TickFixture(t, ctx, 0x0a)
 
-	f.save(newUniswapV4TestTick(f.poolID, 60, 5000, 0, big.NewInt(100)))
-	changed := newUniswapV4TestTick(f.poolID, 60, 5002, 0, big.NewInt(100))
-	changed.LiquidityGross = big.NewInt(999)
-	f.save(changed)
+	for _, tc := range []struct {
+		column        string
+		discriminator byte
+		set           func(*uniswapV4TickValues, *big.Int)
+	}{
+		{"liquidity_gross", 0x0a, func(v *uniswapV4TickValues, n *big.Int) { v.liquidityGross = n }},
+		{"liquidity_net", 0x13, func(v *uniswapV4TickValues, n *big.Int) { v.liquidityNet = n }},
+		{"fee_growth_outside0_x128", 0x14, func(v *uniswapV4TickValues, n *big.Int) { v.feeGrowthOutside0X128 = n }},
+		{"fee_growth_outside1_x128", 0x15, func(v *uniswapV4TickValues, n *big.Int) { v.feeGrowthOutside1X128 = n }},
+	} {
+		t.Run(tc.column, func(t *testing.T) {
+			f := newUniswapV4TickFixture(t, ctx, tc.discriminator)
+			const tick = 60
 
-	if got := f.rowCount(60); got != 2 {
-		t.Fatalf("row count = %d, want 2", got)
-	}
-	if got := f.latestLiquidityGross(60); got != "999" {
-		t.Errorf("latest liquidity_gross = %q, want 999", got)
+			f.save(newUniswapV4TestTickWithValues(f.poolID, tick, 5000, 0, defaultUniswapV4TickValues()))
+
+			changed := defaultUniswapV4TickValues()
+			changedValue := big.NewInt(999)
+			tc.set(&changed, changedValue)
+			f.save(newUniswapV4TestTickWithValues(f.poolID, tick, 5002, 0, changed))
+
+			if got := f.rowCount(tick); got != 2 {
+				t.Fatalf("row count = %d, want 2", got)
+			}
+			if got := f.latestValue(tick, tc.column); got != changedValue.String() {
+				t.Errorf("latest %s = %q, want %q", tc.column, got, changedValue)
+			}
+		})
 	}
 }
 
@@ -1327,17 +1411,87 @@ func newUniswapV4TestState(poolID int64, blockNumber int64, blockVersion int, ti
 	}
 }
 
+// newUniswapV4TestBlockWrites builds one validated row for each of the four
+// fact hypertables, sharing every key but blockVersion so two calls differ
+// exactly as an original and its reorg re-observation do.
+func newUniswapV4TestBlockWrites(t *testing.T, poolID int64, blockNumber int64, blockVersion int) outbound.UniswapV4BlockWrites {
+	t.Helper()
+	blockTimestamp := time.Unix(1740000000+blockNumber, 0).UTC()
+	txHash := common.HexToHash("0x11ccddeeff00112233445566778899aabbccddeeff00112233445566778899aa")
+	sender := common.HexToAddress("0x66a9893cc07d91d95644aedd05d03f95e1dba8af")
+
+	state := newUniswapV4TestState(poolID, blockNumber, blockVersion, 7)
+	swap := &entity.UniswapV4Swap{
+		PoolID: poolID, BlockNumber: blockNumber, BlockVersion: blockVersion, BlockTimestamp: blockTimestamp,
+		TxHash: txHash, LogIndex: 1, Sender: sender,
+		Amount0: big.NewInt(-100), Amount1: big.NewInt(100),
+		SqrtPriceX96: big.NewInt(1), Liquidity: big.NewInt(1), Tick: 0, Fee: 3000,
+	}
+	liquidityEvent := &entity.UniswapV4LiquidityEvent{
+		PoolID: poolID, BlockNumber: blockNumber, BlockVersion: blockVersion, BlockTimestamp: blockTimestamp,
+		TxHash: txHash, LogIndex: 2, Sender: sender,
+		TickLower: -60, TickUpper: 60,
+		LiquidityDelta: big.NewInt(1000),
+		Salt:           common.HexToHash("0x00000000000000000000000000000000000000000000000000000000000000ff"),
+	}
+	poolEvent := &entity.UniswapV4PoolEvent{
+		PoolID: poolID, BlockNumber: blockNumber, BlockVersion: blockVersion, BlockTimestamp: blockTimestamp,
+		TxHash: txHash, LogIndex: 3,
+		EventName: entity.UniswapV4PoolEventInitialize,
+		Params:    json.RawMessage(`{"sqrtPriceX96":"1000","tick":10}`),
+	}
+
+	for _, v := range []interface{ Validate() error }{state, swap, liquidityEvent, poolEvent} {
+		if err := v.Validate(); err != nil {
+			t.Fatalf("Validate: %v", err)
+		}
+	}
+
+	return outbound.UniswapV4BlockWrites{
+		States:          []*entity.UniswapV4PoolState{state},
+		Swaps:           []*entity.UniswapV4Swap{swap},
+		LiquidityEvents: []*entity.UniswapV4LiquidityEvent{liquidityEvent},
+		PoolEvents:      []*entity.UniswapV4PoolEvent{poolEvent},
+	}
+}
+
+// uniswapV4TickValues holds a tick row's four append-on-change value columns,
+// so a test can vary one of them without restating the other three.
+type uniswapV4TickValues struct {
+	liquidityGross        *big.Int
+	liquidityNet          *big.Int
+	feeGrowthOutside0X128 *big.Int
+	feeGrowthOutside1X128 *big.Int
+}
+
+// defaultUniswapV4TickValues are four distinct values, so a case that mutates
+// one column cannot pass on another column's value.
+func defaultUniswapV4TickValues() uniswapV4TickValues {
+	return uniswapV4TickValues{
+		liquidityGross:        big.NewInt(1000),
+		liquidityNet:          big.NewInt(1),
+		feeGrowthOutside0X128: big.NewInt(2),
+		feeGrowthOutside1X128: big.NewInt(3),
+	}
+}
+
 func newUniswapV4TestTick(poolID int64, tick int, blockNumber int64, blockVersion int, liquidityNet *big.Int) *entity.UniswapV4Tick {
+	values := defaultUniswapV4TickValues()
+	values.liquidityNet = liquidityNet
+	return newUniswapV4TestTickWithValues(poolID, tick, blockNumber, blockVersion, values)
+}
+
+func newUniswapV4TestTickWithValues(poolID int64, tick int, blockNumber int64, blockVersion int, values uniswapV4TickValues) *entity.UniswapV4Tick {
 	return &entity.UniswapV4Tick{
 		PoolID:                poolID,
 		Tick:                  tick,
 		BlockNumber:           blockNumber,
 		BlockVersion:          blockVersion,
 		BlockTimestamp:        time.Unix(1740000000+blockNumber, 0).UTC(),
-		LiquidityGross:        big.NewInt(1000),
-		LiquidityNet:          liquidityNet,
-		FeeGrowthOutside0X128: big.NewInt(1),
-		FeeGrowthOutside1X128: big.NewInt(2),
+		LiquidityGross:        values.liquidityGross,
+		LiquidityNet:          values.liquidityNet,
+		FeeGrowthOutside0X128: values.feeGrowthOutside0X128,
+		FeeGrowthOutside1X128: values.feeGrowthOutside1X128,
 	}
 }
 

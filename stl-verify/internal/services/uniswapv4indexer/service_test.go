@@ -126,6 +126,7 @@ type recordingMulticaller struct {
 	baselineResults map[int16]outbound.Result // unlisted words default to an all-zero (no initialized ticks) word
 
 	executeAtHashCalls int
+	pinnedHashes       []common.Hash
 	stateCalls         int
 	tickBatchCalls     int
 	tickBatchSizes     []int
@@ -140,8 +141,9 @@ func (m *recordingMulticaller) Execute(_ context.Context, _ []outbound.Call, _ *
 	return nil, fmt.Errorf("Execute must not be called; all reads must pin to a block hash")
 }
 
-func (m *recordingMulticaller) ExecuteAtHash(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+func (m *recordingMulticaller) ExecuteAtHash(_ context.Context, calls []outbound.Call, blockHash common.Hash) ([]outbound.Result, error) {
 	m.executeAtHashCalls++
+	m.pinnedHashes = append(m.pinnedHashes, blockHash)
 	kind, err := m.batchKind(calls)
 	if err != nil {
 		return nil, err
@@ -247,6 +249,23 @@ func (m *recordingMulticaller) tickBitmapResults(calls []outbound.Call) ([]outbo
 }
 
 func (m *recordingMulticaller) Address() common.Address { return common.Address{} }
+
+// assertPinnedTo requires every read issued since the previous call to have been
+// pinned to want, and drains the record so the next block can be checked on its
+// own. A read answered at any other hash would silently mix forks.
+func assertPinnedTo(t *testing.T, mc *recordingMulticaller, want common.Hash) {
+	t.Helper()
+	got := mc.pinnedHashes
+	mc.pinnedHashes = nil
+	if len(got) == 0 {
+		t.Fatalf("no hash-pinned reads were issued; want reads pinned to %s", want)
+	}
+	for i, h := range got {
+		if h != want {
+			t.Errorf("read %d pinned to %s, want %s", i, h, want)
+		}
+	}
+}
 
 const testChainID = int64(1)
 
@@ -461,10 +480,12 @@ func TestBlockHandler_MixedEventsPersistsBlockWrites(t *testing.T) {
 		donateLog(t, pool, "0x2"),
 	}}
 
-	if err := svc.BlockHandler()(context.Background(), blockEvent(200), []shared.TransactionReceipt{receipt}); err != nil {
+	event := blockEvent(200)
+	if err := svc.BlockHandler()(context.Background(), event, []shared.TransactionReceipt{receipt}); err != nil {
 		t.Fatalf("BlockHandler: %v", err)
 	}
 
+	assertPinnedTo(t, mc, common.HexToHash(event.BlockHash))
 	if txMgr.calls != 1 {
 		t.Fatalf("WithTransaction calls = %d, want 1", txMgr.calls)
 	}
@@ -1189,13 +1210,13 @@ func TestBlockHandler_BaselineAboveTicksPerCallIsChunked(t *testing.T) {
 		t.Fatalf("BlockHandler: %v", err)
 	}
 
-	wantBatches := (len(wantTicks) + ticksPerCall - 1) / ticksPerCall
+	wantBatches := (len(wantTicks) + tickbitmap.TicksPerCall - 1) / tickbitmap.TicksPerCall
 	if mc.tickBatchCalls != wantBatches {
-		t.Errorf("getTickInfo batches = %d, want %d (ceil(%d/%d))", mc.tickBatchCalls, wantBatches, len(wantTicks), ticksPerCall)
+		t.Errorf("getTickInfo batches = %d, want %d (ceil(%d/%d))", mc.tickBatchCalls, wantBatches, len(wantTicks), tickbitmap.TicksPerCall)
 	}
 	for i, size := range mc.tickBatchSizes {
-		if size > ticksPerCall {
-			t.Errorf("batch %d packed %d calls, want at most %d", i, size, ticksPerCall)
+		if size > tickbitmap.TicksPerCall {
+			t.Errorf("batch %d packed %d calls, want at most %d", i, size, tickbitmap.TicksPerCall)
 		}
 	}
 

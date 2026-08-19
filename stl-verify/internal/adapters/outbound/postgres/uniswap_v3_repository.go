@@ -436,7 +436,7 @@ func sendUniswapV3Batch(
 // ordering, same per-tick append-on-change decision.
 //
 // Ticks within one block share one (block_number, block_version) and are
-// deduplicated per (pool_id, tick) upstream (TouchedTicks / mergeTickSets), so
+// deduplicated per (pool_id, tick) upstream (TouchedTicks / MergeTickSets), so
 // each (pool_id, tick) appears at most once here; the per-key decision below
 // therefore needs no in-batch same-key sequencing.
 func (r *UniswapV3Repository) writeTicks(ctx context.Context, tx pgx.Tx, ticks []*entity.UniswapV3Tick) error {

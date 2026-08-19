@@ -23,7 +23,9 @@ var poolManagerABIOnce = sync.OnceValues(func() (*abi.ABI, error) {
 // PoolManagerABI returns the ABI fragment covering all 10 events the v4-core
 // PoolManager can emit, including the ERC6909 claim-token set it inherits.
 // Signatures match PoolManager.sol exactly, including which arguments are
-// indexed; abi_test.go pins every resulting topic0 to a real mainnet log.
+// indexed. Two tests split that guarantee: abi_test.go pins each topic0, which
+// fixes the signature but says nothing about the indexed flags, and
+// event_decode_test.go decodes verbatim mainnet logs, which pins the layout.
 func PoolManagerABI() (*abi.ABI, error) {
 	return poolManagerABIOnce()
 }

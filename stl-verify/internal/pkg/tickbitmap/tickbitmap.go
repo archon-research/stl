@@ -4,6 +4,8 @@
 // floored-division math lives here once instead of per indexer.
 package tickbitmap
 
+import "slices"
+
 // MinTick and MaxTick are TickMath's usable tick bounds, identical in v3-core
 // and v4-core. They are the widest range any pool can report regardless of
 // tickSpacing, and are distinct from the int24 wire bounds entity validation
@@ -46,4 +48,34 @@ func WordBounds(tickSpacing int) (int16, int16) {
 	minWord := FloorDiv(FloorDiv(MinTick, tickSpacing), 256)
 	maxWord := FloorDiv(FloorDiv(MaxTick, tickSpacing), 256)
 	return int16(minWord), int16(maxWord)
+}
+
+// TicksPerCall and BitmapWordsPerCall bound how many per-tick getter and how
+// many bitmap-word sub-calls an indexer packs into one multicall3 aggregate
+// call. A dense pool's first touch enumerates O(10³) initialized ticks and, at
+// tickSpacing 1, ~6932 bitmap words; sending either set in one aggregate call
+// risks exceeding an RPC provider's request/response/gas caps. 500 keeps the
+// worst case to ~14 batches.
+const (
+	TicksPerCall       = 500
+	BitmapWordsPerCall = 500
+)
+
+// MergeTickSets returns the deduplicated, ascending-sorted union of two tick
+// sets: a pool's first-touch persist must write every initialized tick exactly
+// once, even where the bitmap baseline and the block's own event bounds overlap.
+func MergeTickSets(a, b []int32) []int32 {
+	seen := make(map[int32]struct{}, len(a)+len(b))
+	out := make([]int32, 0, len(a)+len(b))
+	for _, set := range [][]int32{a, b} {
+		for _, tick := range set {
+			if _, ok := seen[tick]; ok {
+				continue
+			}
+			seen[tick] = struct{}{}
+			out = append(out, tick)
+		}
+	}
+	slices.Sort(out)
+	return out
 }

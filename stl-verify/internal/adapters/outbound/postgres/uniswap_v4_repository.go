@@ -73,8 +73,8 @@ const loadUniswapV4PoolsSQL = `
 // LoadPools returns the current version of every registered pool on chainID,
 // with the chain's current PoolManager / StateView addresses and the currency
 // decimals. Every registry defect the port documents (a missing PoolManager,
-// NULL deploy_block, NULL decimals, a currency that disagrees with its token
-// row) is an error rather than a skipped pool.
+// NULL decimals, a currency that disagrees with its token row) is an error
+// rather than a skipped pool.
 func (r *UniswapV4Repository) LoadPools(ctx context.Context, chainID int64) ([]outbound.UniswapV4PoolRow, error) {
 	rows, err := r.pool.Query(ctx, loadUniswapV4PoolsSQL, chainID)
 	if err != nil {
@@ -107,7 +107,7 @@ func scanUniswapV4PoolRow(rows pgx.Rows, chainID int64) (outbound.UniswapV4PoolR
 		decimals0, decimals1   *int
 		fee, tickSpacing       int
 		hooks                  []byte
-		deployBlock            *int64
+		deployBlock            int64
 		row                    outbound.UniswapV4PoolRow
 	)
 	if err := rows.Scan(&id, &protocolID, &poolManager, &stateView,
@@ -118,9 +118,6 @@ func scanUniswapV4PoolRow(rows pgx.Rows, chainID int64) (outbound.UniswapV4PoolR
 	}
 	if protocolID == nil {
 		return row, fmt.Errorf("chain %d has uniswap_v4 pools (e.g. %d) but no uniswap_v4_pool_manager row", chainID, id)
-	}
-	if deployBlock == nil {
-		return row, fmt.Errorf("uniswap_v4 pool %d has NULL deploy_block: defeats the reorg deploy-gate", id)
 	}
 
 	currency0Decimals, err := currencyTokenDecimals(id, "currency0", common.BytesToAddress(currency0), common.BytesToAddress(token0), decimals0)
@@ -145,7 +142,7 @@ func scanUniswapV4PoolRow(rows pgx.Rows, chainID int64) (outbound.UniswapV4PoolR
 		Fee:               fee,
 		TickSpacing:       tickSpacing,
 		Hooks:             common.BytesToAddress(hooks),
-		DeployBlock:       *deployBlock,
+		DeployBlock:       deployBlock,
 	}, nil
 }
 

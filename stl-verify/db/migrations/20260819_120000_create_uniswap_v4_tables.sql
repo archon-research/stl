@@ -38,10 +38,13 @@
 --           price = 1.0001^tick.
 --           liquidity / liquidity_gross / liquidity_net are raw on-chain L
 --           (sqrt(xy) scaled by the pool's currency decimals; not comparable
---           across pools with different decimals). amount0/amount1 are raw
---           native-decimal integers signed from the SWAPPER's perspective
---           (negative = paid into the PoolManager, positive = received) -- the
---           INVERSE of uniswap_v3_swap, which signs from the pool's side.
+--           across pools with different decimals). amount0/amount1 are the
+--           pool's swap BalanceDelta as emitted, raw native-decimal integers
+--           (negative = owed to the PoolManager, positive = owed to the
+--           swapper) -- the INVERSE of uniswap_v3_swap, which signs from the
+--           pool's side. They are emitted before afterSwap applies any hook
+--           delta, so they equal what the swapper settled only when the pool's
+--           hooks carry no *_RETURNS_DELTA permission.
 
 CREATE TABLE IF NOT EXISTS uniswap_v4_pool_manager
 (
@@ -208,7 +211,7 @@ COMMENT ON COLUMN uniswap_v4_pool.tick_spacing IS
 COMMENT ON COLUMN uniswap_v4_pool.hooks IS
   'PoolKey.hooks, 20 bytes: the hook contract attached to this pool, or the zero address when the pool has no hooks. The hook''s PERMISSION FLAGS are encoded in the low 14 bits of the address itself (beforeSwap, afterSwap, delta-returning, ...), so the address doubles as the capability set. A dynamic fee is not among them: it is signalled by PoolKey.fee = 8388608 (0x800000).';
 COMMENT ON COLUMN uniswap_v4_pool.deploy_block IS
-  'Configuration (load-bearing). Block at which the pool was created (its Initialize event; a V4 pool has no contract deployment of its own), used to gate snapshot reads. REQUIRED: LoadPools rejects a NULL deploy_block, since a NULL defeats the reorg deploy-gate. Must be a lower bound of the true initialize block (<= actual height): DueSet hard-errors ("registry bug") when a touched pool reports deploy_block greater than the processed block, and skips sweep scheduling before this height.';
+  'Configuration (load-bearing). Block at which the pool was created (its Initialize event; a V4 pool has no contract deployment of its own), used to gate snapshot reads. NOT NULL: a NULL would defeat the reorg deploy-gate, so the column makes one unrepresentable. Must be a lower bound of the true initialize block (<= actual height): DueSet hard-errors ("registry bug") when a touched pool reports deploy_block greater than the processed block, and skips sweep scheduling before this height.';
 COMMENT ON COLUMN uniswap_v4_pool.created_at IS
   'Audit. Row insertion time, UTC wall-clock (timestamp without time zone, so it reads the same under any session TimeZone); bookkeeping only, not an on-chain value.';
 COMMENT ON COLUMN uniswap_v4_pool.processing_version IS
@@ -321,7 +324,7 @@ COMMENT ON COLUMN uniswap_v4_pool_state.tick IS
 COMMENT ON COLUMN uniswap_v4_pool_state.protocol_fee IS
   'StateView.getSlot0().protocolFee: the PACKED uint24 protocol fee, not a single rate. Low 12 bits = the zeroForOne fee, high 12 bits = the oneForZero fee, each in hundredths of a bip and each capped at 1000 (0.1%). Taken off the swap input before the LP fee.';
 COMMENT ON COLUMN uniswap_v4_pool_state.lp_fee IS
-  'StateView.getSlot0().lpFee: the LP fee currently in force, hundredths of a bip (<= 1000000). For a static-fee pool this equals uniswap_v4_pool.fee. For a dynamic-fee pool (uniswap_v4_pool.fee = 8388608) the hook sets it via updateDynamicLPFee, which emits NO event, so this column is only refreshed on blocks that otherwise touch the pool -- between two snapshots the true value may have changed unobserved.';
+  'StateView.getSlot0().lpFee: the LP fee currently in force, hundredths of a bip (<= 1000000). For a static-fee pool this equals uniswap_v4_pool.fee. A dynamic-fee pool (uniswap_v4_pool.fee = 8388608) has no such guarantee -- the hook sets the fee via updateDynamicLPFee, which emits NO event, so this column would only be refreshed on blocks that otherwise touch the pool -- and is therefore refused at indexer boot until lp_fee has a refresh path.';
 COMMENT ON COLUMN uniswap_v4_pool_state.liquidity IS
   'StateView.getLiquidity(): in-range raw liquidity L active at the current tick (sqrt(xy) scaled by the pool''s currency decimals; not comparable across pools with different decimals).';
 COMMENT ON COLUMN uniswap_v4_pool_state.fee_growth_global0_x128 IS
@@ -432,11 +435,11 @@ COMMENT ON COLUMN uniswap_v4_swap.tx_hash IS
 COMMENT ON COLUMN uniswap_v4_swap.log_index IS
   'PK. Index of the event log within the block.';
 COMMENT ON COLUMN uniswap_v4_swap.sender IS
-  'Event field `sender`: the address that called PoolManager.swap (a router, or the hook''s caller), 20 bytes. Not the end user.';
+  'Event field `sender`: msg.sender of the PoolManager.swap call -- a router, or the hook contract itself when a hook initiates the swap, 20 bytes. Not the end user.';
 COMMENT ON COLUMN uniswap_v4_swap.amount0 IS
-  'Signed currency0 BalanceDelta of this swap from the SWAPPER''s perspective, raw native decimals of currency0: NEGATIVE = the swapper paid currency0 into the PoolManager, POSITIVE = the swapper received it. This is the INVERSE of uniswap_v3_swap.amount0, which is signed from the pool''s side; negate to compare the two.';
+  'The pool''s swap BalanceDelta for currency0 as emitted, raw native decimals of currency0: NEGATIVE = owed to the PoolManager, POSITIVE = owed to the swapper. PoolManager emits this delta BEFORE afterSwap applies any hook delta, so it equals what the swapper actually settled only for pools whose hooks address carries no *_RETURNS_DELTA permission. This is the INVERSE of uniswap_v3_swap.amount0, which is signed from the pool''s side; negate to compare the two.';
 COMMENT ON COLUMN uniswap_v4_swap.amount1 IS
-  'Signed currency1 BalanceDelta of this swap from the SWAPPER''s perspective, raw native decimals of currency1 (negative = paid in, positive = received); same inverted convention as amount0.';
+  'The pool''s swap BalanceDelta for currency1 as emitted, raw native decimals of currency1 (negative = owed to the PoolManager, positive = owed to the swapper); same pre-hook-delta caveat and same inverted convention as amount0.';
 COMMENT ON COLUMN uniswap_v4_swap.sqrt_price_x96 IS
   'Pool sqrtPriceX96 immediately after the swap, Q64.96 fixed point (see uniswap_v4_pool_state.sqrt_price_x96 for the price conversion).';
 COMMENT ON COLUMN uniswap_v4_swap.liquidity IS
@@ -743,7 +746,7 @@ COMMENT ON COLUMN uniswap_v4_pool_event.log_index IS
 COMMENT ON COLUMN uniswap_v4_pool_event.event_name IS
   'Decoded event type: one of initialize, donate, protocol_fee_updated.';
 COMMENT ON COLUMN uniswap_v4_pool_event.params IS
-  'JSONB of decoded event fields keyed by name. Keys per event_name: initialize {currency0,currency1,fee,tickSpacing,hooks,sqrtPriceX96,tick} (fee in hundredths of a bip, sqrtPriceX96 Q64.96, tick a plain integer); donate {sender,amount0,amount1} (raw native decimals of the respective currency, always non-negative -- the pool receives them); protocol_fee_updated {protocolFee} (the packed uint24, see uniswap_v4_pool_state.protocol_fee for the bit layout).';
+  'JSONB of decoded event fields keyed by name, indexed arguments included. Every key set starts with id, the 32-byte on-chain PoolId as lowercase 0x hex (joinable against uniswap_v4_pool.pool_id via decode(substring(params->>''id'' from 3), ''hex'')). Keys per event_name: initialize {id,currency0,currency1,fee,tickSpacing,hooks,sqrtPriceX96,tick} (addresses as lowercase 0x hex, fee in hundredths of a bip, sqrtPriceX96 Q64.96, tick a plain integer); donate {id,sender,amount0,amount1} (raw native decimals of the respective currency, always non-negative -- the pool receives them); protocol_fee_updated {id,protocolFee} (the packed uint24, see uniswap_v4_pool_state.protocol_fee for the bit layout).';
 COMMENT ON COLUMN uniswap_v4_pool_event.processing_version IS
   'PK, Audit. Per-build reprocessing counter (ADR-0002): 0 for the first write of a key under a build_id, bumped only when a later build rewrites the same key; prior versions are retained.';
 COMMENT ON COLUMN uniswap_v4_pool_event.build_id IS

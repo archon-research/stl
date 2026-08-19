@@ -56,12 +56,16 @@ var poolKeyArgsOnce = sync.OnceValues(func() (abi.Arguments, error) {
 	}, nil
 })
 
+// DynamicFeeFlag is the PoolKey.fee sentinel (LPFeeLibrary.DYNAMIC_FEE_FLAG)
+// marking a pool whose LP fee the hook sets at runtime, rather than a rate.
+const DynamicFeeFlag = 0x800000
+
 // ValidatePoolKeys recomputes every pool's on-chain PoolId from its registry
-// key and rejects any mismatch or duplicate. A mismatch is unrecoverable at
-// runtime rather than merely wrong: PoolManager logs are routed by PoolId, so a
-// pool whose stored id disagrees with its key would silently never match a log
-// and its fact tables would stay empty while the worker looks healthy. Refusing
-// to boot is the only failure mode that surfaces it.
+// key and rejects any mismatch, duplicate, or dynamic-fee pool. A mismatch is
+// unrecoverable at runtime rather than merely wrong: PoolManager logs are routed
+// by PoolId, so a pool whose stored id disagrees with its key would silently
+// never match a log and its fact tables would stay empty while the worker looks
+// healthy. Refusing to boot is the only failure mode that surfaces it.
 func ValidatePoolKeys(pools []RegisteredPool) error {
 	seen := make(map[common.Hash]int64, len(pools))
 	for _, pool := range pools {
@@ -69,6 +73,10 @@ func ValidatePoolKeys(pools []RegisteredPool) error {
 			return fmt.Errorf("pools %d and %d share PoolId %s: registry bug", other, pool.ID, pool.PoolIDHash)
 		}
 		seen[pool.PoolIDHash] = pool.ID
+
+		if err := rejectDynamicFee(pool); err != nil {
+			return err
+		}
 
 		computed, err := computePoolID(pool)
 		if err != nil {
@@ -80,6 +88,20 @@ func ValidatePoolKeys(pools []RegisteredPool) error {
 		}
 	}
 	return nil
+}
+
+// rejectDynamicFee refuses a pool whose LP fee is hook-controlled. This
+// indexer's whole snapshot schedule assumes every field it stores changes only
+// through a PoolManager log, but PoolManager.updateDynamicLPFee rewrites
+// slot0.lpFee emitting nothing, so uniswap_v4_pool_state.lp_fee would silently
+// go stale between touches. Booting with such a pool registered is worse than
+// not indexing it.
+func rejectDynamicFee(pool RegisteredPool) error {
+	if pool.Fee != DynamicFeeFlag {
+		return nil
+	}
+	return fmt.Errorf("pool %d (PoolId %s) has the dynamic-fee flag (fee %d): dynamic-fee pools are not snapshottable yet, updateDynamicLPFee emits no event so lp_fee would go stale; see VEC-573",
+		pool.ID, pool.PoolIDHash, DynamicFeeFlag)
 }
 
 // computePoolID returns keccak256(abi.encode(currency0, currency1, fee,
