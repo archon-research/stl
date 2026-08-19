@@ -15,10 +15,12 @@ resources:
   - ../../../base/prime-debt-indexer
   # Dev covers one representative chain (base); PSM3 does not exist on the mainnet chain dev runs.
   - ../../../base/base-psm3-indexer
-  # curve-indexer + uniswap-v3-indexer (dex-indexer image) dev wiring is
-  # deferred to VEC-329, which adds the dex-indexer build + kind-load, the
-  # localstack queues, and the dev-up rollout-wait entries. Bases kept; not run
-  # in dev until then.
+  # All three DEX indexers run the one dex-indexer image; the DEX env below
+  # selects the factory. Their pool registries are seeded by migrations, so
+  # they boot against the local database like any other worker.
+  - ../../../base/curve-indexer
+  - ../../../base/uniswap-v3-indexer
+  - ../../../base/uniswap-v4-indexer
 
 components:
   - ../components/runtime
@@ -42,6 +44,11 @@ images:
     newTag: local
   - name: base-psm3-indexer
     newName: localhost/stl-psm3-indexer
+    newTag: local
+  # Shared by curve-indexer + uniswap-v3-indexer + uniswap-v4-indexer (all
+  # three bases use image name `dex-indexer`; DEX env var selects the factory).
+  - name: dex-indexer
+    newName: localhost/stl-dex-indexer
     newTag: local
 
 patches:
@@ -138,3 +145,54 @@ patches:
                     value: "300"
                   - name: AWS_SQS_QUEUE_URL
                     value: http://localstack:4566/000000000000/stl-base-psm3-indexer.fifo
+  # DEX indexers. Prod/staging read DEX from the per-service
+  # <name>-indexer-config ConfigMap; the runtime Component replaces envFrom
+  # with stl-config + stl-secrets, so dev names the DEX explicitly here. The
+  # rest (CHAIN_ID=1, S3_BUCKET, DEPLOY_ENV, ALCHEMY_HTTP_URL, endpoints,
+  # DATABASE_URL, REDIS_ADDR) comes from stl-config, ALCHEMY_API_KEY from
+  # stl-secrets — same as every other dev worker.
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: curve-indexer
+      spec:
+        template:
+          spec:
+            containers:
+              - name: curve-indexer
+                env:
+                  - name: DEX
+                    value: curve
+                  - name: AWS_SQS_QUEUE_URL
+                    value: http://localstack:4566/000000000000/stl-ethereum-curve-indexing.fifo
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: uniswap-v3-indexer
+      spec:
+        template:
+          spec:
+            containers:
+              - name: uniswap-v3-indexer
+                env:
+                  - name: DEX
+                    value: uniswap-v3
+                  - name: AWS_SQS_QUEUE_URL
+                    value: http://localstack:4566/000000000000/stl-ethereum-uniswap-v3-indexing.fifo
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: uniswap-v4-indexer
+      spec:
+        template:
+          spec:
+            containers:
+              - name: uniswap-v4-indexer
+                env:
+                  - name: DEX
+                    value: uniswap-v4
+                  - name: AWS_SQS_QUEUE_URL
+                    value: http://localstack:4566/000000000000/stl-ethereum-uniswap-v4-indexing.fifo

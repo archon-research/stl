@@ -396,15 +396,34 @@ func run(ctx context.Context, args []string) error {
    `k8s/base/oracle-price-worker/` as the template. Wire the new service
    into `k8s/overlays/{staging,prod}/kustomization.yaml` and, for local
    kind, `k8s/overlays/dev/workers/kustomization.yaml` (add the base dir
-   under `resources:` and a `localhost/stl-<name>:local` `images:` entry).
-6. **Add build/deploy targets to the Makefile** (`docker-build-<name>`,
+   under `resources:`, a `localhost/stl-<name>:local` `images:` entry, and
+   a patch setting `AWS_SQS_QUEUE_URL` to the LocalStack queue). The dev
+   runtime Component replaces the base's `envFrom` with the shared
+   `stl-config` + `stl-secrets`, so anything your base reads from a
+   per-service ConfigMap (e.g. the DEX indexers' `DEX`) must be set
+   explicitly in that patch.
+6. **Create the local SQS queue** in both copies of the LocalStack init
+   script — `stl-verify/localstack-init/init-aws.sh` and the inlined
+   `localstack-init` ConfigMap in `k8s/dev-infra/localstack.yaml` (the one
+   the kind cluster actually runs) — via `create_consumer_queue <chain>
+   <name>`, which creates the FIFO queue + DLQ and subscribes it to the
+   chain's blocks topic with raw delivery.
+7. **Add build/deploy targets to the Makefile** (`docker-build-<name>`,
    `docker-release-<name>`, and register the worker in the `run-*` /
-   `kind-load-workers` / `kind-deploy-workers` groupings). Grep for an
+   `kind-load-workers` / `kind-deploy-workers` groupings, plus the
+   rollout lists in `_dev-up-alchemy-workers` and `dev-up`). Grep for an
    existing worker name in the Makefile to see every site you need to
    touch.
-7. **Coordinate with infra.** Open a PR in the Infrastructure repo for
+8. **Coordinate with infra.** Open a PR in the Infrastructure repo for
    the SQS queue, SNS subscription, IAM policy, and any secrets — your
    code PR depends on those resources existing.
+
+Once steps 5–7 are in place, `make dev-up` runs the worker in kind (when
+`ALCHEMY_API_KEY` is set in `.env.secrets`), consuming the in-cluster
+watcher's blocks through LocalStack SNS→SQS — no host-run binary, no
+ad-hoc queue script. The DEX indexers (`curve-indexer`,
+`uniswap-v3-indexer`, `uniswap-v4-indexer`, all one `stl-dex-indexer`
+image) are wired this way.
 
 > **Tip:** It's welcome (often preferred) to split the k8s-manifest and
 > Infrastructure-repo changes into a follow-up PR. The code PR stays

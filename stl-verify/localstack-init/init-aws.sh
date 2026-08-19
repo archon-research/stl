@@ -104,8 +104,9 @@ create_chain_resources "optimism"
 create_chain_resources "unichain"
 create_chain_resources "arbitrum"
 
-# Ethereum-only consumers
-for queue in oracle-price morpho-indexing; do
+# Ethereum-only consumers. curve-indexing / uniswap-v3-indexing / uniswap-v4-indexing
+# feed the shared dex-indexer image — one Deployment per DEX, DEX env selects the factory.
+for queue in oracle-price morpho-indexing curve-indexing uniswap-v3-indexing uniswap-v4-indexing; do
   create_consumer_queue "ethereum" "$queue"
 done
 
