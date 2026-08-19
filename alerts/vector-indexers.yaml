@@ -1933,9 +1933,10 @@ groups:
   # dextelemetry.NewTelemetry by dexbootstrap.Bootstrap
   # (cmd/workers/internal/dexbootstrap/bootstrap.go).
   #
-  # NOT DEPLOYED YET: the k8s workload (Deployment + SQS queue) lands in the
-  # stacked follow-up PR. Until it merges no uniswap_v4_* series exist, so none
-  # of these rules can fire.
+  # NOT DEPLOYED YET: the SQS queue is provisioned in the infrastructure repo
+  # (uniswap_v4_indexing, infrastructure#617); the k8s Deployment lands in the
+  # stacked follow-up PR. Until that merges no uniswap_v4_* series exist, so
+  # none of these rules can fire.
   #
   # V4 is a SINGLETON: every pool lives inside one PoolManager contract
   # (mainnet 0x000000000004444c5dc75cB358380D2e3dE08A90) and is identified by a
