@@ -25,9 +25,15 @@ if [[ -z "$templates" ]]; then
   exit 0
 fi
 
-for template in $templates; do
+while read -r template; do
+  # The names reach SQL by interpolation and this loop only drops, so it recognises
+  # the shape ensureTemplate generates rather than trusting the LIKE above.
+  if [[ ! "$template" =~ ^stl_tmpl_[0-9a-f]{12}$ ]]; then
+    echo "skipped $template: not a generated template name" >&2
+    continue
+  fi
   # The flag first: Postgres refuses to drop a database while it is marked template.
   psql "$dsn" -qtAXc "ALTER DATABASE $template IS_TEMPLATE false" >/dev/null
   psql "$dsn" -qtAXc "DROP DATABASE IF EXISTS $template" >/dev/null
   echo "dropped $template"
-done
+done <<< "$templates"

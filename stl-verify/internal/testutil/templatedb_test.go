@@ -5,6 +5,14 @@ import "testing"
 func TestClaimMainDBName_RejectsASecondClaim(t *testing.T) {
 	const dbName = "test_claimed_twice"
 
+	// The claims outlive the test, so without this `go test -count=2` fails on its
+	// own first claim.
+	t.Cleanup(func() {
+		mainDBNamesMu.Lock()
+		defer mainDBNamesMu.Unlock()
+		delete(mainDBNames, dbName)
+	})
+
 	if err := claimMainDBName(dbName); err != nil {
 		t.Fatalf("first claim: %v", err)
 	}
