@@ -1,0 +1,36 @@
+# Manual-apply overlay for the one-off balance-sheet-backfill Job in kind.
+# NOT referenced by ../kustomization.yaml, so `make dev-up` never runs it.
+#   make docker-build-balance-sheet-backfill
+#   make kind-load-images IMAGES="stl-balance-sheet-backfill:local"
+#   kubectl kustomize k8s/overlays/dev/bootstrap-balance-sheet | kubectl apply -f -
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: vector
+
+resources:
+  - ../../../base/balance-sheet-backfill
+
+images:
+  - name: balance-sheet-backfill
+    newName: localhost/stl-balance-sheet-backfill
+    newTag: local
+
+patches:
+  # The dev runtime Component only patches Deployments, so a Job sources the
+  # shared local ConfigMap/Secret here instead of the per-service pair base
+  # names for EKS.
+  - target:
+      kind: Job
+      name: balance-sheet-backfill
+    patch: |
+      - op: replace
+        path: /spec/template/spec/containers/0/envFrom
+        value:
+          - configMapRef:
+              name: stl-config
+          - secretRef:
+              name: stl-secrets
+      - op: add
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Never

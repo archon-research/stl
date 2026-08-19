@@ -84,7 +84,7 @@ func upstreamRow(star string) outbound.RiskCapitalPrimeSnapshot {
 }
 
 func newService(primes *mockPrimeRepo, capital *mockCapitalRepo, provider *mockRiskProvider) *Service {
-	return NewService(primes, capital, provider, trackedStars, 7, func() time.Time { return syncedAt }, nil)
+	return NewService(primes, capital, provider, trackedStars, 7, func() time.Time { return syncedAt }, nil, nil)
 }
 
 func TestRunPersistsASnapshotPerUpstreamPrime(t *testing.T) {
@@ -244,6 +244,7 @@ func TestRunFailsWhenNoPrimesAreTracked(t *testing.T) {
 		nil,
 		7,
 		func() time.Time { return syncedAt },
+		nil,
 		nil,
 	)
 

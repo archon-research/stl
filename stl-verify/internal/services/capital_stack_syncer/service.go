@@ -28,6 +28,7 @@ type Service struct {
 	trackedStars []string
 	buildID      int
 	now          Clock
+	telemetry    *Telemetry
 	logger       *slog.Logger
 }
 
@@ -43,6 +44,7 @@ func NewService(
 	trackedStars []string,
 	buildID int,
 	now Clock,
+	telemetry *Telemetry,
 	logger *slog.Logger,
 ) *Service {
 	if logger == nil {
@@ -58,6 +60,7 @@ func NewService(
 		trackedStars: trackedStars,
 		buildID:      buildID,
 		now:          now,
+		telemetry:    telemetry,
 		logger:       logger.With("component", "capital-stack-syncer"),
 	}
 }
@@ -84,6 +87,8 @@ func (s *Service) Run(ctx context.Context) error {
 		return fmt.Errorf("upstream monitor covered none of the %d tracked primes", len(s.trackedStars))
 	}
 
+	s.reportUncovered(ctx, rows)
+
 	snapshots, err := s.toSnapshots(rows, primeIDs, s.now().UTC())
 	if err != nil {
 		return err
@@ -93,8 +98,32 @@ func (s *Service) Run(ctx context.Context) error {
 		return fmt.Errorf("saving capital stack snapshots: %w", err)
 	}
 
+	s.telemetry.RecordSnapshotsWritten(ctx, len(snapshots))
 	s.logger.Info("capital stack sync complete", "snapshots", len(snapshots))
 	return nil
+}
+
+// reportUncovered surfaces the tracked primes this cycle did not observe.
+//
+// Partial coverage is not an error — the monitor's coverage is its own — but it
+// stalls a prime's series silently: the read path gap-fills with locf, so the
+// last value keeps serving as current. The cycle continues and the gap is
+// counted, which is what an alert can key on.
+func (s *Service) reportUncovered(ctx context.Context, rows []outbound.RiskCapitalPrimeSnapshot) {
+	covered := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		covered[strings.ToLower(strings.TrimSpace(row.Star))] = true
+	}
+
+	for _, star := range s.trackedStars {
+		normalized := strings.ToLower(strings.TrimSpace(star))
+		if covered[normalized] {
+			continue
+		}
+		s.telemetry.RecordPrimeUncovered(ctx, normalized)
+		s.logger.Warn("tracked prime not covered by the upstream monitor; its series will not advance",
+			"star", normalized)
+	}
 }
 
 func (s *Service) primeIDsByName(ctx context.Context) (map[string]int64, error) {

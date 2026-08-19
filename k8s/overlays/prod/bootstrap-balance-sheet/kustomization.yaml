@@ -1,0 +1,18 @@
+# Manual-apply overlay for the one-off balance-sheet-backfill Job.
+# NOT referenced by ../kustomization.yaml, so ArgoCD never syncs or auto-runs it.
+# Run once, by hand, after capital-stack-syncer is deployed (the Job reuses its
+# ConfigMap and Secret):
+#   kustomize build k8s/overlays/prod/bootstrap-balance-sheet | kubectl apply -f -
+# Set newTag to the currently deployed cronjob image.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: vector
+
+resources:
+  - ../../../base/balance-sheet-backfill
+
+images:
+  - name: balance-sheet-backfill
+    newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-cronjob
+    newTag: "balance-sheet-backfill-3eceb410076e6ff0f8c523e13bace9cd0cf984e6"

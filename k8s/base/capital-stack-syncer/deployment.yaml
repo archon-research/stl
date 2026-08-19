@@ -1,0 +1,36 @@
+# Temporal cronjob worker. The schedule lives in Temporal state, not here:
+# changing CAPITAL_STACK_SYNC_INTERVAL requires deleting the schedule in
+# Temporal and restarting (see stl-verify/AGENTS.md).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: capital-stack-syncer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: capital-stack-syncer
+  template:
+    metadata:
+      labels:
+        app: capital-stack-syncer
+    spec:
+      serviceAccountName: capital-stack-syncer
+      containers:
+        - name: capital-stack-syncer
+          image: capital-stack-syncer
+          envFrom:
+            - configMapRef:
+                name: otel-config
+            - configMapRef:
+                name: capital-stack-syncer
+            - secretRef:
+                name: capital-stack-syncer
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+      terminationGracePeriodSeconds: 60

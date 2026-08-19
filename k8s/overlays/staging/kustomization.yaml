@@ -41,6 +41,7 @@ resources:
   # On-demand CoinGecko backfill worker (VEC-540). No Temporal schedule: idles on
   # its task queue until a run is started by hand from the Temporal UI.
   - ../../base/offchain-price-backfill
+  - ../../base/capital-stack-syncer
   - ../../base/maple-graphql-indexer
   # CEX L2 order book indexer fleet — one pod per exchange, same binary,
   # different EXCHANGE/SYMBOLS config (OKX/Kraken added by copying the coinbase
@@ -178,6 +179,9 @@ images:
   - name: offchain-price-backfill
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-cronjob
     newTag: "offchain-price-backfill-3eceb410076e6ff0f8c523e13bace9cd0cf984e6"
+  - name: capital-stack-syncer
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-cronjob
+    newTag: "capital-stack-syncer-3eceb410076e6ff0f8c523e13bace9cd0cf984e6"
   - name: maple-graphql-indexer
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-cronjob
     newTag: "maple-graphql-indexer-3eceb410076e6ff0f8c523e13bace9cd0cf984e6"

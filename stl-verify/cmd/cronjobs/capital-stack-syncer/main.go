@@ -74,6 +74,11 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runn
 		return nil, err
 	}
 
+	syncTelemetry, err := capital_stack_syncer.NewTelemetry()
+	if err != nil {
+		return nil, fmt.Errorf("creating telemetry: %w", err)
+	}
+
 	service := capital_stack_syncer.NewService(
 		postgres.NewPrimeRepository(deps.Pool),
 		postgres.NewPrimeCapitalStackRepository(deps.Pool, txm, deps.Logger),
@@ -81,6 +86,7 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runn
 		trackedStars,
 		int(buildReg.BuildID()),
 		time.Now,
+		syncTelemetry,
 		deps.Logger,
 	)
 

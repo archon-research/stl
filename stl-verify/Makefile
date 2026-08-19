@@ -2166,7 +2166,7 @@ kind-load-python-api:
 # `make kind-deploy-data-validator` (see k8s/overlays/dev/data-validator), not part of dev-up.
 
 CRONJOBS := $(sort $(notdir $(patsubst %/main.go,%,$(wildcard cmd/cronjobs/*/main.go))))
-CRONJOB_DEPLOYMENTS := spark-anchorage-indexer offchain-price-indexer
+CRONJOB_DEPLOYMENTS := spark-anchorage-indexer offchain-price-indexer capital-stack-syncer
 
 # Pattern rule: docker-build-cronjob-<name> builds any cronjob image.
 docker-build-cronjob-%:
@@ -2188,6 +2188,18 @@ docker-release-transform-bootstrap: ecr-login _docker-release-transform-bootstra
 
 _docker-release-transform-bootstrap-internal:
 	@$(MAKE) _docker-release-go-service GO_NAME="Transform Bootstrap" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/backfillers/transform-bootstrap GO_BIN=transform-bootstrap GO_CACHE_KEY="cronjob-transform-bootstrap" GO_TAG="transform-bootstrap-$(IMAGE_TAG)" GO_LATEST_TAG="transform-bootstrap-latest"
+
+# balance-sheet-backfill: the one-off seed of reference capital history predating
+# STL's own observation of Sky's Star monitor. Not a cronjob (no Temporal
+# schedule) so it is not auto-discovered; ships in the shared cronjob ECR repo
+# with a name-prefixed tag and runs as a one-off k8s Job.
+docker-build-balance-sheet-backfill:
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/balance-sheet-backfill --build-arg BIN=balance-sheet-backfill -t stl-balance-sheet-backfill:local -f Dockerfile.common .
+
+docker-release-balance-sheet-backfill: ecr-login _docker-release-balance-sheet-backfill-internal
+
+_docker-release-balance-sheet-backfill-internal:
+	@$(MAKE) _docker-release-go-service GO_NAME="Balance Sheet Backfill" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/backfillers/balance-sheet-backfill GO_BIN=balance-sheet-backfill GO_CACHE_KEY="cronjob-balance-sheet-backfill" GO_TAG="balance-sheet-backfill-$(IMAGE_TAG)" GO_LATEST_TAG="balance-sheet-backfill-latest"
 
 # offchain-price-backfill (VEC-540): the on-demand CoinGecko history backfill. Not a
 # cronjob (it registers no Temporal schedule) so it is not auto-discovered, but it is
