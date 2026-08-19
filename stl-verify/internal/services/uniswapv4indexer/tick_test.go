@@ -65,10 +65,6 @@ func packTickInfoReturn(t *testing.T, liquidityGross, liquidityNet, fg0, fg1 *bi
 	return packed
 }
 
-// ---------------------------------------------------------------------------
-// TouchedTicks
-// ---------------------------------------------------------------------------
-
 func TestTouchedTicks(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -88,7 +84,7 @@ func TestTouchedTicks(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := TouchedTicks(DecodedEvents{LiquidityEvents: tt.events})
+			got := TouchedTicks(tt.events)
 			if !slices.Equal(got, tt.want) {
 				t.Errorf("TouchedTicks() = %v, want %v", got, tt.want)
 			}
@@ -107,16 +103,12 @@ func TestTouchedTicks_ExcludesZeroDeltaPokes(t *testing.T) {
 		liquidityEvent(-600, 600, 42),
 	}
 
-	got := TouchedTicks(DecodedEvents{LiquidityEvents: events})
+	got := TouchedTicks(events)
 
 	if want := []int32{-600, 600}; !slices.Equal(got, want) {
 		t.Errorf("TouchedTicks() = %v, want %v (the zero-delta poke's bounds must be excluded)", got, want)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// BuildTickCalls / DecodeTick
-// ---------------------------------------------------------------------------
 
 func TestBuildTickCalls(t *testing.T) {
 	pool := tickTestPool()
@@ -230,10 +222,6 @@ func TestDecodeTick_FailureModes(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// BaselineTicks
-// ---------------------------------------------------------------------------
-
 // bitmapWord returns a uint256 (as *big.Int) with the given bit indices set.
 func bitmapWord(bits ...uint) *big.Int {
 	w := new(big.Int)
@@ -241,6 +229,17 @@ func bitmapWord(bits ...uint) *big.Int {
 		w.SetBit(w, int(b), 1)
 	}
 	return w
+}
+
+// bitmapWordResult packs a getTickBitmap return whose given bit indices are
+// set, so a test can stage a densely-initialized word.
+func bitmapWordResult(t *testing.T, bits ...uint) outbound.Result {
+	t.Helper()
+	packed, err := tickViewTestABI(t).Methods["getTickBitmap"].Outputs.Pack(bitmapWord(bits...))
+	if err != nil {
+		t.Fatalf("packing getTickBitmap return: %v", err)
+	}
+	return outbound.Result{Success: true, ReturnData: packed}
 }
 
 // wordFromCallData recovers the int16 word position from a packed

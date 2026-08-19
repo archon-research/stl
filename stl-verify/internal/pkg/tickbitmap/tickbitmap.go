@@ -36,8 +36,12 @@ func WordBitToTick(word int16, bit uint8, tickSpacing int) int32 {
 
 // WordBounds returns the inclusive [minWord, maxWord] range of bitmap word
 // positions that can hold an initialized tick for a pool with the given
-// tickSpacing. Enumerating only this range (rather than every int16) keeps a
-// full bitmap scan to O(tens) of calls instead of 65536.
+// tickSpacing. Enumerating only this range (rather than every int16) bounds a
+// full bitmap scan at 6,932 words for tickSpacing 1 and 36 for 200, instead of
+// 65,536.
+//
+// tickSpacing must be >= 1, which every pool registry enforces (a v4-core
+// PoolKey with tickSpacing 0 cannot initialize); 0 divides by zero here.
 func WordBounds(tickSpacing int) (int16, int16) {
 	minWord := FloorDiv(FloorDiv(MinTick, tickSpacing), 256)
 	maxWord := FloorDiv(FloorDiv(MaxTick, tickSpacing), 256)

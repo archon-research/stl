@@ -130,10 +130,6 @@ func snapshotWith(t *testing.T, pool RegisteredPool, f stateFixture) (*testutil.
 	return mc, gotHash, gotCalls, err
 }
 
-// ---------------------------------------------------------------------------
-// SnapshotState
-// ---------------------------------------------------------------------------
-
 func TestSnapshotState_MapsCoreFields(t *testing.T) {
 	pool := stateTestPool()
 	blockHash := common.HexToHash("0xabc1")
@@ -281,48 +277,54 @@ func TestSnapshotState_UnknownPoolIDFailsValidation(t *testing.T) {
 	}
 }
 
-func TestSnapshotState_ResultCountMismatchFails(t *testing.T) {
-	pool := stateTestPool()
-	mc := testutil.NewMockMulticaller()
-	mc.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
-		return make([]outbound.Result, len(calls)-1), nil
-	}
-
-	_, err := SnapshotState(context.Background(), mc, pool, common.HexToHash("0xabc1"), blockNumber, blockVer, blockTS)
-	if err == nil {
-		t.Fatal("SnapshotState: want error when the multicaller returns fewer results than calls, got nil")
-	}
-}
-
-func TestSnapshotState_TransportErrorFails(t *testing.T) {
-	pool := stateTestPool()
-	mc := testutil.NewMockMulticaller()
-	mc.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
-		return nil, fmt.Errorf("rpc down")
-	}
-
-	_, err := SnapshotState(context.Background(), mc, pool, common.HexToHash("0xabc1"), blockNumber, blockVer, blockTS)
-	if err == nil {
-		t.Fatal("SnapshotState: want error on a transport failure, got nil")
-	}
-	if !strings.Contains(err.Error(), "rpc down") {
-		t.Errorf("error %q does not wrap the transport failure", err)
-	}
-}
-
-// TestSnapshotState_MalformedReturnDataFails covers a successful call whose
-// payload cannot be decoded: it must fail loud rather than yield a partly
-// zeroed snapshot.
-func TestSnapshotState_MalformedReturnDataFails(t *testing.T) {
-	pool := stateTestPool()
-	results := buildStateResults(t, defaultStateFixture())
-	results[0] = outbound.Result{Success: true, ReturnData: []byte{0x01, 0x02}}
-	var gotHash common.Hash
-	var gotCalls []outbound.Call
-	mc := mockMulticallerReturning(results, &gotHash, &gotCalls)
-
-	_, err := SnapshotState(context.Background(), mc, pool, common.HexToHash("0xabc1"), blockNumber, blockVer, blockTS)
-	if err == nil {
-		t.Fatal("SnapshotState: want error for an undecodable getSlot0 payload, got nil")
+// TestSnapshotState_UnusableReadFails covers every way a read can come back
+// unusable: each must fail loud rather than yield a partly zeroed snapshot.
+func TestSnapshotState_UnusableReadFails(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		stub    func(t *testing.T) *testutil.MockMulticaller
+		wantSub string
+	}{
+		{
+			name: "fewer results than calls",
+			stub: func(*testing.T) *testutil.MockMulticaller {
+				mc := testutil.NewMockMulticaller()
+				mc.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+					return make([]outbound.Result, len(calls)-1), nil
+				}
+				return mc
+			},
+		},
+		{
+			name: "transport failure",
+			stub: func(*testing.T) *testutil.MockMulticaller {
+				mc := testutil.NewMockMulticaller()
+				mc.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+					return nil, fmt.Errorf("rpc down")
+				}
+				return mc
+			},
+			wantSub: "rpc down",
+		},
+		{
+			name: "undecodable getSlot0 payload",
+			stub: func(t *testing.T) *testutil.MockMulticaller {
+				results := buildStateResults(t, defaultStateFixture())
+				results[0] = outbound.Result{Success: true, ReturnData: []byte{0x01, 0x02}}
+				var gotHash common.Hash
+				var gotCalls []outbound.Call
+				return mockMulticallerReturning(results, &gotHash, &gotCalls)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := SnapshotState(context.Background(), tc.stub(t), stateTestPool(), common.HexToHash("0xabc1"), blockNumber, blockVer, blockTS)
+			if err == nil {
+				t.Fatalf("SnapshotState: want error for %s, got nil", tc.name)
+			}
+			if tc.wantSub != "" && !strings.Contains(err.Error(), tc.wantSub) {
+				t.Errorf("error %q does not mention %q", err, tc.wantSub)
+			}
+		})
 	}
 }

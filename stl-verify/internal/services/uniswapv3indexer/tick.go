@@ -155,17 +155,6 @@ func DecodeTick(pool RegisteredPool, tick int32, blockNumber int64, version int,
 	return result, nil
 }
 
-// The tick-bitmap arithmetic below is identical in v3-core and v4-core, so it
-// lives in internal/pkg/tickbitmap and both indexers delegate to it. These
-// package-local names stay as the V3 call sites.
-func floorDiv(a, b int) int { return tickbitmap.FloorDiv(a, b) }
-
-func wordBitToTick(word int16, bit uint8, tickSpacing int) int32 {
-	return tickbitmap.WordBitToTick(word, bit, tickSpacing)
-}
-
-func wordBounds(tickSpacing int) (int16, int16) { return tickbitmap.WordBounds(tickSpacing) }
-
 // baselineTickBitmapWordsPerCall bounds how many tickBitmap(int16) sub-calls
 // BaselineTicks packs into a single multicall3 aggregate call. At
 // tickSpacing=1 the full word range is ~6932 words; sending them all in one
@@ -187,7 +176,7 @@ func BaselineTicks(ctx context.Context, mc outbound.Multicaller, pool Registered
 		return nil, err
 	}
 
-	minWord, maxWord := wordBounds(pool.TickSpacing)
+	minWord, maxWord := tickbitmap.WordBounds(pool.TickSpacing)
 
 	var ticks []int32
 	for chunkStart := int(minWord); chunkStart <= int(maxWord); chunkStart += baselineTickBitmapWordsPerCall {
@@ -221,7 +210,7 @@ func BaselineTicks(ctx context.Context, mc outbound.Multicaller, pool Registered
 				if word.Bit(bit) == 0 {
 					continue
 				}
-				ticks = append(ticks, wordBitToTick(words[i], uint8(bit), pool.TickSpacing))
+				ticks = append(ticks, tickbitmap.WordBitToTick(words[i], uint8(bit), pool.TickSpacing))
 			}
 		}
 	}
