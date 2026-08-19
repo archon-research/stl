@@ -1222,26 +1222,6 @@ func TestBlockHandler_ReorgRedelivery_RereadsPriorVersionTicks(t *testing.T) {
 	}
 }
 
-// TestMergeTickSets_DedupsAndSortsOverlappingRanges verifies mergeTickSets
-// unions touched and baseline ticks, dropping duplicates and sorting
-// ascending even when the inputs interleave out of order.
-func TestMergeTickSets_DedupsAndSortsOverlappingRanges(t *testing.T) {
-	touched := []int32{180, -120}
-	baseline := []int32{60, -120, 300}
-
-	got := mergeTickSets(touched, baseline)
-	want := []int32{-120, 60, 180, 300}
-
-	if len(got) != len(want) {
-		t.Fatalf("mergeTickSets() = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("mergeTickSets()[%d] = %d, want %d (full: got=%v want=%v)", i, got[i], want[i], got, want)
-		}
-	}
-}
-
 // ---------------------------------------------------------------------------
 // Telemetry: the pools.touched gate
 // ---------------------------------------------------------------------------

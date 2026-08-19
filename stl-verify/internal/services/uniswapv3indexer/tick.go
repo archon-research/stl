@@ -155,20 +155,13 @@ func DecodeTick(pool RegisteredPool, tick int32, blockNumber int64, version int,
 	return result, nil
 }
 
-// baselineTickBitmapWordsPerCall bounds how many tickBitmap(int16) sub-calls
-// BaselineTicks packs into a single multicall3 aggregate call. At
-// tickSpacing=1 the full word range is ~6932 words; sending them all in one
-// aggregate call risks exceeding an RPC provider's request/response/gas caps.
-// 500 words per call keeps that worst case to ~14 batches.
-const baselineTickBitmapWordsPerCall = 500
-
 // BaselineTicks performs a one-time enumeration of every currently
 // initialized tick on pool by scanning its tickBitmap across the full
 // tickSpacing-derived word range. It is a pure read: callers own logging and
 // retry policy. A reverted call is returned as an error immediately (no
 // partial/best-effort baseline), since a silently incomplete baseline would
 // under-report initialized ticks forever after. The word range is scanned in
-// bounded batches (see baselineTickBitmapWordsPerCall) rather than one
+// bounded batches (see tickbitmap.BitmapWordsPerCall) rather than one
 // multicall covering the whole range.
 func BaselineTicks(ctx context.Context, mc outbound.Multicaller, pool RegisteredPool, blockHash common.Hash) ([]int32, error) {
 	a, err := tickViewABI()
@@ -179,8 +172,8 @@ func BaselineTicks(ctx context.Context, mc outbound.Multicaller, pool Registered
 	minWord, maxWord := tickbitmap.WordBounds(pool.TickSpacing)
 
 	var ticks []int32
-	for chunkStart := int(minWord); chunkStart <= int(maxWord); chunkStart += baselineTickBitmapWordsPerCall {
-		chunkEnd := min(chunkStart+baselineTickBitmapWordsPerCall-1, int(maxWord))
+	for chunkStart := int(minWord); chunkStart <= int(maxWord); chunkStart += tickbitmap.BitmapWordsPerCall {
+		chunkEnd := min(chunkStart+tickbitmap.BitmapWordsPerCall-1, int(maxWord))
 
 		words := make([]int16, 0, chunkEnd-chunkStart+1)
 		calls := make([]outbound.Call, 0, cap(words))

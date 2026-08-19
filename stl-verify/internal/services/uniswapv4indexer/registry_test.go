@@ -186,6 +186,23 @@ func TestValidatePoolKeys_RejectsDuplicatePoolIDHash(t *testing.T) {
 	}
 }
 
+// TestValidatePoolKeys_RejectsDynamicFeePool pins the boot refusal that keeps
+// uniswap_v4_pool_state.lp_fee honest: updateDynamicLPFee rewrites slot0.lpFee
+// with no event, so a dynamic-fee pool would go stale between touches.
+func TestValidatePoolKeys_RejectsDynamicFeePool(t *testing.T) {
+	pool := registeredPool(4, ethWstethPoolID, DynamicFeeFlag, common.Address{})
+
+	err := ValidatePoolKeys([]RegisteredPool{pool})
+	if err == nil {
+		t.Fatal("ValidatePoolKeys: want error for a dynamic-fee pool, got nil")
+	}
+	for _, want := range []string{"4", ethWstethPoolID, "updateDynamicLPFee", "VEC-573"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+}
+
 // TestValidatePoolKeys_RejectsFeeOutsideUint24 keeps the recompute from
 // silently truncating: abi.Pack would reject an out-of-range uint24, and that
 // failure must surface as a registry error rather than a panic.

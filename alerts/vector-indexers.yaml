@@ -1800,11 +1800,14 @@ groups:
   # enough, and never distinguishes one pool from another.
   #
   # Like uniswap-v3 and unlike curve there is no sweep (SnapshotTracker(0)):
-  # V4 pool state can only change through a PoolManager log keyed by PoolId, so
-  # state/tick rows are written only for pools touched in that block and a
-  # quiet block legitimately writes zero rows. State itself is read from the
-  # StateView lens (0x7fFE42C4a5DEeA5b0feC41C94C136Cf115597227) pinned to the
-  # block hash.
+  # for a STATIC-FEE pool V4 state can only change through a PoolManager log
+  # keyed by PoolId, so state/tick rows are written only for pools touched in
+  # that block and a quiet block legitimately writes zero rows. The one
+  # exception is the dynamic LP fee (PoolKey.fee == 0x800000), which
+  # updateDynamicLPFee rewrites with no event; such pools are refused at boot
+  # until lp_fee has a refresh path, so no series here can come from one. State
+  # itself is read from the StateView lens
+  # (0x7fFE42C4a5DEeA5b0feC41C94C136Cf115597227) pinned to the block hash.
   - name: vector-uniswap-v4-indexer
     interval: 1m
     rules:

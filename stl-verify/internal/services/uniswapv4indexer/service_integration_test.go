@@ -47,6 +47,56 @@ func (f *v4IntegrationFixture) restarted(t *testing.T) *UniswapV4Service {
 	return svc
 }
 
+// seededDeployBlocks is the Initialize height of every pool the V4 migration
+// seeds, transcribed from the verified Initialize-log scan. deploy_block is
+// load-bearing (DueSet's gate hard-errors when a touched pool reports a height
+// above the block), and this is the only place the migration's OWN seed is read
+// back: the postgres package re-seeds the registry itself because sibling tests
+// TRUNCATE it away.
+var seededDeployBlocks = map[common.Hash]int64{
+	common.HexToHash("0x1d5b2949ece8754c2d736991c62c5162bd144f497b2212182401b9bae77e2d76"): 21743144,
+	common.HexToHash("0xbc21dd4a44766fadfd6447f4b222a6185dcc2e6a3b15eb79e0cc637e30e7e97f"): 25199556,
+	common.HexToHash("0x056c3c5d8aceeb400b674c27db54e4a90d2f468d786582571ee9394b4c5e3a11"): 25199299,
+	common.HexToHash("0x9e0032112d580d8f45a0e356c48148846a3306a991da398dde4f92071e853d09"): 24857024,
+	common.HexToHash("0xaea49399167b73015a01e9ca9754c2b438e8aaf42d911468443540eea235735e"): 25494004,
+	common.HexToHash("0x58299b9ad89104f189f5efcdf4910615cb9e3296afb0c5a1d1d3befdd1bf7ae4"): 23188451,
+	common.HexToHash("0x1d6ebf506eacf0e98a8c4566687380ddf1601192acd9bce29feeaf0c0245ea6f"): 24363425,
+	common.HexToHash("0xe7c7bbac1cb017812f5129246ba1ace4aeaadb96fed67cc43d94ac2c6c5048d8"): 23796248,
+	common.HexToHash("0xbb78d828ded564d7dfcf041eb1316200e4ec5380dc601c7b4872c0a2727a580e"): 24284325,
+	common.HexToHash("0x84a2753546221b6aedf1b96098235f8eb5494b1ddd7d57583d99b2d174cd2103"): 22962297,
+	common.HexToHash("0xef3a1d51982c20ee2f125e6d6d1f9d3a10c1e94391b828040943005a1ea27e14"): 22552041,
+	common.HexToHash("0x904e8ad11c6f8abb44ea77c507355900e7f9d2907ab0a29353cb1ef0f06b0852"): 23326185,
+	common.HexToHash("0xa068c5ab2de0c5fed15f8c187d911915437ed55e6a47d2e42710f9174e6db9a2"): 22240740,
+	common.HexToHash("0x4d9cc597ec7d8848af463fca5f4c750279f0d02d2745844c1e9f52a7930cc4d7"): 25492487,
+	common.HexToHash("0xe63e32b2ae40601662f760d6bf5d771057324fbd97784fe1d3717069f7b75d45"): 24229945,
+	common.HexToHash("0x3b1b1f2e775a6db1664f8e7d59ad568605ea2406312c11aef03146c0cf89d5b9"): 24230047,
+	common.HexToHash("0xb54ece65cc2ddd3eaec0ad18657470fb043097220273d87368a062c7d4e59180"): 23153381,
+	common.HexToHash("0xa2a5a544a8cbd9c24557b8393fd909360779cf0f48a0b88895a7d9d83ce9d437"): 22268982,
+	common.HexToHash("0x2d04d518afae8b57a702a6f679edf49f39593d818f9342cc57b457ea738a7460"): 25036987,
+	common.HexToHash("0x51ccd46db78d6988ab156c9b0d023e14b2e848240bc719718e63c4cc5c258bcf"): 22989795,
+	common.HexToHash("0x2f5dff74b96e2df0fa8a5695318d59839c3ce5d058b19024fbfe276100b676ff"): 24363921,
+}
+
+// assertSeededDeployBlocks checks the loaded registry against seededDeployBlocks
+// by PoolId, so a mistyped seed is caught regardless of the order LoadPools
+// returns rows in.
+func assertSeededDeployBlocks(t *testing.T, pools []RegisteredPool) {
+	t.Helper()
+	if len(pools) != len(seededDeployBlocks) {
+		t.Fatalf("LoadPools returned %d pools, want %d seeded", len(pools), len(seededDeployBlocks))
+	}
+	for _, pool := range pools {
+		want, seeded := seededDeployBlocks[pool.PoolIDHash]
+		if !seeded {
+			t.Errorf("pool %s is registered but absent from the expected seed", pool.PoolIDHash)
+			continue
+		}
+		if pool.DeployBlock != want {
+			t.Errorf("pool %s deploy_block = %d, want %d", pool.PoolIDHash, pool.DeployBlock, want)
+		}
+	}
+}
+
 func setupV4Integration(t *testing.T) *v4IntegrationFixture {
 	t.Helper()
 	ctx := context.Background()
@@ -63,6 +113,7 @@ func setupV4Integration(t *testing.T) *v4IntegrationFixture {
 		t.Fatal("LoadPools returned no pools; the migration seed is missing")
 	}
 	pools := RegisteredPoolsFromRows(rows)
+	assertSeededDeployBlocks(t, pools)
 
 	wanted := common.HexToHash(wbtcWstethPoolID)
 	idx := slices.IndexFunc(pools, func(p RegisteredPool) bool { return p.PoolIDHash == wanted })
@@ -195,6 +246,7 @@ func TestIntegration_ReorgReconcilesStaleTicks(t *testing.T) {
 	if err := bh(ctx, v0, []shared.TransactionReceipt{receipt}); err != nil {
 		t.Fatalf("BlockHandler (v0): %v", err)
 	}
+	assertPinnedTo(t, f.mc, common.HexToHash(v0.BlockHash))
 	if bn, ver, gross := latestTick(t, ctx, f.db, f.pool.ID, clearedTick); bn != integrationBlock || ver != 0 || gross != "1000" {
 		t.Fatalf("after v0, tick %d latest = (bn=%d ver=%d gross=%s), want (%d, 0, 1000)", clearedTick, bn, ver, gross, integrationBlock)
 	}
@@ -208,6 +260,7 @@ func TestIntegration_ReorgReconcilesStaleTicks(t *testing.T) {
 	if err := bh(ctx, v1, nil); err != nil {
 		t.Fatalf("BlockHandler (v1 reorg redelivery): %v", err)
 	}
+	assertPinnedTo(t, f.mc, common.HexToHash(v1.BlockHash))
 
 	if bn, ver, gross := latestTick(t, ctx, f.db, f.pool.ID, clearedTick); bn != integrationBlock || ver != 1 || gross != "0" {
 		t.Errorf("tick %d latest = (bn=%d ver=%d gross=%s), want (%d, 1, 0) — the orphaned-fork row survived", clearedTick, bn, ver, gross, integrationBlock)
@@ -238,6 +291,7 @@ func TestIntegration_ReorgAfterRestartReconcilesStaleTicks(t *testing.T) {
 	if err := f.svc.BlockHandler()(ctx, v0, []shared.TransactionReceipt{receipt}); err != nil {
 		t.Fatalf("BlockHandler (v0): %v", err)
 	}
+	assertPinnedTo(t, f.mc, common.HexToHash(v0.BlockHash))
 
 	f.mc.tickResults[clearedTick] = tickResultWith(t, 0, 0)
 	f.mc.tickResults[changedTick] = tickResultWith(t, 2000, 750)
@@ -248,6 +302,7 @@ func TestIntegration_ReorgAfterRestartReconcilesStaleTicks(t *testing.T) {
 	if err := f.restarted(t).BlockHandler()(ctx, v1, nil); err != nil {
 		t.Fatalf("BlockHandler (v1 reorg redelivery after a restart): %v", err)
 	}
+	assertPinnedTo(t, f.mc, common.HexToHash(v1.BlockHash))
 
 	if bn, ver, gross := latestTick(t, ctx, f.db, f.pool.ID, clearedTick); bn != integrationBlock || ver != 1 || gross != "0" {
 		t.Errorf("tick %d latest = (bn=%d ver=%d gross=%s), want (%d, 1, 0) — the orphaned-fork row survived the restart", clearedTick, bn, ver, gross, integrationBlock)

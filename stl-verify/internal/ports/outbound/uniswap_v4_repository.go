@@ -42,12 +42,12 @@ type UniswapV4Repository interface {
 	// decimals from token. Both registry tables are append-only version
 	// histories, so "current" means the highest processing_version per natural
 	// key — per (chain_id, pool_id) for pools, per chain_id for the PoolManager.
-	// A missing PoolManager, a NULL deploy_block, a NULL decimals, or a currency
-	// that disagrees with its token row is an error rather than a skipped pool:
-	// the deploy-block gate is unrecoverable from a half-populated registry, and
-	// the decimals are carried so downstream consumers can scale and sanity-check
-	// the raw amounts this indexer stores. A currency matches when token.address
-	// equals it, or when it is address(0) and the token row is the
+	// A missing PoolManager, a NULL decimals, or a currency that disagrees with
+	// its token row is an error rather than a skipped pool: without the chain's
+	// StateView there is nothing to snapshot, and the decimals are carried so
+	// downstream consumers can scale and sanity-check the raw amounts this
+	// indexer stores. A currency matches when token.address equals it, or when it
+	// is address(0) and the token row is the
 	// 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE native-ETH placeholder.
 	LoadPools(ctx context.Context, chainID int64) ([]UniswapV4PoolRow, error)
 	// SaveBlock persists all of a block's uniswap_v4 rows within tx and returns
