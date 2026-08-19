@@ -8,6 +8,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
@@ -73,9 +74,13 @@ func (s *Service) ReplayMetaMorphoLog(ctx context.Context, log shared.Log, block
 //
 // Reads-then-persist, like discoverAndRegisterVault: every on-chain read
 // completes before the transaction opens, so a transient RPC failure commits
-// nothing and a re-triggered run starts clean. Re-running is safe — the
-// converging GetOrCreateAdapter and the deduped SaveAdapterState are the same
-// idempotent writes live indexing uses.
+// nothing and a re-triggered run starts clean.
+//
+// Re-running is safe, and it is now also QUIET. The enumeration is an ASSERTION
+// recorded as observed_via = bootstrap_seed, so a re-run whose head-block answer
+// already matches the membership log appends nothing at all — where the old
+// registry recorded a fresh "added at the finalized head" every time and hung the
+// seed snapshot off it.
 func (s *Service) SeedV2VaultAdapters(ctx context.Context, vaultAddress common.Address, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) error {
 	vault, err := s.resolveV2Vault(vaultAddress)
 	if err != nil {
@@ -86,7 +91,7 @@ func (s *Service) SeedV2VaultAdapters(ctx context.Context, vaultAddress common.A
 		return fmt.Errorf("reading adapters for vault %s: %w", vaultAddress.Hex(), err)
 	}
 	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		return s.seedDiscoveredAdapters(ctx, tx, vault, vaultAddress, blockNumber, blockVersion, blockTimestamp, adapters)
+		return s.seedDiscoveredAdapters(ctx, tx, vault, vaultAddress, blockNumber, blockVersion, blockTimestamp, adapters, entity.MembershipFromBootstrapSeed)
 	})
 }
 

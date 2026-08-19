@@ -27,9 +27,11 @@
 // # Idempotency
 //
 // Every write goes through the same idempotent repository methods live indexing
-// uses (converging GetOrCreateAdapter, ON CONFLICT DO NOTHING snapshots), so
-// clicking Trigger again is safe — it redoes the work and converges to the same
-// state.
+// uses (append-only membership observations keyed on their own block position,
+// ON CONFLICT DO NOTHING snapshots), so clicking Trigger again is safe — it
+// redoes the work and reaches the same state. The head seed in particular is an
+// assertion, so a repeat run whose answer already matches the log writes nothing
+// at all.
 //
 // # Resuming an interrupted run
 //
