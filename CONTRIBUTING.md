@@ -844,7 +844,16 @@ ArgoCD PreSync hook in staging/prod.
    table's `COMMENT`; the append-only + `processing_version`/`build_id`
    + advisory-locked trigger requirements still apply in full. If you
    are not sure your table qualifies, it doesn't — make it a hypertable.
-5. Use `CREATE INDEX CONCURRENTLY` on big tables. Test on staging first.
+5. **Append-only, and enforced by the database.** No `UPDATE`, no `DELETE`, no
+   `INSERT … ON CONFLICT … DO UPDATE` (a no-op `SET` still needs UPDATE privilege
+   and still fails) on a converted table. Identity rows are written once;
+   everything time-varying, lifecycle included, is a new row with the version
+   tuple, and "the current value" is a query. A converted table's creating
+   migration ends with `REVOKE UPDATE, DELETE ON <table> FROM stl_readwrite;`.
+   The converted set is listed in `stl-verify/db/migrations/AGENTS.md`; the rest
+   of the schema is being converted table by table, so the absence of a REVOKE on
+   an old table is debt, not permission.
+6. Use `CREATE INDEX CONCURRENTLY` on big tables. Test on staging first.
 
 ---
 
