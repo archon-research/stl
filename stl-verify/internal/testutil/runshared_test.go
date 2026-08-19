@@ -1,6 +1,7 @@
 package testutil
 
 import (
+	"reflect"
 	"slices"
 	"testing"
 )
@@ -147,11 +148,47 @@ func TestRunShared_LetsTheLeakCheckDecideTheExitCode(t *testing.T) {
 	}
 }
 
-func TestRunShared_KeepsAFailingTestRunFailing(t *testing.T) {
+func TestRunShared_HandsTheTestRunsExitCodeToTheLeakCheck(t *testing.T) {
 	var rec recorder
+	var checked int
+	starters := rec.starters()
+	starters.checkLeaks = func(code int) int {
+		checked = code
+		rec.record("check leaks")
+		return code
+	}
 
-	if code := runShared(rec.run(3), Shared{}, rec.starters()); code != 3 {
+	code := runShared(rec.run(3), Shared{}, starters)
+
+	if checked != 3 {
+		t.Errorf("leak check saw exit code %d, want the test run's 3: it cannot pass through a failure it never received", checked)
+	}
+	if code != 3 {
 		t.Errorf("exit code is %d, want 3: the leak check must not mask a test failure", code)
+	}
+}
+
+// The timescaleDB and redis starters have the same signature, so swapping them in
+// liveStarters compiles and every DSN-only package would dial Redis instead. The
+// fakes above cannot reach that wiring, so assert it directly.
+func TestLiveStarters_WiresEachHandleToItsOwnHelper(t *testing.T) {
+	live := liveStarters()
+
+	for _, tc := range []struct {
+		field string
+		got   any
+		want  any
+	}{
+		{"timescaleDB", live.timescaleDB, StartTimescaleDBForMain},
+		{"redis", live.redis, StartRedisForMain},
+		{"localStack", live.localStack, StartLocalStackForMain},
+		{"checkLeaks", live.checkLeaks, CheckGoroutineLeaks},
+	} {
+		t.Run(tc.field, func(t *testing.T) {
+			if reflect.ValueOf(tc.got).Pointer() != reflect.ValueOf(tc.want).Pointer() {
+				t.Errorf("%s is wired to another helper", tc.field)
+			}
+		})
 	}
 }
 

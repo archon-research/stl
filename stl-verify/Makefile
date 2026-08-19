@@ -258,8 +258,8 @@ tidy-check:
 	@mv go.mod.bak go.mod && mv go.sum.bak go.sum
 	@echo "go.mod is tidy"
 
-# Enforces the rule in AGENTS.md that services come from TestMain, never from a
-# test; a test that starts its own container adds a container start to every CI run. Benchmarks are exempt: they
+# Enforces the rule in AGENTS.md that services come from TestMain via testutil.RunShared,
+# never from a test; a test that starts its own container adds a container start to every CI run. Benchmarks are exempt: they
 # are not part of make test-integration. Matching the IMPORT PATH, not a call like
 # testcontainers.GenericContainer, because only testutil may depend on testcontainers
 # at all — so an alias, testcontainers.Run, or a modules/* helper cannot slip past.
@@ -270,7 +270,7 @@ shared-container-check:
 	if [ -n "$$offenders" ]; then \
 	  echo "ERROR: these tests start their own container instead of sharing the package's:"; \
 	  echo "$$offenders" | sed 's/^/  /'; \
-	  echo "Start it once in TestMain via testutil.Start<X>ForMain and isolate per test instead."; \
+	  echo "Declare it once in TestMain via testutil.RunShared and isolate per test instead."; \
 	  exit 1; \
 	fi
 

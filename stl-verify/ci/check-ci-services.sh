@@ -51,15 +51,27 @@ if [[ -n "$unknown_images" ]]; then
   exit 1
 fi
 
+# grep exits 1 when a pattern matches nothing, which the emptiness check below
+# reports far better than an abort under pipefail. Exit 2 is a broken pattern or an
+# unreadable tree, and passing that off as "no match" would narrow the union to
+# whatever the other pattern found -- the exact drift this script exists to catch.
+grep_test_files() {
+  local status=0
+  grep -rhoE "$1" --include='*_test.go' . || status=$?
+  if (( status > 1 )); then
+    echo "ERROR: grep failed (exit $status) for pattern: $1" >&2
+    return "$status"
+  fi
+}
+
 # The shared LocalStack must enable the union of what every package asks for; a
 # package whose service is missing fails with an opaque AWS error instead. Packages
 # name their services in the Shared declaration they hand to testutil.RunShared;
-# the direct helper call is still valid, so both spellings count. Neither grep may
-# sink the script under pipefail before the emptiness check below reports it.
-requested_services="$({
-    grep -rhoE 'LocalStackServices:[[:space:]]*"[^"]*"' --include='*_test.go' . || true
-    grep -rhoE 'StartLocalStackForMain\("[^"]*"' --include='*_test.go' . || true
-  } | sed -E 's/^[^"]*"//; s/"$//' | tr ',' '\n' | sed '/^$/d' | sort -u)"
+# the direct helper call is still valid, so both spellings count.
+shared_declarations="$(grep_test_files 'LocalStackServices:[[:space:]]*"[^"]*"')"
+helper_calls="$(grep_test_files 'StartLocalStackForMain\("[^"]*"')"
+requested_services="$(printf '%s\n%s\n' "$shared_declarations" "$helper_calls" \
+  | sed -E 's/^[^"]*"//; s/"$//' | tr ',' '\n' | sed '/^$/d' | sort -u)"
 if [[ -z "$requested_services" ]]; then
   echo "ERROR: no LocalStack service requests found -- check the grep patterns" >&2
   exit 1

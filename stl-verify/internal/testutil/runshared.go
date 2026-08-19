@@ -14,7 +14,9 @@ type Shared struct {
 	TimescaleDSN *string
 	RedisAddr    *string
 	LocalStack   *LocalStackConfig
-	// LocalStackServices is LocalStack's SERVICES list, required alongside it.
+	// LocalStackServices is LocalStack's SERVICES list, required alongside it. Keep
+	// it a string literal: ci/check-ci-services.sh greps the declarations to hold the
+	// workflow's SERVICES to their union, and cannot see through a const or a var.
 	LocalStackServices string
 
 	// BeforeRun and AfterRun bracket the tests, for a package that needs more than
@@ -35,7 +37,12 @@ type Shared struct {
 // that stops its services after the leak check reports the teardown it is waiting
 // for, and one that lets m.Run own the exit code drops the leaks it finds. It
 // returns the code rather than exiting so that order can be tested.
+// Validation lives here rather than in runShared because it ends the process: the
+// core stays free of os.Exit so every ordering test can call it.
 func RunShared(m *testing.M, s Shared) int {
+	if err := s.validate(); err != nil {
+		log.Fatalf("testutil.RunShared: %v", err)
+	}
 	return runShared(m.Run, s, liveStarters())
 }
 
@@ -58,9 +65,6 @@ func liveStarters() serviceStarters {
 }
 
 func runShared(run func() int, s Shared, start serviceStarters) int {
-	if err := s.validate(); err != nil {
-		log.Fatalf("testutil.RunShared: %v", err)
-	}
 	stopServices := s.startServices(start)
 
 	code := s.runTests(run)
@@ -119,7 +123,7 @@ func (s Shared) runTests(run func() int) int {
 // service it ships, and a list with no LocalStack requested starts none.
 func (s Shared) validate() error {
 	if s.LocalStack != nil && s.LocalStackServices == "" {
-		return errors.New("LocalStack needs LocalStackServices, e.g. \"s3,sqs\"")
+		return errors.New(`LocalStack needs LocalStackServices, e.g. "s3,sqs"`)
 	}
 	if s.LocalStack == nil && s.LocalStackServices != "" {
 		return errors.New("LocalStackServices was given without a LocalStack handle to fill")
