@@ -9,11 +9,12 @@ resources:
   - ../../base/oracle-price-worker
   - ../../base/sparklend-position-tracker
   - ../../base/morpho-indexer
-  # curve-indexer + uniswap-v3-indexer run the shared dex-indexer image, one
-  # Deployment per DEX (DEX env selects the factory). Staging-only for now
-  # (VEC-329); prod/dev remain deferred.
+  # curve-indexer + uniswap-v3-indexer + uniswap-v4-indexer run the shared
+  # dex-indexer image, one Deployment per DEX (DEX env selects the factory).
+  # VEC-329, VEC-475; the dev overlay remains deferred.
   - ../../base/curve-indexer
   - ../../base/uniswap-v3-indexer
+  - ../../base/uniswap-v4-indexer
   - ../../base/fluid-vault-indexer
   - ../../base/allocation-tracker
   - ../../base/avalanche-watcher
@@ -81,8 +82,8 @@ images:
   - name: morpho-indexer
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-morpho-indexer
     newTag: "9958da7aa0f0138e5e543c976b164a14a1a0e9bc"
-  # Shared by curve-indexer + uniswap-v3-indexer (both bases use image name
-  # `dex-indexer`; DEX env var selects the factory).
+  # Shared by curve-indexer + uniswap-v3-indexer + uniswap-v4-indexer (all three
+  # bases use image name `dex-indexer`; DEX env var selects the factory).
   - name: dex-indexer
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-dex-indexer
     newTag: "9958da7aa0f0138e5e543c976b164a14a1a0e9bc"
