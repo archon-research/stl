@@ -632,7 +632,7 @@ class AllocationRepository:
     async def list_allocation_activity(
         self,
         *,
-        prime_id: EthAddress | None = None,
+        proxy_addresses: Sequence[EthAddress] | None = None,
         chain_id: int | None = None,
         protocol_name: str | None = None,
         action_type: str | None = None,
@@ -644,7 +644,7 @@ class AllocationRepository:
     ) -> list[AllocationActivityEvent]:
         # Escape LIKE metacharacters to prevent pattern injection
         params = {
-            "prime_hex": prime_id.hex if prime_id else None,
+            "prime_hexes": ",".join(a.hex for a in proxy_addresses) if proxy_addresses else None,
             "chain_id": chain_id,
             "protocol_name": _escape_like_pattern(protocol_name) if protocol_name else None,
             "action_type": action_type,
@@ -658,7 +658,7 @@ class AllocationRepository:
         logger.debug(
             "Executing allocation activity query",
             extra={
-                "prime_id": str(prime_id) if prime_id else None,
+                "proxy_addresses": [str(a) for a in proxy_addresses] if proxy_addresses else None,
                 "chain_id": chain_id,
                 "limit": params["limit"],
                 "has_time_filter": from_timestamp is not None,
@@ -705,7 +705,7 @@ class AllocationRepository:
     async def list_activity_buckets(
         self,
         *,
-        prime_id: EthAddress | None = None,
+        proxy_addresses: Sequence[EthAddress] | None = None,
         chain_id: int | None = None,
         protocol_name: str | None = None,
         action_type: str | None = None,
@@ -718,7 +718,7 @@ class AllocationRepository:
     ) -> list[AllocationActivityBucket]:
         """Return allocation activity counts and tx-amount sums per time bucket."""
         params = {
-            "prime_hex": prime_id.hex if prime_id else None,
+            "prime_hexes": ",".join(a.hex for a in proxy_addresses) if proxy_addresses else None,
             "chain_id": chain_id,
             "protocol_name": _escape_like_pattern(protocol_name) if protocol_name else None,
             "action_type": action_type,
@@ -1568,7 +1568,8 @@ LEFT JOIN LATERAL (
     ORDER BY match_priority
     LIMIT 1
 ) AS protocol_match ON TRUE
-WHERE (CAST(:prime_hex AS TEXT) IS NULL OR ap.proxy_address = decode(CAST(:prime_hex AS TEXT), 'hex'))
+WHERE (CAST(:prime_hexes AS TEXT) IS NULL OR ap.proxy_address = ANY(
+        SELECT decode(hex, 'hex') FROM unnest(string_to_array(CAST(:prime_hexes AS TEXT), ',')) AS hex))
     AND ap.direction IS NOT NULL
     AND ap.tx_amount IS NOT NULL
     AND ap.balance IS NOT NULL
@@ -1816,7 +1817,8 @@ LEFT JOIN nearest_share_ratio nearest_ratio
     ON nearest_ratio.token_id = ap.token_id
     AND nearest_ratio.chain_id = ap.chain_id
     AND nearest_ratio.block_number = ap.block_number
-WHERE (CAST(:prime_hex AS TEXT) IS NULL OR ap.proxy_address = decode(CAST(:prime_hex AS TEXT), 'hex'))
+WHERE (CAST(:prime_hexes AS TEXT) IS NULL OR ap.proxy_address = ANY(
+        SELECT decode(hex, 'hex') FROM unnest(string_to_array(CAST(:prime_hexes AS TEXT), ',')) AS hex))
     AND ap.direction IS NOT NULL
     AND ap.tx_amount IS NOT NULL
     AND ap.created_at IS NOT NULL

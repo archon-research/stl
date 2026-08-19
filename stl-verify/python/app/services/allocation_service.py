@@ -16,6 +16,7 @@ from app.domain.entities.time_series_bucket import (
     ExposureBucket,
     TotalCapitalBucket,
 )
+from app.domain.prime_registry import alm_proxies_for_prime, prime_name_for
 from app.ports.allocation_repository import AllocationRepositoryPort
 
 
@@ -50,6 +51,25 @@ class AllocationService:
     async def get_total_usd_exposure(self, prime_id: EthAddress) -> Decimal:
         return await self._repository.get_total_usd_exposure(prime_id)
 
+    @staticmethod
+    def _activity_proxies(prime_id: EthAddress | None) -> list[EthAddress] | None:
+        """Widen one proxy address to every ALM proxy of the prime that owns it.
+
+        A prime allocates through one proxy per chain, so activity addressed by
+        any one of them belongs to the whole prime. Scoping to the address as
+        given would report a fraction of the prime's flows against a prime-wide
+        headline. An address outside the contract is passed through unchanged so
+        an unknown proxy still filters to itself rather than to everything.
+        """
+        if prime_id is None:
+            return None
+
+        prime_name = prime_name_for(str(prime_id))
+        if prime_name is None:
+            return [prime_id]
+
+        return [EthAddress(entry.address) for entry in alm_proxies_for_prime(prime_name)]
+
     async def list_allocation_activity(
         self,
         *,
@@ -64,7 +84,7 @@ class AllocationService:
         limit: int = 100,
     ) -> list[AllocationActivityEvent]:
         return await self._repository.list_allocation_activity(
-            prime_id=prime_id,
+            proxy_addresses=self._activity_proxies(prime_id),
             chain_id=chain_id,
             protocol_name=protocol_name,
             action_type=action_type,
@@ -90,7 +110,7 @@ class AllocationService:
         limit: int = 100,
     ) -> list[AllocationActivityBucket]:
         return await self._repository.list_activity_buckets(
-            prime_id=prime_id,
+            proxy_addresses=self._activity_proxies(prime_id),
             chain_id=chain_id,
             protocol_name=protocol_name,
             action_type=action_type,

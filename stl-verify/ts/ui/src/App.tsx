@@ -671,10 +671,9 @@ function App() {
     isLoading: isChartsLoading,
     errorMessage: chartsErrorMessage,
   } = usePrimeChartData(
-    // These per-bucket time-series endpoints have no prime-wide aggregation
-    // (unlike risk-capital's prime_* fields), so summing them across a
-    // prime's proxies is not well-defined here; scope to the primary proxy
-    // rather than fan out.
+    // The activity endpoint resolves this to the prime's whole ALM proxy set
+    // server-side, so its buckets are prime-wide. The exposure, total-capital
+    // and debt series are still scoped to this one proxy.
     primaryProxyAddress,
     timeRange.from_timestamp,
     timeRange.to_timestamp,
@@ -810,18 +809,8 @@ function App() {
   // at the current total would misstate every point. Suppress it for custom
   // ranges until a range-end anchor is available.
   //
-  // It is also only valid for a single-proxy prime: the anchor
-  // (primeTotalAllocationUsd) is cross-chain, but activityBuckets' net flows
-  // are fetched for the primary proxy only (see usePrimeChartData below), so
-  // for a multi-chain prime every point except the newest would be silently
-  // over- or under-stated by whatever flowed through the other chains.
-  // Suppress it rather than reconstruct a history the inputs can't support.
   const allocationBalanceSeries = useMemo<ChartDatum[]>(() => {
-    if (
-      isMultiChainPrime ||
-      rangePreset === 'custom' ||
-      activityBuckets.length === 0
-    ) {
+    if (rangePreset === 'custom' || activityBuckets.length === 0) {
       return [];
     }
 
@@ -836,12 +825,7 @@ function App() {
       balance -= parseNumericValue(bucket.net_flow_usd) ?? 0;
     }
     return series;
-  }, [
-    activityBuckets,
-    isMultiChainPrime,
-    primeTotalAllocationUsd,
-    rangePreset,
-  ]);
+  }, [activityBuckets, primeTotalAllocationUsd, rangePreset]);
 
   const primeDebtSeries = useMemo<ChartDatum[]>(
     () =>
@@ -1102,7 +1086,6 @@ function App() {
                 chartsErrorMessage={chartsErrorMessage}
                 riskCapitalErrorMessage={riskCapitalErrorMessage}
                 primeDebtErrorMessage={primeDebtErrorMessage}
-                isMultiChainPrime={isMultiChainPrime}
                 noticeMessage={unknownPrimeMessage}
               />
             ) : (
@@ -1114,7 +1097,6 @@ function App() {
                 selectedProtocol={selectedProtocol}
                 showAllPrimes={showAllPrimesInActivities}
                 selectedPrime={selectedPrime}
-                isMultiChainPrime={isMultiChainPrime}
                 tokenOptions={tokenSymbolOptions}
                 tokenFilter={activitiesSearch?.token ?? null}
                 onTokenFilterChange={(value) =>

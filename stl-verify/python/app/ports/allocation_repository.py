@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from datetime import datetime
 from decimal import Decimal
 from typing import Protocol
@@ -101,7 +102,7 @@ class AllocationRepositoryPort(Protocol):
     async def list_allocation_activity(
         self,
         *,
-        prime_id: EthAddress | None = None,
+        proxy_addresses: Sequence[EthAddress] | None = None,
         chain_id: int | None = None,
         protocol_name: str | None = None,
         action_type: str | None = None,
@@ -117,7 +118,7 @@ class AllocationRepositoryPort(Protocol):
     async def list_activity_buckets(
         self,
         *,
-        prime_id: EthAddress | None = None,
+        proxy_addresses: Sequence[EthAddress] | None = None,
         chain_id: int | None = None,
         protocol_name: str | None = None,
         action_type: str | None = None,

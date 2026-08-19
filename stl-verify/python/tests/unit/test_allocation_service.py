@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.domain.entities.allocation import ChainMetadata, EthAddress, Prime, ProtocolMetadata
+from app.domain.prime_registry import alm_proxies_for_prime
 from app.services.allocation_service import AllocationService
 from tests.factories import make_direct_asset_holding, make_receipt_token_position
 
@@ -136,8 +137,9 @@ async def test_list_allocation_activity_delegates_filters_to_repository():
     )
 
     assert result == []
+    # Not a contract proxy, so it filters to itself rather than to everything.
     repo.list_allocation_activity.assert_awaited_once_with(
-        prime_id=_VALID_ADDR,
+        proxy_addresses=[_VALID_ADDR],
         chain_id=1,
         protocol_name="aave",
         action_type="in",
@@ -147,6 +149,38 @@ async def test_list_allocation_activity_delegates_filters_to_repository():
         to_timestamp=to_timestamp,
         limit=50,
     )
+
+
+@pytest.mark.asyncio
+async def test_activity_addressed_by_one_proxy_covers_the_whole_prime():
+    # A prime allocates through one proxy per chain, so a prime-wide headline
+    # needs every proxy's flows, not just the one the caller happened to use.
+    repo = AsyncMock()
+    repo.list_activity_buckets.return_value = []
+    service = AllocationService(repo)
+    proxies = alm_proxies_for_prime("spark")
+
+    await service.list_activity_buckets(
+        prime_id=EthAddress(proxies[0].address),
+        from_timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+        to_timestamp=datetime(2026, 1, 2, tzinfo=UTC),
+        bucket_seconds=3600,
+    )
+
+    passed = repo.list_activity_buckets.await_args.kwargs["proxy_addresses"]
+    assert len(passed) == len(proxies) > 1
+    assert {str(a) for a in passed} == {entry.address for entry in proxies}
+
+
+@pytest.mark.asyncio
+async def test_activity_without_a_prime_filter_stays_unscoped():
+    repo = AsyncMock()
+    repo.list_allocation_activity.return_value = []
+    service = AllocationService(repo)
+
+    await service.list_allocation_activity()
+
+    assert repo.list_allocation_activity.await_args.kwargs["proxy_addresses"] is None
 
 
 @pytest.mark.asyncio

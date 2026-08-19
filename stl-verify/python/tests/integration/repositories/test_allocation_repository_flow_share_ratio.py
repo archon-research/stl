@@ -99,7 +99,7 @@ async def repo(async_db_url: str):
 async def _single_bucket(repo: AllocationRepository, proxy_hex: str):
     """Return the one hourly bucket every seeded scenario lands its rows in."""
     buckets = await repo.list_activity_buckets(
-        prime_id=EthAddress(f"0x{proxy_hex}"),
+        proxy_addresses=[EthAddress(f"0x{proxy_hex}")],
         from_timestamp=FR_BUCKET_TS - dt.timedelta(minutes=30),
         to_timestamp=FR_BUCKET_TS + dt.timedelta(minutes=30),
         bucket_seconds=3600.0,
