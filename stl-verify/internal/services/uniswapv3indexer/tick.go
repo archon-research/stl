@@ -13,17 +13,9 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/tickbitmap"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
-)
-
-// Uniswap V3 TickMath MIN_TICK/MAX_TICK: the widest tick range any pool can
-// ever report, regardless of tickSpacing. This is the TickMath usable tick
-// range, distinct from entity's int24 wire bounds (-8388608/8388607) used by
-// Validate() elsewhere.
-const (
-	minTick = -887272
-	maxTick = 887272
 )
 
 const tickViewMethodsJSON = `[
@@ -163,40 +155,16 @@ func DecodeTick(pool RegisteredPool, tick int32, blockNumber int64, version int,
 	return result, nil
 }
 
-// floorDiv implements floored (as opposed to Go's truncated) integer division:
-// e.g. floorDiv(-1, 256) == -1, whereas Go's native -1/256 == 0. Uniswap V3's
-// tick bitmap packs ticks using floored semantics (Solidity's compressed >> 8
-// on a signed int24, an arithmetic shift which floors), so using Go's native
-// operator here would silently misplace every negative tick into the wrong
-// bitmap word.
-func floorDiv(a, b int) int {
-	q := a / b
-	if (a%b != 0) && ((a < 0) != (b < 0)) {
-		q--
-	}
-	return q
-}
+// The tick-bitmap arithmetic below is identical in v3-core and v4-core, so it
+// lives in internal/pkg/tickbitmap and both indexers delegate to it. These
+// package-local names stay as the V3 call sites.
+func floorDiv(a, b int) int { return tickbitmap.FloorDiv(a, b) }
 
-// wordBitToTick recovers the tick at a given bitmap word/bit for a pool with
-// the given tickSpacing, inverting Solidity's int16(compressed >> 8) /
-// uint8(compressed % 256) packing.
 func wordBitToTick(word int16, bit uint8, tickSpacing int) int32 {
-	compressed := int(word)*256 + int(bit)
-	return int32(compressed * tickSpacing)
+	return tickbitmap.WordBitToTick(word, bit, tickSpacing)
 }
 
-// wordBounds returns the inclusive [minWord, maxWord] range of tickBitmap
-// word positions that can hold an initialized tick for a pool with the given
-// tickSpacing, derived from Uniswap's fixed MIN_TICK/MAX_TICK. Enumerating
-// only this range (rather than every int16) keeps BaselineTicks to O(tens) of
-// calls instead of 65536.
-func wordBounds(tickSpacing int) (int16, int16) {
-	minCompressed := floorDiv(minTick, tickSpacing)
-	maxCompressed := floorDiv(maxTick, tickSpacing)
-	minWord := floorDiv(minCompressed, 256)
-	maxWord := floorDiv(maxCompressed, 256)
-	return int16(minWord), int16(maxWord)
-}
+func wordBounds(tickSpacing int) (int16, int16) { return tickbitmap.WordBounds(tickSpacing) }
 
 // baselineTickBitmapWordsPerCall bounds how many tickBitmap(int16) sub-calls
 // BaselineTicks packs into a single multicall3 aggregate call. At
