@@ -613,6 +613,23 @@ func TestPositionState(t *testing.T) {
 		mppErr(t, "vzp", body, "zp", "protocol_pos")
 	})
 
+	t.Run("two positions at one block may carry different timestamps (event-time sources)", func(t *testing.T) {
+		// block_timestamp is each source's observation time, invariant only per logical key (pre-flight
+		// check 3), NOT a table-wide function of block_number: Sky prime_debt uses synced_at, so two
+		// positions at the same block legitimately differ. Pins the Sky-enabling semantics so a future
+		// "consistency" check doesn't silently break the #627 materializer.
+		body := `SELECT * FROM (VALUES ` +
+			`(1::int,10::bigint,'idv1'::text,'aa'::text,5::numeric,'LOAN'::text,777::bigint,0::int,0::int,'2026-01-01'::timestamptz),` +
+			`(1::int,10::bigint,'idv2'::text,'aa'::text,6::numeric,'BORROW'::text,777::bigint,0::int,0::int,'2026-02-01'::timestamptz)) ` + mppCols
+		mpp(t, "vdv", body, "eventtime")
+		if got := classOf(t, "idv1", "aa"); got != "LOAN" {
+			t.Errorf("position 1 class = %q; want LOAN", got)
+		}
+		if got := classOf(t, "idv2", "aa"); got != "BORROW" {
+			t.Errorf("position 2 class = %q; want BORROW", got)
+		}
+	})
+
 	t.Run("pre-blockchain block_timestamp rejected (epoch-corruption guard)", func(t *testing.T) {
 		// A hex-parse bug writing epoch-zero would otherwise silently create a 1970 chunk on the
 		// partition column and poison time-ordered reads.

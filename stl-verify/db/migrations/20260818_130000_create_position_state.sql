@@ -56,9 +56,12 @@ CREATE TABLE IF NOT EXISTS position_state (
     block_timestamp    timestamptz NOT NULL,          -- on-chain observation time
     created_at         timestamptz NOT NULL DEFAULT now(),
     -- block_timestamp is in the PK because it is the hypertable partition column (Timescale requires the
-    -- partition column in every unique constraint). It is functionally determined by block_number, so the
-    -- 5-column key is unique over the same observations as (position_id, block_number, block_version,
-    -- processing_version) — the upsert arbiter in the helper below matches it exactly.
+    -- partition column in every unique constraint). It is invariant PER LOGICAL KEY (position_id,
+    -- block_number, block_version, processing_version) — enforced by the helper's pre-flight check (3) —
+    -- so the 5-column key is unique over the same observations as the 4-column key, and the upsert arbiter
+    -- below matches it exactly. It is NOT a table-wide function of block_number: block_timestamp is each
+    -- source's observation time, and an event-time source (Sky prime_debt uses synced_at) can legitimately
+    -- give two positions at the same block different timestamps.
     CONSTRAINT position_state_pkey PRIMARY KEY (position_id, block_number, block_version, processing_version, block_timestamp),
     -- position_id is sha256() output: enforce the 32-byte width (bytea is unlength-modified), matching
     -- position_classification (Simon review on #572).
