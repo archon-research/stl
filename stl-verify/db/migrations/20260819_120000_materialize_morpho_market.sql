@@ -113,4 +113,4 @@ $fn$;
 
 COMMENT ON FUNCTION materialize_morpho_market() IS '[Operational] VEC-402: materialize Morpho market positions into position_state + position_classification, via materialize_position_projection(position_morpho_market). Idempotent; run out of band. Returns position_state rows written.';
 
-INSERT INTO migrations (filename) VALUES ('20260724_120100_materialize_morpho_market.sql') ON CONFLICT (filename) DO NOTHING;
+INSERT INTO migrations (filename) VALUES ('20260819_120000_materialize_morpho_market.sql') ON CONFLICT (filename) DO NOTHING;
