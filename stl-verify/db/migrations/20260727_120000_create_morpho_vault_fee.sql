@@ -112,6 +112,16 @@ COMMENT ON COLUMN morpho_vault_fee.processing_version IS 'Correction version: 0=
 COMMENT ON COLUMN morpho_vault_fee.build_id IS 'Audit. Deployment build that wrote the row; never use to pick the latest row.';
 COMMENT ON COLUMN morpho_vault_fee.created_at IS 'Audit. Processing time: wall-clock the row was inserted (DEFAULT NOW()), per the schema_master canonical semantics; NOT the block timestamp (`timestamp`). Never part of any key or latest-row ordering.';
 
+-- ============================================================================
+-- Append-only enforcement: the application role may SELECT and INSERT but never
+-- mutate or delete. (Table owner stl_migrator is unaffected, as Postgres owners
+-- bypass these grants — that is the operator escape hatch for repairing a bad
+-- row. TRUNCATE is never granted by ALTER DEFAULT PRIVILEGES, so it needs no
+-- REVOKE.)
+-- ============================================================================
+
+REVOKE UPDATE, DELETE ON morpho_vault_fee FROM stl_readwrite;
+
 INSERT INTO migrations (filename)
 VALUES ('20260727_120000_create_morpho_vault_fee.sql')
 ON CONFLICT (filename) DO NOTHING;

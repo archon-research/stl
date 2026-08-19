@@ -64,6 +64,16 @@ COMMENT ON COLUMN morpho_adapter.processing_version IS 'Correction version: 0=or
 COMMENT ON COLUMN morpho_adapter.build_id IS 'Audit. Deployment build that wrote the row; never use to pick the latest row.';
 COMMENT ON COLUMN morpho_adapter.created_at IS 'Audit. Processing time: wall-clock the identity row was first written (DEFAULT NOW()), per the schema_master canonical semantics; NOT a block time — this row carries none, every block-timed fact about the adapter lives in morpho_adapter_membership. Written once; never part of any key or ordering.';
 
+-- ============================================================================
+-- Append-only enforcement: the application role may SELECT and INSERT but never
+-- mutate or delete. (Table owner stl_migrator is unaffected, as Postgres owners
+-- bypass these grants — that is the operator escape hatch for repairing a bad
+-- row. TRUNCATE is never granted by ALTER DEFAULT PRIVILEGES, so it needs no
+-- REVOKE.)
+-- ============================================================================
+
+REVOKE UPDATE, DELETE ON morpho_adapter FROM stl_readwrite;
+
 INSERT INTO migrations (filename)
 VALUES ('20260721_120000_create_morpho_adapter.sql')
 ON CONFLICT (filename) DO NOTHING;

@@ -168,6 +168,16 @@ COMMENT ON COLUMN morpho_adapter_membership.created_at IS 'Audit. Processing tim
 
 COMMENT ON VIEW morpho_adapter_current IS '[Configuration] The adapters currently in each VaultV2''s adapter set: the latest morpho_adapter_membership observation per adapter, filtered to is_member. What consumers should read instead of the log.';
 
+-- ============================================================================
+-- Append-only enforcement: the application role may SELECT and INSERT but never
+-- mutate or delete. (Table owner stl_migrator is unaffected, as Postgres owners
+-- bypass these grants — that is the operator escape hatch for repairing a bad
+-- row. TRUNCATE is never granted by ALTER DEFAULT PRIVILEGES, so it needs no
+-- REVOKE.)
+-- ============================================================================
+
+REVOKE UPDATE, DELETE ON morpho_adapter_membership FROM stl_readwrite;
+
 INSERT INTO migrations (filename)
 VALUES ('20260721_125000_create_morpho_adapter_membership.sql')
 ON CONFLICT (filename) DO NOTHING;
