@@ -49,7 +49,9 @@ var (
 func SetupTestDB(t *testing.T, baseDSN string) (pool *pgxpool.Pool, dsn string, cleanup func()) {
 	t.Helper()
 
-	pool, dsn, drop, err := setupClonedDatabase(context.Background(), baseDSN, SanitizeTestName(t.Name()))
+	pool, dsn, drop, err := setupClonedDatabase(
+		context.Background(), baseDSN, SanitizeTestName(t.Name()), connectPool,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +81,7 @@ func SetupDBForMain(baseDSN, dbName string) *pgxpool.Pool {
 	if err := claimMainDBName(dbName); err != nil {
 		log.Fatal(err)
 	}
-	pool, _, _, err := setupClonedDatabase(context.Background(), baseDSN, withProcessTag(dbName))
+	pool, _, _, err := setupClonedDatabase(context.Background(), baseDSN, withProcessTag(dbName), connectPool)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -138,9 +140,14 @@ func DatabaseDSN(baseDSN, dbName string) string {
 	return dsn
 }
 
+// connectFunc opens a pool for a DSN. setupClonedDatabase takes it rather than
+// calling connectPool directly because failing this one step is the only way to
+// reach the compensating drop below: the create and the connect are adjacent.
+type connectFunc func(ctx context.Context, dsn string) (*pgxpool.Pool, error)
+
 // setupClonedDatabase clones the template into dbName and connects to it.
 func setupClonedDatabase(
-	ctx context.Context, baseDSN, dbName string,
+	ctx context.Context, baseDSN, dbName string, connect connectFunc,
 ) (pool *pgxpool.Pool, dsn string, drop func() error, err error) {
 	template, err := ensureTemplate(ctx, baseDSN)
 	if err != nil {
@@ -175,7 +182,7 @@ func setupClonedDatabase(
 	if err != nil {
 		return nil, "", nil, err
 	}
-	pool, err = connectPool(ctx, dsn)
+	pool, err = connect(ctx, dsn)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("connect to %s: %w", dbName, err)
 	}
