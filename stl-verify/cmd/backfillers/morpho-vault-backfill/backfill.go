@@ -319,7 +319,6 @@ type backfillActivities struct {
 // re-running an overlapping range — re-reaches the same rows rather than adding
 // any.
 func (a *backfillActivities) DiscoverVaults(ctx context.Context, rng blockRange) (result discoveryResult, err error) {
-	// Classified on the way out so no return path can escape it.
 	defer func() { err = nonRetryableIfStructural(err) }()
 
 	// Deferred before the drain so it stops LAST: the drain blocks on in-flight
@@ -333,7 +332,6 @@ func (a *backfillActivities) DiscoverVaults(ctx context.Context, rng blockRange)
 		return discoveryResult{}, fmt.Errorf("discovering vaults over blocks %d-%d: %w", rng.From, rng.To, err)
 	}
 
-	// Counted after persisting, so this run's finds are already in it.
 	got.KnownV2Vaults, err = knownV2VaultCount(ctx, a.logger, a.multicaller, a.pool, a.buildID, a.cfg.chainID)
 	if err != nil {
 		return discoveryResult{}, fmt.Errorf("counting the known VaultV2 vaults: %w", err)
@@ -351,7 +349,6 @@ func (a *backfillActivities) DiscoverVaults(ctx context.Context, rng blockRange)
 // a retry may land on a worker that never ran DiscoverVaults, so reading it here
 // is what makes the activity self-contained.
 func (a *backfillActivities) ReplayPartition(ctx context.Context, work partitionWork) (events int, err error) {
-	// Classified on the way out so no return path can escape it.
 	defer func() { err = nonRetryableIfStructural(err) }()
 
 	stopHeartbeat := startHeartbeat(ctx, heartbeatInterval)
@@ -392,7 +389,8 @@ func (a *backfillActivities) ReplayPartition(ctx context.Context, work partition
 // Neither activity caps its attempts, so an unclassified structural failure
 // burns the whole ScheduleToClose envelope — 2h for a partition, 24h for
 // discovery — before an operator sees a fault only an S3 repair or a code change
-// can clear.
+// can clear. Both activities apply it in a deferred assignment to their named
+// error result, so no return path can escape it.
 func nonRetryableIfStructural(err error) error {
 	if errors.Is(err, errStructuralData) || errors.Is(err, morpho_indexer.ErrUnreplayableLog) {
 		return temporalsdk.NewNonRetryableApplicationError(err.Error(), "StructuralData", err)
