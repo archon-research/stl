@@ -35,12 +35,21 @@ function resolveEntryUrl(routeTree, url) {
     }
 
     try {
-      beforeLoad({ search: match.search, params: match.params });
+      beforeLoad({
+        cause: 'enter',
+        location: router.latestLocation,
+        matches,
+        params: match.params,
+        search: match.search,
+      });
     } catch (thrown) {
       if (!thrown?.options) {
         throw thrown;
       }
-      return { redirectTo: router.buildLocation(thrown.options).href };
+      return {
+        redirectTo:
+          thrown.options.href ?? router.buildLocation(thrown.options).href,
+      };
     }
   }
 
@@ -97,24 +106,23 @@ async function main() {
 
     assert.equal(resolve('/allocation/0xAAA').params.primeId, '0xAAA');
 
-    // A hand-edited URL degrades to "absent" rather than failing the route.
-    const bogus = resolve(
-      '/allocation/0xAAA?range=bogus&tab=bogus&category=bogus&network=1',
-    ).search;
-    assert.equal(bogus.range, undefined);
-    assert.equal(bogus.tab, undefined);
-    assert.equal(bogus.category, undefined);
-    assert.equal(bogus.network, '1');
+    // A hand-edited URL degrades to "absent" rather than failing the route, and
+    // the address bar is rewritten to the state that was actually applied.
+    assert.equal(
+      resolve('/allocation/0xAAA?range=bogus&tab=bogus&category=bogus&network=1')
+        .redirectTo,
+      '/allocation/0xAAA?network=1',
+    );
 
     // A custom range survives only as bounds that parse in the right order.
     assert.equal(
-      resolve('/allocation/0xAAA?range=custom&from=nope&to=nope').search.from,
-      undefined,
+      resolve('/allocation/0xAAA?range=custom&from=nope&to=nope').redirectTo,
+      '/allocation/0xAAA',
     );
     assert.equal(
       resolve('/allocation/0xAAA?from=2026-02-01T00:00:00Z&to=2026-01-01T00:00:00Z')
-        .search.from,
-      undefined,
+        .redirectTo,
+      '/allocation/0xAAA',
     );
     assert.equal(
       resolve('/allocation/0xAAA?from=2026-01-01T00:00:00Z&to=2026-02-01T00:00:00Z')
@@ -128,7 +136,13 @@ async function main() {
       resolve('/allocation/0xAAA?sort=symbol:desc').search.sort,
       'symbol:desc',
     );
-    assert.equal(resolve('/activities?sort=symbol:desc').search.sort, undefined);
+    assert.equal(resolve('/activities?sort=symbol:desc').redirectTo, '/activities');
+
+    // A leftover `?prime=` cannot contradict the prime in the path.
+    assert.equal(
+      resolve('/allocation/0xAAA?prime=0xBBB&network=1').redirectTo,
+      '/allocation/0xAAA?network=1',
+    );
   } finally {
     await vite.close();
   }

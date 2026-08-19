@@ -15,9 +15,66 @@ import {
   sharedSearchSchema,
 } from './search-params';
 
+// Every param here is a plain string, and the default JSON round-trip would
+// write `?network=1` as `?network=%221%22` — a shape no existing link uses.
+const parseSearch = parseSearchWith((value: string) => value);
+const stringifySearch = stringifySearchWith(JSON.stringify);
+
+type SearchRecord = Record<string, unknown>;
+
+type SearchCleanupContext = {
+  location: { pathname: string; hash: string; search: unknown };
+  matches: ReadonlyArray<{ _strictSearch: unknown }>;
+};
+
+function toSearchRecord(value: unknown): SearchRecord {
+  return typeof value === 'object' && value !== null
+    ? (value as SearchRecord)
+    : {};
+}
+
+// Compared as URL text and without regard to order: `?network=1` parses to the
+// number 1 while the schema yields "1", and a reordering renders the same data.
+function rendersSameSearch(raw: SearchRecord, applied: SearchRecord): boolean {
+  const appliedEntries = Object.entries(applied).filter(
+    ([, value]) => value !== undefined,
+  );
+
+  return (
+    appliedEntries.length === Object.keys(raw).length &&
+    appliedEntries.every(([key, value]) => String(raw[key]) === String(value))
+  );
+}
+
+// The schemas drop values they cannot honour, but the address bar keeps them, so
+// `?range=90D` reads as 90 days of data next to a chart showing the default.
+function redirectToValidatedSearch({
+  location,
+  matches,
+}: SearchCleanupContext): void {
+  // The leaf's own validated view is the whole applied set: each route's
+  // `_strictSearch` already folds in every parent schema.
+  // eslint-disable-next-line no-underscore-dangle -- the router names the field
+  const applied = toSearchRecord(matches[matches.length - 1]?._strictSearch);
+
+  if (rendersSameSearch(toSearchRecord(location.search), applied)) {
+    return;
+  }
+
+  const hash = location.hash ? `#${location.hash}` : '';
+
+  throw redirect({
+    href: `${location.pathname}${stringifySearch(applied)}${hash}`,
+    replace: true,
+  });
+}
+
 const rootRoute = createRootRoute({
   validateSearch: sharedSearchSchema,
   component: App,
+  beforeLoad: (context) => {
+    redirectToValidatedSearch(context);
+  },
 });
 
 type EntrySearch = z.infer<typeof sharedSearchSchema>;
@@ -80,9 +137,23 @@ const allocationIndexRoute = createRoute({
   beforeLoad: ({ search }) => redirectToPrimePath(search),
 });
 
+// The prime rides in the path here, so a surviving `?prime=` would name a second
+// one that nothing reads — and it may disagree with the prime on screen.
 const allocationPrimeRoute = createRoute({
   getParentRoute: () => allocationRoute,
   path: '$primeId',
+  beforeLoad: ({ params, search }) => {
+    if (!search.prime) {
+      return;
+    }
+
+    throw redirect({
+      to: '/allocation/$primeId',
+      params,
+      search: withoutLegacyPrime(search),
+      replace: true,
+    });
+  },
 });
 
 const activitiesRoute = createRoute({
@@ -102,10 +173,8 @@ export const router = createRouter({
   routeTree,
   // "/activities/" must resolve like "/activities" on hosts that append a slash.
   trailingSlash: 'never',
-  // Every param here is a plain string, and the default JSON round-trip would
-  // write `?network=1` as `?network=%221%22` — a shape no existing link uses.
-  parseSearch: parseSearchWith((value) => value),
-  stringifySearch: stringifySearchWith(JSON.stringify),
+  parseSearch,
+  stringifySearch,
 });
 
 declare module '@tanstack/react-router' {
