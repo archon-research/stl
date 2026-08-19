@@ -60,6 +60,10 @@ class AllocationService:
         given would report a fraction of the prime's flows against a prime-wide
         headline. An address outside the contract is passed through unchanged so
         an unknown proxy still filters to itself rather than to everything.
+
+        Never returns an empty list: downstream an empty filter is indistinguishable
+        from no filter, so a prime with no ALM proxies would widen to every prime's
+        activity instead of narrowing to none.
         """
         if prime_id is None:
             return None
@@ -68,7 +72,8 @@ class AllocationService:
         if prime_name is None:
             return [prime_id]
 
-        return [EthAddress(entry.address) for entry in alm_proxies_for_prime(prime_name)]
+        proxies = [EthAddress(entry.address) for entry in alm_proxies_for_prime(prime_name)]
+        return proxies or [prime_id]
 
     async def list_allocation_activity(
         self,

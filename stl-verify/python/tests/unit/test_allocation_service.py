@@ -1,10 +1,11 @@
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from app.domain.entities.allocation import ChainMetadata, EthAddress, Prime, ProtocolMetadata
 from app.domain.prime_registry import alm_proxies_for_prime
+from app.services import allocation_service
 from app.services.allocation_service import AllocationService
 from tests.factories import make_direct_asset_holding, make_receipt_token_position
 
@@ -170,6 +171,23 @@ async def test_activity_addressed_by_one_proxy_covers_the_whole_prime():
     passed = repo.list_activity_buckets.await_args.kwargs["proxy_addresses"]
     assert len(passed) == len(proxies) > 1
     assert {str(a) for a in passed} == {entry.address for entry in proxies}
+
+
+@pytest.mark.asyncio
+async def test_a_prime_with_no_alm_proxies_narrows_rather_than_widening():
+    # An empty filter reads downstream as no filter, which would serve every
+    # prime's activity under one prime's heading.
+    repo = AsyncMock()
+    repo.list_allocation_activity.return_value = []
+    service = AllocationService(repo)
+
+    with (
+        patch.object(allocation_service, "prime_name_for", return_value="spark"),
+        patch.object(allocation_service, "alm_proxies_for_prime", return_value=()),
+    ):
+        await service.list_allocation_activity(prime_id=_VALID_ADDR)
+
+    assert repo.list_allocation_activity.await_args.kwargs["proxy_addresses"] == [_VALID_ADDR]
 
 
 @pytest.mark.asyncio
