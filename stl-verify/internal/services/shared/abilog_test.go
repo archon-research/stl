@@ -200,6 +200,32 @@ func TestGetBigIntField(t *testing.T) {
 	})
 }
 
+func TestGetHashField(t *testing.T) {
+	h := common.HexToHash("0x00000000000000000000000000000000000000000000000000000000000000ff")
+
+	t.Run("present and correct type", func(t *testing.T) {
+		got, err := GetHashField(map[string]any{"h": [32]byte(h)}, "h")
+		if err != nil {
+			t.Fatalf("GetHashField: %v", err)
+		}
+		if got != h {
+			t.Errorf("got %s, want %s", got, h)
+		}
+	})
+
+	t.Run("missing field errors", func(t *testing.T) {
+		if _, err := GetHashField(map[string]any{}, "h"); err == nil {
+			t.Fatal("expected error for missing field")
+		}
+	})
+
+	t.Run("wrong type errors", func(t *testing.T) {
+		if _, err := GetHashField(map[string]any{"h": h}, "h"); err == nil {
+			t.Fatal("expected error for a common.Hash rather than the [32]byte go-ethereum decodes into")
+		}
+	})
+}
+
 func TestGetBigIntSliceField(t *testing.T) {
 	vs := []*big.Int{big.NewInt(1), big.NewInt(2)}
 

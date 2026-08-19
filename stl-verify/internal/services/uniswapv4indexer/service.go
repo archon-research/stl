@@ -1,6 +1,7 @@
 package uniswapv4indexer
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
@@ -19,8 +20,7 @@ import (
 )
 
 // UniswapV4ServiceDeps groups the UniswapV4Service's constructor arguments.
-// Telemetry is optional (nil = no-op); Pools may be nil/empty (a worker with no
-// registered pools yet is a valid, if quiet, boot state).
+// Telemetry is optional (nil = no-op); every other field is required.
 type UniswapV4ServiceDeps struct {
 	Pools       []RegisteredPool
 	Multicaller outbound.Multicaller
@@ -42,10 +42,9 @@ type UniswapV4ServiceDeps struct {
 // disables its periodic-sweep half, see NewUniswapV4Service), and baselineSeen
 // (which pools' initialized ticks have already been enumerated once).
 type UniswapV4Service struct {
-	poolsByID map[common.Hash]RegisteredPool
-	pools     []RegisteredPool // ordered for deterministic iteration
-	// poolManager is the single contract every watched pool lives in, so log
-	// routing filters on one address rather than a per-pool index.
+	poolsByID   map[common.Hash]RegisteredPool
+	poolsByRow  map[int64]RegisteredPool
+	pools       []RegisteredPool // ordered for deterministic iteration
 	poolManager common.Address
 	multicaller outbound.Multicaller
 	repo        outbound.UniswapV4Repository
@@ -59,11 +58,10 @@ type UniswapV4Service struct {
 	baselineSeen map[int64]bool
 }
 
-// validate checks that every required dependency is present, so
-// NewUniswapV4Service reads as its build steps rather than a wall of nil
-// guards.
 func (d UniswapV4ServiceDeps) validate() error {
 	switch {
+	case len(d.Pools) == 0:
+		return fmt.Errorf("at least one pool is required")
 	case d.Multicaller == nil:
 		return fmt.Errorf("multicaller is required")
 	case d.Repo == nil:
@@ -72,6 +70,8 @@ func (d UniswapV4ServiceDeps) validate() error {
 		return fmt.Errorf("eventWriter is required")
 	case d.TxManager == nil:
 		return fmt.Errorf("txManager is required")
+	case d.ChainID <= 0:
+		return fmt.Errorf("chainID must be positive, got %d", d.ChainID)
 	case d.Logger == nil:
 		return fmt.Errorf("logger is required")
 	}
@@ -79,9 +79,9 @@ func (d UniswapV4ServiceDeps) validate() error {
 }
 
 // NewUniswapV4Service validates deps and builds a UniswapV4Service. It refuses
-// to boot on a registry whose PoolIds disagree with their keys (see
-// ValidatePoolKeys) or that spans more than one PoolManager, since both would
-// silently produce an indexer that never matches a log.
+// to boot on an empty registry, on a registry whose PoolIds disagree with their
+// keys (see ValidatePoolKeys), or on one spanning more than one PoolManager:
+// each would silently produce an indexer that never matches a log.
 //
 // The snapshot tracker is built with sweepBlocks=0: V4 pool state is
 // piecewise-constant between touches — every field this indexer snapshots
@@ -95,13 +95,14 @@ func NewUniswapV4Service(deps UniswapV4ServiceDeps) (*UniswapV4Service, error) {
 	if err := ValidatePoolKeys(deps.Pools); err != nil {
 		return nil, err
 	}
-	poolManager, err := singletonAddresses(deps.Pools)
+	poolManager, err := poolManagerFor(deps.Pools)
 	if err != nil {
 		return nil, err
 	}
 
 	return &UniswapV4Service{
 		poolsByID:    indexPoolsByHash(deps.Pools),
+		poolsByRow:   indexPoolsByRowID(deps.Pools),
 		pools:        deps.Pools,
 		poolManager:  poolManager,
 		multicaller:  deps.Multicaller,
@@ -116,16 +117,11 @@ func NewUniswapV4Service(deps UniswapV4ServiceDeps) (*UniswapV4Service, error) {
 	}, nil
 }
 
-// singletonAddresses returns the one PoolManager address the registry shares.
-// One worker serves one chain's PoolManager, and the StateView is that
-// deployment's periphery: a registry mixing either address would mean two
-// deployments in one worker, which the log filter and the state reads both
-// silently mis-handle. An empty registry yields the zero address, which matches
-// no log.
-func singletonAddresses(pools []RegisteredPool) (common.Address, error) {
-	if len(pools) == 0 {
-		return common.Address{}, nil
-	}
+// poolManagerFor returns the one PoolManager address the registry shares. One
+// worker serves one chain's PoolManager, and the StateView is that deployment's
+// periphery: a registry mixing either address would mean two deployments in one
+// worker, which the log filter and the state reads both silently mis-handle.
+func poolManagerFor(pools []RegisteredPool) (common.Address, error) {
 	first := pools[0]
 	for _, pool := range pools[1:] {
 		if pool.PoolManager != first.PoolManager {
@@ -148,6 +144,16 @@ func indexPoolsByHash(pools []RegisteredPool) map[common.Hash]RegisteredPool {
 	return byHash
 }
 
+// indexPoolsByRowID indexes by the uniswap_v4_pool surrogate id, which is how
+// persisted fact rows name a pool.
+func indexPoolsByRowID(pools []RegisteredPool) map[int64]RegisteredPool {
+	byRow := make(map[int64]RegisteredPool, len(pools))
+	for _, p := range pools {
+		byRow[p.ID] = p
+	}
+	return byRow
+}
+
 // BlockHandler returns the dexconsumer.BlockHandler for this service. It
 // records uniswap_v4_errors_total once, at this boundary, on any non-nil
 // handler return: handleBlock's inner steps wrap their errors with stage
@@ -163,7 +169,7 @@ func (s *UniswapV4Service) BlockHandler() dexconsumer.BlockHandler {
 	}
 }
 
-// handleBlock decodes every receipt in the block, snapshots the touched pools'
+// handleBlock decodes every receipt in the block, snapshots the due pools'
 // state and tick rows via multicall (before opening the transaction), and
 // persists swaps, liquidity events, pool events, state, ticks, and captured
 // logs in one transaction. Returning a non-nil error leaves the block for SQS
@@ -174,28 +180,21 @@ func (s *UniswapV4Service) handleBlock(ctx context.Context, event outbound.Block
 	ver := event.Version
 	ts := time.Unix(event.BlockTimestamp, 0).UTC()
 
-	// common.HexToHash never errors: an empty string would silently become the
-	// zero hash and reach the RPC as a real eth_call. Both producers always
-	// populate BlockHash (it's part of the dedup key), so this guards a
-	// malformed message rather than an expected path.
-	if event.BlockHash == "" {
-		return fmt.Errorf("block %d v%d: missing block hash on event", bn, ver)
+	blockHash, err := event.ParsedBlockHash()
+	if err != nil {
+		return err
 	}
-	blockHash := common.HexToHash(event.BlockHash)
 
 	acc, err := s.decodeBlockEvents(ctx, receipts, bn, ver, ts)
 	if err != nil {
 		return err
 	}
 
-	dueSet, err := dexconsumer.DueSet(s.tracker, s.pools, acc.touchedIDs, bn, ver)
+	dueSet, err := s.dueSetForBlock(ctx, acc.touchedIDs, bn, ver)
 	if err != nil {
 		return err
 	}
 
-	// Read pool state and tick data via multicall BEFORE opening the transaction
-	// so archive-RPC latency never pins a pgx connection (connection-pool
-	// exhaustion is a stall cause).
 	states, ticks, baselined, err := s.snapshotDueSet(ctx, dueSet, acc, blockHash, bn, ver, ts)
 	if err != nil {
 		return err
@@ -214,15 +213,56 @@ func (s *UniswapV4Service) handleBlock(ctx context.Context, event outbound.Block
 
 	s.markSnapshotted(dueSet, baselined, bn, ver)
 	// Recorded only after a successful commit, so the alerts compare pools this
-	// block touched against the rows that same block persisted. Not len(dueSet)
-	// — see RecordPoolsTouched.
+	// block touched against the rows that same block persisted.
 	s.telemetry.RecordPoolsTouched(ctx, len(acc.touchedIDs))
 	s.telemetry.RecordStateRows(ctx, int(stateRows))
 	return nil
 }
 
-// blockAccumulators holds every event decoded from a single block's receipts,
-// keyed for the downstream due-set and write-building steps.
+// dueSetForBlock selects the pools this block must snapshot: everything
+// dexconsumer.DueSet picks, plus — on a reorg redelivery — every pool that
+// already has a state row at this height. The tracker lives only in memory, so
+// after a restart DueSet's reorg rule sees nothing and the orphaned fork's
+// (N, v0) rows would stay canonical-latest forever.
+func (s *UniswapV4Service) dueSetForBlock(ctx context.Context, touched map[int64]bool, bn int64, ver int) ([]RegisteredPool, error) {
+	due, err := dexconsumer.DueSet(s.tracker, s.pools, touched, bn, ver)
+	if err != nil {
+		return nil, err
+	}
+	if ver == 0 {
+		return due, nil
+	}
+
+	priorIDs, err := s.repo.PoolIDsWithStateAtBlock(ctx, bn)
+	if err != nil {
+		return nil, fmt.Errorf("reading pools already snapshotted at block %d: %w", bn, err)
+	}
+	return s.withRegisteredPools(due, priorIDs)
+}
+
+// withRegisteredPools adds the pools named by ids that due does not already
+// carry, restoring the ascending-ID order the snapshot loop and the tests rely
+// on.
+func (s *UniswapV4Service) withRegisteredPools(due []RegisteredPool, ids []int64) ([]RegisteredPool, error) {
+	present := make(map[int64]bool, len(due))
+	for _, pool := range due {
+		present[pool.ID] = true
+	}
+	for _, id := range ids {
+		if present[id] {
+			continue
+		}
+		pool, known := s.poolsByRow[id]
+		if !known {
+			return nil, fmt.Errorf("pool %d has uniswap_v4_pool_state rows but is absent from the registry: registry bug", id)
+		}
+		present[id] = true
+		due = append(due, pool)
+	}
+	slices.SortFunc(due, func(a, b RegisteredPool) int { return cmp.Compare(a.ID, b.ID) })
+	return due, nil
+}
+
 type blockAccumulators struct {
 	swaps      []*entity.UniswapV4Swap
 	liquidity  []*entity.UniswapV4LiquidityEvent
@@ -238,17 +278,15 @@ func (acc blockAccumulators) hasEvents() bool {
 
 // decodeBlockEvents decodes each receipt once against the whole registry — the
 // PoolManager is a single contract, so there is no per-pool pass — and
-// accumulates the typed events plus the touched-pool-ID set. ctx is checked at
-// the start of each receipt to honour cancellation without silently acking a
-// partially-decoded block.
+// accumulates the typed events plus the touched-pool-ID set.
 func (s *UniswapV4Service) decodeBlockEvents(ctx context.Context, receipts []shared.TransactionReceipt, bn int64, ver int, ts time.Time) (blockAccumulators, error) {
 	acc := blockAccumulators{
 		touchedIDs: make(map[int64]bool),
 		liqByPool:  make(map[int64][]*entity.UniswapV4LiquidityEvent),
 	}
 	for _, receipt := range receipts {
-		// Bail early (with an error, never a silent ack) if the handler-timeout
-		// budget or a shutdown cancelled ctx, rather than decoding the rest.
+		// Bail with an error, never a silent ack, when the handler-timeout budget
+		// or a shutdown cancelled ctx mid-block.
 		if err := ctx.Err(); err != nil {
 			return blockAccumulators{}, err
 		}
@@ -270,9 +308,10 @@ func (s *UniswapV4Service) decodeBlockEvents(ctx context.Context, receipts []sha
 
 // snapshotDueSet reads each due pool's state and tick rows via multicall,
 // pinned to blockHash so the read cannot silently answer from a post-reorg
-// fork. It must run BEFORE the DB transaction opens (see handleBlock doc).
-// Returns the pool IDs whose baseline ticks were read this call, so the caller
-// can mark baselineSeen only after a successful persist.
+// fork. It must run BEFORE the DB transaction opens, so archive-RPC latency
+// never pins a pgx connection (pool exhaustion is a stall cause). Returns the
+// pool IDs whose baseline ticks were read this call, so the caller can mark
+// baselineSeen only after a successful persist.
 func (s *UniswapV4Service) snapshotDueSet(ctx context.Context, dueSet []RegisteredPool, acc blockAccumulators, blockHash common.Hash, bn int64, ver int, ts time.Time) ([]*entity.UniswapV4PoolState, []*entity.UniswapV4Tick, []int64, error) {
 	var states []*entity.UniswapV4PoolState
 	var ticks []*entity.UniswapV4Tick
@@ -305,17 +344,16 @@ func (s *UniswapV4Service) snapshotDueSet(ctx context.Context, dueSet []Register
 // silently skipping it forever.
 //
 // On a reorg redelivery (ver > 0) it additionally re-reads every tick that
-// already has a row at this block height (VEC-487). The DueSet reorg rule
-// re-snapshots a pool at (N, v_new) even when the new fork's receipts don't
-// touch it, but TouchedTicks is then empty and the baseline (bitmap scan) only
-// enumerates ticks still initialized on v_new — so a tick initialized only on
-// the orphaned fork would never be re-read and its stale (N, v0) row would stay
-// canonical-latest forever. Re-reading the prior version's ticks at blockHash
-// produces a superseding (N, v_new) row for each: a now-cleared tick reads back
-// zeroed (getTickInfo never reverts), a still-initialized one gets its v_new
-// value. The read runs before the write tx opens (see handleBlock doc).
+// already has a row at this block height. dueSetForBlock re-snapshots a pool at
+// (N, v_new) even when the new fork's receipts don't touch it, but TouchedTicks
+// is then empty and the baseline (bitmap scan) only enumerates ticks still
+// initialized on v_new — so a tick initialized only on the orphaned fork would
+// never be re-read and its stale (N, v0) row would stay canonical-latest
+// forever. Re-reading the prior version's ticks at blockHash produces a
+// superseding (N, v_new) row for each: a now-cleared tick reads back zeroed
+// (getTickInfo never reverts), a still-initialized one gets its v_new value.
 func (s *UniswapV4Service) snapshotPoolTicks(ctx context.Context, pool RegisteredPool, blockHash common.Hash, bn int64, ver int, ts time.Time, liqEvents []*entity.UniswapV4LiquidityEvent) ([]*entity.UniswapV4Tick, bool, error) {
-	ticksToRead := TouchedTicks(DecodedEvents{LiquidityEvents: liqEvents})
+	ticksToRead := TouchedTicks(liqEvents)
 
 	isFirstSeen := !s.baselineSeen[pool.ID]
 	if isFirstSeen {
@@ -413,10 +451,8 @@ func mergeTickSets(a, b []int32) []int32 {
 	return out
 }
 
-// buildBlockWrites converts decoded accumulators and snapshots into the typed
-// input structs that the repo and event writer expect. Called before the
-// transaction opens so any future conversion errors would fail fast without
-// touching the connection pool.
+// buildBlockWrites runs before the transaction opens, so any future conversion
+// error fails fast without holding a pooled connection.
 func (s *UniswapV4Service) buildBlockWrites(acc blockAccumulators, states []*entity.UniswapV4PoolState, ticks []*entity.UniswapV4Tick, bn int64, ver int, ts time.Time) (outbound.UniswapV4BlockWrites, []dexconsumer.ProtocolEventInput) {
 	writes := outbound.UniswapV4BlockWrites{
 		States:          states,
@@ -428,9 +464,8 @@ func (s *UniswapV4Service) buildBlockWrites(acc blockAccumulators, states []*ent
 	return writes, dexconsumer.ToProtocolEventInputs(acc.captured, s.chainID, bn, ver, ts)
 }
 
-// persistBlock saves the block writes and captured events in a single DB
-// transaction via dexconsumer.PersistBlock. Returns the number of state rows
-// actually inserted (may be zero on an idempotent ON CONFLICT DO NOTHING replay).
+// persistBlock returns the number of state rows actually inserted, which is
+// zero on an idempotent ON CONFLICT DO NOTHING replay.
 func (s *UniswapV4Service) persistBlock(ctx context.Context, writes outbound.UniswapV4BlockWrites, capturedIns []dexconsumer.ProtocolEventInput, bn int64) (int64, error) {
 	return dexconsumer.PersistBlock(ctx, s.txMgr, s.eventWriter, func(ctx context.Context, tx pgx.Tx) (int64, error) {
 		rows, err := s.repo.SaveBlock(ctx, tx, writes)

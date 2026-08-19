@@ -20,13 +20,13 @@ type RegisteredPool struct {
 	PoolManager       common.Address
 	StateView         common.Address
 	PoolIDHash        common.Hash
-	Currency0         common.Address // address(0) is native ETH
+	Currency0         common.Address
 	Currency1         common.Address
 	Currency0Decimals int
 	Currency1Decimals int
-	Fee               int // 0x800000 flags a dynamic LP fee
+	Fee               int
 	TickSpacing       int
-	Hooks             common.Address // zero address means the pool has no hooks
+	Hooks             common.Address
 	DeployBlock       int64
 }
 
@@ -36,11 +36,10 @@ type RegisteredPool struct {
 func (p RegisteredPool) PoolID() int64         { return p.ID }
 func (p RegisteredPool) DeployBlockNum() int64 { return p.DeployBlock }
 
-// DecodedEvents holds the typed entities and the capture-net mirror produced by
-// decoding a single transaction receipt against the whole pool registry.
-// Captured is a superset of Swaps, LiquidityEvents, and PoolEvents plus the
-// singleton's non-pool-keyed governance logs; it deliberately excludes logs
-// belonging to unregistered pools (see DecodeEvents).
+// DecodedEvents holds one receipt's typed entities and their capture-net
+// mirror. Captured is a superset of the typed slices plus the singleton's
+// non-pool-keyed governance logs; it deliberately excludes logs belonging to
+// unregistered pools (see DecodeEvents).
 type DecodedEvents struct {
 	Swaps           []*entity.UniswapV4Swap
 	LiquidityEvents []*entity.UniswapV4LiquidityEvent

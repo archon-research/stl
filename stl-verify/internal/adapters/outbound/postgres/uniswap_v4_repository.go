@@ -66,8 +66,8 @@ const loadUniswapV4PoolsSQL = `
 	    ORDER BY processing_version DESC
 	    LIMIT 1
 	) m ON TRUE
-	JOIN token t0 ON t0.id = p.currency0_token_id
-	JOIN token t1 ON t1.id = p.currency1_token_id
+	JOIN token t0 ON t0.id = p.currency0_token_id AND t0.chain_id = $1
+	JOIN token t1 ON t1.id = p.currency1_token_id AND t1.chain_id = $1
 	ORDER BY p.id`
 
 // LoadPools returns the current version of every registered pool on chainID,
@@ -137,7 +137,7 @@ func scanUniswapV4PoolRow(rows pgx.Rows, chainID int64) (outbound.UniswapV4PoolR
 		ProtocolID:        *protocolID,
 		PoolManager:       common.BytesToAddress(poolManager),
 		StateView:         common.BytesToAddress(stateView),
-		PoolID:            common.BytesToHash(onchainPoolID),
+		PoolIDHash:        common.BytesToHash(onchainPoolID),
 		Currency0:         common.BytesToAddress(currency0),
 		Currency1:         common.BytesToAddress(currency1),
 		Currency0Decimals: currency0Decimals,
@@ -203,32 +203,21 @@ type v4TickConverted struct {
 // tx, except ticks (append-on-change, see writeTicks), and returns the count of
 // state rows inserted.
 func (r *UniswapV4Repository) SaveBlock(ctx context.Context, tx pgx.Tx, w outbound.UniswapV4BlockWrites) (stateRows int64, err error) {
-	states, err := convertV4States(w.States)
-	if err != nil {
-		return 0, err
-	}
-	swaps, err := convertV4Swaps(w.Swaps)
-	if err != nil {
-		return 0, err
-	}
-	liqs, err := convertV4LiquidityEvents(w.LiquidityEvents)
+	rows, err := convertV4BlockWrites(w)
 	if err != nil {
 		return 0, err
 	}
 
 	batch := &pgx.Batch{}
-	queueUniswapV4Batch(batch, states, swaps, liqs, w.PoolEvents, r.buildID)
+	queueUniswapV4Batch(batch, rows, r.buildID)
 
-	stateRows, err = sendUniswapV4Batch(ctx, tx, batch, states, swaps, liqs, w.PoolEvents)
+	stateRows, err = sendUniswapV4Batch(ctx, tx, batch, rows)
 	if err != nil {
 		return stateRows, err
 	}
 
-	// Ticks are written after the batch reader is fully closed: pgx forbids
-	// issuing new queries on a connection while a batch result reader is open,
-	// and each tick insert depends on a prior read of the latest row for that
-	// (pool_id, tick) slot (a read-then-write race ON CONFLICT cannot guard,
-	// ADR-0002 §3).
+	// pgx forbids new queries while a batch result reader is open, and each tick
+	// insert depends on a prior read of its slot (see writeTicks).
 	if err := r.writeTicks(ctx, tx, w.Ticks); err != nil {
 		return stateRows, err
 	}
@@ -236,11 +225,42 @@ func (r *UniswapV4Repository) SaveBlock(ctx context.Context, tx pgx.Tx, w outbou
 	return stateRows, nil
 }
 
+// PoolIDsWithStateAtBlock returns the pool ids that already have a
+// uniswap_v4_pool_state row at blockNumber, ascending. A reorg redelivery
+// unions them into its due set so the orphaned fork's snapshot is superseded
+// even when the in-memory tracker was lost to a restart. Queries the connection
+// pool directly (committed rows), not a write transaction.
+func (r *UniswapV4Repository) PoolIDsWithStateAtBlock(ctx context.Context, blockNumber int64) ([]int64, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT DISTINCT pool_id FROM uniswap_v4_pool_state
+		 WHERE block_number = $1
+		 ORDER BY pool_id`,
+		blockNumber,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("querying pools with state at block %d: %w", blockNumber, err)
+	}
+	defer rows.Close()
+
+	var poolIDs []int64
+	for rows.Next() {
+		var poolID int64
+		if err := rows.Scan(&poolID); err != nil {
+			return nil, fmt.Errorf("scanning pool id with state at block %d: %w", blockNumber, err)
+		}
+		poolIDs = append(poolIDs, poolID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating pools with state at block %d: %w", blockNumber, err)
+	}
+	return poolIDs, nil
+}
+
 // TicksForPoolAtBlock returns the distinct tick positions with a row for pool at
 // blockNumber, ascending. A reorg redelivery uses this to re-read exactly the
 // ticks a prior version wrote at this height and supersede them at the new
-// version (VEC-487). Queries the connection pool directly (committed rows), not
-// a write transaction.
+// version. Queries the connection pool directly (committed rows), not a write
+// transaction.
 func (r *UniswapV4Repository) TicksForPoolAtBlock(ctx context.Context, poolID int64, blockNumber int64) ([]int32, error) {
 	rows, err := r.pool.Query(ctx,
 		`SELECT DISTINCT tick FROM uniswap_v4_tick
@@ -332,17 +352,59 @@ func convertV4LiquidityEvents(events []*entity.UniswapV4LiquidityEvent) ([]v4Liq
 	return out, nil
 }
 
-// queueUniswapV4Batch adds all converted rows to batch in the canonical order
-// that sendUniswapV4Batch expects to drain them: states, swaps, liquidity
-// events, pool events.
-func queueUniswapV4Batch(
-	batch *pgx.Batch,
-	states []v4StateConverted,
-	swaps []v4SwapConverted,
-	liqs []v4LiquidityEventConverted,
-	poolEvents []*entity.UniswapV4PoolEvent,
-	buildID buildregistry.BuildID,
-) {
+// v4BatchRows is one block's converted rows in the canonical batch order that
+// sendUniswapV4Batch drains them in.
+type v4BatchRows struct {
+	states     []v4StateConverted
+	swaps      []v4SwapConverted
+	liqs       []v4LiquidityEventConverted
+	poolEvents []*entity.UniswapV4PoolEvent
+}
+
+func convertV4BlockWrites(w outbound.UniswapV4BlockWrites) (v4BatchRows, error) {
+	states, err := convertV4States(w.States)
+	if err != nil {
+		return v4BatchRows{}, err
+	}
+	swaps, err := convertV4Swaps(w.Swaps)
+	if err != nil {
+		return v4BatchRows{}, err
+	}
+	liqs, err := convertV4LiquidityEvents(w.LiquidityEvents)
+	if err != nil {
+		return v4BatchRows{}, err
+	}
+	return v4BatchRows{states: states, swaps: swaps, liqs: liqs, poolEvents: w.PoolEvents}, nil
+}
+
+// v4BatchSection names one contiguous run of queued statements so the drain can
+// walk the batch without re-listing every slice.
+type v4BatchSection struct {
+	name            string
+	count           int
+	countsStateRows bool
+}
+
+// sections must stay in the order queueUniswapV4Batch queues them: pgx returns
+// batch results positionally, so a reordering here silently mis-attributes both
+// the row counts and the error messages.
+func (rows v4BatchRows) sections() []v4BatchSection {
+	return []v4BatchSection{
+		{name: "state", count: len(rows.states), countsStateRows: true},
+		{name: "swap", count: len(rows.swaps)},
+		{name: "liquidity event", count: len(rows.liqs)},
+		{name: "pool event", count: len(rows.poolEvents)},
+	}
+}
+
+func queueUniswapV4Batch(batch *pgx.Batch, rows v4BatchRows, buildID buildregistry.BuildID) {
+	queueV4States(batch, rows.states, buildID)
+	queueV4Swaps(batch, rows.swaps, buildID)
+	queueV4LiquidityEvents(batch, rows.liqs, buildID)
+	queueV4PoolEvents(batch, rows.poolEvents, buildID)
+}
+
+func queueV4States(batch *pgx.Batch, states []v4StateConverted, buildID buildregistry.BuildID) {
 	for _, c := range states {
 		s := c.s
 		batch.Queue(
@@ -357,7 +419,9 @@ func queueUniswapV4Batch(
 			c.feeGrowthGlobal0, c.feeGrowthGlobal1, int(buildID),
 		)
 	}
+}
 
+func queueV4Swaps(batch *pgx.Batch, swaps []v4SwapConverted, buildID buildregistry.BuildID) {
 	for _, c := range swaps {
 		s := c.s
 		batch.Queue(
@@ -372,7 +436,9 @@ func queueUniswapV4Batch(
 			c.sqrtPriceX96, c.liquidity, s.Tick, s.Fee, int(buildID),
 		)
 	}
+}
 
+func queueV4LiquidityEvents(batch *pgx.Batch, liqs []v4LiquidityEventConverted, buildID buildregistry.BuildID) {
 	for _, c := range liqs {
 		e := c.e
 		batch.Queue(
@@ -387,7 +453,9 @@ func queueUniswapV4Batch(
 			c.liquidityDelta, e.Salt.Bytes(), int(buildID),
 		)
 	}
+}
 
+func queueV4PoolEvents(batch *pgx.Batch, poolEvents []*entity.UniswapV4PoolEvent, buildID buildregistry.BuildID) {
 	for _, e := range poolEvents {
 		batch.Queue(
 			`INSERT INTO uniswap_v4_pool_event
@@ -405,45 +473,23 @@ func queueUniswapV4Batch(
 // order, returning the count of state rows inserted. The batch reader is always
 // closed before returning so the caller may issue further queries on tx
 // (writeTicks runs after this).
-func sendUniswapV4Batch(
-	ctx context.Context,
-	tx pgx.Tx,
-	batch *pgx.Batch,
-	states []v4StateConverted,
-	swaps []v4SwapConverted,
-	liqs []v4LiquidityEventConverted,
-	poolEvents []*entity.UniswapV4PoolEvent,
-) (stateRows int64, err error) {
+func sendUniswapV4Batch(ctx context.Context, tx pgx.Tx, batch *pgx.Batch, rows v4BatchRows) (stateRows int64, err error) {
 	br := tx.SendBatch(ctx, batch)
 	defer func() {
-		if closeErr := br.Close(); closeErr != nil && err == nil {
-			err = fmt.Errorf("closing uniswap_v4 SaveBlock batch: %w", closeErr)
+		if closeErr := br.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("closing uniswap_v4 SaveBlock batch: %w", closeErr))
 		}
 	}()
 
-	for i := range states {
-		tag, readErr := br.Exec()
-		if readErr != nil {
-			return stateRows, fmt.Errorf("batch state %d: %w", i, readErr)
-		}
-		stateRows += tag.RowsAffected()
-	}
-
-	for i := range swaps {
-		if _, readErr := br.Exec(); readErr != nil {
-			return stateRows, fmt.Errorf("batch swap %d: %w", i, readErr)
-		}
-	}
-
-	for i := range liqs {
-		if _, readErr := br.Exec(); readErr != nil {
-			return stateRows, fmt.Errorf("batch liquidity event %d: %w", i, readErr)
-		}
-	}
-
-	for i := range poolEvents {
-		if _, readErr := br.Exec(); readErr != nil {
-			return stateRows, fmt.Errorf("batch pool event %d: %w", i, readErr)
+	for _, section := range rows.sections() {
+		for i := range section.count {
+			tag, readErr := br.Exec()
+			if readErr != nil {
+				return stateRows, fmt.Errorf("batch %s %d: %w", section.name, i, readErr)
+			}
+			if section.countsStateRows {
+				stateRows += tag.RowsAffected()
+			}
 		}
 	}
 
@@ -459,7 +505,7 @@ func sendUniswapV4Batch(
 //
 // Each phase is one round-trip for the whole tick set — locks in a single
 // unnest() Exec, latest-row reads in a single DISTINCT ON query, inserts in a
-// single pgx.Batch — because a dense pool's first touch covers O(100+) ticks
+// single pgx.Batch — because a dense pool's first touch covers O(10³) ticks
 // and per-tick round-trips would hold the advisory locks for all of them.
 //
 // Ticks in one block are deduplicated per (pool_id, tick) upstream, so each key
@@ -469,12 +515,17 @@ func (r *UniswapV4Repository) writeTicks(ctx context.Context, tx pgx.Tx, ticks [
 		return nil
 	}
 
+	blockNumber, err := sharedBlockNumber(ticks)
+	if err != nil {
+		return err
+	}
+
 	keys := distinctSortedV4TickKeys(ticks)
 	if err := lockTickKeysV4(ctx, tx, keys); err != nil {
 		return err
 	}
 
-	latest, err := readLatestTicksV4(ctx, tx, keys)
+	latest, err := readLatestTicksV4(ctx, tx, keys, blockNumber)
 	if err != nil {
 		return err
 	}
@@ -482,11 +533,24 @@ func (r *UniswapV4Repository) writeTicks(ctx context.Context, tx pgx.Tx, ticks [
 	return r.insertChangedTicksV4(ctx, tx, ticks, latest)
 }
 
+// sharedBlockNumber returns the block every tick in the write belongs to. One
+// SaveBlock is one block, and readLatestTicksV4 compares against rows at or
+// below that height, so a mixed batch would silently compare across blocks.
+func sharedBlockNumber(ticks []*entity.UniswapV4Tick) (int64, error) {
+	blockNumber := ticks[0].BlockNumber
+	for _, t := range ticks[1:] {
+		if t.BlockNumber != blockNumber {
+			return 0, fmt.Errorf("uniswap_v4 tick write spans blocks %d and %d: one SaveBlock is one block", blockNumber, t.BlockNumber)
+		}
+	}
+	return blockNumber, nil
+}
+
 // lockTickKeysV4 acquires the per-slot advisory lock for every key in one
 // round-trip via unnest(). keys must already be in the canonical sorted order
 // (distinctSortedV4TickKeys) so concurrent SaveBlock transactions touching
 // overlapping ticks acquire overlapping locks in the same order and never
-// deadlock (CLAUDE.md read-then-write rule).
+// deadlock (db/migrations/AGENTS.md read-then-write rule).
 //
 // The "uniswap_v4_tick|<pool>|<tick>" lock domain is deliberately distinct from
 // the pv-trigger's row-identity key ("u4t|pool|tick|block|version"): this guards
@@ -510,10 +574,12 @@ func lockTickKeysV4(ctx context.Context, tx pgx.Tx, keys []v4TickKey) error {
 	return nil
 }
 
-// readLatestTicksV4 fetches the latest row per (pool_id, tick) for every key in
-// one query. Keys with no prior row are absent from the returned map, which the
-// caller treats as "insert unconditionally".
-func readLatestTicksV4(ctx context.Context, tx pgx.Tx, keys []v4TickKey) (map[v4TickKey]v4TickValues, error) {
+// readLatestTicksV4 fetches the latest row per (pool_id, tick) at or below
+// blockNumber for every key in one query. Keys with no prior row are absent
+// from the returned map, which the caller treats as "insert unconditionally".
+// The height bound keeps an out-of-order (backfill) write from being compared
+// against — and silently dropped as unchanged against — a newer row.
+func readLatestTicksV4(ctx context.Context, tx pgx.Tx, keys []v4TickKey, blockNumber int64) (map[v4TickKey]v4TickValues, error) {
 	poolIDs := make([]int64, len(keys))
 	tickNums := make([]int32, len(keys))
 	for i, k := range keys {
@@ -529,9 +595,10 @@ func readLatestTicksV4(ctx context.Context, tx pgx.Tx, keys []v4TickKey) (map[v4
 		 FROM uniswap_v4_tick t
 		 JOIN unnest($1::bigint[], $2::int[]) AS k(pool_id, tick)
 		   ON t.pool_id = k.pool_id AND t.tick = k.tick
+		 WHERE t.block_number <= $3
 		 ORDER BY t.pool_id, t.tick,
 		          t.block_number DESC, t.block_version DESC, t.processing_version DESC`,
-		poolIDs, tickNums,
+		poolIDs, tickNums, blockNumber,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("querying latest uniswap_v4 ticks for %d slots: %w", len(keys), err)

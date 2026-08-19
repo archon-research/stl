@@ -2,7 +2,10 @@ package uniswapv4indexer
 
 import (
 	"fmt"
+	"maps"
 	"math/big"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,18 +17,20 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
-// eventsByID returns the PoolManager ABI's events indexed by topic0 for O(1)
-// log dispatch, built exactly once alongside the once-parsed ABI: like the ABI
+// eventsByID indexes the PoolManager ABI's events by topic0 for O(1) log
+// dispatch, built exactly once alongside the once-parsed ABI: like the ABI
 // itself, this map is immutable and on the per-receipt hot path.
 var eventsByID = sync.OnceValues(func() (map[common.Hash]*abi.Event, error) {
 	poolManagerABI, err := PoolManagerABI()
 	if err != nil {
 		return nil, err
 	}
+	if err := assertRoutedEventsExist(poolManagerABI); err != nil {
+		return nil, err
+	}
 	out := make(map[common.Hash]*abi.Event, len(poolManagerABI.Events))
 	for _, ev := range poolManagerABI.Events {
-		e := ev
-		out[e.ID] = &e
+		out[ev.ID] = &ev
 	}
 	return out, nil
 })
@@ -58,6 +63,29 @@ var poolEventNames = map[string]entity.UniswapV4PoolEventName{
 	"Initialize":         entity.UniswapV4PoolEventInitialize,
 	"Donate":             entity.UniswapV4PoolEventDonate,
 	"ProtocolFeeUpdated": entity.UniswapV4PoolEventProtocolFeeUpdated,
+}
+
+// assertRoutedEventsExist rejects a routing table naming an event the ABI does
+// not define: a typo there would silently divert real logs into the
+// unknown-topic0 capture net instead of their typed table, and nothing at
+// runtime would look wrong.
+func assertRoutedEventsExist(poolManagerABI *abi.ABI) error {
+	tables := []struct {
+		table string
+		names []string
+	}{
+		{"poolKeyedEvents", slices.Sorted(maps.Keys(poolKeyedEvents))},
+		{"erc6909Events", slices.Sorted(maps.Keys(erc6909Events))},
+		{"poolEventNames", slices.Sorted(maps.Keys(poolEventNames))},
+	}
+	for _, t := range tables {
+		for _, name := range t.names {
+			if _, ok := poolManagerABI.Events[name]; !ok {
+				return fmt.Errorf("%s routes %q, which the PoolManager ABI does not define", t.table, name)
+			}
+		}
+	}
+	return nil
 }
 
 // DecodeEvents extracts typed entities from a single transaction receipt,
@@ -103,7 +131,7 @@ func DecodeEvents(
 
 // receiptDecoder carries the registry and block identity every log decode
 // needs, so the per-log helpers below take the log alone instead of repeating a
-// seven-argument tail.
+// six-argument tail.
 type receiptDecoder struct {
 	events      map[common.Hash]*abi.Event
 	poolsByID   map[common.Hash]RegisteredPool
@@ -116,7 +144,6 @@ type receiptDecoder struct {
 	touched map[int64]bool
 }
 
-// logSite is one log's identity within its block.
 type logSite struct {
 	address  common.Address
 	logIndex uint
@@ -156,8 +183,6 @@ func (d *receiptDecoder) decodeLog(log shared.Log) error {
 	return err
 }
 
-// knownEvent resolves a log's topic0 against the PoolManager ABI, returning nil
-// for a zero-topic log or an unrecognised topic0.
 func (d *receiptDecoder) knownEvent(log shared.Log) *abi.Event {
 	if len(log.Topics) == 0 {
 		return nil
@@ -170,10 +195,11 @@ func (d *receiptDecoder) knownEvent(log shared.Log) *abi.Event {
 // for an untracked pool is dropped entirely — the deliberate high-volume filter
 // this indexer depends on, not a swallowed failure.
 func (d *receiptDecoder) decodePoolKeyedLog(ev abi.Event, log shared.Log, site logSite) error {
-	if len(log.Topics) < 2 {
-		return fmt.Errorf("%s log (index %s) carries no indexed pool id", ev.Name, log.LogIndex)
+	poolID, err := indexedPoolID(ev, log)
+	if err != nil {
+		return err
 	}
-	pool, tracked := d.poolsByID[common.HexToHash(log.Topics[1])]
+	pool, tracked := d.poolsByID[poolID]
 	if !tracked {
 		return nil
 	}
@@ -189,12 +215,30 @@ func (d *receiptDecoder) decodePoolKeyedLog(ev abi.Event, log shared.Log, site l
 	return nil
 }
 
+// indexedPoolID reads topics[1] as a PoolId, rejecting anything that is not a
+// full 32-byte hex word: common.HexToHash left-pads a short value into a
+// plausible-looking hash that would silently miss (or, worse, hit) a registry
+// entry.
+func indexedPoolID(ev abi.Event, log shared.Log) (common.Hash, error) {
+	if len(log.Topics) < 2 {
+		return common.Hash{}, fmt.Errorf("%s log (index %s) carries no indexed pool id", ev.Name, log.LogIndex)
+	}
+	topic := log.Topics[1]
+	if len(topic) != 66 || !strings.HasPrefix(topic, "0x") {
+		return common.Hash{}, fmt.Errorf("%s log (index %s) pool id %q is not a 32-byte hex word", ev.Name, log.LogIndex, topic)
+	}
+	return common.HexToHash(topic), nil
+}
+
 // decodeAndCapture ABI-decodes a known event and mirrors it into the capture
 // net, returning the decoded fields for any typed entity built from them.
 func (d *receiptDecoder) decodeAndCapture(ev abi.Event, log shared.Log, site logSite) (map[string]any, error) {
 	data, err := shared.DecodeLog(ev, log)
 	if err != nil {
 		return nil, fmt.Errorf("decoding %s log (index %s): %w", ev.Name, log.LogIndex, err)
+	}
+	if err := assertEveryArgumentDecoded(ev, data, log); err != nil {
+		return nil, err
 	}
 	captured, err := dexconsumer.NewDecodedCapturedLog(site.address, site.logIndex, site.txHash, ev.Name, data)
 	if err != nil {
@@ -204,8 +248,20 @@ func (d *receiptDecoder) decodeAndCapture(ev abi.Event, log shared.Log, site log
 	return data, nil
 }
 
-// captureRaw mirrors a log the ABI cannot decode, named by its topic0 (or the
-// anonymous sentinel when it has none).
+// assertEveryArgumentDecoded rejects a log whose truncated topics or data left
+// an ABI argument unset: DecodeLog skips the non-indexed block entirely when
+// data is empty, which would otherwise persist a silently partial params blob.
+func assertEveryArgumentDecoded(ev abi.Event, data map[string]any, log shared.Log) error {
+	for _, arg := range ev.Inputs {
+		if _, ok := data[arg.Name]; !ok {
+			return fmt.Errorf("decoding %s log (index %s): field %s is missing from the log", ev.Name, log.LogIndex, arg.Name)
+		}
+	}
+	return nil
+}
+
+// captureRaw mirrors a log the ABI cannot decode, named by its topic0. The
+// PoolManager is non-upgradeable, so this net is expected to stay empty.
 func (d *receiptDecoder) captureRaw(log shared.Log, site logSite) error {
 	name := dexconsumer.AnonymousLogEventName
 	if len(log.Topics) > 0 {
@@ -219,8 +275,6 @@ func (d *receiptDecoder) captureRaw(log shared.Log, site logSite) error {
 	return nil
 }
 
-// appendTypedEvent decodes data into the entity matching abiEventName and
-// appends it to the correct slice.
 func (d *receiptDecoder) appendTypedEvent(abiEventName string, data map[string]any, pool RegisteredPool, site logSite) error {
 	switch abiEventName {
 	case "Swap":
@@ -259,6 +313,14 @@ func (d *receiptDecoder) buildSwap(data map[string]any, pool RegisteredPool, sit
 	if err != nil {
 		return nil, err
 	}
+	tick, err := int24Value("tick", fields["tick"])
+	if err != nil {
+		return nil, err
+	}
+	fee, err := uint24Value("fee", fields["fee"])
+	if err != nil {
+		return nil, err
+	}
 
 	swap := &entity.UniswapV4Swap{
 		PoolID:         pool.ID,
@@ -272,8 +334,8 @@ func (d *receiptDecoder) buildSwap(data map[string]any, pool RegisteredPool, sit
 		Amount1:        fields["amount1"],
 		SqrtPriceX96:   fields["sqrtPriceX96"],
 		Liquidity:      fields["liquidity"],
-		Tick:           int(fields["tick"].Int64()),
-		Fee:            int(fields["fee"].Int64()),
+		Tick:           tick,
+		Fee:            fee,
 	}
 	if err := swap.Validate(); err != nil {
 		return nil, fmt.Errorf("validating Swap: %w", err)
@@ -290,7 +352,15 @@ func (d *receiptDecoder) buildLiquidityEvent(data map[string]any, pool Registere
 	if err != nil {
 		return nil, err
 	}
-	salt, err := getHashField(data, "salt")
+	salt, err := shared.GetHashField(data, "salt")
+	if err != nil {
+		return nil, err
+	}
+	tickLower, err := int24Value("tickLower", fields["tickLower"])
+	if err != nil {
+		return nil, err
+	}
+	tickUpper, err := int24Value("tickUpper", fields["tickUpper"])
 	if err != nil {
 		return nil, err
 	}
@@ -303,8 +373,8 @@ func (d *receiptDecoder) buildLiquidityEvent(data map[string]any, pool Registere
 		TxHash:         site.txHash,
 		LogIndex:       int(site.logIndex),
 		Sender:         sender,
-		TickLower:      int(fields["tickLower"].Int64()),
-		TickUpper:      int(fields["tickUpper"].Int64()),
+		TickLower:      tickLower,
+		TickUpper:      tickUpper,
 		LiquidityDelta: fields["liquidityDelta"],
 		Salt:           salt,
 	}
@@ -343,11 +413,9 @@ func (d *receiptDecoder) buildPoolEvent(abiEventName string, data map[string]any
 	return ev, nil
 }
 
-// bigIntFields reads several *big.Int fields at once so each entity builder
-// stays a field mapping instead of a run of identical error checks. Every
-// v4-core numeric event argument (int24/uint24/int128/int256/uint128/uint160)
-// decodes to *big.Int: go-ethereum only returns native Go integers for the
-// 8/16/32/64-bit widths, none of which appear in these events.
+// bigIntFields reads several fields at once so each builder stays a field
+// mapping. Every v4-core numeric event argument decodes to *big.Int (see
+// numeric.go).
 func bigIntFields(data map[string]any, keys ...string) (map[string]*big.Int, error) {
 	out := make(map[string]*big.Int, len(keys))
 	for _, key := range keys {
@@ -358,19 +426,4 @@ func bigIntFields(data map[string]any, keys ...string) (map[string]*big.Int, err
 		out[key] = v
 	}
 	return out, nil
-}
-
-// getHashField reads key from a DecodeLog result map as a common.Hash.
-// go-ethereum decodes a bytes32 argument — indexed or not — into a [32]byte
-// array rather than any named type.
-func getHashField(data map[string]any, key string) (common.Hash, error) {
-	v, ok := data[key]
-	if !ok {
-		return common.Hash{}, fmt.Errorf("missing field: %s", key)
-	}
-	b, ok := v.([32]byte)
-	if !ok {
-		return common.Hash{}, fmt.Errorf("field %s: unexpected type %T", key, v)
-	}
-	return common.Hash(b), nil
 }

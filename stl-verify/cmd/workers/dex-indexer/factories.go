@@ -153,10 +153,8 @@ func (uniswapV4Factory) BuildHandler(ctx context.Context, deps *dexbootstrap.Dep
 	}
 	pools := uniswapv4indexer.RegisteredPoolsFromRows(poolRows)
 
-	// The Uniswap V4 indexer snapshots only event-touched pools; it has no
-	// periodic sweep, so SWEEP_BLOCKS has no effect here. Warn only when an
-	// operator explicitly set a positive value (not on the shared default),
-	// and warn rather than fail so a copied deploy config still starts.
+	// V4 has no periodic sweep, so SWEEP_BLOCKS is inert. Warn rather than fail
+	// so a deploy config copied from another DEX still starts.
 	if cfg.SweepBlocksSet && cfg.SweepBlocks > 0 {
 		deps.Logger.Warn("uniswap-v4 indexer has no sweep; SWEEP_BLOCKS is ignored", "sweepBlocks", cfg.SweepBlocks)
 	}

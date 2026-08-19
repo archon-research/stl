@@ -29,9 +29,22 @@ const integrationBlock = int64(25_600_000)
 // disagreed with its PoolIds would fail the service constructor here.
 type v4IntegrationFixture struct {
 	svc  *UniswapV4Service
+	deps UniswapV4ServiceDeps
 	mc   *recordingMulticaller
 	db   *pgxpool.Pool
 	pool RegisteredPool
+}
+
+// restarted builds a second service over the same database with an empty
+// snapshot tracker, standing in for a worker process that was replaced between
+// the two deliveries of a block.
+func (f *v4IntegrationFixture) restarted(t *testing.T) *UniswapV4Service {
+	t.Helper()
+	svc, err := NewUniswapV4Service(f.deps)
+	if err != nil {
+		t.Fatalf("NewUniswapV4Service (restart): %v", err)
+	}
+	return svc
 }
 
 func setupV4Integration(t *testing.T) *v4IntegrationFixture {
@@ -66,7 +79,7 @@ func setupV4Integration(t *testing.T) *v4IntegrationFixture {
 		tickResults:  map[int32]outbound.Result{},
 	}
 
-	svc, err := NewUniswapV4Service(UniswapV4ServiceDeps{
+	deps := UniswapV4ServiceDeps{
 		Pools:       pools,
 		Multicaller: mc,
 		Repo:        repo,
@@ -74,12 +87,13 @@ func setupV4Integration(t *testing.T) *v4IntegrationFixture {
 		TxManager:   txMgr,
 		ChainID:     testChainID,
 		Logger:      testLogger(),
-	})
+	}
+	svc, err := NewUniswapV4Service(deps)
 	if err != nil {
 		t.Fatalf("NewUniswapV4Service: %v", err)
 	}
 
-	return &v4IntegrationFixture{svc: svc, mc: mc, db: db, pool: pools[idx]}
+	return &v4IntegrationFixture{svc: svc, deps: deps, mc: mc, db: db, pool: pools[idx]}
 }
 
 func countRows(t *testing.T, ctx context.Context, db *pgxpool.Pool, query string, args ...any) int {
@@ -93,7 +107,7 @@ func countRows(t *testing.T, ctx context.Context, db *pgxpool.Pool, query string
 
 // TestIntegration_PersistsEveryTableForATouchedBlock drives one block carrying
 // a swap, a liquidity change, and a donate through the real repository, and
-// checks each of the six tables the indexer owns received its row.
+// checks each of the six tables this block writes to received its row.
 func TestIntegration_PersistsEveryTableForATouchedBlock(t *testing.T) {
 	ctx := context.Background()
 	f := setupV4Integration(t)
@@ -157,10 +171,10 @@ func latestTick(t *testing.T, ctx context.Context, db *pgxpool.Pool, poolID int6
 	return blockNumber, blockVersion, liquidityGross
 }
 
-// TestIntegration_ReorgReconcilesStaleTicks proves the VEC-487 reconciliation
-// against the real writer: a tick initialized on an orphaned fork (N, v0) is
-// superseded when block N is redelivered at v1 whose receipts do NOT touch the
-// pool. Without the prior-version re-read the stale (N, v0) row would stay
+// TestIntegration_ReorgReconcilesStaleTicks proves the reconciliation against
+// the real writer: a tick initialized on an orphaned fork (N, v0) is superseded
+// when block N is redelivered at v1 whose receipts do NOT touch the pool.
+// Without the prior-version re-read the stale (N, v0) row would stay
 // canonical-latest forever.
 func TestIntegration_ReorgReconcilesStaleTicks(t *testing.T) {
 	ctx := context.Background()
@@ -200,5 +214,47 @@ func TestIntegration_ReorgReconcilesStaleTicks(t *testing.T) {
 	}
 	if bn, ver, gross := latestTick(t, ctx, f.db, f.pool.ID, changedTick); bn != integrationBlock || ver != 1 || gross != "2000" {
 		t.Errorf("tick %d latest = (bn=%d ver=%d gross=%s), want (%d, 1, 2000)", changedTick, bn, ver, gross, integrationBlock)
+	}
+}
+
+// TestIntegration_ReorgAfterRestartReconcilesStaleTicks is the same
+// reconciliation across a process boundary: the redelivering service has never
+// seen block N, so the pools to re-snapshot can only come from the rows already
+// persisted at that height.
+func TestIntegration_ReorgAfterRestartReconcilesStaleTicks(t *testing.T) {
+	ctx := context.Background()
+	f := setupV4Integration(t)
+
+	const (
+		clearedTick = -100
+		changedTick = 200
+	)
+	f.mc.tickResults[clearedTick] = goodTickResult(t)
+	f.mc.tickResults[changedTick] = goodTickResult(t)
+
+	v0 := blockEvent(integrationBlock)
+	v0.BlockHash = common.HexToHash("0xaa").Hex()
+	receipt := shared.TransactionReceipt{Logs: []shared.Log{modifyLog(t, f.pool, "0x0", clearedTick, changedTick, 5000)}}
+	if err := f.svc.BlockHandler()(ctx, v0, []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("BlockHandler (v0): %v", err)
+	}
+
+	f.mc.tickResults[clearedTick] = tickResultWith(t, 0, 0)
+	f.mc.tickResults[changedTick] = tickResultWith(t, 2000, 750)
+
+	v1 := blockEvent(integrationBlock)
+	v1.Version = 1
+	v1.BlockHash = common.HexToHash("0xbb").Hex()
+	if err := f.restarted(t).BlockHandler()(ctx, v1, nil); err != nil {
+		t.Fatalf("BlockHandler (v1 reorg redelivery after a restart): %v", err)
+	}
+
+	if bn, ver, gross := latestTick(t, ctx, f.db, f.pool.ID, clearedTick); bn != integrationBlock || ver != 1 || gross != "0" {
+		t.Errorf("tick %d latest = (bn=%d ver=%d gross=%s), want (%d, 1, 0) — the orphaned-fork row survived the restart", clearedTick, bn, ver, gross, integrationBlock)
+	}
+	if n := countRows(t, ctx, f.db,
+		`SELECT count(*) FROM uniswap_v4_pool_state WHERE pool_id=$1 AND block_number=$2 AND block_version=1`,
+		f.pool.ID, integrationBlock); n != 1 {
+		t.Errorf("v1 pool_state rows = %d, want 1 (the restarted service must re-snapshot the pool)", n)
 	}
 }

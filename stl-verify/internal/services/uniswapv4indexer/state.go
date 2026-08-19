@@ -83,7 +83,6 @@ func SnapshotState(ctx context.Context, mc outbound.Multicaller, pool Registered
 // read's Pack next to its Decode means the call order below is the only place
 // that determines wire order.
 func stateSnapshotReads(state *entity.UniswapV4PoolState, stateABI *abi.ABI) []shared.SnapshotRead[RegisteredPool] {
-	// stateViewRead builds a CORE read of one PoolId-keyed StateView getter.
 	stateViewRead := func(method string, decode func(pool RegisteredPool, res outbound.Result) error) shared.SnapshotRead[RegisteredPool] {
 		return shared.SnapshotRead[RegisteredPool]{
 			Name: method,
@@ -118,22 +117,30 @@ func stateSnapshotReads(state *entity.UniswapV4PoolState, stateABI *abi.ABI) []s
 	}
 }
 
-// decodeSlot0 unpacks getSlot0()'s 4-tuple into state. Every field is a
-// *big.Int: go-ethereum returns native Go integers only for the 8/16/32/64-bit
-// widths, and slot0's uint160/int24/uint24 are none of those.
 func decodeSlot0(pool RegisteredPool, a *abi.ABI, res outbound.Result, state *entity.UniswapV4PoolState) error {
 	out, err := unpackStateView(pool, a, "getSlot0", res, 4)
 	if err != nil {
 		return err
 	}
+	tick, err := int24Value("tick", out[1])
+	if err != nil {
+		return fmt.Errorf("pool %s getSlot0(): %w", pool.PoolIDHash, err)
+	}
+	protocolFee, err := uint24Value("protocolFee", out[2])
+	if err != nil {
+		return fmt.Errorf("pool %s getSlot0(): %w", pool.PoolIDHash, err)
+	}
+	lpFee, err := uint24Value("lpFee", out[3])
+	if err != nil {
+		return fmt.Errorf("pool %s getSlot0(): %w", pool.PoolIDHash, err)
+	}
 	state.SqrtPriceX96 = out[0]
-	state.Tick = int(out[1].Int64())
-	state.ProtocolFee = int(out[2].Int64())
-	state.LpFee = int(out[3].Int64())
+	state.Tick = tick
+	state.ProtocolFee = protocolFee
+	state.LpFee = lpFee
 	return nil
 }
 
-// decodeFeeGrowthGlobals unpacks getFeeGrowthGlobals()'s (fg0, fg1) pair.
 func decodeFeeGrowthGlobals(pool RegisteredPool, a *abi.ABI, res outbound.Result, state *entity.UniswapV4PoolState) error {
 	out, err := unpackStateView(pool, a, "getFeeGrowthGlobals", res, 2)
 	if err != nil {
@@ -144,9 +151,6 @@ func decodeFeeGrowthGlobals(pool RegisteredPool, a *abi.ABI, res outbound.Result
 	return nil
 }
 
-// unpackStateView decodes a StateView getter's all-*big.Int return tuple,
-// rejecting a revert, an undecodable payload, an unexpected arity, or an
-// unexpected element type.
 func unpackStateView(pool RegisteredPool, a *abi.ABI, method string, res outbound.Result, want int) ([]*big.Int, error) {
 	if !res.Success {
 		return nil, fmt.Errorf("pool %s %s() reverted", pool.PoolIDHash, method)
