@@ -96,10 +96,11 @@ data:
   ARCHIVE_SC_CALLS: "true"
   RAW_SC_BUCKET: "stl-sentinelstaging-raw-sc-calls"
 ---
-# curve-indexer + uniswap-v3-indexer run the shared dex-indexer binary; the DEX
-# key selects the factory. No SC-call archiving (dexbootstrap does not wire the
-# archiving decorator), so no ARCHIVE_SC_CALLS / RAW_SC_BUCKET here. The SQS
-# queue URL, DB, Redis, and Alchemy key come from the matching ExternalSecret.
+# curve-indexer + uniswap-v3-indexer + uniswap-v4-indexer run the shared
+# dex-indexer binary; the DEX key selects the factory. No SC-call archiving
+# (dexbootstrap does not wire the archiving decorator), so no ARCHIVE_SC_CALLS /
+# RAW_SC_BUCKET here. The SQS queue URL, DB, Redis, and Alchemy key come from the
+# matching ExternalSecret.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -118,6 +119,18 @@ metadata:
   name: uniswap-v3-indexer-config
 data:
   DEX: "uniswap-v3"
+  CHAIN_ID: "1"
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
+  ENVIRONMENT: "sentinelstaging"
+  DEPLOY_ENV: "staging"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: uniswap-v4-indexer-config
+data:
+  DEX: "uniswap-v4"
   CHAIN_ID: "1"
   AWS_REGION: "eu-west-1"
   ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
