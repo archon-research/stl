@@ -222,6 +222,13 @@ data:
       create_consumer_queue "$chain" "psm3-indexer"
     done
 
+    # DEX indexers (shared dex-indexer image, one Deployment per DEX) are
+    # Ethereum-only. Local convention stl-<chain>-<queue>.fifo — no
+    # sentinel<env> segment, unlike the EKS queues.
+    for queue in curve-indexing uniswap-v3-indexing uniswap-v4-indexing; do
+      create_consumer_queue "ethereum" "$queue"
+    done
+
     # Per-chain raw-block buckets are created by create_chain_resources above.
     echo "Creating stress-test S3 bucket..."
     $AWS s3 mb s3://stress-test-data --region $REGION
@@ -250,6 +257,11 @@ spec:
     metadata:
       labels:
         app: localstack
+      annotations:
+        # Substituted by `make kind-infra` with a hash of this file, so the pod
+        # (and therefore init-aws.sh, which only runs at container start) is
+        # re-run whenever the inlined init script changes.
+        stl.dev/localstack-manifest-sha: "__LOCALSTACK_MANIFEST_SHA__"
     spec:
       containers:
         - name: localstack
