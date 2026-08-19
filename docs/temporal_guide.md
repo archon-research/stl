@@ -240,6 +240,13 @@ Reference implementation: `stl-verify/cmd/backfillers/offchain-price-backfill/`
 (`main.go` is the composition root; `backfill.go` holds the workflow, params and
 activity).
 
+### Current on-demand jobs
+
+| Job (`stl-verify/cmd/backfillers/`) | Task queue | Workflow Type | Input |
+|---|---|---|---|
+| `offchain-price-backfill` | `offchain-price-backfill` | `OffchainPriceBackfill` | `{"assets":["weth"],"from":"2020-01-01T00:00:00Z","to":"2026-08-05T00:00:00Z"}` |
+| `morpho-vault-backfill` | `morpho-vault-backfill` | `MorphoVaultBackfill` | `{"from":24765588,"to":24786366}` (or `{"to":24786366,"fromV2Deploy":true}` for the whole VaultV2 era) |
+
 ### Shape of an on-demand job
 
 ```go
@@ -360,6 +367,7 @@ make dev-up                                  # kind cluster incl. Temporal (serv
 make dev-env                                 # generate cmd/cronjobs/*/ and backfiller .env
 make run-cronjob-offchain-price-indexer      # run one cronjob, sourcing its .env
 make run-backfiller-offchain-price-backfill  # run the on-demand worker locally
+make run-backfiller-morpho-vault-backfill    # ditto; reads the real staging raw bucket
 ```
 
 An on-demand worker started this way registers nothing on a schedule and simply idles
