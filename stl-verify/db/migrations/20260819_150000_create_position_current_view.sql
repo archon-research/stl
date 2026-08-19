@@ -32,4 +32,4 @@ COMMENT ON VIEW position_current IS '[Operational] Current state per position (V
 GRANT SELECT ON position_current TO stl_readonly;
 GRANT SELECT ON position_current TO stl_readwrite;
 
-INSERT INTO migrations (filename) VALUES ('20260724_150000_create_position_current_view.sql') ON CONFLICT (filename) DO NOTHING;
+INSERT INTO migrations (filename) VALUES ('20260819_150000_create_position_current_view.sql') ON CONFLICT (filename) DO NOTHING;
