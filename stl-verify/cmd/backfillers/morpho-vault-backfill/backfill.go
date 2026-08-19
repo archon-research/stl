@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/ethclient"
@@ -397,8 +398,8 @@ func startHeartbeat(ctx context.Context, interval time.Duration) (stop func()) {
 			}
 		}
 	}()
-	return func() {
+	return sync.OnceFunc(func() {
 		close(done)
 		<-finished
-	}
+	})
 }
