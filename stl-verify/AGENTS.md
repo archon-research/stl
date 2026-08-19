@@ -33,10 +33,11 @@ Follow [Effective Go](https://go.dev/doc/effective_go).
 - `cmd/workers/` — long-running SQS FIFO consumers, one message per block (sparklend, morpho, curve, oracle-price, psm3, prime-*, raw-data-backup, ...).
 - `cmd/cronjobs/` — **Temporal**-scheduled (not k8s CronJobs): anchorage, maple-graphql, offchain-price, watcher-data-validator. Schedules live in Temporal state; changing an interval env var requires deleting the schedule in Temporal and restarting. Ticks must be idempotent (Temporal retries).
 - `cmd/backfillers/` — historical gap fillers. Mostly one-shot CLI binaries (sparklend,
-  morpho-vault, oracle-pricing, aave-like-user-snapshot, raw-block-bulk-downloader), plus
-  `offchain-price-backfill`, which is a long-running **on-demand Temporal worker**: it polls a
-  task queue and idles until a run is started by hand from the Temporal UI, with the range as
-  workflow input. Grouped here by purpose (backfilling), not by lifecycle.
+  oracle-pricing, aave-like-user-snapshot, raw-block-bulk-downloader), plus
+  `offchain-price-backfill` and `morpho-vault-backfill`, which are long-running **on-demand
+  Temporal workers**: they poll a task queue and idle until a run is started by hand from the
+  Temporal UI, with the range as workflow input. Grouped here by purpose (backfilling), not by
+  lifecycle.
 - `cmd/util/` — `migrate`, `generate-er`, `null-payload-refill`, `stress-test`.
 
 Every binary extracts a `run(ctx, args) error` from `main()` and runs under one of three

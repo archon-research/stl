@@ -16,6 +16,7 @@ into TimescaleDB (or validates stored data). Current cronjobs:
 | `offchain-price-backfill` | `offchain-price-backfill` | **on demand** | Backfills CoinGecko price history for a range supplied at trigger time |
 | `reference-capital-indexer` | `reference-capital-indexer` | 15m | Sky Star-monitor reference risk capital; the only writer of forward reference history |
 | `reference-capital-backfill` | `reference-capital-backfill` | **on demand** | Seeds the reference balance-sheet history predating the syncer's first run |
+| `morpho-vault-backfill` | `morpho-vault-backfill` | **on demand** | Discovers Morpho vaults from the archived S3 receipts and replays their VaultV2 structured events, for a block range supplied at trigger time (VEC-218) |
 | `morpho-v2-bootstrap` | `morpho-v2-bootstrap` | **manual only** | One-shot repair of Morpho VaultV2 vaults discovered before atomic discovery (VEC-218) |
 
 > `maple-graphql-indexer` is also a cronjob but has its own richer rules — see
@@ -185,7 +186,8 @@ nothing is ticking into the void and no data is going stale. The only impact is
 that a new run cannot be started until the pod is back. Warning severity for that
 reason.
 
-Currently matches: `offchain-price-backfill`, `reference-capital-backfill`, `morpho-v2-bootstrap`.
+Currently matches: `offchain-price-backfill`, `reference-capital-backfill`,
+`morpho-vault-backfill`, `morpho-v2-bootstrap`.
 
 ### First checks
 
@@ -379,6 +381,64 @@ absent.
 Do not "fix" this by relaxing the syncer to accept partial coverage silently.
 The alert exists precisely because a partially-covered cycle looks healthy.
 ## morpho-v2-bootstrap fails repeatedly on the same adapter
+### Special case: `morpho-vault-backfill` (on-demand, no schedule)
+
+Another **on-demand** Temporal worker (`temporal.RunWorker`). Everything said
+about `offchain-price-backfill` above applies — nothing is missed while it is
+down, it emits one `cronjob_runs_total` record per *activity*, and it is excluded
+from `VectorCronjobAllRunsFailing` for the same reason.
+
+**How to start a run.** Temporal UI (namespace **`vector`**) →
+**Start Workflow**:
+
+| Field | Value |
+|---|---|
+| Task Queue | `morpho-vault-backfill` |
+| Workflow Type | `MorphoVaultBackfill` |
+| Workflow ID | descriptive and unique, e.g. `morpho-vault-backfill-24765588-24786366` |
+| Input | `{"from":24765588,"to":24786366}` |
+
+`from`/`to` are inclusive block numbers. To cover the whole VaultV2 era instead,
+supply `{"to":24786366,"fromV2Deploy":true}` — `from` then defaults to the
+chain's VaultV2 factory deploy block. An explicit `from` always wins. The
+equivalent CLI call:
+
+```bash
+temporal workflow start --namespace vector \
+  --task-queue morpho-vault-backfill --type MorphoVaultBackfill \
+  --workflow-id morpho-vault-backfill-24765588-24786366 \
+  --input '{"from":24765588,"to":24786366}'
+```
+
+**What a run does, and how long it takes.** One discovery activity over the whole
+range (scan S3 receipts → probe candidates on-chain → persist vaults), then one
+activity per 1000-block S3 partition replaying that partition's VaultV2
+structured events, sequentially and in ascending block order. Measured on
+mainnet: ~11.5 s per partition for discovery and ~20 s per partition for replay,
+so a whole-V2-era run is measured in hours. A range wider than 2500 partitions is
+rejected up front rather than terminated mid-flight for outgrowing Temporal's
+history limit — split it, or check for a mistyped `from`.
+
+**Reading progress and re-running.** The `progress` query (UI → Query tab) shows
+`partitionsDone` / `partitionsTotal` mid-run and survives a failed run, whose
+Result panel Temporal discards. A failed partition stops the run there, so the
+completed prefix is what the query reports. Re-running the same range is always
+safe: every write is an idempotent append, so a repeat costs wall clock, not
+correctness.
+
+**Failure modes specific to this worker.**
+
+- `AccessDenied` listing or reading the raw bucket → the EKS Pod Identity
+  association granting this ServiceAccount S3 read on the per-chain raw bucket is
+  missing. It lives in the infra repo, not here.
+- `partition ... missing receipt block(s) ... (S3 gap)` → the archive is
+  genuinely incomplete for that partition. Replay hard-stops rather than replay
+  a thinned partition; repair S3 and re-run the same range.
+- An adapter-classification failure — same cause and same recovery as the
+  bootstrap's, below; the two share the VaultV2 replay path.
+
+---
+
 ## morpho-v2-bootstrap fails on an adapter
 
 **Nothing here needs rows reconciling by hand.** Adapter membership is an
@@ -409,8 +469,8 @@ just slow). Escalate to the Vector team if the same non-transient error repeats
 across triggers: that is a code defect, not an operational state.
 
 This is a property of the shared VaultV2 replay path, not of the bootstrap alone
-— the morpho-vault-backfill replays through the same handlers and has
-the same exposure.
+— `morpho-vault-backfill` replays through the same handlers and has the same
+exposure.
 
 ---
 
@@ -418,8 +478,8 @@ the same exposure.
 
 Failure + all-failing alerts are automatic (they group by `service_name`).
 `VectorCronjobAllRunsFailing` excludes `maple-graphql-indexer`,
-`offchain-price-backfill` and `morpho-v2-bootstrap`; `VectorCronjobRunFailing`
-excludes only maple. Two manual steps:
+`offchain-price-backfill`, `morpho-vault-backfill` and `morpho-v2-bootstrap`;
+`VectorCronjobRunFailing` excludes only maple. Two manual steps:
 
 1. Add the new **Deployment name** to the `deployment=~"..."` regex in the
    availability rule that matches its lifecycle — `VectorCronjobWorkerDown` for

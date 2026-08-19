@@ -27,13 +27,14 @@
 # template's `Cluster:` header is populated. `namespace` is a static rule label
 # (mimir-rules-sync lint forbids `cluster`/`env` as static labels but allows it).
 #
-# Three services are EXCLUDED by service_name: maple-graphql-indexer, which has
-# richer dedicated rules in vector-indexers.yaml (VEC-320), and
-# offchain-price-backfill, reference-capital-backfill and morpho-v2-bootstrap,
-# which are on-demand — see VectorCronjobAllRunsFailing
-# for why "no successes in an hour" is its healthy state. Every other cronjob,
-# including any added later, is covered automatically; on-demand workers are
-# covered by VectorCronjobRunFailing and VectorOnDemandWorkerDown instead.
+# Five services are EXCLUDED by service_name: maple-graphql-indexer, which has
+# richer dedicated rules in vector-indexers.yaml (VEC-320), and the four
+# trigger-only jobs — offchain-price-backfill, reference-capital-backfill and
+# morpho-vault-backfill (on-demand) and morpho-v2-bootstrap (manual-only) — see
+# VectorCronjobAllRunsFailing for why "no successes in an hour" is their healthy
+# state. Every other cronjob, including any added later, is covered
+# automatically; trigger-only workers are covered by VectorCronjobRunFailing and
+# VectorOnDemandWorkerDown instead.
 #
 # Severity → routing (per the alerting routing spec):
 #   critical       → pages, prod #at_stl_prod_alerts / staging
@@ -92,13 +93,14 @@ groups:
         # failing, not flapping.
         #
         # Trigger-only jobs — on-demand workers (temporal.RunWorker:
-        # offchain-price-backfill, reference-capital-backfill) and manual-only
+        # offchain-price-backfill, reference-capital-backfill,
+        # morpho-vault-backfill) and manual-only
         # cronjobs (morpho-v2-bootstrap) — are excluded: they run only when a
         # human starts them, so "zero successes in the last hour" is their
         # healthy state and a single failed run is by definition
         # errors=1/successes=0, which would page critical for a run the operator
-        # is already watching. They still emit cronjob_runs_total and are covered
-        # by the VectorCronjobRunFailing
+        # is already watching. They still emit
+        # cronjob_runs_total and are covered by the VectorCronjobRunFailing
         # warning above (the right severity) plus VectorOnDemandWorkerDown.
         #
         # The 1h window spans >=1 cycle for even the
@@ -114,6 +116,7 @@ groups:
                 service_name!="offchain-price-backfill",
                 service_name!="reference-capital-backfill",
                 service_name!="morpho-v2-bootstrap",
+                service_name!="morpho-vault-backfill",
                 k8s_namespace_name="vector"
               }[1h])
             ) > 0
@@ -127,6 +130,7 @@ groups:
                 service_name!="offchain-price-backfill",
                 service_name!="reference-capital-backfill",
                 service_name!="morpho-v2-bootstrap",
+                service_name!="morpho-vault-backfill",
                 k8s_namespace_name="vector"
               }[1h])
             ) == 0
@@ -225,7 +229,7 @@ groups:
             max by (cluster, deployment) (
               kube_deployment_status_replicas_available{
                 namespace="vector",
-                deployment=~"offchain-price-backfill|reference-capital-backfill|morpho-v2-bootstrap"
+                deployment=~"offchain-price-backfill|reference-capital-backfill|morpho-v2-bootstrap|morpho-vault-backfill"
               }
             ) < 1
           )
@@ -233,7 +237,7 @@ groups:
             max by (cluster, deployment) (
               kube_deployment_spec_replicas{
                 namespace="vector",
-                deployment=~"offchain-price-backfill|reference-capital-backfill|morpho-v2-bootstrap"
+                deployment=~"offchain-price-backfill|reference-capital-backfill|morpho-v2-bootstrap|morpho-vault-backfill"
               }
             ) > 0
           )
