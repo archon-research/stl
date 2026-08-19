@@ -25,12 +25,9 @@ type processingVersionTriggerFunction struct {
 	proconfig []string
 }
 
-// Every trigger function carries the setting, with no exemptions: 20260806_120000_processing_version_force_custom_plan.sql
-// grants it to offchain_token_price, 20260806_130000_set_plan_cache_mode_on_processing_version_triggers.sql
-// to the 35 that predate it, and every migration since declares it inline (VEC-475 adds 7, one per
-// uniswap_v4_* table, registry tables included). Without it a function's
-// per-row lookup goes generic and stops pruning chunks, so insert cost scales with the table's total
-// chunk count.
+// Every assign_processing_version_* function must carry the setting, no exemptions: without it the
+// function's per-row lookup goes generic, stops pruning chunks, and insert cost scales with the
+// table's total chunk count.
 func TestProcessingVersionTriggersForceCustomPlan(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
