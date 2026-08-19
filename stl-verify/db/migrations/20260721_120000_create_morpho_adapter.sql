@@ -1,61 +1,52 @@
--- Morpho VaultV2 structured tracking, part 1 of 3 (VEC-218): adapter registry.
+-- Morpho VaultV2 structured tracking (VEC-218): adapter identity.
 --
 -- A VaultV2 (morpho-org/vault-v2) never allocates to Morpho Blue directly. It
 -- holds a set of liquidity-adapter contracts, each wrapping one downstream
 -- venue (a Morpho Blue market or a nested MetaMorpho V1 vault). morpho_adapter
--- is the registry of those adapters, one row per adapter per vault; its
--- per-block realAssets() readings live in the morpho_adapter_state hypertable
--- (part 2). This is a Dimension/registry table like morpho_vault / fluid_vault:
--- no hypertable, no processing_version.
+-- is the IDENTITY of those adapters: exactly one row per (morpho_vault_id,
+-- address), forever. Whether the adapter is currently in the vault's adapter
+-- set, when it entered or left, and how it classifies are OBSERVATIONS, and
+-- they live in morpho_adapter_membership (20260721_125000); its per-block realAssets()
+-- readings live in the morpho_adapter_state hypertable (20260721_130000).
 --
--- Only (morpho_vault_id, address) is immutable per row. The lifetime bounds and
--- the classification are CONVERGING OBSERVATIONS, not values fixed at insert:
--- added_at_block and removed_at_block each move toward the earliest block we ever
--- observed as backfilled history and reorg-relocated transactions arrive, and
--- adapter_type is upgraded from the Unknown sentinel the first time a replay
--- classifies the adapter. None of them is a time-varying on-chain VALUE needing an
--- audit trail (see the full-auditability rule in db/migrations/AGENTS.md) — they are
--- our best estimate of when ONE on-chain lifetime started and ended, which only ever
--- gets more accurate, so they stay in-place columns.
+-- Every column here is a genuinely immutable identity fact, so the row is
+-- written once and never converged (strict append-only rule, see
+-- db/migrations/AGENTS.md). That is what makes the surrogate id stable: no
+-- lifecycle decision can move the row a morpho_adapter_state snapshot hangs
+-- off, so no snapshot can ever be stranded by one.
 --
--- added_at_block / removed_at_block bound each adapter's active lifetime
--- (removed_at_block NULL = active). A removed-then-re-added adapter is a new row, so
--- added_at_block is part of the UNIQUE key.
+-- Deliberately NOT here: a first_seen_block / added_at_block column. "First
+-- seen" is itself a converging observation, so a written-once column would
+-- record whichever writer arrived first rather than the earliest block. It is
+-- MIN(block_number) over the membership log, and the honest first-add is
+-- MIN(block_number) FILTER (WHERE observed_via = 'add_adapter_event').
 --
--- The convergence CONTRACT — which observation wins, when a re-observation is a
--- relocation rather than a new fact, and what is refused — is stated once on the
--- outbound.MorphoRepository port (GetOrCreateAdapter / MarkAdapterRemoved). The
--- COMMENT ON statements below are the catalogue's summary of it; do not restate the
--- reasoning in either place.
+-- processing_version and build_id are carried for schema uniformity and audit
+-- (ADR-0002 §3), not for versioning: an identity row is written once, so there
+-- is no (key, version) series to version and both stay 0 in practice. That is
+-- also why this table gets NO assign_processing_version_* BEFORE INSERT
+-- trigger — the advisory-locked trigger pattern versions repeated observations
+-- of one key, and this table has none; UNIQUE (morpho_vault_id, address) makes
+-- a re-observation an ON CONFLICT DO NOTHING no-op instead of a new row.
 
 -- ============================================================================
--- morpho_adapter: registry of VaultV2 liquidity adapters (one row per adapter).
--- morpho_vault_id FKs the parent VaultV2; asset_token_id FKs the vault's
--- underlying asset (the unit of the adapter's realAssets() reading), resolved
--- from the token registry by natural key (chain_id, address).
+-- morpho_adapter: identity of a VaultV2 liquidity adapter (one row per adapter
+-- per vault, forever). morpho_vault_id FKs the parent VaultV2; asset_token_id
+-- FKs the vault's underlying asset (the unit of the adapter's realAssets()
+-- reading), resolved from the token registry by natural key (chain_id, address).
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS morpho_adapter
 (
-    id              BIGSERIAL PRIMARY KEY,
-    morpho_vault_id BIGINT   NOT NULL REFERENCES morpho_vault (id),
-    address         BYTEA    NOT NULL,
-    asset_token_id  BIGINT   NOT NULL REFERENCES token (id),
-    adapter_type    SMALLINT NOT NULL,
-    added_at_block  BIGINT   NOT NULL,
-    removed_at_block BIGINT,
-    UNIQUE (morpho_vault_id, address, added_at_block)
+    id                 BIGSERIAL PRIMARY KEY,
+    morpho_vault_id    BIGINT NOT NULL REFERENCES morpho_vault (id),
+    address            BYTEA  NOT NULL,
+    asset_token_id     BIGINT NOT NULL REFERENCES token (id),
+    processing_version INT    NOT NULL DEFAULT 0,
+    build_id           INT    NOT NULL DEFAULT 0,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (morpho_vault_id, address)
 );
 
--- At most ONE active incarnation per (vault, adapter), enforced by the database.
--- Registrations and removals both serialize on a pg_advisory_xact_lock over
--- (vault, address), so this index is the structural backstop rather than the
--- primary guard: it aborts any writer that reaches the table without that lock,
--- instead of letting a de-registered adapter resurrect as a second ACTIVE row that
--- GetActiveAdaptersByVault would feed into realAssets forever. It also serves the
--- hot lookup (a vault's currently-active adapters on every allocation snapshot)
--- via its leading morpho_vault_id column.
-CREATE UNIQUE INDEX IF NOT EXISTS uq_morpho_adapter_active
-    ON morpho_adapter (morpho_vault_id, address) WHERE removed_at_block IS NULL;
 CREATE INDEX IF NOT EXISTS idx_morpho_adapter_asset_token ON morpho_adapter (asset_token_id);
 
 -- ============================================================================
@@ -64,14 +55,14 @@ CREATE INDEX IF NOT EXISTS idx_morpho_adapter_asset_token ON morpho_adapter (ass
 -- 20260609_120000_add_schema_comments / 20260626_120000_create_fluid_vault_tables.
 -- ============================================================================
 COMMENT ON TABLE morpho_adapter IS
-  '[Dimension] Registry of Morpho VaultV2 liquidity adapters, one row per adapter per vault. Each adapter wraps one downstream venue; per-block realAssets() readings live in morpho_adapter_state. Only (morpho_vault_id, address) is immutable per row: added_at_block and removed_at_block converge toward the earliest observed block as backfilled history and reorg-relocated transactions arrive, and adapter_type is curated once from the Unknown sentinel. Removed adapters keep their row; re-adds are new rows. Full convergence contract: outbound.MorphoRepository (GetOrCreateAdapter / MarkAdapterRemoved).';
-COMMENT ON COLUMN morpho_adapter.id IS 'PK. Surrogate id referenced by morpho_adapter_state.';
-COMMENT ON COLUMN morpho_adapter.morpho_vault_id IS 'FK→morpho_vault.id. The parent VaultV2 that registered this adapter.';
-COMMENT ON COLUMN morpho_adapter.address IS 'Adapter contract address (20 bytes). Unique per (morpho_vault_id, address, added_at_block).';
-COMMENT ON COLUMN morpho_adapter.asset_token_id IS 'FK→token.id. The vault''s underlying asset ERC-20; the unit of the adapter''s realAssets() reading.';
-COMMENT ON COLUMN morpho_adapter.adapter_type IS 'Adapter kind: 1 = MorphoMarketV1AdapterV2 (Morpho Blue market), 2 = MorphoVaultV1Adapter (nested MetaMorpho V1 vault), 99 = Unknown (the on-chain type probe could not classify it). Curated by replay: a row recorded as 99 is upgraded the first time an observation supplies a real type; a real type is never overwritten.';
-COMMENT ON COLUMN morpho_adapter.added_at_block IS 'Block at which the adapter was first observed on-chain by us: the AddAdapter block when witnessed live or replayed; the vault-discovery or first-allocation block for adapters predating discovery; the RemoveAdapter block when a removal is the only event ever recorded for an incarnation, where it is a lower bound rather than an observation of the add. Converges to the true AddAdapter block once history is replayed, via SQL LEAST against the matched incarnation, so it is order-independent for any arrival sequence. Part of the UNIQUE key so a re-added adapter is a distinct row.';
-COMMENT ON COLUMN morpho_adapter.removed_at_block IS 'Block at which the adapter was de-registered; NULL while the adapter is active. Not a plain LEAST: the writer selects the incarnation live at the observed block, and converges to the minimum of that row''s recorded close and the new observation only when the two are within 64 blocks (Ethereum''s reorg bound) of each other in EITHER direction, so a re-landed RemoveAdapter settles on the same value in any arrival order. Outside that symmetric window the removal is refused, as is any close that would strand morpho_adapter_state rows above it. Full rules: outbound.MorphoRepository.MarkAdapterRemoved.';
+  '[Dimension] Identity of a Morpho VaultV2 liquidity adapter: exactly one row per (morpho_vault_id, address), forever. Written once and never updated — whether the adapter is currently in the vault''s adapter set, when it entered or left, and its classification are observations in morpho_adapter_membership, and "the current set" is the morpho_adapter_current view. Its stable id is what morpho_adapter_state rows hang off, so no lifecycle observation can ever strand a snapshot. Append-only: UPDATE and DELETE are revoked from the application role.';
+COMMENT ON COLUMN morpho_adapter.id IS 'PK. Stable surrogate id referenced by morpho_adapter_state and morpho_adapter_membership; never reassigned.';
+COMMENT ON COLUMN morpho_adapter.morpho_vault_id IS 'FK→morpho_vault.id. The parent VaultV2. Part of the natural key (morpho_vault_id, address).';
+COMMENT ON COLUMN morpho_adapter.address IS 'Adapter contract address (20 bytes). Part of the natural key (morpho_vault_id, address).';
+COMMENT ON COLUMN morpho_adapter.asset_token_id IS 'FK→token.id. The vault''s underlying asset ERC-20 and the unit of the adapter''s realAssets() reading; invariantly equal to morpho_vault.asset_token_id, denormalised so a state reader needs one join rather than two. Immutable.';
+COMMENT ON COLUMN morpho_adapter.processing_version IS 'Correction version: 0=original, N=Nth reprocess. Carried for schema uniformity and audit only — an identity row is written once, so it is 0 in practice, it is NOT part of the natural key UNIQUE (morpho_vault_id, address), and a re-observation reuses the existing row rather than minting a new version. Lifecycle versioning lives on morpho_adapter_membership.';
+COMMENT ON COLUMN morpho_adapter.build_id IS 'Audit. Deployment build that wrote the row; never use to pick the latest row.';
+COMMENT ON COLUMN morpho_adapter.created_at IS 'Audit. Processing time: wall-clock the identity row was first written (DEFAULT NOW()), per the schema_master canonical semantics; NOT a block time — this row carries none, every block-timed fact about the adapter lives in morpho_adapter_membership. Written once; never part of any key or ordering.';
 
 INSERT INTO migrations (filename)
 VALUES ('20260721_120000_create_morpho_adapter.sql')

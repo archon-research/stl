@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"strings"
 	"sync"
@@ -37,14 +38,16 @@ func init() {
 // truncateMorpho clears morpho-related tables for test isolation.
 func truncateMorpho(t *testing.T, ctx context.Context) {
 	t.Helper()
-	// Delete children before parents: morpho_adapter_state FKs morpho_adapter,
-	// morpho_vault_cap / morpho_vault_fee and morpho_adapter FK morpho_vault.
+	// Delete children before parents: morpho_adapter_state and
+	// morpho_adapter_membership FK morpho_adapter; morpho_vault_cap /
+	// morpho_vault_fee and morpho_adapter FK morpho_vault.
 	tables := []string{
 		`morpho_market_state`,
 		`morpho_market_position`,
 		`morpho_vault_state`,
 		`morpho_vault_position`,
 		`morpho_adapter_state`,
+		`morpho_adapter_membership`,
 		`morpho_vault_cap`,
 		`morpho_vault_fee`,
 		`morpho_market`,
@@ -1548,62 +1551,90 @@ func adapterAddr(seed byte) []byte {
 	return addr
 }
 
-// createTestAdapter registers an active MarketV1 adapter on the given vault via
-// the repository and returns its DB ID.
+// adapterTypePtr is shorthand for taking the address of a classification literal.
+func adapterTypePtr(t entity.MorphoAdapterType) *entity.MorphoAdapterType { return &t }
+
+// addedAt / removedAt / assertedAt build the three observation shapes the tests use,
+// so a test body reads as the sequence of observations it is describing.
+func addedAt(block int64, version int, logIndex int32, adapterType entity.MorphoAdapterType) entity.MorphoAdapterMembership {
+	return entity.MorphoAdapterMembership{
+		BlockNumber: block, BlockVersion: version, LogIndex: logIndex, Timestamp: morphoBlockTime,
+		IsMember: true, AdapterType: adapterTypePtr(adapterType), ObservedVia: entity.MembershipFromAddAdapter,
+	}
+}
+
+func removedAt(block int64, version int, logIndex int32) entity.MorphoAdapterMembership {
+	return entity.MorphoAdapterMembership{
+		BlockNumber: block, BlockVersion: version, LogIndex: logIndex, Timestamp: morphoBlockTime,
+		IsMember: false, AdapterType: nil, ObservedVia: entity.MembershipFromRemoveAdapter,
+	}
+}
+
+func assertedAt(block int64, version int, logIndex int32, adapterType *entity.MorphoAdapterType, via entity.MembershipSource) entity.MorphoAdapterMembership {
+	return entity.MorphoAdapterMembership{
+		BlockNumber: block, BlockVersion: version, LogIndex: logIndex, Timestamp: morphoBlockTime,
+		IsMember: true, AdapterType: adapterType, ObservedVia: via,
+	}
+}
+
+// observe records one observation in its own committed transaction and returns the
+// adapter's stable id and whether a row was appended.
+func (f *morphoTestFixture) observe(t *testing.T, ctx context.Context, vaultID int64, address []byte, m entity.MorphoAdapterMembership) (int64, bool) {
+	t.Helper()
+	id, appended, err := f.observeErr(ctx, vaultID, address, m)
+	if err != nil {
+		t.Fatalf("ObserveAdapterMembership(%s@%d.%d): %v", m.ObservedVia, m.BlockNumber, m.LogIndex, err)
+	}
+	return id, appended
+}
+
+// observeErr is observe for the paths that are expected to fail: it rolls the
+// transaction back on error, so a refused observation leaves nothing behind.
+func (f *morphoTestFixture) observeErr(ctx context.Context, vaultID int64, address []byte, m entity.MorphoAdapterMembership) (int64, bool, error) {
+	tx, err := f.pool.Begin(ctx)
+	if err != nil {
+		return 0, false, fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	id, appended, err := f.repo.ObserveAdapterMembership(ctx, tx, &entity.MorphoAdapterObservation{
+		Identity: entity.MorphoAdapterIdentity{
+			MorphoVaultID: vaultID, Address: address, AssetTokenID: f.loanTokenID,
+		},
+		Membership: m,
+	})
+	if err != nil {
+		return 0, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, false, fmt.Errorf("commit: %w", err)
+	}
+	return id, appended, nil
+}
+
+// createTestAdapter records an AddAdapter observation for a MarketV1 adapter on the
+// given vault and returns its stable id.
 func (f *morphoTestFixture) createTestAdapter(t *testing.T, ctx context.Context, vaultID int64, address []byte, addedAtBlock int64) int64 {
 	t.Helper()
 	return f.createTestAdapterOfType(t, ctx, vaultID, address, addedAtBlock, entity.MorphoAdapterTypeMarketV1)
 }
 
-// createTestAdapterOfType is createTestAdapter with an explicit classification, for
-// the adapter_type curation cases.
+// createTestAdapterOfType is createTestAdapter with an explicit classification.
 func (f *morphoTestFixture) createTestAdapterOfType(t *testing.T, ctx context.Context, vaultID int64, address []byte, addedAtBlock int64, adapterType entity.MorphoAdapterType) int64 {
 	t.Helper()
-
-	adapter := &entity.MorphoAdapter{
-		MorphoVaultID: vaultID,
-		Address:       address,
-		AssetTokenID:  f.loanTokenID,
-		AdapterType:   adapterType,
-		AddedAtBlock:  addedAtBlock,
-	}
-
-	tx, err := f.pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("failed to begin transaction: %v", err)
-	}
-	defer tx.Rollback(ctx)
-
-	id, err := f.repo.GetOrCreateAdapter(ctx, tx, adapter)
-	if err != nil {
-		t.Fatalf("failed to create adapter: %v", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		t.Fatalf("failed to commit: %v", err)
-	}
+	id, _ := f.observe(t, ctx, vaultID, address, addedAt(addedAtBlock, 0, 0, adapterType))
 	return id
 }
 
-// adapterTypeOf reads the recorded classification of one adapter row.
-func (f *morphoTestFixture) adapterTypeOf(t *testing.T, ctx context.Context, id int64) entity.MorphoAdapterType {
-	t.Helper()
-	var adapterType entity.MorphoAdapterType
-	if err := f.pool.QueryRow(ctx, `SELECT adapter_type FROM morpho_adapter WHERE id = $1`, id).Scan(&adapterType); err != nil {
-		t.Fatalf("reading adapter_type for id %d: %v", id, err)
-	}
-	return adapterType
-}
-
 // seedAdapterStateAt writes one adapter_state snapshot for the given adapter at
-// blockNumber, so a test can own state rows inside (or outside) a lifetime window.
+// blockNumber, so a test can own state rows around a de-registration.
 func (f *morphoTestFixture) seedAdapterStateAt(t *testing.T, ctx context.Context, adapterID, blockNumber int64) {
 	t.Helper()
 	f.seedAdapterStateAtVersion(t, ctx, adapterID, blockNumber, 0)
 }
 
 // seedAdapterStateAtVersion writes one adapter_state snapshot at a specific
-// block_version, so a test can distinguish a snapshot the canonical chain owns from
-// dead-chain residue a reorg left behind.
+// block_version.
 func (f *morphoTestFixture) seedAdapterStateAtVersion(t *testing.T, ctx context.Context, adapterID, blockNumber int64, blockVersion int) {
 	t.Helper()
 	tx, err := f.pool.Begin(ctx)
@@ -1626,123 +1657,9 @@ func (f *morphoTestFixture) seedAdapterStateAtVersion(t *testing.T, ctx context.
 	}
 }
 
-// markAdapterRemoved runs MarkAdapterRemoved in its own transaction, committing on
-// success and rolling back on error.
-func (f *morphoTestFixture) markAdapterRemoved(t *testing.T, ctx context.Context, vaultID int64, address []byte, block int64) error {
-	t.Helper()
-	tx, err := f.pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	defer tx.Rollback(ctx)
-	if err := f.repo.MarkAdapterRemoved(ctx, tx, vaultID, address, block); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
-}
-
-// removeAdapter runs the whole RemoveAdapter path the worker runs, in ONE
-// transaction: guarantee an incarnation to close, then close it. The lifecycle
-// tests below drive this rather than MarkAdapterRemoved alone, because the
-// registry shape a removal leaves behind is a property of the composition.
-//
-// adapterType is the classification the on-chain probe supplied, used only if the
-// registry turns out to have no incarnation to close.
-func (f *morphoTestFixture) removeAdapter(ctx context.Context, vaultID int64, address []byte, block int64, adapterType entity.MorphoAdapterType) error {
-	tx, err := f.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin: %w", err)
-	}
-	defer tx.Rollback(ctx)
-
-	candidate := &entity.MorphoAdapter{
-		MorphoVaultID:  vaultID,
-		Address:        address,
-		AssetTokenID:   f.loanTokenID,
-		AdapterType:    adapterType,
-		AddedAtBlock:   block,
-		RemovedAtBlock: &block,
-	}
-	if _, err := f.repo.EnsureIncarnationToClose(ctx, tx, vaultID, address, block, candidate); err != nil {
-		return err
-	}
-	if err := f.repo.MarkAdapterRemoved(ctx, tx, vaultID, address, block); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
-}
-
-// insertClosedIncarnation writes a zero-length incarnation straight to the table, for the
-// registry shapes no single write path produces (a healed row beside another incarnation
-// whose close it sits between). Returns its DB ID.
-func (f *morphoTestFixture) insertClosedIncarnation(t *testing.T, ctx context.Context, vaultID int64, address []byte, block int64) int64 {
-	t.Helper()
-	var id int64
-	if err := f.pool.QueryRow(ctx,
-		`INSERT INTO morpho_adapter (morpho_vault_id, address, asset_token_id, adapter_type, added_at_block, removed_at_block)
-		 VALUES ($1, $2, $3, $4, $5, $5) RETURNING id`,
-		vaultID, address, f.loanTokenID, int16(entity.MorphoAdapterTypeMarketV1), block,
-	).Scan(&id); err != nil {
-		t.Fatalf("inserting a closed incarnation at block %d: %v", block, err)
-	}
-	return id
-}
-
-// adapterIncarnationAt runs GetAdapterIncarnationAt (which reads through the
-// caller's tx) in a short read transaction that is rolled back afterwards.
-func (f *morphoTestFixture) adapterIncarnationAt(t *testing.T, ctx context.Context, vaultID int64, address []byte, atBlock int64) *entity.MorphoAdapter {
-	t.Helper()
-	tx, err := f.pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	defer tx.Rollback(ctx)
-	got, err := f.repo.getAdapterIncarnationAt(ctx, tx, vaultID, address, atBlock)
-	if err != nil {
-		t.Fatalf("GetAdapterIncarnationAt(%d): %v", atBlock, err)
-	}
-	return got
-}
-
-// describeIncarnations renders every recorded incarnation of one adapter as
-// "id=N [added,removed]", oldest first, so a lifecycle assertion can print the
-// whole registry state it is unhappy about instead of one column of it.
-func (f *morphoTestFixture) describeIncarnations(t *testing.T, ctx context.Context, vaultID int64, address []byte) string {
-	t.Helper()
-	rows, err := f.pool.Query(ctx,
-		`SELECT id, added_at_block, removed_at_block FROM morpho_adapter
-		 WHERE morpho_vault_id = $1 AND address = $2 ORDER BY added_at_block`,
-		vaultID, address)
-	if err != nil {
-		t.Fatalf("listing incarnations: %v", err)
-	}
-	defer rows.Close()
-
-	var described []string
-	for rows.Next() {
-		var (
-			id      int64
-			added   int64
-			removed *int64
-		)
-		if err := rows.Scan(&id, &added, &removed); err != nil {
-			t.Fatalf("scanning incarnation: %v", err)
-		}
-		closedAt := "ACTIVE"
-		if removed != nil {
-			closedAt = fmt.Sprintf("%d", *removed)
-		}
-		described = append(described, fmt.Sprintf("id=%d [%d,%s]", id, added, closedAt))
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("iterating incarnations: %v", err)
-	}
-	return strings.Join(described, " ")
-}
-
 // getActiveAdapter runs GetActiveAdapter (which reads through the caller's tx) in
 // a short read transaction that is rolled back afterwards.
-func (f *morphoTestFixture) getActiveAdapter(t *testing.T, ctx context.Context, vaultID int64, address []byte) (*entity.MorphoAdapter, error) {
+func (f *morphoTestFixture) getActiveAdapter(t *testing.T, ctx context.Context, vaultID int64, address []byte) (*entity.MorphoAdapterMember, error) {
 	t.Helper()
 	tx, err := f.pool.Begin(ctx)
 	if err != nil {
@@ -1752,39 +1669,115 @@ func (f *morphoTestFixture) getActiveAdapter(t *testing.T, ctx context.Context, 
 	return f.repo.GetActiveAdapter(ctx, tx, vaultID, address)
 }
 
-// --- GetOrCreateAdapter Tests ---
+// isMemberAt reports whether the log says the adapter was a member as of the END of a
+// block on the latest chain we have indexed: the sentinel log index so every log in that
+// block counts, and the maximum block_version so a re-indexed block wins over the version
+// a reorg replaced. A CALLER passes its own position instead — an event being processed
+// at block_version v must be answered about v, not about a version indexed later.
+func (f *morphoTestFixture) isMemberAt(t *testing.T, ctx context.Context, vaultID int64, address []byte, block int64) bool {
+	t.Helper()
+	member, err := f.repo.GetActiveAdapterAt(ctx, vaultID, address, entity.BlockPosition{
+		BlockNumber: block, BlockVersion: math.MaxInt32, LogIndex: entity.EndOfBlockLogIndex,
+	})
+	if err != nil {
+		t.Fatalf("GetActiveAdapterAt(%d): %v", block, err)
+	}
+	return member != nil
+}
 
-func TestGetOrCreateAdapter_CreateNew(t *testing.T) {
+// describeMembership renders an adapter's whole observation log in selection order
+// (latest first), so a failure message shows what the registry actually holds.
+func (f *morphoTestFixture) describeMembership(t *testing.T, ctx context.Context, adapterID int64) string {
+	t.Helper()
+	rows, err := f.pool.Query(ctx,
+		`SELECT block_number, block_version, log_index, is_member, adapter_type, observed_via, processing_version
+		 FROM morpho_adapter_membership WHERE morpho_adapter_id = $1
+		 ORDER BY block_number DESC, block_version DESC, log_index DESC, processing_version DESC`,
+		adapterID)
+	if err != nil {
+		t.Fatalf("query membership: %v", err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var (
+			block, logIndex, version, pv int64
+			isMember                     bool
+			adapterType                  *int16
+			via                          string
+		)
+		if err := rows.Scan(&block, &version, &logIndex, &isMember, &adapterType, &via, &pv); err != nil {
+			t.Fatalf("scan membership: %v", err)
+		}
+		typeText := "nil"
+		if adapterType != nil {
+			typeText = fmt.Sprintf("%d", *adapterType)
+		}
+		out = append(out, fmt.Sprintf("%d.v%d.%d member=%t type=%s via=%s pv=%d",
+			block, version, logIndex, isMember, typeText, via, pv))
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate membership: %v", err)
+	}
+	return strings.Join(out, " | ")
+}
+
+// countMembership returns how many observations the log holds for an adapter.
+func (f *morphoTestFixture) countMembership(t *testing.T, ctx context.Context, adapterID int64) int {
+	t.Helper()
+	var count int
+	if err := f.pool.QueryRow(ctx,
+		`SELECT count(*) FROM morpho_adapter_membership WHERE morpho_adapter_id = $1`, adapterID,
+	).Scan(&count); err != nil {
+		t.Fatalf("counting membership rows: %v", err)
+	}
+	return count
+}
+
+// firstAddBlock is "the block this adapter was added at": a MIN over the log, never a
+// column. It is NULL until an AddAdapter has actually been observed.
+func (f *morphoTestFixture) firstAddBlock(t *testing.T, ctx context.Context, adapterID int64) *int64 {
+	t.Helper()
+	var block *int64
+	if err := f.pool.QueryRow(ctx,
+		`SELECT MIN(block_number) FILTER (WHERE is_member AND observed_via = 'add_adapter_event')
+		 FROM morpho_adapter_membership WHERE morpho_adapter_id = $1`, adapterID,
+	).Scan(&block); err != nil {
+		t.Fatalf("reading the first add block: %v", err)
+	}
+	return block
+}
+
+// countIdentityRows counts the identity rows for one (vault, address).
+func (f *morphoTestFixture) countIdentityRows(t *testing.T, ctx context.Context, vaultID int64, address []byte) int {
+	t.Helper()
+	var count int
+	if err := f.pool.QueryRow(ctx,
+		`SELECT count(*) FROM morpho_adapter WHERE morpho_vault_id = $1 AND address = $2`, vaultID, address,
+	).Scan(&count); err != nil {
+		t.Fatalf("counting identity rows: %v", err)
+	}
+	return count
+}
+
+// --- ObserveAdapterMembership Tests ---
+
+func TestObserveAdapterMembership_CreateNew(t *testing.T) {
 	fixture := setupMorphoTest(t)
 	ctx := context.Background()
 	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x30))
+	addr := adapterAddr(0x01)
 
-	adapter := &entity.MorphoAdapter{
-		MorphoVaultID: vaultID,
-		Address:       adapterAddr(0x01),
-		AssetTokenID:  fixture.loanTokenID,
-		AdapterType:   entity.MorphoAdapterTypeMarketV1,
-		AddedAtBlock:  24481834,
-	}
-
-	tx, err := fixture.pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	defer tx.Rollback(ctx)
-
-	id, err := fixture.repo.GetOrCreateAdapter(ctx, tx, adapter)
-	if err != nil {
-		t.Fatalf("GetOrCreateAdapter failed: %v", err)
-	}
+	id, appended := fixture.observe(t, ctx, vaultID, addr, addedAt(24481834, 0, 7, entity.MorphoAdapterTypeMarketV1))
 	if id <= 0 {
 		t.Errorf("expected positive id, got %d", id)
 	}
-	if err := tx.Commit(ctx); err != nil {
-		t.Fatalf("commit: %v", err)
+	if !appended {
+		t.Error("a transition must always be recorded")
 	}
 
-	got, err := fixture.getActiveAdapter(t, ctx, vaultID, adapterAddr(0x01))
+	got, err := fixture.getActiveAdapter(t, ctx, vaultID, addr)
 	if err != nil {
 		t.Fatalf("GetActiveAdapter failed: %v", err)
 	}
@@ -1797,1373 +1790,462 @@ func TestGetOrCreateAdapter_CreateNew(t *testing.T) {
 	if got.AdapterType != entity.MorphoAdapterTypeMarketV1 {
 		t.Errorf("AdapterType mismatch: got %d", got.AdapterType)
 	}
-	if got.AddedAtBlock != 24481834 {
-		t.Errorf("AddedAtBlock mismatch: got %d", got.AddedAtBlock)
+	if got.AsOfBlock != 24481834 {
+		t.Errorf("AsOfBlock mismatch: got %d", got.AsOfBlock)
 	}
-	if got.RemovedAtBlock != nil {
-		t.Errorf("expected nil RemovedAtBlock, got %v", *got.RemovedAtBlock)
+	if got.ObservedVia != entity.MembershipFromAddAdapter {
+		t.Errorf("ObservedVia mismatch: got %q", got.ObservedVia)
+	}
+	if got.AssetTokenID != fixture.loanTokenID {
+		t.Errorf("AssetTokenID mismatch: got %d, want %d", got.AssetTokenID, fixture.loanTokenID)
+	}
+	if block := fixture.firstAddBlock(t, ctx, id); block == nil || *block != 24481834 {
+		t.Errorf("first add block = %v, want 24481834", block)
 	}
 }
 
-func TestGetOrCreateAdapter_Idempotent(t *testing.T) {
+func TestObserveAdapterMembership_Idempotent(t *testing.T) {
 	fixture := setupMorphoTest(t)
 	ctx := context.Background()
 	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x10))
+	addr := adapterAddr(0x02)
 
-	id1 := fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x02), 24481834)
-	id2 := fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x02), 24481834)
-
-	if id1 != id2 {
-		t.Errorf("GetOrCreateAdapter not idempotent: first=%d, second=%d", id1, id2)
-	}
-}
-
-// TestGetOrCreateAdapter_ActiveRowConverges verifies the active-row-keyed
-// semantics: a second GetOrCreateAdapter for the same (vault, address) while the
-// first incarnation is still active does NOT create a second active row. It
-// reuses the existing row's id and converges added_at_block to the earliest
-// on-chain observation (LEAST). This is what lets the backfiller replay the TRUE
-// AddAdapter@X after a live lazy-registration at first-seen block Y>X collapse to
-// a single active row keyed at X, rather than leaving two active rows.
-//
-// A genuine re-add (a NEW row) only happens after a removal closes the prior
-// incarnation — covered by TestMarkAdapterRemoved_ReplayOldRemovalSparesReAddedRow.
-func TestGetOrCreateAdapter_ActiveRowConverges(t *testing.T) {
-	tests := []struct {
-		name          string
-		firstBlock    int64
-		secondBlock   int64
-		wantConverged int64
-	}{
-		{"backfill replays the earlier true AddAdapter block", 24500000, 24481834, 24481834},
-		{"a later observation keeps the earlier block", 24481834, 24500000, 24481834},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			fixture := setupMorphoTest(t)
-			ctx := context.Background()
-			vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x11))
-
-			id1 := fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x03), tt.firstBlock)
-			id2 := fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x03), tt.secondBlock)
-
-			if id1 != id2 {
-				t.Errorf("active-row convergence must reuse the row: first=%d, second=%d", id1, id2)
-			}
-
-			got, err := fixture.getActiveAdapter(t, ctx, vaultID, adapterAddr(0x03))
-			if err != nil {
-				t.Fatalf("GetActiveAdapter: %v", err)
-			}
-			if got == nil {
-				t.Fatal("expected one active adapter row")
-			}
-			if got.AddedAtBlock != tt.wantConverged {
-				t.Errorf("added_at_block = %d, want %d (LEAST of the two observations)", got.AddedAtBlock, tt.wantConverged)
-			}
-
-			var count int
-			if err := fixture.pool.QueryRow(ctx,
-				`SELECT count(*) FROM morpho_adapter WHERE morpho_vault_id = $1 AND address = $2`,
-				vaultID, adapterAddr(0x03)).Scan(&count); err != nil {
-				t.Fatalf("counting adapter rows: %v", err)
-			}
-			if count != 1 {
-				t.Errorf("want exactly 1 adapter row (no duplicate active rows), got %d", count)
-			}
-		})
-	}
-}
-
-// TestGetOrCreateAdapter_BackfilledAddBeforeRemovalConvergesOntoClosedRow guards
-// against resurrecting a de-registered adapter. The live stream can lazily
-// register an adapter at block X and remove it at the same block (row: added X,
-// removed X). When the backfiller later replays the TRUE AddAdapter@W with W < X,
-// there is no active row — but the candidate belongs to the ALREADY-CLOSED
-// incarnation whose window covers it, so GetOrCreateAdapter must converge onto
-// that row (UPDATE added_at_block down to W, same id, removed_at_block still X),
-// NOT insert a second, spuriously-active incarnation that would feed
-// GetActiveAdaptersByVault / realAssets a de-registered adapter forever.
-func TestGetOrCreateAdapter_BackfilledAddBeforeRemovalConvergesOntoClosedRow(t *testing.T) {
-	fixture := setupMorphoTest(t)
-	ctx := context.Background()
-	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x2a))
-	addr := adapterAddr(0x2b)
-
-	const (
-		liveBlock     = int64(24600000) // lazy register + removal both land here
-		backfillBlock = int64(24481834) // the true AddAdapter, strictly earlier
-	)
-
-	// Live: lazily register at liveBlock, then remove at the same block.
-	id1 := fixture.createTestAdapter(t, ctx, vaultID, addr, liveBlock)
-	tx, err := fixture.pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	if err := fixture.repo.MarkAdapterRemoved(ctx, tx, vaultID, addr, liveBlock); err != nil {
-		t.Fatalf("MarkAdapterRemoved: %v", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-
-	// Backfill replays the true AddAdapter earlier than the removal: it must
-	// converge onto the closed incarnation, not create a new active row.
-	id2 := fixture.createTestAdapter(t, ctx, vaultID, addr, backfillBlock)
+	id1 := fixture.createTestAdapter(t, ctx, vaultID, addr, 24481834)
+	id2 := fixture.createTestAdapter(t, ctx, vaultID, addr, 24481834)
 
 	if id1 != id2 {
-		t.Errorf("backfilled add before the removal must converge onto the closed incarnation: id1=%d id2=%d", id1, id2)
+		t.Errorf("ObserveAdapterMembership not idempotent: first=%d, second=%d", id1, id2)
 	}
-
-	var count int
-	if err := fixture.pool.QueryRow(ctx,
-		`SELECT count(*) FROM morpho_adapter WHERE morpho_vault_id = $1 AND address = $2`,
-		vaultID, addr).Scan(&count); err != nil {
-		t.Fatalf("count: %v", err)
-	}
-	if count != 1 {
-		t.Fatalf("want exactly 1 row (no resurrected active incarnation), got %d", count)
-	}
-
-	var added int64
-	var removed *int64
-	if err := fixture.pool.QueryRow(ctx,
-		`SELECT added_at_block, removed_at_block FROM morpho_adapter WHERE morpho_vault_id = $1 AND address = $2`,
-		vaultID, addr).Scan(&added, &removed); err != nil {
-		t.Fatalf("query: %v", err)
-	}
-	if added != backfillBlock {
-		t.Errorf("added_at_block = %d, want %d (converged down to the true AddAdapter)", added, backfillBlock)
-	}
-	if removed == nil || *removed != liveBlock {
-		t.Errorf("removed_at_block = %v, want %d (incarnation stays closed)", removed, liveBlock)
-	}
-
-	got, err := fixture.getActiveAdapter(t, ctx, vaultID, addr)
-	if err != nil {
-		t.Fatalf("GetActiveAdapter: %v", err)
-	}
-	if got != nil {
-		t.Errorf("expected NO active adapter (must stay removed), got %+v", got)
+	if got := fixture.countMembership(t, ctx, id1); got != 1 {
+		t.Errorf("membership rows = %d, want 1: %s", got, fixture.describeMembership(t, ctx, id1))
 	}
 }
 
-// TestGetOrCreateAdapter_BackfilledAddConvergesClosedWindowNotActiveRow pins the
-// decision order for a removed-then-re-added adapter. Two incarnations coexist: a
-// CLOSED window (added 150, removed 200) and a later ACTIVE one (added 300, NULL).
-// A backfilled true AddAdapter@80 belongs to the FIRST incarnation, and the closed
-// window covers it (removed 200 >= 80), so it must converge onto the CLOSED row and
-// leave the re-added active row's lifetime intact. Converging the active row first
-// (matching regardless of window) would corrupt the live incarnation's
-// added_at_block down to 80 and never converge the closed one, silently wrecking
-// VEC-219's adapter-lifetime data.
-func TestGetOrCreateAdapter_BackfilledAddConvergesClosedWindowNotActiveRow(t *testing.T) {
-	fixture := setupMorphoTest(t)
-	ctx := context.Background()
-	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x2c))
-	addr := adapterAddr(0x2d)
-
-	const (
-		firstAdd    = int64(150)
-		removeBlock = int64(200)
-		reAdd       = int64(300)
-		backfill    = int64(80) // true AddAdapter of the FIRST incarnation, replayed late
-	)
-
-	// Seed the two incarnations via the repo's own methods: add→remove→re-add.
-	closedID := fixture.createTestAdapter(t, ctx, vaultID, addr, firstAdd)
-	tx, err := fixture.pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	if err := fixture.repo.MarkAdapterRemoved(ctx, tx, vaultID, addr, removeBlock); err != nil {
-		t.Fatalf("MarkAdapterRemoved: %v", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-	activeID := fixture.createTestAdapter(t, ctx, vaultID, addr, reAdd)
-
-	// Backfill the true AddAdapter of the closed incarnation, arriving late.
-	gotID := fixture.createTestAdapter(t, ctx, vaultID, addr, backfill)
-
-	if gotID != closedID {
-		t.Errorf("backfilled add@%d must converge onto the CLOSED incarnation id=%d, got id=%d (active row is id=%d)",
-			backfill, closedID, gotID, activeID)
-	}
-
-	readRow := func(id int64) (int64, *int64) {
-		var added int64
-		var removed *int64
-		if err := fixture.pool.QueryRow(ctx,
-			`SELECT added_at_block, removed_at_block FROM morpho_adapter WHERE id = $1`,
-			id).Scan(&added, &removed); err != nil {
-			t.Fatalf("reading row id=%d: %v", id, err)
-		}
-		return added, removed
-	}
-
-	closedAdded, closedRemoved := readRow(closedID)
-	if closedAdded != backfill {
-		t.Errorf("closed incarnation added_at_block = %d, want %d (converged down to the backfilled add)", closedAdded, backfill)
-	}
-	if closedRemoved == nil || *closedRemoved != removeBlock {
-		t.Errorf("closed incarnation removed_at_block = %v, want %d (window stays closed)", closedRemoved, removeBlock)
-	}
-
-	activeAdded, activeRemoved := readRow(activeID)
-	if activeAdded != reAdd {
-		t.Errorf("re-added incarnation added_at_block = %d, want %d (must stay untouched)", activeAdded, reAdd)
-	}
-	if activeRemoved != nil {
-		t.Errorf("re-added incarnation removed_at_block = %d, want NULL (must stay active)", *activeRemoved)
-	}
-
-	var count int
-	if err := fixture.pool.QueryRow(ctx,
-		`SELECT count(*) FROM morpho_adapter WHERE morpho_vault_id = $1 AND address = $2`,
-		vaultID, addr).Scan(&count); err != nil {
-		t.Fatalf("count: %v", err)
-	}
-	if count != 2 {
-		t.Errorf("want exactly 2 rows (closed + active, no new row), got %d", count)
-	}
-}
-
-// TestGetOrCreateAdapter_SameBlockReAddOpensANewIncarnation covers a governance
-// multicall that removes and immediately re-adds an adapter in ONE block: the logs
-// are processed in order, so the re-add's added_at_block equals the removal block.
-// The closed-window match must therefore be STRICT — an inclusive
-// removed_at_block >= candidate swallowed the re-add into the row it had just
-// closed, leaving the adapter with no active row on-DB while it is active on-chain.
-func TestGetOrCreateAdapter_SameBlockReAddOpensANewIncarnation(t *testing.T) {
-	fixture := setupMorphoTest(t)
-	ctx := context.Background()
-	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x35))
-	addr := adapterAddr(0x36)
-
-	const (
-		firstAdd    = int64(100)
-		sameBlockAt = int64(500)
-	)
-
-	closedID := fixture.createTestAdapter(t, ctx, vaultID, addr, firstAdd)
-	if err := fixture.markAdapterRemoved(t, ctx, vaultID, addr, sameBlockAt); err != nil {
-		t.Fatalf("MarkAdapterRemoved: %v", err)
-	}
-
-	reAddID := fixture.createTestAdapter(t, ctx, vaultID, addr, sameBlockAt)
-	if reAddID == closedID {
-		t.Fatalf("the same-block re-add must open a NEW incarnation, got the just-closed row id=%d", closedID)
-	}
-
-	active, err := fixture.getActiveAdapter(t, ctx, vaultID, addr)
-	if err != nil {
-		t.Fatalf("GetActiveAdapter: %v", err)
-	}
-	if active == nil {
-		t.Fatal("expected an ACTIVE adapter row after the same-block re-add")
-	}
-	if active.ID != reAddID || active.AddedAtBlock != sameBlockAt {
-		t.Errorf("active row = (id %d, added %d), want (id %d, added %d)", active.ID, active.AddedAtBlock, reAddID, sameBlockAt)
-	}
-}
-
-// TestGetOrCreateAdapter_BackfilledAddAtExactRemovalBlockStaysClosed is the other
-// side of the strict closed-window boundary: when the live stream lazily registered
-// AND removed an adapter in one block, a backfilled AddAdapter for that same block
-// is a late observation of the incarnation that already exists, not a new one — the
-// UNIQUE (vault, address, added_at_block) key folds it onto the closed row, so the
-// adapter stays de-registered.
-func TestGetOrCreateAdapter_BackfilledAddAtExactRemovalBlockStaysClosed(t *testing.T) {
-	fixture := setupMorphoTest(t)
-	ctx := context.Background()
-	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x37))
-	addr := adapterAddr(0x38)
-
-	const liveBlock = int64(24600000)
-
-	id1 := fixture.createTestAdapter(t, ctx, vaultID, addr, liveBlock)
-	if err := fixture.markAdapterRemoved(t, ctx, vaultID, addr, liveBlock); err != nil {
-		t.Fatalf("MarkAdapterRemoved: %v", err)
-	}
-
-	if id2 := fixture.createTestAdapter(t, ctx, vaultID, addr, liveBlock); id2 != id1 {
-		t.Errorf("backfilled add at the removal block must fold onto the existing row: got %d, want %d", id2, id1)
-	}
-
-	active, err := fixture.getActiveAdapter(t, ctx, vaultID, addr)
-	if err != nil {
-		t.Fatalf("GetActiveAdapter: %v", err)
-	}
-	if active != nil {
-		t.Errorf("expected NO active adapter, got %+v", active)
-	}
-}
-
-// adapterTypeConvergenceCases pins the curation rule shared by both convergence
-// paths: a row recorded as Unknown (the forward-compatible sentinel written when
-// the on-chain probe cannot classify an adapter) is upgraded when a replay supplies
-// a real type, and a known type is never overwritten. Without this, an adapter that
-// probed Unknown once stayed Unknown forever, and replay — the curation path the
-// schema comment promises — could not fix it.
-var adapterTypeConvergenceCases = []struct {
-	name     string
-	existing entity.MorphoAdapterType
-	replayed entity.MorphoAdapterType
-	want     entity.MorphoAdapterType
-}{
-	{"unknown is upgraded by a replayed known type", entity.MorphoAdapterTypeUnknown, entity.MorphoAdapterTypeMarketV1, entity.MorphoAdapterTypeMarketV1},
-	{"a known type is never downgraded to unknown", entity.MorphoAdapterTypeMarketV1, entity.MorphoAdapterTypeUnknown, entity.MorphoAdapterTypeMarketV1},
-	{"a known type is never replaced by another known type", entity.MorphoAdapterTypeVaultV1, entity.MorphoAdapterTypeMarketV1, entity.MorphoAdapterTypeVaultV1},
-}
-
-func TestGetOrCreateAdapter_ActiveRowConvergenceCuratesAdapterType(t *testing.T) {
-	for _, tt := range adapterTypeConvergenceCases {
-		t.Run(tt.name, func(t *testing.T) {
-			fixture := setupMorphoTest(t)
-			ctx := context.Background()
-			vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x39))
-			addr := adapterAddr(0x3a)
-
-			id := fixture.createTestAdapterOfType(t, ctx, vaultID, addr, 200, tt.existing)
-			fixture.createTestAdapterOfType(t, ctx, vaultID, addr, 100, tt.replayed)
-
-			if got := fixture.adapterTypeOf(t, ctx, id); got != tt.want {
-				t.Errorf("adapter_type = %d, want %d", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestGetOrCreateAdapter_ClosedWindowConvergenceCuratesAdapterType(t *testing.T) {
-	for _, tt := range adapterTypeConvergenceCases {
-		t.Run(tt.name, func(t *testing.T) {
-			fixture := setupMorphoTest(t)
-			ctx := context.Background()
-			vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x3b))
-			addr := adapterAddr(0x3c)
-
-			id := fixture.createTestAdapterOfType(t, ctx, vaultID, addr, 200, tt.existing)
-			if err := fixture.markAdapterRemoved(t, ctx, vaultID, addr, 500); err != nil {
-				t.Fatalf("MarkAdapterRemoved: %v", err)
-			}
-			fixture.createTestAdapterOfType(t, ctx, vaultID, addr, 100, tt.replayed)
-
-			if got := fixture.adapterTypeOf(t, ctx, id); got != tt.want {
-				t.Errorf("adapter_type = %d, want %d", got, tt.want)
-			}
-		})
-	}
-}
-
-// TestMorphoAdapter_UniqueActiveIncarnationIndexRejectsSecondActiveRow is the
-// database-level backstop for a writer that reaches morpho_adapter WITHOUT the
-// per-(vault, address) advisory lock both GetOrCreateAdapter and MarkAdapterRemoved
-// take — a future code path, a manual INSERT, or a migration. Unlocked, under READ
-// COMMITTED a registration can pass the closed-window check, then have its
-// active-row UPDATE re-checked by EvalPlanQual against a concurrently committed
-// removed_at_block, match 0 rows, and fall through to the INSERT — resurrecting a
-// de-registered adapter as a second ACTIVE row. The partial UNIQUE index makes that
-// INSERT abort so the retried event re-runs and lands in the closed-window path
-// instead. The raw INSERTs below stand in for such a lockless writer.
-func TestMorphoAdapter_UniqueActiveIncarnationIndexRejectsSecondActiveRow(t *testing.T) {
-	fixture := setupMorphoTest(t)
-	ctx := context.Background()
-	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x2e))
-	addr := adapterAddr(0x2f)
-
-	fixture.createTestAdapter(t, ctx, vaultID, addr, 100)
-
-	insertActive := func(addedAtBlock int64) error {
-		_, err := fixture.pool.Exec(ctx,
-			`INSERT INTO morpho_adapter (morpho_vault_id, address, asset_token_id, adapter_type, added_at_block, removed_at_block)
-			 VALUES ($1, $2, $3, 1, $4, NULL)`,
-			vaultID, addr, fixture.loanTokenID, addedAtBlock)
-		return err
-	}
-
-	if err := insertActive(200); err == nil {
-		t.Fatal("a second ACTIVE row for the same (vault, address) must violate the partial unique index")
-	}
-
-	// The index must not block the legitimate shape: one CLOSED incarnation plus
-	// one ACTIVE one, which is exactly what a removed-then-re-added adapter looks
-	// like.
-	tx, err := fixture.pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	if err := fixture.repo.MarkAdapterRemoved(ctx, tx, vaultID, addr, 150); err != nil {
-		t.Fatalf("MarkAdapterRemoved: %v", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-	if err := insertActive(200); err != nil {
-		t.Fatalf("closed + active incarnations must coexist: %v", err)
-	}
-}
-
-// --- MarkAdapterRemoved Tests ---
-
-// TestMarkAdapterRemoved_ClosesAndConverges is the authoritative matrix for which
-// block a removal closes an incarnation at. One behaviour, one row per input shape.
-//
-// The axes are whether the incarnation is still OPEN (this is its first close) or
-// already CLOSED (the removal is being re-observed), and how far the observed block
-// sits from the recorded one. A re-observation within maxRemovalRelocationDistance of
-// the recorded close, in EITHER direction, is the SAME on-chain removal that a reorg
-// relocated or a backfill replayed, so it converges to the earliest observation.
-// Beyond that window — either way — it cannot be the same removal: the row has
-// conflated two of the adapter's lifetimes, and converging would rewrite one of two
-// real de-registrations.
-//
-// The orphan guard (snapshots stranded outside the closed window) has its own tests
-// below; it asserts on a refused write rather than on a converged block.
-func TestMarkAdapterRemoved_ClosesAndConverges(t *testing.T) {
-	const (
-		addedAt    = int64(24481834)
-		firstClose = int64(24600000)
-	)
-
-	tests := []struct {
-		name        string
-		closeFirst  bool
-		removeAt    int64
-		wantErr     string
-		wantRemoved int64
-	}{
-		{
-			name:     "an open incarnation closes at the observed block",
-			removeAt: firstClose, wantRemoved: firstClose,
-		},
-		{
-			name:       "a replay of the recorded removal is an idempotent no-op",
-			closeFirst: true, removeAt: firstClose, wantRemoved: firstClose,
-		},
-		{
-			name:       "a removal relocated one block later keeps the earliest observation",
-			closeFirst: true, removeAt: firstClose + 1, wantRemoved: firstClose,
-		},
-		{
-			name:       "a removal relocated one block earlier converges down",
-			closeFirst: true, removeAt: firstClose - 1, wantRemoved: firstClose - 1,
-		},
-		{
-			name:       "a removal at the far upper edge of the reorg window still converges",
-			closeFirst: true, removeAt: firstClose + maxRemovalRelocationDistance, wantRemoved: firstClose,
-		},
-		{
-			name:       "a removal at the far lower edge of the reorg window still converges",
-			closeFirst: true, removeAt: firstClose - maxRemovalRelocationDistance,
-			wantRemoved: firstClose - maxRemovalRelocationDistance,
-		},
-		{
-			name:       "a removal above the reorg window is a conflated incarnation, not a relocation",
-			closeFirst: true, removeAt: firstClose + maxRemovalRelocationDistance + 1,
-			wantErr: "conflated incarnation", wantRemoved: firstClose,
-		},
-		{
-			name:       "a removal below the reorg window is a conflated incarnation, not a relocation",
-			closeFirst: true, removeAt: firstClose - maxRemovalRelocationDistance - 1,
-			wantErr: "conflated incarnation", wantRemoved: firstClose,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			fixture := setupMorphoTest(t)
-			ctx := context.Background()
-			vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x12))
-			addr := adapterAddr(0x04)
-			fixture.createTestAdapter(t, ctx, vaultID, addr, addedAt)
-
-			if tt.closeFirst {
-				if err := fixture.markAdapterRemoved(t, ctx, vaultID, addr, firstClose); err != nil {
-					t.Fatalf("recording the first close at %d: %v", firstClose, err)
-				}
-			}
-
-			err := fixture.markAdapterRemoved(t, ctx, vaultID, addr, tt.removeAt)
-			if tt.wantErr != "" {
-				if err == nil {
-					t.Fatalf("removal at %d must not be swallowed as a relocation of the close at %d", tt.removeAt, firstClose)
-				}
-				if !strings.Contains(err.Error(), tt.wantErr) {
-					t.Errorf("error %q should name the conflated-incarnation hypothesis (%q)", err.Error(), tt.wantErr)
-				}
-			} else if err != nil {
-				t.Fatalf("MarkAdapterRemoved(%d): %v", tt.removeAt, err)
-			}
-
-			var removed *int64
-			if err := fixture.pool.QueryRow(ctx,
-				`SELECT removed_at_block FROM morpho_adapter WHERE morpho_vault_id = $1 AND address = $2`,
-				vaultID, addr).Scan(&removed); err != nil {
-				t.Fatalf("query: %v", err)
-			}
-			if removed == nil || *removed != tt.wantRemoved {
-				t.Errorf("removed_at_block = %v, want %d", removed, tt.wantRemoved)
-			}
-		})
-	}
-}
-
-// TestCreateAdapterIncarnation_HealingAnUnobservedRemovalSparesALaterIncarnation
-// walks the two steps a RemoveAdapter takes when the adapter has no recorded
-// incarnation covering its block (ensureIncarnationToClose registers one, then
-// MarkAdapterRemoved closes it), and pins that a LATER incarnation of the same
-// address is untouched by both.
-//
-// Registering through the converging GetOrCreateAdapter is what made this unsafe: its
-// active-row match LEAST-converges added_at_block, so healing a historical removal at
-// 1000 dragged an on-chain-ACTIVE [1100, NULL] row down to added=1000 and the close
-// then de-registered it — an adapter still allocating on-chain, silently gone from the
-// registry. With no state rows on that row the orphan guard has nothing to refuse, so
-// this shape is precisely the one convergence cannot be allowed to touch.
-func TestCreateAdapterIncarnation_HealingAnUnobservedRemovalSparesALaterIncarnation(t *testing.T) {
-	fixture := setupMorphoTest(t)
-	ctx := context.Background()
-	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x52))
-	addr := adapterAddr(0x53)
-
-	const (
-		healedRemoval = int64(1000)
-		laterAdd      = int64(1100)
-	)
-
-	activeID := fixture.createTestAdapter(t, ctx, vaultID, addr, laterAdd)
-	if covering := fixture.adapterIncarnationAt(t, ctx, vaultID, addr, healedRemoval); covering != nil {
-		t.Fatalf("block %d must have no covering incarnation, so the removal takes the heal path", healedRemoval)
-	}
-
-	tx, err := fixture.pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	defer tx.Rollback(ctx)
-	synthetic := &entity.MorphoAdapter{
-		MorphoVaultID: vaultID,
-		Address:       addr,
-		AssetTokenID:  fixture.loanTokenID,
-		AdapterType:   entity.MorphoAdapterTypeMarketV1,
-		AddedAtBlock:  healedRemoval,
-	}
-	syntheticID, err := fixture.repo.createAdapterIncarnation(ctx, tx, synthetic, healedRemoval)
-	if err != nil {
-		t.Fatalf("CreateAdapterIncarnation: %v", err)
-	}
-	if err := fixture.repo.MarkAdapterRemoved(ctx, tx, vaultID, addr, healedRemoval); err != nil {
-		t.Fatalf("MarkAdapterRemoved after the heal: %v", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-
-	if syntheticID == activeID {
-		t.Errorf("the heal reused the later incarnation (id=%d) instead of inserting its own row", activeID)
-	}
-	want := fmt.Sprintf("id=%d [%d,%d] id=%d [%d,ACTIVE]", syntheticID, healedRemoval, healedRemoval, activeID, laterAdd)
-	if got := fixture.describeIncarnations(t, ctx, vaultID, addr); got != want {
-		t.Errorf("registry = %q, want %q", got, want)
-	}
-}
-
-// TestCreateAdapterIncarnation_ExactKeyConflictLeavesTheRecordedRowAlone pins the only
-// tolerated conflict. A row already recorded at the same (vault, address, added block)
-// is returned as-is: the DO UPDATE must not write the requested removed_at_block onto
-// it, or a heal racing an AddAdapter would close an incarnation the chain still has
-// open.
-func TestCreateAdapterIncarnation_ExactKeyConflictLeavesTheRecordedRowAlone(t *testing.T) {
-	fixture := setupMorphoTest(t)
-	ctx := context.Background()
-	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x54))
-	addr := adapterAddr(0x55)
-
-	const addedAt = int64(900)
-	openID := fixture.createTestAdapter(t, ctx, vaultID, addr, addedAt)
-
-	tx, err := fixture.pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	defer tx.Rollback(ctx)
-	got, err := fixture.repo.createAdapterIncarnation(ctx, tx, &entity.MorphoAdapter{
-		MorphoVaultID: vaultID,
-		Address:       addr,
-		AssetTokenID:  fixture.loanTokenID,
-		AdapterType:   entity.MorphoAdapterTypeMarketV1,
-		AddedAtBlock:  addedAt,
-	}, addedAt)
-	if err != nil {
-		t.Fatalf("CreateAdapterIncarnation: %v", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-
-	if got != openID {
-		t.Errorf("id = %d, want the existing row %d", got, openID)
-	}
-	got2 := fixture.describeIncarnations(t, ctx, vaultID, addr)
-	if want := fmt.Sprintf("id=%d [%d,ACTIVE]", openID, addedAt); got2 != want {
-		t.Errorf("registry = %q, want %q: the conflict must not close the existing row", got2, want)
-	}
-}
-
-// TestEnsureIncarnationToClose_DecidesAndRegistersUnderOneLock pins the read-then-write
-// serialization ADR-0002 §3 requires: the "is there an incarnation to close" read and the
-// registration it authorises must both happen under the adapter's advisory lock, or two
-// overlapping writers each decide "nothing on record" and mint their own incarnation for
-// one on-chain lifetime.
-//
-// The interleaving below is the live-worker-vs-backfiller one. An AddAdapter@900 holds the
-// lock uncommitted while a RemoveAdapter@1000 for the same adapter starts: with the
-// decisive read taken BEFORE the lock, the removal sees an empty registry, waits for the
-// lock only to insert, and lands a second [1000,1000] row beside the add's — leaving the
-// added row ACTIVE forever. Taking the lock first makes the removal read the add and close
-// IT, whichever order the two writers are granted the lock in.
-func TestEnsureIncarnationToClose_DecidesAndRegistersUnderOneLock(t *testing.T) {
-	fixture := setupMorphoTest(t)
-	ctx := context.Background()
-	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x58))
-	addr := adapterAddr(0x59)
-
-	const (
-		addAt    = int64(900)
-		removeAt = int64(1000)
-	)
-
-	addTx, err := fixture.pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin the AddAdapter transaction: %v", err)
-	}
-	defer addTx.Rollback(ctx)
-	addedID, err := fixture.repo.GetOrCreateAdapter(ctx, addTx, &entity.MorphoAdapter{
-		MorphoVaultID: vaultID,
-		Address:       addr,
-		AssetTokenID:  fixture.loanTokenID,
-		AdapterType:   entity.MorphoAdapterTypeMarketV1,
-		AddedAtBlock:  addAt,
-	})
-	if err != nil {
-		t.Fatalf("registering the adapter at %d: %v", addAt, err)
-	}
-
-	removed := make(chan error, 1)
-	go func() {
-		removed <- fixture.removeAdapter(ctx, vaultID, addr, removeAt, entity.MorphoAdapterTypeMarketV1)
-	}()
-
-	// Long enough for the removal to reach its decisive read; it can only get past the
-	// registration by waiting for the lock this transaction holds.
-	time.Sleep(500 * time.Millisecond)
-	if err := addTx.Commit(ctx); err != nil {
-		t.Fatalf("commit the AddAdapter transaction: %v", err)
-	}
-	if err := <-removed; err != nil {
-		t.Fatalf("RemoveAdapter@%d: %v", removeAt, err)
-	}
-
-	want := fmt.Sprintf("id=%d [%d,%d]", addedID, addAt, removeAt)
-	if got := fixture.describeIncarnations(t, ctx, vaultID, addr); got != want {
-		t.Errorf("registry = %q, want %q: the removal decided before it held the lock, so it minted its own incarnation instead of closing the one being added", got, want)
-	}
-}
-
-// TestEnsureIncarnationToClose_UnclassifiedCandidateIsRefused pins that a registration the
-// caller cannot classify is refused rather than recorded with a defaulted adapter_type. Only
-// the decisive read under the lock can tell whether a registration is needed at all, so the
-// caller cannot make this call itself — it hands over a nil candidate and gets a
-// distinguishable error back.
-func TestEnsureIncarnationToClose_UnclassifiedCandidateIsRefused(t *testing.T) {
-	fixture := setupMorphoTest(t)
-	ctx := context.Background()
-	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x62))
-	addr := adapterAddr(0x63)
-
-	tx, err := fixture.pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	defer tx.Rollback(ctx)
-
-	registered, err := fixture.repo.EnsureIncarnationToClose(ctx, tx, vaultID, addr, 1000, nil)
-	if !errors.Is(err, outbound.ErrAdapterUnclassified) {
-		t.Fatalf("err = %v, want ErrAdapterUnclassified", err)
-	}
-	if registered {
-		t.Error("a refused registration must not report having registered anything")
-	}
-	if err := tx.Commit(ctx); err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-	if got := fixture.describeIncarnations(t, ctx, vaultID, addr); got != "" {
-		t.Errorf("registry = %q, want empty: nothing may be recorded with a defaulted type", got)
-	}
-}
-
-// TestEnsureIncarnationToClose_RelocatedRemovalConvergesTheHealedRow is the
-// bounded-reorg-residue convergence for a HEALED removal, the one shape the covering
-// question alone cannot see.
-//
-// A removal for a lifetime nobody recorded heals [R,R]. When a reorg re-lands that same
-// removal a few blocks away, the healed row's added_at_block sits ABOVE the relocated
-// block, so nothing covers it and a second heal mints a second zero-length incarnation for
-// one on-chain removal. Recognising the recorded close as the relocation target instead
-// leaves exactly one row, converged to the earliest observation whichever way the removal
-// moved — and moves the healed row's added_at_block down with it, because that block is a
-// lower-bound placeholder rather than an observation and added_at_block <= removed_at_block
-// must hold.
-func TestEnsureIncarnationToClose_RelocatedRemovalConvergesTheHealedRow(t *testing.T) {
-	const healedAt = int64(1000)
-
-	tests := []struct {
-		name        string
-		relocatedTo int64
-		wantWindow  int64
-	}{
-		{name: "relocated a few blocks earlier", relocatedTo: healedAt - 10, wantWindow: healedAt - 10},
-		{name: "relocated a few blocks later", relocatedTo: healedAt + 10, wantWindow: healedAt},
-		{
-			name:        "relocated to the far lower edge of the reorg window",
-			relocatedTo: healedAt - maxRemovalRelocationDistance, wantWindow: healedAt - maxRemovalRelocationDistance,
-		},
-		{
-			name:        "relocated to the far upper edge of the reorg window",
-			relocatedTo: healedAt + maxRemovalRelocationDistance, wantWindow: healedAt,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			fixture := setupMorphoTest(t)
-			ctx := context.Background()
-			vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x5a))
-			addr := adapterAddr(0x5b)
-
-			if err := fixture.removeAdapter(ctx, vaultID, addr, healedAt, entity.MorphoAdapterTypeMarketV1); err != nil {
-				t.Fatalf("healing the unobserved removal at %d: %v", healedAt, err)
-			}
-			var healedID int64
-			if err := fixture.pool.QueryRow(ctx,
-				`SELECT id FROM morpho_adapter WHERE morpho_vault_id = $1 AND address = $2`,
-				vaultID, addr).Scan(&healedID); err != nil {
-				t.Fatalf("reading the healed incarnation: %v", err)
-			}
-
-			if err := fixture.removeAdapter(ctx, vaultID, addr, tt.relocatedTo, entity.MorphoAdapterTypeMarketV1); err != nil {
-				t.Fatalf("re-landing the removal at %d: %v", tt.relocatedTo, err)
-			}
-
-			want := fmt.Sprintf("id=%d [%d,%d]", healedID, tt.wantWindow, tt.wantWindow)
-			if got := fixture.describeIncarnations(t, ctx, vaultID, addr); got != want {
-				t.Errorf("registry = %q, want %q: the re-landed removal is the healed one relocated, not a second lifetime", got, want)
-			}
-		})
-	}
-}
-
-// TestEnsureIncarnationToClose_RemovalBeyondTheReorgWindowHealsAFreshIncarnation is the
-// other side of the relocation bound: too far from the recorded close to be the same
-// removal, so it is a lifetime of its own whose AddAdapter was never observed and it gets
-// its own row. Without this the relocation match above would swallow every unobserved
-// later lifetime into the previous one's close.
-func TestEnsureIncarnationToClose_RemovalBeyondTheReorgWindowHealsAFreshIncarnation(t *testing.T) {
-	const firstHeal = int64(900)
-
-	tests := []struct {
-		name     string
-		removeAt int64
-	}{
-		{name: "further above the recorded close than a reorg reaches", removeAt: firstHeal + maxRemovalRelocationDistance + 1},
-		{name: "further below the recorded close than a reorg reaches", removeAt: firstHeal - maxRemovalRelocationDistance - 1},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			fixture := setupMorphoTest(t)
-			ctx := context.Background()
-			vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x5c))
-			addr := adapterAddr(0x5d)
-
-			if err := fixture.removeAdapter(ctx, vaultID, addr, firstHeal, entity.MorphoAdapterTypeMarketV1); err != nil {
-				t.Fatalf("healing the unobserved removal at %d: %v", firstHeal, err)
-			}
-			if err := fixture.removeAdapter(ctx, vaultID, addr, tt.removeAt, entity.MorphoAdapterTypeMarketV1); err != nil {
-				t.Fatalf("healing the second unobserved removal at %d: %v", tt.removeAt, err)
-			}
-
-			registry := fixture.describeIncarnations(t, ctx, vaultID, addr)
-			for _, window := range []int64{firstHeal, tt.removeAt} {
-				if want := fmt.Sprintf("[%d,%d]", window, window); !strings.Contains(registry, want) {
-					t.Errorf("registry = %q, want an incarnation %s of its own", registry, want)
-				}
-			}
-			if got := strings.Count(registry, "id="); got != 2 {
-				t.Errorf("registry = %q, want 2 incarnations: the two removals are too far apart to be one", registry)
-			}
-		})
-	}
-}
-
-// TestEnsureIncarnationToClose_CoveringIncarnationWinsOverANearerClose pins the precedence
-// between the two ways a removal can already have a row to close. The registry below holds
-// a real lifetime [900, 1000] that CONTAINS the re-landed removal at 990, and a zero-length
-// [995, 995] whose recorded close sits NEARER to it. Containment wins: the removal narrows
-// the lifetime it happened inside, and that row's added_at_block — a real observation, not
-// the healed lower bound — is left where it is.
-func TestEnsureIncarnationToClose_CoveringIncarnationWinsOverANearerClose(t *testing.T) {
-	fixture := setupMorphoTest(t)
-	ctx := context.Background()
-	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x5e))
-	addr := adapterAddr(0x5f)
-
-	const (
-		addedAt     = int64(900)
-		recorded    = int64(1000)
-		nearerClose = int64(995)
-		relocatedTo = int64(990)
-	)
-
-	coveringID := fixture.createTestAdapter(t, ctx, vaultID, addr, addedAt)
-	if err := fixture.markAdapterRemoved(t, ctx, vaultID, addr, recorded); err != nil {
-		t.Fatalf("recording the removal at %d: %v", recorded, err)
-	}
-	nearerID := fixture.insertClosedIncarnation(t, ctx, vaultID, addr, nearerClose)
-
-	if err := fixture.removeAdapter(ctx, vaultID, addr, relocatedTo, entity.MorphoAdapterTypeMarketV1); err != nil {
-		t.Fatalf("re-landing the removal at %d: %v", relocatedTo, err)
-	}
-
-	want := fmt.Sprintf("id=%d [%d,%d] id=%d [%d,%d]", coveringID, addedAt, relocatedTo, nearerID, nearerClose, nearerClose)
-	if got := fixture.describeIncarnations(t, ctx, vaultID, addr); got != want {
-		t.Errorf("registry = %q, want %q", got, want)
-	}
-}
-
-// TestEnsureIncarnationToClose_RelocationOntoAnAmbiguousRegistryIsRefused pins what happens
-// when the relocation target and the incarnation MarkAdapterRemoved resolves are different
-// rows. The registry holds a fully observed [100, 200] and a healed [1000, 1000]; a removal
-// re-landing at 990 is a relocation of the healed close, but the row registered at or
-// before 990 is the unrelated first lifetime.
-//
-// Nothing here can tell which of the two the removal belongs to — that needs the
-// incarnation-sequence key the port doc defers — so it stops loudly on the relocation bound
-// rather than picking one. Healing a THIRD zero-length row instead, which is what asking
-// only the covering question did, is the outcome this refuses.
-func TestEnsureIncarnationToClose_RelocationOntoAnAmbiguousRegistryIsRefused(t *testing.T) {
-	fixture := setupMorphoTest(t)
-	ctx := context.Background()
-	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x60))
-	addr := adapterAddr(0x61)
-
-	const (
-		firstAdd    = int64(100)
-		firstRemove = int64(200)
-		healedAt    = int64(1000)
-		relocatedTo = int64(990)
-	)
-
-	firstID := fixture.createTestAdapter(t, ctx, vaultID, addr, firstAdd)
-	if err := fixture.markAdapterRemoved(t, ctx, vaultID, addr, firstRemove); err != nil {
-		t.Fatalf("recording the first removal at %d: %v", firstRemove, err)
-	}
-	if err := fixture.removeAdapter(ctx, vaultID, addr, healedAt, entity.MorphoAdapterTypeMarketV1); err != nil {
-		t.Fatalf("healing the second removal at %d: %v", healedAt, err)
-	}
-	var healedID int64
-	if err := fixture.pool.QueryRow(ctx,
-		`SELECT id FROM morpho_adapter WHERE morpho_vault_id = $1 AND address = $2 AND added_at_block = $3`,
-		vaultID, addr, healedAt).Scan(&healedID); err != nil {
-		t.Fatalf("reading the healed incarnation: %v", err)
-	}
-
-	err := fixture.removeAdapter(ctx, vaultID, addr, relocatedTo, entity.MorphoAdapterTypeMarketV1)
-	if err == nil {
-		t.Fatalf("a removal at %d must not be resolved silently: registry is now %s", relocatedTo, fixture.describeIncarnations(t, ctx, vaultID, addr))
-	}
-	if !strings.Contains(err.Error(), "conflated incarnation") {
-		t.Errorf("error %q should name the conflated-incarnation hypothesis", err.Error())
-	}
-
-	want := fmt.Sprintf("id=%d [%d,%d] id=%d [%d,%d]", firstID, firstAdd, firstRemove, healedID, healedAt, healedAt)
-	if got := fixture.describeIncarnations(t, ctx, vaultID, addr); got != want {
-		t.Errorf("registry = %q, want %q unchanged: the refused removal must write nothing", got, want)
-	}
-}
-
-// TestMarkAdapterRemoved_ConflatedIncarnationsFromABoundedReplayAreRefused walks
-// the full sequence a bounded historical replay puts an adapter through when the
-// registry has conflated two of its incarnations, and pins that it stops loudly
-// instead of erasing the recorded de-registration.
-//
-// True on-chain history is add@1000 / remove@1050 / add@1100 / remove@1200, but the
-// live stream discovered the vault mid-life and recorded only [1100, 1200], with its
-// realAssets snapshots hanging off that row. An operator then replays 1000-1150 — a
-// range that covers the FIRST incarnation's whole life but stops inside the second's.
-// Step by step: the replayed AddAdapter@1000 folds onto the recorded row (legitimate:
-// with no incarnation-sequence key, a mid-life-discovered row is exactly what a
-// backfilled add is supposed to converge), which makes the row cover 1050, so the
-// replayed RemoveAdapter@1050 registers nothing and lands on MarkAdapterRemoved with
-// a recorded close 150 blocks above it. Converging there would erase the real
-// removal at 1200 and leave an adapter that is de-registered on-chain permanently
-// ACTIVE in the registry, its two snapshots outside the window. A replay range that
-// also covered 1200 would repair the row, but nothing enforces that it does, so the
-// close block is a recorded fact this cannot silently rewrite.
-func TestMarkAdapterRemoved_ConflatedIncarnationsFromABoundedReplayAreRefused(t *testing.T) {
+// TestObserveAdapterMembership_RemovalOfUnknownAdapterIsRecorded pins the behaviour
+// change this redesign makes on the removal path. The old registry ERRORED on a removal
+// for an address it had never seen ("no adapter incarnation registered at or before
+// block N"), and the caller papered over that by probing the chain and healing a
+// zero-length [R,R] row. There is no lifetime to heal any more: a removal is one
+// observation, and the truthful record of "we first learned of this adapter when it was
+// de-registered" is exactly one untyped is_member=false row.
+func TestObserveAdapterMembership_RemovalOfUnknownAdapterIsRecorded(t *testing.T) {
 	fixture := setupMorphoTest(t)
 	ctx := context.Background()
 	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x50))
 	addr := adapterAddr(0x51)
 
-	const (
-		firstAdd     = int64(1000)
-		firstRemove  = int64(1050)
-		secondAdd    = int64(1100)
-		midLifeState = int64(1150)
-		secondRemove = int64(1200)
-	)
-
-	liveID := fixture.createTestAdapter(t, ctx, vaultID, addr, secondAdd)
-	fixture.seedAdapterStateAt(t, ctx, liveID, secondAdd)
-	fixture.seedAdapterStateAt(t, ctx, liveID, midLifeState)
-	if err := fixture.markAdapterRemoved(t, ctx, vaultID, addr, secondRemove); err != nil {
-		t.Fatalf("recording the live removal at %d: %v", secondRemove, err)
+	id, appended := fixture.observe(t, ctx, vaultID, addr, removedAt(24600000, 0, 3))
+	if !appended {
+		t.Error("a removal must always be recorded")
 	}
-
-	if got := fixture.createTestAdapter(t, ctx, vaultID, addr, firstAdd); got != liveID {
-		t.Fatalf("replayed AddAdapter@%d created id=%d; this scenario needs it to fold onto the live row %d", firstAdd, got, liveID)
+	if got := fixture.describeMembership(t, ctx, id); got != "24600000.v0.3 member=false type=nil via=remove_adapter_event pv=0" {
+		t.Errorf("membership log = %q", got)
 	}
-	if covering := fixture.adapterIncarnationAt(t, ctx, vaultID, addr, firstRemove); covering == nil {
-		t.Fatalf("the folded row must cover block %d, so the removal reaches MarkAdapterRemoved without registering anything", firstRemove)
-	}
-
-	if err := fixture.markAdapterRemoved(t, ctx, vaultID, addr, firstRemove); err == nil {
-		t.Errorf("removal at %d must be refused as a conflated incarnation, not converged onto the close recorded at %d; registry is now %s",
-			firstRemove, secondRemove, fixture.describeIncarnations(t, ctx, vaultID, addr))
-	} else if !strings.Contains(err.Error(), "conflated incarnation") {
-		t.Errorf("error %q should name the conflated-incarnation hypothesis", err.Error())
-	}
-
-	if got := fixture.describeIncarnations(t, ctx, vaultID, addr); got != fmt.Sprintf("id=%d [%d,%d]", liveID, firstAdd, secondRemove) {
-		t.Errorf("registry = %q, want the folded row still closed at %d: the recorded de-registration must survive the replay", got, secondRemove)
-	}
-}
-
-// TestMarkAdapterRemoved_ConvergingCloseRunsTheOrphanGuard pins that a downward
-// convergence is guarded too, not exempt: it narrows the window, so it can strand
-// snapshots the initial close legitimately admitted. Exempting this arm is what let a
-// conflated replay inside the reorg window erase a recorded de-registration.
-func TestMarkAdapterRemoved_ConvergingCloseRunsTheOrphanGuard(t *testing.T) {
-	const (
-		addedAt     = int64(100)
-		recorded    = int64(500)
-		relocatedTo = int64(499)
-	)
-
-	tests := []struct {
-		name        string
-		stateAt     int64
-		wantRemoved int64
-	}{
-		{name: "a snapshot the narrowed window would strand blocks it", stateAt: recorded, wantRemoved: recorded},
-		{name: "a snapshot still inside the narrowed window does not", stateAt: relocatedTo, wantRemoved: relocatedTo},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			fixture := setupMorphoTest(t)
-			ctx := context.Background()
-			vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x46))
-			addr := adapterAddr(0x47)
-
-			adapterID := fixture.createTestAdapter(t, ctx, vaultID, addr, addedAt)
-			if err := fixture.markAdapterRemoved(t, ctx, vaultID, addr, recorded); err != nil {
-				t.Fatalf("recording the removal at %d: %v", recorded, err)
-			}
-			fixture.seedAdapterStateAt(t, ctx, adapterID, tt.stateAt)
-
-			err := fixture.markAdapterRemoved(t, ctx, vaultID, addr, relocatedTo)
-			if wantRefused := tt.wantRemoved == recorded; wantRefused != (err != nil) {
-				t.Errorf("converging down to %d: err = %v, want refused = %v", relocatedTo, err, wantRefused)
-			}
-
-			var removed *int64
-			if err := fixture.pool.QueryRow(ctx,
-				`SELECT removed_at_block FROM morpho_adapter WHERE id = $1`, adapterID).Scan(&removed); err != nil {
-				t.Fatalf("query: %v", err)
-			}
-			if removed == nil || *removed != tt.wantRemoved {
-				t.Errorf("removed_at_block = %v, want %d", removed, tt.wantRemoved)
-			}
-		})
-	}
-}
-
-// TestMarkAdapterRemoved_ConflatedIncarnationsInsideTheReorgWindowAreRefused is the F1
-// corruption at a distance the relocation bound permits, and the reason the orphan
-// guard may not reason about block_version at all.
-//
-// True history is add@900 / remove@1000 / add@1010 / remove@1030 — the two lifetimes are
-// only 30 blocks apart, so a replay that conflates them converges INSIDE the reorg
-// window and the symmetric bound cannot refuse it. The orphan guard is then the only
-// thing standing between the replay and an erased de-registration, and the snapshots it
-// must catch sit in exactly the band a relocation would have vacated. Excluding them by
-// version — for any reason — hands the replay a silent pass.
-func TestMarkAdapterRemoved_ConflatedIncarnationsInsideTheReorgWindowAreRefused(t *testing.T) {
-	fixture := setupMorphoTest(t)
-	ctx := context.Background()
-	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x56))
-	addr := adapterAddr(0x57)
-
-	const (
-		firstAdd     = int64(900)
-		firstRemove  = int64(1000)
-		secondAdd    = int64(1010)
-		midLifeState = int64(1020)
-		secondRemove = int64(1030)
-	)
-
-	liveID := fixture.createTestAdapter(t, ctx, vaultID, addr, secondAdd)
-	fixture.seedAdapterStateAtVersion(t, ctx, liveID, secondAdd, 0)
-	fixture.seedAdapterStateAtVersion(t, ctx, liveID, midLifeState, 0)
-	if err := fixture.markAdapterRemoved(t, ctx, vaultID, addr, secondRemove); err != nil {
-		t.Fatalf("recording the live removal at %d: %v", secondRemove, err)
-	}
-
-	if got := fixture.createTestAdapter(t, ctx, vaultID, addr, firstAdd); got != liveID {
-		t.Fatalf("replayed AddAdapter@%d created id=%d; this scenario needs it to fold onto the live row %d", firstAdd, got, liveID)
-	}
-
-	// The replayed removal's own block was reorged once, so it carries a higher version
-	// than the untouched blocks its snapshots live in.
-	if err := fixture.markAdapterRemoved(t, ctx, vaultID, addr, firstRemove); err == nil {
-		t.Errorf("converging down to %d must be refused: it is %d blocks below the recorded close, inside the reorg window, so only the stranded snapshots distinguish a relocation from a conflated replay; registry is now %s",
-			firstRemove, secondRemove-firstRemove, fixture.describeIncarnations(t, ctx, vaultID, addr))
-	}
-
-	if got, want := fixture.describeIncarnations(t, ctx, vaultID, addr), fmt.Sprintf("id=%d [%d,%d]", liveID, firstAdd, secondRemove); got != want {
-		t.Errorf("registry = %q, want %q: the recorded de-registration must survive the replay", got, want)
-	}
-}
-
-// TestMarkAdapterRemoved_InitialCloseCountsEveryStateRowAboveIt pins that an
-// incarnation's FIRST close compares block_number only, at every distance.
-//
-// An initial close relocated nothing: there is no prior recorded close for a reorg to
-// have moved the removal away from, so the removal's own block_version says only "how
-// many times this height was republished" and carries no information about the heights
-// above it. Excluding lower-versioned snapshots there strands rows the canonical chain
-// owns — the shape seedDiscoveredAdapters' bootstrap contract relies on this guard to
-// catch, where a row seeded at a later discovery block is converged into an earlier
-// replayed window. The distances below straddle the reorg window deliberately: a fixed
-// 64-block band around the close is NOT a safe place to trust block_version either,
-// because block_version is a per-block_number counter, not a chain epoch.
-func TestMarkAdapterRemoved_InitialCloseCountsEveryStateRowAboveIt(t *testing.T) {
-	const (
-		trueAdd    = int64(100)
-		trueRemove = int64(500)
-	)
-
-	tests := []struct {
-		name        string
-		discoveryAt int64
-	}{
-		{name: "a snapshot just above the close", discoveryAt: trueRemove + 1},
-		{name: "a snapshot inside the reorg window", discoveryAt: trueRemove + maxRemovalRelocationDistance - 4},
-		{name: "a snapshot beyond the reorg window", discoveryAt: trueRemove + maxRemovalRelocationDistance + 1},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			fixture := setupMorphoTest(t)
-			ctx := context.Background()
-			vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x4a))
-			addr := adapterAddr(0x4b)
-
-			adapterID := fixture.createTestAdapter(t, ctx, vaultID, addr, tt.discoveryAt)
-			fixture.seedAdapterStateAtVersion(t, ctx, adapterID, tt.discoveryAt, 0)
-			if got := fixture.createTestAdapter(t, ctx, vaultID, addr, trueAdd); got != adapterID {
-				t.Fatalf("the replayed AddAdapter must fold onto the seeded row: got id=%d want %d", got, adapterID)
-			}
-
-			// The replayed removal's block was reorged once in history, so its receipt
-			// version is 1 — higher than the untouched discovery block's.
-			if err := fixture.markAdapterRemoved(t, ctx, vaultID, addr, trueRemove); err == nil {
-				t.Errorf("closing at %d must be refused: the snapshot at (%d, v0) is %d blocks above it and no reorg relocated this close, so its lower version is not evidence of a dead chain; registry is now %s",
-					trueRemove, tt.discoveryAt, tt.discoveryAt-trueRemove, fixture.describeIncarnations(t, ctx, vaultID, addr))
-			}
-		})
-	}
-}
-
-// TestMarkAdapterRemoved_RedeliveryAboveTheRecordedCloseSkipsTheOrphanGuard pins the
-// one exemption: a close that does not narrow the window. SQS delivers at least once,
-// and a redelivered removal whose block a reorg nudged upward converges to the
-// already-recorded close, leaving removed_at_block untouched. Re-asking the guard
-// there would fail a write that changes nothing, turning every redelivery into a
-// poison pill.
-func TestMarkAdapterRemoved_RedeliveryAboveTheRecordedCloseSkipsTheOrphanGuard(t *testing.T) {
-	fixture := setupMorphoTest(t)
-	ctx := context.Background()
-	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x48))
-	addr := adapterAddr(0x49)
-
-	const (
-		addedAt  = int64(100)
-		recorded = int64(500)
-	)
-
-	adapterID := fixture.createTestAdapter(t, ctx, vaultID, addr, addedAt)
-	if err := fixture.markAdapterRemoved(t, ctx, vaultID, addr, recorded); err != nil {
-		t.Fatalf("recording the removal at %d: %v", recorded, err)
-	}
-	fixture.seedAdapterStateAtVersion(t, ctx, adapterID, recorded+10, 1)
-
-	if err := fixture.markAdapterRemoved(t, ctx, vaultID, addr, recorded+1); err != nil {
-		t.Fatalf("a redelivery that leaves removed_at_block at %d must not be refused: %v", recorded, err)
-	}
-
-	var removed *int64
-	if err := fixture.pool.QueryRow(ctx,
-		`SELECT removed_at_block FROM morpho_adapter WHERE id = $1`, adapterID).Scan(&removed); err != nil {
-		t.Fatalf("query: %v", err)
-	}
-	if removed == nil || *removed != recorded {
-		t.Errorf("removed_at_block = %v, want %d unchanged", removed, recorded)
-	}
-}
-
-func TestMarkAdapterRemoved_UnknownAddressErrors(t *testing.T) {
-	fixture := setupMorphoTest(t)
-	ctx := context.Background()
-	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x14))
-
-	tx, err := fixture.pool.Begin(ctx)
+	active, err := fixture.getActiveAdapter(t, ctx, vaultID, addr)
 	if err != nil {
-		t.Fatalf("begin: %v", err)
+		t.Fatalf("GetActiveAdapter: %v", err)
 	}
-	defer tx.Rollback(ctx)
-
-	err = fixture.repo.MarkAdapterRemoved(ctx, tx, vaultID, adapterAddr(0x06), 24600000)
-	if err == nil {
-		t.Fatal("expected error for unknown adapter address, got nil")
+	if active != nil {
+		t.Errorf("expected no active adapter, got %+v", active)
+	}
+	// R3: an adapter first observed by its removal has no known type, and that is now
+	// representable rather than a hard failure.
+	if block := fixture.firstAddBlock(t, ctx, id); block != nil {
+		t.Errorf("first add block = %d, want NULL: no AddAdapter has ever been observed", *block)
 	}
 }
 
-// TestMarkAdapterRemoved_OrphaningStateRowsIsHardError reproduces the
-// multi-incarnation orphaning the reviewer found: AddAdapter@100 / RemoveAdapter@500
-// / AddAdapter@600 on-chain, but the vault is discovered at 1000, so the registry
-// seeds ONE row at added=1000 and hangs its adapter_state snapshots off it. The
-// backfiller then converges that row down to added=100 and replays the removal at
-// 500 — which would close a row that owns state rows at 1000+, stranding them
-// inside a [100, 500] window: window-filtered queries drop them, window-ignoring
-// queries double-count them against the second incarnation. The removal must fail
-// loudly instead, so the event poison-pills and the snapshots get re-homed.
-func TestMarkAdapterRemoved_OrphaningStateRowsIsHardError(t *testing.T) {
+// TestObserveAdapterMembership_LatestTransitionWinsUnderReorgVersions pins the ordering
+// tuple. A re-indexed block is a HIGHER block_version at the same block_number, so it
+// wins there without anything being edited — and a later block wins outright, whatever
+// version either carries.
+func TestObserveAdapterMembership_LatestTransitionWinsUnderReorgVersions(t *testing.T) {
 	fixture := setupMorphoTest(t)
 	ctx := context.Background()
 	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x31))
-	addr := adapterAddr(0x32)
 
-	const (
-		trueAdd       = int64(100)
-		trueRemove    = int64(500)
-		discoveryAt   = int64(1000)
-		laterSnapshot = int64(1010)
-	)
+	t.Run("a higher block_version at the same block wins", func(t *testing.T) {
+		addr := adapterAddr(0x32)
+		id, _ := fixture.observe(t, ctx, vaultID, addr, addedAt(1000, 0, 2, entity.MorphoAdapterTypeMarketV1))
+		fixture.observe(t, ctx, vaultID, addr, removedAt(1000, 1, 2))
 
-	adapterID := fixture.createTestAdapter(t, ctx, vaultID, addr, discoveryAt)
-	fixture.seedAdapterStateAt(t, ctx, adapterID, discoveryAt)
-	fixture.seedAdapterStateAt(t, ctx, adapterID, laterSnapshot)
+		if fixture.isMemberAt(t, ctx, vaultID, addr, 1000) {
+			t.Errorf("the re-indexed block says the adapter is gone: %s", fixture.describeMembership(t, ctx, id))
+		}
+		if got := fixture.countMembership(t, ctx, id); got != 2 {
+			t.Errorf("membership rows = %d, want 2 (nothing is overwritten)", got)
+		}
+	})
 
-	// Backfill replays the true AddAdapter, converging the row down to block 100.
-	if got := fixture.createTestAdapter(t, ctx, vaultID, addr, trueAdd); got != adapterID {
-		t.Fatalf("backfilled add should converge onto the seeded row: got id=%d want %d", got, adapterID)
-	}
+	t.Run("a higher block wins whatever version either carries", func(t *testing.T) {
+		addr := adapterAddr(0x33)
+		id, _ := fixture.observe(t, ctx, vaultID, addr, removedAt(1000, 3, 2))
+		fixture.observe(t, ctx, vaultID, addr, addedAt(1001, 0, 1, entity.MorphoAdapterTypeVaultV1))
 
-	err := fixture.markAdapterRemoved(t, ctx, vaultID, addr, trueRemove)
-	if err == nil {
-		t.Fatal("closing an incarnation that owns later adapter_state rows must be a hard error")
-	}
-
-	var removed *int64
-	if err := fixture.pool.QueryRow(ctx,
-		`SELECT removed_at_block FROM morpho_adapter WHERE id = $1`, adapterID).Scan(&removed); err != nil {
-		t.Fatalf("query: %v", err)
-	}
-	if removed != nil {
-		t.Errorf("removed_at_block = %d, want NULL (the failed close must not commit)", *removed)
-	}
+		if !fixture.isMemberAt(t, ctx, vaultID, addr, 1001) {
+			t.Errorf("the later block must win: %s", fixture.describeMembership(t, ctx, id))
+		}
+		if fixture.isMemberAt(t, ctx, vaultID, addr, 1000) {
+			t.Errorf("as of 1000 the adapter was still gone: %s", fixture.describeMembership(t, ctx, id))
+		}
+	})
 }
 
-// TestMarkAdapterRemoved_StateRowAtRemovalBlockIsAllowed pins the guard's boundary:
-// an allocation snapshot taken in the SAME block as the removal (the Deallocate log
-// that precedes the RemoveAdapter log in one governance transaction) is inside the
-// closed window, so it must not block the close.
-func TestMarkAdapterRemoved_StateRowAtRemovalBlockIsAllowed(t *testing.T) {
+// TestObserveAdapterMembership_SameBlockAddRemoveReAdd covers the shape the previous
+// design documented as unrepresentable: a governance multicall that adds, removes and
+// re-adds one adapter inside a single block collapsed onto one row, leaving the adapter
+// de-registered on-DB while it was active on-chain. log_index in the key makes the three
+// observations three rows, and the ordering resolves them.
+func TestObserveAdapterMembership_SameBlockAddRemoveReAdd(t *testing.T) {
 	fixture := setupMorphoTest(t)
 	ctx := context.Background()
-	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x33))
-	addr := adapterAddr(0x34)
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x34))
+	addr := adapterAddr(0x35)
 
-	adapterID := fixture.createTestAdapter(t, ctx, vaultID, addr, 100)
-	fixture.seedAdapterStateAt(t, ctx, adapterID, 500)
+	id, _ := fixture.observe(t, ctx, vaultID, addr, addedAt(2000, 0, 3, entity.MorphoAdapterTypeMarketV1))
+	fixture.observe(t, ctx, vaultID, addr, removedAt(2000, 0, 5))
+	fixture.observe(t, ctx, vaultID, addr, addedAt(2000, 0, 9, entity.MorphoAdapterTypeMarketV1))
 
-	if err := fixture.markAdapterRemoved(t, ctx, vaultID, addr, 500); err != nil {
-		t.Fatalf("a state row at the removal block must not block the close: %v", err)
+	if got := fixture.countMembership(t, ctx, id); got != 3 {
+		t.Errorf("membership rows = %d, want 3: %s", got, fixture.describeMembership(t, ctx, id))
+	}
+	active, err := fixture.getActiveAdapter(t, ctx, vaultID, addr)
+	if err != nil {
+		t.Fatalf("GetActiveAdapter: %v", err)
+	}
+	if active == nil {
+		t.Fatalf("the re-add at log index 9 is the last word in the block: %s", fixture.describeMembership(t, ctx, id))
+	}
+	// Between the removal and the re-add the adapter really was out of the set.
+	between, err := fixture.repo.GetActiveAdapterAt(ctx, vaultID, addr, entity.BlockPosition{BlockNumber: 2000, BlockVersion: 0, LogIndex: 6})
+	if err != nil {
+		t.Fatalf("GetActiveAdapterAt: %v", err)
+	}
+	if between != nil {
+		t.Errorf("at log index 6 the adapter was removed, got %+v", between)
 	}
 }
 
-// TestMarkAdapterRemoved_ReplayOldRemovalSparesReAddedRow guards the added_at_block
-// scope: an adapter added→removed@X→re-added at a2>X, then a replay of the old
-// RemoveAdapter@X must re-match the originally-removed incarnation and leave the
-// active re-added row untouched (rather than closing it with a block earlier than
-// its own registration).
-func TestMarkAdapterRemoved_ReplayOldRemovalSparesReAddedRow(t *testing.T) {
+// TestObserveAdapterMembership_IdempotentReAppendAndNewBuild pins the redelivery and
+// reprocess semantics: the same observation from the same build dedupes on the PK, while
+// a deliberate reprocess (a new build_id) takes MAX+1 and orders LAST, so the reprocessed
+// row is the one that wins without anything being updated.
+func TestObserveAdapterMembership_IdempotentReAppendAndNewBuild(t *testing.T) {
 	fixture := setupMorphoTest(t)
 	ctx := context.Background()
-	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x1a))
-	addr := adapterAddr(0x0e)
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x36))
+	addr := adapterAddr(0x37)
 
-	const (
-		firstAdd    = int64(24481834)
-		removeBlock = int64(24600000)
-		reAdd       = int64(24700000)
-	)
+	observation := addedAt(3000, 0, 4, entity.MorphoAdapterTypeMarketV1)
+	id, _ := fixture.observe(t, ctx, vaultID, addr, observation)
+	fixture.observe(t, ctx, vaultID, addr, observation)
 
-	mark := func(block int64) error {
-		tx, err := fixture.pool.Begin(ctx)
-		if err != nil {
-			return err
-		}
-		defer tx.Rollback(ctx)
-		if err := fixture.repo.MarkAdapterRemoved(ctx, tx, vaultID, addr, block); err != nil {
-			return err
-		}
-		return tx.Commit(ctx)
-	}
-	removedAt := func(addedAtBlock int64) *int64 {
-		var removed *int64
-		if err := fixture.pool.QueryRow(ctx,
-			`SELECT removed_at_block FROM morpho_adapter WHERE morpho_vault_id = $1 AND address = $2 AND added_at_block = $3`,
-			vaultID, addr, addedAtBlock).Scan(&removed); err != nil {
-			t.Fatalf("reading removed_at_block for added_at_block %d: %v", addedAtBlock, err)
-		}
-		return removed
+	if got := fixture.countMembership(t, ctx, id); got != 1 {
+		t.Fatalf("a same-build re-observation must dedupe, got %d rows: %s", got, fixture.describeMembership(t, ctx, id))
 	}
 
-	fixture.createTestAdapter(t, ctx, vaultID, addr, firstAdd)
-	if err := mark(removeBlock); err != nil {
-		t.Fatalf("removing first incarnation: %v", err)
+	repoBuild1, err := NewMorphoRepository(morphoPool, nil, 1)
+	if err != nil {
+		t.Fatalf("NewMorphoRepository build 1: %v", err)
 	}
-	fixture.createTestAdapter(t, ctx, vaultID, addr, reAdd)
-
-	// Replay the old removal at removeBlock.
-	if err := mark(removeBlock); err != nil {
-		t.Fatalf("replaying removal at %d: %v", removeBlock, err)
-	}
-
-	if got := removedAt(reAdd); got != nil {
-		t.Errorf("re-added incarnation (added %d) was wrongly closed at %d; must stay active", reAdd, *got)
-	}
-	if got := removedAt(firstAdd); got == nil || *got != removeBlock {
-		t.Errorf("originally-removed incarnation removed_at_block = %v, want %d", got, removeBlock)
-	}
-}
-
-// --- GetAdapterIncarnationAt Tests ---
-
-// TestGetAdapterIncarnationAt pins the covering lookup a RemoveAdapter's decision
-// starts from. The load-bearing case is the last two rows: an incarnation closed AT
-// the block covers it (so a replayed removal is idempotent against that row instead
-// of minting a zero-length duplicate), while one closed BELOW it does not — the
-// decision then falls through to the nearby-close relocation question, and only a
-// close beyond the relocation bound leads to registering a fresh incarnation.
-func TestGetAdapterIncarnationAt(t *testing.T) {
-	const (
-		addedAt  = int64(100)
-		closedAt = int64(500)
-	)
-
-	tests := []struct {
-		name    string
-		close   bool
-		atBlock int64
-		wantHit bool
-	}{
-		{name: "an open incarnation covers a later block", atBlock: 900, wantHit: true},
-		{name: "an open incarnation covers its own registration block", atBlock: addedAt, wantHit: true},
-		{name: "no incarnation covers a block before the registration", atBlock: addedAt - 1},
-		{name: "a closed incarnation covers a block inside its window", close: true, atBlock: 300, wantHit: true},
-		{name: "a closed incarnation covers the block it closed at", close: true, atBlock: closedAt, wantHit: true},
-		{name: "a closed incarnation does not cover a block above its close", close: true, atBlock: closedAt + 1},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			fixture := setupMorphoTest(t)
-			ctx := context.Background()
-			vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x42))
-			addr := adapterAddr(0x43)
-
-			adapterID := fixture.createTestAdapter(t, ctx, vaultID, addr, addedAt)
-			if tt.close {
-				if err := fixture.markAdapterRemoved(t, ctx, vaultID, addr, closedAt); err != nil {
-					t.Fatalf("MarkAdapterRemoved: %v", err)
-				}
-			}
-
-			tx, err := fixture.pool.Begin(ctx)
-			if err != nil {
-				t.Fatalf("begin: %v", err)
-			}
-			defer tx.Rollback(ctx)
-
-			got, err := fixture.repo.getAdapterIncarnationAt(ctx, tx, vaultID, addr, tt.atBlock)
-			if err != nil {
-				t.Fatalf("GetAdapterIncarnationAt(%d): %v", tt.atBlock, err)
-			}
-			if !tt.wantHit {
-				if got != nil {
-					t.Fatalf("expected no incarnation covering block %d, got id=%d", tt.atBlock, got.ID)
-				}
-				return
-			}
-			if got == nil {
-				t.Fatalf("expected the incarnation covering block %d", tt.atBlock)
-			}
-			if got.ID != adapterID || got.AddedAtBlock != addedAt {
-				t.Errorf("incarnation = (id %d, added %d), want (id %d, added %d)", got.ID, got.AddedAtBlock, adapterID, addedAt)
-			}
-		})
-	}
-}
-
-// TestGetAdapterIncarnationAt_PicksTheLatestCoveringIncarnation guards the
-// ORDER BY added_at_block DESC: with a closed [100, 500] and an active [600, …] row
-// coexisting, a removal at 700 must resolve to the active incarnation.
-func TestGetAdapterIncarnationAt_PicksTheLatestCoveringIncarnation(t *testing.T) {
-	fixture := setupMorphoTest(t)
-	ctx := context.Background()
-	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x44))
-	addr := adapterAddr(0x45)
-
-	fixture.createTestAdapter(t, ctx, vaultID, addr, 100)
-	if err := fixture.markAdapterRemoved(t, ctx, vaultID, addr, 500); err != nil {
-		t.Fatalf("MarkAdapterRemoved: %v", err)
-	}
-	reAddID := fixture.createTestAdapter(t, ctx, vaultID, addr, 600)
-
 	tx, err := fixture.pool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
 	defer tx.Rollback(ctx)
-
-	got, err := fixture.repo.getAdapterIncarnationAt(ctx, tx, vaultID, addr, 700)
-	if err != nil {
-		t.Fatalf("GetAdapterIncarnationAt: %v", err)
+	if _, _, err := repoBuild1.ObserveAdapterMembership(ctx, tx, &entity.MorphoAdapterObservation{
+		Identity:   entity.MorphoAdapterIdentity{MorphoVaultID: vaultID, Address: addr, AssetTokenID: fixture.loanTokenID},
+		Membership: observation,
+	}); err != nil {
+		t.Fatalf("reprocess under build 1: %v", err)
 	}
-	if got == nil || got.ID != reAddID {
-		t.Fatalf("incarnation = %+v, want the re-added row id=%d", got, reAddID)
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	var count, maxVer int
+	if err := fixture.pool.QueryRow(ctx,
+		`SELECT count(*), MAX(processing_version) FROM morpho_adapter_membership WHERE morpho_adapter_id = $1`, id,
+	).Scan(&count, &maxVer); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if count != 2 || maxVer != 1 {
+		t.Errorf("reprocess = %d rows / max processing_version %d, want 2 / 1: %s",
+			count, maxVer, fixture.describeMembership(t, ctx, id))
+	}
+	if !fixture.isMemberAt(t, ctx, vaultID, addr, 3000) {
+		t.Error("the reprocessed row carries the same answer, so membership is unchanged")
+	}
+}
+
+// TestObserveAdapterMembership_RelocatedRemovalNeedsNoBound is the direct replacement for
+// the ±64-block symmetric relocation bound and its 8-row semantic matrix. A removal
+// re-observed at a different block is simply another row at its own position: both are
+// retained, every as-of answer is decided by the ordering tuple, and nothing errors —
+// including at distances the old bound refused outright.
+func TestObserveAdapterMembership_RelocatedRemovalNeedsNoBound(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x38))
+	addr := adapterAddr(0x39)
+
+	id := fixture.createTestAdapter(t, ctx, vaultID, addr, 900)
+	fixture.observe(t, ctx, vaultID, addr, removedAt(1000, 0, 1))
+	fixture.observe(t, ctx, vaultID, addr, removedAt(990, 0, 1))
+
+	if got := fixture.countMembership(t, ctx, id); got != 3 {
+		t.Errorf("membership rows = %d, want 3 (both removals retained): %s", got, fixture.describeMembership(t, ctx, id))
+	}
+	if !fixture.isMemberAt(t, ctx, vaultID, addr, 950) {
+		t.Error("as of 950 the adapter was still a member")
+	}
+	if fixture.isMemberAt(t, ctx, vaultID, addr, 995) {
+		t.Error("as of 995 the relocated removal already applies")
+	}
+	if fixture.isMemberAt(t, ctx, vaultID, addr, 1005) {
+		t.Error("as of 1005 the adapter is gone")
+	}
+
+	// A re-observation far outside the old ±64 reorg window is refused by nothing.
+	fixture.observe(t, ctx, vaultID, addr, removedAt(500, 0, 1))
+	if fixture.isMemberAt(t, ctx, vaultID, addr, 600) {
+		t.Errorf("the 500 observation stands on its own: %s", fixture.describeMembership(t, ctx, id))
+	}
+}
+
+// TestObserveAdapterMembership_CloseNeverOrphansSnapshots is the inverse of the deleted
+// orphan guard. Snapshots hang off an identity id that no lifecycle observation can move,
+// so a de-registration recorded BELOW existing snapshots is simply recorded: no refusal,
+// no poison pill, and every snapshot keeps its adapter.
+func TestObserveAdapterMembership_CloseNeverOrphansSnapshots(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x3a))
+	addr := adapterAddr(0x3b)
+
+	id := fixture.createTestAdapter(t, ctx, vaultID, addr, 400)
+	fixture.seedAdapterStateAt(t, ctx, id, 1000)
+	fixture.seedAdapterStateAt(t, ctx, id, 1010)
+
+	if _, _, err := fixture.observeErr(ctx, vaultID, addr, removedAt(500, 0, 2)); err != nil {
+		t.Fatalf("recording a removal below existing snapshots must not fail: %v", err)
+	}
+
+	var orphaned int
+	if err := fixture.pool.QueryRow(ctx,
+		`SELECT count(*) FROM morpho_adapter_state WHERE morpho_adapter_id = $1`, id,
+	).Scan(&orphaned); err != nil {
+		t.Fatalf("counting snapshots: %v", err)
+	}
+	if orphaned != 2 {
+		t.Errorf("snapshots = %d, want 2 still hanging off adapter %d", orphaned, id)
+	}
+	if fixture.isMemberAt(t, ctx, vaultID, addr, 1010) {
+		t.Errorf("the removal is on record: %s", fixture.describeMembership(t, ctx, id))
+	}
+}
+
+// TestObserveAdapterMembership_AddBlockConvergesInEitherArrivalOrder is the
+// order-independence theorem, and the reason "when was it added" is a MIN over the log
+// rather than a column some writer converges. A mid-life discovery ASSERTS membership at
+// the discovery block; the true AddAdapter is a TRANSITION at its own, lower block. Both
+// arrival orders land on the same two answers.
+//
+// The two orders do not produce the same ROWS, deliberately: replaying the add after a
+// discovery adds the transition the log was missing, whereas a discovery after the add
+// asserts an answer the log already gives and writes nothing. Only the answers are
+// claimed to converge.
+func TestObserveAdapterMembership_AddBlockConvergesInEitherArrivalOrder(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x3c))
+
+	discovery := assertedAt(2000, 0, entity.EndOfBlockLogIndex, adapterTypePtr(entity.MorphoAdapterTypeMarketV1), entity.MembershipFromDiscovery)
+	add := addedAt(1000, 0, 6, entity.MorphoAdapterTypeMarketV1)
+
+	orders := []struct {
+		name string
+		addr []byte
+		seq  []entity.MorphoAdapterMembership
+	}{
+		{"discovery then the replayed add", adapterAddr(0x3d), []entity.MorphoAdapterMembership{discovery, add}},
+		{"the add then a later discovery", adapterAddr(0x3e), []entity.MorphoAdapterMembership{add, discovery}},
+	}
+	for _, order := range orders {
+		t.Run(order.name, func(t *testing.T) {
+			var id int64
+			for _, m := range order.seq {
+				id, _ = fixture.observe(t, ctx, vaultID, order.addr, m)
+			}
+			if block := fixture.firstAddBlock(t, ctx, id); block == nil || *block != 1000 {
+				t.Errorf("first add block = %v, want 1000: %s", block, fixture.describeMembership(t, ctx, id))
+			}
+			if !fixture.isMemberAt(t, ctx, vaultID, order.addr, 2000) {
+				t.Errorf("membership at 2000: %s", fixture.describeMembership(t, ctx, id))
+			}
+			if !fixture.isMemberAt(t, ctx, vaultID, order.addr, 1000) {
+				t.Errorf("membership at 1000: %s", fixture.describeMembership(t, ctx, id))
+			}
+			if fixture.isMemberAt(t, ctx, vaultID, order.addr, 999) {
+				t.Errorf("nothing is claimed below the add: %s", fixture.describeMembership(t, ctx, id))
+			}
+		})
+	}
+}
+
+// TestObserveAdapterMembership_AssertionThatChangesNothingAppendsNothing pins the
+// conditional that keeps a governance-rate table governance-rate. An Allocate proves
+// membership but witnesses no change, so once the log already says "member" at that
+// position, further allocations write nothing at all.
+func TestObserveAdapterMembership_AssertionThatChangesNothingAppendsNothing(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x3f))
+	addr := adapterAddr(0x40)
+
+	id := fixture.createTestAdapter(t, ctx, vaultID, addr, 1000)
+
+	for _, logIndex := range []int32{2, 11} {
+		_, appended := fixture.observe(t, ctx, vaultID, addr,
+			assertedAt(1500, 0, logIndex, adapterTypePtr(entity.MorphoAdapterTypeMarketV1), entity.MembershipFromAllocation))
+		if appended {
+			t.Errorf("allocation at log index %d appended although the log already said member", logIndex)
+		}
+	}
+	if got := fixture.countMembership(t, ctx, id); got != 1 {
+		t.Errorf("membership rows = %d, want 1: %s", got, fixture.describeMembership(t, ctx, id))
+	}
+
+	// It DOES append when it changes the answer: after a removal, an allocation is
+	// evidence the adapter is back in the set.
+	fixture.observe(t, ctx, vaultID, addr, removedAt(1600, 0, 1))
+	_, appended := fixture.observe(t, ctx, vaultID, addr,
+		assertedAt(1700, 0, 4, adapterTypePtr(entity.MorphoAdapterTypeMarketV1), entity.MembershipFromAllocation))
+	if !appended {
+		t.Errorf("an allocation after a removal must be recorded: %s", fixture.describeMembership(t, ctx, id))
+	}
+}
+
+// TestObserveAdapterMembership_UnclassifiedMembershipAssertionIsRefused pins the one
+// place ErrAdapterUnclassified survives. The caller probes the type only when its
+// pre-transaction read says the adapter is NOT a member; if the in-transaction decision
+// disagrees, recording membership would need a classification nobody has, and a defaulted
+// type is worse than a failed event.
+func TestObserveAdapterMembership_UnclassifiedMembershipAssertionIsRefused(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x41))
+	addr := adapterAddr(0x42)
+
+	_, _, err := fixture.observeErr(ctx, vaultID, addr,
+		assertedAt(1200, 0, 3, nil, entity.MembershipFromAllocation))
+	if !errors.Is(err, outbound.ErrAdapterUnclassified) {
+		t.Fatalf("error = %v, want ErrAdapterUnclassified", err)
+	}
+	// Nothing is written: the transaction is rolled back, so not even the identity row
+	// survives. The table's CHECK is the structural backstop behind this.
+	if got := fixture.countIdentityRows(t, ctx, vaultID, addr); got != 0 {
+		t.Errorf("identity rows = %d, want 0 after a refused observation", got)
+	}
+}
+
+// TestObserveAdapterMembership_IdentityRowIsWrittenOnce pins the invariant that replaces
+// the whole incarnation model: one identity row per (vault, address) forever, with a
+// stable id, and at least one observation hanging off it (R5).
+func TestObserveAdapterMembership_IdentityRowIsWrittenOnce(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x43))
+	addr := adapterAddr(0x44)
+
+	first, _ := fixture.observe(t, ctx, vaultID, addr, addedAt(1000, 0, 1, entity.MorphoAdapterTypeMarketV1))
+	second, _ := fixture.observe(t, ctx, vaultID, addr, removedAt(1100, 0, 1))
+	third, _ := fixture.observe(t, ctx, vaultID, addr, addedAt(1200, 0, 1, entity.MorphoAdapterTypeVaultV1))
+
+	if first != second || second != third {
+		t.Errorf("the identity id moved across observations: %d, %d, %d", first, second, third)
+	}
+	if got := fixture.countIdentityRows(t, ctx, vaultID, addr); got != 1 {
+		t.Errorf("identity rows = %d, want exactly 1 forever", got)
+	}
+
+	var stranded int
+	if err := fixture.pool.QueryRow(ctx,
+		`SELECT count(*) FROM morpho_adapter a
+		 WHERE NOT EXISTS (SELECT 1 FROM morpho_adapter_membership m WHERE m.morpho_adapter_id = a.id)`,
+	).Scan(&stranded); err != nil {
+		t.Fatalf("checking the every-identity-has-an-observation invariant: %v", err)
+	}
+	if stranded != 0 {
+		t.Errorf("%d identity rows carry no observation", stranded)
+	}
+}
+
+// TestObserveAdapterMembership_ConcurrentAssertionsAppendOnce pins the surviving advisory
+// lock. An assertion decides whether to append by reading the log, so two overlapping
+// writers that both read "nothing here" would each decide to append for one on-chain
+// fact — ON CONFLICT cannot catch that, because the decision precedes the insert
+// (ADR-0002 §3). Taking the lock BEFORE the decisive read makes the second writer see the
+// first's committed answer and append nothing.
+//
+// The adapter is deliberately seeded FIRST, with a committed removal. If the identity row
+// did not exist yet, the two writers would serialize on its speculative insert instead —
+// ON CONFLICT DO NOTHING waits out a conflicting inserter — and the test would pass with
+// the lock deleted. What is under test is the decision, so the identity must be settled
+// before the race starts, and the prior removal is what gives both writers something to
+// change.
+func TestObserveAdapterMembership_ConcurrentAssertionsAppendOnce(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x45))
+	addr := adapterAddr(0x46)
+	fixture.createTestAdapter(t, ctx, vaultID, addr, 1000)
+	fixture.observe(t, ctx, vaultID, addr, removedAt(1100, 0, 1))
+	assertion := assertedAt(1300, 0, 5, adapterTypePtr(entity.MorphoAdapterTypeMarketV1), entity.MembershipFromAllocation)
+
+	firstTx, err := fixture.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the first assertion: %v", err)
+	}
+	defer firstTx.Rollback(ctx)
+	id, appended, err := fixture.repo.ObserveAdapterMembership(ctx, firstTx, &entity.MorphoAdapterObservation{
+		Identity:   entity.MorphoAdapterIdentity{MorphoVaultID: vaultID, Address: addr, AssetTokenID: fixture.loanTokenID},
+		Membership: assertion,
+	})
+	if err != nil {
+		t.Fatalf("first assertion: %v", err)
+	}
+	if !appended {
+		t.Fatal("the first assertion had nothing to go on, so it must append")
+	}
+
+	type result struct {
+		appended bool
+		err      error
+	}
+	second := make(chan result, 1)
+	go func() {
+		_, appended, err := fixture.observeErr(ctx, vaultID, addr, assertion)
+		second <- result{appended, err}
+	}()
+
+	// Long enough for the concurrent writer to reach its decisive read; it can only get
+	// past it by waiting for the lock this transaction holds.
+	time.Sleep(500 * time.Millisecond)
+	if err := firstTx.Commit(ctx); err != nil {
+		t.Fatalf("commit the first assertion: %v", err)
+	}
+
+	got := <-second
+	if got.err != nil {
+		t.Fatalf("the concurrent assertion failed: %v", got.err)
+	}
+	if got.appended {
+		t.Error("the concurrent assertion decided before it held the lock, so it recorded an observation for a fact the first writer had already recorded")
+	}
+	// Two adds/removes seeded above plus the one assertion under test.
+	if rows := fixture.countMembership(t, ctx, id); rows != 3 {
+		t.Errorf("membership rows = %d, want 3: %s", rows, fixture.describeMembership(t, ctx, id))
 	}
 }
 
@@ -3191,20 +2273,11 @@ func TestGetActiveAdapter_RemovedReturnsNil(t *testing.T) {
 	fixture := setupMorphoTest(t)
 	ctx := context.Background()
 	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x17))
-	fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x09), 24481834)
+	addr := adapterAddr(0x09)
+	fixture.createTestAdapter(t, ctx, vaultID, addr, 24481834)
+	fixture.observe(t, ctx, vaultID, addr, removedAt(24600000, 0, 1))
 
-	tx, err := fixture.pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	if err := fixture.repo.MarkAdapterRemoved(ctx, tx, vaultID, adapterAddr(0x09), 24600000); err != nil {
-		t.Fatalf("MarkAdapterRemoved failed: %v", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-
-	got, err := fixture.getActiveAdapter(t, ctx, vaultID, adapterAddr(0x09))
+	got, err := fixture.getActiveAdapter(t, ctx, vaultID, addr)
 	if err != nil {
 		t.Fatalf("GetActiveAdapter failed: %v", err)
 	}
@@ -3237,16 +2310,7 @@ func TestGetActiveAdaptersByVault_ReturnsActiveExcludesRemoved(t *testing.T) {
 	fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x0d), 24482000)
 
 	// Remove one of the three.
-	tx, err := fixture.pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	if err := fixture.repo.MarkAdapterRemoved(ctx, tx, vaultID, adapterAddr(0x0d), 24600000); err != nil {
-		t.Fatalf("MarkAdapterRemoved failed: %v", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		t.Fatalf("commit: %v", err)
-	}
+	fixture.observe(t, ctx, vaultID, adapterAddr(0x0d), removedAt(24600000, 0, 1))
 
 	got, err := fixture.repo.GetActiveAdaptersByVault(ctx, vaultID)
 	if err != nil {
@@ -3256,11 +2320,11 @@ func TestGetActiveAdaptersByVault_ReturnsActiveExcludesRemoved(t *testing.T) {
 		t.Fatalf("expected 2 active adapters, got %d", len(got))
 	}
 	for _, a := range got {
-		if a.RemovedAtBlock != nil {
-			t.Errorf("active adapter %d has non-nil RemovedAtBlock", a.ID)
-		}
 		if a.MorphoVaultID != vaultID {
 			t.Errorf("adapter %d has wrong vault id %d", a.ID, a.MorphoVaultID)
+		}
+		if a.AdapterType != entity.MorphoAdapterTypeMarketV1 {
+			t.Errorf("adapter %d has type %d, want the type its latest observation carried", a.ID, a.AdapterType)
 		}
 	}
 }
@@ -3276,6 +2340,62 @@ func TestGetActiveAdaptersByVault_Empty(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Errorf("expected 0 adapters, got %d", len(got))
+	}
+}
+
+// TestMorphoAdapterCurrentView_MatchesTheRepositoryRead pins the SQL surface the Python
+// readers use (VEC-219) against the Go one, so the two cannot drift.
+func TestMorphoAdapterCurrentView_MatchesTheRepositoryRead(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x47))
+
+	fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x48), 1000)
+	kept := fixture.createTestAdapterOfType(t, ctx, vaultID, adapterAddr(0x49), 1100, entity.MorphoAdapterTypeVaultV1)
+	dropped := fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x4a), 1200)
+	fixture.observe(t, ctx, vaultID, adapterAddr(0x4a), removedAt(1300, 0, 1))
+
+	rows, err := fixture.pool.Query(ctx,
+		`SELECT id, adapter_type FROM morpho_adapter_current WHERE morpho_vault_id = $1 ORDER BY id`, vaultID)
+	if err != nil {
+		t.Fatalf("querying morpho_adapter_current: %v", err)
+	}
+	defer rows.Close()
+
+	viewed := map[int64]int16{}
+	for rows.Next() {
+		var id int64
+		var adapterType int16
+		if err := rows.Scan(&id, &adapterType); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		viewed[id] = adapterType
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate: %v", err)
+	}
+
+	if len(viewed) != 2 {
+		t.Fatalf("view returned %d adapters, want 2", len(viewed))
+	}
+	if _, ok := viewed[dropped]; ok {
+		t.Errorf("the de-registered adapter %d is still in morpho_adapter_current", dropped)
+	}
+	if viewed[kept] != int16(entity.MorphoAdapterTypeVaultV1) {
+		t.Errorf("view adapter_type = %d, want %d", viewed[kept], entity.MorphoAdapterTypeVaultV1)
+	}
+
+	active, err := fixture.repo.GetActiveAdaptersByVault(ctx, vaultID)
+	if err != nil {
+		t.Fatalf("GetActiveAdaptersByVault: %v", err)
+	}
+	if len(active) != len(viewed) {
+		t.Errorf("the view and the repository disagree: %d vs %d adapters", len(viewed), len(active))
+	}
+	for _, a := range active {
+		if _, ok := viewed[a.ID]; !ok {
+			t.Errorf("adapter %d is active for the repository but absent from the view", a.ID)
+		}
 	}
 }
 

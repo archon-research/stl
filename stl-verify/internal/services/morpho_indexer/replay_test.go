@@ -86,7 +86,7 @@ func TestV2VaultAddresses(t *testing.T) {
 
 // TestReplayMetaMorphoLog_RoutesToHandler verifies ReplayMetaMorphoLog drives a
 // V2 structured log into the same typed handler the live SQS path uses (here
-// AddAdapter → GetOrCreateAdapter), rather than only audit-logging it. Reuses
+// AddAdapter → ObserveAdapterMembership), rather than only audit-logging it. Reuses
 // the existing mock harness from vault_v2_handler_test.go.
 func TestReplayMetaMorphoLog_RoutesToHandler(t *testing.T) {
 	h := newTestHarness(t)
@@ -105,10 +105,10 @@ func TestReplayMetaMorphoLog_RoutesToHandler(t *testing.T) {
 		return nil, errTestUnexpectedCall(calls)
 	}
 
-	var saved *entity.MorphoAdapter
-	h.morphoRepo.GetOrCreateAdapterFn = func(_ context.Context, _ pgx.Tx, a *entity.MorphoAdapter) (int64, error) {
-		saved = a
-		return 42, nil
+	var saved *entity.MorphoAdapterObservation
+	h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, obs *entity.MorphoAdapterObservation) (int64, bool, error) {
+		saved = obs
+		return 42, true, nil
 	}
 	var auditSaved bool
 	h.eventRepo.SaveEventFn = func(_ context.Context, _ pgx.Tx, _ *entity.ProtocolEvent) error {
@@ -125,16 +125,19 @@ func TestReplayMetaMorphoLog_RoutesToHandler(t *testing.T) {
 	}
 
 	if saved == nil {
-		t.Fatal("GetOrCreateAdapter not called — log was not routed to the AddAdapter handler")
+		t.Fatal("ObserveAdapterMembership not called — log was not routed to the AddAdapter handler")
 	}
-	if saved.MorphoVaultID != 7 {
-		t.Errorf("MorphoVaultID = %d, want 7", saved.MorphoVaultID)
+	if saved.Identity.MorphoVaultID != 7 {
+		t.Errorf("MorphoVaultID = %d, want 7", saved.Identity.MorphoVaultID)
 	}
-	if !bytes.Equal(saved.Address, testAdapterAddr.Bytes()) {
-		t.Errorf("Address = %x, want %s", saved.Address, testAdapterAddr.Hex())
+	if !bytes.Equal(saved.Identity.Address, testAdapterAddr.Bytes()) {
+		t.Errorf("Address = %x, want %s", saved.Identity.Address, testAdapterAddr.Hex())
 	}
-	if saved.AddedAtBlock != 20000000 {
-		t.Errorf("AddedAtBlock = %d, want 20000000", saved.AddedAtBlock)
+	if saved.Membership.BlockNumber != 20000000 {
+		t.Errorf("BlockNumber = %d, want 20000000", saved.Membership.BlockNumber)
+	}
+	if saved.Membership.ObservedVia != entity.MembershipFromAddAdapter {
+		t.Errorf("ObservedVia = %q, want add_adapter_event", saved.Membership.ObservedVia)
 	}
 	if !auditSaved {
 		t.Error("audit-log protocol_event not saved during replay")

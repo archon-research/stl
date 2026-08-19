@@ -135,6 +135,64 @@ func TestReplaySparkUSDTbcV2Events(t *testing.T) {
 	}
 }
 
+// TestReplaySparkUSDTbcV2Events_ReverseOrderReachesTheSameState is the assertion the
+// previous design could not make. Ordering used to be correctness-critical and to fail
+// SILENTLY: an Allocate replayed before its AddAdapter minted a registry row stamped
+// with the Allocate's block, and only a replay that also covered the AddAdapter walked
+// it back. With membership recorded as observations at their own positions, replaying
+// the same 33 events in the exact REVERSE order reaches the same answers — current
+// membership, current classification, the true add block, and every realAssets snapshot.
+//
+// The membership LOG legitimately differs by one row (the reverse pass records the
+// allocation_event assertion the forward pass never needed), which is why this compares
+// answers rather than row counts. That extra row is the honest record of an event that
+// really did prove membership before we had seen the add.
+func TestReplaySparkUSDTbcV2Events_ReverseOrderReachesTheSameState(t *testing.T) {
+	ctx := context.Background()
+	fx := loadReplayFixture(t)
+
+	// Each pass runs as a subtest so SetupTestSchema (which keys the schema on
+	// t.Name()) gives it its own schema, and the two replays cannot see each other.
+	var forward, reverse adapterAnswers
+	var forwardInferred, reverseInferred int
+	replayInto := func(name string, descending bool, out *adapterAnswers, inferred *int) {
+		t.Run(name, func(t *testing.T) {
+			pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+			t.Cleanup(cleanup)
+			vaultID := seedVaultRegistry(t, ctx, pool, fx)
+			svc := buildReplayServiceForTest(t, ctx, pool, fx)
+			replayFixtureEventsOrdered(t, ctx, svc, fx, descending)
+			*out = readAdapterAnswers(t, ctx, pool, vaultID)
+			*inferred = countRows(t, ctx, pool,
+				`SELECT count(*) FROM morpho_adapter_membership m JOIN morpho_adapter a ON a.id = m.morpho_adapter_id
+				 WHERE a.morpho_vault_id = $1 AND m.observed_via = 'allocation_event'`, vaultID)
+		})
+	}
+
+	replayInto("forward", false, &forward, &forwardInferred)
+	replayInto("reverse", true, &reverse, &reverseInferred)
+
+	if forward != reverse {
+		t.Errorf("reverse-order replay reached a different state:\n forward = %+v\n reverse = %+v", forward, reverse)
+	}
+	if forward.identityRows != 1 {
+		t.Errorf("forward replay wrote %d identity rows, want 1", forward.identityRows)
+	}
+	if forward.firstAdd != fx.Adapter.AddedAtBlock {
+		t.Errorf("forward first add block = %d, want %d", forward.firstAdd, fx.Adapter.AddedAtBlock)
+	}
+	// Guards against a vacuous pass: the two orders must really have taken
+	// different paths. In block order every Allocate lands after the AddAdapter has
+	// already answered its position, so nothing is inferred; in reverse the
+	// Allocates arrive first and must record the membership they prove.
+	if forwardInferred != 0 {
+		t.Errorf("in-order replay inferred %d memberships from Allocates, want 0", forwardInferred)
+	}
+	if reverseInferred == 0 {
+		t.Error("reverse replay inferred nothing from an Allocate — the out-of-order path was never exercised")
+	}
+}
+
 func loadReplayFixture(t *testing.T) *replayFixture {
 	t.Helper()
 	raw, err := os.ReadFile("testdata/sparkusdtbc_v2_replay.json")
@@ -365,7 +423,19 @@ func newFixtureMulticaller(t *testing.T, fx *replayFixture) *testutil.MockMultic
 // replayFixtureEvents feeds every fixture event through ReplayMetaMorphoLog in
 // strict (blockNumber, logIndex) order — the ordering the backfiller enforces so
 // AddAdapter lands before the adapter's first allocation.
+// replayFixtureEvents replays every recorded event in strict (blockNumber, logIndex)
+// order, the order the backfiller produces.
 func replayFixtureEvents(t *testing.T, ctx context.Context, svc *morpho_indexer.Service, fx *replayFixture) {
+	t.Helper()
+	replayFixtureEventsOrdered(t, ctx, svc, fx, false)
+}
+
+// replayFixtureEventsOrdered replays the recorded events ascending or DESCENDING by
+// (blockNumber, logIndex). The descending pass is the point: with membership as an
+// append-only log keyed on each observation's own position, replay order can no longer
+// change the final answers, so an out-of-order replay is a supported (if noisier) input
+// rather than a silent corruption.
+func replayFixtureEventsOrdered(t *testing.T, ctx context.Context, svc *morpho_indexer.Service, fx *replayFixture, descending bool) {
 	t.Helper()
 
 	type queued struct {
@@ -392,10 +462,14 @@ func replayFixtureEvents(t *testing.T, ctx context.Context, svc *morpho_indexer.
 		})
 	}
 	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].blockNumber != entries[j].blockNumber {
-			return entries[i].blockNumber < entries[j].blockNumber
+		a, b := entries[i], entries[j]
+		if descending {
+			a, b = b, a
 		}
-		return entries[i].logIndex < entries[j].logIndex
+		if a.blockNumber != b.blockNumber {
+			return a.blockNumber < b.blockNumber
+		}
+		return a.logIndex < b.logIndex
 	})
 
 	for _, e := range entries {
@@ -405,6 +479,11 @@ func replayFixtureEvents(t *testing.T, ctx context.Context, svc *morpho_indexer.
 	}
 }
 
+// assertAdapterRow pins what the append-only registry must hold after the replay:
+// exactly ONE identity row for the vault's adapter (the invariant that replaces the
+// deleted orphan guard — every morpho_adapter_state row hangs off an id nothing can
+// move), a membership log whose latest observation says "member" with the probed type,
+// and an add block that is a MIN over the log rather than a column.
 func assertAdapterRow(t *testing.T, ctx context.Context, pool *pgxpool.Pool, vaultID int64, fx *replayFixture) {
 	t.Helper()
 
@@ -417,28 +496,117 @@ func assertAdapterRow(t *testing.T, ctx context.Context, pool *pgxpool.Pool, vau
 	}
 
 	var (
-		address       []byte
-		adapterType   int16
-		addedAtBlock  int64
-		removedAtNull *int64
+		adapterID int64
+		address   []byte
 	)
 	if err := pool.QueryRow(ctx,
-		`SELECT address, adapter_type, added_at_block, removed_at_block FROM morpho_adapter WHERE morpho_vault_id = $1`,
-		vaultID).Scan(&address, &adapterType, &addedAtBlock, &removedAtNull); err != nil {
+		`SELECT id, address FROM morpho_adapter WHERE morpho_vault_id = $1`,
+		vaultID).Scan(&adapterID, &address); err != nil {
 		t.Fatalf("reading adapter row: %v", err)
 	}
 	if got, want := common.BytesToAddress(address), common.HexToAddress(fx.Adapter.Address); got != want {
 		t.Errorf("adapter address = %s, want %s", got.Hex(), want.Hex())
 	}
-	if adapterType != 1 {
-		t.Errorf("adapter_type = %d, want 1 (MarketV1)", adapterType)
+
+	// Latest observation: the current membership answer and the current type.
+	var (
+		isMember    bool
+		adapterType *int16
+		observedVia string
+	)
+	if err := pool.QueryRow(ctx,
+		`SELECT is_member, adapter_type, observed_via FROM morpho_adapter_membership
+		 WHERE morpho_adapter_id = $1
+		 ORDER BY block_number DESC, block_version DESC, log_index DESC, processing_version DESC
+		 LIMIT 1`, adapterID).Scan(&isMember, &adapterType, &observedVia); err != nil {
+		t.Fatalf("reading the latest membership observation: %v", err)
 	}
-	if addedAtBlock != fx.Adapter.AddedAtBlock {
-		t.Errorf("added_at_block = %d, want %d", addedAtBlock, fx.Adapter.AddedAtBlock)
+	if !isMember {
+		t.Errorf("latest observation says the adapter is not a member (via %s)", observedVia)
 	}
-	if removedAtNull != nil {
-		t.Errorf("removed_at_block = %d, want NULL", *removedAtNull)
+	if adapterType == nil || *adapterType != 1 {
+		t.Errorf("adapter_type = %v, want 1 (MarketV1)", adapterType)
 	}
+
+	// "When was it added" is a MIN over the log's add_adapter_event rows.
+	var addedAtBlock *int64
+	if err := pool.QueryRow(ctx,
+		`SELECT MIN(block_number) FILTER (WHERE is_member AND observed_via = 'add_adapter_event')
+		 FROM morpho_adapter_membership WHERE morpho_adapter_id = $1`, adapterID).Scan(&addedAtBlock); err != nil {
+		t.Fatalf("reading the first add block: %v", err)
+	}
+	if addedAtBlock == nil || *addedAtBlock != fx.Adapter.AddedAtBlock {
+		t.Errorf("first add block = %v, want %d", addedAtBlock, fx.Adapter.AddedAtBlock)
+	}
+
+	// Every snapshot hangs off that one id, and the view agrees with the log.
+	var strayState int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM morpho_adapter_state WHERE morpho_adapter_id <> $1`, adapterID).Scan(&strayState); err != nil {
+		t.Fatalf("counting stray adapter_state rows: %v", err)
+	}
+	if strayState != 0 {
+		t.Errorf("%d morpho_adapter_state rows hang off some other adapter id", strayState)
+	}
+
+	var viewed int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM morpho_adapter_current WHERE morpho_vault_id = $1 AND id = $2`,
+		vaultID, adapterID).Scan(&viewed); err != nil {
+		t.Fatalf("querying morpho_adapter_current: %v", err)
+	}
+	if viewed != 1 {
+		t.Errorf("morpho_adapter_current returned %d rows for the active adapter, want 1", viewed)
+	}
+}
+
+// adapterAnswers is everything an adapter-registry consumer can actually ask, which is
+// what a replay must reproduce regardless of the order the events arrive in. It
+// deliberately excludes the membership ROW COUNT: an out-of-order replay records one
+// extra allocation_event assertion (the Allocate arrives before the AddAdapter that
+// would have answered it), and that extra row is a faithful record of what was
+// observed, not a discrepancy.
+type adapterAnswers struct {
+	identityRows int
+	isMember     bool
+	adapterType  int16
+	firstAdd     int64
+	stateRows    int
+	stateSum     string
+}
+
+func readAdapterAnswers(t *testing.T, ctx context.Context, pool *pgxpool.Pool, vaultID int64) adapterAnswers {
+	t.Helper()
+	var a adapterAnswers
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM morpho_adapter WHERE morpho_vault_id = $1`, vaultID).Scan(&a.identityRows); err != nil {
+		t.Fatalf("counting adapters: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`SELECT m.is_member, m.adapter_type
+		 FROM morpho_adapter a
+		 JOIN LATERAL (
+		     SELECT is_member, adapter_type FROM morpho_adapter_membership
+		     WHERE morpho_adapter_id = a.id
+		     ORDER BY block_number DESC, block_version DESC, log_index DESC, processing_version DESC
+		     LIMIT 1
+		 ) m ON TRUE
+		 WHERE a.morpho_vault_id = $1`, vaultID).Scan(&a.isMember, &a.adapterType); err != nil {
+		t.Fatalf("reading the latest membership: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`SELECT MIN(m.block_number) FILTER (WHERE m.is_member AND m.observed_via = 'add_adapter_event')
+		 FROM morpho_adapter_membership m JOIN morpho_adapter a ON a.id = m.morpho_adapter_id
+		 WHERE a.morpho_vault_id = $1`, vaultID).Scan(&a.firstAdd); err != nil {
+		t.Fatalf("reading the first add block: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*), COALESCE(sum(s.real_assets), 0)::TEXT
+		 FROM morpho_adapter_state s JOIN morpho_adapter a ON a.id = s.morpho_adapter_id
+		 WHERE a.morpho_vault_id = $1`, vaultID).Scan(&a.stateRows, &a.stateSum); err != nil {
+		t.Fatalf("reading adapter state: %v", err)
+	}
+	return a
 }
 
 func assertAdapterStateRows(t *testing.T, ctx context.Context, pool *pgxpool.Pool, vaultID int64, fx *replayFixture) {
@@ -621,6 +789,8 @@ func snapshotRowCounts(t *testing.T, ctx context.Context, pool *pgxpool.Pool, va
 	t.Helper()
 	counts := map[string]int{}
 	counts["morpho_adapter"] = countRows(t, ctx, pool, `SELECT count(*) FROM morpho_adapter WHERE morpho_vault_id = $1`, vaultID)
+	counts["morpho_adapter_membership"] = countRows(t, ctx, pool,
+		`SELECT count(*) FROM morpho_adapter_membership m JOIN morpho_adapter a ON a.id = m.morpho_adapter_id WHERE a.morpho_vault_id = $1`, vaultID)
 	counts["morpho_adapter_state"] = countRows(t, ctx, pool,
 		`SELECT count(*) FROM morpho_adapter_state s JOIN morpho_adapter a ON a.id = s.morpho_adapter_id WHERE a.morpho_vault_id = $1`, vaultID)
 	counts["morpho_vault_cap"] = countRows(t, ctx, pool, `SELECT count(*) FROM morpho_vault_cap WHERE morpho_vault_id = $1`, vaultID)

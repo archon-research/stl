@@ -36,8 +36,8 @@ func (s *Service) V2VaultAddresses() map[common.Address]struct{} {
 //
 // Every write goes through the same idempotent repository methods as live
 // indexing (GetOrCreate / ON CONFLICT DO NOTHING / trigger-versioned snapshots /
-// replay-tolerant MarkAdapterRemoved), so replaying a log more than once — the
-// resume case after a partially-completed run — is safe.
+// append-only membership observations keyed on the log's own position), so replaying
+// a log more than once — the resume case after a partially-completed run — is safe.
 func (s *Service) ReplayMetaMorphoLog(ctx context.Context, log shared.Log, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) error {
 	if len(log.Topics) == 0 {
 		return fmt.Errorf("replay log has no topics")

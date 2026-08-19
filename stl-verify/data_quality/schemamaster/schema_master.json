@@ -463,6 +463,10 @@
       "type": "bool",
       "class": "S"
     },
+    "is_member": {
+      "type": "bool",
+      "class": "S"
+    },
     "is_orphaned": {
       "type": "bool",
       "class": "S"
@@ -644,6 +648,10 @@
       "semantics": "event_time"
     },
     "notes": {
+      "type": "text",
+      "class": "S"
+    },
+    "observed_via": {
       "type": "text",
       "class": "S"
     },
@@ -1153,6 +1161,11 @@
       "type": "config",
       "owner": "morpho"
     },
+    "morpho_adapter_membership": {
+      "type": "raw_pipeline",
+      "owner": "morpho",
+      "transform_defer": "VEC-218: new VaultV2 adapter membership log, read raw by the VEC-219 risk pipeline; no transformed-layer consumer yet"
+    },
     "morpho_adapter_state": {
       "type": "raw_pipeline",
       "owner": "morpho",
@@ -1340,6 +1353,12 @@
       "action": "rename"
     },
     {
+      "table": "morpho_adapter_membership",
+      "column": "timestamp",
+      "canonical": "block_timestamp",
+      "action": "rename"
+    },
+    {
       "table": "morpho_adapter_state",
       "column": "timestamp",
       "canonical": "block_timestamp",
@@ -1483,6 +1502,16 @@
       "parent": "morpho_vault",
       "key": "morpho_vault_id",
       "ref": "id"
+    },
+    {
+      "table": "morpho_adapter_membership",
+      "column": "chain_id",
+      "parent": "morpho_adapter",
+      "key": "morpho_adapter_id",
+      "ref": "id",
+      "then_parent": "morpho_vault",
+      "then_key": "morpho_vault_id",
+      "then_ref": "id"
     },
     {
       "table": "morpho_adapter_state",
@@ -1631,6 +1660,16 @@
       "parent": "morpho_vault",
       "key": "morpho_vault_id",
       "ref": "id"
+    },
+    {
+      "table": "morpho_adapter_membership",
+      "column": "protocol_id",
+      "parent": "morpho_adapter",
+      "key": "morpho_adapter_id",
+      "ref": "id",
+      "then_parent": "morpho_vault",
+      "then_key": "morpho_vault_id",
+      "then_ref": "id"
     },
     {
       "table": "morpho_adapter_state",

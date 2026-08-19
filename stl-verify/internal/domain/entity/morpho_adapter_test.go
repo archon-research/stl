@@ -2,85 +2,41 @@ package entity
 
 import (
 	"bytes"
+	"math"
 	"strings"
 	"testing"
+	"time"
 )
 
-func TestNewMorphoAdapter(t *testing.T) {
+func TestNewMorphoAdapterIdentity(t *testing.T) {
 	validAddr := make([]byte, 20)
 
 	tests := []struct {
-		name         string
-		vaultID      int64
-		address      []byte
-		assetToken   int64
-		adapterType  MorphoAdapterType
-		addedBlock   int64
-		removedBlock int64 // applied only when hasRemoved is true
-		hasRemoved   bool
-		wantErr      bool
-		errContains  string
+		name        string
+		vaultID     int64
+		address     []byte
+		assetToken  int64
+		wantErr     bool
+		errContains string
 	}{
-		{
-			name: "valid market V1 adapter", vaultID: 1, address: validAddr, assetToken: 1,
-			adapterType: MorphoAdapterTypeMarketV1, addedBlock: 24481834,
-		},
-		{
-			name: "valid nested vault V1 adapter", vaultID: 2, address: validAddr, assetToken: 3,
-			adapterType: MorphoAdapterTypeVaultV1, addedBlock: 24481900,
-		},
-		{
-			name: "valid unknown adapter", vaultID: 3, address: validAddr, assetToken: 5,
-			adapterType: MorphoAdapterTypeUnknown, addedBlock: 24482000,
-		},
-		{
-			name: "valid removed adapter", vaultID: 1, address: validAddr, assetToken: 1,
-			adapterType: MorphoAdapterTypeMarketV1, addedBlock: 24481834, removedBlock: 24500000, hasRemoved: true,
-		},
-		{
-			name: "removed at same block as added", vaultID: 1, address: validAddr, assetToken: 1,
-			adapterType: MorphoAdapterTypeMarketV1, addedBlock: 24481834, removedBlock: 24481834, hasRemoved: true,
-		},
+		{name: "valid identity", vaultID: 1, address: validAddr, assetToken: 1},
 		{
 			name: "zero vault id", vaultID: 0, address: validAddr, assetToken: 1,
-			adapterType: MorphoAdapterTypeMarketV1, addedBlock: 1,
 			wantErr: true, errContains: "morphoVaultID must be positive",
 		},
 		{
 			name: "short address", vaultID: 1, address: make([]byte, 10), assetToken: 1,
-			adapterType: MorphoAdapterTypeMarketV1, addedBlock: 1,
 			wantErr: true, errContains: "address must be 20 bytes",
 		},
 		{
 			name: "zero asset token", vaultID: 1, address: validAddr, assetToken: 0,
-			adapterType: MorphoAdapterTypeMarketV1, addedBlock: 1,
 			wantErr: true, errContains: "assetTokenID must be positive",
-		},
-		{
-			name: "invalid adapter type", vaultID: 1, address: validAddr, assetToken: 1,
-			adapterType: MorphoAdapterType(3), addedBlock: 1,
-			wantErr: true, errContains: "adapterType must be 1, 2, or 99",
-		},
-		{
-			name: "zero added block", vaultID: 1, address: validAddr, assetToken: 1,
-			adapterType: MorphoAdapterTypeMarketV1, addedBlock: 0,
-			wantErr: true, errContains: "addedAtBlock must be positive",
-		},
-		{
-			name: "removed before added", vaultID: 1, address: validAddr, assetToken: 1,
-			adapterType: MorphoAdapterTypeMarketV1, addedBlock: 24481834, removedBlock: 24481833, hasRemoved: true,
-			wantErr: true, errContains: "removedAtBlock must be >= addedAtBlock",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var removedBlock *int64
-			if tt.hasRemoved {
-				rb := tt.removedBlock
-				removedBlock = &rb
-			}
-			got, err := NewMorphoAdapter(tt.vaultID, tt.address, tt.assetToken, tt.adapterType, tt.addedBlock, removedBlock)
+			got, err := NewMorphoAdapterIdentity(tt.vaultID, tt.address, tt.assetToken)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")
@@ -102,21 +58,136 @@ func TestNewMorphoAdapter(t *testing.T) {
 			if got.AssetTokenID != tt.assetToken {
 				t.Errorf("AssetTokenID = %d, want %d", got.AssetTokenID, tt.assetToken)
 			}
-			if got.AdapterType != tt.adapterType {
-				t.Errorf("AdapterType = %d, want %d", got.AdapterType, tt.adapterType)
-			}
-			if got.AddedAtBlock != tt.addedBlock {
-				t.Errorf("AddedAtBlock = %d, want %d", got.AddedAtBlock, tt.addedBlock)
-			}
-			if tt.hasRemoved {
-				if got.RemovedAtBlock == nil {
-					t.Errorf("RemovedAtBlock = nil, want %d", tt.removedBlock)
-				} else if *got.RemovedAtBlock != tt.removedBlock {
-					t.Errorf("RemovedAtBlock = %d, want %d", *got.RemovedAtBlock, tt.removedBlock)
+		})
+	}
+}
+
+// TestMorphoAdapterMembership_Validate pins what an observation must carry. Note what
+// is deliberately NOT rejected: an assertion of membership with no classification. The
+// caller that already knows the adapter is a member probes nothing, and nothing will be
+// appended — the rule binds at append time, in the repository (ErrAdapterUnclassified)
+// and in the table's CHECK.
+func TestMorphoAdapterMembership_Validate(t *testing.T) {
+	marketV1 := MorphoAdapterTypeMarketV1
+	bogus := MorphoAdapterType(3)
+	ts := time.Unix(1_700_000_000, 0).UTC()
+
+	base := func() MorphoAdapterMembership {
+		return MorphoAdapterMembership{
+			BlockNumber: 1000, BlockVersion: 0, LogIndex: 4, Timestamp: ts,
+			IsMember: true, AdapterType: &marketV1, ObservedVia: MembershipFromAddAdapter,
+		}
+	}
+
+	tests := []struct {
+		name        string
+		mutate      func(*MorphoAdapterMembership)
+		wantErr     bool
+		errContains string
+	}{
+		{name: "valid transition", mutate: func(*MorphoAdapterMembership) {}},
+		{
+			name: "untyped removal is valid",
+			mutate: func(m *MorphoAdapterMembership) {
+				m.IsMember, m.AdapterType, m.ObservedVia = false, nil, MembershipFromRemoveAdapter
+			},
+		},
+		{
+			name: "untyped assertion of membership is not rejected here",
+			mutate: func(m *MorphoAdapterMembership) {
+				m.AdapterType, m.ObservedVia = nil, MembershipFromAllocation
+			},
+		},
+		{
+			name:   "end-of-block log index is valid",
+			mutate: func(m *MorphoAdapterMembership) { m.LogIndex = EndOfBlockLogIndex },
+		},
+		{
+			name:    "zero block",
+			mutate:  func(m *MorphoAdapterMembership) { m.BlockNumber = 0 },
+			wantErr: true, errContains: "blockNumber must be positive",
+		},
+		{
+			name:    "negative block version",
+			mutate:  func(m *MorphoAdapterMembership) { m.BlockVersion = -1 },
+			wantErr: true, errContains: "blockVersion must be non-negative",
+		},
+		{
+			name:    "negative log index",
+			mutate:  func(m *MorphoAdapterMembership) { m.LogIndex = -1 },
+			wantErr: true, errContains: "logIndex must be non-negative",
+		},
+		{
+			name:    "zero timestamp",
+			mutate:  func(m *MorphoAdapterMembership) { m.Timestamp = time.Time{} },
+			wantErr: true, errContains: "timestamp must not be zero",
+		},
+		{
+			name:    "unknown provenance",
+			mutate:  func(m *MorphoAdapterMembership) { m.ObservedVia = MembershipSource("hand_edited") },
+			wantErr: true, errContains: "observedVia must be one of",
+		},
+		{
+			name:    "invalid adapter type",
+			mutate:  func(m *MorphoAdapterMembership) { m.AdapterType = &bogus },
+			wantErr: true, errContains: "adapterType must be 1, 2, or 99",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := base()
+			tt.mutate(&m)
+			err := m.Validate()
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
 				}
-			} else if got.RemovedAtBlock != nil {
-				t.Errorf("RemovedAtBlock = %d, want nil", *got.RemovedAtBlock)
+				if tt.errContains != "" && !strings.Contains(err.Error(), tt.errContains) {
+					t.Errorf("error %q should contain %q", err.Error(), tt.errContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
 			}
 		})
+	}
+}
+
+func TestMembershipSource_IsTransition(t *testing.T) {
+	tests := []struct {
+		source MembershipSource
+		want   bool
+	}{
+		{MembershipFromAddAdapter, true},
+		{MembershipFromRemoveAdapter, true},
+		{MembershipFromAllocation, false},
+		{MembershipFromDiscovery, false},
+		{MembershipFromBootstrapSeed, false},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.source), func(t *testing.T) {
+			if got := tt.source.IsTransition(); got != tt.want {
+				t.Errorf("IsTransition() = %v, want %v", got, tt.want)
+			}
+			if !tt.source.IsValid() {
+				t.Errorf("%q should be a valid source", tt.source)
+			}
+		})
+	}
+}
+
+// TestEndOfBlockLogIndexOrdersLast pins the sentinel's whole purpose: a hash-pinned
+// end-of-block state read is authoritative over every log in its block, so it must sort
+// above any log index the chain can produce.
+func TestEndOfBlockLogIndexOrdersLast(t *testing.T) {
+	if EndOfBlockLogIndex != math.MaxInt32 {
+		t.Errorf("EndOfBlockLogIndex = %d, want math.MaxInt32", EndOfBlockLogIndex)
+	}
+	for _, logIndex := range []int32{0, 1, 4096, math.MaxInt32 - 1} {
+		if logIndex >= EndOfBlockLogIndex {
+			t.Errorf("log index %d must sort below EndOfBlockLogIndex", logIndex)
+		}
 	}
 }

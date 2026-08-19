@@ -842,7 +842,7 @@ func TestProcessBlockEvent_EnsureMarket_IdleMarket(t *testing.T) {
 		t.Errorf("market token IDs: loan=%d collateral=%d, want 1 / 2", savedMarket.LoanTokenID, savedMarket.CollateralTokenID)
 	}
 
-	// Two token rows must have been upserted: loan with real metadata, collateral with empty metadata.
+	// Two token rows must have been written: loan with real metadata, collateral with empty metadata.
 	if len(tokenAddrs) != 2 {
 		t.Fatalf("expected 2 GetOrCreateToken calls, got %d", len(tokenAddrs))
 	}

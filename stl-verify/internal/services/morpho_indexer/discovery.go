@@ -178,9 +178,9 @@ func (s *Service) readV2FeeConfigForSeed(ctx context.Context, vaultAddress commo
 // readV2Adapters enumerates a freshly-discovered VaultV2's adapter set (hash-pinned
 // — the set is versioned state) and, for each adapter, classifies its type
 // (number-pinned identity) and reads its hash-pinned realAssets() seed. The result
-// is sorted by address so the persist transaction acquires the per-(vault,address)
-// GetOrCreateAdapter advisory locks (and the mas-state trigger locks after them)
-// in a deterministic order (ADR-0002 §3 batch rule).
+// is sorted by address so the persist transaction acquires the per-adapter membership
+// advisory locks (and the mam/mas trigger locks after them) in a deterministic order
+// (ADR-0002 §3 batch rule).
 func (s *Service) readV2Adapters(ctx context.Context, vaultAddress common.Address, blockNumber int64, blockHash common.Hash) ([]discoveredAdapter, error) {
 	addresses, err := s.blockchainSvc.enumerateVaultAdapters(ctx, vaultAddress, blockHash)
 	if err != nil {
@@ -238,10 +238,10 @@ func (s *Service) persistDiscoveredVault(ctx context.Context, vaultAddress commo
 			return fmt.Errorf("creating receipt token entity: %w", err)
 		}
 		if _, err := s.receiptTokenRepo.GetOrCreateReceiptToken(ctx, tx, *receiptToken); err != nil {
-			return fmt.Errorf("upserting receipt token: %w", err)
+			return fmt.Errorf("registering receipt token: %w", err)
 		}
 
-		if err := s.seedDiscoveredAdapters(ctx, tx, vault, vaultAddress, blockNumber, blockVersion, blockTimestamp, reads.adapters); err != nil {
+		if err := s.seedDiscoveredAdapters(ctx, tx, vault, vaultAddress, blockNumber, blockVersion, blockTimestamp, reads.adapters, entity.MembershipFromDiscovery); err != nil {
 			return err
 		}
 		return s.seedDiscoveredFees(ctx, tx, vault, blockNumber, blockVersion, blockTimestamp, reads.fees)
@@ -251,28 +251,36 @@ func (s *Service) persistDiscoveredVault(ctx context.Context, vaultAddress commo
 	return vault, nil
 }
 
-// seedDiscoveredAdapters registers each enumerated adapter and seeds one
-// adapter_state row from its already-read hash-pinned realAssets, within the
-// discovery transaction. Seeding at discovery keeps the adapter registry and its
-// state consistent from the first moment (VEC-219's composition-completeness probe
-// treats an active adapter with no state row as adapter_data_missing); subsequent
-// Allocate/Deallocate events append as normal. adapters arrive address-sorted (see
-// readV2Adapters); V1/V1.1 vaults pass an empty slice.
+// seedDiscoveredAdapters records the membership each enumerated adapter's presence in
+// adapters(i) asserts, and seeds one adapter_state row from its already-read hash-pinned
+// realAssets, within the discovery transaction. Seeding at discovery keeps the adapter
+// registry and its state consistent from the first moment (VEC-219's
+// composition-completeness probe treats an active adapter with no state row as
+// adapter_data_missing); subsequent Allocate/Deallocate events append as normal. adapters
+// arrive address-sorted (see readV2Adapters); V1/V1.1 vaults pass an empty slice.
 //
-// Bootstrap ordering contract: for a vault discovered mid-life, the adapter
-// LIFECYCLE history (AddAdapter / RemoveAdapter) must be replayed before any state
-// is seeded for that adapter. Discovery only ever sees the adapters active at the
-// discovery block, so it collapses every prior incarnation of an address into the
-// single row it seeds here, and hangs the seed snapshot off that row. If the
-// backfiller later replays an add/remove pair that predates discovery, the row
-// converges into that earlier window while still owning snapshots from after it —
-// which MarkAdapterRemoved's orphan guard refuses, because that close is the
-// incarnation's first and so compares block_number alone (assertNoStateAfterRemoval).
-// The guard is a backstop, not a substitute for the ordering: replaying lifecycle first
-// means every snapshot is written against the incarnation that actually owns it.
-func (s *Service) seedDiscoveredAdapters(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault, vaultAddress common.Address, blockNumber int64, blockVersion int, blockTimestamp time.Time, adapters []discoveredAdapter) error {
+// What it records is an ASSERTION, not an add: an adapters(i) enumeration witnesses no
+// transition, it reads the set's contents at the end of the discovery block — which is why
+// it carries entity.EndOfBlockLogIndex, ordering above every log in that block, and why a
+// re-run whose answer already matches the log writes nothing. A later replay of the true
+// AddAdapter appends its own transition at its own, lower block, and the add block is a MIN
+// over those; nothing here has to be converged or walked back.
+//
+// observedVia distinguishes a mid-life discovery from the Temporal bootstrap's head seed,
+// which drives the same loop.
+func (s *Service) seedDiscoveredAdapters(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault, vaultAddress common.Address, blockNumber int64, blockVersion int, blockTimestamp time.Time, adapters []discoveredAdapter, observedVia entity.MembershipSource) error {
 	for _, a := range adapters {
-		adapterID, err := s.upsertAdapterRow(ctx, tx, vault, vaultAddress, a.address, a.adapterType, blockNumber)
+		s.warnIfUnknownAdapterType(vaultAddress, a.address, a.adapterType, blockNumber)
+		adapterType := a.adapterType
+		adapterID, _, err := s.observeAdapterMembership(ctx, tx, vault, a.address, entity.MorphoAdapterMembership{
+			BlockNumber:  blockNumber,
+			BlockVersion: blockVersion,
+			LogIndex:     entity.EndOfBlockLogIndex,
+			Timestamp:    blockTimestamp,
+			IsMember:     true,
+			AdapterType:  &adapterType,
+			ObservedVia:  observedVia,
+		})
 		if err != nil {
 			return err
 		}

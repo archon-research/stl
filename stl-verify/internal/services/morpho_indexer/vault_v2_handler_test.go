@@ -131,6 +131,19 @@ func (h *serviceTestHarness) adapterProbeResults(adapterType entity.MorphoAdapte
 
 var testAdapterAddr = common.HexToAddress("0x7481968709b8f155652D42ebf468b22945907dC2")
 
+// testAdapterMember is the answer a pre-transaction membership read gives for an
+// adapter that is already in the vault's set at the position being processed.
+func testAdapterMember() *entity.MorphoAdapterMember {
+	return &entity.MorphoAdapterMember{
+		MorphoAdapterIdentity: entity.MorphoAdapterIdentity{
+			ID: 55, MorphoVaultID: 7, Address: testAdapterAddr.Bytes(), AssetTokenID: 1,
+		},
+		AdapterType: entity.MorphoAdapterTypeMarketV1,
+		AsOfBlock:   19000000,
+		ObservedVia: entity.MembershipFromAddAdapter,
+	}
+}
+
 // --- AddAdapter ---
 
 func TestProcessBlockEvent_AddAdapter(t *testing.T) {
@@ -162,10 +175,10 @@ func TestProcessBlockEvent_AddAdapter(t *testing.T) {
 				return nil, errTestUnexpectedCall(calls)
 			}
 
-			var saved *entity.MorphoAdapter
-			h.morphoRepo.GetOrCreateAdapterFn = func(_ context.Context, _ pgx.Tx, a *entity.MorphoAdapter) (int64, error) {
-				saved = a
-				return 42, nil
+			var saved *entity.MorphoAdapterObservation
+			h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, obs *entity.MorphoAdapterObservation) (int64, bool, error) {
+				saved = obs
+				return 42, true, nil
 			}
 
 			ev := h.vaultV2EventsABI.Events["AddAdapter"]
@@ -175,25 +188,28 @@ func TestProcessBlockEvent_AddAdapter(t *testing.T) {
 			}
 
 			if saved == nil {
-				t.Fatal("GetOrCreateAdapter not called")
+				t.Fatal("ObserveAdapterMembership not called")
 			}
-			if saved.MorphoVaultID != 7 {
-				t.Errorf("MorphoVaultID = %d, want 7", saved.MorphoVaultID)
+			if saved.Identity.MorphoVaultID != 7 {
+				t.Errorf("MorphoVaultID = %d, want 7", saved.Identity.MorphoVaultID)
 			}
-			if !bytes.Equal(saved.Address, testAdapterAddr.Bytes()) {
-				t.Errorf("Address = %x, want %s", saved.Address, testAdapterAddr.Hex())
+			if !bytes.Equal(saved.Identity.Address, testAdapterAddr.Bytes()) {
+				t.Errorf("Address = %x, want %s", saved.Identity.Address, testAdapterAddr.Hex())
 			}
-			if saved.AssetTokenID != 1 {
-				t.Errorf("AssetTokenID = %d, want 1 (vault asset)", saved.AssetTokenID)
+			if saved.Identity.AssetTokenID != 1 {
+				t.Errorf("AssetTokenID = %d, want 1 (vault asset)", saved.Identity.AssetTokenID)
 			}
-			if saved.AdapterType != tt.adapterType {
-				t.Errorf("AdapterType = %d, want %d", saved.AdapterType, tt.adapterType)
+			if got := saved.Membership.AdapterType; got == nil || *got != tt.adapterType {
+				t.Errorf("AdapterType = %v, want %d", got, tt.adapterType)
 			}
-			if saved.AddedAtBlock != 20000000 {
-				t.Errorf("AddedAtBlock = %d, want 20000000", saved.AddedAtBlock)
+			if saved.Membership.BlockNumber != 20000000 {
+				t.Errorf("BlockNumber = %d, want 20000000", saved.Membership.BlockNumber)
 			}
-			if saved.RemovedAtBlock != nil {
-				t.Errorf("RemovedAtBlock = %v, want nil", *saved.RemovedAtBlock)
+			if !saved.Membership.IsMember {
+				t.Error("an AddAdapter records membership")
+			}
+			if saved.Membership.ObservedVia != entity.MembershipFromAddAdapter {
+				t.Errorf("ObservedVia = %q, want add_adapter_event", saved.Membership.ObservedVia)
 			}
 			if got := logs.hasWarnContaining("unknown type"); got != tt.wantWarn {
 				t.Errorf("WARN(unknown type) = %v, want %v", got, tt.wantWarn)
@@ -228,8 +244,8 @@ func TestProcessBlockEvent_AddAdapter_SeedsAdapterState(t *testing.T) {
 		}
 		return nil, errTestUnexpectedCall(calls)
 	}
-	h.morphoRepo.GetOrCreateAdapterFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapter) (int64, error) {
-		return 42, nil
+	h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterObservation) (int64, bool, error) {
+		return 42, true, nil
 	}
 	var savedState *entity.MorphoAdapterState
 	h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, s *entity.MorphoAdapterState) error {
@@ -250,7 +266,7 @@ func TestProcessBlockEvent_AddAdapter_SeedsAdapterState(t *testing.T) {
 		t.Errorf("realAssets seed pinned to %s, want %s", gotHash, testBlockHash)
 	}
 	if savedState.MorphoAdapterID != 42 {
-		t.Errorf("MorphoAdapterID = %d, want 42 (the row GetOrCreateAdapter returned)", savedState.MorphoAdapterID)
+		t.Errorf("MorphoAdapterID = %d, want 42 (the id ObserveAdapterMembership returned)", savedState.MorphoAdapterID)
 	}
 	if savedState.RealAssets.Cmp(realAssets) != 0 {
 		t.Errorf("RealAssets = %s, want %s", savedState.RealAssets, realAssets)
@@ -334,9 +350,9 @@ func TestProcessBlockEvent_AddAdapter_RealAssetsSeedTolerance(t *testing.T) {
 			}
 
 			registered := false
-			h.morphoRepo.GetOrCreateAdapterFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapter) (int64, error) {
+			h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterObservation) (int64, bool, error) {
 				registered = true
-				return 42, nil
+				return 42, true, nil
 			}
 			seeded := false
 			h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterState) error {
@@ -381,9 +397,9 @@ func TestProcessBlockEvent_AddAdapter_NonV2VaultErrors(t *testing.T) {
 		adapterProbed = true
 		return h.adapterProbeResults(entity.MorphoAdapterTypeMarketV1), nil
 	}
-	h.morphoRepo.GetOrCreateAdapterFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapter) (int64, error) {
-		t.Fatal("GetOrCreateAdapter must not be called for a non-V2 vault")
-		return 0, nil
+	h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterObservation) (int64, bool, error) {
+		t.Fatal("no membership may be recorded for a non-V2 vault")
+		return 0, false, nil
 	}
 
 	ev := h.vaultV2EventsABI.Events["AddAdapter"]
@@ -429,9 +445,9 @@ func TestProcessBlockEvent_AdapterProbeRunsBeforeTransaction(t *testing.T) {
 					}
 					return nil, errTestUnexpectedCall(calls)
 				}
-				// Adapter predates discovery, so the pre-transaction membership check
-				// misses and the heal path probes before opening the write tx.
-				h.morphoRepo.GetActiveAdapterFn = func(_ context.Context, _ pgx.Tx, _ int64, _ []byte) (*entity.MorphoAdapter, error) {
+				// Adapter predates discovery, so the pre-transaction membership read
+				// misses and the assertion path probes before opening the write tx.
+				h.morphoRepo.GetActiveAdapterAtFn = func(_ context.Context, _ int64, _ []byte, _ entity.BlockPosition) (*entity.MorphoAdapterMember, error) {
 					return nil, nil
 				}
 				return h.makeV2VaultLog(h.vaultV2EventsABI.Events["Allocate"], testVaultAddr,
@@ -474,45 +490,154 @@ func TestProcessBlockEvent_RemoveAdapter(t *testing.T) {
 	h := newTestHarness(t)
 	h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
 
-	// Known adapter: the pre-transaction membership check finds it (so no probe
-	// fires) and the in-tx incarnation lookup returns the open row, so removal
-	// proceeds directly (no lazy registration).
-	h.morphoRepo.GetActiveAdaptersByVaultFn = func(_ context.Context, _ int64) ([]*entity.MorphoAdapter, error) {
-		return []*entity.MorphoAdapter{{ID: 55, MorphoVaultID: 7, Address: testAdapterAddr.Bytes(), AssetTokenID: 1, AdapterType: entity.MorphoAdapterTypeMarketV1, AddedAtBlock: 19000000}}, nil
+	// The removal path makes no decision, so it reads nothing and probes nothing.
+	// Both guards are the point of the test: the type probe and the membership read
+	// existed only to classify the heal row a removal used to have to register.
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		t.Fatal("a removal must not probe the adapter type: an observation of NON-membership carries none")
+		return nil, errTestUnexpectedCall(calls)
 	}
-	h.morphoRepo.EnsureIncarnationToCloseFn = func(_ context.Context, _ pgx.Tx, _ int64, _ []byte, _ int64, _ *entity.MorphoAdapter) (bool, error) {
-		return false, nil // the open row already covers the removal block
+	h.morphoRepo.GetActiveAdapterAtFn = func(_ context.Context, _ int64, _ []byte, _ entity.BlockPosition) (*entity.MorphoAdapterMember, error) {
+		t.Fatal("a removal must not read membership: it is an unconditional append")
+		return nil, nil
 	}
 
-	var (
-		gotVaultID int64
-		gotAddr    []byte
-		gotBlock   int64
-		called     bool
-	)
-	h.morphoRepo.MarkAdapterRemovedFn = func(_ context.Context, _ pgx.Tx, vaultID int64, address []byte, removedAtBlock int64) error {
-		called = true
-		gotVaultID, gotAddr, gotBlock = vaultID, address, removedAtBlock
-		return nil
+	var saved *entity.MorphoAdapterObservation
+	h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, obs *entity.MorphoAdapterObservation) (int64, bool, error) {
+		saved = obs
+		return 55, true, nil
 	}
 
 	ev := h.vaultV2EventsABI.Events["RemoveAdapter"]
 	log := h.makeV2VaultLog(ev, testVaultAddr, []common.Hash{addrTopic(testAdapterAddr)})
-	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err != nil {
+	if err := h.processBlock(t, 1, 20000000, 3, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err != nil {
 		t.Fatalf("processBlock: %v", err)
 	}
 
-	if !called {
-		t.Fatal("MarkAdapterRemoved not called")
+	if saved == nil {
+		t.Fatal("ObserveAdapterMembership not called")
 	}
-	if gotVaultID != 7 {
-		t.Errorf("vaultID = %d, want 7", gotVaultID)
+	if saved.Identity.MorphoVaultID != 7 {
+		t.Errorf("MorphoVaultID = %d, want 7", saved.Identity.MorphoVaultID)
 	}
-	if !bytes.Equal(gotAddr, testAdapterAddr.Bytes()) {
-		t.Errorf("address = %x, want %s", gotAddr, testAdapterAddr.Hex())
+	if !bytes.Equal(saved.Identity.Address, testAdapterAddr.Bytes()) {
+		t.Errorf("address = %x, want %s", saved.Identity.Address, testAdapterAddr.Hex())
 	}
-	if gotBlock != 20000000 {
-		t.Errorf("removedAtBlock = %d, want 20000000", gotBlock)
+	if saved.Membership.IsMember {
+		t.Error("a RemoveAdapter records NON-membership")
+	}
+	if saved.Membership.AdapterType != nil {
+		t.Errorf("AdapterType = %v, want nil: nothing classified this adapter", *saved.Membership.AdapterType)
+	}
+	if saved.Membership.ObservedVia != entity.MembershipFromRemoveAdapter {
+		t.Errorf("ObservedVia = %q, want remove_adapter_event", saved.Membership.ObservedVia)
+	}
+	if saved.Membership.BlockNumber != 20000000 {
+		t.Errorf("BlockNumber = %d, want 20000000", saved.Membership.BlockNumber)
+	}
+	if saved.Membership.BlockVersion != 3 {
+		t.Errorf("BlockVersion = %d, want 3", saved.Membership.BlockVersion)
+	}
+	if saved.Membership.Timestamp.IsZero() {
+		t.Error("Timestamp must be set")
+	}
+}
+
+// TestProcessBlockEvent_Allocation_WarnsOnlyWhenTheObservationWasRecorded pins the ops
+// signal to the thing it is supposed to mean. An Allocate asserts membership on every
+// single allocation, thousands per day; the WARN is worth an operator's attention only
+// when the assertion actually added something the log did not already hold — i.e. when
+// we are learning about an adapter whose AddAdapter we never saw. Warning on every
+// allocation would bury the signal it exists to raise, and the alert built on the
+// matching counter (VectorMorphoV2LazyAdapterRegistrations) would fire constantly.
+func TestProcessBlockEvent_Allocation_WarnsOnlyWhenTheObservationWasRecorded(t *testing.T) {
+	tests := []struct {
+		name     string
+		appended bool
+	}{
+		{"nothing appended: the log already said member", false},
+		{"appended: the log had no answer here", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newTestHarness(t)
+			h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
+			logs := h.captureLogs()
+
+			h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+				if len(calls) == 1 && calls[0].Target == testAdapterAddr {
+					return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(1))}}, nil
+				}
+				return nil, errTestUnexpectedCall(calls)
+			}
+			h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+				if len(calls) == 2 && calls[0].Target == testAdapterAddr {
+					return h.adapterProbeResults(entity.MorphoAdapterTypeMarketV1), nil
+				}
+				return nil, errTestUnexpectedCall(calls)
+			}
+			h.morphoRepo.GetActiveAdapterAtFn = func(_ context.Context, _ int64, _ []byte, _ entity.BlockPosition) (*entity.MorphoAdapterMember, error) {
+				if tt.appended {
+					return nil, nil
+				}
+				return testAdapterMember(), nil
+			}
+			h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterObservation) (int64, bool, error) {
+				return 55, tt.appended, nil
+			}
+
+			log := h.makeV2VaultLog(h.vaultV2EventsABI.Events["Allocate"], testVaultAddr,
+				[]common.Hash{addrTopic(testCaller), addrTopic(testAdapterAddr)},
+				big.NewInt(5000), hashSlice(common.HexToHash("0xaa")), big.NewInt(5000))
+			if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err != nil {
+				t.Fatalf("processBlock: %v", err)
+			}
+
+			if got := logs.hasWarnContaining("membership inferred from an Allocate"); got != tt.appended {
+				t.Errorf("WARN(membership inferred) = %v, want %v", got, tt.appended)
+			}
+		})
+	}
+}
+
+// TestProcessBlockEvent_RemoveAdapter_UnknownAdapterIsRecordedNotHealed replaces the
+// old "unknown adapter heals" behaviour. A removal for an adapter no AddAdapter was
+// ever seen for used to probe the chain and register a zero-length [R,R] incarnation
+// so MarkAdapterRemoved had something to close. There is nothing to close now: the
+// removal is one untyped observation, recorded with no probe and no lookup, and the
+// identity row is created by the repository on first sight.
+func TestProcessBlockEvent_RemoveAdapter_UnknownAdapterIsRecordedNotHealed(t *testing.T) {
+	h := newTestHarness(t)
+	h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
+	logs := h.captureLogs()
+
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		t.Fatal("an unknown adapter is not probed on the removal path either")
+		return nil, errTestUnexpectedCall(calls)
+	}
+	var saved *entity.MorphoAdapterObservation
+	h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, obs *entity.MorphoAdapterObservation) (int64, bool, error) {
+		saved = obs
+		return 91, true, nil
+	}
+	h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterState) error {
+		t.Fatal("a removal seeds no state")
+		return nil
+	}
+
+	log := h.makeV2VaultLog(h.vaultV2EventsABI.Events["RemoveAdapter"], testVaultAddr, []common.Hash{addrTopic(testAdapterAddr)})
+	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err != nil {
+		t.Fatalf("a removal for an unseen adapter must be recorded, not fail: %v", err)
+	}
+	if saved == nil {
+		t.Fatal("ObserveAdapterMembership not called")
+	}
+	if saved.Membership.AdapterType != nil || saved.Membership.IsMember {
+		t.Errorf("want an untyped non-membership observation, got type=%v member=%t",
+			saved.Membership.AdapterType, saved.Membership.IsMember)
+	}
+	if logs.hasWarnContaining("registered lazily") {
+		t.Error("nothing is registered lazily on the removal path any more")
 	}
 }
 
@@ -543,19 +668,22 @@ func TestProcessBlockEvent_Allocation(t *testing.T) {
 				return []outbound.Result{{Success: true, ReturnData: h.packUint256(realAssets)}}, nil
 			}
 
-			// Known adapter: the pre-transaction membership check finds it, so no
-			// classification probe fires; the in-tx GetActiveAdapter is the decisive
-			// read that yields the id for the state snapshot.
-			h.morphoRepo.GetActiveAdaptersByVaultFn = func(_ context.Context, _ int64) ([]*entity.MorphoAdapter, error) {
-				return []*entity.MorphoAdapter{{ID: 55, MorphoVaultID: 7, Address: testAdapterAddr.Bytes(), AssetTokenID: 1, AdapterType: entity.MorphoAdapterTypeMarketV1, AddedAtBlock: 19000000}}, nil
+			// Known adapter: the pre-transaction membership read finds it at this
+			// position, so no classification probe fires and the in-transaction
+			// assertion appends nothing — it only resolves the id for the snapshot.
+			h.morphoRepo.GetActiveAdapterAtFn = func(_ context.Context, _ int64, _ []byte, _ entity.BlockPosition) (*entity.MorphoAdapterMember, error) {
+				return testAdapterMember(), nil
 			}
 			var (
 				gotVaultID int64
 				gotAddr    []byte
 			)
-			h.morphoRepo.GetActiveAdapterFn = func(_ context.Context, _ pgx.Tx, vaultID int64, address []byte) (*entity.MorphoAdapter, error) {
-				gotVaultID, gotAddr = vaultID, address
-				return &entity.MorphoAdapter{ID: 55, MorphoVaultID: 7, Address: testAdapterAddr.Bytes(), AssetTokenID: 1, AdapterType: entity.MorphoAdapterTypeMarketV1, AddedAtBlock: 19000000}, nil
+			h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, obs *entity.MorphoAdapterObservation) (int64, bool, error) {
+				gotVaultID, gotAddr = obs.Identity.MorphoVaultID, obs.Identity.Address
+				if obs.Membership.ObservedVia != entity.MembershipFromAllocation {
+					t.Errorf("ObservedVia = %q, want allocation_event", obs.Membership.ObservedVia)
+				}
+				return 55, false, nil
 			}
 			var savedState *entity.MorphoAdapterState
 			h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, s *entity.MorphoAdapterState) error {
@@ -578,7 +706,7 @@ func TestProcessBlockEvent_Allocation(t *testing.T) {
 				t.Errorf("realAssets pinned to %s, want %s", gotHash, testBlockHash)
 			}
 			if gotVaultID != 7 || !bytes.Equal(gotAddr, testAdapterAddr.Bytes()) {
-				t.Errorf("GetActiveAdapter(%d,%x), want (7,%s)", gotVaultID, gotAddr, testAdapterAddr.Hex())
+				t.Errorf("ObserveAdapterMembership(%d,%x), want (7,%s)", gotVaultID, gotAddr, testAdapterAddr.Hex())
 			}
 			if savedState == nil {
 				t.Fatal("SaveAdapterState not called")
@@ -605,10 +733,10 @@ func TestProcessBlockEvent_Allocation(t *testing.T) {
 // TestProcessBlockEvent_Allocation_UnknownAdapterHeals verifies the self-heal:
 // an Allocate/Deallocate for an adapter we never saw AddAdapter for (it predates
 // the vault's discovery) must NOT hard-fail the event and poison the FIFO queue.
-// Instead the adapter is classified on-chain, registered at the event block, and
-// its state row saved — behind a "registered lazily" WARN. The adapter address
-// comes from the vault's own event and is verified by the probe, so this is a
-// heal, not a phantom write.
+// Instead the adapter is classified on-chain, the membership the log implies is
+// recorded at the event position, and its state row saved — behind a WARN saying the
+// membership was inferred. The adapter address comes from the vault's own event and is
+// verified by the probe, so this is evidence, not a phantom write.
 func TestProcessBlockEvent_Allocation_UnknownAdapterHeals(t *testing.T) {
 	tests := []struct {
 		name            string
@@ -639,13 +767,13 @@ func TestProcessBlockEvent_Allocation_UnknownAdapterHeals(t *testing.T) {
 				return nil, errTestUnexpectedCall(calls)
 			}
 
-			h.morphoRepo.GetActiveAdapterFn = func(_ context.Context, _ pgx.Tx, _ int64, _ []byte) (*entity.MorphoAdapter, error) {
+			h.morphoRepo.GetActiveAdapterAtFn = func(_ context.Context, _ int64, _ []byte, _ entity.BlockPosition) (*entity.MorphoAdapterMember, error) {
 				return nil, nil // adapter predates discovery — never AddAdapter'd
 			}
-			var registered *entity.MorphoAdapter
-			h.morphoRepo.GetOrCreateAdapterFn = func(_ context.Context, _ pgx.Tx, a *entity.MorphoAdapter) (int64, error) {
-				registered = a
-				return 77, nil
+			var registered *entity.MorphoAdapterObservation
+			h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, obs *entity.MorphoAdapterObservation) (int64, bool, error) {
+				registered = obs
+				return 77, true, nil
 			}
 			var savedState *entity.MorphoAdapterState
 			h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, s *entity.MorphoAdapterState) error {
@@ -662,160 +790,40 @@ func TestProcessBlockEvent_Allocation_UnknownAdapterHeals(t *testing.T) {
 			}
 
 			if registered == nil {
-				t.Fatal("adapter was not lazily registered")
+				t.Fatal("the membership the Allocate implies was not recorded")
 			}
-			if registered.MorphoVaultID != 7 {
-				t.Errorf("MorphoVaultID = %d, want 7", registered.MorphoVaultID)
+			if registered.Identity.MorphoVaultID != 7 {
+				t.Errorf("MorphoVaultID = %d, want 7", registered.Identity.MorphoVaultID)
 			}
-			if !bytes.Equal(registered.Address, testAdapterAddr.Bytes()) {
-				t.Errorf("Address = %x, want %s", registered.Address, testAdapterAddr.Hex())
+			if !bytes.Equal(registered.Identity.Address, testAdapterAddr.Bytes()) {
+				t.Errorf("Address = %x, want %s", registered.Identity.Address, testAdapterAddr.Hex())
 			}
-			if registered.AdapterType != tt.adapterType {
-				t.Errorf("AdapterType = %d, want %d (probed on-chain)", registered.AdapterType, tt.adapterType)
+			if got := registered.Membership.AdapterType; got == nil || *got != tt.adapterType {
+				t.Errorf("AdapterType = %v, want %d (probed on-chain)", got, tt.adapterType)
 			}
-			if registered.AddedAtBlock != 20000000 {
-				t.Errorf("AddedAtBlock = %d, want 20000000 (event block)", registered.AddedAtBlock)
+			if registered.Membership.BlockNumber != 20000000 {
+				t.Errorf("BlockNumber = %d, want 20000000 (event block)", registered.Membership.BlockNumber)
 			}
-			if registered.AssetTokenID != 1 {
-				t.Errorf("AssetTokenID = %d, want 1 (vault asset)", registered.AssetTokenID)
+			if registered.Membership.ObservedVia != entity.MembershipFromAllocation {
+				t.Errorf("ObservedVia = %q, want allocation_event", registered.Membership.ObservedVia)
+			}
+			if registered.Identity.AssetTokenID != 1 {
+				t.Errorf("AssetTokenID = %d, want 1 (vault asset)", registered.Identity.AssetTokenID)
 			}
 			if savedState == nil {
 				t.Fatal("adapter state not saved after heal")
 			}
 			if savedState.MorphoAdapterID != 77 {
-				t.Errorf("MorphoAdapterID = %d, want 77 (the lazily-registered row)", savedState.MorphoAdapterID)
+				t.Errorf("MorphoAdapterID = %d, want 77 (the id the observation resolved)", savedState.MorphoAdapterID)
 			}
 			if savedState.RealAssets.Cmp(realAssets) != 0 {
 				t.Errorf("RealAssets = %s, want %s", savedState.RealAssets, realAssets)
 			}
-			if !logs.hasWarnContaining("registered lazily") {
-				t.Error("expected a WARN that the adapter was registered lazily")
+			if !logs.hasWarnContaining("membership inferred from an Allocate") {
+				t.Error("expected a WARN that the membership was inferred rather than witnessed")
 			}
 			if got := logs.hasWarnContaining("unknown type"); got != tt.wantUnknownWarn {
 				t.Errorf("WARN(unknown type) = %v, want %v", got, tt.wantUnknownWarn)
-			}
-		})
-	}
-}
-
-// TestProcessBlockEvent_RemoveAdapter_UnknownAdapterHeals verifies a RemoveAdapter
-// for an adapter that predates discovery lazily registers an audit-consistent row
-// (probed type, event block) and then closes it in the same transaction, rather
-// than failing MarkAdapterRemoved with a 0-rows error and poisoning the queue.
-func TestProcessBlockEvent_RemoveAdapter_UnknownAdapterHeals(t *testing.T) {
-	h := newTestHarness(t)
-	h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
-	logs := h.captureLogs()
-
-	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		if len(calls) == 2 && calls[0].Target == testAdapterAddr {
-			return h.adapterProbeResults(entity.MorphoAdapterTypeVaultV1), nil
-		}
-		return nil, errTestUnexpectedCall(calls)
-	}
-	var registered *entity.MorphoAdapter
-	h.morphoRepo.EnsureIncarnationToCloseFn = func(_ context.Context, _ pgx.Tx, _ int64, _ []byte, _ int64, candidate *entity.MorphoAdapter) (bool, error) {
-		registered = candidate // unknown adapter: the registry has nothing to close
-		return true, nil
-	}
-	h.morphoRepo.GetOrCreateAdapterFn = func(_ context.Context, _ pgx.Tx, a *entity.MorphoAdapter) (int64, error) {
-		t.Fatalf("the removal heal must not register through the converging GetOrCreateAdapter (added %d): it would drag a later active incarnation of this address down to the removal block", a.AddedAtBlock)
-		return 0, nil
-	}
-	var (
-		removedVaultID int64
-		removedAddr    []byte
-		removedBlock   int64
-		marked         bool
-	)
-	h.morphoRepo.MarkAdapterRemovedFn = func(_ context.Context, _ pgx.Tx, vaultID int64, address []byte, removedAtBlock int64) error {
-		marked = true
-		removedVaultID, removedAddr, removedBlock = vaultID, address, removedAtBlock
-		return nil
-	}
-
-	ev := h.vaultV2EventsABI.Events["RemoveAdapter"]
-	log := h.makeV2VaultLog(ev, testVaultAddr, []common.Hash{addrTopic(testAdapterAddr)})
-	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err != nil {
-		t.Fatalf("processBlock must self-heal, not fail: %v", err)
-	}
-
-	if registered == nil {
-		t.Fatal("unknown adapter was not lazily registered before removal")
-	}
-	if registered.AddedAtBlock != 20000000 {
-		t.Errorf("AddedAtBlock = %d, want 20000000 (event block)", registered.AddedAtBlock)
-	}
-	if registered.RemovedAtBlock == nil || *registered.RemovedAtBlock != 20000000 {
-		t.Errorf("RemovedAtBlock = %v, want 20000000: the synthetic incarnation is born closed so it cannot collide with a later active one", registered.RemovedAtBlock)
-	}
-	if registered.AdapterType != entity.MorphoAdapterTypeVaultV1 {
-		t.Errorf("AdapterType = %d, want VaultV1 (probed)", registered.AdapterType)
-	}
-	if !marked {
-		t.Fatal("MarkAdapterRemoved not called after lazy registration")
-	}
-	if removedVaultID != 7 || !bytes.Equal(removedAddr, testAdapterAddr.Bytes()) || removedBlock != 20000000 {
-		t.Errorf("MarkAdapterRemoved(%d,%x,%d), want (7,%s,20000000)", removedVaultID, removedAddr, removedBlock, testAdapterAddr.Hex())
-	}
-	if !logs.hasWarnContaining("registered lazily") {
-		t.Error("expected a WARN that the adapter was registered lazily")
-	}
-}
-
-// TestProcessBlockEvent_RemoveAdapter_ClosesWhetherOrNotAnIncarnationWasRegistered pins
-// what the handler owes each answer the registry can give it. WHICH answer that is — a
-// covering incarnation, a reorg-relocated close, or a genuinely unknown lifetime — is the
-// registry's decision under its advisory lock and is pinned by the incarnation matrix in
-// morpho_repository_integration_test.go, not mockable from here.
-//
-// Both answers still reach MarkAdapterRemoved: a redelivered or replayed removal whose
-// incarnation is already on record must converge onto it rather than be skipped. Only a
-// registration earns the lazy-registration WARN, which is the ops signal that an
-// AddAdapter predates vault discovery — emitting it on the idempotent path would cry wolf
-// on every SQS redelivery.
-func TestProcessBlockEvent_RemoveAdapter_ClosesWhetherOrNotAnIncarnationWasRegistered(t *testing.T) {
-	tests := []struct {
-		name       string
-		registered bool
-	}{
-		{name: "an incarnation already on record absorbs the removal"},
-		{name: "an unobserved lifetime is registered first", registered: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			h := newTestHarness(t)
-			h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
-			logs := h.captureLogs()
-
-			h.morphoRepo.GetActiveAdaptersByVaultFn = func(_ context.Context, _ int64) ([]*entity.MorphoAdapter, error) {
-				return nil, nil // not active, so the type probe runs before the transaction
-			}
-			h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-				if len(calls) == 2 && calls[0].Target == testAdapterAddr {
-					return h.adapterProbeResults(entity.MorphoAdapterTypeMarketV1), nil
-				}
-				return nil, errTestUnexpectedCall(calls)
-			}
-			h.morphoRepo.EnsureIncarnationToCloseFn = func(_ context.Context, _ pgx.Tx, _ int64, _ []byte, _ int64, _ *entity.MorphoAdapter) (bool, error) {
-				return tt.registered, nil
-			}
-			marked := false
-			h.morphoRepo.MarkAdapterRemovedFn = func(_ context.Context, _ pgx.Tx, _ int64, _ []byte, _ int64) error {
-				marked = true
-				return nil
-			}
-
-			log := h.makeV2VaultLog(h.vaultV2EventsABI.Events["RemoveAdapter"], testVaultAddr, []common.Hash{addrTopic(testAdapterAddr)})
-			if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err != nil {
-				t.Fatalf("processBlock: %v", err)
-			}
-
-			if !marked {
-				t.Error("MarkAdapterRemoved must run so the removal converges onto whichever row the registry resolved")
-			}
-			if got := logs.hasWarnContaining("registered lazily"); got != tt.registered {
-				t.Errorf("WARN(registered lazily) = %v, want %v", got, tt.registered)
 			}
 		})
 	}
@@ -1273,9 +1281,9 @@ func TestProcessBlockEvent_V2Handlers_ErrorsPropagate(t *testing.T) {
 				h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					return nil, errors.New("probe rpc down")
 				}
-				h.morphoRepo.GetOrCreateAdapterFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapter) (int64, error) {
-					t.Fatal("adapter must not be persisted when the probe fails")
-					return 0, nil
+				h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterObservation) (int64, bool, error) {
+					t.Fatal("no membership may be recorded when the probe fails")
+					return 0, false, nil
 				}
 				return h.makeV2VaultLog(h.vaultV2EventsABI.Events["AddAdapter"], testVaultAddr, []common.Hash{addrTopic(testAdapterAddr)})
 			},
@@ -1295,8 +1303,8 @@ func TestProcessBlockEvent_V2Handlers_ErrorsPropagate(t *testing.T) {
 			},
 		},
 		{
-			name:    "AddAdapter: GetOrCreateAdapter DB error",
-			wantErr: "persisting adapter",
+			name:    "AddAdapter: ObserveAdapterMembership DB error",
+			wantErr: "recording adapter",
 			setup: func(h *serviceTestHarness) shared.Log {
 				h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					return h.adapterProbeResults(entity.MorphoAdapterTypeMarketV1), nil
@@ -1304,8 +1312,8 @@ func TestProcessBlockEvent_V2Handlers_ErrorsPropagate(t *testing.T) {
 				h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 					return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(1))}}, nil
 				}
-				h.morphoRepo.GetOrCreateAdapterFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapter) (int64, error) {
-					return 0, errors.New("db down")
+				h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterObservation) (int64, bool, error) {
+					return 0, false, errors.New("db down")
 				}
 				h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterState) error {
 					t.Fatal("adapter state must not be persisted when the registry write fails")
@@ -1315,11 +1323,11 @@ func TestProcessBlockEvent_V2Handlers_ErrorsPropagate(t *testing.T) {
 			},
 		},
 		{
-			// The pre-transaction membership read decides whether the heal path needs
-			// to probe at all; a DB failure there must stop the event, not be read as
-			// "adapter not registered".
-			name:    "Allocation: GetActiveAdaptersByVault DB error",
-			wantErr: "looking up active adapters",
+			// The pre-transaction membership read decides whether the assertion path
+			// needs to probe at all; a DB failure there must stop the event, not be
+			// read as "adapter not a member".
+			name:    "Allocation: GetActiveAdapterAt DB error",
+			wantErr: "looking up adapter",
 			setup: func(h *serviceTestHarness) shared.Log {
 				h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 					return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(1))}}, nil
@@ -1329,7 +1337,7 @@ func TestProcessBlockEvent_V2Handlers_ErrorsPropagate(t *testing.T) {
 				h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					return h.adapterProbeResults(entity.MorphoAdapterTypeMarketV1), nil
 				}
-				h.morphoRepo.GetActiveAdaptersByVaultFn = func(_ context.Context, _ int64) ([]*entity.MorphoAdapter, error) {
+				h.morphoRepo.GetActiveAdapterAtFn = func(_ context.Context, _ int64, _ []byte, _ entity.BlockPosition) (*entity.MorphoAdapterMember, error) {
 					return nil, errors.New("db down")
 				}
 				h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterState) error {
@@ -1340,24 +1348,22 @@ func TestProcessBlockEvent_V2Handlers_ErrorsPropagate(t *testing.T) {
 			},
 		},
 		{
-			name: "Allocation: GetActiveAdapter DB error",
-			// "looking up active adapter" is a prefix of the plural membership-read
-			// message, so the address is what pins this row to the in-tx read.
-			wantErr: "looking up active adapter 0x",
+			name:    "Allocation: ObserveAdapterMembership DB error",
+			wantErr: "recording adapter",
 			setup: func(h *serviceTestHarness) shared.Log {
 				h.multicaller.ExecuteAtHashFn = func(_ context.Context, _ []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 					return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(1))}}, nil
 				}
-				// Adapter is already registered (pre-tx check finds it), so the
-				// failure under test is the decisive in-tx GetActiveAdapter read.
-				h.morphoRepo.GetActiveAdaptersByVaultFn = func(_ context.Context, _ int64) ([]*entity.MorphoAdapter, error) {
-					return []*entity.MorphoAdapter{{ID: 55, MorphoVaultID: 7, Address: testAdapterAddr.Bytes(), AssetTokenID: 1, AdapterType: entity.MorphoAdapterTypeMarketV1, AddedAtBlock: 19000000}}, nil
+				// Adapter is already a member (the pre-tx read finds it), so the
+				// failure under test is the in-transaction observation write.
+				h.morphoRepo.GetActiveAdapterAtFn = func(_ context.Context, _ int64, _ []byte, _ entity.BlockPosition) (*entity.MorphoAdapterMember, error) {
+					return testAdapterMember(), nil
 				}
-				h.morphoRepo.GetActiveAdapterFn = func(_ context.Context, _ pgx.Tx, _ int64, _ []byte) (*entity.MorphoAdapter, error) {
-					return nil, errors.New("db down")
+				h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterObservation) (int64, bool, error) {
+					return 0, false, errors.New("db down")
 				}
 				h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterState) error {
-					t.Fatal("adapter state must not be persisted on a DB lookup error")
+					t.Fatal("adapter state must not be persisted on a DB write error")
 					return nil
 				}
 				return h.makeV2VaultLog(h.vaultV2EventsABI.Events["Allocate"], testVaultAddr, adapterIdx, big.NewInt(1), hashSlice(common.HexToHash("0xaa")), big.NewInt(1))
@@ -1376,12 +1382,12 @@ func TestProcessBlockEvent_V2Handlers_ErrorsPropagate(t *testing.T) {
 				h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 					return nil, errors.New("adapter probe rpc down")
 				}
-				h.morphoRepo.GetActiveAdapterFn = func(_ context.Context, _ pgx.Tx, _ int64, _ []byte) (*entity.MorphoAdapter, error) {
-					return nil, nil // unknown adapter → heal path fires, then the probe fails
+				h.morphoRepo.GetActiveAdapterAtFn = func(_ context.Context, _ int64, _ []byte, _ entity.BlockPosition) (*entity.MorphoAdapterMember, error) {
+					return nil, nil // not a member here → the probe runs, then fails
 				}
-				h.morphoRepo.GetOrCreateAdapterFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapter) (int64, error) {
-					t.Fatal("adapter must not be persisted when the classification probe fails")
-					return 0, nil
+				h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterObservation) (int64, bool, error) {
+					t.Fatal("no membership may be recorded when the classification probe fails")
+					return 0, false, nil
 				}
 				h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterState) error {
 					t.Fatal("adapter state must not be persisted when the probe fails")
@@ -1461,15 +1467,14 @@ func TestProcessBlockEvent_Allocation_VanishedAdapterFailsHard(t *testing.T) {
 		t.Fatal("no probe may run: the pre-transaction membership check found the adapter")
 		return nil, errTestUnexpectedCall(calls)
 	}
-	h.morphoRepo.GetActiveAdaptersByVaultFn = func(_ context.Context, _ int64) ([]*entity.MorphoAdapter, error) {
-		return []*entity.MorphoAdapter{{ID: 55, MorphoVaultID: 7, Address: testAdapterAddr.Bytes(), AssetTokenID: 1, AdapterType: entity.MorphoAdapterTypeMarketV1, AddedAtBlock: 19000000}}, nil
+	h.morphoRepo.GetActiveAdapterAtFn = func(_ context.Context, _ int64, _ []byte, _ entity.BlockPosition) (*entity.MorphoAdapterMember, error) {
+		return testAdapterMember(), nil
 	}
-	h.morphoRepo.GetActiveAdapterFn = func(_ context.Context, _ pgx.Tx, _ int64, _ []byte) (*entity.MorphoAdapter, error) {
-		return nil, nil
-	}
-	h.morphoRepo.GetOrCreateAdapterFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapter) (int64, error) {
-		t.Fatal("an adapter must never be registered with a defaulted type")
-		return 0, nil
+	h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, obs *entity.MorphoAdapterObservation) (int64, bool, error) {
+		if obs.Membership.AdapterType != nil {
+			t.Errorf("AdapterType = %v, want nil: nothing was probed, so nothing may be invented", *obs.Membership.AdapterType)
+		}
+		return 0, false, fmt.Errorf("wrapped: %w", outbound.ErrAdapterUnclassified)
 	}
 	h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterState) error {
 		t.Fatal("no adapter state may be written for an adapter that vanished mid-transaction")
@@ -1488,52 +1493,14 @@ func TestProcessBlockEvent_Allocation_VanishedAdapterFailsHard(t *testing.T) {
 	}
 }
 
-// TestProcessBlockEvent_RemoveAdapter_VanishedAdapterFailsHard is the removal path's
-// counterpart to TestProcessBlockEvent_Allocation_VanishedAdapterFailsHard: the
-// pre-transaction membership check finds the adapter, so nothing is probed and no
-// classification enters the transaction, but the registry then reports no incarnation
-// covering the removal block. With no probed type the only alternatives are recording a
-// defaulted classification or failing, so it must fail and let SQS redelivery re-probe.
-func TestProcessBlockEvent_RemoveAdapter_VanishedAdapterFailsHard(t *testing.T) {
-	h := newTestHarness(t)
-	h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
-
-	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		t.Fatal("no probe may run: the pre-transaction membership check found the adapter")
-		return nil, errTestUnexpectedCall(calls)
-	}
-	h.morphoRepo.GetActiveAdaptersByVaultFn = func(_ context.Context, _ int64) ([]*entity.MorphoAdapter, error) {
-		return []*entity.MorphoAdapter{{ID: 55, MorphoVaultID: 7, Address: testAdapterAddr.Bytes(), AssetTokenID: 1, AdapterType: entity.MorphoAdapterTypeMarketV1, AddedAtBlock: 19000000}}, nil
-	}
-	h.morphoRepo.EnsureIncarnationToCloseFn = func(_ context.Context, _ pgx.Tx, _ int64, _ []byte, _ int64, candidate *entity.MorphoAdapter) (bool, error) {
-		if candidate != nil {
-			t.Errorf("candidate = %+v, want nil: no type was probed, so none may be invented", candidate)
-		}
-		return false, fmt.Errorf("wrapped: %w", outbound.ErrAdapterUnclassified)
-	}
-	h.morphoRepo.MarkAdapterRemovedFn = func(_ context.Context, _ pgx.Tx, _ int64, _ []byte, _ int64) error {
-		t.Fatal("no removal may be recorded against an incarnation the registry could not resolve")
-		return nil
-	}
-
-	log := h.makeV2VaultLog(h.vaultV2EventsABI.Events["RemoveAdapter"], testVaultAddr, []common.Hash{addrTopic(testAdapterAddr)})
-	err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)})
-	if err == nil {
-		t.Fatal("expected the block to fail so SQS redelivers and the pre-tx check re-probes")
-	}
-	if !strings.Contains(err.Error(), "no type was probed") {
-		t.Errorf("error should name the missing probed type, got: %v", err)
-	}
-}
-
 // TestProcessBlockEvent_RemoveAdapter_NonV2VaultErrors exercises resolveV2Vault's
 // version guard through a handler other than AddAdapter.
 func TestProcessBlockEvent_RemoveAdapter_NonV2VaultErrors(t *testing.T) {
 	h := newTestHarness(t)
 	h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV1)
-	h.morphoRepo.MarkAdapterRemovedFn = func(_ context.Context, _ pgx.Tx, _ int64, _ []byte, _ int64) error {
-		t.Fatal("MarkAdapterRemoved must not run for a non-V2 vault")
-		return nil
+	h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterObservation) (int64, bool, error) {
+		t.Fatal("no membership may be recorded for a non-V2 vault")
+		return 0, false, nil
 	}
 	log := h.makeV2VaultLog(h.vaultV2EventsABI.Events["RemoveAdapter"], testVaultAddr, []common.Hash{addrTopic(testAdapterAddr)})
 	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err == nil {

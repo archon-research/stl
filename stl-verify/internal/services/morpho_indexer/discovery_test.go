@@ -305,10 +305,10 @@ func TestProcessBlockEvent_VaultDiscovery_V2_UnclassifiedAdapterWithoutRealAsset
 		}
 	}
 
-	var registered []*entity.MorphoAdapter
-	h.morphoRepo.GetOrCreateAdapterFn = func(_ context.Context, _ pgx.Tx, a *entity.MorphoAdapter) (int64, error) {
-		registered = append(registered, a)
-		return int64(len(registered)), nil
+	var registered []*entity.MorphoAdapterObservation
+	h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, obs *entity.MorphoAdapterObservation) (int64, bool, error) {
+		registered = append(registered, obs)
+		return int64(len(registered)), true, nil
 	}
 	h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterState) error {
 		t.Fatal("no state row may be seeded for an adapter that served no realAssets() reading")
@@ -323,8 +323,8 @@ func TestProcessBlockEvent_VaultDiscovery_V2_UnclassifiedAdapterWithoutRealAsset
 	if len(registered) != 1 {
 		t.Fatalf("registered %d adapters, want 1", len(registered))
 	}
-	if registered[0].AdapterType != entity.MorphoAdapterTypeUnknown {
-		t.Errorf("AdapterType = %d, want Unknown", registered[0].AdapterType)
+	if got := registered[0].Membership.AdapterType; got == nil || *got != entity.MorphoAdapterTypeUnknown {
+		t.Errorf("AdapterType = %v, want Unknown", got)
 	}
 	if !logs.hasWarnContaining("does not serve realAssets()") {
 		t.Error("expected a WARN naming the adapter that served no realAssets() reading")
@@ -506,10 +506,10 @@ func TestProcessBlockEvent_VaultDiscovery_V2_EnumeratesAndSeedsAdapters(t *testi
 
 	h.morphoRepo.GetOrCreateVaultFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoVault) (int64, error) { return 99, nil }
 	adapterIDByAddr := map[common.Address]int64{adapterA: 101, adapterB: 102}
-	var registered []*entity.MorphoAdapter
-	h.morphoRepo.GetOrCreateAdapterFn = func(_ context.Context, _ pgx.Tx, a *entity.MorphoAdapter) (int64, error) {
-		registered = append(registered, a)
-		return adapterIDByAddr[common.BytesToAddress(a.Address)], nil
+	var registered []*entity.MorphoAdapterObservation
+	h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, obs *entity.MorphoAdapterObservation) (int64, bool, error) {
+		registered = append(registered, obs)
+		return adapterIDByAddr[common.BytesToAddress(obs.Identity.Address)], true, nil
 	}
 	var seeded []*entity.MorphoAdapterState
 	h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, s *entity.MorphoAdapterState) error {
@@ -528,24 +528,35 @@ func TestProcessBlockEvent_VaultDiscovery_V2_EnumeratesAndSeedsAdapters(t *testi
 	if len(registered) != 2 {
 		t.Fatalf("want 2 adapters registered, got %d", len(registered))
 	}
-	byAddr := map[common.Address]*entity.MorphoAdapter{}
-	for _, a := range registered {
-		byAddr[common.BytesToAddress(a.Address)] = a
-		if a.MorphoVaultID != 99 {
-			t.Errorf("adapter %x MorphoVaultID = %d, want 99", a.Address, a.MorphoVaultID)
+	byAddr := map[common.Address]*entity.MorphoAdapterObservation{}
+	for _, obs := range registered {
+		byAddr[common.BytesToAddress(obs.Identity.Address)] = obs
+		if obs.Identity.MorphoVaultID != 99 {
+			t.Errorf("adapter %x MorphoVaultID = %d, want 99", obs.Identity.Address, obs.Identity.MorphoVaultID)
 		}
-		if a.AddedAtBlock != 24481834 {
-			t.Errorf("adapter %x AddedAtBlock = %d, want 24481834 (discovery block)", a.Address, a.AddedAtBlock)
+		if obs.Membership.BlockNumber != 24481834 {
+			t.Errorf("adapter %x observed at block %d, want 24481834 (discovery block)", obs.Identity.Address, obs.Membership.BlockNumber)
 		}
-		if a.AssetTokenID != 1 {
-			t.Errorf("adapter %x AssetTokenID = %d, want 1 (vault asset)", a.Address, a.AssetTokenID)
+		if obs.Identity.AssetTokenID != 1 {
+			t.Errorf("adapter %x AssetTokenID = %d, want 1 (vault asset)", obs.Identity.Address, obs.Identity.AssetTokenID)
+		}
+		// An enumeration reads END-OF-BLOCK state, so it must order above every log in
+		// its block and record itself as an assertion, not as an add it never witnessed.
+		if obs.Membership.LogIndex != entity.EndOfBlockLogIndex {
+			t.Errorf("adapter %x LogIndex = %d, want EndOfBlockLogIndex", obs.Identity.Address, obs.Membership.LogIndex)
+		}
+		if obs.Membership.ObservedVia != entity.MembershipFromDiscovery {
+			t.Errorf("adapter %x ObservedVia = %q, want vault_discovery", obs.Identity.Address, obs.Membership.ObservedVia)
+		}
+		if !obs.Membership.IsMember {
+			t.Errorf("adapter %x must be recorded as a member of the enumerated set", obs.Identity.Address)
 		}
 	}
-	if byAddr[adapterA].AdapterType != entity.MorphoAdapterTypeMarketV1 {
-		t.Errorf("adapterA type = %d, want MarketV1", byAddr[adapterA].AdapterType)
+	if got := byAddr[adapterA].Membership.AdapterType; got == nil || *got != entity.MorphoAdapterTypeMarketV1 {
+		t.Errorf("adapterA type = %v, want MarketV1", got)
 	}
-	if byAddr[adapterB].AdapterType != entity.MorphoAdapterTypeVaultV1 {
-		t.Errorf("adapterB type = %d, want VaultV1", byAddr[adapterB].AdapterType)
+	if got := byAddr[adapterB].Membership.AdapterType; got == nil || *got != entity.MorphoAdapterTypeVaultV1 {
+		t.Errorf("adapterB type = %v, want VaultV1", got)
 	}
 
 	if len(seeded) != 2 {
@@ -737,9 +748,9 @@ func TestProcessBlockEvent_VaultDiscovery_V2_ZeroAdaptersRegistersCleanly(t *tes
 		}
 	}
 	h.morphoRepo.GetOrCreateVaultFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoVault) (int64, error) { return 99, nil }
-	h.morphoRepo.GetOrCreateAdapterFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapter) (int64, error) {
-		t.Fatal("no adapter must be registered for a zero-adapter vault")
-		return 0, nil
+	h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterObservation) (int64, bool, error) {
+		t.Fatal("no adapter membership must be recorded for a zero-adapter vault")
+		return 0, false, nil
 	}
 	h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterState) error {
 		t.Fatal("no adapter state must be seeded for a zero-adapter vault")
@@ -841,8 +852,8 @@ func TestProcessBlockEvent_VaultDiscovery_V2_EnumerationFailureCommitsNothingAnd
 		adapterSeeded = true
 		return nil
 	}
-	h.morphoRepo.GetOrCreateAdapterFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapter) (int64, error) {
-		return 101, nil
+	h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterObservation) (int64, bool, error) {
+		return 101, true, nil
 	}
 
 	enumerationShouldFail := true

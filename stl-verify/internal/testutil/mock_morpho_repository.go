@@ -21,11 +21,10 @@ type MockMorphoRepository struct {
 	SaveVaultStateFn      func(ctx context.Context, tx pgx.Tx, state *entity.MorphoVaultState) error
 	SaveVaultPositionFn   func(ctx context.Context, tx pgx.Tx, position *entity.MorphoVaultPosition) error
 
-	GetOrCreateAdapterFn       func(ctx context.Context, tx pgx.Tx, adapter *entity.MorphoAdapter) (int64, error)
-	EnsureIncarnationToCloseFn func(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, removedAtBlock int64, candidate *entity.MorphoAdapter) (bool, error)
-	MarkAdapterRemovedFn       func(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, removedAtBlock int64) error
-	GetActiveAdapterFn         func(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte) (*entity.MorphoAdapter, error)
-	GetActiveAdaptersByVaultFn func(ctx context.Context, morphoVaultID int64) ([]*entity.MorphoAdapter, error)
+	ObserveAdapterMembershipFn func(ctx context.Context, tx pgx.Tx, obs *entity.MorphoAdapterObservation) (int64, bool, error)
+	GetActiveAdapterFn         func(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte) (*entity.MorphoAdapterMember, error)
+	GetActiveAdapterAtFn       func(ctx context.Context, morphoVaultID int64, address []byte, at entity.BlockPosition) (*entity.MorphoAdapterMember, error)
+	GetActiveAdaptersByVaultFn func(ctx context.Context, morphoVaultID int64) ([]*entity.MorphoAdapterMember, error)
 	SaveAdapterStateFn         func(ctx context.Context, tx pgx.Tx, state *entity.MorphoAdapterState) error
 	SaveVaultCapFn             func(ctx context.Context, tx pgx.Tx, vaultCap *entity.MorphoVaultCap) error
 	SaveVaultFeeFn             func(ctx context.Context, tx pgx.Tx, vaultFee *entity.MorphoVaultFee) error
@@ -94,35 +93,28 @@ func (m *MockMorphoRepository) SaveVaultPosition(ctx context.Context, tx pgx.Tx,
 	return nil
 }
 
-func (m *MockMorphoRepository) GetOrCreateAdapter(ctx context.Context, tx pgx.Tx, adapter *entity.MorphoAdapter) (int64, error) {
-	if m.GetOrCreateAdapterFn != nil {
-		return m.GetOrCreateAdapterFn(ctx, tx, adapter)
+func (m *MockMorphoRepository) ObserveAdapterMembership(ctx context.Context, tx pgx.Tx, obs *entity.MorphoAdapterObservation) (int64, bool, error) {
+	if m.ObserveAdapterMembershipFn != nil {
+		return m.ObserveAdapterMembershipFn(ctx, tx, obs)
 	}
-	return 1, nil
+	return 1, true, nil
 }
 
-func (m *MockMorphoRepository) EnsureIncarnationToClose(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, removedAtBlock int64, candidate *entity.MorphoAdapter) (bool, error) {
-	if m.EnsureIncarnationToCloseFn != nil {
-		return m.EnsureIncarnationToCloseFn(ctx, tx, morphoVaultID, address, removedAtBlock, candidate)
-	}
-	return false, nil
-}
-
-func (m *MockMorphoRepository) MarkAdapterRemoved(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte, removedAtBlock int64) error {
-	if m.MarkAdapterRemovedFn != nil {
-		return m.MarkAdapterRemovedFn(ctx, tx, morphoVaultID, address, removedAtBlock)
-	}
-	return nil
-}
-
-func (m *MockMorphoRepository) GetActiveAdapter(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte) (*entity.MorphoAdapter, error) {
+func (m *MockMorphoRepository) GetActiveAdapter(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte) (*entity.MorphoAdapterMember, error) {
 	if m.GetActiveAdapterFn != nil {
 		return m.GetActiveAdapterFn(ctx, tx, morphoVaultID, address)
 	}
 	return nil, nil
 }
 
-func (m *MockMorphoRepository) GetActiveAdaptersByVault(ctx context.Context, morphoVaultID int64) ([]*entity.MorphoAdapter, error) {
+func (m *MockMorphoRepository) GetActiveAdapterAt(ctx context.Context, morphoVaultID int64, address []byte, at entity.BlockPosition) (*entity.MorphoAdapterMember, error) {
+	if m.GetActiveAdapterAtFn != nil {
+		return m.GetActiveAdapterAtFn(ctx, morphoVaultID, address, at)
+	}
+	return nil, nil
+}
+
+func (m *MockMorphoRepository) GetActiveAdaptersByVault(ctx context.Context, morphoVaultID int64) ([]*entity.MorphoAdapterMember, error) {
 	if m.GetActiveAdaptersByVaultFn != nil {
 		return m.GetActiveAdaptersByVaultFn(ctx, morphoVaultID)
 	}

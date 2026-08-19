@@ -593,9 +593,9 @@ func (s *Service) processMorphoBlueLog(ctx context.Context, log shared.Log, chai
 		"block", blockNumber)
 
 	// Save raw protocol event
-	logIndex, err := strconv.ParseInt(log.LogIndex, 0, 64)
+	logIndex, err := parseLogIndex(log)
 	if err != nil {
-		return fmt.Errorf("parsing log index %q: %w", log.LogIndex, err)
+		return err
 	}
 	if err := s.saveProtocolEvent(ctx, event, chainID, blockNumber, blockVersion, int(logIndex), blockTimestamp); err != nil {
 		return fmt.Errorf("saving protocol event: %w", err)
@@ -651,6 +651,15 @@ func (s *Service) processMetaMorphoLog(ctx context.Context, log shared.Log, vaul
 		return fmt.Errorf("MetaMorpho event has unrecognised topic: %v", log.Topics)
 	}
 
+	// Parsed once here and passed down: the VaultV2 handlers record the position of
+	// the observation WITHIN its block, which is what lets an add, a remove and a
+	// re-add in one block be three distinct observations of the adapter set rather
+	// than one collapsed row.
+	logIndex, err := parseLogIndex(log)
+	if err != nil {
+		return err
+	}
+
 	ctx, span := s.telemetry.StartSpan(ctx, "morpho.processMetaMorphoEvent",
 		attribute.String("event.type", eventName),
 		attribute.String("vault.address", vaultAddress.Hex()))
@@ -663,7 +672,7 @@ func (s *Service) processMetaMorphoLog(ctx context.Context, log shared.Log, vaul
 		"tx", log.TransactionHash,
 		"block", blockNumber)
 
-	if err := s.saveMetaMorphoProtocolEvent(ctx, log, vaultAddress, eventName, chainID, blockNumber, blockVersion, blockTimestamp); err != nil {
+	if err := s.saveMetaMorphoProtocolEvent(ctx, log, vaultAddress, eventName, chainID, blockNumber, blockVersion, blockTimestamp, logIndex); err != nil {
 		return fmt.Errorf("saving MetaMorpho protocol_event: %w", err)
 	}
 
@@ -687,13 +696,13 @@ func (s *Service) processMetaMorphoLog(ctx context.Context, log shared.Log, vaul
 	case *VaultAccrueInterestEvent:
 		return s.handleVaultAccrueInterest(ctx, e, vaultAddress, chainID, blockNumber, blockHash, blockVersion, blockTimestamp)
 	case *AddAdapterEvent:
-		return s.handleAddAdapter(ctx, e, vaultAddress, blockNumber, blockHash, blockVersion, blockTimestamp)
+		return s.handleAddAdapter(ctx, e, vaultAddress, blockNumber, blockHash, blockVersion, blockTimestamp, logIndex)
 	case *RemoveAdapterEvent:
-		return s.handleRemoveAdapter(ctx, e, vaultAddress, blockNumber)
+		return s.handleRemoveAdapter(ctx, e, vaultAddress, blockNumber, blockVersion, blockTimestamp, logIndex)
 	case *AllocateEvent:
-		return s.handleAllocation(ctx, e.Adapter, vaultAddress, blockNumber, blockHash, blockVersion, blockTimestamp)
+		return s.handleAllocation(ctx, e.Adapter, vaultAddress, blockNumber, blockHash, blockVersion, blockTimestamp, logIndex)
 	case *DeallocateEvent:
-		return s.handleAllocation(ctx, e.Adapter, vaultAddress, blockNumber, blockHash, blockVersion, blockTimestamp)
+		return s.handleAllocation(ctx, e.Adapter, vaultAddress, blockNumber, blockHash, blockVersion, blockTimestamp, logIndex)
 	case *ForceDeallocateEvent:
 		return s.handleForceDeallocate(ctx, e, vaultAddress, blockNumber)
 	case *IncreaseAbsoluteCapEvent:
@@ -727,12 +736,18 @@ func (s *Service) processMetaMorphoLog(ctx context.Context, log shared.Log, vaul
 // stl-verify/internal/pkg/blockchain/abis/vault_v2_events_abi.go if needed.
 // This keeps the writer cheap and avoids encoding-bug failure modes for
 // event shapes the indexer doesn't yet structurally consume.
-func (s *Service) saveMetaMorphoProtocolEvent(ctx context.Context, log shared.Log, vaultAddress common.Address, eventName string, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
-	logIndex, err := strconv.ParseInt(log.LogIndex, 0, 64)
+// parseLogIndex reads a log's position within its block. The wire format is hex- or
+// decimal-encoded (hence strconv base 0), and the result is int32 because that is the
+// width both protocol_event.log_index and morpho_adapter_membership.log_index store.
+func parseLogIndex(log shared.Log) (int32, error) {
+	logIndex, err := strconv.ParseInt(log.LogIndex, 0, 32)
 	if err != nil {
-		return fmt.Errorf("parsing log index %q: %w", log.LogIndex, err)
+		return 0, fmt.Errorf("parsing log index %q: %w", log.LogIndex, err)
 	}
+	return int32(logIndex), nil
+}
 
+func (s *Service) saveMetaMorphoProtocolEvent(ctx context.Context, log shared.Log, vaultAddress common.Address, eventName string, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time, logIndex int32) error {
 	payload, err := json.Marshal(map[string]any{
 		"eventType": eventName,
 		"vault":     vaultAddress.Hex(),

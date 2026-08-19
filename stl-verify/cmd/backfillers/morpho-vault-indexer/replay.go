@@ -124,18 +124,15 @@ func buildReplayService(logger *slog.Logger, multicaller outbound.Multicaller, p
 // replayPartition collects, orders, and replays every structured V2 log in one
 // S3 partition, in strict (blockNumber, logIndex) order.
 //
-// Ordering is correctness-critical precisely because breaking it fails
-// SILENTLY. An Allocate for an adapter no AddAdapter was seen for does not
-// error: handleAllocation → ensureAdapterRegistered lazily registers it behind a
-// WARN, stamping added_at_block with the Allocate's block. GetOrCreateAdapter does
-// converge that block back down when the AddAdapter replays afterwards, so the
-// registration block self-heals — but only if the AddAdapter is inside the replayed
-// range at all. What a mis-ordered replay leaves behind regardless is a run whose
-// adapters were all minted through the lazy WARN path: the ops signal that
-// distinguishes a real mid-life discovery from a replay artefact is destroyed, and on
-// the RemoveAdapter path lazily minting a row for a block a recorded incarnation
-// already covers is exactly the zero-length-incarnation hazard
-// ensureIncarnationToClose guards against.
+// Ordering is desirable, not correctness-critical. Adapter membership is an
+// append-only log keyed on each observation's own block position, so an out-of-order
+// replay reaches the same final state: an Allocate replayed before its AddAdapter
+// records an allocation_event assertion at its own block, the AddAdapter later records
+// its transition at its own (lower) block, and both "is it a member now" (the latest
+// observation) and "which block was it added at" (a MIN over add_adapter_event rows)
+// land on the same answers either way. What mis-ordering still costs is one redundant
+// assertion row and one WARN per adapter — the ops signal that distinguishes a real
+// mid-life discovery from a replay artefact — which is reason enough to keep the sort.
 func replayPartition(
 	ctx context.Context,
 	logger *slog.Logger,
@@ -318,9 +315,9 @@ func partitionBlockRange(part string) (start, end int64, ok bool) {
 }
 
 // replayPartitionPrefixes returns the S3 partition prefixes covering [from,to]
-// in ascending start-block order. Replay must process partitions in block order
-// so an AddAdapter in an earlier partition lands before a later partition's
-// Allocate. partitionsForRange sorts lexicographically ("10000-10999" before
+// in ascending start-block order, so an AddAdapter in an earlier partition lands
+// before a later partition's Allocate (desirable rather than required — see
+// replayPartition). partitionsForRange sorts lexicographically ("10000-10999" before
 // "2000-2999"), which is fine for the order-agnostic discovery scan but wrong
 // here; building the list from aligned block starts keeps it numeric-ascending.
 //
@@ -382,7 +379,9 @@ func filterV2Logs(receipts []shared.TransactionReceipt, blockNumber int64, v2Vau
 }
 
 // sortV2LogEntries sorts entries in strict (blockNumber, logIndex) ascending
-// order so AddAdapter always lands before that adapter's first Allocate.
+// order so AddAdapter lands before that adapter's first Allocate — which keeps the
+// lazy-registration WARN meaningful and avoids a redundant assertion row, not
+// correctness (see replayPartition).
 func sortV2LogEntries(entries []v2LogEntry) {
 	sort.Slice(entries, func(i, j int) bool {
 		if entries[i].blockNumber != entries[j].blockNumber {

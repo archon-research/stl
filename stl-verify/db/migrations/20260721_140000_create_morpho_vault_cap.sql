@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS morpho_vault_cap
     timestamp          TIMESTAMPTZ  NOT NULL,
     processing_version INT          NOT NULL DEFAULT 0,
     build_id           INT          NOT NULL DEFAULT 0,
+    created_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     -- processing_version last so the trigger's (morpho_vault_id, cap_id,
     -- block_number, block_version, timestamp) lookup is a contiguous PK-index
     -- prefix (ADR-0002, matching morpho_*_state / fluid_vault_state).
@@ -112,6 +113,7 @@ COMMENT ON COLUMN morpho_vault_cap.block_version IS 'Reorg version: increments w
 COMMENT ON COLUMN morpho_vault_cap.timestamp IS 'Block timestamp (UTC). Part of PK.';
 COMMENT ON COLUMN morpho_vault_cap.processing_version IS 'Correction version: 0=original, N=Nth reprocess. Part of PK; order by block_number DESC, block_version DESC, processing_version DESC for the latest snapshot.';
 COMMENT ON COLUMN morpho_vault_cap.build_id IS 'Audit. Deployment build that wrote the row; never use to pick the latest row.';
+COMMENT ON COLUMN morpho_vault_cap.created_at IS 'Audit. Processing time: wall-clock the row was inserted (DEFAULT NOW()), per the schema_master canonical semantics; NOT the block timestamp (`timestamp`). Never part of any key or latest-row ordering.';
 
 INSERT INTO migrations (filename)
 VALUES ('20260721_140000_create_morpho_vault_cap.sql')

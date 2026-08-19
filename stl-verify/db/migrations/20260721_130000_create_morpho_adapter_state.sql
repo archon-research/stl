@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS morpho_adapter_state
     real_assets        NUMERIC(78, 0) NOT NULL,
     processing_version INT          NOT NULL DEFAULT 0,
     build_id           INT          NOT NULL DEFAULT 0,
+    created_at         TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     -- processing_version last so the trigger's (morpho_adapter_id, block_number,
     -- block_version, timestamp) lookup is a contiguous PK-index prefix
     -- (ADR-0002, matching morpho_*_state / fluid_vault_state).
@@ -114,6 +115,7 @@ COMMENT ON COLUMN morpho_adapter_state.timestamp IS 'Partition. Block timestamp 
 COMMENT ON COLUMN morpho_adapter_state.real_assets IS 'Adapter realAssets() reading: raw on-chain uint256 in the vault''s underlying asset base units (unscaled). Non-negative.';
 COMMENT ON COLUMN morpho_adapter_state.processing_version IS 'Correction version: 0=original, N=Nth reprocess. Part of PK; order by block_number DESC, block_version DESC, processing_version DESC for the latest snapshot.';
 COMMENT ON COLUMN morpho_adapter_state.build_id IS 'Audit. Deployment build that wrote the row; never use to pick the latest row.';
+COMMENT ON COLUMN morpho_adapter_state.created_at IS 'Audit. Processing time: wall-clock the row was inserted (DEFAULT NOW()), per the schema_master canonical semantics; NOT the block timestamp (`timestamp`). Never part of any key or latest-row ordering.';
 
 INSERT INTO migrations (filename)
 VALUES ('20260721_130000_create_morpho_adapter_state.sql')
