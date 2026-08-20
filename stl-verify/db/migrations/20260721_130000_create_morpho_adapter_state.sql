@@ -113,7 +113,7 @@ COMMENT ON TABLE morpho_adapter_state IS
   '[Hypertable] Per-adapter realAssets() snapshot at a single block, partitioned on timestamp. One row per VaultV2 liquidity adapter per block. Append-only, ADR-0002 versioned.';
 COMMENT ON COLUMN morpho_adapter_state.morpho_adapter_id IS 'FK→morpho_adapter.id. Part of PK.';
 COMMENT ON COLUMN morpho_adapter_state.block_number IS 'Block height of the snapshot. Part of PK.';
-COMMENT ON COLUMN morpho_adapter_state.block_version IS 'Reorg version: increments when a block is re-indexed after a reorg. Part of PK; a new version inserts cleanly rather than overwriting.';
+COMMENT ON COLUMN morpho_adapter_state.block_version IS 'Block payload version the row was indexed from. Live rows: the reorg version carried by the block event. Replayed rows: the S3 object version, routinely 1 straight from the bulk downloader with no reorg behind it. A higher version is therefore never evidence of a reorg, only the tie-break that picks the canonical row. Part of PK; a new version inserts cleanly rather than overwriting.';
 COMMENT ON COLUMN morpho_adapter_state.timestamp IS 'Partition. Block timestamp (UTC). Part of PK.';
 COMMENT ON COLUMN morpho_adapter_state.real_assets IS 'Adapter realAssets() reading: raw on-chain uint256 in the vault''s underlying asset base units (unscaled). Non-negative.';
 COMMENT ON COLUMN morpho_adapter_state.processing_version IS 'Correction version: 0=original, N=Nth reprocess. Part of PK; order by block_number DESC, block_version DESC, processing_version DESC for the latest snapshot.';

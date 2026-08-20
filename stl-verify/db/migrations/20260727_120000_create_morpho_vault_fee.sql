@@ -106,7 +106,7 @@ COMMENT ON COLUMN morpho_vault_fee.management_fee IS 'Management fee: raw on-cha
 COMMENT ON COLUMN morpho_vault_fee.performance_fee_recipient IS 'Performance-fee recipient address (20 bytes). The zero address is the contract default (no recipient set).';
 COMMENT ON COLUMN morpho_vault_fee.management_fee_recipient IS 'Management-fee recipient address (20 bytes). The zero address is the contract default (no recipient set).';
 COMMENT ON COLUMN morpho_vault_fee.block_number IS 'Block height at which the fee config was read. Part of PK.';
-COMMENT ON COLUMN morpho_vault_fee.block_version IS 'Reorg version: increments when a block is re-indexed after a reorg. Part of PK; a new version inserts cleanly rather than overwriting.';
+COMMENT ON COLUMN morpho_vault_fee.block_version IS 'Block payload version the row was indexed from. Live rows: the reorg version carried by the block event. Replayed rows: the S3 object version, routinely 1 straight from the bulk downloader with no reorg behind it. A higher version is therefore never evidence of a reorg, only the tie-break that picks the canonical row. Part of PK; a new version inserts cleanly rather than overwriting.';
 COMMENT ON COLUMN morpho_vault_fee.timestamp IS 'Block timestamp (UTC). Part of PK.';
 COMMENT ON COLUMN morpho_vault_fee.processing_version IS 'Correction version: 0=original, N=Nth reprocess. Part of PK; order by block_number DESC, block_version DESC, processing_version DESC for the latest snapshot.';
 COMMENT ON COLUMN morpho_vault_fee.build_id IS 'Audit. Deployment build that wrote the row; never use to pick the latest row.';

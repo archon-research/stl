@@ -112,7 +112,7 @@ COMMENT ON COLUMN morpho_vault_cap.id_data IS 'ABI-encoded pre-image of cap_id (
 COMMENT ON COLUMN morpho_vault_cap.absolute_cap IS 'Absolute allocation ceiling: raw on-chain uint128 in the vault''s underlying asset base units (unscaled). Non-negative.';
 COMMENT ON COLUMN morpho_vault_cap.relative_cap IS 'Relative allocation cap: raw on-chain uint128 WAD fraction of total assets (1e18 = 100%; contract default 0). Stored unscaled (raw WAD, like lltv elsewhere), not as a NUMERIC(38,18) decimal.';
 COMMENT ON COLUMN morpho_vault_cap.block_number IS 'Block height at which the cap was set. Part of PK.';
-COMMENT ON COLUMN morpho_vault_cap.block_version IS 'Reorg version: increments when a block is re-indexed after a reorg. Part of PK; a new version inserts cleanly rather than overwriting.';
+COMMENT ON COLUMN morpho_vault_cap.block_version IS 'Block payload version the row was indexed from. Live rows: the reorg version carried by the block event. Replayed rows: the S3 object version, routinely 1 straight from the bulk downloader with no reorg behind it. A higher version is therefore never evidence of a reorg, only the tie-break that picks the canonical row. Part of PK; a new version inserts cleanly rather than overwriting.';
 COMMENT ON COLUMN morpho_vault_cap.timestamp IS 'Block timestamp (UTC). Part of PK.';
 COMMENT ON COLUMN morpho_vault_cap.processing_version IS 'Correction version: 0=original, N=Nth reprocess. Part of PK; order by block_number DESC, block_version DESC, processing_version DESC for the latest snapshot.';
 COMMENT ON COLUMN morpho_vault_cap.build_id IS 'Audit. Deployment build that wrote the row; never use to pick the latest row.';
