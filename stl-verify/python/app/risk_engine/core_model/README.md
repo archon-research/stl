@@ -29,6 +29,7 @@ The financial model logic (ARMA-GARCH calibration, copula simulation, liquidatio
 | Dead variable assignments removed (`slippage`, `P`, `new_supply_qty_df`) | Three variables were initialized then immediately overwritten before first use, producing no-op assignments. Removed to reduce noise. |
 | `JUMPS + HOURLY_CONV` raises `NotImplementedError` | The original code called `importer.load_data_yahoo()` which never existed in this codebase (yfinance is not a service dependency). The dead call is replaced with an explicit error so the combination is rejected at runtime rather than crashing with `AttributeError`. |
 | Three `# TODO` comments added | Document known bugs in the original code that were not fixed during integration (see **Known Issues** section). |
+| `default_params.json` `_comment` extended | States that the schema's min/max/choices are advisory and enforced nowhere — upstream's convention (a human editing overrides in `main.py` with the schema open), kept deliberately. |
 
 ---
 

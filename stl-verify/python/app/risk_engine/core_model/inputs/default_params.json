@@ -1,5 +1,5 @@
 {
-  "_comment": "CORE — default parameters. Each entry carries the canonical value plus metadata (description, choices or min/max). Edit 'value' fields only; everything else is documentation.",
+  "_comment": "CORE — default parameters. Each entry carries the canonical value plus metadata (description, choices or min/max). Edit 'value' fields only; everything else is documentation. The min/max/choices bounds are advisory and enforced nowhere — upstream's workflow was a human editing overrides in main.py with this file open, and that convention is kept: an env override outside the bounds (e.g. CORE_MODEL_N_MC below min, useful for pipeline smoke tests) runs without complaint.",
 
   "PROTOCOL": {
     "value": "SYRUP",
