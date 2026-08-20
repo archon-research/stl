@@ -422,6 +422,23 @@ export function formatPercentValue(
 // of 1.0, so it reads before the buffer is gone rather than as it goes.
 export const ENCUMBRANCE_WARNING_THRESHOLD = 0.95;
 
+/**
+ * Columns that spread `count` cards evenly over the fewest rows `maxColumns`
+ * allows — 6 cards in 4 columns becomes 3 and 3, not 4 and 2.
+ *
+ * A row that cannot be filled is left short rather than stretched: five cards
+ * over three columns is 3 then 2, and those two keep the width of the three
+ * above them instead of growing to half the container each.
+ */
+export function balancedColumns(count: number, maxColumns: number): number {
+  if (count <= 1) {
+    return 1;
+  }
+
+  const rows = Math.ceil(count / maxColumns);
+  return Math.ceil(count / rows);
+}
+
 export function formatRatioPercent(
   value: number | string | null | undefined,
   digits = 2,

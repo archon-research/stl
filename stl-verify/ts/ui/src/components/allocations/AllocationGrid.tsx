@@ -21,6 +21,7 @@ import {
   type SortingState,
   useDataTable,
 } from '@archon-research/design-system';
+import type { CSSProperties } from 'react';
 import { useEffect, useMemo, useState } from 'react';
 
 import { css, cx } from '#styled-system/css';
@@ -30,6 +31,7 @@ import { getActionColorClass, getActionIcon } from '../../lib/activity';
 import {
   type ChainLabelLookup,
   ENCUMBRANCE_WARNING_THRESHOLD,
+  balancedColumns,
   formatDateTime,
   formatFreshnessLabel,
   formatRawWadLabel,
@@ -126,6 +128,36 @@ export type MetricChartSpec = {
   // Draws a dashed limit line with the region past it shaded as a breach.
   threshold?: { value: number; label: string };
 };
+
+// Every card the metrics band can render. Its length drives both the loading
+// placeholders and the column count, so neither can drift from the cards.
+const TOP_METRIC_CARDS = [
+  'total-allocation',
+  'exposure',
+  'total-risk-capital',
+  'prime-collateral',
+  'encumbrance',
+  'prime-debt',
+] as const;
+
+const metricsGridClassName = css({
+  display: 'grid',
+  gridTemplateColumns: {
+    base: '1fr',
+    lg: 'repeat(var(--metric-columns-lg), minmax(0, 1fr))',
+    '2xl': 'repeat(var(--metric-columns-2xl), minmax(0, 1fr))',
+  },
+  gap: '3',
+});
+
+// The counts are per-breakpoint and computed, so they ride custom properties:
+// panda generates its classes at build time and cannot see a runtime value.
+function metricsGridStyle(count: number): CSSProperties {
+  return {
+    '--metric-columns-lg': balancedColumns(count, 2),
+    '--metric-columns-2xl': balancedColumns(count, 4),
+  } as CSSProperties;
+}
 
 function findMetricChart(
   charts: MetricChartSpec[],
@@ -1038,6 +1070,16 @@ export function AllocationGrid({
   const isEncumbranceBreaching =
     encumbranceRatio !== null &&
     encumbranceRatio >= ENCUMBRANCE_WARNING_THRESHOLD;
+  // Counted from the same conditions the cards below render under, so a card
+  // that does not appear does not leave a column reserved for it.
+  const visibleMetricCardCount = [
+    summary !== null,
+    riskCapital !== null,
+    riskCapital !== null,
+    selectedPrime !== null,
+    riskCapital !== null,
+    selectedPrime !== null,
+  ].filter(Boolean).length;
   const unservedChains = riskCapital?.prime_unserved_chains ?? [];
   // Absence has a cause worth naming: the ratio is required-over-total risk
   // capital, so it cannot be computed without a total. And where chains go
@@ -1190,19 +1232,12 @@ export function AllocationGrid({
         )}
         {showTopMetricsSkeleton ? (
           <div
-            className={css({
-              display: 'grid',
-              gridTemplateColumns: {
-                base: '1fr',
-                lg: 'repeat(2, minmax(0, 1fr))',
-                '2xl': 'repeat(4, minmax(0, 1fr))',
-              },
-              gap: '3',
-            })}
+            className={metricsGridClassName}
+            style={metricsGridStyle(TOP_METRIC_CARDS.length)}
           >
-            {Array.from({ length: 4 }).map((_, index) => (
+            {TOP_METRIC_CARDS.map((card) => (
               <div
-                key={`metrics-skeleton-${index}`}
+                key={`metrics-skeleton-${card}`}
                 className={css({
                   height: '88px',
                   borderRadius: 'md',
@@ -1217,15 +1252,8 @@ export function AllocationGrid({
         ) : null}
         {!showTopMetricsSkeleton && hasTopMetrics ? (
           <div
-            className={css({
-              display: 'grid',
-              gridTemplateColumns: {
-                base: '1fr',
-                lg: 'repeat(2, minmax(0, 1fr))',
-                '2xl': 'repeat(4, minmax(0, 1fr))',
-              },
-              gap: '3',
-            })}
+            className={metricsGridClassName}
+            style={metricsGridStyle(visibleMetricCardCount)}
           >
             {summary ? (
               <SummaryMetric

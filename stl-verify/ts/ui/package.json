@@ -18,6 +18,7 @@
     "preview": "vite preview",
     "test:explorers": "node scripts/check-explorer-urls.mjs",
     "test:prime-grouping": "node scripts/check-prime-grouping.mjs",
+    "test:metrics-grid": "node scripts/check-metrics-grid.mjs",
     "test:routes": "node scripts/check-router-urls.mjs",
     "generate:openapi-types": "uikit-openapi-generate --schema ./src/generated/openapi-schema.json --output ./src/generated/openapi-types.ts && uikit-cli format --write ./src/generated/openapi-types.ts",
     "lint": "uikit-cli lint src panda.config.ts vite.config.ts env.ts",
