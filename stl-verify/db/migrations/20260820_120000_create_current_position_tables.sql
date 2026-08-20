@@ -214,13 +214,17 @@ ORDER BY srd.protocol_id, srd.token_id,
 -- token_price_current
 -- ============================================================================
 
+-- oracle_id and block_version are the canonical widths (int8 / int4) here, not the
+-- narrower ones onchain_token_price kept from before the convention: the widths this
+-- table joins against (oracle.id, protocol_oracle.oracle_id) are BIGINT, and the
+-- schema_master register requires canonical widths on a table created after it.
 CREATE TABLE IF NOT EXISTS token_price_current (
     protocol_id        BIGINT         NOT NULL,
     token_id           BIGINT         NOT NULL,
     price_usd          NUMERIC(30,18) NOT NULL,
-    oracle_id          SMALLINT       NOT NULL,
+    oracle_id          BIGINT         NOT NULL,
     block_number       BIGINT         NOT NULL,
-    block_version      SMALLINT       NOT NULL,
+    block_version      INT            NOT NULL,
     processing_version INT            NOT NULL,
     PRIMARY KEY (protocol_id, token_id)
 );
