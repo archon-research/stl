@@ -35,6 +35,13 @@ type SQSConsumer interface {
 	// DeleteMessage removes a successfully processed message from the queue.
 	DeleteMessage(ctx context.Context, receiptHandle string) error
 
+	// ChangeMessageVisibility resets how long the received message stays hidden
+	// from other consumers, counted from now. Zero hands it back immediately:
+	// a worker shutting down uses it to release a message it will not finish,
+	// which on a FIFO queue unblocks the whole message group for the successor
+	// instead of stalling it until the visibility timeout expires.
+	ChangeMessageVisibility(ctx context.Context, receiptHandle string, visibility time.Duration) error
+
 	// VisibilityTimeout reports the per-receive visibility timeout configured on
 	// the consumer. The consume loop validates it exceeds the handler budget so a
 	// message is never redelivered while its handler is still running.

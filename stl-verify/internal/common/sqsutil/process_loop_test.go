@@ -16,11 +16,18 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
+// visibilityChange records one ChangeMessageVisibility call.
+type visibilityChange struct {
+	handle     string
+	visibility time.Duration
+}
+
 // mockConsumer implements outbound.SQSConsumer for testing.
 type mockConsumer struct {
 	mu                sync.Mutex
 	batches           [][]outbound.SQSMessage // each call to ReceiveMessages pops one batch
 	deletedHandles    []string
+	visibilityChanges []visibilityChange
 	deleteErr         error
 	visibilityTimeout time.Duration // 0 -> a safe default well above the handler budget
 
@@ -50,14 +57,41 @@ func (m *mockConsumer) ReceiveMessages(ctx context.Context, maxMessages int) ([]
 	return batch, nil
 }
 
-func (m *mockConsumer) DeleteMessage(_ context.Context, handle string) error {
+// DeleteMessage refuses a cancelled context the way the AWS SDK does, so a
+// test catches cleanup that is still riding the shutdown-cancelled context.
+func (m *mockConsumer) DeleteMessage(ctx context.Context, handle string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.deletedHandles = append(m.deletedHandles, handle)
 	return m.deleteErr
 }
 
+func (m *mockConsumer) ChangeMessageVisibility(ctx context.Context, handle string, visibility time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.visibilityChanges = append(m.visibilityChanges, visibilityChange{handle: handle, visibility: visibility})
+	return nil
+}
+
 func (m *mockConsumer) Close() error { return nil }
+
+func (m *mockConsumer) deleted() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.deletedHandles)
+}
+
+func (m *mockConsumer) released() []visibilityChange {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.visibilityChanges)
+}
 
 func makeMsg(id, handle string, event outbound.BlockEvent) outbound.SQSMessage {
 	body, _ := json.Marshal(event)
@@ -107,7 +141,7 @@ func (h *levelRecorder) messagesAt(level slog.Level) []string {
 
 // startRunLoop runs RunLoop on its own goroutine, returning the shutdown
 // trigger and a channel closed once the loop has exited.
-func startRunLoop(consumer *mockConsumer, logger *slog.Logger) (context.CancelFunc, <-chan struct{}) {
+func startRunLoop(consumer *mockConsumer, logger *slog.Logger, handler BlockEventHandler) (context.CancelFunc, <-chan struct{}) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -118,10 +152,12 @@ func startRunLoop(consumer *mockConsumer, logger *slog.Logger) (context.CancelFu
 			PollInterval: 10 * time.Millisecond,
 			Logger:       logger,
 			ChainID:      1,
-		}, func(context.Context, outbound.BlockEvent) error { return nil })
+		}, handler)
 	}()
 	return cancel, done
 }
+
+func noopHandler(context.Context, outbound.BlockEvent) error { return nil }
 
 func awaitLoopExit(t *testing.T, done <-chan struct{}) {
 	t.Helper()
@@ -138,6 +174,35 @@ func signalOnce(ch chan<- struct{}) {
 	select {
 	case ch <- struct{}{}:
 	default:
+	}
+}
+
+func blockEvent(number int64) outbound.BlockEvent {
+	return outbound.BlockEvent{ChainID: 1, BlockNumber: number, Version: 0, BlockHash: "0xabc"}
+}
+
+// recordingConfig pairs a test Config with the recorder behind its logger, so a
+// test can assert on the level every shutdown-path record was logged at.
+func recordingConfig(consumer *mockConsumer) (Config, *levelRecorder) {
+	recorder := &levelRecorder{}
+	cfg := testConfig(consumer)
+	cfg.Logger = slog.New(recorder)
+	return cfg, recorder
+}
+
+func awaitSignal(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+	}
+}
+
+func assertNoErrorLogs(t *testing.T, recorder *levelRecorder) {
+	t.Helper()
+	if logged := recorder.messagesAt(slog.LevelError); len(logged) > 0 {
+		t.Errorf("expected no ERROR records on the shutdown path, got %v", logged)
 	}
 }
 
@@ -357,7 +422,7 @@ func TestRunLoop_ShutdownCancellationIsNotAnError(t *testing.T) {
 	}
 	recorder := &levelRecorder{}
 
-	cancel, done := startRunLoop(consumer, slog.New(recorder))
+	cancel, done := startRunLoop(consumer, slog.New(recorder), noopHandler)
 	<-receiving
 	cancel()
 	awaitLoopExit(t, done)
@@ -379,7 +444,7 @@ func TestRunLoop_LogsGenuineReceiveFailureAtError(t *testing.T) {
 	}
 	recorder := &levelRecorder{}
 
-	cancel, done := startRunLoop(consumer, slog.New(recorder))
+	cancel, done := startRunLoop(consumer, slog.New(recorder), noopHandler)
 	<-receiving
 	cancel()
 	awaitLoopExit(t, done)
@@ -549,4 +614,222 @@ func TestProcessMessages_LogsWhenHandlerIgnoresDeadline(t *testing.T) {
 	if !strings.Contains(buf.String(), "exceeding its timeout budget") {
 		t.Errorf("expected budget-exceeded warning, got logs: %q", buf.String())
 	}
+}
+
+// TestProcessMessages_DrainsInFlightHandlerOnShutdown covers the rollout
+// blackout measured in kind: SIGTERM mid-message used to cancel the handler,
+// leaving the message in flight for the queue's visibility timeout (300s) and
+// starving the successor pod, which on a FIFO queue is the chain's whole block
+// stream. The handler must instead keep a live context and its message must be
+// deleted.
+func TestProcessMessages_DrainsInFlightHandlerOnShutdown(t *testing.T) {
+	consumer := &mockConsumer{
+		batches: [][]outbound.SQSMessage{{makeMsg("1", "h1", blockEvent(100))}},
+	}
+	cfg, recorder := recordingConfig(consumer)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	handling := make(chan struct{}, 1)
+	shutdownRequested := make(chan struct{})
+	var handlerCtxErr error
+	handler := func(hctx context.Context, _ outbound.BlockEvent) error {
+		signalOnce(handling)
+		<-shutdownRequested
+		handlerCtxErr = hctx.Err()
+		return nil
+	}
+	go func() {
+		<-handling
+		cancel()
+		close(shutdownRequested)
+	}()
+
+	if err := ProcessMessages(ctx, cfg, handler); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if handlerCtxErr != nil {
+		t.Errorf("expected the in-flight handler to keep a live context across shutdown, got %v", handlerCtxErr)
+	}
+	if got := consumer.deleted(); !slices.Equal(got, []string{"h1"}) {
+		t.Errorf("expected the drained message to be deleted, got deletes %v", got)
+	}
+	if got := consumer.released(); len(got) != 0 {
+		t.Errorf("expected no visibility change for a completed message, got %v", got)
+	}
+	assertNoErrorLogs(t, recorder)
+}
+
+// TestProcessMessages_ReleasesMessageWhenDrainBudgetExpires covers the handler
+// that cannot finish inside the shutdown window: the message must go back to
+// the queue immediately instead of staying hidden until the visibility timeout.
+func TestProcessMessages_ReleasesMessageWhenDrainBudgetExpires(t *testing.T) {
+	consumer := &mockConsumer{
+		batches: [][]outbound.SQSMessage{{makeMsg("1", "h1", blockEvent(100))}},
+	}
+	cfg, recorder := recordingConfig(consumer)
+	cfg.DrainTimeout = 20 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	handling := make(chan struct{}, 1)
+	handlerReturned := make(chan struct{})
+	handler := func(hctx context.Context, _ outbound.BlockEvent) error {
+		defer close(handlerReturned)
+		signalOnce(handling)
+		<-hctx.Done()
+		return hctx.Err()
+	}
+	go func() {
+		<-handling
+		cancel()
+	}()
+
+	err := ProcessMessages(ctx, cfg, handler)
+	if !isShutdownCancellation(ctx, err) {
+		t.Fatalf("expected an expired drain to read as shutdown cancellation, got %v", err)
+	}
+	awaitSignal(t, handlerReturned, "the abandoned handler to observe cancellation")
+
+	if got := consumer.deleted(); len(got) != 0 {
+		t.Errorf("expected no delete for an unfinished handler, got deletes %v", got)
+	}
+	want := []visibilityChange{{handle: "h1", visibility: 0}}
+	if got := consumer.released(); !slices.Equal(got, want) {
+		t.Errorf("expected the message released for the successor, got %v", got)
+	}
+	assertNoErrorLogs(t, recorder)
+}
+
+// TestProcessMessages_ReleasesUnstartedBatchRemainderOnShutdown covers messages
+// the batch never started: they were received (hidden) but will not run, so
+// they must be handed straight back rather than held for the visibility
+// timeout.
+func TestProcessMessages_ReleasesUnstartedBatchRemainderOnShutdown(t *testing.T) {
+	consumer := &mockConsumer{
+		batches: [][]outbound.SQSMessage{{
+			makeMsg("1", "h1", blockEvent(100)),
+			makeMsg("2", "h2", blockEvent(101)),
+		}},
+	}
+	cfg, recorder := recordingConfig(consumer)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var handled []int64
+	handler := func(_ context.Context, event outbound.BlockEvent) error {
+		handled = append(handled, event.BlockNumber)
+		cancel()
+		return nil
+	}
+
+	if err := ProcessMessages(ctx, cfg, handler); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !slices.Equal(handled, []int64{100}) {
+		t.Errorf("expected shutdown to stop the batch after block 100, handled %v", handled)
+	}
+	if got := consumer.deleted(); !slices.Equal(got, []string{"h1"}) {
+		t.Errorf("expected only the finished message deleted, got deletes %v", got)
+	}
+	want := []visibilityChange{{handle: "h2", visibility: 0}}
+	if got := consumer.released(); !slices.Equal(got, want) {
+		t.Errorf("expected the unstarted message released for the successor, got %v", got)
+	}
+	assertNoErrorLogs(t, recorder)
+}
+
+// TestProcessMessages_HandlerFailureLeavesVisibilityUntouched pins the
+// non-shutdown failure path: the queue's visibility timeout is the deliberate
+// retry pacing for a poison pill, so a failing handler must not shorten it.
+func TestProcessMessages_HandlerFailureLeavesVisibilityUntouched(t *testing.T) {
+	consumer := &mockConsumer{
+		batches: [][]outbound.SQSMessage{{makeMsg("1", "h1", blockEvent(100))}},
+	}
+	cfg, recorder := recordingConfig(consumer)
+
+	handler := func(context.Context, outbound.BlockEvent) error {
+		return errors.New("persisting block: connection reset")
+	}
+
+	if err := ProcessMessages(context.Background(), cfg, handler); err == nil {
+		t.Fatal("expected the handler failure to be returned")
+	}
+	if got := consumer.deleted(); len(got) != 0 {
+		t.Errorf("expected no delete on handler failure, got deletes %v", got)
+	}
+	if got := consumer.released(); len(got) != 0 {
+		t.Errorf("expected the retry backoff left intact, got visibility changes %v", got)
+	}
+	if logged := recorder.messagesAt(slog.LevelError); !slices.Contains(logged, "failed to process message") {
+		t.Errorf("expected a genuine handler failure at ERROR, got %v", logged)
+	}
+}
+
+// TestProcessMessages_GenuineFailureAtShutdownStillLogsError is the counterpart
+// to the quiet drain paths: a real failure racing SIGTERM must still surface at
+// ERROR, while its message is released like any other unfinished one.
+func TestProcessMessages_GenuineFailureAtShutdownStillLogsError(t *testing.T) {
+	consumer := &mockConsumer{
+		batches: [][]outbound.SQSMessage{{makeMsg("1", "h1", blockEvent(100))}},
+	}
+	cfg, recorder := recordingConfig(consumer)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	handling := make(chan struct{}, 1)
+	shutdownRequested := make(chan struct{})
+	handler := func(context.Context, outbound.BlockEvent) error {
+		signalOnce(handling)
+		<-shutdownRequested
+		return errors.New("persisting block: connection reset")
+	}
+	go func() {
+		<-handling
+		cancel()
+		close(shutdownRequested)
+	}()
+
+	if err := ProcessMessages(ctx, cfg, handler); err == nil {
+		t.Fatal("expected the handler failure to be returned")
+	}
+	if got := consumer.deleted(); len(got) != 0 {
+		t.Errorf("expected no delete on handler failure, got deletes %v", got)
+	}
+	want := []visibilityChange{{handle: "h1", visibility: 0}}
+	if got := consumer.released(); !slices.Equal(got, want) {
+		t.Errorf("expected the failed message released for the successor, got %v", got)
+	}
+	if logged := recorder.messagesAt(slog.LevelError); !slices.Contains(logged, "failed to process message") {
+		t.Errorf("expected a genuine handler failure at ERROR, got %v", logged)
+	}
+}
+
+// TestRunLoop_DrainsInFlightMessageOnShutdown is the end-to-end shape of the
+// rollout: cancel the loop while a handler is running, and the loop finishes
+// that message, deletes it and exits without an ERROR record.
+func TestRunLoop_DrainsInFlightMessageOnShutdown(t *testing.T) {
+	consumer := &mockConsumer{
+		batches: [][]outbound.SQSMessage{{makeMsg("1", "h1", blockEvent(100))}},
+	}
+	recorder := &levelRecorder{}
+
+	handling := make(chan struct{}, 1)
+	shutdownRequested := make(chan struct{})
+	handler := func(context.Context, outbound.BlockEvent) error {
+		signalOnce(handling)
+		<-shutdownRequested
+		return nil
+	}
+
+	cancel, done := startRunLoop(consumer, slog.New(recorder), handler)
+	awaitSignal(t, handling, "the handler to start")
+	cancel()
+	close(shutdownRequested)
+	awaitLoopExit(t, done)
+
+	if got := consumer.deleted(); !slices.Equal(got, []string{"h1"}) {
+		t.Errorf("expected the drained message to be deleted, got deletes %v", got)
+	}
+	assertNoErrorLogs(t, recorder)
 }

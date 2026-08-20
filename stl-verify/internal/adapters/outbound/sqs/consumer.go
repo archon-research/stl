@@ -17,7 +17,12 @@ import (
 type sqsAPI interface {
 	ReceiveMessage(ctx context.Context, params *sqs.ReceiveMessageInput, optFns ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error)
 	DeleteMessage(ctx context.Context, params *sqs.DeleteMessageInput, optFns ...func(*sqs.Options)) (*sqs.DeleteMessageOutput, error)
+	ChangeMessageVisibility(ctx context.Context, params *sqs.ChangeMessageVisibilityInput, optFns ...func(*sqs.Options)) (*sqs.ChangeMessageVisibilityOutput, error)
 }
+
+// maxVisibilityTimeoutSeconds is the SQS ceiling for a per-message visibility
+// timeout (12 hours).
+const maxVisibilityTimeoutSeconds = 43200
 
 // Compile-time check that Consumer implements outbound.SQSConsumer
 var _ outbound.SQSConsumer = (*Consumer)(nil)
@@ -156,6 +161,22 @@ func (c *Consumer) DeleteMessage(ctx context.Context, receiptHandle string) erro
 	})
 	if err != nil {
 		return fmt.Errorf("failed to delete message: %w", err)
+	}
+	return nil
+}
+
+// ChangeMessageVisibility resets the received message's visibility timeout,
+// counted from now and rounded to whole seconds (the SQS wire unit).
+func (c *Consumer) ChangeMessageVisibility(ctx context.Context, receiptHandle string, visibility time.Duration) error {
+	seconds := min(max(int64(visibility.Round(time.Second)/time.Second), 0), maxVisibilityTimeoutSeconds)
+
+	_, err := c.client.ChangeMessageVisibility(ctx, &sqs.ChangeMessageVisibilityInput{
+		QueueUrl:          aws.String(c.queueURL),
+		ReceiptHandle:     aws.String(receiptHandle),
+		VisibilityTimeout: int32(seconds),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to change message visibility: %w", err)
 	}
 	return nil
 }
