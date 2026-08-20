@@ -51,11 +51,21 @@ else
   )
 fi
 
-# Emit every newTag value in the file, one per line, quoted or not. Matching
-# only quoted values would silently skip an unquoted one and check a subset of
-# the file while reporting success.
+# Emit every newTag value in the file, one per line: quoted or unquoted, with or
+# without a trailing comment.
+#
+# Matching a narrow shape and dropping the rest is the one thing this function
+# must not do. An unmatched line vanishes, so the check reports success having
+# examined a subset — the precise failure it exists to catch. So every line whose
+# key is newTag is emitted, even when the value parses to nothing, and the caller
+# reports that as malformed. A hand-pinned tag is likelier than most to carry a
+# comment explaining the pin, which is exactly the line we cannot afford to miss.
 extract_tags() {
-  sed -nE 's/^[[:space:]]*newTag:[[:space:]]*"?([^"[:space:]]+)"?[[:space:]]*$/\1/p' "$1"
+  sed -nE 's/^[[:space:]]*newTag:[[:space:]]*(.*)$/\1/p' "$1" |
+    sed -E 's/[[:space:]]+#.*$//
+            s/^"([^"]*)"[[:space:]]*$/\1/
+            s/^'"'"'([^'"'"']*)'"'"'[[:space:]]*$/\1/
+            s/[[:space:]]+$//'
 }
 
 FAILED=0
@@ -73,8 +83,11 @@ for f in "${FILES[@]}"; do
   # `while read` rather than mapfile: matches verify-ecr-images.sh and keeps the
   # script working on the bash 3.2 that ships with macOS.
   while IFS= read -r tag; do
-    [ -z "$tag" ] && continue
     TAG_COUNT=$((TAG_COUNT + 1))
+    if [ -z "$tag" ]; then
+      MALFORMED="${MALFORMED}    malformed (newTag with no value)"$'\n'
+      continue
+    fi
     # Cronjob entries carry a "<service>-" prefix; regular services are the bare
     # SHA. Either way the commit is the trailing 40 hex chars.
     sha="$(printf '%s' "$tag" | sed -nE 's/.*([a-f0-9]{40})$/\1/p')"

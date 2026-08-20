@@ -4,7 +4,8 @@
 # ConfigMap and Secret):
 #   kustomize build k8s/overlays/staging/bootstrap-reference-capital | kubectl apply -f -
 # Set newTag to a cronjob image that has actually been built and pushed — check with
-#   aws ecr list-images --repository-name <repo> --query 'imageIds[?starts_with(imageTag, `reference-capital-backfill`)].imageTag'
+#   aws ecr list-images --repository-name stl-sentinelstaging-cronjob --region eu-west-1 \
+#     --query 'imageIds[?starts_with(imageTag, `reference-capital-backfill`)].imageTag'
 # A tag for a branch SHA whose image was never pushed leaves the Job in ImagePullBackOff.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
