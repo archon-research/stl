@@ -100,8 +100,9 @@ func requireBigInt(field string, v *big.Int) error {
 // UniswapV4PoolState is a per-touched-block snapshot of one pool's StateView
 // slot0, liquidity and global fee growth. LpFee is only refreshed on blocks the
 // pool is touched, which is sound only for static-fee pools: updateDynamicLPFee
-// emits no event, so dynamic-fee pools are refused at boot (ValidatePoolKeys)
-// until lp_fee has a refresh path.
+// emits no event, so a dynamic-fee pool is registered with
+// uniswap_v4_pool.snapshot_supported = false and produces no row here until
+// lp_fee has a refresh path.
 type UniswapV4PoolState struct {
 	PoolID               int64 // uniswap_v4_pool surrogate id
 	BlockNumber          int64
@@ -118,10 +119,14 @@ type UniswapV4PoolState struct {
 
 // Validate rejects a zero SqrtPriceX96: StateView.getSlot0 answers all-zeros for
 // an unknown PoolId instead of reverting, so a zero price means the registry row
-// points at a pool this PoolManager never initialized.
+// points at a pool this PoolManager never initialized — except on a reorg
+// re-read, see isOrphanedReRead.
 func (s *UniswapV4PoolState) Validate() error {
 	if err := validatePoolBlockKey(s.PoolID, s.BlockNumber, s.BlockVersion, s.BlockTimestamp); err != nil {
 		return err
+	}
+	if s.isOrphanedReRead() {
+		return nil
 	}
 	if err := requirePositiveSqrtPrice(s.SqrtPriceX96); err != nil {
 		return err
@@ -142,6 +147,26 @@ func (s *UniswapV4PoolState) Validate() error {
 		return err
 	}
 	return requireBigInt("feeGrowthGlobal1X128", s.FeeGrowthGlobal1X128)
+}
+
+// isOrphanedReRead reports the one legal all-zero snapshot: a reorg re-read
+// (BlockVersion > 0) of a pool whose Initialize the reorg orphaned. StateView
+// then answers all-zeros for every getter, and that row must persist to
+// supersede the orphaned fork's — the same tolerance the tick path has. Nothing
+// short of a complete zero read qualifies, so a half-decoded row still fails.
+func (s *UniswapV4PoolState) isOrphanedReRead() bool {
+	if s.BlockVersion <= 0 {
+		return false
+	}
+	if s.Tick != 0 || s.ProtocolFee != 0 || s.LpFee != 0 {
+		return false
+	}
+	for _, v := range []*big.Int{s.SqrtPriceX96, s.Liquidity, s.FeeGrowthGlobal0X128, s.FeeGrowthGlobal1X128} {
+		if v == nil || v.Sign() != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // requirePositiveSqrtPrice rejects the all-zeros a StateView getter returns for
@@ -169,12 +194,13 @@ func (s *UniswapV4PoolState) validateProtocolFee() error {
 	return nil
 }
 
-// UniswapV4Swap is a PoolManager Swap event. Amount0/Amount1 are the pool's swap
-// BalanceDelta as emitted — negative is owed to the PoolManager, positive is
-// owed to the swapper — the inverse of the pool-perspective signs on
-// UniswapV3Swap. PoolManager emits the delta before afterSwap applies any hook
-// delta, so it equals what the swapper settled only when the pool's hooks carry
-// no *_RETURNS_DELTA permission.
+// UniswapV4Swap is a PoolManager Swap event. Amount0/Amount1 are the swap
+// BalanceDelta from the swapper's perspective (v4-core applies swapDelta to
+// msg.sender): negative means the swapper owes the PoolManager, positive means
+// the PoolManager owes the swapper — the inverse of the pool-perspective signs
+// on UniswapV3Swap. PoolManager emits the delta before afterSwap applies any
+// hook delta, so it equals what the swapper settled only when the pool's hooks
+// carry no *_RETURNS_DELTA permission.
 type UniswapV4Swap struct {
 	PoolID         int64 // uniswap_v4_pool surrogate id
 	BlockNumber    int64

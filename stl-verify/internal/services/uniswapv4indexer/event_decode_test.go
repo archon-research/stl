@@ -49,6 +49,7 @@ func decodeTestPool(id int64, poolIDHash string) RegisteredPool {
 		Fee:               100,
 		TickSpacing:       1,
 		DeployBlock:       21743144,
+		SnapshotSupported: true,
 	}
 }
 
@@ -109,6 +110,13 @@ func receiptOf(logs ...shared.Log) shared.TransactionReceipt {
 
 // addrTopic left-pads an address into a 32-byte topic word.
 func addrTopic(a common.Address) common.Hash { return common.BytesToHash(a.Bytes()) }
+
+// corruptHexWord replaces one hex digit in the middle of a 32-byte word with a
+// non-hex character. Corrupting the middle rather than the first digit is what
+// makes the case interesting: go-ethereum truncates at the bad character and
+// left-pads the remainder into a plausible-looking hash, not an obviously-empty
+// one.
+func corruptHexWord(word string) string { return word[:34] + "z" + word[35:] }
 
 // decodeFixture runs DecodeEvents over one log against the given registry,
 // failing the test on any decode error.
@@ -693,6 +701,51 @@ func TestDecodeEvents_MalformedLogsReturnError(t *testing.T) {
 				return l
 			}(),
 			wantSub: "32-byte hex word",
+		},
+		{
+			name: "pool id topic with a non-hex character",
+			log: func() shared.Log {
+				l := swapFixtureLog()
+				l.Topics[1] = corruptHexWord(l.Topics[1])
+				return l
+			}(),
+			wantSub: "topic 1",
+		},
+		{
+			name: "topic0 with a non-hex character",
+			log: func() shared.Log {
+				l := swapFixtureLog()
+				l.Topics[0] = corruptHexWord(l.Topics[0])
+				return l
+			}(),
+			wantSub: "topic 0",
+		},
+		{
+			name: "indexed sender topic with a non-hex character",
+			log: func() shared.Log {
+				l := swapFixtureLog()
+				l.Topics[2] = corruptHexWord(l.Topics[2])
+				return l
+			}(),
+			wantSub: "topic 2",
+		},
+		{
+			name: "transaction hash with a non-hex character",
+			log: func() shared.Log {
+				l := swapFixtureLog()
+				l.TransactionHash = corruptHexWord(l.TransactionHash)
+				return l
+			}(),
+			wantSub: "transaction hash",
+		},
+		{
+			name: "truncated transaction hash",
+			log: func() shared.Log {
+				l := swapFixtureLog()
+				l.TransactionHash = "0xfeed"
+				return l
+			}(),
+			wantSub: "transaction hash",
 		},
 		{
 			name: "tick wider than int64",
