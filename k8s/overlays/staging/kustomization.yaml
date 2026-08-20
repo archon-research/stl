@@ -43,6 +43,10 @@ resources:
   - ../../base/offchain-price-backfill
   - ../../base/reference-capital-indexer
   - ../../base/reference-capital-backfill
+  # CORE model runner (VEC-272). Staging-only for now: computes from the parquet
+  # snapshots baked into the python-api image, so its CRRs reflect the snapshot
+  # vintage, not live positions, until the live readers land (VEC-272 PR 3).
+  - ../../base/core-model-runner
   - ../../base/maple-graphql-indexer
   # CEX L2 order book indexer fleet — one pod per exchange, same binary,
   # different EXCHANGE/SYMBOLS config (OKX/Kraken added by copying the coinbase
@@ -226,6 +230,11 @@ images:
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-migrate
     newTag: "9958da7aa0f0138e5e543c976b164a14a1a0e9bc"
   - name: python-api
+    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-python-api
+    newTag: "9958da7aa0f0138e5e543c976b164a14a1a0e9bc"
+  - name: core-model-runner
+    # Shares the python-api image — the model, its parquet inputs and the
+    # runner entry point all ship inside stl-verify/python.
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-python-api
     newTag: "9958da7aa0f0138e5e543c976b164a14a1a0e9bc"
 
