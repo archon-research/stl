@@ -430,6 +430,28 @@ export const ENCUMBRANCE_WARNING_THRESHOLD = 0.95;
  * over three columns is 3 then 2, and those two keep the width of the three
  * above them instead of growing to half the container each.
  */
+/**
+ * Projects gap-filled buckets onto chart points, dropping those whose figure is
+ * absent.
+ *
+ * A dropped bucket leaves a hole the line is then drawn straight across, so this
+ * reads a discontinuous series as continuous. That is tolerable because every
+ * caller's figure is LOCF-carried server-side — an interior gap means the whole
+ * feed stopped, which the cronjob alerts already cover — but it is the reason
+ * absence is dropped rather than plotted as zero.
+ */
+export function toChartSeries<T extends { bucket_start: string }>(
+  buckets: readonly T[],
+  read: (bucket: T) => number | null,
+): { label: string; value: number }[] {
+  return buckets
+    .map((bucket) => ({
+      label: formatChartTimestampLabel(bucket.bucket_start),
+      value: read(bucket) ?? Number.NaN,
+    }))
+    .filter((point) => Number.isFinite(point.value));
+}
+
 export function balancedColumns(count: number, maxColumns: number): number {
   if (count <= 1) {
     return 1;

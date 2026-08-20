@@ -17,11 +17,9 @@ import { css } from '#styled-system/css';
 import type {
   ChartDatum,
   MetricChartKind,
-} from './components/allocations/AllocationGrid';
-import {
-  AllocationGrid,
-  type MetricChartSpec,
-} from './components/allocations/AllocationGrid';
+  MetricChartSpec,
+} from './components/allocations/metricCards';
+import { AllocationGrid } from './components/allocations/AllocationGrid';
 import { BottomPanel } from './components/allocations/BottomPanel';
 import { RiskDetailDrawer } from './components/allocations/RiskDetailDrawer';
 import { ActivityFeed } from './components/allocations/tabs/ActivityFeed';
@@ -70,6 +68,7 @@ import {
   getProtocolLabel,
   groupPrimesByVault,
   parseNumericValue,
+  toChartSeries,
   truncateMiddle,
   wadToUnits,
 } from './lib/dashboard';
@@ -818,25 +817,16 @@ function App() {
   }, [activityBuckets, primeTotalAllocationUsd, rangePreset]);
 
   const primeDebtSeries = useMemo<ChartDatum[]>(
-    () =>
-      debtBuckets
-        .map((bucket) => ({
-          label: formatChartTimestampLabel(bucket.bucket_start),
-          value: wadToUnits(bucket.debt_wad) ?? Number.NaN,
-        }))
-        .filter((point) => Number.isFinite(point.value)),
+    () => toChartSeries(debtBuckets, (bucket) => wadToUnits(bucket.debt_wad)),
     [debtBuckets],
   );
 
   // Total capital is the on-chain SubProxy treasury balance over time.
   const totalCapitalSeries = useMemo<ChartDatum[]>(
     () =>
-      totalCapitalBuckets
-        .map((bucket) => ({
-          label: formatChartTimestampLabel(bucket.bucket_start),
-          value: parseNumericValue(bucket.total_capital_usd) ?? Number.NaN,
-        }))
-        .filter((point) => Number.isFinite(point.value)),
+      toChartSeries(totalCapitalBuckets, (bucket) =>
+        parseNumericValue(bucket.total_capital_usd),
+      ),
     [totalCapitalBuckets],
   );
 
@@ -846,23 +836,17 @@ function App() {
   // them null, which filters to an empty series and a flat fallback card.
   const collateralSeries = useMemo<ChartDatum[]>(
     () =>
-      totalCapitalBuckets
-        .map((bucket) => ({
-          label: formatChartTimestampLabel(bucket.bucket_start),
-          value: parseNumericValue(bucket.assets_usd) ?? Number.NaN,
-        }))
-        .filter((point) => Number.isFinite(point.value)),
+      toChartSeries(totalCapitalBuckets, (bucket) =>
+        parseNumericValue(bucket.assets_usd),
+      ),
     [totalCapitalBuckets],
   );
 
   const encumbranceSeries = useMemo<ChartDatum[]>(
     () =>
-      totalCapitalBuckets
-        .map((bucket) => ({
-          label: formatChartTimestampLabel(bucket.bucket_start),
-          value: parseNumericValue(bucket.encumbrance_ratio) ?? Number.NaN,
-        }))
-        .filter((point) => Number.isFinite(point.value)),
+      toChartSeries(totalCapitalBuckets, (bucket) =>
+        parseNumericValue(bucket.encumbrance_ratio),
+      ),
     [totalCapitalBuckets],
   );
 
@@ -887,12 +871,9 @@ function App() {
   // (falls back to the flat current value below when no history is available).
   const exposureSeries = useMemo<ChartDatum[]>(
     () =>
-      exposureBuckets
-        .map((bucket) => ({
-          label: formatChartTimestampLabel(bucket.bucket_start),
-          value: parseNumericValue(bucket.exposure_usd) ?? Number.NaN,
-        }))
-        .filter((point) => Number.isFinite(point.value)),
+      toChartSeries(exposureBuckets, (bucket) =>
+        parseNumericValue(bucket.exposure_usd),
+      ),
     [exposureBuckets],
   );
 
