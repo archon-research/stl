@@ -3,7 +3,10 @@
 # Run once, by hand, after reference-capital-indexer is deployed (the Job reuses its
 # ConfigMap and Secret):
 #   kustomize build k8s/overlays/prod/bootstrap-reference-capital | kubectl apply -f -
-# Set newTag to the currently deployed cronjob image.
+# Set newTag to a cronjob image that has actually been built and pushed — check with
+#   aws ecr list-images --repository-name stl-sentinelprod-cronjob --region eu-west-1 \
+#     --query 'imageIds[?starts_with(imageTag, `reference-capital-backfill`)].imageTag'
+# A tag for a branch SHA whose image was never pushed leaves the Job in ImagePullBackOff.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
@@ -15,4 +18,4 @@ resources:
 images:
   - name: reference-capital-backfill
     newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-cronjob
-    newTag: "reference-capital-backfill-3eceb410076e6ff0f8c523e13bace9cd0cf984e6"
+    newTag: "reference-capital-backfill-2e910b76c4f0d0ac3335b310976c4ee28e8a427b"
