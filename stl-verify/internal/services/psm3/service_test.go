@@ -192,6 +192,10 @@ func (f *fakeSQSConsumer) DeleteMessage(_ context.Context, receiptHandle string)
 	return nil
 }
 
+func (f *fakeSQSConsumer) ChangeMessageVisibility(context.Context, string, time.Duration) error {
+	return nil
+}
+
 func (f *fakeSQSConsumer) Close() error { return nil }
 
 func (f *fakeSQSConsumer) VisibilityTimeout() time.Duration { return 30 * time.Second }
