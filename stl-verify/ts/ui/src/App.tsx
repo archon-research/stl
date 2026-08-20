@@ -14,15 +14,13 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { css } from '#styled-system/css';
 
+import { AllocationGrid } from './components/allocations/AllocationGrid';
+import { BottomPanel } from './components/allocations/BottomPanel';
 import type {
   ChartDatum,
   MetricChartKind,
-} from './components/allocations/AllocationGrid';
-import {
-  AllocationGrid,
-  type MetricChartSpec,
-} from './components/allocations/AllocationGrid';
-import { BottomPanel } from './components/allocations/BottomPanel';
+  MetricChartSpec,
+} from './components/allocations/metricCards';
 import { RiskDetailDrawer } from './components/allocations/RiskDetailDrawer';
 import { ActivityFeed } from './components/allocations/tabs/ActivityFeed';
 // DEFAULT_RANGE_PRESET comes from the local shared barrel so the temporary 24h
@@ -58,9 +56,12 @@ import {
   buildProtocolOptions,
   buildProtocolOptionsFromMetadata,
   DIRECT_PROTOCOL_FILTER_VALUE,
+  ENCUMBRANCE_HIGH_SEVERITY_THRESHOLD,
+  ENCUMBRANCE_LOW_SEVERITY_THRESHOLD,
   formatChartTimestampLabel,
   formatCompactNumber,
   formatCompactUsd,
+  formatRatioPercent,
   formatTokenAmount,
   formatUsdValue,
   getChainLabel,
@@ -68,6 +69,7 @@ import {
   getProtocolLabel,
   groupPrimesByVault,
   parseNumericValue,
+  toChartSeries,
   truncateMiddle,
   wadToUnits,
 } from './lib/dashboard';
@@ -548,17 +550,6 @@ function App() {
   // requests.
   const primaryProxyAddress = selectedPrimeGroup?.primaryProxyAddress ?? null;
 
-  // The bucketed chart series below (debt/exposure/total-capital/activity) are
-  // fetched for the primary proxy only, not fanned out (see the
-  // usePrimeChartData call). For a prime with more than one proxy, that makes
-  // those series describe one chain while the headline figures they sit next
-  // to are prime-wide — real history for one chain would silently look like
-  // real history for the whole prime. Chart specs below suppress the series
-  // in that case rather than render a trend line that contradicts its own
-  // headline number.
-  const isMultiChainPrime =
-    (selectedPrimeGroup?.proxyAddresses.length ?? 0) > 1;
-
   useEffect(() => {
     if (!primaryProxyAddress) {
       setRiskCapital(null);
@@ -671,10 +662,9 @@ function App() {
     isLoading: isChartsLoading,
     errorMessage: chartsErrorMessage,
   } = usePrimeChartData(
-    // These per-bucket time-series endpoints have no prime-wide aggregation
-    // (unlike risk-capital's prime_* fields), so summing them across a
-    // prime's proxies is not well-defined here; scope to the primary proxy
-    // rather than fan out.
+    // Any one of the prime's proxies: the activity and exposure endpoints
+    // resolve it prime-wide server-side. Total-capital and debt read
+    // prime-scoped rows, so one address answers for the whole prime there too.
     primaryProxyAddress,
     timeRange.from_timestamp,
     timeRange.to_timestamp,
@@ -809,19 +799,8 @@ function App() {
   // window whose end drifts into the past, so anchoring its newest (past) bucket
   // at the current total would misstate every point. Suppress it for custom
   // ranges until a range-end anchor is available.
-  //
-  // It is also only valid for a single-proxy prime: the anchor
-  // (primeTotalAllocationUsd) is cross-chain, but activityBuckets' net flows
-  // are fetched for the primary proxy only (see usePrimeChartData below), so
-  // for a multi-chain prime every point except the newest would be silently
-  // over- or under-stated by whatever flowed through the other chains.
-  // Suppress it rather than reconstruct a history the inputs can't support.
   const allocationBalanceSeries = useMemo<ChartDatum[]>(() => {
-    if (
-      isMultiChainPrime ||
-      rangePreset === 'custom' ||
-      activityBuckets.length === 0
-    ) {
+    if (rangePreset === 'custom' || activityBuckets.length === 0) {
       return [];
     }
 
@@ -836,46 +815,75 @@ function App() {
       balance -= parseNumericValue(bucket.net_flow_usd) ?? 0;
     }
     return series;
-  }, [
-    activityBuckets,
-    isMultiChainPrime,
-    primeTotalAllocationUsd,
-    rangePreset,
-  ]);
+  }, [activityBuckets, primeTotalAllocationUsd, rangePreset]);
 
   const primeDebtSeries = useMemo<ChartDatum[]>(
-    () =>
-      debtBuckets
-        .map((bucket) => ({
-          label: formatChartTimestampLabel(bucket.bucket_start),
-          value: wadToUnits(bucket.debt_wad) ?? Number.NaN,
-        }))
-        .filter((point) => Number.isFinite(point.value)),
+    () => toChartSeries(debtBuckets, (bucket) => wadToUnits(bucket.debt_wad)),
     [debtBuckets],
   );
 
   // Total capital is the on-chain SubProxy treasury balance over time.
   const totalCapitalSeries = useMemo<ChartDatum[]>(
     () =>
-      totalCapitalBuckets
-        .map((bucket) => ({
-          label: formatChartTimestampLabel(bucket.bucket_start),
-          value: parseNumericValue(bucket.total_capital_usd) ?? Number.NaN,
-        }))
-        .filter((point) => Number.isFinite(point.value)),
+      toChartSeries(totalCapitalBuckets, (bucket) =>
+        parseNumericValue(bucket.total_capital_usd),
+      ),
     [totalCapitalBuckets],
   );
+
+  // Both ride the total-capital buckets: assets_usd and encumbrance_ratio come
+  // from the same two upstream feeds, so a separate request could pair figures
+  // observed at different instants. Reference mode only — self mode reports
+  // them null, which filters to an empty series and a flat fallback card.
+  const collateralSeries = useMemo<ChartDatum[]>(
+    () =>
+      toChartSeries(totalCapitalBuckets, (bucket) =>
+        parseNumericValue(bucket.assets_usd),
+      ),
+    [totalCapitalBuckets],
+  );
+
+  const encumbranceSeries = useMemo<ChartDatum[]>(
+    () =>
+      toChartSeries(totalCapitalBuckets, (bucket) =>
+        parseNumericValue(bucket.encumbrance_ratio),
+      ),
+    [totalCapitalBuckets],
+  );
+
+  // When the reference collateral figure was observed, which is not the bucket
+  // serving it: the feed is daily and the value is carried forward, so without
+  // showing this a figure up to a day old is indistinguishable from a fresh one.
+  const primeCollateralObservedAt = REFERENCE_MODE
+    ? (totalCapitalBuckets
+        .filter((bucket) => bucket.assets_observed_at != null)
+        .at(-1)?.assets_observed_at ?? null)
+    : null;
+
+  // The monitor's three figures share one stamp because they share one row. It
+  // matters for the same reason the collateral one does, and more so since the
+  // prior seeding reaches up to 90 days back.
+  const capitalObservedAt = REFERENCE_MODE
+    ? (totalCapitalBuckets
+        .filter((bucket) => bucket.capital_observed_at != null)
+        .at(-1)?.capital_observed_at ?? null)
+    : null;
+
+  // Reference mode publishes a real total-assets figure. Self mode has no
+  // equivalent — STL does not index PSM3 and prices no Curve LP position — so
+  // it shows what STL actually holds records for, captioned as such.
+  // Buckets are oldest-first, so the newest observation is the last point.
+  const primeCollateralValue = REFERENCE_MODE
+    ? (collateralSeries.at(-1)?.value ?? null)
+    : primeTotalAllocationUsd;
 
   // Priced receipt-token exposure over time; drives the Exposure card trend
   // (falls back to the flat current value below when no history is available).
   const exposureSeries = useMemo<ChartDatum[]>(
     () =>
-      exposureBuckets
-        .map((bucket) => ({
-          label: formatChartTimestampLabel(bucket.bucket_start),
-          value: parseNumericValue(bucket.exposure_usd) ?? Number.NaN,
-        }))
-        .filter((point) => Number.isFinite(point.value)),
+      toChartSeries(exposureBuckets, (bucket) =>
+        parseNumericValue(bucket.exposure_usd),
+      ),
     [exposureBuckets],
   );
 
@@ -923,6 +931,10 @@ function App() {
 
     const primeDebtValue = wadToUnits(primeDebtSnapshot?.debt_wad);
 
+    const encumbranceValue = parseNumericValue(
+      riskCapital?.prime_encumbrance_ratio,
+    );
+
     // One ordinal series token per card, and deliberately no `var(..., fallback)`:
     // a fallback lets a wrong or missing token render as a plausible colour, which
     // is how two of these cards came to name the same token unnoticed.
@@ -939,16 +951,9 @@ function App() {
       },
       {
         // Exposure trend from priced receipt-token balances over time; falls
-        // back to the flat current value when no history is available, and
-        // also when the prime spans more than one proxy — exposureSeries is
-        // fetched for the primary proxy only, while the headline number next
-        // to it (prime_exposure_usd) is prime-wide, so a real per-chain
-        // series here would contradict its own headline figure.
+        // back to the flat current value when no history is available.
         key: 'risk-capital',
-        ...seriesOrFallback(
-          isMultiChainPrime ? [] : exposureSeries,
-          exposureValue,
-        ),
+        ...seriesOrFallback(exposureSeries, exposureValue),
         stroke: 'var(--colors-chart-series-secondary)',
         formatValue: formatCompactUsd,
       },
@@ -964,19 +969,46 @@ function App() {
         stroke: 'var(--colors-chart-series-quinary)',
         formatValue: (value: number) => `${formatCompactNumber(value)} DAI`,
       },
+      {
+        key: 'prime-collateral',
+        ...seriesOrFallback(collateralSeries, primeCollateralValue),
+        stroke: 'var(--colors-chart-series-tertiary)',
+        formatValue: formatCompactUsd,
+      },
+      {
+        key: 'encumbrance-ratio',
+        ...seriesOrFallback(encumbranceSeries, encumbranceValue),
+        stroke: 'var(--colors-chart-series-critical)',
+        formatValue: formatRatioPercent,
+        thresholds: [
+          {
+            value: ENCUMBRANCE_LOW_SEVERITY_THRESHOLD,
+            label: formatRatioPercent(ENCUMBRANCE_LOW_SEVERITY_THRESHOLD, 0),
+            stroke: 'var(--colors-text-warning)',
+          },
+          {
+            value: ENCUMBRANCE_HIGH_SEVERITY_THRESHOLD,
+            label: formatRatioPercent(ENCUMBRANCE_HIGH_SEVERITY_THRESHOLD, 0),
+            stroke: 'var(--colors-text-critical)',
+          },
+        ],
+      },
     ];
     return charts.filter((chart) => chart.data.length > 0);
   }, [
     allocationBalanceSeries,
     riskCapital?.prime_exposure_usd,
+    riskCapital?.prime_encumbrance_ratio,
     riskCapital?.total_risk_capital_usd,
     chartFromLabel,
     chartToLabel,
     exposureSeries,
-    isMultiChainPrime,
     primeDebtSeries,
     primeDebtSnapshot?.debt_wad,
     totalCapitalSeries,
+    collateralSeries,
+    encumbranceSeries,
+    primeCollateralValue,
   ]);
 
   // `row` restores a drawer deep link; anything the current filters exclude falls
@@ -1102,8 +1134,10 @@ function App() {
                 chartsErrorMessage={chartsErrorMessage}
                 riskCapitalErrorMessage={riskCapitalErrorMessage}
                 primeDebtErrorMessage={primeDebtErrorMessage}
-                isMultiChainPrime={isMultiChainPrime}
                 noticeMessage={unknownPrimeMessage}
+                primeCollateralUsd={primeCollateralValue}
+                primeCollateralObservedAt={primeCollateralObservedAt}
+                capitalObservedAt={capitalObservedAt}
               />
             ) : (
               <ActivityFeed
@@ -1114,7 +1148,6 @@ function App() {
                 selectedProtocol={selectedProtocol}
                 showAllPrimes={showAllPrimesInActivities}
                 selectedPrime={selectedPrime}
-                isMultiChainPrime={isMultiChainPrime}
                 tokenOptions={tokenSymbolOptions}
                 tokenFilter={activitiesSearch?.token ?? null}
                 onTokenFilterChange={(value) =>

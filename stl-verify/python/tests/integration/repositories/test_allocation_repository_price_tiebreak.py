@@ -102,7 +102,7 @@ async def test_activity_buckets_net_flow_price_tie_resolves_to_highest_oracle_id
     """
     now = dt.datetime.now(dt.UTC)
     buckets = await repo.list_activity_buckets(
-        prime_id=_PRIME,
+        proxy_addresses=[_PRIME],
         from_timestamp=now - dt.timedelta(hours=1),
         to_timestamp=now + dt.timedelta(hours=1),
         bucket_seconds=7200.0,

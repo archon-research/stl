@@ -82,11 +82,25 @@ class ReferencePrimeRiskCapital:
 class ReferenceCapitalBucket:
     """Last observed upstream figures within a single time bucket (LOCF).
 
-    Both figures ride one bucket because they come from one snapshot row, so
-    splitting them across two queries could straddle a sync cycle and pair an
-    exposure with a treasury observed at a different instant.
+    The figures ride one bucket because one query produces them, so splitting
+    them across two requests could straddle a sync cycle and pair figures
+    observed at different instants.
+
+    They do not share a feed, and each is ``None`` outside the range its own
+    feed covers: ``encumbrance_ratio`` comes from the monitor, ``assets_usd``
+    from the daily balance sheet, and each is gap-filled independently — so
+    where both are set they were observed at different instants by
+    construction, not from one row.
     """
 
     bucket_start: datetime
     total_capital_usd: Decimal | None
     exposure_usd: Decimal | None
+    encumbrance_ratio: Decimal | None = None
+    assets_usd: Decimal | None = None
+    # When ``assets_usd`` was observed, which is not ``bucket_start``: the feed
+    # is daily and the value is carried forward.
+    assets_observed_at: datetime | None = None
+    # When the monitor's three figures were observed. One field, not three: they
+    # arrive on one snapshot row.
+    capital_observed_at: datetime | None = None

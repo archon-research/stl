@@ -15,6 +15,7 @@ into TimescaleDB (or validates stored data). Current cronjobs:
 | `transform-worker` | `transform-worker` | 10m | Drains the transformed-layer change queues and refreshes the parity ledger |
 | `offchain-price-backfill` | `offchain-price-backfill` | **on demand** | Backfills CoinGecko price history for a range supplied at trigger time |
 | `reference-capital-indexer` | `reference-capital-indexer` | 15m | Sky Star-monitor reference risk capital; the only writer of forward reference history |
+| `reference-capital-backfill` | `reference-capital-backfill` | **on demand** | Seeds the reference balance-sheet history predating the syncer's first run |
 
 > `maple-graphql-indexer` is also a cronjob but has its own richer rules — see
 > [vector-indexers.md](vector-indexers.md), not this runbook.
@@ -157,13 +158,14 @@ workers carry **no schedule**, so unlike `VectorCronjobWorkerDown` nothing is
 ticking into the void and no data is going stale. The only impact is that a new
 run cannot be started until the pod is back. Warning severity for that reason.
 
-Currently matches: `offchain-price-backfill`.
+Currently matches: `offchain-price-backfill`, `reference-capital-backfill`.
 
 ### First checks
 
-1. `kubectl -n vector get pods -l app=offchain-price-backfill` — look for
-   `CrashLoopBackOff`, `ImagePullBackOff` or `OOMKilled`.
-2. `kubectl -n vector logs deploy/offchain-price-backfill --tail=100`.
+1. `kubectl -n vector get pods -l app=$DEPLOY` — look for
+   `CrashLoopBackOff`, `ImagePullBackOff` or `OOMKilled`. `$DEPLOY` is the
+   `deployment` label on the alert; more than one worker matches this rule.
+2. `kubectl -n vector logs deploy/$DEPLOY --tail=100`.
 3. If the worker is up but a *run* is failing, this is the wrong alert — see
    `VectorCronjobRunFailing`, which is the only run-failure signal for on-demand
    workers (`VectorCronjobAllRunsFailing` excludes them).
@@ -234,6 +236,49 @@ scheduled cronjob. Two things differ when it pages:
 lives under `cmd/backfillers/`, which is **not** auto-discovered, so it needs its
 explicit `_docker-release-offchain-price-backfill-internal` line in
 `docker-release-all` and its entry in `deploy.yaml`'s `CRONJOBS` promotion list.
+
+---
+
+### Special case: `reference-capital-backfill` (on-demand, no schedule)
+
+Seeds the reference balance-sheet history that predates STL's own observation of
+Sky's Star monitor. `reference-capital-indexer` can only accumulate **forward**
+from its first run — the monitor publishes no history — so this is the only
+source of anything earlier, and it reads Sky's balance-sheet feed instead.
+
+Trigger it from the Temporal UI (Workflow Type `ReferenceCapitalBackfill`, Input
+`{"daysAgo": 365}`) or:
+
+```
+temporal workflow start --namespace vector \
+  --task-queue reference-capital-backfill --type ReferenceCapitalBackfill \
+  --workflow-id reference-capital-backfill-$(date +%s) \
+  --input '{"daysAgo": 365}'
+```
+
+- **One activity, all or nothing.** Unlike `offchain-price-backfill` it is not
+  chunked. The service fetches every tracked prime in one request and refuses to
+  write unless all of them came back, because the write is `ON CONFLICT DO
+  NOTHING`: a prime missing from a one-shot seed leaves a permanent hole a re-run
+  cannot repair. A failure therefore writes nothing — retry it rather than
+  reaching for a partial repair.
+- **Re-running is safe.** Rows are insert-only and conflict away within a build.
+  A run under a new `build_id` appends a fresh `processing_version` generation
+  rather than overwriting; read paths take the newest.
+- **What it fills, and what it cannot.** It populates `assets_usd` (the figure
+  Sky's dashboard labels PRIME COLLATERAL, and the only source of it) and
+  `treasury_balance_usd`, which backs the total-capital series. It does **not**
+  fill reference `exposure`: the feed's `allocated_assets` is a different
+  measurement from the monitor's `total_exposure` (+32% for spark at the same
+  instant), so the read path splices in `NULL` rather than stepping the series.
+  Reference exposure has no history by design and accumulates forward only.
+- **Verify a run landed** by row count rather than a green dashboard, since
+  per-activity metrics cannot see a workflow-level failure:
+
+  ```sql
+  SELECT count(*), min(observed_at)::date, max(observed_at)::date
+  FROM prime_reference_balance_sheet;
+  ```
 
 ---
 

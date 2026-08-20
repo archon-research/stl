@@ -228,6 +228,21 @@ class PrimeDebtRepository:
                 WHERE b.prime_id = :prime_id
                 {required_time_window_clause("b.observed_at")}
                 ORDER BY b.observed_at, b.processing_version DESC
+            ), prior AS (
+                -- The last figure before the window, fed to locf as its
+                -- `prev`. Upstream publishes one row per prime per day, so
+                -- from a minute past midnight the newest row already sits
+                -- outside a 24h window and the series would read as absent
+                -- for most of every day. Bounded, because a figure this
+                -- stale is not a current reading.
+                SELECT b.debt_usd * 1e18 AS debt_wad
+                FROM prime_reference_balance_sheet b
+                WHERE b.prime_id = :prime_id
+                  AND b.observed_at < CAST(:from_timestamp AS TIMESTAMPTZ)
+                  AND b.observed_at >=
+                      CAST(:from_timestamp AS TIMESTAMPTZ) - INTERVAL '90 days'
+                ORDER BY b.observed_at DESC, b.processing_version DESC
+                LIMIT 1
             )
             SELECT
                 time_bucket_gapfill(
@@ -236,7 +251,11 @@ class PrimeDebtRepository:
                     CAST(:from_timestamp AS TIMESTAMPTZ),
                     CAST(:to_timestamp AS TIMESTAMPTZ)
                 ) AS bucket_start,
-                locf(last(corrected.debt_wad, corrected.observed_at)) AS debt_wad
+                locf(
+                    last(corrected.debt_wad, corrected.observed_at),
+                    (SELECT prior.debt_wad FROM prior),
+                    treat_null_as_missing => true
+                ) AS debt_wad
             FROM corrected
             GROUP BY bucket_start
             ORDER BY bucket_start DESC
