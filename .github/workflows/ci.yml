@@ -8,8 +8,6 @@ on:
       - 'k8s/overlays/staging/kustomization.yaml'
       - 'k8s/overlays/prod/kustomization.yaml'
   pull_request:
-    branches:
-      - main
   merge_group:
   workflow_dispatch:
 
