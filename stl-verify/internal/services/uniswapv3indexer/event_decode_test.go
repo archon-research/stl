@@ -794,6 +794,25 @@ func TestDecodeEvents_KnownTopic0MalformedDataReturnsError(t *testing.T) {
 	}
 }
 
+// TestDecodeEvents_KnownTopic0EmptyDataReturnsError proves an Initialize log
+// with no data block stops the block rather than persisting a pool_event whose
+// params are an empty object and a capture-net mirror of the same nothing.
+func TestDecodeEvents_KnownTopic0EmptyDataReturnsError(t *testing.T) {
+	a := poolABIForTest(t)
+	pool := testPool()
+
+	log := buildLog(t, a, "Initialize", pool.Address, "0x0", nil, big.NewInt(1234567890123), big.NewInt(-100))
+	log.Data = "0x"
+
+	_, err := DecodeEvents(receiptOf(log), pool, chainID, blockNumber, blockVer, blockTS)
+	if err == nil {
+		t.Fatal("DecodeEvents: want error for an Initialize log with no data, got nil")
+	}
+	if !strings.Contains(err.Error(), "sqrtPriceX96") {
+		t.Errorf("error %q does not name the undecoded field", err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Multiple logs across one receipt: mix of belonging/not, known/unknown.
 // ---------------------------------------------------------------------------
