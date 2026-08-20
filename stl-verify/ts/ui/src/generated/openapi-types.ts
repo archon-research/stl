@@ -465,32 +465,6 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
-  '/v1/risk/{receipt_token_id}/core-model': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    /**
-     * Latest CORE model result (deprecated)
-     * @deprecated
-     * @description Return the latest pre-computed CORE model result for a receipt token.
-     *
-     *     **Deprecated.** Prefer `/v1/risk/{chain_id}/{token_address}/core-model`.
-     *
-     *     Errors:
-     *     - `404` if the receipt token is unknown or has no pre-computed result.
-     */
-    get: operations['get_core_model_result_v1_risk__receipt_token_id__core_model_get'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
   '/v1/status': {
     parameters: {
       query?: never;
@@ -1211,6 +1185,7 @@ export interface components {
       asset_id: number;
       /**
        * Computed At
+       * Format: date-time
        * @description UTC timestamp of when this result was computed.
        * @example 2026-06-01T12:00:00+00:00
        */
@@ -1995,7 +1970,7 @@ export interface components {
       chain_id?: number | null;
       /**
        * Overrides
-       * @description Per-model scenario overrides. Outer keys are registered risk-model names (`suraf`, `gap_sweep`); inner objects are model-specific. For example, `gap_sweep` accepts `gap_pct` (a price-drop fraction in `[0, 1]`) and `suraf` accepts `usd_exposure`. Unknown outer keys are rejected with `422`.
+       * @description Per-model scenario overrides. Outer keys are registered risk-model names (`suraf`, `gap_sweep`, `core_model`); inner objects are model-specific. For example, `gap_sweep` accepts `gap_pct` (a price-drop fraction in `[0, 1]`); `suraf` and `core_model` accept `usd_exposure`. Unknown outer keys are rejected with `422`.
        */
       overrides?: {
         [key: string]: {
@@ -2960,37 +2935,6 @@ export interface operations {
         };
         content: {
           'application/json': components['schemas']['RiskBreakdownResponse'];
-        };
-      };
-      /** @description Validation Error */
-      422: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['HTTPValidationError'];
-        };
-      };
-    };
-  };
-  get_core_model_result_v1_risk__receipt_token_id__core_model_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        receipt_token_id: number;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['CoreModelResultResponse'];
         };
       };
       /** @description Validation Error */

@@ -33,6 +33,7 @@ type RrcTabProps = {
 const MODEL_LABELS: Record<string, string> = {
   suraf: 'SURAF',
   gap_sweep: 'Gap sweep',
+  core_model: 'CORE',
 };
 
 // A map of finished class names rather than a tone-to-token-path helper: see

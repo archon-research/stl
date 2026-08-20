@@ -957,6 +957,7 @@
             "examples": [
               "2026-06-01T12:00:00+00:00"
             ],
+            "format": "date-time",
             "title": "Computed At",
             "type": "string"
           },
@@ -2195,7 +2196,7 @@
               "additionalProperties": true,
               "type": "object"
             },
-            "description": "Per-model scenario overrides. Outer keys are registered risk-model names (`suraf`, `gap_sweep`); inner objects are model-specific. For example, `gap_sweep` accepts `gap_pct` (a price-drop fraction in `[0, 1]`) and `suraf` accepts `usd_exposure`. Unknown outer keys are rejected with `422`.",
+            "description": "Per-model scenario overrides. Outer keys are registered risk-model names (`suraf`, `gap_sweep`, `core_model`); inner objects are model-specific. For example, `gap_sweep` accepts `gap_pct` (a price-drop fraction in `[0, 1]`); `suraf` and `core_model` accept `usd_exposure`. Unknown outer keys are rejected with `422`.",
             "title": "Overrides",
             "type": "object"
           },
@@ -4296,51 +4297,6 @@
         "summary": "Risk-enriched collateral breakdown (deprecated)",
         "tags": [
           "risk"
-        ]
-      }
-    },
-    "/v1/risk/{receipt_token_id}/core-model": {
-      "get": {
-        "deprecated": true,
-        "description": "Return the latest pre-computed CORE model result for a receipt token.\n\n**Deprecated.** Prefer `/v1/risk/{chain_id}/{token_address}/core-model`.\n\nErrors:\n- `404` if the receipt token is unknown or has no pre-computed result.",
-        "operationId": "get_core_model_result_v1_risk__receipt_token_id__core_model_get",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "receipt_token_id",
-            "required": true,
-            "schema": {
-              "title": "Receipt Token Id",
-              "type": "integer"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CoreModelResultResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Latest CORE model result (deprecated)",
-        "tags": [
-          "risk",
-          "internal"
         ]
       }
     },

@@ -35,7 +35,6 @@ from app.api.v1 import (
 from app.config import Settings, get_settings
 from app.logging import get_logger, setup_logging
 from app.middleware.request_id import RequestIdMiddleware
-from app.risk_engine.core_model.core_model_mapping import load_core_model_mapping
 from app.risk_engine.mapping import MappingError, load_asset_mapping
 from app.risk_engine.suraf.loader import load_all_ratings
 from app.risk_engine.suraf.result import SurafResult
@@ -172,7 +171,7 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
     _check_mapping_refs(raw_mapping, suraf_ratings)
     logger.info("asset->rating mapping loaded entries=%d", len(raw_mapping))
 
-    core_raw_mapping = load_core_model_mapping(settings.core_model_mappings_file)
+    core_raw_mapping = load_asset_mapping(settings.core_model_mappings_file)
     logger.info("core model asset->market_key mapping loaded entries=%d", len(core_raw_mapping))
 
     @asynccontextmanager

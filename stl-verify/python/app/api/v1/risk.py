@@ -1,3 +1,5 @@
+import logging
+from datetime import datetime
 from decimal import Decimal
 from typing import Annotated, Any
 
@@ -29,6 +31,7 @@ from app.domain.entities.risk import RrcResult
 from app.domain.exceptions import (
     AllocationUnpricedError,
     InvalidOverrideError,
+    ModelDataUnavailableError,
 )
 from app.domain.serialization import PlainDecimal
 from app.ports.core_model_results_reader import CoreModelResult
@@ -36,6 +39,8 @@ from app.ports.receipt_token_lookup import ReceiptTokenLookup
 from app.services.core_model_risk_service import CoreModelRiskService
 from app.services.crypto_lending_risk_service import CryptoLendingRiskService
 from app.services.model_registry import ModelRegistry
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["risk"])
 
@@ -361,9 +366,10 @@ class RrcRequest(BaseModel):
         default_factory=dict,
         description=(
             "Per-model scenario overrides. Outer keys are registered risk-model names "
-            "(`suraf`, `gap_sweep`); inner objects are model-specific. For example, "
-            "`gap_sweep` accepts `gap_pct` (a price-drop fraction in `[0, 1]`) and "
-            "`suraf` accepts `usd_exposure`. Unknown outer keys are rejected with `422`."
+            "(`suraf`, `gap_sweep`, `core_model`); inner objects are model-specific. "
+            "For example, `gap_sweep` accepts `gap_pct` (a price-drop fraction in `[0, 1]`); "
+            "`suraf` and `core_model` accept `usd_exposure`. "
+            "Unknown outer keys are rejected with `422`."
         ),
     )
 
@@ -563,7 +569,19 @@ async def _compute_envelope(
             raise share_error_503(exc) from exc
         except InvalidOverrideError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except ModelDataUnavailableError as exc:
+            # A model with no data yet degrades the envelope, not the endpoint.
+            logger.warning("skipping model without data model=%s asset_id=%s: %s", m.risk_model, asset_id, exc)
+            continue
         results.append(result)
+
+    if not results:
+        # Matches the pre-CORE behavior for assets whose only model has no
+        # data yet: the endpoint 404s rather than serving an empty envelope.
+        raise HTTPException(
+            status_code=404,
+            detail=f"no risk model has a result for asset_id={asset_id}",
+        )
 
     return RrcEnvelope(
         asset_id=asset_id,
@@ -598,7 +616,7 @@ class CoreModelResultResponse(BaseModel):
     forecast_step: int = Field(description="Forecast horizon in calendar days.", examples=[14])
     n_mc: int = Field(description="Number of Monte Carlo price scenarios.", examples=[10000])
     copula_type: str = Field(description="Cross-asset dependence structure.", examples=["T-COPULA"])
-    computed_at: str = Field(
+    computed_at: datetime = Field(
         description="UTC timestamp of when this result was computed.", examples=["2026-06-01T12:00:00+00:00"]
     )
 
@@ -615,7 +633,7 @@ def _core_model_response(asset_id: int, result: CoreModelResult) -> CoreModelRes
         forecast_step=result.forecast_step,
         n_mc=result.n_mc,
         copula_type=result.copula_type,
-        computed_at=result.computed_at.isoformat(),
+        computed_at=result.computed_at,
     )
 
 
@@ -627,30 +645,6 @@ async def _get_core_model_result(
     if result is None:
         raise HTTPException(status_code=404, detail=f"no core model result for asset_id={asset_id}")
     return _core_model_response(asset_id, result)
-
-
-@router.get(
-    "/risk/{receipt_token_id}/core-model",
-    response_model=CoreModelResultResponse,
-    summary="Latest CORE model result (deprecated)",
-    tags=["internal"],
-    deprecated=True,
-    description=(
-        "Return the latest pre-computed CORE model result for a receipt token.\n\n"
-        "**Deprecated.** Prefer `/v1/risk/{chain_id}/{token_address}/core-model`.\n\n"
-        "Errors:\n"
-        "- `404` if the receipt token is unknown or has no pre-computed result.\n"
-    ),
-)
-async def get_core_model_result(
-    receipt_token_id: int,
-    lookup: ReceiptTokenLookup = Depends(get_receipt_token_lookup),
-    service: CoreModelRiskService = Depends(get_core_model_risk_service),
-) -> CoreModelResultResponse:
-    info = await lookup.get(receipt_token_id)
-    if info is None:
-        raise HTTPException(status_code=404, detail=f"unknown asset_id={receipt_token_id}")
-    return await _get_core_model_result(info.receipt_token_id, service)
 
 
 @router.get(

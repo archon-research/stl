@@ -24,8 +24,6 @@ from app.risk_engine.core_model.liquidator import Liquidator
 if TYPE_CHECKING:
     from app.ports.core_model_data_reader import CoreModelDataReader
 
-warnings.filterwarnings("ignore", category=FutureWarning)
-
 
 @dataclass(frozen=True)
 class CoreModelConfig:
@@ -55,14 +53,16 @@ class CoreModelPipelineResult:
 
 
 def _load_protection_usd(protocol: str, inputs_dir: Path) -> float:
-    """Read inputs/protocol_defense.json and return total USD protection for the protocol."""
+    """Read inputs/protocol_defense.json and return total USD protection for the protocol.
+
+    Fails loudly on a missing/malformed file or an unlisted protocol: silently
+    assuming 0 protection would shift every stored CRR for a protected
+    protocol (GALAXY carries $27M) while looking like a correct run.
+    """
     defense_path = inputs_dir / "protocol_defense.json"
-    try:
-        with open(defense_path) as f:
-            data = json.load(f)
-        return float(data.get(protocol.upper(), {}).get("total_protection_usd", 0))
-    except Exception:
-        return 0.0
+    with open(defense_path) as f:
+        data = json.load(f)
+    return float(data[protocol.upper()]["total_protection_usd"])
 
 
 async def run(
@@ -76,6 +76,19 @@ async def run(
     data loading delegated to ``data_reader`` and the result returned as a
     typed dataclass instead of being printed to stdout.
     """
+    with warnings.catch_warnings():
+        # statsmodels/arch emit FutureWarnings on every fit; scope the
+        # silencing to this run instead of mutating global filters for
+        # every importer of the module.
+        warnings.filterwarnings("ignore", category=FutureWarning)
+        return await _run_pipeline(config, data_reader, inputs_dir)
+
+
+async def _run_pipeline(
+    config: CoreModelConfig,
+    data_reader: CoreModelDataReader,
+    inputs_dir: Path,
+) -> CoreModelPipelineResult:
     p = config.params
 
     if str(p.get("LIQ_ANALYSIS", "YES")).upper() != "YES":

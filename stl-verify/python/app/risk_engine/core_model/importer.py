@@ -1,4 +1,8 @@
+import logging
+
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Change each user LTV under the worst case scenario assumption HF = 1
@@ -56,6 +60,15 @@ def change_user_ltvs(users_df: pd.DataFrame, market_df: pd.DataFrame) -> pd.Data
         price = oracle_price_dict.get(token, 0)
 
         if price == 0:
+            # A modeled token landing here would silently zero its quantity
+            # column while the row still claims HF = 1; make it visible.
+            if (new_supply_usd_df[usd_col] != 0).any():
+                logger.warning(
+                    "no oracle price for %s; zeroing %s despite nonzero USD supply in %s",
+                    token,
+                    qty_col,
+                    usd_col,
+                )
             new_supply_qty_df[qty_col] = 0
         else:
             new_supply_qty_df[qty_col] = new_supply_usd_df[usd_col] / price

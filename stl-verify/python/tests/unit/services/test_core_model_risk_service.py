@@ -8,7 +8,7 @@ import pytest
 
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.risk import CoreModelDetails, RrcResult
-from app.domain.exceptions import InvalidOverrideError
+from app.domain.exceptions import InvalidOverrideError, ModelDataUnavailableError
 from app.ports.core_model_results_reader import CoreModelResult
 from app.services.core_model_risk_service import CoreModelRiskService
 
@@ -33,11 +33,15 @@ def _service(
     asset_to_market_key: dict | None = None,
     get_latest_return: CoreModelResult | None = _RESULT,
     usd_exposure: Decimal = Decimal("10000.00"),
+    usd_exposure_error: Exception | None = None,
 ) -> CoreModelRiskService:
     results_reader = AsyncMock()
     results_reader.get_latest.return_value = get_latest_return
     allocation_repo = AsyncMock()
-    allocation_repo.get_usd_exposure.return_value = usd_exposure
+    if usd_exposure_error is not None:
+        allocation_repo.get_usd_exposure.side_effect = usd_exposure_error
+    else:
+        allocation_repo.get_usd_exposure.return_value = usd_exposure
     return CoreModelRiskService(
         asset_to_market_key=asset_to_market_key or {1: "sparklend_usdc"},
         results_reader=results_reader,
@@ -75,10 +79,22 @@ async def test_compute_details_populated():
     assert result.details.hhi == Decimal("22.3")
 
 
-async def test_compute_raises_when_no_precomputed_result():
+async def test_compute_raises_typed_error_when_no_precomputed_result():
     svc = _service(get_latest_return=None)
-    with pytest.raises(ValueError, match="no pre-computed result"):
+    with pytest.raises(ModelDataUnavailableError, match="no pre-computed result"):
         await svc.compute(1, _PRIME, {})
+
+
+async def test_compute_raises_typed_error_when_prime_has_no_position():
+    svc = _service(usd_exposure_error=ValueError("no position or price found"))
+    with pytest.raises(ModelDataUnavailableError, match="no resolvable position"):
+        await svc.compute(1, _PRIME, {})
+
+
+async def test_compute_with_override_skips_position_lookup_entirely():
+    svc = _service(usd_exposure_error=ValueError("no position or price found"))
+    result = await svc.compute(1, _PRIME, {"usd_exposure": "5000"})
+    assert result.rrc_usd == Decimal("625.00")
 
 
 async def test_compute_with_usd_exposure_override():

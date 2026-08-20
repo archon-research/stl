@@ -11,15 +11,13 @@ from typing import Any
 
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.risk import CoreModelDetails, ModelName, RrcResult
-from app.domain.exceptions import InvalidOverrideError
+from app.domain.exceptions import ModelDataUnavailableError
 from app.ports.allocation_repository import AllocationRepositoryPort
 from app.ports.core_model_results_reader import CoreModelResult, CoreModelResultsReader
+from app.services._overrides import parse_usd_exposure_override
 
 _HUNDRED = Decimal("100")
 _USD_CENT = Decimal("0.01")
-_ALLOWED_OVERRIDES = frozenset({"usd_exposure"})
-_USD_EXPOSURE_MAX = Decimal("1e15")
-_DECIMAL_STR_MAX_LEN = 64
 
 
 class CoreModelRiskService:
@@ -60,7 +58,7 @@ class CoreModelRiskService:
         market_key = self._asset_to_market_key[asset_id]
         result = await self._results_reader.get_latest(market_key)
         if result is None:
-            raise ValueError(
+            raise ModelDataUnavailableError(
                 f"no pre-computed result for market_key={market_key!r} (asset_id={asset_id}); "
                 "run the core-model-runner cronjob first"
             )
@@ -90,28 +88,15 @@ class CoreModelRiskService:
         prime_id: EthAddress,
         overrides: Mapping[str, Any],
     ) -> Decimal:
-        unknown = set(overrides) - _ALLOWED_OVERRIDES
-        if unknown:
-            raise InvalidOverrideError(f"unknown override keys: {sorted(unknown)}")
-
-        if "usd_exposure" not in overrides:
-            return await self._allocation_repo.get_usd_exposure(asset_id, prime_id)
-
-        raw = overrides["usd_exposure"]
-        if raw is None:
-            raise InvalidOverrideError("invalid usd_exposure: expected a positive finite number, got None")
-        if isinstance(raw, str) and len(raw) > _DECIMAL_STR_MAX_LEN:
-            raise InvalidOverrideError(
-                f"invalid usd_exposure: input string too long ({len(raw)} > {_DECIMAL_STR_MAX_LEN})"
-            )
+        override = parse_usd_exposure_override(overrides)
+        if override is not None:
+            return override
         try:
-            usd_exposure = raw if isinstance(raw, Decimal) else Decimal(str(raw))
-        except Exception as exc:
-            raise InvalidOverrideError(f"invalid usd_exposure: expected a positive finite number, got {raw!r}") from exc
-        if not usd_exposure.is_finite():
-            raise InvalidOverrideError(f"invalid usd_exposure: expected a positive finite number, got {usd_exposure}")
-        if usd_exposure <= Decimal("0"):
-            raise InvalidOverrideError(f"invalid usd_exposure: expected a positive finite number, got {usd_exposure}")
-        if usd_exposure > _USD_EXPOSURE_MAX:
-            raise InvalidOverrideError(f"usd_exposure must be <= {_USD_EXPOSURE_MAX:E}, got {usd_exposure}")
-        return usd_exposure
+            return await self._allocation_repo.get_usd_exposure(asset_id, prime_id)
+        except ValueError as exc:
+            # get_usd_exposure raises ValueError when the prime holds no
+            # resolvable position; without exposure this model has nothing to
+            # multiply, so the envelope should skip it, not 500.
+            raise ModelDataUnavailableError(
+                f"no resolvable position for asset_id={asset_id} prime_id={prime_id}: {exc}"
+            ) from exc

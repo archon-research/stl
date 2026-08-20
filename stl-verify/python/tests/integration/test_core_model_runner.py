@@ -1,10 +1,9 @@
 """Smoke test for the CORE model runner.
 
-Marked as integration because it runs GARCH calibration + Monte Carlo
-against real parquet snapshots. Excluded from the standard unit test run.
-
-Run explicitly with:
-    pytest tests/unit/risk_engine/test_core_model_runner.py -v -m integration
+Lives in tests/integration/ because it runs GARCH calibration + Monte Carlo
+against real parquet snapshots; test selection in this repo is path-based
+(make test-unit runs tests/unit only), so placement is what excludes it
+from the unit run.
 
 Speed notes:
 - Uses Morpho CBBTC-USDC (1 collateral token) to minimise GARCH grid-search cost.
@@ -16,15 +15,12 @@ from decimal import Decimal
 from pathlib import Path
 
 import pandas as pd
-import pytest
 
 from app.adapters.parquet.core_model_data_reader import ParquetCoreModelDataReader
 from app.risk_engine.core_model.config import load_params
 from app.risk_engine.core_model.runner import CoreModelConfig, run
 
-INPUTS_DIR = Path(__file__).resolve().parents[3] / "app" / "risk_engine" / "core_model" / "inputs"
-
-pytestmark = pytest.mark.integration
+INPUTS_DIR = Path(__file__).resolve().parents[2] / "app" / "risk_engine" / "core_model" / "inputs"
 
 _TRAIN_SIZE = 180
 _BACKTEST_ROWS = 20
@@ -38,7 +34,6 @@ class _TruncatedReader(ParquetCoreModelDataReader):
         return df.tail(_TRAIN_SIZE + _BACKTEST_ROWS)
 
 
-@pytest.mark.skipif(not INPUTS_DIR.exists(), reason="core_model inputs not present")
 async def test_runner_returns_valid_result():
     """Full pipeline smoke test: 1 token, truncated price history, N_MC=10."""
     params = load_params(

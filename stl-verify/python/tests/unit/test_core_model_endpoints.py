@@ -1,5 +1,4 @@
-"""Unit tests for GET /v1/risk/{asset_id}/core-model and
-GET /v1/risk/{chain_id}/{token_address}/core-model endpoints."""
+"""Unit tests for the GET /v1/risk/{chain_id}/{token_address}/core-model endpoint."""
 
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -79,12 +78,12 @@ def client():
 
 
 # ---------------------------------------------------------------------------
-# GET /v1/risk/{asset_id}/core-model
+# GET /v1/risk/{chain_id}/{token_address}/core-model
 # ---------------------------------------------------------------------------
 
 
-def test_get_by_asset_id_returns_result(client: TestClient) -> None:
-    response = client.get(f"/v1/risk/{_ASSET_ID}/core-model")
+def test_get_by_address_returns_result(client: TestClient) -> None:
+    response = client.get(f"/v1/risk/{_CHAIN_ID}/{_TOKEN_ADDRESS}/core-model")
 
     assert response.status_code == 200
     body = response.json()
@@ -101,25 +100,17 @@ def test_get_by_asset_id_returns_result(client: TestClient) -> None:
     assert body["computed_at"] is not None
 
 
-def test_get_by_asset_id_returns_404_when_not_in_mapping(client: TestClient) -> None:
+def test_get_by_address_returns_404_when_no_result(client: TestClient) -> None:
     dep, svc = _override_service(result=None)
     svc.get_latest_result = AsyncMock(return_value=None)
     app.dependency_overrides[get_core_model_risk_service] = dep
 
-    response = client.get(f"/v1/risk/{_ASSET_ID}/core-model")
+    response = client.get(f"/v1/risk/{_CHAIN_ID}/{_TOKEN_ADDRESS}/core-model")
 
     assert response.status_code == 404
 
 
-def test_get_by_asset_id_returns_404_when_asset_unknown(client: TestClient) -> None:
-    app.dependency_overrides[get_receipt_token_lookup] = _override_lookup(info=None)
-
-    response = client.get(f"/v1/risk/{_ASSET_ID}/core-model")
-
-    assert response.status_code == 404
-
-
-def test_get_by_asset_id_handles_null_hhi(client: TestClient) -> None:
+def test_get_by_address_handles_null_hhi(client: TestClient) -> None:
     dep, _ = _override_service(
         result=CoreModelResult(
             market_key="sparklend_usdc",
@@ -136,25 +127,10 @@ def test_get_by_asset_id_handles_null_hhi(client: TestClient) -> None:
     )
     app.dependency_overrides[get_core_model_risk_service] = dep
 
-    response = client.get(f"/v1/risk/{_ASSET_ID}/core-model")
-
-    assert response.status_code == 200
-    assert response.json()["hhi"] is None
-
-
-# ---------------------------------------------------------------------------
-# GET /v1/risk/{chain_id}/{token_address}/core-model
-# ---------------------------------------------------------------------------
-
-
-def test_get_by_address_returns_result(client: TestClient) -> None:
     response = client.get(f"/v1/risk/{_CHAIN_ID}/{_TOKEN_ADDRESS}/core-model")
 
     assert response.status_code == 200
-    body = response.json()
-    assert body["asset_id"] == _ASSET_ID
-    assert body["market_key"] == "sparklend_usdc"
-    assert Decimal(body["crr_el_pct"]) == Decimal("12.5")
+    assert response.json()["hhi"] is None
 
 
 def test_get_by_address_returns_404_when_token_unknown(client: TestClient) -> None:
