@@ -2334,6 +2334,12 @@ export interface components {
      */
     TotalCapitalBucketResponse: {
       /**
+       * Assets Observed At
+       * @description When `assets_usd` was observed. Not `bucket_start`: the balance-sheet feed publishes one row per prime per day and the value is carried forward, so a figure can be up to a day older than the bucket serving it. Consumers should show this rather than implying the figure is current.
+       * @example 2026-08-19T00:00:00Z
+       */
+      assets_observed_at?: string | null;
+      /**
        * Assets Usd
        * @description Total assets the prime holds, as published upstream — the figure Sky's dashboard labels PRIME COLLATERAL. Reference mode only, and `null` outside the range the balance-sheet feed covers. STL computes no equivalent: its own asset total omits sources it does not index (PSM3, Curve LP valuations), so it is not served here.
        * @example 3190000000.00

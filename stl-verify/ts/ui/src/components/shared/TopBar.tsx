@@ -1,4 +1,5 @@
 import {
+  PageShell as DesignSystemPageShell,
   RangePicker,
   type RangePreset,
   StyledSelect,
@@ -132,77 +133,88 @@ export function TopBar({
     onRangeChange !== undefined;
 
   return (
-    <div
-      className={css({
-        width: '100%',
-        display: 'flex',
-        flexWrap: 'wrap',
-        alignItems: 'flex-end',
-        justifyContent: 'space-between',
-        gap: '4',
-      })}
-    >
-      <Tabs.Root
-        value={selectedView}
-        onValueChange={(details: { value: string }) => {
-          if (
-            details.value === 'allocation' ||
-            details.value === 'activities'
-          ) {
-            onViewChange(details.value);
-          }
-        }}
-        aria-label="Core navigation"
-        className={css({ flexShrink: 0 })}
-      >
-        <Tabs.List className={tabsListClassName}>
-          <Tabs.Trigger value="allocation" className={tabTriggerClassName}>
-            Allocations
-          </Tabs.Trigger>
-          <Tabs.Trigger value="activities" className={tabTriggerClassName}>
-            Activities
-          </Tabs.Trigger>
-        </Tabs.List>
-      </Tabs.Root>
-
+    // Wrapped in the content shell so the tabs line up with the card beneath
+    // rather than sitting flush to the viewport. The shell in this slot already
+    // starts inset from the content one, so only the remainder is added here —
+    // repeating the content Panel's full padding overshoots it.
+    <DesignSystemPageShell maxWidth="none">
       <div
-        className={flex({
-          gap: '3',
-          align: 'end',
-          wrap: 'wrap',
-          justify: 'flex-end',
+        className={css({
+          width: '100%',
+          display: 'flex',
+          flexWrap: 'wrap',
+          alignItems: 'flex-end',
+          justifyContent: 'space-between',
+          gap: '4',
+          // Asymmetric because the inset is: this slot already starts right of
+          // the content shell, so the left needs only the remainder, while the
+          // right needs the content Panel's padding in full.
+          paddingLeft: '1',
+          paddingRight: '5',
         })}
       >
-        <FilterField
-          ariaLabel="Filter by network"
-          disabled={networkOptions.length === 0}
-          onChange={onNetworkChange}
-          options={networkOptions}
-          placeholder="All networks"
-          value={selectedNetwork}
-        />
-        <FilterField
-          ariaLabel="Filter by protocol"
-          disabled={
-            (!hasSelectedPrime && selectedView === 'allocation') ||
-            protocolOptions.length === 0
-          }
-          onChange={onProtocolChange}
-          options={protocolOptions}
-          placeholder="All protocols"
-          value={selectedProtocol}
-        />
-        {showRangePicker ? (
-          <div className={rangeFieldClassName}>
-            <RangePicker
-              preset={rangePreset}
-              range={timeRange}
-              onChange={onRangeChange}
-            />
-          </div>
-        ) : null}
-        <SettingsMenu sections={[dataSource]} />
+        <Tabs.Root
+          value={selectedView}
+          onValueChange={(details: { value: string }) => {
+            if (
+              details.value === 'allocation' ||
+              details.value === 'activities'
+            ) {
+              onViewChange(details.value);
+            }
+          }}
+          aria-label="Core navigation"
+          className={css({ flexShrink: 0 })}
+        >
+          <Tabs.List className={tabsListClassName}>
+            <Tabs.Trigger value="allocation" className={tabTriggerClassName}>
+              Allocations
+            </Tabs.Trigger>
+            <Tabs.Trigger value="activities" className={tabTriggerClassName}>
+              Activities
+            </Tabs.Trigger>
+          </Tabs.List>
+        </Tabs.Root>
+
+        <div
+          className={flex({
+            gap: '3',
+            align: 'end',
+            wrap: 'wrap',
+            justify: 'flex-end',
+          })}
+        >
+          <FilterField
+            ariaLabel="Filter by network"
+            disabled={networkOptions.length === 0}
+            onChange={onNetworkChange}
+            options={networkOptions}
+            placeholder="All networks"
+            value={selectedNetwork}
+          />
+          <FilterField
+            ariaLabel="Filter by protocol"
+            disabled={
+              (!hasSelectedPrime && selectedView === 'allocation') ||
+              protocolOptions.length === 0
+            }
+            onChange={onProtocolChange}
+            options={protocolOptions}
+            placeholder="All protocols"
+            value={selectedProtocol}
+          />
+          {showRangePicker ? (
+            <div className={rangeFieldClassName}>
+              <RangePicker
+                preset={rangePreset}
+                range={timeRange}
+                onChange={onRangeChange}
+              />
+            </div>
+          ) : null}
+          <SettingsMenu sections={[dataSource]} />
+        </div>
       </div>
-    </div>
+    </DesignSystemPageShell>
   );
 }

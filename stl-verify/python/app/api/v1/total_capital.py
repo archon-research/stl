@@ -61,6 +61,16 @@ class TotalCapitalBucketResponse(BaseModel):
         ),
         examples=["0.9397"],
     )
+    assets_observed_at: datetime | None = Field(
+        default=None,
+        description=(
+            "When `assets_usd` was observed. Not `bucket_start`: the balance-sheet feed "
+            "publishes one row per prime per day and the value is carried forward, so a "
+            "figure can be up to a day older than the bucket serving it. Consumers should "
+            "show this rather than implying the figure is current."
+        ),
+        examples=["2026-08-19T00:00:00Z"],
+    )
 
 
 class TotalCapitalEnvelope(BaseModel):
@@ -144,6 +154,7 @@ async def list_prime_total_capital(
                     total_capital_usd=bucket.total_capital_usd,
                     assets_usd=bucket.assets_usd,
                     encumbrance_ratio=bucket.encumbrance_ratio,
+                    assets_observed_at=bucket.assets_observed_at,
                 )
                 for bucket in reference_buckets
             ],

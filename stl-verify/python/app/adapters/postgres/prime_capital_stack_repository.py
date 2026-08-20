@@ -39,7 +39,8 @@ _REFERENCE_CAPITAL_BUCKETS_SQL = text(
             pcs.total_risk_capital_usd,
             pcs.exposure_usd,
             pcs.encumbrance_ratio,
-            NULL::NUMERIC AS assets_usd
+            NULL::NUMERIC AS assets_usd,
+            NULL::TIMESTAMPTZ AS assets_observed_at
         FROM prime_capital_stack pcs
         WHERE pcs.prime_id = (SELECT prime_id FROM target)
         """
@@ -57,7 +58,8 @@ _REFERENCE_CAPITAL_BUCKETS_SQL = text(
             -- The balance-sheet feed reports no encumbrance; it is the monitor's
             -- figure, so history leaves it unobserved rather than deriving one.
             NULL::NUMERIC AS encumbrance_ratio,
-            pbs.assets_usd
+            pbs.assets_usd,
+            pbs.observed_at AS assets_observed_at
         FROM prime_reference_balance_sheet pbs
         WHERE pbs.prime_id = (SELECT prime_id FROM target)
         """
@@ -100,13 +102,14 @@ _REFERENCE_CAPITAL_BUCKETS_SQL = text(
             merged.total_risk_capital_usd,
             merged.exposure_usd,
             merged.encumbrance_ratio,
-            merged.assets_usd
+            merged.assets_usd,
+            merged.assets_observed_at
         FROM (
             SELECT observed_at, total_risk_capital_usd, exposure_usd, encumbrance_ratio, assets_usd,
-                   0 AS precedence FROM snapshots
+                   assets_observed_at, 0 AS precedence FROM snapshots
             UNION ALL
             SELECT observed_at, total_risk_capital_usd, exposure_usd, encumbrance_ratio, assets_usd,
-                   1 AS precedence FROM history
+                   assets_observed_at, 1 AS precedence FROM history
         ) merged
         ORDER BY merged.observed_at, merged.precedence
     ), prior AS (
@@ -134,7 +137,11 @@ _REFERENCE_CAPITAL_BUCKETS_SQL = text(
             (SELECT assets_usd FROM pre
               WHERE assets_usd IS NOT NULL
               ORDER BY observed_at DESC, precedence, processing_version DESC
-              LIMIT 1) AS assets_usd
+              LIMIT 1) AS assets_usd,
+            (SELECT observed_at FROM pre
+              WHERE assets_usd IS NOT NULL
+              ORDER BY observed_at DESC, precedence, processing_version DESC
+              LIMIT 1) AS assets_observed_at
     )
     SELECT
         time_bucket_gapfill(
@@ -171,7 +178,16 @@ _REFERENCE_CAPITAL_BUCKETS_SQL = text(
                 FILTER (WHERE corrected.assets_usd IS NOT NULL),
             (SELECT prior.assets_usd FROM prior),
             treat_null_as_missing => true
-        ) AS assets_usd
+        ) AS assets_usd,
+        -- The instant the assets figure above was observed, not the bucket it
+        -- was carried into. The feed is daily and the value is carried forward,
+        -- so without this a figure up to a day old renders as a current one.
+        locf(
+            last(corrected.assets_observed_at, corrected.observed_at)
+                FILTER (WHERE corrected.assets_observed_at IS NOT NULL),
+            (SELECT prior.assets_observed_at FROM prior),
+            treat_null_as_missing => true
+        ) AS assets_observed_at
     FROM corrected
     GROUP BY bucket_start
     ORDER BY bucket_start DESC
@@ -231,6 +247,7 @@ class PrimeCapitalStackRepository:
                 exposure_usd=_optional_decimal(row.exposure_usd, "exposure_usd"),
                 encumbrance_ratio=_optional_decimal(row.encumbrance_ratio, "encumbrance_ratio"),
                 assets_usd=_optional_decimal(row.assets_usd, "assets_usd"),
+                assets_observed_at=row.assets_observed_at,
             )
             for row in rows
         ]

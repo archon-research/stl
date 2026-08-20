@@ -95,6 +95,7 @@ type AllocationGridProps = {
   primeDebtErrorMessage: string | null;
   noticeMessage: string | null;
   primeCollateralUsd: number | null;
+  primeCollateralObservedAt: string | null;
 };
 
 export type ChartDatum = {
@@ -872,6 +873,7 @@ export function AllocationGrid({
   primeDebtErrorMessage,
   noticeMessage,
   primeCollateralUsd,
+  primeCollateralObservedAt,
 }: AllocationGridProps) {
   const [localSearchValue, setLocalSearchValue] = useState(searchValue);
 
@@ -1036,6 +1038,19 @@ export function AllocationGrid({
   const isEncumbranceBreaching =
     encumbranceRatio !== null &&
     encumbranceRatio >= ENCUMBRANCE_WARNING_THRESHOLD;
+  const unservedChains = riskCapital?.prime_unserved_chains ?? [];
+  // Absence has a cause worth naming: the ratio is required-over-total risk
+  // capital, so it cannot be computed without a total. And where chains go
+  // unserved the numerator is bounded, making the ratio a floor rather than a
+  // measurement — on a risk surface that difference matters.
+  const encumbranceCaption =
+    encumbranceRatio === null
+      ? 'Needs total risk capital, which is not yet observed'
+      : unservedChains.length > 0
+        ? `At least this, with ${unservedChains.length} chain${unservedChains.length === 1 ? '' : 's'} unserved`
+        : isEncumbranceBreaching
+          ? `Above the ${formatRatioPercent(ENCUMBRANCE_WARNING_THRESHOLD, 0)} warning level`
+          : `Warning at ${formatRatioPercent(ENCUMBRANCE_WARNING_THRESHOLD, 0)}`;
 
   return (
     <PageShell>
@@ -1318,7 +1333,9 @@ export function AllocationGrid({
                       className={css({ fontSize: 'sm', color: 'text.muted' })}
                     >
                       {REFERENCE_MODE
-                        ? 'Total assets as published by Sky'
+                        ? primeCollateralObservedAt === null
+                          ? 'Total assets as published by Sky'
+                          : `As published by Sky · ${formatFreshnessLabel(primeCollateralObservedAt)}`
                         : 'STL-indexed positions · excludes PSM3 and unpriced LP'}
                     </div>
                     <MetricCardTrend
@@ -1331,7 +1348,7 @@ export function AllocationGrid({
               />
             ) : null}
 
-            {riskCapital && encumbranceRatio !== null ? (
+            {riskCapital ? (
               <SummaryMetric
                 className={metricsCardClassName}
                 label="Encumbrance"
@@ -1346,9 +1363,7 @@ export function AllocationGrid({
                           : 'text.muted',
                       })}
                     >
-                      {isEncumbranceBreaching
-                        ? `Above the ${formatRatioPercent(ENCUMBRANCE_WARNING_THRESHOLD)} warning level`
-                        : `Warning at ${formatRatioPercent(ENCUMBRANCE_WARNING_THRESHOLD)}`}
+                      {encumbranceCaption}
                     </div>
                     <MetricCardTrend
                       chart={encumbranceChart}

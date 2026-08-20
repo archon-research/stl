@@ -866,6 +866,15 @@ function App() {
     [totalCapitalBuckets],
   );
 
+  // When the reference collateral figure was observed, which is not the bucket
+  // serving it: the feed is daily and the value is carried forward, so without
+  // showing this a figure up to a day old is indistinguishable from a fresh one.
+  const primeCollateralObservedAt = REFERENCE_MODE
+    ? (totalCapitalBuckets
+        .filter((bucket) => bucket.assets_observed_at != null)
+        .at(-1)?.assets_observed_at ?? null)
+    : null;
+
   // Reference mode publishes a real total-assets figure. Self mode has no
   // equivalent — STL does not index PSM3 and prices no Curve LP position — so
   // it shows what STL actually holds records for, captioned as such.
@@ -1128,6 +1137,7 @@ function App() {
                 primeDebtErrorMessage={primeDebtErrorMessage}
                 noticeMessage={unknownPrimeMessage}
                 primeCollateralUsd={primeCollateralValue}
+                primeCollateralObservedAt={primeCollateralObservedAt}
               />
             ) : (
               <ActivityFeed
