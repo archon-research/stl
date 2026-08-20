@@ -52,6 +52,30 @@ Off-chain sources cannot be replayed and we do not claim otherwise. Off-chain ta
 same columns and rules for uniformity (a transform bug on stored off-chain rows can still be
 corrected as a new version), but no archive of raw responses is required.
 
+**Reproduction fidelity.** Bit-for-bit is the claim only when the reproduction runs the
+retained image (§2). A rebuild from `git_hash` — different toolchain, dependency or base-image
+state — must match within a documented numerical tolerance (value TBD with the model owners;
+PRD RP-4.4). The tolerance acknowledges the float paths in the risk models; the retained image
+is the exact path.
+
+**Point-in-time boundary.** "Point in time" here means *any recorded calculation*: the snapshot
+(§5) reproduces exactly what a calculation saw, at any later time. Arbitrary wall-clock as-of
+queries over the whole database are not a goal of this ADR; if they ever become one, the
+`ingested_at` watermark (Alternatives) is the designed upgrade path. PRD RP-4.1 is being
+aligned to this wording.
+
+**Cutover.** The guarantees in this ADR apply to rows and calculations from the cutover date
+(TBD) onward. Pre-tracking data (`build_id = 0`, `NULL ingest_xid`, config history overwritten
+in place before §4, archive gaps) is explicitly out of scope and cannot be brought into scope
+retroactively.
+
+**Scope: reproducibility only.** Auditability controls are deliberately out of scope and are
+covered by a separate ADR: actor identity and per-service credentials, tamper-evident
+hashing/anchoring, storage-level WORM and retention, correction approvals, audit/access
+logging, evidence export, and GDPR handling. This ADR leaves the seams that ADR attaches to:
+`writer_run` is where a principal lands, `processing_version_log` is insert-only and extensible
+with approval fields, and `manifest_hash` is the hook for signing/anchoring.
+
 ## Decision
 
 ### 1. Data and config tables are append-only, and Postgres enforces it
@@ -59,6 +83,16 @@ corrected as a new version), but no archive of raw responses is required.
 Applies to every table classified `raw_pipeline`, `dimension` or `config` in
 `data_quality/schemamaster/schema_master.json`. Operational tables (`block_states`, queues,
 watermarks, transform queues) are exempt.
+
+Governance must be **complete** to mean anything: the 36 tables currently in schemamaster's
+`ignore_tables` — the `curve_*` and `uniswap_v3_*` pipelines, the enrichment layer
+(`entity_master`, `entity_ref_codes`, `security_master`, `security_instrument_bridge`,
+`position_classification`, `position_entity_link`) and the `ref_*` vocabularies — are
+classified and brought under the same rules. The `transformed.*` read models are governed too:
+their refresh path today rewrites rows in place (`ON CONFLICT … DO UPDATE … WHERE IS DISTINCT
+FROM`), which is incompatible with §5, so it is converted to append-only (new rows,
+latest-wins) before any calculation may read `transformed.*`; until then calculations read the
+raw governed tables only.
 
 - **Privileges**: services connect as an application role with `SELECT, INSERT` only on these
   tables. Migrations run as the owner role. This is zero-cost and verifiable from
@@ -236,7 +270,15 @@ none of these problems, so it is the mechanism:
 - **End-to-end self-check:** the manifest job recomputes the calculation from the manifest it
   just wrote and compares with the recorded output; a mismatch (a read outside the transaction,
   a non-governed input, nondeterminism) raises an alert. This guards the whole class, not just
-  the cases listed under Threats.
+  the cases listed under Threats. A scheduled assurance job extends the same check backwards:
+  it samples historical calculation records, regenerates each manifest from the recorded
+  snapshot, re-runs the calculation at the recorded code identity, and alerts on drift
+  (PRD RP-4.8) — reproducibility is verified continuously, not only at write time.
+- **Replay is read-only by construction** (PRD RP-4.7): replay and manifest generation run
+  under a read-only role on the production cluster or any physical replica. Where isolation
+  from production is required, the environment is created by physical fork or physical
+  restore, never logical dump (see Threats: a logical restore resets the xid space). The
+  read-only replay role and the replica/fork runbook are Migration Plan items.
 
 The snapshot is **not** the third-party deliverable — it only resolves against our database and
 nobody outside ever sees it. It is what lets us generate the calculation manifest (§6) exactly,
@@ -337,7 +379,8 @@ models / `transformed.*`), which encode `block_version DESC, processing_version 
 tables are for audit queries. Existing version-blind aggregates (`protocol_event` and
 `allocation_position` time buckets, `prime_debt` list) are fixed to read through those. A
 schemamaster check flags application SQL that orders a governed table without
-`processing_version`.
+`processing_version`. The `transformed.*` read models qualify as a canonical read surface for
+calculations only once converted to append-only under §1.
 
 ### 8. Data-point recipe: the unit a single data point reproduces from
 
@@ -424,8 +467,40 @@ Ordered by information lost per day of delay; 1–3 make reproducibility *possib
 6. Registry retention policy removed for production repositories and `docker_sha` populated at
    registration (§2) — small, do early. Later: replay tooling (`replay row`, `replay calc`),
    reproducible builds.
+7. **Governance completeness and replay access** (§1, §5): classify the `ignore_tables` set in
+   `schema_master.json`, convert the `transformed.*` refresh path to append-only, create the
+   read-only replay role, and document the physical-fork/restore (never logical dump) rule.
 
 Existing rows keep `processing_version` and `build_id`, with `NULL ingest_xid` (always visible) and `NULL`/cutover `ingested_at`; no other backfill.
+
+## PRD Traceability
+
+This ADR implements the reproducibility half of the *STL Auditability & Reproducibility PRD*;
+auditability requirements are deferred to a separate ADR. Per-requirement mapping:
+
+| PRD requirement | Where in this ADR |
+|---|---|
+| AR-1.1 append-only stores | §1 |
+| AR-1.4 retraction as new append | §3 (corrections are new versions) |
+| PR-2.2 software version | §2 (`build_registry`: git hash, service, image digest) |
+| PR-2.3 input lineage | §6 manifest, §8 recipe |
+| PR-2.4 run/config identity | §2 (`writer_run`) |
+| PR-2.6 provenance immutability | §1 (registry/log tables are governed, insert-only) |
+| PR-2.7 UTC timestamps | §5 (`timestamptz`, `TimeZone = 'UTC'`, RFC 3339); clock sync itself: auditability ADR |
+| CR-3.1/3.2 supersession by reference | §3 — identity is natural key + `block_version` + `processing_version`; the supersession chain is the version ordering plus `processing_version_log`; there are no surrogate record IDs |
+| CR-3.3 correction reason | §3 (`ticket`, `reason`); approval workflow: auditability ADR |
+| CR-3.4 correction history | §1/§7 (raw tables keep every version) |
+| CR-3.5 restatement vs valid-time change | §4 (config); `block_version` (chain) vs `processing_version` (restatement) |
+| CR-3.6 original vs corrected at a past time | §5 snapshot + version filter |
+| RP-4.1 as-of queries | §5, bounded to recorded calculations (Point-in-time boundary) |
+| RP-4.2 reproduction manifest | §6 |
+| RP-4.3 artifact retention | §2 (production images retained indefinitely) |
+| RP-4.4 re-execution fidelity | Goal and Boundaries (bit-for-bit via retained image; tolerance TBD otherwise) |
+| RP-4.5 determinism | §6 rules + Threats (total ordering; no wall-clock/env/cache) |
+| RP-4.6 output ↔ manifest link | §6 (record id in response; `manifest_key`/`manifest_hash`) |
+| RP-4.7 isolated re-execution | §5 (read-only replay; fork-not-dump) |
+| RP-4.8 periodic re-verification | §5 (self-check + historical sampling) |
+| AR-1.2/1.3/1.5/1.6/1.7, PR-2.1/2.5, NFR-1..8, DP-1..10 | Auditability ADR (separate) |
 
 ## Alternatives Considered
 
