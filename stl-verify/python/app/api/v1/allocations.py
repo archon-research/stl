@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from collections.abc import Callable
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Annotated, Literal
@@ -15,7 +16,7 @@ from app.api._validators import (
     OptionalTxHashParam,
     ProxyAddressPathParam,
 )
-from app.api.deps import get_engine
+from app.api.deps import get_engine, get_reference_risk_capital_service_factory
 from app.api.time_series import TimeSeriesWindow, apply_cache_control, build_window, get_time_series_query_params
 from app.config import get_settings
 from app.domain.entities.allocation import (
@@ -23,12 +24,16 @@ from app.domain.entities.allocation import (
     DirectAssetHolding,
     EthAddress,
     ReceiptTokenPosition,
+    as_address,
 )
 from app.domain.entities.allocation_category import AllocationCategory
+from app.domain.entities.reference_risk_capital import ReferenceAllocation
+from app.domain.exceptions import ReferenceDataUnavailableError
 from app.domain.serialization import PlainDecimal
 from app.domain.time_series import TimeSeriesQuery, enforce_filter_for_window
 from app.services.allocation_category_service import AllocationCategoryService
 from app.services.allocation_service import AllocationService
+from app.services.reference_risk_capital_service import ReferenceRiskCapitalService
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -167,8 +172,13 @@ class AllocationResponse(BaseModel):
         description="Protocol the position is held in. `null` for direct holdings (no registered wrapper).",
         examples=["aave-v3"],
     )
-    balance: PlainDecimal = Field(
-        description="Balance held by the prime, in token units. Decimal serialized as a JSON string.",
+    balance: PlainDecimal | None = Field(
+        description=(
+            "Balance held by the prime, in token units. Decimal serialized as a JSON string. "
+            "Always present in self mode. Always `null` under `reference=true`: the upstream Star "
+            "monitor reports USD exposure only and never a token quantity, so there is no balance "
+            "to report — read `amount_usd` instead."
+        ),
         examples=["1234567.89"],
     )
     amount_usd: PlainDecimal | None = Field(
@@ -648,7 +658,19 @@ async def list_protocols(service: AllocationService = Depends(_get_service)):
 )
 async def list_allocations(
     prime_id: ProxyAddressPathParam,
+    reference: bool = Query(
+        False,
+        description=(
+            "List the positions Sky's Star monitor reports for this prime instead of the ones STL "
+            "indexes on-chain. The row shape is unchanged, but every row is prime-scoped "
+            '(`scope="prime"`) because the monitor reports per prime, not per proxy — so a client '
+            "fanning out across a prime's proxies must dedupe rather than sum. `balance` is `null` "
+            "throughout: the monitor reports USD exposure only. Returns `404` when the monitor does "
+            "not track the prime and `502` when it cannot be read."
+        ),
+    ),
     service: AllocationService = Depends(_get_service),
+    reference_services: Callable[[], ReferenceRiskCapitalService] = Depends(get_reference_risk_capital_service_factory),
 ):
     """Return current allocations for ``prime_id``.
 
@@ -671,6 +693,9 @@ async def list_allocations(
     prime_address = EthAddress(prime_id)
     if not await service.prime_exists(prime_address):
         raise HTTPException(status_code=404, detail="Prime not found")
+
+    if reference:
+        return await _reference_allocations(prime_address, reference_services())
 
     custody_applies = await _custody_applies(prime_address, service)
     positions, direct, custody = await asyncio.gather(
@@ -711,6 +736,64 @@ async def _custody_applies(prime_address: EthAddress, service: AllocationService
         )
         return False
     return primary.lower() == str(prime_address).lower()
+
+
+async def _reference_allocations(
+    prime_address: EthAddress, reference_service: ReferenceRiskCapitalService
+) -> list[AllocationResponse]:
+    """List the positions the upstream monitor reports for this prime."""
+    try:
+        snapshot = await reference_service.get(prime_address)
+
+        if snapshot is None:
+            # Not a ReferenceDataUnavailableError, so this propagates past the
+            # handler below rather than being rewritten to a 502.
+            raise HTTPException(
+                status_code=404,
+                detail="The upstream Star monitor does not track this prime, so it reports no allocations",
+            )
+
+        # The projection stays inside the guard: _reference_allocation_row
+        # raises ReferenceDataUnavailableError for an unmappable network, which
+        # is still an upstream-data problem (502), not a server fault (500).
+        category_service = AllocationCategoryService()
+        return [_reference_allocation_row(row, category_service) for row in snapshot.per_allocation]
+    except ReferenceDataUnavailableError as exc:
+        raise HTTPException(status_code=502, detail=f"Reference allocations upstream unavailable: {exc}") from exc
+
+
+def _reference_allocation_row(
+    row: ReferenceAllocation, category_service: AllocationCategoryService
+) -> AllocationResponse:
+    """Project an upstream position onto the allocation model."""
+    if row.chain_id is None:
+        # 0 is this endpoint's off-chain-custody sentinel, so a network STL
+        # cannot map has no representable id: serving one would file an EVM
+        # position as custodied BTC.
+        raise ReferenceDataUnavailableError(
+            f"Star monitor reported a position on network {row.network!r}, which maps to no known chain"
+        )
+
+    return AllocationResponse(
+        chain_id=row.chain_id,
+        receipt_token_id=row.receipt_token_id,
+        receipt_token_address=row.token_address if as_address(row.token_address) else None,
+        # Both or neither, per the model's invariant. Upstream names the loan
+        # token but carries no registry id for it, and resolving one here would
+        # be a second lookup for a field `underlying_symbol` already identifies.
+        underlying_token_id=None,
+        underlying_token_address=None,
+        symbol=row.symbol,
+        underlying_symbol=row.loan_token_symbol,
+        protocol_name=row.protocol_name,
+        balance=None,
+        amount_usd=row.exposure_usd,
+        latest_activity_at=None,
+        latest_activity_action=None,
+        latest_activity_amount=None,
+        category=category_service.classify(row.protocol_name, row.symbol),
+        scope="prime",
+    )
 
 
 def _receipt_token_row(

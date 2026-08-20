@@ -23,12 +23,11 @@ var sharedPool *pgxpool.Pool
 
 func TestMain(m *testing.M) {
 	dsn, cleanup := testutil.StartTimescaleDBForMain()
-	testutil.EnsurePublicMigrations(dsn)
-	sharedPool = testutil.ConnectPoolForMain(dsn)
+	sharedPool = testutil.SetupDBForMain(dsn, "test_gen_transformed")
 
 	code := m.Run()
 
-	sharedPool.Close()
+	testutil.CleanupDBForMain(dsn, sharedPool, "test_gen_transformed")
 	cleanup()
 	code = testutil.CheckGoroutineLeaks(code)
 	os.Exit(code)

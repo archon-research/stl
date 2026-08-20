@@ -215,10 +215,12 @@ jobs:
     needs: update-staging
     if: ${{ inputs.push && github.event_name != 'workflow_dispatch' }}
     runs-on: ubuntu-latest
-    # Raised 10 -> 20 min: a brand-new service's first rollout can sit in
-    # ImagePullBackOff (kubelet backoff up to ~5 min) until its first image
-    # lands, so this job must outlast the argocd-wait timeout below. See ORB-313.
-    timeout-minutes: 20
+    # Must outlast the retry budget of the grace window below, or the job dies
+    # of its own timeout mid-retry and skips the prod promotion -- the exact
+    # failure this is meant to prevent. Worst case: two fast Degraded exits
+    # (~35s each) + two 120s holds + a final attempt that runs the full 900s
+    # argocd-wait timeout ~= 20.2 min, so 20 was already too tight. See ORB-313.
+    timeout-minutes: 30
     concurrency:
       group: deploy-wait-staging
       cancel-in-progress: false
@@ -233,13 +235,68 @@ jobs:
           path: .github-actions
           persist-credentials: false
 
-      - uses: ./.github-actions/argocd-wait
+      # Grace window for a Degraded first rollout.
+      #
+      # argocd-wait fail-fasts on health=Degraded -- it exits 1 on the first
+      # Degraded reading instead of waiting out its own `timeout`. So the ORB-313
+      # timeout bumps never engage for the case they were added for: a brand-new
+      # service reports Degraded while its first image is still landing. In #721
+      # this gate failed 31s in ("app=stl-staging health=Degraded sync=Synced"),
+      # the pod went Ready 50s later, and the prod promotion was skipped anyway.
+      #
+      # Retrying across a ~5min window absorbs that, since kubelet image-pull
+      # backoff tops out around 5min. Only the final attempt is fatal, so a
+      # genuinely broken rollout still fails the gate (just later).
+      #
+      # Collapse these three steps back into one once argocd-wait treats
+      # Degraded as non-terminal until its timeout (fix belongs in
+      # archon-research/github-actions).
+      - id: wait-attempt-1
+        continue-on-error: true
+        uses: ./.github-actions/argocd-wait
         with:
           app: stl-staging
           server: http://argocd-prod-archon
-          # 900s (was 300s): tolerate a slow first rollout of a brand-new
-          # service image (ImagePullBackOff race) without hard-failing the
-          # gate and silently skipping prod promotion. See ORB-313.
+          # Covers a genuinely slow (Progressing) rollout. It does NOT cover a
+          # Degraded one -- see the grace-window comment above.
+          timeout: "900"
+          min-wait: "30"
+          aws-role-arn: arn:aws:iam::030797368798:role/archonprod-github-actions-argocd-wait
+          tailscale-secret-id: archon-prod-argocd-ci-tailscale-oauth
+          argocd-token-secret-id: archon-prod-argocd-ci-token
+
+      - name: Degraded — hold before retry
+        if: steps.wait-attempt-1.outcome == 'failure'
+        run: sleep 120
+
+      - id: wait-attempt-2
+        if: steps.wait-attempt-1.outcome == 'failure'
+        continue-on-error: true
+        uses: ./.github-actions/argocd-wait
+        with:
+          app: stl-staging
+          server: http://argocd-prod-archon
+          # Covers a genuinely slow (Progressing) rollout. It does NOT cover a
+          # Degraded one -- see the grace-window comment above.
+          timeout: "900"
+          min-wait: "30"
+          aws-role-arn: arn:aws:iam::030797368798:role/archonprod-github-actions-argocd-wait
+          tailscale-secret-id: archon-prod-argocd-ci-tailscale-oauth
+          argocd-token-secret-id: archon-prod-argocd-ci-token
+
+      - name: Still degraded — final hold
+        if: steps.wait-attempt-1.outcome == 'failure' && steps.wait-attempt-2.outcome == 'failure'
+        run: sleep 120
+
+      # No continue-on-error: this attempt decides the gate.
+      - id: wait-attempt-3
+        if: steps.wait-attempt-1.outcome == 'failure' && steps.wait-attempt-2.outcome == 'failure'
+        uses: ./.github-actions/argocd-wait
+        with:
+          app: stl-staging
+          server: http://argocd-prod-archon
+          # Covers a genuinely slow (Progressing) rollout. It does NOT cover a
+          # Degraded one -- see the grace-window comment above.
           timeout: "900"
           min-wait: "30"
           aws-role-arn: arn:aws:iam::030797368798:role/archonprod-github-actions-argocd-wait
@@ -262,7 +319,7 @@ jobs:
       PROD_REGISTRY: 030797368798.dkr.ecr.eu-west-1.amazonaws.com
       PROD_ROLE_ARN: arn:aws:iam::030797368798:role/stl-sentinelprod-github-actions-ecr
       SERVICES: watcher backup-worker oracle-price-worker sparklend-position-tracker morpho-indexer allocation-tracker prime-debt-indexer psm3-indexer dex-indexer fluid-vault-indexer cex-orderbook-indexer migrate python-api
-      CRONJOBS: anchorage-indexer maple-graphql-indexer offchain-price-indexer watcher-data-validator transform-worker transform-bootstrap offchain-price-backfill
+      CRONJOBS: anchorage-indexer maple-graphql-indexer offchain-price-indexer watcher-data-validator transform-worker transform-bootstrap offchain-price-backfill reference-capital-indexer reference-capital-backfill
     permissions:
       id-token: write
     steps:

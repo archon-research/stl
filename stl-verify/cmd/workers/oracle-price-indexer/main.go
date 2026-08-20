@@ -13,10 +13,7 @@ import (
 	"strconv"
 	"syscall"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
-
+	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/cache"
@@ -144,9 +141,9 @@ func run(ctx context.Context, args []string) error {
 
 	logger.Info("starting oracle price worker", "queue", cfg.queueURL, "chainID", cfg.chainID)
 
-	awsCfg, err := awsconfig.LoadDefaultConfig(ctx,
-		awsconfig.WithRegion(env.Get("AWS_REGION", "eu-west-1")),
-	)
+	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{
+		StaticCredentialsFromEnv: true,
+	})
 	if err != nil {
 		return fmt.Errorf("loading AWS config: %w", err)
 	}
@@ -158,6 +155,7 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("creating SQS consumer: %w", err)
 	}
+	defer consumer.Close()
 
 	cacheCfg := redisadapter.ConfigDefaults()
 	cacheCfg.Addr = cfg.redisAddr
@@ -172,14 +170,7 @@ func run(ctx context.Context, args []string) error {
 	}
 	logger.Info("Redis connected", "addr", cfg.redisAddr)
 
-	s3Opts := []func(*awss3.Options){}
-	if s3Endpoint := env.Get("AWS_S3_ENDPOINT", ""); s3Endpoint != "" {
-		s3Opts = append(s3Opts, func(o *awss3.Options) {
-			o.BaseEndpoint = aws.String(s3Endpoint)
-			o.UsePathStyle = true
-		})
-	}
-	s3Reader := s3adapter.NewReaderWithOptions(awsCfg, logger, s3Opts...)
+	s3Reader := s3adapter.NewReaderFromEnv(awsCfg, logger)
 	cacheReader, err := cache.NewReaderWithFallback(blockCache, s3Reader, cfg.chainID, cfg.deployEnv, cfg.s3Bucket, logger)
 	if err != nil {
 		return fmt.Errorf("creating cache reader: %w", err)

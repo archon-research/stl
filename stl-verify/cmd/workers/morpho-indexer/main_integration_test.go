@@ -91,7 +91,7 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	ctx := context.Background()
 
-	_, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	_, dbURL, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
 	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -111,9 +111,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 		deployEnv = "test"
 	)
 
-	if _, err := s3Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
-		t.Fatalf("create S3 bucket: %v", err)
-	}
+	testutil.EnsureBucket(t, ctx, s3Client, bucket)
 
 	t.Setenv("BUILD_GIT_HASH", "test")
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
@@ -178,11 +176,11 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 	bgCtx := context.Background()
 
-	pool, dbURL, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, dbURL, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	// Morpho Blue is deployed at block 18883124 on Ethereum; use a block above it.
-	const blockNum = int64(19000000)
+	blockNum := testutil.ReservedBlock(t, "morpho-indexer")
 	const version = 1
 
 	// Seed Redis with an AccrueInterest receipt so the worker's cache read returns
@@ -191,9 +189,7 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 
 	s3Client := testutil.NewS3Client(t, bgCtx, sharedLocalStackCfg)
 	for _, b := range []string{testBucket, archiveBucket} {
-		if _, err := s3Client.CreateBucket(bgCtx, &s3.CreateBucketInput{Bucket: aws.String(b)}); err != nil {
-			t.Fatalf("create bucket %s: %v", b, err)
-		}
+		testutil.EnsureBucket(t, bgCtx, s3Client, b)
 	}
 
 	rpcServer := buildMorphoAccrueInterestMockRPC(t)

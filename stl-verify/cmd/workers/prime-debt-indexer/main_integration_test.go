@@ -260,7 +260,7 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	ctx := context.Background()
 
-	pool, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, dbURL, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
 	if _, err := pool.Exec(ctx, `TRUNCATE prime CASCADE`); err != nil {
@@ -354,7 +354,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 func TestRunIntegration_NoPrimesInDB(t *testing.T) {
 	ctx := context.Background()
 
-	pool, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, dbURL, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
 	if _, err := pool.Exec(ctx, `TRUNCATE prime CASCADE`); err != nil {
@@ -395,7 +395,7 @@ func TestRunIntegration_NoPrimesInDB(t *testing.T) {
 func TestRunIntegration_MultipleVaults(t *testing.T) {
 	ctx := context.Background()
 
-	pool, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, dbURL, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
 	const vatAddr = "0x35d1b3f3d7966a1dfe207aa4514c12a259a0492b"
@@ -513,7 +513,7 @@ func TestRunIntegration_MultipleVaults(t *testing.T) {
 func TestRunIntegration_SnapshotAccumulation(t *testing.T) {
 	ctx := context.Background()
 
-	pool, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, dbURL, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
 	const vatAddr = "0x35d1b3f3d7966a1dfe207aa4514c12a259a0492b"
@@ -601,7 +601,7 @@ func TestRunIntegration_SnapshotAccumulation(t *testing.T) {
 func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 	ctx := context.Background()
 
-	pool, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, dbURL, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
 	const vatAddr = "0x35d1b3f3d7966a1dfe207aa4514c12a259a0492b"
@@ -624,9 +624,7 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 
 	// Create the archive bucket so the fire-and-forget archiver has somewhere to write.
 	s3Client := testutil.NewS3Client(t, ctx, sharedLocalStackCfg)
-	if _, err := s3Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(archiveBucket)}); err != nil {
-		t.Fatalf("create bucket %s: %v", archiveBucket, err)
-	}
+	testutil.EnsureBucket(t, ctx, s3Client, archiveBucket)
 
 	sqsServer, sqsState := testutil.StartMockSQS(t)
 	defer sqsServer.Close()
@@ -730,7 +728,7 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 }
 
 func TestRunIntegration_InvalidVatFlag(t *testing.T) {
-	_, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	_, dbURL, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
 	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

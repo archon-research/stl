@@ -13,8 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
@@ -86,7 +84,7 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	ctx := context.Background()
 
-	_, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	_, dbURL, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
 	rpcServer := buildEmptyResolverMockRPC(t)
@@ -96,9 +94,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	defer sqsServer.Close()
 
 	s3Client := testutil.NewS3Client(t, ctx, sharedLocalStackCfg)
-	if _, err := s3Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(testBucket)}); err != nil {
-		t.Fatalf("create S3 bucket: %v", err)
-	}
+	testutil.EnsureBucket(t, ctx, s3Client, testBucket)
 
 	t.Setenv("BUILD_GIT_HASH", "test")
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")

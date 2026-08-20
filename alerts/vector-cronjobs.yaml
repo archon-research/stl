@@ -27,9 +27,10 @@
 # template's `Cluster:` header is populated. `namespace` is a static rule label
 # (mimir-rules-sync lint forbids `cluster`/`env` as static labels but allows it).
 #
-# Two services are EXCLUDED by service_name: maple-graphql-indexer, which has
+# Three services are EXCLUDED by service_name: maple-graphql-indexer, which has
 # richer dedicated rules in vector-indexers.yaml (VEC-320), and
-# offchain-price-backfill, which is on-demand — see VectorCronjobAllRunsFailing
+# offchain-price-backfill and reference-capital-backfill, which are on-demand —
+# see VectorCronjobAllRunsFailing
 # for why "no successes in an hour" is its healthy state. Every other cronjob,
 # including any added later, is covered automatically; on-demand workers are
 # covered by VectorCronjobRunFailing and VectorOnDemandWorkerDown instead.
@@ -90,7 +91,8 @@ groups:
         # Errors > 0 AND zero successes over 1h => the job is consistently
         # failing, not flapping.
         #
-        # On-demand jobs (temporal.RunWorker — offchain-price-backfill) are excluded:
+        # On-demand jobs (temporal.RunWorker — offchain-price-backfill,
+        # reference-capital-backfill) are excluded:
         # they run only when a human triggers them, so "zero successes in the last
         # hour" is their normal healthy state and this rule's premise does not hold.
         # One deliberately-failed manual run would otherwise page the operator who
@@ -108,6 +110,7 @@ groups:
                 status="error",
                 service_name!="maple-graphql-indexer",
                 service_name!="offchain-price-backfill",
+                service_name!="reference-capital-backfill",
                 k8s_namespace_name="vector"
               }[1h])
             ) > 0
@@ -119,6 +122,7 @@ groups:
                 status="success",
                 service_name!="maple-graphql-indexer",
                 service_name!="offchain-price-backfill",
+                service_name!="reference-capital-backfill",
                 k8s_namespace_name="vector"
               }[1h])
             ) == 0
@@ -170,7 +174,7 @@ groups:
             max by (cluster, deployment) (
               kube_deployment_status_replicas_available{
                 namespace="vector",
-                deployment=~"spark-anchorage-indexer|offchain-price-indexer|watcher-data-validator|transform-worker"
+                deployment=~"spark-anchorage-indexer|offchain-price-indexer|watcher-data-validator|transform-worker|reference-capital-indexer"
               }
             ) < 1
           )
@@ -178,7 +182,7 @@ groups:
             max by (cluster, deployment) (
               kube_deployment_spec_replicas{
                 namespace="vector",
-                deployment=~"spark-anchorage-indexer|offchain-price-indexer|watcher-data-validator|transform-worker"
+                deployment=~"spark-anchorage-indexer|offchain-price-indexer|watcher-data-validator|transform-worker|reference-capital-indexer"
               }
             ) > 0
           )
@@ -215,7 +219,7 @@ groups:
             max by (cluster, deployment) (
               kube_deployment_status_replicas_available{
                 namespace="vector",
-                deployment=~"offchain-price-backfill"
+                deployment=~"offchain-price-backfill|reference-capital-backfill"
               }
             ) < 1
           )
@@ -223,7 +227,7 @@ groups:
             max by (cluster, deployment) (
               kube_deployment_spec_replicas{
                 namespace="vector",
-                deployment=~"offchain-price-backfill"
+                deployment=~"offchain-price-backfill|reference-capital-backfill"
               }
             ) > 0
           )
@@ -355,3 +359,69 @@ groups:
             or a bug). An in-place raw UPDATE changes no count and is not caught here.
             Check `SELECT * FROM transformed._parity_status WHERE source = '{{ $labels.table }}'`.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-transform-worker.md#vectortransformparitydrift
+
+      # -----------------------------------------------------------------------
+      # WARNING — the reference capital series stopped advancing
+      # -----------------------------------------------------------------------
+      # reference-capital-indexer is the only writer of forward reference capital.
+      # Sky's Star monitor publishes no history, so a cycle that records nothing
+      # leaves a hole that can never be backfilled — and the read path gap-fills
+      # with locf, so a stalled series keeps serving its last value as current.
+      # Neither rule below is covered by the generic cronjob rules above: both
+      # failures happen on runs that report success.
+      - alert: VectorReferenceCapitalIndexerWritesZero
+        # Cycling but persisting nothing. The monitor covers every tracked prime
+        # today, so a healthy cycle always writes; zero means it returned an
+        # empty-but-successful payload. Gated on "cycling AND zero" so it does
+        # not duplicate the worker-down rules when the worker is simply down.
+        expr: |
+          (
+            sum by (cluster) (
+              rate(cronjob_runs_total{service_name="reference-capital-indexer", status="success", k8s_namespace_name="vector"}[1h])
+            ) > 0
+          )
+          and
+          (
+            sum by (cluster) (
+              increase(reference_capital_sync_snapshots_written_total{k8s_namespace_name="vector"}[1h])
+            ) == 0
+          )
+        for: 30m
+        labels:
+          team: vector
+          severity: warning
+          component: reference-capital-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector reference-capital-indexer wrote 0 reference snapshots"
+          description: |
+            `prime_capital_stack` received 0 rows over 1h while cycles succeeded.
+            The reference series has stopped advancing, and
+            `/v1/primes/{id}/total-capital?reference=true` keeps serving its last
+            value as current rather than going null. This history cannot be
+            backfilled afterwards — the monitor publishes none.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorreferencecapitalindexerwriteszero
+
+      - alert: VectorReferenceCapitalIndexerPrimeUncovered
+        # A prime STL tracks that the monitor stopped covering. The cycle still
+        # succeeds and still writes every other prime, so neither the error rules
+        # nor WritesZero above catch it — only this one prime's series freezes.
+        expr: |
+          sum by (star, cluster) (
+            increase(reference_capital_sync_primes_uncovered_total{k8s_namespace_name="vector"}[1h])
+          ) > 0
+        for: 30m
+        labels:
+          team: vector
+          severity: warning
+          component: reference-capital-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector reference-capital-indexer: prime `{{ $labels.star }}` not covered upstream"
+          description: |
+            The Star monitor did not report `{{ $labels.star }}` on any cycle in
+            the last hour, so its reference series is frozen while every other
+            prime advances. Either the monitor dropped the prime, or its name
+            drifted from the axis-synome contract STL tracks. Confirm against the
+            monitor's `/primes/` route before assuming an outage.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorreferencecapitalindexerprimeuncovered

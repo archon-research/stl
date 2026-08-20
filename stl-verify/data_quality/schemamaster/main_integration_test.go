@@ -12,17 +12,16 @@ import (
 )
 
 // The gates read catalog tables scoped to table_schema = 'public' and never
-// write, so they need the migrated public schema itself, not a per-test schema.
+// write, so they run against one migrated database for the whole package.
 var sharedPool *pgxpool.Pool
 
 func TestMain(m *testing.M) {
 	dsn, cleanup := testutil.StartTimescaleDBForMain()
-	testutil.EnsurePublicMigrations(dsn)
-	sharedPool = testutil.ConnectPoolForMain(dsn)
+	sharedPool = testutil.SetupDBForMain(dsn, "test_schemamaster")
 
 	code := m.Run()
 
-	sharedPool.Close()
+	testutil.CleanupDBForMain(dsn, sharedPool, "test_schemamaster")
 	cleanup()
 	code = testutil.CheckGoroutineLeaks(code)
 	os.Exit(code)

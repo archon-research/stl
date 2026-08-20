@@ -15,6 +15,7 @@ from app.adapters.postgres.aave_like_liquidation_params_repository import AaveLi
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
 from app.adapters.postgres.backed_breakdown_repository_maple import MapleBackedBreakdownRepository
 from app.adapters.postgres.backed_breakdown_repository_morpho import MorphoBackedBreakdownRepository
+from app.adapters.postgres.core_model_results_reader import PostgresCoreModelResultsReader
 from app.adapters.postgres.crypto_lending_reader import PostgresCryptoLendingReader
 from app.adapters.postgres.engine import create_db_engine
 from app.adapters.postgres.morpho_liquidation_params_repository import MorphoLiquidationParamsRepository
@@ -37,6 +38,7 @@ from app.middleware.request_id import RequestIdMiddleware
 from app.risk_engine.mapping import MappingError, load_asset_mapping
 from app.risk_engine.suraf.loader import load_all_ratings
 from app.risk_engine.suraf.result import SurafResult
+from app.services.core_model_risk_service import CoreModelRiskService
 from app.services.crypto_lending_risk_service import CryptoLendingRiskService
 from app.services.model_registry import ModelRegistry
 from app.services.suraf_rrc_service import SurafRrcService
@@ -169,6 +171,9 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
     _check_mapping_refs(raw_mapping, suraf_ratings)
     logger.info("asset->rating mapping loaded entries=%d", len(raw_mapping))
 
+    core_raw_mapping = load_asset_mapping(settings.core_model_mappings_file)
+    logger.info("core model asset->market_key mapping loaded entries=%d", len(core_raw_mapping))
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         engine = create_db_engine(settings)
@@ -201,12 +206,20 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
                 default_gap_pct=settings.risk_default_gap_pct,
                 supported_asset_ids=supported_crypto_lending_asset_ids,
             )
-            model_registry = ModelRegistry([suraf_rrc_service, crypto_lending_risk_service])
+            asset_to_market_key = await resolve_receipt_token_mapping(core_raw_mapping, engine)
+            core_model_results_reader = PostgresCoreModelResultsReader(engine)
+            core_model_risk_service = CoreModelRiskService(
+                asset_to_market_key=asset_to_market_key,
+                results_reader=core_model_results_reader,
+                allocation_repo=allocation_repo,
+            )
+            model_registry = ModelRegistry([suraf_rrc_service, crypto_lending_risk_service, core_model_risk_service])
 
             app.state.engine = engine
             app.state.suraf_ratings = suraf_ratings
             app.state.asset_to_rating = asset_to_rating
             app.state.crypto_lending_risk_service = crypto_lending_risk_service
+            app.state.core_model_risk_service = core_model_risk_service
             app.state.model_registry = model_registry
             app.state.receipt_token_lookup = receipt_token_repo
 

@@ -10,7 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/archon-research/stl/stl-verify/db/migrator"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -303,13 +302,8 @@ func (c processingVersionIndexCase) keyLiterals() []string {
 
 func TestProcessingVersionCoveringIndexesExist(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := setupPostgres(ctx, t)
+	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
-
-	m := migrator.New(pool, getMigrationsPath())
-	if err := m.ApplyAll(ctx); err != nil {
-		t.Fatalf("migrations failed: %v", err)
-	}
 
 	for _, tc := range processingVersionIndexCases() {
 		t.Run(tc.tableName, func(t *testing.T) {
@@ -339,12 +333,8 @@ func TestProcessingVersionCoveringIndexesExist(t *testing.T) {
 // decision production makes.
 func TestProcessingVersionTriggerLookupsPruneToOneChunk(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := setupPostgres(ctx, t)
+	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
-
-	if err := migrator.New(pool, getMigrationsPath()).ApplyAll(ctx); err != nil {
-		t.Fatalf("migrations failed: %v", err)
-	}
 	seedProcessingVersionPlanRows(t, ctx, pool, 2_000)
 
 	conn, err := pool.Acquire(ctx)
@@ -393,12 +383,8 @@ func TestProcessingVersionTriggerLookupsPruneToOneChunk(t *testing.T) {
 // own control below.
 func TestProcessingVersionLatestVersionLookupFansOutUnderGenericPlan(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := setupPostgres(ctx, t)
+	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
-
-	if err := migrator.New(pool, getMigrationsPath()).ApplyAll(ctx); err != nil {
-		t.Fatalf("migrations failed: %v", err)
-	}
 	seedProcessingVersionPlanRows(t, ctx, pool, 2_000)
 
 	conn, err := pool.Acquire(ctx)
@@ -435,12 +421,8 @@ func TestProcessingVersionLatestVersionLookupFansOutUnderGenericPlan(t *testing.
 // table. Only the startup-exclusion counter tells the two apart, which is what this pins.
 func TestProcessingVersionBuildIDLookupDefersChunkExclusionUnderGenericPlan(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := setupPostgres(ctx, t)
+	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
-
-	if err := migrator.New(pool, getMigrationsPath()).ApplyAll(ctx); err != nil {
-		t.Fatalf("migrations failed: %v", err)
-	}
 	seedProcessingVersionPlanRows(t, ctx, pool, 2_000)
 
 	conn, err := pool.Acquire(ctx)
@@ -475,12 +457,8 @@ func TestProcessingVersionBuildIDLookupDefersChunkExclusionUnderGenericPlan(t *t
 // fan-out — the setting removed, the covering index dropped, or a lookup reshaped past pruning.
 func TestProcessingVersionTriggerInsertStaysUnderPerRowBudget(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := setupPostgres(ctx, t)
+	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
-
-	if err := migrator.New(pool, getMigrationsPath()).ApplyAll(ctx); err != nil {
-		t.Fatalf("migrations failed: %v", err)
-	}
 	seedProcessingVersionPlanRows(t, ctx, pool, 2_000)
 	primeID := upsertFixturePrime(t, ctx, pool)
 

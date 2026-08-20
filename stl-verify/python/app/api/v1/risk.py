@@ -1,3 +1,5 @@
+import logging
+from datetime import datetime
 from decimal import Decimal
 from typing import Annotated, Any
 
@@ -12,6 +14,7 @@ from app.api._validators import (
     TokenAddressPath,
 )
 from app.api.deps import (
+    get_core_model_risk_service,
     get_crypto_lending_risk_service,
     get_model_registry,
     get_receipt_token_lookup,
@@ -28,11 +31,16 @@ from app.domain.entities.risk import RrcResult
 from app.domain.exceptions import (
     AllocationUnpricedError,
     InvalidOverrideError,
+    ModelDataUnavailableError,
 )
 from app.domain.serialization import PlainDecimal
+from app.ports.core_model_results_reader import CoreModelResult
 from app.ports.receipt_token_lookup import ReceiptTokenLookup
+from app.services.core_model_risk_service import CoreModelRiskService
 from app.services.crypto_lending_risk_service import CryptoLendingRiskService
 from app.services.model_registry import ModelRegistry
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["risk"])
 
@@ -358,9 +366,10 @@ class RrcRequest(BaseModel):
         default_factory=dict,
         description=(
             "Per-model scenario overrides. Outer keys are registered risk-model names "
-            "(`suraf`, `gap_sweep`); inner objects are model-specific. For example, "
-            "`gap_sweep` accepts `gap_pct` (a price-drop fraction in `[0, 1]`) and "
-            "`suraf` accepts `usd_exposure`. Unknown outer keys are rejected with `422`."
+            "(`suraf`, `gap_sweep`, `core_model`); inner objects are model-specific. "
+            "For example, `gap_sweep` accepts `gap_pct` (a price-drop fraction in `[0, 1]`); "
+            "`suraf` and `core_model` accept `usd_exposure`. "
+            "Unknown outer keys are rejected with `422`."
         ),
     )
 
@@ -560,7 +569,19 @@ async def _compute_envelope(
             raise share_error_503(exc) from exc
         except InvalidOverrideError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except ModelDataUnavailableError as exc:
+            # A model with no data yet degrades the envelope, not the endpoint.
+            logger.warning("skipping model without data model=%s asset_id=%s: %s", m.risk_model, asset_id, exc)
+            continue
         results.append(result)
+
+    if not results:
+        # Matches the pre-CORE behavior for assets whose only model has no
+        # data yet: the endpoint 404s rather than serving an empty envelope.
+        raise HTTPException(
+            status_code=404,
+            detail=f"no risk model has a result for asset_id={asset_id}",
+        )
 
     return RrcEnvelope(
         asset_id=asset_id,
@@ -571,3 +592,80 @@ async def _compute_envelope(
         max_rrc_usd=max(r.rrc_usd for r in results),
         max_crr_pct=max(r.comparable_crr_pct for r in results),
     )
+
+
+# ---------------------------------------------------------------------------
+# Core model raw results
+# ---------------------------------------------------------------------------
+
+
+class CoreModelResultResponse(BaseModel):
+    """Latest pre-computed CORE model result for a receipt token."""
+
+    asset_id: int = Field(description="Surrogate id of the receipt token.", examples=[42])
+    market_key: str = Field(
+        description="Market key used by the core-model-runner cronjob.", examples=["sparklend_usdc"]
+    )
+    crr_el_pct: Decimal = Field(description="Expected-loss CRR as a 0-100 percentage.", examples=["12.5"])
+    crr_es_pct: Decimal = Field(description="Expected-shortfall CRR as a 0-100 percentage.", examples=["15.0"])
+    crr_var_pct: Decimal = Field(description="Value-at-Risk CRR as a 0-100 percentage.", examples=["10.0"])
+    hhi: Decimal | None = Field(
+        description="Herfindahl-Hirschman Index of borrower concentration (0-100), or null.", examples=["22.3"]
+    )
+    protocol: str = Field(description="Protocol identifier used by the model.", examples=["SPARKLEND"])
+    forecast_step: int = Field(description="Forecast horizon in calendar days.", examples=[14])
+    n_mc: int = Field(description="Number of Monte Carlo price scenarios.", examples=[10000])
+    copula_type: str = Field(description="Cross-asset dependence structure.", examples=["T-COPULA"])
+    computed_at: datetime = Field(
+        description="UTC timestamp of when this result was computed.", examples=["2026-06-01T12:00:00+00:00"]
+    )
+
+
+def _core_model_response(asset_id: int, result: CoreModelResult) -> CoreModelResultResponse:
+    return CoreModelResultResponse(
+        asset_id=asset_id,
+        market_key=result.market_key,
+        crr_el_pct=result.crr_el_pct,
+        crr_es_pct=result.crr_es_pct,
+        crr_var_pct=result.crr_var_pct,
+        hhi=result.hhi,
+        protocol=result.protocol,
+        forecast_step=result.forecast_step,
+        n_mc=result.n_mc,
+        copula_type=result.copula_type,
+        computed_at=result.computed_at,
+    )
+
+
+async def _get_core_model_result(
+    asset_id: int,
+    service: CoreModelRiskService,
+) -> CoreModelResultResponse:
+    result = await service.get_latest_result(asset_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"no core model result for asset_id={asset_id}")
+    return _core_model_response(asset_id, result)
+
+
+@router.get(
+    "/risk/{chain_id}/{token_address}/core-model",
+    response_model=CoreModelResultResponse,
+    summary="Latest CORE model result (by chain id and receipt-token address)",
+    description=(
+        "Return the latest pre-computed CORE model result for the receipt token at "
+        "`(chain_id, token_address)`.\n\n"
+        "`token_address` is the **receipt-token** address (e.g. `spUSDC`, `spWETH`), "
+        "not the underlying ERC-20 address.\n\n"
+        "Errors:\n"
+        "- `404` if the receipt token is unknown or has no pre-computed result.\n"
+        "- `422` if `chain_id` < 1 or `token_address` is malformed.\n"
+    ),
+)
+async def get_core_model_result_by_address(
+    chain_id: ChainIdPath,
+    token_address: TokenAddressPath,
+    lookup: ReceiptTokenLookup = Depends(get_receipt_token_lookup),
+    service: CoreModelRiskService = Depends(get_core_model_risk_service),
+) -> CoreModelResultResponse:
+    info = await resolve_receipt_token(chain_id, token_address, lookup)
+    return await _get_core_model_result(info.receipt_token_id, service)

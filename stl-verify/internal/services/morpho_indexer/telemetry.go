@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -14,16 +15,48 @@ import (
 
 const instrumentationName = "github.com/archon-research/stl/stl-verify/internal/services/morpho_indexer"
 
+// v2SnapshotType names the structured VaultV2 table a snapshot landed in.
+type v2SnapshotType string
+
+const (
+	v2SnapshotAdapterState v2SnapshotType = "adapter_state"
+	v2SnapshotVaultCap     v2SnapshotType = "vault_cap"
+	v2SnapshotVaultFee     v2SnapshotType = "vault_fee"
+)
+
+// adapterTypeLabel renders an adapter classification as a metric label. Two
+// collapses are forbidden because VectorMorphoV2UnknownAdapters counts "unknown"
+// exactly: a value outside the modelled set renders numerically rather than as
+// "unknown", and a nil classification renders "unprobed" — the shape a
+// de-registration takes, not a probe that ran and failed to classify.
+func adapterTypeLabel(t *entity.MorphoAdapterType) string {
+	if t == nil {
+		return "unprobed"
+	}
+	switch *t {
+	case entity.MorphoAdapterTypeMarketV1:
+		return "market_v1"
+	case entity.MorphoAdapterTypeVaultV1:
+		return "vault_v1"
+	case entity.MorphoAdapterTypeUnknown:
+		return "unknown"
+	default:
+		return fmt.Sprintf("type_%d", int16(*t))
+	}
+}
+
 // Telemetry provides OpenTelemetry metrics and tracing for the Morpho indexer.
 type Telemetry struct {
 	tracer trace.Tracer
 	meter  metric.Meter
 
 	// Counters
-	blocksProcessed metric.Int64Counter
-	eventsProcessed metric.Int64Counter
-	rpcCallsTotal   metric.Int64Counter
-	errorsTotal     metric.Int64Counter
+	blocksProcessed      metric.Int64Counter
+	eventsProcessed      metric.Int64Counter
+	rpcCallsTotal        metric.Int64Counter
+	errorsTotal          metric.Int64Counter
+	adapterRegistrations metric.Int64Counter
+	v2SnapshotsWritten   metric.Int64Counter
 
 	// Histograms
 	blockDuration   metric.Float64Histogram
@@ -93,6 +126,22 @@ func NewTelemetryWithProviders(tp trace.TracerProvider, mp metric.MeterProvider,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("creating errorsTotal counter: %w", err)
+	}
+
+	t.adapterRegistrations, err = meter.Int64Counter(
+		"morpho.v2.adapter.registrations",
+		metric.WithDescription("VaultV2 adapter-membership observations appended, by on-chain classification and how the membership was observed"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating adapterRegistrations counter: %w", err)
+	}
+
+	t.v2SnapshotsWritten, err = meter.Int64Counter(
+		"morpho.v2.snapshots.written",
+		metric.WithDescription("VaultV2 structured snapshots committed by the event-driven handlers (adapter realAssets, allocation caps, fee config)"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating v2SnapshotsWritten counter: %w", err)
 	}
 
 	t.symbolsMissing, err = meter.Int64Gauge(
@@ -184,6 +233,51 @@ func (t *Telemetry) RecordError(ctx context.Context, operation string, err error
 	t.errorsTotal.Add(ctx, 1, metric.WithAttributes(
 		t.chainAttr,
 		attribute.String("operation", operation),
+	))
+}
+
+// RecordAdapterMembershipObservation counts observations APPENDED to
+// morpho_adapter_membership, never write attempts: an assertion that changes
+// nothing appends nothing, and counting attempts would make every Allocate
+// increment it and hold VectorMorphoV2LazyAdapterRegistrations permanently in
+// alarm. Canonical statement of that contract for the alert and its runbook.
+//
+// Callers flush only after the appending transaction commits
+// (recordMembershipObservations), so a rolled-back append — which an SQS
+// redelivery repeats every visibility timeout while a block stays stuck — cannot
+// inflate it. observed_via mirrors the DB column of the same name; adapter.type
+// is "unprobed" when the observation carried no probe.
+func (t *Telemetry) RecordAdapterMembershipObservation(ctx context.Context, adapterType *entity.MorphoAdapterType, observedVia entity.MembershipSource) {
+	if t == nil {
+		return
+	}
+	t.adapterRegistrations.Add(ctx, 1, metric.WithAttributes(
+		t.chainAttr,
+		attribute.String("adapter.type", adapterTypeLabel(adapterType)),
+		attribute.String("observed_via", string(observedVia)),
+	))
+}
+
+// RecordV2Snapshot records one committed VaultV2 structured snapshot. Callers
+// record after their write transaction returns and only when the writer reports a
+// row appended, so the counter never claims a row that was rolled back — or that
+// deduped to no row, which same-block siblings and a redelivery re-running an
+// already-committed handler both do.
+//
+// This counter is the liveness signal for the EVENT-DRIVEN write path, so exactly
+// two writers of these tables stay uncounted, both deliberately: discovery's
+// adapter_state seeds (seedDiscoveredAdapters) and its vault_fee seed
+// (seedDiscoveredFees). Both fire on vault registration, not on a V2 log, so
+// counting them would let a run of new vaults mask a dead event path. Every other
+// writer counts — including the adapter_state seed an AddAdapter commits
+// (saveAdapterSeedState), which an AddAdapter log drives.
+func (t *Telemetry) RecordV2Snapshot(ctx context.Context, snapshotType v2SnapshotType) {
+	if t == nil {
+		return
+	}
+	t.v2SnapshotsWritten.Add(ctx, 1, metric.WithAttributes(
+		t.chainAttr,
+		attribute.String("snapshot.type", string(snapshotType)),
 	))
 }
 

@@ -15,7 +15,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-const univ3FullValueSchemaName = "test_univ3_full_value"
+const univ3FullValueDBName = "test_univ3_full_value"
 
 // The AUSD/USDC Uniswap V3 pool contract whose token row the migration renames.
 const univ3PoolAddressHex = "bafead7c60ea473758ed6c6021505e8bbd7e8e5d"
@@ -30,10 +30,10 @@ const univ3SkyecoRenameMigrationFile = "20260714_170000_rename_univ3_symbol_skye
 var univ3FullValuePool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(univ3FullValueSchemaName, func() {
-		univ3FullValuePool = testutil.SetupSchemaForMain(sharedDSN, univ3FullValueSchemaName)
+	registerTestFileSetup(func() {
+		univ3FullValuePool = testutil.SetupDBForMain(sharedDSN, univ3FullValueDBName)
 	}, func() {
-		testutil.CleanupSchemaForMain(sharedDSN, univ3FullValuePool, univ3FullValueSchemaName)
+		testutil.CleanupDBForMain(sharedDSN, univ3FullValuePool, univ3FullValueDBName)
 	})
 }
 

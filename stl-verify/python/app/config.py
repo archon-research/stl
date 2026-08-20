@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     risk_default_gap_pct: Decimal = Field(default=Decimal("0.15"), ge=0, le=1)
     suraf_inputs_dir: Path = ENV_DIR / "suraf" / "inputs"
     suraf_mappings_file: Path = ENV_DIR / "suraf" / "mappings" / "asset_to_rating.json"
+    core_model_mappings_file: Path = (
+        ENV_DIR / "app" / "risk_engine" / "core_model" / "mappings" / "asset_to_market_key.json"
+    )
     # Injected as a Docker build arg; see stl-verify/python/Dockerfile.
     # Falls back to "unknown" so local dev and tests don't need it set.
     git_commit: str = "unknown"
@@ -71,6 +74,17 @@ class Settings(BaseSettings):
         query = dict(url.query)
         query.pop("sslmode", None)
         return url.set(query=query).render_as_string(hide_password=False)
+
+    @property
+    def star_risk_capital_base_url(self) -> str:
+        """The Star monitor's risk-capital root, derived from the configured primes URL.
+
+        Derived rather than configured separately so pointing the service at a
+        mock or a staging monitor moves every route at once; two env vars would
+        let the list and the per-prime routes drift to different hosts, which
+        surfaces as a prime the list reports but the detail route 500s on.
+        """
+        return self.star_risk_capital_upstream_url.rstrip("/").removesuffix("/primes")
 
 
 @functools.lru_cache

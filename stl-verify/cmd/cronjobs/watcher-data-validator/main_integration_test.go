@@ -34,7 +34,7 @@ func TestMain(m *testing.M) {
 // real Etherscan endpoint.
 func TestSetupRunner_WiresService(t *testing.T) {
 	ctx := context.Background()
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 
 	t.Setenv("CHAIN_ID", "1")

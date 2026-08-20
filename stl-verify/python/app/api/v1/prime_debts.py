@@ -79,6 +79,13 @@ class PrimeDebtEnvelope(BaseModel):
     """Prime debt response: raw snapshots or aggregated time buckets."""
 
     mode: Literal["raw", "aggregated"] = Field(description="`raw` for snapshots, `aggregated` for time buckets.")
+    source: Literal["self", "reference"] = Field(
+        default="self",
+        description=(
+            "Provenance of the figures. `self` is the on-chain per-ilk debt; `reference` is Sky's "
+            "own reported debt, returned when `reference=true`."
+        ),
+    )
     window: TimeSeriesWindow = Field(description="The window and resolution applied to this response.")
     data: list[PrimeDebtSnapshotResponse] | list[PrimeDebtBucketResponse] = Field(
         description="Snapshots when `mode=raw`, value buckets when `mode=aggregated`."
@@ -98,23 +105,45 @@ async def _get_prime_debt_service(engine: AsyncEngine = Depends(get_engine)) -> 
         "envelope. Results are time-windowed (default last 24h). Returns `404` if the prime "
         "is unknown. Each snapshot carries the `block_number`/`block_version` it was observed "
         "at; consumers can use `block_version` to detect reorg-driven re-emissions. Set "
-        "`aggregate=true` for the last debt value per time bucket (gap-filled)."
+        "`aggregate=true` for the last debt value per time bucket (gap-filled). Pass "
+        "`reference=true` (with `aggregate=true`) for Sky's own reported debt instead of the "
+        "on-chain per-ilk figure; `source` reports which provenance answered."
     ),
 )
 async def list_prime_debt_snapshots(
     prime_id: PrimeOrProxyAddressPathParam,
     time_series: TimeSeriesQuery = Depends(get_time_series_query_params),
     limit: int = Query(100, ge=1, le=500, description="Max snapshots returned (default 100, max 500)."),
+    reference: bool = Query(
+        False,
+        description=(
+            "Serve Sky's own reported debt instead of the on-chain per-ilk debt. Requires "
+            "`aggregate=true`: upstream publishes one figure per prime per day and carries no ilk, "
+            "block number or block version, so it cannot fill a raw snapshot — asking for one "
+            "returns `400` rather than inventing those fields. `debt_wad` keeps its unit in both "
+            "modes, so dividing by 1e18 gives USDS units either way."
+        ),
+    ),
     service: PrimeDebtService = Depends(_get_prime_debt_service),
 ) -> PrimeDebtEnvelope:
-    prime_address = EthAddress(prime_id)
-    if not await service.prime_exists(prime_address):
+    resolved_prime_id = await service.resolve_prime_id(EthAddress(prime_id))
+    if resolved_prime_id is None:
         raise HTTPException(status_code=404, detail="Prime not found")
+
+    if reference and not time_series.aggregate:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Reference debt is only available aggregated; upstream reports one figure per prime "
+                "per day and carries no ilk or block identity. Retry with aggregate=true."
+            ),
+        )
 
     window = build_window(time_series)
     if time_series.aggregate:
-        buckets = await service.list_debt_buckets(
-            prime_address,
+        read_buckets = service.list_reference_debt_buckets if reference else service.list_debt_buckets
+        buckets = await read_buckets(
+            resolved_prime_id,
             from_timestamp=time_series.from_timestamp,
             to_timestamp=time_series.to_timestamp,
             bucket_seconds=time_series.bucket.total_seconds(),
@@ -122,18 +151,20 @@ async def list_prime_debt_snapshots(
         )
         return PrimeDebtEnvelope(
             mode="aggregated",
+            source="reference" if reference else "self",
             window=window,
             data=[PrimeDebtBucketResponse(**bucket.__dict__) for bucket in buckets],
         )
 
     snapshots = await service.list_debt_snapshots(
-        prime_address,
+        resolved_prime_id,
         from_timestamp=time_series.from_timestamp,
         to_timestamp=time_series.to_timestamp,
         limit=limit,
     )
     return PrimeDebtEnvelope(
         mode="raw",
+        source="self",
         window=window,
         data=[PrimeDebtSnapshotResponse(**snapshot.__dict__) for snapshot in snapshots],
     )

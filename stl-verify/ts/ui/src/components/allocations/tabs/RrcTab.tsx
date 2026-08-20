@@ -1,4 +1,4 @@
-import { ErrorState, LoadingIndicator } from '@archon-research/design-system';
+import { ErrorState, SkeletonStack } from '@archon-research/design-system';
 import { useEffect, useMemo, useState } from 'react';
 
 import { css, cx } from '#styled-system/css';
@@ -33,6 +33,7 @@ type RrcTabProps = {
 const MODEL_LABELS: Record<string, string> = {
   suraf: 'SURAF',
   gap_sweep: 'Gap sweep',
+  core_model: 'CORE',
 };
 
 // A map of finished class names rather than a tone-to-token-path helper: see
@@ -195,7 +196,11 @@ export function RrcTab({
               Required risk capital (RRC)
             </p>
             {isLoading ? (
-              <LoadingIndicator message="Fetching required risk capital" />
+              <SkeletonStack
+                count={1}
+                itemHeight={16}
+                className={css({ width: '32' })}
+              />
             ) : null}
           </div>
 
@@ -303,7 +308,7 @@ export function RrcTab({
           </p>
           {isLoading && !rrc ? (
             <div className={css({ mt: '3' })}>
-              <LoadingIndicator message="Computing required risk capital" />
+              <SkeletonStack count={2} itemHeight={14} />
             </div>
           ) : (
             <p

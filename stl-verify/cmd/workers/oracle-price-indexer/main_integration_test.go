@@ -95,7 +95,7 @@ func setupIntegrationTest(t *testing.T, opts ...setupOption) *integrationEnv {
 		opt(&cfg)
 	}
 
-	pool, dbURL, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, dbURL, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	bgCtx := context.Background()
@@ -125,18 +125,17 @@ func setupIntegrationTest(t *testing.T, opts ...setupOption) *integrationEnv {
 	// Pre-seed S3 with the block JSON for block 18000000 so resolveBlockTimestamp
 	// can recover a timestamp via the cache→S3 fallback path.
 	s3Client := testutil.NewS3Client(t, bgCtx, sharedLocalStackCfg)
-	if _, err := s3Client.CreateBucket(bgCtx, &s3.CreateBucketInput{Bucket: aws.String(testBucket)}); err != nil {
-		t.Fatalf("create S3 bucket: %v", err)
-	}
+	testutil.EnsureBucket(t, bgCtx, s3Client, testBucket)
 	if cfg.archiving {
-		if _, err := s3Client.CreateBucket(bgCtx, &s3.CreateBucketInput{Bucket: aws.String(archiveBucket)}); err != nil {
-			t.Fatalf("create archive S3 bucket: %v", err)
-		}
+		testutil.EnsureBucket(t, bgCtx, s3Client, archiveBucket)
 	}
-	seedBlockToS3(t, bgCtx, s3Client, testBucket, 18_000_000, 1, 1_700_000_000)
+	blockNum := testutil.ReservedBlock(t, "oracle-price-indexer")
+	seedBlockToS3(t, bgCtx, s3Client, testBucket, blockNum, 1, 1_700_000_000)
 
 	// Enqueue one block event message for the service to process.
-	sqsState.AddMessage(fmt.Sprintf(`{"chainId":1,"blockNumber":18000000,"version":1,"blockHash":"0x%064x","blockTimestamp":1700000000}`, 18_000_000))
+	sqsState.AddMessage(fmt.Sprintf(
+		`{"chainId":1,"blockNumber":%d,"version":1,"blockHash":"0x%064x","blockTimestamp":1700000000}`,
+		blockNum, blockNum))
 
 	// Configure environment for run()
 	t.Setenv("BUILD_GIT_HASH", "test")
@@ -249,7 +248,7 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 	// whose key carries the expected block version and source. rawsckey.Build
 	// formats the filename as {block}_{blockVersion}_{source}_{batchHash}, so the
 	// segment also pins that the message's version 1 (not the default 0) is keyed.
-	const wantSegment = "18000000_1_oracle-price_"
+	wantSegment := fmt.Sprintf("%d_1_oracle-price_", testutil.ReservedBlock(t, "oracle-price-indexer"))
 	testutil.WaitForCondition(t, 30*time.Second, func() bool {
 		out, err := env.s3Client.ListObjectsV2(env.bgCtx, &s3.ListObjectsV2Input{
 			Bucket: aws.String(archiveBucket),

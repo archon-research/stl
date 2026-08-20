@@ -139,13 +139,14 @@ components:
     rounded: "{rounded.md}"
     padding: "0 0.75rem"
     height: "2.25rem"
-  # Local to this app: the allocation category chip in `AllocationGrid`. Not a
-  # design-system recipe.
+  # The allocation category chip in `AllocationGrid`: the `badge` recipe
+  # (variant="subtle", size="md") with only its fill overridden, because
+  # `colorPalette` has no five-way category-neutral hue set.
   chip-category:
     backgroundColor: "{colors.categorical.1.bg}"
     textColor: "{colors.categorical.1.fg}"
     rounded: "{rounded.md}"
-    padding: "0.25rem 0.5rem"
+    padding: "0.375rem 0.625rem"
   table-row-selected:
     backgroundColor: "{colors.interactive.selected.light}"
     textColor: "{colors.text.default.light}"
@@ -191,7 +192,7 @@ The ramp steps forward monotonically in both themes: canvas is furthest back, pa
 - **colors.surface.default** (#fff / #171717): main panel and control surface — lighter than the canvas in **both** themes.
 - **colors.surface.subtle** (#f5f5f5 / #262626): recessed insets *within* a panel. Not the page background.
 - **colors.surface.hover** (#f5f5f5 / #404040): the neutral grey wash for row and list-item hover. **In this app's own styles**, use this rather than `interactive.hover`.
-- **colors.interactive.hover** (#eff6ff / #172554) and **colors.interactive.selected** (#dbeafe / #1e3a8a): accent-tinted, so selection and accent-hover read as *active*. Applying these to an ordinary row hover turns the whole table blue. Note this is an app-level rule, not a package-level one: five preset recipes (`button`, `searchInput`, `segmentedControl`, `interactiveItem`, `drawer`) use `interactive.hover` internally, and `segmentedControl` is one this app calls directly — so an accent-tinted hover does ship in places, and the rule is about styles we write ourselves.
+- **colors.interactive.hover** (#eff6ff / #172554) and **colors.interactive.selected** (#dbeafe / `color-mix(in srgb, #3b82f6 24%, #171717)`): accent-tinted, so selection and accent-hover read as *active*. Applying these to an ordinary row hover turns the whole table blue. Note this is an app-level rule, not a package-level one: of the recipes this app ships, `searchInput` (highlighted item), `segmentedControl` (item hover), `dataTable` (icon button, menu item, row expander) and `popover` (close trigger) use `interactive.hover` internally — so an accent-tinted hover does ship in places, and the rule is about styles we write ourselves. Recipes that use it and are *not* in this app's `staticCss` map (`button`, `interactiveItem`, `drawer`, `facetedMultiSelect`) ship no CSS at all here.
 
 ### Borders and text
 - **colors.border.hairline** (rgba(9, 9, 11, 0.06) / rgba(255, 255, 255, 0.08)): ~6% alpha dividers and insets, for stacked internal rules where a solid border becomes visual noise. Its only call site is `MethodologyPanel`. Grid row separators are **not** hairline: the `dataTable` recipe draws both its frame and its row rules in `border.subtle`, and overriding that per-row would fight the recipe.
@@ -281,9 +282,20 @@ Never hand-write a shadow literal: a `rgba(0, 0, 0, 0.2)` drop shadow disappears
 - **Low emphasis:** the recipe default (`variant="panel"`, no `emphasis`): `surface.default` on a `border.subtle` stroke. There is no `quiet` variant.
 
 ### Chips
+- **Component:** `Badge`, not `Chip`. `Chip` is the removable-filter control — pill radius, padding asymmetric to seat its dismiss `×` — so a non-dismissible taxonomy label would have to override every visual property it sets. `Badge` already is a `rounded.md`, semibold, `xs` label on the same variant × colorPalette model.
 - **Style:** `rounded.md` (0.375rem), not pill, and no `textTransform` — the label is sentence-cased at whatever the source gives.
-- **Colour:** a category chip fills from `categorical.N.bg` / `.fg` (see "Categorical encoding"), so it stays dark-aware and carries no status meaning.
+- **Colour:** a category chip fills from `categorical.N.bg` / `.fg` (see "Categorical encoding"), so it stays dark-aware and carries no status meaning. This is the one property overridden on the recipe, and it is why `useIdentityPalette` is not used here: `identity.1..8` assigns hues by hashing an id, which would scramble the category-to-`chart.series` hue pairing and supplies no matching foreground colour.
 - **State:** used to mark section context and compact taxonomy labels. A status chip drives colour through `colorPalette` + `variant`, not through the deprecated `tone` prop.
+
+### Tooltips
+- **Surface:** the upstream `tooltip` recipe — `rounded.md`, `overlay.tooltip` fill with `text.inverse` text, a `border.subtle` stroke, `shadows.overlay`, and `zIndex.tooltip`. Do not re-derive any of those locally; the recipe is the whole bubble.
+- **What stays local:** the trigger shape (a `cursor: help` inline button, or the truncated-label variant) and the shared positioning (`placement="top"`, 8px main-axis offset). The design system re-exports Ark's `Tooltip` headless, so an unwrapped `Tooltip.Content` renders as unstyled, unpositioned text over the page — always go through the app wrapper in `shared/Tooltip.tsx`.
+
+### Tables
+- **Component:** `DataTable` for every tabular surface, including the activity feed and its drawer-mode twin. The `dataTable` slot recipe owns the frame, header, rows, and the inline magnitude bar; the app supplies columns and a shared header style, not table chrome.
+- **Expandable rows:** row expansion is upstream too — `renderDetailPanel` plus the `expanderCell` / `expander` / `detailCell` slots. Two of the slots the component emits, `dataTable__rowGroup` and `dataTable__detailRow`, are declared with empty style objects upstream and therefore have no CSS in any build: they are structural hooks, so do not read a missing rule there as dropped CSS.
+- **Header typography:** the recipe's `density="compact"` header is an 11px muted micro-label, too quiet for these grids, so one shared `& thead th` override (`shared/tableStyles.ts`) lifts it to 0.875rem semibold uppercase in `text.default`. It is one definition for all three tables — do not re-declare it per table.
+- **Row identity:** pass `getRowId`; without it the component logs a dev warning and expansion state keys off row index.
 
 ### Cards / Containers
 - **Corner Style:** `rounded.md` (0.375rem), uniformly. Radius does not vary with hierarchy depth — `panel`, `panelSection`, `statTile`, `surfaceMessage`, and the `dataTable` frame are all `md`, and matching them is what makes nested surfaces read as one system.
@@ -328,3 +340,16 @@ Never hand-write a shadow literal: a `rgba(0, 0, 0, 0.2)` drop shadow disappears
 - **Don't** compute a token path in a helper and pass it to `css()` as a variable. Panda extracts from **source text**: `bg: getCategoryColor(c)` emits no declaration at all and fails silently. Use a recipe variant, or index a literal lookup inside the `css()` call.
 - **Don't** name a token that does not exist. Panda passes an unknown path through as a literal CSS value, the browser discards the declaration, and the element inherits instead. Sweep for it: `npx panda cssgen --outfile /tmp/x.css && grep -oE '^\s+[a-z-]+: [a-z]+\.[a-zA-Z.]+;' /tmp/x.css` must be empty.
 - **Don't** add an unlayered rule to `src/index.css`. Unlayered CSS beats every layered rule regardless of specificity, so a bare `button { font: inherit }` outranks `@layer recipes` and strips the type step from every design-system control. Everything in that file belongs inside `@layer base`.
+- **Don't** import a design-system component without adding its recipe to `staticCss` in `panda.config.ts`. The map is narrowed to the recipes this app renders, and the components apply their recipes as runtime class strings Panda cannot see, so a missing key means that component ships with no CSS and nothing complains. The rule and the verification recipe are in the config comment.
+
+### What the gate catches (and what it cannot)
+
+`npm run doctor` (`uikit-cli doctor --codegen`) runs in `ts-ci.yml` after codegen. It has exactly two checks: an unresolved-token scan over colour-ish declarations, and a "`staticCss` is wired at all" gate. Everything else in the silently-dropped-CSS class is held by the conventions above, not by a tool.
+
+| mechanism | caught |
+| --- | --- |
+| undefined token → literal `color: text.subtle;` | **yes** — the unresolved-token scan; the sweep above is the same check by hand |
+| token path computed in a helper | no — no declaration is emitted, so there is nothing to match |
+| `var(--token, #fallback)` | no — well-formed CSS |
+| roleless `colorPalette` | no — emits a valid-looking `var()`, unset only in that scope. Held by convention; looks mechanically detectable and is filed upstream |
+| `staticCss` coverage | **partially** — the gate is "at least one design-system recipe stem present", which catches total omission only. A narrowed map is supported and encouraged, so a per-recipe gap inside one is invisible to it: verify a narrowed map by building and grepping the emitted CSS for the stems the built JS contains |

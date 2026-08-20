@@ -21,7 +21,7 @@ import (
 func setupPostgres(t *testing.T) (*postgres.BlockStateRepository, func()) {
 	t.Helper()
 
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	repo := postgres.NewBlockStateRepository(pool, 1, nil)
 	return repo, cleanup
 }
@@ -725,7 +725,7 @@ func TestBackfillService_AdvancesWatermark_OnUnseededChain(t *testing.T) {
 
 	ctx := context.Background()
 
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	// Insert a fresh chain that was NOT in the `chain` table when the
@@ -811,7 +811,7 @@ func TestBackfillService_AdvancesWatermark_OnUnseededChain(t *testing.T) {
 func TestBackfillService_WatermarkLag_ClampedNonNegative(t *testing.T) {
 	ctx := context.Background()
 
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	const testChainID int64 = 998

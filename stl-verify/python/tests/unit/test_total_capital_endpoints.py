@@ -61,9 +61,25 @@ def test_list_prime_total_capital_returns_aggregated_buckets():
         body = response.json()
         assert body["mode"] == "aggregated"
         assert body["window"]["resolution"] == "PT6H"
+        # assets_usd and encumbrance_ratio are reference-only, so self mode
+        # reports them unobserved rather than deriving a local stand-in.
         assert body["data"] == [
-            {"bucket_start": "2026-06-18T00:00:00Z", "total_capital_usd": "36359440.25"},
-            {"bucket_start": "2026-06-17T18:00:00Z", "total_capital_usd": None},
+            {
+                "bucket_start": "2026-06-18T00:00:00Z",
+                "total_capital_usd": "36359440.25",
+                "assets_usd": None,
+                "encumbrance_ratio": None,
+                "assets_observed_at": None,
+                "capital_observed_at": None,
+            },
+            {
+                "bucket_start": "2026-06-17T18:00:00Z",
+                "total_capital_usd": None,
+                "assets_usd": None,
+                "encumbrance_ratio": None,
+                "assets_observed_at": None,
+                "capital_observed_at": None,
+            },
         ]
         service.prime_exists.assert_awaited_once_with(EthAddress(_VALID_ADDR))
         assert service.list_total_capital_buckets.await_args.args[0] == EthAddress(_VALID_ADDR)

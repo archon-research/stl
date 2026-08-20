@@ -35,7 +35,7 @@ jobs:
           go install golang.org/x/vuln/cmd/govulncheck@latest
 
       - name: Format and module checks
-        run: make fmt-check goimports-check tidy-check shared-container-check
+        run: make fmt-check goimports-check tidy-check shared-container-check integration-shard-check ci-service-check
 
       # Runs the golangci-lint binary directly (not `make golangci-lint`) so
       # the action can manage the binary install and analysis cache. Covers
@@ -79,9 +79,63 @@ jobs:
         run: make test-race
 
   integration-tests:
-    name: Integration Tests
+    name: Integration Tests (${{ matrix.shard }}/2)
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+
+    # One service set per shard instead of one per test package: `go test`
+    # compiles a binary per package, so a container started in TestMain is shared
+    # within one process only, and container starts grew with package count.
+    # `services:` also pulls during job setup, replacing the explicit pull step.
+    # LocalStack needs the union of every service set the packages request.
+    services:
+      timescaledb:
+        image: timescale/timescaledb:2.25.1-pg17 # keep in sync with internal/testutil/images.go
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: testdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U test -d testdb"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+      redis:
+        image: redis:8.0.6-alpine # keep in sync with internal/testutil/images.go
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+      localstack:
+        image: localstack/localstack:4.3 # keep in sync with internal/testutil/images.go
+        env:
+          SERVICES: s3,sns,sqs
+          DEBUG: 0
+          DISABLE_EVENTS: 1
+          SKIP_SSL_CERT_DOWNLOAD: 1
+        ports:
+          - 4566:4566
+        options: >-
+          --health-cmd "curl -sf http://localhost:4566/_localstack/health"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+
+    env:
+      STL_TEST_POSTGRES_DSN: postgres://test:test@localhost:5432/testdb?sslmode=disable
+      STL_TEST_REDIS_ADDR: localhost:6379
+      STL_TEST_LOCALSTACK_ENDPOINT: http://localhost:4566
 
     steps:
       - name: Checkout code
@@ -96,16 +150,5 @@ jobs:
           cache: true
           cache-dependency-path: 'stl-verify/go.sum'
 
-      - name: Pull container images
-        run: |
-          IMAGES=$(grep -E 'Image[A-Za-z0-9_]+[[:space:]]*=' internal/testutil/images.go | grep -oP '".*?"' | tr -d '"')
-          if [ -z "$IMAGES" ]; then
-            echo "::error::No image constants found in internal/testutil/images.go -- check the grep pattern"
-            exit 1
-          fi
-          for IMAGE in $IMAGES; do
-            docker pull "$IMAGE"
-          done
-
       - name: Run integration tests
-        run: make test-integration
+        run: make test-integration-shard INTEGRATION_SHARD=${{ matrix.shard }}
