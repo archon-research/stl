@@ -7,6 +7,7 @@ import {
   StyledSelect,
   ToggleGroup,
 } from '@archon-research/design-system';
+import { toSearchOption } from '@archon-research/router-kit';
 import { useNavigate, useSearch } from '@tanstack/react-router';
 import { ArrowUpRight } from 'lucide-react';
 import { useEffect, useMemo, useState, type ChangeEvent } from 'react';
@@ -28,7 +29,6 @@ import {
   ALLOCATION_CATEGORIES,
   DRAWER_TABS,
   type DrawerTab,
-  toSearchOption,
 } from '../../router/search-params';
 import type {
   Allocation,

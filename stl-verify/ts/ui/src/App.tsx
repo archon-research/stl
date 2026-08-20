@@ -4,6 +4,7 @@ import {
   SidebarLayout,
   type SortingState,
 } from '@archon-research/design-system';
+import { toSearchOption } from '@archon-research/router-kit';
 import {
   useMatchRoute,
   useNavigate,
@@ -76,11 +77,7 @@ import {
 import { isAbortError, toErrorMessage } from './lib/errors';
 import { logging } from './lib/logging';
 import { REFERENCE_MODE } from './lib/referenceMode';
-import {
-  ACTIVITY_ACTIONS,
-  type AppSearchPatch,
-  toSearchOption,
-} from './router/search-params';
+import { ACTIVITY_ACTIONS, type AppSearchPatch } from './router/search-params';
 import type {
   Allocation,
   DataSource,
