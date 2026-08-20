@@ -400,27 +400,44 @@ func TestPositionState(t *testing.T) {
 		}
 	})
 
-	t.Run("reorg across chunk boundaries reclassifies (multi-day observations)", func(t *testing.T) {
+	t.Run("reorg across chunk boundaries reclassifies (12 observations, 12 daily chunks)", func(t *testing.T) {
 		// Every other fixture uses one timestamp, so the guard's stored∪run merge had never been
-		// exercised across real chunk boundaries. Observations two days apart land in different 1-day
-		// chunks; the reorg zeroing the later chunk's block must still reclassify down.
-		body := `SELECT * FROM (VALUES ` +
-			`(1::int,10::bigint,'ixc'::text,'aa'::text,7::numeric,'BORROW'::text,200::bigint,0::int,0::int,'2026-03-01 12:00+00'::timestamptz),` +
-			`(1::int,10::bigint,'ixc'::text,'aa'::text,5::numeric,'LOAN'::text,300::bigint,0::int,0::int,'2026-03-03 12:00+00'::timestamptz)) ` + mppCols
-		mpp(t, "vxc", body, "seed")
-		body = `SELECT * FROM (VALUES ` +
-			`(1::int,10::bigint,'ixc'::text,'aa'::text,7::numeric,'BORROW'::text,200::bigint,0::int,0::int,'2026-03-01 12:00+00'::timestamptz),` +
-			`(1::int,10::bigint,'ixc'::text,'aa'::text,0::numeric,'LOAN'::text,300::bigint,1::int,0::int,'2026-03-03 12:00+00'::timestamptz)) ` + mppCols
-		mpp(t, "vxc", body, "reorg")
-		if got := classOf(t, "ixc", "aa"); got != "BORROW" {
-			t.Errorf("cross-chunk reorg class = %q; want BORROW", got)
+		// exercised across real chunk boundaries. Twelve observations, one per day (one per 1-day
+		// chunk): blocks 100..111, all LOAN except block 108 (COLLATERAL). A reorg then zeroes the
+		// top three blocks at bv=1 — the canonical latest non-zero moves down three chunks to 108
+		// and the classification must follow it.
+		obs := func(qty int, code string, bn, bv int) string {
+			day := strconv.Itoa(bn - 100 + 1)
+			return "(1::int,10::bigint,'ixc'::text,'aa'::text," + strconv.Itoa(qty) + "::numeric," + code + "::text," +
+				strconv.Itoa(bn) + "::bigint," + strconv.Itoa(bv) + "::int,0::int,timestamptz '2026-03-01 12:00+00' + interval '" + day + " days')"
+		}
+		var seed, reorg []string
+		for bn := 100; bn <= 111; bn++ {
+			code := "'LOAN'"
+			if bn == 108 {
+				code = "'COLLATERAL'"
+			}
+			seed = append(seed, obs(5, code, bn, 0))
+			if bn >= 109 {
+				reorg = append(reorg, obs(0, code, bn, 1))
+			} else {
+				reorg = append(reorg, obs(5, code, bn, 0))
+			}
+		}
+		mpp(t, "vxc", `SELECT * FROM (VALUES `+strings.Join(seed, ",")+`) `+mppCols, "seed")
+		if got := classOf(t, "ixc", "aa"); got != "LOAN" {
+			t.Fatalf("seed class = %q; want LOAN (latest non-zero is block 111)", got)
+		}
+		mpp(t, "vxc", `SELECT * FROM (VALUES `+strings.Join(reorg, ",")+`) `+mppCols, "reorg-top-three")
+		if got := classOf(t, "ixc", "aa"); got != "COLLATERAL" {
+			t.Errorf("after zeroing blocks 109-111 across three chunks, class = %q; want COLLATERAL from block 108", got)
 		}
 		var chunks int
 		if err := pool.QueryRow(ctx, `SELECT count(DISTINCT chunk_name) FROM timescaledb_information.chunks WHERE hypertable_name = 'position_state'`).Scan(&chunks); err != nil {
 			t.Fatal(err)
 		}
-		if chunks < 2 {
-			t.Errorf("fixtures landed in %d chunk(s); the cross-chunk premise requires >= 2", chunks)
+		if chunks < 12 {
+			t.Errorf("fixtures landed in %d chunk(s); the multi-chunk premise requires >= 12", chunks)
 		}
 	})
 
