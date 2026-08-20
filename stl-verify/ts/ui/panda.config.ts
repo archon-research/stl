@@ -60,26 +60,8 @@ export default defineConfig({
       tooltip: designSystemStaticCssRecipes.tooltip,
     },
   },
-  theme: {
-    extend: {
-      semanticTokens: {
-        colors: {
-          // Only tokens the design-system preset does NOT provide. Never shadow
-          // a preset token here: `theme.extend` merges last and wins, so a local
-          // copy silently reverts upstream token fixes.
-          bg: {
-            // Completes the preset's `bg.*` status family, which ships
-            // canvas/success/critical/warning but no neutral fill. Upstream gap
-            // tracked as ORB-352; delete this once the preset ships it.
-            neutral: {
-              value: {
-                base: '{colors.neutral.100}',
-                _dark: '{colors.neutral.800}',
-              },
-            },
-          },
-        },
-      },
-    },
-  },
+  // No `theme.extend`: every token this app uses comes from the preset. Add one
+  // here only for a token the preset does NOT provide, and never to shadow one
+  // it does — `theme.extend` merges last and wins, so a local copy silently
+  // reverts upstream token fixes.
 });

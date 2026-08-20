@@ -162,7 +162,7 @@ STL Verify should feel like an operations desk built for sustained concentration
 
 The visual system favors practical rhythm over decorative flourish. High-value metrics, filters, and tables are separated through spacing cadence and tonal layers, while interaction states stay quiet until users need to act. The interface rejects ornamental gradients, novelty controls, and high-chroma noise that competes with risk signals.
 
-Token provenance for this spec comes from `@archon-research/design-system/panda-preset`, which owns the surface, border, text, interactive, `bg.*`, `categorical.*`, `chart.*`, `overlay.*`, `zIndex`, shadow, and scrollbar semantic ramps. `stl-verify/ts/ui/panda.config.ts` adds **only** what the preset does not ship — `bg.neutral` — and **shadows nothing**. Every hex in the frontmatter below is a resolved value read out of `npx panda cssgen` output, not a hand-maintained copy; regenerate and re-read after any preset upgrade.
+Token provenance for this spec comes from `@archon-research/design-system/panda-preset`, which owns the surface, border, text, interactive, `bg.*`, `categorical.*`, `chart.*`, `overlay.*`, `zIndex`, shadow, and scrollbar semantic ramps. `stl-verify/ts/ui/panda.config.ts` has **no `theme.extend` block at all**: it shadows nothing, and the one token it used to add locally (`bg.neutral`) now ships in the preset. Every hex in the frontmatter below is a resolved value read out of `npx panda cssgen` output, not a hand-maintained copy; regenerate and re-read after any preset upgrade.
 
 **Do not re-add local overrides of preset tokens.** A local copy silently reverts upstream token fixes: the previous config redefined `surface.default` to `gray.950` in dark mode, which made a raised panel the darkest thing on the page and inverted the elevation ramp.
 
@@ -206,7 +206,7 @@ The ramp steps forward monotonically in both themes: canvas is furthest back, pa
 - **colors.text.critical** (#dc2626 / #fca5a5): the absent state on a risk dashboard. Use it; a risk grid that signals only success/warning/interactive is under-reporting.
 
 ### Status fills
-`bg.success`, `bg.warning`, `bg.critical` come from the preset; `bg.neutral` (#f5f5f5 / #262626) completes the status family locally.
+`bg.success`, `bg.warning`, `bg.critical` and `bg.neutral` (#f5f5f5 / #262626) all come from the preset. `bg.neutral` is the status-free member: "this block is called out, and it means nothing good or bad".
 
 ### Categorical encoding
 `categorical.1..5` (`.bg` + `.fg`, dark-aware) carry grouping that has no status meaning — allocation category chips, legends. Hue order is blue / teal / violet / amber / pink, matching `chart.series`, so a chip and its series line read as the same category. Reach for these, not the `bg.*` status family: its red reads as an alarm on a routine category, and `colorPalette` role sub-tokens exist for only six hues (neutral, gray, green, red, amber, blue), of which gray is indistinguishable from neutral.
