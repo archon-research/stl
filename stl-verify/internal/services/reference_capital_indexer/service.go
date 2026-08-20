@@ -17,19 +17,25 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
+// Enough to close the gap since the last cycle and absorb one that did not run.
+// The backfill seeded the year, so this is not a history window.
+const balanceSheetLookbackDays = 3
+
 // Clock returns the current time; injected so a cycle's synced_at is testable.
 type Clock func() time.Time
 
 // Service fetches reference risk-capital snapshots and persists them.
 type Service struct {
-	primeRepo    outbound.PrimeRepository
-	capitalRepo  outbound.PrimeCapitalStackRepository
-	riskProvider outbound.RiskCapitalProvider
-	trackedStars []string
-	buildID      int
-	now          Clock
-	telemetry    *Telemetry
-	logger       *slog.Logger
+	primeRepo     outbound.PrimeRepository
+	capitalRepo   outbound.PrimeCapitalStackRepository
+	riskProvider  outbound.RiskCapitalProvider
+	sheetRepo     outbound.PrimeBalanceSheetRepository
+	sheetProvider outbound.BalanceSheetProvider
+	trackedStars  []string
+	buildID       int
+	now           Clock
+	telemetry     *Telemetry
+	logger        *slog.Logger
 }
 
 // NewService creates a capital stack sync service.
@@ -41,6 +47,8 @@ func NewService(
 	primeRepo outbound.PrimeRepository,
 	capitalRepo outbound.PrimeCapitalStackRepository,
 	riskProvider outbound.RiskCapitalProvider,
+	sheetRepo outbound.PrimeBalanceSheetRepository,
+	sheetProvider outbound.BalanceSheetProvider,
 	trackedStars []string,
 	buildID int,
 	now Clock,
@@ -54,14 +62,16 @@ func NewService(
 		now = time.Now
 	}
 	return &Service{
-		primeRepo:    primeRepo,
-		capitalRepo:  capitalRepo,
-		riskProvider: riskProvider,
-		trackedStars: trackedStars,
-		buildID:      buildID,
-		now:          now,
-		telemetry:    telemetry,
-		logger:       logger.With("component", "reference-capital-indexer"),
+		primeRepo:     primeRepo,
+		capitalRepo:   capitalRepo,
+		riskProvider:  riskProvider,
+		sheetRepo:     sheetRepo,
+		sheetProvider: sheetProvider,
+		trackedStars:  trackedStars,
+		buildID:       buildID,
+		now:           now,
+		telemetry:     telemetry,
+		logger:        logger.With("component", "reference-capital-indexer"),
 	}
 }
 
@@ -99,8 +109,74 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	s.telemetry.RecordSnapshotsWritten(ctx, len(snapshots))
+
+	if err := s.recordBalanceSheet(ctx, primeIDs); err != nil {
+		return err
+	}
+
 	s.logger.Info("capital stack sync complete", "snapshots", len(snapshots))
 	return nil
+}
+
+// recordBalanceSheet advances the daily balance sheet, whose figures the monitor
+// does not carry — assets_usd among them.
+//
+// The window is short because the backfill seeded the year: this only has to
+// close the gap since the last cycle, plus a day's slack for a cycle that did
+// not run. The provider drops the current UTC day, so a run before upstream has
+// published yesterday finds nothing new, which is not an error.
+func (s *Service) recordBalanceSheet(ctx context.Context, primeIDs map[string]int64) error {
+	days, err := s.sheetProvider.FetchHistory(ctx, s.trackedStars, balanceSheetLookbackDays)
+	if err != nil {
+		return fmt.Errorf("fetching balance-sheet history: %w", err)
+	}
+
+	sheets, err := s.toBalanceSheets(days, primeIDs)
+	if err != nil {
+		return err
+	}
+	if len(sheets) == 0 {
+		return nil
+	}
+
+	if err := s.sheetRepo.SaveBalanceSheetSnapshots(ctx, sheets); err != nil {
+		return fmt.Errorf("saving balance sheet snapshots: %w", err)
+	}
+
+	s.logger.Info("balance sheet advanced", "days", len(sheets))
+	return nil
+}
+
+func (s *Service) toBalanceSheets(
+	days []outbound.BalanceSheetDay,
+	primeIDs map[string]int64,
+) ([]entity.PrimeBalanceSheetSnapshot, error) {
+	sheets := make([]entity.PrimeBalanceSheetSnapshot, 0, len(days))
+	for _, day := range days {
+		primeID, ok := primeIDs[strings.ToLower(strings.TrimSpace(day.Star))]
+		if !ok {
+			return nil, fmt.Errorf("balance-sheet feed reported unknown prime %q", day.Star)
+		}
+
+		observedAt, err := time.Parse(time.DateOnly, day.Date)
+		if err != nil {
+			return nil, fmt.Errorf("parsing date %q for prime %q: %w", day.Date, day.Star, err)
+		}
+
+		sheets = append(sheets, entity.PrimeBalanceSheetSnapshot{
+			PrimeID:            primeID,
+			ObservedAt:         observedAt.UTC(),
+			TreasuryBalanceUSD: day.TreasuryBalance,
+			AssetsUSD:          day.Assets,
+			AllocatedAssetsUSD: day.AllocatedAssets,
+			IdleAssetsUSD:      day.IdleAssets,
+			DebtUSD:            day.Debt,
+			BackstopCapitalUSD: day.BackstopCapital,
+			Source:             entity.ReferenceDataSource,
+			BuildID:            s.buildID,
+		})
+	}
+	return sheets, nil
 }
 
 // reportUncovered surfaces the tracked primes this cycle did not observe.

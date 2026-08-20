@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func row(star, date string, overrides map[string]any) map[string]any {
@@ -31,6 +32,9 @@ func row(star, date string, overrides map[string]any) map[string]any {
 	return r
 }
 
+// Pinned so the in-progress-day cutoff lands on the same date every run.
+var testNow = time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC)
+
 // The returned accessor reads the recorded query under the same lock the
 // handler writes it with: the handler runs on the server's goroutine, so
 // handing back a bare pointer would race the assertion.
@@ -52,7 +56,10 @@ func newTestClient(t *testing.T, rows []map[string]any) (*Client, func() string)
 	}))
 	t.Cleanup(server.Close)
 
-	client, err := NewClient(ClientConfig{BaseURL: server.URL})
+	client, err := NewClient(ClientConfig{
+		BaseURL: server.URL,
+		Now:     func() time.Time { return testNow },
+	})
 	if err != nil {
 		t.Fatalf("NewClient() = %v", err)
 	}
@@ -165,5 +172,34 @@ func TestFetchHistoryRejectsANonPositiveWindow(t *testing.T) {
 func TestNewClientRejectsARelativeBaseURL(t *testing.T) {
 	if _, err := NewClient(ClientConfig{BaseURL: "internal"}); err == nil {
 		t.Fatal("NewClient() = nil, want an error")
+	}
+}
+
+// The current day's row moves as the day runs, and the store cannot revise it:
+// the processing-version trigger is build-aware, so a second write for the same
+// day under one deployment is discarded and the first reading is frozen.
+func TestFetchHistoryWithholdsTheDayStillInProgress(t *testing.T) {
+	client, _ := newTestClient(t, []map[string]any{
+		row("spark", "2026-08-20", nil),
+		row("spark", "2026-08-19", nil),
+	})
+
+	days, err := client.FetchHistory(context.Background(), []string{"spark"}, 3)
+	if err != nil {
+		t.Fatalf("FetchHistory() = %v", err)
+	}
+
+	if len(days) != 1 || days[0].Date != "2026-08-19" {
+		t.Fatalf("kept %v, want only the completed day 2026-08-19", days)
+	}
+}
+
+func TestFetchHistoryRejectsAWindowHoldingOnlyTheDayInProgress(t *testing.T) {
+	// Distinct from "nothing published": the caller asked for a window and the
+	// feed answered, so silently returning an empty set would read as no history.
+	client, _ := newTestClient(t, []map[string]any{row("spark", "2026-08-20", nil)})
+
+	if _, err := client.FetchHistory(context.Background(), []string{"spark"}, 1); err == nil {
+		t.Fatal("FetchHistory() = nil, want an error")
 	}
 }
