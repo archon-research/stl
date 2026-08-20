@@ -633,7 +633,14 @@ groups:
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectormorphov2forcedeallocatesurge
 
       - alert: VectorMorphoV2NoSnapshotsWritten
-        # Silent-empty guard for the structured write path. Every V2 event named
+        # Silent-empty guard for the structured write path, HALF ONE of two: the V2
+        # event feed is alive but no snapshot row came out the other side.
+        # VectorMorphoV2NoStructuredEvents below is the other half and covers the
+        # class this one structurally cannot — a feed that is ALWAYS empty zeroes
+        # this rule's own left side and makes it un-fireable. The two are
+        # complementary; neither alone is the silent-empty guard.
+        #
+        # Every V2 event named
         # on the left has a typed handler that must produce a snapshot row; if one
         # loses its handler (a dispatch case falling through processMetaMorphoLog's
         # `default: return nil`, which audit-logs the event and returns success),
@@ -654,6 +661,16 @@ groups:
         # side non-zero, so this rule catches a TOTAL write-path failure, not the
         # loss of one snapshot_type. Per-type coverage would need per-type gating
         # and is not worth the false-positive surface at those volumes.
+        #
+        # Both windows are 6h, deliberately SYMMETRIC. The cap/fee sparsity above
+        # is what forces 6h on the left; making the right side narrower (a 30m
+        # snapshot window against a 6h event window) would false-fire on every
+        # ordinary stall, because a 30m-quiet indexer trivially has zero snapshots
+        # against 6h of remembered events — and the stall rule already owns that
+        # condition. The cost is detection latency: a deploy that breaks the write
+        # path at t=0 is not caught until the 6h rate window has aged out the last
+        # pre-deploy snapshot sample, so worst case is ~6h plus the 15m `for`
+        # (~6h15m). Accepted — this failure is persistent, not transient.
         #
         # `unless`, not `and … == 0`: RecordV2Snapshot never fires under the exact
         # bug this targets, so the snapshots series is never created and an
@@ -696,6 +713,57 @@ groups:
             and no error is raised — downstream VaultV2 composition and fee reads
             are silently freezing.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectormorphov2nosnapshotswritten
+
+      - alert: VectorMorphoV2NoStructuredEvents
+        # Silent-empty guard, HALF TWO: blocks are processing successfully but NOT
+        # ONE VaultV2 structured event has been decoded. Covers exactly the class
+        # VectorMorphoV2NoSnapshotsWritten cannot — it gates on this same V2 event
+        # feed, so a feed that is always empty makes its left side absent and the
+        # rule un-fireable.
+        #
+        # None of the failures here raise an error and blocks_processed keeps
+        # advancing throughout: a V2 topic dropped from the extractor's registered
+        # set, an ABI change that stops the V2 signatures matching, or a vault
+        # registry that holds no V2 vault so IsVaultActivityEvent never routes a
+        # log into the V2 handlers at all. Nothing else in this file would page.
+        #
+        # 6h window, matching its twin (see its comment for why 6h is the floor).
+        # Mainnet prod runs ~25k Allocate/Deallocate per 7d (~150/h), so 6h with
+        # zero V2 events is orders of magnitude outside anything observed.
+        # morpho-indexer is a single mainnet deployment, so there is no chain here
+        # whose VaultV2 population is legitimately empty; adding a chain that has
+        # no V2 vaults means gating this rule on that chain, not silencing it.
+        #
+        # `unless`, not `and … == 0`: under the bug the V2 event series is never
+        # created at all, and `and … == 0` finds no match on an empty right side —
+        # blind in exactly the case this exists for. Do not revert to `and`.
+        expr: |
+          sum by (chain, cluster) (
+            rate(morpho_blocks_processed_total{status="success", k8s_namespace_name="vector"}[6h])
+          ) > 0
+          unless
+          sum by (chain, cluster) (
+            rate(morpho_events_processed_total{
+              event_type=~"Allocate|Deallocate|IncreaseAbsoluteCap|DecreaseAbsoluteCap|IncreaseRelativeCap|DecreaseRelativeCap|SetPerformanceFee|SetManagementFee|SetPerformanceFeeRecipient|SetManagementFeeRecipient",
+              k8s_namespace_name="vector"
+            }[6h])
+          ) > 0
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: morpho-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector morpho decoding no VaultV2 structured events on {{ $labels.chain }}"
+          description: |
+            `morpho-indexer` on chain `{{ $labels.chain }}` has processed blocks
+            successfully for 6h but decoded zero VaultV2 allocation / cap / fee
+            events. Mainnet normally sees ~150 an hour, so this is not a quiet
+            market: the V2 topics are likely no longer registered, the signatures
+            no longer match, or the vault registry holds no V2 vault — in every
+            case the structured tables stop filling with no error raised.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectormorphov2nostructuredevents
 
   # Own rule GROUP but same file, so it keeps the filename-derived Mimir
   # namespace `vector-indexers`. Splitting the group (not the file) keeps each

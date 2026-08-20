@@ -1989,10 +1989,23 @@ means no expectation of rows and the rule stays silent, so a dormant vault
 population cannot false-positive it. This is deliberately **not** a wall-clock
 staleness rule — see "Why there is no VaultV2 state-freshness alert" above.
 
+This is **half one** of a two-rule silent-empty guard.
+[`VectorMorphoV2NoStructuredEvents`](#vectormorphov2nostructuredevents) is half
+two and covers the class this rule structurally cannot: an event feed that is
+*always* empty zeroes this rule's own left side and makes it un-fireable.
+
 Scope: the counters are summed across snapshot types, and Allocate/Deallocate
 traffic on mainnet is continuous (~25k events/7d), so this catches a **total**
 write-path failure. The loss of one snapshot type alone (e.g. caps only, ~104
 events/7d) will not fire it.
+
+Both sides use the same 6h window, deliberately. Cap (~104/7d) and fee (~15/7d)
+sparsity is what forces 6h on the left; a narrower right side would false-fire on
+every ordinary stall, since a 30m-quiet indexer trivially has zero snapshots
+against 6h of remembered events — and the Stalled rule already owns that
+condition. The cost is detection latency: a deploy that breaks the write path is
+not caught until the 6h rate window has aged out the last pre-deploy snapshot
+sample, so **worst case ~6h15m** (6h window + 15m `for`).
 
 ### First checks
 
@@ -2040,5 +2053,78 @@ events/7d) will not fire it.
 
 `rate(morpho_v2_snapshots_written_total[6h]) > 0` for the affected chain, and the
 three `max(block_number)` queries above tracking the chain head.
+
+---
+
+## VectorMorphoV2NoStructuredEvents
+
+**Severity:** warning · **For:** 15m (on a 6h window)
+
+### What it means
+
+Blocks are processing successfully (`morpho_blocks_processed_total{status="success"}`
+is non-zero) but **not one** VaultV2 allocation / cap / fee event has been decoded
+(`morpho_events_processed_total` for the V2 event set is zero or absent) for 6
+hours on the labelled `chain`.
+
+This is **half two** of the silent-empty guard, and it covers what
+[`VectorMorphoV2NoSnapshotsWritten`](#vectormorphov2nosnapshotswritten)
+structurally cannot: that rule gates on this same V2 event feed, so a feed that is
+*always* empty makes its left side absent and the rule un-fireable. Nothing else
+in the group would page — `morpho_blocks_processed_total` keeps advancing happily,
+and no error is ever raised.
+
+Mainnet prod runs ~25k `Allocate`/`Deallocate` per 7d (~150/h), so 6h of zero V2
+events is orders of magnitude outside anything observed. It is not a lull.
+
+### First checks
+
+1. **Topic registration** — the most likely cause. Confirm the V2 topics are still
+   in the extractor's registered set and still resolve to typed events:
+   diff `event_extractor.go`'s V2 topic table against the `event_type` values the
+   metric last carried
+   (`count by (event_type) (morpho_events_processed_total)` over a wider window,
+   e.g. `[30d]`, to see which names have gone missing).
+2. **V2 vault population** — a registry holding no V2 vault means
+   `IsVaultActivityEvent` never routes a log into the V2 handlers:
+
+   ```sql
+   SELECT vault_version, count(*) FROM morpho_vault GROUP BY 1;
+   ```
+
+   Zero rows at `vault_version = 3` is the answer.
+3. **Genuinely no V2 activity on-chain** — confirm against the chain that the
+   known V2 vaults really emitted nothing in 6h (cast, or the Morpho explorer).
+   For the mainnet population this would be extraordinary; if a chain is added
+   whose V2 population is legitimately empty, gate the rule on that chain rather
+   than silencing it.
+4. **Audit log cross-check** (`db-query`) — metrics could be lying:
+
+   ```sql
+   SELECT event_name, max(block_number)
+     FROM protocol_event
+    WHERE created_at > now() - interval '1 hour'
+      AND event_name IN ('Allocate', 'Deallocate', 'SetPerformanceFee')
+    GROUP BY 1;
+   ```
+
+   Rows advancing while the counter is flat means the OTLP export is broken, not
+   the pipeline.
+
+### Common causes
+
+- V2 topic dropped from the extractor's registered set → logs are never decoded,
+  so nothing reaches `processMetaMorphoLog`.
+- ABI / signature change on the vault contracts → the registered topic hashes no
+  longer match the emitted logs.
+- Vault registry holds no V2 vault (migration not applied, discovery regression)
+  → every V2 log is filtered out before dispatch.
+- Broken OTLP export while the pipeline is healthy → `protocol_event` advances
+  while the counter is flat (check 4 above).
+
+### Verify recovery
+
+`rate(morpho_events_processed_total{event_type=~"Allocate|Deallocate|Increase.*Cap|Decrease.*Cap|Set.*Fee.*"}[6h]) > 0`
+for the affected chain.
 
 ---
