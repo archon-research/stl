@@ -401,6 +401,93 @@ func TestSeedV2VaultAdapters_EnumerationFailureWritesNothing(t *testing.T) {
 	}
 }
 
+// TestSeedV2VaultAdapters_CountsNothingWhenTheTransactionFails pins the seed's
+// telemetry to the COMMIT, not to the append. The registry appended a membership
+// row, then the transaction rolled back, so the run recorded nothing and
+// morpho_v2_adapter_registrations_total must agree. Counting inside the
+// transaction instead made every failed attempt raise the counter the
+// bootstrap's runbook and VectorMorphoV2LazyAdapterRegistrations read — and a
+// bootstrap retry re-seeds the same vault, so one adapter would be counted once
+// per attempt.
+func TestSeedV2VaultAdapters_CountsNothingWhenTheTransactionFails(t *testing.T) {
+	h := newTestHarness(t)
+	h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
+	reader := h.recordMetrics(t)
+	h.wireV2AdapterSeedReads(testAdapterAddr, big.NewInt(4242))
+
+	h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterObservation) (int64, bool, error) {
+		return 99, true, nil
+	}
+	h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterState) error {
+		return errors.New("write barrier")
+	}
+
+	if err := h.svc.SeedV2VaultAdapters(context.Background(), testVaultAddr, 24_000_000, testBlockHash, 0, time.Unix(1_760_000_000, 0).UTC()); err == nil {
+		t.Fatal("expected the seed transaction to fail")
+	}
+
+	want := map[string]string{"observed_via": string(entity.MembershipFromBootstrapSeed)}
+	if got := counterValue(t, reader, "morpho.v2.adapter.registrations", want); got != 0 {
+		t.Errorf("morpho.v2.adapter.registrations%v = %d, want 0: the transaction rolled back, so no observation was recorded", want, got)
+	}
+}
+
+// TestSeedV2VaultAdapters_CountsEveryObservationACommittedSeedAppended is the
+// other half: once the transaction commits, the counter carries one point per
+// APPENDED row — the enumerated adapter and the de-registration the enumeration
+// implied — each labelled with the classification it was recorded under.
+func TestSeedV2VaultAdapters_CountsEveryObservationACommittedSeedAppended(t *testing.T) {
+	h := newTestHarness(t)
+	h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
+	reader := h.recordMetrics(t)
+	h.wireV2AdapterSeedReads(testAdapterAddr, big.NewInt(4242))
+
+	goneAdapter := common.HexToAddress("0x00000000000000000000000000000000000000aa")
+	h.morphoRepo.GetActiveAdaptersByVaultAtFn = func(_ context.Context, _ int64, _ entity.BlockPosition) ([]*entity.MorphoAdapterMember, error) {
+		return []*entity.MorphoAdapterMember{
+			{MorphoAdapterIdentity: entity.MorphoAdapterIdentity{ID: 1, MorphoVaultID: 7, Address: testAdapterAddr.Bytes(), AssetTokenID: 1}, AdapterType: entity.MorphoAdapterTypeMarketV1},
+			{MorphoAdapterIdentity: entity.MorphoAdapterIdentity{ID: 2, MorphoVaultID: 7, Address: goneAdapter.Bytes(), AssetTokenID: 1}, AdapterType: entity.MorphoAdapterTypeVaultV1},
+		}, nil
+	}
+	h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterObservation) (int64, bool, error) {
+		return 99, true, nil
+	}
+
+	if err := h.svc.SeedV2VaultAdapters(context.Background(), testVaultAddr, 24_000_000, testBlockHash, 0, time.Unix(1_760_000_000, 0).UTC()); err != nil {
+		t.Fatalf("SeedV2VaultAdapters: %v", err)
+	}
+
+	seeded := map[string]string{"adapter.type": "market_v1", "observed_via": string(entity.MembershipFromBootstrapSeed)}
+	if got := counterValue(t, reader, "morpho.v2.adapter.registrations", seeded); got != 1 {
+		t.Errorf("morpho.v2.adapter.registrations%v = %d, want 1 for the enumerated adapter", seeded, got)
+	}
+	// A de-registration carries no probe, so it lands on the "unprobed" label —
+	// the third state the unknown-adapter alert must not confuse with a failed probe.
+	deregistered := map[string]string{"adapter.type": "unprobed", "observed_via": string(entity.MembershipFromBootstrapSeed)}
+	if got := counterValue(t, reader, "morpho.v2.adapter.registrations", deregistered); got != 1 {
+		t.Errorf("morpho.v2.adapter.registrations%v = %d, want 1 for the de-registration", deregistered, got)
+	}
+	total := map[string]string{"observed_via": string(entity.MembershipFromBootstrapSeed)}
+	if got := counterValue(t, reader, "morpho.v2.adapter.registrations", total); got != 2 {
+		t.Errorf("morpho.v2.adapter.registrations%v = %d, want exactly the 2 appended observations", total, got)
+	}
+}
+
+// wireV2AdapterSeedReads answers every chain read SeedV2VaultAdapters issues for
+// a vault holding exactly one adapter: the hash-pinned enumeration plus
+// realAssets, and the number-pinned type probe that classifies it as MarketV1.
+func (h *serviceTestHarness) wireV2AdapterSeedReads(adapter common.Address, realAssets *big.Int) {
+	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		return h.vaultAdapterEnumerationResults(calls, testVaultAddr, adapter, realAssets)
+	}
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		if len(calls) == adapterProbeCallsPerAdapter && calls[0].Target == adapter {
+			return h.adapterProbeResults(entity.MorphoAdapterTypeMarketV1), nil
+		}
+		return nil, errTestUnexpectedCall(calls)
+	}
+}
+
 // vaultAdapterEnumerationResults answers the three hash-pinned reads the adapter
 // seed issues — adaptersLength(), adapters(0), and the adapter's realAssets() —
 // for a vault holding exactly one adapter.

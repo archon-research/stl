@@ -112,12 +112,17 @@ func (s *Service) SeedV2VaultAdapters(ctx context.Context, vaultAddress common.A
 	if err != nil {
 		return fmt.Errorf("reading the recorded adapter set for vault %s: %w", vaultAddress.Hex(), err)
 	}
-	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		if err := s.seedDiscoveredAdapters(ctx, tx, vault, vaultAddress, blockNumber, blockVersion, blockTimestamp, adapters, entity.MembershipFromBootstrapSeed); err != nil {
+	var recorded []membershipObservation
+	if err := s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
+		if err := s.seedDiscoveredAdapters(ctx, tx, vault, vaultAddress, blockNumber, blockVersion, blockTimestamp, adapters, entity.MembershipFromBootstrapSeed, &recorded); err != nil {
 			return err
 		}
-		return s.deregisterAdaptersAbsentOnChain(ctx, tx, vault, vaultAddress, blockNumber, blockVersion, blockTimestamp, adapters, registered)
-	})
+		return s.deregisterAdaptersAbsentOnChain(ctx, tx, vault, vaultAddress, blockNumber, blockVersion, blockTimestamp, adapters, registered, &recorded)
+	}); err != nil {
+		return err
+	}
+	s.recordMembershipObservations(ctx, recorded)
+	return nil
 }
 
 // deregisterAdaptersAbsentOnChain records that every adapter our registry still
@@ -136,7 +141,7 @@ func (s *Service) SeedV2VaultAdapters(ctx context.Context, vaultAddress common.A
 // end-of-block state read, so its answer is authoritative over every log in that
 // block. And it is an assertion, so a run whose enumeration already matches the
 // registry appends nothing at all.
-func (s *Service) deregisterAdaptersAbsentOnChain(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault, vaultAddress common.Address, blockNumber int64, blockVersion int, blockTimestamp time.Time, onChain []discoveredAdapter, registered []*entity.MorphoAdapterMember) error {
+func (s *Service) deregisterAdaptersAbsentOnChain(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault, vaultAddress common.Address, blockNumber int64, blockVersion int, blockTimestamp time.Time, onChain []discoveredAdapter, registered []*entity.MorphoAdapterMember, recorded *[]membershipObservation) error {
 	enumerated := make(map[common.Address]struct{}, len(onChain))
 	for _, a := range onChain {
 		enumerated[a.address] = struct{}{}
@@ -155,7 +160,7 @@ func (s *Service) deregisterAdaptersAbsentOnChain(ctx context.Context, tx pgx.Tx
 			IsMember:     false,
 			AdapterType:  nil,
 			ObservedVia:  entity.MembershipFromBootstrapSeed,
-		})
+		}, recorded)
 		if err != nil {
 			return err
 		}
