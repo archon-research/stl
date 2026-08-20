@@ -76,6 +76,51 @@ func TestPositionState(t *testing.T) {
 		return `SELECT * FROM (VALUES ` + strings.Join(rows, ",") + `) ` + mppCols
 	}
 
+	// Mutation audit — every guard in 20260818_130000_create_position_state.sql mapped to the
+	// subtest that fails if that guard is deleted or weakened. Reviewers: this table is the
+	// coverage claim; each row was verified by reproducing the mutation on a scratch build.
+	//
+	//   guard / behavior                          killed by subtest
+	//   ----------------------------------------  ------------------------------------------------
+	//   position_state_qty_nonneg_chk             negative/NaN/Infinity quantity rejected
+	//   position_state_coord_nonneg_chk           negative block_number / bv+pv rejected
+	//   position_state_chain_pos_chk              zero or negative chain_id rejected
+	//   position_state_protocol_pos_chk           zero or negative chain_id/protocol_id rejected
+	//   position_state_ts_sane_chk                pre-blockchain block_timestamp rejected
+	//   position_state_id_len_chk                 1-byte position_id rejected (direct insert)
+	//   position_state_holder_hex_chk             holder case/prefix/non-hex cases (input matrix)
+	//   pre-flight (1) column contract            float8 fails / missing column MISSING
+	//   pre-flight (2) double-emit                double-emitted logical key raises
+	//   pre-flight (3) changed block_timestamp    re-emitted observation with changed ts raises
+	//   pre-flight (4) NULL code on non-zero      null deal_type_code on non-zero raises
+	//   p_reason / p_view argument guards         null/blank p_reason; NULL p_view subtests
+	//   recency guard bn component                older-block backfill does not regress
+	//   recency guard bv component                same-height older version does not regress
+	//   recency guard pv component (deny)         older processing_version does not regress
+	//   recency guard lexicographic order         block_version bump outranks higher stored pv
+	//   merged-canonical (fix a, reorg drop)      reorg-wedge reclassifies down (:279)
+	//   merged-canonical (fix b, run visibility)  self-snapshot correction reclassifies (:278)
+	//   canonicality join (round 7)               stale re-emission cannot rewrite / cannot mint
+	//   cls FK fail-hard (LEFT JOIN + raw code)   unseeded deal_type_code fails the run
+	//   cls no-op guard (IS DISTINCT FROM)        no-op rerun preserves change_reason
+	//   direction frozen from ref_deal_type       no-op rerun preserves change_reason (direction)
+	//   valid_from UTC stamp                      classification stamps valid_from as UTC today
+	//   quantity-only upsert (ins arm)            qty rewrite leaves created_at untouched
+	//   column-scoped UPDATE grants               narrowed grants: rewrite denied suite
+	//   TRUNCATE / readonly / collateral locks    TRUNCATE denied and stl_readonly is read-only
+	//   advisory lock exists + key stability      advisory lock key is search_path-independent
+	//   advisory lock serializes same view        concurrent same-view runs serialize
+	//   advisory lock does NOT over-serialize     different views run concurrently
+	//   pg_temp-qualified reads (round 7)         poisoned permanent _mpp_src is never read
+	//   pg_temp DROP qualification                temp-table drop spares a permanent _mpp_src
+	//   temp lifecycle                            temp snapshot is not left behind after a run
+	//   hypertable + 1-day chunks                 position_state is a hypertable with 1-day chunks
+	//   no default ts index                       no default block_timestamp index
+	//   cross-chunk correctness                   12-day chunk reorg / model fuzz
+	//   whole-run atomicity                       within-write failure leaves rows untouched
+	//   return-count contract                     return value counts rows inserted or changed
+	//   state-space beyond hand-picked cases      model fuzz (seeded, oracle-mirrored)
+
 	// --- recency guard ---------------------------------------------------------------------------
 
 	t.Run("same-height older version does not regress (CodeRabbit)", func(t *testing.T) {
@@ -1086,13 +1131,14 @@ func TestPositionState(t *testing.T) {
 
 	// --- model-based fuzz --------------------------------------------------------------------------
 
-	t.Run("model fuzz: 120 random steps against an independent oracle (seed 20260819)", func(t *testing.T) {
-		// Every other subtest is a hand-picked scenario; this drives seeded-random operation sequences
-		// (new blocks, reorg zeroes, pv corrections, stale partial re-emissions, quantity rewrites,
-		// full re-projections) and checks four invariants after every step: idempotent rerun, exact
+	t.Run("model fuzz: seeded operation sequences vs an independent oracle", func(t *testing.T) {
+		// Every other subtest is a hand-picked scenario; this drives seeded-random operation
+		// sequences and checks four invariants after every step: idempotent rerun, exact
 		// stored-state conservation, no minted codes, and a full mirror of the guard semantics
-		// (merged-canonical, canonicality join, hwm). The round-7 bug class is found automatically by
-		// this style of test; the seed is fixed so CI is deterministic.
+		// (merged-canonical, canonicality join, hwm). Two profiles: "core" (single-position
+		// batches, the op mix that finds the round-7 bug class automatically) and "batch-shapes"
+		// (NULL-code zero closes and multi-position views — shapes the core profile never emits).
+		// Seeds are fixed so CI is deterministic.
 		type okey struct{ bn, bv, pv int }
 		type oobs struct {
 			qty  int
@@ -1104,12 +1150,11 @@ func TestPositionState(t *testing.T) {
 			expected string // "" means unclassified
 			seen     map[string]bool
 		}
-		codes := []string{"LOAN", "BORROW", "COLLATERAL"}
-		rng := rand.New(rand.NewSource(20260819))
-		positions := make([]*opos, 3)
-		for i := range positions {
-			positions[i] = &opos{ik: fmt.Sprintf("fzg%d", i), stored: map[okey]oobs{}, seen: map[string]bool{}}
+		type canon struct {
+			bv, pv, qty int
+			code        string
 		}
+		codes := []string{"LOAN", "BORROW", "COLLATERAL"}
 		sortedKeys := func(m map[okey]oobs) []okey {
 			ks := make([]okey, 0, len(m))
 			for k := range m {
@@ -1134,11 +1179,6 @@ func TestPositionState(t *testing.T) {
 			return fmt.Sprintf("(1::int,10::bigint,'%s'::text,'aa'::text,%d::numeric,%s,%d::bigint,%d::int,%d::int,timestamptz '2026-06-01 12:00+00' + %d*interval '1 day')",
 				ik, o.qty, c, k.bn, k.bv, k.pv, k.bn%40)
 		}
-		type canon struct {
-			bv, pv, qty int
-			code        string
-		}
-		// merged canonical per block over stored ∪ extra, extra (the run) winning ties
 		canonical := func(p *opos, extra map[okey]oobs) map[int]canon {
 			type cand struct {
 				bv, pv, src, qty int
@@ -1166,7 +1206,6 @@ func TestPositionState(t *testing.T) {
 		}
 		oracleApply := func(p *opos, batch map[okey]oobs) {
 			merged := canonical(p, batch)
-			// the run's latest classifiable observation: canonical within the batch, highest non-zero block
 			runCanon := map[int]canon{}
 			for k, o := range batch {
 				c, seen := runCanon[k.bn]
@@ -1202,31 +1241,11 @@ func TestPositionState(t *testing.T) {
 				}
 			}
 			if hbn >= 0 {
-				lt := [3]int{latestBn, l.bv, l.pv}
-				ht := [3]int{hbn, h.bv, h.pv}
-				if lt[0] < ht[0] || (lt[0] == ht[0] && (lt[1] < ht[1] || (lt[1] == ht[1] && lt[2] < ht[2]))) {
+				if latestBn < hbn || (latestBn == hbn && (l.bv < h.bv || (l.bv == h.bv && l.pv < h.pv))) {
 					return // recency guard blocks it
 				}
 			}
 			p.expected = l.code
-		}
-		runBatch := func(p *opos, batch map[okey]oobs) (int64, int64) {
-			rows := make([]string, 0, len(batch))
-			for _, k := range sortedKeys(batch) {
-				rows = append(rows, tupleSQL(p.ik, k, batch[k]))
-			}
-			view := "vfz" + p.ik
-			if _, err := pool.Exec(ctx, `CREATE OR REPLACE VIEW `+view+` AS `+valuesOf(rows...)); err != nil {
-				t.Fatalf("fuzz view %s: %v", view, err)
-			}
-			var n1, n2 int64
-			if err := pool.QueryRow(ctx, `SELECT materialize_position_projection($1::regclass, 'fuzz')`, view).Scan(&n1); err != nil {
-				t.Fatalf("fuzz run %s: %v", view, err)
-			}
-			if err := pool.QueryRow(ctx, `SELECT materialize_position_projection($1::regclass, 'fuzz-rerun')`, view).Scan(&n2); err != nil {
-				t.Fatalf("fuzz rerun %s: %v", view, err)
-			}
-			return n1, n2
 		}
 		dbRows := func(p *opos) map[okey]int {
 			out := map[okey]int{}
@@ -1246,51 +1265,7 @@ func TestPositionState(t *testing.T) {
 			}
 			return out
 		}
-		for step := 1; step <= 120; step++ {
-			p := positions[rng.Intn(len(positions))]
-			op := rng.Intn(7)
-			batch := map[okey]oobs{}
-			keys := sortedKeys(p.stored)
-			var nz []okey
-			for _, k := range keys {
-				if p.stored[k].qty > 0 {
-					nz = append(nz, k)
-				}
-			}
-			switch {
-			case op <= 1 || len(keys) == 0: // new block
-				maxBn := 99
-				for _, k := range keys {
-					if k.bn > maxBn {
-						maxBn = k.bn
-					}
-				}
-				batch[okey{maxBn + 1 + rng.Intn(3), 0, 0}] = oobs{1 + rng.Intn(9), codes[rng.Intn(3)]}
-			case op == 2: // reorg-zero the top block
-				top := keys[len(keys)-1]
-				batch[okey{top.bn, top.bv + 1, 0}] = oobs{0, codes[rng.Intn(3)]}
-			case op == 3: // pv correction of a random stored key
-				k := keys[rng.Intn(len(keys))]
-				batch[okey{k.bn, k.bv, k.pv + 1}] = oobs{1 + rng.Intn(9), codes[rng.Intn(3)]}
-			case op == 4 && len(nz) > 0: // stale partial re-emission, code changed (the round-7 shape)
-				k := nz[rng.Intn(len(nz))]
-				batch[k] = oobs{p.stored[k].qty, codes[rng.Intn(3)]}
-			case op == 5 && len(nz) > 0: // quantity rewrite at the same key (the sanctioned D1 channel)
-				k := nz[rng.Intn(len(nz))]
-				batch[k] = oobs{1 + rng.Intn(9), p.stored[k].code}
-			default: // full re-projection of everything stored
-				for k, o := range p.stored {
-					batch[k] = o
-				}
-			}
-			if len(batch) == 0 {
-				continue
-			}
-			_, n2 := runBatch(p, batch)
-			if n2 != 0 {
-				t.Fatalf("step %d %s: identical rerun changed %d rows; want 0", step, p.ik, n2)
-			}
-			oracleApply(p, batch)
+		checkPos := func(step int, p *opos) {
 			got := dbRows(p)
 			if len(got) != len(p.stored) {
 				t.Fatalf("step %d %s: db has %d rows, oracle %d", step, p.ik, len(got), len(p.stored))
@@ -1306,6 +1281,106 @@ func TestPositionState(t *testing.T) {
 			}
 			if cls != "" && !p.seen[cls] {
 				t.Fatalf("step %d %s: minted code %q never emitted on a non-zero row", step, p.ik, cls)
+			}
+		}
+		buildOp := func(rng *rand.Rand, p *opos, nullCloses bool) map[okey]oobs {
+			batch := map[okey]oobs{}
+			keys := sortedKeys(p.stored)
+			var nz []okey
+			for _, k := range keys {
+				if p.stored[k].qty > 0 {
+					nz = append(nz, k)
+				}
+			}
+			op := rng.Intn(7)
+			switch {
+			case op <= 1 || len(keys) == 0: // new block
+				maxBn := 99
+				for _, k := range keys {
+					if k.bn > maxBn {
+						maxBn = k.bn
+					}
+				}
+				batch[okey{maxBn + 1 + rng.Intn(3), 0, 0}] = oobs{1 + rng.Intn(9), codes[rng.Intn(3)]}
+			case op == 2: // reorg-zero the top block; batch-shapes profile closes with a NULL code
+				top := keys[len(keys)-1]
+				code := codes[rng.Intn(3)]
+				if nullCloses && rng.Intn(2) == 0 {
+					code = ""
+				}
+				batch[okey{top.bn, top.bv + 1, 0}] = oobs{0, code}
+			case op == 3: // pv correction of a random stored key
+				k := keys[rng.Intn(len(keys))]
+				batch[okey{k.bn, k.bv, k.pv + 1}] = oobs{1 + rng.Intn(9), codes[rng.Intn(3)]}
+			case op == 4 && len(nz) > 0: // stale partial re-emission, code changed (the round-7 shape)
+				k := nz[rng.Intn(len(nz))]
+				batch[k] = oobs{p.stored[k].qty, codes[rng.Intn(3)]}
+			case op == 5 && len(nz) > 0: // quantity rewrite at the same key (the sanctioned D1 channel)
+				k := nz[rng.Intn(len(nz))]
+				batch[k] = oobs{1 + rng.Intn(9), p.stored[k].code}
+			default: // full re-projection of everything stored
+				for k, o := range p.stored {
+					batch[k] = o
+				}
+			}
+			return batch
+		}
+		profiles := []struct {
+			name       string
+			seed       int64
+			steps      int
+			multi      bool
+			nullCloses bool
+		}{
+			{"core", 20260819, 200, false, false},
+			{"batch-shapes", 424242, 140, true, true},
+		}
+		for pi, prof := range profiles {
+			rng := rand.New(rand.NewSource(prof.seed))
+			positions := make([]*opos, 3)
+			for i := range positions {
+				positions[i] = &opos{ik: fmt.Sprintf("fzp%d_%d", pi, i), stored: map[okey]oobs{}, seen: map[string]bool{}}
+			}
+			view := fmt.Sprintf("vfzp%d", pi)
+			for step := 1; step <= prof.steps; step++ {
+				primary := positions[rng.Intn(len(positions))]
+				batches := map[*opos]map[okey]oobs{primary: buildOp(rng, primary, prof.nullCloses)}
+				if prof.multi && rng.Intn(3) == 0 { // one view emitting rows for a second position too
+					other := positions[rng.Intn(len(positions))]
+					if other != primary {
+						batches[other] = buildOp(rng, other, prof.nullCloses)
+					}
+				}
+				var rows []string
+				for _, p := range positions { // deterministic order across the map
+					if b, okb := batches[p]; okb {
+						for _, k := range sortedKeys(b) {
+							rows = append(rows, tupleSQL(p.ik, k, b[k]))
+						}
+					}
+				}
+				if len(rows) == 0 {
+					continue
+				}
+				if _, err := pool.Exec(ctx, `CREATE OR REPLACE VIEW `+view+` AS `+valuesOf(rows...)); err != nil {
+					t.Fatalf("fuzz view %s step %d: %v", view, step, err)
+				}
+				var n1, n2 int64
+				if err := pool.QueryRow(ctx, `SELECT materialize_position_projection($1::regclass, 'fuzz')`, view).Scan(&n1); err != nil {
+					t.Fatalf("fuzz run %s step %d: %v", view, step, err)
+				}
+				if err := pool.QueryRow(ctx, `SELECT materialize_position_projection($1::regclass, 'fuzz-rerun')`, view).Scan(&n2); err != nil {
+					t.Fatalf("fuzz rerun %s step %d: %v", view, step, err)
+				}
+				if n2 != 0 {
+					t.Fatalf("step %d: identical rerun changed %d rows; want 0", step, n2)
+				}
+				for p, b := range batches {
+					oracleApply(p, b)
+				}
+				for p := range batches {
+					checkPos(step, p)
+				}
 			}
 		}
 	})
