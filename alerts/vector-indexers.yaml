@@ -561,10 +561,17 @@ groups:
         # (WHERE observed_via = 'add_adapter_event') is NULL for it until its
         # history is replayed.
         #
-        # >3 per 6h absorbs the legitimate one-off (an adapter set that changed
-        # between the discovery enumeration read and the next event, or the
-        # bootstrap tail) without going blind on a real enumeration regression.
-        # Deliberately not >0: a single self-heal is by design not an incident.
+        # >3 per 6h absorbs the benign source without going blind on a real
+        # enumeration regression. That source is DETERMINISTIC, not a race:
+        # discovery records its enumeration at log_index=EndOfBlockLogIndex
+        # (MaxInt32) so it orders above every log in the discovery block, while the
+        # membership read is position-scoped ((block, version, log_index) <= …). A
+        # VaultV2 emits AccrueInterest — the discovery trigger — first in the very
+        # transaction that allocates, so every allocation in that same block reads
+        # strictly BELOW the seed, finds no answer and appends. One append per
+        # adapter allocated in the discovery block, every time; nothing has to have
+        # changed between two reads. Deliberately not >0: those appends are by
+        # design not an incident.
         expr: |
           sum by (chain, cluster) (
             increase(morpho_v2_adapter_registrations_total{

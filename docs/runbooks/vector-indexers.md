@@ -1826,6 +1826,16 @@ discovery enumerates the vault's **current** adapter set (`adaptersLength()` /
 the log already answers every allocation, nothing is appended, and this counter's
 steady-state rate is **zero**.
 
+**The one benign source is deterministic, not a race.** Discovery records its
+enumeration at `log_index = EndOfBlockLogIndex` (MaxInt32) so it orders above every
+log in the discovery block, while the membership read is position-scoped
+(`(block_number, block_version, log_index) <= …`). A VaultV2 emits `AccrueInterest`
+— the discovery trigger — first in the very transaction that allocates, so every
+allocation in that same block reads strictly *below* the seed, finds no answer, and
+appends. Expect exactly one append per adapter allocated in the discovery block,
+every single time; nothing has to have changed between two reads. Its signature in
+the query below is `blocks_after_discovery = 0`.
+
 It also costs data quality — but not the way a mutable registry did. Nothing is
 approximated: an adapter known only from an `Allocate` simply has **no**
 `add_adapter_event` observation, so its add block is NULL until its history is
@@ -1833,9 +1843,10 @@ replayed. Current membership and classification are correct in the meantime.
 
 ### First checks
 
-1. **Is it one new vault or many?** A vault discovered mid-life whose adapter set
-   changed between the enumeration read and the next event produces a small,
-   one-off burst. Correlate with the discovery path:
+1. **Is it one new vault or many?** A mid-life discovery produces one append per
+   adapter the vault allocates to in the discovery block — deterministically, per
+   the mechanism above — so a wave of new vaults produces a small, one-off burst.
+   Correlate with the discovery path:
    `sum by (observed_via) (increase(morpho_v2_adapter_registrations_total[6h]))`
    — `allocation_event` observations with **no** matching `vault_discovery`
    traffic in the same window are the suspicious case.
@@ -1863,10 +1874,10 @@ replayed. Current membership and classification are correct in the meantime.
    LIMIT 50;
    ```
 
-   `blocks_after_discovery` near 0 means the vault was just discovered — benign.
-   A large positive value on a long-known vault means enumeration missed the
-   adapter, which is the bug. A NULL `added_at_block` is the replay backlog, not a
-   second fault.
+   `blocks_after_discovery = 0` is the same-block signature above — benign, and the
+   expected shape, not a coincidence. A large positive value on a long-known vault
+   means enumeration missed the adapter, which is the bug. A NULL `added_at_block`
+   is the replay backlog, not a second fault.
 4. **Cross-check the chain** — for a suspect vault, ask the contract directly and
    compare with the registry:
 
@@ -1877,8 +1888,9 @@ replayed. Current membership and classification are correct in the meantime.
 
 ### Common causes
 
-- A wave of newly discovered V2 vaults (or the initial bootstrap) → benign;
-  confirm via `blocks_after_discovery` and let it clear.
+- A wave of newly discovered V2 vaults (or the initial bootstrap) → benign and
+  expected: each contributes one append per adapter allocated in its discovery
+  block. Confirm via `blocks_after_discovery = 0` and let it clear.
 - `readV2Adapters` enumeration regression (truncated list, wrong selector, a
   failed sub-read defaulting to empty) → adapters are missing from every newly
   discovered vault; this is the bug the alert exists to catch.
