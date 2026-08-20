@@ -5,11 +5,13 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel"
 	mnoop "go.opentelemetry.io/otel/metric/noop"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.temporal.io/sdk/testsuite"
 	"go.temporal.io/sdk/worker"
 )
 
@@ -96,6 +98,79 @@ func TestRunWorker_InitializesOTELBeforeOpeningTheDatabase(t *testing.T) {
 	}
 	if _, ok := otel.GetMeterProvider().(mnoop.MeterProvider); ok {
 		t.Error("global meter provider is the no-op implementation; metrics would record nothing")
+	}
+}
+
+// TestRegisterRunner_RunsTheRunnerFromAnInputlessStart is the whole point of the
+// helper: a job with nothing to parameterise must be startable with no input
+// payload, and the run must still reach the Runner. A workflow declaring a
+// parameter could not be started that way without the operator inventing a
+// value for it.
+func TestRegisterRunner_RunsTheRunnerFromAnInputlessStart(t *testing.T) {
+	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+	ran := false
+
+	err := RegisterRunner(env, RunnerJob{
+		WorkflowType: "OneShotRepair",
+		Runner: RunnerFunc(func(context.Context) error {
+			ran = true
+			return nil
+		}),
+		Timeouts: ActivityTimeouts{StartToClose: time.Minute, ScheduleToClose: 2 * time.Minute, MaximumAttempts: 3},
+	})
+	if err != nil {
+		t.Fatalf("RegisterRunner: %v", err)
+	}
+
+	env.ExecuteWorkflow("OneShotRepair")
+
+	if !env.IsWorkflowCompleted() {
+		t.Fatal("expected the workflow to complete")
+	}
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatalf("running the registered workflow type with no input: %v", err)
+	}
+	if !ran {
+		t.Error("the runner never ran; the registered workflow reached no activity")
+	}
+}
+
+// The bounds must reach the activity from the registration rather than from
+// workflow input, because an operator supplies no input: a MaximumAttempts of 1
+// would leave a heartbeat-resuming job with no later attempt to resume into.
+func TestRegisterRunner_AppliesTheRegisteredRetryBudget(t *testing.T) {
+	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+	attempts := 0
+
+	err := RegisterRunner(env, RunnerJob{
+		WorkflowType: "OneShotRepair",
+		Runner: RunnerFunc(func(context.Context) error {
+			attempts++
+			return errors.New("chain read failed")
+		}),
+		Timeouts: ActivityTimeouts{StartToClose: time.Minute, ScheduleToClose: 2 * time.Minute, MaximumAttempts: 3},
+	})
+	if err != nil {
+		t.Fatalf("RegisterRunner: %v", err)
+	}
+
+	env.ExecuteWorkflow("OneShotRepair")
+
+	if env.GetWorkflowError() == nil {
+		t.Fatal("expected the workflow to fail after exhausting its attempts")
+	}
+	if attempts != 3 {
+		t.Errorf("runner attempts = %d, want 3 — the registered MaximumAttempts is what a hand-started run gets", attempts)
+	}
+}
+
+func TestRegisterRunner_RequiresAWorkflowType(t *testing.T) {
+	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+
+	err := RegisterRunner(env, RunnerJob{Runner: RunnerFunc(func(context.Context) error { return nil })})
+
+	if err == nil || !strings.Contains(err.Error(), "WorkflowType") {
+		t.Fatalf("error = %v, want one naming the missing WorkflowType", err)
 	}
 }
 

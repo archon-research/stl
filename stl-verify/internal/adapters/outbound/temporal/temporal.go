@@ -2,9 +2,10 @@
 //
 // Two lifecycles are supported. Schedule-driven jobs use RunCronjob, which
 // creates a Temporal schedule and runs the generic cronjobWorkflow on it.
-// Hand-triggered jobs use RunWorker (see ondemand.go), which creates no schedule
-// and registers a workflow that accepts parameters — the shape a backfill needs,
-// because its range comes from whoever starts the run.
+// Hand-started jobs use RunWorker (see ondemand.go), which creates no schedule
+// and registers the caller's own workflow — with parameters, the shape a
+// backfill needs because its range comes from whoever starts the run, or without
+// any, via RegisterRunner, for a one-shot job that derives its own scope.
 //
 // To create a new cronjob, define a CronjobConfig and call RunCronjob.
 // Only Name, IntervalDefault, and Setup are required:
