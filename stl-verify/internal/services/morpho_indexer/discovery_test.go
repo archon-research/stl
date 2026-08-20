@@ -543,9 +543,35 @@ func TestProcessBlockEvent_VaultDiscovery_V2_AdapterObservationsNotRecordedWhenT
 	}
 }
 
-func TestProcessBlockEvent_VaultDiscovery_V2_EnumeratesAndSeedsAdapters(t *testing.T) {
+// TestProcessBlockEvent_VaultDiscovery_V2_CountsObservationsByTypeAndProvenance
+// pins the labels the enumeration's observations carry. observed_via
+// "vault_discovery" is what lets VectorMorphoV2LazyAdapterRegistrations treat the
+// allocation_event path as a defect signal rather than normal new-vault traffic.
+func TestProcessBlockEvent_VaultDiscovery_V2_CountsObservationsByTypeAndProvenance(t *testing.T) {
 	h := newTestHarness(t)
 	reader := h.recordMetrics(t)
+	fx := h.setupV2DiscoveryWithTwoAdapters()
+
+	adapterIDByAddr := map[common.Address]int64{fx.adapterA: 101, fx.adapterB: 102}
+	h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, obs *entity.MorphoAdapterObservation) (int64, bool, error) {
+		return adapterIDByAddr[common.BytesToAddress(obs.Identity.Address)], true, nil
+	}
+
+	log := h.makeDiscoveryTriggerLog(fx.vault)
+	if err := h.processBlock(t, 1, 24481834, 2, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err != nil {
+		t.Fatalf("processBlock: %v", err)
+	}
+
+	for _, wantType := range []string{"market_v1", "vault_v1"} {
+		want := map[string]string{"adapter.type": wantType, "observed_via": string(entity.MembershipFromDiscovery)}
+		if got := counterValue(t, reader, "morpho.v2.adapter.registrations", want); got != 1 {
+			t.Errorf("morpho.v2.adapter.registrations%v = %d, want 1", want, got)
+		}
+	}
+}
+
+func TestProcessBlockEvent_VaultDiscovery_V2_EnumeratesAndSeedsAdapters(t *testing.T) {
+	h := newTestHarness(t)
 	fx := h.setupV2DiscoveryWithTwoAdapters()
 	unknownVault, adapterA, adapterB := fx.vault, fx.adapterA, fx.adapterB
 	realAssetsA, realAssetsB := fx.realAssetsA, fx.realAssetsB
@@ -625,16 +651,6 @@ func TestProcessBlockEvent_VaultDiscovery_V2_EnumeratesAndSeedsAdapters(t *testi
 	}
 	if got := seededByID[102]; got == nil || got.RealAssets.Cmp(realAssetsB) != 0 {
 		t.Errorf("adapterB seed realAssets = %v, want %s (hash-pinned)", got, realAssetsB)
-	}
-
-	// Observations seeded here carry observed_via="vault_discovery", which is what
-	// lets VectorMorphoV2LazyAdapterRegistrations treat the allocation_event path as
-	// a defect signal rather than normal new-vault traffic.
-	for _, wantType := range []string{"market_v1", "vault_v1"} {
-		want := map[string]string{"adapter.type": wantType, "observed_via": string(entity.MembershipFromDiscovery)}
-		if got := counterValue(t, reader, "morpho.v2.adapter.registrations", want); got != 1 {
-			t.Errorf("morpho.v2.adapter.registrations%v = %d, want 1", want, got)
-		}
 	}
 
 	// The adapter SET is versioned state, so its enumeration must be hash-pinned to
