@@ -91,16 +91,12 @@ type MorphoRepository interface {
 	// incarnation for a snapshot to be stranded by.
 	ObserveAdapterMembership(ctx context.Context, tx pgx.Tx, obs *entity.MorphoAdapterObservation) (int64, bool, error)
 
-	// GetActiveAdapter returns the adapter and its current membership for (vault, address),
-	// reading within the caller's transaction so it sees writes made earlier in the same tx.
-	// Returns nil, nil when the adapter is unknown or its latest observation says it is not
-	// a member.
-	GetActiveAdapter(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte) (*entity.MorphoAdapterMember, error)
-
-	// GetActiveAdapterAt is GetActiveAdapter as of a block position, for replay and for the
-	// pre-transaction probe decision: it answers "was this adapter a member HERE", not
-	// "is it a member now", so a backfiller replaying a historical block is not told about
-	// the present. Reads committed state through the pool.
+	// GetActiveAdapterAt returns the adapter and its membership for (vault, address) as of a
+	// block position, for replay and for the pre-transaction probe decision: it answers
+	// "was this adapter a member HERE", not "is it a member now", so a backfiller replaying
+	// a historical block is not told about the present. Returns nil, nil when the adapter is
+	// unknown or the latest observation at or below that position says it is not a member.
+	// Reads committed state through the pool.
 	GetActiveAdapterAt(ctx context.Context, morphoVaultID int64, address []byte, at entity.BlockPosition) (*entity.MorphoAdapterMember, error)
 
 	// GetActiveAdaptersByVaultAt returns every adapter the log calls a member of the

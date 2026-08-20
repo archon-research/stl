@@ -1449,7 +1449,7 @@ func TestProcessBlockEvent_V2Handlers_ErrorsPropagate(t *testing.T) {
 // TestProcessBlockEvent_Allocation_VanishedAdapterFailsHard covers the disagreement
 // between the two adapter reads: the pre-transaction membership check finds the
 // adapter (so nothing is probed and no type is carried into the transaction), but
-// the decisive in-transaction GetActiveAdapter then reports it absent. There is no
+// the decisive in-transaction append then reports it unclassified. There is no
 // live single-consumer path that can remove an adapter in between, so this is
 // unexplained drift: with no probed type the only alternatives are recording a
 // defaulted classification or failing. It must fail, and SQS redelivery re-probes.

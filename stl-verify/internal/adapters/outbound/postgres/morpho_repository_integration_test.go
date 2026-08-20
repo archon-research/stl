@@ -1658,16 +1658,13 @@ func (f *morphoTestFixture) seedAdapterStateAtVersion(t *testing.T, ctx context.
 	}
 }
 
-// getActiveAdapter runs GetActiveAdapter (which reads through the caller's tx) in
-// a short read transaction that is rolled back afterwards.
-func (f *morphoTestFixture) getActiveAdapter(t *testing.T, ctx context.Context, vaultID int64, address []byte) (*entity.MorphoAdapterMember, error) {
+// activeAdapterAtHead reads the adapter as of the end of the highest block on the latest
+// chain we have indexed, the same sentinel position isMemberAt asks about.
+func (f *morphoTestFixture) activeAdapterAtHead(t *testing.T, ctx context.Context, vaultID int64, address []byte) (*entity.MorphoAdapterMember, error) {
 	t.Helper()
-	tx, err := f.pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	defer tx.Rollback(ctx)
-	return f.repo.GetActiveAdapter(ctx, tx, vaultID, address)
+	return f.repo.GetActiveAdapterAt(ctx, vaultID, address, entity.BlockPosition{
+		BlockNumber: math.MaxInt64, BlockVersion: math.MaxInt32, LogIndex: entity.EndOfBlockLogIndex,
+	})
 }
 
 // isMemberAt reports whether the log says the adapter was a member as of the END of a
@@ -1791,9 +1788,9 @@ func TestObserveAdapterMembership_CreateNew(t *testing.T) {
 		t.Error("a transition must always be recorded")
 	}
 
-	got, err := fixture.getActiveAdapter(t, ctx, vaultID, addr)
+	got, err := fixture.activeAdapterAtHead(t, ctx, vaultID, addr)
 	if err != nil {
-		t.Fatalf("GetActiveAdapter failed: %v", err)
+		t.Fatalf("GetActiveAdapterAt failed: %v", err)
 	}
 	if got == nil {
 		t.Fatal("expected adapter, got nil")
@@ -1855,9 +1852,9 @@ func TestObserveAdapterMembership_RemovalOfUnknownAdapterIsRecorded(t *testing.T
 	if got := fixture.describeMembership(t, ctx, id); got != "24600000.v0.3 member=false type=nil via=remove_adapter_event pv=0" {
 		t.Errorf("membership log = %q", got)
 	}
-	active, err := fixture.getActiveAdapter(t, ctx, vaultID, addr)
+	active, err := fixture.activeAdapterAtHead(t, ctx, vaultID, addr)
 	if err != nil {
-		t.Fatalf("GetActiveAdapter: %v", err)
+		t.Fatalf("GetActiveAdapterAt: %v", err)
 	}
 	if active != nil {
 		t.Errorf("expected no active adapter, got %+v", active)
@@ -1971,9 +1968,9 @@ func TestObserveAdapterMembership_SameBlockAddRemoveReAdd(t *testing.T) {
 	if got := fixture.countMembership(t, ctx, id); got != 3 {
 		t.Errorf("membership rows = %d, want 3: %s", got, fixture.describeMembership(t, ctx, id))
 	}
-	active, err := fixture.getActiveAdapter(t, ctx, vaultID, addr)
+	active, err := fixture.activeAdapterAtHead(t, ctx, vaultID, addr)
 	if err != nil {
-		t.Fatalf("GetActiveAdapter: %v", err)
+		t.Fatalf("GetActiveAdapterAt: %v", err)
 	}
 	if active == nil {
 		t.Fatalf("the re-add at log index 9 is the last word in the block: %s", fixture.describeMembership(t, ctx, id))
@@ -2336,17 +2333,17 @@ func TestObserveAdapterMembership_ConcurrentAssertionsAppendOnce(t *testing.T) {
 	}
 }
 
-// --- GetActiveAdapter / GetActiveAdaptersByVault Tests ---
+// --- GetActiveAdapterAt / GetActiveAdaptersByVaultAt Tests ---
 
-func TestGetActiveAdapter_Found(t *testing.T) {
+func TestGetActiveAdapterAt_Found(t *testing.T) {
 	fixture := setupMorphoTest(t)
 	ctx := context.Background()
 	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x16))
 	id := fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x08), 24481834)
 
-	got, err := fixture.getActiveAdapter(t, ctx, vaultID, adapterAddr(0x08))
+	got, err := fixture.activeAdapterAtHead(t, ctx, vaultID, adapterAddr(0x08))
 	if err != nil {
-		t.Fatalf("GetActiveAdapter failed: %v", err)
+		t.Fatalf("GetActiveAdapterAt failed: %v", err)
 	}
 	if got == nil {
 		t.Fatal("expected adapter, got nil")
@@ -2356,7 +2353,7 @@ func TestGetActiveAdapter_Found(t *testing.T) {
 	}
 }
 
-func TestGetActiveAdapter_RemovedReturnsNil(t *testing.T) {
+func TestGetActiveAdapterAt_RemovedReturnsNil(t *testing.T) {
 	fixture := setupMorphoTest(t)
 	ctx := context.Background()
 	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x17))
@@ -2364,21 +2361,21 @@ func TestGetActiveAdapter_RemovedReturnsNil(t *testing.T) {
 	fixture.createTestAdapter(t, ctx, vaultID, addr, 24481834)
 	fixture.observe(t, ctx, vaultID, addr, removedAt(24600000, 0, 1))
 
-	got, err := fixture.getActiveAdapter(t, ctx, vaultID, addr)
+	got, err := fixture.activeAdapterAtHead(t, ctx, vaultID, addr)
 	if err != nil {
-		t.Fatalf("GetActiveAdapter failed: %v", err)
+		t.Fatalf("GetActiveAdapterAt failed: %v", err)
 	}
 	if got != nil {
 		t.Errorf("expected nil for removed adapter, got %+v", got)
 	}
 }
 
-func TestGetActiveAdapter_NotFound(t *testing.T) {
+func TestGetActiveAdapterAt_NotFound(t *testing.T) {
 	fixture := setupMorphoTest(t)
 	ctx := context.Background()
 	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x18))
 
-	got, err := fixture.getActiveAdapter(t, ctx, vaultID, adapterAddr(0x0a))
+	got, err := fixture.activeAdapterAtHead(t, ctx, vaultID, adapterAddr(0x0a))
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}

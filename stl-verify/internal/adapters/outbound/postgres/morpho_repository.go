@@ -514,24 +514,11 @@ const latestMembershipOrder = `
 	     ORDER BY block_number DESC, block_version DESC, log_index DESC, processing_version DESC
 	     LIMIT 1`
 
-// GetActiveAdapter returns the adapter for (vault, address) when its latest observation
-// says it is a member, reading through the caller's transaction so an observation this
-// transaction recorded earlier is visible (read-your-writes).
-func (r *MorphoRepository) GetActiveAdapter(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte) (*entity.MorphoAdapterMember, error) {
-	row := tx.QueryRow(ctx,
-		`SELECT a.id, a.asset_token_id, m.adapter_type, m.block_number, m.observed_via
-		 FROM morpho_adapter a
-		 JOIN LATERAL (`+latestMembershipLateral+latestMembershipOrder+`
-		 ) m ON TRUE
-		 WHERE a.morpho_vault_id = $1 AND a.address = $2 AND m.is_member`,
-		morphoVaultID, address)
-	return scanAdapterMember(row, morphoVaultID, address)
-}
-
-// GetActiveAdapterAt is GetActiveAdapter as of a block position: the latest observation at
-// or below it decides, so a backfiller replaying a historical block is answered about that
-// block rather than about the present. Reads committed state through the pool, which is
-// what lets the caller run it before opening its write transaction.
+// GetActiveAdapterAt returns the adapter for (vault, address) when the latest observation
+// at or below a block position says it is a member, so a backfiller replaying a historical
+// block is answered about that block rather than about the present. Reads committed state
+// through the pool, which is what lets the caller run it before opening its write
+// transaction.
 //
 // The row comparison stays an index-bounded backward scan on the PK prefix, so the block
 // bound folds into the index condition rather than becoming a filter.

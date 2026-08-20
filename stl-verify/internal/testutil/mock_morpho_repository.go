@@ -22,7 +22,6 @@ type MockMorphoRepository struct {
 	SaveVaultPositionFn   func(ctx context.Context, tx pgx.Tx, position *entity.MorphoVaultPosition) error
 
 	ObserveAdapterMembershipFn   func(ctx context.Context, tx pgx.Tx, obs *entity.MorphoAdapterObservation) (int64, bool, error)
-	GetActiveAdapterFn           func(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte) (*entity.MorphoAdapterMember, error)
 	GetActiveAdapterAtFn         func(ctx context.Context, morphoVaultID int64, address []byte, at entity.BlockPosition) (*entity.MorphoAdapterMember, error)
 	GetActiveAdaptersByVaultAtFn func(ctx context.Context, morphoVaultID int64, at entity.BlockPosition) ([]*entity.MorphoAdapterMember, error)
 	SaveAdapterStateFn           func(ctx context.Context, tx pgx.Tx, state *entity.MorphoAdapterState) error
@@ -98,13 +97,6 @@ func (m *MockMorphoRepository) ObserveAdapterMembership(ctx context.Context, tx 
 		return m.ObserveAdapterMembershipFn(ctx, tx, obs)
 	}
 	return 1, true, nil
-}
-
-func (m *MockMorphoRepository) GetActiveAdapter(ctx context.Context, tx pgx.Tx, morphoVaultID int64, address []byte) (*entity.MorphoAdapterMember, error) {
-	if m.GetActiveAdapterFn != nil {
-		return m.GetActiveAdapterFn(ctx, tx, morphoVaultID, address)
-	}
-	return nil, nil
 }
 
 func (m *MockMorphoRepository) GetActiveAdapterAt(ctx context.Context, morphoVaultID int64, address []byte, at entity.BlockPosition) (*entity.MorphoAdapterMember, error) {
