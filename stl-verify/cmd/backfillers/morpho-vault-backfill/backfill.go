@@ -43,6 +43,11 @@ const maxPlausibleBlock = 100_000_000_000
 // is for.
 var errStructuralData = errors.New("structural data defect")
 
+// discoveryScanPerPartition is what one 1000-block partition cost the discovery
+// scan in the VEC-218 E2E: 253s over 22 partitions. It is the rate the discovery
+// timeouts are sized from, so changing either moves the other.
+const discoveryScanPerPartition = 11500 * time.Millisecond
+
 // heartbeatInterval keeps the discovery scan visible to Temporal. Its
 // StartToClose ceiling is hours, so without a heartbeat a worker killed mid-scan
 // would hold the activity open for that whole ceiling instead of minutes.
@@ -260,15 +265,20 @@ func replayPartitions(ctx workflow.Context, rng blockRange, parts []string, stat
 
 func discoverActivityOptions() workflow.ActivityOptions {
 	return workflow.ActivityOptions{
-		// Sized off the measured scan rate: 253s for 22 partitions in the VEC-218
-		// E2E (~11.5s each), so the 2500-partition ceiling is ~8h of scanning.
-		// The heartbeat below is what makes a ceiling this high tolerable.
-		StartToCloseTimeout: 12 * time.Hour,
+		// Sized to cover the widest range resolve accepts, not a typical one: at
+		// discoveryScanPerPartition, maxPartitionsPerRun is 8000 x 11.5s = 25.6h of
+		// scanning. Anything shorter would accept ranges it cannot finish — the
+		// scan keeps no progress state, so an attempt killed here is redone from
+		// block one and the envelope below expires having persisted nothing.
+		//
+		// A ceiling this high costs nothing on a dead worker: the 3-minute
+		// HeartbeatTimeout, not this timeout, is what detects one.
+		StartToCloseTimeout: 30 * time.Hour,
 
 		// Total time for the phase INCLUDING retries. An attempt has nothing to
 		// resume into (the scan keeps no progress state), so this envelope allows
 		// one full redo and no more.
-		ScheduleToCloseTimeout: 24 * time.Hour,
+		ScheduleToCloseTimeout: 48 * time.Hour,
 
 		HeartbeatTimeout: heartbeatTimeoutFactor * heartbeatInterval,
 
@@ -399,7 +409,7 @@ func (a *backfillActivities) ReplayPartition(ctx context.Context, work partition
 
 // nonRetryableIfStructural stops Temporal retrying a verdict that cannot change.
 // Neither activity caps its attempts, so an unclassified structural failure
-// burns the whole ScheduleToClose envelope — 2h for a partition, 24h for
+// burns the whole ScheduleToClose envelope — 2h for a partition, 48h for
 // discovery — before an operator sees a fault only an S3 repair or a code change
 // can clear. Both activities apply it in a deferred assignment to their named
 // error result, so no return path can escape it.
