@@ -445,6 +445,11 @@ correctness.
 
 ### Special case: `morpho-v2-bootstrap` (on-demand, no schedule)
 
+Both history jobs emit the same `morpho_v2_*` metrics as the live indexer (the
+replay path is metered since VEC-218), so the V2 volume alerts in
+`vector-indexers.yaml` can fire during a deliberate replay or bootstrap run —
+expected, not an incident; the run is operator-initiated and visible here.
+
 A third **on-demand** Temporal worker (`temporal.RunWorker`). Everything said
 about `offchain-price-backfill` above applies — nothing is missed while it is
 down, and it is excluded from `VectorCronjobAllRunsFailing` for the same reason.
