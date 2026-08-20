@@ -606,15 +606,28 @@ groups:
         #
         # Reuses the existing morpho_events_processed_total counter: ForceDeallocate
         # is a registered VaultV2 topic and has been counted there since the V2
-        # topics were registered, so no new instrument is needed. Note it is
-        # incremented before the handler runs, so an SQS redelivery double-counts;
-        # irrelevant at a 3x-peak threshold.
+        # topics were registered, so no new instrument is needed.
+        #
+        # GATED on the indexer not erroring, and that gate is load-bearing rather
+        # than cosmetic. RecordEventProcessed increments BEFORE dispatch, so a
+        # redelivery re-counts every log in the stuck block, not just the failing
+        # one: the morpho queue is FIFO, so a single block holding >=2
+        # ForceDeallocate logs crosses 20/h on redelivery alone (12 redeliveries an
+        # hour at the 300s visibility timeout) with zero new on-chain activity —
+        # and the runbook would send risk chasing a liquidity run that never
+        # happened. During an error loop this counter is not a measure of protocol
+        # activity at all, so the signal is suppressed and the stall/error rules
+        # own that condition instead.
         expr: |
           sum by (chain, cluster) (
             increase(morpho_events_processed_total{
               event_type="ForceDeallocate", k8s_namespace_name="vector"
             }[1h])
           ) > 20
+          unless on (chain, cluster)
+          sum by (chain, cluster) (
+            rate(morpho_blocks_processed_total{status="error", k8s_namespace_name="vector"}[1h])
+          ) > 0
         for: 0m
         labels:
           team: vector

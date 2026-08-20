@@ -1913,9 +1913,24 @@ arbitrage trimming the edges, it is depositors paying the penalty *en masse*
 because a vault cannot meet withdrawals from idle liquidity — a liquidity-run
 shape worth handing to risk.
 
+The rule is gated on the indexer not erroring
+(`unless … morpho_blocks_processed_total{status="error"} > 0`), because
+`RecordEventProcessed` increments **before** dispatch. On a redelivery loop every
+log in the stuck block is re-counted, so one FIFO-blocked block holding two
+`ForceDeallocate` logs crosses 20/h on redelivery alone (12/h at the 300s
+visibility timeout) with no new on-chain activity at all. While the indexer is
+erroring this counter measures redeliveries, not protocol activity.
+
 ### First checks
 
-1. **Which vault and adapter** (`db-query`) — the events are audit-logged with
+1. **Confirm the indexer is not stalled or redelivering.** Expect this alert
+   *alongside* a stall, not instead of one — and if it is firing during an error
+   loop, treat the count as unreliable and fix the stall first:
+   `rate(morpho_blocks_processed_total{status="error"}[1h])` and
+   `VectorMorphoIndexerStalled`. The gate on the rule suppresses the clear-cut
+   case, but a loop that has just cleared can still leave inflated counts inside
+   the 1h window.
+2. **Which vault and adapter** (`db-query`) — the events are audit-logged with
    their raw payload:
 
    ```sql
@@ -1931,10 +1946,10 @@ shape worth handing to risk.
    `event_data` carries the raw topics/data; decode against
    `stl-verify/internal/pkg/blockchain/abis/vault_v2_events_abi.go` for
    `adapter`, `assets`, `onBehalf` and `penaltyAssets`.
-2. **Is it one vault or many?** One vault = a vault-specific liquidity squeeze.
+3. **Is it one vault or many?** One vault = a vault-specific liquidity squeeze.
    Many = a market-wide event; check whether the underlying asset is depegging or
    a large Blue market is at full utilisation.
-3. **Idle liquidity trend** — the accompanying `Deallocate` events snapshot each
+4. **Idle liquidity trend** — the accompanying `Deallocate` events snapshot each
    adapter's `realAssets()`, so the drain is visible in `morpho_adapter_state`:
 
    ```sql
@@ -1946,11 +1961,17 @@ shape worth handing to risk.
    LIMIT 100;
    ```
 
-4. **Indexer logs** — every event is WARNed with full context:
+5. **Indexer logs** — every event is WARNed with full context:
    `kubectl -n vector logs -l app=morpho-indexer | grep forceDeallocate`.
 
 ### Common causes
 
+- A poison pill in the morpho FIFO queue → `RecordEventProcessed` fires before
+  dispatch, so every redelivery re-counts every log in the stuck block. Two
+  `ForceDeallocate` logs in one blocked block reach 20/h on redelivery alone. The
+  rule's `unless … status="error"` gate suppresses this, but a loop that has just
+  cleared can still leave inflated counts inside the 1h window. Not a liquidity
+  event — fix the stall.
 - A large withdrawal against a vault whose liquidity is fully allocated into
   adapters → the exit path is working as designed; inform risk, no code action.
 - An underlying Blue market at ~100% utilisation, so normal deallocation cannot
