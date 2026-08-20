@@ -2352,6 +2352,12 @@ export interface components {
        */
       bucket_start: string;
       /**
+       * Capital Observed At
+       * @description When `total_capital_usd`, `exposure_usd` and `encumbrance_ratio` were last observed. One field rather than three: the monitor reports them together, so a stamp each would repeat one instant. Carried forward like the figures it describes, so a value observed well before the window still reports its own age rather than the bucket's.
+       * @example 2026-08-20T09:00:00Z
+       */
+      capital_observed_at?: string | null;
+      /**
        * Encumbrance Ratio
        * @description `required_risk_capital / total_risk_capital` as the monitor reported it (0-1). Reference mode only, and `null` for buckets covered by backfilled history alone: the balance-sheet feed carries no encumbrance figure.
        * @example 0.9397

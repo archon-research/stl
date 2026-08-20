@@ -141,7 +141,10 @@ _REFERENCE_CAPITAL_BUCKETS_SQL = text(
             (SELECT observed_at FROM pre
               WHERE assets_usd IS NOT NULL
               ORDER BY observed_at DESC, precedence, processing_version DESC
-              LIMIT 1) AS assets_observed_at
+              LIMIT 1) AS assets_observed_at,
+            (SELECT observed_at FROM pre
+              ORDER BY observed_at DESC, precedence, processing_version DESC
+              LIMIT 1) AS capital_observed_at
     )
     SELECT
         time_bucket_gapfill(
@@ -187,7 +190,17 @@ _REFERENCE_CAPITAL_BUCKETS_SQL = text(
                 FILTER (WHERE corrected.assets_observed_at IS NOT NULL),
             (SELECT prior.assets_observed_at FROM prior),
             treat_null_as_missing => true
-        ) AS assets_observed_at
+        ) AS assets_observed_at,
+        -- When total capital, exposure and encumbrance were last observed. One
+        -- stamp for the three because they arrive on one row, so a stamp each
+        -- would be three copies of the same instant. The prior seeding reaches
+        -- up to 90 days back, so without this a figure that old serves as
+        -- current with nothing to say so.
+        locf(
+            last(corrected.observed_at, corrected.observed_at),
+            (SELECT prior.capital_observed_at FROM prior),
+            treat_null_as_missing => true
+        ) AS capital_observed_at
     FROM corrected
     GROUP BY bucket_start
     ORDER BY bucket_start DESC
@@ -248,6 +261,7 @@ class PrimeCapitalStackRepository:
                 encumbrance_ratio=_optional_decimal(row.encumbrance_ratio, "encumbrance_ratio"),
                 assets_usd=_optional_decimal(row.assets_usd, "assets_usd"),
                 assets_observed_at=row.assets_observed_at,
+                capital_observed_at=row.capital_observed_at,
             )
             for row in rows
         ]

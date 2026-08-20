@@ -71,6 +71,17 @@ class TotalCapitalBucketResponse(BaseModel):
         ),
         examples=["2026-08-19T00:00:00Z"],
     )
+    capital_observed_at: datetime | None = Field(
+        default=None,
+        description=(
+            "When `total_capital_usd`, `exposure_usd` and `encumbrance_ratio` were last "
+            "observed. One field rather than three: the monitor reports them together, so "
+            "a stamp each would repeat one instant. Carried forward like the figures it "
+            "describes, so a value observed well before the window still reports its own "
+            "age rather than the bucket's."
+        ),
+        examples=["2026-08-20T09:00:00Z"],
+    )
 
 
 class TotalCapitalEnvelope(BaseModel):
@@ -155,6 +166,7 @@ async def list_prime_total_capital(
                     assets_usd=bucket.assets_usd,
                     encumbrance_ratio=bucket.encumbrance_ratio,
                     assets_observed_at=bucket.assets_observed_at,
+                    capital_observed_at=bucket.capital_observed_at,
                 )
                 for bucket in reference_buckets
             ],

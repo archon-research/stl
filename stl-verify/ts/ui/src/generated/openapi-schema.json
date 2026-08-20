@@ -2916,6 +2916,22 @@
             "title": "Bucket Start",
             "type": "string"
           },
+          "capital_observed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When `total_capital_usd`, `exposure_usd` and `encumbrance_ratio` were last observed. One field rather than three: the monitor reports them together, so a stamp each would repeat one instant. Carried forward like the figures it describes, so a value observed well before the window still reports its own age rather than the bucket's.",
+            "examples": [
+              "2026-08-20T09:00:00Z"
+            ],
+            "title": "Capital Observed At"
+          },
           "encumbrance_ratio": {
             "anyOf": [
               {

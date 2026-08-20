@@ -56,7 +56,8 @@ import {
   buildProtocolOptions,
   buildProtocolOptionsFromMetadata,
   DIRECT_PROTOCOL_FILTER_VALUE,
-  ENCUMBRANCE_WARNING_THRESHOLD,
+  ENCUMBRANCE_HIGH_SEVERITY_THRESHOLD,
+  ENCUMBRANCE_LOW_SEVERITY_THRESHOLD,
   formatChartTimestampLabel,
   formatCompactNumber,
   formatCompactUsd,
@@ -859,6 +860,15 @@ function App() {
         .at(-1)?.assets_observed_at ?? null)
     : null;
 
+  // The monitor's three figures share one stamp because they share one row. It
+  // matters for the same reason the collateral one does, and more so since the
+  // prior seeding reaches up to 90 days back.
+  const capitalObservedAt = REFERENCE_MODE
+    ? (totalCapitalBuckets
+        .filter((bucket) => bucket.capital_observed_at != null)
+        .at(-1)?.capital_observed_at ?? null)
+    : null;
+
   // Reference mode publishes a real total-assets figure. Self mode has no
   // equivalent — STL does not index PSM3 and prices no Curve LP position — so
   // it shows what STL actually holds records for, captioned as such.
@@ -970,10 +980,16 @@ function App() {
         ...seriesOrFallback(encumbranceSeries, encumbranceValue),
         stroke: 'var(--colors-chart-series-critical)',
         formatValue: formatRatioPercent,
-        threshold: {
-          value: ENCUMBRANCE_WARNING_THRESHOLD,
-          label: formatRatioPercent(ENCUMBRANCE_WARNING_THRESHOLD, 0),
-        },
+        thresholds: [
+          {
+            value: ENCUMBRANCE_LOW_SEVERITY_THRESHOLD,
+            label: formatRatioPercent(ENCUMBRANCE_LOW_SEVERITY_THRESHOLD, 0),
+          },
+          {
+            value: ENCUMBRANCE_HIGH_SEVERITY_THRESHOLD,
+            label: formatRatioPercent(ENCUMBRANCE_HIGH_SEVERITY_THRESHOLD, 0),
+          },
+        ],
       },
     ];
     return charts.filter((chart) => chart.data.length > 0);
@@ -1119,6 +1135,7 @@ function App() {
                 noticeMessage={unknownPrimeMessage}
                 primeCollateralUsd={primeCollateralValue}
                 primeCollateralObservedAt={primeCollateralObservedAt}
+                capitalObservedAt={capitalObservedAt}
               />
             ) : (
               <ActivityFeed

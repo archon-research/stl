@@ -16,7 +16,8 @@ import { flex } from '#styled-system/patterns';
 import { getActionColorClass, getActionIcon } from '../../lib/activity';
 import {
   type ChainLabelLookup,
-  ENCUMBRANCE_WARNING_THRESHOLD,
+  ENCUMBRANCE_LOW_SEVERITY_THRESHOLD,
+  encumbranceSeverity,
   formatDateTime,
   formatFreshnessLabel,
   formatRatioPercent,
@@ -81,6 +82,7 @@ type AllocationGridProps = {
   noticeMessage: string | null;
   primeCollateralUsd: number | null;
   primeCollateralObservedAt: string | null;
+  capitalObservedAt: string | null;
 };
 
 // Fill override for the `Badge` these chips render as: `Badge`'s `colorPalette`
@@ -591,6 +593,7 @@ export function AllocationGrid({
   noticeMessage,
   primeCollateralUsd,
   primeCollateralObservedAt,
+  capitalObservedAt,
 }: AllocationGridProps) {
   const [localSearchValue, setLocalSearchValue] = useState(searchValue);
 
@@ -733,9 +736,7 @@ export function AllocationGrid({
   const encumbranceRatio = parseNumericValue(
     riskCapital?.prime_encumbrance_ratio,
   );
-  const isEncumbranceBreaching =
-    encumbranceRatio !== null &&
-    encumbranceRatio >= ENCUMBRANCE_WARNING_THRESHOLD;
+  const encumbranceBreach = encumbranceSeverity(encumbranceRatio);
   // Counted from the same conditions the cards below render under, so a card
   // that does not appear does not leave a column reserved for it.
   const visibleMetricCardCount = [
@@ -751,14 +752,23 @@ export function AllocationGrid({
   // capital, so it cannot be computed without a total. And where chains go
   // unserved the numerator is bounded, making the ratio a floor rather than a
   // measurement — on a risk surface that difference matters.
-  const encumbranceCaption =
-    encumbranceRatio === null
-      ? 'Needs total risk capital, which is not yet observed'
-      : unservedChains.length > 0
-        ? `At least this, with ${unservedChains.length} chain${unservedChains.length === 1 ? '' : 's'} unserved`
-        : isEncumbranceBreaching
-          ? `Above the ${formatRatioPercent(ENCUMBRANCE_WARNING_THRESHOLD, 0)} warning level`
-          : `Warning at ${formatRatioPercent(ENCUMBRANCE_WARNING_THRESHOLD, 0)}`;
+  const encumbranceCaption = (() => {
+    if (encumbranceRatio === null) {
+      return 'Needs total risk capital, which is not yet observed';
+    }
+    if (encumbranceBreach === 'high') {
+      return 'High severity breach';
+    }
+    if (encumbranceBreach === 'low') {
+      return 'Low severity breach';
+    }
+    // A bounded numerator understates the ratio, so "within" is a floor here
+    // rather than a measurement — worth saying on a surface read for breaches.
+    if (unservedChains.length > 0) {
+      return `At least this, with ${unservedChains.length} chain${unservedChains.length === 1 ? '' : 's'} unserved`;
+    }
+    return `Within the ${formatRatioPercent(ENCUMBRANCE_LOW_SEVERITY_THRESHOLD, 0)} breach level`;
+  })();
 
   return (
     <PageShell>
@@ -904,6 +914,7 @@ export function AllocationGrid({
           overallSummary={overallSummary}
           hasSearchQuery={hasSearchQuery}
           riskCapital={riskCapital}
+          capitalObservedAt={capitalObservedAt}
           riskCapitalErrorMessage={riskCapitalErrorMessage}
           hasPrime={selectedPrime !== null}
           collateral={{
@@ -914,7 +925,7 @@ export function AllocationGrid({
           encumbrance={{
             ratio: encumbranceRatio,
             caption: encumbranceCaption,
-            isBreaching: isEncumbranceBreaching,
+            severity: encumbranceBreach,
           }}
           debt={{
             wad: debtWad,

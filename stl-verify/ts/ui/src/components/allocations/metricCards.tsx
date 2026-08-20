@@ -43,8 +43,9 @@ export type MetricChartSpec = {
   stroke: string;
   formatValue: (value: number) => string;
   kind: MetricChartKind;
-  // Draws a dashed limit line with the region past it shaded as a breach.
-  threshold?: { value: number; label: string };
+  // Ordered ascending. Each draws a dashed limit with the region past it shaded,
+  // so overlapping severities read as escalating shade.
+  thresholds?: { value: number; label: string }[];
 };
 
 // Every card the metrics band can render. Its length drives both the loading
@@ -210,20 +211,23 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
     ? [minValue - flatPad, maxValue + flatPad]
     : [minValue, maxValue];
 
-  const threshold = chart.threshold?.value;
+  const thresholds = chart.thresholds ?? [];
   const yDomain: [number, number] = (() => {
-    if (threshold === undefined) {
+    if (thresholds.length === 0) {
       return [domainMin, domainMax];
     }
     // A limit outside the domain renders off-plot, reading as "no threshold"
-    // rather than "well within it" — but pinning it to the domain edge is no
-    // better: ReferenceBand drops the whole band, dashed line and label
-    // included, once its breach region has zero height. So the series-below-
-    // the-limit case, which is the one worth showing, needs headroom above it.
-    const low = Math.min(domainMin, threshold);
-    const high = Math.max(domainMax, threshold);
-    const headroom = (high - low) * 0.1 || Math.abs(threshold) * 0.1 || 1;
-    return [low, high === threshold ? high + headroom : high];
+    // rather than "well within it" — but pinning the topmost one to the domain
+    // edge is no better: ReferenceBand drops the whole band, dashed line and
+    // label included, once its breach region has zero height. So the
+    // series-below-the-limit case, which is the one worth showing, needs
+    // headroom above the highest limit.
+    const limits = thresholds.map((entry) => entry.value);
+    const highest = Math.max(...limits);
+    const low = Math.min(domainMin, ...limits);
+    const high = Math.max(domainMax, highest);
+    const headroom = (high - low) * 0.1 || Math.abs(highest) * 0.1 || 1;
+    return [low, high === highest ? high + headroom : high];
   })();
 
   return (
@@ -276,14 +280,15 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
           yAccessor={(d: ChartDatum) => d.value}
           stroke={chart.stroke}
         />
-        {chart.threshold ? (
+        {thresholds.map((entry) => (
           <ReferenceBand
+            key={`threshold-${entry.value}`}
             mode="threshold"
-            value={chart.threshold.value}
+            value={entry.value}
             breach="above"
-            label={chart.threshold.label}
+            label={entry.label}
           />
-        ) : null}
+        ))}
         <Tooltip
           snapTooltipToDatumX
           snapTooltipToDatumY

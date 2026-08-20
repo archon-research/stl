@@ -101,3 +101,6 @@ class ReferenceCapitalBucket:
     # When ``assets_usd`` was observed, which is not ``bucket_start``: the feed
     # is daily and the value is carried forward.
     assets_observed_at: datetime | None = None
+    # When the monitor's three figures were observed. One field, not three: they
+    # arrive on one snapshot row.
+    capital_observed_at: datetime | None = None

@@ -3,6 +3,7 @@ import { ErrorState } from '@archon-research/design-system';
 import { css } from '#styled-system/css';
 
 import {
+  type EncumbranceSeverity,
   formatFreshnessLabel,
   formatRatioPercent,
   formatRawWadLabel,
@@ -45,6 +46,8 @@ type PrimeMetricsBandProps = {
   overallSummary: AllocationTotals | null;
   hasSearchQuery: boolean;
   riskCapital: PrimeRiskCapital | null;
+  // Shared by exposure, total risk capital and encumbrance.
+  capitalObservedAt: string | null;
   riskCapitalErrorMessage: string | null;
   hasPrime: boolean;
   collateral: {
@@ -52,7 +55,11 @@ type PrimeMetricsBandProps = {
     observedAt: string | null;
     isLoading: boolean;
   };
-  encumbrance: { ratio: number | null; caption: string; isBreaching: boolean };
+  encumbrance: {
+    ratio: number | null;
+    caption: string;
+    severity: EncumbranceSeverity;
+  };
   debt: {
     wad: string | null | undefined;
     ilkLabel: string | null;
@@ -119,12 +126,22 @@ function TotalAllocationCard({
   );
 }
 
+// Absent when the figure is STL's own: only the reference feed carries an
+// observation instant, and the on-chain series is as current as its last block.
+function observedCaption(observedAt: string | null): string | null {
+  return observedAt === null
+    ? null
+    : `Observed ${formatFreshnessLabel(observedAt)}`;
+}
+
 function ExposureCard({
   riskCapital,
+  observedAt,
   chart,
   isChartsLoading,
 }: {
   riskCapital: PrimeRiskCapital;
+  observedAt: string | null;
   chart: MetricChartSpec | null;
   isChartsLoading: boolean;
 }) {
@@ -135,6 +152,7 @@ function ExposureCard({
       value={formatUsdValue(riskCapital.prime_exposure_usd)}
       detail={
         <div className={metricDetailClassName}>
+          <div className={captionClassName}>{observedCaption(observedAt)}</div>
           <MetricCardTrend
             chart={chart}
             isLoading={isChartsLoading}
@@ -148,10 +166,12 @@ function ExposureCard({
 
 function TotalRiskCapitalCard({
   riskCapital,
+  observedAt,
   chart,
   isChartsLoading,
 }: {
   riskCapital: PrimeRiskCapital;
+  observedAt: string | null;
   chart: MetricChartSpec | null;
   isChartsLoading: boolean;
 }) {
@@ -165,6 +185,9 @@ function TotalRiskCapitalCard({
           <div className={captionClassName}>
             Required{' '}
             {formatUsdValue(riskCapital.prime_required_risk_capital_usd)}
+            {observedAt === null
+              ? null
+              : ` · observed ${formatFreshnessLabel(observedAt)}`}
           </div>
           <MetricCardTrend
             chart={chart}
@@ -199,11 +222,7 @@ function PrimeCollateralCard({
       value={isLoading ? 'Loading...' : formatUsdValue(usd)}
       detail={
         <div className={metricDetailClassName}>
-          <div className={captionClassName}>
-            {observedAt === null
-              ? null
-              : `Observed ${formatFreshnessLabel(observedAt)}`}
-          </div>
+          <div className={captionClassName}>{observedCaption(observedAt)}</div>
           <MetricCardTrend
             chart={chart}
             isLoading={isChartsLoading}
@@ -215,16 +234,24 @@ function PrimeCollateralCard({
   );
 }
 
+// Low and high are distinct tones: the Atlas treats them as different breaches
+// with separately measured durations, so one colour for both would flatten that.
+const encumbranceCaptionTone: Record<EncumbranceSeverity, string> = {
+  none: 'text.muted',
+  low: 'text.warning',
+  high: 'text.critical',
+};
+
 function EncumbranceCard({
   ratio,
   caption,
-  isBreaching,
+  severity,
   chart,
   isChartsLoading,
 }: {
   ratio: number | null;
   caption: string;
-  isBreaching: boolean;
+  severity: EncumbranceSeverity;
   chart: MetricChartSpec | null;
   isChartsLoading: boolean;
 }) {
@@ -238,7 +265,7 @@ function EncumbranceCard({
           <div
             className={css({
               fontSize: 'sm',
-              color: isBreaching ? 'text.warning' : 'text.muted',
+              color: encumbranceCaptionTone[severity],
             })}
           >
             {caption}
@@ -344,6 +371,7 @@ export function PrimeMetricsBand({
   overallSummary,
   hasSearchQuery,
   riskCapital,
+  capitalObservedAt,
   riskCapitalErrorMessage,
   hasPrime,
   collateral,
@@ -391,6 +419,7 @@ export function PrimeMetricsBand({
       {riskCapital ? (
         <ExposureCard
           riskCapital={riskCapital}
+          observedAt={capitalObservedAt}
           chart={charts.exposure}
           isChartsLoading={isChartsLoading}
         />
@@ -414,6 +443,7 @@ export function PrimeMetricsBand({
       {riskCapital ? (
         <TotalRiskCapitalCard
           riskCapital={riskCapital}
+          observedAt={capitalObservedAt}
           chart={charts.totalCapital}
           isChartsLoading={isChartsLoading}
         />
@@ -433,7 +463,7 @@ export function PrimeMetricsBand({
         <EncumbranceCard
           ratio={encumbrance.ratio}
           caption={encumbrance.caption}
-          isBreaching={encumbrance.isBreaching}
+          severity={encumbrance.severity}
           chart={charts.encumbrance}
           isChartsLoading={isChartsLoading}
         />

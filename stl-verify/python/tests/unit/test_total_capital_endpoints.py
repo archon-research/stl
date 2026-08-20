@@ -70,6 +70,7 @@ def test_list_prime_total_capital_returns_aggregated_buckets():
                 "assets_usd": None,
                 "encumbrance_ratio": None,
                 "assets_observed_at": None,
+                "capital_observed_at": None,
             },
             {
                 "bucket_start": "2026-06-17T18:00:00Z",
@@ -77,6 +78,7 @@ def test_list_prime_total_capital_returns_aggregated_buckets():
                 "assets_usd": None,
                 "encumbrance_ratio": None,
                 "assets_observed_at": None,
+                "capital_observed_at": None,
             },
         ]
         service.prime_exists.assert_awaited_once_with(EthAddress(_VALID_ADDR))

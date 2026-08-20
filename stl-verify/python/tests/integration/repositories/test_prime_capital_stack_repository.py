@@ -280,6 +280,23 @@ async def test_carries_an_observation_from_before_the_window_into_it(seeded, asy
 
 
 @pytest.mark.asyncio(loop_scope="module")
+async def test_stamps_the_monitor_figures_with_their_own_observation(seeded, async_db_url: str):
+    # The prior seeding reaches up to 90 days back, so a figure that old would
+    # otherwise serve as current with nothing to say so.
+    conn, prime_id = seeded
+    observed = _WINDOW_START - timedelta(days=2)
+    await _insert_snapshot(conn, prime_id, observed, total_rc="10", exposure="20")
+
+    buckets = await _buckets(async_db_url)
+
+    assert buckets
+    assert all(b.capital_observed_at == observed for b in buckets), (
+        "every bucket should report the instant it was carried from"
+    )
+    assert all(b.bucket_start > b.capital_observed_at for b in buckets)
+
+
+@pytest.mark.asyncio(loop_scope="module")
 async def test_does_not_reach_back_past_the_staleness_bound(seeded, async_db_url: str):
     # A figure this old is not a current reading, and an unbounded backward scan
     # would walk every chunk the table has.
