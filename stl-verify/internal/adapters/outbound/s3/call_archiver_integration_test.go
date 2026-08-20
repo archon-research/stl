@@ -40,9 +40,7 @@ func newArchiverOnLocalStack(t *testing.T, ctx context.Context) *archiveHarness 
 	bucket := testutil.S3TestBucketName(t, "raw-sc-calls-")
 
 	s3Client := testutil.NewS3Client(t, ctx, lsCfg)
-	if _, err := s3Client.CreateBucket(ctx, &awss3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
-		t.Fatalf("create bucket: %v", err)
-	}
+	testutil.EnsureBucket(t, ctx, s3Client, bucket)
 
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx,
 		awsconfig.WithRegion(lsCfg.Region),

@@ -12,19 +12,19 @@ class PrimeDebtService:
     def __init__(self, repository: PrimeDebtRepositoryPort) -> None:
         self._repository = repository
 
-    async def prime_exists(self, prime_address: EthAddress) -> bool:
-        return await self._repository.prime_exists(prime_address)
+    async def resolve_prime_id(self, prime_address: EthAddress) -> int | None:
+        return await self._repository.resolve_prime_id(prime_address)
 
     async def list_debt_snapshots(
         self,
-        prime_address: EthAddress,
+        prime_id: int,
         *,
         from_timestamp: datetime | None = None,
         to_timestamp: datetime | None = None,
         limit: int = 100,
     ) -> list[PrimeDebtSnapshot]:
         return await self._repository.list_debt_snapshots(
-            prime_address,
+            prime_id,
             from_timestamp=from_timestamp,
             to_timestamp=to_timestamp,
             limit=limit,
@@ -32,7 +32,7 @@ class PrimeDebtService:
 
     async def list_debt_buckets(
         self,
-        prime_address: EthAddress,
+        prime_id: int,
         *,
         from_timestamp: datetime,
         to_timestamp: datetime,
@@ -40,7 +40,7 @@ class PrimeDebtService:
         limit: int = 100,
     ) -> list[PrimeDebtBucket]:
         return await self._repository.list_debt_buckets(
-            prime_address,
+            prime_id,
             from_timestamp=from_timestamp,
             to_timestamp=to_timestamp,
             bucket_seconds=bucket_seconds,
@@ -49,7 +49,7 @@ class PrimeDebtService:
 
     async def list_reference_debt_buckets(
         self,
-        prime_address: EthAddress,
+        prime_id: int,
         *,
         from_timestamp: datetime,
         to_timestamp: datetime,
@@ -57,7 +57,7 @@ class PrimeDebtService:
         limit: int = 100,
     ) -> list[PrimeDebtBucket]:
         return await self._repository.list_reference_debt_buckets(
-            prime_address,
+            prime_id,
             from_timestamp=from_timestamp,
             to_timestamp=to_timestamp,
             bucket_seconds=bucket_seconds,

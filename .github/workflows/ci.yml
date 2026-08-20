@@ -8,8 +8,6 @@ on:
       - 'k8s/overlays/staging/kustomization.yaml'
       - 'k8s/overlays/prod/kustomization.yaml'
   pull_request:
-    branches:
-      - main
   merge_group:
   workflow_dispatch:
 
@@ -77,6 +75,22 @@ jobs:
     uses: ./.github/workflows/ts-ci.yml
     secrets: inherit
 
+  manifests:
+    name: Manifests
+    # Deliberately not change-detected: the check takes seconds, and an overlay
+    # can be left inconsistent by a merge that never touches k8s/ — e.g. a stale
+    # tag stranded by a skipped prod promotion (ORB-313).
+    if: '!cancelled()'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Image tags are CI-owned and internally consistent
+        run: scripts/deploy/check-overlay-tag-consistency.sh
+
   ci-passed:
     name: Success
     needs:
@@ -84,6 +98,7 @@ jobs:
       - go-ci
       - python-ci
       - ts-ci
+      - manifests
     if: always()
     runs-on: ubuntu-latest
     steps:

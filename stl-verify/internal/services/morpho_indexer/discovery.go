@@ -211,7 +211,10 @@ func (s *Service) readV2Adapters(ctx context.Context, vaultAddress common.Addres
 // nothing does, so the vault row can never exist without the adapters its
 // historical AddAdapter events would have created.
 func (s *Service) persistDiscoveredVault(ctx context.Context, vaultAddress common.Address, chainID, blockNumber int64, blockVersion int, blockTimestamp time.Time, reads *vaultDiscoveryReads) (*entity.MorphoVault, error) {
-	var vault *entity.MorphoVault
+	var (
+		vault    *entity.MorphoVault
+		recorded []membershipObservation
+	)
 	if err := s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
 		tokenID, err := s.tokenRepo.GetOrCreateToken(ctx, tx, chainID, reads.metadata.Asset, reads.assetMetadata.Symbol, reads.assetMetadata.Decimals, &blockNumber)
 		if err != nil {
@@ -241,13 +244,14 @@ func (s *Service) persistDiscoveredVault(ctx context.Context, vaultAddress commo
 			return fmt.Errorf("registering receipt token: %w", err)
 		}
 
-		if err := s.seedDiscoveredAdapters(ctx, tx, vault, vaultAddress, blockNumber, blockVersion, blockTimestamp, reads.adapters, entity.MembershipFromDiscovery); err != nil {
+		if err := s.seedDiscoveredAdapters(ctx, tx, vault, vaultAddress, blockNumber, blockVersion, blockTimestamp, reads.adapters, entity.MembershipFromDiscovery, &recorded); err != nil {
 			return err
 		}
 		return s.seedDiscoveredFees(ctx, tx, vault, blockNumber, blockVersion, blockTimestamp, reads.fees)
 	}); err != nil {
 		return nil, fmt.Errorf("persisting vault %s: %w", vaultAddress.Hex(), err)
 	}
+	s.recordMembershipObservations(ctx, recorded)
 	return vault, nil
 }
 
@@ -270,7 +274,7 @@ func (s *Service) persistDiscoveredVault(ctx context.Context, vaultAddress commo
 //
 // observedVia distinguishes a mid-life discovery from the Temporal bootstrap's head seed,
 // which drives the same loop.
-func (s *Service) seedDiscoveredAdapters(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault, vaultAddress common.Address, blockNumber int64, blockVersion int, blockTimestamp time.Time, adapters []discoveredAdapter, observedVia entity.MembershipSource) error {
+func (s *Service) seedDiscoveredAdapters(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault, vaultAddress common.Address, blockNumber int64, blockVersion int, blockTimestamp time.Time, adapters []discoveredAdapter, observedVia entity.MembershipSource, recorded *[]membershipObservation) error {
 	for _, a := range adapters {
 		s.warnIfUnknownAdapterType(vaultAddress, a.address, a.adapterType, blockNumber)
 		adapterType := a.adapterType
@@ -282,11 +286,11 @@ func (s *Service) seedDiscoveredAdapters(ctx context.Context, tx pgx.Tx, vault *
 			IsMember:     true,
 			AdapterType:  &adapterType,
 			ObservedVia:  observedVia,
-		})
+		}, recorded)
 		if err != nil {
 			return err
 		}
-		if err := s.saveAdapterSeedState(ctx, tx, adapterID, a.realAssets, blockNumber, blockVersion, blockTimestamp); err != nil {
+		if _, err := s.saveAdapterSeedState(ctx, tx, adapterID, a.realAssets, blockNumber, blockVersion, blockTimestamp); err != nil {
 			return fmt.Errorf("seeding adapter state for %s: %w", a.address.Hex(), err)
 		}
 	}
@@ -314,7 +318,7 @@ func (s *Service) seedDiscoveredFees(ctx context.Context, tx pgx.Tx, vault *enti
 	if err != nil {
 		return fmt.Errorf("creating vault fee entity: %w", err)
 	}
-	if err := s.morphoRepo.SaveVaultFee(ctx, tx, vaultFee); err != nil {
+	if _, err := s.morphoRepo.SaveVaultFee(ctx, tx, vaultFee); err != nil {
 		return fmt.Errorf("seeding vault fee config: %w", err)
 	}
 	return nil

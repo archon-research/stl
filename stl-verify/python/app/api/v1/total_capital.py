@@ -25,7 +25,12 @@ router = APIRouter(tags=["primes", "capital"])
 
 
 class TotalCapitalBucketResponse(BaseModel):
-    """Last observed treasury balance within a single time bucket (LOCF gap-filled)."""
+    """Last observed capital figures within a single time bucket (LOCF gap-filled).
+
+    Only ``total_capital_usd`` is served in both modes. The other two are
+    reference-only and come from two different upstream feeds, so each is null
+    outside the range its own feed covers.
+    """
 
     bucket_start: datetime = Field(description="Inclusive start of the time bucket (UTC).")
     total_capital_usd: PlainDecimal | None = Field(
@@ -36,6 +41,46 @@ class TotalCapitalBucketResponse(BaseModel):
             "buckets before the first observation."
         ),
         examples=["36359440.25"],
+    )
+    assets_usd: PlainDecimal | None = Field(
+        default=None,
+        description=(
+            "Total assets the prime holds, as published upstream — the figure Sky's dashboard "
+            "labels PRIME COLLATERAL. Reference mode only, and `null` outside the range the "
+            "balance-sheet feed covers. STL computes no equivalent: its own asset total omits "
+            "sources it does not index (PSM3, Curve LP valuations), so it is not served here."
+        ),
+        examples=["3190000000.00"],
+    )
+    encumbrance_ratio: PlainDecimal | None = Field(
+        default=None,
+        description=(
+            "`required_risk_capital / total_risk_capital` as the monitor reported it (0-1). "
+            "Reference mode only, and `null` for buckets covered by backfilled history alone: "
+            "the balance-sheet feed carries no encumbrance figure."
+        ),
+        examples=["0.9397"],
+    )
+    assets_observed_at: datetime | None = Field(
+        default=None,
+        description=(
+            "When `assets_usd` was observed. Not `bucket_start`: the balance-sheet feed "
+            "publishes one row per prime per day and the value is carried forward, so a "
+            "figure can be up to a day older than the bucket serving it. Consumers should "
+            "show this rather than implying the figure is current."
+        ),
+        examples=["2026-08-19T00:00:00Z"],
+    )
+    capital_observed_at: datetime | None = Field(
+        default=None,
+        description=(
+            "When `total_capital_usd`, `exposure_usd` and `encumbrance_ratio` were last "
+            "observed. One field rather than three: the monitor reports them together, so "
+            "a stamp each would repeat one instant. Carried forward like the figures it "
+            "describes, so a value observed well before the window still reports its own "
+            "age rather than the bucket's."
+        ),
+        examples=["2026-08-20T09:00:00Z"],
     )
 
 
@@ -51,7 +96,9 @@ class TotalCapitalEnvelope(BaseModel):
         ),
     )
     window: TimeSeriesWindow = Field(description="The window and resolution applied to this response.")
-    data: list[TotalCapitalBucketResponse] = Field(description="Last treasury balance per time bucket.")
+    data: list[TotalCapitalBucketResponse] = Field(
+        description="Last observed capital figures per time bucket, newest first."
+    )
 
 
 async def _get_service(engine: AsyncEngine = Depends(get_engine)) -> AllocationService:
@@ -66,7 +113,9 @@ async def _get_service(engine: AsyncEngine = Depends(get_engine)) -> AllocationS
         "Return the prime's total capital over time, gap-filled (LOCF) into buckets. Total "
         "capital is the treasury USDS held in the prime's SubProxy wallet (USDS is "
         "dollar-pegged, so the balance is the USD figure); it matches the upstream Star "
-        "`total_capital`. Returns `404` if the prime is unknown. Defaults to the last 24h; "
+        "`total_capital`. Under `reference=true` each bucket also carries `assets_usd` "
+        "(the upstream PRIME COLLATERAL figure) and the monitor's `encumbrance_ratio`. "
+        "Returns `404` if the prime is unknown. Defaults to the last 24h; "
         "pass a window and `resolution` for longer ranges."
     ),
 )
@@ -111,7 +160,14 @@ async def list_prime_total_capital(
             source="reference",
             window=window,
             data=[
-                TotalCapitalBucketResponse(bucket_start=bucket.bucket_start, total_capital_usd=bucket.total_capital_usd)
+                TotalCapitalBucketResponse(
+                    bucket_start=bucket.bucket_start,
+                    total_capital_usd=bucket.total_capital_usd,
+                    assets_usd=bucket.assets_usd,
+                    encumbrance_ratio=bucket.encumbrance_ratio,
+                    assets_observed_at=bucket.assets_observed_at,
+                    capital_observed_at=bucket.capital_observed_at,
+                )
                 for bucket in reference_buckets
             ],
         )

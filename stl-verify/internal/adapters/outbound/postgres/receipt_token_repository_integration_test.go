@@ -13,15 +13,15 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-const receiptTokenSchemaName = "test_receipt_token"
+const receiptTokenDBName = "test_receipt_token"
 
 var receiptTokenPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(receiptTokenSchemaName, func() {
-		receiptTokenPool = testutil.SetupSchemaForMain(sharedDSN, receiptTokenSchemaName)
+	registerTestFileSetup(func() {
+		receiptTokenPool = testutil.SetupDBForMain(sharedDSN, receiptTokenDBName)
 	}, func() {
-		testutil.CleanupSchemaForMain(sharedDSN, receiptTokenPool, receiptTokenSchemaName)
+		testutil.CleanupDBForMain(sharedDSN, receiptTokenPool, receiptTokenDBName)
 	})
 }
 

@@ -42,11 +42,10 @@ var convertedAppendOnlyTables = []string{
 // the NOLOGIN group role needs no SET ROLE and reports exactly what production will do.
 // The end-to-end half is TestConvertedTablesRejectUpdateAsTheLoginRole below.
 //
-// This lives in db/migrator, not in a package that uses testutil.SetupTestSchema: a
-// per-test SCHEMA is outside `ALTER DEFAULT PRIVILEGES IN SCHEMA public`, so
-// stl_readwrite would hold no grants there at all and every assertion would pass
-// vacuously. db/migrator gives each test its own DATABASE and re-runs
-// 20260122_140100 in it before the morpho migrations.
+// This lives in db/migrator, not in a package that clones the migrated template: the
+// clone arrives fully migrated, and this test needs to control migration order —
+// db/migrator gives each test its own database and re-runs 20260122_140100 in it
+// before the morpho migrations.
 func TestConvertedTablesAreAppendOnly(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupPostgres(ctx, t)

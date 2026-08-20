@@ -18,15 +18,15 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-const positionSchemaName = "test_position"
+const positionDBName = "test_position"
 
 var positionPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(positionSchemaName, func() {
-		positionPool = testutil.SetupSchemaForMain(sharedDSN, positionSchemaName)
+	registerTestFileSetup(func() {
+		positionPool = testutil.SetupDBForMain(sharedDSN, positionDBName)
 	}, func() {
-		testutil.CleanupSchemaForMain(sharedDSN, positionPool, positionSchemaName)
+		testutil.CleanupDBForMain(sharedDSN, positionPool, positionDBName)
 	})
 }
 

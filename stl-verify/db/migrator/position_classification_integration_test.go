@@ -5,8 +5,6 @@ package migrator_test
 import (
 	"context"
 	"testing"
-
-	"github.com/archon-research/stl/stl-verify/db/migrator"
 )
 
 // TestPositionClassification is the VEC-401 contract test: after migrations,
@@ -15,11 +13,8 @@ import (
 // reference-tables migration earlier in the chain.
 func TestPositionClassification(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := setupPostgres(ctx, t)
+	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
-	if err := migrator.New(pool, getMigrationsPath()).ApplyAll(ctx); err != nil {
-		t.Fatalf("migrations: %v", err)
-	}
 
 	// Valid: a seeded ref_deal_type code (LOAN) with a valid direction inserts.
 	if _, err := pool.Exec(ctx,

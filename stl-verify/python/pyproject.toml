@@ -17,7 +17,13 @@ dependencies = [
     "opentelemetry-instrumentation-sqlalchemy>=0.62b0,<1",
     "opentelemetry-exporter-otlp>=1.41.0,<2",
     "pandas>=2.2.0",
+    "pyarrow>=18.0.0",
     "numpy",
+    "arch>=8.0.0",
+    "statsmodels>=0.14.6",
+    "scipy>=1.17.1",
+    "joblib>=1.5.3",
+    "tqdm>=4.67.3",
 ]
 
 [project.optional-dependencies]
@@ -35,7 +41,13 @@ asyncio_mode = "auto"
 
 [tool.ty.src]
 include = ["app", "tests", "scripts"]
-exclude = [".venv", "**/__pycache__", "app/static"]
+# app/risk_engine/core_model is BA's CORE model, kept as close as possible to
+# their upstream (github.com/TWave-code/core_model_copy; every deviation is
+# documented in the model README's "Changes from the original" table) so diffs
+# stay reviewable and upstream fixes port cleanly. It predates typing and is
+# deliberately excluded rather than annotated or ty:ignore'd in-file.
+# Integration code around it (adapters, services, cli) is fully checked.
+exclude = [".venv", "**/__pycache__", "app/static", "app/risk_engine/core_model"]
 
 [tool.uv]
 # Guard against supply chain attacks from fresh dependencies: ignore any release

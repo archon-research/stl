@@ -10,9 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
-
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
@@ -76,9 +73,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 
 	s3Client := testutil.NewS3Client(t, ctx, sharedLocalStackCfg)
 	const bucket = "stl-sentineltest-ethereum-raw"
-	if _, err := s3Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
-		t.Fatalf("create S3 bucket: %v", err)
-	}
+	testutil.EnsureBucket(t, ctx, s3Client, bucket)
 
 	sqsServer, sqsState := testutil.StartMockSQS(t)
 	defer sqsServer.Close()

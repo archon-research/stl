@@ -930,6 +930,193 @@
         "title": "ChainRiskCapitalResponse",
         "type": "object"
       },
+      "CoreModelDetails": {
+        "additionalProperties": false,
+        "description": "CORE model-specific output embedded in an RrcResult.\n\n``crr_el_pct`` is the expected-loss CRR used as the primary capital\ncharge (0-100 scale, e.g. ``Decimal(\"12.5\")`` means 12.5%).\n``hhi`` is the Herfindahl-Hirschman Index of borrower concentration\nexpressed as a percentage; ``None`` when liquidation analysis was\nnot run or the market had fewer than two borrowers.",
+        "properties": {
+          "copula_type": {
+            "title": "Copula Type",
+            "type": "string"
+          },
+          "crr_el_pct": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Crr El Pct",
+            "type": "string"
+          },
+          "crr_es_pct": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Crr Es Pct",
+            "type": "string"
+          },
+          "crr_var_pct": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Crr Var Pct",
+            "type": "string"
+          },
+          "forecast_step": {
+            "title": "Forecast Step",
+            "type": "integer"
+          },
+          "hhi": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hhi"
+          },
+          "n_mc": {
+            "title": "N Mc",
+            "type": "integer"
+          },
+          "protocol": {
+            "title": "Protocol",
+            "type": "string"
+          },
+          "risk_model": {
+            "const": "core_model",
+            "title": "Risk Model",
+            "type": "string"
+          }
+        },
+        "required": [
+          "risk_model",
+          "crr_el_pct",
+          "crr_es_pct",
+          "crr_var_pct",
+          "hhi",
+          "protocol",
+          "forecast_step",
+          "n_mc",
+          "copula_type"
+        ],
+        "title": "CoreModelDetails",
+        "type": "object"
+      },
+      "CoreModelResultResponse": {
+        "description": "Latest pre-computed CORE model result for a receipt token.",
+        "properties": {
+          "asset_id": {
+            "description": "Surrogate id of the receipt token.",
+            "examples": [
+              42
+            ],
+            "title": "Asset Id",
+            "type": "integer"
+          },
+          "computed_at": {
+            "description": "UTC timestamp of when this result was computed.",
+            "examples": [
+              "2026-06-01T12:00:00+00:00"
+            ],
+            "format": "date-time",
+            "title": "Computed At",
+            "type": "string"
+          },
+          "copula_type": {
+            "description": "Cross-asset dependence structure.",
+            "examples": [
+              "T-COPULA"
+            ],
+            "title": "Copula Type",
+            "type": "string"
+          },
+          "crr_el_pct": {
+            "description": "Expected-loss CRR as a 0-100 percentage.",
+            "examples": [
+              "12.5"
+            ],
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Crr El Pct",
+            "type": "string"
+          },
+          "crr_es_pct": {
+            "description": "Expected-shortfall CRR as a 0-100 percentage.",
+            "examples": [
+              "15.0"
+            ],
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Crr Es Pct",
+            "type": "string"
+          },
+          "crr_var_pct": {
+            "description": "Value-at-Risk CRR as a 0-100 percentage.",
+            "examples": [
+              "10.0"
+            ],
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Crr Var Pct",
+            "type": "string"
+          },
+          "forecast_step": {
+            "description": "Forecast horizon in calendar days.",
+            "examples": [
+              14
+            ],
+            "title": "Forecast Step",
+            "type": "integer"
+          },
+          "hhi": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Herfindahl-Hirschman Index of borrower concentration (0-100), or null.",
+            "examples": [
+              "22.3"
+            ],
+            "title": "Hhi"
+          },
+          "market_key": {
+            "description": "Market key used by the core-model-runner cronjob.",
+            "examples": [
+              "sparklend_usdc"
+            ],
+            "title": "Market Key",
+            "type": "string"
+          },
+          "n_mc": {
+            "description": "Number of Monte Carlo price scenarios.",
+            "examples": [
+              10000
+            ],
+            "title": "N Mc",
+            "type": "integer"
+          },
+          "protocol": {
+            "description": "Protocol identifier used by the model.",
+            "examples": [
+              "SPARKLEND"
+            ],
+            "title": "Protocol",
+            "type": "string"
+          }
+        },
+        "required": [
+          "asset_id",
+          "market_key",
+          "crr_el_pct",
+          "crr_es_pct",
+          "crr_var_pct",
+          "hhi",
+          "protocol",
+          "forecast_step",
+          "n_mc",
+          "copula_type",
+          "computed_at"
+        ],
+        "title": "CoreModelResultResponse",
+        "type": "object"
+      },
       "DataSourceResponse": {
         "description": "Data source metadata for the transparency panel.",
         "properties": {
@@ -2232,7 +2419,7 @@
               "additionalProperties": true,
               "type": "object"
             },
-            "description": "Per-model scenario overrides. Outer keys are registered risk-model names (`suraf`, `gap_sweep`); inner objects are model-specific. For example, `gap_sweep` accepts `gap_pct` (a price-drop fraction in `[0, 1]`) and `suraf` accepts `usd_exposure`. Unknown outer keys are rejected with `422`.",
+            "description": "Per-model scenario overrides. Outer keys are registered risk-model names (`suraf`, `gap_sweep`, `core_model`); inner objects are model-specific. For example, `gap_sweep` accepts `gap_pct` (a price-drop fraction in `[0, 1]`); `suraf` and `core_model` accept `usd_exposure`. Unknown outer keys are rejected with `422`.",
             "title": "Overrides",
             "type": "object"
           },
@@ -2282,6 +2469,7 @@
           "details": {
             "discriminator": {
               "mapping": {
+                "core_model": "#/components/schemas/CoreModelDetails",
                 "gap_sweep": "#/components/schemas/GapSweepDetails",
                 "suraf": "#/components/schemas/SurafDetails"
               },
@@ -2293,6 +2481,9 @@
               },
               {
                 "$ref": "#/components/schemas/GapSweepDetails"
+              },
+              {
+                "$ref": "#/components/schemas/CoreModelDetails"
               }
             ],
             "title": "Details"
@@ -2304,7 +2495,8 @@
           "risk_model": {
             "enum": [
               "suraf",
-              "gap_sweep"
+              "gap_sweep",
+              "core_model"
             ],
             "title": "Risk Model",
             "type": "string"
@@ -2684,13 +2876,77 @@
         "type": "object"
       },
       "TotalCapitalBucketResponse": {
-        "description": "Last observed treasury balance within a single time bucket (LOCF gap-filled).",
+        "description": "Last observed capital figures within a single time bucket (LOCF gap-filled).\n\nOnly ``total_capital_usd`` is served in both modes. The other two are\nreference-only and come from two different upstream feeds, so each is null\noutside the range its own feed covers.",
         "properties": {
+          "assets_observed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When `assets_usd` was observed. Not `bucket_start`: the balance-sheet feed publishes one row per prime per day and the value is carried forward, so a figure can be up to a day older than the bucket serving it. Consumers should show this rather than implying the figure is current.",
+            "examples": [
+              "2026-08-19T00:00:00Z"
+            ],
+            "title": "Assets Observed At"
+          },
+          "assets_usd": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Total assets the prime holds, as published upstream \u2014 the figure Sky's dashboard labels PRIME COLLATERAL. Reference mode only, and `null` outside the range the balance-sheet feed covers. STL computes no equivalent: its own asset total omits sources it does not index (PSM3, Curve LP valuations), so it is not served here.",
+            "examples": [
+              "3190000000.00"
+            ],
+            "title": "Assets Usd"
+          },
           "bucket_start": {
             "description": "Inclusive start of the time bucket (UTC).",
             "format": "date-time",
             "title": "Bucket Start",
             "type": "string"
+          },
+          "capital_observed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When `total_capital_usd`, `exposure_usd` and `encumbrance_ratio` were last observed. One field rather than three: the monitor reports them together, so a stamp each would repeat one instant. Carried forward like the figures it describes, so a value observed well before the window still reports its own age rather than the bucket's.",
+            "examples": [
+              "2026-08-20T09:00:00Z"
+            ],
+            "title": "Capital Observed At"
+          },
+          "encumbrance_ratio": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`required_risk_capital / total_risk_capital` as the monitor reported it (0-1). Reference mode only, and `null` for buckets covered by backfilled history alone: the balance-sheet feed carries no encumbrance figure.",
+            "examples": [
+              "0.9397"
+            ],
+            "title": "Encumbrance Ratio"
           },
           "total_capital_usd": {
             "anyOf": [
@@ -2719,7 +2975,7 @@
         "description": "Per-prime total-capital time series, gap-filled into buckets.",
         "properties": {
           "data": {
-            "description": "Last treasury balance per time bucket.",
+            "description": "Last observed capital figures per time bucket, newest first.",
             "items": {
               "$ref": "#/components/schemas/TotalCapitalBucketResponse"
             },
@@ -3549,7 +3805,7 @@
     },
     "/v1/primes/{prime_id}/total-capital": {
       "get": {
-        "description": "Return the prime's total capital over time, gap-filled (LOCF) into buckets. Total capital is the treasury USDS held in the prime's SubProxy wallet (USDS is dollar-pegged, so the balance is the USD figure); it matches the upstream Star `total_capital`. Returns `404` if the prime is unknown. Defaults to the last 24h; pass a window and `resolution` for longer ranges.",
+        "description": "Return the prime's total capital over time, gap-filled (LOCF) into buckets. Total capital is the treasury USDS held in the prime's SubProxy wallet (USDS is dollar-pegged, so the balance is the USD figure); it matches the upstream Star `total_capital`. Under `reference=true` each bucket also carries `assets_usd` (the upstream PRIME COLLATERAL figure) and the monitor's `encumbrance_ratio`. Returns `404` if the prime is unknown. Defaults to the last 24h; pass a window and `resolution` for longer ranges.",
         "operationId": "list_prime_total_capital_v1_primes__prime_id__total_capital_get",
         "parameters": [
           {
@@ -4201,6 +4457,69 @@
           }
         },
         "summary": "Risk-enriched collateral breakdown (by chain id and receipt-token address)",
+        "tags": [
+          "risk"
+        ]
+      }
+    },
+    "/v1/risk/{chain_id}/{token_address}/core-model": {
+      "get": {
+        "description": "Return the latest pre-computed CORE model result for the receipt token at `(chain_id, token_address)`.\n\n`token_address` is the **receipt-token** address (e.g. `spUSDC`, `spWETH`), not the underlying ERC-20 address.\n\nErrors:\n- `404` if the receipt token is unknown or has no pre-computed result.\n- `422` if `chain_id` < 1 or `token_address` is malformed.",
+        "operationId": "get_core_model_result_by_address_v1_risk__chain_id___token_address__core_model_get",
+        "parameters": [
+          {
+            "description": "EVM chain id.",
+            "in": "path",
+            "name": "chain_id",
+            "required": true,
+            "schema": {
+              "description": "EVM chain id.",
+              "examples": [
+                1
+              ],
+              "minimum": 1,
+              "title": "Chain Id",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "0x-prefixed token contract address (40 hex chars).",
+            "in": "path",
+            "name": "token_address",
+            "required": true,
+            "schema": {
+              "description": "0x-prefixed token contract address (40 hex chars).",
+              "examples": [
+                "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+              ],
+              "title": "Token Address",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoreModelResultResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Latest CORE model result (by chain id and receipt-token address)",
         "tags": [
           "risk"
         ]

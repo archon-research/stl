@@ -17,15 +17,15 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-const allocUnderlyingSchemaName = "test_alloc_underlying"
+const allocUnderlyingDBName = "test_alloc_underlying"
 
 var allocUnderlyingPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(allocUnderlyingSchemaName, func() {
-		allocUnderlyingPool = testutil.SetupSchemaForMain(sharedDSN, allocUnderlyingSchemaName)
+	registerTestFileSetup(func() {
+		allocUnderlyingPool = testutil.SetupDBForMain(sharedDSN, allocUnderlyingDBName)
 	}, func() {
-		testutil.CleanupSchemaForMain(sharedDSN, allocUnderlyingPool, allocUnderlyingSchemaName)
+		testutil.CleanupDBForMain(sharedDSN, allocUnderlyingPool, allocUnderlyingDBName)
 	})
 }
 

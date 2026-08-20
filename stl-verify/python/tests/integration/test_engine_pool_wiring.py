@@ -32,6 +32,7 @@ def started_app(async_db_url: str, tmp_path: Path) -> Iterator[FastAPI]:
             {
                 "database_url": SecretStr(async_db_url),
                 "suraf_mappings_file": empty_mapping,
+                "core_model_mappings_file": empty_mapping,
                 "db_pool_size": _POOL_SIZE,
                 "db_max_overflow": _MAX_OVERFLOW,
                 "db_pool_timeout": _POOL_TIMEOUT,
