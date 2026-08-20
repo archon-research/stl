@@ -930,6 +930,193 @@
         "title": "ChainRiskCapitalResponse",
         "type": "object"
       },
+      "CoreModelDetails": {
+        "additionalProperties": false,
+        "description": "CORE model-specific output embedded in an RrcResult.\n\n``crr_el_pct`` is the expected-loss CRR used as the primary capital\ncharge (0-100 scale, e.g. ``Decimal(\"12.5\")`` means 12.5%).\n``hhi`` is the Herfindahl-Hirschman Index of borrower concentration\nexpressed as a percentage; ``None`` when liquidation analysis was\nnot run or the market had fewer than two borrowers.",
+        "properties": {
+          "copula_type": {
+            "title": "Copula Type",
+            "type": "string"
+          },
+          "crr_el_pct": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Crr El Pct",
+            "type": "string"
+          },
+          "crr_es_pct": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Crr Es Pct",
+            "type": "string"
+          },
+          "crr_var_pct": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Crr Var Pct",
+            "type": "string"
+          },
+          "forecast_step": {
+            "title": "Forecast Step",
+            "type": "integer"
+          },
+          "hhi": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hhi"
+          },
+          "n_mc": {
+            "title": "N Mc",
+            "type": "integer"
+          },
+          "protocol": {
+            "title": "Protocol",
+            "type": "string"
+          },
+          "risk_model": {
+            "const": "core_model",
+            "title": "Risk Model",
+            "type": "string"
+          }
+        },
+        "required": [
+          "risk_model",
+          "crr_el_pct",
+          "crr_es_pct",
+          "crr_var_pct",
+          "hhi",
+          "protocol",
+          "forecast_step",
+          "n_mc",
+          "copula_type"
+        ],
+        "title": "CoreModelDetails",
+        "type": "object"
+      },
+      "CoreModelResultResponse": {
+        "description": "Latest pre-computed CORE model result for a receipt token.",
+        "properties": {
+          "asset_id": {
+            "description": "Surrogate id of the receipt token.",
+            "examples": [
+              42
+            ],
+            "title": "Asset Id",
+            "type": "integer"
+          },
+          "computed_at": {
+            "description": "UTC timestamp of when this result was computed.",
+            "examples": [
+              "2026-06-01T12:00:00+00:00"
+            ],
+            "format": "date-time",
+            "title": "Computed At",
+            "type": "string"
+          },
+          "copula_type": {
+            "description": "Cross-asset dependence structure.",
+            "examples": [
+              "T-COPULA"
+            ],
+            "title": "Copula Type",
+            "type": "string"
+          },
+          "crr_el_pct": {
+            "description": "Expected-loss CRR as a 0-100 percentage.",
+            "examples": [
+              "12.5"
+            ],
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Crr El Pct",
+            "type": "string"
+          },
+          "crr_es_pct": {
+            "description": "Expected-shortfall CRR as a 0-100 percentage.",
+            "examples": [
+              "15.0"
+            ],
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Crr Es Pct",
+            "type": "string"
+          },
+          "crr_var_pct": {
+            "description": "Value-at-Risk CRR as a 0-100 percentage.",
+            "examples": [
+              "10.0"
+            ],
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Crr Var Pct",
+            "type": "string"
+          },
+          "forecast_step": {
+            "description": "Forecast horizon in calendar days.",
+            "examples": [
+              14
+            ],
+            "title": "Forecast Step",
+            "type": "integer"
+          },
+          "hhi": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Herfindahl-Hirschman Index of borrower concentration (0-100), or null.",
+            "examples": [
+              "22.3"
+            ],
+            "title": "Hhi"
+          },
+          "market_key": {
+            "description": "Market key used by the core-model-runner cronjob.",
+            "examples": [
+              "sparklend_usdc"
+            ],
+            "title": "Market Key",
+            "type": "string"
+          },
+          "n_mc": {
+            "description": "Number of Monte Carlo price scenarios.",
+            "examples": [
+              10000
+            ],
+            "title": "N Mc",
+            "type": "integer"
+          },
+          "protocol": {
+            "description": "Protocol identifier used by the model.",
+            "examples": [
+              "SPARKLEND"
+            ],
+            "title": "Protocol",
+            "type": "string"
+          }
+        },
+        "required": [
+          "asset_id",
+          "market_key",
+          "crr_el_pct",
+          "crr_es_pct",
+          "crr_var_pct",
+          "hhi",
+          "protocol",
+          "forecast_step",
+          "n_mc",
+          "copula_type",
+          "computed_at"
+        ],
+        "title": "CoreModelResultResponse",
+        "type": "object"
+      },
       "DataSourceResponse": {
         "description": "Data source metadata for the transparency panel.",
         "properties": {
@@ -2232,7 +2419,7 @@
               "additionalProperties": true,
               "type": "object"
             },
-            "description": "Per-model scenario overrides. Outer keys are registered risk-model names (`suraf`, `gap_sweep`); inner objects are model-specific. For example, `gap_sweep` accepts `gap_pct` (a price-drop fraction in `[0, 1]`) and `suraf` accepts `usd_exposure`. Unknown outer keys are rejected with `422`.",
+            "description": "Per-model scenario overrides. Outer keys are registered risk-model names (`suraf`, `gap_sweep`, `core_model`); inner objects are model-specific. For example, `gap_sweep` accepts `gap_pct` (a price-drop fraction in `[0, 1]`); `suraf` and `core_model` accept `usd_exposure`. Unknown outer keys are rejected with `422`.",
             "title": "Overrides",
             "type": "object"
           },
@@ -2282,6 +2469,7 @@
           "details": {
             "discriminator": {
               "mapping": {
+                "core_model": "#/components/schemas/CoreModelDetails",
                 "gap_sweep": "#/components/schemas/GapSweepDetails",
                 "suraf": "#/components/schemas/SurafDetails"
               },
@@ -2293,6 +2481,9 @@
               },
               {
                 "$ref": "#/components/schemas/GapSweepDetails"
+              },
+              {
+                "$ref": "#/components/schemas/CoreModelDetails"
               }
             ],
             "title": "Details"
@@ -2304,7 +2495,8 @@
           "risk_model": {
             "enum": [
               "suraf",
-              "gap_sweep"
+              "gap_sweep",
+              "core_model"
             ],
             "title": "Risk Model",
             "type": "string"
@@ -4201,6 +4393,69 @@
           }
         },
         "summary": "Risk-enriched collateral breakdown (by chain id and receipt-token address)",
+        "tags": [
+          "risk"
+        ]
+      }
+    },
+    "/v1/risk/{chain_id}/{token_address}/core-model": {
+      "get": {
+        "description": "Return the latest pre-computed CORE model result for the receipt token at `(chain_id, token_address)`.\n\n`token_address` is the **receipt-token** address (e.g. `spUSDC`, `spWETH`), not the underlying ERC-20 address.\n\nErrors:\n- `404` if the receipt token is unknown or has no pre-computed result.\n- `422` if `chain_id` < 1 or `token_address` is malformed.",
+        "operationId": "get_core_model_result_by_address_v1_risk__chain_id___token_address__core_model_get",
+        "parameters": [
+          {
+            "description": "EVM chain id.",
+            "in": "path",
+            "name": "chain_id",
+            "required": true,
+            "schema": {
+              "description": "EVM chain id.",
+              "examples": [
+                1
+              ],
+              "minimum": 1,
+              "title": "Chain Id",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "0x-prefixed token contract address (40 hex chars).",
+            "in": "path",
+            "name": "token_address",
+            "required": true,
+            "schema": {
+              "description": "0x-prefixed token contract address (40 hex chars).",
+              "examples": [
+                "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+              ],
+              "title": "Token Address",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CoreModelResultResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Latest CORE model result (by chain id and receipt-token address)",
         "tags": [
           "risk"
         ]

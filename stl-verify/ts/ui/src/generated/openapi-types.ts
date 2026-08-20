@@ -381,6 +381,32 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/v1/risk/{chain_id}/{token_address}/core-model': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Latest CORE model result (by chain id and receipt-token address)
+     * @description Return the latest pre-computed CORE model result for the receipt token at `(chain_id, token_address)`.
+     *
+     *     `token_address` is the **receipt-token** address (e.g. `spUSDC`, `spWETH`), not the underlying ERC-20 address.
+     *
+     *     Errors:
+     *     - `404` if the receipt token is unknown or has no pre-computed result.
+     *     - `422` if `chain_id` < 1 or `token_address` is malformed.
+     */
+    get: operations['get_core_model_result_by_address_v1_risk__chain_id___token_address__core_model_get'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/v1/risk/{receipt_token_id}/bad-debt': {
     parameters: {
       query?: never;
@@ -1129,6 +1155,112 @@ export interface components {
        * @description Required Risk Capital from this proxy's positions (USD). `null` when the chain is unserved.
        */
       required_risk_capital_usd?: string | null;
+    };
+    /**
+     * CoreModelDetails
+     * @description CORE model-specific output embedded in an RrcResult.
+     *
+     *     ``crr_el_pct`` is the expected-loss CRR used as the primary capital
+     *     charge (0-100 scale, e.g. ``Decimal("12.5")`` means 12.5%).
+     *     ``hhi`` is the Herfindahl-Hirschman Index of borrower concentration
+     *     expressed as a percentage; ``None`` when liquidation analysis was
+     *     not run or the market had fewer than two borrowers.
+     */
+    CoreModelDetails: {
+      /** Copula Type */
+      copula_type: string;
+      /** Crr El Pct */
+      crr_el_pct: string;
+      /** Crr Es Pct */
+      crr_es_pct: string;
+      /** Crr Var Pct */
+      crr_var_pct: string;
+      /** Forecast Step */
+      forecast_step: number;
+      /** Hhi */
+      hhi: string | null;
+      /** N Mc */
+      n_mc: number;
+      /** Protocol */
+      protocol: string;
+      /**
+       * @description discriminator enum property added by openapi-typescript
+       * @enum {string}
+       */
+      risk_model: 'core_model';
+    };
+    /**
+     * CoreModelResultResponse
+     * @description Latest pre-computed CORE model result for a receipt token.
+     */
+    CoreModelResultResponse: {
+      /**
+       * Asset Id
+       * @description Surrogate id of the receipt token.
+       * @example 42
+       */
+      asset_id: number;
+      /**
+       * Computed At
+       * Format: date-time
+       * @description UTC timestamp of when this result was computed.
+       * @example 2026-06-01T12:00:00+00:00
+       */
+      computed_at: string;
+      /**
+       * Copula Type
+       * @description Cross-asset dependence structure.
+       * @example T-COPULA
+       */
+      copula_type: string;
+      /**
+       * Crr El Pct
+       * @description Expected-loss CRR as a 0-100 percentage.
+       * @example 12.5
+       */
+      crr_el_pct: string;
+      /**
+       * Crr Es Pct
+       * @description Expected-shortfall CRR as a 0-100 percentage.
+       * @example 15.0
+       */
+      crr_es_pct: string;
+      /**
+       * Crr Var Pct
+       * @description Value-at-Risk CRR as a 0-100 percentage.
+       * @example 10.0
+       */
+      crr_var_pct: string;
+      /**
+       * Forecast Step
+       * @description Forecast horizon in calendar days.
+       * @example 14
+       */
+      forecast_step: number;
+      /**
+       * Hhi
+       * @description Herfindahl-Hirschman Index of borrower concentration (0-100), or null.
+       * @example 22.3
+       */
+      hhi: string | null;
+      /**
+       * Market Key
+       * @description Market key used by the core-model-runner cronjob.
+       * @example sparklend_usdc
+       */
+      market_key: string;
+      /**
+       * N Mc
+       * @description Number of Monte Carlo price scenarios.
+       * @example 10000
+       */
+      n_mc: number;
+      /**
+       * Protocol
+       * @description Protocol identifier used by the model.
+       * @example SPARKLEND
+       */
+      protocol: string;
     };
     /**
      * DataSourceResponse
@@ -1931,7 +2063,7 @@ export interface components {
       chain_id?: number | null;
       /**
        * Overrides
-       * @description Per-model scenario overrides. Outer keys are registered risk-model names (`suraf`, `gap_sweep`); inner objects are model-specific. For example, `gap_sweep` accepts `gap_pct` (a price-drop fraction in `[0, 1]`) and `suraf` accepts `usd_exposure`. Unknown outer keys are rejected with `422`.
+       * @description Per-model scenario overrides. Outer keys are registered risk-model names (`suraf`, `gap_sweep`, `core_model`); inner objects are model-specific. For example, `gap_sweep` accepts `gap_pct` (a price-drop fraction in `[0, 1]`); `suraf` and `core_model` accept `usd_exposure`. Unknown outer keys are rejected with `422`.
        */
       overrides?: {
         [key: string]: {
@@ -1970,14 +2102,15 @@ export interface components {
       /** Details */
       details:
         | components['schemas']['SurafDetails']
-        | components['schemas']['GapSweepDetails'];
+        | components['schemas']['GapSweepDetails']
+        | components['schemas']['CoreModelDetails'];
       /** Prime Id */
       prime_id: string;
       /**
        * Risk Model
        * @enum {string}
        */
-      risk_model: 'suraf' | 'gap_sweep';
+      risk_model: 'suraf' | 'gap_sweep' | 'core_model';
       /** Rrc Usd */
       rrc_usd: string;
     };
@@ -2812,6 +2945,40 @@ export interface operations {
         };
         content: {
           'application/json': components['schemas']['RiskBreakdownResponse'];
+        };
+      };
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['HTTPValidationError'];
+        };
+      };
+    };
+  };
+  get_core_model_result_by_address_v1_risk__chain_id___token_address__core_model_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description EVM chain id. */
+        chain_id: number;
+        /** @description 0x-prefixed token contract address (40 hex chars). */
+        token_address: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['CoreModelResultResponse'];
         };
       };
       /** @description Validation Error */
