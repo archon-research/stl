@@ -37,10 +37,10 @@ const (
 var uniswapV4TestPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(uniswapV4SchemaName, func() {
-		uniswapV4TestPool = testutil.SetupSchemaForMain(sharedDSN, uniswapV4SchemaName)
+	registerTestFileSetup(func() {
+		uniswapV4TestPool = testutil.SetupDBForMain(sharedDSN, uniswapV4SchemaName)
 	}, func() {
-		testutil.CleanupSchemaForMain(sharedDSN, uniswapV4TestPool, uniswapV4SchemaName)
+		testutil.CleanupDBForMain(sharedDSN, uniswapV4TestPool, uniswapV4SchemaName)
 	})
 }
 
@@ -1533,7 +1533,9 @@ func TestUniswapV4CreatedAtIgnoresSessionTimeZone(t *testing.T) {
 	wstETH := seedUniswapV4Token(t, ctx, "\\x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0", "wstETH", 18)
 	usdc := seedUniswapV4Token(t, ctx, "\\xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", "USDC", 6)
 
-	conn, err := pgx.Connect(ctx, sharedDSN)
+	// The migrated tables live in this file's cloned database, not the base
+	// sharedDSN server, so the dedicated session must dial the pool's own DSN.
+	conn, err := pgx.Connect(ctx, uniswapV4TestPool.Config().ConnString())
 	if err != nil {
 		t.Fatalf("opening a dedicated connection: %v", err)
 	}
