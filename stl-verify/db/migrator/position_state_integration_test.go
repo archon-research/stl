@@ -127,6 +127,31 @@ func TestPositionState(t *testing.T) {
 		}
 	})
 
+	t.Run("stale re-emission of a reorged-out row cannot rewrite the classification", func(t *testing.T) {
+		// Round-7 fix: latest is canonicalized over the RUN's rows only, so a run re-emitting just a stale
+		// lower-version row (raw pruned of the superseding version) passed the recency guard whenever the
+		// superseding stored row was a ZERO (hwm drops that block; COALESCE(-1) admits anything) and
+		// silently rewrote the classification from a reorged-out observation. The canonicality join
+		// (latest row must BE the merged-canonical row at its block) closes it. Fails on pre-fix code.
+		mpp(t, "vsr", valuesOf(row("isr", "aa", 5, "LOAN", 100, 0, 0)), "seed")
+		mpp(t, "vsr", valuesOf(row("isr", "aa", 5, "LOAN", 100, 0, 0), row("isr", "aa", 0, "LOAN", 100, 1, 0)), "reorg-close")
+		mpp(t, "vsr", valuesOf(row("isr", "aa", 5, "BORROW", 100, 0, 0)), "stale-reemit")
+		if got := classOf(t, "isr", "aa"); got != "LOAN" {
+			t.Errorf("stale reorged-out re-emission rewrote the classification to %q; want LOAN held", got)
+		}
+	})
+
+	t.Run("stale re-emission cannot mint a classification for an all-zero position", func(t *testing.T) {
+		mpp(t, "vsm", valuesOf(row("ism", "aa", 5, "LOAN", 100, 0, 0), row("ism", "aa", 0, "LOAN", 100, 1, 0)), "seed-closed")
+		if got := classOf(t, "ism", "aa"); got != "" {
+			t.Fatalf("all-zero canonical history classified as %q at seed", got)
+		}
+		mpp(t, "vsm", valuesOf(row("ism", "aa", 5, "BORROW", 100, 0, 0)), "stale-reemit")
+		if got := classOf(t, "ism", "aa"); got != "" {
+			t.Errorf("stale re-emission minted classification %q for a canonically all-zero position; want unclassified", got)
+		}
+	})
+
 	t.Run("closed position reclassifies (finding :269)", func(t *testing.T) {
 		mpp(t, "vc", valuesOf(row("ic", "ac", 5, "LOAN", 100, 0, 0), row("ic", "ac", 0, "LOAN", 110, 0, 0)), "init")
 		mpp(t, "vc", valuesOf(row("ic", "ac", 5, "COLLATERAL", 100, 0, 1)), "correct")
@@ -310,6 +335,58 @@ func TestPositionState(t *testing.T) {
 		}
 		if sentinel != 777 {
 			t.Errorf("permanent _mpp_src sentinel = %d; want 777", sentinel)
+		}
+	})
+
+	t.Run("poisoned permanent _mpp_src is never read (pg_temp-qualified reads)", func(t *testing.T) {
+		// A caller listing pg_temp LAST in search_path would previously have every pre-flight check and
+		// both writes read a permanent _mpp_src instead of the just-built temp snapshot. Reads are now
+		// pg_temp-qualified; the poison rows must not land in position_state. Fails on pre-fix code.
+		if _, err := pool.Exec(ctx, `CREATE TABLE public._mpp_src (chain_id int, protocol_id bigint, instrument_key text, holder_id text, quantity numeric, deal_type_code text, block_number bigint, block_version int, processing_version int, block_timestamp timestamptz)`); err != nil {
+			t.Fatal(err)
+		}
+		defer pool.Exec(ctx, `DROP TABLE IF EXISTS public._mpp_src`)
+		if _, err := pool.Exec(ctx, `INSERT INTO public._mpp_src VALUES (1,10,'ipsn','aa',999,'LOAN',100,0,0,'2026-01-01')`); err != nil {
+			t.Fatal(err)
+		}
+		conn, err := pool.Acquire(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Release()
+		tx, err := conn.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback(ctx)
+		if _, err := tx.Exec(ctx, `SET LOCAL search_path = public, pg_temp`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(ctx, `CREATE OR REPLACE VIEW vps AS `+valuesOf(row("ips", "aa", 5, "LOAN", 100, 0, 0))); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(ctx, `SELECT materialize_position_projection('vps'::regclass, 'poisoned-path')`); err != nil {
+			t.Fatalf("run under hostile search_path: %v", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+		var poison int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_state WHERE position_id = position_id(1,10,'ipsn','aa')`).Scan(&poison); err != nil {
+			t.Fatal(err)
+		}
+		if poison != 0 {
+			t.Errorf("permanent _mpp_src poison rows written: %d; want 0 (reads must be pg_temp-qualified)", poison)
+		}
+		if got := classOf(t, "ips", "aa"); got != "LOAN" {
+			t.Errorf("legitimate row under hostile search_path classified %q; want LOAN", got)
+		}
+	})
+
+	t.Run("NULL p_view raises instead of silently skipping the lock", func(t *testing.T) {
+		_, err := pool.Exec(ctx, `SELECT materialize_position_projection(NULL::regclass, 'r')`)
+		if err == nil || !strings.Contains(err.Error(), "p_view must not be NULL") {
+			t.Errorf("NULL p_view: got %v; want the explicit raise", err)
 		}
 	})
 

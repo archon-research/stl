@@ -220,6 +220,11 @@ BEGIN
     IF p_reason IS NULL OR btrim(p_reason) = '' THEN
         RAISE EXCEPTION 'materialize_position_projection(%): p_reason must be a non-empty change_reason', p_view;
     END IF;
+    -- NULL p_view would silently SKIP the advisory lock (hashtextextended is STRICT, so PERFORM of a NULL
+    -- lock key is a no-op) and then fail confusingly in the contract check. Fail honestly instead.
+    IF p_view IS NULL THEN
+        RAISE EXCEPTION 'materialize_position_projection: p_view must not be NULL';
+    END IF;
 
     -- Serialize concurrent runs of the SAME projection (cron overlap, scheduled + manual backfill).
     -- Key on the view's CANONICAL schema-qualified name from the catalog, not p_view::text: the regclass
@@ -264,13 +269,13 @@ BEGIN
                block_number, block_version, processing_version, block_timestamp
         FROM %1$s
     $q$, p_view);
-    ANALYZE _mpp_src;
+    ANALYZE pg_temp._mpp_src;
 
     -- (2) Fail hard on a double-emitted logical observation key (do not rely on 21000). Reads the temp
     -- snapshot, so no view rescan.
     SELECT string_agg(msg, '; ') INTO bad FROM (
         SELECT format('bn=%s bv=%s pv=%s x%s', block_number, block_version, processing_version, count(*)) AS msg
-        FROM _mpp_src
+        FROM pg_temp._mpp_src
         GROUP BY position_id, block_number, block_version, processing_version
         HAVING count(*) > 1 LIMIT 5) z;
     IF bad IS NOT NULL THEN
@@ -283,7 +288,7 @@ BEGIN
     -- concurrent run cannot slip a colliding row between this check and the upsert.
     SELECT string_agg(msg, '; ') INTO bad FROM (
         SELECT format('bn=%s bv=%s pv=%s', s.block_number, s.block_version, s.processing_version) AS msg
-        FROM _mpp_src s
+        FROM pg_temp._mpp_src s
         JOIN position_state p ON p.position_id = s.position_id AND p.block_number = s.block_number
              AND p.block_version = s.block_version AND p.processing_version = s.processing_version
         WHERE p.block_timestamp <> s.block_timestamp LIMIT 5) z;
@@ -296,7 +301,7 @@ BEGIN
     -- hit the NOT NULL classification insert as a raw 23502, or silently leave the position unclassified.
     SELECT string_agg(msg, '; ') INTO bad FROM (
         SELECT format('bn=%s bv=%s pv=%s', block_number, block_version, processing_version) AS msg
-        FROM _mpp_src WHERE quantity > 0 AND deal_type_code IS NULL LIMIT 5) z;
+        FROM pg_temp._mpp_src WHERE quantity > 0 AND deal_type_code IS NULL LIMIT 5) z;
     IF bad IS NOT NULL THEN
         RAISE EXCEPTION 'projection % emits a NULL deal_type_code on a non-zero observation (every non-zero observation must carry a classification code): %', p_view, bad;
     END IF;
@@ -310,7 +315,7 @@ BEGIN
              block_number, block_version, processing_version, block_timestamp)
         SELECT position_id, chain_id, protocol_id, instrument_key, holder_id, quantity,
                block_number, block_version, processing_version, block_timestamp
-        FROM _mpp_src
+        FROM pg_temp._mpp_src
         -- Insert in PK order for B-tree bulk-load locality (sequential leaf writes). NOTE: this is NOT a
         -- cross-view lock-ordering guard — the header's view-disjointness contract makes two views' row
         -- sets disjoint, so concurrent runs never contend on the same position_state row; ordering here is
@@ -326,7 +331,7 @@ BEGIN
     canonical AS (
         SELECT DISTINCT ON (position_id, block_number)
                position_id, block_number, block_version, processing_version, quantity, deal_type_code
-        FROM _mpp_src
+        FROM pg_temp._mpp_src
         ORDER BY position_id, block_number, block_version DESC, processing_version DESC
     ),
     latest AS (
@@ -355,7 +360,7 @@ BEGIN
               FROM position_state WHERE position_id IN (SELECT position_id FROM latest)
             UNION ALL
             SELECT position_id, block_number, block_version, processing_version, quantity, 1 AS src
-              FROM _mpp_src WHERE position_id IN (SELECT position_id FROM latest)
+              FROM pg_temp._mpp_src WHERE position_id IN (SELECT position_id FROM latest)
         ) m
         ORDER BY position_id, block_number, block_version DESC, processing_version DESC, src DESC
     ),
@@ -372,6 +377,14 @@ BEGIN
         -- (23503) and fail the run, not be silently dropped by an inner join (CLAUDE.md: fail hard).
         SELECT l.position_id, l.deal_type_code, d.direction, p_reason
         FROM latest l
+        -- Canonicality guard (INNER join): the run's classifying row must BE the merged-canonical row at
+        -- its own block. latest is canonicalized over the RUN's rows only, so without this join a run
+        -- re-emitting just a stale lower-version row (raw pruned of the superseding version) would pass
+        -- the recency guard below whenever the superseding stored row is a ZERO — hwm's quantity > 0
+        -- filter drops that block entirely, COALESCE(-1) admits anything — and silently rewrite the
+        -- classification from a reorged-out observation, or mint one for a canonically all-zero position.
+        JOIN merged_canon mc ON mc.position_id = l.position_id AND mc.block_number = l.block_number
+             AND mc.block_version = l.block_version AND mc.processing_version = l.processing_version
         LEFT JOIN hwm s ON s.position_id = l.position_id
         LEFT JOIN ref_deal_type d ON d.deal_type = l.deal_type_code
         -- Recency guard: (re)classify only when this run's latest classifiable observation is at least as
