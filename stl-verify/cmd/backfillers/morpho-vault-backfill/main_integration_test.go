@@ -181,7 +181,7 @@ func newActivityEnv(t *testing.T, ctx context.Context, pool *pgxpool.Pool) *test
 // workflowTypeName — using the constant would rename both sides together and pin
 // nothing.
 func TestIntegration_Register_ExposesTheDocumentedWorkflowType(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -211,7 +211,7 @@ func TestIntegration_Register_ExposesTheDocumentedWorkflowType(t *testing.T) {
 // chain makes every block number in a run's range meaningless, and the mismatch
 // would otherwise surface as missing S3 keys rather than as itself.
 func TestIntegration_Register_RefusesAChainIDMismatch(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -233,7 +233,7 @@ func TestIntegration_Register_RefusesAChainIDMismatch(t *testing.T) {
 // A range whose receipts carry nothing Morpho-related yields no candidates and
 // no error — the "quiet range" outcome the workflow treats as ordinary.
 func TestIntegration_DiscoverVaults_FindsNoCandidatesInAnUnrelatedRange(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -272,7 +272,7 @@ func TestIntegration_DiscoverVaults_FindsNoCandidatesInAnUnrelatedRange(t *testi
 // silently thinning the discovered vault set. Reaching that verdict at all means
 // the activity listed, fetched, decompressed and walked a real archived object.
 func TestIntegration_DiscoverVaults_FailsOnAnUndecodableMorphoBlueLog(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -313,7 +313,7 @@ func TestIntegration_DiscoverVaults_FailsOnAnUndecodableMorphoBlueLog(t *testing
 // VaultV2 vault has nothing to replay — and must say so instead of reading S3
 // and reporting a complete pass over logs it could never have matched.
 func TestIntegration_ReplayPartition_ReplaysNothingWhenNoV2VaultIsKnown(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -339,7 +339,7 @@ func TestIntegration_ReplayPartition_ReplaysNothingWhenNoV2VaultIsKnown(t *testi
 // composition root builds is what proves the wiring, rather than reading a field
 // back.
 func TestIntegration_BuildReplayService_MetersTheReplayPath(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 	ctx := context.Background()
 

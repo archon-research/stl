@@ -30,7 +30,7 @@ func setWorkerEnv(t *testing.T, chainID string) {
 // constant would rename both sides together and pin nothing. The activity is
 // mocked because a real run sweeps mainnet.
 func TestIntegration_Register_RunsTheDocumentedWorkflowTypeWithNoInput(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 	setWorkerEnv(t, "1")
 
@@ -59,7 +59,7 @@ func TestIntegration_Register_RunsTheDocumentedWorkflowTypeWithNoInput(t *testin
 // A missing migration or a repository constructor that rejects the wiring shows
 // up here rather than on the first hand-started run.
 func TestSetupRunner_WiresAgainstAMigratedDatabase(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 	setWorkerEnv(t, "1")
 
@@ -76,7 +76,7 @@ func TestSetupRunner_WiresAgainstAMigratedDatabase(t *testing.T) {
 // factory deploy block to bound its sweep. Starting on a chain without one would
 // otherwise mean sweeping from block 0 or silently doing nothing.
 func TestSetupRunner_RejectsAnUnsupportedChain(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 	setWorkerEnv(t, "8453")
 
