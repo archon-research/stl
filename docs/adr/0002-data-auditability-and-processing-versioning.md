@@ -366,8 +366,8 @@ EXECUTE FUNCTION assign_processing_version_onchain_token_price();
 
 -- Same pattern for: borrower, borrower_collateral, sparklend_reserve_data,
 -- morpho_market_position, morpho_vault_state, morpho_vault_position,
--- morpho_adapter_state, morpho_vault_cap, morpho_vault_fee,
--- prime_debt, allocation_position, protocol_event
+-- morpho_adapter_membership, morpho_adapter_state, morpho_vault_cap,
+-- morpho_vault_fee, prime_debt, allocation_position, protocol_event
 -- (each with its own natural key columns in the WHERE clause)
 
 -- ============================================================================
@@ -549,6 +549,7 @@ triggers:
 | `morpho_market_position` | `user_id, morpho_market_id, block_number, block_version, timestamp` | Hypertable (compression) |
 | `morpho_vault_state` | `morpho_vault_id, block_number, block_version, timestamp` | Hypertable (compression) |
 | `morpho_vault_position` | `user_id, morpho_vault_id, block_number, block_version, timestamp` | Hypertable (compression) |
+| `morpho_adapter_membership` | `morpho_adapter_id, block_number, block_version, log_index` | Plain table, natural PK |
 | `morpho_adapter_state` | `morpho_adapter_id, block_number, block_version, timestamp` | Hypertable (compression) |
 | `morpho_vault_cap` | `morpho_vault_id, cap_id, block_number, block_version, timestamp` | Plain table, natural PK |
 | `morpho_vault_fee` | `morpho_vault_id, block_number, block_version, timestamp` | Plain table, natural PK |
@@ -566,11 +567,12 @@ triggers:
 
 **Notes:**
 - All state tables are hypertables except the sparse governance-event tables marked
-  "Plain table" above (`morpho_vault_cap`, `morpho_vault_fee`), whose write rate makes
-  chunking pure overhead (CONTRIBUTING §11 rule 4). Tables using the old compression API
-  (`timescaledb.compress`) require `remove_compression_policy` + `decompress_chunk` before
-  constraint alteration. Tables using the columnstore API (`timescaledb.enable_columnstore`)
-  require pausing the job, decompressing, and disabling columnstore before alteration.
+  "Plain table" above (`morpho_adapter_membership`, `morpho_vault_cap`, `morpho_vault_fee`),
+  whose write rate makes chunking pure overhead (CONTRIBUTING §11 rule 4). Tables using the
+  old compression API (`timescaledb.compress`) require `remove_compression_policy` +
+  `decompress_chunk` before constraint alteration. Tables using the columnstore API
+  (`timescaledb.enable_columnstore`) require pausing the job, decompressing, and disabling
+  columnstore before alteration.
 - `sparklend_reserve_data` has a surrogate PK `(id, block_number)` with a **separate** UNIQUE
   constraint on the natural key. `processing_version` is added to the UNIQUE constraint, not
   the surrogate PK. `prime_debt` has no PK — only a UNIQUE constraint.

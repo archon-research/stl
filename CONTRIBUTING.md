@@ -838,12 +838,13 @@ ArgoCD PreSync hook in staging/prod.
 
    **The exception:** sparse governance/config-event tables — those
    writing on the order of rows per day or less (e.g.
-   `morpho_vault_cap`, `morpho_vault_fee`) — may be plain tables at
-   maintainer discretion, because chunking, compression and tiering buy
-   nothing at that rate. State the decision and its rationale in the
-   table's `COMMENT`; the append-only + `processing_version`/`build_id`
-   + advisory-locked trigger requirements still apply in full. If you
-   are not sure your table qualifies, it doesn't — make it a hypertable.
+   `morpho_adapter_membership`, `morpho_vault_cap`, `morpho_vault_fee`)
+   — may be plain tables at maintainer discretion, because chunking,
+   compression and tiering buy nothing at that rate. State the decision
+   and its rationale in the table's `COMMENT`; the append-only +
+   `processing_version`/`build_id` + advisory-locked trigger requirements
+   still apply in full. If you are not sure your table qualifies, it
+   doesn't — make it a hypertable.
 5. **Append-only, and enforced by the database.** No `UPDATE`, no `DELETE`, no
    `INSERT … ON CONFLICT … DO UPDATE` (a no-op `SET` still needs UPDATE privilege
    and still fails) on a converted table. Identity rows are written once;
