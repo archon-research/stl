@@ -427,9 +427,9 @@ func newBootstrapHarness(t *testing.T) *bootstrapHarness {
 		h.adapters = append(h.adapters, obs)
 		return id, true, nil
 	}
-	h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, s *entity.MorphoAdapterState) error {
+	h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, s *entity.MorphoAdapterState) (bool, error) {
 		h.adapterStates = append(h.adapterStates, s)
-		return nil
+		return true, nil
 	}
 	eventRepo := &testutil.MockEventRepository{
 		SaveEventFn: func(_ context.Context, _ pgx.Tx, e *entity.ProtocolEvent) error {
