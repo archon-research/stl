@@ -107,6 +107,26 @@ func TestPositionState(t *testing.T) {
 		}
 	})
 
+	t.Run("older processing_version at same coordinates does not regress", func(t *testing.T) {
+		// Deny-side pv coverage: the guard tuple is (bn, bv, pv); a mutation dropping pv from the
+		// comparison would let an older-pv re-emission regress the classification.
+		mpp(t, "vpd", valuesOf(row("ipd", "aa", 5, "COLLATERAL", 100, 0, 1)), "store")
+		mpp(t, "vpd", valuesOf(row("ipd", "aa", 5, "LOAN", 100, 0, 0)), "olderpv")
+		if got := classOf(t, "ipd", "aa"); got != "COLLATERAL" {
+			t.Errorf("older-pv re-emission regressed to %q; want COLLATERAL (pv is part of the guard tuple)", got)
+		}
+	})
+
+	t.Run("a block_version bump outranks a higher stored processing_version (lexicographic guard)", func(t *testing.T) {
+		// Accept-side: a reorg (bv bump) resets pv; lexicographic >= must admit (100,1,0) over (100,0,5).
+		// A wrong all-components->= implementation would wedge every post-reorg reclassification.
+		mpp(t, "vbo", valuesOf(row("ibo", "aa", 5, "COLLATERAL", 100, 0, 5)), "store")
+		mpp(t, "vbo", valuesOf(row("ibo", "aa", 7, "BORROW", 100, 1, 0)), "reorg")
+		if got := classOf(t, "ibo", "aa"); got != "BORROW" {
+			t.Errorf("bv bump with pv reset did not reclassify: %q; want BORROW", got)
+		}
+	})
+
 	t.Run("closed position reclassifies (finding :269)", func(t *testing.T) {
 		mpp(t, "vc", valuesOf(row("ic", "ac", 5, "LOAN", 100, 0, 0), row("ic", "ac", 0, "LOAN", 110, 0, 0)), "init")
 		mpp(t, "vc", valuesOf(row("ic", "ac", 5, "COLLATERAL", 100, 0, 1)), "correct")
@@ -186,15 +206,44 @@ func TestPositionState(t *testing.T) {
 		}
 	})
 
+	t.Run("mixed batch: NULL-code closing zero row alongside a coded non-zero row", func(t *testing.T) {
+		// Every reorg fixture's zero row carries a code; the realistic close is uncoded. The NULL-code
+		// zero row must be allowed in a mixed batch and the classification must come from the coded row.
+		body := `SELECT * FROM (VALUES ` +
+			`(1::int,10::bigint,'imx'::text,'aa'::text,5::numeric,'LOAN'::text,100::bigint,0::int,0::int,'2026-01-01'::timestamptz),` +
+			`(1::int,10::bigint,'imx'::text,'aa'::text,0::numeric,NULL::text,110::bigint,0::int,0::int,'2026-01-01'::timestamptz)) ` + mppCols
+		mpp(t, "vmx", body, "mixed")
+		if got := classOf(t, "imx", "aa"); got != "LOAN" {
+			t.Errorf("mixed batch class = %q; want LOAN from the coded non-zero row", got)
+		}
+	})
+
+	t.Run("no-op rerun preserves change_reason (guarded classification update)", func(t *testing.T) {
+		mpp(t, "vnp", valuesOf(row("inp", "aa", 5, "LOAN", 100, 0, 0)), "first-reason")
+		mpp(t, "vnp", valuesOf(row("inp", "aa", 5, "LOAN", 100, 0, 0)), "second-reason")
+		var reason, direction string
+		if err := pool.QueryRow(ctx,
+			`SELECT change_reason, direction FROM position_classification WHERE position_id = position_id(1,10,'inp','aa')`).Scan(&reason, &direction); err != nil {
+			t.Fatal(err)
+		}
+		if reason != "first-reason" {
+			t.Errorf("no-op rerun overwrote change_reason to %q; want first-reason preserved (IS DISTINCT FROM guard)", reason)
+		}
+		if direction != "LONG" {
+			t.Errorf("direction = %q; want LONG frozen from ref_deal_type", direction)
+		}
+	})
+
 	t.Run("null and blank p_reason are rejected (finding :286)", func(t *testing.T) {
 		if _, err := pool.Exec(ctx, `CREATE OR REPLACE VIEW vpr AS `+valuesOf(row("ipr", "aa", 5, "LOAN", 100, 0, 0))); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := pool.Exec(ctx, `SELECT materialize_position_projection('vpr'::regclass, $1)`, nil); err == nil {
-			t.Error("NULL p_reason was accepted; want a raise")
+		want := "p_reason must be a non-empty change_reason"
+		if _, err := pool.Exec(ctx, `SELECT materialize_position_projection('vpr'::regclass, $1)`, nil); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("NULL p_reason: got %v; want the p_reason raise", err)
 		}
-		if _, err := pool.Exec(ctx, `SELECT materialize_position_projection('vpr'::regclass, '   ')`); err == nil {
-			t.Error("blank p_reason was accepted; want a raise")
+		if _, err := pool.Exec(ctx, `SELECT materialize_position_projection('vpr'::regclass, '   ')`); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("blank p_reason: got %v; want the p_reason raise", err)
 		}
 	})
 
@@ -274,6 +323,23 @@ func TestPositionState(t *testing.T) {
 		}
 	})
 
+	t.Run("position_state is a hypertable with 1-day chunks", func(t *testing.T) {
+		var n int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM timescaledb_information.hypertables WHERE hypertable_name = 'position_state'`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 1 {
+			t.Fatalf("position_state is not a hypertable (rows=%d); create_hypertable missing", n)
+		}
+		var interval string
+		if err := pool.QueryRow(ctx, `SELECT time_interval::text FROM timescaledb_information.dimensions WHERE hypertable_name = 'position_state'`).Scan(&interval); err != nil {
+			t.Fatal(err)
+		}
+		if interval != "1 day" {
+			t.Errorf("chunk interval = %q; want 1 day", interval)
+		}
+	})
+
 	t.Run("advisory lock key is search_path-independent (finding :169/:24, via pg_locks)", func(t *testing.T) {
 		if _, err := pool.Exec(ctx, `CREATE OR REPLACE VIEW lockprobe AS `+valuesOf(row("ilk", "aa", 1, "LOAN", 1, 0, 0))); err != nil {
 			t.Fatal(err)
@@ -304,7 +370,7 @@ func TestPositionState(t *testing.T) {
 			}
 			var classid, objid int64
 			if err := tx.QueryRow(ctx,
-				`SELECT classid::bigint, objid::bigint FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid() LIMIT 1`).Scan(&classid, &objid); err != nil {
+				`SELECT classid::bigint, objid::bigint FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid() ORDER BY classid, objid LIMIT 1`).Scan(&classid, &objid); err != nil {
 				t.Fatalf("read advisory lock under %s: %v", searchPath, err)
 			}
 			return classid, objid
@@ -361,7 +427,7 @@ func TestPositionState(t *testing.T) {
 	t.Run("unseeded deal_type_code fails the run (FK, not a silent drop)", func(t *testing.T) {
 		// The cls insert uses a LEFT JOIN + the raw code, so an unseeded/typo'd code must hit the
 		// deal_type_code FK (23503) and fail the run rather than be dropped by an inner join.
-		mppErr(t, "vfk", valuesOf(row("ifk", "aa", 5, "NOPE_NOT_A_CODE", 100, 0, 0)), "fk", "foreign key")
+		mppErr(t, "vfk", valuesOf(row("ifk", "aa", 5, "NOPE_NOT_A_CODE", 100, 0, 0)), "fk", "deal_type_fkey")
 	})
 
 	t.Run("view missing a contract column is rejected as MISSING", func(t *testing.T) {
@@ -559,8 +625,8 @@ func TestPositionState(t *testing.T) {
 		if _, err := pool.Exec(ctx, `CREATE OR REPLACE VIEW vat AS `+poison); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := pool.Exec(ctx, `SELECT materialize_position_projection('vat'::regclass, 'poison')`); err == nil {
-			t.Fatal("expected the unseeded-code run to fail")
+		if _, err := pool.Exec(ctx, `SELECT materialize_position_projection('vat'::regclass, 'poison')`); err == nil || !strings.Contains(err.Error(), "deal_type_fkey") {
+			t.Fatalf("poison run: got %v; want the classification FK failure (proves the failure happened mid-write)", err)
 		}
 		var unchanged bool
 		if err := pool.QueryRow(ctx, `SELECT quantity = 5 FROM position_state WHERE position_id = position_id(1,10,'iat','aa')`).Scan(&unchanged); err != nil {
@@ -583,12 +649,12 @@ func TestPositionState(t *testing.T) {
 
 	t.Run("null block_number rejected (NOT NULL observation column)", func(t *testing.T) {
 		body := `SELECT * FROM (VALUES (1::int,10::bigint,'ibn'::text,'aa'::text,5::numeric,'LOAN'::text,NULL::bigint,0::int,0::int,'2026-01-01'::timestamptz)) ` + mppCols
-		mppErr(t, "vbn", body, "bn", "not-null constraint")
+		mppErr(t, "vbn", body, "bn", `column "block_number"`)
 	})
 
 	t.Run("null block_timestamp rejected (NOT NULL partition column)", func(t *testing.T) {
 		body := `SELECT * FROM (VALUES (1::int,10::bigint,'ibt'::text,'aa'::text,5::numeric,'LOAN'::text,100::bigint,0::int,0::int,NULL::timestamptz)) ` + mppCols
-		mppErr(t, "vbt", body, "bt", "not-null constraint")
+		mppErr(t, "vbt", body, "bt", `column "block_timestamp"`)
 	})
 
 	// --- coordinate / structural-id CHECKs (round 5; each fails on the pre-fix code, which stored these) --
@@ -678,12 +744,12 @@ func TestPositionState(t *testing.T) {
 		}
 		// Rewrites of identity/coordinate/history columns must be denied; quantity stays sanctioned.
 		denied := [][2]string{
-			{"position_state identity", `UPDATE position_state SET holder_id = 'bb' WHERE true`},
-			{"position_state coordinates", `UPDATE position_state SET block_number = 1 WHERE true`},
-			{"position_state delete", `DELETE FROM position_state WHERE true`},
-			{"classification identity", `UPDATE position_classification SET position_id = '\x00'::bytea WHERE true`},
-			{"classification collateral_status", `UPDATE position_classification SET collateral_status = 'PLEDGED' WHERE true`},
-			{"classification delete", `DELETE FROM position_classification WHERE true`},
+			{"position_state identity", `UPDATE position_state SET holder_id = 'bb' WHERE false`},
+			{"position_state coordinates", `UPDATE position_state SET block_number = 1 WHERE false`},
+			{"position_state delete", `DELETE FROM position_state WHERE false`},
+			{"classification identity", `UPDATE position_classification SET position_id = '\x00'::bytea WHERE false`},
+			{"classification collateral_status", `UPDATE position_classification SET collateral_status = 'PLEDGED' WHERE false`},
+			{"classification delete", `DELETE FROM position_classification WHERE false`},
 		}
 		for _, d := range denied {
 			if err := asRole(d[1]); err == nil || !strings.Contains(err.Error(), "permission denied") {
@@ -692,6 +758,21 @@ func TestPositionState(t *testing.T) {
 		}
 		if err := asRole(`UPDATE position_state SET quantity = quantity WHERE false`); err != nil {
 			t.Errorf("quantity update (the sanctioned column) denied: %v", err)
+		}
+		// Reclassify the same position as the role: forces the cls ON CONFLICT DO UPDATE arm, which
+		// needs the column-scoped UPDATE grant on position_classification (deleting that grant line
+		// must fail here, not weeks later on the first production reclassification).
+		if _, err := pool.Exec(ctx, `CREATE OR REPLACE VIEW aclv2 AS `+valuesOf(row("iaclr", "aa", 5, "COLLATERAL", 100, 0, 0))); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `GRANT SELECT ON aclv2 TO stl_readwrite`); err != nil {
+			t.Fatal(err)
+		}
+		if err := asRole(`SELECT materialize_position_projection('aclv2'::regclass, 'role-reclassify')`); err != nil {
+			t.Fatalf("reclassification (cls UPDATE arm) as stl_readwrite failed: %v", err)
+		}
+		if got := classOf(t, "iaclr", "aa"); got != "COLLATERAL" {
+			t.Errorf("role reclassification = %q; want COLLATERAL", got)
 		}
 	})
 }
