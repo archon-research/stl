@@ -183,7 +183,6 @@ const chartEmptyMessageClassName = css({
 
 const CHART_HEIGHT = 236;
 
-
 function MetricCardTrend({
   chart,
   isLoading,
@@ -1026,7 +1025,10 @@ export function AllocationGrid({
   const riskCapitalChart = findMetricChart(metricCharts, 'risk-capital');
   const totalCapitalChart = findMetricChart(metricCharts, 'total-capital');
   const primeDebtChart = findMetricChart(metricCharts, 'prime-debt-exposure');
-  const primeCollateralChart = findMetricChart(metricCharts, 'prime-collateral');
+  const primeCollateralChart = findMetricChart(
+    metricCharts,
+    'prime-collateral',
+  );
   const encumbranceChart = findMetricChart(metricCharts, 'encumbrance-ratio');
   const encumbranceRatio = parseNumericValue(
     riskCapital?.prime_encumbrance_ratio,

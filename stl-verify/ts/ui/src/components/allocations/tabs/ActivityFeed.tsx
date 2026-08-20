@@ -826,13 +826,7 @@ function useAllocationActivity({
     void fetchActivity();
 
     return () => abortController.abort();
-  }, [
-    isEnabled,
-    isPageMode,
-    requestFilters,
-    selectedPrime,
-    showAllPrimes,
-  ]);
+  }, [isEnabled, isPageMode, requestFilters, selectedPrime, showAllPrimes]);
 
   const filteredEvents = useMemo(() => {
     if (!searchQuery) {
