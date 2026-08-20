@@ -217,9 +217,10 @@ func buildReplayService(ctx context.Context, deps temporal.Dependencies, chainID
 	}
 	eventRepo := postgres.NewEventRepository(deps.Logger, buildReg.BuildID())
 
-	svcConfig := morpho_indexer.ConfigDefaults()
-	svcConfig.ChainID = chainID
-	svcConfig.Logger = deps.Logger
+	svcConfig, err := morpho_indexer.NewReplayConfig(chainID, deps.Logger)
+	if err != nil {
+		return nil, err
+	}
 
 	replayService, err := morpho_indexer.NewReplayService(svcConfig, multicaller, txManager, protocolRepo, morphoRepo, eventRepo)
 	if err != nil {

@@ -8,22 +8,32 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/mock"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.temporal.io/sdk/testsuite"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/partition"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/morpho_indexer"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
@@ -318,6 +328,195 @@ func TestIntegration_ReplayPartition_ReplaysNothingWhenNoV2VaultIsKnown(t *testi
 
 	if events != 0 {
 		t.Errorf("replayed %d events with no V2 vault registered, want 0", events)
+	}
+}
+
+// The replay path is metered, end to end. buildReplayService left Config.Telemetry
+// nil, so every instrument the morpho-indexer records went to a nil recorder:
+// morpho_v2_adapter_registrations_total could never exist for a replayed or
+// bootstrap-seeded adapter, and the morpho-v2-bootstrap runbook's first check
+// queries exactly that. Driving a real AddAdapter through the service this
+// composition root builds is what proves the wiring, rather than reading a field
+// back.
+func TestIntegration_BuildReplayService_MetersTheReplayPath(t *testing.T) {
+	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	t.Cleanup(cleanup)
+	ctx := context.Background()
+
+	vault := common.HexToAddress("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
+	adapter := common.HexToAddress("0x7481968709b8f155652D42ebf468b22945907dC2")
+	seedV2VaultRow(t, ctx, pool, vault)
+
+	reader := installTestMeterProvider(t)
+	multicaller := testutil.NewMockMulticaller()
+	wireAdapterRegistrationReads(t, multicaller, adapter)
+
+	t.Setenv("BUILD_GIT_HASH", "integration-test")
+	buildReg, err := buildregistry.New(ctx, pool)
+	if err != nil {
+		t.Fatalf("registering the build: %v", err)
+	}
+	svc, err := buildReplayService(testutil.DiscardLogger(), multicaller, pool, buildReg.BuildID(), 1)
+	if err != nil {
+		t.Fatalf("buildReplayService: %v", err)
+	}
+	if err := svc.LoadVaultRegistry(ctx); err != nil {
+		t.Fatalf("loading the vault registry: %v", err)
+	}
+
+	err = svc.ReplayMetaMorphoLog(ctx, addAdapterLog(t, vault, adapter), 23_400_000,
+		common.HexToHash("0x11"), 1, time.Unix(1_760_000_000, 0).UTC())
+	if err != nil {
+		t.Fatalf("ReplayMetaMorphoLog: %v", err)
+	}
+
+	// The chain label is asserted too: the counter is per-chain, so a service
+	// handed a raw chain id instead of a chain NAME would meter every replay under
+	// a series the per-chain alerts never select.
+	want := map[string]string{"chain": "mainnet", "observed_via": "add_adapter_event"}
+	if got := counterValue(t, reader, "morpho.v2.adapter.registrations", want); got != 1 {
+		t.Errorf("morpho.v2.adapter.registrations%v = %d, want 1: a replay service with no Telemetry records nothing", want, got)
+	}
+}
+
+// installTestMeterProvider points the global meter provider — the one
+// morpho_indexer.NewTelemetry reads — at an in-memory reader for one test, and
+// restores whatever was there.
+func installTestMeterProvider(t *testing.T) sdkmetric.Reader {
+	t.Helper()
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	previous := otel.GetMeterProvider()
+	otel.SetMeterProvider(provider)
+	t.Cleanup(func() {
+		otel.SetMeterProvider(previous)
+		if err := provider.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutting down the test meter provider: %v", err)
+		}
+	})
+	return reader
+}
+
+// counterValue sums the named int64 counter's data points whose attributes
+// include every entry of want. Attributes outside want are ignored, so a test
+// asserts only the labels it cares about.
+func counterValue(t *testing.T, reader sdkmetric.Reader, name string, want map[string]string) int64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collecting metrics: %v", err)
+	}
+	var total int64
+	for _, scope := range rm.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != name {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("metric %q is %T, want metricdata.Sum[int64]", name, m.Data)
+			}
+			for _, dp := range sum.DataPoints {
+				if hasAttributes(dp.Attributes, want) {
+					total += dp.Value
+				}
+			}
+		}
+	}
+	return total
+}
+
+func hasAttributes(set attribute.Set, want map[string]string) bool {
+	for key, value := range want {
+		got, ok := set.Value(attribute.Key(key))
+		if !ok || got.AsString() != value {
+			return false
+		}
+	}
+	return true
+}
+
+// seedV2VaultRow inserts the protocol, asset token and VaultV2 row a replay
+// expects to already exist — replay never discovers, it only drives logs of
+// vaults the database already holds.
+func seedV2VaultRow(t *testing.T, ctx context.Context, pool *pgxpool.Pool, vault common.Address) {
+	t.Helper()
+	var protocolID int64
+	err := pool.QueryRow(ctx,
+		`INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block, updated_at, metadata)
+		 VALUES (1, $1, 'Morpho Blue', 'lending', 18883124, NOW(), '{}'::jsonb)
+		 ON CONFLICT (chain_id, address) DO UPDATE SET name = EXCLUDED.name
+		 RETURNING id`, morpho_indexer.MorphoBlueAddress.Bytes()).Scan(&protocolID)
+	if err != nil {
+		t.Fatalf("seeding protocol: %v", err)
+	}
+
+	var tokenID int64
+	err = pool.QueryRow(ctx,
+		`INSERT INTO token (chain_id, address, symbol, decimals) VALUES (1, $1, 'USDC', 6)
+		 ON CONFLICT (chain_id, address) DO UPDATE SET symbol = EXCLUDED.symbol
+		 RETURNING id`,
+		common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48").Bytes()).Scan(&tokenID)
+	if err != nil {
+		t.Fatalf("seeding token: %v", err)
+	}
+
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO morpho_vault (chain_id, protocol_id, address, name, symbol, asset_token_id, vault_version, created_at_block)
+		 VALUES (1, $1, $2, 'Test Vault', 'tVAULT', $3, 3, 23400000)
+		 ON CONFLICT DO NOTHING`,
+		protocolID, vault.Bytes(), tokenID); err != nil {
+		t.Fatalf("seeding morpho_vault: %v", err)
+	}
+}
+
+// addAdapterLog builds the AddAdapter log from the registered ABI, so the
+// fixture cannot drift from the real event signature.
+func addAdapterLog(t *testing.T, vault, adapter common.Address) shared.Log {
+	t.Helper()
+	eventsABI, err := abis.GetVaultV2EventsABI()
+	if err != nil {
+		t.Fatalf("GetVaultV2EventsABI: %v", err)
+	}
+	return shared.Log{
+		Address:         vault.Hex(),
+		Topics:          []string{eventsABI.Events["AddAdapter"].ID.Hex(), common.BytesToHash(adapter.Bytes()).Hex()},
+		TransactionHash: "0xabcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+		LogIndex:        "0x0",
+	}
+}
+
+// wireAdapterRegistrationReads answers the two chain reads registering an adapter
+// issues: the number-pinned type probe (morpho() succeeds, morphoVaultV1()
+// reverts ⇒ MarketV1) and the hash-pinned realAssets() seed.
+func wireAdapterRegistrationReads(t *testing.T, mc *testutil.MockMulticaller, adapter common.Address) {
+	t.Helper()
+	adapterABI, err := abis.GetVaultV2AdapterReadABI()
+	if err != nil {
+		t.Fatalf("GetVaultV2AdapterReadABI: %v", err)
+	}
+	pack := func(args abi.Arguments, values ...any) []byte {
+		data, err := args.Pack(values...)
+		if err != nil {
+			t.Fatalf("packing return data: %v", err)
+		}
+		return data
+	}
+
+	mc.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		if len(calls) != 2 || calls[0].Target != adapter {
+			return nil, fmt.Errorf("unexpected number-pinned multicall of %d calls", len(calls))
+		}
+		return []outbound.Result{
+			{Success: true, ReturnData: pack(adapterABI.Methods["morpho"].Outputs, common.HexToAddress("0x1"))},
+			{Success: false},
+		}, nil
+	}
+	mc.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		if len(calls) != 1 || calls[0].Target != adapter {
+			return nil, fmt.Errorf("unexpected hash-pinned multicall of %d calls", len(calls))
+		}
+		return []outbound.Result{{Success: true, ReturnData: pack(adapterABI.Methods["realAssets"].Outputs, big.NewInt(777))}}, nil
 	}
 }
 

@@ -26,11 +26,12 @@ import (
 // (no SQS consumer, no block cache) plus the repositories it needs.
 //
 // Every failure here is structural, which is why each one is tagged: the pool
-// arrives already built, so all four constructors do is reject a nil port,
-// validate the config and read the embedded ABIs and the chain's deploy-block
-// table. None of that dials anything, so no attempt can reach a different
-// verdict. Add a step that DOES touch the network or the database and it must
-// stay untagged — the retry envelope is what carries a blip.
+// arrives already built, so all of it does is reject a nil port, resolve the
+// chain's name and telemetry instruments, validate the config and read the
+// embedded ABIs and the chain's deploy-block table. None of that dials anything,
+// so no attempt can reach a different verdict. Add a step that DOES touch the
+// network or the database and it must stay untagged — the retry envelope is what
+// carries a blip.
 func buildReplayService(logger *slog.Logger, multicaller outbound.Multicaller, pool *pgxpool.Pool, buildID buildregistry.BuildID, chainID int64) (*morpho_indexer.Service, error) {
 	txManager, err := postgres.NewTxManager(pool, logger)
 	if err != nil {
@@ -46,9 +47,10 @@ func buildReplayService(logger *slog.Logger, multicaller outbound.Multicaller, p
 	}
 	eventRepo := postgres.NewEventRepository(logger, buildID)
 
-	svcConfig := morpho_indexer.ConfigDefaults()
-	svcConfig.ChainID = chainID
-	svcConfig.Logger = logger
+	svcConfig, err := morpho_indexer.NewReplayConfig(chainID, logger)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", err, errStructuralData)
+	}
 
 	svc, err := morpho_indexer.NewReplayService(svcConfig, multicaller, txManager, protocolRepo, morphoRepo, eventRepo)
 	if err != nil {
