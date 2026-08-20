@@ -347,12 +347,14 @@ Never hand-write a shadow literal: a `rgba(0, 0, 0, 0.2)` drop shadow disappears
 
 ### What the gate catches (and what it cannot)
 
-`npm run doctor` (`uikit-cli doctor --codegen`) runs in `ts-ci.yml` after codegen. It has exactly two checks: an unresolved-token scan over colour-ish declarations, and a "`staticCss` is wired at all" gate. Everything else in the silently-dropped-CSS class is held by the conventions above, not by a tool.
+`npm run doctor` (`uikit-cli doctor --codegen`) runs in `ts-ci.yml` after codegen. It has three checks: an unresolved-token scan over colour-ish declarations, a roleless-`colorPalette` scan, and a "`staticCss` is wired at all" gate. Everything else in the silently-dropped-CSS class is held by the conventions above, not by a tool.
+
+The roleless-`colorPalette` check ships with the 0.10.0 CLI. Until this repo's `@archon-research/uikit-cli` pin moves off 0.9.0, a local `npm run doctor` reports two checks, not three — the table below describes the 0.10.0 target state.
 
 | mechanism | caught |
 | --- | --- |
 | undefined token → literal `color: text.subtle;` | **yes** — the unresolved-token scan; the sweep above is the same check by hand |
 | token path computed in a helper | no — no declaration is emitted, so there is nothing to match |
 | `var(--token, #fallback)` | no — well-formed CSS |
-| roleless `colorPalette` | no — emits a valid-looking `var()`, unset only in that scope. Held by convention; looks mechanically detectable and is filed upstream |
+| roleless `colorPalette` | **yes** — doctor reads the stylesheet as its own palette→roles map: a `colorPalette` assignment ruleset that never defines a role, paired with a role reference in the same recipe's classes, is reported. Bounded on purpose: it resolves one recipe scope, not the cascade, so atomic utilities, a palette set on an outer recipe and consumed by an inner one, and a `var(--colors-color-palette-…, fallback)` are all reported clean rather than risk failing a healthy stylesheet |
 | `staticCss` coverage | **partially** — the gate is "at least one design-system recipe stem present", which catches total omission only. A narrowed map is supported and encouraged, so a per-recipe gap inside one is invisible to it: verify a narrowed map by building and grepping the emitted CSS for the stems the built JS contains |
