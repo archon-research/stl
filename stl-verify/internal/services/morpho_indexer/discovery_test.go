@@ -451,29 +451,43 @@ func TestProcessBlockEvent_VaultDiscovery_V2_FeeSurface(t *testing.T) {
 // realAssets() read. Without this, a discovered-but-quiet vault would carry
 // adapter rows with no state rows until its first allocation, which the VEC-219
 // composition-completeness probe would flag as adapter_data_missing.
-func TestProcessBlockEvent_VaultDiscovery_V2_EnumeratesAndSeedsAdapters(t *testing.T) {
-	h := newTestHarness(t)
-	reader := h.recordMetrics(t)
-	unknownVault := common.HexToAddress("0xc7CDcFDEfC64631ED6799C95e3b110cd42F2bD22")
+// v2DiscoveryFixture names the addresses and hash-pinned seed values
+// setupV2DiscoveryWithTwoAdapters wired the mocks to serve.
+type v2DiscoveryFixture struct {
+	vault       common.Address
+	adapterA    common.Address
+	adapterB    common.Address
+	realAssetsA *big.Int
+	realAssetsB *big.Int
+}
+
+// setupV2DiscoveryWithTwoAdapters wires every chain read a mid-life VaultV2
+// discovery makes for a vault holding two adapters (one MarketV1, one VaultV1),
+// plus the vault-id write. Repository capture stubs are the caller's, so each test
+// decides what the transaction does with what discovery hands it.
+func (h *serviceTestHarness) setupV2DiscoveryWithTwoAdapters() v2DiscoveryFixture {
+	fx := v2DiscoveryFixture{
+		vault:       common.HexToAddress("0xc7CDcFDEfC64631ED6799C95e3b110cd42F2bD22"),
+		adapterA:    common.HexToAddress("0xAaAa000000000000000000000000000000000001"),
+		adapterB:    common.HexToAddress("0xbBbB000000000000000000000000000000000002"),
+		realAssetsA: big.NewInt(41_300_000),
+		realAssetsB: big.NewInt(7_654_321),
+	}
 	curator := common.HexToAddress("0x00000000000000000000000000000000000000A3")
-	adapterA := common.HexToAddress("0xAaAa000000000000000000000000000000000001")
-	adapterB := common.HexToAddress("0xbBbB000000000000000000000000000000000002")
-	realAssetsA := big.NewInt(41_300_000)
-	realAssetsB := big.NewInt(7_654_321)
 
 	// Number-pinned reads (identity): vault probe/details, token metadata, and the
 	// per-adapter type probe.
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 		switch {
 		case len(calls) == 4 && h.isProbeMulticall(calls):
-			return h.vaultV2ProbeResults(testLoanToken, curator, adapterA), nil
+			return h.vaultV2ProbeResults(testLoanToken, curator, fx.adapterA), nil
 		case len(calls) == 4 && h.isVaultDetailsMulticall(calls):
 			return h.vaultDetailResults("Spark Blue Chip USDT Vault", "sparkUSDTbc", 6, false), nil
 		case len(calls) == 2 && calls[0].Target == testLoanToken:
 			return h.tokenMetadataResults("USDT", 6), nil
-		case len(calls) == 2 && calls[0].Target == adapterA:
+		case len(calls) == 2 && calls[0].Target == fx.adapterA:
 			return h.adapterProbeResults(entity.MorphoAdapterTypeMarketV1), nil
-		case len(calls) == 2 && calls[0].Target == adapterB:
+		case len(calls) == 2 && calls[0].Target == fx.adapterB:
 			return h.adapterProbeResults(entity.MorphoAdapterTypeVaultV1), nil
 		default:
 			return nil, fmt.Errorf("unexpected Execute shape (%d calls)", len(calls))
@@ -485,27 +499,57 @@ func TestProcessBlockEvent_VaultDiscovery_V2_EnumeratesAndSeedsAdapters(t *testi
 	// are both 2 calls to the vault, so discriminate by selector.
 	h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
 		switch {
-		case len(calls) == 1 && calls[0].Target == unknownVault && hasSameSelector(calls[0].CallData, adaptersLengthSelector):
+		case len(calls) == 1 && calls[0].Target == fx.vault && hasSameSelector(calls[0].CallData, adaptersLengthSelector):
 			return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(2))}}, nil
-		case len(calls) == 2 && calls[0].Target == unknownVault && hasSameSelector(calls[0].CallData, adaptersSelector):
+		case len(calls) == 2 && calls[0].Target == fx.vault && hasSameSelector(calls[0].CallData, adaptersSelector):
 			return []outbound.Result{
-				{Success: true, ReturnData: h.packAddress(adapterA)},
-				{Success: true, ReturnData: h.packAddress(adapterB)},
+				{Success: true, ReturnData: h.packAddress(fx.adapterA)},
+				{Success: true, ReturnData: h.packAddress(fx.adapterB)},
 			}, nil
-		case len(calls) == 1 && calls[0].Target == adapterA:
-			return []outbound.Result{{Success: true, ReturnData: h.packUint256(realAssetsA)}}, nil
-		case len(calls) == 1 && calls[0].Target == adapterB:
-			return []outbound.Result{{Success: true, ReturnData: h.packUint256(realAssetsB)}}, nil
-		case len(calls) == 4 && calls[0].Target == unknownVault:
+		case len(calls) == 1 && calls[0].Target == fx.adapterA:
+			return []outbound.Result{{Success: true, ReturnData: h.packUint256(fx.realAssetsA)}}, nil
+		case len(calls) == 1 && calls[0].Target == fx.adapterB:
+			return []outbound.Result{{Success: true, ReturnData: h.packUint256(fx.realAssetsB)}}, nil
+		case len(calls) == 4 && calls[0].Target == fx.vault:
 			return h.feeGetterResults(big.NewInt(0), big.NewInt(0), common.Address{}, common.Address{}), nil
-		case len(calls) == 2 && calls[0].Target == unknownVault:
+		case len(calls) == 2 && calls[0].Target == fx.vault:
 			return []outbound.Result{h.defaultVaultTotalAssetsResult(), h.defaultVaultTotalSupplyResult()}, nil
 		default:
 			return nil, fmt.Errorf("unexpected ExecuteAtHash shape (%d calls)", len(calls))
 		}
 	}
-
 	h.morphoRepo.GetOrCreateVaultFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoVault) (int64, error) { return 99, nil }
+	return fx
+}
+
+// TestProcessBlockEvent_VaultDiscovery_V2_AdapterObservationsNotRecordedWhenTheCommitFails
+// pins the same honesty the event handlers owe to discovery, which appends a whole
+// adapter set in one transaction: a commit that fails must leave the registration
+// counter untouched for every adapter it enumerated, not just the last one.
+func TestProcessBlockEvent_VaultDiscovery_V2_AdapterObservationsNotRecordedWhenTheCommitFails(t *testing.T) {
+	h := newTestHarness(t)
+	reader := h.recordMetrics(t)
+	fx := h.setupV2DiscoveryWithTwoAdapters()
+	h.failCommitAfterMembershipAppend()
+
+	log := h.makeDiscoveryTriggerLog(fx.vault)
+	if err := h.processBlock(t, 1, 24481834, 2, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err == nil {
+		t.Fatal("expected the block to fail so SQS redelivers")
+	}
+
+	want := map[string]string{"observed_via": string(entity.MembershipFromDiscovery)}
+	if got := counterValue(t, reader, "morpho.v2.adapter.registrations", want); got != 0 {
+		t.Errorf("morpho.v2.adapter.registrations%v = %d, want 0 (the discovery transaction rolled back)", want, got)
+	}
+}
+
+func TestProcessBlockEvent_VaultDiscovery_V2_EnumeratesAndSeedsAdapters(t *testing.T) {
+	h := newTestHarness(t)
+	reader := h.recordMetrics(t)
+	fx := h.setupV2DiscoveryWithTwoAdapters()
+	unknownVault, adapterA, adapterB := fx.vault, fx.adapterA, fx.adapterB
+	realAssetsA, realAssetsB := fx.realAssetsA, fx.realAssetsB
+
 	adapterIDByAddr := map[common.Address]int64{adapterA: 101, adapterB: 102}
 	var registered []*entity.MorphoAdapterObservation
 	h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, obs *entity.MorphoAdapterObservation) (int64, bool, error) {

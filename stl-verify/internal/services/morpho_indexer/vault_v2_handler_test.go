@@ -1091,6 +1091,95 @@ func TestProcessBlockEvent_V2Snapshots_RecordSnapshotType(t *testing.T) {
 	}
 }
 
+// TestProcessBlockEvent_AdapterMembership_NotRecordedWhenTheCommitFails keeps the
+// registration counter honest about rolled-back appends. Recorded from inside the
+// write transaction it counted observations no reader can ever see, once per adapter
+// per SQS redelivery of a stuck block — 12 an hour on the 300s visibility timeout,
+// which alone holds VectorMorphoV2LazyAdapterRegistrations (>3 in 6h) in alarm over a
+// table with zero rows.
+func TestProcessBlockEvent_AdapterMembership_NotRecordedWhenTheCommitFails(t *testing.T) {
+	tests := []struct {
+		name    string
+		setup   func(h *serviceTestHarness)
+		makeLog func(h *serviceTestHarness) shared.Log
+		wantVia entity.MembershipSource
+	}{
+		{
+			name: "AddAdapter",
+			setup: func(h *serviceTestHarness) {
+				h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+					if len(calls) == 2 && calls[0].Target == testAdapterAddr {
+						return h.adapterProbeResults(entity.MorphoAdapterTypeMarketV1), nil
+					}
+					return nil, errTestUnexpectedCall(calls)
+				}
+				h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+					if len(calls) == 1 && calls[0].Target == testAdapterAddr {
+						return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(41_300_000))}}, nil
+					}
+					return nil, errTestUnexpectedCall(calls)
+				}
+			},
+			makeLog: func(h *serviceTestHarness) shared.Log {
+				return h.makeV2VaultLog(h.vaultV2EventsABI.Events["AddAdapter"], testVaultAddr, []common.Hash{addrTopic(testAdapterAddr)})
+			},
+			wantVia: entity.MembershipFromAddAdapter,
+		},
+		{
+			name:  "RemoveAdapter",
+			setup: func(_ *serviceTestHarness) {},
+			makeLog: func(h *serviceTestHarness) shared.Log {
+				return h.makeV2VaultLog(h.vaultV2EventsABI.Events["RemoveAdapter"], testVaultAddr, []common.Hash{addrTopic(testAdapterAddr)})
+			},
+			wantVia: entity.MembershipFromRemoveAdapter,
+		},
+		{
+			name: "Allocate",
+			setup: func(h *serviceTestHarness) {
+				h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+					if len(calls) == 2 && calls[0].Target == testAdapterAddr {
+						return h.adapterProbeResults(entity.MorphoAdapterTypeMarketV1), nil
+					}
+					return nil, errTestUnexpectedCall(calls)
+				}
+				h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+					if len(calls) == 1 && calls[0].Target == testAdapterAddr {
+						return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(5000))}}, nil
+					}
+					return nil, errTestUnexpectedCall(calls)
+				}
+				h.morphoRepo.GetActiveAdapterAtFn = func(_ context.Context, _ int64, _ []byte, _ entity.BlockPosition) (*entity.MorphoAdapterMember, error) {
+					return nil, nil
+				}
+			},
+			makeLog: func(h *serviceTestHarness) shared.Log {
+				return h.makeV2VaultLog(h.vaultV2EventsABI.Events["Allocate"], testVaultAddr,
+					[]common.Hash{addrTopic(testCaller), addrTopic(testAdapterAddr)},
+					big.NewInt(5000), hashSlice(common.HexToHash("0xaa")), big.NewInt(5000))
+			},
+			wantVia: entity.MembershipFromAllocation,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newTestHarness(t)
+			h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
+			reader := h.recordMetrics(t)
+			tt.setup(h)
+			h.failCommitAfterMembershipAppend()
+
+			if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, tt.makeLog(h))}); err == nil {
+				t.Fatal("expected the block to fail so SQS redelivers")
+			}
+
+			want := map[string]string{"observed_via": string(tt.wantVia)}
+			if got := counterValue(t, reader, "morpho.v2.adapter.registrations", want); got != 0 {
+				t.Errorf("morpho.v2.adapter.registrations%v = %d, want 0 (the transaction rolled back)", want, got)
+			}
+		})
+	}
+}
+
 // TestProcessBlockEvent_V2Snapshot_NotRecordedWhenWriteFails keeps the counter
 // honest: it counts committed snapshots, so a failed write must leave it at zero
 // rather than reporting a row that never landed.

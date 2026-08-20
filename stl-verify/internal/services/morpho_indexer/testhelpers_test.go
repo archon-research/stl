@@ -3,6 +3,7 @@ package morpho_indexer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"testing"
@@ -166,6 +167,28 @@ func (h *serviceTestHarness) recordMetrics(t *testing.T) sdkmetric.Reader {
 	tel, reader := newRecordingTelemetry(t)
 	h.svc.telemetry = tel
 	return reader
+}
+
+// failCommitAfterMembershipAppend serves every membership append and then fails
+// the commit of the transaction that made one, so a test can prove what the
+// counters claim about rows that never landed. Transactions that appended nothing
+// (the audit-log save) still commit.
+func (h *serviceTestHarness) failCommitAfterMembershipAppend() {
+	appended := false
+	h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterObservation) (int64, bool, error) {
+		appended = true
+		return 42, true, nil
+	}
+	h.txManager.WithTransactionFn = func(_ context.Context, fn func(tx pgx.Tx) error) error {
+		appended = false
+		if err := fn(nil); err != nil {
+			return err
+		}
+		if appended {
+			return errors.New("commit failed")
+		}
+		return nil
+	}
 }
 
 // counterPoints collects the named int64 counter's data points. An instrument

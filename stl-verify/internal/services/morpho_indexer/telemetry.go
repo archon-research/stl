@@ -254,10 +254,10 @@ func (t *Telemetry) RecordError(ctx context.Context, operation string, err error
 // about provenance have the same vocabulary. adapter.type is the classification
 // the observation carried, with "unprobed" for the removals that carry none.
 //
-// It is called from inside the write transaction, so a transaction that later
-// rolls back over-counts by one, and the SQS retry counts again. Both are bounded
-// by the block-failure rate the error alerts already cover, and the rules reading
-// this counter threshold over hours rather than single events.
+// Callers accumulate their appends and flush them here only after the transaction
+// that made them commits (recordMembershipObservations), so a rolled-back append —
+// which an SQS redelivery repeats every visibility timeout for as long as a block
+// stays stuck — cannot inflate the counter against a table that gained no rows.
 func (t *Telemetry) RecordAdapterMembershipObservation(ctx context.Context, adapterType *entity.MorphoAdapterType, observedVia entity.MembershipSource) {
 	if t == nil {
 		return
