@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -21,6 +23,10 @@ type mockConsumer struct {
 	deletedHandles    []string
 	deleteErr         error
 	visibilityTimeout time.Duration // 0 -> a safe default well above the handler budget
+
+	// receive, when set, replaces the batch-popping behaviour so a test can
+	// drive ReceiveMessages failures.
+	receive func(ctx context.Context, maxMessages int) ([]outbound.SQSMessage, error)
 }
 
 func (m *mockConsumer) VisibilityTimeout() time.Duration {
@@ -30,7 +36,10 @@ func (m *mockConsumer) VisibilityTimeout() time.Duration {
 	return 300 * time.Second
 }
 
-func (m *mockConsumer) ReceiveMessages(_ context.Context, _ int) ([]outbound.SQSMessage, error) {
+func (m *mockConsumer) ReceiveMessages(ctx context.Context, maxMessages int) ([]outbound.SQSMessage, error) {
+	if m.receive != nil {
+		return m.receive(ctx, maxMessages)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if len(m.batches) == 0 {
@@ -61,6 +70,74 @@ func testConfig(consumer *mockConsumer) Config {
 		MaxMessages: 10,
 		Logger:      slog.Default(),
 		ChainID:     1,
+	}
+}
+
+// levelRecorder is a slog.Handler that keeps every record so a test can assert
+// on the level a message was logged at, not just on the text.
+type levelRecorder struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *levelRecorder) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *levelRecorder) Handle(_ context.Context, record slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, record.Clone())
+	return nil
+}
+
+func (h *levelRecorder) WithAttrs([]slog.Attr) slog.Handler { return h }
+
+func (h *levelRecorder) WithGroup(string) slog.Handler { return h }
+
+func (h *levelRecorder) messagesAt(level slog.Level) []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var messages []string
+	for _, record := range h.records {
+		if record.Level == level {
+			messages = append(messages, record.Message)
+		}
+	}
+	return messages
+}
+
+// startRunLoop runs RunLoop on its own goroutine, returning the shutdown
+// trigger and a channel closed once the loop has exited.
+func startRunLoop(consumer *mockConsumer, logger *slog.Logger) (context.CancelFunc, <-chan struct{}) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		RunLoop(ctx, Config{
+			Consumer:     consumer,
+			MaxMessages:  10,
+			PollInterval: 10 * time.Millisecond,
+			Logger:       logger,
+			ChainID:      1,
+		}, func(context.Context, outbound.BlockEvent) error { return nil })
+	}()
+	return cancel, done
+}
+
+func awaitLoopExit(t *testing.T, done <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunLoop did not return after cancellation")
+	}
+}
+
+// signalOnce reports entry into a mock receive without blocking or panicking on
+// repeated polls.
+func signalOnce(ch chan<- struct{}) {
+	select {
+	case ch <- struct{}{}:
+	default:
 	}
 }
 
@@ -263,6 +340,54 @@ func TestRunLoop_StopsOnCancel(t *testing.T) {
 		ChainID:      1,
 	}, handler)
 	// If we get here without hanging, test passes.
+}
+
+// TestRunLoop_ShutdownCancellationIsNotAnError covers the SIGTERM path: the
+// in-flight ReceiveMessages is cancelled with the loop's context, which is a
+// clean shutdown, not a failure. Logging it at ERROR made every rollout of
+// every SQS worker feed the error-rate alerts.
+func TestRunLoop_ShutdownCancellationIsNotAnError(t *testing.T) {
+	receiving := make(chan struct{}, 1)
+	consumer := &mockConsumer{
+		receive: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+			signalOnce(receiving)
+			<-ctx.Done()
+			return nil, fmt.Errorf("receiving from SQS: %w", ctx.Err())
+		},
+	}
+	recorder := &levelRecorder{}
+
+	cancel, done := startRunLoop(consumer, slog.New(recorder))
+	<-receiving
+	cancel()
+	awaitLoopExit(t, done)
+
+	if logged := recorder.messagesAt(slog.LevelError); len(logged) > 0 {
+		t.Fatalf("expected no ERROR records for a cancelled shutdown, got %v", logged)
+	}
+}
+
+// TestRunLoop_LogsGenuineReceiveFailureAtError is the counterpart guard: the
+// shutdown-quiet path must not swallow a real receive failure.
+func TestRunLoop_LogsGenuineReceiveFailureAtError(t *testing.T) {
+	receiving := make(chan struct{}, 1)
+	consumer := &mockConsumer{
+		receive: func(context.Context, int) ([]outbound.SQSMessage, error) {
+			signalOnce(receiving)
+			return nil, errors.New("SQS unavailable")
+		},
+	}
+	recorder := &levelRecorder{}
+
+	cancel, done := startRunLoop(consumer, slog.New(recorder))
+	<-receiving
+	cancel()
+	awaitLoopExit(t, done)
+
+	logged := recorder.messagesAt(slog.LevelError)
+	if !slices.Contains(logged, "error processing messages") {
+		t.Fatalf("expected a genuine receive failure at ERROR, got %v", logged)
+	}
 }
 
 func TestRunLoop_LogsBadVisibilityTimeout(t *testing.T) {

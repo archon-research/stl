@@ -100,10 +100,21 @@ func RunLoop(ctx context.Context, cfg Config, handler BlockEventHandler) {
 			return
 		case <-ticker.C:
 			if err := ProcessMessages(ctx, cfg, handler); err != nil {
+				if isShutdownCancellation(ctx, err) {
+					return
+				}
 				cfg.Logger.Error("error processing messages", "error", err)
 			}
 		}
 	}
+}
+
+// isShutdownCancellation reports whether err is only the loop's context being
+// cancelled (SIGTERM), rather than a processing failure. Both conditions are
+// required so a genuine error racing shutdown is still logged.
+func isShutdownCancellation(ctx context.Context, err error) bool {
+	return ctx.Err() != nil &&
+		(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
 }
 
 // ProcessMessages receives a batch of SQS messages, parses each as a
