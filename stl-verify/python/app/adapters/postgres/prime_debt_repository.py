@@ -237,11 +237,7 @@ class PrimeDebtRepository:
                 -- stale is not a current reading.
                 SELECT b.debt_usd * 1e18 AS debt_wad
                 FROM prime_reference_balance_sheet b
-                JOIN prime p ON p.id = b.prime_id
-                WHERE
-            """
-            + self._prime_match_clause()
-            + """
+                WHERE b.prime_id = :prime_id
                   AND b.observed_at < CAST(:from_timestamp AS TIMESTAMPTZ)
                   AND b.observed_at >=
                       CAST(:from_timestamp AS TIMESTAMPTZ) - INTERVAL '90 days'

@@ -105,10 +105,10 @@ async def test_carries_an_observation_from_before_the_window_into_it(seeded, asy
     # midnight the newest row already sits outside a 24h window. Without seeding
     # locf from the prior observation the card reports a figure while its own
     # chart reports none.
-    conn, prime_id, _vault = seeded
+    conn, prime_id = seeded
     await _insert_day(conn, prime_id, _WINDOW_START - timedelta(days=2), debt="2642983145.21")
 
-    buckets = await _buckets(async_db_url, f"0x{_PROXY.hex()}")
+    buckets = await _buckets(async_db_url, prime_id)
 
     assert buckets
     assert all(b.debt_wad == Decimal("2642983145.21") * Decimal("1e18") for b in buckets)
