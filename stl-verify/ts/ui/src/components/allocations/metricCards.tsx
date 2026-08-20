@@ -9,10 +9,10 @@ import {
   chartTokens,
   useContainerWidth,
 } from '@archon-research/charting';
-import { ReferenceBand } from '@archon-research/charting';
+import { DataContext, ReferenceBand } from '@archon-research/charting';
 import { SkeletonStack } from '@archon-research/design-system';
 import type { CSSProperties } from 'react';
-import { useMemo } from 'react';
+import { useContext, useMemo } from 'react';
 
 import { css } from '#styled-system/css';
 
@@ -45,7 +45,8 @@ export type MetricChartSpec = {
   kind: MetricChartKind;
   // Ordered ascending. Each draws a dashed limit with the region past it shaded,
   // so overlapping severities read as escalating shade.
-  thresholds?: { value: number; label: string }[];
+  //
+  thresholds?: { value: number; label?: string; stroke?: string }[];
 };
 
 // Every card the metrics band can render. Its length drives both the loading
@@ -134,6 +135,65 @@ export const chartEmptyMessageClassName = css({
 });
 
 const CHART_HEIGHT = 236;
+
+type ThresholdEntry = NonNullable<MetricChartSpec['thresholds']>[number];
+
+const THRESHOLD_LABEL_FONT_SIZE = 11;
+
+/**
+ * Threshold labels, drawn here rather than by `ReferenceBand`.
+ *
+ * The kit pins every label to the same x at its own line's y, so two limits a
+ * few percentage points apart land on top of each other. Splitting them — the
+ * highest above its line, the rest below theirs — puts each on the outside of
+ * the band it bounds and separates them by two label heights.
+ *
+ * Reads the committed scale from `DataContext` instead of recomputing it: the
+ * chart passes `nice`, which adjusts the domain, so a locally derived scale
+ * would place the text off its own line.
+ */
+function ThresholdLabels({ thresholds }: { thresholds: ThresholdEntry[] }) {
+  const context = useContext(DataContext);
+  const yScale = context?.yScale as
+    | ((value: number) => number | undefined)
+    | undefined;
+  const marginLeft = context?.margin?.left;
+
+  if (yScale === undefined || marginLeft === undefined) {
+    return null;
+  }
+
+  const labelled = thresholds.filter((entry) => entry.label !== undefined);
+  if (labelled.length === 0) {
+    return null;
+  }
+
+  const highest = Math.max(...labelled.map((entry) => entry.value));
+
+  return (
+    <g data-part="threshold-labels" pointerEvents="none">
+      {labelled.map((entry) => {
+        const y = yScale(entry.value);
+        if (y === undefined || !Number.isFinite(y)) {
+          return null;
+        }
+
+        const isHighest = entry.value === highest;
+        return (
+          <text
+            key={`threshold-label-${entry.value}`}
+            x={marginLeft + 6}
+            y={y + (isHighest ? -6 : THRESHOLD_LABEL_FONT_SIZE + 3)}
+            fill={entry.stroke}
+            fontSize={THRESHOLD_LABEL_FONT_SIZE}
+          >
+            {entry.label}
+          </text>
+        );
+      })}
+    </g>
+  );
+}
 
 export function MetricCardTrend({
   chart,
@@ -286,9 +346,10 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
             mode="threshold"
             value={entry.value}
             breach="above"
-            label={entry.label}
+            stroke={entry.stroke}
           />
         ))}
+        <ThresholdLabels thresholds={thresholds} />
         <Tooltip
           snapTooltipToDatumX
           snapTooltipToDatumY

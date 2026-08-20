@@ -984,10 +984,12 @@ function App() {
           {
             value: ENCUMBRANCE_LOW_SEVERITY_THRESHOLD,
             label: formatRatioPercent(ENCUMBRANCE_LOW_SEVERITY_THRESHOLD, 0),
+            stroke: 'var(--colors-text-warning)',
           },
           {
             value: ENCUMBRANCE_HIGH_SEVERITY_THRESHOLD,
             label: formatRatioPercent(ENCUMBRANCE_HIGH_SEVERITY_THRESHOLD, 0),
+            stroke: 'var(--colors-text-critical)',
           },
         ],
       },
