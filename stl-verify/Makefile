@@ -5,7 +5,7 @@
 include lint.mk
 
 .PHONY: all test test-race test-integration test-integration-shard integration-shard-check ci-service-check test-templates-clean lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-oracle-price-worker-avax run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-allocation-tracker run-allocation-tracker-avax help ci ci-checks install-hooks format \
-	dev-up dev-up-rebuild dev-up-workers dev-up-or-resume dev-preflight dev-env dev-db dev-down dev-suspend dev-resume dev-wipe dev-ips generate-er \
+	dev-up dev-up-rebuild dev-up-workers dev-up-or-resume dev-preflight dev-env dev-secrets dev-env-files dev-db dev-down dev-suspend dev-resume dev-wipe dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
 		_docker-release-image _docker-release-go-service \
 		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-fluid-vault-indexer-internal _docker-release-dex-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal _docker-release-psm3-indexer-internal _docker-release-cex-orderbook-indexer-internal _docker-release-migrate-internal _docker-release-python-api-internal _docker-release-transform-bootstrap-internal _docker-release-cronjob-%-internal \
@@ -526,12 +526,38 @@ dev-db:
 	@echo "==> Database ready."
 	@echo "    Connection: postgres://postgres:postgres@127.0.0.1:$(KIND_HOST_PG_PORT)/stl_verify?sslmode=disable"
 
-# Generate .env files for all services (fetches secrets from AWS)
+# refresh_secret <ENV_NAME> <secret-id> <jq path into the SecretString, or empty when
+# the SecretString IS the value>. A failed or empty fetch leaves the key's existing
+# line alone rather than blanking it: ArchonDeveloper cannot read three of these
+# (ORB-343), so overwriting on failure deletes whatever was set by hand.
+define refresh_secret
+VALUE=$$(aws secretsmanager get-secret-value --secret-id $(2) --query SecretString --output text 2>/dev/null $(if $(3),| jq -r '$(3) // empty',)); \
+if [ -z "$$VALUE" ]; then \
+	echo "WARNING: Could not read $(1) ($(2)) from AWS Secrets Manager -- ArchonDeveloper is read-only as of ORB-343 and this secret is not carved out; keeping whatever ../.env.secrets already holds"; \
+else \
+	{ grep -v '^$(1)=' ../.env.secrets; printf '%s\n' "$(1)=$$VALUE"; } > ../.env.secrets.tmp && \
+		mv ../.env.secrets.tmp ../.env.secrets && chmod 600 ../.env.secrets; \
+fi
+endef
+
+# Generate .env files for all services (refreshes the secrets from AWS first).
 # Can be re-run independently to refresh secrets without restarting services.
-dev-env:
-	@ALCHEMY_API_KEY=$$(aws secretsmanager get-secret-value --secret-id stl-sentinelstaging-watcher-config --query SecretString --output text | jq -r '.alchemy_api_key // empty') || \
-		{ echo "WARNING: Could not read ALCHEMY_API_KEY (stl-sentinelstaging-watcher-config) from AWS Secrets Manager -- ArchonDeveloper is read-only as of ORB-343 and this secret is not carved out; set it manually in .env.secrets"; ALCHEMY_API_KEY=''; }; \
-	printf '%s\n' "ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" > ../.env.secrets && chmod 600 ../.env.secrets; \
+dev-env: dev-secrets dev-env-files
+
+# Refresh ../.env.secrets from AWS Secrets Manager, one key per secret.
+dev-secrets:
+	@touch ../.env.secrets && chmod 600 ../.env.secrets
+	@$(call refresh_secret,ALCHEMY_API_KEY,stl-sentinelstaging-watcher-config,.alchemy_api_key)
+	@$(call refresh_secret,COINGECKO_API_KEY,coingecko_api_key,.coingecko_api_key)
+	@$(call refresh_secret,ETHERSCAN_API_KEY,etherscan_api_key,)
+	@$(call refresh_secret,ANCHORAGE_API_KEY,stl-sentinelstaging-anchorage-api-key,)
+
+# Write every service's .env from whatever ../.env.secrets already holds. It calls no
+# AWS API, so it is the target to run on a read-only role, offline, or when the keys
+# are already set by hand — `make dev-env` runs it after refreshing the secrets.
+dev-env-files:
+	@test -f ../.env.secrets || { echo "ERROR: ../.env.secrets is missing. Run: make dev-secrets, or set the keys by hand"; exit 1; }
+	@set -a; . ../.env.secrets; set +a; \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
 		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
@@ -688,19 +714,10 @@ dev-env:
 		"SQS_VISIBILITY_TIMEOUT=30" \
 		"LOG_LEVEL=debug" \
 		> cmd/workers/morpho-indexer/.env
-	@COINGECKO_API_KEY=$$(aws secretsmanager get-secret-value --secret-id coingecko_api_key --query SecretString --output text | jq -r '.coingecko_api_key // empty') || \
-		{ echo "WARNING: Could not read COINGECKO_API_KEY (coingecko_api_key) from AWS Secrets Manager -- ArchonDeveloper is read-only as of ORB-343 and this secret is not carved out; set it manually in .env.secrets"; COINGECKO_API_KEY=''; }; \
-	printf '%s\n' "COINGECKO_API_KEY=$$COINGECKO_API_KEY" >> ../.env.secrets
 	@printf '%s\n' \
 		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:$(KIND_HOST_PG_PORT)/stl_verify?sslmode=disable" \
 		"LOG_LEVEL=debug" \
 		> cmd/backfillers/oracle-pricing-backfill/.env
-	@ETHERSCAN_API_KEY=$$(aws secretsmanager get-secret-value --secret-id etherscan_api_key --query SecretString --output text) || \
-		{ echo "WARNING: Could not read ETHERSCAN_API_KEY (etherscan_api_key) from AWS Secrets Manager -- ArchonDeveloper is read-only as of ORB-343 and this secret is not carved out; set it manually in .env.secrets"; ETHERSCAN_API_KEY=''; }; \
-	printf '%s\n' "ETHERSCAN_API_KEY=$$ETHERSCAN_API_KEY" >> ../.env.secrets
-	@ANCHORAGE_API_KEY=$$(aws secretsmanager get-secret-value --secret-id stl-sentinelstaging-anchorage-api-key --query SecretString --output text 2>/dev/null) || \
-		{ echo "WARNING: Could not read ANCHORAGE_API_KEY (stl-sentinelstaging-anchorage-api-key) from AWS Secrets Manager -- ArchonDeveloper is read-only as of ORB-343 and this secret is not carved out; set it manually in .env.secrets"; ANCHORAGE_API_KEY=''; }; \
-	printf '%s\n' "ANCHORAGE_API_KEY=$$ANCHORAGE_API_KEY" >> ../.env.secrets
 	@set -a; . ../.env.secrets; set +a; \
 	printf '%s\n' \
 		"CHAIN_ID=1" \
@@ -791,7 +808,7 @@ dev-env:
 		"BUILD_GIT_HASH=dev" \
 		"LOG_LEVEL=info" \
 		> cmd/backfillers/morpho-vault-backfill/.env
-	@echo "Environment files generated (.env.secrets updated)."; \
+	@echo "Environment files generated from ../.env.secrets."; \
 	MISSING=""; \
 	for key in ALCHEMY_API_KEY COINGECKO_API_KEY ETHERSCAN_API_KEY ANCHORAGE_API_KEY; do \
 	  val="$$(grep -m1 "^$$key=" ../.env.secrets | cut -d= -f2-)"; \
@@ -2009,6 +2026,10 @@ build-backfiller-%:
 	go build -o dist/$* ./cmd/backfillers/$*
 	@echo "==> Built: dist/$*"
 
+# A backfiller reading a REAL bucket needs creds this .env does not carry: run it as
+# `AWS_PROFILE=<profile> make run-backfiller-<name>`, which reaches awsconfig.Load's
+# default chain — only because the .env leaves AWS_ACCESS_KEY_ID unset, and setting it
+# (as the LocalStack-backed services' .env files do) would pin static creds instead.
 run-backfiller-%:
 	@test -f cmd/backfillers/$*/.env || { echo "ERROR: cmd/backfillers/$*/.env is missing. Generate it with: make dev-env"; exit 1; }
 	@echo "==> Running $*..."
