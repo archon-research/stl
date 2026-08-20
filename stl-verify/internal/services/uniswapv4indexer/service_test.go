@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
@@ -42,13 +43,21 @@ type fakeUniswapRepo struct {
 	ticksForPoolErr   error
 
 	poolsWithState      map[int64][]int64
-	poolsWithStateCalls []int64
+	poolsWithStateCalls []fakeStateBlockKey
 	poolsWithStateErr   error
 }
 
 type fakePoolBlockKey struct {
 	poolID      int64
 	blockNumber int64
+}
+
+// fakeStateBlockKey records the full scope PoolIDsWithStateAtBlock is called
+// with, so a test can pin the chain and the chunk-bounding timestamp.
+type fakeStateBlockKey struct {
+	chainID     int64
+	blockNumber int64
+	blockTime   time.Time
 }
 
 func (r *fakeUniswapRepo) LoadPools(_ context.Context, _ int64) ([]outbound.UniswapV4PoolRow, error) {
@@ -64,8 +73,9 @@ func (r *fakeUniswapRepo) TicksForPoolAtBlock(_ context.Context, poolID int64, b
 	return r.priorTicks[key], nil
 }
 
-func (r *fakeUniswapRepo) PoolIDsWithStateAtBlock(_ context.Context, blockNumber int64) ([]int64, error) {
-	r.poolsWithStateCalls = append(r.poolsWithStateCalls, blockNumber)
+func (r *fakeUniswapRepo) PoolIDsWithStateAtBlock(_ context.Context, chainID int64, blockNumber int64, blockTime time.Time) ([]int64, error) {
+	r.poolsWithStateCalls = append(r.poolsWithStateCalls,
+		fakeStateBlockKey{chainID: chainID, blockNumber: blockNumber, blockTime: blockTime})
 	if r.poolsWithStateErr != nil {
 		return nil, r.poolsWithStateErr
 	}
@@ -293,7 +303,25 @@ func servicePool() RegisteredPool {
 		Fee:               2500,
 		TickSpacing:       50,
 		DeployBlock:       100,
+		SnapshotSupported: true,
 	}
+}
+
+// dynamicFeeServicePool is servicePool's key at the dynamic-LP-fee sentinel and
+// therefore excluded from snapshots. Its PoolId is computed rather than
+// transcribed: no mainnet pool carries this exact key.
+func dynamicFeeServicePool(t *testing.T) RegisteredPool {
+	t.Helper()
+	pool := servicePool()
+	pool.ID = 9
+	pool.Fee = DynamicFeeFlag
+	pool.SnapshotSupported = false
+	hash, err := computePoolID(pool)
+	if err != nil {
+		t.Fatalf("computePoolID: %v", err)
+	}
+	pool.PoolIDHash = hash
+	return pool
 }
 
 // secondServicePool is the same pair at 0.3% / tickSpacing 60, so a single
@@ -465,6 +493,69 @@ func TestNewUniswapV4Service_RejectsInvalidDeps(t *testing.T) {
 				t.Errorf("error %q does not mention %q", err, tt.wantSub)
 			}
 		})
+	}
+}
+
+// A dynamic-fee pool is schema-legal and its fee is hashed into its PoolId, so
+// refusing to boot on one would be an unrepairable CrashLoop; the registry
+// excludes it from snapshots instead.
+func TestNewUniswapV4Service_AcceptsDynamicFeePool(t *testing.T) {
+	deps, _, _, _ := validServiceDeps(t, []RegisteredPool{dynamicFeeServicePool(t)})
+	if _, err := NewUniswapV4Service(deps); err != nil {
+		t.Fatalf("NewUniswapV4Service with a dynamic-fee pool: %v", err)
+	}
+}
+
+// TestBlockHandler_UnsnapshottablePoolPersistsEventsWithoutState pins the other
+// half of the curated gate: excluding a pool from snapshots must not exclude it
+// from event indexing, and must issue no chain read at all.
+func TestBlockHandler_UnsnapshottablePoolPersistsEventsWithoutState(t *testing.T) {
+	pool := dynamicFeeServicePool(t)
+	svc, repo, mc, txMgr := newTestService(t, pool)
+
+	receipt := shared.TransactionReceipt{Logs: []shared.Log{
+		swapLog(t, pool, "0x0"),
+		modifyLog(t, pool, "0x1", -100, 200, 5000),
+	}}
+	if err := svc.BlockHandler()(context.Background(), blockEvent(200), []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("BlockHandler: %v", err)
+	}
+
+	if txMgr.calls != 1 {
+		t.Fatalf("WithTransaction calls = %d, want 1", txMgr.calls)
+	}
+	if mc.executeAtHashCalls != 0 {
+		t.Errorf("chain reads = %d, want 0 for a pool excluded from snapshots", mc.executeAtHashCalls)
+	}
+	w := repo.lastWrites
+	if len(w.Swaps) != 1 || len(w.LiquidityEvents) != 1 {
+		t.Errorf("Swaps = %d, LiquidityEvents = %d, want 1 and 1 (events still index)", len(w.Swaps), len(w.LiquidityEvents))
+	}
+	if len(w.States) != 0 || len(w.Ticks) != 0 {
+		t.Errorf("States = %d, Ticks = %d, want 0 and 0", len(w.States), len(w.Ticks))
+	}
+}
+
+// An absent BlockTimestamp is not the zero time, so it would pass every
+// downstream IsZero() guard and file the whole block in a 1970 chunk — acked,
+// invisible, and only repairable by a backfill.
+func TestBlockHandler_MissingBlockTimestamp_ErrorsWithoutPersisting(t *testing.T) {
+	pool := servicePool()
+	svc, repo, mc, txMgr := newTestService(t, pool)
+
+	event := blockEvent(200)
+	event.BlockTimestamp = 0
+	receipt := shared.TransactionReceipt{Logs: []shared.Log{swapLog(t, pool, "0x0")}}
+	err := svc.BlockHandler()(context.Background(), event, []shared.TransactionReceipt{receipt})
+	if err == nil {
+		t.Fatal("BlockHandler: want error for a block with no timestamp, got nil")
+	}
+	if !strings.Contains(err.Error(), "block timestamp") {
+		t.Errorf("error %q does not identify the missing block timestamp", err)
+	}
+	if txMgr.calls != 0 || repo.saveBlockCalls != 0 || mc.executeAtHashCalls != 0 {
+		t.Errorf("tx calls = %d, SaveBlock calls = %d, chain reads = %d, want 0, 0 and 0",
+			txMgr.calls, repo.saveBlockCalls, mc.executeAtHashCalls)
 	}
 }
 
@@ -1088,8 +1179,9 @@ func TestBlockHandler_ReorgAfterRestart_ResnapshotsPoolsWithStateAtThatBlock(t *
 		t.Fatalf("BlockHandler (v1 reorg redelivery on a fresh service): %v", err)
 	}
 
-	if !slices.Contains(repo.poolsWithStateCalls, int64(200)) {
-		t.Fatalf("PoolIDsWithStateAtBlock calls = %v, want to include block 200", repo.poolsWithStateCalls)
+	wantScope := fakeStateBlockKey{chainID: testChainID, blockNumber: 200, blockTime: time.Unix(200, 0).UTC()}
+	if !slices.Contains(repo.poolsWithStateCalls, wantScope) {
+		t.Fatalf("PoolIDsWithStateAtBlock calls = %v, want to include %v", repo.poolsWithStateCalls, wantScope)
 	}
 	if len(repo.lastWrites.States) != 1 || repo.lastWrites.States[0].PoolID != pool.ID {
 		t.Fatalf("v1 States = %+v, want one snapshot of pool %d", repo.lastWrites.States, pool.ID)
@@ -1106,9 +1198,34 @@ func TestBlockHandler_ReorgAfterRestart_ResnapshotsPoolsWithStateAtThatBlock(t *
 	}
 }
 
+// TestBlockHandler_ReorgPriorStateBelowDeployBlock_IsNotScheduled mirrors
+// DueSet's deploy gate on the restart path: below a pool's registered deploy
+// height there is nothing for StateView to answer, so the pool is skipped
+// rather than snapshotted at a height it did not exist at.
+func TestBlockHandler_ReorgPriorStateBelowDeployBlock_IsNotScheduled(t *testing.T) {
+	pool := servicePool()
+	pool.DeployBlock = 500
+	svc, repo, mc, txMgr := newTestService(t, pool)
+	repo.poolsWithState = map[int64][]int64{200: {pool.ID}}
+
+	reorg := blockEvent(200)
+	reorg.Version = 1
+	if err := svc.BlockHandler()(context.Background(), reorg, nil); err != nil {
+		t.Fatalf("BlockHandler: %v", err)
+	}
+	if mc.executeAtHashCalls != 0 {
+		t.Errorf("chain reads = %d, want 0 below the pool's deploy block", mc.executeAtHashCalls)
+	}
+	if txMgr.calls != 0 || repo.saveBlockCalls != 0 {
+		t.Errorf("tx calls = %d, SaveBlock calls = %d, want 0 and 0", txMgr.calls, repo.saveBlockCalls)
+	}
+}
+
 // TestBlockHandler_ReorgWithUnregisteredPriorState_Errors keeps the registry
-// authoritative: a persisted pool the registry no longer names cannot be
-// snapshotted, and guessing past it would leave the orphaned fork canonical.
+// authoritative: the repository already resolves prior-state ids forward to
+// their current version on this chain, so an id the registry still does not
+// name is a genuine registry bug, and guessing past it would leave the orphaned
+// fork canonical.
 func TestBlockHandler_ReorgWithUnregisteredPriorState_Errors(t *testing.T) {
 	pool := servicePool()
 	svc, repo, _, txMgr := newTestService(t, pool)
@@ -1125,6 +1242,44 @@ func TestBlockHandler_ReorgWithUnregisteredPriorState_Errors(t *testing.T) {
 	}
 	if txMgr.calls != 0 || repo.saveBlockCalls != 0 {
 		t.Errorf("tx calls = %d, SaveBlock calls = %d, want 0 and 0", txMgr.calls, repo.saveBlockCalls)
+	}
+}
+
+// TestBlockHandler_ReorgReReadOfOrphanedPool_PersistsZeroStateTombstone pins the
+// counterpart of the tick path's zeroed re-read: a pool whose Initialize the
+// reorg orphaned answers all zeros through StateView, and that row has to
+// persist to supersede the orphaned fork's snapshot. Refusing it would stall
+// the block forever on redelivery.
+func TestBlockHandler_ReorgReReadOfOrphanedPool_PersistsZeroStateTombstone(t *testing.T) {
+	pool := servicePool()
+	svc, repo, mc, txMgr := newTestService(t, pool)
+
+	zeroed := stateFixture{
+		sqrtPriceX96:     big.NewInt(0),
+		tick:             big.NewInt(0),
+		protocolFee:      big.NewInt(0),
+		lpFee:            big.NewInt(0),
+		liquidity:        big.NewInt(0),
+		feeGrowthGlobal0: big.NewInt(0),
+		feeGrowthGlobal1: big.NewInt(0),
+	}
+	mc.stateResults = buildStateResults(t, zeroed)
+	repo.poolsWithState = map[int64][]int64{200: {pool.ID}}
+
+	reorg := blockEvent(200)
+	reorg.Version = 1
+	if err := svc.BlockHandler()(context.Background(), reorg, nil); err != nil {
+		t.Fatalf("BlockHandler (v1 re-read of an orphaned pool): %v", err)
+	}
+
+	if txMgr.calls != 1 {
+		t.Fatalf("tx calls = %d, want 1 (the tombstone must commit)", txMgr.calls)
+	}
+	if len(repo.lastWrites.States) != 1 {
+		t.Fatalf("v1 States = %+v, want one zeroed tombstone row", repo.lastWrites.States)
+	}
+	if got := repo.lastWrites.States[0]; got.SqrtPriceX96.Sign() != 0 || got.BlockVersion != 1 {
+		t.Errorf("tombstone = sqrtPriceX96 %s at block_version %d, want 0 at 1", got.SqrtPriceX96, got.BlockVersion)
 	}
 }
 

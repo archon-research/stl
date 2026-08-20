@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"slices"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
@@ -41,33 +42,37 @@ func NewUniswapV4Repository(pool *pgxpool.Pool, buildID buildregistry.BuildID) *
 // loadUniswapV4PoolsSQL reads the current registry for one chain. Both registry
 // tables are append-only version histories, so "current" is the highest
 // processing_version per natural key: DISTINCT ON (pool_id) for the pools, and
-// the single newest uniswap_v4_pool_manager row for the chain. The manager is
-// LEFT JOINed so a chain with pools but no manager returns rows with NULL
-// manager columns, which the scan rejects, rather than an empty result that
-// would look like an unregistered chain.
+// the single newest uniswap_v4_pool_manager row for the chain. The PoolManager
+// address is the FK'd protocol row's, never a column of its own.
+//
+// Every join to the right of the pool subquery is LEFT so a registry defect
+// surfaces as a named error from the scan rather than as a silently missing
+// pool: no manager row, or a currency whose token_id belongs to another chain,
+// would otherwise drop the pool and leave the indexer looking healthy.
 const loadUniswapV4PoolsSQL = `
 	SELECT p.id, m.protocol_id, m.pool_manager_address, m.state_view_address,
 	       p.pool_id, p.currency0, p.currency1,
 	       t0.address, t0.decimals, t1.address, t1.decimals,
-	       p.fee, p.tick_spacing, p.hooks, p.deploy_block
+	       p.fee, p.tick_spacing, p.hooks, p.deploy_block, p.snapshot_supported
 	FROM (
 	    SELECT DISTINCT ON (pool_id)
 	           id, pool_id, currency0, currency1,
 	           currency0_token_id, currency1_token_id,
-	           fee, tick_spacing, hooks, deploy_block
+	           fee, tick_spacing, hooks, deploy_block, snapshot_supported
 	    FROM uniswap_v4_pool
 	    WHERE chain_id = $1
 	    ORDER BY pool_id, processing_version DESC
 	) p
 	LEFT JOIN LATERAL (
-	    SELECT protocol_id, pool_manager_address, state_view_address
-	    FROM uniswap_v4_pool_manager
-	    WHERE chain_id = $1
-	    ORDER BY processing_version DESC
+	    SELECT mgr.protocol_id, pr.address AS pool_manager_address, mgr.state_view_address
+	    FROM uniswap_v4_pool_manager mgr
+	    JOIN protocol pr ON pr.id = mgr.protocol_id
+	    WHERE mgr.chain_id = $1
+	    ORDER BY mgr.processing_version DESC
 	    LIMIT 1
 	) m ON TRUE
-	JOIN token t0 ON t0.id = p.currency0_token_id AND t0.chain_id = $1
-	JOIN token t1 ON t1.id = p.currency1_token_id AND t1.chain_id = $1
+	LEFT JOIN token t0 ON t0.id = p.currency0_token_id AND t0.chain_id = $1
+	LEFT JOIN token t1 ON t1.id = p.currency1_token_id AND t1.chain_id = $1
 	ORDER BY p.id`
 
 // LoadPools returns the current version of every registered pool on chainID,
@@ -108,23 +113,24 @@ func scanUniswapV4PoolRow(rows pgx.Rows, chainID int64) (outbound.UniswapV4PoolR
 		fee, tickSpacing       int
 		hooks                  []byte
 		deployBlock            int64
+		snapshotSupported      bool
 		row                    outbound.UniswapV4PoolRow
 	)
 	if err := rows.Scan(&id, &protocolID, &poolManager, &stateView,
 		&onchainPoolID, &currency0, &currency1,
 		&token0, &decimals0, &token1, &decimals1,
-		&fee, &tickSpacing, &hooks, &deployBlock); err != nil {
+		&fee, &tickSpacing, &hooks, &deployBlock, &snapshotSupported); err != nil {
 		return row, fmt.Errorf("scanning uniswap_v4 pool row: %w", err)
 	}
 	if protocolID == nil {
 		return row, fmt.Errorf("chain %d has uniswap_v4 pools (e.g. %d) but no uniswap_v4_pool_manager row", chainID, id)
 	}
 
-	currency0Decimals, err := currencyTokenDecimals(id, "currency0", common.BytesToAddress(currency0), common.BytesToAddress(token0), decimals0)
+	currency0Decimals, err := currencyTokenDecimals(id, "currency0", common.BytesToAddress(currency0), token0, decimals0)
 	if err != nil {
 		return row, err
 	}
-	currency1Decimals, err := currencyTokenDecimals(id, "currency1", common.BytesToAddress(currency1), common.BytesToAddress(token1), decimals1)
+	currency1Decimals, err := currencyTokenDecimals(id, "currency1", common.BytesToAddress(currency1), token1, decimals1)
 	if err != nil {
 		return row, err
 	}
@@ -143,22 +149,28 @@ func scanUniswapV4PoolRow(rows pgx.Rows, chainID int64) (outbound.UniswapV4PoolR
 		TickSpacing:       tickSpacing,
 		Hooks:             common.BytesToAddress(hooks),
 		DeployBlock:       deployBlock,
+		SnapshotSupported: snapshotSupported,
 	}, nil
 }
 
 // currencyTokenDecimals returns the decimals of the token row a currency
-// resolves to, rejecting a registry row whose token is not that currency (or,
-// for native ETH, not the placeholder) and one whose decimals are NULL.
-func currencyTokenDecimals(poolID int64, field string, currency, token common.Address, decimals *int) (int, error) {
+// resolves to, rejecting a registry row whose token is absent from this chain,
+// is not that currency (or, for native ETH, not the placeholder), or has NULL
+// decimals. token is the raw column so an absent row is distinguishable from
+// the zero address, which is itself a meaningful currency value.
+func currencyTokenDecimals(poolID int64, field string, currency common.Address, token []byte, decimals *int) (int, error) {
 	want := currency
 	if currency == (common.Address{}) {
 		want = nativeETHPlaceholder
 	}
-	if token != want {
-		return 0, fmt.Errorf("uniswap_v4 pool %d %s %s resolves to token %s, want %s", poolID, field, currency, token, want)
+	if token == nil {
+		return 0, fmt.Errorf("uniswap_v4 pool %d %s %s has no token row on its own chain: the currency token id points at another chain", poolID, field, currency)
+	}
+	if got := common.BytesToAddress(token); got != want {
+		return 0, fmt.Errorf("uniswap_v4 pool %d %s %s resolves to token %s, want %s", poolID, field, currency, got, want)
 	}
 	if decimals == nil {
-		return 0, fmt.Errorf("uniswap_v4 pool %d %s token %s has NULL decimals: amounts cannot be scaled", poolID, field, token)
+		return 0, fmt.Errorf("uniswap_v4 pool %d %s token %s has NULL decimals: amounts cannot be scaled", poolID, field, want)
 	}
 	return *decimals, nil
 }
@@ -222,18 +234,38 @@ func (r *UniswapV4Repository) SaveBlock(ctx context.Context, tx pgx.Tx, w outbou
 	return stateRows, nil
 }
 
-// PoolIDsWithStateAtBlock returns the pool ids that already have a
-// uniswap_v4_pool_state row at blockNumber, ascending. A reorg redelivery
-// unions them into its due set so the orphaned fork's snapshot is superseded
-// even when the in-memory tracker was lost to a restart. Queries the connection
-// pool directly (committed rows), not a write transaction.
-func (r *UniswapV4Repository) PoolIDsWithStateAtBlock(ctx context.Context, blockNumber int64) ([]int64, error) {
-	rows, err := r.pool.Query(ctx,
-		`SELECT DISTINCT pool_id FROM uniswap_v4_pool_state
-		 WHERE block_number = $1
-		 ORDER BY pool_id`,
-		blockNumber,
-	)
+// poolIDsWithStateAtBlockSQL resolves each state row's pool through the
+// registry twice over. uniswap_v4_pool_state carries no chain_id, so the
+// worker's chain filter has to come from the pool row the fact FKs; and a
+// registry correction mints a new surrogate while the old fact rows keep the
+// old one, so uniswap_v4_pool_current maps that superseded id forward to the
+// current version of its (chain_id, pool_id) natural key — the only id the
+// caller's in-memory registry knows.
+//
+// The block_timestamp band is what lets TimescaleDB exclude chunks: filtering
+// on block_number alone scans every chunk of the hypertable on each reorg
+// (VEC-541). One day either side is far wider than any block's own timestamp
+// needs and still prunes to a couple of chunks.
+const poolIDsWithStateAtBlockSQL = `
+	SELECT DISTINCT cur.id
+	FROM uniswap_v4_pool_state s
+	JOIN uniswap_v4_pool p ON p.id = s.pool_id
+	JOIN uniswap_v4_pool_current cur
+	  ON cur.chain_id = p.chain_id AND cur.pool_id = p.pool_id
+	WHERE p.chain_id = $1
+	  AND s.block_number = $2
+	  AND s.block_timestamp BETWEEN $3::timestamptz - INTERVAL '1 day'
+	                            AND $3::timestamptz + INTERVAL '1 day'
+	ORDER BY cur.id`
+
+// PoolIDsWithStateAtBlock returns the current registry ids of the pools on
+// chainID that already have a uniswap_v4_pool_state row at blockNumber,
+// ascending. A reorg redelivery unions them into its due set so the orphaned
+// fork's snapshot is superseded even when the in-memory tracker was lost to a
+// restart. Queries the connection pool directly (committed rows), not a write
+// transaction.
+func (r *UniswapV4Repository) PoolIDsWithStateAtBlock(ctx context.Context, chainID int64, blockNumber int64, blockTimestamp time.Time) ([]int64, error) {
+	rows, err := r.pool.Query(ctx, poolIDsWithStateAtBlockSQL, chainID, blockNumber, blockTimestamp)
 	if err != nil {
 		return nil, fmt.Errorf("querying pools with state at block %d: %w", blockNumber, err)
 	}

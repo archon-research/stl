@@ -106,6 +106,18 @@ func (e BlockEvent) ParsedBlockHash() (common.Hash, error) {
 	return common.BytesToHash(raw), nil
 }
 
+// BlockTime returns BlockTimestamp as a UTC instant, rejecting a missing or
+// non-positive value. time.Unix(0, 0) is a real instant, not the zero Time, so
+// an absent timestamp survives every IsZero() guard downstream and files a
+// whole block's rows in a 1970 hypertable chunk — acked, invisible to any
+// recent-window query, and repairable only by a backfill.
+func (e BlockEvent) BlockTime() (time.Time, error) {
+	if e.BlockTimestamp <= 0 {
+		return time.Time{}, fmt.Errorf("block %d v%d: missing or non-positive block timestamp %d on event", e.BlockNumber, e.Version, e.BlockTimestamp)
+	}
+	return time.Unix(e.BlockTimestamp, 0).UTC(), nil
+}
+
 // EventSink defines the interface for publishing block data events.
 // Events contain only metadata; actual data is in the cache.
 type EventSink interface {

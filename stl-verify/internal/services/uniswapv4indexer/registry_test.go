@@ -36,6 +36,7 @@ func registeredPool(id int64, poolIDHash string, fee int, hooks common.Address) 
 		TickSpacing:       1,
 		Hooks:             hooks,
 		DeployBlock:       21743144,
+		SnapshotSupported: true,
 	}
 }
 
@@ -91,6 +92,7 @@ func TestRegisteredPoolsFromRows(t *testing.T) {
 			TickSpacing:       row.TickSpacing,
 			Hooks:             row.Hooks,
 			DeployBlock:       row.DeployBlock,
+			SnapshotSupported: row.SnapshotSupported,
 		}
 		if got[i] != want {
 			t.Errorf("pool %d = %+v, want %+v", i, got[i], want)
@@ -186,20 +188,35 @@ func TestValidatePoolKeys_RejectsDuplicatePoolIDHash(t *testing.T) {
 	}
 }
 
-// TestValidatePoolKeys_RejectsDynamicFeePool pins the boot refusal that keeps
-// uniswap_v4_pool_state.lp_fee honest: updateDynamicLPFee rewrites slot0.lpFee
-// with no event, so a dynamic-fee pool would go stale between touches.
-func TestValidatePoolKeys_RejectsDynamicFeePool(t *testing.T) {
-	pool := registeredPool(4, ethWstethPoolID, DynamicFeeFlag, common.Address{})
+// TestSnapshottablePools_KeepsOnlySupportedPools pins the curated gate that
+// replaced the boot refusal: an excluded pool stays in the registry (its events
+// still index) and only drops out of the snapshot schedule.
+func TestSnapshottablePools_KeepsOnlySupportedPools(t *testing.T) {
+	supported := registeredPool(1, ethWstethPoolID, 100, common.Address{})
+	excluded := registeredPool(2, hookedPoolID, 50, common.HexToAddress(hookAddress))
+	excluded.SnapshotSupported = false
 
-	err := ValidatePoolKeys([]RegisteredPool{pool})
-	if err == nil {
-		t.Fatal("ValidatePoolKeys: want error for a dynamic-fee pool, got nil")
+	got := SnapshottablePools([]RegisteredPool{supported, excluded})
+
+	if len(got) != 1 || got[0].ID != supported.ID {
+		t.Errorf("SnapshottablePools = %+v, want only pool %d", got, supported.ID)
 	}
-	for _, want := range []string{"4", ethWstethPoolID, "updateDynamicLPFee", "VEC-573"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error %q does not mention %q", err, want)
-		}
+}
+
+// TestValidatePoolKeys_AcceptsDynamicFeePool pins that the fee sentinel is no
+// longer a boot refusal: the fee is hashed into the PoolId, so a registered
+// dynamic-fee pool has no sanctioned repair and must not crash the worker.
+func TestValidatePoolKeys_AcceptsDynamicFeePool(t *testing.T) {
+	pool := registeredPool(4, ethWstethPoolID, DynamicFeeFlag, common.Address{})
+	hash, err := computePoolID(pool)
+	if err != nil {
+		t.Fatalf("computePoolID: %v", err)
+	}
+	pool.PoolIDHash = hash
+	pool.SnapshotSupported = false
+
+	if err := ValidatePoolKeys([]RegisteredPool{pool}); err != nil {
+		t.Fatalf("ValidatePoolKeys with a dynamic-fee pool: %v", err)
 	}
 }
 

@@ -28,6 +28,10 @@ type RegisteredPool struct {
 	TickSpacing       int
 	Hooks             common.Address
 	DeployBlock       int64
+	// SnapshotSupported is the registry's curated gate on the state/tick
+	// snapshot path alone: a false pool is still decoded and persisted for
+	// events, it just never gets a uniswap_v4_pool_state or uniswap_v4_tick row.
+	SnapshotSupported bool
 }
 
 // PoolID and DeployBlockNum implement dexconsumer.SnapshotPool, letting

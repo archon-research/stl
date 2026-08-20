@@ -7,6 +7,7 @@ import (
 	"context"
 	"math/big"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -328,14 +329,14 @@ func TestUniswapV4ProcessingVersionTriggerAppendsPoolManagerCorrection(t *testin
 	const correctionBuildID = 1
 	insert := `
 		INSERT INTO uniswap_v4_pool_manager
-		    (chain_id, protocol_id, pool_manager_address, state_view_address, deploy_block, build_id)
-		VALUES (1, $1, $2::bytea, $3::bytea, $4, $5)
+		    (chain_id, protocol_id, state_view_address, deploy_block, build_id)
+		VALUES (1, $1, $2::bytea, $3, $4)
 		ON CONFLICT (chain_id, processing_version) DO NOTHING
 		RETURNING processing_version`
 
 	var pv int
 	if err := uniswapV4TestPool.QueryRow(ctx, insert,
-		protocolID, uniswapV4PoolManagerHex, uniswapV4StateViewHex,
+		protocolID, uniswapV4StateViewHex,
 		uniswapV4DeployBlock, correctionBuildID).Scan(&pv); err != nil {
 		t.Fatalf("appending a corrected pool manager version: %v", err)
 	}
@@ -344,7 +345,7 @@ func TestUniswapV4ProcessingVersionTriggerAppendsPoolManagerCorrection(t *testin
 	}
 
 	tag, err := uniswapV4TestPool.Exec(ctx, insert,
-		protocolID, uniswapV4PoolManagerHex, uniswapV4StateViewHex,
+		protocolID, uniswapV4StateViewHex,
 		uniswapV4DeployBlock, correctionBuildID)
 	if err != nil {
 		t.Fatalf("re-inserting under the same build: %v", err)
@@ -633,6 +634,44 @@ func TestUniswapV4FactTableChecksAcceptBoundaryValues(t *testing.T) {
 	}
 }
 
+// A reorg that orphans a pool's Initialize makes StateView answer all zeros on
+// the re-read; that tombstone has to persist to supersede the orphaned fork's
+// snapshot, while a zero at block_version 0 stays a registry bug.
+func TestUniswapV4PoolStateZeroSqrtPriceOnlyAtAReorgVersion(t *testing.T) {
+	ctx := context.Background()
+
+	insert := `
+		INSERT INTO uniswap_v4_pool_state
+		    (pool_id, block_number, block_version, block_timestamp,
+		     sqrt_price_x96, tick, protocol_fee, lp_fee, liquidity,
+		     fee_growth_global0_x128, fee_growth_global1_x128, build_id)
+		VALUES ($1, 22000010, $2, '2025-02-01T00:00:00Z'::timestamptz,
+		        0, 0, 0, 0, 0, 0, 0, 0)`
+
+	cases := []struct {
+		name         string
+		poolIDHex    string
+		blockVersion int
+		wantAccept   bool
+	}{
+		{"first observation", "\\x1800000000000000000000000000000000000000000000000000000000000001", 0, false},
+		{"reorg re-read", "\\x1800000000000000000000000000000000000000000000000000000000000002", 1, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			poolID := insertTestUniswapV4Pool(t, ctx, tc.poolIDHex)
+			_, err := uniswapV4TestPool.Exec(ctx, insert, poolID, tc.blockVersion)
+			if tc.wantAccept && err != nil {
+				t.Fatalf("all-zero state at block_version %d was rejected: %v", tc.blockVersion, err)
+			}
+			if !tc.wantAccept && err == nil {
+				t.Fatalf("all-zero state at block_version %d was accepted, want a CHECK violation", tc.blockVersion)
+			}
+		})
+	}
+}
+
 // 8388608 (0x800000) is the dynamic-LP-fee sentinel, the one value above the
 // 100% cap a PoolKey may legally carry.
 func TestUniswapV4PoolFeeCheckAllowsOnlyRatesAndTheDynamicSentinel(t *testing.T) {
@@ -728,6 +767,58 @@ func TestUniswapV4ColumnComments(t *testing.T) {
 		if comment == nil || *comment == "" {
 			t.Errorf("uniswap_v4 table missing COMMENT: %s", table)
 		}
+	}
+}
+
+// uniswapV4ColumnComment returns one column's COMMENT, failing the test when
+// the column or its comment is absent.
+func uniswapV4ColumnComment(t *testing.T, ctx context.Context, table, column string) string {
+	t.Helper()
+
+	var comment *string
+	if err := uniswapV4TestPool.QueryRow(ctx, `
+		SELECT col_description(a.attrelid, a.attnum)
+		FROM pg_attribute a
+		JOIN pg_class c ON c.oid = a.attrelid
+		WHERE c.relname = $1
+		  AND pg_table_is_visible(c.oid)
+		  AND a.attname = $2`, table, column).Scan(&comment); err != nil {
+		t.Fatalf("reading %s.%s comment: %v", table, column, err)
+	}
+	if comment == nil {
+		t.Fatalf("%s.%s has no COMMENT", table, column)
+	}
+	return *comment
+}
+
+// v4-core applies the swap BalanceDelta to msg.sender, so the sign rule is the
+// swapper's; a comment opening with the pool's side inverts it for every reader.
+func TestUniswapV4SwapAmountCommentsLeadWithTheSwapperPerspective(t *testing.T) {
+	ctx := context.Background()
+
+	cases := []struct {
+		column string
+		keep   []string
+	}{
+		{"amount0", []string{"afterSwap", "_RETURNS_DELTA", "uniswap_v3_swap.amount0"}},
+		{"amount1", []string{"pre-hook-delta", "amount0"}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.column, func(t *testing.T) {
+			comment := uniswapV4ColumnComment(t, ctx, "uniswap_v4_swap", tc.column)
+			if !strings.Contains(strings.ToLower(comment), "swapper's perspective") {
+				t.Errorf("comment %q does not lead with the swapper's perspective", comment)
+			}
+			if strings.Contains(comment, "pool's swap BalanceDelta") {
+				t.Errorf("comment %q still frames the delta from the pool's side", comment)
+			}
+			for _, want := range tc.keep {
+				if !strings.Contains(comment, want) {
+					t.Errorf("comment %q dropped %q", comment, want)
+				}
+			}
+		})
 	}
 }
 
@@ -861,13 +952,51 @@ func TestUniswapV4PoolManagerHasOneIdentityPerChain(t *testing.T) {
 
 	var addresses int
 	if err := uniswapV4TestPool.QueryRow(ctx, `
-		SELECT count(DISTINCT (pool_manager_address, state_view_address))
-		FROM uniswap_v4_pool_manager
-		WHERE chain_id = 1`).Scan(&addresses); err != nil {
+		SELECT count(DISTINCT (pr.address, m.state_view_address))
+		FROM uniswap_v4_pool_manager m
+		JOIN protocol pr ON pr.id = m.protocol_id
+		WHERE m.chain_id = 1`).Scan(&addresses); err != nil {
 		t.Fatalf("counting distinct pool manager identities: %v", err)
 	}
 	if addresses != 1 {
-		t.Errorf("distinct (pool_manager_address, state_view_address) pairs on chain 1 = %d, want 1; versions of one manager may accumulate, two concurrent managers may not", addresses)
+		t.Errorf("distinct (protocol.address, state_view_address) pairs on chain 1 = %d, want 1; versions of one manager may accumulate, two concurrent managers may not", addresses)
+	}
+}
+
+// The PoolManager address is the FK'd protocol row's address; a second copy on
+// uniswap_v4_pool_manager is a registry duplicate that can disagree with it.
+func TestUniswapV4PoolManagerHasNoDuplicateAddressColumn(t *testing.T) {
+	ctx := context.Background()
+
+	var exists bool
+	if err := uniswapV4TestPool.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.columns
+			WHERE table_schema = 'public'
+			  AND table_name = 'uniswap_v4_pool_manager'
+			  AND column_name = 'pool_manager_address'
+		)`).Scan(&exists); err != nil {
+		t.Fatalf("checking for uniswap_v4_pool_manager.pool_manager_address: %v", err)
+	}
+	if exists {
+		t.Error("uniswap_v4_pool_manager.pool_manager_address duplicates protocol.address; resolve it through the protocol FK instead")
+	}
+}
+
+// A pool is snapshotted unless a maintainer deliberately excludes it, so the
+// curated gate defaults to TRUE: forgetting the column must not silently stop
+// state and tick rows for a newly registered pool.
+func TestUniswapV4PoolSnapshotSupportedDefaultsToTrue(t *testing.T) {
+	ctx := context.Background()
+	poolID := insertTestUniswapV4Pool(t, ctx, "\\x1700000000000000000000000000000000000000000000000000000000000001")
+
+	var supported bool
+	if err := uniswapV4TestPool.QueryRow(ctx,
+		`SELECT snapshot_supported FROM uniswap_v4_pool WHERE id = $1`, poolID).Scan(&supported); err != nil {
+		t.Fatalf("reading snapshot_supported for pool %d: %v", poolID, err)
+	}
+	if !supported {
+		t.Error("snapshot_supported defaulted to false; a pool must be snapshotted unless deliberately excluded")
 	}
 }
 
@@ -1129,10 +1258,10 @@ func seedUniswapV4PoolManager(t *testing.T, ctx context.Context) int64 {
 
 	if _, err := uniswapV4TestPool.Exec(ctx, `
 		INSERT INTO uniswap_v4_pool_manager
-		    (chain_id, protocol_id, pool_manager_address, state_view_address, deploy_block, build_id)
-		VALUES (1, $1, $2::bytea, $3::bytea, $4, 0)
+		    (chain_id, protocol_id, state_view_address, deploy_block, build_id)
+		VALUES (1, $1, $2::bytea, $3, 0)
 		ON CONFLICT (chain_id, processing_version) DO NOTHING`,
-		protocolID, uniswapV4PoolManagerHex, uniswapV4StateViewHex, uniswapV4DeployBlock,
+		protocolID, uniswapV4StateViewHex, uniswapV4DeployBlock,
 	); err != nil {
 		t.Fatalf("seeding uniswap_v4_pool_manager row: %v", err)
 	}
@@ -1236,8 +1365,8 @@ func TestUniswapV4PoolManagerCurrentViewReturnsOnlyTheLatestVersion(t *testing.T
 	const correctedStateViewHex = "\\x1111111111111111111111111111111111111111"
 	insert := `
 		INSERT INTO uniswap_v4_pool_manager
-		    (chain_id, protocol_id, pool_manager_address, state_view_address, deploy_block, build_id)
-		VALUES ($1, $2, $3::bytea, $4::bytea, $5, $6)
+		    (chain_id, protocol_id, state_view_address, deploy_block, build_id)
+		VALUES ($1, $2, $3::bytea, $4, $5)
 		ON CONFLICT (chain_id, processing_version) DO NOTHING`
 	for _, seed := range []struct {
 		stateViewHex string
@@ -1247,7 +1376,7 @@ func TestUniswapV4PoolManagerCurrentViewReturnsOnlyTheLatestVersion(t *testing.T
 		{correctedStateViewHex, 1},
 	} {
 		if _, err := uniswapV4TestPool.Exec(ctx, insert,
-			uniswapV4ViewChainID, protocolID, uniswapV4PoolManagerHex,
+			uniswapV4ViewChainID, protocolID,
 			seed.stateViewHex, uniswapV4DeployBlock, seed.buildID); err != nil {
 			t.Fatalf("seeding pool manager version under build %d: %v", seed.buildID, err)
 		}

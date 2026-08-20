@@ -81,16 +81,17 @@ func (d UniswapV4ServiceDeps) validate() error {
 
 // NewUniswapV4Service validates deps and builds a UniswapV4Service. It refuses
 // to boot on an empty registry, on a registry whose PoolIds disagree with their
-// keys or which registers a dynamic-fee pool (see ValidatePoolKeys), or on one
-// spanning more than one PoolManager: each would leave an indexer that looks
-// healthy while silently writing wrong or no rows.
+// keys (see ValidatePoolKeys), or on one spanning more than one PoolManager:
+// each would leave an indexer that looks healthy while silently writing wrong
+// or no rows.
 //
 // The snapshot tracker is built with sweepBlocks=0: for a static-fee pool V4
 // state is piecewise-constant between touches — every field this indexer
 // snapshots changes only through a PoolManager log keyed by the pool's own
 // PoolId — so unlike Curve there is no periodic heartbeat snapshot to keep quiet
-// pools fresh. That is exactly why ValidatePoolKeys refuses dynamic-fee pools:
-// their lp_fee has no log to ride on, and no sweep to fall back to.
+// pools fresh. A dynamic-fee pool's lp_fee has no log to ride on and no sweep to
+// fall back to, which is why the registry excludes it from snapshots
+// (snapshot_supported = false) while still indexing its events.
 func NewUniswapV4Service(deps UniswapV4ServiceDeps) (*UniswapV4Service, error) {
 	if err := deps.validate(); err != nil {
 		return nil, err
@@ -183,11 +184,15 @@ func (s *UniswapV4Service) handleBlock(ctx context.Context, event outbound.Block
 	if err != nil {
 		return err
 	}
+	blockTime, err := event.BlockTime()
+	if err != nil {
+		return err
+	}
 	coords := blockCoords{
 		hash:    blockHash,
 		number:  event.BlockNumber,
 		version: event.Version,
-		ts:      time.Unix(event.BlockTimestamp, 0).UTC(),
+		ts:      blockTime,
 	}
 
 	acc, err := s.decodeBlockEvents(ctx, receipts, coords.number, coords.version, coords.ts)
@@ -195,7 +200,7 @@ func (s *UniswapV4Service) handleBlock(ctx context.Context, event outbound.Block
 		return err
 	}
 
-	dueSet, err := s.dueSetForBlock(ctx, acc.touchedIDs, coords.number, coords.version)
+	dueSet, err := s.dueSetForBlock(ctx, acc.touchedIDs, coords)
 	if err != nil {
 		return err
 	}
@@ -225,30 +230,40 @@ func (s *UniswapV4Service) handleBlock(ctx context.Context, event outbound.Block
 }
 
 // dueSetForBlock selects the pools this block must snapshot: everything
-// dexconsumer.DueSet picks, plus — on a reorg redelivery — every pool that
-// already has a state row at this height. The tracker lives only in memory, so
-// after a restart DueSet's reorg rule sees nothing and the orphaned fork's
-// (N, v0) rows would stay canonical-latest forever.
-func (s *UniswapV4Service) dueSetForBlock(ctx context.Context, touched map[int64]bool, bn int64, ver int) ([]RegisteredPool, error) {
-	due, err := dexconsumer.DueSet(s.tracker, s.pools, touched, bn, ver)
+// dexconsumer.DueSet picks that the registry marks snapshot_supported, plus —
+// on a reorg redelivery — every pool that already has a state row at this
+// height. The tracker lives only in memory, so after a restart DueSet's reorg
+// rule sees nothing and the orphaned fork's (N, v0) rows would stay
+// canonical-latest forever. A pool the registry has since excluded is still
+// re-snapshotted on that path: its rows exist and have to be superseded.
+//
+// DueSet runs over the whole registry rather than the snapshottable subset, so
+// its unregistered-touch and deploy-block guards keep covering excluded pools.
+func (s *UniswapV4Service) dueSetForBlock(ctx context.Context, touched map[int64]bool, coords blockCoords) ([]RegisteredPool, error) {
+	all, err := dexconsumer.DueSet(s.tracker, s.pools, touched, coords.number, coords.version)
 	if err != nil {
 		return nil, err
 	}
-	if ver == 0 {
+	due := SnapshottablePools(all)
+	if coords.version == 0 {
 		return due, nil
 	}
 
-	priorIDs, err := s.repo.PoolIDsWithStateAtBlock(ctx, bn)
+	priorIDs, err := s.repo.PoolIDsWithStateAtBlock(ctx, s.chainID, coords.number, coords.ts)
 	if err != nil {
-		return nil, fmt.Errorf("reading pools already snapshotted at block %d: %w", bn, err)
+		return nil, fmt.Errorf("reading pools already snapshotted at block %d: %w", coords.number, err)
 	}
-	return s.withRegisteredPools(due, priorIDs)
+	return s.withRegisteredPools(due, priorIDs, coords.number)
 }
 
 // withRegisteredPools adds the pools named by ids that due does not already
 // carry, restoring the ascending-ID order the snapshot loop and the tests rely
-// on.
-func (s *UniswapV4Service) withRegisteredPools(due []RegisteredPool, ids []int64) ([]RegisteredPool, error) {
+// on. ids are already resolved to current registry versions on the worker's own
+// chain, so one the registry does not name is a genuine registry bug rather
+// than a superseded or foreign row. Pools registered above bn are skipped, not
+// errored, matching DueSet's deploy gate: there is no state to read below their
+// deploy height.
+func (s *UniswapV4Service) withRegisteredPools(due []RegisteredPool, ids []int64, bn int64) ([]RegisteredPool, error) {
 	present := make(map[int64]bool, len(due))
 	for _, pool := range due {
 		present[pool.ID] = true
@@ -260,6 +275,9 @@ func (s *UniswapV4Service) withRegisteredPools(due []RegisteredPool, ids []int64
 		pool, known := s.poolsByRow[id]
 		if !known {
 			return nil, fmt.Errorf("pool %d has uniswap_v4_pool_state rows but is absent from the registry: registry bug", id)
+		}
+		if pool.DeployBlock > bn {
+			continue
 		}
 		present[id] = true
 		due = append(due, pool)

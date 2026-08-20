@@ -133,6 +133,49 @@ func TestUniswapV4PoolState_Validate(t *testing.T) {
 	}
 }
 
+// zeroV4PoolState sets every StateView-sourced field to the all-zeros
+// getSlot0 / getLiquidity / getFeeGrowthGlobals answer for a PoolId the
+// PoolManager does not know.
+func zeroV4PoolState(s *UniswapV4PoolState) {
+	s.SqrtPriceX96 = big.NewInt(0)
+	s.Tick = 0
+	s.ProtocolFee = 0
+	s.LpFee = 0
+	s.Liquidity = big.NewInt(0)
+	s.FeeGrowthGlobal0X128 = big.NewInt(0)
+	s.FeeGrowthGlobal1X128 = big.NewInt(0)
+}
+
+// A reorg that orphans a pool's Initialize makes the re-read answer all zeros;
+// that row must persist to supersede the orphaned fork's snapshot, exactly as
+// the tick path already tolerates a zeroed re-read. Anything short of a full
+// zero read, or a zero at block_version 0, is still a registry bug.
+func TestUniswapV4PoolState_ValidateAcceptsAllZeroReorgReRead(t *testing.T) {
+	cases := []struct {
+		name    string
+		mut     func(*UniswapV4PoolState)
+		wantErr bool
+	}{
+		{"all-zero re-read at block_version 1", func(s *UniswapV4PoolState) {
+			zeroV4PoolState(s)
+			s.BlockVersion = 1
+		}, false},
+		{"all-zero read at block_version 0", zeroV4PoolState, true},
+		{"partly-zero re-read at block_version 1", func(s *UniswapV4PoolState) {
+			zeroV4PoolState(s)
+			s.BlockVersion = 1
+			s.Liquidity = big.NewInt(5)
+		}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := validV4PoolState()
+			tc.mut(s)
+			assertValidateErr(t, s.Validate(), tc.wantErr)
+		})
+	}
+}
+
 func TestUniswapV4Swap_Validate(t *testing.T) {
 	cases := []struct {
 		name    string
