@@ -26,11 +26,12 @@ var (
 	sharedLocalStackCfg testutil.LocalStackConfig
 )
 
-// testBucket / testDeployEnv satisfy chainutil.ValidateS3BucketForChain, which the
-// cache reader enforces at construction: stl-sentinel{env}-{chain}-raw, chainID=1 → "ethereum".
+// rawBucketPrefix / testDeployEnv satisfy chainutil.ValidateS3BucketForChain, which
+// the cache reader enforces at construction: stl-sentinel{env}-{chain}-raw, chainID=1
+// → "ethereum". It is a prefix check, so a per-test suffix is allowed.
 const (
-	testBucket    = "stl-sentineltest-ethereum-raw"
-	testDeployEnv = "test"
+	rawBucketPrefix = "stl-sentineltest-ethereum-raw-"
+	testDeployEnv   = "test"
 	// archiveBucket receives raw SC call archives when ARCHIVE_SC_CALLS=true.
 	archiveBucket = "test-sparklend-worker-raw-sc-calls"
 	// archivePrefix is the chain_id partition rawsckey.Build writes under for chainID=1.
@@ -66,17 +67,23 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	// SparkLend's PoolDataProvider is active from block 16776400; use a block above it.
-	blockNum := testutil.ReservedBlock(t, "sparklend-indexer")
+	const blockNum int64 = 16_800_000
 	const version = 1
 	const daiAddress = "0x6B175474E89094C44Da98b954EedeAC495271d0F"
 	const sparkLendPool = "0xC13e21B648A5Ee794902342038FF3aDAB66BE987"
 
+	// One prefix for both the seeder and the binary: the binary builds its own cache
+	// key, so a test sharing Redis with another package can only separate them here.
+	keyPrefix := testutil.SanitizeTestName(t.Name())
+	t.Setenv("REDIS_KEY_PREFIX", keyPrefix)
+
 	// Seed Redis with a Borrow receipt so the worker's cache read returns it
 	// directly (no S3 fallback needed).
-	seedBorrowReceipt(t, bgCtx, blockNum, version, sparkLendPool)
+	seedBorrowReceipt(t, bgCtx, keyPrefix, blockNum, version, sparkLendPool)
 
 	s3Client := testutil.NewS3Client(t, bgCtx, sharedLocalStackCfg)
-	for _, b := range []string{testBucket, archiveBucket} {
+	rawBucket := testutil.S3TestBucketName(t, rawBucketPrefix)
+	for _, b := range []string{rawBucket, archiveBucket} {
 		testutil.EnsureBucket(t, bgCtx, s3Client, b)
 	}
 
@@ -98,7 +105,7 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 	t.Setenv("AWS_REGION", "us-east-1")
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
-	t.Setenv("S3_BUCKET", testBucket)
+	t.Setenv("S3_BUCKET", rawBucket)
 	t.Setenv("DEPLOY_ENV", testDeployEnv)
 	t.Setenv("CHAIN_ID", "1")
 	t.Setenv("ARCHIVE_SC_CALLS", "true")
@@ -186,7 +193,7 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 
 // seedBorrowReceipt writes a SparkLend Borrow receipt for DAI into the Redis block
 // cache at the given block/version, so the worker's cache read returns it.
-func seedBorrowReceipt(t *testing.T, ctx context.Context, blockNum int64, version int, poolAddress string) {
+func seedBorrowReceipt(t *testing.T, ctx context.Context, keyPrefix string, blockNum int64, version int, poolAddress string) {
 	t.Helper()
 
 	// SparkLend Borrow event for DAI by a synthetic borrower (see the backfill test).
@@ -229,6 +236,7 @@ func seedBorrowReceipt(t *testing.T, ctx context.Context, blockNum int64, versio
 
 	cacheCfg := redisAdapter.ConfigDefaults()
 	cacheCfg.Addr = sharedRedisAddr
+	cacheCfg.KeyPrefix = keyPrefix
 	blockCache, err := redisAdapter.NewBlockCache(cacheCfg, nil)
 	if err != nil {
 		t.Fatalf("create block cache: %v", err)
