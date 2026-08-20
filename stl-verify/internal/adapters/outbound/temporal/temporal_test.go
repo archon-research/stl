@@ -154,23 +154,6 @@ func TestApplyScheduleSpecUpdate_PreservesActionReplacesSpec(t *testing.T) {
 	}
 }
 
-// TestBuildScheduleSpec_ManualOnlyHasNoIntervals pins the second half of the
-// manual-only guarantee: besides being created paused, the schedule carries no
-// interval at all, so even an operator who unpauses it never gets an automatic
-// run — the only way to start one is the UI's Trigger button.
-func TestBuildScheduleSpec_ManualOnlyHasNoIntervals(t *testing.T) {
-	spec, err := buildScheduleSpec(CronjobConfig{Name: "manual-job", ManualOnly: true}, func(string) string { return "" })
-	if err != nil {
-		t.Fatalf("buildScheduleSpec: %v", err)
-	}
-	if len(spec.Intervals) != 0 {
-		t.Fatalf("Intervals = %v, want none for a manual-only cronjob", spec.Intervals)
-	}
-	if len(spec.Calendars) != 0 || len(spec.CronExpressions) != 0 {
-		t.Fatalf("spec carries a calendar/cron trigger (%+v); a manual-only cronjob must never fire on its own", spec)
-	}
-}
-
 func TestCronjobConfigValidate(t *testing.T) {
 	base := func(mutate func(*CronjobConfig)) CronjobConfig {
 		cfg := CronjobConfig{
@@ -196,20 +179,6 @@ func TestCronjobConfigValidate(t *testing.T) {
 			cfg:     base(func(c *CronjobConfig) { c.IntervalDefault = "" }),
 			wantErr: "IntervalDefault",
 		},
-		{
-			name: "manual-only cronjob without an interval is valid",
-			cfg:  base(func(c *CronjobConfig) { c.ManualOnly = true; c.IntervalDefault = "" }),
-		},
-		{
-			name:    "manual-only cronjob with an interval is rejected",
-			cfg:     base(func(c *CronjobConfig) { c.ManualOnly = true }),
-			wantErr: "ManualOnly",
-		},
-		{
-			name:    "manual-only cronjob with an interval env is rejected",
-			cfg:     base(func(c *CronjobConfig) { c.ManualOnly = true; c.IntervalDefault = ""; c.IntervalEnv = "SOME_INTERVAL" }),
-			wantErr: "ManualOnly",
-		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -227,35 +196,16 @@ func TestCronjobConfigValidate(t *testing.T) {
 	}
 }
 
-// TestEnsureSchedule_ManualOnlyCreatesPaused is the core of the "button"
-// mechanic: the schedule must reach Temporal already paused, because an
-// unpaused one-shot bootstrap would start healing on its own the moment the
-// worker rolls out. A paused schedule still exposes the UI Trigger button.
-func TestEnsureSchedule_ManualOnlyCreatesPaused(t *testing.T) {
-	opts, err := captureScheduleCreate(t, CronjobConfig{Name: "manual-job", ManualOnly: true})
-	if err != nil {
-		t.Fatalf("ensureSchedule: %v", err)
-	}
-	if !opts.Paused {
-		t.Error("Paused = false; a manual-only cronjob must be created paused so it never runs unattended")
-	}
-	if opts.Note == "" {
-		t.Error("Note is empty; the paused schedule should explain in the UI why it is paused")
-	}
-	if len(opts.Spec.Intervals) != 0 {
-		t.Errorf("Spec.Intervals = %v, want none", opts.Spec.Intervals)
-	}
-}
-
-// TestEnsureSchedule_ScheduledJobStaysUnpaused guards the existing cronjobs: the
-// ManualOnly addition must not change how an interval-driven schedule is created.
+// A cronjob's schedule must reach Temporal unpaused and on its interval: a
+// paused one would leave the job producing nothing while the worker looks
+// perfectly healthy.
 func TestEnsureSchedule_ScheduledJobStaysUnpaused(t *testing.T) {
 	opts, err := captureScheduleCreate(t, CronjobConfig{Name: "interval-job", IntervalDefault: "1h"})
 	if err != nil {
 		t.Fatalf("ensureSchedule: %v", err)
 	}
 	if opts.Paused {
-		t.Error("Paused = true for an interval-driven cronjob; existing cronjobs must keep running on their schedule")
+		t.Error("Paused = true for an interval-driven cronjob; a cronjob must keep running on its schedule")
 	}
 	if len(opts.Spec.Intervals) != 1 || opts.Spec.Intervals[0].Every != time.Hour {
 		t.Errorf("Spec.Intervals = %v, want a single 1h interval", opts.Spec.Intervals)
@@ -267,7 +217,7 @@ func TestEnsureSchedule_ScheduledJobStaysUnpaused(t *testing.T) {
 // multi-hour bootstrap would be killed by the 10m default StartToCloseTimeout.
 func TestEnsureSchedule_PassesActivityTimeoutsToWorkflow(t *testing.T) {
 	want := ActivityTimeouts{StartToClose: 6 * time.Hour, ScheduleToClose: 12 * time.Hour, MaximumAttempts: 2}
-	opts, err := captureScheduleCreate(t, CronjobConfig{Name: "long-job", ManualOnly: true, ActivityTimeouts: want})
+	opts, err := captureScheduleCreate(t, CronjobConfig{Name: "long-job", IntervalDefault: "24h", ActivityTimeouts: want})
 	if err != nil {
 		t.Fatalf("ensureSchedule: %v", err)
 	}

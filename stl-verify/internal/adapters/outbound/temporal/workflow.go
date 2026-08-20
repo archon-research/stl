@@ -152,20 +152,20 @@ const (
 // timeout is a multiple of the interval rather than equal to it.
 const heartbeatTimeoutFactor = 3
 
-// ActivityTimeouts bounds one cronjob activity execution. A cronjob whose tick
-// can legitimately run for hours (a one-shot historical bootstrap) must raise
-// StartToClose, or Temporal kills it mid-run at the 10m default.
+// ActivityTimeouts bounds one activity execution. A job whose single run can
+// legitimately take hours must raise StartToClose, or Temporal kills it mid-run
+// at the 10m default.
 //
-// It travels as the cronjobWorkflow argument rather than a package-level value
-// because activity options are recorded in workflow history: reading them from
-// mutable process state would make a replay of an older execution
-// non-deterministic. Any zero field falls back to the default above, which is
-// also what a schedule created before this argument existed decodes to.
+// On the scheduled path it travels as the cronjobWorkflow argument, because
+// ensureSchedule bakes it into the schedule's action at creation. Any zero field
+// falls back to the default above, which is also what a schedule created before
+// this argument existed decodes to. reconcileScheduleSpec deliberately touches
+// only the timing spec, so changing the values later requires deleting the
+// schedule in Temporal and restarting the worker — the same caveat that already
+// applies to a changed interval.
 //
-// The values are baked into the schedule's action when it is first created.
-// reconcileScheduleSpec deliberately touches only the timing spec, so changing
-// them later requires deleting the schedule in Temporal and restarting the
-// worker — the same caveat that already applies to a changed interval.
+// An on-demand job has no action to carry them and binds them at registration
+// instead (RegisterRunner), so a redeploy is enough to change them.
 type ActivityTimeouts struct {
 	StartToClose    time.Duration
 	ScheduleToClose time.Duration
