@@ -67,3 +67,21 @@ patches:
       metadata:
         name: python-api
       $patch: delete
+  # Local kind runs the model on stale parquet snapshots, so the daily tick has
+  # no statistical value -- N_MC=5000 would pin 4 cores for hours to produce
+  # numbers nobody reads. 100 scenarios keep the tick minutes-long and still
+  # exercise the whole pipeline. Real environments (once registered) keep the
+  # default from default_params.json.
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: core-model-runner
+      spec:
+        template:
+          spec:
+            containers:
+              - name: core-model-runner
+                env:
+                  - name: CORE_MODEL_N_MC
+                    value: "100"
