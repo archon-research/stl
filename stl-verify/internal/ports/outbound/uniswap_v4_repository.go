@@ -38,6 +38,7 @@ type UniswapV4BlockWrites struct {
 	LiquidityEvents []*entity.UniswapV4LiquidityEvent
 	Ticks           []*entity.UniswapV4Tick
 	PoolEvents      []*entity.UniswapV4PoolEvent
+	Positions       []*entity.UniswapV4Position
 }
 
 type UniswapV4Repository interface {
@@ -78,6 +79,14 @@ type UniswapV4Repository interface {
 	// ticks a prior version wrote at this height. Reads committed rows outside
 	// any transaction; safe to call before the write tx opens.
 	TicksForPoolAtBlock(ctx context.Context, poolID int64, blockNumber int64) ([]int32, error)
+	// PositionsForPoolAtBlock returns the distinct position keys that already have
+	// a row for pool at blockNumber, in entity.UniswapV4PositionKey.Compare order,
+	// so a reorg redelivery can re-read exactly the positions a prior version
+	// wrote at this height. Positions are only ever discovered from
+	// ModifyLiquidity logs, so the new fork's receipts alone would not name a
+	// position the orphaned fork touched. Reads committed rows outside any
+	// transaction; safe to call before the write tx opens.
+	PositionsForPoolAtBlock(ctx context.Context, poolID int64, blockNumber int64) ([]entity.UniswapV4PositionKey, error)
 	// PoolIDsEverSnapshotted returns the CURRENT uniswap_v4_pool ids, ascending,
 	// of the pools on chainID that have at least one uniswap_v4_pool_state or
 	// uniswap_v4_tick row at any height. Read once at construction, it recovers
