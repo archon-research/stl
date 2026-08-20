@@ -207,6 +207,8 @@ func (w *backfillWorkflows) Backfill(ctx workflow.Context, params BackfillParams
 		return resultOf(), err
 	}
 
+	// No emptiness check, breaking temporal_guide design rule 5: a range holding
+	// zero VaultV2 governance events is ordinary, so a hole is not visible by count.
 	logger.Info("morpho vault backfill complete",
 		"discovered", state.Discovered, "partitions", state.PartitionsDone, "events", state.EventsReplayed)
 	return resultOf(), nil
