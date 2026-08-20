@@ -659,11 +659,6 @@ func TestGetBlocksBatch_PartialErrors(t *testing.T) {
 	if results[0].BlobsErr != nil {
 		t.Errorf("expected no BlobsErr, got %v", results[0].BlobsErr)
 	}
-
-	// HasErrors should return true
-	if !results[0].HasErrors() {
-		t.Error("expected HasErrors() to return true")
-	}
 }
 
 func TestGetBlocksBatch_AllSuccess(t *testing.T) {
@@ -715,7 +710,7 @@ func TestGetBlocksBatch_AllSuccess(t *testing.T) {
 	}
 
 	// No errors
-	if results[0].HasErrors() {
+	if results[0].BlockErr != nil || results[0].ReceiptsErr != nil || results[0].TracesErr != nil || results[0].BlobsErr != nil {
 		t.Errorf("expected no errors, got Block=%v Receipts=%v Traces=%v Blobs=%v",
 			results[0].BlockErr, results[0].ReceiptsErr, results[0].TracesErr, results[0].BlobsErr)
 	}
@@ -775,10 +770,6 @@ func TestGetBlocksBatch_AllErrors(t *testing.T) {
 	// Errors should include the error code
 	if !strings.Contains(results[0].BlockErr.Error(), "-32602") {
 		t.Errorf("expected error code in message, got %v", results[0].BlockErr)
-	}
-
-	if !results[0].HasErrors() {
-		t.Error("expected HasErrors() to return true")
 	}
 }
 

@@ -8,6 +8,7 @@ import type {
   CapitalMetricsListResponse,
   DataSourcesResponse,
   ExposureEnvelope,
+  PrimeDebtBucket,
   PrimeDebtEnvelope,
   PrimeRiskCapital,
   PrimeDebtSnapshot,
@@ -22,8 +23,8 @@ import type {
   TxProtocolEventsResponse,
 } from '../types/allocation';
 import type { LocalChainRow, LocalProtocolRow } from '../types/local-data';
-import { isAbortError } from './errors';
 import { logging } from './logging';
+import { REFERENCE_MODE, referenceQuery } from './referenceMode';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
 const apiClient = createApiClient<paths>(API_BASE_URL);
@@ -72,6 +73,18 @@ function toErrorBody(error: unknown): string {
   }
 }
 
+// Carries the HTTP status so callers can branch on it (e.g. fall back only on
+// 404) instead of parsing it back out of the message.
+export class ApiRequestError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'ApiRequestError';
+    this.status = status;
+  }
+}
+
 async function requestData<TData, TError>(
   request: ApiResult<TData, TError>,
   label: string,
@@ -89,7 +102,7 @@ async function requestData<TData, TError>(
       error,
     });
 
-    throw new Error(errorMessage);
+    throw new ApiRequestError(errorMessage, response.status);
   }
 
   return data;
@@ -118,7 +131,7 @@ export function getAllocations(
 ): Promise<AllocationsResponse> {
   return requestData(
     apiClient.GET('/v1/primes/{prime_id}/allocations', {
-      params: { path: { prime_id: primeId } },
+      params: { path: { prime_id: primeId }, query: { ...referenceQuery } },
       signal,
     }),
     'GET /v1/primes/{prime_id}/allocations',
@@ -133,6 +146,14 @@ export async function getAllocationsForProxies(
   proxyAddresses: string[],
   signal?: AbortSignal,
 ): Promise<AllocationsResponse> {
+  // Reference rows are prime-scoped (`scope: "prime"`), so every proxy answers
+  // with the same list. Fanning out would show each position once per chain —
+  // exactly the double-count that field warns about.
+  if (REFERENCE_MODE) {
+    const [first] = proxyAddresses;
+    return first === undefined ? [] : getAllocations(first, signal);
+  }
+
   const perProxyAllocations = await Promise.all(
     proxyAddresses.map((proxyAddress) => getAllocations(proxyAddress, signal)),
   );
@@ -145,7 +166,7 @@ export function getPrimeRiskCapital(
 ): Promise<PrimeRiskCapital> {
   return requestData(
     apiClient.GET('/v1/primes/{prime_id}/risk-capital', {
-      params: { path: { prime_id: primeId } },
+      params: { path: { prime_id: primeId }, query: { ...referenceQuery } },
       signal,
     }),
     'GET /v1/primes/{prime_id}/risk-capital',
@@ -163,9 +184,10 @@ export async function getExposureEnvelope(
   },
   signal?: AbortSignal,
 ): Promise<ExposureEnvelope> {
-  const query = filters as
-    | paths['/v1/primes/{prime_id}/exposure']['get']['parameters']['query']
-    | undefined;
+  const query = {
+    ...(filters ?? {}),
+    ...referenceQuery,
+  } as paths['/v1/primes/{prime_id}/exposure']['get']['parameters']['query'];
 
   const envelope = await requestData(
     apiClient.GET('/v1/primes/{prime_id}/exposure', {
@@ -263,28 +285,10 @@ export async function getAllocationActivityEnvelope(
 export function getCapitalMetrics(
   signal?: AbortSignal,
 ): Promise<CapitalMetricsListResponse> {
-  const endpointPath = '/v1/capital-metrics';
-  const endpointUrl = API_BASE_URL
-    ? `${API_BASE_URL}${endpointPath}`
-    : endpointPath;
-
-  return fetch(endpointUrl, { signal })
-    .then(async (response) => {
-      if (!response.ok) {
-        const responseText = await response.text().catch(() => '<no body>');
-        throw new Error(
-          `GET ${endpointPath} failed (${response.status}): ${responseText}`,
-        );
-      }
-
-      return response.json() as Promise<CapitalMetricsListResponse>;
-    })
-    .catch((error: unknown) => {
-      if (!isAbortError(error)) {
-        logging.error('Failed to fetch capital metrics list', { error });
-      }
-      throw error;
-    });
+  return requestData(
+    apiClient.GET('/v1/capital-metrics', { signal }),
+    'GET /v1/capital-metrics',
+  );
 }
 
 export function getDataSources(
@@ -404,7 +408,7 @@ export async function getPrimeDebtSnapshots(
 
 export async function getPrimeDebtEnvelope(
   primeId: string,
-  filters?: TimeSeriesFilters,
+  filters?: TimeSeriesFilters & { reference?: boolean },
   signal?: AbortSignal,
 ): Promise<PrimeDebtEnvelope> {
   const query = filters as
@@ -431,9 +435,10 @@ export async function getTotalCapitalEnvelope(
   filters?: TimeSeriesFilters,
   signal?: AbortSignal,
 ): Promise<TotalCapitalEnvelope> {
-  const query = filters as
-    | paths['/v1/primes/{prime_id}/total-capital']['get']['parameters']['query']
-    | undefined;
+  const query = {
+    ...(filters ?? {}),
+    ...referenceQuery,
+  } as paths['/v1/primes/{prime_id}/total-capital']['get']['parameters']['query'];
 
   const envelope = await requestData(
     apiClient.GET('/v1/primes/{prime_id}/total-capital', {
@@ -448,6 +453,32 @@ export async function getTotalCapitalEnvelope(
     'GET /v1/primes/{prime_id}/total-capital',
   );
   return envelope as TotalCapitalEnvelope;
+}
+
+// How far back to look for the newest reference debt bucket. The endpoint
+// defaults to the last 24h, but this series is a daily upstream feed seeded by
+// a one-shot backfill, so the most recent bucket is routinely older than that
+// and the default window returns nothing at all.
+const REFERENCE_DEBT_LOOKBACK_DAYS = 90;
+
+// Reference debt is aggregate-only: upstream reports one figure per prime per
+// day and carries no ilk or block identity, so the API rejects a raw request
+// rather than inventing them. The latest bucket is the closest thing to a
+// "current" reading, and it carries the only two fields upstream can fill.
+export async function getLatestReferenceDebtBucket(
+  primeId: string,
+  signal?: AbortSignal,
+): Promise<PrimeDebtBucket | null> {
+  const from = new Date(
+    Date.now() - REFERENCE_DEBT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000,
+  ).toISOString();
+
+  const envelope = await getPrimeDebtEnvelope(
+    primeId,
+    { aggregate: true, limit: 1, reference: true, from_timestamp: from },
+    signal,
+  );
+  return ((envelope.data ?? [])[0] as PrimeDebtBucket | undefined) ?? null;
 }
 
 export async function getLatestPrimeDebtSnapshot(

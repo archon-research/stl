@@ -206,3 +206,80 @@ class PrimeDebtRepository:
             raise ValueError(
                 f"Database query failed while fetching debt buckets for prime {prime_address}: {exc}"
             ) from exc
+
+    async def list_reference_debt_buckets(
+        self,
+        prime_address: EthAddress,
+        *,
+        from_timestamp: datetime,
+        to_timestamp: datetime,
+        bucket_seconds: float,
+        limit: int = 100,
+    ) -> list[PrimeDebtBucket]:
+        """Return Sky's reported debt per time bucket, gap-filled (LOCF).
+
+        Upstream publishes one already-normalized USD figure per prime per day,
+        so it is scaled to ``wad`` here: the field means the same thing in both
+        provenances, and a consumer dividing by 1e18 gets USDS units either way.
+        There is no per-ilk split upstream, so this is the prime's whole debt.
+        """
+        query = text(
+            """
+            WITH corrected AS (
+                SELECT DISTINCT ON (b.observed_at)
+                    b.observed_at,
+                    -- Rescaled here, not around locf(): TimescaleDB requires
+                    -- locf to be the top-level call in its select expression.
+                    b.debt_usd * 1e18 AS debt_wad
+                FROM prime_reference_balance_sheet b
+                JOIN prime p ON p.id = b.prime_id
+                WHERE
+            """
+            + self._prime_match_clause()
+            + f"""
+                {required_time_window_clause("b.observed_at")}
+                ORDER BY b.observed_at, b.processing_version DESC
+            )
+            SELECT
+                time_bucket_gapfill(
+                    make_interval(secs => :bucket_seconds),
+                    corrected.observed_at,
+                    CAST(:from_timestamp AS TIMESTAMPTZ),
+                    CAST(:to_timestamp AS TIMESTAMPTZ)
+                ) AS bucket_start,
+                locf(last(corrected.debt_wad, corrected.observed_at)) AS debt_wad
+            FROM corrected
+            GROUP BY bucket_start
+            ORDER BY bucket_start DESC
+            LIMIT :limit
+            """
+        )
+
+        params = {
+            "address_hex": prime_address.hex,
+            "from_timestamp": from_timestamp,
+            "to_timestamp": to_timestamp,
+            "bucket_seconds": bucket_seconds,
+            "limit": clamp_limit(limit, _PRIME_DEBT_LIMIT),
+        }
+
+        try:
+            async with self._engine.connect() as conn:
+                result = await conn.execute(query, params)
+                rows = result.fetchall()
+
+            return [PrimeDebtBucket(bucket_start=row.bucket_start, debt_wad=row.debt_wad) for row in rows]
+        except Exception as exc:
+            logger.error(
+                "Failed to fetch reference debt buckets from database",
+                extra={
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                    "prime_address": str(prime_address),
+                    "limit": limit,
+                },
+                exc_info=True,
+            )
+            raise ValueError(
+                f"Database query failed while fetching reference debt buckets for prime {prime_address}: {exc}"
+            ) from exc

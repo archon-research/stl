@@ -2,6 +2,7 @@ import { Portal, Tooltip } from '@archon-research/design-system';
 import type { ReactNode } from 'react';
 
 import { css } from '#styled-system/css';
+import { tooltip } from '#styled-system/recipes';
 
 type AppTooltipProps = {
   trigger: ReactNode;
@@ -16,24 +17,11 @@ type TruncatedLabelProps = {
 };
 
 // These wrappers are not a style preference. The design system re-exports Ark's
-// Tooltip, which is headless, and ships no `tooltip` recipe — so an unwrapped
-// Tooltip.Content renders as unstyled, unpositioned text over the page. Delete
-// this styling once a `tooltip` recipe ships.
-const tooltipContentClassName = css({
-  maxW: '20rem',
-  borderRadius: 'sm',
-  borderStyle: 'solid',
-  borderWidth: '1px',
-  borderColor: 'border.default',
-  bg: 'overlay.tooltip',
-  px: '2.5',
-  py: '2',
-  boxShadow: 'lg',
-  color: 'text.inverse',
-  fontSize: 'xs',
-  lineHeight: '1.4',
-  zIndex: 'tooltip',
-});
+// Tooltip headless, so an unwrapped Tooltip.Content renders as unstyled,
+// unpositioned text over the page. The bubble surface is the upstream `tooltip`
+// recipe; what stays local is the trigger shape (two of them, below) and the
+// shared positioning.
+const tooltipContentClassName = tooltip();
 
 const tooltipPositioning = {
   placement: 'top',

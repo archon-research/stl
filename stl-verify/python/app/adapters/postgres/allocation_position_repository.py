@@ -1022,30 +1022,45 @@ class AllocationRepository:
                   AND ap.created_at >= CAST(:from_timestamp AS TIMESTAMPTZ)
                   AND ap.created_at <= CAST(:to_timestamp AS TIMESTAMPTZ)
                 GROUP BY rt.id, rt.underlying_token_id, rt.protocol_id, bucket
+            ),
+            -- The latest price is bucket-independent, so it is resolved once per
+            -- (underlying, protocol) pair instead of inside the per-bucket join:
+            -- the lateral would otherwise re-scan onchain_token_price per bucket
+            -- per token (~1,600x on a 24h/PT15M window; ~17s per request).
+            price_keys AS (
+                SELECT DISTINCT underlying_token_id, protocol_id
+                FROM position_buckets
+            ),
+            latest_price AS (
+                SELECT pk.underlying_token_id, pk.protocol_id, px.price_usd
+                FROM price_keys pk
+                LEFT JOIN LATERAL (
+                    SELECT otp.price_usd
+                    FROM onchain_token_price otp
+                    JOIN protocol_oracle po
+                        ON po.oracle_id = otp.oracle_id AND po.protocol_id = pk.protocol_id
+                    WHERE otp.token_id = pk.underlying_token_id
+                    -- enabled-mapping filter (rationale on _DIRECT_ASSET_HOLDINGS_SQL):
+                    -- a retired source's tail must not serve any bucket after
+                    -- retirement (nor, given the no-history simplification, before).
+                      AND EXISTS (
+                          SELECT 1 FROM oracle_asset oa
+                          WHERE oa.oracle_id = otp.oracle_id
+                            AND oa.token_id = otp.token_id
+                            AND oa.enabled
+                      )
+                    ORDER BY otp.block_number DESC, otp.block_version DESC,
+                             otp.processing_version DESC, otp.oracle_id DESC
+                    LIMIT 1
+                ) px ON TRUE
             )
             SELECT
                 b.bucket AS bucket_start,
-                SUM(b.valuation_units * COALESCE(px.price_usd, 0)) AS exposure_usd
+                SUM(b.valuation_units * COALESCE(lp.price_usd, 0)) AS exposure_usd
             FROM position_buckets b
-            LEFT JOIN LATERAL (
-                SELECT otp.price_usd
-                FROM onchain_token_price otp
-                JOIN protocol_oracle po
-                    ON po.oracle_id = otp.oracle_id AND po.protocol_id = b.protocol_id
-                WHERE otp.token_id = b.underlying_token_id
-                -- enabled-mapping filter (rationale on _DIRECT_ASSET_HOLDINGS_SQL):
-                -- a retired source's tail must not serve any bucket after
-                -- retirement (nor, given the no-history simplification, before).
-                  AND EXISTS (
-                      SELECT 1 FROM oracle_asset oa
-                      WHERE oa.oracle_id = otp.oracle_id
-                        AND oa.token_id = otp.token_id
-                        AND oa.enabled
-                  )
-                ORDER BY otp.block_number DESC, otp.block_version DESC,
-                         otp.processing_version DESC, otp.oracle_id DESC
-                LIMIT 1
-            ) px ON TRUE
+            LEFT JOIN latest_price lp
+                ON lp.underlying_token_id = b.underlying_token_id
+               AND lp.protocol_id = b.protocol_id
             GROUP BY b.bucket
             ORDER BY b.bucket DESC
             LIMIT :limit

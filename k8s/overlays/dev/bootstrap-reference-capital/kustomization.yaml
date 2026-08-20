@@ -1,0 +1,36 @@
+# Manual-apply overlay for the one-off reference-capital-backfill Job in kind.
+# NOT referenced by ../kustomization.yaml, so `make dev-up` never runs it.
+#   make docker-build-reference-capital-backfill
+#   make kind-load-images IMAGES="stl-reference-capital-backfill:local"
+#   kubectl kustomize k8s/overlays/dev/bootstrap-reference-capital | kubectl apply -f -
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: vector
+
+resources:
+  - ../../../base/reference-capital-backfill
+
+images:
+  - name: reference-capital-backfill
+    newName: localhost/stl-reference-capital-backfill
+    newTag: local
+
+patches:
+  # The dev runtime Component only patches Deployments, so a Job sources the
+  # shared local ConfigMap/Secret here instead of the per-service pair base
+  # names for EKS.
+  - target:
+      kind: Job
+      name: reference-capital-backfill
+    patch: |
+      - op: replace
+        path: /spec/template/spec/containers/0/envFrom
+        value:
+          - configMapRef:
+              name: stl-config
+          - secretRef:
+              name: stl-secrets
+      - op: add
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Never
