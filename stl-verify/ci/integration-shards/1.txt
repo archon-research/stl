@@ -48,3 +48,6 @@
 ./internal/pkg/env
 ./internal/ports/outbound
 ./internal/pkg/rawsckey
+./internal/pkg/blockheader
+./internal/services/block_meta_loader
+./cmd/backfillers/block-meta-loader

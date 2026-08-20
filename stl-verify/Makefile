@@ -10,6 +10,7 @@ include lint.mk
 		_docker-release-image _docker-release-go-service \
 		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-fluid-vault-indexer-internal _docker-release-dex-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal _docker-release-psm3-indexer-internal _docker-release-cex-orderbook-indexer-internal _docker-release-migrate-internal _docker-release-python-api-internal _docker-release-transform-bootstrap-internal _docker-release-cronjob-%-internal \
 		docker-build-offchain-price-backfill docker-release-offchain-price-backfill _docker-release-offchain-price-backfill-internal \
+		docker-build-block-meta-loader docker-release-block-meta-loader _docker-release-block-meta-loader-internal \
 		build-backfiller-% run-backfiller-% \
         docker-build-watcher docker-push-watcher docker-release-watcher \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
@@ -1060,6 +1061,8 @@ docker-release-all:
 	@echo ""
 	@$(MAKE) _docker-release-transform-bootstrap-internal ENV=$(ENV)
 	@$(MAKE) _docker-release-offchain-price-backfill-internal ENV=$(ENV)
+	@echo ""
+	@$(MAKE) _docker-release-block-meta-loader-internal ENV=$(ENV)
 	@echo ""
 	@for cj in $(CRONJOBS); do \
 		$(MAKE) _docker-release-cronjob-$$cj-internal ENV=$(ENV) || { echo "ERROR: Failed to release cronjob $$cj"; exit 1; }; \
@@ -2240,6 +2243,16 @@ docker-release-offchain-price-backfill: ecr-login _docker-release-offchain-price
 
 _docker-release-offchain-price-backfill-internal:
 	@$(MAKE) _docker-release-go-service GO_NAME="Offchain Price Backfill" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/backfillers/offchain-price-backfill GO_BIN=offchain-price-backfill GO_CACHE_KEY="cronjob-offchain-price-backfill" GO_TAG="offchain-price-backfill-$(IMAGE_TAG)" GO_LATEST_TAG="offchain-price-backfill-latest"
+
+# block-meta-loader: a run-to-completion per-chain Job that fills the block_meta dimension from a
+# chain's S3 raw-block archive. Ships in the shared cronjob ECR repo with a name-prefixed tag.
+docker-build-block-meta-loader:
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/block-meta-loader --build-arg BIN=block-meta-loader -t stl-block-meta-loader:local -f Dockerfile.common .
+
+docker-release-block-meta-loader: ecr-login _docker-release-block-meta-loader-internal
+
+_docker-release-block-meta-loader-internal:
+	@$(MAKE) _docker-release-go-service GO_NAME="Block Meta Loader" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/backfillers/block-meta-loader GO_BIN=block-meta-loader GO_CACHE_KEY="cronjob-block-meta-loader" GO_TAG="block-meta-loader-$(IMAGE_TAG)" GO_LATEST_TAG="block-meta-loader-latest"
 
 kind-load-cronjobs:
 	@$(MAKE) --no-print-directory kind-load-images IMAGES="$(foreach cj,$(CRONJOBS),stl-$(cj):$(LOCAL_TAG))"
