@@ -2345,11 +2345,14 @@ kind-infra:
 	kubectl --context=$(KUBE_CONTEXT) apply -f ../k8s/dev-infra/temporal.yaml
 	# Apply remaining infra resources to the app namespace.
 	kubectl --context=$(KUBE_CONTEXT) apply -f ../k8s/dev-infra/jaeger.yaml       -n $(KUBE_NS)
+	# localstack-init is generated from the canonical script so there is exactly one
+	# copy of it in the repo; the Deployment mounts it by subPath as init-aws.sh.
+	kubectl --context=$(KUBE_CONTEXT) create configmap localstack-init --from-file=init-aws.sh=localstack-init/init-aws.sh -n $(KUBE_NS) --dry-run=client -o yaml | kubectl --context=$(KUBE_CONTEXT) apply -f -
 	# LocalStack runs init-aws.sh only at container start and the ConfigMap is a subPath
 	# mount, so a changed script would otherwise never re-run on a warm dev-up and newly
-	# added queues would silently not exist. Stamping the manifest's hash into the pod
-	# template rolls the pod exactly when k8s/dev-infra/localstack.yaml changes.
-	sed "s/__LOCALSTACK_MANIFEST_SHA__/$$(shasum -a 256 ../k8s/dev-infra/localstack.yaml | cut -c1-16)/" ../k8s/dev-infra/localstack.yaml \
+	# added queues would silently not exist. Stamping the hash of the manifest *and* the
+	# script into the pod template rolls the pod exactly when either changes.
+	sed "s/__LOCALSTACK_MANIFEST_SHA__/$$(cat ../k8s/dev-infra/localstack.yaml localstack-init/init-aws.sh | shasum -a 256 | cut -c1-16)/" ../k8s/dev-infra/localstack.yaml \
 	  | kubectl --context=$(KUBE_CONTEXT) apply -f - -n $(KUBE_NS)
 	kubectl --context=$(KUBE_CONTEXT) apply -f ../k8s/dev-infra/redis.yaml        -n $(KUBE_NS)
 	kubectl --context=$(KUBE_CONTEXT) apply -f ../k8s/dev-infra/timescaledb.yaml  -n $(KUBE_NS)
