@@ -29,8 +29,13 @@ spec:
               value: "all"
           # Deliberately far larger than the other cronjobs. They stay at
           # 50m/64Mi because their tick is IO against an external API; this
-          # tick is the GARCH fit and Monte Carlo itself, running in-process
-          # on a joblib pool, for hours per full pass.
+          # tick is the GARCH fit and Monte Carlo itself, in-process and
+          # single-threaded (forecaster.py pins the MC to n_jobs=1 -- loky
+          # workers would multiply the per-scenario tensors). Measured: the
+          # heaviest parquet market peaks at ~8.0 GiB at the N_MC=10000
+          # default, ABOVE this limit. Dev is capped at N_MC=100 in its
+          # overlay; registering this in staging/prod must first re-measure
+          # with live inputs and raise the limit or lower N_MC.
           resources:
             requests:
               cpu: "1"
