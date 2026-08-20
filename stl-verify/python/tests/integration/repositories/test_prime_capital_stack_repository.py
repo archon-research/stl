@@ -262,3 +262,31 @@ async def test_keeps_assets_when_a_later_snapshot_lands_in_the_same_window(seede
     assert latest, "expected buckets at or after the snapshot"
     assert all(b.assets_usd == Decimal("1") for b in latest)
     assert all(b.encumbrance_ratio == Decimal("0.37") for b in latest)
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_carries_an_observation_from_before_the_window_into_it(seeded, async_db_url: str):
+    # The balance sheet is daily, so from a minute past midnight its newest row
+    # already sits outside a 24h window. Without seeding locf from the last prior
+    # observation, the collateral series reads as absent for most of every day.
+    conn, prime_id = seeded
+    await _insert_history(conn, prime_id, _WINDOW_START - timedelta(days=2), treasury="111")
+
+    buckets = await _buckets(async_db_url)
+
+    assert buckets
+    assert all(b.assets_usd == Decimal("1") for b in buckets)
+    assert all(b.total_capital_usd == Decimal("111") for b in buckets)
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_does_not_reach_back_past_the_staleness_bound(seeded, async_db_url: str):
+    # A figure this old is not a current reading, and an unbounded backward scan
+    # would walk every chunk the table has.
+    conn, prime_id = seeded
+    await _insert_history(conn, prime_id, _WINDOW_START - timedelta(days=120), treasury="111")
+
+    buckets = await _buckets(async_db_url)
+
+    assert buckets
+    assert all(b.assets_usd is None for b in buckets)

@@ -64,6 +64,32 @@ _REFERENCE_CAPITAL_BUCKETS_SQL = text(
     + required_time_window_clause("pbs.observed_at")
     + """
         ORDER BY pbs.observed_at, pbs.processing_version DESC
+    ), pre AS (
+        SELECT
+            pcs.synced_at AS observed_at,
+            pcs.total_risk_capital_usd,
+            pcs.exposure_usd,
+            pcs.encumbrance_ratio,
+            NULL::NUMERIC AS assets_usd,
+            0 AS precedence,
+            pcs.processing_version
+        FROM prime_capital_stack pcs
+        WHERE pcs.prime_id = (SELECT prime_id FROM target)
+          AND pcs.synced_at < CAST(:from_timestamp AS TIMESTAMPTZ)
+          AND pcs.synced_at >= CAST(:from_timestamp AS TIMESTAMPTZ) - INTERVAL '90 days'
+        UNION ALL
+        SELECT
+            pbs.observed_at,
+            pbs.treasury_balance_usd AS total_risk_capital_usd,
+            NULL::NUMERIC AS exposure_usd,
+            NULL::NUMERIC AS encumbrance_ratio,
+            pbs.assets_usd,
+            1 AS precedence,
+            pbs.processing_version
+        FROM prime_reference_balance_sheet pbs
+        WHERE pbs.prime_id = (SELECT prime_id FROM target)
+          AND pbs.observed_at < CAST(:from_timestamp AS TIMESTAMPTZ)
+          AND pbs.observed_at >= CAST(:from_timestamp AS TIMESTAMPTZ) - INTERVAL '90 days'
     ), corrected AS (
         -- One series from two feeds. `last()` has no defined order among rows
         -- sharing a timestamp, so precedence is explicit rather than left to
@@ -83,6 +109,32 @@ _REFERENCE_CAPITAL_BUCKETS_SQL = text(
                    1 AS precedence FROM history
         ) merged
         ORDER BY merged.observed_at, merged.precedence
+    ), prior AS (
+        -- The last observation before the window, per figure, fed to `locf` as
+        -- its `prev`. Without it a figure whose newest row predates the window
+        -- reads as never observed — and the balance sheet is daily, so from one
+        -- minute past midnight its newest row already sits outside a 24h window
+        -- and the collateral series would be empty for most of every day.
+        --
+        -- Bounded, because a figure this stale is not a current reading. Callers
+        -- pair it with the observation time so age is visible rather than implied.
+        SELECT
+            (SELECT total_risk_capital_usd FROM pre
+              WHERE total_risk_capital_usd IS NOT NULL
+              ORDER BY observed_at DESC, precedence, processing_version DESC
+              LIMIT 1) AS total_capital_usd,
+            (SELECT exposure_usd FROM pre
+              WHERE exposure_usd IS NOT NULL
+              ORDER BY observed_at DESC, precedence, processing_version DESC
+              LIMIT 1) AS exposure_usd,
+            (SELECT encumbrance_ratio FROM pre
+              WHERE encumbrance_ratio IS NOT NULL
+              ORDER BY observed_at DESC, precedence, processing_version DESC
+              LIMIT 1) AS encumbrance_ratio,
+            (SELECT assets_usd FROM pre
+              WHERE assets_usd IS NOT NULL
+              ORDER BY observed_at DESC, precedence, processing_version DESC
+              LIMIT 1) AS assets_usd
     )
     SELECT
         time_bucket_gapfill(
@@ -91,7 +143,12 @@ _REFERENCE_CAPITAL_BUCKETS_SQL = text(
             CAST(:from_timestamp AS TIMESTAMPTZ),
             CAST(:to_timestamp AS TIMESTAMPTZ)
         ) AS bucket_start,
-        locf(last(corrected.total_risk_capital_usd, corrected.observed_at)) AS total_capital_usd,
+        locf(
+            last(corrected.total_risk_capital_usd, corrected.observed_at)
+                FILTER (WHERE corrected.total_risk_capital_usd IS NOT NULL),
+            (SELECT prior.total_capital_usd FROM prior),
+            treat_null_as_missing => true
+        ) AS total_capital_usd,
         -- FILTER, not just treat_null_as_missing: the two feeds NULL each other's
         -- columns, so without it last() returns the NULL of whichever feed wrote
         -- the bucket's newest row and locf then carries that NULL forever. The
@@ -100,16 +157,19 @@ _REFERENCE_CAPITAL_BUCKETS_SQL = text(
         locf(
             last(corrected.exposure_usd, corrected.observed_at)
                 FILTER (WHERE corrected.exposure_usd IS NOT NULL),
+            (SELECT prior.exposure_usd FROM prior),
             treat_null_as_missing => true
         ) AS exposure_usd,
         locf(
             last(corrected.encumbrance_ratio, corrected.observed_at)
                 FILTER (WHERE corrected.encumbrance_ratio IS NOT NULL),
+            (SELECT prior.encumbrance_ratio FROM prior),
             treat_null_as_missing => true
         ) AS encumbrance_ratio,
         locf(
             last(corrected.assets_usd, corrected.observed_at)
                 FILTER (WHERE corrected.assets_usd IS NOT NULL),
+            (SELECT prior.assets_usd FROM prior),
             treat_null_as_missing => true
         ) AS assets_usd
     FROM corrected

@@ -262,7 +262,7 @@ class AllocationRepository:
                 extra={
                     "error_type": type(exc).__name__,
                     "error_message": str(exc),
-                    "proxy_addresses": [str(a) for a in proxy_addresses],
+                    "prime_address": str(prime_address),
                 },
                 exc_info=True,
             )
@@ -1130,7 +1130,7 @@ class AllocationRepository:
                 extra={
                     "error_type": type(exc).__name__,
                     "error_message": str(exc),
-                    "prime_address": str(prime_address),
+                    "proxy_addresses": [str(a) for a in proxy_addresses],
                 },
                 exc_info=True,
             )
