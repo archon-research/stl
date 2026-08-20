@@ -12,11 +12,24 @@
 -- silent corruption, where a row records the wrong side of the transfer and nothing can
 -- detect it without re-reading the transaction off-chain.
 --
--- allocation_position is a columnstore-enabled hypertable with a tiering policy: the
--- columns are added bare (nullable, no DEFAULT) per the TigerData restriction
--- documented in 20260410_110000. Rows written before this migration keep NULL; they are
--- not backfilled (the historical block payloads would have to be re-decoded, which is a
--- separate job).
+-- Both columns are nullable, and NULL is meaningful rather than a placeholder: it means
+-- there was no transfer to read parties from. Two groups of rows carry it -- every
+-- direction = sweep row, and every row written before this migration (a bare ADD COLUMN
+-- leaves existing rows NULL; they are not backfilled, since recovering the values would
+-- mean re-decoding historical block payloads, which is a separate job).
+--
+-- NOT NULL is not an option here, on two counts. Mechanically, allocation_position is a
+-- columnstore-enabled hypertable, and TSDB rejects ADD COLUMN ... NOT NULL without a
+-- default on one outright ("cannot add column with NOT NULL constraint without default
+-- to a hypertable that has columnstore enabled"); adding it with a default is accepted,
+-- so this is not the blocker on its own. Semantically is: the only sentinel available
+-- for a bytea address is the zero address, and that is already a real value here --
+-- a mint on from_address, a burn on to_address. Using it to mean "absent" would make
+-- those indistinguishable from a sweep. NULL is the only honest encoding.
+--
+-- (Contrast 20260410_110000, whose bare-nullable choice was about TigerData's tiering
+-- restriction and was followed by 20260410_115000 setting defaults and NOT NULL. That
+-- path is deliberately not taken here, for the semantic reason above.)
 --
 -- Raw addresses, not FKs to "user": either side can be any address that transacted with
 -- a proxy, so an FK would mean minting a user row for every unknown EOA that ever

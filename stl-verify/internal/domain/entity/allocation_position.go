@@ -108,6 +108,12 @@ func (p *AllocationPosition) Validate() error {
 // rather than being persisted.
 func (p *AllocationPosition) validateTransferParties() error {
 	if p.Direction == "sweep" {
+		if p.FromAddress != nil || p.ToAddress != nil {
+			return fmt.Errorf(
+				"a sweep reads no transfer, so it carries neither party, got from=%v to=%v",
+				p.FromAddress, p.ToAddress,
+			)
+		}
 		return nil
 	}
 	if p.FromAddress == nil || p.ToAddress == nil {

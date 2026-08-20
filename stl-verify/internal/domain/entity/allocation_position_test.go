@@ -83,6 +83,19 @@ func TestAllocationPosition_Validate(t *testing.T) {
 			p.ToAddress = &mintBurn
 		}, false},
 		{"sweep carries neither party", func(p *AllocationPosition) { p.Direction = "sweep" }, false},
+		{"sweep carrying a sender", func(p *AllocationPosition) {
+			p.Direction = "sweep"
+			p.FromAddress = &counterparty
+		}, true},
+		{"sweep carrying a recipient", func(p *AllocationPosition) {
+			p.Direction = "sweep"
+			p.ToAddress = &proxy
+		}, true},
+		{"sweep carrying both parties", func(p *AllocationPosition) {
+			p.Direction = "sweep"
+			p.FromAddress = &counterparty
+			p.ToAddress = &proxy
+		}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
