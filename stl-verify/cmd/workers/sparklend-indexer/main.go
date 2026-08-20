@@ -57,15 +57,16 @@ func main() {
 }
 
 type cliConfig struct {
-	queueURL    string
-	redisAddr   string
-	dbURL       string
-	alchemyURL  string
-	s3Bucket    string
-	deployEnv   string
-	maxMessages int
-	waitTime    int
-	chainID     int64
+	queueURL          string
+	redisAddr         string
+	dbURL             string
+	alchemyURL        string
+	s3Bucket          string
+	deployEnv         string
+	maxMessages       int
+	waitTime          int
+	visibilityTimeout int
+	chainID           int64
 }
 
 func parseConfig(args []string) (cliConfig, error) {
@@ -75,16 +76,37 @@ func parseConfig(args []string) (cliConfig, error) {
 	dbURL := fs.String("db", "", "PostgreSQL connection URL")
 	maxMessages := fs.Int("max", 10, "Max messages per poll")
 	waitTime := fs.Int("wait", 20, "Wait time in seconds (long polling)")
+	visibilityTimeout := fs.Int("visibility-timeout", 300, "SQS visibility timeout in seconds")
 	if err := fs.Parse(args); err != nil {
 		return cliConfig{}, fmt.Errorf("parsing CLI flags: %w", err)
 	}
 
+	// Env vars are fallbacks only; an explicitly-set flag wins over its env var.
+	setFlags := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
+
 	cfg := cliConfig{
-		queueURL:    *queueURL,
-		redisAddr:   *redisAddr,
-		dbURL:       *dbURL,
-		maxMessages: *maxMessages,
-		waitTime:    *waitTime,
+		queueURL:          *queueURL,
+		redisAddr:         *redisAddr,
+		dbURL:             *dbURL,
+		maxMessages:       *maxMessages,
+		waitTime:          *waitTime,
+		visibilityTimeout: *visibilityTimeout,
+	}
+
+	if waitTimeStr := env.Get("SQS_WAIT_TIME", ""); waitTimeStr != "" && !setFlags["wait"] {
+		v, err := strconv.Atoi(waitTimeStr)
+		if err != nil {
+			return cliConfig{}, fmt.Errorf("parsing SQS_WAIT_TIME %q: %w", waitTimeStr, err)
+		}
+		cfg.waitTime = v
+	}
+	if visTimeStr := env.Get("SQS_VISIBILITY_TIMEOUT", ""); visTimeStr != "" && !setFlags["visibility-timeout"] {
+		v, err := strconv.Atoi(visTimeStr)
+		if err != nil {
+			return cliConfig{}, fmt.Errorf("parsing SQS_VISIBILITY_TIMEOUT %q: %w", visTimeStr, err)
+		}
+		cfg.visibilityTimeout = v
 	}
 
 	if cfg.queueURL == "" {
@@ -157,7 +179,7 @@ func run(ctx context.Context, args []string) error {
 	sqsConsumer, err := sqsAdapter.NewConsumer(awsCfg, sqsAdapter.Config{
 		QueueURL:          cfg.queueURL,
 		WaitTimeSeconds:   int32(cfg.waitTime),
-		VisibilityTimeout: 300,
+		VisibilityTimeout: int32(cfg.visibilityTimeout),
 		BaseEndpoint:      env.Get("AWS_SQS_ENDPOINT", ""),
 	}, logger)
 	if err != nil {
@@ -173,12 +195,13 @@ func run(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("creating block cache: %w", err)
 	}
+	defer blockCache.Close()
 	if err := blockCache.Ping(ctx); err != nil {
 		return fmt.Errorf("connecting to Redis: %w", err)
 	}
-	defer blockCache.Close()
 	logger.Info("Redis connected", "addr", cfg.redisAddr)
-	s3Reader := s3adapter.NewReader(awsCfg, logger)
+
+	s3Reader := s3adapter.NewReaderFromEnv(awsCfg, logger)
 	cacheReader, err := cache.NewReaderWithFallback(blockCache, s3Reader, cfg.chainID, cfg.deployEnv, cfg.s3Bucket, logger)
 	if err != nil {
 		return fmt.Errorf("creating cache reader: %w", err)

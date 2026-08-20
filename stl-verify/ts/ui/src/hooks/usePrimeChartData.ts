@@ -9,6 +9,7 @@ import {
 import { sortByBucketStart } from '../lib/dashboard';
 import { isAbortError, toErrorMessage } from '../lib/errors';
 import { logging } from '../lib/logging';
+import { referenceQuery } from '../lib/referenceMode';
 import type {
   AllocationActivityBucket,
   ExposureBucket,
@@ -88,7 +89,9 @@ export function usePrimeChartData(
 
     const debtRequest = getPrimeDebtEnvelope(
       primeId,
-      bucketFilters,
+      // The metric beside this chart reads the same provenance; leaving the
+      // chart on self data would put both in one card.
+      { ...bucketFilters, ...referenceQuery },
       controller.signal,
     )
       .then((debtEnvelope) => {

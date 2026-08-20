@@ -35,3 +35,15 @@ class PrimeDebtRepositoryPort(Protocol):
     ) -> list[PrimeDebtBucket]:
         """Return the last observed debt per time bucket (LOCF gap-filled)."""
         ...
+
+    async def list_reference_debt_buckets(
+        self,
+        prime_address: EthAddress,
+        *,
+        from_timestamp: datetime,
+        to_timestamp: datetime,
+        bucket_seconds: float,
+        limit: int = 100,
+    ) -> list[PrimeDebtBucket]:
+        """Return Sky's reported debt per time bucket (LOCF gap-filled), in wad."""
+        ...

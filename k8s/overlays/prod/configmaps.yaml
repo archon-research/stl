@@ -586,3 +586,19 @@ data:
   ORDERBOOK_DEPTH: "100"
   ORDERBOOK_INTERVAL: "5s"
   ENVIRONMENT: "sentinelprod"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: reference-capital-indexer
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  # The schedule lives in Temporal state; changing this needs the schedule
+  # deleted there and the worker restarted (stl-verify/AGENTS.md).
+  REFERENCE_CAPITAL_SYNC_INTERVAL: "15m"
+  # Risk-capital root, without the /primes route the client appends itself.
+  SKY_RISK_CAPITAL_URL: "https://info-sky.blockanalitica.com/star-monitoring/risk-capital"
+  # Balance-sheet feed, read only by the one-off reference-capital-backfill Job.
+  SKY_DATA_URL: "https://sky.data.blockanalitica.com/internal"
+  ENVIRONMENT: "sentinelprod"

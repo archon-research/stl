@@ -99,3 +99,18 @@ func (r *VaultRegistry) Count() int {
 	defer r.mu.RUnlock()
 	return len(r.vaults)
 }
+
+// V2VaultAddresses returns the addresses of every registered Morpho VaultV2
+// vault. Used by the backfiller's replay phase to bound structured-event replay
+// to the vaults whose adapter / cap / fee events it knows how to handle.
+func (r *VaultRegistry) V2VaultAddresses() map[common.Address]struct{} {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make(map[common.Address]struct{})
+	for addr, v := range r.vaults {
+		if v.VaultVersion == entity.MorphoVaultV2 {
+			out[addr] = struct{}{}
+		}
+	}
+	return out
+}
