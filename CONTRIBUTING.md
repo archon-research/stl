@@ -402,12 +402,14 @@ func run(ctx context.Context, args []string) error {
    `stl-config` + `stl-secrets`, so anything your base reads from a
    per-service ConfigMap (e.g. the DEX indexers' `DEX`) must be set
    explicitly in that patch.
-6. **Create the local SQS queue** in both copies of the LocalStack init
-   script — `stl-verify/localstack-init/init-aws.sh` and the inlined
-   `localstack-init` ConfigMap in `k8s/dev-infra/localstack.yaml` (the one
-   the kind cluster actually runs) — via `create_consumer_queue <chain>
-   <name>`, which creates the FIFO queue + DLQ and subscribes it to the
-   chain's blocks topic with raw delivery.
+6. **Create the local SQS queue** in the LocalStack init script,
+   `stl-verify/localstack-init/init-aws.sh` — the single source of truth —
+   via `create_consumer_queue <chain> <name>`, which creates the FIFO
+   queue + DLQ and subscribes it to the chain's blocks topic with raw
+   delivery. `make kind-infra` generates the `localstack-init` ConfigMap
+   from that file and stamps a hash of it into the LocalStack pod
+   template, so the pod restarts and your queue exists after the next
+   `make dev-up`. Nothing is inlined in `k8s/dev-infra/localstack.yaml`.
 7. **Add build/deploy targets to the Makefile** (`docker-build-<name>`,
    `docker-release-<name>`, and register the worker in the `run-*` /
    `kind-load-workers` / `kind-deploy-workers` groupings, plus the
