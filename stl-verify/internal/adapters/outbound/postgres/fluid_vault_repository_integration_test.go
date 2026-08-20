@@ -16,15 +16,15 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-const fluidSchemaName = "test_fluid"
+const fluidDBName = "test_fluid"
 
 var fluidPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(fluidSchemaName, func() {
-		fluidPool = testutil.SetupSchemaForMain(sharedDSN, fluidSchemaName)
+	registerTestFileSetup(func() {
+		fluidPool = testutil.SetupDBForMain(sharedDSN, fluidDBName)
 	}, func() {
-		testutil.CleanupSchemaForMain(sharedDSN, fluidPool, fluidSchemaName)
+		testutil.CleanupDBForMain(sharedDSN, fluidPool, fluidDBName)
 	})
 }
 

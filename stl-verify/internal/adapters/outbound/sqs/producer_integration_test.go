@@ -44,7 +44,7 @@ func TestIntegration_DeadLetterPublisher_SendsToFifoQueue(t *testing.T) {
 
 	// Create a FIFO DLQ with content-based deduplication enabled, mirroring prod.
 	queueResult, err := sqsClient.CreateQueue(ctx, &sqs.CreateQueueInput{
-		QueueName: aws.String("dlq-producer-" + testutil.SanitizeTestName(t.Name()) + ".fifo"),
+		QueueName: aws.String(testutil.SQSTestFifoQueueName(t, "dlq-producer-")),
 		Attributes: map[string]string{
 			string(sqstypes.QueueAttributeNameFifoQueue):                 "true",
 			string(sqstypes.QueueAttributeNameContentBasedDeduplication): "true",

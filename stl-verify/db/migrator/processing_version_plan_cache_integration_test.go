@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/archon-research/stl/stl-verify/db/migrator"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -32,12 +31,8 @@ type processingVersionTriggerFunction struct {
 // insert cost scales with the table's total chunk count.
 func TestProcessingVersionTriggersForceCustomPlan(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := setupPostgres(ctx, t)
+	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
-
-	if err := migrator.New(pool, getMigrationsPath()).ApplyAll(ctx); err != nil {
-		t.Fatalf("migrations failed: %v", err)
-	}
 
 	for _, fn := range processingVersionTriggerFunctions(t, ctx, pool) {
 		t.Run(fn.name, func(t *testing.T) {

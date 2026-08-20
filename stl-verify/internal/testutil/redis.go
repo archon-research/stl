@@ -12,7 +12,14 @@ import (
 
 // StartRedisForMain starts a Redis container for use in TestMain.
 // On error it calls log.Fatal instead of t.Fatal.
+//
+// When STL_TEST_REDIS_ADDR is set it returns that server instead, so CI can own
+// one Redis per shard rather than one per package.
 func StartRedisForMain() (addr string, cleanup func()) {
+	if shared, ok := sharedService(EnvRedisAddr); ok {
+		return shared, noopCleanup
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 

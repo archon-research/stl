@@ -37,7 +37,7 @@ func capitalStackSnapshot(primeID int64, syncedAt time.Time, buildID int) entity
 
 func TestPrimeCapitalStackRepositoryPreservesEighteenDecimalPrecision(t *testing.T) {
 	ctx := context.Background()
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 
 	var primeID int64
@@ -78,7 +78,7 @@ func TestPrimeCapitalStackRepositoryPreservesEighteenDecimalPrecision(t *testing
 // conflict away, so a Temporal retry cannot duplicate a cycle.
 func TestPrimeCapitalStackRepositoryIsIdempotentWithinABuild(t *testing.T) {
 	ctx := context.Background()
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 
 	var primeID int64
@@ -115,7 +115,7 @@ func TestPrimeCapitalStackRepositoryIsIdempotentWithinABuild(t *testing.T) {
 // overwriting, so history stays auditable (ADR-0002).
 func TestPrimeCapitalStackRepositoryAppendsACorrectionForANewBuild(t *testing.T) {
 	ctx := context.Background()
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 
 	var primeID int64

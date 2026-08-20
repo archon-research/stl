@@ -54,7 +54,7 @@ func (p *fakeProvider) Watch(ctx context.Context, symbols []string) (<-chan enti
 // an injected fake provider, then verifies a snapshot row is persisted before the
 // context is cancelled and run() returns cleanly.
 func TestRunHappyPath(t *testing.T) {
-	pool, dsn, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, dsn, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 
 	t.Setenv("EXCHANGE", "coinbase")

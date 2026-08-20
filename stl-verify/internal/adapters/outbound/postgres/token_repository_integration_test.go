@@ -20,15 +20,15 @@ import (
 // by the token and user integration tests in this package.
 func i64(n int64) *int64 { return &n }
 
-const tokenSchemaName = "test_token"
+const tokenDBName = "test_token"
 
 var tokenPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(tokenSchemaName, func() {
-		tokenPool = testutil.SetupSchemaForMain(sharedDSN, tokenSchemaName)
+	registerTestFileSetup(func() {
+		tokenPool = testutil.SetupDBForMain(sharedDSN, tokenDBName)
 	}, func() {
-		testutil.CleanupSchemaForMain(sharedDSN, tokenPool, tokenSchemaName)
+		testutil.CleanupDBForMain(sharedDSN, tokenPool, tokenDBName)
 	})
 }
 

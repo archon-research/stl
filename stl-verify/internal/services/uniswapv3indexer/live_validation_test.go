@@ -77,7 +77,7 @@ func TestLiveValidation(t *testing.T) {
 	rep := newLiveReport()
 	defer rep.writeAndLog(t)
 
-	pool, _, cleanupDB := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanupDB := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanupDB()
 
 	buildID := buildregistry.BuildID(1)

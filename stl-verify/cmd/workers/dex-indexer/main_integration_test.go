@@ -12,9 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
-
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
@@ -90,10 +87,10 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 func runStartupAndShutdown(t *testing.T, dex string) {
 	ctx := context.Background()
 
-	// SetupTestSchema applies all migrations, which seed the Curve pools and the
-	// 18 Uniswap V3 pools on chain_id=1. run() calls LoadPools(chainID) and fails
-	// hard on zero pools, so CHAIN_ID must be "1" to match the seeded rows.
-	_, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	// The template SetupTestDB clones carries every migration, so the Curve and
+	// Uniswap V3 pools are seeded on chain_id=1. run() fails hard on zero pools,
+	// so CHAIN_ID must be "1" to match the seeded rows.
+	_, dbURL, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
 	// After the capability-probe removal, startup makes no chain call, and with no
@@ -116,9 +113,7 @@ func runStartupAndShutdown(t *testing.T, dex string) {
 		deployEnv = "test"
 	)
 
-	if _, err := s3Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
-		t.Fatalf("create S3 bucket: %v", err)
-	}
+	testutil.EnsureBucket(t, ctx, s3Client, bucket)
 
 	t.Setenv("BUILD_GIT_HASH", "test")
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
