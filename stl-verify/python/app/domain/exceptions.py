@@ -69,3 +69,14 @@ class InvalidOverrideError(ValueError):
     while bare ``ValueError`` (an invariant breach) is allowed to surface
     as 500 — those should never happen in production and indicate a bug.
     """
+
+
+class ReferenceDataUnavailableError(Exception):
+    """Raised when the upstream Star monitor cannot be read or is malformed.
+
+    Distinct from a prime the monitor simply does not track, which is not an
+    error and is signalled by a ``None`` return from
+    ``ReferenceRiskCapitalProvider.get_prime``. Keeping the two apart is what
+    stops an upstream outage from being served as "this prime has no reference
+    data", which reads identically to a real answer.
+    """

@@ -48,3 +48,7 @@
 ./internal/pkg/env
 ./internal/ports/outbound
 ./internal/pkg/rawsckey
+./internal/adapters/outbound/sky
+./internal/adapters/outbound/skydata
+./internal/services/reference_capital_backfill
+./cmd/backfillers/reference-capital-backfill

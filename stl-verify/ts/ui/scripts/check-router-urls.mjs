@@ -209,6 +209,21 @@ async function main() {
       '/allocation/0xAAA',
     );
 
+    // The reference flag survives validation and rides a prime switch. It is read
+    // once at entry by the comparison harness, so being stripped on arrival or on
+    // the first navigation would revert the page to STL's own model unannounced.
+    assert.equal(applied('/allocation/0xAAA?reference=true').reference, true);
+    assert.equal(applied('/allocation/0xAAA?reference').reference, true);
+    assert.equal(
+      settledUrl('/allocation/0xAAA?reference&network=1'),
+      '/allocation/0xAAA?network=1&reference=true',
+    );
+
+    // Off is spelled by absence, so the address bar never reads "on" while the
+    // page is serving STL's own figures.
+    assert.equal(applied('/allocation/0xAAA?reference=false').reference, undefined);
+    assert.equal(settledUrl('/allocation/0xAAA?reference=false'), '/allocation/0xAAA');
+
     // The drawer flag is a closed set of one, so only the spelling links use it.
     assert.equal(applied('/allocation/0xAAA?drawer=1').drawer, '1');
     assert.equal(settledUrl('/allocation/0xAAA?drawer=true'), '/allocation/0xAAA');

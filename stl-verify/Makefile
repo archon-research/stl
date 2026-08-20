@@ -10,6 +10,7 @@ include lint.mk
 		_docker-release-image _docker-release-go-service \
 		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-fluid-vault-indexer-internal _docker-release-dex-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal _docker-release-psm3-indexer-internal _docker-release-cex-orderbook-indexer-internal _docker-release-migrate-internal _docker-release-python-api-internal _docker-release-transform-bootstrap-internal _docker-release-cronjob-%-internal \
 		docker-build-offchain-price-backfill docker-release-offchain-price-backfill _docker-release-offchain-price-backfill-internal \
+		docker-build-reference-capital-backfill docker-release-reference-capital-backfill _docker-release-reference-capital-backfill-internal \
 		build-backfiller-% run-backfiller-% \
         docker-build-watcher docker-push-watcher docker-release-watcher \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
@@ -739,6 +740,14 @@ dev-env:
 		"BUILD_GIT_HASH=dev" \
 		"LOG_LEVEL=debug" \
 		> cmd/cronjobs/maple-graphql-indexer/.env
+	@printf '%s\n' \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
+		"SKY_RISK_CAPITAL_URL=https://info-sky.blockanalitica.com/star-monitoring/risk-capital" \
+		"REFERENCE_CAPITAL_SYNC_INTERVAL=15m" \
+		"TEMPORAL_HOST_PORT=127.0.0.1:7233" \
+		"TEMPORAL_NAMESPACE=vector" \
+		"LOG_LEVEL=debug" \
+		> cmd/cronjobs/reference-capital-indexer/.env
 	@echo "Environment files generated (.env.secrets updated)."; \
 	MISSING=""; \
 	for key in ALCHEMY_API_KEY COINGECKO_API_KEY ETHERSCAN_API_KEY ANCHORAGE_API_KEY; do \
@@ -1060,6 +1069,8 @@ docker-release-all:
 	@echo ""
 	@$(MAKE) _docker-release-transform-bootstrap-internal ENV=$(ENV)
 	@$(MAKE) _docker-release-offchain-price-backfill-internal ENV=$(ENV)
+	@echo ""
+	@$(MAKE) _docker-release-reference-capital-backfill-internal ENV=$(ENV)
 	@echo ""
 	@for cj in $(CRONJOBS); do \
 		$(MAKE) _docker-release-cronjob-$$cj-internal ENV=$(ENV) || { echo "ERROR: Failed to release cronjob $$cj"; exit 1; }; \
@@ -2205,7 +2216,7 @@ kind-load-python-api:
 # `make kind-deploy-data-validator` (see k8s/overlays/dev/data-validator), not part of dev-up.
 
 CRONJOBS := $(sort $(notdir $(patsubst %/main.go,%,$(wildcard cmd/cronjobs/*/main.go))))
-CRONJOB_DEPLOYMENTS := spark-anchorage-indexer offchain-price-indexer
+CRONJOB_DEPLOYMENTS := spark-anchorage-indexer offchain-price-indexer reference-capital-indexer
 
 # Pattern rule: docker-build-cronjob-<name> builds any cronjob image.
 docker-build-cronjob-%:
@@ -2227,6 +2238,18 @@ docker-release-transform-bootstrap: ecr-login _docker-release-transform-bootstra
 
 _docker-release-transform-bootstrap-internal:
 	@$(MAKE) _docker-release-go-service GO_NAME="Transform Bootstrap" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/backfillers/transform-bootstrap GO_BIN=transform-bootstrap GO_CACHE_KEY="cronjob-transform-bootstrap" GO_TAG="transform-bootstrap-$(IMAGE_TAG)" GO_LATEST_TAG="transform-bootstrap-latest"
+
+# reference-capital-backfill: the one-off seed of reference capital history predating
+# STL's own observation of Sky's Star monitor. Not a cronjob (no Temporal
+# schedule) so it is not auto-discovered; ships in the shared cronjob ECR repo
+# with a name-prefixed tag and runs as a one-off k8s Job.
+docker-build-reference-capital-backfill:
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/reference-capital-backfill --build-arg BIN=reference-capital-backfill -t stl-reference-capital-backfill:local -f Dockerfile.common .
+
+docker-release-reference-capital-backfill: ecr-login _docker-release-reference-capital-backfill-internal
+
+_docker-release-reference-capital-backfill-internal:
+	@$(MAKE) _docker-release-go-service GO_NAME="Reference Capital Backfill" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/backfillers/reference-capital-backfill GO_BIN=reference-capital-backfill GO_CACHE_KEY="cronjob-reference-capital-backfill" GO_TAG="reference-capital-backfill-$(IMAGE_TAG)" GO_LATEST_TAG="reference-capital-backfill-latest"
 
 # offchain-price-backfill (VEC-540): the on-demand CoinGecko history backfill. Not a
 # cronjob (it registers no Temporal schedule) so it is not auto-discovered, but it is

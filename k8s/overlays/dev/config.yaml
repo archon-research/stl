@@ -25,5 +25,9 @@ data:
   ENABLE_BACKFILL: "false"
   TEMPORAL_HOST_PORT: temporal-server.temporal:7233
   TEMPORAL_NAMESPACE: vector
+  # Risk-capital root, without the /primes route the client appends itself.
+  SKY_RISK_CAPITAL_URL: "https://info-sky.blockanalitica.com/star-monitoring/risk-capital"
+  SKY_DATA_URL: "https://sky.data.blockanalitica.com/internal"
+  REFERENCE_CAPITAL_SYNC_INTERVAL: "15m"
   ANCHORAGE_API_URL: "https://api.anchorage.com"
   ANCHORAGE_PRIME: "spark"

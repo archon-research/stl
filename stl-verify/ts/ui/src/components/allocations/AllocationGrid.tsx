@@ -41,11 +41,13 @@ import {
   getProtocolLabel,
   parseNumericValue,
 } from '../../lib/dashboard';
+import { REFERENCE_MODE } from '../../lib/referenceMode';
 import type {
   Allocation,
   AllocationCategory,
   AllocationRiskCapital,
   Prime,
+  PrimeDebtBucket,
   PrimeDebtSnapshot,
   PrimeRiskCapital,
 } from '../../types/allocation';
@@ -75,6 +77,7 @@ type AllocationGridProps = {
   localProtocols: LocalProtocolRow[];
   onSelectAllocation: (allocationKey: string) => void;
   primeDebtSnapshot: PrimeDebtSnapshot | null;
+  referenceDebt: PrimeDebtBucket | null;
   onSearchChange: (value: string) => void;
   onSortingChange: (
     sorting: SortingState | ((old: SortingState) => SortingState),
@@ -823,6 +826,7 @@ export function AllocationGrid({
   localProtocols,
   onSelectAllocation,
   primeDebtSnapshot,
+  referenceDebt,
   onSearchChange,
   onSortingChange,
   searchValue,
@@ -907,11 +911,30 @@ export function AllocationGrid({
     };
   }, [allocations]);
 
+  const debtWad = REFERENCE_MODE
+    ? referenceDebt?.debt_wad
+    : primeDebtSnapshot?.debt_wad;
+  // Reference mode has no observation time: upstream publishes one figure per
+  // prime per day, so the closest thing is the bucket the figure falls in. The
+  // label says "as of" rather than "sync" so a boundary is not read as a
+  // moment we observed the value.
+  const debtObservedAt = REFERENCE_MODE
+    ? referenceDebt?.bucket_start
+    : primeDebtSnapshot?.synced_at;
+  const debtTimestampLabel = REFERENCE_MODE ? 'Debt as of' : 'Debt sync';
+  const debtIlkLabel = REFERENCE_MODE
+    ? 'Sky-reported'
+    : `Ilk ${primeDebtSnapshot?.ilk_name ?? 'Unknown'}`;
+
   const hasSearchQuery = searchValue.trim().length > 0;
 
   const riskByReceiptTokenId = useMemo(() => {
     const map = new Map<number, AllocationRiskCapital>();
     for (const entry of riskCapital?.per_allocation ?? []) {
+      // A reference-sourced row that did not resolve to a receipt token has
+      // nothing on this grid to attach to, and every such row shares the null
+      // key — so keying on it would collapse them onto one another.
+      if (entry.receipt_token_id === null) continue;
       map.set(entry.receipt_token_id, entry);
     }
     return map;
@@ -1075,13 +1098,13 @@ export function AllocationGrid({
                       color: 'text.strong',
                     })}
                   >
-                    Debt sync{' '}
+                    {debtTimestampLabel}{' '}
                     {isPrimeDebtLoading
                       ? 'Loading...'
                       : primeDebtErrorMessage
                         ? 'Error'
-                        : primeDebtSnapshot?.synced_at
-                          ? formatFreshnessLabel(primeDebtSnapshot.synced_at)
+                        : debtObservedAt
+                          ? formatFreshnessLabel(debtObservedAt)
                           : '—'}
                   </span>
                   <span
@@ -1095,9 +1118,9 @@ export function AllocationGrid({
                       ? 'Waiting for sync timestamp'
                       : primeDebtErrorMessage
                         ? primeDebtErrorMessage
-                        : primeDebtSnapshot?.synced_at
-                          ? formatDateTime(primeDebtSnapshot.synced_at)
-                          : 'No debt sync timestamp'}
+                        : debtObservedAt
+                          ? formatDateTime(debtObservedAt)
+                          : 'No debt timestamp'}
                   </span>
                 </div>
               ) : null}
@@ -1256,9 +1279,7 @@ export function AllocationGrid({
                   className={metricsCardClassName}
                   label="Prime debt exposure"
                   value={
-                    isPrimeDebtLoading
-                      ? 'Loading...'
-                      : formatWadValue(primeDebtSnapshot?.debt_wad)
+                    isPrimeDebtLoading ? 'Loading...' : formatWadValue(debtWad)
                   }
                   detail={
                     isPrimeDebtLoading ? (
@@ -1280,14 +1301,12 @@ export function AllocationGrid({
                             '& button': { minHeight: 'auto', py: '0' },
                           })}
                         >
-                          <span>
-                            Ilk {primeDebtSnapshot?.ilk_name ?? 'Unknown'}
-                          </span>
+                          <span>{debtIlkLabel}</span>
                           <span aria-hidden="true">·</span>
                           <AppTooltip
                             ariaLabel={
-                              primeDebtSnapshot?.debt_wad
-                                ? `Exact raw WAD ${primeDebtSnapshot.debt_wad}`
+                              debtWad
+                                ? `Exact raw WAD ${debtWad}`
                                 : 'Raw WAD unavailable'
                             }
                             trigger={
@@ -1298,12 +1317,12 @@ export function AllocationGrid({
                                   textUnderlineOffset: '2px',
                                 })}
                               >
-                                {formatRawWadLabel(primeDebtSnapshot?.debt_wad)}
+                                {formatRawWadLabel(debtWad)}
                               </span>
                             }
                             content={
-                              primeDebtSnapshot?.debt_wad
-                                ? `Exact raw WAD: ${primeDebtSnapshot.debt_wad}`
+                              debtWad
+                                ? `Exact raw WAD: ${debtWad}`
                                 : 'Raw WAD unavailable'
                             }
                           />
@@ -1329,11 +1348,23 @@ export function AllocationGrid({
               color: 'text.muted',
             })}
           >
-            Model-derived ({riskCapital.model}, 15% stress) ·{' '}
-            {parseNumericValue(riskCapital.prime_modeled_pct) !== null
-              ? formatRatioPercent(riskCapital.prime_modeled_pct)
-              : 'partial'}{' '}
-            of exposure modeled
+            {riskCapital.source === 'reference' ? (
+              // No model ran, so the coverage figure below would read as "STL
+              // priced all of this" when nothing of STL's did. Attribute the
+              // figures to their source instead.
+              <>
+                Reported by Sky&apos;s Star Agents Risk Capital &amp;
+                Requirements Monitor · not STL&apos;s model
+              </>
+            ) : (
+              <>
+                Model-derived ({riskCapital.model}, 15% stress) ·{' '}
+                {parseNumericValue(riskCapital.prime_modeled_pct) !== null
+                  ? formatRatioPercent(riskCapital.prime_modeled_pct)
+                  : 'partial'}{' '}
+                of exposure modeled
+              </>
+            )}
           </p>
         ) : null}
         <div

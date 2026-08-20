@@ -61,3 +61,5 @@
 ./internal/services/sparklend
 ./internal/testutil
 ./internal/testutil/dataexport
+./internal/services/reference_capital_indexer
+./cmd/cronjobs/reference-capital-indexer

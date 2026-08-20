@@ -70,6 +70,10 @@
       "type": "bytea",
       "class": "S"
     },
+    "allocated_assets_usd": {
+      "type": "numeric",
+      "class": "S"
+    },
     "amount": {
       "type": "numeric",
       "class": "D"
@@ -127,7 +131,15 @@
       "type": "numeric",
       "class": "D"
     },
+    "assets_usd": {
+      "type": "numeric",
+      "class": "S"
+    },
     "average_stable_borrow_rate": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "backstop_capital_usd": {
       "type": "numeric",
       "class": "S"
     },
@@ -287,6 +299,10 @@
       "type": "int8",
       "class": "R"
     },
+    "debt_usd": {
+      "type": "numeric",
+      "class": "S"
+    },
     "debt_wad": {
       "type": "numeric",
       "class": "D"
@@ -336,6 +352,14 @@
       "type": "bool",
       "class": "S"
     },
+    "encumbrance_ratio": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "epi_utilization": {
+      "type": "numeric",
+      "class": "S"
+    },
     "event_data": {
       "type": "jsonb",
       "class": "S"
@@ -357,7 +381,23 @@
       "type": "text",
       "class": "R"
     },
+    "exposure_share": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "exposure_usd": {
+      "type": "numeric",
+      "class": "S"
+    },
     "exposure_value": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "external_junior_risk_capital_usd": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "external_senior_risk_capital_usd": {
       "type": "numeric",
       "class": "S"
     },
@@ -422,6 +462,10 @@
       "type": "bytea",
       "class": "S"
     },
+    "idle_assets_usd": {
+      "type": "numeric",
+      "class": "S"
+    },
     "ilk_name": {
       "type": "text",
       "class": "S"
@@ -440,6 +484,14 @@
       "class": "A"
     },
     "interest_rate": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "internal_junior_risk_capital_usd": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "internal_senior_risk_capital_usd": {
       "type": "numeric",
       "class": "S"
     },
@@ -477,6 +529,10 @@
     },
     "is_syrup": {
       "type": "bool",
+      "class": "S"
+    },
+    "junior_risk_capital_usd": {
+      "type": "numeric",
       "class": "S"
     },
     "last_update_at": {
@@ -798,6 +854,10 @@
       "type": "int8",
       "class": "S"
     },
+    "required_risk_capital_usd": {
+      "type": "numeric",
+      "class": "S"
+    },
     "reserve_factor": {
       "type": "numeric",
       "class": "S"
@@ -813,6 +873,10 @@
     "secured_party_id": {
       "type": "text",
       "class": "R"
+    },
+    "senior_risk_capital_usd": {
+      "type": "numeric",
+      "class": "S"
     },
     "shares": {
       "type": "numeric",
@@ -834,6 +898,10 @@
     "source_id": {
       "type": "int8",
       "class": "R"
+    },
+    "spj_utilization": {
+      "type": "numeric",
+      "class": "S"
     },
     "spot_apy": {
       "type": "numeric",
@@ -907,6 +975,10 @@
       "type": "int8",
       "class": "R"
     },
+    "tokenized_junior_risk_capital_usd": {
+      "type": "numeric",
+      "class": "S"
+    },
     "total_a_token": {
       "type": "numeric",
       "class": "S"
@@ -935,6 +1007,10 @@
       "type": "numeric",
       "class": "S"
     },
+    "total_risk_capital_usd": {
+      "type": "numeric",
+      "class": "S"
+    },
     "total_shares": {
       "type": "numeric",
       "class": "S"
@@ -956,6 +1032,10 @@
       "class": "S"
     },
     "total_variable_debt": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "treasury_balance_usd": {
       "type": "numeric",
       "class": "S"
     },
@@ -1233,10 +1313,20 @@
       "type": "dimension",
       "owner": "prime"
     },
+    "prime_capital_stack": {
+      "type": "raw_pipeline",
+      "owner": "prime",
+      "transform_defer": "native PK (prime_id, synced_at); transform deferred pending the reference-data rollout"
+    },
     "prime_debt": {
       "type": "raw_pipeline",
       "owner": "prime",
       "transform_defer": "VEC-494: bucket 3 (no natural PK, keyed via transform_config)"
+    },
+    "prime_reference_balance_sheet": {
+      "type": "raw_pipeline",
+      "owner": "prime",
+      "transform_defer": "native PK (prime_id, observed_at); transform deferred pending the reference-data rollout"
     },
     "protocol": {
       "type": "dimension",
@@ -1443,9 +1533,21 @@
       "action": "rename"
     },
     {
+      "table": "prime_capital_stack",
+      "column": "synced_at",
+      "canonical": "snapshot_time",
+      "action": "rename"
+    },
+    {
       "table": "prime_debt",
       "column": "synced_at",
       "canonical": "block_timestamp",
+      "action": "rename"
+    },
+    {
+      "table": "prime_reference_balance_sheet",
+      "column": "observed_at",
+      "canonical": "snapshot_time",
       "action": "rename"
     },
     {
@@ -1803,7 +1905,9 @@
         "anchorage_operation",
         "anchorage_package_snapshot",
         "cex_orderbook_snapshots",
-        "offchain_token_price"
+        "offchain_token_price",
+        "prime_capital_stack",
+        "prime_reference_balance_sheet"
       ]
     },
     {
@@ -1822,7 +1926,9 @@
         "maple_syrup_global_state",
         "offchain_token_price",
         "onchain_token_price",
+        "prime_capital_stack",
         "prime_debt",
+        "prime_reference_balance_sheet",
         "psm3_reserves",
         "token_total_supply"
       ]

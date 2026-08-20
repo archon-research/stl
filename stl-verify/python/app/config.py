@@ -72,6 +72,17 @@ class Settings(BaseSettings):
         query.pop("sslmode", None)
         return url.set(query=query).render_as_string(hide_password=False)
 
+    @property
+    def star_risk_capital_base_url(self) -> str:
+        """The Star monitor's risk-capital root, derived from the configured primes URL.
+
+        Derived rather than configured separately so pointing the service at a
+        mock or a staging monitor moves every route at once; two env vars would
+        let the list and the per-prime routes drift to different hosts, which
+        surfaces as a prime the list reports but the detail route 500s on.
+        """
+        return self.star_risk_capital_upstream_url.rstrip("/").removesuffix("/primes")
+
 
 @functools.lru_cache
 def get_settings() -> Settings:
