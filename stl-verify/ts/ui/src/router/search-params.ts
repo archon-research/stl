@@ -96,6 +96,31 @@ function normalizeRangeSelection<T extends RangeSelection>(selection: T): T {
   return { ...selection, from: undefined, to: undefined };
 }
 
+// Off values are explicit; anything else present — including the bare `?reference`
+// switch, which arrives as an empty string — means on. Absence is the only other
+// state, so this is `true | undefined` and never `false`: the entry-time cleanup
+// drops a param whose validated value is undefined, which is what stops
+// `?reference=false` from sitting in a URL that reads as "on".
+//
+// Exported because `lib/referenceMode` applies the same rule to the entry URL
+// before the router has validated anything; two spellings of "is it on" would be
+// one drift away from a page mixing both provenances.
+const REFERENCE_OFF_VALUES = new Set(['false', '0', 'no', 'off']);
+
+export function toReferenceFlag(value: unknown): true | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+
+  return REFERENCE_OFF_VALUES.has(String(value).toLowerCase())
+    ? undefined
+    : true;
+}
+
+function referenceParam() {
+  return z.optional(z.unknown().transform(toReferenceFlag));
+}
+
 /**
  * Params every view shares, carried by the root route so both leaves inherit one
  * definition. Two consequences worth knowing: `from`/`to` survive validation
@@ -111,6 +136,10 @@ export const sharedSearchSchema = z
     range: rangePresetParam(),
     from: textParam(),
     to: textParam(),
+    // Selects the provenance every endpoint answers from. Declared here rather
+    // than read loose from the URL so the router carries it across navigations
+    // instead of stripping it as unvalidated.
+    reference: referenceParam(),
   })
   .transform(normalizeRangeSelection);
 
