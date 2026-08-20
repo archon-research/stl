@@ -305,7 +305,8 @@ app/services/core_model_risk_service.py  RiskModel implementation
 
 app/services/core_model_runner/
 ├── service.py   The body of one tick: run each market, append results
-└── workflow.py  Temporal workflow + activity wrapping that tick
+├── workflow.py  Temporal workflow; sandboxed, imports nothing from the model
+└── activity.py  The activity that runs the tick; the only side that may import it
 
 app/adapters/temporal/
 └── cronjob.py   Shared harness: connect, ensure schedule, run worker
