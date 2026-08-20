@@ -185,6 +185,11 @@ function App() {
     string | null
   >(null);
   const [isAllocationsLoading, setIsAllocationsLoading] = useState(false);
+  // Which prime `allocations` holds rows for. Loading flags are set in an effect
+  // and so cannot gate that same commit's later effects; this marker can.
+  const [loadedAllocationsPrimeKey, setLoadedAllocationsPrimeKey] = useState<
+    string | null
+  >(null);
   const [isRiskCapitalLoading, setIsRiskCapitalLoading] = useState(false);
   const [riskCapitalErrorMessage, setRiskCapitalErrorMessage] = useState<
     string | null
@@ -492,6 +497,7 @@ function App() {
   useEffect(() => {
     if (!selectedPrimeGroup) {
       setAllocations([]);
+      setLoadedAllocationsPrimeKey(null);
       setAllocationsErrorMessage(null);
       setIsAllocationsLoading(false);
       return;
@@ -500,6 +506,7 @@ function App() {
     const controller = new AbortController();
 
     setAllocations([]);
+    setLoadedAllocationsPrimeKey(null);
     setIsAllocationsLoading(true);
     setAllocationsErrorMessage(null);
 
@@ -513,6 +520,7 @@ function App() {
     )
       .then((response) => {
         setAllocations(response);
+        setLoadedAllocationsPrimeKey(selectedPrimeGroup.key);
       })
       .catch((error: unknown) => {
         if (isAbortError(error)) {
@@ -698,14 +706,11 @@ function App() {
     [allocations, isActivitiesView, localProtocols],
   );
 
-  // Drop a stale filter only once its option source has actually delivered
-  // options: an empty source means "not known yet", and treating it as "no such
-  // option" wipes a valid deep link (?network=/?protocol=) on mount or on a
-  // failed fetch.
+  // Only rows loaded for this exact prime are an authoritative option list; []
+  // or another prime's rows read as "no such option" and wipe ?network=.
   const allocationOptionsUnready =
     selectedPrimeGroup === null ||
-    isAllocationsLoading ||
-    allocationsErrorMessage !== null;
+    loadedAllocationsPrimeKey !== selectedPrimeGroup.key;
   const networkOptionsLoading = isActivitiesView
     ? localChains.length === 0
     : allocationOptionsUnready;
