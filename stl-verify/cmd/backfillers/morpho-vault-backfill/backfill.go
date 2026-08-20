@@ -373,6 +373,16 @@ func (a *backfillActivities) DiscoverVaults(ctx context.Context, rng blockRange)
 func (a *backfillActivities) ReplayPartition(ctx context.Context, work partitionWork) (events int, err error) {
 	defer func() { err = nonRetryableIfStructural(err) }()
 
+	// One wrap for every failure path, deferred rather than repeated per return.
+	// The workflow surfaces only this error, so the paths that fail BEFORE the
+	// replay begins — service build, registry load, topic derivation — would
+	// otherwise reach the operator with no partition to re-run.
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("replaying partition %s: %w", work.Partition, err)
+		}
+	}()
+
 	stopHeartbeat := startHeartbeat(ctx, heartbeatInterval)
 	defer stopHeartbeat()
 	defer a.archiveDrain()
@@ -382,7 +392,7 @@ func (a *backfillActivities) ReplayPartition(ctx context.Context, work partition
 		return 0, fmt.Errorf("building replay service: %w", err)
 	}
 	if err := svc.LoadVaultRegistry(ctx); err != nil {
-		return 0, err
+		return 0, fmt.Errorf("loading the vault registry: %w", err)
 	}
 
 	v2Vaults := svc.V2VaultAddresses()
@@ -399,7 +409,7 @@ func (a *backfillActivities) ReplayPartition(ctx context.Context, work partition
 	events, err = replayPartition(ctx, a.logger, a.s3Reader, svc, blocktime.New(a.ethClient),
 		a.cfg, work.Range, work.Partition, v2Vaults, topics)
 	if err != nil {
-		return 0, fmt.Errorf("replaying partition %s: %w", work.Partition, err)
+		return 0, err
 	}
 
 	activity.GetLogger(ctx).Info("replayed partition",

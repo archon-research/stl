@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"runtime"
 	"slices"
@@ -405,6 +406,28 @@ func TestBackfillWorkflow_ExposesPartialCountsAfterFailure(t *testing.T) {
 	}
 	if got.EventsReplayed != 10 {
 		t.Errorf("EventsReplayed = %d, want 10", got.EventsReplayed)
+	}
+}
+
+// The workflow surfaces only the activity's own error, so every failure path has
+// to name the partition — including the ones that fail BEFORE the replay starts
+// (service build, registry load, topic derivation), which otherwise reach the
+// operator as a bare "database pool cannot be nil" with nothing to re-run.
+func TestReplayPartition_NamesThePartitionOnAnEarlyFailure(t *testing.T) {
+	// A nil pool fails the first step, buildReplayService, which is the earliest
+	// of those paths.
+	activities := &backfillActivities{logger: slog.Default(), archiveDrain: func() {}}
+
+	_, err := activities.ReplayPartition(context.Background(), partitionWork{
+		Range:     blockRange{From: 1000, To: 1999},
+		Partition: "1000-1999",
+	})
+
+	if err == nil {
+		t.Fatal("expected a nil database pool to fail the activity")
+	}
+	if !strings.Contains(err.Error(), "replaying partition 1000-1999") {
+		t.Errorf("error = %q, want it to name the partition being replayed", err)
 	}
 }
 
