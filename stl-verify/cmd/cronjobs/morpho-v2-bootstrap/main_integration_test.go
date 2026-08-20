@@ -15,10 +15,8 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-// setWorkerEnv installs the environment a deployed pod would have, so these
-// tests exercise the real startup wiring rather than a hand-built config.
-// Dialing an HTTP RPC URL does not open a connection, so no node is needed to
-// prove the wiring; the run itself is exercised by the service tests.
+// setWorkerEnv installs the environment a deployed pod would have. Dialing an
+// HTTP RPC URL opens no connection, so no node is needed to prove the wiring.
 func setWorkerEnv(t *testing.T, chainID string) {
 	t.Helper()
 
@@ -28,15 +26,9 @@ func setWorkerEnv(t *testing.T, chainID string) {
 	t.Setenv("ALCHEMY_HTTP_URL", "http://127.0.0.1:1/v2")
 }
 
-// TestIntegration_Register_RunsTheDocumentedWorkflowTypeWithNoInput is the
-// operator contract: the runbook says to start `--type MorphoV2Bootstrap` with
-// no input at all, and Temporal resolves that name by string. The literal is
-// spelled out rather than referencing workflowTypeName — using the constant
-// would rename both sides together and pin nothing.
-//
-// The activity is mocked because a real run sweeps mainnet; what this proves is
-// that the registered names resolve and that a start carrying no input payload
-// reaches the activity wrapping the bootstrap service.
+// The type name is spelled out rather than read from workflowTypeName: the
+// constant would rename both sides together and pin nothing. The activity is
+// mocked because a real run sweeps mainnet.
 func TestIntegration_Register_RunsTheDocumentedWorkflowTypeWithNoInput(t *testing.T) {
 	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
 	t.Cleanup(cleanup)

@@ -164,6 +164,25 @@ func TestRegisterRunner_AppliesTheRegisteredRetryBudget(t *testing.T) {
 	}
 }
 
+// A progress store reaches Temporal only through the liveness ticker, which a
+// zero Heartbeat disables. Accepting that pair would give a job that looks
+// healthy and silently re-does its whole run on every retry — worse than
+// refusing to start.
+func TestRegisterRunner_RefusesAProgressStoreItCouldNeverSend(t *testing.T) {
+	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+
+	err := RegisterRunner(env, RunnerJob{
+		WorkflowType: "OneShotRepair",
+		Runner:       RunnerFunc(func(context.Context) error { return nil }),
+		Timeouts:     ActivityTimeouts{StartToClose: time.Minute},
+		Progress:     &fakeProgressHeartbeater{onBeat: func() {}},
+	})
+
+	if err == nil || !strings.Contains(err.Error(), "Heartbeat") {
+		t.Fatalf("error = %v, want one naming the missing Timeouts.Heartbeat", err)
+	}
+}
+
 func TestRegisterRunner_RequiresAWorkflowType(t *testing.T) {
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
 

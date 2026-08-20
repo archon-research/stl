@@ -94,6 +94,11 @@ func RegisterRunner(r worker.Registry, job RunnerJob) error {
 	if job.WorkflowType == "" {
 		return fmt.Errorf("RunnerJob.WorkflowType is required")
 	}
+	// The liveness ticker is the only thing that sends the store, so this pair
+	// would resume from nothing while looking perfectly healthy.
+	if job.Progress != nil && job.Timeouts.Heartbeat <= 0 {
+		return fmt.Errorf("RunnerJob.Progress needs a non-zero Timeouts.Heartbeat, or the progress it records never reaches Temporal")
+	}
 	activities, err := newCronjobActivities(job.Runner, nil, job.Timeouts.Heartbeat, job.Progress)
 	if err != nil {
 		return fmt.Errorf("creating the runner activity: %w", err)

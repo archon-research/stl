@@ -279,8 +279,8 @@ func isCurrentAdapter(t *testing.T, ctx context.Context, pool *pgxpool.Pool, ada
 }
 
 // TestRun_IsIdempotent re-runs the whole bootstrap against the state the first
-// run produced. Re-clicking Trigger must converge, not duplicate: the operator
-// is explicitly told a repeat run is safe.
+// run produced. A second run must converge, not duplicate: the operator is
+// explicitly told a repeat run is safe.
 func TestRun_IsIdempotent(t *testing.T) {
 	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
 	defer cleanup()
@@ -311,8 +311,8 @@ func TestRun_IsIdempotent(t *testing.T) {
 	firstObservations := readAdapterMembership(t, ctx, pool, firstAdapterID)
 	firstStates := countRows(t, ctx, pool, "morpho_adapter_state")
 
-	// A re-trigger is a new workflow execution, so it carries no heartbeat
-	// details: the second run sweeps the whole range again, as in production.
+	// A second run is a new workflow execution, so it carries no heartbeat
+	// details: it sweeps the whole range again, as in production.
 	reRun := buildIntegrationService(t, ctx, pool, chain, multicaller, &fakeProgressStore{})
 	if err := reRun.Run(ctx); err != nil {
 		t.Fatalf("second Run: %v", err)
