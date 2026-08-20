@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -24,12 +25,13 @@ type visibilityChange struct {
 
 // mockConsumer implements outbound.SQSConsumer for testing.
 type mockConsumer struct {
-	mu                sync.Mutex
-	batches           [][]outbound.SQSMessage // each call to ReceiveMessages pops one batch
-	deletedHandles    []string
-	visibilityChanges []visibilityChange
-	deleteErr         error
-	visibilityTimeout time.Duration // 0 -> a safe default well above the handler budget
+	mu                  sync.Mutex
+	batches             [][]outbound.SQSMessage // each call to ReceiveMessages pops one batch
+	deletedHandles      []string
+	visibilityChanges   []visibilityChange
+	visibilityDeadlines []time.Time
+	deleteErr           error
+	visibilityTimeout   time.Duration // 0 -> a safe default well above the handler budget
 
 	// receive, when set, replaces the batch-popping behaviour so a test can
 	// drive ReceiveMessages failures.
@@ -73,9 +75,11 @@ func (m *mockConsumer) ChangeMessageVisibility(ctx context.Context, handle strin
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	deadline, _ := ctx.Deadline()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.visibilityChanges = append(m.visibilityChanges, visibilityChange{handle: handle, visibility: visibility})
+	m.visibilityDeadlines = append(m.visibilityDeadlines, deadline)
 	return nil
 }
 
@@ -91,6 +95,12 @@ func (m *mockConsumer) released() []visibilityChange {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return slices.Clone(m.visibilityChanges)
+}
+
+func (m *mockConsumer) releaseDeadlines() []time.Time {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.visibilityDeadlines)
 }
 
 func makeMsg(id, handle string, event outbound.BlockEvent) outbound.SQSMessage {
@@ -737,6 +747,83 @@ func TestProcessMessages_ReleasesUnstartedBatchRemainderOnShutdown(t *testing.T)
 		t.Errorf("expected the unstarted message released for the successor, got %v", got)
 	}
 	assertNoErrorLogs(t, recorder)
+}
+
+// TestProcessMessages_ReleasesBatchThatArrivesDuringShutdown covers the poll
+// that completes after SIGTERM: the consumer never abandons an in-flight
+// receive, so a batch can land with the loop already shutting down. None of it
+// may be processed, and every message must go straight back to the queue or the
+// successor's FIFO group stalls for the visibility timeout.
+func TestProcessMessages_ReleasesBatchThatArrivesDuringShutdown(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	consumer := &mockConsumer{
+		receive: func(context.Context, int) ([]outbound.SQSMessage, error) {
+			cancel() // the poll outlives the shutdown signal, then delivers
+			return []outbound.SQSMessage{
+				makeMsg("1", "h1", blockEvent(100)),
+				makeMsg("2", "h2", blockEvent(101)),
+			}, nil
+		},
+	}
+	cfg, recorder := recordingConfig(consumer)
+
+	var handled []int64
+	handler := func(_ context.Context, event outbound.BlockEvent) error {
+		handled = append(handled, event.BlockNumber)
+		return nil
+	}
+
+	if err := ProcessMessages(ctx, cfg, handler); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(handled) != 0 {
+		t.Errorf("expected no message processed after shutdown began, handled %v", handled)
+	}
+	if got := consumer.deleted(); len(got) != 0 {
+		t.Errorf("expected no deletes, got %v", got)
+	}
+	want := []visibilityChange{{handle: "h1", visibility: 0}, {handle: "h2", visibility: 0}}
+	if got := consumer.released(); !slices.Equal(got, want) {
+		t.Errorf("expected the whole batch released for the successor, got %v", got)
+	}
+	assertNoErrorLogs(t, recorder)
+}
+
+// TestProcessMessages_ReleasesWholeBatchWithinOneCleanupBudget pins the
+// shutdown budget: a cleanup context per message lets a full batch of 10 need
+// 10x ShutdownCleanupTimeout, which no longer fits lifecycle.ShutdownTimeout.
+func TestProcessMessages_ReleasesWholeBatchWithinOneCleanupBudget(t *testing.T) {
+	const batchSize = 10
+	batch := make([]outbound.SQSMessage, 0, batchSize)
+	for i := range batchSize {
+		batch = append(batch, makeMsg(strconv.Itoa(i), fmt.Sprintf("h%d", i), blockEvent(int64(100+i))))
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	consumer := &mockConsumer{
+		receive: func(context.Context, int) ([]outbound.SQSMessage, error) {
+			cancel()
+			return batch, nil
+		},
+	}
+	cfg, _ := recordingConfig(consumer)
+
+	if err := ProcessMessages(ctx, cfg, noopHandler); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	deadlines := consumer.releaseDeadlines()
+	if len(deadlines) != batchSize {
+		t.Fatalf("expected %d releases, got %d", batchSize, len(deadlines))
+	}
+	for i, deadline := range deadlines {
+		if !deadline.Equal(deadlines[0]) {
+			t.Errorf("release %d got its own cleanup budget (deadline %s, first %s); the batch must share one",
+				i, deadline, deadlines[0])
+		}
+	}
 }
 
 // TestProcessMessages_HandlerFailureLeavesVisibilityUntouched pins the

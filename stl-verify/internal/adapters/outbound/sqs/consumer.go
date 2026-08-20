@@ -9,6 +9,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -23,6 +24,11 @@ type sqsAPI interface {
 // maxVisibilityTimeoutSeconds is the SQS ceiling for a per-message visibility
 // timeout (12 hours).
 const maxVisibilityTimeoutSeconds = 43200
+
+// receiveSlack is the headroom added to the configured long-poll wait when
+// bounding one poll. It covers connection setup and the SDK's own retries, so a
+// healthy poll is never cut short by its own deadline.
+const receiveSlack = 5 * time.Second
 
 // Compile-time check that Consumer implements outbound.SQSConsumer
 var _ outbound.SQSConsumer = (*Consumer)(nil)
@@ -114,17 +120,26 @@ func (c *Consumer) VisibilityTimeout() time.Duration {
 }
 
 // ReceiveMessages fetches up to maxMessages from the queue.
+//
+// The long poll runs on a context detached from ctx's cancellation and
+// deadline, bounded instead by the wait time plus slack: cancelling ctx
+// (SIGTERM) mid-poll aborts the HTTP request, but SQS still hands the next
+// message to that dead request, so its receipt handle never reaches the process
+// and nothing can release it — the FIFO message group then stalls for the full
+// visibility timeout. A cancelled ctx therefore only stops the *next* poll from
+// starting; the caller is responsible for releasing a batch it can no longer
+// process.
 func (c *Consumer) ReceiveMessages(ctx context.Context, maxMessages int) ([]outbound.SQSMessage, error) {
-	if maxMessages < 1 {
-		maxMessages = 1
-	}
-	if maxMessages > 10 {
-		maxMessages = 10 // SQS max is 10
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("not starting a poll: %w", err)
 	}
 
-	result, err := c.client.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
+	pollCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.pollBudget())
+	defer cancel()
+
+	result, err := c.client.ReceiveMessage(pollCtx, &sqs.ReceiveMessageInput{
 		QueueUrl:            aws.String(c.queueURL),
-		MaxNumberOfMessages: int32(maxMessages),
+		MaxNumberOfMessages: clampBatchSize(maxMessages),
 		WaitTimeSeconds:     c.config.WaitTimeSeconds,
 		VisibilityTimeout:   c.config.VisibilityTimeout,
 		// Request all message attributes
@@ -134,8 +149,27 @@ func (c *Consumer) ReceiveMessages(ctx context.Context, maxMessages int) ([]outb
 		return nil, fmt.Errorf("failed to receive messages: %w", err)
 	}
 
-	messages := make([]outbound.SQSMessage, 0, len(result.Messages))
-	for _, msg := range result.Messages {
+	messages := toSQSMessages(result.Messages)
+	if len(messages) > 0 {
+		c.logger.Debug("received messages", "count", len(messages))
+	}
+
+	return messages, nil
+}
+
+// pollBudget bounds one detached long poll, so a hung request cannot outlive
+// the shutdown window it has to fit inside (see lifecycle.ShutdownTimeout).
+func (c *Consumer) pollBudget() time.Duration {
+	return time.Duration(c.config.WaitTimeSeconds)*time.Second + receiveSlack
+}
+
+func clampBatchSize(maxMessages int) int32 {
+	return int32(min(max(maxMessages, 1), 10)) // SQS accepts 1..10
+}
+
+func toSQSMessages(received []sqstypes.Message) []outbound.SQSMessage {
+	messages := make([]outbound.SQSMessage, 0, len(received))
+	for _, msg := range received {
 		if msg.MessageId == nil || msg.ReceiptHandle == nil || msg.Body == nil {
 			continue
 		}
@@ -145,12 +179,7 @@ func (c *Consumer) ReceiveMessages(ctx context.Context, maxMessages int) ([]outb
 			Body:          *msg.Body,
 		})
 	}
-
-	if len(messages) > 0 {
-		c.logger.Debug("received messages", "count", len(messages))
-	}
-
-	return messages, nil
+	return messages
 }
 
 // DeleteMessage removes a successfully processed message from the queue.

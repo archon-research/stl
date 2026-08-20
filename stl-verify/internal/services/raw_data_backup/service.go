@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/partition"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/retry"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
@@ -244,14 +245,10 @@ func (s *Service) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			s.logger.Info("context cancelled, stopping message fetcher")
-			closeMsgCh()
-			s.wg.Wait()
-			return ctx.Err()
+			return s.stopFetching(closeMsgCh, ctx.Err())
 		case <-s.stopCh:
 			s.logger.Info("stop signal received, stopping message fetcher")
-			closeMsgCh()
-			s.wg.Wait()
-			return nil
+			return s.stopFetching(closeMsgCh, nil)
 		default:
 		}
 
@@ -259,26 +256,46 @@ func (s *Service) Run(ctx context.Context) error {
 		messages, err := s.consumer.ReceiveMessages(ctx, s.config.BatchSize)
 		if err != nil {
 			if ctx.Err() != nil {
-				closeMsgCh()
-				s.wg.Wait()
-				return ctx.Err()
+				return s.stopFetching(closeMsgCh, ctx.Err())
 			}
 			s.logger.Error("failed to receive messages", "error", err)
 			time.Sleep(5 * time.Second)
 			continue
 		}
 
-		// Send messages to workers
-		for _, msg := range messages {
-			select {
-			case msgCh <- msg:
-			case <-ctx.Done():
-				closeMsgCh()
-				s.wg.Wait()
-				return ctx.Err()
-			}
+		// The workers share the cancelled context, so a batch that lands during
+		// shutdown could only fail; hand it back instead.
+		if ctx.Err() != nil {
+			sqsutil.ReleaseMessages(ctx, s.consumer, s.logger, messages)
+			return s.stopFetching(closeMsgCh, ctx.Err())
+		}
+
+		if undispatched := s.dispatch(ctx, msgCh, messages); len(undispatched) > 0 {
+			sqsutil.ReleaseMessages(ctx, s.consumer, s.logger, undispatched)
+			return s.stopFetching(closeMsgCh, ctx.Err())
 		}
 	}
+}
+
+// stopFetching closes the work channel, waits for the workers to finish what
+// they already took, and reports why the fetcher stopped.
+func (s *Service) stopFetching(closeMsgCh func(), reason error) error {
+	closeMsgCh()
+	s.wg.Wait()
+	return reason
+}
+
+// dispatch hands the batch to the workers, returning the tail that shutdown
+// stopped it from handing over.
+func (s *Service) dispatch(ctx context.Context, msgCh chan<- outbound.SQSMessage, messages []outbound.SQSMessage) []outbound.SQSMessage {
+	for i, msg := range messages {
+		select {
+		case msgCh <- msg:
+		case <-ctx.Done():
+			return messages[i:]
+		}
+	}
+	return nil
 }
 
 // Stop signals the service to stop.
