@@ -4,12 +4,15 @@ package migrator_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"sort"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/archon-research/stl/stl-verify/db/migrator"
 )
@@ -61,7 +64,7 @@ func TestPositionState(t *testing.T) {
 			`SELECT deal_type_code FROM position_classification WHERE position_id = position_id(1, 10, $1, $2)`,
 			ik, holder).Scan(&dt)
 		if err != nil {
-			if strings.Contains(err.Error(), "no rows") {
+			if errors.Is(err, pgx.ErrNoRows) {
 				return ""
 			}
 			t.Fatalf("classOf(%s, %s): %v", ik, holder, err)
@@ -79,6 +82,9 @@ func TestPositionState(t *testing.T) {
 	// Mutation audit — every guard in 20260818_130000_create_position_state.sql mapped to the
 	// subtest that fails if that guard is deleted or weakened. Reviewers: this table is the
 	// coverage claim; each row was verified by reproducing the mutation on a scratch build.
+	// (Round 9 re-attributed three rows the review proved false: the bv/pv/lexicographic fixtures
+	// are killed by the CANONICALITY FILTER, not by version legs of the guard — the guard itself
+	// collapsed to a block equality once the filter guarantees the classifying row is merged-canonical.)
 	//
 	//   guard / behavior                          killed by subtest
 	//   ----------------------------------------  ------------------------------------------------
@@ -91,34 +97,36 @@ func TestPositionState(t *testing.T) {
 	//   position_state_holder_hex_chk             holder case/prefix/non-hex cases (input matrix)
 	//   pre-flight (1) column contract            float8 fails / missing column MISSING
 	//   pre-flight (2) double-emit                double-emitted logical key raises
-	//   pre-flight (3) changed block_timestamp    re-emitted observation with changed ts raises
+	//   pre-flight (3) drift kept-stored+warn     ts-drift kept-stored (:296) / qty drift kept-stored
 	//   pre-flight (4) NULL code on non-zero      null deal_type_code on non-zero raises
+	//   pre-flight (5) cross-view ownership       second view on the same position raises (:193)
 	//   p_reason / p_view argument guards         null/blank p_reason; NULL p_view subtests
-	//   recency guard bn component                older-block backfill does not regress
-	//   recency guard bv component                same-height older version does not regress
-	//   recency guard pv component (deny)         older processing_version does not regress
-	//   recency guard lexicographic order         block_version bump outranks higher stored pv
-	//   merged-canonical (fix a, reorg drop)      reorg-wedge reclassifies down (:279)
-	//   merged-canonical (fix b, run visibility)  self-snapshot correction reclassifies (:278)
-	//   canonicality join (round 7)               stale re-emission cannot rewrite / cannot mint
+	//   canonicality filter (cand, version legs)  same-height older bv / older pv / bv-outranks-pv
+	//   filter-then-top latest (:337)             lower-block correction not suppressed
+	//   block-equality recency guard              older-block backfill does not regress
+	//   merged sees run's own zeroing             self-snapshot (bv bump) reclassifies (:278)
+	//   merged drops reorged-out blocks           reorg-wedge reclassifies down (:279)
+	//   outlives-basis semantics pinned (:374)    classification outlives reorged-out basis
+	//   append-only insert (no update channel)    return-count kept-stored / created_at untouched
 	//   cls FK fail-hard (LEFT JOIN + raw code)   unseeded deal_type_code fails the run
 	//   cls no-op guard (IS DISTINCT FROM)        no-op rerun preserves change_reason
 	//   direction frozen from ref_deal_type       no-op rerun preserves change_reason (direction)
 	//   valid_from UTC stamp                      classification stamps valid_from as UTC today
-	//   quantity-only upsert (ins arm)            qty rewrite leaves created_at untouched
-	//   column-scoped UPDATE grants               narrowed grants: rewrite denied suite
+	//   column-scoped cls UPDATE grants           narrowed grants: rewrite denied suite
+	//   owner-side REVOKE + no quantity channel   narrowed grants (catalogue assertions)
 	//   TRUNCATE / readonly / collateral locks    TRUNCATE denied and stl_readonly is read-only
-	//   advisory lock exists + key stability      advisory lock key is search_path-independent
-	//   advisory lock serializes same view        concurrent same-view runs serialize
+	//   advisory lock exists + key stability      lock key test (shadow-schema fixture, :2D)
+	//   advisory lock serializes same view        concurrent runs (pg_locks advisory-wait, :2G)
 	//   advisory lock does NOT over-serialize     different views run concurrently
-	//   pg_temp-qualified reads (round 7)         poisoned permanent _mpp_src is never read
+	//   pg_temp-qualified snapshot reads          poisoned permanent _mpp_src is never read
+	//   schema-qualified permanent tables (:312)  pg_temp shadows are defeated
 	//   pg_temp DROP qualification                temp-table drop spares a permanent _mpp_src
 	//   temp lifecycle                            temp snapshot is not left behind after a run
 	//   hypertable + 1-day chunks                 position_state is a hypertable with 1-day chunks
 	//   no default ts index                       no default block_timestamp index
 	//   cross-chunk correctness                   12-day chunk reorg / model fuzz
 	//   whole-run atomicity                       within-write failure leaves rows untouched
-	//   return-count contract                     return value counts rows inserted or changed
+	//   return-count contract (inserted only)     return value counts rows inserted
 	//   state-space beyond hand-picked cases      model fuzz (seeded, oracle-mirrored)
 
 	// --- recency guard ---------------------------------------------------------------------------
@@ -139,11 +147,15 @@ func TestPositionState(t *testing.T) {
 		}
 	})
 
-	t.Run("self-snapshot correction reclassifies (finding :278)", func(t *testing.T) {
+	t.Run("self-snapshot correction reclassifies (finding :278, append-only form)", func(t *testing.T) {
+		// Append-only: a run cannot zero a stored key in place (that would be the removed update
+		// channel); the zeroing legitimately arrives as a block_version bump IN THE SAME RUN, and the
+		// guard must see the run's own zeroing (a same-statement scan of position_state cannot -
+		// data-modifying CTEs share the pre-statement snapshot).
 		mpp(t, "vf2", valuesOf(row("if2", "ab", 7, "BORROW", 140, 0, 0), row("if2", "ab", 10, "LOAN", 150, 0, 0)), "store")
-		mpp(t, "vf2", valuesOf(row("if2", "ab", 7, "BORROW", 140, 0, 0), row("if2", "ab", 0, "LOAN", 150, 0, 0)), "zero150")
+		mpp(t, "vf2", valuesOf(row("if2", "ab", 7, "BORROW", 140, 0, 0), row("if2", "ab", 10, "LOAN", 150, 0, 0), row("if2", "ab", 0, "LOAN", 150, 1, 0)), "zero150-bv1")
 		if got := classOf(t, "if2", "ab"); got != "BORROW" {
-			t.Errorf("a run that zeroed its own stored latest did not reclassify: class = %q; want BORROW (high-water must see the run's own writes)", got)
+			t.Errorf("a run that zeroed its own stored latest (bv bump) did not reclassify: class = %q; want BORROW", got)
 		}
 	})
 
@@ -510,6 +522,17 @@ func TestPositionState(t *testing.T) {
 		if _, err := pool.Exec(ctx, `CREATE OR REPLACE VIEW lockprobe AS `+valuesOf(row("ilk", "aa", 1, "LOAN", 1, 0, 0))); err != nil {
 			t.Fatal(err)
 		}
+		// Discriminating fixture (review finding: comparing 'public' vs 'pg_catalog, public' was
+		// tautological — both contain public, so p_view::text rendered identically and a text-keyed
+		// mutation survived). A shadow schema with its OWN lockprobe put FIRST in the path makes
+		// public.lockprobe not-visible-unqualified, so regclass::text would render schema-qualified
+		// there and a p_view::text-keyed lock would differ across the two calls.
+		if _, err := pool.Exec(ctx, `CREATE SCHEMA IF NOT EXISTS lockshadow`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `CREATE OR REPLACE VIEW lockshadow.lockprobe AS `+valuesOf(row("ilkshadow", "aa", 1, "LOAN", 1, 0, 0))); err != nil {
+			t.Fatal(err)
+		}
 		// Call the REAL function inside a transaction under a given search_path, then read the advisory
 		// lock it is holding (xact lock, still held pre-commit). Comparing the held (classid,objid) across
 		// two search_paths pins the actual key — a hardcoded copy of the expression could not.
@@ -542,7 +565,7 @@ func TestPositionState(t *testing.T) {
 			return classid, objid
 		}
 		c1, o1 := heldLock("public")
-		c2, o2 := heldLock("pg_catalog, public")
+		c2, o2 := heldLock("lockshadow, public")
 		if c1 != c2 || o1 != o2 {
 			t.Errorf("advisory lock key differs across search_path: public=(%d,%d) pg_catalog=(%d,%d); the per-view lock would not serialize concurrent runs", c1, o1, c2, o2)
 		}
@@ -695,8 +718,15 @@ func TestPositionState(t *testing.T) {
 		if err := pool.QueryRow(ctx, `SELECT materialize_position_projection('vrc'::regclass, 'rc')`).Scan(&n); err != nil {
 			t.Fatal(err)
 		}
-		if n != 1 {
-			t.Errorf("one changed quantity reported %d; want 1", n)
+		if n != 0 {
+			t.Errorf("a same-key changed quantity reported %d inserts; want 0 (append-only: kept-stored + warned)", n)
+		}
+		var q int
+		if err := pool.QueryRow(ctx, `SELECT quantity::int FROM position_state WHERE position_id = position_id(1,10,'irc','aa') AND block_number = 110`).Scan(&q); err != nil {
+			t.Fatal(err)
+		}
+		if q != 6 {
+			t.Errorf("stored quantity = %d; want 6 kept (the drifted 99 must not be applied)", q)
 		}
 	})
 
@@ -759,24 +789,42 @@ func TestPositionState(t *testing.T) {
 		// interrupts the wait, proving B was excluded (a broken/absent lock would let B finish instantly).
 		// SET LOCAL + the deferred rollback keep the timeout scoped to this tx, so it can't leak back to the
 		// pool the way a session-level SET + ignored RESET could.
-		connB, err := pool.Acquire(ctx)
-		if err != nil {
+		// Assert WHAT B is blocked on (review finding: a bare statement-timeout is satisfiable by the
+		// speculative-insert XactLockTableWait even with the advisory lock deleted). A third connection
+		// polls pg_locks for a NOT-granted advisory lock while B is waiting.
+		done := make(chan error, 1)
+		go func() {
+			_, err := pool.Exec(ctx, `SELECT materialize_position_projection('vlock'::regclass, 'B')`)
+			done <- err
+		}()
+		sawAdvisoryWait := false
+		for i := 0; i < 100; i++ {
+			var waiting int
+			if err := pool.QueryRow(ctx,
+				`SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`).Scan(&waiting); err != nil {
+				t.Fatal(err)
+			}
+			if waiting > 0 {
+				sawAdvisoryWait = true
+				break
+			}
+			select {
+			case err := <-done:
+				t.Fatalf("conn B completed (err=%v) while conn A held the lock; the per-view lock did not serialize", err)
+			default:
+			}
+			if _, err := pool.Exec(ctx, `SELECT pg_sleep(0.05)`); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if !sawAdvisoryWait {
+			t.Fatal("never observed B waiting on an ungranted ADVISORY lock; the block may be PK speculative-insert, not the per-view lock")
+		}
+		if err := txA.Rollback(ctx); err != nil {
 			t.Fatal(err)
 		}
-		defer connB.Release()
-		txB, err := connB.Begin(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer txB.Rollback(ctx)
-		if _, err := txB.Exec(ctx, `SET LOCAL statement_timeout = '2s'`); err != nil {
-			t.Fatal(err)
-		}
-		_, errB := txB.Exec(ctx, `SELECT materialize_position_projection('vlock'::regclass, 'B')`)
-		if errB == nil {
-			t.Error("conn B completed while conn A held the lock; the per-view lock did not serialize")
-		} else if !strings.Contains(errB.Error(), "statement timeout") {
-			t.Errorf("conn B failed with %v; want a statement timeout (blocked on the advisory lock)", errB)
+		if err := <-done; err != nil {
+			t.Fatalf("conn B failed after A released: %v", err)
 		}
 	})
 
@@ -922,8 +970,19 @@ func TestPositionState(t *testing.T) {
 				t.Errorf("%s: want permission denied, got %v", d[0], err)
 			}
 		}
-		if err := asRole(`UPDATE position_state SET quantity = quantity WHERE false`); err != nil {
-			t.Errorf("quantity update (the sanctioned column) denied: %v", err)
+		if err := asRole(`UPDATE position_state SET quantity = quantity WHERE false`); err == nil || !strings.Contains(err.Error(), "permission denied") {
+			t.Errorf("quantity update: want permission denied (the update channel was removed; append-only default), got %v", err)
+		}
+		// Owner-side REVOKE (#737: a stray fix-migration must fail loudly; nothing FKs position_state,
+		// so the ref-table FK/KEY SHARE caveat does not apply). Asserted via the catalogue because the
+		// harness superuser bypasses ACLs.
+		var ownUpd, ownDel bool
+		if err := pool.QueryRow(ctx,
+			`SELECT has_table_privilege('stl_migrator','position_state','UPDATE'), has_table_privilege('stl_migrator','position_state','DELETE')`).Scan(&ownUpd, &ownDel); err != nil {
+			t.Fatal(err)
+		}
+		if ownUpd || ownDel {
+			t.Errorf("owner-side privileges present (UPDATE=%v DELETE=%v); want both revoked", ownUpd, ownDel)
 		}
 		// Reclassify the same position as the role: forces the cls ON CONFLICT DO UPDATE arm, which
 		// needs the column-scoped UPDATE grant on position_classification (deleting that grant line
@@ -1025,8 +1084,8 @@ func TestPositionState(t *testing.T) {
 
 	t.Run("1-byte position_id rejected by the width CHECK (direct insert)", func(t *testing.T) {
 		// Unreachable through the function (position_id() always emits 32 bytes); pin the table CHECK.
-		_, err := pool.Exec(ctx, `INSERT INTO position_state (position_id, instrument_key, holder_id, quantity, block_number, block_timestamp)
-			VALUES ('\x00'::bytea, 'x', 'aa', 1, 100, '2026-01-01')`)
+		_, err := pool.Exec(ctx, `INSERT INTO position_state (position_id, instrument_key, holder_id, quantity, block_number, block_timestamp, projection)
+			VALUES ('\x00'::bytea, 'x', 'aa', 1, 100, '2026-01-01', 'direct-test')`)
 		if err == nil || !strings.Contains(err.Error(), "id_len") {
 			t.Errorf("1-byte position_id: want id_len_chk violation, got %v", err)
 		}
@@ -1042,23 +1101,23 @@ func TestPositionState(t *testing.T) {
 		if !utcToday {
 			t.Error("valid_from is not UTC today on first classification")
 		}
-		// The sanctioned same-key quantity rewrite (pv-less sources) leaves created_at untouched —
-		// pinning the documented residual: the rewrite carries no audit trail.
+		// Append-only: a same-key differing quantity is KEPT-STORED and warned — nothing about the
+		// stored row changes, including created_at (there is no rewrite channel to audit).
 		var before string
 		if err := pool.QueryRow(ctx, `SELECT created_at::text FROM position_state WHERE position_id = position_id(1,10,'isp1','aa')`).Scan(&before); err != nil {
 			t.Fatal(err)
 		}
-		mpp(t, "vsp1", valuesOf(row("isp1", "aa", 9, "LOAN", 100, 0, 0)), "rewrite")
+		mpp(t, "vsp1", valuesOf(row("isp1", "aa", 9, "LOAN", 100, 0, 0)), "drift")
 		var after string
 		var q int
 		if err := pool.QueryRow(ctx, `SELECT created_at::text, quantity::int FROM position_state WHERE position_id = position_id(1,10,'isp1','aa')`).Scan(&after, &q); err != nil {
 			t.Fatal(err)
 		}
-		if q != 9 {
-			t.Errorf("rewrite quantity = %d; want 9", q)
+		if q != 5 {
+			t.Errorf("stored quantity = %d; want 5 kept (append-only: the drifted 9 is not applied)", q)
 		}
 		if before != after {
-			t.Errorf("created_at changed on a quantity rewrite (%s -> %s); the residual is pinned as no-audit", before, after)
+			t.Errorf("created_at changed on a kept-stored drift (%s -> %s)", before, after)
 		}
 	})
 
@@ -1129,16 +1188,115 @@ func TestPositionState(t *testing.T) {
 		}
 	})
 
+	// --- round-9 fixes (each reproduced fail-first on the pre-fix code) -----------------------------
+
+	t.Run("filter-then-top: a lower-block correction is not suppressed by a stale higher-block row (:337)", func(t *testing.T) {
+		mpp(t, "v337", valuesOf(row("i337", "aa", 5, "LOAN", 100, 0, 0), row("i337", "aa", 7, "BORROW", 110, 0, 0)), "seed")
+		mpp(t, "v337", valuesOf(row("i337", "aa", 5, "LOAN", 100, 0, 0), row("i337", "aa", 7, "BORROW", 110, 0, 0), row("i337", "aa", 0, "BORROW", 110, 1, 0)), "reorg")
+		if got := classOf(t, "i337", "aa"); got != "LOAN" {
+			t.Fatalf("after the reorg class = %q; want LOAN", got)
+		}
+		// raw pruned of the superseding bv1 row; the next run emits the stale (110,bv0) row PLUS a
+		// legitimate code correction at 100 — pre-fix, latest picked 110 first, the join dropped it,
+		// and the COLLATERAL write (the merged-canonical latest non-zero) was never made, permanently.
+		mpp(t, "v337", valuesOf(row("i337", "aa", 5, "COLLATERAL", 100, 0, 0), row("i337", "aa", 7, "BORROW", 110, 0, 0)), "stale-plus-correction")
+		if got := classOf(t, "i337", "aa"); got != "COLLATERAL" {
+			t.Errorf("legitimate lower-block correction suppressed: class = %q; want COLLATERAL (filter-then-top)", got)
+		}
+	})
+
+	t.Run("a classification outlives a fully reorged-out basis (documented; :374 pinned)", func(t *testing.T) {
+		// Chosen resolution: DOCUMENT, not clear — a delete channel would violate the append-only
+		// default (#737), and a zero latest quantity already hides the position from exposure queries.
+		// This pin makes the behavior deliberate: if it ever changes silently, this fails.
+		mpp(t, "v374", valuesOf(row("i374p", "aa", 5, "LOAN", 100, 0, 0)), "seed")
+		mpp(t, "v374", valuesOf(row("i374p", "aa", 5, "LOAN", 100, 0, 0), row("i374p", "aa", 0, "LOAN", 100, 1, 0)), "reorg-out")
+		if got := classOf(t, "i374p", "aa"); got != "LOAN" {
+			t.Errorf("outlives-basis behavior changed: class = %q; want LOAN retained (documented)", got)
+		}
+	})
+
+	t.Run("cross-view ownership is enforced: a second view on the same position raises (:193)", func(t *testing.T) {
+		mpp(t, "vown1", valuesOf(row("iown", "aa", 5, "LOAN", 100, 0, 0)), "owner")
+		body := valuesOf(row("iown", "aa", 7, "BORROW", 110, 0, 0))
+		mppErr(t, "vown2", body, "thief", "owned by another projection")
+		// and the owning view keeps working
+		mpp(t, "vown1", valuesOf(row("iown", "aa", 5, "LOAN", 100, 0, 0), row("iown", "aa", 6, "LOAN", 120, 0, 0)), "owner-again")
+		if got := classOf(t, "iown", "aa"); got != "LOAN" {
+			t.Errorf("owner view broken after ownership check: %q", got)
+		}
+	})
+
+	t.Run("a re-emitted key with a changed block_timestamp is kept-stored, not a wedge (:296)", func(t *testing.T) {
+		// At-least-once wall-clock sources (Sky's synced_at on an SQS retry) legitimately re-emit a
+		// stored key with a new timestamp. Pre-fix this raised on every run, forever, with no repair
+		// path. Now: warn, keep the stored row, insert nothing, and the run keeps succeeding.
+		mpp(t, "vtsd", valuesOf(row("itsd", "aa", 5, "LOAN", 100, 0, 0)), "seed")
+		drift := `SELECT * FROM (VALUES (1::int,10::bigint,'itsd'::text,'aa'::text,5::numeric,'LOAN'::text,100::bigint,0::int,0::int,'2026-01-01 00:00:07+00'::timestamptz)) ` + mppCols
+		if _, err := pool.Exec(ctx, `CREATE OR REPLACE VIEW vtsd AS `+drift); err != nil {
+			t.Fatal(err)
+		}
+		var n int64
+		if err := pool.QueryRow(ctx, `SELECT materialize_position_projection('vtsd'::regclass, 'drift')`).Scan(&n); err != nil {
+			t.Fatalf("timestamp drift wedged the run: %v", err)
+		}
+		if n != 0 {
+			t.Errorf("drift run inserted %d rows; want 0 (kept-stored)", n)
+		}
+		var rows int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_state WHERE position_id = position_id(1,10,'itsd','aa')`).Scan(&rows); err != nil {
+			t.Fatal(err)
+		}
+		if rows != 1 {
+			t.Errorf("stored rows = %d; want 1 (no duplicate under the 5-column PK)", rows)
+		}
+	})
+
+	t.Run("pg_temp shadows of the permanent tables are defeated (:312)", func(t *testing.T) {
+		// PostgreSQL searches the session temp schema FIRST for relation names; the function's relation
+		// references are schema-qualified (and its search_path pinned FROM CURRENT), so a pre-created
+		// pg_temp shadow must not absorb the writes. Empirically: FROM CURRENT alone did NOT defeat
+		// this (pg_temp is implicitly first when not explicitly listed) — the qualification is what does.
+		conn, err := pool.Acquire(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Release()
+		for _, ddl := range []string{
+			`CREATE TEMP TABLE position_state (LIKE public.position_state INCLUDING ALL)`,
+			`CREATE TEMP TABLE position_classification (LIKE public.position_classification INCLUDING ALL)`,
+			`CREATE TEMP TABLE ref_deal_type (LIKE public.ref_deal_type INCLUDING ALL)`,
+			`CREATE OR REPLACE VIEW vshadow AS ` + valuesOf(row("ishadow", "aa", 5, "LOAN", 100, 0, 0)),
+		} {
+			if _, err := conn.Exec(ctx, ddl); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := conn.Exec(ctx, `SELECT materialize_position_projection('vshadow'::regclass, 'shadowed')`); err != nil {
+			t.Fatalf("run under shadow tables: %v", err)
+		}
+		var realRows, shadowRows int
+		if err := conn.QueryRow(ctx, `SELECT count(*) FROM public.position_state WHERE position_id = position_id(1,10,'ishadow','aa')`).Scan(&realRows); err != nil {
+			t.Fatal(err)
+		}
+		if err := conn.QueryRow(ctx, `SELECT count(*) FROM pg_temp.position_state`).Scan(&shadowRows); err != nil {
+			t.Fatal(err)
+		}
+		if realRows != 1 || shadowRows != 0 {
+			t.Errorf("shadow absorbed the write: public=%d shadow=%d; want 1/0", realRows, shadowRows)
+		}
+	})
+
 	// --- model-based fuzz --------------------------------------------------------------------------
 
 	t.Run("model fuzz: seeded operation sequences vs an independent oracle", func(t *testing.T) {
 		// Every other subtest is a hand-picked scenario; this drives seeded-random operation
-		// sequences and checks four invariants after every step: idempotent rerun, exact
-		// stored-state conservation, no minted codes, and a full mirror of the guard semantics
-		// (merged-canonical, canonicality join, hwm). Two profiles: "core" (single-position
-		// batches, the op mix that finds the round-7 bug class automatically) and "batch-shapes"
-		// (NULL-code zero closes and multi-position views — shapes the core profile never emits).
-		// Seeds are fixed so CI is deterministic.
+		// sequences and checks invariants after every step: the run inserts EXACTLY the batch's
+		// unseen keys (append-only), an identical rerun inserts 0, stored state matches the oracle
+		// exactly (kept-stored: a re-emitted key never changes), no minted codes, and the
+		// classification mirrors the round-9 pipeline (effective-quantity canonical, canonicality
+		// filter, filter-then-top, block-equality recency). Two profiles: "core" and "batch-shapes"
+		// (NULL-code zero closes and multi-position views). Seeds fixed for CI determinism.
 		type okey struct{ bn, bv, pv int }
 		type oobs struct {
 			qty  int
@@ -1179,73 +1337,90 @@ func TestPositionState(t *testing.T) {
 			return fmt.Sprintf("(1::int,10::bigint,'%s'::text,'aa'::text,%d::numeric,%s,%d::bigint,%d::int,%d::int,timestamptz '2026-06-01 12:00+00' + %d*interval '1 day')",
 				ik, o.qty, c, k.bn, k.bv, k.pv, k.bn%40)
 		}
-		canonical := func(p *opos, extra map[okey]oobs) map[int]canon {
-			type cand struct {
-				bv, pv, src, qty int
-				code             string
-			}
-			best := map[int]cand{}
-			consider := func(k okey, o oobs, src int) {
-				c, seen := best[k.bn]
-				n := cand{k.bv, k.pv, src, o.qty, o.code}
-				if !seen || n.bv > c.bv || (n.bv == c.bv && (n.pv > c.pv || (n.pv == c.pv && n.src > c.src))) {
-					best[k.bn] = n
-				}
-			}
-			for k, o := range p.stored {
-				consider(k, o, 0)
-			}
-			for k, o := range extra {
-				consider(k, o, 1)
-			}
+		// effective per-block run-canonical rows: highest (bv,pv) among batch rows per block, with the
+		// stored quantity authoritative when the key is already stored (kept-stored), code from the run.
+		runCanonical := func(p *opos, batch map[okey]oobs) map[int]canon {
 			out := map[int]canon{}
-			for bn, c := range best {
-				out[bn] = canon{c.bv, c.pv, c.qty, c.code}
+			for k, o := range batch {
+				qty := o.qty
+				if st, okst := p.stored[k]; okst {
+					qty = st.qty
+				}
+				c, seen := out[k.bn]
+				if !seen || k.bv > c.bv || (k.bv == c.bv && k.pv > c.pv) {
+					out[k.bn] = canon{k.bv, k.pv, qty, o.code}
+				}
 			}
 			return out
 		}
-		oracleApply := func(p *opos, batch map[okey]oobs) {
-			merged := canonical(p, batch)
-			runCanon := map[int]canon{}
-			for k, o := range batch {
-				c, seen := runCanon[k.bn]
-				if !seen || k.bv > c.bv || (k.bv == c.bv && k.pv > c.pv) {
-					runCanon[k.bn] = canon{k.bv, k.pv, o.qty, o.code}
-				}
-			}
+		oracleApply := func(p *opos, batch map[okey]oobs) int {
+			rc := runCanonical(p, batch)
+			// cand: effective non-zero run-canonical rows not defeated by a strictly higher STORED
+			// version at the same block; latest = highest such block (filter-then-top).
 			latestBn := -1
-			for bn, c := range runCanon {
-				if c.qty > 0 && bn > latestBn {
-					latestBn = bn
+			var latest canon
+			for bn, c := range rc {
+				if c.qty <= 0 {
+					continue
+				}
+				defeated := false
+				for k := range p.stored {
+					if k.bn == bn && (k.bv > c.bv || (k.bv == c.bv && k.pv > c.pv)) {
+						defeated = true
+						break
+					}
+				}
+				if !defeated && bn > latestBn {
+					latestBn, latest = bn, c
 				}
 			}
+			// append the unseen keys; count them (the run's expected return value)
+			inserted := 0
 			for k, o := range batch {
-				p.stored[k] = o
-				if o.qty > 0 && o.code != "" {
+				if _, okst := p.stored[k]; !okst {
+					p.stored[k] = o
+					inserted++
+				}
+				eff := o.qty
+				if st, okst := p.stored[k]; okst {
+					eff = st.qty
+				}
+				if eff > 0 && o.code != "" {
 					p.seen[o.code] = true
 				}
 			}
 			if latestBn < 0 {
-				return
+				return inserted
 			}
-			l := runCanon[latestBn]
-			mc, okmc := merged[latestBn]
-			if !okmc || mc.bv != l.bv || mc.pv != l.pv {
-				return // canonicality join blocks it
+			// blocked if any merged-canonical non-zero block exists ABOVE latestBn: per-block winner
+			// over stored ∪ run-canonical (run wins version ties), stored quantities authoritative.
+			type cand struct {
+				bv, pv, src, qty int
 			}
-			hbn := -1
-			var h canon
-			for bn, c := range merged {
-				if c.qty > 0 && bn > hbn {
-					hbn, h = bn, c
+			best := map[int]cand{}
+			consider := func(bn, bv, pv, src, qty int) {
+				if bn <= latestBn {
+					return
+				}
+				c, seen := best[bn]
+				n := cand{bv, pv, src, qty}
+				if !seen || n.bv > c.bv || (n.bv == c.bv && (n.pv > c.pv || (n.pv == c.pv && n.src > c.src))) {
+					best[bn] = n
 				}
 			}
-			if hbn >= 0 {
-				if latestBn < hbn || (latestBn == hbn && (l.bv < h.bv || (l.bv == h.bv && l.pv < h.pv))) {
-					return // recency guard blocks it
+			for k, o := range p.stored {
+				consider(k.bn, k.bv, k.pv, 0, o.qty)
+			}
+			for bn, c := range rc {
+				consider(bn, c.bv, c.pv, 1, c.qty)
+			}
+			for _, c := range best {
+				if c.qty > 0 {
+					return inserted // a newer canonical non-zero block exists: guard blocks
 				}
 			}
-			p.expected = l.code
+			p.expected = latest.code
+			return inserted
 		}
 		dbRows := func(p *opos) map[okey]int {
 			out := map[okey]int{}
@@ -1272,7 +1447,7 @@ func TestPositionState(t *testing.T) {
 			}
 			for k, o := range p.stored {
 				if got[k] != o.qty {
-					t.Fatalf("step %d %s: row %+v qty db=%d oracle=%d", step, p.ik, k, got[k], o.qty)
+					t.Fatalf("step %d %s: row %+v qty db=%d oracle=%d (kept-stored violated?)", step, p.ik, k, got[k], o.qty)
 				}
 			}
 			cls := classOf(t, p.ik, "aa")
@@ -1280,7 +1455,7 @@ func TestPositionState(t *testing.T) {
 				t.Fatalf("step %d %s: classification db=%q oracle=%q", step, p.ik, cls, p.expected)
 			}
 			if cls != "" && !p.seen[cls] {
-				t.Fatalf("step %d %s: minted code %q never emitted on a non-zero row", step, p.ik, cls)
+				t.Fatalf("step %d %s: minted code %q", step, p.ik, cls)
 			}
 		}
 		buildOp := func(rng *rand.Rand, p *opos, nullCloses bool) map[okey]oobs {
@@ -1312,10 +1487,10 @@ func TestPositionState(t *testing.T) {
 			case op == 3: // pv correction of a random stored key
 				k := keys[rng.Intn(len(keys))]
 				batch[okey{k.bn, k.bv, k.pv + 1}] = oobs{1 + rng.Intn(9), codes[rng.Intn(3)]}
-			case op == 4 && len(nz) > 0: // stale partial re-emission, code changed (the round-7 shape)
+			case op == 4 && len(nz) > 0: // stale re-emission, code changed (same key, same qty)
 				k := nz[rng.Intn(len(nz))]
 				batch[k] = oobs{p.stored[k].qty, codes[rng.Intn(3)]}
-			case op == 5 && len(nz) > 0: // quantity rewrite at the same key (the sanctioned D1 channel)
+			case op == 5 && len(nz) > 0: // quantity drift at a stored key: KEPT-STORED (nothing applied)
 				k := nz[rng.Intn(len(nz))]
 				batch[k] = oobs{1 + rng.Intn(9), p.stored[k].code}
 			default: // full re-projection of everything stored
@@ -1345,7 +1520,7 @@ func TestPositionState(t *testing.T) {
 			for step := 1; step <= prof.steps; step++ {
 				primary := positions[rng.Intn(len(positions))]
 				batches := map[*opos]map[okey]oobs{primary: buildOp(rng, primary, prof.nullCloses)}
-				if prof.multi && rng.Intn(3) == 0 { // one view emitting rows for a second position too
+				if prof.multi && rng.Intn(3) == 0 {
 					other := positions[rng.Intn(len(positions))]
 					if other != primary {
 						batches[other] = buildOp(rng, other, prof.nullCloses)
@@ -1373,10 +1548,14 @@ func TestPositionState(t *testing.T) {
 					t.Fatalf("fuzz rerun %s step %d: %v", view, step, err)
 				}
 				if n2 != 0 {
-					t.Fatalf("step %d: identical rerun changed %d rows; want 0", step, n2)
+					t.Fatalf("step %d: identical rerun inserted %d rows; want 0", step, n2)
 				}
+				var expectedInserts int64
 				for p, b := range batches {
-					oracleApply(p, b)
+					expectedInserts += int64(oracleApply(p, b))
+				}
+				if n1 != expectedInserts {
+					t.Fatalf("step %d: run inserted %d rows; oracle expected %d (append-only accounting)", step, n1, expectedInserts)
 				}
 				for p := range batches {
 					checkPos(step, p)
