@@ -465,6 +465,31 @@ func TestRunLoop_LogsGenuineReceiveFailureAtError(t *testing.T) {
 	}
 }
 
+// TestRunLoop_LogsNestedReceiveDeadlineRacingShutdownAtError guards the receive
+// path's silent case: an SDK per-attempt deadline firing as SIGTERM lands is a
+// real failure, and nothing below the loop logs it.
+func TestRunLoop_LogsNestedReceiveDeadlineRacingShutdownAtError(t *testing.T) {
+	receiving := make(chan struct{}, 1)
+	consumer := &mockConsumer{
+		receive: func(ctx context.Context, _ int) ([]outbound.SQSMessage, error) {
+			signalOnce(receiving)
+			<-ctx.Done()
+			return nil, fmt.Errorf("receiving from SQS: %w", context.DeadlineExceeded)
+		},
+	}
+	recorder := &levelRecorder{}
+
+	cancel, done := startRunLoop(consumer, slog.New(recorder), noopHandler)
+	awaitSignal(t, receiving, "the receive to start")
+	cancel()
+	awaitLoopExit(t, done)
+
+	logged := recorder.messagesAt(slog.LevelError)
+	if !slices.Contains(logged, "error processing messages") {
+		t.Fatalf("expected a nested receive deadline racing shutdown at ERROR, got %v", logged)
+	}
+}
+
 func TestRunLoop_LogsBadVisibilityTimeout(t *testing.T) {
 	// Visibility (60s) below the default handler budget (120s) is logged as an
 	// error at startup but does not stop the loop.
@@ -919,4 +944,34 @@ func TestRunLoop_DrainsInFlightMessageOnShutdown(t *testing.T) {
 		t.Errorf("expected the drained message to be deleted, got deletes %v", got)
 	}
 	assertNoErrorLogs(t, recorder)
+}
+
+// TestRunLoop_LogsNestedDeadlineRacingShutdownAtError pins the one deadline the
+// shutdown path must not swallow. The loop's context is a signal.NotifyContext
+// and never carries a deadline, so a DeadlineExceeded arriving with SIGTERM came
+// from a nested budget (handler timeout, RPC or DB per-attempt deadline) and is
+// a real failure.
+func TestRunLoop_LogsNestedDeadlineRacingShutdownAtError(t *testing.T) {
+	consumer := &mockConsumer{
+		batches: [][]outbound.SQSMessage{{makeMsg("1", "h1", blockEvent(100))}},
+	}
+	recorder := &levelRecorder{}
+
+	handling := make(chan struct{}, 1)
+	shutdownRequested := make(chan struct{})
+	handler := func(context.Context, outbound.BlockEvent) error {
+		signalOnce(handling)
+		<-shutdownRequested
+		return fmt.Errorf("reading pool state: %w", context.DeadlineExceeded)
+	}
+
+	cancel, done := startRunLoop(consumer, slog.New(recorder), handler)
+	awaitSignal(t, handling, "the handler to start")
+	cancel()
+	close(shutdownRequested)
+	awaitLoopExit(t, done)
+
+	if logged := recorder.messagesAt(slog.LevelError); !slices.Contains(logged, "error processing messages") {
+		t.Fatalf("expected a nested deadline racing shutdown at ERROR, got %v", logged)
+	}
 }
