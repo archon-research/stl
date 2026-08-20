@@ -69,6 +69,9 @@ func readUniswapV4MigrationSeededPoolIDs() []string {
 	return poolIDs
 }
 
+// uniswapV4Tables are the 7 tables created by
+// 20260819_120000_create_uniswap_v4_tables.sql plus uniswap_v4_position from
+// 20260820_120000_create_uniswap_v4_positions.sql.
 var uniswapV4Tables = []string{
 	"uniswap_v4_pool_manager",
 	"uniswap_v4_pool",
@@ -77,16 +80,29 @@ var uniswapV4Tables = []string{
 	"uniswap_v4_liquidity_event",
 	"uniswap_v4_tick",
 	"uniswap_v4_pool_event",
+	"uniswap_v4_position",
 }
 
-// Registry rows are versioned too, so every table carries a pv trigger.
+// uniswapV4VersionedTables is every table above: registry rows are versioned and
+// append-only too, so all 8 carry a processing_version trigger.
 var uniswapV4VersionedTables = uniswapV4Tables
 
+// uniswapV4Hypertables excludes the append-on-change tables, which are
+// deliberately plain (see uniswapV4PlainTables).
 var uniswapV4Hypertables = []string{
 	"uniswap_v4_pool_state",
 	"uniswap_v4_swap",
 	"uniswap_v4_liquidity_event",
 	"uniswap_v4_pool_event",
+}
+
+// uniswapV4PlainTables are the append-on-change fact tables. They are written
+// on-change rather than on every touched block, and each write first reads the
+// latest row per natural key with no time bound the planner could use, so
+// partitioning would fan that lookup out over every chunk.
+var uniswapV4PlainTables = []string{
+	"uniswap_v4_tick",
+	"uniswap_v4_position",
 }
 
 func TestUniswapV4MigrationCreatesTables(t *testing.T) {
@@ -127,19 +143,23 @@ func TestUniswapV4MigrationRegistersHypertables(t *testing.T) {
 	}
 }
 
-func TestUniswapV4TickIsNotAHypertable(t *testing.T) {
+func TestUniswapV4AppendOnChangeTablesAreNotHypertables(t *testing.T) {
 	ctx := context.Background()
 
-	var exists bool
-	if err := uniswapV4TestPool.QueryRow(ctx, `
-		SELECT EXISTS (
-			SELECT 1 FROM _timescaledb_catalog.hypertable
-			WHERE table_name = 'uniswap_v4_tick'
-		)`).Scan(&exists); err != nil {
-		t.Fatalf("checking uniswap_v4_tick hypertable registration: %v", err)
-	}
-	if exists {
-		t.Error("uniswap_v4_tick should be a regular append-on-change table, not a hypertable")
+	for _, table := range uniswapV4PlainTables {
+		t.Run(table, func(t *testing.T) {
+			var exists bool
+			if err := uniswapV4TestPool.QueryRow(ctx, `
+				SELECT EXISTS (
+					SELECT 1 FROM _timescaledb_catalog.hypertable
+					WHERE table_name = $1
+				)`, table).Scan(&exists); err != nil {
+				t.Fatalf("checking %s hypertable registration: %v", table, err)
+			}
+			if exists {
+				t.Errorf("%s should be a regular append-on-change table, not a hypertable", table)
+			}
+		})
 	}
 }
 
@@ -344,6 +364,7 @@ func TestUniswapV4ForeignKeys(t *testing.T) {
 		{"uniswap_v4_liquidity_event", "pool_id", "uniswap_v4_pool"},
 		{"uniswap_v4_tick", "pool_id", "uniswap_v4_pool"},
 		{"uniswap_v4_pool_event", "pool_id", "uniswap_v4_pool"},
+		{"uniswap_v4_position", "pool_id", "uniswap_v4_pool"},
 	}
 
 	for _, tc := range cases {
@@ -553,6 +574,16 @@ const (
 		VALUES ($1, $2, 22000003, 0, '2025-02-01T00:03:00Z'::timestamptz,
 		        1000000000000000000, 1000000000000000000, 0, 0, $3)`
 
+	uniswapV4PositionInsertSQL = `
+		INSERT INTO uniswap_v4_position
+		    (pool_id, owner, tick_lower, tick_upper, salt,
+		     block_number, block_version, block_timestamp,
+		     liquidity, fee_growth_inside0_last_x128, fee_growth_inside1_last_x128, build_id)
+		VALUES ($1, '\xbD216513d74C8cf14cf4747E6AaA6420FF64ee9e'::bytea, $2, $3,
+		        '\x0000000000000000000000000000000000000000000000000000000000000001'::bytea,
+		        22000005, 0, '2025-02-01T00:05:00Z'::timestamptz,
+		        $4::numeric, $5::numeric, $6::numeric, $7)`
+
 	uniswapV4PoolEventInsertSQL = `
 		INSERT INTO uniswap_v4_pool_event
 		    (pool_id, block_number, block_version, block_timestamp,
@@ -570,6 +601,8 @@ type uniswapV4ValidFactRow struct {
 	args      []any
 }
 
+// uniswapV4ValidFactRows covers all six versioned fact tables. Each gets its own
+// registry pool so the shared block/log_index values cannot collide.
 var uniswapV4ValidFactRows = []uniswapV4ValidFactRow{
 	{
 		table:     "uniswap_v4_pool_state",
@@ -600,6 +633,12 @@ var uniswapV4ValidFactRows = []uniswapV4ValidFactRow{
 		insert:    uniswapV4PoolEventInsertSQL,
 		poolIDHex: "\\x1100000000000000000000000000000000000000000000000000000000000005",
 		args:      nil,
+	},
+	{
+		table:     "uniswap_v4_position",
+		insert:    uniswapV4PositionInsertSQL,
+		poolIDHex: "\\x1100000000000000000000000000000000000000000000000000000000000006",
+		args:      []any{-120, 120, "1000000000000000000", "0", "0"},
 	},
 }
 
@@ -685,6 +724,13 @@ func TestUniswapV4FactTableChecksRejectOutOfRangeValues(t *testing.T) {
 		{"liquidity_event_tick_lower_above_upper", uniswapV4LiquidityEventInsertSQL, []any{240, 120}},
 		{"tick_above_max", uniswapV4TickInsertSQL, []any{887273}},
 		{"tick_below_min", uniswapV4TickInsertSQL, []any{-887273}},
+		{"position_tick_lower_below_min", uniswapV4PositionInsertSQL, []any{-887273, 120, "1", "0", "0"}},
+		{"position_tick_upper_above_max", uniswapV4PositionInsertSQL, []any{-120, 887273, "1", "0", "0"}},
+		{"position_tick_lower_equals_upper", uniswapV4PositionInsertSQL, []any{120, 120, "1", "0", "0"}},
+		{"position_tick_lower_above_upper", uniswapV4PositionInsertSQL, []any{240, 120, "1", "0", "0"}},
+		{"position_negative_liquidity", uniswapV4PositionInsertSQL, []any{-120, 120, "-1", "0", "0"}},
+		{"position_negative_fee_growth_inside0", uniswapV4PositionInsertSQL, []any{-120, 120, "1", "-1", "0"}},
+		{"position_negative_fee_growth_inside1", uniswapV4PositionInsertSQL, []any{-120, 120, "1", "0", "-1"}},
 	}
 
 	for _, tc := range cases {
@@ -745,6 +791,14 @@ func TestUniswapV4FactTableChecksAcceptBoundaryValues(t *testing.T) {
 			uniswapV4TickInsertSQL,
 			"\\x1300000000000000000000000000000000000000000000000000000000000004",
 			[]any{887272},
+		},
+		// A burned position reads back all-zero rather than reverting, so the
+		// erasure must insert alongside the widest legal tick range.
+		{
+			"position_full_tick_range_zeroed_out",
+			uniswapV4PositionInsertSQL,
+			"\\x1300000000000000000000000000000000000000000000000000000000000005",
+			[]any{-887272, 887272, "0", "0", "0"},
 		},
 	}
 
@@ -855,6 +909,110 @@ const uniswapV4FeeCheckInsertWithSnapshotSQL = `
 	        '\x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0'::bytea,
 	        '\xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'::bytea,
 	        $2, $3, $4, 60, '\x0000000000000000000000000000000000000000'::bytea, 22000000, $5)`
+
+// owner and salt are fixed-width on chain; a short or long value would make the
+// natural key ambiguous, so the byte lengths are pinned in the schema.
+func TestUniswapV4PositionRejectsWrongOwnerAndSaltWidths(t *testing.T) {
+	ctx := context.Background()
+	poolID := insertTestUniswapV4Pool(t, ctx, "\\x1700000000000000000000000000000000000000000000000000000000000001")
+
+	insert := `
+		INSERT INTO uniswap_v4_position
+		    (pool_id, owner, tick_lower, tick_upper, salt,
+		     block_number, block_version, block_timestamp,
+		     liquidity, fee_growth_inside0_last_x128, fee_growth_inside1_last_x128)
+		VALUES ($1, $2::bytea, -120, 120, $3::bytea,
+		        22000006, 0, '2025-02-01T00:06:00Z'::timestamptz, 1, 0, 0)`
+
+	const (
+		goodOwner = "\\xbD216513d74C8cf14cf4747E6AaA6420FF64ee9e"
+		goodSalt  = "\\x0000000000000000000000000000000000000000000000000000000000000001"
+	)
+	cases := []struct {
+		name  string
+		owner string
+		salt  string
+	}{
+		{"owner_too_short", "\\xbD216513d74C8cf14cf4747E6AaA6420FF64ee", goodSalt},
+		{"owner_too_long", goodOwner + "ff", goodSalt},
+		{"salt_too_short", goodOwner, "\\x00000000000000000000000000000000000000000000000000000000000001"},
+		{"salt_too_long", goodOwner, goodSalt + "ff"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := uniswapV4TestPool.Exec(ctx, insert, poolID, tc.owner, tc.salt); err == nil {
+				t.Fatal("mis-sized owner/salt was accepted, want a CHECK violation")
+			}
+		})
+	}
+}
+
+// The natural key is (pool_id, owner, tick_lower, tick_upper, salt): one sender
+// holds independent positions over the same range discriminated only by salt, so
+// dropping any column would collapse distinct positions into one history.
+func TestUniswapV4PositionPrimaryKeyCoversTheNaturalKeyAndVersion(t *testing.T) {
+	ctx := context.Background()
+
+	var columns []string
+	if err := uniswapV4TestPool.QueryRow(ctx, `
+		SELECT array_agg(a.attname ORDER BY a.attname)
+		FROM pg_constraint con
+		JOIN pg_class c ON c.oid = con.conrelid
+		JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = ANY(con.conkey)
+		WHERE c.relname = 'uniswap_v4_position'
+		  AND pg_table_is_visible(c.oid)
+		  AND con.contype = 'p'`).Scan(&columns); err != nil {
+		t.Fatalf("reading uniswap_v4_position primary key columns: %v", err)
+	}
+
+	// block_timestamp is deliberately absent: it is in the sibling hypertables'
+	// keys only because TimescaleDB demands the partition column, and this table
+	// is not partitioned.
+	want := []string{
+		"block_number", "block_version", "owner",
+		"pool_id", "processing_version", "salt", "tick_lower", "tick_upper",
+	}
+	if !slices.Equal(columns, want) {
+		t.Errorf("uniswap_v4_position PK = %v, want %v", columns, want)
+	}
+}
+
+// The salt discriminator has to survive into the row: two positions differing
+// only by salt must be two independent histories, not one overwritten row.
+func TestUniswapV4PositionDistinguishesPositionsBySaltAlone(t *testing.T) {
+	ctx := context.Background()
+	poolID := insertTestUniswapV4Pool(t, ctx, "\\x1700000000000000000000000000000000000000000000000000000000000002")
+
+	insert := `
+		INSERT INTO uniswap_v4_position
+		    (pool_id, owner, tick_lower, tick_upper, salt,
+		     block_number, block_version, block_timestamp,
+		     liquidity, fee_growth_inside0_last_x128, fee_growth_inside1_last_x128)
+		VALUES ($1, '\xbD216513d74C8cf14cf4747E6AaA6420FF64ee9e'::bytea, -120, 120, $2::bytea,
+		        22000007, 0, '2025-02-01T00:07:00Z'::timestamptz, $3, 0, 0)`
+
+	for _, seed := range []struct {
+		salt      string
+		liquidity int64
+	}{
+		{"\\x0000000000000000000000000000000000000000000000000000000000000001", 111},
+		{"\\x0000000000000000000000000000000000000000000000000000000000000002", 222},
+	} {
+		if _, err := uniswapV4TestPool.Exec(ctx, insert, poolID, seed.salt, seed.liquidity); err != nil {
+			t.Fatalf("inserting position with salt %s: %v", seed.salt, err)
+		}
+	}
+
+	var rows int
+	if err := uniswapV4TestPool.QueryRow(ctx,
+		`SELECT count(*) FROM uniswap_v4_position WHERE pool_id = $1`, poolID).Scan(&rows); err != nil {
+		t.Fatalf("counting positions: %v", err)
+	}
+	if rows != 2 {
+		t.Errorf("rows = %d, want 2 (salt alone must keep the two positions apart)", rows)
+	}
+}
 
 func TestUniswapV4ColumnComments(t *testing.T) {
 	ctx := context.Background()

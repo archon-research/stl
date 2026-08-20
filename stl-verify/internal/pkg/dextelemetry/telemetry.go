@@ -23,20 +23,33 @@ import (
 // no-op when called on a nil pointer, so production code can pass nil for
 // "telemetry disabled" without guard checks at each call site.
 type Telemetry struct {
-	prefix             string
-	chainAttr          attribute.KeyValue
-	blocksProcessed    metric.Int64Counter
-	errorsTotal        metric.Int64Counter
-	blockDuration      metric.Float64Histogram
-	stateRowsWritten   metric.Int64Counter
-	stateRowsAttempted metric.Int64Counter
-	poolsTouched       metric.Int64Counter
-	poolsNeverIndexed  metric.Int64Gauge
+	prefix              string
+	chainAttr           attribute.KeyValue
+	blocksProcessed     metric.Int64Counter
+	errorsTotal         metric.Int64Counter
+	blockDuration       metric.Float64Histogram
+	stateRowsWritten    metric.Int64Counter
+	stateRowsAttempted  metric.Int64Counter
+	poolsTouched        metric.Int64Counter
+	tickRowsWritten     metric.Int64Counter
+	positionRowsWritten metric.Int64Counter
+	poolsNeverIndexed   metric.Int64Gauge
 }
 
-// NewTelemetry registers the whole instrument set for one DEX; the
-// OTel-to-Prometheus exporter normalises the dots to underscores and adds
-// `_total`, yielding the series names the alert rules select.
+// NewTelemetry registers seven counters (`<prefix>.blocks.processed`,
+// `<prefix>.errors.total`, `<prefix>.state.rows.written`,
+// `<prefix>.state.rows.attempted`, `<prefix>.pools.touched`,
+// `<prefix>.tick.rows.written`, `<prefix>.position.rows.written`), the
+// `<prefix>.block.duration_seconds`
+// histogram, and the `<prefix>.pools.never_indexed` gauge. Every DEX gets the
+// whole set; an instrument a worker never records simply produces no series.
+// The OTel-to-Prometheus exporter normalises the dots to underscores and adds
+// the `_total` suffix to the counters, yielding the metric series names the
+// alert rules expect. The chain NAME (via entity.ChainName) is baked into
+// every datapoint as the `chain` attribute so multi-chain dashboards line up
+// with the morpho/oracle indexers, which label the same way. An unknown chainID
+// is rejected so a worker fails hard at startup rather than emitting an empty or
+// mismatched `chain` label.
 func NewTelemetry(prefix string, chainID int64) (*Telemetry, error) {
 	if prefix == "" {
 		return nil, fmt.Errorf("dextelemetry.NewTelemetry: prefix must be non-empty")
@@ -47,20 +60,22 @@ func NewTelemetry(prefix string, chainID int64) (*Telemetry, error) {
 	}
 	meter := otel.Meter(prefix + "-dex-worker")
 
-	blocks, err := meter.Int64Counter(
-		prefix+".blocks.processed",
-		metric.WithDescription("Total number of blocks processed"),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("creating %s.blocks.processed counter: %w", prefix, err)
+	counter := func(suffix, description string) (metric.Int64Counter, error) {
+		c, err := meter.Int64Counter(prefix+suffix, metric.WithDescription(description))
+		if err != nil {
+			return nil, fmt.Errorf("creating %s%s counter: %w", prefix, suffix, err)
+		}
+		return c, nil
 	}
 
-	errs, err := meter.Int64Counter(
-		prefix+".errors.total",
-		metric.WithDescription("Total number of block-processing errors"),
-	)
+	blocks, err := counter(".blocks.processed", "Total number of blocks processed")
 	if err != nil {
-		return nil, fmt.Errorf("creating %s.errors.total counter: %w", prefix, err)
+		return nil, err
+	}
+
+	errs, err := counter(".errors.total", "Total number of block-processing errors")
+	if err != nil {
+		return nil, err
 	}
 
 	dur, err := meter.Float64Histogram(
@@ -77,28 +92,29 @@ func NewTelemetry(prefix string, chainID int64) (*Telemetry, error) {
 		return nil, fmt.Errorf("creating %s.block.duration_seconds histogram: %w", prefix, err)
 	}
 
-	stateRows, err := meter.Int64Counter(
-		prefix+".state.rows.written",
-		metric.WithDescription("Total state snapshot rows written"),
-	)
+	stateRows, err := counter(".state.rows.written", "Total state snapshot rows written")
 	if err != nil {
-		return nil, fmt.Errorf("creating %s.state.rows.written counter: %w", prefix, err)
+		return nil, err
 	}
 
-	stateRowsAttempted, err := meter.Int64Counter(
-		prefix+".state.rows.attempted",
-		metric.WithDescription("Total state snapshot rows a block queued for insert, conflicts included"),
-	)
+	stateRowsAttempted, err := counter(".state.rows.attempted", "Total state snapshot rows a block queued for insert, conflicts included")
 	if err != nil {
-		return nil, fmt.Errorf("creating %s.state.rows.attempted counter: %w", prefix, err)
+		return nil, err
 	}
 
-	touched, err := meter.Int64Counter(
-		prefix+".pools.touched",
-		metric.WithDescription("Total registered pools touched by decoded events"),
-	)
+	touched, err := counter(".pools.touched", "Total registered pools touched by decoded events")
 	if err != nil {
-		return nil, fmt.Errorf("creating %s.pools.touched counter: %w", prefix, err)
+		return nil, err
+	}
+
+	tickRows, err := counter(".tick.rows.written", "Total per-tick rows offered to the append-on-change writer")
+	if err != nil {
+		return nil, err
+	}
+
+	positionRows, err := counter(".position.rows.written", "Total per-position rows offered to the append-on-change writer")
+	if err != nil {
+		return nil, err
 	}
 
 	neverIndexed, err := meter.Int64Gauge(
@@ -110,15 +126,17 @@ func NewTelemetry(prefix string, chainID int64) (*Telemetry, error) {
 	}
 
 	return &Telemetry{
-		prefix:             prefix,
-		chainAttr:          attribute.String("chain", chainName),
-		blocksProcessed:    blocks,
-		errorsTotal:        errs,
-		blockDuration:      dur,
-		stateRowsWritten:   stateRows,
-		stateRowsAttempted: stateRowsAttempted,
-		poolsTouched:       touched,
-		poolsNeverIndexed:  neverIndexed,
+		prefix:              prefix,
+		chainAttr:           attribute.String("chain", chainName),
+		blocksProcessed:     blocks,
+		errorsTotal:         errs,
+		blockDuration:       dur,
+		stateRowsWritten:    stateRows,
+		stateRowsAttempted:  stateRowsAttempted,
+		poolsTouched:        touched,
+		tickRowsWritten:     tickRows,
+		positionRowsWritten: positionRows,
+		poolsNeverIndexed:   neverIndexed,
 	}, nil
 }
 
@@ -192,4 +210,25 @@ func (t *Telemetry) RecordPoolsNeverIndexed(ctx context.Context, n int) {
 		return
 	}
 	t.poolsNeverIndexed.Record(ctx, int64(n), metric.WithAttributes(t.chainAttr))
+}
+
+// RecordTickRows and RecordPositionRows count the per-tick and per-position rows
+// a committed block OFFERED to the append-on-change writer — an upper bound on
+// the rows actually appended, since the writer drops any whose state is
+// unchanged. They exist to make the deliberate plain-table (not hypertable)
+// choice on uniswap_v4_tick / uniswap_v4_position self-monitoring: the alert
+// that watches unbounded growth reads them, and over-counting only makes it
+// fire early. Nil receiver or n <= 0 are no-ops.
+func (t *Telemetry) RecordTickRows(ctx context.Context, n int) {
+	if t == nil || n <= 0 {
+		return
+	}
+	t.tickRowsWritten.Add(ctx, int64(n), metric.WithAttributes(t.chainAttr))
+}
+
+func (t *Telemetry) RecordPositionRows(ctx context.Context, n int) {
+	if t == nil || n <= 0 {
+		return
+	}
+	t.positionRowsWritten.Add(ctx, int64(n), metric.WithAttributes(t.chainAttr))
 }

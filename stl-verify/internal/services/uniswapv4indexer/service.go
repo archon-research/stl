@@ -213,7 +213,13 @@ func (s *UniswapV4Service) BlockHandler() dexconsumer.BlockHandler {
 	}
 }
 
-// Every per-block value is local, so an SQS redelivery reprocesses from scratch.
+// handleBlock decodes every receipt in the block, snapshots the due pools'
+// state, tick and position rows via multicall (before opening the transaction),
+// and persists swaps, liquidity events, pool events, state, ticks, positions and
+// captured logs in one transaction. Returning a non-nil error leaves the block
+// for SQS redelivery; nil is returned only after a successful commit. All
+// per-block state is local, so a redelivery reprocesses from scratch with no
+// carryover.
 func (s *UniswapV4Service) handleBlock(ctx context.Context, event outbound.BlockEvent, receipts []shared.TransactionReceipt) error {
 	blockHash, err := event.ParsedBlockHash()
 	if err != nil {
@@ -240,30 +246,43 @@ func (s *UniswapV4Service) handleBlock(ctx context.Context, event outbound.Block
 		return err
 	}
 
-	states, ticks, baselined, err := s.snapshotDueSet(ctx, dueSet, acc, coords)
+	snaps, err := s.snapshotDueSet(ctx, dueSet, acc, coords)
 	if err != nil {
 		return err
 	}
 
-	if !acc.hasEvents() && len(states) == 0 && len(ticks) == 0 {
+	if !acc.hasEvents() && snaps.isEmpty() {
 		return nil
 	}
 
-	writes, capturedIns := s.buildBlockWrites(acc, states, ticks, coords.number, coords.version, coords.ts)
+	writes, capturedIns := s.buildBlockWrites(acc, snaps, coords)
 
 	stateRows, err := s.persistBlock(ctx, writes, capturedIns, coords.number)
 	if err != nil {
 		return err
 	}
 
-	s.markSnapshotted(dueSet, baselined, coords.number, coords.version)
+	s.markSnapshotted(dueSet, snaps.baselined, coords.number, coords.version)
 	s.markIndexed(ctx, dueSet)
-	// NotWritingState keys on attempted, not persisted: a healthy replay appends
-	// no rows and would otherwise look like a stall.
+	s.recordBlockMetrics(ctx, acc, writes, stateRows)
+	return nil
+}
+
+// recordBlockMetrics runs only after a successful commit, so the alerts compare
+// pools this block touched against the state rows that same block queued.
+// Attempted is what VectorUniswapV4IndexerNotWritingState keys on — persisted
+// goes to zero on a healthy replay; written stays as volume observability.
+//
+// The tick/position counts come from the write set, not from a DB row count:
+// their writer appends only rows whose state changed, so these are an upper
+// bound on rows landed. The growth-headroom alert they feed only over-estimates
+// as a result, which is the safe direction for it.
+func (s *UniswapV4Service) recordBlockMetrics(ctx context.Context, acc blockAccumulators, writes outbound.UniswapV4BlockWrites, stateRows outbound.StateRowCounts) {
 	s.recordPoolsTouched(ctx, acc.touchedIDs)
 	s.telemetry.RecordStateRowsAttempted(ctx, int(stateRows.Attempted))
 	s.telemetry.RecordStateRows(ctx, int(stateRows.Persisted))
-	return nil
+	s.telemetry.RecordTickRows(ctx, len(writes.Ticks))
+	s.telemetry.RecordPositionRows(ctx, len(writes.Positions))
 }
 
 // Only the snapshot_supported half reaches the due set, so only it may gate
@@ -388,30 +407,140 @@ func (s *UniswapV4Service) decodeBlockEvents(ctx context.Context, receipts []sha
 	return acc, nil
 }
 
-// Runs before the DB transaction opens, so archive-RPC latency never pins a pgx
-// connection.
-func (s *UniswapV4Service) snapshotDueSet(ctx context.Context, dueSet []RegisteredPool, acc blockAccumulators, coords blockCoords) ([]*entity.UniswapV4PoolState, []*entity.UniswapV4Tick, []int64, error) {
-	var states []*entity.UniswapV4PoolState
-	var ticks []*entity.UniswapV4Tick
-	var baselined []int64
+// blockSnapshots is one block's hash-pinned read output. baselined names the
+// pools whose baseline ticks this call enumerated, so the caller can mark
+// baselineSeen only after a successful persist.
+type blockSnapshots struct {
+	states    []*entity.UniswapV4PoolState
+	ticks     []*entity.UniswapV4Tick
+	positions []*entity.UniswapV4Position
+	baselined []int64
+}
+
+// isEmpty omits baselined: snapshotPool emits a state row for every due pool, so
+// a non-empty baselined implies a non-empty states.
+func (snaps blockSnapshots) isEmpty() bool {
+	return len(snaps.states) == 0 && len(snaps.ticks) == 0 && len(snaps.positions) == 0
+}
+
+// appendPool must stay exhaustive over the struct's fields; nothing links it to
+// isEmpty at compile time.
+func (snaps *blockSnapshots) appendPool(other blockSnapshots) {
+	snaps.states = append(snaps.states, other.states...)
+	snaps.ticks = append(snaps.ticks, other.ticks...)
+	snaps.positions = append(snaps.positions, other.positions...)
+	snaps.baselined = append(snaps.baselined, other.baselined...)
+}
+
+// snapshotDueSet reads each due pool's state, tick and position rows via
+// multicall, pinned to coords.hash so the read cannot silently answer from a
+// post-reorg fork. It must run BEFORE the DB transaction opens, so archive-RPC
+// latency never pins a pgx connection (pool exhaustion is a stall cause).
+func (s *UniswapV4Service) snapshotDueSet(ctx context.Context, dueSet []RegisteredPool, acc blockAccumulators, coords blockCoords) (blockSnapshots, error) {
+	var snaps blockSnapshots
 
 	for _, pool := range dueSet {
-		state, err := SnapshotState(ctx, s.multicaller, pool, coords.hash, coords.number, coords.version, coords.ts)
+		poolSnaps, err := s.snapshotPool(ctx, pool, coords, acc.liqByPool[pool.ID])
 		if err != nil {
-			return nil, nil, nil, fmt.Errorf("snapshotting pool %s block %d: %w", pool.PoolIDHash, coords.number, err)
+			return blockSnapshots{}, err
 		}
-		states = append(states, state)
-
-		poolTicks, isFirstSeen, err := s.snapshotPoolTicks(ctx, pool, coords, acc.liqByPool[pool.ID])
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		ticks = append(ticks, poolTicks...)
-		if isFirstSeen {
-			baselined = append(baselined, pool.ID)
-		}
+		snaps.appendPool(poolSnaps)
 	}
-	return states, ticks, baselined, nil
+	return snaps, nil
+}
+
+// snapshotPool reads one pool's state, tick and position rows at coords.hash.
+func (s *UniswapV4Service) snapshotPool(ctx context.Context, pool RegisteredPool, coords blockCoords, liqEvents []*entity.UniswapV4LiquidityEvent) (blockSnapshots, error) {
+	state, err := SnapshotState(ctx, s.multicaller, pool, coords.hash, coords.number, coords.version, coords.ts)
+	if err != nil {
+		return blockSnapshots{}, fmt.Errorf("snapshotting pool %s block %d: %w", pool.PoolIDHash, coords.number, err)
+	}
+
+	ticks, isFirstSeen, err := s.snapshotPoolTicks(ctx, pool, coords, liqEvents)
+	if err != nil {
+		return blockSnapshots{}, err
+	}
+
+	positions, err := s.snapshotPoolPositions(ctx, pool, coords, liqEvents)
+	if err != nil {
+		return blockSnapshots{}, err
+	}
+
+	snaps := blockSnapshots{states: []*entity.UniswapV4PoolState{state}, ticks: ticks, positions: positions}
+	if isFirstSeen {
+		snaps.baselined = []int64{pool.ID}
+	}
+	return snaps, nil
+}
+
+// snapshotPoolPositions reads the positions this block's ModifyLiquidity events
+// touched. There is no baseline enumeration counterpart to BaselineTicks: V4
+// exposes no way to list a pool's positions, so a position is only ever
+// discovered from a log — which is also why the reorg re-read below has no
+// bitmap-scan fallback to lean on.
+//
+// The prior-version re-read on coords.version > 0 exists for the reason
+// snapshotPoolTicks documents; a position the new fork never opened reads back
+// zeroed (getPositionInfo never reverts), so the superseding row records the
+// erasure.
+func (s *UniswapV4Service) snapshotPoolPositions(ctx context.Context, pool RegisteredPool, coords blockCoords, liqEvents []*entity.UniswapV4LiquidityEvent) ([]*entity.UniswapV4Position, error) {
+	keys := TouchedPositions(liqEvents)
+
+	if coords.version > 0 {
+		prior, err := s.repo.PositionsForPoolAtBlock(ctx, pool.ID, coords.number)
+		if err != nil {
+			return nil, fmt.Errorf("reading prior-version positions for pool %s block %d: %w", pool.PoolIDHash, coords.number, err)
+		}
+		keys = MergePositionKeys(keys, prior)
+	}
+
+	return s.readPositions(ctx, pool, coords, keys)
+}
+
+// readPositions reads the given positions in bounded multicall batches (see
+// positionsPerCall), decoding every result into an authoritative
+// entity.UniswapV4Position. Batches are issued in order and their rows
+// concatenated so the returned slice stays aligned with keys.
+func (s *UniswapV4Service) readPositions(ctx context.Context, pool RegisteredPool, coords blockCoords, keys []entity.UniswapV4PositionKey) ([]*entity.UniswapV4Position, error) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+
+	rows := make([]*entity.UniswapV4Position, 0, len(keys))
+	for chunk := range slices.Chunk(keys, positionsPerCall) {
+		chunkRows, err := s.readPositionChunk(ctx, pool, coords, chunk)
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, chunkRows...)
+	}
+	return rows, nil
+}
+
+// readPositionChunk issues one getPositionInfo multicall for a single bounded
+// batch of positions and decodes every result positionally.
+func (s *UniswapV4Service) readPositionChunk(ctx context.Context, pool RegisteredPool, coords blockCoords, chunk []entity.UniswapV4PositionKey) ([]*entity.UniswapV4Position, error) {
+	calls, err := BuildPositionCalls(pool, chunk)
+	if err != nil {
+		return nil, fmt.Errorf("building position calls for pool %s block %d: %w", pool.PoolIDHash, coords.number, err)
+	}
+	results, err := s.multicaller.ExecuteAtHash(ctx, calls, coords.hash)
+	if err != nil {
+		return nil, fmt.Errorf("executing position multicall for pool %s block %d: %w", pool.PoolIDHash, coords.number, err)
+	}
+	if len(results) != len(chunk) {
+		return nil, fmt.Errorf("pool %s block %d: got %d position results, want %d", pool.PoolIDHash, coords.number, len(results), len(chunk))
+	}
+
+	rows := make([]*entity.UniswapV4Position, 0, len(chunk))
+	for i, key := range chunk {
+		row, err := DecodePosition(pool, key, coords.number, coords.version, coords.ts, results[i])
+		if err != nil {
+			return nil, fmt.Errorf("decoding position %+v for pool %s block %d: %w", key, pool.PoolIDHash, coords.number, err)
+		}
+		rows = append(rows, row)
+	}
+	return rows, nil
 }
 
 // A tick initialized only on an orphaned fork is invisible to the bitmap scan, so
@@ -484,15 +613,18 @@ func (s *UniswapV4Service) readTickChunk(ctx context.Context, pool RegisteredPoo
 	return rows, nil
 }
 
-func (s *UniswapV4Service) buildBlockWrites(acc blockAccumulators, states []*entity.UniswapV4PoolState, ticks []*entity.UniswapV4Tick, bn int64, ver int, ts time.Time) (outbound.UniswapV4BlockWrites, []dexconsumer.ProtocolEventInput) {
+// buildBlockWrites runs before the transaction opens, so any future conversion
+// error fails fast without holding a pooled connection.
+func (s *UniswapV4Service) buildBlockWrites(acc blockAccumulators, snaps blockSnapshots, coords blockCoords) (outbound.UniswapV4BlockWrites, []dexconsumer.ProtocolEventInput) {
 	writes := outbound.UniswapV4BlockWrites{
-		States:          states,
+		States:          snaps.states,
 		Swaps:           acc.swaps,
 		LiquidityEvents: acc.liquidity,
-		Ticks:           ticks,
+		Ticks:           snaps.ticks,
 		PoolEvents:      acc.poolEvts,
+		Positions:       snaps.positions,
 	}
-	return writes, dexconsumer.ToProtocolEventInputs(acc.captured, s.chainID, bn, ver, ts)
+	return writes, dexconsumer.ToProtocolEventInputs(acc.captured, s.chainID, coords.number, coords.version, coords.ts)
 }
 
 // PersistBlock carries only the persisted count back, so attempted rides the

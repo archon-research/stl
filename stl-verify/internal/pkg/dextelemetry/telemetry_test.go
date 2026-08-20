@@ -290,6 +290,57 @@ func TestTelemetry_NilSafe(t *testing.T) {
 	tel.RecordPoolsTouched(ctx, 0)
 	tel.RecordPoolsNeverIndexed(ctx, 5)
 	tel.RecordPoolsNeverIndexed(ctx, 0)
+	tel.RecordTickRows(ctx, 5)
+	tel.RecordTickRows(ctx, 0)
+	tel.RecordPositionRows(ctx, 5)
+	tel.RecordPositionRows(ctx, 0)
+}
+
+// The append-on-change counters exist to make the plain-table (not hypertable)
+// decision on uniswap_v4_tick / uniswap_v4_position self-monitoring, so their
+// series names are what the growth-headroom alert is written against.
+func TestRecordAppendOnChangeRows_IncrementsItsOwnCounter(t *testing.T) {
+	for _, tc := range []struct {
+		metric string
+		record func(*Telemetry, context.Context, int)
+	}{
+		{"curve.tick.rows.written", (*Telemetry).RecordTickRows},
+		{"curve.position.rows.written", (*Telemetry).RecordPositionRows},
+	} {
+		t.Run(tc.metric, func(t *testing.T) {
+			reader := metricsdk.NewManualReader()
+			mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
+			prev := otel.GetMeterProvider()
+			otel.SetMeterProvider(mp)
+			t.Cleanup(func() {
+				otel.SetMeterProvider(prev)
+				_ = mp.Shutdown(context.Background())
+			})
+
+			tel, err := NewTelemetry("curve", 1)
+			if err != nil {
+				t.Fatalf("NewTelemetry: %v", err)
+			}
+
+			ctx := context.Background()
+			tc.record(tel, ctx, 3)
+			tc.record(tel, ctx, 5)
+			tc.record(tel, ctx, 0)  // no-op
+			tc.record(tel, ctx, -1) // no-op
+
+			var rm metricdata.ResourceMetrics
+			if err := reader.Collect(ctx, &rm); err != nil {
+				t.Fatalf("Collect: %v", err)
+			}
+
+			if got := readSingleSumCount(t, &rm, tc.metric); got != 8 {
+				t.Errorf("%s = %d, want 8 (3+5; 0 and -1 are no-ops)", tc.metric, got)
+			}
+			if want := "mainnet"; readChainAttr(t, &rm, tc.metric) != want {
+				t.Errorf("%s chain attr = %q, want %q", tc.metric, readChainAttr(t, &rm, tc.metric), want)
+			}
+		})
+	}
 }
 
 func TestRecordStateRows_IncrementsCounter(t *testing.T) {

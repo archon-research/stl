@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/dexconsumer"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
@@ -110,8 +111,9 @@ func setupV4Integration(t *testing.T) *v4IntegrationFixture {
 		t.Fatalf("NewTxManager: %v", err)
 	}
 	mc := &recordingMulticaller{
-		stateResults: buildStateResults(t, defaultStateFixture()),
-		tickResults:  map[int32]outbound.Result{},
+		stateResults:    buildStateResults(t, defaultStateFixture()),
+		tickResults:     map[int32]outbound.Result{},
+		positionResults: map[entity.UniswapV4PositionKey]outbound.Result{},
 	}
 
 	deps := UniswapV4ServiceDeps{
@@ -168,6 +170,7 @@ func TestIntegration_PersistsEveryTableForATouchedBlock(t *testing.T) {
 		{table: "uniswap_v4_liquidity_event", query: `SELECT count(*) FROM uniswap_v4_liquidity_event WHERE pool_id = $1`, want: 1},
 		{table: "uniswap_v4_pool_event", query: `SELECT count(*) FROM uniswap_v4_pool_event WHERE pool_id = $1`, want: 1},
 		{table: "uniswap_v4_tick", query: `SELECT count(*) FROM uniswap_v4_tick WHERE pool_id = $1`, want: 2},
+		{table: "uniswap_v4_position", query: `SELECT count(*) FROM uniswap_v4_position WHERE pool_id = $1`, want: 1},
 	}
 	for _, tt := range tests {
 		if got := countRows(t, ctx, f.db, tt.query, f.pool.ID); got != tt.want {
@@ -180,6 +183,153 @@ func TestIntegration_PersistsEveryTableForATouchedBlock(t *testing.T) {
 	}
 }
 
+// positionResultWith packs a getPositionInfo return with the given liquidity,
+// so the reorg test can distinguish a live position from a burned (all-zero) one.
+func positionResultWith(t *testing.T, liquidity int64) outbound.Result {
+	t.Helper()
+	return outbound.Result{Success: true, ReturnData: packPositionInfoReturn(t, big.NewInt(liquidity), big.NewInt(0), big.NewInt(0))}
+}
+
+// latestPosition reads the canonical-latest uniswap_v4_position row for key.
+func latestPosition(t *testing.T, ctx context.Context, db *pgxpool.Pool, poolID int64, key entity.UniswapV4PositionKey) (blockNumber int64, blockVersion int, liquidity string) {
+	t.Helper()
+	if err := db.QueryRow(ctx,
+		`SELECT block_number, block_version, liquidity::text
+		 FROM uniswap_v4_position
+		 WHERE pool_id = $1 AND owner = $2 AND tick_lower = $3 AND tick_upper = $4 AND salt = $5
+		 ORDER BY block_number DESC, block_version DESC, processing_version DESC
+		 LIMIT 1`,
+		poolID, key.Owner.Bytes(), key.TickLower, key.TickUpper, key.Salt.Bytes(),
+	).Scan(&blockNumber, &blockVersion, &liquidity); err != nil {
+		t.Fatalf("reading latest position (pool=%d %+v): %v", poolID, key, err)
+	}
+	return blockNumber, blockVersion, liquidity
+}
+
+// TestIntegration_ReorgReconcilesStalePositions proves the reconciliation
+// against the real writer: a position opened on an orphaned fork (N, v0) is
+// superseded when block N is redelivered at v1 whose receipts do NOT touch the
+// pool. Positions are only ever discovered from logs, so without the
+// prior-version re-read the stale (N, v0) row would stay canonical-latest.
+func TestIntegration_ReorgReconcilesStalePositions(t *testing.T) {
+	ctx := context.Background()
+	f := setupV4Integration(t)
+
+	const (
+		tickLower = -100
+		tickUpper = 200
+	)
+	key := modifyPositionKey(tickLower, tickUpper)
+
+	f.mc.tickResults[tickLower] = goodTickResult(t)
+	f.mc.tickResults[tickUpper] = goodTickResult(t)
+	f.mc.positionResults[key] = positionResultWith(t, 5000)
+
+	bh := f.svc.BlockHandler()
+	v0 := blockEvent(integrationBlock)
+	v0.BlockHash = common.HexToHash("0xaa").Hex()
+	receipt := shared.TransactionReceipt{Logs: []shared.Log{modifyLog(t, f.pool, "0x0", tickLower, tickUpper, 5000)}}
+	if err := bh(ctx, v0, []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("BlockHandler (v0): %v", err)
+	}
+	assertPinnedTo(t, f.mc, common.HexToHash(v0.BlockHash))
+	if bn, ver, liquidity := latestPosition(t, ctx, f.db, f.pool.ID, key); bn != integrationBlock || ver != 0 || liquidity != "5000" {
+		t.Fatalf("after v0, position latest = (bn=%d ver=%d liquidity=%s), want (%d, 0, 5000)", bn, ver, liquidity, integrationBlock)
+	}
+
+	f.mc.positionResults[key] = positionResultWith(t, 0)
+
+	v1 := blockEvent(integrationBlock)
+	v1.Version = 1
+	v1.BlockHash = common.HexToHash("0xbb").Hex()
+	if err := bh(ctx, v1, nil); err != nil {
+		t.Fatalf("BlockHandler (v1 reorg redelivery): %v", err)
+	}
+	assertPinnedTo(t, f.mc, common.HexToHash(v1.BlockHash))
+
+	if bn, ver, liquidity := latestPosition(t, ctx, f.db, f.pool.ID, key); bn != integrationBlock || ver != 1 || liquidity != "0" {
+		t.Errorf("position latest = (bn=%d ver=%d liquidity=%s), want (%d, 1, 0) — the orphaned-fork row survived", bn, ver, liquidity, integrationBlock)
+	}
+}
+
+// TestIntegration_ReorgAfterRestartReconcilesStalePositions is the same
+// reconciliation across a process boundary: the redelivering service has never
+// seen block N, so the positions to re-read can only come from the rows already
+// persisted at that height.
+func TestIntegration_ReorgAfterRestartReconcilesStalePositions(t *testing.T) {
+	ctx := context.Background()
+	f := setupV4Integration(t)
+
+	const (
+		tickLower = -100
+		tickUpper = 200
+	)
+	key := modifyPositionKey(tickLower, tickUpper)
+
+	f.mc.tickResults[tickLower] = goodTickResult(t)
+	f.mc.tickResults[tickUpper] = goodTickResult(t)
+	f.mc.positionResults[key] = positionResultWith(t, 5000)
+
+	v0 := blockEvent(integrationBlock)
+	v0.BlockHash = common.HexToHash("0xaa").Hex()
+	receipt := shared.TransactionReceipt{Logs: []shared.Log{modifyLog(t, f.pool, "0x0", tickLower, tickUpper, 5000)}}
+	if err := f.svc.BlockHandler()(ctx, v0, []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("BlockHandler (v0): %v", err)
+	}
+	assertPinnedTo(t, f.mc, common.HexToHash(v0.BlockHash))
+
+	f.mc.positionResults[key] = positionResultWith(t, 0)
+
+	v1 := blockEvent(integrationBlock)
+	v1.Version = 1
+	v1.BlockHash = common.HexToHash("0xbb").Hex()
+	if err := f.restarted(t).BlockHandler()(ctx, v1, nil); err != nil {
+		t.Fatalf("BlockHandler (v1 reorg redelivery after a restart): %v", err)
+	}
+	assertPinnedTo(t, f.mc, common.HexToHash(v1.BlockHash))
+
+	if bn, ver, liquidity := latestPosition(t, ctx, f.db, f.pool.ID, key); bn != integrationBlock || ver != 1 || liquidity != "0" {
+		t.Errorf("position latest = (bn=%d ver=%d liquidity=%s), want (%d, 1, 0) — the orphaned-fork row survived the restart", bn, ver, liquidity, integrationBlock)
+	}
+}
+
+// TestIntegration_UnchangedPositionDoesNotAppend pins the append-on-change
+// contract end to end: a second block touching the same position with identical
+// read-back state must leave one row, so a poke storm cannot inflate history.
+func TestIntegration_UnchangedPositionDoesNotAppend(t *testing.T) {
+	ctx := context.Background()
+	f := setupV4Integration(t)
+
+	const (
+		tickLower = -100
+		tickUpper = 200
+	)
+	key := modifyPositionKey(tickLower, tickUpper)
+
+	f.mc.tickResults[tickLower] = goodTickResult(t)
+	f.mc.tickResults[tickUpper] = goodTickResult(t)
+	f.mc.positionResults[key] = positionResultWith(t, 5000)
+
+	bh := f.svc.BlockHandler()
+	for i, blockNumber := range []int64{integrationBlock, integrationBlock + 1} {
+		event := blockEvent(blockNumber)
+		event.BlockHash = common.BigToHash(big.NewInt(int64(i + 1))).Hex()
+		receipt := shared.TransactionReceipt{Logs: []shared.Log{modifyLog(t, f.pool, "0x0", tickLower, tickUpper, 0)}}
+		if err := bh(ctx, event, []shared.TransactionReceipt{receipt}); err != nil {
+			t.Fatalf("BlockHandler (block %d): %v", blockNumber, err)
+		}
+	}
+
+	if got := countRows(t, ctx, f.db, `SELECT count(*) FROM uniswap_v4_position WHERE pool_id = $1`, f.pool.ID); got != 1 {
+		t.Errorf("uniswap_v4_position rows = %d, want 1 (unchanged state must not append)", got)
+	}
+	if got := countRows(t, ctx, f.db, `SELECT count(*) FROM uniswap_v4_liquidity_event WHERE pool_id = $1`, f.pool.ID); got != 2 {
+		t.Errorf("uniswap_v4_liquidity_event rows = %d, want 2 (both pokes are still events)", got)
+	}
+}
+
+// tickResultWith packs a getTickInfo return with the given liquidity, so the
+// reorg test can distinguish an initialized tick from a cleared (all-zero) one.
 func tickResultWith(t *testing.T, liquidityGross, liquidityNet int64) outbound.Result {
 	t.Helper()
 	return outbound.Result{Success: true, ReturnData: packTickInfoReturn(t, big.NewInt(liquidityGross), big.NewInt(liquidityNet), big.NewInt(0), big.NewInt(0))}
