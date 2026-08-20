@@ -1174,11 +1174,11 @@ groups:
       # the VaultResolver via Multicall3, appends fluid_vault_state snapshots into
       # TimescaleDB. Mainnet (chain 1) only.
       #
-      # Rules live in this shared file (not a vector-fluid-vault-indexer.yaml) so
-      # the mimir-rules-sync namespace allowlist
-      # `^vector-(watcher|backup-worker|indexers|postgres|cronjobs)$`
-      # (.github/workflows/alerts.yml) actually syncs them — a vector-fluid-*
-      # namespace would be silently dropped.
+      # Rules live in this shared file (not a vector-fluid-vault-indexer.yaml)
+      # because mimir-rules-sync derives the namespace from the FILENAME and only
+      # syncs namespaces its allowlist regex accepts
+      # (`namespaces-regex` in .github/workflows/alerts.yml) — a vector-fluid-*
+      # namespace is not on that list and would be silently dropped.
       #
       # Metric coverage: honest signals available today are:
       #   - kube_deployment_status_replicas_available (kube-state-metrics) —
@@ -1283,11 +1283,11 @@ groups:
     interval: 1m
     rules:
       # Rules live in this shared file (not a vector-allocation-tracker.yaml) so
-      # the mimir-rules-sync namespace allowlist
-      # `^vector-(watcher|backup-worker|indexers|psm3|postgres|cronjobs)$`
-      # (.github/workflows/alerts.yml) syncs them — the sync derives the namespace
-      # from the FILENAME (vector-indexers), so a vector-allocation-tracker.yaml
-      # would map to an unlisted namespace and be silently dropped. This is a
+      # that mimir-rules-sync syncs them: the sync derives the namespace from the
+      # FILENAME (vector-indexers) and only accepts namespaces matching
+      # `namespaces-regex` in .github/workflows/alerts.yml, so a
+      # vector-allocation-tracker.yaml would map to an unlisted namespace and be
+      # silently dropped. This is a
       # separate GROUP (not appended to vector-indexers), matching this file's
       # per-indexer group convention (and staying clear of Mimir's 20-rule group
       # cap).
