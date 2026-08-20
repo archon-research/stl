@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: position-materializer
+spec:
+  # Ships at 0 on purpose: the write path is the full-projection upsert, so the
+  # FIRST scheduled tick re-projects and upserts every configured view's whole
+  # history (it IS the bootstrap). Rollout is: apply (worker at 0) -> confirm
+  # POSITION_PROJECTIONS lists exactly the intended views -> bump to 1 in a
+  # separate change. VectorCronjobWorkerDown is guarded on desired replicas > 0,
+  # so it does not page while this is intentionally 0.
+  replicas: 0
+  selector:
+    matchLabels:
+      app: position-materializer
+  template:
+    metadata:
+      labels:
+        app: position-materializer
+    spec:
+      serviceAccountName: position-materializer
+      containers:
+        - name: position-materializer
+          image: position-materializer
+          env:
+            # Inject the deployment name so the worker registers its Temporal
+            # schedule/task queue under this name (cfg.Name) and its metrics
+            # carry service_name="position-materializer".
+            - name: SERVICE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['app']
+          envFrom:
+            - configMapRef:
+                name: otel-config
+            # Carries POSITION_PROJECTIONS (the explicit view list) and
+            # MATERIALIZE_INTERVAL; the secret carries DATABASE_URL — interim
+            # credentials until the dedicated stl_materialize role (VEC-562).
+            - configMapRef:
+                name: position-materializer
+            - secretRef:
+                name: position-materializer
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+      terminationGracePeriodSeconds: 60
