@@ -18,13 +18,14 @@ from app.main import app
 from app.services.prime_debt_service import PrimeDebtService
 
 _VALID_ADDR = "0x" + "ab" * 20
+_PRIME_ID = 7
 _BUCKET = datetime(2026, 8, 19, 12, 0, tzinfo=timezone.utc)
 
 
 @pytest.fixture
 def client():
     service = AsyncMock(spec=PrimeDebtService)
-    service.prime_exists.return_value = True
+    service.resolve_prime_id.return_value = _PRIME_ID
     service.list_reference_debt_buckets.return_value = [
         PrimeDebtBucket(bucket_start=_BUCKET, debt_wad=Decimal("2645260280720000000000000000"))
     ]
@@ -41,12 +42,13 @@ def client():
 
 
 def test_reference_debt_reports_its_provenance(client):
-    test_client, _ = client
+    test_client, service = client
 
     body = test_client.get(f"/v1/primes/{_VALID_ADDR}/debt?reference=true&aggregate=true").json()
 
     assert body["source"] == "reference"
     assert body["mode"] == "aggregated"
+    assert service.list_reference_debt_buckets.await_args.args[0] == _PRIME_ID
 
 
 def test_reference_debt_serves_the_upstream_figure_in_wad(client):
@@ -91,7 +93,7 @@ def test_self_mode_is_unchanged_and_never_reads_the_reference_series(client):
 
 def test_reference_debt_still_404s_for_an_unknown_prime(client):
     test_client, service = client
-    service.prime_exists.return_value = False
+    service.resolve_prime_id.return_value = None
 
     response = test_client.get(f"/v1/primes/{_VALID_ADDR}/debt?reference=true&aggregate=true")
 
