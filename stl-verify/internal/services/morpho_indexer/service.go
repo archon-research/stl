@@ -75,6 +75,31 @@ func ConfigDefaults() Config {
 	}
 }
 
+// NewReplayConfig builds the Config every replay composition root
+// (morpho-vault-backfill, morpho-v2-bootstrap) hands NewReplayService, telemetry
+// included. It exists so the wiring lives once: Config.Telemetry is nil-safe, so
+// a root that forgets it mutes the whole replay path silently — and
+// morpho_v2_adapter_registrations_total{observed_via="bootstrap_seed"} is the
+// first thing the bootstrap runbook queries.
+//
+// Nothing here dials: the chain name is a table lookup and the instruments come
+// from the global meter provider, which no-ops when no exporter is configured.
+func NewReplayConfig(chainID int64, logger *slog.Logger) (Config, error) {
+	chainName, err := entity.ChainName(chainID)
+	if err != nil {
+		return Config{}, fmt.Errorf("resolving the chain name for telemetry: %w", err)
+	}
+	replayTelemetry, err := NewTelemetry(chainName)
+	if err != nil {
+		return Config{}, fmt.Errorf("creating morpho telemetry: %w", err)
+	}
+	config := ConfigDefaults()
+	config.ChainID = chainID
+	config.Logger = logger
+	config.Telemetry = replayTelemetry
+	return config, nil
+}
+
 // Service is the Morpho indexer SQS consumer service.
 type Service struct {
 	config           Config
