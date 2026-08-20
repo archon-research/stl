@@ -6,7 +6,11 @@ import {
   Tooltip,
   Axis,
   buildChartTheme,
+  type ChartColor,
+  type ChartColorToken,
+  chartColorToken,
   chartTokens,
+  resolveChartColor,
   useContainerWidth,
 } from '@archon-research/charting';
 import { DataContext, ReferenceBand } from '@archon-research/charting';
@@ -40,13 +44,15 @@ export type MetricChartKind = 'series' | 'fallback';
 export type MetricChartSpec = {
   key: MetricChartKey;
   data: ChartDatum[];
-  stroke: string;
+  // A token name, not a colour: `chartColorToken` resolves it where a raw visx
+  // prop or a `style` object needs the CSS value.
+  stroke: ChartColorToken;
   formatValue: (value: number) => string;
   kind: MetricChartKind;
   // Ordered ascending. Each draws a dashed limit with the region past it shaded,
   // so overlapping severities read as escalating shade.
   //
-  thresholds?: { value: number; label?: string; stroke?: string }[];
+  thresholds?: { value: number; label?: string; stroke?: ChartColor }[];
 };
 
 // Every card the metrics band can render. Its length drives both the loading
@@ -184,7 +190,7 @@ function ThresholdLabels({ thresholds }: { thresholds: ThresholdEntry[] }) {
             key={`threshold-label-${entry.value}`}
             x={marginLeft + 6}
             y={y + (isHighest ? -6 : THRESHOLD_LABEL_FONT_SIZE + 3)}
-            fill={entry.stroke}
+            fill={resolveChartColor(entry.stroke)}
             fontSize={THRESHOLD_LABEL_FONT_SIZE}
           >
             {entry.label}
@@ -251,9 +257,12 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
   // overhang a narrow card for a frame — clipped rather than allowed to widen
   // the card under the reader.
   const [measureRef, chartWidth] = useContainerWidth();
+  // `AreaSeries`/`LineSeries` and the tooltip `style` are raw visx surfaces that
+  // resolve no token names, so the token becomes a CSS value exactly once here.
+  const strokeColor = chartColorToken(chart.stroke);
   const chartTheme = useMemo(
-    () => buildSingleSeriesTheme(chart.stroke),
-    [chart.stroke],
+    () => buildSingleSeriesTheme(strokeColor),
+    [strokeColor],
   );
 
   const values = chart.data.map((point) => point.value);
@@ -328,7 +337,7 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
             data={chart.data as ChartDatum[]}
             xAccessor={(d: ChartDatum) => d.label}
             yAccessor={(d: ChartDatum) => d.value}
-            fill={chart.stroke}
+            fill={strokeColor}
             fillOpacity={0.18}
             lineProps={{ stroke: 'none' }}
           />
@@ -338,7 +347,7 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
           data={chart.data as ChartDatum[]}
           xAccessor={(d: ChartDatum) => d.label}
           yAccessor={(d: ChartDatum) => d.value}
-          stroke={chart.stroke}
+          stroke={strokeColor}
         />
         {thresholds.map((entry) => (
           <ReferenceBand
@@ -369,7 +378,7 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
                 <div className={chartTooltipTitleClassName}>{datum.label}</div>
                 <div
                   className={chartTooltipValueClassName}
-                  style={{ color: chart.stroke }}
+                  style={{ color: strokeColor }}
                 >
                   {chart.formatValue(datum.value)}
                 </div>
