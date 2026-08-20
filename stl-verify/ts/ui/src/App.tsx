@@ -14,13 +14,13 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { css } from '#styled-system/css';
 
+import { AllocationGrid } from './components/allocations/AllocationGrid';
+import { BottomPanel } from './components/allocations/BottomPanel';
 import type {
   ChartDatum,
   MetricChartKind,
   MetricChartSpec,
 } from './components/allocations/metricCards';
-import { AllocationGrid } from './components/allocations/AllocationGrid';
-import { BottomPanel } from './components/allocations/BottomPanel';
 import { RiskDetailDrawer } from './components/allocations/RiskDetailDrawer';
 import { ActivityFeed } from './components/allocations/tabs/ActivityFeed';
 // DEFAULT_RANGE_PRESET comes from the local shared barrel so the temporary 24h

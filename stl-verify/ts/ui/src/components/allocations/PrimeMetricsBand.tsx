@@ -1,0 +1,454 @@
+import { ErrorState } from '@archon-research/design-system';
+
+import { css } from '#styled-system/css';
+
+import {
+  formatFreshnessLabel,
+  formatRatioPercent,
+  formatRawWadLabel,
+  formatUsdValue,
+  formatWadValue,
+} from '../../lib/dashboard';
+import type { PrimeRiskCapital } from '../../types/allocation';
+import { AppTooltip, SummaryMetric } from '../shared';
+import {
+  MetricCardTrend,
+  type MetricChartSpec,
+  metricDetailClassName,
+  metricsCardClassName,
+  metricsGridClassName,
+  metricsGridStyle,
+  TOP_METRIC_CARDS,
+} from './metricCards';
+
+// Only what the band reads. The caller's summary carries more (a latest-activity
+// timestamp), but asking for it here would couple this to a field it never uses.
+export type AllocationTotals = {
+  allocationCount: number;
+  totalUsd: number;
+};
+
+type BandCharts = {
+  activity: MetricChartSpec | null;
+  exposure: MetricChartSpec | null;
+  totalCapital: MetricChartSpec | null;
+  collateral: MetricChartSpec | null;
+  encumbrance: MetricChartSpec | null;
+  debt: MetricChartSpec | null;
+};
+
+type PrimeMetricsBandProps = {
+  isSkeleton: boolean;
+  hasTopMetrics: boolean;
+  visibleCardCount: number;
+  summary: AllocationTotals | null;
+  overallSummary: AllocationTotals | null;
+  hasSearchQuery: boolean;
+  riskCapital: PrimeRiskCapital | null;
+  riskCapitalErrorMessage: string | null;
+  hasPrime: boolean;
+  collateral: {
+    usd: number | null;
+    observedAt: string | null;
+    isLoading: boolean;
+  };
+  encumbrance: { ratio: number | null; caption: string; isBreaching: boolean };
+  debt: {
+    wad: string | null | undefined;
+    ilkLabel: string | null;
+    isLoading: boolean;
+  };
+  charts: BandCharts;
+  isChartsLoading: boolean;
+  chartsErrorMessage: string | null;
+};
+
+const captionClassName = css({ fontSize: 'sm', color: 'text.muted' });
+
+const skeletonCardClassName = css({
+  height: '88px',
+  borderRadius: 'md',
+  borderStyle: 'solid',
+  borderWidth: '1px',
+  borderColor: 'border.subtle',
+  bg: 'surface.subtle',
+});
+
+// chartsErrorMessage tracks the primary (prime-debt) series only; every
+// supplementary card degrades to its own fallback instead of reporting an error
+// that did not happen to it.
+function TotalAllocationCard({
+  summary,
+  overallSummary,
+  hasSearchQuery,
+  chart,
+  isChartsLoading,
+}: {
+  summary: AllocationTotals;
+  overallSummary: AllocationTotals | null;
+  hasSearchQuery: boolean;
+  chart: MetricChartSpec | null;
+  isChartsLoading: boolean;
+}) {
+  const isFiltered = hasSearchQuery && overallSummary !== null;
+
+  return (
+    <SummaryMetric
+      className={metricsCardClassName}
+      label="Total allocation"
+      value={
+        isFiltered
+          ? `${formatUsdValue(summary.totalUsd)} / ${formatUsdValue(overallSummary.totalUsd)}`
+          : formatUsdValue(summary.totalUsd)
+      }
+      detail={
+        <div className={metricDetailClassName}>
+          <div className={captionClassName}>
+            {isFiltered
+              ? `${summary.allocationCount}/${overallSummary.allocationCount} allocations`
+              : `${summary.allocationCount} allocations`}
+          </div>
+          <MetricCardTrend
+            chart={chart}
+            isLoading={isChartsLoading}
+            errorMessage={null}
+          />
+        </div>
+      }
+    />
+  );
+}
+
+function ExposureCard({
+  riskCapital,
+  chart,
+  isChartsLoading,
+}: {
+  riskCapital: PrimeRiskCapital;
+  chart: MetricChartSpec | null;
+  isChartsLoading: boolean;
+}) {
+  return (
+    <SummaryMetric
+      className={metricsCardClassName}
+      label="Exposure"
+      value={formatUsdValue(riskCapital.prime_exposure_usd)}
+      detail={
+        <div className={metricDetailClassName}>
+          <MetricCardTrend
+            chart={chart}
+            isLoading={isChartsLoading}
+            errorMessage={null}
+          />
+        </div>
+      }
+    />
+  );
+}
+
+function TotalRiskCapitalCard({
+  riskCapital,
+  chart,
+  isChartsLoading,
+}: {
+  riskCapital: PrimeRiskCapital;
+  chart: MetricChartSpec | null;
+  isChartsLoading: boolean;
+}) {
+  return (
+    <SummaryMetric
+      className={metricsCardClassName}
+      label="Total risk capital"
+      value={formatUsdValue(riskCapital.total_risk_capital_usd ?? '0')}
+      detail={
+        <div className={metricDetailClassName}>
+          <div className={captionClassName}>
+            Required{' '}
+            {formatUsdValue(riskCapital.prime_required_risk_capital_usd)}
+          </div>
+          <MetricCardTrend
+            chart={chart}
+            isLoading={isChartsLoading}
+            errorMessage={null}
+          />
+        </div>
+      }
+    />
+  );
+}
+
+function PrimeCollateralCard({
+  usd,
+  observedAt,
+  isLoading,
+  chart,
+  isChartsLoading,
+}: {
+  usd: number | null;
+  observedAt: string | null;
+  isLoading: boolean;
+  chart: MetricChartSpec | null;
+  isChartsLoading: boolean;
+}) {
+  return (
+    <SummaryMetric
+      className={metricsCardClassName}
+      label="Prime collateral"
+      // The value is a reduce from zero, so "not fetched yet" and "holds
+      // nothing" are the same number until the fetch lands.
+      value={isLoading ? 'Loading...' : formatUsdValue(usd)}
+      detail={
+        <div className={metricDetailClassName}>
+          <div className={captionClassName}>
+            {observedAt === null
+              ? null
+              : `Observed ${formatFreshnessLabel(observedAt)}`}
+          </div>
+          <MetricCardTrend
+            chart={chart}
+            isLoading={isChartsLoading}
+            errorMessage={null}
+          />
+        </div>
+      }
+    />
+  );
+}
+
+function EncumbranceCard({
+  ratio,
+  caption,
+  isBreaching,
+  chart,
+  isChartsLoading,
+}: {
+  ratio: number | null;
+  caption: string;
+  isBreaching: boolean;
+  chart: MetricChartSpec | null;
+  isChartsLoading: boolean;
+}) {
+  return (
+    <SummaryMetric
+      className={metricsCardClassName}
+      label="Encumbrance"
+      value={formatRatioPercent(ratio)}
+      detail={
+        <div className={metricDetailClassName}>
+          <div
+            className={css({
+              fontSize: 'sm',
+              color: isBreaching ? 'text.warning' : 'text.muted',
+            })}
+          >
+            {caption}
+          </div>
+          <MetricCardTrend
+            chart={chart}
+            isLoading={isChartsLoading}
+            errorMessage={null}
+          />
+        </div>
+      }
+    />
+  );
+}
+
+const debtCaptionClassName = css({
+  display: 'flex',
+  flexWrap: 'wrap',
+  alignItems: 'baseline',
+  gap: '1',
+  fontSize: 'sm',
+  color: 'text.muted',
+  // The tooltip trigger is a 44px-min tap target; inline here it would inflate
+  // the row and drop the text below the other cards' single-line subtitles.
+  // Collapse it to the text line height so the baselines align.
+  '& button': { minHeight: 'auto', py: '0' },
+});
+
+function PrimeDebtCard({
+  wad,
+  ilkLabel,
+  isLoading,
+  chart,
+  isChartsLoading,
+  chartsErrorMessage,
+}: {
+  wad: string | null | undefined;
+  ilkLabel: string | null;
+  isLoading: boolean;
+  chart: MetricChartSpec | null;
+  isChartsLoading: boolean;
+  chartsErrorMessage: string | null;
+}) {
+  const rawWadLabel = wad ? `Exact raw WAD ${wad}` : 'Raw WAD unavailable';
+
+  return (
+    <SummaryMetric
+      className={metricsCardClassName}
+      label="Prime debt exposure"
+      value={isLoading ? 'Loading...' : formatWadValue(wad)}
+      detail={
+        isLoading ? (
+          'Fetching latest debt snapshot'
+        ) : (
+          <div className={metricDetailClassName}>
+            <div className={debtCaptionClassName}>
+              {ilkLabel === null ? null : (
+                <>
+                  <span>{ilkLabel}</span>
+                  <span aria-hidden="true">·</span>
+                </>
+              )}
+              <AppTooltip
+                ariaLabel={rawWadLabel}
+                trigger={
+                  <span
+                    className={css({
+                      textDecoration: 'underline',
+                      textDecorationStyle: 'dotted',
+                      textUnderlineOffset: '2px',
+                    })}
+                  >
+                    {formatRawWadLabel(wad)}
+                  </span>
+                }
+                content={wad ? `Exact raw WAD: ${wad}` : 'Raw WAD unavailable'}
+              />
+            </div>
+            <MetricCardTrend
+              chart={chart}
+              isLoading={isChartsLoading}
+              errorMessage={chartsErrorMessage}
+            />
+          </div>
+        )
+      }
+    />
+  );
+}
+
+/**
+ * The metrics rail above the allocations table.
+ *
+ * Which cards appear is data-dependent, so the column count is passed in rather
+ * than counted here: the caller already knows, and computing it twice is how the
+ * skeleton came to disagree with what replaced it.
+ */
+export function PrimeMetricsBand({
+  isSkeleton,
+  hasTopMetrics,
+  visibleCardCount,
+  summary,
+  overallSummary,
+  hasSearchQuery,
+  riskCapital,
+  riskCapitalErrorMessage,
+  hasPrime,
+  collateral,
+  encumbrance,
+  debt,
+  charts,
+  isChartsLoading,
+  chartsErrorMessage,
+}: PrimeMetricsBandProps) {
+  if (isSkeleton) {
+    return (
+      <div
+        className={metricsGridClassName}
+        style={metricsGridStyle(TOP_METRIC_CARDS.length)}
+      >
+        {TOP_METRIC_CARDS.map((card) => (
+          <div
+            key={`metrics-skeleton-${card}`}
+            className={skeletonCardClassName}
+          />
+        ))}
+      </div>
+    );
+  }
+
+  if (!hasTopMetrics) {
+    return null;
+  }
+
+  return (
+    <div
+      className={metricsGridClassName}
+      style={metricsGridStyle(visibleCardCount)}
+    >
+      {summary ? (
+        <TotalAllocationCard
+          summary={summary}
+          overallSummary={overallSummary}
+          hasSearchQuery={hasSearchQuery}
+          chart={charts.activity}
+          isChartsLoading={isChartsLoading}
+        />
+      ) : null}
+
+      {riskCapital ? (
+        <ExposureCard
+          riskCapital={riskCapital}
+          chart={charts.exposure}
+          isChartsLoading={isChartsLoading}
+        />
+      ) : null}
+
+      {/* Takes the place of the two cards risk capital feeds, so a failed metric
+          stays one cell wide in the rail instead of becoming a full-width banner
+          under it. `alignSelf` so the panel is only as tall as its message: a
+          grid item would otherwise stretch to the chart cards' height. */}
+      {!riskCapital && riskCapitalErrorMessage ? (
+        <ErrorState
+          className={css({ alignSelf: 'start' })}
+          tone="critical"
+          size="inline"
+          title="Risk capital is unavailable"
+          description="The risk capital endpoint failed for this session."
+          errorMessage={riskCapitalErrorMessage}
+        />
+      ) : null}
+
+      {riskCapital ? (
+        <TotalRiskCapitalCard
+          riskCapital={riskCapital}
+          chart={charts.totalCapital}
+          isChartsLoading={isChartsLoading}
+        />
+      ) : null}
+
+      {hasPrime ? (
+        <PrimeCollateralCard
+          usd={collateral.usd}
+          observedAt={collateral.observedAt}
+          isLoading={collateral.isLoading}
+          chart={charts.collateral}
+          isChartsLoading={isChartsLoading}
+        />
+      ) : null}
+
+      {riskCapital ? (
+        <EncumbranceCard
+          ratio={encumbrance.ratio}
+          caption={encumbrance.caption}
+          isBreaching={encumbrance.isBreaching}
+          chart={charts.encumbrance}
+          isChartsLoading={isChartsLoading}
+        />
+      ) : null}
+
+      {hasPrime ? (
+        <PrimeDebtCard
+          wad={debt.wad}
+          ilkLabel={debt.ilkLabel}
+          isLoading={debt.isLoading}
+          chart={charts.debt}
+          isChartsLoading={isChartsLoading}
+          chartsErrorMessage={chartsErrorMessage}
+        />
+      ) : null}
+    </div>
+  );
+}

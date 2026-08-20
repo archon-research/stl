@@ -19,11 +19,9 @@ import {
   ENCUMBRANCE_WARNING_THRESHOLD,
   formatDateTime,
   formatFreshnessLabel,
-  formatRawWadLabel,
   formatRatioPercent,
   formatTokenAmount,
   formatUsdValue,
-  formatWadValue,
   getAllocationKey,
   getCategoryLabel,
   getChainLabel,
@@ -31,16 +29,6 @@ import {
   parseNumericValue,
 } from '../../lib/dashboard';
 import { REFERENCE_MODE } from '../../lib/referenceMode';
-import {
-  findMetricChart,
-  MetricCardTrend,
-  type MetricChartSpec,
-  metricDetailClassName,
-  metricsCardClassName,
-  metricsGridClassName,
-  metricsGridStyle,
-  TOP_METRIC_CARDS,
-} from './metricCards';
 import type {
   Allocation,
   AllocationCategory,
@@ -52,15 +40,15 @@ import type {
 } from '../../types/allocation';
 import type { LocalProtocolRow } from '../../types/local-data';
 import {
-  AppTooltip,
   ChainLogo,
   PageShell,
   ProtocolLogo,
-  SummaryMetric,
   tableHeaderTypographyClassName,
   TokenAddress,
   TokenLogo,
 } from '../shared';
+import { findMetricChart, type MetricChartSpec } from './metricCards';
+import { PrimeMetricsBand } from './PrimeMetricsBand';
 import { TabNotePanel } from './tabs/TabStatePanels';
 
 type AllocationGridProps = {
@@ -94,7 +82,6 @@ type AllocationGridProps = {
   primeCollateralUsd: number | null;
   primeCollateralObservedAt: string | null;
 };
-
 
 // Fill override for the `Badge` these chips render as: `Badge`'s `colorPalette`
 // ships six status-flavoured hues, so it cannot give five strategy categories
@@ -909,248 +896,42 @@ export function AllocationGrid({
         {noticeMessage === null ? null : (
           <TabNotePanel message={noticeMessage} />
         )}
-        {showTopMetricsSkeleton ? (
-          <div
-            className={metricsGridClassName}
-            style={metricsGridStyle(TOP_METRIC_CARDS.length)}
-          >
-            {TOP_METRIC_CARDS.map((card) => (
-              <div
-                key={`metrics-skeleton-${card}`}
-                className={css({
-                  height: '88px',
-                  borderRadius: 'md',
-                  borderStyle: 'solid',
-                  borderWidth: '1px',
-                  borderColor: 'border.subtle',
-                  bg: 'surface.subtle',
-                })}
-              />
-            ))}
-          </div>
-        ) : null}
-        {!showTopMetricsSkeleton && hasTopMetrics ? (
-          <div
-            className={metricsGridClassName}
-            style={metricsGridStyle(visibleMetricCardCount)}
-          >
-            {summary ? (
-              <SummaryMetric
-                className={metricsCardClassName}
-                label="Total allocation"
-                value={
-                  hasSearchQuery && overallSummary
-                    ? `${formatUsdValue(summary.totalUsd)} / ${formatUsdValue(overallSummary.totalUsd)}`
-                    : formatUsdValue(summary.totalUsd)
-                }
-                detail={
-                  <div className={metricDetailClassName}>
-                    <div
-                      className={css({ fontSize: 'sm', color: 'text.muted' })}
-                    >
-                      {hasSearchQuery && overallSummary
-                        ? `${summary.allocationCount}/${overallSummary.allocationCount} allocations`
-                        : `${summary.allocationCount} allocations`}
-                    </div>
-                    <MetricCardTrend
-                      chart={allocationActivityChart}
-                      isLoading={isChartsLoading}
-                      // chartsErrorMessage tracks the primary (prime-debt) series
-                      // only; supplementary cards degrade to their own fallback.
-                      errorMessage={null}
-                    />
-                  </div>
-                }
-              />
-            ) : null}
-
-            {riskCapital ? (
-              <>
-                <SummaryMetric
-                  className={metricsCardClassName}
-                  label="Exposure"
-                  value={formatUsdValue(riskCapital.prime_exposure_usd)}
-                  detail={
-                    <div className={metricDetailClassName}>
-                      <MetricCardTrend
-                        chart={riskCapitalChart}
-                        isLoading={isChartsLoading}
-                        errorMessage={null}
-                      />
-                    </div>
-                  }
-                />
-              </>
-            ) : null}
-
-            {/* Takes the place of the two cards risk capital feeds, so a failed
-                metric stays one cell wide in the rail instead of becoming a
-                full-width banner under it. */}
-            {!riskCapital && riskCapitalErrorMessage ? (
-              // `alignSelf` so the panel is only as tall as its message: a grid
-              // item would otherwise stretch to the chart cards' height and
-              // render as a large empty block.
-              <ErrorState
-                className={css({ alignSelf: 'start' })}
-                tone="critical"
-                size="inline"
-                title="Risk capital is unavailable"
-                description="The risk capital endpoint failed for this session."
-                errorMessage={riskCapitalErrorMessage}
-              />
-            ) : null}
-
-            {riskCapital ? (
-              <SummaryMetric
-                className={metricsCardClassName}
-                label="Total risk capital"
-                value={formatUsdValue(
-                  riskCapital.total_risk_capital_usd ?? '0',
-                )}
-                detail={
-                  <div className={metricDetailClassName}>
-                    <div
-                      className={css({ fontSize: 'sm', color: 'text.muted' })}
-                    >
-                      Required{' '}
-                      {formatUsdValue(
-                        riskCapital.prime_required_risk_capital_usd,
-                      )}
-                    </div>
-                    <MetricCardTrend
-                      chart={totalCapitalChart}
-                      isLoading={isChartsLoading}
-                      errorMessage={null}
-                    />
-                  </div>
-                }
-              />
-            ) : null}
-
-            {selectedPrime ? (
-              <SummaryMetric
-                className={metricsCardClassName}
-                label="Prime collateral"
-                value={
-                  isLoading ? 'Loading...' : formatUsdValue(primeCollateralUsd)
-                }
-                detail={
-                  <div className={metricDetailClassName}>
-                    <div
-                      className={css({ fontSize: 'sm', color: 'text.muted' })}
-                    >
-                      {primeCollateralObservedAt === null
-                        ? null
-                        : `Observed ${formatFreshnessLabel(primeCollateralObservedAt)}`}
-                    </div>
-                    <MetricCardTrend
-                      chart={primeCollateralChart}
-                      isLoading={isChartsLoading}
-                      errorMessage={null}
-                    />
-                  </div>
-                }
-              />
-            ) : null}
-
-            {riskCapital ? (
-              <SummaryMetric
-                className={metricsCardClassName}
-                label="Encumbrance"
-                value={formatRatioPercent(encumbranceRatio)}
-                detail={
-                  <div className={metricDetailClassName}>
-                    <div
-                      className={css({
-                        fontSize: 'sm',
-                        color: isEncumbranceBreaching
-                          ? 'text.warning'
-                          : 'text.muted',
-                      })}
-                    >
-                      {encumbranceCaption}
-                    </div>
-                    <MetricCardTrend
-                      chart={encumbranceChart}
-                      isLoading={isChartsLoading}
-                      errorMessage={null}
-                    />
-                  </div>
-                }
-              />
-            ) : null}
-
-            {selectedPrime ? (
-              <>
-                <SummaryMetric
-                  className={metricsCardClassName}
-                  label="Prime debt exposure"
-                  value={
-                    isPrimeDebtLoading ? 'Loading...' : formatWadValue(debtWad)
-                  }
-                  detail={
-                    isPrimeDebtLoading ? (
-                      'Fetching latest debt snapshot'
-                    ) : (
-                      <div className={metricDetailClassName}>
-                        <div
-                          className={css({
-                            display: 'flex',
-                            flexWrap: 'wrap',
-                            alignItems: 'baseline',
-                            gap: '1',
-                            fontSize: 'sm',
-                            color: 'text.muted',
-                            // The tooltip trigger is a 44px-min tap target; inline
-                            // here it would inflate the row and drop the text below
-                            // the other cards' single-line subtitles. Collapse it to
-                            // the text line height so the baselines align.
-                            '& button': { minHeight: 'auto', py: '0' },
-                          })}
-                        >
-                          {debtIlkLabel === null ? null : (
-                            <>
-                              <span>{debtIlkLabel}</span>
-                              <span aria-hidden="true">·</span>
-                            </>
-                          )}
-                          <AppTooltip
-                            ariaLabel={
-                              debtWad
-                                ? `Exact raw WAD ${debtWad}`
-                                : 'Raw WAD unavailable'
-                            }
-                            trigger={
-                              <span
-                                className={css({
-                                  textDecoration: 'underline',
-                                  textDecorationStyle: 'dotted',
-                                  textUnderlineOffset: '2px',
-                                })}
-                              >
-                                {formatRawWadLabel(debtWad)}
-                              </span>
-                            }
-                            content={
-                              debtWad
-                                ? `Exact raw WAD: ${debtWad}`
-                                : 'Raw WAD unavailable'
-                            }
-                          />
-                        </div>
-                        <MetricCardTrend
-                          chart={primeDebtChart}
-                          isLoading={isChartsLoading}
-                          errorMessage={chartsErrorMessage}
-                        />
-                      </div>
-                    )
-                  }
-                />
-              </>
-            ) : null}
-          </div>
-        ) : null}
+        <PrimeMetricsBand
+          isSkeleton={showTopMetricsSkeleton}
+          hasTopMetrics={hasTopMetrics}
+          visibleCardCount={visibleMetricCardCount}
+          summary={summary}
+          overallSummary={overallSummary}
+          hasSearchQuery={hasSearchQuery}
+          riskCapital={riskCapital}
+          riskCapitalErrorMessage={riskCapitalErrorMessage}
+          hasPrime={selectedPrime !== null}
+          collateral={{
+            usd: primeCollateralUsd,
+            observedAt: primeCollateralObservedAt,
+            isLoading,
+          }}
+          encumbrance={{
+            ratio: encumbranceRatio,
+            caption: encumbranceCaption,
+            isBreaching: isEncumbranceBreaching,
+          }}
+          debt={{
+            wad: debtWad,
+            ilkLabel: debtIlkLabel,
+            isLoading: isPrimeDebtLoading,
+          }}
+          charts={{
+            activity: allocationActivityChart,
+            exposure: riskCapitalChart,
+            totalCapital: totalCapitalChart,
+            collateral: primeCollateralChart,
+            encumbrance: encumbranceChart,
+            debt: primeDebtChart,
+          }}
+          isChartsLoading={isChartsLoading}
+          chartsErrorMessage={chartsErrorMessage}
+        />
         {!showTopMetricsSkeleton && riskCapital ? (
           <p
             className={css({
