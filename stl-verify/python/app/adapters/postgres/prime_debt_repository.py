@@ -17,6 +17,42 @@ logger = logging.getLogger(__name__)
 
 _PRIME_DEBT_LIMIT = 500
 
+# Debt reads use the prime.id resolved up front; inline address matching cannot be decorrelated.
+# An EXISTS under OR re-scans every allocation_position chunk per joined prime_debt row.
+DEBT_SNAPSHOTS_SQL = f"""
+    SELECT
+        encode(p.vault_address, 'hex') AS prime_address,
+        p.name AS prime_name,
+        pd.ilk_name,
+        pd.debt_wad,
+        pd.block_number,
+        pd.block_version,
+        pd.synced_at
+    FROM prime_debt pd
+    JOIN prime p ON p.id = pd.prime_id
+    WHERE pd.prime_id = :prime_id
+    {optional_time_window_clause("pd.synced_at")}
+    ORDER BY pd.synced_at DESC, pd.block_number DESC, pd.block_version DESC
+    LIMIT :limit
+"""
+
+DEBT_BUCKETS_SQL = f"""
+    SELECT
+        time_bucket_gapfill(
+            make_interval(secs => :bucket_seconds),
+            pd.synced_at,
+            CAST(:from_timestamp AS TIMESTAMPTZ),
+            CAST(:to_timestamp AS TIMESTAMPTZ)
+        ) AS bucket_start,
+        locf(last(pd.debt_wad, pd.synced_at)) AS debt_wad
+    FROM prime_debt pd
+    WHERE pd.prime_id = :prime_id
+    {required_time_window_clause("pd.synced_at")}
+    GROUP BY bucket_start
+    ORDER BY bucket_start DESC
+    LIMIT :limit
+"""
+
 
 class PrimeDebtRepository:
     """PostgreSQL adapter for prime debt snapshot queries."""
@@ -28,8 +64,6 @@ class PrimeDebtRepository:
     def _prime_match_clause() -> str:
         # /v1/primes exposes allocation proxy_address, while prime_debt is keyed by prime.id
         # and prime.vault_address. Resolve by either identity to keep API contracts consistent.
-        # Parenthesized so that callers can AND additional predicates (e.g. a time window)
-        # without the trailing OR absorbing them via AND-over-OR precedence.
         return """
             (
                 p.vault_address = decode(:address_hex, 'hex')
@@ -42,15 +76,21 @@ class PrimeDebtRepository:
             )
         """
 
-    async def prime_exists(self, prime_address: EthAddress) -> bool:
+    async def resolve_prime_id(self, prime_address: EthAddress) -> int | None:
+        """Resolve either prime identity to its ``prime.id``, or ``None`` if unknown.
+
+        Proxy ownership is not globally unique, so an address can match several primes;
+        the vault match wins, then the lowest ``prime.id``, keeping resolution deterministic.
+        """
         query = text(
             """
-            SELECT 1
+            SELECT p.id
             FROM prime p
             WHERE
             """
             + self._prime_match_clause()
             + """
+            ORDER BY p.vault_address = decode(:address_hex, 'hex') DESC, p.id
             LIMIT 1
             """
         )
@@ -59,10 +99,10 @@ class PrimeDebtRepository:
             async with self._engine.connect() as conn:
                 row = (await conn.execute(query, {"address_hex": prime_address.hex})).fetchone()
 
-            return row is not None
+            return row.id if row is not None else None
         except Exception as exc:
             logger.error(
-                "Failed to check prime existence in database",
+                "Failed to resolve prime id in database",
                 extra={
                     "error_type": type(exc).__name__,
                     "error_message": str(exc),
@@ -70,40 +110,18 @@ class PrimeDebtRepository:
                 },
                 exc_info=True,
             )
-            raise ValueError(f"Database query failed while checking if prime {prime_address} exists: {exc}") from exc
+            raise ValueError(f"Database query failed while resolving prime {prime_address}: {exc}") from exc
 
     async def list_debt_snapshots(
         self,
-        prime_address: EthAddress,
+        prime_id: int,
         *,
         from_timestamp: datetime | None = None,
         to_timestamp: datetime | None = None,
         limit: int = 100,
     ) -> list[PrimeDebtSnapshot]:
-        query = text(
-            """
-            SELECT
-                encode(p.vault_address, 'hex') AS prime_address,
-                p.name AS prime_name,
-                pd.ilk_name,
-                pd.debt_wad,
-                pd.block_number,
-                pd.block_version,
-                pd.synced_at
-            FROM prime_debt pd
-            JOIN prime p ON p.id = pd.prime_id
-            WHERE
-            """
-            + self._prime_match_clause()
-            + f"""
-            {optional_time_window_clause("pd.synced_at")}
-            ORDER BY pd.synced_at DESC, pd.block_number DESC, pd.block_version DESC
-            LIMIT :limit
-            """
-        )
-
         params = {
-            "address_hex": prime_address.hex,
+            "prime_id": prime_id,
             "from_timestamp": from_timestamp,
             "to_timestamp": to_timestamp,
             "limit": clamp_limit(limit, _PRIME_DEBT_LIMIT),
@@ -111,7 +129,7 @@ class PrimeDebtRepository:
 
         try:
             async with self._engine.connect() as conn:
-                result = await conn.execute(query, params)
+                result = await conn.execute(text(DEBT_SNAPSHOTS_SQL), params)
                 rows = result.fetchall()
 
             return [
@@ -132,18 +150,18 @@ class PrimeDebtRepository:
                 extra={
                     "error_type": type(exc).__name__,
                     "error_message": str(exc),
-                    "prime_address": str(prime_address),
+                    "prime_id": prime_id,
                     "limit": limit,
                 },
                 exc_info=True,
             )
             raise ValueError(
-                f"Database query failed while fetching debt snapshots for prime {prime_address}: {exc}"
+                f"Database query failed while fetching debt snapshots for prime {prime_id}: {exc}"
             ) from exc
 
     async def list_debt_buckets(
         self,
-        prime_address: EthAddress,
+        prime_id: int,
         *,
         from_timestamp: datetime,
         to_timestamp: datetime,
@@ -155,31 +173,8 @@ class PrimeDebtRepository:
         Buckets with no observation carry the previous bucket's value forward;
         leading buckets before the first observation are ``None``.
         """
-        query = text(
-            """
-            SELECT
-                time_bucket_gapfill(
-                    make_interval(secs => :bucket_seconds),
-                    pd.synced_at,
-                    CAST(:from_timestamp AS TIMESTAMPTZ),
-                    CAST(:to_timestamp AS TIMESTAMPTZ)
-                ) AS bucket_start,
-                locf(last(pd.debt_wad, pd.synced_at)) AS debt_wad
-            FROM prime_debt pd
-            JOIN prime p ON p.id = pd.prime_id
-            WHERE
-            """
-            + self._prime_match_clause()
-            + f"""
-            {required_time_window_clause("pd.synced_at")}
-            GROUP BY bucket_start
-            ORDER BY bucket_start DESC
-            LIMIT :limit
-            """
-        )
-
         params = {
-            "address_hex": prime_address.hex,
+            "prime_id": prime_id,
             "from_timestamp": from_timestamp,
             "to_timestamp": to_timestamp,
             "bucket_seconds": bucket_seconds,
@@ -188,7 +183,7 @@ class PrimeDebtRepository:
 
         try:
             async with self._engine.connect() as conn:
-                result = await conn.execute(query, params)
+                result = await conn.execute(text(DEBT_BUCKETS_SQL), params)
                 rows = result.fetchall()
 
             return [PrimeDebtBucket(bucket_start=row.bucket_start, debt_wad=row.debt_wad) for row in rows]
@@ -198,18 +193,16 @@ class PrimeDebtRepository:
                 extra={
                     "error_type": type(exc).__name__,
                     "error_message": str(exc),
-                    "prime_address": str(prime_address),
+                    "prime_id": prime_id,
                     "limit": limit,
                 },
                 exc_info=True,
             )
-            raise ValueError(
-                f"Database query failed while fetching debt buckets for prime {prime_address}: {exc}"
-            ) from exc
+            raise ValueError(f"Database query failed while fetching debt buckets for prime {prime_id}: {exc}") from exc
 
     async def list_reference_debt_buckets(
         self,
-        prime_address: EthAddress,
+        prime_id: int,
         *,
         from_timestamp: datetime,
         to_timestamp: datetime,
@@ -224,7 +217,7 @@ class PrimeDebtRepository:
         There is no per-ilk split upstream, so this is the prime's whole debt.
         """
         query = text(
-            """
+            f"""
             WITH corrected AS (
                 SELECT DISTINCT ON (b.observed_at)
                     b.observed_at,
@@ -232,11 +225,7 @@ class PrimeDebtRepository:
                     -- locf to be the top-level call in its select expression.
                     b.debt_usd * 1e18 AS debt_wad
                 FROM prime_reference_balance_sheet b
-                JOIN prime p ON p.id = b.prime_id
-                WHERE
-            """
-            + self._prime_match_clause()
-            + f"""
+                WHERE b.prime_id = :prime_id
                 {required_time_window_clause("b.observed_at")}
                 ORDER BY b.observed_at, b.processing_version DESC
             )
@@ -256,7 +245,7 @@ class PrimeDebtRepository:
         )
 
         params = {
-            "address_hex": prime_address.hex,
+            "prime_id": prime_id,
             "from_timestamp": from_timestamp,
             "to_timestamp": to_timestamp,
             "bucket_seconds": bucket_seconds,
@@ -275,11 +264,11 @@ class PrimeDebtRepository:
                 extra={
                     "error_type": type(exc).__name__,
                     "error_message": str(exc),
-                    "prime_address": str(prime_address),
+                    "prime_id": prime_id,
                     "limit": limit,
                 },
                 exc_info=True,
             )
             raise ValueError(
-                f"Database query failed while fetching reference debt buckets for prime {prime_address}: {exc}"
+                f"Database query failed while fetching reference debt buckets for prime {prime_id}: {exc}"
             ) from exc

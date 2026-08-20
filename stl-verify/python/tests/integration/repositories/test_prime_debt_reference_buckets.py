@@ -1,8 +1,8 @@
 """Reference debt buckets read against a real TimescaleDB.
 
 The risk here is in the SQL: the wad rescale, the gap-fill, the correction
-ordering, and resolving a prime by either its vault or a proxy address. None of
-that is exercised by mocking the repository.
+ordering, and filtering by the already-resolved prime ID. None of that is
+exercised by mocking the repository.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -16,11 +16,12 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.postgres.prime_debt_repository import PrimeDebtRepository
 from app.domain.entities.allocation import EthAddress
-from tests.integration.seed import insert_allocation_position
+from tests.integration.seed import insert_allocation_position, insert_token
 
-_PROXY = bytes.fromhex("1601843c5e9bc251a3272907010afa41fa18347e")
 _WINDOW_START = datetime(2026, 8, 19, 0, 0, tzinfo=timezone.utc)
 _OBSERVED = _WINDOW_START + timedelta(hours=2)
+_PRIME_NAME = "prime_debt_reference_buckets"
+_PRIME_ADDRESS = bytes.fromhex("7a" * 20)
 
 
 async def _insert_day(
@@ -44,34 +45,28 @@ async def _insert_day(
 async def seeded(db_url: str):
     conn = await asyncpg.connect(db_url)
     try:
-        prime_id = cast(int, await conn.fetchval("SELECT id FROM prime WHERE name = 'spark'"))
-        vault = cast(bytes, await conn.fetchval("SELECT vault_address FROM prime WHERE name = 'spark'"))
-        token_id = cast(int, await conn.fetchval("SELECT id FROM token WHERE symbol = 'WETH' AND chain_id = 1"))
-        await insert_allocation_position(
-            conn,
-            token_id=token_id,
-            prime_id=prime_id,
-            proxy_hex=_PROXY.hex(),
-            balance=1,
-            block=1,
-            tx="11" * 32,
-            direction="in",
-            created_at=_OBSERVED,
+        prime_id = cast(
+            int,
+            await conn.fetchval(
+                "INSERT INTO prime (name, vault_address) VALUES ($1, $2) RETURNING id",
+                _PRIME_NAME,
+                _PRIME_ADDRESS,
+            ),
         )
         await conn.execute("DELETE FROM prime_reference_balance_sheet WHERE prime_id = $1", prime_id)
-        yield conn, prime_id, vault
+        yield conn, prime_id
         await conn.execute("DELETE FROM prime_reference_balance_sheet WHERE prime_id = $1", prime_id)
-        await conn.execute("DELETE FROM allocation_position WHERE proxy_address = $1", _PROXY)
+        await conn.execute("DELETE FROM prime WHERE id = $1", prime_id)
     finally:
         await conn.close()
 
 
-async def _buckets(async_db_url: str, address: str, *, hours: int = 6):
+async def _buckets(async_db_url: str, prime_id: int, *, hours: int = 6):
     engine = create_async_engine(async_db_url)
     try:
         repository = PrimeDebtRepository(engine)
         return await repository.list_reference_debt_buckets(
-            EthAddress(address),
+            prime_id,
             from_timestamp=_WINDOW_START,
             to_timestamp=_WINDOW_START + timedelta(hours=hours),
             bucket_seconds=3600,
@@ -82,10 +77,10 @@ async def _buckets(async_db_url: str, address: str, *, hours: int = 6):
 
 @pytest.mark.asyncio(loop_scope="module")
 async def test_rescales_the_upstream_usd_figure_to_wad(seeded, async_db_url: str):
-    conn, prime_id, _ = seeded
+    conn, prime_id = seeded
     await _insert_day(conn, prime_id, _OBSERVED, debt="2645260280.72")
 
-    buckets = await _buckets(async_db_url, "0x" + _PROXY.hex())
+    buckets = await _buckets(async_db_url, prime_id)
 
     observed = [b for b in buckets if b.debt_wad is not None]
     assert observed, "expected the seeded day to populate the series"
@@ -94,10 +89,10 @@ async def test_rescales_the_upstream_usd_figure_to_wad(seeded, async_db_url: str
 
 @pytest.mark.asyncio(loop_scope="module")
 async def test_carries_the_last_observation_forward(seeded, async_db_url: str):
-    conn, prime_id, _ = seeded
+    conn, prime_id = seeded
     await _insert_day(conn, prime_id, _OBSERVED, debt="100")
 
-    buckets = await _buckets(async_db_url, "0x" + _PROXY.hex())
+    buckets = await _buckets(async_db_url, prime_id)
 
     carried = [b for b in buckets if b.bucket_start > _OBSERVED]
     assert carried, "expected buckets after the observation"
@@ -106,10 +101,10 @@ async def test_carries_the_last_observation_forward(seeded, async_db_url: str):
 
 @pytest.mark.asyncio(loop_scope="module")
 async def test_leaves_buckets_before_the_first_observation_null(seeded, async_db_url: str):
-    conn, prime_id, _ = seeded
+    conn, prime_id = seeded
     await _insert_day(conn, prime_id, _OBSERVED, debt="100")
 
-    buckets = await _buckets(async_db_url, "0x" + _PROXY.hex())
+    buckets = await _buckets(async_db_url, prime_id)
 
     leading = [b for b in buckets if b.bucket_start < _OBSERVED]
     assert leading, "expected buckets before the observation"
@@ -118,22 +113,64 @@ async def test_leaves_buckets_before_the_first_observation_null(seeded, async_db
 
 @pytest.mark.asyncio(loop_scope="module")
 async def test_prefers_a_correction_over_the_original_it_supersedes(seeded, async_db_url: str):
-    conn, prime_id, _ = seeded
+    conn, prime_id = seeded
     await _insert_day(conn, prime_id, _OBSERVED, debt="1", build_id=1)
     await _insert_day(conn, prime_id, _OBSERVED, debt="999", build_id=2)
 
-    buckets = await _buckets(async_db_url, "0x" + _PROXY.hex())
+    buckets = await _buckets(async_db_url, prime_id)
 
     observed = [b for b in buckets if b.debt_wad is not None]
     assert observed[0].debt_wad == Decimal(999) * Decimal(10) ** 18
 
 
-# The endpoint accepts either identity, so the reference read must resolve both.
 @pytest.mark.asyncio(loop_scope="module")
-async def test_resolves_the_prime_by_its_vault_address(seeded, async_db_url: str):
-    conn, prime_id, vault = seeded
+async def test_reads_the_prime_by_its_resolved_id(seeded, async_db_url: str):
+    conn, prime_id = seeded
     await _insert_day(conn, prime_id, _OBSERVED, debt="100")
 
-    buckets = await _buckets(async_db_url, "0x" + vault.hex())
+    buckets = await _buckets(async_db_url, prime_id)
 
     assert any(b.debt_wad is not None for b in buckets)
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_resolve_prime_id_prefers_a_vault_address_over_a_matching_proxy(seeded, async_db_url: str):
+    conn, _ = seeded
+    address = bytes.fromhex("7b" * 20)
+    token_id = await insert_token(conn, "PRIME-DEBT-RESOLVE", 18, bytes.fromhex("7c" * 20))
+    vault_prime_id = cast(
+        int,
+        await conn.fetchval(
+            "INSERT INTO prime (name, vault_address) VALUES ('prime_debt_vault_match', $1) RETURNING id",
+            address,
+        ),
+    )
+    proxy_prime_id = cast(
+        int,
+        await conn.fetchval(
+            "INSERT INTO prime (name, vault_address) VALUES ('prime_debt_proxy_match', $1) RETURNING id",
+            bytes.fromhex("7d" * 20),
+        ),
+    )
+    try:
+        await insert_allocation_position(
+            conn,
+            token_id=token_id,
+            prime_id=proxy_prime_id,
+            proxy_hex=address.hex(),
+            balance=1,
+            block=1,
+            tx="7e" * 32,
+            direction="in",
+        )
+        engine = create_async_engine(async_db_url)
+        try:
+            resolved_id = await PrimeDebtRepository(engine).resolve_prime_id(EthAddress("0x" + address.hex()))
+        finally:
+            await engine.dispose()
+
+        assert resolved_id == vault_prime_id
+    finally:
+        await conn.execute("DELETE FROM allocation_position WHERE prime_id = $1", proxy_prime_id)
+        await conn.execute("DELETE FROM prime WHERE id = ANY($1::bigint[])", [vault_prime_id, proxy_prime_id])
+        await conn.execute("DELETE FROM token WHERE id = $1", token_id)
