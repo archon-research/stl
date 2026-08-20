@@ -7,8 +7,9 @@ import {
   StyledSelect,
   ToggleGroup,
 } from '@archon-research/design-system';
+import { useNavigate, useSearch } from '@tanstack/react-router';
 import { ArrowUpRight } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
+import { useEffect, useMemo, useState, type ChangeEvent } from 'react';
 
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
@@ -21,7 +22,14 @@ import {
   getPrimeGroupKey,
   sortAllocations,
 } from '../../lib/dashboard';
-import { navigateWithParams, PARAMS, useUrlParam } from '../../lib/url-params';
+import {
+  ACTIVITY_ACTIONS,
+  type ActivityAction,
+  ALLOCATION_CATEGORIES,
+  DRAWER_TABS,
+  type DrawerTab,
+  toSearchOption,
+} from '../../router/search-params';
 import type {
   Allocation,
   AllocationCategory,
@@ -41,20 +49,11 @@ type BottomPanelProps = {
   selectedPrime: Prime | null;
 };
 
-type ActiveTab = 'risk' | 'rrc' | 'activity';
-
-function parseCategoryParam(value: string | null): AllocationCategory | '' {
-  if (
-    value === 'allocation' ||
-    value === 'pol' ||
-    value === 'psm3' ||
-    value === 'asset' ||
-    value === 'custody'
-  ) {
-    return value;
-  }
-  return '';
-}
+type DrawerSearchPatch = {
+  tab?: DrawerTab | undefined;
+  category?: AllocationCategory | undefined;
+  daa?: ActivityAction | undefined;
+};
 
 const segmentedControlStyles = segmentedControl();
 const toggleGroupClassName = `${segmentedControlStyles.group} ${css({ p: '0.25', gap: '0.5' })}`;
@@ -73,47 +72,24 @@ export function BottomPanel({
   selectedAllocation,
   selectedPrime,
 }: BottomPanelProps) {
-  const [tabParam, setTabParam] = useUrlParam(PARAMS.tab);
-  const [categoryParam, setCategoryParam] = useUrlParam(PARAMS.category);
-  const [activityActionParam, setActivityActionParam] = useUrlParam(
-    PARAMS.activityAction,
-  );
+  // Not strict: the drawer stays mounted on the activities route, where the
+  // allocation search does not exist.
+  const search = useSearch({ from: '/allocation', shouldThrow: false });
+  const navigate = useNavigate();
   const [localRiskSearchValue, setLocalRiskSearchValue] = useState('');
   const [riskSearchValue, setRiskSearchValue] = useState('');
-  const [categoryFilter, setCategoryFilter] = useState<AllocationCategory | ''>(
-    parseCategoryParam(categoryParam),
-  );
 
-  const previousPrimeIdRef = useRef<string | null>(selectedPrime?.id ?? null);
+  const activeTab: DrawerTab = search?.tab ?? 'risk';
+  const categoryFilter: AllocationCategory | '' = search?.category ?? '';
+  const activityActionFilter = search?.daa ?? '';
 
-  const activeTab: ActiveTab =
-    tabParam === 'rrc' ? 'rrc' : tabParam === 'activity' ? 'activity' : 'risk';
-  const activityActionFilter =
-    activityActionParam === 'in' ||
-    activityActionParam === 'out' ||
-    activityActionParam === 'sweep'
-      ? activityActionParam
-      : '';
-
-  useEffect(() => {
-    const primeId = selectedPrime?.id ?? null;
-
-    if (previousPrimeIdRef.current && previousPrimeIdRef.current !== primeId) {
-      setCategoryFilter('');
-      setCategoryParam(null);
-      setActivityActionParam(null);
-    }
-
-    previousPrimeIdRef.current = primeId;
-  }, [selectedPrime?.id, setActivityActionParam, setCategoryParam]);
-
-  useEffect(() => {
-    const normalized = parseCategoryParam(categoryParam);
-
-    if (normalized !== categoryFilter) {
-      setCategoryFilter(normalized);
-    }
-  }, [categoryFilter, categoryParam]);
+  const updateDrawerSearch = (patch: DrawerSearchPatch) => {
+    void navigate({
+      to: '.',
+      search: (previous) => ({ ...previous, ...patch }),
+      replace: true,
+    });
+  };
 
   const sortedAllocations = useMemo(
     () => sortAllocations(allocations),
@@ -204,14 +180,10 @@ export function BottomPanel({
         <ToggleGroup.Root
           value={[activeTab]}
           onValueChange={(details: { value: string[] }) => {
-            const nextValue = details.value[0];
+            const nextTab = toSearchOption(details.value[0], DRAWER_TABS);
 
-            if (
-              nextValue === 'risk' ||
-              nextValue === 'rrc' ||
-              nextValue === 'activity'
-            ) {
-              setTabParam(nextValue);
+            if (nextTab) {
+              updateDrawerSearch({ tab: nextTab });
             }
           }}
           aria-label="Risk views"
@@ -233,16 +205,22 @@ export function BottomPanel({
             type="button"
             disabled={!focusedAllocation}
             onClick={() =>
-              navigateWithParams('/activities', {
-                [PARAMS.prime]: selectedPrime
-                  ? getPrimeGroupKey(selectedPrime)
-                  : null,
-                [PARAMS.network]: focusedAllocation
-                  ? String(focusedAllocation.chain_id)
-                  : null,
-                [PARAMS.token]: focusedAllocation?.symbol ?? null,
-                [PARAMS.activityAction]: activityActionFilter || null,
-                [PARAMS.showAllPrimes]: '0',
+              // A fresh search, not a patch: nothing from the allocation view
+              // rides along — range/from/to included, so the feed opens on its own
+              // default window.
+              void navigate({
+                to: '/activities',
+                search: {
+                  prime: selectedPrime
+                    ? getPrimeGroupKey(selectedPrime)
+                    : undefined,
+                  network: focusedAllocation
+                    ? String(focusedAllocation.chain_id)
+                    : undefined,
+                  token: focusedAllocation?.symbol ?? undefined,
+                  aa: activityActionFilter || undefined,
+                  allp: '0',
+                },
               })
             }
             className={css({
@@ -300,12 +278,14 @@ export function BottomPanel({
           <StyledSelect
             id="category-select"
             value={categoryFilter}
-            onChange={(event: ChangeEvent<HTMLSelectElement>) => {
-              const nextCategory =
-                (event.target.value as AllocationCategory) || '';
-              setCategoryFilter(nextCategory);
-              setCategoryParam(nextCategory || null);
-            }}
+            onChange={(event: ChangeEvent<HTMLSelectElement>) =>
+              updateDrawerSearch({
+                category: toSearchOption(
+                  event.target.value,
+                  ALLOCATION_CATEGORIES,
+                ),
+              })
+            }
             disabled={
               !selectedPrime ||
               isLoading ||
@@ -345,7 +325,9 @@ export function BottomPanel({
               id="activity-action-filter"
               value={activityActionFilter}
               onChange={(event: ChangeEvent<HTMLSelectElement>) =>
-                setActivityActionParam(event.target.value || null)
+                updateDrawerSearch({
+                  daa: toSearchOption(event.target.value, ACTIVITY_ACTIONS),
+                })
               }
               disabled={
                 !focusedAllocation || isLoading || errorMessage !== null

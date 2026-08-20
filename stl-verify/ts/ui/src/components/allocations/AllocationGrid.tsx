@@ -62,6 +62,7 @@ import {
   TokenAddress,
   TokenLogo,
 } from '../shared';
+import { TabNotePanel } from './tabs/TabStatePanels';
 
 type AllocationGridProps = {
   allocations: Allocation[];
@@ -91,6 +92,7 @@ type AllocationGridProps = {
   riskCapitalErrorMessage: string | null;
   primeDebtErrorMessage: string | null;
   isMultiChainPrime: boolean;
+  noticeMessage: string | null;
 };
 
 export type ChartDatum = {
@@ -837,6 +839,7 @@ export function AllocationGrid({
   riskCapitalErrorMessage,
   primeDebtErrorMessage,
   isMultiChainPrime,
+  noticeMessage,
 }: AllocationGridProps) {
   const [localSearchValue, setLocalSearchValue] = useState(searchValue);
 
@@ -1124,6 +1127,9 @@ export function AllocationGrid({
             </div>
           ) : null}
         </div>
+        {noticeMessage === null ? null : (
+          <TabNotePanel message={noticeMessage} />
+        )}
         {showTopMetricsSkeleton ? (
           <div
             className={css({

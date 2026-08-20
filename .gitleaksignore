@@ -1,0 +1,18 @@
+# Gitleaks fingerprint suppressions (ORB-303).
+#
+# Only for findings that exist ONLY in git history, where the commit is
+# immutable and the line pin therefore cannot rot. Anything still present at
+# HEAD must be handled by a shape or line-context allowlist in .gitleaks.toml
+# instead, so it survives the file changing.
+#
+# All three below are un-prefixed EVM hex in test fixtures, matched by the
+# default generic-api-key rule. Public on-chain data, not credentials.
+#
+# Format: <commit>:<path>:<rule>:<line>
+
+# 2026-06-11, not an ancestor of HEAD; content absent from the current tree.
+b4ea91b4783211be90cc0941acb4588243150de3:stl-verify/python/tests/unit/adapters/postgres/test_allocation_anchorage_repository.py:generic-api-key:32
+b4ea91b4783211be90cc0941acb4588243150de3:stl-verify/python/tests/unit/adapters/postgres/test_allocation_anchorage_repository.py:generic-api-key:34
+
+# 2026-03-09, in history; content absent from the current tree.
+b9ec31a7e7f08c29fb16a9a666c57d50529eacd5:stl-verify/python/tests/integration/test_allocation_api.py:generic-api-key:29

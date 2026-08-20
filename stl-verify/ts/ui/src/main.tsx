@@ -1,18 +1,14 @@
 import { ErrorBoundary, ThemeProvider } from '@archon-research/design-system';
 import { HttpProvider } from '@archon-research/http-client-react';
+import { RouterProvider } from '@tanstack/react-router';
 import { createRoot } from 'react-dom/client';
 
-import App from './App.tsx';
 import { logging } from './lib/logging';
-import { setPathname } from './lib/url-params';
+import { router } from './router/routes';
 
 // Required global stylesheet side effects.
 // oxlint-disable-next-line import/no-unassigned-import
 import './index.css';
-
-if (typeof window !== 'undefined' && window.location.pathname === '/') {
-  setPathname('/allocation', 'replace');
-}
 
 createRoot(document.getElementById('root')!).render(
   <ErrorBoundary
@@ -26,7 +22,7 @@ createRoot(document.getElementById('root')!).render(
   >
     <ThemeProvider>
       <HttpProvider>
-        <App />
+        <RouterProvider router={router} />
       </HttpProvider>
     </ThemeProvider>
   </ErrorBoundary>,

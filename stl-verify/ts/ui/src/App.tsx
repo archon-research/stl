@@ -4,7 +4,13 @@ import {
   SidebarLayout,
   type SortingState,
 } from '@archon-research/design-system';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useMatchRoute,
+  useNavigate,
+  useParams,
+  useSearch,
+} from '@tanstack/react-router';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { css } from '#styled-system/css';
 
@@ -19,14 +25,11 @@ import {
 import { BottomPanel } from './components/allocations/BottomPanel';
 import { RiskDetailDrawer } from './components/allocations/RiskDetailDrawer';
 import { ActivityFeed } from './components/allocations/tabs/ActivityFeed';
-// DEFAULT_RANGE_PRESET / defaultTimeRange come from the local shared barrel so
-// the temporary 24h override in components/shared/index.ts applies here too;
-// see that file for context.
+// DEFAULT_RANGE_PRESET comes from the local shared barrel so the temporary 24h
+// override in components/shared/index.ts applies here too; see that file.
 import {
   ChainLogo,
   DEFAULT_RANGE_PRESET,
-  defaultTimeRange,
-  isRangePreset,
   presetToRange,
   ProtocolLogo,
   type RangePreset,
@@ -65,17 +68,17 @@ import {
   getProtocolLabel,
   groupPrimesByVault,
   parseNumericValue,
+  truncateMiddle,
   wadToUnits,
 } from './lib/dashboard';
 import { isAbortError, toErrorMessage } from './lib/errors';
 import { logging } from './lib/logging';
 import { REFERENCE_MODE } from './lib/referenceMode';
 import {
-  PARAMS,
-  setPathname as replacePathname,
-  usePathname,
-  useUrlParam,
-} from './lib/url-params';
+  ACTIVITY_ACTIONS,
+  type AppSearchPatch,
+  toSearchOption,
+} from './router/search-params';
 import type {
   Allocation,
   DataSource,
@@ -150,6 +153,27 @@ function getResolutionForRange(
   return 'P1D';
 }
 
+type ViewNavigation = {
+  view: 'allocation' | 'activities';
+  primeKey: string | null;
+  patch?: AppSearchPatch;
+  replace?: boolean;
+};
+
+// Everything scoped to the prime that was just left behind. Cleared as part of
+// the navigation so the URL never advertises a filter from the previous prime.
+const PRIME_SCOPED_RESET: AppSearchPatch = {
+  network: undefined,
+  protocol: undefined,
+  category: undefined,
+  // Both action filters: each view owns its own key, and either may be the one
+  // the departing prime left behind.
+  aa: undefined,
+  daa: undefined,
+  drawer: undefined,
+  row: undefined,
+};
+
 function App() {
   const [primes, setPrimes] = useState<Prime[]>([]);
   const [primesErrorMessage, setPrimesErrorMessage] = useState<string | null>(
@@ -178,87 +202,124 @@ function App() {
   const [primeDebtErrorMessage, setPrimeDebtErrorMessage] = useState<
     string | null
   >(null);
-  const [selectedAllocationKey, setSelectedAllocationKey] = useState<
-    string | null
-  >(null);
-  const [isDrawerOpenParam, setIsDrawerOpenParam] = useUrlParam(
-    PARAMS.drawerOpen,
-  );
-  const [selectedPrimeId, setSelectedPrimeId] = useUrlParam(PARAMS.prime);
-  const [selectedNetwork, setSelectedNetwork] = useUrlParam(PARAMS.network);
-  const [selectedProtocol, setSelectedProtocol] = useUrlParam(PARAMS.protocol);
-  const [activityTokenParam, setActivityTokenParam] = useUrlParam(PARAMS.token);
-  const [activityActionParam, setActivityActionParam] = useUrlParam(
-    PARAMS.activityAction,
-  );
-  const [showAllPrimesParam, setShowAllPrimesParam] = useUrlParam(
-    PARAMS.showAllPrimes,
-  );
-  const [pathname, setPathname] = usePathname();
-  const { globalFilter, setGlobalFilter, setSorting, sorting } =
-    useUrlSyncedTableState(PARAMS.sort, PARAMS.search);
   const [tokenSymbolOptions, setTokenSymbolOptions] = useState<string[]>([]);
+  // Not derived: the URL is replaced with the fallback prime, so afterwards
+  // nothing but this still names the prime that was asked for.
+  const [unknownPrimeMessage, setUnknownPrimeMessage] = useState<string | null>(
+    null,
+  );
+  const navigate = useNavigate();
+  const matchRoute = useMatchRoute();
+  const sharedSearch = useSearch({ from: '__root__' });
+  const allocationSearch = useSearch({
+    from: '/allocation',
+    shouldThrow: false,
+  });
+  const activitiesSearch = useSearch({
+    from: '/activities',
+    shouldThrow: false,
+  });
+  const primePathParams = useParams({
+    from: '/allocation/$primeId',
+    shouldThrow: false,
+  });
+  const { globalFilter, setGlobalFilter, setSorting, sorting } =
+    useUrlSyncedTableState();
 
-  // Range selection persisted in the URL so it survives reloads and is
-  // shareable: a preset key, plus from/to timestamps for custom ranges.
-  const [rangeParam, setRangeParam] = useUrlParam(PARAMS.range);
-  const [rangeFromParam, setRangeFromParam] = useUrlParam(PARAMS.rangeFrom);
-  const [rangeToParam, setRangeToParam] = useUrlParam(PARAMS.rangeTo);
+  const selectedView: 'allocation' | 'activities' = matchRoute({
+    to: '/activities',
+  })
+    ? 'activities'
+    : 'allocation';
+  const selectedPrimeId =
+    primePathParams?.primeId ?? sharedSearch.prime ?? null;
+  const selectedNetwork = sharedSearch.network ?? null;
+  const selectedProtocol = sharedSearch.protocol ?? null;
+  const showAllPrimesInActivities =
+    selectedView === 'activities' ? activitiesSearch?.allp !== '0' : false;
 
-  const rangePreset: RangePreset = isRangePreset(rangeParam)
-    ? rangeParam
-    : DEFAULT_RANGE_PRESET;
+  // Param edits replace rather than push: a filter belongs in the URL but not in
+  // the back-history, where it would take a Back press each to undo.
+  const updateSearch = useCallback(
+    (patch: AppSearchPatch) => {
+      void navigate({
+        to: '.',
+        search: (previous) => ({ ...previous, ...patch }),
+        replace: true,
+      });
+    },
+    [navigate],
+  );
 
-  const timeRange = useMemo<TimeRange>(() => {
-    if (rangePreset === 'custom') {
-      // A hand-edited URL can carry unparsable or reversed custom timestamps;
-      // fall back to the default rather than sending a bad range downstream.
-      if (rangeFromParam && rangeToParam) {
-        const fromMs = new Date(rangeFromParam).getTime();
-        const toMs = new Date(rangeToParam).getTime();
-        if (Number.isFinite(fromMs) && Number.isFinite(toMs) && toMs > fromMs) {
-          return { from_timestamp: rangeFromParam, to_timestamp: rangeToParam };
-        }
+  // View and prime are both addresses, not params: the prime rides in the path on
+  // the allocation view and in the query on activities.
+  const navigateToView = useCallback(
+    ({ view, primeKey, patch, replace }: ViewNavigation) => {
+      if (view === 'activities') {
+        void navigate({
+          to: '/activities',
+          search: (previous) => ({
+            ...previous,
+            ...patch,
+            prime: primeKey ?? undefined,
+          }),
+          replace,
+        });
+        return;
       }
-      return defaultTimeRange();
-    }
-    return presetToRange(rangePreset);
-  }, [rangePreset, rangeFromParam, rangeToParam]);
+
+      if (primeKey === null) {
+        void navigate({
+          to: '/allocation',
+          search: (previous) => ({ ...previous, ...patch, prime: undefined }),
+          replace,
+        });
+        return;
+      }
+
+      void navigate({
+        to: '/allocation/$primeId',
+        params: { primeId: primeKey },
+        search: (previous) => ({ ...previous, ...patch, prime: undefined }),
+        replace,
+      });
+    },
+    [navigate],
+  );
+
+  // A usable from/to pair in the URL is the custom selection itself; `range`
+  // only ever names a preset (see the root search schema).
+  const customTimeRange = useMemo<TimeRange | null>(
+    () =>
+      sharedSearch.from && sharedSearch.to
+        ? { from_timestamp: sharedSearch.from, to_timestamp: sharedSearch.to }
+        : null,
+    [sharedSearch.from, sharedSearch.to],
+  );
+
+  const searchRangePreset = sharedSearch.range ?? DEFAULT_RANGE_PRESET;
+  const rangePreset: RangePreset = customTimeRange
+    ? 'custom'
+    : searchRangePreset;
+
+  const timeRange = useMemo<TimeRange>(
+    () => customTimeRange ?? presetToRange(searchRangePreset),
+    [customTimeRange, searchRangePreset],
+  );
 
   const handleRangeChange = (preset: RangePreset, range: TimeRange) => {
-    // The default preset stays out of the URL to keep it clean.
-    setRangeParam(preset === DEFAULT_RANGE_PRESET ? null : preset);
-    if (preset === 'custom') {
-      setRangeFromParam(range.from_timestamp ?? null);
-      setRangeToParam(range.to_timestamp ?? null);
-    } else {
-      setRangeFromParam(null);
-      setRangeToParam(null);
-    }
+    const customRange = preset === 'custom' ? range : null;
+    updateSearch({
+      // The default preset stays out of the URL to keep it clean, and a custom
+      // range is carried by from/to alone.
+      range:
+        preset === 'custom' || preset === DEFAULT_RANGE_PRESET
+          ? undefined
+          : preset,
+      from: customRange?.from_timestamp,
+      to: customRange?.to_timestamp,
+    });
   };
-
-  const previousPrimeIdRef = useRef<string | null>(selectedPrimeId);
-  const isDrawerOpen = isDrawerOpenParam === '1';
-  // Trim trailing slashes so "/activities/" links resolve the same as
-  // "/activities" on hosts that append one.
-  const normalizedPathname = pathname.replace(/\/+$/, '') || '/';
-  const selectedView: 'allocation' | 'activities' =
-    normalizedPathname === '/activities' ? 'activities' : 'allocation';
-  const showAllPrimesInActivities =
-    selectedView === 'activities' ? showAllPrimesParam !== '0' : false;
-
-  useEffect(() => {
-    if (
-      normalizedPathname === '/allocation' ||
-      normalizedPathname === '/activities'
-    ) {
-      return;
-    }
-
-    // Redirect unknown paths (e.g. "/") to the default view, preserving query
-    // params. `replace` so the bare path never lands in the back-history.
-    replacePathname('/allocation', 'replace');
-  }, [normalizedPathname]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -373,43 +434,59 @@ function App() {
     [primeGroups, selectedPrimeId],
   );
 
+  // Resolving the default (first) prime preserves the rest of the URL: a deep
+  // link that names filters but no prime must keep those filters.
   useEffect(() => {
     if (isPrimesLoading) {
       return;
     }
 
-    if (primeGroups.length === 0) {
-      if (selectedPrimeId !== null) {
-        setSelectedPrimeId(null);
+    const fallbackGroup = primeGroups[0] ?? null;
+
+    if (fallbackGroup === null) {
+      // A failed prime fetch is not an empty prime list: dropping the prime out
+      // of the URL here would destroy the deep link a retry could still serve.
+      if (primesErrorMessage === null && selectedPrimeId !== null) {
+        navigateToView({ view: selectedView, primeKey: null, replace: true });
       }
       return;
     }
 
-    if (
-      !selectedPrimeId ||
-      !primeGroups.some((group) => group.key === selectedPrimeId)
-    ) {
-      setSelectedPrimeId(primeGroups[0]?.key ?? null);
-    }
-  }, [isPrimesLoading, selectedPrimeId, setSelectedPrimeId, primeGroups]);
-
-  useEffect(() => {
-    if (
-      previousPrimeIdRef.current !== null &&
-      previousPrimeIdRef.current !== selectedPrimeId
-    ) {
-      setSelectedNetwork(null);
-      setSelectedProtocol(null);
-      setSelectedAllocationKey(null);
-      setIsDrawerOpenParam(null);
+    if (!selectedPrimeId) {
+      navigateToView({
+        view: selectedView,
+        primeKey: fallbackGroup.key,
+        replace: true,
+      });
+      return;
     }
 
-    previousPrimeIdRef.current = selectedPrimeId;
+    if (primeGroups.some((group) => group.key === selectedPrimeId)) {
+      return;
+    }
+
+    // Silently swapping primes renders one prime's data under another's link,
+    // and the filters in that link were scoped to the prime that is gone.
+    logging.warn('Requested prime is not in the prime list', {
+      requestedPrimeKey: selectedPrimeId,
+      fallbackPrimeKey: fallbackGroup.key,
+    });
+    setUnknownPrimeMessage(
+      `Prime ${truncateMiddle(selectedPrimeId)} was not found; showing ${fallbackGroup.name}.`,
+    );
+    navigateToView({
+      view: selectedView,
+      primeKey: fallbackGroup.key,
+      patch: PRIME_SCOPED_RESET,
+      replace: true,
+    });
   }, [
+    isPrimesLoading,
+    navigateToView,
+    primeGroups,
+    primesErrorMessage,
     selectedPrimeId,
-    setIsDrawerOpenParam,
-    setSelectedNetwork,
-    setSelectedProtocol,
+    selectedView,
   ]);
 
   useEffect(() => {
@@ -423,7 +500,6 @@ function App() {
     const controller = new AbortController();
 
     setAllocations([]);
-    setSelectedAllocationKey(null);
     setIsAllocationsLoading(true);
     setAllocationsErrorMessage(null);
 
@@ -622,15 +698,20 @@ function App() {
     [allocations, isActivitiesView, localProtocols],
   );
 
-  // Drop a stale filter only once its option source is ready — otherwise a
-  // valid deep link (e.g. ?network=/?protocol=) is cleared on first render
-  // before chains/protocols metadata has loaded.
+  // Drop a stale filter only once its option source has actually delivered
+  // options: an empty source means "not known yet", and treating it as "no such
+  // option" wipes a valid deep link (?network=/?protocol=) on mount or on a
+  // failed fetch.
+  const allocationOptionsUnready =
+    selectedPrimeGroup === null ||
+    isAllocationsLoading ||
+    allocationsErrorMessage !== null;
   const networkOptionsLoading = isActivitiesView
     ? localChains.length === 0
-    : isAllocationsLoading;
+    : allocationOptionsUnready;
   const protocolOptionsLoading = isActivitiesView
     ? localProtocols.length === 0
-    : isAllocationsLoading;
+    : allocationOptionsUnready;
 
   useEffect(() => {
     if (networkOptionsLoading || !selectedNetwork) {
@@ -638,14 +719,9 @@ function App() {
     }
 
     if (!networkOptions.some((option) => option.value === selectedNetwork)) {
-      setSelectedNetwork(null);
+      updateSearch({ network: undefined });
     }
-  }, [
-    networkOptionsLoading,
-    networkOptions,
-    selectedNetwork,
-    setSelectedNetwork,
-  ]);
+  }, [networkOptionsLoading, networkOptions, selectedNetwork, updateSearch]);
 
   useEffect(() => {
     if (protocolOptionsLoading || !selectedProtocol) {
@@ -653,14 +729,9 @@ function App() {
     }
 
     if (!protocolOptions.some((option) => option.value === selectedProtocol)) {
-      setSelectedProtocol(null);
+      updateSearch({ protocol: undefined });
     }
-  }, [
-    protocolOptionsLoading,
-    protocolOptions,
-    selectedProtocol,
-    setSelectedProtocol,
-  ]);
+  }, [protocolOptionsLoading, protocolOptions, selectedProtocol, updateSearch]);
 
   const searchFilteredAllocations = useMemo(
     () =>
@@ -903,63 +974,27 @@ function App() {
     totalCapitalSeries,
   ]);
 
-  useEffect(() => {
-    if (filteredAllocations.length === 0) {
-      if (selectedAllocationKey !== null) {
-        setSelectedAllocationKey(null);
-      }
-      if (isDrawerOpen && !isAllocationsLoading) {
-        setIsDrawerOpenParam(null);
-      }
-      return;
-    }
+  // `row` restores a drawer deep link; anything the current filters exclude falls
+  // back to the first row in view, so a tab always has something to render.
+  const selectedAllocation = useMemo(() => {
+    const requestedRow = allocationSearch?.row;
+    const requested = requestedRow
+      ? filteredAllocations.find(
+          (allocation) => getAllocationKey(allocation) === requestedRow,
+        )
+      : undefined;
 
-    if (
-      !selectedAllocationKey ||
-      !filteredAllocations.some(
-        (allocation) => getAllocationKey(allocation) === selectedAllocationKey,
-      )
-    ) {
-      setSelectedAllocationKey(getAllocationKey(filteredAllocations[0]));
-    }
-  }, [
-    filteredAllocations,
-    isAllocationsLoading,
-    isDrawerOpen,
-    selectedAllocationKey,
-    setIsDrawerOpenParam,
-  ]);
+    return requested ?? filteredAllocations[0] ?? null;
+  }, [allocationSearch?.row, filteredAllocations]);
 
-  useEffect(() => {
-    if (!isDrawerOpen) {
-      return;
-    }
+  const selectedAllocationKey = selectedAllocation
+    ? getAllocationKey(selectedAllocation)
+    : null;
 
-    if (selectedAllocationKey === null) {
-      return;
-    }
-
-    if (
-      !filteredAllocations.some(
-        (allocation) => getAllocationKey(allocation) === selectedAllocationKey,
-      )
-    ) {
-      setIsDrawerOpenParam(null);
-    }
-  }, [
-    filteredAllocations,
-    isDrawerOpen,
-    selectedAllocationKey,
-    setIsDrawerOpenParam,
-  ]);
-
-  const selectedAllocation = useMemo(
-    () =>
-      filteredAllocations.find(
-        (allocation) => getAllocationKey(allocation) === selectedAllocationKey,
-      ) ?? null,
-    [filteredAllocations, selectedAllocationKey],
-  );
+  // Derived, never corrected: a deep link names its row before the allocations
+  // are fetched, so `drawer=1` waits for a row instead of being dropped as stale.
+  const isDrawerOpen =
+    allocationSearch?.drawer === '1' && selectedAllocation !== null;
 
   const selectedProtocolLabel = selectedAllocation
     ? getProtocolLabel(
@@ -995,11 +1030,19 @@ function App() {
               selectedPrimeId={selectedPrimeId}
               isLoading={isPrimesLoading}
               errorMessage={primesErrorMessage}
-              onSelectPrime={setSelectedPrimeId}
+              onSelectPrime={(primeKey) => {
+                setUnknownPrimeMessage(null);
+                navigateToView({
+                  view: selectedView,
+                  primeKey,
+                  patch: PRIME_SCOPED_RESET,
+                  replace: true,
+                });
+              }}
               showAllPrimes={showAllPrimesInActivities}
               canShowAllPrimes={selectedView === 'activities'}
               onShowAllPrimesChange={(value) =>
-                setShowAllPrimesParam(value ? '1' : '0')
+                updateSearch({ allp: value ? '1' : '0' })
               }
             />
           }
@@ -1007,16 +1050,18 @@ function App() {
             <TopBar
               hasSelectedPrime={selectedPrime !== null}
               networkOptions={networkOptions}
-              onNetworkChange={setSelectedNetwork}
-              onProtocolChange={setSelectedProtocol}
+              onNetworkChange={(value) =>
+                updateSearch({ network: value ?? undefined })
+              }
+              onProtocolChange={(value) =>
+                updateSearch({ protocol: value ?? undefined })
+              }
               protocolOptions={protocolOptions}
               selectedNetwork={selectedNetwork}
               selectedProtocol={selectedProtocol}
               selectedView={selectedView}
               onViewChange={(view) =>
-                setPathname(
-                  view === 'activities' ? '/activities' : '/allocation',
-                )
+                navigateToView({ view, primeKey: selectedPrimeId })
               }
               rangePreset={rangePreset}
               timeRange={timeRange}
@@ -1037,8 +1082,7 @@ function App() {
                 isPrimeDebtLoading={isPrimeDebtLoading}
                 localProtocols={localProtocols}
                 onSelectAllocation={(allocationKey) => {
-                  setSelectedAllocationKey(allocationKey);
-                  setIsDrawerOpenParam('1');
+                  updateSearch({ row: allocationKey, drawer: '1' });
                 }}
                 primeDebtSnapshot={primeDebtSnapshot}
                 referenceDebt={referenceDebt}
@@ -1054,6 +1098,7 @@ function App() {
                 riskCapitalErrorMessage={riskCapitalErrorMessage}
                 primeDebtErrorMessage={primeDebtErrorMessage}
                 isMultiChainPrime={isMultiChainPrime}
+                noticeMessage={unknownPrimeMessage}
               />
             ) : (
               <ActivityFeed
@@ -1066,10 +1111,14 @@ function App() {
                 selectedPrime={selectedPrime}
                 isMultiChainPrime={isMultiChainPrime}
                 tokenOptions={tokenSymbolOptions}
-                tokenFilter={activityTokenParam}
-                onTokenFilterChange={setActivityTokenParam}
-                actionFilter={activityActionParam ?? undefined}
-                onActionFilterChange={setActivityActionParam}
+                tokenFilter={activitiesSearch?.token ?? null}
+                onTokenFilterChange={(value) =>
+                  updateSearch({ token: value ?? undefined })
+                }
+                actionFilter={activitiesSearch?.aa}
+                onActionFilterChange={(value) =>
+                  updateSearch({ aa: toSearchOption(value, ACTIVITY_ACTIONS) })
+                }
                 externalRangePreset={rangePreset}
                 externalTimeRange={timeRange}
                 onRangeChange={handleRangeChange}
@@ -1086,7 +1135,7 @@ function App() {
             : undefined
         }
         isOpen={selectedView === 'allocation' && isDrawerOpen}
-        onClose={() => setIsDrawerOpenParam(null)}
+        onClose={() => updateSearch({ drawer: undefined })}
         subtitle={
           selectedAllocation ? (
             <span

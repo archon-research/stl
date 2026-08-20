@@ -18,6 +18,7 @@
     "preview": "vite preview",
     "test:explorers": "node scripts/check-explorer-urls.mjs",
     "test:prime-grouping": "node scripts/check-prime-grouping.mjs",
+    "test:routes": "node scripts/check-router-urls.mjs",
     "generate:openapi-types": "uikit-openapi-generate --schema ./src/generated/openapi-schema.json --output ./src/generated/openapi-types.ts && uikit-cli format --write ./src/generated/openapi-types.ts",
     "lint": "uikit-cli lint src panda.config.ts vite.config.ts env.ts",
     "doctor": "uikit-cli doctor --codegen"
@@ -27,6 +28,7 @@
     "@archon-research/design-system": "0.9.0",
     "@archon-research/http-client-core": "0.9.0",
     "@archon-research/http-client-react": "0.9.0",
+    "@tanstack/react-router": "1.170.25",
     "lucide-react": "1.28.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
