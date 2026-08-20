@@ -4,6 +4,9 @@ package migrator_test
 
 import (
 	"context"
+	"fmt"
+	"math/rand"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -891,6 +894,232 @@ func TestPositionState(t *testing.T) {
 		}
 		if got := classOf(t, "iaclr", "aa"); got != "COLLATERAL" {
 			t.Errorf("role reclassification = %q; want COLLATERAL", got)
+		}
+	})
+
+	// --- model-based fuzz --------------------------------------------------------------------------
+
+	t.Run("model fuzz: 120 random steps against an independent oracle (seed 20260819)", func(t *testing.T) {
+		// Every other subtest is a hand-picked scenario; this drives seeded-random operation sequences
+		// (new blocks, reorg zeroes, pv corrections, stale partial re-emissions, quantity rewrites,
+		// full re-projections) and checks four invariants after every step: idempotent rerun, exact
+		// stored-state conservation, no minted codes, and a full mirror of the guard semantics
+		// (merged-canonical, canonicality join, hwm). The round-7 bug class is found automatically by
+		// this style of test; the seed is fixed so CI is deterministic.
+		type okey struct{ bn, bv, pv int }
+		type oobs struct {
+			qty  int
+			code string // "" means NULL
+		}
+		type opos struct {
+			ik       string
+			stored   map[okey]oobs
+			expected string // "" means unclassified
+			seen     map[string]bool
+		}
+		codes := []string{"LOAN", "BORROW", "COLLATERAL"}
+		rng := rand.New(rand.NewSource(20260819))
+		positions := make([]*opos, 3)
+		for i := range positions {
+			positions[i] = &opos{ik: fmt.Sprintf("fzg%d", i), stored: map[okey]oobs{}, seen: map[string]bool{}}
+		}
+		sortedKeys := func(m map[okey]oobs) []okey {
+			ks := make([]okey, 0, len(m))
+			for k := range m {
+				ks = append(ks, k)
+			}
+			sort.Slice(ks, func(a, b int) bool {
+				if ks[a].bn != ks[b].bn {
+					return ks[a].bn < ks[b].bn
+				}
+				if ks[a].bv != ks[b].bv {
+					return ks[a].bv < ks[b].bv
+				}
+				return ks[a].pv < ks[b].pv
+			})
+			return ks
+		}
+		tupleSQL := func(ik string, k okey, o oobs) string {
+			c := "NULL::text"
+			if o.code != "" {
+				c = "'" + o.code + "'::text"
+			}
+			return fmt.Sprintf("(1::int,10::bigint,'%s'::text,'aa'::text,%d::numeric,%s,%d::bigint,%d::int,%d::int,timestamptz '2026-06-01 12:00+00' + %d*interval '1 day')",
+				ik, o.qty, c, k.bn, k.bv, k.pv, k.bn%40)
+		}
+		type canon struct {
+			bv, pv, qty int
+			code        string
+		}
+		// merged canonical per block over stored ∪ extra, extra (the run) winning ties
+		canonical := func(p *opos, extra map[okey]oobs) map[int]canon {
+			type cand struct {
+				bv, pv, src, qty int
+				code             string
+			}
+			best := map[int]cand{}
+			consider := func(k okey, o oobs, src int) {
+				c, seen := best[k.bn]
+				n := cand{k.bv, k.pv, src, o.qty, o.code}
+				if !seen || n.bv > c.bv || (n.bv == c.bv && (n.pv > c.pv || (n.pv == c.pv && n.src > c.src))) {
+					best[k.bn] = n
+				}
+			}
+			for k, o := range p.stored {
+				consider(k, o, 0)
+			}
+			for k, o := range extra {
+				consider(k, o, 1)
+			}
+			out := map[int]canon{}
+			for bn, c := range best {
+				out[bn] = canon{c.bv, c.pv, c.qty, c.code}
+			}
+			return out
+		}
+		oracleApply := func(p *opos, batch map[okey]oobs) {
+			merged := canonical(p, batch)
+			// the run's latest classifiable observation: canonical within the batch, highest non-zero block
+			runCanon := map[int]canon{}
+			for k, o := range batch {
+				c, seen := runCanon[k.bn]
+				if !seen || k.bv > c.bv || (k.bv == c.bv && k.pv > c.pv) {
+					runCanon[k.bn] = canon{k.bv, k.pv, o.qty, o.code}
+				}
+			}
+			latestBn := -1
+			for bn, c := range runCanon {
+				if c.qty > 0 && bn > latestBn {
+					latestBn = bn
+				}
+			}
+			for k, o := range batch {
+				p.stored[k] = o
+				if o.qty > 0 && o.code != "" {
+					p.seen[o.code] = true
+				}
+			}
+			if latestBn < 0 {
+				return
+			}
+			l := runCanon[latestBn]
+			mc, okmc := merged[latestBn]
+			if !okmc || mc.bv != l.bv || mc.pv != l.pv {
+				return // canonicality join blocks it
+			}
+			hbn := -1
+			var h canon
+			for bn, c := range merged {
+				if c.qty > 0 && bn > hbn {
+					hbn, h = bn, c
+				}
+			}
+			if hbn >= 0 {
+				lt := [3]int{latestBn, l.bv, l.pv}
+				ht := [3]int{hbn, h.bv, h.pv}
+				if lt[0] < ht[0] || (lt[0] == ht[0] && (lt[1] < ht[1] || (lt[1] == ht[1] && lt[2] < ht[2]))) {
+					return // recency guard blocks it
+				}
+			}
+			p.expected = l.code
+		}
+		runBatch := func(p *opos, batch map[okey]oobs) (int64, int64) {
+			rows := make([]string, 0, len(batch))
+			for _, k := range sortedKeys(batch) {
+				rows = append(rows, tupleSQL(p.ik, k, batch[k]))
+			}
+			view := "vfz" + p.ik
+			if _, err := pool.Exec(ctx, `CREATE OR REPLACE VIEW `+view+` AS `+valuesOf(rows...)); err != nil {
+				t.Fatalf("fuzz view %s: %v", view, err)
+			}
+			var n1, n2 int64
+			if err := pool.QueryRow(ctx, `SELECT materialize_position_projection($1::regclass, 'fuzz')`, view).Scan(&n1); err != nil {
+				t.Fatalf("fuzz run %s: %v", view, err)
+			}
+			if err := pool.QueryRow(ctx, `SELECT materialize_position_projection($1::regclass, 'fuzz-rerun')`, view).Scan(&n2); err != nil {
+				t.Fatalf("fuzz rerun %s: %v", view, err)
+			}
+			return n1, n2
+		}
+		dbRows := func(p *opos) map[okey]int {
+			out := map[okey]int{}
+			rs, err := pool.Query(ctx,
+				`SELECT block_number, block_version, processing_version, quantity::int
+				   FROM position_state WHERE position_id = position_id(1, 10, $1, 'aa')`, p.ik)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer rs.Close()
+			for rs.Next() {
+				var bn, bv, pv, q int
+				if err := rs.Scan(&bn, &bv, &pv, &q); err != nil {
+					t.Fatal(err)
+				}
+				out[okey{bn, bv, pv}] = q
+			}
+			return out
+		}
+		for step := 1; step <= 120; step++ {
+			p := positions[rng.Intn(len(positions))]
+			op := rng.Intn(7)
+			batch := map[okey]oobs{}
+			keys := sortedKeys(p.stored)
+			var nz []okey
+			for _, k := range keys {
+				if p.stored[k].qty > 0 {
+					nz = append(nz, k)
+				}
+			}
+			switch {
+			case op <= 1 || len(keys) == 0: // new block
+				maxBn := 99
+				for _, k := range keys {
+					if k.bn > maxBn {
+						maxBn = k.bn
+					}
+				}
+				batch[okey{maxBn + 1 + rng.Intn(3), 0, 0}] = oobs{1 + rng.Intn(9), codes[rng.Intn(3)]}
+			case op == 2: // reorg-zero the top block
+				top := keys[len(keys)-1]
+				batch[okey{top.bn, top.bv + 1, 0}] = oobs{0, codes[rng.Intn(3)]}
+			case op == 3: // pv correction of a random stored key
+				k := keys[rng.Intn(len(keys))]
+				batch[okey{k.bn, k.bv, k.pv + 1}] = oobs{1 + rng.Intn(9), codes[rng.Intn(3)]}
+			case op == 4 && len(nz) > 0: // stale partial re-emission, code changed (the round-7 shape)
+				k := nz[rng.Intn(len(nz))]
+				batch[k] = oobs{p.stored[k].qty, codes[rng.Intn(3)]}
+			case op == 5 && len(nz) > 0: // quantity rewrite at the same key (the sanctioned D1 channel)
+				k := nz[rng.Intn(len(nz))]
+				batch[k] = oobs{1 + rng.Intn(9), p.stored[k].code}
+			default: // full re-projection of everything stored
+				for k, o := range p.stored {
+					batch[k] = o
+				}
+			}
+			if len(batch) == 0 {
+				continue
+			}
+			_, n2 := runBatch(p, batch)
+			if n2 != 0 {
+				t.Fatalf("step %d %s: identical rerun changed %d rows; want 0", step, p.ik, n2)
+			}
+			oracleApply(p, batch)
+			got := dbRows(p)
+			if len(got) != len(p.stored) {
+				t.Fatalf("step %d %s: db has %d rows, oracle %d", step, p.ik, len(got), len(p.stored))
+			}
+			for k, o := range p.stored {
+				if got[k] != o.qty {
+					t.Fatalf("step %d %s: row %+v qty db=%d oracle=%d", step, p.ik, k, got[k], o.qty)
+				}
+			}
+			cls := classOf(t, p.ik, "aa")
+			if cls != p.expected {
+				t.Fatalf("step %d %s: classification db=%q oracle=%q", step, p.ik, cls, p.expected)
+			}
+			if cls != "" && !p.seen[cls] {
+				t.Fatalf("step %d %s: minted code %q never emitted on a non-zero row", step, p.ik, cls)
+			}
 		}
 	})
 }
