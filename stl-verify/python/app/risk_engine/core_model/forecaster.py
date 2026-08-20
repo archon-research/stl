@@ -490,7 +490,9 @@ class Simulator:
                 )
                 return {"prices": forecasted_prices.values}
 
-            sim_results = Parallel(jobs=4)(delayed(run_simulation)(i) for i in tqdm(range(n_sims)))
+            # n_jobs=1 on purpose: the heaviest market already peaks at ~8.0 GiB
+            # single-process; loky workers would multiply that past any pod limit.
+            sim_results = Parallel(n_jobs=1)(delayed(run_simulation)(i) for i in tqdm(range(n_sims)))
 
             all_prices = [res["prices"] if res is not None else np.full(forecasted_step, np.nan) for res in sim_results]
 
