@@ -140,12 +140,14 @@ func RunLoop(ctx context.Context, cfg Config, handler BlockEventHandler) {
 	}
 }
 
-// isShutdownCancellation reports whether err is only the loop's context being
-// cancelled (SIGTERM), rather than a processing failure. Both conditions are
-// required so a genuine error racing shutdown is still logged.
+// isShutdownCancellation reports whether err is only the shutdown itself — the
+// loop's context cancelled (SIGTERM), or a handler the drain budget abandoned —
+// rather than a processing failure. The loop's context never carries a deadline,
+// so a DeadlineExceeded here always came from a nested budget (handler timeout,
+// RPC or DB per-attempt deadline) and stays a genuine, logged failure.
 func isShutdownCancellation(ctx context.Context, err error) bool {
 	return ctx.Err() != nil &&
-		(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
+		(errors.Is(err, context.Canceled) || errors.Is(err, errDrainAbandoned))
 }
 
 // ProcessMessages receives a batch of SQS messages, parses each as a
@@ -274,6 +276,11 @@ func runHandler(ctx context.Context, cfg Config, event outbound.BlockEvent, hand
 	}
 }
 
+// errDrainAbandoned marks the handler the shutdown drain gave up on. It is a
+// distinct sentinel, not context.DeadlineExceeded, so the expected drain expiry
+// stays quiet without also silencing a nested deadline racing the same shutdown.
+var errDrainAbandoned = errors.New("handler abandoned when the shutdown drain expired")
+
 // drainHandler gives a handler caught mid-message by shutdown the drain budget
 // to finish. Past it the handler is cancelled and left to unwind while the
 // caller releases its message: the successor pod reprocesses that block, which
@@ -288,7 +295,7 @@ func drainHandler(hctx context.Context, cancelHandler context.CancelFunc, cfg Co
 	case <-drain.C:
 		cancelHandler()
 		return handlerOutcome{
-			err:       fmt.Errorf("handler still running after the %s shutdown drain: %w", cfg.drainTimeout(), context.DeadlineExceeded),
+			err:       fmt.Errorf("%w: still running after %s", errDrainAbandoned, cfg.drainTimeout()),
 			abandoned: true,
 		}
 	}
