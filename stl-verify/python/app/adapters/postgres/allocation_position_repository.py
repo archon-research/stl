@@ -262,7 +262,7 @@ class AllocationRepository:
                 extra={
                     "error_type": type(exc).__name__,
                     "error_message": str(exc),
-                    "prime_address": str(prime_address),
+                    "proxy_addresses": [str(a) for a in proxy_addresses],
                 },
                 exc_info=True,
             )
@@ -1006,7 +1006,7 @@ class AllocationRepository:
 
     async def list_exposure_buckets(
         self,
-        prime_address: EthAddress,
+        proxy_addresses: Sequence[EthAddress],
         *,
         from_timestamp: datetime,
         to_timestamp: datetime,
@@ -1059,7 +1059,10 @@ class AllocationRepository:
                 JOIN token t ON t.id = ap.token_id
                 JOIN receipt_token rt
                     ON rt.receipt_token_address = t.address AND rt.chain_id = ap.chain_id
-                WHERE ap.proxy_address = decode(:address_hex, 'hex')
+                -- Prime-wide, like the headline figure beside it: a prime holds
+                -- receipt tokens through one proxy per chain, so scoping to one
+                -- address prices a single chain against a prime-wide total.
+                WHERE ap.proxy_address = ANY(CAST(:proxy_addrs AS BYTEA[]))
                   AND ap.created_at >= CAST(:from_timestamp AS TIMESTAMPTZ)
                   AND ap.created_at <= CAST(:to_timestamp AS TIMESTAMPTZ)
                 GROUP BY rt.id, rt.underlying_token_id, rt.protocol_id, bucket
@@ -1108,7 +1111,7 @@ class AllocationRepository:
             """
         )
         params = {
-            "address_hex": prime_address.hex,
+            "proxy_addrs": [a.to_bytes() for a in proxy_addresses],
             "from_timestamp": from_timestamp,
             "to_timestamp": to_timestamp,
             "bucket_seconds": bucket_seconds,
@@ -1132,7 +1135,7 @@ class AllocationRepository:
                 exc_info=True,
             )
             raise ValueError(
-                f"Database query failed while fetching exposure buckets for prime {prime_address}: {exc}"
+                f"Database query failed while fetching exposure buckets for {proxy_addresses}: {exc}"
             ) from exc
 
         return [

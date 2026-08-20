@@ -550,17 +550,6 @@ function App() {
   // requests.
   const primaryProxyAddress = selectedPrimeGroup?.primaryProxyAddress ?? null;
 
-  // The bucketed chart series below (debt/exposure/total-capital) are
-  // fetched for the primary proxy only, not fanned out (see the
-  // usePrimeChartData call). For a prime with more than one proxy, that makes
-  // those series describe one chain while the headline figures they sit next
-  // to are prime-wide — real history for one chain would silently look like
-  // real history for the whole prime. Chart specs below suppress the series
-  // in that case rather than render a trend line that contradicts its own
-  // headline number.
-  const isMultiChainPrime =
-    (selectedPrimeGroup?.proxyAddresses.length ?? 0) > 1;
-
   useEffect(() => {
     if (!primaryProxyAddress) {
       setRiskCapital(null);
@@ -673,9 +662,9 @@ function App() {
     isLoading: isChartsLoading,
     errorMessage: chartsErrorMessage,
   } = usePrimeChartData(
-    // The activity endpoint resolves this to the prime's whole ALM proxy set
-    // server-side, so its buckets are prime-wide. The exposure, total-capital
-    // and debt series are still scoped to this one proxy.
+    // Any one of the prime's proxies: the activity and exposure endpoints
+    // resolve it prime-wide server-side. Total-capital and debt read
+    // prime-scoped rows, so one address answers for the whole prime there too.
     primaryProxyAddress,
     timeRange.from_timestamp,
     timeRange.to_timestamp,
@@ -962,16 +951,9 @@ function App() {
       },
       {
         // Exposure trend from priced receipt-token balances over time; falls
-        // back to the flat current value when no history is available, and
-        // also when the prime spans more than one proxy — exposureSeries is
-        // fetched for the primary proxy only, while the headline number next
-        // to it (prime_exposure_usd) is prime-wide, so a real per-chain
-        // series here would contradict its own headline figure.
+        // back to the flat current value when no history is available.
         key: 'risk-capital',
-        ...seriesOrFallback(
-          isMultiChainPrime ? [] : exposureSeries,
-          exposureValue,
-        ),
+        ...seriesOrFallback(exposureSeries, exposureValue),
         stroke: 'var(--colors-chart-series-secondary)',
         formatValue: formatCompactUsd,
       },
@@ -1013,7 +995,6 @@ function App() {
     chartFromLabel,
     chartToLabel,
     exposureSeries,
-    isMultiChainPrime,
     primeDebtSeries,
     primeDebtSnapshot?.debt_wad,
     totalCapitalSeries,

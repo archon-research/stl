@@ -168,12 +168,15 @@ class AllocationRepositoryPort(Protocol):
 
     async def list_exposure_buckets(
         self,
-        prime_address: EthAddress,
+        proxy_addresses: Sequence[EthAddress],
         *,
         from_timestamp: datetime,
         to_timestamp: datetime,
         bucket_seconds: float,
         limit: int = 100,
     ) -> list[ExposureBucket]:
-        """Return priced receipt-token exposure aggregated into time buckets."""
+        """Return priced receipt-token exposure aggregated into time buckets.
+
+        Scoped to the given proxies, which the service resolves prime-wide.
+        """
         ...

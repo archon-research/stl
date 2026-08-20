@@ -50,7 +50,7 @@ class AllocationService:
     async def get_total_usd_exposure(self, prime_id: EthAddress) -> Decimal:
         return await self._repository.get_total_usd_exposure(prime_id)
 
-    async def _activity_proxies(self, prime_id: EthAddress | None) -> list[EthAddress] | None:
+    async def _prime_proxies(self, prime_id: EthAddress | None) -> list[EthAddress] | None:
         """Widen one proxy address to every allocation proxy of its prime.
 
         A prime allocates through one proxy per chain, so activity addressed by
@@ -76,7 +76,7 @@ class AllocationService:
         limit: int = 100,
     ) -> list[AllocationActivityEvent]:
         return await self._repository.list_allocation_activity(
-            proxy_addresses=await self._activity_proxies(prime_id),
+            proxy_addresses=await self._prime_proxies(prime_id),
             chain_id=chain_id,
             protocol_name=protocol_name,
             action_type=action_type,
@@ -102,7 +102,7 @@ class AllocationService:
         limit: int = 100,
     ) -> list[AllocationActivityBucket]:
         return await self._repository.list_activity_buckets(
-            proxy_addresses=await self._activity_proxies(prime_id),
+            proxy_addresses=await self._prime_proxies(prime_id),
             chain_id=chain_id,
             protocol_name=protocol_name,
             action_type=action_type,
@@ -141,7 +141,7 @@ class AllocationService:
         limit: int = 100,
     ) -> list[ExposureBucket]:
         return await self._repository.list_exposure_buckets(
-            prime_address,
+            await self._repository.list_prime_proxy_addresses(prime_address),
             from_timestamp=from_timestamp,
             to_timestamp=to_timestamp,
             bucket_seconds=bucket_seconds,
