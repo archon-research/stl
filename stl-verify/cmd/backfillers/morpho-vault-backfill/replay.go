@@ -281,7 +281,8 @@ func replayPartitionPrefixes(from, to int64) []string {
 // checked against, and `to` is operator-supplied: walking the range to measure it
 // allocates a string per 1000 blocks, so a pasted millisecond timestamp exhausts
 // the worker before the ceiling can reject it, and math.MaxInt64 overflows the
-// walk's cursor and never terminates at all.
+// walk's cursor and never terminates at all. This measures width only;
+// maxPlausibleBlock is the companion guard on where the range sits.
 func replayPartitionCount(from, to int64) int64 {
 	return to/partition.BlockRangeSize - from/partition.BlockRangeSize + 1
 }

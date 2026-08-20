@@ -147,6 +147,16 @@ func TestBackfillParams_Resolve(t *testing.T) {
 			in:              BackfillParams{From: 1, To: math.MaxInt64},
 			wantErrContains: "partitions, over the",
 		},
+		// The shape the partition ceiling cannot see: a WIDTH of ten partitions,
+		// so the count guard passes, at a POSITION where the walk building them
+		// steps past math.MaxInt64 on its last iteration. Only a ceiling on `to`
+		// itself rejects it — and it has to reject by arithmetic, since walking
+		// the range to find out is the very loop that never terminates.
+		{
+			name:            "to at the int64 ceiling with small width is rejected",
+			in:              BackfillParams{From: math.MaxInt64 - 9_999, To: math.MaxInt64},
+			wantErrContains: "not a plausible block number",
+		},
 	}
 
 	for _, tc := range tests {
@@ -322,6 +332,30 @@ func TestBackfillWorkflow_RejectsAnAbsurdRangeBeforeBuildingItsPartitionList(t *
 	}
 	if !strings.Contains(err.Error(), "partitions, over the") {
 		t.Errorf("error = %v, want it to name the partition ceiling", err)
+	}
+	if len(*replayed) != 0 {
+		t.Errorf("replayed %v for a rejected range, want none", *replayed)
+	}
+}
+
+// The same rejection, for the range shape the partition ceiling cannot catch: a
+// `to` at the int64 ceiling with a ten-partition width. The workflow builds the
+// prefix list itself, and that walk steps past math.MaxInt64, wraps negative and
+// never terminates — so an unrejected run hangs the single-replica worker rather
+// than failing it.
+func TestBackfillWorkflow_RejectsATopOfInt64RangeBeforeWalkingIt(t *testing.T) {
+	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+	replayed := registerActivityStubs(env, noNewVaultsDiscovered, noEventsReplayed)
+
+	executeBackfill(env, BackfillParams{From: math.MaxInt64 - 9_999, To: math.MaxInt64})
+
+	err := env.GetWorkflowError()
+	if err == nil {
+		t.Fatal("expected a `to` at the int64 ceiling to be rejected")
+	}
+	var appErr *temporalsdk.ApplicationError
+	if !errors.As(err, &appErr) || !appErr.NonRetryable() {
+		t.Errorf("error = %v, want a non-retryable rejection: no attempt of this range can succeed", err)
 	}
 	if len(*replayed) != 0 {
 		t.Errorf("replayed %v for a rejected range, want none", *replayed)
