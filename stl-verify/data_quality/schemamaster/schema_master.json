@@ -275,10 +275,6 @@
       "type": "text",
       "class": "S"
     },
-    "counterparty_address": {
-      "type": "bytea",
-      "class": "S"
-    },
     "created_at": {
       "type": "timestamptz",
       "class": "A",
@@ -461,6 +457,10 @@
     },
     "forecast_step": {
       "type": "int4",
+      "class": "S"
+    },
+    "from_address": {
+      "type": "bytea",
       "class": "S"
     },
     "from_block": {
@@ -1019,6 +1019,10 @@
     "term_days": {
       "type": "int8",
       "class": "R"
+    },
+    "to_address": {
+      "type": "bytea",
+      "class": "S"
     },
     "token_id": {
       "type": "int8",

@@ -124,7 +124,7 @@ func TestHandleBatch_ERC20(t *testing.T) {
 	}
 }
 
-func TestHandleBatch_ThreadsCounterpartyOntoPosition(t *testing.T) {
+func TestHandleBatch_ThreadsTransferPartiesOntoPosition(t *testing.T) {
 	usdc := common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
 	wallet := common.HexToAddress("0x1601843c5e9bc251a3272907010afa41fa18347e")
 	counterparty := common.HexToAddress("0x9999999999999999999999999999999999999999")
@@ -145,14 +145,15 @@ func TestHandleBatch_ThreadsCounterpartyOntoPosition(t *testing.T) {
 					Chain:           "mainnet",
 					TokenType:       "erc20",
 				},
-				Balance:      big.NewInt(1000000),
-				ChainID:      1,
-				BlockNumber:  100,
-				TxHash:       "0xda50e73f9d4722402ae4ec6e506c3726a78fc5f6146b4957bfadc2c1fffc8f8c",
-				LogIndex:     3,
-				TxAmount:     big.NewInt(1000000),
-				Direction:    DirectionIn,
-				Counterparty: &counterparty,
+				Balance:     big.NewInt(1000000),
+				ChainID:     1,
+				BlockNumber: 100,
+				TxHash:      "0xda50e73f9d4722402ae4ec6e506c3726a78fc5f6146b4957bfadc2c1fffc8f8c",
+				LogIndex:    3,
+				TxAmount:    big.NewInt(1000000),
+				Direction:   DirectionIn,
+				From:        &counterparty,
+				To:          &wallet,
 			},
 		},
 	})
@@ -163,9 +164,11 @@ func TestHandleBatch_ThreadsCounterpartyOntoPosition(t *testing.T) {
 	if len(repo.saved) != 1 {
 		t.Fatalf("expected 1 saved position, got %d", len(repo.saved))
 	}
-	got := repo.saved[0].Counterparty
-	if got == nil || *got != counterparty {
-		t.Errorf("counterparty_address = %v, want %s", got, counterparty.Hex())
+	if got := repo.saved[0].FromAddress; got == nil || *got != counterparty {
+		t.Errorf("from_address = %v, want %s", got, counterparty.Hex())
+	}
+	if got := repo.saved[0].ToAddress; got == nil || *got != wallet {
+		t.Errorf("to_address = %v, want %s", got, wallet.Hex())
 	}
 }
 

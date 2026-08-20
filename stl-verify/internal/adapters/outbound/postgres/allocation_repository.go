@@ -174,19 +174,14 @@ func (r *AllocationRepository) buildInsertArgs(
 		underlyingValue = toNumeric(pos.Underlying.Value, pos.Underlying.AssetDecimals)
 	}
 
-	var counterparty []byte
-	if pos.Counterparty != nil {
-		counterparty = pos.Counterparty.Bytes()
-	}
-
 	query := `
 		INSERT INTO allocation_position (
 			chain_id, token_id, prime_id, proxy_address,
 			balance, scaled_balance,
 			block_number, block_version,
 			tx_hash, log_index, tx_amount, direction, created_at, build_id,
-			underlying_value, underlying_token_id, counterparty_address
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+			underlying_value, underlying_token_id, from_address, to_address
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
 		ON CONFLICT (chain_id, token_id, prime_id, proxy_address, block_number, block_version, tx_hash, log_index, direction, processing_version, created_at) DO NOTHING
 	`
 
@@ -207,10 +202,20 @@ func (r *AllocationRepository) buildInsertArgs(
 		int(r.buildID),
 		underlyingValue,
 		underlyingTokenID,
-		counterparty,
+		encodeAddress(pos.FromAddress),
+		encodeAddress(pos.ToAddress),
 	}
 
 	return query, args, nil
+}
+
+// encodeAddress keeps a nil address NULL, distinct from the zero address, which
+// is a genuine mint/burn party and must persist as 20 zero bytes.
+func encodeAddress(addr *common.Address) []byte {
+	if addr == nil {
+		return nil
+	}
+	return addr.Bytes()
 }
 
 // encodeTxHash returns the on-chain transaction hash for a position, or the

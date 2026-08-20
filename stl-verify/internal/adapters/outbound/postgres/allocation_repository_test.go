@@ -232,41 +232,61 @@ func TestBuildInsertArgs_UnderlyingValueUsesAssetDecimals(t *testing.T) {
 	}
 }
 
-func TestBuildInsertArgs_CounterpartyAddress(t *testing.T) {
+func TestBuildInsertArgs_TransferParties(t *testing.T) {
+	proxy := common.HexToAddress("0x1601843c5e9bc251a3272907010afa41fa18347e")
 	counterparty := common.HexToAddress("0x9999999999999999999999999999999999999999")
+	zero := common.Address{}
+	txHash := "0xda50e73f9d4722402ae4ec6e506c3726a78fc5f6146b4957bfadc2c1fffc8f8c"
 
-	newPos := func(direction string, cp *common.Address, txHash string) *entity.AllocationPosition {
+	newPos := func(direction string, from, to *common.Address, tx string) *entity.AllocationPosition {
 		return &entity.AllocationPosition{
 			ChainID:       1,
 			TokenAddress:  common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"),
 			TokenDecimals: 6,
+			ProxyAddress:  proxy,
 			Balance:       big.NewInt(1),
-			TxHash:        txHash,
+			TxHash:        tx,
 			TxAmount:      big.NewInt(1),
 			Direction:     direction,
-			Counterparty:  cp,
+			FromAddress:   from,
+			ToAddress:     to,
 		}
 	}
 
 	tests := []struct {
-		name string
-		pos  *entity.AllocationPosition
-		want []byte
+		name             string
+		pos              *entity.AllocationPosition
+		wantFrom, wantTo []byte
 	}{
 		{
-			name: "transfer row stores the other side of the log",
-			pos:  newPos("in", &counterparty, "0xda50e73f9d4722402ae4ec6e506c3726a78fc5f6146b4957bfadc2c1fffc8f8c"),
-			want: counterparty.Bytes(),
+			name:     "inbound transfer stores both sides as decoded",
+			pos:      newPos("in", &counterparty, &proxy, txHash),
+			wantFrom: counterparty.Bytes(),
+			wantTo:   proxy.Bytes(),
 		},
 		{
-			name: "mint or burn stores 20 zero bytes, not NULL",
-			pos:  newPos("in", &common.Address{}, "0xda50e73f9d4722402ae4ec6e506c3726a78fc5f6146b4957bfadc2c1fffc8f8c"),
-			want: make([]byte, common.AddressLength),
+			name:     "outbound transfer stores both sides as decoded",
+			pos:      newPos("out", &proxy, &counterparty, txHash),
+			wantFrom: proxy.Bytes(),
+			wantTo:   counterparty.Bytes(),
 		},
 		{
-			name: "sweep row stores NULL",
-			pos:  newPos("sweep", nil, ""),
-			want: nil,
+			name:     "mint stores 20 zero bytes, not NULL",
+			pos:      newPos("in", &zero, &proxy, txHash),
+			wantFrom: make([]byte, common.AddressLength),
+			wantTo:   proxy.Bytes(),
+		},
+		{
+			name:     "burn stores 20 zero bytes, not NULL",
+			pos:      newPos("out", &proxy, &zero, txHash),
+			wantFrom: proxy.Bytes(),
+			wantTo:   make([]byte, common.AddressLength),
+		},
+		{
+			name:     "sweep row stores NULL on both",
+			pos:      newPos("sweep", nil, nil, ""),
+			wantFrom: nil,
+			wantTo:   nil,
 		},
 	}
 
@@ -277,12 +297,19 @@ func TestBuildInsertArgs_CounterpartyAddress(t *testing.T) {
 			if err != nil {
 				t.Fatalf("buildInsertArgs: %v", err)
 			}
-			got, ok := args[16].([]byte) // $17
+			gotFrom, ok := args[16].([]byte) // $17
 			if !ok {
 				t.Fatalf("expected args[16] to be []byte, got %T", args[16])
 			}
-			if !bytes.Equal(got, tt.want) {
-				t.Errorf("counterparty_address = %x, want %x", got, tt.want)
+			gotTo, ok := args[17].([]byte) // $18
+			if !ok {
+				t.Fatalf("expected args[17] to be []byte, got %T", args[17])
+			}
+			if !bytes.Equal(gotFrom, tt.wantFrom) {
+				t.Errorf("from_address = %x, want %x", gotFrom, tt.wantFrom)
+			}
+			if !bytes.Equal(gotTo, tt.wantTo) {
+				t.Errorf("to_address = %x, want %x", gotTo, tt.wantTo)
 			}
 		})
 	}

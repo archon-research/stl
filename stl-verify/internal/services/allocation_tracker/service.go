@@ -334,7 +334,8 @@ func (s *Service) buildSnapshots(
 			snap.LogIndex = t.LogIndex
 			snap.TxAmount = t.Amount
 			snap.Direction = t.Direction
-			snap.Counterparty = &t.Counterparty
+			snap.From = &t.From
+			snap.To = &t.To
 		}
 		snapshots = append(snapshots, snap)
 	}

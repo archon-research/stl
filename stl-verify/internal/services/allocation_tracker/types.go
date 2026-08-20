@@ -113,9 +113,10 @@ type PositionSnapshot struct {
 	LogIndex  int
 	TxAmount  *big.Int
 	Direction Direction
-	// Counterparty carried from the triggering TransferEvent; nil for a sweep,
-	// which has no transfer. See the field comment there.
-	Counterparty *common.Address
+	// From and To carried from the triggering TransferEvent; nil for a sweep,
+	// which has no transfer. See the field comments there.
+	From *common.Address
+	To   *common.Address
 
 	BlockTimestamp time.Time // block timestamp for hypertable partition column
 }

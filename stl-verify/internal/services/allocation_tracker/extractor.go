@@ -18,10 +18,10 @@ func init() {
 
 type TransferEvent struct {
 	TokenAddress common.Address
-	// Counterparty is the side of the Transfer that is not ProxyAddress: the
-	// sender for DirectionIn, the recipient for DirectionOut. The zero address
-	// is a genuine value (mint/burn), not "unknown".
-	Counterparty common.Address
+	// From and To are both sides of the Transfer log as decoded, whichever one is
+	// the proxy. The zero address is a genuine value (mint/burn), not "unknown".
+	From         common.Address
+	To           common.Address
 	Amount       *big.Int
 	Direction    Direction
 	Star         string
@@ -74,7 +74,8 @@ func (e *TransferExtractor) Extract(receipt TransactionReceipt) []*TransferEvent
 		if fromIsProxy {
 			events = append(events, &TransferEvent{
 				TokenAddress: log.Address,
-				Counterparty: to,
+				From:         from,
+				To:           to,
 				Amount:       new(big.Int).Set(amount),
 				Direction:    DirectionOut,
 				Star:         proxyFrom.Star,
@@ -86,7 +87,8 @@ func (e *TransferExtractor) Extract(receipt TransactionReceipt) []*TransferEvent
 		if toIsProxy {
 			events = append(events, &TransferEvent{
 				TokenAddress: log.Address,
-				Counterparty: from,
+				From:         from,
+				To:           to,
 				Amount:       new(big.Int).Set(amount),
 				Direction:    DirectionIn,
 				Star:         proxyTo.Star,
