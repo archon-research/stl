@@ -2,10 +2,42 @@ package archivingwire
 
 import (
 	"context"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
+
+// TestWaitWithBudget_GivesUpOnWritesThatOutlastTheBudget pins the bound the
+// deferred archive drain needs: it runs after the service's shutdown window has
+// already closed, inside what the kubelet's grace period leaves, so waiting on
+// a stuck write until it finishes is what gets the process SIGKILLed — losing
+// the final telemetry flush along with the write.
+func TestWaitWithBudget_GivesUpOnWritesThatOutlastTheBudget(t *testing.T) {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	stuck := make(chan struct{})
+	t.Cleanup(func() { close(stuck); wg.Wait() })
+	go func() {
+		defer wg.Done()
+		<-stuck
+	}()
+
+	if finished := waitWithBudget(&wg, 20*time.Millisecond); finished {
+		t.Error("expected the drain to give up on a write that outlasts its budget")
+	}
+}
+
+// TestWaitWithBudget_ReportsWritesThatFinishInTime is the counterpart: a drain
+// that completes must say so, so the caller does not warn about lost writes.
+func TestWaitWithBudget_ReportsWritesThatFinishInTime(t *testing.T) {
+	var wg sync.WaitGroup
+
+	if finished := waitWithBudget(&wg, time.Minute); !finished {
+		t.Error("expected an idle wait group to drain immediately")
+	}
+}
 
 func TestEnabled(t *testing.T) {
 	tests := []struct {

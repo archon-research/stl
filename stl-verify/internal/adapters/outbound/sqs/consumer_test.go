@@ -12,7 +12,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
+	smithy "github.com/aws/smithy-go"
 
+	"github.com/archon-research/stl/stl-verify/internal/common/sqsutil"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -61,6 +64,7 @@ type blockingReceiveAPI struct {
 	calls       int
 	deadline    time.Time
 	hasDeadline bool
+	options     sqs.Options
 }
 
 func newBlockingReceiveAPI() *blockingReceiveAPI {
@@ -70,8 +74,8 @@ func newBlockingReceiveAPI() *blockingReceiveAPI {
 	}
 }
 
-func (f *blockingReceiveAPI) ReceiveMessage(ctx context.Context, _ *sqs.ReceiveMessageInput, _ ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
-	f.recordCall(ctx)
+func (f *blockingReceiveAPI) ReceiveMessage(ctx context.Context, _ *sqs.ReceiveMessageInput, optFns ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
+	f.recordCall(ctx, optFns)
 
 	select {
 	case <-ctx.Done():
@@ -85,15 +89,25 @@ func (f *blockingReceiveAPI) ReceiveMessage(ctx context.Context, _ *sqs.ReceiveM
 	}
 }
 
-func (f *blockingReceiveAPI) recordCall(ctx context.Context) {
+func (f *blockingReceiveAPI) recordCall(ctx context.Context, optFns []func(*sqs.Options)) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
 	f.deadline, f.hasDeadline = ctx.Deadline()
+	f.options = sqs.Options{}
+	for _, fn := range optFns {
+		fn(&f.options)
+	}
 	select {
 	case f.entered <- struct{}{}:
 	default:
 	}
+}
+
+func (f *blockingReceiveAPI) receiveOptions() sqs.Options {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.options
 }
 
 func (f *blockingReceiveAPI) callCount() int {
@@ -186,6 +200,36 @@ func TestConsumer_ReceiveMessages_SkipsTheCallWhenAlreadyCancelled(t *testing.T)
 	}
 }
 
+// TestConsumer_ReceiveMessages_DisablesSDKRetriesForThePoll pins the contract
+// pollBudget depends on: with the SDK's default standard retryer a retried
+// ReceiveMessage needs another full WaitTimeSeconds, which the budget would cut
+// off mid-flight — abandoning a poll SQS may already have assigned a message
+// to, and stranding it for the visibility timeout. One attempt per poll keeps
+// retry where the loop can pace it.
+func TestConsumer_ReceiveMessages_DisablesSDKRetriesForThePoll(t *testing.T) {
+	api := newBlockingReceiveAPI()
+	close(api.release)
+	consumer := newTestConsumer(api)
+
+	if _, err := consumer.ReceiveMessages(context.Background(), 1); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	retryer := api.receiveOptions().Retryer
+	if retryer == nil {
+		t.Fatal("expected the poll to override the SDK retryer")
+	}
+	if got := retryer.MaxAttempts(); got != 1 {
+		t.Errorf("expected one attempt per poll, got %d", got)
+	}
+	// A throttle is the error the SDK's default retryer would retry, each retry
+	// costing another full WaitTimeSeconds.
+	throttle := &smithy.GenericAPIError{Code: "ThrottlingException", Message: "Rate exceeded"}
+	if retryer.IsErrorRetryable(throttle) {
+		t.Error("expected the poll retryer to refuse retries, leaving retry to the poll loop")
+	}
+}
+
 func TestConsumer_ReceiveMessages_BoundsThePollByWaitTimePlusSlack(t *testing.T) {
 	api := newBlockingReceiveAPI()
 	close(api.release)
@@ -202,6 +246,37 @@ func TestConsumer_ReceiveMessages_BoundsThePollByWaitTimePlusSlack(t *testing.T)
 	want := time.Duration(ConfigDefaults().WaitTimeSeconds)*time.Second + receiveSlack
 	if remaining := time.Until(deadline); remaining > want || remaining < want-time.Second {
 		t.Fatalf("expected a deadline of about %s, got %s remaining", want, remaining)
+	}
+}
+
+// TestNewConsumer_RejectsAWaitTimeThatOutlastsTheShutdownWindow covers the
+// per-worker knob nothing validated: SQS_WAIT_TIME (e.g. morpho-indexer's
+// -wait) sizes pollBudget, and a poll that cannot finish inside
+// lifecycle.ShutdownTimeout means Stop() is abandoned mid-poll and the message
+// SQS handed to it is stranded for the visibility timeout on every rollout —
+// with no signal, because the guardrail test only ever sees the default.
+func TestNewConsumer_RejectsAWaitTimeThatOutlastsTheShutdownWindow(t *testing.T) {
+	tooLong := int32((lifecycle.ShutdownTimeout-sqsutil.ShutdownCleanupTimeout-receiveSlack)/time.Second) + 1
+
+	tests := []struct {
+		name            string
+		waitTimeSeconds int32
+		wantErr         bool
+	}{
+		{"the SQS long-poll maximum fits", 20, false},
+		{"unset falls back to the default and fits", 0, false},
+		{"a wait time that outlasts the shutdown window is rejected", tooLong, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewConsumer(aws.Config{}, Config{
+				QueueURL:        "https://sqs.test/queue.fifo",
+				WaitTimeSeconds: tt.waitTimeSeconds,
+			}, slog.Default())
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("NewConsumer(WaitTimeSeconds=%d) error = %v, wantErr %v", tt.waitTimeSeconds, err, tt.wantErr)
+			}
+		})
 	}
 }
 
