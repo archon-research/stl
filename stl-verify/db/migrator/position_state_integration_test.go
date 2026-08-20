@@ -976,13 +976,21 @@ func TestPositionState(t *testing.T) {
 		// Owner-side REVOKE (#737: a stray fix-migration must fail loudly; nothing FKs position_state,
 		// so the ref-table FK/KEY SHARE caveat does not apply). Asserted via the catalogue because the
 		// harness superuser bypasses ACLs.
-		var ownUpd, ownDel bool
-		if err := pool.QueryRow(ctx,
-			`SELECT has_table_privilege('stl_migrator','position_state','UPDATE'), has_table_privilege('stl_migrator','position_state','DELETE')`).Scan(&ownUpd, &ownDel); err != nil {
+		// The owner-side REVOKE is guarded by role existence (roles come from the infra bootstrap, not
+		// migrations), so assert it only where the role exists — as the roles migration's own harness does.
+		var migratorExists bool
+		if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'stl_migrator')`).Scan(&migratorExists); err != nil {
 			t.Fatal(err)
 		}
-		if ownUpd || ownDel {
-			t.Errorf("owner-side privileges present (UPDATE=%v DELETE=%v); want both revoked", ownUpd, ownDel)
+		if migratorExists {
+			var ownUpd, ownDel bool
+			if err := pool.QueryRow(ctx,
+				`SELECT has_table_privilege('stl_migrator','position_state','UPDATE'), has_table_privilege('stl_migrator','position_state','DELETE')`).Scan(&ownUpd, &ownDel); err != nil {
+				t.Fatal(err)
+			}
+			if ownUpd || ownDel {
+				t.Errorf("owner-side privileges present (UPDATE=%v DELETE=%v); want both revoked", ownUpd, ownDel)
+			}
 		}
 		// Reclassify the same position as the role: forces the cls ON CONFLICT DO UPDATE arm, which
 		// needs the column-scoped UPDATE grant on position_classification (deleting that grant line

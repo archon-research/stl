@@ -164,8 +164,21 @@ GRANT SELECT ON position_state TO stl_readonly;
 -- (nothing FKs position_state, so the ref-table FK/KEY SHARE caveat does not apply here); a deliberate
 -- fix re-grants explicitly first. Enforced test-side by TestConvertedTablesAreAppendOnly.
 GRANT SELECT, INSERT ON position_state TO stl_readwrite;
-REVOKE UPDATE, DELETE, TRUNCATE ON position_state FROM stl_readwrite;
-REVOKE UPDATE, DELETE, TRUNCATE ON position_state FROM stl_migrator;
+-- Guarded by role existence, mirroring security_master (20260713_140000): the roles are created by the
+-- infra bootstrap, not by migrations, so the per-database test harness (which migrates as its own
+-- bootstrap superuser) has neither role. Revoking the OWNER's UPDATE is safe here only because nothing
+-- FKs position_state — a future FK against it would hit the RI-probe privilege trap that
+-- 20260714_160000 fixed for the reference tables (restore owner UPDATE + a BEFORE UPDATE OR DELETE
+-- trigger instead).
+DO $$
+DECLARE role text;
+BEGIN
+    FOREACH role IN ARRAY ARRAY['stl_readwrite','stl_migrator'] LOOP
+        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role) THEN
+            EXECUTE format('REVOKE UPDATE, DELETE, TRUNCATE ON position_state FROM %I', role);
+        END IF;
+    END LOOP;
+END $$;
 
 -- position_classification is the RECORDED EXCEPTION to the append-only default (#737): a one-row-per-
 -- position current-state table whose documented purpose is the guarded in-place reclassification, so its
