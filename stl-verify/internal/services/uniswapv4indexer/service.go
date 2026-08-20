@@ -40,8 +40,9 @@ type UniswapV4ServiceDeps struct {
 // time, so no synchronisation is required on any field. All per-block work
 // happens in local variables inside handleBlock; the only cross-block state is
 // the pool registry, the snapshot tracker (deploy-gate tracking; sweepBlocks=0
-// disables its periodic-sweep half, see NewUniswapV4Service), and baselineSeen
-// (which pools' initialized ticks have already been enumerated once).
+// disables its periodic-sweep half, see NewUniswapV4Service), baselineSeen and
+// neverIndexed. The last two are seeded from the database at construction, so
+// neither is reset by a restart.
 type UniswapV4Service struct {
 	poolsByID   map[common.Hash]RegisteredPool
 	poolsByRow  map[int64]RegisteredPool
@@ -57,6 +58,7 @@ type UniswapV4Service struct {
 
 	tracker      *dexconsumer.SnapshotTracker
 	baselineSeen map[int64]bool
+	neverIndexed map[int64]bool
 }
 
 func (d UniswapV4ServiceDeps) validate() error {
@@ -92,7 +94,10 @@ func (d UniswapV4ServiceDeps) validate() error {
 // pools fresh. A dynamic-fee pool's lp_fee has no log to ride on and no sweep to
 // fall back to, which is why the registry excludes it from snapshots
 // (snapshot_supported = false) while still indexing its events.
-func NewUniswapV4Service(deps UniswapV4ServiceDeps) (*UniswapV4Service, error) {
+//
+// It reads PoolIDsEverSnapshotted once here, which is why it takes a ctx: that
+// read is what makes baselineSeen and neverIndexed survive a restart.
+func NewUniswapV4Service(ctx context.Context, deps UniswapV4ServiceDeps) (*UniswapV4Service, error) {
 	if err := deps.validate(); err != nil {
 		return nil, err
 	}
@@ -103,8 +108,14 @@ func NewUniswapV4Service(deps UniswapV4ServiceDeps) (*UniswapV4Service, error) {
 	if err != nil {
 		return nil, err
 	}
+	indexed, err := deps.Repo.PoolIDsEverSnapshotted(ctx, deps.ChainID)
+	if err != nil {
+		return nil, fmt.Errorf("reading which uniswap v4 pools have ever been indexed on chain %d: %w", deps.ChainID, err)
+	}
 
-	return &UniswapV4Service{
+	// baselineSeen IS the ever-snapshotted set: see PoolIDsEverSnapshotted.
+	baselineSeen := seenSet(indexed)
+	svc := &UniswapV4Service{
 		poolsByID:    indexPoolsByHash(deps.Pools),
 		poolsByRow:   indexPoolsByRowID(deps.Pools),
 		pools:        deps.Pools,
@@ -117,8 +128,49 @@ func NewUniswapV4Service(deps UniswapV4ServiceDeps) (*UniswapV4Service, error) {
 		logger:       deps.Logger,
 		telemetry:    deps.Telemetry,
 		tracker:      dexconsumer.NewSnapshotTracker(0),
-		baselineSeen: make(map[int64]bool),
-	}, nil
+		baselineSeen: baselineSeen,
+		neverIndexed: neverIndexedPools(deps.Pools, baselineSeen),
+	}
+	svc.reportNeverIndexed(ctx)
+	return svc, nil
+}
+
+func seenSet(indexed []int64) map[int64]bool {
+	seen := make(map[int64]bool, len(indexed))
+	for _, id := range indexed {
+		seen[id] = true
+	}
+	return seen
+}
+
+// neverIndexedPools skips pools the registry excludes from snapshots: they
+// produce no state or tick rows by design, so counting them would leave the
+// alert permanently firing.
+func neverIndexedPools(pools []RegisteredPool, indexed map[int64]bool) map[int64]bool {
+	never := make(map[int64]bool)
+	for _, pool := range SnapshottablePools(pools) {
+		if !indexed[pool.ID] {
+			never[pool.ID] = true
+		}
+	}
+	return never
+}
+
+// reportNeverIndexed publishes the count and, while it is non-zero, names the
+// pools: the gauge is what alerts, the log is what says which registry row to
+// check (the gauge carries no per-pool label, on purpose).
+func (s *UniswapV4Service) reportNeverIndexed(ctx context.Context) {
+	s.telemetry.RecordPoolsNeverIndexed(ctx, len(s.neverIndexed))
+	if len(s.neverIndexed) == 0 {
+		return
+	}
+	ids := slices.Sorted(maps.Keys(s.neverIndexed))
+	hashes := make([]string, len(ids))
+	for i, id := range ids {
+		hashes[i] = s.poolsByRow[id].PoolIDHash.Hex()
+	}
+	s.logger.Warn("uniswap-v4 pools have never produced a state or tick row",
+		"chainId", s.chainID, "count", len(ids), "poolRowIds", ids, "poolIds", hashes)
 }
 
 // poolManagerFor returns the one PoolManager address the registry shares. One
@@ -222,11 +274,29 @@ func (s *UniswapV4Service) handleBlock(ctx context.Context, event outbound.Block
 	}
 
 	s.markSnapshotted(dueSet, baselined, coords.number, coords.version)
+	s.markIndexed(ctx, dueSet)
 	// Recorded only after a successful commit, so the alerts compare pools this
 	// block touched against the rows that same block persisted.
 	s.telemetry.RecordPoolsTouched(ctx, len(acc.touchedIDs))
 	s.telemetry.RecordStateRows(ctx, int(stateRows))
 	return nil
+}
+
+// markIndexed clears the pools this block snapshotted from the never-indexed
+// set and republishes the gauge when it shrank. Every due pool got a state row
+// in the commit that just succeeded — an ON CONFLICT DO NOTHING replay means the
+// row was already there — so a due pool is indexed either way.
+func (s *UniswapV4Service) markIndexed(ctx context.Context, dueSet []RegisteredPool) {
+	changed := false
+	for _, pool := range dueSet {
+		if s.neverIndexed[pool.ID] {
+			delete(s.neverIndexed, pool.ID)
+			changed = true
+		}
+	}
+	if changed {
+		s.reportNeverIndexed(ctx)
+	}
 }
 
 // dueSetForBlock selects the pools this block must snapshot: everything

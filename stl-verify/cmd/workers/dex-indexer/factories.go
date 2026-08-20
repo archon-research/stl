@@ -162,7 +162,7 @@ func (uniswapV4Factory) BuildHandler(ctx context.Context, deps *dexbootstrap.Dep
 	protocolID := poolRows[0].ProtocolID
 	eventWriter := dexconsumer.NewProtocolEventWriter(protocolID, deps.EventRepo)
 
-	service, err := uniswapv4indexer.NewUniswapV4Service(uniswapv4indexer.UniswapV4ServiceDeps{
+	service, err := uniswapv4indexer.NewUniswapV4Service(ctx, uniswapv4indexer.UniswapV4ServiceDeps{
 		Pools:       pools,
 		Multicaller: deps.Multicaller,
 		Repo:        repo,
