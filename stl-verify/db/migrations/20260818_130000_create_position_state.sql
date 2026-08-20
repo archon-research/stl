@@ -180,18 +180,6 @@ BEGIN
     END LOOP;
 END $$;
 
--- position_classification is the RECORDED EXCEPTION to the append-only default (#737): a one-row-per-
--- position current-state table whose documented purpose is the guarded in-place reclassification, so its
--- UPDATE channel is sanctioned and recorded in db/migrations/AGENTS.md citing VEC-401/VEC-402. The channel
--- stays column-scoped to exactly the columns the cls upsert SETs (deal_type_code, direction,
--- change_reason, valid_from). collateral_status is deliberately NOT grantable: nothing writes it yet (see
--- the collateral_status note below) — the future materializer PR that handles it adds the column grant
--- together with the consistency logic. position_id (identity) stays unwritable.
-GRANT SELECT, INSERT ON position_classification TO stl_readwrite;   -- the upsert's INSERT arm (idempotent re-grant)
-GRANT SELECT ON ref_deal_type TO stl_readwrite;                      -- the direction lookup join (idempotent re-grant)
-REVOKE UPDATE, DELETE, TRUNCATE ON position_classification FROM stl_readwrite;
-GRANT UPDATE (deal_type_code, direction, change_reason, valid_from) ON position_classification TO stl_readwrite;
-
 -- Classification provenance (review :276): record WHAT was classified, as data on the row, so the
 -- recency invariant is inspectable at the table instead of living only in the materializer. These are
 -- the coordinates of the classifying observation; the validating trigger below re-derives them from
@@ -206,6 +194,23 @@ ALTER TABLE position_classification
 COMMENT ON COLUMN position_classification.as_of_block IS 'Provenance. block_number of the observation this classification was derived from (the canonical latest non-zero at write time). Validated against position_state by trigger_validate_position_classification.';
 COMMENT ON COLUMN position_classification.as_of_block_version IS 'Provenance. block_version of the classifying observation.';
 COMMENT ON COLUMN position_classification.as_of_processing_version IS 'Provenance. processing_version of the classifying observation.';
+
+-- position_classification is the RECORDED EXCEPTION to the append-only default (#737): a one-row-per-
+-- position current-state table whose documented purpose is the guarded in-place reclassification, so its
+-- UPDATE channel is sanctioned and recorded in db/migrations/AGENTS.md citing VEC-401/VEC-402. The channel
+-- stays column-scoped to exactly the columns the cls upsert SETs (deal_type_code, direction,
+-- change_reason, valid_from). collateral_status is deliberately NOT grantable: nothing writes it yet (see
+-- the collateral_status note below) — the future materializer PR that handles it adds the column grant
+-- together with the consistency logic. position_id (identity) stays unwritable.
+GRANT SELECT, INSERT ON position_classification TO stl_readwrite;   -- the upsert's INSERT arm (idempotent re-grant)
+GRANT SELECT ON ref_deal_type TO stl_readwrite;                      -- the direction lookup join (idempotent re-grant)
+REVOKE UPDATE, DELETE, TRUNCATE ON position_classification FROM stl_readwrite;
+-- The column list must match the cls upsert's SET list exactly, including the provenance columns:
+-- ON CONFLICT DO UPDATE requires UPDATE privilege on every column it sets, checked at executor
+-- start whether or not a conflict occurs, so a missing column here refuses the whole statement.
+GRANT UPDATE (deal_type_code, direction, change_reason, valid_from,
+              as_of_block, as_of_block_version, as_of_processing_version)
+    ON position_classification TO stl_readwrite;
 
 -- Table-level enforcement of the recency invariant (review :276: "the invariant lives only in this
 -- caller ... enforceable at the table"). Any writer — the materializer, a fix-migration, a future

@@ -1275,38 +1275,52 @@ func TestPositionState(t *testing.T) {
 	})
 
 	t.Run("pg_temp shadows of the permanent tables are defeated (:312)", func(t *testing.T) {
-		// PostgreSQL searches the session temp schema FIRST for relation names; the function's relation
-		// references are schema-qualified (and its search_path pinned FROM CURRENT), so a pre-created
-		// pg_temp shadow must not absorb the writes. Empirically: FROM CURRENT alone did NOT defeat
-		// this (pg_temp is implicitly first when not explicitly listed) — the qualification is what does.
+		// PostgreSQL searches the session temp schema FIRST for relation names, so a pre-created
+		// pg_temp shadow must not absorb the writes. Empirically: SET search_path FROM CURRENT alone
+		// did NOT defeat this (pg_temp is implicitly first when not explicitly listed) — the
+		// schema-qualification in the function is what does.
+		//
+		// Everything runs inside ONE transaction with ON COMMIT DROP temp tables and a rollback, so
+		// the shadows cannot outlive this subtest. Temp tables live for the whole SESSION, and this
+		// connection goes back to the pool: a leaked shadow would silently redirect every later
+		// test's unqualified reads to an empty table (that exact leak turned this suite red once).
 		conn, err := pool.Acquire(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer conn.Release()
+		tx, err := conn.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback(ctx)
 		for _, ddl := range []string{
-			`CREATE TEMP TABLE position_state (LIKE public.position_state INCLUDING ALL)`,
-			`CREATE TEMP TABLE position_classification (LIKE public.position_classification INCLUDING ALL)`,
-			`CREATE TEMP TABLE ref_deal_type (LIKE public.ref_deal_type INCLUDING ALL)`,
-			`CREATE OR REPLACE VIEW vshadow AS ` + valuesOf(row("ishadow", "aa", 5, "LOAN", 100, 0, 0)),
+			`CREATE TEMP TABLE position_state (LIKE public.position_state INCLUDING ALL) ON COMMIT DROP`,
+			`CREATE TEMP TABLE position_classification (LIKE public.position_classification INCLUDING ALL) ON COMMIT DROP`,
+			`CREATE TEMP TABLE ref_deal_type (LIKE public.ref_deal_type INCLUDING ALL) ON COMMIT DROP`,
 		} {
-			if _, err := conn.Exec(ctx, ddl); err != nil {
+			if _, err := tx.Exec(ctx, ddl); err != nil {
 				t.Fatal(err)
 			}
 		}
-		if _, err := conn.Exec(ctx, `SELECT materialize_position_projection('vshadow'::regclass, 'shadowed')`); err != nil {
+		if _, err := tx.Exec(ctx, `CREATE OR REPLACE VIEW vshadow AS `+valuesOf(row("ishadow", "aa", 5, "LOAN", 100, 0, 0))); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(ctx, `SELECT materialize_position_projection('vshadow'::regclass, 'shadowed')`); err != nil {
 			t.Fatalf("run under shadow tables: %v", err)
 		}
 		var realRows, shadowRows int
-		if err := conn.QueryRow(ctx, `SELECT count(*) FROM public.position_state WHERE position_id = position_id(1,10,'ishadow','aa')`).Scan(&realRows); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM public.position_state WHERE position_id = position_id(1,10,'ishadow','aa')`).Scan(&realRows); err != nil {
 			t.Fatal(err)
 		}
-		if err := conn.QueryRow(ctx, `SELECT count(*) FROM pg_temp.position_state`).Scan(&shadowRows); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM pg_temp.position_state`).Scan(&shadowRows); err != nil {
 			t.Fatal(err)
 		}
 		if realRows != 1 || shadowRows != 0 {
 			t.Errorf("shadow absorbed the write: public=%d shadow=%d; want 1/0", realRows, shadowRows)
 		}
+		// Rolled back by the deferred Rollback: the shadows and the probe row both disappear, so the
+		// pooled connection is returned clean.
 	})
 
 	// --- table-level enforcement of the recency invariant (:276) -----------------------------------
