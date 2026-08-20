@@ -401,9 +401,11 @@ func (a *backfillActivities) ReplayPartition(ctx context.Context, work partition
 		return 0, nil
 	}
 
+	// Structural: the topics come from the ABI embedded in this binary, so a
+	// failure here is a defect only a new build can clear.
 	topics, err := morpho_indexer.VaultV2StructuredEventTopics()
 	if err != nil {
-		return 0, fmt.Errorf("deriving VaultV2 structured topics: %w", err)
+		return 0, fmt.Errorf("deriving VaultV2 structured topics: %w: %w", err, errStructuralData)
 	}
 
 	events, err = replayPartition(ctx, a.logger, a.s3Reader, svc, blocktime.New(a.ethClient),
