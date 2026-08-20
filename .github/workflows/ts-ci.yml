@@ -85,6 +85,10 @@ jobs:
       - name: Run router URL regression test
         run: npm run test:routes -w ui
 
+      # No codegen needed: @stl-verify/mocks reaches nothing under #styled-system/*.
+      - name: Run offline mock API self-test
+        run: npm run test:mocks -w mocks
+
       # The committed types are what every call site is checked against, so a
       # schema change without a regeneration leaves the UI compiling happily
       # against an API that no longer exists. python-ci gates the schema against

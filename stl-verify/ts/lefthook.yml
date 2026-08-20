@@ -1,19 +1,34 @@
 # Lefthook configuration for TypeScript code
 # This file is extended by the root lefthook.yml
+#
+# oxlint and oxfmt each take one config, and the two workspaces have their own
+# (ui carries the design-system boundaries preset, mocks does not).
 
 _ts_root: &ts_root 'ts/'
 
 pre-commit:
   parallel: true
   commands:
-    ts-oxlint:
+    ui-oxlint:
       root: *ts_root
       glob: 'ui/**/*.{ts,tsx}'
-      run: npx --no-install oxlint -c ui/.oxlintrc.ts --fix {staged_files}
+      run: npx --no-install oxlint -c ui/oxlint.config.ts --fix {staged_files}
       stage_fixed: true
 
-    ts-oxfmt:
+    ui-oxfmt:
       root: *ts_root
       glob: 'ui/**/*.{ts,tsx,css,html,json}'
       run: npx --no-install oxfmt -c ui/.oxfmtrc.ts --write {staged_files}
+      stage_fixed: true
+
+    mocks-oxlint:
+      root: *ts_root
+      glob: 'mocks/**/*.{ts,mjs}'
+      run: npx --no-install oxlint -c mocks/oxlint.config.ts --fix {staged_files}
+      stage_fixed: true
+
+    mocks-oxfmt:
+      root: *ts_root
+      glob: 'mocks/**/*.{ts,mjs,json}'
+      run: npx --no-install oxfmt -c mocks/.oxfmtrc.ts --write {staged_files}
       stage_fixed: true
