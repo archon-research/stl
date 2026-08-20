@@ -1,6 +1,6 @@
-// Package main implements the morpho-v2-bootstrap Temporal cronjob: a one-shot,
-// operator-triggered repair for Morpho VaultV2 vaults that were discovered
-// before VaultV2 discovery became atomic (VEC-218).
+// Package main implements the morpho-v2-bootstrap Temporal worker: a one-shot,
+// hand-started repair for Morpho VaultV2 vaults that were discovered before
+// VaultV2 discovery became atomic (VEC-218).
 //
 // # What it heals
 //
@@ -13,22 +13,27 @@
 // enumerates every V2 vault's current adapter set at a pinned finalized block and
 // snapshots each adapter's realAssets().
 //
-// # How to trigger it (the button)
+// # How to start a run
 //
-// The schedule is created PAUSED and with no interval, so deploying this worker
-// never starts a run. To run it:
+// This carries no schedule: the worker idles on its task queue, so deploying it
+// never starts a run. An operator starts one exactly the way they start the
+// morpho-vault-backfill, and supplies nothing — the run reads the chain from the
+// environment, the vault set from the database, and pins its own finalized head:
 //
-//	Temporal UI → Schedules → morpho-v2-bootstrap → Trigger
+//	temporal workflow start --namespace vector \
+//	  --task-queue morpho-v2-bootstrap --type MorphoV2Bootstrap \
+//	  --workflow-id morpho-v2-bootstrap-<date>
 //
-// That fires exactly one workflow. The schedule stays paused afterwards. The run
-// takes hours (a full mainnet log sweep), which is why the activity timeouts
-// below are far larger than the shared cronjob defaults.
+// The workflow ID is the concurrency guard: Temporal rejects a duplicate while a
+// run with that ID is in flight. The run takes hours (a full mainnet log sweep),
+// which is why the activity timeouts below are far larger than the shared
+// cronjob defaults.
 //
 // # Idempotency
 //
 // Every write goes through the same idempotent repository methods live indexing
 // uses (append-only membership observations keyed on their own block position,
-// ON CONFLICT DO NOTHING snapshots), so clicking Trigger again is safe — it
+// ON CONFLICT DO NOTHING snapshots), so starting a second run is safe — it
 // redoes the work and reaches the same state. The head seed in particular is an
 // assertion, so a repeat run whose answer already matches the log writes nothing
 // at all.
@@ -45,11 +50,11 @@
 // that were never read for the new vault.
 //
 // Heartbeat details belong to one activity execution, so this only spans the
-// automatic attempts within a single run. A run that goes red and is
-// re-triggered by hand is a NEW workflow execution with no heartbeat history: it
-// starts from the beginning, which is safe because every write is idempotent.
-// Any failure past the last attempt shows red in the Temporal UI; the fix is to
-// re-trigger once the cause is addressed.
+// automatic attempts within a single run. A run that goes red and is started
+// again by hand is a NEW workflow execution with no heartbeat history: it starts
+// from the beginning, which is safe because every write is idempotent. Any
+// failure past the last attempt shows red in the Temporal UI; the fix is to
+// start another run once the cause is addressed.
 package main
 
 import (
@@ -63,6 +68,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/ethclient"
+	"go.temporal.io/sdk/worker"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
@@ -98,6 +104,17 @@ func init() {
 	buildinfo.PopulateFromVCS(&GitCommit, &BuildTime)
 }
 
+const (
+	// taskQueueName is the Temporal task queue an operator starts a run on, and
+	// also the OTel service name the vector-cronjobs alerts select by.
+	taskQueueName = "morpho-v2-bootstrap"
+
+	// workflowTypeName is what an operator passes to `--type` (the Temporal UI's
+	// "Workflow Type" box), so it is registered explicitly rather than derived
+	// from a Go name — a rename must not invalidate the runbook.
+	workflowTypeName = "MorphoV2Bootstrap"
+)
+
 func run(ctx context.Context) error {
 	// Require DATABASE_URL rather than default to localhost: a deployed worker
 	// that silently connected to a local (empty) database would look healthy
@@ -107,27 +124,37 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("startup configuration: %w", err)
 	}
 
+	return temporal.RunWorker(ctx, temporal.BuildMeta{
+		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
+	}, temporal.WorkerConfig{
+		Name:         taskQueueName,
+		OpenDatabase: postgres.PoolOpener(postgres.DefaultDBConfig(dbURL)),
+		Register:     register,
+	})
+}
+
+func register(ctx context.Context, deps temporal.Dependencies, r worker.Registry) error {
 	// One store, shared by the sweep and the liveness heartbeat: the ticker
 	// re-sends what the sweep recorded instead of erasing it with a bare ping.
 	progress := temporal.NewActivityProgress[morpho_v2_bootstrap.SweepProgress]()
 
-	return temporal.RunCronjob(ctx, temporal.BuildMeta{
-		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
-	}, temporal.CronjobConfig{
-		Name:             "morpho-v2-bootstrap",
-		ManualOnly:       true,
-		ActivityTimeouts: bootstrapActivityTimeouts,
-		OpenDatabase:     postgres.PoolOpener(postgres.DefaultDBConfig(dbURL)),
-		Progress:         progress,
-		Setup: func(ctx context.Context, deps temporal.Dependencies) (temporal.Runner, error) {
-			return setupRunner(ctx, deps, progress)
-		},
+	runner, err := setupRunner(ctx, deps, progress)
+	if err != nil {
+		return err
+	}
+	return temporal.RegisterRunner(r, temporal.RunnerJob{
+		WorkflowType: workflowTypeName,
+		Runner:       runner,
+		Timeouts:     bootstrapActivityTimeouts,
+		Progress:     progress,
 	})
 }
 
 // bootstrapActivityTimeouts sizes one run against a full mainnet sweep: ~2M
 // blocks of eth_getLogs plus a per-vault adapter enumeration. The shared 10m
-// default would kill it mid-sweep.
+// default would kill it mid-sweep. They are bound here rather than left to
+// whoever starts a run: an operator supplies no input at all, and a mistyped
+// ceiling would surface hours in as a killed sweep.
 //
 // StartToClose is a safety ceiling, not an expectation — the sweep is sparse
 // (10 topics over a few hundred chunks), so a healthy run finishes far sooner.

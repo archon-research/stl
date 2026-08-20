@@ -38,8 +38,8 @@ images:
     newTag: local
   - name: reference-capital-indexer
     newName: localhost/stl-reference-capital-indexer
-  # Manual-only: registers a paused, interval-less Temporal schedule on startup
-  # and then idles, so having it in dev-up costs nothing but proves the wiring.
+  # On-demand: registers no schedule and idles on its task queue until a run is
+  # started, so having it in dev-up costs nothing but proves the wiring.
   - name: morpho-v2-bootstrap
     newName: localhost/stl-morpho-v2-bootstrap
     newTag: local

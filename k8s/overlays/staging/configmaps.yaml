@@ -316,7 +316,8 @@ data:
   CHAIN_ID: "1"
   OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector-opentelemetry-collector.observability.svc.cluster.local:4317"
 ---
-# Manual-only cronjob — see docs/runbooks/vector-cronjobs.md. ALCHEMY_HTTP_URL is
+# On-demand one-shot repair worker — see docs/runbooks/vector-cronjobs.md.
+# ALCHEMY_HTTP_URL is
 # omitted: the binary defaults to eth-mainnet, matching CHAIN_ID below.
 apiVersion: v1
 kind: ConfigMap
