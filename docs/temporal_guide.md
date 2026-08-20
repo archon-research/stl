@@ -86,17 +86,13 @@ You normally never touch these to add a job.
 neighbourhood, not by lifecycle: it carries no schedule and is listed under
 [on-demand jobs](#current-on-demand-jobs).
 
-### Manual-only cronjobs
+A job that must never run unattended — a one-shot repair, a destructive migration — is
+**not** a cronjob with the schedule switched off. Every `RunCronjob` job has a schedule
+that fires, so give it none at all: see
+[on-demand jobs](#on-demand-jobs-no-schedule-started-by-hand).
 
-Set `CronjobConfig.ManualOnly: true` (and no interval) for a job that must never run
-unattended — a one-shot repair, a destructive migration. `ensureSchedule` then creates the
-schedule **paused and with an empty spec**, so redeploying the worker never starts a run.
-The operator starts one from the Temporal UI: **Schedules → `<name>` → Trigger**, which
-fires exactly one workflow and leaves the schedule paused. The pause is a deliberate
-safety property, not a misconfiguration — say so in the job's `Note`.
-
-A job whose single run legitimately takes hours also needs `CronjobConfig.ActivityTimeouts`;
-the shared defaults (10m `StartToClose`, 30m `ScheduleToClose`, 5 attempts) would kill it
+A cronjob whose tick legitimately takes hours needs `CronjobConfig.ActivityTimeouts`; the
+shared defaults (10m `StartToClose`, 30m `ScheduleToClose`, 5 attempts) would kill it
 mid-run. A zero `ActivityTimeouts` keeps those defaults, so existing jobs are unaffected.
 
 ### Resuming a long run after a pod kill
