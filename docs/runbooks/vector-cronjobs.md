@@ -180,10 +180,10 @@ and a fresh `status="success"` run in `cronjob_runs_total`.
 ### What it means
 
 A start-on-demand Deployment — a `temporal.RunWorker` job — has had <1 available
-replica for >30m. These workers carry **no schedule**, so unlike `VectorCronjobWorkerDown`
-nothing is ticking into the void and no data is going stale. The only impact is
-that a new run cannot be started until the pod is back. Warning severity for that
-reason.
+replica for >30m. These workers carry **no schedule**, so unlike
+`VectorCronjobWorkerDown` nothing is ticking into the void and no data is going
+stale. The only impact is that a new run cannot be started until the pod is back.
+Warning severity for that reason.
 
 Currently matches: `offchain-price-backfill`, `reference-capital-backfill`,
 `morpho-vault-backfill`, `morpho-v2-bootstrap`.

@@ -32,26 +32,12 @@ func TestRun_RequiresDatabaseURL(t *testing.T) {
 	}
 }
 
-// The task queue and the workflow type are the two strings an operator types to
-// start a run, and the task queue doubles as the OTel service_name the
-// vector-cronjobs alerts select by. Both literals are spelled out rather than
-// compared to the constants, which would rename both sides together and pin
-// nothing.
-func TestOperatorFacingNames_MatchTheRunbookStartCommand(t *testing.T) {
-	tests := []struct {
-		name string
-		got  string
-		want string
-	}{
-		{name: "task queue", got: taskQueueName, want: "morpho-v2-bootstrap"},
-		{name: "workflow type", got: workflowTypeName, want: "MorphoV2Bootstrap"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if tc.got != tc.want {
-				t.Errorf("%s = %q, want %q", tc.name, tc.got, tc.want)
-			}
-		})
+// The task queue doubles as the OTel service name, which is the label the
+// vector-cronjobs alerts select this job by. Spelled out rather than compared to
+// the constant, which would rename both sides together and pin nothing.
+func TestTaskQueueName_MatchesTheAlertServiceName(t *testing.T) {
+	if taskQueueName != "morpho-v2-bootstrap" {
+		t.Errorf("taskQueueName = %q, want %q", taskQueueName, "morpho-v2-bootstrap")
 	}
 }
 

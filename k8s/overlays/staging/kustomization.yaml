@@ -47,7 +47,8 @@ resources:
   - ../../base/reference-capital-indexer
   - ../../base/reference-capital-backfill
   - ../../base/maple-graphql-indexer
-  # Manual-only cronjob — see docs/runbooks/vector-cronjobs.md.
+  # On-demand one-shot VaultV2 repair worker (VEC-218). No Temporal schedule:
+  # idles on its task queue until a run is started by hand from the Temporal UI.
   - ../../base/morpho-v2-bootstrap
   # On-demand Morpho vault backfill worker (VEC-218). No Temporal schedule: idles
   # on its task queue until a run is started by hand from the Temporal UI.

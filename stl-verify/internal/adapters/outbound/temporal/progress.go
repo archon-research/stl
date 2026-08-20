@@ -16,7 +16,7 @@ import (
 // The details are readable only by a LATER ATTEMPT OF THE SAME ACTIVITY
 // EXECUTION. Two consequences the callers must live with: the activity's retry
 // policy has to allow more than one attempt or there is nothing to resume into,
-// and a freshly triggered workflow is a new execution with no heartbeat history,
+// and a freshly started workflow is a new execution with no heartbeat history,
 // so it always starts from the beginning.
 //
 // One instance per worker process, shared by the runner and the liveness

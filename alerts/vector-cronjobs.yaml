@@ -214,10 +214,10 @@ groups:
       # -----------------------------------------------------------------------
       - alert: VectorOnDemandWorkerDown
         # The availability rule for temporal.RunWorker jobs, split from
-        # VectorCronjobWorkerDown because the impact is
-        # categorically different: these carry no schedule, so a dead pod misses
-        # no ticks and produces no stale data. The only consequence is that a run
-        # cannot be STARTED, which is worth a slack message and not a 3am page.
+        # VectorCronjobWorkerDown because the impact is categorically different:
+        # these carry no schedule, so a dead pod misses no ticks and produces no
+        # stale data. The only consequence is that a run cannot be STARTED, which
+        # is worth a slack message and not a 3am page.
         #
         # Longer `for` than the scheduled rule for the same reason — a rollout or
         # a brief eviction on an idle worker is not worth waking anyone for.

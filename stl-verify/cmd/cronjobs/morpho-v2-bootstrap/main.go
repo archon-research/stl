@@ -109,9 +109,6 @@ const (
 	// also the OTel service name the vector-cronjobs alerts select by.
 	taskQueueName = "morpho-v2-bootstrap"
 
-	// workflowTypeName is what an operator passes to `--type` (the Temporal UI's
-	// "Workflow Type" box), so it is registered explicitly rather than derived
-	// from a Go name — a rename must not invalidate the runbook.
 	workflowTypeName = "MorphoV2Bootstrap"
 )
 
