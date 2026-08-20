@@ -78,4 +78,25 @@ type UniswapV4Repository interface {
 	// ticks a prior version wrote at this height. Reads committed rows outside
 	// any transaction; safe to call before the write tx opens.
 	TicksForPoolAtBlock(ctx context.Context, poolID int64, blockNumber int64) ([]int32, error)
+	// PoolIDsEverSnapshotted returns the CURRENT uniswap_v4_pool ids, ascending,
+	// of the pools on chainID that have at least one uniswap_v4_pool_state or
+	// uniswap_v4_tick row at any height. Read once at construction, it recovers
+	// the two facts no in-memory state survives a restart with: which registered
+	// pools have never produced a row at all (the never-indexed gauge), and which
+	// pools' baseline tick enumeration is already on disk, so a rollout does not
+	// re-enumerate every pool's bitmap and spike block latency.
+	//
+	// Either table answers "baselined": a pool reaches the snapshot loop only as
+	// part of a due set, and every due pool is state-snapshotted and
+	// baseline-enumerated in the same block, under the same commit. Both are
+	// needed for "ever indexed" though — a pool with no initialized ticks writes
+	// a state row and no tick rows.
+	//
+	// Registry versions resolve forward to the current id for a
+	// (chain_id, pool_id) natural key, exactly as PoolIDsWithStateAtBlock does,
+	// and another chain's pools are excluded. A pool corrected by a superseding
+	// registry row therefore counts as already baselined even though nothing is
+	// yet written under its new surrogate id — correct, because the rows are read
+	// back by (chain_id, pool_id) across versions, never by a single id.
+	PoolIDsEverSnapshotted(ctx context.Context, chainID int64) ([]int64, error)
 }

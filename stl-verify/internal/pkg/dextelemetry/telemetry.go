@@ -27,21 +27,24 @@ import (
 // no-op when called on a nil pointer, so production code can pass nil for
 // "telemetry disabled" without guard checks at each call site.
 type Telemetry struct {
-	prefix           string
-	chainAttr        attribute.KeyValue
-	blocksProcessed  metric.Int64Counter
-	errorsTotal      metric.Int64Counter
-	blockDuration    metric.Float64Histogram
-	stateRowsWritten metric.Int64Counter
-	poolsTouched     metric.Int64Counter
+	prefix            string
+	chainAttr         attribute.KeyValue
+	blocksProcessed   metric.Int64Counter
+	errorsTotal       metric.Int64Counter
+	blockDuration     metric.Float64Histogram
+	stateRowsWritten  metric.Int64Counter
+	poolsTouched      metric.Int64Counter
+	poolsNeverIndexed metric.Int64Gauge
 }
 
 // NewTelemetry registers four counters (`<prefix>.blocks.processed`,
 // `<prefix>.errors.total`, `<prefix>.state.rows.written`,
-// `<prefix>.pools.touched`) plus the `<prefix>.block.duration_seconds`
-// histogram. The OTel-to-Prometheus exporter normalises the dots to
-// underscores and adds the `_total` suffix, yielding the metric series names
-// the alert rules expect. The chain NAME (via entity.ChainName) is baked into
+// `<prefix>.pools.touched`), the `<prefix>.block.duration_seconds` histogram,
+// and the `<prefix>.pools.never_indexed` gauge. Every DEX gets the whole set;
+// an instrument a worker never records simply produces no series. The
+// OTel-to-Prometheus exporter normalises the dots to underscores and adds the
+// `_total` suffix to the counters, yielding the metric series names the alert
+// rules expect. The chain NAME (via entity.ChainName) is baked into
 // every datapoint as the `chain` attribute so multi-chain dashboards line up
 // with the morpho/oracle indexers, which label the same way. An unknown chainID
 // is rejected so a worker fails hard at startup rather than emitting an empty or
@@ -102,14 +105,23 @@ func NewTelemetry(prefix string, chainID int64) (*Telemetry, error) {
 		return nil, fmt.Errorf("creating %s.pools.touched counter: %w", prefix, err)
 	}
 
+	neverIndexed, err := meter.Int64Gauge(
+		prefix+".pools.never_indexed",
+		metric.WithDescription("Registered, snapshot-supported pools that have never produced a state or tick row"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating %s.pools.never_indexed gauge: %w", prefix, err)
+	}
+
 	return &Telemetry{
-		prefix:           prefix,
-		chainAttr:        attribute.String("chain", chainName),
-		blocksProcessed:  blocks,
-		errorsTotal:      errs,
-		blockDuration:    dur,
-		stateRowsWritten: stateRows,
-		poolsTouched:     touched,
+		prefix:            prefix,
+		chainAttr:         attribute.String("chain", chainName),
+		blocksProcessed:   blocks,
+		errorsTotal:       errs,
+		blockDuration:     dur,
+		stateRowsWritten:  stateRows,
+		poolsTouched:      touched,
+		poolsNeverIndexed: neverIndexed,
 	}, nil
 }
 
@@ -172,4 +184,14 @@ func (t *Telemetry) RecordPoolsTouched(ctx context.Context, n int) {
 		return
 	}
 	t.poolsTouched.Add(ctx, int64(n), metric.WithAttributes(t.chainAttr))
+}
+
+// RecordPoolsNeverIndexed sets pools_never_indexed to n. Unlike the counters
+// here, 0 is a value and not a no-op: the alert on it compares a level, so the
+// series has to exist while the answer is "none". Nil receiver is still a no-op.
+func (t *Telemetry) RecordPoolsNeverIndexed(ctx context.Context, n int) {
+	if t == nil {
+		return
+	}
+	t.poolsNeverIndexed.Record(ctx, int64(n), metric.WithAttributes(t.chainAttr))
 }
