@@ -516,26 +516,41 @@ func TestStartHeartbeat_StopIsIdempotent(t *testing.T) {
 
 // stop must JOIN the reporter, not merely signal it: an unjoined reporter keeps
 // heartbeating into a context whose activity has already reported its result.
+//
+// The assertion sits INSIDE the activity, so stop is the only thing that can
+// reap the reporter when it runs. Asserting after ExecuteActivity instead proves
+// nothing: the test environment cancels the activity context as it returns, and
+// the reporter's own ctx.Done arm then retires the goroutine whatever stop did.
 func TestStartHeartbeat_StopJoinsTheReporterGoroutine(t *testing.T) {
 	const interval = 2 * time.Millisecond
 	env := (&testsuite.WorkflowTestSuite{}).NewTestActivityEnvironment()
 
-	beatAWhile := func(ctx context.Context) error {
+	beatThenAssertReaped := func(ctx context.Context) error {
 		stop := startHeartbeat(ctx, interval)
 		time.Sleep(20 * interval)
 		stop()
-		return nil
-	}
-	env.RegisterActivity(beatAWhile)
-	if _, err := env.ExecuteActivity(beatAWhile); err != nil {
-		t.Fatalf("ExecuteActivity: %v", err)
-	}
 
-	// Asserted on the reporter's own frame rather than a goroutine count: the
-	// SDK spawns its own short-lived heartbeat batcher, which a count would
-	// measure instead of this code.
-	if stacks := goroutineStacks(t); strings.Contains(stacks, ".startHeartbeat.") {
-		t.Errorf("a reporter goroutine survived the activity; stop did not join it:\n%s", stacks)
+		// Asserted on the reporter's own frame rather than a goroutine count: the
+		// SDK spawns its own short-lived heartbeat batcher, which a count would
+		// measure instead of this code. Re-read for a moment, because a joined
+		// goroutine is a few instructions short of dead when stop returns — while a
+		// stop that only signals leaves the reporter ticking for the whole window.
+		deadline := time.Now().Add(time.Second)
+		for {
+			stacks := goroutineStacks(t)
+			if !strings.Contains(stacks, ".startHeartbeat.") {
+				return nil
+			}
+			if time.Now().After(deadline) {
+				t.Errorf("the reporter goroutine outlived stop, which therefore did not join it:\n%s", stacks)
+				return nil
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	env.RegisterActivity(beatThenAssertReaped)
+	if _, err := env.ExecuteActivity(beatThenAssertReaped); err != nil {
+		t.Fatalf("ExecuteActivity: %v", err)
 	}
 }
 
