@@ -69,14 +69,17 @@ func (c Config) handlerTimeout() time.Duration {
 }
 
 // DefaultDrainTimeout is the grace a mid-message handler gets after SIGTERM
-// when Config.DrainTimeout is unset. It plus ShutdownCleanupTimeout must stay
+// when Config.DrainTimeout is unset. It plus the settle calls that follow it
+// (up to 3x ShutdownCleanupTimeout, see lifecycle.ShutdownTimeout) must stay
 // under lifecycle.ShutdownTimeout, past which the process is killed with the
 // message still in flight — the failure this budget exists to avoid.
 const DefaultDrainTimeout = 15 * time.Second
 
-// ShutdownCleanupTimeout bounds the delete/release call that settles a message
-// after shutdown cancelled the parent context. Exported because it is the tail
-// of every shutdown path budgeted against lifecycle.ShutdownTimeout.
+// ShutdownCleanupTimeout bounds one delete/release call that settles a message
+// after shutdown cancelled the parent context. A single drained message can
+// need three of them in sequence (delete, the release that follows a failed
+// delete, then the release of the rest of the batch), which is how it enters
+// the chain derived on lifecycle.ShutdownTimeout.
 const ShutdownCleanupTimeout = 5 * time.Second
 
 func (c Config) drainTimeout() time.Duration {
@@ -147,7 +150,7 @@ func RunLoop(ctx context.Context, cfg Config, handler BlockEventHandler) {
 // RPC or DB per-attempt deadline) and stays a genuine, logged failure.
 func isShutdownCancellation(ctx context.Context, err error) bool {
 	return ctx.Err() != nil &&
-		(errors.Is(err, context.Canceled) || errors.Is(err, errDrainAbandoned))
+		(errors.Is(err, context.Canceled) || errors.Is(err, ErrDrainAbandoned))
 }
 
 // ProcessMessages receives a batch of SQS messages, parses each as a
@@ -182,17 +185,13 @@ func ProcessMessages(
 		return nil
 	}
 
-	// The consumer never abandons an in-flight poll, so a batch can land with
-	// shutdown already under way; none of it can be processed.
-	if ctx.Err() != nil {
-		releaseMessages(ctx, cfg, messages)
-		return nil
-	}
-
 	cfg.Logger.Info("received messages", "count", len(messages))
 
 	var errs []error
 	for i, msg := range messages {
+		// The single owner of "shutdown means hand the rest back": it covers a
+		// batch that landed after the signal (i == 0, because the consumer never
+		// abandons an in-flight poll) as well as one the signal interrupted.
 		if ctx.Err() != nil {
 			releaseMessages(ctx, cfg, messages[i:])
 			break
@@ -235,80 +234,31 @@ func discardForeignChainMessage(ctx context.Context, cfg Config, msg outbound.SQ
 		"got", event.ChainID,
 		"block", event.BlockNumber)
 
-	cleanupCtx, cancel := cleanupContext(ctx)
+	cleanupCtx, cancel := CleanupContext(ctx)
 	defer cancel()
 	if err := cfg.Consumer.DeleteMessage(cleanupCtx, msg.ReceiptHandle); err != nil {
 		cfg.Logger.Error("failed to delete mismatched message",
 			"messageID", msg.MessageID,
 			"error", err)
-	}
-}
-
-// handlerOutcome reports how one handler invocation ended.
-type handlerOutcome struct {
-	err error
-
-	// budgetExceeded marks a handler that returned nil only after running past
-	// HandlerTimeout, i.e. one that ignored its context.
-	budgetExceeded bool
-
-	// abandoned marks a handler still running when the shutdown drain expired.
-	// Its message goes back to the queue, so the failure is expected, not logged.
-	abandoned bool
-}
-
-// runHandler invokes the handler on a context detached from ctx, so a SIGTERM
-// mid-message does not kill work that can still finish. The detached context
-// keeps the handler budget, which bounds a stuck dependency (e.g. a Postgres
-// lock wait) whether or not the process is shutting down.
-func runHandler(ctx context.Context, cfg Config, event outbound.BlockEvent, handler BlockEventHandler) handlerOutcome {
-	hctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cfg.handlerTimeout())
-	defer cancel()
-
-	done := make(chan error, 1)
-	go func() { done <- handler(hctx, event) }()
-
-	select {
-	case err := <-done:
-		return handlerOutcome{err: err, budgetExceeded: exceededBudget(hctx)}
-	case <-ctx.Done():
-		return drainHandler(hctx, cancel, cfg, done)
-	}
-}
-
-// errDrainAbandoned marks the handler the shutdown drain gave up on. It is a
-// distinct sentinel, not context.DeadlineExceeded, so the expected drain expiry
-// stays quiet without also silencing a nested deadline racing the same shutdown.
-var errDrainAbandoned = errors.New("handler abandoned when the shutdown drain expired")
-
-// drainHandler gives a handler caught mid-message by shutdown the drain budget
-// to finish. Past it the handler is cancelled and left to unwind while the
-// caller releases its message: the successor pod reprocesses that block, which
-// beats holding it for the queue's visibility timeout.
-func drainHandler(hctx context.Context, cancelHandler context.CancelFunc, cfg Config, done <-chan error) handlerOutcome {
-	drain := time.NewTimer(cfg.drainTimeout())
-	defer drain.Stop()
-
-	select {
-	case err := <-done:
-		return handlerOutcome{err: err, budgetExceeded: exceededBudget(hctx)}
-	case <-drain.C:
-		cancelHandler()
-		return handlerOutcome{
-			err:       fmt.Errorf("%w: still running after %s", errDrainAbandoned, cfg.drainTimeout()),
-			abandoned: true,
+		if ctx.Err() != nil {
+			releaseMessage(ctx, cfg, msg)
 		}
 	}
 }
 
-func exceededBudget(hctx context.Context) bool {
-	return errors.Is(hctx.Err(), context.DeadlineExceeded)
+// runHandler invokes the handler under the shared drain primitive, so a SIGTERM
+// mid-message does not kill work that can still finish.
+func runHandler(ctx context.Context, cfg Config, event outbound.BlockEvent, handler BlockEventHandler) DrainOutcome {
+	budget := DrainBudget{Work: cfg.handlerTimeout(), Drain: cfg.drainTimeout()}
+	return RunDrainable(ctx, budget, func(hctx context.Context) error {
+		return handler(hctx, event)
+	})
 }
 
 // settleMessage deletes a message whose handler completed, or keeps an
 // unfinished one for redelivery.
-func settleMessage(ctx context.Context, cfg Config, msg outbound.SQSMessage, outcome handlerOutcome) error {
-	if outcome.err != nil {
+func settleMessage(ctx context.Context, cfg Config, msg outbound.SQSMessage, outcome DrainOutcome) error {
+	if outcome.Err != nil {
 		return keepMessageForRedelivery(ctx, cfg, msg, outcome)
 	}
 	deleteProcessedMessage(ctx, cfg, msg, outcome)
@@ -319,27 +269,27 @@ func settleMessage(ctx context.Context, cfg Config, msg outbound.SQSMessage, out
 // shutdown that is deliberate retry pacing — the queue's visibility timeout is
 // the backoff a poison pill gets — but during shutdown the successor pod must
 // not wait it out, so the message is released instead.
-func keepMessageForRedelivery(ctx context.Context, cfg Config, msg outbound.SQSMessage, outcome handlerOutcome) error {
-	if !outcome.abandoned {
+func keepMessageForRedelivery(ctx context.Context, cfg Config, msg outbound.SQSMessage, outcome DrainOutcome) error {
+	if !outcome.Abandoned {
 		cfg.Logger.Error("failed to process message",
 			"messageID", msg.MessageID,
-			"error", outcome.err)
+			"error", outcome.Err)
 	}
 	if ctx.Err() != nil {
 		releaseMessage(ctx, cfg, msg)
 	}
-	return outcome.err
+	return outcome.Err
 }
 
-func deleteProcessedMessage(ctx context.Context, cfg Config, msg outbound.SQSMessage, outcome handlerOutcome) {
-	if outcome.budgetExceeded {
+func deleteProcessedMessage(ctx context.Context, cfg Config, msg outbound.SQSMessage, outcome DrainOutcome) {
+	if outcome.BudgetExceeded {
 		// The work completed, so we still delete; log it so a handler that does
 		// not honour its deadline is visible.
 		cfg.Logger.Warn("handler returned nil after exceeding its timeout budget; deleting anyway",
 			"messageID", msg.MessageID)
 	}
 
-	cleanupCtx, cancel := cleanupContext(ctx)
+	cleanupCtx, cancel := CleanupContext(ctx)
 	defer cancel()
 	if err := cfg.Consumer.DeleteMessage(cleanupCtx, msg.ReceiptHandle); err != nil {
 		cfg.Logger.Error("failed to delete message",
@@ -351,44 +301,12 @@ func deleteProcessedMessage(ctx context.Context, cfg Config, msg outbound.SQSMes
 	}
 }
 
-// ReleaseMessages hands received-but-unfinished messages straight back to the
-// queue, because a message left in flight blocks its whole FIFO message group
-// (one chain's block stream) from the successor pod until the visibility
-// timeout expires. The whole batch shares one cleanup budget: a budget per
-// message would scale the shutdown tail with the batch size and no longer fit
-// lifecycle.ShutdownTimeout. A failed release only costs the successor the
-// visibility timeout it would have waited anyway, and the process is on its way
-// out, so it is logged rather than propagated.
-func ReleaseMessages(ctx context.Context, consumer outbound.SQSConsumer, logger *slog.Logger, messages []outbound.SQSMessage) {
-	if len(messages) == 0 {
-		return
-	}
-
-	cleanupCtx, cancel := cleanupContext(ctx)
-	defer cancel()
-
-	for _, msg := range messages {
-		logger.Info("releasing in-flight message for successor", "messageID", msg.MessageID)
-		if err := consumer.ChangeMessageVisibility(cleanupCtx, msg.ReceiptHandle, 0); err != nil {
-			logger.Warn("failed to release in-flight message; it stays hidden until the visibility timeout expires",
-				"messageID", msg.MessageID,
-				"error", err)
-		}
-	}
-}
-
-func releaseMessages(ctx context.Context, cfg Config, messages []outbound.SQSMessage) {
-	ReleaseMessages(ctx, cfg.Consumer, cfg.Logger, messages)
-}
-
-func releaseMessage(ctx context.Context, cfg Config, msg outbound.SQSMessage) {
-	releaseMessages(ctx, cfg, []outbound.SQSMessage{msg})
-}
-
-// cleanupContext returns the context for the queue call that settles a message.
-// Once shutdown cancelled the parent, that call must still go out, so it runs
-// detached and briefly bounded instead.
-func cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
+// CleanupContext returns the context for the queue call that settles a message
+// (delete, dead-letter publish, release). Once shutdown cancelled the parent,
+// that call must still go out, so it runs detached and bounded by
+// ShutdownCleanupTimeout instead. Exported so a worker that runs its own
+// message loop settles messages on the same budget this package does.
+func CleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	if ctx.Err() == nil {
 		return context.WithCancel(ctx)
 	}
