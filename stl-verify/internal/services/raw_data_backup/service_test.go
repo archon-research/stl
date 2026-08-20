@@ -22,19 +22,26 @@ import (
 // Mock Implementations
 // =============================================================================
 
+// visibilityChange records one ChangeMessageVisibility call.
+type visibilityChange struct {
+	handle     string
+	visibility time.Duration
+}
+
 // mockSQSConsumer is a mock implementation of outbound.SQSConsumer.
 type mockSQSConsumer struct {
-	mu              sync.Mutex
-	messages        []outbound.SQSMessage
-	deletedHandles  []string
-	receiveErr      error
-	deleteErr       error
-	receiveCount    int
-	receiveCalled   atomic.Int32
-	deleteCalled    atomic.Int32
-	receiveDelay    time.Duration
-	closed          bool
-	receiveCallback func(ctx context.Context, maxMessages int) ([]outbound.SQSMessage, error)
+	mu                sync.Mutex
+	messages          []outbound.SQSMessage
+	deletedHandles    []string
+	visibilityChanges []visibilityChange
+	receiveErr        error
+	deleteErr         error
+	receiveCount      int
+	receiveCalled     atomic.Int32
+	deleteCalled      atomic.Int32
+	receiveDelay      time.Duration
+	closed            bool
+	receiveCallback   func(ctx context.Context, maxMessages int) ([]outbound.SQSMessage, error)
 }
 
 func newMockSQSConsumer() *mockSQSConsumer {
@@ -99,7 +106,10 @@ func (m *mockSQSConsumer) DeleteMessage(ctx context.Context, receiptHandle strin
 	return nil
 }
 
-func (m *mockSQSConsumer) ChangeMessageVisibility(context.Context, string, time.Duration) error {
+func (m *mockSQSConsumer) ChangeMessageVisibility(_ context.Context, receiptHandle string, visibility time.Duration) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.visibilityChanges = append(m.visibilityChanges, visibilityChange{handle: receiptHandle, visibility: visibility})
 	return nil
 }
 
@@ -120,6 +130,12 @@ func (m *mockSQSConsumer) GetDeletedHandles() []string {
 	result := make([]string, len(m.deletedHandles))
 	copy(result, m.deletedHandles)
 	return result
+}
+
+func (m *mockSQSConsumer) GetVisibilityChanges() []visibilityChange {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.visibilityChanges)
 }
 
 // mockBlockCache is a mock implementation of outbound.BlockCache.
@@ -1586,6 +1602,44 @@ func TestRun_ProcessesMessages(t *testing.T) {
 	keys := writer.GetAllKeys()
 	if len(keys) != 1 {
 		t.Errorf("expected 1 file, got %d", len(keys))
+	}
+}
+
+// TestRun_ReleasesBatchThatArrivesDuringShutdown covers the poll that completes
+// after SIGTERM: the consumer never abandons an in-flight receive, so a batch
+// can land with the fetcher already shutting down. Handing it to the workers
+// would fail every message against the cancelled context and keep it hidden for
+// the visibility timeout, stalling the successor's FIFO group.
+func TestRun_ReleasesBatchThatArrivesDuringShutdown(t *testing.T) {
+	consumer := newMockSQSConsumer()
+	cache := newMockBlockCache()
+	writer := newMockS3Writer()
+	svc := newTestServiceWithClient(t, Config{
+		ChainID:           1,
+		Bucket:            "test-bucket",
+		Workers:           1,
+		ChainExpectations: blockOnlyExpectations(),
+	}, consumer, cache, writer, nil, newMockBlockchainClient())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	consumer.receiveCallback = func(context.Context, int) ([]outbound.SQSMessage, error) {
+		cancel() // the poll outlives the shutdown signal, then delivers
+		return []outbound.SQSMessage{createSQSMessage("msg1", createBlockEvent(1, 100, 0))}, nil
+	}
+
+	if err := svc.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+	want := []visibilityChange{{handle: "receipt-msg1", visibility: 0}}
+	if got := consumer.GetVisibilityChanges(); !slices.Equal(got, want) {
+		t.Errorf("expected the batch released for the successor, got %v", got)
+	}
+	if got := consumer.GetDeletedHandles(); len(got) != 0 {
+		t.Errorf("expected no deletes after shutdown began, got %v", got)
+	}
+	if keys := writer.GetAllKeys(); len(keys) != 0 {
+		t.Errorf("expected nothing backed up after shutdown began, got %v", keys)
 	}
 }
 

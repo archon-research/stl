@@ -42,7 +42,7 @@ type Config struct {
 	// keeps working on a context detached from the shutdown, so the message can
 	// be deleted normally; past it the handler is cancelled and its message
 	// released to the successor. It must fit, together with the cleanup calls,
-	// inside lifecycle.Run's 25s shutdown window. Zero uses DefaultDrainTimeout.
+	// inside lifecycle.ShutdownTimeout. Zero uses DefaultDrainTimeout.
 	DrainTimeout time.Duration
 }
 
@@ -69,14 +69,15 @@ func (c Config) handlerTimeout() time.Duration {
 }
 
 // DefaultDrainTimeout is the grace a mid-message handler gets after SIGTERM
-// when Config.DrainTimeout is unset. It plus shutdownCleanupTimeout must stay
-// under lifecycle.Run's 25s shutdown window, past which the process is killed
-// with the message still in flight — the failure this budget exists to avoid.
+// when Config.DrainTimeout is unset. It plus ShutdownCleanupTimeout must stay
+// under lifecycle.ShutdownTimeout, past which the process is killed with the
+// message still in flight — the failure this budget exists to avoid.
 const DefaultDrainTimeout = 15 * time.Second
 
-// shutdownCleanupTimeout bounds the delete/release call that settles a message
-// after shutdown cancelled the parent context.
-const shutdownCleanupTimeout = 5 * time.Second
+// ShutdownCleanupTimeout bounds the delete/release call that settles a message
+// after shutdown cancelled the parent context. Exported because it is the tail
+// of every shutdown path budgeted against lifecycle.ShutdownTimeout.
+const ShutdownCleanupTimeout = 5 * time.Second
 
 func (c Config) drainTimeout() time.Duration {
 	if c.DrainTimeout > 0 {
@@ -154,10 +155,11 @@ func isShutdownCancellation(ctx context.Context, err error) bool {
 // Cancelling ctx (SIGTERM) never kills work in progress: the handler already
 // running keeps a context detached from the shutdown until the drain budget
 // expires, so its message can still be deleted. Every message the shutdown
-// leaves unfinished — drain expired, handler failed, or never started — is
-// released back to the queue immediately, because a message left in flight
-// blocks its whole FIFO message group (one chain's block stream) from the
-// successor pod until the visibility timeout expires.
+// leaves unfinished — drain expired, handler failed, never started, or arrived
+// in a poll that completed after the signal — is released back to the queue
+// immediately, because a message left in flight blocks its whole FIFO message
+// group (one chain's block stream) from the successor pod until the visibility
+// timeout expires.
 //
 // Returns a joined error for any failures.
 func ProcessMessages(
@@ -175,6 +177,13 @@ func ProcessMessages(
 	}
 
 	if len(messages) == 0 {
+		return nil
+	}
+
+	// The consumer never abandons an in-flight poll, so a batch can land with
+	// shutdown already under way; none of it can be processed.
+	if ctx.Err() != nil {
+		releaseMessages(ctx, cfg, messages)
 		return nil
 	}
 
@@ -335,26 +344,38 @@ func deleteProcessedMessage(ctx context.Context, cfg Config, msg outbound.SQSMes
 	}
 }
 
-func releaseMessages(ctx context.Context, cfg Config, messages []outbound.SQSMessage) {
-	for _, msg := range messages {
-		releaseMessage(ctx, cfg, msg)
+// ReleaseMessages hands received-but-unfinished messages straight back to the
+// queue, because a message left in flight blocks its whole FIFO message group
+// (one chain's block stream) from the successor pod until the visibility
+// timeout expires. The whole batch shares one cleanup budget: a budget per
+// message would scale the shutdown tail with the batch size and no longer fit
+// lifecycle.ShutdownTimeout. A failed release only costs the successor the
+// visibility timeout it would have waited anyway, and the process is on its way
+// out, so it is logged rather than propagated.
+func ReleaseMessages(ctx context.Context, consumer outbound.SQSConsumer, logger *slog.Logger, messages []outbound.SQSMessage) {
+	if len(messages) == 0 {
+		return
 	}
-}
 
-// releaseMessage hands a received-but-unfinished message straight back to the
-// queue. A failed release only costs the successor the visibility timeout it
-// would have waited anyway, and the process is on its way out, so it is logged
-// rather than propagated.
-func releaseMessage(ctx context.Context, cfg Config, msg outbound.SQSMessage) {
 	cleanupCtx, cancel := cleanupContext(ctx)
 	defer cancel()
 
-	cfg.Logger.Info("releasing in-flight message for successor", "messageID", msg.MessageID)
-	if err := cfg.Consumer.ChangeMessageVisibility(cleanupCtx, msg.ReceiptHandle, 0); err != nil {
-		cfg.Logger.Warn("failed to release in-flight message; it stays hidden until the visibility timeout expires",
-			"messageID", msg.MessageID,
-			"error", err)
+	for _, msg := range messages {
+		logger.Info("releasing in-flight message for successor", "messageID", msg.MessageID)
+		if err := consumer.ChangeMessageVisibility(cleanupCtx, msg.ReceiptHandle, 0); err != nil {
+			logger.Warn("failed to release in-flight message; it stays hidden until the visibility timeout expires",
+				"messageID", msg.MessageID,
+				"error", err)
+		}
 	}
+}
+
+func releaseMessages(ctx context.Context, cfg Config, messages []outbound.SQSMessage) {
+	ReleaseMessages(ctx, cfg.Consumer, cfg.Logger, messages)
+}
+
+func releaseMessage(ctx context.Context, cfg Config, msg outbound.SQSMessage) {
+	releaseMessages(ctx, cfg, []outbound.SQSMessage{msg})
 }
 
 // cleanupContext returns the context for the queue call that settles a message.
@@ -364,5 +385,5 @@ func cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	if ctx.Err() == nil {
 		return context.WithCancel(ctx)
 	}
-	return context.WithTimeout(context.WithoutCancel(ctx), shutdownCleanupTimeout)
+	return context.WithTimeout(context.WithoutCancel(ctx), ShutdownCleanupTimeout)
 }

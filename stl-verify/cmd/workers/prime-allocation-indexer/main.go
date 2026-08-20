@@ -9,7 +9,6 @@ import (
 	"os/signal"
 	"strconv"
 	"syscall"
-	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/cache"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
@@ -26,6 +25,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	at "github.com/archon-research/stl/stl-verify/internal/services/allocation_tracker"
@@ -376,49 +376,10 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("create service: %w", err)
 	}
 
-	// Start
-	runCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-	if err := svc.Start(runCtx); err != nil {
-		return fmt.Errorf("start: %w", err)
-	}
-
 	logger.Info("running",
 		"chainID", cfg.chainID,
 		"entries", len(entries),
 		"sweepEveryNBlocks", cfg.sweepBlocks)
 
-	select {
-	case sig := <-sigChan:
-		logger.Info("shutting down", "signal", sig)
-	case <-ctx.Done():
-		logger.Info("shutting down", "reason", "context cancelled")
-	}
-	cancel()
-
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 25*time.Second)
-	defer shutdownCancel()
-
-	done := make(chan struct{})
-	var stopErr error
-	go func() {
-		defer close(done)
-		stopErr = svc.Stop()
-	}()
-
-	select {
-	case <-done:
-		if stopErr != nil {
-			return fmt.Errorf("stop: %w", stopErr)
-		}
-		logger.Info("shutdown complete")
-	case <-shutdownCtx.Done():
-		return fmt.Errorf("shutdown timeout")
-	}
-
-	return nil
+	return lifecycle.Run(ctx, logger, svc)
 }

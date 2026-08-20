@@ -12,10 +12,20 @@ import (
 	"time"
 )
 
-// ShutdownTimeout bounds how long the services get to stop once the context is
-// cancelled. Every pod allows 60s (terminationGracePeriodSeconds) before
-// SIGKILL, so this leaves room for the caller's own cleanup afterwards.
-const ShutdownTimeout = 25 * time.Second
+// ShutdownTimeout bounds the graceful shutdown after ctx is cancelled. It is
+// derived from the longest SQS-worker shutdown path, which must complete inside
+// it: an in-flight long poll finishing (SQS wait 20s + 5s slack) plus releasing
+// the batch it returns (one 5s budget for the whole batch) plus Stop()
+// overhead — 30s < 45s, leaving margin under PodTerminationGracePeriod.
+const ShutdownTimeout = 45 * time.Second
+
+// PodTerminationGracePeriod mirrors the terminationGracePeriodSeconds every
+// worker Deployment declares, and is the hard ceiling every shutdown budget
+// must fit: past it the kubelet SIGKILLs, so a worker that has not settled its
+// in-flight SQS message strands it for the queue's visibility timeout. Raising
+// ShutdownTimeout above this requires raising the manifests first (and, for
+// anything still on ECS Fargate, that task definition's stopTimeout).
+const PodTerminationGracePeriod = 60 * time.Second
 
 // ErrShutdownTimedOut reports that the services did not stop within
 // ShutdownTimeout. The caller's deferred cleanup has not run yet when this is
