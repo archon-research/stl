@@ -66,13 +66,28 @@ groups:
         # an adapter we have never seen is deliberately NOT one of them — it is a
         # recordable observation, not an error.)
         #
+        # The `or (total … * 0)` zero-fill is what makes that success key durable
+        # across a pod restart (same shape as VectorFluidVaultIndexerStalled and
+        # VectorArchivingStalled): a fresh pod that comes up straight into the
+        # poison pill emits only status="error" samples, so the success series
+        # never exists and a bare `== 0` matches nothing. Without the fill the
+        # already-firing alert RESOLVES on every restart while the data stays
+        # frozen — exactly the failure this rule exists for. The total, which the
+        # redelivery loop keeps advancing, synthesises the 0 instead.
+        #
         # Residual (same as VectorAllocationTrackerStalled): a live pod whose OTLP
-        # export dies lets the success series staleness-expire, so `== 0` returns
-        # no data and this goes silent. morpho has no kube-state Down companion
-        # yet — see the runbook.
+        # export dies lets BOTH series staleness-expire, so `== 0` returns no data
+        # and this goes silent. morpho has no kube-state Down companion yet — see
+        # the runbook.
         expr: |
-          sum by (chain, cluster) (
-            rate(morpho_blocks_processed_total{status="success", k8s_namespace_name="vector"}[5m])
+          (
+            sum by (chain, cluster) (
+              rate(morpho_blocks_processed_total{status="success", k8s_namespace_name="vector"}[5m])
+            )
+            or
+            sum by (chain, cluster) (
+              rate(morpho_blocks_processed_total{k8s_namespace_name="vector"}[5m])
+            ) * 0
           ) == 0
         for: 15m
         labels:

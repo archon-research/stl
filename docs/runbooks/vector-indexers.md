@@ -29,7 +29,14 @@ whole chain's Morpho data freeze silently. Keying on successes closes that.
 Consequence when it fires: **an all-error loop looks identical to a dead
 consumer here** — check the logs before assuming the pod is wedged.
 
-Residual: a live pod whose OTLP export dies lets the `status="success"` series
+That success rate is zero-filled from the bare total
+(`success-rate or total-rate * 0`). A pod restarting straight into the poison
+pill emits only `status="error"` samples, so the `status="success"` series never
+exists and a bare `== 0` would match nothing — the firing alert would RESOLVE on
+every restart while the data stayed frozen. The total, which the redelivery loop
+keeps advancing, supplies the 0 the success series is missing.
+
+Residual: a live pod whose OTLP export dies lets **both** series
 staleness-expire, so `== 0` matches nothing and this rule goes silent. morpho
 has no kube-state-metrics `Down` companion yet (unlike maple / fluid-vault /
 allocation-tracker); adding one is the follow-up that closes this.
