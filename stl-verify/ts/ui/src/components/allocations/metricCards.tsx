@@ -190,7 +190,11 @@ function ThresholdLabels({ thresholds }: { thresholds: ThresholdEntry[] }) {
             key={`threshold-label-${entry.value}`}
             x={marginLeft + 6}
             y={y + (isHighest ? -6 : THRESHOLD_LABEL_FONT_SIZE + 3)}
-            fill={resolveChartColor(entry.stroke)}
+            fill={
+              entry.stroke === undefined
+                ? undefined
+                : resolveChartColor(entry.stroke)
+            }
             fontSize={THRESHOLD_LABEL_FONT_SIZE}
           >
             {entry.label}
