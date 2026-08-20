@@ -310,9 +310,9 @@ func TestProcessBlockEvent_VaultDiscovery_V2_UnclassifiedAdapterWithoutRealAsset
 		registered = append(registered, obs)
 		return int64(len(registered)), true, nil
 	}
-	h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterState) error {
+	h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterState) (bool, error) {
 		t.Fatal("no state row may be seeded for an adapter that served no realAssets() reading")
-		return nil
+		return true, nil
 	}
 
 	log := h.makeDiscoveryTriggerLog(unknownVault)
@@ -405,9 +405,9 @@ func TestProcessBlockEvent_VaultDiscovery_V2_FeeSurface(t *testing.T) {
 				return 99, nil
 			}
 			seeded := false
-			h.morphoRepo.SaveVaultFeeFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoVaultFee) error {
+			h.morphoRepo.SaveVaultFeeFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoVaultFee) (bool, error) {
 				seeded = true
-				return nil
+				return true, nil
 			}
 
 			log := h.makeDiscoveryTriggerLog(unknownVault)
@@ -557,9 +557,9 @@ func TestProcessBlockEvent_VaultDiscovery_V2_EnumeratesAndSeedsAdapters(t *testi
 		return adapterIDByAddr[common.BytesToAddress(obs.Identity.Address)], true, nil
 	}
 	var seeded []*entity.MorphoAdapterState
-	h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, s *entity.MorphoAdapterState) error {
+	h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, s *entity.MorphoAdapterState) (bool, error) {
 		seeded = append(seeded, s)
-		return nil
+		return true, nil
 	}
 
 	log := h.makeDiscoveryTriggerLog(unknownVault)
@@ -694,9 +694,9 @@ func TestProcessBlockEvent_VaultDiscovery_V2_SeedsFeeConfig(t *testing.T) {
 	}
 	h.morphoRepo.GetOrCreateVaultFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoVault) (int64, error) { return 99, nil }
 	var savedFee *entity.MorphoVaultFee
-	h.morphoRepo.SaveVaultFeeFn = func(_ context.Context, _ pgx.Tx, f *entity.MorphoVaultFee) error {
+	h.morphoRepo.SaveVaultFeeFn = func(_ context.Context, _ pgx.Tx, f *entity.MorphoVaultFee) (bool, error) {
 		savedFee = f
-		return nil
+		return true, nil
 	}
 
 	log := h.makeDiscoveryTriggerLog(unknownVault)
@@ -756,9 +756,9 @@ func TestProcessBlockEvent_VaultDiscovery_V1NeverSeedsFeeConfig(t *testing.T) {
 		return nil, fmt.Errorf("unexpected ExecuteAtHash shape (%d calls)", len(calls))
 	}
 	h.morphoRepo.GetOrCreateVaultFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoVault) (int64, error) { return 99, nil }
-	h.morphoRepo.SaveVaultFeeFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoVaultFee) error {
+	h.morphoRepo.SaveVaultFeeFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoVaultFee) (bool, error) {
 		t.Fatal("a V1 vault must not get a VaultV2 fee snapshot")
-		return nil
+		return true, nil
 	}
 
 	log := h.makeDiscoveryTriggerLog(unknownVault)
@@ -807,9 +807,9 @@ func TestProcessBlockEvent_VaultDiscovery_V2_ZeroAdaptersRegistersCleanly(t *tes
 		t.Fatal("no adapter membership must be recorded for a zero-adapter vault")
 		return 0, false, nil
 	}
-	h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterState) error {
+	h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterState) (bool, error) {
 		t.Fatal("no adapter state must be seeded for a zero-adapter vault")
-		return nil
+		return true, nil
 	}
 
 	log := h.makeDiscoveryTriggerLog(unknownVault)
@@ -903,9 +903,9 @@ func TestProcessBlockEvent_VaultDiscovery_V2_EnumerationFailureCommitsNothingAnd
 		return out, nil
 	}
 	var adapterSeeded bool
-	h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterState) error {
+	h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterState) (bool, error) {
 		adapterSeeded = true
-		return nil
+		return true, nil
 	}
 	h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterObservation) (int64, bool, error) {
 		return 101, true, nil
@@ -1030,9 +1030,9 @@ func TestProcessBlockEvent_VaultDiscovery_V2_SeedRealAssetsErrorRetries(t *testi
 		}
 	}
 	h.morphoRepo.GetOrCreateVaultFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoVault) (int64, error) { return 99, nil }
-	h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterState) error {
+	h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterState) (bool, error) {
 		t.Fatal("no adapter state must be seeded when the realAssets read fails")
-		return nil
+		return true, nil
 	}
 
 	log := h.makeDiscoveryTriggerLog(unknownVault)

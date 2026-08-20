@@ -270,8 +270,10 @@ func (t *Telemetry) RecordAdapterMembershipObservation(ctx context.Context, adap
 }
 
 // RecordV2Snapshot records one committed VaultV2 structured snapshot. Callers
-// record after their write transaction returns, so the counter never claims a
-// row that was rolled back.
+// record after their write transaction returns and only when the writer reports a
+// row appended, so the counter never claims a row that was rolled back — or that
+// deduped to no row, which same-block siblings and a redelivery re-running an
+// already-committed handler both do.
 //
 // This counter is the liveness signal for the EVENT-DRIVEN write path, so exactly
 // two writers of these tables stay uncounted, both deliberately: discovery's

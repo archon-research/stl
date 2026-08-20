@@ -60,7 +60,10 @@ func (s *Service) handleAddAdapter(ctx context.Context, e *AddAdapterEvent, vaul
 		return err
 	}
 	s.warnIfUnknownAdapterType(vaultAddress, e.Account, adapterType, blockNumber)
-	var recorded []membershipObservation
+	var (
+		recorded []membershipObservation
+		appended bool
+	)
 	if err := s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
 		adapterID, _, err := s.observeAdapterMembership(ctx, tx, vault, e.Account, entity.MorphoAdapterMembership{
 			BlockNumber:  blockNumber,
@@ -74,12 +77,13 @@ func (s *Service) handleAddAdapter(ctx context.Context, e *AddAdapterEvent, vaul
 		if err != nil {
 			return err
 		}
-		return s.saveAdapterSeedState(ctx, tx, adapterID, realAssets, blockNumber, blockVersion, blockTimestamp)
+		appended, err = s.saveAdapterSeedState(ctx, tx, adapterID, realAssets, blockNumber, blockVersion, blockTimestamp)
+		return err
 	}); err != nil {
 		return err
 	}
 	s.recordMembershipObservations(ctx, recorded)
-	if realAssets != nil {
+	if appended {
 		s.telemetry.RecordV2Snapshot(ctx, v2SnapshotAdapterState)
 	}
 	return nil
@@ -155,13 +159,14 @@ func (s *Service) readSeedRealAssets(ctx context.Context, adapter common.Address
 
 // saveAdapterSeedState writes a freshly registered adapter's first realAssets
 // snapshot, or nothing when the adapter served no reading (see readSeedRealAssets).
-func (s *Service) saveAdapterSeedState(ctx context.Context, tx pgx.Tx, adapterID int64, realAssets *big.Int, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
+// Reports whether a row was appended.
+func (s *Service) saveAdapterSeedState(ctx context.Context, tx pgx.Tx, adapterID int64, realAssets *big.Int, blockNumber int64, blockVersion int, blockTimestamp time.Time) (bool, error) {
 	if realAssets == nil {
-		return nil
+		return false, nil
 	}
 	state, err := entity.NewMorphoAdapterState(adapterID, blockNumber, blockVersion, blockTimestamp, realAssets)
 	if err != nil {
-		return fmt.Errorf("creating adapter state entity: %w", err)
+		return false, fmt.Errorf("creating adapter state entity: %w", err)
 	}
 	return s.morphoRepo.SaveAdapterState(ctx, tx, state)
 }
@@ -231,7 +236,10 @@ func (s *Service) handleAllocation(ctx context.Context, adapter, vaultAddress co
 		return err
 	}
 
-	var recorded []membershipObservation
+	var (
+		recorded []membershipObservation
+		appended bool
+	)
 	if err := s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
 		adapterID, err := s.assertAllocatedAdapterIsMember(ctx, tx, vault, vaultAddress, adapter, position, blockTimestamp, probedType, &recorded)
 		if err != nil {
@@ -241,12 +249,15 @@ func (s *Service) handleAllocation(ctx context.Context, adapter, vaultAddress co
 		if err != nil {
 			return fmt.Errorf("creating adapter state entity: %w", err)
 		}
-		return s.morphoRepo.SaveAdapterState(ctx, tx, state)
+		appended, err = s.morphoRepo.SaveAdapterState(ctx, tx, state)
+		return err
 	}); err != nil {
 		return err
 	}
 	s.recordMembershipObservations(ctx, recorded)
-	s.telemetry.RecordV2Snapshot(ctx, v2SnapshotAdapterState)
+	if appended {
+		s.telemetry.RecordV2Snapshot(ctx, v2SnapshotAdapterState)
+	}
 	return nil
 }
 
@@ -394,12 +405,17 @@ func (s *Service) handleCapChange(ctx context.Context, vaultAddress common.Addre
 		return fmt.Errorf("creating vault cap entity: %w", err)
 	}
 
+	var appended bool
 	if err := s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		return s.morphoRepo.SaveVaultCap(ctx, tx, vaultCap)
+		var err error
+		appended, err = s.morphoRepo.SaveVaultCap(ctx, tx, vaultCap)
+		return err
 	}); err != nil {
 		return err
 	}
-	s.telemetry.RecordV2Snapshot(ctx, v2SnapshotVaultCap)
+	if appended {
+		s.telemetry.RecordV2Snapshot(ctx, v2SnapshotVaultCap)
+	}
 	return nil
 }
 
@@ -437,11 +453,16 @@ func (s *Service) handleFeeChange(ctx context.Context, vaultAddress common.Addre
 		return fmt.Errorf("creating vault fee entity: %w", err)
 	}
 
+	var appended bool
 	if err := s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		return s.morphoRepo.SaveVaultFee(ctx, tx, vaultFee)
+		var err error
+		appended, err = s.morphoRepo.SaveVaultFee(ctx, tx, vaultFee)
+		return err
 	}); err != nil {
 		return err
 	}
-	s.telemetry.RecordV2Snapshot(ctx, v2SnapshotVaultFee)
+	if appended {
+		s.telemetry.RecordV2Snapshot(ctx, v2SnapshotVaultFee)
+	}
 	return nil
 }

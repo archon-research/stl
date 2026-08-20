@@ -290,7 +290,7 @@ func (s *Service) seedDiscoveredAdapters(ctx context.Context, tx pgx.Tx, vault *
 		if err != nil {
 			return err
 		}
-		if err := s.saveAdapterSeedState(ctx, tx, adapterID, a.realAssets, blockNumber, blockVersion, blockTimestamp); err != nil {
+		if _, err := s.saveAdapterSeedState(ctx, tx, adapterID, a.realAssets, blockNumber, blockVersion, blockTimestamp); err != nil {
 			return fmt.Errorf("seeding adapter state for %s: %w", a.address.Hex(), err)
 		}
 	}
@@ -318,7 +318,7 @@ func (s *Service) seedDiscoveredFees(ctx context.Context, tx pgx.Tx, vault *enti
 	if err != nil {
 		return fmt.Errorf("creating vault fee entity: %w", err)
 	}
-	if err := s.morphoRepo.SaveVaultFee(ctx, tx, vaultFee); err != nil {
+	if _, err := s.morphoRepo.SaveVaultFee(ctx, tx, vaultFee); err != nil {
 		return fmt.Errorf("seeding vault fee config: %w", err)
 	}
 	return nil
