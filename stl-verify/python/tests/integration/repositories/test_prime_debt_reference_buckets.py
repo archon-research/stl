@@ -100,6 +100,21 @@ async def test_carries_the_last_observation_forward(seeded, async_db_url: str):
 
 
 @pytest.mark.asyncio(loop_scope="module")
+async def test_carries_an_observation_from_before_the_window_into_it(seeded, async_db_url: str):
+    # Upstream publishes one row per prime per day, so from a minute past
+    # midnight the newest row already sits outside a 24h window. Without seeding
+    # locf from the prior observation the card reports a figure while its own
+    # chart reports none.
+    conn, prime_id, _vault = seeded
+    await _insert_day(conn, prime_id, _WINDOW_START - timedelta(days=2), debt="2642983145.21")
+
+    buckets = await _buckets(async_db_url, f"0x{_PROXY.hex()}")
+
+    assert buckets
+    assert all(b.debt_wad == Decimal("2642983145.21") * Decimal("1e18") for b in buckets)
+
+
+@pytest.mark.asyncio(loop_scope="module")
 async def test_leaves_buckets_before_the_first_observation_null(seeded, async_db_url: str):
     conn, prime_id = seeded
     await _insert_day(conn, prime_id, _OBSERVED, debt="100")
