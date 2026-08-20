@@ -35,12 +35,13 @@ type v4IntegrationFixture struct {
 	pool RegisteredPool
 }
 
-// restarted builds a second service over the same database with an empty
-// snapshot tracker, standing in for a worker process that was replaced between
-// the two deliveries of a block.
+// restarted builds a second service over the same database, standing in for a
+// worker process that was replaced between two deliveries. Its snapshot tracker
+// starts empty; its baseline set does not — the constructor re-seeds that from
+// the persisted rows, which is exactly the difference these tests exercise.
 func (f *v4IntegrationFixture) restarted(t *testing.T) *UniswapV4Service {
 	t.Helper()
-	svc, err := NewUniswapV4Service(f.deps)
+	svc, err := NewUniswapV4Service(context.Background(), f.deps)
 	if err != nil {
 		t.Fatalf("NewUniswapV4Service (restart): %v", err)
 	}
@@ -139,7 +140,7 @@ func setupV4Integration(t *testing.T) *v4IntegrationFixture {
 		ChainID:     testChainID,
 		Logger:      testLogger(),
 	}
-	svc, err := NewUniswapV4Service(deps)
+	svc, err := NewUniswapV4Service(context.Background(), deps)
 	if err != nil {
 		t.Fatalf("NewUniswapV4Service: %v", err)
 	}
@@ -311,5 +312,37 @@ func TestIntegration_ReorgAfterRestartReconcilesStaleTicks(t *testing.T) {
 		`SELECT count(*) FROM uniswap_v4_pool_state WHERE pool_id=$1 AND block_number=$2 AND block_version=1`,
 		f.pool.ID, integrationBlock); n != 1 {
 		t.Errorf("v1 pool_state rows = %d, want 1 (the restarted service must re-snapshot the pool)", n)
+	}
+}
+
+// TestIntegration_RestartDoesNotRebaselineAnIndexedPool proves the boot seed
+// against the real repository: baselineSeen lives in memory, so before it was
+// seeded from persisted rows every rollout re-enumerated every pool's tick
+// bitmap — seconds of archive reads per pool, inside the block duration the 3s
+// p99 alert watches.
+func TestIntegration_RestartDoesNotRebaselineAnIndexedPool(t *testing.T) {
+	ctx := context.Background()
+	f := setupV4Integration(t)
+	f.mc.tickResults[-100] = goodTickResult(t)
+	f.mc.tickResults[200] = goodTickResult(t)
+
+	first := blockEvent(integrationBlock)
+	first.BlockHash = common.HexToHash("0xaa").Hex()
+	receipt := shared.TransactionReceipt{Logs: []shared.Log{modifyLog(t, f.pool, "0x0", -100, 200, 5000)}}
+	if err := f.svc.BlockHandler()(ctx, first, []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("BlockHandler (first touch): %v", err)
+	}
+	if f.mc.baselineCalls == 0 {
+		t.Fatal("the first touch issued no getTickBitmap scan; the fixture is not exercising the baseline")
+	}
+	f.mc.baselineCalls = 0
+
+	next := blockEvent(integrationBlock + 1)
+	next.BlockHash = common.HexToHash("0xbb").Hex()
+	if err := f.restarted(t).BlockHandler()(ctx, next, []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("BlockHandler (after restart): %v", err)
+	}
+	if f.mc.baselineCalls != 0 {
+		t.Errorf("getTickBitmap batches after restart = %d, want 0: the baseline is already persisted", f.mc.baselineCalls)
 	}
 }

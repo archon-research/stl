@@ -45,6 +45,10 @@ type fakeUniswapRepo struct {
 	poolsWithState      map[int64][]int64
 	poolsWithStateCalls []fakeStateBlockKey
 	poolsWithStateErr   error
+
+	everSnapshotted       []int64
+	everSnapshottedChains []int64
+	everSnapshottedErr    error
 }
 
 type fakePoolBlockKey struct {
@@ -80,6 +84,14 @@ func (r *fakeUniswapRepo) PoolIDsWithStateAtBlock(_ context.Context, chainID int
 		return nil, r.poolsWithStateErr
 	}
 	return r.poolsWithState[blockNumber], nil
+}
+
+func (r *fakeUniswapRepo) PoolIDsEverSnapshotted(_ context.Context, chainID int64) ([]int64, error) {
+	r.everSnapshottedChains = append(r.everSnapshottedChains, chainID)
+	if r.everSnapshottedErr != nil {
+		return nil, r.everSnapshottedErr
+	}
+	return r.everSnapshotted, nil
 }
 
 func (r *fakeUniswapRepo) SaveBlock(_ context.Context, _ pgx.Tx, w outbound.UniswapV4BlockWrites) (int64, error) {
@@ -415,7 +427,7 @@ func validServiceDeps(t *testing.T, pools []RegisteredPool) (UniswapV4ServiceDep
 func newTestService(t *testing.T, pools ...RegisteredPool) (*UniswapV4Service, *fakeUniswapRepo, *recordingMulticaller, *countingTxManager) {
 	t.Helper()
 	deps, repo, mc, txMgr := validServiceDeps(t, pools)
-	svc, err := NewUniswapV4Service(deps)
+	svc, err := NewUniswapV4Service(context.Background(), deps)
 	if err != nil {
 		t.Fatalf("NewUniswapV4Service: %v", err)
 	}
@@ -485,7 +497,7 @@ func TestNewUniswapV4Service_RejectsInvalidDeps(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			deps, _, _, _ := validServiceDeps(t, []RegisteredPool{servicePool()})
-			_, err := NewUniswapV4Service(tt.mutate(deps))
+			_, err := NewUniswapV4Service(context.Background(), tt.mutate(deps))
 			if err == nil {
 				t.Fatalf("NewUniswapV4Service: want error for %s, got nil", tt.name)
 			}
@@ -501,7 +513,7 @@ func TestNewUniswapV4Service_RejectsInvalidDeps(t *testing.T) {
 // excludes it from snapshots instead.
 func TestNewUniswapV4Service_AcceptsDynamicFeePool(t *testing.T) {
 	deps, _, _, _ := validServiceDeps(t, []RegisteredPool{dynamicFeeServicePool(t)})
-	if _, err := NewUniswapV4Service(deps); err != nil {
+	if _, err := NewUniswapV4Service(context.Background(), deps); err != nil {
 		t.Fatalf("NewUniswapV4Service with a dynamic-fee pool: %v", err)
 	}
 }
@@ -607,7 +619,7 @@ func TestBlockHandler_CapturesEveryDecodedLog(t *testing.T) {
 	deps, _, mc, _ := validServiceDeps(t, []RegisteredPool{pool})
 	eventRepo := &fakeEventRepo{}
 	deps.EventWriter = dexconsumer.NewProtocolEventWriter(1, eventRepo)
-	svc, err := NewUniswapV4Service(deps)
+	svc, err := NewUniswapV4Service(context.Background(), deps)
 	if err != nil {
 		t.Fatalf("NewUniswapV4Service: %v", err)
 	}
@@ -865,7 +877,7 @@ func TestBlockHandler_TickResultCountMismatch_NoPersist(t *testing.T) {
 	mc.tickResults[-100] = goodTickResult(t)
 	mc.tickResults[200] = goodTickResult(t)
 	deps.Multicaller = &truncatingTickMulticaller{recordingMulticaller: mc}
-	svc, err := NewUniswapV4Service(deps)
+	svc, err := NewUniswapV4Service(context.Background(), deps)
 	if err != nil {
 		t.Fatalf("NewUniswapV4Service: %v", err)
 	}
@@ -1085,7 +1097,7 @@ func TestBlockHandler_EventBatchPersistError_DoesNotMarkBaseline(t *testing.T) {
 	deps, repo, mc, _ := validServiceDeps(t, []RegisteredPool{pool})
 	eventRepo := &fakeEventRepo{err: fmt.Errorf("event db down")}
 	deps.EventWriter = dexconsumer.NewProtocolEventWriter(1, eventRepo)
-	svc, err := NewUniswapV4Service(deps)
+	svc, err := NewUniswapV4Service(context.Background(), deps)
 	if err != nil {
 		t.Fatalf("NewUniswapV4Service: %v", err)
 	}
@@ -1306,7 +1318,7 @@ func TestBlockHandler_GovernanceOnlyBlockPersistsCapturedLogsOnly(t *testing.T) 
 	deps, repo, mc, txMgr := validServiceDeps(t, []RegisteredPool{pool})
 	eventRepo := &fakeEventRepo{}
 	deps.EventWriter = dexconsumer.NewProtocolEventWriter(1, eventRepo)
-	svc, err := NewUniswapV4Service(deps)
+	svc, err := NewUniswapV4Service(context.Background(), deps)
 	if err != nil {
 		t.Fatalf("NewUniswapV4Service: %v", err)
 	}
@@ -1386,10 +1398,12 @@ func TestBlockHandler_BaselineAboveTicksPerCallIsChunked(t *testing.T) {
 	}
 }
 
-// newTelemetryService builds a service wired to a REAL dextelemetry.Telemetry
-// (the rest of the suite passes nil, making every Record* call a no-op) plus
-// the ManualReader that collects it.
-func newTelemetryService(t *testing.T, pools []RegisteredPool) (*UniswapV4Service, *fakeUniswapRepo, *metricsdk.ManualReader) {
+// newTelemetryDeps builds a dependency set wired to a REAL
+// dextelemetry.Telemetry (the rest of the suite passes nil, making every
+// Record* call a no-op) plus the ManualReader that collects it. Tests that need
+// the repo staged BEFORE construction — the boot-time reads — use this and
+// construct the service themselves.
+func newTelemetryDeps(t *testing.T, pools []RegisteredPool) (UniswapV4ServiceDeps, *fakeUniswapRepo, *metricsdk.ManualReader) {
 	t.Helper()
 
 	reader := metricsdk.NewManualReader()
@@ -1410,7 +1424,13 @@ func newTelemetryService(t *testing.T, pools []RegisteredPool) (*UniswapV4Servic
 
 	deps, repo, _, _ := validServiceDeps(t, pools)
 	deps.Telemetry = tel
-	svc, err := NewUniswapV4Service(deps)
+	return deps, repo, reader
+}
+
+func newTelemetryService(t *testing.T, pools []RegisteredPool) (*UniswapV4Service, *fakeUniswapRepo, *metricsdk.ManualReader) {
+	t.Helper()
+	deps, repo, reader := newTelemetryDeps(t, pools)
+	svc, err := NewUniswapV4Service(context.Background(), deps)
 	if err != nil {
 		t.Fatalf("NewUniswapV4Service: %v", err)
 	}
@@ -1536,5 +1556,148 @@ func TestBlockHandler_RecordsErrorsAtTheBoundary(t *testing.T) {
 
 	if errs, ok := sumCounter(t, collect(t, reader), "uniswap_v4.errors.total"); !ok || errs != 1 {
 		t.Errorf("uniswap_v4.errors.total = %d (present=%t), want 1", errs, ok)
+	}
+}
+
+// gaugeValue returns the gauge value for name, and whether the metric exists at
+// all. Absent and zero are different states: the never-indexed alert must be
+// able to distinguish "nothing to report" from "the gauge was never emitted".
+func gaugeValue(t *testing.T, rm *metricdata.ResourceMetrics, name string) (int64, bool) {
+	t.Helper()
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != name {
+				continue
+			}
+			gauge, ok := m.Data.(metricdata.Gauge[int64])
+			if !ok {
+				t.Fatalf("metric %s is %T, want Gauge[int64]", name, m.Data)
+			}
+			if len(gauge.DataPoints) != 1 {
+				t.Fatalf("metric %s has %d datapoints, want 1", name, len(gauge.DataPoints))
+			}
+			return gauge.DataPoints[0].Value, true
+		}
+	}
+	return 0, false
+}
+
+// A mis-seeded pool key is self-consistent, so it passes ValidatePoolKeys, boots
+// green, and then never matches a log — invisible unless the worker reports, per
+// pool, whether it has ever produced a row.
+func TestNewUniswapV4Service_CountsPoolsNeverIndexedAtBoot(t *testing.T) {
+	indexed, never := servicePool(), secondServicePool()
+	deps, repo, reader := newTelemetryDeps(t, []RegisteredPool{indexed, never})
+	repo.everSnapshotted = []int64{indexed.ID}
+
+	if _, err := NewUniswapV4Service(context.Background(), deps); err != nil {
+		t.Fatalf("NewUniswapV4Service: %v", err)
+	}
+
+	got, ok := gaugeValue(t, collect(t, reader), "uniswap_v4.pools.never_indexed")
+	if !ok {
+		t.Fatal("uniswap_v4.pools.never_indexed absent: a pool that never boots into the data is invisible")
+	}
+	if got != 1 {
+		t.Errorf("uniswap_v4.pools.never_indexed = %d, want 1", got)
+	}
+}
+
+// A pool the registry excludes from snapshots can never produce a state or tick
+// row by design, so counting it would leave the alert firing forever.
+func TestNewUniswapV4Service_ExcludesUnsnapshottablePoolsFromNeverIndexed(t *testing.T) {
+	deps, repo, reader := newTelemetryDeps(t, []RegisteredPool{servicePool(), dynamicFeeServicePool(t)})
+	repo.everSnapshotted = []int64{servicePool().ID}
+
+	if _, err := NewUniswapV4Service(context.Background(), deps); err != nil {
+		t.Fatalf("NewUniswapV4Service: %v", err)
+	}
+
+	if got, ok := gaugeValue(t, collect(t, reader), "uniswap_v4.pools.never_indexed"); !ok || got != 0 {
+		t.Errorf("uniswap_v4.pools.never_indexed = %d (present=%t), want 0", got, ok)
+	}
+}
+
+func TestBlockHandler_ClearsNeverIndexedOnFirstPersist(t *testing.T) {
+	pool := servicePool()
+	svc, _, reader := newTelemetryService(t, []RegisteredPool{pool})
+	if got, _ := gaugeValue(t, collect(t, reader), "uniswap_v4.pools.never_indexed"); got != 1 {
+		t.Fatalf("uniswap_v4.pools.never_indexed at boot = %d, want 1", got)
+	}
+
+	receipt := shared.TransactionReceipt{Logs: []shared.Log{swapLog(t, pool, "0x0")}}
+	if err := svc.BlockHandler()(context.Background(), blockEvent(200), []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("BlockHandler: %v", err)
+	}
+
+	if got, ok := gaugeValue(t, collect(t, reader), "uniswap_v4.pools.never_indexed"); !ok || got != 0 {
+		t.Errorf("uniswap_v4.pools.never_indexed = %d (present=%t), want 0 after the pool's first rows land", got, ok)
+	}
+}
+
+func TestBlockHandler_FailedPersistKeepsPoolNeverIndexed(t *testing.T) {
+	pool := servicePool()
+	svc, repo, reader := newTelemetryService(t, []RegisteredPool{pool})
+	repo.err = fmt.Errorf("boom")
+
+	receipt := shared.TransactionReceipt{Logs: []shared.Log{swapLog(t, pool, "0x0")}}
+	if err := svc.BlockHandler()(context.Background(), blockEvent(200), []shared.TransactionReceipt{receipt}); err == nil {
+		t.Fatal("BlockHandler: want the persist error, got nil")
+	}
+
+	if got, _ := gaugeValue(t, collect(t, reader), "uniswap_v4.pools.never_indexed"); got != 1 {
+		t.Errorf("uniswap_v4.pools.never_indexed = %d, want 1 (nothing was committed)", got)
+	}
+}
+
+// Baseline enumeration costs a full tick-bitmap scan per pool. baselineSeen is
+// in-memory, so without a boot seed every rollout re-enumerates every pool and
+// spikes uniswap_v4_block_duration_seconds past the 3s p99 alert.
+func TestNewUniswapV4Service_SeedsBaselineFromPersistedRows(t *testing.T) {
+	pool := servicePool()
+	deps, repo, mc, _ := validServiceDeps(t, []RegisteredPool{pool})
+	repo.everSnapshotted = []int64{pool.ID}
+	svc, err := NewUniswapV4Service(context.Background(), deps)
+	if err != nil {
+		t.Fatalf("NewUniswapV4Service: %v", err)
+	}
+
+	receipt := shared.TransactionReceipt{Logs: []shared.Log{swapLog(t, pool, "0x0")}}
+	if err := svc.BlockHandler()(context.Background(), blockEvent(200), []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("BlockHandler: %v", err)
+	}
+
+	if mc.baselineCalls != 0 {
+		t.Errorf("getTickBitmap batches = %d, want 0 for a pool whose baseline is already persisted", mc.baselineCalls)
+	}
+}
+
+// A boot read that fails must stop the worker: a silently empty result would
+// re-baseline every pool and report every pool as never indexed.
+func TestNewUniswapV4Service_RejectsFailedEverSnapshottedRead(t *testing.T) {
+	deps, repo, _, _ := validServiceDeps(t, []RegisteredPool{servicePool()})
+	repo.everSnapshottedErr = fmt.Errorf("connection refused")
+
+	_, err := NewUniswapV4Service(context.Background(), deps)
+	if err == nil {
+		t.Fatal("NewUniswapV4Service: want an error when the boot read fails, got nil")
+	}
+	if !strings.Contains(err.Error(), "connection refused") {
+		t.Errorf("error %q does not carry the underlying read failure", err)
+	}
+}
+
+// A boot read scoped to the wrong chain would return another chain's pools,
+// silently marking this chain's as already baselined and already indexed.
+func TestNewUniswapV4Service_ReadsEverSnapshottedForItsOwnChain(t *testing.T) {
+	deps, repo, _, _ := validServiceDeps(t, []RegisteredPool{servicePool()})
+
+	if _, err := NewUniswapV4Service(context.Background(), deps); err != nil {
+		t.Fatalf("NewUniswapV4Service: %v", err)
+	}
+
+	if !slices.Equal(repo.everSnapshottedChains, []int64{testChainID}) {
+		t.Errorf("PoolIDsEverSnapshotted called with chains %v, want exactly [%d]",
+			repo.everSnapshottedChains, testChainID)
 	}
 }
