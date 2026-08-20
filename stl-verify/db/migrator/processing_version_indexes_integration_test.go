@@ -28,8 +28,9 @@ const minFixtureChunkCount = 5
 
 // Per-lookup budget, planning included: force_custom_plan re-plans on every execution, so planning
 // is part of the per-row trigger cost and has to stay flat in chunk count too. Measured 25-59 buffers
-// across all 14 tables with the many-chunk table at 401 chunks; the same lookup costs 406 buffers
-// once a generic plan stops pruning.
+// across all 14 tables with the many-chunk table at 401 chunks, and 37-95 once the probe key's chunk
+// is in the columnstore, where planning also has to reach the compress_hyper_* twin; the same lookup
+// costs 406 buffers once a generic plan stops pruning.
 const maxTriggerLookupBuffers = 120
 
 // Per-row insert budget for the real trigger on the many-chunk table, in the steady state a
@@ -351,25 +352,12 @@ func TestProcessingVersionTriggerLookupsPruneToOneChunk(t *testing.T) {
 		for _, lookup := range tc.triggerLookups() {
 			t.Run(tc.tableName+"/"+lookup.label, func(t *testing.T) {
 				plan := explainWarmedLookup(t, ctx, conn, lookup)
-				if plan.hasNodeType("Seq Scan") {
-					t.Fatalf("%s %s lookup fell back to a sequential scan\nplan:\n%s",
-						tc.tableName, lookup.label, plan.raw)
-				}
-				if chunks := plan.chunkNames(); len(chunks) != 1 {
-					t.Fatalf("%s %s lookup scanned %d chunks, want exactly 1\nplan:\n%s",
-						tc.tableName, lookup.label, len(chunks), plan.raw)
-				}
-				// The assertion above cannot stand alone: a plan that kept every chunk and excluded them
-				// at startup also scans exactly one, and costs few buffers doing it, so it satisfies both
-				// of the other checks while paying the fan-out per row.
-				if excluded := plan.deferredChunkExclusions(); excluded > 0 {
-					t.Fatalf("%s %s lookup deferred exclusion of %d chunks to startup, so it re-derives them "+
-						"on every execution instead of pruning once when the plan is built\nplan:\n%s",
-						tc.tableName, lookup.label, excluded, plan.raw)
-				}
-				if buffers := plan.totalBuffers(); buffers > maxTriggerLookupBuffers {
-					t.Fatalf("%s %s lookup touched %d buffers; expected <= %d\nplan:\n%s",
-						tc.tableName, lookup.label, buffers, maxTriggerLookupBuffers, plan.raw)
+				assertLookupPrunedToOneChunk(t, plan, tc.tableName+" "+lookup.label)
+				if twins := plan.compressedChunkNames(); len(twins) != 0 {
+					t.Fatalf("%s %s lookup reached the columnstore twins %v on a fixture that compresses "+
+						"nothing, so the policy jobs setupMigratedPostgres switches off ran anyway and the "+
+						"row-store chunk count above is no longer measuring what it names\nplan:\n%s",
+						tc.tableName, lookup.label, twins, plan.raw)
 				}
 			})
 		}
@@ -506,6 +494,30 @@ func manyChunkCase(t *testing.T) processingVersionIndexCase {
 	return processingVersionIndexCase{}
 }
 
+// What a trigger lookup has to keep whatever the storage layout of the chunk it lands in, so the
+// row-store fixture and the columnstore one are held to one standard instead of two.
+func assertLookupPrunedToOneChunk(t *testing.T, plan explainPlan, label string) {
+	t.Helper()
+
+	if plan.hasNodeType("Seq Scan") {
+		t.Fatalf("%s lookup fell back to a sequential scan\nplan:\n%s", label, plan.raw)
+	}
+	if chunks := plan.chunkNames(); len(chunks) != 1 {
+		t.Fatalf("%s lookup scanned %d chunks, want exactly 1\nplan:\n%s", label, len(chunks), plan.raw)
+	}
+	// The assertion above cannot stand alone: a plan that kept every chunk and excluded them at
+	// startup also scans exactly one, and costs few buffers doing it, so it satisfies both of the
+	// other checks while paying the fan-out per row.
+	if excluded := plan.deferredChunkExclusions(); excluded > 0 {
+		t.Fatalf("%s lookup deferred exclusion of %d chunks to startup, so it re-derives them on every "+
+			"execution instead of pruning once when the plan is built\nplan:\n%s", label, excluded, plan.raw)
+	}
+	if buffers := plan.totalBuffers(); buffers > maxTriggerLookupBuffers {
+		t.Fatalf("%s lookup touched %d buffers; expected <= %d\nplan:\n%s",
+			label, buffers, maxTriggerLookupBuffers, plan.raw)
+	}
+}
+
 // The measured EXPLAIN is the second execution, not the first. Planning a hypertable's chunks on a cold
 // session reads catalog pages that are not yet in shared buffers — 1,050 planning buffers on borrower's
 // first execution against 30 on every one after it — and that is a session start-up cost, not the
@@ -560,15 +572,32 @@ func (p explainPlan) totalBuffers() int {
 	return total
 }
 
-// Compressed chunks are named apart from row-store ones and a columnar scan reaches the hypertable
-// through them, so a count that omitted them would under-report what the plan touches.
-var chunkRelationPattern = regexp.MustCompile(`^(?:_hyper|compress_hyper)_\d+_\d+_chunk$`)
+// A compressed chunk is two relations, and the two answer different questions: the row-store chunk
+// is what pruning either kept or discarded, and its columnstore twin is where a columnar scan reads
+// the compressed batches from. Counting them together would let a twin stand in for a second chunk
+// the plan failed to prune, so each pattern gets its own accessor and every caller says which it
+// means. TimescaleDB names both, and only these two shapes are chunks.
+var (
+	chunkRelationPattern           = regexp.MustCompile(`^_hyper_\d+_\d+_chunk$`)
+	compressedChunkRelationPattern = regexp.MustCompile(`^compress_hyper_\d+_\d+_chunk$`)
+)
 
+// The row-store chunks the plan names — one per chunk that survived pruning, whether its rows are
+// compressed or not.
 func (p explainPlan) chunkNames() []string {
+	return p.relationNamesMatching(chunkRelationPattern)
+}
+
+// The columnstore twins the plan names, one per compressed chunk it reads batches from.
+func (p explainPlan) compressedChunkNames() []string {
+	return p.relationNamesMatching(compressedChunkRelationPattern)
+}
+
+func (p explainPlan) relationNamesMatching(pattern *regexp.Regexp) []string {
 	seen := map[string]bool{}
 	var names []string
 	p.walk(func(n explainNode) {
-		if chunkRelationPattern.MatchString(n.RelationName) && !seen[n.RelationName] {
+		if pattern.MatchString(n.RelationName) && !seen[n.RelationName] {
 			seen[n.RelationName] = true
 			names = append(names, n.RelationName)
 		}
