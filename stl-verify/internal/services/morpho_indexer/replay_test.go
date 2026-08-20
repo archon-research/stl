@@ -190,6 +190,51 @@ func TestSeedV2VaultAdapters_EnumeratesAndSeedsState(t *testing.T) {
 	}
 }
 
+// TestSeedV2VaultAdapters_StampsArchivingBlockContext verifies the seed stamps
+// its pinned block coordinates on the context the way the live SQS path does. It
+// receives them as parameters, so nothing else can put them there — and
+// unstamped, the archiving decorator keys every hash-pinned batch at block 0,
+// where each seeded vault overwrites the previous one's archive.
+func TestSeedV2VaultAdapters_StampsArchivingBlockContext(t *testing.T) {
+	h := newTestHarness(t)
+	h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
+
+	const headBlock = int64(24_000_000)
+	const headVersion = 2
+	var seenNumber int64
+	var seenNumberOK bool
+	var seenVersion int
+	var seenVersionOK bool
+	h.multicaller.ExecuteAtHashFn = func(ctx context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		seenNumber, seenNumberOK = archiving.BlockNumberFromContext(ctx)
+		seenVersion, seenVersionOK = archiving.BlockVersionFromContext(ctx)
+		return h.vaultAdapterEnumerationResults(calls, testVaultAddr, testAdapterAddr, big.NewInt(4242))
+	}
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		if len(calls) == adapterProbeCallsPerAdapter && calls[0].Target == testAdapterAddr {
+			return h.adapterProbeResults(entity.MorphoAdapterTypeMarketV1), nil
+		}
+		return nil, errTestUnexpectedCall(calls)
+	}
+
+	if err := h.svc.SeedV2VaultAdapters(context.Background(), testVaultAddr, headBlock, testBlockHash, headVersion, time.Unix(1_760_000_000, 0).UTC()); err != nil {
+		t.Fatalf("SeedV2VaultAdapters: %v", err)
+	}
+
+	if !seenNumberOK {
+		t.Error("hash-pinned read saw no archiving block number; the archive would key it at block 0")
+	}
+	if seenNumber != headBlock {
+		t.Errorf("archiving block number = %d, want %d", seenNumber, headBlock)
+	}
+	if !seenVersionOK {
+		t.Error("hash-pinned read saw no archiving block version")
+	}
+	if seenVersion != headVersion {
+		t.Errorf("archiving block version = %d, want %d", seenVersion, headVersion)
+	}
+}
+
 // TestSeedV2VaultAdapters_DeregistersAdaptersAbsentOnChain covers the half of the
 // seed that asserting presence alone can never fix (R2). The bootstrap enumerates
 // adapters(i) at the pinned head; an adapter that is in our registry but NOT in

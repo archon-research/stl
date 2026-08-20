@@ -90,6 +90,10 @@ func (s *Service) ReplayMetaMorphoLog(ctx context.Context, log shared.Log, block
 // and hung the seed snapshot off it. The realAssets snapshot is still written: it
 // is a reading at the new head, which is new information regardless.
 func (s *Service) SeedV2VaultAdapters(ctx context.Context, vaultAddress common.Address, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) error {
+	// Hash-pinned reads carry no block argument, so unstamped the archiving
+	// decorator keys every seeded vault's batch at block 0 and they overwrite each other.
+	ctx = archiving.WithBlockVersion(ctx, blockVersion)
+	ctx = archiving.WithBlockNumber(ctx, blockNumber)
 	vault, err := s.resolveV2Vault(vaultAddress)
 	if err != nil {
 		return err
