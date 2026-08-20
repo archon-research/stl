@@ -8,6 +8,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
@@ -39,6 +40,10 @@ func (s *Service) V2VaultAddresses() map[common.Address]struct{} {
 // append-only membership observations keyed on the log's own position), so replaying
 // a log more than once — the resume case after a partially-completed run — is safe.
 func (s *Service) ReplayMetaMorphoLog(ctx context.Context, log shared.Log, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) error {
+	// Hash-pinned reads carry no block argument, so unstamped the archiving
+	// decorator keys every replayed batch at block 0 and they overwrite each other.
+	ctx = archiving.WithBlockVersion(ctx, blockVersion)
+	ctx = archiving.WithBlockNumber(ctx, blockNumber)
 	if len(log.Topics) == 0 {
 		return fmt.Errorf("replay log has no topics")
 	}

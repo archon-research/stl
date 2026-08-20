@@ -13,6 +13,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -141,6 +142,57 @@ func TestReplayMetaMorphoLog_RoutesToHandler(t *testing.T) {
 	}
 	if !auditSaved {
 		t.Error("audit-log protocol_event not saved during replay")
+	}
+}
+
+// TestReplayMetaMorphoLog_StampsArchivingBlockContext verifies replay stamps the
+// replayed log's block coordinates on the context the way the live SQS path
+// does. Without them the archiving decorator keys every hash-pinned batch at
+// block 0, so each replayed block overwrites the previous one's archive.
+func TestReplayMetaMorphoLog_StampsArchivingBlockContext(t *testing.T) {
+	h := newTestHarness(t)
+	h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
+
+	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		if len(calls) == 2 && calls[0].Target == testAdapterAddr {
+			return h.adapterProbeResults(entity.MorphoAdapterTypeMarketV1), nil
+		}
+		return nil, errTestUnexpectedCall(calls)
+	}
+	var seenNumber int64
+	var seenNumberOK bool
+	var seenVersion int
+	var seenVersionOK bool
+	h.multicaller.ExecuteAtHashFn = func(ctx context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		seenNumber, seenNumberOK = archiving.BlockNumberFromContext(ctx)
+		seenVersion, seenVersionOK = archiving.BlockVersionFromContext(ctx)
+		if len(calls) == 1 && calls[0].Target == testAdapterAddr {
+			return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(41_300_000))}}, nil
+		}
+		return nil, errTestUnexpectedCall(calls)
+	}
+	h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterObservation) (int64, bool, error) {
+		return 42, true, nil
+	}
+
+	ev := h.vaultV2EventsABI.Events["AddAdapter"]
+	log := h.makeV2VaultLog(ev, testVaultAddr, []common.Hash{addrTopic(testAdapterAddr)})
+
+	if err := h.svc.ReplayMetaMorphoLog(context.Background(), log, 20000000, testBlockHash, 3, time.Unix(1700000000, 0).UTC()); err != nil {
+		t.Fatalf("ReplayMetaMorphoLog: %v", err)
+	}
+
+	if !seenNumberOK {
+		t.Error("hash-pinned read saw no archiving block number; the archive would key it at block 0")
+	}
+	if seenNumber != 20000000 {
+		t.Errorf("archiving block number = %d, want 20000000", seenNumber)
+	}
+	if !seenVersionOK {
+		t.Error("hash-pinned read saw no archiving block version")
+	}
+	if seenVersion != 3 {
+		t.Errorf("archiving block version = %d, want 3", seenVersion)
 	}
 }
 
