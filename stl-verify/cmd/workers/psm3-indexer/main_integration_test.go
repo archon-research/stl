@@ -368,7 +368,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	}
 
 	var (
-		addrBytes                              []byte
+		addrBytes, almAddrBytes                []byte
 		usds, susds, usdc, total, rate, source string
 		shares, allShares, shareValue          string
 		blockNumber                            int64
@@ -377,11 +377,11 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	err := pool.QueryRow(ctx, `
 		SELECT address, usds_balance::text, susds_balance::text, usdc_balance::text,
 		       total_assets::text, conversion_rate::text,
-		       spark_alm_shares::text, total_shares::text, spark_alm_asset_value::text,
+		       spark_alm_address, spark_alm_shares::text, total_shares::text, spark_alm_asset_value::text,
 		       block_number, block_version, source
 		FROM psm3_reserves ORDER BY block_number LIMIT 1
 	`).Scan(&addrBytes, &usds, &susds, &usdc, &total, &rate,
-		&shares, &allShares, &shareValue, &blockNumber, &blockVer, &source)
+		&almAddrBytes, &shares, &allShares, &shareValue, &blockNumber, &blockVer, &source)
 	if err != nil {
 		t.Fatalf("query snapshot: %v", err)
 	}
@@ -403,6 +403,9 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	}
 	if rate != conversionRate.String() {
 		t.Errorf("conversion_rate = %s, want %s", rate, conversionRate)
+	}
+	if common.BytesToAddress(almAddrBytes) != almAddr {
+		t.Errorf("spark_alm_address = %s, want %s", common.BytesToAddress(almAddrBytes).Hex(), almAddr.Hex())
 	}
 	if shares != almShares.String() {
 		t.Errorf("spark_alm_shares = %s, want %s", shares, almShares)

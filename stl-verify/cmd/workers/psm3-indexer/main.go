@@ -251,6 +251,7 @@ func run(ctx context.Context, args []string) error {
 			SweepEveryNBlocks: *sweepBlocks,
 			ChainID:           chainID,
 			PSM3Address:       psm3Cfg.PSM3,
+			SparkALMAddress:   psm3Cfg.SparkALM,
 			MaxMessages:       10,
 			PollInterval:      100 * time.Millisecond,
 			Logger:            logger,

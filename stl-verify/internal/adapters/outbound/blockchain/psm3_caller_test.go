@@ -187,6 +187,26 @@ func TestValidateAgainstAxisSynome(t *testing.T) {
 			almProxies("base", "0x2917956eff0b5eaf030abdb4ef4296df775009ca", "subproxy"),
 			"no alm proxy",
 		},
+		{
+			"two stars own the chain's psm3", 8453,
+			map[string][]axis_synome_contract.TokenEntry{
+				"spark": {psm3Entry("base", "0x1601843c5e9bc251a3272907010afa41fa18347e")},
+				"grove": {psm3Entry("base", "0x1601843c5e9bc251a3272907010afa41fa18347e")},
+			},
+			sparkALMOnBase,
+			"two stars",
+		},
+		{
+			"two alm proxies during a rotation window", 8453,
+			sparkOnBase,
+			map[string]map[string][]axis_synome_contract.ProxyConfig{
+				"spark": {"base": {
+					{Star: "spark", Chain: "base", Address: "0x2917956eff0b5eaf030abdb4ef4296df775009ca", Role: "alm"},
+					{Star: "spark", Chain: "base", Address: "0x92afd6f2385a90e44da3a8b60fe36f6cbe1d8709", Role: "alm"},
+				}},
+			},
+			"want exactly one",
+		},
 	}
 
 	for _, tc := range tests {
@@ -545,6 +565,16 @@ func TestReadState_Round2Failures(t *testing.T) {
 				}, nil
 			},
 			"convertToAssetValue call failed",
+		},
+		{
+			"garbage convertToAssetValue return data",
+			func() ([]outbound.Result, error) {
+				return []outbound.Result{
+					{Success: true, ReturnData: common.BigToHash(big.NewInt(7)).Bytes()},
+					{Success: true, ReturnData: []byte{0xff}},
+				}, nil
+			},
+			"unpack convertToAssetValue",
 		},
 	}
 

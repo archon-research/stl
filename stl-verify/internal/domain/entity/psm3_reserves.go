@@ -22,13 +22,17 @@ type PSM3State struct {
 
 // PSM3Reserves is a single append-only psm3_reserves row.
 type PSM3Reserves struct {
-	ChainID        int64
-	Address        common.Address // PSM3 contract
-	State          PSM3State
-	BlockNumber    int64
-	BlockVersion   int
-	BlockTimestamp time.Time
-	Source         string // "sweep"; widened when the event-driven path lands
+	ChainID int64
+	Address common.Address // PSM3 contract
+	// SparkALMAddress records which holder the share legs were read for.
+	// Config-sourced, so a proxy rotation with a lagging config stays
+	// distinguishable from a real divestment in the append-only history.
+	SparkALMAddress common.Address
+	State           PSM3State
+	BlockNumber     int64
+	BlockVersion    int
+	BlockTimestamp  time.Time
+	Source          string // "sweep"; widened when the event-driven path lands
 }
 
 // Validate checks that the snapshot is well-formed before persistence.
@@ -38,6 +42,9 @@ func (s *PSM3Reserves) Validate() error {
 	}
 	if s.Address == (common.Address{}) {
 		return fmt.Errorf("address is required")
+	}
+	if s.SparkALMAddress == (common.Address{}) {
+		return fmt.Errorf("spark_alm_address is required")
 	}
 	fields := []struct {
 		name string
@@ -56,6 +63,15 @@ func (s *PSM3Reserves) Validate() error {
 		if f.v == nil {
 			return fmt.Errorf("%s is required", f.name)
 		}
+	}
+	// Both hold unconditionally for same-block reads (totalShares sums the
+	// shares mapping; floor division is monotone), so a violation means the
+	// caller paired call and result wrong — stop it before it is persisted.
+	if s.State.SparkALMShares.Cmp(s.State.TotalShares) > 0 {
+		return fmt.Errorf("spark_alm_shares %s exceeds total_shares %s", s.State.SparkALMShares, s.State.TotalShares)
+	}
+	if s.State.SparkALMAssetValue.Cmp(s.State.TotalAssets) > 0 {
+		return fmt.Errorf("spark_alm_asset_value %s exceeds total_assets %s", s.State.SparkALMAssetValue, s.State.TotalAssets)
 	}
 	if s.BlockNumber <= 0 {
 		return fmt.Errorf("block_number must be positive")

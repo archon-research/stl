@@ -87,6 +87,12 @@ func (cfg PSM3Config) ValidateAgainstAxisSynome(contract *axis_synome_contract.C
 			if e.Protocol != "psm3" || e.Chain != chainName {
 				continue
 			}
+			// Two stars owning one chain's PSM3 would make the ALM lookup below
+			// depend on map iteration order — fail deterministically instead.
+			if owningStar != "" && owningStar != star {
+				return fmt.Errorf("axis-synome has psm3 entries for chain %s under two stars (%s, %s)",
+					chainName, owningStar, star)
+			}
 			owningStar = star
 			if common.HexToAddress(e.ContractAddress) != cfg.PSM3 {
 				return fmt.Errorf("axis-synome psm3 entry for chain %s (star %s) has contract %s, config has %s",
@@ -103,18 +109,28 @@ func (cfg PSM3Config) ValidateAgainstAxisSynome(contract *axis_synome_contract.C
 
 // validateALMAgainstAxisSynome checks cfg.SparkALM against the canonical ALM proxy
 // (role "alm", not a SubProxy/treasury wallet) of the given star and chain.
+// Exactly one alm-role entry may exist: during a proxy rotation window two
+// entries would make pass/fail depend on entry order, so that state fails hard
+// until the registry is settled.
 func (cfg PSM3Config) validateALMAgainstAxisSynome(contract *axis_synome_contract.Contract, star, chainName string) error {
+	var alms []string
 	for _, proxy := range contract.GetAlmProxies()[star][chainName] {
-		if proxy.Role != "alm" {
-			continue
+		if proxy.Role == "alm" {
+			alms = append(alms, proxy.Address)
 		}
-		if common.HexToAddress(proxy.Address) != cfg.SparkALM {
-			return fmt.Errorf("axis-synome alm proxy for chain %s (star %s) is %s, config has %s",
-				chainName, star, proxy.Address, cfg.SparkALM.Hex())
-		}
-		return nil
 	}
-	return fmt.Errorf("no alm proxy in axis-synome for chain %s (star %s)", chainName, star)
+	if len(alms) == 0 {
+		return fmt.Errorf("no alm proxy in axis-synome for chain %s (star %s)", chainName, star)
+	}
+	if len(alms) > 1 {
+		return fmt.Errorf("axis-synome has %d alm proxies for chain %s (star %s), want exactly one: %v",
+			len(alms), chainName, star, alms)
+	}
+	if common.HexToAddress(alms[0]) != cfg.SparkALM {
+		return fmt.Errorf("axis-synome alm proxy for chain %s (star %s) is %s, config has %s",
+			chainName, star, alms[0], cfg.SparkALM.Hex())
+	}
+	return nil
 }
 
 // PSM3Caller reads Spark PSM3 reserve state using batched multicall3 reads.
@@ -214,8 +230,7 @@ func (c *PSM3Caller) ReadState(ctx context.Context, blockHash common.Hash) (*ent
 		return nil, err
 	}
 
-	state.USDCBalance, state.SparkALMAssetValue, err = c.readPocketBalanceAndShareValue(ctx, pocket, state.SparkALMShares, blockHash)
-	if err != nil {
+	if err := c.readPocketBalanceAndShareValue(ctx, pocket, state, blockHash); err != nil {
 		return nil, err
 	}
 
@@ -237,6 +252,19 @@ func (c *PSM3Caller) readReservesAndShares(ctx context.Context, blockHash common
 
 	return c.decodeReservesAndShares(results)
 }
+
+// Round-1 result positions, shared by reservesAndSharesCalls and
+// decodeReservesAndShares so the builder and the decoder cannot drift apart.
+const (
+	idxPocket = iota
+	idxUSDSBalance
+	idxSUSDSBalance
+	idxTotalAssets
+	idxConversionRate
+	idxSparkALMShares
+	idxTotalShares
+	round1Calls
+)
 
 // reservesAndSharesCalls builds the round-1 calls, in the order
 // decodeReservesAndShares expects.
@@ -266,15 +294,15 @@ func (c *PSM3Caller) reservesAndSharesCalls() ([]outbound.Call, error) {
 		return nil, fmt.Errorf("pack totalShares: %w", err)
 	}
 
-	return []outbound.Call{
-		{Target: c.cfg.PSM3, CallData: pocketData},
-		{Target: c.cfg.USDS, CallData: balanceOfPSM3},
-		{Target: c.cfg.SUSDS, CallData: balanceOfPSM3},
-		{Target: c.cfg.PSM3, CallData: totalAssetsData},
-		{Target: c.rateProvider, CallData: rateData},
-		{Target: c.cfg.PSM3, CallData: sharesData},
-		{Target: c.cfg.PSM3, CallData: totalSharesData},
-	}, nil
+	calls := make([]outbound.Call, round1Calls)
+	calls[idxPocket] = outbound.Call{Target: c.cfg.PSM3, CallData: pocketData}
+	calls[idxUSDSBalance] = outbound.Call{Target: c.cfg.USDS, CallData: balanceOfPSM3}
+	calls[idxSUSDSBalance] = outbound.Call{Target: c.cfg.SUSDS, CallData: balanceOfPSM3}
+	calls[idxTotalAssets] = outbound.Call{Target: c.cfg.PSM3, CallData: totalAssetsData}
+	calls[idxConversionRate] = outbound.Call{Target: c.rateProvider, CallData: rateData}
+	calls[idxSparkALMShares] = outbound.Call{Target: c.cfg.PSM3, CallData: sharesData}
+	calls[idxTotalShares] = outbound.Call{Target: c.cfg.PSM3, CallData: totalSharesData}
+	return calls, nil
 }
 
 // decodeReservesAndShares decodes the round-1 results built by
@@ -282,7 +310,7 @@ func (c *PSM3Caller) reservesAndSharesCalls() ([]outbound.Call, error) {
 func (c *PSM3Caller) decodeReservesAndShares(results []outbound.Result) (*entity.PSM3State, common.Address, error) {
 	fail := func(err error) (*entity.PSM3State, common.Address, error) { return nil, common.Address{}, err }
 
-	pocket, err := unpackAddress(&c.psm3ABI, "pocket", results[0])
+	pocket, err := unpackAddress(&c.psm3ABI, "pocket", results[idxPocket])
 	if err != nil {
 		return fail(err)
 	}
@@ -291,27 +319,27 @@ func (c *PSM3Caller) decodeReservesAndShares(results []outbound.Result) (*entity
 		// (the burn address can hold USDC), so fail hard instead.
 		return fail(fmt.Errorf("psm3 pocket() returned the zero address"))
 	}
-	usdsBalance, err := unpackUint256(&c.erc20ABI, "balanceOf", results[1])
+	usdsBalance, err := unpackUint256(&c.erc20ABI, "balanceOf", results[idxUSDSBalance])
 	if err != nil {
 		return fail(fmt.Errorf("usds balance: %w", err))
 	}
-	susdsBalance, err := unpackUint256(&c.erc20ABI, "balanceOf", results[2])
+	susdsBalance, err := unpackUint256(&c.erc20ABI, "balanceOf", results[idxSUSDSBalance])
 	if err != nil {
 		return fail(fmt.Errorf("susds balance: %w", err))
 	}
-	totalAssets, err := unpackUint256(&c.psm3ABI, "totalAssets", results[3])
+	totalAssets, err := unpackUint256(&c.psm3ABI, "totalAssets", results[idxTotalAssets])
 	if err != nil {
 		return fail(err)
 	}
-	conversionRate, err := unpackUint256(&c.rateABI, "getConversionRate", results[4])
+	conversionRate, err := unpackUint256(&c.rateABI, "getConversionRate", results[idxConversionRate])
 	if err != nil {
 		return fail(err)
 	}
-	almShares, err := unpackUint256(&c.psm3ABI, "shares", results[5])
+	almShares, err := unpackUint256(&c.psm3ABI, "shares", results[idxSparkALMShares])
 	if err != nil {
 		return fail(err)
 	}
-	totalShares, err := unpackUint256(&c.psm3ABI, "totalShares", results[6])
+	totalShares, err := unpackUint256(&c.psm3ABI, "totalShares", results[idxTotalShares])
 	if err != nil {
 		return fail(err)
 	}
@@ -326,21 +354,23 @@ func (c *PSM3Caller) decodeReservesAndShares(results []outbound.Result) (*entity
 	}, pocket, nil
 }
 
-// readPocketBalanceAndShareValue runs round 2: USDC.balanceOf(pocket) and the
-// par value of almShares, both of which depend on a round-1 result.
+// readPocketBalanceAndShareValue runs round 2 — USDC.balanceOf(pocket) and the
+// par value of the ALM's shares, both of which depend on a round-1 result —
+// and writes the two legs into their state fields directly, so the 1e6 USDC
+// and 1e18 share-value results cannot be transposed at a call site.
 func (c *PSM3Caller) readPocketBalanceAndShareValue(
 	ctx context.Context,
 	pocket common.Address,
-	almShares *big.Int,
+	state *entity.PSM3State,
 	blockHash common.Hash,
-) (*big.Int, *big.Int, error) {
+) error {
 	balanceData, err := c.erc20ABI.Pack("balanceOf", pocket)
 	if err != nil {
-		return nil, nil, fmt.Errorf("pack balanceOf(pocket): %w", err)
+		return fmt.Errorf("pack balanceOf(pocket): %w", err)
 	}
-	assetValueData, err := c.psm3ABI.Pack("convertToAssetValue", almShares)
+	assetValueData, err := c.psm3ABI.Pack("convertToAssetValue", state.SparkALMShares)
 	if err != nil {
-		return nil, nil, fmt.Errorf("pack convertToAssetValue(almShares): %w", err)
+		return fmt.Errorf("pack convertToAssetValue(almShares): %w", err)
 	}
 
 	calls := []outbound.Call{
@@ -349,18 +379,18 @@ func (c *PSM3Caller) readPocketBalanceAndShareValue(
 	}
 	results, err := c.executeAtHash(ctx, calls, blockHash)
 	if err != nil {
-		return nil, nil, fmt.Errorf("multicall usdc balance at pocket %s and alm share value: %w", pocket.Hex(), err)
+		return fmt.Errorf("multicall usdc balance at pocket %s and alm share value: %w", pocket.Hex(), err)
 	}
 
-	balance, err := unpackUint256(&c.erc20ABI, "balanceOf", results[0])
+	state.USDCBalance, err = unpackUint256(&c.erc20ABI, "balanceOf", results[0])
 	if err != nil {
-		return nil, nil, fmt.Errorf("usdc balance at pocket %s: %w", pocket.Hex(), err)
+		return fmt.Errorf("usdc balance at pocket %s: %w", pocket.Hex(), err)
 	}
-	assetValue, err := unpackUint256(&c.psm3ABI, "convertToAssetValue", results[1])
+	state.SparkALMAssetValue, err = unpackUint256(&c.psm3ABI, "convertToAssetValue", results[1])
 	if err != nil {
-		return nil, nil, err
+		return fmt.Errorf("alm share value: %w", err)
 	}
-	return balance, assetValue, nil
+	return nil
 }
 
 // execute runs a number-pinned multicall and verifies the result count. Callers

@@ -944,6 +944,10 @@
       "type": "int8",
       "class": "R"
     },
+    "spark_alm_address": {
+      "type": "bytea",
+      "class": "S"
+    },
     "spark_alm_asset_value": {
       "type": "numeric",
       "class": "S"

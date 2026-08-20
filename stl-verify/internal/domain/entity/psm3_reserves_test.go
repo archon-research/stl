@@ -11,13 +11,14 @@ import (
 
 func validPSM3Reserves() PSM3Reserves {
 	return PSM3Reserves{
-		ChainID: 8453,
-		Address: common.HexToAddress("0x1601843c5E9bC251A3272907010AFa41Fa18347E"),
+		ChainID:         8453,
+		Address:         common.HexToAddress("0x1601843c5E9bC251A3272907010AFa41Fa18347E"),
+		SparkALMAddress: common.HexToAddress("0x2917956eFF0B5eaF030abDB4EF4296DF775009cA"),
 		State: PSM3State{
 			USDSBalance:        big.NewInt(1),
 			SUSDSBalance:       big.NewInt(2),
 			USDCBalance:        big.NewInt(3),
-			TotalAssets:        big.NewInt(4),
+			TotalAssets:        big.NewInt(9),
 			ConversionRate:     big.NewInt(5),
 			SparkALMShares:     big.NewInt(6),
 			TotalShares:        big.NewInt(7),
@@ -41,6 +42,7 @@ func TestPSM3Reserves_Validate(t *testing.T) {
 		{"zero chain id", func(s *PSM3Reserves) { s.ChainID = 0 }, "chain_id"},
 		{"negative chain id", func(s *PSM3Reserves) { s.ChainID = -1 }, "chain_id"},
 		{"zero address", func(s *PSM3Reserves) { s.Address = common.Address{} }, "address"},
+		{"zero spark alm address", func(s *PSM3Reserves) { s.SparkALMAddress = common.Address{} }, "spark_alm_address"},
 		{"nil usds balance", func(s *PSM3Reserves) { s.State.USDSBalance = nil }, "usds_balance"},
 		{"nil susds balance", func(s *PSM3Reserves) { s.State.SUSDSBalance = nil }, "susds_balance"},
 		{"nil usdc balance", func(s *PSM3Reserves) { s.State.USDCBalance = nil }, "usdc_balance"},
@@ -49,6 +51,9 @@ func TestPSM3Reserves_Validate(t *testing.T) {
 		{"nil alm shares", func(s *PSM3Reserves) { s.State.SparkALMShares = nil }, "spark_alm_shares"},
 		{"nil total shares", func(s *PSM3Reserves) { s.State.TotalShares = nil }, "total_shares"},
 		{"nil alm asset value", func(s *PSM3Reserves) { s.State.SparkALMAssetValue = nil }, "spark_alm_asset_value"},
+		{"alm shares equal to total shares is fine", func(s *PSM3Reserves) { s.State.SparkALMShares = big.NewInt(7) }, ""},
+		{"alm shares exceed total shares", func(s *PSM3Reserves) { s.State.SparkALMShares = big.NewInt(8) }, "exceeds total_shares"},
+		{"alm asset value exceeds total assets", func(s *PSM3Reserves) { s.State.SparkALMAssetValue = big.NewInt(10) }, "exceeds total_assets"},
 		{"zero block number", func(s *PSM3Reserves) { s.BlockNumber = 0 }, "block_number"},
 		{"zero timestamp", func(s *PSM3Reserves) { s.BlockTimestamp = time.Time{} }, "block_timestamp"},
 		{"bad source", func(s *PSM3Reserves) { s.Source = "manual" }, "source"},
