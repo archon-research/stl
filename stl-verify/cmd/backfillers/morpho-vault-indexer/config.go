@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+	"github.com/archon-research/stl/stl-verify/internal/services/morpho_indexer"
 )
 
 type config struct {
@@ -20,8 +21,9 @@ type config struct {
 
 func parseConfig(args []string) (config, error) {
 	fs := flag.NewFlagSet("morpho-vault-backfill", flag.ContinueOnError)
-	from := fs.Int64("from", 0, "Start block number (inclusive)")
+	from := fs.Int64("from", 0, "Start block number (inclusive). Optional when -from-v2-deploy is set; an explicit -from always wins.")
 	to := fs.Int64("to", 0, "End block number (inclusive)")
+	fromV2Deploy := fs.Bool("from-v2-deploy", false, "Default -from to the VaultV2 factory deploy block for the chain. This narrows the WHOLE pipeline, not just the V2 replay: the phase-1 discovery scan starts there too, so a V1/V1.1 vault whose only Morpho Blue activity predates the factory is not discovered by this run. Ignored when -from is given explicitly.")
 	bucket := fs.String("bucket", "", "S3 bucket name")
 	dbURL := fs.String("db", "", "PostgreSQL connection URL")
 	rpcURL := fs.String("rpc-url", "", "Ethereum HTTP RPC endpoint")
@@ -64,6 +66,19 @@ func parseConfig(args []string) (config, error) {
 		return config{}, fmt.Errorf("RPC URL not provided (use -rpc-url flag or RPC_URL env var)")
 	}
 
+	if cfg.chainID <= 0 {
+		return config{}, fmt.Errorf("-chain-id must be positive")
+	}
+
+	// An explicit -from always wins; -from-v2-deploy only fills an unset -from.
+	if *fromV2Deploy && cfg.from <= 0 {
+		deployBlock, err := morpho_indexer.VaultV2FactoryDeployBlock(cfg.chainID)
+		if err != nil {
+			return config{}, fmt.Errorf("-from-v2-deploy: %w", err)
+		}
+		cfg.from = deployBlock
+	}
+
 	if cfg.from <= 0 {
 		return config{}, fmt.Errorf("-from must be a positive block number")
 	}
@@ -72,9 +87,6 @@ func parseConfig(args []string) (config, error) {
 	}
 	if cfg.from > cfg.to {
 		return config{}, fmt.Errorf("-from (%d) must be <= -to (%d)", cfg.from, cfg.to)
-	}
-	if cfg.chainID <= 0 {
-		return config{}, fmt.Errorf("-chain-id must be positive")
 	}
 	if cfg.goroutines <= 0 {
 		return config{}, fmt.Errorf("-goroutines must be positive")
