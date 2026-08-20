@@ -495,10 +495,15 @@ groups:
       - alert: VectorMorphoV2UnknownAdapters
         # A VaultV2 holds its liquidity in adapter contracts, one per downstream
         # venue. The indexer classifies each with a 2-getter on-chain probe
-        # (MarketV1 / VaultV1); when BOTH getters revert it records the adapter as
-        # Unknown (type 99) rather than dropping it. Unknown means "we persist the
-        # adapter and its realAssets, but we cannot say what venue backs it", so a
-        # growing Unknown population degrades every downstream composition read.
+        # (MarketV1 / VaultV1) and records the adapter as Unknown (type 99) rather
+        # than dropping it unless EXACTLY ONE getter answers. Unknown therefore has
+        # two arms (classifyAdapter, adapter_probe.go) that triage must tell apart:
+        # both REVERT is a family the probe does not model (fix = a new marker
+        # selector), while both SUCCEED is a hybrid adapter or a proxy/fallback
+        # answering any selector (fix = a tie-break rule; a third selector cannot
+        # help). Unknown means "we persist the adapter and its realAssets, but we
+        # cannot say what venue backs it", so a growing Unknown population degrades
+        # every downstream composition read.
         #
         # THRESHOLD, NOT ZERO. The VEC-218 ticket proposed "Unknown count stays 0"
         # as the sentinel; live mainnet validation disproved it — real, legitimate

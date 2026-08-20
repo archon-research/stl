@@ -45,7 +45,9 @@ allocation-tracker); adding one is the follow-up that closes this.
 
 1. **Pod status** — run the one matching the firing alert:
    - Morpho: `kubectl -n vector get pods -l app=morpho-indexer`
-   - Oracle: `kubectl -n vector get pods -l app=oracle-price-worker`
+   - Oracle: `kubectl -n vector get pods -l 'app in (oracle-price-worker,avalanche-oracle-price-worker,base-oracle-price-worker)'`
+     — one Deployment per chain, each with its own `app` label; the bare
+     `app=oracle-price-worker` selector matches mainnet pods only.
 2. **Recent logs** — look for decode panics, DB connection errors, or
    `context deadline exceeded` against the watcher's archive RPC.
 3. **Upstream lag** — confirm the watcher is producing for this chain (if
@@ -137,6 +139,8 @@ check queue depth for that.
      `kubectl -n vector logs deploy/oracle-price-worker | grep "failed to process oracle"`
    - `chain="avalanche-c"`:
      `kubectl -n vector logs deploy/avalanche-oracle-price-worker | grep "failed to process oracle"`
+   - `chain="base"`:
+     `kubectl -n vector logs deploy/base-oracle-price-worker | grep "failed to process oracle"`
 
    The `oracle` field names the unit. **If the grep comes back empty**, grep
    the same logs for `"failed to process message"` instead: the failure is
@@ -1728,10 +1732,20 @@ not mistaken for a bug during triage.
 `morpho-indexer` recorded more than 25 VaultV2 adapters as `adapter_type=unknown`
 in 24 hours on the labelled `chain`. The classifier probes two selectors on every
 adapter — `morpho()` (`0xd8fbc833`) and `morphoVaultV1()` (`0xe4baaddf`) — and
-records Unknown (DB `adapter_type = 99`) when **both revert**. Those adapters are
-still registered and their `realAssets()` still tracked, so this is not data loss;
-what is lost is venue attribution, so nothing downstream can say what backs the
-exposure.
+records Unknown (DB `adapter_type = 99`) unless **exactly one** answers. There are
+therefore **two** Unknown arms (`classifyAdapter`, `adapter_probe.go`), and they
+mean different things:
+
+- **Both revert** — the contract serves neither marker. A family the probe does
+  not model; the fix is a new marker selector.
+- **Both succeed** — the contract serves *both* markers, so the probe cannot
+  choose. A hybrid adapter, or a proxy/fallback that answers any selector. A third
+  selector does not help here: the fix is a tie-break rule (e.g. prefer the more
+  specific marker, or discriminate on a shape only one family has).
+
+Those adapters are still registered and their `realAssets()` still tracked, so this
+is not data loss; what is lost is venue attribution, so nothing downstream can say
+what backs the exposure.
 
 **A non-zero Unknown count is normal.** The VEC-218 ticket originally proposed
 "Unknown count stays 0" as the sentinel; live mainnet validation disproved it —
@@ -1780,7 +1794,11 @@ vault is discovered at once. Acknowledge and curate.
    cast call <adapter> "morphoVaultV1()(address)"  --rpc-url https://ethereum-rpc.publicnode.com
    ```
 
-   Both reverting confirms Unknown is correct for this contract.
+   **Read which arm you are in.** Both reverting = an unmodelled family, so go to
+   check 4. Both *answering* = the probe could not choose, which needs a tie-break
+   rule rather than a third selector — expect a hybrid adapter or a
+   proxy/fallback that answers any selector, and check the contract before
+   assuming either family.
 4. **Find the real type** — read the contract on Etherscan and look for the
    marker getter of the new family (e.g. a `compoundV3()` / `erc4626()` style
    accessor). That selector is the fix.
@@ -1791,7 +1809,12 @@ vault is discovered at once. Acknowledge and curate.
 
 - Morpho deployed a new adapter family the 2-selector probe does not model →
   extend `adapter_probe.go` with the new marker selector and its
-  `entity.MorphoAdapterType`, then re-classify the existing type-99 rows.
+  `entity.MorphoAdapterType`, then **replay / re-seed the affected vaults** so the
+  extended probe APPENDS a corrected classification. `morpho_adapter_current` is
+  latest-row-wins, so the new observation supersedes the type-99 one; there is no
+  in-place fix available — UPDATE is revoked on `morpho_adapter_membership`. See
+  the replay note under Verify recovery for
+  [`VectorMorphoV2LazyAdapterRegistrations`](#vectormorphov2lazyadapterregistrations).
 - A mass discovery burst (bootstrap, or a wave of new V2 vaults) surfacing the
   known long tail of unclassifiable adapters all at once → curate, no code change.
 
@@ -1951,9 +1974,14 @@ erroring this counter measures redeliveries, not protocol activity.
           event_data
    FROM protocol_event
    WHERE event_name = 'ForceDeallocate'
+     AND created_at > now() - interval '1 hour'
      AND block_number > <block_1h_ago>
    ORDER BY block_number DESC;
    ```
+
+   The `created_at` bound is not redundant: on `protocol_event` `created_at` **is**
+   the block timestamp and is the partition column, so it is what prunes chunks —
+   `block_number` alone scans every one of them.
 
    `event_data` carries the raw topics/data; decode against
    `stl-verify/internal/pkg/blockchain/abis/vault_v2_events_abi.go` for
@@ -1969,9 +1997,15 @@ erroring this counter measures redeliveries, not protocol activity.
    FROM morpho_adapter_state s
    JOIN morpho_adapter a ON a.id = s.morpho_adapter_id
    WHERE a.morpho_vault_id = <vault_id>
+     AND s.timestamp > now() - interval '7 days'
    ORDER BY s.block_number DESC
    LIMIT 100;
    ```
+
+   Bound on `timestamp`, **not** `created_at`. On the VaultV2 tables `timestamp` is
+   the block time and the partition column; `created_at` is processing time (wall
+   clock at insert) and never block time, so bounding on it prunes nothing and
+   silently excludes backfilled rows. Widen the interval if the drain predates it.
 
 5. **Indexer logs** — every event is WARNed with full context:
    `kubectl -n vector logs -l app=morpho-indexer | grep forceDeallocate`.
@@ -2057,10 +2091,22 @@ sample, so **worst case ~6h15m** (6h window + 15m `for`).
 3. **Confirm against the DB** (`db-query`) — metrics could be lying:
 
    ```sql
-   SELECT max(block_number) AS last_adapter_state FROM morpho_adapter_state;
-   SELECT max(block_number) AS last_cap FROM morpho_vault_cap;
-   SELECT max(block_number) AS last_fee FROM morpho_vault_fee;
+   SELECT max(block_number) AS last_adapter_state FROM morpho_adapter_state
+    WHERE timestamp > now() - interval '7 days';
+   SELECT max(block_number) AS last_cap FROM morpho_vault_cap
+    WHERE timestamp > now() - interval '7 days';
+   SELECT max(block_number) AS last_fee FROM morpho_vault_fee
+    WHERE timestamp > now() - interval '7 days';
    ```
+
+   `morpho_adapter_state` is a hypertable partitioned on `timestamp`, so that bound
+   is what prunes chunks — an unbounded `max()` scans the whole table.
+   `morpho_vault_cap` / `morpho_vault_fee` (and `morpho_adapter_membership`) are
+   plain tables with nothing to prune; keep them bounded on `timestamp` or
+   `block_number` anyway, for row count rather than pruning. Never bound any of
+   these on `created_at` — it is processing time here, not block time. A `max()`
+   that comes back NULL means nothing landed in the window, which is the answer
+   this check is looking for.
 
    If these are advancing while the counter is flat, the problem is the OTLP
    export, not the pipeline.
