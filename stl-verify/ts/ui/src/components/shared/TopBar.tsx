@@ -11,6 +11,7 @@ import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
 import type { FilterOption } from '../../lib/dashboard';
+import { SettingsMenu, useDataSourceSection } from './SettingsMenu';
 
 type TopBarProps = {
   hasSelectedPrime: boolean;
@@ -124,6 +125,7 @@ export function TopBar({
   timeRange,
   onRangeChange,
 }: TopBarProps) {
+  const dataSource = useDataSourceSection();
   const showRangePicker =
     rangePreset !== undefined &&
     timeRange !== undefined &&
@@ -199,6 +201,7 @@ export function TopBar({
             />
           </div>
         ) : null}
+        <SettingsMenu sections={[dataSource]} />
       </div>
     </div>
   );
