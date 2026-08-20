@@ -145,9 +145,9 @@ func TestSeedV2VaultAdapters_EnumeratesAndSeedsState(t *testing.T) {
 		return 99, true, nil
 	}
 	var savedState *entity.MorphoAdapterState
-	h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, s *entity.MorphoAdapterState) error {
+	h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, s *entity.MorphoAdapterState) (bool, error) {
 		savedState = s
-		return nil
+		return true, nil
 	}
 
 	blockTS := time.Unix(1_760_000_000, 0).UTC()
@@ -286,9 +286,9 @@ func TestSeedV2VaultAdapters_DeregistersAdaptersAbsentOnChain(t *testing.T) {
 		return 99, true, nil
 	}
 	seededStates := 0
-	h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterState) error {
+	h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterState) (bool, error) {
 		seededStates++
-		return nil
+		return true, nil
 	}
 
 	blockTS := time.Unix(1_760_000_000, 0).UTC()
@@ -418,8 +418,8 @@ func TestSeedV2VaultAdapters_CountsNothingWhenTheTransactionFails(t *testing.T) 
 	h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterObservation) (int64, bool, error) {
 		return 99, true, nil
 	}
-	h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterState) error {
-		return errors.New("write barrier")
+	h.morphoRepo.SaveAdapterStateFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterState) (bool, error) {
+		return false, errors.New("write barrier")
 	}
 
 	if err := h.svc.SeedV2VaultAdapters(context.Background(), testVaultAddr, 24_000_000, testBlockHash, 0, time.Unix(1_760_000_000, 0).UTC()); err == nil {
