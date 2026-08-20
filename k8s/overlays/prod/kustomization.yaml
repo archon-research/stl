@@ -41,6 +41,7 @@ resources:
   # its task queue until a run is started by hand from the Temporal UI.
   - ../../base/offchain-price-backfill
   - ../../base/reference-capital-indexer
+  - ../../base/reference-capital-backfill
   - ../../base/maple-graphql-indexer
   # CEX L2 order book indexer fleet — one pod per exchange, same binary,
   # different EXCHANGE/SYMBOLS config (mirrors the staging fleet, VEC-374/VEC-380).
@@ -180,6 +181,9 @@ images:
   - name: reference-capital-indexer
     newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-cronjob
     newTag: "reference-capital-indexer-8b12482e0c8a5e63a4cffc80d1aef2bb666ba40f"
+  - name: reference-capital-backfill
+    newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-cronjob
+    newTag: "reference-capital-backfill-8b12482e0c8a5e63a4cffc80d1aef2bb666ba40f"
   - name: maple-graphql-indexer
     newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-cronjob
     newTag: "maple-graphql-indexer-8b12482e0c8a5e63a4cffc80d1aef2bb666ba40f"
