@@ -652,3 +652,18 @@ data:
   # Balance-sheet feed, read only by the one-off reference-capital-backfill Job.
   SKY_DATA_URL: "https://sky.data.blockanalitica.com/internal"
   ENVIRONMENT: "sentinelstaging"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: core-model-runner
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  # The schedule lives in Temporal state; changing this needs the schedule
+  # deleted there and the worker restarted (stl-verify/AGENTS.md).
+  CORE_MODEL_RUN_INTERVAL_HOURS: "24"
+  # Deliberately tiny while staging only validates the pipeline end to end:
+  # the heaviest market peaks at ~8.0 GiB at the N_MC=10000 default, above the
+  # pod's 8Gi limit. Raise only together with the deployment's memory limit.
+  CORE_MODEL_N_MC: "100"
