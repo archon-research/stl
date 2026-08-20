@@ -192,6 +192,98 @@ GRANT SELECT ON ref_deal_type TO stl_readwrite;                      -- the dire
 REVOKE UPDATE, DELETE, TRUNCATE ON position_classification FROM stl_readwrite;
 GRANT UPDATE (deal_type_code, direction, change_reason, valid_from) ON position_classification TO stl_readwrite;
 
+-- Classification provenance (review :276): record WHAT was classified, as data on the row, so the
+-- recency invariant is inspectable at the table instead of living only in the materializer. These are
+-- the coordinates of the classifying observation; the validating trigger below re-derives them from
+-- position_state and rejects any write that disagrees, which is what makes the invariant
+-- table-enforced rather than caller-enforced. Nullable because the table predates this migration (its
+-- creating migration is immutable and already applied); the trigger requires them on every new write.
+ALTER TABLE position_classification
+    ADD COLUMN IF NOT EXISTS as_of_block              bigint,
+    ADD COLUMN IF NOT EXISTS as_of_block_version      integer,
+    ADD COLUMN IF NOT EXISTS as_of_processing_version integer;
+
+COMMENT ON COLUMN position_classification.as_of_block IS 'Provenance. block_number of the observation this classification was derived from (the canonical latest non-zero at write time). Validated against position_state by trigger_validate_position_classification.';
+COMMENT ON COLUMN position_classification.as_of_block_version IS 'Provenance. block_version of the classifying observation.';
+COMMENT ON COLUMN position_classification.as_of_processing_version IS 'Provenance. processing_version of the classifying observation.';
+
+-- Table-level enforcement of the recency invariant (review :276: "the invariant lives only in this
+-- caller ... enforceable at the table"). Any writer — the materializer, a fix-migration, a future
+-- service — must present coordinates that ARE the canonical latest non-zero observation in
+-- position_state for that position. This is checkable only because the materializer appends
+-- observations in a SEPARATE, earlier statement (see the function below), so by the time this trigger
+-- fires the stored state is complete; in the previous single-statement form the trigger could not have
+-- seen the run's own rows at all.
+--
+-- LIMIT, stated so it is not assumed away: this validates the BASIS, not the CODE. position_state
+-- carries no deal_type_code (classifications are attributes of a position, not observations, VEC-400),
+-- so no trigger can verify that the written code matches the observation at those coordinates — only
+-- that the claimed basis IS the canonical latest non-zero. Substituting a wrong code while presenting
+-- valid provenance therefore remains possible for any role holding UPDATE on the column; that residue
+-- is closed by narrowing the writer to a single materializer role (VEC-562), not here. A committed
+-- test pins this boundary explicitly.
+--
+-- Cost: one PK-bounded scan of the position's blocks per classification write, which is the same shape
+-- the materializer's own guard reads. NOTE for ADR-0006 (#689): that ADR proposes retiring the
+-- assign_processing_version_* family — BEFORE INSERT triggers that ASSIGN a value via a per-row
+-- MAX() lookup. This is a different animal (a VALIDATING trigger that assigns nothing), so it is not
+-- in that family's scope; if the ADR's scope widens to validation triggers, this is the enforcement
+-- point to revisit.
+CREATE OR REPLACE FUNCTION validate_position_classification()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SET search_path FROM CURRENT
+    SET plan_cache_mode = 'force_custom_plan'
+AS $vfn$
+DECLARE
+    canon_bv int; canon_pv int; canon_qty numeric; max_nonzero_bn bigint;
+BEGIN
+    IF NEW.as_of_block IS NULL OR NEW.as_of_block_version IS NULL OR NEW.as_of_processing_version IS NULL THEN
+        RAISE EXCEPTION 'position_classification write for % must carry as_of_block/as_of_block_version/as_of_processing_version provenance', encode(NEW.position_id, 'hex');
+    END IF;
+
+    -- The claimed coordinates must be the canonical row at their own block (nothing stored at that
+    -- block carries a strictly higher (block_version, processing_version)) and must be non-zero.
+    SELECT p.block_version, p.processing_version, p.quantity
+      INTO canon_bv, canon_pv, canon_qty
+      FROM public.position_state p
+     WHERE p.position_id = NEW.position_id AND p.block_number = NEW.as_of_block
+     ORDER BY p.block_version DESC, p.processing_version DESC
+     LIMIT 1;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'position_classification: no observation at block % for position %', NEW.as_of_block, encode(NEW.position_id, 'hex');
+    END IF;
+    IF (canon_bv, canon_pv) <> (NEW.as_of_block_version, NEW.as_of_processing_version) THEN
+        RAISE EXCEPTION 'position_classification: claimed observation (bn=%, bv=%, pv=%) is superseded at that block by (bv=%, pv=%)', NEW.as_of_block, NEW.as_of_block_version, NEW.as_of_processing_version, canon_bv, canon_pv;
+    END IF;
+    IF canon_qty <= 0 THEN
+        RAISE EXCEPTION 'position_classification: claimed observation (bn=%) is a zero-quantity (closing) row and cannot be a classification basis', NEW.as_of_block;
+    END IF;
+
+    -- ... and no canonical non-zero observation may exist ABOVE it (the recency rule itself).
+    SELECT max(c.block_number) INTO max_nonzero_bn
+      FROM (
+        SELECT DISTINCT ON (p.block_number) p.block_number, p.quantity
+          FROM public.position_state p
+         WHERE p.position_id = NEW.position_id AND p.block_number >= NEW.as_of_block
+         ORDER BY p.block_number, p.block_version DESC, p.processing_version DESC
+      ) c
+     WHERE c.quantity > 0;
+    IF max_nonzero_bn IS DISTINCT FROM NEW.as_of_block THEN
+        RAISE EXCEPTION 'position_classification: stale basis for position % — claimed block % but the canonical latest non-zero observation is block %', encode(NEW.position_id, 'hex'), NEW.as_of_block, max_nonzero_bn;
+    END IF;
+
+    RETURN NEW;
+END $vfn$;
+
+DROP TRIGGER IF EXISTS trigger_validate_position_classification ON position_classification;
+CREATE TRIGGER trigger_validate_position_classification
+    BEFORE INSERT OR UPDATE ON position_classification
+    FOR EACH ROW
+EXECUTE FUNCTION validate_position_classification();
+
+COMMENT ON FUNCTION validate_position_classification() IS '[Operational] Table-level enforcement of the position_classification recency invariant (VEC-402): every write must present as_of_(block, block_version, processing_version) provenance that IS the canonical latest non-zero observation for that position in position_state. Rejects a superseded, zero-quantity, or stale basis regardless of writer, so the invariant no longer lives only in materialize_position_projection.';
+
 -- Shared materializer body for every per-protocol projection (VEC-402..407). Each projection view
 -- (position_morpho_market, position_morpho_vault, position_sky_prime_debt, ...) holds its own bespoke
 -- projection logic but emits the identical position_state COLUMN CONTRACT — (chain_id integer,
@@ -249,7 +341,7 @@ CREATE OR REPLACE FUNCTION materialize_position_projection(p_view regclass, p_re
     -- temp snapshot stays reachable because its references are pg_temp-qualified explicitly.
     SET search_path FROM CURRENT
     AS $fn$
-DECLARE n bigint; bad text; v_qualname text;
+DECLARE n bigint; n_cls bigint; bad text; v_qualname text;
 BEGIN
     -- p_reason stamps change_reason provenance on every classification write; a NULL/blank would erase
     -- provenance (and overwrite a prior reason with NULL on the update path). Fail fast on the argument.
@@ -374,115 +466,82 @@ BEGIN
         RAISE EXCEPTION 'projection % emits position_ids owned by another projection (cross-view disjointness violated): %', p_view, bad;
     END IF;
 
-    -- Insert NEW logical keys and classify, in one statement over the temp snapshot. position_state is
-    -- strictly append-only: already-stored keys were handled above (identical rows are no-ops; drifted
-    -- re-emissions are kept-stored and warned), so the insert filters to unseen keys; ON CONFLICT DO
-    -- NOTHING is only a belt against a racing same-key insert (same-view runs are serialized; cross-view
-    -- keys are disjoint by check (5)). The data-modifying cls CTE runs to completion even though the
-    -- top-level query reads only ins.
-    WITH ins AS (
-        INSERT INTO public.position_state
-            (position_id, chain_id, protocol_id, instrument_key, holder_id, quantity,
-             block_number, block_version, processing_version, block_timestamp, projection)
-        SELECT s.position_id, s.chain_id, s.protocol_id, s.instrument_key, s.holder_id, s.quantity,
-               s.block_number, s.block_version, s.processing_version, s.block_timestamp, v_qualname
-        FROM pg_temp._mpp_src s
-        WHERE NOT EXISTS (
-            SELECT 1 FROM public.position_state p
-            WHERE p.position_id = s.position_id AND p.block_number = s.block_number
-              AND p.block_version = s.block_version AND p.processing_version = s.processing_version)
-        -- Insert in PK order for B-tree bulk-load locality (sequential leaf writes); not a lock-ordering
-        -- concern (check (5) makes cross-view row sets disjoint).
-        ORDER BY s.position_id, s.block_number, s.block_version, s.processing_version, s.block_timestamp
-        ON CONFLICT (position_id, block_number, block_version, processing_version, block_timestamp) DO NOTHING
-        RETURNING 1
+    -- TWO STATEMENTS, deliberately (this is what makes table-level enforcement possible). Statement 1
+    -- appends the new observations; statement 2 classifies. Because the append has COMMITTED to the
+    -- statement's own snapshot by the time statement 2 runs, the classification logic — and the
+    -- validating trigger on position_classification — both read the complete post-append state from
+    -- position_state alone. The previous single-statement form could not: a data-modifying CTE shares
+    -- the pre-statement snapshot, so the guard had to fold the run's rows in by hand (the :278
+    -- self-snapshot class) and a trigger could not have seen them at all. Same transaction either way,
+    -- so atomicity is unchanged (a raise in statement 2 rolls back the append).
+    INSERT INTO public.position_state
+        (position_id, chain_id, protocol_id, instrument_key, holder_id, quantity,
+         block_number, block_version, processing_version, block_timestamp, projection)
+    SELECT s.position_id, s.chain_id, s.protocol_id, s.instrument_key, s.holder_id, s.quantity,
+           s.block_number, s.block_version, s.processing_version, s.block_timestamp, v_qualname
+    FROM pg_temp._mpp_src s
+    WHERE NOT EXISTS (
+        SELECT 1 FROM public.position_state p
+        WHERE p.position_id = s.position_id AND p.block_number = s.block_number
+          AND p.block_version = s.block_version AND p.processing_version = s.processing_version)
+    -- Insert in PK order for B-tree bulk-load locality (sequential leaf writes); not a lock-ordering
+    -- concern (check (5) makes cross-view row sets disjoint).
+    ORDER BY s.position_id, s.block_number, s.block_version, s.processing_version, s.block_timestamp
+    ON CONFLICT (position_id, block_number, block_version, processing_version, block_timestamp) DO NOTHING;
+    GET DIAGNOSTICS n = ROW_COUNT;
+
+    -- Statement 2: classify from the post-append stored state. Every CTE now reads position_state, so
+    -- there is no run-vs-stored reconciliation left: the append already merged them.
+    WITH run_pos AS (
+        SELECT DISTINCT position_id FROM pg_temp._mpp_src
     ),
-    -- Per-block canonical view of the RUN's rows, with EFFECTIVE values: where a logical key is already
-    -- stored, the stored quantity is authoritative (kept-stored above), so the guard reasons about what
-    -- the table actually holds, never about a drifted re-emission that was not applied. The run's
-    -- deal_type_code is kept — codes live only in the run and feed the classification.
+    -- Per-block canonical: highest (block_version, processing_version) at each block, from the stored
+    -- table (post-append).
     canonical AS (
-        SELECT DISTINCT ON (s.position_id, s.block_number)
-               s.position_id, s.block_number, s.block_version, s.processing_version,
-               COALESCE(p.quantity, s.quantity) AS quantity, s.deal_type_code
-        FROM pg_temp._mpp_src s
-        LEFT JOIN public.position_state p ON p.position_id = s.position_id AND p.block_number = s.block_number
-             AND p.block_version = s.block_version AND p.processing_version = s.processing_version
-        ORDER BY s.position_id, s.block_number, s.block_version DESC, s.processing_version DESC
+        SELECT DISTINCT ON (p.position_id, p.block_number)
+               p.position_id, p.block_number, p.block_version, p.processing_version, p.quantity
+        FROM public.position_state p
+        JOIN run_pos r ON r.position_id = p.position_id
+        ORDER BY p.position_id, p.block_number, p.block_version DESC, p.processing_version DESC
     ),
-    -- Candidate classifying rows: FILTER-THEN-TOP (review finding: top-1-then-filter permanently
-    -- suppressed a legitimate lower-block correction arriving alongside a stale higher-block row, with
-    -- every rerun repeating the skip). A run-canonical row qualifies only if it is ALSO the
-    -- merged-canonical row at its own block: no stored row at that block carries a strictly higher
-    -- (block_version, processing_version). A stored row at the SAME version is the same observation
-    -- (kept-stored) and still qualifies.
-    cand AS (
-        SELECT c.*
+    -- The classifying observation per position: the canonical NON-ZERO row at the highest block. The
+    -- codes live only in the run, so the deal_type_code is joined back from the snapshot at exactly
+    -- those coordinates; a position whose canonical latest non-zero was not emitted by this run has no
+    -- code to write and is skipped (its stored classification stands).
+    latest AS (
+        SELECT DISTINCT ON (c.position_id)
+               c.position_id, c.block_number, c.block_version, c.processing_version
         FROM canonical c
         WHERE c.quantity > 0
-          AND NOT EXISTS (
-            SELECT 1 FROM public.position_state p
-            WHERE p.position_id = c.position_id AND p.block_number = c.block_number
-              AND (p.block_version, p.processing_version) > (c.block_version, c.processing_version))
-    ),
-    -- The classifying row per position: the candidate at the highest block.
-    latest AS (
-        SELECT DISTINCT ON (position_id)
-               position_id, deal_type_code, block_number, block_version, processing_version
-        FROM cand
-        ORDER BY position_id, block_number DESC
-    ),
-    -- Recency: classify only when NO merged-canonical non-zero observation exists ABOVE the classifying
-    -- block. Bounded per the review's equivalence argument: a canonical non-zero BELOW l.block_number can
-    -- never outrank l, so both branches join to `latest` and read only block_number >= l.block_number —
-    -- the stored branch becomes a per-position PK range scan instead of a full-history external sort, and
-    -- the run branch reuses `canonical` (per-block canonicalization is idempotent). The former
-    -- three-component tuple guard provably collapsed to this block equality: given the cand filter, l is
-    -- always a non-zero merged-canonical row, so the high-water always exists and the version legs could
-    -- never decide. NOTE: the run branch is what lets the guard see the run's OWN zeroing at a NEW
-    -- version (a same-statement scan of position_state cannot — data-modifying CTEs share the
-    -- pre-statement snapshot), and per-block canonicalisation is what drops a reorged-out block from the
-    -- high-water.
-    merged_ge AS (
-        SELECT DISTINCT ON (m.position_id, m.block_number)
-               m.position_id, m.block_number, m.quantity
-        FROM (
-            SELECT p.position_id, p.block_number, p.block_version, p.processing_version, p.quantity, 0 AS src
-              FROM public.position_state p JOIN latest l ON l.position_id = p.position_id
-             WHERE p.block_number >= l.block_number
-            UNION ALL
-            SELECT c.position_id, c.block_number, c.block_version, c.processing_version, c.quantity, 1 AS src
-              FROM canonical c JOIN latest l ON l.position_id = c.position_id
-             WHERE c.block_number >= l.block_number
-        ) m
-        ORDER BY m.position_id, m.block_number, m.block_version DESC, m.processing_version DESC, m.src DESC
-    ),
-    hwm AS (
-        SELECT position_id, max(block_number) AS max_bn
-        FROM merged_ge
-        WHERE quantity > 0
-        GROUP BY position_id
+        ORDER BY c.position_id, c.block_number DESC
     ),
     cls AS (
-        INSERT INTO public.position_classification (position_id, deal_type_code, direction, change_reason)
+        INSERT INTO public.position_classification
+            (position_id, deal_type_code, direction, change_reason,
+             as_of_block, as_of_block_version, as_of_processing_version)
         -- LEFT JOIN + raw deal_type_code: an unseeded / typo'd code must hit the deal_type_code FK
         -- (23503) and fail the run, not be silently dropped by an inner join (CLAUDE.md: fail hard).
-        SELECT l.position_id, l.deal_type_code, d.direction, p_reason
+        SELECT l.position_id, s.deal_type_code, d.direction, p_reason,
+               l.block_number, l.block_version, l.processing_version
         FROM latest l
-        JOIN hwm s ON s.position_id = l.position_id
-        LEFT JOIN public.ref_deal_type d ON d.deal_type = l.deal_type_code
-        WHERE l.block_number = s.max_bn
+        JOIN pg_temp._mpp_src s ON s.position_id = l.position_id AND s.block_number = l.block_number
+             AND s.block_version = l.block_version AND s.processing_version = l.processing_version
+        LEFT JOIN public.ref_deal_type d ON d.deal_type = s.deal_type_code
         ORDER BY l.position_id
         ON CONFLICT (position_id) DO UPDATE
-            SET deal_type_code = EXCLUDED.deal_type_code,
-                direction      = EXCLUDED.direction,
-                change_reason  = EXCLUDED.change_reason,
+            SET deal_type_code           = EXCLUDED.deal_type_code,
+                direction                = EXCLUDED.direction,
+                change_reason            = EXCLUDED.change_reason,
+                as_of_block              = EXCLUDED.as_of_block,
+                as_of_block_version      = EXCLUDED.as_of_block_version,
+                as_of_processing_version = EXCLUDED.as_of_processing_version,
                 -- re-stamp valid_from + change_reason only when the classification actually changes.
-                valid_from     = (now() AT TIME ZONE 'utc')::date
+                valid_from               = (now() AT TIME ZONE 'utc')::date
             WHERE public.position_classification.deal_type_code IS DISTINCT FROM EXCLUDED.deal_type_code
                OR public.position_classification.direction      IS DISTINCT FROM EXCLUDED.direction
+        RETURNING 1
     )
-    SELECT count(*) INTO n FROM ins;
+    SELECT count(*) INTO n_cls FROM cls;
 
     DROP TABLE pg_temp._mpp_src;
 

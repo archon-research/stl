@@ -246,12 +246,14 @@ func TestPositionState(t *testing.T) {
 		}
 	})
 
-	t.Run("un-zeroing reopens a closed position", func(t *testing.T) {
+	t.Run("un-zeroing reopens a closed position (append-only: a version bump)", func(t *testing.T) {
+		// Append-only: a reopen cannot rewrite the zero row in place (kept-stored); it arrives as a
+		// higher block_version at the same block, or a later block.
 		mpp(t, "vuz", valuesOf(row("iuz", "aa", 0, "BORROW", 100, 0, 0)), "closed")
 		if got := classOf(t, "iuz", "aa"); got != "" {
 			t.Errorf("all-zero position classified as %q; want unclassified", got)
 		}
-		mpp(t, "vuz", valuesOf(row("iuz", "aa", 5, "BORROW", 100, 0, 0)), "reopen")
+		mpp(t, "vuz", valuesOf(row("iuz", "aa", 0, "BORROW", 100, 0, 0), row("iuz", "aa", 5, "BORROW", 100, 1, 0)), "reopen-bv1")
 		if got := classOf(t, "iuz", "aa"); got != "BORROW" {
 			t.Errorf("reopened position = %q; want BORROW", got)
 		}
@@ -351,9 +353,19 @@ func TestPositionState(t *testing.T) {
 		mppErr(t, "vde", valuesOf(row("ide", "aa", 7, "LOAN", 600, 0, 0), row("ide", "aa", 9, "LOAN", 600, 0, 0)), "de", "double-emit")
 	})
 
-	t.Run("re-emitted observation with a changed block_timestamp raises", func(t *testing.T) {
+	t.Run("re-emitted observation with a changed block_timestamp does NOT raise (kept-stored)", func(t *testing.T) {
+		// Superseded by the round-9 :296 decision: raising wedged at-least-once wall-clock sources
+		// forever. The run succeeds, warns, and keeps the stored row (asserted in detail by the
+		// dedicated :296 subtest below).
 		mpp(t, "vts", valuesOf(row("its", "aa", 5, "LOAN", 100, 0, 0)), "store")
-		mppErr(t, "vts", `SELECT * FROM (VALUES (1::int,10::bigint,'its'::text,'aa'::text,5::numeric,'LOAN'::text,100::bigint,0::int,0::int,'2026-09-09'::timestamptz)) `+mppCols, "shift", "changed block_timestamp")
+		mpp(t, "vts", `SELECT * FROM (VALUES (1::int,10::bigint,'its'::text,'aa'::text,5::numeric,'LOAN'::text,100::bigint,0::int,0::int,'2026-09-09'::timestamptz)) `+mppCols, "shift")
+		var ts string
+		if err := pool.QueryRow(ctx, `SELECT block_timestamp::text FROM position_state WHERE position_id = position_id(1,10,'its','aa')`).Scan(&ts); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasPrefix(ts, "2026-01-01") {
+			t.Errorf("stored block_timestamp = %s; want the original 2026-01-01 kept", ts)
+		}
 	})
 
 	t.Run("uppercase holder rejected by the hex CHECK", func(t *testing.T) {
@@ -995,13 +1007,15 @@ func TestPositionState(t *testing.T) {
 		// Reclassify the same position as the role: forces the cls ON CONFLICT DO UPDATE arm, which
 		// needs the column-scoped UPDATE grant on position_classification (deleting that grant line
 		// must fail here, not weeks later on the first production reclassification).
-		if _, err := pool.Exec(ctx, `CREATE OR REPLACE VIEW aclv2 AS `+valuesOf(row("iaclr", "aa", 5, "COLLATERAL", 100, 0, 0))); err != nil {
+		// Reuse the SAME view: one projection owns a position (round-9 ownership check), and a
+		// reclassification is a new processing_version from that same view.
+		if _, err := pool.Exec(ctx, `CREATE OR REPLACE VIEW aclv AS `+valuesOf(row("iaclr", "aa", 5, "COLLATERAL", 100, 0, 1))); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := pool.Exec(ctx, `GRANT SELECT ON aclv2 TO stl_readwrite`); err != nil {
+		if _, err := pool.Exec(ctx, `GRANT SELECT ON aclv TO stl_readwrite`); err != nil {
 			t.Fatal(err)
 		}
-		if err := asRole(`SELECT materialize_position_projection('aclv2'::regclass, 'role-reclassify')`); err != nil {
+		if err := asRole(`SELECT materialize_position_projection('aclv'::regclass, 'role-reclassify')`); err != nil {
 			t.Fatalf("reclassification (cls UPDATE arm) as stl_readwrite failed: %v", err)
 		}
 		if got := classOf(t, "iaclr", "aa"); got != "COLLATERAL" {
@@ -1295,6 +1309,68 @@ func TestPositionState(t *testing.T) {
 		}
 	})
 
+	// --- table-level enforcement of the recency invariant (:276) -----------------------------------
+
+	t.Run("classification provenance is recorded and validated by trigger (:276)", func(t *testing.T) {
+		body := valuesOf(row("itrg", "aa", 5, "LOAN", 100, 0, 0), row("itrg", "aa", 7, "LOAN", 200, 0, 0))
+		mpp(t, "vtrg", body, "legit")
+		var bn, bv, pv int
+		if err := pool.QueryRow(ctx,
+			`SELECT as_of_block, as_of_block_version, as_of_processing_version FROM position_classification
+			  WHERE position_id = position_id(1,10,'itrg','aa')`).Scan(&bn, &bv, &pv); err != nil {
+			t.Fatal(err)
+		}
+		if bn != 200 || bv != 0 || pv != 0 {
+			t.Errorf("provenance = (%d,%d,%d); want (200,0,0) — the canonical latest non-zero", bn, bv, pv)
+		}
+	})
+
+	t.Run("trigger rejects a provenance-less, stale, superseded, or zero-basis classification (:276)", func(t *testing.T) {
+		mpp(t, "vtrg2", valuesOf(row("itrg2", "aa", 5, "LOAN", 100, 0, 0), row("itrg2", "aa", 7, "LOAN", 200, 0, 0)), "legit")
+		pid := `position_id(1,10,'itrg2','aa')`
+		cases := []struct {
+			name string
+			stmt string
+			want string
+		}{
+			{"no provenance", `INSERT INTO position_classification (position_id, deal_type_code) VALUES (position_id(1,10,'inoprov','aa'), 'LOAN')`, "provenance"},
+			{"stale basis", `INSERT INTO position_classification (position_id, deal_type_code, as_of_block, as_of_block_version, as_of_processing_version)
+				VALUES (` + pid + `, 'BORROW', 100, 0, 0)
+				ON CONFLICT (position_id) DO UPDATE SET deal_type_code = 'BORROW', as_of_block = 100, as_of_block_version = 0, as_of_processing_version = 0`, "stale basis"},
+			{"no observation at that block", `INSERT INTO position_classification (position_id, deal_type_code, as_of_block, as_of_block_version, as_of_processing_version)
+				VALUES (position_id(1,10,'inosuch','aa'), 'LOAN', 999, 0, 0)`, "no observation at block"},
+		}
+		for _, c := range cases {
+			if _, err := pool.Exec(ctx, c.stmt); err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Errorf("%s: got %v; want a raise containing %q", c.name, err, c.want)
+			}
+		}
+		// A zero-quantity (closing) row can never be a classification basis.
+		mpp(t, "vtrg3", valuesOf(row("itrg3", "aa", 0, "LOAN", 100, 0, 0)), "closed")
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO position_classification (position_id, deal_type_code, as_of_block, as_of_block_version, as_of_processing_version)
+			 VALUES (position_id(1,10,'itrg3','aa'), 'LOAN', 100, 0, 0)`); err == nil || !strings.Contains(err.Error(), "zero-quantity") {
+			t.Errorf("zero basis: got %v; want a zero-quantity raise", err)
+		}
+	})
+
+	t.Run("KNOWN LIMIT: a code-only rewrite with valid provenance is NOT caught by the trigger", func(t *testing.T) {
+		// Pinned deliberately so the boundary of table-level enforcement is explicit rather than
+		// assumed. position_state carries no deal_type_code (classifications are attributes, VEC-400),
+		// so no trigger can verify that the CODE matches the observation — only that the claimed BASIS
+		// is the canonical latest non-zero. Substituting a wrong code while keeping valid provenance
+		// therefore stays possible for any writer holding UPDATE on the column, and is closed by the
+		// grant narrowing in VEC-562 (a single materializer role), not by this trigger.
+		mpp(t, "vlim", valuesOf(row("ilim", "aa", 5, "LOAN", 100, 0, 0)), "legit")
+		if _, err := pool.Exec(ctx,
+			`UPDATE position_classification SET deal_type_code = 'BORROW' WHERE position_id = position_id(1,10,'ilim','aa')`); err != nil {
+			t.Fatalf("code-only rewrite unexpectedly failed (limit changed - update the comment): %v", err)
+		}
+		if got := classOf(t, "ilim", "aa"); got != "BORROW" {
+			t.Errorf("code-only rewrite did not land: %q", got)
+		}
+	})
+
 	// --- model-based fuzz --------------------------------------------------------------------------
 
 	t.Run("model fuzz: seeded operation sequences vs an independent oracle", func(t *testing.T) {
@@ -1302,8 +1378,8 @@ func TestPositionState(t *testing.T) {
 		// sequences and checks invariants after every step: the run inserts EXACTLY the batch's
 		// unseen keys (append-only), an identical rerun inserts 0, stored state matches the oracle
 		// exactly (kept-stored: a re-emitted key never changes), no minted codes, and the
-		// classification mirrors the round-9 pipeline (effective-quantity canonical, canonicality
-		// filter, filter-then-top, block-equality recency). Two profiles: "core" and "batch-shapes"
+		// classification mirrors the split pipeline (stored-canonical per block, latest non-zero,
+		// classify iff the run supplied that exact observation). Two profiles: "core" and "batch-shapes"
 		// (NULL-code zero closes and multi-position views). Seeds fixed for CI determinism.
 		type okey struct{ bn, bv, pv int }
 		type oobs struct {
@@ -1318,7 +1394,6 @@ func TestPositionState(t *testing.T) {
 		}
 		type canon struct {
 			bv, pv, qty int
-			code        string
 		}
 		codes := []string{"LOAN", "BORROW", "COLLATERAL"}
 		sortedKeys := func(m map[okey]oobs) []okey {
@@ -1345,91 +1420,43 @@ func TestPositionState(t *testing.T) {
 			return fmt.Sprintf("(1::int,10::bigint,'%s'::text,'aa'::text,%d::numeric,%s,%d::bigint,%d::int,%d::int,timestamptz '2026-06-01 12:00+00' + %d*interval '1 day')",
 				ik, o.qty, c, k.bn, k.bv, k.pv, k.bn%40)
 		}
-		// effective per-block run-canonical rows: highest (bv,pv) among batch rows per block, with the
-		// stored quantity authoritative when the key is already stored (kept-stored), code from the run.
-		runCanonical := func(p *opos, batch map[okey]oobs) map[int]canon {
-			out := map[int]canon{}
-			for k, o := range batch {
-				qty := o.qty
-				if st, okst := p.stored[k]; okst {
-					qty = st.qty
-				}
-				c, seen := out[k.bn]
-				if !seen || k.bv > c.bv || (k.bv == c.bv && k.pv > c.pv) {
-					out[k.bn] = canon{k.bv, k.pv, qty, o.code}
-				}
-			}
-			return out
-		}
+		// Oracle for the SPLIT (insert-then-classify) pipeline. Because the append runs as its own
+		// earlier statement, classification reads only STORED state — so the oracle is simply:
+		// canonical per block from stored (highest bv,pv), latest = canonical non-zero at the highest
+		// block, and classify iff the RUN supplied a row at exactly those coordinates (its code).
 		oracleApply := func(p *opos, batch map[okey]oobs) int {
-			rc := runCanonical(p, batch)
-			// cand: effective non-zero run-canonical rows not defeated by a strictly higher STORED
-			// version at the same block; latest = highest such block (filter-then-top).
-			latestBn := -1
-			var latest canon
-			for bn, c := range rc {
-				if c.qty <= 0 {
-					continue
-				}
-				defeated := false
-				for k := range p.stored {
-					if k.bn == bn && (k.bv > c.bv || (k.bv == c.bv && k.pv > c.pv)) {
-						defeated = true
-						break
-					}
-				}
-				if !defeated && bn > latestBn {
-					latestBn, latest = bn, c
-				}
-			}
-			// append the unseen keys; count them (the run's expected return value)
 			inserted := 0
 			for k, o := range batch {
-				if _, okst := p.stored[k]; !okst {
+				if _, seen := p.stored[k]; !seen {
 					p.stored[k] = o
 					inserted++
 				}
-				eff := o.qty
-				if st, okst := p.stored[k]; okst {
-					eff = st.qty
+			}
+			perBlock := map[int]canon{}
+			for k, o := range p.stored {
+				c, seen := perBlock[k.bn]
+				if !seen || k.bv > c.bv || (k.bv == c.bv && k.pv > c.pv) {
+					perBlock[k.bn] = canon{bv: k.bv, pv: k.pv, qty: o.qty}
 				}
-				if eff > 0 && o.code != "" {
-					p.seen[o.code] = true
+			}
+			latestBn := -1
+			var latestKey okey
+			for bn, c := range perBlock {
+				if c.qty > 0 && bn > latestBn {
+					latestBn = bn
+					latestKey = okey{bn, c.bv, c.pv}
 				}
 			}
 			if latestBn < 0 {
 				return inserted
 			}
-			// blocked if any merged-canonical non-zero block exists ABOVE latestBn: per-block winner
-			// over stored ∪ run-canonical (run wins version ties), stored quantities authoritative.
-			type cand struct {
-				bv, pv, src, qty int
+			if o, inRun := batch[latestKey]; inRun && o.code != "" {
+				p.expected = o.code
+				p.seen[o.code] = true
 			}
-			best := map[int]cand{}
-			consider := func(bn, bv, pv, src, qty int) {
-				if bn <= latestBn {
-					return
-				}
-				c, seen := best[bn]
-				n := cand{bv, pv, src, qty}
-				if !seen || n.bv > c.bv || (n.bv == c.bv && (n.pv > c.pv || (n.pv == c.pv && n.src > c.src))) {
-					best[bn] = n
-				}
-			}
-			for k, o := range p.stored {
-				consider(k.bn, k.bv, k.pv, 0, o.qty)
-			}
-			for bn, c := range rc {
-				consider(bn, c.bv, c.pv, 1, c.qty)
-			}
-			for _, c := range best {
-				if c.qty > 0 {
-					return inserted // a newer canonical non-zero block exists: guard blocks
-				}
-			}
-			p.expected = latest.code
 			return inserted
 		}
+
 		dbRows := func(p *opos) map[okey]int {
 			out := map[okey]int{}
 			rs, err := pool.Query(ctx,
