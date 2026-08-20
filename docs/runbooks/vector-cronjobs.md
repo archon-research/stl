@@ -419,6 +419,10 @@ so a whole-V2-era run is measured in hours. A range wider than 8000 partitions i
 rejected up front — that catches a mistyped `from` or a millisecond timestamp
 pasted into `to`, and keeps every accepted run inside Temporal's 51,200-event
 history limit (~6 events per activity), so none is terminated mid-flight.
+Note on dead-worker detection: the replay activity heartbeats on a 60 s ticker,
+but a typical partition finishes in 10-20 s, so in practice the heartbeat only
+fires on pathologically slow partitions — for ordinary ones the 30-minute
+StartToClose timeout is the real detector after a mid-partition rollout.
 
 **Reading progress and re-running.** The `progress` query (UI → Query tab) shows
 `partitionsDone` / `partitionsTotal` mid-run and survives a failed run, whose
