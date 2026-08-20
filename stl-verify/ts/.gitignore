@@ -6,6 +6,8 @@ node_modules/
 # Build outputs
 dist/
 build/
+# Copied from @archon-research/design-system by ui/scripts/copy-theme-bootstrap.mjs
+ui/public/theme-init.js
 
 # IDE
 .vscode/

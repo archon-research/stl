@@ -10,8 +10,8 @@
   },
   "scripts": {
     "prepare": "panda codegen",
-    "dev": "vite",
-    "build": "vite build",
+    "dev": "node scripts/copy-theme-bootstrap.mjs && vite",
+    "build": "node scripts/copy-theme-bootstrap.mjs && vite build",
     "type:check": "tsc -b",
     "format": "uikit-cli format --write \"src/**/*.ts\" \"src/**/*.tsx\" panda.config.ts vite.config.ts env.ts",
     "format:check": "uikit-cli format --check \"src/**/*.ts\" \"src/**/*.tsx\" panda.config.ts vite.config.ts env.ts",
