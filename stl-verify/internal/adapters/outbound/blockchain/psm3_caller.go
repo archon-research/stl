@@ -24,40 +24,41 @@ type PSM3Config struct {
 	USDS  common.Address
 	SUSDS common.Address
 	USDC  common.Address
-	// ALM is the prime's ALM proxy, the only meaningful LP in the pool. Its
-	// shares are read per block; there is no share token, so the holder cannot
-	// be discovered from chain state alone.
-	ALM common.Address
+	// SparkALM is Spark's ALM proxy, today the only meaningful LP in the pool.
+	// Its shares are read per block; there is no share token, so the holder
+	// cannot be discovered from chain state alone. A future prime depositing
+	// gets its own field and its own spark_alm-style columns.
+	SparkALM common.Address
 }
 
 var psm3Configs = map[int64]PSM3Config{
 	8453: { // base
-		PSM3:  common.HexToAddress("0x1601843c5E9bC251A3272907010AFa41Fa18347E"),
-		USDS:  common.HexToAddress("0x820C137fa70C8691f0e44Dc420a5e53c168921Dc"),
-		SUSDS: common.HexToAddress("0x5875eEE11Cf8398102FdAd704C9E96607675467a"),
-		USDC:  common.HexToAddress("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"),
-		ALM:   common.HexToAddress("0x2917956eFF0B5eaF030abDB4EF4296DF775009cA"),
+		PSM3:     common.HexToAddress("0x1601843c5E9bC251A3272907010AFa41Fa18347E"),
+		USDS:     common.HexToAddress("0x820C137fa70C8691f0e44Dc420a5e53c168921Dc"),
+		SUSDS:    common.HexToAddress("0x5875eEE11Cf8398102FdAd704C9E96607675467a"),
+		USDC:     common.HexToAddress("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"),
+		SparkALM: common.HexToAddress("0x2917956eFF0B5eaF030abDB4EF4296DF775009cA"),
 	},
 	10: { // optimism
-		PSM3:  common.HexToAddress("0xe0F9978b907853F354d79188A3dEfbD41978af62"),
-		USDS:  common.HexToAddress("0x4F13a96EC5C4Cf34e442b46Bbd98a0791F20edC3"),
-		SUSDS: common.HexToAddress("0xb5B2dc7fd34C249F4be7fB1fCea07950784229e0"),
-		USDC:  common.HexToAddress("0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85"),
-		ALM:   common.HexToAddress("0x876664f0c9Ff24D1aa355Ce9f1680AE1A5bf36fB"),
+		PSM3:     common.HexToAddress("0xe0F9978b907853F354d79188A3dEfbD41978af62"),
+		USDS:     common.HexToAddress("0x4F13a96EC5C4Cf34e442b46Bbd98a0791F20edC3"),
+		SUSDS:    common.HexToAddress("0xb5B2dc7fd34C249F4be7fB1fCea07950784229e0"),
+		USDC:     common.HexToAddress("0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85"),
+		SparkALM: common.HexToAddress("0x876664f0c9Ff24D1aa355Ce9f1680AE1A5bf36fB"),
 	},
 	42161: { // arbitrum
-		PSM3:  common.HexToAddress("0x2B05F8e1cACC6974fD79A673a341Fe1f58d27266"),
-		USDS:  common.HexToAddress("0x6491c05A82219b8D1479057361ff1654749b876b"),
-		SUSDS: common.HexToAddress("0xdDb46999F8891663a8F2828d25298f70416d7610"),
-		USDC:  common.HexToAddress("0xaf88d065e77c8cC2239327C5EDb3A432268e5831"),
-		ALM:   common.HexToAddress("0x92afd6F2385a90e44da3a8B60fe36f6cBe1D8709"),
+		PSM3:     common.HexToAddress("0x2B05F8e1cACC6974fD79A673a341Fe1f58d27266"),
+		USDS:     common.HexToAddress("0x6491c05A82219b8D1479057361ff1654749b876b"),
+		SUSDS:    common.HexToAddress("0xdDb46999F8891663a8F2828d25298f70416d7610"),
+		USDC:     common.HexToAddress("0xaf88d065e77c8cC2239327C5EDb3A432268e5831"),
+		SparkALM: common.HexToAddress("0x92afd6F2385a90e44da3a8B60fe36f6cBe1D8709"),
 	},
 	130: { // unichain
-		PSM3:  common.HexToAddress("0x7b42Ed932f26509465F7cE3FAF76FfCe1275312f"),
-		USDS:  common.HexToAddress("0x7E10036Acc4B56d4dFCa3b77810356CE52313F9C"),
-		SUSDS: common.HexToAddress("0xA06b10Db9F390990364A3984C04FaDf1c13691b5"),
-		USDC:  common.HexToAddress("0x078D782b760474a361dDA0AF3839290b0EF57AD6"),
-		ALM:   common.HexToAddress("0x345E368fcCd62266B3f5F37C9a131FD1c39f5869"),
+		PSM3:     common.HexToAddress("0x7b42Ed932f26509465F7cE3FAF76FfCe1275312f"),
+		USDS:     common.HexToAddress("0x7E10036Acc4B56d4dFCa3b77810356CE52313F9C"),
+		SUSDS:    common.HexToAddress("0xA06b10Db9F390990364A3984C04FaDf1c13691b5"),
+		USDC:     common.HexToAddress("0x078D782b760474a361dDA0AF3839290b0EF57AD6"),
+		SparkALM: common.HexToAddress("0x345E368fcCd62266B3f5F37C9a131FD1c39f5869"),
 	},
 }
 
@@ -100,16 +101,16 @@ func (cfg PSM3Config) ValidateAgainstAxisSynome(contract *axis_synome_contract.C
 	return cfg.validateALMAgainstAxisSynome(contract, owningStar, chainName)
 }
 
-// validateALMAgainstAxisSynome checks cfg.ALM against the canonical ALM proxy
+// validateALMAgainstAxisSynome checks cfg.SparkALM against the canonical ALM proxy
 // (role "alm", not a SubProxy/treasury wallet) of the given star and chain.
 func (cfg PSM3Config) validateALMAgainstAxisSynome(contract *axis_synome_contract.Contract, star, chainName string) error {
 	for _, proxy := range contract.GetAlmProxies()[star][chainName] {
 		if proxy.Role != "alm" {
 			continue
 		}
-		if common.HexToAddress(proxy.Address) != cfg.ALM {
+		if common.HexToAddress(proxy.Address) != cfg.SparkALM {
 			return fmt.Errorf("axis-synome alm proxy for chain %s (star %s) is %s, config has %s",
-				chainName, star, proxy.Address, cfg.ALM.Hex())
+				chainName, star, proxy.Address, cfg.SparkALM.Hex())
 		}
 		return nil
 	}
@@ -213,7 +214,7 @@ func (c *PSM3Caller) ReadState(ctx context.Context, blockHash common.Hash) (*ent
 		return nil, err
 	}
 
-	state.USDCBalance, state.ALMAssetValue, err = c.readPocketBalanceAndShareValue(ctx, pocket, state.ALMShares, blockHash)
+	state.USDCBalance, state.SparkALMAssetValue, err = c.readPocketBalanceAndShareValue(ctx, pocket, state.SparkALMShares, blockHash)
 	if err != nil {
 		return nil, err
 	}
@@ -256,7 +257,7 @@ func (c *PSM3Caller) reservesAndSharesCalls() ([]outbound.Call, error) {
 	if err != nil {
 		return nil, fmt.Errorf("pack getConversionRate: %w", err)
 	}
-	sharesData, err := c.psm3ABI.Pack("shares", c.cfg.ALM)
+	sharesData, err := c.psm3ABI.Pack("shares", c.cfg.SparkALM)
 	if err != nil {
 		return nil, fmt.Errorf("pack shares(alm): %w", err)
 	}
@@ -320,7 +321,7 @@ func (c *PSM3Caller) decodeReservesAndShares(results []outbound.Result) (*entity
 		SUSDSBalance:   susdsBalance,
 		TotalAssets:    totalAssets,
 		ConversionRate: conversionRate,
-		ALMShares:      almShares,
+		SparkALMShares: almShares,
 		TotalShares:    totalShares,
 	}, pocket, nil
 }

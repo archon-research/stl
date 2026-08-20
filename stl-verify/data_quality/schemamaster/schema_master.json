@@ -74,14 +74,6 @@
       "type": "numeric",
       "class": "S"
     },
-    "alm_asset_value": {
-      "type": "numeric",
-      "class": "S"
-    },
-    "alm_shares": {
-      "type": "numeric",
-      "class": "S"
-    },
     "amount": {
       "type": "numeric",
       "class": "D"
@@ -951,6 +943,14 @@
     "source_id": {
       "type": "int8",
       "class": "R"
+    },
+    "spark_alm_asset_value": {
+      "type": "numeric",
+      "class": "S"
+    },
+    "spark_alm_shares": {
+      "type": "numeric",
+      "class": "S"
     },
     "spj_utilization": {
       "type": "numeric",

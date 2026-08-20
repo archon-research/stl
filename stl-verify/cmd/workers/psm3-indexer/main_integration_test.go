@@ -377,7 +377,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	err := pool.QueryRow(ctx, `
 		SELECT address, usds_balance::text, susds_balance::text, usdc_balance::text,
 		       total_assets::text, conversion_rate::text,
-		       alm_shares::text, total_shares::text, alm_asset_value::text,
+		       spark_alm_shares::text, total_shares::text, spark_alm_asset_value::text,
 		       block_number, block_version, source
 		FROM psm3_reserves ORDER BY block_number LIMIT 1
 	`).Scan(&addrBytes, &usds, &susds, &usdc, &total, &rate,
@@ -405,13 +405,13 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 		t.Errorf("conversion_rate = %s, want %s", rate, conversionRate)
 	}
 	if shares != almShares.String() {
-		t.Errorf("alm_shares = %s, want %s", shares, almShares)
+		t.Errorf("spark_alm_shares = %s, want %s", shares, almShares)
 	}
 	if allShares != totalSharesVal.String() {
 		t.Errorf("total_shares = %s, want %s", allShares, totalSharesVal)
 	}
 	if shareValue != almAssetValue.String() {
-		t.Errorf("alm_asset_value = %s, want %s", shareValue, almAssetValue)
+		t.Errorf("spark_alm_asset_value = %s, want %s", shareValue, almAssetValue)
 	}
 	if blockNumber != startBlock {
 		t.Errorf("block_number = %d, want %d", blockNumber, startBlock)

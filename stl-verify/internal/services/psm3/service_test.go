@@ -62,14 +62,14 @@ type fakePSM3Caller struct {
 func newFakePSM3Caller() *fakePSM3Caller {
 	return &fakePSM3Caller{
 		state: entity.PSM3State{
-			USDSBalance:    big.NewInt(1_000_000),
-			SUSDSBalance:   big.NewInt(2_000_000),
-			USDCBalance:    big.NewInt(3_000_000),
-			TotalAssets:    big.NewInt(6_000_000),
-			ConversionRate: big.NewInt(1_050_000),
-			ALMShares:      big.NewInt(5_900_000),
-			TotalShares:    big.NewInt(6_000_000),
-			ALMAssetValue:  big.NewInt(5_900_000),
+			USDSBalance:        big.NewInt(1_000_000),
+			SUSDSBalance:       big.NewInt(2_000_000),
+			USDCBalance:        big.NewInt(3_000_000),
+			TotalAssets:        big.NewInt(6_000_000),
+			ConversionRate:     big.NewInt(1_050_000),
+			SparkALMShares:     big.NewInt(5_900_000),
+			TotalShares:        big.NewInt(6_000_000),
+			SparkALMAssetValue: big.NewInt(5_900_000),
 		},
 	}
 }

@@ -84,9 +84,9 @@ func resolvedCaller(t *testing.T, mc *testutil.MockMulticaller) *PSM3Caller {
 
 func TestPSM3ConfigForChain(t *testing.T) {
 	tests := []struct {
-		chainID  int64
-		wantPSM3 string
-		wantALM  string
+		chainID      int64
+		wantPSM3     string
+		wantSparkALM string
 	}{
 		{8453, "0x1601843c5E9bC251A3272907010AFa41Fa18347E", "0x2917956eFF0B5eaF030abDB4EF4296DF775009cA"},
 		{10, "0xe0F9978b907853F354d79188A3dEfbD41978af62", "0x876664f0c9Ff24D1aa355Ce9f1680AE1A5bf36fB"},
@@ -101,8 +101,8 @@ func TestPSM3ConfigForChain(t *testing.T) {
 		if cfg.PSM3 != common.HexToAddress(tc.wantPSM3) {
 			t.Errorf("chain %d: PSM3 = %s, want %s", tc.chainID, cfg.PSM3.Hex(), tc.wantPSM3)
 		}
-		if cfg.ALM != common.HexToAddress(tc.wantALM) {
-			t.Errorf("chain %d: ALM = %s, want %s", tc.chainID, cfg.ALM.Hex(), tc.wantALM)
+		if cfg.SparkALM != common.HexToAddress(tc.wantSparkALM) {
+			t.Errorf("chain %d: ALM = %s, want %s", tc.chainID, cfg.SparkALM.Hex(), tc.wantSparkALM)
 		}
 	}
 }
@@ -421,8 +421,8 @@ func TestReadState_HappyPath_PocketRedirect(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unpack shares calldata: %v", err)
 			}
-			if got := sharesArgs[0].(common.Address); got != cfg.ALM {
-				t.Errorf("shares arg = %s, want ALM proxy %s", got.Hex(), cfg.ALM.Hex())
+			if got := sharesArgs[0].(common.Address); got != cfg.SparkALM {
+				t.Errorf("shares arg = %s, want ALM proxy %s", got.Hex(), cfg.SparkALM.Hex())
 			}
 			return []outbound.Result{
 				{Success: true, ReturnData: packAddressOutput(t, caller, "pocket", pocket)},
@@ -476,9 +476,9 @@ func TestReadState_HappyPath_PocketRedirect(t *testing.T) {
 		state.USDCBalance.Cmp(usdcBal) != 0 ||
 		state.TotalAssets.Cmp(totalAssets) != 0 ||
 		state.ConversionRate.Cmp(rate) != 0 ||
-		state.ALMShares.Cmp(almShares) != 0 ||
+		state.SparkALMShares.Cmp(almShares) != 0 ||
 		state.TotalShares.Cmp(totalShares) != 0 ||
-		state.ALMAssetValue.Cmp(almAssetValue) != 0 {
+		state.SparkALMAssetValue.Cmp(almAssetValue) != 0 {
 		t.Errorf("unexpected state: %+v", state)
 	}
 }
