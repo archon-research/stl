@@ -27,9 +27,9 @@ from datetime import timedelta
 
 from app.adapters.temporal import CronjobSpec, run_cronjob
 from app.services.core_model_runner.activity import run_core_model_activity
+from app.services.core_model_runner.config import RunnerConfig
 from app.services.core_model_runner.service import run_markets
 from app.services.core_model_runner.workflow import CoreModelRunnerWorkflow
-from cli.cronjobs.core_model_runner.config import RunnerConfig
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)

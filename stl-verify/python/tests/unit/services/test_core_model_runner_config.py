@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from cli.cronjobs.core_model_runner.config import (
+from app.services.core_model_runner.config import (
     _MARKET_CONFIGS_DEFAULT,
     RunnerConfig,
     _load_market_configs,

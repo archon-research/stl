@@ -8,9 +8,9 @@ import asyncio
 
 from temporalio import activity
 
+from app.services.core_model_runner.config import RunnerConfig
 from app.services.core_model_runner.service import run_markets
 from app.services.core_model_runner.workflow import ACTIVITY_NAME
-from cli.cronjobs.core_model_runner.config import RunnerConfig
 
 
 @activity.defn(name=ACTIVITY_NAME)

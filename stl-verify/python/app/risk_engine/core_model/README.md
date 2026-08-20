@@ -123,7 +123,7 @@ runner.py             Service entry point — orchestrates the full pipeline
 | `LOAN_TOKEN` | `USDC` | Filter positions by loan token (`ALL` = no filter) |
 | `SEED` | `0` | Global random seed |
 
-All parameters can be overridden via environment variables when running the cronjob — see `cli/cronjobs/core_model_runner/config.py` for the full mapping.
+All parameters can be overridden via environment variables when running the cronjob — see `app/services/core_model_runner/config.py` for the full mapping.
 
 ---
 
@@ -304,6 +304,7 @@ app/adapters/
 app/services/core_model_risk_service.py  RiskModel implementation
 
 app/services/core_model_runner/
+├── config.py    Param resolution (defaults -> market config -> env)
 ├── service.py   The body of one tick: run each market, append results
 ├── workflow.py  Temporal workflow; sandboxed, imports nothing from the model
 └── activity.py  The activity that runs the tick; the only side that may import it
@@ -312,7 +313,6 @@ app/adapters/temporal/
 └── cronjob.py   Shared harness: connect, ensure schedule, run worker
 
 cli/cronjobs/core_model_runner/
-├── config.py    Param resolution (defaults -> market config -> env)
 └── main.py      Entry point: Temporal worker, or --once. No business logic.
 ```
 
