@@ -146,26 +146,14 @@ images:
     # Shares the backup-worker image — same binary, different chain config via env vars
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-backup-worker
     newTag: "61e063657b9842842d77443f081ca1397366e804"
-  - name: optimism-allocation-tracker
-    # Shares the allocation-tracker image — same binary, different chain config via env vars
-    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-allocation-tracker
-    newTag: "e77e8fc0e6b74f0d387ac9994973bd13110011e4"
   - name: unichain-backup-worker
     # Shares the backup-worker image — same binary, different chain config via env vars
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-backup-worker
     newTag: "61e063657b9842842d77443f081ca1397366e804"
-  - name: unichain-allocation-tracker
-    # Shares the allocation-tracker image — same binary, different chain config via env vars
-    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-allocation-tracker
-    newTag: "e77e8fc0e6b74f0d387ac9994973bd13110011e4"
   - name: arbitrum-backup-worker
     # Shares the backup-worker image — same binary, different chain config via env vars
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-backup-worker
     newTag: "61e063657b9842842d77443f081ca1397366e804"
-  - name: arbitrum-allocation-tracker
-    # Shares the allocation-tracker image — same binary, different chain config via env vars
-    newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-allocation-tracker
-    newTag: "e77e8fc0e6b74f0d387ac9994973bd13110011e4"
   - name: prime-debt-indexer
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-prime-debt-indexer
     newTag: "61e063657b9842842d77443f081ca1397366e804"

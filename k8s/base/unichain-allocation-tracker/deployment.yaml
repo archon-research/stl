@@ -15,9 +15,7 @@ spec:
       serviceAccountName: unichain-allocation-tracker
       containers:
         - name: unichain-allocation-tracker
-          # Distinct image key — overlay maps this to the allocation-tracker ECR repo.
-          # Same binary as allocation-tracker; chain is selected via CHAIN_ID env var.
-          image: unichain-allocation-tracker
+          image: allocation-tracker
           envFrom:
             - configMapRef:
                 name: otel-config

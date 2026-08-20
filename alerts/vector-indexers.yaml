@@ -1297,7 +1297,7 @@ groups:
       #   - deployment / pod `app` label = `allocation-tracker`  (kube-state-metrics)
       #   - OTel service_name           = `prime-allocation-indexer`  (InitOTEL resource)
       # The Down rule keys on the deployment name; the metric rules key on
-      # service_name. Per-chain instances (avalanche/base) run the same binary and
+      # service_name. Per-chain instances (avalanche/base/optimism/unichain/arbitrum) run the same binary and
       # so reuse ONE service_name, differing only by the `chain` label — the metric
       # rules therefore cover every chain via `by (chain, ...)` with no per-instance
       # edits. Only the Down regex is keyed on deployment names, so it is the one
