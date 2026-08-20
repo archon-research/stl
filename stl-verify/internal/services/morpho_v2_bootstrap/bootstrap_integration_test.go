@@ -40,7 +40,7 @@ import (
 // latest observation that says "member", and the seed's head-block snapshot
 // hanging off that same identity.
 func TestRun_SeedAndReplayRecordTheWholeLifecycle(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 	ctx := context.Background()
 
@@ -129,7 +129,7 @@ func TestRun_SeedAndReplayRecordTheWholeLifecycle(t *testing.T) {
 // invisible forever and the adapter would keep being priced. The enumeration is
 // the only read that sees the whole set.
 func TestRun_DeregistersAnAdapterTheChainNoLongerHolds(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 	ctx := context.Background()
 
@@ -212,7 +212,7 @@ func TestRun_DeregistersAnAdapterTheChainNoLongerHolds(t *testing.T) {
 // removal), but the run would emit a WARN and a de-registration for an adapter that
 // was never removed. Reading the registry AS OF the pinned head is what avoids it.
 func TestRun_LeavesAnAdapterAddedAboveThePinnedHeadAlone(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 	ctx := context.Background()
 
@@ -282,7 +282,7 @@ func isCurrentAdapter(t *testing.T, ctx context.Context, pool *pgxpool.Pool, ada
 // run produced. A second run must converge, not duplicate: the operator is
 // explicitly told a repeat run is safe.
 func TestRun_IsIdempotent(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 	ctx := context.Background()
 
@@ -342,7 +342,7 @@ func TestRun_IsIdempotent(t *testing.T) {
 // skipped the remaining blocks would leave the vault unrepaired rather than
 // merely re-do work.
 func TestRun_ResumesAfterAKilledAttemptAndFinishesTheWork(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 	ctx := context.Background()
 
