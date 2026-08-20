@@ -24,41 +24,47 @@ type PSM3Config struct {
 	USDS  common.Address
 	SUSDS common.Address
 	USDC  common.Address
-	// SparkALM is Spark's ALM proxy, today the only meaningful LP in the pool.
-	// Its shares are read per block; there is no share token, so the holder
-	// cannot be discovered from chain state alone. A future prime depositing
-	// gets its own field and its own spark_alm-style columns.
-	SparkALM common.Address
+	// ALMs lists the ALM proxies whose stakes are read per block, one entry
+	// per prime. Tracking another prime's stake is a new entry here (plus its
+	// axis-synome registration) — no schema or code change. There is no share
+	// token, so holders cannot be discovered from chain state alone.
+	ALMs []PSM3ALM
+}
+
+// PSM3ALM names a prime and its ALM proxy on one chain.
+type PSM3ALM struct {
+	Prime   string // registry name, must match prime.name and the axis-synome star
+	Address common.Address
 }
 
 var psm3Configs = map[int64]PSM3Config{
 	8453: { // base
-		PSM3:     common.HexToAddress("0x1601843c5E9bC251A3272907010AFa41Fa18347E"),
-		USDS:     common.HexToAddress("0x820C137fa70C8691f0e44Dc420a5e53c168921Dc"),
-		SUSDS:    common.HexToAddress("0x5875eEE11Cf8398102FdAd704C9E96607675467a"),
-		USDC:     common.HexToAddress("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"),
-		SparkALM: common.HexToAddress("0x2917956eFF0B5eaF030abDB4EF4296DF775009cA"),
+		PSM3:  common.HexToAddress("0x1601843c5E9bC251A3272907010AFa41Fa18347E"),
+		USDS:  common.HexToAddress("0x820C137fa70C8691f0e44Dc420a5e53c168921Dc"),
+		SUSDS: common.HexToAddress("0x5875eEE11Cf8398102FdAd704C9E96607675467a"),
+		USDC:  common.HexToAddress("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"),
+		ALMs:  []PSM3ALM{{Prime: "spark", Address: common.HexToAddress("0x2917956eFF0B5eaF030abDB4EF4296DF775009cA")}},
 	},
 	10: { // optimism
-		PSM3:     common.HexToAddress("0xe0F9978b907853F354d79188A3dEfbD41978af62"),
-		USDS:     common.HexToAddress("0x4F13a96EC5C4Cf34e442b46Bbd98a0791F20edC3"),
-		SUSDS:    common.HexToAddress("0xb5B2dc7fd34C249F4be7fB1fCea07950784229e0"),
-		USDC:     common.HexToAddress("0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85"),
-		SparkALM: common.HexToAddress("0x876664f0c9Ff24D1aa355Ce9f1680AE1A5bf36fB"),
+		PSM3:  common.HexToAddress("0xe0F9978b907853F354d79188A3dEfbD41978af62"),
+		USDS:  common.HexToAddress("0x4F13a96EC5C4Cf34e442b46Bbd98a0791F20edC3"),
+		SUSDS: common.HexToAddress("0xb5B2dc7fd34C249F4be7fB1fCea07950784229e0"),
+		USDC:  common.HexToAddress("0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85"),
+		ALMs:  []PSM3ALM{{Prime: "spark", Address: common.HexToAddress("0x876664f0c9Ff24D1aa355Ce9f1680AE1A5bf36fB")}},
 	},
 	42161: { // arbitrum
-		PSM3:     common.HexToAddress("0x2B05F8e1cACC6974fD79A673a341Fe1f58d27266"),
-		USDS:     common.HexToAddress("0x6491c05A82219b8D1479057361ff1654749b876b"),
-		SUSDS:    common.HexToAddress("0xdDb46999F8891663a8F2828d25298f70416d7610"),
-		USDC:     common.HexToAddress("0xaf88d065e77c8cC2239327C5EDb3A432268e5831"),
-		SparkALM: common.HexToAddress("0x92afd6F2385a90e44da3a8B60fe36f6cBe1D8709"),
+		PSM3:  common.HexToAddress("0x2B05F8e1cACC6974fD79A673a341Fe1f58d27266"),
+		USDS:  common.HexToAddress("0x6491c05A82219b8D1479057361ff1654749b876b"),
+		SUSDS: common.HexToAddress("0xdDb46999F8891663a8F2828d25298f70416d7610"),
+		USDC:  common.HexToAddress("0xaf88d065e77c8cC2239327C5EDb3A432268e5831"),
+		ALMs:  []PSM3ALM{{Prime: "spark", Address: common.HexToAddress("0x92afd6F2385a90e44da3a8B60fe36f6cBe1D8709")}},
 	},
 	130: { // unichain
-		PSM3:     common.HexToAddress("0x7b42Ed932f26509465F7cE3FAF76FfCe1275312f"),
-		USDS:     common.HexToAddress("0x7E10036Acc4B56d4dFCa3b77810356CE52313F9C"),
-		SUSDS:    common.HexToAddress("0xA06b10Db9F390990364A3984C04FaDf1c13691b5"),
-		USDC:     common.HexToAddress("0x078D782b760474a361dDA0AF3839290b0EF57AD6"),
-		SparkALM: common.HexToAddress("0x345E368fcCd62266B3f5F37C9a131FD1c39f5869"),
+		PSM3:  common.HexToAddress("0x7b42Ed932f26509465F7cE3FAF76FfCe1275312f"),
+		USDS:  common.HexToAddress("0x7E10036Acc4B56d4dFCa3b77810356CE52313F9C"),
+		SUSDS: common.HexToAddress("0xA06b10Db9F390990364A3984C04FaDf1c13691b5"),
+		USDC:  common.HexToAddress("0x078D782b760474a361dDA0AF3839290b0EF57AD6"),
+		ALMs:  []PSM3ALM{{Prime: "spark", Address: common.HexToAddress("0x345E368fcCd62266B3f5F37C9a131FD1c39f5869")}},
 	},
 }
 
@@ -104,31 +110,39 @@ func (cfg PSM3Config) ValidateAgainstAxisSynome(contract *axis_synome_contract.C
 		return fmt.Errorf("no psm3 entry in axis-synome for chain %s", chainName)
 	}
 
-	return cfg.validateALMAgainstAxisSynome(contract, owningStar, chainName)
+	if len(cfg.ALMs) == 0 {
+		return fmt.Errorf("no ALMs configured for chain %s", chainName)
+	}
+	for _, alm := range cfg.ALMs {
+		if err := validateALMAgainstAxisSynome(contract, alm, chainName); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-// validateALMAgainstAxisSynome checks cfg.SparkALM against the canonical ALM proxy
-// (role "alm", not a SubProxy/treasury wallet) of the given star and chain.
+// validateALMAgainstAxisSynome checks one configured ALM against the canonical
+// ALM proxy (role "alm", not a SubProxy/treasury wallet) of its prime and chain.
 // Exactly one alm-role entry may exist: during a proxy rotation window two
 // entries would make pass/fail depend on entry order, so that state fails hard
 // until the registry is settled.
-func (cfg PSM3Config) validateALMAgainstAxisSynome(contract *axis_synome_contract.Contract, star, chainName string) error {
-	var alms []string
-	for _, proxy := range contract.GetAlmProxies()[star][chainName] {
+func validateALMAgainstAxisSynome(contract *axis_synome_contract.Contract, alm PSM3ALM, chainName string) error {
+	var proxies []string
+	for _, proxy := range contract.GetAlmProxies()[alm.Prime][chainName] {
 		if proxy.Role == "alm" {
-			alms = append(alms, proxy.Address)
+			proxies = append(proxies, proxy.Address)
 		}
 	}
-	if len(alms) == 0 {
-		return fmt.Errorf("no alm proxy in axis-synome for chain %s (star %s)", chainName, star)
+	if len(proxies) == 0 {
+		return fmt.Errorf("no alm proxy in axis-synome for chain %s (star %s)", chainName, alm.Prime)
 	}
-	if len(alms) > 1 {
+	if len(proxies) > 1 {
 		return fmt.Errorf("axis-synome has %d alm proxies for chain %s (star %s), want exactly one: %v",
-			len(alms), chainName, star, alms)
+			len(proxies), chainName, alm.Prime, proxies)
 	}
-	if common.HexToAddress(alms[0]) != cfg.SparkALM {
+	if common.HexToAddress(proxies[0]) != alm.Address {
 		return fmt.Errorf("axis-synome alm proxy for chain %s (star %s) is %s, config has %s",
-			chainName, star, alms[0], cfg.SparkALM.Hex())
+			chainName, alm.Prime, proxies[0], alm.Address.Hex())
 	}
 	return nil
 }
@@ -255,15 +269,15 @@ func (c *PSM3Caller) readReservesAndShares(ctx context.Context, blockHash common
 
 // Round-1 result positions, shared by reservesAndSharesCalls and
 // decodeReservesAndShares so the builder and the decoder cannot drift apart.
+// One shares(alm) call per configured ALM follows, in cfg.ALMs order.
 const (
 	idxPocket = iota
 	idxUSDSBalance
 	idxSUSDSBalance
 	idxTotalAssets
 	idxConversionRate
-	idxSparkALMShares
 	idxTotalShares
-	round1Calls
+	idxFirstALMShares
 )
 
 // reservesAndSharesCalls builds the round-1 calls, in the order
@@ -285,23 +299,25 @@ func (c *PSM3Caller) reservesAndSharesCalls() ([]outbound.Call, error) {
 	if err != nil {
 		return nil, fmt.Errorf("pack getConversionRate: %w", err)
 	}
-	sharesData, err := c.psm3ABI.Pack("shares", c.cfg.SparkALM)
-	if err != nil {
-		return nil, fmt.Errorf("pack shares(alm): %w", err)
-	}
 	totalSharesData, err := c.psm3ABI.Pack("totalShares")
 	if err != nil {
 		return nil, fmt.Errorf("pack totalShares: %w", err)
 	}
 
-	calls := make([]outbound.Call, round1Calls)
+	calls := make([]outbound.Call, idxFirstALMShares, idxFirstALMShares+len(c.cfg.ALMs))
 	calls[idxPocket] = outbound.Call{Target: c.cfg.PSM3, CallData: pocketData}
 	calls[idxUSDSBalance] = outbound.Call{Target: c.cfg.USDS, CallData: balanceOfPSM3}
 	calls[idxSUSDSBalance] = outbound.Call{Target: c.cfg.SUSDS, CallData: balanceOfPSM3}
 	calls[idxTotalAssets] = outbound.Call{Target: c.cfg.PSM3, CallData: totalAssetsData}
 	calls[idxConversionRate] = outbound.Call{Target: c.rateProvider, CallData: rateData}
-	calls[idxSparkALMShares] = outbound.Call{Target: c.cfg.PSM3, CallData: sharesData}
 	calls[idxTotalShares] = outbound.Call{Target: c.cfg.PSM3, CallData: totalSharesData}
+	for _, alm := range c.cfg.ALMs {
+		sharesData, err := c.psm3ABI.Pack("shares", alm.Address)
+		if err != nil {
+			return nil, fmt.Errorf("pack shares(%s alm): %w", alm.Prime, err)
+		}
+		calls = append(calls, outbound.Call{Target: c.cfg.PSM3, CallData: sharesData})
+	}
 	return calls, nil
 }
 
@@ -335,13 +351,17 @@ func (c *PSM3Caller) decodeReservesAndShares(results []outbound.Result) (*entity
 	if err != nil {
 		return fail(err)
 	}
-	almShares, err := unpackUint256(&c.psm3ABI, "shares", results[idxSparkALMShares])
-	if err != nil {
-		return fail(err)
-	}
 	totalShares, err := unpackUint256(&c.psm3ABI, "totalShares", results[idxTotalShares])
 	if err != nil {
 		return fail(err)
+	}
+	positions := make([]entity.PSM3ALMPosition, len(c.cfg.ALMs))
+	for i, alm := range c.cfg.ALMs {
+		shares, err := unpackUint256(&c.psm3ABI, "shares", results[idxFirstALMShares+i])
+		if err != nil {
+			return fail(fmt.Errorf("%s alm shares: %w", alm.Prime, err))
+		}
+		positions[i] = entity.PSM3ALMPosition{Prime: alm.Prime, Address: alm.Address, Shares: shares}
 	}
 
 	return &entity.PSM3State{
@@ -349,14 +369,14 @@ func (c *PSM3Caller) decodeReservesAndShares(results []outbound.Result) (*entity
 		SUSDSBalance:   susdsBalance,
 		TotalAssets:    totalAssets,
 		ConversionRate: conversionRate,
-		SparkALMShares: almShares,
 		TotalShares:    totalShares,
+		ALMPositions:   positions,
 	}, pocket, nil
 }
 
-// readPocketBalanceAndShareValue runs round 2 — USDC.balanceOf(pocket) and the
-// par value of the ALM's shares, both of which depend on a round-1 result —
-// and writes the two legs into their state fields directly, so the 1e6 USDC
+// readPocketBalanceAndShareValue runs round 2 — USDC.balanceOf(pocket) and one
+// convertToAssetValue per ALM position, all of which depend on a round-1
+// result — and writes each leg into its state field directly, so the 1e6 USDC
 // and 1e18 share-value results cannot be transposed at a call site.
 func (c *PSM3Caller) readPocketBalanceAndShareValue(
 	ctx context.Context,
@@ -368,27 +388,31 @@ func (c *PSM3Caller) readPocketBalanceAndShareValue(
 	if err != nil {
 		return fmt.Errorf("pack balanceOf(pocket): %w", err)
 	}
-	assetValueData, err := c.psm3ABI.Pack("convertToAssetValue", state.SparkALMShares)
-	if err != nil {
-		return fmt.Errorf("pack convertToAssetValue(almShares): %w", err)
+
+	calls := make([]outbound.Call, 1, 1+len(state.ALMPositions))
+	calls[0] = outbound.Call{Target: c.cfg.USDC, CallData: balanceData}
+	for _, pos := range state.ALMPositions {
+		assetValueData, err := c.psm3ABI.Pack("convertToAssetValue", pos.Shares)
+		if err != nil {
+			return fmt.Errorf("pack convertToAssetValue(%s alm shares): %w", pos.Prime, err)
+		}
+		calls = append(calls, outbound.Call{Target: c.cfg.PSM3, CallData: assetValueData})
 	}
 
-	calls := []outbound.Call{
-		{Target: c.cfg.USDC, CallData: balanceData},
-		{Target: c.cfg.PSM3, CallData: assetValueData},
-	}
 	results, err := c.executeAtHash(ctx, calls, blockHash)
 	if err != nil {
-		return fmt.Errorf("multicall usdc balance at pocket %s and alm share value: %w", pocket.Hex(), err)
+		return fmt.Errorf("multicall usdc balance at pocket %s and alm share values: %w", pocket.Hex(), err)
 	}
 
 	state.USDCBalance, err = unpackUint256(&c.erc20ABI, "balanceOf", results[0])
 	if err != nil {
 		return fmt.Errorf("usdc balance at pocket %s: %w", pocket.Hex(), err)
 	}
-	state.SparkALMAssetValue, err = unpackUint256(&c.psm3ABI, "convertToAssetValue", results[1])
-	if err != nil {
-		return fmt.Errorf("alm share value: %w", err)
+	for i := range state.ALMPositions {
+		state.ALMPositions[i].AssetValue, err = unpackUint256(&c.psm3ABI, "convertToAssetValue", results[1+i])
+		if err != nil {
+			return fmt.Errorf("%s alm share value: %w", state.ALMPositions[i].Prime, err)
+		}
 	}
 	return nil
 }

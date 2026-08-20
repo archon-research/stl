@@ -27,7 +27,7 @@ const (
 
 var testPSM3Address = common.HexToAddress("0x1601843c5E9bC251A3272907010AFa41Fa18347E")
 
-var testSparkALMAddress = common.HexToAddress("0x2917956eFF0B5eaF030abDB4EF4296DF775009cA")
+var testALMAddress = common.HexToAddress("0x2917956eFF0B5eaF030abDB4EF4296DF775009cA")
 
 // ---------------------------------------------------------------------------
 // Fakes
@@ -64,14 +64,18 @@ type fakePSM3Caller struct {
 func newFakePSM3Caller() *fakePSM3Caller {
 	return &fakePSM3Caller{
 		state: entity.PSM3State{
-			USDSBalance:        big.NewInt(1_000_000),
-			SUSDSBalance:       big.NewInt(2_000_000),
-			USDCBalance:        big.NewInt(3_000_000),
-			TotalAssets:        big.NewInt(6_000_000),
-			ConversionRate:     big.NewInt(1_050_000),
-			SparkALMShares:     big.NewInt(5_900_000),
-			TotalShares:        big.NewInt(6_000_000),
-			SparkALMAssetValue: big.NewInt(5_900_000),
+			USDSBalance:    big.NewInt(1_000_000),
+			SUSDSBalance:   big.NewInt(2_000_000),
+			USDCBalance:    big.NewInt(3_000_000),
+			TotalAssets:    big.NewInt(6_000_000),
+			ConversionRate: big.NewInt(1_050_000),
+			TotalShares:    big.NewInt(6_000_000),
+			ALMPositions: []entity.PSM3ALMPosition{{
+				Prime:      "spark",
+				Address:    testALMAddress,
+				Shares:     big.NewInt(5_900_000),
+				AssetValue: big.NewInt(5_900_000),
+			}},
 		},
 	}
 }
@@ -223,7 +227,6 @@ func defaultConfig(sweepEveryN int) psm3.Config {
 		SweepEveryNBlocks: sweepEveryN,
 		ChainID:           testChainID,
 		PSM3Address:       testPSM3Address,
-		SparkALMAddress:   testSparkALMAddress,
 		MaxMessages:       10,
 		PollInterval:      10 * time.Millisecond,
 	}
@@ -296,11 +299,6 @@ func TestNewService_Validation(t *testing.T) {
 			cfg.PSM3Address = common.Address{}
 			return psm3.NewService(cfg, caller, repo, consumer, querier)
 		}, "psm3 address"},
-		{"zero spark alm address", func() (*psm3.Service, error) {
-			cfg := defaultConfig(1)
-			cfg.SparkALMAddress = common.Address{}
-			return psm3.NewService(cfg, caller, repo, consumer, querier)
-		}, "spark alm address"},
 		{"negative sweep blocks", func() (*psm3.Service, error) {
 			return psm3.NewService(defaultConfig(-1), caller, repo, consumer, querier)
 		}, "sweep every n blocks"},
@@ -320,7 +318,7 @@ func TestNewService_Validation(t *testing.T) {
 }
 
 func TestNewService_Defaults(t *testing.T) {
-	cfg := psm3.Config{ChainID: testChainID, PSM3Address: testPSM3Address, SparkALMAddress: testSparkALMAddress}
+	cfg := psm3.Config{ChainID: testChainID, PSM3Address: testPSM3Address}
 	svc, err := psm3.NewService(cfg, newFakePSM3Caller(), &fakePSM3Repo{}, newFakeSQSConsumer(nil), newFakeBlockQuerier(testBlockNum))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -434,8 +432,8 @@ func TestSweep_WritesSnapshot(t *testing.T) {
 	if snap.Address != testPSM3Address {
 		t.Errorf("Address = %s, want %s", snap.Address.Hex(), testPSM3Address.Hex())
 	}
-	if snap.SparkALMAddress != testSparkALMAddress {
-		t.Errorf("SparkALMAddress = %s, want %s", snap.SparkALMAddress.Hex(), testSparkALMAddress.Hex())
+	if len(snap.State.ALMPositions) != 1 || snap.State.ALMPositions[0].Address != testALMAddress {
+		t.Errorf("ALMPositions = %+v, want a single position for %s", snap.State.ALMPositions, testALMAddress.Hex())
 	}
 	if snap.BlockNumber != testBlockNum {
 		t.Errorf("BlockNumber = %d, want %d", snap.BlockNumber, testBlockNum)

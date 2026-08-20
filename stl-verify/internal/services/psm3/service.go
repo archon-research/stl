@@ -40,10 +40,6 @@ type Config struct {
 	// PSM3Address is the PSM3 contract address recorded on every snapshot.
 	PSM3Address common.Address
 
-	// SparkALMAddress is the holder the share legs are read for, recorded on
-	// every snapshot (see entity.PSM3Reserves.SparkALMAddress).
-	SparkALMAddress common.Address
-
 	// MaxMessages is the max number of SQS messages per poll.
 	MaxMessages int
 
@@ -98,9 +94,6 @@ func NewService(
 	}
 	if config.PSM3Address == (common.Address{}) {
 		return nil, fmt.Errorf("psm3 address is required")
-	}
-	if config.SparkALMAddress == (common.Address{}) {
-		return nil, fmt.Errorf("spark alm address is required")
 	}
 	if config.SweepEveryNBlocks < 0 {
 		return nil, fmt.Errorf("sweep every n blocks must not be negative, got %d", config.SweepEveryNBlocks)
@@ -225,14 +218,13 @@ func (s *Service) sweep(ctx context.Context, event outbound.BlockEvent) error {
 	}
 
 	snap := &entity.PSM3Reserves{
-		ChainID:         s.config.ChainID,
-		Address:         s.config.PSM3Address,
-		SparkALMAddress: s.config.SparkALMAddress,
-		State:           *state,
-		BlockNumber:     event.BlockNumber,
-		BlockVersion:    event.Version,
-		BlockTimestamp:  time.Unix(event.BlockTimestamp, 0).UTC(),
-		Source:          "sweep",
+		ChainID:        s.config.ChainID,
+		Address:        s.config.PSM3Address,
+		State:          *state,
+		BlockNumber:    event.BlockNumber,
+		BlockVersion:   event.Version,
+		BlockTimestamp: time.Unix(event.BlockTimestamp, 0).UTC(),
+		Source:         "sweep",
 	}
 	if err := snap.Validate(); err != nil {
 		return fmt.Errorf("psm3 reserves at block %d: %w", event.BlockNumber, err)

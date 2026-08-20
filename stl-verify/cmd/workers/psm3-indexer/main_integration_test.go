@@ -17,6 +17,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -368,20 +369,19 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	}
 
 	var (
-		addrBytes, almAddrBytes                []byte
+		addrBytes                              []byte
 		usds, susds, usdc, total, rate, source string
-		shares, allShares, shareValue          string
+		allShares                              string
 		blockNumber                            int64
 		blockVer                               int
 	)
 	err := pool.QueryRow(ctx, `
 		SELECT address, usds_balance::text, susds_balance::text, usdc_balance::text,
-		       total_assets::text, conversion_rate::text,
-		       spark_alm_address, spark_alm_shares::text, total_shares::text, spark_alm_asset_value::text,
+		       total_assets::text, conversion_rate::text, total_shares::text,
 		       block_number, block_version, source
 		FROM psm3_reserves ORDER BY block_number LIMIT 1
 	`).Scan(&addrBytes, &usds, &susds, &usdc, &total, &rate,
-		&almAddrBytes, &shares, &allShares, &shareValue, &blockNumber, &blockVer, &source)
+		&allShares, &blockNumber, &blockVer, &source)
 	if err != nil {
 		t.Fatalf("query snapshot: %v", err)
 	}
@@ -404,18 +404,10 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	if rate != conversionRate.String() {
 		t.Errorf("conversion_rate = %s, want %s", rate, conversionRate)
 	}
-	if common.BytesToAddress(almAddrBytes) != almAddr {
-		t.Errorf("spark_alm_address = %s, want %s", common.BytesToAddress(almAddrBytes).Hex(), almAddr.Hex())
-	}
-	if shares != almShares.String() {
-		t.Errorf("spark_alm_shares = %s, want %s", shares, almShares)
-	}
 	if allShares != totalSharesVal.String() {
 		t.Errorf("total_shares = %s, want %s", allShares, totalSharesVal)
 	}
-	if shareValue != almAssetValue.String() {
-		t.Errorf("spark_alm_asset_value = %s, want %s", shareValue, almAssetValue)
-	}
+	assertALMSharesRow(ctx, t, pool, startBlock)
 	if blockNumber != startBlock {
 		t.Errorf("block_number = %d, want %d", blockNumber, startBlock)
 	}
@@ -507,5 +499,48 @@ func TestRunIntegration_SnapshotAccumulation(t *testing.T) {
 		}
 	case <-time.After(30 * time.Second):
 		t.Fatal("run() did not return after context cancellation")
+	}
+}
+
+// assertALMSharesRow checks the psm3_alm_shares row written alongside the pool
+// snapshot: the stake is attributed to the configured holder and its prime.
+func assertALMSharesRow(ctx context.Context, t *testing.T, pool *pgxpool.Pool, block int64) {
+	t.Helper()
+
+	var (
+		almAddrBytes  []byte
+		primeName     string
+		shares, value string
+		rowCount      int
+	)
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM psm3_alm_shares`).Scan(&rowCount); err != nil {
+		t.Fatalf("count alm shares: %v", err)
+	}
+	if rowCount == 0 {
+		t.Fatal("no psm3_alm_shares row written alongside the reserve snapshot")
+	}
+
+	err := pool.QueryRow(ctx, `
+		SELECT s.alm_address, p.name, s.shares::text, s.asset_value::text
+		FROM psm3_alm_shares s
+		JOIN prime p ON p.id = s.prime_id
+		WHERE s.block_number = $1
+		ORDER BY s.alm_address LIMIT 1
+	`, block).Scan(&almAddrBytes, &primeName, &shares, &value)
+	if err != nil {
+		t.Fatalf("query alm shares: %v", err)
+	}
+
+	if got := common.BytesToAddress(almAddrBytes); got != almAddr {
+		t.Errorf("alm_address = %s, want %s", got.Hex(), almAddr.Hex())
+	}
+	if primeName != "spark" {
+		t.Errorf("prime = %s, want spark", primeName)
+	}
+	if shares != almShares.String() {
+		t.Errorf("shares = %s, want %s", shares, almShares)
+	}
+	if value != almAssetValue.String() {
+		t.Errorf("asset_value = %s, want %s", value, almAssetValue)
 	}
 }

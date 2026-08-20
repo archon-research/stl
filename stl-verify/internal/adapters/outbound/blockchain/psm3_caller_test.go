@@ -101,8 +101,11 @@ func TestPSM3ConfigForChain(t *testing.T) {
 		if cfg.PSM3 != common.HexToAddress(tc.wantPSM3) {
 			t.Errorf("chain %d: PSM3 = %s, want %s", tc.chainID, cfg.PSM3.Hex(), tc.wantPSM3)
 		}
-		if cfg.SparkALM != common.HexToAddress(tc.wantSparkALM) {
-			t.Errorf("chain %d: ALM = %s, want %s", tc.chainID, cfg.SparkALM.Hex(), tc.wantSparkALM)
+		if len(cfg.ALMs) != 1 || cfg.ALMs[0].Prime != "spark" {
+			t.Fatalf("chain %d: ALMs = %+v, want a single spark entry", tc.chainID, cfg.ALMs)
+		}
+		if cfg.ALMs[0].Address != common.HexToAddress(tc.wantSparkALM) {
+			t.Errorf("chain %d: spark ALM = %s, want %s", tc.chainID, cfg.ALMs[0].Address.Hex(), tc.wantSparkALM)
 		}
 	}
 }
@@ -437,12 +440,12 @@ func TestReadState_HappyPath_PocketRedirect(t *testing.T) {
 					t.Errorf("round 1 call %d target = %s, want %s", i, calls[i].Target.Hex(), want.Hex())
 				}
 			}
-			sharesArgs, err := caller.psm3ABI.Methods["shares"].Inputs.Unpack(calls[5].CallData[4:])
+			sharesArgs, err := caller.psm3ABI.Methods["shares"].Inputs.Unpack(calls[idxFirstALMShares].CallData[4:])
 			if err != nil {
 				t.Fatalf("unpack shares calldata: %v", err)
 			}
-			if got := sharesArgs[0].(common.Address); got != cfg.SparkALM {
-				t.Errorf("shares arg = %s, want ALM proxy %s", got.Hex(), cfg.SparkALM.Hex())
+			if got := sharesArgs[0].(common.Address); got != cfg.ALMs[0].Address {
+				t.Errorf("shares arg = %s, want ALM proxy %s", got.Hex(), cfg.ALMs[0].Address.Hex())
 			}
 			return []outbound.Result{
 				{Success: true, ReturnData: packAddressOutput(t, caller, "pocket", pocket)},
@@ -450,8 +453,8 @@ func TestReadState_HappyPath_PocketRedirect(t *testing.T) {
 				{Success: true, ReturnData: packUintOutput(t, susdsBal)},
 				{Success: true, ReturnData: packUintOutput(t, totalAssets)},
 				{Success: true, ReturnData: packUintOutput(t, rate)},
-				{Success: true, ReturnData: packUintOutput(t, almShares)},
 				{Success: true, ReturnData: packUintOutput(t, totalShares)},
+				{Success: true, ReturnData: packUintOutput(t, almShares)},
 			}, nil
 		case 2: // round 2: USDC.balanceOf(pocket) + convertToAssetValue(almShares)
 			if len(calls) != 2 {
@@ -496,15 +499,115 @@ func TestReadState_HappyPath_PocketRedirect(t *testing.T) {
 		state.USDCBalance.Cmp(usdcBal) != 0 ||
 		state.TotalAssets.Cmp(totalAssets) != 0 ||
 		state.ConversionRate.Cmp(rate) != 0 ||
-		state.SparkALMShares.Cmp(almShares) != 0 ||
 		state.TotalShares.Cmp(totalShares) != 0 ||
-		state.SparkALMAssetValue.Cmp(almAssetValue) != 0 {
+		len(state.ALMPositions) != 1 ||
+		state.ALMPositions[0].Prime != "spark" ||
+		state.ALMPositions[0].Address != cfg.ALMs[0].Address ||
+		state.ALMPositions[0].Shares.Cmp(almShares) != 0 ||
+		state.ALMPositions[0].AssetValue.Cmp(almAssetValue) != 0 {
 		t.Errorf("unexpected state: %+v", state)
 	}
 }
 
+// TestReadState_MultipleALMs pins the multi-prime path: each configured ALM
+// gets its own shares call and its own convertToAssetValue, paired by index.
+func TestReadState_MultipleALMs(t *testing.T) {
+	cfg := baseConfig(t)
+	// Grove's real base ALM proxy from axis-synome; Grove does not deposit into
+	// Spark's PSM3 today, so this stands in for the next prime that does.
+	cfg.ALMs = append(cfg.ALMs, PSM3ALM{
+		Prime:   "grove",
+		Address: common.HexToAddress("0x9b746dbc5269e1df6e4193bcb441c0fbbf1cecee"),
+	})
+
+	caller, err := NewPSM3Caller(testutil.NewMockMulticaller(), cfg)
+	if err != nil {
+		t.Fatalf("create caller: %v", err)
+	}
+	mc := caller.multicaller.(*testutil.MockMulticaller)
+	mc.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		return immutableResults(t, caller, cfg), nil
+	}
+	if err := caller.ResolveImmutables(context.Background(), big.NewInt(1)); err != nil {
+		t.Fatalf("resolve immutables: %v", err)
+	}
+	mc.CallCount = 0
+
+	shares := map[common.Address]*big.Int{
+		cfg.ALMs[0].Address: big.NewInt(60),
+		cfg.ALMs[1].Address: big.NewInt(30),
+	}
+	totalShares := big.NewInt(100)
+	totalAssets := big.NewInt(200)
+
+	mc.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+		switch mc.CallCount {
+		case 1: // round 1: fixed legs + one shares call per ALM
+			if len(calls) != idxFirstALMShares+len(cfg.ALMs) {
+				t.Fatalf("round 1: got %d calls, want %d", len(calls), idxFirstALMShares+len(cfg.ALMs))
+			}
+			results := []outbound.Result{
+				{Success: true, ReturnData: packAddressOutput(t, caller, "pocket", cfg.PSM3)},
+				{Success: true, ReturnData: packUintOutput(t, big.NewInt(1))},
+				{Success: true, ReturnData: packUintOutput(t, big.NewInt(2))},
+				{Success: true, ReturnData: packUintOutput(t, totalAssets)},
+				{Success: true, ReturnData: packUintOutput(t, big.NewInt(4))},
+				{Success: true, ReturnData: packUintOutput(t, totalShares)},
+			}
+			for i, alm := range cfg.ALMs {
+				args, err := caller.psm3ABI.Methods["shares"].Inputs.Unpack(calls[idxFirstALMShares+i].CallData[4:])
+				if err != nil {
+					t.Fatalf("unpack shares calldata %d: %v", i, err)
+				}
+				if got := args[0].(common.Address); got != alm.Address {
+					t.Errorf("shares arg %d = %s, want %s ALM %s", i, got.Hex(), alm.Prime, alm.Address.Hex())
+				}
+				results = append(results, outbound.Result{Success: true, ReturnData: packUintOutput(t, shares[alm.Address])})
+			}
+			return results, nil
+		case 2: // round 2: USDC balance + one convertToAssetValue per ALM
+			if len(calls) != 1+len(cfg.ALMs) {
+				t.Fatalf("round 2: got %d calls, want %d", len(calls), 1+len(cfg.ALMs))
+			}
+			results := []outbound.Result{{Success: true, ReturnData: packUintOutput(t, big.NewInt(5))}}
+			for i, alm := range cfg.ALMs {
+				args, err := caller.psm3ABI.Methods["convertToAssetValue"].Inputs.Unpack(calls[1+i].CallData[4:])
+				if err != nil {
+					t.Fatalf("unpack convertToAssetValue calldata %d: %v", i, err)
+				}
+				if got := args[0].(*big.Int); got.Cmp(shares[alm.Address]) != 0 {
+					t.Errorf("convertToAssetValue arg %d = %s, want %s ALM's shares %s", i, got, alm.Prime, shares[alm.Address])
+				}
+				// Mirror the contract so a mis-paired argument changes the result.
+				value := new(big.Int).Div(new(big.Int).Mul(args[0].(*big.Int), totalAssets), totalShares)
+				results = append(results, outbound.Result{Success: true, ReturnData: packUintOutput(t, value)})
+			}
+			return results, nil
+		default:
+			t.Fatalf("unexpected multicall round %d", mc.CallCount)
+			return nil, nil
+		}
+	}
+
+	state, err := caller.ReadState(context.Background(), common.HexToHash("0xbeef"))
+	if err != nil {
+		t.Fatalf("read state: %v", err)
+	}
+	if len(state.ALMPositions) != len(cfg.ALMs) {
+		t.Fatalf("got %d positions, want %d", len(state.ALMPositions), len(cfg.ALMs))
+	}
+	for i, alm := range cfg.ALMs {
+		pos := state.ALMPositions[i]
+		want := new(big.Int).Div(new(big.Int).Mul(shares[alm.Address], totalAssets), totalShares)
+		if pos.Prime != alm.Prime || pos.Address != alm.Address ||
+			pos.Shares.Cmp(shares[alm.Address]) != 0 || pos.AssetValue.Cmp(want) != 0 {
+			t.Errorf("position %d = %+v, want prime %s shares %s value %s", i, pos, alm.Prime, shares[alm.Address], want)
+		}
+	}
+}
+
 // round1Results returns a happy-path ReadState round-1 result set
-// [pocket, usds, susds, totalAssets, rate, shares(alm), totalShares].
+// [pocket, usds, susds, totalAssets, rate, totalShares, shares(alm)].
 func round1Results(t *testing.T, c *PSM3Caller, pocket common.Address) []outbound.Result {
 	t.Helper()
 	results := []outbound.Result{{Success: true, ReturnData: packAddressOutput(t, c, "pocket", pocket)}}
@@ -522,8 +625,8 @@ func TestReadState_Round1Failures(t *testing.T) {
 	}{
 		{"failed call", func(r []outbound.Result) { r[1].Success = false }, "balanceOf call failed"},
 		{"garbage return data", func(r []outbound.Result) { r[3].ReturnData = []byte{0xff} }, "unpack totalAssets"},
-		{"failed shares call", func(r []outbound.Result) { r[5].Success = false }, "shares call failed"},
-		{"garbage total shares", func(r []outbound.Result) { r[6].ReturnData = []byte{0xff} }, "unpack totalShares"},
+		{"failed shares call", func(r []outbound.Result) { r[idxFirstALMShares].Success = false }, "shares call failed"},
+		{"garbage total shares", func(r []outbound.Result) { r[idxTotalShares].ReturnData = []byte{0xff} }, "unpack totalShares"},
 	}
 
 	for _, tc := range tests {

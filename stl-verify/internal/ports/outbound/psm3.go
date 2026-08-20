@@ -22,8 +22,8 @@ type PSM3Caller interface {
 	// ReadState reads the reserve state pinned to blockHash: USDS/sUSDS
 	// balances at the PSM3, the USDC balance at the current pocket (resolved
 	// in the same sweep — it is governance-settable), totalAssets, the
-	// sUSDS conversion rate, and the share legs (the ALM proxy's shares, the
-	// total share supply, and the ALM's shares valued at par).
+	// sUSDS conversion rate, the total share supply, and one position per
+	// configured ALM proxy (its shares and their par value).
 	// Pinning by hash (not number) keeps the read on the
 	// exact block being processed so a reorg can't return another fork's
 	// reserves (see Multicaller.ExecuteAtHash / VEC-471).
