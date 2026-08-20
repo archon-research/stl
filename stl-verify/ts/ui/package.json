@@ -3,6 +3,10 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "exports": {
+    "./openapi-types": "./src/generated/openapi-types.ts",
+    "./package.json": "./package.json"
+  },
   "imports": {
     "#env": "./env.ts",
     "#src/*": "./src/*",
@@ -43,10 +47,12 @@
     "@archon-research/oxlint-config": "0.10.0-rohit-pre-release-consumer-fixes.1",
     "@archon-research/tsconfig": "0.10.0-rohit-pre-release-consumer-fixes.1",
     "@pandacss/dev": "1.12.0",
+    "@stl-verify/mocks": "*",
     "@types/node": "26.1.2",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.4",
     "@vitejs/plugin-react": "6.0.5",
+    "msw": "2.15.0",
     "openapi-typescript": "7.13.0",
     "postcss": "8.5.26",
     "vite": "8.2.1"
@@ -54,5 +60,10 @@
   "optionalDependencies": {
     "lightningcss-darwin-arm64": "1.33.0",
     "lightningcss-linux-x64-gnu": "1.33.0"
+  },
+  "msw": {
+    "workerDirectory": [
+      "public"
+    ]
   }
 }
