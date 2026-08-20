@@ -10,23 +10,16 @@ type SummaryMetricProps = {
   className?: string;
 };
 
-// `statTile`'s value slot is not a flex container and neither it nor `sub` sets
-// wrapping. Both are needed here: values carry an inline <TokenLogo> beside
-// their text, and USD amounts get long enough to overflow a 4-up grid column.
-// Upstream gap in the recipe, tracked as ORB-352.
-const valueClassName = css({
-  display: 'flex',
-  alignItems: 'center',
-  gap: '2',
-  flexWrap: 'wrap',
+// The `statTile` value slot is a wrap-friendly inline-flex row now, so `value`
+// goes in unwrapped: a logo and its figure are two items of that row and take
+// its gap, which a span of our own would collapse back to inline text.
+// `sub` is the same row, and that is what the wrapper below is for — a block
+// child of a flex row is sized by its content, so the detail's chart column
+// needs `flex` to keep filling the tile.
+const detailClassName = css({
+  flex: '1',
   minWidth: 0,
   overflowWrap: 'anywhere',
-  wordBreak: 'break-word',
-});
-
-const detailClassName = css({
-  overflowWrap: 'anywhere',
-  wordBreak: 'break-word',
 });
 
 // Thin adapter over StatTile that keeps this component's own prop names, so the
@@ -45,7 +38,7 @@ export function SummaryMetric({
       className={className}
       labelCase="upper"
       label={label}
-      value={<span className={valueClassName}>{value}</span>}
+      value={value}
       sub={
         // Falsy, not nullish: `''` and `0` must render nothing, or the tile gains
         // an empty `sub` slot and the extra grid gap that comes with it.
