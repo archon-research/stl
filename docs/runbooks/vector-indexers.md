@@ -1950,13 +1950,18 @@ arbitrage trimming the edges, it is depositors paying the penalty *en masse*
 because a vault cannot meet withdrawals from idle liquidity — a liquidity-run
 shape worth handing to risk.
 
-The rule is gated on the indexer not erroring
-(`unless … morpho_blocks_processed_total{status="error"} > 0`), because
+The rule is gated on a redelivery **loop** — errors present *and* zero successful
+blocks over the same 1h window, with the success side zero-filled from the total
+so a fresh pod that only ever errors still counts as zero — because
 `RecordEventProcessed` increments **before** dispatch. On a redelivery loop every
 log in the stuck block is re-counted, so one FIFO-blocked block holding two
 `ForceDeallocate` logs crosses 20/h on redelivery alone (12/h at the 300s
-visibility timeout) with no new on-chain activity at all. While the indexer is
-erroring this counter measures redeliveries, not protocol activity.
+visibility timeout) with no new on-chain activity at all.
+
+The gate deliberately does **not** trip on a single error: a lone transient
+429/5xx used to blind this alert for the rest of the hour (~2.3h blind per 7d).
+The price is that a stall's *first* hour can still fire this, because the success
+rate needs the full 1h window to fall to zero — so rule out a stall first.
 
 ### First checks
 
@@ -1964,9 +1969,9 @@ erroring this counter measures redeliveries, not protocol activity.
    *alongside* a stall, not instead of one — and if it is firing during an error
    loop, treat the count as unreliable and fix the stall first:
    `rate(morpho_blocks_processed_total{status="error"}[1h])` and
-   `VectorMorphoIndexerStalled`. The gate on the rule suppresses the clear-cut
-   case, but a loop that has just cleared can still leave inflated counts inside
-   the 1h window.
+   `VectorMorphoIndexerStalled`. The gate suppresses a chain that is erroring and
+   committing nothing, but a loop's first hour — and the tail of one that has just
+   cleared — can still leave inflated counts inside the 1h window.
 2. **Which vault and adapter** (`db-query`) — the events are audit-logged with
    their raw payload:
 
@@ -2017,9 +2022,10 @@ erroring this counter measures redeliveries, not protocol activity.
 - A poison pill in the morpho FIFO queue → `RecordEventProcessed` fires before
   dispatch, so every redelivery re-counts every log in the stuck block. Two
   `ForceDeallocate` logs in one blocked block reach 20/h on redelivery alone. The
-  rule's `unless … status="error"` gate suppresses this, but a loop that has just
-  cleared can still leave inflated counts inside the 1h window. Not a liquidity
-  event — fix the stall.
+  rule's errors-and-no-successes gate suppresses this once the chain has committed
+  nothing for a full hour, but the loop's first hour and the tail of one that has
+  just cleared can still leave inflated counts inside the 1h window. Not a
+  liquidity event — fix the stall.
 - A large withdrawal against a vault whose liquidity is fully allocated into
   adapters → the exit path is working as designed; inform risk, no code action.
 - An underlying Blue market at ~100% utilisation, so normal deallocation cannot

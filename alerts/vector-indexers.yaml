@@ -620,16 +620,35 @@ groups:
         # is a registered VaultV2 topic and has been counted there since the V2
         # topics were registered, so no new instrument is needed.
         #
-        # GATED on the indexer not erroring, and that gate is load-bearing rather
-        # than cosmetic. RecordEventProcessed increments BEFORE dispatch, so a
+        # GATED on a redelivery LOOP, and that gate is load-bearing rather than
+        # cosmetic. RecordEventProcessed increments BEFORE dispatch, so a
         # redelivery re-counts every log in the stuck block, not just the failing
-        # one: the morpho queue is FIFO, so a single block holding >=2
-        # ForceDeallocate logs crosses 20/h on redelivery alone (12 redeliveries an
-        # hour at the 300s visibility timeout) with zero new on-chain activity —
-        # and the runbook would send risk chasing a liquidity run that never
-        # happened. During an error loop this counter is not a measure of protocol
-        # activity at all, so the signal is suppressed and the stall/error rules
-        # own that condition instead.
+        # one: the morpho queue is FIFO with MessageGroupId=chainId, so a single
+        # block holding >=2 ForceDeallocate logs crosses 20/h on redelivery alone
+        # (12 redeliveries an hour at the 300s visibility timeout) with zero new
+        # on-chain activity — and the runbook would send risk chasing a liquidity
+        # run that never happened.
+        #
+        # The gate is "erroring AND committing nothing", not "any error in the
+        # trailing hour". Morpho errors are not all stalls, and a single transient
+        # 429/5xx used to suppress this for the whole following hour — ~2.3h blind
+        # per 7d measured on prod mainnet. Only a chain making NO forward progress
+        # turns this counter into a redelivery measure; one still committing blocks
+        # is still measuring protocol activity.
+        #
+        # The success side is zero-filled from the total (`or … * 0`, the shape
+        # VectorMorphoIndexerStalled uses): a fresh pod that comes up straight into
+        # the poison pill emits only status="error" samples, so the success series
+        # never exists and a bare `== 0` matches nothing — leaving the alert
+        # UN-suppressed in exactly the case the gate exists for.
+        #
+        # Residual, accepted: the success rate is windowed over the same 1h, so it
+        # only reaches zero about an hour after a stall begins, while redelivery
+        # inflation needs roughly that same hour to reach 20. A stall's first hour
+        # can therefore still fire this, as can the tail of one that just cleared.
+        # VectorMorphoIndexerStalled (critical, 15m) pages long before either and
+        # the runbook's first check is to rule out a loop, which is a better trade
+        # than going blind on a real liquidity run every time one block errors.
         expr: |
           sum by (chain, cluster) (
             increase(morpho_events_processed_total{
@@ -637,9 +656,21 @@ groups:
             }[1h])
           ) > 20
           unless on (chain, cluster)
-          sum by (chain, cluster) (
-            rate(morpho_blocks_processed_total{status="error", k8s_namespace_name="vector"}[1h])
-          ) > 0
+          (
+            sum by (chain, cluster) (
+              rate(morpho_blocks_processed_total{status="error", k8s_namespace_name="vector"}[1h])
+            ) > 0
+            and on (chain, cluster)
+            (
+              sum by (chain, cluster) (
+                rate(morpho_blocks_processed_total{status="success", k8s_namespace_name="vector"}[1h])
+              )
+              or
+              sum by (chain, cluster) (
+                rate(morpho_blocks_processed_total{k8s_namespace_name="vector"}[1h])
+              ) * 0
+            ) == 0
+          )
         for: 0m
         labels:
           team: vector
