@@ -460,7 +460,7 @@ func TestNonRetryableIfStructural_LeavesTransientFailuresRetryable(t *testing.T)
 
 // Both activities heartbeat, so both must declare a timeout: without one
 // Temporal notices a worker killed mid-activity only at StartToClose — 30
-// minutes for a partition, 12 hours for discovery.
+// minutes for a partition, 30 hours for discovery.
 func TestActivityOptions_DeclareAHeartbeatTimeoutWithGraceOverTheTicker(t *testing.T) {
 	tests := []struct {
 		name string
@@ -480,6 +480,25 @@ func TestActivityOptions_DeclareAHeartbeatTimeoutWithGraceOverTheTicker(t *testi
 					tc.opts.HeartbeatTimeout, tc.opts.StartToCloseTimeout)
 			}
 		})
+	}
+}
+
+// The partition ceiling and the discovery timeouts have to agree: the widest
+// range resolve ACCEPTS must be one a single attempt can finish. It cannot resume
+// — the scan keeps no progress state — so an attempt killed at StartToClose is
+// redone from block one, and a ceiling wider than the timeout covers turns every
+// such range into an envelope that expires having persisted nothing.
+func TestDiscoverActivityOptions_TimeoutsCoverTheWidestAcceptedRange(t *testing.T) {
+	opts := discoverActivityOptions()
+	widestScan := time.Duration(maxPartitionsPerRun) * discoveryScanPerPartition
+
+	if opts.StartToCloseTimeout < widestScan {
+		t.Errorf("StartToCloseTimeout = %s, want at least %s (%d partitions x %s)",
+			opts.StartToCloseTimeout, widestScan, maxPartitionsPerRun, discoveryScanPerPartition)
+	}
+	if opts.ScheduleToCloseTimeout <= opts.StartToCloseTimeout {
+		t.Errorf("ScheduleToCloseTimeout = %s, want more than the %s a single attempt may take",
+			opts.ScheduleToCloseTimeout, opts.StartToCloseTimeout)
 	}
 }
 
