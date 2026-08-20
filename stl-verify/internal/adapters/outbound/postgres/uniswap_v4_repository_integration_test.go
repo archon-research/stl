@@ -40,6 +40,10 @@ const (
 	uniswapV4RepoUnsupportedChainID = 490013
 	uniswapV4RepoPriorStateChainID  = 490014
 	uniswapV4RepoSupersededChainID  = 490015
+	uniswapV4RepoEverIndexedChainID = 490016
+	uniswapV4RepoEverIndexedFwdChID = 490017
+	uniswapV4RepoEverIndexedNbrChID = 490018
+	uniswapV4RepoEverIndexedFgnChID = 490019
 )
 
 // testUniswapV4BuildID / testUniswapV4RebuildID are two distinct build ids so a
@@ -1038,6 +1042,56 @@ func TestUniswapV4Repository_WriteTicks_ReorgReobservationAppends(t *testing.T) 
 	}
 }
 
+// TestUniswapV4Repository_WriteTicks_SameBlockRedeliveryDoesNotAppend pins the
+// case the block_version gate must still skip: an at-least-once redelivery of
+// the same block at the same version.
+func TestUniswapV4Repository_WriteTicks_SameBlockRedeliveryDoesNotAppend(t *testing.T) {
+	ctx := context.Background()
+	f := newUniswapV4TickFixture(t, ctx, 0x17)
+
+	f.save(newUniswapV4TestTick(f.poolID, 60, 5000, 0, big.NewInt(100)))
+	f.save(newUniswapV4TestTick(f.poolID, 60, 5000, 0, big.NewInt(100)))
+
+	if got := f.rowCount(60); got != 1 {
+		t.Fatalf("row count = %d, want 1 (a redelivery of one block at one version must not append)", got)
+	}
+}
+
+// TestUniswapV4Repository_WriteTicks_LaterIdenticalTouchAfterReorgDoesNotAppend
+// pins that block_version is only comparable within one height: once a reorg
+// has written (N, v1), the next touch at N+k carries v0, and treating that as a
+// re-observation appends a row claiming a change the chain never made.
+func TestUniswapV4Repository_WriteTicks_LaterIdenticalTouchAfterReorgDoesNotAppend(t *testing.T) {
+	ctx := context.Background()
+	f := newUniswapV4TickFixture(t, ctx, 0x18)
+
+	f.save(newUniswapV4TestTick(f.poolID, 60, 5000, 0, big.NewInt(100)))
+	f.save(newUniswapV4TestTick(f.poolID, 60, 5000, 1, big.NewInt(100)))
+	f.save(newUniswapV4TestTick(f.poolID, 60, 5001, 0, big.NewInt(100)))
+
+	if got := f.rowCount(60); got != 2 {
+		t.Fatalf("row count = %d, want 2 (a later unchanged touch must not append because a prior height was reorged)", got)
+	}
+}
+
+// TestUniswapV4Repository_WriteTicks_BackfilledGapBlockAppendsBelowNewerRow
+// pins the height bound: the gap backfiller republishes a missed block at
+// block_version 0, under a row a later touch already wrote, and the
+// append-on-change decision has to be made against the tick's state at that
+// height or the missed block leaves a permanent hole.
+func TestUniswapV4Repository_WriteTicks_BackfilledGapBlockAppendsBelowNewerRow(t *testing.T) {
+	ctx := context.Background()
+	f := newUniswapV4TickFixture(t, ctx, 0x19)
+
+	f.save(newUniswapV4TestTick(f.poolID, 60, 5000, 0, big.NewInt(100)))
+	f.save(newUniswapV4TestTick(f.poolID, 60, 5002, 0, big.NewInt(200)))
+	f.save(newUniswapV4TestTick(f.poolID, 60, 5001, 0, big.NewInt(200)))
+
+	if got := f.rowCount(60); got != 3 {
+		t.Fatalf("row count = %d, want 3 (the backfilled block's own change must be recorded, not swallowed by the newer row)", got)
+	}
+}
+
 // TestUniswapV4Repository_WriteTicks_MixedBatchSkipsOnlyUnchanged pins that the
 // append-on-change decision is per tick, not per batch: one SaveBlock carrying
 // an unchanged, a changed and a brand-new tick must insert exactly two rows.
@@ -1677,4 +1731,107 @@ func newUniswapV4TestTickWithValues(poolID int64, tick int, blockNumber int64, b
 // require the offending registry row to be identified.
 func containsPoolID(msg string, poolID int64) bool {
 	return strings.Contains(msg, strconv.FormatInt(poolID, 10))
+}
+
+// seedUniswapV4EverIndexedPool builds a registry pool on chainID (with that
+// chain's PoolManager) for the ever-snapshotted reads, which are chain-scoped
+// and unbounded in block range and so need a chain of their own per scenario.
+func seedUniswapV4EverIndexedPool(t *testing.T, ctx context.Context, chainID int, discriminator byte) int64 {
+	t.Helper()
+	seedUniswapV4RepoPoolManager(t, ctx, newUniswapV4RepoManagerFixture(chainID))
+	return seedUniswapV4RepoPool(t, ctx, newUniswapV4RepoPoolFixture(t, ctx, chainID, discriminator))
+}
+
+// Both tables count, and neither alone is enough: a pool with no initialized
+// ticks writes a state row and no tick rows, while the baseline enumeration of
+// a pool can write tick rows the state snapshot's own row does not distinguish.
+func TestUniswapV4Repository_PoolIDsEverSnapshotted_ReturnsPoolsWithStateOrTickRows(t *testing.T) {
+	ctx := context.Background()
+	const chainID = uniswapV4RepoEverIndexedChainID
+	statePool := seedUniswapV4EverIndexedPool(t, ctx, chainID, 0x17)
+	tickPool := seedUniswapV4EverIndexedPool(t, ctx, chainID, 0x18)
+	untouchedPool := seedUniswapV4EverIndexedPool(t, ctx, chainID, 0x19)
+
+	const block = int64(7140000)
+	repo := newUniswapV4Repo(t)
+	withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
+		if _, err := repo.SaveBlock(ctx, tx, outbound.UniswapV4BlockWrites{
+			States: []*entity.UniswapV4PoolState{newUniswapV4TestState(statePool, block, 0, 11)},
+			Ticks:  []*entity.UniswapV4Tick{newUniswapV4TestTick(tickPool, 60, block, 0, big.NewInt(1))},
+		}); err != nil {
+			t.Fatalf("SaveBlock: %v", err)
+		}
+	})
+
+	got, err := repo.PoolIDsEverSnapshotted(ctx, chainID)
+	if err != nil {
+		t.Fatalf("PoolIDsEverSnapshotted: %v", err)
+	}
+	want := []int64{statePool, tickPool}
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Errorf("pool ids = %v, want %v (pool %d has produced no row at all)", got, want, untouchedPool)
+	}
+}
+
+// A registry correction mints a new surrogate id while the fact rows keep the
+// old one; the caller only knows current ids, so a pool that WAS indexed under a
+// superseded version must not read back as never indexed.
+func TestUniswapV4Repository_PoolIDsEverSnapshotted_ResolvesSupersededPoolForward(t *testing.T) {
+	ctx := context.Background()
+	const chainID = uniswapV4RepoEverIndexedFwdChID
+	seedUniswapV4RepoPoolManager(t, ctx, newUniswapV4RepoManagerFixture(chainID))
+
+	fixture := newUniswapV4RepoPoolFixture(t, ctx, chainID, 0x1a)
+	supersededID := seedUniswapV4RepoPool(t, ctx, fixture)
+
+	repo := newUniswapV4Repo(t)
+	withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
+		if _, err := repo.SaveBlock(ctx, tx, outbound.UniswapV4BlockWrites{
+			States: []*entity.UniswapV4PoolState{newUniswapV4TestState(supersededID, 7150000, 0, 11)},
+		}); err != nil {
+			t.Fatalf("SaveBlock: %v", err)
+		}
+	})
+
+	fixture.buildID = 1
+	fixture.deployBlock = 2
+	currentID := seedUniswapV4RepoPool(t, ctx, fixture)
+	if currentID == supersededID {
+		t.Fatalf("the corrected pool reused id %d; the fixture did not append a new version", currentID)
+	}
+
+	got, err := repo.PoolIDsEverSnapshotted(ctx, chainID)
+	if err != nil {
+		t.Fatalf("PoolIDsEverSnapshotted: %v", err)
+	}
+	if !slices.Equal(got, []int64{currentID}) {
+		t.Errorf("pool ids = %v, want %v (the superseded %d must resolve forward)", got, []int64{currentID}, supersededID)
+	}
+}
+
+// The fact tables carry no chain_id, so the scope comes from the registry join;
+// a neighbouring chain's indexed pool would otherwise mask this chain's own
+// never-indexed one.
+func TestUniswapV4Repository_PoolIDsEverSnapshotted_ExcludesOtherChains(t *testing.T) {
+	ctx := context.Background()
+	homePool := seedUniswapV4EverIndexedPool(t, ctx, uniswapV4RepoEverIndexedNbrChID, 0x1b)
+	neighbourPool := seedUniswapV4EverIndexedPool(t, ctx, uniswapV4RepoEverIndexedFgnChID, 0x1c)
+
+	repo := newUniswapV4Repo(t)
+	withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
+		if _, err := repo.SaveBlock(ctx, tx, outbound.UniswapV4BlockWrites{
+			States: []*entity.UniswapV4PoolState{newUniswapV4TestState(neighbourPool, 7160000, 0, 11)},
+		}); err != nil {
+			t.Fatalf("SaveBlock: %v", err)
+		}
+	})
+
+	got, err := repo.PoolIDsEverSnapshotted(ctx, uniswapV4RepoEverIndexedNbrChID)
+	if err != nil {
+		t.Fatalf("PoolIDsEverSnapshotted: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("pool ids = %v, want none: pool %d has no rows and %d belongs to another chain", got, homePool, neighbourPool)
+	}
 }

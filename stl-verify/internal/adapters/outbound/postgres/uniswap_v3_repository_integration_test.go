@@ -5,6 +5,7 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"testing"
 	"time"
@@ -676,6 +677,115 @@ func newUniswapV3TestTick(poolID int64, tick int, blockNumber int64, blockVersio
 	}
 }
 
+// uniswapV3TickFixture owns one test's pool plus the tick save/read helpers, so
+// every append-on-change test starts from rows nothing else can have touched.
+type uniswapV3TickFixture struct {
+	t      *testing.T
+	ctx    context.Context
+	repo   *UniswapV3Repository
+	poolID int64
+}
+
+func newUniswapV3TickFixture(t *testing.T, ctx context.Context, discriminator byte) uniswapV3TickFixture {
+	t.Helper()
+	token0ID, token1ID := seedUniswapV3TokenPair(t, ctx,
+		common.Address{0x10, discriminator}, common.Address{0x20, discriminator},
+		18, 18,
+		fmt.Sprintf("TK0%02x", discriminator), fmt.Sprintf("TK1%02x", discriminator))
+	return uniswapV3TickFixture{
+		t:    t,
+		ctx:  ctx,
+		repo: newUniswapV3Repo(t),
+		poolID: seedUniswapV3Pool(t, ctx, common.Address{0x30, discriminator},
+			token0ID, token1ID, 3000, 60, ptrInt64(100)),
+	}
+}
+
+func (f uniswapV3TickFixture) save(ticks ...*entity.UniswapV3Tick) {
+	f.t.Helper()
+	withUniswapV3Tx(f.t, f.ctx, func(tx pgx.Tx) {
+		if _, err := f.repo.SaveBlock(f.ctx, tx, outbound.UniswapV3BlockWrites{Ticks: ticks}); err != nil {
+			f.t.Fatalf("SaveBlock: %v", err)
+		}
+	})
+}
+
+func (f uniswapV3TickFixture) rowCount(tick int) int {
+	f.t.Helper()
+	var count int
+	if err := uniswapV3TestPool.QueryRow(f.ctx,
+		`SELECT count(*) FROM uniswap_v3_tick WHERE pool_id=$1 AND tick=$2`, f.poolID, tick,
+	).Scan(&count); err != nil {
+		f.t.Fatalf("count ticks at %d: %v", tick, err)
+	}
+	return count
+}
+
+// latestValue reads one value column off the canonical-latest row at tick, the
+// row a consumer asking "what is this tick now" would get.
+func (f uniswapV3TickFixture) latestValue(tick int, column string) string {
+	f.t.Helper()
+	var value string
+	if err := uniswapV3TestPool.QueryRow(f.ctx, fmt.Sprintf(
+		`SELECT %s::text FROM uniswap_v3_tick WHERE pool_id=$1 AND tick=$2
+		 ORDER BY block_number DESC, block_version DESC, processing_version DESC LIMIT 1`, column),
+		f.poolID, tick,
+	).Scan(&value); err != nil {
+		f.t.Fatalf("query latest %s at tick %d: %v", column, tick, err)
+	}
+	return value
+}
+
+// TestUniswapV3Repository_WriteTicks_SameBlockRedeliveryDoesNotAppend pins the
+// case the block_version gate must still skip: an at-least-once redelivery of
+// the same block at the same version.
+func TestUniswapV3Repository_WriteTicks_SameBlockRedeliveryDoesNotAppend(t *testing.T) {
+	ctx := context.Background()
+	f := newUniswapV3TickFixture(t, ctx, 0x41)
+
+	f.save(newUniswapV3TestTick(f.poolID, 60, 5000, 0, big.NewInt(100)))
+	f.save(newUniswapV3TestTick(f.poolID, 60, 5000, 0, big.NewInt(100)))
+
+	if got := f.rowCount(60); got != 1 {
+		t.Fatalf("row count = %d, want 1 (a redelivery of one block at one version must not append)", got)
+	}
+}
+
+// TestUniswapV3Repository_WriteTicks_LaterIdenticalTouchAfterReorgDoesNotAppend
+// pins that block_version is only comparable within one height: once a reorg
+// has written (N, v1), the next touch at N+k carries v0, and treating that as a
+// re-observation appends a row claiming a change the chain never made.
+func TestUniswapV3Repository_WriteTicks_LaterIdenticalTouchAfterReorgDoesNotAppend(t *testing.T) {
+	ctx := context.Background()
+	f := newUniswapV3TickFixture(t, ctx, 0x42)
+
+	f.save(newUniswapV3TestTick(f.poolID, 60, 5000, 0, big.NewInt(100)))
+	f.save(newUniswapV3TestTick(f.poolID, 60, 5000, 1, big.NewInt(100)))
+	f.save(newUniswapV3TestTick(f.poolID, 60, 5001, 0, big.NewInt(100)))
+
+	if got := f.rowCount(60); got != 2 {
+		t.Fatalf("row count = %d, want 2 (a later unchanged touch must not append because a prior height was reorged)", got)
+	}
+}
+
+// TestUniswapV3Repository_WriteTicks_BackfilledGapBlockAppendsBelowNewerRow
+// pins the height bound: the gap backfiller republishes a missed block at
+// block_version 0, under a row a later touch already wrote, and the
+// append-on-change decision has to be made against the tick's state at that
+// height or the missed block leaves a permanent hole.
+func TestUniswapV3Repository_WriteTicks_BackfilledGapBlockAppendsBelowNewerRow(t *testing.T) {
+	ctx := context.Background()
+	f := newUniswapV3TickFixture(t, ctx, 0x43)
+
+	f.save(newUniswapV3TestTick(f.poolID, 60, 5000, 0, big.NewInt(100)))
+	f.save(newUniswapV3TestTick(f.poolID, 60, 5002, 0, big.NewInt(200)))
+	f.save(newUniswapV3TestTick(f.poolID, 60, 5001, 0, big.NewInt(200)))
+
+	if got := f.rowCount(60); got != 3 {
+		t.Fatalf("row count = %d, want 3 (the backfilled block's own change must be recorded, not swallowed by the newer row)", got)
+	}
+}
+
 // TestUniswapV3Repository_SaveBlock_Tick_AppendOnChange exercises the four
 // append-on-change scenarios the tick table must satisfy: identical values
 // insert once, a changed field inserts a new row, replaying an already-seen
@@ -768,13 +878,7 @@ func TestUniswapV3Repository_SaveBlock_Tick_AppendOnChange(t *testing.T) {
 // despite being batched alongside inserting siblings).
 func TestUniswapV3Repository_SaveBlock_Ticks_BatchAppendOnChange(t *testing.T) {
 	ctx := context.Background()
-	truncateUniswapV3FactTables(t, ctx)
-
-	token0ID, token1ID := seedUniswapV3TokenPair(t, ctx,
-		common.HexToAddress("0x1717171717171717171717171717171717171a"),
-		common.HexToAddress("0x1717171717171717171717171717171717171b"),
-		18, 18, "BTOKA", "BTOKB")
-	poolID := seedUniswapV3Pool(t, ctx, common.HexToAddress("0x1818181818181818181818181818181818181a"), token0ID, token1ID, 3000, 60, ptrInt64(100))
+	f := newUniswapV3TickFixture(t, ctx, 0x45)
 
 	const (
 		tickUnchangedPos = 10 // seeded, re-written identical -> stays 1 row
@@ -782,75 +886,34 @@ func TestUniswapV3Repository_SaveBlock_Ticks_BatchAppendOnChange(t *testing.T) {
 		tickNewPos       = 30 // not seeded, first appears in batch -> 1 row
 	)
 
-	repo := newUniswapV3Repo(t)
-	saveBatch := func(ticks []*entity.UniswapV3Tick) {
-		withUniswapV3Tx(t, ctx, func(tx pgx.Tx) {
-			if _, err := repo.SaveBlock(ctx, tx, outbound.UniswapV3BlockWrites{Ticks: ticks}); err != nil {
-				t.Fatalf("SaveBlock: %v", err)
-			}
-		})
-	}
-	countTicks := func(tick int) int {
-		var count int
-		if err := uniswapV3TestPool.QueryRow(ctx,
-			`SELECT count(*) FROM uniswap_v3_tick WHERE pool_id=$1 AND tick=$2`,
-			poolID, tick,
-		).Scan(&count); err != nil {
-			t.Fatalf("count ticks: %v", err)
-		}
-		return count
-	}
+	f.save(
+		newUniswapV3TestTick(f.poolID, tickUnchangedPos, 3000, 0, big.NewInt(100)),
+		newUniswapV3TestTick(f.poolID, tickChangedPos, 3000, 0, big.NewInt(200)),
+	)
 
-	// Prior block: seed the two ticks that will be re-observed later.
-	saveBatch([]*entity.UniswapV3Tick{
-		newUniswapV3TestTick(poolID, tickUnchangedPos, 3000, 0, big.NewInt(100)),
-		newUniswapV3TestTick(poolID, tickChangedPos, 3000, 0, big.NewInt(200)),
-	})
+	// All three re-written in ONE batch at a strictly later block, same version.
+	f.save(
+		newUniswapV3TestTick(f.poolID, tickUnchangedPos, 3001, 0, big.NewInt(100)),
+		newUniswapV3TestTick(f.poolID, tickChangedPos, 3001, 0, big.NewInt(999)),
+		newUniswapV3TestTick(f.poolID, tickNewPos, 3001, 0, big.NewInt(300)),
+	)
 
-	// Later block: all three re-written in ONE batch. The unchanged tick keeps
-	// its exact prior values; the changed tick bumps liquidity_net; the new tick
-	// has never been seen. All at a strictly later block_number, same version.
-	saveBatch([]*entity.UniswapV3Tick{
-		newUniswapV3TestTick(poolID, tickUnchangedPos, 3001, 0, big.NewInt(100)),
-		newUniswapV3TestTick(poolID, tickChangedPos, 3001, 0, big.NewInt(999)),
-		newUniswapV3TestTick(poolID, tickNewPos, 3001, 0, big.NewInt(300)),
-	})
-
-	if got := countTicks(tickUnchangedPos); got != 1 {
+	if got := f.rowCount(tickUnchangedPos); got != 1 {
 		t.Errorf("unchanged tick row count = %d, want 1 (no new row despite batched-in siblings inserting)", got)
 	}
-	if got := countTicks(tickChangedPos); got != 2 {
+	if got := f.rowCount(tickChangedPos); got != 2 {
 		t.Errorf("changed tick row count = %d, want 2 (changed field must append a new row)", got)
 	}
-	if got := countTicks(tickNewPos); got != 1 {
+	if got := f.rowCount(tickNewPos); got != 1 {
 		t.Errorf("new tick row count = %d, want 1 (first observation must insert)", got)
 	}
-
-	// The changed tick's latest row must reflect the new value, not the seed.
-	var latestChangedNet string
-	if err := uniswapV3TestPool.QueryRow(ctx,
-		`SELECT liquidity_net::text FROM uniswap_v3_tick
-		 WHERE pool_id=$1 AND tick=$2
-		 ORDER BY block_number DESC, block_version DESC, processing_version DESC LIMIT 1`,
-		poolID, tickChangedPos,
-	).Scan(&latestChangedNet); err != nil {
-		t.Fatalf("querying latest changed tick: %v", err)
+	if got := f.latestValue(tickChangedPos, "liquidity_net"); got != "999" {
+		t.Errorf("latest changed liquidity_net = %q, want 999", got)
 	}
-	if latestChangedNet != "999" {
-		t.Errorf("latest changed liquidity_net = %q, want 999", latestChangedNet)
-	}
-
-	// The unchanged tick's single row must still carry its original block_number
-	// (3000), proving the batch skipped it rather than re-inserting at 3001.
-	var unchangedBlock int64
-	if err := uniswapV3TestPool.QueryRow(ctx,
-		`SELECT block_number FROM uniswap_v3_tick WHERE pool_id=$1 AND tick=$2`,
-		poolID, tickUnchangedPos,
-	).Scan(&unchangedBlock); err != nil {
-		t.Fatalf("querying unchanged tick block: %v", err)
-	}
-	if unchangedBlock != 3000 {
-		t.Errorf("unchanged tick block_number = %d, want 3000 (row must be the untouched seed, not a 3001 re-insert)", unchangedBlock)
+	// The unchanged tick's single row must still carry its original block_number,
+	// proving the batch skipped it rather than re-inserting at 3001.
+	if got := f.latestValue(tickUnchangedPos, "block_number"); got != "3000" {
+		t.Errorf("unchanged tick block_number = %q, want 3000 (row must be the untouched seed, not a 3001 re-insert)", got)
 	}
 }
 
@@ -861,43 +924,21 @@ func TestUniswapV3Repository_SaveBlock_Ticks_BatchAppendOnChange(t *testing.T) {
 // inserts" rule for all keys, not collapse them as unchanged.
 func TestUniswapV3Repository_SaveBlock_Ticks_BatchReorgAllInsert(t *testing.T) {
 	ctx := context.Background()
-	truncateUniswapV3FactTables(t, ctx)
+	f := newUniswapV3TickFixture(t, ctx, 0x46)
 
-	token0ID, token1ID := seedUniswapV3TokenPair(t, ctx,
-		common.HexToAddress("0x1919191919191919191919191919191919191a"),
-		common.HexToAddress("0x1919191919191919191919191919191919191b"),
-		18, 18, "RTOKA", "RTOKB")
-	poolID := seedUniswapV3Pool(t, ctx, common.HexToAddress("0x1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a"), token0ID, token1ID, 3000, 60, ptrInt64(100))
-
-	ticksAtVersion := func(blockNumber int64, version int) []*entity.UniswapV3Tick {
-		return []*entity.UniswapV3Tick{
-			newUniswapV3TestTick(poolID, 40, blockNumber, version, big.NewInt(100)),
-			newUniswapV3TestTick(poolID, 50, blockNumber, version, big.NewInt(200)),
-		}
+	saveAtVersion := func(version int) {
+		f.save(
+			newUniswapV3TestTick(f.poolID, 40, 4000, version, big.NewInt(100)),
+			newUniswapV3TestTick(f.poolID, 50, 4000, version, big.NewInt(200)),
+		)
 	}
 
-	repo := newUniswapV3Repo(t)
-	saveBatch := func(ticks []*entity.UniswapV3Tick) {
-		withUniswapV3Tx(t, ctx, func(tx pgx.Tx) {
-			if _, err := repo.SaveBlock(ctx, tx, outbound.UniswapV3BlockWrites{Ticks: ticks}); err != nil {
-				t.Fatalf("SaveBlock: %v", err)
-			}
-		})
-	}
-
-	saveBatch(ticksAtVersion(4000, 0))
-	saveBatch(ticksAtVersion(4000, 1)) // same values, bumped version -> must insert
+	saveAtVersion(0)
+	saveAtVersion(1) // same values, bumped version -> must insert
 
 	for _, tick := range []int{40, 50} {
-		var count int
-		if err := uniswapV3TestPool.QueryRow(ctx,
-			`SELECT count(*) FROM uniswap_v3_tick WHERE pool_id=$1 AND tick=$2`,
-			poolID, tick,
-		).Scan(&count); err != nil {
-			t.Fatalf("count tick %d: %v", tick, err)
-		}
-		if count != 2 {
-			t.Errorf("tick %d row count = %d, want 2 (reorg re-observation must insert even with identical values)", tick, count)
+		if got := f.rowCount(tick); got != 2 {
+			t.Errorf("tick %d row count = %d, want 2 (reorg re-observation must insert even with identical values)", tick, got)
 		}
 	}
 }
@@ -907,36 +948,16 @@ func TestUniswapV3Repository_SaveBlock_Ticks_BatchReorgAllInsert(t *testing.T) {
 // left-to-right removes liquidity) round-trips with its sign intact.
 func TestUniswapV3Repository_SaveBlock_Tick_SignedLiquidityNet(t *testing.T) {
 	ctx := context.Background()
-	truncateUniswapV3FactTables(t, ctx)
-
-	token0ID, token1ID := seedUniswapV3TokenPair(t, ctx,
-		common.HexToAddress("0x1313131313131313131313131313131313131a"),
-		common.HexToAddress("0x1313131313131313131313131313131313131b"),
-		18, 18, "NTOKA", "NTOKB")
-	poolID := seedUniswapV3Pool(t, ctx, common.HexToAddress("0x1414141414141414141414141414141414141a"), token0ID, token1ID, 3000, 60, ptrInt64(100))
+	f := newUniswapV3TickFixture(t, ctx, 0x47)
 
 	negNet, ok := new(big.Int).SetString("-123456789012345678", 10)
 	if !ok {
 		t.Fatal("parsing negNet")
 	}
-	tk := newUniswapV3TestTick(poolID, -777, 2000, 0, negNet)
+	f.save(newUniswapV3TestTick(f.poolID, -777, 2000, 0, negNet))
 
-	repo := newUniswapV3Repo(t)
-	withUniswapV3Tx(t, ctx, func(tx pgx.Tx) {
-		if _, err := repo.SaveBlock(ctx, tx, outbound.UniswapV3BlockWrites{Ticks: []*entity.UniswapV3Tick{tk}}); err != nil {
-			t.Fatalf("SaveBlock: %v", err)
-		}
-	})
-
-	var gotNet string
-	if err := uniswapV3TestPool.QueryRow(ctx,
-		`SELECT liquidity_net::text FROM uniswap_v3_tick WHERE pool_id=$1 AND tick=-777`,
-		poolID,
-	).Scan(&gotNet); err != nil {
-		t.Fatalf("read back liquidity_net: %v", err)
-	}
-	if gotNet != "-123456789012345678" {
-		t.Errorf("liquidity_net = %q, want -123456789012345678 (sign must survive NUMERIC round-trip)", gotNet)
+	if got := f.latestValue(-777, "liquidity_net"); got != negNet.String() {
+		t.Errorf("liquidity_net = %q, want %s (sign must survive NUMERIC round-trip)", got, negNet)
 	}
 }
 
@@ -1020,39 +1041,20 @@ func TestUniswapV3Repository_SaveBlock_State_BlockVersionStamping(t *testing.T) 
 // tick and excluding ticks written only at other blocks.
 func TestUniswapV3Repository_TicksForPoolAtBlock(t *testing.T) {
 	ctx := context.Background()
-	truncateUniswapV3FactTables(t, ctx)
-
-	token0ID, token1ID := seedUniswapV3TokenPair(t, ctx,
-		common.HexToAddress("0x2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a"),
-		common.HexToAddress("0x2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b"),
-		18, 18, "FTOKA", "FTOKB")
-	poolID := seedUniswapV3Pool(t, ctx, common.HexToAddress("0x2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c"), token0ID, token1ID, 3000, 60, ptrInt64(100))
-
-	repo := newUniswapV3Repo(t)
-	saveTicks := func(ticks []*entity.UniswapV3Tick) {
-		withUniswapV3Tx(t, ctx, func(tx pgx.Tx) {
-			if _, err := repo.SaveBlock(ctx, tx, outbound.UniswapV3BlockWrites{Ticks: ticks}); err != nil {
-				t.Fatalf("SaveBlock: %v", err)
-			}
-		})
-	}
+	f := newUniswapV3TickFixture(t, ctx, 0x48)
 
 	const targetBlock = int64(5000)
 	// Two ticks at the target block, plus a second version of one of them (a
 	// changed value at the same block) to prove DISTINCT dedups it.
-	saveTicks([]*entity.UniswapV3Tick{
-		newUniswapV3TestTick(poolID, -60, targetBlock, 0, big.NewInt(100)),
-		newUniswapV3TestTick(poolID, 120, targetBlock, 0, big.NewInt(200)),
-	})
-	saveTicks([]*entity.UniswapV3Tick{
-		newUniswapV3TestTick(poolID, -60, targetBlock, 1, big.NewInt(999)),
-	})
+	f.save(
+		newUniswapV3TestTick(f.poolID, -60, targetBlock, 0, big.NewInt(100)),
+		newUniswapV3TestTick(f.poolID, 120, targetBlock, 0, big.NewInt(200)),
+	)
+	f.save(newUniswapV3TestTick(f.poolID, -60, targetBlock, 1, big.NewInt(999)))
 	// A tick at a different block must not appear.
-	saveTicks([]*entity.UniswapV3Tick{
-		newUniswapV3TestTick(poolID, 300, targetBlock+1, 0, big.NewInt(300)),
-	})
+	f.save(newUniswapV3TestTick(f.poolID, 300, targetBlock+1, 0, big.NewInt(300)))
 
-	got, err := repo.TicksForPoolAtBlock(ctx, poolID, targetBlock)
+	got, err := f.repo.TicksForPoolAtBlock(ctx, f.poolID, targetBlock)
 	if err != nil {
 		t.Fatalf("TicksForPoolAtBlock: %v", err)
 	}
