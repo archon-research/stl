@@ -175,6 +175,10 @@ func (uniswapV4Factory) BuildHandler(ctx context.Context, deps *dexbootstrap.Dep
 	if err != nil {
 		return nil, fmt.Errorf("creating uniswap v4 service: %w", err)
 	}
-	deps.Logger.Info("uniswap-v4-indexer started", "pools", len(poolRows))
+	// snapshotPools is logged separately so a registry that quietly excludes a
+	// pool from state/tick snapshots is visible at boot, not only as missing rows.
+	deps.Logger.Info("uniswap-v4-indexer started",
+		"pools", len(poolRows),
+		"snapshotPools", len(uniswapv4indexer.SnapshottablePools(pools)))
 	return service.BlockHandler(), nil
 }

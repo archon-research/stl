@@ -39,19 +39,19 @@
 --           liquidity / liquidity_gross / liquidity_net are raw on-chain L
 --           (sqrt(xy) scaled by the pool's currency decimals; not comparable
 --           across pools with different decimals). amount0/amount1 are the
---           pool's swap BalanceDelta as emitted, raw native-decimal integers
---           (negative = owed to the PoolManager, positive = owed to the
---           swapper) -- the INVERSE of uniswap_v3_swap, which signs from the
---           pool's side. They are emitted before afterSwap applies any hook
---           delta, so they equal what the swapper settled only when the pool's
---           hooks carry no *_RETURNS_DELTA permission.
+--           swap BalanceDelta from the SWAPPER's perspective (v4-core applies
+--           swapDelta to msg.sender), raw native-decimal integers: negative =
+--           the swapper owes the PoolManager, positive = the PoolManager owes
+--           the swapper -- the INVERSE of uniswap_v3_swap, which signs from
+--           the pool's side. They are emitted before afterSwap applies any
+--           hook delta, so they equal what the swapper settled only when the
+--           pool's hooks carry no *_RETURNS_DELTA permission.
 
 CREATE TABLE IF NOT EXISTS uniswap_v4_pool_manager
 (
     id                   BIGSERIAL PRIMARY KEY,
     chain_id             INT         NOT NULL REFERENCES chain (chain_id),
     protocol_id          BIGINT      NOT NULL REFERENCES protocol (id),
-    pool_manager_address BYTEA       NOT NULL CHECK (octet_length(pool_manager_address) = 20),
     state_view_address   BYTEA       NOT NULL CHECK (octet_length(state_view_address) = 20),
     deploy_block         BIGINT      NOT NULL,
     created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -108,9 +108,7 @@ COMMENT ON COLUMN uniswap_v4_pool_manager.id IS
 COMMENT ON COLUMN uniswap_v4_pool_manager.chain_id IS
   'FK->chain.chain_id. Network the PoolManager is deployed on. V4 is a singleton, so a chain has exactly one live PoolManager: UNIQUE (chain_id, processing_version) allows only superseding versions of it, never two concurrent managers.';
 COMMENT ON COLUMN uniswap_v4_pool_manager.protocol_id IS
-  'FK->protocol.id. The UniswapV4 protocol row (the PoolManager address) this deployment belongs to.';
-COMMENT ON COLUMN uniswap_v4_pool_manager.pool_manager_address IS
-  'On-chain PoolManager contract address, 20 bytes. Every indexed V4 log is emitted by this address; a log from any other address is not a V4 pool event.';
+  'FK->protocol.id. The UniswapV4 protocol row this deployment belongs to, and the SOLE source of the on-chain PoolManager address (protocol.address): every indexed V4 log is emitted by it, and a log from any other address is not a V4 pool event. Deliberately not duplicated as a column here -- a second copy could disagree with the row it FKs.';
 COMMENT ON COLUMN uniswap_v4_pool_manager.state_view_address IS
   'On-chain StateView contract address, 20 bytes. Read-only lens over PoolManager''s transient/packed storage: getSlot0, getLiquidity, getFeeGrowthGlobals, getTickInfo, getTickBitmap. Deployed after the PoolManager, so its own deploy height is later than deploy_block.';
 COMMENT ON COLUMN uniswap_v4_pool_manager.deploy_block IS
@@ -135,6 +133,7 @@ CREATE TABLE IF NOT EXISTS uniswap_v4_pool
     tick_spacing       INT         NOT NULL CHECK (tick_spacing BETWEEN 1 AND 32767),
     hooks              BYTEA       NOT NULL CHECK (octet_length(hooks) = 20),
     deploy_block       BIGINT      NOT NULL,
+    snapshot_supported BOOLEAN     NOT NULL DEFAULT TRUE,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     processing_version INT         NOT NULL DEFAULT 0,
     build_id           INT         NOT NULL DEFAULT 0,
@@ -205,11 +204,13 @@ COMMENT ON COLUMN uniswap_v4_pool.currency0_token_id IS
 COMMENT ON COLUMN uniswap_v4_pool.currency1_token_id IS
   'FK->token.id. Resolves currency1''s symbol/decimals, with the same address(0) -> 0xEeee... native-ETH mapping as currency0_token_id.';
 COMMENT ON COLUMN uniswap_v4_pool.fee IS
-  'PoolKey.fee, hundredths of a bip (1e6 = 100%; e.g. 3000 = 0.30%, 100 = 0.01%). The sentinel 8388608 (0x800000) is not a fee: it flags a DYNAMIC-LP-fee pool whose effective fee lives in uniswap_v4_pool_state.lp_fee and in each swap''s fee. Static fees are <= 1000000.';
+  'PoolKey.fee, hundredths of a bip (1e6 = 100%; e.g. 3000 = 0.30%, 100 = 0.01%). Static fees are <= 1000000. The sentinel 8388608 (0x800000) is not a fee: it flags a DYNAMIC-LP-fee pool whose effective fee the hook sets at runtime through updateDynamicLPFee, which emits no event -- so such a pool is registered with snapshot_supported = FALSE and only its per-swap fee is observable, never a uniswap_v4_pool_state.lp_fee snapshot. The fee is hashed into pool_id, so it is immutable for a PoolKey: a superseding registry version can never change it.';
 COMMENT ON COLUMN uniswap_v4_pool.tick_spacing IS
   'PoolKey.tickSpacing: minimum tick granularity for this pool (1..32767); ticks usable by positions must be a multiple of this value. Chosen freely per pool in V4, not derived from the fee tier as in V3.';
 COMMENT ON COLUMN uniswap_v4_pool.hooks IS
   'PoolKey.hooks, 20 bytes: the hook contract attached to this pool, or the zero address when the pool has no hooks. The hook''s PERMISSION FLAGS are encoded in the low 14 bits of the address itself (beforeSwap, afterSwap, delta-returning, ...), so the address doubles as the capability set. A dynamic fee is not among them: it is signalled by PoolKey.fee = 8388608 (0x800000).';
+COMMENT ON COLUMN uniswap_v4_pool.snapshot_supported IS
+  'Configuration (curated, load-bearing). Gates the STATE and TICK snapshot path only: TRUE = the indexer reads uniswap_v4_pool_state and uniswap_v4_tick rows for this pool; FALSE = the pool stays registered and its logs are still decoded into uniswap_v4_swap / uniswap_v4_liquidity_event / uniswap_v4_pool_event and mirrored into protocol_event, but no state or tick row is ever written for it. Curated the way curve_pool.has_a_precise is, rather than derived: set FALSE for a dynamic-LP-fee pool (fee = 8388608), whose lp_fee updateDynamicLPFee rewrites emitting no event, so a snapshot would silently go stale between touches -- until VEC-573 gives lp_fee a refresh path. A change is a new version row, never an UPDATE.';
 COMMENT ON COLUMN uniswap_v4_pool.deploy_block IS
   'Configuration (load-bearing). Block at which the pool was created (its Initialize event; a V4 pool has no contract deployment of its own), used to gate snapshot reads. NOT NULL: a NULL would defeat the reorg deploy-gate, so the column makes one unrepresentable. Must be a lower bound of the true initialize block (<= actual height): DueSet hard-errors ("registry bug") when a touched pool reports deploy_block greater than the processed block, and skips sweep scheduling before this height.';
 COMMENT ON COLUMN uniswap_v4_pool.created_at IS
@@ -225,7 +226,7 @@ CREATE TABLE IF NOT EXISTS uniswap_v4_pool_state
     block_number            BIGINT      NOT NULL,
     block_version           INT         NOT NULL DEFAULT 0,
     block_timestamp         TIMESTAMPTZ NOT NULL,
-    sqrt_price_x96          NUMERIC     NOT NULL CHECK (sqrt_price_x96 > 0),
+    sqrt_price_x96          NUMERIC     NOT NULL,
     tick                    INT         NOT NULL CHECK (tick BETWEEN -887272 AND 887272),
     protocol_fee            INT         NOT NULL CHECK (protocol_fee BETWEEN 0 AND 16777215
                                                     AND (protocol_fee & 4095) <= 1000
@@ -236,6 +237,10 @@ CREATE TABLE IF NOT EXISTS uniswap_v4_pool_state
     fee_growth_global1_x128 NUMERIC     NOT NULL,
     processing_version      INT         NOT NULL DEFAULT 0,
     build_id                INT         NOT NULL DEFAULT 0,
+    -- A reorg that orphans a pool's Initialize makes StateView answer all zeros
+    -- on the re-read; that tombstone must persist to supersede the orphaned
+    -- fork's row, but a zero on a first observation is still a registry bug.
+    CHECK (sqrt_price_x96 > 0 OR (sqrt_price_x96 = 0 AND block_version > 0)),
     -- block_timestamp must be in the PK: TimescaleDB requires the partition
     -- column in every unique index on a hypertable.
     PRIMARY KEY (pool_id, block_timestamp, block_number, block_version, processing_version)
@@ -318,13 +323,13 @@ COMMENT ON COLUMN uniswap_v4_pool_state.block_version IS
 COMMENT ON COLUMN uniswap_v4_pool_state.block_timestamp IS
   'PK, Partition. Block timestamp (UTC); hypertable partition column.';
 COMMENT ON COLUMN uniswap_v4_pool_state.sqrt_price_x96 IS
-  'StateView.getSlot0().sqrtPriceX96: Q64.96 fixed point. price(currency1/currency0) = (sqrt_price_x96/2^96)^2, then adjust by 10^(currency0.decimals-currency1.decimals). Never 0 for an initialized pool: StateView returns all zeros for an unknown PoolId rather than reverting, so a 0 here means the registry row is wrong.';
+  'StateView.getSlot0().sqrtPriceX96: Q64.96 fixed point. price(currency1/currency0) = (sqrt_price_x96/2^96)^2, then adjust by 10^(currency0.decimals-currency1.decimals). 0 means the PoolManager does not know the PoolId -- StateView returns all zeros for an unknown one rather than reverting -- and the CHECK allows it only at block_version > 0, where it is the legitimate tombstone a reorg re-read of a pool whose Initialize was orphaned writes to supersede the orphaned fork''s snapshot. A 0 at block_version 0 means the registry row is wrong and is refused.';
 COMMENT ON COLUMN uniswap_v4_pool_state.tick IS
   'StateView.getSlot0().tick: current pool tick (plain integer, -887272..887272); price(currency1/currency0) = 1.0001^tick before decimal adjustment.';
 COMMENT ON COLUMN uniswap_v4_pool_state.protocol_fee IS
   'StateView.getSlot0().protocolFee: the PACKED uint24 protocol fee, not a single rate. Low 12 bits = the zeroForOne fee, high 12 bits = the oneForZero fee, each in hundredths of a bip and each capped at 1000 (0.1%). Taken off the swap input before the LP fee.';
 COMMENT ON COLUMN uniswap_v4_pool_state.lp_fee IS
-  'StateView.getSlot0().lpFee: the LP fee currently in force, hundredths of a bip (<= 1000000). For a static-fee pool this equals uniswap_v4_pool.fee. A dynamic-fee pool (uniswap_v4_pool.fee = 8388608) has no such guarantee -- the hook sets the fee via updateDynamicLPFee, which emits NO event, so this column would only be refreshed on blocks that otherwise touch the pool -- and is therefore refused at indexer boot until lp_fee has a refresh path.';
+  'StateView.getSlot0().lpFee: the LP fee currently in force, hundredths of a bip (<= 1000000). For a static-fee pool this equals uniswap_v4_pool.fee. A dynamic-fee pool (uniswap_v4_pool.fee = 8388608) has no such guarantee -- the hook sets the fee via updateDynamicLPFee, which emits NO event, so this column would only be refreshed on blocks that otherwise touch the pool -- which is why such a pool is registered with uniswap_v4_pool.snapshot_supported = FALSE and produces no row here at all until lp_fee has a refresh path.';
 COMMENT ON COLUMN uniswap_v4_pool_state.liquidity IS
   'StateView.getLiquidity(): in-range raw liquidity L active at the current tick (sqrt(xy) scaled by the pool''s currency decimals; not comparable across pools with different decimals).';
 COMMENT ON COLUMN uniswap_v4_pool_state.fee_growth_global0_x128 IS
@@ -437,9 +442,9 @@ COMMENT ON COLUMN uniswap_v4_swap.log_index IS
 COMMENT ON COLUMN uniswap_v4_swap.sender IS
   'Event field `sender`: msg.sender of the PoolManager.swap call -- a router, or the hook contract itself when a hook initiates the swap, 20 bytes. Not the end user.';
 COMMENT ON COLUMN uniswap_v4_swap.amount0 IS
-  'The pool''s swap BalanceDelta for currency0 as emitted, raw native decimals of currency0: NEGATIVE = owed to the PoolManager, POSITIVE = owed to the swapper. PoolManager emits this delta BEFORE afterSwap applies any hook delta, so it equals what the swapper actually settled only for pools whose hooks address carries no *_RETURNS_DELTA permission. This is the INVERSE of uniswap_v3_swap.amount0, which is signed from the pool''s side; negate to compare the two.';
+  'Swap BalanceDelta for currency0 from the SWAPPER''s perspective, as emitted, raw native decimals of currency0: v4-core applies swapDelta to msg.sender, so NEGATIVE = the swapper owes the PoolManager, POSITIVE = the PoolManager owes the swapper. PoolManager emits this delta BEFORE afterSwap applies any hook delta, so it equals what the swapper actually settled only for pools whose hooks address carries no *_RETURNS_DELTA permission. This is the INVERSE of uniswap_v3_swap.amount0, which is signed from the pool''s side; negate to compare the two.';
 COMMENT ON COLUMN uniswap_v4_swap.amount1 IS
-  'The pool''s swap BalanceDelta for currency1 as emitted, raw native decimals of currency1 (negative = owed to the PoolManager, positive = owed to the swapper); same pre-hook-delta caveat and same inverted convention as amount0.';
+  'Swap BalanceDelta for currency1 from the SWAPPER''s perspective, as emitted, raw native decimals of currency1 (negative = the swapper owes the PoolManager, positive = the PoolManager owes the swapper); same pre-hook-delta caveat and same inverted convention as amount0.';
 COMMENT ON COLUMN uniswap_v4_swap.sqrt_price_x96 IS
   'Pool sqrtPriceX96 immediately after the swap, Q64.96 fixed point (see uniswap_v4_pool_state.sqrt_price_x96 for the price conversion).';
 COMMENT ON COLUMN uniswap_v4_swap.liquidity IS
@@ -826,9 +831,8 @@ VALUES
     (1, '\x68749665FF8D2d112Fa859AA293F07A622782F38'::bytea, 'XAUt', 6)
 ON CONFLICT (chain_id, address) DO NOTHING;
 
-INSERT INTO uniswap_v4_pool_manager (chain_id, protocol_id, pool_manager_address, state_view_address, deploy_block)
+INSERT INTO uniswap_v4_pool_manager (chain_id, protocol_id, state_view_address, deploy_block)
 SELECT 1, pr.id,
-       '\x000000000004444c5dc75cB358380D2e3dE08A90'::bytea,
        '\x7fFE42C4a5DEeA5b0feC41C94C136Cf115597227'::bytea,
        21688329
 FROM protocol pr
@@ -865,9 +869,11 @@ WITH seed (pool_id, currency0, currency1, fee, tick_spacing, hooks, deploy_block
 )
 INSERT INTO uniswap_v4_pool
     (chain_id, pool_id, currency0, currency1,
-     currency0_token_id, currency1_token_id, fee, tick_spacing, hooks, deploy_block)
+     currency0_token_id, currency1_token_id, fee, tick_spacing, hooks, deploy_block,
+     snapshot_supported)
 SELECT 1, s.pool_id, s.currency0, s.currency1, t0.id, t1.id,
-       s.fee, s.tick_spacing, s.hooks, s.deploy_block
+       s.fee, s.tick_spacing, s.hooks, s.deploy_block,
+       TRUE
 FROM seed s
 JOIN token t0 ON t0.chain_id = 1 AND t0.address = CASE
         WHEN s.currency0 = '\x0000000000000000000000000000000000000000'::bytea
@@ -887,6 +893,7 @@ DO $$
 DECLARE
     manager_count      INT;
     pool_count         INT;
+    unsupported_count  INT;
     bad_mapping_count  INT;
     null_decimal_count INT;
     bad_token          TEXT;
@@ -901,6 +908,15 @@ BEGIN
     WHERE p.chain_id = 1;
     IF pool_count <> 21 THEN
         RAISE EXCEPTION 'expected exactly 21 UniswapV4 pools, got %', pool_count;
+    END IF;
+
+    -- Every seeded PoolKey carries a static fee, so none of them is excluded
+    -- from the state/tick snapshot path.
+    SELECT count(*) INTO unsupported_count
+    FROM uniswap_v4_pool
+    WHERE chain_id = 1 AND NOT snapshot_supported;
+    IF unsupported_count <> 0 THEN
+        RAISE EXCEPTION 'expected every seeded UniswapV4 pool to be snapshot_supported, got % excluded', unsupported_count;
     END IF;
 
     -- The branches are mutually exclusive on purpose: a non-native currency must

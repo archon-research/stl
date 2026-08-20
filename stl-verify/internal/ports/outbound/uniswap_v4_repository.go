@@ -2,6 +2,7 @@ package outbound
 
 import (
 	"context"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
@@ -26,6 +27,9 @@ type UniswapV4PoolRow struct {
 	TickSpacing       int
 	Hooks             common.Address // zero address means the pool has no hooks
 	DeployBlock       int64
+	// SnapshotSupported is the curated uniswap_v4_pool gate on the state/tick
+	// snapshot path alone; a false pool is still indexed for events.
+	SnapshotSupported bool
 }
 
 type UniswapV4BlockWrites struct {
@@ -54,12 +58,21 @@ type UniswapV4Repository interface {
 	// the number of state rows actually inserted (ON CONFLICT DO NOTHING means a
 	// redelivery returns 0), for the uniswap_v4_state_rows_written_total metric.
 	SaveBlock(ctx context.Context, tx pgx.Tx, w UniswapV4BlockWrites) (stateRows int64, err error)
-	// PoolIDsWithStateAtBlock returns the uniswap_v4_pool ids that already have a
-	// uniswap_v4_pool_state row at blockNumber, ascending. A reorg redelivery
-	// unions them into its due set so a pool snapshotted on the orphaned fork is
-	// re-snapshotted at the new version even when the in-memory snapshot tracker
-	// was lost to a restart.
-	PoolIDsWithStateAtBlock(ctx context.Context, blockNumber int64) ([]int64, error)
+	// PoolIDsWithStateAtBlock returns the CURRENT uniswap_v4_pool ids, ascending,
+	// of the pools on chainID that already have a uniswap_v4_pool_state row at
+	// blockNumber. A reorg redelivery unions them into its due set so a pool
+	// snapshotted on the orphaned fork is re-snapshotted at the new version even
+	// when the in-memory snapshot tracker was lost to a restart.
+	//
+	// The fact table carries no chain_id, so the scope comes from joining the
+	// registry: a row written under a superseded registry version resolves
+	// forward to the current id for its (chain_id, pool_id) natural key, and
+	// another chain's pools at the same height are excluded — one worker serves
+	// one chain, and a foreign id would look like a registry bug to the caller.
+	// blockTimestamp is the block's own timestamp; the query bounds the scan to
+	// the chunks around it, without which every chunk of the hypertable is
+	// scanned on each reorg (VEC-541).
+	PoolIDsWithStateAtBlock(ctx context.Context, chainID int64, blockNumber int64, blockTimestamp time.Time) ([]int64, error)
 	// TicksForPoolAtBlock returns the distinct tick positions that already have a
 	// row for pool at blockNumber, so a reorg redelivery can re-read exactly the
 	// ticks a prior version wrote at this height. Reads committed rows outside

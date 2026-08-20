@@ -25,16 +25,21 @@ import (
 // so a deliberately-broken or multi-version registry can never leak into
 // another test's LoadPools call. Only the mainnet fixtures live on chain 1.
 const (
-	uniswapV4RepoSaveChainID       = 490001
-	uniswapV4RepoNullDecChainID    = 490002
-	uniswapV4RepoMismatchChainID   = 490003
-	uniswapV4RepoEmptyChainID      = 490004
-	uniswapV4RepoNoManagerChainID  = 490005
-	uniswapV4RepoPoolVerChainID    = 490006
-	uniswapV4RepoManagerVerChainID = 490007
-	uniswapV4RepoNativeChainID     = 490008
-	uniswapV4RepoHomeChainID       = 490009
-	uniswapV4RepoNeighbourChainID  = 490010
+	uniswapV4RepoSaveChainID        = 490001
+	uniswapV4RepoNullDecChainID     = 490002
+	uniswapV4RepoMismatchChainID    = 490003
+	uniswapV4RepoEmptyChainID       = 490004
+	uniswapV4RepoNoManagerChainID   = 490005
+	uniswapV4RepoPoolVerChainID     = 490006
+	uniswapV4RepoManagerVerChainID  = 490007
+	uniswapV4RepoNativeChainID      = 490008
+	uniswapV4RepoHomeChainID        = 490009
+	uniswapV4RepoNeighbourChainID   = 490010
+	uniswapV4RepoXChainTokenChainID = 490011
+	uniswapV4RepoXChainDonorChainID = 490012
+	uniswapV4RepoUnsupportedChainID = 490013
+	uniswapV4RepoPriorStateChainID  = 490014
+	uniswapV4RepoSupersededChainID  = 490015
 )
 
 // testUniswapV4BuildID / testUniswapV4RebuildID are two distinct build ids so a
@@ -157,10 +162,10 @@ func seedUniswapV4RepoPoolManager(t *testing.T, ctx context.Context, f uniswapV4
 
 	if _, err := uniswapV4TestPool.Exec(ctx,
 		`INSERT INTO uniswap_v4_pool_manager
-		    (chain_id, protocol_id, pool_manager_address, state_view_address, deploy_block, build_id)
-		 VALUES ($1, $2, $3, $4, $5, $6)
+		    (chain_id, protocol_id, state_view_address, deploy_block, build_id)
+		 VALUES ($1, $2, $3, $4, $5)
 		 ON CONFLICT (chain_id, processing_version) DO NOTHING`,
-		f.chainID, protocolID, f.manager.Bytes(), f.stateView.Bytes(), f.deployBlock, f.buildID,
+		f.chainID, protocolID, f.stateView.Bytes(), f.deployBlock, f.buildID,
 	); err != nil {
 		t.Fatalf("seed pool manager on chain %d: %v", f.chainID, err)
 	}
@@ -180,6 +185,9 @@ type uniswapV4RepoPoolFixture struct {
 	hooks            common.Address
 	deployBlock      int64
 	buildID          int
+	// excludeFromSnapshots seeds snapshot_supported = false; the column's own
+	// default is true, which is what every other fixture wants.
+	excludeFromSnapshots bool
 }
 
 // seedUniswapV4RepoPool appends one pool version and returns the surrogate id
@@ -194,12 +202,12 @@ func seedUniswapV4RepoPool(t *testing.T, ctx context.Context, f uniswapV4RepoPoo
 		`INSERT INTO uniswap_v4_pool
 		    (chain_id, pool_id, currency0, currency1,
 		     currency0_token_id, currency1_token_id, fee, tick_spacing, hooks,
-		     deploy_block, build_id)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+		     deploy_block, build_id, snapshot_supported)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
 		 ON CONFLICT (chain_id, pool_id, processing_version) DO NOTHING`,
 		f.chainID, f.poolID.Bytes(), f.currency0.Bytes(), f.currency1.Bytes(),
 		f.currency0TokenID, f.currency1TokenID, f.fee, f.tickSpacing,
-		f.hooks.Bytes(), f.deployBlock, f.buildID,
+		f.hooks.Bytes(), f.deployBlock, f.buildID, !f.excludeFromSnapshots,
 	); err != nil {
 		t.Fatalf("seed uniswap_v4_pool %s: %v", f.poolID, err)
 	}
@@ -1214,6 +1222,76 @@ func TestUniswapV4Repository_LoadPools_RejectsNativeCurrencyMappedToZeroSentinel
 	}
 }
 
+// TestUniswapV4Repository_LoadPools_CarriesTheSnapshotGate keeps an excluded
+// pool in the result: dropping it here would stop its event indexing too, and
+// the service is what decides to skip only its snapshots.
+func TestUniswapV4Repository_LoadPools_CarriesTheSnapshotGate(t *testing.T) {
+	ctx := context.Background()
+	seedUniswapV4RepoPoolManager(t, ctx, newUniswapV4RepoManagerFixture(uniswapV4RepoUnsupportedChainID))
+
+	supported := newUniswapV4RepoPoolFixture(t, ctx, uniswapV4RepoUnsupportedChainID, 0x41)
+	supportedID := seedUniswapV4RepoPool(t, ctx, supported)
+
+	excluded := newUniswapV4RepoPoolFixture(t, ctx, uniswapV4RepoUnsupportedChainID, 0x42)
+	excluded.excludeFromSnapshots = true
+	excludedID := seedUniswapV4RepoPool(t, ctx, excluded)
+
+	repo := newUniswapV4Repo(t)
+	pools, err := repo.LoadPools(ctx, uniswapV4RepoUnsupportedChainID)
+	if err != nil {
+		t.Fatalf("LoadPools: %v", err)
+	}
+
+	got := make(map[int64]bool, len(pools))
+	for _, p := range pools {
+		got[p.ID] = p.SnapshotSupported
+	}
+	if len(pools) != 2 {
+		t.Fatalf("LoadPools returned %d pools, want 2 (an excluded pool is still registered)", len(pools))
+	}
+	if !got[supportedID] {
+		t.Errorf("pool %d SnapshotSupported = false, want true", supportedID)
+	}
+	if got[excludedID] {
+		t.Errorf("pool %d SnapshotSupported = true, want false", excludedID)
+	}
+}
+
+// TestUniswapV4Repository_LoadPools_RejectsCrossChainCurrencyToken pins the
+// port contract against the join that used to enforce it: a currency_token_id
+// pointing at another chain's token row must name the offending pool, never
+// drop it from the result and leave the indexer running one pool short.
+func TestUniswapV4Repository_LoadPools_RejectsCrossChainCurrencyToken(t *testing.T) {
+	ctx := context.Background()
+	seedUniswapV4RepoPoolManager(t, ctx, newUniswapV4RepoManagerFixture(uniswapV4RepoXChainTokenChainID))
+
+	currency0 := common.HexToAddress("0x00000000000000000000000000000000000000c1")
+	currency1 := common.HexToAddress("0x00000000000000000000000000000000000000c2")
+	decimals := 18
+	foreignToken0ID := seedUniswapV4RepoToken(t, ctx, uniswapV4RepoXChainDonorChainID, currency0, "TK0", &decimals)
+	token1ID := seedUniswapV4RepoToken(t, ctx, uniswapV4RepoXChainTokenChainID, currency1, "TK1", &decimals)
+
+	poolID := seedUniswapV4RepoPool(t, ctx, uniswapV4RepoPoolFixture{
+		chainID:          uniswapV4RepoXChainTokenChainID,
+		poolID:           common.HexToHash("0x0000000000000000000000000000000000000000000000000000000000c8a1a1"),
+		currency0:        currency0,
+		currency1:        currency1,
+		currency0TokenID: foreignToken0ID,
+		currency1TokenID: token1ID,
+		fee:              500,
+		tickSpacing:      10,
+	})
+
+	repo := newUniswapV4Repo(t)
+	pools, err := repo.LoadPools(ctx, uniswapV4RepoXChainTokenChainID)
+	if err == nil {
+		t.Fatalf("LoadPools with pool id=%d whose currency0 token lives on another chain: want error, got %d pools", poolID, len(pools))
+	}
+	if !containsPoolID(err.Error(), poolID) {
+		t.Errorf("error %q does not name the offending pool id %d", err, poolID)
+	}
+}
+
 // TestUniswapV4Repository_LoadPools_ExcludesOtherChains seeds two chains at
 // once: the chain filter must reach the pools, the PoolManager and the token
 // join alike.
@@ -1371,7 +1449,7 @@ func TestUniswapV4Repository_PoolIDsWithStateAtBlock_ReturnsDistinctPoolsAscendi
 		})
 	}
 
-	got, err := repo.PoolIDsWithStateAtBlock(ctx, targetBlock)
+	got, err := repo.PoolIDsWithStateAtBlock(ctx, uniswapV4RepoSaveChainID, targetBlock, uniswapV4TestBlockTime(targetBlock))
 	if err != nil {
 		t.Fatalf("PoolIDsWithStateAtBlock: %v", err)
 	}
@@ -1382,11 +1460,105 @@ func TestUniswapV4Repository_PoolIDsWithStateAtBlock_ReturnsDistinctPoolsAscendi
 	}
 }
 
+// A worker serves one chain, and the fact table carries no chain_id of its own,
+// so the scope has to come from the registry join; a neighbouring chain's pool
+// at the same height would look like a registry bug to the caller.
+func TestUniswapV4Repository_PoolIDsWithStateAtBlock_ExcludesOtherChains(t *testing.T) {
+	ctx := context.Background()
+	homePool := seedUniswapV4RepoTestPool(t, ctx, 0x13)
+
+	seedUniswapV4RepoPoolManager(t, ctx, newUniswapV4RepoManagerFixture(uniswapV4RepoPriorStateChainID))
+	neighbourPool := seedUniswapV4RepoPool(t, ctx,
+		newUniswapV4RepoPoolFixture(t, ctx, uniswapV4RepoPriorStateChainID, 0x14))
+
+	const targetBlock = int64(7110000)
+	repo := newUniswapV4Repo(t)
+	for _, poolID := range []int64{homePool, neighbourPool} {
+		withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
+			if _, err := repo.SaveBlock(ctx, tx, outbound.UniswapV4BlockWrites{
+				States: []*entity.UniswapV4PoolState{newUniswapV4TestState(poolID, targetBlock, 0, 11)},
+			}); err != nil {
+				t.Fatalf("SaveBlock: %v", err)
+			}
+		})
+	}
+
+	got, err := repo.PoolIDsWithStateAtBlock(ctx, uniswapV4RepoSaveChainID, targetBlock, uniswapV4TestBlockTime(targetBlock))
+	if err != nil {
+		t.Fatalf("PoolIDsWithStateAtBlock: %v", err)
+	}
+	if !slices.Equal(got, []int64{homePool}) {
+		t.Errorf("pool ids = %v, want %v (the neighbouring chain's pool %d must not leak in)", got, []int64{homePool}, neighbourPool)
+	}
+}
+
+// A registry correction mints a new surrogate id while the fact rows keep the
+// old one, so the id handed back must be the CURRENT version for the natural
+// key: the caller's in-memory registry only knows current ids.
+func TestUniswapV4Repository_PoolIDsWithStateAtBlock_ResolvesSupersededPoolForward(t *testing.T) {
+	ctx := context.Background()
+	seedUniswapV4RepoPoolManager(t, ctx, newUniswapV4RepoManagerFixture(uniswapV4RepoSupersededChainID))
+
+	fixture := newUniswapV4RepoPoolFixture(t, ctx, uniswapV4RepoSupersededChainID, 0x15)
+	supersededID := seedUniswapV4RepoPool(t, ctx, fixture)
+
+	const targetBlock = int64(7120000)
+	repo := newUniswapV4Repo(t)
+	withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
+		if _, err := repo.SaveBlock(ctx, tx, outbound.UniswapV4BlockWrites{
+			States: []*entity.UniswapV4PoolState{newUniswapV4TestState(supersededID, targetBlock, 0, 11)},
+		}); err != nil {
+			t.Fatalf("SaveBlock: %v", err)
+		}
+	})
+
+	fixture.buildID = 1
+	fixture.deployBlock = 2
+	currentID := seedUniswapV4RepoPool(t, ctx, fixture)
+	if currentID == supersededID {
+		t.Fatalf("the corrected pool reused id %d; the fixture did not append a new version", currentID)
+	}
+
+	got, err := repo.PoolIDsWithStateAtBlock(ctx, uniswapV4RepoSupersededChainID, targetBlock, uniswapV4TestBlockTime(targetBlock))
+	if err != nil {
+		t.Fatalf("PoolIDsWithStateAtBlock: %v", err)
+	}
+	if !slices.Equal(got, []int64{currentID}) {
+		t.Errorf("pool ids = %v, want %v (the superseded %d must resolve forward)", got, []int64{currentID}, supersededID)
+	}
+}
+
+// Without a block_timestamp predicate the reorg read scans every chunk of the
+// hypertable (VEC-541), so the bound has to be live rather than assumed.
+func TestUniswapV4Repository_PoolIDsWithStateAtBlock_BoundsTheScanToTheBlockTimestamp(t *testing.T) {
+	ctx := context.Background()
+	poolID := seedUniswapV4RepoTestPool(t, ctx, 0x16)
+
+	const targetBlock = int64(7130000)
+	repo := newUniswapV4Repo(t)
+	withUniswapV4Tx(t, ctx, func(tx pgx.Tx) {
+		if _, err := repo.SaveBlock(ctx, tx, outbound.UniswapV4BlockWrites{
+			States: []*entity.UniswapV4PoolState{newUniswapV4TestState(poolID, targetBlock, 0, 11)},
+		}); err != nil {
+			t.Fatalf("SaveBlock: %v", err)
+		}
+	})
+
+	farAway := uniswapV4TestBlockTime(targetBlock).AddDate(0, 0, 10)
+	got, err := repo.PoolIDsWithStateAtBlock(ctx, uniswapV4RepoSaveChainID, targetBlock, farAway)
+	if err != nil {
+		t.Fatalf("PoolIDsWithStateAtBlock: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("pool ids = %v, want none: the scan must be bounded to the chunks around the block timestamp", got)
+	}
+}
+
 func TestUniswapV4Repository_PoolIDsWithStateAtBlock_UnknownBlockIsEmpty(t *testing.T) {
 	ctx := context.Background()
 
 	repo := newUniswapV4Repo(t)
-	got, err := repo.PoolIDsWithStateAtBlock(ctx, 7199999)
+	got, err := repo.PoolIDsWithStateAtBlock(ctx, uniswapV4RepoSaveChainID, 7199999, uniswapV4TestBlockTime(7199999))
 	if err != nil {
 		t.Fatalf("PoolIDsWithStateAtBlock: %v", err)
 	}
@@ -1395,12 +1567,18 @@ func TestUniswapV4Repository_PoolIDsWithStateAtBlock_UnknownBlockIsEmpty(t *test
 	}
 }
 
+// uniswapV4TestBlockTime is the block_timestamp every fixture row at a height
+// carries; PoolIDsWithStateAtBlock bounds its chunk scan around it.
+func uniswapV4TestBlockTime(blockNumber int64) time.Time {
+	return time.Unix(1740000000+blockNumber, 0).UTC()
+}
+
 func newUniswapV4TestState(poolID int64, blockNumber int64, blockVersion int, tick int) *entity.UniswapV4PoolState {
 	return &entity.UniswapV4PoolState{
 		PoolID:               poolID,
 		BlockNumber:          blockNumber,
 		BlockVersion:         blockVersion,
-		BlockTimestamp:       time.Unix(1740000000+blockNumber, 0).UTC(),
+		BlockTimestamp:       uniswapV4TestBlockTime(blockNumber),
 		SqrtPriceX96:         big.NewInt(1),
 		Tick:                 tick,
 		ProtocolFee:          0,
