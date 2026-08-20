@@ -259,13 +259,13 @@ The preset adds a step below `xs` (0.75rem) and **redefines** an existing one:
 Depth is mostly tonal rather than shadow-driven. Most surfaces remain flat, with subtle border contrast and background shifts carrying hierarchy. Shadows appear only in contained overlays and selected-detail emphasis.
 
 ### Shadow Vocabulary
-Three shadow tokens are dark-aware — in dark mode they swap a light-mode drop shadow for a stronger drop plus a `rgba(255, 255, 255, 0.05–0.06)` inset top highlight, which is what makes an edge read as raised on a near-black surface:
+**Every shadow token is dark-aware** — in dark mode each one swaps its light-mode drop shadow for a stronger drop plus an `rgba(255, 255, 255, 0.05–0.08)` inset top highlight, which is what makes an edge read as raised on a near-black surface. So the choice of step is a pure elevation decision; there is no longer a "does it survive dark mode" question to route around.
 
 - **`shadows.elevation`** — the named raised-panel token. Light: `0 1px 2px 0 rgba(15, 23, 42, 0.08), 0 1px 3px 0 rgba(15, 23, 42, 0.06)`. Dark: `0 1px 2px 0 rgba(0, 0, 0, 0.55), inset 0 1px 0 0 rgba(255, 255, 255, 0.06)`. Prefer this over `sm` for panels.
 - **`shadows.xs`** — light `0 1px 2px 0 rgba(15, 23, 42, 0.06)`; dark `0 1px 2px 0 rgba(0, 0, 0, 0.5), inset 0 1px 0 0 rgba(255, 255, 255, 0.05)`. Correct choice for small controls such as a slider thumb.
 - **`shadows.sm`** — light `0 1px 3px 0 rgba(15, 23, 42, 0.10), 0 1px 2px -1px rgba(15, 23, 42, 0.10)`; dark `0 2px 4px 0 rgba(0, 0, 0, 0.6), inset 0 1px 0 0 rgba(255, 255, 255, 0.06)`.
-
-**`md` / `lg` / `xl` / `2xl` are theme-blind** — they keep Panda's `rgb(0 0 0 / 0.1)`–`0.25` defaults with no `.dark` override, so a `2xl` on a `#171717` drawer is effectively invisible. This is an upstream gap, filed. For a floating overlay reach for `shadows.overlay`, which is dark-aware; elsewhere carry the layering with `border.subtle` plus the surface ramp.
+- **`shadows.md` / `lg` / `xl` / `2xl`** — the upper ramp. Their light values are Panda's own defaults verbatim (`rgb(0 0 0 / 0.1)`–`0.25`), so nothing moved in light mode; their dark forms collapse the two light layers into one deeper, softer drop (~1.3x the light offset and blur) plus the inset highlight, with drop alpha continuing the ramp's progression (md 0.62, lg 0.64, xl 0.66, 2xl 0.7). `2xl` is the step for a full-height panel that floats over the page: it is what `RiskDetailDrawer` uses, having carried `overlay` only while `2xl` had no dark form.
+- **`shadows.overlay`** — floating-overlay elevation (menus, tooltips, popovers), sized between `lg` and `xl`, which is why its dark alpha (0.6) sits below theirs rather than above. `TokenAddress`'s menu uses it, matching the `popover` and `tooltip` recipes.
 
 Never hand-write a shadow literal: a `rgba(0, 0, 0, 0.2)` drop shadow disappears on a dark surface, which is exactly the failure the dark-aware tokens exist to prevent.
 
