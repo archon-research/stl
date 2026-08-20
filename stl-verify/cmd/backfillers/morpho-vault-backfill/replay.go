@@ -24,18 +24,25 @@ import (
 
 // buildReplayService constructs the morpho-indexer Service wired for replay
 // (no SQS consumer, no block cache) plus the repositories it needs.
+//
+// Every failure here is structural, which is why each one is tagged: the pool
+// arrives already built, so all four constructors do is reject a nil port,
+// validate the config and read the embedded ABIs and the chain's deploy-block
+// table. None of that dials anything, so no attempt can reach a different
+// verdict. Add a step that DOES touch the network or the database and it must
+// stay untagged — the retry envelope is what carries a blip.
 func buildReplayService(logger *slog.Logger, multicaller outbound.Multicaller, pool *pgxpool.Pool, buildID buildregistry.BuildID, chainID int64) (*morpho_indexer.Service, error) {
 	txManager, err := postgres.NewTxManager(pool, logger)
 	if err != nil {
-		return nil, fmt.Errorf("creating tx manager: %w", err)
+		return nil, fmt.Errorf("creating tx manager: %w: %w", err, errStructuralData)
 	}
 	morphoRepo, err := postgres.NewMorphoRepository(pool, logger, buildID)
 	if err != nil {
-		return nil, fmt.Errorf("creating morpho repository: %w", err)
+		return nil, fmt.Errorf("creating morpho repository: %w: %w", err, errStructuralData)
 	}
 	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, buildID, 0)
 	if err != nil {
-		return nil, fmt.Errorf("creating protocol repository: %w", err)
+		return nil, fmt.Errorf("creating protocol repository: %w: %w", err, errStructuralData)
 	}
 	eventRepo := postgres.NewEventRepository(logger, buildID)
 
@@ -43,7 +50,11 @@ func buildReplayService(logger *slog.Logger, multicaller outbound.Multicaller, p
 	svcConfig.ChainID = chainID
 	svcConfig.Logger = logger
 
-	return morpho_indexer.NewReplayService(svcConfig, multicaller, txManager, protocolRepo, morphoRepo, eventRepo)
+	svc, err := morpho_indexer.NewReplayService(svcConfig, multicaller, txManager, protocolRepo, morphoRepo, eventRepo)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", err, errStructuralData)
+	}
+	return svc, nil
 }
 
 // knownV2VaultCount reports how many VaultV2 vaults the database holds, read

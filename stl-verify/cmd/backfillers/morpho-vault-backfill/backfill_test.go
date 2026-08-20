@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"go.temporal.io/sdk/activity"
 	temporalsdk "go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/partition"
 	"github.com/archon-research/stl/stl-verify/internal/services/morpho_indexer"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 // mainnetChainID is the only chain with a known VaultV2 factory deploy block, so
@@ -429,6 +431,63 @@ func TestReplayPartition_NamesThePartitionOnAnEarlyFailure(t *testing.T) {
 	if !strings.Contains(err.Error(), "replaying partition 1000-1999") {
 		t.Errorf("error = %q, want it to name the partition being replayed", err)
 	}
+}
+
+// buildReplayService only validates and assembles: nil ports, the SQS config,
+// the embedded ABIs, the chain's deploy-block table. Nothing it does can succeed
+// on a later attempt, so leaving it retryable spends the partition's whole 2h
+// envelope on a verdict the first millisecond already reached.
+func TestReplayPartition_ConstructorValidationIsNotRetried(t *testing.T) {
+	activities := &backfillActivities{logger: slog.Default(), archiveDrain: func() {}}
+
+	_, err := activities.ReplayPartition(context.Background(), partitionWork{Partition: "1000-1999"})
+
+	var appErr *temporalsdk.ApplicationError
+	if !errors.As(err, &appErr) || !appErr.NonRetryable() {
+		t.Fatalf("error = %v, want a non-retryable failure: no attempt can build a service from a nil pool", err)
+	}
+}
+
+// The mirror, and the constraint that tag must not overreach: the step right
+// after the constructor reads the vault registry from Postgres, and a database
+// that is unreachable right now is exactly what the retry envelope is for.
+func TestReplayPartition_AnUnreachableDatabaseStaysRetryable(t *testing.T) {
+	activities := &backfillActivities{
+		logger:       slog.Default(),
+		pool:         unreachablePool(t),
+		multicaller:  testutil.NewMockMulticaller(),
+		cfg:          config{chainID: mainnetChainID},
+		archiveDrain: func() {},
+	}
+
+	_, err := activities.ReplayPartition(context.Background(), partitionWork{Partition: "1000-1999"})
+
+	if err == nil {
+		t.Fatal("expected an unreachable database to fail the activity")
+	}
+	// Pinned so the case cannot drift onto an earlier, deterministic guard and
+	// keep passing for the wrong reason.
+	if !strings.Contains(err.Error(), "loading the vault registry") {
+		t.Fatalf("error = %v, want the failure to come from the registry read", err)
+	}
+	var appErr *temporalsdk.ApplicationError
+	if errors.As(err, &appErr) && appErr.NonRetryable() {
+		t.Errorf("error = %v, want it left retryable: a database that is down comes back", err)
+	}
+}
+
+// unreachablePool hands back a real pool pointed at a port nothing listens on,
+// so the first query fails as a dial error rather than a wait. pgxpool connects
+// lazily, which is what lets the constructor succeed and the registry read be
+// the step that fails.
+func unreachablePool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	pool, err := pgxpool.New(context.Background(), "postgres://nobody:nobody@127.0.0.1:1/nodb?sslmode=disable")
+	if err != nil {
+		t.Fatalf("building an unreachable pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
 }
 
 // Neither activity caps its attempts, so a deterministic defect that stays
