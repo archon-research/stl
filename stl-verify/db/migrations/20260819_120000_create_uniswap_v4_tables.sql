@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS uniswap_v4_pool_manager
     pool_manager_address BYTEA       NOT NULL CHECK (octet_length(pool_manager_address) = 20),
     state_view_address   BYTEA       NOT NULL CHECK (octet_length(state_view_address) = 20),
     deploy_block         BIGINT      NOT NULL,
-    created_at           TIMESTAMP   NOT NULL DEFAULT (now() AT TIME ZONE 'utc'),
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     processing_version   INT         NOT NULL DEFAULT 0,
     build_id             INT         NOT NULL DEFAULT 0,
     UNIQUE (chain_id, processing_version)
@@ -116,7 +116,7 @@ COMMENT ON COLUMN uniswap_v4_pool_manager.state_view_address IS
 COMMENT ON COLUMN uniswap_v4_pool_manager.deploy_block IS
   'Documentation only. Block at which the PoolManager was deployed, hence a lower bound for every pool under it; no V4 state exists before this height. The indexer never reads it: the deploy gate runs off uniswap_v4_pool.deploy_block, which is the load-bearing one.';
 COMMENT ON COLUMN uniswap_v4_pool_manager.created_at IS
-  'Audit. Row insertion time, UTC wall-clock (timestamp without time zone, so it reads the same under any session TimeZone); bookkeeping only, not an on-chain value.';
+  'Audit. Row insertion time as an instant (timestamptz, so it denotes the same moment under any session TimeZone, and stores UTC internally); bookkeeping only, not an on-chain value.';
 COMMENT ON COLUMN uniswap_v4_pool_manager.processing_version IS
   'Audit. Correction version (ADR-0002): 0 for the first write of a chain under a build_id, bumped only when a later build rewrites the same chain; prior versions are retained. Order by processing_version DESC for the current row.';
 COMMENT ON COLUMN uniswap_v4_pool_manager.build_id IS
@@ -135,7 +135,7 @@ CREATE TABLE IF NOT EXISTS uniswap_v4_pool
     tick_spacing       INT         NOT NULL CHECK (tick_spacing BETWEEN 1 AND 32767),
     hooks              BYTEA       NOT NULL CHECK (octet_length(hooks) = 20),
     deploy_block       BIGINT      NOT NULL,
-    created_at         TIMESTAMP   NOT NULL DEFAULT (now() AT TIME ZONE 'utc'),
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     processing_version INT         NOT NULL DEFAULT 0,
     build_id           INT         NOT NULL DEFAULT 0,
     UNIQUE (chain_id, pool_id, processing_version),
@@ -213,7 +213,7 @@ COMMENT ON COLUMN uniswap_v4_pool.hooks IS
 COMMENT ON COLUMN uniswap_v4_pool.deploy_block IS
   'Configuration (load-bearing). Block at which the pool was created (its Initialize event; a V4 pool has no contract deployment of its own), used to gate snapshot reads. NOT NULL: a NULL would defeat the reorg deploy-gate, so the column makes one unrepresentable. Must be a lower bound of the true initialize block (<= actual height): DueSet hard-errors ("registry bug") when a touched pool reports deploy_block greater than the processed block, and skips sweep scheduling before this height.';
 COMMENT ON COLUMN uniswap_v4_pool.created_at IS
-  'Audit. Row insertion time, UTC wall-clock (timestamp without time zone, so it reads the same under any session TimeZone); bookkeeping only, not an on-chain value.';
+  'Audit. Row insertion time as an instant (timestamptz, so it denotes the same moment under any session TimeZone, and stores UTC internally); bookkeeping only, not an on-chain value.';
 COMMENT ON COLUMN uniswap_v4_pool.processing_version IS
   'Audit. Correction version (ADR-0002): 0 for the first write of a (chain_id, pool_id) under a build_id, bumped only when a later build rewrites the same key; prior versions are retained. Order by processing_version DESC for the current row.';
 COMMENT ON COLUMN uniswap_v4_pool.build_id IS

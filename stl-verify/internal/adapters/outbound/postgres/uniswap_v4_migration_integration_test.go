@@ -1372,7 +1372,7 @@ func TestUniswapV4HypertablesCompressAfterTwoDays(t *testing.T) {
 	}
 }
 
-func TestUniswapV4CreatedAtIsUTCWallClock(t *testing.T) {
+func TestUniswapV4CreatedAtIsTimestamptz(t *testing.T) {
 	ctx := context.Background()
 
 	for _, table := range []string{"uniswap_v4_pool_manager", "uniswap_v4_pool"} {
@@ -1384,17 +1384,18 @@ func TestUniswapV4CreatedAtIsUTCWallClock(t *testing.T) {
 			table).Scan(&dataType, &columnDefault); err != nil {
 			t.Fatalf("reading %s.created_at definition: %v", table, err)
 		}
-		if want := "timestamp without time zone"; dataType != want {
+		if want := "timestamp with time zone"; dataType != want {
 			t.Errorf("%s.created_at data_type = %q, want %q", table, dataType, want)
 		}
-		if want := "(now() AT TIME ZONE 'utc'::text)"; columnDefault != want {
+		if want := "now()"; columnDefault != want {
 			t.Errorf("%s.created_at column_default = %q, want %q", table, columnDefault, want)
 		}
 	}
 }
 
-// The default must be UTC wall-clock, not the writer's local wall-clock, so a
-// worker running under a non-UTC session TimeZone still stamps comparable rows.
+// created_at holds an instant, so a row written under a non-UTC session still
+// compares equal to now(); a naive UTC wall-clock column would be read back as
+// the session's local time and drift by that session's UTC offset.
 func TestUniswapV4CreatedAtIgnoresSessionTimeZone(t *testing.T) {
 	ctx := context.Background()
 
@@ -1413,12 +1414,8 @@ func TestUniswapV4CreatedAtIgnoresSessionTimeZone(t *testing.T) {
 		t.Fatalf("setting the session TimeZone: %v", err)
 	}
 
-	var wantUTC time.Time
-	if err := uniswapV4TestPool.QueryRow(ctx, `SELECT now() AT TIME ZONE 'utc'`).Scan(&wantUTC); err != nil {
-		t.Fatalf("reading UTC now: %v", err)
-	}
-
 	var createdAt time.Time
+	var driftSeconds float64
 	if err := conn.QueryRow(ctx, `
 		INSERT INTO uniswap_v4_pool
 		    (chain_id, pool_id, currency0, currency1,
@@ -1427,12 +1424,13 @@ func TestUniswapV4CreatedAtIgnoresSessionTimeZone(t *testing.T) {
 		        '\x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0'::bytea,
 		        '\xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'::bytea,
 		        $2, $3, 3000, 60, '\x0000000000000000000000000000000000000000'::bytea, 21743144)
-		RETURNING created_at`, poolIDHex, wstETH, usdc).Scan(&createdAt); err != nil {
+		RETURNING created_at, EXTRACT(EPOCH FROM (now() - created_at))::double precision`,
+		poolIDHex, wstETH, usdc).Scan(&createdAt, &driftSeconds); err != nil {
 		t.Fatalf("inserting under a non-UTC session TimeZone: %v", err)
 	}
 
-	if drift := createdAt.Sub(wantUTC); drift < -10*time.Second || drift > 10*time.Second {
-		t.Errorf("created_at = %s, want within 10s of UTC now %s (drift %s); the default follows the session TimeZone",
-			createdAt, wantUTC, drift)
+	if driftSeconds < -10 || driftSeconds > 10 {
+		t.Errorf("created_at = %s, %.0fs away from now() under a non-UTC session; it is not stored as an instant",
+			createdAt, driftSeconds)
 	}
 }
