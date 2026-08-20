@@ -10,7 +10,7 @@ Note that CRR is an expected loss, not a tail loss by construction. However, the
 
 This directory contains the CORE model as integrated into the STL service. The original standalone version lives in [`core_model_copy/`](https://github.com/TWave-code/core_model_copy). The integration wires CORE as a first-class `RiskModel` backed by a pre-compute cronjob and a thin API service that reads the results.
 
-The model reads static parquet snapshots in this PR; the parquet-to-live-table swaps land in the next PR of the stack (see the PR description).
+The model still reads static parquet snapshots. [`DATA_GAPS.md`](DATA_GAPS.md) tracks every gap between those snapshots and the live tables, and what brings each one back.
 
 ---
 
