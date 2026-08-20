@@ -400,6 +400,30 @@ func TestPositionState(t *testing.T) {
 		}
 	})
 
+	t.Run("reorg across chunk boundaries reclassifies (multi-day observations)", func(t *testing.T) {
+		// Every other fixture uses one timestamp, so the guard's stored∪run merge had never been
+		// exercised across real chunk boundaries. Observations two days apart land in different 1-day
+		// chunks; the reorg zeroing the later chunk's block must still reclassify down.
+		body := `SELECT * FROM (VALUES ` +
+			`(1::int,10::bigint,'ixc'::text,'aa'::text,7::numeric,'BORROW'::text,200::bigint,0::int,0::int,'2026-03-01 12:00+00'::timestamptz),` +
+			`(1::int,10::bigint,'ixc'::text,'aa'::text,5::numeric,'LOAN'::text,300::bigint,0::int,0::int,'2026-03-03 12:00+00'::timestamptz)) ` + mppCols
+		mpp(t, "vxc", body, "seed")
+		body = `SELECT * FROM (VALUES ` +
+			`(1::int,10::bigint,'ixc'::text,'aa'::text,7::numeric,'BORROW'::text,200::bigint,0::int,0::int,'2026-03-01 12:00+00'::timestamptz),` +
+			`(1::int,10::bigint,'ixc'::text,'aa'::text,0::numeric,'LOAN'::text,300::bigint,1::int,0::int,'2026-03-03 12:00+00'::timestamptz)) ` + mppCols
+		mpp(t, "vxc", body, "reorg")
+		if got := classOf(t, "ixc", "aa"); got != "BORROW" {
+			t.Errorf("cross-chunk reorg class = %q; want BORROW", got)
+		}
+		var chunks int
+		if err := pool.QueryRow(ctx, `SELECT count(DISTINCT chunk_name) FROM timescaledb_information.chunks WHERE hypertable_name = 'position_state'`).Scan(&chunks); err != nil {
+			t.Fatal(err)
+		}
+		if chunks < 2 {
+			t.Errorf("fixtures landed in %d chunk(s); the cross-chunk premise requires >= 2", chunks)
+		}
+	})
+
 	t.Run("position_state is a hypertable with 1-day chunks", func(t *testing.T) {
 		var n int
 		if err := pool.QueryRow(ctx, `SELECT count(*) FROM timescaledb_information.hypertables WHERE hypertable_name = 'position_state'`).Scan(&n); err != nil {
