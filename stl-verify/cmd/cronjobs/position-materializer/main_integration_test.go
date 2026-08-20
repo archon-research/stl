@@ -34,7 +34,7 @@ func TestMain(m *testing.M) {
 // clean no-op. Depends on the position_state spine migration (#625) being on
 // main; red until it lands.
 func TestPositionMaterializer_RunOnce(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTestDatabase(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 
 	ctx := context.Background()

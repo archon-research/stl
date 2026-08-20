@@ -87,7 +87,7 @@ func init() {
 // the service constructor, which fails startup loudly.
 func splitProjections(raw string) []string {
 	var views []string
-	for _, part := range strings.Split(raw, ",") {
+	for part := range strings.SplitSeq(raw, ",") {
 		if v := strings.TrimSpace(part); v != "" {
 			views = append(views, v)
 		}
