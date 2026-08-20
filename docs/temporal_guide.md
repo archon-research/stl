@@ -8,7 +8,7 @@ entrypoints: [temporal.RunCronjob, temporal.RunWorker]
 job_dirs: [stl-verify/cmd/cronjobs, stl-verify/cmd/backfillers]
 key_files:
   - stl-verify/internal/adapters/outbound/temporal/temporal.go   # RunCronjob, CronjobConfig, newBootstrap, ensureSchedule
-  - stl-verify/internal/adapters/outbound/temporal/ondemand.go   # RunWorker, WorkerConfig (hand-triggered jobs, no schedule)
+  - stl-verify/internal/adapters/outbound/temporal/ondemand.go   # RunWorker, WorkerConfig, RegisterRunner, RunnerJob (hand-started jobs, no schedule)
   - stl-verify/internal/adapters/outbound/temporal/workflow.go   # cronjobWorkflow, cronjobActivities, Runner, RunnerFunc, ScheduledAtFromContext
   - stl-verify/internal/adapters/outbound/temporal/metrics.go    # cronjob.runs.total, cronjob.run.duration_seconds
   - stl-verify/cmd/cronjobs/offchain-price-indexer/main.go       # canonical scheduled cronjob to copy
@@ -21,7 +21,7 @@ task_recipes: [add-a-new-cronjob, add-an-on-demand-job]
 # Temporal Jobs - Developer Guide
 
 How to develop, run, and add Temporal jobs in STL Verify — both **scheduled**
-("cronjobs") and **on-demand** (hand-triggered, parameterised).
+("cronjobs") and **on-demand** (started by hand, with or without parameters).
 
 For the platform itself (where the central Temporal server lives, how to provision a
 namespace, how *other* repos onboard) see the infrastructure repo's
@@ -39,8 +39,8 @@ Do NOT edit the shared package to add a job. Adding a job = one new `main.go` + 
 
 ## How it works
 
-This section covers **scheduled** jobs. For a job triggered by hand with parameters
-(a backfill), skip to [On-demand jobs](#on-demand-jobs-no-schedule-triggered-by-hand).
+This section covers **scheduled** jobs. For a job started by hand (a backfill, a
+one-shot repair), skip to [On-demand jobs](#on-demand-jobs-no-schedule-started-by-hand).
 
 Each cronjob is a small `main.go` under `stl-verify/cmd/cronjobs/<name>/` that calls one
 shared entry point, `temporal.RunCronjob`. All the Temporal plumbing (client connection,
@@ -81,7 +81,10 @@ You normally never touch these to add a job.
 | `watcher-data-validator` | `DATA_VALIDATION_INTERVAL` | 1h | Cross-check stored block data (per chain; `SERVICE_NAME` sets the queue) |
 | `anchorage-indexer` | `ANCHORAGE_INDEX_INTERVAL` | 15m | Snapshot Anchorage collateral |
 | `maple-graphql-indexer` | `MAPLE_SYNC_INTERVAL` | 10m | Sync Maple positions via GraphQL |
-| `morpho-v2-bootstrap` | — (`ManualOnly`) | never | One-shot repair of Morpho VaultV2 vaults discovered before atomic discovery (VEC-218) |
+
+`stl-verify/cmd/cronjobs/morpho-v2-bootstrap/` sits in that directory by
+neighbourhood, not by lifecycle: it carries no schedule and is listed under
+[on-demand jobs](#current-on-demand-jobs).
 
 ### Manual-only cronjobs
 
@@ -102,18 +105,19 @@ A run measured in hours should not restart from scratch when a deploy rolls its 
 `temporal.NewActivityProgress[T]()` records a runner's progress in the activity's heartbeat
 details, which live on the Temporal server:
 
-- pass the SAME instance to `CronjobConfig.Progress` and to the runner (`Setup` closes over
-  it), because the liveness ticker beats through it — Temporal keeps only the last
-  heartbeat's details, so a bare ping in between would erase the resume point;
+- pass the SAME instance to the runner and to the `Progress` field of whichever config
+  carries it (`CronjobConfig` on a schedule, `RunnerJob` on an on-demand worker), because
+  the liveness ticker beats through it — Temporal keeps only the last heartbeat's details,
+  so a bare ping in between would erase the resume point;
 - the runner reads `LoadProgress` at the start and `SaveProgress` after each completed unit
   of work, through a port it declares itself, so the service never imports the Temporal SDK;
 - the details are readable only by a LATER ATTEMPT of the same activity, so
-  `ActivityTimeouts.MaximumAttempts` must allow more than one — and a hand re-trigger is a
-  new workflow execution, so it always starts from the beginning;
+  `ActivityTimeouts.MaximumAttempts` must allow more than one — and a hand-started rerun is
+  a new workflow execution, so it always starts from the beginning;
 - resume must be alignment-safe: record a position only once the unit that reached it is
   fully done, and scope the record so a record computed for different inputs is refused.
 
-`morpho-v2-bootstrap` is the worked example. A cronjob with nothing to resume leaves
+`morpho-v2-bootstrap` is the worked example. A job with nothing to resume leaves
 `Progress` nil and heartbeats exactly as before.
 
 ## Recipe: add a new cronjob
@@ -220,32 +224,38 @@ already covered by `alerts/vector-cronjobs.yaml`. Add job-specific data-quality 
 matching runbook sections in `docs/runbooks/` only if the generic error path cannot catch a
 silent hole (e.g. "ran successfully but wrote zero rows").
 
-## On-demand jobs (no schedule, triggered by hand)
+## On-demand jobs (no schedule, started by hand)
 
-Some work is not periodic: a backfill's range is an argument, decided by whoever
-runs it. `RunCronjob` cannot express that — `CronjobConfig` requires an interval, it
-always calls `ensureSchedule`, and `cronjobWorkflow` takes no parameters. Use
-`temporal.RunWorker` (`ondemand.go`) instead. It shares the same bootstrap
-(logging, OTel, database, client) but registers **your** workflow and creates **no
-schedule**, so the pod idles on its task queue until a run is started.
+Some work is not periodic. A backfill's range is an argument, decided by whoever
+runs it; a one-shot repair has no argument at all but must still never run
+unattended. `RunCronjob` expresses neither — `CronjobConfig` requires an interval
+and it always calls `ensureSchedule`. Use `temporal.RunWorker` (`ondemand.go`)
+instead. It shares the same bootstrap (logging, OTel, database, client) but
+registers **your** workflow and creates **no schedule**, so the pod idles on its
+task queue until a run is started.
 
 | | `RunCronjob` | `RunWorker` |
 |---|---|---|
 | Schedule | created and reconciled | none |
-| Workflow | shared `cronjobWorkflow` | yours, with typed parameters |
-| Interface you implement | `Runner` | `Register` (workflow + activities) |
+| Workflow | shared `cronjobWorkflow` | yours, with typed parameters — or the shared one via `RegisterRunner`, with none |
+| Interface you implement | `Runner` | `Register` (workflow + activities), or `Runner` again with `RegisterRunner` |
 | Started by | Temporal schedule | a human, or `temporal workflow start` |
 
-Reference implementation: `stl-verify/cmd/backfillers/offchain-price-backfill/`
-(`main.go` is the composition root; `backfill.go` holds the workflow, params and
-activity).
+Reference implementations: `stl-verify/cmd/backfillers/offchain-price-backfill/`
+for the parameterised shape (`main.go` is the composition root; `backfill.go`
+holds the workflow, params and activity), and
+`stl-verify/cmd/cronjobs/morpho-v2-bootstrap/main.go` for the parameterless one.
 
 ### Current on-demand jobs
 
-| Job (`stl-verify/cmd/backfillers/`) | Task queue | Workflow Type | Input |
+Every one of them is started the same way — a task queue, a workflow type, and
+whatever input the job declares. Nothing here has a schedule or a button.
+
+| Job | Task queue | Workflow Type | Input |
 |---|---|---|---|
-| `offchain-price-backfill` | `offchain-price-backfill` | `OffchainPriceBackfill` | `{"assets":["weth"],"from":"2020-01-01T00:00:00Z","to":"2026-08-05T00:00:00Z"}` |
-| `morpho-vault-backfill` | `morpho-vault-backfill` | `MorphoVaultBackfill` | `{"from":24765588,"to":24786366}` (or `{"to":24786366,"fromV2Deploy":true}` for the whole VaultV2 era) |
+| `cmd/backfillers/offchain-price-backfill` | `offchain-price-backfill` | `OffchainPriceBackfill` | `{"assets":["weth"],"from":"2020-01-01T00:00:00Z","to":"2026-08-05T00:00:00Z"}` |
+| `cmd/backfillers/morpho-vault-backfill` | `morpho-vault-backfill` | `MorphoVaultBackfill` | `{"from":24765588,"to":24786366}` (or `{"to":24786366,"fromV2Deploy":true}` for the whole VaultV2 era) |
+| `cmd/cronjobs/morpho-v2-bootstrap` | `morpho-v2-bootstrap` | `MorphoV2Bootstrap` | none (`{}` is accepted and ignored) |
 
 ### Shape of an on-demand job
 
@@ -271,7 +281,33 @@ func register(ctx context.Context, deps temporal.Dependencies, r worker.Registry
 }
 ```
 
-### Triggering a run from the Temporal UI
+A job with **no parameters** registers a `Runner` instead of writing a workflow.
+`RegisterRunner` puts it on the shared `cronjobWorkflow` with the bounds closed
+over, so a run starts with no input payload and still gets the retry policy, the
+timeouts and the progress-preserving heartbeat a scheduled cronjob gets:
+
+```go
+func register(ctx context.Context, deps temporal.Dependencies, r worker.Registry) error {
+	progress := temporal.NewActivityProgress[SweepProgress]()
+	runner, err := setupRunner(ctx, deps, progress)
+	if err != nil {
+		return err
+	}
+	return temporal.RegisterRunner(r, temporal.RunnerJob{
+		WorkflowType: "MyOneShotRepair",
+		Runner:       runner,
+		Timeouts:     temporal.ActivityTimeouts{StartToClose: 6 * time.Hour, MaximumAttempts: 3},
+		Progress:     progress,
+	})
+}
+```
+
+`Timeouts` is bound here rather than taken as input for the same reason the
+workflow takes none: an operator supplies nothing. Changing it is a redeploy —
+unlike a schedule, whose action bakes the bounds in until the schedule is
+deleted.
+
+### Starting a run from the Temporal UI
 
 > **Just want to backfill prices?** [backfilling-offchain-prices.md](backfilling-offchain-prices.md)
 > is the task-oriented version of this section: valid asset IDs, how to read the
@@ -288,7 +324,7 @@ Namespace is **`vector`** — the UI lands on `default`, which is empty for us.
 | Task Queue | the job's `Name` (e.g. `offchain-price-backfill`) |
 | Workflow Type | the registered name (e.g. `OffchainPriceBackfill`) |
 | Workflow ID | descriptive and unique, e.g. `backfill-weth-wbtc-2020-01-01` |
-| Input | the params struct as JSON |
+| Input | the params struct as JSON, or nothing for a job that declares none |
 
 ```json
 {"assets":["weth","wrapped-bitcoin"],"from":"2020-01-01T00:00:00Z","to":"2026-08-05T00:00:00Z"}
@@ -303,8 +339,16 @@ temporal workflow start --namespace vector \
   --input '{"assets":["weth","wrapped-bitcoin"],"from":"2020-01-01T00:00:00Z","to":"2026-08-05T00:00:00Z"}'
 ```
 
+A `RegisterRunner` job takes no `--input` at all:
+
+```bash
+temporal workflow start --namespace vector \
+  --task-queue morpho-v2-bootstrap --type MorphoV2Bootstrap \
+  --workflow-id morpho-v2-bootstrap-2026-08-20
+```
+
 The **Workflow ID is the concurrency guard**: Temporal rejects a duplicate while a
-run with that ID is in flight, so a double-click cannot launch the same backfill
+run with that ID is in flight, so a double-click cannot launch the same run
 twice. Re-running later means the same form with a new ID.
 
 ### Design rules for an on-demand job
@@ -312,6 +356,9 @@ twice. Re-running later means the same form with a new ID.
 1. **Fan out one activity per unit of work**, not one activity for the whole job.
    The backfill uses one per (asset, 30-day chunk) — about 162 for a six-year range
    — so a failure at chunk 140 retries that chunk instead of redoing 139 good ones.
+   A `RegisterRunner` job is the deliberate exception: it is one activity, and its
+   resume point lives in that activity's heartbeat details instead of in workflow
+   history (see [Resuming a long run](#resuming-a-long-run-after-a-pod-kill)).
 2. **Make the unit idempotent.** Activities retry, and an operator will re-run
    overlapping ranges. The backfill upserts `ON CONFLICT DO NOTHING`, which makes a
    retry free — but note the scope: `offchain_token_price`'s PK includes
@@ -343,7 +390,7 @@ twice. Re-running later means the same form with a new ID.
 ### Deploying one
 
 A long-running `Deployment` with `replicas: 1` (not a k8s `Job`): it has to poll the
-task queue to receive a manual trigger. Model it on
+task queue to receive a hand-started run. Model it on
 `k8s/base/offchain-price-backfill/` — including its `strategy: {type: Recreate}`, so a
 rollout never runs two pods against the same task queue.
 
@@ -368,6 +415,7 @@ make dev-env                                 # generate cmd/cronjobs/*/ and back
 make run-cronjob-offchain-price-indexer      # run one cronjob, sourcing its .env
 make run-backfiller-offchain-price-backfill  # run the on-demand worker locally
 make run-backfiller-morpho-vault-backfill    # ditto; reads the real staging raw bucket
+make run-cronjob-solo NAME=morpho-v2-bootstrap  # ditto, with the cluster pod scaled to 0
 ```
 
 An on-demand worker started this way registers nothing on a schedule and simply idles

@@ -29,11 +29,11 @@
 #
 # Five services are EXCLUDED by service_name: maple-graphql-indexer, which has
 # richer dedicated rules in vector-indexers.yaml (VEC-320), and the four
-# trigger-only jobs — offchain-price-backfill, reference-capital-backfill and
-# morpho-vault-backfill (on-demand) and morpho-v2-bootstrap (manual-only) — see
+# on-demand jobs — offchain-price-backfill, reference-capital-backfill,
+# morpho-vault-backfill and morpho-v2-bootstrap, none of which carries a schedule — see
 # VectorCronjobAllRunsFailing for why "no successes in an hour" is their healthy
 # state. Every other cronjob, including any added later, is covered
-# automatically; trigger-only workers are covered by VectorCronjobRunFailing and
+# automatically; on-demand workers are covered by VectorCronjobRunFailing and
 # VectorOnDemandWorkerDown instead.
 #
 # Severity → routing (per the alerting routing spec):
@@ -92,11 +92,10 @@ groups:
         # Errors > 0 AND zero successes over 1h => the job is consistently
         # failing, not flapping.
         #
-        # Trigger-only jobs — on-demand workers (temporal.RunWorker:
-        # offchain-price-backfill, reference-capital-backfill,
-        # morpho-vault-backfill) and manual-only
-        # cronjobs (morpho-v2-bootstrap) — are excluded: they run only when a
-        # human starts them, so "zero successes in the last hour" is their
+        # On-demand jobs (temporal.RunWorker: offchain-price-backfill,
+        # reference-capital-backfill, morpho-vault-backfill,
+        # morpho-v2-bootstrap) are excluded: they run only
+        # when a human starts them, so "zero successes in the last hour" is their
         # healthy state and a single failed run is by definition
         # errors=1/successes=0, which would page critical for a run the operator
         # is already watching. They still emit
@@ -170,14 +169,12 @@ groups:
         # VectorMapleIndexerDown). When a new SCHEDULED cronjob ships, add its
         # Deployment name to both regexes below.
         #
-        # On-demand workers (temporal.RunWorker) and manual-only cronjobs (a
-        # paused, interval-less schedule fired by an operator — morpho-v2-bootstrap)
-        # are deliberately NOT listed here. This rule pages because a dead
-        # scheduled worker means ticks are firing into the void and data is going
-        # stale. Neither of those has a schedule, so nothing is missed while it is
-        # down — only the ability to start a new run. Paging for that would invert
-        # the severity, since an actually-failing run reaches only
-        # VectorCronjobRunFailing (warning). They are covered by
+        # On-demand workers (temporal.RunWorker) are deliberately NOT listed here.
+        # This rule pages because a dead scheduled worker means ticks are firing
+        # into the void and data is going stale. They carry no schedule, so
+        # nothing is missed while one is down — only the ability to start a new
+        # run. Paging for that would invert the severity, since an actually-failing
+        # run reaches only VectorCronjobRunFailing (warning). They are covered by
         # VectorOnDemandWorkerDown below instead.
         expr: |
           (
@@ -216,8 +213,8 @@ groups:
       # WARNING — an on-demand worker is unavailable (nothing is going stale)
       # -----------------------------------------------------------------------
       - alert: VectorOnDemandWorkerDown
-        # The availability rule for temporal.RunWorker jobs and manual-only
-        # cronjobs, split from VectorCronjobWorkerDown because the impact is
+        # The availability rule for temporal.RunWorker jobs, split from
+        # VectorCronjobWorkerDown because the impact is
         # categorically different: these carry no schedule, so a dead pod misses
         # no ticks and produces no stale data. The only consequence is that a run
         # cannot be STARTED, which is worth a slack message and not a 3am page.

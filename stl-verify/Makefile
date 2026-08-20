@@ -2006,13 +2006,16 @@ run-cronjob-%:
 
 # Run a cronjob's worker locally as the ONLY worker on its Temporal task queue.
 #
-# Local and in-cluster workers share the task queue named after the job, so a trigger is
-# dealt to whichever polls first — usually the in-cluster pod, running an image built from
-# whatever commit was current when it was loaded. Scaling it to zero is what makes a local
-# run actually test the local code. The cluster worker is restored on exit, Ctrl-C included.
+# Local and in-cluster workers share the task queue named after the job, so a started run
+# is dealt to whichever polls first — usually the in-cluster pod, running an image built
+# from whatever commit was current when it was loaded. Scaling it to zero is what makes a
+# local run actually test the local code. The cluster worker is restored on exit, Ctrl-C
+# included.
 #
 # Usage: make run-cronjob-solo NAME=morpho-v2-bootstrap
-#        (then, from another shell) make temporal-trigger SCHEDULE=morpho-v2-bootstrap
+#        (then, from another shell, for a job with no schedule) make temporal-cli \
+#          ARGS="workflow start --task-queue morpho-v2-bootstrap --type MorphoV2Bootstrap \
+#                --workflow-id morpho-v2-bootstrap-local"
 run-cronjob-solo:
 	@test -n "$(NAME)" || { echo "ERROR: NAME is required. Example: make run-cronjob-solo NAME=morpho-v2-bootstrap"; exit 1; }
 	@echo "==> Handing the $(NAME) task queue to a local worker (scaling deployment/$(NAME) to 0)..."
@@ -2409,7 +2412,7 @@ REPLICAS ?= 1
 
 # Scale one in-cluster Deployment down and back up. The reason this pair exists is
 # Temporal task queues: an in-cluster worker and a local one poll the SAME queue, so a
-# triggered run lands wherever it lands unless the cluster worker is out of the way.
+# started run lands wherever it lands unless the cluster worker is out of the way.
 # run-cronjob-solo does both around a local run; use these directly for a worker whose
 # local process you manage yourself.
 # Usage: make kind-scale-down-morpho-v2-bootstrap
@@ -2437,30 +2440,31 @@ TEMPORAL_ADDRESS ?= temporal-server.$(TEMPORAL_K8S_NS):7233
 temporal_cli = kubectl --context=$(KUBE_CONTEXT) exec -n $(TEMPORAL_K8S_NS) deployment/temporal-server -- \
 	temporal --address $(TEMPORAL_ADDRESS) --namespace $(TEMPORAL_NAMESPACE)
 
-require_schedule = test -n "$(SCHEDULE)" || { echo "ERROR: SCHEDULE is required. Example: make $@ SCHEDULE=morpho-v2-bootstrap"; exit 1; }
+require_schedule = test -n "$(SCHEDULE)" || { echo "ERROR: SCHEDULE is required. Example: make $@ SCHEDULE=offchain-price-indexer"; exit 1; }
 
 # List every schedule registered by a cronjob worker.
 temporal-schedules:
 	@$(temporal_cli) schedule list
 
 # Show one schedule: its action, whether it is paused, and how many runs it has taken.
-# Usage: make temporal-schedule-describe SCHEDULE=morpho-v2-bootstrap
+# Usage: make temporal-schedule-describe SCHEDULE=offchain-price-indexer
 temporal-schedule-describe:
 	@$(require_schedule)
 	@$(temporal_cli) schedule describe --schedule-id $(SCHEDULE)
 
-# Start exactly one run of a schedule. This is the "button" a ManualOnly cronjob documents:
-# the schedule is created paused with no interval, and triggering it leaves it paused.
-# Usage: make temporal-trigger SCHEDULE=morpho-v2-bootstrap
+# Start exactly one run of a schedule, off-cycle. Only scheduled cronjobs have one;
+# an on-demand job is started with `workflow start` via temporal-cli below.
+# Usage: make temporal-trigger SCHEDULE=offchain-price-indexer
 temporal-trigger:
 	@$(require_schedule)
 	@$(temporal_cli) schedule trigger --schedule-id $(SCHEDULE)
 
 # Show a workflow execution's status. A schedule's runs use the workflow ID
-# "scheduled-<schedule id>", which is what a cronjob's ensureSchedule registers.
-# Usage: make temporal-workflow-describe WORKFLOW=scheduled-morpho-v2-bootstrap
+# "scheduled-<schedule id>", which is what a cronjob's ensureSchedule registers; a
+# hand-started run uses whatever ID the starter gave it.
+# Usage: make temporal-workflow-describe WORKFLOW=scheduled-offchain-price-indexer
 temporal-workflow-describe:
-	@test -n "$(WORKFLOW)" || { echo "ERROR: WORKFLOW is required. Example: make temporal-workflow-describe WORKFLOW=scheduled-morpho-v2-bootstrap"; exit 1; }
+	@test -n "$(WORKFLOW)" || { echo "ERROR: WORKFLOW is required. Example: make temporal-workflow-describe WORKFLOW=scheduled-offchain-price-indexer"; exit 1; }
 	@$(temporal_cli) workflow describe --workflow-id $(WORKFLOW)
 
 # Escape hatch for anything the targets above do not cover.

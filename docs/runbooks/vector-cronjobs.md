@@ -16,8 +16,8 @@ into TimescaleDB (or validates stored data). Current cronjobs:
 | `offchain-price-backfill` | `offchain-price-backfill` | **on demand** | Backfills CoinGecko price history for a range supplied at trigger time |
 | `reference-capital-indexer` | `reference-capital-indexer` | 15m | Sky Star-monitor reference risk capital; the only writer of forward reference history |
 | `reference-capital-backfill` | `reference-capital-backfill` | **on demand** | Seeds the reference balance-sheet history predating the syncer's first run |
-| `morpho-vault-backfill` | `morpho-vault-backfill` | **on demand** | Discovers Morpho vaults from the archived S3 receipts and replays their VaultV2 structured events, for a block range supplied at trigger time (VEC-218) |
-| `morpho-v2-bootstrap` | `morpho-v2-bootstrap` | **manual only** | One-shot repair of Morpho VaultV2 vaults discovered before atomic discovery (VEC-218) |
+| `morpho-vault-backfill` | `morpho-vault-backfill` | **on demand** | Discovers Morpho vaults from the archived S3 receipts and replays their VaultV2 structured events, for a block range supplied at start time (VEC-218) |
+| `morpho-v2-bootstrap` | `morpho-v2-bootstrap` | **on demand** | One-shot repair of Morpho VaultV2 vaults discovered before atomic discovery (VEC-218) |
 
 > `maple-graphql-indexer` is also a cronjob but has its own richer rules — see
 > [vector-indexers.md](vector-indexers.md), not this runbook.
@@ -33,29 +33,28 @@ cronjob, `VectorOnDemandWorkerDown` for an on-demand worker.
 > `kube_deployment_spec_replicas > 0`, so a deliberately scaled-to-zero deployment
 > does not page (see that section).
 
-> `morpho-v2-bootstrap` is **manual only**: its Temporal schedule is created paused
-> and with no interval, so it produces nothing until an operator triggers it. Its
-> worker idles ~100% of the time and no data goes stale while it is down, so it is
-> classed with the on-demand workers: `VectorOnDemandWorkerDown` (warning) covers
-> its availability, and it is excluded from `VectorCronjobAllRunsFailing` — a job
-> that runs once on demand produces only errors and no success from a single failed
-> run (up to one error per attempt, and it is allowed three), which would page
-> critical for a run an operator is already watching. That failure still fires
-> `VectorCronjobRunFailing` (warning), the right severity for it. If a trigger does
-> not start, check the pod first
-> (`kubectl -n vector get pods -l app=morpho-v2-bootstrap`).
+> `morpho-v2-bootstrap` carries **no schedule**: it produces nothing until an
+> operator starts a run on its task queue. Its worker idles ~100% of the time and
+> no data goes stale while it is down, so it is classed with the other on-demand
+> workers: `VectorOnDemandWorkerDown` (warning) covers its availability, and it is
+> excluded from `VectorCronjobAllRunsFailing` — a job that runs once on demand
+> produces only errors and no success from a single failed run (up to one error per
+> attempt, and it is allowed three), which would page critical for a run an
+> operator is already watching. That failure still fires `VectorCronjobRunFailing`
+> (warning), the right severity for it. If a run does not start, check the pod
+> first (`kubectl -n vector get pods -l app=morpho-v2-bootstrap`).
 
-> **A killed morpho-v2-bootstrap run resumes; a re-triggered one starts over.** The
+> **A killed morpho-v2-bootstrap run resumes; a newly started one starts over.** The
 > sweep records its position in the activity's Temporal heartbeat details after
 > every completed block chunk, and the activity is allowed 3 attempts. A worker
 > killed mid-run — any deploy rolls this Deployment — is retried by Temporal and
 > the retry picks up at the next chunk, so an interrupted run costs minutes, not
 > the hours of `eth_getLogs` it had already done. Heartbeat details belong to one
-> workflow execution, so a run that goes red and is **re-triggered by hand starts
-> from the factory deploy block again**: that is a fresh execution with no
-> heartbeat history. It is safe (every write is idempotent), just slow. A run that
-> is red after its attempts is the operator signal — the cause is deterministic and
-> no further retry will clear it.
+> workflow execution, so a run that goes red and is **started again by hand starts
+> from the factory deploy block**: that is a fresh execution with no heartbeat
+> history. It is safe (every write is idempotent), just slow. A run that is red
+> after its attempts is the operator signal — the cause is deterministic and no
+> further retry will clear it.
 
 General triage:
 
@@ -65,7 +64,8 @@ kubectl -n vector logs deploy/<deployment> --tail=200
 ```
 
 Temporal UI (vector namespace) → Schedules → `<cronjob>` shows recent runs and
-the failure stack for each.
+the failure stack for each. An on-demand job has no schedule; look under
+Workflows instead, filtered by its Workflow Type.
 
 ---
 
@@ -179,9 +179,8 @@ and a fresh `status="success"` run in `cronjob_runs_total`.
 
 ### What it means
 
-A trigger-only Deployment — a `temporal.RunWorker` job, or a `ManualOnly` cronjob
-whose schedule is paused with no interval — has had <1 available replica for
->30m. These workers carry **no schedule**, so unlike `VectorCronjobWorkerDown`
+A start-on-demand Deployment — a `temporal.RunWorker` job — has had <1 available
+replica for >30m. These workers carry **no schedule**, so unlike `VectorCronjobWorkerDown`
 nothing is ticking into the void and no data is going stale. The only impact is
 that a new run cannot be started until the pod is back. Warning severity for that
 reason.
@@ -444,6 +443,45 @@ correctness.
 
 ---
 
+### Special case: `morpho-v2-bootstrap` (on-demand, no schedule)
+
+A third **on-demand** Temporal worker (`temporal.RunWorker`). Everything said
+about `offchain-price-backfill` above applies — nothing is missed while it is
+down, and it is excluded from `VectorCronjobAllRunsFailing` for the same reason.
+
+**How to start a run.** Temporal UI (namespace **`vector`**) →
+**Start Workflow**:
+
+| Field | Value |
+|---|---|
+| Task Queue | `morpho-v2-bootstrap` |
+| Workflow Type | `MorphoV2Bootstrap` |
+| Workflow ID | descriptive and unique, e.g. `morpho-v2-bootstrap-2026-08-20` |
+| Input | leave empty |
+
+There is nothing to supply: the run reads the chain from its ConfigMap, the V2
+vault set from the database, and pins its own finalized head. The equivalent CLI
+call, which is how the local `make run-cronjob-solo NAME=morpho-v2-bootstrap`
+worker is driven too:
+
+```bash
+temporal workflow start --namespace vector \
+  --task-queue morpho-v2-bootstrap --type MorphoV2Bootstrap \
+  --workflow-id morpho-v2-bootstrap-2026-08-20
+```
+
+**What a run does, and how long it takes.** One activity for the whole job: sweep
+`eth_getLogs` from the VaultV2 factory deploy block to a pinned finalized block
+for the 10 VaultV2 governance events, replay each through the live handler path,
+then enumerate every V2 vault's current adapter set and snapshot each adapter's
+`realAssets()`. A full mainnet sweep runs for hours, which is why the activity is
+bounded at 6h `StartToClose` / 12h `ScheduleToClose` with 3 attempts and a
+60 s heartbeat — all compiled into the worker, so an operator supplies none of it.
+Unlike the backfill, progress lives in the activity's heartbeat details rather
+than in workflow history; see the resume note at the top of this runbook.
+
+---
+
 ## morpho-v2-bootstrap fails on an adapter
 
 **Nothing here needs rows reconciling by hand.** Adapter membership is an
@@ -468,10 +506,10 @@ rather than defaulting a type. It clears on retry: the retry re-reads and probes
 It records one untyped `is_member = false` observation, which is the truthful
 record of learning about an adapter from its own de-registration.
 
-**Recovery.** Let Temporal's retries run; if the run is still red, re-trigger from
-the Temporal UI (a hand re-trigger starts from the factory deploy block — safe,
-just slow). Escalate to the Vector team if the same non-transient error repeats
-across triggers: that is a code defect, not an operational state.
+**Recovery.** Let Temporal's retries run; if the run is still red, start another
+one (see the section above — a fresh run starts from the factory deploy block,
+safe but slow). Escalate to the Vector team if the same non-transient error
+repeats across runs: that is a code defect, not an operational state.
 
 This is a property of the shared VaultV2 replay path, not of the bootstrap alone
 — `morpho-vault-backfill` replays through the same handlers and has the same
@@ -489,10 +527,10 @@ Failure + all-failing alerts are automatic (they group by `service_name`).
 1. Add the new **Deployment name** to the `deployment=~"..."` regex in the
    availability rule that matches its lifecycle — `VectorCronjobWorkerDown` for
    a scheduled cronjob, `VectorOnDemandWorkerDown` for anything that only runs
-   when a human triggers it (a `temporal.RunWorker` job, or a `ManualOnly`
-   cronjob with a paused interval-less schedule like `morpho-v2-bootstrap`).
+   when a human starts it (any `temporal.RunWorker` job, whether it takes
+   parameters like `morpho-vault-backfill` or none like `morpho-v2-bootstrap`).
    (The kube-state-metrics label is the Deployment name, which may differ from
-   `service_name` — e.g. `spark-anchorage-indexer`.) A trigger-only worker must
+   `service_name` — e.g. `spark-anchorage-indexer`.) An on-demand worker must
    ALSO be added to the `service_name!=` exclusions in
    `VectorCronjobAllRunsFailing`, or its idle state pages.
 2. Add a row to the table at the top of this runbook.
