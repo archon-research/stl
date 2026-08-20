@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"os"
 	"testing"
 	"time"
 
@@ -13,6 +14,19 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
+var sharedDSN string
+
+func TestMain(m *testing.M) {
+	dsn, cleanup := testutil.StartTimescaleDBForMain()
+	sharedDSN = dsn
+
+	code := m.Run()
+
+	cleanup()
+	code = testutil.CheckGoroutineLeaks(code)
+	os.Exit(code)
+}
+
 // TestRunBootstrap_CopiesHistoryAndSeedsParity exercises the correctness-critical
 // bootstrap binary end to end: it seeds a raw row, clears the change queue so only
 // the bootstrap (not the worker) can materialise it, runs runBootstrap, and asserts
@@ -20,7 +34,7 @@ import (
 // covers the binary's window loop, single-connection session setup, the
 // _bootstrap_<t>() copy, and the _parity_verify_all ledger seed.
 func TestRunBootstrap_CopiesHistoryAndSeedsParity(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	pool, _, cleanup := testutil.SetupTestDatabase(t, sharedDSN)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -62,7 +76,7 @@ func TestRunBootstrap_CopiesHistoryAndSeedsParity(t *testing.T) {
 // fixed default, so history older than any hardcoded start is still copied. The seeded
 // row predates the old 2025-01-01 default, so a correct derive copies it and parity is 0.
 func TestRunBootstrap_DerivesStartFromEarliestRawRow(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	pool, _, cleanup := testutil.SetupTestDatabase(t, sharedDSN)
 	defer cleanup()
 
 	ctx := context.Background()

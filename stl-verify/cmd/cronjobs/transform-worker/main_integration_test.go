@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"os"
 	"slices"
 	"testing"
 	"time"
@@ -14,6 +15,19 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
+
+var sharedDSN string
+
+func TestMain(m *testing.M) {
+	dsn, cleanup := testutil.StartTimescaleDBForMain()
+	sharedDSN = dsn
+
+	code := m.Run()
+
+	cleanup()
+	code = testutil.CheckGoroutineLeaks(code)
+	os.Exit(code)
+}
 
 // TestTransformWorker_RunOnce migrates a fresh DB (which creates the transformed
 // schema, its _sources rows, the change queues, the enqueue triggers, the _run
@@ -25,7 +39,7 @@ import (
 // idempotency is proven at the SQL-function level (VEC-484) and the RunOnce
 // control flow by service_test.go.
 func TestTransformWorker_RunOnce(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	pool, _, cleanup := testutil.SetupTestDatabase(t, sharedDSN)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -95,7 +109,7 @@ func TestTransformWorker_RunOnce(t *testing.T) {
 // must land in transformed.morpho_market_state (count 2). A block_number or
 // build_id ">=" watermark would have dropped the backfill row (count 1).
 func TestTransformWorker_QueueCapturesBackfill(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	pool, _, cleanup := testutil.SetupTestDatabase(t, sharedDSN)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -244,7 +258,7 @@ func countTransformedMarketState(ctx context.Context, t *testing.T, pool *pgxpoo
 // trigger bumps the version -- lands as a distinct transformed row via the enqueue
 // trigger (not overwriting the original).
 func TestTransformWorker_CorrectionReEnqueue(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	pool, _, cleanup := testutil.SetupTestDatabase(t, sharedDSN)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -289,7 +303,7 @@ func TestTransformWorker_CorrectionReEnqueue(t *testing.T) {
 // copies pre-existing history (written while the enqueue trigger was absent) and
 // that re-running it is a guarded no-op.
 func TestTransformWorker_BootstrapIdempotent(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	pool, _, cleanup := testutil.SetupTestDatabase(t, sharedDSN)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -335,7 +349,7 @@ func TestTransformWorker_BootstrapIdempotent(t *testing.T) {
 // rows), so RunTable must loop: the bounded _run consumes drainBatch rows, then
 // the remainder, until the queue is empty and every row is materialized.
 func TestTransformWorker_MultiIterationDrain(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTimescaleDB(t)
+	pool, _, cleanup := testutil.SetupTestDatabase(t, sharedDSN)
 	defer cleanup()
 
 	ctx := context.Background()

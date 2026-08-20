@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.prime_debt_repository import PrimeDebtRepository
-from app.api._validators import EthAddressParam
+from app.api._validators import PrimeOrProxyAddressPathParam
 from app.api.deps import get_engine
 from app.api.time_series import TimeSeriesWindow, build_window, get_time_series_query_params
 from app.domain.entities.allocation import EthAddress
@@ -21,7 +21,10 @@ class PrimeDebtSnapshotResponse(BaseModel):
     """A single observed prime-debt position at a point in time."""
 
     prime_address: str = Field(
-        description="Prime's 0x-prefixed Ethereum address.",
+        description=(
+            "The prime's on-chain vault address — the same value served as `prime_vault_address` "
+            "elsewhere in this API (e.g. `/v1/primes`)."
+        ),
         examples=["0x1234567890abcdef1234567890abcdef12345678"],
     )
     prime_name: str = Field(description="Human-readable prime name.", examples=["Acme Prime"])
@@ -99,7 +102,7 @@ async def _get_prime_debt_service(engine: AsyncEngine = Depends(get_engine)) -> 
     ),
 )
 async def list_prime_debt_snapshots(
-    prime_id: EthAddressParam,
+    prime_id: PrimeOrProxyAddressPathParam,
     time_series: TimeSeriesQuery = Depends(get_time_series_query_params),
     limit: int = Query(100, ge=1, le=500, description="Max snapshots returned (default 100, max 500)."),
     service: PrimeDebtService = Depends(_get_prime_debt_service),

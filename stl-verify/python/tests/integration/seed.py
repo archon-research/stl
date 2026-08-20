@@ -349,21 +349,23 @@ async def insert_allocation_position(
     underlying_token_id: int | None = None,
     created_at: dt.datetime | None = None,
     tx_amount: int | Decimal | None = None,
+    chain_id: int = 1,
 ) -> None:
-    """Insert one allocation_position row (chain_id=1; tx_amount defaults to balance).
+    """Insert one allocation_position row (chain_id defaults to mainnet; tx_amount defaults to balance).
 
     ``underlying_value``/``underlying_token_id`` default to NULL (both-or-neither,
     matching the tracker's domain invariant) so existing callers are unaffected.
     ``created_at`` defaults to the column's NOW(); pass it to place rows in
     specific buckets for the time-bucketed reads. Pass ``tx_amount`` when a flow
-    scenario needs the tx magnitude decoupled from the post-tx balance.
+    scenario needs the tx magnitude decoupled from the post-tx balance. Pass
+    ``chain_id`` to seed a position on a non-mainnet ALM proxy (e.g. avalanche).
     """
     await conn.execute(
         "INSERT INTO allocation_position "
         "(chain_id, token_id, prime_id, proxy_address, balance, "
         "block_number, block_version, tx_hash, log_index, tx_amount, direction, "
         "underlying_value, underlying_token_id, created_at) "
-        "VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $13, $9, $10, $11, COALESCE($12, NOW()))",
+        "VALUES ($14, $1, $2, $3, $4, $5, $6, $7, $8, $13, $9, $10, $11, COALESCE($12, NOW()))",
         token_id,
         prime_id,
         bytes.fromhex(proxy_hex),
@@ -377,6 +379,7 @@ async def insert_allocation_position(
         underlying_token_id,
         created_at,
         Decimal(tx_amount) if tx_amount is not None else Decimal(balance),
+        chain_id,
     )
 
 
@@ -391,8 +394,8 @@ async def insert_allocation_position(
 # migration-seeded primes (spark/grove/obex) in ``/v1/primes``.
 # ---------------------------------------------------------------------------
 
-# The proxy_kind classifier marks an address as ALM unless it matches a known
-# sub-proxy.  Any address that is NOT the Spark sub-proxy will do.
+# app.domain.prime_registry.classify_proxy marks an address as ALM unless it
+# matches a known sub-proxy.  Any address that is NOT the Spark sub-proxy will do.
 GHOST_CLOSED_PROXY_HEX = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"  # all positions closed to zero
 GHOST_SWEEP_PROXY_HEX = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"  # zero sweep rows newer than the non-zero row
 GHOST_OPEN_PROXY_HEX = "cccccccccccccccccccccccccccccccccccccccc"  # open position with older zero rows
@@ -2062,3 +2065,147 @@ async def _seed_anchorage_other_prime(conn: asyncpg.Connection, token_id: int) -
         snapshot_time=_ANCHORAGE_OTHER_SNAPSHOT,
         asset_type="BTC",
     )
+
+
+# ---------------------------------------------------------------------------
+# Prime fan-out seed
+#
+# The REAL axis-synome spark proxies, so app.domain.prime_registry recognises them
+# and the API's prime-level aggregation is actually exercised. Spark holds a priced
+# receipt-token position on mainnet and a bare holding on avalanche, so the
+# avalanche proxy's own exposure is zero while the prime-wide figure is not — the
+# difference the fan-out tests assert on.
+# ---------------------------------------------------------------------------
+
+SPARK_MAINNET_ALM_HEX = "1601843c5e9bc251a3272907010afa41fa18347e"
+SPARK_AVALANCHE_ALM_HEX = "ece6b0e8a54c2f44e066fbb9234e7157b15b7fec"
+SPARK_SUB_PROXY_HEX = "3300f198988e4c9c63f75df86de36421f06af8c4"
+# Absent from the pinned contract, and lower than SPARK_MAINNET_ALM_HEX.
+SPARK_OFF_CONTRACT_ALM_HEX = "0a11ce0000000000000000000000000000000001"
+
+_FAN_OUT_USDC_HEX = "b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0"
+_FAN_OUT_AUSDC_HEX = "c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1"
+_FAN_OUT_AVAX_TOKEN_HEX = "d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2"
+_FAN_OUT_TX = "1a" * 32
+_FAN_OUT_TX_AVAX = "1b" * 32
+_FAN_OUT_TX_TREASURY = "1c" * 32
+_FAN_OUT_TX_OFF_CONTRACT = "1d" * 32
+
+# Must match allocation_position_repository._USDS_ADDRESS_HEX: get_latest_total_capital_usd
+# filters the treasury read on this exact address, and migration 20260204_110000 already
+# seeds a USDS token row here, so its id is resolved by SELECT rather than inserted.
+_FAN_OUT_USDS_HEX = "dc035d45d973e3ec169d2276ddab16f1e407384f"
+
+# aUSDC balance 1000 against a USDC price of 1 USD.
+_FAN_OUT_BALANCE = Decimal("1000")
+_FAN_OUT_TREASURY = Decimal("4000")
+FAN_OUT_PROXY_EXPOSURE_USD = "0"
+FAN_OUT_PRIME_EXPOSURE_USD = "1000.000000"
+
+
+async def seed_prime_fan_out(db_url: str, *, with_off_contract_proxy: bool = False) -> None:
+    """Seed spark's real mainnet + avalanche ALM proxies and its SubProxy treasury.
+
+    ``with_off_contract_proxy`` adds a third proxy holding rows under spark's
+    ``prime_id`` at an address the pinned axis-synome contract does not list — the
+    state while a newly deployed tracker runs ahead of the contract pin. Its
+    address sorts *below* the mainnet proxy's, so a primary picked by address
+    alone would attribute spark's prime-scoped rows to it.
+    """
+    conn = await asyncpg.connect(db_url)
+    try:
+        async with conn.transaction():
+            spark_id = await conn.fetchval("SELECT id FROM prime WHERE name = 'spark'")
+            protocol_id = await conn.fetchval("SELECT id FROM protocol WHERE name = 'Aave V3' AND chain_id = 1")
+            oracle_id = await conn.fetchval("SELECT id FROM oracle WHERE name = 'aave_v3'")
+
+            usdc_id = await insert_token(conn, "USDC", 6, bytes.fromhex(_FAN_OUT_USDC_HEX))
+            ausdc_id = await insert_token(conn, "aUSDC", 6, bytes.fromhex(_FAN_OUT_AUSDC_HEX))
+            await insert_receipt_token_row(
+                conn,
+                protocol_id=protocol_id,
+                underlying_token_id=usdc_id,
+                address=bytes.fromhex(_FAN_OUT_AUSDC_HEX),
+                symbol="aUSDC",
+            )
+            await conn.execute(
+                "INSERT INTO onchain_token_price "
+                "(token_id, oracle_id, block_number, block_version, timestamp, price_usd) "
+                "VALUES ($1, $2, 1000, 0, NOW(), $3)",
+                usdc_id,
+                oracle_id,
+                Decimal(1),
+            )
+            await insert_oracle_asset(conn, oracle_id, usdc_id)
+
+            await insert_allocation_position(
+                conn,
+                token_id=ausdc_id,
+                prime_id=spark_id,
+                proxy_hex=SPARK_MAINNET_ALM_HEX,
+                balance=_FAN_OUT_BALANCE,
+                block=1000,
+                tx=_FAN_OUT_TX,
+                direction="in",
+            )
+
+            avax_token_id = await insert_token(conn, "JAAA", 18, bytes.fromhex(_FAN_OUT_AVAX_TOKEN_HEX))
+            await insert_allocation_position(
+                conn,
+                token_id=avax_token_id,
+                prime_id=spark_id,
+                proxy_hex=SPARK_AVALANCHE_ALM_HEX,
+                balance=Decimal("5"),
+                block=1001,
+                tx=_FAN_OUT_TX_AVAX,
+                direction="in",
+                chain_id=43114,
+            )
+
+            # SubProxy treasury: the prime-wide Total Risk Capital denominator.
+            # Without it, get_latest_total_capital_usd returns None and
+            # total_risk_capital_usd / prime_encumbrance_ratio go null, so this
+            # keeps the fixture shaped like a real prime even though no test
+            # here asserts on those fields directly.
+            usds_id = await conn.fetchval(
+                "SELECT id FROM token WHERE chain_id = 1 AND address = $1",
+                bytes.fromhex(_FAN_OUT_USDS_HEX),
+            )
+            if usds_id is None:
+                raise RuntimeError("USDS token not seeded by migrations")
+            await insert_allocation_position(
+                conn,
+                token_id=usds_id,
+                prime_id=spark_id,
+                proxy_hex=SPARK_SUB_PROXY_HEX,
+                balance=_FAN_OUT_TREASURY,
+                block=1002,
+                tx=_FAN_OUT_TX_TREASURY,
+                direction="in",
+            )
+
+            await _insert_anchorage_snapshot(
+                conn,
+                prime_id=spark_id,
+                package_id="FAN-OUT-PKG",
+                active=True,
+                exposure_value=Decimal("250000000"),
+                package_value=Decimal("309672229"),
+                asset_quantity=Decimal("4722.61"),
+                snapshot_time=ANCHORAGE_LATEST_SNAPSHOT,
+            )
+
+            if with_off_contract_proxy:
+                await insert_allocation_position(
+                    conn,
+                    token_id=avax_token_id,
+                    prime_id=spark_id,
+                    proxy_hex=SPARK_OFF_CONTRACT_ALM_HEX,
+                    balance=Decimal("7"),
+                    block=1003,
+                    tx=_FAN_OUT_TX_OFF_CONTRACT,
+                    direction="in",
+                    chain_id=8453,
+                )
+    finally:
+        await conn.close()

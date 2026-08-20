@@ -28,7 +28,7 @@ jobs:
           python-version-file: '.python-version'
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           enable-cache: true
           working-directory: stl-verify/python
@@ -43,6 +43,18 @@ jobs:
       - name: Lint
         if: ${{ !cancelled() }}
         run: make lint
+
+      # The committed schema is what the TS UI's typegen consumes and what the
+      # deprecation notices on this API are published through, so a response-model
+      # change that skips the regeneration silently breaks both.
+      - name: OpenAPI schema is in sync with the response models
+        if: ${{ !cancelled() }}
+        run: |
+          make export-openapi-schema
+          if ! git diff --exit-code -- ../ts/ui/src/generated/openapi-schema.json; then
+            echo "::error::openapi-schema.json is stale — run 'make export-openapi-schema' in stl-verify/python and commit the result"
+            exit 1
+          fi
 
   test:
     name: Tests (Python)
@@ -66,7 +78,7 @@ jobs:
           python-version-file: '.python-version'
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           enable-cache: true
           working-directory: stl-verify/python

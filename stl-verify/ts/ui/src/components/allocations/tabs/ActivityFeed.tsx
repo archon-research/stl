@@ -60,6 +60,10 @@ type ActivityFeedProps = {
   selectedReceiptToken?: Allocation | null;
   searchQuery?: string;
   showAllPrimes?: boolean;
+  // Page mode only: selectedPrime always resolves to the primary proxy, so a
+  // network filter naming one of the prime's other chains needs the same
+  // chain-mismatch guard the drawer already has (see isChainMismatch below).
+  isMultiChainPrime?: boolean;
   tokenOptions?: string[];
   chainLabels?: ChainLabelLookup;
   // External range control: provided by parent-owned top bar picker.
@@ -131,6 +135,19 @@ function buildActivityEventKey(event: AllocationActivity): string {
 
 function buildTxCacheKey(txHash: string, chainId: number): string {
   return `${chainId}:${txHash.toLowerCase()}`;
+}
+
+// Shared by requestFilters and the page-mode chain-mismatch guard so the two
+// cannot parse the network param differently.
+function parseNetworkChainId(
+  selectedNetwork: string | null | undefined,
+): number | undefined {
+  if (!selectedNetwork || selectedNetwork.length === 0) {
+    return undefined;
+  }
+
+  const parsed = Number(selectedNetwork);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function ProtocolEventCard({ event }: { event: ProtocolEvent }) {
@@ -423,8 +440,51 @@ export function ActivityFeed({
   externalRangePreset,
   externalTimeRange,
   onRangeChange: onExternalRangeChange,
+  isMultiChainPrime = false,
 }: ActivityFeedProps) {
   const isPageMode = mode === 'page';
+  const networkChainId = parseNetworkChainId(selectedNetwork);
+  // Drawer mode ANDs prime_id (selectedPrime, always the primary proxy) with
+  // the focused allocation's own chain_id server-side. For a non-mainnet
+  // allocation those two no longer describe the same proxy, so the request
+  // matches nothing and silently renders "No Activity Found" — indistinguishable
+  // from a position that genuinely has no history.
+  const isDrawerChainMismatch =
+    !isPageMode &&
+    selectedPrime !== null &&
+    selectedReceiptToken !== null &&
+    selectedReceiptToken.chain_id !== selectedPrime.chain_id;
+  // Page mode's network filter is built from chain metadata (every known
+  // chain), while selectedPrime always resolves to the primary proxy. Picking
+  // a specific prime plus a chain other than that proxy's own still ANDs
+  // prime_id with chain_id server-side, so real activity on the prime's other
+  // proxies matches nothing — same failure as the drawer case above, just
+  // reached through the network dropdown instead of a focused allocation.
+  const isPageChainMismatch =
+    isPageMode &&
+    isMultiChainPrime &&
+    !showAllPrimes &&
+    selectedPrime !== null &&
+    networkChainId !== undefined &&
+    networkChainId !== selectedPrime.chain_id;
+  const isChainMismatch = isDrawerChainMismatch || isPageChainMismatch;
+  // The default state of the case above, and the normal way this page is read:
+  // with no chain picked the request carries prime_id (the primary proxy) and no
+  // chain_id, which still matches that one proxy's rows alone. So a multi-chain
+  // prime's feed is one chain's activity presented as the prime's. Suppressing it
+  // would be wrong — every row shown is real — so it is labelled instead.
+  const isPagePartialChainCoverage =
+    isPageMode &&
+    isMultiChainPrime &&
+    !showAllPrimes &&
+    selectedPrime !== null &&
+    networkChainId === undefined;
+  const coveredChainLabel =
+    selectedPrime !== null
+      ? (chainLabels?.get(selectedPrime.chain_id) ??
+        selectedPrime.chain ??
+        null)
+      : null;
   const txRequestControllersRef = useRef<Record<string, AbortController>>({});
 
   const [events, setEvents] = useState<AllocationActivityResponse>([]);
@@ -544,17 +604,9 @@ export function ActivityFeed({
 
   const requestFilters = useMemo(() => {
     if (isPageMode) {
-      const parsedChainId =
-        selectedNetwork && selectedNetwork.length > 0
-          ? Number(selectedNetwork)
-          : undefined;
-
       return {
         prime_id: showAllPrimes ? undefined : (selectedPrime?.id ?? undefined),
-        chain_id:
-          parsedChainId && Number.isFinite(parsedChainId)
-            ? parsedChainId
-            : undefined,
+        chain_id: networkChainId,
         protocol_name:
           selectedProtocol && selectedProtocol !== DIRECT_PROTOCOL_FILTER_VALUE
             ? selectedProtocol
@@ -579,7 +631,7 @@ export function ActivityFeed({
     effectiveRange,
     filters,
     isPageMode,
-    selectedNetwork,
+    networkChainId,
     selectedPrime?.id,
     selectedProtocol,
     selectedReceiptToken?.chain_id,
@@ -591,10 +643,12 @@ export function ActivityFeed({
   useEffect(() => {
     // Don't fetch without a scope: drawer always needs a prime; page mode needs
     // one too unless "show all primes" is on (otherwise prime_id is undefined
-    // and we'd issue an unfiltered request the UI never asked for).
+    // and we'd issue an unfiltered request the UI never asked for). Either
+    // mode also skips the fetch on a chain mismatch — it is a doomed request,
+    // not a merely-empty one (see isChainMismatch above).
     const missingScope = isPageMode
-      ? !showAllPrimes && !selectedPrime
-      : !selectedPrime;
+      ? (!showAllPrimes && !selectedPrime) || isChainMismatch
+      : !selectedPrime || isChainMismatch;
 
     if (!isEnabled || missingScope) {
       Object.values(txRequestControllersRef.current).forEach((controller) => {
@@ -645,7 +699,14 @@ export function ActivityFeed({
     void fetchActivity();
 
     return () => abortController.abort();
-  }, [isEnabled, isPageMode, requestFilters, selectedPrime, showAllPrimes]);
+  }, [
+    isChainMismatch,
+    isEnabled,
+    isPageMode,
+    requestFilters,
+    selectedPrime,
+    showAllPrimes,
+  ]);
 
   useEffect(() => {
     return () => {
@@ -806,6 +867,16 @@ export function ActivityFeed({
     );
   }
 
+  if (isChainMismatch) {
+    return (
+      <EmptyState
+        title="Not Available"
+        description="Activity is not yet available for non-mainnet allocations."
+        stretch
+      />
+    );
+  }
+
   const latestActivityAt = events[0]?.created_at ?? null;
 
   const activityHeader = (
@@ -838,6 +909,13 @@ export function ActivityFeed({
         {showAllPrimes ? (
           <span className={css({ fontSize: 'sm', color: 'text.muted' })}>
             Across all primes
+          </span>
+        ) : null}
+        {isPagePartialChainCoverage ? (
+          <span className={css({ fontSize: 'sm', color: 'text.muted' })}>
+            {coveredChainLabel === null
+              ? 'One chain only — this prime allocates on several, and the rest are not yet included.'
+              : `${coveredChainLabel} only — this prime's activity on its other chains is not yet included.`}
           </span>
         ) : null}
 

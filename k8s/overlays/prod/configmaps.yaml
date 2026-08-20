@@ -86,6 +86,7 @@ kind: ConfigMap
 metadata:
   name: morpho-indexer-config
 data:
+  CHAIN_ID: "1"
   AWS_REGION: "eu-west-1"
   ALCHEMY_HTTP_URL: "https://eth-mainnet.g.alchemy.com/v2"
   ENVIRONMENT: "sentinelprod"
@@ -247,6 +248,22 @@ data:
   TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
   TEMPORAL_NAMESPACE: "vector"
   CHAIN_ID: "1"
+---
+# On-demand CoinGecko backfill worker (VEC-540). Same Temporal namespace and DB as
+# the 5-minute indexer; the difference is that this worker registers no schedule.
+#
+# OTEL_EXPORTER_OTLP_ENDPOINT is set explicitly. Without it telemetry silently
+# no-ops, which is exactly why offchain-price-indexer emits no cronjob metrics
+# despite running fine — do not drop it here.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: offchain-price-backfill
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "1"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector-opentelemetry-collector.observability.svc.cluster.local:4317"
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -479,6 +496,20 @@ data:
   OTEL_ENABLED: "true"
   OTEL_EXPORTER_OTLP_PROTOCOL: "grpc"
   OTEL_SERVICE_NAME: "stl-verify-python-api"
+  # DB pool for the API, declared here rather than left baked into the image so it
+  # can be tuned by editing config and restarting — this ConfigMap is consumed via
+  # envFrom with no hash suffix. A prime-scoped risk-capital request opens
+  # connections in proportion to positions x ALM proxies: the ceiling decides when
+  # a replica saturates, and the timeout decides what happens next — a queued
+  # caller fails fast instead of holding a worker for SQLAlchemy's unset 30s and
+  # dragging down endpoints that never touch this pool. VEC-532 bounds the fan-out
+  # itself.
+  # Held at 5 + 10 until it does: at 10 + 20 the fan-out's decompressing backends
+  # exhausted the 8 GiB TigerData primary on 2026-08-13, failing every client's
+  # queries with `out of memory` for four minutes.
+  DB_POOL_SIZE: "5"
+  DB_MAX_OVERFLOW: "10"
+  DB_POOL_TIMEOUT: "10"
 ---
 apiVersion: v1
 kind: ConfigMap

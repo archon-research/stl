@@ -12,14 +12,15 @@ import { flex } from '#styled-system/patterns';
 import { toggleSwitch } from '#styled-system/recipes';
 
 import { ProtocolLogo } from '.';
-import type { Prime } from '../../types/allocation';
+import { truncateMiddle } from '../../lib/dashboard';
+import type { PrimeGroup } from '../../lib/dashboard';
 
 type PrimeSidebarProps = {
-  primes: Prime[];
+  primeGroups: PrimeGroup[];
   selectedPrimeId: string | null;
   isLoading: boolean;
   errorMessage: string | null;
-  onSelectPrime: (primeId: string) => void;
+  onSelectPrime: (primeKey: string) => void;
   showAllPrimes: boolean;
   canShowAllPrimes: boolean;
   onShowAllPrimesChange: (value: boolean) => void;
@@ -28,7 +29,7 @@ type PrimeSidebarProps = {
 const switchStyles = toggleSwitch();
 
 export function PrimeSidebar({
-  primes,
+  primeGroups,
   selectedPrimeId,
   isLoading,
   errorMessage,
@@ -119,7 +120,7 @@ export function PrimeSidebar({
         <AsyncStateRenderer
           isLoading={isLoading}
           error={errorMessage}
-          isEmpty={primes.length === 0}
+          isEmpty={primeGroups.length === 0}
           loadingView={<SkeletonStack count={6} itemHeight={64} />}
           errorView={
             <ErrorState
@@ -138,15 +139,15 @@ export function PrimeSidebar({
           }
         >
           <div className={css({ display: 'grid', gap: '2.5' })}>
-            {primes.map((prime) => {
-              const isSelected = prime.id === selectedPrimeId;
+            {primeGroups.map((primeGroup) => {
+              const isSelected = primeGroup.key === selectedPrimeId;
               return (
                 <button
-                  key={prime.id}
+                  key={primeGroup.key}
                   type="button"
                   aria-pressed={isSelected}
                   disabled={primeButtonsDisabled}
-                  onClick={() => onSelectPrime(prime.id)}
+                  onClick={() => onSelectPrime(primeGroup.key)}
                   className={css({
                     width: '100%',
                     boxSizing: 'border-box',
@@ -179,7 +180,7 @@ export function PrimeSidebar({
                 >
                   <div className={flex({ align: 'center', gap: '3.5' })}>
                     <ProtocolLogo
-                      protocolName={prime.name}
+                      protocolName={primeGroup.name}
                       isSelected={isSelected}
                       size="8"
                     />
@@ -190,16 +191,34 @@ export function PrimeSidebar({
                         minWidth: 0,
                       })}
                     >
-                      <p
-                        className={css({
-                          m: 0,
-                          fontSize: 'sm',
-                          fontWeight: 'semibold',
-                          color: 'text.strong',
+                      <div
+                        className={flex({
+                          align: 'baseline',
+                          gap: '1.5',
+                          minWidth: 0,
                         })}
                       >
-                        {prime.name}
-                      </p>
+                        <p
+                          className={css({
+                            m: 0,
+                            fontSize: 'sm',
+                            fontWeight: 'semibold',
+                            color: 'text.strong',
+                          })}
+                        >
+                          {primeGroup.name}
+                        </p>
+                        <span
+                          className={css({
+                            fontSize: 'xs',
+                            color: 'text.muted',
+                            whiteSpace: 'nowrap',
+                          })}
+                        >
+                          {primeGroup.chainCount}{' '}
+                          {primeGroup.chainCount === 1 ? 'chain' : 'chains'}
+                        </span>
+                      </div>
                       <span
                         className={css({
                           fontFamily: 'mono',
@@ -210,9 +229,9 @@ export function PrimeSidebar({
                           whiteSpace: 'nowrap',
                           display: 'block',
                         })}
-                        title={prime.address}
+                        title={primeGroup.vaultAddress ?? undefined}
                       >
-                        {prime.address.slice(0, 6)}...{prime.address.slice(-4)}
+                        {truncateMiddle(primeGroup.vaultAddress, 6, 4)}
                       </span>
                     </div>
                   </div>

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/url"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -17,52 +18,6 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/db/migrator"
 )
-
-// StartTimescaleDB creates a TimescaleDB container and returns the DSN and a
-// cleanup function. No pool connection or migrations are applied.
-func StartTimescaleDB(t *testing.T) (dsn string, cleanup func()) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
-
-	req := testcontainers.ContainerRequest{
-		Image:        ImageTimescaleDB,
-		ExposedPorts: []string{"5432/tcp"},
-		Env: map[string]string{
-			"POSTGRES_USER":     "test",
-			"POSTGRES_PASSWORD": "test",
-			"POSTGRES_DB":       "testdb",
-		},
-		WaitingFor: wait.ForAll(
-			wait.ForLog("database system is ready to accept connections").
-				WithOccurrence(2).
-				WithStartupTimeout(60*time.Second),
-			wait.ForListeningPort("5432/tcp").
-				WithStartupTimeout(60*time.Second),
-		),
-	}
-
-	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: req,
-		Started:          true,
-	})
-	if err != nil {
-		HandleContainerRuntimeError(t, err, "start container")
-	}
-
-	host, err := container.Host(ctx)
-	if err != nil {
-		t.Fatalf("get host: %v", err)
-	}
-	port, err := container.MappedPort(ctx, "5432")
-	if err != nil {
-		t.Fatalf("get port: %v", err)
-	}
-
-	dsn = fmt.Sprintf("postgres://test:test@%s:%s/testdb?sslmode=disable", host, port.Port())
-	cleanup = func() { _ = container.Terminate(context.Background()) }
-	return dsn, cleanup
-}
 
 // ConnectPool creates a pgxpool.Pool for the given DSN with retry logic.
 func ConnectPool(t *testing.T, dsn string) *pgxpool.Pool {
@@ -81,6 +36,9 @@ func ConnectPool(t *testing.T, dsn string) *pgxpool.Pool {
 		time.Sleep(100 * time.Millisecond)
 	}
 
+	// t.Fatal runs runtime.Goexit and this pool never reaches the caller: its leaked
+	// goroutines would let the package's leak check overwrite the exit code.
+	pool.Close()
 	t.Fatal("timed out waiting for database connection")
 	return nil
 }
@@ -96,22 +54,6 @@ func RunMigrations(t *testing.T, pool *pgxpool.Pool) {
 	if err := m.ApplyAll(ctx); err != nil {
 		t.Fatalf("migrations: %v", err)
 	}
-}
-
-// SetupTimescaleDB is the composed helper: container + pool + migrations.
-// Most integration tests use this.
-func SetupTimescaleDB(t *testing.T) (pool *pgxpool.Pool, dsn string, cleanup func()) {
-	t.Helper()
-
-	dsn, containerCleanup := StartTimescaleDB(t)
-	pool = ConnectPool(t, dsn)
-	RunMigrations(t, pool)
-
-	cleanup = func() {
-		pool.Close()
-		containerCleanup()
-	}
-	return pool, dsn, cleanup
 }
 
 // StartTimescaleDBForMain starts a shared TimescaleDB container for use in
@@ -343,8 +285,7 @@ func CleanupSchemaForMain(baseDSN string, schemaPool *pgxpool.Pool, schemaName s
 
 // SetupTestSchema creates an isolated PostgreSQL schema backed by a shared
 // container whose base DSN is passed in. Public-schema migrations are applied
-// once; the test schema gets its own copy of all tables. This is a drop-in
-// replacement for SetupTimescaleDB that reuses an existing container.
+// once; the test schema gets its own copy of all tables.
 func SetupTestSchema(t *testing.T, baseDSN string) (pool *pgxpool.Pool, dsn string, cleanup func()) {
 	t.Helper()
 
@@ -399,6 +340,83 @@ func SetupTestSchema(t *testing.T, baseDSN string) (pool *pgxpool.Pool, dsn stri
 		_, _ = dropPool.Exec(dropCtx, fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", schemaName))
 	}
 	return pool, dsn, cleanup
+}
+
+// SetupTestDatabase creates an isolated PostgreSQL *database* on the shared
+// container whose base DSN is passed in, applies all migrations to it, and
+// returns a pool for it.
+//
+// Prefer SetupTestSchema: it is cheaper. Reach for this only when the code under
+// test runs SQL that names its schema explicitly, because search_path cannot
+// isolate that. The transform pipeline is the case that forces it — the
+// transformed.* tables, triggers and _run/_bootstrap functions are all pinned to
+// public.* raw tables, so every schema created by SetupTestSchema would share
+// one set of transformed tables and leak rows between tests.
+func SetupTestDatabase(t *testing.T, baseDSN string) (pool *pgxpool.Pool, dsn string, cleanup func()) {
+	t.Helper()
+
+	dbName := SanitizeTestName(t.Name())
+	ctx := context.Background()
+
+	// A database left behind by a killed run would silently supply its rows to
+	// this one, so drop before create rather than CREATE IF NOT EXISTS.
+	adminPool := ConnectPool(t, baseDSN)
+	// Deferred, not closed inline: the t.Fatalf calls below run runtime.Goexit.
+	defer adminPool.Close()
+	if _, err := adminPool.Exec(ctx, dropDatabaseSQL(dbName)); err != nil {
+		t.Fatalf("drop stale database %s: %v", dbName, err)
+	}
+	if _, err := adminPool.Exec(ctx, fmt.Sprintf("CREATE DATABASE %s", dbName)); err != nil {
+		t.Fatalf("create database %s: %v", dbName, err)
+	}
+
+	dsn = withDatabase(t, baseDSN, dbName)
+	pool = ConnectPool(t, dsn)
+	// t.Cleanup rather than the returned cleanup, for the same reason; pgxpool.Close
+	// is once-guarded, so cleanup closing it again is a no-op.
+	t.Cleanup(pool.Close)
+
+	// Migrations deliberately do not create the extension (production gets it from
+	// the infrastructure bootstrap script), and a database cloned from template1
+	// does not inherit it, so enable it here before the first create_hypertable.
+	if _, err := pool.Exec(ctx, "CREATE EXTENSION IF NOT EXISTS timescaledb"); err != nil {
+		t.Fatalf("enable timescaledb in %s: %v", dbName, err)
+	}
+
+	RunMigrations(t, pool)
+
+	cleanup = func() {
+		pool.Close()
+		dropCtx := context.Background()
+		dropPool, err := pgxpool.New(dropCtx, baseDSN)
+		if err != nil {
+			log.Printf("warning: could not connect to drop database %s: %v", dbName, err)
+			return
+		}
+		defer dropPool.Close()
+		if _, err := dropPool.Exec(dropCtx, dropDatabaseSQL(dbName)); err != nil {
+			log.Printf("warning: could not drop database %s: %v", dbName, err)
+		}
+	}
+	return pool, dsn, cleanup
+}
+
+// dropDatabaseSQL drops dbName, terminating any backend still attached to it —
+// a pool that outlived its test would otherwise block the drop outright.
+func dropDatabaseSQL(dbName string) string {
+	return fmt.Sprintf("DROP DATABASE IF EXISTS %s WITH (FORCE)", dbName)
+}
+
+// withDatabase returns baseDSN pointed at dbName, preserving its user, host and
+// query parameters.
+func withDatabase(t *testing.T, baseDSN, dbName string) string {
+	t.Helper()
+	u, err := url.Parse(baseDSN)
+	if err != nil {
+		t.Fatalf("parse base DSN: %v", err)
+	}
+	u.Path = "/" + dbName
+	return u.String()
 }
 
 // SanitizeTestName converts a test name to a string safe for use as a

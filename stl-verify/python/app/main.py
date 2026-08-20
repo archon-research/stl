@@ -9,7 +9,6 @@ from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.postgres.aave_like_backed_breakdown_repository import AaveLikeBackedBreakdownRepository
 from app.adapters.postgres.aave_like_liquidation_params_repository import AaveLikeLiquidationParamsRepository
@@ -17,6 +16,7 @@ from app.adapters.postgres.allocation_position_repository import AllocationRepos
 from app.adapters.postgres.backed_breakdown_repository_maple import MapleBackedBreakdownRepository
 from app.adapters.postgres.backed_breakdown_repository_morpho import MorphoBackedBreakdownRepository
 from app.adapters.postgres.crypto_lending_reader import PostgresCryptoLendingReader
+from app.adapters.postgres.engine import create_db_engine
 from app.adapters.postgres.morpho_liquidation_params_repository import MorphoLiquidationParamsRepository
 from app.adapters.postgres.receipt_token_repository import ReceiptTokenRepository, resolve_receipt_token_mapping
 from app.api.v1 import (
@@ -171,7 +171,7 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        engine = create_async_engine(settings.async_database_url, pool_pre_ping=True)
+        engine = create_db_engine(settings)
         try:
             async with engine.connect() as conn:
                 await conn.execute(text("SELECT 1"))

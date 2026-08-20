@@ -17,6 +17,7 @@ import {
   type ChainLabelLookup,
   getAllocationKey,
   getCategoryLabel,
+  getPrimeGroupKey,
   sortAllocations,
 } from '../../lib/dashboard';
 import { navigateWithParams, PARAMS, useUrlParam } from '../../lib/url-params';
@@ -232,7 +233,9 @@ export function BottomPanel({
             disabled={!focusedAllocation}
             onClick={() =>
               navigateWithParams('/activities', {
-                [PARAMS.prime]: selectedPrime?.id ?? null,
+                [PARAMS.prime]: selectedPrime
+                  ? getPrimeGroupKey(selectedPrime)
+                  : null,
                 [PARAMS.network]: focusedAllocation
                   ? String(focusedAllocation.chain_id)
                   : null,

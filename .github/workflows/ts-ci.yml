@@ -70,11 +70,26 @@ jobs:
       - name: Design-system doctor
         run: npm run doctor
 
-      # After codegen, not before: the script loads src/lib/dashboard.ts through
-      # vite, so the day its import graph reaches #styled-system/* it would fail
-      # as though its assertions had.
+      # Both scripts run after codegen, not before: each loads
+      # src/lib/dashboard.ts through vite, so the day that import graph reaches
+      # #styled-system/* they would fail as though their assertions had.
+      - name: Run prime grouping regression test
+        run: npm run test:prime-grouping -w ui
+
       - name: Run explorer URL regression test
         run: npm run test:explorers -w ui
+
+      # The committed types are what every call site is checked against, so a
+      # schema change without a regeneration leaves the UI compiling happily
+      # against an API that no longer exists. python-ci gates the schema against
+      # the response models; this gates the types against the schema.
+      - name: Generated API types are in sync with the OpenAPI schema
+        run: |
+          npm run generate:openapi-types -w ui
+          if ! git diff --exit-code -- ui/src/generated/openapi-types.ts; then
+            echo "::error::openapi-types.ts is stale — run 'npm run generate:openapi-types -w ui' in stl-verify/ts and commit the result"
+            exit 1
+          fi
 
       - name: Typecheck workspace
         run: npm run type:check

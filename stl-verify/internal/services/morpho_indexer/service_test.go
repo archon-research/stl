@@ -1159,9 +1159,9 @@ func TestProcessBlockEvent_VaultDiscovery_AlreadyKnownNotVault(t *testing.T) {
 	h.svc.vaultRegistry.MarkNotVault(unknownVault)
 
 	// No multicall should be made.
-	var multicallCalled int32
+	var multicallCalled atomic.Int32
 	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		atomic.AddInt32(&multicallCalled, 1)
+		multicallCalled.Add(1)
 		return nil, errors.New("should not be called")
 	}
 
@@ -1172,7 +1172,7 @@ func TestProcessBlockEvent_VaultDiscovery_AlreadyKnownNotVault(t *testing.T) {
 		t.Fatalf("processBlock: %v", err)
 	}
 
-	if atomic.LoadInt32(&multicallCalled) != 0 {
+	if multicallCalled.Load() != 0 {
 		t.Error("multicall should not be called for known non-vaults")
 	}
 }
@@ -1218,7 +1218,7 @@ func TestProcessBlockEvent_VaultDiscovery_V1ViaMorphoBlueCaller(t *testing.T) {
 	// service.go's `seen` map must keep this at exactly 1. Without the
 	// dedup, two probes would fire (and the test would still pass at the
 	// vault-registered assertion below — wasted RPC).
-	var probeCount int32
+	var probeCount atomic.Int32
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 		switch len(calls) {
 		case 2:
@@ -1228,7 +1228,7 @@ func TestProcessBlockEvent_VaultDiscovery_V1ViaMorphoBlueCaller(t *testing.T) {
 			return h.tokenMetadataResults("WETH", 18), nil
 		case 4:
 			if h.isProbeMulticall(calls) {
-				atomic.AddInt32(&probeCount, 1)
+				probeCount.Add(1)
 				return h.vaultProbeResults(MorphoBlueAddress, testLoanToken), nil
 			}
 			return h.vaultDetailResults("V1 Vault", "v1V", 18, false), nil
@@ -1265,7 +1265,7 @@ func TestProcessBlockEvent_VaultDiscovery_V1ViaMorphoBlueCaller(t *testing.T) {
 	// `seen` map in discoverV1V11VaultsInReceipt must collapse the two
 	// candidates into a single probe. Two probes would mean wasted RPC +
 	// duplicate DB inserts (idempotent, but still wrong).
-	if got := atomic.LoadInt32(&probeCount); got != 1 {
+	if got := probeCount.Load(); got != 1 {
 		t.Errorf("probe fired %d times for caller==onBehalf; want exactly 1 (caller/onBehalf must dedupe via seen[])", got)
 	}
 
@@ -1274,7 +1274,7 @@ func TestProcessBlockEvent_VaultDiscovery_V1ViaMorphoBlueCaller(t *testing.T) {
 		t.Fatalf("replay: %v", err)
 	}
 	// Replay must also not re-probe — registry is consulted first.
-	if got := atomic.LoadInt32(&probeCount); got != 1 {
+	if got := probeCount.Load(); got != 1 {
 		t.Errorf("probe fired %d times after replay; want still 1 (registry cache must short-circuit known vault)", got)
 	}
 }
@@ -1665,14 +1665,14 @@ func TestProcessBlockEvent_VaultDiscovery_MorphoBluePath_FreshUserCallerProbedEx
 	h.setupMarketExistsInDB(testMarketID, 42)
 	freshUser := common.HexToAddress("0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0")
 
-	var probeCount int32
+	var probeCount atomic.Int32
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
 		switch len(calls) {
 		case 2:
 			return []outbound.Result{h.defaultMarketStateResult(), h.defaultPositionStateResult()}, nil
 		case 4:
 			if h.isProbeMulticall(calls) {
-				atomic.AddInt32(&probeCount, 1)
+				probeCount.Add(1)
 				return h.notAVaultProbeResults(), nil
 			}
 		}
@@ -1686,7 +1686,7 @@ func TestProcessBlockEvent_VaultDiscovery_MorphoBluePath_FreshUserCallerProbedEx
 	if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{receipt}); err != nil {
 		t.Fatalf("processBlock: %v", err)
 	}
-	if got := atomic.LoadInt32(&probeCount); got != 1 {
+	if got := probeCount.Load(); got != 1 {
 		t.Fatalf("probe fired %d times for fresh caller; want exactly 1 — if 0, the discoverV1V11VaultsInReceipt wiring is broken; if >1, the seen-map dedup is broken", got)
 	}
 	if !h.svc.vaultRegistry.IsKnownNotVault(freshUser) {
@@ -1876,9 +1876,9 @@ func TestProcessReceipt_NoRelevantEvents_SkipsSpan(t *testing.T) {
 	h.svc.telemetry = telemetry
 
 	// Ensure no downstream work happens.
-	var multicallCalled int32
+	var multicallCalled atomic.Int32
 	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		atomic.AddInt32(&multicallCalled, 1)
+		multicallCalled.Add(1)
 		return nil, errors.New("should not be called")
 	}
 
@@ -1907,7 +1907,7 @@ func TestProcessReceipt_NoRelevantEvents_SkipsSpan(t *testing.T) {
 		}
 	}
 
-	if atomic.LoadInt32(&multicallCalled) != 0 {
+	if multicallCalled.Load() != 0 {
 		t.Error("multicall should not be called when receipt has no relevant events")
 	}
 }
@@ -1968,9 +1968,9 @@ func TestProcessBlockEvent_MultipleReceipts_OneError(t *testing.T) {
 	h.setupMarketExistsInDB(testMarketID, 42)
 
 	// First call succeeds, subsequent calls fail.
-	var callCount int32
+	var callCount atomic.Int32
 	h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		n := atomic.AddInt32(&callCount, 1)
+		n := callCount.Add(1)
 		if n == 1 {
 			return []outbound.Result{h.defaultMarketStateResult(), h.defaultPositionStateResult()}, nil
 		}
@@ -3700,9 +3700,9 @@ func TestProcessBlockEvent_MissingBlockHash_ReturnsError(t *testing.T) {
 		makeReceipt(testTxHash, h.makeSupplyLog(testMarketID, testCaller, testOnBehalf, big.NewInt(1000), big.NewInt(900))),
 	})
 
-	var multicallCalled int32
+	var multicallCalled atomic.Int32
 	h.multicaller.ExecuteFn = func(_ context.Context, _ []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
-		atomic.AddInt32(&multicallCalled, 1)
+		multicallCalled.Add(1)
 		return nil, fmt.Errorf("multicaller must not be called")
 	}
 	var stateSaved, positionSaved int32
@@ -3720,7 +3720,7 @@ func TestProcessBlockEvent_MissingBlockHash_ReturnsError(t *testing.T) {
 		t.Fatal("expected non-nil error from processBlockEvent when event.BlockHash is empty")
 	}
 
-	if atomic.LoadInt32(&multicallCalled) != 0 {
+	if multicallCalled.Load() != 0 {
 		t.Error("multicaller invoked, want it never called")
 	}
 	if atomic.LoadInt32(&stateSaved) != 0 {

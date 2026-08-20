@@ -35,6 +35,25 @@ class Settings(BaseSettings):
     # treats it as stale and returns HTTP 503.
     allocation_share_max_stale_seconds: int = 1800
     star_risk_capital_upstream_url: str = "https://info-sky.blockanalitica.com/star-monitoring/risk-capital/primes/"
+    # Connection-pool ceiling per replica. Set explicitly rather than left on
+    # SQLAlchemy's 5 + 10, because a prime-scoped risk-capital request is a
+    # concurrent fan-out rather than a single query: every repository read opens
+    # its own engine.connect(), and the request gathers one receipt-token lookup
+    # per position plus one model compute per allocation, across every ALM proxy
+    # of the prime. Peak concurrent connections therefore scale with
+    # positions × proxies, which this ceiling does not bound — it only decides how
+    # far a replica gets before callers queue on pool_timeout and surface as 500s.
+    # Bounding the fan-out itself is VEC-532.
+    db_pool_size: int = Field(default=10, ge=1)
+    db_max_overflow: int = Field(default=20, ge=0)
+    # How long a caller queues for a connection before its request fails. Left on
+    # SQLAlchemy's unset 30s, a saturated replica holds a worker for half a minute
+    # per queued caller, so one burst on the fan-out also stalls the endpoints that
+    # never touch this pool. Set well above a healthy acquisition so it fires on
+    # real exhaustion rather than on load: the fan-out's own queries run in
+    # hundreds of milliseconds, so ten seconds of queueing means saturation, and
+    # failing then keeps it legible instead of silently slow.
+    db_pool_timeout: int = Field(default=10, ge=1)
 
     @property
     def async_database_url(self) -> str:

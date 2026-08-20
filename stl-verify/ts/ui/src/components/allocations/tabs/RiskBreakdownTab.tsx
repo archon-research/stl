@@ -258,6 +258,15 @@ export function RiskBreakdownTab({
 
   const receiptTokenId = selectedReceiptToken?.receipt_token_id ?? null;
   const primeId = selectedPrime?.id ?? null;
+  // The breakdown scales to the given prime_id's pro-rata pool share on the
+  // allocation's own chain_id, so it only resolves for the chain
+  // selectedPrime actually holds a position on — the prime's primary proxy's
+  // chain, today always mainnet. A non-mainnet allocation would find no
+  // share data for that (chain_id, prime_id) pair.
+  const isChainMismatch =
+    selectedReceiptToken !== null &&
+    selectedPrime !== null &&
+    selectedReceiptToken.chain_id !== selectedPrime.chain_id;
 
   useEffect(() => {
     const receiptTokenAddress = selectedReceiptToken?.receipt_token_address;
@@ -265,7 +274,8 @@ export function RiskBreakdownTab({
       !isEnabled ||
       !selectedReceiptToken ||
       receiptTokenId === null ||
-      !receiptTokenAddress
+      !receiptTokenAddress ||
+      isChainMismatch
     ) {
       setBreakdown(null);
       setErrorMessage(null);
@@ -311,7 +321,13 @@ export function RiskBreakdownTab({
       });
 
     return () => controller.abort();
-  }, [isEnabled, receiptTokenId, primeId, selectedReceiptToken]);
+  }, [
+    isChainMismatch,
+    isEnabled,
+    receiptTokenId,
+    primeId,
+    selectedReceiptToken,
+  ]);
 
   useEffect(() => {
     if (!isEnabled || !selectedReceiptToken) {
@@ -452,6 +468,12 @@ export function RiskBreakdownTab({
   if (receiptTokenId === null) {
     return (
       <TabNotePanel message="Direct asset holdings have no collateral backing to break down." />
+    );
+  }
+
+  if (isChainMismatch) {
+    return (
+      <TabNotePanel message="Risk breakdown is not yet available for non-mainnet allocations." />
     );
   }
 
