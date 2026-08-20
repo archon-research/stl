@@ -897,6 +897,193 @@ func TestPositionState(t *testing.T) {
 		}
 	})
 
+	// --- ported input matrix (previously scratch-only) ---------------------------------------------
+
+	t.Run("input matrix: boundary and encoding cases", func(t *testing.T) {
+		// Table-driven port of the scratch matrix cases the hand-written subtests above don't cover:
+		// boundary numerics, encoding edges, and vocabulary-miss shapes. want == "" expects success.
+		// Fields are SQL expressions: chain/proto/ik/holder/qty get their casts appended by the
+		// template; code carries its own cast (so NULL and '' shapes stay expressible).
+		cases := []struct {
+			name   string
+			chain  string
+			proto  string
+			ik     string
+			holder string
+			qty    string
+			code   string
+			bn, bv string
+			want   string
+		}{
+			{"holder 0x prefix rejected", "1", "10", "'m1'", "'0xabc1'", "5", "'LOAN'::text", "100", "0", "holder_hex"},
+			{"holder non-hex g rejected", "1", "10", "'m2'", "'gg11'", "5", "'LOAN'::text", "100", "0", "holder_hex"},
+			{"whitespace-only instrument rejected", "1", "10", "'   '", "'aa'", "5", "'LOAN'::text", "100", "0", "instrument_key is required"},
+			{"whitespace-only holder rejected", "1", "10", "'m3'", "'  '", "5", "'LOAN'::text", "100", "0", "holder_id is required"},
+			{"uppercase instrument is legal", "1", "10", "'REGISTRY:ILK-A'", "'aa'", "5", "'LOAN'::text", "100", "0", ""},
+			{"10k-char instrument is legal", "1", "10", "repeat('x',10000)", "'aa'", "5", "'LOAN'::text", "100", "0", ""},
+			{"unicode instrument is legal", "1", "10", "'ilk-Ω-θ'", "'aa'", "5", "'LOAN'::text", "100", "0", ""},
+			{"quantity 1e30 is legal", "1", "10", "'m4'", "'aa'", "1e30", "'LOAN'::text", "100", "0", ""},
+			{"quantity 1e-18 dust is legal", "1", "10", "'m5'", "'aa'", "0.000000000000000001", "'LOAN'::text", "100", "0", ""},
+			{"empty-string code hits the FK", "1", "10", "'m6'", "'aa'", "5", "''::text", "100", "0", "deal_type_fkey"},
+			{"lowercase code hits the FK", "1", "10", "'m7'", "'aa'", "5", "'loan'::text", "100", "0", "deal_type_fkey"},
+			{"chain_id int32 max is legal", "2147483647", "10", "'m8'", "'aa'", "5", "'LOAN'::text", "100", "0", ""},
+			{"protocol_id int64 max is legal", "1", "9223372036854775807", "'m9'", "'aa'", "5", "'LOAN'::text", "100", "0", ""},
+			{"block_number 2^62 is legal", "1", "10", "'m10'", "'aa'", "5", "'LOAN'::text", "4611686018427387904", "0", ""},
+			{"block_version int32 max is legal", "1", "10", "'m11'", "'aa'", "5", "'LOAN'::text", "100", "2147483647", ""},
+		}
+		for i, tc := range cases {
+			body := fmt.Sprintf(
+				`SELECT * FROM (VALUES (%s::int,%s::bigint,%s::text,%s::text,%s::numeric,%s,%s::bigint,%s::int,0::int,'2026-01-01'::timestamptz)) `+mppCols,
+				tc.chain, tc.proto, tc.ik, tc.holder, tc.qty, tc.code, tc.bn, tc.bv)
+			view := "vmat" + strconv.Itoa(i)
+			if tc.want == "" {
+				mpp(t, view, body, "matrix")
+			} else {
+				mppErr(t, view, body, "matrix", tc.want)
+			}
+		}
+	})
+
+	// --- ACL completions and semantic pins ----------------------------------------------------------
+
+	t.Run("TRUNCATE denied and stl_readonly is read-only", func(t *testing.T) {
+		asRoleOne := func(role, stmt string) error {
+			conn, err := pool.Acquire(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Release()
+			tx, err := conn.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback(ctx)
+			if _, err := tx.Exec(ctx, `SET LOCAL ROLE `+role); err != nil {
+				t.Fatal(err)
+			}
+			_, err = tx.Exec(ctx, stmt)
+			return err
+		}
+		// TRUNCATE is a privilege of its own; the DELETE denial does not imply it.
+		for _, tbl := range []string{"position_state", "position_classification"} {
+			if err := asRoleOne("stl_readwrite", `TRUNCATE `+tbl); err == nil || !strings.Contains(err.Error(), "permission denied") {
+				t.Errorf("TRUNCATE %s as stl_readwrite: want permission denied, got %v", tbl, err)
+			}
+		}
+		if err := asRoleOne("stl_readonly", `SELECT count(*) FROM position_state`); err != nil {
+			t.Errorf("SELECT as stl_readonly failed: %v", err)
+		}
+		if err := asRoleOne("stl_readonly", `INSERT INTO position_classification (position_id, deal_type_code) VALUES ('\x00'::bytea, 'LOAN')`); err == nil || !strings.Contains(err.Error(), "permission denied") {
+			t.Errorf("INSERT as stl_readonly: want permission denied, got %v", err)
+		}
+	})
+
+	t.Run("1-byte position_id rejected by the width CHECK (direct insert)", func(t *testing.T) {
+		// Unreachable through the function (position_id() always emits 32 bytes); pin the table CHECK.
+		_, err := pool.Exec(ctx, `INSERT INTO position_state (position_id, instrument_key, holder_id, quantity, block_number, block_timestamp)
+			VALUES ('\x00'::bytea, 'x', 'aa', 1, 100, '2026-01-01')`)
+		if err == nil || !strings.Contains(err.Error(), "id_len") {
+			t.Errorf("1-byte position_id: want id_len_chk violation, got %v", err)
+		}
+	})
+
+	t.Run("classification stamps valid_from as UTC today; qty rewrite leaves created_at untouched", func(t *testing.T) {
+		mpp(t, "vsp1", valuesOf(row("isp1", "aa", 5, "LOAN", 100, 0, 0)), "stamp")
+		var utcToday bool
+		if err := pool.QueryRow(ctx,
+			`SELECT valid_from = (now() AT TIME ZONE 'utc')::date FROM position_classification WHERE position_id = position_id(1,10,'isp1','aa')`).Scan(&utcToday); err != nil {
+			t.Fatal(err)
+		}
+		if !utcToday {
+			t.Error("valid_from is not UTC today on first classification")
+		}
+		// The sanctioned same-key quantity rewrite (pv-less sources) leaves created_at untouched —
+		// pinning the documented residual: the rewrite carries no audit trail.
+		var before string
+		if err := pool.QueryRow(ctx, `SELECT created_at::text FROM position_state WHERE position_id = position_id(1,10,'isp1','aa')`).Scan(&before); err != nil {
+			t.Fatal(err)
+		}
+		mpp(t, "vsp1", valuesOf(row("isp1", "aa", 9, "LOAN", 100, 0, 0)), "rewrite")
+		var after string
+		var q int
+		if err := pool.QueryRow(ctx, `SELECT created_at::text, quantity::int FROM position_state WHERE position_id = position_id(1,10,'isp1','aa')`).Scan(&after, &q); err != nil {
+			t.Fatal(err)
+		}
+		if q != 9 {
+			t.Errorf("rewrite quantity = %d; want 9", q)
+		}
+		if before != after {
+			t.Errorf("created_at changed on a quantity rewrite (%s -> %s); the residual is pinned as no-audit", before, after)
+		}
+	})
+
+	t.Run("temp snapshot is not left behind after a run", func(t *testing.T) {
+		conn, err := pool.Acquire(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Release()
+		if _, err := conn.Exec(ctx, `CREATE OR REPLACE VIEW vtl AS `+valuesOf(row("itl", "aa", 5, "LOAN", 100, 0, 0))); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := conn.Exec(ctx, `SELECT materialize_position_projection('vtl'::regclass, 'tmp')`); err != nil {
+			t.Fatal(err)
+		}
+		var leaked bool
+		if err := conn.QueryRow(ctx, `SELECT to_regclass('pg_temp._mpp_src') IS NOT NULL`).Scan(&leaked); err != nil {
+			t.Fatal(err)
+		}
+		if leaked {
+			t.Error("pg_temp._mpp_src survived the call in the same session")
+		}
+	})
+
+	t.Run("different views on disjoint positions run concurrently without blocking", func(t *testing.T) {
+		// The per-view advisory lock must serialize same-view runs ONLY: a second view touching a
+		// disjoint position must complete while the first holds its transaction open.
+		if _, err := pool.Exec(ctx, `CREATE OR REPLACE VIEW vcna AS `+valuesOf(row("icna", "aa", 5, "LOAN", 100, 0, 0))); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `CREATE OR REPLACE VIEW vcnb AS `+valuesOf(row("icnb", "aa", 5, "BORROW", 100, 0, 0))); err != nil {
+			t.Fatal(err)
+		}
+		connA, err := pool.Acquire(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer connA.Release()
+		txA, err := connA.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer txA.Rollback(ctx)
+		if _, err := txA.Exec(ctx, `SELECT materialize_position_projection('vcna'::regclass, 'A')`); err != nil {
+			t.Fatal(err)
+		}
+		connB, err := pool.Acquire(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer connB.Release()
+		txB, err := connB.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer txB.Rollback(ctx)
+		if _, err := txB.Exec(ctx, `SET LOCAL statement_timeout = '3s'`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := txB.Exec(ctx, `SELECT materialize_position_projection('vcnb'::regclass, 'B')`); err != nil {
+			t.Fatalf("a different view on a disjoint position blocked behind the first run: %v", err)
+		}
+		if err := txB.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if got := classOf(t, "icnb", "aa"); got != "BORROW" {
+			t.Errorf("concurrent B classification = %q; want BORROW", got)
+		}
+	})
+
 	// --- model-based fuzz --------------------------------------------------------------------------
 
 	t.Run("model fuzz: 120 random steps against an independent oracle (seed 20260819)", func(t *testing.T) {
