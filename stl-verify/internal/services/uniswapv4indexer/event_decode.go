@@ -163,6 +163,9 @@ func (d *receiptDecoder) decodeLog(log shared.Log) error {
 		return nil
 	}
 
+	if err := assertHexWords(log); err != nil {
+		return err
+	}
 	logIndex, err := shared.ParseHexUint(log.LogIndex)
 	if err != nil {
 		return fmt.Errorf("parsing log index %q: %w", log.LogIndex, err)
@@ -215,19 +218,36 @@ func (d *receiptDecoder) decodePoolKeyedLog(ev abi.Event, log shared.Log, site l
 	return nil
 }
 
-// indexedPoolID reads topics[1] as a PoolId, rejecting anything that is not a
-// full 32-byte hex word: common.HexToHash left-pads a short value into a
-// plausible-looking hash that would silently miss (or, worse, hit) a registry
-// entry.
+// indexedPoolID reads topics[1], which every pool-keyed PoolManager event
+// carries as its PoolId. assertHexWords has already rejected a topic that is
+// not a full 32-byte word.
 func indexedPoolID(ev abi.Event, log shared.Log) (common.Hash, error) {
 	if len(log.Topics) < 2 {
 		return common.Hash{}, fmt.Errorf("%s log (index %s) carries no indexed pool id", ev.Name, log.LogIndex)
 	}
-	topic := log.Topics[1]
-	if len(topic) != 66 || !strings.HasPrefix(topic, "0x") {
-		return common.Hash{}, fmt.Errorf("%s log (index %s) pool id %q is not a 32-byte hex word", ev.Name, log.LogIndex, topic)
+	return common.HexToHash(log.Topics[1]), nil
+}
+
+// assertHexWords rejects a log whose transaction hash or topics are not full
+// 32-byte hex words. Everything downstream reads them through
+// common.HexToHash, which left-pads a short value and truncates at the first
+// non-hex character: one corrupted character otherwise becomes a registry miss
+// that drops a tracked pool's swap, a wrong indexed sender, or the wrong
+// transaction hash on a persisted row — none of it visible as a failure.
+func assertHexWords(log shared.Log) error {
+	if !isHexWord(log.TransactionHash) {
+		return fmt.Errorf("log (index %s) transaction hash %q is not a 32-byte hex word", log.LogIndex, log.TransactionHash)
 	}
-	return common.HexToHash(topic), nil
+	for i, topic := range log.Topics {
+		if !isHexWord(topic) {
+			return fmt.Errorf("log (index %s) topic %d %q is not a 32-byte hex word", log.LogIndex, i, topic)
+		}
+	}
+	return nil
+}
+
+func isHexWord(value string) bool {
+	return len(value) == 66 && strings.HasPrefix(value, "0x") && common.IsHexHash(value)
 }
 
 // decodeAndCapture ABI-decodes a known event and mirrors it into the capture
@@ -237,27 +257,12 @@ func (d *receiptDecoder) decodeAndCapture(ev abi.Event, log shared.Log, site log
 	if err != nil {
 		return nil, fmt.Errorf("decoding %s log (index %s): %w", ev.Name, log.LogIndex, err)
 	}
-	if err := assertEveryArgumentDecoded(ev, data, log); err != nil {
-		return nil, err
-	}
 	captured, err := dexconsumer.NewDecodedCapturedLog(site.address, site.logIndex, site.txHash, ev.Name, data)
 	if err != nil {
 		return nil, err
 	}
 	d.out.Captured = append(d.out.Captured, captured)
 	return data, nil
-}
-
-// assertEveryArgumentDecoded rejects a log whose truncated topics or data left
-// an ABI argument unset: DecodeLog skips the non-indexed block entirely when
-// data is empty, which would otherwise persist a silently partial params blob.
-func assertEveryArgumentDecoded(ev abi.Event, data map[string]any, log shared.Log) error {
-	for _, arg := range ev.Inputs {
-		if _, ok := data[arg.Name]; !ok {
-			return fmt.Errorf("decoding %s log (index %s): field %s is missing from the log", ev.Name, log.LogIndex, arg.Name)
-		}
-	}
-	return nil
 }
 
 // captureRaw mirrors a log the ABI cannot decode, named by its topic0. The
