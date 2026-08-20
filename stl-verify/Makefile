@@ -59,7 +59,10 @@ include lint.mk
 		docker-build-mock-blockchain-server docker-push-mock-blockchain-server docker-release-mock-blockchain-server \
 		docker-release-mock-blockchain-server-staging \
 		kind-build-mock-blockchain-server kind-load-mock-blockchain-server kind-deploy-mock-blockchain-server kind-deploy-mock-blockchain-server-s3 \
-		kind-use-mock kind-use-alchemy k6-stress-test stress-test-data stress-test kind-clean
+		kind-use-mock kind-use-alchemy k6-stress-test stress-test-data stress-test kind-clean \
+		build-cronjob-% run-cronjob-% run-cronjob-solo \
+		kind-scale-down-% kind-scale-up-% dev-endpoints dev-psql \
+		temporal-schedules temporal-schedule-describe temporal-trigger temporal-workflow-describe temporal-cli
 
 # Go bin path for installed tools
 GOBIN := $(shell go env GOPATH)/bin
@@ -757,28 +760,36 @@ dev-env:
 		"TEMPORAL_NAMESPACE=vector" \
 		"LOG_LEVEL=debug" \
 		> cmd/cronjobs/reference-capital-indexer/.env
+# The two Morpho history jobs sweep ~2.4M blocks and log one line per replayed
+# event, so they run at info: debug buries the run in per-call noise. Both need
+# JAEGER_ENDPOINT set — unset, telemetry pretty-prints every span to stdout and
+# the run log becomes unreadable.
 	@set -a; . ../.env.secrets; set +a; \
 	printf '%s\n' \
 		"CHAIN_ID=1" \
-		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
-		"TEMPORAL_HOST_PORT=127.0.0.1:7233" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:$(KIND_HOST_PG_PORT)/stl_verify?sslmode=disable" \
+		"TEMPORAL_HOST_PORT=127.0.0.1:$(KIND_HOST_TEMPORAL_PORT)" \
 		"TEMPORAL_NAMESPACE=vector" \
 		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
 		"ALCHEMY_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2" \
+		"JAEGER_ENDPOINT=127.0.0.1:$(KIND_HOST_OTLP_PORT)" \
+		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
 		"BUILD_GIT_HASH=dev" \
-		"LOG_LEVEL=debug" \
+		"LOG_LEVEL=info" \
 		> cmd/cronjobs/morpho-v2-bootstrap/.env; \
 	printf '%s\n' \
 		"CHAIN_ID=1" \
-		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/stl_verify?sslmode=disable" \
-		"TEMPORAL_HOST_PORT=127.0.0.1:7233" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:$(KIND_HOST_PG_PORT)/stl_verify?sslmode=disable" \
+		"TEMPORAL_HOST_PORT=127.0.0.1:$(KIND_HOST_TEMPORAL_PORT)" \
 		"TEMPORAL_NAMESPACE=vector" \
 		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
 		"ALCHEMY_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2" \
 		"S3_BUCKET=stl-sentinelstaging-ethereum-raw-89d540d0" \
 		"AWS_REGION=eu-west-1" \
+		"JAEGER_ENDPOINT=127.0.0.1:$(KIND_HOST_OTLP_PORT)" \
+		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
 		"BUILD_GIT_HASH=dev" \
-		"LOG_LEVEL=debug" \
+		"LOG_LEVEL=info" \
 		> cmd/backfillers/morpho-vault-backfill/.env
 	@echo "Environment files generated (.env.secrets updated)."; \
 	MISSING=""; \
@@ -858,6 +869,28 @@ dev-ips:
 	@docker inspect stl-verify-redis --format 'Redis:       {{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null || echo "Redis: not running"
 	@docker inspect stl-verify-localstack --format 'LocalStack:  {{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null || echo "LocalStack: not running"
 	@docker inspect stl-verify-jaeger --format 'Jaeger:      {{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null || echo "Jaeger: not running"
+
+# Print the host addresses this cluster publishes. The kind node maps all of them, so
+# nothing here needs a `kubectl port-forward`; with KIND_PORT_OFFSET set they are not the
+# default ports, and digging them out of the dev ConfigMap gives in-cluster DNS instead.
+dev-endpoints:
+	@echo "=== $(KIND_CLUSTER) host endpoints (KIND_PORT_OFFSET=$(KIND_PORT_OFFSET)) ==="
+	@echo "Postgres     postgres://postgres:postgres@127.0.0.1:$(KIND_HOST_PG_PORT)/stl_verify?sslmode=disable"
+	@echo "Redis        127.0.0.1:$(KIND_HOST_REDIS_PORT)"
+	@echo "LocalStack   http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)"
+	@echo "Temporal     127.0.0.1:$(KIND_HOST_TEMPORAL_PORT)"
+	@echo "Temporal UI  http://127.0.0.1:$(KIND_HOST_TEMPORAL_UI_PORT)"
+	@echo "Jaeger OTLP  127.0.0.1:$(KIND_HOST_OTLP_PORT)"
+	@echo "Jaeger UI    http://127.0.0.1:$(KIND_HOST_JAEGER_UI_PORT)"
+	@echo "Mock RPC     http://127.0.0.1:$(KIND_HOST_MOCK_RPC_PORT)"
+
+# Open psql against the local kind database, or run one single-line statement with SQL=.
+# The kind node publishes Postgres on the host, so no port-forward is involved.
+# Usage: make dev-psql
+#        make dev-psql SQL="select count(*) from morpho_adapter;"
+#        make dev-psql < query.sql          # multi-line: make cannot pass newlines in SQL=
+dev-psql:
+	@PGPASSWORD=postgres psql -h 127.0.0.1 -p $(KIND_HOST_PG_PORT) -U postgres -d stl_verify $(if $(SQL),-c "$(SQL)")
 
 # Generate ER diagram from database schema (requires dev-up)
 generate-er:
@@ -1946,9 +1979,28 @@ build-cronjob-%:
 	go build -o dist/$* ./cmd/cronjobs/$*
 	@echo "==> Built: dist/$*"
 
+# BUILD_GIT_HASH is stamped from HEAD rather than left at the .env's "dev": build_registry
+# keys rows by git hash, so "dev" collapses every local build into one build_id and the rows
+# a run wrote stop being attributable to the commit that wrote them. See run-allocation-tracker.
 run-cronjob-%:
+	@test -f cmd/cronjobs/$*/.env || { echo "ERROR: cmd/cronjobs/$*/.env is missing. Generate it with: make dev-env"; exit 1; }
 	@echo "==> Running $*..."
-	@set -a && . cmd/cronjobs/$*/.env && [ -f cmd/cronjobs/$*/.env.local ] && . cmd/cronjobs/$*/.env.local; set +a && go run ./cmd/cronjobs/$*
+	@set -a && . cmd/cronjobs/$*/.env && [ -f cmd/cronjobs/$*/.env.local ] && . cmd/cronjobs/$*/.env.local; set +a && BUILD_GIT_HASH=$$(git rev-parse HEAD 2>/dev/null || echo dev) go run ./cmd/cronjobs/$*
+
+# Run a cronjob's worker locally as the ONLY worker on its Temporal task queue.
+#
+# Local and in-cluster workers share the task queue named after the job, so a trigger is
+# dealt to whichever polls first — usually the in-cluster pod, running an image built from
+# whatever commit was current when it was loaded. Scaling it to zero is what makes a local
+# run actually test the local code. The cluster worker is restored on exit, Ctrl-C included.
+#
+# Usage: make run-cronjob-solo NAME=morpho-v2-bootstrap
+#        (then, from another shell) make temporal-trigger SCHEDULE=morpho-v2-bootstrap
+run-cronjob-solo:
+	@test -n "$(NAME)" || { echo "ERROR: NAME is required. Example: make run-cronjob-solo NAME=morpho-v2-bootstrap"; exit 1; }
+	@echo "==> Handing the $(NAME) task queue to a local worker (scaling deployment/$(NAME) to 0)..."
+	@kubectl --context=$(KUBE_CONTEXT) scale -n $(KUBE_NS) deployment/$(NAME) --replicas=0
+	@trap '$(MAKE) --no-print-directory kind-scale-up-$(NAME)' EXIT INT TERM; $(MAKE) --no-print-directory run-cronjob-$(NAME)
 
 # Pattern rules for backfiller binaries — work for any backfiller under cmd/backfillers/.
 build-backfiller-%:
@@ -1958,8 +2010,9 @@ build-backfiller-%:
 	@echo "==> Built: dist/$*"
 
 run-backfiller-%:
+	@test -f cmd/backfillers/$*/.env || { echo "ERROR: cmd/backfillers/$*/.env is missing. Generate it with: make dev-env"; exit 1; }
 	@echo "==> Running $*..."
-	@set -a && . cmd/backfillers/$*/.env && [ -f cmd/backfillers/$*/.env.local ] && . cmd/backfillers/$*/.env.local; set +a && go run ./cmd/backfillers/$*
+	@set -a && . cmd/backfillers/$*/.env && [ -f cmd/backfillers/$*/.env.local ] && . cmd/backfillers/$*/.env.local; set +a && BUILD_GIT_HASH=$$(git rev-parse HEAD 2>/dev/null || echo dev) go run ./cmd/backfillers/$*
 
 # Build oracle-pricing-backfill binary for ARM64 Linux (to run on Erigon node)
 build-oracle-pricing-backfill-arm64:
@@ -2330,6 +2383,70 @@ kind-redeploy-watcher:
 	$(MAKE) docker-build-watcher LOCAL=1
 	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-watcher:$(LOCAL_TAG)"
 	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/watcher -n $(KUBE_NS)
+
+REPLICAS ?= 1
+
+# Scale one in-cluster Deployment down and back up. The reason this pair exists is
+# Temporal task queues: an in-cluster worker and a local one poll the SAME queue, so a
+# triggered run lands wherever it lands unless the cluster worker is out of the way.
+# run-cronjob-solo does both around a local run; use these directly for a worker whose
+# local process you manage yourself.
+# Usage: make kind-scale-down-morpho-v2-bootstrap
+#        make kind-scale-up-morpho-v2-bootstrap
+kind-scale-down-%:
+	kubectl --context=$(KUBE_CONTEXT) scale -n $(KUBE_NS) deployment/$* --replicas=0
+
+kind-scale-up-%:
+	kubectl --context=$(KUBE_CONTEXT) scale -n $(KUBE_NS) deployment/$* --replicas=$(REPLICAS)
+
+# ============================================================================
+# Temporal (local kind cluster)
+# ============================================================================
+# Schedules and workflows live in Temporal's own state, not in a manifest, so the only way
+# to inspect or start one is the Temporal CLI. It ships inside the temporal-server image,
+# which saves installing it on the host and guarantees a client/server version match.
+
+# Kubernetes namespace the Temporal server runs in (its own, not KUBE_NS).
+TEMPORAL_K8S_NS ?= temporal
+# Temporal namespace the stl workers register their schedules in.
+TEMPORAL_NAMESPACE ?= vector
+# In-cluster address, resolved from inside the temporal-server pod.
+TEMPORAL_ADDRESS ?= temporal-server.$(TEMPORAL_K8S_NS):7233
+
+temporal_cli = kubectl --context=$(KUBE_CONTEXT) exec -n $(TEMPORAL_K8S_NS) deployment/temporal-server -- \
+	temporal --address $(TEMPORAL_ADDRESS) --namespace $(TEMPORAL_NAMESPACE)
+
+require_schedule = test -n "$(SCHEDULE)" || { echo "ERROR: SCHEDULE is required. Example: make $@ SCHEDULE=morpho-v2-bootstrap"; exit 1; }
+
+# List every schedule registered by a cronjob worker.
+temporal-schedules:
+	@$(temporal_cli) schedule list
+
+# Show one schedule: its action, whether it is paused, and how many runs it has taken.
+# Usage: make temporal-schedule-describe SCHEDULE=morpho-v2-bootstrap
+temporal-schedule-describe:
+	@$(require_schedule)
+	@$(temporal_cli) schedule describe --schedule-id $(SCHEDULE)
+
+# Start exactly one run of a schedule. This is the "button" a ManualOnly cronjob documents:
+# the schedule is created paused with no interval, and triggering it leaves it paused.
+# Usage: make temporal-trigger SCHEDULE=morpho-v2-bootstrap
+temporal-trigger:
+	@$(require_schedule)
+	@$(temporal_cli) schedule trigger --schedule-id $(SCHEDULE)
+
+# Show a workflow execution's status. A schedule's runs use the workflow ID
+# "scheduled-<schedule id>", which is what a cronjob's ensureSchedule registers.
+# Usage: make temporal-workflow-describe WORKFLOW=scheduled-morpho-v2-bootstrap
+temporal-workflow-describe:
+	@test -n "$(WORKFLOW)" || { echo "ERROR: WORKFLOW is required. Example: make temporal-workflow-describe WORKFLOW=scheduled-morpho-v2-bootstrap"; exit 1; }
+	@$(temporal_cli) workflow describe --workflow-id $(WORKFLOW)
+
+# Escape hatch for anything the targets above do not cover.
+# Usage: make temporal-cli ARGS="workflow list --limit 5"
+temporal-cli:
+	@test -n "$(ARGS)" || { echo "ERROR: ARGS is required. Example: make temporal-cli ARGS=\"workflow list --limit 5\""; exit 1; }
+	@$(temporal_cli) $(ARGS)
 
 # CI targets — infra only, no apps, no secrets needed
 # Migrations run via go run (no Docker build required)
