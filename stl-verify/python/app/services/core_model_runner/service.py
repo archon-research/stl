@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from app.adapters.parquet.core_model_data_reader import ParquetCoreModelDataReader
 from app.risk_engine.core_model.runner import CoreModelConfig, CoreModelPipelineResult, run
-from cli.cronjobs.core_model_runner.config import RunnerConfig
+from app.services.core_model_runner.config import RunnerConfig
 
 logger = logging.getLogger(__name__)
 
