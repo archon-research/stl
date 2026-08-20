@@ -24,6 +24,18 @@ import (
 // 51,200-event history (~6 events/activity caps it at ~8,500); 8M blocks reaches 2028.
 const maxPartitionsPerRun = 8_000
 
+// maxPlausibleBlock bounds where a range may SIT, where maxPartitionsPerRun
+// bounds how WIDE it may be. 1e11 is ~38,000 years of Ethereum blocks, while a
+// pasted millisecond timestamp is ~1.75e12 and so is rejected.
+//
+// It is what keeps both partition walks — replayPartitionPrefixes, run in
+// workflow code, and partitionsForRange, run inside the discovery activity —
+// from overflowing. Each steps a cursor from at most `from` by BlockRangeSize
+// while it is <= `to`, so with 0 < from <= to <= 1e11 the cursor tops out just
+// above 1e11: eight orders of magnitude below math.MaxInt64, past which the
+// cursor would wrap negative and the loop never terminate.
+const maxPlausibleBlock = 100_000_000_000
+
 // errStructuralData marks a failure that reproduces identically on every
 // attempt: an S3 gap, an unparseable partition prefix, a log the archive cannot
 // give coordinates for. A transient fault (S3/RPC/DB network error, timeout,
@@ -81,6 +93,14 @@ func (p BackfillParams) resolve(chainID int64) (BackfillParams, error) {
 	if n := replayPartitionCount(p.From, p.To); n > maxPartitionsPerRun {
 		return BackfillParams{}, fmt.Errorf(
 			"this range expands to %d partitions, over the %d limit: split it into narrower ranges", n, maxPartitionsPerRun)
+	}
+	// Last, because the count guard above already rejects every implausible `to`
+	// reached from a sane `from` — and does it with the more useful "split the
+	// range" message. What it cannot see is a NARROW window sitting at the top of
+	// int64, which is the one shape that overflows the partition walks.
+	if p.To > maxPlausibleBlock {
+		return BackfillParams{}, fmt.Errorf(
+			"to (%d) is not a plausible block number: over the %d ceiling", p.To, maxPlausibleBlock)
 	}
 	return p, nil
 }
