@@ -271,8 +271,15 @@ func (t *Telemetry) RecordAdapterMembershipObservation(ctx context.Context, adap
 
 // RecordV2Snapshot records one committed VaultV2 structured snapshot. Callers
 // record after their write transaction returns, so the counter never claims a
-// row that was rolled back. Discovery-seeded adapter_state rows are deliberately
-// excluded: this counter is the liveness signal for the event-driven write path.
+// row that was rolled back.
+//
+// This counter is the liveness signal for the EVENT-DRIVEN write path, so exactly
+// two writers of these tables stay uncounted, both deliberately: discovery's
+// adapter_state seeds (seedDiscoveredAdapters) and its vault_fee seed
+// (seedDiscoveredFees). Both fire on vault registration, not on a V2 log, so
+// counting them would let a run of new vaults mask a dead event path. Every other
+// writer counts — including the adapter_state seed an AddAdapter commits
+// (saveAdapterSeedState), which an AddAdapter log drives.
 func (t *Telemetry) RecordV2Snapshot(ctx context.Context, snapshotType v2SnapshotType) {
 	if t == nil {
 		return

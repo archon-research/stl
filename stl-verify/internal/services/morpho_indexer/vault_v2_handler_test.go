@@ -1180,6 +1180,62 @@ func TestProcessBlockEvent_AdapterMembership_NotRecordedWhenTheCommitFails(t *te
 	}
 }
 
+// TestProcessBlockEvent_AddAdapter_CountsTheCommittedSeedAsASnapshot closes the
+// registration path's hole in the snapshot counter. The seed row an AddAdapter
+// commits is an event-driven adapter_state write like the one an Allocate makes, so
+// VectorMorphoV2NoSnapshotsWritten must see it; a vault whose only V2 traffic is
+// governance registering adapters would otherwise look like a dead write path.
+func TestProcessBlockEvent_AddAdapter_CountsTheCommittedSeedAsASnapshot(t *testing.T) {
+	tests := []struct {
+		name          string
+		adapterType   entity.MorphoAdapterType
+		seedReverts   bool
+		wantSnapshots int64
+	}{
+		{name: "a seeded adapter counts its committed state row", adapterType: entity.MorphoAdapterTypeMarketV1, wantSnapshots: 1},
+		{
+			name:        "an unclassified adapter that serves no realAssets writes no row to count",
+			adapterType: entity.MorphoAdapterTypeUnknown, seedReverts: true, wantSnapshots: 0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newTestHarness(t)
+			h.registerTestVault(testVaultAddr, 7, entity.MorphoVaultV2)
+			reader := h.recordMetrics(t)
+
+			h.multicaller.ExecuteFn = func(_ context.Context, calls []outbound.Call, _ *big.Int) ([]outbound.Result, error) {
+				if len(calls) == 2 && calls[0].Target == testAdapterAddr {
+					return h.adapterProbeResults(tt.adapterType), nil
+				}
+				return nil, errTestUnexpectedCall(calls)
+			}
+			h.multicaller.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+				if len(calls) != 1 || calls[0].Target != testAdapterAddr {
+					return nil, errTestUnexpectedCall(calls)
+				}
+				if tt.seedReverts {
+					return []outbound.Result{{Success: false, ReturnData: nil}}, nil
+				}
+				return []outbound.Result{{Success: true, ReturnData: h.packUint256(big.NewInt(41_300_000))}}, nil
+			}
+			h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterObservation) (int64, bool, error) {
+				return 42, true, nil
+			}
+
+			log := h.makeV2VaultLog(h.vaultV2EventsABI.Events["AddAdapter"], testVaultAddr, []common.Hash{addrTopic(testAdapterAddr)})
+			if err := h.processBlock(t, 1, 20000000, 0, []shared.TransactionReceipt{makeReceipt(testTxHash, log)}); err != nil {
+				t.Fatalf("processBlock: %v", err)
+			}
+
+			want := map[string]string{"snapshot.type": string(v2SnapshotAdapterState)}
+			if got := counterValue(t, reader, "morpho.v2.snapshots.written", want); got != tt.wantSnapshots {
+				t.Errorf("morpho.v2.snapshots.written%v = %d, want %d", want, got, tt.wantSnapshots)
+			}
+		})
+	}
+}
+
 // TestProcessBlockEvent_V2Snapshot_NotRecordedWhenWriteFails keeps the counter
 // honest: it counts committed snapshots, so a failed write must leave it at zero
 // rather than reporting a row that never landed.

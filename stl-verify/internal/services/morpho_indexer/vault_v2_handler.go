@@ -79,6 +79,9 @@ func (s *Service) handleAddAdapter(ctx context.Context, e *AddAdapterEvent, vaul
 		return err
 	}
 	s.recordMembershipObservations(ctx, recorded)
+	if realAssets != nil {
+		s.telemetry.RecordV2Snapshot(ctx, v2SnapshotAdapterState)
+	}
 	return nil
 }
 
