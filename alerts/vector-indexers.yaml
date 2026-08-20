@@ -466,8 +466,8 @@ groups:
   # Signals (morpho-indexer OTel instruments, all carrying chain + cluster):
   #   morpho_v2_adapter_registrations_total{adapter_type,observed_via}
   #     one sample per adapter-membership observation APPENDED to
-  #     morpho_adapter_membership; an assertion that changes nothing is not
-  #     counted, so this means "observations recorded", not "write attempts".
+  #     morpho_adapter_membership — what it does and does not count is stated
+  #     canonically on RecordAdapterMembershipObservation (morpho_indexer/telemetry.go).
   #     adapter_type is the classification the observation carried (market_v1 |
   #     vault_v1 | unknown = probed and unclassifiable | unprobed = no probe, the
   #     shape a de-registration takes); observed_via mirrors the DB column

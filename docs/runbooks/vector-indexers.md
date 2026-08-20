@@ -1661,7 +1661,9 @@ over `morpho_adapter_membership`, and it is **NULL** for an adapter whose
 
 - `morpho_v2_adapter_registrations_total{adapter_type, observed_via}` — one
   sample per adapter-membership observation **appended** to
-  `morpho_adapter_membership` (an assertion that changes nothing is not counted).
+  `morpho_adapter_membership`; what it does and does not count is stated
+  canonically on `RecordAdapterMembershipObservation` in
+  `stl-verify/internal/services/morpho_indexer/telemetry.go`.
   `adapter_type` is the classification the observation carried (`market_v1` |
   `vault_v1` | `unknown` = probed and unclassifiable | `unprobed` = the
   observation carried no probe, which is what a de-registration looks like);

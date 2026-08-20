@@ -24,17 +24,11 @@ const (
 	v2SnapshotVaultFee     v2SnapshotType = "vault_fee"
 )
 
-// adapterTypeLabel renders an adapter classification as a metric label. A value
-// outside the modelled set renders as its numeric form rather than collapsing
-// into "unknown": Unknown (99) is a real classification the alerts count, so
-// masking a newly added enum value as Unknown would corrupt that signal.
-//
-// A nil classification renders as "unprobed", which is a THIRD state and not a
-// synonym for "unknown": 99 means an on-chain probe ran and could not classify
-// the adapter, while unprobed means the observation carried no probe at all —
-// the shape a de-registration takes, since an adapter first seen by its own
-// removal has no known type. VectorMorphoV2UnknownAdapters counts only the
-// former, so collapsing the two would make removals look like probe failures.
+// adapterTypeLabel renders an adapter classification as a metric label. Two
+// collapses are forbidden because VectorMorphoV2UnknownAdapters counts "unknown"
+// exactly: a value outside the modelled set renders numerically rather than as
+// "unknown", and a nil classification renders "unprobed" — the shape a
+// de-registration takes, not a probe that ran and failed to classify.
 func adapterTypeLabel(t *entity.MorphoAdapterType) string {
 	if t == nil {
 		return "unprobed"
@@ -242,22 +236,17 @@ func (t *Telemetry) RecordError(ctx context.Context, operation string, err error
 	))
 }
 
-// RecordAdapterMembershipObservation records that one VaultV2 adapter-membership
-// observation was APPENDED to the log. Callers must not record when the
-// repository appended nothing, so the counter means "observations recorded"
-// rather than "write attempts" — otherwise every Allocate would increment it,
-// thousands per day, and VectorMorphoV2LazyAdapterRegistrations would fire
-// permanently.
+// RecordAdapterMembershipObservation counts observations APPENDED to
+// morpho_adapter_membership, never write attempts: an assertion that changes
+// nothing appends nothing, and counting attempts would make every Allocate
+// increment it and hold VectorMorphoV2LazyAdapterRegistrations permanently in
+// alarm. Canonical statement of that contract for the alert and its runbook.
 //
-// observed_via carries the same five values as
-// morpho_adapter_membership.observed_via, so a PromQL question and a SQL question
-// about provenance have the same vocabulary. adapter.type is the classification
-// the observation carried, with "unprobed" for the removals that carry none.
-//
-// Callers accumulate their appends and flush them here only after the transaction
-// that made them commits (recordMembershipObservations), so a rolled-back append —
-// which an SQS redelivery repeats every visibility timeout for as long as a block
-// stays stuck — cannot inflate the counter against a table that gained no rows.
+// Callers flush only after the appending transaction commits
+// (recordMembershipObservations), so a rolled-back append — which an SQS
+// redelivery repeats every visibility timeout while a block stays stuck — cannot
+// inflate it. observed_via mirrors the DB column of the same name; adapter.type
+// is "unprobed" when the observation carried no probe.
 func (t *Telemetry) RecordAdapterMembershipObservation(ctx context.Context, adapterType *entity.MorphoAdapterType, observedVia entity.MembershipSource) {
 	if t == nil {
 		return
