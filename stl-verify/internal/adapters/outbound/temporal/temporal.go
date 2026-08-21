@@ -301,11 +301,11 @@ func waitForServer(ctx context.Context, c client.Client, logger *slog.Logger) er
 	}
 }
 
-// buildScheduleSpec resolves the interval and optional offset for a cronjob into
-// a Temporal schedule spec. getenv is injected so the resolution is unit-testable.
-// A non-empty interval env overrides IntervalDefault; an empty or unset offset env
-// leaves the offset at zero (fire on the interval boundary).
-func buildScheduleSpec(cfg CronjobConfig, getenv func(string) string) (client.ScheduleSpec, error) {
+// buildScheduleInterval resolves the interval and optional offset for a cronjob.
+// getenv is injected so the resolution is unit-testable. A non-empty interval env
+// overrides IntervalDefault; an empty or unset offset env leaves the offset at
+// zero (fire on the interval boundary).
+func buildScheduleInterval(cfg CronjobConfig, getenv func(string) string) (client.ScheduleIntervalSpec, error) {
 	interval := cfg.IntervalDefault
 	intervalSource := "IntervalDefault"
 	if cfg.IntervalEnv != "" {
@@ -316,7 +316,7 @@ func buildScheduleSpec(cfg CronjobConfig, getenv func(string) string) (client.Sc
 	}
 	every, err := time.ParseDuration(interval)
 	if err != nil {
-		return client.ScheduleSpec{}, fmt.Errorf("parsing interval from %s (%q): %w", intervalSource, interval, err)
+		return client.ScheduleIntervalSpec{}, fmt.Errorf("parsing interval from %s (%q): %w", intervalSource, interval, err)
 	}
 
 	var offset time.Duration
@@ -324,21 +324,20 @@ func buildScheduleSpec(cfg CronjobConfig, getenv func(string) string) (client.Sc
 		if v := getenv(cfg.IntervalOffsetEnv); v != "" {
 			offset, err = time.ParseDuration(v)
 			if err != nil {
-				return client.ScheduleSpec{}, fmt.Errorf("parsing %s %q: %w", cfg.IntervalOffsetEnv, v, err)
+				return client.ScheduleIntervalSpec{}, fmt.Errorf("parsing %s %q: %w", cfg.IntervalOffsetEnv, v, err)
 			}
 		}
 	}
 
-	return client.ScheduleSpec{
-		Intervals: []client.ScheduleIntervalSpec{{Every: every, Offset: offset}},
-	}, nil
+	return client.ScheduleIntervalSpec{Every: every, Offset: offset}, nil
 }
 
 func ensureSchedule(ctx context.Context, c client.Client, logger *slog.Logger, taskQueue string, cfg CronjobConfig) error {
-	spec, err := buildScheduleSpec(cfg, os.Getenv)
+	interval, err := buildScheduleInterval(cfg, os.Getenv)
 	if err != nil {
 		return fmt.Errorf("building schedule spec for %q: %w", cfg.Name, err)
 	}
+	spec := client.ScheduleSpec{Intervals: []client.ScheduleIntervalSpec{interval}}
 
 	scheduleID := cfg.Name
 	workflowID := "scheduled-" + cfg.Name
@@ -358,7 +357,7 @@ func ensureSchedule(ctx context.Context, c client.Client, logger *slog.Logger, t
 		},
 	})
 	if err == nil {
-		logger.Info("schedule created", "scheduleID", scheduleID, "spec", describeSpec(spec))
+		logger.Info("schedule created", "scheduleID", scheduleID, "interval", interval.Every, "offset", interval.Offset)
 		return nil
 	}
 
@@ -372,7 +371,7 @@ func ensureSchedule(ctx context.Context, c client.Client, logger *slog.Logger, t
 		// worker: log it and start against the existing schedule. The offset is
 		// best-effort defence in depth; the semantic skip fix is what actually
 		// stops the alert noise, and the next successful startup reconciles again.
-		if reconcileErr := reconcileScheduleSpec(ctx, c, logger, scheduleID, spec); reconcileErr != nil {
+		if reconcileErr := reconcileScheduleSpec(ctx, c, logger, scheduleID, interval); reconcileErr != nil {
 			logger.Warn("schedule reconcile failed; starting with the existing schedule",
 				"scheduleID", scheduleID, "error", reconcileErr)
 		}
@@ -383,22 +382,19 @@ func ensureSchedule(ctx context.Context, c client.Client, logger *slog.Logger, t
 
 // reconcileScheduleSpec updates an existing schedule's spec in place. The action
 // (workflow + task queue) is left untouched; only the timing spec is reconciled.
-func reconcileScheduleSpec(ctx context.Context, c client.Client, logger *slog.Logger, scheduleID string, want client.ScheduleSpec) error {
+func reconcileScheduleSpec(ctx context.Context, c client.Client, logger *slog.Logger, scheduleID string, want client.ScheduleIntervalSpec) error {
 	handle := c.ScheduleClient().GetHandle(ctx, scheduleID)
+	spec := client.ScheduleSpec{Intervals: []client.ScheduleIntervalSpec{want}}
 	err := handle.Update(ctx, client.ScheduleUpdateOptions{
 		DoUpdate: func(in client.ScheduleUpdateInput) (*client.ScheduleUpdate, error) {
-			return applyScheduleSpecUpdate(in, want), nil
+			return applyScheduleSpecUpdate(in, spec), nil
 		},
 	})
 	if err != nil {
 		return fmt.Errorf("reconciling schedule %q: %w", scheduleID, err)
 	}
-	logger.Info("schedule reconciled", "scheduleID", scheduleID, "spec", describeSpec(want))
+	logger.Info("schedule reconciled", "scheduleID", scheduleID, "interval", want.Every, "offset", want.Offset)
 	return nil
-}
-
-func describeSpec(spec client.ScheduleSpec) string {
-	return fmt.Sprintf("%+v", spec.Intervals)
 }
 
 // applyScheduleSpecUpdate replaces only the timing spec on the current schedule

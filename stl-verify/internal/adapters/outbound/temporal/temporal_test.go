@@ -57,7 +57,7 @@ func TestRunCronjob_InitializesOTEL(t *testing.T) {
 	}
 }
 
-func TestBuildScheduleSpec_Offset(t *testing.T) {
+func TestBuildScheduleInterval_Offset(t *testing.T) {
 	tests := []struct {
 		name       string
 		cfg        CronjobConfig
@@ -109,7 +109,7 @@ func TestBuildScheduleSpec_Offset(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			getenv := func(k string) string { return tc.env[k] }
-			spec, err := buildScheduleSpec(tc.cfg, getenv)
+			got, err := buildScheduleInterval(tc.cfg, getenv)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")
@@ -119,7 +119,6 @@ func TestBuildScheduleSpec_Offset(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			got := spec.Intervals[0]
 			if got.Every != tc.wantEvery || got.Offset != tc.wantOffset {
 				t.Fatalf("got {Every:%s Offset:%s}, want {Every:%s Offset:%s}",
 					got.Every, got.Offset, tc.wantEvery, tc.wantOffset)
