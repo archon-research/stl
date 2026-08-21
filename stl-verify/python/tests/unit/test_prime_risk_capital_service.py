@@ -67,8 +67,12 @@ _SPARK_MAINNET_ALM = "0x1601843c5e9bc251a3272907010afa41fa18347e"
 _SPARK_AVALANCHE_ALM = "0xece6b0e8a54c2f44e066fbb9234e7157b15b7fec"
 _SPARK_MAINNET_ALM_MIXED_CASE = "0x1601843C5E9BC251A3272907010AFA41FA18347E"
 _SPARK_BASE_ALM = "0x2917956eff0b5eaf030abdb4ef4296df775009ca"
-# On a chain no allocation tracker serves (acknowledgedUnservedByTrackerChains).
-_SPARK_ARBITRUM_ALM = "0x92afd6f2385a90e44da3a8b60fe36f6cbe1d8709"
+# Grove, not spark, is the prime with proxies left on unserved chains: every chain
+# spark holds an ALM proxy on now has a deployed tracker.
+_GROVE_MAINNET_ALM = "0x491edfb0b8b608044e227225c715981a30f3a44e"
+_GROVE_AVALANCHE_ALM = "0x7107dd8f56642327945294a18a4280c78e153644"
+_GROVE_BASE_ALM = "0x9b746dbc5269e1df6e4193bcb441c0fbbf1cecee"
+_GROVE_PLUME_ALM = "0x1db91ad50446a671e2231f77e00948e68876f812"
 
 
 def _repo_by_proxy(positions_by_proxy: dict[str, list], total_rc: Decimal | None):
@@ -100,6 +104,18 @@ def _two_chain_spark_repo():
             _SPARK_MAINNET_ALM: [make_receipt_token_position(receipt_token_id=1, amount_usd=Decimal("400"))],
             _SPARK_AVALANCHE_ALM: [make_receipt_token_position(receipt_token_id=2, amount_usd=Decimal("20"))],
         },
+        Decimal("100"),
+    )
+
+
+def _grove_repo():
+    """Grove with one priced mainnet position, for the served/unserved narrowing.
+
+    Grove's ALM proxies span mainnet, avalanche-c and base (all served) plus monad,
+    plasma and plume (absent from the chain vocabulary, so unservable).
+    """
+    return _repo_by_proxy(
+        {_GROVE_MAINNET_ALM: [make_receipt_token_position(receipt_token_id=1, amount_usd=Decimal("400"))]},
         Decimal("100"),
     )
 
@@ -277,16 +293,16 @@ async def test_compute_reports_a_per_chain_breakdown_of_the_aggregation():
 async def test_compute_reports_null_not_zero_for_a_chain_no_tracker_serves():
     """The distinction the prime-wide totals rest on.
 
-    Spark's arbitrum, optimism and unichain proxies have no
-    ``allocation_position`` rows because no tracker indexes those chains. Reported
-    as ``0`` they would claim the prime holds nothing there, which understates
-    encumbrance in the direction that looks safe.
+    Grove's monad, plasma and plume proxies have no ``allocation_position`` rows
+    because no tracker indexes those chains. Reported as ``0`` they would claim the
+    prime holds nothing there, which understates encumbrance in the direction that
+    looks safe.
     """
-    service = _service(_two_chain_spark_repo(), _two_asset_registry())
+    service = _service(_grove_repo(), _two_asset_registry())
 
-    result = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
+    result = await service.compute(EthAddress(_GROVE_MAINNET_ALM))
 
-    unserved = [row for row in result.prime_per_chain if row.chain == "arbitrum"]
+    unserved = [row for row in result.prime_per_chain if row.chain == "plume"]
     assert len(unserved) == 1
     assert unserved[0].exposure_usd is None
     assert unserved[0].required_risk_capital_usd is None
@@ -295,23 +311,23 @@ async def test_compute_reports_null_not_zero_for_a_chain_no_tracker_serves():
 
 @pytest.mark.asyncio
 async def test_compute_names_the_chains_its_totals_exclude():
-    service = _service(_two_chain_spark_repo(), _two_asset_registry())
+    service = _service(_grove_repo(), _two_asset_registry())
 
-    result = await service.compute(EthAddress(_SPARK_MAINNET_ALM))
+    result = await service.compute(EthAddress(_GROVE_MAINNET_ALM))
 
-    assert result.prime_unserved_chains == ("arbitrum", "optimism", "unichain")
+    assert result.prime_unserved_chains == ("monad", "plasma", "plume")
 
 
 @pytest.mark.asyncio
 async def test_compute_does_not_query_a_proxy_on_an_unserved_chain():
     """Each skipped proxy is a pooled connection not taken; see Settings.db_pool_size."""
-    repo = _two_chain_spark_repo()
+    repo = _grove_repo()
     service = _service(repo, _two_asset_registry())
 
-    await service.compute(EthAddress(_SPARK_MAINNET_ALM))
+    await service.compute(EthAddress(_GROVE_MAINNET_ALM))
 
     queried = {str(call.args[0]).lower() for call in repo.list_receipt_token_positions.await_args_list}
-    assert queried == {_SPARK_MAINNET_ALM, _SPARK_AVALANCHE_ALM, _SPARK_BASE_ALM}
+    assert queried == {_GROVE_MAINNET_ALM, _GROVE_AVALANCHE_ALM, _GROVE_BASE_ALM}
 
 
 @pytest.mark.asyncio
@@ -351,13 +367,13 @@ async def test_compute_totals_equal_the_sum_of_the_per_chain_rows_that_carry_fig
 async def test_compute_warns_when_a_proxy_holds_positions_on_a_chain_declared_unserved():
     """A stale SERVED_TRACKER_CHAINS silently nulls real per-chain figures."""
     repo = _repo_by_proxy(
-        {_SPARK_ARBITRUM_ALM: [make_receipt_token_position(receipt_token_id=1, amount_usd=Decimal("400"))]},
+        {_GROVE_PLUME_ALM: [make_receipt_token_position(receipt_token_id=1, amount_usd=Decimal("400"))]},
         Decimal("100"),
     )
     service = _service(repo, _two_asset_registry())
 
     with patch("app.services.prime_risk_capital_service.logger") as mock_logger:
-        await service.compute(EthAddress(_SPARK_ARBITRUM_ALM))
+        await service.compute(EthAddress(_GROVE_PLUME_ALM))
 
     assert "unserved chain" in mock_logger.warning.call_args.args[0]
 

@@ -27,6 +27,8 @@ const (
 
 var testPSM3Address = common.HexToAddress("0x1601843c5E9bC251A3272907010AFa41Fa18347E")
 
+var testALMAddress = common.HexToAddress("0x2917956eFF0B5eaF030abDB4EF4296DF775009cA")
+
 // ---------------------------------------------------------------------------
 // Fakes
 // ---------------------------------------------------------------------------
@@ -67,6 +69,13 @@ func newFakePSM3Caller() *fakePSM3Caller {
 			USDCBalance:    big.NewInt(3_000_000),
 			TotalAssets:    big.NewInt(6_000_000),
 			ConversionRate: big.NewInt(1_050_000),
+			TotalShares:    big.NewInt(6_000_000),
+			ALMPositions: []entity.PSM3ALMPosition{{
+				Prime:      "spark",
+				Address:    testALMAddress,
+				Shares:     big.NewInt(5_900_000),
+				AssetValue: big.NewInt(5_900_000),
+			}},
 		},
 	}
 }
@@ -422,6 +431,9 @@ func TestSweep_WritesSnapshot(t *testing.T) {
 	}
 	if snap.Address != testPSM3Address {
 		t.Errorf("Address = %s, want %s", snap.Address.Hex(), testPSM3Address.Hex())
+	}
+	if len(snap.State.ALMPositions) != 1 || snap.State.ALMPositions[0].Address != testALMAddress {
+		t.Errorf("ALMPositions = %+v, want a single position for %s", snap.State.ALMPositions, testALMAddress.Hex())
 	}
 	if snap.BlockNumber != testBlockNum {
 		t.Errorf("BlockNumber = %d, want %d", snap.BlockNumber, testBlockNum)

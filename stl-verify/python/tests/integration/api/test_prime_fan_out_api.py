@@ -21,6 +21,7 @@ from app.config import Settings
 from app.main import create_app
 from tests.integration.seed import (
     FAN_OUT_PRIME_EXPOSURE_USD,
+    GROVE_MAINNET_ALM_HEX,
     SPARK_AVALANCHE_ALM_HEX,
     SPARK_MAINNET_ALM_HEX,
     seed_prime_fan_out,
@@ -28,6 +29,7 @@ from tests.integration.seed import (
 
 _SPARK_MAINNET_ALM = f"0x{SPARK_MAINNET_ALM_HEX}"
 _SPARK_AVALANCHE_ALM = f"0x{SPARK_AVALANCHE_ALM_HEX}"
+_GROVE_MAINNET_ALM = f"0x{GROVE_MAINNET_ALM_HEX}"
 _SPARK_VAULT = "0x691a6c29e9e96dd897718305427ad5d534db16ba"
 
 
@@ -56,6 +58,10 @@ def client(async_db_url: str, tmp_path: Path):
 
 def _spark_rows(client: TestClient) -> list[dict]:
     return [row for row in client.get("/v1/primes").json() if row["name"] == "spark"]
+
+
+def _grove_rows(client: TestClient) -> list[dict]:
+    return [row for row in client.get("/v1/primes").json() if row["name"] == "grove"]
 
 
 def _stub_star_payload(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -215,12 +221,12 @@ def test_risk_capital_prime_encumbrance_ratio_is_non_null(client: TestClient) ->
 
 
 def test_risk_capital_reports_null_for_a_chain_no_tracker_serves(client: TestClient) -> None:
-    """Spark's contract proxies on unserved chains have no rows at all.
+    """Grove's contract proxies on unserved chains have no rows at all.
 
     Reported as ``"0"`` they would be indistinguishable from a served chain the
     prime genuinely holds nothing on, which understates encumbrance.
     """
-    body = client.get(f"/v1/primes/{_SPARK_MAINNET_ALM}/risk-capital").json()
+    body = client.get(f"/v1/primes/{_GROVE_MAINNET_ALM}/risk-capital").json()
 
     unserved = [row for row in body["prime_per_chain"] if row["chain"] in body["prime_unserved_chains"]]
     assert unserved != []
@@ -230,10 +236,10 @@ def test_risk_capital_reports_null_for_a_chain_no_tracker_serves(client: TestCli
 def test_risk_capital_names_the_unserved_chains_identically_from_every_proxy(client: TestClient) -> None:
     reported = {
         tuple(client.get(f"/v1/primes/{row['address']}/risk-capital").json()["prime_unserved_chains"])
-        for row in _spark_rows(client)
+        for row in _grove_rows(client)
     }
 
-    assert reported == {("arbitrum", "optimism", "unichain")}
+    assert reported == {("monad", "plasma", "plume")}
 
 
 def test_risk_capital_prime_per_chain_sums_to_the_prime_total(client: TestClient) -> None:

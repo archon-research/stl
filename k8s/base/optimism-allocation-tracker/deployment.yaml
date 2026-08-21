@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: optimism-allocation-tracker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: optimism-allocation-tracker
+  template:
+    metadata:
+      labels:
+        app: optimism-allocation-tracker
+    spec:
+      serviceAccountName: optimism-allocation-tracker
+      containers:
+        - name: optimism-allocation-tracker
+          image: allocation-tracker
+          envFrom:
+            - configMapRef:
+                name: otel-config
+            - configMapRef:
+                name: optimism-allocation-tracker-config
+            - secretRef:
+                name: optimism-allocation-tracker
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pgrep -f allocation"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+      terminationGracePeriodSeconds: 60

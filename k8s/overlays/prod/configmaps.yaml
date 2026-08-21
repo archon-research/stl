@@ -217,6 +217,59 @@ data:
   ARCHIVE_SC_CALLS: "true"
   RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
 ---
+# The three L2 trackers below (ARCT-216) set SWEEP_BLOCKS because the 75-block
+# default is block-count based: at these chains' cadences it would re-read and
+# append every tracked position every ~19s (arbitrum) to ~75s (unichain). The
+# values normalise the sweep to ~10 minutes, matching the psm3-indexer configmaps
+# for the same chains.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: optimism-allocation-tracker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://opt-mainnet.g.alchemy.com/v2"
+  DEPLOY_ENV: "prod"
+  CHAIN_ID: "10"
+  ENVIRONMENT: "sentinelprod"
+  SWEEP_BLOCKS: "300"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains;
+  # pod identity write policy granted in infrastructure#383.
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: unichain-allocation-tracker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://unichain-mainnet.g.alchemy.com/v2"
+  DEPLOY_ENV: "prod"
+  CHAIN_ID: "130"
+  ENVIRONMENT: "sentinelprod"
+  SWEEP_BLOCKS: "600"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains;
+  # pod identity write policy granted in infrastructure#383.
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arbitrum-allocation-tracker-config
+data:
+  AWS_REGION: "eu-west-1"
+  ALCHEMY_HTTP_URL: "https://arb-mainnet.g.alchemy.com/v2"
+  DEPLOY_ENV: "prod"
+  CHAIN_ID: "42161"
+  ENVIRONMENT: "sentinelprod"
+  SWEEP_BLOCKS: "2400"
+  # Raw SC call archiving (VEC-81). Single bucket shared across chains;
+  # pod identity write policy granted in infrastructure#383.
+  ARCHIVE_SC_CALLS: "true"
+  RAW_SC_BUCKET: "stl-sentinelprod-raw-sc-calls"
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:

@@ -25,6 +25,10 @@ func validPosition() *AllocationPosition {
 }
 
 func TestAllocationPosition_Validate(t *testing.T) {
+	proxy := common.HexToAddress("0x1601843c5e9bc251a3272907010afa41fa18347e") // matches validPosition
+	counterparty := common.HexToAddress("0x9999999999999999999999999999999999999999")
+	mintBurn := common.Address{}
+
 	cases := []struct {
 		name    string
 		mut     func(*AllocationPosition)
@@ -42,6 +46,56 @@ func TestAllocationPosition_Validate(t *testing.T) {
 		{"missing block number", func(p *AllocationPosition) { p.BlockNumber = 0 }, true},
 		{"zero created_at_block", func(p *AllocationPosition) { p.CreatedAtBlock = 0 }, true},
 		{"negative created_at_block", func(p *AllocationPosition) { p.CreatedAtBlock = -1 }, true},
+		{"transfer without either party", func(p *AllocationPosition) { p.Direction = "in" }, true},
+		{"transfer with only one party", func(p *AllocationPosition) {
+			p.Direction = "in"
+			p.FromAddress = &counterparty
+		}, true},
+		{"inbound transfer", func(p *AllocationPosition) {
+			p.Direction = "in"
+			p.FromAddress = &counterparty
+			p.ToAddress = &proxy
+		}, false},
+		{"outbound transfer", func(p *AllocationPosition) {
+			p.Direction = "out"
+			p.FromAddress = &proxy
+			p.ToAddress = &counterparty
+		}, false},
+		// direction is redundant with the two addresses, so it can contradict them.
+		{"inbound but the proxy is the sender", func(p *AllocationPosition) {
+			p.Direction = "in"
+			p.FromAddress = &proxy
+			p.ToAddress = &counterparty
+		}, true},
+		{"outbound but the proxy is the recipient", func(p *AllocationPosition) {
+			p.Direction = "out"
+			p.FromAddress = &counterparty
+			p.ToAddress = &proxy
+		}, true},
+		{"zero address is a mint, not a missing value", func(p *AllocationPosition) {
+			p.Direction = "in"
+			p.FromAddress = &mintBurn
+			p.ToAddress = &proxy
+		}, false},
+		{"zero address is a burn, not a missing value", func(p *AllocationPosition) {
+			p.Direction = "out"
+			p.FromAddress = &proxy
+			p.ToAddress = &mintBurn
+		}, false},
+		{"sweep carries neither party", func(p *AllocationPosition) { p.Direction = "sweep" }, false},
+		{"sweep carrying a sender", func(p *AllocationPosition) {
+			p.Direction = "sweep"
+			p.FromAddress = &counterparty
+		}, true},
+		{"sweep carrying a recipient", func(p *AllocationPosition) {
+			p.Direction = "sweep"
+			p.ToAddress = &proxy
+		}, true},
+		{"sweep carrying both parties", func(p *AllocationPosition) {
+			p.Direction = "sweep"
+			p.FromAddress = &counterparty
+			p.ToAddress = &proxy
+		}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

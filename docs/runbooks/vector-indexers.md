@@ -1367,11 +1367,12 @@ OTel `service_name` `prime-allocation-indexer`) consumes Ethereum BlockEvents,
 extracts ERC-20 transfers to the ALM proxies, reads end-of-block token positions
 and total supplies via Multicall3, and appends `allocation_position` /
 `token_total_supply` snapshots into TimescaleDB. A periodic sweep (every
-`SweepEveryNBlocks`, default 75) re-reads every tracked entry to catch
-transfer-less balance changes (interest accrual, rebases). Mainnet today;
-avalanche/base instances stack on top (VEC-499) and reuse one `service_name`,
-differing only by the `chain` label — so every alert below covers all chains
-without per-instance edits.
+`SweepEveryNBlocks`, default 75; the L2 instances override it via `SWEEP_BLOCKS`)
+re-reads every tracked entry to catch transfer-less balance changes (interest
+accrual, rebases). One instance per chain — mainnet, avalanche, base (VEC-499),
+optimism, unichain, arbitrum (ARCT-216) — all reusing one `service_name` and
+differing only by the `chain` label, so the chain-scoped alerts below cover every
+chain without per-instance edits.
 
 **Metric coverage (VEC-499):** the shared `telemetry.Metrics` recorder emits one
 sample per consumed block — `blocks_processed_total{service_name="prime-allocation-indexer",
@@ -1384,8 +1385,9 @@ below).
 
 **`<deployment>` / `app` label per chain:** each per-chain instance has its **own**
 Deployment and `app` label equal to its deployment name — mainnet →
-`allocation-tracker`, avalanche → `avalanche-allocation-tracker`, base →
-`base-allocation-tracker`. The Down alert carries a `deployment` label (use
+`allocation-tracker`, every other chain → `<chain>-allocation-tracker`
+(`avalanche-`, `base-`, `optimism-`, `unichain-`, `arbitrum-`). The Down alert
+carries a `deployment` label (use
 `{{ $labels.deployment }}` in its commands); the chain-scoped alerts below carry
 only `chain`, so substitute the matching `<deployment>` from this mapping in their
 `kubectl` selectors (`-l app=allocation-tracker` matches mainnet pods only).
@@ -1399,7 +1401,7 @@ only `chain`, so substitute the matching `<deployment>` from this mapping in the
 ### What it means
 
 The allocation-tracker Deployment (`{{ $labels.deployment }}` —
-`allocation-tracker`, or `avalanche-`/`base-allocation-tracker` for the per-chain
+`allocation-tracker`, or `<chain>-allocation-tracker` for the per-chain
 instances) has <1 available replica for 10 minutes. No pod is running, so no
 allocation positions or supplies are written and the SQS backlog is growing. This
 is process liveness from kube-state-metrics, independent of the OTel pipeline, so
@@ -1415,7 +1417,7 @@ it fires even when the metrics export is the thing that broke.
    bad axis-synome contract load).
 3. **Secrets/config present** — the worker requires `AWS_SQS_QUEUE_URL`,
    `DATABASE_URL`, `ALCHEMY_API_KEY`, `REDIS_ADDR`, `S3_BUCKET`, `DEPLOY_ENV`. A
-   missing key from the `allocation-tracker` ExternalSecret crashes it on startup.
+   missing key from the `{{ $labels.deployment }}` ExternalSecret crashes it on startup.
 4. **Node/scheduling** — a pending pod means node capacity / taints.
 
 ### Common causes
@@ -1626,7 +1628,7 @@ USD exposure computed from these rows silently undercounts (VEC-307).
 
 1. `sum by (token, reason) (increase(allocation_underlying_value_failures_total[6h]))`
    -- which contracts, which reason.
-2. Logs: `{app="allocation-tracker"} |= "underlying value not computable"`
+2. Logs: `{app=~"(avalanche-|base-|optimism-|unichain-|arbitrum-)?allocation-tracker"} |= "underlying value not computable"`
    -- carries token, wallet, block, reason.
 3. Rows stay NULL until the next successful sweep writes new rows (the table
    is append-only; nothing backfills automatically). Consumers fall back to
