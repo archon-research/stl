@@ -7,6 +7,7 @@ import (
 	"io"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -132,9 +133,18 @@ func TestListAllBlockKeys_AbandonedWorkersRetireOnCancellation(t *testing.T) {
 	parts := contiguousPartitions(20)
 	lister := newGatedLister(parts[0])
 
+	// Both are also driven explicitly below, in an order the test depends on.
+	// Deferred as well, and idempotently, because a t.Fatal in between would
+	// otherwise strand the workers, the feeder and the closer for the life of the
+	// binary — inside the very stack dumps this file's helpers scan.
+	releaseListings := sync.OnceFunc(func() { close(lister.release) })
+	defer releaseListings()
+
 	// Owned here the way scanBlockRange owns it: it derives a cancellable context
 	// and releases it as it returns, which is the moment the collector goes away.
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	_, err := listAllBlockKeys(ctx, testutil.DiscardLogger(), lister, "test-bucket",
 		parts, 0, int64(len(parts))*partition.BlockRangeSize-1, workers, &progress{})
 	if err == nil {
@@ -143,7 +153,7 @@ func TestListAllBlockKeys_AbandonedWorkersRetireOnCancellation(t *testing.T) {
 
 	// Released only now, so the survivor's first send lands in the buffer the
 	// abandoned collector left and its next one has nowhere to go.
-	close(lister.release)
+	releaseListings()
 	awaitStacks(t, "a listing worker to park on the result channel", func(stacks string) bool {
 		return listWorkersParkedOnASend(stacks) > 0
 	})
