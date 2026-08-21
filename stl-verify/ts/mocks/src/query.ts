@@ -15,7 +15,11 @@
 import { DAY_MS, HOUR_MS, MINUTE_MS, floorToInterval, iso } from './clock.ts';
 import type { Parsed } from './problem.ts';
 import { invalidQueryParam, unprocessable } from './problem.ts';
-import type { TimeSeriesResolution, TimeSeriesWindow } from './schema.ts';
+import type {
+  Provenance,
+  TimeSeriesResolution,
+  TimeSeriesWindow,
+} from './schema.ts';
 
 const RESOLUTION_INTERVAL_MS: Record<TimeSeriesResolution, number> = {
   PT1M: MINUTE_MS,
@@ -295,4 +299,48 @@ export function sameHex(
     right !== undefined &&
     left.toLowerCase() === right.toLowerCase()
   );
+}
+
+const PROVENANCES: readonly Provenance[] = ['indexed', 'reference', 'both'];
+
+/**
+ * Resolve the provenance the way the API does.
+ *
+ * `source` wins where both are given and they agree; a disagreement is a 422
+ * there, so it is a problem here too. `reference=false` asked for STL's own
+ * figures by name, so it is `indexed` rather than the default.
+ */
+export function readProvenance(
+  source: string | null,
+  reference: string | null,
+): Parsed<Provenance> {
+  const named = PROVENANCES.find((candidate) => candidate === source);
+  if (source !== null && named === undefined) {
+    return {
+      ok: false,
+      problem: invalidQueryParam(
+        'source',
+        `Input should be ${PROVENANCES.join(', ')}`,
+      ),
+    };
+  }
+
+  if (reference === null) {
+    return { ok: true, value: named ?? 'indexed' };
+  }
+
+  const flag = readFlag('reference', reference);
+  if (!flag.ok) return flag;
+  const legacy: Provenance = flag.value ? 'reference' : 'indexed';
+
+  if (named !== undefined && named !== legacy) {
+    return {
+      ok: false,
+      problem: invalidQueryParam(
+        'source',
+        `conflicts with the deprecated reference param, which asked for ${legacy}`,
+      ),
+    };
+  }
+  return { ok: true, value: named ?? legacy };
 }

@@ -12,6 +12,7 @@ import {
   rrcEnvelope,
   scaleBreakdown,
   seedCapitalMetrics,
+  toCompositeRiskCapital,
   toReferenceRiskCapital,
 } from '../fixtures/risk.ts';
 import { ownEntry } from '../lookup.ts';
@@ -22,7 +23,7 @@ import {
   problemResponse,
   unavailable,
 } from '../problem.ts';
-import { readChainId, readFlag } from '../query.ts';
+import { readChainId, readProvenance } from '../query.ts';
 
 export function riskHandlers(): MockHandler[] {
   return [
@@ -30,9 +31,12 @@ export function riskHandlers(): MockHandler[] {
       '/v1/primes/{prime_id}/risk-capital',
       async ({ params, query, response }) => {
         await mockDelay(LIST_DELAY_MS);
-        const reference = readFlag('reference', query.get('reference'));
-        if (!reference.ok) {
-          return response.untyped(problemResponse(reference.problem));
+        const source = readProvenance(
+          query.get('source'),
+          query.get('reference'),
+        );
+        if (!source.ok) {
+          return response.untyped(problemResponse(source.problem));
         }
         const selfScoped = ownEntry(
           RISK_CAPITAL_BY_PROXY,
@@ -45,8 +49,13 @@ export function riskHandlers(): MockHandler[] {
           );
         }
 
+        if (source.value === 'reference') {
+          return response(200).json(toReferenceRiskCapital(selfScoped));
+        }
         return response(200).json(
-          reference.value ? toReferenceRiskCapital(selfScoped) : selfScoped,
+          source.value === 'both'
+            ? toCompositeRiskCapital(selfScoped)
+            : selfScoped,
         );
       },
     ),

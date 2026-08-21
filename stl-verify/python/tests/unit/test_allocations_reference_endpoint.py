@@ -1,5 +1,6 @@
 """The ``reference=true`` branch of ``/v1/primes/{id}/allocations``."""
 
+from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock
 
@@ -8,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from app.api.deps import get_reference_risk_capital_service_factory
 from app.api.v1 import allocations
+from app.domain.entities.allocation import AnchorageCustodyHolding, EthAddress
 from app.domain.entities.reference_risk_capital import ReferenceAllocation, ReferencePrimeRiskCapital
 from app.domain.exceptions import ReferenceDataUnavailableError
 from app.main import app
@@ -17,6 +19,18 @@ _VALID_ADDR = "0x" + "ab" * 20
 _TOKEN = "0x" + "cd" * 20
 _LOAN_TOKEN = "0x" + "12" * 20
 _V4_POOL_ID = "0x" + "ef" * 32
+_OTHER_PROXY = "0x" + "99" * 20
+
+
+def _custody_holding() -> AnchorageCustodyHolding:
+    return AnchorageCustodyHolding(
+        symbol="BTC",
+        custody_type="vault",
+        balance=Decimal("1200"),
+        amount_usd=Decimal("250000000"),
+        collateral_usd=Decimal("310000000"),
+        as_of=datetime(2026, 8, 21, tzinfo=UTC),
+    )
 
 
 def _reference_allocation(
@@ -77,6 +91,7 @@ def reference_client(request):
 
     service = AsyncMock(spec=AllocationService)
     service.prime_exists.return_value = True
+    service.list_anchorage_custody_holdings.return_value = []
 
     async def _service_dep():
         yield service
@@ -167,14 +182,109 @@ def test_reference_mode_returns_502_when_the_monitor_cannot_be_read(reference_cl
 
 @pytest.mark.parametrize(
     "reference_client",
-    [_snapshot(_reference_allocation(network="solana", chain_id=None, chain=None))],
+    [_snapshot(_reference_allocation(network="plume", chain_id=None, chain=None))],
     indirect=True,
 )
-def test_reference_mode_returns_502_when_a_position_sits_on_an_unmappable_network(reference_client):
-    # The projection raises the same upstream-data error as the fetch, so it has
-    # to be reported as a bad upstream payload rather than a server fault.
+def test_reference_mode_serves_a_position_on_a_chain_it_has_no_id_for(reference_client):
+    # Upstream adds chains before STL indexes them. Failing the list would cost
+    # the prime every other position it holds -- grove loses 13 rows to 2.
     client, _ = reference_client
 
     response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations?reference=true")
 
-    assert response.status_code == 502
+    assert response.status_code == 200
+    [row] = response.json()
+    assert row["chain_id"] is None
+    assert row["network"] == "plume"
+
+
+@pytest.mark.parametrize(
+    "reference_client",
+    [
+        _snapshot(
+            _reference_allocation(network="plume", chain_id=None, chain=None),
+            _reference_allocation(network="ethereum", chain_id=1, chain="mainnet"),
+        )
+    ],
+    indirect=True,
+)
+def test_reference_mode_keeps_the_mappable_rows_alongside_the_unmapped_one(reference_client):
+    client, _ = reference_client
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations?reference=true")
+
+    assert response.status_code == 200
+    assert [(row["chain_id"], row["network"]) for row in response.json()] == [
+        (None, "plume"),
+        (1, "ethereum"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "reference_client",
+    [_snapshot(_reference_allocation(network="ethereum", chain_id=1, chain="mainnet"))],
+    indirect=True,
+)
+def test_source_reference_lists_the_monitor_positions(reference_client):
+    client, _ = reference_client
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations?source=reference")
+
+    assert response.status_code == 200
+    assert [row["scope"] for row in response.json()] == ["prime"]
+
+
+@pytest.mark.parametrize(
+    "reference_client",
+    [_snapshot(_reference_allocation(network="ethereum", chain_id=1, chain="mainnet"))],
+    indirect=True,
+)
+def test_both_marks_a_position_only_sky_reports(reference_client):
+    client, service = reference_client
+    service.prime_proxy_addresses.return_value = [EthAddress(_VALID_ADDR)]
+    service.list_receipt_token_positions.return_value = []
+    service.list_direct_asset_holdings.return_value = []
+    service.primary_proxy_address.return_value = None
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations?source=both")
+
+    assert response.status_code == 200
+    assert [row["source"] for row in response.json()] == ["reference"]
+
+
+@pytest.mark.parametrize(
+    "reference_client",
+    [_snapshot(_reference_allocation(network="ethereum", chain_id=1, chain="mainnet"))],
+    indirect=True,
+)
+def test_both_serves_the_custody_leg_when_a_non_primary_proxy_is_queried(reference_client):
+    # The merged view spans every proxy, so the prime-scoped leg belongs to it
+    # whichever proxy was asked. Gating it on "is this the primary proxy" — right
+    # for the proxy-scoped default — dropped it from the union entirely.
+    client, service = reference_client
+    service.prime_proxy_addresses.return_value = [EthAddress(_VALID_ADDR)]
+    service.list_receipt_token_positions.return_value = []
+    service.list_direct_asset_holdings.return_value = []
+    service.primary_proxy_address.return_value = _OTHER_PROXY
+    service.list_anchorage_custody_holdings.return_value = [_custody_holding()]
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations?source=both")
+
+    assert response.status_code == 200
+    assert [row["symbol"] for row in response.json() if row["protocol_name"] == "anchorage"] == ["BTC"]
+
+
+@pytest.mark.parametrize("reference_client", [ReferenceDataUnavailableError("boom")], indirect=True)
+def test_both_serves_the_indexed_half_when_sky_cannot_be_read(reference_client):
+    # Never a 502 for the merged view: the indexed rows are still true, and every
+    # row carrying its own provenance is what says Sky contributed nothing.
+    client, service = reference_client
+    service.prime_proxy_addresses.return_value = [EthAddress(_VALID_ADDR)]
+    service.list_receipt_token_positions.return_value = []
+    service.list_direct_asset_holdings.return_value = []
+    service.primary_proxy_address.return_value = None
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations?source=both")
+
+    assert response.status_code == 200
+    assert response.json() == []

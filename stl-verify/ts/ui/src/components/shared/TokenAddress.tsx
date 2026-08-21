@@ -8,7 +8,11 @@ import { getExplorerUrl } from '../../lib/dashboard';
 
 type TokenAddressProps = {
   address: string | null | undefined;
-  chainId?: number;
+  /**
+   * `null` or absent suppresses the explorer link rather than defaulting it:
+   * mainnet's explorer renders a page for an address that never existed there.
+   */
+  chainId?: number | null;
   /** Type of address: 'address' for contract/EOA, 'tx' for transaction hash */
   type?: 'address' | 'tx';
   /** Optional inline styles applied to the button (use for font-size overrides etc.) */
@@ -33,7 +37,7 @@ function truncateMiddle(address: string, maxLength = 12): string {
 
 export function TokenAddress({
   address,
-  chainId = 1,
+  chainId,
   type = 'address',
   style,
   className,

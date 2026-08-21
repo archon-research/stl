@@ -1,4 +1,8 @@
-import { ErrorState, SkeletonStack } from '@archon-research/design-system';
+import {
+  Badge,
+  ErrorState,
+  SkeletonStack,
+} from '@archon-research/design-system';
 import { useEffect, useMemo, useState } from 'react';
 
 import { css, cx } from '#styled-system/css';
@@ -15,18 +19,28 @@ import {
 } from '../../../lib/dashboard';
 import { isAbortError, toErrorMessage } from '../../../lib/errors';
 import { logging } from '../../../lib/logging';
-import type { Allocation, Prime, Rrc } from '../../../types/allocation';
+import { showsReference } from '../../../lib/provenance';
+import type {
+  Allocation,
+  AllocationRiskCapital,
+  PrimeRiskCapital,
+  Prime,
+  Rrc,
+} from '../../../types/allocation';
 import {
   ProtocolLogo,
   StatusBadge,
   SummaryMetric,
   TokenLogo,
 } from '../../shared';
-import { TabNotePanel } from './TabStatePanels';
+import { TabNotePanel, unindexedChainMessage } from './TabStatePanels';
 
 type RrcTabProps = {
   isEnabled: boolean;
   selectedReceiptToken: Allocation | null;
+  // The response the page already fetched. Fetching it again here would issue a
+  // second call to the slowest endpoint on the page every time the drawer opens.
+  riskCapital: PrimeRiskCapital | null;
   selectedPrime: Prime | null;
 };
 
@@ -45,10 +59,95 @@ const TONE_VALUE_COLOR_CLASS: Record<UsdTone, string> = {
   neutral: css({ color: 'text.muted' }),
 };
 
+type ReferenceFigures = { crrPct: string | null; rrcUsd: string | null };
+
+// A zero is a figure Sky published rather than a missing one, so a position is
+// dropped only when it reports neither.
+function toReferenceFigures(
+  rrcUsd: string | null | undefined,
+  crrPct: string | null | undefined,
+): ReferenceFigures | null {
+  return rrcUsd == null && crrPct == null
+    ? null
+    : { crrPct: crrPct ?? null, rrcUsd: rrcUsd ?? null };
+}
+
+// Sky's own figures for this position. Under `both` they ride beside STL's in
+// the `reference_` fields; under `reference` the bare fields are already Sky's.
+function referenceFigures(
+  entry: AllocationRiskCapital | null,
+): ReferenceFigures | null {
+  switch (entry?.source) {
+    case 'both':
+      return toReferenceFigures(
+        entry.reference_required_risk_capital_usd,
+        entry.reference_crr_pct,
+      );
+    case 'reference':
+      return toReferenceFigures(entry.required_risk_capital_usd, entry.crr_pct);
+    default:
+      return null;
+  }
+}
+
+function ResultRow({
+  isSelected = false,
+  label,
+  value,
+}: {
+  isSelected?: boolean;
+  label: string;
+  value: string;
+}) {
+  return (
+    <li
+      aria-current={isSelected ? 'true' : undefined}
+      className={cx(
+        flex({
+          align: 'center',
+          justify: 'space-between',
+          gap: '4',
+          p: '3',
+          borderRadius: 'sm',
+          borderWidth: '1px',
+          borderStyle: 'solid',
+        }),
+        // Accent is what DESIGN.md spends on a selection; the transparent border
+        // on every other row keeps the rows the same height.
+        css({
+          borderColor: isSelected ? 'interactive.accent' : 'transparent',
+          bg: isSelected ? 'interactive.selected' : 'surface.default',
+        }),
+      )}
+    >
+      <span
+        className={flex({
+          align: 'center',
+          gap: '2',
+          fontSize: 'sm',
+          fontWeight: 'semibold',
+          color: 'text.strong',
+        })}
+      >
+        {label}
+        {isSelected ? (
+          <Badge size="sm" variant="subtle">
+            Selected
+          </Badge>
+        ) : null}
+      </span>
+      <span className={css({ fontSize: 'sm', color: 'text.muted' })}>
+        {value}
+      </span>
+    </li>
+  );
+}
+
 export function RrcTab({
   isEnabled,
   selectedReceiptToken,
   selectedPrime,
+  riskCapital,
 }: RrcTabProps) {
   const [rrc, setRrc] = useState<Rrc | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -124,6 +223,29 @@ export function RrcTab({
     receiptTokenId,
   ]);
 
+  // Which model the prime's reported requirement comes from, and Sky's figures
+  // for the same position: the RRC response carries neither, since it runs every
+  // model and takes no provenance.
+  //
+  // Joined on the published keys rather than `receipt_token_id`, which only
+  // STL's own rows carry — a position Sky reports and STL does not index has
+  // none, and those are the rows Sky prices highest.
+  const riskCapitalEntry = useMemo(() => {
+    if (!isEnabled || isChainMismatch || selectedReceiptToken === null) {
+      return null;
+    }
+
+    const keys = new Set(selectedReceiptToken.position_keys ?? []);
+    return (
+      riskCapital?.per_allocation.find((entry) =>
+        (entry.position_keys ?? []).some((key) => keys.has(key)),
+      ) ?? null
+    );
+  }, [isChainMismatch, isEnabled, riskCapital, selectedReceiptToken]);
+
+  const selectedModel = riskCapitalEntry?.model ?? null;
+  const reference = showsReference ? referenceFigures(riskCapitalEntry) : null;
+
   const tone = getUsdTone(rrc?.max_rrc_usd);
   const maxRrcValue = parseNumericValue(rrc?.max_rrc_usd) ?? 0;
   const hasRiskCapital = maxRrcValue > 0;
@@ -144,6 +266,17 @@ export function RrcTab({
   if (!selectedReceiptToken) {
     return (
       <TabNotePanel message="Pick a receipt token to inspect required risk capital." />
+    );
+  }
+
+  if (selectedReceiptToken.chain_id === null) {
+    return (
+      <TabNotePanel
+        message={unindexedChainMessage(
+          selectedReceiptToken.network,
+          'required risk capital',
+        )}
+      />
     );
   }
 
@@ -363,36 +496,21 @@ export function RrcTab({
             })}
           >
             {rrc.results.map((result) => (
-              <li
+              <ResultRow
                 key={result.risk_model}
-                className={flex({
-                  align: 'center',
-                  justify: 'space-between',
-                  gap: '4',
-                  p: '3',
-                  borderRadius: 'sm',
-                  bg: 'surface.default',
-                })}
-              >
-                <span
-                  className={css({
-                    fontSize: 'sm',
-                    fontWeight: 'semibold',
-                    color: 'text.strong',
-                  })}
-                >
-                  {MODEL_LABELS[result.risk_model] ?? result.risk_model}
-                </span>
-                <span
-                  className={css({
-                    fontSize: 'sm',
-                    color: 'text.muted',
-                  })}
-                >
-                  {`${formatUsdValue(result.rrc_usd)} · CRR ${formatPercentValue(result.comparable_crr_pct, 2)}`}
-                </span>
-              </li>
+                isSelected={result.risk_model === selectedModel}
+                label={MODEL_LABELS[result.risk_model] ?? result.risk_model}
+                value={`${formatUsdValue(result.rrc_usd)} · CRR ${formatPercentValue(result.comparable_crr_pct, 2)}`}
+              />
             ))}
+            {/* Its own row rather than a substitution: the tab compares model
+                outputs, and Sky's figures disagree with STL's by design. */}
+            {reference ? (
+              <ResultRow
+                label="Sky published figure"
+                value={`${formatUsdValue(reference.rrcUsd)} · CRR ${formatPercentValue(reference.crrPct, 2)}`}
+              />
+            ) : null}
           </ul>
         </div>
       ) : null}

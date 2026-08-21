@@ -50,6 +50,10 @@ class AllocationService:
     async def get_total_usd_exposure(self, prime_id: EthAddress) -> Decimal:
         return await self._repository.get_total_usd_exposure(prime_id)
 
+    async def prime_proxy_addresses(self, prime_id: EthAddress) -> list[EthAddress]:
+        """Every allocation proxy of the prime that owns ``prime_id``."""
+        return await self._repository.list_prime_proxy_addresses(prime_id)
+
     async def _prime_proxies(self, prime_id: EthAddress | None) -> list[EthAddress] | None:
         """Widen one proxy address to every allocation proxy of its prime.
 

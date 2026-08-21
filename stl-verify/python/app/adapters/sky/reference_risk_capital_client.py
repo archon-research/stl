@@ -66,7 +66,7 @@ class SkyReferenceRiskCapitalClient:
 
     async def get_prime(self, star: str) -> ReferencePrimeRiskCapital | None:
         """Return ``star``'s upstream snapshot, or ``None`` if the monitor does not track it."""
-        if star.strip().lower() not in await self._tracked_stars():
+        if star.strip().lower() not in await self.tracked_stars():
             logger.info(
                 "Prime is not tracked by the upstream Star monitor; no reference data",
                 extra={"star": star, "upstream_url": self._base_url},
@@ -82,7 +82,7 @@ class SkyReferenceRiskCapitalClient:
         )
         return _build_snapshot(star, detail, allocations)
 
-    async def _tracked_stars(self) -> frozenset[str]:
+    async def tracked_stars(self) -> frozenset[str]:
         url = f"{self._base_url}/primes/?limit={_PAGE_LIMIT}"
         data = await self._get_data(url)
         results = _require_results(data, url=url)

@@ -309,3 +309,23 @@ export const DATA_SOURCES: readonly DataSource[] = [
     attribution_required: false,
   },
 ];
+
+/**
+ * Which provenances each prime can be answered from.
+ *
+ * `grove` is deliberately indexed-only: with every prime covered by Sky the
+ * greyed-out option and the URL rewrite would never be reachable offline, and
+ * those are the two things the coverage endpoint exists to drive.
+ */
+export function provenanceAvailability(): {
+  primes: { name: string; available: ('indexed' | 'reference' | 'both')[] }[];
+  reference_upstream_reachable: boolean;
+} {
+  return {
+    primes: [
+      { name: 'spark', available: ['indexed', 'reference', 'both'] },
+      { name: 'grove', available: ['indexed'] },
+    ],
+    reference_upstream_reachable: true,
+  };
+}

@@ -40,7 +40,7 @@ import {
   TruncatedLabel,
 } from '../../shared';
 import { MethodologyPanel } from '../../shared/MethodologyPanel';
-import { TabNotePanel } from './TabStatePanels';
+import { TabNotePanel, unindexedChainMessage } from './TabStatePanels';
 
 type RiskBreakdownTabProps = {
   isEnabled: boolean;
@@ -55,7 +55,7 @@ function RiskSymbolCell({
   chainId,
   symbol,
 }: {
-  chainId: number;
+  chainId: number | null;
   symbol: string;
 }) {
   return (
@@ -93,7 +93,7 @@ function truncatingHeader(label: string) {
   );
 }
 
-function createRiskColumns(chainId: number): ColumnDef<RiskItem>[] {
+function createRiskColumns(chainId: number | null): ColumnDef<RiskItem>[] {
   return [
     {
       id: 'symbol',
@@ -163,7 +163,7 @@ function RiskTable({
   isLoading,
   searchQuery,
 }: {
-  chainId: number;
+  chainId: number | null;
   items: RiskItem[];
   isLoading: boolean;
   searchQuery: string;
@@ -246,14 +246,19 @@ export function RiskBreakdownTab({
   // share data for that (chain_id, prime_id) pair.
   const isChainMismatch =
     selectedReceiptToken !== null &&
+    selectedReceiptToken.chain_id !== null &&
     selectedPrime !== null &&
     selectedReceiptToken.chain_id !== selectedPrime.chain_id;
 
   useEffect(() => {
     const receiptTokenAddress = selectedReceiptToken?.receipt_token_address;
+    // A null chain is a position STL does not index, so there is no
+    // (chain, receipt token) pair to ask about.
+    const chainId = selectedReceiptToken?.chain_id ?? null;
     if (
       !isEnabled ||
       !selectedReceiptToken ||
+      chainId === null ||
       receiptTokenId === null ||
       !receiptTokenAddress ||
       isChainMismatch
@@ -271,7 +276,7 @@ export function RiskBreakdownTab({
     setBreakdown(null);
 
     void getRiskBreakdown(
-      selectedReceiptToken.chain_id,
+      chainId,
       receiptTokenAddress,
       primeId,
       controller.signal,
@@ -320,7 +325,7 @@ export function RiskBreakdownTab({
 
     const chainId = selectedReceiptToken.chain_id;
     const underlyingAddress = selectedReceiptToken.underlying_token_address;
-    if (!underlyingAddress) {
+    if (chainId === null || !underlyingAddress) {
       setTokenCatalog(null);
       setTokenPrice(null);
       setIsTokenMetaLoading(false);
@@ -443,6 +448,17 @@ export function RiskBreakdownTab({
   if (!selectedReceiptToken) {
     return (
       <TabNotePanel message="Pick a receipt token to inspect its collateral backing." />
+    );
+  }
+
+  if (selectedReceiptToken.chain_id === null) {
+    return (
+      <TabNotePanel
+        message={unindexedChainMessage(
+          selectedReceiptToken.network,
+          'collateral backing',
+        )}
+      />
     );
   }
 

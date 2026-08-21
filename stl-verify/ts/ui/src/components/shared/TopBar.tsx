@@ -12,6 +12,7 @@ import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
 import type { FilterOption } from '../../lib/dashboard';
+import type { Provenance } from '../../types/allocation';
 import { SettingsMenu, useDataSourceSection } from './SettingsMenu';
 
 type TopBarProps = {
@@ -28,6 +29,8 @@ type TopBarProps = {
   rangePreset?: RangePreset;
   timeRange?: TimeRange;
   onRangeChange?: (preset: RangePreset, range: TimeRange) => void;
+  /** Provenances the selected prime can be served from. */
+  availableProvenances?: readonly Provenance[];
 };
 
 const tabsListClassName = css({
@@ -125,8 +128,9 @@ export function TopBar({
   rangePreset,
   timeRange,
   onRangeChange,
+  availableProvenances,
 }: TopBarProps) {
-  const dataSource = useDataSourceSection();
+  const dataSource = useDataSourceSection(availableProvenances);
   const showRangePicker =
     rangePreset !== undefined &&
     timeRange !== undefined &&

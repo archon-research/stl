@@ -39,7 +39,12 @@ export function getChainName(chainId: number): string {
  * @param chainId - Chain ID
  * @returns Official explorer URL from viem, or null if not available
  */
-export function getChainExplorerUrl(chainId: number): string | null {
+export function getChainExplorerUrl(
+  chainId: number | null | undefined,
+): string | null {
+  if (chainId === null || chainId === undefined) {
+    return null;
+  }
   const chain = VIEM_CHAINS[chainId as keyof typeof VIEM_CHAINS];
   return chain?.blockExplorers?.default?.url ?? null;
 }
@@ -49,7 +54,10 @@ export function getChainExplorerUrl(chainId: number): string | null {
  * @param chainId - Chain ID
  * @returns Native currency symbol (e.g., "ETH", "AVAX"), or null if not available
  */
-export function getNativeSymbol(chainId: number): string | null {
+export function getNativeSymbol(chainId: number | null): string | null {
+  if (chainId === null) {
+    return null;
+  }
   const chain = VIEM_CHAINS[chainId as keyof typeof VIEM_CHAINS];
   return chain?.nativeCurrency?.symbol ?? null;
 }

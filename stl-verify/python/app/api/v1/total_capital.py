@@ -1,5 +1,7 @@
+import asyncio
 from collections.abc import Callable
 from datetime import datetime
+from decimal import Decimal
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
@@ -9,6 +11,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
 from app.api._validators import ProxyAddressPathParam
 from app.api.deps import get_engine, get_reference_capital_repository_factory
+from app.api.provenance import (
+    get_requested_provenance,
+    resolve_or_422,
+)
 from app.api.time_series import (
     TimeSeriesWindow,
     apply_cache_control,
@@ -16,6 +22,7 @@ from app.api.time_series import (
     get_time_series_query_params,
 )
 from app.domain.entities.allocation import EthAddress
+from app.domain.provenance import Provenance
 from app.domain.serialization import PlainDecimal
 from app.domain.time_series import TimeSeriesQuery
 from app.ports.reference_capital_repository import ReferenceCapitalRepository
@@ -82,17 +89,28 @@ class TotalCapitalBucketResponse(BaseModel):
         ),
         examples=["2026-08-20T09:00:00Z"],
     )
+    reference_total_capital_usd: PlainDecimal | None = Field(
+        default=None,
+        description=(
+            "Sky's reported total risk capital for the same bucket, populated only under "
+            "`source=both`. Beside STL's rather than replacing it: the two are computed "
+            "differently, and a reader needs the gap shown rather than reconciled."
+        ),
+        examples=["48142491.08"],
+    )
 
 
 class TotalCapitalEnvelope(BaseModel):
     """Per-prime total-capital time series, gap-filled into buckets."""
 
     mode: Literal["aggregated"] = Field(description="Always `aggregated`: a gap-filled time series.")
-    source: Literal["self", "reference"] = Field(
-        default="self",
+    source: Provenance = Field(
+        default=Provenance.INDEXED,
         description=(
-            "Provenance of the series. `self` is the on-chain SubProxy treasury; `reference` is "
-            "Sky's Star monitor as observed by STL's syncer, returned when `reference=true`."
+            "Provenance the series was answered from. `indexed` is the on-chain SubProxy treasury; "
+            "`reference` is Sky's Star monitor as observed by STL's syncer; `both` fills "
+            "`total_capital_usd` and `reference_total_capital_usd` on every bucket, leaving either null "
+            "where that provenance reported nothing."
         ),
     )
     window: TimeSeriesWindow = Field(description="The window and resolution applied to this response.")
@@ -105,6 +123,21 @@ async def _get_service(engine: AsyncEngine = Depends(get_engine)) -> AllocationS
     return AllocationService(AllocationRepository(engine))
 
 
+def _merged_bucket_starts(*grids: dict) -> list:
+    """Every bucket either provenance reported, newest first like each series."""
+    return sorted({start for grid in grids for start in grid}, reverse=True)
+
+
+def _reference_capital(by_bucket: dict, bucket_start) -> Decimal | None:
+    bucket = by_bucket.get(bucket_start)
+    return None if bucket is None else bucket.total_capital_usd
+
+
+def _reference_field(by_bucket: dict, bucket_start, field: str):
+    bucket = by_bucket.get(bucket_start)
+    return None if bucket is None else getattr(bucket, field)
+
+
 @router.get(
     "/primes/{prime_id}/total-capital",
     response_model=TotalCapitalEnvelope,
@@ -113,7 +146,8 @@ async def _get_service(engine: AsyncEngine = Depends(get_engine)) -> AllocationS
         "Return the prime's total capital over time, gap-filled (LOCF) into buckets. Total "
         "capital is the treasury USDS held in the prime's SubProxy wallet (USDS is "
         "dollar-pegged, so the balance is the USD figure); it matches the upstream Star "
-        "`total_capital`. Under `reference=true` each bucket also carries `assets_usd` "
+        "`total_capital`. Wherever the response carries Sky's figures (`source=reference` or "
+        "`source=both`) each bucket also carries `assets_usd` "
         "(the upstream PRIME COLLATERAL figure) and the monitor's `encumbrance_ratio`. "
         "Returns `404` if the prime is unknown. Defaults to the last 24h; "
         "pass a window and `resolution` for longer ranges."
@@ -124,15 +158,7 @@ async def list_prime_total_capital(
     response: Response,
     time_series: TimeSeriesQuery = Depends(get_time_series_query_params),
     limit: int = Query(100, ge=1, le=500, description="Max buckets returned (default 100, max 500)."),
-    reference: bool = Query(
-        False,
-        description=(
-            "Serve Sky's Star monitor figures instead of the on-chain treasury. The shape is "
-            "unchanged; `source` reports the provenance. The reference series only extends back to "
-            "when STL first observed the monitor — it publishes no history of its own — so earlier "
-            "buckets are `null`, meaning not yet observed rather than zero."
-        ),
-    ),
+    requested_provenance: Provenance | None = Depends(get_requested_provenance),
     service: AllocationService = Depends(_get_service),
     reference_repositories: Callable[[], ReferenceCapitalRepository] = Depends(
         get_reference_capital_repository_factory
@@ -142,12 +168,14 @@ async def list_prime_total_capital(
     if not await service.prime_exists(prime_address):
         raise HTTPException(status_code=404, detail="Prime not found")
 
+    source = resolve_or_422(requested_provenance, available=frozenset(Provenance), default=Provenance.INDEXED)
+
     # Treasury observations are immutable once written, so a fully-pinned window
     # is safely cacheable; a defaulted (now-relative) window is not.
     apply_cache_control(response, time_series)
     window = build_window(time_series)
 
-    if reference:
+    if source is Provenance.REFERENCE:
         reference_buckets = await reference_repositories().list_reference_capital_buckets(
             prime_address,
             from_timestamp=time_series.from_timestamp,
@@ -157,7 +185,7 @@ async def list_prime_total_capital(
         )
         return TotalCapitalEnvelope(
             mode="aggregated",
-            source="reference",
+            source=source,
             window=window,
             data=[
                 TotalCapitalBucketResponse(
@@ -172,6 +200,46 @@ async def list_prime_total_capital(
             ],
         )
 
+    if source is Provenance.BOTH:
+        reference_buckets, buckets = await asyncio.gather(
+            reference_repositories().list_reference_capital_buckets(
+                prime_address,
+                from_timestamp=time_series.from_timestamp,
+                to_timestamp=time_series.to_timestamp,
+                bucket_seconds=time_series.bucket.total_seconds(),
+                limit=limit,
+            ),
+            service.list_total_capital_buckets(
+                prime_address,
+                from_timestamp=time_series.from_timestamp,
+                to_timestamp=time_series.to_timestamp,
+                bucket_seconds=time_series.bucket.total_seconds(),
+                limit=limit,
+            ),
+        )
+        # Both series are gap-filled over the same window and resolution, so the
+        # bucket grids match and a lookup cannot shift a value one bucket over.
+        reference_by_bucket = {bucket.bucket_start: bucket for bucket in reference_buckets}
+        indexed_by_bucket = {bucket.bucket_start: bucket.total_capital_usd for bucket in buckets}
+        return TotalCapitalEnvelope(
+            mode="aggregated",
+            source=source,
+            window=window,
+            data=[
+                TotalCapitalBucketResponse(
+                    bucket_start=start,
+                    total_capital_usd=indexed_by_bucket.get(start),
+                    reference_total_capital_usd=_reference_capital(reference_by_bucket, start),
+                    # Reported by Sky alone whichever provenance was asked for.
+                    assets_usd=_reference_field(reference_by_bucket, start, "assets_usd"),
+                    encumbrance_ratio=_reference_field(reference_by_bucket, start, "encumbrance_ratio"),
+                    assets_observed_at=_reference_field(reference_by_bucket, start, "assets_observed_at"),
+                    capital_observed_at=_reference_field(reference_by_bucket, start, "capital_observed_at"),
+                )
+                for start in _merged_bucket_starts(indexed_by_bucket, reference_by_bucket)
+            ],
+        )
+
     buckets = await service.list_total_capital_buckets(
         prime_address,
         from_timestamp=time_series.from_timestamp,
@@ -181,7 +249,7 @@ async def list_prime_total_capital(
     )
     return TotalCapitalEnvelope(
         mode="aggregated",
-        source="self",
+        source=source,
         window=window,
         data=[TotalCapitalBucketResponse(**bucket.__dict__) for bucket in buckets],
     )
