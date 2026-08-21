@@ -12,16 +12,13 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 from temporalio import activity
 from temporalio.client import WorkflowFailureError
-from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
 from app.services.core_model_runner.workflow import CoreModelRunnerWorkflow
 
-
-@pytest.fixture()
-async def env():
-    async with await WorkflowEnvironment.start_local() as environment:
-        yield environment
+# The dev server lives in a module-scoped fixture (conftest.temporal_env), so
+# every test must share its event loop.
+pytestmark = pytest.mark.asyncio(loop_scope="module")
 
 
 async def _run(env, stub_activity, market_key: str = "all") -> None:
@@ -44,18 +41,18 @@ async def _run(env, stub_activity, market_key: str = "all") -> None:
             )
 
 
-async def test_workflow_passes_the_market_key_to_the_activity(env):
+async def test_workflow_passes_the_market_key_to_the_activity(temporal_env):
     seen: list[str] = []
 
     @activity.defn(name="run_core_model")
     def _stub(market_key: str) -> None:
         seen.append(market_key)
 
-    await _run(env, _stub, market_key="sparklend_usdt")
+    await _run(temporal_env, _stub, market_key="sparklend_usdt")
     assert seen == ["sparklend_usdt"]
 
 
-async def test_a_failing_tick_is_not_retried(env):
+async def test_a_failing_tick_is_not_retried(temporal_env):
     attempts: list[int] = []
 
     @activity.defn(name="run_core_model")
@@ -64,6 +61,6 @@ async def test_a_failing_tick_is_not_retried(env):
         raise RuntimeError("market blew up")
 
     with pytest.raises(WorkflowFailureError):
-        await _run(env, _stub)
+        await _run(temporal_env, _stub)
 
     assert len(attempts) == 1

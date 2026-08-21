@@ -15,6 +15,8 @@ import pathlib
 
 import asyncpg
 import pytest
+import pytest_asyncio
+from temporalio.testing import WorkflowEnvironment
 from testcontainers.postgres import PostgresContainer
 
 MIGRATIONS_DIR = pathlib.Path(__file__).resolve().parents[3] / "db" / "migrations"
@@ -135,3 +137,14 @@ def db_url(module_db) -> str:
 def async_db_url(module_db) -> str:
     """SQLAlchemy async URL for the module's isolated database."""
     return module_db["async_url"]
+
+
+@pytest_asyncio.fixture(scope="module", loop_scope="module")
+async def temporal_env():
+    """One Temporal dev server per test module, not per test.
+
+    start_local() downloads/boots the Temporal CLI dev server; per-test scope
+    was booting four servers per CI run across the Temporal test files.
+    """
+    async with await WorkflowEnvironment.start_local() as environment:
+        yield environment

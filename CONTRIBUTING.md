@@ -607,7 +607,10 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runn
 
 Cronjobs are **idempotent by design** — a tick may be retried by
 Temporal. Your service must tolerate running twice on the same window
-without producing duplicates.
+without producing duplicates. Model-output cronjobs are the deliberate
+exception: `core-model-runner` disables retries (`maximum_attempts=1`)
+because its rows are keyed by wall-clock `computed_at`, so a mid-run
+retry would append duplicates instead of colliding on them.
 
 ### If you're writing the cronjob in Python
 
@@ -637,6 +640,7 @@ Uses the [`temporalio`](https://pypi.org/project/temporalio/) SDK:
 ```python
 import asyncio
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
 from temporalio.client import (
@@ -646,7 +650,11 @@ from temporalio.client import (
 from temporalio.worker import Worker
 
 from app.config import load_config
-from app.services.my_cronjob import MyCronjobService, tick_workflow
+from app.services.my_cronjob.service import MyCronjobService
+# The workflow comes from its own module, never the package __init__ — the
+# sandbox re-imports the workflow module, and anything the __init__ drags in
+# (the service, numpy) comes with it.
+from app.services.my_cronjob.workflow import TickWorkflow
 
 NAME     = "my-cronjob"
 INTERVAL = timedelta(minutes=int(os.getenv("MY_CRONJOB_INTERVAL_MIN", "15")))
@@ -656,13 +664,15 @@ async def run() -> None:
     client  = await Client.connect(cfg.temporal_host, namespace=cfg.temporal_namespace)
     service = MyCronjobService(cfg)                 # wires DB + HTTP clients
 
-    # Idempotent schedule creation — swallow AlreadyExists on restarts.
+    # Idempotent schedule creation — AlreadyExists is the normal path on every
+    # restart after the first; the harness reconciles the interval into the
+    # existing schedule there, so an interval change only needs a redeploy.
     try:
         await client.create_schedule(
             NAME,
             Schedule(
                 action=ScheduleActionStartWorkflow(
-                    tick_workflow,
+                    TickWorkflow.run,
                     id=f"scheduled-{NAME}",
                     task_queue=NAME,
                 ),
@@ -670,15 +680,20 @@ async def run() -> None:
             ),
         )
     except ScheduleAlreadyRunningError:
-        pass  # normal on every restart after the first
+        pass  # see the harness's ensure_schedule for the reconcile
 
-    worker = Worker(
-        client,
-        task_queue=NAME,
-        workflows=[tick_workflow],
-        activities=[service.tick],
-    )
-    await worker.run()
+    # A sync (CPU-bound) activity needs an executor — Worker rejects it at
+    # startup otherwise. One slot: one tick at a time.
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        worker = Worker(
+            client,
+            task_queue=NAME,
+            workflows=[TickWorkflow],
+            activities=[service.tick],
+            activity_executor=executor,
+            max_concurrent_activities=1,
+        )
+        await worker.run()
 
 if __name__ == "__main__":
     asyncio.run(run())
@@ -691,8 +706,8 @@ Run it locally with `uv run python -m cli.cronjobs.<my_cronjob>.main` (from `stl
 - `stl-verify/python/cli/cronjobs/<my_cronjob>/main.py` — entry point
   (above). No business logic.
 - `stl-verify/python/app/services/<my_cronjob>/` — business logic,
-  the body of one tick, plus the `tick_workflow` wrapper. Full unit
-  tests; mock external HTTP clients.
+  the body of one tick, plus the `TickWorkflow` wrapper in its own
+  `workflow.py`. Full unit tests; mock external HTTP clients.
 - `stl-verify/python/app/domain/entities/` — pure entities.
 - `stl-verify/python/app/ports/` — interfaces.
 - `stl-verify/python/app/adapters/{postgres,onchain,temporal,…}/` —
@@ -704,9 +719,9 @@ Run it locally with `uv run python -m cli.cronjobs.<my_cronjob>.main` (from `stl
   name (lowercase, hyphenated).
 - Interval read from `<NAME>_INTERVAL` env var with a sensible default
   — prefer longer, and always overrideable.
-- Create the schedule on startup; swallow `AlreadyExists`; changing
-  the interval still requires deleting the schedule in Temporal and
-  restarting the worker.
+- Create the schedule on startup; on `AlreadyExists`, reconcile the
+  interval into the existing schedule (both harnesses do this), so an
+  interval change only needs a redeploy.
 - The activity must be **idempotent** — Temporal retries. Guard every
   write against duplicates.
 
