@@ -4,6 +4,10 @@ metadata:
   name: morpho-v2-bootstrap
 spec:
   replicas: 1
+  # Recreate: the default RollingUpdate rounds maxSurge up to 1, so a rollout —
+  # including a Reloader-triggered one — would put two pods on this task queue.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: morpho-v2-bootstrap
