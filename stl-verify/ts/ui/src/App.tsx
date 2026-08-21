@@ -11,7 +11,7 @@ import {
   useParams,
   useSearch,
 } from '@tanstack/react-router';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { css } from '#styled-system/css';
 
@@ -548,11 +548,26 @@ function App() {
   // requests.
   const primaryProxyAddress = selectedPrimeGroup?.primaryProxyAddress ?? null;
 
+  // Any change to the selected range, as a primitive dependency: it is the
+  // retry signal for the snapshot fetches below, which take no range at all.
+  const retryKey = `${timeRange.from_timestamp}..${timeRange.to_timestamp}`;
+
+  // Risk capital is a snapshot with no range of its own, so it was fetched once
+  // per prime and a transient failure stuck for the session. The range selector
+  // is the retry gesture; this ref stops a fetch that already succeeded from
+  // repeating on every change.
+  const loadedRiskCapitalFor = useRef<string | null>(null);
+
   useEffect(() => {
     if (!primaryProxyAddress) {
+      loadedRiskCapitalFor.current = null;
       setRiskCapital(null);
       setIsRiskCapitalLoading(false);
       setRiskCapitalErrorMessage(null);
+      return;
+    }
+
+    if (loadedRiskCapitalFor.current === primaryProxyAddress) {
       return;
     }
 
@@ -565,6 +580,7 @@ function App() {
     void getPrimeRiskCapital(primaryProxyAddress, controller.signal)
       .then((response) => {
         if (!controller.signal.aborted) {
+          loadedRiskCapitalFor.current = primaryProxyAddress;
           setRiskCapital(response);
         }
       })
@@ -587,7 +603,7 @@ function App() {
       });
 
     return () => controller.abort();
-  }, [primaryProxyAddress]);
+  }, [primaryProxyAddress, retryKey]);
 
   useEffect(() => {
     if (!primaryProxyAddress) {
