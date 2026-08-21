@@ -210,7 +210,15 @@ func listAllBlockKeys(
 				prog.listDurationMs.Add(time.Since(listStart).Milliseconds())
 				prog.listCount.Add(1)
 				if err != nil {
-					resultCh <- listResult{err: fmt.Errorf("listing partition %s: %w", part, err)}
+					// Both sends watch ctx: the collector stops reading at the
+					// first error it sees, so every other worker is handing its
+					// result to nobody. scanBlockRange cancels as it returns,
+					// which is what retires them — a bare send parks the worker
+					// for the life of this always-on process.
+					select {
+					case resultCh <- listResult{err: fmt.Errorf("listing partition %s: %w", part, err)}:
+					case <-ctx.Done():
+					}
 					return
 				}
 
@@ -227,7 +235,11 @@ func listAllBlockKeys(
 
 				logBlockGapsFromKeys(logger, part, keys, from, to)
 				prog.partitionsDone.Add(1)
-				resultCh <- listResult{keys: keys}
+				select {
+				case resultCh <- listResult{keys: keys}:
+				case <-ctx.Done():
+					return
+				}
 			}
 		})
 	}
