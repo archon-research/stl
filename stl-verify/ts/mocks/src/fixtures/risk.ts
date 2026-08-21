@@ -285,6 +285,158 @@ function usdFigure(cents: number): string {
  * contract is "unprefixed equals prefixed", so expressing it as a transform
  * keeps the two halves from drifting apart in the fixture.
  */
+/**
+ * Sky's own per-allocation figures, captured from staging's spark composite
+ * response.
+ *
+ * They exist to be *unlike* STL's, because that is the case the composite view
+ * is for: Sky prices spUSDS at nothing where STL's model asks $23.3M, and the
+ * two rows it prices highest — off-chain custody and the Arkis vault — are ones
+ * STL resolves no receipt token for, so they carry a null id and cannot join to
+ * a row on the allocations grid. A fixture where the two provenances agreed, or
+ * where every Sky row had an id, would leave both facts untested.
+ */
+type ReferenceAllocationRow = readonly [
+  receipt_token_id: AllocationRiskCapital['receipt_token_id'],
+  symbol: AllocationRiskCapital['symbol'],
+  protocol_name: AllocationRiskCapital['protocol_name'],
+  exposure_usd: AllocationRiskCapital['exposure_usd'],
+  required_risk_capital_usd: NonNullable<
+    AllocationRiskCapital['required_risk_capital_usd']
+  >,
+  crr_pct: NonNullable<AllocationRiskCapital['crr_pct']>,
+];
+
+const SPARK_REFERENCE_ROWS: readonly ReferenceAllocationRow[] = [
+  [736, 'spUSDS', 'SparkLend', '869783405.762', '0', '0'],
+  [
+    338,
+    'spUSDT',
+    'SparkLend',
+    '354681648.458',
+    '2369391.55517',
+    '0.66778919177',
+  ],
+  [
+    723,
+    'spDAI',
+    'SparkLend',
+    '295574431.958',
+    '0.09367882851',
+    '0.00000003168',
+  ],
+  [735, 'spPYUSD', 'SparkLend', '100023505.149', '0', '0'],
+  // Sky-only, and the two largest requirements in its model.
+  [null, 'ANCHORAGE', 'anchorage', '210000001.360', '6300000.0408', '3.0'],
+  [null, 'sparkPrimeUSDC1', 'Arkis', '20286862.977', '10143431.4886', '50.0'],
+  [null, 'UNI-V4-PYUSD-USDS', 'uniswap', '100118500.444', '0', '0'],
+];
+
+const GROVE_REFERENCE_ROWS: readonly ReferenceAllocationRow[] = [
+  [736, 'spUSDS', 'SparkLend', '124481521.310', '4102881.44', '3.29'],
+  [null, 'ANCHORAGE', 'anchorage', '41000000.000', '1230000.00', '3.0'],
+];
+
+function referenceAllocation(
+  row: ReferenceAllocationRow,
+): AllocationRiskCapital {
+  const [receiptTokenId, symbol, protocolName, exposureUsd, rrcUsd, crrPct] =
+    row;
+
+  return {
+    receipt_token_id: receiptTokenId,
+    source: 'reference',
+    symbol,
+    protocol_name: protocolName,
+    exposure_usd: exposureUsd,
+    // Upstream publishes only positions it has priced, so every row is applied
+    // and none carries a model name.
+    applied: true,
+    required_risk_capital_usd: rrcUsd,
+    crr_pct: crrPct,
+    model: null,
+    unpriced_reason: null,
+  };
+}
+
+function referenceRowsFor(
+  self: PrimeRiskCapital,
+): readonly ReferenceAllocationRow[] {
+  return self.prime_name === 'grove'
+    ? GROVE_REFERENCE_ROWS
+    : SPARK_REFERENCE_ROWS;
+}
+
+/**
+ * The merged breakdown: STL's row where both provenances have one, carrying
+ * Sky's figures in its `reference_*` fields, plus the rows Sky alone reports.
+ *
+ * Ordered by exposure, largest first, like the endpoint — the two halves arrive
+ * in their own orders and concatenating them would publish neither.
+ */
+function compositePerAllocation(
+  self: PrimeRiskCapital,
+): AllocationRiskCapital[] {
+  const skyById = new Map<number, ReferenceAllocationRow>();
+  const skyOnly: ReferenceAllocationRow[] = [];
+  for (const row of referenceRowsFor(self)) {
+    const [receiptTokenId] = row;
+    if (receiptTokenId === null) {
+      skyOnly.push(row);
+    } else {
+      skyById.set(receiptTokenId, row);
+    }
+  }
+
+  const merged: AllocationRiskCapital[] = self.per_allocation.map((entry) => {
+    const sky =
+      entry.receipt_token_id === null
+        ? undefined
+        : skyById.get(entry.receipt_token_id);
+    if (sky === undefined) return entry;
+
+    const [, , , , rrcUsd, crrPct] = sky;
+    return {
+      ...entry,
+      source: 'both',
+      reference_exposure_usd: sky[3],
+      reference_required_risk_capital_usd: rrcUsd,
+      reference_crr_pct: crrPct,
+    };
+  });
+
+  return [...merged, ...skyOnly.map(referenceAllocation)].sort(
+    (left, right) => Number(right.exposure_usd) - Number(left.exposure_usd),
+  );
+}
+
+/**
+ * Both provenances at once: STL's totals in the bare fields, Sky's in the
+ * `reference_`-prefixed ones, and one row per position.
+ */
+export function toCompositeRiskCapital(
+  self: PrimeRiskCapital,
+): PrimeRiskCapital {
+  const reference = toReferenceRiskCapital(self);
+
+  return {
+    ...self,
+    source: 'both',
+    per_allocation: compositePerAllocation(self),
+    reference_prime_exposure_usd: reference.prime_exposure_usd,
+    reference_prime_required_risk_capital_usd:
+      reference.prime_required_risk_capital_usd,
+    reference_total_risk_capital_usd: reference.total_risk_capital_usd,
+    reference_prime_encumbrance_ratio: reference.prime_encumbrance_ratio,
+    // Sky reports these and STL models none of them, so the merged answer
+    // carries them whole.
+    junior_risk_capital_usd: reference.junior_risk_capital_usd,
+    senior_risk_capital_usd: reference.senior_risk_capital_usd,
+    exposure_share: reference.exposure_share,
+  };
+}
+
+/** Sky's answer alone: its own totals, and its own breakdown. */
 export function toReferenceRiskCapital(
   self: PrimeRiskCapital,
 ): PrimeRiskCapital {
@@ -301,6 +453,7 @@ export function toReferenceRiskCapital(
     ...self,
     source: 'reference',
     model: null,
+    per_allocation: referenceRowsFor(self).map(referenceAllocation),
     exposure_usd: self.prime_exposure_usd,
     required_risk_capital_usd: self.prime_required_risk_capital_usd,
     modeled_exposure_usd: self.prime_modeled_exposure_usd,

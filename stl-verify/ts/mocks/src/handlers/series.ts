@@ -23,12 +23,13 @@ import {
   usdString,
 } from '../fixtures/series.ts';
 import { SERIES_DELAY_MS, mock } from '../mock-api.ts';
-import { invalidQueryParam, type Parsed, type Problem } from '../problem.ts';
+import type { Parsed, Problem } from '../problem.ts';
 import { badRequest, notFound, problemResponse } from '../problem.ts';
 import {
   bucketStarts,
   readFlag,
   readLimit,
+  readProvenance,
   resolveWindow,
   sameHex,
 } from '../query.ts';
@@ -84,50 +85,6 @@ export type SeriesQuery = {
   source: string | null;
   reference: string | null;
 };
-
-const PROVENANCES: readonly Provenance[] = ['indexed', 'reference', 'both'];
-
-/**
- * Resolve the provenance the way the API does.
- *
- * `source` wins where both are given and they agree; a disagreement is a 422
- * there, so it is a problem here too. `reference=false` asked for STL's own
- * figures by name, so it is `indexed` rather than the default.
- */
-function readProvenance(
-  source: string | null,
-  reference: string | null,
-): Parsed<Provenance> {
-  const named = PROVENANCES.find((candidate) => candidate === source);
-  if (source !== null && named === undefined) {
-    return {
-      ok: false,
-      problem: invalidQueryParam(
-        'source',
-        `Input should be ${PROVENANCES.join(', ')}`,
-      ),
-    };
-  }
-
-  if (reference === null) {
-    return { ok: true, value: named ?? 'indexed' };
-  }
-
-  const flag = readFlag('reference', reference);
-  if (!flag.ok) return flag;
-  const legacy: Provenance = flag.value ? 'reference' : 'indexed';
-
-  if (named !== undefined && named !== legacy) {
-    return {
-      ok: false,
-      problem: invalidQueryParam(
-        'source',
-        `conflicts with the deprecated reference param, which asked for ${legacy}`,
-      ),
-    };
-  }
-  return { ok: true, value: named ?? legacy };
-}
 
 /**
  * Takes the raw strings rather than the resolver's `query` object: the three

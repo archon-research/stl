@@ -18,7 +18,7 @@
  * are read off `TOKENS` by id, so a row cannot name one token and label itself
  * with another's symbol.
  */
-import { DAY_MS, MINUTE_MS, SECOND_MS, offsetIsoAgo } from '../clock.ts';
+import { DAY_MS, MINUTE_MS, SECOND_MS, iso, offsetIsoAgo } from '../clock.ts';
 import type { Allocation, AllocationActivity } from '../schema.ts';
 import type { PrimeName } from './registry.ts';
 import {
@@ -331,13 +331,113 @@ export function seedReferenceAllocations(
       ? sparkMainnetAllocations(nowMs)
       : groveMainnetAllocations(nowMs);
 
-  return selfRows
-    .filter((allocation) => allocation.category === 'allocation')
-    .map((allocation): Allocation => ({
-      ...allocation,
+  return [
+    ...selfRows
+      .filter((allocation) => allocation.category === 'allocation')
+      .map((allocation): Allocation => ({
+        ...allocation,
+        balance: null,
+        scope: 'prime',
+        source: 'reference',
+      })),
+    ...skyOnlyAllocations(nowMs, primeName),
+  ];
+}
+
+/**
+ * Positions Sky reports and STL does not index at all.
+ *
+ * The union is only interesting if one side has rows the other lacks, and these
+ * carry the three properties that make them awkward: no receipt token (so no
+ * `receipt_token_id` to join a risk row by), no token quantity, and — for the
+ * Arkis vault — an exposure large enough to matter against STL's own totals.
+ */
+function skyOnlyAllocations(nowMs: number, primeName: PrimeName): Allocation[] {
+  if (primeName !== 'spark') return [];
+
+  const observedAt = iso(nowMs - 13 * MINUTE_MS);
+  return [
+    {
+      chain_id: 1,
+      network: 'ethereum',
+      receipt_token_id: null,
+      receipt_token_address: null,
+      underlying_token_id: null,
+      underlying_token_address: null,
+      symbol: 'sparkPrimeUSDC1',
+      underlying_symbol: 'USDC',
+      protocol_name: 'Arkis',
       balance: null,
+      amount_usd: '20286862.977',
+      latest_activity_at: observedAt,
+      latest_activity_action: null,
+      latest_activity_amount: null,
+      category: 'allocation',
       scope: 'prime',
-    }));
+      source: 'reference',
+    },
+    {
+      chain_id: 1,
+      network: 'ethereum',
+      receipt_token_id: null,
+      receipt_token_address: null,
+      underlying_token_id: null,
+      underlying_token_address: null,
+      symbol: 'UNI-V4-PYUSD-USDS',
+      underlying_symbol: 'USDS',
+      protocol_name: 'uniswap',
+      balance: null,
+      amount_usd: '100118500.444',
+      latest_activity_at: observedAt,
+      latest_activity_action: null,
+      latest_activity_amount: null,
+      category: 'allocation',
+      scope: 'prime',
+      source: 'reference',
+    },
+  ];
+}
+
+/**
+ * Every position either provenance reports, each named once.
+ *
+ * STL's row wins where both describe the same position — it is computed from the
+ * chain rather than reported — and says `both` so the reader knows the other
+ * agrees it exists. Rows only Sky reports keep their own provenance, which is
+ * what the grid badges.
+ */
+export function seedCompositeAllocations(
+  nowMs: number,
+  primeName: PrimeName,
+  proxyAddress: string,
+): Allocation[] {
+  const indexed = seedAllocations(nowMs)[proxyAddress] ?? [];
+  const referenceRows = seedReferenceAllocations(nowMs, primeName) ?? [];
+
+  const indexedIds = new Set(
+    indexed
+      .map((allocation) => allocation.receipt_token_id)
+      // `!= null` covers undefined too: the field is optional in the document,
+      // so a row that omits it reads as absent rather than as id 0.
+      .filter((id): id is number => id != null),
+  );
+
+  return [
+    ...indexed.map((allocation): Allocation => ({
+      ...allocation,
+      source:
+        allocation.receipt_token_id != null &&
+        referenceRows.some(
+          (row) => row.receipt_token_id === allocation.receipt_token_id,
+        )
+          ? 'both'
+          : 'indexed',
+    })),
+    ...referenceRows.filter(
+      (row) =>
+        row.receipt_token_id == null || !indexedIds.has(row.receipt_token_id),
+    ),
+  ];
 }
 
 /** Spread so 16 rows cover the whole default 24h window, newest first. */

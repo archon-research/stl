@@ -351,6 +351,119 @@ async function checkDebtRawSnapshots() {
   assert.match(raw.data[0].debt_wad, /^\d+$/u, 'debt_wad is an integer string');
 }
 
+async function checkCompositeAllocationsAreAUnion() {
+  const indexed = await request(
+    '/v1/primes/{prime_id}/allocations',
+    {
+      params: {
+        path: { prime_id: SPARK_MAINNET_PROXY },
+        query: { source: 'indexed' },
+      },
+    },
+    'allocations (indexed)',
+  );
+  const reference = await request(
+    '/v1/primes/{prime_id}/allocations',
+    {
+      params: {
+        path: { prime_id: SPARK_MAINNET_PROXY },
+        query: { source: 'reference' },
+      },
+    },
+    'allocations (reference)',
+  );
+  const composite = await request(
+    '/v1/primes/{prime_id}/allocations',
+    {
+      params: {
+        path: { prime_id: SPARK_MAINNET_PROXY },
+        query: { source: 'both' },
+      },
+    },
+    'allocations (both)',
+  );
+
+  // Every position once: the union is larger than either half and smaller than
+  // their sum, because the halves overlap.
+  assert.ok(
+    composite.length > indexed.length,
+    'the union should carry rows the indexed half does not',
+  );
+  assert.ok(
+    composite.length < indexed.length + reference.length,
+    'the union should not be the two halves concatenated',
+  );
+
+  const keys = composite.map(
+    (row) => `${row.receipt_token_id ?? row.symbol}:${row.chain_id}`,
+  );
+  assert.equal(new Set(keys).size, keys.length, 'a position appears twice');
+
+  // A row only Sky reports keeps its own provenance, which is what the grid
+  // badges; a row both describe says so.
+  const sources = new Set(composite.map((row) => row.source));
+  assert.ok(sources.has('both'), 'no row reports both provenances');
+  assert.ok(sources.has('reference'), 'no row reports Sky alone');
+}
+
+async function checkCompositeRiskCapitalKeepsBothFigures() {
+  const composite = await request(
+    '/v1/primes/{prime_id}/risk-capital',
+    {
+      params: {
+        path: { prime_id: SPARK_MAINNET_PROXY },
+        query: { source: 'both' },
+      },
+    },
+    'risk-capital (both)',
+  );
+
+  assert.equal(composite.source, 'both');
+
+  const merged = composite.per_allocation.filter(
+    (row) => row.source === 'both',
+  );
+  assert.ok(merged.length > 0, 'no merged rows in the breakdown');
+
+  // The point of the fixture: the two provenances disagree, and neither figure
+  // is overwritten by the other.
+  const disagreeing = merged.find(
+    (row) =>
+      row.reference_required_risk_capital_usd !== null &&
+      Number(row.reference_required_risk_capital_usd) !==
+        Number(row.required_risk_capital_usd),
+  );
+  assert.ok(
+    disagreeing !== undefined,
+    'no row where the provenances disagree, so the merge is untested',
+  );
+  assert.ok(
+    disagreeing.reference_crr_pct !== null &&
+      disagreeing.reference_crr_pct !== undefined,
+    "Sky's own ratio should ride along, not be derived from its two figures",
+  );
+
+  // Sky prices positions STL resolves no receipt token for, so they cannot join
+  // a grid row by id. They must still be in the breakdown.
+  const skyOnly = composite.per_allocation.filter(
+    (row) => row.source === 'reference' && row.receipt_token_id == null,
+  );
+  assert.ok(
+    skyOnly.length > 0,
+    'no Sky-only rows, so the unjoinable case is untested',
+  );
+
+  // Largest exposure first, like the endpoint.
+  const exposures = composite.per_allocation.map((row) =>
+    Number(row.exposure_usd),
+  );
+  assert.deepEqual(
+    exposures,
+    [...exposures].sort((left, right) => right - left),
+    'the merged breakdown is not ordered by exposure',
+  );
+}
+
 async function checkProvenanceSelection() {
   const window = { aggregate: true, limit: 3 };
 
@@ -1015,6 +1128,11 @@ const checks = [
   ['the raw feed honours limit', checkRawActivityHonoursLimit],
   ['debt raw snapshots', checkDebtRawSnapshots],
   ['provenance selection', checkProvenanceSelection],
+  ['composite allocations are a union', checkCompositeAllocationsAreAUnion],
+  [
+    'composite risk capital keeps both figures',
+    checkCompositeRiskCapitalKeepsBothFigures,
+  ],
   [
     'a contradictory provenance pair is refused',
     checkProvenanceConflictRejected,
