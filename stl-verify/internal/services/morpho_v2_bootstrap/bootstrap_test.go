@@ -227,7 +227,7 @@ func TestRun_FinalizedHeadBelowDeployBlockFailsTheRun(t *testing.T) {
 // what an operator reads.
 func TestRun_ReplayFailureStopsBeforeSeed(t *testing.T) {
 	h := newBootstrapHarness(t)
-	replayer := &recordingReplayer{v2Vaults: map[common.Address]struct{}{testVaultAddr: {}}}
+	replayer := &recordingReplayer{v2Vaults: map[common.Address]int64{testVaultAddr: 0}}
 	service, err := NewService(h.config, h.chain, replayer, h.progress)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
@@ -258,6 +258,112 @@ func TestRun_SeedFailureFailsTheRun(t *testing.T) {
 	}
 }
 
+// TestRun_DefersAVaultFirstSeenAboveThePinnedHead: morpho_vault.created_at_block
+// is where discovery FIRST SAW the vault, so a vault whose value sits above the
+// run's pinned head cannot be shown to have existed there. Probing it anyway asks
+// a contract-less address for its adapters, and recording that as a failure would
+// make an ordinary "the vault is newer than the head" a red run forever.
+func TestRun_DefersAVaultFirstSeenAboveThePinnedHead(t *testing.T) {
+	h := newBootstrapHarness(t)
+	const headBlock = int64(24_000_000)
+	logger, logs := capturingLogger()
+	h.config.Logger = logger
+
+	replayer := &recordingReplayer{v2Vaults: map[common.Address]int64{
+		testVaultAddr:   23_400_000,
+		secondVaultAddr: headBlock + 1,
+	}}
+	service, err := NewService(h.config, h.chain, replayer, h.progress)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	h.chain.setFinalizedHead(headBlock, 1_770_000_000)
+
+	if err := service.Run(context.Background()); err != nil {
+		t.Fatalf("a vault newer than the head must be deferred, not fail the run: %v", err)
+	}
+
+	if want := []common.Address{testVaultAddr}; !slices.Equal(replayer.seeded, want) {
+		t.Errorf("seeded %v, want only the vault that existed at the head %v", replayer.seeded, want)
+	}
+	written := logs()
+	if !strings.Contains(written, secondVaultAddr.Hex()) {
+		t.Errorf("the run never named the deferred vault %s in its logs:\n%s", secondVaultAddr.Hex(), written)
+	}
+	if !strings.Contains(written, "deferredVaults=1") {
+		t.Errorf("the completion log carries no deferred count:\n%s", written)
+	}
+}
+
+// TestRun_ALaterHeadPicksUpAPreviouslyDeferredVault: deferral is not exclusion.
+// Live indexing has owned the vault since its first event, and the next run pins
+// a later finalized head that includes it — which is what makes skipping safe
+// rather than a permanent hole.
+func TestRun_ALaterHeadPicksUpAPreviouslyDeferredVault(t *testing.T) {
+	h := newBootstrapHarness(t)
+	const firstHead = int64(24_000_000)
+
+	replayer := &recordingReplayer{v2Vaults: map[common.Address]int64{
+		testVaultAddr:   23_400_000,
+		secondVaultAddr: firstHead + 1,
+	}}
+	service, err := NewService(h.config, h.chain, replayer, h.progress)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	h.chain.setFinalizedHead(firstHead, 1_770_000_000)
+	if err := service.Run(context.Background()); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	h.chain.setFinalizedHead(firstHead+1_000, 1_770_100_000)
+	if err := service.Run(context.Background()); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+
+	if !slices.Contains(replayer.seeded, secondVaultAddr) {
+		t.Errorf("seeded %v, want the deferred vault %s once the head reached it", replayer.seeded, secondVaultAddr.Hex())
+	}
+}
+
+// TestRun_AHeadThatAdmitsADeferredVaultReSweepsTheWholeRange: the resume record
+// is scoped to the vault set it was fetched for, and the filter is part of that
+// set. A later head admitting a vault must therefore change the digest and force
+// the full sweep — the recorded chunks were read through an address filter that
+// never mentioned it.
+func TestRun_AHeadThatAdmitsADeferredVaultReSweepsTheWholeRange(t *testing.T) {
+	h := newBootstrapHarness(t)
+	const firstHead = int64(24_000_000)
+
+	replayer := &recordingReplayer{v2Vaults: map[common.Address]int64{
+		testVaultAddr:   23_400_000,
+		secondVaultAddr: firstHead + 1,
+	}}
+	service, err := NewService(h.config, h.chain, replayer, h.progress)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	h.chain.setFinalizedHead(firstHead, 1_770_000_000)
+	if err := service.Run(context.Background()); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	firstDigest := h.progress.saved[len(h.progress.saved)-1].VaultsDigest
+	queriesBefore := len(h.chain.queries)
+
+	h.chain.setFinalizedHead(firstHead+1_000, 1_770_100_000)
+	if err := service.Run(context.Background()); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+
+	if got := h.progress.saved[len(h.progress.saved)-1].VaultsDigest; got == firstDigest {
+		t.Errorf("the digest is unchanged at %s although the later head admitted a vault", got)
+	}
+	if from := h.chain.queries[queriesBefore].FromBlock.Int64(); from != mainnetVaultV2DeployBlock {
+		t.Errorf("the second run resumed at block %d, want a full re-sweep from the factory deploy block %d", from, mainnetVaultV2DeployBlock)
+	}
+}
+
 // TestRun_SeedHealsEveryVaultPastAFailingOneAndStillFailsTheRun: a vault-shaped
 // contract that cannot be probed fails identically forever, so aborting the seed
 // at the first one would leave every vault after it unhealed on every future run
@@ -266,7 +372,7 @@ func TestRun_SeedFailureFailsTheRun(t *testing.T) {
 func TestRun_SeedHealsEveryVaultPastAFailingOneAndStillFailsTheRun(t *testing.T) {
 	h := newBootstrapHarness(t)
 	replayer := &recordingReplayer{
-		v2Vaults: map[common.Address]struct{}{testVaultAddr: {}, secondVaultAddr: {}, thirdVaultAddr: {}},
+		v2Vaults: map[common.Address]int64{testVaultAddr: 0, secondVaultAddr: 0, thirdVaultAddr: 0},
 		// Sorted by address, secondVaultAddr sits between thirdVaultAddr and
 		// testVaultAddr, so a vault is seeded both before and after the failure.
 		seedErr: func(vault common.Address) error {
@@ -310,7 +416,7 @@ func TestRun_SeedStopsAtOnceWhenTheRunIsCancelled(t *testing.T) {
 
 	attempts := 0
 	replayer := &recordingReplayer{
-		v2Vaults: map[common.Address]struct{}{testVaultAddr: {}, secondVaultAddr: {}, thirdVaultAddr: {}},
+		v2Vaults: map[common.Address]int64{testVaultAddr: 0, secondVaultAddr: 0, thirdVaultAddr: 0},
 		seedErr: func(common.Address) error {
 			attempts++
 			cancel()
@@ -337,7 +443,7 @@ func TestRun_SeedStopsAtOnceWhenTheRunIsCancelled(t *testing.T) {
 // inferred-membership WARN that means a discovery gap.
 func TestRun_ReplayedLogsArriveInChainOrder(t *testing.T) {
 	h := newBootstrapHarness(t)
-	replayer := &recordingReplayer{v2Vaults: map[common.Address]struct{}{testVaultAddr: {}}}
+	replayer := &recordingReplayer{v2Vaults: map[common.Address]int64{testVaultAddr: 0}}
 	service, err := NewService(h.config, h.chain, replayer, h.progress)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
@@ -381,7 +487,7 @@ func TestRun_ReplayedLogsArriveInChainOrder(t *testing.T) {
 // non-canonical block; filtering it away silently would hide the anomaly.
 func TestRun_RemovedLogFailsTheRun(t *testing.T) {
 	h := newBootstrapHarness(t)
-	replayer := &recordingReplayer{v2Vaults: map[common.Address]struct{}{testVaultAddr: {}}}
+	replayer := &recordingReplayer{v2Vaults: map[common.Address]int64{testVaultAddr: 0}}
 	service, err := NewService(h.config, h.chain, replayer, h.progress)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
@@ -405,7 +511,7 @@ func TestRun_RemovedLogFailsTheRun(t *testing.T) {
 // deliver every log in the original range exactly once.
 func TestRun_NarrowsRangeOnProviderCap(t *testing.T) {
 	h := newBootstrapHarness(t)
-	replayer := &recordingReplayer{v2Vaults: map[common.Address]struct{}{testVaultAddr: {}}}
+	replayer := &recordingReplayer{v2Vaults: map[common.Address]int64{testVaultAddr: 0}}
 	h.config.BlockChunkSize = 1_000_000
 	service, err := NewService(h.config, h.chain, replayer, h.progress)
 	if err != nil {
@@ -436,7 +542,7 @@ func TestRun_NarrowsRangeOnProviderCap(t *testing.T) {
 // empty history.
 func TestRun_UnrelatedGetLogsErrorBubbles(t *testing.T) {
 	h := newBootstrapHarness(t)
-	replayer := &recordingReplayer{v2Vaults: map[common.Address]struct{}{testVaultAddr: {}}}
+	replayer := &recordingReplayer{v2Vaults: map[common.Address]int64{testVaultAddr: 0}}
 	service, err := NewService(h.config, h.chain, replayer, h.progress)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
@@ -680,6 +786,14 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+// capturingLogger returns a logger and a reader over everything written to it,
+// for the assertions that are about what a run TELLS an operator.
+func capturingLogger() (*slog.Logger, func() string) {
+	var out bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&out, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	return logger, out.String
+}
+
 // --- fakes -------------------------------------------------------------------
 
 // fakeChainReader answers the three node reads the bootstrap issues and records
@@ -766,7 +880,7 @@ func (f *fakeChainReader) FilterLogs(_ context.Context, q ethereum.FilterQuery) 
 // assert on WHAT the sweep feeds it (order, filtering) rather than on what the
 // handlers then do with it.
 type recordingReplayer struct {
-	v2Vaults map[common.Address]struct{}
+	v2Vaults map[common.Address]int64
 	// seedErr, when set, decides each vault's seed outcome; only the vaults it
 	// lets through land in seeded.
 	seedErr  func(common.Address) error
@@ -781,7 +895,7 @@ type replayedLog struct {
 
 func (r *recordingReplayer) LoadVaultRegistry(context.Context) error { return nil }
 
-func (r *recordingReplayer) V2VaultAddresses() map[common.Address]struct{} { return r.v2Vaults }
+func (r *recordingReplayer) V2VaultsFirstSeen() map[common.Address]int64 { return r.v2Vaults }
 
 func (r *recordingReplayer) SeedV2VaultAdapters(_ context.Context, vaultAddress common.Address, _ int64, _ common.Hash, _ int, _ time.Time) error {
 	if r.seedErr != nil {
