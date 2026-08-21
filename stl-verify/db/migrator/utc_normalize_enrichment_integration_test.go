@@ -23,10 +23,7 @@ func TestUtcNormalizeEnrichment(t *testing.T) {
 	}
 
 	// valid_from defaults to the UTC expression on every normalized table (not session CURRENT_DATE).
-	// position_classification is the append-only decision history and position_classification_current
-	// its derived cache (VEC-402); both carry valid_from, so both must default it in UTC.
-	for _, tbl := range []string{"security_instrument_bridge", "position_classification",
-		"position_classification_current", "position_entity_link"} {
+	for _, tbl := range []string{"security_instrument_bridge", "position_classification", "position_entity_link"} {
 		t.Run("utc default "+tbl, func(t *testing.T) {
 			var def string
 			if err := pool.QueryRow(ctx, `

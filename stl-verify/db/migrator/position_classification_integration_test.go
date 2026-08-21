@@ -29,24 +29,10 @@ func TestPositionClassification(t *testing.T) {
 		t.Fatalf("migrations: %v", err)
 	}
 
-	// One observation per fixture position, so each classification below has a valid basis.
-	seed := func(t *testing.T, tag string) {
-		t.Helper()
-		if _, err := pool.Exec(ctx,
-			`INSERT INTO position_state (position_id, chain_id, protocol_id, instrument_key, holder_id,
-				quantity, block_number, block_version, processing_version, block_timestamp, projection)
-			 VALUES (sha256($1::bytea), 1, 10, $2, 'aa', 5, 100, 0, 0, '2026-01-01+00', 'vec401-test')`,
-			tag, tag); err != nil {
-			t.Fatalf("seed observation for %s: %v", tag, err)
-		}
-	}
-	// The table is the append-only decision history (VEC-402), so every insert carries the decision's
-	// version and reason alongside the provenance of the observation it classified.
-	prov := `, classification_version, change_reason, as_of_block, as_of_block_version, as_of_processing_version`
-	provVals := `, 1, 'vec401-test', 100, 0, 0`
+	prov := ``
+	provVals := ``
 
 	// Valid: a seeded ref_deal_type code (LOAN) with a valid direction and a real basis inserts.
-	seed(t, "valid")
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO position_classification (position_id, deal_type_code, direction`+prov+`)
 		 VALUES (sha256('valid'::bytea), 'LOAN', 'LONG'`+provVals+`)`); err != nil {
@@ -54,7 +40,6 @@ func TestPositionClassification(t *testing.T) {
 	}
 
 	// FK: an unknown deal_type_code is rejected by the foreign key.
-	seed(t, "fk")
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO position_classification (position_id, deal_type_code`+prov+`)
 		 VALUES (sha256('fk'::bytea), 'NOT_A_DEAL_TYPE'`+provVals+`)`); err == nil ||
@@ -63,7 +48,6 @@ func TestPositionClassification(t *testing.T) {
 	}
 
 	// CHECK: a direction that is not LONG/SHORT is rejected.
-	seed(t, "chk")
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO position_classification (position_id, deal_type_code, direction`+prov+`)
 		 VALUES (sha256('chk'::bytea), 'LOAN', 'SIDEWAYS'`+provVals+`)`); err == nil ||
@@ -71,34 +55,12 @@ func TestPositionClassification(t *testing.T) {
 		t.Errorf("invalid direction: got %v; want a check violation naming direction", err)
 	}
 
-	// PK: the same (position_id, classification_version) twice is rejected; a NEW version is not.
+	// PK: a duplicate position_id is rejected.
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO position_classification (position_id, deal_type_code`+prov+`)
 		 VALUES (sha256('valid'::bytea), 'LOAN'`+provVals+`)`); err == nil ||
 		!strings.Contains(err.Error(), "position_classification_pkey") {
-		t.Errorf("duplicate (position_id, classification_version): got %v; want a primary-key violation", err)
-	}
-	if _, err := pool.Exec(ctx,
-		`INSERT INTO position_classification (position_id, deal_type_code, classification_version,
-			change_reason, as_of_block, as_of_block_version, as_of_processing_version)
-		 VALUES (sha256('valid'::bytea), 'BORROW', 2, 'vec401-test', 100, 0, 0)`); err != nil {
-		t.Errorf("a second decision for the same position must append: %v", err)
+		t.Errorf("duplicate position_id: got %v; want a primary-key violation", err)
 	}
 
-	// Provenance is structural now, not trigger-enforced: the columns are NOT NULL, so a write with no
-	// basis cannot be stored at all.
-	for _, c := range []struct{ name, stmt, want string }{
-		{"no provenance", `INSERT INTO position_classification (position_id, deal_type_code,
-			classification_version, change_reason) VALUES (sha256('noprov'::bytea), 'LOAN', 1, 'r')`, "as_of_block"},
-		{"no version", `INSERT INTO position_classification (position_id, deal_type_code, change_reason,
-			as_of_block, as_of_block_version, as_of_processing_version)
-			VALUES (sha256('nover'::bytea), 'LOAN', 'r', 100, 0, 0)`, "classification_version"},
-		{"zero version", `INSERT INTO position_classification (position_id, deal_type_code,
-			classification_version, change_reason, as_of_block, as_of_block_version, as_of_processing_version)
-			VALUES (sha256('zerover'::bytea), 'LOAN', 0, 'r', 100, 0, 0)`, "version_pos_chk"},
-	} {
-		if _, err := pool.Exec(ctx, c.stmt); err == nil || !strings.Contains(err.Error(), c.want) {
-			t.Errorf("%s: got %v; want an error naming %q", c.name, err, c.want)
-		}
-	}
 }
