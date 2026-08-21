@@ -425,36 +425,8 @@ func TestIntegration_ReplayPartition_ReplaysNothingWhenNoV2VaultIsKnown(t *testi
 // composition root builds is what proves the wiring, rather than reading a field
 // back.
 func TestIntegration_BuildReplayService_MetersTheReplayPath(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
-	t.Cleanup(cleanup)
-	ctx := context.Background()
-
-	vault := common.HexToAddress("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
-	adapter := common.HexToAddress("0x7481968709b8f155652D42ebf468b22945907dC2")
-	seedV2VaultRow(t, ctx, pool, vault)
-
 	reader := installTestMeterProvider(t)
-	multicaller := testutil.NewMockMulticaller()
-	wireAdapterRegistrationReads(t, multicaller, adapter)
-
-	t.Setenv("BUILD_GIT_HASH", "integration-test")
-	buildReg, err := buildregistry.New(ctx, pool)
-	if err != nil {
-		t.Fatalf("registering the build: %v", err)
-	}
-	svc, _, err := buildReplayService(testutil.DiscardLogger(), multicaller, pool, buildReg.BuildID(), 1)
-	if err != nil {
-		t.Fatalf("buildReplayService: %v", err)
-	}
-	if err := svc.LoadVaultRegistry(ctx); err != nil {
-		t.Fatalf("loading the vault registry: %v", err)
-	}
-
-	err = svc.ReplayMetaMorphoLog(ctx, addAdapterLog(t, vault, adapter), 23_400_000,
-		common.HexToHash("0x11"), 1, time.Unix(1_760_000_000, 0).UTC())
-	if err != nil {
-		t.Fatalf("ReplayMetaMorphoLog: %v", err)
-	}
+	replayOneAddAdapter(t)
 
 	// The chain label is asserted too: the counter is per-chain, so a service
 	// handed a raw chain id instead of a chain NAME would meter every replay under
@@ -470,6 +442,20 @@ func TestIntegration_BuildReplayService_MetersTheReplayPath(t *testing.T) {
 // per-partition line reporting zero rows for a run that wrote plenty — and reporting zero
 // is exactly the symptom of the silent loss the count exists to expose.
 func TestIntegration_BuildReplayService_CountsTheRowsItAppends(t *testing.T) {
+	counted := replayOneAddAdapter(t)
+
+	want := appendedRows{AdapterStates: 1, MembershipObservations: 1}
+	if counted.counts != want {
+		t.Errorf("counts after one AddAdapter replay = %+v, want %+v", counted.counts, want)
+	}
+}
+
+// replayOneAddAdapter drives a single AddAdapter log through the service this composition
+// root builds — registry seeded, adapter probes mocked — and hands back the counter the
+// wiring installed. Shared by the metering and tally tests, which assert two different
+// things about the same one replay.
+func replayOneAddAdapter(t *testing.T) *countingMorphoRepository {
+	t.Helper()
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 	ctx := context.Background()
@@ -493,17 +479,11 @@ func TestIntegration_BuildReplayService_CountsTheRowsItAppends(t *testing.T) {
 	if err := svc.LoadVaultRegistry(ctx); err != nil {
 		t.Fatalf("loading the vault registry: %v", err)
 	}
-
-	err = svc.ReplayMetaMorphoLog(ctx, addAdapterLog(t, vault, adapter), 23_400_000,
-		common.HexToHash("0x11"), 1, time.Unix(1_760_000_000, 0).UTC())
-	if err != nil {
+	if err := svc.ReplayMetaMorphoLog(ctx, addAdapterLog(t, vault, adapter), 23_400_000,
+		common.HexToHash("0x11"), 1, time.Unix(1_760_000_000, 0).UTC()); err != nil {
 		t.Fatalf("ReplayMetaMorphoLog: %v", err)
 	}
-
-	want := appendedRows{AdapterStates: 1, MembershipObservations: 1}
-	if counted.counts != want {
-		t.Errorf("counts after one AddAdapter replay = %+v, want %+v", counted.counts, want)
-	}
+	return counted
 }
 
 // installTestMeterProvider points the global meter provider — the one

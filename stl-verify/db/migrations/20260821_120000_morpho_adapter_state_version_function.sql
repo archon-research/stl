@@ -19,9 +19,20 @@
 -- INSERT and the trigger share ONE definition of it — the advisory-lock key included,
 -- which has to match or the serialization ADR-0002 §3 requires is lost. A repository
 -- calls it in the INSERT's VALUES list, evaluated before the arbiter, so the arbiter sees
--- the version the row will really carry. The trigger stays as the floor for any writer
--- that supplies none; running under the lock the function already holds, it recomputes
--- the same answer.
+-- the version the row will really carry, and the position's lock is held before any
+-- arbiter or decompression work begins.
+--
+-- The trigger is the floor on ROWSTORE chunks only. A writer that does not call the
+-- function — psql, an ad-hoc script — still loses its correction on a columnstored chunk,
+-- because the arbiter has already discarded the row by the time the trigger could assign
+-- anything; it also reaches the position's lock only after that arbiter work. What the
+-- trigger still guarantees is that such a writer never lands a DEFAULT-0 row on top of an
+-- existing series.
+--
+-- Cost: the rule now runs twice per inserted row (the VALUES call, then the trigger's
+-- recompute under the lock it already holds) — two advisory-lock calls and four PK-prefix
+-- probes where there were one and two. Deliberate: ~200 µs/row buys a DB-level floor that
+-- no writer can bypass, against a table sized for governance events.
 --
 -- compress_orderby is deliberately left alone. Adding processing_version to it changes
 -- none of this — the drop reproduces identically with and without it, because the
