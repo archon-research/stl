@@ -89,23 +89,25 @@ async def ensure_schedule(client: Client, spec: CronjobSpec) -> None:
         logger.info("schedule already exists, leaving it untouched name=%s", spec.name)
 
 
-async def run_cronjob(spec: CronjobSpec, *, max_concurrent_activities: int = 1) -> None:
+async def run_cronjob(spec: CronjobSpec) -> None:
     """Connect, ensure the schedule, then serve the task queue until cancelled.
 
     Activities run on a thread pool because these ticks are CPU-bound rather
     than IO-bound; leaving them on the event loop would stall heartbeats and
-    schedule polling for the duration of a run.
+    schedule polling for the duration of a run. One activity slot, hardcoded:
+    every cronjob tick is one CPU-bound pass, and overlap-SKIP already
+    guarantees a schedule never queues a second one.
     """
     client = await connect()
     await ensure_schedule(client, spec)
-    with ThreadPoolExecutor(max_workers=max_concurrent_activities) as executor:
+    with ThreadPoolExecutor(max_workers=1) as executor:
         worker = Worker(
             client,
             task_queue=spec.name,
             workflows=[spec.workflow],
             activities=spec.activities,
             activity_executor=executor,
-            max_concurrent_activities=max_concurrent_activities,
+            max_concurrent_activities=1,
         )
         logger.info("worker running task_queue=%s", spec.name)
         await worker.run()

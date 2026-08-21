@@ -34,6 +34,11 @@ class CoreModelRunnerService:
 async def run_markets(configs: list[RunnerConfig]) -> None:
     """Run every config against one engine, then fail if any market failed.
 
+    Deliberately the tick's composition root: both entry points (the Temporal
+    activity and the CLI --once path) call this and stay wiring-free, so the
+    adapter imports above are this function's to make, and swapping data
+    sources (parquet -> live tables) is a one-place edit here.
+
     A failing market does not abort its siblings: the markets are independent,
     and one broken input set (Galaxy's missing order books, say) should not
     withhold every other market's result. The failures are still raised at the
