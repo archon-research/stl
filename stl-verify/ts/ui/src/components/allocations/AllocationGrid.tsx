@@ -514,7 +514,18 @@ function AllocationRiskCapitalCell({
     );
   }
 
-  if (!entry?.applied) {
+  // The same preference the sort, the bar and the CRR column apply. Reading
+  // `required_risk_capital_usd` here instead showed STL's figure beside Sky's
+  // ratio: spUSDS rendered $25.34M at 0.00% CRR, which is neither provenance.
+  const requiredRiskCapitalUsd =
+    entry === undefined
+      ? null
+      : preferReference(
+          entry.reference_required_risk_capital_usd,
+          entry.applied ? entry.required_risk_capital_usd : null,
+        );
+
+  if (requiredRiskCapitalUsd === null) {
     return (
       <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>n/a</p>
     );
@@ -529,7 +540,7 @@ function AllocationRiskCapitalCell({
         color: 'text.strong',
       })}
     >
-      {formatUsdValue(entry.required_risk_capital_usd)}
+      {formatUsdValue(requiredRiskCapitalUsd)}
     </p>
   );
 }
