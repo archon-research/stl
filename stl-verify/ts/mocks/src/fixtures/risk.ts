@@ -28,6 +28,7 @@ import {
   SPARK_MAINNET_PROXY,
   SPARK_VAULT,
   SPUSDS,
+  TOKENS,
 } from './registry.ts';
 
 const SPARK_PROXIES = [
@@ -521,6 +522,23 @@ export function poolShareFor(primeId: string | null): number | undefined {
   return primeId === null ? 1 : PRIME_POOL_SHARE[primeId.toLowerCase()];
 }
 
+// Any registry token gets a breakdown so the drawer works for every
+// allocation row; the mapped entries above keep their curated exposures and
+// the fallback reuses the shared pool composition at a mid-size share. A token
+// outside the registry still misses, keeping the 404 branch reachable.
+export function breakdownFor(tokenAddress: string): RiskBreakdown | undefined {
+  const mapped = RISK_BREAKDOWN_BY_TOKEN[tokenAddress.toLowerCase()];
+  if (mapped !== undefined) {
+    return mapped;
+  }
+  const token = TOKENS.find(
+    (row) => row.address?.toLowerCase() === tokenAddress.toLowerCase(),
+  );
+  return token === undefined
+    ? undefined
+    : sharedPoolBreakdown(token.id, 0.24513);
+}
+
 export function scaleBreakdown(
   breakdown: RiskBreakdown,
   share: number,
@@ -554,24 +572,25 @@ export function rrcEnvelope(
   if (chainId === null || tokenAddress === null) {
     return undefined;
   }
-  const breakdown = RISK_BREAKDOWN_BY_TOKEN[tokenAddress.toLowerCase()];
+  const breakdown = breakdownFor(tokenAddress);
   if (breakdown === undefined) {
     return undefined;
   }
   const assetId = breakdown.receipt_token_id;
   // gap_sweep is the model risk-capital reports per allocation, so the two
   // endpoints agree on the same asset; suraf is scaled off it at a fixed ratio.
+  // Assets outside the curated per-allocation rows get fixed mid-size numbers,
+  // so every allocation's drawer resolves.
   const applied = SPARK_PER_ALLOCATION.find(
     (entry) => entry.receipt_token_id === assetId,
   );
-  if (applied?.required_risk_capital_usd == null || applied.crr_pct == null) {
-    return undefined;
-  }
+  const gapSweepUsd = applied?.required_risk_capital_usd ?? '1834200.55';
+  const gapSweepCrrPct = applied?.crr_pct ?? '2.31';
   const rrc = {
-    gapSweepUsd: applied.required_risk_capital_usd,
-    gapSweepCrrPct: applied.crr_pct,
-    surafUsd: (Number(applied.required_risk_capital_usd) * 0.809).toFixed(2),
-    surafCrrPct: (Number(applied.crr_pct) * 0.809).toFixed(2),
+    gapSweepUsd,
+    gapSweepCrrPct,
+    surafUsd: (Number(gapSweepUsd) * 0.809).toFixed(2),
+    surafCrrPct: (Number(gapSweepCrrPct) * 0.809).toFixed(2),
   };
 
   return {

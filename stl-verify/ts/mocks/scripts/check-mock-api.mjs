@@ -481,6 +481,39 @@ async function checkTokenSymbolFilter() {
   );
 }
 
+async function checkRiskResolvesForEveryRegistryToken() {
+  // The drawer opens for any allocation row, so any registry token must answer
+  // both risk endpoints; aEthUSDT is outside the curated breakdown map and
+  // exercises the fallback.
+  const aEthUsdt = '0x23878914efe38d27c4d67ab83ed1b93a74d4086a';
+  const breakdown = await request(
+    '/v1/risk/{chain_id}/{token_address}/breakdown',
+    {
+      params: {
+        path: { chain_id: 1, token_address: aEthUsdt },
+        query: { prime_id: SPARK_MAINNET_PROXY },
+      },
+    },
+    'fallback breakdown',
+  );
+  assert.ok(breakdown.items.length > 0);
+
+  const envelope = await request(
+    '/v1/risk/rrc',
+    {
+      params: {
+        query: {
+          chain_id: 1,
+          prime_id: SPARK_MAINNET_PROXY,
+          token_address: aEthUsdt,
+        },
+      },
+    },
+    'fallback rrc',
+  );
+  assert.equal(envelope.results.length, 2);
+}
+
 async function checkRiskBreakdownScalesToPrime() {
   const pool = await request(
     '/v1/risk/{chain_id}/{token_address}/breakdown',
@@ -730,6 +763,10 @@ const checks = [
   ['token price lookup', checkTokenPriceLookup],
   ['the token symbol filter', checkTokenSymbolFilter],
   ['the breakdown scales to a prime', checkRiskBreakdownScalesToPrime],
+  [
+    'every registry token resolves breakdown and rrc',
+    checkRiskResolvesForEveryRegistryToken,
+  ],
   ['rrc reports both models', checkRrcReportsBothModels],
   ['capital metrics dedupe by vault', checkCapitalMetricsDedupeByVault],
   ['an empty proxy is not an error', checkEmptyProxyIsNotAnError],

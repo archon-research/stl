@@ -6,8 +6,8 @@ import type { MockHandler } from '@archon-research/http-client-msw';
 
 import { mockNow } from '../clock.ts';
 import {
-  RISK_BREAKDOWN_BY_TOKEN,
   RISK_CAPITAL_BY_PROXY,
+  breakdownFor,
   poolShareFor,
   rrcEnvelope,
   scaleBreakdown,
@@ -49,8 +49,7 @@ export function riskHandlers(): MockHandler[] {
       '/v1/risk/{chain_id}/{token_address}/breakdown',
       async ({ params, query, response }) => {
         await mockDelay(LIST_DELAY_MS);
-        const breakdown =
-          RISK_BREAKDOWN_BY_TOKEN[params.token_address.toLowerCase()];
+        const breakdown = breakdownFor(params.token_address);
 
         if (breakdown === undefined) {
           return response.untyped(
