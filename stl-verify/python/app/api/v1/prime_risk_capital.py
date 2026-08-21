@@ -240,7 +240,10 @@ class PrimeRiskCapitalResponse(BaseModel):
         default=None, description="`modeled_exposure_usd / exposure_usd` (0-1). `null` when exposure is zero."
     )
     per_allocation: list[AllocationRiskCapitalResponse] = Field(
-        description="Per-allocation breakdown, newest-exposure first."
+        description=(
+            "Per-allocation breakdown, largest exposure first. Under `source=both` the merged rows are "
+            "re-sorted, so a row's position reflects STL's exposure where it has one and Sky's otherwise."
+        )
     )
     prime_name: str | None = Field(
         default=None,
@@ -518,7 +521,11 @@ def _merge_per_allocation(
         )
 
     merged.extend(row for row in indexed.per_allocation if id(row) not in matched)
-    return merged
+    # Both halves arrive ordered by their own exposure, so concatenating them
+    # yields neither order. `per_allocation` is published as largest-exposure
+    # first and a consumer paginating or truncating it reads the wrong rows
+    # otherwise.
+    return sorted(merged, key=lambda row: row.exposure_usd, reverse=True)
 
 
 async def _with_reference_totals(

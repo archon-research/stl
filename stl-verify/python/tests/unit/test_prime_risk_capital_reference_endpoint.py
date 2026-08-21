@@ -208,7 +208,22 @@ def test_reference_mode_is_off_by_default(reference_client):
     assert body["per_allocation"] == []
 
 
-def _self_result(total_risk_capital_usd: Decimal = Decimal("100")):
+def _indexed_allocation(*, receipt_token_id: int, exposure_usd: Decimal):
+    from app.domain.entities.prime_risk_capital import AllocationRiskCapital
+
+    return AllocationRiskCapital(
+        receipt_token_id=receipt_token_id,
+        symbol="spUSDT",
+        protocol_name="sparklend",
+        exposure_usd=exposure_usd,
+        applied=True,
+        required_risk_capital_usd=Decimal("30"),
+        crr_pct=Decimal("28.76"),
+        model="gap_sweep",
+    )
+
+
+def _self_result(total_risk_capital_usd: Decimal = Decimal("100"), per_allocation=None):
     from app.domain.entities.prime_risk_capital import PrimeRiskCapital
 
     return PrimeRiskCapital(
@@ -220,7 +235,7 @@ def _self_result(total_risk_capital_usd: Decimal = Decimal("100")):
         encumbrance_ratio=Decimal("0.3"),
         modeled_exposure_usd=Decimal("600"),
         modeled_pct=Decimal("0.6"),
-        per_allocation=[],
+        per_allocation=per_allocation if per_allocation is not None else [],
     )
 
 
@@ -258,6 +273,36 @@ def test_both_keeps_each_provenance_in_its_own_fields(reference_client):
     assert body["reference_total_risk_capital_usd"] == "48142491.08"
     # Sky reports these and STL models none of them.
     assert body["junior_risk_capital_usd"] is not None
+
+
+@pytest.mark.parametrize(
+    "reference_client",
+    [
+        _snapshot(
+            per_allocation=(
+                _reference_allocation(receipt_token_id=None, token_address="0x" + "ee" * 20),
+                _reference_allocation(receipt_token_id=41),
+            )
+        )
+    ],
+    indirect=True,
+)
+def test_both_orders_the_merged_breakdown_by_exposure(reference_client):
+    # Each half arrives ordered by its own exposure, so concatenating them yields
+    # neither order and a consumer truncating the published list reads the wrong
+    # rows.
+    client, self_service = reference_client
+    self_service.compute.return_value = _self_result(
+        per_allocation=[
+            _indexed_allocation(receipt_token_id=41, exposure_usd=Decimal("900000000")),
+            _indexed_allocation(receipt_token_id=77, exposure_usd=Decimal("1")),
+        ]
+    )
+
+    body = client.get(f"/v1/primes/{_VALID_ADDR}/risk-capital?source=both").json()
+
+    exposures = [Decimal(row["exposure_usd"]) for row in body["per_allocation"]]
+    assert exposures == sorted(exposures, reverse=True)
 
 
 @pytest.mark.parametrize("reference_client", [ReferenceDataUnavailableError("boom")], indirect=True)
