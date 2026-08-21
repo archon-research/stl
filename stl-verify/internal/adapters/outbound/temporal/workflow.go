@@ -3,6 +3,7 @@ package temporal
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"go.temporal.io/sdk/activity"
@@ -78,7 +79,7 @@ func (a *cronjobActivities) Execute(ctx context.Context, scheduledAt time.Time) 
 
 	ctx = ContextWithScheduledAt(ctx, scheduledAt)
 	resetProgress(a.progress)
-	stopHeartbeat := startHeartbeat(ctx, a.heartbeat, a.progress)
+	stopHeartbeat := StartHeartbeat(ctx, a.heartbeat, a.progress)
 	start := time.Now()
 	err := a.runner.Run(ctx)
 	stopHeartbeat()
@@ -96,17 +97,25 @@ func (a *cronjobActivities) Execute(ctx context.Context, scheduledAt time.Time) 
 	return nil
 }
 
-// startHeartbeat reports activity liveness every interval until the returned
+// StartHeartbeat reports activity liveness every interval until the returned
 // stop function is called, so Temporal notices a worker that died mid-run
 // instead of waiting out StartToCloseTimeout. A zero interval disables it, which
 // is why the returned stop is always safe to call.
+//
+// stop JOINS the reporter rather than merely signalling it, so no ping can land
+// after the activity has reported its result, and it is idempotent, so a caller
+// may both defer it and call it inline.
 //
 // The Runner interface carries no progress signal, so without a progress store
 // the heartbeat is a plain liveness ping with no details: it answers "is this
 // worker still alive", not "how far has it got". A runner that DOES record
 // progress supplies one, and the ping goes through it — Temporal keeps only the
 // last heartbeat's details, so a bare ping in between would erase them.
-func startHeartbeat(ctx context.Context, interval time.Duration, progress ProgressHeartbeater) (stop func()) {
+//
+// Exported because activities outside this package (the morpho-vault-backfill's,
+// which register their own workflows through RunWorker rather than running as a
+// Runner) need the same reporter.
+func StartHeartbeat(ctx context.Context, interval time.Duration, progress ProgressHeartbeater) (stop func()) {
 	if interval <= 0 {
 		return func() {}
 	}
@@ -127,10 +136,10 @@ func startHeartbeat(ctx context.Context, interval time.Duration, progress Progre
 			}
 		}
 	}()
-	return func() {
+	return sync.OnceFunc(func() {
 		close(done)
 		<-finished
-	}
+	})
 }
 
 // resetProgress clears whatever an earlier execution left in the store, before

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/ethclient"
@@ -15,6 +14,7 @@ import (
 	"go.temporal.io/sdk/workflow"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/blocktime"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/morpho_indexer"
@@ -347,7 +347,7 @@ func (a *backfillActivities) DiscoverVaults(ctx context.Context, rng blockRange)
 
 	// Deferred before the drain so it stops LAST: the drain blocks on in-flight
 	// archive writes, and an unheartbeated wait there reads as a dead worker.
-	stopHeartbeat := startHeartbeat(ctx, heartbeatInterval)
+	stopHeartbeat := temporal.StartHeartbeat(ctx, heartbeatInterval, nil)
 	defer stopHeartbeat()
 	defer a.archiveDrain()
 
@@ -385,7 +385,7 @@ func (a *backfillActivities) ReplayPartition(ctx context.Context, work partition
 		}
 	}()
 
-	stopHeartbeat := startHeartbeat(ctx, heartbeatInterval)
+	stopHeartbeat := temporal.StartHeartbeat(ctx, heartbeatInterval, nil)
 	defer stopHeartbeat()
 	defer a.archiveDrain()
 
@@ -432,30 +432,4 @@ func nonRetryableIfStructural(err error) error {
 		return temporalsdk.NewNonRetryableApplicationError(err.Error(), "StructuralData", err)
 	}
 	return err
-}
-
-// startHeartbeat's stop joins the goroutine rather than just signalling it, so
-// no ping can land after the activity has reported its result.
-func startHeartbeat(ctx context.Context, interval time.Duration) (stop func()) {
-	done := make(chan struct{})
-	finished := make(chan struct{})
-	go func() {
-		defer close(finished)
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-done:
-				return
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				activity.RecordHeartbeat(ctx)
-			}
-		}
-	}()
-	return sync.OnceFunc(func() {
-		close(done)
-		<-finished
-	})
 }

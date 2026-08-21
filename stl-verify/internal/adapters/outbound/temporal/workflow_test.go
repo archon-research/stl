@@ -143,10 +143,22 @@ func TestCronjobActivities_Execute(t *testing.T) {
 // keeps today's behavior — no goroutine, no heartbeat — and the returned stop is
 // still safe to call.
 func TestStartHeartbeat_ZeroIntervalIsANoOp(t *testing.T) {
-	stop := startHeartbeat(context.Background(), 0, nil)
+	stop := StartHeartbeat(context.Background(), 0, nil)
 	if stop == nil {
-		t.Fatal("startHeartbeat returned a nil stop function")
+		t.Fatal("StartHeartbeat returned a nil stop function")
 	}
+	stop()
+}
+
+// stop is a plain func the caller holds, and a caller may both defer it and call
+// it inline. A second call must be a no-op rather than a close-of-a-closed-channel
+// panic that fails the activity it was meant to tidy up after.
+func TestStartHeartbeat_StopIsIdempotent(t *testing.T) {
+	// An interval no test reaches: a tick would call activity.RecordHeartbeat,
+	// which panics outside an activity context.
+	stop := StartHeartbeat(context.Background(), time.Hour, nil)
+
+	stop()
 	stop()
 }
 
@@ -156,7 +168,7 @@ func TestStartHeartbeat_ZeroIntervalIsANoOp(t *testing.T) {
 // returning — an unjoined reporter would keep heartbeating into a finished
 // activity's context and leak one goroutine per run.
 //
-// It asserts on the absence of startHeartbeat's own frame rather than a
+// It asserts on the absence of StartHeartbeat's own frame rather than a
 // goroutine count: the SDK spawns its own short-lived heartbeat batcher, so a
 // count comparison would be measuring Temporal's internals, not this code's.
 // The number of heartbeats is likewise not asserted — the SDK batches them
@@ -183,8 +195,67 @@ func TestCronjobActivities_Execute_HeartbeatsWithoutLeakingTheReporter(t *testin
 
 	// Execute joins the reporter synchronously, so its frame must already be
 	// gone — no sleep-and-hope.
-	if stacks := goroutineStacks(t); strings.Contains(stacks, "startHeartbeat") {
+	if stacks := goroutineStacks(t); strings.Contains(stacks, "StartHeartbeat") {
 		t.Errorf("a heartbeat reporter goroutine survived the activity; Execute did not join it:\n%s", stacks)
+	}
+}
+
+// stop must JOIN the reporter, not merely signal it: an unjoined reporter keeps
+// heartbeating into a context whose activity has already reported its result.
+//
+// The assertion sits INSIDE the activity, so stop is the only thing that can
+// reap the reporter when it runs. Asserting after ExecuteActivity instead proves
+// nothing: the test environment cancels the activity context as it returns, and
+// the reporter's own ctx.Done arm then retires the goroutine whatever stop did.
+func TestStartHeartbeat_StopJoinsTheReporterGoroutine(t *testing.T) {
+	const interval = 2 * time.Millisecond
+	env := (&testsuite.WorkflowTestSuite{}).NewTestActivityEnvironment()
+
+	beatThenAssertReaped := func(ctx context.Context) error {
+		stop := StartHeartbeat(ctx, interval, nil)
+		time.Sleep(20 * interval)
+		stop()
+
+		// Asserted on the reporter's own frame rather than a goroutine count: the
+		// SDK spawns its own short-lived heartbeat batcher, which a count would
+		// measure instead of this code. Re-read for a moment, because a joined
+		// goroutine is a few instructions short of dead when stop returns — while a
+		// stop that only signals leaves the reporter ticking for the whole window.
+		deadline := time.Now().Add(time.Second)
+		for {
+			stacks := goroutineStacks(t)
+			if !strings.Contains(stacks, ".StartHeartbeat.") {
+				return nil
+			}
+			if time.Now().After(deadline) {
+				t.Errorf("the reporter goroutine outlived stop, which therefore did not join it:\n%s", stacks)
+				return nil
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	env.RegisterActivity(beatThenAssertReaped)
+	if _, err := env.ExecuteActivity(beatThenAssertReaped); err != nil {
+		t.Fatalf("ExecuteActivity: %v", err)
+	}
+}
+
+// A cancelled context must end the reporter on its own. Temporal cancels the
+// activity context when the run is terminated or the worker shuts down, and the
+// deferred stop cannot run until the activity body returns.
+func TestStartHeartbeat_ContextCancellationExitsTheReporter(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	stop := StartHeartbeat(ctx, time.Hour, nil)
+	defer stop()
+
+	cancel()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for strings.Contains(goroutineStacks(t), ".StartHeartbeat.") {
+		if time.Now().After(deadline) {
+			t.Fatal("the reporter goroutine outlived its cancelled context")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -205,7 +276,7 @@ func TestStartHeartbeat_BeatsThroughTheProgressStore(t *testing.T) {
 		}
 	}}
 
-	stop := startHeartbeat(context.Background(), time.Millisecond, store)
+	stop := StartHeartbeat(context.Background(), time.Millisecond, store)
 	defer stop()
 
 	select {
