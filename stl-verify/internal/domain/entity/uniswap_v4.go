@@ -1,6 +1,8 @@
 package entity
 
 import (
+	"bytes"
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -315,6 +317,92 @@ func (t *UniswapV4Tick) Validate() error {
 		return err
 	}
 	return requireBigInt("feeGrowthOutside1X128", t.FeeGrowthOutside1X128)
+}
+
+// UniswapV4PositionKey identifies one LP position inside a pool: the tuple
+// StateView.getPositionInfo takes and the one ModifyLiquidity carries. Owner is
+// the PoolManager-level owner — the address that called modifyLiquidity — which
+// for a PositionManager-managed NFT is the PositionManager, with Salt =
+// bytes32(tokenId); it is not the NFT holder.
+type UniswapV4PositionKey struct {
+	Owner     common.Address
+	TickLower int
+	TickUpper int
+	Salt      common.Hash
+}
+
+// Validate lives on the key, not only on the row that carries it: a key crosses
+// the repository boundary inbound (PositionsForPoolAtBlock) and is packed
+// straight into an int24 getPositionInfo argument, which the ABI encoder does
+// not range-check.
+func (k UniswapV4PositionKey) Validate() error {
+	if k.Owner == (common.Address{}) {
+		return fmt.Errorf("owner is required")
+	}
+	return validateV4Ticks(k.TickLower, k.TickUpper)
+}
+
+// Compare orders keys by owner, then tick range, then salt. It is the canonical
+// order for both the snapshot reads and the repository's advisory locks, so
+// concurrent writers touching overlapping positions lock them in one sequence.
+func (k UniswapV4PositionKey) Compare(other UniswapV4PositionKey) int {
+	return cmp.Or(
+		bytes.Compare(k.Owner.Bytes(), other.Owner.Bytes()),
+		cmp.Compare(k.TickLower, other.TickLower),
+		cmp.Compare(k.TickUpper, other.TickUpper),
+		bytes.Compare(k.Salt.Bytes(), other.Salt.Bytes()),
+	)
+}
+
+// UniswapV4Position is the append-on-change authoritative per-position state
+// from StateView.getPositionInfo. It carries no token amounts: V4 stores only
+// liquidity and the fee-growth checkpoints, so amounts are a downstream
+// derivation from liquidity, the pool's sqrtPrice and the tick bounds.
+type UniswapV4Position struct {
+	PoolID    int64 // uniswap_v4_pool surrogate id
+	Owner     common.Address
+	TickLower int
+	TickUpper int
+	Salt      common.Hash
+
+	BlockNumber    int64
+	BlockVersion   int
+	BlockTimestamp time.Time
+	Liquidity      *big.Int
+	// FeeGrowthInside*LastX128 are the Q128.128 checkpoints v4-core wrote at the
+	// position's last touch, not fees owed: fees accrued since are
+	// (feeGrowthInside now - this) * Liquidity.
+	FeeGrowthInside0LastX128 *big.Int
+	FeeGrowthInside1LastX128 *big.Int
+}
+
+func (p *UniswapV4Position) Key() UniswapV4PositionKey {
+	return UniswapV4PositionKey{
+		Owner:     p.Owner,
+		TickLower: p.TickLower,
+		TickUpper: p.TickUpper,
+		Salt:      p.Salt,
+	}
+}
+
+// Validate rejects any negative numeric: all three getPositionInfo outputs are
+// unsigned on chain, so a negative can only be a decode defect. An all-zero
+// position is legitimate — a burned position reads back zeroed rather than
+// reverting — and that erasure is what the row records.
+func (p *UniswapV4Position) Validate() error {
+	if err := validatePoolBlockKey(p.PoolID, p.BlockNumber, p.BlockVersion, p.BlockTimestamp); err != nil {
+		return err
+	}
+	if err := p.Key().Validate(); err != nil {
+		return err
+	}
+	if err := requireNonNegativeBigInt("liquidity", p.Liquidity); err != nil {
+		return err
+	}
+	if err := requireNonNegativeBigInt("feeGrowthInside0LastX128", p.FeeGrowthInside0LastX128); err != nil {
+		return err
+	}
+	return requireNonNegativeBigInt("feeGrowthInside1LastX128", p.FeeGrowthInside1LastX128)
 }
 
 // UniswapV4PoolEventName identifies which typed low-frequency PoolManager event
