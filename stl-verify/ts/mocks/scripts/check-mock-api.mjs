@@ -512,6 +512,9 @@ async function checkRiskResolvesForEveryRegistryToken() {
     'fallback rrc',
   );
   assert.equal(envelope.results.length, 2);
+  // The same coherence the curated asset gets: a fallback body that summarizes
+  // spUSDS is the failure this endpoint is most likely to regress into.
+  assertMaxCollapsesResults(envelope, 'fallback rrc (aEthUSDT)');
 }
 
 async function checkRiskBreakdownScalesToPrime() {
@@ -543,6 +546,38 @@ async function checkRiskBreakdownScalesToPrime() {
   );
 }
 
+/**
+ * `max_*` summarizes `results`, so it has to be the largest of them on the asset
+ * it was asked about — the check that catches a summary copied from another one.
+ */
+function assertMaxCollapsesResults(envelope, label) {
+  assert.equal(
+    Number(envelope.max_rrc_usd),
+    Math.max(...envelope.results.map((result) => Number(result.rrc_usd))),
+    `${label}: max_rrc_usd is not the largest result`,
+  );
+  assert.equal(
+    Number(envelope.max_crr_pct),
+    Math.max(
+      ...envelope.results.map((result) => Number(result.comparable_crr_pct)),
+    ),
+    `${label}: max_crr_pct is not the largest result`,
+  );
+
+  const suraf = envelope.results.find((r) => r.risk_model === 'suraf');
+  assert.equal(
+    Number(suraf.details.crr_pct),
+    Number(suraf.comparable_crr_pct),
+    `${label}: suraf reports one CRR on the result and another in its details`,
+  );
+  const parts =
+    Number(suraf.details.unadjusted_crr_pct) + Number(suraf.details.penalty_pp);
+  assert.ok(
+    Math.abs(Number(suraf.details.crr_pct) - parts) < 1e-9,
+    `${label}: crr_pct is not unadjusted_crr_pct + penalty_pp`,
+  );
+}
+
 async function checkRrcReportsBothModels() {
   const envelope = await request(
     '/v1/risk/rrc',
@@ -563,6 +598,39 @@ async function checkRrcReportsBothModels() {
   const gapSweep = envelope.results.find((r) => r.risk_model === 'gap_sweep');
   assert.equal(envelope.max_rrc_usd, gapSweep.rrc_usd);
   assert.equal(gapSweep.details.loss_usd, gapSweep.rrc_usd);
+  assertMaxCollapsesResults(envelope, 'rrc (spUSDS)');
+}
+
+/**
+ * The reference tranches split the same response's Total Risk Capital, so they
+ * have to add up to it for whichever prime was asked — grove's 9.2M included.
+ */
+async function checkReferenceTranchesSplitTotalCapital() {
+  for (const primeId of [SPARK_MAINNET_PROXY, GROVE_MAINNET_PROXY]) {
+    const reference = await request(
+      '/v1/primes/{prime_id}/risk-capital',
+      { params: { path: { prime_id: primeId }, query: { reference: true } } },
+      `risk-capital?reference for ${primeId}`,
+    );
+
+    assert.equal(reference.source, 'reference');
+    const total = Number(reference.total_risk_capital_usd);
+    const tranches =
+      Number(reference.junior_risk_capital_usd) +
+      Number(reference.senior_risk_capital_usd);
+    assert.ok(
+      Math.abs(total - tranches) < 0.01,
+      `${primeId}: junior + senior is ${tranches}, not the reported total ${total}`,
+    );
+    const juniorParts =
+      Number(reference.internal_junior_risk_capital_usd) +
+      Number(reference.external_junior_risk_capital_usd) +
+      Number(reference.tokenized_junior_risk_capital_usd);
+    assert.ok(
+      Math.abs(Number(reference.junior_risk_capital_usd) - juniorParts) < 0.01,
+      `${primeId}: the junior tranche does not equal its own split`,
+    );
+  }
 }
 
 async function checkCapitalMetricsDedupeByVault() {
@@ -772,6 +840,10 @@ const checks = [
     checkRiskResolvesForEveryRegistryToken,
   ],
   ['rrc reports both models', checkRrcReportsBothModels],
+  [
+    'the reference tranches split total capital',
+    checkReferenceTranchesSplitTotalCapital,
+  ],
   ['capital metrics dedupe by vault', checkCapitalMetricsDedupeByVault],
   ['an empty proxy is not an error', checkEmptyProxyIsNotAnError],
   ['an unknown prime is a 404', checkUnknownPrimeIsNotFound],

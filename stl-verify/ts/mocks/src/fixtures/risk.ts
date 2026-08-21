@@ -317,6 +317,32 @@ export const RISK_CAPITAL_BY_PROXY: Readonly<Record<string, PrimeRiskCapital>> =
   };
 
 /**
+ * The tranche split as fractions of Total Risk Capital, not as figures.
+ *
+ * Spark's captured shares, applied to whichever prime is asked. Held as ratios
+ * because the absolute figures are the one thing that cannot be shared: grove's
+ * Total Risk Capital is 9.2M, so spark's 48.1M of tranches would have described
+ * a prime holding five times its own capital in its first-loss layer.
+ */
+const JUNIOR_SHARE = 0.2596;
+const JUNIOR_INTERNAL_SHARE = 0.6;
+const JUNIOR_EXTERNAL_SHARE = 0.3;
+const SENIOR_INTERNAL_SHARE = 0.6;
+
+/**
+ * Split in cents, at the precision these figures are published at: shares
+ * rounded independently leave the parts a cent or two off the whole they split,
+ * which is the same kind of body-that-cannot-be-true the shares exist to avoid.
+ */
+function centsOf(usd: string | null | undefined): number {
+  return Math.round(Number(usd ?? '0') * 100);
+}
+
+function usdFigure(cents: number): string {
+  return (cents / 100).toFixed(2);
+}
+
+/**
  * `reference=true` moves every figure to prime scope and fills the
  * reference-only fields. Derived rather than captured: the reference-mode
  * contract is "unprefixed equals prefixed", so expressing it as a transform
@@ -325,6 +351,15 @@ export const RISK_CAPITAL_BY_PROXY: Readonly<Record<string, PrimeRiskCapital>> =
 export function toReferenceRiskCapital(
   self: PrimeRiskCapital,
 ): PrimeRiskCapital {
+  const total = centsOf(self.total_risk_capital_usd);
+  const junior = Math.round(total * JUNIOR_SHARE);
+  // Every residual layer takes what the layers above it leave, rather than its
+  // own share, so each split adds up to the figure it splits.
+  const senior = total - junior;
+  const juniorInternal = Math.round(junior * JUNIOR_INTERNAL_SHARE);
+  const juniorExternal = Math.round(junior * JUNIOR_EXTERNAL_SHARE);
+  const seniorInternal = Math.round(senior * SENIOR_INTERNAL_SHARE);
+
   return {
     ...self,
     source: 'reference',
@@ -333,13 +368,17 @@ export function toReferenceRiskCapital(
     required_risk_capital_usd: self.prime_required_risk_capital_usd,
     modeled_exposure_usd: self.prime_modeled_exposure_usd,
     encumbrance_ratio: self.prime_encumbrance_ratio,
-    junior_risk_capital_usd: '12500000.00',
-    senior_risk_capital_usd: '35642491.09',
-    internal_junior_risk_capital_usd: '7500000.00',
-    internal_senior_risk_capital_usd: '21385494.65',
-    external_junior_risk_capital_usd: '3750000.00',
-    external_senior_risk_capital_usd: '14256996.44',
-    tokenized_junior_risk_capital_usd: '1250000.00',
+    junior_risk_capital_usd: usdFigure(junior),
+    senior_risk_capital_usd: usdFigure(senior),
+    internal_junior_risk_capital_usd: usdFigure(juniorInternal),
+    internal_senior_risk_capital_usd: usdFigure(seniorInternal),
+    external_junior_risk_capital_usd: usdFigure(juniorExternal),
+    external_senior_risk_capital_usd: usdFigure(senior - seniorInternal),
+    tokenized_junior_risk_capital_usd: usdFigure(
+      junior - juniorInternal - juniorExternal,
+    ),
+    // Utilizations and the exposure share are ratios, so they carry no scale to
+    // contradict and stay the captured values.
     epi_utilization: '0.8712',
     spj_utilization: '0.6431',
     exposure_share: '0.9302',
@@ -553,6 +592,16 @@ export function scaleBreakdown(
   };
 }
 
+/** suraf's capital against gap_sweep's expected loss on the same asset. */
+const SURAF_RATIO = 0.809;
+/** The rating penalty suraf's adjusted CRR carries over its unadjusted one. */
+const SURAF_PENALTY_PP = 0.5;
+
+/** `max_rrc_usd` and `max_crr_pct` are each the largest across `results`. */
+function largerDecimal(left: string, right: string): string {
+  return Number(left) >= Number(right) ? left : right;
+}
+
 /**
  * RRC at default stress. No staging capture existed for this endpoint, so the
  * bodies are built from the schema: both registered models, `max_*` taken from
@@ -589,17 +638,24 @@ export function rrcEnvelope(
   const rrc = {
     gapSweepUsd,
     gapSweepCrrPct,
-    surafUsd: (Number(gapSweepUsd) * 0.809).toFixed(2),
-    surafCrrPct: (Number(gapSweepCrrPct) * 0.809).toFixed(2),
+    surafUsd: (Number(gapSweepUsd) * SURAF_RATIO).toFixed(2),
+    surafCrrPct: (Number(gapSweepCrrPct) * SURAF_RATIO).toFixed(2),
   };
+  // `crr_pct == unadjusted_crr_pct + penalty_pp`, per `SurafDetails`. The
+  // penalty is capped at the CRR itself so a zero-CRR asset keeps that identity
+  // without reporting a negative unadjusted ratio.
+  const penaltyPp = Math.min(SURAF_PENALTY_PP, Number(rrc.surafCrrPct));
 
   return {
     asset_id: assetId,
     chain_id: chainId,
     prime_id: primeId,
     receipt_token_address: tokenAddress,
-    max_rrc_usd: '23308466.81',
-    max_crr_pct: '4.47',
+    // Collapsed from this asset's own two results, not carried over from
+    // spUSDS: a `max_` larger than every result it summarizes is a body no
+    // response could have produced.
+    max_rrc_usd: largerDecimal(rrc.gapSweepUsd, rrc.surafUsd),
+    max_crr_pct: largerDecimal(rrc.gapSweepCrrPct, rrc.surafCrrPct),
     results: [
       {
         asset_id: assetId,
@@ -621,10 +677,12 @@ export function rrcEnvelope(
         comparable_crr_pct: rrc.surafCrrPct,
         details: {
           risk_model: 'suraf',
-          crr_pct: '3.62',
-          unadjusted_crr_pct: '3.12',
-          penalty_pp: '0.50',
-          rating_id: 'sparklend-usds-v3',
+          crr_pct: rrc.surafCrrPct,
+          unadjusted_crr_pct: (Number(rrc.surafCrrPct) - penaltyPp).toFixed(2),
+          penalty_pp: penaltyPp.toFixed(2),
+          // Scoped to the asset: a fixed `sparklend-usds` rating id answered a
+          // WETH or a Morpho position with a rating of a different asset.
+          rating_id: `stl-fixture-asset-${assetId}`,
           rating_version: '2026.07',
           // Synthetic, not a commit of any repo: a real sha here reads as a
           // provenance claim the fixture cannot make.
