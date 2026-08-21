@@ -541,6 +541,19 @@
             "description": "Comparable capital-risk ratio (0-100). `null` when the allocation is unpriced. Under `reference=true` this is upstream's `crr` rescaled from its native 0-1 fraction, so the scale matches self mode.",
             "title": "Crr Pct"
           },
+          "encumbrance_contribution": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "This position's share of the prime's encumbrance: its required risk capital over the prime's *total* risk capital. Summing the column gives the prime's encumbrance ratio. Attributed rather than decomposed \u2014 risk capital is held by the prime, not the position, so only the numerator is per-position.",
+            "title": "Encumbrance Contribution"
+          },
           "exposure_usd": {
             "description": "On-chain USD exposure of the allocation.",
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
@@ -591,6 +604,32 @@
             "description": "Surrogate id of the receipt token. Always set in self mode. Under `reference=true` it is `null` when the upstream position does not join to STL's token registry \u2014 an unmapped network, a token STL does not index, or a Uniswap V4 position, which identifies itself by 32-byte pool id where an address is expected and so can never resolve. `token_address` carries the raw upstream value in that case.",
             "title": "Receipt Token Id"
           },
+          "reference_exposure_usd": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Sky's exposure for this position. Populated only under `source=both`.",
+            "title": "Reference Exposure Usd"
+          },
+          "reference_required_risk_capital_usd": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Sky's requirement for this position. Populated only under `source=both`.",
+            "title": "Reference Required Risk Capital Usd"
+          },
           "required_risk_capital_usd": {
             "anyOf": [
               {
@@ -603,6 +642,11 @@
             ],
             "description": "Per-allocation RRC (USD). `null` when the allocation is unpriced.",
             "title": "Required Risk Capital Usd"
+          },
+          "source": {
+            "$ref": "#/components/schemas/Provenance",
+            "default": "indexed",
+            "description": "Which provenance reported this position's figures. Under `source=both` a position both report keeps STL's, with Sky's in `reference_*`."
           },
           "symbol": {
             "description": "Receipt-token symbol.",

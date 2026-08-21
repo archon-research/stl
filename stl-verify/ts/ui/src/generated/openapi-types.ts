@@ -935,6 +935,11 @@ export interface components {
        */
       crr_pct?: string | null;
       /**
+       * Encumbrance Contribution
+       * @description This position's share of the prime's encumbrance: its required risk capital over the prime's *total* risk capital. Summing the column gives the prime's encumbrance ratio. Attributed rather than decomposed — risk capital is held by the prime, not the position, so only the numerator is per-position.
+       */
+      encumbrance_contribution?: string | null;
+      /**
        * Exposure Usd
        * @description On-chain USD exposure of the allocation.
        */
@@ -961,10 +966,25 @@ export interface components {
        */
       receipt_token_id: number | null;
       /**
+       * Reference Exposure Usd
+       * @description Sky's exposure for this position. Populated only under `source=both`.
+       */
+      reference_exposure_usd?: string | null;
+      /**
+       * Reference Required Risk Capital Usd
+       * @description Sky's requirement for this position. Populated only under `source=both`.
+       */
+      reference_required_risk_capital_usd?: string | null;
+      /**
        * Required Risk Capital Usd
        * @description Per-allocation RRC (USD). `null` when the allocation is unpriced.
        */
       required_risk_capital_usd?: string | null;
+      /**
+       * @description Which provenance reported this position's figures. Under `source=both` a position both report keeps STL's, with Sky's in `reference_*`.
+       * @default indexed
+       */
+      source: components['schemas']['Provenance'];
       /**
        * Symbol
        * @description Receipt-token symbol.
