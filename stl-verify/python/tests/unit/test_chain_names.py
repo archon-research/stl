@@ -93,9 +93,10 @@ def test_the_go_served_chain_parse_covers_every_entry():
 
 
 def test_chain_is_served_rejects_a_chain_no_tracker_serves():
-    # arbitrum is in the vocabulary (a tracker *could* index it) but none is
-    # deployed, which is exactly the case a chain-id lookup cannot distinguish.
-    assert chain_is_served("arbitrum") is False
+    # plume carries a contract ALM proxy but is absent from the vocabulary, so no
+    # tracker can be configured for it — the case a proxy-to-chain lookup answers
+    # and a chain-id lookup cannot.
+    assert chain_is_served("plume") is False
 
 
 def test_chain_is_served_rejects_a_proxy_with_no_discoverable_chain():

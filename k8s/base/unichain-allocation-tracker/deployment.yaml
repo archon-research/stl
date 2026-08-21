@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: unichain-allocation-tracker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: unichain-allocation-tracker
+  template:
+    metadata:
+      labels:
+        app: unichain-allocation-tracker
+    spec:
+      serviceAccountName: unichain-allocation-tracker
+      containers:
+        - name: unichain-allocation-tracker
+          image: allocation-tracker
+          envFrom:
+            - configMapRef:
+                name: otel-config
+            - configMapRef:
+                name: unichain-allocation-tracker-config
+            - secretRef:
+                name: unichain-allocation-tracker
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pgrep -f allocation"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+      terminationGracePeriodSeconds: 60

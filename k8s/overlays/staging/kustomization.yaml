@@ -27,10 +27,13 @@ resources:
   - ../../base/base-oracle-price-worker
   - ../../base/optimism-watcher
   - ../../base/optimism-backup-worker
+  - ../../base/optimism-allocation-tracker
   - ../../base/unichain-watcher
   - ../../base/unichain-backup-worker
+  - ../../base/unichain-allocation-tracker
   - ../../base/arbitrum-watcher
   - ../../base/arbitrum-backup-worker
+  - ../../base/arbitrum-allocation-tracker
   - ../../base/prime-debt-indexer
   - ../../base/base-psm3-indexer
   - ../../base/optimism-psm3-indexer

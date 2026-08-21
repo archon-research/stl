@@ -2086,10 +2086,19 @@ SPARK_OFF_CONTRACT_ALM_HEX = "0a11ce0000000000000000000000000000000001"
 _FAN_OUT_USDC_HEX = "b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0"
 _FAN_OUT_AUSDC_HEX = "c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1"
 _FAN_OUT_AVAX_TOKEN_HEX = "d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2"
+# Grove's real proxies. Spark holds a tracker on every chain it has a proxy on, so
+# only grove still reaches the unserved-chain path (monad/plasma/plume).
+GROVE_MAINNET_ALM_HEX = "491edfb0b8b608044e227225c715981a30f3a44e"
+GROVE_AVALANCHE_ALM_HEX = "7107dd8f56642327945294a18a4280c78e153644"
+GROVE_SUB_PROXY_HEX = "1369f7b2b38c76b6478c0f0e66d94923421891ba"
+
 _FAN_OUT_TX = "1a" * 32
 _FAN_OUT_TX_AVAX = "1b" * 32
 _FAN_OUT_TX_TREASURY = "1c" * 32
 _FAN_OUT_TX_OFF_CONTRACT = "1d" * 32
+_FAN_OUT_TX_GROVE = "1e" * 32
+_FAN_OUT_TX_GROVE_AVAX = "1f" * 32
+_FAN_OUT_TX_GROVE_TREASURY = "2a" * 32
 
 # Must match allocation_position_repository._USDS_ADDRESS_HEX: get_latest_total_capital_usd
 # filters the treasury read on this exact address, and migration 20260204_110000 already
@@ -2104,7 +2113,11 @@ FAN_OUT_PRIME_EXPOSURE_USD = "1000.000000"
 
 
 async def seed_prime_fan_out(db_url: str, *, with_off_contract_proxy: bool = False) -> None:
-    """Seed spark's real mainnet + avalanche ALM proxies and its SubProxy treasury.
+    """Seed spark's and grove's real ALM proxies plus their SubProxy treasuries.
+
+    Grove is seeded alongside spark because its contract proxies on monad, plasma
+    and plume are absent from ``entity.ChainIDToName``, so they are the only ones
+    left that exercise the unserved-chain (null, not zero) per-chain path.
 
     ``with_off_contract_proxy`` adds a third proxy holding rows under spark's
     ``prime_id`` at an address the pinned axis-synome contract does not list — the
@@ -2193,6 +2206,39 @@ async def seed_prime_fan_out(db_url: str, *, with_off_contract_proxy: bool = Fal
                 package_value=Decimal("309672229"),
                 asset_quantity=Decimal("4722.61"),
                 snapshot_time=ANCHORAGE_LATEST_SNAPSHOT,
+            )
+
+            grove_id = await conn.fetchval("SELECT id FROM prime WHERE name = 'grove'")
+            await insert_allocation_position(
+                conn,
+                token_id=ausdc_id,
+                prime_id=grove_id,
+                proxy_hex=GROVE_MAINNET_ALM_HEX,
+                balance=_FAN_OUT_BALANCE,
+                block=1010,
+                tx=_FAN_OUT_TX_GROVE,
+                direction="in",
+            )
+            await insert_allocation_position(
+                conn,
+                token_id=avax_token_id,
+                prime_id=grove_id,
+                proxy_hex=GROVE_AVALANCHE_ALM_HEX,
+                balance=Decimal("5"),
+                block=1011,
+                tx=_FAN_OUT_TX_GROVE_AVAX,
+                direction="in",
+                chain_id=43114,
+            )
+            await insert_allocation_position(
+                conn,
+                token_id=usds_id,
+                prime_id=grove_id,
+                proxy_hex=GROVE_SUB_PROXY_HEX,
+                balance=_FAN_OUT_TREASURY,
+                block=1012,
+                tx=_FAN_OUT_TX_GROVE_TREASURY,
+                direction="in",
             )
 
             if with_off_contract_proxy:
