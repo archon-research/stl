@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rpc"
@@ -24,6 +25,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/oracle_backfill"
+	"github.com/archon-research/stl/stl-verify/internal/services/oracle_pricing"
 )
 
 func main() {
@@ -161,12 +163,19 @@ func run(args []string) error {
 		return fmt.Errorf("creating repository: %w", err)
 	}
 
+	referenceEffectiveAt, err := oracle_pricing.ResolveReferenceEffectiveAt(
+		os.Getenv(oracle_pricing.ReferenceEffectiveAtEnv), time.Now())
+	if err != nil {
+		return err
+	}
+
 	service, err := oracle_backfill.NewService(
 		oracle_backfill.Config{
-			ChainID:     cfg.chainID,
-			Concurrency: cfg.concurrency,
-			BatchSize:   cfg.batchSize,
-			Logger:      logger,
+			ChainID:              cfg.chainID,
+			Concurrency:          cfg.concurrency,
+			BatchSize:            cfg.batchSize,
+			Logger:               logger,
+			ReferenceEffectiveAt: referenceEffectiveAt,
 		},
 		ethClient,
 		newMulticaller,

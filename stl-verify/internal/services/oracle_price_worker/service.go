@@ -85,6 +85,10 @@ type Service struct {
 
 	telemetry *Telemetry
 
+	// referenceEffectiveAt pins the oracle_asset versions the units are built from; zero
+	// means "resolve at load time" (ADR-0006 §4).
+	referenceEffectiveAt time.Time
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup // tracks the SQS run loop so Stop can drain it
@@ -94,6 +98,13 @@ type Service struct {
 // WithTelemetry sets the telemetry instance for the service. Call before Start.
 func (s *Service) WithTelemetry(t *Telemetry) {
 	s.telemetry = t
+}
+
+// WithReferenceEffectiveAt pins which oracle_asset versions this run reads, so a replay can
+// rebuild the reference view a past run used (ADR-0006 §4). Call before Start; unset means
+// the run's start date.
+func (s *Service) WithReferenceEffectiveAt(effectiveAt time.Time) {
+	s.referenceEffectiveAt = effectiveAt
 }
 
 // NewService creates a new oracle price worker service.
@@ -194,10 +205,12 @@ func (s *Service) Stop() error {
 }
 
 func (s *Service) initialize(ctx context.Context) error {
-	// One reference view per run (ADR-0006 §4): capture the run's effective date once, so
-	// every unit resolves against the same oracle_asset versions and a replay can pass the
-	// same date back instead of re-reading whatever the mapping says today.
-	referenceEffectiveAt := time.Now().UTC()
+	// One reference view per run (ADR-0006 §4): resolved once, so every unit sees the same
+	// oracle_asset versions and a replay can supply the date the original run used.
+	referenceEffectiveAt := s.referenceEffectiveAt
+	if referenceEffectiveAt.IsZero() {
+		referenceEffectiveAt = time.Now().UTC()
+	}
 	shared, err := oracle_pricing.LoadOracleUnits(ctx, s.repo, s.config.ChainID, referenceEffectiveAt, s.logger)
 	if err != nil {
 		return err

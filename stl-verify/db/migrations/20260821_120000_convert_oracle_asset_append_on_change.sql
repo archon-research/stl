@@ -7,12 +7,11 @@
 -- field, a `_current` view for operational reads, a `_versions` view for history, and an
 -- `oracle_asset_as_of(effective_at)` read path for calculation and writer SQL.
 --
--- Deviation from security_master, deliberate: `id` stays the primary key. It is a pre-existing
--- BIGSERIAL surrogate that the Go entity and every reader carry, and the natural key
--- (oracle_id, token_id, feed_address) cannot be a primary key because feed_address is NULL for
--- aave-style rows. The natural key + processing_version is enforced by the two partial unique
--- indexes below instead — the same split 20260212_120000 introduced, now version-aware. One `id`
--- per VERSION, not per asset: resolve an asset by its natural key, never by id.
+-- The PK is the natural key + processing_version. feed_address is NULL for aave-style rows and a
+-- PK column cannot be NULL, so the key carries `feed_key` — feed_address with NULL folded to an
+-- empty bytea — which also collapses the feed / non-feed partial-index split 20260212_120000
+-- needed. `id` survives as a per-VERSION surrogate the Go entity still reads; it is not an asset
+-- identity, so resolve an asset by its natural key, never by id.
 --
 -- Cutover (ADR-0006): rows that predate this migration keep a single version whose valid_from is
 -- their created_at date and whose payload is whatever the last in-place UPDATE left. Their real
@@ -39,28 +38,36 @@ ALTER TABLE oracle_asset ADD CONSTRAINT oracle_asset_processing_version_chk CHEC
 ALTER TABLE oracle_asset DROP CONSTRAINT IF EXISTS oracle_asset_change_reason_chk;
 ALTER TABLE oracle_asset ADD CONSTRAINT oracle_asset_change_reason_chk CHECK (btrim(change_reason) <> '');
 
+-- feed_key is the NULL-free form of feed_address, so one key covers both oracle shapes.
+ALTER TABLE oracle_asset ADD COLUMN IF NOT EXISTS feed_key bytea
+  GENERATED ALWAYS AS (COALESCE(feed_address, '\x'::bytea)) STORED;
+
 -- The pre-conversion unique indexes allowed exactly one row per natural key, which is what made
--- a toggle an UPDATE. Version-aware replacements keep the same feed / non-feed split.
+-- a toggle an UPDATE; the versioned PK replaces both, including the feed / non-feed split.
 DROP INDEX IF EXISTS oracle_asset_nonfeed_unique;
 DROP INDEX IF EXISTS oracle_asset_feed_unique;
-CREATE UNIQUE INDEX IF NOT EXISTS oracle_asset_nonfeed_version_unique
-  ON oracle_asset (oracle_id, token_id, processing_version) WHERE feed_address IS NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS oracle_asset_feed_version_unique
-  ON oracle_asset (oracle_id, token_id, feed_address, processing_version) WHERE feed_address IS NOT NULL;
+ALTER TABLE oracle_asset DROP CONSTRAINT IF EXISTS oracle_asset_pkey;
+ALTER TABLE oracle_asset ADD CONSTRAINT oracle_asset_pkey
+  PRIMARY KEY (oracle_id, token_id, feed_key, processing_version);
+-- id stops being the key but stays unique: readers carry it, and the sequence is no guarantee
+-- against an explicit insert.
+CREATE UNIQUE INDEX IF NOT EXISTS oracle_asset_id_key ON oracle_asset (id);
 -- Serves the ORDER BY of _current, _as_of and the writer's read-latest lookup.
 CREATE INDEX IF NOT EXISTS oracle_asset_version_lookup_idx
-  ON oracle_asset (oracle_id, token_id, feed_address, valid_from DESC, processing_version DESC);
+  ON oracle_asset (oracle_id, token_id, feed_key, valid_from DESC, processing_version DESC);
 
 COMMENT ON TABLE oracle_asset IS
-'[Configuration] Append-on-change map of which tokens an oracle prices (ADR-0006 §4). Natural key (oracle_id, token_id, feed_address) + processing_version, enforced by the two partial unique indexes; `id` is a per-VERSION surrogate, never an asset identity. Every change — enabled included — is a new row via oracle_asset_set_enabled(); UPDATE/DELETE are revoked. Calculation and writer SQL read oracle_asset_as_of(effective_at) with a recorded effective_at; oracle_asset_current is for operational reads only. A plain table, not a hypertable: governance rows, on the order of a few per month.';
+'[Configuration] Append-on-change map of which tokens an oracle prices (ADR-0006 §4). PK (oracle_id, token_id, feed_key, processing_version); `id` is a per-VERSION surrogate, never an asset identity. Every change — enabled included — is a new row via oracle_asset_set_enabled(); UPDATE/DELETE are revoked. Calculation and writer SQL read oracle_asset_as_of(effective_at) with a recorded effective_at; oracle_asset_current is for operational reads only. A plain table, not a hypertable: governance rows, on the order of a few per month.';
 COMMENT ON COLUMN oracle_asset.processing_version IS
-'PK component of the natural key. Version of this (oracle_id, token_id, feed_address); monotonic from 0, assigned by oracle_asset_set_enabled under an advisory lock.';
+'PK. Version of this (oracle_id, token_id, feed_key); monotonic from 0, assigned by oracle_asset_set_enabled under an advisory lock.';
+COMMENT ON COLUMN oracle_asset.feed_key IS
+'PK. Derived: feed_address with NULL folded to an empty bytea, so the natural key is NULL-free and one key covers feed and non-feed oracles. Never written directly.';
 COMMENT ON COLUMN oracle_asset.valid_from IS
 'Date this version became effective (UTC); the only temporal field stored. valid_to is derived in oracle_asset_versions. Reads resolve a version with valid_from <= effective_at.';
 COMMENT ON COLUMN oracle_asset.change_reason IS
 'Mandatory: why this version exists. Rows predating VEC-597 say so explicitly.';
 COMMENT ON COLUMN oracle_asset.id IS
-'Audit. BIGSERIAL surrogate, one per VERSION row. NOT an asset identity and not stable across versions — resolve by (oracle_id, token_id, feed_address).';
+'Audit. BIGSERIAL surrogate, one per VERSION row; unique but not the key. NOT an asset identity and not stable across versions — resolve by (oracle_id, token_id, feed_key).';
 
 -- Effective version per natural key as of an explicit, recorded date. THE read path for
 -- calculation and writer SQL (ADR-0006 §4): a replay passes the recorded effective_at and gets
@@ -71,10 +78,10 @@ RETURNS SETOF oracle_asset
 LANGUAGE sql
 STABLE
 AS $$
-    SELECT DISTINCT ON (oracle_id, token_id, feed_address) *
+    SELECT DISTINCT ON (oracle_id, token_id, feed_key) *
     FROM oracle_asset
     WHERE valid_from <= p_effective_at
-    ORDER BY oracle_id, token_id, feed_address, valid_from DESC, processing_version DESC
+    ORDER BY oracle_id, token_id, feed_key, valid_from DESC, processing_version DESC
 $$;
 COMMENT ON FUNCTION oracle_asset_as_of(date) IS
 'Effective oracle_asset version per natural key as of p_effective_at (ADR-0006 §4). The calculation/writer read path; pass a recorded effective_at, never now(). Includes disabled versions.';
@@ -83,10 +90,10 @@ COMMENT ON FUNCTION oracle_asset_as_of(date) IS
 -- current until its valid_from arrives — which is exactly why it is banned from calculation SQL,
 -- where the same query must not change answer with the wall clock.
 CREATE OR REPLACE VIEW oracle_asset_current AS
-SELECT DISTINCT ON (oracle_id, token_id, feed_address) *
+SELECT DISTINCT ON (oracle_id, token_id, feed_key) *
 FROM oracle_asset
 WHERE valid_from <= (now() AT TIME ZONE 'utc')::date
-ORDER BY oracle_id, token_id, feed_address, valid_from DESC, processing_version DESC;
+ORDER BY oracle_id, token_id, feed_key, valid_from DESC, processing_version DESC;
 COMMENT ON VIEW oracle_asset_current IS
 '[Configuration] Latest effective oracle_asset version per natural key as of UTC today. OPERATIONAL reads only — calculation and writer SQL must use oracle_asset_as_of(effective_at) (ADR-0006 §4).';
 
@@ -103,6 +110,7 @@ SELECT
     v.feed_address,
     v.feed_decimals,
     v.quote_currency,
+    v.feed_key,
     v.processing_version,
     v.valid_from,
     v.change_reason,
@@ -112,7 +120,7 @@ SELECT
 FROM (
     SELECT oracle_asset.*,
         lead(valid_from) OVER (
-            PARTITION BY oracle_id, token_id, feed_address
+            PARTITION BY oracle_id, token_id, feed_key
             ORDER BY valid_from, processing_version
         ) AS valid_to_exclusive
     FROM oracle_asset
@@ -144,15 +152,28 @@ BEGIN
     PERFORM pg_advisory_xact_lock(hashtextextended(
         format('oracle_asset:%s:%s:%s', p_oracle_id, p_token_id, COALESCE(encode(p_feed_address, 'hex'), '')), 0));
 
+    -- The version this supersedes is the one effective ON p_effective_at, not the newest row:
+    -- with a future-dated version already recorded, comparing against that would report "no
+    -- change" for a toggle taking effect today and silently write nothing.
     SELECT * INTO current_version
     FROM oracle_asset
     WHERE oracle_id = p_oracle_id
       AND token_id = p_token_id
-      AND feed_address IS NOT DISTINCT FROM p_feed_address
+      AND feed_key = COALESCE(p_feed_address, '\x'::bytea)
+      AND valid_from <= p_effective_at
     ORDER BY valid_from DESC, processing_version DESC
     LIMIT 1;
 
     IF NOT FOUND THEN
+        IF EXISTS (
+            SELECT 1 FROM oracle_asset
+            WHERE oracle_id = p_oracle_id
+              AND token_id = p_token_id
+              AND feed_key = COALESCE(p_feed_address, '\x'::bytea)
+        ) THEN
+            RAISE EXCEPTION 'effective date % predates the first oracle_asset version for (oracle_id=%, token_id=%, feed_address=%); there is nothing to supersede',
+                p_effective_at, p_oracle_id, p_token_id, COALESCE(encode(p_feed_address, 'hex'), 'NULL');
+        END IF;
         RAISE EXCEPTION 'oracle_asset (oracle_id=%, token_id=%, feed_address=%) is not registered; register it with an INSERT before toggling it',
             p_oracle_id, p_token_id, COALESCE(encode(p_feed_address, 'hex'), 'NULL');
     END IF;
@@ -161,18 +182,13 @@ BEGIN
         RETURN NULL;
     END IF;
 
-    -- valid_from is the effective-ordering key, so a version dated before the one it supersedes
-    -- could never become current: fail loudly instead of appending a row that does nothing.
-    IF p_effective_at < current_version.valid_from THEN
-        RAISE EXCEPTION 'valid_from % predates the current version''s % for oracle_asset (oracle_id=%, token_id=%); a correction must be dated on or after the row it supersedes',
-            p_effective_at, current_version.valid_from, p_oracle_id, p_token_id;
-    END IF;
-
+    -- Monotonic over ALL versions of the key, so a version inserted between two existing ones
+    -- still wins its same-valid_from ties and the PK stays collision-free.
     SELECT max(processing_version) + 1 INTO next_version
     FROM oracle_asset
     WHERE oracle_id = p_oracle_id
       AND token_id = p_token_id
-      AND feed_address IS NOT DISTINCT FROM p_feed_address;
+      AND feed_key = COALESCE(p_feed_address, '\x'::bytea);
 
     INSERT INTO oracle_asset (
         oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency,
@@ -185,7 +201,7 @@ BEGIN
     RETURN next_version;
 END $$;
 COMMENT ON FUNCTION oracle_asset_set_enabled(bigint, bigint, bytea, boolean, date, text) IS
-'Appends a new oracle_asset version toggling `enabled` (ADR-0006 §4). Returns the new processing_version, or NULL if unchanged. Advisory-locked on the natural key; raises on an unregistered key or a backdated valid_from.';
+'Appends a new oracle_asset version toggling `enabled` (ADR-0006 §4). Compares against the version effective on p_effective_at. Returns the new processing_version, or NULL if unchanged. Advisory-locked on the natural key; raises on an unregistered key or a date before the first version.';
 
 -- Reads for both roles; append-only writes for the application role, and mutation revoked from
 -- the owner too so a future migration cannot quietly rewrite history either. Safe to revoke the

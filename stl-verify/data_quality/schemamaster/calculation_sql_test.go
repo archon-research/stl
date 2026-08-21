@@ -37,8 +37,23 @@ func TestCheckCalculationSQL(t *testing.T) {
 			body: `INSERT INTO oracle_asset (oracle_id, token_id, enabled) VALUES ($1, $2, true)`,
 		},
 		{
-			name: "wall clock away from a reference read",
+			name: "wall clock in a source that reads no reference table",
 			body: `SELECT EXTRACT(EPOCH FROM (NOW() - otp.timestamp)) FROM onchain_token_price otp`,
+		},
+		{
+			name: "whitespace before the argument list",
+			body: `SELECT 1 FROM oracle_asset_as_of (:reference_effective_at) oa`,
+		},
+		{
+			name:     "whitespace before a wall-clock argument list",
+			body:     `SELECT 1 FROM oracle_asset_as_of (CURRENT_DATE) oa`,
+			wantKind: "wall_clock_effective_at",
+		},
+		{
+			name: "wall clock alongside a reference read",
+			body: `SELECT EXTRACT(EPOCH FROM (NOW() - otp.timestamp)) FROM onchain_token_price otp
+			WHERE EXISTS (SELECT 1 FROM oracle_asset_as_of(:reference_effective_at) oa)`,
+			wantKind: "wall_clock_in_reference_read_sql",
 		},
 		{
 			name: "a comment naming the banned objects",
@@ -98,6 +113,29 @@ func TestCheckCalculationSQL(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestCheckCalculationSQLHonoursTheWallClockExemption covers the sanctioned case: a file
+// that reads a reference table AND computes an observation's age is clean only while the
+// register names it, so removing the entry brings the finding back.
+func TestCheckCalculationSQLHonoursTheWallClockExemption(t *testing.T) {
+	src := SQLSource{
+		Path: "/repo/python/app/adapters/postgres/token_catalog_repository.py",
+		Body: `SELECT EXTRACT(EPOCH FROM (NOW() - otp.timestamp)) FROM onchain_token_price otp
+		       WHERE EXISTS (SELECT 1 FROM oracle_asset_as_of(:reference_effective_at) oa)`,
+	}
+	reg := testReferenceRegister()
+	if vs := reg.CheckCalculationSQL([]SQLSource{src}); len(vs) != 1 {
+		t.Fatalf("got %d violations without an exemption, want 1", len(vs))
+	}
+
+	reg.WallClockExempt = []WallClockExempt{{
+		Path:   "python/app/adapters/postgres/token_catalog_repository.py",
+		Reason: "staleness_seconds",
+	}}
+	if vs := reg.CheckCalculationSQL([]SQLSource{src}); len(vs) != 0 {
+		t.Errorf("got %d violations for an exempt file, want 0: %+v", len(vs), vs)
 	}
 }
 

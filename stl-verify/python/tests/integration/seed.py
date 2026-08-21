@@ -836,7 +836,7 @@ async def insert_oracle_asset(
         """
         INSERT INTO oracle_asset (oracle_id, token_id, enabled, valid_from, change_reason)
         VALUES ($1, $2, true, $3, 'test seed: registered')
-        ON CONFLICT (oracle_id, token_id, processing_version) WHERE feed_address IS NULL DO NOTHING
+        ON CONFLICT ON CONSTRAINT oracle_asset_pkey DO NOTHING
         """,
         oracle_id,
         token_id,

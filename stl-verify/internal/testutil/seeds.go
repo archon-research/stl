@@ -97,7 +97,7 @@ func SeedFeedOracleAsset(t *testing.T, ctx context.Context, pool *pgxpool.Pool, 
 	_, err = pool.Exec(ctx, `
 		INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency, valid_from, change_reason)
 		VALUES ($1, $2, true, $3, $4, $5, $6::date, 'test seed')
-		ON CONFLICT (oracle_id, token_id, feed_address, processing_version) WHERE feed_address IS NOT NULL DO NOTHING
+		ON CONFLICT ON CONSTRAINT oracle_asset_pkey DO NOTHING
 	`, oracleID, tokenID, feedAddrBytes, feedDecimals, quoteCurrency, time.Now().UTC().Format(time.DateOnly))
 	if err != nil {
 		t.Fatalf("failed to insert feed oracle asset (oracle=%d, token=%d): %v", oracleID, tokenID, err)
@@ -118,7 +118,7 @@ func SeedOracleAssetEffectiveFrom(t *testing.T, ctx context.Context, pool *pgxpo
 	_, err := pool.Exec(ctx, `
 		INSERT INTO oracle_asset (oracle_id, token_id, enabled, valid_from, change_reason)
 		VALUES ($1, $2, true, $3::date, 'test seed')
-		ON CONFLICT (oracle_id, token_id, processing_version) WHERE feed_address IS NULL DO NOTHING
+		ON CONFLICT ON CONSTRAINT oracle_asset_pkey DO NOTHING
 	`, oracleID, tokenID, validFrom)
 	if err != nil {
 		t.Fatalf("failed to insert oracle asset (oracle=%d, token=%d): %v", oracleID, tokenID, err)

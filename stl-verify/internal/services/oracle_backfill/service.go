@@ -41,6 +41,10 @@ type Config struct {
 	Concurrency int
 	BatchSize   int
 	Logger      *slog.Logger
+
+	// ReferenceEffectiveAt pins which oracle_asset versions this run reads (ADR-0006 §4).
+	// Zero means the run's start date.
+	ReferenceEffectiveAt time.Time
 }
 
 func configDefaults() Config {
@@ -198,10 +202,12 @@ func (s *Service) validateFeedDecimals(ctx context.Context, workUnits []*oracleW
 // buildOracleWorkUnits loads all enabled oracles from DB, deduplicates by oracle_id,
 // and builds the per-oracle data structures needed for price fetching.
 func (s *Service) buildOracleWorkUnits(ctx context.Context) ([]*oracleWorkUnit, error) {
-	// One reference view per run (ADR-0006 §4): capture the run's effective date once, so
-	// every unit resolves against the same oracle_asset versions and a replay can pass the
-	// same date back instead of re-reading whatever the mapping says today.
-	referenceEffectiveAt := time.Now().UTC()
+	// One reference view per run (ADR-0006 §4): resolved once, so every unit sees the same
+	// oracle_asset versions and a replay can supply the date the original run used.
+	referenceEffectiveAt := s.config.ReferenceEffectiveAt
+	if referenceEffectiveAt.IsZero() {
+		referenceEffectiveAt = time.Now().UTC()
+	}
 	shared, err := oracle_pricing.LoadOracleUnits(ctx, s.repo, s.config.ChainID, referenceEffectiveAt, s.logger)
 	if err != nil {
 		return nil, err

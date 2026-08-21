@@ -25,6 +25,17 @@ def utc_today() -> date:
     return datetime.now(UTC).date()
 
 
+def pinned_to(effective_at: date | None) -> ReferenceEffectiveAtProvider:
+    """A provider fixed to effective_at, or the default when it is None.
+
+    How a replay reproduces a past reference view: the settings-supplied date is resolved
+    once here instead of per query.
+    """
+    if effective_at is None:
+        return utc_today
+    return lambda: effective_at
+
+
 class ReferenceAsOf:
     """Binds the reference effective date into a query's parameters."""
 

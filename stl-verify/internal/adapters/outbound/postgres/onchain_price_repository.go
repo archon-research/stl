@@ -74,9 +74,8 @@ func (r *OnchainPriceRepository) GetOracle(ctx context.Context, name string) (*e
 }
 
 // GetEnabledAssets retrieves the assets a given oracle prices, as the mapping stood at
-// referenceEffectiveAt (ADR-0006 §4). Ordered by the natural key, not by id: under
-// append-on-change a re-versioned row gets a fresh id, so id order would reshuffle the
-// list every time a mapping changed.
+// referenceEffectiveAt (ADR-0006 §4). Ordered by the natural key, not by id: a re-versioned
+// row gets a fresh id, so id order would reshuffle the list on every mapping change.
 func (r *OnchainPriceRepository) GetEnabledAssets(ctx context.Context, oracleID int64, referenceEffectiveAt time.Time) ([]*entity.OracleAsset, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT id, oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency, created_at
@@ -375,10 +374,9 @@ func (r *OnchainPriceRepository) GetAllProtocolOracleBindings(ctx context.Contex
 	return bindings, nil
 }
 
-// CopyOracleAssets seeds a newly discovered oracle with the mappings the source oracle had
-// at referenceEffectiveAt. The copied rows are version 0 of the target's own history, so
-// they carry their own change_reason, and valid_from is the run's recorded date rather than
-// the wall clock — a replay of the same run must produce identically dated rows.
+// CopyOracleAssets seeds a newly discovered oracle with the mappings the source had at
+// referenceEffectiveAt, as version 0 of the target's own history. valid_from is the run's
+// date, not the wall clock: a replay of the same run must produce identically dated rows.
 func (r *OnchainPriceRepository) CopyOracleAssets(ctx context.Context, fromOracleID, toOracleID int64, referenceEffectiveAt time.Time) error {
 	_, err := r.pool.Exec(ctx, `
 		INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency, valid_from, change_reason)

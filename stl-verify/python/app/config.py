@@ -1,4 +1,5 @@
 import functools
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
@@ -52,6 +53,9 @@ class Settings(BaseSettings):
     # Maximum age (in seconds) of a token_total_supply row before the risk API
     # treats it as stale and returns HTTP 503.
     allocation_share_max_stale_seconds: int = 1800
+    # Pins which append-on-change reference versions the read path resolves (ADR-0006 §4).
+    # Unset means today (UTC); set it to reproduce the reference view of a past date.
+    reference_effective_at: date | None = None
     star_risk_capital_upstream_url: str = "https://info-sky.blockanalitica.com/star-monitoring/risk-capital/primes/"
     # A second Sky host, and deliberately not the one above. The Star monitor
     # publishes a *risk-capital* breakdown — 11 priced positions for spark,

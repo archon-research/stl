@@ -20,6 +20,7 @@ from app.adapters.postgres.crypto_lending_reader import PostgresCryptoLendingRea
 from app.adapters.postgres.engine import create_db_engine
 from app.adapters.postgres.morpho_liquidation_params_repository import MorphoLiquidationParamsRepository
 from app.adapters.postgres.receipt_token_repository import ReceiptTokenRepository, resolve_receipt_token_mapping
+from app.adapters.postgres.reference_as_of import pinned_to
 from app.api.v1 import (
     allocations,
     data_sources,
@@ -190,14 +191,17 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
                 await conn.execute(text("SELECT 1"))
 
             asset_to_rating = await resolve_receipt_token_mapping(raw_mapping, engine)
-            allocation_repo = AllocationRepository(engine)
+            # One reference view for the whole process when pinned (ADR-0006 §4); unset
+            # leaves each read resolving today's, as before.
+            reference_effective_at = pinned_to(settings.reference_effective_at)
+            allocation_repo = AllocationRepository(engine, reference_effective_at)
             suraf_rrc_service = SurafRrcService(asset_to_rating, suraf_ratings, allocation_repo)
 
             receipt_token_repo = ReceiptTokenRepository(engine)
             crypto_lending_reader = PostgresCryptoLendingReader(
                 receipt_token_repo=receipt_token_repo,
-                aave_breakdown_repo=AaveLikeBackedBreakdownRepository(engine),
-                morpho_breakdown_repo=MorphoBackedBreakdownRepository(engine),
+                aave_breakdown_repo=AaveLikeBackedBreakdownRepository(engine, reference_effective_at),
+                morpho_breakdown_repo=MorphoBackedBreakdownRepository(engine, reference_effective_at),
                 maple_breakdown_repo=MapleBackedBreakdownRepository(engine),
                 aave_liq_repo=AaveLikeLiquidationParamsRepository(engine),
                 morpho_liq_repo=MorphoLiquidationParamsRepository(engine),

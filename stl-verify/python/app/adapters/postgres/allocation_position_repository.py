@@ -1300,14 +1300,11 @@ _DIRECT_ASSET_HOLDINGS_SQL = text("""
         -- republish a frozen/retired source's row at a FRESH (max) block while
         -- a change-suppressed live feed writes no newer row, so the retired
         -- source would otherwise beat the live one indefinitely.
-        -- The mapping is append-on-change (VEC-597), so the version read is the
-        -- one effective at the recorded date, not "whatever it says now": a
-        -- retirement stops surfacing the source from that date forward without
-        -- rewriting what earlier reads saw. Read through oracle_asset_as_of,
-        -- never the raw table (it holds every version) or oracle_asset_current
-        -- (wall-clock bounded) — ADR-0006 §4, enforced by the schemamaster lint.
-        -- The date is one value per query, so every source in one answer is
-        -- judged against one consistent reference view.
+        -- The mapping is append-on-change, so the version read is the one
+        -- effective at the recorded date rather than "whatever it says now".
+        -- Read through oracle_asset_as_of, never the raw table (every version)
+        -- or oracle_asset_current (wall-clock bounded) — ADR-0006 §4, enforced
+        -- by the schemamaster lint.
           AND EXISTS (
               SELECT 1 FROM oracle_asset_as_of(:reference_effective_at) oa
               WHERE oa.oracle_id = otp.oracle_id

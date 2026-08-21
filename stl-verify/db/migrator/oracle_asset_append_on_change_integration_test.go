@@ -10,9 +10,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// seedOracleAsset registers one aave-style (feedless) oracle_asset version and returns
-// its natural key. Each caller passes its own oracle name so two fixtures in one
-// database never share a natural key.
+// seedOracleAsset registers one aave-style (feedless) oracle_asset version. Each caller passes
+// its own oracle name, so two fixtures in one database never share a natural key.
 func seedOracleAsset(ctx context.Context, t *testing.T, pool *pgxpool.Pool, oracleName string, enabled bool, validFrom string) (oracleID, tokenID int64) {
 	t.Helper()
 
@@ -52,9 +51,8 @@ func setEnabled(ctx context.Context, t *testing.T, pool *pgxpool.Pool, oracleID,
 	return *pv
 }
 
-// TestOracleAssetToggleAppendsNewVersion is the VEC-597 contract: retiring a source
-// appends a version instead of overwriting the row, so the pre-toggle reference view
-// survives (the information VEC-549 lost).
+// TestOracleAssetToggleAppendsNewVersion is the contract: retiring a source appends a version
+// instead of overwriting the row, so the pre-toggle reference view survives.
 func TestOracleAssetToggleAppendsNewVersion(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
@@ -159,10 +157,8 @@ func TestOracleAssetAsOfReadsTheVersionEffectiveThen(t *testing.T) {
 	}
 }
 
-// TestOracleAssetVersionsDerivesTheValidityWindow is the history read: the toggle's two
-// versions come back as half-open windows [valid_from, valid_to_exclusive), so "which
-// mapping applied on date D" is answerable from the view without reimplementing the
-// ordering at every call site.
+// TestOracleAssetVersionsDerivesTheValidityWindow is the history read: half-open windows
+// [valid_from, valid_to_exclusive), so "which mapping applied on D" needs no call-site logic.
 func TestOracleAssetVersionsDerivesTheValidityWindow(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
@@ -213,10 +209,9 @@ func TestOracleAssetVersionsDerivesTheValidityWindow(t *testing.T) {
 	}
 }
 
-// TestOracleAssetCurrentIgnoresAFutureDatedVersion pins the operational view's
-// boundary: a version inserted ahead of its effective date must not become current
-// early. This is also why _current is banned from calculation SQL (ADR-0006 §4) —
-// the same row flips the answer once its valid_from arrives.
+// TestOracleAssetCurrentIgnoresAFutureDatedVersion: a version inserted ahead of its
+// effective date must not become current early. Also why _current is banned from
+// calculation SQL — the same row flips the answer once its valid_from arrives.
 func TestOracleAssetCurrentIgnoresAFutureDatedVersion(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
@@ -247,9 +242,8 @@ func TestOracleAssetCurrentIgnoresAFutureDatedVersion(t *testing.T) {
 	}
 }
 
-// TestOracleAssetSetEnabledIsANoOpWhenUnchanged keeps append-ON-CHANGE honest: a
-// re-assertion of the current value must not manufacture a payload-identical version,
-// the pollution ADR-0006 recorded from the ADR-0002 trigger (~880 duplicate rows).
+// TestOracleAssetSetEnabledIsANoOpWhenUnchanged keeps append-ON-CHANGE honest: re-asserting
+// the current value must not manufacture a payload-identical version.
 func TestOracleAssetSetEnabledIsANoOpWhenUnchanged(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
@@ -272,11 +266,9 @@ func TestOracleAssetSetEnabledIsANoOpWhenUnchanged(t *testing.T) {
 	}
 }
 
-// TestOracleAssetSetEnabledRejectsABackdatedVersion guards the ordering invariant the
-// security_master pattern documents: valid_from is the effective-ordering key, so a
-// version dated before the row it supersedes could never become current and would
-// silently do nothing.
-func TestOracleAssetSetEnabledRejectsABackdatedVersion(t *testing.T) {
+// TestOracleAssetSetEnabledRejectsADateBeforeTheFirstVersion: appending a row with nothing to
+// supersede would claim the asset was disabled before it was ever registered.
+func TestOracleAssetSetEnabledRejectsADateBeforeTheFirstVersion(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
@@ -288,7 +280,65 @@ func TestOracleAssetSetEnabledRejectsABackdatedVersion(t *testing.T) {
 		`SELECT oracle_asset_set_enabled($1, $2, NULL, false, '2026-01-01'::date, 'backdated')`,
 		oracleID, tokenID).Scan(&pv)
 	if err == nil {
-		t.Fatal("a backdated valid_from was accepted; want an error")
+		t.Fatal("an effective date before the first version was accepted; want an error")
+	}
+}
+
+// TestOracleAssetSetEnabledComparesAgainstTheVersionEffectiveThen: with a retirement already
+// recorded for next week, retiring TODAY must still append. Comparing against the newest row
+// would see "already disabled" and leave the source live until next week.
+func TestOracleAssetSetEnabledComparesAgainstTheVersionEffectiveThen(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+
+	oracleID, tokenID := seedOracleAsset(ctx, t, pool, "vec597-pending", true, "2026-01-01")
+	nextWeek := time.Now().UTC().AddDate(0, 0, 7).Format(time.DateOnly)
+	setEnabled(ctx, t, pool, oracleID, tokenID, false, nextWeek, "announced retirement")
+
+	today := time.Now().UTC().Format(time.DateOnly)
+	if pv := setEnabled(ctx, t, pool, oracleID, tokenID, false, today, "retired early"); pv != 2 {
+		t.Fatalf("bringing the retirement forward appended processing_version %d, want 2", pv)
+	}
+
+	var enabled bool
+	if err := pool.QueryRow(ctx, `
+		SELECT enabled FROM oracle_asset_current
+		WHERE oracle_id = $1 AND token_id = $2`, oracleID, tokenID).Scan(&enabled); err != nil {
+		t.Fatalf("read oracle_asset_current: %v", err)
+	}
+	if enabled {
+		t.Error("the source is still enabled today; the early retirement did not take effect")
+	}
+}
+
+// TestOracleAssetNaturalKeyIsThePrimaryKey pins the key shape the pattern is built on;
+// feed_key is what makes it hold for aave-style rows, whose feed_address is NULL.
+func TestOracleAssetNaturalKeyIsThePrimaryKey(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+
+	oracleID, tokenID := seedOracleAsset(ctx, t, pool, "vec597-pk", true, "2026-01-01")
+
+	_, err := pool.Exec(ctx, `
+		INSERT INTO oracle_asset (oracle_id, token_id, enabled, valid_from, change_reason)
+		VALUES ($1, $2, false, '2026-02-01'::date, 'duplicate version 0')`, oracleID, tokenID)
+	if err == nil {
+		t.Fatal("a duplicate (oracle_id, token_id, feed_key, processing_version) was accepted")
+	}
+
+	var keyColumns string
+	if err := pool.QueryRow(ctx, `
+		SELECT string_agg(a.attname, ',' ORDER BY k.ord)
+		FROM pg_constraint c
+		JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord) ON true
+		JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+		WHERE c.conrelid = 'oracle_asset'::regclass AND c.contype = 'p'`).Scan(&keyColumns); err != nil {
+		t.Fatalf("read the primary key: %v", err)
+	}
+	if want := "oracle_id,token_id,feed_key,processing_version"; keyColumns != want {
+		t.Errorf("primary key = (%s), want (%s)", keyColumns, want)
 	}
 }
 

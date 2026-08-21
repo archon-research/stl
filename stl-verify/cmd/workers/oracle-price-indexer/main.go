@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
@@ -32,6 +33,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/oracle_price_worker"
+	"github.com/archon-research/stl/stl-verify/internal/services/oracle_pricing"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
@@ -265,6 +267,13 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("creating service: %w", err)
 	}
 	service.WithTelemetry(oracleTelemetry)
+
+	referenceEffectiveAt, err := oracle_pricing.ResolveReferenceEffectiveAt(
+		os.Getenv(oracle_pricing.ReferenceEffectiveAtEnv), time.Now())
+	if err != nil {
+		return err
+	}
+	service.WithReferenceEffectiveAt(referenceEffectiveAt)
 
 	return lifecycle.Run(ctx, logger, service)
 }
