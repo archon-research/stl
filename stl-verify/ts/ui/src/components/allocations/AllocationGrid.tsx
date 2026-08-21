@@ -952,6 +952,7 @@ export function AllocationGrid({
           capitalObservedAt={capitalObservedAt}
           riskCapitalErrorMessage={riskCapitalErrorMessage}
           summaryErrorMessage={errorMessage}
+          primeDebtErrorMessage={primeDebtErrorMessage}
           hasPrime={selectedPrime !== null}
           collateral={{
             usd: primeCollateralUsd,

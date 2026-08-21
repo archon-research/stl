@@ -55,6 +55,7 @@ type PrimeMetricsBandProps = {
   capitalObservedAt: string | null;
   riskCapitalErrorMessage: string | null;
   summaryErrorMessage: string | null;
+  primeDebtErrorMessage: string | null;
   hasPrime: boolean;
   collateral: {
     usd: number | null;
@@ -416,6 +417,7 @@ export function PrimeMetricsBand({
   capitalObservedAt,
   riskCapitalErrorMessage,
   summaryErrorMessage,
+  primeDebtErrorMessage,
   hasPrime,
   collateral,
   encumbrance,
@@ -452,7 +454,7 @@ export function PrimeMetricsBand({
     'total-risk-capital': riskCapitalErrorMessage,
     'prime-collateral': null,
     encumbrance: riskCapitalErrorMessage,
-    'prime-debt': null,
+    'prime-debt': primeDebtErrorMessage,
   };
 
   const renderedCards: Record<TopMetricCard, ReactNode> = {
@@ -503,16 +505,20 @@ export function PrimeMetricsBand({
           isChartsLoading={isChartsLoading}
         />
       ),
-    'prime-debt': !hasPrime ? null : (
-      <PrimeDebtCard
-        wad={debt.wad}
-        ilkLabel={debt.ilkLabel}
-        isLoading={debt.isLoading}
-        chart={charts.debt}
-        isChartsLoading={isChartsLoading}
-        chartsErrorMessage={chartsErrorMessage}
-      />
-    ),
+    // Withheld on a failed snapshot as well as with no prime: the cell falls
+    // through to the error box only when nothing is rendered, and a card showing
+    // an em dash reads as "no debt" rather than "we could not read it".
+    'prime-debt':
+      !hasPrime || primeDebtErrorMessage !== null ? null : (
+        <PrimeDebtCard
+          wad={debt.wad}
+          ilkLabel={debt.ilkLabel}
+          isLoading={debt.isLoading}
+          chart={charts.debt}
+          isChartsLoading={isChartsLoading}
+          chartsErrorMessage={chartsErrorMessage}
+        />
+      ),
   };
 
   return (
