@@ -20,6 +20,10 @@ const (
 // enumeration (a renamed prefix, a wrong schema filter) into a failure instead of a vacuous pass.
 const minProcessingVersionTriggerFunctions = 36
 
+// The next_processing_version_* family — the rule shared by a table's INSERT and its
+// trigger — starts at morpho_adapter_state (20260821_120000).
+const minProcessingVersionHelperFunctions = 1
+
 type processingVersionTriggerFunction struct {
 	name      string
 	proconfig []string
@@ -34,7 +38,26 @@ func TestProcessingVersionTriggersForceCustomPlan(t *testing.T) {
 	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
 
-	for _, fn := range processingVersionTriggerFunctions(t, ctx, pool) {
+	functions := processingVersionFunctions(t, ctx, pool, `assign\_processing\_version\_%`,
+		minProcessingVersionTriggerFunctions)
+	assertForceCustomPlan(t, functions)
+}
+
+// The helper functions the trigger bodies now delegate to run the very same per-row
+// lookups, so the setting has to be on them too — and CREATE OR REPLACE resets it.
+func TestProcessingVersionHelpersForceCustomPlan(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+
+	functions := processingVersionFunctions(t, ctx, pool, `next\_processing\_version\_%`,
+		minProcessingVersionHelperFunctions)
+	assertForceCustomPlan(t, functions)
+}
+
+func assertForceCustomPlan(t *testing.T, functions []processingVersionTriggerFunction) {
+	t.Helper()
+	for _, fn := range functions {
 		t.Run(fn.name, func(t *testing.T) {
 			if !slices.Contains(fn.proconfig, planCacheModeSetting) {
 				t.Errorf("%s is missing %q; proconfig = [%s]",
@@ -44,9 +67,10 @@ func TestProcessingVersionTriggersForceCustomPlan(t *testing.T) {
 	}
 }
 
-// Enumerated from the catalogue rather than a fixed list so a trigger function added for a future
-// table is covered without touching this test.
-func processingVersionTriggerFunctions(t *testing.T, ctx context.Context, pool *pgxpool.Pool) []processingVersionTriggerFunction {
+// Enumerated from the catalogue rather than a fixed list so a function added for a future
+// table is covered without touching this test. floor is what turns a silently-broken
+// enumeration into a failure instead of a vacuous pass.
+func processingVersionFunctions(t *testing.T, ctx context.Context, pool *pgxpool.Pool, namePattern string, floor int) []processingVersionTriggerFunction {
 	t.Helper()
 
 	rows, err := pool.Query(ctx, `
@@ -54,11 +78,11 @@ func processingVersionTriggerFunctions(t *testing.T, ctx context.Context, pool *
 		FROM pg_proc p
 		JOIN pg_namespace n ON n.oid = p.pronamespace
 		WHERE n.nspname = 'public'
-		  AND p.proname LIKE 'assign\_processing\_version\_%'
+		  AND p.proname LIKE $1
 		ORDER BY p.proname
-	`)
+	`, namePattern)
 	if err != nil {
-		t.Fatalf("query processing_version trigger functions: %v", err)
+		t.Fatalf("query %s functions: %v", namePattern, err)
 	}
 	defer rows.Close()
 
@@ -73,10 +97,10 @@ func processingVersionTriggerFunctions(t *testing.T, ctx context.Context, pool *
 	if err := rows.Err(); err != nil {
 		t.Fatalf("read pg_proc rows: %v", err)
 	}
-	if len(functions) < minProcessingVersionTriggerFunctions {
-		t.Fatalf("found %d assign_processing_version_* functions, want >= %d: either the pg_proc enumeration "+
-			"stopped matching them or one was removed — raise the floor when a new versioned table adds one",
-			len(functions), minProcessingVersionTriggerFunctions)
+	if len(functions) < floor {
+		t.Fatalf("found %d %s functions, want >= %d: either the pg_proc enumeration stopped matching "+
+			"them or one was removed — raise the floor when a new versioned table adds one",
+			len(functions), namePattern, floor)
 	}
 	return functions
 }
