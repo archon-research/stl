@@ -102,7 +102,7 @@ func setupV4Integration(t *testing.T) *v4IntegrationFixture {
 	t.Helper()
 	ctx := context.Background()
 
-	db, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	db, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	repo := postgres.NewUniswapV4Repository(db, 1)
