@@ -71,11 +71,13 @@ func TestExtractCandidatesFromReceipts_CorruptMorphoBlueLogFailsRun(t *testing.T
 }
 
 // gatedLister is an S3Reader whose partition listings the test drives: one named
-// partition fails at once, every other one waits for release and then answers with
-// a complete set of receipt keys, minus an optionally omitted block. Gating is what
-// places a worker on a channel send at a chosen moment rather than a hoped-for one.
+// partition fails at once, another answers empty, and every other one waits for
+// release and then answers with a complete set of receipt keys, minus an
+// optionally omitted block. Gating is what places a worker on a channel send at a
+// chosen moment rather than a hoped-for one.
 type gatedLister struct {
 	failOn    string
+	emptyOn   string
 	omitBlock int64
 	release   chan struct{}
 }
@@ -90,6 +92,10 @@ func (g *gatedLister) ListPrefix(_ context.Context, _, prefix string) ([]string,
 		return nil, errors.New("the object store refused the listing")
 	}
 	<-g.release
+
+	if part == g.emptyOn {
+		return nil, nil
+	}
 
 	start, end, ok := partitionBlockRange(part)
 	if !ok {
@@ -208,6 +214,29 @@ func TestListAllBlockKeys_RefusesAPartitionTheArchiveHasAHoleIn(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), fmt.Sprint(missingBlock)) {
 		t.Errorf("error %v should name the missing block %d", err, missingBlock)
+	}
+}
+
+// TestListAllBlockKeys_RefusesAPartitionTheArchiveHasNoKeysFor covers the
+// maximal hole, and the shape the silent success actually had: a fresh database
+// over an unarchived range finished green with no partition replayed. It is
+// caught only because the expected range is derived from the partition PREFIX;
+// an early return on an empty listing — what the deleted logBlockGapsFromKeys
+// did — would restore the silence with every other test still green.
+func TestListAllBlockKeys_RefusesAPartitionTheArchiveHasNoKeysFor(t *testing.T) {
+	parts := contiguousPartitions(3)
+	lister := newGatedLister("")
+	lister.emptyOn = parts[1]
+	close(lister.release)
+
+	_, err := listAllBlockKeys(context.Background(), testutil.DiscardLogger(), lister, "test-bucket",
+		parts, 0, int64(len(parts))*partition.BlockRangeSize-1, 2, &progress{})
+
+	if !errors.Is(err, errStructuralData) {
+		t.Fatalf("error = %v, want the unarchived partition reported as a structural defect", err)
+	}
+	if !strings.Contains(err.Error(), parts[1]) {
+		t.Errorf("error %v should name the partition %s that listed nothing", err, parts[1])
 	}
 }
 
