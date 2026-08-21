@@ -549,6 +549,8 @@ endef
 
 # Generate .env files for all services (refreshes the secrets from AWS first).
 # Can be re-run independently to refresh secrets without restarting services.
+# -j must not overlap the halves: dev-env-files reads ../.env.secrets as dev-secrets rewrites it.
+.NOTPARALLEL: dev-env
 dev-env: dev-secrets dev-env-files
 
 # Refresh ../.env.secrets from AWS Secrets Manager, one key per secret.
