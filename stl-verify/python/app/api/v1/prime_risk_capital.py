@@ -69,6 +69,14 @@ class AllocationRiskCapitalResponse(BaseModel):
         default=None,
         description="Sky's requirement for this position. Populated only under `source=both`.",
     )
+    reference_crr_pct: PlainDecimal | None = Field(
+        default=None,
+        description=(
+            "Sky's comparable capital-risk ratio for this position (0-100). Populated only under "
+            "`source=both`. Carried rather than derived from the two figures above: it is upstream's "
+            "own ratio, and a consumer dividing them would publish a number Sky does not."
+        ),
+    )
     encumbrance_contribution: PlainDecimal | None = Field(
         default=None,
         description=(
@@ -525,6 +533,7 @@ def _merge_per_allocation(
                     "source": Provenance.BOTH,
                     "reference_exposure_usd": row.exposure_usd,
                     "reference_required_risk_capital_usd": row.required_risk_capital_usd,
+                    "reference_crr_pct": row.crr_pct,
                 }
             )
         )

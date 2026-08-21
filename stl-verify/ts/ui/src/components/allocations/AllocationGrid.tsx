@@ -21,6 +21,7 @@ import {
   encumbranceSeverity,
   formatDateTime,
   formatFreshnessLabel,
+  formatPercentValue,
   formatRatioPercent,
   formatTokenAmount,
   formatUsdValue,
@@ -30,7 +31,11 @@ import {
   getProtocolLabel,
   parseNumericValue,
 } from '../../lib/dashboard';
-import { showsIndexed, showsReference } from '../../lib/provenance';
+import {
+  preferReference,
+  showsIndexed,
+  showsReference,
+} from '../../lib/provenance';
 import type {
   Allocation,
   AllocationCategory,
@@ -407,14 +412,63 @@ function lookupAllocationRiskCapital(
 
 // Applied required risk capital in USD, or null when none applies. Shared by the
 // column accessor and the magnitude bar so the two cannot diverge on the rule.
+//
+// Sky's requirement wins where it has one: it is the preferred model in
+// composite mode, and it prices positions STL's models do not cover yet — so a
+// row `applied: false` under STL's model still has a figure to show. `applied`
+// therefore gates only the STL fallback.
 function appliedRiskCapitalUsd(
   riskByReceiptTokenId: Map<number, AllocationRiskCapital>,
   allocation: Allocation,
 ): number | null {
   const entry = lookupAllocationRiskCapital(riskByReceiptTokenId, allocation);
-  return entry?.applied
-    ? parseNumericValue(entry.required_risk_capital_usd)
-    : null;
+  if (entry === undefined) {
+    return null;
+  }
+
+  return parseNumericValue(
+    preferReference(
+      entry.reference_required_risk_capital_usd,
+      entry.applied ? entry.required_risk_capital_usd : null,
+    ),
+  );
+}
+
+// Comparable capital-risk ratio (0-100), Sky's preferred over STL's.
+function preferredCrrPct(
+  riskByReceiptTokenId: Map<number, AllocationRiskCapital>,
+  allocation: Allocation,
+): number | null {
+  const entry = lookupAllocationRiskCapital(riskByReceiptTokenId, allocation);
+  if (entry === undefined) {
+    return null;
+  }
+
+  return parseNumericValue(
+    preferReference(entry.reference_crr_pct, entry.crr_pct),
+  );
+}
+
+// This position's share of the prime's whole requirement, 0-1.
+//
+// The denominator is Σ RRC, not the prime's available risk capital: the column
+// answers "how much of the requirement does this position account for", so it
+// sums to 1. `encumbrance_contribution` on the row divides by available capital
+// instead and sums to the encumbrance ratio, which is a different question.
+function rrcSharePct(
+  riskByReceiptTokenId: Map<number, AllocationRiskCapital>,
+  allocation: Allocation,
+  totalRequiredRiskCapitalUsd: number | null,
+): number | null {
+  if (
+    totalRequiredRiskCapitalUsd === null ||
+    totalRequiredRiskCapitalUsd === 0
+  ) {
+    return null;
+  }
+
+  const rrc = appliedRiskCapitalUsd(riskByReceiptTokenId, allocation);
+  return rrc === null ? null : rrc / totalRequiredRiskCapitalUsd;
 }
 
 // riskByReceiptTokenId is built from a risk-capital call scoped to
@@ -485,6 +539,7 @@ function createAllocationColumns(
   localProtocols: LocalProtocolRow[],
   riskByReceiptTokenId: Map<number, AllocationRiskCapital>,
   selectedPrime: Prime | null,
+  totalRequiredRiskCapitalUsd: number | null,
 ): ColumnDef<Allocation>[] {
   return [
     {
@@ -548,7 +603,8 @@ function createAllocationColumns(
     },
     {
       id: 'risk_capital',
-      header: 'Risk capital',
+      // Named as Sky names it, since the two are compared side by side.
+      header: 'RRC',
       // A chain-mismatched row sorts below genuine zeroes (-1) rather than
       // tying with them, since it isn't a real zero — it's a figure this
       // session never fetched.
@@ -586,7 +642,90 @@ function createAllocationColumns(
         align: 'right',
       },
     },
+    {
+      id: 'crr',
+      header: 'CRR',
+      // A row with no ratio sorts below a genuine 0% rather than tying with it.
+      accessorFn: (allocation) =>
+        isRiskCapitalChainMismatch(selectedPrime, allocation)
+          ? -1
+          : (preferredCrrPct(riskByReceiptTokenId, allocation) ?? -1),
+      cell: ({ row }) => (
+        <AllocationRatioCell
+          value={
+            isRiskCapitalChainMismatch(selectedPrime, row.original)
+              ? null
+              : preferredCrrPct(riskByReceiptTokenId, row.original)
+          }
+          format={formatPercentValue}
+        />
+      ),
+      meta: { mono: true, align: 'right' },
+    },
+    {
+      id: 'rrc_share',
+      header: 'RRC share',
+      accessorFn: (allocation) =>
+        isRiskCapitalChainMismatch(selectedPrime, allocation)
+          ? -1
+          : (rrcSharePct(
+              riskByReceiptTokenId,
+              allocation,
+              totalRequiredRiskCapitalUsd,
+            ) ?? -1),
+      cell: ({ row }) => (
+        <AllocationRatioCell
+          value={
+            isRiskCapitalChainMismatch(selectedPrime, row.original)
+              ? null
+              : rrcSharePct(
+                  riskByReceiptTokenId,
+                  row.original,
+                  totalRequiredRiskCapitalUsd,
+                )
+          }
+          format={formatRatioPercent}
+        />
+      ),
+      meta: {
+        magnitude: {
+          scale: 'linear',
+          getValue: (allocation) =>
+            isRiskCapitalChainMismatch(selectedPrime, allocation)
+              ? NaN
+              : (rrcSharePct(
+                  riskByReceiptTokenId,
+                  allocation,
+                  totalRequiredRiskCapitalUsd,
+                ) ?? NaN),
+          getValueText: () => null,
+        },
+        mono: true,
+        align: 'right',
+      },
+    },
   ];
+}
+
+function AllocationRatioCell({
+  value,
+  format,
+}: {
+  value: number | null;
+  format: (value: number | null) => string;
+}) {
+  return (
+    <p
+      className={css({
+        m: 0,
+        fontSize: 'sm',
+        fontWeight: 'semibold',
+        color: value === null ? 'text.muted' : 'text.strong',
+      })}
+    >
+      {format(value)}
+    </p>
+  );
 }
 
 export function AllocationGrid({
@@ -738,6 +877,22 @@ export function AllocationGrid({
     return map;
   }, [riskCapital]);
 
+  // Σ of exactly what the RRC column shows, so the share column sums to 100%.
+  // Not `prime_required_risk_capital_usd`: that is STL's own sum and would not
+  // account for the positions Sky prices and STL does not.
+  const totalRequiredRiskCapitalUsd = useMemo(() => {
+    let total = 0;
+    let sawFigure = false;
+    for (const allocation of allocations) {
+      const rrc = appliedRiskCapitalUsd(riskByReceiptTokenId, allocation);
+      if (rrc !== null) {
+        total += rrc;
+        sawFigure = true;
+      }
+    }
+    return sawFigure ? total : null;
+  }, [allocations, riskByReceiptTokenId]);
+
   const columns = useMemo<ColumnDef<Allocation>[]>(
     () =>
       createAllocationColumns(
@@ -745,8 +900,15 @@ export function AllocationGrid({
         localProtocols,
         riskByReceiptTokenId,
         selectedPrime,
+        totalRequiredRiskCapitalUsd,
       ),
-    [chainLabels, localProtocols, riskByReceiptTokenId, selectedPrime],
+    [
+      chainLabels,
+      localProtocols,
+      riskByReceiptTokenId,
+      selectedPrime,
+      totalRequiredRiskCapitalUsd,
+    ],
   );
 
   // Explicit hints replace DataTable's meta-derived ones wholesale, so they are

@@ -305,6 +305,26 @@ def test_both_orders_the_merged_breakdown_by_exposure(reference_client):
     assert exposures == sorted(exposures, reverse=True)
 
 
+@pytest.mark.parametrize(
+    "reference_client",
+    [_snapshot(per_allocation=(_reference_allocation(receipt_token_id=41),))],
+    indirect=True,
+)
+def test_both_carries_skys_own_ratio_rather_than_deriving_one(reference_client):
+    # Upstream's `crr` is its own ratio; dividing its two figures would publish a
+    # number Sky does not.
+    client, self_service = reference_client
+    self_service.compute.return_value = _self_result(
+        per_allocation=[_indexed_allocation(receipt_token_id=41, exposure_usd=Decimal("900000000"))]
+    )
+
+    body = client.get(f"/v1/primes/{_VALID_ADDR}/risk-capital?source=both").json()
+
+    (row,) = [row for row in body["per_allocation"] if row["source"] == "both"]
+    assert row["crr_pct"] == "28.76"
+    assert row["reference_crr_pct"] == "0.28764051"
+
+
 @pytest.mark.parametrize("reference_client", [ReferenceDataUnavailableError("boom")], indirect=True)
 def test_both_serves_stl_own_model_when_sky_cannot_be_read(reference_client):
     client, self_service = reference_client

@@ -986,6 +986,11 @@ export interface components {
        */
       receipt_token_id: number | null;
       /**
+       * Reference Crr Pct
+       * @description Sky's comparable capital-risk ratio for this position (0-100). Populated only under `source=both`. Carried rather than derived from the two figures above: it is upstream's own ratio, and a consumer dividing them would publish a number Sky does not.
+       */
+      reference_crr_pct?: string | null;
+      /**
        * Reference Exposure Usd
        * @description Sky's exposure for this position. Populated only under `source=both`.
        */

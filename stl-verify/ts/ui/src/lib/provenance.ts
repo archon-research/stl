@@ -51,3 +51,22 @@ export const showsReference =
 
 /** Whether STL's own figures are on screen, alone or merged. */
 export const showsIndexed = PROVENANCE === 'indexed' || PROVENANCE === 'both';
+
+/**
+ * Sky's figure for a merged row, or STL's where Sky reports none.
+ *
+ * Sky's is the preferred model in composite mode: it prices positions STL's
+ * models do not yet cover, so reading STL's first would show a zero where a
+ * requirement exists. Under `indexed` there is no Sky figure to prefer and this
+ * reduces to STL's own.
+ *
+ * Reads the row rather than `PROVENANCE`: `reference_*` is populated only under
+ * `source=both`, so the row itself says whether there is anything to prefer, and
+ * a row Sky alone reports already carries its figures in the bare fields.
+ */
+export function preferReference(
+  skyValue: string | null | undefined,
+  stlValue: string | null | undefined,
+): string | null {
+  return skyValue ?? stlValue ?? null;
+}

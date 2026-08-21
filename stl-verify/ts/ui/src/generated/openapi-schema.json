@@ -604,6 +604,19 @@
             "description": "Surrogate id of the receipt token. Always set for an indexed row. For a Sky-reported one it is `null` when the upstream position does not join to STL's token registry \u2014 an unmapped network, a token STL does not index, or a Uniswap V4 position, which identifies itself by 32-byte pool id where an address is expected and so can never resolve. `token_address` carries the raw upstream value in that case.",
             "title": "Receipt Token Id"
           },
+          "reference_crr_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Sky's comparable capital-risk ratio for this position (0-100). Populated only under `source=both`. Carried rather than derived from the two figures above: it is upstream's own ratio, and a consumer dividing them would publish a number Sky does not.",
+            "title": "Reference Crr Pct"
+          },
           "reference_exposure_usd": {
             "anyOf": [
               {
