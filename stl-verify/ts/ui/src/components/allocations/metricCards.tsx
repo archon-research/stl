@@ -417,7 +417,10 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
             fill: 'var(--colors-text-muted)',
           })}
         />
-        {chart.kind === 'fallback' ? null : (
+        {/* No fill when a second series is present: it anchors the domain at
+            zero, which compresses both lines into a band at the plot top, and a
+            comparison does not need a filled magnitude anyway. */}
+        {chart.kind === 'fallback' || chart.reference ? null : (
           <AreaSeries
             dataKey={`${chart.key}-area`}
             data={chart.data as ChartDatum[]}
@@ -445,7 +448,11 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
             xAccessor={(d: ChartDatum) => d.label}
             yAccessor={(d: ChartDatum) => d.value}
             stroke={resolveChartColor(chart.reference.stroke)}
-            strokeDasharray="4 3"
+            // Heavier than a hairline: where the two provenances agree the
+            // lines coincide exactly, and the series colour showing through the
+            // gaps is what tells a reader that is what happened.
+            strokeWidth={1.5}
+            strokeDasharray="6 4"
           />
         ) : null}
         {thresholds.map((entry) => (

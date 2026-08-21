@@ -30,7 +30,7 @@ import {
   getProtocolLabel,
   parseNumericValue,
 } from '../../lib/dashboard';
-import { showsReference } from '../../lib/provenance';
+import { showsIndexed, showsReference } from '../../lib/provenance';
 import type {
   Allocation,
   AllocationCategory,
@@ -150,7 +150,7 @@ function AllocationAssetCell({
         </p>
         {/* Only the odd ones out are marked. In a merged view most rows are
             reported by both, so badging those would label almost everything. */}
-        {allocation.source === 'reference' ? (
+        {allocation.source === 'reference' && showsIndexed ? (
           <Badge size="sm" variant="subtle">
             Sky only
           </Badge>
@@ -634,11 +634,18 @@ export function AllocationGrid({
       return null;
     }
 
-    const totalUsd = topMetricsAllocations.reduce(
-      (sum, allocation) =>
-        sum + (parseNumericValue(allocation.amount_usd) ?? 0),
-      0,
-    );
+    // Rows Sky alone reports are excluded from the total, not from the table.
+    // The two provenances sometimes describe the same money differently — a
+    // vault position against the asset underneath it — and those rows do not
+    // match on identity, so adding them counts it twice. Every other card keeps
+    // the provenances in separate figures for the same reason.
+    const totalUsd = topMetricsAllocations
+      .filter((allocation) => allocation.source !== 'reference')
+      .reduce(
+        (sum, allocation) =>
+          sum + (parseNumericValue(allocation.amount_usd) ?? 0),
+        0,
+      );
 
     const latestActivityAt = topMetricsAllocations.reduce<string | null>(
       (latest, allocation) => {
@@ -658,7 +665,12 @@ export function AllocationGrid({
     );
 
     return {
-      allocationCount: topMetricsAllocations.length,
+      allocationCount: topMetricsAllocations.filter(
+        (allocation) => allocation.source !== 'reference',
+      ).length,
+      referenceOnlyCount: topMetricsAllocations.filter(
+        (allocation) => allocation.source === 'reference',
+      ).length,
       latestActivityAt,
       totalUsd,
     };
@@ -669,14 +681,18 @@ export function AllocationGrid({
       return null;
     }
 
-    const totalUsd = allocations.reduce(
+    const indexed = allocations.filter(
+      (allocation) => allocation.source !== 'reference',
+    );
+    const totalUsd = indexed.reduce(
       (sum, allocation) =>
         sum + (parseNumericValue(allocation.amount_usd) ?? 0),
       0,
     );
 
     return {
-      allocationCount: allocations.length,
+      allocationCount: indexed.length,
+      referenceOnlyCount: allocations.length - indexed.length,
       totalUsd,
     };
   }, [allocations]);

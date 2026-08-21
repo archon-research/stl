@@ -30,6 +30,8 @@ import {
 // timestamp), but asking for it here would couple this to a field it never uses.
 export type AllocationTotals = {
   allocationCount: number;
+  // Rows Sky alone reports, which the table shows and the total excludes.
+  referenceOnlyCount: number;
   totalUsd: number;
 };
 
@@ -142,6 +144,9 @@ function TotalAllocationCard({
             {isFiltered
               ? `${summary.allocationCount}/${overallSummary.allocationCount} allocations`
               : `${summary.allocationCount} allocations`}
+            {summary.referenceOnlyCount > 0
+              ? ` · ${summary.referenceOnlyCount} reported only by Sky`
+              : null}
           </div>
           <MetricCardTrend
             chart={chart}
