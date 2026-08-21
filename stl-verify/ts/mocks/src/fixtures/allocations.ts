@@ -242,7 +242,7 @@ function sparkMainnetAllocations(nowMs: number): Allocation[] {
       symbol: 'BTC',
       underlying_symbol: 'BTC',
       protocol_name: 'anchorage',
-      balance: '4722.60956901',
+      balance: '4722.61',
       amount_usd: '250000000',
       latest_activity_at: offsetIsoAgo(nowMs, CUSTODY_SNAPSHOT_AGO),
       latest_activity_action: null,

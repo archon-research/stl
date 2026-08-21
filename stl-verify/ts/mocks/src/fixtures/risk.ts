@@ -626,7 +626,9 @@ export function rrcEnvelope(
           penalty_pp: '0.50',
           rating_id: 'sparklend-usds-v3',
           rating_version: '2026.07',
-          source_commit_sha: '3eceb410076e6ff0f8c523e13bace9cd0cf984e6',
+          // Synthetic, not a commit of any repo: a real sha here reads as a
+          // provenance claim the fixture cannot make.
+          source_commit_sha: 'f1e2d3c4b5a60978877665544332211009fedcba',
         },
       },
     ],
