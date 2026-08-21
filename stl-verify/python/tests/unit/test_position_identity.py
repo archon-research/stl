@@ -1,6 +1,16 @@
 import pytest
 
-from app.domain.position_identity import PositionFacts, position_identity
+from app.domain.position_identity import (
+    PositionFacts,
+    position_identities,
+    position_identity,
+)
+
+
+def matches(left: PositionFacts, right: PositionFacts) -> bool:
+    """Two rows are the same position when they share any candidate key."""
+    return bool(set(position_identities(left)) & set(position_identities(right)))
+
 
 _SP_USDS = "0x" + "c0" * 20
 _SPARK_USDT_BC = "0x" + "b0" * 20
@@ -30,16 +40,30 @@ def facts(
 
 def test_the_same_position_from_either_provenance_shares_a_key():
     # STL resolves the registry id, upstream does not; both carry the address.
-    indexed = facts(receipt_token_id=736)
-    reference = facts(receipt_token_id=None)
+    assert matches(facts(receipt_token_id=736), facts(receipt_token_id=None))
 
-    assert position_identity(indexed) == position_identity(reference)
+
+def test_one_side_carrying_only_an_id_and_the_other_only_an_address_still_matches():
+    # The risk-capital breakdown is exactly this: STL's rows have the registry
+    # id and no address, Sky's have both. An address-first single key sent them
+    # to different buckets and nothing merged.
+    indexed = facts(receipt_token_id=736, position_address=None)
+    reference = facts(receipt_token_id=736)
+
+    assert matches(indexed, reference)
+
+
+def test_a_shared_id_outranks_a_differing_address():
+    # The registry id is STL's own, so two rows carrying the same one are the
+    # same token however each side spells its address.
+    assert matches(
+        facts(receipt_token_id=736),
+        facts(receipt_token_id=736, position_address="0x" + "ff" * 20),
+    )
 
 
 def test_address_case_does_not_split_a_position():
-    assert position_identity(facts(position_address=_SP_USDS.upper())) == position_identity(
-        facts(position_address=_SP_USDS)
-    )
+    assert matches(facts(position_address=_SP_USDS.upper()), facts(position_address=_SP_USDS))
 
 
 def test_two_vaults_lending_the_same_asset_stay_distinct():
@@ -48,11 +72,11 @@ def test_two_vaults_lending_the_same_asset_stay_distinct():
     first = facts(position_address=_SPARK_USDT_BC, symbol="sparkUSDTbc", protocol_name="morpho")
     second = facts(position_address=_OTHER_USDT_VAULT, symbol="sparkUSDTbc", protocol_name="morpho")
 
-    assert position_identity(first) != position_identity(second)
+    assert not matches(first, second)
 
 
 def test_the_same_token_on_two_chains_stays_distinct():
-    assert position_identity(facts(chain_id=1)) != position_identity(facts(chain_id=8453))
+    assert not matches(facts(chain_id=1), facts(chain_id=8453))
 
 
 def test_off_chain_custody_matches_across_its_two_descriptions():
@@ -63,7 +87,7 @@ def test_off_chain_custody_matches_across_its_two_descriptions():
         chain_id=1, network="ethereum", position_address="0x" + "49" * 20, symbol="ANCHORAGE", protocol_name="anchorage"
     )
 
-    assert position_identity(indexed) == position_identity(reference)
+    assert matches(indexed, reference)
 
 
 @pytest.mark.parametrize("protocol", ["anchorage", "Anchorage", "ANCHORAGE"])
@@ -78,7 +102,7 @@ def test_a_pool_id_is_not_treated_as_an_address():
     second = facts(position_address="0x" + "3b" * 32, symbol="UNI-V4-PYUSD-USDS", protocol_name="uniswap")
 
     assert not position_identity(first).startswith("position:")
-    assert position_identity(first) != position_identity(second)
+    assert not matches(first, second)
 
 
 def test_the_registry_id_carries_a_position_with_no_usable_address():
@@ -91,7 +115,7 @@ def test_a_chain_with_no_id_keys_on_its_network_name():
     plume = facts(chain_id=None, network="plume", position_address=None, receipt_token_id=None, symbol="ACRDX")
     robinhood = facts(chain_id=None, network="robinhood", position_address=None, receipt_token_id=None, symbol="ACRDX")
 
-    assert position_identity(plume) != position_identity(robinhood)
+    assert not matches(plume, robinhood)
 
 
 def test_an_underlying_address_is_never_the_key():
@@ -100,4 +124,4 @@ def test_an_underlying_address_is_never_the_key():
     lending_usdt = facts(position_address=_SPARK_USDT_BC, symbol="sparkUSDTbc")
     holding_usdt = facts(position_address=_USDT, symbol="USDT", protocol_name=None)
 
-    assert position_identity(lending_usdt) != position_identity(holding_usdt)
+    assert not matches(lending_usdt, holding_usdt)

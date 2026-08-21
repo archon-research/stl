@@ -17,6 +17,7 @@ from app.domain.entities.allocation import EthAddress
 from app.domain.entities.prime_risk_capital import PrimeRiskCapital, UnpricedReason
 from app.domain.entities.reference_risk_capital import ReferenceAllocation, ReferencePrimeRiskCapital
 from app.domain.exceptions import ReferenceDataUnavailableError
+from app.domain.position_identity import PositionFacts, position_identities
 from app.domain.prime_registry import ProxyKind, alm_proxies_for_prime, classify_proxy
 from app.domain.provenance import Provenance
 from app.domain.serialization import PlainDecimal
@@ -52,6 +53,30 @@ class AllocationRiskCapitalResponse(BaseModel):
     )
     required_risk_capital_usd: PlainDecimal | None = Field(
         default=None, description="Per-allocation RRC (USD). `null` when the allocation is unpriced."
+    )
+    source: Provenance = Field(
+        default=Provenance.INDEXED,
+        description=(
+            "Which provenance reported this position's figures. Under `source=both` a position both "
+            "report keeps STL's, with Sky's in `reference_*`."
+        ),
+    )
+    reference_exposure_usd: PlainDecimal | None = Field(
+        default=None,
+        description="Sky's exposure for this position. Populated only under `source=both`.",
+    )
+    reference_required_risk_capital_usd: PlainDecimal | None = Field(
+        default=None,
+        description="Sky's requirement for this position. Populated only under `source=both`.",
+    )
+    encumbrance_contribution: PlainDecimal | None = Field(
+        default=None,
+        description=(
+            "This position's share of the prime's encumbrance: its required risk capital over the "
+            "prime's *total* risk capital. Summing the column gives the prime's encumbrance ratio. "
+            "Attributed rather than decomposed — risk capital is held by the prime, not the "
+            "position, so only the numerator is per-position."
+        ),
     )
     crr_pct: PlainDecimal | None = Field(
         default=None,
@@ -402,13 +427,98 @@ async def get_prime_risk_capital(
     source = resolve_or_422(requested_provenance, available=frozenset(Provenance), default=Provenance.INDEXED)
 
     if source is Provenance.REFERENCE:
-        return await _reference_response(prime_address, reference_services())
+        return _with_encumbrance_contributions(await _reference_response(prime_address, reference_services()))
 
     indexed = _self_response(await service.compute(prime_address))
     if source is Provenance.INDEXED:
-        return indexed
+        return _with_encumbrance_contributions(indexed)
 
-    return await _with_reference_totals(prime_address, indexed, reference_services())
+    merged = await _with_reference_totals(prime_address, indexed, reference_services())
+    return _with_encumbrance_contributions(merged)
+
+
+def _with_encumbrance_contributions(
+    response: PrimeRiskCapitalResponse,
+) -> PrimeRiskCapitalResponse:
+    """Attribute each position a share of the prime's encumbrance.
+
+    The denominator is the prime's whole risk capital, the same for every row, so
+    the column sums to the prime's own ratio. A zero or absent total leaves the
+    column null rather than dividing by it.
+    """
+    total = response.total_risk_capital_usd
+    if total is None or total == 0:
+        return response
+
+    return response.model_copy(
+        update={
+            "per_allocation": [
+                allocation.model_copy(
+                    update={
+                        "encumbrance_contribution": (
+                            None
+                            # The denominator is this response's own total, so a
+                            # row Sky alone reports has no share of it — leaving
+                            # it in would stop the column summing to the ratio.
+                            if allocation.required_risk_capital_usd is None or allocation.source is Provenance.REFERENCE
+                            else allocation.required_risk_capital_usd / total
+                        )
+                    }
+                )
+                for allocation in response.per_allocation
+            ]
+        }
+    )
+
+
+def _merge_per_allocation(
+    indexed: PrimeRiskCapitalResponse, reference: PrimeRiskCapitalResponse
+) -> list[AllocationRiskCapitalResponse]:
+    """One row per position, from either provenance, keyed the same way the
+    allocation union is.
+
+    A position both report keeps STL's figures with Sky's beside them: STL's are
+    computed from the chain, and the two differ by STL's chain coverage.
+    """
+
+    def facts(row: AllocationRiskCapitalResponse) -> PositionFacts:
+        return PositionFacts(
+            chain_id=None,
+            network=row.chain,
+            position_address=row.token_address,
+            receipt_token_id=row.receipt_token_id,
+            protocol_name=row.protocol_name,
+            symbol=row.symbol,
+        )
+
+    by_identity: dict[str, AllocationRiskCapitalResponse] = {}
+    for row in indexed.per_allocation:
+        for key in position_identities(facts(row)):
+            by_identity.setdefault(key, row)
+
+    merged: list[AllocationRiskCapitalResponse] = []
+    matched: set[int] = set()
+    for row in reference.per_allocation:
+        counterpart = next(
+            (by_identity[key] for key in position_identities(facts(row)) if key in by_identity),
+            None,
+        )
+        if counterpart is None:
+            merged.append(row.model_copy(update={"source": Provenance.REFERENCE}))
+            continue
+        matched.add(id(counterpart))
+        merged.append(
+            counterpart.model_copy(
+                update={
+                    "source": Provenance.BOTH,
+                    "reference_exposure_usd": row.exposure_usd,
+                    "reference_required_risk_capital_usd": row.required_risk_capital_usd,
+                }
+            )
+        )
+
+    merged.extend(row for row in indexed.per_allocation if id(row) not in matched)
+    return merged
 
 
 async def _with_reference_totals(
@@ -437,6 +547,7 @@ async def _with_reference_totals(
     return indexed.model_copy(
         update={
             "source": Provenance.BOTH,
+            "per_allocation": _merge_per_allocation(indexed, reference),
             "reference_prime_exposure_usd": reference.prime_exposure_usd,
             "reference_prime_required_risk_capital_usd": reference.prime_required_risk_capital_usd,
             "reference_total_risk_capital_usd": reference.total_risk_capital_usd,

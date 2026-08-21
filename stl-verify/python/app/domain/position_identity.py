@@ -34,26 +34,43 @@ class PositionFacts:
     symbol: str
 
 
-def position_identity(facts: PositionFacts) -> str:
-    """Return a key equal for one position however it was reported."""
+def position_identities(facts: PositionFacts) -> list[str]:
+    """Every key this position could be recognised by, strongest first.
+
+    Two rows are the same position when they share any one key. Candidates
+    rather than a single key because the provenances do not carry the same kind
+    of identifier: the risk-capital breakdown gives STL's rows a registry id and
+    no address, and Sky's rows both.
+
+    The symbol is a last resort and only offered when nothing better exists —
+    two vaults can share one, so matching on it where an address was available
+    would merge different positions.
+    """
     if (facts.protocol_name or "").lower() == CUSTODY_PROTOCOL:
         # The two sides agree on nothing else here: STL files the leg off-chain
         # (chain 0, symbol BTC, no address) while upstream reports it on
         # ethereum under its own symbol with a token address.
-        return f"custody:{CUSTODY_PROTOCOL}"
+        return [f"custody:{CUSTODY_PROTOCOL}"]
+
+    candidates: list[str] = []
+    if facts.receipt_token_id is not None:
+        # STL's own registry id, so both sides mean the same token by it.
+        candidates.append(f"token:{facts.receipt_token_id}")
 
     address = (facts.position_address or "").lower()
     if len(address) == _ADDRESS_LENGTH:
-        # Preferred because both provenances carry it for almost every row,
-        # while the registry id resolves on fewer of them.
-        return f"position:{_chain_key(facts)}:{address}"
+        candidates.append(f"position:{_chain_key(facts)}:{address}")
 
-    if facts.receipt_token_id is not None:
-        return f"token:{facts.receipt_token_id}"
+    if candidates:
+        return candidates
 
-    # A pool id, or a token neither side could resolve. Symbol is weak, so it is
-    # scoped as tightly as possible.
-    return f"symbol:{_chain_key(facts)}:{facts.protocol_name or ''}:{facts.symbol.lower()}"
+    # A pool id, or a token neither side could resolve.
+    return [f"symbol:{_chain_key(facts)}:{facts.protocol_name or ''}:{facts.symbol.lower()}"]
+
+
+def position_identity(facts: PositionFacts) -> str:
+    """The strongest single key, for grouping rows within one provenance."""
+    return position_identities(facts)[0]
 
 
 def _chain_key(facts: PositionFacts) -> str:

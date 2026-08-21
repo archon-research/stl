@@ -33,7 +33,7 @@ from app.domain.entities.allocation import (
 from app.domain.entities.allocation_category import AllocationCategory
 from app.domain.entities.reference_risk_capital import ReferenceAllocation
 from app.domain.exceptions import ReferenceDataUnavailableError
-from app.domain.position_identity import PositionFacts, position_identity
+from app.domain.position_identity import PositionFacts, position_identities
 from app.domain.provenance import Provenance
 from app.domain.serialization import PlainDecimal
 from app.domain.time_series import TimeSeriesQuery, enforce_filter_for_window
@@ -811,12 +811,21 @@ async def _merged_allocations(
         )
         return indexed
 
-    by_identity = {position_identity(_position_facts(row)): row for row in indexed}
+    # Indexed by every key each row answers to, so a match on any one counts.
+    by_identity: dict[str, AllocationResponse] = {}
+    for row in indexed:
+        for key in position_identities(_position_facts(row)):
+            by_identity.setdefault(key, row)
 
     merged: list[AllocationResponse] = []
+    matched: set[int] = set()
     for row in reference:
-        identity = position_identity(_position_facts(row))
-        counterpart = by_identity.pop(identity, None)
+        counterpart = next(
+            (by_identity[key] for key in position_identities(_position_facts(row)) if key in by_identity),
+            None,
+        )
+        if counterpart is not None:
+            matched.add(id(counterpart))
         if counterpart is None:
             merged.append(row.model_copy(update={"source": Provenance.REFERENCE}))
             continue
@@ -825,7 +834,7 @@ async def _merged_allocations(
         # exposure, which a consumer needs told rather than averaged away.
         merged.append(counterpart.model_copy(update={"source": Provenance.BOTH}))
 
-    merged.extend(by_identity.values())
+    merged.extend(row for row in indexed if id(row) not in matched)
     return merged
 
 
