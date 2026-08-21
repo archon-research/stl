@@ -14,13 +14,14 @@ import {
   useContainerWidth,
 } from '@archon-research/charting';
 import { DataContext, ReferenceBand } from '@archon-research/charting';
-import { SkeletonStack } from '@archon-research/design-system';
+import { ErrorState, SkeletonStack } from '@archon-research/design-system';
 import type { CSSProperties } from 'react';
 import { useContext, useMemo } from 'react';
 
 import { css } from '#styled-system/css';
 
 import { balancedColumns } from '../../lib/dashboard';
+import { SummaryMetric } from '../shared';
 
 export type ChartDatum = {
   label: string;
@@ -65,6 +66,19 @@ export const TOP_METRIC_CARDS = [
   'encumbrance',
   'prime-debt',
 ] as const;
+
+export type TopMetricCard = (typeof TOP_METRIC_CARDS)[number];
+
+// A card that is loading or unavailable still knows which metric it is, which
+// is the difference between "six grey boxes" and a page you can read early.
+export const TOP_METRIC_CARD_LABELS: Record<TopMetricCard, string> = {
+  'total-allocation': 'Total allocation',
+  exposure: 'Exposure',
+  'total-risk-capital': 'Total risk capital',
+  'prime-collateral': 'Prime collateral',
+  encumbrance: 'Encumbrance',
+  'prime-debt': 'Prime debt exposure',
+};
 
 export const metricsGridClassName = css({
   display: 'grid',
@@ -202,6 +216,66 @@ function ThresholdLabels({ thresholds }: { thresholds: ThresholdEntry[] }) {
         );
       })}
     </g>
+  );
+}
+
+/**
+ * A card whose figure has not arrived yet.
+ *
+ * Built from the same frame as the real card rather than a single grey block:
+ * the label is known up front, so the page reads as itself while it loads and
+ * nothing moves when the figures land.
+ */
+export function MetricCardSkeleton({ label }: { label: string }) {
+  return (
+    <SummaryMetric
+      className={metricsCardClassName}
+      label={label}
+      value={<SkeletonStack count={1} itemHeight={28} />}
+      detail={
+        <div className={metricDetailClassName}>
+          <SkeletonStack count={1} itemHeight={16} />
+          <SkeletonStack count={1} itemHeight={CHART_HEIGHT} />
+        </div>
+      }
+    />
+  );
+}
+
+/**
+ * A card whose figure could not be fetched.
+ *
+ * Keeps the card's frame and height so a row does not reflow when a retry
+ * succeeds, and names the metric so which one failed is visible.
+ */
+export function MetricCardError({
+  label,
+  title,
+  description,
+  errorMessage,
+}: {
+  label: string;
+  title: string;
+  description: string;
+  errorMessage: string | null;
+}) {
+  return (
+    <SummaryMetric
+      className={metricsCardClassName}
+      label={label}
+      value="—"
+      detail={
+        <div className={metricDetailClassName}>
+          <ErrorState
+            tone="critical"
+            size="inline"
+            title={title}
+            description={description}
+            errorMessage={errorMessage ?? undefined}
+          />
+        </div>
+      }
+    />
   );
 }
 
@@ -418,4 +492,8 @@ export const metricDetailClassName = css({
   gridTemplateRows: 'auto 1fr',
   gap: '2',
   minHeight: '17rem',
+  // One line whether or not it has text, since only some cards carry an
+  // observation stamp and an empty row lifts the chart out of line with its
+  // row-mates. `1lh` resolves against the caption's own font, not the card's.
+  '& > :first-child': { minHeight: '1lh' },
 });

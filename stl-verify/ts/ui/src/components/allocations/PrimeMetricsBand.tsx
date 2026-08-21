@@ -1,5 +1,3 @@
-import { ErrorState } from '@archon-research/design-system';
-
 import { css } from '#styled-system/css';
 
 import {
@@ -13,13 +11,17 @@ import {
 import type { PrimeRiskCapital } from '../../types/allocation';
 import { AppTooltip, SummaryMetric } from '../shared';
 import {
+  MetricCardError,
+  MetricCardSkeleton,
   MetricCardTrend,
   type MetricChartSpec,
   metricDetailClassName,
   metricsCardClassName,
   metricsGridClassName,
   metricsGridStyle,
+  TOP_METRIC_CARD_LABELS,
   TOP_METRIC_CARDS,
+  type TopMetricCard,
 } from './metricCards';
 
 // Only what the band reads. The caller's summary carries more (a latest-activity
@@ -72,14 +74,12 @@ type PrimeMetricsBandProps = {
 
 const captionClassName = css({ fontSize: 'sm', color: 'text.muted' });
 
-const skeletonCardClassName = css({
-  height: '88px',
-  borderRadius: 'md',
-  borderStyle: 'solid',
-  borderWidth: '1px',
-  borderColor: 'border.subtle',
-  bg: 'surface.subtle',
-});
+// The cards a single risk-capital response feeds, in the order they appear.
+const RISK_CAPITAL_CARDS: TopMetricCard[] = [
+  'exposure',
+  'total-risk-capital',
+  'encumbrance',
+];
 
 // chartsErrorMessage tracks the primary (prime-debt) series only; every
 // supplementary card degrades to its own fallback instead of reporting an error
@@ -283,7 +283,11 @@ function EncumbranceCard({
 
 const debtCaptionClassName = css({
   display: 'flex',
-  flexWrap: 'wrap',
+  // Wrapping this caption -- the longest of the six -- cost a second line and
+  // dropped the chart below its row-mates. Truncating hides nothing: the raw
+  // WAD is already abbreviated behind a tooltip.
+  flexWrap: 'nowrap',
+  minWidth: 0,
   alignItems: 'baseline',
   gap: '1',
   fontSize: 'sm',
@@ -292,6 +296,12 @@ const debtCaptionClassName = css({
   // the row and drop the text below the other cards' single-line subtitles.
   // Collapse it to the text line height so the baselines align.
   '& button': { minHeight: 'auto', py: '0' },
+  '& > *': {
+    minWidth: 0,
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  },
 });
 
 function PrimeDebtCard({
@@ -388,9 +398,9 @@ export function PrimeMetricsBand({
         style={metricsGridStyle(TOP_METRIC_CARDS.length)}
       >
         {TOP_METRIC_CARDS.map((card) => (
-          <div
+          <MetricCardSkeleton
             key={`metrics-skeleton-${card}`}
-            className={skeletonCardClassName}
+            label={TOP_METRIC_CARD_LABELS[card]}
           />
         ))}
       </div>
@@ -425,20 +435,20 @@ export function PrimeMetricsBand({
         />
       ) : null}
 
-      {/* Takes the place of the two cards risk capital feeds, so a failed metric
-          stays one cell wide in the rail instead of becoming a full-width banner
-          under it. `alignSelf` so the panel is only as tall as its message: a
-          grid item would otherwise stretch to the chart cards' height. */}
-      {!riskCapital && riskCapitalErrorMessage ? (
-        <ErrorState
-          className={css({ alignSelf: 'start' })}
-          tone="critical"
-          size="inline"
-          title="Risk capital is unavailable"
-          description="The risk capital endpoint failed for this session."
-          errorMessage={riskCapitalErrorMessage}
-        />
-      ) : null}
+      {/* One box per card risk capital feeds, each the size of the card it
+          stands in for: a single box left the row ragged and every cell after it
+          shifted when a retry succeeded. */}
+      {!riskCapital && riskCapitalErrorMessage
+        ? RISK_CAPITAL_CARDS.map((card) => (
+            <MetricCardError
+              key={`metrics-error-${card}`}
+              label={TOP_METRIC_CARD_LABELS[card]}
+              title="Risk capital is unavailable"
+              description="Change the time range to retry."
+              errorMessage={riskCapitalErrorMessage}
+            />
+          ))
+        : null}
 
       {riskCapital ? (
         <TotalRiskCapitalCard
