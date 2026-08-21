@@ -217,10 +217,10 @@ WHERE (EXCLUDED.block_number, EXCLUDED.block_version, EXCLUDED.processing_versio
 -- NOT NULL here would abort the insert that fires the trigger.
 --
 -- processing_version is the other way round: it stays NOT NULL here, but every
--- read of the history column is COALESCEd to 0. Alone among the four histories,
+-- read of the history column is COALESCEd to -1. Alone among the four histories,
 -- sparklend_reserve_data has a nullable processing_version (a pre-convention
 -- retrofit; DEFAULT 0 and the assign trigger mean live rows have a value, and the
--- schema register carries the exemption). Two things follow, and both are handled
+-- schema register carries the exemption). Three things follow, and all are handled
 -- rather than assumed away:
 --   * the assign trigger copies an existing row's version verbatim
 --     (NEW.processing_version := existing_ver), so one residual NULL history row
@@ -228,8 +228,14 @@ WHERE (EXCLUDED.block_number, EXCLUDED.block_version, EXCLUDED.processing_versio
 --     the trigger — the same failure the flag column above avoids.
 --   * `processing_version DESC` puts NULLS FIRST, so an unCOALESCEd backfill would
 --     rank a NULL row as the NEWEST and cache it over a real version.
--- Treating NULL as 0 matches the column's documented meaning (0 = original) and
--- keeps the newer-wins comparison total.
+--   * -1, not 0, because a correction to a NULL-version key arrives AS version 0:
+--     the assign trigger's other branch computes COALESCE(MAX(processing_version),
+--     -1) + 1 over rows that are all NULL, which is 0. Folding NULL to 0 would make
+--     that correction compare equal to the cached row, and the strict > guard would
+--     silently drop it — a reserve flag flip that never reaches the cache. -1 sorts
+--     below every real version, so the correction wins.
+-- -1 therefore means "pre-convention row, version unknown"; 0 keeps its documented
+-- meaning of an original row. The comparison stays total either way.
 CREATE TABLE IF NOT EXISTS sparklend_reserve_data_current (
     protocol_id                 BIGINT  NOT NULL,
     token_id                    BIGINT  NOT NULL,
@@ -246,7 +252,7 @@ COMMENT ON COLUMN sparklend_reserve_data_current.token_id IS 'PK. FK→token.id.
 COMMENT ON COLUMN sparklend_reserve_data_current.usage_as_collateral_enabled IS 'Derived. Whether the protocol still accepts this reserve as collateral. NULL when the history row left it unset.';
 COMMENT ON COLUMN sparklend_reserve_data_current.block_number IS 'Derived. Block the winning history row was observed at; part of the newer-wins comparison.';
 COMMENT ON COLUMN sparklend_reserve_data_current.block_version IS 'Derived. Reorg version of that block (0 = original); part of the newer-wins comparison.';
-COMMENT ON COLUMN sparklend_reserve_data_current.processing_version IS 'Derived. Correction version of that row (0 = original, N = Nth reprocess); part of the newer-wins comparison.';
+COMMENT ON COLUMN sparklend_reserve_data_current.processing_version IS 'Derived. Correction version of that row (0 = original, N = Nth reprocess); part of the newer-wins comparison. -1 means the history row predates this column being populated (its value was NULL) — it sorts below every real version so a later correction, which arrives as version 0, still wins.';
 
 GRANT SELECT ON sparklend_reserve_data_current TO stl_readonly;
 GRANT SELECT, INSERT, UPDATE ON sparklend_reserve_data_current TO stl_readwrite;
@@ -259,7 +265,7 @@ BEGIN
          block_number, block_version, processing_version)
     VALUES
         (NEW.protocol_id, NEW.token_id, NEW.usage_as_collateral_enabled,
-         NEW.block_number, NEW.block_version, COALESCE(NEW.processing_version, 0))
+         NEW.block_number, NEW.block_version, COALESCE(NEW.processing_version, -1))
     ON CONFLICT (protocol_id, token_id) DO UPDATE SET
         usage_as_collateral_enabled = EXCLUDED.usage_as_collateral_enabled,
         block_number = EXCLUDED.block_number,
@@ -281,10 +287,10 @@ INSERT INTO sparklend_reserve_data_current
      block_number, block_version, processing_version)
 SELECT DISTINCT ON (srd.protocol_id, srd.token_id)
     srd.protocol_id, srd.token_id, srd.usage_as_collateral_enabled,
-    srd.block_number, srd.block_version, COALESCE(srd.processing_version, 0)
+    srd.block_number, srd.block_version, COALESCE(srd.processing_version, -1)
 FROM sparklend_reserve_data srd
 ORDER BY srd.protocol_id, srd.token_id,
-         srd.block_number DESC, srd.block_version DESC, COALESCE(srd.processing_version, 0) DESC
+         srd.block_number DESC, srd.block_version DESC, COALESCE(srd.processing_version, -1) DESC
 ON CONFLICT (protocol_id, token_id) DO UPDATE SET
     usage_as_collateral_enabled = EXCLUDED.usage_as_collateral_enabled,
     block_number = EXCLUDED.block_number,

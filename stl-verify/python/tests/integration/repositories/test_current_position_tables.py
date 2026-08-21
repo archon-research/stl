@@ -173,7 +173,7 @@ async def test_null_processing_version_reserve_row_does_not_break_ingest(conn: a
     copies an existing row's version verbatim, so a residual NULL row makes the
     NEXT insert for the same key carry NULL too — which, against a NOT NULL cache
     column, would abort the history insert itself and stop ingest. The cache
-    COALESCEs it to 0 instead (0 = original, the column's documented meaning).
+    COALESCEs it to -1 instead ("pre-convention, version unknown").
     """
     protocol_id = await insert_protocol(conn, "curNullPv", b"\xa1" * 20)
     token_id = await insert_token(conn, "CURNULLPV", 18, b"\xa2" * 20)
@@ -192,12 +192,100 @@ async def test_null_processing_version_reserve_row_does_not_break_ingest(conn: a
     # takes the existing NULL rather than computing a fresh version.
     await insert_reserve_data(conn, protocol_id=protocol_id, token_id=token_id, block=_BLOCK, collateral_enabled=False)
 
+    # The insert above did not raise, which is the property under test. A cache row
+    # is still present for the key — the NULL row is not newer than what the first,
+    # non-NULL insert already cached, so it does not overwrite it.
+    assert (
+        await conn.fetchval(
+            "SELECT count(*) FROM sparklend_reserve_data_current WHERE protocol_id = $1 AND token_id = $2",
+            protocol_id,
+            token_id,
+        )
+        == 1
+    )
+
+
+# The backfill statement for sparklend_reserve_data_current, scoped to one key.
+# Kept in step with 20260820_120000_create_current_position_tables.sql so the test
+# exercises the real recovery path rather than a paraphrase of it.
+_RESERVE_BACKFILL = """
+INSERT INTO sparklend_reserve_data_current
+    (protocol_id, token_id, usage_as_collateral_enabled,
+     block_number, block_version, processing_version)
+SELECT DISTINCT ON (srd.protocol_id, srd.token_id)
+    srd.protocol_id, srd.token_id, srd.usage_as_collateral_enabled,
+    srd.block_number, srd.block_version, COALESCE(srd.processing_version, -1)
+FROM sparklend_reserve_data srd
+WHERE srd.protocol_id = $1 AND srd.token_id = $2
+ORDER BY srd.protocol_id, srd.token_id,
+         srd.block_number DESC, srd.block_version DESC, COALESCE(srd.processing_version, -1) DESC
+ON CONFLICT (protocol_id, token_id) DO UPDATE SET
+    usage_as_collateral_enabled = EXCLUDED.usage_as_collateral_enabled,
+    block_number = EXCLUDED.block_number,
+    block_version = EXCLUDED.block_version,
+    processing_version = EXCLUDED.processing_version
+WHERE (EXCLUDED.block_number, EXCLUDED.block_version, EXCLUDED.processing_version)
+    > (sparklend_reserve_data_current.block_number, sparklend_reserve_data_current.block_version,
+       sparklend_reserve_data_current.processing_version)
+"""
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_correction_lands_over_a_backfilled_null_version_row(conn: asyncpg.Connection) -> None:
+    """A correction to a key whose cached row came from NULL-versioned history must land.
+
+    This is the production shape. Pre-convention rows carry a NULL
+    processing_version, and the cache for such a key is first populated by the
+    migration's backfill — the assign trigger cannot produce a NULL row, it always
+    assigns. A later correction to that key arrives as version **0**, because the
+    trigger computes COALESCE(MAX(processing_version), -1) + 1 over rows that are
+    all NULL. So the cached sentinel must sort strictly below 0, or the newer-wins
+    guard drops the correction silently and the reserve flag never updates. -1 does;
+    0 would not, and this test fails if the sentinel is changed to 0.
+    """
+    protocol_id = await insert_protocol(conn, "curNullPvFix", b"\xa5" * 20)
+    token_id = await insert_token(conn, "CURNULLPVFIX", 18, b"\xa6" * 20)
+
+    # Build a genuine pre-convention row: NULL version, with no cache row for it yet.
+    await insert_reserve_data(conn, protocol_id=protocol_id, token_id=token_id, block=_BLOCK, collateral_enabled=True)
+    await conn.execute(
+        "UPDATE sparklend_reserve_data SET processing_version = NULL WHERE protocol_id = $1 AND token_id = $2",
+        protocol_id,
+        token_id,
+    )
+    await conn.execute(
+        "DELETE FROM sparklend_reserve_data_current WHERE protocol_id = $1 AND token_id = $2",
+        protocol_id,
+        token_id,
+    )
+
+    await conn.execute(_RESERVE_BACKFILL, protocol_id, token_id)
+    assert (
+        await conn.fetchval(
+            "SELECT processing_version FROM sparklend_reserve_data_current WHERE protocol_id = $1 AND token_id = $2",
+            protocol_id,
+            token_id,
+        )
+        == -1
+    )
+
+    # A distinct build_id takes the MAX(...)+1 branch, so this correction is version 0.
+    await conn.execute(
+        "INSERT INTO sparklend_reserve_data (protocol_id, token_id, block_number, block_version, "
+        "usage_as_collateral_enabled, build_id) VALUES ($1, $2, $3, 0, false, 999999)",
+        protocol_id,
+        token_id,
+        _BLOCK,
+    )
+
     row = await conn.fetchrow(
-        "SELECT processing_version FROM sparklend_reserve_data_current WHERE protocol_id = $1 AND token_id = $2",
+        "SELECT usage_as_collateral_enabled, processing_version FROM sparklend_reserve_data_current "
+        "WHERE protocol_id = $1 AND token_id = $2",
         protocol_id,
         token_id,
     )
     assert row is not None
+    assert row["usage_as_collateral_enabled"] is False
     assert row["processing_version"] == 0
 
 
