@@ -193,9 +193,8 @@ func run(ctx context.Context, args []string) error {
 		Password: env.Get("REDIS_PASSWORD", ""),
 		DB:       0,
 		TTL:      2 * 24 * time.Hour,
-		// KeyPrefix is configurable for the tests that drive this binary: they
-		// cannot namespace a key the binary builds for itself, and they share
-		// one Redis.
+		// Configurable for the tests driving this binary: they share one Redis and
+		// cannot namespace a key the binary builds for itself.
 		KeyPrefix: env.Get("REDIS_KEY_PREFIX", "stl"),
 	}, logger)
 	if err != nil {

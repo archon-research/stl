@@ -59,9 +59,7 @@ stl:{chainId}:{blockNumber}:{version}:{dataType}
 ```
 - version increments on chain reorgs
 - dataType: block, receipts, traces, blobs
-- `stl` is the default of `REDIS_KEY_PREFIX`, which every deployment leaves unset.
-  It exists for the integration tests that drive a worker binary: they share one
-  Redis and cannot namespace a key the binary builds for itself.
+- `stl` is the default of `REDIS_KEY_PREFIX`; only the tests that drive a worker binary set it, production leaves it unset
 
 ### Environment
 

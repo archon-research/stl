@@ -26,9 +26,8 @@ var (
 	sharedLocalStackCfg testutil.LocalStackConfig
 )
 
-// rawBucketPrefix / testDeployEnv satisfy the cache reader's bucket-name
-// convention (stl-sentinel{env}-{chain}-raw); chainID=1 -> "ethereum". The check
-// is on the prefix, so a per-test suffix is allowed.
+// rawBucketPrefix / testDeployEnv satisfy chainutil.ValidateS3BucketForChain, a
+// prefix check rather than an equality one, so a per-test suffix is allowed.
 const (
 	rawBucketPrefix = "stl-sentineltest-ethereum-raw-"
 	testDeployEnv   = "test"

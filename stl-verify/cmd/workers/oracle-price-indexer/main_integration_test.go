@@ -28,9 +28,8 @@ var (
 	sharedLocalStackCfg testutil.LocalStackConfig
 )
 
-// rawBucketPrefix / testDeployEnv match the chainutil.ValidateS3BucketForChain
-// rule: stl-sentinel{env}-{chain}-raw. chainID=1 → "ethereum". It is a prefix
-// check, so a per-test suffix is allowed.
+// rawBucketPrefix / testDeployEnv satisfy chainutil.ValidateS3BucketForChain, a
+// prefix check rather than an equality one, so a per-test suffix is allowed.
 const (
 	rawBucketPrefix = "stl-sentineltest-ethereum-raw-"
 	testDeployEnv   = "test"
@@ -38,9 +37,8 @@ const (
 	archiveBucket = "stl-raw-sc-calls-test"
 	// archivePrefix is the chain_id partition rawsckey.Build writes under for chainID=1.
 	archivePrefix = "raw-sc-calls/chain_id=1/"
-	// seedBlockNum is the block the setup seeds into S3 and enqueues. Any height
-	// works — the mock RPC answers at whatever block the event carries — but the
-	// archiving test asserts on it, so both sides read it from here.
+	// Any height works — the mock RPC answers whatever the event carries — but the
+	// archiving test asserts on it, so setup and assertion read the one const.
 	seedBlockNum int64 = 18_000_000
 )
 

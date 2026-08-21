@@ -39,9 +39,8 @@ var (
 const (
 	archiveBucket = "test-prime-allocation-worker-raw-sc-calls"
 	archivePrefix = "raw-sc-calls/chain_id=1/"
-	// rawBucketPrefix satisfies chainutil.ValidateS3BucketForChain, which the cache
-	// reader enforces at construction: stl-sentinel{env}-{chain}-raw, chainID=1 ->
-	// "ethereum". It is a prefix check, so a per-test suffix is allowed.
+	// rawBucketPrefix satisfies chainutil.ValidateS3BucketForChain, a prefix check
+	// rather than an equality one, so a per-test suffix is allowed.
 	rawBucketPrefix = "stl-sentineltest-ethereum-raw-"
 )
 
