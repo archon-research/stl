@@ -8,7 +8,17 @@ from app.domain.entities.reference_risk_capital import ReferenceCapitalBucket
 
 
 class ReferenceCapitalRepository(Protocol):
-    """Read the reference snapshots the capital-stack syncer accumulates."""
+    """Read the reference snapshots the capital-stack syncer accumulates.
+
+    Reference *figures*, but not a reference *read*: these come from STL's own
+    Postgres, so callers must not treat a failure here the way they treat one
+    from the live Star monitor. The allocation and risk-capital endpoints serve
+    their indexed half when the monitor 404s or 502s, because a third party
+    being unreachable is not STL failing; a failed read of this store is the
+    same database the indexed half was just read from, and answering with half a
+    series would be the partial success the repo forbids. The `source=both`
+    branches let it raise.
+    """
 
     async def list_reference_capital_buckets(
         self,
