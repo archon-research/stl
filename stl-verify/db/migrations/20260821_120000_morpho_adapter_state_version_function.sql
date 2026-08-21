@@ -34,6 +34,11 @@
 -- Pinned to force_custom_plan for the same reason the trigger functions are: its per-row
 -- lookups must keep pruning chunks instead of fanning out over every chunk once plpgsql
 -- caches a generic plan (VEC-541, db/migrations/AGENTS.md).
+--
+-- VOLATILE is spelled out because correctness rests on it: a STABLE function would read
+-- the CALLING statement's snapshot, so a writer released from the advisory lock would
+-- recompute the same version as the writer it waited for and insert a duplicate the
+-- unique index cannot catch on compressed data.
 CREATE OR REPLACE FUNCTION next_processing_version_morpho_adapter_state(
     p_adapter_id    BIGINT,
     p_block_number  BIGINT,
@@ -41,6 +46,7 @@ CREATE OR REPLACE FUNCTION next_processing_version_morpho_adapter_state(
     p_timestamp     TIMESTAMPTZ,
     p_build_id      INT)
 RETURNS INT
+VOLATILE
 SET plan_cache_mode = 'force_custom_plan'
 AS $$
 DECLARE

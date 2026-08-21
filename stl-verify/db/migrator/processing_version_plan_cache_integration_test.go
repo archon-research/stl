@@ -25,8 +25,9 @@ const minProcessingVersionTriggerFunctions = 36
 const minProcessingVersionHelperFunctions = 1
 
 type processingVersionTriggerFunction struct {
-	name      string
-	proconfig []string
+	name       string
+	proconfig  []string
+	volatility string
 }
 
 // Every trigger function carries the setting, with no exemptions: 20260806_120000_processing_version_force_custom_plan.sql
@@ -55,6 +56,25 @@ func TestProcessingVersionHelpersForceCustomPlan(t *testing.T) {
 	assertForceCustomPlan(t, functions)
 }
 
+// A helper marked STABLE would read the calling statement's snapshot, so a writer
+// released from the position's advisory lock would recompute the version the writer it
+// waited for already took — and on compressed data the duplicate that follows is past
+// anything the unique index can catch.
+func TestProcessingVersionHelpersAreVolatile(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+
+	for _, fn := range processingVersionFunctions(t, ctx, pool, `next\_processing\_version\_%`,
+		minProcessingVersionHelperFunctions) {
+		t.Run(fn.name, func(t *testing.T) {
+			if fn.volatility != "v" {
+				t.Errorf("%s is provolatile %q, want \"v\" (VOLATILE): its per-statement snapshot is what makes the version it returns current", fn.name, fn.volatility)
+			}
+		})
+	}
+}
+
 func assertForceCustomPlan(t *testing.T, functions []processingVersionTriggerFunction) {
 	t.Helper()
 	for _, fn := range functions {
@@ -74,7 +94,7 @@ func processingVersionFunctions(t *testing.T, ctx context.Context, pool *pgxpool
 	t.Helper()
 
 	rows, err := pool.Query(ctx, `
-		SELECT p.proname, COALESCE(p.proconfig, '{}')
+		SELECT p.proname, COALESCE(p.proconfig, '{}'), p.provolatile
 		FROM pg_proc p
 		JOIN pg_namespace n ON n.oid = p.pronamespace
 		WHERE n.nspname = 'public'
@@ -89,7 +109,7 @@ func processingVersionFunctions(t *testing.T, ctx context.Context, pool *pgxpool
 	var functions []processingVersionTriggerFunction
 	for rows.Next() {
 		var fn processingVersionTriggerFunction
-		if err := rows.Scan(&fn.name, &fn.proconfig); err != nil {
+		if err := rows.Scan(&fn.name, &fn.proconfig, &fn.volatility); err != nil {
 			t.Fatalf("scan pg_proc row: %v", err)
 		}
 		functions = append(functions, fn)
