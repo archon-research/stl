@@ -45,6 +45,9 @@ func ContextWithScheduledAt(ctx context.Context, scheduledAt time.Time) context.
 type ProgressHeartbeater interface {
 	// Beat sends one heartbeat carrying the progress recorded so far.
 	Beat(ctx context.Context)
+	// Reset drops the progress carried so far, so one execution's record cannot
+	// ride the next execution's beats.
+	Reset()
 }
 
 // cronjobActivities wraps a Runner for Temporal activity execution.
@@ -74,6 +77,7 @@ func (a *cronjobActivities) Execute(ctx context.Context, scheduledAt time.Time) 
 	logger.Info("starting cronjob execution", "scheduledAt", scheduledAt)
 
 	ctx = ContextWithScheduledAt(ctx, scheduledAt)
+	resetProgress(a.progress)
 	stopHeartbeat := startHeartbeat(ctx, a.heartbeat, a.progress)
 	start := time.Now()
 	err := a.runner.Run(ctx)
@@ -127,6 +131,15 @@ func startHeartbeat(ctx context.Context, interval time.Duration, progress Progre
 		close(done)
 		<-finished
 	}
+}
+
+// resetProgress clears whatever an earlier execution left in the store, before
+// the runner's own LoadProgress reseeds it from THIS execution's details.
+func resetProgress(progress ProgressHeartbeater) {
+	if progress == nil {
+		return
+	}
+	progress.Reset()
 }
 
 // beat sends one liveness heartbeat, through the progress store when there is
