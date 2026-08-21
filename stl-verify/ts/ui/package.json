@@ -49,7 +49,7 @@
     "@archon-research/tsconfig": "0.10.0-rohit-pre-release-consumer-fixes.1",
     "@pandacss/dev": "1.12.0",
     "@stl-verify/mocks": "*",
-    "@types/node": "26.1.2",
+    "@types/node": "26.2.0",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.4",
     "@vitejs/plugin-react": "6.0.5",
