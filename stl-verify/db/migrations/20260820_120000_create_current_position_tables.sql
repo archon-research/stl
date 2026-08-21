@@ -42,8 +42,12 @@
 --
 -- Because both the triggers and the backfills are newer-wins upserts on the same
 -- key, their order does not matter and neither does interleaving with live
--- inserts: whichever runs second is a guarded no-op. Correctness here does not
--- depend on the migrator wrapping this file in one transaction.
+-- inserts: whichever runs second is a guarded no-op. That much does not depend on
+-- the migrator wrapping this file in one transaction. The two SET LOCAL statements
+-- below DO: outside a transaction block SET LOCAL only warns and changes nothing
+-- (verified — lock_timeout stays 0), which would silently restore both hazards
+-- they exist to prevent. This file must therefore never be marked
+-- `-- migrate: no-transaction`.
 
 -- Fail fast rather than convoy ingestion. Each CREATE TRIGGER below takes
 -- SHARE ROW EXCLUSIVE on its (busy) history table, held to commit and propagated
