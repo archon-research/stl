@@ -40,6 +40,8 @@ spec:
           image: morpho-vault-backfill
           envFrom:
             - configMapRef:
+                name: otel-config
+            - configMapRef:
                 name: morpho-vault-backfill
             - secretRef:
                 name: morpho-vault-backfill
