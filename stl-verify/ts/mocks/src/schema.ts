@@ -2,9 +2,13 @@
  * Names for the generated schema types the fixtures are written against; see the
  * README for why they come from the ui workspace.
  */
-import type { components, paths } from '@stl-verify/ui/openapi-types';
+import type {
+  components,
+  operations,
+  paths,
+} from '@stl-verify/ui/openapi-types';
 
-export type { paths };
+export type { operations, paths };
 
 type Schemas = components['schemas'];
 

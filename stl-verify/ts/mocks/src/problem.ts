@@ -10,10 +10,37 @@
  * Body shapes follow FastAPI: a hand-raised `HTTPException` carries a string
  * `detail`, a rejected `Query`/path parameter carries the validation array.
  */
+import type { operations } from './schema.ts';
+
 export type Problem = {
   status: number;
   body: { detail: string | ValidationDetail[] };
 };
+
+/**
+ * `response.untyped` is the one hole in the contract check: it accepts any body
+ * at any status, so nothing above would notice the document gaining the statuses
+ * it is standing in for. This asserts the premise instead of the bodies — it
+ * stops compiling the day any operation declares a third status, which is the
+ * day that endpoint's failure branch should move to `response(<status>)` and be
+ * type-checked like the success one.
+ */
+type DeclaredStatus = {
+  [Name in keyof operations]: keyof operations[Name]['responses'];
+}[keyof operations];
+
+type IsExactly<Actual, Expected> =
+  (<T>() => T extends Actual ? 1 : 2) extends <T>() => T extends Expected
+    ? 1
+    : 2
+    ? true
+    : false;
+
+type Assert<T extends true> = T;
+
+export type DocumentDeclaresOnly200And422 = Assert<
+  IsExactly<DeclaredStatus, 200 | 422>
+>;
 
 type ValidationDetail = {
   loc: (string | number)[];
