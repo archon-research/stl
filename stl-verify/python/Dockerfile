@@ -29,11 +29,13 @@ WORKDIR /app
 COPY python/pyproject.toml python/uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
-# Copy application code and install the project
+# Copy application code and install the project. cli/ is deliberately absent:
+# the wheel only packages `app` (pyproject [tool.hatch.build.targets.wheel]),
+# and the final stage copies cli/ from the build context, so copying it here
+# would only invalidate the uv sync layer on every cli/ edit.
 COPY python/.env.default ./.env.default
 COPY python/app/ app/
 COPY python/suraf/ suraf/
-COPY python/cli/ cli/
 RUN uv sync --frozen --no-dev
 
 FROM python:${PYTHON_VERSION}-slim

@@ -14,8 +14,8 @@ from temporalio.common import RetryPolicy
 
 ACTIVITY_NAME = "run_core_model"
 
-# Matches the activeDeadlineSeconds of the k8s CronJob this replaced: a full
-# "all markets" pass at the default N_MC is hours of Monte Carlo, not minutes.
+# A full "all markets" pass at the default N_MC is hours of Monte Carlo, not
+# minutes; 4h kills a hung tick without cutting off a legitimately slow one.
 TICK_TIMEOUT = timedelta(hours=4)
 
 
