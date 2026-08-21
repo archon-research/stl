@@ -359,6 +359,11 @@ function referenceAllocation(
   };
 }
 
+/** Sum of decimal-string figures, kept in cents so the total is exact. */
+function sumFigures(values: readonly string[]): string {
+  return usdFigure(values.reduce((total, value) => total + centsOf(value), 0));
+}
+
 function referenceRowsFor(
   self: PrimeRiskCapital,
 ): readonly ReferenceAllocationRow[] {
@@ -449,13 +454,23 @@ export function toReferenceRiskCapital(
   const juniorExternal = Math.round(junior * JUNIOR_EXTERNAL_SHARE);
   const seniorInternal = Math.round(senior * SENIOR_INTERNAL_SHARE);
 
+  // Sky's totals are Sky's own rows summed, not STL's totals relabelled. Copying
+  // STL's would make every share a position takes of the requirement wrong by
+  // the ratio between the two models — 5% where Sky publishes 12%.
+  const rows = referenceRowsFor(self);
+  const primeExposureUsd = sumFigures(rows.map((row) => row[3]));
+  const primeRequiredRiskCapitalUsd = sumFigures(rows.map((row) => row[4]));
+
   return {
     ...self,
     source: 'reference',
     model: null,
-    per_allocation: referenceRowsFor(self).map(referenceAllocation),
-    exposure_usd: self.prime_exposure_usd,
-    required_risk_capital_usd: self.prime_required_risk_capital_usd,
+    per_allocation: rows.map(referenceAllocation),
+    prime_exposure_usd: primeExposureUsd,
+    prime_required_risk_capital_usd: primeRequiredRiskCapitalUsd,
+    prime_modeled_exposure_usd: primeExposureUsd,
+    exposure_usd: primeExposureUsd,
+    required_risk_capital_usd: primeRequiredRiskCapitalUsd,
     modeled_exposure_usd: self.prime_modeled_exposure_usd,
     encumbrance_ratio: self.prime_encumbrance_ratio,
     junior_risk_capital_usd: usdFigure(junior),

@@ -888,21 +888,26 @@ export function AllocationGrid({
     return map;
   }, [riskCapital]);
 
-  // Σ of exactly what the RRC column shows, so the share column sums to 100%.
-  // Not `prime_required_risk_capital_usd`: that is STL's own sum and would not
-  // account for the positions Sky prices and STL does not.
-  const totalRequiredRiskCapitalUsd = useMemo(() => {
-    let total = 0;
-    let sawFigure = false;
-    for (const allocation of allocations) {
-      const rrc = appliedRiskCapitalUsd(riskByReceiptTokenId, allocation);
-      if (rrc !== null) {
-        total += rrc;
-        sawFigure = true;
-      }
-    }
-    return sawFigure ? total : null;
-  }, [allocations, riskByReceiptTokenId]);
+  // The prime's whole requirement, from the same provenance the RRC column
+  // reads. Not Σ of the visible rows: Sky prices positions STL resolves no
+  // receipt token for — off-chain custody and the Arkis vault, its two largest
+  // — and those rows cannot join a grid row by id, so summing what is on screen
+  // divided by $2.8M where the prime's requirement is $19.1M and reported one
+  // position as 84% of a requirement Sky puts it at 12% of.
+  //
+  // The consequence is deliberate: the column no longer sums to 100% on screen,
+  // because the rows it can show do not account for the whole requirement. Each
+  // row's own share is right, which is the number a reader compares.
+  const totalRequiredRiskCapitalUsd = useMemo(
+    () =>
+      parseNumericValue(
+        preferReference(
+          riskCapital?.reference_prime_required_risk_capital_usd,
+          riskCapital?.prime_required_risk_capital_usd,
+        ),
+      ),
+    [riskCapital],
+  );
 
   const columns = useMemo<ColumnDef<Allocation>[]>(
     () =>
