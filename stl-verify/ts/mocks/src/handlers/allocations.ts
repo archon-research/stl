@@ -91,7 +91,10 @@ function activityBuckets(
   bucketStartsMs: readonly number[],
   intervalMs: number,
 ): AllocationActivityBucket[] {
-  return bucketStartsMs.map((startMs) => {
+  // The callback's return annotation is what makes the literal fresh; the
+  // function's own `AllocationActivityBucket[]` is not enough, because a
+  // `.map()` result is checked for assignability rather than for excess keys.
+  return bucketStartsMs.map((startMs): AllocationActivityBucket => {
     const inBucket = rows.filter((row) => {
       const createdMs = Date.parse(row.created_at);
       return createdMs >= startMs && createdMs < startMs + intervalMs;

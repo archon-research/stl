@@ -32,7 +32,12 @@ import {
   resolveWindow,
   sameHex,
 } from '../query.ts';
-import type { TimeSeriesWindow } from '../schema.ts';
+import type {
+  ExposureBucket,
+  PrimeDebtBucket,
+  TimeSeriesWindow,
+  TotalCapitalBucket,
+} from '../schema.ts';
 
 const BUCKET_LIMIT_DEFAULT = 100;
 const BUCKET_LIMIT_MAX = 500;
@@ -154,8 +159,12 @@ export function seriesHandlers(): MockHandler[] {
           mode: 'aggregated',
           source: request.value.reference ? 'reference' : 'self',
           window: request.value.window,
+          // The return annotation is load-bearing, not decoration: a `.map()`
+          // result is not a fresh object literal, so without it a bucket field
+          // the document drops stays assignable and the mock keeps serving a
+          // key the API no longer has. Annotated, that drop is a compile error.
           data: seriesPoints(EXPOSURE_USD, request.value.starts).map(
-            (point) => ({
+            (point): ExposureBucket => ({
               bucket_start: iso(point.startMs),
               exposure_usd: usdString(point.value),
             }),
@@ -183,7 +192,7 @@ export function seriesHandlers(): MockHandler[] {
           source: request.value.reference ? 'reference' : 'self',
           window: request.value.window,
           data: seriesPoints(TOTAL_CAPITAL_USD, request.value.starts).map(
-            (point) => ({
+            (point): TotalCapitalBucket => ({
               bucket_start: iso(point.startMs),
               total_capital_usd: usdString(point.value),
             }),
@@ -224,10 +233,12 @@ export function seriesHandlers(): MockHandler[] {
             mode: 'aggregated',
             source: reference ? 'reference' : 'self',
             window,
-            data: seriesPoints(PRIME_DEBT_USDS, starts).map((point) => ({
-              bucket_start: iso(point.startMs),
-              debt_wad: toWad(point.value),
-            })),
+            data: seriesPoints(PRIME_DEBT_USDS, starts).map(
+              (point): PrimeDebtBucket => ({
+                bucket_start: iso(point.startMs),
+                debt_wad: toWad(point.value),
+              }),
+            ),
           });
         }
 

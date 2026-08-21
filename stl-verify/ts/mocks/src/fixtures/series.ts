@@ -126,18 +126,21 @@ export function seedDebtSnapshots(
   primeName: string,
   ilkName: string,
 ): PrimeDebtSnapshot[] {
-  return Array.from({ length: DEBT_SNAPSHOT_COUNT }, (_, index) => {
-    const syncedAgo = DEBT_SYNC_AGO + index * DEBT_SYNC_INTERVAL;
-    const syncedMs = nowMs - syncedAgo;
+  return Array.from(
+    { length: DEBT_SNAPSHOT_COUNT },
+    (_, index): PrimeDebtSnapshot => {
+      const syncedAgo = DEBT_SYNC_AGO + index * DEBT_SYNC_INTERVAL;
+      const syncedMs = nowMs - syncedAgo;
 
-    return {
-      prime_address: primeAddress,
-      prime_name: primeName,
-      ilk_name: ilkName,
-      debt_wad: toWad(valueAt(PRIME_DEBT_USDS, nowMs, syncedMs)),
-      block_number: 25780913 - index * 74,
-      block_version: 0,
-      synced_at: isoAgo(nowMs, syncedAgo),
-    };
-  });
+      return {
+        prime_address: primeAddress,
+        prime_name: primeName,
+        ilk_name: ilkName,
+        debt_wad: toWad(valueAt(PRIME_DEBT_USDS, nowMs, syncedMs)),
+        block_number: 25780913 - index * 74,
+        block_version: 0,
+        synced_at: isoAgo(nowMs, syncedAgo),
+      };
+    },
+  );
 }

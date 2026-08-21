@@ -20,7 +20,7 @@ import {
   resolveWindow,
   sameHex,
 } from '../query.ts';
-import type { ProtocolEvent } from '../schema.ts';
+import type { ProtocolEvent, ProtocolEventBucket } from '../schema.ts';
 
 const EVENT_LIMIT_DEFAULT = 100;
 const EVENT_LIMIT_MAX = 500;
@@ -79,8 +79,11 @@ export function eventHandlers(): MockHandler[] {
         return response(200).json({
           mode: 'aggregated',
           window,
+          // Annotated for the same reason as the series buckets: a `.map()`
+          // result is not fresh, so an unannotated literal would keep a field
+          // the document had dropped. See `handlers/series.ts`.
           data: bucketStarts(fromMs, toMs, window.interval_ms, limit.value).map(
-            (startMs) => ({
+            (startMs): ProtocolEventBucket => ({
               bucket_start: iso(startMs),
               event_count: countInBucket(matched, startMs, window.interval_ms),
             }),

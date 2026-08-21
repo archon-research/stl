@@ -352,7 +352,11 @@ export function seedReferenceAllocations(
 
   return selfRows
     .filter((allocation) => allocation.category === 'allocation')
-    .map((allocation) => ({ ...allocation, balance: null, scope: 'prime' }));
+    .map((allocation): Allocation => ({
+      ...allocation,
+      balance: null,
+      scope: 'prime',
+    }));
 }
 
 /** Spread so 16 rows cover the whole default 24h window, newest first. */
@@ -596,7 +600,10 @@ const ACTIVITY_ROWS: readonly ActivityRowSeed[] = [
 ];
 
 export function seedActivity(nowMs: number): AllocationActivity[] {
-  return ACTIVITY_ROWS.map((row, index) => ({
+  // Annotated on the callback, not just on the function: a `.map()` result is
+  // checked for assignability, which lets a field the document dropped stay in
+  // the row. See the same annotation on every response-row `.map()` here.
+  return ACTIVITY_ROWS.map((row, index): AllocationActivity => ({
     ...row,
     block_number: 25780912 - index * 110,
     block_version: 0,
