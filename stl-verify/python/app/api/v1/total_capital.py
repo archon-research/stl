@@ -1,5 +1,7 @@
+import asyncio
 from collections.abc import Callable
 from datetime import datetime
+from decimal import Decimal
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
@@ -10,7 +12,6 @@ from app.adapters.postgres.allocation_position_repository import AllocationRepos
 from app.api._validators import ProxyAddressPathParam
 from app.api.deps import get_engine, get_reference_capital_repository_factory
 from app.api.provenance import (
-    INDEXED_OR_REFERENCE,
     get_requested_provenance,
     resolve_or_422,
 )
@@ -88,6 +89,15 @@ class TotalCapitalBucketResponse(BaseModel):
         ),
         examples=["2026-08-20T09:00:00Z"],
     )
+    reference_total_capital_usd: PlainDecimal | None = Field(
+        default=None,
+        description=(
+            "Sky's reported total risk capital for the same bucket, populated only under "
+            "`source=both`. Beside STL's rather than replacing it: the two are computed "
+            "differently, and a reader needs the gap shown rather than reconciled."
+        ),
+        examples=["48142491.08"],
+    )
 
 
 class TotalCapitalEnvelope(BaseModel):
@@ -109,6 +119,21 @@ class TotalCapitalEnvelope(BaseModel):
 
 async def _get_service(engine: AsyncEngine = Depends(get_engine)) -> AllocationService:
     return AllocationService(AllocationRepository(engine))
+
+
+def _merged_bucket_starts(*grids: dict) -> list:
+    """Every bucket either provenance reported, newest first like each series."""
+    return sorted({start for grid in grids for start in grid}, reverse=True)
+
+
+def _reference_capital(by_bucket: dict, bucket_start) -> Decimal | None:
+    bucket = by_bucket.get(bucket_start)
+    return None if bucket is None else bucket.total_capital_usd
+
+
+def _reference_field(by_bucket: dict, bucket_start, field: str):
+    bucket = by_bucket.get(bucket_start)
+    return None if bucket is None else getattr(bucket, field)
 
 
 @router.get(
@@ -140,7 +165,7 @@ async def list_prime_total_capital(
     if not await service.prime_exists(prime_address):
         raise HTTPException(status_code=404, detail="Prime not found")
 
-    source = resolve_or_422(requested_provenance, available=INDEXED_OR_REFERENCE, default=Provenance.INDEXED)
+    source = resolve_or_422(requested_provenance, available=frozenset(Provenance), default=Provenance.INDEXED)
 
     # Treasury observations are immutable once written, so a fully-pinned window
     # is safely cacheable; a defaulted (now-relative) window is not.
@@ -169,6 +194,46 @@ async def list_prime_total_capital(
                     capital_observed_at=bucket.capital_observed_at,
                 )
                 for bucket in reference_buckets
+            ],
+        )
+
+    if source is Provenance.BOTH:
+        reference_buckets, buckets = await asyncio.gather(
+            reference_repositories().list_reference_capital_buckets(
+                prime_address,
+                from_timestamp=time_series.from_timestamp,
+                to_timestamp=time_series.to_timestamp,
+                bucket_seconds=time_series.bucket.total_seconds(),
+                limit=limit,
+            ),
+            service.list_total_capital_buckets(
+                prime_address,
+                from_timestamp=time_series.from_timestamp,
+                to_timestamp=time_series.to_timestamp,
+                bucket_seconds=time_series.bucket.total_seconds(),
+                limit=limit,
+            ),
+        )
+        # Both series are gap-filled over the same window and resolution, so the
+        # bucket grids match and a lookup cannot shift a value one bucket over.
+        reference_by_bucket = {bucket.bucket_start: bucket for bucket in reference_buckets}
+        indexed_by_bucket = {bucket.bucket_start: bucket.total_capital_usd for bucket in buckets}
+        return TotalCapitalEnvelope(
+            mode="aggregated",
+            source=source,
+            window=window,
+            data=[
+                TotalCapitalBucketResponse(
+                    bucket_start=start,
+                    total_capital_usd=indexed_by_bucket.get(start),
+                    reference_total_capital_usd=_reference_capital(reference_by_bucket, start),
+                    # Reported by Sky alone whichever provenance was asked for.
+                    assets_usd=_reference_field(reference_by_bucket, start, "assets_usd"),
+                    encumbrance_ratio=_reference_field(reference_by_bucket, start, "encumbrance_ratio"),
+                    assets_observed_at=_reference_field(reference_by_bucket, start, "assets_observed_at"),
+                    capital_observed_at=_reference_field(reference_by_bucket, start, "capital_observed_at"),
+                )
+                for start in _merged_bucket_starts(indexed_by_bucket, reference_by_bucket)
             ],
         )
 

@@ -118,12 +118,25 @@ def test_source_indexed_selects_the_on_chain_debt(client):
     service.list_reference_debt_buckets.assert_not_awaited()
 
 
-def test_rejects_both_until_the_merged_series_exists(client):
+def test_both_carries_each_provenance_on_the_same_bucket(client):
+    client, service = client
+
+    body = client.get(f"/v1/primes/{_VALID_ADDR}/debt?aggregate=true&source=both").json()
+
+    assert body["source"] == "both"
+    service.list_debt_buckets.assert_awaited()
+    service.list_reference_debt_buckets.assert_awaited()
+    for bucket in body["data"]:
+        assert "reference_debt_wad" in bucket
+
+
+def test_both_still_requires_an_aggregated_window(client):
+    # The reference half cannot fill a raw snapshot, so neither can the union.
     client, _ = client
 
-    response = client.get(f"/v1/primes/{_VALID_ADDR}/debt?aggregate=true&source=both")
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/debt?source=both")
 
-    assert response.status_code == 422
+    assert response.status_code == 400
 
 
 def test_source_reference_still_requires_an_aggregated_window(client):

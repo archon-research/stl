@@ -1,5 +1,7 @@
+import asyncio
 from collections.abc import Callable
 from datetime import datetime
+from decimal import Decimal
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
@@ -10,7 +12,6 @@ from app.adapters.postgres.allocation_position_repository import AllocationRepos
 from app.api._validators import ProxyAddressPathParam
 from app.api.deps import get_engine, get_reference_capital_repository_factory
 from app.api.provenance import (
-    INDEXED_OR_REFERENCE,
     get_requested_provenance,
     resolve_or_422,
 )
@@ -43,6 +44,15 @@ class ExposureBucketResponse(BaseModel):
         ),
         examples=["1459014561.88"],
     )
+    reference_exposure_usd: PlainDecimal | None = Field(
+        default=None,
+        description=(
+            "Sky's reported exposure for the same bucket, populated only under `source=both`. "
+            "Carried beside STL's rather than replacing it: the two are computed differently and "
+            "differ by around a percent, which a reader needs shown rather than reconciled."
+        ),
+        examples=["1461200000.00"],
+    )
 
 
 class ExposureEnvelope(BaseModel):
@@ -53,7 +63,8 @@ class ExposureEnvelope(BaseModel):
         default=Provenance.INDEXED,
         description=(
             "Provenance the series was answered from. `indexed` is STL's priced receipt-token "
-            "exposure; `reference` is Sky's Star monitor as observed by STL's syncer."
+            "exposure; `reference` is Sky's Star monitor as observed by STL's syncer; `both` fills "
+            "`exposure_usd` and `reference_exposure_usd` on every bucket."
         ),
     )
     window: TimeSeriesWindow = Field(description="The window and resolution applied to this response.")
@@ -62,6 +73,34 @@ class ExposureEnvelope(BaseModel):
 
 async def _get_service(engine: AsyncEngine = Depends(get_engine)) -> AllocationService:
     return AllocationService(AllocationRepository(engine))
+
+
+def _merged_bucket_starts(*grids: dict) -> list:
+    """Every bucket either provenance reported, newest first like each series."""
+    starts = {start for grid in grids for start in grid}
+    return sorted(starts, reverse=True)
+
+
+async def _reference_exposure_by_bucket(
+    prime_address: EthAddress,
+    time_series: TimeSeriesQuery,
+    limit: int,
+    repository: ReferenceCapitalRepository,
+) -> dict[datetime, Decimal | None]:
+    """Sky's exposure keyed by bucket start.
+
+    Both series are gap-filled over the same window and resolution, so their
+    bucket grids are identical and a lookup cannot silently shift a value into a
+    neighbouring bucket.
+    """
+    buckets = await repository.list_reference_capital_buckets(
+        prime_address,
+        from_timestamp=time_series.from_timestamp,
+        to_timestamp=time_series.to_timestamp,
+        bucket_seconds=time_series.bucket.total_seconds(),
+        limit=limit,
+    )
+    return {bucket.bucket_start: bucket.exposure_usd for bucket in buckets}
 
 
 @router.get(
@@ -92,7 +131,7 @@ async def list_prime_exposure(
     if not await service.prime_exists(prime_address):
         raise HTTPException(status_code=404, detail="Prime not found")
 
-    source = resolve_or_422(requested_provenance, available=INDEXED_OR_REFERENCE, default=Provenance.INDEXED)
+    source = resolve_or_422(requested_provenance, available=frozenset(Provenance), default=Provenance.INDEXED)
 
     # Exposure observations are immutable once written, so a fully-pinned window
     # is safely cacheable; a defaulted (now-relative) window is not.
@@ -114,6 +153,32 @@ async def list_prime_exposure(
             data=[
                 ExposureBucketResponse(bucket_start=bucket.bucket_start, exposure_usd=bucket.exposure_usd)
                 for bucket in reference_buckets
+            ],
+        )
+
+    if source is Provenance.BOTH:
+        reference_by_bucket, buckets = await asyncio.gather(
+            _reference_exposure_by_bucket(prime_address, time_series, limit, reference_repositories()),
+            service.list_exposure_buckets(
+                prime_address,
+                from_timestamp=time_series.from_timestamp,
+                to_timestamp=time_series.to_timestamp,
+                bucket_seconds=time_series.bucket.total_seconds(),
+                limit=limit,
+            ),
+        )
+        indexed_by_bucket = {bucket.bucket_start: bucket.exposure_usd for bucket in buckets}
+        return ExposureEnvelope(
+            mode="aggregated",
+            source=source,
+            window=window,
+            data=[
+                ExposureBucketResponse(
+                    bucket_start=bucket_start,
+                    exposure_usd=indexed_by_bucket.get(bucket_start),
+                    reference_exposure_usd=reference_by_bucket.get(bucket_start),
+                )
+                for bucket_start in _merged_bucket_starts(indexed_by_bucket, reference_by_bucket)
             ],
         )
 

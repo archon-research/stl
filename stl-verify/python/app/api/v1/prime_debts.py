@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime
 from typing import Literal
 
@@ -9,7 +10,6 @@ from app.adapters.postgres.prime_debt_repository import PrimeDebtRepository
 from app.api._validators import PrimeOrProxyAddressPathParam
 from app.api.deps import get_engine
 from app.api.provenance import (
-    INDEXED_OR_REFERENCE,
     get_requested_provenance,
     resolve_or_422,
 )
@@ -79,6 +79,14 @@ class PrimeDebtBucketResponse(BaseModel):
         ),
         examples=["1234567890000000000000"],
     )
+    reference_debt_wad: PlainDecimal | None = Field(
+        default=None,
+        description=(
+            "Sky's reported debt for the same bucket in the same unit, populated only under "
+            "`source=both`. Beside the on-chain figure rather than replacing it."
+        ),
+        examples=["2645260280720000000000000000"],
+    )
 
 
 class PrimeDebtEnvelope(BaseModel):
@@ -127,9 +135,9 @@ async def list_prime_debt_snapshots(
     if resolved_prime_id is None:
         raise HTTPException(status_code=404, detail="Prime not found")
 
-    source = resolve_or_422(requested_provenance, available=INDEXED_OR_REFERENCE, default=Provenance.INDEXED)
+    source = resolve_or_422(requested_provenance, available=frozenset(Provenance), default=Provenance.INDEXED)
 
-    if source is Provenance.REFERENCE and not time_series.aggregate:
+    if source in (Provenance.REFERENCE, Provenance.BOTH) and not time_series.aggregate:
         raise HTTPException(
             status_code=400,
             detail=(
@@ -139,6 +147,40 @@ async def list_prime_debt_snapshots(
         )
 
     window = build_window(time_series)
+    if source is Provenance.BOTH and time_series.aggregate:
+        reference_buckets, buckets = await asyncio.gather(
+            service.list_reference_debt_buckets(
+                resolved_prime_id,
+                from_timestamp=time_series.from_timestamp,
+                to_timestamp=time_series.to_timestamp,
+                bucket_seconds=time_series.bucket.total_seconds(),
+                limit=limit,
+            ),
+            service.list_debt_buckets(
+                resolved_prime_id,
+                from_timestamp=time_series.from_timestamp,
+                to_timestamp=time_series.to_timestamp,
+                bucket_seconds=time_series.bucket.total_seconds(),
+                limit=limit,
+            ),
+        )
+        # Same window and resolution on both, so the bucket grids align.
+        reference_by_bucket = {bucket.bucket_start: bucket.debt_wad for bucket in reference_buckets}
+        indexed_by_bucket = {bucket.bucket_start: bucket.debt_wad for bucket in buckets}
+        return PrimeDebtEnvelope(
+            mode="aggregated",
+            source=source,
+            window=window,
+            data=[
+                PrimeDebtBucketResponse(
+                    bucket_start=start,
+                    debt_wad=indexed_by_bucket.get(start),
+                    reference_debt_wad=reference_by_bucket.get(start),
+                )
+                for start in sorted(set(indexed_by_bucket) | set(reference_by_bucket), reverse=True)
+            ],
+        )
+
     if time_series.aggregate:
         read_buckets = (
             service.list_reference_debt_buckets if source is Provenance.REFERENCE else service.list_debt_buckets

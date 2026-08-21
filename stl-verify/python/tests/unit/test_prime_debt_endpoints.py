@@ -159,8 +159,8 @@ def test_list_prime_debt_returns_aggregated_buckets():
         body = response.json()
         assert body["mode"] == "aggregated"
         assert body["data"] == [
-            {"bucket_start": "2026-03-05T12:00:00Z", "debt_wad": "1000"},
-            {"bucket_start": "2026-03-05T11:00:00Z", "debt_wad": None},
+            {"bucket_start": "2026-03-05T12:00:00Z", "debt_wad": "1000", "reference_debt_wad": None},
+            {"bucket_start": "2026-03-05T11:00:00Z", "debt_wad": None, "reference_debt_wad": None},
         ]
         assert service.list_debt_buckets.await_args.args[0] == _PRIME_ID
         kwargs = service.list_debt_buckets.await_args.kwargs

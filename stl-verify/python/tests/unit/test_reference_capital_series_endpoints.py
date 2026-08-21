@@ -87,13 +87,18 @@ def test_source_indexed_reads_stl_own_figures(series):
     repository.list_reference_capital_buckets.assert_not_called()
 
 
-def test_rejects_both_until_the_merged_series_exists(series):
-    client, path, _, _, _ = series
+def test_both_carries_each_provenance_on_the_same_bucket(series):
+    client, path, field, _, _ = series
 
-    response = client.get(f"/v1/primes/{_VALID_ADDR}/{path}?source=both")
+    body = client.get(f"/v1/primes/{_VALID_ADDR}/{path}?source=both").json()
 
-    assert response.status_code == 422
-    assert "serves: indexed, reference" in response.json()["detail"]
+    assert body["source"] == "both"
+    # Aligned, not concatenated: one bucket carries both figures, so a chart can
+    # overlay them without matching timestamps itself.
+    assert body["data"], "expected buckets"
+    for bucket in body["data"]:
+        assert "bucket_start" in bucket
+        assert f"reference_{field}" in bucket
 
 
 def test_rejects_a_source_that_contradicts_the_superseded_flag(series):

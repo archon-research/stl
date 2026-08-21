@@ -54,8 +54,12 @@ def test_list_prime_exposure_returns_aggregated_buckets():
         body = response.json()
         assert body["mode"] == "aggregated"
         assert body["data"] == [
-            {"bucket_start": "2026-06-18T00:00:00Z", "exposure_usd": "1459014561.88"},
-            {"bucket_start": "2026-06-17T18:00:00Z", "exposure_usd": None},
+            {
+                "bucket_start": "2026-06-18T00:00:00Z",
+                "exposure_usd": "1459014561.88",
+                "reference_exposure_usd": None,
+            },
+            {"bucket_start": "2026-06-17T18:00:00Z", "exposure_usd": None, "reference_exposure_usd": None},
         ]
         assert service.list_exposure_buckets.await_args.args[0] == EthAddress(_VALID_ADDR)
         assert service.list_exposure_buckets.await_args.kwargs["bucket_seconds"] == 6 * 60 * 60
