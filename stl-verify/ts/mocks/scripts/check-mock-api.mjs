@@ -533,6 +533,10 @@ async function checkRiskBreakdownScalesToPrime() {
 
   assert.equal(pool.receipt_token_id, 736);
   assert.ok(pool.items.length > 0);
+  // Asserted before the comparison below indexes it: an empty list would
+  // otherwise read as `undefined < undefined`, which is false, and report the
+  // scaling as broken rather than the fixture as missing.
+  assert.ok(grove.items.length > 0, "grove's scaled breakdown is empty");
   assert.ok(
     Number(grove.items[0].amount_usd) < Number(pool.items[0].amount_usd),
     "prime_id should scale the breakdown to that prime's pool share",
