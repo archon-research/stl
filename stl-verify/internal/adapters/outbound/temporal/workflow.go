@@ -80,6 +80,10 @@ func (a *cronjobActivities) Execute(ctx context.Context, scheduledAt time.Time) 
 	ctx = ContextWithScheduledAt(ctx, scheduledAt)
 	resetProgress(a.progress)
 	stopHeartbeat := StartHeartbeat(ctx, a.heartbeat, a.progress)
+	// Deferred as well as called inline: the inline call fixes the ORDER (no beat
+	// may land after the result is reported), the defer covers the paths that
+	// never reach it — a panicking runner. Double-stopping is safe by design.
+	defer stopHeartbeat()
 	start := time.Now()
 	err := a.runner.Run(ctx)
 	stopHeartbeat()

@@ -201,6 +201,47 @@ func TestCronjobActivities_Execute_HeartbeatsWithoutLeakingTheReporter(t *testin
 	}
 }
 
+// TestCronjobActivities_Execute_ReapsTheReporterWhenTheRunnerPanics: a panicking
+// runner skips every statement after the Run call, so only a deferred stop can
+// reap the reporter. Asserted from inside a live activity context, because the
+// SDK cancels that context once the activity returns and the reporter's own
+// ctx.Done arm would then hide an unjoined reporter.
+func TestCronjobActivities_Execute_ReapsTheReporterWhenTheRunnerPanics(t *testing.T) {
+	const interval = 2 * time.Millisecond
+	env := (&testsuite.WorkflowTestSuite{}).NewTestActivityEnvironment()
+
+	activities, err := newCronjobActivities(&mockRunner{
+		runFn: func(context.Context) error { panic("the runner blew up mid-run") },
+	}, nil, interval, nil)
+	if err != nil {
+		t.Fatalf("newCronjobActivities: %v", err)
+	}
+
+	executeThenAssertReaped := func(ctx context.Context) error {
+		func() {
+			defer func() { _ = recover() }()
+			_ = activities.Execute(ctx, time.Now().UTC())
+		}()
+
+		deadline := time.Now().Add(time.Second)
+		for {
+			stacks := goroutineStacks(t)
+			if !strings.Contains(stacks, ".StartHeartbeat.") {
+				return nil
+			}
+			if time.Now().After(deadline) {
+				t.Errorf("the reporter goroutine outlived a panicking runner:\n%s", stacks)
+				return nil
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	env.RegisterActivity(executeThenAssertReaped)
+	if _, err := env.ExecuteActivity(executeThenAssertReaped); err != nil {
+		t.Fatalf("ExecuteActivity: %v", err)
+	}
+}
+
 // stop must JOIN the reporter, not merely signal it: an unjoined reporter keeps
 // heartbeating into a context whose activity has already reported its result.
 //
