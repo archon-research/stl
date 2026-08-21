@@ -2,9 +2,11 @@ package testutil
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -155,3 +157,24 @@ func replaceDatabase(baseDSN, dbName string) (string, error) {
 	u.Path = "/" + dbName
 	return u.String(), nil
 }
+
+// IsUniqueViolation reports whether err is a Postgres unique constraint
+// violation. Matched through the SQLState interface rather than a pgconn type
+// assertion, so a caller that wraps or substitutes the driver error still
+// resolves, with the message as the last resort.
+func IsUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	type sqlStateProvider interface {
+		SQLState() string
+	}
+	var p sqlStateProvider
+	if errors.As(err, &p) {
+		return p.SQLState() == uniqueViolationSQLState
+	}
+	msg := err.Error()
+	return strings.Contains(msg, uniqueViolationSQLState) || strings.Contains(msg, "unique constraint")
+}
+
+const uniqueViolationSQLState = "23505"
