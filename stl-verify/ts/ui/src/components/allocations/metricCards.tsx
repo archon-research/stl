@@ -54,11 +54,11 @@ export type MetricChartSpec = {
   // so overlapping severities read as escalating shade.
   //
   thresholds?: { value: number; label?: string; stroke?: ChartColor }[];
-  // Sky's figures for the same buckets, drawn beside STL's under `source=both`.
-  // A second line rather than a second card: the point is the gap between them.
-  // `ChartColor`, not a series token: it is deliberately not one of the series
-  // hues, so it cannot be mistaken for a quantity of its own.
-  reference?: { data: ChartDatum[]; stroke: ChartColor } | null;
+  // The provenance not drawn as the primary series, for the same buckets, under
+  // `source=both`. A second line rather than a second card: the point is the gap
+  // between them. `ChartColor`, not a series token: it is deliberately not one of
+  // the series hues, so it cannot be mistaken for a quantity of its own.
+  comparison?: { data: ChartDatum[]; stroke: ChartColor } | null;
 };
 
 // Every card the metrics band can render. Its length drives both the loading
@@ -374,7 +374,7 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
 
   const values = [
     ...chart.data.map((point) => point.value),
-    ...(chart.reference?.data ?? []).map((point) => point.value),
+    ...(chart.comparison?.data ?? []).map((point) => point.value),
   ];
   const minValue = Math.min(...values);
   const maxValue = Math.max(...values);
@@ -444,7 +444,7 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
         {/* No fill when a second series is present: it anchors the domain at
             zero, which compresses both lines into a band at the plot top, and a
             comparison does not need a filled magnitude anyway. */}
-        {chart.kind === 'fallback' || chart.reference ? null : (
+        {chart.kind === 'fallback' || chart.comparison ? null : (
           <AreaSeries
             dataKey={`${chart.key}-area`}
             data={chart.data as ChartDatum[]}
@@ -462,16 +462,16 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
           yAccessor={(d: ChartDatum) => d.value}
           stroke={strokeColor}
         />
-        {chart.reference && chart.reference.data.length > 0 ? (
-          // Dashed and unfilled: the same figure from a source STL does not
-          // compute, which should not read as a second quantity stacked on the
-          // first.
+        {chart.comparison && chart.comparison.data.length > 0 ? (
+          // Dashed and unfilled: the same quantity as the primary series, from
+          // the other provenance, which should not read as a second quantity
+          // stacked on the first.
           <LineSeries
-            dataKey={`${chart.key}-reference`}
-            data={chart.reference.data}
+            dataKey={`${chart.key}-comparison`}
+            data={chart.comparison.data}
             xAccessor={(d: ChartDatum) => d.label}
             yAccessor={(d: ChartDatum) => d.value}
-            stroke={resolveChartColor(chart.reference.stroke)}
+            stroke={resolveChartColor(chart.comparison.stroke)}
             // Heavier than a hairline: where the two provenances agree the
             // lines coincide exactly, and the series colour showing through the
             // gaps is what tells a reader that is what happened.

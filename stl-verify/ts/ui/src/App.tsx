@@ -79,7 +79,7 @@ import {
 } from './lib/dashboard';
 import { isAbortError, toErrorMessage } from './lib/errors';
 import { logging } from './lib/logging';
-import { showsReference } from './lib/provenance';
+import { preferReference, showsReference } from './lib/provenance';
 import { ACTIVITY_ACTIONS, type AppSearchPatch } from './router/search-params';
 import type {
   Allocation,
@@ -962,17 +962,21 @@ function App() {
         ? { data: series, kind: 'series' }
         : { data: fallbackChart(currentValue), kind: 'fallback' };
 
-    const exposureValue =
-      riskCapital?.prime_exposure_usd === undefined ||
-      riskCapital?.prime_exposure_usd === null
-        ? null
-        : parseNumericValue(riskCapital.prime_exposure_usd);
+    // Sky's figures where it reports them: these are the flat line a card falls
+    // back to, which must land on the same number the card's value shows.
+    const exposureValue = parseNumericValue(
+      preferReference(
+        riskCapital?.reference_prime_exposure_usd,
+        riskCapital?.prime_exposure_usd,
+      ),
+    );
 
-    const totalRiskCapitalValue =
-      riskCapital?.total_risk_capital_usd === undefined ||
-      riskCapital?.total_risk_capital_usd === null
-        ? null
-        : parseNumericValue(riskCapital.total_risk_capital_usd);
+    const totalRiskCapitalValue = parseNumericValue(
+      preferReference(
+        riskCapital?.reference_total_risk_capital_usd,
+        riskCapital?.total_risk_capital_usd,
+      ),
+    );
 
     const primeDebtValue = wadToUnits(primeDebtSnapshot?.debt_wad);
 
@@ -980,18 +984,47 @@ function App() {
       riskCapital?.prime_encumbrance_ratio,
     );
 
+    // Sky's is the preferred model, so its series leads and STL's becomes the
+    // comparison. Whole series: a line drawn from both would trace neither.
+    const preferSkySeries = (
+      stl: ChartDatum[],
+      sky: ChartDatum[],
+    ): { primary: ChartDatum[]; comparison: ChartDatum[] } =>
+      sky.length > 0
+        ? { primary: sky, comparison: stl }
+        : { primary: stl, comparison: [] };
+
+    const exposure = preferSkySeries(
+      exposureSeries,
+      toChartSeries(exposureBuckets, (bucket) =>
+        parseNumericValue(bucket.reference_exposure_usd),
+      ),
+    );
+
+    const totalCapital = preferSkySeries(
+      totalCapitalSeries,
+      toChartSeries(totalCapitalBuckets, (bucket) =>
+        parseNumericValue(bucket.reference_total_capital_usd),
+      ),
+    );
+
+    const primeDebt = preferSkySeries(
+      primeDebtSeries,
+      toChartSeries(debtBuckets, (bucket) =>
+        wadToUnits(bucket.reference_debt_wad),
+      ),
+    );
+
     // One ordinal series token per card, named rather than written out as a
     // `var()` read: the token type is what catches a typo (and a repeat of the
     // collision where two of these cards named the same token unnoticed).
     //
-    // Sky's figures for the same buckets ride beside STL's under `both`. One
-    // dashed line per chart where the two describe the same quantity: exposure,
-    // capital and debt. Collateral and encumbrance are Sky's alone, so there is
-    // nothing to compare them with. Not a series token: it must not read as a
-    // quantity of its own.
-    const referenceSeries = (
-      points: { label: string; value: number }[],
-    ): NonNullable<MetricChartSpec['reference']> | null =>
+    // The provenance not leading rides dashed beside the one that is, on the
+    // three charts where both describe the same quantity. Collateral and
+    // encumbrance are Sky's alone, so there is nothing to compare them with.
+    const comparisonSeries = (
+      points: ChartDatum[],
+    ): NonNullable<MetricChartSpec['comparison']> | null =>
       points.length > 0
         ? { data: points, stroke: 'var(--colors-text-muted)' }
         : null;
@@ -1011,34 +1044,22 @@ function App() {
         // Exposure trend from priced receipt-token balances over time; falls
         // back to the flat current value when no history is available.
         key: 'risk-capital',
-        ...seriesOrFallback(exposureSeries, exposureValue),
-        reference: referenceSeries(
-          toChartSeries(exposureBuckets, (bucket) =>
-            parseNumericValue(bucket.reference_exposure_usd),
-          ),
-        ),
+        ...seriesOrFallback(exposure.primary, exposureValue),
+        comparison: comparisonSeries(exposure.comparison),
         stroke: 'chart.series.secondary',
         formatValue: formatCompactUsd,
       },
       {
         key: 'total-capital',
-        ...seriesOrFallback(totalCapitalSeries, totalRiskCapitalValue),
-        reference: referenceSeries(
-          toChartSeries(totalCapitalBuckets, (bucket) =>
-            parseNumericValue(bucket.reference_total_capital_usd),
-          ),
-        ),
+        ...seriesOrFallback(totalCapital.primary, totalRiskCapitalValue),
+        comparison: comparisonSeries(totalCapital.comparison),
         stroke: 'chart.series.quaternary',
         formatValue: formatCompactUsd,
       },
       {
         key: 'prime-debt-exposure',
-        ...seriesOrFallback(primeDebtSeries, primeDebtValue),
-        reference: referenceSeries(
-          toChartSeries(debtBuckets, (bucket) =>
-            wadToUnits(bucket.reference_debt_wad),
-          ),
-        ),
+        ...seriesOrFallback(primeDebt.primary, primeDebtValue),
+        comparison: comparisonSeries(primeDebt.comparison),
         stroke: 'chart.series.quinary',
         formatValue: (value: number) => `${formatCompactNumber(value)} DAI`,
       },
@@ -1072,6 +1093,8 @@ function App() {
     allocationBalanceSeries,
     riskCapital?.prime_exposure_usd,
     riskCapital?.prime_encumbrance_ratio,
+    riskCapital?.reference_prime_exposure_usd,
+    riskCapital?.reference_total_risk_capital_usd,
     riskCapital?.total_risk_capital_usd,
     chartFromLabel,
     chartToLabel,

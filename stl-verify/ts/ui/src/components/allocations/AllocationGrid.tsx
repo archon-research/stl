@@ -966,11 +966,22 @@ export function AllocationGrid({
     'prime-collateral',
   );
   const encumbranceChart = findMetricChart(metricCharts, 'encumbrance-ratio');
+  // One call decides the ratio for the card, its severity, its caption and the
+  // chart's fallback value, so they cannot end up describing different
+  // provenances — a Sky figure over a breach threshold beside STL's "within the
+  // 100% breach level" would read as a bug in the threshold.
+  const skyEncumbranceRatio = riskCapital?.reference_prime_encumbrance_ratio;
   const encumbranceRatio = parseNumericValue(
-    riskCapital?.prime_encumbrance_ratio,
+    preferReference(skyEncumbranceRatio, riskCapital?.prime_encumbrance_ratio),
   );
   const encumbranceBreach = encumbranceSeverity(encumbranceRatio);
-  const unservedChains = riskCapital?.prime_unserved_chains ?? [];
+  // Only STL's ratio is bounded by the chains STL does not serve. Sky's covers
+  // whatever it covers, so the "at least this" caption below does not apply to
+  // it.
+  const unservedChains =
+    skyEncumbranceRatio == null
+      ? (riskCapital?.prime_unserved_chains ?? [])
+      : [];
   // Absence has a cause worth naming: the ratio is required-over-total risk
   // capital, so it cannot be computed without a total. And where chains go
   // unserved the numerator is bounded, making the ratio a floor rather than a

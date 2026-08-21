@@ -10,6 +10,7 @@ import {
   formatUsdValue,
   formatWadValue,
 } from '../../lib/dashboard';
+import { preferReference } from '../../lib/provenance';
 import type { PrimeRiskCapital } from '../../types/allocation';
 import { AppTooltip, SummaryMetric } from '../shared';
 import {
@@ -168,6 +169,22 @@ function observedCaption(observedAt: string | null): string | null {
     : `Observed ${formatFreshnessLabel(observedAt)}`;
 }
 
+/**
+ * A headline figure, Sky's preferred, and which provenance it came from.
+ *
+ * Callers need the provenance as well as the number: the observation stamp is
+ * the reference feed's own, so it may only caption a figure from that feed.
+ */
+function preferredFigure(
+  skyValue: string | null | undefined,
+  stlValue: string | null | undefined,
+): { value: string | null; fromReference: boolean } {
+  return {
+    value: preferReference(skyValue, stlValue),
+    fromReference: skyValue != null,
+  };
+}
+
 function ExposureCard({
   riskCapital,
   observedAt,
@@ -179,14 +196,21 @@ function ExposureCard({
   chart: MetricChartSpec | null;
   isChartsLoading: boolean;
 }) {
+  const exposure = preferredFigure(
+    riskCapital.reference_prime_exposure_usd,
+    riskCapital.prime_exposure_usd,
+  );
+
   return (
     <SummaryMetric
       className={metricsCardClassName}
       label="Exposure"
-      value={formatUsdValue(riskCapital.prime_exposure_usd)}
+      value={formatUsdValue(exposure.value)}
       detail={
         <div className={metricDetailClassName}>
-          <div className={captionClassName}>{observedCaption(observedAt)}</div>
+          <div className={captionClassName}>
+            {observedCaption(exposure.fromReference ? observedAt : null)}
+          </div>
           <MetricCardTrend
             chart={chart}
             isLoading={isChartsLoading}
@@ -209,19 +233,31 @@ function TotalRiskCapitalCard({
   chart: MetricChartSpec | null;
   isChartsLoading: boolean;
 }) {
+  const total = preferredFigure(
+    riskCapital.reference_total_risk_capital_usd,
+    riskCapital.total_risk_capital_usd,
+  );
+  const required = preferredFigure(
+    riskCapital.reference_prime_required_risk_capital_usd,
+    riskCapital.prime_required_risk_capital_usd,
+  );
+  // The stamp is the reference feed's, and it sits on a line covering both
+  // figures, so it is withheld unless both came from that feed.
+  const capitalObservedAt =
+    total.fromReference && required.fromReference ? observedAt : null;
+
   return (
     <SummaryMetric
       className={metricsCardClassName}
       label="Total risk capital"
-      value={formatUsdValue(riskCapital.total_risk_capital_usd ?? '0')}
+      value={formatUsdValue(total.value ?? '0')}
       detail={
         <div className={metricDetailClassName}>
           <div className={captionClassName}>
-            Required{' '}
-            {formatUsdValue(riskCapital.prime_required_risk_capital_usd)}
-            {observedAt === null
+            Required {formatUsdValue(required.value)}
+            {capitalObservedAt === null
               ? null
-              : ` · observed ${formatFreshnessLabel(observedAt)}`}
+              : ` · observed ${formatFreshnessLabel(capitalObservedAt)}`}
           </div>
           <MetricCardTrend
             chart={chart}
