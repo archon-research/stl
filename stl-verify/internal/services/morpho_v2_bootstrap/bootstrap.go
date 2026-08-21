@@ -183,13 +183,8 @@ func (s *Service) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// A repair job that heals nothing must not report success. This job is only
-	// ever triggered because V2 vaults are known to be missing rows, so an empty
-	// set means the run is pointed at the wrong place (wrong CHAIN_ID, wrong
-	// database) — the one outcome nobody would notice if it returned nil.
 	if len(scope.vaults) == 0 {
-		return fmt.Errorf("no VaultV2 vaults of chain %d were first seen at or below the pinned head %d (%d deferred above it): the bootstrap has nothing to repair, which means it is pointed at the wrong chain or database",
-			s.config.ChainID, head.number, scope.deferred)
+		return s.emptyScopeError(scope, head)
 	}
 
 	s.logger.Info("starting VaultV2 bootstrap",
@@ -210,6 +205,24 @@ func (s *Service) Run(ctx context.Context) error {
 	s.logger.Info("VaultV2 bootstrap complete",
 		"vaults", len(scope.vaults), "deferredVaults", scope.deferred, "headBlock", head.number)
 	return nil
+}
+
+// emptyScopeError explains a run with nothing in scope. A repair job that heals
+// nothing must not report success — it is only ever triggered because V2 vaults
+// are known to be missing rows, so it is the one outcome nobody would notice if
+// it returned nil.
+//
+// The two causes need opposite responses, which is why the message branches:
+// deferral is a finalized head that has not caught up yet and clears itself,
+// while an empty set with nothing deferred means the run is pointed somewhere
+// that has no V2 vaults at all.
+func (s *Service) emptyScopeError(scope v2VaultScope, head pinnedBlock) error {
+	if scope.deferred > 0 {
+		return fmt.Errorf("all %d known VaultV2 vaults of chain %d were first seen above the pinned head %d — re-run once finality passes them",
+			scope.deferred, s.config.ChainID, head.number)
+	}
+	return fmt.Errorf("no VaultV2 vaults of chain %d were first seen at or below the pinned head %d: the bootstrap has nothing to repair, which means it is pointed at the wrong chain or database",
+		s.config.ChainID, head.number)
 }
 
 // pinnedBlock is the single block every state read in a run is pinned to, so the
