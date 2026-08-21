@@ -231,16 +231,40 @@ function ThresholdLabels({ thresholds }: { thresholds: ThresholdEntry[] }) {
  * the label is known up front, so the page reads as itself while it loads and
  * nothing moves when the figures land.
  */
+// Not `SkeletonStack`: it fills its items with `surface.subtle`, which is this
+// card's own fill, and takes no tone — so its placeholders are invisible here
+// and neither a composed class nor a descendant override outranks the kit's own
+// layer.
+const placeholderClassName = css({
+  bg: 'border.subtle',
+  borderRadius: 'sm',
+  animation: 'pulse',
+});
+
+function Placeholder({ width, height }: { width: string; height: number }) {
+  return (
+    <div
+      className={placeholderClassName}
+      // Sizes vary per slot, so they ride the style attribute: Panda generates
+      // its classes at build time and cannot see a value passed in.
+      style={{ width, height: `${height}px` }}
+    />
+  );
+}
+
 export function MetricCardSkeleton({ label }: { label: string }) {
   return (
     <SummaryMetric
       className={metricsCardClassName}
       label={label}
-      value={<SkeletonStack count={1} itemHeight={28} />}
+      // Widths are a typical figure and subtitle rather than the full column: a
+      // placeholder the width of the card reads as a filled card, not a loading
+      // one.
+      value={<Placeholder width="8rem" height={28} />}
       detail={
         <div className={metricDetailClassName}>
-          <SkeletonStack count={1} itemHeight={16} />
-          <SkeletonStack count={1} itemHeight={CHART_HEIGHT} />
+          <Placeholder width="12rem" height={16} />
+          <Placeholder width="100%" height={CHART_HEIGHT} />
         </div>
       }
     />
