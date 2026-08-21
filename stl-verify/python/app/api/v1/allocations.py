@@ -854,10 +854,14 @@ async def _prime_wide_indexed_allocations(
         rows.extend(_receipt_token_row(position, category_service) for position in positions)
         rows.extend(_direct_asset_row(holding, category_service) for holding in direct)
 
-    # Prime-scoped, so it belongs to the union once however many proxies there are.
-    if await _custody_applies(prime_address, service):
-        custody = await service.list_anchorage_custody_holdings(prime_address)
-        rows.extend(_anchorage_custody_row(holding, category_service) for holding in custody)
+    # Prime-scoped, so it belongs to the union once however many proxies there
+    # are — and ungated, unlike the proxy-scoped default. `_custody_applies`
+    # answers "does *this* proxy carry the leg", which is the wrong question of a
+    # response that already spans every proxy: asking it drops the leg entirely
+    # whenever a non-primary proxy is the one queried. The read resolves the
+    # prime from whichever proxy it is given, so any of them returns the leg.
+    custody = await service.list_anchorage_custody_holdings(prime_address)
+    rows.extend(_anchorage_custody_row(holding, category_service) for holding in custody)
 
     return rows
 
