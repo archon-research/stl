@@ -903,11 +903,14 @@ dev-endpoints:
 
 # Open psql against the local kind database, or run one single-line statement with SQL=.
 # The kind node publishes Postgres on the host, so no port-forward is involved.
+# SQL reaches psql through the environment, never interpolated into the recipe: the
+# shell re-parses recipe text, so a backtick or $(...) in the statement would execute.
 # Usage: make dev-psql
 #        make dev-psql SQL="select count(*) from morpho_adapter;"
 #        make dev-psql < query.sql          # multi-line: make cannot pass newlines in SQL=
+dev-psql: export SQL := $(SQL)
 dev-psql:
-	@PGPASSWORD=postgres psql -h 127.0.0.1 -p $(KIND_HOST_PG_PORT) -U postgres -d stl_verify $(if $(SQL),-c "$(SQL)")
+	@PGPASSWORD=postgres psql -h 127.0.0.1 -p $(KIND_HOST_PG_PORT) -U postgres -d stl_verify $(if $(SQL),-c "$$SQL")
 
 # Generate ER diagram from database schema (requires dev-up)
 generate-er:
