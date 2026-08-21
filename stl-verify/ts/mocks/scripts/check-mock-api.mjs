@@ -278,6 +278,53 @@ async function checkAggregatedRowShapeAndGrid() {
   assert.equal(quarterHourly.data.length, 97);
 }
 
+/**
+ * `net_flow_usd` has to be a USD figure, not a sum of token units: a bucket that
+ * adds WETH to USDT reports the same USD-per-unit for both, so comparing two
+ * denominations is what catches it.
+ */
+async function checkAggregatedFlowsAreValued() {
+  const usdPerUnit = async (symbol) => {
+    const feed = await request(
+      '/v1/allocations/activity',
+      activity({
+        aggregate: true,
+        resolution: 'PT1H',
+        token_symbol: symbol,
+        limit: 500,
+      }),
+      `activity?aggregate&token_symbol=${symbol}`,
+    );
+    const moved = feed.data.filter(
+      (bucket) => Number(bucket.total_tx_amount) > 0,
+    );
+    assert.ok(moved.length > 0, `${symbol} moved nothing in the window`);
+    return moved.map(
+      (bucket) =>
+        Math.abs(Number(bucket.net_flow_usd)) / Number(bucket.total_tx_amount),
+    );
+  };
+
+  for (const ratio of await usdPerUnit('spWETH')) {
+    assert.ok(
+      ratio > 1000,
+      `a spWETH unit is worth ~1900 USD, valued at ${ratio}`,
+    );
+  }
+  for (const ratio of await usdPerUnit('spUSDT')) {
+    assert.ok(
+      ratio > 0.5 && ratio < 2,
+      `a spUSDT unit is worth ~1 USD, valued at ${ratio}`,
+    );
+  }
+  // A directly-held underlying is deliberately worth nothing here: the endpoint
+  // values only receipt-token flows, because a treasury token's outflows are
+  // recorded as sweeps and its inflows alone are throughput, not net flow.
+  for (const ratio of await usdPerUnit('sUSDS')) {
+    assert.equal(ratio, 0, 'a direct holding must not be valued');
+  }
+}
+
 async function checkRawActivityHonoursLimit() {
   const feed = await request(
     '/v1/allocations/activity',
@@ -844,6 +891,7 @@ const checks = [
   ['the default 24h window has data', checkDefaultWindowAlwaysHasData],
   ['raw and aggregated activity agree', checkRawAndAggregatedActivityAgree],
   ['the aggregated grid follows resolution', checkAggregatedRowShapeAndGrid],
+  ['aggregated flows are valued in USD', checkAggregatedFlowsAreValued],
   ['the raw feed honours limit', checkRawActivityHonoursLimit],
   ['debt raw snapshots', checkDebtRawSnapshots],
   ['debt aggregated buckets', checkDebtAggregatedBuckets],

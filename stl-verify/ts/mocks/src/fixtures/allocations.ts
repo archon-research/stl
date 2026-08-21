@@ -321,6 +321,35 @@ function groveMainnetAllocations(nowMs: number): Allocation[] {
   ];
 }
 
+/**
+ * USD per unit of each receipt token a position holds, read off that position:
+ * `amount_usd / balance` is the row's share ratio times its underlying's oracle
+ * price, which is the product the real endpoint multiplies a flow by. Reading it
+ * off the position is what keeps a valued flow agreeing with the allocation row
+ * it moved, rather than with a price the fixture priced nothing at.
+ *
+ * Directly-held underlyings are absent by construction, matching the endpoint:
+ * it values only receipt-token flows, because a treasury token's outflows are
+ * recorded as sweeps and pricing its inflows alone reports gross throughput as
+ * net flow.
+ */
+export function receiptTokenUsdPerUnit(
+  nowMs: number,
+): ReadonlyMap<number, number> {
+  const priced = new Map<number, number>();
+
+  for (const row of Object.values(seedAllocations(nowMs)).flat()) {
+    const receiptTokenId = row.receipt_token_id ?? null;
+    const balance = Number(row.balance);
+    if (receiptTokenId === null || balance <= 0) {
+      continue;
+    }
+    priced.set(receiptTokenId, Number(row.amount_usd) / balance);
+  }
+
+  return priced;
+}
+
 /** Keyed by lower-cased proxy address; a proxy with no entry holds nothing. */
 export function seedAllocations(
   nowMs: number,

@@ -100,12 +100,17 @@ function valueAt(
 }
 
 /**
- * USD decimals, at the six places a double can carry without inventing digits.
- * The API sends 18; padding rather than printing float noise is the honest
- * translation.
+ * The 18 decimals the API serializes a `Decimal` field at, carrying the six a
+ * double holds without inventing digits. Padding rather than printing float
+ * noise is the honest translation.
  */
-export function usdString(value: number): string {
+export function decimalString(value: number): string {
   return `${value.toFixed(6)}000000000000`;
+}
+
+/** The same serialization, named for the fields that are money. */
+export function usdString(value: number): string {
+  return decimalString(value);
 }
 
 /** USDS → `wad`, as an integer string. `debt_wad` is never fractional. */

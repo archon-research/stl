@@ -15,12 +15,13 @@ import type { MockHandler } from '@archon-research/http-client-msw';
 
 import { iso, mockNow } from '../clock.ts';
 import {
+  receiptTokenUsdPerUnit,
   seedActivity,
   seedAllocations,
   seedReferenceAllocations,
 } from '../fixtures/allocations.ts';
 import { PRIMES } from '../fixtures/registry.ts';
-import { usdString } from '../fixtures/series.ts';
+import { decimalString, usdString } from '../fixtures/series.ts';
 import { LIST_DELAY_MS, SERIES_DELAY_MS, mock } from '../mock-api.ts';
 import { notFound, problemResponse } from '../problem.ts';
 import {
@@ -90,6 +91,7 @@ function activityBuckets(
   rows: readonly AllocationActivity[],
   bucketStartsMs: readonly number[],
   intervalMs: number,
+  usdPerUnit: ReadonlyMap<number, number>,
 ): AllocationActivityBucket[] {
   // The callback's return annotation is what makes the literal fresh; the
   // function's own `AllocationActivityBucket[]` is not enough, because a
@@ -103,8 +105,10 @@ function activityBuckets(
     return {
       bucket_start: iso(startMs),
       event_count: inBucket.length,
-      total_tx_amount: usdString(sumBy(inBucket, grossAmount)),
-      net_flow_usd: usdString(sumBy(inBucket, signedFlow)),
+      total_tx_amount: decimalString(sumBy(inBucket, grossAmount)),
+      net_flow_usd: usdString(
+        sumBy(inBucket, (row) => signedFlowUsd(row, usdPerUnit)),
+      ),
     };
   });
 }
@@ -116,14 +120,30 @@ function sumBy(
   return rows.reduce((total, row) => total + amount(row), 0);
 }
 
+/**
+ * Token units, unvalued and unsigned, summed across whatever denominations the
+ * bucket happens to hold — which is what the API means by the field:
+ * `SUM(ap.tx_amount)` over the same rows, clamped at zero. Not a USD figure, and
+ * not comparable across buckets; `net_flow_usd` is the one that is.
+ */
 function grossAmount(row: AllocationActivity): number {
   return Number(row.tx_amount);
 }
 
-/** A sweep is a rebalance, so it moves no capital in or out of the prime. */
-function signedFlow(row: AllocationActivity): number {
-  if (row.action_type === 'in') return grossAmount(row);
-  if (row.action_type === 'out') return -grossAmount(row);
+/**
+ * The flow in USD: the row's amount at its receipt token's USD-per-unit, signed
+ * by direction. A token with no priced position contributes nothing, which is
+ * both the endpoint's rule for an unpriced flow and its rule for a directly-held
+ * underlying. A sweep is a rebalance, so it moves no capital in or out.
+ */
+function signedFlowUsd(
+  row: AllocationActivity,
+  usdPerUnit: ReadonlyMap<number, number>,
+): number {
+  const priceUsd = usdPerUnit.get(row.token_id);
+  if (priceUsd === undefined) return 0;
+  if (row.action_type === 'in') return grossAmount(row) * priceUsd;
+  if (row.action_type === 'out') return -grossAmount(row) * priceUsd;
   return 0;
 }
 
@@ -210,6 +230,7 @@ export function allocationHandlers(): MockHandler[] {
             matched,
             bucketStarts(fromMs, toMs, window.interval_ms, limit.value),
             window.interval_ms,
+            receiptTokenUsdPerUnit(nowMs),
           ),
         });
       }
