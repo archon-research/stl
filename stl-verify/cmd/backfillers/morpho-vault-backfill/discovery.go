@@ -205,10 +205,7 @@ func listAllBlockKeys(
 				if ctx.Err() != nil {
 					return
 				}
-				listStart := time.Now()
-				receiptKeys, err := listHighestVersionReceipts(ctx, s3Reader, bucket, part)
-				prog.listDurationMs.Add(time.Since(listStart).Milliseconds())
-				prog.listCount.Add(1)
+				keys, err := listPartitionBlockKeys(ctx, logger, s3Reader, bucket, part, from, to, prog)
 				if err != nil {
 					// Both sends watch ctx: the collector stops reading at the
 					// first error it sees, so every other worker is handing its
@@ -216,24 +213,11 @@ func listAllBlockKeys(
 					// which is what retires them — a bare send parks the worker
 					// for the life of this always-on process.
 					select {
-					case resultCh <- listResult{err: fmt.Errorf("listing partition %s: %w", part, err)}:
+					case resultCh <- listResult{err: err}:
 					case <-ctx.Done():
 					}
 					return
 				}
-
-				var keys []blockWork
-				for _, key := range receiptKeys {
-					parsed, ok := s3key.Parse(key)
-					if !ok {
-						continue
-					}
-					if parsed.BlockNumber >= from && parsed.BlockNumber <= to {
-						keys = append(keys, blockWork{key: key, blockNumber: parsed.BlockNumber})
-					}
-				}
-
-				logBlockGapsFromKeys(logger, part, keys, from, to)
 				prog.partitionsDone.Add(1)
 				select {
 				case resultCh <- listResult{keys: keys}:
@@ -277,16 +261,57 @@ func listAllBlockKeys(
 	return allKeys, nil
 }
 
-// logBlockGapsFromKeys is like logBlockGaps but works with blockWork slices.
-func logBlockGapsFromKeys(logger *slog.Logger, partitionPrefix string, keys []blockWork, from, to int64) {
-	if len(keys) == 0 {
-		return
+// listPartitionBlockKeys returns one partition's highest-version receipt keys
+// inside [from,to], refusing a partition the archive has a hole in.
+//
+// That refusal is the run's ONLY hard archive-completeness check, which is why it
+// lives on the scan every run performs rather than on the replay phase: replay is
+// skipped whole when no VaultV2 vault is known, so a fresh database over an
+// unarchived range would otherwise report success having verified nothing. The
+// WARN goes out first because it maps every gap, where the error names a bounded
+// few.
+func listPartitionBlockKeys(
+	ctx context.Context,
+	logger *slog.Logger,
+	s3Reader outbound.S3Reader,
+	bucket, part string,
+	from, to int64,
+	prog *progress,
+) ([]blockWork, error) {
+	listStart := time.Now()
+	receiptKeys, err := listHighestVersionReceipts(ctx, s3Reader, bucket, part)
+	prog.listDurationMs.Add(time.Since(listStart).Milliseconds())
+	prog.listCount.Add(1)
+	if err != nil {
+		return nil, fmt.Errorf("listing partition %s: %w", part, err)
 	}
-	blockNums := make([]int64, len(keys))
+
+	var keys []blockWork
+	for _, key := range receiptKeys {
+		parsed, ok := s3key.Parse(key)
+		if !ok {
+			continue
+		}
+		if parsed.BlockNumber >= from && parsed.BlockNumber <= to {
+			keys = append(keys, blockWork{key: key, blockNumber: parsed.BlockNumber})
+		}
+	}
+
+	blocks := blockNumbersOf(keys)
+	logBlockGaps(logger, part, blocks, from, to)
+	if err := requireCompletePartition(part, blocks, from, to); err != nil {
+		return nil, err
+	}
+	return keys, nil
+}
+
+// blockNumbersOf projects the block numbers out of a partition's key list.
+func blockNumbersOf(keys []blockWork) []int64 {
+	blocks := make([]int64, len(keys))
 	for i, k := range keys {
-		blockNums[i] = k.blockNumber
+		blocks[i] = k.blockNumber
 	}
-	logBlockGaps(logger, partitionPrefix, blockNums, from, to)
+	return blocks
 }
 
 // downloadWorker pulls block work items from workCh, downloads and processes each one.

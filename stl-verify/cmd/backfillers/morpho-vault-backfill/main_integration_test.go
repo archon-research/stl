@@ -238,23 +238,25 @@ func TestIntegration_DiscoverVaults_FindsNoCandidatesInAnUnrelatedRange(t *testi
 
 	ctx := context.Background()
 	bucket := seedBucket(t, ctx)
-	for block := int64(0); block < partition.BlockRangeSize; block++ {
-		if block%500 == 0 {
-			putReceipts(t, ctx, bucket, block, []shared.TransactionReceipt{{
-				TransactionHash: fmt.Sprintf("0x%064x", block),
-				BlockHash:       fmt.Sprintf("0x%064x", block),
-				Logs: []shared.Log{{
-					Address: "0xdAC17F958D2ee523a2206206994597C13D831ec7",
-					Topics:  []string{"0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"},
-				}},
-			}})
-		}
+	// Contiguous, and the range below covers exactly these blocks: the scan
+	// refuses a partition slice the archive has a hole in, so a sampled seed
+	// would fail on the gap rather than on the candidates it is about.
+	const lastBlock = int64(4)
+	for block := range lastBlock + 1 {
+		putReceipts(t, ctx, bucket, block, []shared.TransactionReceipt{{
+			TransactionHash: fmt.Sprintf("0x%064x", block),
+			BlockHash:       fmt.Sprintf("0x%064x", block),
+			Logs: []shared.Log{{
+				Address: "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+				Topics:  []string{"0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"},
+			}},
+		}})
 	}
 
 	setWorkerEnv(t, bucket, chainFixtureServer(t, "0x1").URL)
 	env := newActivityEnv(t, ctx, pool)
 
-	got := runDiscovery(t, env, blockRange{From: 0, To: 999})
+	got := runDiscovery(t, env, blockRange{From: 0, To: lastBlock})
 
 	if got.Candidates != 0 {
 		t.Errorf("Candidates = %d, want 0 for a range of unrelated ERC20 transfers", got.Candidates)
@@ -307,6 +309,87 @@ func TestIntegration_DiscoverVaults_FailsOnAnUndecodableMorphoBlueLog(t *testing
 	if _, err := env.ExecuteActivity(activities.DiscoverVaults, blockRange{From: 0, To: 999}); err == nil {
 		t.Fatal("expected an undecodable Morpho Blue log to fail the activity")
 	}
+}
+
+// A run against a database with no VaultV2 vault skips the replay phase, so the
+// discovery scan is the only thing that reads S3 at all. It must still prove the
+// range is archived: without that, a fresh database over an unarchived window
+// would end green having verified nothing.
+func TestIntegration_Backfill_FailsOnAnArchiveGapWhenNoV2VaultIsKnown(t *testing.T) {
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+	const missingBlock = int64(3)
+	bucket := seedQuietBlocks(t, ctx, 1, 6, missingBlock)
+	setWorkerEnv(t, bucket, chainFixtureServer(t, "0x1").URL)
+
+	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+	if err := register(ctx, newDeps(t, pool), env); err != nil {
+		t.Fatalf("running the production registration: %v", err)
+	}
+	env.ExecuteWorkflow("MorphoVaultBackfill", BackfillParams{From: 1, To: 6})
+
+	err := env.GetWorkflowError()
+	if err == nil {
+		t.Fatal("expected the archive gap to fail the run rather than report success over it")
+	}
+	if !strings.Contains(err.Error(), fmt.Sprint(missingBlock)) {
+		t.Errorf("error = %v, want it to name the missing block %d", err, missingBlock)
+	}
+}
+
+// The other half: over a COMPLETE archive the same zero-vault run is a success,
+// and reports the empty replay honestly rather than by having skipped the check.
+func TestIntegration_Backfill_SucceedsWithNothingToReplayOverACompleteArchive(t *testing.T) {
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	t.Cleanup(cleanup)
+
+	ctx := context.Background()
+	bucket := seedQuietBlocks(t, ctx, 1, 6, -1)
+	setWorkerEnv(t, bucket, chainFixtureServer(t, "0x1").URL)
+
+	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+	if err := register(ctx, newDeps(t, pool), env); err != nil {
+		t.Fatalf("running the production registration: %v", err)
+	}
+	env.ExecuteWorkflow("MorphoVaultBackfill", BackfillParams{From: 1, To: 6})
+
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatalf("running over a complete archive: %v", err)
+	}
+	var got BackfillResult
+	if err := env.GetWorkflowResult(&got); err != nil {
+		t.Fatalf("decoding the workflow result: %v", err)
+	}
+	if got.PartitionsRun != 0 {
+		t.Errorf("PartitionsRun = %d, want 0: no VaultV2 vault is known, so no partition replays", got.PartitionsRun)
+	}
+	if got.Discovered == nil || got.Discovered.KnownV2Vaults != 0 {
+		t.Errorf("Discovered = %+v, want a run that found no VaultV2 vault", got.Discovered)
+	}
+}
+
+// seedQuietBlocks archives one unrelated-ERC20 receipt per block in [from,to],
+// skipping omitBlock (pass -1 to archive them all).
+func seedQuietBlocks(t *testing.T, ctx context.Context, from, to, omitBlock int64) string {
+	t.Helper()
+
+	bucket := seedBucket(t, ctx)
+	for block := from; block <= to; block++ {
+		if block == omitBlock {
+			continue
+		}
+		putReceipts(t, ctx, bucket, block, []shared.TransactionReceipt{{
+			TransactionHash: fmt.Sprintf("0x%064x", block),
+			BlockHash:       fmt.Sprintf("0x%064x", block),
+			Logs: []shared.Log{{
+				Address: "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+				Topics:  []string{"0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"},
+			}},
+		}})
+	}
+	return bucket
 }
 
 // Replay loads the vault registry from the database, so a database with no

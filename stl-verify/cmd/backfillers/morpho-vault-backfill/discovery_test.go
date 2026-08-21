@@ -70,11 +70,17 @@ func TestExtractCandidatesFromReceipts_CorruptMorphoBlueLogFailsRun(t *testing.T
 }
 
 // gatedLister is an S3Reader whose partition listings the test drives: one named
-// partition fails at once, every other one waits for release. That is what places
-// a worker on a channel send at a chosen moment rather than a hoped-for one.
+// partition fails at once, every other one waits for release and then answers with
+// a complete set of receipt keys, minus an optionally omitted block. Gating is what
+// places a worker on a channel send at a chosen moment rather than a hoped-for one.
 type gatedLister struct {
-	failOn  string
-	release chan struct{}
+	failOn    string
+	omitBlock int64
+	release   chan struct{}
+}
+
+func newGatedLister(failOn string) *gatedLister {
+	return &gatedLister{failOn: failOn, omitBlock: -1, release: make(chan struct{})}
 }
 
 func (g *gatedLister) ListPrefix(_ context.Context, _, prefix string) ([]string, error) {
@@ -84,11 +90,18 @@ func (g *gatedLister) ListPrefix(_ context.Context, _, prefix string) ([]string,
 	}
 	<-g.release
 
-	start, _, ok := partitionBlockRange(part)
+	start, end, ok := partitionBlockRange(part)
 	if !ok {
 		return nil, fmt.Errorf("test fixture built an unparseable partition %q", part)
 	}
-	return []string{s3key.BuildWithPartition(part, start, 1, s3key.Receipts)}, nil
+	keys := make([]string, 0, end-start+1)
+	for block := start; block <= end; block++ {
+		if block == g.omitBlock {
+			continue
+		}
+		keys = append(keys, s3key.BuildWithPartition(part, block, 1, s3key.Receipts))
+	}
+	return keys, nil
 }
 
 func (g *gatedLister) ListFiles(context.Context, string, string) ([]outbound.S3File, error) {
@@ -117,7 +130,7 @@ func contiguousPartitions(n int) []string {
 func TestListAllBlockKeys_AbandonedWorkersRetireOnCancellation(t *testing.T) {
 	const workers = 2
 	parts := contiguousPartitions(20)
-	lister := &gatedLister{failOn: parts[0], release: make(chan struct{})}
+	lister := newGatedLister(parts[0])
 
 	// Owned here the way scanBlockRange owns it: it derives a cancellable context
 	// and releases it as it returns, which is the moment the collector goes away.
@@ -145,22 +158,46 @@ func TestListAllBlockKeys_AbandonedWorkersRetireOnCancellation(t *testing.T) {
 // the cancellation arm must not change: every partition's in-range keys, sorted.
 func TestListAllBlockKeys_ReturnsEveryPartitionsKeysInBlockOrder(t *testing.T) {
 	parts := contiguousPartitions(5)
-	lister := &gatedLister{release: make(chan struct{})}
+	lister := newGatedLister("")
 	close(lister.release)
+	lastBlock := int64(len(parts))*partition.BlockRangeSize - 1
 
 	keys, err := listAllBlockKeys(context.Background(), testutil.DiscardLogger(), lister, "test-bucket",
-		parts, 0, int64(len(parts))*partition.BlockRangeSize-1, 2, &progress{})
+		parts, 0, lastBlock, 2, &progress{})
 	if err != nil {
 		t.Fatalf("listAllBlockKeys: %v", err)
 	}
 
-	if len(keys) != len(parts) {
-		t.Fatalf("collected %d block keys, want one per partition (%d)", len(keys), len(parts))
+	if int64(len(keys)) != lastBlock+1 {
+		t.Fatalf("collected %d block keys, want one per block in [0,%d]", len(keys), lastBlock)
 	}
 	for i, key := range keys {
-		if want := int64(i) * partition.BlockRangeSize; key.blockNumber != want {
+		if want := int64(i); key.blockNumber != want {
 			t.Errorf("key %d is for block %d, want %d in ascending block order", i, key.blockNumber, want)
 		}
+	}
+}
+
+// TestListAllBlockKeys_RefusesAPartitionTheArchiveHasAHoleIn: the discovery scan
+// is the only phase every run performs, so it is where archive completeness has to
+// be established. A run over a database with no VaultV2 vault skips the replay
+// phase entirely, and with it the check that used to be the sole one — leaving the
+// run to report success over a range it never proved was archived.
+func TestListAllBlockKeys_RefusesAPartitionTheArchiveHasAHoleIn(t *testing.T) {
+	const missingBlock = int64(1_500)
+	parts := contiguousPartitions(3)
+	lister := newGatedLister("")
+	lister.omitBlock = missingBlock
+	close(lister.release)
+
+	_, err := listAllBlockKeys(context.Background(), testutil.DiscardLogger(), lister, "test-bucket",
+		parts, 0, int64(len(parts))*partition.BlockRangeSize-1, 2, &progress{})
+
+	if !errors.Is(err, errStructuralData) {
+		t.Fatalf("error = %v, want the S3 gap reported as a structural defect", err)
+	}
+	if !strings.Contains(err.Error(), fmt.Sprint(missingBlock)) {
+		t.Errorf("error %v should name the missing block %d", err, missingBlock)
 	}
 }
 
