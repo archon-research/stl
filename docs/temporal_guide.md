@@ -407,12 +407,16 @@ built, which surfaces as `ImagePullBackOff`:
 ```bash
 cd stl-verify
 make dev-up                                  # kind cluster incl. Temporal (server, DB, UI)
-make dev-env                                 # generate cmd/cronjobs/*/ and backfiller .env
+make dev-env                                 # write the .env files dev-env-files names
 make run-cronjob-offchain-price-indexer      # run one cronjob, sourcing its .env
 make run-backfiller-offchain-price-backfill  # run the on-demand worker locally
 make run-backfiller-morpho-vault-backfill    # ditto; reads the real staging raw bucket
 make run-cronjob-solo NAME=morpho-v2-bootstrap  # ditto, with the cluster pod scaled to 0
 ```
+
+`dev-env` covers only the jobs the `dev-env-files` target names, not every job under
+`cmd/cronjobs/` and `cmd/backfillers/`. For one it does not cover, copy a covered job's
+`.env` and edit the job-specific keys — the `run-*` targets say so when the file is missing.
 
 An on-demand worker started this way registers nothing on a schedule and simply idles
 on its task queue — it does no work until you start a run from the Temporal UI (or with
