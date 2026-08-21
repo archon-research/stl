@@ -12,6 +12,7 @@ import {
   DATA_SOURCES,
   PRIMES,
   PROTOCOLS,
+  provenanceAvailability,
   TOKENS,
   TOKEN_PRICES_USD,
 } from '../fixtures/registry.ts';
@@ -131,6 +132,10 @@ export function registryHandlers(): MockHandler[] {
               ),
             );
       },
+    ),
+
+    mock.get('/v1/provenance/available', ({ response }) =>
+      response(200).json(provenanceAvailability()),
     ),
 
     mock.get(
