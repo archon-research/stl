@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from app.api.deps import get_reference_risk_capital_service_factory
 from app.api.v1 import allocations
+from app.domain.entities.allocation import EthAddress
 from app.domain.entities.reference_risk_capital import ReferenceAllocation, ReferencePrimeRiskCapital
 from app.domain.exceptions import ReferenceDataUnavailableError
 from app.main import app
@@ -224,9 +225,30 @@ def test_source_reference_lists_the_monitor_positions(reference_client):
     [_snapshot(_reference_allocation(network="ethereum", chain_id=1, chain="mainnet"))],
     indirect=True,
 )
-def test_rejects_both_until_the_union_exists(reference_client):
-    client, _ = reference_client
+def test_both_marks_a_position_only_sky_reports(reference_client):
+    client, service = reference_client
+    service.prime_proxy_addresses.return_value = [EthAddress(_VALID_ADDR)]
+    service.list_receipt_token_positions.return_value = []
+    service.list_direct_asset_holdings.return_value = []
+    service.primary_proxy_address.return_value = None
 
     response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations?source=both")
 
-    assert response.status_code == 422
+    assert response.status_code == 200
+    assert [row["source"] for row in response.json()] == ["reference"]
+
+
+@pytest.mark.parametrize("reference_client", [ReferenceDataUnavailableError("boom")], indirect=True)
+def test_both_serves_the_indexed_half_when_sky_cannot_be_read(reference_client):
+    # Never a 502 for the merged view: the indexed rows are still true, and every
+    # row carrying its own provenance is what says Sky contributed nothing.
+    client, service = reference_client
+    service.prime_proxy_addresses.return_value = [EthAddress(_VALID_ADDR)]
+    service.list_receipt_token_positions.return_value = []
+    service.list_direct_asset_holdings.return_value = []
+    service.primary_proxy_address.return_value = None
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations?source=both")
+
+    assert response.status_code == 200
+    assert response.json() == []

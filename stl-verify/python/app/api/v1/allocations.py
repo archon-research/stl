@@ -18,7 +18,6 @@ from app.api._validators import (
 )
 from app.api.deps import get_engine, get_reference_risk_capital_service_factory
 from app.api.provenance import (
-    INDEXED_OR_REFERENCE,
     get_requested_provenance,
     resolve_or_422,
 )
@@ -34,6 +33,7 @@ from app.domain.entities.allocation import (
 from app.domain.entities.allocation_category import AllocationCategory
 from app.domain.entities.reference_risk_capital import ReferenceAllocation
 from app.domain.exceptions import ReferenceDataUnavailableError
+from app.domain.position_identity import PositionFacts, position_identity
 from app.domain.provenance import Provenance
 from app.domain.serialization import PlainDecimal
 from app.domain.time_series import TimeSeriesQuery, enforce_filter_for_window
@@ -144,6 +144,14 @@ class AllocationResponse(BaseModel):
             "`network` for the label in that case."
         ),
         examples=[1],
+    )
+    source: Provenance = Field(
+        default=Provenance.INDEXED,
+        description=(
+            "Which provenance reported this position. `both` means the two agreed it exists and "
+            "the figures shown are STL's; `reference` means only Sky reports it, which is either a "
+            "position STL does not index or one on a chain it does not serve."
+        ),
     )
     network: str | None = Field(
         default=None,
@@ -709,10 +717,13 @@ async def list_allocations(
     if not await service.prime_exists(prime_address):
         raise HTTPException(status_code=404, detail="Prime not found")
 
-    source = resolve_or_422(requested_provenance, available=INDEXED_OR_REFERENCE, default=Provenance.INDEXED)
+    source = resolve_or_422(requested_provenance, available=frozenset(Provenance), default=Provenance.INDEXED)
 
     if source is Provenance.REFERENCE:
         return await _reference_allocations(prime_address, reference_services())
+
+    if source is Provenance.BOTH:
+        return await _merged_allocations(prime_address, service, reference_services())
 
     custody_applies = await _custody_applies(prime_address, service)
     positions, direct, custody = await asyncio.gather(
@@ -755,6 +766,93 @@ async def _custody_applies(prime_address: EthAddress, service: AllocationService
     return primary.lower() == str(prime_address).lower()
 
 
+def _position_facts(row: AllocationResponse) -> PositionFacts:
+    """Read a projected row back as the facts that identify its position.
+
+    The receipt token where there is one, else the held asset itself — never the
+    underlying of a wrapped position, which two different vaults can share.
+    """
+    return PositionFacts(
+        chain_id=row.chain_id,
+        network=row.network,
+        position_address=row.receipt_token_address or row.underlying_token_address,
+        receipt_token_id=row.receipt_token_id,
+        protocol_name=row.protocol_name,
+        symbol=row.symbol,
+    )
+
+
+async def _merged_allocations(
+    prime_address: EthAddress,
+    service: AllocationService,
+    reference_service: ReferenceRiskCapitalService,
+) -> list[AllocationResponse]:
+    """Every position either provenance reports, each named once.
+
+    The indexed half is resolved prime-wide here, unlike the proxy-scoped
+    default: the reference half is reported per prime, and joining it against a
+    single proxy's rows matches whatever that one chain happens to hold — for
+    spark, 8 of 12 against its mainnet proxy and 0 against its Base one.
+
+    A reference half that cannot be read leaves the indexed rows as they are.
+    Every row states its own provenance, so an answer with nothing from Sky in
+    it says so without an envelope to carry the notice.
+    """
+    indexed = await _prime_wide_indexed_allocations(prime_address, service)
+
+    try:
+        reference = await _reference_allocations(prime_address, reference_service)
+    except HTTPException as exc:
+        if exc.status_code not in (404, 502):
+            raise
+        logger.warning(
+            "Serving indexed allocations alone; the reference half is unavailable",
+            extra={"prime_address": str(prime_address), "status_code": exc.status_code},
+        )
+        return indexed
+
+    by_identity = {position_identity(_position_facts(row)): row for row in indexed}
+
+    merged: list[AllocationResponse] = []
+    for row in reference:
+        identity = position_identity(_position_facts(row))
+        counterpart = by_identity.pop(identity, None)
+        if counterpart is None:
+            merged.append(row.model_copy(update={"source": Provenance.REFERENCE}))
+            continue
+        # STL's own figures lead where both report a position: they are computed
+        # from the chain rather than reported. The two disagree by ~1% on
+        # exposure, which a consumer needs told rather than averaged away.
+        merged.append(counterpart.model_copy(update={"source": Provenance.BOTH}))
+
+    merged.extend(by_identity.values())
+    return merged
+
+
+async def _prime_wide_indexed_allocations(
+    prime_address: EthAddress, service: AllocationService
+) -> list[AllocationResponse]:
+    """STL's rows for every proxy of the prime, not just the queried one."""
+    proxies = await service.prime_proxy_addresses(prime_address)
+    category_service = AllocationCategoryService()
+
+    rows: list[AllocationResponse] = []
+    for proxy in proxies:
+        positions, direct = await asyncio.gather(
+            service.list_receipt_token_positions(proxy),
+            service.list_direct_asset_holdings(proxy),
+        )
+        rows.extend(_receipt_token_row(position, category_service) for position in positions)
+        rows.extend(_direct_asset_row(holding, category_service) for holding in direct)
+
+    # Prime-scoped, so it belongs to the union once however many proxies there are.
+    if await _custody_applies(prime_address, service):
+        custody = await service.list_anchorage_custody_holdings(prime_address)
+        rows.extend(_anchorage_custody_row(holding, category_service) for holding in custody)
+
+    return rows
+
+
 async def _reference_allocations(
     prime_address: EthAddress, reference_service: ReferenceRiskCapitalService
 ) -> list[AllocationResponse]:
@@ -771,7 +869,10 @@ async def _reference_allocations(
             )
 
         category_service = AllocationCategoryService()
-        return [_reference_allocation_row(row, category_service) for row in snapshot.per_allocation]
+        return [
+            _reference_allocation_row(row, category_service).model_copy(update={"source": Provenance.REFERENCE})
+            for row in snapshot.per_allocation
+        ]
     except ReferenceDataUnavailableError as exc:
         raise HTTPException(status_code=502, detail=f"Reference allocations upstream unavailable: {exc}") from exc
 
