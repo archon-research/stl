@@ -5,6 +5,7 @@ import (
 	"errors"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -302,26 +303,18 @@ func TestCronjobActivities_Execute_StartsEachExecutionWithACleanProgressStore(t 
 	})
 	runExecution(t, suite, progress, interval, recordProgress)
 
-	beats := make(chan []any, 1)
-	progress.record = func(_ context.Context, details ...any) {
-		select {
-		case beats <- details:
-		default:
-		}
-	}
-	var secondBeat []any
-	awaitBeat := RunnerFunc(func(ctx context.Context) error {
-		select {
-		case secondBeat = <-beats:
-			return nil
-		case <-time.After(2 * time.Second):
-			return errors.New("the liveness ticker never beat")
-		}
+	var beats atomic.Int64
+	progress.record = func(context.Context, ...any) { beats.Add(1) }
+	// Long enough for many ticks of the interval above: this asserts an absence,
+	// so the only bound available is time.
+	idleThroughManyTicks := RunnerFunc(func(context.Context) error {
+		time.Sleep(100 * time.Millisecond)
+		return nil
 	})
-	runExecution(t, suite, progress, interval, awaitBeat)
+	runExecution(t, suite, progress, interval, idleThroughManyTicks)
 
-	if len(secondBeat) != 0 {
-		t.Errorf("the second execution's first beat carried %v, want no details", secondBeat)
+	if n := beats.Load(); n != 0 {
+		t.Errorf("the second execution sent %d heartbeat(s) before recording anything of its own, so the first execution's record reached the server", n)
 	}
 }
 
