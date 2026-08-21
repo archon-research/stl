@@ -1186,7 +1186,7 @@
     "allocation_position": {
       "type": "raw_pipeline",
       "owner": "prime",
-      "transform_defer": "VEC-491: bucket 2 (block-time dimension via block_states)"
+      "transform_defer": "VEC-491: bucket 2 (block_timestamp via block_meta dimension, block headers sourced from S3)"
     },
     "anchorage_operation": {
       "type": "raw_pipeline",
@@ -1206,19 +1206,19 @@
       "type": "infrastructure",
       "owner": "infra"
     },
-    "block_time": {
+    "block_meta": {
       "type": "infrastructure",
       "owner": "infra"
     },
     "borrower": {
       "type": "raw_pipeline",
       "owner": "lending",
-      "transform_defer": "VEC-491: bucket 2 (block-time dimension via block_states)"
+      "transform_defer": "VEC-491: bucket 2 (block_timestamp via block_meta dimension, block headers sourced from S3)"
     },
     "borrower_collateral": {
       "type": "raw_pipeline",
       "owner": "lending",
-      "transform_defer": "VEC-491: bucket 2 (block-time dimension via block_states)"
+      "transform_defer": "VEC-491: bucket 2 (block_timestamp via block_meta dimension, block headers sourced from S3)"
     },
     "build_registry": {
       "type": "infrastructure",
@@ -1384,7 +1384,7 @@
     "protocol_event": {
       "type": "raw_pipeline",
       "owner": "infra",
-      "transform_defer": "VEC-491: bucket 2 (block-time dimension via block_states)"
+      "transform_defer": "VEC-491: bucket 2 (block_timestamp via block_meta dimension, block headers sourced from S3)"
     },
     "protocol_oracle": {
       "type": "config",
@@ -1406,7 +1406,7 @@
     "sparklend_reserve_data": {
       "type": "raw_pipeline",
       "owner": "lending",
-      "transform_defer": "VEC-491: bucket 2 (block-time dimension via block_states)"
+      "transform_defer": "VEC-491: bucket 2 (block_timestamp via block_meta dimension, block headers sourced from S3)"
     },
     "token": {
       "type": "dimension",
@@ -1937,6 +1937,11 @@
     },
     {
       "table": "sparklend_reserve_data",
+      "column": "block_timestamp",
+      "block_time": true
+    },
+    {
+      "table": "prime_debt",
       "column": "block_timestamp",
       "block_time": true
     }
