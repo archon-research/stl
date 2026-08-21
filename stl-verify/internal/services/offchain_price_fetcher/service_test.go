@@ -161,10 +161,6 @@ func (m *mockPriceRepository) UpsertPrices(ctx context.Context, prices []*entity
 	return nil
 }
 
-func (m *mockPriceRepository) GetLatestPrice(ctx context.Context, tokenID int64) (*entity.TokenPrice, error) {
-	return nil, nil
-}
-
 func (m *mockPriceRepository) GetUpsertPricesCalls() [][]*entity.TokenPrice {
 	m.mu.Lock()
 	defer m.mu.Unlock()
