@@ -489,11 +489,11 @@ The alert exists precisely because a partially-covered cycle looks healthy.
 
 ---
 
-## morpho-v2-bootstrap fails on an adapter
+## morpho-v2-bootstrap run outcomes
 
 **Nothing here needs rows reconciling by hand.** Adapter membership is an
 append-only observation log, so a failed pass writes no lifecycle a later run has
-to walk back, and re-running is always safe. Two things can stop a run:
+to walk back, and re-running is always safe. Three things can stop a run:
 
 **1. A chain or DB error.** `eth_getLogs` 401/429/5xx, an RPC timeout, a DB
 outage. Temporal retries the activity (3 attempts) and each retry resumes from the
@@ -509,9 +509,32 @@ way inside the transaction — a concurrent live-indexer write landing between t
 two reads — the registry refuses to record membership with no classification
 rather than defaulting a type. It clears on retry: the retry re-reads and probes.
 
-**Not a failure:** a `RemoveAdapter` for an adapter the registry has never seen.
-It records one untyped `is_member = false` observation, which is the truthful
-record of learning about an adapter from its own de-registration.
+**3. `N of M vaults could not be seeded`.** The seed pass deliberately does not
+stop at the first bad vault — a vault-shaped contract it cannot probe fails
+identically on every future run, so aborting there would leave every vault after
+it unhealed forever. So everything healable in that run was already attempted,
+and the joined error names each vault that was not. Work through those
+individually; re-running unchanged produces the same set. The run stays red until
+each one is fixed or explicitly written off, which is the point: a hole is
+reported, never hidden.
+
+**Not failures:**
+
+- A `RemoveAdapter` for an adapter the registry has never seen. It records one
+  untyped `is_member = false` observation, which is the truthful record of
+  learning about an adapter from its own de-registration.
+- A green run whose logs carry `deferredVaults=N`. A vault first SEEN above the
+  run's pinned finalized head is DEFERRED, not skipped: nothing proves it had
+  code at that head, and live indexing has owned it since its first event. Each
+  one is named in its own WARN, and the next run pins a later head that includes
+  it — so the scope heals itself once finality passes them, and there is nothing
+  to do. Evidence is log-only; no metric counts deferrals.
+
+  If EVERY known vault is deferred there is nothing left to work on, so the run
+  fails instead, with `all N known VaultV2 vaults of chain <id> were first seen
+  above the pinned head <block> — re-run once finality passes them`. That is the
+  same benign state: re-run later rather than checking `CHAIN_ID` and
+  `DATABASE_URL`, which this message deliberately does not blame.
 
 **Recovery.** Let Temporal's retries run; if the run is still red, start another
 one (see the section above — a fresh run starts from the factory deploy block,
