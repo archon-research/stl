@@ -224,7 +224,7 @@ func listWorkersParkedOnASend(stacks string) int {
 
 func countListWorkers(stacks string, match func(goroutine string) bool) int {
 	count := 0
-	for _, g := range strings.Split(stacks, "\n\n") {
+	for g := range strings.SplitSeq(stacks, "\n\n") {
 		if strings.Contains(g, "listAllBlockKeys") && strings.Contains(g, "sync.(*WaitGroup).Go") && match(g) {
 			count++
 		}
