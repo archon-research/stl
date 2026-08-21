@@ -459,6 +459,10 @@
       "type": "int4",
       "class": "S"
     },
+    "from_address": {
+      "type": "bytea",
+      "class": "S"
+    },
     "from_block": {
       "type": "int8",
       "class": "S"
@@ -1015,6 +1019,10 @@
     "term_days": {
       "type": "int8",
       "class": "R"
+    },
+    "to_address": {
+      "type": "bytea",
+      "class": "S"
     },
     "token_id": {
       "type": "int8",
