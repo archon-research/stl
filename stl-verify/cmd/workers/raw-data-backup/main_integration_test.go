@@ -19,18 +19,11 @@ var (
 )
 
 func TestMain(m *testing.M) {
-	redisAddr, redisCleanup := testutil.StartRedisForMain()
-	sharedRedisAddr = redisAddr
-
-	lsCfg, lsCleanup := testutil.StartLocalStackForMain("sqs,s3")
-	sharedLocalStackCfg = lsCfg
-
-	code := m.Run()
-
-	lsCleanup()
-	redisCleanup()
-	code = testutil.CheckGoroutineLeaks(code)
-	os.Exit(code)
+	os.Exit(testutil.RunShared(m, testutil.Shared{
+		RedisAddr:          &sharedRedisAddr,
+		LocalStack:         &sharedLocalStackCfg,
+		LocalStackServices: "sqs,s3",
+	}))
 }
 
 // TestRunIntegration_DLQURLDerivationFails confirms run() fails fast when the DLQ

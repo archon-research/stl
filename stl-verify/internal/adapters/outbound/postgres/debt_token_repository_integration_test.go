@@ -10,7 +10,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
-	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 const debtTokenDBName = "test_debt_token"
@@ -18,11 +17,7 @@ const debtTokenDBName = "test_debt_token"
 var debtTokenPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(func() {
-		debtTokenPool = testutil.SetupDBForMain(sharedDSN, debtTokenDBName)
-	}, func() {
-		testutil.CleanupDBForMain(sharedDSN, debtTokenPool, debtTokenDBName)
-	})
+	useFileDatabase(debtTokenDBName, &debtTokenPool)
 }
 
 // truncateDebtToken clears the debt_token table and its dependencies for test isolation.

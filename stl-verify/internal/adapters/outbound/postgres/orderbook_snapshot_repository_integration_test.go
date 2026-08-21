@@ -12,7 +12,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
-	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 const orderbookSnapshotDBName = "test_cex_orderbook"
@@ -20,11 +19,7 @@ const orderbookSnapshotDBName = "test_cex_orderbook"
 var orderbookSnapshotPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(func() {
-		orderbookSnapshotPool = testutil.SetupDBForMain(sharedDSN, orderbookSnapshotDBName)
-	}, func() {
-		testutil.CleanupDBForMain(sharedDSN, orderbookSnapshotPool, orderbookSnapshotDBName)
-	})
+	useFileDatabase(orderbookSnapshotDBName, &orderbookSnapshotPool)
 }
 
 func truncateOrderbookSnapshots(t *testing.T, ctx context.Context) {

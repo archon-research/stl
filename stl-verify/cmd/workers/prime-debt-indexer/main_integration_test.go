@@ -37,17 +37,11 @@ const (
 )
 
 func TestMain(m *testing.M) {
-	dsn, dbCleanup := testutil.StartTimescaleDBForMain()
-	sharedDSN = dsn
-	lsCfg, lsCleanup := testutil.StartLocalStackForMain("s3")
-	sharedLocalStackCfg = lsCfg
-
-	code := m.Run()
-
-	lsCleanup()
-	dbCleanup()
-	code = testutil.CheckGoroutineLeaks(code)
-	os.Exit(code)
+	os.Exit(testutil.RunShared(m, testutil.Shared{
+		TimescaleDSN:       &sharedDSN,
+		LocalStack:         &sharedLocalStackCfg,
+		LocalStackServices: "s3",
+	}))
 }
 
 // primeFixture holds test data for a single prime vault.

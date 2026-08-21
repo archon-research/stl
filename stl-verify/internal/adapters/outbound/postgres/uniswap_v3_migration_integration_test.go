@@ -10,8 +10,6 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-
-	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 const uniswapV3DBName = "test_uniswap_v3_migration"
@@ -19,11 +17,7 @@ const uniswapV3DBName = "test_uniswap_v3_migration"
 var uniswapV3TestPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(func() {
-		uniswapV3TestPool = testutil.SetupDBForMain(sharedDSN, uniswapV3DBName)
-	}, func() {
-		testutil.CleanupDBForMain(sharedDSN, uniswapV3TestPool, uniswapV3DBName)
-	})
+	useFileDatabase(uniswapV3DBName, &uniswapV3TestPool)
 }
 
 // TestUniswapV3Migration verifies that the

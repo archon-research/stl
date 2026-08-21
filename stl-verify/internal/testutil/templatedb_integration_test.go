@@ -14,13 +14,7 @@ import (
 var sharedDSN string
 
 func TestMain(m *testing.M) {
-	dsn, cleanup := StartTimescaleDBForMain()
-	sharedDSN = dsn
-
-	code := m.Run()
-
-	cleanup()
-	os.Exit(code)
+	os.Exit(RunShared(m, Shared{TimescaleDSN: &sharedDSN}))
 }
 
 // The clone's name carries this process's pid, so nothing reclaims it as stale on a

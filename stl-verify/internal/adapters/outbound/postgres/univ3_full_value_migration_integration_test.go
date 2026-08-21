@@ -11,8 +11,6 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-
-	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 const univ3FullValueDBName = "test_univ3_full_value"
@@ -30,11 +28,7 @@ const univ3SkyecoRenameMigrationFile = "20260714_170000_rename_univ3_symbol_skye
 var univ3FullValuePool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(func() {
-		univ3FullValuePool = testutil.SetupDBForMain(sharedDSN, univ3FullValueDBName)
-	}, func() {
-		testutil.CleanupDBForMain(sharedDSN, univ3FullValuePool, univ3FullValueDBName)
-	})
+	useFileDatabase(univ3FullValueDBName, &univ3FullValuePool)
 }
 
 // TestAllocationPositionCatalogueComments verifies the rewritten catalogue
