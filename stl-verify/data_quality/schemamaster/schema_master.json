@@ -70,12 +70,12 @@
       "type": "bytea",
       "class": "S"
     },
-    "alm_address": {
-      "type": "bytea",
-      "class": "S"
-    },
     "allocated_assets_usd": {
       "type": "numeric",
+      "class": "S"
+    },
+    "alm_address": {
+      "type": "bytea",
       "class": "S"
     },
     "amount": {
@@ -90,6 +90,11 @@
     "apy": {
       "type": "numeric",
       "class": "S"
+    },
+    "as_of_date": {
+      "type": "date",
+      "class": "A",
+      "semantics": "event_time"
     },
     "asks": {
       "type": "jsonb",
@@ -495,6 +500,11 @@
       "type": "numeric",
       "class": "D"
     },
+    "holder_id": {
+      "type": "text",
+      "class": "R",
+      "not_null": true
+    },
     "id": {
       "type": "int8",
       "class": "A"
@@ -515,6 +525,11 @@
       "type": "timestamptz",
       "class": "A",
       "semantics": "processing_time"
+    },
+    "instrument_key": {
+      "type": "text",
+      "class": "R",
+      "not_null": true
     },
     "interest_accrued": {
       "type": "numeric",
@@ -829,6 +844,11 @@
       "type": "numeric",
       "class": "S"
     },
+    "position_id": {
+      "type": "bytea",
+      "class": "R",
+      "not_null": true
+    },
     "prev_borrow_rate": {
       "type": "numeric",
       "class": "S"
@@ -859,6 +879,11 @@
     },
     "processing_version": {
       "type": "int4",
+      "class": "A",
+      "not_null": true
+    },
+    "projection": {
+      "type": "text",
       "class": "A",
       "not_null": true
     },
@@ -1373,6 +1398,14 @@
     "oracle_asset": {
       "type": "config",
       "owner": "pricing"
+    },
+    "position_daily": {
+      "type": "derived",
+      "owner": "prime"
+    },
+    "position_state": {
+      "type": "derived",
+      "owner": "prime"
     },
     "prime": {
       "type": "dimension",
