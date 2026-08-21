@@ -25,10 +25,7 @@ def market_configs_path(tmp_path: Path) -> Path:
 
 
 def _env(extra: dict | None = None) -> dict:
-    base = {"DATABASE_URL": "postgresql://localhost/test"}
-    if extra:
-        base.update(extra)
-    return base
+    return dict(extra) if extra else {}
 
 
 def _one(market_key: str, market_configs_path: Path) -> RunnerConfig:
@@ -127,6 +124,30 @@ def test_typoed_boolean_env_override_raises(market_configs_path, monkeypatch):
     monkeypatch.setattr(os, "environ", _env({"CORE_MODEL_JUMPS": "ture"}))
     with pytest.raises(ValueError, match="invalid boolean for JUMPS"):
         _one("sparklend_usdt", market_configs_path)
+
+
+def test_optional_float_env_override_parses(market_configs_path, monkeypatch):
+    monkeypatch.setattr(os, "environ", _env({"CORE_MODEL_MC_TARGET_LTV": "0.8"}))
+    cfg = _one("sparklend_usdt", market_configs_path)
+    assert cfg.params["MC_TARGET_LTV"] == 0.8
+
+
+def test_typoed_optional_float_env_override_raises(market_configs_path, monkeypatch):
+    # A typo must not silently become None -- None is a meaningful model input
+    # (no managed-close target) and params is recorded for auditability.
+    monkeypatch.setattr(os, "environ", _env({"CORE_MODEL_MC_TARGET_LTV": "0.8x"}))
+    with pytest.raises(ValueError, match="invalid float for MC_TARGET_LTV"):
+        _one("sparklend_usdt", market_configs_path)
+
+
+def test_stray_market_config_key_is_dropped_from_params(tmp_path, monkeypatch):
+    # load_params filters unknown keys, so a mistyped key in
+    # market_configs.json cannot leak into the recorded params audit trail.
+    monkeypatch.setattr(os, "environ", _env())
+    path = tmp_path / "market_configs.json"
+    path.write_text(json.dumps({"sparklend_usdt": {"PROTOCOL": "SPARKLEND", "N_MCC": 25}}))
+    cfg = _one("sparklend_usdt", path)
+    assert "N_MCC" not in cfg.params
 
 
 # Every test above runs against a synthetic tmp_path config. This one loads the

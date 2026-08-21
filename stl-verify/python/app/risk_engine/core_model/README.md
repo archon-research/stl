@@ -22,7 +22,7 @@ The financial model logic (ARMA-GARCH calibration, copula simulation, liquidatio
 |---|---|
 | `main.py` replaced by `runner.py` | Original `main.py` printed results to stdout. `runner.py` is a pure function that accepts typed inputs and returns a typed `CoreModelPipelineResult` dataclass, making it testable and composable. |
 | Import paths updated (`from app.risk_engine.core_model.X import Y`) | Required for Python package structure; original used bare module imports only valid when run from the same directory. |
-| `Parallel(n_jobs=-1)` changed: `n_jobs=4` in the calibrator backtest, `n_jobs=1` in the Monte Carlo | `-1` consumed all available CPUs and caused OOM in constrained environments. The MC is single-process on purpose: its per-scenario tensors already peak at ~8.0 GiB for the heaviest market (measured at N_MC=10000), and loky workers would multiply that past any pod memory limit. The backtest parallelises fine — its per-window state is small. |
+| `Parallel(n_jobs=-1)` changed: `n_jobs=4` in the calibrator backtest, `n_jobs=1` in the Monte Carlo | `-1` consumed all available CPUs and caused OOM in constrained environments. Note the MC has **always run sequentially**: the earlier `Parallel(jobs=4)` was a typo joblib silently swallowed (`Parallel.__init__` forwards unknown kwargs to the backend), leaving `n_jobs` at its default of 1. The explicit `n_jobs=1` changes nothing at runtime — it turns the accident into a decision. Do not "restore" parallelism: per-scenario tensors peak at ~8.0 GiB for the heaviest market (measured at N_MC=10000), and loky workers would multiply that past any pod memory limit. The backtest parallelises fine — its per-window state is small. |
 | `orderbook_data` lookup lowercased (`symbol.lower()`) | Original assumed the working directory was case-insensitive (macOS). Lowercase normalisation is required for Linux where the service runs. |
 | Bare `except:` changed to `except Exception:` | Required by the project linter (ruff). |
 | `importer.py` reduced to `change_user_ltvs` only | `load_protocol_data` and `load_price_data` were dead code replaced by the `CoreModelDataReader` port. `load_orderbook_data` moved to `ParquetCoreModelDataReader.get_orderbooks()` (also added to the port), so all I/O goes through the same abstraction. `Liquidator` now accepts pre-loaded orderbooks instead of loading them internally
@@ -308,15 +308,16 @@ app/services/core_model_risk_service.py  RiskModel implementation
 
 app/services/core_model_runner/
 ├── config.py    Param resolution (defaults -> market config -> env)
-├── service.py   The body of one tick: run each market, append results
-├── workflow.py  Temporal workflow; sandboxed, imports nothing from the model
-└── activity.py  The activity that runs the tick; the only side that may import it
+├── service.py   The body of one tick: run each market, append via the writer port
+└── workflow.py  Temporal workflow; sandboxed, imports nothing from the model
 
 app/adapters/temporal/
-└── cronjob.py   Shared harness: connect, ensure schedule, run worker
+└── cronjob.py   Shared harness: connect, ensure/reconcile schedule, run worker
 
 cli/cronjobs/core_model_runner/
-└── main.py      Entry point: Temporal worker, or --once. No business logic.
+├── main.py      Entry point: Temporal worker, or --once. No business logic.
+└── activity.py  The activity + tick wiring (engine, writer, reader); the only
+                 side of the workflow/activity pair that may import the model
 ```
 
 ---

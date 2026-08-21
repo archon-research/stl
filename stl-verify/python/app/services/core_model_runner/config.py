@@ -5,8 +5,8 @@ Params are resolved in three layers (lowest wins):
   2. market_configs.json[key]     -- market-specific required overrides
   3. CORE_MODEL_* env vars        -- runtime overrides (e.g. N_MC=100 for a quick test)
 
-Only DATABASE_URL and CORE_MODEL_MARKET_KEY are required env vars. All other
-params come from the config files and can be selectively overridden via env.
+The entry point (cli/cronjobs/core_model_runner) owns DATABASE_URL and the
+market-key selection; this module only resolves model params.
 """
 
 import json
@@ -14,9 +14,9 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from app.risk_engine.core_model.config import DEFAULTS
+from app.risk_engine.core_model.config import DEFAULTS, INPUTS_DIR, load_params
 
-_INPUTS_DEFAULT = Path(__file__).resolve().parents[3] / "app" / "risk_engine" / "core_model" / "inputs"
+_INPUTS_DEFAULT = Path(INPUTS_DIR)
 _MARKET_CONFIGS_DEFAULT = _INPUTS_DEFAULT / "market_configs.json"
 
 
@@ -28,7 +28,6 @@ def _load_market_configs(path: Path) -> dict[str, dict]:
 
 @dataclass(frozen=True)
 class RunnerConfig:
-    database_url: str
     market_key: str
     inputs_dir: Path
     params: dict = field(default_factory=dict)
@@ -55,20 +54,12 @@ class RunnerConfig:
 
     @classmethod
     def _build(cls, market_key: str, market_configs: dict[str, dict]) -> "RunnerConfig":
-        # Layer 1: defaults
-        params = dict(DEFAULTS)
-        # Layer 2: market-specific overrides from config file
-        params.update(market_configs[market_key])
-        # Layer 3: env var overrides
         env_overrides = {k: _coerce(k, os.environ[env_key]) for k, env_key in _ENV_MAP.items() if env_key in os.environ}
-        params.update(env_overrides)
-
-        return cls(
-            database_url=os.environ["DATABASE_URL"],
-            market_key=market_key,
-            inputs_dir=Path(os.environ.get("CORE_MODEL_INPUTS_DIR", str(_INPUTS_DEFAULT))),
-            params=params,
-        )
+        # load_params layers defaults -> overrides AND drops unknown keys, so a
+        # stray key in market_configs.json cannot leak into the audit trail
+        # (params is recorded verbatim in the results table).
+        params = load_params(overrides={**market_configs[market_key], **env_overrides})
+        return cls(market_key=market_key, inputs_dir=_INPUTS_DEFAULT, params=params)
 
 
 # Maps CORE param name -> env var name
@@ -100,12 +91,15 @@ _ENV_MAP: dict[str, str] = {
 
 
 def _coerce(param: str, raw: str) -> object:
-    """Coerce a string env var to the type of the corresponding DEFAULTS entry."""
+    """Coerce a string env var to the type of the corresponding DEFAULTS entry.
+
+    Strict on purpose: the advisory-bounds decision covers out-of-range VALUES,
+    not unparseable strings. A typo'd override silently changing a model input
+    (JUMPS=ture -> False, MC_TARGET_LTV=0.8x -> None) is a typo, not an
+    override, and params is recorded in the results table for auditability.
+    """
     default = DEFAULTS.get(param)
     if isinstance(default, bool):
-        # Strict on purpose: the advisory-bounds decision covers out-of-range
-        # VALUES, not unparseable strings. A typo'd boolean (JUMPS=ture)
-        # silently flipping a model feature off is a typo, not an override.
         low = raw.lower()
         if low in ("true", "1", "yes"):
             return True
@@ -117,9 +111,10 @@ def _coerce(param: str, raw: str) -> object:
     if isinstance(default, float):
         return float(raw)
     if default is None:
-        # Optional params (MC_TARGET_LTV) -- try float, fall back to None
+        # Optional params (MC_TARGET_LTV): only a float override makes sense --
+        # None is the default, so there is no reason to set the var to get it.
         try:
             return float(raw)
         except ValueError:
-            return None
+            raise ValueError(f"invalid float for {param}: {raw!r}") from None
     return raw

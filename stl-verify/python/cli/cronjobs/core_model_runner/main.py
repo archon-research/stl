@@ -1,4 +1,4 @@
-"""CORE model runner entry point. Scheduling only -- the tick body is a service.
+"""CORE model runner entry point. Scheduling and wiring -- the tick body is a service.
 
 Default mode is a Temporal worker: it registers the schedule and then serves
 the task queue, matching every other cronjob in the repo.
@@ -15,8 +15,8 @@ market looks like:
     uv run python -m cli.cronjobs.core_model_runner.main --once
 
 Params inherit: default_params.json -> market_configs.json[key] -> env vars.
-Changing CORE_MODEL_RUN_INTERVAL_HOURS does not move an existing schedule --
-delete it in Temporal and restart the worker (see CONTRIBUTING.md).
+CORE_MODEL_RUN_INTERVAL_HOURS is reconciled into the existing Temporal
+schedule on worker startup, so changing it needs only a redeploy.
 """
 
 import argparse
@@ -26,16 +26,23 @@ import os
 from datetime import timedelta
 
 from app.adapters.temporal import CronjobSpec, run_cronjob
-from app.services.core_model_runner.activity import run_core_model_activity
-from app.services.core_model_runner.config import RunnerConfig
-from app.services.core_model_runner.service import run_markets
+from app.logging import setup_logging
 from app.services.core_model_runner.workflow import CoreModelRunnerWorkflow
+from cli.cronjobs.core_model_runner.activity import run_core_model_activity, run_tick
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 NAME = "core-model-runner"
 _DEFAULT_INTERVAL_HOURS = "24"
+
+
+def _configure_logging() -> None:
+    # The harness, service and model all log under app.* — setup_logging gives
+    # them the repo's JSON shape (logger name included) so Loki can tell a
+    # harness line from a model line. cli.* falls through to the root handler,
+    # which at minimum must carry %(name)s for the same reason.
+    setup_logging()
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
 
 def _market_key() -> str:
@@ -47,9 +54,9 @@ def _interval() -> timedelta:
 
 
 async def run_once() -> None:
-    configs = RunnerConfig.resolve(_market_key())
-    logger.info("one-shot run for %d market(s)", len(configs))
-    await run_markets(configs)
+    market_key = _market_key()
+    logger.info("one-shot run market_key=%s", market_key)
+    await run_tick(market_key)
 
 
 async def run_worker() -> None:
@@ -74,6 +81,7 @@ def main(argv: list[str] | None = None) -> None:
         help="run a single pass in-process and exit, without connecting to Temporal",
     )
     args = parser.parse_args(argv)
+    _configure_logging()
     asyncio.run(run_once() if args.once else run_worker())
 
 
