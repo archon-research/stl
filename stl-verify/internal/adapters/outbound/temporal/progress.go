@@ -54,6 +54,11 @@ func (p *ActivityProgress[T]) SaveProgress(ctx context.Context, progress T) erro
 // Absence — the first attempt of a run — is (zero, false, nil); details that
 // cannot be decoded are an error, because silently treating them as absence
 // would restart a multi-hour sweep without saying so.
+//
+// A successful read also seeds what a liveness Beat re-sends: a resumed attempt
+// records nothing of its own until its first unit of work lands, and Temporal
+// keeps only the last heartbeat's details, so a bare ping in that window would
+// erase the record this attempt is resuming from.
 func (p *ActivityProgress[T]) LoadProgress(ctx context.Context) (T, bool, error) {
 	var progress T
 	if !activity.HasHeartbeatDetails(ctx) {
@@ -62,10 +67,6 @@ func (p *ActivityProgress[T]) LoadProgress(ctx context.Context) (T, bool, error)
 	if err := activity.GetHeartbeatDetails(ctx, &progress); err != nil {
 		return progress, false, fmt.Errorf("decoding activity heartbeat details: %w", err)
 	}
-	// A resumed attempt records nothing of its own until its first unit of work
-	// lands, and Temporal keeps only the last heartbeat's details — so without
-	// seeding here a liveness Beat in that window would erase the very record
-	// this attempt is resuming from.
 	p.mu.Lock()
 	p.latest = []any{progress}
 	p.mu.Unlock()
