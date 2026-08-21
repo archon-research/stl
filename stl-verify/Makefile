@@ -2020,7 +2020,8 @@ run-cronjob-%:
 # is dealt to whichever polls first — usually the in-cluster pod, running an image built
 # from whatever commit was current when it was loaded. Scaling it to zero is what makes a
 # local run actually test the local code. The cluster worker is restored on exit, Ctrl-C
-# included.
+# included, at the replica count it had — transform-worker sits at 0 on purpose, and
+# restoring a flat 1 would start a worker nobody asked for.
 #
 # Usage: make run-cronjob-solo NAME=morpho-v2-bootstrap
 #        (then, from another shell, for a job with no schedule) make temporal-cli \
@@ -2028,9 +2029,13 @@ run-cronjob-%:
 #                --workflow-id morpho-v2-bootstrap-local"
 run-cronjob-solo:
 	@test -n "$(NAME)" || { echo "ERROR: NAME is required. Example: make run-cronjob-solo NAME=morpho-v2-bootstrap"; exit 1; }
-	@echo "==> Handing the $(NAME) task queue to a local worker (scaling deployment/$(NAME) to 0)..."
-	@kubectl --context=$(KUBE_CONTEXT) scale -n $(KUBE_NS) deployment/$(NAME) --replicas=0
-	@trap '$(MAKE) --no-print-directory kind-scale-up-$(NAME)' EXIT INT TERM; $(MAKE) --no-print-directory run-cronjob-$(NAME)
+	@$(require_kind_context)
+	@echo "==> Handing the $(NAME) task queue to a local worker (scaling deployment/$(call deployment_of,$(NAME)) to 0)..."
+	@PRIOR=$$(kubectl --context=$(KUBE_CONTEXT) get -n $(KUBE_NS) deployment/$(call deployment_of,$(NAME)) -o jsonpath='{.spec.replicas}'); \
+	  test -n "$$PRIOR" || { echo "ERROR: deployment/$(call deployment_of,$(NAME)) has no replica count to restore."; exit 1; }; \
+	  kubectl --context=$(KUBE_CONTEXT) scale -n $(KUBE_NS) deployment/$(call deployment_of,$(NAME)) --replicas=0; \
+	  trap "$(MAKE) --no-print-directory kind-scale-up-$(call deployment_of,$(NAME)) REPLICAS=$$PRIOR" EXIT INT TERM; \
+	  $(MAKE) --no-print-directory run-cronjob-$(NAME)
 
 # Pattern rules for backfiller binaries — work for any backfiller under cmd/backfillers/.
 build-backfiller-%:
@@ -2338,6 +2343,10 @@ kind-load-python-api:
 CRONJOBS := $(sort $(notdir $(patsubst %/main.go,%,$(wildcard cmd/cronjobs/*/main.go))))
 CRONJOB_DEPLOYMENTS := spark-anchorage-indexer offchain-price-indexer reference-capital-indexer morpho-v2-bootstrap
 
+# The Deployment behind one cmd/cronjobs package name — the same name, except for the
+# anchorage-indexer mismatch above. Targets that take NAME= take the package name.
+deployment_of = $(if $(filter anchorage-indexer,$(1)),spark-anchorage-indexer,$(1))
+
 # Pattern rule: docker-build-cronjob-<name> builds any cronjob image.
 docker-build-cronjob-%:
 	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/cronjobs/$* --build-arg BIN=cronjob -t stl-$*:$(LOCAL_TAG) -f Dockerfile.common .
@@ -2410,8 +2419,7 @@ kind-redeploy-worker:
 	  $(MAKE) docker-build-$(NAME) LOCAL=1; \
 	fi
 	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-$(NAME):$(LOCAL_TAG)"
-	@DEPLOY="$(NAME)"; [ "$(NAME)" = "anchorage-indexer" ] && DEPLOY="spark-anchorage-indexer"; \
-	  kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/$$DEPLOY -n $(KUBE_NS)
+	@kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/$(call deployment_of,$(NAME)) -n $(KUBE_NS)
 
 kind-redeploy-watcher:
 	$(MAKE) docker-build-watcher LOCAL=1
