@@ -12,6 +12,7 @@ import {
   DATA_SOURCES,
   PRIMES,
   PROTOCOLS,
+  PROVENANCE_AVAILABILITY,
   TOKENS,
   TOKEN_PRICES_USD,
 } from '../fixtures/registry.ts';
@@ -90,6 +91,11 @@ export function registryHandlers(): MockHandler[] {
     mock.get('/v1/data-sources', ({ response }) =>
       response(200).json({ sources: [...DATA_SOURCES] }),
     ),
+
+    mock.get('/v1/provenance/available', async ({ response }) => {
+      await mockDelay(LIST_DELAY_MS);
+      return response(200).json(PROVENANCE_AVAILABILITY);
+    }),
 
     mock.get('/v1/tokens', async ({ query, response }) => {
       await mockDelay(LIST_DELAY_MS);

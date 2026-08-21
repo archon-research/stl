@@ -5,7 +5,14 @@
  * rows to the ones the rest of the fixtures reference (see `TOKENS`).
  */
 import { FIXTURE_ANCHOR_ISO } from '../clock.ts';
-import type { Chain, DataSource, Prime, Protocol, Token } from '../schema.ts';
+import type {
+  Chain,
+  DataSource,
+  Prime,
+  Protocol,
+  ProvenanceAvailability,
+  Token,
+} from '../schema.ts';
 
 export const CHAINS: readonly Chain[] = [
   { chain_id: 1, name: 'Ethereum Mainnet' },
@@ -117,6 +124,21 @@ export const PRIMES: readonly SeededPrime[] = PRIME_ROWS.map(
     prime_vault_address: PRIME_VAULTS[name],
   }),
 );
+
+/**
+ * Sky's monitor covers both primes, matching the rest of this fixture world:
+ * every per-prime handler serves `reference` and `both`, and this endpoint's
+ * contract is to never advertise less than what will work. Names are derived
+ * from `PRIME_ROWS` (one entry per prime, not per proxy) so a renamed prime
+ * cannot leave a stale availability row behind.
+ */
+export const PROVENANCE_AVAILABILITY: ProvenanceAvailability = {
+  primes: [...new Set(PRIME_ROWS.map(([, name]) => name))].map((name) => ({
+    name,
+    available: ['indexed', 'reference', 'both'],
+  })),
+  reference_upstream_reachable: true,
+};
 
 export const USDS = '0xdc035d45d973e3ec169d2276ddab16f1e407384f';
 export const USDT = '0xdac17f958d2ee523a2206206994597c13d831ec7';
