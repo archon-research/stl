@@ -3,7 +3,7 @@
 import pytest
 
 from app.services.core_model_runner import service as service_module
-from app.services.core_model_runner.service import async_db_url, run_markets
+from app.services.core_model_runner.service import run_markets
 
 
 def _cfg(market_key: str):
@@ -29,15 +29,16 @@ class _StubEngine:
 
 @pytest.fixture()
 def collected(monkeypatch):
-    """Capture which markets ran, with the engine and model stubbed out."""
+    """Capture which markets ran, with the engine, writer and model stubbed out."""
     engine = _StubEngine()
     ran: list[str] = []
     failing: set[str] = set()
 
-    monkeypatch.setattr(service_module, "create_async_engine", lambda *a, **k: engine)
+    monkeypatch.setattr(service_module, "create_worker_db_engine", lambda url: engine)
+    monkeypatch.setattr(service_module, "PostgresCoreModelResultsWriter", lambda _engine: object())
 
     class _Service:
-        def __init__(self, _engine): ...
+        def __init__(self, _writer): ...
 
         async def run_market(self, cfg):
             if cfg.market_key in failing:
@@ -76,16 +77,3 @@ async def test_engine_is_disposed_even_when_a_market_fails(collected):
 async def test_empty_config_list_is_rejected():
     with pytest.raises(ValueError, match="no market configs"):
         await run_markets([])
-
-
-@pytest.mark.parametrize(
-    ("raw", "expected"),
-    [
-        ("postgresql://u:p@h:5432/db", "postgresql+asyncpg://u:p@h:5432/db"),
-        ("postgres://u:p@h:5432/db", "postgresql+asyncpg://u:p@h:5432/db"),
-        # asyncpg takes `ssl`, not libpq's `sslmode`, so the parameter is dropped.
-        ("postgresql://u:p@h:5432/db?sslmode=require", "postgresql+asyncpg://u:p@h:5432/db"),
-    ],
-)
-def test_async_db_url_normalisation(raw, expected):
-    assert async_db_url(raw) == expected
