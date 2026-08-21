@@ -64,6 +64,63 @@ func TestActivityProgress_LoadProgressReturnsAnEarlierAttemptsRecord(t *testing.
 	}
 }
 
+// TestActivityProgress_LivenessBeatAfterAResumeCarriesTheLoadedRecord: a resumed
+// attempt records nothing of its own until its first unit of work lands. Temporal
+// keeps only the LAST heartbeat's details, so a bare liveness ping in that window
+// erases the very record the attempt is resuming from — and the attempt after it
+// re-sweeps a range this one already covered.
+func TestActivityProgress_LivenessBeatAfterAResumeCarriesTheLoadedRecord(t *testing.T) {
+	env := (&testsuite.WorkflowTestSuite{}).NewTestActivityEnvironment()
+	recorded := sweepPoint{Scope: "chain-1", Block: 23_400_000}
+	env.SetHeartbeatDetails(recorded)
+
+	progress := NewActivityProgress[sweepPoint]()
+	var sent [][]any
+	progress.record = func(_ context.Context, details ...any) { sent = append(sent, details) }
+
+	loadThenBeat := func(ctx context.Context) error {
+		if _, _, err := progress.LoadProgress(ctx); err != nil {
+			return err
+		}
+		progress.Beat(ctx)
+		return nil
+	}
+	env.RegisterActivity(loadThenBeat)
+	if _, err := env.ExecuteActivity(loadThenBeat); err != nil {
+		t.Fatalf("ExecuteActivity: %v", err)
+	}
+
+	if len(sent) != 1 {
+		t.Fatalf("heartbeats sent = %d, want 1 (the liveness beat)", len(sent))
+	}
+	if len(sent[0]) != 1 || sent[0][0] != recorded {
+		t.Errorf("the beat after a resume carried %v, want the loaded %+v", sent[0], recorded)
+	}
+}
+
+// TestActivityProgress_ResetDropsTheCarriedRecord: one store serves the whole
+// worker process, so the record a finished execution left in it must not ride the
+// next execution's beats.
+func TestActivityProgress_ResetDropsTheCarriedRecord(t *testing.T) {
+	ctx := context.Background()
+	progress := NewActivityProgress[sweepPoint]()
+	var sent [][]any
+	progress.record = func(_ context.Context, details ...any) { sent = append(sent, details) }
+
+	if err := progress.SaveProgress(ctx, sweepPoint{Scope: "chain-1", Block: 23_400_000}); err != nil {
+		t.Fatalf("SaveProgress: %v", err)
+	}
+	progress.Reset()
+	progress.Beat(ctx)
+
+	if len(sent) != 2 {
+		t.Fatalf("heartbeats sent = %d, want 2 (the progress record and the liveness beat)", len(sent))
+	}
+	if len(sent[1]) != 0 {
+		t.Errorf("the beat after a reset carried %v, want no details", sent[1])
+	}
+}
+
 // TestActivityProgress_LivenessBeatCarriesTheLastRecordedProgress: Temporal
 // keeps only the LAST heartbeat's details, so once progress is recorded no
 // heartbeat may go out empty. A bare liveness ping would erase the resume point

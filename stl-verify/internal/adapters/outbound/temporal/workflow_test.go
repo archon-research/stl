@@ -215,11 +215,66 @@ func TestStartHeartbeat_BeatsThroughTheProgressStore(t *testing.T) {
 	}
 }
 
+// TestCronjobActivities_Execute_StartsEachExecutionWithACleanProgressStore: the
+// store is built once at worker start, but heartbeat details belong to ONE
+// activity execution. Without a reset the record a finished run left behind rides
+// the next run's liveness beats to the server, handing that run's second attempt a
+// resume point over blocks it never swept.
+func TestCronjobActivities_Execute_StartsEachExecutionWithACleanProgressStore(t *testing.T) {
+	const interval = time.Millisecond
+	suite := &testsuite.WorkflowTestSuite{}
+	progress := NewActivityProgress[sweepPoint]()
+	progress.record = func(context.Context, ...any) {}
+
+	recordProgress := RunnerFunc(func(ctx context.Context) error {
+		return progress.SaveProgress(ctx, sweepPoint{Scope: "first-execution", Block: 23_400_000})
+	})
+	runExecution(t, suite, progress, interval, recordProgress)
+
+	beats := make(chan []any, 1)
+	progress.record = func(_ context.Context, details ...any) {
+		select {
+		case beats <- details:
+		default:
+		}
+	}
+	var secondBeat []any
+	awaitBeat := RunnerFunc(func(ctx context.Context) error {
+		select {
+		case secondBeat = <-beats:
+			return nil
+		case <-time.After(2 * time.Second):
+			return errors.New("the liveness ticker never beat")
+		}
+	})
+	runExecution(t, suite, progress, interval, awaitBeat)
+
+	if len(secondBeat) != 0 {
+		t.Errorf("the second execution's first beat carried %v, want no details", secondBeat)
+	}
+}
+
+// runExecution drives one activity execution of runner against the shared store.
+func runExecution(t *testing.T, suite *testsuite.WorkflowTestSuite, progress ProgressHeartbeater, heartbeat time.Duration, runner Runner) {
+	t.Helper()
+	activities, err := newCronjobActivities(runner, nil, heartbeat, progress)
+	if err != nil {
+		t.Fatalf("newCronjobActivities: %v", err)
+	}
+	env := suite.NewTestActivityEnvironment()
+	env.RegisterActivity(activities.Execute)
+	if _, err := env.ExecuteActivity(activities.Execute, time.Now().UTC()); err != nil {
+		t.Fatalf("ExecuteActivity: %v", err)
+	}
+}
+
 type fakeProgressHeartbeater struct {
 	onBeat func()
 }
 
 func (f *fakeProgressHeartbeater) Beat(context.Context) { f.onBeat() }
+
+func (f *fakeProgressHeartbeater) Reset() {}
 
 func goroutineStacks(t *testing.T) string {
 	t.Helper()

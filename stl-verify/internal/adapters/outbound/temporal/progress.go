@@ -62,7 +62,24 @@ func (p *ActivityProgress[T]) LoadProgress(ctx context.Context) (T, bool, error)
 	if err := activity.GetHeartbeatDetails(ctx, &progress); err != nil {
 		return progress, false, fmt.Errorf("decoding activity heartbeat details: %w", err)
 	}
+	// A resumed attempt records nothing of its own until its first unit of work
+	// lands, and Temporal keeps only the last heartbeat's details — so without
+	// seeding here a liveness Beat in that window would erase the very record
+	// this attempt is resuming from.
+	p.mu.Lock()
+	p.latest = []any{progress}
+	p.mu.Unlock()
 	return progress, true, nil
+}
+
+// Reset drops the record this store carries. The store lives for the worker
+// PROCESS while heartbeat details belong to one activity execution, so without
+// this a second run on the same pod would beat the first run's position at the
+// server and hand its own retry a resume point over blocks it never covered.
+func (p *ActivityProgress[T]) Reset() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.latest = nil
 }
 
 // Beat sends the liveness heartbeat, carrying the latest recorded progress.
