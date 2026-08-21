@@ -3,6 +3,7 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"slices"
@@ -483,6 +484,168 @@ func TestProcessingVersionTrigger_CrossBuildRace_PrimeDebt(t *testing.T) {
 	}
 	if want := []int{0, 1}; !slices.Equal(versions, want) {
 		t.Fatalf("processing_version assignment incorrect: got %v, want %v", versions, want)
+	}
+}
+
+// TestProcessingVersionTrigger_CrossBuildRace_MorphoAdapterStateCompressed exercises the
+// shape the other three cannot: the version is decided by the INSERT (through
+// next_processing_version_morpho_adapter_state) rather than only by the trigger, because
+// on a columnstored chunk TimescaleDB resolves ON CONFLICT before triggers fire and a
+// defaulted version loses the row. Deciding it earlier moves the read that the advisory
+// lock protects, so the race has to be proven again at the new call site — and against a
+// chunk that is already compressed, where a mis-timed read costs either a lost correction
+// or a duplicate the unique index cannot catch.
+func TestProcessingVersionTrigger_CrossBuildRace_MorphoAdapterStateCompressed(t *testing.T) {
+	withConcurrencyPool(t)
+	ctx := context.Background()
+	truncateAdapterStateForConcurrency(t, ctx)
+	key := seedMorphoAdapterKey(t, ctx)
+
+	insertAdapterState(t, ctx, key, 0)
+	compressAdapterStateForConcurrency(t, ctx)
+
+	errs := runRace(t, ctx, func(ctx context.Context, tx pgx.Tx, buildID int) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO morpho_adapter_state (morpho_adapter_id, block_number, block_version, timestamp, real_assets, processing_version, build_id)
+			 VALUES ($1, $2, $3, $4, 0, next_processing_version_morpho_adapter_state($1, $2, $3, $4, $5), $5)
+			 ON CONFLICT (morpho_adapter_id, block_number, block_version, timestamp, processing_version) DO NOTHING`,
+			key.adapterID, key.blockNumber, key.blockVersion, key.timestamp, buildID)
+		return err
+	})
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("worker %d: %v", i, err)
+		}
+	}
+
+	versions := collectAdapterStateVersions(t, ctx, key)
+	if want := []int{0, 1, 2}; !slices.Equal(versions, want) {
+		t.Fatalf("processing_version assignment incorrect: got %v, want %v — both builds must append their own version alongside the compressed one", versions, want)
+	}
+}
+
+// morphoAdapterKey is the natural key the adapter-state race inserts under.
+type morphoAdapterKey struct {
+	adapterID    int64
+	blockNumber  int64
+	blockVersion int
+	timestamp    time.Time
+}
+
+// seedMorphoAdapterKey seeds the protocol/token/vault/adapter rows morpho_adapter_state
+// FKs and returns the position the race writes to.
+func seedMorphoAdapterKey(t *testing.T, ctx context.Context) morphoAdapterKey {
+	t.Helper()
+
+	var protocolID int64
+	if err := concurrencyPool.QueryRow(ctx,
+		`INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block, updated_at, metadata)
+		 VALUES (1, '\xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb'::bytea, 'Morpho Blue', 'lending', 18883124, NOW(), '{}'::jsonb)
+		 ON CONFLICT (chain_id, address) DO UPDATE SET name = EXCLUDED.name
+		 RETURNING id`).Scan(&protocolID); err != nil {
+		t.Fatalf("seed protocol: %v", err)
+	}
+
+	var tokenID int64
+	if err := concurrencyPool.QueryRow(ctx,
+		`INSERT INTO token (chain_id, address, symbol, decimals) VALUES (1, $1, 'USDC', 6) RETURNING id`,
+		bytes.Repeat([]byte{0xc1}, 20)).Scan(&tokenID); err != nil {
+		t.Fatalf("seed token: %v", err)
+	}
+
+	var vaultID int64
+	if err := concurrencyPool.QueryRow(ctx,
+		`INSERT INTO morpho_vault (chain_id, protocol_id, address, asset_token_id, vault_version, created_at_block)
+		 VALUES (1, $1, $2, $3, 2, 18883124) RETURNING id`,
+		protocolID, bytes.Repeat([]byte{0xc2}, 20), tokenID).Scan(&vaultID); err != nil {
+		t.Fatalf("seed vault: %v", err)
+	}
+
+	var adapterID int64
+	if err := concurrencyPool.QueryRow(ctx,
+		`INSERT INTO morpho_adapter (morpho_vault_id, address, asset_token_id) VALUES ($1, $2, $3) RETURNING id`,
+		vaultID, bytes.Repeat([]byte{0xc3}, 20), tokenID).Scan(&adapterID); err != nil {
+		t.Fatalf("seed adapter: %v", err)
+	}
+
+	return morphoAdapterKey{
+		adapterID:    adapterID,
+		blockNumber:  24_500_000,
+		blockVersion: 0,
+		timestamp:    time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC),
+	}
+}
+
+// insertAdapterState writes the position's row for one build, the way the repository does.
+func insertAdapterState(t *testing.T, ctx context.Context, key morphoAdapterKey, buildID int) {
+	t.Helper()
+	if _, err := concurrencyPool.Exec(ctx,
+		`INSERT INTO morpho_adapter_state (morpho_adapter_id, block_number, block_version, timestamp, real_assets, processing_version, build_id)
+		 VALUES ($1, $2, $3, $4, 0, next_processing_version_morpho_adapter_state($1, $2, $3, $4, $5), $5)
+		 ON CONFLICT (morpho_adapter_id, block_number, block_version, timestamp, processing_version) DO NOTHING`,
+		key.adapterID, key.blockNumber, key.blockVersion, key.timestamp, buildID); err != nil {
+		t.Fatalf("seed the position's first row: %v", err)
+	}
+}
+
+// compressAdapterStateForConcurrency columnstores the seeded chunk, which is what the
+// 2-day compression policy has already done to every chunk a replay lands in.
+func compressAdapterStateForConcurrency(t *testing.T, ctx context.Context) {
+	t.Helper()
+	var chunks int
+	if err := concurrencyPool.QueryRow(ctx,
+		`SELECT count(*)::int FROM (SELECT compress_chunk(c) FROM show_chunks('morpho_adapter_state') c) s`,
+	).Scan(&chunks); err != nil {
+		t.Fatalf("compress morpho_adapter_state chunks: %v", err)
+	}
+	if chunks == 0 {
+		t.Fatal("morpho_adapter_state has no chunk to compress; the seed write did not land")
+	}
+}
+
+func collectAdapterStateVersions(t *testing.T, ctx context.Context, key morphoAdapterKey) []int {
+	t.Helper()
+	rows, err := concurrencyPool.Query(ctx,
+		`SELECT processing_version FROM morpho_adapter_state
+		 WHERE morpho_adapter_id = $1 AND block_number = $2 AND block_version = $3 AND timestamp = $4
+		 ORDER BY processing_version`,
+		key.adapterID, key.blockNumber, key.blockVersion, key.timestamp)
+	if err != nil {
+		t.Fatalf("query versions: %v", err)
+	}
+	defer rows.Close()
+	var versions []int
+	for rows.Next() {
+		var v int
+		if err := rows.Scan(&v); err != nil {
+			t.Fatalf("scan version: %v", err)
+		}
+		versions = append(versions, v)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iter versions: %v", err)
+	}
+	return versions
+}
+
+// The chunks are dropped, not the rows: a DELETE would leave a columnstored chunk behind
+// for whichever test runs next.
+func truncateAdapterStateForConcurrency(t *testing.T, ctx context.Context) {
+	t.Helper()
+	if _, err := concurrencyPool.Exec(ctx,
+		`SELECT drop_chunks('morpho_adapter_state', older_than => now() + interval '1000 years')`); err != nil {
+		t.Fatalf("drop morpho_adapter_state chunks: %v", err)
+	}
+	for _, table := range []string{`morpho_adapter`, `morpho_vault`} {
+		if _, err := concurrencyPool.Exec(ctx, `DELETE FROM `+table); err != nil {
+			t.Fatalf("truncate %s: %v", table, err)
+		}
+	}
+	if _, err := concurrencyPool.Exec(ctx, `TRUNCATE protocol CASCADE`); err != nil {
+		t.Fatalf("truncate protocol: %v", err)
+	}
+	if _, err := concurrencyPool.Exec(ctx, `TRUNCATE token CASCADE`); err != nil {
+		t.Fatalf("truncate token: %v", err)
 	}
 }
 
