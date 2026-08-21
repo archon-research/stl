@@ -21,6 +21,10 @@ var (
 	sharedLocalStackCfg testutil.LocalStackConfig
 )
 
+// rawBucketPrefix satisfies chainutil.ValidateS3BucketForChain, a prefix check
+// rather than an equality one, so a per-test suffix is allowed.
+const rawBucketPrefix = "stl-sentineltest-ethereum-raw-"
+
 func TestMain(m *testing.M) {
 	os.Exit(testutil.RunShared(m, testutil.Shared{
 		TimescaleDSN:       &sharedDSN,
@@ -43,7 +47,7 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 	t.Setenv("BUILD_GIT_HASH", "test")
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
-	t.Setenv("S3_BUCKET", "stl-sentineltest-ethereum-raw")
+	t.Setenv("S3_BUCKET", testutil.S3TestBucketName(t, rawBucketPrefix))
 	t.Setenv("DEPLOY_ENV", "test")
 	t.Setenv("CHAIN_ID", "1")
 	t.Setenv("DEX", "curve")
@@ -98,13 +102,8 @@ func runStartupAndShutdown(t *testing.T, dex string) {
 
 	s3Client := testutil.NewS3Client(t, ctx, sharedLocalStackCfg)
 
-	// Bucket name must satisfy the stl-sentinel{env}-{chain}-raw prefix convention;
-	// chainutil resolves chain 1 to "ethereum", so this is the only valid name.
-	const (
-		bucket    = "stl-sentineltest-ethereum-raw"
-		deployEnv = "test"
-	)
-
+	const deployEnv = "test"
+	bucket := testutil.S3TestBucketName(t, rawBucketPrefix)
 	testutil.EnsureBucket(t, ctx, s3Client, bucket)
 
 	t.Setenv("BUILD_GIT_HASH", "test")

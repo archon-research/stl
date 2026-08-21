@@ -32,11 +32,11 @@ var (
 	sharedLocalStackCfg testutil.LocalStackConfig
 )
 
-// testBucket / testDeployEnv satisfy chainutil.ValidateS3BucketForChain, which the
-// cache reader enforces at construction: stl-sentinel{env}-{chain}-raw, chainID=1 -> "ethereum".
+// rawBucketPrefix / testDeployEnv satisfy chainutil.ValidateS3BucketForChain, a
+// prefix check rather than an equality one, so a per-test suffix is allowed.
 const (
-	testBucket    = "stl-sentineltest-ethereum-raw"
-	testDeployEnv = "test"
+	rawBucketPrefix = "stl-sentineltest-ethereum-raw-"
+	testDeployEnv   = "test"
 	// archiveBucket receives raw SC call archives when ARCHIVE_SC_CALLS=true.
 	archiveBucket = "test-morpho-worker-raw-sc-calls"
 	// archivePrefix is the chain_id partition rawsckey.Build writes under for chainID=1.
@@ -63,8 +63,8 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 	t.Setenv("BUILD_GIT_HASH", "test")
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
-	t.Setenv("S3_BUCKET", "stl-sentineltest-ethereum-raw")
-	t.Setenv("DEPLOY_ENV", "test")
+	t.Setenv("S3_BUCKET", testutil.S3TestBucketName(t, rawBucketPrefix))
+	t.Setenv("DEPLOY_ENV", testDeployEnv)
 
 	err := run(context.Background(), []string{
 		"-queue", "http://localhost/test-queue",
@@ -97,12 +97,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 
 	s3Client := testutil.NewS3Client(t, ctx, sharedLocalStackCfg)
 
-	// Bucket name must satisfy the stl-sentinel{env}-{chain}-raw prefix convention.
-	const (
-		bucket    = "stl-sentineltest-ethereum-raw"
-		deployEnv = "test"
-	)
-
+	bucket := testutil.S3TestBucketName(t, rawBucketPrefix)
 	testutil.EnsureBucket(t, ctx, s3Client, bucket)
 
 	t.Setenv("BUILD_GIT_HASH", "test")
@@ -114,7 +109,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
 	t.Setenv("S3_BUCKET", bucket)
-	t.Setenv("DEPLOY_ENV", deployEnv)
+	t.Setenv("DEPLOY_ENV", testDeployEnv)
 
 	runCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -172,15 +167,21 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	// Morpho Blue is deployed at block 18883124 on Ethereum; use a block above it.
-	blockNum := testutil.ReservedBlock(t, "morpho-indexer")
+	const blockNum int64 = 19_000_000
 	const version = 1
+
+	// One prefix for both the seeder and the binary: the binary builds its own cache
+	// key, so a test sharing Redis with another package can only separate them here.
+	keyPrefix := testutil.SanitizeTestName(t.Name())
+	t.Setenv("REDIS_KEY_PREFIX", keyPrefix)
 
 	// Seed Redis with an AccrueInterest receipt so the worker's cache read returns
 	// it directly (no S3 fallback needed).
-	seedAccrueInterestReceipt(t, bgCtx, blockNum, version)
+	seedAccrueInterestReceipt(t, bgCtx, keyPrefix, blockNum, version)
 
 	s3Client := testutil.NewS3Client(t, bgCtx, sharedLocalStackCfg)
-	for _, b := range []string{testBucket, archiveBucket} {
+	rawBucket := testutil.S3TestBucketName(t, rawBucketPrefix)
+	for _, b := range []string{rawBucket, archiveBucket} {
 		testutil.EnsureBucket(t, bgCtx, s3Client, b)
 	}
 
@@ -202,7 +203,7 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 	t.Setenv("AWS_REGION", "us-east-1")
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
-	t.Setenv("S3_BUCKET", testBucket)
+	t.Setenv("S3_BUCKET", rawBucket)
 	t.Setenv("DEPLOY_ENV", testDeployEnv)
 	t.Setenv("CHAIN_ID", "1")
 	t.Setenv("ARCHIVE_SC_CALLS", "true")
@@ -306,7 +307,7 @@ var (
 // seedAccrueInterestReceipt writes a Morpho Blue AccrueInterest receipt into the
 // Redis block cache at the given block/version, so the worker's cache read
 // returns it.
-func seedAccrueInterestReceipt(t *testing.T, ctx context.Context, blockNum int64, version int) {
+func seedAccrueInterestReceipt(t *testing.T, ctx context.Context, keyPrefix string, blockNum int64, version int) {
 	t.Helper()
 
 	eventsABI, err := abis.GetMorphoBlueEventsABI()
@@ -347,6 +348,7 @@ func seedAccrueInterestReceipt(t *testing.T, ctx context.Context, blockNum int64
 
 	cacheCfg := redisAdapter.ConfigDefaults()
 	cacheCfg.Addr = sharedRedisAddr
+	cacheCfg.KeyPrefix = keyPrefix
 	blockCache, err := redisAdapter.NewBlockCache(cacheCfg, nil)
 	if err != nil {
 		t.Fatalf("create block cache: %v", err)

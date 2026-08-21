@@ -26,11 +26,11 @@ var (
 	sharedLocalStackCfg testutil.LocalStackConfig
 )
 
-// testBucket / testDeployEnv satisfy the cache reader's bucket-name convention
-// (stl-sentinel{env}-{chain}-raw); chainID=1 -> "ethereum".
+// rawBucketPrefix / testDeployEnv satisfy chainutil.ValidateS3BucketForChain, a
+// prefix check rather than an equality one, so a per-test suffix is allowed.
 const (
-	testBucket    = "stl-sentineltest-ethereum-raw"
-	testDeployEnv = "test"
+	rawBucketPrefix = "stl-sentineltest-ethereum-raw-"
+	testDeployEnv   = "test"
 )
 
 func TestMain(m *testing.M) {
@@ -52,7 +52,7 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 	t.Setenv("AWS_REGION", "us-east-1")
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
-	t.Setenv("S3_BUCKET", testBucket)
+	t.Setenv("S3_BUCKET", testutil.S3TestBucketName(t, rawBucketPrefix))
 	t.Setenv("DEPLOY_ENV", testDeployEnv)
 
 	err := run(context.Background(), []string{
@@ -86,7 +86,8 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	defer sqsServer.Close()
 
 	s3Client := testutil.NewS3Client(t, ctx, sharedLocalStackCfg)
-	testutil.EnsureBucket(t, ctx, s3Client, testBucket)
+	rawBucket := testutil.S3TestBucketName(t, rawBucketPrefix)
+	testutil.EnsureBucket(t, ctx, s3Client, rawBucket)
 
 	t.Setenv("BUILD_GIT_HASH", "test")
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
@@ -96,7 +97,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	t.Setenv("AWS_REGION", "us-east-1")
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
-	t.Setenv("S3_BUCKET", testBucket)
+	t.Setenv("S3_BUCKET", rawBucket)
 	t.Setenv("DEPLOY_ENV", testDeployEnv)
 	t.Setenv("CHAIN_ID", "1")
 	t.Setenv("ARCHIVE_SC_CALLS", "false")

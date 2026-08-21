@@ -136,13 +136,13 @@ func endpointHost(endpoint string) string {
 	return u.Hostname()
 }
 
-// EnsureBucket creates bucket unless it is already there, for suites that share one
-// LocalStack.
+// EnsureBucket creates bucket unless it is already there, for a name shared by
+// more than one test in a package.
 //
-// Existing is tolerated because it is expected: the stl-sentinel{env}-{chain}-raw
-// name is fixed by what the worker parses, so every package driving one of those
-// binaries asks for it, and `go test -p` runs them at once. A test that counts
-// objects needs its own bucket from S3TestBucketName instead.
+// Existing is tolerated because it is expected: an archive bucket is named for the
+// worker, not the test, so every test in the package asks for the same one. A name
+// that has to be unique per test comes from S3TestBucketName, which needs no
+// tolerance and so can be counted against.
 func EnsureBucket(t *testing.T, ctx context.Context, client *s3.Client, bucket string) {
 	t.Helper()
 

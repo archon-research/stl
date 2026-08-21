@@ -18,6 +18,10 @@ var (
 	sharedLocalStackCfg testutil.LocalStackConfig
 )
 
+// rawBucketPrefix satisfies chainutil.ValidateS3BucketForChain, a prefix check
+// rather than an equality one, so a per-test suffix is allowed.
+const rawBucketPrefix = "stl-sentineltest-ethereum-raw-"
+
 func TestMain(m *testing.M) {
 	os.Exit(testutil.RunShared(m, testutil.Shared{
 		RedisAddr:          &sharedRedisAddr,
@@ -65,7 +69,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	ctx := context.Background()
 
 	s3Client := testutil.NewS3Client(t, ctx, sharedLocalStackCfg)
-	const bucket = "stl-sentineltest-ethereum-raw"
+	bucket := testutil.S3TestBucketName(t, rawBucketPrefix)
 	testutil.EnsureBucket(t, ctx, s3Client, bucket)
 
 	sqsServer, sqsState := testutil.StartMockSQS(t)
@@ -117,7 +121,7 @@ func setBaseEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("SQS_QUEUE_URL", "http://localhost/main-queue")
 	t.Setenv("DLQ_QUEUE_URL", "http://localhost/dlq-queue.fifo")
-	t.Setenv("S3_BUCKET", "stl-sentineltest-ethereum-raw")
+	t.Setenv("S3_BUCKET", testutil.S3TestBucketName(t, rawBucketPrefix))
 	t.Setenv("REDIS_ADDR", "127.0.0.1:6379")
 	t.Setenv("CHAIN_ID", "1")
 	t.Setenv("DEPLOY_ENV", "test")
