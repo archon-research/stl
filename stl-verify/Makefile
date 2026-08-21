@@ -442,7 +442,7 @@ dev-up:
 	@echo "==> Waiting for all deployments to roll out..."
 	@set -a; . ../.env.secrets 2>/dev/null; set +a; \
 	if [ -n "$$ALCHEMY_API_KEY" ]; then \
-	  DEPS="mock-blockchain-server watcher morpho-indexer oracle-price-worker avalanche-oracle-price-worker sparklend-position-tracker prime-debt-indexer base-psm3-indexer python-api $(CRONJOB_DEPLOYMENTS)"; \
+	  DEPS="mock-blockchain-server watcher morpho-indexer oracle-price-worker avalanche-oracle-price-worker sparklend-position-tracker prime-debt-indexer base-psm3-indexer curve-indexer uniswap-v3-indexer uniswap-v4-indexer python-api $(CRONJOB_DEPLOYMENTS)"; \
 	else \
 	  DEPS="mock-blockchain-server watcher python-api $(CRONJOB_DEPLOYMENTS)"; \
 	fi; \
@@ -460,8 +460,9 @@ dev-up:
 	  echo "  The watcher pipeline is running with the mock blockchain server."; \
 	  echo "  Workers require the following keys in .env.secrets:"; \
 	  echo ""; \
-	  echo "    ALCHEMY_API_KEY    — oracle-price-worker, morpho-indexer,"; \
-	  echo "                         sparklend-position-tracker, prime-debt-indexer"; \
+	  echo "    ALCHEMY_API_KEY    — oracle-price-worker, avalanche-oracle-price-worker, morpho-indexer,"; \
+	  echo "                         sparklend-position-tracker, prime-debt-indexer, base-psm3-indexer,"; \
+	  echo "                         curve-indexer, uniswap-v3-indexer, uniswap-v4-indexer"; \
 	  echo "    COINGECKO_API_KEY  — offchain-price-indexer"; \
 	  echo ""; \
 	  echo "  Once set, run: make kind-secrets && make dev-up-workers"; \
@@ -478,7 +479,7 @@ dev-up-workers:
 	@set -a; . ../.env.secrets 2>/dev/null; set +a; \
 	MISSING=""; \
 	if [ -z "$$ALCHEMY_API_KEY" ]; then \
-	  MISSING="$$MISSING\n    ALCHEMY_API_KEY    — oracle-price-worker, morpho-indexer, sparklend-position-tracker, prime-debt-indexer"; \
+	  MISSING="$$MISSING\n    ALCHEMY_API_KEY    — oracle-price-worker, avalanche-oracle-price-worker, morpho-indexer, sparklend-position-tracker, prime-debt-indexer, base-psm3-indexer, curve-indexer, uniswap-v3-indexer, uniswap-v4-indexer"; \
 	fi; \
 	if [ -z "$$COINGECKO_API_KEY" ]; then \
 	  MISSING="$$MISSING\n    COINGECKO_API_KEY  — offchain-price-indexer"; \
@@ -490,7 +491,7 @@ dev-up-workers:
 	  echo ""; \
 	fi; \
 	if [ -n "$$ALCHEMY_API_KEY" ]; then \
-	  echo "==> Deploying Alchemy workers (oracle-price-worker, morpho-indexer, sparklend-position-tracker, prime-debt-indexer)..."; \
+	  echo "==> Deploying Alchemy workers (oracle-price-worker, morpho-indexer, sparklend-position-tracker, prime-debt-indexer, curve-indexer, uniswap-v3-indexer, uniswap-v4-indexer)..."; \
 	  $(MAKE) _dev-up-alchemy-workers; \
 	else \
 	  echo "==> Skipping Alchemy workers (no ALCHEMY_API_KEY)"; \
@@ -502,8 +503,10 @@ _dev-up-alchemy-workers:
 	$(call build-if-needed,stl-sparklend-position-tracker:$(LOCAL_TAG),docker-build-sparklend-position-tracker LOCAL=1)
 	$(call build-if-needed,stl-prime-debt-indexer:$(LOCAL_TAG),docker-build-prime-debt-indexer LOCAL=1)
 	$(call build-if-needed,stl-psm3-indexer:$(LOCAL_TAG),docker-build-psm3-indexer LOCAL=1)
+	# One image for curve-indexer + uniswap-v3-indexer + uniswap-v4-indexer.
+	$(call build-if-needed,stl-dex-indexer:$(LOCAL_TAG),docker-build-dex-indexer LOCAL=1)
 	$(MAKE) kind-load-workers kind-deploy-workers
-	@for dep in morpho-indexer oracle-price-worker sparklend-position-tracker prime-debt-indexer base-psm3-indexer; do \
+	@for dep in morpho-indexer oracle-price-worker sparklend-position-tracker prime-debt-indexer base-psm3-indexer curve-indexer uniswap-v3-indexer uniswap-v4-indexer; do \
 	  kubectl --context=$(KUBE_CONTEXT) rollout status deployment/$$dep -n $(KUBE_NS) --timeout=300s || \
 	    { echo "ERROR: deployment $$dep not ready after 300s"; exit 1; }; \
 	done
@@ -1532,7 +1535,7 @@ docker-release-fluid-vault-indexer-staging:
 # =============================================================================
 # Docker Build & Push - DEX Indexer
 # =============================================================================
-# One shared image for every DEX deployment (curve-indexer, uniswap-v3-indexer);
+# One shared image for every DEX deployment (curve-indexer, uniswap-v3-indexer, uniswap-v4-indexer);
 # the DEX env var selects the factory at runtime (cmd/workers/dex-indexer).
 
 ECR_REPO_DEX_INDEXER = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-dex-indexer
@@ -2077,7 +2080,15 @@ kind-infra:
 	kubectl --context=$(KUBE_CONTEXT) apply -f ../k8s/dev-infra/temporal.yaml
 	# Apply remaining infra resources to the app namespace.
 	kubectl --context=$(KUBE_CONTEXT) apply -f ../k8s/dev-infra/jaeger.yaml       -n $(KUBE_NS)
-	kubectl --context=$(KUBE_CONTEXT) apply -f ../k8s/dev-infra/localstack.yaml   -n $(KUBE_NS)
+	# localstack-init is generated from the canonical script so there is exactly one
+	# copy of it in the repo; the Deployment mounts it by subPath as init-aws.sh.
+	kubectl --context=$(KUBE_CONTEXT) create configmap localstack-init --from-file=init-aws.sh=localstack-init/init-aws.sh -n $(KUBE_NS) --dry-run=client -o yaml | kubectl --context=$(KUBE_CONTEXT) apply -f -
+	# LocalStack runs init-aws.sh only at container start and the ConfigMap is a subPath
+	# mount, so a changed script would otherwise never re-run on a warm dev-up and newly
+	# added queues would silently not exist. Stamping the hash of the manifest *and* the
+	# script into the pod template rolls the pod exactly when either changes.
+	sed "s/__LOCALSTACK_MANIFEST_SHA__/$$(cat ../k8s/dev-infra/localstack.yaml localstack-init/init-aws.sh | shasum -a 256 | cut -c1-16)/" ../k8s/dev-infra/localstack.yaml \
+	  | kubectl --context=$(KUBE_CONTEXT) apply -f - -n $(KUBE_NS)
 	kubectl --context=$(KUBE_CONTEXT) apply -f ../k8s/dev-infra/redis.yaml        -n $(KUBE_NS)
 	kubectl --context=$(KUBE_CONTEXT) apply -f ../k8s/dev-infra/timescaledb.yaml  -n $(KUBE_NS)
 	@echo "==> Waiting for timescaledb to be ready (may take a moment on first run — image pull)..."
@@ -2143,7 +2154,7 @@ kind-load-watcher:
 	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-watcher:$(LOCAL_TAG)"
 
 kind-load-workers:
-	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-oracle-price-worker:$(LOCAL_TAG) stl-morpho-indexer:$(LOCAL_TAG) stl-sparklend-position-tracker:$(LOCAL_TAG) stl-prime-debt-indexer:$(LOCAL_TAG) stl-psm3-indexer:$(LOCAL_TAG)"
+	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-oracle-price-worker:$(LOCAL_TAG) stl-morpho-indexer:$(LOCAL_TAG) stl-sparklend-position-tracker:$(LOCAL_TAG) stl-prime-debt-indexer:$(LOCAL_TAG) stl-psm3-indexer:$(LOCAL_TAG) stl-dex-indexer:$(LOCAL_TAG)"
 
 # Guard against drift now that cronjobs are hand-maintained (generator retired):
 # the dev overlay's Deployment set must equal {watcher, python-api} + CRONJOB_DEPLOYMENTS.
@@ -2191,7 +2202,7 @@ kind-deploy-apps: check-dev-overlay-sync
 
 kind-deploy-workers:
 	$(call kind-apply-rendered,kubectl kustomize ../k8s/overlays/dev/workers)
-	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/morpho-indexer deployment/oracle-price-worker deployment/avalanche-oracle-price-worker deployment/sparklend-position-tracker deployment/prime-debt-indexer deployment/base-psm3-indexer -n $(KUBE_NS)
+	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/morpho-indexer deployment/oracle-price-worker deployment/avalanche-oracle-price-worker deployment/sparklend-position-tracker deployment/prime-debt-indexer deployment/base-psm3-indexer deployment/curve-indexer deployment/uniswap-v3-indexer deployment/uniswap-v4-indexer -n $(KUBE_NS)
 
 # Opt-in: build + deploy the watcher-data-validator cron (excluded from `make dev-up`).
 # It verifies stored blocks against real Etherscan, which is meaningless on the mock
@@ -2275,19 +2286,28 @@ _docker-release-offchain-price-backfill-internal:
 kind-load-cronjobs:
 	@$(MAKE) --no-print-directory kind-load-images IMAGES="$(foreach cj,$(CRONJOBS),stl-$(cj):$(LOCAL_TAG))"
 
-# Rebuild and redeploy a specific worker or cronjob.
+# Rebuild and redeploy a specific worker or cronjob. NAME is the dev Deployment
+# name; the case below maps it to the image/build target where they differ
+# (the three DEX workers share the dex-indexer image, base-psm3-indexer runs
+# the psm3-indexer image) and to the Deployment where that differs (anchorage).
 # Usage: make kind-redeploy-worker NAME=morpho-indexer
+#        make kind-redeploy-worker NAME=uniswap-v4-indexer
 #        make kind-redeploy-worker NAME=anchorage-indexer
 kind-redeploy-worker:
 	@test -n "$(NAME)" || { echo "ERROR: NAME is required. Example: make kind-redeploy-worker NAME=morpho-indexer"; exit 1; }
-	@if echo " $(CRONJOBS) " | grep -q " $(NAME) "; then \
+	@IMG="$(NAME)"; DEPLOY="$(NAME)"; \
+	case "$(NAME)" in \
+	  curve-indexer|uniswap-v3-indexer|uniswap-v4-indexer) IMG=dex-indexer ;; \
+	  base-psm3-indexer) IMG=psm3-indexer ;; \
+	  anchorage-indexer) DEPLOY=spark-anchorage-indexer ;; \
+	esac; \
+	if echo " $(CRONJOBS) " | grep -q " $(NAME) "; then \
 	  $(MAKE) docker-build-cronjob-$(NAME); \
 	else \
-	  $(MAKE) docker-build-$(NAME) LOCAL=1; \
-	fi
-	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-$(NAME):$(LOCAL_TAG)"
-	@DEPLOY="$(NAME)"; [ "$(NAME)" = "anchorage-indexer" ] && DEPLOY="spark-anchorage-indexer"; \
-	  kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/$$DEPLOY -n $(KUBE_NS)
+	  $(MAKE) docker-build-$$IMG LOCAL=1; \
+	fi; \
+	$(MAKE) --no-print-directory kind-load-images IMAGES="stl-$$IMG:$(LOCAL_TAG)"; \
+	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/$$DEPLOY -n $(KUBE_NS)
 
 kind-redeploy-watcher:
 	$(MAKE) docker-build-watcher LOCAL=1

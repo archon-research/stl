@@ -1,34 +1,34 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: curve-indexer
+  name: uniswap-v4-indexer
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: curve-indexer
+      app: uniswap-v4-indexer
   template:
     metadata:
       labels:
-        app: curve-indexer
+        app: uniswap-v4-indexer
     spec:
-      serviceAccountName: curve-indexer
+      serviceAccountName: uniswap-v4-indexer
       containers:
-        - name: curve-indexer
+        - name: uniswap-v4-indexer
           # Image name used as the Kustomize images transformer key.
           # The overlay kustomization.yaml overrides newName + newTag.
           # Runs the shared dex-indexer binary (cmd/workers/dex-indexer) with
-          # DEX=curve from curve-indexer-config in the EKS overlays; the dev
+          # DEX=uniswap-v4 from uniswap-v4-indexer-config in the EKS overlays; the dev
           # overlay sets DEX inline (its runtime Component replaces envFrom).
           image: dex-indexer
           envFrom:
             - configMapRef:
                 name: otel-config
             - configMapRef:
-                name: curve-indexer-config
+                name: uniswap-v4-indexer-config
             - secretRef:
                 # Populated by ExternalSecret — secret name mirrors the service.
-                name: curve-indexer
+                name: uniswap-v4-indexer
           resources:
             requests:
               cpu: "50m"
