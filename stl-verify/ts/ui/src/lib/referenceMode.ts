@@ -1,10 +1,10 @@
-// LOCAL COMPARISON HARNESS — not intended to ship as-is.
+// Selects the provenance every endpoint that supports it answers from:
 //
-// Flips every endpoint that supports it onto `reference=true`, so the same UI
-// can be opened twice and compared side by side:
+//   /allocation            → source: "self"      (STL's own model)
+//   /allocation?reference  → source: "reference" (Sky's published figures)
 //
-//   http://localhost:5173/allocation            → source: "self"      (STL's model)
-//   http://localhost:5173/allocation?reference  → source: "reference" (Sky's figures)
+// The settings menu writes it; opening the same view twice also works, which is
+// how the two are compared side by side.
 //
 // `reference` is declared on the root search schema rather than read loose from
 // the URL. The router redirects an entry URL to its validated search, and every

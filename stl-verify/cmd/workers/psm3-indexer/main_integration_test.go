@@ -26,14 +26,7 @@ import (
 var sharedDSN string
 
 func TestMain(m *testing.M) {
-	dsn, cleanup := testutil.StartTimescaleDBForMain()
-	sharedDSN = dsn
-
-	code := m.Run()
-
-	cleanup()
-	code = testutil.CheckGoroutineLeaks(code)
-	os.Exit(code)
+	os.Exit(testutil.RunShared(m, testutil.Shared{TimescaleDSN: &sharedDSN}))
 }
 
 // ---------------------------------------------------------------------------
@@ -252,7 +245,7 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 }
 
 func TestRunIntegration_UnknownChainID(t *testing.T) {
-	_, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	_, dbURL, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
 	sqsServer, _ := testutil.StartMockSQS(t)
@@ -274,7 +267,7 @@ func TestRunIntegration_UnknownChainID(t *testing.T) {
 }
 
 func TestRunIntegration_ImmutableMismatch(t *testing.T) {
-	_, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	_, dbURL, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
 	rpcServer := mockPSM3RPC(t, psm3Dispatcher(t, true)) // usds() disagrees with config
@@ -300,7 +293,7 @@ func TestRunIntegration_ImmutableMismatch(t *testing.T) {
 func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	ctx := context.Background()
 
-	pool, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, dbURL, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
 	rpcServer := mockPSM3RPC(t, psm3Dispatcher(t, false))
@@ -398,7 +391,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 func TestRunIntegration_SnapshotAccumulation(t *testing.T) {
 	ctx := context.Background()
 
-	pool, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, dbURL, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
 	rpcServer := mockPSM3RPC(t, psm3Dispatcher(t, false))

@@ -8,6 +8,7 @@ from app.services.allocation_service import AllocationService
 from tests.factories import make_direct_asset_holding, make_receipt_token_position
 
 _VALID_ADDR = EthAddress("0x" + "ab" * 20)
+_SIBLING_ADDR = EthAddress("0x" + "cd" * 20)
 
 
 @pytest.mark.asyncio
@@ -118,6 +119,7 @@ async def test_prime_exists_delegates_to_repository():
 async def test_list_allocation_activity_delegates_filters_to_repository():
     repo = AsyncMock()
     repo.list_allocation_activity.return_value = []
+    repo.list_prime_proxy_addresses.return_value = [_VALID_ADDR, _SIBLING_ADDR]
     service = AllocationService(repo)
 
     from_timestamp = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
@@ -136,8 +138,10 @@ async def test_list_allocation_activity_delegates_filters_to_repository():
     )
 
     assert result == []
+    # Scoped to the prime's whole proxy set, resolved from the same rows
+    # /v1/primes is built from.
     repo.list_allocation_activity.assert_awaited_once_with(
-        prime_id=_VALID_ADDR,
+        proxy_addresses=[_VALID_ADDR, _SIBLING_ADDR],
         chain_id=1,
         protocol_name="aave",
         action_type="in",

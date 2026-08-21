@@ -126,8 +126,8 @@ async def list_prime_debt_snapshots(
     ),
     service: PrimeDebtService = Depends(_get_prime_debt_service),
 ) -> PrimeDebtEnvelope:
-    prime_address = EthAddress(prime_id)
-    if not await service.prime_exists(prime_address):
+    resolved_prime_id = await service.resolve_prime_id(EthAddress(prime_id))
+    if resolved_prime_id is None:
         raise HTTPException(status_code=404, detail="Prime not found")
 
     if reference and not time_series.aggregate:
@@ -143,7 +143,7 @@ async def list_prime_debt_snapshots(
     if time_series.aggregate:
         read_buckets = service.list_reference_debt_buckets if reference else service.list_debt_buckets
         buckets = await read_buckets(
-            prime_address,
+            resolved_prime_id,
             from_timestamp=time_series.from_timestamp,
             to_timestamp=time_series.to_timestamp,
             bucket_seconds=time_series.bucket.total_seconds(),
@@ -157,7 +157,7 @@ async def list_prime_debt_snapshots(
         )
 
     snapshots = await service.list_debt_snapshots(
-        prime_address,
+        resolved_prime_id,
         from_timestamp=time_series.from_timestamp,
         to_timestamp=time_series.to_timestamp,
         limit=limit,

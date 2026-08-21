@@ -21,19 +21,14 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
-	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-const morphoSchemaName = "test_morpho"
+const morphoDBName = "test_morpho"
 
 var morphoPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(morphoSchemaName, func() {
-		morphoPool = testutil.SetupSchemaForMain(sharedDSN, morphoSchemaName)
-	}, func() {
-		testutil.CleanupSchemaForMain(sharedDSN, morphoPool, morphoSchemaName)
-	})
+	useFileDatabase(morphoDBName, &morphoPool)
 }
 
 // truncateMorpho clears morpho-related tables for test isolation.
@@ -1650,7 +1645,7 @@ func (f *morphoTestFixture) seedAdapterStateAtVersion(t *testing.T, ctx context.
 		Timestamp:       morphoBlockTime,
 		RealAssets:      big.NewInt(1_000_000),
 	}
-	if err := f.repo.SaveAdapterState(ctx, tx, state); err != nil {
+	if _, err := f.repo.SaveAdapterState(ctx, tx, state); err != nil {
 		t.Fatalf("SaveAdapterState at block %d version %d: %v", blockNumber, blockVersion, err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -2521,7 +2516,7 @@ func TestSaveAdapterState_RoundTrip(t *testing.T) {
 		t.Fatalf("begin: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	if err := fixture.repo.SaveAdapterState(ctx, tx, state); err != nil {
+	if _, err := fixture.repo.SaveAdapterState(ctx, tx, state); err != nil {
 		t.Fatalf("SaveAdapterState failed: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -2547,7 +2542,7 @@ func TestSaveAdapterState_DuplicateSameBuildDeduped(t *testing.T) {
 	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x1c))
 	adapterID := fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x0f), 24481834)
 
-	save := func(realAssets *big.Int) {
+	save := func(realAssets *big.Int) bool {
 		state := &entity.MorphoAdapterState{
 			MorphoAdapterID: adapterID,
 			BlockNumber:     24500100,
@@ -2559,18 +2554,24 @@ func TestSaveAdapterState_DuplicateSameBuildDeduped(t *testing.T) {
 		if err != nil {
 			t.Fatalf("begin: %v", err)
 		}
-		if err := fixture.repo.SaveAdapterState(ctx, tx, state); err != nil {
+		appended, err := fixture.repo.SaveAdapterState(ctx, tx, state)
+		if err != nil {
 			t.Fatalf("SaveAdapterState failed: %v", err)
 		}
 		if err := tx.Commit(ctx); err != nil {
 			t.Fatalf("commit: %v", err)
 		}
+		return appended
 	}
 
 	// Both saves use the same repo (build_id 0) → trigger reuses
 	// processing_version 0 and ON CONFLICT DO NOTHING dedupes to one row.
-	save(big.NewInt(1000))
-	save(big.NewInt(9999))
+	if appended := save(big.NewInt(1000)); !appended {
+		t.Error("the first adapter-state write must report a row appended")
+	}
+	if appended := save(big.NewInt(9999)); appended {
+		t.Error("the deduped retry must report no row appended (the snapshot counter gates on it)")
+	}
 
 	var count int
 	err := fixture.pool.QueryRow(ctx,
@@ -2608,7 +2609,7 @@ func TestSaveAdapterState_DifferentBuildNewVersion(t *testing.T) {
 		if err != nil {
 			t.Fatalf("begin: %v", err)
 		}
-		if err := repo.SaveAdapterState(ctx, tx, state); err != nil {
+		if _, err := repo.SaveAdapterState(ctx, tx, state); err != nil {
 			t.Fatalf("SaveAdapterState failed: %v", err)
 		}
 		if err := tx.Commit(ctx); err != nil {
@@ -2645,19 +2646,22 @@ func capIDFor(idData []byte) []byte {
 	return crypto.Keccak256(idData)
 }
 
-// saveCap persists one MorphoVaultCap in its own committed transaction.
-func (f *morphoTestFixture) saveCap(t *testing.T, ctx context.Context, c *entity.MorphoVaultCap) {
+// saveCap persists one MorphoVaultCap in its own committed transaction and
+// returns whether a row was appended.
+func (f *morphoTestFixture) saveCap(t *testing.T, ctx context.Context, c *entity.MorphoVaultCap) bool {
 	t.Helper()
 	tx, err := f.pool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	if err := f.repo.SaveVaultCap(ctx, tx, c); err != nil {
+	appended, err := f.repo.SaveVaultCap(ctx, tx, c)
+	if err != nil {
 		t.Fatalf("SaveVaultCap failed: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
+	return appended
 }
 
 // latestCap reads the current (absolute, relative) pair for a cap id straight
@@ -2739,8 +2743,12 @@ func TestSaveVaultCap_SameBlockDedupesToIdenticalRow(t *testing.T) {
 			Timestamp:     morphoBlockTime,
 		}
 	}
-	fixture.saveCap(t, ctx, row())
-	fixture.saveCap(t, ctx, row())
+	if appended := fixture.saveCap(t, ctx, row()); !appended {
+		t.Error("the first cap write must report a row appended")
+	}
+	if appended := fixture.saveCap(t, ctx, row()); appended {
+		t.Error("the deduped sibling write must report no row appended (the snapshot counter gates on it)")
+	}
 
 	var count int
 	if err := fixture.pool.QueryRow(ctx,
@@ -2824,7 +2832,7 @@ func TestSaveVaultCap_DifferentBuildNewVersion(t *testing.T) {
 		if err != nil {
 			t.Fatalf("begin: %v", err)
 		}
-		if err := repo.SaveVaultCap(ctx, tx, c); err != nil {
+		if _, err := repo.SaveVaultCap(ctx, tx, c); err != nil {
 			t.Fatalf("SaveVaultCap failed: %v", err)
 		}
 		if err := tx.Commit(ctx); err != nil {
@@ -2861,19 +2869,22 @@ func TestSaveVaultCap_DifferentBuildNewVersion(t *testing.T) {
 
 // --- SaveVaultFee Tests ---
 
-// saveFee persists one MorphoVaultFee in its own committed transaction.
-func (f *morphoTestFixture) saveFee(t *testing.T, ctx context.Context, fee *entity.MorphoVaultFee) {
+// saveFee persists one MorphoVaultFee in its own committed transaction and
+// returns whether a row was appended.
+func (f *morphoTestFixture) saveFee(t *testing.T, ctx context.Context, fee *entity.MorphoVaultFee) bool {
 	t.Helper()
 	tx, err := f.pool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	if err := f.repo.SaveVaultFee(ctx, tx, fee); err != nil {
+	appended, err := f.repo.SaveVaultFee(ctx, tx, fee)
+	if err != nil {
 		t.Fatalf("SaveVaultFee failed: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
+	return appended
 }
 
 // latestFee reads the current full fee config for a vault via the ADR-0002
@@ -2960,8 +2971,12 @@ func TestSaveVaultFee_SameBuildDedupesToOneRow(t *testing.T) {
 			Timestamp:               morphoBlockTime,
 		}
 	}
-	fixture.saveFee(t, ctx, row())
-	fixture.saveFee(t, ctx, row())
+	if appended := fixture.saveFee(t, ctx, row()); !appended {
+		t.Error("the first fee write must report a row appended")
+	}
+	if appended := fixture.saveFee(t, ctx, row()); appended {
+		t.Error("the deduped sibling write must report no row appended (the snapshot counter gates on it)")
+	}
 
 	var count int
 	if err := fixture.pool.QueryRow(ctx,
@@ -3008,7 +3023,7 @@ func TestSaveVaultFee_DifferentBuildNewVersion(t *testing.T) {
 		if err != nil {
 			t.Fatalf("begin: %v", err)
 		}
-		if err := repo.SaveVaultFee(ctx, tx, fee); err != nil {
+		if _, err := repo.SaveVaultFee(ctx, tx, fee); err != nil {
 			t.Fatalf("SaveVaultFee failed: %v", err)
 		}
 		if err := tx.Commit(ctx); err != nil {

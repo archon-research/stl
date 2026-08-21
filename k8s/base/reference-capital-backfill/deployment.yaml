@@ -1,0 +1,60 @@
+# On-demand seed of the reference capital history that predates STL's own
+# observation of Sky's Star monitor.
+#
+# A long-running Deployment, not a k8s Job: it polls the Temporal task queue
+# "reference-capital-backfill" and idles until someone starts a run from the
+# Temporal UI (Workflow Type "ReferenceCapitalBackfill", input {"daysAgo": 365}).
+# It registers NO schedule, so an always-on pod costs nothing but a poller — and
+# unlike the Job it replaced, running it needs no write access to this namespace.
+#
+# Was a manual-apply Job under k8s/overlays/*/bootstrap-reference-capital. That
+# overlay carried a hand-pinned image tag which went stale the moment the next
+# deploy landed, and the documented kustomize|kubectl apply then failed on an
+# image that was never built. ArgoCD owns the tag here, so that cannot recur.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reference-capital-backfill
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: reference-capital-backfill
+  template:
+    metadata:
+      labels:
+        app: reference-capital-backfill
+    spec:
+      serviceAccountName: reference-capital-backfill
+      containers:
+        - name: reference-capital-backfill
+          image: reference-capital-backfill
+          # No args: the window is the workflow's input, supplied per run.
+          #
+          # otel-config is required, not decorative — RunWorker's interceptor emits
+          # cronjob_runs_total from here, and VectorCronjobRunFailing is the only
+          # alert covering a failed run. Reuses the reference-capital-indexer
+          # ConfigMap and Secret for DATABASE_URL, the Temporal coordinates and
+          # SKY_DATA_URL: this seeds the same series that service accumulates, and
+          # splitting them would leave two copies of one DATABASE_URL to rotate.
+          envFrom:
+            - configMapRef:
+                name: otel-config
+            - configMapRef:
+                name: reference-capital-indexer
+            - secretRef:
+                name: reference-capital-indexer
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              # Higher than the syncer's: one run decodes a year of daily sheets
+              # for every tracked prime and batches them into a single insert,
+              # where the syncer only ever holds one instant per prime.
+              cpu: "500m"
+              memory: "512Mi"
+      # The worker does not drain: an in-flight activity is cancelled on shutdown
+      # and Temporal retries it on the next worker. Safe because the write is
+      # insert-only and conflicts away within a build, so a retry converges.
+      terminationGracePeriodSeconds: 60

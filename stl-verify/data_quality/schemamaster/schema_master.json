@@ -259,12 +259,21 @@
       "type": "numeric",
       "class": "S"
     },
+    "computed_at": {
+      "type": "timestamptz",
+      "class": "A",
+      "semantics": "processing_time"
+    },
     "contract_address": {
       "type": "bytea",
       "class": "S"
     },
     "conversion_rate": {
       "type": "numeric",
+      "class": "S"
+    },
+    "copula_type": {
+      "type": "text",
       "class": "S"
     },
     "created_at": {
@@ -279,6 +288,18 @@
     "critical_ltv": {
       "type": "numeric",
       "class": "S"
+    },
+    "crr_el_pct": {
+      "type": "numeric",
+      "class": "D"
+    },
+    "crr_es_pct": {
+      "type": "numeric",
+      "class": "D"
+    },
+    "crr_var_pct": {
+      "type": "numeric",
+      "class": "D"
     },
     "current_ltv": {
       "type": "numeric",
@@ -435,6 +456,10 @@
       "type": "int8",
       "class": "R"
     },
+    "forecast_step": {
+      "type": "int4",
+      "class": "S"
+    },
     "from_block": {
       "type": "int8",
       "class": "S"
@@ -454,6 +479,10 @@
     "hashdiff": {
       "type": "bytea",
       "class": "R"
+    },
+    "hhi": {
+      "type": "numeric",
+      "class": "D"
     },
     "id": {
       "type": "int8",
@@ -662,6 +691,10 @@
       "type": "bytea",
       "class": "R"
     },
+    "market_key": {
+      "type": "text",
+      "class": "S"
+    },
     "maturity_date": {
       "type": "timestamptz",
       "class": "R",
@@ -686,6 +719,10 @@
     "morpho_vault_id": {
       "type": "int8",
       "class": "R"
+    },
+    "n_mc": {
+      "type": "int4",
+      "class": "S"
     },
     "name": {
       "type": "text",
@@ -742,6 +779,10 @@
     },
     "package_value": {
       "type": "numeric",
+      "class": "S"
+    },
+    "params": {
+      "type": "jsonb",
       "class": "S"
     },
     "parent_hash": {
@@ -809,6 +850,10 @@
       "type": "int4",
       "class": "A",
       "not_null": true
+    },
+    "protocol": {
+      "type": "text",
+      "class": "S"
     },
     "protocol_id": {
       "type": "int8",
@@ -1188,6 +1233,10 @@
     "chain": {
       "type": "dimension",
       "owner": "infra"
+    },
+    "core_model_results": {
+      "type": "model_output",
+      "owner": "risk"
     },
     "debt_token": {
       "type": "config",

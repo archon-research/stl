@@ -17,14 +17,7 @@ import (
 var sharedDSN string
 
 func TestMain(m *testing.M) {
-	dsn, cleanup := testutil.StartTimescaleDBForMain()
-	sharedDSN = dsn
-
-	code := m.Run()
-
-	cleanup()
-	code = testutil.CheckGoroutineLeaks(code)
-	os.Exit(code)
+	os.Exit(testutil.RunShared(m, testutil.Shared{TimescaleDSN: &sharedDSN}))
 }
 
 // fakeProvider feeds run() one snapshot then keeps the channel open until ctx is
@@ -54,7 +47,7 @@ func (p *fakeProvider) Watch(ctx context.Context, symbols []string) (<-chan enti
 // an injected fake provider, then verifies a snapshot row is persisted before the
 // context is cancelled and run() returns cleanly.
 func TestRunHappyPath(t *testing.T) {
-	pool, dsn, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, dsn, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 
 	t.Setenv("EXCHANGE", "coinbase")

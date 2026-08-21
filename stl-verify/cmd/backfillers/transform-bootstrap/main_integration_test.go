@@ -17,14 +17,7 @@ import (
 var sharedDSN string
 
 func TestMain(m *testing.M) {
-	dsn, cleanup := testutil.StartTimescaleDBForMain()
-	sharedDSN = dsn
-
-	code := m.Run()
-
-	cleanup()
-	code = testutil.CheckGoroutineLeaks(code)
-	os.Exit(code)
+	os.Exit(testutil.RunShared(m, testutil.Shared{TimescaleDSN: &sharedDSN}))
 }
 
 // TestRunBootstrap_CopiesHistoryAndSeedsParity exercises the correctness-critical
@@ -34,7 +27,7 @@ func TestMain(m *testing.M) {
 // covers the binary's window loop, single-connection session setup, the
 // _bootstrap_<t>() copy, and the _parity_verify_all ledger seed.
 func TestRunBootstrap_CopiesHistoryAndSeedsParity(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTestDatabase(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 
 	ctx := context.Background()
@@ -76,7 +69,7 @@ func TestRunBootstrap_CopiesHistoryAndSeedsParity(t *testing.T) {
 // fixed default, so history older than any hardcoded start is still copied. The seeded
 // row predates the old 2025-01-01 default, so a correct derive copies it and parity is 0.
 func TestRunBootstrap_DerivesStartFromEarliestRawRow(t *testing.T) {
-	pool, _, cleanup := testutil.SetupTestDatabase(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 
 	ctx := context.Background()

@@ -6,8 +6,6 @@ import (
 	"context"
 	"strings"
 	"testing"
-
-	"github.com/archon-research/stl/stl-verify/db/migrator"
 )
 
 // TestPositionClassification is the VEC-401 contract test: after migrations,
@@ -23,11 +21,8 @@ import (
 // test (the trigger is BEFORE INSERT, so it fires ahead of both).
 func TestPositionClassification(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := setupPostgres(ctx, t)
+	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
-	if err := migrator.New(pool, getMigrationsPath()).ApplyAll(ctx); err != nil {
-		t.Fatalf("migrations: %v", err)
-	}
 
 	prov := ``
 	provVals := ``

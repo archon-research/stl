@@ -591,47 +591,49 @@ func (r *MorphoRepository) GetActiveAdaptersByVaultAt(ctx context.Context, morph
 	return adapters, nil
 }
 
-// SaveAdapterState saves an adapter realAssets() snapshot within an external transaction.
-func (r *MorphoRepository) SaveAdapterState(ctx context.Context, tx pgx.Tx, state *entity.MorphoAdapterState) error {
+// SaveAdapterState saves an adapter realAssets() snapshot within an external
+// transaction and reports whether a row was appended.
+func (r *MorphoRepository) SaveAdapterState(ctx context.Context, tx pgx.Tx, state *entity.MorphoAdapterState) (bool, error) {
 	if err := state.Validate(); err != nil {
-		return fmt.Errorf("validating morpho adapter state: %w", err)
+		return false, fmt.Errorf("validating morpho adapter state: %w", err)
 	}
 
 	realAssets, err := bigIntToNumeric(state.RealAssets)
 	if err != nil {
-		return fmt.Errorf("converting real_assets: %w", err)
+		return false, fmt.Errorf("converting real_assets: %w", err)
 	}
 
 	// processing_version is assigned by the trigger; ON CONFLICT DO NOTHING
 	// dedupes same-build retries (see SaveMarketState for the rationale).
-	_, err = tx.Exec(ctx,
+	tag, err := tx.Exec(ctx,
 		`INSERT INTO morpho_adapter_state (morpho_adapter_id, block_number, block_version, timestamp, real_assets, build_id)
 		 VALUES ($1, $2, $3, $4, $5, $6)
 		 ON CONFLICT (morpho_adapter_id, block_number, block_version, timestamp, processing_version) DO NOTHING`,
 		state.MorphoAdapterID, state.BlockNumber, state.BlockVersion, state.Timestamp, realAssets, int(r.buildID),
 	)
 	if err != nil {
-		return fmt.Errorf("saving morpho adapter state: %w", err)
+		return false, fmt.Errorf("saving morpho adapter state: %w", err)
 	}
-	return nil
+	return tag.RowsAffected() == 1, nil
 }
 
-// SaveVaultCap saves a VaultV2 allocation-cap snapshot within an external transaction.
-func (r *MorphoRepository) SaveVaultCap(ctx context.Context, tx pgx.Tx, vaultCap *entity.MorphoVaultCap) error {
+// SaveVaultCap saves a VaultV2 allocation-cap snapshot within an external
+// transaction and reports whether a row was appended.
+func (r *MorphoRepository) SaveVaultCap(ctx context.Context, tx pgx.Tx, vaultCap *entity.MorphoVaultCap) (bool, error) {
 	if err := vaultCap.Validate(); err != nil {
-		return fmt.Errorf("validating morpho vault cap: %w", err)
+		return false, fmt.Errorf("validating morpho vault cap: %w", err)
 	}
 
 	absoluteCap, err := bigIntToNumeric(vaultCap.AbsoluteCap)
 	if err != nil {
-		return fmt.Errorf("converting absolute_cap: %w", err)
+		return false, fmt.Errorf("converting absolute_cap: %w", err)
 	}
 	relativeCap, err := bigIntToNumeric(vaultCap.RelativeCap)
 	if err != nil {
-		return fmt.Errorf("converting relative_cap: %w", err)
+		return false, fmt.Errorf("converting relative_cap: %w", err)
 	}
 
-	_, err = tx.Exec(ctx,
+	tag, err := tx.Exec(ctx,
 		`INSERT INTO morpho_vault_cap (morpho_vault_id, cap_id, id_data, absolute_cap, relative_cap, block_number, block_version, timestamp, build_id)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		 ON CONFLICT (morpho_vault_id, cap_id, block_number, block_version, timestamp, processing_version) DO NOTHING`,
@@ -639,30 +641,31 @@ func (r *MorphoRepository) SaveVaultCap(ctx context.Context, tx pgx.Tx, vaultCap
 		vaultCap.BlockNumber, vaultCap.BlockVersion, vaultCap.Timestamp, int(r.buildID),
 	)
 	if err != nil {
-		return fmt.Errorf("saving morpho vault cap: %w", err)
+		return false, fmt.Errorf("saving morpho vault cap: %w", err)
 	}
-	return nil
+	return tag.RowsAffected() == 1, nil
 }
 
-// SaveVaultFee saves a VaultV2 full fee-config snapshot within an external transaction.
-func (r *MorphoRepository) SaveVaultFee(ctx context.Context, tx pgx.Tx, vaultFee *entity.MorphoVaultFee) error {
+// SaveVaultFee saves a VaultV2 full fee-config snapshot within an external
+// transaction and reports whether a row was appended.
+func (r *MorphoRepository) SaveVaultFee(ctx context.Context, tx pgx.Tx, vaultFee *entity.MorphoVaultFee) (bool, error) {
 	if err := vaultFee.Validate(); err != nil {
-		return fmt.Errorf("validating morpho vault fee: %w", err)
+		return false, fmt.Errorf("validating morpho vault fee: %w", err)
 	}
 
 	performanceFee, err := bigIntToNumeric(vaultFee.PerformanceFee)
 	if err != nil {
-		return fmt.Errorf("converting performance_fee: %w", err)
+		return false, fmt.Errorf("converting performance_fee: %w", err)
 	}
 	managementFee, err := bigIntToNumeric(vaultFee.ManagementFee)
 	if err != nil {
-		return fmt.Errorf("converting management_fee: %w", err)
+		return false, fmt.Errorf("converting management_fee: %w", err)
 	}
 
 	// processing_version is assigned by the mvf trigger; ON CONFLICT DO NOTHING
 	// dedupes same-build retries and same-block sibling fee events (see
 	// SaveVaultCap for the rationale).
-	_, err = tx.Exec(ctx,
+	tag, err := tx.Exec(ctx,
 		`INSERT INTO morpho_vault_fee (morpho_vault_id, performance_fee, management_fee, performance_fee_recipient, management_fee_recipient, block_number, block_version, timestamp, build_id)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		 ON CONFLICT (morpho_vault_id, block_number, block_version, timestamp, processing_version) DO NOTHING`,
@@ -671,9 +674,9 @@ func (r *MorphoRepository) SaveVaultFee(ctx context.Context, tx pgx.Tx, vaultFee
 		vaultFee.BlockNumber, vaultFee.BlockVersion, vaultFee.Timestamp, int(r.buildID),
 	)
 	if err != nil {
-		return fmt.Errorf("saving morpho vault fee: %w", err)
+		return false, fmt.Errorf("saving morpho vault fee: %w", err)
 	}
-	return nil
+	return tag.RowsAffected() == 1, nil
 }
 
 // numericToBigInt converts a numeric string from Postgres to *big.Int.

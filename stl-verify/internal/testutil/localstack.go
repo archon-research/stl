@@ -2,11 +2,12 @@ package testutil
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
@@ -25,22 +27,7 @@ type LocalStackConfig struct {
 	Region   string
 }
 
-// S3TestBucketName builds a bucket name unique to the calling test, for suites
-// that share one LocalStack container and so cannot share a bucket.
-func S3TestBucketName(t *testing.T, prefix string) string {
-	t.Helper()
-
-	name := prefix + strings.ReplaceAll(SanitizeTestName(t.Name()), "_", "-")
-	if len(name) > 63 {
-		// Plain truncation would put two sibling subtests sharing a 63-character
-		// prefix on one bucket, so spend the tail on a digest of the full name.
-		sum := sha256.Sum256([]byte(name))
-		name = name[:55] + hex.EncodeToString(sum[:4])
-	}
-	// TrimRight, not TrimSuffix: truncation can land mid-run of separators, and
-	// S3 rejects a name that does not end in a letter or digit.
-	return strings.TrimRight(name, "-.")
-}
+const localStackRegion = "us-east-1"
 
 // NewS3Client constructs an S3 client pointed at the given LocalStack endpoint.
 // UsePathStyle is enabled as required by LocalStack.
@@ -63,11 +50,22 @@ func NewS3Client(t *testing.T, ctx context.Context, cfg LocalStackConfig) *s3.Cl
 
 // StartLocalStackForMain starts a LocalStack container for use in TestMain.
 // On error it calls log.Fatal instead of t.Fatal.
+//
+// When STL_TEST_LOCALSTACK_ENDPOINT is set it returns that endpoint instead, so
+// CI can own one LocalStack per shard rather than one per package. That instance
+// has to enable the union of every services string passed here, which
+// ci/check-ci-services.sh checks against the workflow.
 func StartLocalStackForMain(services string) (cfg LocalStackConfig, cleanup func()) {
+	if endpoint, ok := sharedService(EnvLocalStackEndpoint); ok {
+		cfg = LocalStackConfig{Endpoint: endpoint, Region: localStackRegion}
+		allowDirectConnection(endpointHost(endpoint))
+		return cfg, noopCleanup
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	cfg.Region = "us-east-1"
+	cfg.Region = localStackRegion
 
 	req := testcontainers.ContainerRequest{
 		Image:        ImageLocalStack,
@@ -101,23 +99,62 @@ func StartLocalStackForMain(services string) (cfg LocalStackConfig, cleanup func
 		log.Fatalf("get LocalStack port: %v", err)
 	}
 	cfg.Endpoint = fmt.Sprintf("http://%s:%s", host, port.Port())
-
-	// Ensure the container host bypasses the HTTP proxy.
-	if noProxy := os.Getenv("NO_PROXY"); !strings.Contains(noProxy, host) {
-		if noProxy == "" {
-			os.Setenv("NO_PROXY", host)
-		} else {
-			os.Setenv("NO_PROXY", noProxy+","+host)
-		}
-	}
-	if noProxy := os.Getenv("no_proxy"); !strings.Contains(noProxy, host) {
-		if noProxy == "" {
-			os.Setenv("no_proxy", host)
-		} else {
-			os.Setenv("no_proxy", noProxy+","+host)
-		}
-	}
+	allowDirectConnection(host)
 
 	cleanup = func() { _ = container.Terminate(context.Background()) }
 	return cfg, cleanup
+}
+
+// allowDirectConnection adds host to both spellings of the no-proxy list, so an
+// ambient HTTP proxy does not swallow requests to a local LocalStack.
+func allowDirectConnection(host string) {
+	if host == "" {
+		return
+	}
+	for _, envVar := range []string{"NO_PROXY", "no_proxy"} {
+		noProxy := os.Getenv(envVar)
+		if noProxy == "" {
+			os.Setenv(envVar, host)
+			continue
+		}
+		// Split, not strings.Contains: "127.0.0.1" is a substring of "127.0.0.10".
+		if slices.Contains(strings.Split(noProxy, ","), host) {
+			continue
+		}
+		os.Setenv(envVar, noProxy+","+host)
+	}
+}
+
+// endpointHost extracts the hostname from a LocalStack endpoint URL, returning
+// "" when it cannot be parsed — the no-proxy entry is an optimization, not a
+// precondition, so an unparseable endpoint must not fail the suite.
+func endpointHost(endpoint string) string {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
+}
+
+// EnsureBucket creates bucket unless it is already there, for a name shared by
+// more than one test in a package.
+//
+// Existing is tolerated because it is expected: an archive bucket is named for the
+// worker, not the test, so every test in the package asks for the same one. A name
+// that has to be unique per test comes from S3TestBucketName, which needs no
+// tolerance and so can be counted against.
+func EnsureBucket(t *testing.T, ctx context.Context, client *s3.Client, bucket string) {
+	t.Helper()
+
+	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)})
+	if err == nil {
+		return
+	}
+
+	var owned *s3types.BucketAlreadyOwnedByYou
+	var exists *s3types.BucketAlreadyExists
+	if errors.As(err, &owned) || errors.As(err, &exists) {
+		return
+	}
+	t.Fatalf("create bucket %s: %v", bucket, err)
 }

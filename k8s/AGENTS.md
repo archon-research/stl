@@ -18,5 +18,12 @@ Root repo map and cross-cutting rules: [../AGENTS.md](../AGENTS.md).
 ## Deploy
 
 - **Never hand-edit image tags** in `k8s/overlays/{staging,prod}/kustomization.yaml` — CI owns them (staging bumps on merge; prod via the gated `production` GitHub Environment approval).
+  Guard: the `Manifests` CI job runs `scripts/deploy/check-overlay-tag-consistency.sh`,
+  which fails a PR whose tags do not all name one commit — the bot stamps a whole file to a
+  single deploy SHA, so a hand-written tag is the odd one out. This has to block the merge:
+  ArgoCD syncs the merge commit before the bot stamps it, so a tag naming an image that does
+  not exist yet reaches the cluster as ImagePullBackOff, fails the staging health gate, and
+  skips the prod promotion (ORB-313). A brand-new service lands its image in a separate PR
+  first (CONTRIBUTING.md section 14).
 - Merging to `main` deploys to staging via ArgoCD, then prod after manual approval.
 - AWS resources (SQS queues, SNS subscriptions, IAM, secrets) live in a separate private infrastructure repo and must land **before** the code that needs them.

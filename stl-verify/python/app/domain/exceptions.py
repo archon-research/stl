@@ -71,6 +71,16 @@ class InvalidOverrideError(ValueError):
     """
 
 
+class ModelDataUnavailableError(Exception):
+    """Raised by a RiskModel when it applies to the asset but has no data to compute from.
+
+    Covers both a missing pre-computed result (the model's writer has not run
+    yet for this market) and a prime with no resolvable position. The envelope
+    skips the model with a warning instead of failing the whole response: a
+    model without data should degrade the envelope, not the endpoint.
+    """
+
+
 class ReferenceDataUnavailableError(Exception):
     """Raised when the upstream Star monitor cannot be read or is malformed.
 

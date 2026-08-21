@@ -208,3 +208,102 @@ async def test_pairs_each_bucket_from_one_snapshot_row(seeded, async_db_url: str
 
     assert (Decimal("10"), Decimal("20")) in pairs
     assert (Decimal("30"), Decimal("40")) in pairs
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_carries_the_monitors_encumbrance_ratio(seeded, async_db_url: str):
+    conn, prime_id = seeded
+    await _insert_snapshot(conn, prime_id, _FIRST_OBSERVATION, total_rc="10", exposure="20")
+
+    buckets = await _buckets(async_db_url)
+
+    observed = [b for b in buckets if b.encumbrance_ratio is not None]
+    assert observed, "the snapshot's encumbrance ratio should reach the series"
+    assert all(b.encumbrance_ratio == Decimal("0.37") for b in observed)
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_serves_assets_only_from_the_balance_sheet_feed(seeded, async_db_url: str):
+    # A snapshot-only window has no assets figure: the monitor does not report
+    # one, and deriving it from risk capital would invent a measurement.
+    conn, prime_id = seeded
+    await _insert_snapshot(conn, prime_id, _FIRST_OBSERVATION, total_rc="10", exposure="20")
+
+    buckets = await _buckets(async_db_url)
+
+    assert all(b.assets_usd is None for b in buckets)
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_history_carries_assets_but_no_encumbrance(seeded, async_db_url: str):
+    # The balance-sheet feed reports assets and no encumbrance, so a
+    # history-only window must not fabricate the latter.
+    conn, prime_id = seeded
+    await _insert_history(conn, prime_id, _WINDOW_START, treasury="111")
+
+    buckets = await _buckets(async_db_url)
+
+    assert any(b.assets_usd == Decimal("1") for b in buckets)
+    assert all(b.encumbrance_ratio is None for b in buckets)
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_keeps_assets_when_a_later_snapshot_lands_in_the_same_window(seeded, async_db_url: str):
+    # The balance sheet is stamped at midnight and the monitor runs intraday, so
+    # any live window holds a history row followed by snapshots. Each figure must
+    # survive the other feed's rows rather than being nulled by the later one.
+    conn, prime_id = seeded
+    await _insert_history(conn, prime_id, _WINDOW_START, treasury="111")
+    await _insert_snapshot(conn, prime_id, _FIRST_OBSERVATION, total_rc="222", exposure="5")
+
+    buckets = await _buckets(async_db_url)
+
+    latest = [b for b in buckets if b.bucket_start >= _FIRST_OBSERVATION]
+    assert latest, "expected buckets at or after the snapshot"
+    assert all(b.assets_usd == Decimal("1") for b in latest)
+    assert all(b.encumbrance_ratio == Decimal("0.37") for b in latest)
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_carries_an_observation_from_before_the_window_into_it(seeded, async_db_url: str):
+    # The balance sheet is daily, so from a minute past midnight its newest row
+    # already sits outside a 24h window. Without seeding locf from the last prior
+    # observation, the collateral series reads as absent for most of every day.
+    conn, prime_id = seeded
+    await _insert_history(conn, prime_id, _WINDOW_START - timedelta(days=2), treasury="111")
+
+    buckets = await _buckets(async_db_url)
+
+    assert buckets
+    assert all(b.assets_usd == Decimal("1") for b in buckets)
+    assert all(b.total_capital_usd == Decimal("111") for b in buckets)
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_stamps_the_monitor_figures_with_their_own_observation(seeded, async_db_url: str):
+    # The prior seeding reaches up to 90 days back, so a figure that old would
+    # otherwise serve as current with nothing to say so.
+    conn, prime_id = seeded
+    observed = _WINDOW_START - timedelta(days=2)
+    await _insert_snapshot(conn, prime_id, observed, total_rc="10", exposure="20")
+
+    buckets = await _buckets(async_db_url)
+
+    assert buckets
+    assert all(b.capital_observed_at == observed for b in buckets), (
+        "every bucket should report the instant it was carried from"
+    )
+    assert all(b.bucket_start > b.capital_observed_at for b in buckets)
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_does_not_reach_back_past_the_staleness_bound(seeded, async_db_url: str):
+    # A figure this old is not a current reading, and an unbounded backward scan
+    # would walk every chunk the table has.
+    conn, prime_id = seeded
+    await _insert_history(conn, prime_id, _WINDOW_START - timedelta(days=120), treasury="111")
+
+    buckets = await _buckets(async_db_url)
+
+    assert buckets
+    assert all(b.assets_usd is None for b in buckets)

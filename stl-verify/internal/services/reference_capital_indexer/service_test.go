@@ -83,8 +83,55 @@ func upstreamRow(star string) outbound.RiskCapitalPrimeSnapshot {
 	}
 }
 
+type mockSheetRepo struct {
+	sheets []entity.PrimeBalanceSheetSnapshot
+	err    error
+}
+
+func (m *mockSheetRepo) SaveBalanceSheetSnapshots(
+	_ context.Context,
+	snapshots []entity.PrimeBalanceSheetSnapshot,
+) error {
+	if m.err != nil {
+		return m.err
+	}
+	m.sheets = append(m.sheets, snapshots...)
+	return nil
+}
+
+type mockSheetProvider struct {
+	days          []outbound.BalanceSheetDay
+	err           error
+	requestedDays int
+}
+
+func (m *mockSheetProvider) FetchHistory(
+	_ context.Context,
+	_ []string,
+	daysAgo int,
+) ([]outbound.BalanceSheetDay, error) {
+	m.requestedDays = daysAgo
+	if m.err != nil {
+		return nil, m.err
+	}
+	return m.days, nil
+}
+
 func newService(primes *mockPrimeRepo, capital *mockCapitalRepo, provider *mockRiskProvider) *Service {
-	return NewService(primes, capital, provider, trackedStars, 7, func() time.Time { return syncedAt }, nil, nil)
+	return newServiceWithSheets(primes, capital, provider, &mockSheetRepo{}, &mockSheetProvider{})
+}
+
+func newServiceWithSheets(
+	primes *mockPrimeRepo,
+	capital *mockCapitalRepo,
+	provider *mockRiskProvider,
+	sheets *mockSheetRepo,
+	sheetProvider *mockSheetProvider,
+) *Service {
+	return NewService(
+		primes, capital, provider, sheets, sheetProvider,
+		trackedStars, 7, func() time.Time { return syncedAt }, nil, nil,
+	)
 }
 
 func TestRunPersistsASnapshotPerUpstreamPrime(t *testing.T) {
@@ -241,6 +288,8 @@ func TestRunFailsWhenNoPrimesAreTracked(t *testing.T) {
 		&mockPrimeRepo{primes: []entity.Prime{{ID: 1, Name: "spark"}}},
 		&mockCapitalRepo{},
 		provider,
+		&mockSheetRepo{},
+		&mockSheetProvider{},
 		nil,
 		7,
 		func() time.Time { return syncedAt },
@@ -303,5 +352,80 @@ func TestRunPropagatesAPrimeListingFailure(t *testing.T) {
 
 	if !errors.Is(err, errRepo) {
 		t.Fatalf("Run() = %v, want it to wrap %v", err, errRepo)
+	}
+}
+
+func TestRunAdvancesTheBalanceSheetEachCycle(t *testing.T) {
+	// The monitor publishes no assets figure, so without this the collateral
+	// series stops the day the one-shot backfill ran.
+	primes := &mockPrimeRepo{primes: []entity.Prime{{ID: 1, Name: "spark"}}}
+	sheets := &mockSheetRepo{}
+	sheetProvider := &mockSheetProvider{days: []outbound.BalanceSheetDay{{
+		Star: "spark", Date: "2026-08-19", TreasuryBalance: "1", Assets: "3291806969.21",
+		AllocatedAssets: "2", IdleAssets: "3", Debt: "4", BackstopCapital: "5",
+	}}}
+	provider := &mockRiskProvider{rows: []outbound.RiskCapitalPrimeSnapshot{upstreamRow("spark")}}
+
+	err := newServiceWithSheets(primes, &mockCapitalRepo{}, provider, sheets, sheetProvider).
+		Run(context.Background())
+
+	if err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+	if len(sheets.sheets) != 1 {
+		t.Fatalf("saved %d balance sheets, want 1", len(sheets.sheets))
+	}
+	if got := sheets.sheets[0].AssetsUSD; got != "3291806969.21" {
+		t.Errorf("AssetsUSD = %q, want the upstream figure", got)
+	}
+	if got := sheets.sheets[0].Source; got != entity.ReferenceDataSource {
+		t.Errorf("Source = %q, want %q", got, entity.ReferenceDataSource)
+	}
+}
+
+func TestRunAsksOnlyForEnoughDaysToCloseTheGap(t *testing.T) {
+	// The backfill seeded the year; a history-sized window every cycle would
+	// re-fetch all of it each time.
+	primes := &mockPrimeRepo{primes: []entity.Prime{{ID: 1, Name: "spark"}}}
+	sheetProvider := &mockSheetProvider{}
+	provider := &mockRiskProvider{rows: []outbound.RiskCapitalPrimeSnapshot{upstreamRow("spark")}}
+
+	err := newServiceWithSheets(primes, &mockCapitalRepo{}, provider, &mockSheetRepo{}, sheetProvider).
+		Run(context.Background())
+
+	if err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+	if sheetProvider.requestedDays != balanceSheetLookbackDays {
+		t.Errorf("requested %d days, want %d", sheetProvider.requestedDays, balanceSheetLookbackDays)
+	}
+}
+
+func TestRunTreatsNoNewCompletedDayAsSuccess(t *testing.T) {
+	// The provider withholds the in-progress day, so a cycle running before
+	// upstream publishes yesterday legitimately finds nothing to add. The repo
+	// is rigged to fail, which proves it is never reached.
+	primes := &mockPrimeRepo{primes: []entity.Prime{{ID: 1, Name: "spark"}}}
+	provider := &mockRiskProvider{rows: []outbound.RiskCapitalPrimeSnapshot{upstreamRow("spark")}}
+
+	err := newServiceWithSheets(
+		primes, &mockCapitalRepo{}, provider, &mockSheetRepo{err: errRepo}, &mockSheetProvider{},
+	).Run(context.Background())
+
+	if err != nil {
+		t.Fatalf("Run() = %v, want nil — an empty window must not fail the cycle", err)
+	}
+}
+
+func TestRunPropagatesABalanceSheetFailure(t *testing.T) {
+	primes := &mockPrimeRepo{primes: []entity.Prime{{ID: 1, Name: "spark"}}}
+	provider := &mockRiskProvider{rows: []outbound.RiskCapitalPrimeSnapshot{upstreamRow("spark")}}
+
+	err := newServiceWithSheets(
+		primes, &mockCapitalRepo{}, provider, &mockSheetRepo{}, &mockSheetProvider{err: errProvider},
+	).Run(context.Background())
+
+	if !errors.Is(err, errProvider) {
+		t.Fatalf("Run() = %v, want it to wrap %v", err, errProvider)
 	}
 }

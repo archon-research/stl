@@ -19,19 +19,19 @@ const migrationPath = "../../../db/migrations/20260706_140000_create_transformed
 
 // The gate reads information_schema for table_schema = 'public' and never
 // writes, so it needs the migrated public schema itself, not a per-test schema.
-var sharedPool *pgxpool.Pool
+var (
+	sharedDSN  string
+	sharedPool *pgxpool.Pool
+)
+
+const packageDBName = "test_gen_transformed"
 
 func TestMain(m *testing.M) {
-	dsn, cleanup := testutil.StartTimescaleDBForMain()
-	testutil.EnsurePublicMigrations(dsn)
-	sharedPool = testutil.ConnectPoolForMain(dsn)
-
-	code := m.Run()
-
-	sharedPool.Close()
-	cleanup()
-	code = testutil.CheckGoroutineLeaks(code)
-	os.Exit(code)
+	os.Exit(testutil.RunShared(m, testutil.Shared{
+		TimescaleDSN: &sharedDSN,
+		BeforeRun:    func() { sharedPool = testutil.SetupDBForMain(sharedDSN, packageDBName) },
+		AfterRun:     func() { testutil.CleanupDBForMain(sharedDSN, sharedPool, packageDBName) },
+	}))
 }
 
 // TestRegenDiff is the drift gate: it reads the raw schema of

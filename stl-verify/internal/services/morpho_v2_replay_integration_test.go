@@ -109,7 +109,7 @@ func TestReplaySparkUSDTbcV2Events(t *testing.T) {
 	ctx := context.Background()
 	fx := loadReplayFixture(t)
 
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	vaultID := seedVaultRegistry(t, ctx, pool, fx)
@@ -153,13 +153,13 @@ func TestReplaySparkUSDTbcV2Events_ReverseOrderReachesTheSameState(t *testing.T)
 	ctx := context.Background()
 	fx := loadReplayFixture(t)
 
-	// Each pass runs as a subtest so SetupTestSchema (which keys the schema on
-	// t.Name()) gives it its own schema, and the two replays cannot see each other.
+	// Each pass runs as a subtest so SetupTestDB (which keys the database on
+	// t.Name()) gives it its own database, and the two replays cannot see each other.
 	var forward, reverse adapterAnswers
 	var forwardInferred, reverseInferred int
 	replayInto := func(name string, descending bool, out *adapterAnswers, inferred *int) {
 		t.Run(name, func(t *testing.T) {
-			pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+			pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 			t.Cleanup(cleanup)
 			vaultID := seedVaultRegistry(t, ctx, pool, fx)
 			svc := buildReplayServiceForTest(t, ctx, pool, fx)

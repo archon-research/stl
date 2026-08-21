@@ -15,6 +15,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sky"
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/skydata"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/axis_synome_contract"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
@@ -71,6 +72,15 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runn
 		return nil, fmt.Errorf("creating sky client: %w", err)
 	}
 
+	// Empty falls through to the client's own default, as above.
+	sheetClient, err := skydata.NewClient(skydata.ClientConfig{
+		BaseURL: env.Get("SKY_DATA_URL", ""),
+		Logger:  deps.Logger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("creating sky-data client: %w", err)
+	}
+
 	trackedStars, err := trackedStarsFromContract()
 	if err != nil {
 		return nil, err
@@ -85,6 +95,8 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runn
 		postgres.NewPrimeRepository(deps.Pool),
 		postgres.NewPrimeCapitalStackRepository(deps.Pool, txm, deps.Logger),
 		skyClient,
+		postgres.NewPrimeBalanceSheetRepository(deps.Pool, txm, deps.Logger),
+		sheetClient,
 		trackedStars,
 		int(buildReg.BuildID()),
 		time.Now,

@@ -11,6 +11,7 @@ from app.config import get_settings
 from app.ports.receipt_token_lookup import ReceiptTokenLookup
 from app.ports.reference_capital_repository import ReferenceCapitalRepository
 from app.risk_engine.suraf.result import SurafResult
+from app.services.core_model_risk_service import CoreModelRiskService
 from app.services.crypto_lending_risk_service import CryptoLendingRiskService
 from app.services.model_registry import ModelRegistry
 from app.services.reference_risk_capital_service import ReferenceRiskCapitalService
@@ -39,6 +40,11 @@ def get_crypto_lending_risk_service(request: Request) -> CryptoLendingRiskServic
 def get_model_registry(request: Request) -> ModelRegistry:
     """Extract the model registry built at startup."""
     return request.app.state.model_registry
+
+
+def get_core_model_risk_service(request: Request) -> CoreModelRiskService:
+    """Extract the core-model risk service built at startup."""
+    return request.app.state.core_model_risk_service
 
 
 def get_receipt_token_lookup(request: Request) -> ReceiptTokenLookup:

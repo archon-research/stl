@@ -162,7 +162,7 @@ STL Verify should feel like an operations desk built for sustained concentration
 
 The visual system favors practical rhythm over decorative flourish. High-value metrics, filters, and tables are separated through spacing cadence and tonal layers, while interaction states stay quiet until users need to act. The interface rejects ornamental gradients, novelty controls, and high-chroma noise that competes with risk signals.
 
-Token provenance for this spec comes from `@archon-research/design-system/panda-preset`, which owns the surface, border, text, interactive, `bg.*`, `categorical.*`, `chart.*`, `overlay.*`, `zIndex`, shadow, and scrollbar semantic ramps. `stl-verify/ts/ui/panda.config.ts` adds **only** what the preset does not ship — `bg.neutral` — and **shadows nothing**. Every hex in the frontmatter below is a resolved value read out of `npx panda cssgen` output, not a hand-maintained copy; regenerate and re-read after any preset upgrade.
+Token provenance for this spec comes from `@archon-research/design-system/panda-preset`, which owns the surface, border, text, interactive, `bg.*`, `categorical.*`, `chart.*`, `overlay.*`, `zIndex`, shadow, and scrollbar semantic ramps. `stl-verify/ts/ui/panda.config.ts` has **no `theme.extend` block at all**: it shadows nothing, and the one token it used to add locally (`bg.neutral`) now ships in the preset. Every hex in the frontmatter below is a resolved value read out of `npx panda cssgen` output, not a hand-maintained copy; regenerate and re-read after any preset upgrade.
 
 **Do not re-add local overrides of preset tokens.** A local copy silently reverts upstream token fixes: the previous config redefined `surface.default` to `gray.950` in dark mode, which made a raised panel the darkest thing on the page and inverted the elevation ramp.
 
@@ -206,7 +206,7 @@ The ramp steps forward monotonically in both themes: canvas is furthest back, pa
 - **colors.text.critical** (#dc2626 / #fca5a5): the absent state on a risk dashboard. Use it; a risk grid that signals only success/warning/interactive is under-reporting.
 
 ### Status fills
-`bg.success`, `bg.warning`, `bg.critical` come from the preset; `bg.neutral` (#f5f5f5 / #262626) completes the status family locally.
+`bg.success`, `bg.warning`, `bg.critical` and `bg.neutral` (#f5f5f5 / #262626) all come from the preset. `bg.neutral` is the status-free member: "this block is called out, and it means nothing good or bad".
 
 ### Categorical encoding
 `categorical.1..5` (`.bg` + `.fg`, dark-aware) carry grouping that has no status meaning — allocation category chips, legends. Hue order is blue / teal / violet / amber / pink, matching `chart.series`, so a chip and its series line read as the same category. Reach for these, not the `bg.*` status family: its red reads as an alarm on a routine category, and `colorPalette` role sub-tokens exist for only six hues (neutral, gray, green, red, amber, blue), of which gray is indistinguishable from neutral.
@@ -218,6 +218,10 @@ Ordinal order is `primary → secondary → tertiary → quaternary → quinary`
 
 - **primary** #2563eb / #93c5fd — **secondary** #0d9488 / #5eead4 — **tertiary** #7c3aed / #c4b5fd — **quaternary** #d97706 / #fcd34d — **quinary** #db2777 / #f9a8d4
 - Supporting chart tokens, all dark-aware: `chart.axis` (#737373 / #a3a3a3), `chart.grid` (#e5e5e5 / #404040), `chart.area.primary` (#dbeafe / #1e3a8a).
+
+**Name the token, never the custom property.** `@archon-research/charting` types every colour-accepting prop as `ChartColor`, so `'chart.series.primary'` is a checked literal and `'chart.series.primry'` is a compile error — which is the validation a `var(--colors-chart-series-primary)` string could never have. That type check replaces the old local rule about withholding a `var()` fallback: the package's own resolved strings *do* carry hex fallbacks (they are what a chart renders with no design system present), and a wrong name can no longer reach them. In dev it also warns once, on the console, for an unknown `--colors-chart-*` / `--colors-identity-*` read.
+
+Two forms, and the distinction matters: props the package owns (`buildChartTheme`'s config, its own axes and marks) resolve a token name themselves, while the raw visx components it re-exports (`LineSeries`, `AreaSeries`) and any `style` object take a CSS value — for those, resolve once with `chartColorToken('chart.series.primary')`. `App.tsx` carries the token name per metric card; `AllocationGrid` resolves it where visx needs a string.
 
 ### Overlays and layering
 `overlay.backdrop` (scrims) and `overlay.tooltip` (always-dark floating fills, paired with `text.inverse`) come from the preset, as does `shadows.overlay` for floating-overlay elevation. Layer with the preset's `zIndex` scale — `dropdown`/`sticky`/`overlay`/`modal`/`popover`/`toast`/`tooltip` — never a hand-picked number.
@@ -259,13 +263,13 @@ The preset adds a step below `xs` (0.75rem) and **redefines** an existing one:
 Depth is mostly tonal rather than shadow-driven. Most surfaces remain flat, with subtle border contrast and background shifts carrying hierarchy. Shadows appear only in contained overlays and selected-detail emphasis.
 
 ### Shadow Vocabulary
-Three shadow tokens are dark-aware — in dark mode they swap a light-mode drop shadow for a stronger drop plus a `rgba(255, 255, 255, 0.05–0.06)` inset top highlight, which is what makes an edge read as raised on a near-black surface:
+**Every shadow token is dark-aware** — in dark mode each one swaps its light-mode drop shadow for a stronger drop plus an `rgba(255, 255, 255, 0.05–0.08)` inset top highlight, which is what makes an edge read as raised on a near-black surface. So the choice of step is a pure elevation decision; there is no longer a "does it survive dark mode" question to route around.
 
 - **`shadows.elevation`** — the named raised-panel token. Light: `0 1px 2px 0 rgba(15, 23, 42, 0.08), 0 1px 3px 0 rgba(15, 23, 42, 0.06)`. Dark: `0 1px 2px 0 rgba(0, 0, 0, 0.55), inset 0 1px 0 0 rgba(255, 255, 255, 0.06)`. Prefer this over `sm` for panels.
 - **`shadows.xs`** — light `0 1px 2px 0 rgba(15, 23, 42, 0.06)`; dark `0 1px 2px 0 rgba(0, 0, 0, 0.5), inset 0 1px 0 0 rgba(255, 255, 255, 0.05)`. Correct choice for small controls such as a slider thumb.
 - **`shadows.sm`** — light `0 1px 3px 0 rgba(15, 23, 42, 0.10), 0 1px 2px -1px rgba(15, 23, 42, 0.10)`; dark `0 2px 4px 0 rgba(0, 0, 0, 0.6), inset 0 1px 0 0 rgba(255, 255, 255, 0.06)`.
-
-**`md` / `lg` / `xl` / `2xl` are theme-blind** — they keep Panda's `rgb(0 0 0 / 0.1)`–`0.25` defaults with no `.dark` override, so a `2xl` on a `#171717` drawer is effectively invisible. This is an upstream gap, filed. For a floating overlay reach for `shadows.overlay`, which is dark-aware; elsewhere carry the layering with `border.subtle` plus the surface ramp.
+- **`shadows.md` / `lg` / `xl` / `2xl`** — the upper ramp. Their light values are Panda's own defaults verbatim (`rgb(0 0 0 / 0.1)`–`0.25`), so nothing moved in light mode; their dark forms collapse the two light layers into one deeper, softer drop (~1.3x the light offset and blur) plus the inset highlight, with drop alpha continuing the ramp's progression (md 0.62, lg 0.64, xl 0.66, 2xl 0.7). `2xl` is the step for a full-height panel that floats over the page: it is what `RiskDetailDrawer` uses, having carried `overlay` only while `2xl` had no dark form.
+- **`shadows.overlay`** — floating-overlay elevation (menus, tooltips, popovers), sized between `lg` and `xl`, which is why its dark alpha (0.6) sits below theirs rather than above. `TokenAddress`'s menu uses it, matching the `popover` and `tooltip` recipes.
 
 Never hand-write a shadow literal: a `rgba(0, 0, 0, 0.2)` drop shadow disappears on a dark surface, which is exactly the failure the dark-aware tokens exist to prevent.
 
@@ -334,8 +338,7 @@ Never hand-write a shadow literal: a `rgba(0, 0, 0, 0.2)` drop shadow disappears
 ### Don't (token discipline):
 - **Don't** override a preset semantic token in `panda.config.ts`. Local `theme.extend` merges last and wins, so a copy silently reverts upstream fixes. Add only tokens the preset does not ship, and say in a comment why.
 - **Don't** write a raw hex or `rgba()` in application code — those are theme-blind and will not follow the theme switch.
-- **Don't** write a raw `var(--colors-*)` read either, but for a different reason: it *does* follow the theme, because the custom property is redefined per theme. What it loses is validation — Panda never sees the name, so a typo or a future token rename fails silently and `uikit-cli doctor` cannot flag it. Prefer the token path. The chart series in `App.tsx` are the deliberate exception: they are passed to a charting library as string props, which is not a Panda style context.
-- **Don't** give those chart `var()` reads a fallback. `var(--colors-chart-series-primary, #60a5fa)` is exactly how the original collision stayed hidden: two cards with the same token name but different fallbacks, making the wrong values look correct for a release. Without a fallback, a wrong token reference becomes an empty custom property — the browser skips the declaration entirely, and the element inherits its parent's color instead. This is still silent, but the missing color is visible and unmissable (no plausible accident can explain it). If `@archon-research/charting` ever accepts a token path instead of a resolved value, use that instead — it is the only way to bring these under validation.
+- **Don't** write a raw `var(--colors-*)` read either, but for a different reason: it *does* follow the theme, because the custom property is redefined per theme. What it loses is validation — Panda never sees the name, so a typo or a future token rename fails silently and `uikit-cli doctor` cannot flag it. Prefer the token path. There is no chart exception any more: chart colours are named, not written out (see "Chart series").
 - **Don't** reach for `gray.*`, `neutral.*`, or any other raw palette step where a semantic token exists.
 - **Don't** compute a token path in a helper and pass it to `css()` as a variable. Panda extracts from **source text**: `bg: getCategoryColor(c)` emits no declaration at all and fails silently. Use a recipe variant, or index a literal lookup inside the `css()` call.
 - **Don't** name a token that does not exist. Panda passes an unknown path through as a literal CSS value, the browser discards the declaration, and the element inherits instead. Sweep for it: `npx panda cssgen --outfile /tmp/x.css && grep -oE '^\s+[a-z-]+: [a-z]+\.[a-zA-Z.]+;' /tmp/x.css` must be empty.
@@ -344,12 +347,14 @@ Never hand-write a shadow literal: a `rgba(0, 0, 0, 0.2)` drop shadow disappears
 
 ### What the gate catches (and what it cannot)
 
-`npm run doctor` (`uikit-cli doctor --codegen`) runs in `ts-ci.yml` after codegen. It has exactly two checks: an unresolved-token scan over colour-ish declarations, and a "`staticCss` is wired at all" gate. Everything else in the silently-dropped-CSS class is held by the conventions above, not by a tool.
+`npm run doctor` (`uikit-cli doctor --codegen`) runs in `ts-ci.yml` after codegen. It has three checks: an unresolved-token scan over colour-ish declarations, a roleless-`colorPalette` scan, and a "`staticCss` is wired at all" gate. Everything else in the silently-dropped-CSS class is held by the conventions above, not by a tool.
+
+The roleless-`colorPalette` check ships with the 0.10.0 CLI. Until this repo's `@archon-research/uikit-cli` pin moves off 0.9.0, a local `npm run doctor` reports two checks, not three — the table below describes the 0.10.0 target state.
 
 | mechanism | caught |
 | --- | --- |
 | undefined token → literal `color: text.subtle;` | **yes** — the unresolved-token scan; the sweep above is the same check by hand |
 | token path computed in a helper | no — no declaration is emitted, so there is nothing to match |
 | `var(--token, #fallback)` | no — well-formed CSS |
-| roleless `colorPalette` | no — emits a valid-looking `var()`, unset only in that scope. Held by convention; looks mechanically detectable and is filed upstream |
+| roleless `colorPalette` | **yes** — doctor reads the stylesheet as its own palette→roles map: a `colorPalette` assignment ruleset that never defines a role, paired with a role reference in the same recipe's classes, is reported. Bounded on purpose: it resolves one recipe scope, not the cascade, so atomic utilities, a palette set on an outer recipe and consumed by an inner one, and a `var(--colors-color-palette-…, fallback)` are all reported clean rather than risk failing a healthy stylesheet |
 | `staticCss` coverage | **partially** — the gate is "at least one design-system recipe stem present", which catches total omission only. A narrowed map is supported and encouraged, so a per-recipe gap inside one is invisible to it: verify a narrowed map by building and grepping the emitted CSS for the stems the built JS contains |

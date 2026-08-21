@@ -30,8 +30,8 @@ const baseChainID int64 = 8453
 //   - the chain-routing factory (blockverifier.New) selects the Etherscan
 //     verifier for 8453 — this is what confirms routing, not a hand-built client;
 //   - that verifier talks to a MOCK Etherscan V2 proxy HTTP server;
-//   - the service reads block state from a REAL Postgres (testcontainers harness
-//     via testutil.SetupTestSchema, which applies all migrations);
+//   - the service reads block state from a REAL Postgres, migrated via
+//     testutil.SetupTestDB;
 //   - the produced report is a success.
 //
 // Only the Etherscan HTTP endpoint is mocked (a data source we do not control),
@@ -40,7 +40,7 @@ func TestValidate_BaseChain_Integration(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	pool, _, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
 	repo := postgres.NewBlockStateRepository(pool, baseChainID, logger)

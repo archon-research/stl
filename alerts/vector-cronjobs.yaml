@@ -27,9 +27,10 @@
 # template's `Cluster:` header is populated. `namespace` is a static rule label
 # (mimir-rules-sync lint forbids `cluster`/`env` as static labels but allows it).
 #
-# Two services are EXCLUDED by service_name: maple-graphql-indexer, which has
+# Three services are EXCLUDED by service_name: maple-graphql-indexer, which has
 # richer dedicated rules in vector-indexers.yaml (VEC-320), and
-# offchain-price-backfill, which is on-demand — see VectorCronjobAllRunsFailing
+# offchain-price-backfill and reference-capital-backfill, which are on-demand —
+# see VectorCronjobAllRunsFailing
 # for why "no successes in an hour" is its healthy state. Every other cronjob,
 # including any added later, is covered automatically; on-demand workers are
 # covered by VectorCronjobRunFailing and VectorOnDemandWorkerDown instead.
@@ -90,7 +91,8 @@ groups:
         # Errors > 0 AND zero successes over 1h => the job is consistently
         # failing, not flapping.
         #
-        # On-demand jobs (temporal.RunWorker — offchain-price-backfill) are excluded:
+        # On-demand jobs (temporal.RunWorker — offchain-price-backfill,
+        # reference-capital-backfill) are excluded:
         # they run only when a human triggers them, so "zero successes in the last
         # hour" is their normal healthy state and this rule's premise does not hold.
         # One deliberately-failed manual run would otherwise page the operator who
@@ -108,6 +110,7 @@ groups:
                 status="error",
                 service_name!="maple-graphql-indexer",
                 service_name!="offchain-price-backfill",
+                service_name!="reference-capital-backfill",
                 k8s_namespace_name="vector"
               }[1h])
             ) > 0
@@ -119,6 +122,7 @@ groups:
                 status="success",
                 service_name!="maple-graphql-indexer",
                 service_name!="offchain-price-backfill",
+                service_name!="reference-capital-backfill",
                 k8s_namespace_name="vector"
               }[1h])
             ) == 0
@@ -215,7 +219,7 @@ groups:
             max by (cluster, deployment) (
               kube_deployment_status_replicas_available{
                 namespace="vector",
-                deployment=~"offchain-price-backfill"
+                deployment=~"offchain-price-backfill|reference-capital-backfill"
               }
             ) < 1
           )
@@ -223,7 +227,7 @@ groups:
             max by (cluster, deployment) (
               kube_deployment_spec_replicas{
                 namespace="vector",
-                deployment=~"offchain-price-backfill"
+                deployment=~"offchain-price-backfill|reference-capital-backfill"
               }
             ) > 0
           )
@@ -247,8 +251,10 @@ groups:
       # transform-worker (VEC-484): queue-drain and parity rules
       # =======================================================================
       # These live here, not in a vector-transform-worker.yaml, because the
-      # rules-sync namespace regex only accepts vector-{watcher,backup-worker,
-      # indexers,psm3,postgres,cronjobs}. The transform-worker cronjob drains a
+      # rules-sync namespace regex (`namespaces-regex` in
+      # .github/workflows/alerts.yml) does not accept a vector-transform-worker
+      # namespace, and the sync derives the namespace from the FILENAME — such a
+      # file would be silently dropped. The transform-worker cronjob drains a
       # per-source change queue (transformed._pending_<t>) into the transformed
       # hypertables. Generic run-failure and worker-liveness above already cover
       # it (service_name / deployment "transform-worker"); these add the

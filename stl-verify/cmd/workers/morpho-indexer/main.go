@@ -189,11 +189,13 @@ func run(ctx context.Context, args []string) error {
 
 	// Redis
 	blockCache, err := redisAdapter.NewBlockCache(redisAdapter.Config{
-		Addr:      cfg.redisAddr,
-		Password:  env.Get("REDIS_PASSWORD", ""),
-		DB:        0,
-		TTL:       2 * 24 * time.Hour,
-		KeyPrefix: "stl",
+		Addr:     cfg.redisAddr,
+		Password: env.Get("REDIS_PASSWORD", ""),
+		DB:       0,
+		TTL:      2 * 24 * time.Hour,
+		// Configurable for the tests driving this binary: they share one Redis and
+		// cannot namespace a key the binary builds for itself.
+		KeyPrefix: env.Get("REDIS_KEY_PREFIX", "stl"),
 	}, logger)
 	if err != nil {
 		return fmt.Errorf("creating Redis cache: %w", err)

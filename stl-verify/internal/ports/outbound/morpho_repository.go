@@ -108,12 +108,19 @@ type MorphoRepository interface {
 	// that block as a member the enumeration failed to return.
 	GetActiveAdaptersByVaultAt(ctx context.Context, morphoVaultID int64, at entity.BlockPosition) ([]*entity.MorphoAdapterMember, error)
 
-	// SaveAdapterState saves an adapter realAssets() snapshot within an external transaction.
-	SaveAdapterState(ctx context.Context, tx pgx.Tx, state *entity.MorphoAdapterState) error
+	// SaveAdapterState saves an adapter realAssets() snapshot within an external
+	// transaction, reporting whether a row was appended (see SaveVaultCap).
+	SaveAdapterState(ctx context.Context, tx pgx.Tx, state *entity.MorphoAdapterState) (bool, error)
 
 	// SaveVaultCap saves a VaultV2 allocation-cap snapshot within an external transaction.
-	SaveVaultCap(ctx context.Context, tx pgx.Tx, vaultCap *entity.MorphoVaultCap) error
+	//
+	// Reports false when the snapshot deduped to no row: same-block sibling events
+	// build byte-identical rows, and a same-build retry converges on the one already
+	// there. A caller counting rows written must gate on it, the way
+	// ObserveAdapterMembership's appended flag is gated on.
+	SaveVaultCap(ctx context.Context, tx pgx.Tx, vaultCap *entity.MorphoVaultCap) (bool, error)
 
-	// SaveVaultFee saves a VaultV2 full fee-config snapshot within an external transaction.
-	SaveVaultFee(ctx context.Context, tx pgx.Tx, vaultFee *entity.MorphoVaultFee) error
+	// SaveVaultFee saves a VaultV2 full fee-config snapshot within an external
+	// transaction, reporting whether a row was appended (see SaveVaultCap).
+	SaveVaultFee(ctx context.Context, tx pgx.Tx, vaultFee *entity.MorphoVaultFee) (bool, error)
 }

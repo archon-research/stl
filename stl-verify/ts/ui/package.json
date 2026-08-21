@@ -3,6 +3,10 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "exports": {
+    "./openapi-types": "./src/generated/openapi-types.ts",
+    "./package.json": "./package.json"
+  },
   "imports": {
     "#env": "./env.ts",
     "#src/*": "./src/*",
@@ -10,24 +14,27 @@
   },
   "scripts": {
     "prepare": "panda codegen",
-    "dev": "vite",
-    "build": "vite build",
+    "dev": "node scripts/copy-theme-bootstrap.mjs && vite",
+    "build": "node scripts/copy-theme-bootstrap.mjs && vite build",
     "type:check": "tsc -b",
     "format": "uikit-cli format --write \"src/**/*.ts\" \"src/**/*.tsx\" panda.config.ts vite.config.ts env.ts",
     "format:check": "uikit-cli format --check \"src/**/*.ts\" \"src/**/*.tsx\" panda.config.ts vite.config.ts env.ts",
     "preview": "vite preview",
     "test:explorers": "node scripts/check-explorer-urls.mjs",
     "test:prime-grouping": "node scripts/check-prime-grouping.mjs",
+    "test:metrics-grid": "node scripts/check-metrics-grid.mjs",
+    "test:mock-worker": "node scripts/check-mock-worker.mjs",
     "test:routes": "node scripts/check-router-urls.mjs",
     "generate:openapi-types": "uikit-openapi-generate --schema ./src/generated/openapi-schema.json --output ./src/generated/openapi-types.ts && uikit-cli format --write ./src/generated/openapi-types.ts",
     "lint": "uikit-cli lint src panda.config.ts vite.config.ts env.ts",
     "doctor": "uikit-cli doctor --codegen"
   },
   "dependencies": {
-    "@archon-research/charting": "0.9.0",
-    "@archon-research/design-system": "0.9.0",
-    "@archon-research/http-client-core": "0.9.0",
-    "@archon-research/http-client-react": "0.9.0",
+    "@archon-research/charting": "0.10.0-rohit-pre-release-consumer-fixes.1",
+    "@archon-research/design-system": "0.10.0-rohit-pre-release-consumer-fixes.1",
+    "@archon-research/http-client-core": "0.10.0-rohit-pre-release-consumer-fixes.1",
+    "@archon-research/http-client-react": "0.10.0-rohit-pre-release-consumer-fixes.1",
+    "@archon-research/router-kit": "0.10.0-rohit-pre-release-consumer-fixes.1",
     "@tanstack/react-router": "1.170.25",
     "lucide-react": "1.28.0",
     "react": "19.2.8",
@@ -37,14 +44,16 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
-    "@archon-research/oxfmt-config": "0.9.0",
-    "@archon-research/oxlint-config": "0.9.0",
-    "@archon-research/tsconfig": "0.9.0",
+    "@archon-research/oxfmt-config": "0.10.0-rohit-pre-release-consumer-fixes.1",
+    "@archon-research/oxlint-config": "0.10.0-rohit-pre-release-consumer-fixes.1",
+    "@archon-research/tsconfig": "0.10.0-rohit-pre-release-consumer-fixes.1",
     "@pandacss/dev": "1.12.0",
+    "@stl-verify/mocks": "*",
     "@types/node": "26.1.2",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.4",
     "@vitejs/plugin-react": "6.0.5",
+    "msw": "2.15.0",
     "openapi-typescript": "7.13.0",
     "postcss": "8.5.26",
     "vite": "8.2.1"
@@ -52,5 +61,10 @@
   "optionalDependencies": {
     "lightningcss-darwin-arm64": "1.33.0",
     "lightningcss-linux-x64-gnu": "1.33.0"
+  },
+  "msw": {
+    "workerDirectory": [
+      "public"
+    ]
   }
 }

@@ -85,7 +85,7 @@ func setupReorgIntegration(t *testing.T) *reorgIntegrationFixture {
 	t.Helper()
 	ctx := context.Background()
 
-	db, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	db, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	pool := uniswapTestPool()

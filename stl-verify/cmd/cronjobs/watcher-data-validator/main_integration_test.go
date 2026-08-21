@@ -16,14 +16,7 @@ import (
 var sharedDSN string
 
 func TestMain(m *testing.M) {
-	dsn, cleanup := testutil.StartTimescaleDBForMain()
-	sharedDSN = dsn
-
-	code := m.Run()
-
-	cleanup()
-	code = testutil.CheckGoroutineLeaks(code)
-	os.Exit(code)
+	os.Exit(testutil.RunShared(m, testutil.Shared{TimescaleDSN: &sharedDSN}))
 }
 
 // TestSetupRunner_WiresService covers setupRunner end to end: chain ID resolved,
@@ -34,7 +27,7 @@ func TestMain(m *testing.M) {
 // real Etherscan endpoint.
 func TestSetupRunner_WiresService(t *testing.T) {
 	ctx := context.Background()
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 
 	t.Setenv("CHAIN_ID", "1")

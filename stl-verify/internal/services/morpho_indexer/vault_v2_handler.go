@@ -60,7 +60,11 @@ func (s *Service) handleAddAdapter(ctx context.Context, e *AddAdapterEvent, vaul
 		return err
 	}
 	s.warnIfUnknownAdapterType(vaultAddress, e.Account, adapterType, blockNumber)
-	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
+	var (
+		recorded []membershipObservation
+		appended bool
+	)
+	if err := s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
 		adapterID, _, err := s.observeAdapterMembership(ctx, tx, vault, e.Account, entity.MorphoAdapterMembership{
 			BlockNumber:  blockNumber,
 			BlockVersion: blockVersion,
@@ -69,18 +73,38 @@ func (s *Service) handleAddAdapter(ctx context.Context, e *AddAdapterEvent, vaul
 			IsMember:     true,
 			AdapterType:  &adapterType,
 			ObservedVia:  entity.MembershipFromAddAdapter,
-		})
+		}, &recorded)
 		if err != nil {
 			return err
 		}
-		return s.saveAdapterSeedState(ctx, tx, adapterID, realAssets, blockNumber, blockVersion, blockTimestamp)
-	})
+		appended, err = s.saveAdapterSeedState(ctx, tx, adapterID, realAssets, blockNumber, blockVersion, blockTimestamp)
+		return err
+	}); err != nil {
+		return err
+	}
+	s.recordMembershipObservations(ctx, recorded)
+	if appended {
+		s.telemetry.RecordV2Snapshot(ctx, v2SnapshotAdapterState)
+	}
+	return nil
+}
+
+// membershipObservation is one appended observation awaiting its counter, held
+// until the transaction that appended it commits.
+type membershipObservation struct {
+	adapterType *entity.MorphoAdapterType
+	observedVia entity.MembershipSource
 }
 
 // observeAdapterMembership records one observation about (vault, adapter), creating the
 // adapter's identity row on first sight. Every VaultV2 write path funnels through here, so
 // the identity an observation is attached to is built in exactly one place.
-func (s *Service) observeAdapterMembership(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault, adapter common.Address, membership entity.MorphoAdapterMembership) (int64, bool, error) {
+//
+// An append is accumulated into recorded rather than counted, because this runs inside
+// the caller's transaction; the caller flushes with recordMembershipObservations once
+// that transaction has committed. An assertion that changes nothing accumulates nothing —
+// it is not an observation the log gained.
+func (s *Service) observeAdapterMembership(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault, adapter common.Address, membership entity.MorphoAdapterMembership, recorded *[]membershipObservation) (int64, bool, error) {
 	adapterID, appended, err := s.morphoRepo.ObserveAdapterMembership(ctx, tx, &entity.MorphoAdapterObservation{
 		Identity: entity.MorphoAdapterIdentity{
 			MorphoVaultID: vault.ID,
@@ -92,7 +116,18 @@ func (s *Service) observeAdapterMembership(ctx context.Context, tx pgx.Tx, vault
 	if err != nil {
 		return 0, false, fmt.Errorf("recording adapter %s membership at block %d: %w", adapter.Hex(), membership.BlockNumber, err)
 	}
+	if appended {
+		*recorded = append(*recorded, membershipObservation{adapterType: membership.AdapterType, observedVia: membership.ObservedVia})
+	}
 	return adapterID, appended, nil
+}
+
+// recordMembershipObservations counts the observations a committed transaction
+// appended. Callers must not call it on a path that returned an error.
+func (s *Service) recordMembershipObservations(ctx context.Context, recorded []membershipObservation) {
+	for _, obs := range recorded {
+		s.telemetry.RecordAdapterMembershipObservation(ctx, obs.adapterType, obs.observedVia)
+	}
 }
 
 // readSeedRealAssets reads the realAssets() seed for an adapter being registered,
@@ -124,13 +159,14 @@ func (s *Service) readSeedRealAssets(ctx context.Context, adapter common.Address
 
 // saveAdapterSeedState writes a freshly registered adapter's first realAssets
 // snapshot, or nothing when the adapter served no reading (see readSeedRealAssets).
-func (s *Service) saveAdapterSeedState(ctx context.Context, tx pgx.Tx, adapterID int64, realAssets *big.Int, blockNumber int64, blockVersion int, blockTimestamp time.Time) error {
+// Reports whether a row was appended.
+func (s *Service) saveAdapterSeedState(ctx context.Context, tx pgx.Tx, adapterID int64, realAssets *big.Int, blockNumber int64, blockVersion int, blockTimestamp time.Time) (bool, error) {
 	if realAssets == nil {
-		return nil
+		return false, nil
 	}
 	state, err := entity.NewMorphoAdapterState(adapterID, blockNumber, blockVersion, blockTimestamp, realAssets)
 	if err != nil {
-		return fmt.Errorf("creating adapter state entity: %w", err)
+		return false, fmt.Errorf("creating adapter state entity: %w", err)
 	}
 	return s.morphoRepo.SaveAdapterState(ctx, tx, state)
 }
@@ -151,7 +187,8 @@ func (s *Service) handleRemoveAdapter(ctx context.Context, e *RemoveAdapterEvent
 	if err != nil {
 		return err
 	}
-	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
+	var recorded []membershipObservation
+	if err := s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
 		_, _, err := s.observeAdapterMembership(ctx, tx, vault, e.Account, entity.MorphoAdapterMembership{
 			BlockNumber:  blockNumber,
 			BlockVersion: blockVersion,
@@ -160,9 +197,13 @@ func (s *Service) handleRemoveAdapter(ctx context.Context, e *RemoveAdapterEvent
 			IsMember:     false,
 			AdapterType:  nil,
 			ObservedVia:  entity.MembershipFromRemoveAdapter,
-		})
+		}, &recorded)
 		return err
-	})
+	}); err != nil {
+		return err
+	}
+	s.recordMembershipObservations(ctx, recorded)
+	return nil
 }
 
 // handleAllocation snapshots an adapter's realAssets() after an Allocate or
@@ -195,8 +236,12 @@ func (s *Service) handleAllocation(ctx context.Context, adapter, vaultAddress co
 		return err
 	}
 
-	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		adapterID, err := s.assertAllocatedAdapterIsMember(ctx, tx, vault, vaultAddress, adapter, position, blockTimestamp, probedType)
+	var (
+		recorded []membershipObservation
+		appended bool
+	)
+	if err := s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
+		adapterID, err := s.assertAllocatedAdapterIsMember(ctx, tx, vault, vaultAddress, adapter, position, blockTimestamp, probedType, &recorded)
 		if err != nil {
 			return err
 		}
@@ -204,8 +249,16 @@ func (s *Service) handleAllocation(ctx context.Context, adapter, vaultAddress co
 		if err != nil {
 			return fmt.Errorf("creating adapter state entity: %w", err)
 		}
-		return s.morphoRepo.SaveAdapterState(ctx, tx, state)
-	})
+		appended, err = s.morphoRepo.SaveAdapterState(ctx, tx, state)
+		return err
+	}); err != nil {
+		return err
+	}
+	s.recordMembershipObservations(ctx, recorded)
+	if appended {
+		s.telemetry.RecordV2Snapshot(ctx, v2SnapshotAdapterState)
+	}
+	return nil
 }
 
 // assertAllocatedAdapterIsMember records the membership an Allocate/Deallocate log
@@ -222,7 +275,7 @@ func (s *Service) handleAllocation(ctx context.Context, adapter, vaultAddress co
 // membership with no classification, which the registry refuses with
 // ErrAdapterUnclassified — the event fails hard rather than defaulting a type; SQS
 // redelivers and the pre-transaction read re-probes.
-func (s *Service) assertAllocatedAdapterIsMember(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault, vaultAddress, adapter common.Address, at entity.BlockPosition, blockTimestamp time.Time, probedType *entity.MorphoAdapterType) (int64, error) {
+func (s *Service) assertAllocatedAdapterIsMember(ctx context.Context, tx pgx.Tx, vault *entity.MorphoVault, vaultAddress, adapter common.Address, at entity.BlockPosition, blockTimestamp time.Time, probedType *entity.MorphoAdapterType, recorded *[]membershipObservation) (int64, error) {
 	adapterID, appended, err := s.observeAdapterMembership(ctx, tx, vault, adapter, entity.MorphoAdapterMembership{
 		BlockNumber:  at.BlockNumber,
 		BlockVersion: at.BlockVersion,
@@ -231,7 +284,7 @@ func (s *Service) assertAllocatedAdapterIsMember(ctx context.Context, tx pgx.Tx,
 		IsMember:     true,
 		AdapterType:  probedType,
 		ObservedVia:  entity.MembershipFromAllocation,
-	})
+	}, recorded)
 	if errors.Is(err, outbound.ErrAdapterUnclassified) {
 		return 0, fmt.Errorf("adapter %s was a member before the transaction but is not at block %d inside it, so no type was probed: %w",
 			adapter.Hex(), at.BlockNumber, err)
@@ -352,9 +405,18 @@ func (s *Service) handleCapChange(ctx context.Context, vaultAddress common.Addre
 		return fmt.Errorf("creating vault cap entity: %w", err)
 	}
 
-	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		return s.morphoRepo.SaveVaultCap(ctx, tx, vaultCap)
-	})
+	var appended bool
+	if err := s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
+		var err error
+		appended, err = s.morphoRepo.SaveVaultCap(ctx, tx, vaultCap)
+		return err
+	}); err != nil {
+		return err
+	}
+	if appended {
+		s.telemetry.RecordV2Snapshot(ctx, v2SnapshotVaultCap)
+	}
+	return nil
 }
 
 // handleFeeChange snapshots the vault's FULL on-chain fee config after any of the
@@ -391,7 +453,16 @@ func (s *Service) handleFeeChange(ctx context.Context, vaultAddress common.Addre
 		return fmt.Errorf("creating vault fee entity: %w", err)
 	}
 
-	return s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
-		return s.morphoRepo.SaveVaultFee(ctx, tx, vaultFee)
-	})
+	var appended bool
+	if err := s.txManager.WithTransaction(ctx, func(tx pgx.Tx) error {
+		var err error
+		appended, err = s.morphoRepo.SaveVaultFee(ctx, tx, vaultFee)
+		return err
+	}); err != nil {
+		return err
+	}
+	if appended {
+		s.telemetry.RecordV2Snapshot(ctx, v2SnapshotVaultFee)
+	}
+	return nil
 }
