@@ -12,7 +12,7 @@ import (
 // TestMaterializeSkyPrimeDebt is the VEC-406 contract test: after migrations,
 // materialize_sky_prime_debt() projects raw prime_debt rows into position_state on the native
 // per-instrument grain (VEC-400) — one position per (prime, ilk), keyed by the native ilk_name, held by
-// the prime's vault address — and writes the current deal_type (BORROW) into position_classification.
+// the prime's vault address. Observations only: the spine writes no classification.
 //
 // Pins: native ilk_name key, prime vault address as holder, debt_wad as quantity, chain_id constant 1 /
 // protocol_id NULL, prime_debt's own processing_version flowing into the spine, closure (VEC-409) — a
@@ -34,9 +34,12 @@ DO $$
 DECLARE paid bigint; pbid bigint; pcid bigint;
 BEGIN
   INSERT INTO chain (chain_id, name) VALUES (1, 'ethereum') ON CONFLICT (chain_id) DO NOTHING;
-  INSERT INTO prime (name, vault_address) VALUES ('spark', '\xaa') RETURNING id INTO paid;
-  INSERT INTO prime (name, vault_address) VALUES ('grove', '\xbb') RETURNING id INTO pbid;
-  INSERT INTO prime (name, vault_address) VALUES ('nova',  '\xcc') RETURNING id INTO pcid;
+  -- Names are test-local: 20260305_120000 seeds the real 'spark', 'grove' and 'obex', and prime.name is
+  -- UNIQUE, so reusing those names collides. The assertions key on the vault_address (the holder_id the
+  -- projection emits), not the name, so a distinct name changes nothing under test.
+  INSERT INTO prime (name, vault_address) VALUES ('itest-a', '\xaa') RETURNING id INTO paid;
+  INSERT INTO prime (name, vault_address) VALUES ('itest-b', '\xbb') RETURNING id INTO pbid;
+  INSERT INTO prime (name, vault_address) VALUES ('itest-c', '\xcc') RETURNING id INTO pcid;
   INSERT INTO prime_debt (prime_id, ilk_name, debt_wad, block_number, block_version, synced_at, processing_version, build_id) VALUES
     (paid, 'ILK-A', 1000, 100, 0, '2026-01-01T00:00:00Z', 0, 0),
     (paid, 'ILK-A', 1500, 200, 0, '2026-01-02T00:00:00Z', 0, 0),
@@ -118,33 +121,15 @@ END $$;`
 		})
 	}
 
-	// Three positions, all BORROW/SHORT. C's classification comes from its last non-zero observation, so a
-	// repaid position still classifies BORROW/SHORT.
-	var classRows int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_classification`).Scan(&classRows); err != nil {
-		t.Fatalf("classification count: %v", err)
-	}
-	if classRows != 3 {
-		t.Errorf("position_classification rows = %d, want 3", classRows)
-	}
-	var borrowShort int
-	if err := pool.QueryRow(ctx,
-		`SELECT count(*) FROM position_classification WHERE deal_type_code='BORROW' AND direction='SHORT'`).Scan(&borrowShort); err != nil {
-		t.Fatalf("classification check: %v", err)
-	}
-	if borrowShort != 3 {
-		t.Errorf("BORROW/SHORT classifications = %d, want 3", borrowShort)
-	}
-
-	// Idempotent.
+	// Idempotent: a second run re-derives the same observations and appends nothing.
 	if _, err := pool.Exec(ctx, `SELECT materialize_sky_prime_debt()`); err != nil {
 		t.Fatalf("second materialize: %v", err)
 	}
-	var rows2, class2 int
-	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM position_state), (SELECT count(*) FROM position_classification)`).Scan(&rows2, &class2); err != nil {
+	var rows2 int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_state`).Scan(&rows2); err != nil {
 		t.Fatalf("re-count: %v", err)
 	}
-	if rows2 != 5 || class2 != 3 {
-		t.Errorf("after re-run: position_state=%d (want 5), position_classification=%d (want 3)", rows2, class2)
+	if rows2 != 5 {
+		t.Errorf("after re-run: position_state=%d, want 5 (the rerun must append nothing)", rows2)
 	}
 }
