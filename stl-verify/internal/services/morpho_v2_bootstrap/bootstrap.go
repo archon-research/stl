@@ -20,8 +20,9 @@
 // The order is load-bearing, not a preference — see seedAdapterState.
 //
 // Every write goes through the same idempotent repository methods live indexing
-// uses, so re-running is safe. Any failure stops the run: a partial pass leaves
-// no silent holes because a re-run simply redoes the work.
+// uses, so re-running is safe. Any failure fails the run — the seed pass first
+// finishes the vaults it can (see seedAdapterState), but a vault it could not
+// heal is always reported, never left as a silent hole.
 //
 // The replay pass records its position after each completed chunk through a
 // ProgressStore, so an attempt that dies part-way (a pod kill, a deploy) resumes
@@ -32,6 +33,7 @@ package morpho_v2_bootstrap
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
@@ -267,15 +269,35 @@ func (s *Service) loadV2Vaults(ctx context.Context) ([]common.Address, error) {
 // snapshot hangs off an identity id that no lifecycle observation can move.
 // Replaying first is kept because it is cheaper — with the history already on
 // record the head assertion usually writes nothing.
+//
+// One vault's failure does not stop the pass. A vault-shaped contract this job
+// cannot probe fails identically on every future run, so aborting at the first
+// one would leave every vault after it unhealed forever — a permanent poison
+// pill in a repair job. The run still fails, naming every vault it could not
+// seed: healing as much as possible is the point, hiding a hole is not.
 func (s *Service) seedAdapterState(ctx context.Context, vaults []common.Address, head pinnedBlock) error {
+	var failures []error
 	for i, vault := range vaults {
 		if err := s.replay.SeedV2VaultAdapters(ctx, vault, head.number, head.hash, canonicalBlockVersion, head.timestamp); err != nil {
-			return fmt.Errorf("seeding adapters for vault %s at block %d: %w", vault.Hex(), head.number, err)
+			wrapped := fmt.Errorf("seeding adapters for vault %s at block %d: %w", vault.Hex(), head.number, err)
+			// A cancelled run fails every remaining vault identically, so
+			// collecting those would bury the cause under one error per vault.
+			if ctx.Err() != nil {
+				return wrapped
+			}
+			failures = append(failures, wrapped)
+			s.logger.Error("vault seed failed; continuing so healable vaults still heal",
+				"vault", vault.Hex(), "block", head.number, "error", err)
+			continue
 		}
 		if (i+1)%progressLogEvery == 0 {
 			s.logger.Info("seeding adapters", "done", i+1, "total", len(vaults))
 		}
 	}
+	if len(failures) > 0 {
+		return fmt.Errorf("%d of %d vaults could not be seeded: %w", len(failures), len(vaults), errors.Join(failures...))
+	}
+
 	s.logger.Info("adapter seed complete", "vaults", len(vaults), "block", head.number)
 	return nil
 }
