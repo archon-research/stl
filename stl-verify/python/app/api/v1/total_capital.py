@@ -108,7 +108,9 @@ class TotalCapitalEnvelope(BaseModel):
         default=Provenance.INDEXED,
         description=(
             "Provenance the series was answered from. `indexed` is the on-chain SubProxy treasury; "
-            "`reference` is Sky's Star monitor as observed by STL's syncer."
+            "`reference` is Sky's Star monitor as observed by STL's syncer; `both` fills "
+            "`total_capital_usd` and `reference_total_capital_usd` on every bucket, leaving either null "
+            "where that provenance reported nothing."
         ),
     )
     window: TimeSeriesWindow = Field(description="The window and resolution applied to this response.")
@@ -144,7 +146,8 @@ def _reference_field(by_bucket: dict, bucket_start, field: str):
         "Return the prime's total capital over time, gap-filled (LOCF) into buckets. Total "
         "capital is the treasury USDS held in the prime's SubProxy wallet (USDS is "
         "dollar-pegged, so the balance is the USD figure); it matches the upstream Star "
-        "`total_capital`. Under `reference=true` each bucket also carries `assets_usd` "
+        "`total_capital`. Wherever the response carries Sky's figures (`source=reference` or "
+        "`source=both`) each bucket also carries `assets_usd` "
         "(the upstream PRIME COLLATERAL figure) and the monitor's `encumbrance_ratio`. "
         "Returns `404` if the prime is unknown. Defaults to the last 24h; "
         "pass a window and `resolution` for longer ranges."

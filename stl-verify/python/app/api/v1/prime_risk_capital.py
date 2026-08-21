@@ -35,7 +35,7 @@ class AllocationRiskCapitalResponse(BaseModel):
 
     receipt_token_id: int | None = Field(
         description=(
-            "Surrogate id of the receipt token. Always set in self mode. Under `reference=true` it is "
+            "Surrogate id of the receipt token. Always set for an indexed row. For a Sky-reported one it is "
             "`null` when the upstream position does not join to STL's token registry — an unmapped "
             "network, a token STL does not index, or a Uniswap V4 position, which identifies itself by "
             "32-byte pool id where an address is expected and so can never resolve. `token_address` "
@@ -47,7 +47,7 @@ class AllocationRiskCapitalResponse(BaseModel):
     exposure_usd: PlainDecimal = Field(description="On-chain USD exposure of the allocation.")
     applied: bool = Field(
         description=(
-            "Whether the figure is priced. Always `true` under `reference=true`: the upstream monitor "
+            "Whether the figure is priced. Always `true` for a Sky-reported row: the upstream monitor "
             "reports only positions it has already priced."
         )
     )
@@ -82,19 +82,22 @@ class AllocationRiskCapitalResponse(BaseModel):
         default=None,
         description=(
             "Comparable capital-risk ratio (0-100). `null` when the allocation is unpriced. Under "
-            "`reference=true` this is upstream's `crr` rescaled from its native 0-1 fraction, so the "
+            "`source=reference` this is upstream's `crr` rescaled from its native 0-1 fraction, so the "
             "scale matches self mode."
         ),
     )
     model: str | None = Field(
         default=None,
-        description="Model that produced the figure. `null` when unpriced, and always `null` under `reference=true`.",
+        description=(
+            "Model that produced the figure. `null` when unpriced, and always `null` for a Sky-reported "
+            "row, which runs no model."
+        ),
     )
     chain: str | None = Field(
         default=None,
         description=(
             "Internal chain name the position sits on. Reference-only: `null` in self mode, and `null` "
-            "under `reference=true` for a network STL has no chain id for."
+            "for a Sky-reported row on a network STL has no chain id for."
         ),
         examples=["mainnet"],
     )
@@ -192,18 +195,23 @@ class PrimeRiskCapitalResponse(BaseModel):
     source: Provenance = Field(
         default=Provenance.INDEXED,
         description=(
-            "Provenance of every figure in this response. `indexed` is STL's own on-chain model; "
-            "`reference` is Sky's Star Agents Risk Capital & Requirements Monitor. Never mixed: one "
-            "response is entirely one or the other."
+            "Provenance of the figures in this response. `indexed` is STL's own on-chain model; "
+            "`reference` is Sky's Star Agents Risk Capital & Requirements Monitor; `both` carries the "
+            "two side by side, STL's in the unprefixed fields and Sky's in the `reference_`-prefixed "
+            "ones. Never reconciled: no field holds a blend of the two, and `both` degrades to "
+            "`indexed` — reporting itself as such — when the monitor cannot be read."
         ),
     )
     model: str | None = Field(
-        description="Default RRC model used (e.g. `gap_sweep`). `null` under `reference=true`, which runs no model.",
+        description=(
+            "Default RRC model used (e.g. `gap_sweep`). `null` under `source=reference`, which runs no "
+            "model; under `source=both` it is STL's model, since the unprefixed figures are STL's."
+        ),
         examples=["gap_sweep"],
     )
     exposure_usd: PlainDecimal = Field(
         description=(
-            "Σ priced receipt-token allocation exposure (USD). Under `reference=true` this is upstream's "
+            "Σ priced receipt-token allocation exposure (USD). Under `source=reference` this is upstream's "
             "own total, which deliberately does not equal the sum of `per_allocation` — the two come "
             "from separately-computed snapshots and reconcile only to about 1e-6."
         )
@@ -211,13 +219,13 @@ class PrimeRiskCapitalResponse(BaseModel):
     total_risk_capital_usd: PlainDecimal | None = Field(
         default=None,
         description=(
-            "On-chain SubProxy treasury balance (USD). `null` when absent. Under `reference=true` this "
+            "On-chain SubProxy treasury balance (USD). `null` when absent. Under `source=reference` this "
             "is upstream's Total Risk Capital, which is neither on-chain nor a treasury balance."
         ),
     )
     required_risk_capital_usd: PlainDecimal = Field(
         description=(
-            "Σ per-allocation RRC from the default model (USD). Under `reference=true` this is upstream's "
+            "Σ per-allocation RRC from the default model (USD). Under `source=reference` this is upstream's "
             "own Required Risk Capital total; no model runs."
         )
     )
@@ -232,7 +240,7 @@ class PrimeRiskCapitalResponse(BaseModel):
     )
     modeled_exposure_usd: PlainDecimal = Field(
         description=(
-            "Exposure the default model could price (USD). Under `reference=true` it equals "
+            "Exposure the default model could price (USD). Under `source=reference` it equals "
             "`exposure_usd`: the monitor publishes only positions it has already priced."
         )
     )
@@ -319,7 +327,7 @@ class PrimeRiskCapitalResponse(BaseModel):
         description=(
             "Chains the prime has an ALM proxy on that no allocation tracker serves, so they contribute "
             "nothing to the `prime_*` totals and read `null` in `prime_per_chain`. Non-empty means the "
-            "totals are a lower bound. Always empty under `reference=true`: upstream's totals are not "
+            "totals are a lower bound. Always empty under `source=reference`: upstream's totals are not "
             "bounded by what STL indexes, so the caveat does not apply to them."
         ),
         examples=[["arbitrum", "optimism", "unichain"]],
@@ -327,7 +335,8 @@ class PrimeRiskCapitalResponse(BaseModel):
     junior_risk_capital_usd: PlainDecimal | None = Field(
         default=None,
         description=(
-            "Junior (first-loss) risk capital (USD). Reference-only — `null` unless `reference=true`. "
+            "Junior (first-loss) risk capital (USD). Reference-only — `null` unless the response carries "
+            "Sky's figures (`source=reference` or `source=both`). "
             "This is the measured junior/senior split, which self mode has no equivalent for: it can "
             "only approximate a buffer as `total_risk_capital_usd - required_risk_capital_usd`."
         ),

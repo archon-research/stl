@@ -135,7 +135,7 @@ export interface paths {
     };
     /**
      * List prime debt snapshots
-     * @description Return debt snapshots for a prime, newest first, inside a `{mode, window, data}` envelope. Results are time-windowed (default last 24h). Returns `404` if the prime is unknown. Each snapshot carries the `block_number`/`block_version` it was observed at; consumers can use `block_version` to detect reorg-driven re-emissions. Set `aggregate=true` for the last debt value per time bucket (gap-filled). Pass `reference=true` (with `aggregate=true`) for Sky's own reported debt instead of the on-chain per-ilk figure; `source` reports which provenance answered.
+     * @description Return debt snapshots for a prime, newest first, inside a `{mode, window, data}` envelope. Results are time-windowed (default last 24h). Returns `404` if the prime is unknown. Each snapshot carries the `block_number`/`block_version` it was observed at; consumers can use `block_version` to detect reorg-driven re-emissions. Set `aggregate=true` for the last debt value per time bucket (gap-filled). Pass `source=reference` (with `aggregate=true`) for Sky's own reported debt instead of the on-chain per-ilk figure, or `source=both` to carry each in its own field on every bucket; `source` reports which provenance answered.
      */
     get: operations['list_prime_debt_snapshots_v1_primes__prime_id__debt_get'];
     put?: never;
@@ -197,7 +197,7 @@ export interface paths {
     };
     /**
      * Prime total-capital (treasury) time series
-     * @description Return the prime's total capital over time, gap-filled (LOCF) into buckets. Total capital is the treasury USDS held in the prime's SubProxy wallet (USDS is dollar-pegged, so the balance is the USD figure); it matches the upstream Star `total_capital`. Under `reference=true` each bucket also carries `assets_usd` (the upstream PRIME COLLATERAL figure) and the monitor's `encumbrance_ratio`. Returns `404` if the prime is unknown. Defaults to the last 24h; pass a window and `resolution` for longer ranges.
+     * @description Return the prime's total capital over time, gap-filled (LOCF) into buckets. Total capital is the treasury USDS held in the prime's SubProxy wallet (USDS is dollar-pegged, so the balance is the USD figure); it matches the upstream Star `total_capital`. Wherever the response carries Sky's figures (`source=reference` or `source=both`) each bucket also carries `assets_usd` (the upstream PRIME COLLATERAL figure) and the monitor's `encumbrance_ratio`. Returns `404` if the prime is unknown. Defaults to the last 24h; pass a window and `resolution` for longer ranges.
      */
     get: operations['list_prime_total_capital_v1_primes__prime_id__total_capital_get'];
     put?: never;
@@ -841,7 +841,7 @@ export interface components {
       amount_usd?: string | null;
       /**
        * Balance
-       * @description Balance held by the prime, in token units. Decimal serialized as a JSON string. Always present in self mode. Always `null` under `reference=true`: the upstream Star monitor reports USD exposure only and never a token quantity, so there is no balance to report — read `amount_usd` instead.
+       * @description Balance held by the prime, in token units. Decimal serialized as a JSON string. Always present for an indexed row. Always `null` for a Sky-reported one: the upstream Star monitor reports USD exposure only and never a token quantity, so there is no balance to report — read `amount_usd` instead.
        * @example 1234567.89
        */
       balance: string | null;
@@ -940,18 +940,18 @@ export interface components {
     AllocationRiskCapitalResponse: {
       /**
        * Applied
-       * @description Whether the figure is priced. Always `true` under `reference=true`: the upstream monitor reports only positions it has already priced.
+       * @description Whether the figure is priced. Always `true` for a Sky-reported row: the upstream monitor reports only positions it has already priced.
        */
       applied: boolean;
       /**
        * Chain
-       * @description Internal chain name the position sits on. Reference-only: `null` in self mode, and `null` under `reference=true` for a network STL has no chain id for.
+       * @description Internal chain name the position sits on. Reference-only: `null` in self mode, and `null` for a Sky-reported row on a network STL has no chain id for.
        * @example mainnet
        */
       chain?: string | null;
       /**
        * Crr Pct
-       * @description Comparable capital-risk ratio (0-100). `null` when the allocation is unpriced. Under `reference=true` this is upstream's `crr` rescaled from its native 0-1 fraction, so the scale matches self mode.
+       * @description Comparable capital-risk ratio (0-100). `null` when the allocation is unpriced. Under `source=reference` this is upstream's `crr` rescaled from its native 0-1 fraction, so the scale matches self mode.
        */
       crr_pct?: string | null;
       /**
@@ -972,7 +972,7 @@ export interface components {
       loan_token_symbol?: string | null;
       /**
        * Model
-       * @description Model that produced the figure. `null` when unpriced, and always `null` under `reference=true`.
+       * @description Model that produced the figure. `null` when unpriced, and always `null` for a Sky-reported row, which runs no model.
        */
       model?: string | null;
       /**
@@ -982,7 +982,7 @@ export interface components {
       protocol_name: string;
       /**
        * Receipt Token Id
-       * @description Surrogate id of the receipt token. Always set in self mode. Under `reference=true` it is `null` when the upstream position does not join to STL's token registry — an unmapped network, a token STL does not index, or a Uniswap V4 position, which identifies itself by 32-byte pool id where an address is expected and so can never resolve. `token_address` carries the raw upstream value in that case.
+       * @description Surrogate id of the receipt token. Always set for an indexed row. For a Sky-reported one it is `null` when the upstream position does not join to STL's token registry — an unmapped network, a token STL does not index, or a Uniswap V4 position, which identifies itself by 32-byte pool id where an address is expected and so can never resolve. `token_address` carries the raw upstream value in that case.
        */
       receipt_token_id: number | null;
       /**
@@ -1486,7 +1486,7 @@ export interface components {
        */
       mode: 'raw' | 'aggregated';
       /**
-       * @description Provenance the series was answered from. `indexed` is the on-chain per-ilk debt; `reference` is Sky's own reported figure. Raw snapshots are always `indexed`.
+       * @description Provenance the series was answered from. `indexed` is the on-chain per-ilk debt; `reference` is Sky's own reported figure; `both` fills `debt_wad` and `reference_debt_wad` on every bucket, leaving either null where that provenance reported nothing. Raw snapshots are always `indexed`.
        * @default indexed
        */
       source: components['schemas']['Provenance'];
@@ -1660,7 +1660,7 @@ export interface components {
       exposure_share?: string | null;
       /**
        * Exposure Usd
-       * @description Σ priced receipt-token allocation exposure (USD). Under `reference=true` this is upstream's own total, which deliberately does not equal the sum of `per_allocation` — the two come from separately-computed snapshots and reconcile only to about 1e-6.
+       * @description Σ priced receipt-token allocation exposure (USD). Under `source=reference` this is upstream's own total, which deliberately does not equal the sum of `per_allocation` — the two come from separately-computed snapshots and reconcile only to about 1e-6.
        */
       exposure_usd: string;
       /**
@@ -1685,18 +1685,18 @@ export interface components {
       internal_senior_risk_capital_usd?: string | null;
       /**
        * Junior Risk Capital Usd
-       * @description Junior (first-loss) risk capital (USD). Reference-only — `null` unless `reference=true`. This is the measured junior/senior split, which self mode has no equivalent for: it can only approximate a buffer as `total_risk_capital_usd - required_risk_capital_usd`.
+       * @description Junior (first-loss) risk capital (USD). Reference-only — `null` unless the response carries Sky's figures (`source=reference` or `source=both`). This is the measured junior/senior split, which self mode has no equivalent for: it can only approximate a buffer as `total_risk_capital_usd - required_risk_capital_usd`.
        */
       junior_risk_capital_usd?: string | null;
       /**
        * Model
-       * @description Default RRC model used (e.g. `gap_sweep`). `null` under `reference=true`, which runs no model.
+       * @description Default RRC model used (e.g. `gap_sweep`). `null` under `source=reference`, which runs no model; under `source=both` it is STL's model, since the unprefixed figures are STL's.
        * @example gap_sweep
        */
       model: string | null;
       /**
        * Modeled Exposure Usd
-       * @description Exposure the default model could price (USD). Under `reference=true` it equals `exposure_usd`: the monitor publishes only positions it has already priced.
+       * @description Exposure the default model could price (USD). Under `source=reference` it equals `exposure_usd`: the monitor publishes only positions it has already priced.
        */
       modeled_exposure_usd: string;
       /**
@@ -1706,7 +1706,7 @@ export interface components {
       modeled_pct?: string | null;
       /**
        * Per Allocation
-       * @description Per-allocation breakdown, newest-exposure first.
+       * @description Per-allocation breakdown, largest exposure first. Under `source=both` the merged rows are re-sorted, so a row's position reflects STL's exposure where it has one and Sky's otherwise.
        */
       per_allocation: components['schemas']['AllocationRiskCapitalResponse'][];
       /**
@@ -1763,7 +1763,7 @@ export interface components {
       prime_required_risk_capital_usd: string;
       /**
        * Prime Unserved Chains
-       * @description Chains the prime has an ALM proxy on that no allocation tracker serves, so they contribute nothing to the `prime_*` totals and read `null` in `prime_per_chain`. Non-empty means the totals are a lower bound. Always empty under `reference=true`: upstream's totals are not bounded by what STL indexes, so the caveat does not apply to them.
+       * @description Chains the prime has an ALM proxy on that no allocation tracker serves, so they contribute nothing to the `prime_*` totals and read `null` in `prime_per_chain`. Non-empty means the totals are a lower bound. Always empty under `source=reference`: upstream's totals are not bounded by what STL indexes, so the caveat does not apply to them.
        * @example [
        *       "arbitrum",
        *       "optimism",
@@ -1799,7 +1799,7 @@ export interface components {
       reference_total_risk_capital_usd?: string | null;
       /**
        * Required Risk Capital Usd
-       * @description Σ per-allocation RRC from the default model (USD). Under `reference=true` this is upstream's own Required Risk Capital total; no model runs.
+       * @description Σ per-allocation RRC from the default model (USD). Under `source=reference` this is upstream's own Required Risk Capital total; no model runs.
        */
       required_risk_capital_usd: string;
       /**
@@ -1808,7 +1808,7 @@ export interface components {
        */
       senior_risk_capital_usd?: string | null;
       /**
-       * @description Provenance of every figure in this response. `indexed` is STL's own on-chain model; `reference` is Sky's Star Agents Risk Capital & Requirements Monitor. Never mixed: one response is entirely one or the other.
+       * @description Provenance of the figures in this response. `indexed` is STL's own on-chain model; `reference` is Sky's Star Agents Risk Capital & Requirements Monitor; `both` carries the two side by side, STL's in the unprefixed fields and Sky's in the `reference_`-prefixed ones. Never reconciled: no field holds a blend of the two, and `both` degrades to `indexed` — reporting itself as such — when the monitor cannot be read.
        * @default indexed
        */
       source: components['schemas']['Provenance'];
@@ -1824,7 +1824,7 @@ export interface components {
       tokenized_junior_risk_capital_usd?: string | null;
       /**
        * Total Risk Capital Usd
-       * @description On-chain SubProxy treasury balance (USD). `null` when absent. Under `reference=true` this is upstream's Total Risk Capital, which is neither on-chain nor a treasury balance.
+       * @description On-chain SubProxy treasury balance (USD). `null` when absent. Under `source=reference` this is upstream's Total Risk Capital, which is neither on-chain nor a treasury balance.
        */
       total_risk_capital_usd?: string | null;
     };
@@ -2521,7 +2521,7 @@ export interface components {
        */
       mode: 'aggregated';
       /**
-       * @description Provenance the series was answered from. `indexed` is the on-chain SubProxy treasury; `reference` is Sky's Star monitor as observed by STL's syncer.
+       * @description Provenance the series was answered from. `indexed` is the on-chain SubProxy treasury; `reference` is Sky's Star monitor as observed by STL's syncer; `both` fills `total_capital_usd` and `reference_total_capital_usd` on every bucket, leaving either null where that provenance reported nothing.
        * @default indexed
        */
       source: components['schemas']['Provenance'];

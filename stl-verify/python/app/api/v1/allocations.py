@@ -208,7 +208,7 @@ class AllocationResponse(BaseModel):
     balance: PlainDecimal | None = Field(
         description=(
             "Balance held by the prime, in token units. Decimal serialized as a JSON string. "
-            "Always present in self mode. Always `null` under `reference=true`: the upstream Star "
+            "Always present for an indexed row. Always `null` for a Sky-reported one: the upstream Star "
             "monitor reports USD exposure only and never a token quantity, so there is no balance "
             "to report — read `amount_usd` instead."
         ),

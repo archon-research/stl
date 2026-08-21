@@ -97,7 +97,9 @@ class PrimeDebtEnvelope(BaseModel):
         default=Provenance.INDEXED,
         description=(
             "Provenance the series was answered from. `indexed` is the on-chain per-ilk debt; "
-            "`reference` is Sky's own reported figure. Raw snapshots are always `indexed`."
+            "`reference` is Sky's own reported figure; `both` fills `debt_wad` and `reference_debt_wad` "
+            "on every bucket, leaving either null where that provenance reported nothing. Raw "
+            "snapshots are always `indexed`."
         ),
     )
     window: TimeSeriesWindow = Field(description="The window and resolution applied to this response.")
@@ -120,8 +122,9 @@ async def _get_prime_debt_service(engine: AsyncEngine = Depends(get_engine)) -> 
         "is unknown. Each snapshot carries the `block_number`/`block_version` it was observed "
         "at; consumers can use `block_version` to detect reorg-driven re-emissions. Set "
         "`aggregate=true` for the last debt value per time bucket (gap-filled). Pass "
-        "`reference=true` (with `aggregate=true`) for Sky's own reported debt instead of the "
-        "on-chain per-ilk figure; `source` reports which provenance answered."
+        "`source=reference` (with `aggregate=true`) for Sky's own reported debt instead of the "
+        "on-chain per-ilk figure, or `source=both` to carry each in its own field on every "
+        "bucket; `source` reports which provenance answered."
     ),
 )
 async def list_prime_debt_snapshots(
