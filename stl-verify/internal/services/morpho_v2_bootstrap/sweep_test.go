@@ -141,10 +141,8 @@ func TestBatchAddresses(t *testing.T) {
 }
 
 // TestSortLogs orders strictly by (block, log index). Ordering no longer decides
-// the answers (see sortLogs), but it decides the ops signal: replaying an Allocate
-// ahead of its AddAdapter records a redundant assertion and a WARN that otherwise
-// means a discovery gap. Logs arrive interleaved because one chunk is fetched as
-// several per-address-batch requests.
+// the answers (see sortLogs); logs arrive interleaved because one chunk is
+// fetched as several per-address-batch requests.
 func TestSortLogs(t *testing.T) {
 	logs := []ethtypes.Log{
 		{BlockNumber: 20, Index: 1},
