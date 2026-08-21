@@ -104,12 +104,30 @@ func (r *VaultRegistry) Count() int {
 // vault. Used by the backfiller's replay phase to bound structured-event replay
 // to the vaults whose adapter / cap / fee events it knows how to handle.
 func (r *VaultRegistry) V2VaultAddresses() map[common.Address]struct{} {
+	firstSeen := r.V2VaultsFirstSeen()
+	out := make(map[common.Address]struct{}, len(firstSeen))
+	for addr := range firstSeen {
+		out[addr] = struct{}{}
+	}
+	return out
+}
+
+// V2VaultsFirstSeen returns every registered Morpho VaultV2 vault mapped to its
+// morpho_vault.created_at_block.
+//
+// FIRST SEEN, not deployed: V2 discovery triggers on a vault's first observed
+// AccrueInterest, and the legacy upsert only converges the column downward as
+// earlier sightings arrive (sparkUSDTbc: row 24481865, deployed 24481834). It is
+// therefore an UPPER BOUND — deployment <= first seen — which is what a caller
+// pinned to a historical block needs to tell "certainly existed by then" from
+// "cannot be certain".
+func (r *VaultRegistry) V2VaultsFirstSeen() map[common.Address]int64 {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	out := make(map[common.Address]struct{})
+	out := make(map[common.Address]int64)
 	for addr, v := range r.vaults {
 		if v.VaultVersion == entity.MorphoVaultV2 {
-			out[addr] = struct{}{}
+			out[addr] = v.CreatedAtBlock
 		}
 	}
 	return out

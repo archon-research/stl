@@ -37,6 +37,13 @@ func (s *Service) V2VaultAddresses() map[common.Address]struct{} {
 	return s.vaultRegistry.V2VaultAddresses()
 }
 
+// V2VaultsFirstSeen returns every registered Morpho VaultV2 vault mapped to the
+// block it was first seen at — an upper bound on its deployment block, see
+// VaultRegistry.V2VaultsFirstSeen. LoadVaultRegistry must have run first.
+func (s *Service) V2VaultsFirstSeen() map[common.Address]int64 {
+	return s.vaultRegistry.V2VaultsFirstSeen()
+}
+
 // ReplayMetaMorphoLog routes a single already-persisted VaultV2 vault's
 // structured-event log through the exact handler path the live SQS consumer uses
 // (processMetaMorphoLog): the audit-log write plus the typed adapter / cap / fee

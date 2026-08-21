@@ -19,6 +19,9 @@
 //
 // The order is load-bearing, not a preference — see seedAdapterState.
 //
+// Both passes cover only the vaults the pinned head can speak for; a vault first
+// seen above it is deferred to the next run — see loadV2Vaults.
+//
 // Every write goes through the same idempotent repository methods live indexing
 // uses, so re-running is safe. Any failure fails the run — the seed pass first
 // finishes the vaults it can (see seedAdapterState), but a vault it could not
@@ -84,7 +87,10 @@ type ChainReader interface {
 // which vaults and which logs to feed through the live path.
 type V2Replayer interface {
 	LoadVaultRegistry(ctx context.Context) error
-	V2VaultAddresses() map[common.Address]struct{}
+	// V2VaultsFirstSeen maps every persisted VaultV2 to the block it was first
+	// SEEN at, which is an upper bound on its deployment block — the run's head
+	// filter needs that bound, see loadV2Vaults.
+	V2VaultsFirstSeen() map[common.Address]int64
 	SeedV2VaultAdapters(ctx context.Context, vaultAddress common.Address, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) error
 	ReplayMetaMorphoLog(ctx context.Context, log shared.Log, blockNumber int64, blockHash common.Hash, blockVersion int, blockTimestamp time.Time) error
 }
@@ -173,7 +179,7 @@ func (s *Service) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	vaults, err := s.loadV2Vaults(ctx)
+	scope, err := s.loadV2Vaults(ctx, head)
 	if err != nil {
 		return err
 	}
@@ -181,25 +187,28 @@ func (s *Service) Run(ctx context.Context) error {
 	// ever triggered because V2 vaults are known to be missing rows, so an empty
 	// set means the run is pointed at the wrong place (wrong CHAIN_ID, wrong
 	// database) — the one outcome nobody would notice if it returned nil.
-	if len(vaults) == 0 {
-		return fmt.Errorf("no VaultV2 vaults found for chain %d: the bootstrap has nothing to repair, which means it is pointed at the wrong chain or database", s.config.ChainID)
+	if len(scope.vaults) == 0 {
+		return fmt.Errorf("no VaultV2 vaults of chain %d were first seen at or below the pinned head %d (%d deferred above it): the bootstrap has nothing to repair, which means it is pointed at the wrong chain or database",
+			s.config.ChainID, head.number, scope.deferred)
 	}
 
 	s.logger.Info("starting VaultV2 bootstrap",
 		"chainID", s.config.ChainID,
-		"vaults", len(vaults),
+		"vaults", len(scope.vaults),
+		"deferredVaults", scope.deferred,
 		"fromBlock", s.deployBlock,
 		"headBlock", head.number,
 		"headHash", head.hash.Hex())
 
-	if err := s.replayConfigHistory(ctx, vaults, head); err != nil {
+	if err := s.replayConfigHistory(ctx, scope.vaults, head); err != nil {
 		return err
 	}
-	if err := s.seedAdapterState(ctx, vaults, head); err != nil {
+	if err := s.seedAdapterState(ctx, scope.vaults, head); err != nil {
 		return err
 	}
 
-	s.logger.Info("VaultV2 bootstrap complete", "vaults", len(vaults), "headBlock", head.number)
+	s.logger.Info("VaultV2 bootstrap complete",
+		"vaults", len(scope.vaults), "deferredVaults", scope.deferred, "headBlock", head.number)
 	return nil
 }
 
@@ -239,22 +248,48 @@ func (s *Service) pinFinalizedHead(ctx context.Context) (pinnedBlock, error) {
 	}, nil
 }
 
-// loadV2Vaults reads every persisted VaultV2 for the configured chain, sorted by
+// v2VaultScope is what a run will work on: the vaults it heals, sorted by
 // address so a run's order — and its advisory-lock acquisition order — is
-// deterministic.
-func (s *Service) loadV2Vaults(ctx context.Context) ([]common.Address, error) {
+// deterministic, plus how many it left to a later head.
+type v2VaultScope struct {
+	vaults   []common.Address
+	deferred int
+}
+
+// loadV2Vaults reads every persisted VaultV2 for the configured chain that the
+// run's pinned head can speak for.
+//
+// morpho_vault.created_at_block is where DISCOVERY first saw the vault (V2
+// discovery triggers on the first observed AccrueInterest, and the legacy upsert
+// only converges the column downward as earlier sightings arrive), so it is an
+// UPPER BOUND: deployment <= first seen. The inequality is used in the direction
+// that bound supports — first seen <= head means the vault certainly had code at
+// the head, so no vault is ever probed at a block it did not exist at.
+//
+// A vault first seen ABOVE the head is DEFERRED, not excluded: it may well have
+// been enumerable there, but nothing proves it, and live indexing has owned that
+// vault since its first event. The next run pins a later finalized head that
+// includes it, which is why each skip is logged loudly rather than quietly.
+func (s *Service) loadV2Vaults(ctx context.Context, head pinnedBlock) (v2VaultScope, error) {
 	if err := s.replay.LoadVaultRegistry(ctx); err != nil {
-		return nil, fmt.Errorf("loading vault registry: %w", err)
+		return v2VaultScope{}, fmt.Errorf("loading vault registry: %w", err)
 	}
-	known := s.replay.V2VaultAddresses()
-	vaults := make([]common.Address, 0, len(known))
-	for address := range known {
-		vaults = append(vaults, address)
+	known := s.replay.V2VaultsFirstSeen()
+
+	scope := v2VaultScope{vaults: make([]common.Address, 0, len(known))}
+	for address, firstSeenBlock := range known {
+		if firstSeenBlock > head.number {
+			scope.deferred++
+			s.logger.Warn("vault first seen above the pinned head, deferring it: live indexing covers it, and the next run's later head includes it",
+				"vault", address.Hex(), "firstSeenBlock", firstSeenBlock, "headBlock", head.number)
+			continue
+		}
+		scope.vaults = append(scope.vaults, address)
 	}
-	slices.SortFunc(vaults, func(a, b common.Address) int {
+	slices.SortFunc(scope.vaults, func(a, b common.Address) int {
 		return bytes.Compare(a.Bytes(), b.Bytes())
 	})
-	return vaults, nil
+	return scope, nil
 }
 
 // seedAdapterState gives every vault its current adapter registry rows and one
@@ -368,6 +403,11 @@ func (s *Service) replayChunk(ctx context.Context, batches [][]common.Address, c
 // VAULT SET is the case that must not resume — the recorded chunks were fetched
 // through an address filter that never mentioned the vault that joined, so
 // skipping them would silently lose its whole governance history.
+//
+// The digest is computed over the HEAD-FILTERED set (loadV2Vaults), so a later
+// head that admits a previously deferred vault changes it and re-sweeps the whole
+// range. That is the same rule, deliberately: the vault it admits is exactly one
+// the recorded chunks were never fetched for.
 func (s *Service) resumeBlock(ctx context.Context, vaultsDigest string) (int64, error) {
 	recorded, found, err := s.progress.LoadProgress(ctx)
 	if err != nil {

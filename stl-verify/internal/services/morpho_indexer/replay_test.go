@@ -556,6 +556,31 @@ func TestV2VaultAddresses(t *testing.T) {
 	}
 }
 
+// TestV2VaultsFirstSeen carries each V2 vault's morpho_vault.created_at_block
+// through to the caller. The morpho-v2-bootstrap needs it to tell a vault that
+// certainly existed at its pinned head from one it cannot be sure about.
+func TestV2VaultsFirstSeen(t *testing.T) {
+	h := newTestHarness(t)
+
+	const firstSeen = int64(24_481_865)
+	v2 := common.HexToAddress("0xa000000000000000000000000000000000000001")
+	v1 := common.HexToAddress("0xa000000000000000000000000000000000000003")
+	h.svc.vaultRegistry.RegisterVault(v2, &entity.MorphoVault{
+		ID: 1, ChainID: 1, ProtocolID: 1, Address: v2.Bytes(), AssetTokenID: 1,
+		VaultVersion: entity.MorphoVaultV2, CreatedAtBlock: firstSeen,
+	})
+	h.registerTestVault(v1, 3, entity.MorphoVaultV1)
+
+	got := h.svc.V2VaultsFirstSeen()
+
+	if len(got) != 1 {
+		t.Fatalf("want only the V2 vault, got %d: %v", len(got), got)
+	}
+	if got[v2] != firstSeen {
+		t.Errorf("first-seen block for %s = %d, want %d", v2.Hex(), got[v2], firstSeen)
+	}
+}
+
 // TestReplayMetaMorphoLog_RoutesToHandler verifies ReplayMetaMorphoLog drives a
 // V2 structured log into the same typed handler the live SQS path uses (here
 // AddAdapter → ObserveAdapterMembership), rather than only audit-logging it. Reuses
