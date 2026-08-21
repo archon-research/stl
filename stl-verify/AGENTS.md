@@ -40,7 +40,9 @@ Follow [Effective Go](https://go.dev/doc/effective_go).
 - `cmd/util/` — `migrate`, `generate-er`, `null-payload-refill`, `stress-test`.
 
 Every binary extracts a `run(ctx, args) error` from `main()` and runs under one of three
-entry points for graceful SIGINT/SIGTERM shutdown (~25s): `lifecycle.Run` (workers),
+entry points for graceful SIGINT/SIGTERM shutdown (`lifecycle.ShutdownTimeout`, 40s, plus a
+15s `lifecycle.ShutdownTailBudget` for the deferred archive drain and OTEL flush, inside
+the pods' 60s `terminationGracePeriodSeconds`): `lifecycle.Run` (workers),
 `temporal.RunCronjob` (scheduled cronjobs), or `temporal.RunWorker` (on-demand Temporal
 jobs — no schedule, parameters supplied at trigger time; see `docs/temporal_guide.md`).
 

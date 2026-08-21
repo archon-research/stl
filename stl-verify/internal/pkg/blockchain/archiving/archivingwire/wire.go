@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
@@ -27,6 +28,14 @@ const (
 	// EnvEndpoint optionally overrides the S3 endpoint (LocalStack).
 	EnvEndpoint = "AWS_S3_ENDPOINT"
 )
+
+// DrainTimeout bounds the wait for in-flight archive writes at shutdown. The
+// drain is deferred, so it runs after the service's own shutdown window has
+// closed and shares lifecycle.ShutdownTailBudget with the OTEL flush that
+// follows it; waiting out a stuck write (each is capped at 30s) instead pushes
+// the process past the kubelet's grace period and gets it SIGKILLed, losing the
+// metric flush as well as the write.
+const DrainTimeout = 5 * time.Second
 
 // Wrap decorates a multicaller with archiving. Identity when archiving is off.
 type Wrap func(outbound.Multicaller) outbound.Multicaller
@@ -80,9 +89,9 @@ func Bootstrap(ctx context.Context, logger *slog.Logger, chainID, buildID int64,
 }
 
 // NewS3WrapFromEnv builds the archiving wrap from env config. The returned
-// drain func blocks until all in-flight archive writes finish; call it during
-// graceful shutdown. All decorators produced by the wrap share one WaitGroup,
-// so a single drain() covers them all.
+// drain func blocks until all in-flight archive writes finish or DrainTimeout
+// expires; call it during graceful shutdown. All decorators produced by the
+// wrap share one WaitGroup, so a single drain() covers them all.
 func NewS3WrapFromEnv(ctx context.Context, logger *slog.Logger, chainID, buildID int64, source string) (Wrap, func(), error) {
 	if logger == nil {
 		logger = slog.Default()
@@ -129,7 +138,30 @@ func NewS3WrapFromEnv(ctx context.Context, logger *slog.Logger, chainID, buildID
 			Logger:  logger,
 		})
 	}
-	drain := func() { wg.Wait() }
+	drain := func() {
+		if !waitWithBudget(wg, DrainTimeout) {
+			logger.Warn("raw SC call archive drain budget expired; abandoning in-flight writes",
+				"budget", DrainTimeout)
+		}
+	}
 
 	return wrap, drain, nil
+}
+
+// waitWithBudget waits for wg, reporting whether it finished within budget.
+func waitWithBudget(wg *sync.WaitGroup, budget time.Duration) bool {
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		wg.Wait()
+	}()
+
+	timer := time.NewTimer(budget)
+	defer timer.Stop()
+	select {
+	case <-drained:
+		return true
+	case <-timer.C:
+		return false
+	}
 }

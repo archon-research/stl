@@ -13,6 +13,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/tickbitmap"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
@@ -379,69 +380,6 @@ func TestDecodeTick_MalformedReturnDataReturnsError(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Floor-div helpers (tick <-> word/bit)
-// ---------------------------------------------------------------------------
-
-// floorMod implements floored (as opposed to Go's truncated) modulo:
-// floorMod(-1, 256) == 255, whereas Go's native -1%256 == -1.
-func floorMod(a, b int) int {
-	m := a % b
-	if m != 0 && ((m < 0) != (b < 0)) {
-		m += b
-	}
-	return m
-}
-
-// tickToWordBit maps an on-chain tick (must be a multiple of tickSpacing) to
-// its tickBitmap word position and bit index, inverting Solidity's
-// int16(compressed >> 8) / uint8(compressed % 256) packing. It is the
-// test-local reference inverse used to round-trip wordBitToTick.
-func tickToWordBit(tick int32, tickSpacing int) (int16, uint8) {
-	compressed := floorDiv(int(tick), tickSpacing)
-	word := floorDiv(compressed, 256)
-	bit := floorMod(compressed, 256)
-	return int16(word), uint8(bit)
-}
-
-func TestTickToWordBit(t *testing.T) {
-	tests := []struct {
-		name        string
-		tick        int32
-		tickSpacing int
-		wantWord    int16
-		wantBit     uint8
-	}{
-		{name: "zero tick, positive spacing", tick: 0, tickSpacing: 60, wantWord: 0, wantBit: 0},
-		{name: "positive tick within word 0", tick: 60, tickSpacing: 60, wantWord: 0, wantBit: 1},
-		{name: "positive tick crossing into word 1", tick: 60 * 256, tickSpacing: 60, wantWord: 1, wantBit: 0},
-		{name: "tick=-1 spacing=60 floors to word -1", tick: -60, tickSpacing: 60, wantWord: -1, wantBit: 255},
-		{name: "most-negative bit of word -1", tick: -60 * 256, tickSpacing: 60, wantWord: -1, wantBit: 0},
-		{name: "one below word -1 boundary falls to word -2", tick: -60 * 257, tickSpacing: 60, wantWord: -2, wantBit: 255},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			gotWord, gotBit := tickToWordBit(tt.tick, tt.tickSpacing)
-			if gotWord != tt.wantWord || gotBit != tt.wantBit {
-				t.Errorf("tickToWordBit(%d, %d) = (%d, %d), want (%d, %d)", tt.tick, tt.tickSpacing, gotWord, gotBit, tt.wantWord, tt.wantBit)
-			}
-
-			// Inverse must recover the original tick: only meaningful at
-			// bitmap-aligned ticks (exact multiples of tickSpacing), which is
-			// every tick in this table.
-			gotTick := wordBitToTick(gotWord, gotBit, tt.tickSpacing)
-			if gotTick != tt.tick {
-				t.Errorf("wordBitToTick(%d, %d, %d) = %d, want %d (round-trip)", gotWord, gotBit, tt.tickSpacing, gotTick, tt.tick)
-			}
-		})
-	}
-}
-
-// ---------------------------------------------------------------------------
-// BaselineTicks
-// ---------------------------------------------------------------------------
-
 // bitmapWord returns a uint256 (as *big.Int) with the given bit indices set.
 func bitmapWord(bits ...uint) *big.Int {
 	w := new(big.Int)
@@ -455,7 +393,7 @@ func TestBaselineTicks_DecodesSetBitsToTicks(t *testing.T) {
 	pool := tickTestPool() // TickSpacing = 60
 	blockHash := common.HexToHash("0xabc0000000000000000000000000000000000000000000000000000000001")
 
-	minWord, maxWord := wordBounds(pool.TickSpacing)
+	minWord, maxWord := tickbitmap.WordBounds(pool.TickSpacing)
 	var gotCallCount int
 
 	mc := testutil.NewMockMulticaller()
@@ -510,7 +448,7 @@ func TestBaselineTicks_DecodesSetBitsToTicks(t *testing.T) {
 }
 
 // TestBaselineTicks_ChunksMultipleWordBatches uses tickSpacing=1, which
-// widens the word range past baselineTickBitmapWordsPerCall, to prove
+// widens the word range past tickbitmap.BitmapWordsPerCall, to prove
 // BaselineTicks splits the scan into multiple ExecuteAtHash batches rather
 // than firing one multicall covering the entire word range.
 func TestBaselineTicks_ChunksMultipleWordBatches(t *testing.T) {
@@ -518,10 +456,10 @@ func TestBaselineTicks_ChunksMultipleWordBatches(t *testing.T) {
 	pool.TickSpacing = 1
 	blockHash := common.HexToHash("0xabc0000000000000000000000000000000000000000000000000000000005")
 
-	minWord, maxWord := wordBounds(pool.TickSpacing)
+	minWord, maxWord := tickbitmap.WordBounds(pool.TickSpacing)
 	totalWords := int(maxWord) - int(minWord) + 1
-	if totalWords <= baselineTickBitmapWordsPerCall {
-		t.Fatalf("test fixture invalid: totalWords = %d, want > baselineTickBitmapWordsPerCall = %d", totalWords, baselineTickBitmapWordsPerCall)
+	if totalWords <= tickbitmap.BitmapWordsPerCall {
+		t.Fatalf("test fixture invalid: totalWords = %d, want > tickbitmap.BitmapWordsPerCall = %d", totalWords, tickbitmap.BitmapWordsPerCall)
 	}
 
 	var (
@@ -573,16 +511,16 @@ func TestBaselineTicks_ChunksMultipleWordBatches(t *testing.T) {
 		t.Fatalf("ExecuteAtHash invocation count = %d, want > 1 (word range must be chunked)", executeCalls)
 	}
 	for i, size := range batchSizes {
-		if size > baselineTickBitmapWordsPerCall {
-			t.Errorf("batch %d size = %d, want <= baselineTickBitmapWordsPerCall = %d", i, size, baselineTickBitmapWordsPerCall)
+		if size > tickbitmap.BitmapWordsPerCall {
+			t.Errorf("batch %d size = %d, want <= tickbitmap.BitmapWordsPerCall = %d", i, size, tickbitmap.BitmapWordsPerCall)
 		}
 	}
 	if len(seenWords) != totalWords {
 		t.Errorf("distinct words scanned across all chunks = %d, want %d (full range, no gaps/overlaps)", len(seenWords), totalWords)
 	}
 
-	wantLowTick := wordBitToTick(0, 60, pool.TickSpacing)
-	wantHighTick := wordBitToTick(maxWord, 0, pool.TickSpacing)
+	wantLowTick := tickbitmap.WordBitToTick(0, 60, pool.TickSpacing)
+	wantHighTick := tickbitmap.WordBitToTick(maxWord, 0, pool.TickSpacing)
 	if len(got) != 2 {
 		t.Fatalf("BaselineTicks() = %v, want 2 ticks (one from first chunk, one from last chunk)", got)
 	}

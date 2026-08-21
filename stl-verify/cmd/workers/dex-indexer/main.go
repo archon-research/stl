@@ -40,7 +40,7 @@ func main() {
 // registration / package-level singletons), so the set of supported DEXes is
 // visible at the single call site in run.
 func newRegistry() map[string]Factory {
-	factories := []Factory{curveFactory{}, uniswapV3Factory{}}
+	factories := []Factory{curveFactory{}, uniswapV3Factory{}, uniswapV4Factory{}}
 	registry := make(map[string]Factory, len(factories))
 	for _, f := range factories {
 		registry[f.Kind()] = f

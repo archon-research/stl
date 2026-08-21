@@ -9,10 +9,11 @@ import (
 
 // MockSQSConsumer implements outbound.SQSConsumer for testing.
 type MockSQSConsumer struct {
-	ReceiveMessagesFn   func(ctx context.Context, maxMessages int) ([]outbound.SQSMessage, error)
-	DeleteMessageFn     func(ctx context.Context, receiptHandle string) error
-	CloseFn             func() error
-	VisibilityTimeoutFn func() time.Duration
+	ReceiveMessagesFn         func(ctx context.Context, maxMessages int) ([]outbound.SQSMessage, error)
+	DeleteMessageFn           func(ctx context.Context, receiptHandle string) error
+	ChangeMessageVisibilityFn func(ctx context.Context, receiptHandle string, visibility time.Duration) error
+	CloseFn                   func() error
+	VisibilityTimeoutFn       func() time.Duration
 }
 
 func (m *MockSQSConsumer) VisibilityTimeout() time.Duration {
@@ -32,6 +33,13 @@ func (m *MockSQSConsumer) ReceiveMessages(ctx context.Context, maxMessages int) 
 func (m *MockSQSConsumer) DeleteMessage(ctx context.Context, receiptHandle string) error {
 	if m.DeleteMessageFn != nil {
 		return m.DeleteMessageFn(ctx, receiptHandle)
+	}
+	return nil
+}
+
+func (m *MockSQSConsumer) ChangeMessageVisibility(ctx context.Context, receiptHandle string, visibility time.Duration) error {
+	if m.ChangeMessageVisibilityFn != nil {
+		return m.ChangeMessageVisibilityFn(ctx, receiptHandle, visibility)
 	}
 	return nil
 }

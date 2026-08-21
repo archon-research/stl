@@ -39,6 +39,7 @@ func TestNewDecodedCapturedLog_StringifiesBigInts(t *testing.T) {
 		"amount":        huge,
 		"token_amounts": []*big.Int{huge, big.NewInt(200)},
 		"provider":      common.HexToAddress("0x2222222222222222222222222222222222222222"),
+		"tx":            txHash,
 	}
 
 	got, err := NewDecodedCapturedLog(addr, 7, txHash, "AddLiquidity", eventData)
@@ -64,9 +65,52 @@ func TestNewDecodedCapturedLog_StringifiesBigInts(t *testing.T) {
 	if s, ok := arr[0].(string); !ok || s != huge.String() {
 		t.Errorf("token_amounts[0] = %v (%T), want string %q", arr[0], arr[0], huge.String())
 	}
-	// Non-big-int scalars keep their natural JSON form (address as its String()).
-	if _, ok := payload["provider"].(string); !ok {
-		t.Errorf("provider = %v (%T), want its natural string form", payload["provider"], payload["provider"])
+	// common.Address/common.Hash are [N]byte arrays: without their
+	// TextMarshaler taking precedence they would fall into the byte-array
+	// branch and lose their EIP-55 / hash text form.
+	if got, want := payload["provider"], "0x2222222222222222222222222222222222222222"; got != want {
+		t.Errorf("provider = %v (%T), want %q", got, got, want)
+	}
+	if got, want := payload["tx"], txHash.Hex(); got != want {
+		t.Errorf("tx = %v (%T), want %q", got, got, want)
+	}
+}
+
+// TestMarshalDecodedParams_HexEncodesFixedSizeByteArrays covers the ABI kind
+// neither *big.Int nor TextMarshaler handles: go-ethereum decodes bytes32
+// (PoolId, salt) as a bare [32]byte, which JSON-encodes as a decimal byte array
+// and leaves params->>'id' unjoinable against uniswap_v4_pool.pool_id.
+func TestMarshalDecodedParams_HexEncodesFixedSizeByteArrays(t *testing.T) {
+	poolID := [32]byte{0x58, 0x29, 0x9b, 0x9a}
+	poolID[31] = 0xe4
+	salt := [32]byte{}
+
+	payload, err := MarshalDecodedParams(map[string]any{
+		"id":    poolID,
+		"salt":  salt,
+		"extra": []byte{0xde, 0xad, 0xbe, 0xef},
+	})
+	if err != nil {
+		t.Fatalf("MarshalDecodedParams: %v", err)
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(payload, &got); err != nil {
+		t.Fatalf("unmarshalling payload: %v", err)
+	}
+
+	tests := []struct {
+		key  string
+		want string
+	}{
+		{key: "id", want: "0x58299b9a000000000000000000000000000000000000000000000000000000e4"},
+		{key: "salt", want: "0x0000000000000000000000000000000000000000000000000000000000000000"},
+		{key: "extra", want: "0xdeadbeef"},
+	}
+	for _, tt := range tests {
+		if got[tt.key] != tt.want {
+			t.Errorf("%s = %v (%T), want %q", tt.key, got[tt.key], got[tt.key], tt.want)
+		}
 	}
 }
 

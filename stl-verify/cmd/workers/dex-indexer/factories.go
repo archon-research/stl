@@ -10,6 +10,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/curveindexer"
 	"github.com/archon-research/stl/stl-verify/internal/services/dexconsumer"
 	"github.com/archon-research/stl/stl-verify/internal/services/uniswapv3indexer"
+	"github.com/archon-research/stl/stl-verify/internal/services/uniswapv4indexer"
 )
 
 // Factory builds the per-DEX dexconsumer.BlockHandler from the shared
@@ -18,7 +19,7 @@ import (
 // only place that imports both the postgres adapters and the service
 // packages; services never import adapters.
 type Factory interface {
-	// Kind matches cfg.Dex (e.g. "curve", "uniswap-v3") and is the registry key.
+	// Kind matches cfg.Dex (e.g. "curve", "uniswap-v3", "uniswap-v4") and is the registry key.
 	Kind() string
 	// ServiceName feeds dexbootstrap.BootstrapOptions.ServiceName (OTEL/logger identity).
 	ServiceName() string
@@ -131,5 +132,53 @@ func (uniswapV3Factory) BuildHandler(ctx context.Context, deps *dexbootstrap.Dep
 		return nil, fmt.Errorf("creating uniswap v3 service: %w", err)
 	}
 	deps.Logger.Info("uniswap-v3-indexer started", "pools", len(poolRows))
+	return service.BlockHandler(), nil
+}
+
+// uniswapV4Factory wires the Uniswap V4 indexer.
+type uniswapV4Factory struct{}
+
+func (uniswapV4Factory) Kind() string         { return "uniswap-v4" }
+func (uniswapV4Factory) ServiceName() string  { return "uniswap-v4-indexer" }
+func (uniswapV4Factory) MetricPrefix() string { return "uniswap_v4" }
+
+func (uniswapV4Factory) BuildHandler(ctx context.Context, deps *dexbootstrap.Deps, cfg dexbootstrap.Config) (dexconsumer.BlockHandler, error) {
+	repo := postgres.NewUniswapV4Repository(deps.PostgresPool, deps.BuildRegistry.BuildID())
+	poolRows, err := repo.LoadPools(ctx, cfg.ChainID)
+	if err != nil {
+		return nil, fmt.Errorf("loading uniswap v4 pools: %w", err)
+	}
+	if len(poolRows) == 0 {
+		return nil, fmt.Errorf("no uniswap v4 pools registered for chain %d", cfg.ChainID)
+	}
+	pools := uniswapv4indexer.RegisteredPoolsFromRows(poolRows)
+
+	// V4 has no periodic sweep, so SWEEP_BLOCKS is inert. Warn rather than fail
+	// so a deploy config copied from another DEX still starts.
+	if cfg.SweepBlocksSet && cfg.SweepBlocks > 0 {
+		deps.Logger.Warn("uniswap-v4 indexer has no sweep; SWEEP_BLOCKS is ignored", "sweepBlocks", cfg.SweepBlocks)
+	}
+
+	protocolID := poolRows[0].ProtocolID
+	eventWriter := dexconsumer.NewProtocolEventWriter(protocolID, deps.EventRepo)
+
+	service, err := uniswapv4indexer.NewUniswapV4Service(ctx, uniswapv4indexer.UniswapV4ServiceDeps{
+		Pools:       pools,
+		Multicaller: deps.Multicaller,
+		Repo:        repo,
+		EventWriter: eventWriter,
+		TxManager:   deps.TxManager,
+		ChainID:     cfg.ChainID,
+		Logger:      deps.Logger,
+		Telemetry:   deps.DexTelemetry,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("creating uniswap v4 service: %w", err)
+	}
+	// snapshotPools is logged separately so a registry that quietly excludes a
+	// pool from state/tick snapshots is visible at boot, not only as missing rows.
+	deps.Logger.Info("uniswap-v4-indexer started",
+		"pools", len(poolRows),
+		"snapshotPools", len(uniswapv4indexer.SnapshottablePools(pools)))
 	return service.BlockHandler(), nil
 }

@@ -52,3 +52,5 @@
 ./internal/adapters/outbound/skydata
 ./internal/services/reference_capital_backfill
 ./cmd/backfillers/reference-capital-backfill
+./internal/services/uniswapv4indexer
+./internal/pkg/tickbitmap

@@ -1781,6 +1781,387 @@ groups:
             this chain, or an address-matching regression in poolsByAddr.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv3indexernopoolstouched
 
+  # uniswap-v4-indexer (VEC-475) — Uniswap V4 DEX pool/swap/liquidity indexer.
+  # Runs via the unified dex-indexer binary (DEX=uniswap-v4); metric prefix
+  # uniswap_v4, declared by uniswapV4Factory.MetricPrefix() in
+  # cmd/workers/dex-indexer/factories.go and passed to
+  # dextelemetry.NewTelemetry by dexbootstrap.Bootstrap
+  # (cmd/workers/internal/dexbootstrap/bootstrap.go).
+  #
+  # NOT DEPLOYED YET: the SQS queue is provisioned in the infrastructure repo
+  # (uniswap_v4_indexing, infrastructure#617); the k8s Deployment lands in the
+  # stacked follow-up PR. Until that merges no uniswap_v4_* series exist, so
+  # none of these rules can fire.
+  #
+  # V4 is a SINGLETON: every pool lives inside one PoolManager contract
+  # (mainnet 0x000000000004444c5dc75cB358380D2e3dE08A90) and is identified by a
+  # 32-byte PoolId = keccak256(abi.encode(PoolKey)), not by its own address. So
+  # "touched" here means: a log emitted BY the PoolManager whose indexed PoolId
+  # (topics[1]) matches a registered pool — an address match alone is not
+  # enough, and never distinguishes one pool from another.
+  #
+  # Like uniswap-v3 and unlike curve there is no sweep (SnapshotTracker(0)):
+  # for a STATIC-FEE pool V4 state can only change through a PoolManager log
+  # keyed by PoolId, so state/tick rows are written only for pools touched in
+  # that block and a quiet block legitimately writes zero rows. The one
+  # exception is the dynamic LP fee (PoolKey.fee == 0x800000), which
+  # updateDynamicLPFee rewrites with no event; the registry excludes such a pool
+  # from snapshots (uniswap_v4_pool.snapshot_supported = false) while still
+  # indexing its events, so it contributes to pools_touched but never to
+  # state_rows_written or pools_never_indexed. State itself is read from the
+  # StateView lens (0x7fFE42C4a5DEeA5b0feC41C94C136Cf115597227) pinned to the
+  # block hash.
+  - name: vector-uniswap-v4-indexer
+    interval: 1m
+    rules:
+      # ---------------------------------------------------------------------
+      # CRITICAL
+      # ---------------------------------------------------------------------
+
+      - alert: VectorUniswapV4IndexerDown
+        # Process liveness from kube-state-metrics (deployment/namespace labels,
+        # NOT the OTel k8s_namespace_name), so it fires even when the OTel pipeline
+        # is the thing that broke. <1 available replica = no pod running, so no
+        # Uniswap V4 rows are written and the SQS backlog grows. Same shape as
+        # VectorFluidVaultIndexerDown above.
+        #
+        # A crash-loop at boot is exactly this case and is NOT hypothetical here:
+        # ValidatePoolKeys, a single-PoolManager registry, and the boot-time
+        # PoolIDsEverSnapshotted read all refuse to start rather than index wrong
+        # or invisible data. Without this rule such a pod emits no uniswap_v4_*
+        # series at all, and the metric-keyed rules below have nothing to key on.
+        #
+        # kube-state knows nothing about chains, so `chain` is a STATIC label
+        # here: one Deployment serves one chain, and this Deployment is mainnet's.
+        # A second chain gets its own copy with its own deployment name and its
+        # own static chain (the entity.ChainName value, e.g. `base`).
+        expr: |
+          max by (cluster) (
+            kube_deployment_status_replicas_available{
+              deployment="uniswap-v4-indexer", namespace="vector"
+            }
+          ) < 1
+        for: 10m
+        labels:
+          team: vector
+          severity: critical
+          component: uniswap-v4-indexer
+          namespace: vector
+          chain: mainnet
+        annotations:
+          summary: "Vector uniswap-v4-indexer has no available replica on mainnet"
+          description: |
+            `uniswap-v4-indexer` Deployment has <1 available replica for >10m.
+            The worker is not running; no Uniswap V4 swaps, liquidity events,
+            pool state or ticks are being written and the SQS backlog is
+            growing. A boot-time registry rejection looks exactly like this —
+            check the previous container's logs first.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4indexerdown
+
+      - alert: VectorUniswapV4IndexerStalled
+        # No block consumed for 15m while a replica is up. The `or (… * 0)`
+        # zero-fill keeps the alive-but-export-dead case firing: when OTLP breaks
+        # the counter series staleness-expires and a bare `rate(...) == 0` returns
+        # no data (silent), so it is zero-filled from kube-state, which is
+        # independent of the OTel pipeline. Gated on >=1 replica so it does not
+        # double-fire alongside Down on a dead process. Same shape as
+        # VectorFluidVaultIndexerStalled above.
+        #
+        # The zero-fill can only come from kube-state, which knows nothing about
+        # chains, so this pair is PER-DEPLOYMENT and therefore per-chain: the rate
+        # is pinned to `chain="mainnet"` (this Deployment's chain, the
+        # entity.ChainName value the worker labels with) and `chain` is re-added
+        # as a static label. Without that pin, `sum by (cluster)` would add up
+        # every chain's rate and one chain stalling would never reach zero once a
+        # second Deployment exists. A second chain gets its own copy of this pair
+        # with its own deployment name and its own chain, in both places.
+        expr: |
+          (
+            (
+              sum by (cluster) (
+                rate(uniswap_v4_blocks_processed_total{
+                  status="success", chain="mainnet", k8s_namespace_name="vector"
+                }[5m])
+              )
+              or
+              max by (cluster) (
+                kube_deployment_status_replicas_available{
+                  deployment="uniswap-v4-indexer", namespace="vector"
+                }
+              ) * 0
+            ) == 0
+          )
+          and on (cluster)
+          (
+            max by (cluster) (
+              kube_deployment_status_replicas_available{
+                deployment="uniswap-v4-indexer", namespace="vector"
+              }
+            ) >= 1
+          )
+        for: 15m
+        labels:
+          team: vector
+          severity: critical
+          component: uniswap-v4-indexer
+          namespace: vector
+          chain: mainnet
+        annotations:
+          summary: "Vector uniswap-v4-indexer stalled on mainnet (no block consumed >15m)"
+          description: |
+            `uniswap-v4-indexer` is up but has consumed no block for >15m (or its
+            uniswap_v4_blocks_processed_total series vanished). The SQS consume
+            loop is wedged or the OTLP metric export broke; Uniswap V4 pool state
+            in TimescaleDB is going stale. Check the pod logs and SQS backlog.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4indexerstalled
+
+      # ---------------------------------------------------------------------
+      # WARNING
+      # ---------------------------------------------------------------------
+
+      - alert: VectorUniswapV4IndexerErrorsHigh
+        expr: |
+          sum by (chain, cluster) (
+            rate(uniswap_v4_errors_total{k8s_namespace_name="vector"}[10m])
+          ) > 0.1
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: uniswap-v4-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector uniswap-v4-indexer error rate >0.1/s on {{ $labels.chain }}"
+          description: |
+            `uniswap-v4-indexer` on chain `{{ $labels.chain }}` is throwing
+            `{{ $value | printf "%.2f" }}` errors/s over 15m. Investigate
+            pod logs before this turns into a stall.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4indexererrorshigh
+
+      - alert: VectorUniswapV4IndexerBlockLatencyHigh
+        # Block processing p99 >3s for 15m. Sustained high latency means the
+        # StateView read path (one getSlot0 + getLiquidity + getFeeGrowthGlobals
+        # multicall per due pool, then that pool's getTickInfo reads and any
+        # getTickBitmap baseline scan in batches of 500) is degraded, or event
+        # decoding / persistence is blocking.
+        #
+        # Histogram `uniswap_v4.block.duration_seconds` (OTel instrument, with
+        # explicit seconds-scale buckets set in dextelemetry.NewTelemetry —
+        # the ms-scale default would pin histogram_quantile near the top
+        # bucket), exported as `uniswap_v4_block_duration_seconds_bucket`.
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (chain, cluster, le) (
+              rate(uniswap_v4_block_duration_seconds_bucket{
+                k8s_namespace_name="vector"
+              }[10m])
+            )
+          ) > 3
+        for: 15m
+        labels:
+          team: vector
+          severity: warning
+          component: uniswap-v4-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector uniswap-v4-indexer p99 block latency >3s on {{ $labels.chain }}"
+          description: |
+            `uniswap-v4-indexer` on chain `{{ $labels.chain }}` p99 block
+            processing latency is `{{ $value | printf "%.2fs" }}` over 15m.
+            Indexer is degraded; expect lag in downstream Uniswap V4 pool
+            state.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4indexerblocklatencyhigh
+
+      - alert: VectorUniswapV4IndexerNotWritingState
+        # Silent-empty guard, HALF ONE of two: pools WERE touched by decoded
+        # PoolManager events, but no pool-state snapshot rows came out the other
+        # side. The error path will NOT catch that: a snapshotDueSet call that
+        # no-ops, or state INSERTs that all hit ON CONFLICT DO NOTHING, raise no
+        # error — there are simply no rows. (DueSet itself is not one of the
+        # silent paths: a touched pool it cannot resolve, or one below its
+        # deploy_block, is a hard error and surfaces as ErrorsHigh/Stalled.)
+        #
+        # It deliberately does NOT catch a touched-pool set that is always
+        # empty (mis-seeded pool key, PoolManager address regression): that
+        # zeroes this rule's own left side and makes it un-fireable.
+        # VectorUniswapV4IndexerNoPoolsTouched below is the other half, and
+        # covers exactly that class. The two are complementary; neither alone
+        # is the silent-empty guard.
+        #
+        # The left side gates on `uniswap_v4.pools.touched` (OTel) -> Prometheus
+        # `uniswap_v4_pools_touched_total`, NOT on blocks processed. uniswap-v4
+        # runs SnapshotTracker(0) — no sweep — so state rows are written only for
+        # pools a PoolManager log touched in that block. Gating on blocks
+        # processed would make every quiet market window look identical to a bug:
+        # blocks advance every 12s on mainnet while a curated pool registry only
+        # produces a handful of state rows an hour, and that exact mistake fired
+        # on a healthy uniswap-v3 indexer (VEC-329 rollout, 2026-07-13). No
+        # touches now means no expectation of rows, and the alert stays silent.
+        #
+        # pools.touched is recorded from handleBlock's decode-stage touchedIDs,
+        # upstream of DueSet, and both counters are recorded only after a
+        # successful commit. Sourcing the gate from DueSet instead would zero
+        # both sides under the exact bug this targets and go blind.
+        #
+        # `unless`, not `and … == 0`: RecordStateRows is a no-op for n<=0, so
+        # under that bug (or on a fresh deploy) the state-rows counter series is
+        # never created, and `and … == 0` yields no match on the empty right
+        # side — the alert could never fire. `A > 0 unless B > 0` keeps each
+        # (chain,cluster) that is touching pools unless it is also writing state
+        # rows, so an absent OR zero state-rows series correctly fires. Do not
+        # revert to `and`.
+        expr: |
+          sum by (chain, cluster) (
+            rate(uniswap_v4_pools_touched_total{k8s_namespace_name="vector"}[30m])
+          ) > 0
+          unless
+          sum by (chain, cluster) (
+            rate(uniswap_v4_state_rows_written_total{k8s_namespace_name="vector"}[30m])
+          ) > 0
+        for: 10m
+        labels:
+          team: vector
+          severity: warning
+          component: uniswap-v4-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector uniswap-v4-indexer writing no state rows on {{ $labels.chain }}"
+          description: |
+            `uniswap-v4-indexer` on chain `{{ $labels.chain }}` has decoded
+            PoolManager events touching registered PoolIds for 30m but written
+            zero pool-state snapshot rows (the counter tracks
+            uniswap_v4_pool_state inserts only, never ticks). Pools are being
+            touched, so this is not a quiet market: suspect snapshotDueSet
+            no-opping, or every state INSERT hitting ON CONFLICT DO NOTHING
+            (a replay of an already-indexed range under one build_id).
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4indexernotwritingstate
+
+      - alert: VectorUniswapV4IndexerNoPoolsTouched
+        # Silent-empty guard, HALF TWO: blocks are advancing but NOT ONE
+        # registered PoolId has been touched by a decoded PoolManager event.
+        # Covers the class NotWritingState structurally cannot (it gates on
+        # pools.touched, so an always-empty touched set makes its left side
+        # absent and un-fireable): a mis-seeded pool key for this chain (an
+        # empty registry cannot reach here — the factory refuses to boot with
+        # zero pools), a wrong PoolManager address in uniswap_v4_pool_manager, a
+        # topics[1] / poolsByID lookup regression, or a pool set that has gone
+        # entirely dead. None of these raise an error — blocks_processed keeps
+        # advancing happily — so nothing else in this group would ever page.
+        #
+        # 6h window, NOT 30m. The window is set by the FAILURE CLASS, not by a
+        # measured touch rate: every failure this catches (mis-seeded pool key,
+        # wrong PoolManager, poolsByID regression) is permanent — once the
+        # touched set is empty it stays empty until a registry row changes or a
+        # fix ships — so a wide window costs detection speed and no detections
+        # at all. The counter-pressure is false positives: a curated registry
+        # genuinely produces 30m stretches with zero touches (that is what made
+        # the old blocks-processed gate on NotWritingState a false positive; see
+        # its comment), and the seeded pools were picked for liquidity DEPTH,
+        # not for swap frequency, so their true quiet-period distribution is
+        # unmeasured. 6h buys margin against that. If a chain's registry proves
+        # quieter still, widen the window for that chain rather than silencing.
+        #
+        # `unless`, not `and … == 0`: RecordPoolsTouched no-ops for n<=0, so a
+        # worker that never touches a pool never creates the series at all, and
+        # `and … == 0` would find no match on the empty right side — blind in
+        # exactly the case this exists for. Do not revert to `and`.
+        expr: |
+          sum by (chain, cluster) (
+            rate(uniswap_v4_blocks_processed_total{status="success", k8s_namespace_name="vector"}[6h])
+          ) > 0
+          unless
+          sum by (chain, cluster) (
+            rate(uniswap_v4_pools_touched_total{k8s_namespace_name="vector"}[6h])
+          ) > 0
+        for: 10m
+        labels:
+          team: vector
+          severity: warning
+          component: uniswap-v4-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector uniswap-v4-indexer touching no pools on {{ $labels.chain }}"
+          description: |
+            `uniswap-v4-indexer` on chain `{{ $labels.chain }}` has processed
+            blocks successfully for 6h without a single decoded PoolManager
+            event touching a registered PoolId. Six hours of silence across the
+            whole registry points at a permanent matching failure rather than a
+            lull: suspect a mis-seeded pool key, a wrong PoolManager address,
+            or a PoolId-matching regression in poolsByID.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4indexernopoolstouched
+
+      - alert: VectorUniswapV4IndexerPoolNeverIndexed
+        # PER-POOL health. Everything above is registry-wide: NoPoolsTouched needs
+        # the WHOLE registry to go quiet, NotWritingState needs ALL state rows to
+        # stop. One mis-seeded pool among twenty is invisible to both — a wrong
+        # tickSpacing (chosen freely per pool in V4, not derived from the fee)
+        # yields a self-consistent PoolKey/PoolId pair that passes
+        # ValidatePoolKeys, boots green, matches no log, and stays empty forever
+        # while every other pool keeps the group's metrics healthy.
+        #
+        # `uniswap_v4_pools_never_indexed` is a GAUGE, not a rate: the service
+        # reads uniswap_v4_pool_state / uniswap_v4_tick at boot
+        # (PoolIDsEverSnapshotted) and counts the registered, snapshot-supported
+        # pools with no row of either kind, then decrements as first rows land. It
+        # therefore measures the persisted history, not this process's uptime, and
+        # a restart or a rollout does not reset it. Pools the registry excludes
+        # (snapshot_supported = false) are never counted — they produce no rows by
+        # design.
+        #
+        # `offset 24h` rather than `for: 24h`. Both express "this has been true
+        # for a day", but `for` restarts its timer on every gap in the series, so
+        # a routine rollout would keep re-arming it and the alert could go years
+        # without maturing. Comparing against the sample 24h ago tolerates those
+        # gaps, and it also gives a NEWLY SEEDED pool its grace period for free:
+        # right after a registry migration there is no day-old sample above zero
+        # for that pool, so the rule stays quiet until the pool has genuinely had
+        # a full day to be touched.
+        #
+        # 24h, not 6h. Same failure-class reasoning as NoPoolsTouched above, one
+        # step further: every failure this catches is PERMANENT, so widening the
+        # window costs detection speed and no detections at all. The pressure the
+        # other way is a quiet pool — and the seeded pools were picked for
+        # liquidity DEPTH, not swap frequency, so their quiet-period distribution
+        # is unmeasured. A pool that has never been touched in a full day is
+        # outside anything a curated deep-liquidity registry should produce; six
+        # hours is not, and firing on it would be an alert that needs no action.
+        #
+        # One residual false positive, accepted: if a pool gets its first rows
+        # and a DIFFERENT pool is seeded within the same 24h, the count is
+        # non-zero at both ends and this fires on a pool younger than the window.
+        # Registry seeding is a migration event, and the runbook's first step
+        # reads the boot log line naming the pools, which resolves it in one look.
+        expr: |
+          (
+            max by (chain, cluster) (
+              uniswap_v4_pools_never_indexed{k8s_namespace_name="vector"}
+            ) > 0
+          )
+          and
+          (
+            max by (chain, cluster) (
+              uniswap_v4_pools_never_indexed{k8s_namespace_name="vector"} offset 24h
+            ) > 0
+          )
+        for: 10m
+        labels:
+          team: vector
+          severity: warning
+          component: uniswap-v4-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector uniswap-v4-indexer has {{ $value }} never-indexed pool(s) on {{ $labels.chain }}"
+          description: |
+            `{{ $value }}` registered, snapshot-supported Uniswap V4 pool(s) on
+            chain `{{ $labels.chain }}` have produced no `uniswap_v4_pool_state`
+            or `uniswap_v4_tick` row at all, and had produced none 24h ago
+            either. The rest of the registry is indexing normally, so this is one bad
+            pool rather than a broken worker: suspect a self-consistent but wrong
+            PoolKey (tick_spacing and hooks are the usual culprits). The worker
+            logs the offending PoolIds at boot.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-indexers.md#vectoruniswapv4indexerpoolneverindexed
+
   # CEX order book indexer (VEC-374). Streams L2 books from an exchange over a
   # WebSocket and persists periodic top-N snapshots. One pod per exchange
   # (service_name="cex-orderbook-indexer-<exchange>", label `exchange`). Unlike
