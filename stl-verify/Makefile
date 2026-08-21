@@ -73,6 +73,10 @@ KIND_CLUSTER ?= vector
 KUBE_CONTEXT ?= kind-$(KIND_CLUSTER)
 KUBE_NS      ?= vector
 
+# Guard for the local-only targets. Scaling a Deployment away or driving the Temporal
+# CLI wrecks staging or prod, which the EKS override above puts one env var away.
+require_kind_context = echo "$(KUBE_CONTEXT)" | grep -q '^kind-' || { echo "ERROR: $@ refused — '$(KUBE_CONTEXT)' is not a local kind context. Only kind-* contexts are allowed."; exit 1; }
+
 # Host ports the kind node publishes. A second cluster on the same machine needs its
 # own set, so every mapped port is derived from one offset:
 #   KIND_CLUSTER=<name> KIND_PORT_OFFSET=<n> make dev-up
@@ -2424,9 +2428,11 @@ REPLICAS ?= 1
 # Usage: make kind-scale-down-morpho-v2-bootstrap
 #        make kind-scale-up-morpho-v2-bootstrap
 kind-scale-down-%:
+	@$(require_kind_context)
 	kubectl --context=$(KUBE_CONTEXT) scale -n $(KUBE_NS) deployment/$* --replicas=0
 
 kind-scale-up-%:
+	@$(require_kind_context)
 	kubectl --context=$(KUBE_CONTEXT) scale -n $(KUBE_NS) deployment/$* --replicas=$(REPLICAS)
 
 # ============================================================================
@@ -2443,7 +2449,9 @@ TEMPORAL_NAMESPACE ?= vector
 # In-cluster address, resolved from inside the temporal-server pod.
 TEMPORAL_ADDRESS ?= temporal-server.$(TEMPORAL_K8S_NS):7233
 
-temporal_cli = kubectl --context=$(KUBE_CONTEXT) exec -n $(TEMPORAL_K8S_NS) deployment/temporal-server -- \
+# The kind guard sits inside the variable, so no target reaching for the Temporal CLI
+# can forget it and drive the prod namespace from an EKS KUBE_CONTEXT.
+temporal_cli = $(require_kind_context); kubectl --context=$(KUBE_CONTEXT) exec -n $(TEMPORAL_K8S_NS) deployment/temporal-server -- \
 	temporal --address $(TEMPORAL_ADDRESS) --namespace $(TEMPORAL_NAMESPACE)
 
 require_schedule = test -n "$(SCHEDULE)" || { echo "ERROR: SCHEDULE is required. Example: make $@ SCHEDULE=offchain-price-indexer"; exit 1; }
@@ -2496,7 +2504,7 @@ kind-ci-down: kind-delete
 # Delete all resources in the local namespace without tearing down the cluster.
 # Useful for a clean redeploy: make kind-clean && make dev-up
 kind-clean:
-	@echo "$(KUBE_CONTEXT)" | grep -q '^kind-' || { echo "ERROR: kind-clean refused — '$(KUBE_CONTEXT)' is not a local kind context. Only kind-* contexts are allowed."; exit 1; }
+	@$(require_kind_context)
 	kubectl --context=$(KUBE_CONTEXT) delete namespace $(KUBE_NS) --ignore-not-found --wait
 	kubectl --context=$(KUBE_CONTEXT) delete namespace temporal      --ignore-not-found --wait
 	@echo "==> Namespaces $(KUBE_NS) and temporal deleted."
