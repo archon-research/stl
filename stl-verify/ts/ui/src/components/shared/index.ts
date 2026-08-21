@@ -20,7 +20,7 @@ import {
   type TimeRange as _DesignSystemTimeRange,
 } from '@archon-research/design-system';
 
-export const DEFAULT_RANGE_PRESET = '24h' as const;
+export const DEFAULT_RANGE_PRESET = '1h' as const;
 
 export function defaultTimeRange(): _DesignSystemTimeRange {
   // Keep the shape identical to the design-system helper so callers stay
