@@ -35,6 +35,7 @@ const mainnetVaultV2DeployBlock = int64(23_375_073)
 var (
 	testVaultAddr   = common.HexToAddress("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
 	secondVaultAddr = common.HexToAddress("0xdddddddddddddddddddddddddddddddddddddddd")
+	thirdVaultAddr  = common.HexToAddress("0xcccccccccccccccccccccccccccccccccccccccc")
 	testAdapterAddr = common.HexToAddress("0x7481968709b8f155652D42ebf468b22945907dC2")
 	testTxHash      = common.HexToHash("0x3333333333333333333333333333333333333333333333333333333333333333")
 )
@@ -254,6 +255,79 @@ func TestRun_SeedFailureFailsTheRun(t *testing.T) {
 
 	if err := h.service.Run(context.Background()); err == nil {
 		t.Fatal("expected the seed failure to fail the run")
+	}
+}
+
+// TestRun_SeedHealsEveryVaultPastAFailingOneAndStillFailsTheRun: a vault-shaped
+// contract that cannot be probed fails identically forever, so aborting the seed
+// at the first one would leave every vault after it unhealed on every future run
+// too — one poison pill blocking the repair job permanently. Heal what can be
+// healed, then fail loudly with what could not be.
+func TestRun_SeedHealsEveryVaultPastAFailingOneAndStillFailsTheRun(t *testing.T) {
+	h := newBootstrapHarness(t)
+	replayer := &recordingReplayer{
+		v2Vaults: map[common.Address]struct{}{testVaultAddr: {}, secondVaultAddr: {}, thirdVaultAddr: {}},
+		// Sorted by address, secondVaultAddr sits between thirdVaultAddr and
+		// testVaultAddr, so a vault is seeded both before and after the failure.
+		seedErr: func(vault common.Address) error {
+			if vault == secondVaultAddr {
+				return errors.New("execution reverted")
+			}
+			return nil
+		},
+	}
+	service, err := NewService(h.config, h.chain, replayer, h.progress)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	h.chain.setFinalizedHead(24_000_000, 1_770_000_000)
+
+	err = service.Run(context.Background())
+
+	if err == nil {
+		t.Fatal("expected the un-seedable vault to fail the run rather than pass unmentioned")
+	}
+	if !strings.Contains(err.Error(), secondVaultAddr.Hex()) {
+		t.Errorf("error %q should name the vault that could not be seeded", err)
+	}
+	if !strings.Contains(err.Error(), "1 of 3") {
+		t.Errorf("error %q should count the failures against the vault set", err)
+	}
+	want := []common.Address{thirdVaultAddr, testVaultAddr}
+	if !slices.Equal(replayer.seeded, want) {
+		t.Errorf("seeded %v, want every healable vault %v — including the one after the failure", replayer.seeded, want)
+	}
+}
+
+// TestRun_SeedStopsAtOnceWhenTheRunIsCancelled: continuing is for a vault whose
+// own probe is broken. A cancelled run (a pod kill, an expiring activity) fails
+// every remaining vault identically, and collecting those would bury the cause
+// under one error per vault.
+func TestRun_SeedStopsAtOnceWhenTheRunIsCancelled(t *testing.T) {
+	h := newBootstrapHarness(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	attempts := 0
+	replayer := &recordingReplayer{
+		v2Vaults: map[common.Address]struct{}{testVaultAddr: {}, secondVaultAddr: {}, thirdVaultAddr: {}},
+		seedErr: func(common.Address) error {
+			attempts++
+			cancel()
+			return context.Canceled
+		},
+	}
+	service, err := NewService(h.config, h.chain, replayer, h.progress)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	h.chain.setFinalizedHead(24_000_000, 1_770_000_000)
+
+	if err := service.Run(ctx); err == nil {
+		t.Fatal("expected a cancelled run to fail")
+	}
+	if attempts != 1 {
+		t.Errorf("seed attempted %d vaults after cancellation, want 1", attempts)
 	}
 }
 
@@ -693,6 +767,9 @@ func (f *fakeChainReader) FilterLogs(_ context.Context, q ethereum.FilterQuery) 
 // handlers then do with it.
 type recordingReplayer struct {
 	v2Vaults map[common.Address]struct{}
+	// seedErr, when set, decides each vault's seed outcome; only the vaults it
+	// lets through land in seeded.
+	seedErr  func(common.Address) error
 	seeded   []common.Address
 	replayed []replayedLog
 }
@@ -707,6 +784,11 @@ func (r *recordingReplayer) LoadVaultRegistry(context.Context) error { return ni
 func (r *recordingReplayer) V2VaultAddresses() map[common.Address]struct{} { return r.v2Vaults }
 
 func (r *recordingReplayer) SeedV2VaultAdapters(_ context.Context, vaultAddress common.Address, _ int64, _ common.Hash, _ int, _ time.Time) error {
+	if r.seedErr != nil {
+		if err := r.seedErr(vaultAddress); err != nil {
+			return err
+		}
+	}
 	r.seeded = append(r.seeded, vaultAddress)
 	return nil
 }
