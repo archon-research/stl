@@ -63,3 +63,5 @@
 ./internal/testutil/dataexport
 ./internal/services/reference_capital_indexer
 ./cmd/cronjobs/reference-capital-indexer
+./cmd/cronjobs/position-materializer
+./internal/services/position_materializer
