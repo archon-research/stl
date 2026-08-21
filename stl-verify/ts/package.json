@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "npm run build --workspace=@stl-verify/ui",
+    "doctor": "npm run doctor --workspaces --if-present",
     "format": "npm run format --workspaces --if-present",
     "format:check": "npm run format:check --workspaces --if-present",
     "generate:openapi": "make -C ../python export-openapi-schema && npm run generate:openapi-types --workspace=@stl-verify/ui",
@@ -14,10 +15,11 @@
     "uikit:unlink": "uikit-cli unlink"
   },
   "devDependencies": {
-    "@archon-research/uikit-cli": "0.6.0",
-    "@typescript/native-preview": "7.0.0-dev.20260601.1"
+    "@archon-research/uikit-cli": "0.10.0-rohit-pre-release-consumer-fixes.1",
+    "typescript": "7.0.2"
   },
   "workspaces": [
+    "mocks",
     "ui"
   ]
 }

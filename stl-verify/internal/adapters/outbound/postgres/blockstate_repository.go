@@ -597,58 +597,6 @@ func (r *BlockStateRepository) GetReorgEventsByBlockRange(ctx context.Context, f
 	return events, nil
 }
 
-// GetOrphanedBlocks retrieves orphaned blocks for analysis.
-func (r *BlockStateRepository) GetOrphanedBlocks(ctx context.Context, limit int) ([]outbound.BlockState, error) {
-	query := `
-		SELECT number, hash, parent_hash, received_at, is_orphaned, version, block_published
-		FROM block_states
-		WHERE chain_id = $1 AND is_orphaned
-		ORDER BY received_at DESC
-		LIMIT $2
-	`
-	rows, err := r.pool.Query(ctx, query, r.chainID, limit)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get orphaned blocks: %w", err)
-	}
-	defer rows.Close()
-
-	var states []outbound.BlockState
-	for rows.Next() {
-		var state outbound.BlockState
-		if err := rows.Scan(
-			&state.Number, &state.Hash, &state.ParentHash, &state.ReceivedAt, &state.IsOrphaned, &state.Version,
-			&state.BlockPublished); err != nil {
-			return nil, fmt.Errorf("failed to scan block state: %w", err)
-		}
-		states = append(states, state)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating block states: %w", err)
-	}
-	return states, nil
-}
-
-// PruneOldBlocks deletes canonical blocks older than the given number.
-// Orphaned blocks are kept for historical analysis.
-func (r *BlockStateRepository) PruneOldBlocks(ctx context.Context, keepAfter int64) error {
-	query := `DELETE FROM block_states WHERE chain_id = $1 AND number < $2 AND NOT is_orphaned`
-	_, err := r.pool.Exec(ctx, query, r.chainID, keepAfter)
-	if err != nil {
-		return fmt.Errorf("failed to prune old blocks: %w", err)
-	}
-	return nil
-}
-
-// PruneOldReorgEvents deletes reorg events older than the given time.
-func (r *BlockStateRepository) PruneOldReorgEvents(ctx context.Context, olderThan time.Time) error {
-	query := `DELETE FROM reorg_events WHERE chain_id = $1 AND detected_at < $2`
-	_, err := r.pool.Exec(ctx, query, r.chainID, olderThan)
-	if err != nil {
-		return fmt.Errorf("failed to prune old reorg events: %w", err)
-	}
-	return nil
-}
-
 // GetMinBlockNumber returns the lowest canonical block number.
 func (r *BlockStateRepository) GetMinBlockNumber(ctx context.Context) (int64, error) {
 	query := `SELECT COALESCE(MIN(number), 0) FROM block_states WHERE chain_id = $1 AND NOT is_orphaned`

@@ -5,6 +5,9 @@ This is an npm monorepo containing the frontend applications for STL Verify.
 ## Workspace Structure
 
 - **ui/** - Vite + React + TypeScript application for the web UI
+- **mocks/** - `@stl-verify/mocks`: typed offline mocks for the UI's API, used by
+  dev-with-no-backend and by the mock self-test. See
+  [mocks/README.md](mocks/README.md).
 
 ## Setup
 
@@ -25,6 +28,16 @@ npm run dev --workspace=@stl-verify/ui
 # Or from ui directory
 cd ui && npm run dev
 ```
+
+### Offline, with no backend
+
+```bash
+VITE_API_MOCKS=1 npm run dev --workspace=@stl-verify/ui
+```
+
+Every `/v1` call is answered in the browser from `@stl-verify/mocks`. `API_URL`
+is not required in this mode — there is no proxy target — and neither msw nor the
+fixtures reach a normal build.
 
 ## Building
 

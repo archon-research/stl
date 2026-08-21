@@ -4,7 +4,6 @@ package postgres
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -27,7 +26,7 @@ import (
 // function, this race silently drops the loser via ON CONFLICT DO NOTHING.
 // Regression test for VEC-194 (ADR-0002 §3 gap).
 
-const concurrencySchemaName = "test_pv_concurrency"
+const concurrencyDBName = "test_pv_concurrency"
 
 // concurrencyPool is opened per-test (not at package setup) so it doesn't
 // hold idle connections that would starve the rest of the integration suite —
@@ -37,28 +36,30 @@ const concurrencySchemaName = "test_pv_concurrency"
 var concurrencyPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(concurrencySchemaName, func() {
-		// SetupSchemaForMain creates the schema and runs migrations. We
-		// throw away the pool it returns — we'll mint a small short-lived
-		// pool inside each test. Schema and migrations persist across pools.
-		testutil.SetupSchemaForMain(sharedDSN, concurrencySchemaName).Close()
+	registerTestFileSetup(func() {
+		// The pool it returns is thrown away: each test mints its own small
+		// short-lived one. The database outlives them all.
+		testutil.SetupDBForMain(sharedDSN, concurrencyDBName).Close()
 	}, func() {
-		// Reopen a tiny pool just for the cleanup so CleanupSchemaForMain
-		// has something to close.
+		// Reopen a tiny pool just for the cleanup so CleanupDBForMain has
+		// something to close.
 		concurrencyPool = openConcurrencyPool()
-		testutil.CleanupSchemaForMain(sharedDSN, concurrencyPool, concurrencySchemaName)
+		testutil.CleanupDBForMain(sharedDSN, concurrencyPool, concurrencyDBName)
 	})
 }
 
 // openConcurrencyPool mints a small, short-lived pool against the
-// concurrency-test schema. Caller is responsible for closing it.
+// concurrency-test database. Caller is responsible for closing it.
 func openConcurrencyPool() *pgxpool.Pool {
-	separator := "?"
-	if strings.Contains(sharedDSN, "?") {
-		separator = "&"
+	// Through the config, not a "&pool_max_conns=2" on the DSN: that assumes the
+	// base DSN already carries a query string, and appends to the path when it does not.
+	cfg, err := pgxpool.ParseConfig(testutil.DatabaseDSN(sharedDSN, concurrencyDBName))
+	if err != nil {
+		panic(fmt.Sprintf("parse concurrency DSN: %v", err))
 	}
-	dsn := fmt.Sprintf("%s%ssearch_path=%s,public&pool_max_conns=2", sharedDSN, separator, concurrencySchemaName)
-	pool, err := pgxpool.New(context.Background(), dsn)
+	cfg.MaxConns = 2
+
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
 	if err != nil {
 		panic(fmt.Sprintf("connect concurrency pool: %v", err))
 	}
@@ -512,7 +513,7 @@ func TestProcessingVersionTrigger_NegativeControl_LocklessFunction(t *testing.T)
 
 		versions, errs := runMorphoMarketStateRace(t, ctx, key)
 		for i, err := range errs {
-			if err != nil && !isUniqueViolation(err) {
+			if err != nil && !testutil.IsUniqueViolation(err) {
 				t.Fatalf("attempt %d, worker %d: unexpected error: %v", attempt, i, err)
 			}
 		}
@@ -634,23 +635,6 @@ func naturalKeyWhere(table string) string {
 	default:
 		panic(fmt.Sprintf("naturalKeyWhere: unknown table %q — extend this switch when adding new shapes to the negative control", table))
 	}
-}
-
-// isUniqueViolation reports whether err is a Postgres unique constraint
-// violation. Avoids importing pgconn just to type-assert one error code.
-func isUniqueViolation(err error) bool {
-	if err == nil {
-		return false
-	}
-	type sqlStateProvider interface {
-		SQLState() string
-	}
-	var p sqlStateProvider
-	if errors.As(err, &p) {
-		return p.SQLState() == "23505"
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "23505") || strings.Contains(msg, "unique constraint")
 }
 
 // mapleLoanStateKey identifies a single (maple_loan_id, synced_at) tuple that

@@ -1,5 +1,6 @@
 # Workflow security gates. Catches workflow syntax errors, template injection,
-# unpinned actions, and accidental secret commits.
+# and unpinned actions. Secret scanning lives in secret-scan.yml, which runs on
+# every PR (not just .github/** changes) and over full git history.
 #
 # Actions are pinned to commit SHAs for supply-chain security.
 # To update: git ls-remote --tags https://github.com/<org>/<action>.git | grep <tag>
@@ -11,9 +12,9 @@ on:
     paths:
       - ".github/**"
   pull_request:
-    branches: [main]
     paths:
       - ".github/**"
+  merge_group:
 
 concurrency:
   group: security-${{ github.ref }}
@@ -28,7 +29,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
 
@@ -46,7 +47,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
 
@@ -56,32 +57,13 @@ jobs:
       - name: Run zizmor
         run: zizmor --format plain --min-severity medium .
 
-  gitleaks:
-    name: Secret Scan (Gitleaks)
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
-        with:
-          persist-credentials: false
-
-      - name: Install Gitleaks
-        run: |
-          GITLEAKS_VERSION="8.18.2"
-          curl -sL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar xz gitleaks
-          sudo mv gitleaks /usr/local/bin/
-
-      - name: Run Gitleaks
-        run: gitleaks detect --source . --verbose --no-git
-
   sha-pin-check:
     name: Action SHA Pinning Check
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
 
@@ -102,7 +84,7 @@ jobs:
 
   summary:
     name: Security Summary
-    needs: [actionlint, zizmor, gitleaks, sha-pin-check]
+    needs: [actionlint, zizmor, sha-pin-check]
     if: always() && github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
@@ -114,14 +96,12 @@ jobs:
         env:
           ACTIONLINT: ${{ needs.actionlint.result }}
           ZIZMOR: ${{ needs.zizmor.result }}
-          GITLEAKS: ${{ needs.gitleaks.result }}
           SHA_PIN: ${{ needs.sha-pin-check.result }}
         with:
           script: |
             const checks = [
               { name: 'Action Lint', result: process.env.ACTIONLINT },
               { name: 'Workflow Security (zizmor)', result: process.env.ZIZMOR },
-              { name: 'Secret Scan (Gitleaks)', result: process.env.GITLEAKS },
               { name: 'SHA Pinning Check', result: process.env.SHA_PIN },
             ];
             const icon = r => r === 'success' ? '✅' : r === 'skipped' ? '⏭️' : '❌';

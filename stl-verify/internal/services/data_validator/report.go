@@ -1,9 +1,6 @@
 package data_validator
 
 import (
-	"encoding/json"
-	"fmt"
-	"strings"
 	"time"
 )
 
@@ -95,98 +92,3 @@ const (
 	StatusError   = "error"
 	StatusSkipped = "skipped"
 )
-
-// FormatText returns the report as human-readable text.
-func (r *Report) FormatText() string {
-	var sb strings.Builder
-
-	// Header
-	sb.WriteString("================================================================================\n")
-	sb.WriteString("                        DATA VALIDATION REPORT\n")
-	sb.WriteString("================================================================================\n")
-	sb.WriteString(fmt.Sprintf("Validation Range: Block %s to %s\n",
-		formatNumber(r.FromBlock), formatNumber(r.ToBlock)))
-	sb.WriteString(fmt.Sprintf("Duration:         %s\n\n", formatDuration(r.Duration)))
-
-	// Check results
-	for _, check := range r.Checks {
-		statusIcon := "[PASSED]"
-		switch check.Status {
-		case StatusFailed:
-			statusIcon = "[FAILED]"
-		case StatusError:
-			statusIcon = "[ERROR]"
-		case StatusSkipped:
-			statusIcon = "[SKIPPED]"
-		}
-
-		sb.WriteString(fmt.Sprintf("%s %s", statusIcon, check.Name))
-		if check.Duration > 0 {
-			sb.WriteString(fmt.Sprintf(" (%s)", formatDuration(check.Duration)))
-		}
-		sb.WriteString("\n")
-
-		if check.Message != "" {
-			// Indent multi-line messages
-			lines := strings.SplitSeq(check.Message, "\n")
-			for line := range lines {
-				sb.WriteString(fmt.Sprintf("         %s\n", line))
-			}
-		}
-	}
-
-	// Summary
-	sb.WriteString(fmt.Sprintf("\nSUMMARY: %d passed, %d failed, %d errors, %d skipped\n",
-		r.Passed, r.Failed, r.Errors, r.Skipped))
-
-	if r.Success() {
-		sb.WriteString("RESULT: PASSED (exit code 0)\n")
-	} else {
-		sb.WriteString("RESULT: FAILED (exit code 1)\n")
-	}
-
-	return sb.String()
-}
-
-// FormatJSON returns the report as JSON.
-func (r *Report) FormatJSON() (string, error) {
-	data, err := json.MarshalIndent(r, "", "  ")
-	if err != nil {
-		return "", fmt.Errorf("marshaling report: %w", err)
-	}
-	return string(data), nil
-}
-
-// formatNumber adds thousands separators to a number.
-func formatNumber(n int64) string {
-	str := fmt.Sprintf("%d", n)
-	if n < 0 {
-		return str
-	}
-
-	// Add commas
-	var result strings.Builder
-	for i, c := range str {
-		if i > 0 && (len(str)-i)%3 == 0 {
-			result.WriteRune(',')
-		}
-		result.WriteRune(c)
-	}
-	return result.String()
-}
-
-// formatDuration formats a duration for human readability.
-func formatDuration(d time.Duration) string {
-	if d < time.Millisecond {
-		return "<1ms"
-	}
-	if d < time.Second {
-		return fmt.Sprintf("%.1fms", float64(d.Milliseconds()))
-	}
-	if d < time.Minute {
-		return fmt.Sprintf("%.1fs", d.Seconds())
-	}
-	minutes := int(d.Minutes())
-	seconds := int(d.Seconds()) % 60
-	return fmt.Sprintf("%dm%ds", minutes, seconds)
-}

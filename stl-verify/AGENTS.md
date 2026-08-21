@@ -32,10 +32,17 @@ Follow [Effective Go](https://go.dev/doc/effective_go).
 - `cmd/base/watcher` — source of block events: WebSocket subscribe, reorg handling, Redis cache write, SNS publish.
 - `cmd/workers/` — long-running SQS FIFO consumers, one message per block (sparklend, morpho, curve, oracle-price, psm3, prime-*, raw-data-backup, ...).
 - `cmd/cronjobs/` — **Temporal**-scheduled (not k8s CronJobs): anchorage, maple-graphql, offchain-price, watcher-data-validator. Schedules live in Temporal state; changing an interval env var requires deleting the schedule in Temporal and restarting. Ticks must be idempotent (Temporal retries).
-- `cmd/backfillers/` — one-shot historical gap fillers (sparklend, morpho-vault, oracle-pricing, aave-like-user-snapshot, raw-block-bulk-downloader).
+- `cmd/backfillers/` — historical gap fillers. Mostly one-shot CLI binaries (sparklend,
+  morpho-vault, oracle-pricing, aave-like-user-snapshot, raw-block-bulk-downloader), plus
+  `offchain-price-backfill`, which is a long-running **on-demand Temporal worker**: it polls a
+  task queue and idles until a run is started by hand from the Temporal UI, with the range as
+  workflow input. Grouped here by purpose (backfilling), not by lifecycle.
 - `cmd/util/` — `migrate`, `generate-er`, `null-payload-refill`, `stress-test`.
 
-Every binary extracts a `run(ctx, args) error` from `main()` and runs under `lifecycle.Run` (workers) or `temporal.RunCronjob` (cronjobs) for graceful SIGINT/SIGTERM shutdown (~25s).
+Every binary extracts a `run(ctx, args) error` from `main()` and runs under one of three
+entry points for graceful SIGINT/SIGTERM shutdown (~25s): `lifecycle.Run` (workers),
+`temporal.RunCronjob` (scheduled cronjobs), or `temporal.RunWorker` (on-demand Temporal
+jobs — no schedule, parameters supplied at trigger time; see `docs/temporal_guide.md`).
 
 ### Data flow
 
@@ -52,6 +59,7 @@ stl:{chainId}:{blockNumber}:{version}:{dataType}
 ```
 - version increments on chain reorgs
 - dataType: block, receipts, traces, blobs
+- `stl` is the default of `REDIS_KEY_PREFIX`; only the tests that drive a worker binary set it, production leaves it unset
 
 ### Environment
 
@@ -67,6 +75,7 @@ All commands run from `stl-verify/`:
 ```bash
 # Development
 make dev-up              # Start kind cluster with full pipeline (mock blockchain server by default)
+KIND_CLUSTER=<name> KIND_PORT_OFFSET=<n> make dev-up   # Isolated second cluster: own name, host ports +n, image tags, data dir
 make dev-suspend         # Suspend local kind nodes (local dev only; do not use in CI/prod)
 make dev-resume          # Resume suspended local kind nodes (local dev only; do not use in CI/prod)
 make dev-down            # Delete local kind cluster (dev-wipe also nukes volumes)
@@ -84,7 +93,7 @@ make cover              # Generate coverage report
 go test -race -run 'TestName' ./internal/services/<pkg>/   # single test
 
 # CI (runs all checks)
-make ci                 # test-race, vet, fmt-check, tidy-check, staticcheck, vulncheck, golangci-lint
+make ci                 # test-race, fmt/imports/tidy checks, golangci-lint (vet+staticcheck+modernize), vulncheck
 
 # Formatting & linting (all languages, run from stl-verify/)
 make install-hooks      # Install lefthook git pre-commit hooks (auto-runs on dev-up)
@@ -100,14 +109,15 @@ make erigon-status ERIGON_USER=<user> ERIGON_IP=<ip>
 make deploy-bulk-download ERIGON_USER=<user> ERIGON_IP=<ip>
 ```
 
-See [Makefile](Makefile) for the complete list of targets.
+See [Makefile](Makefile) for the complete list of targets. Every `run-*`, `dev-*` and
+`kind-*` target honours `KIND_CLUSTER` / `KIND_PORT_OFFSET`, so two agents can each run
+a full cluster on one machine without colliding on ports, image tags or data dirs.
 
 ### Go linting
 
 - Pre-commit hooks: gofmt, goimports (staged files only)
-- Pre-push hooks: go vet (full module)
-- CI (`go-ci.yml` → `make ci-checks && make test-race`): vet, staticcheck, golangci-lint, vulncheck, tidy — **source of truth**
-- Install tools with `make tools`. Don't bypass hooks.
+- CI (`go-ci.yml`): fmt/imports/tidy checks + golangci-lint v2 (covers go vet, staticcheck, and go fix's modernizers — config in `.golangci.yml`) + vulncheck — **source of truth**
+- Install tools with `make tools`; golangci-lint is version-pinned because the config schema is version-coupled, so rerun it when a stale local binary rejects `.golangci.yml`. Don't bypass hooks.
 
 ## Code Conventions
 
@@ -117,6 +127,7 @@ These apply to every language in the service (Go, Python, TS). Go-specific rules
 - **Files**: snake_case
 - **Testing**:
     - Mock outbound ports for unit tests.
+    - **Every unit-test file pairs with the source file it tests.** In Go, `foo_test.go` must sit next to a `foo.go` in the same package, and unit tests for code living in `bar.go` belong in `bar_test.go`. A unit-test file with no matching source file is a smell with exactly two resolutions: the source split is missing (extract the code into the matching file so the pair exists) or the tests are filed wrong (move them into the existing source file's `_test.go`). Two deliberate exceptions: shared fixtures/helpers for a package's tests live in a clearly-named helpers file (`testhelpers_test.go`), and build-tagged integration files that exercise a cross-cutting scenario rather than one source file are named for the scenario (`*_integration_test.go`). Python mirrors the same pairing through the `tests/` tree: `tests/…/test_foo.py` corresponds to `app/…/foo.py`.
     - One scenario per test, named for the single behavior it covers. Never chain independent scenarios in one function — a failure must point at one thing. A parametrized/table-driven test varies *inputs* of the *same* behavior (one case per row); distinct behaviors get distinct functions. Tempted to join with "and" in a test name → write two tests.
     - Parametrize, don't copy-paste. When two tests differ only in inputs and expected outputs, fold them into one parametrized test (a case per row) rather than near-duplicate functions. The split rule above wins on conflict: a distinct *behavior* stays its own function even if its body looks similar.
     - Share setup, don't repeat it. Spot a setup pattern recurring across tests — especially in the same file — and hoist it into a common fixture/helper.
@@ -133,12 +144,14 @@ These apply to every language in the service (Go, Python, TS). Go-specific rules
     - This is strongest for orchestration functions (block/event handlers, coordinators, `main` flows, batch builders): the top-level function must be a readable outline, with detail pushed down into helpers. A single sprawling handler that inlines decode + snapshot + persist is a defect, not a style preference.
     - Enforced in the Review phase: the code-quality reviewer rejects any new or modified function that violates this. Audit EVERY changed function, not a named subset (scoping the review to specific files creates blind spots, which is how a 254-line function once slipped through). Pre-existing functions the PR does not touch are out of scope: refactor them in a separate follow-up PR, not the feature PR that happened to sit next to them.
 - **Comments**: Explain *why*, not *what*; default to none.
-    - Never restate the code or the language: no comments on signatures, field names, or standard-library behavior the reader already knows.
-    - No doc comments on self-evident `Params`/`Config`/`Options` structs or their fields. If such a struct exists for a non-obvious reason (e.g. named fields to block a same-typed arg swap), state it once in the consuming constructor, not on the struct.
-    - DO comment the non-recoverable why: a non-obvious invariant, a workaround and the bug it dodges, a deliberate convention break, a safety/ordering/locking constraint, or units/scale the type can't express.
-    - State each rationale once, at the canonical site (the type, column, or merge it governs). At call sites that depend on it, keep the comment to a short pointer or omit it; don't paste the same "why" at every caller.
-    - When unsure, leave it out: a stale or redundant comment is worse than none.
-    - No history in comments: don't duplicate what git tracks. Describe current code, not what it replaced or why something was removed.
+    - **Two lines max**, constraint first, no preamble. Longer whys go in the doc comment of the thing they govern, an ADR, or the PR description.
+    - **Never restate** the code: a signature, a field name, standard-library behavior (in Go: zero values, nil-map reads, `json.Unmarshal` of null, `defer` order), or a self-evident `Params`/`Config`/`Options` struct — one that exists for a non-obvious reason (named fields blocking a same-typed arg swap) is explained in the consuming constructor, not on the struct.
+    - **Keep package and exported-API doc comments**, but each must say something the signature doesn't.
+    - **State each why once**, at its canonical site (the type, column, or helper it governs). Check the callee first: if its doc carries the why, the call site needs nothing.
+    - **DO comment** the non-recoverable why: non-obvious invariant, workaround plus the bug it dodges, deliberate convention break, safety/ordering/locking constraint, units/scale the type can't express.
+    - **Tests get no exemption** — don't narrate setup. Banner and numbered-step comments (`// 1. …`) are extraction signals, not comments; see Function composition.
+    - **No history** — git tracks it, and no ticket archaeology. Describe current code, not what it replaced.
+    - When unsure, leave it out. Enforced in the Review phase: deleting is the reviewer's default for a comment that restates code or repeats a rationale.
 - **Libraries**:
     - Use the standard library as much as possible.
     - Instead of duplicating code, create a function containing the shared functionality, and re-use it.
@@ -167,14 +180,14 @@ Go-only rules for the stl-verify service. Language-agnostic conventions (testing
     - **A partial failure stops the whole event/block.** Do not ack, commit, or persist a partially-processed event. Stopping and retrying is correct; continuing with a hole is not.
     - **Poison pills get fixed or explicitly discarded, never silently skipped.** When an event persistently fails, the only acceptable responses are to make the code handle it, or to make a deliberate, explicit decision to discard that specific event. Silently dropping or defaulting it is forbidden.
     - **"Best effort" / `AllowFailure` reads still bubble up.** A call you issue is expected to succeed, so treat a failed result as an error and propagate it. If a value is genuinely optional for some inputs (e.g. a getter that does not exist on a particular contract/pool variant), do not issue the call for those inputs; gate it structurally. A NULL or absent value must be a documented structural fact, never the residue of a swallowed failure.
-    - Panic only in `main`/`cmd` entry points. Everywhere else (`internal/`, adapters, services, libraries) return an error and let the caller deal with it, bubbling it up until it reaches `main`.
+    - Panic only in `main`/`cmd` entry points. Everywhere else (`internal/`, adapters, services, libraries) return an error and let the caller deal with it, bubbling it up until it reaches `main`. A test binary's `TestMain`/`init` is its entry point for this purpose, so a `testutil` helper written for that position (`SetupDBForMain` and its `*ForMain` siblings) may `log.Fatal` rather than hand 20 call sites the same error check.
 - **Testing**:
     - Prefer table-driven tests (each case under `t.Run`).
     - `main.go` entry points should also have 100% coverage. Move the `main.go` body into a `run(ctx, args) error` function and call only that from `main()` so you can test it.
     - For `main.go` files, only create integration tests.
-- **Comments**:
-    - The "standard-library behavior" the reader already knows includes Go zero values, nil-map reads, `json.Unmarshal` of null, `defer` order, etc. — don't comment them.
-    - Keep package and exported-API doc comments, but make each say something the signature doesn't.
+    - **One service set per CI shard, never per test** — service startup and migrations, not the tests, dominate integration-test CI time. A package declares what it needs in `TestMain` via `testutil.RunShared`, which owns service lifecycle, teardown order and the goroutine leak check — never hand-roll those in a package. Each handle it publishes lands in a package var the tests read (`sharedDSN`, `sharedRedisAddr`, `sharedLocalStackCfg`). In CI it takes the shard's `services:` containers (`STL_TEST_POSTGRES_DSN`, `STL_TEST_REDIS_ADDR`, `STL_TEST_LOCALSTACK_ENDPOINT`); locally it starts testcontainers. The Postgres server those variables name must be disposable and reached as a superuser — the suite creates and drops databases, flips template flags and evicts sessions it does not own — so never point them at a dev database you care about. `make shared-container-check` (part of `ci-checks`) fails any container started in a test.
+    - **Isolate each test inside those services**: `testutil.SetupTestDB(t, sharedDSN)` for Postgres, a `testutil.SanitizeTestName(t.Name())` prefix for Redis keys and SQS/SNS names, `testutil.S3TestBucketName(t, prefix)` for buckets, `testutil.SQSTestFifoQueueName(t, prefix)` for FIFO queues. Anything a test counts (rows, objects, messages) needs its own database/bucket/queue. A test that drives a binary cannot namespace the names the binary builds for itself, so it hands the binary a namespace to build them from: `REDIS_KEY_PREFIX` for the cache key, and an `S3_BUCKET` from `testutil.S3TestBucketName(t, "stl-sentinel{env}-{chain}-raw-")` — `chainutil.ValidateS3BucketForChain` checks that prefix, not the whole name. Reach for `testutil.EnsureBucket` only where one package's own tests share a bucket, such as an archive bucket named for the worker. `make ci-service-check` holds the workflow's service images and LocalStack `SERVICES` to what the helpers ask for.
+    - **`SetupTestDB` clones a migrated template database**, so a new test costs a file copy and migration time stays flat as tests are added. Never migrate per test; use `testutil.SetupDBForMain(baseDSN, name)` for a database shared by one test file. The template name carries a digest of the migration set plus `templateFormat` — bump that constant whenever `buildTemplate` changes, or a stale template outlives the change. Either edit leaves stale templates behind on a long-lived server: `make test-templates-clean` drops them, by hand because dropping from inside the suite would race a sibling process mid-clone. `db/migrator` is the deliberate exception — applying migrations from scratch is what it tests.
 - **Function composition**: a function-length / complexity linter (golangci-lint `funlen`/`gocognit`) is the planned deterministic backstop so an over-long function fails CI automatically rather than relying on a reviewer noticing.
 - **Binaries/Building**: When building binaries using `go build`, output to `stl-verify/dist`
 - **Code structure**: In main.go files, keep main() at the top of the file.
@@ -204,4 +217,5 @@ Before modifying anything under `internal/adapters/outbound/postgres/`, read and
 ## Do NOT
 
 - Add business logic to adapters
-- Use global state or singletons
+- Use global state or singletons in service code. Test binaries are the exception: a
+  `TestMain`-scoped service handle in a package var is the pattern above, not a violation.

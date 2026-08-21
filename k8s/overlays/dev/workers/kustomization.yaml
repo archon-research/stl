@@ -75,6 +75,11 @@ patches:
                     value: https://avax-mainnet.g.alchemy.com/v2
                   - name: AWS_SQS_QUEUE_URL
                     value: http://localstack:4566/000000000000/stl-avalanche-oracle-price.fifo
+                  # stl-config's S3_BUCKET is Ethereum's; workers reject a bucket
+                  # whose chain does not match CHAIN_ID, so every non-Ethereum
+                  # worker must name its own. localstack creates one per chain.
+                  - name: S3_BUCKET
+                    value: stl-sentineldevelopment-avalanche-raw
   - patch: |
       apiVersion: apps/v1
       kind: Deployment

@@ -9,6 +9,7 @@ from app.adapters.postgres.prime_debt_repository import PrimeDebtRepository
 from app.domain.entities.allocation import EthAddress
 
 _VALID_ADDR = EthAddress("0x" + "ab" * 20)
+_PRIME_ID = 7
 
 
 def _engine_with_rows(rows):
@@ -40,14 +41,36 @@ def test_prime_match_clause_keeps_vault_or_proxy_resolution() -> None:
 
 
 @pytest.mark.asyncio
-async def test_prime_exists_returns_true_and_false() -> None:
-    engine_true, _ = _engine_with_row(SimpleNamespace(one=1))
-    repo_true = PrimeDebtRepository(engine_true)
-    assert await repo_true.prime_exists(_VALID_ADDR) is True
+async def test_resolve_prime_id_returns_the_matched_id_or_none() -> None:
+    engine_found, _ = _engine_with_row(SimpleNamespace(id=_PRIME_ID))
+    repo_found = PrimeDebtRepository(engine_found)
+    assert await repo_found.resolve_prime_id(_VALID_ADDR) == _PRIME_ID
 
-    engine_false, _ = _engine_with_row(None)
-    repo_false = PrimeDebtRepository(engine_false)
-    assert await repo_false.prime_exists(_VALID_ADDR) is False
+    engine_missing, _ = _engine_with_row(None)
+    repo_missing = PrimeDebtRepository(engine_missing)
+    assert await repo_missing.resolve_prime_id(_VALID_ADDR) is None
+
+
+@pytest.mark.asyncio
+async def test_list_queries_filter_by_prime_id_without_a_correlated_exists() -> None:
+    # The match clause used to be inlined here, so its EXISTS re-scanned every allocation_position chunk.
+    engine, conn = _engine_with_rows([])
+    repo = PrimeDebtRepository(engine)
+
+    await repo.list_debt_snapshots(_PRIME_ID)
+    await repo.list_debt_buckets(
+        _PRIME_ID,
+        from_timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+        to_timestamp=datetime(2026, 1, 2, tzinfo=UTC),
+        bucket_seconds=300.0,
+    )
+
+    assert len(conn.execute.await_args_list) == 2
+    for call in conn.execute.await_args_list:
+        statement, params = call.args
+        assert "pd.prime_id = :prime_id" in str(statement)
+        assert "EXISTS" not in str(statement)
+        assert params["prime_id"] == _PRIME_ID
 
 
 @pytest.mark.asyncio
@@ -69,7 +92,7 @@ async def test_list_debt_snapshots_maps_rows_and_clamps_limit() -> None:
     from_ts = datetime(2026, 1, 1, tzinfo=UTC)
     to_ts = datetime(2026, 1, 2, tzinfo=UTC)
 
-    result = await repo.list_debt_snapshots(_VALID_ADDR, from_timestamp=from_ts, to_timestamp=to_ts, limit=9999)
+    result = await repo.list_debt_snapshots(_PRIME_ID, from_timestamp=from_ts, to_timestamp=to_ts, limit=9999)
 
     assert len(result) == 1
     assert result[0].prime_address == "0x" + "ab" * 20
@@ -77,6 +100,24 @@ async def test_list_debt_snapshots_maps_rows_and_clamps_limit() -> None:
     assert call_params["limit"] == 500
     assert call_params["from_timestamp"] == from_ts
     assert call_params["to_timestamp"] == to_ts
+
+
+@pytest.mark.asyncio
+async def test_list_reference_debt_buckets_filters_by_prime_id_without_a_correlated_exists() -> None:
+    engine, conn = _engine_with_rows([])
+    repo = PrimeDebtRepository(engine)
+
+    await repo.list_reference_debt_buckets(
+        _PRIME_ID,
+        from_timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+        to_timestamp=datetime(2026, 1, 2, tzinfo=UTC),
+        bucket_seconds=300.0,
+    )
+
+    statement, params = conn.execute.await_args.args
+    assert "b.prime_id = :prime_id" in str(statement)
+    assert "EXISTS" not in str(statement)
+    assert params["prime_id"] == _PRIME_ID
 
 
 @pytest.mark.asyncio
@@ -91,4 +132,4 @@ async def test_list_debt_snapshots_wraps_database_errors() -> None:
     repo = PrimeDebtRepository(engine)
 
     with pytest.raises(ValueError, match="fetching debt snapshots"):
-        await repo.list_debt_snapshots(_VALID_ADDR)
+        await repo.list_debt_snapshots(_PRIME_ID)

@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: arbitrum-allocation-tracker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: arbitrum-allocation-tracker
+  template:
+    metadata:
+      labels:
+        app: arbitrum-allocation-tracker
+    spec:
+      serviceAccountName: arbitrum-allocation-tracker
+      containers:
+        - name: arbitrum-allocation-tracker
+          image: allocation-tracker
+          envFrom:
+            - configMapRef:
+                name: otel-config
+            - configMapRef:
+                name: arbitrum-allocation-tracker-config
+            - secretRef:
+                name: arbitrum-allocation-tracker
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "pgrep -f allocation"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 3
+      terminationGracePeriodSeconds: 60

@@ -49,7 +49,7 @@ func setupERC4626Integration(t *testing.T, ctx context.Context) *erc4626Integrat
 
 	t.Setenv("BUILD_GIT_HASH", "test-integration-erc4626-supply")
 
-	pool, _, dbCleanup := testutil.SetupTimescaleDB(t)
+	pool, _, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(dbCleanup)
 
 	sparkID := seedSparkPrime(t, ctx, pool)

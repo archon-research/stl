@@ -1,38 +1,38 @@
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
-name: vector
+name: KIND_CLUSTER_NAME
 nodes:
   - role: control-plane
     extraPortMappings:
       - containerPort: 30432   # timescaledb
-        hostPort: 5432
+        hostPort: KIND_HOST_PORT_5432
         listenAddress: "127.0.0.1"
       - containerPort: 30433   # temporal-db
-        hostPort: 5433
+        hostPort: KIND_HOST_PORT_5433
         listenAddress: "127.0.0.1"
       - containerPort: 30379   # redis
-        hostPort: 6379
+        hostPort: KIND_HOST_PORT_6379
         listenAddress: "127.0.0.1"
       - containerPort: 30566   # localstack
-        hostPort: 4566
+        hostPort: KIND_HOST_PORT_4566
         listenAddress: "127.0.0.1"
       - containerPort: 30686   # jaeger UI
-        hostPort: 16686
+        hostPort: KIND_HOST_PORT_16686
         listenAddress: "127.0.0.1"
       - containerPort: 30317   # OTLP gRPC
-        hostPort: 4317
+        hostPort: KIND_HOST_PORT_4317
         listenAddress: "127.0.0.1"
       - containerPort: 30233   # temporal gRPC
-        hostPort: 7233
+        hostPort: KIND_HOST_PORT_7233
         listenAddress: "127.0.0.1"
       - containerPort: 30823   # temporal UI
-        hostPort: 8233
+        hostPort: KIND_HOST_PORT_8233
         listenAddress: "127.0.0.1"
       - containerPort: 30546   # mock-blockchain-server RPC + WS
-        hostPort: 8546
+        hostPort: KIND_HOST_PORT_8546
         listenAddress: "127.0.0.1"
       - containerPort: 30547   # mock-blockchain-server admin API
-        hostPort: 8547
+        hostPort: KIND_HOST_PORT_8547
         listenAddress: "127.0.0.1"
     extraMounts:
       - hostPath: STL_DATA_DIR/timescaledb

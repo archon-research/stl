@@ -3,40 +3,51 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"math"
 	"math/big"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
-	"github.com/archon-research/stl/stl-verify/internal/testutil"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-const morphoSchemaName = "test_morpho"
+const morphoDBName = "test_morpho"
 
 var morphoPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(morphoSchemaName, func() {
-		morphoPool = testutil.SetupSchemaForMain(sharedDSN, morphoSchemaName)
-	}, func() {
-		testutil.CleanupSchemaForMain(sharedDSN, morphoPool, morphoSchemaName)
-	})
+	useFileDatabase(morphoDBName, &morphoPool)
 }
 
 // truncateMorpho clears morpho-related tables for test isolation.
 func truncateMorpho(t *testing.T, ctx context.Context) {
 	t.Helper()
+	// Delete children before parents: morpho_adapter_state and
+	// morpho_adapter_membership FK morpho_adapter; morpho_vault_cap /
+	// morpho_vault_fee and morpho_adapter FK morpho_vault.
 	tables := []string{
 		`morpho_market_state`,
 		`morpho_market_position`,
 		`morpho_vault_state`,
 		`morpho_vault_position`,
+		`morpho_adapter_state`,
+		`morpho_adapter_membership`,
+		`morpho_vault_cap`,
+		`morpho_vault_fee`,
 		`morpho_market`,
+		`morpho_adapter`,
 		`morpho_vault`,
 	}
 	for _, table := range tables {
@@ -821,6 +832,69 @@ func TestGetOrCreateVault_Idempotent(t *testing.T) {
 	}
 }
 
+// TestGetOrCreateVault_CreatedAtBlockConvergesDownward mirrors GetOrCreateToken's
+// first-observed semantics. A vault first seen inside a narrowed backfill range
+// (or on the live stream) records that block as created_at_block; without downward
+// convergence the wrong deploy block would persist forever, because the upsert's
+// only conflict action is a no-op SET.
+func TestGetOrCreateVault_CreatedAtBlockConvergesDownward(t *testing.T) {
+	tests := []struct {
+		name          string
+		firstBlock    int64
+		secondBlock   int64
+		wantConverged int64
+	}{
+		{"an earlier observation wins", 24500000, 19000000, 19000000},
+		{"a later observation is ignored", 19000000, 24500000, 19000000},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := setupMorphoTest(t)
+			ctx := context.Background()
+			address := adapterAddr(0x3d)
+
+			upsert := func(block int64) int64 {
+				t.Helper()
+				vault := &entity.MorphoVault{
+					ChainID: 1, ProtocolID: fixture.protocolID, Address: address,
+					Name: "Gauntlet USDC Core", Symbol: "gtUSDCcore",
+					AssetTokenID: fixture.loanTokenID, VaultVersion: entity.MorphoVaultV1,
+					CreatedAtBlock: block,
+				}
+				tx, err := fixture.pool.Begin(ctx)
+				if err != nil {
+					t.Fatalf("begin: %v", err)
+				}
+				defer tx.Rollback(ctx)
+				id, err := fixture.repo.GetOrCreateVault(ctx, tx, vault)
+				if err != nil {
+					t.Fatalf("GetOrCreateVault at block %d: %v", block, err)
+				}
+				if err := tx.Commit(ctx); err != nil {
+					t.Fatalf("commit: %v", err)
+				}
+				return id
+			}
+
+			id1 := upsert(tt.firstBlock)
+			if id2 := upsert(tt.secondBlock); id2 != id1 {
+				t.Fatalf("upsert must reuse the vault row: first=%d second=%d", id1, id2)
+			}
+
+			got, err := fixture.repo.GetVaultByAddress(ctx, 1, common.BytesToAddress(address))
+			if err != nil {
+				t.Fatalf("GetVaultByAddress: %v", err)
+			}
+			if got == nil {
+				t.Fatal("expected the vault row")
+			}
+			if got.CreatedAtBlock != tt.wantConverged {
+				t.Errorf("created_at_block = %d, want %d (LEAST of the two observations)", got.CreatedAtBlock, tt.wantConverged)
+			}
+		})
+	}
+}
+
 func TestGetVaultByAddress_NotFound(t *testing.T) {
 	fixture := setupMorphoTest(t)
 
@@ -1458,5 +1532,1531 @@ func TestConcurrentWorkers_AllTablesAppendOnly(t *testing.T) {
 	}
 	if got.Int64() < 1000 || got.Int64() > 1000+workers-1 {
 		t.Errorf("total_supply_assets = %s, expected value in range [1000, %d]", totalSupplyAssets, 1000+workers-1)
+	}
+}
+
+// --- VaultV2 Adapter helpers ---
+
+// morphoBlockTime is a fixed snapshot timestamp for adapter-state / cap tests.
+var morphoBlockTime = time.Unix(1700000000, 0).UTC()
+
+// adapterAddr builds a distinct 20-byte adapter address from a seed byte.
+func adapterAddr(seed byte) []byte {
+	addr := make([]byte, 20)
+	addr[0] = seed
+	return addr
+}
+
+// adapterTypePtr is shorthand for taking the address of a classification literal.
+func adapterTypePtr(t entity.MorphoAdapterType) *entity.MorphoAdapterType { return &t }
+
+// addedAt / removedAt / assertedAt build the three observation shapes the tests use,
+// so a test body reads as the sequence of observations it is describing.
+func addedAt(block int64, version int, logIndex int32, adapterType entity.MorphoAdapterType) entity.MorphoAdapterMembership {
+	return entity.MorphoAdapterMembership{
+		BlockNumber: block, BlockVersion: version, LogIndex: logIndex, Timestamp: morphoBlockTime,
+		IsMember: true, AdapterType: adapterTypePtr(adapterType), ObservedVia: entity.MembershipFromAddAdapter,
+	}
+}
+
+func removedAt(block int64, version int, logIndex int32) entity.MorphoAdapterMembership {
+	return entity.MorphoAdapterMembership{
+		BlockNumber: block, BlockVersion: version, LogIndex: logIndex, Timestamp: morphoBlockTime,
+		IsMember: false, AdapterType: nil, ObservedVia: entity.MembershipFromRemoveAdapter,
+	}
+}
+
+func assertedAt(block int64, version int, logIndex int32, adapterType *entity.MorphoAdapterType, via entity.MembershipSource) entity.MorphoAdapterMembership {
+	return entity.MorphoAdapterMembership{
+		BlockNumber: block, BlockVersion: version, LogIndex: logIndex, Timestamp: morphoBlockTime,
+		IsMember: true, AdapterType: adapterType, ObservedVia: via,
+	}
+}
+
+// observe records one observation in its own committed transaction and returns the
+// adapter's stable id and whether a row was appended.
+func (f *morphoTestFixture) observe(t *testing.T, ctx context.Context, vaultID int64, address []byte, m entity.MorphoAdapterMembership) (int64, bool) {
+	t.Helper()
+	id, appended, err := f.observeErr(ctx, vaultID, address, m)
+	if err != nil {
+		t.Fatalf("ObserveAdapterMembership(%s@%d.%d): %v", m.ObservedVia, m.BlockNumber, m.LogIndex, err)
+	}
+	return id, appended
+}
+
+// observeErr is observe for the paths that are expected to fail: it rolls the
+// transaction back on error, so a refused observation leaves nothing behind.
+func (f *morphoTestFixture) observeErr(ctx context.Context, vaultID int64, address []byte, m entity.MorphoAdapterMembership) (int64, bool, error) {
+	tx, err := f.pool.Begin(ctx)
+	if err != nil {
+		return 0, false, fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	id, appended, err := f.repo.ObserveAdapterMembership(ctx, tx, &entity.MorphoAdapterObservation{
+		Identity: entity.MorphoAdapterIdentity{
+			MorphoVaultID: vaultID, Address: address, AssetTokenID: f.loanTokenID,
+		},
+		Membership: m,
+	})
+	if err != nil {
+		return 0, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, false, fmt.Errorf("commit: %w", err)
+	}
+	return id, appended, nil
+}
+
+// createTestAdapter records an AddAdapter observation for a MarketV1 adapter on the
+// given vault and returns its stable id.
+func (f *morphoTestFixture) createTestAdapter(t *testing.T, ctx context.Context, vaultID int64, address []byte, addedAtBlock int64) int64 {
+	t.Helper()
+	return f.createTestAdapterOfType(t, ctx, vaultID, address, addedAtBlock, entity.MorphoAdapterTypeMarketV1)
+}
+
+// createTestAdapterOfType is createTestAdapter with an explicit classification.
+func (f *morphoTestFixture) createTestAdapterOfType(t *testing.T, ctx context.Context, vaultID int64, address []byte, addedAtBlock int64, adapterType entity.MorphoAdapterType) int64 {
+	t.Helper()
+	id, _ := f.observe(t, ctx, vaultID, address, addedAt(addedAtBlock, 0, 0, adapterType))
+	return id
+}
+
+// seedAdapterStateAt writes one adapter_state snapshot for the given adapter at
+// blockNumber, so a test can own state rows around a de-registration.
+func (f *morphoTestFixture) seedAdapterStateAt(t *testing.T, ctx context.Context, adapterID, blockNumber int64) {
+	t.Helper()
+	f.seedAdapterStateAtVersion(t, ctx, adapterID, blockNumber, 0)
+}
+
+// seedAdapterStateAtVersion writes one adapter_state snapshot at a specific
+// block_version.
+func (f *morphoTestFixture) seedAdapterStateAtVersion(t *testing.T, ctx context.Context, adapterID, blockNumber int64, blockVersion int) {
+	t.Helper()
+	tx, err := f.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	state := &entity.MorphoAdapterState{
+		MorphoAdapterID: adapterID,
+		BlockNumber:     blockNumber,
+		BlockVersion:    blockVersion,
+		Timestamp:       morphoBlockTime,
+		RealAssets:      big.NewInt(1_000_000),
+	}
+	if _, err := f.repo.SaveAdapterState(ctx, tx, state); err != nil {
+		t.Fatalf("SaveAdapterState at block %d version %d: %v", blockNumber, blockVersion, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+}
+
+// activeAdapterAtHead reads the adapter as of the end of the highest block on the latest
+// chain we have indexed, the same sentinel position isMemberAt asks about.
+func (f *morphoTestFixture) activeAdapterAtHead(t *testing.T, ctx context.Context, vaultID int64, address []byte) (*entity.MorphoAdapterMember, error) {
+	t.Helper()
+	return f.repo.GetActiveAdapterAt(ctx, vaultID, address, entity.BlockPosition{
+		BlockNumber: math.MaxInt64, BlockVersion: math.MaxInt32, LogIndex: entity.EndOfBlockLogIndex,
+	})
+}
+
+// isMemberAt reports whether the log says the adapter was a member as of the END of a
+// block on the latest chain we have indexed: the sentinel log index so every log in that
+// block counts, and the maximum block_version so a re-indexed block wins over the version
+// a reorg replaced. A CALLER passes its own position instead — an event being processed
+// at block_version v must be answered about v, not about a version indexed later.
+func (f *morphoTestFixture) isMemberAt(t *testing.T, ctx context.Context, vaultID int64, address []byte, block int64) bool {
+	t.Helper()
+	member, err := f.repo.GetActiveAdapterAt(ctx, vaultID, address, entity.BlockPosition{
+		BlockNumber: block, BlockVersion: math.MaxInt32, LogIndex: entity.EndOfBlockLogIndex,
+	})
+	if err != nil {
+		t.Fatalf("GetActiveAdapterAt(%d): %v", block, err)
+	}
+	return member != nil
+}
+
+// activeAdaptersAt reads the vault's whole adapter set as of the END of a block on the
+// latest chain we have indexed, the same position isMemberAt asks about.
+func (f *morphoTestFixture) activeAdaptersAt(t *testing.T, ctx context.Context, vaultID int64, block int64) []*entity.MorphoAdapterMember {
+	t.Helper()
+	adapters, err := f.repo.GetActiveAdaptersByVaultAt(ctx, vaultID, entity.BlockPosition{
+		BlockNumber: block, BlockVersion: math.MaxInt32, LogIndex: entity.EndOfBlockLogIndex,
+	})
+	if err != nil {
+		t.Fatalf("GetActiveAdaptersByVaultAt(%d): %v", block, err)
+	}
+	return adapters
+}
+
+// describeMembership renders an adapter's whole observation log in selection order
+// (latest first), so a failure message shows what the registry actually holds.
+func (f *morphoTestFixture) describeMembership(t *testing.T, ctx context.Context, adapterID int64) string {
+	t.Helper()
+	rows, err := f.pool.Query(ctx,
+		`SELECT block_number, block_version, log_index, is_member, adapter_type, observed_via, processing_version
+		 FROM morpho_adapter_membership WHERE morpho_adapter_id = $1
+		 ORDER BY block_number DESC, block_version DESC, log_index DESC, processing_version DESC`,
+		adapterID)
+	if err != nil {
+		t.Fatalf("query membership: %v", err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var (
+			block, logIndex, version, pv int64
+			isMember                     bool
+			adapterType                  *int16
+			via                          string
+		)
+		if err := rows.Scan(&block, &version, &logIndex, &isMember, &adapterType, &via, &pv); err != nil {
+			t.Fatalf("scan membership: %v", err)
+		}
+		typeText := "nil"
+		if adapterType != nil {
+			typeText = fmt.Sprintf("%d", *adapterType)
+		}
+		out = append(out, fmt.Sprintf("%d.v%d.%d member=%t type=%s via=%s pv=%d",
+			block, version, logIndex, isMember, typeText, via, pv))
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate membership: %v", err)
+	}
+	return strings.Join(out, " | ")
+}
+
+// countMembership returns how many observations the log holds for an adapter.
+func (f *morphoTestFixture) countMembership(t *testing.T, ctx context.Context, adapterID int64) int {
+	t.Helper()
+	var count int
+	if err := f.pool.QueryRow(ctx,
+		`SELECT count(*) FROM morpho_adapter_membership WHERE morpho_adapter_id = $1`, adapterID,
+	).Scan(&count); err != nil {
+		t.Fatalf("counting membership rows: %v", err)
+	}
+	return count
+}
+
+// firstAddBlock is "the block this adapter was added at": a MIN over the log, never a
+// column. It is NULL until an AddAdapter has actually been observed.
+func (f *morphoTestFixture) firstAddBlock(t *testing.T, ctx context.Context, adapterID int64) *int64 {
+	t.Helper()
+	var block *int64
+	if err := f.pool.QueryRow(ctx,
+		`SELECT MIN(block_number) FILTER (WHERE is_member AND observed_via = 'add_adapter_event')
+		 FROM morpho_adapter_membership WHERE morpho_adapter_id = $1`, adapterID,
+	).Scan(&block); err != nil {
+		t.Fatalf("reading the first add block: %v", err)
+	}
+	return block
+}
+
+// countIdentityRows counts the identity rows for one (vault, address).
+func (f *morphoTestFixture) countIdentityRows(t *testing.T, ctx context.Context, vaultID int64, address []byte) int {
+	t.Helper()
+	var count int
+	if err := f.pool.QueryRow(ctx,
+		`SELECT count(*) FROM morpho_adapter WHERE morpho_vault_id = $1 AND address = $2`, vaultID, address,
+	).Scan(&count); err != nil {
+		t.Fatalf("counting identity rows: %v", err)
+	}
+	return count
+}
+
+// --- ObserveAdapterMembership Tests ---
+
+func TestObserveAdapterMembership_CreateNew(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x30))
+	addr := adapterAddr(0x01)
+
+	id, appended := fixture.observe(t, ctx, vaultID, addr, addedAt(24481834, 0, 7, entity.MorphoAdapterTypeMarketV1))
+	if id <= 0 {
+		t.Errorf("expected positive id, got %d", id)
+	}
+	if !appended {
+		t.Error("a transition must always be recorded")
+	}
+
+	got, err := fixture.activeAdapterAtHead(t, ctx, vaultID, addr)
+	if err != nil {
+		t.Fatalf("GetActiveAdapterAt failed: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected adapter, got nil")
+	}
+	if got.ID != id {
+		t.Errorf("ID mismatch: got %d, want %d", got.ID, id)
+	}
+	if got.AdapterType != entity.MorphoAdapterTypeMarketV1 {
+		t.Errorf("AdapterType mismatch: got %d", got.AdapterType)
+	}
+	if got.AsOfBlock != 24481834 {
+		t.Errorf("AsOfBlock mismatch: got %d", got.AsOfBlock)
+	}
+	if got.ObservedVia != entity.MembershipFromAddAdapter {
+		t.Errorf("ObservedVia mismatch: got %q", got.ObservedVia)
+	}
+	if got.AssetTokenID != fixture.loanTokenID {
+		t.Errorf("AssetTokenID mismatch: got %d, want %d", got.AssetTokenID, fixture.loanTokenID)
+	}
+	if block := fixture.firstAddBlock(t, ctx, id); block == nil || *block != 24481834 {
+		t.Errorf("first add block = %v, want 24481834", block)
+	}
+}
+
+func TestObserveAdapterMembership_Idempotent(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x10))
+	addr := adapterAddr(0x02)
+
+	id1 := fixture.createTestAdapter(t, ctx, vaultID, addr, 24481834)
+	id2 := fixture.createTestAdapter(t, ctx, vaultID, addr, 24481834)
+
+	if id1 != id2 {
+		t.Errorf("ObserveAdapterMembership not idempotent: first=%d, second=%d", id1, id2)
+	}
+	if got := fixture.countMembership(t, ctx, id1); got != 1 {
+		t.Errorf("membership rows = %d, want 1: %s", got, fixture.describeMembership(t, ctx, id1))
+	}
+}
+
+// TestObserveAdapterMembership_RemovalOfUnknownAdapterIsRecorded pins the behaviour
+// change this redesign makes on the removal path. The old registry ERRORED on a removal
+// for an address it had never seen ("no adapter incarnation registered at or before
+// block N"), and the caller papered over that by probing the chain and healing a
+// zero-length [R,R] row. There is no lifetime to heal any more: a removal is one
+// observation, and the truthful record of "we first learned of this adapter when it was
+// de-registered" is exactly one untyped is_member=false row.
+func TestObserveAdapterMembership_RemovalOfUnknownAdapterIsRecorded(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x50))
+	addr := adapterAddr(0x51)
+
+	id, appended := fixture.observe(t, ctx, vaultID, addr, removedAt(24600000, 0, 3))
+	if !appended {
+		t.Error("a removal must always be recorded")
+	}
+	if got := fixture.describeMembership(t, ctx, id); got != "24600000.v0.3 member=false type=nil via=remove_adapter_event pv=0" {
+		t.Errorf("membership log = %q", got)
+	}
+	active, err := fixture.activeAdapterAtHead(t, ctx, vaultID, addr)
+	if err != nil {
+		t.Fatalf("GetActiveAdapterAt: %v", err)
+	}
+	if active != nil {
+		t.Errorf("expected no active adapter, got %+v", active)
+	}
+	// R3: an adapter first observed by its removal has no known type, and that is now
+	// representable rather than a hard failure.
+	if block := fixture.firstAddBlock(t, ctx, id); block != nil {
+		t.Errorf("first add block = %d, want NULL: no AddAdapter has ever been observed", *block)
+	}
+}
+
+// TestObserveAdapterMembership_LatestTransitionWinsUnderReorgVersions pins the ordering
+// tuple. A re-indexed block is a HIGHER block_version at the same block_number, so it
+// wins there without anything being edited — and a later block wins outright, whatever
+// version either carries.
+func TestObserveAdapterMembership_LatestTransitionWinsUnderReorgVersions(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x31))
+
+	t.Run("a higher block_version at the same block wins", func(t *testing.T) {
+		addr := adapterAddr(0x32)
+		// The removal carries a LOWER log index than the add it supersedes, so only
+		// block_version can order them: an ordering tuple that dropped it would pick
+		// the add and call the adapter a member.
+		id, _ := fixture.observe(t, ctx, vaultID, addr, addedAt(1000, 0, 9, entity.MorphoAdapterTypeMarketV1))
+		fixture.observe(t, ctx, vaultID, addr, removedAt(1000, 1, 2))
+
+		if fixture.isMemberAt(t, ctx, vaultID, addr, 1000) {
+			t.Errorf("the re-indexed block says the adapter is gone: %s", fixture.describeMembership(t, ctx, id))
+		}
+		if got := fixture.countMembership(t, ctx, id); got != 2 {
+			t.Errorf("membership rows = %d, want 2 (nothing is overwritten)", got)
+		}
+	})
+
+	t.Run("a higher block wins whatever version either carries", func(t *testing.T) {
+		addr := adapterAddr(0x33)
+		id, _ := fixture.observe(t, ctx, vaultID, addr, removedAt(1000, 3, 2))
+		fixture.observe(t, ctx, vaultID, addr, addedAt(1001, 0, 1, entity.MorphoAdapterTypeVaultV1))
+
+		if !fixture.isMemberAt(t, ctx, vaultID, addr, 1001) {
+			t.Errorf("the later block must win: %s", fixture.describeMembership(t, ctx, id))
+		}
+		if fixture.isMemberAt(t, ctx, vaultID, addr, 1000) {
+			t.Errorf("as of 1000 the adapter was still gone: %s", fixture.describeMembership(t, ctx, id))
+		}
+	})
+}
+
+// TestMembershipPrimaryKeyColumnOrder pins the PRIMARY KEY's column sequence, which the
+// behavioural tests above cannot see. latestMembershipOrder is deliberately identical to
+// it so "the latest observation" is one backward scan of the PK index with no sort; a
+// migration that reorders the key — putting log_index before block_version, say — leaves
+// every answer correct while silently turning that scan into a sort over the adapter's
+// whole history. This is the only test that fails on such a reorder.
+func TestMembershipPrimaryKeyColumnOrder(t *testing.T) {
+	setupMorphoTest(t)
+	ctx := context.Background()
+
+	rows, err := morphoPool.Query(ctx,
+		`SELECT c.relname, a.attname
+		 FROM pg_index i
+		 JOIN pg_class c ON c.oid = i.indexrelid
+		 CROSS JOIN LATERAL unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord)
+		 JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+		 WHERE i.indrelid = 'morpho_adapter_membership'::regclass AND i.indisprimary
+		 ORDER BY k.ord`)
+	if err != nil {
+		t.Fatalf("reading the primary key of morpho_adapter_membership: %v", err)
+	}
+	defer rows.Close()
+
+	var indexName string
+	var columns []string
+	for rows.Next() {
+		var column string
+		if err := rows.Scan(&indexName, &column); err != nil {
+			t.Fatalf("scanning primary key column: %v", err)
+		}
+		columns = append(columns, column)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterating primary key columns: %v", err)
+	}
+
+	if indexName != "morpho_adapter_membership_pkey" {
+		t.Errorf("primary key index = %q, want morpho_adapter_membership_pkey", indexName)
+	}
+	want := []string{"morpho_adapter_id", "block_number", "block_version", "log_index", "processing_version"}
+	if !slices.Equal(columns, want) {
+		t.Errorf("primary key columns = %v, want %v — latestMembershipOrder no longer matches the key it scans", columns, want)
+	}
+}
+
+// TestObserveAdapterMembership_SameBlockAddRemoveReAdd covers the shape the previous
+// design documented as unrepresentable: a governance multicall that adds, removes and
+// re-adds one adapter inside a single block collapsed onto one row, leaving the adapter
+// de-registered on-DB while it was active on-chain. log_index in the key makes the three
+// observations three rows, and the ordering resolves them.
+func TestObserveAdapterMembership_SameBlockAddRemoveReAdd(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x34))
+	addr := adapterAddr(0x35)
+
+	id, _ := fixture.observe(t, ctx, vaultID, addr, addedAt(2000, 0, 3, entity.MorphoAdapterTypeMarketV1))
+	fixture.observe(t, ctx, vaultID, addr, removedAt(2000, 0, 5))
+	fixture.observe(t, ctx, vaultID, addr, addedAt(2000, 0, 9, entity.MorphoAdapterTypeMarketV1))
+
+	if got := fixture.countMembership(t, ctx, id); got != 3 {
+		t.Errorf("membership rows = %d, want 3: %s", got, fixture.describeMembership(t, ctx, id))
+	}
+	active, err := fixture.activeAdapterAtHead(t, ctx, vaultID, addr)
+	if err != nil {
+		t.Fatalf("GetActiveAdapterAt: %v", err)
+	}
+	if active == nil {
+		t.Fatalf("the re-add at log index 9 is the last word in the block: %s", fixture.describeMembership(t, ctx, id))
+	}
+	// Between the removal and the re-add the adapter really was out of the set.
+	between, err := fixture.repo.GetActiveAdapterAt(ctx, vaultID, addr, entity.BlockPosition{BlockNumber: 2000, BlockVersion: 0, LogIndex: 6})
+	if err != nil {
+		t.Fatalf("GetActiveAdapterAt: %v", err)
+	}
+	if between != nil {
+		t.Errorf("at log index 6 the adapter was removed, got %+v", between)
+	}
+}
+
+// TestObserveAdapterMembership_IdempotentReAppendAndNewBuild pins the redelivery and
+// reprocess semantics: the same observation from the same build dedupes on the PK, while
+// a deliberate reprocess (a new build_id) takes MAX+1 and orders LAST, so the reprocessed
+// row is the one that wins without anything being updated.
+func TestObserveAdapterMembership_IdempotentReAppendAndNewBuild(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x36))
+	addr := adapterAddr(0x37)
+
+	observation := addedAt(3000, 0, 4, entity.MorphoAdapterTypeMarketV1)
+	id, _ := fixture.observe(t, ctx, vaultID, addr, observation)
+	fixture.observe(t, ctx, vaultID, addr, observation)
+
+	if got := fixture.countMembership(t, ctx, id); got != 1 {
+		t.Fatalf("a same-build re-observation must dedupe, got %d rows: %s", got, fixture.describeMembership(t, ctx, id))
+	}
+
+	repoBuild1, err := NewMorphoRepository(morphoPool, nil, 1)
+	if err != nil {
+		t.Fatalf("NewMorphoRepository build 1: %v", err)
+	}
+	tx, err := fixture.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, _, err := repoBuild1.ObserveAdapterMembership(ctx, tx, &entity.MorphoAdapterObservation{
+		Identity:   entity.MorphoAdapterIdentity{MorphoVaultID: vaultID, Address: addr, AssetTokenID: fixture.loanTokenID},
+		Membership: observation,
+	}); err != nil {
+		t.Fatalf("reprocess under build 1: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	var count, maxVer int
+	if err := fixture.pool.QueryRow(ctx,
+		`SELECT count(*), MAX(processing_version) FROM morpho_adapter_membership WHERE morpho_adapter_id = $1`, id,
+	).Scan(&count, &maxVer); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if count != 2 || maxVer != 1 {
+		t.Errorf("reprocess = %d rows / max processing_version %d, want 2 / 1: %s",
+			count, maxVer, fixture.describeMembership(t, ctx, id))
+	}
+	if !fixture.isMemberAt(t, ctx, vaultID, addr, 3000) {
+		t.Error("the reprocessed row carries the same answer, so membership is unchanged")
+	}
+}
+
+// TestObserveAdapterMembership_RedeliveredTransitionReportsNothingAppended pins the
+// second return value on the transition path, which the row counts above cannot see. A
+// transition is INSERTed unconditionally, but "insert attempted" is not "row appended":
+// a redelivery inside one build hits the PK and adds nothing. Callers key an ops signal
+// off that flag — the registration metric, the inferred-membership WARN — so reporting
+// true here would count one on-chain event once per SQS redelivery.
+func TestObserveAdapterMembership_RedeliveredTransitionReportsNothingAppended(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x3a))
+	addr := adapterAddr(0x3b)
+
+	observation := addedAt(4000, 0, 6, entity.MorphoAdapterTypeMarketV1)
+	id, appended := fixture.observe(t, ctx, vaultID, addr, observation)
+	if !appended {
+		t.Fatal("the first observation of a transition must report an append")
+	}
+	if _, appended := fixture.observe(t, ctx, vaultID, addr, observation); appended {
+		t.Error("a redelivered transition reported an append, but the primary key deduped it")
+	}
+	if got := fixture.countMembership(t, ctx, id); got != 1 {
+		t.Errorf("membership rows = %d, want 1: %s", got, fixture.describeMembership(t, ctx, id))
+	}
+}
+
+// TestObserveAdapterMembership_RelocatedRemovalNeedsNoBound is the direct replacement for
+// the ±64-block symmetric relocation bound and its 8-row semantic matrix. A removal
+// re-observed at a different block is simply another row at its own position: both are
+// retained, every as-of answer is decided by the ordering tuple, and nothing errors —
+// including at distances the old bound refused outright.
+func TestObserveAdapterMembership_RelocatedRemovalNeedsNoBound(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x38))
+	addr := adapterAddr(0x39)
+
+	id := fixture.createTestAdapter(t, ctx, vaultID, addr, 900)
+	fixture.observe(t, ctx, vaultID, addr, removedAt(1000, 0, 1))
+	fixture.observe(t, ctx, vaultID, addr, removedAt(990, 0, 1))
+
+	if got := fixture.countMembership(t, ctx, id); got != 3 {
+		t.Errorf("membership rows = %d, want 3 (both removals retained): %s", got, fixture.describeMembership(t, ctx, id))
+	}
+	if !fixture.isMemberAt(t, ctx, vaultID, addr, 950) {
+		t.Error("as of 950 the adapter was still a member")
+	}
+	if fixture.isMemberAt(t, ctx, vaultID, addr, 995) {
+		t.Error("as of 995 the relocated removal already applies")
+	}
+	if fixture.isMemberAt(t, ctx, vaultID, addr, 1005) {
+		t.Error("as of 1005 the adapter is gone")
+	}
+
+	// A re-observation far outside the old ±64 reorg window is refused by nothing.
+	fixture.observe(t, ctx, vaultID, addr, removedAt(500, 0, 1))
+	if fixture.isMemberAt(t, ctx, vaultID, addr, 600) {
+		t.Errorf("the 500 observation stands on its own: %s", fixture.describeMembership(t, ctx, id))
+	}
+}
+
+// TestObserveAdapterMembership_CloseNeverOrphansSnapshots is the inverse of the deleted
+// orphan guard. Snapshots hang off an identity id that no lifecycle observation can move,
+// so a de-registration recorded BELOW existing snapshots is simply recorded: no refusal,
+// no poison pill, and every snapshot keeps its adapter.
+func TestObserveAdapterMembership_CloseNeverOrphansSnapshots(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x3a))
+	addr := adapterAddr(0x3b)
+
+	id := fixture.createTestAdapter(t, ctx, vaultID, addr, 400)
+	fixture.seedAdapterStateAt(t, ctx, id, 1000)
+	fixture.seedAdapterStateAt(t, ctx, id, 1010)
+
+	if _, _, err := fixture.observeErr(ctx, vaultID, addr, removedAt(500, 0, 2)); err != nil {
+		t.Fatalf("recording a removal below existing snapshots must not fail: %v", err)
+	}
+
+	var orphaned int
+	if err := fixture.pool.QueryRow(ctx,
+		`SELECT count(*) FROM morpho_adapter_state WHERE morpho_adapter_id = $1`, id,
+	).Scan(&orphaned); err != nil {
+		t.Fatalf("counting snapshots: %v", err)
+	}
+	if orphaned != 2 {
+		t.Errorf("snapshots = %d, want 2 still hanging off adapter %d", orphaned, id)
+	}
+	if fixture.isMemberAt(t, ctx, vaultID, addr, 1010) {
+		t.Errorf("the removal is on record: %s", fixture.describeMembership(t, ctx, id))
+	}
+}
+
+// TestObserveAdapterMembership_AddBlockConvergesInEitherArrivalOrder is the
+// order-independence theorem, and the reason "when was it added" is a MIN over the log
+// rather than a column some writer converges. A mid-life discovery ASSERTS membership at
+// the discovery block; the true AddAdapter is a TRANSITION at its own, lower block. Both
+// arrival orders land on the same two answers.
+//
+// The two orders do not produce the same ROWS, deliberately: replaying the add after a
+// discovery adds the transition the log was missing, whereas a discovery after the add
+// asserts an answer the log already gives and writes nothing. Only the answers are
+// claimed to converge.
+func TestObserveAdapterMembership_AddBlockConvergesInEitherArrivalOrder(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x3c))
+
+	discovery := assertedAt(2000, 0, entity.EndOfBlockLogIndex, adapterTypePtr(entity.MorphoAdapterTypeMarketV1), entity.MembershipFromDiscovery)
+	add := addedAt(1000, 0, 6, entity.MorphoAdapterTypeMarketV1)
+
+	orders := []struct {
+		name string
+		addr []byte
+		seq  []entity.MorphoAdapterMembership
+	}{
+		{"discovery then the replayed add", adapterAddr(0x3d), []entity.MorphoAdapterMembership{discovery, add}},
+		{"the add then a later discovery", adapterAddr(0x3e), []entity.MorphoAdapterMembership{add, discovery}},
+	}
+	for _, order := range orders {
+		t.Run(order.name, func(t *testing.T) {
+			var id int64
+			for _, m := range order.seq {
+				id, _ = fixture.observe(t, ctx, vaultID, order.addr, m)
+			}
+			if block := fixture.firstAddBlock(t, ctx, id); block == nil || *block != 1000 {
+				t.Errorf("first add block = %v, want 1000: %s", block, fixture.describeMembership(t, ctx, id))
+			}
+			if !fixture.isMemberAt(t, ctx, vaultID, order.addr, 2000) {
+				t.Errorf("membership at 2000: %s", fixture.describeMembership(t, ctx, id))
+			}
+			if !fixture.isMemberAt(t, ctx, vaultID, order.addr, 1000) {
+				t.Errorf("membership at 1000: %s", fixture.describeMembership(t, ctx, id))
+			}
+			if fixture.isMemberAt(t, ctx, vaultID, order.addr, 999) {
+				t.Errorf("nothing is claimed below the add: %s", fixture.describeMembership(t, ctx, id))
+			}
+		})
+	}
+}
+
+// TestObserveAdapterMembership_AssertionThatChangesNothingAppendsNothing pins the
+// conditional that keeps a governance-rate table governance-rate. An Allocate proves
+// membership but witnesses no change, so once the log already says "member" at that
+// position, further allocations write nothing at all.
+func TestObserveAdapterMembership_AssertionThatChangesNothingAppendsNothing(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x3f))
+	addr := adapterAddr(0x40)
+
+	id := fixture.createTestAdapter(t, ctx, vaultID, addr, 1000)
+
+	for _, logIndex := range []int32{2, 11} {
+		_, appended := fixture.observe(t, ctx, vaultID, addr,
+			assertedAt(1500, 0, logIndex, adapterTypePtr(entity.MorphoAdapterTypeMarketV1), entity.MembershipFromAllocation))
+		if appended {
+			t.Errorf("allocation at log index %d appended although the log already said member", logIndex)
+		}
+	}
+	if got := fixture.countMembership(t, ctx, id); got != 1 {
+		t.Errorf("membership rows = %d, want 1: %s", got, fixture.describeMembership(t, ctx, id))
+	}
+
+	// It DOES append when it changes the answer: after a removal, an allocation is
+	// evidence the adapter is back in the set.
+	fixture.observe(t, ctx, vaultID, addr, removedAt(1600, 0, 1))
+	_, appended := fixture.observe(t, ctx, vaultID, addr,
+		assertedAt(1700, 0, 4, adapterTypePtr(entity.MorphoAdapterTypeMarketV1), entity.MembershipFromAllocation))
+	if !appended {
+		t.Errorf("an allocation after a removal must be recorded: %s", fixture.describeMembership(t, ctx, id))
+	}
+}
+
+// TestObserveAdapterMembership_UnclassifiedMembershipAssertionIsRefused pins the one
+// place ErrAdapterUnclassified survives. The caller probes the type only when its
+// pre-transaction read says the adapter is NOT a member; if the in-transaction decision
+// disagrees, recording membership would need a classification nobody has, and a defaulted
+// type is worse than a failed event.
+func TestObserveAdapterMembership_UnclassifiedMembershipAssertionIsRefused(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x41))
+	addr := adapterAddr(0x42)
+
+	_, _, err := fixture.observeErr(ctx, vaultID, addr,
+		assertedAt(1200, 0, 3, nil, entity.MembershipFromAllocation))
+	if !errors.Is(err, outbound.ErrAdapterUnclassified) {
+		t.Fatalf("error = %v, want ErrAdapterUnclassified", err)
+	}
+	// Nothing is written: the transaction is rolled back, so not even the identity row
+	// survives. The table's CHECK is the structural backstop behind this.
+	if got := fixture.countIdentityRows(t, ctx, vaultID, addr); got != 0 {
+		t.Errorf("identity rows = %d, want 0 after a refused observation", got)
+	}
+}
+
+// TestObserveAdapterMembership_IdentityRowIsWrittenOnce pins the invariant that replaces
+// the whole incarnation model: one identity row per (vault, address) forever, with a
+// stable id, and at least one observation hanging off it (R5).
+func TestObserveAdapterMembership_IdentityRowIsWrittenOnce(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x43))
+	addr := adapterAddr(0x44)
+
+	first, _ := fixture.observe(t, ctx, vaultID, addr, addedAt(1000, 0, 1, entity.MorphoAdapterTypeMarketV1))
+	second, _ := fixture.observe(t, ctx, vaultID, addr, removedAt(1100, 0, 1))
+	third, _ := fixture.observe(t, ctx, vaultID, addr, addedAt(1200, 0, 1, entity.MorphoAdapterTypeVaultV1))
+
+	if first != second || second != third {
+		t.Errorf("the identity id moved across observations: %d, %d, %d", first, second, third)
+	}
+	if got := fixture.countIdentityRows(t, ctx, vaultID, addr); got != 1 {
+		t.Errorf("identity rows = %d, want exactly 1 forever", got)
+	}
+
+	var stranded int
+	if err := fixture.pool.QueryRow(ctx,
+		`SELECT count(*) FROM morpho_adapter a
+		 WHERE NOT EXISTS (SELECT 1 FROM morpho_adapter_membership m WHERE m.morpho_adapter_id = a.id)`,
+	).Scan(&stranded); err != nil {
+		t.Fatalf("checking the every-identity-has-an-observation invariant: %v", err)
+	}
+	if stranded != 0 {
+		t.Errorf("%d identity rows carry no observation", stranded)
+	}
+}
+
+// TestObserveAdapterMembership_ConcurrentAssertionsAppendOnce pins the surviving advisory
+// lock. An assertion decides whether to append by reading the log, so two overlapping
+// writers that both read "nothing here" would each decide to append for one on-chain
+// fact — ON CONFLICT cannot catch that, because the decision precedes the insert
+// (ADR-0002 §3). Taking the lock BEFORE the decisive read makes the second writer see the
+// first's committed answer and append nothing.
+//
+// The adapter is deliberately seeded FIRST, with a committed removal. If the identity row
+// did not exist yet, the two writers would serialize on its speculative insert instead —
+// ON CONFLICT DO NOTHING waits out a conflicting inserter — and the test would pass with
+// the lock deleted. What is under test is the decision, so the identity must be settled
+// before the race starts, and the prior removal is what gives both writers something to
+// change.
+func TestObserveAdapterMembership_ConcurrentAssertionsAppendOnce(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x45))
+	addr := adapterAddr(0x46)
+	fixture.createTestAdapter(t, ctx, vaultID, addr, 1000)
+	fixture.observe(t, ctx, vaultID, addr, removedAt(1100, 0, 1))
+	assertion := assertedAt(1300, 0, 5, adapterTypePtr(entity.MorphoAdapterTypeMarketV1), entity.MembershipFromAllocation)
+
+	firstTx, err := fixture.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the first assertion: %v", err)
+	}
+	defer firstTx.Rollback(ctx)
+	id, appended, err := fixture.repo.ObserveAdapterMembership(ctx, firstTx, &entity.MorphoAdapterObservation{
+		Identity:   entity.MorphoAdapterIdentity{MorphoVaultID: vaultID, Address: addr, AssetTokenID: fixture.loanTokenID},
+		Membership: assertion,
+	})
+	if err != nil {
+		t.Fatalf("first assertion: %v", err)
+	}
+	if !appended {
+		t.Fatal("the first assertion had nothing to go on, so it must append")
+	}
+
+	type result struct {
+		appended bool
+		err      error
+	}
+	second := make(chan result, 1)
+	go func() {
+		_, appended, err := fixture.observeErr(ctx, vaultID, addr, assertion)
+		second <- result{appended, err}
+	}()
+
+	// Long enough for the concurrent writer to reach its decisive read; it can only get
+	// past it by waiting for the lock this transaction holds.
+	time.Sleep(500 * time.Millisecond)
+	if err := firstTx.Commit(ctx); err != nil {
+		t.Fatalf("commit the first assertion: %v", err)
+	}
+
+	got := <-second
+	if got.err != nil {
+		t.Fatalf("the concurrent assertion failed: %v", got.err)
+	}
+	if got.appended {
+		t.Error("the concurrent assertion decided before it held the lock, so it recorded an observation for a fact the first writer had already recorded")
+	}
+	// Two adds/removes seeded above plus the one assertion under test.
+	if rows := fixture.countMembership(t, ctx, id); rows != 3 {
+		t.Errorf("membership rows = %d, want 3: %s", rows, fixture.describeMembership(t, ctx, id))
+	}
+}
+
+// --- GetActiveAdapterAt / GetActiveAdaptersByVaultAt Tests ---
+
+func TestGetActiveAdapterAt_Found(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x16))
+	id := fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x08), 24481834)
+
+	got, err := fixture.activeAdapterAtHead(t, ctx, vaultID, adapterAddr(0x08))
+	if err != nil {
+		t.Fatalf("GetActiveAdapterAt failed: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected adapter, got nil")
+	}
+	if got.ID != id {
+		t.Errorf("ID mismatch: got %d, want %d", got.ID, id)
+	}
+}
+
+func TestGetActiveAdapterAt_RemovedReturnsNil(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x17))
+	addr := adapterAddr(0x09)
+	fixture.createTestAdapter(t, ctx, vaultID, addr, 24481834)
+	fixture.observe(t, ctx, vaultID, addr, removedAt(24600000, 0, 1))
+
+	got, err := fixture.activeAdapterAtHead(t, ctx, vaultID, addr)
+	if err != nil {
+		t.Fatalf("GetActiveAdapterAt failed: %v", err)
+	}
+	if got != nil {
+		t.Errorf("expected nil for removed adapter, got %+v", got)
+	}
+}
+
+func TestGetActiveAdapterAt_NotFound(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x18))
+
+	got, err := fixture.activeAdapterAtHead(t, ctx, vaultID, adapterAddr(0x0a))
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if got != nil {
+		t.Errorf("expected nil for unknown adapter, got %+v", got)
+	}
+}
+
+func TestGetActiveAdaptersByVaultAt_ReturnsActiveExcludesRemoved(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x19))
+
+	fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x0b), 24481834)
+	fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x0c), 24481900)
+	fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x0d), 24482000)
+
+	// Remove one of the three.
+	fixture.observe(t, ctx, vaultID, adapterAddr(0x0d), removedAt(24600000, 0, 1))
+
+	got := fixture.activeAdaptersAt(t, ctx, vaultID, 24600000)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 active adapters, got %d", len(got))
+	}
+	for _, a := range got {
+		if a.MorphoVaultID != vaultID {
+			t.Errorf("adapter %d has wrong vault id %d", a.ID, a.MorphoVaultID)
+		}
+		if a.AdapterType != entity.MorphoAdapterTypeMarketV1 {
+			t.Errorf("adapter %d has type %d, want the type its latest observation carried", a.ID, a.AdapterType)
+		}
+	}
+}
+
+func TestGetActiveAdaptersByVaultAt_Empty(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x1a))
+
+	if got := fixture.activeAdaptersAt(t, ctx, vaultID, 24600000); len(got) != 0 {
+		t.Errorf("expected 0 adapters, got %d", len(got))
+	}
+}
+
+// TestGetActiveAdaptersByVaultAt_IgnoresObservationsAboveThePosition is why this read
+// takes a position at all. Its caller diffs the answer against an adapters(i)
+// enumeration pinned to a block, so an adapter added ABOVE that block must not come back
+// a member: it would be absent from the enumeration and recorded as removed at a block
+// where it was still on-chain.
+func TestGetActiveAdaptersByVaultAt_IgnoresObservationsAboveThePosition(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x1c))
+	pinned := int64(24500000)
+
+	fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x1d), pinned-1000)
+	fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x1e), pinned+1)
+
+	got := fixture.activeAdaptersAt(t, ctx, vaultID, pinned)
+	if len(got) != 1 {
+		t.Fatalf("as of block %d the vault had 1 adapter, got %d", pinned, len(got))
+	}
+	if !bytes.Equal(got[0].Address, adapterAddr(0x1d)) {
+		t.Errorf("returned adapter %x, want the one added at or below the pinned block", got[0].Address)
+	}
+	if later := fixture.activeAdaptersAt(t, ctx, vaultID, pinned+1); len(later) != 2 {
+		t.Errorf("as of block %d both adapters are members, got %d", pinned+1, len(later))
+	}
+}
+
+// TestMorphoAdapterCurrentView_MatchesTheRepositoryRead pins the SQL surface the Python
+// readers use (VEC-219) against the Go one, so the two cannot drift.
+func TestMorphoAdapterCurrentView_MatchesTheRepositoryRead(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x47))
+
+	fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x48), 1000)
+	kept := fixture.createTestAdapterOfType(t, ctx, vaultID, adapterAddr(0x49), 1100, entity.MorphoAdapterTypeVaultV1)
+	dropped := fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x4a), 1200)
+	fixture.observe(t, ctx, vaultID, adapterAddr(0x4a), removedAt(1300, 0, 1))
+
+	rows, err := fixture.pool.Query(ctx,
+		`SELECT id, adapter_type FROM morpho_adapter_current WHERE morpho_vault_id = $1 ORDER BY id`, vaultID)
+	if err != nil {
+		t.Fatalf("querying morpho_adapter_current: %v", err)
+	}
+	defer rows.Close()
+
+	viewed := map[int64]int16{}
+	for rows.Next() {
+		var id int64
+		var adapterType int16
+		if err := rows.Scan(&id, &adapterType); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		viewed[id] = adapterType
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate: %v", err)
+	}
+
+	if len(viewed) != 2 {
+		t.Fatalf("view returned %d adapters, want 2", len(viewed))
+	}
+	if _, ok := viewed[dropped]; ok {
+		t.Errorf("the de-registered adapter %d is still in morpho_adapter_current", dropped)
+	}
+	if viewed[kept] != int16(entity.MorphoAdapterTypeVaultV1) {
+		t.Errorf("view adapter_type = %d, want %d", viewed[kept], entity.MorphoAdapterTypeVaultV1)
+	}
+
+	active := fixture.activeAdaptersAt(t, ctx, vaultID, math.MaxInt32)
+	if len(active) != len(viewed) {
+		t.Errorf("the view and the repository disagree: %d vs %d adapters", len(viewed), len(active))
+	}
+	for _, a := range active {
+		if _, ok := viewed[a.ID]; !ok {
+			t.Errorf("adapter %d is active for the repository but absent from the view", a.ID)
+		}
+	}
+}
+
+// --- SaveAdapterState Tests ---
+
+func TestSaveAdapterState_RoundTrip(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x1b))
+	adapterID := fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x0e), 24481834)
+
+	maxUint256, _ := new(big.Int).SetString("115792089237316195423570985008687907853269984665640564039457584007913129639935", 10)
+	state := &entity.MorphoAdapterState{
+		MorphoAdapterID: adapterID,
+		BlockNumber:     24500000,
+		BlockVersion:    0,
+		Timestamp:       morphoBlockTime,
+		RealAssets:      maxUint256,
+	}
+
+	tx, err := fixture.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := fixture.repo.SaveAdapterState(ctx, tx, state); err != nil {
+		t.Fatalf("SaveAdapterState failed: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	var realAssets string
+	err = fixture.pool.QueryRow(ctx,
+		`SELECT real_assets FROM morpho_adapter_state WHERE morpho_adapter_id = $1 AND block_number = $2 AND block_version = 0`,
+		adapterID, int64(24500000),
+	).Scan(&realAssets)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if realAssets != maxUint256.String() {
+		t.Errorf("real_assets precision lost: got %s, want %s", realAssets, maxUint256.String())
+	}
+}
+
+func TestSaveAdapterState_DuplicateSameBuildDeduped(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x1c))
+	adapterID := fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x0f), 24481834)
+
+	save := func(realAssets *big.Int) bool {
+		state := &entity.MorphoAdapterState{
+			MorphoAdapterID: adapterID,
+			BlockNumber:     24500100,
+			BlockVersion:    0,
+			Timestamp:       morphoBlockTime,
+			RealAssets:      realAssets,
+		}
+		tx, err := fixture.pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		appended, err := fixture.repo.SaveAdapterState(ctx, tx, state)
+		if err != nil {
+			t.Fatalf("SaveAdapterState failed: %v", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		return appended
+	}
+
+	// Both saves use the same repo (build_id 0) → trigger reuses
+	// processing_version 0 and ON CONFLICT DO NOTHING dedupes to one row.
+	if appended := save(big.NewInt(1000)); !appended {
+		t.Error("the first adapter-state write must report a row appended")
+	}
+	if appended := save(big.NewInt(9999)); appended {
+		t.Error("the deduped retry must report no row appended (the snapshot counter gates on it)")
+	}
+
+	var count int
+	err := fixture.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM morpho_adapter_state WHERE morpho_adapter_id = $1 AND block_number = $2`,
+		adapterID, int64(24500100),
+	).Scan(&count)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 deduped row, got %d", count)
+	}
+}
+
+func TestSaveAdapterState_DifferentBuildNewVersion(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x1d))
+	adapterID := fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x1e), 24481834)
+
+	repoBuild1, err := NewMorphoRepository(morphoPool, nil, 1)
+	if err != nil {
+		t.Fatalf("NewMorphoRepository build 1: %v", err)
+	}
+
+	save := func(repo *MorphoRepository, realAssets *big.Int) {
+		state := &entity.MorphoAdapterState{
+			MorphoAdapterID: adapterID,
+			BlockNumber:     24500200,
+			BlockVersion:    0,
+			Timestamp:       morphoBlockTime,
+			RealAssets:      realAssets,
+		}
+		tx, err := fixture.pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		if _, err := repo.SaveAdapterState(ctx, tx, state); err != nil {
+			t.Fatalf("SaveAdapterState failed: %v", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+	}
+
+	// Different build_id → reprocessing → a new processing_version, so both rows
+	// survive.
+	save(fixture.repo, big.NewInt(1000))
+	save(repoBuild1, big.NewInt(2000))
+
+	var count, maxVer int
+	err = fixture.pool.QueryRow(ctx,
+		`SELECT COUNT(*), MAX(processing_version) FROM morpho_adapter_state WHERE morpho_adapter_id = $1 AND block_number = $2`,
+		adapterID, int64(24500200),
+	).Scan(&count, &maxVer)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("expected 2 rows for distinct builds, got %d", count)
+	}
+	if maxVer != 1 {
+		t.Errorf("expected max processing_version 1, got %d", maxVer)
+	}
+}
+
+// --- SaveVaultCap Tests ---
+
+// capIDFor returns the on-chain cap id for a pre-image: id = keccak256(idData).
+// The entity enforces this pairing, so tests must derive the id, not invent one.
+func capIDFor(idData []byte) []byte {
+	return crypto.Keccak256(idData)
+}
+
+// saveCap persists one MorphoVaultCap in its own committed transaction and
+// returns whether a row was appended.
+func (f *morphoTestFixture) saveCap(t *testing.T, ctx context.Context, c *entity.MorphoVaultCap) bool {
+	t.Helper()
+	tx, err := f.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	appended, err := f.repo.SaveVaultCap(ctx, tx, c)
+	if err != nil {
+		t.Fatalf("SaveVaultCap failed: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	return appended
+}
+
+// latestCap reads the current (absolute, relative) pair for a cap id straight
+// from the table using the ADR-0002 latest-row ordering — the read shape the
+// downstream consumer uses now that the repo exposes no GetLatestVaultCap.
+func (f *morphoTestFixture) latestCap(t *testing.T, ctx context.Context, vaultID int64, cid []byte) (absolute, relative *big.Int, found bool) {
+	t.Helper()
+	var absStr, relStr string
+	err := f.pool.QueryRow(ctx,
+		`SELECT absolute_cap::text, relative_cap::text FROM morpho_vault_cap
+		 WHERE morpho_vault_id = $1 AND cap_id = $2
+		 ORDER BY block_number DESC, block_version DESC, processing_version DESC
+		 LIMIT 1`, vaultID, cid).Scan(&absStr, &relStr)
+	if err != nil {
+		return nil, nil, false
+	}
+	a, ok := new(big.Int).SetString(absStr, 10)
+	if !ok {
+		t.Fatalf("absolute_cap %q not decimal", absStr)
+	}
+	r, ok := new(big.Int).SetString(relStr, 10)
+	if !ok {
+		t.Fatalf("relative_cap %q not decimal", relStr)
+	}
+	return a, r, true
+}
+
+func TestSaveVaultCap_RoundTrip(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x20))
+
+	idData := []byte{0x01, 0x02, 0x03, 0x04}
+	cid := capIDFor(idData)
+	fixture.saveCap(t, ctx, &entity.MorphoVaultCap{
+		MorphoVaultID: vaultID,
+		CapID:         cid,
+		IDData:        idData,
+		AbsoluteCap:   big.NewInt(1000000000000),
+		RelativeCap:   big.NewInt(500000000000000000),
+		BlockNumber:   24500000,
+		BlockVersion:  0,
+		Timestamp:     morphoBlockTime,
+	})
+
+	abs, rel, found := fixture.latestCap(t, ctx, vaultID, cid)
+	if !found {
+		t.Fatal("expected cap, got none")
+	}
+	if abs.Cmp(big.NewInt(1000000000000)) != 0 {
+		t.Errorf("absolute_cap mismatch: got %s", abs)
+	}
+	if rel.Cmp(big.NewInt(500000000000000000)) != 0 {
+		t.Errorf("relative_cap mismatch: got %s", rel)
+	}
+}
+
+// TestSaveVaultCap_SameBlockDedupesToIdenticalRow verifies the snapshot contract:
+// two cap events in the same block (e.g. IncreaseAbsoluteCap + IncreaseRelativeCap)
+// each read the same on-chain state and write a byte-identical row; the mvc
+// trigger (same build → same processing_version) plus ON CONFLICT DO NOTHING
+// collapse them to a single row.
+func TestSaveVaultCap_SameBlockDedupesToIdenticalRow(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x24))
+
+	idData := []byte{0xde, 0xad, 0xbe, 0xef}
+	cid := capIDFor(idData)
+	row := func() *entity.MorphoVaultCap {
+		return &entity.MorphoVaultCap{
+			MorphoVaultID: vaultID,
+			CapID:         cid,
+			IDData:        idData,
+			AbsoluteCap:   big.NewInt(250000000000000),
+			RelativeCap:   big.NewInt(1000000000000000000),
+			BlockNumber:   24765623,
+			BlockVersion:  0,
+			Timestamp:     morphoBlockTime,
+		}
+	}
+	if appended := fixture.saveCap(t, ctx, row()); !appended {
+		t.Error("the first cap write must report a row appended")
+	}
+	if appended := fixture.saveCap(t, ctx, row()); appended {
+		t.Error("the deduped sibling write must report no row appended (the snapshot counter gates on it)")
+	}
+
+	var count int
+	if err := fixture.pool.QueryRow(ctx,
+		`SELECT count(*) FROM morpho_vault_cap WHERE morpho_vault_id = $1 AND cap_id = $2`,
+		vaultID, cid).Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("same-block identical caps: expected 1 row, got %d", count)
+	}
+}
+
+// TestSaveVaultCap_MaxWidthRoundTrip round-trips the numeric column extremes:
+// both absolute_cap and relative_cap are on-chain uint128 (NUMERIC(39,0)), so
+// max uint128 must survive intact, guarding against a width/precision regression.
+func TestSaveVaultCap_MaxWidthRoundTrip(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x25))
+
+	maxU128 := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 128), big.NewInt(1))
+
+	idData := []byte{0xca, 0xfe}
+	cid := capIDFor(idData)
+	fixture.saveCap(t, ctx, &entity.MorphoVaultCap{
+		MorphoVaultID: vaultID,
+		CapID:         cid,
+		IDData:        idData,
+		AbsoluteCap:   maxU128,
+		RelativeCap:   maxU128,
+		BlockNumber:   24500000,
+		BlockVersion:  0,
+		Timestamp:     morphoBlockTime,
+	})
+
+	abs, rel, found := fixture.latestCap(t, ctx, vaultID, cid)
+	if !found {
+		t.Fatal("expected cap, got none")
+	}
+	if abs.Cmp(maxU128) != 0 {
+		t.Errorf("absolute_cap max-uint128 round-trip: got %s", abs)
+	}
+	if rel.Cmp(maxU128) != 0 {
+		t.Errorf("relative_cap max-uint128 round-trip: got %s", rel)
+	}
+}
+
+// TestSaveVaultCap_DifferentBuildNewVersion mirrors the adapter-state correction
+// path: two writes with the SAME natural key but different build_id are distinct
+// reprocessings, so the mvc trigger assigns a new processing_version to the
+// second rather than deduping it. Both rows survive (processing_version 0 and 1)
+// and the ADR-0002 latest-row read returns the second (build-2) row.
+func TestSaveVaultCap_DifferentBuildNewVersion(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x26))
+
+	repoBuild1, err := NewMorphoRepository(morphoPool, nil, 1)
+	if err != nil {
+		t.Fatalf("NewMorphoRepository build 1: %v", err)
+	}
+	repoBuild2, err := NewMorphoRepository(morphoPool, nil, 2)
+	if err != nil {
+		t.Fatalf("NewMorphoRepository build 2: %v", err)
+	}
+
+	idData := []byte{0x0a, 0x0b, 0x0c}
+	cid := capIDFor(idData)
+	save := func(repo *MorphoRepository, absolute *big.Int) {
+		c := &entity.MorphoVaultCap{
+			MorphoVaultID: vaultID,
+			CapID:         cid,
+			IDData:        idData,
+			AbsoluteCap:   absolute,
+			RelativeCap:   big.NewInt(1000000000000000000),
+			BlockNumber:   24500300,
+			BlockVersion:  0,
+			Timestamp:     morphoBlockTime,
+		}
+		tx, err := fixture.pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		if _, err := repo.SaveVaultCap(ctx, tx, c); err != nil {
+			t.Fatalf("SaveVaultCap failed: %v", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+	}
+
+	// Different build_id → reprocessing → a new processing_version, so both rows
+	// survive.
+	save(repoBuild1, big.NewInt(1000))
+	save(repoBuild2, big.NewInt(2000))
+
+	var count, maxVer int
+	if err := fixture.pool.QueryRow(ctx,
+		`SELECT COUNT(*), MAX(processing_version) FROM morpho_vault_cap WHERE morpho_vault_id = $1 AND cap_id = $2`,
+		vaultID, cid).Scan(&count, &maxVer); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("expected 2 rows for distinct builds, got %d", count)
+	}
+	if maxVer != 1 {
+		t.Errorf("expected max processing_version 1, got %d", maxVer)
+	}
+
+	abs, _, found := fixture.latestCap(t, ctx, vaultID, cid)
+	if !found {
+		t.Fatal("expected cap, got none")
+	}
+	if abs.Cmp(big.NewInt(2000)) != 0 {
+		t.Errorf("latest-read absolute_cap = %s, want 2000 (the build-2 correction row)", abs)
+	}
+}
+
+// --- SaveVaultFee Tests ---
+
+// saveFee persists one MorphoVaultFee in its own committed transaction and
+// returns whether a row was appended.
+func (f *morphoTestFixture) saveFee(t *testing.T, ctx context.Context, fee *entity.MorphoVaultFee) bool {
+	t.Helper()
+	tx, err := f.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	appended, err := f.repo.SaveVaultFee(ctx, tx, fee)
+	if err != nil {
+		t.Fatalf("SaveVaultFee failed: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	return appended
+}
+
+// latestFee reads the current full fee config for a vault via the ADR-0002
+// latest-row ordering (block_number, block_version, processing_version DESC),
+// never by build_id — the read shape the downstream consumer uses.
+func (f *morphoTestFixture) latestFee(t *testing.T, ctx context.Context, vaultID int64) (perfFee, mgmtFee *big.Int, perfRecip, mgmtRecip []byte, found bool) {
+	t.Helper()
+	var perfStr, mgmtStr string
+	err := f.pool.QueryRow(ctx,
+		`SELECT performance_fee::text, management_fee::text, performance_fee_recipient, management_fee_recipient
+		 FROM morpho_vault_fee
+		 WHERE morpho_vault_id = $1
+		 ORDER BY block_number DESC, block_version DESC, processing_version DESC
+		 LIMIT 1`, vaultID).Scan(&perfStr, &mgmtStr, &perfRecip, &mgmtRecip)
+	if err != nil {
+		return nil, nil, nil, nil, false
+	}
+	p, ok := new(big.Int).SetString(perfStr, 10)
+	if !ok {
+		t.Fatalf("performance_fee %q not decimal", perfStr)
+	}
+	m, ok := new(big.Int).SetString(mgmtStr, 10)
+	if !ok {
+		t.Fatalf("management_fee %q not decimal", mgmtStr)
+	}
+	return p, m, perfRecip, mgmtRecip, true
+}
+
+func TestSaveVaultFee_RoundTrip(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x30))
+
+	perfRecip := adapterAddr(0x1a)
+	mgmtRecip := make([]byte, 20) // zero-address recipient is the contract default
+	fixture.saveFee(t, ctx, &entity.MorphoVaultFee{
+		MorphoVaultID:           vaultID,
+		PerformanceFee:          big.NewInt(100000000000000000),
+		ManagementFee:           big.NewInt(0),
+		PerformanceFeeRecipient: perfRecip,
+		ManagementFeeRecipient:  mgmtRecip,
+		BlockNumber:             24765805,
+		BlockVersion:            0,
+		Timestamp:               morphoBlockTime,
+	})
+
+	perf, mgmt, gotPerfRecip, gotMgmtRecip, found := fixture.latestFee(t, ctx, vaultID)
+	if !found {
+		t.Fatal("expected fee row, got none")
+	}
+	if perf.Cmp(big.NewInt(100000000000000000)) != 0 {
+		t.Errorf("performance_fee mismatch: got %s", perf)
+	}
+	if mgmt.Sign() != 0 {
+		t.Errorf("management_fee mismatch: got %s, want 0", mgmt)
+	}
+	if !bytes.Equal(gotPerfRecip, perfRecip) {
+		t.Errorf("performance_fee_recipient mismatch: got %x, want %x", gotPerfRecip, perfRecip)
+	}
+	if !bytes.Equal(gotMgmtRecip, mgmtRecip) {
+		t.Errorf("management_fee_recipient mismatch: got %x, want %x", gotMgmtRecip, mgmtRecip)
+	}
+}
+
+// TestSaveVaultFee_SameBuildDedupesToOneRow verifies the snapshot contract: two
+// same-block fee events (e.g. SetPerformanceFee + SetPerformanceFeeRecipient)
+// each read the same on-chain config and write a byte-identical row; the mvf
+// trigger (same build → same processing_version) plus ON CONFLICT DO NOTHING
+// collapse them to a single row.
+func TestSaveVaultFee_SameBuildDedupesToOneRow(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x31))
+
+	row := func() *entity.MorphoVaultFee {
+		return &entity.MorphoVaultFee{
+			MorphoVaultID:           vaultID,
+			PerformanceFee:          big.NewInt(100000000000000000),
+			ManagementFee:           big.NewInt(0),
+			PerformanceFeeRecipient: adapterAddr(0x1a),
+			ManagementFeeRecipient:  make([]byte, 20),
+			BlockNumber:             24765805,
+			BlockVersion:            0,
+			Timestamp:               morphoBlockTime,
+		}
+	}
+	if appended := fixture.saveFee(t, ctx, row()); !appended {
+		t.Error("the first fee write must report a row appended")
+	}
+	if appended := fixture.saveFee(t, ctx, row()); appended {
+		t.Error("the deduped sibling write must report no row appended (the snapshot counter gates on it)")
+	}
+
+	var count int
+	if err := fixture.pool.QueryRow(ctx,
+		`SELECT count(*) FROM morpho_vault_fee WHERE morpho_vault_id = $1`, vaultID).Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("same-build identical fees: expected 1 row, got %d", count)
+	}
+}
+
+// TestSaveVaultFee_DifferentBuildNewVersion mirrors the cap-state correction
+// path: two writes with the SAME natural key but different build_id are distinct
+// reprocessings, so the mvf trigger assigns a new processing_version to the
+// second rather than deduping it. Both rows survive (processing_version 0 and 1)
+// and the ADR-0002 latest-row read returns the second (build-2) row — never
+// ordered by build_id.
+func TestSaveVaultFee_DifferentBuildNewVersion(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x32))
+
+	repoBuild1, err := NewMorphoRepository(morphoPool, nil, 1)
+	if err != nil {
+		t.Fatalf("NewMorphoRepository build 1: %v", err)
+	}
+	repoBuild2, err := NewMorphoRepository(morphoPool, nil, 2)
+	if err != nil {
+		t.Fatalf("NewMorphoRepository build 2: %v", err)
+	}
+
+	save := func(repo *MorphoRepository, perfFee *big.Int) {
+		fee := &entity.MorphoVaultFee{
+			MorphoVaultID:           vaultID,
+			PerformanceFee:          perfFee,
+			ManagementFee:           big.NewInt(0),
+			PerformanceFeeRecipient: adapterAddr(0x1a),
+			ManagementFeeRecipient:  make([]byte, 20),
+			BlockNumber:             24765900,
+			BlockVersion:            0,
+			Timestamp:               morphoBlockTime,
+		}
+		tx, err := fixture.pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		if _, err := repo.SaveVaultFee(ctx, tx, fee); err != nil {
+			t.Fatalf("SaveVaultFee failed: %v", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+	}
+
+	// build 2 (lower "latest" if ordered by build_id would still be 2 here, so use
+	// a build-1 correction that is chronologically second to prove build_id is not
+	// the ordering key): write build-2 first, then build-1 second.
+	save(repoBuild2, big.NewInt(1000))
+	save(repoBuild1, big.NewInt(2000))
+
+	var count, maxVer int
+	if err := fixture.pool.QueryRow(ctx,
+		`SELECT COUNT(*), MAX(processing_version) FROM morpho_vault_fee WHERE morpho_vault_id = $1`,
+		vaultID).Scan(&count, &maxVer); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("expected 2 rows for distinct builds, got %d", count)
+	}
+	if maxVer != 1 {
+		t.Errorf("expected max processing_version 1, got %d", maxVer)
+	}
+
+	// Latest by processing_version is the build-1 row (perf 2000). Ordering by
+	// build_id would wrongly pick the build-2 row (perf 1000).
+	perf, _, _, _, found := fixture.latestFee(t, ctx, vaultID)
+	if !found {
+		t.Fatal("expected fee row, got none")
+	}
+	if perf.Cmp(big.NewInt(2000)) != 0 {
+		t.Errorf("latest-read performance_fee = %s, want 2000 (highest processing_version, not highest build_id)", perf)
 	}
 }

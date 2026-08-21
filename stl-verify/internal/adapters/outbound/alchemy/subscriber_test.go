@@ -528,7 +528,6 @@ waitLoop:
 
 func TestSubscribe_ReconnectsOnConnectionLoss(t *testing.T) {
 	connectCount := atomic.Int32{}
-	reconnectCalled := atomic.Bool{}
 	blockSent := make(chan struct{}, 1)
 
 	server := newMockWSServer(func(conn *websocket.Conn) {
@@ -593,10 +592,6 @@ func TestSubscribe_ReconnectsOnConnectionLoss(t *testing.T) {
 		t.Fatalf("failed to create subscriber: %v", err)
 	}
 
-	sub.SetOnReconnect(func() {
-		reconnectCalled.Store(true)
-	})
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -627,10 +622,6 @@ func TestSubscribe_ReconnectsOnConnectionLoss(t *testing.T) {
 
 	if connectCount.Load() < 2 {
 		t.Errorf("expected at least 2 connections, got %d", connectCount.Load())
-	}
-
-	if !reconnectCalled.Load() {
-		t.Error("onReconnect callback was not called")
 	}
 }
 
@@ -1286,63 +1277,6 @@ func TestSubscribe_PingKeepsConnectionAlive(t *testing.T) {
 
 	if !pingReceived.Load() {
 		t.Error("expected ping to be sent")
-	}
-}
-
-// --- Test: SetOnReconnect ---
-
-func TestSetOnReconnect_CallbackNotCalledOnFirstConnect(t *testing.T) {
-	reconnectCalled := atomic.Bool{}
-
-	server := newMockWSServer(func(conn *websocket.Conn) {
-		defer conn.Close()
-
-		var req jsonRPCRequest
-		if err := conn.ReadJSON(&req); err != nil {
-			return
-		}
-
-		resp := jsonRPCResponse{
-			JSONRPC: "2.0",
-			ID:      1,
-			Result:  json.RawMessage(`"0x1234"`),
-		}
-		_ = conn.WriteJSON(resp)
-
-		<-time.After(time.Second)
-	})
-	defer server.Close()
-
-	sub, err := NewSubscriber(SubscriberConfig{
-		WebSocketURL: server.URL(),
-		ReadTimeout:  5 * time.Second,
-	})
-	if err != nil {
-		t.Fatalf("failed to create subscriber: %v", err)
-	}
-
-	sub.SetOnReconnect(func() {
-		reconnectCalled.Store(true)
-	})
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	_, err = sub.Subscribe(ctx)
-	if err != nil {
-		t.Fatalf("failed to subscribe: %v", err)
-	}
-	defer func() {
-		if err := sub.Unsubscribe(); err != nil {
-			t.Logf("unsubscribe returned error: %v", err)
-		}
-	}()
-
-	// Wait for connection to establish
-	time.Sleep(200 * time.Millisecond)
-
-	if reconnectCalled.Load() {
-		t.Error("onReconnect should not be called on first connection")
 	}
 }
 

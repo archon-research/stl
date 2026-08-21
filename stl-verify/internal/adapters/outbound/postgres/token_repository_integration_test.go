@@ -13,23 +13,18 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
-	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 // i64 returns a pointer to n, for the *int64 "first known block" args. Shared
 // by the token and user integration tests in this package.
 func i64(n int64) *int64 { return &n }
 
-const tokenSchemaName = "test_token"
+const tokenDBName = "test_token"
 
 var tokenPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(tokenSchemaName, func() {
-		tokenPool = testutil.SetupSchemaForMain(sharedDSN, tokenSchemaName)
-	}, func() {
-		testutil.CleanupSchemaForMain(sharedDSN, tokenPool, tokenSchemaName)
-	})
+	useFileDatabase(tokenDBName, &tokenPool)
 }
 
 // truncateToken clears the token table for test isolation.

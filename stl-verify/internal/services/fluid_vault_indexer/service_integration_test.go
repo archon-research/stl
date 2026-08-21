@@ -29,7 +29,7 @@ type fluidIntegrationFixture struct {
 func setupFluidIntegration(t *testing.T) *fluidIntegrationFixture {
 	t.Helper()
 
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	tokenRepo, err := postgres.NewTokenRepository(pool, nil, 0)
