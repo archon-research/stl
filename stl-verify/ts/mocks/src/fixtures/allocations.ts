@@ -19,6 +19,7 @@
  * with another's symbol.
  */
 import { DAY_MS, MINUTE_MS, SECOND_MS, iso, offsetIsoAgo } from '../clock.ts';
+import { positionKeys } from '../identity.ts';
 import type { Allocation, AllocationActivity } from '../schema.ts';
 import type { PrimeName } from './registry.ts';
 import {
@@ -59,12 +60,21 @@ function position(seed: PositionSeed): Allocation {
   const underlying = tokenById(seed.underlying_token_id);
   const receiptTokenId = seed.receipt_token_id ?? null;
 
+  const receiptTokenAddress =
+    receiptTokenId === null ? null : tokenById(receiptTokenId).address;
+
   return {
     ...seed,
     chain_id: underlying.chain_id,
     source: seed.source ?? 'indexed',
-    receipt_token_address:
-      receiptTokenId === null ? null : tokenById(receiptTokenId).address,
+    position_keys: positionKeys({
+      chain_id: underlying.chain_id,
+      position_address: receiptTokenAddress ?? underlying.address,
+      receipt_token_id: receiptTokenId,
+      protocol_name: seed.protocol_name,
+      symbol: tokenSymbol(receiptTokenId ?? seed.underlying_token_id),
+    }),
+    receipt_token_address: receiptTokenAddress,
     // A wrapped position is labelled by its receipt token, a direct holding by
     // the asset itself.
     symbol: tokenSymbol(receiptTokenId ?? seed.underlying_token_id),
@@ -220,6 +230,10 @@ function sparkMainnetAllocations(nowMs: number): Allocation[] {
       symbol: 'BTC',
       underlying_symbol: 'BTC',
       protocol_name: 'anchorage',
+      // Its protocol is the only thing the two provenances describe the same
+      // way: Sky reports the leg on ethereum under its own symbol, with an
+      // address.
+      position_keys: ['custody:anchorage'],
       balance: '4722.61',
       amount_usd: '250000000',
       latest_activity_at: offsetIsoAgo(nowMs, CUSTODY_SNAPSHOT_AGO),
@@ -352,6 +366,9 @@ export function seedReferenceAllocations(
  * `receipt_token_id` to join a risk row by), no token quantity, and — for the
  * Arkis vault — an exposure large enough to matter against STL's own totals.
  */
+/** The Arkis vault Sky reports and STL does not index. */
+const ARKIS_VAULT = '0x38464507e02c983f20428a6e8566693fe9e422a9';
+
 function skyOnlyAllocations(nowMs: number, primeName: PrimeName): Allocation[] {
   if (primeName !== 'spark') return [];
 
@@ -367,6 +384,7 @@ function skyOnlyAllocations(nowMs: number, primeName: PrimeName): Allocation[] {
       symbol: 'sparkPrimeUSDC1',
       underlying_symbol: 'USDC',
       protocol_name: 'Arkis',
+      position_keys: [`position:1:${ARKIS_VAULT}`],
       balance: null,
       amount_usd: '20286862.977',
       latest_activity_at: observedAt,
@@ -386,6 +404,8 @@ function skyOnlyAllocations(nowMs: number, primeName: PrimeName): Allocation[] {
       symbol: 'UNI-V4-PYUSD-USDS',
       underlying_symbol: 'USDS',
       protocol_name: 'uniswap',
+      // A pool id is not an address, so this one can only key on its symbol.
+      position_keys: ['symbol:1:uniswap:uni-v4-pyusd-usds'],
       balance: null,
       amount_usd: '100118500.444',
       latest_activity_at: observedAt,

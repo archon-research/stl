@@ -385,6 +385,20 @@
             ],
             "title": "Network"
           },
+          "position_keys": {
+            "description": "Keys this position answers to, strongest first. Two rows describe the same position when they share any one of them, which is how a client joins this row to its risk-capital counterpart: the two endpoints do not carry the same kind of identifier, so a position Sky reports and STL does not index has no `receipt_token_id` to join by. Opaque \u2014 the spelling is not a contract, only the equality is.",
+            "examples": [
+              [
+                "token:736",
+                "position:1:0xc02ab1a5eaa8d1b114ef786d9bde108cd4364359"
+              ]
+            ],
+            "items": {
+              "type": "string"
+            },
+            "title": "Position Keys",
+            "type": "array"
+          },
           "protocol_name": {
             "anyOf": [
               {
@@ -586,6 +600,19 @@
             ],
             "description": "Model that produced the figure. `null` when unpriced, and always `null` for a Sky-reported row, which runs no model.",
             "title": "Model"
+          },
+          "position_keys": {
+            "description": "Keys this position answers to, strongest first, computed the same way as the allocations endpoint's. Two rows describe the same position when they share any one of them, which is how a client attaches this row's figures to an allocation: a position Sky reports and STL does not index has no `receipt_token_id` to join by. Opaque \u2014 the spelling is not a contract, only the equality is.",
+            "examples": [
+              [
+                "custody:anchorage"
+              ]
+            ],
+            "items": {
+              "type": "string"
+            },
+            "title": "Position Keys",
+            "type": "array"
           },
           "protocol_name": {
             "description": "Protocol the allocation sits in.",

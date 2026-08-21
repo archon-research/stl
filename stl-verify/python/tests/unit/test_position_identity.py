@@ -140,3 +140,57 @@ def test_a_registry_id_identifies_a_position_even_with_no_chain_at_all():
     assert position_identities(facts(chain_id=None, network=None, position_address=None, receipt_token_id=736)) == [
         "token:736"
     ]
+
+
+def test_the_two_endpoints_key_a_sky_only_position_the_same_way():
+    """The join the allocations grid makes to attach a risk figure to a row.
+
+    Neither side has a registry id for a position Sky reports and STL does not
+    index, so the address has to carry it — and the two endpoints build their
+    facts from different shapes: the allocations row has a numeric chain id, the
+    risk row has the upstream network name beside it. Both must still land on one
+    key, or the row shows no requirement.
+    """
+    arkis_vault = "0x" + "7a" * 20
+    from_allocations = facts(
+        chain_id=1,
+        network="ethereum",
+        position_address=arkis_vault,
+        receipt_token_id=None,
+        protocol_name="Arkis",
+        symbol="sparkPrimeUSDC1",
+    )
+    from_risk_capital = facts(
+        chain_id=1,
+        network="ethereum",
+        position_address=arkis_vault,
+        receipt_token_id=None,
+        protocol_name="Arkis",
+        symbol="sparkPrimeUSDC1",
+    )
+
+    assert matches(from_allocations, from_risk_capital)
+
+
+def test_off_chain_custody_keys_the_same_way_from_either_endpoint():
+    # The allocations row is STL's projection of the leg (chain 0, BTC, no
+    # address); the risk row is Sky's (ethereum, its own symbol, an address).
+    # Nothing but the protocol is shared, which is what the custody key is for.
+    from_allocations = facts(
+        chain_id=0,
+        network=None,
+        position_address=None,
+        receipt_token_id=None,
+        protocol_name="anchorage",
+        symbol="BTC",
+    )
+    from_risk_capital = facts(
+        chain_id=1,
+        network="ethereum",
+        position_address="0x" + "49" * 20,
+        receipt_token_id=None,
+        protocol_name="Anchorage",
+        symbol="ANCHORAGE",
+    )
+
+    assert matches(from_allocations, from_risk_capital)

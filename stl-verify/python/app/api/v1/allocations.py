@@ -145,6 +145,17 @@ class AllocationResponse(BaseModel):
         ),
         examples=[1],
     )
+    position_keys: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Keys this position answers to, strongest first. Two rows describe the same position when "
+            "they share any one of them, which is how a client joins this row to its risk-capital "
+            "counterpart: the two endpoints do not carry the same kind of identifier, so a position "
+            "Sky reports and STL does not index has no `receipt_token_id` to join by. Opaque — the "
+            "spelling is not a contract, only the equality is."
+        ),
+        examples=[["token:736", "position:1:0xc02ab1a5eaa8d1b114ef786d9bde108cd4364359"]],
+    )
     source: Provenance = Field(
         default=Provenance.INDEXED,
         description=(
@@ -720,10 +731,10 @@ async def list_allocations(
     source = resolve_or_422(requested_provenance, available=frozenset(Provenance), default=Provenance.INDEXED)
 
     if source is Provenance.REFERENCE:
-        return await _reference_allocations(prime_address, reference_services())
+        return _with_position_keys(await _reference_allocations(prime_address, reference_services()))
 
     if source is Provenance.BOTH:
-        return await _merged_allocations(prime_address, service, reference_services())
+        return _with_position_keys(await _merged_allocations(prime_address, service, reference_services()))
 
     custody_applies = await _custody_applies(prime_address, service)
     positions, direct, custody = await asyncio.gather(
@@ -733,11 +744,22 @@ async def list_allocations(
     )
 
     category_service = AllocationCategoryService()
-    return [
-        *(_receipt_token_row(position, category_service) for position in positions),
-        *(_direct_asset_row(holding, category_service) for holding in direct),
-        *(_anchorage_custody_row(holding, category_service) for holding in custody),
-    ]
+    return _with_position_keys(
+        [
+            *(_receipt_token_row(position, category_service) for position in positions),
+            *(_direct_asset_row(holding, category_service) for holding in direct),
+            *(_anchorage_custody_row(holding, category_service) for holding in custody),
+        ]
+    )
+
+
+def _with_position_keys(rows: list[AllocationResponse]) -> list[AllocationResponse]:
+    """Publish each row's identity so a client can join it to its risk row.
+
+    Filled here rather than at the four projections, so a new source of rows
+    cannot ship without them.
+    """
+    return [row.model_copy(update={"position_keys": position_identities(_position_facts(row))}) for row in rows]
 
 
 async def _custody_applies(prime_address: EthAddress, service: AllocationService) -> bool:

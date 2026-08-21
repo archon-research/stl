@@ -10,6 +10,7 @@
  * for.
  */
 import { MINUTE_MS, isoAgo } from '../clock.ts';
+import { positionKeys } from '../identity.ts';
 import { ownEntry } from '../lookup.ts';
 import type {
   AllocationRiskCapital,
@@ -64,6 +65,13 @@ function pricedAllocation(row: PerAllocationRow): AllocationRiskCapital {
 
   return {
     receipt_token_id: receiptTokenId,
+    position_keys: positionKeys({
+      chain_id: null,
+      position_address: null,
+      receipt_token_id: receiptTokenId,
+      protocol_name: protocolName,
+      symbol: tokenSymbol(receiptTokenId),
+    }),
     // STL's own model; a merged-mode fixture would say otherwise.
     source: 'indexed',
     symbol: tokenSymbol(receiptTokenId),
@@ -345,6 +353,13 @@ function referenceAllocation(
 
   return {
     receipt_token_id: receiptTokenId,
+    position_keys: positionKeys({
+      chain_id: 1,
+      position_address: referenceAddressOf(receiptTokenId, symbol),
+      receipt_token_id: receiptTokenId,
+      protocol_name: protocolName,
+      symbol,
+    }),
     source: 'reference',
     symbol,
     protocol_name: protocolName,
@@ -362,6 +377,29 @@ function referenceAllocation(
 /** Sum of decimal-string figures, kept in cents so the total is exact. */
 function sumFigures(values: readonly string[]): string {
   return usdFigure(values.reduce((total, value) => total + centsOf(value), 0));
+}
+
+/**
+ * Addresses for the positions Sky reports that STL resolves no receipt token
+ * for. Without one they could only key on their symbol, and the Arkis vault is
+ * the row whose $10.1M requirement makes the address join worth testing.
+ */
+const SKY_ONLY_ADDRESSES: Record<string, string> = {
+  sparkPrimeUSDC1: '0x38464507e02c983f20428a6e8566693fe9e422a9',
+};
+
+/** The address a Sky row keys on: its receipt token's, else its own. */
+function referenceAddressOf(
+  receiptTokenId: number | null | undefined,
+  symbol: string,
+): string | null {
+  if (receiptTokenId == null) return SKY_ONLY_ADDRESSES[symbol] ?? null;
+
+  const token = TOKENS.find((row) => row.id === receiptTokenId);
+  if (token === undefined) {
+    throw new Error(`no TOKENS row for ${receiptTokenId}`);
+  }
+  return token.address;
 }
 
 function referenceRowsFor(

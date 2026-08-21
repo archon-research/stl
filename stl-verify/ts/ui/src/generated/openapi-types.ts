@@ -878,6 +878,15 @@ export interface components {
        */
       network?: string | null;
       /**
+       * Position Keys
+       * @description Keys this position answers to, strongest first. Two rows describe the same position when they share any one of them, which is how a client joins this row to its risk-capital counterpart: the two endpoints do not carry the same kind of identifier, so a position Sky reports and STL does not index has no `receipt_token_id` to join by. Opaque — the spelling is not a contract, only the equality is.
+       * @example [
+       *       "token:736",
+       *       "position:1:0xc02ab1a5eaa8d1b114ef786d9bde108cd4364359"
+       *     ]
+       */
+      position_keys?: string[];
+      /**
        * Protocol Name
        * @description Protocol the position is held in. `null` for direct holdings (no registered wrapper).
        * @example aave-v3
@@ -975,6 +984,14 @@ export interface components {
        * @description Model that produced the figure. `null` when unpriced, and always `null` for a Sky-reported row, which runs no model.
        */
       model?: string | null;
+      /**
+       * Position Keys
+       * @description Keys this position answers to, strongest first, computed the same way as the allocations endpoint's. Two rows describe the same position when they share any one of them, which is how a client attaches this row's figures to an allocation: a position Sky reports and STL does not index has no `receipt_token_id` to join by. Opaque — the spelling is not a contract, only the equality is.
+       * @example [
+       *       "custody:anchorage"
+       *     ]
+       */
+      position_keys?: string[];
       /**
        * Protocol Name
        * @description Protocol the allocation sits in.

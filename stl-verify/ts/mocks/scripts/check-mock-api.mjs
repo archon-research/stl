@@ -464,6 +464,74 @@ async function checkCompositeRiskCapitalKeepsBothFigures() {
   );
 }
 
+async function checkPositionKeysJoinTheTwoEndpoints() {
+  const allocations = await request(
+    '/v1/primes/{prime_id}/allocations',
+    {
+      params: {
+        path: { prime_id: SPARK_MAINNET_PROXY },
+        query: { source: 'both' },
+      },
+    },
+    'allocations (both)',
+  );
+  const risk = await request(
+    '/v1/primes/{prime_id}/risk-capital',
+    {
+      params: {
+        path: { prime_id: SPARK_MAINNET_PROXY },
+        query: { source: 'both' },
+      },
+    },
+    'risk-capital (both)',
+  );
+
+  const byKey = new Map();
+  for (const row of risk.per_allocation) {
+    for (const key of row.position_keys ?? []) {
+      if (!byKey.has(key)) byKey.set(key, row);
+    }
+  }
+  assert.ok(byKey.size > 0, 'the risk breakdown publishes no position keys');
+
+  const attach = (allocation) =>
+    (allocation.position_keys ?? [])
+      .map((key) => byKey.get(key))
+      .find((row) => row !== undefined);
+
+  // The point of the keys: positions with no receipt_token_id still find their
+  // requirement. Off-chain custody pairs by protocol, the Arkis vault by
+  // address — the two rows Sky prices highest and STL resolves no token for.
+  const custody = allocations.find((row) => row.protocol_name === 'anchorage');
+  assert.ok(custody !== undefined, 'no custody row to join');
+  assert.equal(custody.receipt_token_id ?? null, null);
+  assert.ok(
+    attach(custody) !== undefined,
+    'the custody row found no requirement, so the protocol key is broken',
+  );
+
+  const arkis = allocations.find((row) => row.symbol === 'sparkPrimeUSDC1');
+  assert.ok(arkis !== undefined, 'no Arkis row to join');
+  assert.ok(
+    attach(arkis) !== undefined,
+    'the Arkis vault found no requirement, so the address key is broken',
+  );
+
+  // A key is a join key, so a row must never carry one that resolves to a
+  // position describing something else.
+  for (const allocation of allocations) {
+    const attached = attach(allocation);
+    if (attached === undefined) continue;
+    const sharesAKey = (allocation.position_keys ?? []).some((key) =>
+      (attached.position_keys ?? []).includes(key),
+    );
+    assert.ok(
+      sharesAKey,
+      `joined ${allocation.symbol} on a key it does not carry`,
+    );
+  }
+}
+
 async function checkProvenanceSelection() {
   const window = { aggregate: true, limit: 3 };
 
@@ -1129,6 +1197,10 @@ const checks = [
   ['debt raw snapshots', checkDebtRawSnapshots],
   ['provenance selection', checkProvenanceSelection],
   ['composite allocations are a union', checkCompositeAllocationsAreAUnion],
+  [
+    'position keys join the allocations and risk endpoints',
+    checkPositionKeysJoinTheTwoEndpoints,
+  ],
   [
     'composite risk capital keeps both figures',
     checkCompositeRiskCapitalKeepsBothFigures,

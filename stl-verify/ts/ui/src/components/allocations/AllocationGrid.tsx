@@ -396,18 +396,22 @@ function AllocationCategoryCell({ allocation }: { allocation: Allocation }) {
   );
 }
 
+// Joined on the keys both endpoints publish rather than on `receipt_token_id`,
+// which only STL's own rows carry: Sky prices off-chain custody and the Arkis
+// vault — its two largest requirements — and STL resolves no receipt token for
+// either, so an id join left them blank. The keys encode the rules that make
+// those pair up (custody by protocol, everything else by chain and address), so
+// the grid does not restate them.
 function lookupAllocationRiskCapital(
-  riskByReceiptTokenId: Map<number, AllocationRiskCapital>,
+  riskByPositionKey: Map<string, AllocationRiskCapital>,
   allocation: Allocation,
 ): AllocationRiskCapital | undefined {
-  if (
-    allocation.receipt_token_id === undefined ||
-    allocation.receipt_token_id === null
-  ) {
-    return undefined;
+  for (const key of allocation.position_keys ?? []) {
+    const entry = riskByPositionKey.get(key);
+    if (entry !== undefined) return entry;
   }
 
-  return riskByReceiptTokenId.get(allocation.receipt_token_id);
+  return undefined;
 }
 
 // Applied required risk capital in USD, or null when none applies. Shared by the
@@ -418,10 +422,10 @@ function lookupAllocationRiskCapital(
 // row `applied: false` under STL's model still has a figure to show. `applied`
 // therefore gates only the STL fallback.
 function appliedRiskCapitalUsd(
-  riskByReceiptTokenId: Map<number, AllocationRiskCapital>,
+  riskByPositionKey: Map<string, AllocationRiskCapital>,
   allocation: Allocation,
 ): number | null {
-  const entry = lookupAllocationRiskCapital(riskByReceiptTokenId, allocation);
+  const entry = lookupAllocationRiskCapital(riskByPositionKey, allocation);
   if (entry === undefined) {
     return null;
   }
@@ -436,10 +440,10 @@ function appliedRiskCapitalUsd(
 
 // Comparable capital-risk ratio (0-100), Sky's preferred over STL's.
 function preferredCrrPct(
-  riskByReceiptTokenId: Map<number, AllocationRiskCapital>,
+  riskByPositionKey: Map<string, AllocationRiskCapital>,
   allocation: Allocation,
 ): number | null {
-  const entry = lookupAllocationRiskCapital(riskByReceiptTokenId, allocation);
+  const entry = lookupAllocationRiskCapital(riskByPositionKey, allocation);
   if (entry === undefined) {
     return null;
   }
@@ -456,7 +460,7 @@ function preferredCrrPct(
 // sums to 1. `encumbrance_contribution` on the row divides by available capital
 // instead and sums to the encumbrance ratio, which is a different question.
 function rrcSharePct(
-  riskByReceiptTokenId: Map<number, AllocationRiskCapital>,
+  riskByPositionKey: Map<string, AllocationRiskCapital>,
   allocation: Allocation,
   totalRequiredRiskCapitalUsd: number | null,
 ): number | null {
@@ -467,11 +471,11 @@ function rrcSharePct(
     return null;
   }
 
-  const rrc = appliedRiskCapitalUsd(riskByReceiptTokenId, allocation);
+  const rrc = appliedRiskCapitalUsd(riskByPositionKey, allocation);
   return rrc === null ? null : rrc / totalRequiredRiskCapitalUsd;
 }
 
-// riskByReceiptTokenId is built from a risk-capital call scoped to
+// riskByPositionKey is built from a risk-capital call scoped to
 // selectedPrime's own chain, so an allocation on a different chain has no
 // entry there for the same reason a genuine non-applicable allocation
 // doesn't: the map simply has nothing for its receipt_token_id. Distinguish
@@ -481,7 +485,7 @@ function rrcSharePct(
 //
 // The receipt_token_id check gates this to rows that could ever carry a
 // figure. A null receipt_token_id (the Anchorage custody row, and every
-// direct/bare holding) can never key into riskByReceiptTokenId regardless of
+// direct/bare holding) can never key into riskByPositionKey regardless of
 // chain, so without this check a mainnet-primary prime would flag its own
 // off-chain custody row (chain_id 0) as a cross-chain mismatch and claim a
 // figure exists but merely wasn't fetched, when "n/a" is the correct read.
@@ -548,7 +552,7 @@ function AllocationRiskCapitalCell({
 function createAllocationColumns(
   chainLabels: ChainLabelLookup,
   localProtocols: LocalProtocolRow[],
-  riskByReceiptTokenId: Map<number, AllocationRiskCapital>,
+  riskByPositionKey: Map<string, AllocationRiskCapital>,
   selectedPrime: Prime | null,
   totalRequiredRiskCapitalUsd: number | null,
 ): ColumnDef<Allocation>[] {
@@ -622,13 +626,10 @@ function createAllocationColumns(
       accessorFn: (allocation) =>
         isRiskCapitalChainMismatch(selectedPrime, allocation)
           ? -1
-          : (appliedRiskCapitalUsd(riskByReceiptTokenId, allocation) ?? 0),
+          : (appliedRiskCapitalUsd(riskByPositionKey, allocation) ?? 0),
       cell: ({ row }) => (
         <AllocationRiskCapitalCell
-          entry={lookupAllocationRiskCapital(
-            riskByReceiptTokenId,
-            row.original,
-          )}
+          entry={lookupAllocationRiskCapital(riskByPositionKey, row.original)}
           isChainMismatch={isRiskCapitalChainMismatch(
             selectedPrime,
             row.original,
@@ -643,8 +644,7 @@ function createAllocationColumns(
           getValue: (allocation) =>
             isRiskCapitalChainMismatch(selectedPrime, allocation)
               ? NaN
-              : (appliedRiskCapitalUsd(riskByReceiptTokenId, allocation) ??
-                NaN),
+              : (appliedRiskCapitalUsd(riskByPositionKey, allocation) ?? NaN),
           getValueText: () => null,
         },
         // Single-value USD cell, so the column can take mono + tabular figures
@@ -660,13 +660,13 @@ function createAllocationColumns(
       accessorFn: (allocation) =>
         isRiskCapitalChainMismatch(selectedPrime, allocation)
           ? -1
-          : (preferredCrrPct(riskByReceiptTokenId, allocation) ?? -1),
+          : (preferredCrrPct(riskByPositionKey, allocation) ?? -1),
       cell: ({ row }) => (
         <AllocationRatioCell
           value={
             isRiskCapitalChainMismatch(selectedPrime, row.original)
               ? null
-              : preferredCrrPct(riskByReceiptTokenId, row.original)
+              : preferredCrrPct(riskByPositionKey, row.original)
           }
           format={formatPercentValue}
         />
@@ -680,7 +680,7 @@ function createAllocationColumns(
         isRiskCapitalChainMismatch(selectedPrime, allocation)
           ? -1
           : (rrcSharePct(
-              riskByReceiptTokenId,
+              riskByPositionKey,
               allocation,
               totalRequiredRiskCapitalUsd,
             ) ?? -1),
@@ -690,7 +690,7 @@ function createAllocationColumns(
             isRiskCapitalChainMismatch(selectedPrime, row.original)
               ? null
               : rrcSharePct(
-                  riskByReceiptTokenId,
+                  riskByPositionKey,
                   row.original,
                   totalRequiredRiskCapitalUsd,
                 )
@@ -705,7 +705,7 @@ function createAllocationColumns(
             isRiskCapitalChainMismatch(selectedPrime, allocation)
               ? NaN
               : (rrcSharePct(
-                  riskByReceiptTokenId,
+                  riskByPositionKey,
                   allocation,
                   totalRequiredRiskCapitalUsd,
                 ) ?? NaN),
@@ -876,14 +876,15 @@ export function AllocationGrid({
 
   const hasSearchQuery = searchValue.trim().length > 0;
 
-  const riskByReceiptTokenId = useMemo(() => {
-    const map = new Map<number, AllocationRiskCapital>();
+  const riskByPositionKey = useMemo(() => {
+    const map = new Map<string, AllocationRiskCapital>();
     for (const entry of riskCapital?.per_allocation ?? []) {
-      // A reference-sourced row that did not resolve to a receipt token has
-      // nothing on this grid to attach to, and every such row shares the null
-      // key — so keying on it would collapse them onto one another.
-      if (entry.receipt_token_id === null) continue;
-      map.set(entry.receipt_token_id, entry);
+      // Under every key the row answers to, so a grid row matching on any one
+      // of its own finds it. First writer wins: the strongest key is listed
+      // first, so a weaker one cannot displace it.
+      for (const key of entry.position_keys ?? []) {
+        if (!map.has(key)) map.set(key, entry);
+      }
     }
     return map;
   }, [riskCapital]);
@@ -914,14 +915,14 @@ export function AllocationGrid({
       createAllocationColumns(
         chainLabels,
         localProtocols,
-        riskByReceiptTokenId,
+        riskByPositionKey,
         selectedPrime,
         totalRequiredRiskCapitalUsd,
       ),
     [
       chainLabels,
       localProtocols,
-      riskByReceiptTokenId,
+      riskByPositionKey,
       selectedPrime,
       totalRequiredRiskCapitalUsd,
     ],

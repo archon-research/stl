@@ -251,6 +251,7 @@ def test_list_allocations_returns_200_with_enriched_holdings():
     assert data == [
         {
             "chain_id": 1,
+            "position_keys": ["token:1", "position:1:0x" + "a" * 40],
             "source": "indexed",
             "network": None,
             "receipt_token_id": 1,
@@ -291,6 +292,8 @@ def test_list_allocations_returns_direct_asset_rows_with_null_receipt_fields():
     assert response.json() == [
         {
             "chain_id": 1,
+            # A direct holding is the asset itself, so the asset's address keys it.
+            "position_keys": ["position:1:0x" + "c" * 40],
             "source": "indexed",
             "network": None,
             "receipt_token_id": None,
@@ -463,6 +466,9 @@ def test_list_allocations_surfaces_anchorage_custody_row():
     assert response.json() == [
         {
             "chain_id": 0,
+            # Off-chain custody keys on its protocol: it is the one thing the two
+            # provenances describe the same way.
+            "position_keys": ["custody:anchorage"],
             "source": "indexed",
             "network": None,
             "receipt_token_id": None,

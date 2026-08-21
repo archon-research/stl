@@ -14,7 +14,7 @@ from app.api.provenance import (
     resolve_or_422,
 )
 from app.domain.entities.allocation import EthAddress
-from app.domain.entities.prime_risk_capital import PrimeRiskCapital, UnpricedReason
+from app.domain.entities.prime_risk_capital import AllocationRiskCapital, PrimeRiskCapital, UnpricedReason
 from app.domain.entities.reference_risk_capital import ReferenceAllocation, ReferencePrimeRiskCapital
 from app.domain.exceptions import ReferenceDataUnavailableError
 from app.domain.position_identity import PositionFacts, position_identities
@@ -68,6 +68,17 @@ class AllocationRiskCapitalResponse(BaseModel):
     reference_required_risk_capital_usd: PlainDecimal | None = Field(
         default=None,
         description="Sky's requirement for this position. Populated only under `source=both`.",
+    )
+    position_keys: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Keys this position answers to, strongest first, computed the same way as the allocations "
+            "endpoint's. Two rows describe the same position when they share any one of them, which is "
+            "how a client attaches this row's figures to an allocation: a position Sky reports and STL "
+            "does not index has no `receipt_token_id` to join by. Opaque — the spelling is not a "
+            "contract, only the equality is."
+        ),
+        examples=[["custody:anchorage"]],
     )
     reference_crr_pct: PlainDecimal | None = Field(
         default=None,
@@ -599,7 +610,7 @@ def _self_response(result: PrimeRiskCapital) -> PrimeRiskCapitalResponse:
         encumbrance_ratio=result.encumbrance_ratio,
         modeled_exposure_usd=result.modeled_exposure_usd,
         modeled_pct=result.modeled_pct,
-        per_allocation=[AllocationRiskCapitalResponse(**alloc.__dict__) for alloc in result.per_allocation],
+        per_allocation=[_indexed_allocation(alloc) for alloc in result.per_allocation],
         prime_name=result.prime_name,
         prime_exposure_usd=result.prime_exposure_usd,
         prime_required_risk_capital_usd=result.prime_required_risk_capital_usd,
@@ -675,8 +686,38 @@ def _project_reference(prime_address: EthAddress, snapshot: ReferencePrimeRiskCa
     )
 
 
+def _indexed_allocation(allocation: AllocationRiskCapital) -> AllocationRiskCapitalResponse:
+    """STL's own row, keyed by the registry id it always carries."""
+    return AllocationRiskCapitalResponse(
+        **allocation.__dict__,
+        position_keys=position_identities(
+            PositionFacts(
+                chain_id=None,
+                network=None,
+                position_address=None,
+                receipt_token_id=allocation.receipt_token_id,
+                protocol_name=allocation.protocol_name,
+                symbol=allocation.symbol,
+            )
+        ),
+    )
+
+
 def _reference_allocation(row: ReferenceAllocation) -> AllocationRiskCapitalResponse:
     return AllocationRiskCapitalResponse(
+        # From the entity, not the projected row: the response carries no chain
+        # id, and keying on the network name where the allocations endpoint keys
+        # on the number would put the same position under two keys.
+        position_keys=position_identities(
+            PositionFacts(
+                chain_id=row.chain_id,
+                network=row.network,
+                position_address=row.token_address,
+                receipt_token_id=row.receipt_token_id,
+                protocol_name=row.protocol_name,
+                symbol=row.symbol,
+            )
+        ),
         receipt_token_id=row.receipt_token_id,
         symbol=row.symbol,
         protocol_name=row.protocol_name,
