@@ -603,11 +603,13 @@ func (r *MorphoRepository) SaveAdapterState(ctx context.Context, tx pgx.Tx, stat
 		return false, fmt.Errorf("converting real_assets: %w", err)
 	}
 
-	// processing_version is assigned by the trigger; ON CONFLICT DO NOTHING
-	// dedupes same-build retries (see SaveMarketState for the rationale).
+	// processing_version comes from the shared assignment function, not from the
+	// trigger: on a columnstored chunk the arbiter is resolved before triggers fire
+	// (20260821_120000_morpho_adapter_state_version_function.sql). ON CONFLICT DO
+	// NOTHING dedupes same-build retries (see SaveMarketState for the rationale).
 	tag, err := tx.Exec(ctx,
-		`INSERT INTO morpho_adapter_state (morpho_adapter_id, block_number, block_version, timestamp, real_assets, build_id)
-		 VALUES ($1, $2, $3, $4, $5, $6)
+		`INSERT INTO morpho_adapter_state (morpho_adapter_id, block_number, block_version, timestamp, real_assets, processing_version, build_id)
+		 VALUES ($1, $2, $3, $4, $5, next_processing_version_morpho_adapter_state($1, $2, $3, $4, $6), $6)
 		 ON CONFLICT (morpho_adapter_id, block_number, block_version, timestamp, processing_version) DO NOTHING`,
 		state.MorphoAdapterID, state.BlockNumber, state.BlockVersion, state.Timestamp, realAssets, int(r.buildID),
 	)

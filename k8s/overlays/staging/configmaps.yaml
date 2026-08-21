@@ -316,6 +316,36 @@ data:
   CHAIN_ID: "1"
   OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector-opentelemetry-collector.observability.svc.cluster.local:4317"
 ---
+# On-demand one-shot VaultV2 repair worker (VEC-218) — see
+# docs/runbooks/vector-cronjobs.md. ALCHEMY_HTTP_URL is omitted: the binary
+# defaults to eth-mainnet, matching CHAIN_ID below.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: morpho-v2-bootstrap
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "1"
+---
+# On-demand Morpho vault backfill worker (VEC-218). ALCHEMY_HTTP_URL is omitted:
+# the binary defaults to eth-mainnet, matching CHAIN_ID below. The bucket is not
+# here — it carries a random suffix and so arrives via the ExternalSecret.
+#
+# OTEL_EXPORTER_OTLP_ENDPOINT is set explicitly. Without it telemetry silently
+# no-ops, which is exactly why offchain-price-indexer emits no cronjob metrics
+# despite running fine — do not drop it here.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: morpho-vault-backfill
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "1"
+  AWS_REGION: "eu-west-1"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector-opentelemetry-collector.observability.svc.cluster.local:4317"
+---
 # CEX order book indexer — Coinbase. OKX/Kraken get their own configmaps with the
 # venue-specific EXCHANGE and SYMBOLS (OKX uses dash pairs like BTC-USDT; Kraken
 # uses slash pairs with its own asset names like XBT/USD).

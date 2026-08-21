@@ -38,6 +38,36 @@ func TestConfigDefaults(t *testing.T) {
 	}
 }
 
+// TestNewReplayConfig_CarriesTelemetry guards the one thing a replay composition
+// root cannot notice it forgot: every recorder is nil-safe, so a nil
+// Config.Telemetry mutes the whole replay path in silence — no
+// morpho_v2_adapter_registrations_total series at all, which is what the
+// morpho-v2-bootstrap runbook's first check reads.
+func TestNewReplayConfig_CarriesTelemetry(t *testing.T) {
+	config, err := NewReplayConfig(1, testutil.DiscardLogger())
+	if err != nil {
+		t.Fatalf("NewReplayConfig: %v", err)
+	}
+	if config.Telemetry == nil {
+		t.Error("Telemetry is nil: the replay path would record no metrics at all")
+	}
+	if config.ChainID != 1 {
+		t.Errorf("ChainID = %d, want 1", config.ChainID)
+	}
+	if config.Logger == nil {
+		t.Error("Logger should not be nil")
+	}
+}
+
+// A chain with no name has no `chain` metric label either, which is what left the
+// Vector indexer alerts rendering an empty chain — so the replay config refuses
+// to build rather than metering a run into an unselectable series.
+func TestNewReplayConfig_RejectsAnUnnamedChain(t *testing.T) {
+	if _, err := NewReplayConfig(999_999, testutil.DiscardLogger()); err == nil {
+		t.Fatal("expected an unknown chain ID to be rejected")
+	}
+}
+
 func TestMorphoBlueAddress(t *testing.T) {
 	expected := "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb"
 	if MorphoBlueAddress.Hex() != expected {

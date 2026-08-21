@@ -3,6 +3,7 @@
 package postgres
 
 import (
+	"context"
 	"os"
 	"testing"
 
@@ -45,6 +46,23 @@ func TestMain(m *testing.M) {
 		BeforeRun:    setUpTestFileDatabases,
 		AfterRun:     tearDownTestFileDatabases,
 	}))
+}
+
+// compressChunks columnstores every chunk of one hypertable, which is what a compression
+// policy has already done to any chunk a replay writes into. compress_chunk recompresses a
+// chunk that already holds compressed data, so a caller cannot end up asserting against a
+// row that stayed on the rowstore side.
+func compressChunks(t *testing.T, ctx context.Context, pool *pgxpool.Pool, table string) {
+	t.Helper()
+	var chunks int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*)::int FROM (SELECT compress_chunk(c) FROM show_chunks($1::regclass) c) s`, table,
+	).Scan(&chunks); err != nil {
+		t.Fatalf("compress %s chunks: %v", table, err)
+	}
+	if chunks == 0 {
+		t.Fatalf("%s has no chunk to compress; the seed write did not land", table)
+	}
 }
 
 func setUpTestFileDatabases() {

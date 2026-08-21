@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	ethtypes "github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/partition"
@@ -100,8 +99,8 @@ func TestFilterV2Logs_MalformedLogIndexErrors(t *testing.T) {
 		},
 	}}
 	_, err := filterV2Logs(receipts, 100, map[common.Address]struct{}{vault: {}}, mustV2Topics(t))
-	if err == nil {
-		t.Fatal("expected an error for a malformed logIndex")
+	if !errors.Is(err, errStructuralData) {
+		t.Fatalf("error = %v, want a structural defect no retry can clear", err)
 	}
 }
 
@@ -117,8 +116,8 @@ func TestFilterV2Logs_MissingBlockHashErrors(t *testing.T) {
 		},
 	}}
 	_, err := filterV2Logs(receipts, 100, map[common.Address]struct{}{vault: {}}, mustV2Topics(t))
-	if err == nil {
-		t.Fatal("expected an error for a matching receipt with an empty block hash")
+	if !errors.Is(err, errStructuralData) {
+		t.Fatalf("error = %v, want a structural defect no retry can clear", err)
 	}
 }
 
@@ -187,6 +186,30 @@ func TestReplayPartitionPrefixes_AscendingByBlock(t *testing.T) {
 	}
 }
 
+// The ceiling is checked against replayPartitionCount but the run walks
+// replayPartitionPrefixes, so the two must agree on every shape of range or the
+// guard is measuring something the run does not do.
+func TestReplayPartitionCount_MatchesTheBuiltPrefixList(t *testing.T) {
+	tests := []struct {
+		name     string
+		from, to int64
+	}{
+		{name: "aligned range", from: 2000, to: 10999},
+		{name: "both bounds mid-partition", from: 1500, to: 3500},
+		{name: "single partition", from: 1200, to: 1800},
+		{name: "to on a partition's last block", from: 1000, to: 1999},
+		{name: "from and to in the same block", from: 1234, to: 1234},
+		{name: "from below the first partition boundary", from: 1, to: 5000},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got, want := replayPartitionCount(tt.from, tt.to), int64(len(replayPartitionPrefixes(tt.from, tt.to))); got != want {
+				t.Errorf("replayPartitionCount(%d, %d) = %d, want %d", tt.from, tt.to, got, want)
+			}
+		})
+	}
+}
+
 func vaultSet(addrs ...common.Address) map[common.Address]struct{} {
 	set := make(map[common.Address]struct{}, len(addrs))
 	for _, a := range addrs {
@@ -231,51 +254,6 @@ func (f *fakeReplayS3Reader) StreamFile(_ context.Context, _, key string) (io.Re
 	return io.NopCloser(strings.NewReader(body)), nil
 }
 
-// TestRunReplayPartitions_ReplaysEveryPartitionInBlockOrder: a run replays the
-// full requested range, in ascending block order, so an AddAdapter in an earlier
-// partition always lands before a later partition's Allocate.
-func TestRunReplayPartitions_ReplaysEveryPartitionInBlockOrder(t *testing.T) {
-	const from, to = int64(2000), int64(4500)
-
-	var replayed []string
-	err := runReplayPartitions(replayPartitionPrefixes(from, to), func(part string) error {
-		replayed = append(replayed, part)
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("runReplayPartitions: %v", err)
-	}
-
-	want := []string{"2000-2999", "3000-3999", "4000-4999"}
-	if !slices.Equal(replayed, want) {
-		t.Fatalf("replayed %v, want %v", replayed, want)
-	}
-}
-
-// TestRunReplayPartitions_StopsAtTheFirstFailingPartition: a failing partition
-// stops the run there. Continuing would replay later partitions on top of the
-// hole the failure left, and nothing downstream can detect that hole.
-func TestRunReplayPartitions_StopsAtTheFirstFailingPartition(t *testing.T) {
-	var replayed []string
-	err := runReplayPartitions([]string{"0-999", "1000-1999", "2000-2999"}, func(part string) error {
-		replayed = append(replayed, part)
-		if part == "1000-1999" {
-			return errors.New("boom")
-		}
-		return nil
-	})
-
-	if err == nil {
-		t.Fatal("expected a failing partition to fail the run")
-	}
-	if !strings.Contains(err.Error(), "1000-1999") {
-		t.Errorf("error %v does not name the failing partition", err)
-	}
-	if want := []string{"0-999", "1000-1999"}; !slices.Equal(replayed, want) {
-		t.Fatalf("replayed %v, want %v (nothing after the failure)", replayed, want)
-	}
-}
-
 // TestCollectPartitionV2Logs_MissingReceiptBlockErrors: a block in the
 // partition's [from,to] intersection with no receipt key contributes no logs, so
 // collection must hard-fail rather than hand the loop a silently thinned
@@ -297,8 +275,8 @@ func TestCollectPartitionV2Logs_MissingReceiptBlockErrors(t *testing.T) {
 
 	part := partition.GetPartition(from)
 	_, err := collectPartitionV2Logs(ctx, reader, "bucket", part, from, to, 4, map[common.Address]struct{}{}, mustV2Topics(t))
-	if err == nil {
-		t.Fatal("expected an error for a partition missing a receipt block")
+	if !errors.Is(err, errStructuralData) {
+		t.Fatalf("error = %v, want a structural defect no retry can clear (the runbook repairs S3 and re-runs)", err)
 	}
 }
 
@@ -395,8 +373,8 @@ func TestCollectPartitionV2Logs_ConcurrentDownloadsPreserveBlockOrder(t *testing
 }
 
 // TestCollectPartitionV2Logs_BoundsConcurrencyToWorkers: the pool size comes from
-// -goroutines, so an unbounded fan-out over a 1000-block partition cannot open a
-// thousand simultaneous S3 downloads.
+// BACKFILL_GOROUTINES, so an unbounded fan-out over a 1000-block partition cannot
+// open a thousand simultaneous S3 downloads.
 func TestCollectPartitionV2Logs_BoundsConcurrencyToWorkers(t *testing.T) {
 	ctx := context.Background()
 	const from, to = int64(100), int64(139)
@@ -425,62 +403,5 @@ func TestCollectPartitionV2Logs_BoundsConcurrencyToWorkers(t *testing.T) {
 	}
 	if maxInFlight.Load() < 2 {
 		t.Error("downloads never overlapped; collection is still serial")
-	}
-}
-
-// --- block timestamp cache ---
-
-type fakeHeaderFetcher struct {
-	calls      map[common.Hash]int
-	timeByHash map[common.Hash]uint64
-	err        error
-}
-
-func (f *fakeHeaderFetcher) HeaderByHash(_ context.Context, hash common.Hash) (*ethtypes.Header, error) {
-	if f.err != nil {
-		return nil, f.err
-	}
-	f.calls[hash]++
-	return &ethtypes.Header{Time: f.timeByHash[hash]}, nil
-}
-
-// TestBlockTimestampCache fetches each distinct block hash once and reuses the
-// result.
-func TestBlockTimestampCache(t *testing.T) {
-	hashA := common.HexToHash("0xaa")
-	hashB := common.HexToHash("0xbb")
-	f := &fakeHeaderFetcher{calls: map[common.Hash]int{}, timeByHash: map[common.Hash]uint64{hashA: 1_700_000_000, hashB: 1_700_000_500}}
-	c := newBlockTimestampCache(f)
-
-	ts1, err := c.timestampAt(context.Background(), hashA)
-	if err != nil {
-		t.Fatalf("timestampAt(hashA): %v", err)
-	}
-	ts2, err := c.timestampAt(context.Background(), hashA)
-	if err != nil {
-		t.Fatalf("timestampAt(hashA) again: %v", err)
-	}
-	if !ts1.Equal(ts2) || !ts1.Equal(time.Unix(1_700_000_000, 0).UTC()) {
-		t.Errorf("timestamps = %v / %v, want %v", ts1, ts2, time.Unix(1_700_000_000, 0).UTC())
-	}
-	if f.calls[hashA] != 1 {
-		t.Errorf("hashA fetched %d times, want 1 (cached)", f.calls[hashA])
-	}
-
-	if _, err := c.timestampAt(context.Background(), hashB); err != nil {
-		t.Fatalf("timestampAt(hashB): %v", err)
-	}
-	if f.calls[hashB] != 1 {
-		t.Errorf("hashB fetched %d times, want 1", f.calls[hashB])
-	}
-}
-
-// TestBlockTimestampCache_FetchErrorPropagates: a header fetch failure must
-// surface (transient RPC failure → stop, retry), never yield a zero timestamp.
-func TestBlockTimestampCache_FetchErrorPropagates(t *testing.T) {
-	f := &fakeHeaderFetcher{calls: map[common.Hash]int{}, err: errors.New("rpc down")}
-	c := newBlockTimestampCache(f)
-	if _, err := c.timestampAt(context.Background(), common.HexToHash("0xaa")); err == nil {
-		t.Fatal("expected the fetch error to propagate")
 	}
 }

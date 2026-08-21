@@ -24,7 +24,7 @@ import (
 // MorphoBlueVaultCandidates returns the addresses from a Morpho Blue event
 // that could be MetaMorpho V1/V1.1 vaults — caller and onBehalf for the
 // position-changing events, caller and borrower for Liquidate. Used by both
-// the live indexer (this package) and the morpho-vault-indexer backfiller
+// the live indexer (this package) and the morpho-vault-backfill
 // for V1/V1.1 vault discovery, since those vaults are characterised by
 // their interaction with Morpho Blue rather than by emitting a uniquely
 // shaped event of their own.
@@ -355,7 +355,7 @@ func (s *Service) tryDiscoverVault(ctx context.Context, log shared.Log, vaultAdd
 // caller's main loop sees it as a known vault when it reaches the vault's
 // own Deposit / Transfer / V1 AccrueInterest logs in the same receipt.
 //
-// Mirrors the morpho-vault-indexer backfiller's emitMorphoBlueCandidates,
+// Mirrors the morpho-vault-backfill's emitMorphoBlueCandidates,
 // keeping the live and offline V1/V1.1 discovery contracts uniform — the
 // backfiller is recovery-only, so the live indexer must cover V1/V1.1
 // discovery itself.

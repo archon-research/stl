@@ -499,6 +499,31 @@ constraints that include `processing_version`. On retries (same `build_id`), the
 the existing version and the conflict clause deduplicates. On reprocessing (different `build_id`),
 the trigger assigns a new version and the insert succeeds.
 
+**Amendment (2026-08-21, VEC-218): on a compressed chunk the trigger is too late, so the
+INSERT must pass the version.** TimescaleDB resolves an INSERT's `ON CONFLICT` against
+compressed data *before* row triggers fire (verified on 2.25.1-pg17). A `processing_version`
+left to the trigger therefore reaches the arbiter as the column's `DEFAULT 0`, matches the
+`processing_version = 0` row already in the chunk, and the reprocessed row is discarded with
+no error and no rows affected — 150 rows replayed into a compressed chunk under a new
+`build_id` wrote 0, where the same replay wrote all 150 while the chunk was still rowstore.
+Compression starts at 2 days, so this is every chunk a replay or backfill writes into, and
+"reprocessing appends a new version" did not hold there at all. Adding `processing_version`
+to `compress_orderby` does not change it; the blind spot is the trigger's timing.
+
+The fix keeps the invariant in the database and adds one call site rather than a second
+definition: the rule moves into a `next_processing_version_<table>(…)` SQL function — the
+advisory lock included — which the trigger delegates to and the repository's INSERT calls in
+its `VALUES` list. Both therefore compute the same answer, the second under the lock the
+first already holds, and the arbiter sees the version the row will really carry. The function
+must stay `VOLATILE`: a `STABLE` one would read the calling statement's snapshot, so a writer
+released from the lock would recompute the version the writer it waited for already took, and
+on compressed data no unique index catches the duplicate that follows. This narrows, but does
+not remove, the "Application-level version assignment" rejection below: the version is still
+defined once, in the database, and the trigger remains the floor for a writer that passes
+none — but only on a rowstore chunk. Converted so far: `morpho_adapter_state`. Every other
+table listed here still leaves the version to the trigger alone and still loses corrections
+written into an already-compressed chunk.
+
 #### Performance
 
 Each trigger function uses static SQL with hardcoded column names, allowing PostgreSQL to cache
@@ -647,7 +672,10 @@ one query per reprocessing run instead of per row), but splits the versioning in
 multiple code paths. Every new service or adapter that writes to a state table must remember to
 implement the version logic correctly — a missed code path silently overwrites data at
 `processing_version = 0`. Rejected in favour of the trigger, which enforces the invariant in the
-database regardless of which code path inserts data.
+database regardless of which code path inserts data. (Partly revisited — see the amendment in
+§3: on a compressed chunk the trigger fires after the arbiter has already discarded the row, so
+the INSERT has to pass a version. It passes one computed by the same database function the
+trigger calls, which is what keeps this rejection's reasoning intact.)
 
 **Foreign key from hypertables to build_registry** — Would provide database-level referential
 integrity. Rejected because foreign keys are incompatible with distributed hypertables (as

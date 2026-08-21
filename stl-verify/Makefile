@@ -5,12 +5,13 @@
 include lint.mk
 
 .PHONY: all test test-race test-integration test-integration-shard integration-shard-check ci-service-check test-templates-clean lint vet fmt fix fix-check goimports-check tidy check clean cover run run-watcher run-watcher-avax run-oracle-price-worker run-oracle-price-worker-avax run-morpho-indexer run-sparklend-position-tracker run-sparklend-position-tracker-avax run-allocation-tracker run-allocation-tracker-avax help ci ci-checks install-hooks format \
-	dev-up dev-up-rebuild dev-up-workers dev-up-or-resume dev-preflight dev-env dev-db dev-down dev-suspend dev-resume dev-wipe dev-ips generate-er \
+	dev-up dev-up-rebuild dev-up-workers dev-up-or-resume dev-preflight dev-env dev-secrets dev-env-files dev-db dev-down dev-suspend dev-resume dev-wipe dev-ips generate-er \
 		ecr-login docker-build docker-push docker-release \
 		_docker-release-image _docker-release-go-service \
 		_docker-release-internal _docker-release-backup-internal _docker-release-oracle-price-worker-internal _docker-release-sparklend-position-tracker-internal _docker-release-morpho-indexer-internal _docker-release-fluid-vault-indexer-internal _docker-release-dex-indexer-internal _docker-release-allocation-tracker-internal _docker-release-prime-debt-indexer-internal _docker-release-psm3-indexer-internal _docker-release-cex-orderbook-indexer-internal _docker-release-migrate-internal _docker-release-python-api-internal _docker-release-transform-bootstrap-internal _docker-release-cronjob-%-internal \
 		docker-build-offchain-price-backfill docker-release-offchain-price-backfill _docker-release-offchain-price-backfill-internal \
 		docker-build-reference-capital-backfill docker-release-reference-capital-backfill _docker-release-reference-capital-backfill-internal \
+		docker-build-morpho-vault-backfill docker-release-morpho-vault-backfill _docker-release-morpho-vault-backfill-internal \
 		build-backfiller-% run-backfiller-% \
         docker-build-watcher docker-push-watcher docker-release-watcher \
         docker-build-watcher-staging docker-push-watcher-staging docker-release-watcher-staging \
@@ -58,7 +59,10 @@ include lint.mk
 		docker-build-mock-blockchain-server docker-push-mock-blockchain-server docker-release-mock-blockchain-server \
 		docker-release-mock-blockchain-server-staging \
 		kind-build-mock-blockchain-server kind-load-mock-blockchain-server kind-deploy-mock-blockchain-server kind-deploy-mock-blockchain-server-s3 \
-		kind-use-mock kind-use-alchemy k6-stress-test stress-test-data stress-test kind-clean
+		kind-use-mock kind-use-alchemy k6-stress-test stress-test-data stress-test kind-clean \
+		build-cronjob-% run-cronjob-% run-cronjob-solo \
+		kind-scale-down-% kind-scale-up-% dev-endpoints dev-psql \
+		temporal-schedules temporal-schedule-describe temporal-trigger temporal-workflow-describe temporal-cli
 
 # Go bin path for installed tools
 GOBIN := $(shell go env GOPATH)/bin
@@ -68,6 +72,10 @@ GOBIN := $(shell go env GOPATH)/bin
 KIND_CLUSTER ?= vector
 KUBE_CONTEXT ?= kind-$(KIND_CLUSTER)
 KUBE_NS      ?= vector
+
+# Guard for the local-only targets. Scaling a Deployment away or driving the Temporal
+# CLI wrecks staging or prod, which the EKS override above puts one env var away.
+require_kind_context = echo "$(KUBE_CONTEXT)" | grep -q '^kind-' || { echo "ERROR: $@ refused — '$(KUBE_CONTEXT)' is not a local kind context. Only kind-* contexts are allowed."; exit 1; }
 
 # Host ports the kind node publishes. A second cluster on the same machine needs its
 # own set, so every mapped port is derived from one offset:
@@ -522,12 +530,45 @@ dev-db:
 	@echo "==> Database ready."
 	@echo "    Connection: postgres://postgres:postgres@127.0.0.1:$(KIND_HOST_PG_PORT)/stl_verify?sslmode=disable"
 
-# Generate .env files for all services (fetches secrets from AWS)
+# refresh_secret <ENV_NAME> <secret-id> <jq path into the SecretString, or empty when
+# the SecretString IS the value>. A failed or empty fetch leaves the key's existing
+# line alone rather than blanking it: ArchonDeveloper cannot read three of these
+# (ORB-343), so overwriting on failure deletes whatever was set by hand.
+# umask 077 because mv carries the tmp file's mode onto ../.env.secrets: created under
+# the caller's umask it holds every secret at 0644 until the chmod lands.
+define refresh_secret
+umask 077; \
+VALUE=$$(aws secretsmanager get-secret-value --secret-id $(2) --query SecretString --output text 2>/dev/null $(if $(3),| jq -r '$(3) // empty',)); \
+if [ -z "$$VALUE" ]; then \
+	echo "WARNING: Could not read $(1) ($(2)) from AWS Secrets Manager -- ArchonDeveloper is read-only as of ORB-343 and this secret is not carved out; keeping whatever ../.env.secrets already holds"; \
+else \
+	{ grep -v '^$(1)=' ../.env.secrets; printf '%s\n' "$(1)=$$VALUE"; } > ../.env.secrets.tmp && \
+		mv ../.env.secrets.tmp ../.env.secrets && chmod 600 ../.env.secrets; \
+fi
+endef
+
+# Generate .env files for all services (refreshes the secrets from AWS first).
 # Can be re-run independently to refresh secrets without restarting services.
+# -j must not overlap the halves: dev-env-files reads ../.env.secrets as dev-secrets
+# rewrites it. Sequenced in the recipe rather than with .NOTPARALLEL, whose
+# prerequisite form serializes the WHOLE makefile before GNU Make 4.4 (3.81 here).
 dev-env:
-	@ALCHEMY_API_KEY=$$(aws secretsmanager get-secret-value --secret-id stl-sentinelstaging-watcher-config --query SecretString --output text | jq -r '.alchemy_api_key // empty') || \
-		{ echo "WARNING: Could not read ALCHEMY_API_KEY (stl-sentinelstaging-watcher-config) from AWS Secrets Manager -- ArchonDeveloper is read-only as of ORB-343 and this secret is not carved out; set it manually in .env.secrets"; ALCHEMY_API_KEY=''; }; \
-	printf '%s\n' "ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" > ../.env.secrets && chmod 600 ../.env.secrets; \
+	@$(MAKE) --no-print-directory dev-secrets && $(MAKE) --no-print-directory dev-env-files
+
+# Refresh ../.env.secrets from AWS Secrets Manager, one key per secret.
+dev-secrets:
+	@touch ../.env.secrets && chmod 600 ../.env.secrets
+	@$(call refresh_secret,ALCHEMY_API_KEY,stl-sentinelstaging-watcher-config,.alchemy_api_key)
+	@$(call refresh_secret,COINGECKO_API_KEY,coingecko_api_key,.coingecko_api_key)
+	@$(call refresh_secret,ETHERSCAN_API_KEY,etherscan_api_key,)
+	@$(call refresh_secret,ANCHORAGE_API_KEY,stl-sentinelstaging-anchorage-api-key,)
+
+# Write every service's .env from whatever ../.env.secrets already holds. It calls no
+# AWS API, so it is the target to run on a read-only role, offline, or when the keys
+# are already set by hand — `make dev-env` runs it after refreshing the secrets.
+dev-env-files:
+	@test -f ../.env.secrets || { echo "ERROR: ../.env.secrets is missing. Run: make dev-secrets, or set the keys by hand"; exit 1; }
+	@set -a; . ../.env.secrets; set +a; \
 	printf '%s\n' \
 		"ENVIRONMENT=development" \
 		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
@@ -684,19 +725,10 @@ dev-env:
 		"SQS_VISIBILITY_TIMEOUT=30" \
 		"LOG_LEVEL=debug" \
 		> cmd/workers/morpho-indexer/.env
-	@COINGECKO_API_KEY=$$(aws secretsmanager get-secret-value --secret-id coingecko_api_key --query SecretString --output text | jq -r '.coingecko_api_key // empty') || \
-		{ echo "WARNING: Could not read COINGECKO_API_KEY (coingecko_api_key) from AWS Secrets Manager -- ArchonDeveloper is read-only as of ORB-343 and this secret is not carved out; set it manually in .env.secrets"; COINGECKO_API_KEY=''; }; \
-	printf '%s\n' "COINGECKO_API_KEY=$$COINGECKO_API_KEY" >> ../.env.secrets
 	@printf '%s\n' \
 		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:$(KIND_HOST_PG_PORT)/stl_verify?sslmode=disable" \
 		"LOG_LEVEL=debug" \
 		> cmd/backfillers/oracle-pricing-backfill/.env
-	@ETHERSCAN_API_KEY=$$(aws secretsmanager get-secret-value --secret-id etherscan_api_key --query SecretString --output text) || \
-		{ echo "WARNING: Could not read ETHERSCAN_API_KEY (etherscan_api_key) from AWS Secrets Manager -- ArchonDeveloper is read-only as of ORB-343 and this secret is not carved out; set it manually in .env.secrets"; ETHERSCAN_API_KEY=''; }; \
-	printf '%s\n' "ETHERSCAN_API_KEY=$$ETHERSCAN_API_KEY" >> ../.env.secrets
-	@ANCHORAGE_API_KEY=$$(aws secretsmanager get-secret-value --secret-id stl-sentinelstaging-anchorage-api-key --query SecretString --output text 2>/dev/null) || \
-		{ echo "WARNING: Could not read ANCHORAGE_API_KEY (stl-sentinelstaging-anchorage-api-key) from AWS Secrets Manager -- ArchonDeveloper is read-only as of ORB-343 and this secret is not carved out; set it manually in .env.secrets"; ANCHORAGE_API_KEY=''; }; \
-	printf '%s\n' "ANCHORAGE_API_KEY=$$ANCHORAGE_API_KEY" >> ../.env.secrets
 	@set -a; . ../.env.secrets; set +a; \
 	printf '%s\n' \
 		"CHAIN_ID=1" \
@@ -756,7 +788,38 @@ dev-env:
 		"TEMPORAL_NAMESPACE=vector" \
 		"LOG_LEVEL=debug" \
 		> cmd/cronjobs/reference-capital-indexer/.env
-	@echo "Environment files generated (.env.secrets updated)."; \
+# The two Morpho history jobs sweep ~2.4M blocks and log one line per replayed
+# event, so they run at info: debug buries the run in per-call noise. Both need
+# JAEGER_ENDPOINT set — unset, telemetry pretty-prints every span to stdout and
+# the run log becomes unreadable.
+	@set -a; . ../.env.secrets; set +a; \
+	printf '%s\n' \
+		"CHAIN_ID=1" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:$(KIND_HOST_PG_PORT)/stl_verify?sslmode=disable" \
+		"TEMPORAL_HOST_PORT=127.0.0.1:$(KIND_HOST_TEMPORAL_PORT)" \
+		"TEMPORAL_NAMESPACE=vector" \
+		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
+		"ALCHEMY_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2" \
+		"JAEGER_ENDPOINT=127.0.0.1:$(KIND_HOST_OTLP_PORT)" \
+		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
+		"BUILD_GIT_HASH=dev" \
+		"LOG_LEVEL=info" \
+		> cmd/cronjobs/morpho-v2-bootstrap/.env; \
+	printf '%s\n' \
+		"CHAIN_ID=1" \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:$(KIND_HOST_PG_PORT)/stl_verify?sslmode=disable" \
+		"TEMPORAL_HOST_PORT=127.0.0.1:$(KIND_HOST_TEMPORAL_PORT)" \
+		"TEMPORAL_NAMESPACE=vector" \
+		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
+		"ALCHEMY_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2" \
+		"S3_BUCKET=stl-sentinelstaging-ethereum-raw-89d540d0" \
+		"AWS_REGION=eu-west-1" \
+		"JAEGER_ENDPOINT=127.0.0.1:$(KIND_HOST_OTLP_PORT)" \
+		"OTEL_EXPORTER_OTLP_ENDPOINT=" \
+		"BUILD_GIT_HASH=dev" \
+		"LOG_LEVEL=info" \
+		> cmd/backfillers/morpho-vault-backfill/.env
+	@echo "Environment files generated from ../.env.secrets."; \
 	MISSING=""; \
 	for key in ALCHEMY_API_KEY COINGECKO_API_KEY ETHERSCAN_API_KEY ANCHORAGE_API_KEY; do \
 	  val="$$(grep -m1 "^$$key=" ../.env.secrets | cut -d= -f2-)"; \
@@ -834,6 +897,31 @@ dev-ips:
 	@docker inspect stl-verify-redis --format 'Redis:       {{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null || echo "Redis: not running"
 	@docker inspect stl-verify-localstack --format 'LocalStack:  {{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null || echo "LocalStack: not running"
 	@docker inspect stl-verify-jaeger --format 'Jaeger:      {{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null || echo "Jaeger: not running"
+
+# Print the host addresses this cluster publishes. The kind node maps all of them, so
+# nothing here needs a `kubectl port-forward`; with KIND_PORT_OFFSET set they are not the
+# default ports, and digging them out of the dev ConfigMap gives in-cluster DNS instead.
+dev-endpoints:
+	@echo "=== $(KIND_CLUSTER) host endpoints (KIND_PORT_OFFSET=$(KIND_PORT_OFFSET)) ==="
+	@echo "Postgres     postgres://postgres:postgres@127.0.0.1:$(KIND_HOST_PG_PORT)/stl_verify?sslmode=disable"
+	@echo "Redis        127.0.0.1:$(KIND_HOST_REDIS_PORT)"
+	@echo "LocalStack   http://127.0.0.1:$(KIND_HOST_LOCALSTACK_PORT)"
+	@echo "Temporal     127.0.0.1:$(KIND_HOST_TEMPORAL_PORT)"
+	@echo "Temporal UI  http://127.0.0.1:$(KIND_HOST_TEMPORAL_UI_PORT)"
+	@echo "Jaeger OTLP  127.0.0.1:$(KIND_HOST_OTLP_PORT)"
+	@echo "Jaeger UI    http://127.0.0.1:$(KIND_HOST_JAEGER_UI_PORT)"
+	@echo "Mock RPC     http://127.0.0.1:$(KIND_HOST_MOCK_RPC_PORT)"
+
+# Open psql against the local kind database, or run one single-line statement with SQL=.
+# The kind node publishes Postgres on the host, so no port-forward is involved.
+# SQL reaches psql through the environment, never interpolated into the recipe: the
+# shell re-parses recipe text, so a backtick or $(...) in the statement would execute.
+# Usage: make dev-psql
+#        make dev-psql SQL="select count(*) from morpho_adapter;"
+#        make dev-psql < query.sql          # multi-line: make cannot pass newlines in SQL=
+dev-psql: export SQL := $(SQL)
+dev-psql:
+	@PGPASSWORD=postgres psql -h 127.0.0.1 -p $(KIND_HOST_PG_PORT) -U postgres -d stl_verify $(if $(SQL),-c "$$SQL")
 
 # Generate ER diagram from database schema (requires dev-up)
 generate-er:
@@ -1079,6 +1167,7 @@ docker-release-all:
 	@$(MAKE) _docker-release-offchain-price-backfill-internal ENV=$(ENV)
 	@echo ""
 	@$(MAKE) _docker-release-reference-capital-backfill-internal ENV=$(ENV)
+	@$(MAKE) _docker-release-morpho-vault-backfill-internal ENV=$(ENV)
 	@echo ""
 	@for cj in $(CRONJOBS); do \
 		$(MAKE) _docker-release-cronjob-$$cj-internal ENV=$(ENV) || { echo "ERROR: Failed to release cronjob $$cj"; exit 1; }; \
@@ -1921,9 +2010,40 @@ build-cronjob-%:
 	go build -o dist/$* ./cmd/cronjobs/$*
 	@echo "==> Built: dist/$*"
 
+# BUILD_GIT_HASH is stamped from HEAD rather than left at the .env's "dev": build_registry
+# keys rows by git hash, so "dev" collapses every local build into one build_id and the rows
+# a run wrote stop being attributable to the commit that wrote them. See run-allocation-tracker.
 run-cronjob-%:
+	@test -f cmd/cronjobs/$*/.env || { echo "ERROR: cmd/cronjobs/$*/.env is missing. 'make dev-env' writes only the jobs dev-env-files names; if $* is not one of them, copy a covered job's .env and edit the job-specific keys."; exit 1; }
 	@echo "==> Running $*..."
-	@set -a && . cmd/cronjobs/$*/.env && [ -f cmd/cronjobs/$*/.env.local ] && . cmd/cronjobs/$*/.env.local; set +a && go run ./cmd/cronjobs/$*
+	@set -a && . cmd/cronjobs/$*/.env && [ -f cmd/cronjobs/$*/.env.local ] && . cmd/cronjobs/$*/.env.local; set +a && BUILD_GIT_HASH=$$(git rev-parse HEAD 2>/dev/null || echo dev) go run ./cmd/cronjobs/$*
+
+# Run a cronjob's worker locally as the ONLY worker on its Temporal task queue.
+#
+# Local and in-cluster workers share the task queue named after the job, so a started run
+# is dealt to whichever polls first — usually the in-cluster pod, running an image built
+# from whatever commit was current when it was loaded. Scaling it to zero is what makes a
+# local run actually test the local code. The cluster worker is restored on exit, Ctrl-C
+# included, at the replica count it had — transform-worker sits at 0 on purpose, and
+# restoring a flat 1 would start a worker nobody asked for.
+#
+# The capture and the scale-down share one `;`-joined recipe line, which has no
+# fail-on-error of its own: without the explicit exits below, a refused scale-down
+# would start the local worker beside the cluster one — what this target prevents.
+#
+# Usage: make run-cronjob-solo NAME=morpho-v2-bootstrap
+#        (then, from another shell, for a job with no schedule) make temporal-cli \
+#          ARGS="workflow start --task-queue morpho-v2-bootstrap --type MorphoV2Bootstrap \
+#                --workflow-id morpho-v2-bootstrap-local"
+run-cronjob-solo:
+	@test -n "$(NAME)" || { echo "ERROR: NAME is required. Example: make run-cronjob-solo NAME=morpho-v2-bootstrap"; exit 1; }
+	@$(require_kind_context)
+	@echo "==> Handing the $(NAME) task queue to a local worker (scaling deployment/$(call deployment_of,$(NAME)) to 0)..."
+	@PRIOR=$$(kubectl --context=$(KUBE_CONTEXT) get -n $(KUBE_NS) deployment/$(call deployment_of,$(NAME)) -o jsonpath='{.spec.replicas}'); \
+	  test -n "$$PRIOR" || { echo "ERROR: deployment/$(call deployment_of,$(NAME)) has no replica count to restore."; exit 1; }; \
+	  kubectl --context=$(KUBE_CONTEXT) scale -n $(KUBE_NS) deployment/$(call deployment_of,$(NAME)) --replicas=0 || exit 1; \
+	  trap "$(MAKE) --no-print-directory kind-scale-up-$(call deployment_of,$(NAME)) REPLICAS=$$PRIOR" EXIT INT TERM; \
+	  $(MAKE) --no-print-directory run-cronjob-$(NAME)
 
 # Pattern rules for backfiller binaries — work for any backfiller under cmd/backfillers/.
 build-backfiller-%:
@@ -1932,9 +2052,14 @@ build-backfiller-%:
 	go build -o dist/$* ./cmd/backfillers/$*
 	@echo "==> Built: dist/$*"
 
+# A backfiller reading a REAL bucket needs creds this .env does not carry: run it as
+# `AWS_PROFILE=<profile> make run-backfiller-<name>`, which reaches awsconfig.Load's
+# default chain — only because the .env leaves AWS_ACCESS_KEY_ID unset, and setting it
+# (as the LocalStack-backed services' .env files do) would pin static creds instead.
 run-backfiller-%:
+	@test -f cmd/backfillers/$*/.env || { echo "ERROR: cmd/backfillers/$*/.env is missing. 'make dev-env' writes only the jobs dev-env-files names; if $* is not one of them, copy a covered job's .env and edit the job-specific keys."; exit 1; }
 	@echo "==> Running $*..."
-	@set -a && . cmd/backfillers/$*/.env && [ -f cmd/backfillers/$*/.env.local ] && . cmd/backfillers/$*/.env.local; set +a && go run ./cmd/backfillers/$*
+	@set -a && . cmd/backfillers/$*/.env && [ -f cmd/backfillers/$*/.env.local ] && . cmd/backfillers/$*/.env.local; set +a && BUILD_GIT_HASH=$$(git rev-parse HEAD 2>/dev/null || echo dev) go run ./cmd/backfillers/$*
 
 # Build oracle-pricing-backfill binary for ARM64 Linux (to run on Erigon node)
 build-oracle-pricing-backfill-arm64:
@@ -2186,6 +2311,7 @@ check-reloader-opt-in:
 # Apply the dev core overlay (watcher, python-api, cronjobs) — reuses k8s/base.
 # Images must already be built + loaded into kind.
 kind-deploy-apps: check-dev-overlay-sync
+	@$(require_kind_context)
 	$(call kind-apply-rendered,kubectl kustomize ../k8s/overlays/dev)
 	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/watcher deployment/python-api $(addprefix deployment/,$(CRONJOB_DEPLOYMENTS)) -n $(KUBE_NS)
 
@@ -2224,7 +2350,11 @@ kind-load-python-api:
 # `make kind-deploy-data-validator` (see k8s/overlays/dev/data-validator), not part of dev-up.
 
 CRONJOBS := $(sort $(notdir $(patsubst %/main.go,%,$(wildcard cmd/cronjobs/*/main.go))))
-CRONJOB_DEPLOYMENTS := spark-anchorage-indexer offchain-price-indexer reference-capital-indexer
+CRONJOB_DEPLOYMENTS := spark-anchorage-indexer offchain-price-indexer reference-capital-indexer morpho-v2-bootstrap
+
+# The Deployment behind one cmd/cronjobs package name — the same name, except for the
+# anchorage-indexer mismatch above. Targets that take NAME= take the package name.
+deployment_of = $(if $(filter anchorage-indexer,$(1)),spark-anchorage-indexer,$(1))
 
 # Pattern rule: docker-build-cronjob-<name> builds any cronjob image.
 docker-build-cronjob-%:
@@ -2252,7 +2382,7 @@ _docker-release-transform-bootstrap-internal:
 # schedule) so it is not auto-discovered; ships in the shared cronjob ECR repo
 # with a name-prefixed tag and runs as a one-off k8s Job.
 docker-build-reference-capital-backfill:
-	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/reference-capital-backfill --build-arg BIN=reference-capital-backfill -t stl-reference-capital-backfill:local -f Dockerfile.common .
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/reference-capital-backfill --build-arg BIN=reference-capital-backfill -t stl-reference-capital-backfill:$(LOCAL_TAG) -f Dockerfile.common .
 
 docker-release-reference-capital-backfill: ecr-login _docker-release-reference-capital-backfill-internal
 
@@ -2272,6 +2402,18 @@ docker-release-offchain-price-backfill: ecr-login _docker-release-offchain-price
 _docker-release-offchain-price-backfill-internal:
 	@$(MAKE) _docker-release-go-service GO_NAME="Offchain Price Backfill" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/backfillers/offchain-price-backfill GO_BIN=offchain-price-backfill GO_CACHE_KEY="cronjob-offchain-price-backfill" GO_TAG="offchain-price-backfill-$(IMAGE_TAG)" GO_LATEST_TAG="offchain-price-backfill-latest"
 
+# morpho-vault-backfill (VEC-218): the on-demand Morpho vault + VaultV2 replay
+# backfill. Same lifecycle as offchain-price-backfill above — a long-running
+# worker Deployment that polls its task queue and waits for a run to be started
+# from the Temporal UI — so it needs the same explicit release wiring.
+docker-build-morpho-vault-backfill:
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/morpho-vault-backfill --build-arg BIN=morpho-vault-backfill -t stl-morpho-vault-backfill:$(LOCAL_TAG) -f Dockerfile.common .
+
+docker-release-morpho-vault-backfill: ecr-login _docker-release-morpho-vault-backfill-internal
+
+_docker-release-morpho-vault-backfill-internal:
+	@$(MAKE) _docker-release-go-service GO_NAME="Morpho Vault Backfill" GO_REPO="$(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/stl-$(ENV)-cronjob" GO_CMD_PATH=cmd/backfillers/morpho-vault-backfill GO_BIN=morpho-vault-backfill GO_CACHE_KEY="cronjob-morpho-vault-backfill" GO_TAG="morpho-vault-backfill-$(IMAGE_TAG)" GO_LATEST_TAG="morpho-vault-backfill-latest"
+
 kind-load-cronjobs:
 	@$(MAKE) --no-print-directory kind-load-images IMAGES="$(foreach cj,$(CRONJOBS),stl-$(cj):$(LOCAL_TAG))"
 
@@ -2280,19 +2422,88 @@ kind-load-cronjobs:
 #        make kind-redeploy-worker NAME=anchorage-indexer
 kind-redeploy-worker:
 	@test -n "$(NAME)" || { echo "ERROR: NAME is required. Example: make kind-redeploy-worker NAME=morpho-indexer"; exit 1; }
+	@$(require_kind_context)
 	@if echo " $(CRONJOBS) " | grep -q " $(NAME) "; then \
 	  $(MAKE) docker-build-cronjob-$(NAME); \
 	else \
 	  $(MAKE) docker-build-$(NAME) LOCAL=1; \
 	fi
 	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-$(NAME):$(LOCAL_TAG)"
-	@DEPLOY="$(NAME)"; [ "$(NAME)" = "anchorage-indexer" ] && DEPLOY="spark-anchorage-indexer"; \
-	  kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/$$DEPLOY -n $(KUBE_NS)
+	@kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/$(call deployment_of,$(NAME)) -n $(KUBE_NS)
 
 kind-redeploy-watcher:
 	$(MAKE) docker-build-watcher LOCAL=1
 	@$(MAKE) --no-print-directory kind-load-images IMAGES="stl-watcher:$(LOCAL_TAG)"
 	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/watcher -n $(KUBE_NS)
+
+REPLICAS ?= 1
+
+# Scale one in-cluster Deployment down and back up. The reason this pair exists is
+# Temporal task queues: an in-cluster worker and a local one poll the SAME queue, so a
+# started run lands wherever it lands unless the cluster worker is out of the way.
+# run-cronjob-solo does both around a local run; use these directly for a worker whose
+# local process you manage yourself.
+# Usage: make kind-scale-down-morpho-v2-bootstrap
+#        make kind-scale-up-morpho-v2-bootstrap
+kind-scale-down-%:
+	@$(require_kind_context)
+	kubectl --context=$(KUBE_CONTEXT) scale -n $(KUBE_NS) deployment/$* --replicas=0
+
+kind-scale-up-%:
+	@$(require_kind_context)
+	kubectl --context=$(KUBE_CONTEXT) scale -n $(KUBE_NS) deployment/$* --replicas=$(REPLICAS)
+
+# ============================================================================
+# Temporal (local kind cluster)
+# ============================================================================
+# Schedules and workflows live in Temporal's own state, not in a manifest, so the only way
+# to inspect or start one is the Temporal CLI. It ships inside the temporal-server image,
+# which saves installing it on the host and guarantees a client/server version match.
+
+# Kubernetes namespace the Temporal server runs in (its own, not KUBE_NS).
+TEMPORAL_K8S_NS ?= temporal
+# Temporal namespace the stl workers register their schedules in.
+TEMPORAL_NAMESPACE ?= vector
+# In-cluster address, resolved from inside the temporal-server pod.
+TEMPORAL_ADDRESS ?= temporal-server.$(TEMPORAL_K8S_NS):7233
+
+# The kind guard sits inside the variable, so no target reaching for the Temporal CLI
+# can forget it and drive the prod namespace from an EKS KUBE_CONTEXT.
+temporal_cli = $(require_kind_context); kubectl --context=$(KUBE_CONTEXT) exec -n $(TEMPORAL_K8S_NS) deployment/temporal-server -- \
+	temporal --address $(TEMPORAL_ADDRESS) --namespace $(TEMPORAL_NAMESPACE)
+
+require_schedule = test -n "$(SCHEDULE)" || { echo "ERROR: SCHEDULE is required. Example: make $@ SCHEDULE=offchain-price-indexer"; exit 1; }
+
+# List every schedule registered by a cronjob worker.
+temporal-schedules:
+	@$(temporal_cli) schedule list
+
+# Show one schedule: its action, whether it is paused, and how many runs it has taken.
+# Usage: make temporal-schedule-describe SCHEDULE=offchain-price-indexer
+temporal-schedule-describe:
+	@$(require_schedule)
+	@$(temporal_cli) schedule describe --schedule-id $(SCHEDULE)
+
+# Start exactly one run of a schedule, off-cycle. Only scheduled cronjobs have one;
+# an on-demand job is started with `workflow start` via temporal-cli below.
+# Usage: make temporal-trigger SCHEDULE=offchain-price-indexer
+temporal-trigger:
+	@$(require_schedule)
+	@$(temporal_cli) schedule trigger --schedule-id $(SCHEDULE)
+
+# Show a workflow execution's status. A schedule's runs use the workflow ID
+# "scheduled-<schedule id>", which is what a cronjob's ensureSchedule registers; a
+# hand-started run uses whatever ID the starter gave it.
+# Usage: make temporal-workflow-describe WORKFLOW=scheduled-offchain-price-indexer
+temporal-workflow-describe:
+	@test -n "$(WORKFLOW)" || { echo "ERROR: WORKFLOW is required. Example: make temporal-workflow-describe WORKFLOW=scheduled-offchain-price-indexer"; exit 1; }
+	@$(temporal_cli) workflow describe --workflow-id $(WORKFLOW)
+
+# Escape hatch for anything the targets above do not cover.
+# Usage: make temporal-cli ARGS="workflow list --limit 5"
+temporal-cli:
+	@test -n "$(ARGS)" || { echo "ERROR: ARGS is required. Example: make temporal-cli ARGS=\"workflow list --limit 5\""; exit 1; }
+	@$(temporal_cli) $(ARGS)
 
 # CI targets — infra only, no apps, no secrets needed
 # Migrations run via go run (no Docker build required)
@@ -2311,7 +2522,7 @@ kind-ci-down: kind-delete
 # Delete all resources in the local namespace without tearing down the cluster.
 # Useful for a clean redeploy: make kind-clean && make dev-up
 kind-clean:
-	@echo "$(KUBE_CONTEXT)" | grep -q '^kind-' || { echo "ERROR: kind-clean refused — '$(KUBE_CONTEXT)' is not a local kind context. Only kind-* contexts are allowed."; exit 1; }
+	@$(require_kind_context)
 	kubectl --context=$(KUBE_CONTEXT) delete namespace $(KUBE_NS) --ignore-not-found --wait
 	kubectl --context=$(KUBE_CONTEXT) delete namespace temporal      --ignore-not-found --wait
 	@echo "==> Namespaces $(KUBE_NS) and temporal deleted."
