@@ -329,9 +329,12 @@ func (s *Service) seedAdapterState(ctx context.Context, vaults []common.Address,
 		if err := s.replay.SeedV2VaultAdapters(ctx, vault, head.number, head.hash, canonicalBlockVersion, head.timestamp); err != nil {
 			wrapped := fmt.Errorf("seeding adapters for vault %s at block %d: %w", vault.Hex(), head.number, err)
 			// A cancelled run fails every remaining vault identically, so
-			// collecting those would bury the cause under one error per vault.
+			// collecting those would bury the cause under one error per vault. The
+			// ones that failed on their own before it still ride out: the returned
+			// error is what Temporal shows the operator, so dropping them would
+			// hide a hole behind the cancellation.
 			if ctx.Err() != nil {
-				return wrapped
+				return errors.Join(append(failures, wrapped)...)
 			}
 			failures = append(failures, wrapped)
 			s.logger.Error("vault seed failed; continuing so healable vaults still heal",
