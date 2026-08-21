@@ -54,29 +54,35 @@ def position_identities(facts: PositionFacts) -> list[str]:
 
     candidates: list[str] = []
     if facts.receipt_token_id is not None:
-        # STL's own registry id, so both sides mean the same token by it.
+        # STL's own registry id, so both sides mean the same token by it — and it
+        # needs no chain to qualify it, unlike everything below.
         candidates.append(f"token:{facts.receipt_token_id}")
 
+    chain = _chain_key(facts)
     address = (facts.position_address or "").lower()
-    if len(address) == _ADDRESS_LENGTH:
-        candidates.append(f"position:{_chain_key(facts)}:{address}")
+    if chain is not None and len(address) == _ADDRESS_LENGTH:
+        candidates.append(f"position:{chain}:{address}")
 
     if candidates:
         return candidates
 
+    if chain is None:
+        # Nothing left to key on but a symbol, and no chain to qualify it. Two
+        # vaults can share a symbol, so a placeholder chain would let positions
+        # on two unidentified chains key alike; no key at all leaves the row
+        # standing on its own in the union, which is the honest answer.
+        return []
+
     # A pool id, or a token neither side could resolve.
-    return [f"symbol:{_chain_key(facts)}:{facts.protocol_name or ''}:{facts.symbol.lower()}"]
+    return [f"symbol:{chain}:{facts.protocol_name or ''}:{facts.symbol.lower()}"]
 
 
-def position_identity(facts: PositionFacts) -> str:
-    """The strongest single key, for grouping rows within one provenance."""
-    return position_identities(facts)[0]
-
-
-def _chain_key(facts: PositionFacts) -> str:
-    """The chain, however it is known.
+def _chain_key(facts: PositionFacts) -> str | None:
+    """The chain, however it is known, or ``None`` when it is not known at all.
 
     A null id means a chain STL has no number for, where the upstream network
     name is the only identifier — and two such chains must not share a key.
     """
-    return str(facts.chain_id) if facts.chain_id is not None else f"net:{facts.network or 'unknown'}"
+    if facts.chain_id is not None:
+        return str(facts.chain_id)
+    return f"net:{facts.network}" if facts.network else None

@@ -1,10 +1,6 @@
 import pytest
 
-from app.domain.position_identity import (
-    PositionFacts,
-    position_identities,
-    position_identity,
-)
+from app.domain.position_identity import PositionFacts, position_identities
 
 
 def matches(left: PositionFacts, right: PositionFacts) -> bool:
@@ -92,7 +88,7 @@ def test_off_chain_custody_matches_across_its_two_descriptions():
 
 @pytest.mark.parametrize("protocol", ["anchorage", "Anchorage", "ANCHORAGE"])
 def test_custody_is_recognised_whatever_its_case(protocol: str):
-    assert position_identity(facts(protocol_name=protocol)) == "custody:anchorage"
+    assert position_identities(facts(protocol_name=protocol)) == ["custody:anchorage"]
 
 
 def test_a_pool_id_is_not_treated_as_an_address():
@@ -101,14 +97,14 @@ def test_a_pool_id_is_not_treated_as_an_address():
     first = facts(position_address=_V4_POOL_ID, symbol="UNI-V4-USDT-USDS", protocol_name="uniswap")
     second = facts(position_address="0x" + "3b" * 32, symbol="UNI-V4-PYUSD-USDS", protocol_name="uniswap")
 
-    assert not position_identity(first).startswith("position:")
+    assert not position_identities(first)[0].startswith("position:")
     assert not matches(first, second)
 
 
 def test_the_registry_id_carries_a_position_with_no_usable_address():
     both_sides = facts(position_address=_V4_POOL_ID, receipt_token_id=42)
 
-    assert position_identity(both_sides) == "token:42"
+    assert position_identities(both_sides)[0] == "token:42"
 
 
 def test_a_chain_with_no_id_keys_on_its_network_name():
@@ -125,3 +121,22 @@ def test_an_underlying_address_is_never_the_key():
     holding_usdt = facts(position_address=_USDT, symbol="USDT", protocol_name=None)
 
     assert not matches(lending_usdt, holding_usdt)
+
+
+def test_a_position_with_neither_a_chain_id_nor_a_network_cannot_match_anything():
+    # Nothing but a symbol left, and no chain to qualify it. Keying these alike
+    # would merge two positions that share only a symbol; the union must carry
+    # them as the separate rows they are.
+    first = facts(chain_id=None, network=None, position_address=None, receipt_token_id=None, symbol="ACRDX")
+    second = facts(chain_id=None, network=None, position_address=None, receipt_token_id=None, symbol="ACRDX")
+
+    assert position_identities(first) == []
+    assert not matches(first, second)
+
+
+def test_a_registry_id_identifies_a_position_even_with_no_chain_at_all():
+    # The risk-capital breakdown is this case: STL's rows carry the id and
+    # neither a chain id nor a chain name.
+    assert position_identities(facts(chain_id=None, network=None, position_address=None, receipt_token_id=736)) == [
+        "token:736"
+    ]
