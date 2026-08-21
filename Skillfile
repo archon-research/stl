@@ -6,6 +6,9 @@ install  copilot  local
 # --- Skills ---
 # github  skill  [name]  <owner/repo[@ref]>  <path-or-dir>  [ref]
 
+github  skill  archon-research/skills  db-query
+github  skill  archon-research/skills  verify-deploy
+
 github  skill  gh-stack  github/gh-stack  skills/gh-stack/SKILL.md
 
 local  skill  skills/stl-review-phase

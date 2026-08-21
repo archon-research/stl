@@ -6,51 +6,55 @@ import (
 	"os"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 // sharedDSN is the connection string to the shared TimescaleDB container.
-// Each test file creates its own schema for isolation.
+// Each test file creates its own database for isolation.
 var sharedDSN string
 
-// testFileSetup holds setup and cleanup functions for each test file's schema.
+// testFileSetup holds setup and cleanup functions for each test file's database.
 type testFileSetup struct {
-	schemaName string
-	setup      func()
-	cleanup    func()
+	setup   func()
+	cleanup func()
 }
 
 var testFileSetups []testFileSetup
 
-// registerTestFileSetup allows each test file to register its schema setup/cleanup.
-// Called from init() in each test file.
-func registerTestFileSetup(schemaName string, setup, cleanup func()) {
-	testFileSetups = append(testFileSetups, testFileSetup{
-		schemaName: schemaName,
-		setup:      setup,
-		cleanup:    cleanup,
+// registerTestFileSetup takes work that needs sharedDSN, for a file whose setup is
+// more than one database — useFileDatabase below covers that case.
+func registerTestFileSetup(setup, cleanup func()) {
+	testFileSetups = append(testFileSetups, testFileSetup{setup: setup, cleanup: cleanup})
+}
+
+// useFileDatabase gives the calling file its own database and publishes a pool for
+// it. Registered rather than done here because init() runs before sharedDSN exists.
+func useFileDatabase(dbName string, pool **pgxpool.Pool) {
+	registerTestFileSetup(func() {
+		*pool = testutil.SetupDBForMain(sharedDSN, dbName)
+	}, func() {
+		testutil.CleanupDBForMain(sharedDSN, *pool, dbName)
 	})
 }
 
 func TestMain(m *testing.M) {
-	dsn, cleanup := testutil.StartTimescaleDBForMain()
-	sharedDSN = dsn
+	os.Exit(testutil.RunShared(m, testutil.Shared{
+		TimescaleDSN: &sharedDSN,
+		BeforeRun:    setUpTestFileDatabases,
+		AfterRun:     tearDownTestFileDatabases,
+	}))
+}
 
-	// Run all registered schema setups
+func setUpTestFileDatabases() {
 	for _, ts := range testFileSetups {
 		ts.setup()
 	}
+}
 
-	code := m.Run()
-
-	// Run all registered schema cleanups
+func tearDownTestFileDatabases() {
 	for _, ts := range testFileSetups {
 		ts.cleanup()
 	}
-
-	cleanup()
-
-	code = testutil.CheckGoroutineLeaks(code)
-
-	os.Exit(code)
 }

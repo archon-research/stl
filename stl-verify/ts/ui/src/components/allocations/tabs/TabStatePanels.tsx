@@ -1,65 +1,24 @@
+import {
+  SurfaceMessageBody,
+  SurfaceMessageRoot,
+} from '@archon-research/design-system';
+
 import { css } from '#styled-system/css';
 
-type TabSelectionPromptProps = {
+type TabNotePanelProps = {
   message: string;
 };
 
-type TabErrorPanelProps = {
-  title: string;
-  message: string;
-};
-
-export function TabSelectionPrompt({ message }: TabSelectionPromptProps) {
+// Root plus body rather than the `SurfaceMessage` compound: that one takes a
+// required `title`, and this panel is a bare note.
+export function TabNotePanel({ message }: TabNotePanelProps) {
   return (
-    <div
-      className={css({
-        borderRadius: 'md',
-        borderStyle: 'solid',
-        borderWidth: '1px',
-        borderColor: 'border.subtle',
-        bg: 'surface.subtle',
-        p: '4',
-      })}
-    >
-      <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>
+    <SurfaceMessageRoot>
+      {/* The `body` slot's `mt` exists to clear a preceding title; this panel
+          has none, so the leading gap is removed. */}
+      <SurfaceMessageBody className={css({ mt: 0 })}>
         {message}
-      </p>
-    </div>
-  );
-}
-
-export function TabErrorPanel({ title, message }: TabErrorPanelProps) {
-  return (
-    <div
-      className={css({
-        borderRadius: 'md',
-        borderStyle: 'solid',
-        borderWidth: '1px',
-        borderColor: 'border.default',
-        bg: 'surface.subtle',
-        p: '4',
-      })}
-    >
-      <p
-        className={css({
-          m: 0,
-          fontSize: 'sm',
-          fontWeight: 'semibold',
-          color: 'text.strong',
-        })}
-      >
-        {title}
-      </p>
-      <p
-        className={css({
-          m: 0,
-          mt: '1.5',
-          fontSize: 'sm',
-          color: 'text.muted',
-        })}
-      >
-        {message}
-      </p>
-    </div>
+      </SurfaceMessageBody>
+    </SurfaceMessageRoot>
   );
 }

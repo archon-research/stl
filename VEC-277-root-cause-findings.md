@@ -127,9 +127,10 @@ Reconnect as a SEPARATE theoretical path (not implicated here): on reconnect the
 subscriber dials fresh and resends `eth_subscribe newHeads`, resuming forward
 from the new backend node's head; it tracks no last-seen block number, so if the
 new node lags the previous one it would forward a lower header unguarded into
-the `block.Number <= head` reorg branch. Note `SetOnReconnect` is NEVER wired in
-the watcher (no caller in cmd/ or internal/services/), so reconnect does not
-trigger any backfill ramp.
+the `block.Number <= head` reorg branch. Note nothing hooks reconnect in the
+watcher, so reconnect does not trigger any backfill ramp. (A `SetOnReconnect`
+hook existed when this was written but had no caller in cmd/ or
+internal/services/; it was removed as dead code in VEC-547.)
 
 **F9. In a calm window, delivery is perfectly in order.** A read-only observer
 reusing `alchemy.NewSubscriber`/`Subscribe` ran 4 minutes against live Arbitrum

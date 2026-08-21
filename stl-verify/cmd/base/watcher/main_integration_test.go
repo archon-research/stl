@@ -35,22 +35,12 @@ var (
 )
 
 func TestMain(m *testing.M) {
-	dsn, dbCleanup := testutil.StartTimescaleDBForMain()
-	sharedDSN = dsn
-
-	redisAddr, redisCleanup := testutil.StartRedisForMain()
-	sharedRedisAddr = redisAddr
-
-	lsCfg, lsCleanup := testutil.StartLocalStackForMain("sns,sqs")
-	sharedLocalStackCfg = lsCfg
-
-	code := m.Run()
-
-	lsCleanup()
-	redisCleanup()
-	dbCleanup()
-	code = testutil.CheckGoroutineLeaks(code)
-	os.Exit(code)
+	os.Exit(testutil.RunShared(m, testutil.Shared{
+		TimescaleDSN:       &sharedDSN,
+		RedisAddr:          &sharedRedisAddr,
+		LocalStack:         &sharedLocalStackCfg,
+		LocalStackServices: "sns,sqs",
+	}))
 }
 
 // newTestBlockchainClient returns a MockBlockchainClient configured for
@@ -1228,9 +1218,10 @@ func setupTestInfrastructure(t *testing.T, ctx context.Context) *TestInfrastruct
 	infra := &TestInfrastructure{}
 	var cleanupFuncs []func()
 
-	// Use shared PostgreSQL container with per-test schema isolation
-	pool, _, schemaCleanup := testutil.SetupTestSchema(t, sharedDSN)
-	cleanupFuncs = append(cleanupFuncs, schemaCleanup)
+	pool, _, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
+	// t.Cleanup, not cleanupFuncs: infra.Cleanup is assigned only once every setup
+	// step below has passed, so a t.Fatalf before then would leave the clone behind.
+	t.Cleanup(dbCleanup)
 	infra.Pool = pool
 
 	blockStateRepo := postgres.NewBlockStateRepository(pool, 1, logger)

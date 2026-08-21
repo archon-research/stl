@@ -13,19 +13,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
-	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-const userSchemaName = "test_user"
+const userDBName = "test_user"
 
 var userPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(userSchemaName, func() {
-		userPool = testutil.SetupSchemaForMain(sharedDSN, userSchemaName)
-	}, func() {
-		testutil.CleanupSchemaForMain(sharedDSN, userPool, userSchemaName)
-	})
+	useFileDatabase(userDBName, &userPool)
 }
 
 // truncateUser clears the user table for test isolation.

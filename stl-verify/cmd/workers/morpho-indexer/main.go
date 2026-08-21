@@ -11,9 +11,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
-
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/cache"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
@@ -80,6 +77,10 @@ func parseConfig(args []string) (cliConfig, error) {
 		return cliConfig{}, err
 	}
 
+	// Env vars are fallbacks only; an explicitly-set flag wins over its env var.
+	setFlags := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
+
 	cfg := cliConfig{
 		queueURL:          *queueURL,
 		redisAddr:         *redisAddr,
@@ -117,14 +118,14 @@ func parseConfig(args []string) (cliConfig, error) {
 		return cliConfig{}, fmt.Errorf("redis address not provided (use -redis flag or REDIS_ADDR env var)")
 	}
 
-	if waitTimeStr := env.Get("SQS_WAIT_TIME", ""); waitTimeStr != "" {
+	if waitTimeStr := env.Get("SQS_WAIT_TIME", ""); waitTimeStr != "" && !setFlags["wait"] {
 		v, err := strconv.Atoi(waitTimeStr)
 		if err != nil {
 			return cliConfig{}, fmt.Errorf("parsing SQS_WAIT_TIME %q: %w", waitTimeStr, err)
 		}
 		cfg.waitTime = v
 	}
-	if visTimeStr := env.Get("SQS_VISIBILITY_TIMEOUT", ""); visTimeStr != "" {
+	if visTimeStr := env.Get("SQS_VISIBILITY_TIMEOUT", ""); visTimeStr != "" && !setFlags["visibility-timeout"] {
 		v, err := strconv.Atoi(visTimeStr)
 		if err != nil {
 			return cliConfig{}, fmt.Errorf("parsing SQS_VISIBILITY_TIMEOUT %q: %w", visTimeStr, err)
@@ -188,11 +189,13 @@ func run(ctx context.Context, args []string) error {
 
 	// Redis
 	blockCache, err := redisAdapter.NewBlockCache(redisAdapter.Config{
-		Addr:      cfg.redisAddr,
-		Password:  env.Get("REDIS_PASSWORD", ""),
-		DB:        0,
-		TTL:       2 * 24 * time.Hour,
-		KeyPrefix: "stl",
+		Addr:     cfg.redisAddr,
+		Password: env.Get("REDIS_PASSWORD", ""),
+		DB:       0,
+		TTL:      2 * 24 * time.Hour,
+		// Configurable for the tests driving this binary: they share one Redis and
+		// cannot namespace a key the binary builds for itself.
+		KeyPrefix: env.Get("REDIS_KEY_PREFIX", "stl"),
 	}, logger)
 	if err != nil {
 		return fmt.Errorf("creating Redis cache: %w", err)
@@ -203,14 +206,7 @@ func run(ctx context.Context, args []string) error {
 	}
 	logger.Info("Redis connected", "addr", cfg.redisAddr)
 
-	s3Opts := []func(*awss3.Options){}
-	if s3Endpoint := env.Get("AWS_S3_ENDPOINT", ""); s3Endpoint != "" {
-		s3Opts = append(s3Opts, func(o *awss3.Options) {
-			o.BaseEndpoint = aws.String(s3Endpoint)
-			o.UsePathStyle = true
-		})
-	}
-	s3Reader := s3adapter.NewReaderWithOptions(awsCfg, logger, s3Opts...)
+	s3Reader := s3adapter.NewReaderFromEnv(awsCfg, logger)
 	cacheReader, err := cache.NewReaderWithFallback(blockCache, s3Reader, cfg.chainID, cfg.deployEnv, cfg.s3Bucket, logger)
 	if err != nil {
 		return fmt.Errorf("creating cache reader: %w", err)

@@ -7,20 +7,14 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-
-	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-const curveSchemaName = "test_curve_migration"
+const curveDBName = "test_curve_migration"
 
 var curveTestPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(curveSchemaName, func() {
-		curveTestPool = testutil.SetupSchemaForMain(sharedDSN, curveSchemaName)
-	}, func() {
-		testutil.CleanupSchemaForMain(sharedDSN, curveTestPool, curveSchemaName)
-	})
+	useFileDatabase(curveDBName, &curveTestPool)
 }
 
 // TestCurveExtendedDataMigration verifies that the extended-data schema folded

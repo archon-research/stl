@@ -15,19 +15,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
-	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-const positionSchemaName = "test_position"
+const positionDBName = "test_position"
 
 var positionPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(positionSchemaName, func() {
-		positionPool = testutil.SetupSchemaForMain(sharedDSN, positionSchemaName)
-	}, func() {
-		testutil.CleanupSchemaForMain(sharedDSN, positionPool, positionSchemaName)
-	})
+	useFileDatabase(positionDBName, &positionPool)
 }
 
 // truncateCollaterals clears collateral-related tables for test isolation.

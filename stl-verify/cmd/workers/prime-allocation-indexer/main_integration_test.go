@@ -39,23 +39,18 @@ var (
 const (
 	archiveBucket = "test-prime-allocation-worker-raw-sc-calls"
 	archivePrefix = "raw-sc-calls/chain_id=1/"
+	// rawBucketPrefix satisfies chainutil.ValidateS3BucketForChain, a prefix check
+	// rather than an equality one, so a per-test suffix is allowed.
+	rawBucketPrefix = "stl-sentineltest-ethereum-raw-"
 )
 
 func TestMain(m *testing.M) {
-	dsn, dbCleanup := testutil.StartTimescaleDBForMain()
-	sharedDSN = dsn
-	redisAddr, redisCleanup := testutil.StartRedisForMain()
-	sharedRedisAddr = redisAddr
-	lsCfg, lsCleanup := testutil.StartLocalStackForMain("s3")
-	sharedLocalStackCfg = lsCfg
-
-	code := m.Run()
-
-	lsCleanup()
-	redisCleanup()
-	dbCleanup()
-	code = testutil.CheckGoroutineLeaks(code)
-	os.Exit(code)
+	os.Exit(testutil.RunShared(m, testutil.Shared{
+		TimescaleDSN:       &sharedDSN,
+		RedisAddr:          &sharedRedisAddr,
+		LocalStack:         &sharedLocalStackCfg,
+		LocalStackServices: "s3",
+	}))
 }
 
 // ---------------------------------------------------------------------------
@@ -69,7 +64,7 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 	t.Setenv("BUILD_GIT_HASH", "test")
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
-	t.Setenv("S3_BUCKET", "stl-sentineltest-ethereum-raw")
+	t.Setenv("S3_BUCKET", testutil.S3TestBucketName(t, rawBucketPrefix))
 	t.Setenv("DEPLOY_ENV", "test")
 	t.Setenv("CHAIN_ID", "1")
 
@@ -90,7 +85,7 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	ctx := context.Background()
 
-	_, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	_, dbURL, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
 	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -104,15 +99,9 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 
 	s3Client := testutil.NewS3Client(t, ctx, sharedLocalStackCfg)
 
-	// Bucket name must satisfy the stl-sentinel{env}-{chain}-raw prefix convention.
-	const (
-		bucket    = "stl-sentineltest-ethereum-raw"
-		deployEnv = "test"
-	)
-
-	if _, err := s3Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
-		t.Fatalf("create S3 bucket: %v", err)
-	}
+	const deployEnv = "test"
+	bucket := testutil.S3TestBucketName(t, rawBucketPrefix)
+	testutil.EnsureBucket(t, ctx, s3Client, bucket)
 
 	t.Setenv("BUILD_GIT_HASH", "test")
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
@@ -184,23 +173,27 @@ const (
 func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 	bgCtx := context.Background()
 
-	pool, dbURL, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, dbURL, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
-	const blockNum = int64(19_000_000)
+	// Any height works here: the mock RPC answers whatever block the event carries.
+	const blockNum int64 = 19_100_000
 	const version = 1
+
+	// One prefix for both the seeder and the binary: the binary builds its own cache
+	// key, so a test sharing Redis with another package can only separate them here.
+	keyPrefix := testutil.SanitizeTestName(t.Name())
+	t.Setenv("REDIS_KEY_PREFIX", keyPrefix)
 
 	// Seed Redis with a USDS Transfer into the Grove proxy so the worker's cache
 	// read returns it directly (no S3 fallback needed) and the entry matches a
 	// tracked (token, proxy) pair.
-	seedUsdsTransferReceipt(t, bgCtx, blockNum, version)
+	seedUsdsTransferReceipt(t, bgCtx, keyPrefix, blockNum, version)
 
 	s3Client := testutil.NewS3Client(t, bgCtx, sharedLocalStackCfg)
-	const testBucket = "stl-sentineltest-ethereum-raw"
-	for _, b := range []string{testBucket, archiveBucket} {
-		if _, err := s3Client.CreateBucket(bgCtx, &s3.CreateBucketInput{Bucket: aws.String(b)}); err != nil {
-			t.Fatalf("create bucket %s: %v", b, err)
-		}
+	rawBucket := testutil.S3TestBucketName(t, rawBucketPrefix)
+	for _, b := range []string{rawBucket, archiveBucket} {
+		testutil.EnsureBucket(t, bgCtx, s3Client, b)
 	}
 
 	rpcServer := buildErc20MulticallMockRPC(t)
@@ -221,7 +214,7 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 	t.Setenv("AWS_REGION", "us-east-1")
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
-	t.Setenv("S3_BUCKET", testBucket)
+	t.Setenv("S3_BUCKET", rawBucket)
 	t.Setenv("DEPLOY_ENV", "test")
 	t.Setenv("CHAIN_ID", "1")
 	t.Setenv("ARCHIVE_SC_CALLS", "true")
@@ -313,7 +306,7 @@ func TestRunIntegration_ArchivesRawCalls(t *testing.T) {
 // an external sender into the Grove proxy) into the Redis block cache at the
 // given block/version, so the worker's cache read returns it and the
 // TransferExtractor emits a matching event.
-func seedUsdsTransferReceipt(t *testing.T, ctx context.Context, blockNum int64, version int) {
+func seedUsdsTransferReceipt(t *testing.T, ctx context.Context, keyPrefix string, blockNum int64, version int) {
 	t.Helper()
 
 	token := common.HexToAddress(usdsTokenAddr)
@@ -347,6 +340,7 @@ func seedUsdsTransferReceipt(t *testing.T, ctx context.Context, blockNum int64, 
 
 	cacheCfg := redisAdapter.ConfigDefaults()
 	cacheCfg.Addr = sharedRedisAddr
+	cacheCfg.KeyPrefix = keyPrefix
 	blockCache, err := redisAdapter.NewBlockCache(cacheCfg, nil)
 	if err != nil {
 		t.Fatalf("create block cache: %v", err)

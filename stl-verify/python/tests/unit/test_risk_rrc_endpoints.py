@@ -25,7 +25,12 @@ from app.api.deps import get_model_registry, get_receipt_token_lookup
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.receipt_token import ReceiptTokenInfo
 from app.domain.entities.risk import GapSweepDetails, ModelName, RrcResult, SurafDetails
-from app.domain.exceptions import InvalidOverrideError, MissingShareError, StaleShareError
+from app.domain.exceptions import (
+    InvalidOverrideError,
+    MissingShareError,
+    ModelDataUnavailableError,
+    StaleShareError,
+)
 from app.main import app
 from app.ports.allocation_repository import AllocationRepositoryPort
 from app.ports.crypto_lending_reader import CryptoLendingReader
@@ -179,6 +184,30 @@ def test_get_returns_multiple_results_when_models_overlap(client: TestClient) ->
     assert response.status_code == 200
     models = [r["risk_model"] for r in response.json()["results"]]
     assert models == ["suraf", "gap_sweep"]
+
+
+def test_model_without_data_is_skipped_and_other_results_still_served(client: TestClient) -> None:
+    """A model raising ModelDataUnavailableError degrades the envelope, not the endpoint."""
+    suraf = _FakeRiskModel("suraf", _suraf_result())
+    core = _FakeRiskModel("core_model", raises=ModelDataUnavailableError("no pre-computed result"))
+    app.dependency_overrides[get_model_registry] = _override_registry(ModelRegistry([suraf, core]))
+
+    response = client.get(f"/v1/risk/rrc?asset_id={_ASSET_ID}&prime_id={_PRIME_ID}")
+
+    assert response.status_code == 200
+    models = [r["risk_model"] for r in response.json()["results"]]
+    assert models == ["suraf"]
+
+
+def test_all_models_without_data_returns_404(client: TestClient) -> None:
+    """When every applicable model skips, the endpoint 404s instead of crashing on an empty envelope."""
+    core = _FakeRiskModel("core_model", raises=ModelDataUnavailableError("no pre-computed result"))
+    app.dependency_overrides[get_model_registry] = _override_registry(ModelRegistry([core]))
+
+    response = client.get(f"/v1/risk/rrc?asset_id={_ASSET_ID}&prime_id={_PRIME_ID}")
+
+    assert response.status_code == 404
+    assert "no risk model has a result" in response.json()["detail"]
 
 
 def test_get_returns_404_when_no_models_apply(client: TestClient) -> None:

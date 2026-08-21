@@ -13,14 +13,18 @@ into TimescaleDB (or validates stored data). Current cronjobs:
 | `offchain-price-indexer` | `offchain-price-indexer` | 5m | CoinGecko token prices |
 | `watcher-data-validator` | `watcher-data-validator` | 1h | Validates stored chain data vs Etherscan |
 | `transform-worker` | `transform-worker` | 10m | Drains the transformed-layer change queues and refreshes the parity ledger |
+| `offchain-price-backfill` | `offchain-price-backfill` | **on demand** | Backfills CoinGecko price history for a range supplied at trigger time |
+| `reference-capital-indexer` | `reference-capital-indexer` | 15m | Sky Star-monitor reference risk capital; the only writer of forward reference history |
+| `reference-capital-backfill` | `reference-capital-backfill` | **on demand** | Seeds the reference balance-sheet history predating the syncer's first run |
 
 > `maple-graphql-indexer` is also a cronjob but has its own richer rules — see
 > [vector-indexers.md](vector-indexers.md), not this runbook.
 
 The shared activity records `cronjob_runs_total{status="success"|"error"}` and
 `cronjob_run_duration_seconds` per run, labelled `service_name=<cronjob>`. New
-cronjobs are covered automatically; only `VectorCronjobWorkerDown` needs the new
-Deployment name added to its regex.
+cronjobs are covered automatically; only the availability rule needs the new
+Deployment name added to its regex — `VectorCronjobWorkerDown` for a scheduled
+cronjob, `VectorOnDemandWorkerDown` for an on-demand worker.
 
 > `transform-worker` ships at `replicas: 0` and is enabled (scaled to 1) only after
 > the one-off bootstrap has run. `VectorCronjobWorkerDown` is guarded on
@@ -145,14 +149,223 @@ run long. Keep that rollout order explicit in the deploy notes.
 `kube_deployment_status_replicas_available{deployment="<deployment>", namespace="vector"} >= 1`
 and a fresh `status="success"` run in `cronjob_runs_total`.
 
+## VectorOnDemandWorkerDown
+
+### What it means
+
+A `temporal.RunWorker` Deployment has had <1 available replica for >30m. These
+workers carry **no schedule**, so unlike `VectorCronjobWorkerDown` nothing is
+ticking into the void and no data is going stale. The only impact is that a new
+run cannot be started until the pod is back. Warning severity for that reason.
+
+Currently matches: `offchain-price-backfill`, `reference-capital-backfill`.
+
+### First checks
+
+1. `kubectl -n vector get pods -l app=$DEPLOY` — look for
+   `CrashLoopBackOff`, `ImagePullBackOff` or `OOMKilled`. `$DEPLOY` is the
+   `deployment` label on the alert; more than one worker matches this rule.
+2. `kubectl -n vector logs deploy/$DEPLOY --tail=100`.
+3. If the worker is up but a *run* is failing, this is the wrong alert — see
+   `VectorCronjobRunFailing`, which is the only run-failure signal for on-demand
+   workers (`VectorCronjobAllRunsFailing` excludes them).
+
+### Common causes
+
+- **`ImagePullBackOff`** — much the most likely. `cmd/backfillers/` is not
+  auto-discovered, so the release needs its explicit
+  `_docker-release-offchain-price-backfill-internal` line in `docker-release-all`
+  **and** its entry in `deploy.yaml`'s `CRONJOBS` promotion list. Missing either
+  ships a tag nothing built.
+- **Missing config/secret** — the pod fails at startup wiring; the log names the
+  variable (e.g. `required env var COINGECKO_API_KEY is not set`).
+
+### Verify recovery
+
+`kube_deployment_status_replicas_available{deployment="offchain-price-backfill"} >= 1`,
+then start the smoke workflow below and confirm it completes.
+
+---
+
+### Special case: `offchain-price-backfill` (on-demand, no schedule)
+
+How to actually run a backfill:
+[docs/backfilling-offchain-prices.md](../backfilling-offchain-prices.md).
+
+
+This Deployment is an **on-demand** Temporal worker (`temporal.RunWorker`), not a
+scheduled cronjob. Two things differ when it pages:
+
+- **Nothing is missed while it is down.** It has no schedule, so there is no tick
+  firing into the void and no data going stale. The impact is only that a backfill
+  cannot be *started* until it is back. Triage it, but it is not a data-loss page.
+- **It does emit `cronjob_runs_total`, but one record per *chunk*, not per run.**
+  `RunWorker` instruments activities via an interceptor, so a 162-chunk backfill
+  emits 162 records. `VectorCronjobRunFailing` (warning) therefore covers it, but
+  it is deliberately **excluded from `VectorCronjobAllRunsFailing`** (critical):
+  zero successes in an hour is this job's normal idle state, so that rule would
+  page on any single failed manual trigger. Verify recovery by confirming the pod
+  is available and that a test workflow completes:
+
+  ```
+  temporal workflow start --namespace vector \
+    --task-queue offchain-price-backfill --type OffchainPriceBackfill \
+    --workflow-id backfill-smoke-$(date +%s) \
+    --input '{"assets":["weth"],"from":"2026-07-01T00:00:00Z","to":"2026-07-08T00:00:00Z"}'
+  ```
+
+  A one-week window is one chunk and completes in seconds. Safe to run, but not
+  a no-op: the pod you just recovered is normally a new image, hence a new
+  `build_id`, and `assign_processing_version_offchain_token_price` only reuses a
+  version for the same build. The smoke run therefore appends a fresh
+  `processing_version` generation for that one week. That is additive and read
+  paths take the newest, so it is harmless — but prefer staging if you would
+  rather not add a generation in prod.
+- **A coverage failure fires no alert at all.** The interceptor records per
+  activity, so a run whose chunks all succeeded but whose *workflow* then failed
+  its `assertCoverage` check — an asset that returned nothing, or a gap after data
+  began — emits only `status="success"` and never trips
+  `VectorCronjobRunFailing`. This is the one failure mode metrics cannot see. It
+  is tolerable only because the job is hand-triggered: the run goes red in the
+  Temporal UI with the offending asset named in the error, in front of the person
+  who started it. **Do not treat a green dashboard as evidence a backfill was
+  complete** — read the workflow's own outcome, or the `progress` query, which is
+  still readable after the run has closed.
+
+`ImagePullBackOff` here most often means the image was never built — the binary
+lives under `cmd/backfillers/`, which is **not** auto-discovered, so it needs its
+explicit `_docker-release-offchain-price-backfill-internal` line in
+`docker-release-all` and its entry in `deploy.yaml`'s `CRONJOBS` promotion list.
+
+---
+
+### Special case: `reference-capital-backfill` (on-demand, no schedule)
+
+Seeds the reference balance-sheet history that predates STL's own observation of
+Sky's Star monitor. `reference-capital-indexer` can only accumulate **forward**
+from its first run — the monitor publishes no history — so this is the only
+source of anything earlier, and it reads Sky's balance-sheet feed instead.
+
+Trigger it from the Temporal UI (Workflow Type `ReferenceCapitalBackfill`, Input
+`{"daysAgo": 365}`) or:
+
+```
+temporal workflow start --namespace vector \
+  --task-queue reference-capital-backfill --type ReferenceCapitalBackfill \
+  --workflow-id reference-capital-backfill-$(date +%s) \
+  --input '{"daysAgo": 365}'
+```
+
+- **One activity, all or nothing.** Unlike `offchain-price-backfill` it is not
+  chunked. The service fetches every tracked prime in one request and refuses to
+  write unless all of them came back, because the write is `ON CONFLICT DO
+  NOTHING`: a prime missing from a one-shot seed leaves a permanent hole a re-run
+  cannot repair. A failure therefore writes nothing — retry it rather than
+  reaching for a partial repair.
+- **Re-running is safe.** Rows are insert-only and conflict away within a build.
+  A run under a new `build_id` appends a fresh `processing_version` generation
+  rather than overwriting; read paths take the newest.
+- **What it fills, and what it cannot.** It populates `assets_usd` (the figure
+  Sky's dashboard labels PRIME COLLATERAL, and the only source of it) and
+  `treasury_balance_usd`, which backs the total-capital series. It does **not**
+  fill reference `exposure`: the feed's `allocated_assets` is a different
+  measurement from the monitor's `total_exposure` (+32% for spark at the same
+  instant), so the read path splices in `NULL` rather than stepping the series.
+  Reference exposure has no history by design and accumulates forward only.
+- **Verify a run landed** by row count rather than a green dashboard, since
+  per-activity metrics cannot see a workflow-level failure:
+
+  ```sql
+  SELECT count(*), min(observed_at)::date, max(observed_at)::date
+  FROM prime_reference_balance_sheet;
+  ```
+
+---
+
+## VectorReferenceCapitalIndexerWritesZero
+
+**What it means.** Cycles are succeeding but `prime_capital_stack` received no
+rows for an hour. `reference-capital-indexer` is the only writer of forward reference
+capital, and Sky's Star monitor publishes no history, so every cycle that
+records nothing is a permanent hole — it cannot be backfilled afterwards.
+
+**Why it is not caught by the generic rules.** The run returns no error, so
+`VectorCronjobRunFailing` stays quiet. And because the read path gap-fills with
+`locf`, `/v1/primes/{id}/total-capital?reference=true` keeps serving the last
+observed value as if it were current, rather than going null. The stall is
+invisible from both the error path and the API.
+
+**Triage.**
+
+1. Confirm the worker is cycling rather than wedged:
+   `kubectl -n vector logs deploy/reference-capital-indexer --tail=100`. A healthy
+   cycle logs `capital stack sync complete` with a non-zero `snapshots` count.
+2. Check whether the monitor is answering at all:
+   `curl -s "$SKY_RISK_CAPITAL_URL/primes/" | jq '.data.results | length'`.
+   Zero or a missing `results` array is an upstream fault; the client rejects
+   both, so this should have surfaced as an error — if it did not, the payload
+   changed shape.
+3. If the monitor is healthy and the worker is cycling, the primes it covers no
+   longer match the ones STL tracks. `VectorReferenceCapitalIndexerPrimeUncovered`
+   should also be firing; treat that as the primary signal.
+
+**Resolution.** This is upstream coverage, not something to fix in the service.
+Confirm which primes the monitor now reports and reconcile against the
+axis-synome contract. The gap in the series stays — say so rather than
+backfilling it from a different feed, which would splice a different
+measurement.
+
+---
+
+## VectorReferenceCapitalIndexerPrimeUncovered
+
+**What it means.** A prime STL tracks was absent from every upstream response
+for an hour. Its reference series is frozen while the other primes keep
+advancing.
+
+**Why it is not caught by the generic rules.** The cycle succeeds and still
+writes every covered prime, so neither the error rules nor
+`VectorReferenceCapitalIndexerWritesZero` fire. `locf` then carries that prime's last
+value forward indefinitely, so its chart looks current and flat rather than
+absent.
+
+**Triage.**
+
+1. `{{ $labels.star }}` names the prime. Ask the monitor directly:
+   `curl -s "$SKY_RISK_CAPITAL_URL/primes/" | jq -r '.data.results[].star'`.
+2. If the prime is absent from that list, the monitor dropped it. If a
+   similar-but-different name is present, the vocabulary drifted.
+3. Compare against what STL tracks — the star keys of the axis-synome contract's
+   ALM proxies, which is what `trackedStarsFromContract` reads. Note the `prime`
+   table is **not** the tracked set: it still carries rows for primes STL has
+   stopped tracking.
+
+**Resolution.**
+
+- *Monitor dropped the prime.* Nothing to fix in the service; the series is
+  correctly frozen. Decide with the team whether the prime should still be
+  tracked, and silence the alert while that is open.
+- *Name drifted.* The contract and the monitor disagree on spelling. Fix it in
+  the axis-synome contract, not by mapping the name in the syncer — the contract
+  is the tracked set, and a local alias would hide the next drift.
+
+Do not "fix" this by relaxing the syncer to accept partial coverage silently.
+The alert exists precisely because a partially-covered cycle looks healthy.
+
 ---
 
 ## Adding a new cronjob
 
-Failure + all-failing alerts are automatic (they group by `service_name` and
-exclude only maple). Two manual steps:
+Failure + all-failing alerts are automatic (they group by `service_name`).
+`VectorCronjobAllRunsFailing` excludes `maple-graphql-indexer` and
+`offchain-price-backfill`; `VectorCronjobRunFailing` excludes only maple. Two
+manual steps:
 
-1. Add the new **Deployment name** to the `deployment=~"..."` regex in
-   `VectorCronjobWorkerDown` (the kube-state-metrics label is the Deployment
-   name, which may differ from `service_name` — e.g. `spark-anchorage-indexer`).
+1. Add the new **Deployment name** to the `deployment=~"..."` regex in the
+   availability rule that matches its lifecycle — `VectorCronjobWorkerDown` for
+   a scheduled cronjob, `VectorOnDemandWorkerDown` for a `temporal.RunWorker`
+   job. (The kube-state-metrics label is the Deployment name, which may differ
+   from `service_name` — e.g. `spark-anchorage-indexer`.) An on-demand worker
+   must ALSO be added to the `service_name!=` exclusions in
+   `VectorCronjobAllRunsFailing`, or its idle state pages.
 2. Add a row to the table at the top of this runbook.

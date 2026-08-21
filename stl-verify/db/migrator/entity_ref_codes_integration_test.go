@@ -9,8 +9,6 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
-
-	"github.com/archon-research/stl/stl-verify/db/migrator"
 )
 
 // TestEntityRefCodes is the VEC-414 contract test: after migrations, entity_ref_codes accepts a
@@ -18,11 +16,8 @@ import (
 // resolves each code to its latest re-point. This is the resolver the holder step (VEC-417) joins.
 func TestEntityRefCodes(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := setupPostgres(ctx, t)
+	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
-	if err := migrator.New(pool, getMigrationsPath()).ApplyAll(ctx); err != nil {
-		t.Fatalf("migrations: %v", err)
-	}
 
 	// A valid mapping inserts and reads back.
 	if _, err := pool.Exec(ctx,

@@ -16,6 +16,25 @@ spec:
       securityContext:
         seccompProfile:
           type: RuntimeDefault
+      # Keep the two replicas off one node, which is what makes pdb.yaml's
+      # minAvailable: 1 meaningful. Hostname is DoNotSchedule because Karpenter
+      # bin-packs aggressively and a soft constraint would not reliably hold
+      # them apart; the cost is a surge pod pending on rollout until Karpenter
+      # adds a third node. Zone stays best-effort so AZ capacity can't stall a
+      # deploy. VEC-531.
+      topologySpreadConstraints:
+        - topologyKey: kubernetes.io/hostname
+          maxSkew: 1
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: python-api
+        - topologyKey: topology.kubernetes.io/zone
+          maxSkew: 1
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: python-api
       containers:
         - name: python-api
           image: python-api

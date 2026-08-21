@@ -5,12 +5,13 @@ from typing import Annotated, Literal, Union, get_args
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.domain.entities.allocation import EthAddress
+from app.domain.serialization import PlainDecimal
 
 # ---------------------------------------------------------------------------
 # Discriminated details for RrcResult
 # ---------------------------------------------------------------------------
 
-ModelName = Literal["suraf", "gap_sweep"]
+ModelName = Literal["suraf", "gap_sweep", "core_model"]
 
 
 class SurafDetails(BaseModel):
@@ -30,9 +31,9 @@ class SurafDetails(BaseModel):
     risk_model: Literal["suraf"]
     rating_id: str
     rating_version: str
-    crr_pct: Decimal
-    unadjusted_crr_pct: Decimal
-    penalty_pp: Decimal
+    crr_pct: PlainDecimal
+    unadjusted_crr_pct: PlainDecimal
+    penalty_pp: PlainDecimal
     source_commit_sha: str
 
 
@@ -52,16 +53,40 @@ class GapSweepDetails(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     risk_model: Literal["gap_sweep"]
-    gap_pct: Decimal
-    loss_usd: Decimal
+    gap_pct: PlainDecimal
+    loss_usd: PlainDecimal
 
 
-RrcDetails = Annotated[Union[SurafDetails, GapSweepDetails], Field(discriminator="risk_model")]
+class CoreModelDetails(BaseModel):
+    """CORE model-specific output embedded in an RrcResult.
+
+    ``crr_el_pct`` is the expected-loss CRR used as the primary capital
+    charge (0-100 scale, e.g. ``Decimal("12.5")`` means 12.5%).
+    ``hhi`` is the Herfindahl-Hirschman Index of borrower concentration
+    expressed as a percentage; ``None`` when liquidation analysis was
+    not run or the market had fewer than two borrowers.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    risk_model: Literal["core_model"]
+    crr_el_pct: Decimal
+    crr_es_pct: Decimal
+    crr_var_pct: Decimal
+    hhi: Decimal | None
+    protocol: str
+    forecast_step: int
+    n_mc: int
+    copula_type: str
+
+
+RrcDetails = Annotated[Union[SurafDetails, GapSweepDetails, CoreModelDetails], Field(discriminator="risk_model")]
 """Discriminated union of model-specific detail payloads keyed on ``risk_model``."""
 
 _RISK_MODEL_TO_DETAILS: dict[str, type] = {
     "suraf": SurafDetails,
     "gap_sweep": GapSweepDetails,
+    "core_model": CoreModelDetails,
 }
 
 # Catch drift at import time: adding a literal to ``ModelName`` without
@@ -93,8 +118,8 @@ class RrcResult(BaseModel):
 
     asset_id: int
     prime_id: EthAddress
-    rrc_usd: Decimal
-    comparable_crr_pct: Decimal
+    rrc_usd: PlainDecimal
+    comparable_crr_pct: PlainDecimal
     risk_model: ModelName
     details: RrcDetails
 

@@ -1,5 +1,5 @@
+from collections.abc import Callable
 from datetime import datetime
-from decimal import Decimal
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
@@ -7,8 +7,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
-from app.api._validators import EthAddressParam
-from app.api.deps import get_engine
+from app.api._validators import ProxyAddressPathParam
+from app.api.deps import get_engine, get_reference_capital_repository_factory
 from app.api.time_series import (
     TimeSeriesWindow,
     apply_cache_control,
@@ -16,7 +16,9 @@ from app.api.time_series import (
     get_time_series_query_params,
 )
 from app.domain.entities.allocation import EthAddress
+from app.domain.serialization import PlainDecimal
 from app.domain.time_series import TimeSeriesQuery
+from app.ports.reference_capital_repository import ReferenceCapitalRepository
 from app.services.allocation_service import AllocationService
 
 router = APIRouter(tags=["primes", "capital"])
@@ -26,7 +28,7 @@ class ExposureBucketResponse(BaseModel):
     """Priced receipt-token exposure within a single time bucket (LOCF gap-filled)."""
 
     bucket_start: datetime = Field(description="Inclusive start of the time bucket (UTC).")
-    exposure_usd: Decimal | None = Field(
+    exposure_usd: PlainDecimal | None = Field(
         default=None,
         description=(
             "Sum across the prime's receipt-token positions of the carried-forward balance "
@@ -41,6 +43,13 @@ class ExposureEnvelope(BaseModel):
     """Per-prime exposure time series, gap-filled into buckets."""
 
     mode: Literal["aggregated"] = Field(description="Always `aggregated`: a gap-filled time series.")
+    source: Literal["self", "reference"] = Field(
+        default="self",
+        description=(
+            "Provenance of the series. `self` is STL's priced receipt-token exposure; `reference` is "
+            "Sky's Star monitor as observed by STL's syncer, returned when `reference=true`."
+        ),
+    )
     window: TimeSeriesWindow = Field(description="The window and resolution applied to this response.")
     data: list[ExposureBucketResponse] = Field(description="Priced exposure per time bucket.")
 
@@ -63,11 +72,23 @@ async def _get_service(engine: AsyncEngine = Depends(get_engine)) -> AllocationS
     ),
 )
 async def list_prime_exposure(
-    prime_id: EthAddressParam,
+    prime_id: ProxyAddressPathParam,
     response: Response,
     time_series: TimeSeriesQuery = Depends(get_time_series_query_params),
     limit: int = Query(100, ge=1, le=500, description="Max buckets returned (default 100, max 500)."),
+    reference: bool = Query(
+        False,
+        description=(
+            "Serve Sky's Star monitor exposure instead of STL's priced receipt-token exposure. The "
+            "shape is unchanged; `source` reports the provenance. The reference series only extends "
+            "back to when STL first observed the monitor — it publishes no history of its own — so "
+            "earlier buckets are `null`, meaning not yet observed rather than zero."
+        ),
+    ),
     service: AllocationService = Depends(_get_service),
+    reference_repositories: Callable[[], ReferenceCapitalRepository] = Depends(
+        get_reference_capital_repository_factory
+    ),
 ) -> ExposureEnvelope:
     prime_address = EthAddress(prime_id)
     if not await service.prime_exists(prime_address):
@@ -77,6 +98,25 @@ async def list_prime_exposure(
     # is safely cacheable; a defaulted (now-relative) window is not.
     apply_cache_control(response, time_series)
     window = build_window(time_series)
+
+    if reference:
+        reference_buckets = await reference_repositories().list_reference_capital_buckets(
+            prime_address,
+            from_timestamp=time_series.from_timestamp,
+            to_timestamp=time_series.to_timestamp,
+            bucket_seconds=time_series.bucket.total_seconds(),
+            limit=limit,
+        )
+        return ExposureEnvelope(
+            mode="aggregated",
+            source="reference",
+            window=window,
+            data=[
+                ExposureBucketResponse(bucket_start=bucket.bucket_start, exposure_usd=bucket.exposure_usd)
+                for bucket in reference_buckets
+            ],
+        )
+
     buckets = await service.list_exposure_buckets(
         prime_address,
         from_timestamp=time_series.from_timestamp,
@@ -86,6 +126,7 @@ async def list_prime_exposure(
     )
     return ExposureEnvelope(
         mode="aggregated",
+        source="self",
         window=window,
         data=[ExposureBucketResponse(**bucket.__dict__) for bucket in buckets],
     )

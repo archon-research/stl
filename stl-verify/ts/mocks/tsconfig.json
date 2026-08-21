@@ -1,0 +1,10 @@
+{
+  "extends": "@archon-research/tsconfig/node",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM"],
+    "noUncheckedIndexedAccess": true,
+    "types": ["node"],
+    "preserveSymlinks": true
+  },
+  "include": ["src"]
+}

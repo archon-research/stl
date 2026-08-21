@@ -55,7 +55,7 @@ export function TokenAddress({
     minHeight: '11',
     fontFamily: 'mono',
     fontSize: type === 'tx' ? 'xs' : '2xs',
-    color: { base: 'blue.500', _dark: 'blue.400' },
+    color: 'text.link',
     bg: 'transparent',
     border: 'none',
     cursor: 'pointer',
@@ -65,8 +65,10 @@ export function TokenAddress({
     textOverflow: 'ellipsis',
     whiteSpace: 'nowrap',
     textAlign: 'left',
+    // Underline rather than a colour shift: `text.link` and `text.interactive`
+    // resolve to the same value, so there is no darker accent step to move to.
     _hover: {
-      color: 'interactive.accent',
+      textDecoration: 'underline',
     },
     _focus: {
       outline: '2px solid',
@@ -94,7 +96,8 @@ export function TokenAddress({
     try {
       await navigator.clipboard.writeText(address);
     } catch {
-      // Fallback: create a temporary input
+      // Fallback for older browsers: execCommand is deprecated but still works where Clipboard API is unavailable.
+      // Silently fails if neither method succeeds.
       const textarea = document.createElement('textarea');
       textarea.value = address;
       document.body.appendChild(textarea);
@@ -139,7 +142,7 @@ export function TokenAddress({
               borderStyle: 'solid',
               borderWidth: '1px',
               borderColor: 'border.subtle',
-              boxShadow: 'lg',
+              boxShadow: 'overlay',
               minWidth: '200px',
               overflow: 'hidden',
               zIndex: '50',

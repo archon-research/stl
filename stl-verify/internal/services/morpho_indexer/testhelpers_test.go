@@ -3,6 +3,7 @@ package morpho_indexer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"testing"
@@ -10,6 +11,9 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
+	"go.opentelemetry.io/otel/attribute"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
@@ -43,6 +47,7 @@ type serviceTestHarness struct {
 	morphoBlueEventsABI   *abi.ABI
 	metaMorphoEventsABI   *abi.ABI
 	metaMorphoV2AccrueABI *abi.ABI
+	vaultV2EventsABI      *abi.ABI
 }
 
 func newTestHarness(t *testing.T) *serviceTestHarness {
@@ -124,6 +129,10 @@ func newTestHarness(t *testing.T) *serviceTestHarness {
 	if err != nil {
 		t.Fatalf("GetMetaMorphoV2AccrueInterestABI: %v", err)
 	}
+	vaultV2EventsABI, err := abis.GetVaultV2EventsABI()
+	if err != nil {
+		t.Fatalf("GetVaultV2EventsABI: %v", err)
+	}
 
 	return &serviceTestHarness{
 		t:                t,
@@ -145,6 +154,111 @@ func newTestHarness(t *testing.T) *serviceTestHarness {
 		morphoBlueEventsABI:   morphoBlueEventsABI,
 		metaMorphoEventsABI:   metaMorphoEventsABI,
 		metaMorphoV2AccrueABI: v2AccrueABI,
+		vaultV2EventsABI:      vaultV2EventsABI,
+	}
+}
+
+// recordMetrics swaps the service's telemetry for one backed by an in-memory
+// reader, so a test can assert the instrument increments a handler emits. The
+// harness leaves telemetry nil by default (the recorders are nil-safe), which
+// hides those increments.
+func (h *serviceTestHarness) recordMetrics(t *testing.T) sdkmetric.Reader {
+	t.Helper()
+	tel, reader := newRecordingTelemetry(t)
+	h.svc.telemetry = tel
+	return reader
+}
+
+// failCommitAfterMembershipAppend serves every membership append and then fails
+// the commit of the transaction that made one, so a test can prove what the
+// counters claim about rows that never landed. Transactions that appended nothing
+// (the audit-log save) still commit.
+func (h *serviceTestHarness) failCommitAfterMembershipAppend() {
+	appended := false
+	h.morphoRepo.ObserveAdapterMembershipFn = func(_ context.Context, _ pgx.Tx, _ *entity.MorphoAdapterObservation) (int64, bool, error) {
+		appended = true
+		return 42, true, nil
+	}
+	h.txManager.WithTransactionFn = func(_ context.Context, fn func(tx pgx.Tx) error) error {
+		appended = false
+		if err := fn(nil); err != nil {
+			return err
+		}
+		if appended {
+			return errors.New("commit failed")
+		}
+		return nil
+	}
+}
+
+// counterPoints collects the named int64 counter's data points. An instrument
+// that was never recorded yields no points instead of failing, so callers can
+// assert absence as well as presence.
+func counterPoints(t *testing.T, reader sdkmetric.Reader, name string) []metricdata.DataPoint[int64] {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collecting metrics: %v", err)
+	}
+	for _, scope := range rm.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != name {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("metric %q is %T, want metricdata.Sum[int64]", name, m.Data)
+			}
+			return sum.DataPoints
+		}
+	}
+	return nil
+}
+
+// counterValue sums the named counter's points whose attributes include every
+// entry of want. Attributes outside want are ignored, so a test asserts only the
+// labels it cares about.
+func counterValue(t *testing.T, reader sdkmetric.Reader, name string, want map[string]string) int64 {
+	t.Helper()
+	var total int64
+	for _, dp := range counterPoints(t, reader, name) {
+		if hasAttributes(dp.Attributes, want) {
+			total += dp.Value
+		}
+	}
+	return total
+}
+
+func hasAttributes(set attribute.Set, want map[string]string) bool {
+	for k, v := range want {
+		got, ok := set.Value(attribute.Key(k))
+		if !ok || got.AsString() != v {
+			return false
+		}
+	}
+	return true
+}
+
+// makeV2VaultLog builds a VaultV2 event log emitted by vaultAddr: event.ID plus
+// already-encoded indexed topics, with the non-indexed args ABI-packed into
+// data. Mirrors the extractor test's makeV2Log but stamps the vault address and
+// a log index so it flows through processReceipt as a known-vault event.
+func (h *serviceTestHarness) makeV2VaultLog(event abi.Event, vaultAddr common.Address, indexed []common.Hash, nonIndexed ...any) shared.Log {
+	data, err := event.Inputs.NonIndexed().Pack(nonIndexed...)
+	if err != nil {
+		panic(fmt.Sprintf("makeV2VaultLog(%s): %v", event.Name, err))
+	}
+	topics := make([]string, 0, len(indexed)+1)
+	topics = append(topics, event.ID.Hex())
+	for _, hsh := range indexed {
+		topics = append(topics, hsh.Hex())
+	}
+	return shared.Log{
+		Address:         vaultAddr.Hex(),
+		Topics:          topics,
+		Data:            common.Bytes2Hex(data),
+		TransactionHash: testTxHash,
+		LogIndex:        "0x0",
 	}
 }
 
@@ -380,6 +494,28 @@ func (h *serviceTestHarness) vaultMetadataExecuteFn(name, symbol string, asset c
 	}
 }
 
+// assertMulticallPinnedViaHash asserts the multicaller recorded at least one
+// invocation whose first call matches pred, that it arrived through ExecuteAtHash
+// (not the number-pinned Execute), and that it was pinned to wantHash. Used to
+// prove reorg-sensitive reads (e.g. the versioned adapter-set enumeration) are
+// hash-pinned.
+func (h *serviceTestHarness) assertMulticallPinnedViaHash(t *testing.T, wantHash common.Hash, name string, pred func(outbound.Call) bool) {
+	t.Helper()
+	for _, inv := range h.multicaller.Invocations {
+		if len(inv.Calls) == 0 || !pred(inv.Calls[0]) {
+			continue
+		}
+		if !inv.ViaHash {
+			t.Errorf("%s must be hash-pinned (ExecuteAtHash), but it went through Execute", name)
+		}
+		if inv.BlockHash != wantHash {
+			t.Errorf("%s pinned to %s, want %s", name, inv.BlockHash.Hex(), wantHash.Hex())
+		}
+		return
+	}
+	t.Errorf("%s: no matching multicall invocation was recorded", name)
+}
+
 // hasSameSelector returns true if a and b share the same first 4 bytes (the
 // ABI function selector).
 func hasSameSelector(a, b []byte) bool {
@@ -393,6 +529,14 @@ func hasSameSelector(a, b []byte) bool {
 	}
 	return true
 }
+
+// adaptersLengthSelector / adaptersSelector are the enumerable-adapter read
+// selectors on VaultV2 (chain-verified against sparkUSDTbc: adaptersLength()
+// 0x5aa22bc8, adapters(uint256) 0x4ef501ac).
+var (
+	adaptersLengthSelector = []byte{0x5a, 0xa2, 0x2b, 0xc8}
+	adaptersSelector       = []byte{0x4e, 0xf5, 0x01, 0xac}
+)
 
 // --- Event log construction helpers ---
 

@@ -4,3 +4,14 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+  # npm updates are manual-only: trigger via Insights -> Dependency graph -> Dependabot ->
+  # "Check for updates". The yearly interval exists because the schedule key is mandatory.
+  - package-ecosystem: "npm"
+    directory: "/stl-verify/ts"
+    schedule:
+      interval: "yearly"
+    cooldown:
+      default-days: 7 # mirrors .npmrc min-release-age=7
+    ignore:
+      # uikit versions move only through deliberate adoption PRs, never bot PRs
+      - dependency-name: "@archon-research/*"
