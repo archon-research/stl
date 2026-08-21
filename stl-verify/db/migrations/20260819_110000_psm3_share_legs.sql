@@ -106,8 +106,12 @@ CREATE TRIGGER trigger_assign_processing_version
     FOR EACH ROW
 EXECUTE FUNCTION assign_processing_version_psm3_alm_shares();
 
+-- Append-only from birth: the indexer only ever INSERTs (ON CONFLICT DO NOTHING),
+-- so the application role gets no update channel and a future UPDATE/DELETE or
+-- DO UPDATE fails at runtime instead of rewriting history.
 GRANT SELECT ON psm3_alm_shares TO stl_readonly;
-GRANT SELECT, INSERT, UPDATE, DELETE ON psm3_alm_shares TO stl_readwrite;
+GRANT SELECT, INSERT ON psm3_alm_shares TO stl_readwrite;
+REVOKE UPDATE, DELETE ON psm3_alm_shares FROM stl_readwrite;
 
 -- Columnstore/tiering deliberately skipped, matching psm3_reserves: ~600 rows/day
 -- per tracked ALM across 4 chains is not worth the policy overhead.

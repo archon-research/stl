@@ -28,6 +28,7 @@ var convertedAppendOnlyTables = []string{
 	"morpho_adapter_state",
 	"morpho_vault_cap",
 	"morpho_vault_fee",
+	"psm3_alm_shares",
 }
 
 // TestConvertedTablesAreAppendOnly asserts the DB-level half of the append-only rule:
