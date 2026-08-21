@@ -200,10 +200,10 @@ images:
     newTag: "maple-graphql-indexer-3246f8b7b8770945cd0b60620792be55f617fed3"
   - name: morpho-v2-bootstrap
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-cronjob
-    newTag: "morpho-v2-bootstrap-9958da7aa0f0138e5e543c976b164a14a1a0e9bc"
+    newTag: "morpho-v2-bootstrap-458719c551fde313659793a58febcfb8968dfece"
   - name: morpho-vault-backfill
     newName: 579039992622.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelstaging-cronjob
-    newTag: "morpho-vault-backfill-9958da7aa0f0138e5e543c976b164a14a1a0e9bc"
+    newTag: "morpho-vault-backfill-458719c551fde313659793a58febcfb8968dfece"
   - name: cex-orderbook-indexer
     # One image shared by every per-exchange order book pod (coinbase/okx/kraken),
     # selected at runtime via the EXCHANGE env var.
