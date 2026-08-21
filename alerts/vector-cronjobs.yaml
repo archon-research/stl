@@ -251,8 +251,10 @@ groups:
       # transform-worker (VEC-484): queue-drain and parity rules
       # =======================================================================
       # These live here, not in a vector-transform-worker.yaml, because the
-      # rules-sync namespace regex only accepts vector-{watcher,backup-worker,
-      # indexers,psm3,postgres,cronjobs}. The transform-worker cronjob drains a
+      # rules-sync namespace regex (`namespaces-regex` in
+      # .github/workflows/alerts.yml) does not accept a vector-transform-worker
+      # namespace, and the sync derives the namespace from the FILENAME — such a
+      # file would be silently dropped. The transform-worker cronjob drains a
       # per-source change queue (transformed._pending_<t>) into the transformed
       # hypertables. Generic run-failure and worker-liveness above already cover
       # it (service_name / deployment "transform-worker"); these add the
