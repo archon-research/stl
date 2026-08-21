@@ -103,7 +103,15 @@ def _coerce(param: str, raw: str) -> object:
     """Coerce a string env var to the type of the corresponding DEFAULTS entry."""
     default = DEFAULTS.get(param)
     if isinstance(default, bool):
-        return raw.lower() in ("true", "1", "yes")
+        # Strict on purpose: the advisory-bounds decision covers out-of-range
+        # VALUES, not unparseable strings. A typo'd boolean (JUMPS=ture)
+        # silently flipping a model feature off is a typo, not an override.
+        low = raw.lower()
+        if low in ("true", "1", "yes"):
+            return True
+        if low in ("false", "0", "no"):
+            return False
+        raise ValueError(f"invalid boolean for {param}: {raw!r}")
     if isinstance(default, int):
         return int(raw)
     if isinstance(default, float):
