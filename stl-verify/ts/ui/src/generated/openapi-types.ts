@@ -884,6 +884,11 @@ export interface components {
        */
       scope: 'proxy' | 'prime';
       /**
+       * @description Which provenance reported this position. `both` means the two agreed it exists and the figures shown are STL's; `reference` means only Sky reports it, which is either a position STL does not index or one on a chain it does not serve.
+       * @default indexed
+       */
+      source: components['schemas']['Provenance'];
+      /**
        * Symbol
        * @description Display symbol: receipt-token symbol for wrapped positions, asset symbol for direct holdings.
        * @example aUSDC

@@ -137,16 +137,25 @@ function AllocationAssetCell({
 
   return (
     <div className={css({ display: 'grid', gap: '1', minWidth: 0 })}>
-      <p
-        className={css({
-          m: 0,
-          fontSize: 'sm',
-          fontWeight: 'semibold',
-          color: 'text.strong',
-        })}
-      >
-        {allocation.symbol}
-      </p>
+      <div className={flex({ align: 'center', gap: '1.5', wrap: 'wrap' })}>
+        <p
+          className={css({
+            m: 0,
+            fontSize: 'sm',
+            fontWeight: 'semibold',
+            color: 'text.strong',
+          })}
+        >
+          {allocation.symbol}
+        </p>
+        {/* Only the odd ones out are marked. In a merged view most rows are
+            reported by both, so badging those would label almost everything. */}
+        {allocation.source === 'reference' ? (
+          <Badge size="sm" variant="subtle">
+            Sky only
+          </Badge>
+        ) : null}
+      </div>
       <div className={flex({ gap: '1.5', wrap: 'wrap' })}>
         <span
           className={css({

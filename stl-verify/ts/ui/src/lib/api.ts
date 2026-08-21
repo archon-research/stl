@@ -147,9 +147,10 @@ export async function getAllocationsForProxies(
   proxyAddresses: string[],
   signal?: AbortSignal,
 ): Promise<AllocationsResponse> {
-  // Reference rows are prime-scoped (`scope: "prime"`), so every proxy answers
-  // with the same list. Fanning out would show each position once per chain —
-  // exactly the double-count that field warns about.
+  // One call for anything the server answers prime-wide: reference rows are
+  // prime-scoped, and the merged view resolves the prime's proxies itself.
+  // Fanning out either would show each position once per chain — exactly the
+  // double-count the `scope` field warns about.
   if (showsReference) {
     const [first] = proxyAddresses;
     return first === undefined ? [] : getAllocations(first, signal);
