@@ -20,6 +20,7 @@ export type AllocationActivityEnvelope = Schemas['AllocationActivityEnvelope'];
 export type AllocationRiskCapital = Schemas['AllocationRiskCapitalResponse'];
 export type CapitalMetrics = Schemas['CapitalMetricsResponse'];
 export type Chain = Schemas['ChainResponse'];
+export type ChainRiskCapital = Schemas['ChainRiskCapitalResponse'];
 export type DataSource = Schemas['DataSourceResponse'];
 export type ExposureBucket = Schemas['ExposureBucketResponse'];
 export type ExposureEnvelope = Schemas['ExposureEnvelope'];
