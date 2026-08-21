@@ -952,6 +952,19 @@ function App() {
     // One ordinal series token per card, named rather than written out as a
     // `var()` read: the token type is what catches a typo (and a repeat of the
     // collision where two of these cards named the same token unnoticed).
+    //
+    // Sky's figures for the same buckets ride beside STL's under `both`. One
+    // dashed line per chart where the two describe the same quantity: exposure,
+    // capital and debt. Collateral and encumbrance are Sky's alone, so there is
+    // nothing to compare them with. Not a series token: it must not read as a
+    // quantity of its own.
+    const referenceSeries = (
+      points: { label: string; value: number }[],
+    ): NonNullable<MetricChartSpec['reference']> | null =>
+      points.length > 0
+        ? { data: points, stroke: 'var(--colors-text-muted)' }
+        : null;
+
     const charts: MetricChartSpec[] = [
       {
         // Balance reconstructed from signed USD net flows, anchored at the
@@ -968,18 +981,33 @@ function App() {
         // back to the flat current value when no history is available.
         key: 'risk-capital',
         ...seriesOrFallback(exposureSeries, exposureValue),
+        reference: referenceSeries(
+          toChartSeries(exposureBuckets, (bucket) =>
+            parseNumericValue(bucket.reference_exposure_usd),
+          ),
+        ),
         stroke: 'chart.series.secondary',
         formatValue: formatCompactUsd,
       },
       {
         key: 'total-capital',
         ...seriesOrFallback(totalCapitalSeries, totalRiskCapitalValue),
+        reference: referenceSeries(
+          toChartSeries(totalCapitalBuckets, (bucket) =>
+            parseNumericValue(bucket.reference_total_capital_usd),
+          ),
+        ),
         stroke: 'chart.series.quaternary',
         formatValue: formatCompactUsd,
       },
       {
         key: 'prime-debt-exposure',
         ...seriesOrFallback(primeDebtSeries, primeDebtValue),
+        reference: referenceSeries(
+          toChartSeries(debtBuckets, (bucket) =>
+            wadToUnits(bucket.reference_debt_wad),
+          ),
+        ),
         stroke: 'chart.series.quinary',
         formatValue: (value: number) => `${formatCompactNumber(value)} DAI`,
       },
@@ -1016,9 +1044,12 @@ function App() {
     riskCapital?.total_risk_capital_usd,
     chartFromLabel,
     chartToLabel,
+    debtBuckets,
+    exposureBuckets,
     exposureSeries,
     primeDebtSeries,
     primeDebtSnapshot?.debt_wad,
+    totalCapitalBuckets,
     totalCapitalSeries,
     collateralSeries,
     encumbranceSeries,

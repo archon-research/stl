@@ -1,7 +1,8 @@
 import { toProvenance } from '../router/search-params';
 // Selects the provenance every endpoint that supports it answers from:
 //
-//   /allocation                    → source: "indexed"   (STL's own model)
+//   /allocation                    → source: "both"      (merged, the default)
+//   /allocation?source=indexed     → source: "indexed"   (STL's own model)
 //   /allocation?source=reference   → source: "reference" (Sky's published figures)
 //
 // The settings menu writes it; opening the same view twice also works, which is
@@ -34,7 +35,7 @@ export const PROVENANCE: Provenance =
           ? 'indexed'
           : 'reference',
       ) ?? 'indexed')
-    : 'indexed');
+    : 'both');
 
 /**
  * The provenance to request, always stated rather than defaulted.

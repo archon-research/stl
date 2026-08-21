@@ -186,6 +186,11 @@ export function useDataSourceSection(): SettingsSection {
     value: PROVENANCE,
     options: [
       {
+        value: 'both',
+        label: 'Both',
+        description: 'STL and Sky together, each position named once',
+      },
+      {
         value: 'indexed',
         label: 'STL indexed',
         description: "Computed from STL's own on-chain data",
@@ -208,7 +213,7 @@ export function useDataSourceSection(): SettingsSection {
           // The superseded spelling is dropped on the way out, so a link
           // carrying both cannot arrive contradicting itself.
           reference: undefined,
-          source: value === 'indexed' ? undefined : value,
+          source: value === 'both' ? undefined : value,
         }),
       });
       globalThis.location.assign(href);

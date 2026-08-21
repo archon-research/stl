@@ -54,6 +54,11 @@ export type MetricChartSpec = {
   // so overlapping severities read as escalating shade.
   //
   thresholds?: { value: number; label?: string; stroke?: ChartColor }[];
+  // Sky's figures for the same buckets, drawn beside STL's under `source=both`.
+  // A second line rather than a second card: the point is the gap between them.
+  // `ChartColor`, not a series token: it is deliberately not one of the series
+  // hues, so it cannot be mistaken for a quantity of its own.
+  reference?: { data: ChartDatum[]; stroke: ChartColor } | null;
 };
 
 // Every card the metrics band can render. Its length drives both the loading
@@ -343,7 +348,10 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
     [strokeColor],
   );
 
-  const values = chart.data.map((point) => point.value);
+  const values = [
+    ...chart.data.map((point) => point.value),
+    ...(chart.reference?.data ?? []).map((point) => point.value),
+  ];
   const minValue = Math.min(...values);
   const maxValue = Math.max(...values);
 
@@ -427,6 +435,19 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
           yAccessor={(d: ChartDatum) => d.value}
           stroke={strokeColor}
         />
+        {chart.reference && chart.reference.data.length > 0 ? (
+          // Dashed and unfilled: the same figure from a source STL does not
+          // compute, which should not read as a second quantity stacked on the
+          // first.
+          <LineSeries
+            dataKey={`${chart.key}-reference`}
+            data={chart.reference.data}
+            xAccessor={(d: ChartDatum) => d.label}
+            yAccessor={(d: ChartDatum) => d.value}
+            stroke={resolveChartColor(chart.reference.stroke)}
+            strokeDasharray="4 3"
+          />
+        ) : null}
         {thresholds.map((entry) => (
           <ReferenceBand
             key={`threshold-${entry.value}`}
