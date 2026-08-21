@@ -242,9 +242,27 @@ def test_source_indexed_answers_from_stl_own_model(reference_client):
 
 
 @pytest.mark.parametrize("reference_client", [_snapshot()], indirect=True)
-def test_rejects_both_because_the_two_populate_disjoint_fields(reference_client):
-    client, _ = reference_client
+def test_both_keeps_each_provenance_in_its_own_fields(reference_client):
+    # They populate disjoint sets and disagree on what they share, so nothing is
+    # merged into one number.
+    client, self_service = reference_client
+    self_service.compute.return_value = _self_result()
 
-    response = client.get(f"/v1/primes/{_VALID_ADDR}/risk-capital?source=both")
+    body = client.get(f"/v1/primes/{_VALID_ADDR}/risk-capital?source=both").json()
 
-    assert response.status_code == 422
+    assert body["source"] == "both"
+    assert body["prime_exposure_usd"] != body["reference_prime_exposure_usd"]
+    assert body["reference_total_risk_capital_usd"] == "48142491.08"
+    # Sky reports these and STL models none of them.
+    assert body["junior_risk_capital_usd"] is not None
+
+
+@pytest.mark.parametrize("reference_client", [ReferenceDataUnavailableError("boom")], indirect=True)
+def test_both_serves_stl_own_model_when_sky_cannot_be_read(reference_client):
+    client, self_service = reference_client
+    self_service.compute.return_value = _self_result()
+
+    body = client.get(f"/v1/primes/{_VALID_ADDR}/risk-capital?source=both").json()
+
+    assert body["source"] == "indexed"
+    assert body["reference_prime_exposure_usd"] is None

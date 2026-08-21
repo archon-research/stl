@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Callable
 from decimal import Decimal
 
@@ -9,7 +10,6 @@ from app.adapters.postgres.allocation_position_repository import AllocationRepos
 from app.api._validators import ProxyAddressPathParam
 from app.api.deps import get_engine, get_model_registry, get_reference_risk_capital_service_factory
 from app.api.provenance import (
-    INDEXED_OR_REFERENCE,
     get_requested_provenance,
     resolve_or_422,
 )
@@ -23,6 +23,8 @@ from app.domain.serialization import PlainDecimal
 from app.services.model_registry import ModelRegistry
 from app.services.prime_risk_capital_service import PrimeRiskCapitalService
 from app.services.reference_risk_capital_service import ReferenceRiskCapitalService
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["primes", "capital"])
 
@@ -220,6 +222,29 @@ class PrimeRiskCapitalResponse(BaseModel):
         description="Prime this proxy belongs to. `null` for a proxy absent from the axis-synome contract.",
         examples=["spark"],
     )
+    reference_prime_exposure_usd: PlainDecimal | None = Field(
+        default=None,
+        description=(
+            "Sky's reported exposure for the prime, populated only under `source=both`. Beside "
+            "STL's rather than replacing it: STL prices only the chains it indexes, so the two "
+            "differ by that coverage and the gap is the point."
+        ),
+    )
+    reference_prime_required_risk_capital_usd: PlainDecimal | None = Field(
+        default=None,
+        description="Sky's reported required risk capital. Populated only under `source=both`.",
+    )
+    reference_total_risk_capital_usd: PlainDecimal | None = Field(
+        default=None,
+        description="Sky's reported total risk capital. Populated only under `source=both`.",
+    )
+    reference_prime_encumbrance_ratio: PlainDecimal | None = Field(
+        default=None,
+        description=(
+            "Sky's reported encumbrance, its own required over its own total. Populated only under "
+            "`source=both`; never a ratio built from one provenance over the other."
+        ),
+    )
     prime_exposure_usd: PlainDecimal = Field(
         default=Decimal("0"),
         description=(
@@ -374,11 +399,55 @@ async def get_prime_risk_capital(
     if not await service.prime_exists(prime_address):
         raise HTTPException(status_code=404, detail="Prime not found")
 
-    source = resolve_or_422(requested_provenance, available=INDEXED_OR_REFERENCE, default=Provenance.INDEXED)
+    source = resolve_or_422(requested_provenance, available=frozenset(Provenance), default=Provenance.INDEXED)
 
     if source is Provenance.REFERENCE:
         return await _reference_response(prime_address, reference_services())
-    return _self_response(await service.compute(prime_address))
+
+    indexed = _self_response(await service.compute(prime_address))
+    if source is Provenance.INDEXED:
+        return indexed
+
+    return await _with_reference_totals(prime_address, indexed, reference_services())
+
+
+async def _with_reference_totals(
+    prime_address: EthAddress,
+    indexed: PrimeRiskCapitalResponse,
+    reference_service: ReferenceRiskCapitalService,
+) -> PrimeRiskCapitalResponse:
+    """STL's model, plus Sky's totals in their own fields.
+
+    The two cannot share a field: they populate disjoint sets — Sky's junior and
+    senior splits have no STL equivalent, STL's model name has no Sky one — and
+    the figures they do share disagree by STL's chain coverage. An unreadable
+    reference half leaves STL's own answer whole rather than failing it.
+    """
+    try:
+        reference = await _reference_response(prime_address, reference_service)
+    except HTTPException as exc:
+        if exc.status_code not in (404, 502):
+            raise
+        logger.warning(
+            "Serving STL's risk capital alone; the reference half is unavailable",
+            extra={"prime_address": str(prime_address), "status_code": exc.status_code},
+        )
+        return indexed
+
+    return indexed.model_copy(
+        update={
+            "source": Provenance.BOTH,
+            "reference_prime_exposure_usd": reference.prime_exposure_usd,
+            "reference_prime_required_risk_capital_usd": reference.prime_required_risk_capital_usd,
+            "reference_total_risk_capital_usd": reference.total_risk_capital_usd,
+            "reference_prime_encumbrance_ratio": reference.prime_encumbrance_ratio,
+            # Sky reports these and STL models none of them, so they belong to
+            # the merged answer whole.
+            "junior_risk_capital_usd": reference.junior_risk_capital_usd,
+            "senior_risk_capital_usd": reference.senior_risk_capital_usd,
+            "exposure_share": reference.exposure_share,
+        }
+    )
 
 
 def _self_response(result: PrimeRiskCapital) -> PrimeRiskCapitalResponse:

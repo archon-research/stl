@@ -1343,6 +1343,12 @@ export interface components {
        * @example 1459014561.88
        */
       exposure_usd?: string | null;
+      /**
+       * Reference Exposure Usd
+       * @description Sky's reported exposure for the same bucket, populated only under `source=both`. Carried beside STL's rather than replacing it: the two are computed differently and differ by around a percent, which a reader needs shown rather than reconciled.
+       * @example 1461200000.00
+       */
+      reference_exposure_usd?: string | null;
     };
     /**
      * ExposureEnvelope
@@ -1361,7 +1367,7 @@ export interface components {
        */
       mode: 'aggregated';
       /**
-       * @description Provenance the series was answered from. `indexed` is STL's priced receipt-token exposure; `reference` is Sky's Star monitor as observed by STL's syncer.
+       * @description Provenance the series was answered from. `indexed` is STL's priced receipt-token exposure; `reference` is Sky's Star monitor as observed by STL's syncer; `both` fills `exposure_usd` and `reference_exposure_usd` on every bucket.
        * @default indexed
        */
       source: components['schemas']['Provenance'];
@@ -1414,6 +1420,12 @@ export interface components {
        * @example 1234567890000000000000
        */
       debt_wad?: string | null;
+      /**
+       * Reference Debt Wad
+       * @description Sky's reported debt for the same bucket in the same unit, populated only under `source=both`. Beside the on-chain figure rather than replacing it.
+       * @example 2645260280720000000000000000
+       */
+      reference_debt_wad?: string | null;
     };
     /**
      * PrimeDebtEnvelope
@@ -1703,6 +1715,26 @@ export interface components {
        * @example 0x1601843c5e9bc251a3272907010afa41fa18347e
        */
       proxy_address: string;
+      /**
+       * Reference Prime Encumbrance Ratio
+       * @description Sky's reported encumbrance, its own required over its own total. Populated only under `source=both`; never a ratio built from one provenance over the other.
+       */
+      reference_prime_encumbrance_ratio?: string | null;
+      /**
+       * Reference Prime Exposure Usd
+       * @description Sky's reported exposure for the prime, populated only under `source=both`. Beside STL's rather than replacing it: STL prices only the chains it indexes, so the two differ by that coverage and the gap is the point.
+       */
+      reference_prime_exposure_usd?: string | null;
+      /**
+       * Reference Prime Required Risk Capital Usd
+       * @description Sky's reported required risk capital. Populated only under `source=both`.
+       */
+      reference_prime_required_risk_capital_usd?: string | null;
+      /**
+       * Reference Total Risk Capital Usd
+       * @description Sky's reported total risk capital. Populated only under `source=both`.
+       */
+      reference_total_risk_capital_usd?: string | null;
       /**
        * Required Risk Capital Usd
        * @description Σ per-allocation RRC from the default model (USD). Under `reference=true` this is upstream's own Required Risk Capital total; no model runs.
@@ -2381,6 +2413,12 @@ export interface components {
        * @example 0.9397
        */
       encumbrance_ratio?: string | null;
+      /**
+       * Reference Total Capital Usd
+       * @description Sky's reported total risk capital for the same bucket, populated only under `source=both`. Beside STL's rather than replacing it: the two are computed differently, and a reader needs the gap shown rather than reconciled.
+       * @example 48142491.08
+       */
+      reference_total_capital_usd?: string | null;
       /**
        * Total Capital Usd
        * @description Last observed SubProxy treasury USDS balance carried forward into the bucket (USD; USDS is dollar-pegged), serialized as a JSON string. `null` for leading buckets before the first observation.
