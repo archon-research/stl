@@ -87,3 +87,9 @@ it with `jq`, which rejects JSONC.
   ships msw, the fixtures and `mockServiceWorker.js`, which is what a static
   offline demo or a Playwright target needs. Without the flag a `closeBundle`
   plugin asserts the worker script is gone.
+- **`ui/public/mockServiceWorker.js` is a copy, and copies go stale.** msw's CLI
+  wrote it, and nothing in the package pins the version it was written for, so an
+  msw bump leaves the browser registering a worker that no longer speaks to the
+  library — every request reaching the network as though the mocks were not
+  installed. `npm run test:mock-worker -w ui` byte-compares it against the
+  installed copy and CI runs it; when it fails, `npx msw init` in `ui` is the fix.
