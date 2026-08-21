@@ -27,20 +27,21 @@ spec:
           env:
             - name: CORE_MODEL_MARKET_KEY
               value: "all"
-          # Deliberately far larger than the other cronjobs. They stay at
-          # 50m/64Mi because their tick is IO against an external API; this
-          # tick is the GARCH fit and Monte Carlo itself, in-process and
-          # single-threaded (forecaster.py pins the MC to n_jobs=1 -- loky
-          # workers would multiply the per-scenario tensors). Measured: the
-          # heaviest parquet market peaks at ~8.0 GiB at the N_MC=10000
-          # default, ABOVE this limit. Dev and staging cap N_MC at 100 in
-          # their overlays; raising toward the default (or registering in
-          # prod) must first re-measure and raise this limit or lower N_MC.
+          # Larger than the other cronjobs (50m/64Mi, IO against an external
+          # API): this tick is the GARCH fit and Monte Carlo itself,
+          # in-process and single-threaded (forecaster.py pins the MC to
+          # n_jobs=1 -- loky workers would multiply the per-scenario tensors;
+          # the calibrator backtest still runs 4 joblib workers, hence the cpu
+          # limit). Memory scales with N_MC -- measured on the heaviest
+          # parquet market: ~0.4 GiB at N_MC=100, ~8.0 GiB at the 10000
+          # default. Sized for the capped runs (dev and staging both pin
+          # N_MC=100 in their overlays); raising the cap must raise this
+          # limit with it, from a fresh measurement.
           resources:
             requests:
-              cpu: "1"
-              memory: "2Gi"
+              cpu: "250m"
+              memory: "512Mi"
             limits:
               cpu: "4"
-              memory: "8Gi"
+              memory: "1Gi"
       terminationGracePeriodSeconds: 60

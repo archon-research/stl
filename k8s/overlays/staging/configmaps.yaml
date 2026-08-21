@@ -611,6 +611,7 @@ data:
   # deleted there and the worker restarted (stl-verify/AGENTS.md).
   CORE_MODEL_RUN_INTERVAL_HOURS: "24"
   # Deliberately tiny while staging only validates the pipeline end to end:
-  # the heaviest market peaks at ~8.0 GiB at the N_MC=10000 default, above the
-  # pod's 8Gi limit. Raise only together with the deployment's memory limit.
+  # the pod's memory limit is sized for this cap (~0.4 GiB measured on the
+  # heaviest market; the N_MC=10000 default peaks at ~8.0 GiB). Raise only
+  # together with the deployment's memory limit.
   CORE_MODEL_N_MC: "100"
