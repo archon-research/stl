@@ -16,74 +16,40 @@ export const CHAINS: readonly Chain[] = [
   { chain_id: 43114, name: 'Avalanche C-Chain' },
 ];
 
-export const PROTOCOLS: readonly Protocol[] = [
-  {
-    id: 1,
-    chain_id: 1,
-    encode: 'c13e21b648a5ee794902342038ff3adab66be987',
-    name: 'SparkLend',
-  },
-  {
-    id: 2,
-    chain_id: 1,
-    encode: '7d2768de32b0b80b7a3454c06bdac94a69ddc7a9',
-    name: 'Aave V2',
-  },
-  {
-    id: 3,
-    chain_id: 1,
-    encode: '87870bca3f3fd6335c3f4ce8392d69350b4fa4e2',
-    name: 'Aave V3',
-  },
-  {
-    id: 4,
-    chain_id: 1,
-    encode: '4e033931ad43597d96d6bcc25c280717730b58b1',
-    name: 'Aave V3 Lido',
-  },
-  {
-    id: 6,
-    chain_id: 1,
-    encode: 'bbbbbbbbbb9cc5e90e3b3af64bdaf62c37eeffcb',
-    name: 'Morpho Blue',
-  },
-  {
-    id: 6330502,
-    chain_id: 1,
-    encode: '804a6f5f667170f545bf14e5ddb48c70b788390c',
-    name: 'maple',
-  },
-  {
-    id: 7343805,
-    chain_id: 1,
-    encode: '6a8cbed756804b16e05e741edabd5cb544ae21bf',
-    name: 'Curve',
-  },
-  {
-    id: 7343806,
-    chain_id: 1,
-    encode: '1f98431c8ad98523631ae4a59f267346ea31f984',
-    name: 'UniswapV3',
-  },
-  {
-    id: 7909060,
-    chain_id: 1,
-    encode: '52aa899454998be5b000ad077a46bbe360f4e497',
-    name: 'fluid',
-  },
-  {
-    id: 10530259,
-    chain_id: 8453,
-    encode: 'bbbbbbbbbb9cc5e90e3b3af64bdaf62c37eeffcb',
-    name: 'Morpho Blue',
-  },
-  {
-    id: 100446,
-    chain_id: 43114,
-    encode: '794a61358d6845594f94dc1db02a252b5b4814ad',
-    name: 'Aave V3 Avalanche',
-  },
+/**
+ * Column types come off `Protocol` itself rather than being spelled `number` and
+ * `string`, so a renamed or retyped field breaks the table, not just the row
+ * bodies. Every row table below is typed the same way.
+ */
+type ProtocolRow = readonly [
+  id: Protocol['id'],
+  chain_id: Protocol['chain_id'],
+  encode: Protocol['encode'],
+  name: Protocol['name'],
 ];
+
+const PROTOCOL_ROWS: readonly ProtocolRow[] = [
+  [1, 1, 'c13e21b648a5ee794902342038ff3adab66be987', 'SparkLend'],
+  [2, 1, '7d2768de32b0b80b7a3454c06bdac94a69ddc7a9', 'Aave V2'],
+  [3, 1, '87870bca3f3fd6335c3f4ce8392d69350b4fa4e2', 'Aave V3'],
+  [4, 1, '4e033931ad43597d96d6bcc25c280717730b58b1', 'Aave V3 Lido'],
+  [6, 1, 'bbbbbbbbbb9cc5e90e3b3af64bdaf62c37eeffcb', 'Morpho Blue'],
+  [6330502, 1, '804a6f5f667170f545bf14e5ddb48c70b788390c', 'maple'],
+  [7343805, 1, '6a8cbed756804b16e05e741edabd5cb544ae21bf', 'Curve'],
+  [7343806, 1, '1f98431c8ad98523631ae4a59f267346ea31f984', 'UniswapV3'],
+  [7909060, 1, '52aa899454998be5b000ad077a46bbe360f4e497', 'fluid'],
+  [10530259, 8453, 'bbbbbbbbbb9cc5e90e3b3af64bdaf62c37eeffcb', 'Morpho Blue'],
+  [
+    100446,
+    43114,
+    '794a61358d6845594f94dc1db02a252b5b4814ad',
+    'Aave V3 Avalanche',
+  ],
+];
+
+export const PROTOCOLS: readonly Protocol[] = PROTOCOL_ROWS.map(
+  ([id, chain_id, encode, name]): Protocol => ({ id, chain_id, encode, name }),
+);
 
 export const SPARK_VAULT = '0x691a6c29e9e96dd897718305427ad5d534db16ba';
 export const GROVE_VAULT = '0x26512a41c8406800f21094a7a7a0f980f6e25d43';
@@ -110,67 +76,47 @@ export type SeededPrime = Prime & {
   prime_vault_address: string;
 };
 
+/** Identical across a prime's proxies, which is what the UI groups rows by. */
+const PRIME_VAULTS: Readonly<Record<PrimeName, string>> = {
+  spark: SPARK_VAULT,
+  grove: GROVE_VAULT,
+};
+
+type PrimeRow = readonly [
+  address: SeededPrime['address'],
+  name: PrimeName,
+  chain_id: SeededPrime['chain_id'],
+  chain: SeededPrime['chain'],
+];
+
 /**
  * Two primes, six ALM proxies. Kept whole: `name` repeating across proxies and
  * grouping by `prime_vault_address` is exactly what the UI's prime grouping is
  * built on, so a one-prime fixture would leave that untested.
  */
-export const PRIMES: readonly SeededPrime[] = [
-  {
-    id: SPARK_MAINNET_PROXY,
-    name: 'spark',
-    address: SPARK_MAINNET_PROXY,
-    chain_id: 1,
-    chain: 'mainnet',
-    role: 'alm',
-    prime_vault_address: SPARK_VAULT,
-  },
-  {
-    id: SPARK_BASE_PROXY,
-    name: 'spark',
-    address: SPARK_BASE_PROXY,
-    chain_id: 8453,
-    chain: 'base',
-    role: 'alm',
-    prime_vault_address: SPARK_VAULT,
-  },
-  {
-    id: GROVE_MAINNET_PROXY,
-    name: 'grove',
-    address: GROVE_MAINNET_PROXY,
-    chain_id: 1,
-    chain: 'mainnet',
-    role: 'alm',
-    prime_vault_address: GROVE_VAULT,
-  },
-  {
-    id: GROVE_AVALANCHE_PROXY,
-    name: 'grove',
-    address: GROVE_AVALANCHE_PROXY,
-    chain_id: 43114,
-    chain: 'avalanche-c',
-    role: 'alm',
-    prime_vault_address: GROVE_VAULT,
-  },
-  {
-    id: GROVE_BASE_PROXY,
-    name: 'grove',
-    address: GROVE_BASE_PROXY,
-    chain_id: 8453,
-    chain: 'base',
-    role: 'alm',
-    prime_vault_address: GROVE_VAULT,
-  },
-  {
-    id: SPARK_AVALANCHE_PROXY,
-    name: 'spark',
-    address: SPARK_AVALANCHE_PROXY,
-    chain_id: 43114,
-    chain: 'avalanche-c',
-    role: 'alm',
-    prime_vault_address: SPARK_VAULT,
-  },
+const PRIME_ROWS: readonly PrimeRow[] = [
+  [SPARK_MAINNET_PROXY, 'spark', 1, 'mainnet'],
+  [SPARK_BASE_PROXY, 'spark', 8453, 'base'],
+  [GROVE_MAINNET_PROXY, 'grove', 1, 'mainnet'],
+  [GROVE_AVALANCHE_PROXY, 'grove', 43114, 'avalanche-c'],
+  [GROVE_BASE_PROXY, 'grove', 8453, 'base'],
+  [SPARK_AVALANCHE_PROXY, 'spark', 43114, 'avalanche-c'],
 ];
+
+export const PRIMES: readonly SeededPrime[] = PRIME_ROWS.map(
+  ([address, name, chain_id, chain]): SeededPrime => ({
+    // The document deprecates `id` as byte-identical to `address` in the same
+    // row; carrying it as a column would let the fixture contradict that.
+    id: address,
+    name,
+    address,
+    chain_id,
+    chain,
+    // The endpoint lists allocation venues only, so every row is an ALM proxy.
+    role: 'alm',
+    prime_vault_address: PRIME_VAULTS[name],
+  }),
+);
 
 export const USDS = '0xdc035d45d973e3ec169d2276ddab16f1e407384f';
 export const USDT = '0xdac17f958d2ee523a2206206994597c13d831ec7';
@@ -185,236 +131,103 @@ export const AAVAUSDC = '0x625e7708f30ca75bfd92586e17077590c60eb4cd';
 
 /**
  * 500 staging rows trimmed to 24: every id the allocation, activity, risk and
- * price fixtures reference, plus the zero-address row, which is the only one in
- * staging with a null `symbol` and a zero `decimals` — the shape the UI's token
- * formatting has to survive. `check-mock-api.mjs` asserts that "every id
- * resolves" half, across all proxies.
+ * price fixtures reference, plus the zero-address row below.
+ * `check-mock-api.mjs` asserts that "every id resolves" half, across all
+ * proxies.
  *
  * `updated_at` is the only timestamp in the fixture set that is deliberately
- * absolute: registry rows are months old by design and sit in no window.
+ * absolute: registry rows are months old by design and sit in no window, which
+ * is why the row tables below carry no column for it.
  *
  * Staging carries two rows for `spUSDS` (ids 736 and 858954, one address).
  * Normalised here to 736, the id the allocation rows point at, because a fixture
  * exists to be coherent rather than to reproduce an upstream duplicate.
  */
-export const TOKENS: readonly Token[] = [
-  {
-    id: 1,
-    chain_id: 1,
-    address: DAI,
-    symbol: 'DAI',
-    decimals: 18,
-    updated_at: FIXTURE_ANCHOR_ISO,
-    metadata: null,
-  },
-  {
-    id: 3,
-    chain_id: 1,
-    address: USDC,
-    symbol: 'USDC',
-    decimals: 6,
-    updated_at: FIXTURE_ANCHOR_ISO,
-    metadata: null,
-  },
-  {
-    id: 4,
-    chain_id: 1,
-    address: WETH,
-    symbol: 'WETH',
-    decimals: 18,
-    updated_at: FIXTURE_ANCHOR_ISO,
-    metadata: null,
-  },
-  {
-    id: 6,
-    chain_id: 1,
-    address: '0x2260fac5e5542a773aa44fbcfedf7c193bc2c599',
-    symbol: 'WBTC',
-    decimals: 8,
-    updated_at: FIXTURE_ANCHOR_ISO,
-    metadata: null,
-  },
-  {
-    id: 9,
-    chain_id: 1,
-    address: USDT,
-    symbol: 'USDT',
-    decimals: 6,
-    updated_at: FIXTURE_ANCHOR_ISO,
-    metadata: null,
-  },
-  {
-    id: 11,
-    chain_id: 1,
-    address: '0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf',
-    symbol: 'cbBTC',
-    decimals: 8,
-    updated_at: FIXTURE_ANCHOR_ISO,
-    metadata: null,
-  },
-  {
-    id: 12,
-    chain_id: 1,
-    address: SUSDS,
-    symbol: 'sUSDS',
-    decimals: 18,
-    updated_at: FIXTURE_ANCHOR_ISO,
-    metadata: null,
-  },
-  {
-    id: 13,
-    chain_id: 1,
-    address: USDS,
-    symbol: 'USDS',
-    decimals: 18,
-    updated_at: FIXTURE_ANCHOR_ISO,
-    metadata: null,
-  },
-  {
-    id: 18,
-    chain_id: 1,
-    address: PYUSD,
-    symbol: 'PYUSD',
-    decimals: 6,
-    updated_at: FIXTURE_ANCHOR_ISO,
-    metadata: null,
-  },
-  {
-    id: 34,
-    chain_id: 1,
-    address: '0x23878914efe38d27c4d67ab83ed1b93a74d4086a',
-    symbol: 'aEthUSDT',
-    decimals: 6,
-    updated_at: FIXTURE_ANCHOR_ISO,
-    metadata: {},
-  },
-  {
-    id: 269,
-    chain_id: 1,
-    address: '0x59cd1c87501baa753d0b5b5ab5d8416a45cd71db',
-    symbol: 'spWETH',
-    decimals: 18,
-    updated_at: FIXTURE_ANCHOR_ISO,
-    metadata: {},
-  },
-  {
-    id: 302,
-    chain_id: 1,
-    address: '0x0000000000000000000000000000000000000000',
-    symbol: null,
-    decimals: 0,
-    updated_at: FIXTURE_ANCHOR_ISO,
-    metadata: {},
-  },
-  {
-    id: 338,
-    chain_id: 1,
-    address: '0xe7df13b8e3d6740fe17cbe928c7334243d86c92f',
-    symbol: 'spUSDT',
-    decimals: 6,
-    updated_at: FIXTURE_ANCHOR_ISO,
-    metadata: {},
-  },
-  {
-    id: 723,
-    chain_id: 1,
-    address: '0x4dedf26112b3ec8ec46e7e31ea5e123490b05b8b',
-    symbol: 'spDAI',
-    decimals: 18,
-    updated_at: FIXTURE_ANCHOR_ISO,
-    metadata: {},
-  },
-  {
-    id: 735,
-    chain_id: 1,
-    address: '0x779224df1c756b4edd899854f32a53e8c2b2ce5d',
-    symbol: 'spPYUSD',
-    decimals: 6,
-    updated_at: FIXTURE_ANCHOR_ISO,
-    metadata: {},
-  },
-  {
-    id: 736,
-    chain_id: 1,
-    address: SPUSDS,
-    symbol: 'spUSDS',
-    decimals: 18,
-    updated_at: FIXTURE_ANCHOR_ISO,
-    metadata: {},
-  },
-  {
-    id: 850711,
-    chain_id: 1,
-    address: '0x80ac24aa929eaf5013f6436cda2a7ba190f5cc0b',
-    symbol: 'syrupUSDC',
-    decimals: 6,
-    updated_at: FIXTURE_ANCHOR_ISO,
-    metadata: {},
-  },
-  {
-    id: 885660,
-    chain_id: 1,
-    address: '0x56a76b428244a50513ec81e225a293d128fd581d',
-    symbol: 'sparkUSDCbc',
-    decimals: 6,
-    updated_at: FIXTURE_ANCHOR_ISO,
-    metadata: {},
-  },
-  {
-    id: 892750,
-    chain_id: 1,
-    address: '0x73e65dbd630f90604062f6e02fab9138e713edd9',
-    symbol: 'spDAI',
-    decimals: 18,
-    updated_at: FIXTURE_ANCHOR_ISO,
-    metadata: {},
-  },
-  {
-    id: 5,
-    chain_id: 1,
-    address: '0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0',
-    symbol: 'wstETH',
-    decimals: 18,
-    updated_at: FIXTURE_ANCHOR_ISO,
-    metadata: null,
-  },
-  {
-    id: 10,
-    chain_id: 1,
-    address: '0xcd5fe23c85820f7b72d0926fc9b05b43e359b7ee',
-    symbol: 'weETH',
-    decimals: 18,
-    updated_at: FIXTURE_ANCHOR_ISO,
-    metadata: null,
-  },
-  {
-    id: 2,
-    chain_id: 1,
-    address: '0x83f20f44975d03b1b09e64809b757c47f942beea',
-    symbol: 'sDAI',
-    decimals: 18,
-    updated_at: FIXTURE_ANCHOR_ISO,
-    metadata: null,
-  },
-  {
-    id: 1301,
-    chain_id: 43114,
-    address: USDC_AVALANCHE,
-    symbol: 'USDC',
-    decimals: 6,
-    updated_at: FIXTURE_ANCHOR_ISO,
-    metadata: null,
-  },
-  {
-    id: 1302,
-    chain_id: 43114,
-    address: AAVAUSDC,
-    symbol: 'aAvaUSDC',
-    decimals: 6,
-    updated_at: FIXTURE_ANCHOR_ISO,
-    metadata: {},
-  },
+type TokenRow = readonly [
+  id: Token['id'],
+  chain_id: Token['chain_id'],
+  address: Token['address'],
+  symbol: Token['symbol'],
+  decimals: Token['decimals'],
+  metadata: Token['metadata'],
 ];
+
+const TOKEN_ROWS: readonly TokenRow[] = [
+  [1, 1, DAI, 'DAI', 18, null],
+  [3, 1, USDC, 'USDC', 6, null],
+  [4, 1, WETH, 'WETH', 18, null],
+  [6, 1, '0x2260fac5e5542a773aa44fbcfedf7c193bc2c599', 'WBTC', 8, null],
+  [9, 1, USDT, 'USDT', 6, null],
+  [11, 1, '0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf', 'cbBTC', 8, null],
+  [12, 1, SUSDS, 'sUSDS', 18, null],
+  [13, 1, USDS, 'USDS', 18, null],
+  [18, 1, PYUSD, 'PYUSD', 6, null],
+  [34, 1, '0x23878914efe38d27c4d67ab83ed1b93a74d4086a', 'aEthUSDT', 6, {}],
+  [269, 1, '0x59cd1c87501baa753d0b5b5ab5d8416a45cd71db', 'spWETH', 18, {}],
+  // Staging's only null `symbol` and zero `decimals` — the shape the UI's token
+  // formatting has to survive.
+  [302, 1, '0x0000000000000000000000000000000000000000', null, 0, {}],
+  [338, 1, '0xe7df13b8e3d6740fe17cbe928c7334243d86c92f', 'spUSDT', 6, {}],
+  [723, 1, '0x4dedf26112b3ec8ec46e7e31ea5e123490b05b8b', 'spDAI', 18, {}],
+  [735, 1, '0x779224df1c756b4edd899854f32a53e8c2b2ce5d', 'spPYUSD', 6, {}],
+  [736, 1, SPUSDS, 'spUSDS', 18, {}],
+  [850711, 1, '0x80ac24aa929eaf5013f6436cda2a7ba190f5cc0b', 'syrupUSDC', 6, {}],
+  [
+    885660,
+    1,
+    '0x56a76b428244a50513ec81e225a293d128fd581d',
+    'sparkUSDCbc',
+    6,
+    {},
+  ],
+  [892750, 1, '0x73e65dbd630f90604062f6e02fab9138e713edd9', 'spDAI', 18, {}],
+  [5, 1, '0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0', 'wstETH', 18, null],
+  [10, 1, '0xcd5fe23c85820f7b72d0926fc9b05b43e359b7ee', 'weETH', 18, null],
+  [2, 1, '0x83f20f44975d03b1b09e64809b757c47f942beea', 'sDAI', 18, null],
+  [1301, 43114, USDC_AVALANCHE, 'USDC', 6, null],
+  [1302, 43114, AAVAUSDC, 'aAvaUSDC', 6, {}],
+];
+
+export const TOKENS: readonly Token[] = TOKEN_ROWS.map(
+  ([id, chain_id, address, symbol, decimals, metadata]): Token => ({
+    id,
+    chain_id,
+    address,
+    symbol,
+    decimals,
+    updated_at: FIXTURE_ANCHOR_ISO,
+    metadata,
+  }),
+);
+
+const TOKENS_BY_ID: ReadonlyMap<number, Token> = new Map(
+  TOKENS.map((row): [number, Token] => [row.id, row]),
+);
+
+/**
+ * The registry row an id names. Throws instead of answering `undefined`: the
+ * position fixtures read symbol, address and chain off a token id the way the
+ * responses denormalise them, so a dangling id has to fail while the fixture is
+ * being built rather than reach a response body as a hole.
+ */
+export function tokenById(id: number): Token {
+  const token = TOKENS_BY_ID.get(id);
+  if (token === undefined) {
+    throw new Error(`no TOKENS row for token id ${id}`);
+  }
+
+  return token;
+}
+
+/** The responses type a position's symbol non-null; only id 302 has none. */
+export function tokenSymbol(id: number): string {
+  const symbol = tokenById(id).symbol ?? null;
+  if (symbol === null) {
+    throw new Error(`TOKENS row ${id} carries no symbol`);
+  }
+
+  return symbol;
+}
 
 /**
  * Oracle prices by token id. USDS is the one real capture; the rest are the
