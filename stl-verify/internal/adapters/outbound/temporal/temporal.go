@@ -1,4 +1,10 @@
-// Package temporal provides shared infrastructure for Temporal cronjob workers.
+// Package temporal provides shared infrastructure for Temporal workers.
+//
+// Two lifecycles are supported. Schedule-driven jobs use RunCronjob, which
+// creates a Temporal schedule and runs the generic cronjobWorkflow on it.
+// Hand-triggered jobs use RunWorker (see ondemand.go), which creates no schedule
+// and registers a workflow that accepts parameters — the shape a backfill needs,
+// because its range comes from whoever starts the run.
 //
 // To create a new cronjob, define a CronjobConfig and call RunCronjob.
 // Only Name, IntervalDefault, and Setup are required:
@@ -24,6 +30,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -99,53 +106,14 @@ func RunCronjob(ctx context.Context, meta BuildMeta, cfg CronjobConfig) error {
 	if err := cfg.validate(); err != nil {
 		return fmt.Errorf("validating cronjob config: %w", err)
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: env.ParseLogLevel(slog.LevelInfo),
-	}))
-	slog.SetDefault(logger)
 
-	logger.Info("starting "+cfg.Name+" worker",
-		"commit", meta.Commit,
-		"branch", meta.Branch,
-		"buildTime", meta.BuildTime,
-	)
-
-	// Without this, OTel instruments created from the global providers (e.g.
-	// the maple-graphql-indexer service telemetry) would silently be no-ops.
-	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
-		ServiceName:    cfg.Name,
-		ServiceVersion: meta.Commit,
-		BuildTime:      meta.BuildTime,
-		Logger:         logger,
-	})
+	boot, err := newBootstrap(ctx, meta, cfg.Name, cfg.OpenDatabase)
 	if err != nil {
-		return fmt.Errorf("initializing telemetry: %w", err)
+		return err
 	}
-	defer shutdownOTEL(context.Background())
-	if env.Get("OTEL_EXPORTER_OTLP_ENDPOINT", "") == "" {
-		logger.Warn("OTEL_EXPORTER_OTLP_ENDPOINT is not set; metrics are NOT exported anywhere")
-	}
+	defer boot.close()
 
-	pool, err := cfg.OpenDatabase(ctx)
-	if err != nil {
-		return fmt.Errorf("connecting to database: %w", err)
-	}
-	defer pool.Close()
-
-	temporalClient, err := createClient()
-	if err != nil {
-		return fmt.Errorf("creating temporal client: %w", err)
-	}
-	defer temporalClient.Close()
-
-	if err := waitForServer(ctx, temporalClient, logger); err != nil {
-		return fmt.Errorf("waiting for Temporal: %w", err)
-	}
-
-	runner, err := cfg.Setup(ctx, Dependencies{
-		Pool:   pool,
-		Logger: logger,
-	})
+	runner, err := cfg.Setup(ctx, boot.dependencies())
 	if err != nil {
 		return fmt.Errorf("setting up %s: %w", cfg.Name, err)
 	}
@@ -161,22 +129,123 @@ func RunCronjob(ctx context.Context, meta BuildMeta, cfg CronjobConfig) error {
 	}
 
 	taskQueue := cfg.Name
-	w := worker.New(temporalClient, taskQueue, worker.Options{})
+	w := worker.New(boot.client, taskQueue, worker.Options{})
 	w.RegisterWorkflow(cronjobWorkflow)
 	w.RegisterActivity(activities)
 
-	if err := ensureSchedule(ctx, temporalClient, logger, taskQueue, cfg); err != nil {
+	if err := ensureSchedule(ctx, boot.client, boot.logger, taskQueue, cfg); err != nil {
 		return fmt.Errorf("ensuring schedule: %w", err)
 	}
 
-	logger.Info("starting worker", "taskQueue", taskQueue)
+	boot.logger.Info("starting worker", "taskQueue", taskQueue)
 
 	if err := w.Run(interruptFromContext(ctx)); err != nil {
 		return fmt.Errorf("running worker: %w", err)
 	}
 
-	logger.Info("worker stopped")
+	boot.logger.Info("worker stopped")
 	return nil
+}
+
+// bootstrap is the infrastructure every Temporal worker in this package needs,
+// whether it is schedule-driven (RunCronjob) or on-demand (RunWorker).
+type bootstrap struct {
+	logger *slog.Logger
+	pool   *pgxpool.Pool
+	client client.Client
+
+	// opened holds one closer per acquired resource, in acquisition order. Both
+	// the failure path inside newBootstrap and close() unwind this same list, so
+	// a resource added later cannot be released in one path and leaked in the
+	// other.
+	opened []func()
+}
+
+// newBootstrap wires logging, global OTel providers, the app database and a live
+// Temporal client, in that order.
+//
+// The ordering is load-bearing: OTel providers must be installed BEFORE anything
+// else is constructed, because service telemetry creates its instruments from the
+// global providers at construction time and would otherwise bind to no-ops for
+// the process lifetime.
+func newBootstrap(
+	ctx context.Context,
+	meta BuildMeta,
+	name string,
+	openDatabase func(context.Context) (*pgxpool.Pool, error),
+) (*bootstrap, error) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: env.ParseLogLevel(slog.LevelInfo),
+	}))
+	slog.SetDefault(logger)
+
+	logger.Info("starting "+name+" worker",
+		"commit", meta.Commit,
+		"branch", meta.Branch,
+		"buildTime", meta.BuildTime,
+	)
+
+	// Unwinds whatever has been opened so far when a later step fails; without
+	// it an early failure would leak the pool or the OTel exporter goroutines.
+	var opened []func()
+	unwind := func() {
+		for _, v := range slices.Backward(opened) {
+			v()
+		}
+	}
+
+	shutdownOTEL, err := telemetry.InitOTEL(ctx, telemetry.OTELConfig{
+		ServiceName:    name,
+		ServiceVersion: meta.Commit,
+		BuildTime:      meta.BuildTime,
+		Logger:         logger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("initializing telemetry: %w", err)
+	}
+	// A fresh context, not ctx: by shutdown time the caller's ctx is normally
+	// already cancelled, which would abort the final metric flush.
+	opened = append(opened, func() { shutdownOTEL(context.Background()) })
+	if env.Get("OTEL_EXPORTER_OTLP_ENDPOINT", "") == "" {
+		logger.Warn("OTEL_EXPORTER_OTLP_ENDPOINT is not set; metrics are NOT exported anywhere")
+	}
+
+	pool, err := openDatabase(ctx)
+	if err != nil {
+		unwind()
+		return nil, fmt.Errorf("connecting to database: %w", err)
+	}
+	opened = append(opened, pool.Close)
+
+	temporalClient, err := createClient()
+	if err != nil {
+		unwind()
+		return nil, fmt.Errorf("creating temporal client: %w", err)
+	}
+	opened = append(opened, temporalClient.Close)
+
+	if err := waitForServer(ctx, temporalClient, logger); err != nil {
+		unwind()
+		return nil, fmt.Errorf("waiting for Temporal: %w", err)
+	}
+
+	return &bootstrap{
+		logger: logger,
+		pool:   pool,
+		client: temporalClient,
+		opened: opened,
+	}, nil
+}
+
+func (b *bootstrap) dependencies() Dependencies {
+	return Dependencies{Pool: b.pool, Logger: b.logger}
+}
+
+// close releases everything newBootstrap opened, in reverse order.
+func (b *bootstrap) close() {
+	for _, v := range slices.Backward(b.opened) {
+		v()
+	}
 }
 
 // ---------------------------------------------------------------------------

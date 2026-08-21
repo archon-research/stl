@@ -72,7 +72,7 @@ func TestIntegration_AaveV3RWAOracle_AssetBindingsAreCanonical(t *testing.T) {
 func assertOracleEmitsPricesForSymbols(t *testing.T, oracleName string, symbols []string) {
 	t.Helper()
 
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()
@@ -185,7 +185,7 @@ func assertOracleEmitsPricesForSymbols(t *testing.T, oracleName string, symbols 
 func assertOracleAssetsExactlyMatchAddresses(t *testing.T, oracleName string, expectedAddrs []string) {
 	t.Helper()
 
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)
 
 	ctx := context.Background()

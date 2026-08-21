@@ -14,6 +14,7 @@ from app.adapters.postgres._time_window import (
     required_time_window_clause,
     time_bucket_expr,
 )
+from app.domain.chain_names import MAINNET_CHAIN_ID, chain_name_for
 from app.domain.entities.allocation import (
     AnchorageCustodyHolding,
     ChainMetadata,
@@ -29,7 +30,7 @@ from app.domain.entities.time_series_bucket import (
     ExposureBucket,
     TotalCapitalBucket,
 )
-from app.domain.proxy_kind import ProxyKind, classify_proxy, subproxy_addresses
+from app.domain.prime_registry import ProxyKind, classify_proxy, subproxy_addresses
 
 # USDS (mainnet). A prime's treasury USDS held in its SubProxy wallet is its
 # total capital; this isolates that token from any other SubProxy holding.
@@ -183,23 +184,47 @@ class AllocationRepository:
                 result = await conn.execute(
                     text(
                         """
-                        SELECT DISTINCT ON (proxy_address)
+                        -- One row per (proxy, chain), matching what this endpoint
+                        -- documents. chain_id belongs in the key because
+                        -- block_number is not comparable across chains: keyed on
+                        -- proxy_address alone, an address holding positions on two
+                        -- chains (a CREATE2 deployment at the same address) would
+                        -- report whichever chain happened to be further ahead, and
+                        -- the derived chain name and the UI's mainnet pick with it.
+                        -- Cardinality is unchanged while every proxy is
+                        -- single-chain, which prime_registry enforces for contract
+                        -- addresses by refusing to index a duplicate.
+                        SELECT DISTINCT ON (proxy_address, ap.chain_id)
                             p.name,
-                            encode(proxy_address, 'hex') AS address
+                            encode(proxy_address, 'hex') AS address,
+                            ap.chain_id,
+                            encode(p.vault_address, 'hex') AS vault_address
                         FROM allocation_position ap
                         JOIN prime p ON p.id = ap.prime_id
-                        ORDER BY proxy_address, block_number DESC
+                        ORDER BY proxy_address, ap.chain_id, block_number DESC
                         """
                     )
                 )
                 primes: list[Prime] = []
                 for row in result:
                     address = "0x" + row.address
-                    # SubProxy wallets share a prime_id with the ALM proxy; surfacing
-                    # them here would duplicate each prime in /v1/primes.
-                    if classify_proxy(address) is not ProxyKind.ALM:
+                    kind = classify_proxy(address)
+                    # SubProxy wallets share a prime_id with the ALM proxy and hold
+                    # the treasury rather than allocations; surfacing them here would
+                    # duplicate each prime in /v1/primes.
+                    if kind is not ProxyKind.ALM:
                         continue
-                    primes.append(Prime(id=address, name=row.name, address=address))
+                    primes.append(
+                        Prime(
+                            id=address,
+                            name=row.name,
+                            address=address,
+                            chain_id=row.chain_id,
+                            chain=chain_name_for(row.chain_id),
+                            role="alm",
+                            prime_vault_address="0x" + row.vault_address if row.vault_address else None,
+                        )
+                    )
                 return primes
         except asyncio.CancelledError:
             raise
@@ -607,7 +632,7 @@ class AllocationRepository:
     async def list_allocation_activity(
         self,
         *,
-        prime_id: EthAddress | None = None,
+        proxy_addresses: Sequence[EthAddress] | None = None,
         chain_id: int | None = None,
         protocol_name: str | None = None,
         action_type: str | None = None,
@@ -619,7 +644,7 @@ class AllocationRepository:
     ) -> list[AllocationActivityEvent]:
         # Escape LIKE metacharacters to prevent pattern injection
         params = {
-            "prime_hex": prime_id.hex if prime_id else None,
+            "proxy_addrs": (None if proxy_addresses is None else [a.to_bytes() for a in proxy_addresses]),
             "chain_id": chain_id,
             "protocol_name": _escape_like_pattern(protocol_name) if protocol_name else None,
             "action_type": action_type,
@@ -633,7 +658,7 @@ class AllocationRepository:
         logger.debug(
             "Executing allocation activity query",
             extra={
-                "prime_id": str(prime_id) if prime_id else None,
+                "proxy_addresses": (None if proxy_addresses is None else [str(a) for a in proxy_addresses]),
                 "chain_id": chain_id,
                 "limit": params["limit"],
                 "has_time_filter": from_timestamp is not None,
@@ -680,7 +705,7 @@ class AllocationRepository:
     async def list_activity_buckets(
         self,
         *,
-        prime_id: EthAddress | None = None,
+        proxy_addresses: Sequence[EthAddress] | None = None,
         chain_id: int | None = None,
         protocol_name: str | None = None,
         action_type: str | None = None,
@@ -693,7 +718,7 @@ class AllocationRepository:
     ) -> list[AllocationActivityBucket]:
         """Return allocation activity counts and tx-amount sums per time bucket."""
         params = {
-            "prime_hex": prime_id.hex if prime_id else None,
+            "proxy_addrs": (None if proxy_addresses is None else [a.to_bytes() for a in proxy_addresses]),
             "chain_id": chain_id,
             "protocol_name": _escape_like_pattern(protocol_name) if protocol_name else None,
             "action_type": action_type,
@@ -825,6 +850,105 @@ class AllocationRepository:
         self._record_empty_total_capital(prime_address, buckets)
         return buckets
 
+    async def list_prime_proxy_addresses(self, prime_address: EthAddress) -> list[EthAddress]:
+        """Return every allocation proxy of the prime that owns ``prime_address``.
+
+        Resolved from ``allocation_position``, not the axis-synome contract, for
+        the reason given below ``alm_proxies_for_prime``: ``/v1/primes`` is built
+        from these same rows, so a contract that has not yet been told about a
+        proxy would make server and client disagree about what a prime is.
+
+        SubProxy treasury wallets are excluded — they hold total capital, not
+        allocations. Returns ``[prime_address]`` for an address with no rows, so
+        the caller narrows to it rather than widening to everything.
+        """
+        subproxies = [bytes.fromhex(address[2:]) for address in subproxy_addresses()]
+        query = text("""
+            SELECT DISTINCT encode(ap.proxy_address, 'hex') AS address
+            FROM allocation_position ap
+            WHERE ap.prime_id = (
+                SELECT prime_id FROM allocation_position
+                WHERE proxy_address = decode(:address_hex, 'hex')
+                LIMIT 1
+            )
+              AND ap.proxy_address NOT IN :subproxy_addrs
+            ORDER BY address
+        """).bindparams(bindparam("subproxy_addrs", expanding=True))
+
+        try:
+            async with self._engine.connect() as conn:
+                result = await conn.execute(query, {"address_hex": prime_address.hex, "subproxy_addrs": subproxies})
+                rows = result.fetchall()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "Failed to resolve a prime's proxy addresses",
+                extra={"prime_address": str(prime_address), "error_type": type(exc).__name__},
+                exc_info=True,
+            )
+            raise ValueError(f"Database query failed while resolving proxies for {prime_address}: {exc}") from exc
+
+        return [EthAddress(f"0x{row.address}") for row in rows] or [prime_address]
+
+    async def primary_proxy_address(self, prime_address: EthAddress) -> str | None:
+        """Return the proxy that carries this prime's prime-scoped rows, or ``None``.
+
+        Prime-scoped rows (the Anchorage custody leg) must be attributed to exactly
+        one of a prime's proxies, or a consumer unioning them double-counts. That
+        proxy is resolved from ``allocation_position`` rather than from the
+        axis-synome contract for two reasons: the contract's mainnet ALM proxy may
+        have no rows yet, in which case attributing to it would make the row
+        unreachable; and ``/v1/primes`` — which is what a client groups by — is
+        built from these same rows, so a DB-derived pick cannot disagree with the
+        client's. Mainnet wins when present, else the lowest address, so the pick is
+        deterministic and moves only when the prime's indexed proxy set changes.
+
+        SubProxy treasury wallets are excluded: they hold the denominator, not
+        allocations, and must never carry an allocation row.
+        """
+        subproxies = [bytes.fromhex(address[2:]) for address in subproxy_addresses()]
+        query = text(
+            """
+            SELECT encode(ap.proxy_address, 'hex') AS address
+            FROM allocation_position ap
+            WHERE ap.prime_id = (
+                SELECT prime_id FROM allocation_position
+                WHERE proxy_address = decode(:address_hex, 'hex')
+                LIMIT 1
+            )
+              AND ap.proxy_address NOT IN :subproxy_addrs
+            ORDER BY (ap.chain_id = :mainnet_chain_id) DESC, ap.proxy_address ASC
+            LIMIT 1
+            """
+        ).bindparams(bindparam("subproxy_addrs", expanding=True))
+        params = {
+            "address_hex": prime_address.hex,
+            "subproxy_addrs": subproxies,
+            "mainnet_chain_id": MAINNET_CHAIN_ID,
+        }
+
+        try:
+            async with self._engine.connect() as conn:
+                row = (await conn.execute(query, params)).fetchone()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "Failed to resolve the prime's primary proxy from database",
+                extra={
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                    "prime_address": str(prime_address),
+                },
+                exc_info=True,
+            )
+            raise ValueError(
+                f"Database query failed while resolving the primary proxy for prime {prime_address}: {exc}"
+            ) from exc
+
+        return "0x" + row.address if row is not None else None
+
     async def get_latest_total_capital_usd(self, prime_address: EthAddress) -> Decimal | None:
         """Return the prime's latest treasury USDS balance (Total Risk Capital), or None.
 
@@ -882,7 +1006,7 @@ class AllocationRepository:
 
     async def list_exposure_buckets(
         self,
-        prime_address: EthAddress,
+        proxy_addresses: Sequence[EthAddress],
         *,
         from_timestamp: datetime,
         to_timestamp: datetime,
@@ -935,41 +1059,59 @@ class AllocationRepository:
                 JOIN token t ON t.id = ap.token_id
                 JOIN receipt_token rt
                     ON rt.receipt_token_address = t.address AND rt.chain_id = ap.chain_id
-                WHERE ap.proxy_address = decode(:address_hex, 'hex')
+                -- Prime-wide, like the headline figure beside it: a prime holds
+                -- receipt tokens through one proxy per chain, so scoping to one
+                -- address prices a single chain against a prime-wide total.
+                WHERE ap.proxy_address = ANY(CAST(:proxy_addrs AS BYTEA[]))
                   AND ap.created_at >= CAST(:from_timestamp AS TIMESTAMPTZ)
                   AND ap.created_at <= CAST(:to_timestamp AS TIMESTAMPTZ)
                 GROUP BY rt.id, rt.underlying_token_id, rt.protocol_id, bucket
+            ),
+            -- The latest price is bucket-independent, so it is resolved once per
+            -- (underlying, protocol) pair instead of inside the per-bucket join:
+            -- the lateral would otherwise re-scan onchain_token_price per bucket
+            -- per token (~1,600x on a 24h/PT15M window; ~17s per request).
+            price_keys AS (
+                SELECT DISTINCT underlying_token_id, protocol_id
+                FROM position_buckets
+            ),
+            latest_price AS (
+                SELECT pk.underlying_token_id, pk.protocol_id, px.price_usd
+                FROM price_keys pk
+                LEFT JOIN LATERAL (
+                    SELECT otp.price_usd
+                    FROM onchain_token_price otp
+                    JOIN protocol_oracle po
+                        ON po.oracle_id = otp.oracle_id AND po.protocol_id = pk.protocol_id
+                    WHERE otp.token_id = pk.underlying_token_id
+                    -- enabled-mapping filter (rationale on _DIRECT_ASSET_HOLDINGS_SQL):
+                    -- a retired source's tail must not serve any bucket after
+                    -- retirement (nor, given the no-history simplification, before).
+                      AND EXISTS (
+                          SELECT 1 FROM oracle_asset oa
+                          WHERE oa.oracle_id = otp.oracle_id
+                            AND oa.token_id = otp.token_id
+                            AND oa.enabled
+                      )
+                    ORDER BY otp.block_number DESC, otp.block_version DESC,
+                             otp.processing_version DESC, otp.oracle_id DESC
+                    LIMIT 1
+                ) px ON TRUE
             )
             SELECT
                 b.bucket AS bucket_start,
-                SUM(b.valuation_units * COALESCE(px.price_usd, 0)) AS exposure_usd
+                SUM(b.valuation_units * COALESCE(lp.price_usd, 0)) AS exposure_usd
             FROM position_buckets b
-            LEFT JOIN LATERAL (
-                SELECT otp.price_usd
-                FROM onchain_token_price otp
-                JOIN protocol_oracle po
-                    ON po.oracle_id = otp.oracle_id AND po.protocol_id = b.protocol_id
-                WHERE otp.token_id = b.underlying_token_id
-                -- enabled-mapping filter (rationale on _DIRECT_ASSET_HOLDINGS_SQL):
-                -- a retired source's tail must not serve any bucket after
-                -- retirement (nor, given the no-history simplification, before).
-                  AND EXISTS (
-                      SELECT 1 FROM oracle_asset oa
-                      WHERE oa.oracle_id = otp.oracle_id
-                        AND oa.token_id = otp.token_id
-                        AND oa.enabled
-                  )
-                ORDER BY otp.block_number DESC, otp.block_version DESC,
-                         otp.processing_version DESC, otp.oracle_id DESC
-                LIMIT 1
-            ) px ON TRUE
+            LEFT JOIN latest_price lp
+                ON lp.underlying_token_id = b.underlying_token_id
+               AND lp.protocol_id = b.protocol_id
             GROUP BY b.bucket
             ORDER BY b.bucket DESC
             LIMIT :limit
             """
         )
         params = {
-            "address_hex": prime_address.hex,
+            "proxy_addrs": [a.to_bytes() for a in proxy_addresses],
             "from_timestamp": from_timestamp,
             "to_timestamp": to_timestamp,
             "bucket_seconds": bucket_seconds,
@@ -988,12 +1130,12 @@ class AllocationRepository:
                 extra={
                     "error_type": type(exc).__name__,
                     "error_message": str(exc),
-                    "prime_address": str(prime_address),
+                    "proxy_addresses": [str(a) for a in proxy_addresses],
                 },
                 exc_info=True,
             )
             raise ValueError(
-                f"Database query failed while fetching exposure buckets for prime {prime_address}: {exc}"
+                f"Database query failed while fetching exposure buckets for {proxy_addresses}: {exc}"
             ) from exc
 
         return [
@@ -1470,7 +1612,7 @@ LEFT JOIN LATERAL (
     ORDER BY match_priority
     LIMIT 1
 ) AS protocol_match ON TRUE
-WHERE (CAST(:prime_hex AS TEXT) IS NULL OR ap.proxy_address = decode(CAST(:prime_hex AS TEXT), 'hex'))
+WHERE (CAST(:proxy_addrs AS BYTEA[]) IS NULL OR ap.proxy_address = ANY(CAST(:proxy_addrs AS BYTEA[])))
     AND ap.direction IS NOT NULL
     AND ap.tx_amount IS NOT NULL
     AND ap.balance IS NOT NULL
@@ -1718,7 +1860,7 @@ LEFT JOIN nearest_share_ratio nearest_ratio
     ON nearest_ratio.token_id = ap.token_id
     AND nearest_ratio.chain_id = ap.chain_id
     AND nearest_ratio.block_number = ap.block_number
-WHERE (CAST(:prime_hex AS TEXT) IS NULL OR ap.proxy_address = decode(CAST(:prime_hex AS TEXT), 'hex'))
+WHERE (CAST(:proxy_addrs AS BYTEA[]) IS NULL OR ap.proxy_address = ANY(CAST(:proxy_addrs AS BYTEA[])))
     AND ap.direction IS NOT NULL
     AND ap.tx_amount IS NOT NULL
     AND ap.created_at IS NOT NULL

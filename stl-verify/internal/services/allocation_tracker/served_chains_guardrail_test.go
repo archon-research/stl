@@ -138,7 +138,7 @@ func TestAssertServedTrackerChain(t *testing.T) {
 		wantErr bool
 	}{
 		{"declared served chain boots", "mainnet", false},
-		{"acknowledged-but-unserved chain fails", "optimism", true},
+		{"acknowledged-but-unserved chain fails", "plume", true},
 		{"unknown chain fails", "narnia", true},
 	}
 

@@ -17,6 +17,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -26,14 +27,7 @@ import (
 var sharedDSN string
 
 func TestMain(m *testing.M) {
-	dsn, cleanup := testutil.StartTimescaleDBForMain()
-	sharedDSN = dsn
-
-	code := m.Run()
-
-	cleanup()
-	code = testutil.CheckGoroutineLeaks(code)
-	os.Exit(code)
+	os.Exit(testutil.RunShared(m, testutil.Shared{TimescaleDSN: &sharedDSN}))
 }
 
 // ---------------------------------------------------------------------------
@@ -49,11 +43,16 @@ var (
 	usdcAddr         = common.HexToAddress("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913")
 	rateProviderAddr = common.HexToAddress("0x2722C8f8A5F880401Fa5b01eD548d657F5Cd6175")
 
+	almAddr = common.HexToAddress("0x2917956eFF0B5eaF030abDB4EF4296DF775009cA")
+
 	usdsBalance    = big.NewInt(1_000_000_000_000_000_000)
 	susdsBalance   = big.NewInt(2_000_000_000_000_000_000)
 	usdcBalance    = big.NewInt(3_000_000)
 	totalAssetsVal = big.NewInt(6_000_000_000_000_000_000)
 	conversionRate = new(big.Int).Exp(big.NewInt(10), big.NewInt(27), nil)
+	almShares      = big.NewInt(5_000_000_000_000_000_000)
+	totalSharesVal = big.NewInt(6_000_000_000_000_000_000)
+	almAssetValue  = new(big.Int).Div(new(big.Int).Mul(almShares, totalAssetsVal), totalSharesVal)
 )
 
 func addressWord(addr common.Address) []byte {
@@ -113,6 +112,27 @@ func psm3Dispatcher(t *testing.T, usdsMismatch bool) testutil.SubcallDispatcher 
 			return addressWord(usdcAddr), true
 		case selector(psm3ABI, "totalAssets"):
 			return uintWord(totalAssetsVal), true
+		case selector(psm3ABI, "shares"):
+			args, err := psm3ABI.Methods["shares"].Inputs.Unpack(callData[4:])
+			if err != nil {
+				t.Errorf("unpack shares calldata: %v", err)
+				return nil, false
+			}
+			if got := args[0].(common.Address); got != almAddr {
+				t.Errorf("shares arg = %s, want ALM proxy %s", got.Hex(), almAddr.Hex())
+			}
+			return uintWord(almShares), true
+		case selector(psm3ABI, "totalShares"):
+			return uintWord(totalSharesVal), true
+		case selector(psm3ABI, "convertToAssetValue"):
+			// Mirror the contract so a wrong numShares argument changes the result.
+			args, err := psm3ABI.Methods["convertToAssetValue"].Inputs.Unpack(callData[4:])
+			if err != nil {
+				t.Errorf("unpack convertToAssetValue calldata: %v", err)
+				return nil, false
+			}
+			numShares := args[0].(*big.Int)
+			return uintWord(new(big.Int).Div(new(big.Int).Mul(numShares, totalAssetsVal), totalSharesVal)), true
 		case selector(rateABI, "getConversionRate"):
 			return uintWord(conversionRate), true
 		case selector(erc20ABI, "balanceOf"):
@@ -252,7 +272,7 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 }
 
 func TestRunIntegration_UnknownChainID(t *testing.T) {
-	_, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	_, dbURL, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
 	sqsServer, _ := testutil.StartMockSQS(t)
@@ -274,7 +294,7 @@ func TestRunIntegration_UnknownChainID(t *testing.T) {
 }
 
 func TestRunIntegration_ImmutableMismatch(t *testing.T) {
-	_, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	_, dbURL, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
 	rpcServer := mockPSM3RPC(t, psm3Dispatcher(t, true)) // usds() disagrees with config
@@ -300,7 +320,7 @@ func TestRunIntegration_ImmutableMismatch(t *testing.T) {
 func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	ctx := context.Background()
 
-	pool, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, dbURL, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
 	rpcServer := mockPSM3RPC(t, psm3Dispatcher(t, false))
@@ -344,14 +364,17 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	var (
 		addrBytes                              []byte
 		usds, susds, usdc, total, rate, source string
+		allShares                              string
 		blockNumber                            int64
 		blockVer                               int
 	)
 	err := pool.QueryRow(ctx, `
 		SELECT address, usds_balance::text, susds_balance::text, usdc_balance::text,
-		       total_assets::text, conversion_rate::text, block_number, block_version, source
+		       total_assets::text, conversion_rate::text, total_shares::text,
+		       block_number, block_version, source
 		FROM psm3_reserves ORDER BY block_number LIMIT 1
-	`).Scan(&addrBytes, &usds, &susds, &usdc, &total, &rate, &blockNumber, &blockVer, &source)
+	`).Scan(&addrBytes, &usds, &susds, &usdc, &total, &rate,
+		&allShares, &blockNumber, &blockVer, &source)
 	if err != nil {
 		t.Fatalf("query snapshot: %v", err)
 	}
@@ -374,6 +397,10 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	if rate != conversionRate.String() {
 		t.Errorf("conversion_rate = %s, want %s", rate, conversionRate)
 	}
+	if allShares != totalSharesVal.String() {
+		t.Errorf("total_shares = %s, want %s", allShares, totalSharesVal)
+	}
+	assertALMSharesRow(ctx, t, pool, startBlock)
 	if blockNumber != startBlock {
 		t.Errorf("block_number = %d, want %d", blockNumber, startBlock)
 	}
@@ -398,7 +425,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 func TestRunIntegration_SnapshotAccumulation(t *testing.T) {
 	ctx := context.Background()
 
-	pool, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, dbURL, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
 	rpcServer := mockPSM3RPC(t, psm3Dispatcher(t, false))
@@ -465,5 +492,48 @@ func TestRunIntegration_SnapshotAccumulation(t *testing.T) {
 		}
 	case <-time.After(30 * time.Second):
 		t.Fatal("run() did not return after context cancellation")
+	}
+}
+
+// assertALMSharesRow checks the psm3_alm_shares row written alongside the pool
+// snapshot: the stake is attributed to the configured holder and its prime.
+func assertALMSharesRow(ctx context.Context, t *testing.T, pool *pgxpool.Pool, block int64) {
+	t.Helper()
+
+	var (
+		almAddrBytes  []byte
+		primeName     string
+		shares, value string
+		rowCount      int
+	)
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM psm3_alm_shares`).Scan(&rowCount); err != nil {
+		t.Fatalf("count alm shares: %v", err)
+	}
+	if rowCount == 0 {
+		t.Fatal("no psm3_alm_shares row written alongside the reserve snapshot")
+	}
+
+	err := pool.QueryRow(ctx, `
+		SELECT s.alm_address, p.name, s.shares::text, s.asset_value::text
+		FROM psm3_alm_shares s
+		JOIN prime p ON p.id = s.prime_id
+		WHERE s.block_number = $1
+		ORDER BY s.alm_address LIMIT 1
+	`, block).Scan(&almAddrBytes, &primeName, &shares, &value)
+	if err != nil {
+		t.Fatalf("query alm shares: %v", err)
+	}
+
+	if got := common.BytesToAddress(almAddrBytes); got != almAddr {
+		t.Errorf("alm_address = %s, want %s", got.Hex(), almAddr.Hex())
+	}
+	if primeName != "spark" {
+		t.Errorf("prime = %s, want spark", primeName)
+	}
+	if shares != almShares.String() {
+		t.Errorf("shares = %s, want %s", shares, almShares)
+	}
+	if value != almAssetValue.String() {
+		t.Errorf("asset_value = %s, want %s", value, almAssetValue)
 	}
 }

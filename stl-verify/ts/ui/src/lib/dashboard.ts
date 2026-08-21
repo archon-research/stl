@@ -1,4 +1,4 @@
-import type { Allocation } from '../types/allocation';
+import type { Allocation, Prime } from '../types/allocation';
 import type { LocalChainRow, LocalProtocolRow } from '../types/local-data';
 import { getChainExplorerUrl, getChainName } from './chain-metadata';
 import { logging } from './logging';
@@ -9,7 +9,7 @@ export type FilterOption = {
   count: number;
 };
 
-type UsdTone = 'green' | 'yellow' | 'red' | 'neutral';
+export type UsdTone = 'green' | 'yellow' | 'red' | 'neutral';
 
 export type ChainLabelLookup = ReadonlyMap<number, string>;
 
@@ -112,6 +112,61 @@ export function buildChainLabelLookup(
   chains: LocalChainRow[],
 ): ChainLabelLookup {
   return new Map(chains.map((chain) => [chain.chain_id, chain.name] as const));
+}
+
+export type PrimeGroup = {
+  key: string;
+  name: string;
+  vaultAddress: string | null;
+  primaryProxyAddress: string;
+  proxyAddresses: string[];
+  chainCount: number;
+};
+
+// A prime allocates through one ALM proxy per chain, so `/v1/primes` returns
+// one row per (prime, chain) pair. `prime_vault_address` is the same across
+// every row of a prime; a row whose prime has no vault address on record
+// falls back to `name` so it still groups rather than getting its own row.
+export function getPrimeGroupKey(prime: Prime): string {
+  return prime.prime_vault_address ?? prime.name;
+}
+
+export function groupPrimesByVault(primes: Prime[]): PrimeGroup[] {
+  const rowsByKey = new Map<string, Prime[]>();
+
+  for (const prime of primes) {
+    const key = getPrimeGroupKey(prime);
+    const rows = rowsByKey.get(key);
+    if (rows) {
+      rows.push(prime);
+    } else {
+      rowsByKey.set(key, [prime]);
+    }
+  }
+
+  return [...rowsByKey.entries()].map(([key, rows]) => {
+    const sortedByAddress = [...rows].sort((left, right) =>
+      left.address.localeCompare(right.address),
+    );
+    // `mainnet` is the prime's canonical chain for aggregate figures (e.g.
+    // risk-capital); fall back to a deterministic pick when no row is on it.
+    const mainnetRow = rows.find((row) => row.chain === 'mainnet');
+
+    return {
+      key,
+      name: rows[0].name,
+      vaultAddress: rows[0].prime_vault_address ?? null,
+      primaryProxyAddress: mainnetRow?.address ?? sortedByAddress[0].address,
+      // Deduped because `/v1/primes` is `DISTINCT ON (proxy_address, chain_id)`,
+      // so one address holding positions on two chains yields two rows. Passing
+      // it twice to `getAllocationsForProxies` would fetch it twice and
+      // double-count every one of its rows in the grid and in `summary.totalUsd`
+      // — `getAllocationKey` gives the copies identical keys, so nothing
+      // downstream would catch it.
+      proxyAddresses: [...new Set(sortedByAddress.map((row) => row.address))],
+      chainCount: new Set(rows.map((row) => row.chain_id)).size,
+    };
+  });
 }
 
 function getProtocolMatchScore(
@@ -362,6 +417,76 @@ export function formatPercentValue(
   return `${numeric.toFixed(digits)}%`;
 }
 
+// Encumbrance breach thresholds, as the Sky Atlas defines them rather than as a
+// number chosen here: a Low Severity Breach is a ratio at or above 100% and
+// below 103%, a High Severity Breach is above 103%.
+//
+// https://sky-atlas.io/#1981fd65-a9a5-4e5a-a9f8-aa8e85342d7c (low)
+// https://sky-atlas.io/#363e2bb5-47e2-4eb8-950d-eafd0f1392c7 (high)
+export const ENCUMBRANCE_LOW_SEVERITY_THRESHOLD = 1;
+export const ENCUMBRANCE_HIGH_SEVERITY_THRESHOLD = 1.03;
+
+export type EncumbranceSeverity = 'none' | 'low' | 'high';
+
+/**
+ * Classifies an encumbrance ratio against the Atlas thresholds.
+ *
+ * Exactly 103% falls outside both written definitions — "below 103%" excludes
+ * it and "above 103%" excludes it — so it is read as high here. On a risk
+ * surface the conservative side of an ambiguity is the safe one, and a ratio at
+ * the high boundary is plainly not the lesser breach.
+ */
+export function encumbranceSeverity(
+  ratio: number | null | undefined,
+): EncumbranceSeverity {
+  if (ratio === null || ratio === undefined || !Number.isFinite(ratio)) {
+    return 'none';
+  }
+  if (ratio >= ENCUMBRANCE_HIGH_SEVERITY_THRESHOLD) {
+    return 'high';
+  }
+  return ratio >= ENCUMBRANCE_LOW_SEVERITY_THRESHOLD ? 'low' : 'none';
+}
+
+/**
+ * Columns that spread `count` cards evenly over the fewest rows `maxColumns`
+ * allows — 6 cards in 4 columns becomes 3 and 3, not 4 and 2.
+ *
+ * A row that cannot be filled is left short rather than stretched: five cards
+ * over three columns is 3 then 2, and those two keep the width of the three
+ * above them instead of growing to half the container each.
+ */
+/**
+ * Projects gap-filled buckets onto chart points, dropping those whose figure is
+ * absent.
+ *
+ * A dropped bucket leaves a hole the line is then drawn straight across, so this
+ * reads a discontinuous series as continuous. That is tolerable because every
+ * caller's figure is LOCF-carried server-side — an interior gap means the whole
+ * feed stopped, which the cronjob alerts already cover — but it is the reason
+ * absence is dropped rather than plotted as zero.
+ */
+export function toChartSeries<T extends { bucket_start: string }>(
+  buckets: readonly T[],
+  read: (bucket: T) => number | null,
+): { label: string; value: number }[] {
+  return buckets
+    .map((bucket) => ({
+      label: formatChartTimestampLabel(bucket.bucket_start),
+      value: read(bucket) ?? Number.NaN,
+    }))
+    .filter((point) => Number.isFinite(point.value));
+}
+
+export function balancedColumns(count: number, maxColumns: number): number {
+  if (count <= 1) {
+    return 1;
+  }
+
+  const rows = Math.ceil(count / maxColumns);
+  return Math.ceil(count / rows);
+}
+
 export function formatRatioPercent(
   value: number | string | null | undefined,
   digits = 2,
@@ -480,6 +605,49 @@ export function formatDurationFromSeconds(
   return `${days}d ${hours % 24}h`;
 }
 
+// Expand exponential notation ("2.5707140E+27") into a plain decimal string
+// ("2570714000000000000000000000"). BigInt rejects exponents, so a wad value
+// serialized in scientific form would otherwise parse to just its leading digit
+// and render as 0. The API contract promises plain strings; this is a
+// defense-in-depth guard against a Decimal that slips through in scientific
+// form. Returns null for non-numeric input.
+function toPlainDecimalString(value: string): string | null {
+  const trimmed = value.trim();
+  if (!/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(trimmed)) {
+    return null;
+  }
+
+  const [mantissa, expPart] = trimmed.split(/[eE]/);
+  if (expPart === undefined) {
+    return trimmed;
+  }
+
+  // A real 1e18-scaled wad has a tiny exponent; a wildly out-of-range one would
+  // only make `'0'.repeat(...)` below throw. Reject rather than expand it.
+  const exponent = Number(expPart);
+  if (Math.abs(exponent) > 1000) {
+    return null;
+  }
+
+  const negative = mantissa.startsWith('-');
+  const unsigned = mantissa.replace(/^[+-]/, '');
+  const [intRaw, fracRaw = ''] = unsigned.split('.');
+  const digits = intRaw + fracRaw;
+  // Where the decimal point lands, counted in digits from the left of `digits`.
+  const pointPos = intRaw.length + exponent;
+
+  let result: string;
+  if (pointPos <= 0) {
+    result = `0.${'0'.repeat(-pointPos)}${digits}`;
+  } else if (pointPos >= digits.length) {
+    result = digits + '0'.repeat(pointPos - digits.length);
+  } else {
+    result = `${digits.slice(0, pointPos)}.${digits.slice(pointPos)}`;
+  }
+
+  return negative ? `-${result}` : result;
+}
+
 export function formatWadValue(
   value: number | string | null | undefined,
 ): string {
@@ -487,10 +655,16 @@ export function formatWadValue(
     return '—';
   }
 
+  const plain = toPlainDecimalString(String(value));
+  if (plain === null) {
+    logging.warn(`Failed to parse WAD value: "${value}"`, {
+      context: 'formatWadValue',
+    });
+    return '—';
+  }
+
   try {
-    const normalized =
-      typeof value === 'number' ? Math.trunc(value).toString() : String(value);
-    const wei = BigInt(normalized.split('.')[0]);
+    const wei = BigInt(plain.split('.')[0] || '0');
     const wad = 10n ** 18n;
     const whole = wei / wad;
     const fraction = wei % wad;

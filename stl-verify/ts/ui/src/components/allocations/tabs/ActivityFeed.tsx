@@ -1,17 +1,29 @@
 import {
   AsyncStateRenderer,
+  DataTable,
+  type DataTableProps,
+  defineIdentifiedColumns,
   EmptyState,
   ErrorState,
+  numericColumnMeta,
   SkeletonStack,
   StyledSelect,
+  useDataTable,
 } from '@archon-research/design-system';
-import { type ChangeEvent, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  type ChangeEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+} from 'react';
 
-import { css } from '#styled-system/css';
+import { css, cx } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
-import { getActionColor, getActionIcon } from '../../../lib/activity';
+import { getActionColorClass, getActionIcon } from '../../../lib/activity';
 import {
+  ApiRequestError,
   getAllocationActivity,
   getProtocolEvents,
   getTxProtocolEvents,
@@ -23,6 +35,7 @@ import {
   formatTokenAmount,
   formatFreshnessLabel,
   getChainLabel,
+  parseNumericValue,
 } from '../../../lib/dashboard';
 import { isAbortError, toErrorMessage } from '../../../lib/errors';
 import { logging } from '../../../lib/logging';
@@ -41,6 +54,7 @@ import {
   ProtocolLogo,
   RangePicker,
   type RangePreset,
+  tableHeaderTypographyClassName,
   type TimeRange,
   TokenAddress,
 } from '../../shared';
@@ -101,8 +115,9 @@ function isSweepEvent(event: AllocationActivity): boolean {
 
 function getRealTxHash(event: AllocationActivity): string | null {
   // Defensive client-side guard for stale API responses already loaded before
-  // the backend nulls synthetic sweep tx_hash values.
-  return isSweepEvent(event) ? null : (event.tx_hash ?? null);
+  // the backend nulls synthetic sweep tx_hash values. `||` also maps an empty
+  // string to null so such a row cannot expand into a doomed lookup.
+  return isSweepEvent(event) ? null : event.tx_hash || null;
 }
 
 function formatEventData(eventData: ProtocolEvent['event_data']): string {
@@ -129,8 +144,17 @@ function buildActivityEventKey(event: AllocationActivity): string {
   ].join(':');
 }
 
-function buildTxCacheKey(txHash: string, chainId: number): string {
-  return `${chainId}:${txHash.toLowerCase()}`;
+// Shared by requestFilters and the page-mode chain-mismatch guard so the two
+// cannot parse the network param differently.
+function parseNetworkChainId(
+  selectedNetwork: string | null | undefined,
+): number | undefined {
+  if (!selectedNetwork || selectedNetwork.length === 0) {
+    return undefined;
+  }
+
+  const parsed = Number(selectedNetwork);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function ProtocolEventCard({ event }: { event: ProtocolEvent }) {
@@ -166,7 +190,7 @@ function ProtocolEventCard({ event }: { event: ProtocolEvent }) {
         <span
           className={css({
             fontSize: 'xs',
-            color: 'text.subtle',
+            color: 'text.muted',
           })}
         >
           •
@@ -182,7 +206,7 @@ function ProtocolEventCard({ event }: { event: ProtocolEvent }) {
         <span
           className={css({
             fontSize: 'xs',
-            color: 'text.subtle',
+            color: 'text.muted',
           })}
         >
           log #{event.log_index}
@@ -190,7 +214,7 @@ function ProtocolEventCard({ event }: { event: ProtocolEvent }) {
         <span
           className={css({
             fontSize: 'xs',
-            color: 'text.subtle',
+            color: 'text.muted',
           })}
         >
           block {event.block_number} v{event.block_version}
@@ -215,7 +239,7 @@ function ProtocolEventCard({ event }: { event: ProtocolEvent }) {
         <span
           className={css({
             fontSize: 'xs',
-            color: 'text.subtle',
+            color: 'text.muted',
           })}
         >
           •
@@ -245,163 +269,373 @@ function ProtocolEventCard({ event }: { event: ProtocolEvent }) {
   );
 }
 
-function ActivityEventRow({
-  event,
-  isExpanded,
-  onSelectTx,
-  chainLabels,
-}: {
-  event: AllocationActivity;
-  isExpanded: boolean;
-  onSelectTx: (event: AllocationActivity) => void;
-  chainLabels?: ChainLabelLookup;
-}) {
-  const actionColor = getActionColor(event.action_type);
-  const actionIcon = getActionIcon(event.action_type);
-  const txHash = getRealTxHash(event);
+/**
+ * Protocol events for one transaction, fetched when the row's detail panel
+ * mounts. Expansion mounts and unmounts this component, so the effect's cleanup
+ * is the whole cancellation story: collapsing a row (or unmounting the feed)
+ * aborts an in-flight request, and no request is issued for a row nobody opened.
+ *
+ * `getTxProtocolEvents` is the dedicated endpoint; the generic
+ * `getProtocolEvents` filter is the fallback for deployments that lack it,
+ * gated on 404 so a real outage of the dedicated endpoint still surfaces.
+ */
+const FALLBACK_TX_EVENT_LIMIT = 200;
+
+function TxProtocolEventsPanel({ txHash }: { txHash: string }) {
+  const [events, setEvents] = useState<ProtocolEvent[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [truncated, setTruncated] = useState(false);
+
+  useEffect(() => {
+    const abortController = new AbortController();
+    setEvents(null);
+    setError(null);
+    setTruncated(false);
+
+    async function fetchTxEvents() {
+      try {
+        setEvents(await getTxProtocolEvents(txHash, abortController.signal));
+      } catch (err) {
+        if (isAbortError(err)) {
+          return;
+        }
+
+        if (!(err instanceof ApiRequestError) || err.status !== 404) {
+          const errorMessage = toErrorMessage(err);
+          setError(errorMessage);
+          logging.error('Failed to fetch tx protocol events', {
+            error: err,
+            errorMessage,
+            txHash,
+          });
+          return;
+        }
+
+        try {
+          const fallbackEvents = await getProtocolEvents(
+            { tx_hash: txHash, limit: FALLBACK_TX_EVENT_LIMIT },
+            abortController.signal,
+          );
+          setTruncated(fallbackEvents.length >= FALLBACK_TX_EVENT_LIMIT);
+          setEvents(fallbackEvents);
+        } catch (fallbackErr) {
+          if (isAbortError(fallbackErr)) {
+            return;
+          }
+
+          const errorMessage = toErrorMessage(fallbackErr);
+          setError(errorMessage);
+          logging.error('Failed to fetch tx protocol events', {
+            error: err,
+            fallbackError: fallbackErr,
+            errorMessage,
+            txHash,
+          });
+        }
+      }
+    }
+
+    void fetchTxEvents();
+
+    return () => abortController.abort();
+  }, [txHash]);
 
   return (
-    <div
-      className={css({
-        padding: '3',
-        borderBottom: '1px solid token(colors.surface.subtle)',
-        display: 'flex',
-        alignItems: 'center',
-        gap: '3',
-        _hover: {
-          bg: 'surface.subtle',
-        },
-      })}
-    >
+    <div className={css({ display: 'grid', gap: '2' })}>
       <div
         className={css({
-          width: '8',
-          height: '8',
-          borderRadius: 'full',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          bg: 'surface.subtle',
-          color: actionColor,
-          flexShrink: 0,
-        })}
-      >
-        {actionIcon}
-      </div>
-
-      <div className={flex({ direction: 'column', gap: '1', flex: 1 })}>
-        <div className={flex({ gap: '2', align: 'center', wrap: 'wrap' })}>
-          <span
-            className={css({
-              fontSize: 'sm',
-              fontWeight: 'semibold',
-              color: 'text.strong',
-            })}
-          >
-            {event.token_symbol || 'Unknown'}
-          </span>
-          <span
-            className={css({
-              fontSize: 'sm',
-              color: actionColor,
-              fontWeight: 'semibold',
-              textTransform: 'capitalize',
-            })}
-          >
-            {event.action_type}
-          </span>
-          {event.protocol_name ? (
-            <span
-              className={css({
-                fontSize: 'xs',
-                color: 'text.default',
-                bg: 'surface.subtle',
-                padding: '1 2',
-                borderRadius: 'md',
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '1',
-                whiteSpace: 'nowrap',
-              })}
-            >
-              <ProtocolLogo protocolName={event.protocol_name} size="4" />
-              {event.protocol_name}
-            </span>
-          ) : null}
-        </div>
-        <div className={flex({ gap: '2', align: 'center', wrap: 'wrap' })}>
-          <span className={css({ fontSize: 'xs', color: 'text.default' })}>
-            {formatTokenAmount(event.tx_amount)} {event.token_symbol ?? ''}
-          </span>
-          <span className={css({ fontSize: 'xs', color: 'text.subtle' })}>
-            •
-          </span>
-          <span className={css({ fontSize: 'xs', color: 'text.default' })}>
-            Block {event.block_number}
-          </span>
-          <span className={css({ fontSize: 'xs', color: 'text.subtle' })}>
-            •
-          </span>
-          <span
-            className={css({
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: '1',
-              fontSize: 'xs',
-              color: 'text.default',
-              whiteSpace: 'nowrap',
-            })}
-          >
-            <ChainLogo chainId={event.chain_id} size="4" />
-            {getChainLabel(event.chain_id, chainLabels)}
-          </span>
-          {txHash ? (
-            <>
-              <span className={css({ fontSize: 'xs', color: 'text.subtle' })}>
-                •
-              </span>
-              <TokenAddress
-                address={txHash}
-                chainId={event.chain_id}
-                type="tx"
-              />
-            </>
-          ) : null}
-        </div>
-      </div>
-
-      <span
-        className={css({
           fontSize: 'xs',
-          color: 'text.subtle',
-          whiteSpace: 'nowrap',
-          textAlign: 'right',
+          color: 'text.strong',
+          fontWeight: 'semibold',
         })}
       >
-        {formatFreshnessLabel(event.created_at)}
-        {txHash ? (
-          <button
-            type="button"
-            onClick={() => onSelectTx(event)}
-            className={css({
-              display: 'block',
-              mt: '0.5',
-              fontSize: '2xs',
-              color: 'interactive.accent',
-              bg: 'transparent',
-              border: 'none',
-              cursor: 'pointer',
-            })}
-          >
-            {isExpanded ? 'Hide tx events' : 'Inspect tx events'}
-          </button>
+        Protocol Events For TX
+      </div>
+      <AsyncStateRenderer
+        isLoading={events === null && error === null}
+        error={error}
+        isEmpty={events !== null && events.length === 0}
+        loadingView={<SkeletonStack count={2} itemHeight={40} />}
+        errorView={
+          <span className={css({ fontSize: 'xs', color: 'text.warning' })}>
+            Failed to load protocol events: {error}
+          </span>
+        }
+        emptyView={
+          <EmptyState
+            title="No Protocol Events"
+            description="No protocol events were indexed for this transaction."
+            size="compact"
+            stretch
+          />
+        }
+      >
+        {events?.map((protocolEvent) => (
+          <ProtocolEventCard
+            key={`${protocolEvent.tx_hash}:${protocolEvent.log_index}:${protocolEvent.protocol_name}`}
+            event={protocolEvent}
+          />
+        ))}
+        {truncated ? (
+          <span className={css({ fontSize: 'xs', color: 'text.muted' })}>
+            Limited to the first {FALLBACK_TX_EVENT_LIMIT} protocol events for
+            this transaction.
+          </span>
         ) : null}
+      </AsyncStateRenderer>
+    </div>
+  );
+}
+
+const activityStrongCellClassName = css({
+  fontSize: 'sm',
+  fontWeight: 'semibold',
+  color: 'text.strong',
+  whiteSpace: 'nowrap',
+});
+
+const activityMetaCellClassName = css({
+  fontSize: 'xs',
+  color: 'text.muted',
+  whiteSpace: 'nowrap',
+});
+
+const activityInlineCellClassName = css({
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: '1.5',
+  fontSize: 'sm',
+  color: 'text.default',
+  whiteSpace: 'nowrap',
+});
+
+// A circular glyph so action direction stays readable as a shape, not only as
+// a colour.
+const actionBadgeClassName = css({
+  width: '6',
+  height: '6',
+  borderRadius: 'full',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  bg: 'surface.subtle',
+  flexShrink: 0,
+});
+
+function ActivityTimeCell({ event }: { event: AllocationActivity }) {
+  return (
+    <div>
+      <div className={activityStrongCellClassName}>
+        {formatFreshnessLabel(event.created_at)}
+      </div>
+      <div className={activityMetaCellClassName}>
+        {formatDateTime(event.created_at)}
+      </div>
+    </div>
+  );
+}
+
+function ActivityActionCell({ event }: { event: AllocationActivity }) {
+  const actionColorClassName = getActionColorClass(event.action_type);
+
+  return (
+    <div className={flex({ align: 'center', gap: '2' })}>
+      <span className={cx(actionBadgeClassName, actionColorClassName)}>
+        {getActionIcon(event.action_type)}
+      </span>
+      <span
+        className={cx(
+          css({
+            fontSize: 'sm',
+            fontWeight: 'semibold',
+            textTransform: 'capitalize',
+          }),
+          actionColorClassName,
+        )}
+      >
+        {event.action_type}
       </span>
     </div>
   );
 }
 
-export function ActivityFeed({
+function ActivityProtocolCell({ event }: { event: AllocationActivity }) {
+  if (!event.protocol_name) {
+    return <span className={activityMetaCellClassName}>—</span>;
+  }
+
+  return (
+    <span className={activityInlineCellClassName}>
+      <ProtocolLogo protocolName={event.protocol_name} size="4" />
+      {event.protocol_name}
+    </span>
+  );
+}
+
+function ActivityChainCell({
+  event,
+  chainLabels,
+}: {
+  event: AllocationActivity;
+  chainLabels?: ChainLabelLookup;
+}) {
+  const chainLabel = getChainLabel(event.chain_id, chainLabels);
+
+  return (
+    <span className={activityInlineCellClassName}>
+      <ChainLogo chainId={event.chain_id} label={chainLabel} size="4" />
+      {chainLabel}
+    </span>
+  );
+}
+
+function createActivityColumns(chainLabels?: ChainLabelLookup) {
+  return defineIdentifiedColumns<AllocationActivity>(
+    {
+      id: 'created_at',
+      header: 'Time',
+      accessorFn: (event) => new Date(event.created_at).getTime(),
+      cell: ({ row }) => <ActivityTimeCell event={row.original} />,
+    },
+    {
+      id: 'token_symbol',
+      header: 'Token',
+      accessorFn: (event) => event.token_symbol ?? '',
+      cell: ({ row }) => (
+        <span className={activityStrongCellClassName}>
+          {row.original.token_symbol || 'Unknown'}
+        </span>
+      ),
+    },
+    {
+      id: 'action_type',
+      header: 'Action',
+      accessorFn: (event) => event.action_type ?? '',
+      cell: ({ row }) => <ActivityActionCell event={row.original} />,
+    },
+    {
+      id: 'protocol_name',
+      header: 'Protocol',
+      accessorFn: (event) => event.protocol_name ?? '',
+      cell: ({ row }) => <ActivityProtocolCell event={row.original} />,
+    },
+    {
+      id: 'tx_amount',
+      header: 'Amount',
+      // Sorts on the numeric value, displays the formatted one. The token
+      // symbol is not repeated here — it is already this row's Token column.
+      accessorFn: (event) => parseNumericValue(event.tx_amount) ?? 0,
+      cell: ({ row }) => formatTokenAmount(row.original.tx_amount),
+      meta: { ...numericColumnMeta },
+    },
+    {
+      id: 'block_number',
+      header: 'Block',
+      accessorFn: (event) => event.block_number,
+      meta: { ...numericColumnMeta },
+    },
+    {
+      id: 'chain_id',
+      header: 'Chain',
+      accessorFn: (event) => getChainLabel(event.chain_id, chainLabels),
+      cell: ({ row }) => (
+        <ActivityChainCell event={row.original} chainLabels={chainLabels} />
+      ),
+    },
+    {
+      id: 'tx_hash',
+      header: 'Tx',
+      // Sweeps are internal reallocations with no real transaction;
+      // `TokenAddress` renders the em-dash placeholder for a null address.
+      accessorFn: (event) => getRealTxHash(event) ?? '',
+      cell: ({ row }) => (
+        <TokenAddress
+          address={getRealTxHash(row.original)}
+          chainId={row.original.chain_id}
+          type="tx"
+        />
+      ),
+      enableSorting: false,
+    },
+  );
+}
+
+// Row identity: expansion state, and the DataTable's per-row React key, both
+// key off it. `buildActivityEventKey` alone is not guaranteed unique — a sweep
+// carries neither tx_hash nor log_index, so two sweeps of different tokens in
+// one block collide — and a duplicate id would fuse two rows in the row model.
+// A per-key occurrence counter breaks that tie. Unlike the raw array index, it
+// leaves the id of a unique event untouched when the search filter narrows the
+// list, so an expanded row that survives the filter stays expanded; it cannot
+// mis-target a detail panel across a refetch because the content key in front
+// of it has to match as well, and only an event identical in every keyed field
+// can do that. Sweeps are also exactly the rows that cannot expand (no
+// transaction to inspect).
+function buildActivityRowIds(
+  events: readonly AllocationActivity[],
+): Map<AllocationActivity, string> {
+  const occurrences = new Map<string, number>();
+  const ids = new Map<AllocationActivity, string>();
+
+  for (const event of events) {
+    const key = buildActivityEventKey(event);
+    const seen = occurrences.get(key) ?? 0;
+    occurrences.set(key, seen + 1);
+    ids.set(event, seen === 0 ? key : `${key}:${seen}`);
+  }
+
+  return ids;
+}
+
+function useActivityTable(
+  events: AllocationActivityResponse,
+  chainLabels?: ChainLabelLookup,
+): DataTableProps<AllocationActivity>['table'] {
+  const columns = useMemo(
+    () => createActivityColumns(chainLabels),
+    [chainLabels],
+  );
+
+  const rowIds = useMemo(() => buildActivityRowIds(events), [events]);
+  const getRowId = useCallback(
+    (event: AllocationActivity) =>
+      rowIds.get(event) ?? buildActivityEventKey(event),
+    [rowIds],
+  );
+
+  return useDataTable(events, columns, {
+    enableSorting: true,
+    // The API returns newest-first and the header says so ("Latest activity"),
+    // so the initial view is the sort the data already carries.
+    defaultSorting: [{ id: 'created_at', desc: true }],
+    getRowId,
+    // A sweep has no transaction to inspect, so its row gets no expander.
+    getRowCanExpand: (row) => getRealTxHash(row.original) !== null,
+  });
+}
+
+type ActivityFeedState = {
+  isPageMode: boolean;
+  events: AllocationActivityResponse;
+  filteredEvents: AllocationActivityResponse;
+  isLoading: boolean;
+  error: string | null;
+  effectivePreset: RangePreset;
+  effectiveRange: TimeRange;
+  updateRangePreset: (preset: RangePreset, range: TimeRange) => void;
+  uniqueTokenOptions: string[];
+  hasActiveFilters: boolean;
+  clearFilters: () => void;
+  rowLimit: number;
+};
+
+/**
+ * Everything the activity view needs from the server and from filter state:
+ * the scope guards that decide whether a request is meaningful at all, the
+ * range plumbing (local in drawer mode, parent-owned in page mode), the fetch
+ * lifecycle, and the client-side search narrowing on top of the fetched rows.
+ */
+function useAllocationActivity({
   actionFilter,
   onActionFilterChange,
   tokenFilter = null,
@@ -415,27 +649,15 @@ export function ActivityFeed({
   searchQuery = '',
   showAllPrimes = false,
   tokenOptions = [],
-  chainLabels,
   externalRangePreset,
   externalTimeRange,
   onRangeChange: onExternalRangeChange,
-}: ActivityFeedProps) {
+}: ActivityFeedProps): ActivityFeedState {
   const isPageMode = mode === 'page';
-  const txRequestControllersRef = useRef<Record<string, AbortController>>({});
-
+  const networkChainId = parseNetworkChainId(selectedNetwork);
   const [events, setEvents] = useState<AllocationActivityResponse>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [selectedEventKey, setSelectedEventKey] = useState<string | null>(null);
-  const [txEventsByHash, setTxEventsByHash] = useState<
-    Record<string, ProtocolEvent[]>
-  >({});
-  const [txEventErrorsByHash, setTxEventErrorsByHash] = useState<
-    Record<string, string>
-  >({});
-  const [txEventsLoadingByHash, setTxEventsLoadingByHash] = useState<
-    Record<string, boolean>
-  >({});
   const [filters, setFilters] = useState<ActivityFilters>(() => {
     const initialRange = defaultTimeRange();
     return {
@@ -457,27 +679,6 @@ export function ActivityFeed({
     }
     return Array.from(symbols).sort((a, b) => a.localeCompare(b));
   }, [tokenOptions, tokenFilter]);
-  const resetTxInspectionState = () => {
-    Object.values(txRequestControllersRef.current).forEach((controller) => {
-      controller.abort();
-    });
-    txRequestControllersRef.current = {};
-    setSelectedEventKey(null);
-    setTxEventsByHash({});
-    setTxEventErrorsByHash({});
-    setTxEventsLoadingByHash({});
-  };
-
-  const updateActionFilter = (value: string | null) => {
-    onActionFilterChange?.(value);
-    resetTxInspectionState();
-  };
-
-  const updateTokenFilter = (value: string | null) => {
-    onTokenFilterChange?.(value);
-    resetTxInspectionState();
-  };
-
   const updateRangePreset = (preset: RangePreset, range: TimeRange) => {
     if (isRangeControlled) {
       onExternalRangeChange?.(preset, range);
@@ -489,7 +690,6 @@ export function ActivityFeed({
         to_timestamp: range.to_timestamp,
       }));
     }
-    resetTxInspectionState();
   };
 
   // When the parent drives range via props, use those values over local state.
@@ -535,22 +735,13 @@ export function ActivityFeed({
       from_timestamp: nextRange.from_timestamp,
       to_timestamp: nextRange.to_timestamp,
     });
-    resetTxInspectionState();
   };
 
   const requestFilters = useMemo(() => {
     if (isPageMode) {
-      const parsedChainId =
-        selectedNetwork && selectedNetwork.length > 0
-          ? Number(selectedNetwork)
-          : undefined;
-
       return {
         prime_id: showAllPrimes ? undefined : (selectedPrime?.id ?? undefined),
-        chain_id:
-          parsedChainId && Number.isFinite(parsedChainId)
-            ? parsedChainId
-            : undefined,
+        chain_id: networkChainId,
         protocol_name:
           selectedProtocol && selectedProtocol !== DIRECT_PROTOCOL_FILTER_VALUE
             ? selectedProtocol
@@ -575,7 +766,7 @@ export function ActivityFeed({
     effectiveRange,
     filters,
     isPageMode,
-    selectedNetwork,
+    networkChainId,
     selectedPrime?.id,
     selectedProtocol,
     selectedReceiptToken?.chain_id,
@@ -593,17 +784,11 @@ export function ActivityFeed({
       : !selectedPrime;
 
     if (!isEnabled || missingScope) {
-      Object.values(txRequestControllersRef.current).forEach((controller) => {
-        controller.abort();
-      });
-      txRequestControllersRef.current = {};
+      // Emptying the rows unmounts every open detail panel, and each one aborts
+      // its own in-flight tx-events request on the way out.
       setEvents([]);
       setError(null);
       setIsLoading(false);
-      setSelectedEventKey(null);
-      setTxEventsByHash({});
-      setTxEventErrorsByHash({});
-      setTxEventsLoadingByHash({});
       return;
     }
 
@@ -643,126 +828,6 @@ export function ActivityFeed({
     return () => abortController.abort();
   }, [isEnabled, isPageMode, requestFilters, selectedPrime, showAllPrimes]);
 
-  useEffect(() => {
-    return () => {
-      Object.values(txRequestControllersRef.current).forEach((controller) => {
-        controller.abort();
-      });
-      txRequestControllersRef.current = {};
-    };
-  }, []);
-
-  const handleSelectTx = (event: AllocationActivity) => {
-    const txHash = getRealTxHash(event);
-
-    if (!txHash) {
-      return;
-    }
-
-    const eventKey = buildActivityEventKey(event);
-    const txCacheKey = buildTxCacheKey(txHash, event.chain_id);
-
-    if (selectedEventKey === eventKey) {
-      txRequestControllersRef.current[txCacheKey]?.abort();
-      delete txRequestControllersRef.current[txCacheKey];
-      setTxEventsLoadingByHash((previous) => {
-        if (!previous[txCacheKey]) {
-          return previous;
-        }
-
-        const { [txCacheKey]: _, ...rest } = previous;
-        return rest;
-      });
-      setSelectedEventKey(null);
-      return;
-    }
-
-    setSelectedEventKey(eventKey);
-
-    if (txEventsByHash[txCacheKey] || txEventErrorsByHash[txCacheKey]) {
-      return;
-    }
-
-    if (txEventsLoadingByHash[txCacheKey]) {
-      return;
-    }
-
-    setTxEventsLoadingByHash((previous) => ({
-      ...previous,
-      [txCacheKey]: true,
-    }));
-    setTxEventErrorsByHash((previous) => {
-      if (!previous[txCacheKey]) {
-        return previous;
-      }
-
-      const { [txCacheKey]: _, ...rest } = previous;
-      return rest;
-    });
-
-    const abortController = new AbortController();
-    txRequestControllersRef.current[txCacheKey] = abortController;
-
-    void getTxProtocolEvents(txHash, abortController.signal)
-      .then((result) => {
-        setTxEventsByHash((previous) => ({
-          ...previous,
-          [txCacheKey]: result,
-        }));
-      })
-      .catch(async (err) => {
-        if (isAbortError(err)) {
-          return;
-        }
-
-        try {
-          const fallbackResult = await getProtocolEvents(
-            {
-              tx_hash: txHash,
-              limit: 200,
-            },
-            abortController.signal,
-          );
-
-          setTxEventsByHash((previous) => ({
-            ...previous,
-            [txCacheKey]: fallbackResult,
-          }));
-          return;
-        } catch (fallbackErr) {
-          if (isAbortError(fallbackErr)) {
-            return;
-          }
-
-          const errorMsg = toErrorMessage(fallbackErr);
-          setTxEventErrorsByHash((previous) => ({
-            ...previous,
-            [txCacheKey]: errorMsg,
-          }));
-          logging.error('Failed to fetch tx protocol events', {
-            error: err,
-            fallbackError: fallbackErr,
-            errorMessage: errorMsg,
-            txHash,
-          });
-        }
-      })
-      .finally(() => {
-        if (txRequestControllersRef.current[txCacheKey] === abortController) {
-          delete txRequestControllersRef.current[txCacheKey];
-        }
-
-        setTxEventsLoadingByHash((previous) => {
-          if (!previous[txCacheKey]) {
-            return previous;
-          }
-
-          const { [txCacheKey]: _, ...rest } = previous;
-          return rest;
-        });
-      });
-  };
-
   const filteredEvents = useMemo(() => {
     if (!searchQuery) {
       return events;
@@ -778,33 +843,40 @@ export function ActivityFeed({
     );
   }, [events, searchQuery]);
 
-  if (!isEnabled) {
-    return (
-      <EmptyState
-        title={isPageMode ? 'Activity Unavailable' : 'Open Activity Tab'}
-        description={
-          isPageMode
-            ? 'Activity view is currently unavailable.'
-            : 'Activity loads when the drawer is open and the Activity tab is selected.'
-        }
-        stretch
-      />
-    );
-  }
+  return {
+    isPageMode,
+    events,
+    filteredEvents,
+    isLoading,
+    error,
+    effectivePreset,
+    effectiveRange,
+    updateRangePreset,
+    uniqueTokenOptions,
+    hasActiveFilters,
+    clearFilters,
+    rowLimit: filters.limit ?? 50,
+  };
+}
 
-  if (!isPageMode && !selectedPrime) {
-    return (
-      <EmptyState
-        title="No Prime Selected"
-        description="Select a prime to view its activity feed."
-        stretch
-      />
-    );
-  }
+type ActivityPageHeaderProps = {
+  isPageMode: boolean;
+  showAllPrimes: boolean;
+  latestActivityAt: string | null;
+  rangePreset: RangePreset;
+  range: TimeRange;
+  onRangeChange: (preset: RangePreset, range: TimeRange) => void;
+};
 
-  const latestActivityAt = events[0]?.created_at ?? null;
-
-  const activityHeader = (
+function ActivityPageHeader({
+  isPageMode,
+  showAllPrimes,
+  latestActivityAt,
+  rangePreset,
+  range,
+  onRangeChange,
+}: ActivityPageHeaderProps) {
+  return (
     <div
       className={flex({
         align: 'flex-start',
@@ -841,9 +913,9 @@ export function ActivityFeed({
           <div className={css({ display: 'grid', gap: '1' })}>
             <span className={filterLabelClassName}>Time range</span>
             <RangePicker
-              preset={effectivePreset}
-              range={effectiveRange}
-              onChange={updateRangePreset}
+              preset={rangePreset}
+              range={range}
+              onChange={onRangeChange}
             />
           </div>
         ) : null}
@@ -873,8 +945,28 @@ export function ActivityFeed({
       ) : null}
     </div>
   );
+}
 
-  const activityFilters = (
+type ActivityFilterBarProps = {
+  actionFilter?: string;
+  onActionFilterChange?: (value: string | null) => void;
+  tokenFilter: string | null;
+  onTokenFilterChange?: (value: string | null) => void;
+  tokenOptions: string[];
+  hasActiveFilters: boolean;
+  onClearFilters: () => void;
+};
+
+function ActivityFilterBar({
+  actionFilter,
+  onActionFilterChange,
+  tokenFilter,
+  onTokenFilterChange,
+  tokenOptions,
+  hasActiveFilters,
+  onClearFilters,
+}: ActivityFilterBarProps) {
+  return (
     <div className={css({ display: 'grid', gap: '3' })}>
       <div
         className={css({
@@ -894,7 +986,7 @@ export function ActivityFeed({
             aria-label="Filter activity by action"
             value={actionFilter ?? ''}
             onChange={(event: ChangeEvent<HTMLSelectElement>) =>
-              updateActionFilter(event.target.value || null)
+              onActionFilterChange?.(event.target.value || null)
             }
           >
             {ACTION_FILTER_OPTIONS.map((option) => (
@@ -904,20 +996,20 @@ export function ActivityFeed({
             ))}
           </StyledSelect>
         </label>
-        {uniqueTokenOptions.length > 0 ? (
+        {tokenOptions.length > 0 ? (
           <label className={filterFieldClassName}>
             <span className={filterLabelClassName}>Token</span>
             <StyledSelect
               aria-label="Filter activity by token symbol"
               value={tokenFilter ?? ''}
               onChange={(event: ChangeEvent<HTMLSelectElement>) =>
-                updateTokenFilter(
+                onTokenFilterChange?.(
                   normalizeFilterValue(event.target.value) ?? null,
                 )
               }
             >
               <option value="">All tokens</option>
-              {uniqueTokenOptions.map((symbol) => (
+              {tokenOptions.map((symbol) => (
                 <option key={symbol} value={symbol}>
                   {symbol}
                 </option>
@@ -934,13 +1026,13 @@ export function ActivityFeed({
             alignItems: 'center',
             gap: '3',
             fontSize: 'xs',
-            color: 'text.subtle',
+            color: 'text.muted',
           })}
         >
           <span>Server filters active</span>
           <button
             type="button"
-            onClick={clearFilters}
+            onClick={onClearFilters}
             className={css({
               h: '8',
               borderRadius: 'md',
@@ -952,7 +1044,7 @@ export function ActivityFeed({
               px: '3',
               fontSize: 'xs',
               cursor: 'pointer',
-              _hover: { bg: 'interactive.hover' },
+              _hover: { bg: 'surface.hover' },
             })}
           >
             Clear filters
@@ -961,160 +1053,85 @@ export function ActivityFeed({
       ) : null}
     </div>
   );
+}
 
-  const feedBody = (
-    <div
-      className={css({
-        display: 'flex',
-        flexDirection: 'column',
-        height: '100%',
-        borderRadius: 'lg',
-        overflow: 'hidden',
-      })}
-    >
-      {filteredEvents.length === 0 ? (
+type ActivityTableProps = {
+  table: DataTableProps<AllocationActivity>['table'];
+  isLoading: boolean;
+  visibleEventCount: number;
+  rowLimit: number;
+};
+
+function ActivityTable({
+  table,
+  isLoading,
+  visibleEventCount,
+  rowLimit,
+}: ActivityTableProps) {
+  return (
+    <div className={css({ display: 'grid', gap: '2' })}>
+      {visibleEventCount === 0 ? (
         <EmptyState
           title="No Activity Found"
           description="No allocation activity events match your filters."
           stretch
         />
-      ) : null}
-
-      {filteredEvents.length > 0 ? (
-        <div
-          className={css({
-            flex: 1,
-            overflowY: 'auto',
-            borderRadius: 'lg',
-            border: '1px solid token(colors.surface.subtle)',
-            bg: 'surface.default',
-          })}
-        >
-          {filteredEvents.map((event, idx) => {
-            const eventKey = buildActivityEventKey(event);
-            const txHash = getRealTxHash(event);
-            const txCacheKey = txHash
-              ? buildTxCacheKey(txHash, event.chain_id)
-              : null;
-            const isExpanded = selectedEventKey === eventKey;
-            const txEvents = txCacheKey
-              ? txEventsByHash[txCacheKey]
-              : undefined;
-            const txError = txCacheKey
-              ? txEventErrorsByHash[txCacheKey]
-              : undefined;
-            const isTxLoading =
-              txCacheKey !== null && txEventsLoadingByHash[txCacheKey] === true;
-
-            return (
-              <div key={`${eventKey}:${idx}`}>
-                <ActivityEventRow
-                  event={event}
-                  isExpanded={isExpanded}
-                  onSelectTx={handleSelectTx}
-                  chainLabels={chainLabels}
-                />
-
-                {isExpanded && txHash ? (
-                  <div
-                    className={css({
-                      marginX: '3',
-                      marginBottom: '3',
-                      borderWidth: '1px',
-                      borderStyle: 'solid',
-                      borderColor: 'border.subtle',
-                      borderRadius: 'md',
-                      bg: 'surface.subtle',
-                      padding: '3',
-                      display: 'grid',
-                      gap: '2',
-                    })}
-                  >
-                    <div
-                      className={css({
-                        fontSize: 'xs',
-                        color: 'text.strong',
-                        fontWeight: 'semibold',
-                      })}
-                    >
-                      Protocol Events For TX
-                    </div>
-
-                    {isTxLoading ? (
-                      <span
-                        className={css({
-                          fontSize: 'xs',
-                          color: 'text.default',
-                        })}
-                      >
-                        Loading protocol events...
-                      </span>
-                    ) : null}
-
-                    {!isTxLoading && txError ? (
-                      <span
-                        className={css({
-                          fontSize: 'xs',
-                          color: 'text.warning',
-                        })}
-                      >
-                        Failed to load protocol events: {txError}
-                      </span>
-                    ) : null}
-
-                    {!isTxLoading &&
-                    !txError &&
-                    txEvents &&
-                    txEvents.length === 0 ? (
-                      <EmptyState
-                        title="No Protocol Events"
-                        description="No protocol events were indexed for this transaction."
-                        size="compact"
-                        stretch
-                      />
-                    ) : null}
-
-                    {!isTxLoading && !txError && txEvents && txEvents.length > 0
-                      ? txEvents.map((protocolEvent) => (
-                          <ProtocolEventCard
-                            key={`${protocolEvent.tx_hash}:${protocolEvent.log_index}:${protocolEvent.protocol_name}`}
-                            event={protocolEvent}
-                          />
-                        ))
-                      : null}
-                  </div>
-                ) : null}
-              </div>
-            );
-          })}
+      ) : (
+        <div className={tableHeaderTypographyClassName}>
+          <DataTable
+            table={table}
+            isLoading={isLoading}
+            density="compact"
+            renderDetailPanel={(event) => {
+              const txHash = getRealTxHash(event);
+              return txHash === null ? null : (
+                <TxProtocolEventsPanel txHash={txHash} />
+              );
+            }}
+          />
         </div>
-      ) : null}
+      )}
 
       <div
         className={css({
-          padding: '3',
-          borderTop: '1px solid token(colors.surface.subtle)',
-          bg: 'surface.subtle',
-          fontSize: 'xs',
-          color: 'text.default',
           display: 'flex',
           justifyContent: 'space-between',
           alignItems: 'center',
+          gap: '3',
+          px: '1',
+          fontSize: 'xs',
+          color: 'text.default',
         })}
       >
-        <span>Showing {filteredEvents.length} events</span>
-        {filteredEvents.length >= (filters.limit || 50) ? (
-          <span className={css({ color: 'text.subtle' })}>
-            Limited to most recent {filters.limit || 50}
+        <span>Showing {visibleEventCount} events</span>
+        {visibleEventCount >= rowLimit ? (
+          <span className={css({ color: 'text.muted' })}>
+            Limited to most recent {rowLimit}
           </span>
         ) : null}
       </div>
     </div>
   );
+}
 
-  const feedArea = (
+type ActivityResultsProps = ActivityTableProps & {
+  error: string | null;
+  // Rows fetched before the search filter narrows them: only a first load with
+  // nothing on screen yet shows the skeleton, a refetch keeps the current rows.
+  totalEventCount: number;
+};
+
+function ActivityResults({
+  table,
+  isLoading,
+  error,
+  totalEventCount,
+  visibleEventCount,
+  rowLimit,
+}: ActivityResultsProps) {
+  return (
     <AsyncStateRenderer
-      isLoading={isLoading && events.length === 0}
+      isLoading={isLoading && totalEventCount === 0}
       error={error}
       isEmpty={false}
       loadingView={<SkeletonStack count={3} />}
@@ -1123,6 +1140,8 @@ export function ActivityFeed({
           title="Error Loading Activity"
           description="An error occurred while loading the activity feed."
           errorMessage={error ?? undefined}
+          tone="critical"
+          size="inline"
         />
       }
       emptyView={
@@ -1133,19 +1152,105 @@ export function ActivityFeed({
         />
       }
     >
-      {feedBody}
+      <ActivityTable
+        table={table}
+        isLoading={isLoading}
+        visibleEventCount={visibleEventCount}
+        rowLimit={rowLimit}
+      />
     </AsyncStateRenderer>
+  );
+}
+
+export function ActivityFeed(props: ActivityFeedProps) {
+  const {
+    actionFilter,
+    onActionFilterChange,
+    tokenFilter = null,
+    onTokenFilterChange,
+    isEnabled,
+    selectedPrime,
+    showAllPrimes = false,
+    chainLabels,
+  } = props;
+  const {
+    isPageMode,
+    events,
+    filteredEvents,
+    isLoading,
+    error,
+    effectivePreset,
+    effectiveRange,
+    updateRangePreset,
+    uniqueTokenOptions,
+    hasActiveFilters,
+    clearFilters,
+    rowLimit,
+  } = useAllocationActivity(props);
+
+  const table = useActivityTable(filteredEvents, chainLabels);
+
+  if (!isEnabled) {
+    return (
+      <EmptyState
+        title={isPageMode ? 'Activity Unavailable' : 'Open Activity Tab'}
+        description={
+          isPageMode
+            ? 'Activity view is currently unavailable.'
+            : 'Activity loads when the drawer is open and the Activity tab is selected.'
+        }
+        stretch
+      />
+    );
+  }
+
+  if (!isPageMode && !selectedPrime) {
+    return (
+      <EmptyState
+        title="No Prime Selected"
+        description="Select a prime to view its activity feed."
+        stretch
+      />
+    );
+  }
+
+  const latestActivityAt = events[0]?.created_at ?? null;
+
+  const activityResults = (
+    <ActivityResults
+      table={table}
+      isLoading={isLoading}
+      error={error}
+      totalEventCount={events.length}
+      visibleEventCount={filteredEvents.length}
+      rowLimit={rowLimit}
+    />
   );
 
   if (!isPageMode) {
-    return feedArea;
+    return activityResults;
   }
 
   return (
     <PageShell>
       <div className={css({ display: 'grid', gap: '5' })}>
-        {activityHeader}
-        {activityFilters}
+        <ActivityPageHeader
+          isPageMode={isPageMode}
+          showAllPrimes={showAllPrimes}
+          latestActivityAt={latestActivityAt}
+          rangePreset={effectivePreset}
+          range={effectiveRange}
+          onRangeChange={updateRangePreset}
+        />
+        <ActivityFilterBar
+          actionFilter={actionFilter}
+          onActionFilterChange={onActionFilterChange}
+          tokenFilter={tokenFilter}
+          onTokenFilterChange={onTokenFilterChange}
+          tokenOptions={uniqueTokenOptions}
+          hasActiveFilters={hasActiveFilters}
+          onClearFilters={clearFilters}
+        />
         <div
           className={css({
             display: 'flex',
@@ -1153,7 +1258,7 @@ export function ActivityFeed({
             minHeight: '24rem',
           })}
         >
-          {feedArea}
+          {activityResults}
         </div>
       </div>
     </PageShell>

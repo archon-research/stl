@@ -44,8 +44,23 @@ class AllocationService:
     async def list_anchorage_custody_holdings(self, prime_id: EthAddress) -> list[AnchorageCustodyHolding]:
         return await self._repository.list_anchorage_custody_holdings(prime_id)
 
+    async def primary_proxy_address(self, prime_id: EthAddress) -> str | None:
+        return await self._repository.primary_proxy_address(prime_id)
+
     async def get_total_usd_exposure(self, prime_id: EthAddress) -> Decimal:
         return await self._repository.get_total_usd_exposure(prime_id)
+
+    async def _prime_proxies(self, prime_id: EthAddress | None) -> list[EthAddress] | None:
+        """Widen one proxy address to every allocation proxy of its prime.
+
+        A prime allocates through one proxy per chain, so activity addressed by
+        any one of them belongs to the whole prime; scoping to the address as
+        given reports a fraction of the prime's flows against a prime-wide
+        headline.
+        """
+        if prime_id is None:
+            return None
+        return await self._repository.list_prime_proxy_addresses(prime_id)
 
     async def list_allocation_activity(
         self,
@@ -61,7 +76,7 @@ class AllocationService:
         limit: int = 100,
     ) -> list[AllocationActivityEvent]:
         return await self._repository.list_allocation_activity(
-            prime_id=prime_id,
+            proxy_addresses=await self._prime_proxies(prime_id),
             chain_id=chain_id,
             protocol_name=protocol_name,
             action_type=action_type,
@@ -87,7 +102,7 @@ class AllocationService:
         limit: int = 100,
     ) -> list[AllocationActivityBucket]:
         return await self._repository.list_activity_buckets(
-            prime_id=prime_id,
+            proxy_addresses=await self._prime_proxies(prime_id),
             chain_id=chain_id,
             protocol_name=protocol_name,
             action_type=action_type,
@@ -126,7 +141,7 @@ class AllocationService:
         limit: int = 100,
     ) -> list[ExposureBucket]:
         return await self._repository.list_exposure_buckets(
-            prime_address,
+            await self._repository.list_prime_proxy_addresses(prime_address),
             from_timestamp=from_timestamp,
             to_timestamp=to_timestamp,
             bucket_seconds=bucket_seconds,

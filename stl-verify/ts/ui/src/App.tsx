@@ -4,44 +4,47 @@ import {
   SidebarLayout,
   type SortingState,
 } from '@archon-research/design-system';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { toSearchOption } from '@archon-research/router-kit';
+import {
+  useMatchRoute,
+  useNavigate,
+  useParams,
+  useSearch,
+} from '@tanstack/react-router';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { css } from '#styled-system/css';
-// DEFAULT_RANGE_PRESET / defaultTimeRange come from the local shared barrel so
-// the temporary 24h override in components/shared/index.ts applies here too;
-// see that file for context.
+
+import { AllocationGrid } from './components/allocations/AllocationGrid';
+import { BottomPanel } from './components/allocations/BottomPanel';
+import type {
+  ChartDatum,
+  MetricChartKind,
+  MetricChartSpec,
+} from './components/allocations/metricCards';
+import { RiskDetailDrawer } from './components/allocations/RiskDetailDrawer';
+import { ActivityFeed } from './components/allocations/tabs/ActivityFeed';
+// DEFAULT_RANGE_PRESET comes from the local shared barrel so the temporary 24h
+// override in components/shared/index.ts applies here too; see that file.
 import {
   ChainLogo,
   DEFAULT_RANGE_PRESET,
-  defaultTimeRange,
-  isRangePreset,
   presetToRange,
   ProtocolLogo,
   type RangePreset,
   type TimeRange,
   TokenLogo,
 } from './components/shared';
-
-import type {
-  ChartDatum,
-  MetricChartKind,
-} from './components/allocations/AllocationGrid';
-import {
-  AllocationGrid,
-  type MetricChartSpec,
-} from './components/allocations/AllocationGrid';
-import { BottomPanel } from './components/allocations/BottomPanel';
-import { RiskDetailDrawer } from './components/allocations/RiskDetailDrawer';
-import { ActivityFeed } from './components/allocations/tabs/ActivityFeed';
 import { PrimeSidebar } from './components/shared/PrimeSidebar';
 import { TopBar } from './components/shared/TopBar';
 import { useUrlSyncedTableState } from './data-table/hooks';
 import { usePrimeChartData } from './hooks/usePrimeChartData';
 import {
-  getAllocations,
+  getAllocationsForProxies,
   getChains,
   getDataSources,
   getLatestPrimeDebtSnapshot,
+  getLatestReferenceDebtBucket,
   getPrimeRiskCapital,
   getPrimes,
   getProtocols,
@@ -54,29 +57,32 @@ import {
   buildProtocolOptions,
   buildProtocolOptionsFromMetadata,
   DIRECT_PROTOCOL_FILTER_VALUE,
+  ENCUMBRANCE_HIGH_SEVERITY_THRESHOLD,
+  ENCUMBRANCE_LOW_SEVERITY_THRESHOLD,
   formatChartTimestampLabel,
   formatCompactNumber,
   formatCompactUsd,
+  formatRatioPercent,
   formatTokenAmount,
   formatUsdValue,
   getChainLabel,
   getAllocationKey,
   getProtocolLabel,
+  groupPrimesByVault,
   parseNumericValue,
+  toChartSeries,
+  truncateMiddle,
   wadToUnits,
 } from './lib/dashboard';
 import { isAbortError, toErrorMessage } from './lib/errors';
 import { logging } from './lib/logging';
-import {
-  PARAMS,
-  setPathname as replacePathname,
-  usePathname,
-  useUrlParam,
-} from './lib/url-params';
+import { REFERENCE_MODE } from './lib/referenceMode';
+import { ACTIVITY_ACTIONS, type AppSearchPatch } from './router/search-params';
 import type {
   Allocation,
   DataSource,
   Prime,
+  PrimeDebtBucket,
   PrimeDebtSnapshot,
   PrimeRiskCapital,
   TimeSeriesResolution,
@@ -146,6 +152,27 @@ function getResolutionForRange(
   return 'P1D';
 }
 
+type ViewNavigation = {
+  view: 'allocation' | 'activities';
+  primeKey: string | null;
+  patch?: AppSearchPatch;
+  replace?: boolean;
+};
+
+// Everything scoped to the prime that was just left behind. Cleared as part of
+// the navigation so the URL never advertises a filter from the previous prime.
+const PRIME_SCOPED_RESET: AppSearchPatch = {
+  network: undefined,
+  protocol: undefined,
+  category: undefined,
+  // Both action filters: each view owns its own key, and either may be the one
+  // the departing prime left behind.
+  aa: undefined,
+  daa: undefined,
+  drawer: undefined,
+  row: undefined,
+};
+
 function App() {
   const [primes, setPrimes] = useState<Prime[]>([]);
   const [primesErrorMessage, setPrimesErrorMessage] = useState<string | null>(
@@ -157,6 +184,11 @@ function App() {
     string | null
   >(null);
   const [isAllocationsLoading, setIsAllocationsLoading] = useState(false);
+  // Which prime `allocations` holds rows for. Loading flags are set in an effect
+  // and so cannot gate that same commit's later effects; this marker can.
+  const [loadedAllocationsPrimeKey, setLoadedAllocationsPrimeKey] = useState<
+    string | null
+  >(null);
   const [isRiskCapitalLoading, setIsRiskCapitalLoading] = useState(false);
   const [riskCapitalErrorMessage, setRiskCapitalErrorMessage] = useState<
     string | null
@@ -165,93 +197,133 @@ function App() {
   const [localChains, setLocalChains] = useState<LocalChainRow[]>([]);
   const [localProtocols, setLocalProtocols] = useState<LocalProtocolRow[]>([]);
   const [riskCapital, setRiskCapital] = useState<PrimeRiskCapital | null>(null);
+  const [referenceDebt, setReferenceDebt] = useState<PrimeDebtBucket | null>(
+    null,
+  );
   const [primeDebtSnapshot, setPrimeDebtSnapshot] =
     useState<PrimeDebtSnapshot | null>(null);
   const [isPrimeDebtLoading, setIsPrimeDebtLoading] = useState(false);
   const [primeDebtErrorMessage, setPrimeDebtErrorMessage] = useState<
     string | null
   >(null);
-  const [selectedAllocationKey, setSelectedAllocationKey] = useState<
-    string | null
-  >(null);
-  const [isDrawerOpenParam, setIsDrawerOpenParam] = useUrlParam(
-    PARAMS.drawerOpen,
-  );
-  const [selectedPrimeId, setSelectedPrimeId] = useUrlParam(PARAMS.prime);
-  const [selectedNetwork, setSelectedNetwork] = useUrlParam(PARAMS.network);
-  const [selectedProtocol, setSelectedProtocol] = useUrlParam(PARAMS.protocol);
-  const [activityTokenParam, setActivityTokenParam] = useUrlParam(PARAMS.token);
-  const [activityActionParam, setActivityActionParam] = useUrlParam(
-    PARAMS.activityAction,
-  );
-  const [showAllPrimesParam, setShowAllPrimesParam] = useUrlParam(
-    PARAMS.showAllPrimes,
-  );
-  const [pathname, setPathname] = usePathname();
-  const { globalFilter, setGlobalFilter, setSorting, sorting } =
-    useUrlSyncedTableState(PARAMS.sort, PARAMS.search);
   const [tokenSymbolOptions, setTokenSymbolOptions] = useState<string[]>([]);
+  // Not derived: the URL is replaced with the fallback prime, so afterwards
+  // nothing but this still names the prime that was asked for.
+  const [unknownPrimeMessage, setUnknownPrimeMessage] = useState<string | null>(
+    null,
+  );
+  const navigate = useNavigate();
+  const matchRoute = useMatchRoute();
+  const sharedSearch = useSearch({ from: '__root__' });
+  const allocationSearch = useSearch({
+    from: '/allocation',
+    shouldThrow: false,
+  });
+  const activitiesSearch = useSearch({
+    from: '/activities',
+    shouldThrow: false,
+  });
+  const primePathParams = useParams({
+    from: '/allocation/$primeId',
+    shouldThrow: false,
+  });
+  const { globalFilter, setGlobalFilter, setSorting, sorting } =
+    useUrlSyncedTableState();
 
-  // Range selection persisted in the URL so it survives reloads and is
-  // shareable: a preset key, plus from/to timestamps for custom ranges.
-  const [rangeParam, setRangeParam] = useUrlParam(PARAMS.range);
-  const [rangeFromParam, setRangeFromParam] = useUrlParam(PARAMS.rangeFrom);
-  const [rangeToParam, setRangeToParam] = useUrlParam(PARAMS.rangeTo);
+  const selectedView: 'allocation' | 'activities' = matchRoute({
+    to: '/activities',
+  })
+    ? 'activities'
+    : 'allocation';
+  const selectedPrimeId =
+    primePathParams?.primeId ?? sharedSearch.prime ?? null;
+  const selectedNetwork = sharedSearch.network ?? null;
+  const selectedProtocol = sharedSearch.protocol ?? null;
+  const showAllPrimesInActivities =
+    selectedView === 'activities' ? activitiesSearch?.allp !== '0' : false;
 
-  const rangePreset: RangePreset = isRangePreset(rangeParam)
-    ? rangeParam
-    : DEFAULT_RANGE_PRESET;
+  // Param edits replace rather than push: a filter belongs in the URL but not in
+  // the back-history, where it would take a Back press each to undo.
+  const updateSearch = useCallback(
+    (patch: AppSearchPatch) => {
+      void navigate({
+        to: '.',
+        search: (previous) => ({ ...previous, ...patch }),
+        replace: true,
+      });
+    },
+    [navigate],
+  );
 
-  const timeRange = useMemo<TimeRange>(() => {
-    if (rangePreset === 'custom') {
-      // A hand-edited URL can carry unparsable or reversed custom timestamps;
-      // fall back to the default rather than sending a bad range downstream.
-      if (rangeFromParam && rangeToParam) {
-        const fromMs = new Date(rangeFromParam).getTime();
-        const toMs = new Date(rangeToParam).getTime();
-        if (Number.isFinite(fromMs) && Number.isFinite(toMs) && toMs > fromMs) {
-          return { from_timestamp: rangeFromParam, to_timestamp: rangeToParam };
-        }
+  // View and prime are both addresses, not params: the prime rides in the path on
+  // the allocation view and in the query on activities.
+  const navigateToView = useCallback(
+    ({ view, primeKey, patch, replace }: ViewNavigation) => {
+      if (view === 'activities') {
+        void navigate({
+          to: '/activities',
+          search: (previous) => ({
+            ...previous,
+            ...patch,
+            prime: primeKey ?? undefined,
+          }),
+          replace,
+        });
+        return;
       }
-      return defaultTimeRange();
-    }
-    return presetToRange(rangePreset);
-  }, [rangePreset, rangeFromParam, rangeToParam]);
+
+      if (primeKey === null) {
+        void navigate({
+          to: '/allocation',
+          search: (previous) => ({ ...previous, ...patch, prime: undefined }),
+          replace,
+        });
+        return;
+      }
+
+      void navigate({
+        to: '/allocation/$primeId',
+        params: { primeId: primeKey },
+        search: (previous) => ({ ...previous, ...patch, prime: undefined }),
+        replace,
+      });
+    },
+    [navigate],
+  );
+
+  // A usable from/to pair in the URL is the custom selection itself; `range`
+  // only ever names a preset (see the root search schema).
+  const customTimeRange = useMemo<TimeRange | null>(
+    () =>
+      sharedSearch.from && sharedSearch.to
+        ? { from_timestamp: sharedSearch.from, to_timestamp: sharedSearch.to }
+        : null,
+    [sharedSearch.from, sharedSearch.to],
+  );
+
+  const searchRangePreset = sharedSearch.range ?? DEFAULT_RANGE_PRESET;
+  const rangePreset: RangePreset = customTimeRange
+    ? 'custom'
+    : searchRangePreset;
+
+  const timeRange = useMemo<TimeRange>(
+    () => customTimeRange ?? presetToRange(searchRangePreset),
+    [customTimeRange, searchRangePreset],
+  );
 
   const handleRangeChange = (preset: RangePreset, range: TimeRange) => {
-    // The default preset stays out of the URL to keep it clean.
-    setRangeParam(preset === DEFAULT_RANGE_PRESET ? null : preset);
-    if (preset === 'custom') {
-      setRangeFromParam(range.from_timestamp ?? null);
-      setRangeToParam(range.to_timestamp ?? null);
-    } else {
-      setRangeFromParam(null);
-      setRangeToParam(null);
-    }
+    const customRange = preset === 'custom' ? range : null;
+    updateSearch({
+      // The default preset stays out of the URL to keep it clean, and a custom
+      // range is carried by from/to alone.
+      range:
+        preset === 'custom' || preset === DEFAULT_RANGE_PRESET
+          ? undefined
+          : preset,
+      from: customRange?.from_timestamp,
+      to: customRange?.to_timestamp,
+    });
   };
-
-  const previousPrimeIdRef = useRef<string | null>(selectedPrimeId);
-  const isDrawerOpen = isDrawerOpenParam === '1';
-  // Trim trailing slashes so "/activities/" links resolve the same as
-  // "/activities" on hosts that append one.
-  const normalizedPathname = pathname.replace(/\/+$/, '') || '/';
-  const selectedView: 'allocation' | 'activities' =
-    normalizedPathname === '/activities' ? 'activities' : 'allocation';
-  const showAllPrimesInActivities =
-    selectedView === 'activities' ? showAllPrimesParam !== '0' : false;
-
-  useEffect(() => {
-    if (
-      normalizedPathname === '/allocation' ||
-      normalizedPathname === '/activities'
-    ) {
-      return;
-    }
-
-    // Redirect unknown paths (e.g. "/") to the default view, preserving query
-    // params. `replace` so the bare path never lands in the back-history.
-    replacePathname('/allocation', 'replace');
-  }, [normalizedPathname]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -356,48 +428,75 @@ function App() {
     return () => controller.abort();
   }, []);
 
+  // One entry per prime (grouped by prime_vault_address), not one per ALM
+  // proxy — a prime allocates through several proxies (one per chain), and
+  // the sidebar/selection model addresses the prime, not a single proxy.
+  const primeGroups = useMemo(() => groupPrimesByVault(primes), [primes]);
+
+  const selectedPrimeGroup = useMemo(
+    () => primeGroups.find((group) => group.key === selectedPrimeId) ?? null,
+    [primeGroups, selectedPrimeId],
+  );
+
+  // Resolving the default (first) prime preserves the rest of the URL: a deep
+  // link that names filters but no prime must keep those filters.
   useEffect(() => {
     if (isPrimesLoading) {
       return;
     }
 
-    if (primes.length === 0) {
-      if (selectedPrimeId !== null) {
-        setSelectedPrimeId(null);
+    const fallbackGroup = primeGroups[0] ?? null;
+
+    if (fallbackGroup === null) {
+      // A failed prime fetch is not an empty prime list: dropping the prime out
+      // of the URL here would destroy the deep link a retry could still serve.
+      if (primesErrorMessage === null && selectedPrimeId !== null) {
+        navigateToView({ view: selectedView, primeKey: null, replace: true });
       }
       return;
     }
 
-    if (
-      !selectedPrimeId ||
-      !primes.some((prime) => prime.id === selectedPrimeId)
-    ) {
-      setSelectedPrimeId(primes[0]?.id ?? null);
-    }
-  }, [isPrimesLoading, selectedPrimeId, setSelectedPrimeId, primes]);
-
-  useEffect(() => {
-    if (
-      previousPrimeIdRef.current !== null &&
-      previousPrimeIdRef.current !== selectedPrimeId
-    ) {
-      setSelectedNetwork(null);
-      setSelectedProtocol(null);
-      setSelectedAllocationKey(null);
-      setIsDrawerOpenParam(null);
+    if (!selectedPrimeId) {
+      navigateToView({
+        view: selectedView,
+        primeKey: fallbackGroup.key,
+        replace: true,
+      });
+      return;
     }
 
-    previousPrimeIdRef.current = selectedPrimeId;
+    if (primeGroups.some((group) => group.key === selectedPrimeId)) {
+      return;
+    }
+
+    // Silently swapping primes renders one prime's data under another's link,
+    // and the filters in that link were scoped to the prime that is gone.
+    logging.warn('Requested prime is not in the prime list', {
+      requestedPrimeKey: selectedPrimeId,
+      fallbackPrimeKey: fallbackGroup.key,
+    });
+    setUnknownPrimeMessage(
+      `Prime ${truncateMiddle(selectedPrimeId)} was not found; showing ${fallbackGroup.name}.`,
+    );
+    navigateToView({
+      view: selectedView,
+      primeKey: fallbackGroup.key,
+      patch: PRIME_SCOPED_RESET,
+      replace: true,
+    });
   }, [
+    isPrimesLoading,
+    navigateToView,
+    primeGroups,
+    primesErrorMessage,
     selectedPrimeId,
-    setIsDrawerOpenParam,
-    setSelectedNetwork,
-    setSelectedProtocol,
+    selectedView,
   ]);
 
   useEffect(() => {
-    if (!selectedPrimeId) {
+    if (!selectedPrimeGroup) {
       setAllocations([]);
+      setLoadedAllocationsPrimeKey(null);
       setAllocationsErrorMessage(null);
       setIsAllocationsLoading(false);
       return;
@@ -406,13 +505,21 @@ function App() {
     const controller = new AbortController();
 
     setAllocations([]);
-    setSelectedAllocationKey(null);
+    setLoadedAllocationsPrimeKey(null);
     setIsAllocationsLoading(true);
     setAllocationsErrorMessage(null);
 
-    void getAllocations(selectedPrimeId, controller.signal)
+    // Fans out across every ALM proxy of the prime and concatenates; a
+    // failure on any one proxy rejects the whole call (see
+    // getAllocationsForProxies) rather than silently dropping that chain's
+    // positions.
+    void getAllocationsForProxies(
+      selectedPrimeGroup.proxyAddresses,
+      controller.signal,
+    )
       .then((response) => {
         setAllocations(response);
+        setLoadedAllocationsPrimeKey(selectedPrimeGroup.key);
       })
       .catch((error: unknown) => {
         if (isAbortError(error)) {
@@ -421,7 +528,7 @@ function App() {
 
         logging.error('Failed to load allocations', {
           error,
-          primeId: selectedPrimeId,
+          primeKey: selectedPrimeGroup.key,
         });
         setAllocationsErrorMessage(toErrorMessage(error));
       })
@@ -432,10 +539,16 @@ function App() {
       });
 
     return () => controller.abort();
-  }, [selectedPrimeId]);
+  }, [selectedPrimeGroup]);
+
+  // The prime_* fields on this response are aggregated prime-wide server-side,
+  // so one call against the primary proxy carries the same figures every
+  // other proxy of the prime would return; fanning it out would only waste
+  // requests.
+  const primaryProxyAddress = selectedPrimeGroup?.primaryProxyAddress ?? null;
 
   useEffect(() => {
-    if (!selectedPrimeId) {
+    if (!primaryProxyAddress) {
       setRiskCapital(null);
       setIsRiskCapitalLoading(false);
       setRiskCapitalErrorMessage(null);
@@ -448,7 +561,7 @@ function App() {
     setRiskCapital(null);
     setRiskCapitalErrorMessage(null);
 
-    void getPrimeRiskCapital(selectedPrimeId, controller.signal)
+    void getPrimeRiskCapital(primaryProxyAddress, controller.signal)
       .then((response) => {
         if (!controller.signal.aborted) {
           setRiskCapital(response);
@@ -461,7 +574,7 @@ function App() {
 
         logging.warn('Risk capital unavailable for selected prime', {
           error,
-          primeId: selectedPrimeId,
+          primaryProxyAddress,
         });
         setRiskCapital(null);
         setRiskCapitalErrorMessage(toErrorMessage(error));
@@ -473,11 +586,12 @@ function App() {
       });
 
     return () => controller.abort();
-  }, [selectedPrimeId]);
+  }, [primaryProxyAddress]);
 
   useEffect(() => {
-    if (!selectedPrimeId) {
+    if (!primaryProxyAddress) {
       setPrimeDebtSnapshot(null);
+      setReferenceDebt(null);
       setIsPrimeDebtLoading(false);
       setPrimeDebtErrorMessage(null);
       return;
@@ -487,12 +601,22 @@ function App() {
 
     setIsPrimeDebtLoading(true);
     setPrimeDebtSnapshot(null);
+    setReferenceDebt(null);
     setPrimeDebtErrorMessage(null);
 
-    void getLatestPrimeDebtSnapshot(selectedPrimeId, controller.signal)
-      .then((snapshot) => {
-        if (!controller.signal.aborted) {
-          setPrimeDebtSnapshot(snapshot);
+    void (
+      REFERENCE_MODE
+        ? getLatestReferenceDebtBucket(primaryProxyAddress, controller.signal)
+        : getLatestPrimeDebtSnapshot(primaryProxyAddress, controller.signal)
+    )
+      .then((latest) => {
+        if (controller.signal.aborted) {
+          return;
+        }
+        if (REFERENCE_MODE) {
+          setReferenceDebt(latest as PrimeDebtBucket | null);
+        } else {
+          setPrimeDebtSnapshot(latest as PrimeDebtSnapshot | null);
         }
       })
       .catch((error: unknown) => {
@@ -502,9 +626,10 @@ function App() {
 
         logging.warn('Prime debt snapshot unavailable for selected prime', {
           error,
-          primeId: selectedPrimeId,
+          primaryProxyAddress,
         });
         setPrimeDebtSnapshot(null);
+        setReferenceDebt(null);
         setPrimeDebtErrorMessage(toErrorMessage(error));
       })
       .finally(() => {
@@ -514,11 +639,11 @@ function App() {
       });
 
     return () => controller.abort();
-  }, [selectedPrimeId]);
+  }, [primaryProxyAddress]);
 
   const selectedPrime = useMemo(
-    () => primes.find((prime) => prime.id === selectedPrimeId) ?? null,
-    [selectedPrimeId, primes],
+    () => primes.find((prime) => prime.address === primaryProxyAddress) ?? null,
+    [primaryProxyAddress, primes],
   );
 
   const chartResolution = useMemo(
@@ -534,7 +659,10 @@ function App() {
     isLoading: isChartsLoading,
     errorMessage: chartsErrorMessage,
   } = usePrimeChartData(
-    selectedPrimeId,
+    // Any one of the prime's proxies: the activity and exposure endpoints
+    // resolve it prime-wide server-side. Total-capital and debt read
+    // prime-scoped rows, so one address answers for the whole prime there too.
+    primaryProxyAddress,
     timeRange.from_timestamp,
     timeRange.to_timestamp,
     chartResolution,
@@ -565,15 +693,17 @@ function App() {
     [allocations, isActivitiesView, localProtocols],
   );
 
-  // Drop a stale filter only once its option source is ready — otherwise a
-  // valid deep link (e.g. ?network=/?protocol=) is cleared on first render
-  // before chains/protocols metadata has loaded.
+  // Only rows loaded for this exact prime are an authoritative option list; []
+  // or another prime's rows read as "no such option" and wipe ?network=.
+  const allocationOptionsUnready =
+    selectedPrimeGroup === null ||
+    loadedAllocationsPrimeKey !== selectedPrimeGroup.key;
   const networkOptionsLoading = isActivitiesView
     ? localChains.length === 0
-    : isAllocationsLoading;
+    : allocationOptionsUnready;
   const protocolOptionsLoading = isActivitiesView
     ? localProtocols.length === 0
-    : isAllocationsLoading;
+    : allocationOptionsUnready;
 
   useEffect(() => {
     if (networkOptionsLoading || !selectedNetwork) {
@@ -581,14 +711,9 @@ function App() {
     }
 
     if (!networkOptions.some((option) => option.value === selectedNetwork)) {
-      setSelectedNetwork(null);
+      updateSearch({ network: undefined });
     }
-  }, [
-    networkOptionsLoading,
-    networkOptions,
-    selectedNetwork,
-    setSelectedNetwork,
-  ]);
+  }, [networkOptionsLoading, networkOptions, selectedNetwork, updateSearch]);
 
   useEffect(() => {
     if (protocolOptionsLoading || !selectedProtocol) {
@@ -596,14 +721,9 @@ function App() {
     }
 
     if (!protocolOptions.some((option) => option.value === selectedProtocol)) {
-      setSelectedProtocol(null);
+      updateSearch({ protocol: undefined });
     }
-  }, [
-    protocolOptionsLoading,
-    protocolOptions,
-    selectedProtocol,
-    setSelectedProtocol,
-  ]);
+  }, [protocolOptionsLoading, protocolOptions, selectedProtocol, updateSearch]);
 
   const searchFilteredAllocations = useMemo(
     () =>
@@ -695,38 +815,72 @@ function App() {
   }, [activityBuckets, primeTotalAllocationUsd, rangePreset]);
 
   const primeDebtSeries = useMemo<ChartDatum[]>(
-    () =>
-      debtBuckets
-        .map((bucket) => ({
-          label: formatChartTimestampLabel(bucket.bucket_start),
-          value: wadToUnits(bucket.debt_wad) ?? Number.NaN,
-        }))
-        .filter((point) => Number.isFinite(point.value)),
+    () => toChartSeries(debtBuckets, (bucket) => wadToUnits(bucket.debt_wad)),
     [debtBuckets],
   );
 
   // Total capital is the on-chain SubProxy treasury balance over time.
   const totalCapitalSeries = useMemo<ChartDatum[]>(
     () =>
-      totalCapitalBuckets
-        .map((bucket) => ({
-          label: formatChartTimestampLabel(bucket.bucket_start),
-          value: parseNumericValue(bucket.total_capital_usd) ?? Number.NaN,
-        }))
-        .filter((point) => Number.isFinite(point.value)),
+      toChartSeries(totalCapitalBuckets, (bucket) =>
+        parseNumericValue(bucket.total_capital_usd),
+      ),
     [totalCapitalBuckets],
   );
+
+  // Both ride the total-capital buckets: assets_usd and encumbrance_ratio come
+  // from the same two upstream feeds, so a separate request could pair figures
+  // observed at different instants. Reference mode only — self mode reports
+  // them null, which filters to an empty series and a flat fallback card.
+  const collateralSeries = useMemo<ChartDatum[]>(
+    () =>
+      toChartSeries(totalCapitalBuckets, (bucket) =>
+        parseNumericValue(bucket.assets_usd),
+      ),
+    [totalCapitalBuckets],
+  );
+
+  const encumbranceSeries = useMemo<ChartDatum[]>(
+    () =>
+      toChartSeries(totalCapitalBuckets, (bucket) =>
+        parseNumericValue(bucket.encumbrance_ratio),
+      ),
+    [totalCapitalBuckets],
+  );
+
+  // When the reference collateral figure was observed, which is not the bucket
+  // serving it: the feed is daily and the value is carried forward, so without
+  // showing this a figure up to a day old is indistinguishable from a fresh one.
+  const primeCollateralObservedAt = REFERENCE_MODE
+    ? (totalCapitalBuckets
+        .filter((bucket) => bucket.assets_observed_at != null)
+        .at(-1)?.assets_observed_at ?? null)
+    : null;
+
+  // The monitor's three figures share one stamp because they share one row. It
+  // matters for the same reason the collateral one does, and more so since the
+  // prior seeding reaches up to 90 days back.
+  const capitalObservedAt = REFERENCE_MODE
+    ? (totalCapitalBuckets
+        .filter((bucket) => bucket.capital_observed_at != null)
+        .at(-1)?.capital_observed_at ?? null)
+    : null;
+
+  // Reference mode publishes a real total-assets figure. Self mode has no
+  // equivalent — STL does not index PSM3 and prices no Curve LP position — so
+  // it shows what STL actually holds records for, captioned as such.
+  // Buckets are oldest-first, so the newest observation is the last point.
+  const primeCollateralValue = REFERENCE_MODE
+    ? (collateralSeries.at(-1)?.value ?? null)
+    : primeTotalAllocationUsd;
 
   // Priced receipt-token exposure over time; drives the Exposure card trend
   // (falls back to the flat current value below when no history is available).
   const exposureSeries = useMemo<ChartDatum[]>(
     () =>
-      exposureBuckets
-        .map((bucket) => ({
-          label: formatChartTimestampLabel(bucket.bucket_start),
-          value: parseNumericValue(bucket.exposure_usd) ?? Number.NaN,
-        }))
-        .filter((point) => Number.isFinite(point.value)),
+      toChartSeries(exposureBuckets, (bucket) =>
+        parseNumericValue(bucket.exposure_usd),
+      ),
     [exposureBuckets],
   );
 
@@ -761,10 +915,10 @@ function App() {
         : { data: fallbackChart(currentValue), kind: 'fallback' };
 
     const exposureValue =
-      riskCapital?.exposure_usd === undefined ||
-      riskCapital?.exposure_usd === null
+      riskCapital?.prime_exposure_usd === undefined ||
+      riskCapital?.prime_exposure_usd === null
         ? null
-        : parseNumericValue(riskCapital.exposure_usd);
+        : parseNumericValue(riskCapital.prime_exposure_usd);
 
     const totalRiskCapitalValue =
       riskCapital?.total_risk_capital_usd === undefined ||
@@ -774,6 +928,13 @@ function App() {
 
     const primeDebtValue = wadToUnits(primeDebtSnapshot?.debt_wad);
 
+    const encumbranceValue = parseNumericValue(
+      riskCapital?.prime_encumbrance_ratio,
+    );
+
+    // One ordinal series token per card, named rather than written out as a
+    // `var()` read: the token type is what catches a typo (and a repeat of the
+    // collision where two of these cards named the same token unnoticed).
     const charts: MetricChartSpec[] = [
       {
         // Balance reconstructed from signed USD net flows, anchored at the
@@ -782,7 +943,7 @@ function App() {
         key: 'allocation-activity-volume',
         data: allocationBalanceSeries,
         kind: 'series',
-        stroke: 'var(--colors-chart-series-primary, #60a5fa)',
+        stroke: 'chart.series.primary',
         formatValue: formatCompactUsd,
       },
       {
@@ -790,26 +951,51 @@ function App() {
         // back to the flat current value when no history is available.
         key: 'risk-capital',
         ...seriesOrFallback(exposureSeries, exposureValue),
-        stroke: 'var(--colors-chart-series-secondary, #14b8a6)',
+        stroke: 'chart.series.secondary',
         formatValue: formatCompactUsd,
       },
       {
         key: 'total-capital',
         ...seriesOrFallback(totalCapitalSeries, totalRiskCapitalValue),
-        stroke: 'var(--colors-chart-series-primary, #f59e0b)',
+        stroke: 'chart.series.quaternary',
         formatValue: formatCompactUsd,
       },
       {
         key: 'prime-debt-exposure',
         ...seriesOrFallback(primeDebtSeries, primeDebtValue),
-        stroke: '#f97316',
+        stroke: 'chart.series.quinary',
         formatValue: (value: number) => `${formatCompactNumber(value)} DAI`,
+      },
+      {
+        key: 'prime-collateral',
+        ...seriesOrFallback(collateralSeries, primeCollateralValue),
+        stroke: 'chart.series.tertiary',
+        formatValue: formatCompactUsd,
+      },
+      {
+        key: 'encumbrance-ratio',
+        ...seriesOrFallback(encumbranceSeries, encumbranceValue),
+        stroke: 'chart.series.critical',
+        formatValue: formatRatioPercent,
+        thresholds: [
+          {
+            value: ENCUMBRANCE_LOW_SEVERITY_THRESHOLD,
+            label: formatRatioPercent(ENCUMBRANCE_LOW_SEVERITY_THRESHOLD, 0),
+            stroke: 'var(--colors-text-warning)',
+          },
+          {
+            value: ENCUMBRANCE_HIGH_SEVERITY_THRESHOLD,
+            label: formatRatioPercent(ENCUMBRANCE_HIGH_SEVERITY_THRESHOLD, 0),
+            stroke: 'var(--colors-text-critical)',
+          },
+        ],
       },
     ];
     return charts.filter((chart) => chart.data.length > 0);
   }, [
     allocationBalanceSeries,
-    riskCapital?.exposure_usd,
+    riskCapital?.prime_exposure_usd,
+    riskCapital?.prime_encumbrance_ratio,
     riskCapital?.total_risk_capital_usd,
     chartFromLabel,
     chartToLabel,
@@ -817,65 +1003,32 @@ function App() {
     primeDebtSeries,
     primeDebtSnapshot?.debt_wad,
     totalCapitalSeries,
+    collateralSeries,
+    encumbranceSeries,
+    primeCollateralValue,
   ]);
 
-  useEffect(() => {
-    if (filteredAllocations.length === 0) {
-      if (selectedAllocationKey !== null) {
-        setSelectedAllocationKey(null);
-      }
-      if (isDrawerOpen && !isAllocationsLoading) {
-        setIsDrawerOpenParam(null);
-      }
-      return;
-    }
+  // `row` restores a drawer deep link; anything the current filters exclude falls
+  // back to the first row in view, so a tab always has something to render.
+  const selectedAllocation = useMemo(() => {
+    const requestedRow = allocationSearch?.row;
+    const requested = requestedRow
+      ? filteredAllocations.find(
+          (allocation) => getAllocationKey(allocation) === requestedRow,
+        )
+      : undefined;
 
-    if (
-      !selectedAllocationKey ||
-      !filteredAllocations.some(
-        (allocation) => getAllocationKey(allocation) === selectedAllocationKey,
-      )
-    ) {
-      setSelectedAllocationKey(getAllocationKey(filteredAllocations[0]));
-    }
-  }, [
-    filteredAllocations,
-    isAllocationsLoading,
-    isDrawerOpen,
-    selectedAllocationKey,
-    setIsDrawerOpenParam,
-  ]);
+    return requested ?? filteredAllocations[0] ?? null;
+  }, [allocationSearch?.row, filteredAllocations]);
 
-  useEffect(() => {
-    if (!isDrawerOpen) {
-      return;
-    }
+  const selectedAllocationKey = selectedAllocation
+    ? getAllocationKey(selectedAllocation)
+    : null;
 
-    if (selectedAllocationKey === null) {
-      return;
-    }
-
-    if (
-      !filteredAllocations.some(
-        (allocation) => getAllocationKey(allocation) === selectedAllocationKey,
-      )
-    ) {
-      setIsDrawerOpenParam(null);
-    }
-  }, [
-    filteredAllocations,
-    isDrawerOpen,
-    selectedAllocationKey,
-    setIsDrawerOpenParam,
-  ]);
-
-  const selectedAllocation = useMemo(
-    () =>
-      filteredAllocations.find(
-        (allocation) => getAllocationKey(allocation) === selectedAllocationKey,
-      ) ?? null,
-    [filteredAllocations, selectedAllocationKey],
-  );
+  // Derived, never corrected: a deep link names its row before the allocations
+  // are fetched, so `drawer=1` waits for a row instead of being dropped as stale.
+  const isDrawerOpen =
+    allocationSearch?.drawer === '1' && selectedAllocation !== null;
 
   const selectedProtocolLabel = selectedAllocation
     ? getProtocolLabel(
@@ -893,60 +1046,37 @@ function App() {
     <div
       className={css({
         position: 'relative',
-        '& [data-sidebar-layout] [data-part="panel"]:last-of-type > div': {
-          overflow: 'auto !important',
-          minHeight: '0 !important',
-        },
-        '& [data-sidebar-layout] [data-scope="resize-handle"][data-part="root"][data-axis="vertical"]':
-          {
-            right: '0 !important',
-          },
+        // Not a workaround: the sidebar splitter's 1px indicator line is
+        // redundant next to the sidebar's own border, so hide it and let the
+        // col-resize cursor carry the affordance.
         '& [data-sidebar-layout] [data-scope="resize-handle"][data-part="indicator"]':
           {
             opacity: 0,
           },
-        '@media screen and (max-width: 48rem)': {
-          '& [data-sidebar-layout] > div': {
-            display: 'block !important',
-            height: 'auto !important',
-            overflow: 'visible !important',
-          },
-          '& [data-sidebar-layout] aside': {
-            width: '100% !important',
-            height: 'auto !important',
-            maxHeight: '22rem',
-            borderRight: 'none !important',
-            borderBottom: '1px solid var(--colors-border-subtle)',
-          },
-          '& [data-sidebar-layout] main': {
-            width: '100% !important',
-            height: 'auto !important',
-            minHeight: '0 !important',
-          },
-          '& [data-sidebar-layout] main > header': {
-            minHeight: '0 !important',
-            justifyContent: 'stretch !important',
-          },
-          '& [data-sidebar-layout] [data-scope="resize-handle"][data-part="root"]':
-            {
-              display: 'none !important',
-            },
-        },
       })}
     >
       <div data-sidebar-layout>
         <SidebarLayout
+          collapseBelow={768}
           sidebar={
             <PrimeSidebar
-              primes={primes}
+              primeGroups={primeGroups}
               selectedPrimeId={selectedPrimeId}
               isLoading={isPrimesLoading}
               errorMessage={primesErrorMessage}
-              onSelectPrime={setSelectedPrimeId}
+              onSelectPrime={(primeKey) => {
+                setUnknownPrimeMessage(null);
+                navigateToView({
+                  view: selectedView,
+                  primeKey,
+                  patch: PRIME_SCOPED_RESET,
+                  replace: true,
+                });
+              }}
               showAllPrimes={showAllPrimesInActivities}
               canShowAllPrimes={selectedView === 'activities'}
               onShowAllPrimesChange={(value) =>
-                setShowAllPrimesParam(value ? '1' : '0')
+                updateSearch({ allp: value ? '1' : '0' })
               }
             />
           }
@@ -954,16 +1084,18 @@ function App() {
             <TopBar
               hasSelectedPrime={selectedPrime !== null}
               networkOptions={networkOptions}
-              onNetworkChange={setSelectedNetwork}
-              onProtocolChange={setSelectedProtocol}
+              onNetworkChange={(value) =>
+                updateSearch({ network: value ?? undefined })
+              }
+              onProtocolChange={(value) =>
+                updateSearch({ protocol: value ?? undefined })
+              }
               protocolOptions={protocolOptions}
               selectedNetwork={selectedNetwork}
               selectedProtocol={selectedProtocol}
               selectedView={selectedView}
               onViewChange={(view) =>
-                setPathname(
-                  view === 'activities' ? '/activities' : '/allocation',
-                )
+                navigateToView({ view, primeKey: selectedPrimeId })
               }
               rangePreset={rangePreset}
               timeRange={timeRange}
@@ -984,10 +1116,10 @@ function App() {
                 isPrimeDebtLoading={isPrimeDebtLoading}
                 localProtocols={localProtocols}
                 onSelectAllocation={(allocationKey) => {
-                  setSelectedAllocationKey(allocationKey);
-                  setIsDrawerOpenParam('1');
+                  updateSearch({ row: allocationKey, drawer: '1' });
                 }}
                 primeDebtSnapshot={primeDebtSnapshot}
+                referenceDebt={referenceDebt}
                 onSearchChange={setGlobalFilter}
                 onSortingChange={setSorting}
                 searchValue={globalFilter}
@@ -999,6 +1131,10 @@ function App() {
                 chartsErrorMessage={chartsErrorMessage}
                 riskCapitalErrorMessage={riskCapitalErrorMessage}
                 primeDebtErrorMessage={primeDebtErrorMessage}
+                noticeMessage={unknownPrimeMessage}
+                primeCollateralUsd={primeCollateralValue}
+                primeCollateralObservedAt={primeCollateralObservedAt}
+                capitalObservedAt={capitalObservedAt}
               />
             ) : (
               <ActivityFeed
@@ -1010,10 +1146,14 @@ function App() {
                 showAllPrimes={showAllPrimesInActivities}
                 selectedPrime={selectedPrime}
                 tokenOptions={tokenSymbolOptions}
-                tokenFilter={activityTokenParam}
-                onTokenFilterChange={setActivityTokenParam}
-                actionFilter={activityActionParam ?? undefined}
-                onActionFilterChange={setActivityActionParam}
+                tokenFilter={activitiesSearch?.token ?? null}
+                onTokenFilterChange={(value) =>
+                  updateSearch({ token: value ?? undefined })
+                }
+                actionFilter={activitiesSearch?.aa}
+                onActionFilterChange={(value) =>
+                  updateSearch({ aa: toSearchOption(value, ACTIVITY_ACTIONS) })
+                }
                 externalRangePreset={rangePreset}
                 externalTimeRange={timeRange}
                 onRangeChange={handleRangeChange}
@@ -1030,7 +1170,7 @@ function App() {
             : undefined
         }
         isOpen={selectedView === 'allocation' && isDrawerOpen}
-        onClose={() => setIsDrawerOpenParam(null)}
+        onClose={() => updateSearch({ drawer: undefined })}
         subtitle={
           selectedAllocation ? (
             <span

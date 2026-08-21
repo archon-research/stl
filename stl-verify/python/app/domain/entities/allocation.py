@@ -2,7 +2,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import GetCoreSchemaHandler
 from pydantic_core import CoreSchema, core_schema
@@ -48,6 +48,19 @@ class EthAddress(str):
     @classmethod
     def __get_pydantic_core_schema__(cls, _source_type: Any, _handler: GetCoreSchemaHandler) -> CoreSchema:
         return core_schema.no_info_after_validator_function(cls, core_schema.str_schema())
+
+
+def as_address(value: str) -> EthAddress | None:
+    """Return ``value`` as an address, or ``None`` when it is not one.
+
+    For identifiers from outside STL, where "not an address" is an expected
+    answer rather than a fault — a Uniswap V4 position names itself by 32-byte
+    pool id in the field an address would occupy.
+    """
+    try:
+        return EthAddress(value)
+    except ValueError:
+        return None
 
 
 @dataclass(frozen=True)
@@ -127,9 +140,27 @@ class AnchorageCustodyHolding:
 
 @dataclass(frozen=True)
 class Prime:
+    """One of a prime's proxy wallets, as surfaced by ``/v1/primes``.
+
+    A prime has several of these — one ALM proxy per chain it allocates on — so
+    ``name`` is not a key. ``chain_id`` comes from the position rows; ``chain`` is
+    derived from ``chain_id`` via ``chain_names.chain_name_for`` and is ``None``
+    for a chain the vocabulary has not been taught.
+
+    ``prime_vault_address`` is the owning prime's ``prime.vault_address`` — stable,
+    unique, and the same across every proxy of a prime, so consumers group rows by
+    it. ``None`` when the prime has no vault address on record.
+    """
+
     id: str
     name: str
     address: str
+    chain_id: int
+    chain: str | None
+    # An allocation venue by construction: SubProxy treasury wallets hold no
+    # allocations, so they are excluded rather than listed with another role.
+    role: Literal["alm"]
+    prime_vault_address: str | None = None
 
 
 @dataclass(frozen=True)

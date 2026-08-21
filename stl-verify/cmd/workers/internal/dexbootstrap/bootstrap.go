@@ -4,12 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"math/big"
 	"os"
+	"slices"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/cache"
@@ -61,10 +60,6 @@ type Deps struct {
 	PostgresPool  *pgxpool.Pool
 	BuildRegistry *buildregistry.Registry
 
-	// blockNumberer is the chain client used by LatestBlock; kept unexported so
-	// callers reach it via the accessor rather than the concrete eth client.
-	blockNumberer blockNumberer
-
 	TxManager    outbound.TxManager
 	ProtocolRepo outbound.ProtocolRepository
 	TokenRepo    outbound.TokenRepository
@@ -76,29 +71,11 @@ type Deps struct {
 	cleanups []func()
 }
 
-// blockNumberer is the subset of the eth client used to read chain head.
-type blockNumberer interface {
-	BlockNumber(ctx context.Context) (uint64, error)
-}
-
-// LatestBlock returns the current chain head as a *big.Int, for callers (e.g. a
-// startup capability probe) that need a concrete block for a Multicaller call.
-func (d *Deps) LatestBlock(ctx context.Context) (*big.Int, error) {
-	if d.blockNumberer == nil {
-		return nil, fmt.Errorf("block numberer not initialised")
-	}
-	bn, err := d.blockNumberer.BlockNumber(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("fetching latest block: %w", err)
-	}
-	return new(big.Int).SetUint64(bn), nil
-}
-
 // Close releases every resource in reverse-registration order. Safe to call
 // on a partially-initialised Deps from a Bootstrap error path.
 func (d *Deps) Close() {
-	for i := len(d.cleanups) - 1; i >= 0; i-- {
-		d.cleanups[i]()
+	for _, v := range slices.Backward(d.cleanups) {
+		v()
 	}
 }
 
@@ -187,14 +164,7 @@ func Bootstrap(ctx context.Context, cfg Config, opts BootstrapOptions) (*Deps, e
 	}
 	logger.Info("Redis connected", "addr", cfg.RedisAddr)
 
-	s3Opts := []func(*awss3.Options){}
-	if s3Endpoint := env.Get("AWS_S3_ENDPOINT", ""); s3Endpoint != "" {
-		s3Opts = append(s3Opts, func(o *awss3.Options) {
-			o.BaseEndpoint = aws.String(s3Endpoint)
-			o.UsePathStyle = true
-		})
-	}
-	s3Reader := s3adapter.NewReaderWithOptions(awsCfg, logger, s3Opts...)
+	s3Reader := s3adapter.NewReaderFromEnv(awsCfg, logger)
 	d.CacheReader, err = cache.NewReaderWithFallback(blockCache, s3Reader, cfg.ChainID, cfg.DeployEnv, cfg.S3Bucket, logger)
 	if err != nil {
 		d.Close()
@@ -207,7 +177,6 @@ func Bootstrap(ctx context.Context, cfg Config, opts BootstrapOptions) (*Deps, e
 		return nil, fmt.Errorf("connecting to Ethereum node: %w", err)
 	}
 	d.cleanups = append(d.cleanups, func() { ethClient.Close() })
-	d.blockNumberer = ethClient
 	logger.Info("Ethereum node connected")
 
 	pool, err := postgres.OpenPool(ctx, postgres.WorkerDBConfig(cfg.DBURL))

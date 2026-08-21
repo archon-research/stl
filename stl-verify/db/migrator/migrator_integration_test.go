@@ -35,6 +35,27 @@ func setupPostgres(_ context.Context, t *testing.T) (*pgxpool.Pool, func()) {
 	return pool, cleanup
 }
 
+// setupMigratedPostgres gives a test its own database with the whole migration set
+// applied and TimescaleDB's policy jobs switched off.
+//
+// This package builds its own databases instead of cloning the template that has
+// those jobs off already, and a compression job firing mid-test would rewrite a
+// seeded chunk into a columnstore chunk plus a compress_hyper_* twin.
+func setupMigratedPostgres(ctx context.Context, t *testing.T) (*pgxpool.Pool, func()) {
+	t.Helper()
+
+	pool, cleanup := setupPostgres(ctx, t)
+	if err := migrator.New(pool, getMigrationsPath()).ApplyAll(ctx); err != nil {
+		cleanup()
+		t.Fatalf("apply migrations: %v", err)
+	}
+	if err := testutil.DisableScheduledJobs(ctx, pool); err != nil {
+		cleanup()
+		t.Fatalf("%v", err)
+	}
+	return pool, cleanup
+}
+
 func createTestDatabase(t *testing.T) (dsn string, cleanup func()) {
 	t.Helper()
 

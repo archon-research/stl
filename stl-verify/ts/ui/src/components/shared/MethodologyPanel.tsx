@@ -1,4 +1,10 @@
-import { ErrorState, SkeletonStack } from '@archon-research/design-system';
+import {
+  Badge,
+  type BadgeColorPalette,
+  ErrorState,
+  Panel,
+  SkeletonStack,
+} from '@archon-research/design-system';
 import { ChevronDown, ChevronUp } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
@@ -19,6 +25,24 @@ import {
 import { isAbortError, toErrorMessage } from '../../lib/errors';
 import { logging } from '../../lib/logging';
 import type { DataSource, Token, TokenPrice } from '../../types/allocation';
+
+// Anything not listed reads as neutral: the set of access models is open-ended
+// (it comes from the data-sources API), so an unknown value must not be styled
+// as though it carried a judgement.
+const ACCESS_MODEL_PALETTE: Record<string, BadgeColorPalette> = {
+  open: 'green',
+  public: 'amber',
+};
+
+// Panel owns the frame and the section-label title; the metadata rows inside it
+// still need their own stacking and type step, because `panel__body` is a plain
+// block.
+const metadataBodyClassName = css({
+  display: 'grid',
+  gap: '1.5',
+  fontSize: 'xs',
+  color: 'text.default',
+});
 
 type MethodologyPanelProps = {
   isOpen: boolean;
@@ -190,7 +214,7 @@ export function MethodologyPanel({
     <div
       className={css({
         borderRadius: 'lg',
-        border: '1px solid token(colors.surface.subtle)',
+        border: '1px solid token(colors.border.hairline)',
         bg: 'surface.default',
         overflow: 'hidden',
       })}
@@ -206,7 +230,7 @@ export function MethodologyPanel({
           alignItems: 'center',
           justifyContent: 'space-between',
           borderBottom: isOpen
-            ? '1px solid token(colors.surface.subtle)'
+            ? '1px solid token(colors.border.hairline)'
             : 'none',
           bg: 'surface.subtle',
           cursor: 'pointer',
@@ -236,6 +260,8 @@ export function MethodologyPanel({
                 title="Failed to load data sources"
                 description="An error occurred while loading data-source transparency metadata."
                 errorMessage={error}
+                tone="critical"
+                size="inline"
               />
             </div>
           ) : null}
@@ -275,7 +301,7 @@ export function MethodologyPanel({
                     borderRadius: 'sm',
                   },
                   '& a': {
-                    color: 'interactive.accent',
+                    color: 'text.link',
                     textDecoration: 'underline',
                   },
                 })}
@@ -326,99 +352,68 @@ export function MethodologyPanel({
               ) : null}
 
               {selectedTokenAddress && !isTokenLoading && selectedToken ? (
-                <div
-                  className={css({
-                    borderWidth: '1px',
-                    borderStyle: 'solid',
-                    borderColor: 'border.subtle',
-                    borderRadius: 'md',
-                    bg: 'surface.subtle',
-                    p: '3',
-                    display: 'grid',
-                    gap: '1.5',
-                    fontSize: 'xs',
-                    color: 'text.default',
-                  })}
+                <Panel
+                  surface="recessed"
+                  density="compact"
+                  title="Catalog Token"
                 >
-                  <div>
-                    <span
-                      className={css({
-                        fontWeight: 'semibold',
-                        color: 'text.strong',
-                      })}
-                    >
-                      Catalog Token:
-                    </span>{' '}
-                    {selectedToken.symbol ?? 'Unknown'} (ID {selectedToken.id})
+                  <div className={metadataBodyClassName}>
+                    <div>
+                      {selectedToken.symbol ?? 'Unknown'} (ID {selectedToken.id}
+                      )
+                    </div>
+                    <div>Address: {selectedToken.address}</div>
+                    <div>Chain: {selectedToken.chain_id}</div>
+                    <div>Decimals: {selectedToken.decimals ?? 'Unknown'}</div>
+                    <div>
+                      Catalog updated:{' '}
+                      {formatDateTime(selectedToken.updated_at)}
+                    </div>
+                    <div>
+                      Metadata keys:{' '}
+                      {selectedToken.metadata
+                        ? Object.keys(selectedToken.metadata).join(', ') ||
+                          'None'
+                        : 'None'}
+                    </div>
+                    <div>
+                      Matching catalog rows (chain/symbol preview):{' '}
+                      {catalogPreviewCount}
+                    </div>
                   </div>
-                  <div>Address: {selectedToken.address}</div>
-                  <div>Chain: {selectedToken.chain_id}</div>
-                  <div>Decimals: {selectedToken.decimals ?? 'Unknown'}</div>
-                  <div>
-                    Catalog updated: {formatDateTime(selectedToken.updated_at)}
-                  </div>
-                  <div>
-                    Metadata keys:{' '}
-                    {selectedToken.metadata
-                      ? Object.keys(selectedToken.metadata).join(', ') || 'None'
-                      : 'None'}
-                  </div>
-                  <div>
-                    Matching catalog rows (chain/symbol preview):{' '}
-                    {catalogPreviewCount}
-                  </div>
-                </div>
+                </Panel>
               ) : null}
 
               {selectedTokenAddress && !isTokenLoading && tokenPrice ? (
-                <div
-                  className={css({
-                    borderWidth: '1px',
-                    borderStyle: 'solid',
-                    borderColor: 'border.subtle',
-                    borderRadius: 'md',
-                    bg: 'surface.default',
-                    p: '3',
-                    display: 'grid',
-                    gap: '1.5',
-                    fontSize: 'xs',
-                    color: 'text.default',
-                  })}
-                >
-                  <div>
-                    <span
-                      className={css({
-                        fontWeight: 'semibold',
-                        color: 'text.strong',
-                      })}
-                    >
-                      Latest Price:
-                    </span>{' '}
-                    {tokenPrice.is_stale || tokenPrice.price_usd == null
-                      ? 'Price unavailable'
-                      : formatUsdValue(tokenPrice.price_usd)}
-                  </div>
-                  {!tokenPrice.is_stale && (
-                    <>
-                      <div>
-                        Source:{' '}
-                        {tokenPrice.source_display_name ??
-                          tokenPrice.source_name}{' '}
-                        ({tokenPrice.source_type})
-                      </div>
-                      <div>Source ID: {tokenPrice.source_id}</div>
-                    </>
-                  )}
-                  {tokenPrice.timestamp != null && (
+                <Panel surface="raised" density="compact" title="Latest Price">
+                  <div className={metadataBodyClassName}>
                     <div>
-                      Timestamp: {formatDateTime(tokenPrice.timestamp)} (
-                      {formatFreshnessLabel(tokenPrice.timestamp)})
+                      {tokenPrice.is_stale || tokenPrice.price_usd == null
+                        ? 'Price unavailable'
+                        : formatUsdValue(tokenPrice.price_usd)}
                     </div>
-                  )}
-                  {tokenPrice.staleness_seconds != null && (
-                    <div>Staleness: {tokenPrice.staleness_seconds}s</div>
-                  )}
-                </div>
+                    {!tokenPrice.is_stale && (
+                      <>
+                        <div>
+                          Source:{' '}
+                          {tokenPrice.source_display_name ??
+                            tokenPrice.source_name}{' '}
+                          ({tokenPrice.source_type})
+                        </div>
+                        <div>Source ID: {tokenPrice.source_id}</div>
+                      </>
+                    )}
+                    {tokenPrice.timestamp != null && (
+                      <div>
+                        Timestamp: {formatDateTime(tokenPrice.timestamp)} (
+                        {formatFreshnessLabel(tokenPrice.timestamp)})
+                      </div>
+                    )}
+                    {tokenPrice.staleness_seconds != null && (
+                      <div>Staleness: {tokenPrice.staleness_seconds}s</div>
+                    )}
+                  </div>
+                </Panel>
               ) : null}
             </div>
 
@@ -439,7 +434,7 @@ export function MethodologyPanel({
                 className={css({
                   overflowX: 'auto',
                   borderRadius: 'md',
-                  border: '1px solid token(colors.surface.subtle)',
+                  border: '1px solid token(colors.border.hairline)',
                 })}
               >
                 <table
@@ -460,7 +455,7 @@ export function MethodologyPanel({
                             fontWeight: 'semibold',
                             color: 'text.muted',
                             borderBottom:
-                              '1px solid token(colors.surface.subtle)',
+                              '1px solid token(colors.border.hairline)',
                           })}
                         >
                           {h}
@@ -478,7 +473,7 @@ export function MethodologyPanel({
                           className={css({
                             padding: '3',
                             borderBottom:
-                              '1px solid token(colors.surface.subtle)',
+                              '1px solid token(colors.border.hairline)',
                             fontWeight: 'semibold',
                             color: 'text.strong',
                           })}
@@ -489,7 +484,7 @@ export function MethodologyPanel({
                           className={css({
                             padding: '3',
                             borderBottom:
-                              '1px solid token(colors.surface.subtle)',
+                              '1px solid token(colors.border.hairline)',
                             color: 'text.default',
                           })}
                         >
@@ -499,7 +494,7 @@ export function MethodologyPanel({
                           className={css({
                             padding: '3',
                             borderBottom:
-                              '1px solid token(colors.surface.subtle)',
+                              '1px solid token(colors.border.hairline)',
                             color: 'text.default',
                           })}
                         >
@@ -509,33 +504,19 @@ export function MethodologyPanel({
                           className={css({
                             padding: '3',
                             borderBottom:
-                              '1px solid token(colors.surface.subtle)',
+                              '1px solid token(colors.border.hairline)',
                           })}
                         >
-                          <span
-                            className={css({
-                              display: 'inline-flex',
-                              px: '2',
-                              py: '1',
-                              borderRadius: 'md',
-                              fontSize: 'xs',
-                              fontWeight: 'semibold',
-                              bg:
-                                source.access_model === 'open'
-                                  ? 'bg.success'
-                                  : source.access_model === 'public'
-                                    ? 'bg.warning'
-                                    : 'bg.subtle',
-                              color:
-                                source.access_model === 'open'
-                                  ? 'text.success'
-                                  : source.access_model === 'public'
-                                    ? 'text.warning'
-                                    : 'text.default',
-                            })}
+                          <Badge
+                            colorPalette={
+                              ACCESS_MODEL_PALETTE[source.access_model] ??
+                              'neutral'
+                            }
+                            variant="subtle"
+                            size="sm"
                           >
                             {source.access_model}
-                          </span>
+                          </Badge>
                         </td>
                       </tr>
                     ))}
@@ -549,7 +530,7 @@ export function MethodologyPanel({
                   className={css({
                     mt: '4',
                     pt: '4',
-                    borderTop: '1px solid token(colors.surface.subtle)',
+                    borderTop: '1px solid token(colors.border.hairline)',
                     display: 'grid',
                     gap: '2',
                   })}

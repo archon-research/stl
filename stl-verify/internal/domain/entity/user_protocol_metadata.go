@@ -37,20 +37,3 @@ func (upm *UserProtocolMetadata) Validate() error {
 	}
 	return nil
 }
-
-// SetMetadata sets a key-value pair in the metadata.
-func (u *UserProtocolMetadata) SetMetadata(key string, value any) {
-	if u.Metadata == nil {
-		u.Metadata = make(map[string]any)
-	}
-	u.Metadata[key] = value
-}
-
-// GetMetadata retrieves a value from metadata by key.
-func (u *UserProtocolMetadata) GetMetadata(key string) (any, bool) {
-	if u.Metadata == nil {
-		return nil, false
-	}
-	val, ok := u.Metadata[key]
-	return val, ok
-}

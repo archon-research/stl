@@ -13,8 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
@@ -28,28 +26,20 @@ var (
 	sharedLocalStackCfg testutil.LocalStackConfig
 )
 
-// testBucket / testDeployEnv satisfy the cache reader's bucket-name convention
-// (stl-sentinel{env}-{chain}-raw); chainID=1 -> "ethereum".
+// rawBucketPrefix / testDeployEnv satisfy chainutil.ValidateS3BucketForChain, a
+// prefix check rather than an equality one, so a per-test suffix is allowed.
 const (
-	testBucket    = "stl-sentineltest-ethereum-raw"
-	testDeployEnv = "test"
+	rawBucketPrefix = "stl-sentineltest-ethereum-raw-"
+	testDeployEnv   = "test"
 )
 
 func TestMain(m *testing.M) {
-	dsn, dbCleanup := testutil.StartTimescaleDBForMain()
-	sharedDSN = dsn
-	redisAddr, redisCleanup := testutil.StartRedisForMain()
-	sharedRedisAddr = redisAddr
-	lsCfg, lsCleanup := testutil.StartLocalStackForMain("s3")
-	sharedLocalStackCfg = lsCfg
-
-	code := m.Run()
-
-	lsCleanup()
-	redisCleanup()
-	dbCleanup()
-	code = testutil.CheckGoroutineLeaks(code)
-	os.Exit(code)
+	os.Exit(testutil.RunShared(m, testutil.Shared{
+		TimescaleDSN:       &sharedDSN,
+		RedisAddr:          &sharedRedisAddr,
+		LocalStack:         &sharedLocalStackCfg,
+		LocalStackServices: "s3",
+	}))
 }
 
 func TestRunIntegration_BadConnectionConfig(t *testing.T) {
@@ -62,7 +52,7 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 	t.Setenv("AWS_REGION", "us-east-1")
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
-	t.Setenv("S3_BUCKET", testBucket)
+	t.Setenv("S3_BUCKET", testutil.S3TestBucketName(t, rawBucketPrefix))
 	t.Setenv("DEPLOY_ENV", testDeployEnv)
 
 	err := run(context.Background(), []string{
@@ -86,7 +76,7 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	ctx := context.Background()
 
-	_, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	_, dbURL, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
 	rpcServer := buildEmptyResolverMockRPC(t)
@@ -96,9 +86,8 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	defer sqsServer.Close()
 
 	s3Client := testutil.NewS3Client(t, ctx, sharedLocalStackCfg)
-	if _, err := s3Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(testBucket)}); err != nil {
-		t.Fatalf("create S3 bucket: %v", err)
-	}
+	rawBucket := testutil.S3TestBucketName(t, rawBucketPrefix)
+	testutil.EnsureBucket(t, ctx, s3Client, rawBucket)
 
 	t.Setenv("BUILD_GIT_HASH", "test")
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
@@ -108,7 +97,7 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 	t.Setenv("AWS_REGION", "us-east-1")
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
-	t.Setenv("S3_BUCKET", testBucket)
+	t.Setenv("S3_BUCKET", rawBucket)
 	t.Setenv("DEPLOY_ENV", testDeployEnv)
 	t.Setenv("CHAIN_ID", "1")
 	t.Setenv("ARCHIVE_SC_CALLS", "false")

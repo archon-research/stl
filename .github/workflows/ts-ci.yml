@@ -18,7 +18,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -50,7 +50,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -66,6 +66,46 @@ jobs:
 
       - name: Panda codegen
         run: npm run prepare -w ui
+
+      - name: Design-system doctor
+        run: npm run doctor
+
+      # These scripts run after codegen, not before: each loads app source
+      # through vite, and the router tree already reaches #styled-system/* via
+      # App.tsx, so before codegen they would fail as though their assertions had.
+      - name: Run prime grouping regression test
+        run: npm run test:prime-grouping -w ui
+
+      - name: Metrics grid balances its rows
+        run: npm run test:metrics-grid -w ui
+
+      - name: Run explorer URL regression test
+        run: npm run test:explorers -w ui
+
+      - name: Run router URL regression test
+        run: npm run test:routes -w ui
+
+      # No codegen needed: @stl-verify/mocks reaches nothing under #styled-system/*.
+      - name: Run offline mock API self-test
+        run: npm run test:mocks -w mocks
+
+      # The committed service worker is a copy of msw's, and nothing else pins
+      # the version it was copied from — an msw bump silently leaves the offline
+      # app registering a worker that no longer speaks to the library.
+      - name: Committed msw worker matches the installed msw
+        run: npm run test:mock-worker -w ui
+
+      # The committed types are what every call site is checked against, so a
+      # schema change without a regeneration leaves the UI compiling happily
+      # against an API that no longer exists. python-ci gates the schema against
+      # the response models; this gates the types against the schema.
+      - name: Generated API types are in sync with the OpenAPI schema
+        run: |
+          npm run generate:openapi-types -w ui
+          if ! git diff --exit-code -- ui/src/generated/openapi-types.ts; then
+            echo "::error::openapi-types.ts is stale — run 'npm run generate:openapi-types -w ui' in stl-verify/ts and commit the result"
+            exit 1
+          fi
 
       - name: Typecheck workspace
         run: npm run type:check

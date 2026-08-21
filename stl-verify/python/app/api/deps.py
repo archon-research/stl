@@ -1,10 +1,20 @@
+from collections.abc import Callable
+
 from fastapi import Request
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.adapters.postgres.allocation_position_repository import AllocationRepository
+from app.adapters.postgres.prime_capital_stack_repository import PrimeCapitalStackRepository
+from app.adapters.postgres.receipt_token_repository import ReceiptTokenRepository
+from app.adapters.sky.reference_risk_capital_client import SkyReferenceRiskCapitalClient
+from app.config import get_settings
 from app.ports.receipt_token_lookup import ReceiptTokenLookup
+from app.ports.reference_capital_repository import ReferenceCapitalRepository
 from app.risk_engine.suraf.result import SurafResult
+from app.services.core_model_risk_service import CoreModelRiskService
 from app.services.crypto_lending_risk_service import CryptoLendingRiskService
 from app.services.model_registry import ModelRegistry
+from app.services.reference_risk_capital_service import ReferenceRiskCapitalService
 
 
 def get_engine(request: Request) -> AsyncEngine:
@@ -32,6 +42,38 @@ def get_model_registry(request: Request) -> ModelRegistry:
     return request.app.state.model_registry
 
 
+def get_core_model_risk_service(request: Request) -> CoreModelRiskService:
+    """Extract the core-model risk service built at startup."""
+    return request.app.state.core_model_risk_service
+
+
 def get_receipt_token_lookup(request: Request) -> ReceiptTokenLookup:
     """Extract the receipt-token lookup built at startup."""
     return request.app.state.receipt_token_lookup
+
+
+def get_reference_risk_capital_service_factory(
+    request: Request,
+) -> Callable[[], ReferenceRiskCapitalService]:
+    """Build the upstream Star-monitor service on demand.
+
+    Returned as a factory, not the service, because FastAPI resolves every
+    declared dependency on every request: constructing it eagerly would make a
+    self-mode request build an upstream HTTP client it never uses.
+    """
+
+    def build() -> ReferenceRiskCapitalService:
+        return ReferenceRiskCapitalService(
+            SkyReferenceRiskCapitalClient(get_settings().star_risk_capital_base_url),
+            ReceiptTokenRepository(request.app.state.engine),
+            AllocationRepository(request.app.state.engine),
+        )
+
+    return build
+
+
+def get_reference_capital_repository_factory(
+    request: Request,
+) -> Callable[[], ReferenceCapitalRepository]:
+    """Build the stored-reference-snapshot reader on demand, for the same reason."""
+    return lambda: PrimeCapitalStackRepository(request.app.state.engine)

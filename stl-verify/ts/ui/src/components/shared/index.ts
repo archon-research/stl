@@ -1,6 +1,5 @@
 export { ChainLogo } from './ChainLogo';
 export { PageShell } from './PageShell';
-export { PercentageSlider } from './PercentageSlider';
 export { ProtocolLogo } from './ProtocolLogo';
 export {
   isRangePreset,
@@ -33,7 +32,8 @@ export function defaultTimeRange(): _DesignSystemTimeRange {
 void _designSystemDefaultTimeRange;
 
 export { StatusBadge } from './StatusBadge';
+export { tableHeaderTypographyClassName } from './tableStyles';
 export { SummaryMetric } from './SummaryMetric';
 export { TokenAddress } from './TokenAddress';
 export { TokenLogo } from './TokenLogo';
-export { AppTooltip } from './Tooltip';
+export { AppTooltip, TruncatedLabel } from './Tooltip';

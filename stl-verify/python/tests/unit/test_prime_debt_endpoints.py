@@ -11,16 +11,17 @@ from app.main import app
 from app.services.prime_debt_service import PrimeDebtService
 
 _VALID_ADDR = "0x" + "ab" * 20
+_PRIME_ID = 7
 
 
 def _make_service(
     *,
-    exists: bool = True,
+    resolved_prime_id: int | None = _PRIME_ID,
     snapshots: list[PrimeDebtSnapshot] | None = None,
     buckets: list[PrimeDebtBucket] | None = None,
 ) -> AsyncMock:
     service = AsyncMock(spec=PrimeDebtService)
-    service.prime_exists.return_value = exists
+    service.resolve_prime_id.return_value = resolved_prime_id
     service.list_debt_snapshots.return_value = snapshots or []
     service.list_debt_buckets.return_value = buckets or []
     return service
@@ -72,14 +73,45 @@ def test_list_prime_debt_snapshots_returns_rows():
                 "synced_at": "2026-03-05T12:00:00Z",
             }
         ]
-        service.prime_exists.assert_awaited_once_with(EthAddress(_VALID_ADDR))
+        service.resolve_prime_id.assert_awaited_once_with(EthAddress(_VALID_ADDR))
         kwargs = service.list_debt_snapshots.await_args.kwargs
-        assert service.list_debt_snapshots.await_args.args[0] == EthAddress(_VALID_ADDR)
+        assert service.list_debt_snapshots.await_args.args[0] == _PRIME_ID
         assert kwargs["limit"] == 25
         # Bounds are timezone-aware UTC and default to a 24h window.
         assert kwargs["from_timestamp"].tzinfo is not None
         assert kwargs["to_timestamp"].tzinfo is not None
         assert (kwargs["to_timestamp"] - kwargs["from_timestamp"]).total_seconds() == 24 * 60 * 60
+    finally:
+        app.dependency_overrides.pop(prime_debts._get_prime_debt_service, None)
+
+
+def test_list_prime_debt_snapshots_serializes_large_wad_as_plain_string():
+    # asyncpg decodes a large trailing-zero NUMERIC into a positive-exponent
+    # Decimal (here 2.570714E+27). It must reach the client as a plain integer
+    # string, not scientific notation — a BigInt consumer reads "2.57...E+27" as 0.
+    from app.api.v1 import prime_debts
+
+    positive_exponent_wad = Decimal((0, (2, 5, 7, 0, 7, 1, 4), 21))
+    assert "E+" in str(positive_exponent_wad)  # guard: the input really is exponential
+
+    snap = PrimeDebtSnapshot(
+        prime_address=_VALID_ADDR,
+        prime_name="grove",
+        ilk_name="ALLOCATOR-BLOOM-A",
+        debt_wad=positive_exponent_wad,
+        block_number=22000123,
+        block_version=0,
+        synced_at=datetime(2026, 3, 5, 12, 0, tzinfo=UTC),
+    )
+    service = _make_service(snapshots=[snap])
+    app.dependency_overrides[prime_debts._get_prime_debt_service] = _override_service(service)
+    try:
+        client = TestClient(app)
+
+        response = client.get(f"/v1/primes/{_VALID_ADDR}/debt")
+
+        assert response.status_code == 200
+        assert response.json()["data"][0]["debt_wad"] == "2570714000000000000000000000"
     finally:
         app.dependency_overrides.pop(prime_debts._get_prime_debt_service, None)
 
@@ -130,6 +162,7 @@ def test_list_prime_debt_returns_aggregated_buckets():
             {"bucket_start": "2026-03-05T12:00:00Z", "debt_wad": "1000"},
             {"bucket_start": "2026-03-05T11:00:00Z", "debt_wad": None},
         ]
+        assert service.list_debt_buckets.await_args.args[0] == _PRIME_ID
         kwargs = service.list_debt_buckets.await_args.kwargs
         assert kwargs["bucket_seconds"] == 5 * 60  # 24h window -> PT5M default
         service.list_debt_snapshots.assert_not_awaited()
@@ -140,15 +173,18 @@ def test_list_prime_debt_returns_aggregated_buckets():
 def test_list_prime_debt_snapshots_returns_404_when_prime_missing():
     from app.api.v1 import prime_debts
 
-    service = _make_service(exists=False)
+    service = _make_service(resolved_prime_id=None)
     app.dependency_overrides[prime_debts._get_prime_debt_service] = _override_service(service)
     try:
         client = TestClient(app)
 
-        response = client.get(f"/v1/primes/{_VALID_ADDR}/debt")
+        for params in ({}, {"aggregate": "true"}):
+            response = client.get(f"/v1/primes/{_VALID_ADDR}/debt", params=params)
 
-        assert response.status_code == 404
-        assert response.json()["detail"] == "Prime not found"
+            assert response.status_code == 404
+            assert response.json()["detail"] == "Prime not found"
+        service.list_debt_snapshots.assert_not_awaited()
+        service.list_debt_buckets.assert_not_awaited()
     finally:
         app.dependency_overrides.pop(prime_debts._get_prime_debt_service, None)
 
@@ -179,7 +215,7 @@ def test_list_prime_debt_snapshots_returns_422_for_limit_too_large():
         response = client.get(f"/v1/primes/{_VALID_ADDR}/debt?limit=600")
 
         assert response.status_code == 422
-        service.prime_exists.assert_not_awaited()
+        service.resolve_prime_id.assert_not_awaited()
     finally:
         app.dependency_overrides.pop(prime_debts._get_prime_debt_service, None)
 
@@ -195,7 +231,7 @@ def test_list_prime_debt_snapshots_returns_422_for_malformed_timestamp():
         response = client.get(f"/v1/primes/{_VALID_ADDR}/debt?from_timestamp=not-a-date")
 
         assert response.status_code == 422
-        service.prime_exists.assert_not_awaited()
+        service.resolve_prime_id.assert_not_awaited()
     finally:
         app.dependency_overrides.pop(prime_debts._get_prime_debt_service, None)
 
@@ -211,7 +247,7 @@ def test_list_prime_debt_snapshots_returns_422_for_address_without_prefix():
         response = client.get(f"/v1/primes/{'ab' * 20}/debt")
 
         assert response.status_code == 422
-        service.prime_exists.assert_not_awaited()
+        service.resolve_prime_id.assert_not_awaited()
     finally:
         app.dependency_overrides.pop(prime_debts._get_prime_debt_service, None)
 
@@ -227,7 +263,7 @@ def test_list_prime_debt_snapshots_returns_422_for_address_too_long():
         response = client.get("/v1/primes/0xabababababababababababababababababababababab/debt")
 
         assert response.status_code == 422
-        service.prime_exists.assert_not_awaited()
+        service.resolve_prime_id.assert_not_awaited()
     finally:
         app.dependency_overrides.pop(prime_debts._get_prime_debt_service, None)
 

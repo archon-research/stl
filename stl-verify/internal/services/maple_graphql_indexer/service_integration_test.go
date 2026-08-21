@@ -189,7 +189,7 @@ func countRows(t *testing.T, ctx context.Context, pool *pgxpool.Pool, table stri
 
 func TestSyncIntegration_FullCycle(t *testing.T) {
 	ctx := context.Background()
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 
 	server := newMapleAPIFixture(t)
@@ -397,7 +397,7 @@ func TestSyncIntegration_UnpriceableCollateralPersistsNullPrice(t *testing.T) {
 	// unpriceable loan persists with asset_value_usd = NULL, rather than the
 	// whole cycle rolling back.
 	ctx := context.Background()
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 
 	poolsJSON := `[{"id": "` + itPoolSyrup + `", "name": "Syrup USDC", "monthlyApy": "0", "spotApy": "0",
@@ -505,7 +505,7 @@ func TestSyncIntegration_PoolsPhaseFailsOthersIsolated(t *testing.T) {
 	// phases (skipped because pools failed) leave their tables empty. A
 	// regression to one transaction per cycle would wipe the globals row too.
 	ctx := context.Background()
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 
 	globalsJSON := `{"apy": "46314950526928033107296807949", "collateralApy": "11044228807145689488478201423",
@@ -555,7 +555,7 @@ func TestSyncIntegration_PoolsPhaseFailsOthersIsolated(t *testing.T) {
 
 func TestSyncIntegration_GraphQLErrorMarksRunFailed(t *testing.T) {
 	ctx := context.Background()
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

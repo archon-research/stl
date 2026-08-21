@@ -13,6 +13,9 @@ of shipping and breaking the Go workers at runtime. Keep the expected field sets
 below in lockstep with the Go ``TokenEntry`` / ``ProxyConfig`` structs.
 """
 
+import json
+from pathlib import Path
+
 from axis_synome.export_entities import build_axis_synome_contract
 from axis_synome.spec.entities.protocol_sets import AllocationType, TokenType
 
@@ -31,6 +34,9 @@ EXPECTED_TOKEN_ENTRY_FIELDS = {
 
 # Mirror of the Go `ProxyConfig` struct json tags in loader.go.
 EXPECTED_PROXY_FIELDS = {"star", "chain", "address", "role"}
+
+# The contract file the Go workers load at runtime, committed to this repo.
+_COMMITTED_CONTRACT = Path(__file__).resolve().parents[3] / "contracts" / "axis-synome" / "axis_synome_entities.json"
 
 # The Go loader decodes allocation_type/token_type as plain strings (loader.go),
 # so a renamed or newly-added enum value slips past strict decoding and reaches
@@ -121,3 +127,29 @@ def test_proxy_entries_carry_exactly_the_fields_go_decodes():
                 assert set(proxy) == EXPECTED_PROXY_FIELDS, (
                     f"proxy field set drifted from the Go ProxyConfig struct: {set(proxy)}"
                 )
+
+
+def test_the_committed_contract_entities_match_this_packages_export():
+    """Ties the file Go reads to the package Python computes from.
+
+    Go loads ``contracts/axis-synome/axis_synome_entities.json`` at runtime while
+    the API recomputes the same topology in-process from the pinned
+    ``axis-synome`` package. Nothing else connects the two, so a package bump
+    that re-points a proxy — or a re-export nobody committed — would leave the
+    trackers indexing one address set while the API attributes figures to
+    another, silently and in opposite directions.
+    """
+    committed = json.loads(_COMMITTED_CONTRACT.read_text())
+
+    assert committed["axis_synome"] == _export()["axis_synome"], (
+        "committed axis_synome_entities.json is stale against the installed "
+        "axis-synome package — run 'make export-axis-synome-contract' and commit the result"
+    )
+
+
+def test_the_committed_contract_version_matches_the_installed_package():
+    # The entities blob can be unchanged while the pin moves; the version is what
+    # makes a bump-without-re-export visible.
+    committed = json.loads(_COMMITTED_CONTRACT.read_text())
+
+    assert committed["version"] == _export()["version"]

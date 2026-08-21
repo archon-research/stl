@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -869,12 +870,12 @@ func (s *LiveService) handleReorg(ctx context.Context, block LightBlock, receive
 	}
 
 	orphanedBlocks := make([]LightBlock, 0)
-	for i := len(recentBlocks) - 1; i >= 0; i-- {
-		if recentBlocks[i].Number > commonAncestor {
+	for _, v := range slices.Backward(recentBlocks) {
+		if v.Number > commonAncestor {
 			orphanedBlocks = append(orphanedBlocks, LightBlock{
-				Number:     recentBlocks[i].Number,
-				Hash:       recentBlocks[i].Hash,
-				ParentHash: recentBlocks[i].ParentHash,
+				Number:     v.Number,
+				Hash:       v.Hash,
+				ParentHash: v.ParentHash,
 			})
 		}
 	}
