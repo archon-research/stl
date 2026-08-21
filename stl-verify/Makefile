@@ -530,7 +530,10 @@ dev-db:
 # the SecretString IS the value>. A failed or empty fetch leaves the key's existing
 # line alone rather than blanking it: ArchonDeveloper cannot read three of these
 # (ORB-343), so overwriting on failure deletes whatever was set by hand.
+# umask 077 because mv carries the tmp file's mode onto ../.env.secrets: created under
+# the caller's umask it holds every secret at 0644 until the chmod lands.
 define refresh_secret
+umask 077; \
 VALUE=$$(aws secretsmanager get-secret-value --secret-id $(2) --query SecretString --output text 2>/dev/null $(if $(3),| jq -r '$(3) // empty',)); \
 if [ -z "$$VALUE" ]; then \
 	echo "WARNING: Could not read $(1) ($(2)) from AWS Secrets Manager -- ArchonDeveloper is read-only as of ORB-343 and this secret is not carved out; keeping whatever ../.env.secrets already holds"; \
