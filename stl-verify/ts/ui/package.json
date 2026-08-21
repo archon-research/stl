@@ -36,7 +36,7 @@
     "@archon-research/http-client-react": "0.10.0-rohit-pre-release-consumer-fixes.1",
     "@archon-research/router-kit": "0.10.0-rohit-pre-release-consumer-fixes.1",
     "@tanstack/react-router": "1.170.25",
-    "lucide-react": "1.28.0",
+    "lucide-react": "1.31.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "react-markdown": "10.1.0",
