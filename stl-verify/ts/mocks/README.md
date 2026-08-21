@@ -75,10 +75,14 @@ it with `jq`, which rejects JSONC.
 - **No operation declares a 404.** Every path in the document answers `200` plus
   `422`, so the handlers that need a miss to fail — both `/v1/tokens/{chain_id}/{token_address}`
   reads, `/v1/risk/{chain_id}/{token_address}/breakdown`, `/v1/risk/rrc`, and all
-  four per-prime reads (`risk-capital`, `exposure`, `total-capital`, `debt`, which
-  also `400`s on `reference` without `aggregate`) — answer through
-  `response.untyped(...)`. That records the gap in the document rather than
-  pretending every id resolves. Closing it belongs in the Python response models.
+  five per-prime reads (`allocations`, `risk-capital`, `exposure`,
+  `total-capital`, `debt`, which also `400`s on `reference` without `aggregate`)
+  — answer through `response.untyped(...)`. That records the gap in the document
+  rather than pretending every id resolves. Closing it belongs in the Python
+  response models. A 404 there means "not a prime": a real proxy that holds
+  nothing answers `200` with `[]`, and `check-mock-api.mjs` asserts both, because
+  collapsing them would make an empty allocation table indistinguishable from a
+  bad address.
 - **A mocked production build is deliberate.** `VITE_API_MOCKS=1 npm run build`
   ships msw, the fixtures and `mockServiceWorker.js`, which is what a static
   offline demo or a Playwright target needs. Without the flag a `closeBundle`
