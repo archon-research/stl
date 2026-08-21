@@ -96,6 +96,8 @@ function readSeriesRequest(
   if (!resolved.ok) return resolved;
   const limit = readLimit(raw.limit, BUCKET_LIMIT_DEFAULT, BUCKET_LIMIT_MAX);
   if (!limit.ok) return limit;
+  const reference = readFlag('reference', raw.reference);
+  if (!reference.ok) return reference;
 
   const { window, fromMs, toMs } = resolved.value;
   return {
@@ -104,7 +106,7 @@ function readSeriesRequest(
       window,
       limit: limit.value,
       starts: bucketStarts(fromMs, toMs, window.interval_ms, limit.value),
-      reference: readFlag(raw.reference),
+      reference: reference.value,
     },
   };
 }
@@ -222,7 +224,11 @@ export function seriesHandlers(): MockHandler[] {
         }
 
         const { window, starts, limit, reference } = request.value;
-        const aggregate = readFlag(query.get('aggregate'));
+        const parsedAggregate = readFlag('aggregate', query.get('aggregate'));
+        if (!parsedAggregate.ok) {
+          return response.untyped(problemResponse(parsedAggregate.problem));
+        }
+        const aggregate = parsedAggregate.value;
 
         if (reference && !aggregate) {
           return response.untyped(

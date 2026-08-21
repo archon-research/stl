@@ -61,6 +61,11 @@ export function eventHandlers(): MockHandler[] {
         return response.untyped(problemResponse(limit.problem));
       }
 
+      const aggregate = readFlag('aggregate', query.get('aggregate'));
+      if (!aggregate.ok) {
+        return response.untyped(problemResponse(aggregate.problem));
+      }
+
       const { window, fromMs, toMs } = resolved.value;
       const txHash = query.get('tx_hash');
       const protocolName = query.get('protocol_name');
@@ -75,7 +80,7 @@ export function eventHandlers(): MockHandler[] {
           return createdMs >= fromMs && createdMs <= toMs;
         });
 
-      if (readFlag(query.get('aggregate'))) {
+      if (aggregate.value) {
         return response(200).json({
           mode: 'aggregated',
           window,

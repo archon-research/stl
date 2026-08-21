@@ -33,11 +33,38 @@ const RESOLUTIONS = Object.keys(
 const DEFAULT_WINDOW_MS = DAY_MS;
 const MAX_WINDOW_MS = 366 * DAY_MS;
 
-/** FastAPI treats these as true; anything else (including absence) is false. */
-const TRUTHY = new Set(['1', 'true', 'True', 'yes', 'on']);
+/**
+ * The spellings pydantic parses a `bool` query param from, in either case.
+ * Sets, not a record, so an inherited key cannot answer as a spelling.
+ */
+const TRUE_WORDS = new Set(['1', 't', 'true', 'y', 'yes', 'on']);
+const FALSE_WORDS = new Set(['0', 'f', 'false', 'n', 'no', 'off']);
 
-export function readFlag(raw: string | null): boolean {
-  return raw !== null && TRUTHY.has(raw);
+/**
+ * Absence is the param's default, which is `false` on every flag the app sends.
+ * Anything outside the two vocabularies is a `422`, not a quiet `false`: the
+ * mock that reads `aggregate=maybe` as off serves the raw envelope to a screen
+ * asking for buckets, which is a shape mismatch the app would then blame on
+ * itself.
+ */
+export function readFlag(name: string, raw: string | null): Parsed<boolean> {
+  if (raw === null) {
+    return { ok: true, value: false };
+  }
+  const word = raw.toLowerCase();
+  if (TRUE_WORDS.has(word)) {
+    return { ok: true, value: true };
+  }
+  if (FALSE_WORDS.has(word)) {
+    return { ok: true, value: false };
+  }
+  return {
+    ok: false,
+    problem: invalidQueryParam(
+      name,
+      'Input should be a valid boolean, unable to interpret input',
+    ),
+  };
 }
 
 const DECIMAL_INTEGER = /^\d+$/u;

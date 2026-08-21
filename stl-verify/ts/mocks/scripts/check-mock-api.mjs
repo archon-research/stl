@@ -854,6 +854,27 @@ async function checkMalformedParamsAreRejected() {
   );
 }
 
+/**
+ * A `bool` query param is parsed by pydantic, which takes six spellings either
+ * side in any case and rejects everything else. Reading an unrecognised value as
+ * `false` would serve a raw envelope to a screen that asked for buckets.
+ */
+async function checkBooleanFlagsFollowPydantic() {
+  const feed = await request(
+    '/v1/allocations/activity',
+    activity({ aggregate: 'YES' }),
+    'activity?aggregate=YES',
+  );
+  assert.equal(feed.mode, 'aggregated', 'YES is a true this API accepts');
+
+  await expectStatus(
+    '/v1/allocations/activity',
+    activity({ aggregate: 'maybe' }),
+    422,
+    'aggregate=maybe',
+  );
+}
+
 async function checkIllegalWindowsAreRejected() {
   const now = new Date();
   const earlier = new Date(now.getTime() - 60 * 60 * 1000);
@@ -956,6 +977,7 @@ const checks = [
   ['an inherited key is not a fixture', checkInheritedKeysAreNotFound],
   ['reference debt requires aggregate', checkReferenceDebtRequiresAggregate],
   ['malformed params are rejected', checkMalformedParamsAreRejected],
+  ['boolean flags follow pydantic', checkBooleanFlagsFollowPydantic],
   ['illegal windows are rejected', checkIllegalWindowsAreRejected],
   ['rrc rejects an ambiguous identity', checkRrcRejectsAmbiguousIdentity],
 ];

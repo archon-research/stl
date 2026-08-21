@@ -30,6 +30,10 @@ export function riskHandlers(): MockHandler[] {
       '/v1/primes/{prime_id}/risk-capital',
       async ({ params, query, response }) => {
         await mockDelay(LIST_DELAY_MS);
+        const reference = readFlag('reference', query.get('reference'));
+        if (!reference.ok) {
+          return response.untyped(problemResponse(reference.problem));
+        }
         const selfScoped = ownEntry(
           RISK_CAPITAL_BY_PROXY,
           params.prime_id.toLowerCase(),
@@ -42,9 +46,7 @@ export function riskHandlers(): MockHandler[] {
         }
 
         return response(200).json(
-          readFlag(query.get('reference'))
-            ? toReferenceRiskCapital(selfScoped)
-            : selfScoped,
+          reference.value ? toReferenceRiskCapital(selfScoped) : selfScoped,
         );
       },
     ),

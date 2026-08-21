@@ -154,6 +154,10 @@ export function allocationHandlers(): MockHandler[] {
       async ({ params, query, response }) => {
         await mockDelay(LIST_DELAY_MS);
         const nowMs = mockNow();
+        const reference = readFlag('reference', query.get('reference'));
+        if (!reference.ok) {
+          return response.untyped(problemResponse(reference.problem));
+        }
         const proxy = PRIMES.find((prime) =>
           sameHex(prime.address, params.prime_id),
         );
@@ -166,7 +170,7 @@ export function allocationHandlers(): MockHandler[] {
           );
         }
 
-        if (readFlag(query.get('reference'))) {
+        if (reference.value) {
           const referenceRows = seedReferenceAllocations(nowMs, proxy.name);
           return referenceRows === undefined
             ? response.untyped(
@@ -208,6 +212,10 @@ export function allocationHandlers(): MockHandler[] {
       if (!chainId.ok) {
         return response.untyped(problemResponse(chainId.problem));
       }
+      const aggregate = readFlag('aggregate', query.get('aggregate'));
+      if (!aggregate.ok) {
+        return response.untyped(problemResponse(aggregate.problem));
+      }
 
       const { window, fromMs, toMs } = resolved.value;
       const filters: ActivityFilters = {
@@ -222,7 +230,7 @@ export function allocationHandlers(): MockHandler[] {
         .filter((row) => matchesFilters(row, filters))
         .filter((row) => withinWindow(row, fromMs, toMs));
 
-      if (readFlag(query.get('aggregate'))) {
+      if (aggregate.value) {
         return response(200).json({
           mode: 'aggregated',
           window,
