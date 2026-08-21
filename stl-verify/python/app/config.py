@@ -9,6 +9,21 @@ from sqlalchemy.engine import make_url
 ENV_DIR = Path(__file__).resolve().parents[1]
 
 
+def async_database_url(database_url: str) -> str:
+    """Normalise a plain postgres URL for SQLAlchemy's async engine.
+
+    The shared secret (pooler_url) stores a ``postgresql://`` or ``postgres://``
+    URL; the async engine needs the ``postgresql+asyncpg`` dialect, and asyncpg
+    takes ``ssl`` rather than libpq's ``sslmode``, so that parameter is dropped
+    to avoid a TypeError at connect time. The single normalisation rule for the
+    whole app — API settings and workers both call this.
+    """
+    url = make_url(database_url).set(drivername="postgresql+asyncpg")
+    query = dict(url.query)
+    query.pop("sslmode", None)
+    return url.set(query=query).render_as_string(hide_password=False)
+
+
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
@@ -60,20 +75,7 @@ class Settings(BaseSettings):
 
     @property
     def async_database_url(self) -> str:
-        """Return the database URL with the asyncpg driver.
-
-        The shared secret (pooler_url) stores a plain ``postgresql://`` or
-        ``postgres://`` URL. SQLAlchemy's async engine requires the
-        ``postgresql+asyncpg://`` dialect. ``make_url`` handles scheme
-        normalisation and query-parameter compatibility automatically.
-        """
-        url = make_url(self.database_url.get_secret_value())
-        url = url.set(drivername="postgresql+asyncpg")
-        # asyncpg does not accept sslmode (it uses ssl instead);
-        # drop it to avoid a TypeError at connect time.
-        query = dict(url.query)
-        query.pop("sslmode", None)
-        return url.set(query=query).render_as_string(hide_password=False)
+        return async_database_url(self.database_url.get_secret_value())
 
     @property
     def star_risk_capital_base_url(self) -> str:

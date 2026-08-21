@@ -296,11 +296,13 @@ app/risk_engine/core_model/
 
 app/ports/
 ├── core_model_data_reader.py     Port: get_protocol_data, get_prices
-└── core_model_results_reader.py  Port: get_latest(market_key)
+├── core_model_results_reader.py  Port: get_latest(market_key)
+└── core_model_results_writer.py  Port: insert(result) — the cronjob's write side
 
 app/adapters/
 ├── parquet/core_model_data_reader.py    Reads static parquet snapshots
-└── postgres/core_model_results_reader.py  Reads core_model_results table
+├── postgres/core_model_results_reader.py  Reads core_model_results table
+└── postgres/core_model_results_writer.py  Appends to core_model_results (no ON CONFLICT)
 
 app/services/core_model_risk_service.py  RiskModel implementation
 
