@@ -26,7 +26,7 @@ import (
 type Service struct {
 	views        []string
 	materializer outbound.PositionMaterializer
-	reason       string
+	buildID      int
 	logger       *slog.Logger
 	telemetry    *Telemetry
 }
@@ -35,12 +35,12 @@ type Service struct {
 // list of projection view names to run; it must be non-empty (an empty list
 // means the deployment is misconfigured, not that there is nothing to do), with
 // no blank or duplicate entries (a duplicate is a config typo — reruns are
-// idempotent but a silent double-run hides the mistake). reason must be
-// non-empty: it is stamped as change_reason provenance on every classification
+// idempotent but a silent double-run hides the mistake). buildID is stamped on
+// every appended row as the ADR-0002 code-provenance record; it must not be
 // write, and the database function rejects a blank one anyway — failing here is
 // earlier and clearer. logger defaults to slog.Default(); telemetry may be nil
 // (its metrics become no-ops).
-func NewService(views []string, materializer outbound.PositionMaterializer, reason string, logger *slog.Logger, telemetry *Telemetry) (*Service, error) {
+func NewService(views []string, materializer outbound.PositionMaterializer, buildID int, logger *slog.Logger, telemetry *Telemetry) (*Service, error) {
 	if materializer == nil {
 		return nil, fmt.Errorf("position materializer is required")
 	}
@@ -57,8 +57,8 @@ func NewService(views []string, materializer outbound.PositionMaterializer, reas
 		}
 		seen[v] = true
 	}
-	if strings.TrimSpace(reason) == "" {
-		return nil, fmt.Errorf("change_reason is required")
+	if buildID < 0 {
+		return nil, fmt.Errorf("buildID must not be negative, got %d", buildID)
 	}
 	if logger == nil {
 		logger = slog.Default()
@@ -66,7 +66,7 @@ func NewService(views []string, materializer outbound.PositionMaterializer, reas
 	return &Service{
 		views:        views,
 		materializer: materializer,
-		reason:       reason,
+		buildID:      buildID,
 		logger:       logger.With("component", "position-materializer"),
 		telemetry:    telemetry,
 	}, nil
@@ -94,7 +94,7 @@ func (s *Service) RunOnce(ctx context.Context) error {
 			break
 		}
 		start := time.Now()
-		changed, err := s.materializer.Materialize(ctx, view, s.reason)
+		changed, err := s.materializer.Materialize(ctx, view, s.buildID)
 		if err != nil {
 			s.logger.Error("projection materialization failed", "view", view, "error", err)
 			s.telemetry.RecordRun(ctx, view, "error", 0)

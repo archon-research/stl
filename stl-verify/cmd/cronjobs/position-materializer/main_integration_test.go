@@ -27,12 +27,12 @@ func TestMain(m *testing.M) {
 }
 
 // TestPositionMaterializer_RunOnce migrates a fresh DB (which creates
-// position_state, position_classification, and the shared
-// materialize_position_projection function), registers a contract-conforming
-// projection view, then wires the worker exactly as main() does via setupRunner
-// and runs it end to end: the run classifies the position, and a second run is a
-// clean no-op. Depends on the position_state spine migration (#625) being on
-// main; red until it lands.
+// position_state and the shared materialize_position_projection function),
+// registers a contract-conforming projection view, then wires the worker exactly
+// as main() does via setupRunner and runs it end to end: the run appends the
+// observation stamped with the resolved build_id, and a second run is a clean
+// no-op. Depends on the position_state spine migration (#625) being on main; red
+// until it lands.
 func TestPositionMaterializer_RunOnce(t *testing.T) {
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
@@ -48,7 +48,7 @@ func TestPositionMaterializer_RunOnce(t *testing.T) {
 	}
 
 	runner, err := setupRunner(ctx, temporal.Dependencies{Pool: pool, Logger: slog.Default()},
-		[]string{"position_itest"}, "itest@run")
+		[]string{"position_itest"})
 	if err != nil {
 		t.Fatalf("setupRunner: %v", err)
 	}
@@ -56,25 +56,42 @@ func TestPositionMaterializer_RunOnce(t *testing.T) {
 	if err := runner.Run(ctx); err != nil {
 		t.Fatalf("first run: %v", err)
 	}
-	var code, reason string
-	if err := pool.QueryRow(ctx, `SELECT deal_type_code, change_reason FROM position_classification
-		WHERE position_id = position_id(1, 10, 'itest-instrument', 'aa')`).Scan(&code, &reason); err != nil {
-		t.Fatalf("classification not written: %v", err)
+	// The observation is appended, stamped with the build the registry resolved for
+	// this binary (non-zero: buildregistry inserts the git hash on first sight, and
+	// build_registry.id is a SERIAL starting above the reserved 0 = pre-tracking row).
+	var quantity int64
+	var buildID int
+	var projection string
+	if err := pool.QueryRow(ctx, `SELECT quantity, build_id, projection FROM position_state
+		WHERE position_id = position_id(1, 10, 'itest-instrument', 'aa')`).Scan(&quantity, &buildID, &projection); err != nil {
+		t.Fatalf("observation not appended: %v", err)
 	}
-	if code != "LOAN" {
-		t.Errorf("classification = %q; want LOAN", code)
+	if quantity != 5 {
+		t.Errorf("quantity = %d; want 5", quantity)
 	}
-	if reason != "itest@run" {
-		t.Errorf("change_reason = %q; want the runner's provenance itest@run", reason)
+	if buildID <= 0 {
+		t.Errorf("build_id = %d; want the registry-resolved build, not the pre-tracking 0", buildID)
+	}
+	if projection != "public.position_itest" {
+		t.Errorf("projection = %q; want public.position_itest", projection)
 	}
 
+	// The rerun re-derives the same observation, so it must append nothing.
 	if err := runner.Run(ctx); err != nil {
 		t.Fatalf("second run (idempotent rerun): %v", err)
+	}
+	var rows int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_state
+		WHERE position_id = position_id(1, 10, 'itest-instrument', 'aa')`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 1 {
+		t.Errorf("observations after an idempotent rerun = %d; want 1", rows)
 	}
 
 	// A misconfigured view name must fail the run loudly (regclass), not skip.
 	badRunner, err := setupRunner(ctx, temporal.Dependencies{Pool: pool, Logger: slog.Default()},
-		[]string{"position_itest", "no_such_view"}, "itest@run")
+		[]string{"position_itest", "no_such_view"})
 	if err != nil {
 		t.Fatalf("setupRunner(bad): %v", err)
 	}

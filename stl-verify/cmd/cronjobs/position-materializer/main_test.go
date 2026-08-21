@@ -28,15 +28,3 @@ func TestSplitProjections(t *testing.T) {
 		})
 	}
 }
-
-func TestChangeReason(t *testing.T) {
-	if got := changeReason("position-materializer", ""); got != "position-materializer@dev" {
-		t.Errorf("empty commit: %q", got)
-	}
-	if got := changeReason("pm", "abcdef0123456789"); got != "pm@abcdef012345" {
-		t.Errorf("long commit not truncated to 12: %q", got)
-	}
-	if got := changeReason("pm", "abc"); got != "pm@abc" {
-		t.Errorf("short commit: %q", got)
-	}
-}

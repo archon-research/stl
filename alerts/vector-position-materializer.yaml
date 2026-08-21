@@ -1,0 +1,99 @@
+# =============================================================================
+# Vector — position-materializer alerts (VEC-402)
+# =============================================================================
+# Liveness, failure and duration for this cronjob are ALREADY covered generically
+# by vector-cronjobs.yaml, which groups cronjob_runs_total by service_name and
+# states that a new cronjob is covered the moment it ships. Nothing here
+# duplicates that: service_name="position-materializer" is picked up by
+# VectorCronjobRunFailing and VectorCronjobAllRunsFailing automatically.
+#
+# What those rules cannot see is the failure mode specific to a full-projection
+# materializer: the run SUCCEEDS and appends nothing. Every projection view is a
+# SELECT over raw tables, so an upstream indexer stalling, a view whose join
+# silently goes empty, or a mis-set projection list all produce a clean, fast,
+# successful run that writes zero rows. The error path never fires, the generic
+# cronjob alerts stay green, and position_state quietly stops tracking positions.
+#
+# Series come from stl-verify/internal/services/position_materializer/telemetry.go
+# via the OTel SDK (dots become underscores in Prometheus):
+#   position_materializer_projection_runs_total{view,status}
+#   position_materializer_rows_changed_total{view}
+# plus service_name="position-materializer", k8s_namespace_name="vector",
+# cluster="archon-prod"|"archon-staging" from the resource processor.
+#
+# Note on the healthy steady state: rows_changed is legitimately 0 on most runs
+# once the history is loaded — the append is idempotent, so a run only writes
+# when new blocks have arrived. The alert therefore keys on a LONG window (6h),
+# which spans many hourly runs, rather than on any single empty run.
+#
+# Severity → routing, per the alerting routing spec:
+#   critical       → pages, prod #at_stl_prod_alerts, [CRITICAL], 1h repeat.
+#   warning / info → no page, prod #at_stl_alerts, [WARNING]/[INFO], 4h repeat.
+# =============================================================================
+groups:
+  - name: vector-position-materializer
+    rules:
+      - alert: VectorPositionMaterializerSilentlyEmpty
+        # Runs are succeeding but no observation has been appended for any view in
+        # 6 hours. On a chain producing blocks that is not a plausible steady
+        # state: it means every projection is returning rows already stored, which
+        # is what an upstream indexer stall looks like from here. Warning, not a
+        # page: the data is stale, not wrong, and nothing is corrupted — the append
+        # is idempotent, so recovery is the next successful run.
+        expr: |
+          (
+            sum by (service_name, cluster) (
+              increase(position_materializer_projection_runs_total{
+                status="success",
+                k8s_namespace_name="vector"
+              }[6h])
+            ) > 0
+          )
+          and
+          (
+            sum by (service_name, cluster) (
+              increase(position_materializer_rows_changed_total{
+                k8s_namespace_name="vector"
+              }[6h])
+            ) == 0
+          )
+        for: 30m
+        labels:
+          team: vector
+          severity: warning
+          component: position-materializer
+          namespace: vector
+        annotations:
+          summary: "position-materializer has appended no observations in 6h"
+          description: >-
+            Runs are succeeding on {{ $labels.cluster }} but
+            position_materializer_rows_changed_total has not moved in 6 hours, so
+            position_state is not tracking new positions. Most likely an upstream
+            indexer has stalled, or a projection view's join has gone empty.
+          runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-position-materializer.md#vectorpositionmaterializersilentlyempty"
+
+      - alert: VectorPositionMaterializerViewFailing
+        # One view is failing while others succeed. The generic cronjob alerts fire
+        # on the RUN, so a single bad view among several is visible there only as a
+        # whole-run error; this names the view, which is what the runbook needs.
+        expr: |
+          sum by (view, cluster) (
+            increase(position_materializer_projection_runs_total{
+              status="error",
+              k8s_namespace_name="vector"
+            }[15m])
+          ) > 0
+        for: 0m
+        labels:
+          team: vector
+          severity: warning
+          component: position-materializer
+          namespace: vector
+        annotations:
+          summary: "position-materializer view {{ $labels.view }} is failing"
+          description: >-
+            Projection {{ $labels.view }} returned an error on
+            {{ $labels.cluster }} in the last 15m. The shared materializer fails
+            the whole run rather than skipping a view, so the other views in the
+            same run did not write either.
+          runbook_url: "https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-position-materializer.md#vectorpositionmaterializerviewfailing"

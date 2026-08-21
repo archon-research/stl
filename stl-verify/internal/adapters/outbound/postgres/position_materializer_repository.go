@@ -35,10 +35,10 @@ func NewPositionMaterializerRepository(pool *pgxpool.Pool, logger *slog.Logger) 
 // documented on the function (per-view advisory xact lock). The regclass cast
 // fails loudly on a view name that does not resolve to a relation, so a
 // misconfigured projection list cannot be silently skipped.
-func (r *PositionMaterializerRepository) Materialize(ctx context.Context, view, reason string) (int64, error) {
+func (r *PositionMaterializerRepository) Materialize(ctx context.Context, view string, buildID int) (int64, error) {
 	var changed int64
 	if err := r.pool.QueryRow(ctx,
-		`SELECT materialize_position_projection($1::regclass, $2)`, view, reason,
+		`SELECT materialize_position_projection($1::regclass, $2)`, view, buildID,
 	).Scan(&changed); err != nil {
 		return 0, fmt.Errorf("materializing projection %s: %w", view, err)
 	}

@@ -22,6 +22,7 @@ import (
 	"syscall"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/buildinfo"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
@@ -62,7 +63,7 @@ func main() {
 		IntervalOffsetEnv: "MATERIALIZE_SCHEDULE_OFFSET",
 		OpenDatabase:      postgres.PoolOpener(postgres.DefaultDBConfig(dbURL)),
 		Setup: func(ctx context.Context, deps temporal.Dependencies) (temporal.Runner, error) {
-			return setupRunner(ctx, deps, views, changeReason(serviceName, GitCommit))
+			return setupRunner(ctx, deps, views)
 		},
 	}); err != nil {
 		slog.Error("position-materializer cronjob exited with error", "error", err)
@@ -95,27 +96,23 @@ func splitProjections(raw string) []string {
 	return views
 }
 
-// changeReason is the change_reason provenance stamped on every classification
-// write this runner makes: which service, at which build, wrote it.
-func changeReason(serviceName, commit string) string {
-	if commit == "" {
-		commit = "dev"
-	}
-	if len(commit) > 12 {
-		commit = commit[:12]
-	}
-	return fmt.Sprintf("%s@%s", serviceName, commit)
-}
-
-func setupRunner(_ context.Context, deps temporal.Dependencies, views []string, reason string) (temporal.Runner, error) {
+func setupRunner(ctx context.Context, deps temporal.Dependencies, views []string) (temporal.Runner, error) {
 	telemetry, err := position_materializer.NewTelemetry()
 	if err != nil {
 		return nil, fmt.Errorf("creating position materializer telemetry: %w", err)
 	}
 
+	// Provenance is build_id on every appended row (ADR-0002), resolved the same way
+	// every other cronjob resolves it: the registry maps this binary's git hash to an
+	// id, inserting it on first sight.
+	buildReg, err := buildregistry.New(ctx, deps.Pool)
+	if err != nil {
+		return nil, fmt.Errorf("registering build: %w", err)
+	}
+
 	repo := postgres.NewPositionMaterializerRepository(deps.Pool, deps.Logger)
 
-	service, err := position_materializer.NewService(views, repo, reason, deps.Logger, telemetry)
+	service, err := position_materializer.NewService(views, repo, int(buildReg.BuildID()), deps.Logger, telemetry)
 	if err != nil {
 		return nil, fmt.Errorf("creating position materializer service: %w", err)
 	}

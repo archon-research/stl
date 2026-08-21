@@ -9,29 +9,29 @@ import (
 
 // mockMaterializer implements outbound.PositionMaterializer with a func field.
 type mockMaterializer struct {
-	fn    func(ctx context.Context, view, reason string) (int64, error)
+	fn    func(ctx context.Context, view string, buildID int) (int64, error)
 	calls []string
 }
 
-func (m *mockMaterializer) Materialize(ctx context.Context, view, reason string) (int64, error) {
+func (m *mockMaterializer) Materialize(ctx context.Context, view string, buildID int) (int64, error) {
 	m.calls = append(m.calls, view)
-	return m.fn(ctx, view, reason)
+	return m.fn(ctx, view, buildID)
 }
 
 func TestNewService_Validation(t *testing.T) {
-	ok := &mockMaterializer{fn: func(context.Context, string, string) (int64, error) { return 0, nil }}
+	ok := &mockMaterializer{fn: func(context.Context, string, int) (int64, error) { return 0, nil }}
 	cases := []struct {
-		name   string
-		views  []string
-		mat    *mockMaterializer
-		reason string
-		want   string
+		name    string
+		views   []string
+		mat     *mockMaterializer
+		buildID int
+		want    string
 	}{
-		{"nil materializer", []string{"v"}, nil, "r", "materializer is required"},
-		{"empty views", nil, ok, "r", "no projection views configured"},
-		{"blank view entry", []string{"a", "  "}, ok, "r", "blank entry"},
-		{"duplicate view", []string{"a", "b", "a"}, ok, "r", "configured twice"},
-		{"blank reason", []string{"a"}, ok, "   ", "change_reason is required"},
+		{"nil materializer", []string{"v"}, nil, 1, "materializer is required"},
+		{"empty views", nil, ok, 1, "no projection views configured"},
+		{"blank view entry", []string{"a", "  "}, ok, 1, "blank entry"},
+		{"duplicate view", []string{"a", "b", "a"}, ok, 1, "configured twice"},
+		{"negative buildID", []string{"a"}, ok, -1, "must not be negative"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -41,9 +41,9 @@ func TestNewService_Validation(t *testing.T) {
 			}
 			var err error
 			if mat == nil {
-				_, err = NewService(tc.views, nil, tc.reason, nil, nil)
+				_, err = NewService(tc.views, nil, tc.buildID, nil, nil)
 			} else {
-				_, err = NewService(tc.views, mat, tc.reason, nil, nil)
+				_, err = NewService(tc.views, mat, tc.buildID, nil, nil)
 			}
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("NewService error = %v; want it to contain %q", err, tc.want)
@@ -53,12 +53,12 @@ func TestNewService_Validation(t *testing.T) {
 }
 
 func TestRunOnce_AllViewsInOrderWithReason(t *testing.T) {
-	var reasons []string
-	mat := &mockMaterializer{fn: func(_ context.Context, _, reason string) (int64, error) {
-		reasons = append(reasons, reason)
+	var builds []int
+	mat := &mockMaterializer{fn: func(_ context.Context, _ string, buildID int) (int64, error) {
+		builds = append(builds, buildID)
 		return 3, nil
 	}}
-	svc, err := NewService([]string{"va", "vb", "vc"}, mat, "sched@abc", nil, nil)
+	svc, err := NewService([]string{"va", "vb", "vc"}, mat, 4711, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,22 +68,22 @@ func TestRunOnce_AllViewsInOrderWithReason(t *testing.T) {
 	if got := strings.Join(mat.calls, ","); got != "va,vb,vc" {
 		t.Errorf("call order = %s; want va,vb,vc (sequential, configured order)", got)
 	}
-	for _, r := range reasons {
-		if r != "sched@abc" {
-			t.Errorf("reason = %q; want sched@abc propagated to every view", r)
+	for _, b := range builds {
+		if b != 4711 {
+			t.Errorf("buildID = %d; want 4711 propagated to every view", b)
 		}
 	}
 }
 
 func TestRunOnce_OneFailureDoesNotStarveTheRest(t *testing.T) {
 	boom := errors.New("contract violation")
-	mat := &mockMaterializer{fn: func(_ context.Context, view, _ string) (int64, error) {
+	mat := &mockMaterializer{fn: func(_ context.Context, view string, _ int) (int64, error) {
 		if view == "vb" {
 			return 0, boom
 		}
 		return 1, nil
 	}}
-	svc, err := NewService([]string{"va", "vb", "vc"}, mat, "r", nil, nil)
+	svc, err := NewService([]string{"va", "vb", "vc"}, mat, 4711, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,13 +101,13 @@ func TestRunOnce_OneFailureDoesNotStarveTheRest(t *testing.T) {
 
 func TestRunOnce_ParentCancellationAborts(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	mat := &mockMaterializer{fn: func(_ context.Context, view, _ string) (int64, error) {
+	mat := &mockMaterializer{fn: func(_ context.Context, view string, _ int) (int64, error) {
 		if view == "va" {
 			cancel() // cancellation arrives while the first view is running
 		}
 		return 1, nil
 	}}
-	svc, err := NewService([]string{"va", "vb"}, mat, "r", nil, nil)
+	svc, err := NewService([]string{"va", "vb"}, mat, 1, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
