@@ -178,6 +178,11 @@ func scanBlockRange(
 
 // listAllBlockKeys lists receipt keys from all partitions concurrently and
 // returns a flat list of block work items sorted by block number.
+//
+// Every send to the result channel watches ctx. The collector abandons the
+// channel at the first error it sees, so the workers still running are handing
+// results to nobody; scanBlockRange cancels as it returns, which is what retires
+// them, where a bare send would park one for the life of this always-on process.
 func listAllBlockKeys(
 	ctx context.Context,
 	logger *slog.Logger,
@@ -207,11 +212,6 @@ func listAllBlockKeys(
 				}
 				keys, err := listPartitionBlockKeys(ctx, logger, s3Reader, bucket, part, from, to, prog)
 				if err != nil {
-					// Both sends watch ctx: the collector stops reading at the
-					// first error it sees, so every other worker is handing its
-					// result to nobody. scanBlockRange cancels as it returns,
-					// which is what retires them — a bare send parks the worker
-					// for the life of this always-on process.
 					select {
 					case resultCh <- listResult{err: err}:
 					case <-ctx.Done():
