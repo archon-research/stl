@@ -68,10 +68,10 @@ patches:
         name: python-api
       $patch: delete
   # Local kind runs the model on stale parquet snapshots, so the daily tick has
-  # no statistical value -- N_MC=5000 would pin 4 cores for hours to produce
-  # numbers nobody reads. 100 scenarios keep the tick minutes-long and still
-  # exercise the whole pipeline. Real environments (once registered) keep the
-  # default from default_params.json.
+  # no statistical value -- the N_MC=10000 default would grind for hours (and
+  # peak ~8 GiB) to produce numbers nobody reads. 100 scenarios keep the tick
+  # minutes-long and still exercise the whole pipeline. Staging pins the same
+  # cap in its ConfigMap until the live readers land (VEC-272 PR 3).
   - patch: |
       apiVersion: apps/v1
       kind: Deployment
