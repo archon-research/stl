@@ -424,10 +424,11 @@ func (a *backfillActivities) ReplayPartition(ctx context.Context, work partition
 
 // nonRetryableIfStructural stops Temporal retrying a verdict that cannot change.
 // Neither activity caps its attempts, so an unclassified structural failure
-// burns the whole ScheduleToClose envelope — 2h for a partition, 48h for
-// discovery — before an operator sees a fault only an S3 repair or a code change
-// can clear. Both activities apply it in a deferred assignment to their named
-// error result, so no return path can escape it.
+// burns its whole ScheduleToClose envelope (replayActivityOptions,
+// discoverActivityOptions — hours either way) before an operator sees a fault
+// only an S3 repair or a code change can clear. Both activities apply it in a
+// deferred assignment to their named error result, so no return path can escape
+// it.
 func nonRetryableIfStructural(err error) error {
 	if errors.Is(err, errStructuralData) || errors.Is(err, morpho_indexer.ErrUnreplayableLog) {
 		return temporalsdk.NewNonRetryableApplicationError(err.Error(), "StructuralData", err)
