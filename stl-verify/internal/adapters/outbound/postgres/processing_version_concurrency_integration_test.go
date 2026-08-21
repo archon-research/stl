@@ -4,7 +4,6 @@ package postgres
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -514,7 +513,7 @@ func TestProcessingVersionTrigger_NegativeControl_LocklessFunction(t *testing.T)
 
 		versions, errs := runMorphoMarketStateRace(t, ctx, key)
 		for i, err := range errs {
-			if err != nil && !isUniqueViolation(err) {
+			if err != nil && !testutil.IsUniqueViolation(err) {
 				t.Fatalf("attempt %d, worker %d: unexpected error: %v", attempt, i, err)
 			}
 		}
@@ -636,23 +635,6 @@ func naturalKeyWhere(table string) string {
 	default:
 		panic(fmt.Sprintf("naturalKeyWhere: unknown table %q — extend this switch when adding new shapes to the negative control", table))
 	}
-}
-
-// isUniqueViolation reports whether err is a Postgres unique constraint
-// violation. Avoids importing pgconn just to type-assert one error code.
-func isUniqueViolation(err error) bool {
-	if err == nil {
-		return false
-	}
-	type sqlStateProvider interface {
-		SQLState() string
-	}
-	var p sqlStateProvider
-	if errors.As(err, &p) {
-		return p.SQLState() == "23505"
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "23505") || strings.Contains(msg, "unique constraint")
 }
 
 // mapleLoanStateKey identifies a single (maple_loan_id, synced_at) tuple that

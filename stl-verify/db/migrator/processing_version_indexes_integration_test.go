@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -27,11 +28,17 @@ const (
 const minFixtureChunkCount = 5
 
 // Per-lookup budget, planning included: force_custom_plan re-plans on every execution, so planning
-// is part of the per-row trigger cost and has to stay flat in chunk count too. Measured 25-59 buffers
-// across all 14 tables with the many-chunk table at 401 chunks, and 37-95 once the probe key's chunk
-// is in the columnstore, where planning also has to reach the compress_hyper_* twin; the same lookup
-// costs 406 buffers once a generic plan stops pruning.
-const maxTriggerLookupBuffers = 120
+// is part of the per-row trigger cost and has to stay flat in chunk count too. The same lookup costs
+// 406 buffers once a generic plan stops pruning, which is the regression either budget has to catch.
+//
+// A row-store chunk and a columnstore one are separate populations and get separate ceilings, so cost
+// drift on one cannot be read as fan-out on the other: measured 25-59 buffers across all 14 tables
+// with the many-chunk table at 401 chunks, and 37-95 once the probe key's chunk is compressed, where
+// planning also has to reach the compress_hyper_* twin.
+const (
+	maxTriggerLookupBuffers           = 120
+	maxCompressedTriggerLookupBuffers = 160
+)
 
 // Per-row insert budget for the real trigger on the many-chunk table, in the steady state a
 // long-lived worker connection runs in. Measured 98 buffers/row at 401 chunks under the trigger's
@@ -59,7 +66,14 @@ type processingVersionIndexCase struct {
 	tableName     string
 	indexName     string
 	indexFragment string
-	keyColumns    []processingVersionKeyColumn
+	// Columnstore layout, as timescaledb_information.hypertable_compression_settings reports it. The
+	// sparse min/max index built from these is what a trigger lookup uses once a chunk is compressed —
+	// the covering index above does not exist there — so losing segmentby costs nothing a plan shape
+	// shows and everything at run time, once batches stop being separable by the key's leading column.
+	segmentby string
+	orderby   string
+
+	keyColumns []processingVersionKeyColumn
 }
 
 // The probe key deliberately lands in an existing chunk without matching a row the retry lookup can
@@ -72,6 +86,8 @@ func processingVersionIndexCases() []processingVersionIndexCase {
 			tableName:     "borrower",
 			indexName:     "idx_borrower_pv_lookup",
 			indexFragment: "(user_id, protocol_id, token_id, block_number, block_version, created_at, processing_version DESC)",
+			segmentby:     "protocol_id,token_id",
+			orderby:       "block_number DESC,block_version DESC,processing_version DESC,created_at DESC",
 			keyColumns: []processingVersionKeyColumn{
 				{"user_id", "bigint", "1"},
 				{"protocol_id", "bigint", "1"},
@@ -85,6 +101,8 @@ func processingVersionIndexCases() []processingVersionIndexCase {
 			tableName:     "borrower_collateral",
 			indexName:     "idx_borrower_collateral_pv_lookup",
 			indexFragment: "(user_id, protocol_id, token_id, block_number, block_version, created_at, processing_version DESC)",
+			segmentby:     "protocol_id,token_id",
+			orderby:       "block_number DESC,block_version DESC,processing_version DESC,created_at DESC",
 			keyColumns: []processingVersionKeyColumn{
 				{"user_id", "bigint", "1"},
 				{"protocol_id", "bigint", "1"},
@@ -98,6 +116,8 @@ func processingVersionIndexCases() []processingVersionIndexCase {
 			tableName:     "sparklend_reserve_data",
 			indexName:     "idx_sparklend_reserve_data_pv_lookup",
 			indexFragment: "(protocol_id, token_id, block_number, block_version, processing_version DESC)",
+			segmentby:     "protocol_id,token_id",
+			orderby:       "block_number DESC,block_version DESC,processing_version DESC",
 			keyColumns: []processingVersionKeyColumn{
 				{"protocol_id", "bigint", "1"},
 				{"token_id", "bigint", "1"},
@@ -109,6 +129,8 @@ func processingVersionIndexCases() []processingVersionIndexCase {
 			tableName:     "onchain_token_price",
 			indexName:     "idx_onchain_token_price_pv_lookup",
 			indexFragment: `(token_id, oracle_id, block_number, block_version, "timestamp", processing_version DESC)`,
+			segmentby:     "oracle_id,token_id",
+			orderby:       `block_number DESC,block_version DESC,processing_version DESC,"timestamp" DESC`,
 			keyColumns: []processingVersionKeyColumn{
 				{"token_id", "bigint", "1"},
 				{"oracle_id", "smallint", "1"},
@@ -121,6 +143,8 @@ func processingVersionIndexCases() []processingVersionIndexCase {
 			tableName:     "morpho_market_state",
 			indexName:     "idx_morpho_market_state_pv_lookup",
 			indexFragment: `(morpho_market_id, block_number, block_version, "timestamp", processing_version DESC)`,
+			segmentby:     "morpho_market_id",
+			orderby:       `block_number DESC,block_version DESC,processing_version DESC,"timestamp" DESC`,
 			keyColumns: []processingVersionKeyColumn{
 				{"morpho_market_id", "bigint", "1"},
 				{"block_number", "bigint", "1000000"},
@@ -132,6 +156,8 @@ func processingVersionIndexCases() []processingVersionIndexCase {
 			tableName:     "morpho_market_position",
 			indexName:     "idx_morpho_market_position_pv_lookup",
 			indexFragment: `(user_id, morpho_market_id, block_number, block_version, "timestamp", processing_version DESC)`,
+			segmentby:     "morpho_market_id,user_id",
+			orderby:       `block_number DESC,block_version DESC,processing_version DESC,"timestamp" DESC`,
 			keyColumns: []processingVersionKeyColumn{
 				{"user_id", "bigint", "1"},
 				{"morpho_market_id", "bigint", "1"},
@@ -144,6 +170,8 @@ func processingVersionIndexCases() []processingVersionIndexCase {
 			tableName:     "morpho_vault_state",
 			indexName:     "idx_morpho_vault_state_pv_lookup",
 			indexFragment: `(morpho_vault_id, block_number, block_version, "timestamp", processing_version DESC)`,
+			segmentby:     "morpho_vault_id",
+			orderby:       `block_number DESC,block_version DESC,processing_version DESC,"timestamp" DESC`,
 			keyColumns: []processingVersionKeyColumn{
 				{"morpho_vault_id", "bigint", "1"},
 				{"block_number", "bigint", "1000000"},
@@ -155,6 +183,8 @@ func processingVersionIndexCases() []processingVersionIndexCase {
 			tableName:     "morpho_vault_position",
 			indexName:     "idx_morpho_vault_position_pv_lookup",
 			indexFragment: `(user_id, morpho_vault_id, block_number, block_version, "timestamp", processing_version DESC)`,
+			segmentby:     "morpho_vault_id,user_id",
+			orderby:       `block_number DESC,block_version DESC,processing_version DESC,"timestamp" DESC`,
 			keyColumns: []processingVersionKeyColumn{
 				{"user_id", "bigint", "1"},
 				{"morpho_vault_id", "bigint", "1"},
@@ -167,6 +197,8 @@ func processingVersionIndexCases() []processingVersionIndexCase {
 			tableName:     manyChunkTable,
 			indexName:     "idx_prime_debt_pv_lookup",
 			indexFragment: "(prime_id, block_number, block_version, synced_at, processing_version DESC)",
+			segmentby:     "prime_id",
+			orderby:       "block_number DESC,block_version DESC,processing_version DESC,synced_at DESC",
 			keyColumns: []processingVersionKeyColumn{
 				{"prime_id", "bigint", "1"},
 				{"block_number", "bigint", "1000000"},
@@ -178,6 +210,8 @@ func processingVersionIndexCases() []processingVersionIndexCase {
 			tableName:     "allocation_position",
 			indexName:     "idx_allocation_position_pv_lookup",
 			indexFragment: "(chain_id, token_id, prime_id, proxy_address, block_number, block_version, tx_hash, log_index, direction, created_at, processing_version DESC)",
+			segmentby:     "chain_id,token_id,proxy_address",
+			orderby:       "block_number DESC,block_version DESC,processing_version DESC,created_at DESC",
 			keyColumns: []processingVersionKeyColumn{
 				{"chain_id", "int", "1"},
 				{"token_id", "bigint", "1"},
@@ -195,6 +229,8 @@ func processingVersionIndexCases() []processingVersionIndexCase {
 			tableName:     "protocol_event",
 			indexName:     "idx_protocol_event_pv_lookup",
 			indexFragment: "(chain_id, block_number, block_version, tx_hash, log_index, created_at, processing_version DESC)",
+			segmentby:     "protocol_id",
+			orderby:       "block_number DESC,block_version DESC,processing_version DESC,created_at DESC",
 			keyColumns: []processingVersionKeyColumn{
 				{"chain_id", "int", "1"},
 				{"block_number", "bigint", "1000000"},
@@ -208,6 +244,8 @@ func processingVersionIndexCases() []processingVersionIndexCase {
 			tableName:     "anchorage_package_snapshot",
 			indexName:     "idx_anchorage_package_snapshot_pv_lookup",
 			indexFragment: "(prime_id, package_id, asset_type, custody_type, snapshot_time, processing_version DESC)",
+			segmentby:     "prime_id,package_id",
+			orderby:       "snapshot_time DESC,processing_version DESC",
 			keyColumns: []processingVersionKeyColumn{
 				{"prime_id", "bigint", "1"},
 				{"package_id", "text", "'pkg'"},
@@ -220,6 +258,8 @@ func processingVersionIndexCases() []processingVersionIndexCase {
 			tableName:     "anchorage_operation",
 			indexName:     "idx_anchorage_operation_pv_lookup",
 			indexFragment: "(operation_id, created_at, processing_version DESC)",
+			segmentby:     "prime_id,type_id",
+			orderby:       "created_at DESC,operation_id DESC,processing_version DESC",
 			keyColumns: []processingVersionKeyColumn{
 				{"operation_id", "text", "'operation'"},
 				{"created_at", "timestamptz", ts},
@@ -229,6 +269,8 @@ func processingVersionIndexCases() []processingVersionIndexCase {
 			tableName:     "offchain_token_price",
 			indexName:     "idx_offchain_token_price_pv_lookup",
 			indexFragment: `(token_id, source_id, "timestamp", processing_version DESC)`,
+			segmentby:     "token_id",
+			orderby:       `"timestamp" DESC,processing_version DESC`,
 			keyColumns: []processingVersionKeyColumn{
 				{"token_id", "bigint", "1"},
 				{"source_id", "smallint", "1"},
@@ -352,7 +394,7 @@ func TestProcessingVersionTriggerLookupsPruneToOneChunk(t *testing.T) {
 		for _, lookup := range tc.triggerLookups() {
 			t.Run(tc.tableName+"/"+lookup.label, func(t *testing.T) {
 				plan := explainWarmedLookup(t, ctx, conn, lookup)
-				assertLookupPrunedToOneChunk(t, plan, tc.tableName+" "+lookup.label)
+				assertLookupPrunedToOneChunk(t, plan, tc.tableName+" "+lookup.label, maxTriggerLookupBuffers)
 				if twins := plan.compressedChunkNames(); len(twins) != 0 {
 					t.Fatalf("%s %s lookup reached the columnstore twins %v on a fixture that compresses "+
 						"nothing, so the policy jobs setupMigratedPostgres switches off ran anyway and the "+
@@ -496,11 +538,11 @@ func manyChunkCase(t *testing.T) processingVersionIndexCase {
 
 // What a trigger lookup has to keep whatever the storage layout of the chunk it lands in, so the
 // row-store fixture and the columnstore one are held to one standard instead of two.
-func assertLookupPrunedToOneChunk(t *testing.T, plan explainPlan, label string) {
+func assertLookupPrunedToOneChunk(t *testing.T, plan explainPlan, label string, maxBuffers int) {
 	t.Helper()
 
-	if plan.hasNodeType("Seq Scan") {
-		t.Fatalf("%s lookup fell back to a sequential scan\nplan:\n%s", label, plan.raw)
+	if scanned := plan.seqScannedChunks(); len(scanned) > 0 {
+		t.Fatalf("%s lookup fell back to a sequential scan of %v\nplan:\n%s", label, scanned, plan.raw)
 	}
 	if chunks := plan.chunkNames(); len(chunks) != 1 {
 		t.Fatalf("%s lookup scanned %d chunks, want exactly 1\nplan:\n%s", label, len(chunks), plan.raw)
@@ -512,9 +554,9 @@ func assertLookupPrunedToOneChunk(t *testing.T, plan explainPlan, label string) 
 		t.Fatalf("%s lookup deferred exclusion of %d chunks to startup, so it re-derives them on every "+
 			"execution instead of pruning once when the plan is built\nplan:\n%s", label, excluded, plan.raw)
 	}
-	if buffers := plan.totalBuffers(); buffers > maxTriggerLookupBuffers {
+	if buffers := plan.totalBuffers(); buffers > maxBuffers {
 		t.Fatalf("%s lookup touched %d buffers; expected <= %d\nplan:\n%s",
-			label, buffers, maxTriggerLookupBuffers, plan.raw)
+			label, buffers, maxBuffers, plan.raw)
 	}
 }
 
@@ -616,14 +658,18 @@ func (p explainPlan) deferredChunkExclusions() int {
 	return total
 }
 
-func (p explainPlan) hasNodeType(nodeType string) bool {
-	found := false
+// Row-store chunks the plan reads whole. A twin scanned whole is not the same failure: right after
+// compression its stats are empty and the planner takes its sparse index, but once anything ANALYZEs a
+// one-page twin, reading it whole is genuinely cheapest and pruning is unaffected — so counting that
+// as fan-out would fail the compressed tests on a stats refresh.
+func (p explainPlan) seqScannedChunks() []string {
+	var scanned []string
 	p.walk(func(n explainNode) {
-		if n.NodeType == nodeType {
-			found = true
+		if n.NodeType == "Seq Scan" && chunkRelationPattern.MatchString(n.RelationName) {
+			scanned = append(scanned, n.RelationName)
 		}
 	})
-	return found
+	return scanned
 }
 
 func (p explainPlan) walk(visit func(explainNode)) {
@@ -699,42 +745,19 @@ func upsertFixturePrime(t *testing.T, ctx context.Context, pool *pgxpool.Pool) i
 func seedProcessingVersionPlanRows(t *testing.T, ctx context.Context, pool *pgxpool.Pool, rows int) {
 	t.Helper()
 
-	conn, err := pool.Acquire(ctx)
-	if err != nil {
-		t.Fatalf("acquire seed conn: %v", err)
-	}
-	defer conn.Release()
-
-	tx, err := conn.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin seed tx: %v", err)
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			if err := tx.Rollback(ctx); err != nil {
-				t.Logf("rollback seed tx: %v", err)
+	if err := inReplicaRoleTx(ctx, pool, func(tx pgx.Tx) error {
+		for _, stmt := range processingVersionSeedStatements() {
+			if _, err := tx.Exec(ctx, stmt, rows); err != nil {
+				return fmt.Errorf("seed processing_version plan rows: %w\nstatement:\n%s", err, stmt)
 			}
 		}
-	}()
-
-	if _, err := tx.Exec(ctx, "SET LOCAL session_replication_role = 'replica'"); err != nil {
-		t.Fatalf("disable triggers and FK checks: %v", err)
-	}
-
-	for _, stmt := range processingVersionSeedStatements() {
-		if _, err := tx.Exec(ctx, stmt, rows); err != nil {
-			t.Fatalf("seed processing_version plan rows: %v\nstatement:\n%s", err, stmt)
+		if _, err := tx.Exec(ctx, manyChunkSeedStatement, manyChunkDays); err != nil {
+			return fmt.Errorf("spread %s across chunks: %w", manyChunkTable, err)
 		}
+		return nil
+	}); err != nil {
+		t.Fatalf("%v", err)
 	}
-	if _, err := tx.Exec(ctx, manyChunkSeedStatement, manyChunkDays); err != nil {
-		t.Fatalf("spread %s across chunks: %v", manyChunkTable, err)
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		t.Fatalf("commit seed tx: %v", err)
-	}
-	committed = true
 
 	for _, tc := range processingVersionIndexCases() {
 		if _, err := pool.Exec(ctx, fmt.Sprintf("ANALYZE %s", tc.tableName)); err != nil {
@@ -751,6 +774,27 @@ func seedProcessingVersionPlanRows(t *testing.T, ctx context.Context, pool *pgxp
 		t.Fatalf("%s fixture has %d chunks, want >= %d — fan-out assertions need a wide table",
 			manyChunkTable, n, minManyChunkCount)
 	}
+}
+
+// Runs fn in one transaction with triggers and FK checks off, which is what lets a fixture write
+// processing_version and build_id itself instead of letting the trigger own them.
+func inReplicaRoleTx(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // a rollback after a successful commit is a no-op
+
+	if _, err := tx.Exec(ctx, "SET LOCAL session_replication_role = 'replica'"); err != nil {
+		return fmt.Errorf("disable triggers and FK checks: %w", err)
+	}
+	if err := fn(tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	return nil
 }
 
 // Rows all land in one existing chunk, so any buffer cost beyond that chunk comes from the trigger

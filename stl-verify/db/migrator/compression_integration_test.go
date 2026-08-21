@@ -4,22 +4,24 @@ package migrator_test
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Two days one chunk apart, so a write into a compressed chunk can be compared against the same write
-// into a row-store one. Well clear of the 2035 range the plan fixtures seed.
+// into a row-store one. Well clear of the 2035 range the plan fixtures seed. Spelled with an explicit
+// UTC offset because chunk boundaries are absolute: a bare date would be read in the session's time
+// zone and could put one fixture day either side of a boundary.
 const (
-	compressedFixtureDay = "2036-03-01"
-	rowStoreFixtureDay   = "2036-03-06"
+	compressedFixtureDay = "2036-03-01 00:00:00+00"
+	rowStoreFixtureDay   = "2036-03-06 00:00:00+00"
 )
 
 // Four block numbers per timestamp: the production sort order breaks ties on synced_at by
@@ -61,11 +63,42 @@ func TestCompressedChunkReadPathReturnsTheSameRows(t *testing.T) {
 	}
 }
 
+// The columnstore layout every versioned table is compressed with. Nothing else pins it, and nothing
+// else can: a lost segmentby leaves every plan-shape assertion in this file green — batches stop being
+// separable by the key's leading column, which costs decompression per inserted row and shows up
+// nowhere in a plan on a fixture chunk that holds one segment. So the settings are asserted directly,
+// the way the covering indexes are.
+func TestVersionedTablesKeepTheirColumnstoreLayout(t *testing.T) {
+	ctx := context.Background()
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	defer cleanup()
+
+	for _, tc := range processingVersionIndexCases() {
+		t.Run(tc.tableName, func(t *testing.T) {
+			var segmentby, orderby string
+			if err := pool.QueryRow(ctx, `
+				SELECT COALESCE(segmentby, ''), COALESCE(orderby, '')
+				FROM timescaledb_information.hypertable_compression_settings
+				WHERE hypertable = $1::regclass
+			`, tc.tableName).Scan(&segmentby, &orderby); err != nil {
+				t.Fatalf("read the columnstore settings of %s: %v", tc.tableName, err)
+			}
+			if segmentby != tc.segmentby {
+				t.Fatalf("%s segmentby is %q, want %q", tc.tableName, segmentby, tc.segmentby)
+			}
+			if orderby != tc.orderby {
+				t.Fatalf("%s orderby is %q, want %q", tc.tableName, orderby, tc.orderby)
+			}
+		})
+	}
+}
+
 // Both per-row trigger statements have to keep pruning to one chunk once that chunk is in the
-// columnstore, where the covering index no longer exists and the lookup is served by the sparse
-// min/max index on the compress_hyper_* twin instead. Same assertions as the row-store fixture, plus
-// the twin the plan must name exactly once: a second twin, or a second row-store chunk, is the
-// fan-out the force_custom_plan setting exists to prevent.
+// columnstore, where the covering index no longer exists and the lookup reaches the compress_hyper_*
+// twin instead. Same assertions as the row-store fixture, plus the twin the plan must name exactly
+// once: a second twin, or a second row-store chunk, is the fan-out the force_custom_plan setting
+// exists to prevent. What the twin is indexed by is pinned by the test above, not here — a fixture
+// chunk holds one segment, so no plan shape here changes when segmentby does.
 func TestProcessingVersionTriggerLookupsPruneToOneCompressedChunk(t *testing.T) {
 	ctx := context.Background()
 	pool, cleanup := setupMigratedPostgres(ctx, t)
@@ -83,19 +116,24 @@ func TestProcessingVersionTriggerLookupsPruneToOneCompressedChunk(t *testing.T) 
 	defer resetSessionState(t, ctx, conn, "RESET plan_cache_mode")
 
 	for _, tc := range processingVersionIndexCases() {
-		compressChunk(t, ctx, pool, probeChunk(t, ctx, conn, tc))
+		// The compression is inside the subtest so one table's failure cannot abort the others, and so a
+		// filtered run compresses only the table it was asked about.
+		t.Run(tc.tableName, func(t *testing.T) {
+			compressChunk(t, ctx, pool, probeChunk(t, ctx, conn, tc))
 
-		for _, lookup := range tc.triggerLookups() {
-			t.Run(tc.tableName+"/"+lookup.label, func(t *testing.T) {
-				plan := explainWarmedLookup(t, ctx, conn, lookup)
-				assertLookupPrunedToOneChunk(t, plan, tc.tableName+" "+lookup.label)
-				if twins := plan.compressedChunkNames(); len(twins) != 1 {
-					t.Fatalf("%s %s lookup read %d columnstore twins, want exactly 1: the probe key's chunk "+
-						"is compressed, so its twin is where the lookup reads the batches from\nplan:\n%s",
-						tc.tableName, lookup.label, len(twins), plan.raw)
-				}
-			})
-		}
+			for _, lookup := range tc.triggerLookups() {
+				t.Run(lookup.label, func(t *testing.T) {
+					plan := explainWarmedLookup(t, ctx, conn, lookup)
+					assertLookupPrunedToOneChunk(t, plan, tc.tableName+" "+lookup.label,
+						maxCompressedTriggerLookupBuffers)
+					if twins := plan.compressedChunkNames(); len(twins) != 1 {
+						t.Fatalf("%s %s lookup read %d columnstore twins, want exactly 1: the probe key's chunk "+
+							"is compressed, so its twin is where the lookup reads the batches from\nplan:\n%s",
+							tc.tableName, lookup.label, len(twins), plan.raw)
+					}
+				})
+			}
+		})
 	}
 }
 
@@ -109,13 +147,10 @@ func TestProcessingVersionTriggerLookupsPruneToOneCompressedChunk(t *testing.T) 
 // the compression policy interval hits it.
 func TestReprocessingACompressedKeyIsRejectedBeforeTheVersionTriggerRuns(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := setupMigratedPostgres(ctx, t)
-	defer cleanup()
-	fixture := seedCompressionFixture(t, ctx, pool)
-	fixture.compressDay(t, ctx, pool, compressedFixtureDay)
+	pool, fixture := setupCompressedFixture(t, ctx)
 
 	_, err := fixture.reprocess(ctx, pool, compressedFixtureDay, firstFixtureBlock, probeBuildID)
-	if !isUniqueViolation(err) {
+	if !testutil.IsUniqueViolation(err) {
 		t.Fatalf("reprocessing a compressed key returned %v, want a unique-constraint violation", err)
 	}
 	if versions := fixture.versionsAt(t, ctx, pool, compressedFixtureDay, firstFixtureBlock); !slices.Equal(versions, []int32{0}) {
@@ -128,10 +163,7 @@ func TestReprocessingACompressedKeyIsRejectedBeforeTheVersionTriggerRuns(t *test
 // this, that test would pass just as well against a trigger that had stopped versioning altogether.
 func TestReprocessingARowStoreKeyAssignsTheNextVersion(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := setupMigratedPostgres(ctx, t)
-	defer cleanup()
-	fixture := seedCompressionFixture(t, ctx, pool)
-	fixture.compressDay(t, ctx, pool, compressedFixtureDay)
+	pool, fixture := setupCompressedFixture(t, ctx)
 
 	version, err := fixture.reprocess(ctx, pool, rowStoreFixtureDay, firstFixtureBlock, probeBuildID)
 	if err != nil {
@@ -148,10 +180,7 @@ func TestReprocessingARowStoreKeyAssignsTheNextVersion(t *testing.T) {
 // at all — a first write landing on version 0 is indistinguishable from the column default.
 func TestWritingANewKeyIntoACompressedChunkIsVersionedNormally(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := setupMigratedPostgres(ctx, t)
-	defer cleanup()
-	fixture := seedCompressionFixture(t, ctx, pool)
-	fixture.compressDay(t, ctx, pool, compressedFixtureDay)
+	pool, fixture := setupCompressedFixture(t, ctx)
 
 	for _, build := range []struct {
 		id          int
@@ -176,10 +205,7 @@ func TestWritingANewKeyIntoACompressedChunkIsVersionedNormally(t *testing.T) {
 // the rejection is the pre-trigger comparison alone.
 func TestCompressedChunkStoresAKeyWhoseVersionIsSuppliedUpFront(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := setupMigratedPostgres(ctx, t)
-	defer cleanup()
-	fixture := seedCompressionFixture(t, ctx, pool)
-	fixture.compressDay(t, ctx, pool, compressedFixtureDay)
+	pool, fixture := setupCompressedFixture(t, ctx)
 
 	if err := fixture.insertVersionDirectly(ctx, pool, compressedFixtureDay, firstFixtureBlock, 1); err != nil {
 		t.Fatalf("storing version 1 at a compressed key: %v", err)
@@ -244,12 +270,30 @@ func compressChunk(t *testing.T, ctx context.Context, pool *pgxpool.Pool, chunk 
 	}
 }
 
-// One prime of its own and two days of prime_debt rows a chunk apart, written through the real trigger.
-// A prime per test keeps each fixture on keys no sibling touches, and prime_debt is the table these
-// writes go through because its columnstore segmentby is the leading column of its processing_version
-// key; its trigger has the same shape as the other 35.
+// Two days of prime_debt rows a chunk apart, written through the real trigger. Isolation comes from the
+// database setupMigratedPostgres builds per test, not from the prime — upsertFixturePrime resolves to
+// the same row every call, and its job is staying clear of the migration-seeded primes. prime_debt is
+// the table these writes go through because its columnstore segmentby is the leading column of its
+// processing_version key; its trigger has the same shape as the other 35.
+//
+// SQL below names prime_debt outright rather than through a constant: the choice is this fixture's own,
+// so it must not follow a constant repointed for another test's reasons.
 type compressionFixture struct {
 	primeID int64
+}
+
+const fixtureTable = "prime_debt"
+
+// A migrated database of its own, the fixture seeded into it, and the compressed day already in the
+// columnstore: the state every write assertion below starts from.
+func setupCompressedFixture(t *testing.T, ctx context.Context) (*pgxpool.Pool, compressionFixture) {
+	t.Helper()
+
+	pool, cleanup := setupMigratedPostgres(ctx, t)
+	t.Cleanup(cleanup)
+	fixture := seedCompressionFixture(t, ctx, pool)
+	fixture.compressDay(t, ctx, pool, compressedFixtureDay)
+	return pool, fixture
 }
 
 func seedCompressionFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool) compressionFixture {
@@ -259,7 +303,7 @@ func seedCompressionFixture(t *testing.T, ctx context.Context, pool *pgxpool.Poo
 	for _, day := range []string{compressedFixtureDay, rowStoreFixtureDay} {
 		if _, err := pool.Exec(ctx, fixtureSeedStatement, fixture.primeID, day,
 			fixtureTimestampsPerDay, fixtureBlocksPerStamp); err != nil {
-			t.Fatalf("seed %s rows for %s: %v", manyChunkTable, day, err)
+			t.Fatalf("seed %s rows for %s: %v", fixtureTable, day, err)
 		}
 	}
 	return fixture
@@ -285,7 +329,7 @@ func (f compressionFixture) readDay(t *testing.T, ctx context.Context, pool *pgx
 		ORDER BY synced_at DESC, block_number DESC, block_version DESC
 	`, f.primeID, day)
 	if err != nil {
-		t.Fatalf("read %s rows for %s: %v", manyChunkTable, day, err)
+		t.Fatalf("read %s rows for %s: %v", fixtureTable, day, err)
 	}
 	defer rows.Close()
 
@@ -296,13 +340,13 @@ func (f compressionFixture) readDay(t *testing.T, ctx context.Context, pool *pgx
 		var syncedAt time.Time
 		var debtWad string
 		if err := rows.Scan(&blockNumber, &blockVersion, &syncedAt, &processingVersion, &debtWad); err != nil {
-			t.Fatalf("scan %s row: %v", manyChunkTable, err)
+			t.Fatalf("scan %s row: %v", fixtureTable, err)
 		}
 		rendered = append(rendered, fmt.Sprintf("%d/%d/%s/%d/%s",
 			blockNumber, blockVersion, syncedAt.UTC().Format(time.RFC3339Nano), processingVersion, debtWad))
 	}
 	if err := rows.Err(); err != nil {
-		t.Fatalf("read %s rows for %s: %v", manyChunkTable, day, err)
+		t.Fatalf("read %s rows for %s: %v", fixtureTable, day, err)
 	}
 	return rendered
 }
@@ -317,15 +361,24 @@ func (f compressionFixture) compressDay(t *testing.T, ctx context.Context, pool 
 func (f compressionFixture) chunkOfDay(t *testing.T, ctx context.Context, pool *pgxpool.Pool, day string) string {
 	t.Helper()
 
-	var chunk string
-	if err := pool.QueryRow(ctx, `
+	rows, err := pool.Query(ctx, `
 		SELECT DISTINCT tableoid::regclass::text
 		FROM prime_debt
 		WHERE prime_id = $1 AND synced_at >= $2::timestamptz AND synced_at < $2::timestamptz + interval '1 day'
-	`, f.primeID, day).Scan(&chunk); err != nil {
+	`, f.primeID, day)
+	if err != nil {
 		t.Fatalf("locate the chunk holding %s: %v", day, err)
 	}
-	return chunk
+	chunks, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatalf("locate the chunk holding %s: %v", day, err)
+	}
+	// Compressing an arbitrary one of several would leave the rest in the row store, and the read-path
+	// comparison would then pass while comparing half-uncompressed data against itself.
+	if len(chunks) != 1 {
+		t.Fatalf("%s rows for %s span %d chunks (%v), want exactly 1", fixtureTable, day, len(chunks), chunks)
+	}
+	return chunks[0]
 }
 
 // A write on an existing key by a build that has not written it, which is what a reprocessing run
@@ -343,22 +396,13 @@ func (f compressionFixture) reprocess(ctx context.Context, pool *pgxpool.Pool, d
 // The same row the trigger would have written, with the version supplied instead of assigned.
 // session_replication_role keeps the trigger from overwriting it, exactly as the plan fixtures do.
 func (f compressionFixture) insertVersionDirectly(ctx context.Context, pool *pgxpool.Pool, day string, blockNumber int64, version int32) error {
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin: %w", err)
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck // rollback after a successful commit is a no-op
-
-	if _, err := tx.Exec(ctx, "SET LOCAL session_replication_role = 'replica'"); err != nil {
-		return fmt.Errorf("disable triggers: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO prime_debt (prime_id, ilk_name, debt_wad, block_number, block_version, synced_at, processing_version, build_id)
-		VALUES ($1, 'compression-direct', 1, $2, 0, $3::timestamptz + interval '1 minute', $4, $5)
-	`, f.primeID, blockNumber, day, version, probeBuildID); err != nil {
-		return fmt.Errorf("insert: %w", err)
-	}
-	return tx.Commit(ctx)
+	return inReplicaRoleTx(ctx, pool, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `
+			INSERT INTO prime_debt (prime_id, ilk_name, debt_wad, block_number, block_version, synced_at, processing_version, build_id)
+			VALUES ($1, 'compression-direct', 1, $2, 0, $3::timestamptz + interval '1 minute', $4, $5)
+		`, f.primeID, blockNumber, day, version, probeBuildID)
+		return err
+	})
 }
 
 func (f compressionFixture) versionsAt(t *testing.T, ctx context.Context, pool *pgxpool.Pool, day string, blockNumber int64) []int32 {
@@ -387,10 +431,4 @@ func (f compressionFixture) versionsAt(t *testing.T, ctx context.Context, pool *
 		t.Fatalf("read versions at the key: %v", err)
 	}
 	return versions
-}
-
-// SQLSTATE 23505.
-func isUniqueViolation(err error) bool {
-	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == "23505"
 }
