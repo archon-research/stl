@@ -205,7 +205,11 @@ export function useDataSourceSection(
     label: 'Data source',
     value: PROVENANCE,
     options: [
-      option('both', 'Both', 'STL and Sky together, each position named once'),
+      option(
+        'both',
+        'Composite',
+        'STL and Sky together, each position named once',
+      ),
       option('indexed', 'STL indexed', "Computed from STL's own on-chain data"),
       option('reference', 'Sky reference', 'As published by Sky'),
     ],
