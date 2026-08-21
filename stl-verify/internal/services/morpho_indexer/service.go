@@ -77,10 +77,13 @@ func ConfigDefaults() Config {
 
 // NewReplayConfig builds the Config every replay composition root
 // (morpho-vault-backfill, morpho-v2-bootstrap) hands NewReplayService, telemetry
-// included. It exists so the wiring lives once: Config.Telemetry is nil-safe, so
-// a root that forgets it mutes the whole replay path silently — and
-// morpho_v2_adapter_registrations_total{observed_via="bootstrap_seed"} is the
-// first thing the bootstrap runbook queries.
+// included. It exists so the wiring lives once: Config.Telemetry is nil-safe, so a
+// root that forgets it silently mutes every event and snapshot a run replays.
+//
+// Not among those signals, ordinarily, is
+// morpho_v2_adapter_registrations_total{observed_via="bootstrap_seed"}: the seed
+// only asserts what the replay already recorded, so a healthy run appends nothing
+// under that label and its absence is the expected reading.
 //
 // Nothing here dials: the chain name is a table lookup and the instruments come
 // from the global meter provider, which no-ops when no exporter is configured.
