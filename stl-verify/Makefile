@@ -2360,7 +2360,7 @@ _docker-release-transform-bootstrap-internal:
 # schedule) so it is not auto-discovered; ships in the shared cronjob ECR repo
 # with a name-prefixed tag and runs as a one-off k8s Job.
 docker-build-reference-capital-backfill:
-	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/reference-capital-backfill --build-arg BIN=reference-capital-backfill -t stl-reference-capital-backfill:local -f Dockerfile.common .
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/reference-capital-backfill --build-arg BIN=reference-capital-backfill -t stl-reference-capital-backfill:$(LOCAL_TAG) -f Dockerfile.common .
 
 docker-release-reference-capital-backfill: ecr-login _docker-release-reference-capital-backfill-internal
 
@@ -2385,7 +2385,7 @@ _docker-release-offchain-price-backfill-internal:
 # worker Deployment that polls its task queue and waits for a run to be started
 # from the Temporal UI — so it needs the same explicit release wiring.
 docker-build-morpho-vault-backfill:
-	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/morpho-vault-backfill --build-arg BIN=morpho-vault-backfill -t stl-morpho-vault-backfill:local -f Dockerfile.common .
+	docker build --build-arg GO_VERSION=$(GO_VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT_FULL) --build-arg CMD_PATH=cmd/backfillers/morpho-vault-backfill --build-arg BIN=morpho-vault-backfill -t stl-morpho-vault-backfill:$(LOCAL_TAG) -f Dockerfile.common .
 
 docker-release-morpho-vault-backfill: ecr-login _docker-release-morpho-vault-backfill-internal
 
