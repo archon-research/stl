@@ -99,7 +99,8 @@ CREATE TABLE IF NOT EXISTS position_state (
     -- stored silently and — because the recency guard orders on these columns — became the position's
     -- "oldest" observation and skewed classification recency. Reject at the chokepoint instead.
     CONSTRAINT position_state_coord_nonneg_chk
-        CHECK (block_number >= 0 AND block_version >= 0 AND processing_version >= 0),
+        CHECK (block_number >= 0 AND block_version >= 0 AND processing_version >= 0
+               AND build_id >= 0),
     -- chain_id / protocol_id are nullable structural fields (see position_key), but when present they are
     -- registry ids and strictly positive; 0 or negative is an upstream default/corruption, and because the
     -- value feeds the position_id hash a wrong-but-accepted id forks the position permanently.
@@ -211,27 +212,14 @@ END $$;
 -- processing_version, and event-time views must dedupe each key to a STABLE pick such as
 -- MIN(synced_at)), and (5) fails hard when the view emits a position_id whose stored rows were written
 -- by a DIFFERENT projection — disjointness is enforced through the stamped `projection` column, no
--- longer trusted by construction. The checks and both writes read ONE materialised snapshot of the
+-- longer trusted by construction. The four checks all read ONE materialised snapshot of the
 -- projection (a temp table). Cross-run safety: the advisory lock serialises same-view runs, and check
 -- (5) keeps different views off each other's position_ids.
 --
--- Classification recency: the classifying row is the highest-block CANDIDATE — a run-canonical non-zero
--- row that is also the merged-canonical row at its own block (filter-then-top, so a legitimate
--- lower-block correction is not suppressed by a stale higher-block re-emission) — and it is written only
--- when NO merged-canonical non-zero observation exists above its block, so a windowed backfill cannot
--- regress a newer live classification. A position whose entire canonical history is zero produces NO
--- classification row when it was never classified. KNOWN, DOCUMENTED BEHAVIOR (review finding): a
--- classification can OUTLIVE its canonical basis — if a position is classified and a later reorg zeroes
--- every canonical observation, the classification row remains (indistinguishable from the closed-position
--- case, and there is no delete channel under the append-only default). VEC-409 consumers must treat
--- classification as advisory alongside position_current's quantity (a zero latest quantity means closed
--- OR reorged-out) — never as proof of a live canonical basis.
---
--- collateral_status is not written here (stays NULL). If a future BLOCK-OBSERVED materializer in this
--- spine's scope needs it, add it as one more nullable column to THIS guarded upsert (not a separate
--- write, which leaves a stale status attached across a reclassification). Anchorage custody (CUSTODY vs
--- CUSTODY_COLLATERAL) is snapshot-keyed and out of scope (see the Scope block), so it is NOT planned
--- into this upsert.
+-- Classification is NOT written here. deal_type is an attribute of the instrument (every projection
+-- derives it from the protocol leg, which is already inside instrument_key), so it is resolved
+-- instrument-side and read through VEC-409. position_classification is untouched by this migration,
+-- and collateral_status likewise belongs to whichever PR ships its writer (VEC-408).
 --
 -- p_view is a regclass, so it must name an existing relation — no SQL injection via the dynamic FROM.
 -- Idempotent; run out of band. Returns the number of position_state rows INSERTED (append-only: nothing
@@ -283,7 +271,7 @@ BEGIN
     END IF;
 
     -- Evaluate the projection EXACTLY ONCE into a temp table. The projection is the dominant cost (full
-    -- raw scan + joins + LAG + per-row sha256); the pre-flight checks and both writes all read this
+    -- raw scan + joins + LAG + per-row sha256); the pre-flight checks and the append all read this
     -- materialized snapshot, so the view is never rescanned (was 3x). position_id() is recomputed here,
     -- keeping identity off the view's contract.
     -- pg_temp-qualified so an unqualified _mpp_src on the caller's search_path can never resolve to a
