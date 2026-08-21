@@ -251,6 +251,7 @@ def test_list_allocations_returns_200_with_enriched_holdings():
     assert data == [
         {
             "chain_id": 1,
+            "network": None,
             "receipt_token_id": 1,
             "receipt_token_address": "0x" + "a" * 40,
             "underlying_token_id": 10,
@@ -289,6 +290,7 @@ def test_list_allocations_returns_direct_asset_rows_with_null_receipt_fields():
     assert response.json() == [
         {
             "chain_id": 1,
+            "network": None,
             "receipt_token_id": None,
             "receipt_token_address": None,
             "underlying_token_id": 99,
@@ -459,6 +461,7 @@ def test_list_allocations_surfaces_anchorage_custody_row():
     assert response.json() == [
         {
             "chain_id": 0,
+            "network": None,
             "receipt_token_id": None,
             "receipt_token_address": None,
             "underlying_token_id": None,

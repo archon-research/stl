@@ -17,6 +17,11 @@ from app.api._validators import (
     ProxyAddressPathParam,
 )
 from app.api.deps import get_engine, get_reference_risk_capital_service_factory
+from app.api.provenance import (
+    INDEXED_OR_REFERENCE,
+    get_requested_provenance,
+    resolve_or_422,
+)
 from app.api.time_series import TimeSeriesWindow, apply_cache_control, build_window, get_time_series_query_params
 from app.config import get_settings
 from app.domain.entities.allocation import (
@@ -29,6 +34,7 @@ from app.domain.entities.allocation import (
 from app.domain.entities.allocation_category import AllocationCategory
 from app.domain.entities.reference_risk_capital import ReferenceAllocation
 from app.domain.exceptions import ReferenceDataUnavailableError
+from app.domain.provenance import Provenance
 from app.domain.serialization import PlainDecimal
 from app.domain.time_series import TimeSeriesQuery, enforce_filter_for_window
 from app.services.allocation_category_service import AllocationCategoryService
@@ -125,9 +131,28 @@ class AllocationResponse(BaseModel):
       registry row). ``amount_usd`` is the loan drawn against the collateral and
       ``latest_activity_at`` is the snapshot time — surfaced verbatim even when
       the upstream feed is frozen, so staleness is visible rather than hidden.
+
+    ``chain_id`` therefore has three states, and 0 is not one of the other two:
+    an EVM chain id, 0 for off-chain custody, and null for a chain STL has no id
+    for (reference rows only, where ``network`` carries the upstream name).
     """
 
-    chain_id: int = Field(description="EVM chain id of the position.", examples=[1])
+    chain_id: int | None = Field(
+        description=(
+            "EVM chain id of the position. `0` for off-chain custody. `null` when the position "
+            "is on a chain STL has no id for, which only happens on reference rows — read "
+            "`network` for the label in that case."
+        ),
+        examples=[1],
+    )
+    network: str | None = Field(
+        default=None,
+        description=(
+            "The upstream feed's own name for the chain, e.g. `plume`. Populated on reference "
+            "rows only, and the sole label available when `chain_id` is `null`."
+        ),
+        examples=["ethereum"],
+    )
     receipt_token_id: int | None = Field(
         default=None,
         description="Surrogate id of the receipt token. `null` for direct asset holdings.",
@@ -658,17 +683,7 @@ async def list_protocols(service: AllocationService = Depends(_get_service)):
 )
 async def list_allocations(
     prime_id: ProxyAddressPathParam,
-    reference: bool = Query(
-        False,
-        description=(
-            "List the positions Sky's Star monitor reports for this prime instead of the ones STL "
-            "indexes on-chain. The row shape is unchanged, but every row is prime-scoped "
-            '(`scope="prime"`) because the monitor reports per prime, not per proxy — so a client '
-            "fanning out across a prime's proxies must dedupe rather than sum. `balance` is `null` "
-            "throughout: the monitor reports USD exposure only. Returns `404` when the monitor does "
-            "not track the prime and `502` when it cannot be read."
-        ),
-    ),
+    requested_provenance: Provenance | None = Depends(get_requested_provenance),
     service: AllocationService = Depends(_get_service),
     reference_services: Callable[[], ReferenceRiskCapitalService] = Depends(get_reference_risk_capital_service_factory),
 ):
@@ -694,7 +709,9 @@ async def list_allocations(
     if not await service.prime_exists(prime_address):
         raise HTTPException(status_code=404, detail="Prime not found")
 
-    if reference:
+    source = resolve_or_422(requested_provenance, available=INDEXED_OR_REFERENCE, default=Provenance.INDEXED)
+
+    if source is Provenance.REFERENCE:
         return await _reference_allocations(prime_address, reference_services())
 
     custody_applies = await _custody_applies(prime_address, service)
@@ -753,9 +770,6 @@ async def _reference_allocations(
                 detail="The upstream Star monitor does not track this prime, so it reports no allocations",
             )
 
-        # The projection stays inside the guard: _reference_allocation_row
-        # raises ReferenceDataUnavailableError for an unmappable network, which
-        # is still an upstream-data problem (502), not a server fault (500).
         category_service = AllocationCategoryService()
         return [_reference_allocation_row(row, category_service) for row in snapshot.per_allocation]
     except ReferenceDataUnavailableError as exc:
@@ -765,17 +779,15 @@ async def _reference_allocations(
 def _reference_allocation_row(
     row: ReferenceAllocation, category_service: AllocationCategoryService
 ) -> AllocationResponse:
-    """Project an upstream position onto the allocation model."""
-    if row.chain_id is None:
-        # 0 is this endpoint's off-chain-custody sentinel, so a network STL
-        # cannot map has no representable id: serving one would file an EVM
-        # position as custodied BTC.
-        raise ReferenceDataUnavailableError(
-            f"Star monitor reported a position on network {row.network!r}, which maps to no known chain"
-        )
+    """Project an upstream position onto the allocation model.
 
+    A network STL has no chain id for yields a null ``chain_id``, with
+    ``network`` naming it: upstream adds chains before STL indexes them, and 0
+    is not available, since it already means off-chain custody.
+    """
     return AllocationResponse(
         chain_id=row.chain_id,
+        network=row.network,
         receipt_token_id=row.receipt_token_id,
         receipt_token_address=row.token_address if as_address(row.token_address) else None,
         # Both or neither, per the model's invariant. Upstream names the loan

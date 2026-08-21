@@ -167,14 +167,66 @@ def test_reference_mode_returns_502_when_the_monitor_cannot_be_read(reference_cl
 
 @pytest.mark.parametrize(
     "reference_client",
-    [_snapshot(_reference_allocation(network="solana", chain_id=None, chain=None))],
+    [_snapshot(_reference_allocation(network="plume", chain_id=None, chain=None))],
     indirect=True,
 )
-def test_reference_mode_returns_502_when_a_position_sits_on_an_unmappable_network(reference_client):
-    # The projection raises the same upstream-data error as the fetch, so it has
-    # to be reported as a bad upstream payload rather than a server fault.
+def test_reference_mode_serves_a_position_on_a_chain_it_has_no_id_for(reference_client):
+    # Upstream adds chains before STL indexes them. Failing the list would cost
+    # the prime every other position it holds -- grove loses 13 rows to 2.
     client, _ = reference_client
 
     response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations?reference=true")
 
-    assert response.status_code == 502
+    assert response.status_code == 200
+    [row] = response.json()
+    assert row["chain_id"] is None
+    assert row["network"] == "plume"
+
+
+@pytest.mark.parametrize(
+    "reference_client",
+    [
+        _snapshot(
+            _reference_allocation(network="plume", chain_id=None, chain=None),
+            _reference_allocation(network="ethereum", chain_id=1, chain="mainnet"),
+        )
+    ],
+    indirect=True,
+)
+def test_reference_mode_keeps_the_mappable_rows_alongside_the_unmapped_one(reference_client):
+    client, _ = reference_client
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations?reference=true")
+
+    assert response.status_code == 200
+    assert [(row["chain_id"], row["network"]) for row in response.json()] == [
+        (None, "plume"),
+        (1, "ethereum"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "reference_client",
+    [_snapshot(_reference_allocation(network="ethereum", chain_id=1, chain="mainnet"))],
+    indirect=True,
+)
+def test_source_reference_lists_the_monitor_positions(reference_client):
+    client, _ = reference_client
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations?source=reference")
+
+    assert response.status_code == 200
+    assert [row["scope"] for row in response.json()] == ["prime"]
+
+
+@pytest.mark.parametrize(
+    "reference_client",
+    [_snapshot(_reference_allocation(network="ethereum", chain_id=1, chain="mainnet"))],
+    indirect=True,
+)
+def test_rejects_both_until_the_union_exists(reference_client):
+    client, _ = reference_client
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations?source=both")
+
+    assert response.status_code == 422
