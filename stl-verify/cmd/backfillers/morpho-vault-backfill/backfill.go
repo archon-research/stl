@@ -279,8 +279,9 @@ func discoverActivityOptions() workflow.ActivityOptions {
 
 		// Total time for the phase INCLUDING retries. An attempt has nothing to
 		// resume into (the scan keeps no progress state), so this envelope allows
-		// one full redo and no more.
-		ScheduleToCloseTimeout: 48 * time.Hour,
+		// one full redo and no more: twice StartToClose, so the redo still exists
+		// for an attempt that burned the whole ceiling above.
+		ScheduleToCloseTimeout: 60 * time.Hour,
 
 		HeartbeatTimeout: heartbeatTimeoutFactor * heartbeatInterval,
 

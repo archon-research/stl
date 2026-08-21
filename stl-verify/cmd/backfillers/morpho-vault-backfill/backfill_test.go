@@ -577,8 +577,11 @@ func TestDiscoverActivityOptions_TimeoutsCoverTheWidestAcceptedRange(t *testing.
 		t.Errorf("StartToCloseTimeout = %s, want at least %s (%d partitions x %s)",
 			opts.StartToCloseTimeout, widestScan, maxPartitionsPerRun, discoveryScanPerPartition)
 	}
-	if opts.ScheduleToCloseTimeout <= opts.StartToCloseTimeout {
-		t.Errorf("ScheduleToCloseTimeout = %s, want more than the %s a single attempt may take",
+	// The envelope's claim is "one full redo", so an attempt that burns the whole
+	// StartToClose ceiling must still leave room for a second one — the case the
+	// widest accepted range is precisely about.
+	if opts.ScheduleToCloseTimeout < 2*opts.StartToCloseTimeout {
+		t.Errorf("ScheduleToCloseTimeout = %s, want at least twice the %s a single attempt may take",
 			opts.ScheduleToCloseTimeout, opts.StartToCloseTimeout)
 	}
 }
