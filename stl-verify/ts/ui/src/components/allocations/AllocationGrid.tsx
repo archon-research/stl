@@ -758,16 +758,6 @@ export function AllocationGrid({
     riskCapital?.prime_encumbrance_ratio,
   );
   const encumbranceBreach = encumbranceSeverity(encumbranceRatio);
-  // Counted from the same conditions the cards below render under, so a card
-  // that does not appear does not leave a column reserved for it.
-  const visibleMetricCardCount = [
-    summary !== null,
-    riskCapital !== null,
-    riskCapital !== null,
-    selectedPrime !== null,
-    riskCapital !== null,
-    selectedPrime !== null,
-  ].filter(Boolean).length;
   const unservedChains = riskCapital?.prime_unserved_chains ?? [];
   // Absence has a cause worth naming: the ratio is required-over-total risk
   // capital, so it cannot be computed without a total. And where chains go
@@ -930,13 +920,13 @@ export function AllocationGrid({
         <PrimeMetricsBand
           isSkeleton={showTopMetricsSkeleton}
           hasTopMetrics={hasTopMetrics}
-          visibleCardCount={visibleMetricCardCount}
           summary={summary}
           overallSummary={overallSummary}
           hasSearchQuery={hasSearchQuery}
           riskCapital={riskCapital}
           capitalObservedAt={capitalObservedAt}
           riskCapitalErrorMessage={riskCapitalErrorMessage}
+          summaryErrorMessage={errorMessage}
           hasPrime={selectedPrime !== null}
           collateral={{
             usd: primeCollateralUsd,

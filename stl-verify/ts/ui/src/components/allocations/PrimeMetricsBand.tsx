@@ -1,3 +1,5 @@
+import type { ReactNode } from 'react';
+
 import { css } from '#styled-system/css';
 
 import {
@@ -43,7 +45,6 @@ type BandCharts = {
 type PrimeMetricsBandProps = {
   isSkeleton: boolean;
   hasTopMetrics: boolean;
-  visibleCardCount: number;
   summary: AllocationTotals | null;
   overallSummary: AllocationTotals | null;
   hasSearchQuery: boolean;
@@ -51,6 +52,7 @@ type PrimeMetricsBandProps = {
   // Shared by exposure, total risk capital and encumbrance.
   capitalObservedAt: string | null;
   riskCapitalErrorMessage: string | null;
+  summaryErrorMessage: string | null;
   hasPrime: boolean;
   collateral: {
     usd: number | null;
@@ -74,12 +76,38 @@ type PrimeMetricsBandProps = {
 
 const captionClassName = css({ fontSize: 'sm', color: 'text.muted' });
 
-// The cards a single risk-capital response feeds, in the order they appear.
-const RISK_CAPITAL_CARDS: TopMetricCard[] = [
-  'exposure',
-  'total-risk-capital',
-  'encumbrance',
-];
+/**
+ * One metric's cell, whatever state it is in.
+ *
+ * The grid is always the full set of cards: a missing cell shifted every one
+ * after it, so a card that cannot render holds its place as an error or a
+ * placeholder instead of disappearing.
+ */
+function MetricCardCell({
+  card,
+  rendered,
+  errorMessage,
+}: {
+  card: TopMetricCard;
+  rendered: ReactNode;
+  errorMessage: string | null;
+}) {
+  if (rendered !== null) {
+    return rendered;
+  }
+
+  const label = TOP_METRIC_CARD_LABELS[card];
+  return errorMessage === null ? (
+    <MetricCardSkeleton label={label} />
+  ) : (
+    <MetricCardError
+      label={label}
+      title={`${label} is unavailable`}
+      description="Change the time range to retry."
+      errorMessage={errorMessage}
+    />
+  );
+}
 
 // chartsErrorMessage tracks the primary (prime-debt) series only; every
 // supplementary card degrades to its own fallback instead of reporting an error
@@ -376,13 +404,13 @@ function PrimeDebtCard({
 export function PrimeMetricsBand({
   isSkeleton,
   hasTopMetrics,
-  visibleCardCount,
   summary,
   overallSummary,
   hasSearchQuery,
   riskCapital,
   capitalObservedAt,
   riskCapitalErrorMessage,
+  summaryErrorMessage,
   hasPrime,
   collateral,
   encumbrance,
@@ -411,12 +439,20 @@ export function PrimeMetricsBand({
     return null;
   }
 
-  return (
-    <div
-      className={metricsGridClassName}
-      style={metricsGridStyle(visibleCardCount)}
-    >
-      {summary ? (
+  // Which fetch explains a card being absent. A card with no data and no
+  // explanation is still loading, not failed.
+  const CARD_ERROR_SOURCE: Record<TopMetricCard, string | null> = {
+    'total-allocation': summaryErrorMessage,
+    exposure: riskCapitalErrorMessage,
+    'total-risk-capital': riskCapitalErrorMessage,
+    'prime-collateral': null,
+    encumbrance: riskCapitalErrorMessage,
+    'prime-debt': null,
+  };
+
+  const renderedCards: Record<TopMetricCard, ReactNode> = {
+    'total-allocation':
+      summary === null ? null : (
         <TotalAllocationCard
           summary={summary}
           overallSummary={overallSummary}
@@ -424,52 +460,36 @@ export function PrimeMetricsBand({
           chart={charts.activity}
           isChartsLoading={isChartsLoading}
         />
-      ) : null}
-
-      {riskCapital ? (
+      ),
+    exposure:
+      riskCapital === null ? null : (
         <ExposureCard
           riskCapital={riskCapital}
           observedAt={capitalObservedAt}
           chart={charts.exposure}
           isChartsLoading={isChartsLoading}
         />
-      ) : null}
-
-      {/* One box per card risk capital feeds, each the size of the card it
-          stands in for: a single box left the row ragged and every cell after it
-          shifted when a retry succeeded. */}
-      {!riskCapital && riskCapitalErrorMessage
-        ? RISK_CAPITAL_CARDS.map((card) => (
-            <MetricCardError
-              key={`metrics-error-${card}`}
-              label={TOP_METRIC_CARD_LABELS[card]}
-              title="Risk capital is unavailable"
-              description="Change the time range to retry."
-              errorMessage={riskCapitalErrorMessage}
-            />
-          ))
-        : null}
-
-      {riskCapital ? (
+      ),
+    'total-risk-capital':
+      riskCapital === null ? null : (
         <TotalRiskCapitalCard
           riskCapital={riskCapital}
           observedAt={capitalObservedAt}
           chart={charts.totalCapital}
           isChartsLoading={isChartsLoading}
         />
-      ) : null}
-
-      {hasPrime ? (
-        <PrimeCollateralCard
-          usd={collateral.usd}
-          observedAt={collateral.observedAt}
-          isLoading={collateral.isLoading}
-          chart={charts.collateral}
-          isChartsLoading={isChartsLoading}
-        />
-      ) : null}
-
-      {riskCapital ? (
+      ),
+    'prime-collateral': !hasPrime ? null : (
+      <PrimeCollateralCard
+        usd={collateral.usd}
+        observedAt={collateral.observedAt}
+        isLoading={collateral.isLoading}
+        chart={charts.collateral}
+        isChartsLoading={isChartsLoading}
+      />
+    ),
+    encumbrance:
+      riskCapital === null ? null : (
         <EncumbranceCard
           ratio={encumbrance.ratio}
           caption={encumbrance.caption}
@@ -477,18 +497,32 @@ export function PrimeMetricsBand({
           chart={charts.encumbrance}
           isChartsLoading={isChartsLoading}
         />
-      ) : null}
+      ),
+    'prime-debt': !hasPrime ? null : (
+      <PrimeDebtCard
+        wad={debt.wad}
+        ilkLabel={debt.ilkLabel}
+        isLoading={debt.isLoading}
+        chart={charts.debt}
+        isChartsLoading={isChartsLoading}
+        chartsErrorMessage={chartsErrorMessage}
+      />
+    ),
+  };
 
-      {hasPrime ? (
-        <PrimeDebtCard
-          wad={debt.wad}
-          ilkLabel={debt.ilkLabel}
-          isLoading={debt.isLoading}
-          chart={charts.debt}
-          isChartsLoading={isChartsLoading}
-          chartsErrorMessage={chartsErrorMessage}
+  return (
+    <div
+      className={metricsGridClassName}
+      style={metricsGridStyle(TOP_METRIC_CARDS.length)}
+    >
+      {TOP_METRIC_CARDS.map((card) => (
+        <MetricCardCell
+          key={`metric-card-${card}`}
+          card={card}
+          rendered={renderedCards[card]}
+          errorMessage={CARD_ERROR_SOURCE[card]}
         />
-      ) : null}
+      ))}
     </div>
   );
 }
