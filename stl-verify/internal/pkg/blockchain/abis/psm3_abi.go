@@ -46,6 +46,27 @@ func GetPSM3ABI() (*abi.ABI, error) {
           "outputs": [{"name": "", "type": "address"}],
           "stateMutability": "view",
           "type": "function"
+       },
+       {
+          "inputs": [{"name": "user", "type": "address"}],
+          "name": "shares",
+          "outputs": [{"name": "shares", "type": "uint256"}],
+          "stateMutability": "view",
+          "type": "function"
+       },
+       {
+          "inputs": [],
+          "name": "totalShares",
+          "outputs": [{"name": "", "type": "uint256"}],
+          "stateMutability": "view",
+          "type": "function"
+       },
+       {
+          "inputs": [{"name": "numShares", "type": "uint256"}],
+          "name": "convertToAssetValue",
+          "outputs": [{"name": "", "type": "uint256"}],
+          "stateMutability": "view",
+          "type": "function"
        }
     ]`)
 }

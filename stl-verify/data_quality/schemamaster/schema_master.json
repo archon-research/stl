@@ -70,6 +70,10 @@
       "type": "bytea",
       "class": "S"
     },
+    "alm_address": {
+      "type": "bytea",
+      "class": "S"
+    },
     "allocated_assets_usd": {
       "type": "numeric",
       "class": "S"
@@ -117,6 +121,10 @@
     },
     "asset_type": {
       "type": "text",
+      "class": "S"
+    },
+    "asset_value": {
+      "type": "numeric",
       "class": "S"
     },
     "asset_value_usd": {
@@ -1398,6 +1406,11 @@
       "type": "config",
       "owner": "pricing"
     },
+    "psm3_alm_shares": {
+      "type": "raw_pipeline",
+      "owner": "prime",
+      "transform_defer": "VEC-484: native PK, held back with psm3_reserves"
+    },
     "psm3_reserves": {
       "type": "raw_pipeline",
       "owner": "prime",
@@ -1986,6 +1999,7 @@
         "prime_capital_stack",
         "prime_debt",
         "prime_reference_balance_sheet",
+        "psm3_alm_shares",
         "psm3_reserves",
         "token_total_supply"
       ]
