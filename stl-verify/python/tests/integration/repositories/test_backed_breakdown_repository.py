@@ -9,7 +9,16 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.postgres.aave_like_backed_breakdown_repository import AaveLikeBackedBreakdownRepository
 from app.domain.entities.backed_breakdown import BackedBreakdown
-from tests.integration.seed import insert_oracle_asset, insert_token, insert_user, store_test_ids
+from tests.integration.seed import (
+    insert_borrower_collateral,
+    insert_borrower_debt,
+    insert_onchain_price,
+    insert_oracle_asset,
+    insert_reserve_data,
+    insert_token,
+    insert_user,
+    store_test_ids,
+)
 
 
 class ProtocolScopedBackedBreakdownRepository(Protocol):
@@ -36,36 +45,23 @@ async def _insert_price(
     *,
     time_offset: str = "0 seconds",
 ) -> None:
-    """Insert an onchain token price."""
-    await conn.execute(
-        f"""
-        INSERT INTO onchain_token_price
-            (token_id, oracle_id, block_number, block_version, timestamp, price_usd)
-        VALUES ($1, $2, $3, 0, NOW() + interval '{time_offset}', $4::numeric(30,18))
-        """,
-        token_id,
-        oracle_id,
-        block_number,
-        price,
+    """Insert an onchain token price (positional adapter over the shared seed helper)."""
+    await insert_onchain_price(
+        conn, token_id=token_id, oracle_id=oracle_id, price=price, block=block_number, time_offset=time_offset
     )
 
 
 async def _insert_reserve(
     conn: asyncpg.Connection, protocol_id: int, token_id: int, block_number: int, *, collateral_enabled: bool
 ) -> None:
-    """Insert a SparkLend reserve data row."""
-    await conn.execute(
-        """
-        INSERT INTO sparklend_reserve_data
-            (protocol_id, token_id, block_number, block_version,
-             usage_as_collateral_enabled, ltv)
-        VALUES ($1, $2, $3, 0, $4, $5)
-        """,
-        protocol_id,
-        token_id,
-        block_number,
-        collateral_enabled,
-        Decimal("8000") if collateral_enabled else Decimal("0"),
+    """Insert a SparkLend reserve data row, carrying this module's LTV convention."""
+    await insert_reserve_data(
+        conn,
+        protocol_id=protocol_id,
+        token_id=token_id,
+        block=block_number,
+        collateral_enabled=collateral_enabled,
+        ltv=Decimal("8000") if collateral_enabled else Decimal("0"),
     )
 
 
@@ -80,20 +76,14 @@ async def _insert_collateral(
     collateral_enabled: bool = True,
 ) -> None:
     """Insert a borrower collateral snapshot (raw wei amount)."""
-    await conn.execute(
-        """
-        INSERT INTO borrower_collateral
-            (user_id, protocol_id, token_id, block_number, block_version,
-             amount, change, event_type, tx_hash, collateral_enabled)
-        VALUES ($1, $2, $3, $4, 0, $5, $5, 'deposit', $6, $7)
-        """,
-        user_id,
-        protocol_id,
-        token_id,
-        block_number,
-        amount,
-        b"\x00" * 32,
-        collateral_enabled,
+    await insert_borrower_collateral(
+        conn,
+        protocol_id=protocol_id,
+        user_id=user_id,
+        token_id=token_id,
+        amount=amount,
+        block=block_number,
+        collateral_enabled=collateral_enabled,
     )
 
 
@@ -101,19 +91,8 @@ async def _insert_debt(
     conn: asyncpg.Connection, user_id: int, protocol_id: int, token_id: int, amount: int, block_number: int
 ) -> None:
     """Insert a borrower debt snapshot (raw wei amount)."""
-    await conn.execute(
-        """
-        INSERT INTO borrower
-            (user_id, protocol_id, token_id, block_number, block_version,
-             amount, change, event_type, tx_hash)
-        VALUES ($1, $2, $3, $4, 0, $5, $5, 'borrow', $6)
-        """,
-        user_id,
-        protocol_id,
-        token_id,
-        block_number,
-        amount,
-        b"\x00" * 32,
+    await insert_borrower_debt(
+        conn, protocol_id=protocol_id, user_id=user_id, token_id=token_id, amount=amount, block=block_number
     )
 
 

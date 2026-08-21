@@ -42,20 +42,29 @@ user_collateral AS (
 ),
 
 -- Step 3: Current USD price per token from the protocol's oracles.
--- The enabled oracle_asset mapping is re-checked here and not merely when the
--- price row was written, so retiring a source takes effect immediately (canonical
--- rationale, incl. the no-history tradeoff, on _DIRECT_ASSET_HOLDINGS_SQL in
--- allocation_position_repository.py).
+-- Same shape as before the *_current tables existed — which protocols an oracle
+-- serves and whether its mapping is enabled are resolved HERE, not when the price
+-- was written, so retiring a source takes effect immediately AND still falls back
+-- to the protocol's next enabled oracle (canonical rationale, incl. the no-history
+-- tradeoff, on _DIRECT_ASSET_HOLDINGS_SQL in allocation_position_repository.py).
+-- Only the FROM changed: token_price_current instead of the onchain_token_price
+-- hypertable, so the ranking runs over one row per (oracle, token) rather than all
+-- of history. oracle_id breaks any remaining same-snapshot-key tie deterministically
+-- (higher id = later-registered oracle).
 token_prices AS (
-    SELECT token_id, price_usd
-    FROM token_price_current
-    WHERE protocol_id = :protocol_id
+    SELECT DISTINCT ON (tpc.token_id)
+        tpc.token_id,
+        tpc.price_usd
+    FROM token_price_current tpc
+    JOIN protocol_oracle po ON po.oracle_id = tpc.oracle_id
+    WHERE po.protocol_id = :protocol_id
       AND EXISTS (
           SELECT 1 FROM oracle_asset oa
-          WHERE oa.oracle_id = token_price_current.oracle_id
-            AND oa.token_id = token_price_current.token_id
+          WHERE oa.oracle_id = tpc.oracle_id
+            AND oa.token_id = tpc.token_id
             AND oa.enabled
       )
+    ORDER BY tpc.token_id, tpc.block_number DESC, tpc.block_version DESC, tpc.processing_version DESC, tpc.oracle_id DESC
 ),
 
 -- Step 4: Per (user, backed asset) target debt, for each requested backed asset.
@@ -70,10 +79,15 @@ user_target_debt AS (
 ),
 
 -- Step 5: Collateral USD value per user per token. Collateral without a price is
--- excluded — it cannot contribute to USD-denominated backing. Deliberately NOT
--- pre-filtered to users with target debt: that subquery collapses the row estimate
--- to 1 and the planner picks a quadratic nested loop, and the join in step 6
--- restricts to the same users anyway.
+-- excluded — it cannot contribute to USD-denominated backing. Not pre-filtered to
+-- users with target debt (`WHERE uc.user_id IN (SELECT user_id FROM
+-- user_target_debt)`); the join in step 6 restricts to the same users anyway. That
+-- pre-filter was dropped because it collapsed the row estimate to 1 and the planner
+-- picked a quadratic nested loop — but that was measured against the compressed
+-- hypertable scan this query no longer does, so the reasoning no longer describes
+-- the plan. Whether to restore it is VEC-614: it needs an EXPLAIN ANALYZE per
+-- protocol at full scale, because without it the window sum in step 6 sorts every
+-- collateral row of the protocol (~164k keys for Aave V3 vs ~6k for SparkLend).
 user_collateral_usd AS (
     SELECT
         uc.user_id,
