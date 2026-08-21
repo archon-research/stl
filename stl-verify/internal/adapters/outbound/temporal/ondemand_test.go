@@ -164,11 +164,9 @@ func TestRegisterRunner_AppliesTheRegisteredRetryBudget(t *testing.T) {
 	}
 }
 
-// A progress store reaches Temporal only through the liveness ticker, which a
-// zero Heartbeat disables. Accepting that pair would give a job that looks
-// healthy and silently re-does its whole run on every retry — worse than
-// refusing to start.
-func TestRegisterRunner_RefusesAProgressStoreItCouldNeverSend(t *testing.T) {
+// A zero Heartbeat leaves the activity with no heartbeat timeout, so a worker
+// that dies holding a resume point is only noticed when StartToClose expires.
+func TestRegisterRunner_RefusesAResumableJobWithNoLivenessTicker(t *testing.T) {
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
 
 	err := RegisterRunner(env, RunnerJob{
