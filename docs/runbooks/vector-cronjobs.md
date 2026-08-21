@@ -360,6 +360,15 @@ completed prefix is what the query reports. Re-running the same range is always
 safe: every write is an idempotent append, so a repeat costs wall clock, not
 correctness.
 
+The query, the Result panel and each partition's `replayed partition` log line
+also carry `rowsAppended`, split per table. It is a different quantity from
+`eventsReplayed`: events counts the logs driven through the handler path, rows
+counts what they persisted, and the two diverge by design. Zero rows against a
+non-zero event count means every write deduped — expected when the same build has
+already replayed that range, and a defect otherwise (a fresh range, or a re-run
+from a NEW build, must append: that is what the VEC-218 compressed-chunk fix
+restored, and what this count is here to make visible).
+
 **Failure modes specific to this worker.**
 
 - `AccessDenied` listing or reading the raw bucket → the EKS Pod Identity
