@@ -7,9 +7,6 @@
 # resolves every `extends` path against the repo root regardless of which file
 # the entry appears in, so a path relative to this file silently matches nothing.
 
-# Use doublestar glob matcher for standard recursive behavior
-glob_matcher: doublestar
-
 # Excluded patterns for all commands unless overridden
 _exclude_dirs: &exclude_dirs 'db/**|k8s/**|docs/**|*.pb.go|vendor/**'
 

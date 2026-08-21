@@ -3,8 +3,9 @@
 # Install: make install-hooks or lefthook install
 # Run manually: lefthook run pre-commit
 
-# Use doublestar glob matcher for standard recursive behavior
-glob_matcher: doublestar
+# Globs are matched with gobwas/glob compiled without separators, so `*` spans
+# `/` and there is no distinct `**`. Write `dir/**.ext` to mean "any depth";
+# `dir/**/*.ext` silently skips files sitting directly in dir/.
 
 # Every `extends` path -- including those inside an extended file -- is resolved
 # against the repo root, so they all have to live here to be spelled correctly.
