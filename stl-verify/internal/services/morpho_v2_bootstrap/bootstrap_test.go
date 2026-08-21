@@ -473,6 +473,48 @@ func TestRun_SeedStopsAtOnceWhenTheRunIsCancelled(t *testing.T) {
 	}
 }
 
+// TestRun_SeedCancellationStillReportsTheFailuresAlreadyCollected: the vaults
+// that failed on their own before the cancellation are the run's only durable
+// record of them — Temporal shows the operator the returned error, not the log
+// lines. Dropping them there hides a hole behind a cancellation.
+func TestRun_SeedCancellationStillReportsTheFailuresAlreadyCollected(t *testing.T) {
+	h := newBootstrapHarness(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Sorted by address, thirdVaultAddr is seeded first and secondVaultAddr next.
+	replayer := &recordingReplayer{
+		v2Vaults: map[common.Address]int64{testVaultAddr: 0, secondVaultAddr: 0, thirdVaultAddr: 0},
+		seedErr: func(vault common.Address) error {
+			switch vault {
+			case thirdVaultAddr:
+				return errors.New("execution reverted")
+			case secondVaultAddr:
+				cancel()
+				return context.Canceled
+			}
+			return nil
+		},
+	}
+	service, err := NewService(h.config, h.chain, replayer, h.progress)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	h.chain.setFinalizedHead(24_000_000, 1_770_000_000)
+
+	err = service.Run(ctx)
+
+	if err == nil {
+		t.Fatal("expected a cancelled run to fail")
+	}
+	if !strings.Contains(err.Error(), thirdVaultAddr.Hex()) {
+		t.Errorf("error %q dropped the vault that failed before the cancellation", err)
+	}
+	if !strings.Contains(err.Error(), secondVaultAddr.Hex()) {
+		t.Errorf("error %q should still name the vault the cancellation interrupted", err)
+	}
+}
+
 // TestRun_ReplayedLogsArriveInChainOrder: the per-address-batch requests inside a
 // chunk return interleaved, and the service must restore (block, logIndex) order —
 // not for correctness (see sortLogs) but so a replay does not manufacture the
