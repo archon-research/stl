@@ -302,6 +302,9 @@ func listPartitionBlockKeys(
 	if err := requireCompletePartition(part, blocks, from, to); err != nil {
 		return nil, err
 	}
+	// The strongest guarantee this run makes deserves a positive trace: silence
+	// here would leave "the archive was verified complete" unobservable.
+	logger.Info("partition archive complete", "partition", part, "blocks", len(blocks))
 	return keys, nil
 }
 

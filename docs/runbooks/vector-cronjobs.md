@@ -409,9 +409,11 @@ temporal workflow start --namespace vector \
 `eth_getLogs` from the VaultV2 factory deploy block to a pinned finalized block
 for the 10 VaultV2 governance events, replay each through the live handler path,
 then enumerate every V2 vault's current adapter set and snapshot each adapter's
-`realAssets()`. A full mainnet sweep runs for hours, which is why the activity is
-bounded at 6h `StartToClose` / 12h `ScheduleToClose` with 3 attempts and a
-60 s heartbeat — all compiled into the worker, so an operator supplies none of it.
+`realAssets()`. A full mainnet sweep measures in **minutes** on today's V2 era
+(~15m end to end, measured 2026-08) — the 6h `StartToClose` / 12h `ScheduleToClose`
+bounds (3 attempts, 60 s heartbeat) are headroom for era growth and provider
+slowness, all compiled into the worker, so an operator supplies none of it. A run
+still going after an hour is a stall signal, not normal.
 Unlike the backfill, progress lives in the activity's heartbeat details rather
 than in workflow history; see the resume note at the top of this runbook.
 

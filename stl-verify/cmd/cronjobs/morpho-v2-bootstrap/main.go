@@ -25,18 +25,21 @@
 //	  --workflow-id morpho-v2-bootstrap-<date>
 //
 // The workflow ID is the concurrency guard: Temporal rejects a duplicate while a
-// run with that ID is in flight. The run takes hours (a full mainnet log sweep),
-// which is why the activity timeouts below are far larger than the shared
-// cronjob defaults.
+// run with that ID is in flight. A full mainnet sweep measures in minutes on
+// today's V2 era (~15m end to end, 2026-08); the activity timeouts below are
+// sized as headroom for era growth and provider slowness, not as an estimate.
 //
 // # Idempotency
 //
 // Every write goes through the same idempotent repository methods live indexing
 // uses (append-only membership observations keyed on their own block position,
 // ON CONFLICT DO NOTHING snapshots), so starting a second run is safe — it
-// redoes the work and reaches the same state. The head seed in particular is an
-// assertion, so a repeat run whose answer already matches the log writes nothing
-// at all.
+// redoes the work and reaches the same state. Same-build re-runs write nothing;
+// a re-run from a NEW build re-records the replayed history as parallel
+// provenance rows (processing_version keys on build_id), so row counts and the
+// V2 volume alerts move even though the answer does not. The head seed is an
+// assertion either way: when its answer already matches the log it writes
+// nothing, on any build.
 //
 // # Resuming an interrupted run
 //
