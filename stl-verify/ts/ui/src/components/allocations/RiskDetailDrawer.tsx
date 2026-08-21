@@ -200,10 +200,7 @@ export function RiskDetailDrawer({
           right: 0,
           bottom: 0,
           bg: 'surface.default',
-          // `overlay`, not `2xl`: the latter has no dark override, so in dark
-          // theme the drawer had no elevation cue against the page beyond the
-          // backdrop scrim.
-          boxShadow: 'overlay',
+          boxShadow: '2xl',
           transform: isOpen ? 'translateX(0)' : 'translateX(100%)',
           transitionDuration: 'normal',
           transitionProperty: 'transform',

@@ -10,8 +10,8 @@
   },
   "scripts": {
     "prepare": "panda codegen",
-    "dev": "vite",
-    "build": "vite build",
+    "dev": "node scripts/copy-theme-bootstrap.mjs && vite",
+    "build": "node scripts/copy-theme-bootstrap.mjs && vite build",
     "type:check": "tsc -b",
     "format": "uikit-cli format --write \"src/**/*.ts\" \"src/**/*.tsx\" panda.config.ts vite.config.ts env.ts",
     "format:check": "uikit-cli format --check \"src/**/*.ts\" \"src/**/*.tsx\" panda.config.ts vite.config.ts env.ts",
@@ -25,10 +25,11 @@
     "doctor": "uikit-cli doctor --codegen"
   },
   "dependencies": {
-    "@archon-research/charting": "0.9.0",
-    "@archon-research/design-system": "0.9.0",
-    "@archon-research/http-client-core": "0.9.0",
-    "@archon-research/http-client-react": "0.9.0",
+    "@archon-research/charting": "0.10.0-rohit-pre-release-consumer-fixes.1",
+    "@archon-research/design-system": "0.10.0-rohit-pre-release-consumer-fixes.1",
+    "@archon-research/http-client-core": "0.10.0-rohit-pre-release-consumer-fixes.1",
+    "@archon-research/http-client-react": "0.10.0-rohit-pre-release-consumer-fixes.1",
+    "@archon-research/router-kit": "0.10.0-rohit-pre-release-consumer-fixes.1",
     "@tanstack/react-router": "1.170.25",
     "lucide-react": "1.28.0",
     "react": "19.2.8",
@@ -38,9 +39,9 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
-    "@archon-research/oxfmt-config": "0.9.0",
-    "@archon-research/oxlint-config": "0.9.0",
-    "@archon-research/tsconfig": "0.9.0",
+    "@archon-research/oxfmt-config": "0.10.0-rohit-pre-release-consumer-fixes.1",
+    "@archon-research/oxlint-config": "0.10.0-rohit-pre-release-consumer-fixes.1",
+    "@archon-research/tsconfig": "0.10.0-rohit-pre-release-consumer-fixes.1",
     "@pandacss/dev": "1.12.0",
     "@types/node": "26.1.2",
     "@types/react": "19.2.18",

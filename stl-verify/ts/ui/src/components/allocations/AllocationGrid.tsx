@@ -5,6 +5,7 @@ import {
   EmptyState,
   ErrorState,
   SearchInput,
+  type SkeletonColumnHint,
   type SortingState,
   useDataTable,
 } from '@archon-research/design-system';
@@ -709,6 +710,20 @@ export function AllocationGrid({
     [chainLabels, localProtocols, riskByReceiptTokenId, selectedPrime],
   );
 
+  // Explicit hints replace DataTable's meta-derived ones wholesale, so they are
+  // read off the same column defs rather than restated: only the leading Asset
+  // cell needs a shape `meta` cannot express (a symbol over its protocol line).
+  const skeletonColumnHints = useMemo<SkeletonColumnHint[]>(
+    () =>
+      columns.map((column, index) => {
+        if (index === 0) return { kind: 'identity' };
+        return column.meta?.align === 'right'
+          ? { kind: 'numeric' }
+          : { kind: 'text' };
+      }),
+    [columns],
+  );
+
   const table = useDataTable(filteredAllocations, columns, {
     enableSorting: true,
     onSortingChange,
@@ -1075,7 +1090,8 @@ export function AllocationGrid({
               // Six nowrap columns push min-content well past this, so it binds
               // only on the loading skeleton, which has no intrinsic width.
               minWidth="48rem"
-              skeletonConfig={{ rows: 8, firstColumnTall: true }}
+              // No `firstColumnTall`: the identity hint owns that cell's height.
+              skeletonConfig={{ rows: 8, columnHints: skeletonColumnHints }}
             />
           </div>
         ) : null}

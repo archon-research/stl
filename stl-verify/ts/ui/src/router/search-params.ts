@@ -2,6 +2,11 @@ import {
   isRangePreset,
   type RangePreset,
 } from '@archon-research/design-system';
+import {
+  oneOfParam,
+  textParam,
+  toSearchText,
+} from '@archon-research/router-kit';
 import { z } from 'zod';
 
 import type { AllocationCategory } from '../types/allocation';
@@ -20,40 +25,6 @@ export const ACTIVITY_ACTIONS = ['in', 'out', 'sweep'] as const;
 
 export type DrawerTab = (typeof DRAWER_TABS)[number];
 export type ActivityAction = (typeof ACTIVITY_ACTIONS)[number];
-
-// The router's query decoder coerces numeric and boolean spellings before any
-// parser runs, so `?network=1` arrives as the number 1; unusable values go absent.
-function toSearchText(value: unknown): string | undefined {
-  if (typeof value === 'number' || typeof value === 'boolean') {
-    return String(value);
-  }
-  if (typeof value === 'string' && value !== '') {
-    return value;
-  }
-  return undefined;
-}
-
-/**
- * Narrows a URL value (or a raw control value) to a closed option set. Shared by
- * the schemas below and by the change handlers that write back into them.
- */
-export function toSearchOption<T extends string>(
-  value: unknown,
-  allowed: readonly T[],
-): T | undefined {
-  const text = toSearchText(value);
-  return allowed.includes(text as T) ? (text as T) : undefined;
-}
-
-function textParam() {
-  return z.optional(z.unknown().transform(toSearchText));
-}
-
-function oneOfParam<T extends string>(allowed: readonly T[]) {
-  return z.optional(
-    z.unknown().transform((value) => toSearchOption(value, allowed)),
-  );
-}
 
 // `custom` is not a preset in the URL: a usable from/to pair is what marks a
 // custom range, so the selection can never outlive the bounds it needs.

@@ -1,4 +1,8 @@
 import {
+  createSearchParamStripper,
+  createValidatedSearchRedirect,
+} from '@archon-research/router-kit';
+import {
   createRootRoute,
   createRoute,
   createRouter,
@@ -20,54 +24,12 @@ import {
 const parseSearch = parseSearchWith((value: string) => value);
 const stringifySearch = stringifySearchWith(JSON.stringify);
 
-type SearchRecord = Record<string, unknown>;
-
-type SearchCleanupContext = {
-  location: { pathname: string; hash: string; search: unknown };
-  matches: ReadonlyArray<{ _strictSearch: unknown }>;
-};
-
-function toSearchRecord(value: unknown): SearchRecord {
-  return typeof value === 'object' && value !== null
-    ? (value as SearchRecord)
-    : {};
-}
-
-// Compared as URL text and without regard to order: `?network=1` parses to the
-// number 1 while the schema yields "1", and a reordering renders the same data.
-function rendersSameSearch(raw: SearchRecord, applied: SearchRecord): boolean {
-  const appliedEntries = Object.entries(applied).filter(
-    ([, value]) => value !== undefined,
-  );
-
-  return (
-    appliedEntries.length === Object.keys(raw).length &&
-    appliedEntries.every(([key, value]) => String(raw[key]) === String(value))
-  );
-}
-
-// The schemas drop values they cannot honour, but the address bar keeps them, so
-// `?range=90D` reads as 90 days of data next to a chart showing the default.
-function redirectToValidatedSearch({
-  location,
-  matches,
-}: SearchCleanupContext): void {
-  // The leaf's own validated view is the whole applied set: each route's
-  // `_strictSearch` already folds in every parent schema.
-  // eslint-disable-next-line no-underscore-dangle -- the router names the field
-  const applied = toSearchRecord(matches[matches.length - 1]?._strictSearch);
-
-  if (rendersSameSearch(toSearchRecord(location.search), applied)) {
-    return;
-  }
-
-  const hash = location.hash ? `#${location.hash}` : '';
-
-  throw redirect({
-    href: `${location.pathname}${stringifySearch(applied)}${hash}`,
-    replace: true,
-  });
-}
+// Reached through an arrow below, not passed as `beforeLoad`: an explicitly
+// typed `beforeLoad` param collapses the root route's inference, which leaves
+// every `navigate` search callback an implicit `any`.
+const redirectToValidatedSearch = createValidatedSearchRedirect({
+  stringifySearch,
+});
 
 const rootRoute = createRootRoute({
   validateSearch: sharedSearchSchema,
@@ -141,18 +103,7 @@ const allocationIndexRoute = createRoute({
 const allocationPrimeRoute = createRoute({
   getParentRoute: () => allocationRoute,
   path: '$primeId',
-  beforeLoad: ({ params, search }) => {
-    if (!search.prime) {
-      return;
-    }
-
-    throw redirect({
-      to: '/allocation/$primeId',
-      params,
-      search: withoutLegacyPrime(search),
-      replace: true,
-    });
-  },
+  beforeLoad: createSearchParamStripper('prime', { stringifySearch }),
 });
 
 const activitiesRoute = createRoute({

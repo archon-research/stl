@@ -1,7 +1,8 @@
 import { useUrlSyncedTableStateAdapter } from '@archon-research/design-system';
 import type { UseUrlSyncedTableReturn } from '@archon-research/design-system';
+import { createUrlSyncedTableAdapter } from '@archon-research/router-kit';
 import { useNavigate, useSearch } from '@tanstack/react-router';
-import { useCallback, useMemo } from 'react';
+import { useMemo } from 'react';
 
 /**
  * Syncs TanStack table state (sorting, global search) with the allocation
@@ -21,42 +22,18 @@ export function useUrlSyncedTableState(): UseUrlSyncedTableReturn {
   const search = useSearch({ from: '/allocation', shouldThrow: false });
   const navigate = useNavigate();
 
-  const setSortParam = useCallback(
-    (value: string | null) => {
-      void navigate({
-        to: '.',
-        search: (previous) => ({ ...previous, sort: value ?? undefined }),
-        replace: true,
-      });
-    },
-    [navigate],
-  );
-
-  const setSearchParam = useCallback(
-    (value: string | null) => {
-      void navigate({
-        to: '.',
-        search: (previous) => ({ ...previous, q: value ?? undefined }),
-        replace: true,
-      });
-    },
-    [navigate],
-  );
-
-  // The adapter identity is load-bearing: `useUrlSyncedTableStateAdapter`
-  // memoises the setters it returns on this object, so a fresh literal per
-  // render makes `setGlobalFilter` a new reference every time. That reference is
-  // a dependency of AllocationGrid's 300ms search debounce, which would then be
-  // torn down and re-armed on every unrelated re-render (a resolving fetch, a
-  // URL param change) and never commit the search to the URL under a burst.
+  // Keyed on the two params, not on the whole search object the factory's own
+  // example memoises on: that identity changes with any param, and a fresh
+  // adapter re-arms AllocationGrid's 300ms search debounce on every one.
   const adapter = useMemo(
-    () => ({
-      sortParam: search?.sort ?? null,
-      setSortParam,
-      searchParam: search?.q ?? null,
-      setSearchParam,
-    }),
-    [search?.q, search?.sort, setSearchParam, setSortParam],
+    () =>
+      createUrlSyncedTableAdapter({
+        search: { sort: search?.sort, q: search?.q },
+        sortKey: 'sort',
+        searchKey: 'q',
+        navigate,
+      }),
+    [search?.q, search?.sort, navigate],
   );
 
   return useUrlSyncedTableStateAdapter(adapter);

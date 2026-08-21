@@ -4,6 +4,7 @@ import {
   SidebarLayout,
   type SortingState,
 } from '@archon-research/design-system';
+import { toSearchOption } from '@archon-research/router-kit';
 import {
   useMatchRoute,
   useNavigate,
@@ -76,11 +77,7 @@ import {
 import { isAbortError, toErrorMessage } from './lib/errors';
 import { logging } from './lib/logging';
 import { REFERENCE_MODE } from './lib/referenceMode';
-import {
-  ACTIVITY_ACTIONS,
-  type AppSearchPatch,
-  toSearchOption,
-} from './router/search-params';
+import { ACTIVITY_ACTIONS, type AppSearchPatch } from './router/search-params';
 import type {
   Allocation,
   DataSource,
@@ -935,9 +932,9 @@ function App() {
       riskCapital?.prime_encumbrance_ratio,
     );
 
-    // One ordinal series token per card, and deliberately no `var(..., fallback)`:
-    // a fallback lets a wrong or missing token render as a plausible colour, which
-    // is how two of these cards came to name the same token unnoticed.
+    // One ordinal series token per card, named rather than written out as a
+    // `var()` read: the token type is what catches a typo (and a repeat of the
+    // collision where two of these cards named the same token unnoticed).
     const charts: MetricChartSpec[] = [
       {
         // Balance reconstructed from signed USD net flows, anchored at the
@@ -946,7 +943,7 @@ function App() {
         key: 'allocation-activity-volume',
         data: allocationBalanceSeries,
         kind: 'series',
-        stroke: 'var(--colors-chart-series-primary)',
+        stroke: 'chart.series.primary',
         formatValue: formatCompactUsd,
       },
       {
@@ -954,31 +951,31 @@ function App() {
         // back to the flat current value when no history is available.
         key: 'risk-capital',
         ...seriesOrFallback(exposureSeries, exposureValue),
-        stroke: 'var(--colors-chart-series-secondary)',
+        stroke: 'chart.series.secondary',
         formatValue: formatCompactUsd,
       },
       {
         key: 'total-capital',
         ...seriesOrFallback(totalCapitalSeries, totalRiskCapitalValue),
-        stroke: 'var(--colors-chart-series-quaternary)',
+        stroke: 'chart.series.quaternary',
         formatValue: formatCompactUsd,
       },
       {
         key: 'prime-debt-exposure',
         ...seriesOrFallback(primeDebtSeries, primeDebtValue),
-        stroke: 'var(--colors-chart-series-quinary)',
+        stroke: 'chart.series.quinary',
         formatValue: (value: number) => `${formatCompactNumber(value)} DAI`,
       },
       {
         key: 'prime-collateral',
         ...seriesOrFallback(collateralSeries, primeCollateralValue),
-        stroke: 'var(--colors-chart-series-tertiary)',
+        stroke: 'chart.series.tertiary',
         formatValue: formatCompactUsd,
       },
       {
         key: 'encumbrance-ratio',
         ...seriesOrFallback(encumbranceSeries, encumbranceValue),
-        stroke: 'var(--colors-chart-series-critical)',
+        stroke: 'chart.series.critical',
         formatValue: formatRatioPercent,
         thresholds: [
           {
