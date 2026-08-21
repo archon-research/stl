@@ -5,8 +5,8 @@
 -- and no fan-out: one raw morpho_vault_position row is one position. instrument_key = the vault's
 -- contract address (the VEC-412 bridge form for an ERC-4626 vault); holder_id = the on-chain user
 -- address; quantity = assets (underlying-denominated deposit). deal_type = LOAN (a vault deposit lends
--- to the underlying markets and earns yield) — a classification attribute in position_classification,
--- not part of the id.
+-- to the underlying markets and earns yield) — a classification attribute of the INSTRUMENT, resolved
+-- instrument-side and never part of the id. The spine stores observations only.
 --
 -- Two data facts drive the projection (verified live 2026-07-24; closure re-verified 2026-07-28):
 --   * 164 (user,vault,block_number,block_version) groups carry a second row — reprocessing, not a
@@ -57,16 +57,19 @@ SELECT position_id(chain_id, protocol_id, instrument_key, holder_id) AS position
 FROM series
 WHERE quantity > 0 OR prev_qty > 0;
 
-COMMENT ON VIEW position_morpho_vault IS '[Operational] VEC-403 projection: Morpho vault positions as native position rows (one per vault deposit; instrument_key = vault contract address). Emits the shared position_state column contract consumed by materialize_position_projection(); one row per (position_id, observation), including one closing zero-quantity row on a real exit (VEC-409 closure).';
+COMMENT ON VIEW position_morpho_vault IS '[Operational] VEC-403 projection: Morpho vault positions as native position rows (one per vault deposit; instrument_key = vault contract address). Emits the shared position_state column contract consumed by materialize_position_projection(); one row per (position_id, observation), including one closing zero-quantity row on a real exit (VEC-409 closure). deal_type_code is part of the contract and is validated, but the spine does not store it.';
 
--- Populate the spine + current classification via the shared materializer (defined with position_state,
--- VEC-402 spine). The projection view above holds all the Morpho-vault-specific logic; the identical
--- upsert plumbing is not duplicated here. Idempotent; run out of band; returns position_state rows written.
-CREATE OR REPLACE FUNCTION materialize_morpho_vault() RETURNS bigint
+-- Append the observations via the shared materializer (defined with the position_state spine, VEC-402).
+-- The projection view above holds all the Morpho-vault-specific logic; the identical plumbing --
+-- contract validation, the temp snapshot, the four checks, the append -- is not duplicated here.
+-- p_build_id is the ADR-0002 code-provenance record stamped on every appended row; the scheduled
+-- runner passes the build_registry id it resolved, and 0 means pre-tracking. Idempotent; run out of
+-- band; returns position_state rows appended.
+CREATE OR REPLACE FUNCTION materialize_morpho_vault(p_build_id integer DEFAULT 0) RETURNS bigint
     LANGUAGE sql AS $fn$
-    SELECT materialize_position_projection('position_morpho_vault'::regclass, 'VEC-403: morpho_vault materializer');
+    SELECT materialize_position_projection('position_morpho_vault'::regclass, p_build_id);
 $fn$;
 
-COMMENT ON FUNCTION materialize_morpho_vault() IS '[Operational] VEC-403: materialize Morpho vault positions into position_state + position_classification, via materialize_position_projection(position_morpho_vault). Idempotent; run out of band. Returns position_state rows written.';
+COMMENT ON FUNCTION materialize_morpho_vault(integer) IS '[Operational] VEC-403: append Morpho vault position observations into position_state, via materialize_position_projection(position_morpho_vault). Observations only -- no classification is written; deal_type is an attribute of the instrument and is resolved instrument-side. p_build_id is stamped on every appended row (build_registry.id; 0 = pre-tracking). Idempotent; run out of band. Returns position_state rows appended.';
 
 INSERT INTO migrations (filename) VALUES ('20260819_130000_materialize_morpho_vault.sql') ON CONFLICT (filename) DO NOTHING;
