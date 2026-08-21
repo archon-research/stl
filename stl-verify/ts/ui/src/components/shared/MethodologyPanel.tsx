@@ -49,7 +49,7 @@ type MethodologyPanelProps = {
   onToggle: () => void;
   selectedTokenAddress?: string | null;
   selectedTokenSymbol?: string | null;
-  selectedChainId?: number;
+  selectedChainId?: number | null;
 };
 
 const METHODOLOGY_MARKDOWN = `## Internal Data (STL)

@@ -32,14 +32,18 @@ const PROTOCOL_SLUG_OVERRIDES: Record<string, string | null> = {
 };
 
 export function buildTokenLogoUrl(
-  _chainId: number,
+  _chainId: number | null,
   address: string | null | undefined,
 ): string | null {
   if (!address) return null;
   return `${ONE_INCH_TOKEN_CDN_BASE}/${address.toLowerCase()}.png`;
 }
 
-export function buildChainLogoUrl(chainId: number): string | null {
+export function buildChainLogoUrl(chainId: number | null): string | null {
+  if (chainId === null) {
+    return null;
+  }
+
   const slug = LLAMA_CHAIN_SLUGS[chainId];
   if (!slug) {
     return null;

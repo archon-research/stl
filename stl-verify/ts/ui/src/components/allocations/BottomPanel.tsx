@@ -214,9 +214,12 @@ export function BottomPanel({
                   prime: selectedPrime
                     ? getPrimeGroupKey(selectedPrime)
                     : undefined,
-                  network: focusedAllocation
-                    ? String(focusedAllocation.chain_id)
-                    : undefined,
+                  // Omitted rather than sent as a network key: the activities
+                  // view filters by chain id, and it has none for this row.
+                  network:
+                    focusedAllocation && focusedAllocation.chain_id !== null
+                      ? String(focusedAllocation.chain_id)
+                      : undefined,
                   token: focusedAllocation?.symbol ?? undefined,
                   aa: activityActionFilter || undefined,
                   allp: '0',

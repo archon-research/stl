@@ -22,7 +22,7 @@ import {
   SummaryMetric,
   TokenLogo,
 } from '../../shared';
-import { TabNotePanel } from './TabStatePanels';
+import { TabNotePanel, unindexedChainMessage } from './TabStatePanels';
 
 type RrcTabProps = {
   isEnabled: boolean;
@@ -144,6 +144,17 @@ export function RrcTab({
   if (!selectedReceiptToken) {
     return (
       <TabNotePanel message="Pick a receipt token to inspect required risk capital." />
+    );
+  }
+
+  if (selectedReceiptToken.chain_id === null) {
+    return (
+      <TabNotePanel
+        message={unindexedChainMessage(
+          selectedReceiptToken.network,
+          'required risk capital',
+        )}
+      />
     );
   }
 

@@ -5,7 +5,7 @@ import { LogoAvatar } from './LogoAvatar';
 
 type TokenLogoProps = {
   address: string | null | undefined;
-  chainId: number;
+  chainId: number | null;
   isSelected?: boolean;
   size?: '6' | '7' | '8' | '9' | '10';
   symbol: string;

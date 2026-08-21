@@ -30,7 +30,7 @@ import {
   getProtocolLabel,
   parseNumericValue,
 } from '../../lib/dashboard';
-import { REFERENCE_MODE } from '../../lib/referenceMode';
+import { showsReference } from '../../lib/provenance';
 import type {
   Allocation,
   AllocationCategory,
@@ -129,6 +129,12 @@ function AllocationAssetCell({
   localProtocols: LocalProtocolRow[];
   chainLabels: ChainLabelLookup;
 }) {
+  const chainLabel = getChainLabel(
+    allocation.chain_id,
+    chainLabels,
+    allocation.network,
+  );
+
   return (
     <div className={css({ display: 'grid', gap: '1', minWidth: 0 })}>
       <p
@@ -178,10 +184,10 @@ function AllocationAssetCell({
         >
           <ChainLogo
             chainId={allocation.chain_id}
-            label={getChainLabel(allocation.chain_id, chainLabels)}
+            label={chainLabel}
             size="5"
           />
-          {getChainLabel(allocation.chain_id, chainLabels)}
+          {chainLabel}
         </span>
       </div>
     </div>
@@ -666,14 +672,14 @@ export function AllocationGrid({
     };
   }, [allocations]);
 
-  const debtWad = REFERENCE_MODE
+  const debtWad = showsReference
     ? referenceDebt?.debt_wad
     : primeDebtSnapshot?.debt_wad;
   // Reference mode has no observation time: upstream publishes one figure per
   // prime per day, so the closest thing is the bucket the figure falls in. The
   // label says "as of" rather than "sync" so a boundary is not read as a
   // moment we observed the value.
-  const debtObservedAt = REFERENCE_MODE
+  const debtObservedAt = showsReference
     ? referenceDebt?.bucket_start
     : primeDebtSnapshot?.synced_at;
   // "as of" either way: reference mode has only a daily bucket boundary, and
