@@ -10,6 +10,7 @@
  * for.
  */
 import { MINUTE_MS, isoAgo } from '../clock.ts';
+import { ownEntry } from '../lookup.ts';
 import type {
   AllocationRiskCapital,
   CapitalMetrics,
@@ -558,7 +559,9 @@ const PRIME_POOL_SHARE: Readonly<Record<string, number | undefined>> = {
  * one prime's position: a confident answer that is wrong by the pool's size.
  */
 export function poolShareFor(primeId: string | null): number | undefined {
-  return primeId === null ? 1 : PRIME_POOL_SHARE[primeId.toLowerCase()];
+  return primeId === null
+    ? 1
+    : ownEntry(PRIME_POOL_SHARE, primeId.toLowerCase());
 }
 
 // Any registry token gets a breakdown so the drawer works for every
@@ -566,7 +569,7 @@ export function poolShareFor(primeId: string | null): number | undefined {
 // the fallback reuses the shared pool composition at a mid-size share. A token
 // outside the registry still misses, keeping the 404 branch reachable.
 export function breakdownFor(tokenAddress: string): RiskBreakdown | undefined {
-  const mapped = RISK_BREAKDOWN_BY_TOKEN[tokenAddress.toLowerCase()];
+  const mapped = ownEntry(RISK_BREAKDOWN_BY_TOKEN, tokenAddress.toLowerCase());
   if (mapped !== undefined) {
     return mapped;
   }

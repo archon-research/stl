@@ -772,6 +772,41 @@ async function checkUnknownAssetIsNotFound() {
   );
 }
 
+/**
+ * A fixture table is keyed by addresses the request supplies, so a param naming
+ * an inherited member must still miss. Indexed without a guard these answer with
+ * `Object.prototype`'s members — a 404 that becomes a 200 carrying a function.
+ */
+async function checkInheritedKeysAreNotFound() {
+  for (const key of ['constructor', '__proto__', 'toString']) {
+    await expectStatus(
+      '/v1/primes/{prime_id}/risk-capital',
+      primeAt(key),
+      404,
+      `risk-capital for ${key}`,
+    );
+    await expectStatus(
+      '/v1/risk/{chain_id}/{token_address}/breakdown',
+      { params: { path: { chain_id: 1, token_address: key } } },
+      404,
+      `breakdown for ${key}`,
+    );
+    // Not a 404: the token resolves, but the share lookup for this prime must
+    // miss and answer 503 rather than serving the whole pool as one prime's.
+    await expectStatus(
+      '/v1/risk/{chain_id}/{token_address}/breakdown',
+      {
+        params: {
+          path: { chain_id: 1, token_address: SPUSDS },
+          query: { prime_id: key },
+        },
+      },
+      503,
+      `breakdown?prime_id=${key}`,
+    );
+  }
+}
+
 async function checkReferenceDebtRequiresAggregate() {
   await expectStatus(
     '/v1/primes/{prime_id}/debt',
@@ -918,6 +953,7 @@ const checks = [
   ['an empty proxy is not an error', checkEmptyProxyIsNotAnError],
   ['an unknown prime is a 404', checkUnknownPrimeIsNotFound],
   ['an unknown asset is a 404', checkUnknownAssetIsNotFound],
+  ['an inherited key is not a fixture', checkInheritedKeysAreNotFound],
   ['reference debt requires aggregate', checkReferenceDebtRequiresAggregate],
   ['malformed params are rejected', checkMalformedParamsAreRejected],
   ['illegal windows are rejected', checkIllegalWindowsAreRejected],

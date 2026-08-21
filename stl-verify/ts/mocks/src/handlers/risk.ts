@@ -14,6 +14,7 @@ import {
   seedCapitalMetrics,
   toReferenceRiskCapital,
 } from '../fixtures/risk.ts';
+import { ownEntry } from '../lookup.ts';
 import { LIST_DELAY_MS, mock } from '../mock-api.ts';
 import {
   invalidQueryParam,
@@ -29,7 +30,10 @@ export function riskHandlers(): MockHandler[] {
       '/v1/primes/{prime_id}/risk-capital',
       async ({ params, query, response }) => {
         await mockDelay(LIST_DELAY_MS);
-        const selfScoped = RISK_CAPITAL_BY_PROXY[params.prime_id.toLowerCase()];
+        const selfScoped = ownEntry(
+          RISK_CAPITAL_BY_PROXY,
+          params.prime_id.toLowerCase(),
+        );
 
         if (selfScoped === undefined) {
           return response.untyped(
