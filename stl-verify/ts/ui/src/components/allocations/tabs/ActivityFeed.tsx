@@ -632,6 +632,10 @@ type ActivityFeedState = {
   hasActiveFilters: boolean;
   clearFilters: () => void;
   rowLimit: number;
+  // The network the filter names when STL has no chain id for it. Page mode has
+  // no receipt token to read the same fact off, so the empty state can only name
+  // the chain if the parse result is carried out here.
+  unindexedNetwork: string | null;
 };
 
 /**
@@ -660,6 +664,8 @@ function useAllocationActivity({
 }: ActivityFeedProps): ActivityFeedState {
   const isPageMode = mode === 'page';
   const networkChainId = parseNetworkChainId(selectedNetwork);
+  const unindexedNetwork =
+    networkChainId === null ? (selectedNetwork ?? null) : null;
   const [events, setEvents] = useState<AllocationActivityResponse>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -870,6 +876,7 @@ function useAllocationActivity({
     hasActiveFilters,
     clearFilters,
     rowLimit: filters.limit ?? 50,
+    unindexedNetwork,
   };
 }
 
@@ -1206,6 +1213,7 @@ export function ActivityFeed(props: ActivityFeedProps) {
     hasActiveFilters,
     clearFilters,
     rowLimit,
+    unindexedNetwork,
   } = useAllocationActivity(props);
 
   const table = useActivityTable(filteredEvents, chainLabels);
@@ -1236,6 +1244,22 @@ export function ActivityFeed(props: ActivityFeedProps) {
 
   const latestActivityAt = events[0]?.created_at ?? null;
 
+  // A chain STL has no id for suppresses the request entirely, so "nothing
+  // matched your filters" would be the wrong reason. The drawer reads that off
+  // the selected receipt token; page mode has only the network filter.
+  // Wrapped, not a bare name: the chain being unindexed is known even when it
+  // cannot be named, and the message says "this chain" for that case.
+  const unindexedFilter =
+    selectedReceiptToken?.chain_id === null
+      ? { network: selectedReceiptToken.network }
+      : unindexedNetwork === null
+        ? null
+        : { network: unindexedNetwork };
+  const emptyDescription =
+    unindexedFilter === null
+      ? 'No allocation activity events match your filters.'
+      : unindexedChainMessage(unindexedFilter.network, 'activity');
+
   const activityResults = (
     <ActivityResults
       table={table}
@@ -1244,11 +1268,7 @@ export function ActivityFeed(props: ActivityFeedProps) {
       totalEventCount={events.length}
       visibleEventCount={filteredEvents.length}
       rowLimit={rowLimit}
-      emptyDescription={
-        selectedReceiptToken?.chain_id === null
-          ? unindexedChainMessage(selectedReceiptToken.network, 'activity')
-          : 'No allocation activity events match your filters.'
-      }
+      emptyDescription={emptyDescription}
     />
   );
 
