@@ -94,10 +94,10 @@ func RegisterRunner(r worker.Registry, job RunnerJob) error {
 	if job.WorkflowType == "" {
 		return fmt.Errorf("RunnerJob.WorkflowType is required")
 	}
-	// The liveness ticker is the only thing that sends the store, so this pair
-	// would resume from nothing while looking perfectly healthy.
+	// A job that bothers to record resumable progress runs long, and with no
+	// heartbeat timeout a dead worker goes undetected until StartToClose.
 	if job.Progress != nil && job.Timeouts.Heartbeat <= 0 {
-		return fmt.Errorf("RunnerJob.Progress needs a non-zero Timeouts.Heartbeat, or the progress it records never reaches Temporal")
+		return fmt.Errorf("RunnerJob.Progress needs a non-zero Timeouts.Heartbeat, or a worker that dies mid-run is only noticed when StartToClose expires")
 	}
 	activities, err := newCronjobActivities(job.Runner, nil, job.Timeouts.Heartbeat, job.Progress)
 	if err != nil {
