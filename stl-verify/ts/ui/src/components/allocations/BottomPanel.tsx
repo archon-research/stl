@@ -32,6 +32,7 @@ import {
 } from '../../router/search-params';
 import type {
   Allocation,
+  PrimeRiskCapital,
   AllocationCategory,
   Prime,
 } from '../../types/allocation';
@@ -47,6 +48,7 @@ type BottomPanelProps = {
   isLoading: boolean;
   selectedAllocation: Allocation | null;
   selectedPrime: Prime | null;
+  riskCapital: PrimeRiskCapital | null;
 };
 
 type DrawerSearchPatch = {
@@ -71,6 +73,7 @@ export function BottomPanel({
   isLoading,
   selectedAllocation,
   selectedPrime,
+  riskCapital,
 }: BottomPanelProps) {
   // Not strict: the drawer stays mounted on the activities route, where the
   // allocation search does not exist.
@@ -411,6 +414,7 @@ export function BottomPanel({
                 isEnabled={isDrawerOpen && activeTab === 'rrc'}
                 selectedReceiptToken={focusedAllocation}
                 selectedPrime={selectedPrime}
+                riskCapital={riskCapital}
               />
             ) : (
               <ActivityFeed

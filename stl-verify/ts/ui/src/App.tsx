@@ -1362,6 +1362,7 @@ function App() {
           isLoading={isAllocationsLoading}
           selectedAllocation={selectedAllocation}
           selectedPrime={selectedPrime}
+          riskCapital={riskCapital}
         />
       </RiskDetailDrawer>
     </div>
