@@ -29,7 +29,9 @@ MAINNET_CHAIN_ID = 1
 # ``allocation_position`` rows at all — so a figure aggregated over them reads as
 # a genuine zero rather than as absent data. Anything summed or reported per chain
 # has to know the difference; ``test_chain_names.py`` fails if the two sides drift.
-SERVED_TRACKER_CHAINS: frozenset[str] = frozenset({"mainnet", "avalanche-c", "base"})
+SERVED_TRACKER_CHAINS: frozenset[str] = frozenset(
+    {"mainnet", "avalanche-c", "base", "optimism", "unichain", "arbitrum"}
+)
 
 
 def chain_name_for(chain_id: int) -> str | None:
