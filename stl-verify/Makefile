@@ -2311,6 +2311,7 @@ check-reloader-opt-in:
 # Apply the dev core overlay (watcher, python-api, cronjobs) — reuses k8s/base.
 # Images must already be built + loaded into kind.
 kind-deploy-apps: check-dev-overlay-sync
+	@$(require_kind_context)
 	$(call kind-apply-rendered,kubectl kustomize ../k8s/overlays/dev)
 	kubectl --context=$(KUBE_CONTEXT) rollout restart deployment/watcher deployment/python-api $(addprefix deployment/,$(CRONJOB_DEPLOYMENTS)) -n $(KUBE_NS)
 
@@ -2421,6 +2422,7 @@ kind-load-cronjobs:
 #        make kind-redeploy-worker NAME=anchorage-indexer
 kind-redeploy-worker:
 	@test -n "$(NAME)" || { echo "ERROR: NAME is required. Example: make kind-redeploy-worker NAME=morpho-indexer"; exit 1; }
+	@$(require_kind_context)
 	@if echo " $(CRONJOBS) " | grep -q " $(NAME) "; then \
 	  $(MAKE) docker-build-cronjob-$(NAME); \
 	else \
