@@ -3,32 +3,45 @@
 #
 # oxlint and oxfmt each take one config, and the two workspaces have their own
 # (ui carries the design-system boundaries preset, mocks does not).
+#
+# `root`, `glob` and `exclude` are all repo-root-relative, and `glob`/`exclude`
+# are applied to the staged path BEFORE `root` rewrites it -- so they have to
+# carry the stl-verify/ts/ prefix too. `run` and the substituted {staged_files}
+# are relative to `root`.
 
-_ts_root: &ts_root 'ts/'
+_ts_root: &ts_root 'stl-verify/ts/'
+
+# oxfmt has sortPackageJson on by default, so a staged package.json would come
+# back with its keys reordered and stage_fixed would fold that into whatever
+# commit happened to touch it. Neither `format` nor `format:check` covers these
+# manifests, so keep the hook off them too.
+_oxfmt_exclude: &oxfmt_exclude ['stl-verify/ts/*/package.json']
 
 pre-commit:
   parallel: true
   commands:
     ui-oxlint:
       root: *ts_root
-      glob: 'ui/**/*.{ts,tsx}'
+      glob: 'stl-verify/ts/ui/**.{ts,tsx}'
       run: npx --no-install oxlint -c ui/oxlint.config.ts --fix {staged_files}
       stage_fixed: true
 
     ui-oxfmt:
       root: *ts_root
-      glob: 'ui/**/*.{ts,tsx,css,html,json}'
+      glob: 'stl-verify/ts/ui/**.{ts,tsx,css,html,json}'
+      exclude: *oxfmt_exclude
       run: npx --no-install oxfmt -c ui/.oxfmtrc.ts --write {staged_files}
       stage_fixed: true
 
     mocks-oxlint:
       root: *ts_root
-      glob: 'mocks/**/*.{ts,mjs}'
+      glob: 'stl-verify/ts/mocks/**.{ts,mjs}'
       run: npx --no-install oxlint -c mocks/oxlint.config.ts --fix {staged_files}
       stage_fixed: true
 
     mocks-oxfmt:
       root: *ts_root
-      glob: 'mocks/**/*.{ts,mjs,json}'
+      glob: 'stl-verify/ts/mocks/**.{ts,mjs,json}'
+      exclude: *oxfmt_exclude
       run: npx --no-install oxfmt -c mocks/.oxfmtrc.ts --write {staged_files}
       stage_fixed: true
