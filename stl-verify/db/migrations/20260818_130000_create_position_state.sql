@@ -180,114 +180,171 @@ BEGIN
     END LOOP;
 END $$;
 
--- Classification provenance (review :276): record WHAT was classified, as data on the row, so the
--- recency invariant is inspectable at the table instead of living only in the materializer. These are
--- the coordinates of the classifying observation; the validating trigger below re-derives them from
--- position_state and rejects any write that disagrees, which is what makes the invariant
--- table-enforced rather than caller-enforced. Nullable because the table predates this migration (its
--- creating migration is immutable and already applied); the trigger requires them on every new write.
-ALTER TABLE position_classification
+-- ============================================================================
+-- Classification: append-only history + derived current cache
+-- ============================================================================
+-- Shape follows the current-position tables in #733 (VEC-577): the history table is append-only and
+-- never edited, and a small plain <name>_current table holds the newest row per key, kept fresh by an
+-- AFTER INSERT trigger and rebuildable from history at any time. Applied here, that means:
+--
+--   position_classification          one row per DECISION, append-only, never edited
+--   position_classification_current  one row per position, the derived cache consumers read
+--
+-- Why append: a classification is an observation about a position at a point in the pipeline, and
+-- db/migrations/AGENTS.md names classification specifically as something that must be an appended
+-- observation carrying the version tuple, read latest-first, "never a column". Editing one row in place
+-- destroyed the previous answer on every write: a run that classified BORROW, was corrected by a reorg
+-- to LOAN, then reprocessed to COLLATERAL left only COLLATERAL, so a risk result computed against the
+-- BORROW row could not be explained afterwards — the tracing ADR-0002 exists to guarantee. Appending
+-- also removes the recency guard entirely: an out-of-order backfill cannot regress the current answer
+-- because nothing is overwritten, and the guard had a defect in each of its three revisions.
+--
+-- The existing one-row-per-position table already has exactly the cache's shape (PK on position_id,
+-- deal_type FK, direction CHECK, id-width CHECK), so it is RENAMED rather than rebuilt. Safe to rename
+-- now: nothing reads it yet — no view, no join, no application code — and the rename follows the
+-- precedent in 20260722_120000. Its creating migration (20260713_150000) stays untouched and applied.
+ALTER TABLE position_classification RENAME TO position_classification_current;
+ALTER TABLE position_classification_current
+    RENAME CONSTRAINT position_classification_pkey TO position_classification_current_pkey;
+
+-- The cache carries the winning decision's version and the provenance of the observation it classified,
+-- so a reader can tell WHICH decision it reflects and go straight to that history row.
+ALTER TABLE position_classification_current
+    ADD COLUMN IF NOT EXISTS classification_version   integer,
     ADD COLUMN IF NOT EXISTS as_of_block              bigint,
     ADD COLUMN IF NOT EXISTS as_of_block_version      integer,
     ADD COLUMN IF NOT EXISTS as_of_processing_version integer;
 
-COMMENT ON COLUMN position_classification.as_of_block IS 'Provenance. block_number of the observation this classification was derived from (the canonical latest non-zero at write time). Validated against position_state by trigger_validate_position_classification.';
-COMMENT ON COLUMN position_classification.as_of_block_version IS 'Provenance. block_version of the classifying observation.';
-COMMENT ON COLUMN position_classification.as_of_processing_version IS 'Provenance. processing_version of the classifying observation.';
+COMMENT ON TABLE position_classification_current IS '[Operational] Newest classification per position_id. Derived cache of the position_classification history; rebuildable from it at any time (TRUNCATE and re-run the backfill in 20260818_130000). Consumers read this table, never the history.';
+COMMENT ON COLUMN position_classification_current.classification_version IS 'Derived (copy of position_classification.classification_version). The winning decision; the whole of the newer-wins comparison, because a decision''s BASIS can move to an earlier block after a reorg while the decision sequence only ever increases.';
+COMMENT ON COLUMN position_classification_current.as_of_block IS 'Derived. block_number of the observation the winning decision classified.';
+COMMENT ON COLUMN position_classification_current.as_of_block_version IS 'Derived. Reorg version of that observation.';
+COMMENT ON COLUMN position_classification_current.as_of_processing_version IS 'Derived. Processing version of that observation.';
 
--- position_classification is the RECORDED EXCEPTION to the append-only default (#737): a one-row-per-
--- position current-state table whose documented purpose is the guarded in-place reclassification, so its
--- UPDATE channel is sanctioned and recorded in db/migrations/AGENTS.md citing VEC-401/VEC-402. The channel
--- stays column-scoped to exactly the columns the cls upsert SETs (deal_type_code, direction,
--- change_reason, valid_from). collateral_status is deliberately NOT grantable: nothing writes it yet (see
--- the collateral_status note below) — the future materializer PR that handles it adds the column grant
--- together with the consistency logic. position_id (identity) stays unwritable.
-GRANT SELECT, INSERT ON position_classification TO stl_readwrite;   -- the upsert's INSERT arm (idempotent re-grant)
-GRANT SELECT ON ref_deal_type TO stl_readwrite;                      -- the direction lookup join (idempotent re-grant)
-REVOKE UPDATE, DELETE, TRUNCATE ON position_classification FROM stl_readwrite;
--- The column list must match the cls upsert's SET list exactly, including the provenance columns:
--- ON CONFLICT DO UPDATE requires UPDATE privilege on every column it sets, checked at executor
--- start whether or not a conflict occurs, so a missing column here refuses the whole statement.
-GRANT UPDATE (deal_type_code, direction, change_reason, valid_from,
-              as_of_block, as_of_block_version, as_of_processing_version)
-    ON position_classification TO stl_readwrite;
+-- Per #733, the cache is mutable by design: it is a derived copy, so overwriting it loses nothing that
+-- history does not still hold. Recorded as a derived-cache exception in db/migrations/AGENTS.md citing
+-- VEC-402 / #625, per #737 (append-only is the default; any update channel is recorded).
+GRANT SELECT ON position_classification_current TO stl_readonly;
+GRANT SELECT, INSERT, UPDATE, DELETE ON position_classification_current TO stl_readwrite;
 
--- Table-level enforcement of the recency invariant (review :276: "the invariant lives only in this
--- caller ... enforceable at the table"). Any writer — the materializer, a fix-migration, a future
--- service — must present coordinates that ARE the canonical latest non-zero observation in
--- position_state for that position. This is checkable only because the materializer appends
--- observations in a SEPARATE, earlier statement (see the function below), so by the time this trigger
--- fires the stored state is complete; in the previous single-statement form the trigger could not have
--- seen the run's own rows at all.
---
--- LIMIT, stated so it is not assumed away: this validates the BASIS, not the CODE. position_state
--- carries no deal_type_code (classifications are attributes of a position, not observations, VEC-400),
--- so no trigger can verify that the written code matches the observation at those coordinates — only
--- that the claimed basis IS the canonical latest non-zero. Substituting a wrong code while presenting
--- valid provenance therefore remains possible for any role holding UPDATE on the column; that residue
--- is closed by narrowing the writer to a single materializer role (VEC-562), not here. A committed
--- test pins this boundary explicitly.
---
--- Cost: one PK-bounded scan of the position's blocks per classification write, which is the same shape
--- the materializer's own guard reads. NOTE for ADR-0006 (#689): that ADR proposes retiring the
--- assign_processing_version_* family — BEFORE INSERT triggers that ASSIGN a value via a per-row
--- MAX() lookup. This is a different animal (a VALIDATING trigger that assigns nothing), so it is not
--- in that family's scope; if the ADR's scope widens to validation triggers, this is the enforcement
--- point to revisit.
-CREATE OR REPLACE FUNCTION validate_position_classification()
-    RETURNS TRIGGER
+-- ---------------------------------------------------------------- the history
+
+CREATE TABLE IF NOT EXISTS position_classification (
+    position_id              bytea       NOT NULL,
+    -- Per-position decision sequence, allocated by the writer as max+1. It is the ordering key for
+    -- "current", not (as_of_block, ...): a reorg that zeroes the latest observation moves the
+    -- classifying basis DOWN to an earlier block, so an observation-coordinate comparison would refuse
+    -- the correction (reproduced: claiming block 100 after block 200 is a strictly lower tuple).
+    classification_version   integer     NOT NULL,
+    deal_type_code           text        NOT NULL,
+    direction                text,
+    -- Carried from the pre-rename table for parity; still unwritten (VEC-408 owns its writer). As a
+    -- decision attribute it belongs on the decision, so a future collateral change appends a version
+    -- rather than editing one.
+    collateral_status        text,
+    -- Coordinates of the observation this decision classified, in position_state.
+    as_of_block              bigint      NOT NULL,
+    as_of_block_version      integer     NOT NULL,
+    as_of_processing_version integer     NOT NULL,
+    -- Same UTC default as every other normalized enrichment table (20260721_120000); the materializer
+    -- supplies it explicitly, so the default only covers direct inserts.
+    valid_from               date        NOT NULL DEFAULT (now() AT TIME ZONE 'utc')::date,
+    change_reason            text        NOT NULL,
+    created_at               timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT position_classification_pkey PRIMARY KEY (position_id, classification_version),
+    CONSTRAINT position_classification_deal_type_fkey
+        FOREIGN KEY (deal_type_code) REFERENCES ref_deal_type (deal_type),
+    CONSTRAINT position_classification_direction_chk
+        CHECK (direction IS NULL OR direction = ANY (ARRAY['LONG'::text, 'SHORT'::text])),
+    CONSTRAINT position_classification_id_len_chk CHECK (octet_length(position_id) = 32),
+    CONSTRAINT position_classification_version_pos_chk CHECK (classification_version > 0),
+    CONSTRAINT position_classification_coord_nonneg_chk
+        CHECK (as_of_block >= 0 AND as_of_block_version >= 0 AND as_of_processing_version >= 0)
+);
+
+COMMENT ON TABLE position_classification IS '[Operational] Append-only history of per-position deal-type decisions (VEC-401/VEC-402). One row per DECISION: the deal_type_code, the frozen direction, and the coordinates of the position_state observation it was derived from. Never edited or deleted — a correction, a reorg or a reprocess appends a new classification_version. Consumers read position_classification_current.';
+COMMENT ON COLUMN position_classification.position_id IS 'PK. The bytea(32) native position identity from position_id() (VEC-400).';
+COMMENT ON COLUMN position_classification.classification_version IS 'PK. Per-position decision sequence, 1-based, allocated as max+1 by the writer. Highest version is the current classification.';
+COMMENT ON COLUMN position_classification.deal_type_code IS 'FK->ref_deal_type.deal_type. The classification this decision assigned.';
+COMMENT ON COLUMN position_classification.direction IS 'LONG or SHORT, frozen from ref_deal_type at decision time so a later vocabulary change cannot silently restate history.';
+COMMENT ON COLUMN position_classification.as_of_block IS 'Provenance. block_number of the observation classified (the canonical latest non-zero for the position at decision time).';
+COMMENT ON COLUMN position_classification.as_of_block_version IS 'Provenance. Reorg version of the classified observation.';
+COMMENT ON COLUMN position_classification.as_of_processing_version IS 'Provenance. Processing version of the classified observation.';
+COMMENT ON COLUMN position_classification.collateral_status IS 'Unwritten pending VEC-408. A decision attribute: a collateral change appends a new classification_version rather than editing this one.';
+COMMENT ON COLUMN position_classification.valid_from IS 'Date (UTC) this decision became effective.';
+COMMENT ON COLUMN position_classification.change_reason IS 'Audit. The materializer''s p_reason for this decision; never NULL.';
+COMMENT ON COLUMN position_classification.created_at IS 'Audit. Row insert time.';
+
+-- Strictly append-only, like position_state: no update channel at all. The owner-side REVOKE makes a
+-- stray fix-migration fail loudly rather than silently restating a classification (nothing FKs this
+-- table, so the RI-probe privilege trap 20260714_160000 fixed for the reference tables cannot apply).
+-- Role-existence guarded: the roles come from the infra bootstrap, not from migrations.
+GRANT SELECT ON position_classification TO stl_readonly;
+GRANT SELECT, INSERT ON position_classification TO stl_readwrite;
+GRANT SELECT ON ref_deal_type TO stl_readwrite;   -- the direction lookup join (idempotent re-grant)
+DO $$
+DECLARE role text;
+BEGIN
+    FOREACH role IN ARRAY ARRAY['stl_readwrite','stl_migrator'] LOOP
+        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role) THEN
+            EXECUTE format('REVOKE UPDATE, DELETE, TRUNCATE ON position_classification FROM %I', role);
+        END IF;
+    END LOOP;
+END $$;
+
+-- ---------------------------------------------------------------- cache maintenance
+
+-- AFTER INSERT so the cache copies the committed row, matching #733. The upsert wins only on a higher
+-- classification_version, so a replayed or concurrently-inserted older decision can never regress the
+-- cache. search_path is pinned: pg_temp is searched first for unqualified relation names, so a caller
+-- with a temp table named position_classification_current could otherwise absorb the write.
+CREATE OR REPLACE FUNCTION upsert_position_classification_current() RETURNS trigger
     LANGUAGE plpgsql
     SET search_path FROM CURRENT
-    SET plan_cache_mode = 'force_custom_plan'
-AS $vfn$
-DECLARE
-    canon_bv int; canon_pv int; canon_qty numeric; max_nonzero_bn bigint;
+AS $$
 BEGIN
-    IF NEW.as_of_block IS NULL OR NEW.as_of_block_version IS NULL OR NEW.as_of_processing_version IS NULL THEN
-        RAISE EXCEPTION 'position_classification write for % must carry as_of_block/as_of_block_version/as_of_processing_version provenance', encode(NEW.position_id, 'hex');
-    END IF;
+    INSERT INTO public.position_classification_current AS cur
+        (position_id, classification_version, deal_type_code, direction, valid_from, change_reason,
+         as_of_block, as_of_block_version, as_of_processing_version)
+    VALUES
+        (NEW.position_id, NEW.classification_version, NEW.deal_type_code, NEW.direction,
+         NEW.valid_from, NEW.change_reason, NEW.as_of_block, NEW.as_of_block_version,
+         NEW.as_of_processing_version)
+    ON CONFLICT (position_id) DO UPDATE SET
+        classification_version   = EXCLUDED.classification_version,
+        deal_type_code           = EXCLUDED.deal_type_code,
+        direction                = EXCLUDED.direction,
+        valid_from               = EXCLUDED.valid_from,
+        change_reason            = EXCLUDED.change_reason,
+        as_of_block              = EXCLUDED.as_of_block,
+        as_of_block_version      = EXCLUDED.as_of_block_version,
+        as_of_processing_version = EXCLUDED.as_of_processing_version
+    WHERE EXCLUDED.classification_version > cur.classification_version;
+    RETURN NULL;
+END;
+$$;
 
-    -- The claimed coordinates must be the canonical row at their own block (nothing stored at that
-    -- block carries a strictly higher (block_version, processing_version)) and must be non-zero.
-    SELECT p.block_version, p.processing_version, p.quantity
-      INTO canon_bv, canon_pv, canon_qty
-      FROM public.position_state p
-     WHERE p.position_id = NEW.position_id AND p.block_number = NEW.as_of_block
-     ORDER BY p.block_version DESC, p.processing_version DESC
-     LIMIT 1;
-    IF NOT FOUND THEN
-        RAISE EXCEPTION 'position_classification: no observation at block % for position %', NEW.as_of_block, encode(NEW.position_id, 'hex');
-    END IF;
-    IF (canon_bv, canon_pv) <> (NEW.as_of_block_version, NEW.as_of_processing_version) THEN
-        RAISE EXCEPTION 'position_classification: claimed observation (bn=%, bv=%, pv=%) is superseded at that block by (bv=%, pv=%)', NEW.as_of_block, NEW.as_of_block_version, NEW.as_of_processing_version, canon_bv, canon_pv;
-    END IF;
-    IF canon_qty <= 0 THEN
-        RAISE EXCEPTION 'position_classification: claimed observation (bn=%) is a zero-quantity (closing) row and cannot be a classification basis', NEW.as_of_block;
-    END IF;
+COMMENT ON FUNCTION upsert_position_classification_current() IS '[Operational] Keeps position_classification_current at the highest classification_version per position (VEC-402). AFTER INSERT on the history; newer-wins on classification_version only, so an out-of-order insert cannot regress the cache.';
 
-    -- ... and no canonical non-zero observation may exist ABOVE it (the recency rule itself).
-    SELECT max(c.block_number) INTO max_nonzero_bn
-      FROM (
-        SELECT DISTINCT ON (p.block_number) p.block_number, p.quantity
-          FROM public.position_state p
-         WHERE p.position_id = NEW.position_id AND p.block_number >= NEW.as_of_block
-         ORDER BY p.block_number, p.block_version DESC, p.processing_version DESC
-      ) c
-     WHERE c.quantity > 0;
-    IF max_nonzero_bn IS DISTINCT FROM NEW.as_of_block THEN
-        RAISE EXCEPTION 'position_classification: stale basis for position % — claimed block % but the canonical latest non-zero observation is block %', encode(NEW.position_id, 'hex'), NEW.as_of_block, max_nonzero_bn;
-    END IF;
-
-    RETURN NEW;
-END $vfn$;
-
-DROP TRIGGER IF EXISTS trigger_validate_position_classification ON position_classification;
-CREATE TRIGGER trigger_validate_position_classification
-    BEFORE INSERT OR UPDATE ON position_classification
+-- Created before the backfill: CREATE TRIGGER takes a lock that blocks inserts, so no row can commit in
+-- the window between the backfill's snapshot and the trigger going live (#733).
+CREATE TRIGGER trigger_upsert_position_classification_current
+    AFTER INSERT ON position_classification
     FOR EACH ROW
-EXECUTE FUNCTION validate_position_classification();
+EXECUTE FUNCTION upsert_position_classification_current();
 
-COMMENT ON FUNCTION validate_position_classification() IS '[Operational] Table-level enforcement of the position_classification recency invariant (VEC-402): every write must present as_of_(block, block_version, processing_version) provenance that IS the canonical latest non-zero observation for that position in position_state. Rejects a superseded, zero-quantity, or stale basis regardless of writer, so the invariant no longer lives only in materialize_position_projection.';
+-- Backfill / rebuild statement. Empty on first apply (the history table is new); this is the recovery
+-- path referenced in the cache's COMMENT — TRUNCATE position_classification_current, then run this.
+INSERT INTO position_classification_current
+    (position_id, classification_version, deal_type_code, direction, valid_from, change_reason,
+     as_of_block, as_of_block_version, as_of_processing_version)
+SELECT DISTINCT ON (h.position_id)
+       h.position_id, h.classification_version, h.deal_type_code, h.direction, h.valid_from,
+       h.change_reason, h.as_of_block, h.as_of_block_version, h.as_of_processing_version
+FROM position_classification h
+ORDER BY h.position_id, h.classification_version DESC
+ON CONFLICT (position_id) DO NOTHING;
+
 
 -- Shared materializer body for every per-protocol projection (VEC-402..407). Each projection view
 -- (position_morpho_market, position_morpho_vault, position_sky_prime_debt, ...) holds its own bespoke
@@ -521,29 +578,29 @@ BEGIN
         ORDER BY c.position_id, c.block_number DESC
     ),
     cls AS (
+        -- APPEND a decision. No update channel: the cache is maintained by the AFTER INSERT trigger,
+        -- and an out-of-order run cannot regress it because nothing is overwritten. The NOT EXISTS
+        -- against the cache is the idempotency rule that replaces the old recency guard: a rerun that
+        -- reaches the same answer from the same observation appends nothing and the run returns 0.
         INSERT INTO public.position_classification
-            (position_id, deal_type_code, direction, change_reason,
-             as_of_block, as_of_block_version, as_of_processing_version)
+            (position_id, classification_version, deal_type_code, direction, change_reason,
+             valid_from, as_of_block, as_of_block_version, as_of_processing_version)
         -- LEFT JOIN + raw deal_type_code: an unseeded / typo'd code must hit the deal_type_code FK
         -- (23503) and fail the run, not be silently dropped by an inner join (CLAUDE.md: fail hard).
-        SELECT l.position_id, s.deal_type_code, d.direction, p_reason,
+        SELECT l.position_id, coalesce(cur.classification_version, 0) + 1,
+               s.deal_type_code, d.direction, p_reason, (now() AT TIME ZONE 'utc')::date,
                l.block_number, l.block_version, l.processing_version
         FROM latest l
         JOIN pg_temp._mpp_src s ON s.position_id = l.position_id AND s.block_number = l.block_number
              AND s.block_version = l.block_version AND s.processing_version = l.processing_version
         LEFT JOIN public.ref_deal_type d ON d.deal_type = s.deal_type_code
+        LEFT JOIN public.position_classification_current cur ON cur.position_id = l.position_id
+        WHERE cur.position_id IS NULL
+           OR cur.deal_type_code IS DISTINCT FROM s.deal_type_code
+           OR cur.direction      IS DISTINCT FROM d.direction
+           OR (cur.as_of_block, cur.as_of_block_version, cur.as_of_processing_version)
+              IS DISTINCT FROM (l.block_number, l.block_version, l.processing_version)
         ORDER BY l.position_id
-        ON CONFLICT (position_id) DO UPDATE
-            SET deal_type_code           = EXCLUDED.deal_type_code,
-                direction                = EXCLUDED.direction,
-                change_reason            = EXCLUDED.change_reason,
-                as_of_block              = EXCLUDED.as_of_block,
-                as_of_block_version      = EXCLUDED.as_of_block_version,
-                as_of_processing_version = EXCLUDED.as_of_processing_version,
-                -- re-stamp valid_from + change_reason only when the classification actually changes.
-                valid_from               = (now() AT TIME ZONE 'utc')::date
-            WHERE public.position_classification.deal_type_code IS DISTINCT FROM EXCLUDED.deal_type_code
-               OR public.position_classification.direction      IS DISTINCT FROM EXCLUDED.direction
         RETURNING 1
     )
     SELECT count(*) INTO n_cls FROM cls;

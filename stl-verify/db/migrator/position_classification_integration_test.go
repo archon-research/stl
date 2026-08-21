@@ -40,8 +40,10 @@ func TestPositionClassification(t *testing.T) {
 			t.Fatalf("seed observation for %s: %v", tag, err)
 		}
 	}
-	prov := `, as_of_block, as_of_block_version, as_of_processing_version`
-	provVals := `, 100, 0, 0`
+	// The table is the append-only decision history (VEC-402), so every insert carries the decision's
+	// version and reason alongside the provenance of the observation it classified.
+	prov := `, classification_version, change_reason, as_of_block, as_of_block_version, as_of_processing_version`
+	provVals := `, 1, 'vec401-test', 100, 0, 0`
 
 	// Valid: a seeded ref_deal_type code (LOAN) with a valid direction and a real basis inserts.
 	seed(t, "valid")
@@ -69,19 +71,34 @@ func TestPositionClassification(t *testing.T) {
 		t.Errorf("invalid direction: got %v; want a check violation naming direction", err)
 	}
 
-	// PK: a duplicate position_id is rejected.
+	// PK: the same (position_id, classification_version) twice is rejected; a NEW version is not.
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO position_classification (position_id, deal_type_code`+prov+`)
 		 VALUES (sha256('valid'::bytea), 'LOAN'`+provVals+`)`); err == nil ||
 		!strings.Contains(err.Error(), "position_classification_pkey") {
-		t.Errorf("duplicate position_id: got %v; want a primary-key violation", err)
+		t.Errorf("duplicate (position_id, classification_version): got %v; want a primary-key violation", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO position_classification (position_id, deal_type_code, classification_version,
+			change_reason, as_of_block, as_of_block_version, as_of_processing_version)
+		 VALUES (sha256('valid'::bytea), 'BORROW', 2, 'vec401-test', 100, 0, 0)`); err != nil {
+		t.Errorf("a second decision for the same position must append: %v", err)
 	}
 
-	// Provenance: a write with no basis at all is rejected by the VEC-402 trigger.
-	if _, err := pool.Exec(ctx,
-		`INSERT INTO position_classification (position_id, deal_type_code)
-		 VALUES (sha256('noprov'::bytea), 'LOAN')`); err == nil ||
-		!strings.Contains(err.Error(), "provenance") {
-		t.Errorf("provenance-less write: got %v; want the provenance raise", err)
+	// Provenance is structural now, not trigger-enforced: the columns are NOT NULL, so a write with no
+	// basis cannot be stored at all.
+	for _, c := range []struct{ name, stmt, want string }{
+		{"no provenance", `INSERT INTO position_classification (position_id, deal_type_code,
+			classification_version, change_reason) VALUES (sha256('noprov'::bytea), 'LOAN', 1, 'r')`, "as_of_block"},
+		{"no version", `INSERT INTO position_classification (position_id, deal_type_code, change_reason,
+			as_of_block, as_of_block_version, as_of_processing_version)
+			VALUES (sha256('nover'::bytea), 'LOAN', 'r', 100, 0, 0)`, "classification_version"},
+		{"zero version", `INSERT INTO position_classification (position_id, deal_type_code,
+			classification_version, change_reason, as_of_block, as_of_block_version, as_of_processing_version)
+			VALUES (sha256('zerover'::bytea), 'LOAN', 0, 'r', 100, 0, 0)`, "version_pos_chk"},
+	} {
+		if _, err := pool.Exec(ctx, c.stmt); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: got %v; want an error naming %q", c.name, err, c.want)
+		}
 	}
 }

@@ -29,6 +29,10 @@ var convertedAppendOnlyTables = []string{
 	"morpho_vault_cap",
 	"morpho_vault_fee",
 	"position_state",
+	// Its sanctioned UPDATE channel is column-scoped, and has_table_privilege reports table-level
+	// privilege only, so the narrow GRANT UPDATE (deal_type_code, …) does not flip the assertion
+	// below — the table-wide UPDATE/DELETE it used to hold is what must stay revoked.
+	"position_classification",
 }
 
 // TestConvertedTablesAreAppendOnly asserts the DB-level half of the append-only rule:

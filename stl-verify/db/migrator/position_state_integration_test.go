@@ -64,7 +64,7 @@ func TestPositionState(t *testing.T) {
 		t.Helper()
 		var dt string
 		err := pool.QueryRow(ctx,
-			`SELECT deal_type_code FROM position_classification WHERE position_id = position_id(1, 10, $1, $2)`,
+			`SELECT deal_type_code FROM position_classification_current WHERE position_id = position_id(1, 10, $1, $2)`,
 			ik, holder).Scan(&dt)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -337,7 +337,7 @@ func TestPositionState(t *testing.T) {
 		mpp(t, "vnp", valuesOf(row("inp", "aa", 5, "LOAN", 100, 0, 0)), "second-reason")
 		var reason, direction string
 		if err := pool.QueryRow(ctx,
-			`SELECT change_reason, direction FROM position_classification WHERE position_id = position_id(1,10,'inp','aa')`).Scan(&reason, &direction); err != nil {
+			`SELECT change_reason, direction FROM position_classification_current WHERE position_id = position_id(1,10,'inp','aa')`).Scan(&reason, &direction); err != nil {
 			t.Fatal(err)
 		}
 		if reason != "first-reason" {
@@ -645,10 +645,10 @@ func TestPositionState(t *testing.T) {
 			`(1::int,10::bigint,'inc'::text,'aa'::text,9::numeric,'BORROW'::text,100::bigint,0::int,0::int,'2026-01-01'::timestamptz)) ` + mppCols
 		mpp(t, "vnc", body, "nullchain")
 		var nullClass, setClass string
-		if err := pool.QueryRow(ctx, `SELECT deal_type_code FROM position_classification WHERE position_id = position_id(NULL, 10, 'inc', 'aa')`).Scan(&nullClass); err != nil {
+		if err := pool.QueryRow(ctx, `SELECT deal_type_code FROM position_classification_current WHERE position_id = position_id(NULL, 10, 'inc', 'aa')`).Scan(&nullClass); err != nil {
 			t.Fatalf("null-chain position not classified: %v", err)
 		}
-		if err := pool.QueryRow(ctx, `SELECT deal_type_code FROM position_classification WHERE position_id = position_id(1, 10, 'inc', 'aa')`).Scan(&setClass); err != nil {
+		if err := pool.QueryRow(ctx, `SELECT deal_type_code FROM position_classification_current WHERE position_id = position_id(1, 10, 'inc', 'aa')`).Scan(&setClass); err != nil {
 			t.Fatalf("set-chain position not classified: %v", err)
 		}
 		if nullClass != "LOAN" || setClass != "BORROW" {
@@ -1018,6 +1018,12 @@ func TestPositionState(t *testing.T) {
 		if err := asRole(`UPDATE position_state SET quantity = quantity WHERE false`); err == nil || !strings.Contains(err.Error(), "permission denied") {
 			t.Errorf("quantity update: want permission denied (the update channel was removed; append-only default), got %v", err)
 		}
+		// The other half of the matrix: the derived cache MUST stay writable, or the AFTER INSERT
+		// trigger that maintains it fails at runtime. Asserted positively so a later blanket REVOKE
+		// cannot silently break the write path while the deny cases above still pass.
+		if err := asRole(`UPDATE position_classification_current SET change_reason = change_reason WHERE false`); err != nil {
+			t.Errorf("cache update as stl_readwrite: want allowed (derived cache, per #733), got %v", err)
+		}
 		// Owner-side REVOKE (#737: a stray fix-migration must fail loudly; nothing FKs position_state,
 		// so the ref-table FK/KEY SHARE caveat does not apply). Asserted via the catalogue because the
 		// harness superuser bypasses ACLs.
@@ -1150,7 +1156,7 @@ func TestPositionState(t *testing.T) {
 		mpp(t, "vsp1", valuesOf(row("isp1", "aa", 5, "LOAN", 100, 0, 0)), "stamp")
 		var utcToday bool
 		if err := pool.QueryRow(ctx,
-			`SELECT valid_from = (now() AT TIME ZONE 'utc')::date FROM position_classification WHERE position_id = position_id(1,10,'isp1','aa')`).Scan(&utcToday); err != nil {
+			`SELECT valid_from = (now() AT TIME ZONE 'utc')::date FROM position_classification_current WHERE position_id = position_id(1,10,'isp1','aa')`).Scan(&utcToday); err != nil {
 			t.Fatal(err)
 		}
 		if !utcToday {
@@ -1356,75 +1362,152 @@ func TestPositionState(t *testing.T) {
 		// pooled connection is returned clean.
 	})
 
-	// --- table-level enforcement of the recency invariant (:276) -----------------------------------
+	// --- append-only history and the derived current cache ----------------------------------------
 
-	t.Run("classification provenance is recorded and validated by trigger (:276)", func(t *testing.T) {
-		body := valuesOf(row("itrg", "aa", 5, "LOAN", 100, 0, 0), row("itrg", "aa", 7, "LOAN", 200, 0, 0))
-		mpp(t, "vtrg", body, "legit")
-		var bn, bv, pv int
+	t.Run("each decision appends a row carrying the observation it classified", func(t *testing.T) {
+		mpp(t, "vhist", valuesOf(row("ihist", "aa", 5, "LOAN", 100, 0, 0), row("ihist", "aa", 7, "LOAN", 200, 0, 0)), "legit")
+		var ver, bn, bv, pv int
 		if err := pool.QueryRow(ctx,
-			`SELECT as_of_block, as_of_block_version, as_of_processing_version FROM position_classification
-			  WHERE position_id = position_id(1,10,'itrg','aa')`).Scan(&bn, &bv, &pv); err != nil {
+			`SELECT classification_version, as_of_block, as_of_block_version, as_of_processing_version
+			   FROM position_classification WHERE position_id = position_id(1,10,'ihist','aa')
+			  ORDER BY classification_version DESC LIMIT 1`).Scan(&ver, &bn, &bv, &pv); err != nil {
 			t.Fatal(err)
 		}
-		if bn != 200 || bv != 0 || pv != 0 {
-			t.Errorf("provenance = (%d,%d,%d); want (200,0,0) — the canonical latest non-zero", bn, bv, pv)
+		if ver != 1 || bn != 200 || bv != 0 || pv != 0 {
+			t.Errorf("(ver, provenance) = (%d, %d,%d,%d); want (1, 200,0,0) — the canonical latest non-zero", ver, bn, bv, pv)
 		}
 	})
 
-	t.Run("trigger rejects a provenance-less, stale, superseded, or zero-basis classification (:276)", func(t *testing.T) {
-		mpp(t, "vtrg2", valuesOf(row("itrg2", "aa", 5, "LOAN", 100, 0, 0), row("itrg2", "aa", 7, "LOAN", 200, 0, 0)), "legit")
-		pid := `position_id(1,10,'itrg2','aa')`
-		cases := []struct {
-			name string
-			stmt string
-			want string
-		}{
-			{"no provenance", `INSERT INTO position_classification (position_id, deal_type_code) VALUES (position_id(1,10,'inoprov','aa'), 'LOAN')`, "provenance"},
-			{"stale basis", `INSERT INTO position_classification (position_id, deal_type_code, as_of_block, as_of_block_version, as_of_processing_version)
-				VALUES (` + pid + `, 'BORROW', 100, 0, 0)
-				ON CONFLICT (position_id) DO UPDATE SET deal_type_code = 'BORROW', as_of_block = 100, as_of_block_version = 0, as_of_processing_version = 0`, "stale basis"},
-			{"no observation at that block", `INSERT INTO position_classification (position_id, deal_type_code, as_of_block, as_of_block_version, as_of_processing_version)
-				VALUES (position_id(1,10,'inosuch','aa'), 'LOAN', 999, 0, 0)`, "no observation at block"},
-			// Distinct from "stale basis": the claimed BLOCK is the latest non-zero, so the stale check
-			// passes and only the version legs are wrong. Seeded below with two versions at one block,
-			// because every other case here claims the canonical version and leaves this guard unrun.
-			{"superseded at its own block", `INSERT INTO position_classification (position_id, deal_type_code, as_of_block, as_of_block_version, as_of_processing_version)
-				VALUES (position_id(1,10,'itrgsup','aa'), 'BORROW', 100, 0, 0)
-				ON CONFLICT (position_id) DO UPDATE SET deal_type_code = 'BORROW', as_of_block = 100, as_of_block_version = 0, as_of_processing_version = 0`, "superseded at that block"},
+	t.Run("a reclassification appends rather than overwriting, and the earlier decision survives", func(t *testing.T) {
+		mpp(t, "vappend", valuesOf(row("iappend", "aa", 5, "LOAN", 100, 0, 0)), "first")
+		mpp(t, "vappend", valuesOf(row("iappend", "aa", 5, "LOAN", 100, 0, 0), row("iappend", "aa", 7, "BORROW", 200, 0, 0)), "second")
+		type dec struct {
+			ver  int
+			code string
+			blk  int64
 		}
-		// Two versions at the SAME block: the canonical one is bv=1, so a claim of bv=0 is superseded
-		// rather than stale. Without this fixture the superseded branch has no coverage at all.
-		mpp(t, "vtrgsup", valuesOf(row("itrgsup", "aa", 5, "LOAN", 100, 0, 0)), "v0")
-		mpp(t, "vtrgsup", valuesOf(row("itrgsup", "aa", 6, "LOAN", 100, 1, 0)), "v1")
-		for _, c := range cases {
-			if _, err := pool.Exec(ctx, c.stmt); err == nil || !strings.Contains(err.Error(), c.want) {
-				t.Errorf("%s: got %v; want a raise containing %q", c.name, err, c.want)
+		rows, err := pool.Query(ctx,
+			`SELECT classification_version, deal_type_code, as_of_block FROM position_classification
+			  WHERE position_id = position_id(1,10,'iappend','aa') ORDER BY classification_version`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var got []dec
+		for rows.Next() {
+			var d dec
+			if err := rows.Scan(&d.ver, &d.code, &d.blk); err != nil {
+				t.Fatal(err)
+			}
+			got = append(got, d)
+		}
+		want := []dec{{1, "LOAN", 100}, {2, "BORROW", 200}}
+		if len(got) != len(want) {
+			t.Fatalf("history = %v; want both decisions retained: %v", got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("history[%d] = %v; want %v", i, got[i], want[i])
 			}
 		}
-		// A zero-quantity (closing) row can never be a classification basis.
-		mpp(t, "vtrg3", valuesOf(row("itrg3", "aa", 0, "LOAN", 100, 0, 0)), "closed")
-		if _, err := pool.Exec(ctx,
-			`INSERT INTO position_classification (position_id, deal_type_code, as_of_block, as_of_block_version, as_of_processing_version)
-			 VALUES (position_id(1,10,'itrg3','aa'), 'LOAN', 100, 0, 0)`); err == nil || !strings.Contains(err.Error(), "zero-quantity") {
-			t.Errorf("zero basis: got %v; want a zero-quantity raise", err)
+		if cur := classOf(t, "iappend", "aa"); cur != "BORROW" {
+			t.Errorf("cache = %q; want BORROW (the highest version)", cur)
 		}
 	})
 
-	t.Run("KNOWN LIMIT: a code-only rewrite with valid provenance is NOT caught by the trigger", func(t *testing.T) {
-		// Pinned deliberately so the boundary of table-level enforcement is explicit rather than
-		// assumed. position_state carries no deal_type_code (classifications are attributes, VEC-400),
-		// so no trigger can verify that the CODE matches the observation — only that the claimed BASIS
-		// is the canonical latest non-zero. Substituting a wrong code while keeping valid provenance
-		// therefore stays possible for any writer holding UPDATE on the column, and is closed by the
-		// grant narrowing in VEC-562 (a single materializer role), not by this trigger.
+	t.Run("the cache tracks the highest classification_version and an older insert cannot regress it", func(t *testing.T) {
+		mpp(t, "vcache", valuesOf(row("icache", "aa", 5, "LOAN", 100, 0, 0)), "v1")
+		mpp(t, "vcache", valuesOf(row("icache", "aa", 5, "LOAN", 100, 0, 0), row("icache", "aa", 7, "BORROW", 200, 0, 0)), "v2")
+		if got := classOf(t, "icache", "aa"); got != "BORROW" {
+			t.Fatalf("cache = %q; want BORROW", got)
+		}
+		// A replayed or out-of-order decision at a LOWER version must not win. This is what replaces
+		// the recency guard: the comparison is on the decision sequence, not on the observation
+		// coordinates, so a reorg that moves the basis to an earlier block still reclassifies.
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO position_classification (position_id, classification_version, deal_type_code,
+			     direction, as_of_block, as_of_block_version, as_of_processing_version, valid_from, change_reason)
+			 VALUES (position_id(1,10,'icache','aa'), 99, 'COLLATERAL', 'LONG', 100, 0, 0,
+			         (now() AT TIME ZONE 'utc')::date, 'higher version wins')`); err != nil {
+			t.Fatal(err)
+		}
+		if got := classOf(t, "icache", "aa"); got != "COLLATERAL" {
+			t.Errorf("cache = %q after version 99; want COLLATERAL", got)
+		}
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO position_classification (position_id, classification_version, deal_type_code,
+			     direction, as_of_block, as_of_block_version, as_of_processing_version, valid_from, change_reason)
+			 VALUES (position_id(1,10,'icache','aa'), 3, 'CUSTODY', 'LONG', 100, 0, 0,
+			         (now() AT TIME ZONE 'utc')::date, 'stale replay')`); err != nil {
+			t.Fatal(err)
+		}
+		if got := classOf(t, "icache", "aa"); got != "COLLATERAL" {
+			t.Errorf("cache = %q; a version-3 insert regressed it below version 99", got)
+		}
+		// The stale decision is still recorded in history, just not current.
+		var n int
+		if err := pool.QueryRow(ctx,
+			`SELECT count(*) FROM position_classification WHERE position_id = position_id(1,10,'icache','aa')
+			   AND deal_type_code = 'CUSTODY'`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 1 {
+			t.Errorf("stale decision rows in history = %d; want 1 (recorded, not current)", n)
+		}
+	})
+
+	t.Run("the history rejects UPDATE and DELETE as the writer role", func(t *testing.T) {
+		mpp(t, "vhro", valuesOf(row("ihro", "aa", 5, "LOAN", 100, 0, 0)), "legit")
+		for _, stmt := range []string{
+			`UPDATE position_classification SET deal_type_code = 'BORROW' WHERE false`,
+			`DELETE FROM position_classification WHERE false`,
+			`TRUNCATE position_classification`,
+		} {
+			conn, err := pool.Acquire(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tx, err := conn.Begin(ctx)
+			if err != nil {
+				conn.Release()
+				t.Fatal(err)
+			}
+			if _, err := tx.Exec(ctx, `SET LOCAL ROLE stl_readwrite`); err != nil {
+				t.Fatal(err)
+			}
+			_, err = tx.Exec(ctx, stmt)
+			if err == nil || !strings.Contains(err.Error(), "permission denied") {
+				t.Errorf("%s as stl_readwrite: got %v; want permission denied", stmt, err)
+			}
+			_ = tx.Rollback(ctx)
+			conn.Release()
+		}
+	})
+
+	t.Run("KNOWN LIMIT: a wrong code with valid provenance is recorded, not rejected", func(t *testing.T) {
+		// Pinned deliberately so the boundary is explicit. position_state carries no deal_type_code
+		// (classifications are attributes, VEC-400), so nothing can verify that the CODE matches the
+		// observation. Appending removes the silent-corruption half of this: a wrong code is now a
+		// recorded decision with its own version and change_reason rather than an overwrite, so it is
+		// visible and correctable by appending the right one. Restricting WHO may append is VEC-562.
 		mpp(t, "vlim", valuesOf(row("ilim", "aa", 5, "LOAN", 100, 0, 0)), "legit")
 		if _, err := pool.Exec(ctx,
-			`UPDATE position_classification SET deal_type_code = 'BORROW' WHERE position_id = position_id(1,10,'ilim','aa')`); err != nil {
-			t.Fatalf("code-only rewrite unexpectedly failed (limit changed - update the comment): %v", err)
+			`INSERT INTO position_classification (position_id, classification_version, deal_type_code,
+			     direction, as_of_block, as_of_block_version, as_of_processing_version, valid_from, change_reason)
+			 VALUES (position_id(1,10,'ilim','aa'), 50, 'BORROW', 'SHORT', 100, 0, 0,
+			         (now() AT TIME ZONE 'utc')::date, 'wrong code, valid provenance')`); err != nil {
+			t.Fatalf("append with a wrong code unexpectedly failed (limit changed - update the comment): %v", err)
 		}
 		if got := classOf(t, "ilim", "aa"); got != "BORROW" {
-			t.Errorf("code-only rewrite did not land: %q", got)
+			t.Errorf("wrong-code append did not become current: %q", got)
+		}
+		var n int
+		if err := pool.QueryRow(ctx,
+			`SELECT count(*) FROM position_classification WHERE position_id = position_id(1,10,'ilim','aa')`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 2 {
+			t.Errorf("history rows = %d; want 2 — the original decision must survive the wrong one", n)
 		}
 	})
 
@@ -1718,8 +1801,8 @@ func TestPositionState(t *testing.T) {
 		// Round 8 closed pg_temp shadowing one read at a time and two unqualified references survived,
 		// so the class is asserted from the catalogue rather than case by case.
 		lineComment := regexp.MustCompile(`(?m)--.*$`)
-		unqualified := regexp.MustCompile(`(?i)\b(?:FROM|JOIN|INTO|UPDATE)\s+(position_state|position_classification|ref_deal_type|_mpp_src)\b`)
-		for _, fn := range []string{"materialize_position_projection", "validate_position_classification"} {
+		unqualified := regexp.MustCompile(`(?i)\b(?:FROM|JOIN|INTO|UPDATE)\s+(position_state|position_classification|position_classification_current|ref_deal_type|_mpp_src)\b`)
+		for _, fn := range []string{"materialize_position_projection", "upsert_position_classification_current"} {
 			var src string
 			if err := pool.QueryRow(ctx, `SELECT prosrc FROM pg_proc WHERE proname = $1`, fn).Scan(&src); err != nil {
 				t.Fatalf("%s: %v", fn, err)
@@ -1733,7 +1816,7 @@ func TestPositionState(t *testing.T) {
 	t.Run("both functions pin search_path", func(t *testing.T) {
 		// The pin overrides a hostile caller search_path before the body runs, which is what makes the
 		// qualification above belt-and-braces and its own removal invisible to any behavioural case.
-		for _, fn := range []string{"materialize_position_projection", "validate_position_classification"} {
+		for _, fn := range []string{"materialize_position_projection", "upsert_position_classification_current"} {
 			var settings []string
 			if err := pool.QueryRow(ctx,
 				`SELECT coalesce(proconfig, '{}') FROM pg_proc WHERE proname = $1`, fn).Scan(&settings); err != nil {
