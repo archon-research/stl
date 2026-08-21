@@ -165,6 +165,43 @@ async def test_collateral_flag_follows_the_newest_snapshot(conn: asyncpg.Connect
 
 
 @pytest.mark.asyncio(loop_scope="module")
+async def test_null_processing_version_reserve_row_does_not_break_ingest(conn: asyncpg.Connection) -> None:
+    """A residual NULL processing_version must not abort the insert that fires the trigger.
+
+    sparklend_reserve_data is the one history table of the four whose
+    processing_version is nullable (pre-convention retrofit). Its assign trigger
+    copies an existing row's version verbatim, so a residual NULL row makes the
+    NEXT insert for the same key carry NULL too — which, against a NOT NULL cache
+    column, would abort the history insert itself and stop ingest. The cache
+    COALESCEs it to 0 instead (0 = original, the column's documented meaning).
+    """
+    protocol_id = await insert_protocol(conn, "curNullPv", b"\xa1" * 20)
+    token_id = await insert_token(conn, "CURNULLPV", 18, b"\xa2" * 20)
+
+    await insert_reserve_data(conn, protocol_id=protocol_id, token_id=token_id, block=_BLOCK, collateral_enabled=True)
+    # Simulate a row left behind by the retrofit, before processing_version was populated.
+    await conn.execute(
+        "UPDATE sparklend_reserve_data SET processing_version = NULL "
+        "WHERE protocol_id = $1 AND token_id = $2 AND block_number = $3",
+        protocol_id,
+        token_id,
+        _BLOCK,
+    )
+
+    # Same (protocol, token, block, block_version, build_id): the assign trigger
+    # takes the existing NULL rather than computing a fresh version.
+    await insert_reserve_data(conn, protocol_id=protocol_id, token_id=token_id, block=_BLOCK, collateral_enabled=False)
+
+    row = await conn.fetchrow(
+        "SELECT processing_version FROM sparklend_reserve_data_current WHERE protocol_id = $1 AND token_id = $2",
+        protocol_id,
+        token_id,
+    )
+    assert row is not None
+    assert row["processing_version"] == 0
+
+
+@pytest.mark.asyncio(loop_scope="module")
 async def test_out_of_order_reserve_insert_does_not_regress_current_row(conn: asyncpg.Connection) -> None:
     """A late older reserve snapshot must not resurrect the flag it already superseded."""
     protocol_id = await insert_protocol(conn, "curReserve", b"\x41" * 20)

@@ -55,6 +55,11 @@
 -- transaction — so without a bound this waits out every in-flight writer while
 -- queueing all new INSERTs behind it. Same rationale and value as
 -- 20260706_140000_create_transformed_bucket1.sql; re-run in a quieter window.
+-- The backfills take cache row locks in their ORDER BY order, which is not the
+-- order the Go batch writers sort by, so this transaction can also lose a deadlock
+-- to a concurrent ingest batch rather than merely wait for one. Both fail the same
+-- way — the migration aborts and rolls back, ingest is unharmed — so the writers'
+-- sort orders are deliberately left alone for a one-shot backfill.
 SET LOCAL lock_timeout = '10s';
 
 -- The backfills below must see S3-tiered history. The GUC defaults to off, so
@@ -210,6 +215,21 @@ WHERE (EXCLUDED.block_number, EXCLUDED.block_version, EXCLUDED.processing_versio
 
 -- usage_as_collateral_enabled stays nullable, mirroring the history column: a
 -- NOT NULL here would abort the insert that fires the trigger.
+--
+-- processing_version is the other way round: it stays NOT NULL here, but every
+-- read of the history column is COALESCEd to 0. Alone among the four histories,
+-- sparklend_reserve_data has a nullable processing_version (a pre-convention
+-- retrofit; DEFAULT 0 and the assign trigger mean live rows have a value, and the
+-- schema register carries the exemption). Two things follow, and both are handled
+-- rather than assumed away:
+--   * the assign trigger copies an existing row's version verbatim
+--     (NEW.processing_version := existing_ver), so one residual NULL history row
+--     would propagate a NULL into this cache and abort the very insert that fires
+--     the trigger — the same failure the flag column above avoids.
+--   * `processing_version DESC` puts NULLS FIRST, so an unCOALESCEd backfill would
+--     rank a NULL row as the NEWEST and cache it over a real version.
+-- Treating NULL as 0 matches the column's documented meaning (0 = original) and
+-- keeps the newer-wins comparison total.
 CREATE TABLE IF NOT EXISTS sparklend_reserve_data_current (
     protocol_id                 BIGINT  NOT NULL,
     token_id                    BIGINT  NOT NULL,
@@ -239,7 +259,7 @@ BEGIN
          block_number, block_version, processing_version)
     VALUES
         (NEW.protocol_id, NEW.token_id, NEW.usage_as_collateral_enabled,
-         NEW.block_number, NEW.block_version, NEW.processing_version)
+         NEW.block_number, NEW.block_version, COALESCE(NEW.processing_version, 0))
     ON CONFLICT (protocol_id, token_id) DO UPDATE SET
         usage_as_collateral_enabled = EXCLUDED.usage_as_collateral_enabled,
         block_number = EXCLUDED.block_number,
@@ -261,10 +281,10 @@ INSERT INTO sparklend_reserve_data_current
      block_number, block_version, processing_version)
 SELECT DISTINCT ON (srd.protocol_id, srd.token_id)
     srd.protocol_id, srd.token_id, srd.usage_as_collateral_enabled,
-    srd.block_number, srd.block_version, srd.processing_version
+    srd.block_number, srd.block_version, COALESCE(srd.processing_version, 0)
 FROM sparklend_reserve_data srd
 ORDER BY srd.protocol_id, srd.token_id,
-         srd.block_number DESC, srd.block_version DESC, srd.processing_version DESC
+         srd.block_number DESC, srd.block_version DESC, COALESCE(srd.processing_version, 0) DESC
 ON CONFLICT (protocol_id, token_id) DO UPDATE SET
     usage_as_collateral_enabled = EXCLUDED.usage_as_collateral_enabled,
     block_number = EXCLUDED.block_number,

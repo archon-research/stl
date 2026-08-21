@@ -99,14 +99,15 @@ async def insert_onchain_price(
     scenarios that need to order rows by observation time rather than block.
     """
     await conn.execute(
-        f"""
+        """
         INSERT INTO onchain_token_price
             (token_id, oracle_id, block_number, block_version, timestamp, price_usd)
-        VALUES ($1, $2, $3, 0, NOW() + interval '{time_offset}', $4::numeric(30,18))
+        VALUES ($1, $2, $3, 0, NOW() + $4::text::interval, $5::numeric(30,18))
         """,
         token_id,
         oracle_id,
         block,
+        time_offset,
         str(price),
     )
 
