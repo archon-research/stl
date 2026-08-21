@@ -2027,6 +2027,10 @@ run-cronjob-%:
 # included, at the replica count it had — transform-worker sits at 0 on purpose, and
 # restoring a flat 1 would start a worker nobody asked for.
 #
+# The capture and the scale-down share one `;`-joined recipe line, which has no
+# fail-on-error of its own: without the explicit exits below, a refused scale-down
+# would start the local worker beside the cluster one — what this target prevents.
+#
 # Usage: make run-cronjob-solo NAME=morpho-v2-bootstrap
 #        (then, from another shell, for a job with no schedule) make temporal-cli \
 #          ARGS="workflow start --task-queue morpho-v2-bootstrap --type MorphoV2Bootstrap \
@@ -2037,7 +2041,7 @@ run-cronjob-solo:
 	@echo "==> Handing the $(NAME) task queue to a local worker (scaling deployment/$(call deployment_of,$(NAME)) to 0)..."
 	@PRIOR=$$(kubectl --context=$(KUBE_CONTEXT) get -n $(KUBE_NS) deployment/$(call deployment_of,$(NAME)) -o jsonpath='{.spec.replicas}'); \
 	  test -n "$$PRIOR" || { echo "ERROR: deployment/$(call deployment_of,$(NAME)) has no replica count to restore."; exit 1; }; \
-	  kubectl --context=$(KUBE_CONTEXT) scale -n $(KUBE_NS) deployment/$(call deployment_of,$(NAME)) --replicas=0; \
+	  kubectl --context=$(KUBE_CONTEXT) scale -n $(KUBE_NS) deployment/$(call deployment_of,$(NAME)) --replicas=0 || exit 1; \
 	  trap "$(MAKE) --no-print-directory kind-scale-up-$(call deployment_of,$(NAME)) REPLICAS=$$PRIOR" EXIT INT TERM; \
 	  $(MAKE) --no-print-directory run-cronjob-$(NAME)
 
