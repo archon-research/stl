@@ -7,7 +7,7 @@ from app.domain.entities.allocation import EthAddress
 from app.domain.entities.backed_breakdown import BackedBreakdown, CollateralContribution
 from app.domain.entities.receipt_token import ReceiptTokenInfo
 from app.domain.entities.risk import GapSweepDetails, LiquidationParams, RiskBreakdown, RrcResult
-from app.domain.exceptions import MissingShareError, PriceDataMissingError
+from app.domain.exceptions import LiquidationParamsMissingError, MissingShareError, PriceDataMissingError
 from app.services.crypto_lending_risk_service import CryptoLendingRiskService
 
 DUMMY_PRIME = EthAddress("0x" + "ab" * 20)
@@ -313,22 +313,44 @@ class TestCompute:
         assert result.rrc_usd > Decimal("0")
 
     @pytest.mark.asyncio
-    async def test_compute_items_without_liquidation_params_are_skipped(
+    async def test_compute_raises_when_no_item_has_liquidation_params(
         self,
         service: CryptoLendingRiskService,
         reader: MagicMock,
     ) -> None:
+        # Every item dropped for missing params leaves nothing to compute a gap on.
+        # Returning rrc=0 here reported a *fully covered* zero — indistinguishable
+        # from a priced position with no liquidatable debt — which is how grove came
+        # to show $305M exposure at modeled_pct=1.0 with rrc=0 (VEC-538). Raise so
+        # the prime endpoint degrades the allocation to unpriced instead.
         reader.get_breakdown.return_value = _breakdown(
             (_contrib(10, "WETH", "10000", "2000"),),
             backed_asset_id=UNDERLYING_TOKEN_ID,
         )
-        # No liquidation params for token 10 -> the item is dropped before enrichment.
         reader.get_liquidation_params.return_value = {}
+
+        with pytest.raises(LiquidationParamsMissingError):
+            await service.compute(RECEIPT_TOKEN_ID, DUMMY_PRIME, overrides={})
+
+    @pytest.mark.asyncio
+    async def test_compute_partial_liquidation_params_keep_covered_rows(
+        self,
+        service: CryptoLendingRiskService,
+        reader: MagicMock,
+    ) -> None:
+        # The boundary for the guard above: one item with params is enough to model,
+        # so the covered row computes and only the param-less row drops. Mirrors
+        # test_compute_partial_prices_keep_priced_rows_and_drop_unpriced and the Aave
+        # repo's documented behaviour — partial coverage must not raise.
+        reader.get_breakdown.return_value = _breakdown(
+            (_contrib(10, "WETH", "10000", "2000"), _contrib(11, "WBTC", "5000", "3000")),
+            backed_asset_id=UNDERLYING_TOKEN_ID,
+        )
+        reader.get_liquidation_params.return_value = {10: _params(10, "0.825", "1.05")}
 
         result = await service.compute(RECEIPT_TOKEN_ID, DUMMY_PRIME, overrides={})
 
-        assert result.rrc_usd == Decimal("0")
-        assert result.comparable_crr_pct == Decimal("0.00")
+        assert result.rrc_usd > Decimal("0")
 
     @pytest.mark.asyncio
     async def test_compute_excludes_null_token_id_items_from_enrichment(

@@ -608,7 +608,10 @@
                 "type": "string"
               },
               {
-                "const": "price_data_missing",
+                "enum": [
+                  "price_data_missing",
+                  "liquidation_params_missing"
+                ],
                 "type": "string"
               },
               {

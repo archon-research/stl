@@ -967,7 +967,7 @@ export interface components {
       unpriced_reason?:
         | 'no_model'
         | ('share_data_missing' | 'share_data_stale')
-        | 'price_data_missing'
+        | ('price_data_missing' | 'liquidation_params_missing')
         | null;
     };
     /**

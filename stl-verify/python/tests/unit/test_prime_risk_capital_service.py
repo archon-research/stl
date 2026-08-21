@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.domain.entities.allocation import EthAddress
+from app.domain.entities.risk import LiquidationParams
 from app.domain.exceptions import MissingShareError, StaleShareError
 from app.ports.allocation_repository import AllocationRepositoryPort
 from app.services.model_registry import ModelRegistry
@@ -699,6 +700,12 @@ async def test_prime_compute_degrades_share_error_to_unpriced(share_error, expec
         ),
     )
     reader.batch_get_breakdowns.return_value = {1: nonempty_breakdown, 2: nonempty_breakdown}
+    # Allocation 2 is the healthy one, so it needs real liquidation params: without
+    # them it degrades to liquidation_params_missing and the assertions below would
+    # pass for the wrong reason (see VEC-538).
+    reader.get_liquidation_params.return_value = {
+        99: LiquidationParams(token_id=99, liquidation_threshold=Decimal("0.8"), liquidation_bonus=Decimal("1.05"))
+    }
     service = _service(_repo(positions, Decimal("1000")), _FakeRegistry([_crypto_lending_service(reader)]))
 
     with patch("app.services.prime_risk_capital_service.logger") as mock_logger:
@@ -797,6 +804,12 @@ async def test_prime_compute_degrades_price_data_missing_to_unpriced():
         ),
     )
     reader.batch_get_breakdowns.return_value = {1: unpriced_breakdown, 2: priced_breakdown}
+    # Params for the priced allocation only. Allocation 1 raises on the price guard
+    # before params are consulted, so this isolates price_data_missing from
+    # liquidation_params_missing rather than letting either satisfy the test.
+    reader.get_liquidation_params.return_value = {
+        88: LiquidationParams(token_id=88, liquidation_threshold=Decimal("0.8"), liquidation_bonus=Decimal("1.05"))
+    }
     service = _service(_repo(positions, Decimal("1000")), _FakeRegistry([_crypto_lending_service(reader)]))
 
     with patch("app.services.prime_risk_capital_service.logger") as mock_logger:
