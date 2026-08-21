@@ -1,4 +1,4 @@
-"""The ``reference=true`` branch of the two per-prime capital time series.
+"""Provenance selection on the two per-prime capital time series.
 
 Both endpoints project the same stored snapshot onto their own field, so they
 are covered together: a divergence between them is exactly the bug worth
@@ -67,6 +67,43 @@ def test_reference_series_reports_its_provenance(series):
     assert body["source"] == "reference"
 
 
+def test_source_reference_selects_the_same_series_as_the_superseded_flag(series):
+    client, path, _, _, _ = series
+
+    by_source = client.get(f"/v1/primes/{_VALID_ADDR}/{path}?source=reference").json()
+    by_flag = client.get(f"/v1/primes/{_VALID_ADDR}/{path}?reference=true").json()
+
+    # Not the whole body: a defaulted window is now-relative, so two calls
+    # disagree by microseconds.
+    assert (by_source["source"], by_source["data"]) == (by_flag["source"], by_flag["data"])
+
+
+def test_source_indexed_reads_stl_own_figures(series):
+    client, path, _, _, repository = series
+
+    body = client.get(f"/v1/primes/{_VALID_ADDR}/{path}?source=indexed").json()
+
+    assert body["source"] == "indexed"
+    repository.list_reference_capital_buckets.assert_not_called()
+
+
+def test_rejects_both_until_the_merged_series_exists(series):
+    client, path, _, _, _ = series
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/{path}?source=both")
+
+    assert response.status_code == 422
+    assert "serves: indexed, reference" in response.json()["detail"]
+
+
+def test_rejects_a_source_that_contradicts_the_superseded_flag(series):
+    client, path, _, _, _ = series
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/{path}?source=indexed&reference=true")
+
+    assert response.status_code == 422
+
+
 def test_reference_series_serves_the_stored_upstream_figure(series):
     client, path, field, _, _ = series
     expected = {"total_capital_usd": "48142491.08", "exposure_usd": "2098090654.81"}[field]
@@ -100,7 +137,7 @@ def test_self_mode_never_reads_the_reference_store(series):
 
     body = client.get(f"/v1/primes/{_VALID_ADDR}/{path}").json()
 
-    assert body["source"] == "self"
+    assert body["source"] == "indexed"
     repository.list_reference_capital_buckets.assert_not_awaited()
 
 

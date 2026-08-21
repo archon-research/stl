@@ -86,7 +86,7 @@ def test_self_mode_is_unchanged_and_never_reads_the_reference_series(client):
 
     body = test_client.get(f"/v1/primes/{_VALID_ADDR}/debt?aggregate=true").json()
 
-    assert body["source"] == "self"
+    assert body["source"] == "indexed"
     assert body["data"][0]["debt_wad"] == "1"
     service.list_reference_debt_buckets.assert_not_awaited()
 
@@ -98,3 +98,39 @@ def test_reference_debt_still_404s_for_an_unknown_prime(client):
     response = test_client.get(f"/v1/primes/{_VALID_ADDR}/debt?reference=true&aggregate=true")
 
     assert response.status_code == 404
+
+
+def test_source_reference_selects_the_upstream_debt(client):
+    client, service = client
+
+    body = client.get(f"/v1/primes/{_VALID_ADDR}/debt?aggregate=true&source=reference").json()
+
+    assert body["source"] == "reference"
+    service.list_reference_debt_buckets.assert_awaited()
+
+
+def test_source_indexed_selects_the_on_chain_debt(client):
+    client, service = client
+
+    body = client.get(f"/v1/primes/{_VALID_ADDR}/debt?aggregate=true&source=indexed").json()
+
+    assert body["source"] == "indexed"
+    service.list_reference_debt_buckets.assert_not_awaited()
+
+
+def test_rejects_both_until_the_merged_series_exists(client):
+    client, _ = client
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/debt?aggregate=true&source=both")
+
+    assert response.status_code == 422
+
+
+def test_source_reference_still_requires_an_aggregated_window(client):
+    # Upstream carries no ilk or block identity, so it cannot fill a raw
+    # snapshot -- the same refusal the superseded flag got.
+    client, _ = client
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/debt?source=reference")
+
+    assert response.status_code == 400

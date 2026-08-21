@@ -200,7 +200,7 @@ def test_reference_mode_is_off_by_default(reference_client):
 
     body = client.get(f"/v1/primes/{_VALID_ADDR}/risk-capital").json()
 
-    assert body["source"] == "self"
+    assert body["source"] == "indexed"
     assert body["junior_risk_capital_usd"] is None
     assert body["per_allocation"] == []
 
@@ -219,3 +219,32 @@ def _self_result():
         modeled_pct=Decimal("0.6"),
         per_allocation=[],
     )
+
+
+@pytest.mark.parametrize("reference_client", [_snapshot()], indirect=True)
+def test_source_reference_answers_from_the_monitor(reference_client):
+    client, _ = reference_client
+
+    body = client.get(f"/v1/primes/{_VALID_ADDR}/risk-capital?source=reference").json()
+
+    assert body["source"] == "reference"
+
+
+@pytest.mark.parametrize("reference_client", [_snapshot()], indirect=True)
+def test_source_indexed_answers_from_stl_own_model(reference_client):
+    client, self_service = reference_client
+    self_service.compute.return_value = _self_result()
+
+    body = client.get(f"/v1/primes/{_VALID_ADDR}/risk-capital?source=indexed").json()
+
+    assert body["source"] == "indexed"
+    assert body["junior_risk_capital_usd"] is None
+
+
+@pytest.mark.parametrize("reference_client", [_snapshot()], indirect=True)
+def test_rejects_both_because_the_two_populate_disjoint_fields(reference_client):
+    client, _ = reference_client
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/risk-capital?source=both")
+
+    assert response.status_code == 422

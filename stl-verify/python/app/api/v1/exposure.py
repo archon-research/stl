@@ -9,6 +9,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
 from app.api._validators import ProxyAddressPathParam
 from app.api.deps import get_engine, get_reference_capital_repository_factory
+from app.api.provenance import (
+    INDEXED_OR_REFERENCE,
+    get_requested_provenance,
+    resolve_or_422,
+)
 from app.api.time_series import (
     TimeSeriesWindow,
     apply_cache_control,
@@ -16,6 +21,7 @@ from app.api.time_series import (
     get_time_series_query_params,
 )
 from app.domain.entities.allocation import EthAddress
+from app.domain.provenance import Provenance
 from app.domain.serialization import PlainDecimal
 from app.domain.time_series import TimeSeriesQuery
 from app.ports.reference_capital_repository import ReferenceCapitalRepository
@@ -43,11 +49,11 @@ class ExposureEnvelope(BaseModel):
     """Per-prime exposure time series, gap-filled into buckets."""
 
     mode: Literal["aggregated"] = Field(description="Always `aggregated`: a gap-filled time series.")
-    source: Literal["self", "reference"] = Field(
-        default="self",
+    source: Provenance = Field(
+        default=Provenance.INDEXED,
         description=(
-            "Provenance of the series. `self` is STL's priced receipt-token exposure; `reference` is "
-            "Sky's Star monitor as observed by STL's syncer, returned when `reference=true`."
+            "Provenance the series was answered from. `indexed` is STL's priced receipt-token "
+            "exposure; `reference` is Sky's Star monitor as observed by STL's syncer."
         ),
     )
     window: TimeSeriesWindow = Field(description="The window and resolution applied to this response.")
@@ -76,15 +82,7 @@ async def list_prime_exposure(
     response: Response,
     time_series: TimeSeriesQuery = Depends(get_time_series_query_params),
     limit: int = Query(100, ge=1, le=500, description="Max buckets returned (default 100, max 500)."),
-    reference: bool = Query(
-        False,
-        description=(
-            "Serve Sky's Star monitor exposure instead of STL's priced receipt-token exposure. The "
-            "shape is unchanged; `source` reports the provenance. The reference series only extends "
-            "back to when STL first observed the monitor — it publishes no history of its own — so "
-            "earlier buckets are `null`, meaning not yet observed rather than zero."
-        ),
-    ),
+    requested_provenance: Provenance | None = Depends(get_requested_provenance),
     service: AllocationService = Depends(_get_service),
     reference_repositories: Callable[[], ReferenceCapitalRepository] = Depends(
         get_reference_capital_repository_factory
@@ -94,12 +92,14 @@ async def list_prime_exposure(
     if not await service.prime_exists(prime_address):
         raise HTTPException(status_code=404, detail="Prime not found")
 
+    source = resolve_or_422(requested_provenance, available=INDEXED_OR_REFERENCE, default=Provenance.INDEXED)
+
     # Exposure observations are immutable once written, so a fully-pinned window
     # is safely cacheable; a defaulted (now-relative) window is not.
     apply_cache_control(response, time_series)
     window = build_window(time_series)
 
-    if reference:
+    if source is Provenance.REFERENCE:
         reference_buckets = await reference_repositories().list_reference_capital_buckets(
             prime_address,
             from_timestamp=time_series.from_timestamp,
@@ -109,7 +109,7 @@ async def list_prime_exposure(
         )
         return ExposureEnvelope(
             mode="aggregated",
-            source="reference",
+            source=source,
             window=window,
             data=[
                 ExposureBucketResponse(bucket_start=bucket.bucket_start, exposure_usd=bucket.exposure_usd)
@@ -126,7 +126,7 @@ async def list_prime_exposure(
     )
     return ExposureEnvelope(
         mode="aggregated",
-        source="self",
+        source=source,
         window=window,
         data=[ExposureBucketResponse(**bucket.__dict__) for bucket in buckets],
     )

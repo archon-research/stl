@@ -1,19 +1,24 @@
 from collections.abc import Callable
 from decimal import Decimal
-from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
 from app.api._validators import ProxyAddressPathParam
 from app.api.deps import get_engine, get_model_registry, get_reference_risk_capital_service_factory
+from app.api.provenance import (
+    INDEXED_OR_REFERENCE,
+    get_requested_provenance,
+    resolve_or_422,
+)
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.prime_risk_capital import PrimeRiskCapital, UnpricedReason
 from app.domain.entities.reference_risk_capital import ReferenceAllocation, ReferencePrimeRiskCapital
 from app.domain.exceptions import ReferenceDataUnavailableError
 from app.domain.prime_registry import ProxyKind, alm_proxies_for_prime, classify_proxy
+from app.domain.provenance import Provenance
 from app.domain.serialization import PlainDecimal
 from app.services.model_registry import ModelRegistry
 from app.services.prime_risk_capital_service import PrimeRiskCapitalService
@@ -157,12 +162,12 @@ class PrimeRiskCapitalResponse(BaseModel):
         ),
         examples=["0x1601843c5e9bc251a3272907010afa41fa18347e"],
     )
-    source: Literal["self", "reference"] = Field(
-        default="self",
+    source: Provenance = Field(
+        default=Provenance.INDEXED,
         description=(
-            "Provenance of every figure in this response. `self` is STL's own on-chain model; "
-            "`reference` is Sky's Star Agents Risk Capital & Requirements Monitor, returned when "
-            "`reference=true`. Never mixed: one response is entirely one or the other."
+            "Provenance of every figure in this response. `indexed` is STL's own on-chain model; "
+            "`reference` is Sky's Star Agents Risk Capital & Requirements Monitor. Never mixed: one "
+            "response is entirely one or the other."
         ),
     )
     model: str | None = Field(
@@ -345,20 +350,7 @@ async def _get_service(
 )
 async def get_prime_risk_capital(
     prime_id: ProxyAddressPathParam,
-    reference: bool = Query(
-        False,
-        description=(
-            "Answer from Sky's upstream Star monitor instead of STL's own model. The response shape is "
-            "unchanged; `source` reports which provenance produced it, and the reference-only fields "
-            "(`junior_risk_capital_usd`, `senior_risk_capital_usd`, the internal/external/tokenized "
-            "splits, the utilization ratios and `exposure_share`) are populated only in this mode. "
-            "**Every figure becomes prime-scoped**, because the monitor reports per prime: the "
-            "unprefixed fields carry the same values as their `prime_` counterparts, so a client "
-            "fanning out across a prime's proxies must dedupe rather than sum. "
-            "Returns `404` when the monitor does not track the prime, and `502` when it cannot be read "
-            "— the two are held apart so an outage is never served as an absence of exposure."
-        ),
-    ),
+    requested_provenance: Provenance | None = Depends(get_requested_provenance),
     service: PrimeRiskCapitalService = Depends(_get_service),
     reference_services: Callable[[], ReferenceRiskCapitalService] = Depends(get_reference_risk_capital_service_factory),
 ) -> PrimeRiskCapitalResponse:
@@ -382,7 +374,9 @@ async def get_prime_risk_capital(
     if not await service.prime_exists(prime_address):
         raise HTTPException(status_code=404, detail="Prime not found")
 
-    if reference:
+    source = resolve_or_422(requested_provenance, available=INDEXED_OR_REFERENCE, default=Provenance.INDEXED)
+
+    if source is Provenance.REFERENCE:
         return await _reference_response(prime_address, reference_services())
     return _self_response(await service.compute(prime_address))
 
@@ -390,7 +384,7 @@ async def get_prime_risk_capital(
 def _self_response(result: PrimeRiskCapital) -> PrimeRiskCapitalResponse:
     """Project STL's own model output onto the response."""
     return PrimeRiskCapitalResponse(
-        source="self",
+        source=Provenance.INDEXED,
         prime_id=result.proxy_address,
         proxy_address=result.proxy_address,
         model=result.model,
@@ -443,7 +437,7 @@ def _project_reference(prime_address: EthAddress, snapshot: ReferencePrimeRiskCa
     # would land at ~1.0 with a ~1e-6 wobble that can exceed the documented
     # 0-1 range, and would read as "STL priced all of this" — which no model did.
     return PrimeRiskCapitalResponse(
-        source="reference",
+        source=Provenance.REFERENCE,
         prime_id=str(prime_address),
         proxy_address=str(prime_address),
         model=None,
