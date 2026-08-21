@@ -195,8 +195,44 @@ func TestRun_NoV2VaultsFailsTheRun(t *testing.T) {
 	if !strings.Contains(err.Error(), "no VaultV2 vaults") {
 		t.Errorf("error %q should say no V2 vaults were found", err)
 	}
+	if !strings.Contains(err.Error(), "wrong chain or database") {
+		t.Errorf("error %q should name the misconfiguration an empty, undeferred set implies", err)
+	}
 	if len(h.chain.queries) != 0 {
 		t.Errorf("issued %d eth_getLogs requests for a chain with no V2 vaults, want 0", len(h.chain.queries))
+	}
+}
+
+// TestRun_EveryVaultDeferredTellsTheOperatorToReRun: an empty scope whose cause
+// is deferral is a lagging finalized head, not a misconfiguration. Reporting the
+// wrong chain or database sends the operator to check a CHAIN_ID and a
+// DATABASE_URL that are both correct.
+func TestRun_EveryVaultDeferredTellsTheOperatorToReRun(t *testing.T) {
+	h := newBootstrapHarness(t)
+	const headBlock = int64(24_000_000)
+	replayer := &recordingReplayer{v2Vaults: map[common.Address]int64{
+		testVaultAddr:   headBlock + 1,
+		secondVaultAddr: headBlock + 500,
+	}}
+	service, err := NewService(h.config, h.chain, replayer, h.progress)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	h.chain.setFinalizedHead(headBlock, 1_770_000_000)
+
+	err = service.Run(context.Background())
+
+	if err == nil {
+		t.Fatal("expected a run with nothing in scope to fail rather than report success")
+	}
+	if strings.Contains(err.Error(), "wrong chain or database") {
+		t.Errorf("error %q blames the configuration for what is a head that has not finalized far enough", err)
+	}
+	if !strings.Contains(err.Error(), "re-run once finality passes them") {
+		t.Errorf("error %q should tell the operator the next run heals this", err)
+	}
+	if !strings.Contains(err.Error(), "2") {
+		t.Errorf("error %q should count the deferred vaults", err)
 	}
 }
 
