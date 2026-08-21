@@ -88,8 +88,19 @@ func (p *ActivityProgress[T]) Reset() {
 // Temporal keeps only the LAST heartbeat's details, so a bare liveness ping
 // after a progress heartbeat would erase the resume point and silently send the
 // next attempt back to the start.
+//
+// While the store holds NO record it therefore sends nothing at all. An empty
+// store spans the window from Reset (the top of every execution) to the runner's
+// LoadProgress, and a bare ping there would wipe details the PREVIOUS attempt
+// wrote and this one has not read yet. The tradeoff is deliberate: an attempt
+// that stalls in that window is no longer reported alive, so it trips
+// HeartbeatTimeout instead — which is detection, and leaves the server-side
+// resume point untouched for the attempt that follows.
 func (p *ActivityProgress[T]) Beat(ctx context.Context) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.latest == nil {
+		return
+	}
 	p.record(ctx, p.latest...)
 }

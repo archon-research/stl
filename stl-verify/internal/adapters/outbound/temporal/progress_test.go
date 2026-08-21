@@ -98,10 +98,11 @@ func TestActivityProgress_LivenessBeatAfterAResumeCarriesTheLoadedRecord(t *test
 	}
 }
 
-// TestActivityProgress_ResetDropsTheCarriedRecord: one store serves the whole
-// worker process, so the record a finished execution left in it must not ride the
-// next execution's beats.
-func TestActivityProgress_ResetDropsTheCarriedRecord(t *testing.T) {
+// TestActivityProgress_ResetSilencesTheBeatUntilSomethingIsRecorded: Reset runs
+// at the top of every execution, ahead of the runner's own LoadProgress. A beat
+// landing in that window would send bare details and wipe the server's record of
+// the PREVIOUS attempt — the resume point this attempt has not read yet.
+func TestActivityProgress_ResetSilencesTheBeatUntilSomethingIsRecorded(t *testing.T) {
 	ctx := context.Background()
 	progress := NewActivityProgress[sweepPoint]()
 	var sent [][]any
@@ -113,11 +114,33 @@ func TestActivityProgress_ResetDropsTheCarriedRecord(t *testing.T) {
 	progress.Reset()
 	progress.Beat(ctx)
 
+	if len(sent) != 1 {
+		t.Fatalf("heartbeats sent = %d, want 1 (the progress record alone; the beat after a reset must send nothing)", len(sent))
+	}
+}
+
+// TestActivityProgress_BeatsResumeOnceTheAttemptRecordsItsOwnProgress: the
+// silence after a Reset lasts only until this attempt has something of its own
+// to re-send — after that the liveness beat must carry it again.
+func TestActivityProgress_BeatsResumeOnceTheAttemptRecordsItsOwnProgress(t *testing.T) {
+	ctx := context.Background()
+	recorded := sweepPoint{Scope: "chain-1", Block: 23_500_000}
+
+	progress := NewActivityProgress[sweepPoint]()
+	progress.Reset()
+	var sent [][]any
+	progress.record = func(_ context.Context, details ...any) { sent = append(sent, details) }
+
+	if err := progress.SaveProgress(ctx, recorded); err != nil {
+		t.Fatalf("SaveProgress: %v", err)
+	}
+	progress.Beat(ctx)
+
 	if len(sent) != 2 {
 		t.Fatalf("heartbeats sent = %d, want 2 (the progress record and the liveness beat)", len(sent))
 	}
-	if len(sent[1]) != 0 {
-		t.Errorf("the beat after a reset carried %v, want no details", sent[1])
+	if len(sent[1]) != 1 || sent[1][0] != recorded {
+		t.Errorf("the beat after the first record carried %v, want the recorded %+v", sent[1], recorded)
 	}
 }
 
@@ -148,20 +171,18 @@ func TestActivityProgress_LivenessBeatCarriesTheLastRecordedProgress(t *testing.
 	}
 }
 
-// TestActivityProgress_BeatBeforeAnyProgressIsAPlainLivenessPing: until the
-// runner records something there is nothing to preserve, and the beat must stay
-// what it was for every other cronjob — details-free.
-func TestActivityProgress_BeatBeforeAnyProgressIsAPlainLivenessPing(t *testing.T) {
+// TestActivityProgress_BeatBeforeAnyRecordSendsNothing: an empty store cannot
+// tell "this attempt has genuinely made no progress" from "this attempt has not
+// read the previous one's resume point yet", so it sends no heartbeat at all
+// rather than a bare one that would erase whatever the server holds.
+func TestActivityProgress_BeatBeforeAnyRecordSendsNothing(t *testing.T) {
 	progress := NewActivityProgress[sweepPoint]()
 	var sent [][]any
 	progress.record = func(_ context.Context, details ...any) { sent = append(sent, details) }
 
 	progress.Beat(context.Background())
 
-	if len(sent) != 1 {
-		t.Fatalf("heartbeats sent = %d, want 1", len(sent))
-	}
-	if len(sent[0]) != 0 {
-		t.Errorf("the first beat carried %v, want no details", sent[0])
+	if len(sent) != 0 {
+		t.Errorf("heartbeats sent = %d (%v), want none before the store holds a record", len(sent), sent)
 	}
 }
