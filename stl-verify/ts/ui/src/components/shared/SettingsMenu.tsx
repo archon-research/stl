@@ -6,7 +6,7 @@ import { Fragment } from 'react';
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
-import { REFERENCE_MODE } from '../../lib/referenceMode';
+import { PROVENANCE } from '../../lib/provenance';
 
 export type SettingsOption = {
   value: string;
@@ -172,7 +172,7 @@ const DATA_SOURCE_SECTION_ID = 'data-source';
  * The href comes from the router so the param is spelled and ordered the way the
  * route tree would spell it, and the entry-time cleanup has nothing to rewrite.
  * It is then loaded as a document rather than navigated to: the flag is read
- * once per session on purpose (see `lib/referenceMode`), so a client-side flip
+ * once per session on purpose (see `lib/provenance`), so a client-side flip
  * would leave already-fetched series on the old provenance while new ones
  * arrive on the new one — a page mixing both, which is what `source` exists to
  * make impossible.
@@ -183,7 +183,7 @@ export function useDataSourceSection(): SettingsSection {
   return {
     id: DATA_SOURCE_SECTION_ID,
     label: 'Data source',
-    value: REFERENCE_MODE ? 'reference' : 'indexed',
+    value: PROVENANCE,
     options: [
       {
         value: 'indexed',
@@ -197,8 +197,7 @@ export function useDataSourceSection(): SettingsSection {
       },
     ],
     onChange: (value) => {
-      const wantsReference = value === 'reference';
-      if (wantsReference === REFERENCE_MODE) {
+      if (value === PROVENANCE) {
         return;
       }
 
@@ -206,7 +205,10 @@ export function useDataSourceSection(): SettingsSection {
         to: '.',
         search: (previous: Record<string, unknown>) => ({
           ...previous,
-          reference: wantsReference ? true : undefined,
+          // The superseded spelling is dropped on the way out, so a link
+          // carrying both cannot arrive contradicting itself.
+          reference: undefined,
+          source: value === 'indexed' ? undefined : value,
         }),
       });
       globalThis.location.assign(href);

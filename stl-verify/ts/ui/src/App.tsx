@@ -66,6 +66,7 @@ import {
   formatTokenAmount,
   formatUsdValue,
   getChainLabel,
+  allocationNetworkKey,
   getAllocationKey,
   getProtocolLabel,
   groupPrimesByVault,
@@ -76,7 +77,7 @@ import {
 } from './lib/dashboard';
 import { isAbortError, toErrorMessage } from './lib/errors';
 import { logging } from './lib/logging';
-import { REFERENCE_MODE } from './lib/referenceMode';
+import { showsReference } from './lib/provenance';
 import { ACTIVITY_ACTIONS, type AppSearchPatch } from './router/search-params';
 import type {
   Allocation,
@@ -605,7 +606,7 @@ function App() {
     setPrimeDebtErrorMessage(null);
 
     void (
-      REFERENCE_MODE
+      showsReference
         ? getLatestReferenceDebtBucket(primaryProxyAddress, controller.signal)
         : getLatestPrimeDebtSnapshot(primaryProxyAddress, controller.signal)
     )
@@ -613,7 +614,7 @@ function App() {
         if (controller.signal.aborted) {
           return;
         }
-        if (REFERENCE_MODE) {
+        if (showsReference) {
           setReferenceDebt(latest as PrimeDebtBucket | null);
         } else {
           setPrimeDebtSnapshot(latest as PrimeDebtSnapshot | null);
@@ -738,7 +739,7 @@ function App() {
               localProtocols,
               allocation.chain_id,
             ),
-            getChainLabel(allocation.chain_id, chainLabels),
+            getChainLabel(allocation.chain_id, chainLabels, allocation.network),
             allocation.receipt_token_address,
             allocation.underlying_token_address,
           ]),
@@ -755,7 +756,7 @@ function App() {
       searchFilteredAllocations.filter((allocation) => {
         const matchesNetwork =
           selectedNetwork === null ||
-          String(allocation.chain_id) === selectedNetwork;
+          allocationNetworkKey(allocation) === selectedNetwork;
         const matchesProtocol =
           selectedProtocol === null ||
           (selectedProtocol === DIRECT_PROTOCOL_FILTER_VALUE
@@ -851,7 +852,7 @@ function App() {
   // When the reference collateral figure was observed, which is not the bucket
   // serving it: the feed is daily and the value is carried forward, so without
   // showing this a figure up to a day old is indistinguishable from a fresh one.
-  const primeCollateralObservedAt = REFERENCE_MODE
+  const primeCollateralObservedAt = showsReference
     ? (totalCapitalBuckets
         .filter((bucket) => bucket.assets_observed_at != null)
         .at(-1)?.assets_observed_at ?? null)
@@ -860,7 +861,7 @@ function App() {
   // The monitor's three figures share one stamp because they share one row. It
   // matters for the same reason the collateral one does, and more so since the
   // prior seeding reaches up to 90 days back.
-  const capitalObservedAt = REFERENCE_MODE
+  const capitalObservedAt = showsReference
     ? (totalCapitalBuckets
         .filter((bucket) => bucket.capital_observed_at != null)
         .at(-1)?.capital_observed_at ?? null)
@@ -870,7 +871,7 @@ function App() {
   // equivalent — STL does not index PSM3 and prices no Curve LP position — so
   // it shows what STL actually holds records for, captioned as such.
   // Buckets are oldest-first, so the newest observation is the last point.
-  const primeCollateralValue = REFERENCE_MODE
+  const primeCollateralValue = showsReference
     ? (collateralSeries.at(-1)?.value ?? null)
     : primeTotalAllocationUsd;
 
@@ -1039,7 +1040,11 @@ function App() {
     : null;
 
   const selectedChainLabel = selectedAllocation
-    ? getChainLabel(selectedAllocation.chain_id, chainLabels)
+    ? getChainLabel(
+        selectedAllocation.chain_id,
+        chainLabels,
+        selectedAllocation.network,
+      )
     : null;
 
   return (
