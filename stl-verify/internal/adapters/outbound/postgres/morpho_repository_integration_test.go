@@ -21,7 +21,6 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
-	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 const morphoDBName = "test_morpho"
@@ -29,11 +28,7 @@ const morphoDBName = "test_morpho"
 var morphoPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(func() {
-		morphoPool = testutil.SetupDBForMain(sharedDSN, morphoDBName)
-	}, func() {
-		testutil.CleanupDBForMain(sharedDSN, morphoPool, morphoDBName)
-	})
+	useFileDatabase(morphoDBName, &morphoPool)
 }
 
 // truncateMorpho clears morpho-related tables for test isolation.

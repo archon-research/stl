@@ -417,6 +417,76 @@ export function formatPercentValue(
   return `${numeric.toFixed(digits)}%`;
 }
 
+// Encumbrance breach thresholds, as the Sky Atlas defines them rather than as a
+// number chosen here: a Low Severity Breach is a ratio at or above 100% and
+// below 103%, a High Severity Breach is above 103%.
+//
+// https://sky-atlas.io/#1981fd65-a9a5-4e5a-a9f8-aa8e85342d7c (low)
+// https://sky-atlas.io/#363e2bb5-47e2-4eb8-950d-eafd0f1392c7 (high)
+export const ENCUMBRANCE_LOW_SEVERITY_THRESHOLD = 1;
+export const ENCUMBRANCE_HIGH_SEVERITY_THRESHOLD = 1.03;
+
+export type EncumbranceSeverity = 'none' | 'low' | 'high';
+
+/**
+ * Classifies an encumbrance ratio against the Atlas thresholds.
+ *
+ * Exactly 103% falls outside both written definitions — "below 103%" excludes
+ * it and "above 103%" excludes it — so it is read as high here. On a risk
+ * surface the conservative side of an ambiguity is the safe one, and a ratio at
+ * the high boundary is plainly not the lesser breach.
+ */
+export function encumbranceSeverity(
+  ratio: number | null | undefined,
+): EncumbranceSeverity {
+  if (ratio === null || ratio === undefined || !Number.isFinite(ratio)) {
+    return 'none';
+  }
+  if (ratio >= ENCUMBRANCE_HIGH_SEVERITY_THRESHOLD) {
+    return 'high';
+  }
+  return ratio >= ENCUMBRANCE_LOW_SEVERITY_THRESHOLD ? 'low' : 'none';
+}
+
+/**
+ * Columns that spread `count` cards evenly over the fewest rows `maxColumns`
+ * allows — 6 cards in 4 columns becomes 3 and 3, not 4 and 2.
+ *
+ * A row that cannot be filled is left short rather than stretched: five cards
+ * over three columns is 3 then 2, and those two keep the width of the three
+ * above them instead of growing to half the container each.
+ */
+/**
+ * Projects gap-filled buckets onto chart points, dropping those whose figure is
+ * absent.
+ *
+ * A dropped bucket leaves a hole the line is then drawn straight across, so this
+ * reads a discontinuous series as continuous. That is tolerable because every
+ * caller's figure is LOCF-carried server-side — an interior gap means the whole
+ * feed stopped, which the cronjob alerts already cover — but it is the reason
+ * absence is dropped rather than plotted as zero.
+ */
+export function toChartSeries<T extends { bucket_start: string }>(
+  buckets: readonly T[],
+  read: (bucket: T) => number | null,
+): { label: string; value: number }[] {
+  return buckets
+    .map((bucket) => ({
+      label: formatChartTimestampLabel(bucket.bucket_start),
+      value: read(bucket) ?? Number.NaN,
+    }))
+    .filter((point) => Number.isFinite(point.value));
+}
+
+export function balancedColumns(count: number, maxColumns: number): number {
+  if (count <= 1) {
+    return 1;
+  }
+
+  const rows = Math.ceil(count / maxColumns);
+  return Math.ceil(count / rows);
+}
+
 export function formatRatioPercent(
   value: number | string | null | undefined,
   digits = 2,

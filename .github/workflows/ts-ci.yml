@@ -76,6 +76,9 @@ jobs:
       - name: Run prime grouping regression test
         run: npm run test:prime-grouping -w ui
 
+      - name: Metrics grid balances its rows
+        run: npm run test:metrics-grid -w ui
+
       - name: Run explorer URL regression test
         run: npm run test:explorers -w ui
 

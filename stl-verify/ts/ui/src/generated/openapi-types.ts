@@ -197,7 +197,7 @@ export interface paths {
     };
     /**
      * Prime total-capital (treasury) time series
-     * @description Return the prime's total capital over time, gap-filled (LOCF) into buckets. Total capital is the treasury USDS held in the prime's SubProxy wallet (USDS is dollar-pegged, so the balance is the USD figure); it matches the upstream Star `total_capital`. Returns `404` if the prime is unknown. Defaults to the last 24h; pass a window and `resolution` for longer ranges.
+     * @description Return the prime's total capital over time, gap-filled (LOCF) into buckets. Total capital is the treasury USDS held in the prime's SubProxy wallet (USDS is dollar-pegged, so the balance is the USD figure); it matches the upstream Star `total_capital`. Under `reference=true` each bucket also carries `assets_usd` (the upstream PRIME COLLATERAL figure) and the monitor's `encumbrance_ratio`. Returns `404` if the prime is unknown. Defaults to the last 24h; pass a window and `resolution` for longer ranges.
      */
     get: operations['list_prime_total_capital_v1_primes__prime_id__total_capital_get'];
     put?: never;
@@ -2326,15 +2326,43 @@ export interface components {
     };
     /**
      * TotalCapitalBucketResponse
-     * @description Last observed treasury balance within a single time bucket (LOCF gap-filled).
+     * @description Last observed capital figures within a single time bucket (LOCF gap-filled).
+     *
+     *     Only ``total_capital_usd`` is served in both modes. The other two are
+     *     reference-only and come from two different upstream feeds, so each is null
+     *     outside the range its own feed covers.
      */
     TotalCapitalBucketResponse: {
+      /**
+       * Assets Observed At
+       * @description When `assets_usd` was observed. Not `bucket_start`: the balance-sheet feed publishes one row per prime per day and the value is carried forward, so a figure can be up to a day older than the bucket serving it. Consumers should show this rather than implying the figure is current.
+       * @example 2026-08-19T00:00:00Z
+       */
+      assets_observed_at?: string | null;
+      /**
+       * Assets Usd
+       * @description Total assets the prime holds, as published upstream — the figure Sky's dashboard labels PRIME COLLATERAL. Reference mode only, and `null` outside the range the balance-sheet feed covers. STL computes no equivalent: its own asset total omits sources it does not index (PSM3, Curve LP valuations), so it is not served here.
+       * @example 3190000000.00
+       */
+      assets_usd?: string | null;
       /**
        * Bucket Start
        * Format: date-time
        * @description Inclusive start of the time bucket (UTC).
        */
       bucket_start: string;
+      /**
+       * Capital Observed At
+       * @description When `total_capital_usd`, `exposure_usd` and `encumbrance_ratio` were last observed. One field rather than three: the monitor reports them together, so a stamp each would repeat one instant. Carried forward like the figures it describes, so a value observed well before the window still reports its own age rather than the bucket's.
+       * @example 2026-08-20T09:00:00Z
+       */
+      capital_observed_at?: string | null;
+      /**
+       * Encumbrance Ratio
+       * @description `required_risk_capital / total_risk_capital` as the monitor reported it (0-1). Reference mode only, and `null` for buckets covered by backfilled history alone: the balance-sheet feed carries no encumbrance figure.
+       * @example 0.9397
+       */
+      encumbrance_ratio?: string | null;
       /**
        * Total Capital Usd
        * @description Last observed SubProxy treasury USDS balance carried forward into the bucket (USD; USDS is dollar-pegged), serialized as a JSON string. `null` for leading buckets before the first observation.
@@ -2349,7 +2377,7 @@ export interface components {
     TotalCapitalEnvelope: {
       /**
        * Data
-       * @description Last treasury balance per time bucket.
+       * @description Last observed capital figures per time bucket, newest first.
        */
       data: components['schemas']['TotalCapitalBucketResponse'][];
       /**

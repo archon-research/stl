@@ -33,6 +33,8 @@ type ClientConfig struct {
 	BaseURL string
 	Timeout time.Duration
 	Logger  *slog.Logger
+	// Now decides which day is still in progress; injected so the cutoff is testable.
+	Now func() time.Time
 }
 
 // Client fetches per-prime daily balance sheets from Sky.
@@ -40,6 +42,7 @@ type Client struct {
 	baseURL    string
 	httpClient *httpclient.Client
 	logger     *slog.Logger
+	now        func() time.Time
 }
 
 // NewClient creates a new Sky balance-sheet client.
@@ -49,6 +52,9 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	}
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = defaultBaseURL
+	}
+	if cfg.Now == nil {
+		cfg.Now = time.Now
 	}
 
 	trimmed := strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
@@ -73,6 +79,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		baseURL:    trimmed,
 		httpClient: httpclient.NewClient(httpCfg, logger, nil),
 		logger:     logger,
+		now:        cfg.Now,
 	}, nil
 }
 
@@ -98,9 +105,20 @@ func (c *Client) FetchHistory(ctx context.Context, stars []string, daysAgo int) 
 		return nil, fmt.Errorf("sky balance-sheet history returned no rows for %d days", daysAgo)
 	}
 
+	// The feed's row for the current UTC day is provisional — it moves as the day
+	// runs (verified live: today's assets differ from yesterday's close). Dropped
+	// here rather than persisted, because the store cannot revise it: the
+	// processing-version trigger is build-aware, so a second write for the same
+	// day under the same deployment is discarded, freezing whatever the first
+	// cycle happened to see. A day is recorded once it can no longer change.
+	today := c.now().UTC().Format(time.DateOnly)
+
 	days := make([]outbound.BalanceSheetDay, 0, len(payload.Data))
 	for i, row := range payload.Data {
 		if !wanted[strings.ToLower(strings.TrimSpace(row.Star))] {
+			continue
+		}
+		if strings.TrimSpace(row.Date) == today {
 			continue
 		}
 		day, err := toDay(row, i)

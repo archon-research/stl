@@ -9,8 +9,6 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5/pgxpool"
-
-	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 const protocolDBName = "test_protocol"
@@ -18,11 +16,7 @@ const protocolDBName = "test_protocol"
 var protocolPool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(func() {
-		protocolPool = testutil.SetupDBForMain(sharedDSN, protocolDBName)
-	}, func() {
-		testutil.CleanupDBForMain(sharedDSN, protocolPool, protocolDBName)
-	})
+	useFileDatabase(protocolDBName, &protocolPool)
 }
 
 // truncateProtocol clears the protocol table for test isolation.

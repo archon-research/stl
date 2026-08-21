@@ -24,11 +24,7 @@ const mapleDBName = "test_maple_graphql"
 var maplePool *pgxpool.Pool
 
 func init() {
-	registerTestFileSetup(func() {
-		maplePool = testutil.SetupDBForMain(sharedDSN, mapleDBName)
-	}, func() {
-		testutil.CleanupDBForMain(sharedDSN, maplePool, mapleDBName)
-	})
+	useFileDatabase(mapleDBName, &maplePool)
 }
 
 // truncateMaple clears maple-related tables for test isolation. The protocol
