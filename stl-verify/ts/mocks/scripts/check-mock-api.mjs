@@ -344,11 +344,75 @@ async function checkDebtRawSnapshots() {
   );
 
   assert.equal(raw.mode, 'raw');
-  assert.equal(raw.source, 'self');
+  assert.equal(raw.source, 'indexed');
   assert.equal(raw.data.length, 1, 'limit=1 should return one snapshot');
   assert.equal(raw.data[0].ilk_name, 'ALLOCATOR-SPARK-A');
   assert.equal(raw.data[0].prime_address, SPARK_VAULT);
   assert.match(raw.data[0].debt_wad, /^\d+$/u, 'debt_wad is an integer string');
+}
+
+async function checkProvenanceSelection() {
+  const window = { aggregate: true, limit: 3 };
+
+  for (const source of ['indexed', 'reference', 'both']) {
+    const envelope = await request(
+      '/v1/primes/{prime_id}/exposure',
+      {
+        params: {
+          path: { prime_id: SPARK_MAINNET_PROXY },
+          query: { ...window, source },
+        },
+      },
+      `exposure (source=${source})`,
+    );
+    assert.equal(
+      envelope.source,
+      source,
+      `source=${source} should answer as itself`,
+    );
+  }
+
+  // The superseded spelling still resolves, and `false` means STL's own figures
+  // by name rather than whatever the default is.
+  const byFlag = await request(
+    '/v1/primes/{prime_id}/exposure',
+    {
+      params: {
+        path: { prime_id: SPARK_MAINNET_PROXY },
+        query: { ...window, reference: true },
+      },
+    },
+    'exposure (reference=true)',
+  );
+  assert.equal(byFlag.source, 'reference');
+
+  const offByName = await request(
+    '/v1/primes/{prime_id}/exposure',
+    {
+      params: {
+        path: { prime_id: SPARK_MAINNET_PROXY },
+        query: { ...window, reference: false },
+      },
+    },
+    'exposure (reference=false)',
+  );
+  assert.equal(offByName.source, 'indexed');
+}
+
+async function checkProvenanceConflictRejected() {
+  // Preferring one silently would answer a different question than one of the
+  // two the caller asked, so the API refuses and the mock must too.
+  await expectStatus(
+    '/v1/primes/{prime_id}/exposure',
+    {
+      params: {
+        path: { prime_id: SPARK_MAINNET_PROXY },
+        query: { aggregate: true, source: 'indexed', reference: true },
+      },
+    },
+    422,
+    'source and reference disagreeing',
+  );
 }
 
 async function checkDebtAggregatedBuckets() {
@@ -950,6 +1014,11 @@ const checks = [
   ['aggregated flows are valued in USD', checkAggregatedFlowsAreValued],
   ['the raw feed honours limit', checkRawActivityHonoursLimit],
   ['debt raw snapshots', checkDebtRawSnapshots],
+  ['provenance selection', checkProvenanceSelection],
+  [
+    'a contradictory provenance pair is refused',
+    checkProvenanceConflictRejected,
+  ],
   ['debt aggregated buckets', checkDebtAggregatedBuckets],
   ['series values follow their instant', checkSeriesValuesFollowTheirInstant],
   ['repeated reads are stable', checkRepeatedReadsAreStable],

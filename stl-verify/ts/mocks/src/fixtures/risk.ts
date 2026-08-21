@@ -64,6 +64,8 @@ function pricedAllocation(row: PerAllocationRow): AllocationRiskCapital {
 
   return {
     receipt_token_id: receiptTokenId,
+    // STL's own model; a merged-mode fixture would say otherwise.
+    source: 'indexed',
     symbol: tokenSymbol(receiptTokenId),
     protocol_name: protocolName,
     exposure_usd: exposureUsd,
@@ -91,6 +93,7 @@ const SPARK_PER_ALLOCATION: readonly AllocationRiskCapital[] = [
   // The one unpriced row, and the reason the UI needs an `applied: false` state.
   {
     receipt_token_id: 850711,
+    source: 'indexed',
     symbol: 'syrupUSDC',
     protocol_name: 'maple',
     exposure_usd: '0.000000999870000000',
@@ -162,7 +165,7 @@ const SPARK_RISK_CAPITAL: PrimeRiskCapital = {
   prime_id: SPARK_MAINNET_PROXY,
   proxy_address: SPARK_MAINNET_PROXY,
   model: 'gap_sweep',
-  source: 'self',
+  source: 'indexed',
   exposure_usd: '1656538061.841276418798473974',
   total_risk_capital_usd: '48142491.085806286854722044',
   required_risk_capital_usd: '44692696.19',
@@ -185,7 +188,7 @@ const GROVE_RISK_CAPITAL: PrimeRiskCapital = {
   prime_id: GROVE_MAINNET_PROXY,
   proxy_address: GROVE_MAINNET_PROXY,
   model: 'gap_sweep',
-  source: 'self',
+  source: 'indexed',
   exposure_usd: '124481521.310000000000000000',
   total_risk_capital_usd: '9204118.400000000000000000',
   required_risk_capital_usd: '5564324.20',

@@ -43,6 +43,7 @@ type PositionSeed = Omit<
   Allocation,
   | 'chain_id'
   | 'receipt_token_address'
+  | 'source'
   | 'symbol'
   | 'underlying_symbol'
   | 'underlying_token_address'
@@ -50,6 +51,8 @@ type PositionSeed = Omit<
 > & {
   /** Required: a row's chain and its `underlying_symbol` are read off it. */
   underlying_token_id: NonNullable<Allocation['underlying_token_id']>;
+  /** Defaults to `indexed`: these are STL's own rows unless a case says otherwise. */
+  source?: Allocation['source'];
 };
 
 function position(seed: PositionSeed): Allocation {
@@ -59,6 +62,7 @@ function position(seed: PositionSeed): Allocation {
   return {
     ...seed,
     chain_id: underlying.chain_id,
+    source: seed.source ?? 'indexed',
     receipt_token_address:
       receiptTokenId === null ? null : tokenById(receiptTokenId).address,
     // A wrapped position is labelled by its receipt token, a direct holding by
@@ -208,6 +212,7 @@ function sparkMainnetAllocations(nowMs: number): Allocation[] {
     // to read a chain, an address or a symbol off.
     {
       chain_id: 0,
+      source: 'indexed',
       receipt_token_id: null,
       receipt_token_address: null,
       underlying_token_id: null,

@@ -2,7 +2,7 @@
  * The three per-prime time series: exposure, total capital, debt.
  *
  * Exposure and total capital are aggregate-only by contract (`mode` is the
- * constant `'aggregated'`). Debt has both modes, and `reference=true` is
+ * constant `'aggregated'`). Debt has both modes, and a reference provenance is
  * aggregate-only there because upstream publishes one figure per prime per day
  * with no ilk or block identity, so the API answers `400` rather than inventing
  * them.
@@ -23,7 +23,7 @@ import {
   usdString,
 } from '../fixtures/series.ts';
 import { SERIES_DELAY_MS, mock } from '../mock-api.ts';
-import type { Parsed, Problem } from '../problem.ts';
+import { invalidQueryParam, type Parsed, type Problem } from '../problem.ts';
 import { badRequest, notFound, problemResponse } from '../problem.ts';
 import {
   bucketStarts,
@@ -35,6 +35,7 @@ import {
 import type {
   ExposureBucket,
   PrimeDebtBucket,
+  Provenance,
   TimeSeriesWindow,
   TotalCapitalBucket,
 } from '../schema.ts';
@@ -72,7 +73,7 @@ type SeriesRequest = {
   window: TimeSeriesWindow;
   starts: number[];
   limit: number;
-  reference: boolean;
+  source: Provenance;
 };
 
 export type SeriesQuery = {
@@ -80,8 +81,53 @@ export type SeriesQuery = {
   toTimestamp: string | null;
   resolution: string | null;
   limit: string | null;
+  source: string | null;
   reference: string | null;
 };
+
+const PROVENANCES: readonly Provenance[] = ['indexed', 'reference', 'both'];
+
+/**
+ * Resolve the provenance the way the API does.
+ *
+ * `source` wins where both are given and they agree; a disagreement is a 422
+ * there, so it is a problem here too. `reference=false` asked for STL's own
+ * figures by name, so it is `indexed` rather than the default.
+ */
+function readProvenance(
+  source: string | null,
+  reference: string | null,
+): Parsed<Provenance> {
+  const named = PROVENANCES.find((candidate) => candidate === source);
+  if (source !== null && named === undefined) {
+    return {
+      ok: false,
+      problem: invalidQueryParam(
+        'source',
+        `Input should be ${PROVENANCES.join(', ')}`,
+      ),
+    };
+  }
+
+  if (reference === null) {
+    return { ok: true, value: named ?? 'indexed' };
+  }
+
+  const flag = readFlag('reference', reference);
+  if (!flag.ok) return flag;
+  const legacy: Provenance = flag.value ? 'reference' : 'indexed';
+
+  if (named !== undefined && named !== legacy) {
+    return {
+      ok: false,
+      problem: invalidQueryParam(
+        'source',
+        `conflicts with the deprecated reference param, which asked for ${legacy}`,
+      ),
+    };
+  }
+  return { ok: true, value: named ?? legacy };
+}
 
 /**
  * Takes the raw strings rather than the resolver's `query` object: the three
@@ -96,8 +142,8 @@ function readSeriesRequest(
   if (!resolved.ok) return resolved;
   const limit = readLimit(raw.limit, BUCKET_LIMIT_DEFAULT, BUCKET_LIMIT_MAX);
   if (!limit.ok) return limit;
-  const reference = readFlag('reference', raw.reference);
-  if (!reference.ok) return reference;
+  const source = readProvenance(raw.source, raw.reference);
+  if (!source.ok) return source;
 
   const { window, fromMs, toMs } = resolved.value;
   return {
@@ -106,7 +152,7 @@ function readSeriesRequest(
       window,
       limit: limit.value,
       starts: bucketStarts(fromMs, toMs, window.interval_ms, limit.value),
-      reference: reference.value,
+      source: source.value,
     },
   };
 }
@@ -123,6 +169,7 @@ type SeriesQueryReader = {
       | 'to_timestamp'
       | 'resolution'
       | 'limit'
+      | 'source'
       | 'reference',
   ) => string | null;
 };
@@ -133,6 +180,7 @@ function seriesQuery(query: SeriesQueryReader): SeriesQuery {
     toTimestamp: query.get('to_timestamp'),
     resolution: query.get('resolution'),
     limit: query.get('limit'),
+    source: query.get('source'),
     reference: query.get('reference'),
   };
 }
@@ -160,7 +208,7 @@ export function seriesHandlers(): MockHandler[] {
 
         return response(200).json({
           mode: 'aggregated',
-          source: request.value.reference ? 'reference' : 'self',
+          source: request.value.source,
           window: request.value.window,
           // The return annotation is load-bearing, not decoration: a `.map()`
           // result is not a fresh object literal, so without it a bucket field
@@ -193,7 +241,7 @@ export function seriesHandlers(): MockHandler[] {
 
         return response(200).json({
           mode: 'aggregated',
-          source: request.value.reference ? 'reference' : 'self',
+          source: request.value.source,
           window: request.value.window,
           data: seriesPoints(
             TOTAL_CAPITAL_USD,
@@ -223,14 +271,14 @@ export function seriesHandlers(): MockHandler[] {
           return response.untyped(problemResponse(request.problem));
         }
 
-        const { window, starts, limit, reference } = request.value;
+        const { window, starts, limit, source } = request.value;
         const parsedAggregate = readFlag('aggregate', query.get('aggregate'));
         if (!parsedAggregate.ok) {
           return response.untyped(problemResponse(parsedAggregate.problem));
         }
         const aggregate = parsedAggregate.value;
 
-        if (reference && !aggregate) {
+        if (source !== 'indexed' && !aggregate) {
           return response.untyped(
             problemResponse(
               badRequest('reference debt requires aggregate=true'),
@@ -241,7 +289,7 @@ export function seriesHandlers(): MockHandler[] {
         if (aggregate) {
           return response(200).json({
             mode: 'aggregated',
-            source: reference ? 'reference' : 'self',
+            source,
             window,
             data: seriesPoints(PRIME_DEBT_USDS, starts, nowMs).map(
               (point): PrimeDebtBucket => ({
@@ -254,7 +302,7 @@ export function seriesHandlers(): MockHandler[] {
 
         return response(200).json({
           mode: 'raw',
-          source: 'self',
+          source: 'indexed',
           window,
           data: seedDebtSnapshots(
             nowMs,
