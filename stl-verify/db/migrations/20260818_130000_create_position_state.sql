@@ -253,6 +253,14 @@ BEGIN
     SELECT format('%I.%I', nsp.nspname, cls.relname) INTO v_qualname
       FROM pg_class cls JOIN pg_namespace nsp ON nsp.oid = cls.relnamespace
      WHERE cls.oid = p_view;
+    -- regclass holds any oid, so a dangling reference (a literal oid cast, or the view dropped between
+    -- the caller's cast and this lookup) leaves v_qualname NULL. That is not cosmetic: the lock key
+    -- would concatenate to NULL and pg_advisory_xact_lock is STRICT, so the run would proceed with NO
+    -- lock (reproduced: 0 rows in pg_locks), and check (4) below compares `projection <> v_qualname`,
+    -- which is NULL for every row and therefore passes every ownership violation silently.
+    IF v_qualname IS NULL THEN
+        RAISE EXCEPTION 'materialize_position_projection: p_view (oid %) does not name an existing relation', p_view::oid;
+    END IF;
     PERFORM pg_advisory_xact_lock(hashtextextended('materialize_position_projection.' || v_qualname, 0));
 
     -- (1) Enforce the column contract (name + BASE type) before trusting the view. Compare on the base
@@ -328,8 +336,13 @@ BEGIN
 
     -- (4) Cross-view disjointness ENFORCED as data, not trusted: one projection owns a position_id. Every
     -- insert below stamps the writing view's canonical name, and this check probes ONE stored row per run
-    -- position (the PK-first row — sound inductively, because this check runs before every insert and all
-    -- of a position's rows are stamped identically). A different owner means two views are interleaving
+    -- position (the PK-first row — sound once a position has any stored row, because this check runs
+    -- before every insert and all of a position's rows are stamped identically). It does NOT close the
+    -- first-ever write: two views emitting the same new position concurrently both see no owner and both
+    -- insert, so ownership is established by whichever commits first and the other's rows sit under a
+    -- different projection. Views are per-protocol and disjoint by design, so this needs two projections
+    -- claiming one position, which is itself the bug this check exists to surface — it will be caught on
+    -- the next run rather than prevented. A different owner means two views are interleaving
     -- the same position — the overlap the per-view advisory lock cannot serialize (different views take
     -- different locks) — so fail loudly naming both views.
     SELECT format('position owned by %s', own.projection) INTO bad
