@@ -19,7 +19,7 @@ const (
 
 // TestMaterializeMorphoMarket is the VEC-402 contract test: after migrations,
 // materialize_morpho_market() projects raw morpho_market_position rows into position_state on the
-// native per-instrument grain (VEC-400) and writes the current deal_type into position_classification.
+// native per-instrument grain (VEC-400). Observations only: the spine writes no classification.
 //
 // It pins the behaviours the live data forced (verified over 866,833 rows, 2026-07-24):
 //   - native per-instrument fan-out: one raw row -> its loan-token position and its collateral-token
@@ -83,8 +83,11 @@ BEGIN
   -- C: supply-and-borrow loop of the loan token -> nets to one loan-token position (|100-40| = 60, LOAN).
   INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, timestamp, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets)
     VALUES (ucid, mid, 100, 0, '2026-01-01T00:00:00Z', 0, 0, 0, 100, 40);
-  -- D: one block observation reprocessed -> the assign-pv trigger stamps the two rows pv=0 (supply 10)
-  -- and pv=1 (supply 20). processing_version is part of the grain, so BOTH are retained as observations;
+  -- D: one block observed twice at different wall-clock timestamps. assign_processing_version_morpho_market_position
+  -- keys its dedup on (user, market, block, block_version, TIMESTAMP), so these are two separate groups and BOTH
+  -- get pv=0 -- not pv=0 and pv=1. The projection's DISTINCT ON (..., processing_version) collapses them to one
+  -- row at the latest timestamp (supply 20), which is what the spine requires: block_timestamp is invariant per
+  -- logical key, so an event-time source must pick one stably. Retained for the record:
   -- position_current picks the latest pv (supply 20). (No explicit pv column: the trigger assigns it.)
   INSERT INTO morpho_market_position (user_id, morpho_market_id, block_number, block_version, timestamp, supply_shares, borrow_shares, collateral, supply_assets, borrow_assets)
     VALUES (udid, mid, 100, 0, '2026-01-01T00:00:00Z', 0, 0, 0, 10, 0),
@@ -141,11 +144,11 @@ END $$;`
 		FROM position_state`).Scan(&rows, &distinctPositions, &collisions, &badLen); err != nil {
 		t.Fatalf("position_state summary: %v", err)
 	}
-	if rows != 17 {
-		t.Errorf("position_state rows = %d, want 17", rows)
+	if rows != 16 {
+		t.Errorf("position_state rows = %d, want 16", rows)
 	}
-	if written != 17 {
-		t.Errorf("materialize returned %d, want 17", written)
+	if written != 16 {
+		t.Errorf("materialize returned %d, want 16", written)
 	}
 	if distinctPositions != 10 {
 		t.Errorf("distinct position_id = %d, want 10", distinctPositions)
@@ -169,7 +172,7 @@ END $$;`
 		{"B borrow leg (loan token)", loanInstrument, "bb", "30", 1},
 		{"B collateral leg (collateral token)", collInstrument, "bb", "5", 1},
 		{"C supply/borrow netted (|100-40|)", loanInstrument, "cc", "60", 1},
-		{"D reprocessed: both processing versions retained, latest pv (20) is current", loanInstrument, "dd", "20", 2},
+		{"D observed twice at one block: one logical key, latest timestamp wins", loanInstrument, "dd", "20", 1},
 		{"E collateral closed: open + one closing zero-row", collInstrument, "ee", "0", 2},
 		{"F loan closed: borrow + one closing zero-row", loanInstrument, "ef", "0", 2},
 		{"G leading + repeated zeros dropped: open + one close", collInstrument, "f0", "0", 2},
@@ -198,58 +201,15 @@ END $$;`
 		})
 	}
 
-	// One current classification per position_id (10), each with the right deal_type and frozen direction.
-	// Closed positions (E/F/G) keep the deal_type of their last NON-ZERO observation, not the zero-row.
-	var classRows int
-	if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_classification`).Scan(&classRows); err != nil {
-		t.Fatalf("classification count: %v", err)
-	}
-	if classRows != 10 {
-		t.Errorf("position_classification rows = %d, want 10", classRows)
-	}
-	for _, c := range []struct {
-		name          string
-		instrument    string
-		holder        string
-		wantDealType  string
-		wantDirection string
-	}{
-		{"A -> LOAN/LONG", loanInstrument, "aa", "LOAN", "LONG"},
-		{"B loan -> BORROW/SHORT", loanInstrument, "bb", "BORROW", "SHORT"},
-		{"B coll -> COLLATERAL/LONG", collInstrument, "bb", "COLLATERAL", "LONG"},
-		{"C net-supply -> LOAN/LONG", loanInstrument, "cc", "LOAN", "LONG"},
-		{"E closed collateral keeps COLLATERAL/LONG", collInstrument, "ee", "COLLATERAL", "LONG"},
-		{"F closed loan keeps BORROW/SHORT (last non-zero)", loanInstrument, "ef", "BORROW", "SHORT"},
-		{"I re-opened collateral -> COLLATERAL/LONG", collInstrument, "f1", "COLLATERAL", "LONG"},
-		{"H same-token loan leg -> LOAN/LONG", m2LoanInstrument, "f2", "LOAN", "LONG"},
-	} {
-		c := c
-		t.Run("classify "+c.name, func(t *testing.T) {
-			var dealType, direction string
-			if err := pool.QueryRow(ctx, `
-				SELECT pc.deal_type_code, pc.direction
-				FROM position_classification pc
-				JOIN (SELECT DISTINCT position_id, instrument_key, holder_id FROM position_state) ps
-				  ON ps.position_id = pc.position_id
-				WHERE ps.instrument_key = $1 AND ps.holder_id = $2`,
-				c.instrument, c.holder).Scan(&dealType, &direction); err != nil {
-				t.Fatalf("classification query: %v", err)
-			}
-			if dealType != c.wantDealType || direction != c.wantDirection {
-				t.Errorf("classification = %s/%s, want %s/%s", dealType, direction, c.wantDealType, c.wantDirection)
-			}
-		})
-	}
-
-	// Idempotent: a second run upserts the same rows, not new ones.
+	// Idempotent: a second run re-derives the same observations and appends nothing.
 	if _, err := pool.Exec(ctx, `SELECT materialize_morpho_market()`); err != nil {
 		t.Fatalf("second materialize: %v", err)
 	}
-	var rows2, class2 int
-	if err := pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM position_state), (SELECT count(*) FROM position_classification)`).Scan(&rows2, &class2); err != nil {
+	var rows2 int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM position_state`).Scan(&rows2); err != nil {
 		t.Fatalf("re-count: %v", err)
 	}
-	if rows2 != 17 || class2 != 10 {
-		t.Errorf("after re-run: position_state=%d (want 17), position_classification=%d (want 10)", rows2, class2)
+	if rows2 != 16 {
+		t.Errorf("after re-run: position_state=%d, want 16 (the rerun must append nothing)", rows2)
 	}
 }

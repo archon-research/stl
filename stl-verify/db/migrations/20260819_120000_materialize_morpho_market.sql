@@ -106,11 +106,11 @@ COMMENT ON VIEW position_morpho_market IS '[Operational] VEC-402 projection: Mor
 -- Populate the spine + current classification via the shared materializer (defined with position_state,
 -- VEC-402 spine). The projection view above holds all the Morpho-market-specific logic; the identical
 -- upsert plumbing is not duplicated here. Idempotent; run out of band; returns position_state rows written.
-CREATE OR REPLACE FUNCTION materialize_morpho_market() RETURNS bigint
+CREATE OR REPLACE FUNCTION materialize_morpho_market(p_build_id integer DEFAULT 0) RETURNS bigint
     LANGUAGE sql AS $fn$
-    SELECT materialize_position_projection('position_morpho_market'::regclass, 'VEC-402: morpho_market materializer');
+    SELECT materialize_position_projection('position_morpho_market'::regclass, p_build_id);
 $fn$;
 
-COMMENT ON FUNCTION materialize_morpho_market() IS '[Operational] VEC-402: materialize Morpho market positions into position_state + position_classification, via materialize_position_projection(position_morpho_market). Idempotent; run out of band. Returns position_state rows written.';
+COMMENT ON FUNCTION materialize_morpho_market(integer) IS '[Operational] VEC-402: materialize Morpho market positions into position_state (observations only; no classification is written), via materialize_position_projection(position_morpho_market). Idempotent; run out of band. p_build_id is stamped on every appended row (build_registry.id; 0 = pre-tracking). Returns position_state rows appended.';
 
 INSERT INTO migrations (filename) VALUES ('20260819_120000_materialize_morpho_market.sql') ON CONFLICT (filename) DO NOTHING;
