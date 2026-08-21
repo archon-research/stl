@@ -79,7 +79,13 @@ import {
 } from './lib/dashboard';
 import { isAbortError, toErrorMessage } from './lib/errors';
 import { logging } from './lib/logging';
-import { preferReference, showsReference } from './lib/provenance';
+import {
+  narrowAllocations,
+  narrowRiskCapital,
+  preferReference,
+  showsReference,
+  useProvenanceView,
+} from './lib/provenance';
 import { ACTIVITY_ACTIONS, type AppSearchPatch } from './router/search-params';
 import type {
   Allocation,
@@ -177,12 +183,16 @@ const PRIME_SCOPED_RESET: AppSearchPatch = {
 };
 
 function App() {
+  // What is on screen, which is not always what was fetched: narrowing a
+  // composite response changes this without a request.
+  const { provenance: shownProvenance, showsReference: showsReferenceNow } =
+    useProvenanceView();
   const [primes, setPrimes] = useState<Prime[]>([]);
   const [primesErrorMessage, setPrimesErrorMessage] = useState<string | null>(
     null,
   );
   const [isPrimesLoading, setIsPrimesLoading] = useState(true);
-  const [allocations, setAllocations] = useState<Allocation[]>([]);
+  const [fetchedAllocations, setAllocations] = useState<Allocation[]>([]);
   const [allocationsErrorMessage, setAllocationsErrorMessage] = useState<
     string | null
   >(null);
@@ -199,7 +209,21 @@ function App() {
   const [, setDataSources] = useState<DataSource[]>([]);
   const [localChains, setLocalChains] = useState<LocalChainRow[]>([]);
   const [localProtocols, setLocalProtocols] = useState<LocalProtocolRow[]>([]);
-  const [riskCapital, setRiskCapital] = useState<PrimeRiskCapital | null>(null);
+  const [fetchedRiskCapital, setRiskCapital] =
+    useState<PrimeRiskCapital | null>(null);
+
+  // What was fetched, narrowed to what is being shown. A composite response
+  // holds both provenances, so switching between them is this projection rather
+  // than a request — and doing it here, once, is what keeps the table, the
+  // cards, the charts and the drawer from disagreeing about which they show.
+  const allocations = useMemo(
+    () => narrowAllocations(shownProvenance, fetchedAllocations),
+    [shownProvenance, fetchedAllocations],
+  );
+  const riskCapital = useMemo(
+    () => narrowRiskCapital(shownProvenance, fetchedRiskCapital),
+    [shownProvenance, fetchedRiskCapital],
+  );
   const [referenceDebt, setReferenceDebt] = useState<PrimeDebtBucket | null>(
     null,
   );
@@ -899,7 +923,7 @@ function App() {
   // When the reference collateral figure was observed, which is not the bucket
   // serving it: the feed is daily and the value is carried forward, so without
   // showing this a figure up to a day old is indistinguishable from a fresh one.
-  const primeCollateralObservedAt = showsReference
+  const primeCollateralObservedAt = showsReferenceNow
     ? (totalCapitalBuckets
         .filter((bucket) => bucket.assets_observed_at != null)
         .at(-1)?.assets_observed_at ?? null)
@@ -908,7 +932,7 @@ function App() {
   // The monitor's three figures share one stamp because they share one row. It
   // matters for the same reason the collateral one does, and more so since the
   // prior seeding reaches up to 90 days back.
-  const capitalObservedAt = showsReference
+  const capitalObservedAt = showsReferenceNow
     ? (totalCapitalBuckets
         .filter((bucket) => bucket.capital_observed_at != null)
         .at(-1)?.capital_observed_at ?? null)
@@ -918,7 +942,7 @@ function App() {
   // equivalent — STL does not index PSM3 and prices no Curve LP position — so
   // it shows what STL actually holds records for, captioned as such.
   // Buckets are oldest-first, so the newest observation is the last point.
-  const primeCollateralValue = showsReference
+  const primeCollateralValue = showsReferenceNow
     ? (collateralSeries.at(-1)?.value ?? null)
     : primeTotalAllocationUsd;
 

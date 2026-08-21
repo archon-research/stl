@@ -1,3 +1,5 @@
+import { useSearch } from '@tanstack/react-router';
+
 import { toProvenance } from '../router/search-params';
 // Selects the provenance every endpoint that supports it answers from:
 //
@@ -19,7 +21,11 @@ import { toProvenance } from '../router/search-params';
 // must not change mid-session, because the request that populated a cached
 // series and the request refreshing it would then disagree about provenance —
 // the one thing the `source` field exists to make impossible.
-import type { Provenance } from '../types/allocation';
+import type {
+  Allocation,
+  PrimeRiskCapital,
+  Provenance,
+} from '../types/allocation';
 
 const entryParams = new URLSearchParams(globalThis.location?.search ?? '');
 
@@ -45,12 +51,51 @@ export const PROVENANCE: Provenance =
  */
 export const sourceQuery = { source: PROVENANCE } as const;
 
-/** Whether Sky's published figures are on screen, alone or merged. */
+/** Whether the request asked for Sky's figures, alone or merged. */
 export const showsReference =
   PROVENANCE === 'reference' || PROVENANCE === 'both';
 
-/** Whether STL's own figures are on screen, alone or merged. */
+/** Whether the request asked for STL's figures, alone or merged. */
 export const showsIndexed = PROVENANCE === 'indexed' || PROVENANCE === 'both';
+
+/**
+ * Whether the provenance on screen can change without fetching anything.
+ *
+ * A composite response carries both provenances in one payload, so narrowing it
+ * to either is a projection of data already held. A response fetched as one
+ * provenance alone holds nothing to narrow, so switching from it needs a real
+ * request — and that means a fresh entry, because `PROVENANCE` above is fixed
+ * for the session by design.
+ */
+export const canRestateProvenance = PROVENANCE === 'both';
+
+/**
+ * The provenance being *shown*, which is not always the one fetched.
+ *
+ * Reads the URL, so a client-side navigation changes it; `PROVENANCE` stays at
+ * whatever the session fetched. The two differ only while narrowing a composite
+ * response, which is exactly when no request is needed.
+ */
+export function useProvenanceView(): {
+  provenance: Provenance;
+  showsReference: boolean;
+  showsIndexed: boolean;
+} {
+  // Not strict: the drawer and the band render on the activities route too,
+  // where the allocation search schema does not apply.
+  const search = useSearch({ strict: false }) as { source?: unknown };
+  const shown = canRestateProvenance
+    ? (toProvenance(
+        typeof search.source === 'string' ? search.source : undefined,
+      ) ?? 'both')
+    : PROVENANCE;
+
+  return {
+    provenance: shown,
+    showsReference: shown === 'reference' || shown === 'both',
+    showsIndexed: shown === 'indexed' || shown === 'both',
+  };
+}
 
 /**
  * Sky's figure for a merged row, or STL's where Sky reports none.
@@ -69,4 +114,78 @@ export function preferReference(
   stlValue: string | null | undefined,
 ): string | null {
   return skyValue ?? stlValue ?? null;
+}
+
+/**
+ * A composite response as the chosen provenance alone would have answered it.
+ *
+ * Every display reads a figure as "Sky's, else STL's" (`preferReference`), so
+ * narrowing is a matter of clearing the half that is not being shown rather
+ * than teaching each of those reads which provenance it is in: under `indexed`
+ * the `reference_*` fields go, leaving STL's; under `reference` the bare fields
+ * go, leaving Sky's with no fallback — which is what asking for Sky alone means.
+ *
+ * Applied once where the response is held, so no view can disagree with another
+ * about which provenance it is showing.
+ */
+export function narrowRiskCapital(
+  view: Provenance,
+  response: PrimeRiskCapital | null,
+): PrimeRiskCapital | null {
+  if (response === null || view === 'both') return response;
+
+  const sky = view === 'reference';
+  const drop = <T>(value: T, isSkys: boolean): T | null =>
+    isSkys === sky ? value : null;
+
+  return {
+    ...response,
+    prime_exposure_usd: drop(response.prime_exposure_usd, false) ?? '0',
+    reference_prime_exposure_usd: drop(
+      response.reference_prime_exposure_usd,
+      true,
+    ),
+    prime_required_risk_capital_usd:
+      drop(response.prime_required_risk_capital_usd, false) ?? '0',
+    reference_prime_required_risk_capital_usd: drop(
+      response.reference_prime_required_risk_capital_usd,
+      true,
+    ),
+    total_risk_capital_usd: drop(response.total_risk_capital_usd, false),
+    reference_total_risk_capital_usd: drop(
+      response.reference_total_risk_capital_usd,
+      true,
+    ),
+    prime_encumbrance_ratio: drop(response.prime_encumbrance_ratio, false),
+    reference_prime_encumbrance_ratio: drop(
+      response.reference_prime_encumbrance_ratio,
+      true,
+    ),
+    per_allocation: response.per_allocation.map((row) => ({
+      ...row,
+      required_risk_capital_usd: drop(row.required_risk_capital_usd, false),
+      crr_pct: drop(row.crr_pct, false),
+      reference_required_risk_capital_usd: drop(
+        row.reference_required_risk_capital_usd,
+        true,
+      ),
+      reference_crr_pct: drop(row.reference_crr_pct, true),
+    })),
+  };
+}
+
+/**
+ * The rows the chosen provenance would have returned.
+ *
+ * A row states which provenances describe it, so narrowing drops the ones the
+ * other provenance alone reported. A `both` row belongs to either view.
+ */
+export function narrowAllocations(
+  view: Provenance,
+  allocations: readonly Allocation[],
+): Allocation[] {
+  if (view === 'both') return [...allocations];
+
+  const excluded = view === 'indexed' ? 'reference' : 'indexed';
+  return allocations.filter((allocation) => allocation.source !== excluded);
 }

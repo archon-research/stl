@@ -6,7 +6,7 @@ import { Fragment } from 'react';
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
-import { PROVENANCE } from '../../lib/provenance';
+import { canRestateProvenance, useProvenanceView } from '../../lib/provenance';
 import type { Provenance } from '../../types/allocation';
 
 export type SettingsOption = {
@@ -185,6 +185,7 @@ export function useDataSourceSection(
   available: readonly Provenance[] = ['indexed', 'reference', 'both'],
 ): SettingsSection {
   const router = useRouter();
+  const { provenance: shown } = useProvenanceView();
 
   // Shown disabled rather than hidden: a selector whose contents change with
   // the prime reads as a bug, and "greyed out" says something the absence of an
@@ -203,7 +204,7 @@ export function useDataSourceSection(
   return {
     id: DATA_SOURCE_SECTION_ID,
     label: 'Data source',
-    value: PROVENANCE,
+    value: shown,
     options: [
       option(
         'both',
@@ -214,21 +215,33 @@ export function useDataSourceSection(
       option('reference', 'Sky reference', 'As published by Sky'),
     ],
     onChange: (value) => {
-      if (value === PROVENANCE) {
+      if (value === shown) {
         return;
       }
 
-      const { href } = router.buildLocation({
-        to: '.',
-        search: (previous: Record<string, unknown>) => ({
-          ...previous,
-          // The superseded spelling is dropped on the way out, so a link
-          // carrying both cannot arrive contradicting itself.
-          reference: undefined,
-          source: value === 'both' ? undefined : value,
-        }),
+      const search = (previous: Record<string, unknown>) => ({
+        ...previous,
+        // The superseded spelling is dropped on the way out, so a link carrying
+        // both cannot arrive contradicting itself.
+        reference: undefined,
+        source: value === 'both' ? undefined : value,
       });
-      globalThis.location.assign(href);
+
+      // A composite response holds both provenances, so narrowing it is a
+      // projection of data already on the page: navigate and let the views
+      // re-read the URL. Reloading would re-fetch what we have, and the
+      // composite fetch is the slow one.
+      if (canRestateProvenance) {
+        void router.navigate({ to: '.', search });
+        return;
+      }
+
+      // Nothing held to narrow, so this needs a fresh session: `PROVENANCE` is
+      // fixed for the session on purpose, so that a cached series and the
+      // request refreshing it cannot disagree about what they contain.
+      globalThis.location.assign(
+        router.buildLocation({ to: '.', search }).href,
+      );
     },
   };
 }

@@ -31,11 +31,7 @@ import {
   getProtocolLabel,
   parseNumericValue,
 } from '../../lib/dashboard';
-import {
-  preferReference,
-  showsIndexed,
-  showsReference,
-} from '../../lib/provenance';
+import { preferReference, useProvenanceView } from '../../lib/provenance';
 import type {
   Allocation,
   AllocationCategory,
@@ -134,6 +130,9 @@ function AllocationAssetCell({
   localProtocols: LocalProtocolRow[];
   chainLabels: ChainLabelLookup;
 }) {
+  // The badge marks a row as Sky's *against* STL's rows, so it says nothing
+  // when STL's are not on screen.
+  const { showsIndexed: showsIndexedNow } = useProvenanceView();
   const chainLabel = getChainLabel(
     allocation.chain_id,
     chainLabels,
@@ -155,7 +154,7 @@ function AllocationAssetCell({
         </p>
         {/* Only the odd ones out are marked. In a merged view most rows are
             reported by both, so badging those would label almost everything. */}
-        {allocation.source === 'reference' && showsIndexed ? (
+        {allocation.source === 'reference' && showsIndexedNow ? (
           <Badge size="sm" variant="subtle">
             Sky only
           </Badge>
@@ -769,6 +768,9 @@ export function AllocationGrid({
   primeCollateralObservedAt,
   capitalObservedAt,
 }: AllocationGridProps) {
+  // The provenance on screen, not the one fetched: narrowing a composite
+  // response changes what is shown without issuing a request.
+  const { showsReference: showsReferenceNow } = useProvenanceView();
   const [localSearchValue, setLocalSearchValue] = useState(searchValue);
 
   useEffect(() => {
@@ -855,14 +857,14 @@ export function AllocationGrid({
     };
   }, [allocations]);
 
-  const debtWad = showsReference
+  const debtWad = showsReferenceNow
     ? referenceDebt?.debt_wad
     : primeDebtSnapshot?.debt_wad;
   // Reference mode has no observation time: upstream publishes one figure per
   // prime per day, so the closest thing is the bucket the figure falls in. The
   // label says "as of" rather than "sync" so a boundary is not read as a
   // moment we observed the value.
-  const debtObservedAt = showsReference
+  const debtObservedAt = showsReferenceNow
     ? referenceDebt?.bucket_start
     : primeDebtSnapshot?.synced_at;
   // "as of" either way: reference mode has only a daily bucket boundary, and
