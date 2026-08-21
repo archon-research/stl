@@ -28,12 +28,13 @@ import json
 import os
 from typing import Any
 
+# The packaged input files (parquet snapshots, param/market configs). Exported
+# so callers resolve it here instead of hand-walking parents from their own
+# file depth.
+INPUTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "inputs")
+
 # Canonical defaults file — lives next to the other input files
-_DEFAULTS_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "inputs",
-    "default_params.json",
-)
+_DEFAULTS_PATH = os.path.join(INPUTS_DIR, "default_params.json")
 
 
 def _load_schema(path: str = _DEFAULTS_PATH) -> dict:

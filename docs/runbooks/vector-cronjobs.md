@@ -16,6 +16,7 @@ into TimescaleDB (or validates stored data). Current cronjobs:
 | `offchain-price-backfill` | `offchain-price-backfill` | **on demand** | Backfills CoinGecko price history for a range supplied at trigger time |
 | `reference-capital-indexer` | `reference-capital-indexer` | 15m | Sky Star-monitor reference risk capital; the only writer of forward reference history |
 | `reference-capital-backfill` | `reference-capital-backfill` | **on demand** | Seeds the reference balance-sheet history predating the syncer's first run |
+| `core-model-runner` | `core-model-runner` | 24h | CORE model CRR per market → `core_model_results` (staging only; N_MC capped at 100 until live readers land) |
 
 > `maple-graphql-indexer` is also a cronjob but has its own richer rules — see
 > [vector-indexers.md](vector-indexers.md), not this runbook.
@@ -25,6 +26,13 @@ The shared activity records `cronjob_runs_total{status="success"|"error"}` and
 cronjobs are covered automatically; only the availability rule needs the new
 Deployment name added to its regex — `VectorCronjobWorkerDown` for a scheduled
 cronjob, `VectorOnDemandWorkerDown` for an on-demand worker.
+
+> `core-model-runner` is the first **Python** Temporal cronjob and its harness
+> does not emit `cronjob_runs_total` yet, so the metric-based rules above do not
+> cover it — `VectorCronjobWorkerDown` is its only alert. A failed tick shows up
+> in the Temporal UI (vector namespace → Schedules → `core-model-runner`) and in
+> the pod logs, not in Grafana. Wiring run metrics into the Python harness is
+> the gap to close when the runner starts computing live numbers.
 
 > `transform-worker` ships at `replicas: 0` and is enabled (scaled to 1) only after
 > the one-off bootstrap has run. `VectorCronjobWorkerDown` is guarded on

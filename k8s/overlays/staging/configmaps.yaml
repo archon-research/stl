@@ -591,11 +591,27 @@ metadata:
 data:
   TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
   TEMPORAL_NAMESPACE: "vector"
-  # The schedule lives in Temporal state; changing this needs the schedule
-  # deleted there and the worker restarted (stl-verify/AGENTS.md).
+  # The schedule lives in Temporal state; the worker reconciles a changed
+  # interval into it on startup, so a redeploy is enough (stl-verify/AGENTS.md).
   REFERENCE_CAPITAL_SYNC_INTERVAL: "15m"
   # Risk-capital root, without the /primes route the client appends itself.
   SKY_RISK_CAPITAL_URL: "https://info-sky.blockanalitica.com/star-monitoring/risk-capital"
   # Balance-sheet feed, read only by the one-off reference-capital-backfill Job.
   SKY_DATA_URL: "https://sky.data.blockanalitica.com/internal"
   ENVIRONMENT: "sentinelstaging"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: core-model-runner
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  # The schedule lives in Temporal state; the worker reconciles a changed
+  # interval into it on startup, so a redeploy is enough (stl-verify/AGENTS.md).
+  CORE_MODEL_RUN_INTERVAL_HOURS: "24"
+  # Deliberately tiny while staging only validates the pipeline end to end:
+  # the pod's memory limit is sized for this cap (~1.0 GiB measured for a
+  # full 9-market tick; the N_MC=10000 default peaks at ~8.0 GiB on one
+  # market alone). Raise only together with the deployment's memory limit.
+  CORE_MODEL_N_MC: "100"
