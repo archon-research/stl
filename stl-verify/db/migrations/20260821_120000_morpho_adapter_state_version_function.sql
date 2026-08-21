@@ -1,0 +1,98 @@
+-- Morpho VaultV2 structured tracking (VEC-218): let the INSERT supply
+-- morpho_adapter_state.processing_version instead of only the trigger.
+--
+-- A new migration rather than an edit: 20260721_130000 has been applied in staging since
+-- 2026-08-20, and the migrator rejects a modified file on checksum.
+--
+-- What it fixes, found in the VEC-218 E2E on 2026-08-21 (TimescaleDB 2.25.1-pg17): once a
+-- chunk is columnstored, every correction row for a position that chunk already holds is
+-- silently lost. TimescaleDB resolves the INSERT's ON CONFLICT against compressed data
+-- BEFORE row triggers fire, so a processing_version left to the trigger still carries the
+-- column's DEFAULT 0 at that moment, matches the pv=0 row already there, and is discarded
+-- with no error and no rows affected. Measured: 150 rows replayed into a compressed chunk
+-- under a new build_id wrote 0 rows, where the identical replay wrote all 150 while the
+-- chunk was still rowstore. Compression lands at 2 days, so that is every chunk a
+-- backfill replay touches, and ADR-0002's corrections-as-new-rows model was inoperative
+-- for this table.
+--
+-- The rule therefore moves into next_processing_version_morpho_adapter_state, so the
+-- INSERT and the trigger share ONE definition of it — the advisory-lock key included,
+-- which has to match or the serialization ADR-0002 §3 requires is lost. A repository
+-- calls it in the INSERT's VALUES list, evaluated before the arbiter, so the arbiter sees
+-- the version the row will really carry. The trigger stays as the floor for any writer
+-- that supplies none; running under the lock the function already holds, it recomputes
+-- the same answer.
+--
+-- compress_orderby is deliberately left alone. Adding processing_version to it changes
+-- none of this — the drop reproduces identically with and without it, because the
+-- arbiter's blind spot is the trigger's timing, not the column's absence from the
+-- ordering.
+
+-- ============================================================================
+-- The version rule, callable from both the INSERT and the trigger.
+-- ============================================================================
+-- Pinned to force_custom_plan for the same reason the trigger functions are: its per-row
+-- lookups must keep pruning chunks instead of fanning out over every chunk once plpgsql
+-- caches a generic plan (VEC-541, db/migrations/AGENTS.md).
+CREATE OR REPLACE FUNCTION next_processing_version_morpho_adapter_state(
+    p_adapter_id    BIGINT,
+    p_block_number  BIGINT,
+    p_block_version INT,
+    p_timestamp     TIMESTAMPTZ,
+    p_build_id      INT)
+RETURNS INT
+SET plan_cache_mode = 'force_custom_plan'
+AS $$
+DECLARE
+    existing_ver INT;
+    max_ver      INT;
+BEGIN
+    -- Timestamp wrapped in EXTRACT(epoch FROM …) so the key is TimeZone/DateStyle-stable.
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        format('mas|%s|%s|%s|%s', p_adapter_id, p_block_number, p_block_version,
+               EXTRACT(epoch FROM p_timestamp)), 0));
+
+    SELECT processing_version INTO existing_ver
+    FROM morpho_adapter_state
+    WHERE morpho_adapter_id = p_adapter_id
+      AND block_number      = p_block_number
+      AND block_version     = p_block_version
+      AND timestamp         = p_timestamp
+      AND build_id          = p_build_id
+    LIMIT 1;
+
+    IF FOUND THEN
+        RETURN existing_ver;
+    END IF;
+
+    SELECT COALESCE(MAX(processing_version), -1) INTO max_ver
+    FROM morpho_adapter_state
+    WHERE morpho_adapter_id = p_adapter_id
+      AND block_number      = p_block_number
+      AND block_version     = p_block_version
+      AND timestamp         = p_timestamp;
+    RETURN max_ver + 1;
+END;
+$$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION next_processing_version_morpho_adapter_state(BIGINT, BIGINT, INT, TIMESTAMPTZ, INT) IS
+  'Returns the processing_version a morpho_adapter_state row at (adapter, block, block_version, timestamp) must carry for build_id: the version that build already wrote there, else MAX+1. Takes the position''s advisory lock (ADR-0002 §3) and holds it for the transaction, so the value cannot go stale before the INSERT lands. Call it in the INSERT''s VALUES list: on a columnstored chunk TimescaleDB resolves ON CONFLICT before row triggers fire, so a version left to the trigger reaches the arbiter as DEFAULT 0 and the correction row is silently discarded.';
+
+-- ============================================================================
+-- The trigger now delegates to it (CREATE OR REPLACE resets a function's settings,
+-- so force_custom_plan is re-declared here — db/migrations/AGENTS.md).
+-- ============================================================================
+CREATE OR REPLACE FUNCTION assign_processing_version_morpho_adapter_state()
+RETURNS TRIGGER
+SET plan_cache_mode = 'force_custom_plan'
+AS $$
+BEGIN
+    NEW.processing_version := next_processing_version_morpho_adapter_state(
+        NEW.morpho_adapter_id, NEW.block_number, NEW.block_version, NEW.timestamp, NEW.build_id);
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+INSERT INTO migrations (filename)
+VALUES ('20260821_120000_morpho_adapter_state_version_function.sql')
+ON CONFLICT (filename) DO NOTHING;

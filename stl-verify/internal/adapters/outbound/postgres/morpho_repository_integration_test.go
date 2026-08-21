@@ -2638,6 +2638,145 @@ func TestSaveAdapterState_DifferentBuildNewVersion(t *testing.T) {
 	}
 }
 
+// saveAdapterState persists one realAssets snapshot in its own committed transaction
+// and reports whether a row was appended (mirrors saveCap).
+func (f *morphoTestFixture) saveAdapterState(t *testing.T, ctx context.Context, repo *MorphoRepository, adapterID, block int64, realAssets *big.Int) bool {
+	t.Helper()
+	tx, err := f.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	appended, err := repo.SaveAdapterState(ctx, tx, &entity.MorphoAdapterState{
+		MorphoAdapterID: adapterID,
+		BlockNumber:     block,
+		BlockVersion:    0,
+		Timestamp:       morphoBlockTime,
+		RealAssets:      realAssets,
+	})
+	if err != nil {
+		t.Fatalf("SaveAdapterState failed: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	return appended
+}
+
+// compressAdapterStateChunks columnstores every morpho_adapter_state chunk, which is
+// what the compression policy does to any chunk older than two days. compress_chunk
+// recompresses a chunk that already holds compressed data, so rows a sibling test left
+// behind cannot leave this test's own row on the rowstore side and pass vacuously.
+func (f *morphoTestFixture) compressAdapterStateChunks(t *testing.T, ctx context.Context) {
+	t.Helper()
+	var chunks int
+	if err := f.pool.QueryRow(ctx,
+		`SELECT count(*)::int FROM (SELECT compress_chunk(c) FROM show_chunks('morpho_adapter_state') c) s`,
+	).Scan(&chunks); err != nil {
+		t.Fatalf("compress morpho_adapter_state chunks: %v", err)
+	}
+	if chunks == 0 {
+		t.Fatal("morpho_adapter_state has no chunk to compress; the seed write did not land")
+	}
+	// Sibling tests DELETE the table rather than dropping chunks, and DELETE on a
+	// columnstore chunk is far slower than on a rowstore one.
+	t.Cleanup(func() {
+		if _, err := f.pool.Exec(ctx,
+			`SELECT decompress_chunk(c) FROM show_chunks('morpho_adapter_state') c`); err != nil {
+			t.Errorf("decompress morpho_adapter_state chunks: %v", err)
+		}
+	})
+}
+
+// adapterStateVersions reads the (processing_version, build_id, real_assets) series at
+// one snapshot position, in ADR-0002 latest-row order.
+func (f *morphoTestFixture) adapterStateVersions(t *testing.T, ctx context.Context, adapterID, block int64) []string {
+	t.Helper()
+	rows, err := f.pool.Query(ctx,
+		`SELECT format('pv=%s build=%s assets=%s', processing_version, build_id, real_assets::text)
+		 FROM morpho_adapter_state WHERE morpho_adapter_id = $1 AND block_number = $2
+		 ORDER BY processing_version`, adapterID, block)
+	if err != nil {
+		t.Fatalf("query adapter state versions: %v", err)
+	}
+	defer rows.Close()
+	var versions []string
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			t.Fatalf("scan adapter state version: %v", err)
+		}
+		versions = append(versions, v)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate adapter state versions: %v", err)
+	}
+	return versions
+}
+
+// A reprocess under a new build must append its correction row even when the chunk it
+// lands in is already columnstored — which, at a 2-day compression policy, is every
+// chunk a backfill replay touches.
+//
+// TimescaleDB resolves ON CONFLICT against compressed data BEFORE row triggers fire, so
+// a processing_version left to the trigger still holds its DEFAULT 0 at that moment: the
+// correction is judged a duplicate of the pv=0 row and dropped with no error and no rows
+// affected (measured on 2.25.1-pg17: 150 replayed rows, 0 written). SaveAdapterState
+// therefore supplies the version itself.
+func TestSaveAdapterState_NewBuildAppendsIntoACompressedChunk(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x21))
+	adapterID := fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x22), 24481834)
+
+	if appended := fixture.saveAdapterState(t, ctx, fixture.repo, adapterID, 24500300, big.NewInt(1000)); !appended {
+		t.Fatal("the original write must append a row")
+	}
+	fixture.compressAdapterStateChunks(t, ctx)
+
+	repoBuild1, err := NewMorphoRepository(morphoPool, nil, 1)
+	if err != nil {
+		t.Fatalf("NewMorphoRepository build 1: %v", err)
+	}
+	appended := fixture.saveAdapterState(t, ctx, repoBuild1, adapterID, 24500300, big.NewInt(2000))
+
+	got := fixture.adapterStateVersions(t, ctx, adapterID, 24500300)
+	want := []string{"pv=0 build=0 assets=1000", "pv=1 build=1 assets=2000"}
+	if !slices.Equal(got, want) {
+		t.Errorf("versions at the snapshot position = %v, want %v", got, want)
+	}
+	if !appended {
+		t.Error("SaveAdapterState reported no row appended, so the reprocess was silently dropped")
+	}
+}
+
+// The other direction of the same arbiter: a same-build retry against a columnstored
+// chunk must still converge on the one row it already wrote. The version the insert
+// supplies has to be the one the trigger would assign, or the arbiter misses the
+// compressed row and the primary key gains a duplicate — a unique index does not reach
+// compressed data, so nothing downstream of the arbiter would catch it.
+func TestSaveAdapterState_SameBuildDedupesInACompressedChunk(t *testing.T) {
+	fixture := setupMorphoTest(t)
+	ctx := context.Background()
+	vaultID := fixture.createTestVault(t, ctx, adapterAddr(0x23))
+	adapterID := fixture.createTestAdapter(t, ctx, vaultID, adapterAddr(0x24), 24481834)
+
+	if appended := fixture.saveAdapterState(t, ctx, fixture.repo, adapterID, 24500400, big.NewInt(1000)); !appended {
+		t.Fatal("the original write must append a row")
+	}
+	fixture.compressAdapterStateChunks(t, ctx)
+
+	appended := fixture.saveAdapterState(t, ctx, fixture.repo, adapterID, 24500400, big.NewInt(9999))
+
+	got := fixture.adapterStateVersions(t, ctx, adapterID, 24500400)
+	want := []string{"pv=0 build=0 assets=1000"}
+	if !slices.Equal(got, want) {
+		t.Errorf("versions at the snapshot position = %v, want %v", got, want)
+	}
+	if appended {
+		t.Error("the deduped retry must report no row appended (the snapshot counter gates on it)")
+	}
+}
+
 // --- SaveVaultCap Tests ---
 
 // capIDFor returns the on-chain cap id for a pre-image: id = keccak256(idData).
