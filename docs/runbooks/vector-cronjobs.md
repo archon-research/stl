@@ -361,13 +361,26 @@ safe: every write is an idempotent append, so a repeat costs wall clock, not
 correctness.
 
 The query, the Result panel and each partition's `replayed partition` log line
-also carry `rowsAppended`, split per table. It is a different quantity from
-`eventsReplayed`: events counts the logs driven through the handler path, rows
-counts what they persisted, and the two diverge by design. Zero rows against a
-non-zero event count means every write deduped — expected when the same build has
-already replayed that range, and a defect otherwise (a fresh range, or a re-run
-from a NEW build, must append: that is what the VEC-218 compressed-chunk fix
-restored, and what this count is here to make visible).
+also carry `rowsAppended`, split per table: `adapterStates`, `vaultCaps`,
+`vaultFees`, `membershipObservations`. It is a different quantity from
+`eventsReplayed` — events counts the logs driven through the handler path, rows
+counts the versioned snapshots those logs appended — and the two diverge for
+legitimate reasons as well as for bugs:
+
+- `ForceDeallocate` appends no snapshot at all; its paired `Deallocate` in the
+  same transaction carries the adapter-state row, so a partition holding only
+  those logs reports events with no rows.
+- `membershipObservations` counts appended observations only. An assertion that
+  the log already answers at that block position appends nothing, whatever the
+  build, so 0 is ordinary on a re-run.
+- The per-event `protocol_event` audit row is written but NOT counted here.
+
+What is worth investigating is `adapterStates` = 0 on a partition holding
+allocation, cap or fee events when the range is fresh, or when the same range is
+re-run from a NEW `build_id` (which must append a new `processing_version`). That
+is the shape of the compressed-chunk drop VEC-218 fixed for `morpho_adapter_state`
+— and the shape `protocol_event` still has, since its INSERT still leaves the
+version to its trigger.
 
 **Failure modes specific to this worker.**
 

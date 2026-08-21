@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
@@ -79,9 +81,6 @@ func TestCountingMorphoRepository_CountsOnlyAppendedRows(t *testing.T) {
 			if repo.counts != tt.want {
 				t.Errorf("counts = %+v, want %+v", repo.counts, tt.want)
 			}
-			if got := repo.counts.total(); got != tt.want.total() {
-				t.Errorf("total() = %d, want %d", got, tt.want.total())
-			}
 		})
 	}
 }
@@ -123,6 +122,61 @@ func saveVaultFeeThrough(ctx context.Context, repo *countingMorphoRepository) er
 func observeMembershipThrough(ctx context.Context, repo *countingMorphoRepository) error {
 	_, _, err := repo.ObserveAdapterMembership(ctx, nil, &entity.MorphoAdapterObservation{})
 	return err
+}
+
+// The counter promotes every port method it does not override, so a port method that
+// starts reporting an append would pass through uncounted with no compile error — and the
+// symptom is the under-report the count exists to expose. Enumerated from the port rather
+// than from a list, so the method added tomorrow is covered.
+func TestCountingMorphoRepository_InterceptsEveryAppendingWrite(t *testing.T) {
+	port := reflect.TypeFor[outbound.MorphoRepository]()
+	appending := 0
+
+	for method := range port.Methods() {
+		if !reportsAnAppend(method.Type) {
+			continue
+		}
+		appending++
+		t.Run(method.Name, func(t *testing.T) {
+			repo := newCountingMorphoRepository(appendingMock(true))
+			callWithZeroArgs(t, repo, method.Name)
+			if repo.counts.total() != 1 {
+				t.Errorf("%s reported an append and the tally stayed %+v: the counter does not intercept it",
+					method.Name, repo.counts)
+			}
+		})
+	}
+
+	if appending < 4 {
+		t.Fatalf("found %d append-reporting port methods, want >= 4: the bool-result filter stopped matching them", appending)
+	}
+}
+
+// reportsAnAppend recognises the port's write shape: a bool among the results, which is
+// how every one of them says whether a row was appended.
+func reportsAnAppend(signature reflect.Type) bool {
+	for out := range signature.Outs() {
+		if out.Kind() == reflect.Bool {
+			return true
+		}
+	}
+	return false
+}
+
+// callWithZeroArgs invokes one method with zero values throughout: the mock behind it
+// answers from its configured verdict and reads none of them.
+func callWithZeroArgs(t *testing.T, repo *countingMorphoRepository, name string) {
+	t.Helper()
+	method := reflect.ValueOf(repo).MethodByName(name)
+	args := make([]reflect.Value, method.Type().NumIn())
+	for i := range args {
+		args[i] = reflect.New(method.Type().In(i)).Elem()
+	}
+	for _, result := range method.Call(args) {
+		if err, ok := result.Interface().(error); ok && err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
 }
 
 // Each partition's tally accumulates into the run's, per table.

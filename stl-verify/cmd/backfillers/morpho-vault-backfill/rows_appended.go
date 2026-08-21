@@ -12,11 +12,10 @@ import (
 
 // appendedRows is how many versioned rows a replay actually wrote, per table.
 //
-// The event count alone cannot tell a healthy run from one that persisted nothing: a
-// replay whose every write deduped reports the same "292 events" as the run that wrote
-// them, which is how the compressed-chunk drop 20260821_120000 fixes went unnoticed for a
-// whole E2E. Kept per table rather than as one sum so a table that wrote nothing stays
-// visible behind the ones that did.
+// The event count alone cannot tell a run that persisted everything from one that
+// persisted nothing — both report the same events. Kept per table rather than as one sum
+// so a table that wrote nothing stays visible behind the ones that did; which zeroes are
+// ordinary is in docs/runbooks/vector-cronjobs.md.
 type appendedRows struct {
 	AdapterStates          int `json:"adapterStates"`
 	VaultCaps              int `json:"vaultCaps"`
@@ -35,8 +34,8 @@ func (a *appendedRows) add(other appendedRows) {
 	a.MembershipObservations += other.MembershipObservations
 }
 
-// String keeps the breakdown to one log value, readable through both loggers a run uses
-// (slog on the backfiller, Temporal's on the activity).
+// String keeps the breakdown to one log value: the workflow and activity loggers take
+// key-value pairs, and five keys per line would crowd out the partition it describes.
 func (a appendedRows) String() string {
 	return fmt.Sprintf("total=%d adapterStates=%d vaultCaps=%d vaultFees=%d membershipObservations=%d",
 		a.total(), a.AdapterStates, a.VaultCaps, a.VaultFees, a.MembershipObservations)
@@ -44,12 +43,13 @@ func (a appendedRows) String() string {
 
 // countingMorphoRepository tallies the rows a replay appends through the morpho
 // repository. It wraps the port rather than reaching into the service, so the counting
-// lives where the backfiller does its own wiring and the indexer's write path is
-// untouched.
+// lives where the backfiller does its own wiring and the indexer's write path is untouched.
 //
 // Embedded interface, not a hand-written pass-through: the port carries a dozen read
-// methods this has nothing to say about. Not safe for concurrent use — one partition's
-// logs replay sequentially (see replayPartition).
+// methods this has nothing to say about. A port method that starts reporting an append
+// must be intercepted here — TestCountingMorphoRepository_InterceptsEveryAppendingWrite
+// is what catches one that is not. Not safe for concurrent use: one partition's logs
+// replay sequentially (see replayPartition).
 type countingMorphoRepository struct {
 	outbound.MorphoRepository
 	counts appendedRows

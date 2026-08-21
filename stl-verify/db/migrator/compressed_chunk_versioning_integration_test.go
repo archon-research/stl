@@ -7,34 +7,30 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-
-	"github.com/archon-research/stl/stl-verify/db/migrator"
 )
 
 // TestCompressedConvertedHypertablesHaveAVersionFunction guards the one thing that keeps
 // ADR-0002's corrections-as-new-rows model working on a columnstored chunk: the INSERT,
 // not the BEFORE INSERT trigger, has to decide processing_version.
 //
-// TimescaleDB resolves an INSERT's ON CONFLICT against compressed data BEFORE row triggers
-// fire (2.25.1-pg17), so a version left to the trigger reaches the arbiter as the column's
-// DEFAULT 0, matches the pv=0 row already in the chunk, and the correction is discarded
-// with no error and no rows affected — VEC-218's E2E lost all 150 replayed rows that way.
-// The fix is a next_processing_version_<table> function the INSERT calls in its VALUES
-// list and the trigger delegates to, so both agree on the version and the advisory-lock
-// key (20260821_120000_morpho_adapter_state_version_function.sql).
+// Why the trigger is too late — the arbiter resolves first, against a version still at its
+// DEFAULT — is in 20260821_120000_morpho_adapter_state_version_function.sql and ADR-0002 §3.
+// What a table needs to escape it is a next_processing_version_<table> function that its
+// INSERT calls and its trigger delegates to, so both agree on the version and the lock key.
 //
 // Scoped to the strictly-append-only converted set rather than every compressed
 // hypertable: those are the tables whose whole point is that a correction is a new row,
 // and the set grows table by table (see db/migrations/AGENTS.md), so a future converted
 // hypertable is covered here the moment it is added. The legacy tables share the defect
 // and are deliberately not asserted on — converting them is its own work.
+//
+// A catalogue assertion, so it proves the function EXISTS, not that the table's writer
+// calls it. The behavioural half is per-table and lives with the repository:
+// TestSaveAdapterState_NewBuildAppendsIntoACompressedChunk.
 func TestCompressedConvertedHypertablesHaveAVersionFunction(t *testing.T) {
 	ctx := context.Background()
-	pool, cleanup := setupPostgres(ctx, t)
+	pool, cleanup := setupMigratedPostgres(ctx, t)
 	defer cleanup()
-	if err := migrator.New(pool, getMigrationsPath()).ApplyAll(ctx); err != nil {
-		t.Fatalf("migrations failed: %v", err)
-	}
 
 	tables := compressedConvertedTables(t, ctx, pool)
 	if len(tables) == 0 {

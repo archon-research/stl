@@ -80,21 +80,22 @@ func withConcurrencyPool(t *testing.T) {
 
 func truncateForConcurrency(t *testing.T, ctx context.Context) {
 	t.Helper()
-	tables := []string{
-		`morpho_market_state`,
-		`morpho_market_position`,
-		`morpho_market`,
-	}
+	truncateRegistries(t, ctx, `morpho_market_state`, `morpho_market_position`, `morpho_market`)
+}
+
+// truncateRegistries empties the named tables in order and then the protocol/token
+// registries every seeder in this file resolves its FKs against.
+func truncateRegistries(t *testing.T, ctx context.Context, tables ...string) {
+	t.Helper()
 	for _, table := range tables {
 		if _, err := concurrencyPool.Exec(ctx, `DELETE FROM `+table); err != nil {
 			t.Fatalf("truncate %s: %v", table, err)
 		}
 	}
-	if _, err := concurrencyPool.Exec(ctx, `TRUNCATE protocol CASCADE`); err != nil {
-		t.Fatalf("truncate protocol: %v", err)
-	}
-	if _, err := concurrencyPool.Exec(ctx, `TRUNCATE token CASCADE`); err != nil {
-		t.Fatalf("truncate token: %v", err)
+	for _, registry := range []string{`protocol`, `token`} {
+		if _, err := concurrencyPool.Exec(ctx, `TRUNCATE `+registry+` CASCADE`); err != nil {
+			t.Fatalf("truncate %s: %v", registry, err)
+		}
 	}
 }
 
@@ -488,13 +489,11 @@ func TestProcessingVersionTrigger_CrossBuildRace_PrimeDebt(t *testing.T) {
 }
 
 // TestProcessingVersionTrigger_CrossBuildRace_MorphoAdapterStateCompressed exercises the
-// shape the other three cannot: the version is decided by the INSERT (through
-// next_processing_version_morpho_adapter_state) rather than only by the trigger, because
-// on a columnstored chunk TimescaleDB resolves ON CONFLICT before triggers fire and a
-// defaulted version loses the row. Deciding it earlier moves the read that the advisory
-// lock protects, so the race has to be proven again at the new call site — and against a
-// chunk that is already compressed, where a mis-timed read costs either a lost correction
-// or a duplicate the unique index cannot catch.
+// shape the other three cannot: the INSERT decides the version (through
+// next_processing_version_morpho_adapter_state, see 20260821_120000), which moves the read
+// the advisory lock protects and so needs the race proven again at the new call site —
+// against an already-compressed chunk, where a mis-timed read costs either a lost
+// correction or a duplicate no unique index reaches.
 func TestProcessingVersionTrigger_CrossBuildRace_MorphoAdapterStateCompressed(t *testing.T) {
 	withConcurrencyPool(t)
 	ctx := context.Background()
@@ -502,16 +501,9 @@ func TestProcessingVersionTrigger_CrossBuildRace_MorphoAdapterStateCompressed(t 
 	key := seedMorphoAdapterKey(t, ctx)
 
 	insertAdapterState(t, ctx, key, 0)
-	compressAdapterStateForConcurrency(t, ctx)
+	compressChunks(t, ctx, concurrencyPool, "morpho_adapter_state")
 
-	errs := runRace(t, ctx, func(ctx context.Context, tx pgx.Tx, buildID int) error {
-		_, err := tx.Exec(ctx,
-			`INSERT INTO morpho_adapter_state (morpho_adapter_id, block_number, block_version, timestamp, real_assets, processing_version, build_id)
-			 VALUES ($1, $2, $3, $4, 0, next_processing_version_morpho_adapter_state($1, $2, $3, $4, $5), $5)
-			 ON CONFLICT (morpho_adapter_id, block_number, block_version, timestamp, processing_version) DO NOTHING`,
-			key.adapterID, key.blockNumber, key.blockVersion, key.timestamp, buildID)
-		return err
-	})
+	errs := raceAdapterStateBuilds(t, ctx, key)
 	for i, err := range errs {
 		if err != nil {
 			t.Fatalf("worker %d: %v", i, err)
@@ -541,7 +533,6 @@ func seedMorphoAdapterKey(t *testing.T, ctx context.Context) morphoAdapterKey {
 	if err := concurrencyPool.QueryRow(ctx,
 		`INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block, updated_at, metadata)
 		 VALUES (1, '\xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb'::bytea, 'Morpho Blue', 'lending', 18883124, NOW(), '{}'::jsonb)
-		 ON CONFLICT (chain_id, address) DO UPDATE SET name = EXCLUDED.name
 		 RETURNING id`).Scan(&protocolID); err != nil {
 		t.Fatalf("seed protocol: %v", err)
 	}
@@ -588,19 +579,18 @@ func insertAdapterState(t *testing.T, ctx context.Context, key morphoAdapterKey,
 	}
 }
 
-// compressAdapterStateForConcurrency columnstores the seeded chunk, which is what the
-// 2-day compression policy has already done to every chunk a replay lands in.
-func compressAdapterStateForConcurrency(t *testing.T, ctx context.Context) {
+// raceAdapterStateBuilds fires the repository's adapter-state INSERT from two builds at
+// once against the same position.
+func raceAdapterStateBuilds(t *testing.T, ctx context.Context, key morphoAdapterKey) [2]error {
 	t.Helper()
-	var chunks int
-	if err := concurrencyPool.QueryRow(ctx,
-		`SELECT count(*)::int FROM (SELECT compress_chunk(c) FROM show_chunks('morpho_adapter_state') c) s`,
-	).Scan(&chunks); err != nil {
-		t.Fatalf("compress morpho_adapter_state chunks: %v", err)
-	}
-	if chunks == 0 {
-		t.Fatal("morpho_adapter_state has no chunk to compress; the seed write did not land")
-	}
+	return runRace(t, ctx, func(ctx context.Context, tx pgx.Tx, buildID int) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO morpho_adapter_state (morpho_adapter_id, block_number, block_version, timestamp, real_assets, processing_version, build_id)
+			 VALUES ($1, $2, $3, $4, 0, next_processing_version_morpho_adapter_state($1, $2, $3, $4, $5), $5)
+			 ON CONFLICT (morpho_adapter_id, block_number, block_version, timestamp, processing_version) DO NOTHING`,
+			key.adapterID, key.blockNumber, key.blockVersion, key.timestamp, buildID)
+		return err
+	})
 }
 
 func collectAdapterStateVersions(t *testing.T, ctx context.Context, key morphoAdapterKey) []int {
@@ -628,24 +618,88 @@ func collectAdapterStateVersions(t *testing.T, ctx context.Context, key morphoAd
 	return versions
 }
 
-// The chunks are dropped, not the rows: a DELETE would leave a columnstored chunk behind
-// for whichever test runs next.
+// The state chunks are dropped, not emptied: a DELETE would leave a columnstored chunk
+// behind for whichever test runs next.
 func truncateAdapterStateForConcurrency(t *testing.T, ctx context.Context) {
 	t.Helper()
 	if _, err := concurrencyPool.Exec(ctx,
 		`SELECT drop_chunks('morpho_adapter_state', older_than => now() + interval '1000 years')`); err != nil {
 		t.Fatalf("drop morpho_adapter_state chunks: %v", err)
 	}
-	for _, table := range []string{`morpho_adapter`, `morpho_vault`} {
-		if _, err := concurrencyPool.Exec(ctx, `DELETE FROM `+table); err != nil {
-			t.Fatalf("truncate %s: %v", table, err)
+	truncateRegistries(t, ctx, `morpho_adapter`, `morpho_vault`)
+}
+
+// The adapter-state race has its own negative control, because its lock has moved: the
+// trigger-body swap below cannot reach it, the helper the INSERT calls holds it. Stripped
+// of that lock, both builds compute the same version, one insert is swallowed by
+// ON CONFLICT DO NOTHING, and the compressed row is left with a single correction instead
+// of two — the same lost row the sibling control observes, one call site along.
+func TestProcessingVersionTrigger_NegativeControl_LocklessAdapterStateHelper(t *testing.T) {
+	withConcurrencyPool(t)
+	ctx := context.Background()
+
+	swapInLocklessAdapterStateHelper(t, ctx)
+
+	const attempts = 5
+	for attempt := range attempts {
+		truncateAdapterStateForConcurrency(t, ctx)
+		key := seedMorphoAdapterKey(t, ctx)
+		insertAdapterState(t, ctx, key, 0)
+		compressChunks(t, ctx, concurrencyPool, "morpho_adapter_state")
+
+		errs := raceAdapterStateBuilds(t, ctx, key)
+		for i, err := range errs {
+			if err != nil && !isUniqueViolation(err) {
+				t.Fatalf("attempt %d, worker %d: unexpected error: %v", attempt, i, err)
+			}
+		}
+		if len(collectAdapterStateVersions(t, ctx, key)) < 3 {
+			return // race observed: a correction was lost without the lock
 		}
 	}
-	if _, err := concurrencyPool.Exec(ctx, `TRUNCATE protocol CASCADE`); err != nil {
-		t.Fatalf("truncate protocol: %v", err)
+
+	t.Fatalf("negative control failed to observe a lost row in %d attempts — the race test is not actually exercising the helper's lock", attempts)
+}
+
+// swapInLocklessAdapterStateHelper replaces next_processing_version_morpho_adapter_state
+// with a variant that keeps the rule but drops the advisory lock, and sleeps between the
+// read and the caller's insert to widen the window. Restore failure is fatal: leaking the
+// lockless variant into a sibling test would silently invalidate it.
+func swapInLocklessAdapterStateHelper(t *testing.T, ctx context.Context) {
+	t.Helper()
+
+	var originalDDL string
+	if err := concurrencyPool.QueryRow(ctx,
+		`SELECT pg_get_functiondef(oid) FROM pg_proc
+		 WHERE proname = 'next_processing_version_morpho_adapter_state'`).Scan(&originalDDL); err != nil {
+		t.Fatalf("capture the version helper's ddl: %v", err)
 	}
-	if _, err := concurrencyPool.Exec(ctx, `TRUNCATE token CASCADE`); err != nil {
-		t.Fatalf("truncate token: %v", err)
+	t.Cleanup(func() {
+		if _, err := concurrencyPool.Exec(context.Background(), originalDDL); err != nil {
+			t.Fatalf("restore the version helper: %v — sibling tests would otherwise see the lockless variant", err)
+		}
+	})
+
+	if _, err := concurrencyPool.Exec(ctx, `
+		CREATE OR REPLACE FUNCTION next_processing_version_morpho_adapter_state(
+		    p_adapter_id BIGINT, p_block_number BIGINT, p_block_version INT,
+		    p_timestamp TIMESTAMPTZ, p_build_id INT)
+		RETURNS INT VOLATILE SET plan_cache_mode = 'force_custom_plan' AS $lockless$
+		DECLARE existing_ver INT; max_ver INT;
+		BEGIN
+		    SELECT processing_version INTO existing_ver FROM morpho_adapter_state
+		     WHERE morpho_adapter_id = p_adapter_id AND block_number = p_block_number
+		       AND block_version = p_block_version AND timestamp = p_timestamp
+		       AND build_id = p_build_id LIMIT 1;
+		    IF FOUND THEN RETURN existing_ver; END IF;
+		    SELECT COALESCE(MAX(processing_version), -1) INTO max_ver FROM morpho_adapter_state
+		     WHERE morpho_adapter_id = p_adapter_id AND block_number = p_block_number
+		       AND block_version = p_block_version AND timestamp = p_timestamp;
+		    PERFORM pg_sleep(0.1);
+		    RETURN max_ver + 1;
+		END;
+		$lockless$ LANGUAGE plpgsql`); err != nil {
+		t.Fatalf("install the lockless version helper: %v", err)
 	}
 }
 

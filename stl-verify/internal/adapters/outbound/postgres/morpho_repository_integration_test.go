@@ -2662,23 +2662,11 @@ func (f *morphoTestFixture) saveAdapterState(t *testing.T, ctx context.Context, 
 	return appended
 }
 
-// compressAdapterStateChunks columnstores every morpho_adapter_state chunk, which is
-// what the compression policy does to any chunk older than two days. compress_chunk
-// recompresses a chunk that already holds compressed data, so rows a sibling test left
-// behind cannot leave this test's own row on the rowstore side and pass vacuously.
+// compressAdapterStateChunks columnstores the table and hands it back to the rowstore
+// afterwards: sibling tests DELETE their rows, which is far slower on a columnstore chunk.
 func (f *morphoTestFixture) compressAdapterStateChunks(t *testing.T, ctx context.Context) {
 	t.Helper()
-	var chunks int
-	if err := f.pool.QueryRow(ctx,
-		`SELECT count(*)::int FROM (SELECT compress_chunk(c) FROM show_chunks('morpho_adapter_state') c) s`,
-	).Scan(&chunks); err != nil {
-		t.Fatalf("compress morpho_adapter_state chunks: %v", err)
-	}
-	if chunks == 0 {
-		t.Fatal("morpho_adapter_state has no chunk to compress; the seed write did not land")
-	}
-	// Sibling tests DELETE the table rather than dropping chunks, and DELETE on a
-	// columnstore chunk is far slower than on a rowstore one.
+	compressChunks(t, ctx, f.pool, "morpho_adapter_state")
 	t.Cleanup(func() {
 		if _, err := f.pool.Exec(ctx,
 			`SELECT decompress_chunk(c) FROM show_chunks('morpho_adapter_state') c`); err != nil {
@@ -2714,14 +2702,9 @@ func (f *morphoTestFixture) adapterStateVersions(t *testing.T, ctx context.Conte
 }
 
 // A reprocess under a new build must append its correction row even when the chunk it
-// lands in is already columnstored — which, at a 2-day compression policy, is every
-// chunk a backfill replay touches.
-//
-// TimescaleDB resolves ON CONFLICT against compressed data BEFORE row triggers fire, so
-// a processing_version left to the trigger still holds its DEFAULT 0 at that moment: the
-// correction is judged a duplicate of the pv=0 row and dropped with no error and no rows
-// affected (measured on 2.25.1-pg17: 150 replayed rows, 0 written). SaveAdapterState
-// therefore supplies the version itself.
+// lands in is already columnstored — which, at a 2-day compression policy, is every chunk
+// a backfill replay touches. Why the version cannot be left to the trigger there:
+// 20260821_120000_morpho_adapter_state_version_function.sql.
 func TestSaveAdapterState_NewBuildAppendsIntoACompressedChunk(t *testing.T) {
 	fixture := setupMorphoTest(t)
 	ctx := context.Background()
@@ -2749,11 +2732,10 @@ func TestSaveAdapterState_NewBuildAppendsIntoACompressedChunk(t *testing.T) {
 	}
 }
 
-// The other direction of the same arbiter: a same-build retry against a columnstored
-// chunk must still converge on the one row it already wrote. The version the insert
-// supplies has to be the one the trigger would assign, or the arbiter misses the
-// compressed row and the primary key gains a duplicate — a unique index does not reach
-// compressed data, so nothing downstream of the arbiter would catch it.
+// The other direction of the same arbiter: a same-build retry against a columnstored chunk
+// must still converge on the one row it already wrote. The version the insert supplies has
+// to be the one the trigger would assign, or the arbiter misses the compressed row and the
+// primary key gains a duplicate that no unique index reaches.
 func TestSaveAdapterState_SameBuildDedupesInACompressedChunk(t *testing.T) {
 	fixture := setupMorphoTest(t)
 	ctx := context.Background()
