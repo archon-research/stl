@@ -242,7 +242,7 @@ function AllocationUnderlyingCell({ allocation }: { allocation: Allocation }) {
   );
 }
 
-function AllocationBalanceCell({ allocation }: { allocation: Allocation }) {
+function AllocationExposureCell({ allocation }: { allocation: Allocation }) {
   const amountUsd = allocation.amount_usd;
 
   return (
@@ -506,10 +506,18 @@ function createAllocationColumns(
       cell: ({ row }) => <AllocationUnderlyingCell allocation={row.original} />,
     },
     {
-      id: 'balance',
-      header: 'Balance',
-      accessorFn: (allocation) => Number(allocation.balance),
-      cell: ({ row }) => <AllocationBalanceCell allocation={row.original} />,
+      // Named for what it renders: `amount_usd`, the position's USD exposure —
+      // the same quantity Sky's monitor publishes as EXPOSURE. The token
+      // quantity appears only as the fallback for an unpriced row.
+      id: 'exposure',
+      header: 'Exposure',
+      // Sorts on what the cell shows. Sorting the token balance instead would
+      // order 4,722 BTC below 869M spUSDS while the column displays $250M above
+      // $869M. An unpriced row has no exposure to sort by, so it sorts last
+      // rather than tying with a genuine zero.
+      accessorFn: (allocation) =>
+        parseNumericValue(allocation.amount_usd) ?? -1,
+      cell: ({ row }) => <AllocationExposureCell allocation={row.original} />,
       // Bar reflects USD value so magnitudes compare across heterogeneous
       // tokens; the cell text keeps the token holding. NaN (not null) suppresses
       // the bar for unpriced rows: a null here would fall back to the column
