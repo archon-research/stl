@@ -3,6 +3,7 @@ package testutil
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -94,25 +95,45 @@ func SeedFeedOracleAsset(t *testing.T, ctx context.Context, pool *pgxpool.Pool, 
 		t.Fatalf("failed to parse feed address %s: %v", feedAddress, err)
 	}
 	_, err = pool.Exec(ctx, `
-		INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency)
-		VALUES ($1, $2, true, $3, $4, $5)
-		ON CONFLICT (oracle_id, token_id, feed_address) WHERE feed_address IS NOT NULL DO NOTHING
-	`, oracleID, tokenID, feedAddrBytes, feedDecimals, quoteCurrency)
+		INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency, valid_from, change_reason)
+		VALUES ($1, $2, true, $3, $4, $5, $6::date, 'test seed')
+		ON CONFLICT (oracle_id, token_id, feed_address, processing_version) WHERE feed_address IS NOT NULL DO NOTHING
+	`, oracleID, tokenID, feedAddrBytes, feedDecimals, quoteCurrency, time.Now().UTC().Format(time.DateOnly))
 	if err != nil {
 		t.Fatalf("failed to insert feed oracle asset (oracle=%d, token=%d): %v", oracleID, tokenID, err)
 	}
 }
 
-// SeedOracleAsset inserts an oracle asset link.
+// SeedOracleAsset inserts an oracle asset link, effective from today (UTC).
 func SeedOracleAsset(t *testing.T, ctx context.Context, pool *pgxpool.Pool, oracleID, tokenID int64) {
 	t.Helper()
+	SeedOracleAssetEffectiveFrom(t, ctx, pool, oracleID, tokenID, time.Now().UTC().Format(time.DateOnly))
+}
+
+// SeedOracleAssetEffectiveFrom inserts an oracle asset link effective from validFrom
+// (YYYY-MM-DD), so a test can read it back through oracle_asset_as_of at dates either
+// side of a later change.
+func SeedOracleAssetEffectiveFrom(t *testing.T, ctx context.Context, pool *pgxpool.Pool, oracleID, tokenID int64, validFrom string) {
+	t.Helper()
 	_, err := pool.Exec(ctx, `
-		INSERT INTO oracle_asset (oracle_id, token_id, enabled)
-		VALUES ($1, $2, true)
-		ON CONFLICT (oracle_id, token_id) WHERE feed_address IS NULL DO NOTHING
-	`, oracleID, tokenID)
+		INSERT INTO oracle_asset (oracle_id, token_id, enabled, valid_from, change_reason)
+		VALUES ($1, $2, true, $3::date, 'test seed')
+		ON CONFLICT (oracle_id, token_id, processing_version) WHERE feed_address IS NULL DO NOTHING
+	`, oracleID, tokenID, validFrom)
 	if err != nil {
 		t.Fatalf("failed to insert oracle asset (oracle=%d, token=%d): %v", oracleID, tokenID, err)
+	}
+}
+
+// SetOracleAssetEnabled appends an oracle_asset version toggling enabled, effective from
+// effectiveAt (YYYY-MM-DD) — the append-on-change writer, since UPDATE is revoked.
+func SetOracleAssetEnabled(t *testing.T, ctx context.Context, pool *pgxpool.Pool, oracleID, tokenID int64, enabled bool, effectiveAt, reason string) {
+	t.Helper()
+	_, err := pool.Exec(ctx,
+		`SELECT oracle_asset_set_enabled($1, $2, NULL, $3, $4::date, $5)`,
+		oracleID, tokenID, enabled, effectiveAt, reason)
+	if err != nil {
+		t.Fatalf("failed to set oracle asset enabled=%v (oracle=%d, token=%d): %v", enabled, oracleID, tokenID, err)
 	}
 }
 

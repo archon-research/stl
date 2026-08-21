@@ -801,27 +801,54 @@ UV_USDC_BALANCE = Decimal("1000")
 UV_UNIV3_UNDERLYING_VALUE = Decimal("26927207.299715")
 
 
-async def insert_oracle_asset(conn: asyncpg.Connection, oracle_id: int, token_id: int, *, enabled: bool = True) -> None:
+# oracle_asset versions the seeds register (VEC-597): every mapping is live from
+# ORACLE_ASSET_REGISTERED_FROM, and a retired one is disabled from ORACLE_ASSET_RETIRED_FROM.
+# Both are well in the past, so a read pinned to "today" sees the retirement and a read
+# pinned between the two dates sees the source as it was while live.
+ORACLE_ASSET_REGISTERED_FROM = dt.date(2026, 1, 1)
+ORACLE_ASSET_RETIRED_FROM = dt.date(2026, 4, 1)
+ORACLE_ASSET_WHILE_LIVE = dt.date(2026, 3, 1)
+
+
+async def insert_oracle_asset(
+    conn: asyncpg.Connection,
+    oracle_id: int,
+    token_id: int,
+    *,
+    enabled: bool = True,
+    registered_from: dt.date = ORACLE_ASSET_REGISTERED_FROM,
+    retired_from: dt.date = ORACLE_ASSET_RETIRED_FROM,
+) -> None:
     """Register a non-feed oracle_asset mapping (idempotent).
 
     Every seeded onchain price needs an enabled oracle_asset mapping to stay
     eligible for the latest-price reads, which exclude rows whose
     ``(oracle_id, token_id)`` has no enabled mapping (rationale on
     ``_DIRECT_ASSET_HOLDINGS_SQL``). Production never writes a price without one
-    (the worker fetches only enabled assets), so the seeds mirror that; pass
-    ``enabled=False`` to model a retired source whose stale rows must stop
-    surfacing.
+    (the worker fetches only enabled assets), so the seeds mirror that.
+
+    ``enabled=False`` models a source that was live from ``registered_from`` and
+    RETIRED on ``retired_from``, appended as a second version (VEC-597) — not a
+    mapping that was never enabled. A read pinned before ``retired_from`` therefore
+    still sees the source, which is what makes the retirement's history testable.
     """
     await conn.execute(
         """
-        INSERT INTO oracle_asset (oracle_id, token_id, enabled)
-        VALUES ($1, $2, $3)
-        ON CONFLICT (oracle_id, token_id) WHERE feed_address IS NULL DO NOTHING
+        INSERT INTO oracle_asset (oracle_id, token_id, enabled, valid_from, change_reason)
+        VALUES ($1, $2, true, $3, 'test seed: registered')
+        ON CONFLICT (oracle_id, token_id, processing_version) WHERE feed_address IS NULL DO NOTHING
         """,
         oracle_id,
         token_id,
-        enabled,
+        registered_from,
     )
+    if not enabled:
+        await conn.execute(
+            "SELECT oracle_asset_set_enabled($1, $2, NULL, false, $3, 'test seed: source retired')",
+            oracle_id,
+            token_id,
+            retired_from,
+        )
 
 
 async def _insert_price(conn: asyncpg.Connection, token_id: int, oracle_id: int, price: Decimal) -> None:

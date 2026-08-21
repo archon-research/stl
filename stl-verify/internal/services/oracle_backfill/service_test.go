@@ -40,6 +40,9 @@ type mockRepo struct {
 	// mu guards upserted for concurrent access from the batch writer goroutine.
 	mu       sync.Mutex
 	upserted []*entity.OnchainTokenPrice
+
+	// referenceEffectiveAt records the date the last oracle_asset read was pinned to.
+	referenceEffectiveAt time.Time
 }
 
 func (m *mockRepo) GetOracle(ctx context.Context, name string) (*entity.Oracle, error) {
@@ -49,7 +52,8 @@ func (m *mockRepo) GetOracle(ctx context.Context, name string) (*entity.Oracle, 
 	return nil, errors.New("GetOracle not mocked")
 }
 
-func (m *mockRepo) GetEnabledAssets(ctx context.Context, oracleID int64) ([]*entity.OracleAsset, error) {
+func (m *mockRepo) GetEnabledAssets(ctx context.Context, oracleID int64, referenceEffectiveAt time.Time) ([]*entity.OracleAsset, error) {
+	m.referenceEffectiveAt = referenceEffectiveAt
 	if m.getEnabledAssetsFn != nil {
 		return m.getEnabledAssetsFn(ctx, oracleID)
 	}
@@ -70,7 +74,8 @@ func (m *mockRepo) GetLatestBlock(ctx context.Context, oracleID int64) (int64, e
 	return 0, nil
 }
 
-func (m *mockRepo) GetTokenInfos(ctx context.Context, oracleID int64) (map[int64]outbound.TokenInfo, error) {
+func (m *mockRepo) GetTokenInfos(ctx context.Context, oracleID int64, referenceEffectiveAt time.Time) (map[int64]outbound.TokenInfo, error) {
+	m.referenceEffectiveAt = referenceEffectiveAt
 	if m.getTokenInfosFn != nil {
 		return m.getTokenInfosFn(ctx, oracleID)
 	}
@@ -115,7 +120,7 @@ func (m *mockRepo) InsertProtocolOracleBinding(ctx context.Context, binding *ent
 	return nil, errors.New("InsertProtocolOracleBinding not mocked")
 }
 
-func (m *mockRepo) CopyOracleAssets(ctx context.Context, fromOracleID, toOracleID int64) error {
+func (m *mockRepo) CopyOracleAssets(ctx context.Context, fromOracleID, toOracleID int64, referenceEffectiveAt time.Time) error {
 	if m.copyOracleAssetsFn != nil {
 		return m.copyOracleAssetsFn(ctx, fromOracleID, toOracleID)
 	}

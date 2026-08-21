@@ -2,6 +2,7 @@ package outbound
 
 import (
 	"context"
+	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 )
@@ -21,8 +22,11 @@ type OnchainPriceRepository interface {
 	// GetOracle retrieves an oracle by its name.
 	GetOracle(ctx context.Context, name string) (*entity.Oracle, error)
 
-	// GetEnabledAssets retrieves all enabled assets for a given oracle.
-	GetEnabledAssets(ctx context.Context, oracleID int64) ([]*entity.OracleAsset, error)
+	// GetEnabledAssets retrieves the assets a given oracle prices, as the oracle_asset
+	// mapping stood at referenceEffectiveAt. That date is the run's recorded reference
+	// effective time (ADR-0006 §4), never the wall clock at query time: a replay of the
+	// same run must resolve the same mappings even after a source is retired.
+	GetEnabledAssets(ctx context.Context, oracleID int64, referenceEffectiveAt time.Time) ([]*entity.OracleAsset, error)
 
 	// GetLatestPrices returns the most recent price per token for a given oracle.
 	// Used for change detection: only store prices that differ from the previous block.
@@ -32,10 +36,10 @@ type OnchainPriceRepository interface {
 	// Used for resume support in backfill.
 	GetLatestBlock(ctx context.Context, oracleID int64) (int64, error)
 
-	// GetTokenInfos returns a map of token_id → TokenInfo (address + decimals) for all
-	// enabled oracle assets of the given oracle. Used to build address lists and scale
-	// convertToAssets output for ERC-4626 vaults.
-	GetTokenInfos(ctx context.Context, oracleID int64) (map[int64]TokenInfo, error)
+	// GetTokenInfos returns a map of token_id → TokenInfo (address + decimals) for the
+	// assets the given oracle priced at referenceEffectiveAt. Used to build address lists
+	// and scale convertToAssets output for ERC-4626 vaults.
+	GetTokenInfos(ctx context.Context, oracleID int64, referenceEffectiveAt time.Time) (map[int64]TokenInfo, error)
 
 	// GetEnabledOraclesByChain retrieves all enabled oracles for a given chain.
 	GetEnabledOraclesByChain(ctx context.Context, chainID int64) ([]*entity.Oracle, error)
@@ -49,8 +53,9 @@ type OnchainPriceRepository interface {
 	// InsertProtocolOracleBinding inserts a new protocol-oracle binding.
 	InsertProtocolOracleBinding(ctx context.Context, binding *entity.ProtocolOracle) (*entity.ProtocolOracle, error)
 
-	// CopyOracleAssets copies all oracle_asset rows from one oracle to another.
-	CopyOracleAssets(ctx context.Context, fromOracleID, toOracleID int64) error
+	// CopyOracleAssets copies the oracle_asset mappings the source oracle had at
+	// referenceEffectiveAt to another oracle, as that oracle's first version.
+	CopyOracleAssets(ctx context.Context, fromOracleID, toOracleID int64, referenceEffectiveAt time.Time) error
 
 	// GetAllProtocolOracleBindings retrieves ALL protocol-oracle bindings.
 	// Used by backfill to compute each oracle's earliest valid block.

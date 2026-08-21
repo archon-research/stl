@@ -226,6 +226,10 @@
       "type": "numeric",
       "class": "S"
     },
+    "change_reason": {
+      "type": "text",
+      "class": "A"
+    },
     "checksum": {
       "type": "text",
       "class": "S"
@@ -1172,6 +1176,11 @@
     "utilization": {
       "type": "numeric",
       "class": "S"
+    },
+    "valid_from": {
+      "type": "date",
+      "class": "A",
+      "semantics": "effective_time"
     },
     "variable_borrow_index": {
       "type": "numeric",
@@ -2170,5 +2179,13 @@
         "persisted_at"
       ]
     }
-  }
+  },
+  "reference_reads": [
+    {
+      "table": "oracle_asset",
+      "current_view": "oracle_asset_current",
+      "as_of": "oracle_asset_as_of",
+      "reason": "VEC-597: append-on-change (ADR-0006 §4). Which oracle_asset version a reader used decides which prices it used, so calculation and writer SQL must pin the read to a recorded effective_at."
+    }
+  ]
 }

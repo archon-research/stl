@@ -194,7 +194,11 @@ func (s *Service) Stop() error {
 }
 
 func (s *Service) initialize(ctx context.Context) error {
-	shared, err := oracle_pricing.LoadOracleUnits(ctx, s.repo, s.config.ChainID, s.logger)
+	// One reference view per run (ADR-0006 §4): capture the run's effective date once, so
+	// every unit resolves against the same oracle_asset versions and a replay can pass the
+	// same date back instead of re-reading whatever the mapping says today.
+	referenceEffectiveAt := time.Now().UTC()
+	shared, err := oracle_pricing.LoadOracleUnits(ctx, s.repo, s.config.ChainID, referenceEffectiveAt, s.logger)
 	if err != nil {
 		return err
 	}

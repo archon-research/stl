@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
@@ -72,14 +73,17 @@ func (r *OnchainPriceRepository) GetOracle(ctx context.Context, name string) (*e
 	return &o, nil
 }
 
-// GetEnabledAssets retrieves all enabled assets for a given oracle.
-func (r *OnchainPriceRepository) GetEnabledAssets(ctx context.Context, oracleID int64) ([]*entity.OracleAsset, error) {
+// GetEnabledAssets retrieves the assets a given oracle prices, as the mapping stood at
+// referenceEffectiveAt (ADR-0006 §4). Ordered by the natural key, not by id: under
+// append-on-change a re-versioned row gets a fresh id, so id order would reshuffle the
+// list every time a mapping changed.
+func (r *OnchainPriceRepository) GetEnabledAssets(ctx context.Context, oracleID int64, referenceEffectiveAt time.Time) ([]*entity.OracleAsset, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT id, oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency, created_at
-		FROM oracle_asset
+		FROM oracle_asset_as_of(($2::timestamptz AT TIME ZONE 'utc')::date)
 		WHERE oracle_id = $1 AND enabled = true
-		ORDER BY id
-	`, oracleID)
+		ORDER BY oracle_id, token_id, feed_address
+	`, oracleID, referenceEffectiveAt)
 	if err != nil {
 		return nil, fmt.Errorf("querying enabled oracle assets: %w", err)
 	}
@@ -155,15 +159,17 @@ func (r *OnchainPriceRepository) GetLatestBlock(ctx context.Context, oracleID in
 	return *blockNumber, nil
 }
 
-// GetTokenInfos returns a map of token_id → TokenInfo (address + decimals) for enabled oracle assets.
-func (r *OnchainPriceRepository) GetTokenInfos(ctx context.Context, oracleID int64) (map[int64]outbound.TokenInfo, error) {
+// GetTokenInfos returns a map of token_id → TokenInfo (address + decimals) for the assets
+// the oracle priced at referenceEffectiveAt. Same effective_at as GetEnabledAssets, or a
+// unit would carry an asset it never resolved an address for.
+func (r *OnchainPriceRepository) GetTokenInfos(ctx context.Context, oracleID int64, referenceEffectiveAt time.Time) (map[int64]outbound.TokenInfo, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT oa.token_id, t.address, t.decimals
-		FROM oracle_asset oa
+		FROM oracle_asset_as_of(($2::timestamptz AT TIME ZONE 'utc')::date) oa
 		JOIN token t ON t.id = oa.token_id
 		WHERE oa.oracle_id = $1 AND oa.enabled = true
-		ORDER BY oa.id
-	`, oracleID)
+		ORDER BY oa.oracle_id, oa.token_id, oa.feed_address
+	`, oracleID, referenceEffectiveAt)
 	if err != nil {
 		return nil, fmt.Errorf("querying token infos: %w", err)
 	}
@@ -369,15 +375,20 @@ func (r *OnchainPriceRepository) GetAllProtocolOracleBindings(ctx context.Contex
 	return bindings, nil
 }
 
-// CopyOracleAssets copies all enabled oracle_asset rows from one oracle to another.
-func (r *OnchainPriceRepository) CopyOracleAssets(ctx context.Context, fromOracleID, toOracleID int64) error {
+// CopyOracleAssets seeds a newly discovered oracle with the mappings the source oracle had
+// at referenceEffectiveAt. The copied rows are version 0 of the target's own history, so
+// they carry their own change_reason, and valid_from is the run's recorded date rather than
+// the wall clock — a replay of the same run must produce identically dated rows.
+func (r *OnchainPriceRepository) CopyOracleAssets(ctx context.Context, fromOracleID, toOracleID int64, referenceEffectiveAt time.Time) error {
 	_, err := r.pool.Exec(ctx, `
-		INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency)
-		SELECT $2, token_id, enabled, feed_address, feed_decimals, quote_currency
-		FROM oracle_asset
+		INSERT INTO oracle_asset (oracle_id, token_id, enabled, feed_address, feed_decimals, quote_currency, valid_from, change_reason)
+		SELECT $2, token_id, enabled, feed_address, feed_decimals, quote_currency,
+		       ($3::timestamptz AT TIME ZONE 'utc')::date,
+		       format('copied from oracle %s as of %s', $1::bigint, ($3::timestamptz AT TIME ZONE 'utc')::date)
+		FROM oracle_asset_as_of(($3::timestamptz AT TIME ZONE 'utc')::date)
 		WHERE oracle_id = $1 AND enabled = true
 		ON CONFLICT DO NOTHING
-	`, fromOracleID, toOracleID)
+	`, fromOracleID, toOracleID, referenceEffectiveAt)
 	if err != nil {
 		return fmt.Errorf("copying oracle assets from %d to %d: %w", fromOracleID, toOracleID, err)
 	}

@@ -25,9 +25,11 @@ from app.domain.entities.allocation import EthAddress
 from tests.integration.seed import (
     DIS_DIRECT_BALANCE,
     DIS_DIRECT_PROXY_HEX,
+    DIS_DISABLED_PRICE,
     DIS_ENABLED_PRICE,
     DIS_RECEIPT_PROXY_HEX,
     DIS_RECEIPT_UNDERLYING_VALUE,
+    ORACLE_ASSET_WHILE_LIVE,
     seed_disabled_source_positions,
 )
 
@@ -36,6 +38,11 @@ _DIRECT_PRIME = EthAddress(f"0x{DIS_DIRECT_PROXY_HEX}")
 
 _EXPECTED_RECEIPT_USD = DIS_RECEIPT_UNDERLYING_VALUE * DIS_ENABLED_PRICE
 _EXPECTED_DIRECT_USD = DIS_DIRECT_BALANCE * DIS_ENABLED_PRICE
+
+# While the retired source was still live it held the higher block, so a read pinned
+# before its retirement values the position at ITS price, not the survivor's.
+_EXPECTED_RECEIPT_USD_WHILE_LIVE = DIS_RECEIPT_UNDERLYING_VALUE * DIS_DISABLED_PRICE
+_EXPECTED_DIRECT_USD_WHILE_LIVE = DIS_DIRECT_BALANCE * DIS_DISABLED_PRICE
 
 
 @pytest.fixture(scope="module")
@@ -51,6 +58,16 @@ async def repo(async_db_url: str):
     engine = create_async_engine(async_db_url)
     try:
         yield AllocationRepository(engine)
+    finally:
+        await engine.dispose()
+
+
+@pytest_asyncio.fixture()
+async def repo_while_live(async_db_url: str):
+    """AllocationRepository pinned to a date before the source was retired (VEC-597)."""
+    engine = create_async_engine(async_db_url)
+    try:
+        yield AllocationRepository(engine, reference_effective_at=lambda: ORACLE_ASSET_WHILE_LIVE)
     finally:
         await engine.dispose()
 
@@ -98,3 +115,30 @@ async def test_total_usd_exposure_excludes_disabled_higher_block_source(repo) ->
     """get_total_usd_exposure sums using the enabled source's lower-block price."""
     total = await repo.get_total_usd_exposure(_RECEIPT_PRIME)
     assert total == _EXPECTED_RECEIPT_USD
+
+
+@pytest.mark.asyncio
+async def test_receipt_positions_include_the_source_that_was_live_at_the_effective_date(
+    repo_while_live,
+) -> None:
+    """A read pinned before the retirement still sees the source, at its own price.
+
+    The retirement is a new oracle_asset version (VEC-597), so the mapping as it stood on
+    ORACLE_ASSET_WHILE_LIVE is still queryable — the reference view a calculation from that
+    date used is recoverable, which an in-place toggle destroyed.
+    """
+    positions = await repo_while_live.list_receipt_token_positions(_RECEIPT_PRIME)
+    position = {p.symbol: p for p in positions}.get("disReceipt")
+    assert position is not None
+    assert position.amount_usd == _EXPECTED_RECEIPT_USD_WHILE_LIVE
+
+
+@pytest.mark.asyncio
+async def test_direct_holdings_include_the_source_that_was_live_at_the_effective_date(
+    repo_while_live,
+) -> None:
+    """list_direct_asset_holdings values the holding at the then-live source's price."""
+    holdings = await repo_while_live.list_direct_asset_holdings(_DIRECT_PRIME)
+    holding = {h.symbol: h for h in holdings}.get("disDirect")
+    assert holding is not None
+    assert holding.amount_usd == _EXPECTED_DIRECT_USD_WHILE_LIVE

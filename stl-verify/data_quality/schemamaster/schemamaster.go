@@ -124,6 +124,7 @@ type Register struct {
 	RequiredKeys    []RequiredKey                   `json:"required_keys"`
 	NullableExempt  []NullableExempt                `json:"nullable_exempt"`
 	TransformConfig map[string]TransformConfigEntry `json:"transform_config"`
+	ReferenceReads  []ReferenceRead                 `json:"reference_reads"`
 }
 
 // producesCanonical reports whether a transform for table renames or casts a column to canonicalCol.

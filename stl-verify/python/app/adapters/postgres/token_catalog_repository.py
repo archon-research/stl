@@ -5,6 +5,7 @@ from typing import Any
 from sqlalchemy import Row, text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.adapters.postgres.reference_as_of import ReferenceAsOf, ReferenceEffectiveAtProvider, utc_today
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.token_catalog import TokenMetadata, TokenPriceQuote
 
@@ -62,8 +63,9 @@ def _normalize_symbol(value: str | None) -> str | None:
 
 
 class TokenCatalogRepository:
-    def __init__(self, engine: AsyncEngine) -> None:
+    def __init__(self, engine: AsyncEngine, reference_effective_at: ReferenceEffectiveAtProvider = utc_today) -> None:
         self._engine = engine
+        self._reference = ReferenceAsOf(reference_effective_at)
 
     @staticmethod
     def _row_to_metadata(row: Row[Any]) -> TokenMetadata:
@@ -155,7 +157,7 @@ class TokenCatalogRepository:
     async def get_latest_price(self, token_id: int) -> TokenPriceQuote | None:
         try:
             async with self._engine.connect() as conn:
-                row = (await conn.execute(_LATEST_PRICE_SQL, {"token_id": token_id})).fetchone()
+                row = (await conn.execute(_LATEST_PRICE_SQL, self._reference.params(token_id=token_id))).fetchone()
 
             if row is None:
                 return None
@@ -250,12 +252,12 @@ _LATEST_PRICE_SQL = text(
         JOIN oracle o ON o.id = otp.oracle_id
         WHERE otp.token_id = :token_id
         -- enabled-mapping filter + oracle_id tiebreak (canonical rationale, incl.
-        -- the no-history tradeoff, on _DIRECT_ASSET_HOLDINGS_SQL in
-        -- allocation_position_repository.py). A retired source is excluded at
-        -- read time; same-block rows from two oracles also share the block
-        -- timestamp, so ties reach this read too.
+        -- the append-on-change read path, on _DIRECT_ASSET_HOLDINGS_SQL in
+        -- allocation_position_repository.py). A source retired as of
+        -- :reference_effective_at is excluded; same-block rows from two oracles
+        -- also share the block timestamp, so ties reach this read too.
           AND EXISTS (
-              SELECT 1 FROM oracle_asset oa
+              SELECT 1 FROM oracle_asset_as_of(:reference_effective_at) oa
               WHERE oa.oracle_id = otp.oracle_id
                 AND oa.token_id = otp.token_id
                 AND oa.enabled
