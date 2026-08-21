@@ -34,33 +34,6 @@ class RunnerConfig:
     params: dict = field(default_factory=dict)
 
     @classmethod
-    def from_env(
-        cls,
-        *,
-        market_configs_path: Path = _MARKET_CONFIGS_DEFAULT,
-    ) -> "RunnerConfig":
-        market_key = os.environ["CORE_MODEL_MARKET_KEY"]
-        market_configs = _load_market_configs(market_configs_path)
-        if market_key not in market_configs:
-            available = sorted(market_configs)
-            raise ValueError(f"unknown market_key {market_key!r}; available markets: {available}")
-        return cls._build(market_key, market_configs, market_configs_path)
-
-    @classmethod
-    def all_from_env(
-        cls,
-        *,
-        market_configs_path: Path = _MARKET_CONFIGS_DEFAULT,
-    ) -> "list[RunnerConfig]":
-        """Return one RunnerConfig per market defined in market_configs.json.
-
-        Env var overrides (e.g. CORE_MODEL_N_MC=100) are applied to every market,
-        making it easy to run all markets with a shared override for quick testing.
-        """
-        market_configs = _load_market_configs(market_configs_path)
-        return [cls._build(key, market_configs, market_configs_path) for key in market_configs]
-
-    @classmethod
     def resolve(
         cls,
         market_key: str,
@@ -74,19 +47,14 @@ class RunnerConfig:
         """
         market_configs = _load_market_configs(market_configs_path)
         if market_key == "all":
-            return [cls._build(key, market_configs, market_configs_path) for key in market_configs]
+            return [cls._build(key, market_configs) for key in market_configs]
         if market_key not in market_configs:
             available = sorted(market_configs)
             raise ValueError(f"unknown market_key {market_key!r}; available markets: {available}")
-        return [cls._build(market_key, market_configs, market_configs_path)]
+        return [cls._build(market_key, market_configs)]
 
     @classmethod
-    def _build(
-        cls,
-        market_key: str,
-        market_configs: dict[str, dict],
-        market_configs_path: Path,
-    ) -> "RunnerConfig":
+    def _build(cls, market_key: str, market_configs: dict[str, dict]) -> "RunnerConfig":
         # Layer 1: defaults
         params = dict(DEFAULTS)
         # Layer 2: market-specific overrides from config file
