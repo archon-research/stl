@@ -310,76 +310,6 @@ temporal workflow start --namespace vector \
 
 ---
 
-## VectorReferenceCapitalIndexerWritesZero
-
-**What it means.** Cycles are succeeding but `prime_capital_stack` received no
-rows for an hour. `reference-capital-indexer` is the only writer of forward reference
-capital, and Sky's Star monitor publishes no history, so every cycle that
-records nothing is a permanent hole — it cannot be backfilled afterwards.
-
-**Why it is not caught by the generic rules.** The run returns no error, so
-`VectorCronjobRunFailing` stays quiet. And because the read path gap-fills with
-`locf`, `/v1/primes/{id}/total-capital?reference=true` keeps serving the last
-observed value as if it were current, rather than going null. The stall is
-invisible from both the error path and the API.
-
-**Triage.**
-
-1. Confirm the worker is cycling rather than wedged:
-   `kubectl -n vector logs deploy/reference-capital-indexer --tail=100`. A healthy
-   cycle logs `capital stack sync complete` with a non-zero `snapshots` count.
-2. Check whether the monitor is answering at all:
-   `curl -s "$SKY_RISK_CAPITAL_URL/primes/" | jq '.data.results | length'`.
-   Zero or a missing `results` array is an upstream fault; the client rejects
-   both, so this should have surfaced as an error — if it did not, the payload
-   changed shape.
-3. If the monitor is healthy and the worker is cycling, the primes it covers no
-   longer match the ones STL tracks. `VectorReferenceCapitalIndexerPrimeUncovered`
-   should also be firing; treat that as the primary signal.
-
-**Resolution.** This is upstream coverage, not something to fix in the service.
-Confirm which primes the monitor now reports and reconcile against the
-axis-synome contract. The gap in the series stays — say so rather than
-backfilling it from a different feed, which would splice a different
-measurement.
-
----
-
-## VectorReferenceCapitalIndexerPrimeUncovered
-
-**What it means.** A prime STL tracks was absent from every upstream response
-for an hour. Its reference series is frozen while the other primes keep
-advancing.
-
-**Why it is not caught by the generic rules.** The cycle succeeds and still
-writes every covered prime, so neither the error rules nor
-`VectorReferenceCapitalIndexerWritesZero` fire. `locf` then carries that prime's last
-value forward indefinitely, so its chart looks current and flat rather than
-absent.
-
-**Triage.**
-
-1. `{{ $labels.star }}` names the prime. Ask the monitor directly:
-   `curl -s "$SKY_RISK_CAPITAL_URL/primes/" | jq -r '.data.results[].star'`.
-2. If the prime is absent from that list, the monitor dropped it. If a
-   similar-but-different name is present, the vocabulary drifted.
-3. Compare against what STL tracks — the star keys of the axis-synome contract's
-   ALM proxies, which is what `trackedStarsFromContract` reads. Note the `prime`
-   table is **not** the tracked set: it still carries rows for primes STL has
-   stopped tracking.
-
-**Resolution.**
-
-- *Monitor dropped the prime.* Nothing to fix in the service; the series is
-  correctly frozen. Decide with the team whether the prime should still be
-  tracked, and silence the alert while that is open.
-- *Name drifted.* The contract and the monitor disagree on spelling. Fix it in
-  the axis-synome contract, not by mapping the name in the syncer — the contract
-  is the tracked set, and a local alias would hide the next drift.
-
-Do not "fix" this by relaxing the syncer to accept partial coverage silently.
-The alert exists precisely because a partially-covered cycle looks healthy.
-## morpho-v2-bootstrap fails repeatedly on the same adapter
 ### Special case: `morpho-vault-backfill` (on-demand, no schedule)
 
 Another **on-demand** Temporal worker (`temporal.RunWorker`). Everything said
@@ -484,6 +414,78 @@ bounded at 6h `StartToClose` / 12h `ScheduleToClose` with 3 attempts and a
 60 s heartbeat — all compiled into the worker, so an operator supplies none of it.
 Unlike the backfill, progress lives in the activity's heartbeat details rather
 than in workflow history; see the resume note at the top of this runbook.
+
+---
+
+## VectorReferenceCapitalIndexerWritesZero
+
+**What it means.** Cycles are succeeding but `prime_capital_stack` received no
+rows for an hour. `reference-capital-indexer` is the only writer of forward reference
+capital, and Sky's Star monitor publishes no history, so every cycle that
+records nothing is a permanent hole — it cannot be backfilled afterwards.
+
+**Why it is not caught by the generic rules.** The run returns no error, so
+`VectorCronjobRunFailing` stays quiet. And because the read path gap-fills with
+`locf`, `/v1/primes/{id}/total-capital?reference=true` keeps serving the last
+observed value as if it were current, rather than going null. The stall is
+invisible from both the error path and the API.
+
+**Triage.**
+
+1. Confirm the worker is cycling rather than wedged:
+   `kubectl -n vector logs deploy/reference-capital-indexer --tail=100`. A healthy
+   cycle logs `capital stack sync complete` with a non-zero `snapshots` count.
+2. Check whether the monitor is answering at all:
+   `curl -s "$SKY_RISK_CAPITAL_URL/primes/" | jq '.data.results | length'`.
+   Zero or a missing `results` array is an upstream fault; the client rejects
+   both, so this should have surfaced as an error — if it did not, the payload
+   changed shape.
+3. If the monitor is healthy and the worker is cycling, the primes it covers no
+   longer match the ones STL tracks. `VectorReferenceCapitalIndexerPrimeUncovered`
+   should also be firing; treat that as the primary signal.
+
+**Resolution.** This is upstream coverage, not something to fix in the service.
+Confirm which primes the monitor now reports and reconcile against the
+axis-synome contract. The gap in the series stays — say so rather than
+backfilling it from a different feed, which would splice a different
+measurement.
+
+---
+
+## VectorReferenceCapitalIndexerPrimeUncovered
+
+**What it means.** A prime STL tracks was absent from every upstream response
+for an hour. Its reference series is frozen while the other primes keep
+advancing.
+
+**Why it is not caught by the generic rules.** The cycle succeeds and still
+writes every covered prime, so neither the error rules nor
+`VectorReferenceCapitalIndexerWritesZero` fire. `locf` then carries that prime's last
+value forward indefinitely, so its chart looks current and flat rather than
+absent.
+
+**Triage.**
+
+1. `{{ $labels.star }}` names the prime. Ask the monitor directly:
+   `curl -s "$SKY_RISK_CAPITAL_URL/primes/" | jq -r '.data.results[].star'`.
+2. If the prime is absent from that list, the monitor dropped it. If a
+   similar-but-different name is present, the vocabulary drifted.
+3. Compare against what STL tracks — the star keys of the axis-synome contract's
+   ALM proxies, which is what `trackedStarsFromContract` reads. Note the `prime`
+   table is **not** the tracked set: it still carries rows for primes STL has
+   stopped tracking.
+
+**Resolution.**
+
+- *Monitor dropped the prime.* Nothing to fix in the service; the series is
+  correctly frozen. Decide with the team whether the prime should still be
+  tracked, and silence the alert while that is open.
+- *Name drifted.* The contract and the monitor disagree on spelling. Fix it in
+  the axis-synome contract, not by mapping the name in the syncer — the contract
+  is the tracked set, and a local alias would hide the next drift.
+
+Do not "fix" this by relaxing the syncer to accept partial coverage silently.
+The alert exists precisely because a partially-covered cycle looks healthy.
 
 ---
 
