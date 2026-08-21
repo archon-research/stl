@@ -248,6 +248,26 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/v1/provenance/available': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * Provenance coverage per prime
+     * @description List, for every prime STL indexes, which values of the `source` parameter it can be answered from. Intended to be read once before rendering, so a client can offer only the provenances that will work rather than discovering the rest by their errors.
+     */
+    get: operations['get_provenance_availability_v1_provenance_available_get'];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/v1/ready': {
     parameters: {
       query?: never;
@@ -1531,6 +1551,28 @@ export interface components {
       synced_at: string;
     };
     /**
+     * PrimeProvenanceResponse
+     * @description The provenances one prime can be answered from.
+     */
+    PrimeProvenanceResponse: {
+      /**
+       * Available
+       * @description Provenances this prime can be served from. `indexed` is always present — a prime is only listed because STL indexes it. `reference` and `both` appear together, and only when Sky's monitor covers the prime.
+       * @example [
+       *       "indexed",
+       *       "reference",
+       *       "both"
+       *     ]
+       */
+      available: components['schemas']['Provenance'][];
+      /**
+       * Name
+       * @description Prime name, as `/v1/primes` reports it.
+       * @example spark
+       */
+      name: string;
+    };
+    /**
      * PrimeResponse
      * @description One of a prime's proxy wallets tracked by STL.
      *
@@ -1947,6 +1989,22 @@ export interface components {
      * @enum {string}
      */
     Provenance: 'indexed' | 'reference' | 'both';
+    /**
+     * ProvenanceAvailabilityResponse
+     * @description Per-prime provenance coverage.
+     */
+    ProvenanceAvailabilityResponse: {
+      /**
+       * Primes
+       * @description One entry per prime STL indexes.
+       */
+      primes: components['schemas']['PrimeProvenanceResponse'][];
+      /**
+       * Reference Upstream Reachable
+       * @description Whether Sky's monitor answered. When `false` every prime reports `indexed` alone — unknown coverage is reported as no coverage, so a client is never told a provenance is available and then handed an error for it.
+       */
+      reference_upstream_reachable: boolean;
+    };
     /**
      * RiskBreakdownItemResponse
      * @description One backing-token row in a receipt-token's risk-enriched breakdown.
@@ -2914,6 +2972,26 @@ export interface operations {
         };
         content: {
           'application/json': components['schemas']['ProtocolResponse'][];
+        };
+      };
+    };
+  };
+  get_provenance_availability_v1_provenance_available_get: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          'application/json': components['schemas']['ProvenanceAvailabilityResponse'];
         };
       };
     };

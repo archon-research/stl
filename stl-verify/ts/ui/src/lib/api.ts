@@ -15,6 +15,7 @@ import type {
   PrimesResponse,
   ProtocolEventsResponse,
   Provenance,
+  ProvenanceAvailability,
   RiskBreakdown,
   Rrc,
   Token,
@@ -160,6 +161,15 @@ export async function getAllocationsForProxies(
     proxyAddresses.map((proxyAddress) => getAllocations(proxyAddress, signal)),
   );
   return perProxyAllocations.flat();
+}
+
+export function getProvenanceAvailability(
+  signal?: AbortSignal,
+): Promise<ProvenanceAvailability> {
+  return requestData(
+    apiClient.GET('/v1/provenance/available', { signal }),
+    'GET /v1/provenance/available',
+  );
 }
 
 export function getPrimeRiskCapital(

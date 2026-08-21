@@ -7,11 +7,14 @@ import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
 import { PROVENANCE } from '../../lib/provenance';
+import type { Provenance } from '../../types/allocation';
 
 export type SettingsOption = {
   value: string;
   label: string;
   description?: string;
+  /** Offered but not selectable — this prime cannot be served that way. */
+  disabled?: boolean;
 };
 
 export type SettingsSection = {
@@ -134,6 +137,7 @@ export function SettingsMenu({ sections }: { sections: SettingsSection[] }) {
                     <Menu.RadioItem
                       key={option.value}
                       value={option.value}
+                      disabled={option.disabled ?? false}
                       className={radioItemClassName}
                     >
                       <span className={indicatorClassName}>
@@ -177,29 +181,33 @@ const DATA_SOURCE_SECTION_ID = 'data-source';
  * arrive on the new one — a page mixing both, which is what `source` exists to
  * make impossible.
  */
-export function useDataSourceSection(): SettingsSection {
+export function useDataSourceSection(
+  available: readonly Provenance[] = ['indexed', 'reference', 'both'],
+): SettingsSection {
   const router = useRouter();
+
+  // Shown disabled rather than hidden: a selector whose contents change with
+  // the prime reads as a bug, and "greyed out" says something the absence of an
+  // option does not.
+  const option = (
+    value: Provenance,
+    label: string,
+    description: string,
+  ): SettingsOption => ({
+    value,
+    label,
+    description,
+    disabled: !available.includes(value),
+  });
 
   return {
     id: DATA_SOURCE_SECTION_ID,
     label: 'Data source',
     value: PROVENANCE,
     options: [
-      {
-        value: 'both',
-        label: 'Both',
-        description: 'STL and Sky together, each position named once',
-      },
-      {
-        value: 'indexed',
-        label: 'STL indexed',
-        description: "Computed from STL's own on-chain data",
-      },
-      {
-        value: 'reference',
-        label: 'Sky reference',
-        description: 'As published by Sky, where available',
-      },
+      option('both', 'Both', 'STL and Sky together, each position named once'),
+      option('indexed', 'STL indexed', "Computed from STL's own on-chain data"),
+      option('reference', 'Sky reference', 'As published by Sky'),
     ],
     onChange: (value) => {
       if (value === PROVENANCE) {

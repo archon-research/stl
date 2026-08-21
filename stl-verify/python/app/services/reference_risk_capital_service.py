@@ -54,6 +54,10 @@ class ReferenceRiskCapitalService:
             return None
         return await self._resolve_allocations(snapshot)
 
+    async def tracked_stars(self) -> frozenset[str]:
+        """Every prime the monitor covers, lowercased."""
+        return await self._provider.tracked_stars()
+
     async def _star_for(self, proxy_address: EthAddress) -> str | None:
         """Name the prime ``proxy_address`` belongs to, or ``None`` if it names none.
 

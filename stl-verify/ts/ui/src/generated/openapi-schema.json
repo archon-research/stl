@@ -1568,6 +1568,40 @@
         "title": "PrimeDebtSnapshotResponse",
         "type": "object"
       },
+      "PrimeProvenanceResponse": {
+        "description": "The provenances one prime can be answered from.",
+        "properties": {
+          "available": {
+            "description": "Provenances this prime can be served from. `indexed` is always present \u2014 a prime is only listed because STL indexes it. `reference` and `both` appear together, and only when Sky's monitor covers the prime.",
+            "examples": [
+              [
+                "indexed",
+                "reference",
+                "both"
+              ]
+            ],
+            "items": {
+              "$ref": "#/components/schemas/Provenance"
+            },
+            "title": "Available",
+            "type": "array"
+          },
+          "name": {
+            "description": "Prime name, as `/v1/primes` reports it.",
+            "examples": [
+              "spark"
+            ],
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "available"
+        ],
+        "title": "PrimeProvenanceResponse",
+        "type": "object"
+      },
       "PrimeResponse": {
         "description": "One of a prime's proxy wallets tracked by STL.\n\nA prime allocates through one ALM proxy per chain, so `name` repeats across\nrows and is not a key. Use `/v1/primes/{address}/risk-capital` for\nprime-level figures \u2014 it aggregates across a prime's proxies regardless of\nwhich one you address it by.",
         "properties": {
@@ -2290,6 +2324,30 @@
         ],
         "title": "Provenance",
         "type": "string"
+      },
+      "ProvenanceAvailabilityResponse": {
+        "description": "Per-prime provenance coverage.",
+        "properties": {
+          "primes": {
+            "description": "One entry per prime STL indexes.",
+            "items": {
+              "$ref": "#/components/schemas/PrimeProvenanceResponse"
+            },
+            "title": "Primes",
+            "type": "array"
+          },
+          "reference_upstream_reachable": {
+            "description": "Whether Sky's monitor answered. When `false` every prime reports `indexed` alone \u2014 unknown coverage is reported as no coverage, so a client is never told a provenance is available and then handed an error for it.",
+            "title": "Reference Upstream Reachable",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "primes",
+          "reference_upstream_reachable"
+        ],
+        "title": "ProvenanceAvailabilityResponse",
+        "type": "object"
       },
       "RiskBreakdownItemResponse": {
         "description": "One backing-token row in a receipt-token's risk-enriched breakdown.",
@@ -4409,6 +4467,28 @@
         "summary": "List supported protocols",
         "tags": [
           "metadata"
+        ]
+      }
+    },
+    "/v1/provenance/available": {
+      "get": {
+        "description": "List, for every prime STL indexes, which values of the `source` parameter it can be answered from. Intended to be read once before rendering, so a client can offer only the provenances that will work rather than discovering the rest by their errors.",
+        "operationId": "get_provenance_availability_v1_provenance_available_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProvenanceAvailabilityResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Provenance coverage per prime",
+        "tags": [
+          "primes"
         ]
       }
     },

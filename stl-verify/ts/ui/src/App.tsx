@@ -9,6 +9,7 @@ import {
   useMatchRoute,
   useNavigate,
   useParams,
+  useRouter,
   useSearch,
 } from '@tanstack/react-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -39,6 +40,7 @@ import { PrimeSidebar } from './components/shared/PrimeSidebar';
 import { TopBar } from './components/shared/TopBar';
 import { useUrlSyncedTableState } from './data-table/hooks';
 import { usePrimeChartData } from './hooks/usePrimeChartData';
+import { useProvenanceAvailability } from './hooks/useProvenanceAvailability';
 import {
   getAllocationsForProxies,
   getChains,
@@ -547,6 +549,35 @@ function App() {
   // other proxy of the prime would return; fanning it out would only waste
   // requests.
   const primaryProxyAddress = selectedPrimeGroup?.primaryProxyAddress ?? null;
+
+  const router = useRouter();
+  const provenanceAvailability = useProvenanceAvailability();
+
+  // A provenance this prime cannot be served from is rewritten to one it can,
+  // rather than left to fail request by request. A full document load, because
+  // `lib/provenance` reads the value once per session on purpose: a client-side
+  // switch would leave already-fetched series on the old provenance.
+  const provenanceFallback = provenanceAvailability.fallbackFor(
+    selectedPrimeGroup?.name,
+  );
+  const redirectedProvenance = useRef(false);
+
+  useEffect(() => {
+    if (provenanceFallback === null || redirectedProvenance.current) {
+      return;
+    }
+
+    redirectedProvenance.current = true;
+    const { href } = router.buildLocation({
+      to: '.',
+      search: (previous: Record<string, unknown>) => ({
+        ...previous,
+        reference: undefined,
+        source: provenanceFallback === 'both' ? undefined : provenanceFallback,
+      }),
+    });
+    globalThis.location.assign(href);
+  }, [provenanceFallback, router]);
 
   // Any change to the selected range, as a primitive dependency: it is the
   // retry signal for the snapshot fetches below, which take no range at all.
@@ -1134,6 +1165,9 @@ function App() {
           }
           topBar={
             <TopBar
+              availableProvenances={provenanceAvailability.forPrime(
+                selectedPrimeGroup?.name,
+              )}
               hasSelectedPrime={selectedPrime !== null}
               networkOptions={networkOptions}
               onNetworkChange={(value) =>

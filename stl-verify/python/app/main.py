@@ -27,6 +27,7 @@ from app.api.v1 import (
     prime_debts,
     prime_risk_capital,
     protocol_events,
+    provenance_availability,
     risk,
     status,
     tokens,
@@ -294,6 +295,7 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
     application.include_router(prime_risk_capital.router, prefix="/v1")
     application.include_router(exposure.router, prefix="/v1")
     application.include_router(data_sources.router, prefix="/v1")
+    application.include_router(provenance_availability.router, prefix="/v1")
     application.include_router(risk.router, prefix="/v1")
 
     def public_openapi() -> dict[str, Any]:
