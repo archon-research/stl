@@ -195,7 +195,7 @@ func TestIntegration_Register_ExposesTheDocumentedWorkflowType(t *testing.T) {
 	// Mocked so the run proves the registered names resolve, not that S3 holds
 	// this range: the phases themselves are exercised by the activity tests below.
 	env.OnActivity("DiscoverVaults", mock.Anything, mock.Anything).Return(discoveryResult{Vaults: 1, KnownV2Vaults: 1}, nil)
-	env.OnActivity("ReplayPartition", mock.Anything, mock.Anything).Return(2, nil)
+	env.OnActivity("ReplayPartition", mock.Anything, mock.Anything).Return(partitionReplay{EventsReplayed: 2}, nil)
 
 	env.ExecuteWorkflow("MorphoVaultBackfill", BackfillParams{From: 2000, To: 2500})
 
@@ -404,13 +404,16 @@ func TestIntegration_ReplayPartition_ReplaysNothingWhenNoV2VaultIsKnown(t *testi
 	setWorkerEnv(t, seedBucket(t, ctx), chainFixtureServer(t, "0x1").URL)
 	env := newActivityEnv(t, ctx, pool)
 
-	events := replayOnePartition(t, env, partitionWork{
+	replayed := replayOnePartition(t, env, partitionWork{
 		Range:     blockRange{From: 0, To: 999},
 		Partition: partition.GetPartition(0),
 	})
 
-	if events != 0 {
-		t.Errorf("replayed %d events with no V2 vault registered, want 0", events)
+	if replayed.EventsReplayed != 0 {
+		t.Errorf("replayed %d events with no V2 vault registered, want 0", replayed.EventsReplayed)
+	}
+	if replayed.RowsAppended != (appendedRows{}) {
+		t.Errorf("appended %+v rows with no V2 vault registered, want none", replayed.RowsAppended)
 	}
 }
 
@@ -439,7 +442,7 @@ func TestIntegration_BuildReplayService_MetersTheReplayPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("registering the build: %v", err)
 	}
-	svc, err := buildReplayService(testutil.DiscardLogger(), multicaller, pool, buildReg.BuildID(), 1)
+	svc, _, err := buildReplayService(testutil.DiscardLogger(), multicaller, pool, buildReg.BuildID(), 1)
 	if err != nil {
 		t.Fatalf("buildReplayService: %v", err)
 	}
@@ -459,6 +462,47 @@ func TestIntegration_BuildReplayService_MetersTheReplayPath(t *testing.T) {
 	want := map[string]string{"chain": "mainnet", "observed_via": "add_adapter_event"}
 	if got := counterValue(t, reader, "morpho.v2.adapter.registrations", want); got != 1 {
 		t.Errorf("morpho.v2.adapter.registrations%v = %d, want 1: a replay service with no Telemetry records nothing", want, got)
+	}
+}
+
+// A replay's row tally has to come from the service the composition root actually built:
+// a counting repository the wiring forgot to pass to NewReplayService would leave every
+// per-partition line reporting zero rows for a run that wrote plenty — and reporting zero
+// is exactly the symptom of the silent loss the count exists to expose.
+func TestIntegration_BuildReplayService_CountsTheRowsItAppends(t *testing.T) {
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	t.Cleanup(cleanup)
+	ctx := context.Background()
+
+	vault := common.HexToAddress("0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
+	adapter := common.HexToAddress("0x7481968709b8f155652D42ebf468b22945907dC2")
+	seedV2VaultRow(t, ctx, pool, vault)
+
+	multicaller := testutil.NewMockMulticaller()
+	wireAdapterRegistrationReads(t, multicaller, adapter)
+
+	t.Setenv("BUILD_GIT_HASH", "integration-test")
+	buildReg, err := buildregistry.New(ctx, pool)
+	if err != nil {
+		t.Fatalf("registering the build: %v", err)
+	}
+	svc, counted, err := buildReplayService(testutil.DiscardLogger(), multicaller, pool, buildReg.BuildID(), 1)
+	if err != nil {
+		t.Fatalf("buildReplayService: %v", err)
+	}
+	if err := svc.LoadVaultRegistry(ctx); err != nil {
+		t.Fatalf("loading the vault registry: %v", err)
+	}
+
+	err = svc.ReplayMetaMorphoLog(ctx, addAdapterLog(t, vault, adapter), 23_400_000,
+		common.HexToHash("0x11"), 1, time.Unix(1_760_000_000, 0).UTC())
+	if err != nil {
+		t.Fatalf("ReplayMetaMorphoLog: %v", err)
+	}
+
+	want := appendedRows{AdapterStates: 1, MembershipObservations: 1}
+	if counted.counts != want {
+		t.Errorf("counts after one AddAdapter replay = %+v, want %+v", counted.counts, want)
 	}
 }
 
@@ -618,7 +662,7 @@ func runDiscovery(t *testing.T, env *testsuite.TestActivityEnvironment, rng bloc
 	return got
 }
 
-func replayOnePartition(t *testing.T, env *testsuite.TestActivityEnvironment, work partitionWork) int {
+func replayOnePartition(t *testing.T, env *testsuite.TestActivityEnvironment, work partitionWork) partitionReplay {
 	t.Helper()
 
 	var activities *backfillActivities
@@ -626,9 +670,9 @@ func replayOnePartition(t *testing.T, env *testsuite.TestActivityEnvironment, wo
 	if err != nil {
 		t.Fatalf("ReplayPartition: %v", err)
 	}
-	var events int
-	if err := encoded.Get(&events); err != nil {
+	var replayed partitionReplay
+	if err := encoded.Get(&replayed); err != nil {
 		t.Fatalf("decoding the activity result: %v", err)
 	}
-	return events
+	return replayed
 }

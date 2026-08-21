@@ -32,38 +32,39 @@ import (
 // so no attempt can reach a different verdict. Add a step that DOES touch the
 // network or the database and it must stay untagged — the retry envelope is what
 // carries a blip.
-func buildReplayService(logger *slog.Logger, multicaller outbound.Multicaller, pool *pgxpool.Pool, buildID buildregistry.BuildID, chainID int64) (*morpho_indexer.Service, error) {
+func buildReplayService(logger *slog.Logger, multicaller outbound.Multicaller, pool *pgxpool.Pool, buildID buildregistry.BuildID, chainID int64) (*morpho_indexer.Service, *countingMorphoRepository, error) {
 	txManager, err := postgres.NewTxManager(pool, logger)
 	if err != nil {
-		return nil, fmt.Errorf("creating tx manager: %w: %w", err, errStructuralData)
+		return nil, nil, fmt.Errorf("creating tx manager: %w: %w", err, errStructuralData)
 	}
 	morphoRepo, err := postgres.NewMorphoRepository(pool, logger, buildID)
 	if err != nil {
-		return nil, fmt.Errorf("creating morpho repository: %w: %w", err, errStructuralData)
+		return nil, nil, fmt.Errorf("creating morpho repository: %w: %w", err, errStructuralData)
 	}
+	countingRepo := newCountingMorphoRepository(morphoRepo)
 	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, buildID, 0)
 	if err != nil {
-		return nil, fmt.Errorf("creating protocol repository: %w: %w", err, errStructuralData)
+		return nil, nil, fmt.Errorf("creating protocol repository: %w: %w", err, errStructuralData)
 	}
 	eventRepo := postgres.NewEventRepository(logger, buildID)
 
 	svcConfig, err := morpho_indexer.NewReplayConfig(chainID, logger)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", err, errStructuralData)
+		return nil, nil, fmt.Errorf("%w: %w", err, errStructuralData)
 	}
 
-	svc, err := morpho_indexer.NewReplayService(svcConfig, multicaller, txManager, protocolRepo, morphoRepo, eventRepo)
+	svc, err := morpho_indexer.NewReplayService(svcConfig, multicaller, txManager, protocolRepo, countingRepo, eventRepo)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", err, errStructuralData)
+		return nil, nil, fmt.Errorf("%w: %w", err, errStructuralData)
 	}
-	return svc, nil
+	return svc, countingRepo, nil
 }
 
 // knownV2VaultCount reports how many VaultV2 vaults the database holds, read
 // through the same registry load every replay activity performs — so a zero here
 // is exactly the answer each of them would reach on its own.
 func knownV2VaultCount(ctx context.Context, logger *slog.Logger, multicaller outbound.Multicaller, pool *pgxpool.Pool, buildID buildregistry.BuildID, chainID int64) (int, error) {
-	svc, err := buildReplayService(logger, multicaller, pool, buildID, chainID)
+	svc, _, err := buildReplayService(logger, multicaller, pool, buildID, chainID)
 	if err != nil {
 		return 0, fmt.Errorf("building replay service: %w", err)
 	}

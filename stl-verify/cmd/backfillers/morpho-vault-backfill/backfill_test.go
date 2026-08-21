@@ -44,7 +44,7 @@ func partitionsWide(n int) BackfillParams {
 func registerActivityStubs(
 	env *testsuite.TestWorkflowEnvironment,
 	discover func(blockRange) (discoveryResult, error),
-	replay func(partitionWork) (int, error),
+	replay func(partitionWork) (partitionReplay, error),
 ) *[]string {
 	var replayed []string
 	env.RegisterActivityWithOptions(
@@ -52,7 +52,7 @@ func registerActivityStubs(
 		activity.RegisterOptions{Name: "DiscoverVaults"},
 	)
 	env.RegisterActivityWithOptions(
-		func(_ context.Context, work partitionWork) (int, error) {
+		func(_ context.Context, work partitionWork) (partitionReplay, error) {
 			replayed = append(replayed, work.Partition)
 			return replay(work)
 		},
@@ -67,7 +67,14 @@ func noNewVaultsDiscovered(blockRange) (discoveryResult, error) {
 	return discoveryResult{KnownV2Vaults: 1}, nil
 }
 
-func noEventsReplayed(partitionWork) (int, error) { return 0, nil }
+func noEventsReplayed(partitionWork) (partitionReplay, error) { return partitionReplay{}, nil }
+
+// replayedEvents is a stub replay of n events that appended one adapter-state row each.
+func replayedEvents(n int) func(partitionWork) (partitionReplay, error) {
+	return func(partitionWork) (partitionReplay, error) {
+		return partitionReplay{EventsReplayed: n, RowsAppended: appendedRows{AdapterStates: n}}, nil
+	}
+}
 
 // executeBackfill runs the workflow the deployed worker registers, bound to
 // mainnet so fromV2Deploy resolves.
@@ -203,7 +210,7 @@ func TestBackfillWorkflow_ReplaysEveryPartitionInBlockOrder(t *testing.T) {
 		func(blockRange) (discoveryResult, error) {
 			return discoveryResult{Candidates: 9, Vaults: 2, KnownV2Vaults: 2}, nil
 		},
-		func(partitionWork) (int, error) { return 3, nil },
+		replayedEvents(3),
 	)
 
 	executeBackfill(env, BackfillParams{From: 2000, To: 4500})
@@ -225,6 +232,10 @@ func TestBackfillWorkflow_ReplaysEveryPartitionInBlockOrder(t *testing.T) {
 	if got.EventsReplayed != 9 {
 		t.Errorf("EventsReplayed = %d, want 9 (3 partitions x 3 events)", got.EventsReplayed)
 	}
+	// The rows are what a replay is FOR: every event can replay and still write nothing.
+	if want := (appendedRows{AdapterStates: 9}); got.RowsAppended != want {
+		t.Errorf("RowsAppended = %+v, want %+v", got.RowsAppended, want)
+	}
 	if got.Discovered.Vaults != 2 {
 		t.Errorf("Discovered.Vaults = %d, want 2", got.Discovered.Vaults)
 	}
@@ -235,11 +246,11 @@ func TestBackfillWorkflow_ReplaysEveryPartitionInBlockOrder(t *testing.T) {
 // detect that hole.
 func TestBackfillWorkflow_StopsAtTheFirstFailingPartition(t *testing.T) {
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
-	replayed := registerActivityStubs(env, noNewVaultsDiscovered, func(work partitionWork) (int, error) {
+	replayed := registerActivityStubs(env, noNewVaultsDiscovered, func(work partitionWork) (partitionReplay, error) {
 		if work.Partition == "1000-1999" {
-			return 0, errors.New("boom")
+			return partitionReplay{}, errors.New("boom")
 		}
-		return 0, nil
+		return partitionReplay{}, nil
 	})
 
 	executeBackfill(env, BackfillParams{From: 1, To: 2500})
@@ -368,7 +379,7 @@ func TestBackfillWorkflow_RejectsATopOfInt64RangeBeforeWalkingIt(t *testing.T) {
 // got from the UI without reading raw event history.
 func TestBackfillWorkflow_ExposesProgressQuery(t *testing.T) {
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
-	registerActivityStubs(env, noNewVaultsDiscovered, func(partitionWork) (int, error) { return 2, nil })
+	registerActivityStubs(env, noNewVaultsDiscovered, replayedEvents(2))
 
 	executeBackfill(env, BackfillParams{From: 2000, To: 4500})
 
@@ -382,6 +393,9 @@ func TestBackfillWorkflow_ExposesProgressQuery(t *testing.T) {
 	if got.EventsReplayed != 6 {
 		t.Errorf("EventsReplayed = %d, want 6", got.EventsReplayed)
 	}
+	if want := (appendedRows{AdapterStates: 6}); got.RowsAppended != want {
+		t.Errorf("RowsAppended = %+v, want %+v", got.RowsAppended, want)
+	}
 }
 
 // A failing run must still expose the counts an operator needs to decide what to
@@ -389,11 +403,11 @@ func TestBackfillWorkflow_ExposesProgressQuery(t *testing.T) {
 // the result payload of a workflow that returns a non-nil error.
 func TestBackfillWorkflow_ExposesPartialCountsAfterFailure(t *testing.T) {
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
-	registerActivityStubs(env, noNewVaultsDiscovered, func(work partitionWork) (int, error) {
+	registerActivityStubs(env, noNewVaultsDiscovered, func(work partitionWork) (partitionReplay, error) {
 		if work.Partition == "4000-4999" {
-			return 0, errors.New("boom")
+			return partitionReplay{}, errors.New("boom")
 		}
-		return 5, nil
+		return replayedEvents(5)(work)
 	})
 
 	executeBackfill(env, BackfillParams{From: 2000, To: 4500})
@@ -407,6 +421,9 @@ func TestBackfillWorkflow_ExposesPartialCountsAfterFailure(t *testing.T) {
 	}
 	if got.EventsReplayed != 10 {
 		t.Errorf("EventsReplayed = %d, want 10", got.EventsReplayed)
+	}
+	if want := (appendedRows{AdapterStates: 10}); got.RowsAppended != want {
+		t.Errorf("RowsAppended = %+v, want %+v", got.RowsAppended, want)
 	}
 }
 

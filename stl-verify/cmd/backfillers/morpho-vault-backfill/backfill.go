@@ -123,6 +123,15 @@ type partitionWork struct {
 	Partition string     `json:"partition"`
 }
 
+// partitionReplay is what one partition's replay did: the logs it drove through the
+// handler path, and the rows those logs actually appended. The two are independent —
+// every event can replay and still write nothing, which is the shape a re-run of an
+// already-replayed range takes.
+type partitionReplay struct {
+	EventsReplayed int          `json:"eventsReplayed"`
+	RowsAppended   appendedRows `json:"rowsAppended"`
+}
+
 // discoveryResult is what phases 1-3 found: addresses worth probing, and the
 // subset that probed as Morpho-family vaults and was persisted.
 type discoveryResult struct {
@@ -141,6 +150,7 @@ type BackfillResult struct {
 	Discovered     *discoveryResult `json:"discovered,omitempty"`
 	PartitionsRun  int              `json:"partitionsRun"`
 	EventsReplayed int              `json:"eventsReplayed"`
+	RowsAppended   appendedRows     `json:"rowsAppended"`
 }
 
 type backfillProgress struct {
@@ -149,6 +159,7 @@ type backfillProgress struct {
 	PartitionsTotal int              `json:"partitionsTotal"`
 	PartitionsDone  int              `json:"partitionsDone"`
 	EventsReplayed  int              `json:"eventsReplayed"`
+	RowsAppended    appendedRows     `json:"rowsAppended"`
 }
 
 // backfillWorkflows carries the deployment's chain, which the workflow needs to
@@ -197,6 +208,7 @@ func (w *backfillWorkflows) Backfill(ctx workflow.Context, params BackfillParams
 			Discovered:     state.Discovered,
 			PartitionsRun:  state.PartitionsDone,
 			EventsReplayed: state.EventsReplayed,
+			RowsAppended:   state.RowsAppended,
 		}
 	}
 
@@ -210,7 +222,8 @@ func (w *backfillWorkflows) Backfill(ctx workflow.Context, params BackfillParams
 	// No emptiness check, breaking temporal_guide design rule 5: a range holding
 	// zero VaultV2 governance events is ordinary, so a hole is not visible by count.
 	logger.Info("morpho vault backfill complete",
-		"discovered", state.Discovered, "partitions", state.PartitionsDone, "events", state.EventsReplayed)
+		"discovered", state.Discovered, "partitions", state.PartitionsDone,
+		"events", state.EventsReplayed, "rowsAppended", state.RowsAppended)
 	return resultOf(), nil
 }
 
@@ -255,12 +268,13 @@ func replayPartitions(ctx workflow.Context, rng blockRange, parts []string, stat
 	var activities *backfillActivities
 	for _, part := range parts {
 		work := partitionWork{Range: rng, Partition: part}
-		var events int
-		if err := workflow.ExecuteActivity(ctx, activities.ReplayPartition, work).Get(ctx, &events); err != nil {
+		var replayed partitionReplay
+		if err := workflow.ExecuteActivity(ctx, activities.ReplayPartition, work).Get(ctx, &replayed); err != nil {
 			return err
 		}
 		state.PartitionsDone++
-		state.EventsReplayed += events
+		state.EventsReplayed += replayed.EventsReplayed
+		state.RowsAppended.add(replayed.RowsAppended)
 	}
 	return nil
 }
@@ -367,13 +381,14 @@ func (a *backfillActivities) DiscoverVaults(ctx context.Context, rng blockRange)
 	return got, nil
 }
 
-// ReplayPartition replays one partition's VaultV2 structured events (phase 4)
-// and reports how many logs it drove through the live handler path.
+// ReplayPartition replays one partition's VaultV2 structured events (phase 4) and reports
+// how many logs it drove through the live handler path and how many rows those logs
+// appended.
 //
 // The vault registry is reloaded per partition rather than cached on the struct:
 // a retry may land on a worker that never ran DiscoverVaults, so reading it here
 // is what makes the activity self-contained.
-func (a *backfillActivities) ReplayPartition(ctx context.Context, work partitionWork) (events int, err error) {
+func (a *backfillActivities) ReplayPartition(ctx context.Context, work partitionWork) (replayed partitionReplay, err error) {
 	defer func() { err = nonRetryableIfStructural(err) }()
 
 	// One wrap for every failure path, deferred rather than repeated per return.
@@ -390,36 +405,38 @@ func (a *backfillActivities) ReplayPartition(ctx context.Context, work partition
 	defer stopHeartbeat()
 	defer a.archiveDrain()
 
-	svc, err := buildReplayService(a.logger, a.multicaller, a.pool, a.buildID, a.cfg.chainID)
+	svc, counted, err := buildReplayService(a.logger, a.multicaller, a.pool, a.buildID, a.cfg.chainID)
 	if err != nil {
-		return 0, fmt.Errorf("building replay service: %w", err)
+		return partitionReplay{}, fmt.Errorf("building replay service: %w", err)
 	}
 	if err := svc.LoadVaultRegistry(ctx); err != nil {
-		return 0, fmt.Errorf("loading the vault registry: %w", err)
+		return partitionReplay{}, fmt.Errorf("loading the vault registry: %w", err)
 	}
 
 	v2Vaults := svc.V2VaultAddresses()
 	if len(v2Vaults) == 0 {
 		a.logger.Info("no VaultV2 vaults known — skipping structured-event replay", "partition", work.Partition)
-		return 0, nil
+		return partitionReplay{}, nil
 	}
 
 	// Structural: the topics come from the ABI embedded in this binary, so a
 	// failure here is a defect only a new build can clear.
 	topics, err := morpho_indexer.VaultV2StructuredEventTopics()
 	if err != nil {
-		return 0, fmt.Errorf("deriving VaultV2 structured topics: %w: %w", err, errStructuralData)
+		return partitionReplay{}, fmt.Errorf("deriving VaultV2 structured topics: %w: %w", err, errStructuralData)
 	}
 
-	events, err = replayPartition(ctx, a.logger, a.s3Reader, svc, blocktime.New(a.ethClient),
+	events, err := replayPartition(ctx, a.logger, a.s3Reader, svc, blocktime.New(a.ethClient),
 		a.cfg, work.Range, work.Partition, v2Vaults, topics)
 	if err != nil {
-		return 0, err
+		return partitionReplay{}, err
 	}
+	replayed = partitionReplay{EventsReplayed: events, RowsAppended: counted.counts}
 
 	activity.GetLogger(ctx).Info("replayed partition",
-		"partition", work.Partition, "events", events, "v2Vaults", len(v2Vaults))
-	return events, nil
+		"partition", work.Partition, "events", events,
+		"rowsAppended", replayed.RowsAppended, "v2Vaults", len(v2Vaults))
+	return replayed, nil
 }
 
 // nonRetryableIfStructural stops Temporal retrying a verdict that cannot change.
