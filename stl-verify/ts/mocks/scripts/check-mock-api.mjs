@@ -325,35 +325,57 @@ async function checkDebtAggregatedBuckets() {
 }
 
 /**
- * A bucket's value must follow its instant, not its position: two reads at
- * different page sizes have to agree wherever their grids overlap, or paging a
- * chart redraws it.
+ * A bucket's value must follow its instant and nothing the request asked for:
+ * page size, range and resolution all have to agree wherever their grids
+ * overlap, or paging or rescaling a chart redraws it.
  */
 async function checkSeriesValuesFollowTheirInstant() {
-  const read = async (limit) =>
+  const read = async (query, label) =>
     request(
       '/v1/primes/{prime_id}/exposure',
-      {
-        params: {
-          path: { prime_id: SPARK_MAINNET_PROXY },
-          query: { resolution: 'PT1H', limit },
-        },
-      },
-      `exposure (limit=${limit})`,
+      { params: { path: { prime_id: SPARK_MAINNET_PROXY }, query } },
+      `exposure (${label})`,
     );
 
-  const wide = await read(25);
-  const narrow = await read(10);
+  const daily = await read({ resolution: 'PT1H', limit: 25 }, '24h hourly');
   const byInstant = new Map(
-    wide.data.map((bucket) => [bucket.bucket_start, bucket.exposure_usd]),
+    daily.data.map((bucket) => [bucket.bucket_start, bucket.exposure_usd]),
   );
 
-  for (const bucket of narrow.data) {
-    assert.equal(
-      bucket.exposure_usd,
-      byInstant.get(bucket.bucket_start),
-      `bucket ${bucket.bucket_start} changed value with the page size`,
+  const hoursAgo = (hours) =>
+    new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+  const variants = [
+    [await read({ resolution: 'PT1H', limit: 10 }, 'limit=10'), 'page size'],
+    [
+      await read(
+        {
+          resolution: 'PT1H',
+          limit: 500,
+          from_timestamp: hoursAgo(24 * 7),
+          to_timestamp: hoursAgo(3),
+        },
+        'a week ending three hours ago',
+      ),
+      'window',
+    ],
+    [await read({ resolution: 'PT6H', limit: 500 }, 'PT6H'), 'resolution'],
+  ];
+
+  for (const [variant, asked] of variants) {
+    const overlap = variant.data.filter((bucket) =>
+      byInstant.has(bucket.bucket_start),
     );
+    // Without this the loop below passes on an empty intersection, which is the
+    // one way a comparison across two grids can look green while proving
+    // nothing.
+    assert.ok(overlap.length > 0, `no bucket overlaps across the ${asked}`);
+    for (const bucket of overlap) {
+      assert.equal(
+        bucket.exposure_usd,
+        byInstant.get(bucket.bucket_start),
+        `bucket ${bucket.bucket_start} changed value with the requested ${asked}`,
+      );
+    }
   }
 }
 

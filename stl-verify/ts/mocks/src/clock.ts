@@ -45,3 +45,21 @@ export function offsetIsoAgo(nowMs: number, agoMs: number): string {
 export function floorToInterval(ms: number, intervalMs: number): number {
   return Math.floor(ms / intervalMs) * intervalMs;
 }
+
+/** How coarsely the generated series track the clock; see `seriesAnchorMs`. */
+const SERIES_ANCHOR_INTERVAL_MS = 15 * MINUTE_MS;
+
+/**
+ * The instant the generated value series are measured from.
+ *
+ * It must not come from the response: anchoring on the newest bucket made the
+ * same `bucket_start` answer differently once the window or the resolution
+ * changed, and made a raw debt snapshot disagree with the bucket covering it. A
+ * frozen epoch would fix that by drifting the whole series away from the current
+ * figures the summary tiles read, so the anchor is the clock quantised to a
+ * coarse grid: independent of what was asked for, and identical across the
+ * requests one screen makes.
+ */
+export function seriesAnchorMs(nowMs: number): number {
+  return floorToInterval(nowMs, SERIES_ANCHOR_INTERVAL_MS);
+}

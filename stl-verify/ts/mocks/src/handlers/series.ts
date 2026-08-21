@@ -145,12 +145,13 @@ export function seriesHandlers(): MockHandler[] {
       '/v1/primes/{prime_id}/exposure',
       async ({ params, query, response }) => {
         await mockDelay(SERIES_DELAY_MS);
+        const nowMs = mockNow();
         if (findProxy(params.prime_id) === undefined) {
           return response.untyped(
             problemResponse(unknownPrime(params.prime_id)),
           );
         }
-        const request = readSeriesRequest(seriesQuery(query), mockNow());
+        const request = readSeriesRequest(seriesQuery(query), nowMs);
         if (!request.ok) {
           return response.untyped(problemResponse(request.problem));
         }
@@ -163,7 +164,7 @@ export function seriesHandlers(): MockHandler[] {
           // result is not a fresh object literal, so without it a bucket field
           // the document drops stays assignable and the mock keeps serving a
           // key the API no longer has. Annotated, that drop is a compile error.
-          data: seriesPoints(EXPOSURE_USD, request.value.starts).map(
+          data: seriesPoints(EXPOSURE_USD, request.value.starts, nowMs).map(
             (point): ExposureBucket => ({
               bucket_start: iso(point.startMs),
               exposure_usd: usdString(point.value),
@@ -177,12 +178,13 @@ export function seriesHandlers(): MockHandler[] {
       '/v1/primes/{prime_id}/total-capital',
       async ({ params, query, response }) => {
         await mockDelay(SERIES_DELAY_MS);
+        const nowMs = mockNow();
         if (findProxy(params.prime_id) === undefined) {
           return response.untyped(
             problemResponse(unknownPrime(params.prime_id)),
           );
         }
-        const request = readSeriesRequest(seriesQuery(query), mockNow());
+        const request = readSeriesRequest(seriesQuery(query), nowMs);
         if (!request.ok) {
           return response.untyped(problemResponse(request.problem));
         }
@@ -191,12 +193,14 @@ export function seriesHandlers(): MockHandler[] {
           mode: 'aggregated',
           source: request.value.reference ? 'reference' : 'self',
           window: request.value.window,
-          data: seriesPoints(TOTAL_CAPITAL_USD, request.value.starts).map(
-            (point): TotalCapitalBucket => ({
-              bucket_start: iso(point.startMs),
-              total_capital_usd: usdString(point.value),
-            }),
-          ),
+          data: seriesPoints(
+            TOTAL_CAPITAL_USD,
+            request.value.starts,
+            nowMs,
+          ).map((point): TotalCapitalBucket => ({
+            bucket_start: iso(point.startMs),
+            total_capital_usd: usdString(point.value),
+          })),
         });
       },
     ),
@@ -233,7 +237,7 @@ export function seriesHandlers(): MockHandler[] {
             mode: 'aggregated',
             source: reference ? 'reference' : 'self',
             window,
-            data: seriesPoints(PRIME_DEBT_USDS, starts).map(
+            data: seriesPoints(PRIME_DEBT_USDS, starts, nowMs).map(
               (point): PrimeDebtBucket => ({
                 bucket_start: iso(point.startMs),
                 debt_wad: toWad(point.value),

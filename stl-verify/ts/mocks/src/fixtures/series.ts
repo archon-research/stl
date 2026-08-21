@@ -8,13 +8,16 @@
  * while returning nonsense. Instead each series keeps the two real endpoints of
  * its 24h capture and interpolates the requested grid between them.
  *
- * A bucket's value is a function of **its own instant**, never of its position in
- * the response. Keying off the index would make the same `bucket_start` return a
- * different number at a different `limit`, so paging a chart would redraw it.
+ * A bucket's value is a function of **its own instant**, never of anything the
+ * request asked for. Keying off the index — or off the newest bucket of this
+ * response, which is where the window and the resolution leak in — would make
+ * the same `bucket_start` return a different number at a different `limit` or
+ * range, so paging or rescaling a chart would redraw it. `clock.ts` owns the
+ * anchor the instants are measured from.
  */
 import { createSeededRng } from '@archon-research/http-client-msw';
 
-import { DAY_MS, MINUTE_MS, isoAgo } from '../clock.ts';
+import { DAY_MS, MINUTE_MS, isoAgo, seriesAnchorMs } from '../clock.ts';
 import type { PrimeDebtSnapshot } from '../schema.ts';
 
 /** The 24h endpoints of a staging capture. */
@@ -59,32 +62,31 @@ export const PRIME_DEBT_USDS: SeriesEnvelope = {
 export type SeriesPoint = { startMs: number; value: number };
 
 /**
- * Values for the given bucket starts, which must be newest-first on a fixed
- * grid. The newest bucket is exactly `envelope.newest` — it is the figure the
- * summary tiles read, and a jittered "current" number would disagree with the
- * risk-capital fixture it came from.
+ * Values for the given bucket starts, measured from the clock's series anchor
+ * rather than from the response's own newest bucket. A bucket at the anchor is
+ * exactly `envelope.newest` — it is the figure the summary tiles read, and a
+ * jittered "current" number would disagree with the risk-capital fixture it came
+ * from.
  */
 export function seriesPoints(
   envelope: SeriesEnvelope,
   bucketStartsMs: readonly number[],
+  nowMs: number,
 ): SeriesPoint[] {
-  const newestStartMs = bucketStartsMs[0];
-  if (newestStartMs === undefined) {
-    return [];
-  }
+  const anchorMs = seriesAnchorMs(nowMs);
 
   return bucketStartsMs.map((startMs) => ({
     startMs,
-    value: valueAt(envelope, newestStartMs, startMs),
+    value: valueAt(envelope, anchorMs, startMs),
   }));
 }
 
 function valueAt(
   envelope: SeriesEnvelope,
-  newestStartMs: number,
+  anchorMs: number,
   startMs: number,
 ): number {
-  const progress = Math.min((newestStartMs - startMs) / DAY_MS, 1);
+  const progress = Math.min((anchorMs - startMs) / DAY_MS, 1);
   if (progress <= 0) {
     return envelope.newest;
   }
@@ -136,7 +138,11 @@ export function seedDebtSnapshots(
         prime_address: primeAddress,
         prime_name: primeName,
         ilk_name: ilkName,
-        debt_wad: toWad(valueAt(PRIME_DEBT_USDS, nowMs, syncedMs)),
+        // The same anchor the aggregated buckets use, so a snapshot and the
+        // bucket covering it report the same debt.
+        debt_wad: toWad(
+          valueAt(PRIME_DEBT_USDS, seriesAnchorMs(nowMs), syncedMs),
+        ),
         block_number: 25780913 - index * 74,
         block_version: 0,
         synced_at: isoAgo(nowMs, syncedAgo),
