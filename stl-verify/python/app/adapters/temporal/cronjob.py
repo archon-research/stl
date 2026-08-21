@@ -6,8 +6,10 @@ cronjob name is simultaneously the task queue and the schedule id, and a
 restart must never fail because the schedule survived from a previous run.
 """
 
+import asyncio
 import logging
 import os
+import signal
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -22,6 +24,8 @@ from temporalio.client import (
     ScheduleOverlapPolicy,
     SchedulePolicy,
     ScheduleSpec,
+    ScheduleUpdate,
+    ScheduleUpdateInput,
 )
 from temporalio.worker import Worker
 
@@ -58,11 +62,11 @@ async def connect() -> Client:
 
 
 async def ensure_schedule(client: Client, spec: CronjobSpec) -> None:
-    """Create the schedule, tolerating one that already exists.
+    """Create the schedule, or reconcile the interval into an existing one.
 
-    Temporal owns the schedule, so an interval change in the environment does
-    not propagate: the schedule must be deleted in the UI or CLI and the worker
-    restarted. This is the documented repo behaviour, not an oversight.
+    Temporal owns the schedule, so a changed interval env var only reaches it
+    through the reconcile on worker startup — the same semantics as the Go
+    harness's reconcileScheduleSpec.
     """
     try:
         await client.create_schedule(
@@ -86,28 +90,64 @@ async def ensure_schedule(client: Client, spec: CronjobSpec) -> None:
         # typed SDK error, not the RPCError/"AlreadyExists" string match the
         # Go runner uses -- matching on the string here silently crash-loops
         # the pod.
-        logger.info("schedule already exists, leaving it untouched name=%s", spec.name)
+        await _reconcile_schedule(client, spec)
+
+
+async def _reconcile_schedule(client: Client, spec: CronjobSpec) -> None:
+    """Update the existing schedule's spec so a changed interval takes effect
+    on redeploy without a manual deletion. The existing schedule already has a
+    valid spec, so a failed reconcile (e.g. a transient Temporal error) must
+    not crash-loop the worker: log it and serve the existing schedule; the
+    next successful startup reconciles again."""
+
+    def _update(update_input: ScheduleUpdateInput) -> ScheduleUpdate:
+        schedule = update_input.description.schedule
+        schedule.spec = ScheduleSpec(intervals=[ScheduleIntervalSpec(every=spec.interval)])
+        return ScheduleUpdate(schedule=schedule)
+
+    try:
+        await client.get_schedule_handle(spec.name).update(_update)
+        logger.info("schedule reconciled name=%s interval=%s", spec.name, spec.interval)
+    except Exception:
+        logger.warning(
+            "schedule reconcile failed; starting with the existing schedule name=%s", spec.name, exc_info=True
+        )
 
 
 async def run_cronjob(spec: CronjobSpec) -> None:
-    """Connect, ensure the schedule, then serve the task queue until cancelled.
+    """Connect, ensure the schedule, then serve the task queue until stopped.
 
     Activities run on a thread pool because these ticks are CPU-bound rather
     than IO-bound; leaving them on the event loop would stall heartbeats and
     schedule polling for the duration of a run. One activity slot, hardcoded:
     every cronjob tick is one CPU-bound pass, and overlap-SKIP already
     guarantees a schedule never queues a second one.
+
+    SIGTERM/SIGINT stop the worker gracefully (the Go runner's
+    signal.NotifyContext equivalent): the worker stops polling and tells the
+    server, instead of dying mid-poll and leaving the tick to surface as a
+    timeout hours later.
     """
     client = await connect()
     await ensure_schedule(client, spec)
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        worker = Worker(
-            client,
-            task_queue=spec.name,
-            workflows=[spec.workflow],
-            activities=spec.activities,
-            activity_executor=executor,
-            max_concurrent_activities=1,
-        )
-        logger.info("worker running task_queue=%s", spec.name)
-        await worker.run()
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, stop.set)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            worker = Worker(
+                client,
+                task_queue=spec.name,
+                workflows=[spec.workflow],
+                activities=spec.activities,
+                activity_executor=executor,
+                max_concurrent_activities=1,
+            )
+            async with worker:
+                logger.info("worker running task_queue=%s", spec.name)
+                await stop.wait()
+            logger.info("worker stopped task_queue=%s", spec.name)
+    finally:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.remove_signal_handler(sig)

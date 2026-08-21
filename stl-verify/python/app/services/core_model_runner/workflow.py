@@ -27,6 +27,11 @@ class CoreModelRunnerWorkflow:
             ACTIVITY_NAME,
             market_key,
             start_to_close_timeout=TICK_TIMEOUT,
+            # Also bound queue time: the worker has one activity slot, so a
+            # hung thread would otherwise leave every later tick queued
+            # invisibly forever. This converts that queued state into a failed
+            # workflow the Temporal UI shows.
+            schedule_to_close_timeout=TICK_TIMEOUT * 2,
             # No retries. The inputs are static until the next scheduled window,
             # so a retry would recompute the same answer -- and because
             # core_model_results is append-only, a mid-run retry would duplicate

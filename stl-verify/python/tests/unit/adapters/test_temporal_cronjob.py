@@ -28,15 +28,32 @@ def _spec() -> CronjobSpec:
     )
 
 
-class _RecordingClient:
+class _RecordingHandle:
     def __init__(self, error: Exception | None = None) -> None:
         self.error = error
+        self.updated = False
+
+    async def update(self, updater):
+        if self.error is not None:
+            raise self.error
+        self.updated = True
+
+
+class _RecordingClient:
+    def __init__(self, error: Exception | None = None, handle_error: Exception | None = None) -> None:
+        self.error = error
         self.calls: list[tuple] = []
+        self.handle = _RecordingHandle(handle_error)
+        self.handle_requests: list[str] = []
 
     async def create_schedule(self, schedule_id, schedule):
         self.calls.append((schedule_id, schedule))
         if self.error is not None:
             raise self.error
+
+    def get_schedule_handle(self, schedule_id):
+        self.handle_requests.append(schedule_id)
+        return self.handle
 
 
 async def test_ensure_schedule_uses_the_cronjob_name_as_schedule_id_and_task_queue():
@@ -74,6 +91,25 @@ async def test_ensure_schedule_tolerates_a_schedule_left_by_a_previous_run():
     # Matching on the string instead crash-loops the pod on every restart after
     # the first, which is how this was originally shipped.
     client = _RecordingClient(error=ScheduleAlreadyRunningError())
+    await ensure_schedule(cast(Client, client), _spec())  # must not raise
+
+
+async def test_ensure_schedule_reconciles_an_existing_schedule():
+    # Mirrors the Go harness's reconcileScheduleSpec: a changed interval env
+    # var reaches the existing schedule on redeploy, no manual deletion.
+    client = _RecordingClient(error=ScheduleAlreadyRunningError())
+    await ensure_schedule(cast(Client, client), _spec())
+    assert client.handle_requests == ["my-cronjob"]
+    assert client.handle.updated is True
+
+
+async def test_a_failed_reconcile_does_not_crash_loop_the_worker():
+    # The existing schedule has a valid spec; a transient reconcile failure
+    # must log and serve it, never take the pod down.
+    client = _RecordingClient(
+        error=ScheduleAlreadyRunningError(),
+        handle_error=RPCError("transient", RPCStatusCode.UNAVAILABLE, b""),
+    )
     await ensure_schedule(cast(Client, client), _spec())  # must not raise
 
 
