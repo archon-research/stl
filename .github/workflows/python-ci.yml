@@ -18,7 +18,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -28,7 +28,7 @@ jobs:
           python-version-file: '.python-version'
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           enable-cache: true
           working-directory: stl-verify/python
@@ -44,6 +44,18 @@ jobs:
         if: ${{ !cancelled() }}
         run: make lint
 
+      # The committed schema is what the TS UI's typegen consumes and what the
+      # deprecation notices on this API are published through, so a response-model
+      # change that skips the regeneration silently breaks both.
+      - name: OpenAPI schema is in sync with the response models
+        if: ${{ !cancelled() }}
+        run: |
+          make export-openapi-schema
+          if ! git diff --exit-code -- ../ts/ui/src/generated/openapi-schema.json; then
+            echo "::error::openapi-schema.json is stale — run 'make export-openapi-schema' in stl-verify/python and commit the result"
+            exit 1
+          fi
+
   test:
     name: Tests (Python)
     runs-on: ubuntu-latest
@@ -56,7 +68,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -66,7 +78,7 @@ jobs:
           python-version-file: '.python-version'
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           enable-cache: true
           working-directory: stl-verify/python

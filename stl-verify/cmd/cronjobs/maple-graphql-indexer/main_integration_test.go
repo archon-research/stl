@@ -19,14 +19,7 @@ import (
 var sharedDSN string
 
 func TestMain(m *testing.M) {
-	dsn, cleanup := testutil.StartTimescaleDBForMain()
-	sharedDSN = dsn
-
-	code := m.Run()
-
-	cleanup()
-	code = testutil.CheckGoroutineLeaks(code)
-	os.Exit(code)
+	os.Exit(testutil.RunShared(m, testutil.Shared{TimescaleDSN: &sharedDSN}))
 }
 
 // mapleFixtureServer serves one pool, one loan, one strategy, and globals in
@@ -69,7 +62,7 @@ func mapleFixtureServer(t *testing.T) *httptest.Server {
 
 func TestSetupRunner_WiresService(t *testing.T) {
 	ctx := context.Background()
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 
 	server := mapleFixtureServer(t)
@@ -108,7 +101,7 @@ func TestSetupRunner_WiresService(t *testing.T) {
 // of multiplying snapshots.
 func TestSetupRunner_UsesScheduledAtFromContext(t *testing.T) {
 	ctx := context.Background()
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 
 	server := mapleFixtureServer(t)
@@ -159,7 +152,7 @@ func TestSetupRunner_UsesScheduledAtFromContext(t *testing.T) {
 
 func TestSetupRunner_RejectsNonMainnetChain(t *testing.T) {
 	ctx := context.Background()
-	pool, _, cleanup := testutil.SetupTestSchema(t, sharedDSN)
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 
 	t.Setenv("CHAIN_ID", "137")

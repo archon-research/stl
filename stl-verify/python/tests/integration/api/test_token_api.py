@@ -46,7 +46,13 @@ def client(async_db_url: str, tmp_path_factory, _seed_weth_price: None):
     empty_mapping = tmp_path_factory.mktemp("cfg") / "empty_mapping.json"
     empty_mapping.write_text("{}")
     test_app = create_app(
-        Settings.model_validate({"database_url": SecretStr(async_db_url), "suraf_mappings_file": empty_mapping})
+        Settings.model_validate(
+            {
+                "database_url": SecretStr(async_db_url),
+                "suraf_mappings_file": empty_mapping,
+                "core_model_mappings_file": empty_mapping,
+            }
+        )
     )
     with TestClient(test_app) as c:
         yield c

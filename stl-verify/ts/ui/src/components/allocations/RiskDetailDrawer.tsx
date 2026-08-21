@@ -27,11 +27,32 @@ type DragState = {
 
 const DEFAULT_DRAWER_WIDTH = 704;
 const MIN_DRAWER_WIDTH = 480;
-const MAX_DRAWER_WIDTH = 1100;
 const DRAWER_STORAGE_KEY = 'risk-detail-drawer-width';
+
+// The drawer hosts the full backing-collateral table, which is wider than any
+// fixed pixel ceiling that also looks sensible on a laptop, so the cap is
+// relative to the viewport. Leaving 8% keeps the grid edge visible behind it so
+// the drawer still reads as an overlay rather than a page.
+//
+// Enforced in CSS as well as here: the stored width is a pixel preference, and
+// only the CSS `min()` keeps the cap true when the viewport is resized after
+// mount -- clamping in JS alone would leave a stale, too-wide value behind.
+const MAX_DRAWER_VIEWPORT_FRACTION = 0.92;
+const MAX_DRAWER_WIDTH_CSS = `${MAX_DRAWER_VIEWPORT_FRACTION * 100}vw`;
 
 function isBrowser(): boolean {
   return typeof window !== 'undefined';
+}
+
+function maxDrawerWidth(): number {
+  if (!isBrowser()) {
+    return DEFAULT_DRAWER_WIDTH;
+  }
+
+  return Math.max(
+    MIN_DRAWER_WIDTH,
+    Math.round(window.innerWidth * MAX_DRAWER_VIEWPORT_FRACTION),
+  );
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -53,7 +74,7 @@ function readStoredWidth(): number {
     return DEFAULT_DRAWER_WIDTH;
   }
 
-  return clamp(parsed, MIN_DRAWER_WIDTH, MAX_DRAWER_WIDTH);
+  return clamp(parsed, MIN_DRAWER_WIDTH, maxDrawerWidth());
 }
 
 export function RiskDetailDrawer({
@@ -96,7 +117,7 @@ export function RiskDetailDrawer({
       const nextWidth = clamp(
         dragState.startSize + delta,
         MIN_DRAWER_WIDTH,
-        MAX_DRAWER_WIDTH,
+        maxDrawerWidth(),
       );
       setDrawerWidth(nextWidth);
     };
@@ -124,22 +145,30 @@ export function RiskDetailDrawer({
   }, [dragState]);
 
   const drawerStyle: CSSProperties = {
-    width: `min(${drawerWidth}px, 100vw)`,
+    width: `min(${drawerWidth}px, ${MAX_DRAWER_WIDTH_CSS})`,
   };
 
   const handleResizeStart = (event: MouseEvent<HTMLButtonElement>) => {
     event.preventDefault();
     setDragState({
       startPosition: event.clientX,
-      startSize: drawerWidth,
+      // Seed the drag from the width actually painted, not from state. After the
+      // viewport narrows, state still holds the wider stored preference, and a
+      // drag anchored there could never reach the new cap -- the handle would be
+      // inert until the window widened again. Clamping here rather than on
+      // resize keeps the preference intact for when it does.
+      startSize: clamp(drawerWidth, MIN_DRAWER_WIDTH, maxDrawerWidth()),
     });
   };
 
   const ariaTitle = typeof title === 'string' ? title : 'Risk details';
 
   return (
+    // Drawer stays mounted when closed (tabs gate fetches on `isOpen`). `inert` (not
+    // `aria-hidden`) removes from both tab order and accessibility tree. ~95% browser
+    // support; older browsers skip it (drawer stays keyboard-reachable when closed).
     <div
-      aria-hidden={!isOpen}
+      inert={!isOpen}
       className={css({
         pointerEvents: isOpen ? 'auto' : 'none',
       })}
@@ -298,7 +327,7 @@ export function RiskDetailDrawer({
                 transitionProperty: 'background-color, color, border-color',
                 transitionDuration: 'fast',
                 _hover: {
-                  bg: 'interactive.hover',
+                  bg: 'surface.hover',
                   color: 'text.strong',
                 },
               })}

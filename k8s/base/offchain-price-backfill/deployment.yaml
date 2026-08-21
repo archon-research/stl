@@ -1,0 +1,57 @@
+# On-demand CoinGecko price backfill worker (VEC-540).
+#
+# A long-running Deployment, not a k8s Job or CronJob: it polls the Temporal task
+# queue "offchain-price-backfill" and stays idle until someone starts a run from
+# the Temporal UI. Unlike the cronjob workers it registers NO schedule, so an
+# always-on pod costs nothing but a poller.
+#
+# replicas: 1 — the CoinGecko rate limiter is per client instance and this binary
+# builds exactly one, so a second replica would double the effective request rate
+# against the shared 450 req/min budget. (Activity ordering is enforced by the
+# workflow's own sequential loop, not by Temporal.)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: offchain-price-backfill
+spec:
+  replicas: 1
+  # Recreate, because replicas: 1 above is a correctness bound, not a cost choice.
+  # The default RollingUpdate rounds maxSurge up to 1, so every rollout — including
+  # the Reloader-triggered ones a ConfigMap or rotated secret causes — would run
+  # two pods polling the same task queue until the new one is Ready, which is
+  # exactly the doubled request rate the replica count exists to prevent. The
+  # watchers use Recreate for the same reason.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: offchain-price-backfill
+  template:
+    metadata:
+      labels:
+        app: offchain-price-backfill
+    spec:
+      serviceAccountName: offchain-price-backfill
+      containers:
+        - name: offchain-price-backfill
+          image: offchain-price-backfill
+          envFrom:
+            - configMapRef:
+                name: offchain-price-backfill
+            - secretRef:
+                name: offchain-price-backfill
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "96Mi"
+            limits:
+              # Higher than the 5-minute indexer's: a chunk decodes ~720 hourly
+              # points and batches them into one upsert transaction, where the
+              # indexer only ever holds 18 current prices.
+              cpu: "500m"
+              memory: "512Mi"
+      # Generous, but note the worker does NOT drain: it runs with a zero
+      # WorkerStopTimeout, so an in-flight activity is cancelled on shutdown and
+      # Temporal retries that chunk on the next worker. Safe because chunks are
+      # idempotent within a build.
+      terminationGracePeriodSeconds: 60

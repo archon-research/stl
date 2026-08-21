@@ -1,24 +1,27 @@
 ---
-title: Temporal Cronjobs - Developer Guide
+title: Temporal Jobs (scheduled + on-demand) - Developer Guide
 audience: [developers, ai-agents]
 repo: stl
 applies_to: stl-verify
 shared_package: stl-verify/internal/adapters/outbound/temporal
-entrypoint: temporal.RunCronjob
-job_dir: stl-verify/cmd/cronjobs
+entrypoints: [temporal.RunCronjob, temporal.RunWorker]
+job_dirs: [stl-verify/cmd/cronjobs, stl-verify/cmd/backfillers]
 key_files:
-  - stl-verify/internal/adapters/outbound/temporal/temporal.go   # RunCronjob, CronjobConfig, client dial, ensureSchedule
+  - stl-verify/internal/adapters/outbound/temporal/temporal.go   # RunCronjob, CronjobConfig, newBootstrap, ensureSchedule
+  - stl-verify/internal/adapters/outbound/temporal/ondemand.go   # RunWorker, WorkerConfig (hand-triggered jobs, no schedule)
   - stl-verify/internal/adapters/outbound/temporal/workflow.go   # cronjobWorkflow, cronjobActivities, Runner, RunnerFunc, ScheduledAtFromContext
   - stl-verify/internal/adapters/outbound/temporal/metrics.go    # cronjob.runs.total, cronjob.run.duration_seconds
-  - stl-verify/cmd/cronjobs/offchain-price-indexer/main.go       # canonical example to copy
+  - stl-verify/cmd/cronjobs/offchain-price-indexer/main.go       # canonical scheduled cronjob to copy
+  - stl-verify/cmd/backfillers/offchain-price-backfill/          # canonical on-demand job to copy
 related_docs:
   - infrastructure repo: docs/temporal-workflow-automation-guide.md   # platform + cross-repo onboarding
-task_recipes: [add-a-new-cronjob]
+task_recipes: [add-a-new-cronjob, add-an-on-demand-job]
 ---
 
-# Temporal Cronjobs - Developer Guide
+# Temporal Jobs - Developer Guide
 
-How to develop, run, and add Temporal scheduled jobs ("cronjobs") in STL Verify.
+How to develop, run, and add Temporal jobs in STL Verify — both **scheduled**
+("cronjobs") and **on-demand** (hand-triggered, parameterised).
 
 For the platform itself (where the central Temporal server lives, how to provision a
 namespace, how *other* repos onboard) see the infrastructure repo's
@@ -35,6 +38,9 @@ To add or modify a cronjob, load these files (paths are repo-relative from the s
 Do NOT edit the shared package to add a job. Adding a job = one new `main.go` + k8s manifests + a `dev-env` block. The shared package is generic.
 
 ## How it works
+
+This section covers **scheduled** jobs. For a job triggered by hand with parameters
+(a backfill), skip to [On-demand jobs](#on-demand-jobs-no-schedule-triggered-by-hand).
 
 Each cronjob is a small `main.go` under `stl-verify/cmd/cronjobs/<name>/` that calls one
 shared entry point, `temporal.RunCronjob`. All the Temporal plumbing (client connection,
@@ -167,6 +173,8 @@ make run-cronjob-<your-job>              # run locally against the kind Temporal
 
 Cronjob images are discovered automatically from `cmd/cronjobs/*`:
 `make docker-build-cronjob-<your-job>` and `make docker-release-cronjob-<your-job> ENV=...`.
+The image build is automatic; **promotion is not** — add the job to `deploy.yaml`'s
+`CRONJOBS` list or its tag is never stamped.
 
 **Verify:** open the local Temporal UI, select namespace `vector`, confirm a schedule
 named `<your-job>` appears under Schedules and that a workflow execution runs.
@@ -178,14 +186,151 @@ already covered by `alerts/vector-cronjobs.yaml`. Add job-specific data-quality 
 matching runbook sections in `docs/runbooks/` only if the generic error path cannot catch a
 silent hole (e.g. "ran successfully but wrote zero rows").
 
+## On-demand jobs (no schedule, triggered by hand)
+
+Some work is not periodic: a backfill's range is an argument, decided by whoever
+runs it. `RunCronjob` cannot express that — `CronjobConfig` requires an interval, it
+always calls `ensureSchedule`, and `cronjobWorkflow` takes no parameters. Use
+`temporal.RunWorker` (`ondemand.go`) instead. It shares the same bootstrap
+(logging, OTel, database, client) but registers **your** workflow and creates **no
+schedule**, so the pod idles on its task queue until a run is started.
+
+| | `RunCronjob` | `RunWorker` |
+|---|---|---|
+| Schedule | created and reconciled | none |
+| Workflow | shared `cronjobWorkflow` | yours, with typed parameters |
+| Interface you implement | `Runner` | `Register` (workflow + activities) |
+| Started by | Temporal schedule | a human, or `temporal workflow start` |
+
+Reference implementation: `stl-verify/cmd/backfillers/offchain-price-backfill/`
+(`main.go` is the composition root; `backfill.go` holds the workflow, params and
+activity).
+
+### Shape of an on-demand job
+
+```go
+func run(ctx context.Context) error {
+	return temporal.RunWorker(ctx, meta, temporal.WorkerConfig{
+		Name:         "<your-job>",   // task queue + OTel service name
+		OpenDatabase: postgres.PoolOpener(...),
+		Register:     register,
+	})
+}
+
+func register(ctx context.Context, deps temporal.Dependencies, r worker.Registry) error {
+	service, err := newService(ctx, deps)
+	if err != nil {
+		return err
+	}
+	// Register with an EXPLICIT name: this string is what an operator types into
+	// the UI's "Workflow Type" box, so it must not drift with Go renames.
+	r.RegisterWorkflowWithOptions(myWorkflow, workflow.RegisterOptions{Name: "MyWorkflow"})
+	r.RegisterActivity(&myActivities{service: service})
+	return nil
+}
+```
+
+### Triggering a run from the Temporal UI
+
+> **Just want to backfill prices?** [backfilling-offchain-prices.md](backfilling-offchain-prices.md)
+> is the task-oriented version of this section: valid asset IDs, how to read the
+> result, verification SQL and troubleshooting. The rest of this section is the
+> generic mechanism.
+
+
+Namespace is **`vector`** — the UI lands on `default`, which is empty for us.
+
+`http://temporal-staging:8080/namespaces/vector/workflows` → **Start Workflow**
+
+| Field | Value |
+|---|---|
+| Task Queue | the job's `Name` (e.g. `offchain-price-backfill`) |
+| Workflow Type | the registered name (e.g. `OffchainPriceBackfill`) |
+| Workflow ID | descriptive and unique, e.g. `backfill-weth-wbtc-2020-01-01` |
+| Input | the params struct as JSON |
+
+```json
+{"assets":["weth","wrapped-bitcoin"],"from":"2020-01-01T00:00:00Z","to":"2026-08-05T00:00:00Z"}
+```
+
+The equivalent CLI call:
+
+```bash
+temporal workflow start --namespace vector \
+  --task-queue offchain-price-backfill --type OffchainPriceBackfill \
+  --workflow-id backfill-weth-wbtc-2020-01-01 \
+  --input '{"assets":["weth","wrapped-bitcoin"],"from":"2020-01-01T00:00:00Z","to":"2026-08-05T00:00:00Z"}'
+```
+
+The **Workflow ID is the concurrency guard**: Temporal rejects a duplicate while a
+run with that ID is in flight, so a double-click cannot launch the same backfill
+twice. Re-running later means the same form with a new ID.
+
+### Design rules for an on-demand job
+
+1. **Fan out one activity per unit of work**, not one activity for the whole job.
+   The backfill uses one per (asset, 30-day chunk) — about 162 for a six-year range
+   — so a failure at chunk 140 retries that chunk instead of redoing 139 good ones.
+2. **Make the unit idempotent.** Activities retry, and an operator will re-run
+   overlapping ranges. The backfill upserts `ON CONFLICT DO NOTHING`, which makes a
+   retry free — but note the scope: `offchain_token_price`'s PK includes
+   `processing_version`, and its trigger reuses a version only for the same
+   `build_id`. A re-run from a *different* build appends a new version rather than
+   doing nothing (ADR-0002 §3). Additive, never destructive — but do not read
+   "idempotent" as "byte-identical across deploys".
+3. **Validate parameters in the workflow and fail non-retryably**
+   (`temporalsdk.NewNonRetryableApplicationError`). Bad input fails identically on
+   every attempt; retrying it just buries the mistake behind five backoffs.
+4. **Expose a `SetQueryHandler` for progress.** It is the only way to see how far a
+   long run has got from the UI's Query tab without reading raw event history.
+5. **Judge "did this produce anything" in the workflow, not the activity.** Only the
+   workflow sees every unit, so only it can tell a genuinely empty result from one
+   legitimately-empty slice. See `assertCoverage`.
+6. **Set `OTEL_EXPORTER_OTLP_ENDPOINT` in the ConfigMap.** `RunWorker` instruments
+   every registered activity through an interceptor, so the job emits the same
+   `cronjob_runs_total` / `cronjob_run_duration_seconds` series a scheduled cronjob
+   does — one record per activity execution — and inherits the alerts keyed on them
+   with no per-job wiring. But that only reaches a collector if the endpoint is set:
+   unset makes the providers silent no-ops, which is why `offchain-price-indexer`
+   exported nothing for months while running perfectly.
+
+   Note what the coverage does *not* include: `VectorCronjobAllRunsFailing` pages on
+   "errors and no successes in an hour", which is an on-demand job's normal idle
+   state, so such jobs are excluded from it. Liveness comes from
+   `VectorCronjobWorkerDown` instead — add the Deployment name to its regexes.
+
+### Deploying one
+
+A long-running `Deployment` with `replicas: 1` (not a k8s `Job`): it has to poll the
+task queue to receive a manual trigger. Model it on
+`k8s/base/offchain-price-backfill/` — including its `strategy: {type: Recreate}`, so a
+rollout never runs two pods against the same task queue.
+
+Backfillers are **not** auto-discovered like cronjobs, so the release needs wiring in
+three places. Miss any of them and the tag is promoted without an image ever being
+built, which surfaces as `ImagePullBackOff`:
+
+1. Explicit `docker-build-<name>` / `docker-release-<name>` targets in
+   `stl-verify/Makefile` (the generic `build-backfiller-%` and `run-backfiller-%`
+   pattern rules already work; the docker ones do not).
+2. A `_docker-release-<name>-internal` line in the `docker-release-all` target
+   (`stl-verify/Makefile`), or nothing builds the image on release.
+3. An entry in `deploy.yaml`'s `CRONJOBS` promotion list, or `verify-ecr-images.sh`
+   refuses to stamp the environment — for *every* service, not just this one.
+
 ## Local development
 
 ```bash
 cd stl-verify
 make dev-up                                  # kind cluster incl. Temporal (server, DB, UI)
-make dev-env                                 # generate cmd/cronjobs/*/.env
+make dev-env                                 # generate cmd/cronjobs/*/ and backfiller .env
 make run-cronjob-offchain-price-indexer      # run one cronjob, sourcing its .env
+make run-backfiller-offchain-price-backfill  # run the on-demand worker locally
 ```
+
+An on-demand worker started this way registers nothing on a schedule and simply idles
+on its task queue — it does no work until you start a run from the Temporal UI (or with
+`temporal workflow start`), so an idle log is the expected steady state.
 
 `make dev-up` applies `k8s/dev-infra/temporal*.yaml`. The `temporalio/auto-setup` server
 auto-creates the `vector` namespace and exposes the Temporal UI via a nodePort; open it and

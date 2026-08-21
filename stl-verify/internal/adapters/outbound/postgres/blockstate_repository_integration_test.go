@@ -15,20 +15,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
-	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
-const blockstateSchemaName = "test_blockstate"
+const blockstateDBName = "test_blockstate"
 
 var blockstatePool *pgxpool.Pool
 
 func init() {
-	// Register setup function to be called after TestMain sets sharedDSN
-	registerTestFileSetup(blockstateSchemaName, func() {
-		blockstatePool = testutil.SetupSchemaForMain(sharedDSN, blockstateSchemaName)
-	}, func() {
-		testutil.CleanupSchemaForMain(sharedDSN, blockstatePool, blockstateSchemaName)
-	})
+	useFileDatabase(blockstateDBName, &blockstatePool)
 }
 
 // truncateBlockState clears all block-related tables for test isolation within the schema.

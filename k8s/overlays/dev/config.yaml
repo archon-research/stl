@@ -9,6 +9,10 @@ data:
   AWS_SNS_ENDPOINT: http://localstack:4566
   AWS_SQS_ENDPOINT: http://localstack:4566
   AWS_S3_ENDPOINT: http://localstack:4566
+  # Ethereum default (CHAIN_ID above). Workers validate S3_BUCKET against their
+  # own CHAIN_ID, so any deployment that overrides CHAIN_ID must also override
+  # S3_BUCKET with stl-sentineldevelopment-{chain}-raw — localstack creates a
+  # bucket for every chain it wires up.
   S3_BUCKET: stl-sentineldevelopment-ethereum-raw
   DATABASE_URL: postgres://postgres:postgres@timescaledb:5432/stl_verify?sslmode=disable
   MIGRATOR_DATABASE_URL: postgres://stl_migrator:localdev@timescaledb:5432/stl_verify?sslmode=disable
@@ -21,5 +25,9 @@ data:
   ENABLE_BACKFILL: "false"
   TEMPORAL_HOST_PORT: temporal-server.temporal:7233
   TEMPORAL_NAMESPACE: vector
+  # Risk-capital root, without the /primes route the client appends itself.
+  SKY_RISK_CAPITAL_URL: "https://info-sky.blockanalitica.com/star-monitoring/risk-capital"
+  SKY_DATA_URL: "https://sky.data.blockanalitica.com/internal"
+  REFERENCE_CAPITAL_SYNC_INTERVAL: "15m"
   ANCHORAGE_API_URL: "https://api.anchorage.com"
   ANCHORAGE_PRIME: "spark"

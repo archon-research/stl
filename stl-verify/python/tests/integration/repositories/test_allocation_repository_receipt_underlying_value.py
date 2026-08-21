@@ -148,7 +148,7 @@ async def test_exposure_buckets_value_positions_at_redeemable_value(repo) -> Non
     """list_exposure_buckets carries the redeemable value forward, not the share balance."""
     now = dt.datetime.now(dt.UTC)
     buckets = await repo.list_exposure_buckets(
-        _PRIME,
+        [_PRIME],
         from_timestamp=now - dt.timedelta(hours=1),
         to_timestamp=now + dt.timedelta(hours=1),
         bucket_seconds=3600.0,
@@ -209,7 +209,7 @@ async def test_morpho_vault_receipt_like_spark_usdc_bc_priced_by_redeemable_valu
 
 async def _locf_exposure_by_bucket(repo: AllocationRepository) -> dict[dt.datetime, Decimal | None]:
     buckets = await repo.list_exposure_buckets(
-        EthAddress(f"0x{RUV_LOCF_PROXY_HEX}"),
+        [EthAddress(f"0x{RUV_LOCF_PROXY_HEX}")],
         from_timestamp=RUV_LOCF_BASE_TS,
         to_timestamp=RUV_LOCF_BASE_TS + dt.timedelta(hours=3),
         bucket_seconds=3600.0,

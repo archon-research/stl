@@ -1,27 +1,40 @@
 import { useUrlSyncedTableStateAdapter } from '@archon-research/design-system';
 import type { UseUrlSyncedTableReturn } from '@archon-research/design-system';
-
-import { useUrlParam } from '../lib/url-params';
+import { createUrlSyncedTableAdapter } from '@archon-research/router-kit';
+import { useNavigate, useSearch } from '@tanstack/react-router';
+import { useMemo } from 'react';
 
 /**
- * Hook to sync TanStack table state (sorting, global search) with URL query params.
- * Enables shareable/bookmarkable table states.
+ * Syncs TanStack table state (sorting, global search) with the allocation
+ * route's `sort`/`q` search params, so a table state is shareable.
  *
- * @param sortParamKey - URL param name for sorting (e.g. 'sort')
- * @param searchParamKey - URL param name for search (e.g. 'q')
- * @returns Object with current sorting/filter state and setters
+ * The read is scoped to the `/allocation` route schema, so a table on another
+ * route gets its own keys rather than sharing one namespace with this one. That
+ * scoping is not enforcement: no route sets `search.strict`, so an unvalidated
+ * `sort`/`q` still travels in the URL until the entry-time cleanup drops it.
+ * `sort` is validated for shape only (upstream `validateSortingState`), never
+ * against a column set, so a stale bookmark naming a dropped column renders
+ * unsorted while the URL keeps advertising it.
  */
-export function useUrlSyncedTableState(
-  sortParamKey: string = 'sort',
-  searchParamKey: string = 'q',
-): UseUrlSyncedTableReturn {
-  const [sortParam, setSortParam] = useUrlParam(sortParamKey);
-  const [searchParam, setSearchParam] = useUrlParam(searchParamKey);
+export function useUrlSyncedTableState(): UseUrlSyncedTableReturn {
+  // Not strict: the drawer hosting this table stays mounted on the activities
+  // route, where the allocation search does not exist.
+  const search = useSearch({ from: '/allocation', shouldThrow: false });
+  const navigate = useNavigate();
 
-  return useUrlSyncedTableStateAdapter({
-    sortParam,
-    setSortParam,
-    searchParam,
-    setSearchParam,
-  });
+  // Keyed on the two params, not on the whole search object the factory's own
+  // example memoises on: that identity changes with any param, and a fresh
+  // adapter re-arms AllocationGrid's 300ms search debounce on every one.
+  const adapter = useMemo(
+    () =>
+      createUrlSyncedTableAdapter({
+        search: { sort: search?.sort, q: search?.q },
+        sortKey: 'sort',
+        searchKey: 'q',
+        navigate,
+      }),
+    [search?.q, search?.sort, navigate],
+  );
+
+  return useUrlSyncedTableStateAdapter(adapter);
 }

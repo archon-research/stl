@@ -12,9 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
-
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
@@ -24,21 +21,17 @@ var (
 	sharedLocalStackCfg testutil.LocalStackConfig
 )
 
+// rawBucketPrefix satisfies chainutil.ValidateS3BucketForChain, a prefix check
+// rather than an equality one, so a per-test suffix is allowed.
+const rawBucketPrefix = "stl-sentineltest-ethereum-raw-"
+
 func TestMain(m *testing.M) {
-	dsn, dbCleanup := testutil.StartTimescaleDBForMain()
-	sharedDSN = dsn
-	redisAddr, redisCleanup := testutil.StartRedisForMain()
-	sharedRedisAddr = redisAddr
-	lsCfg, lsCleanup := testutil.StartLocalStackForMain("s3")
-	sharedLocalStackCfg = lsCfg
-
-	code := m.Run()
-
-	lsCleanup()
-	redisCleanup()
-	dbCleanup()
-	code = testutil.CheckGoroutineLeaks(code)
-	os.Exit(code)
+	os.Exit(testutil.RunShared(m, testutil.Shared{
+		TimescaleDSN:       &sharedDSN,
+		RedisAddr:          &sharedRedisAddr,
+		LocalStack:         &sharedLocalStackCfg,
+		LocalStackServices: "s3",
+	}))
 }
 
 // ---------------------------------------------------------------------------
@@ -54,7 +47,7 @@ func TestRunIntegration_BadConnectionConfig(t *testing.T) {
 	t.Setenv("BUILD_GIT_HASH", "test")
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
 	t.Setenv("ALCHEMY_HTTP_URL", rpcServer.URL)
-	t.Setenv("S3_BUCKET", "stl-sentineltest-ethereum-raw")
+	t.Setenv("S3_BUCKET", testutil.S3TestBucketName(t, rawBucketPrefix))
 	t.Setenv("DEPLOY_ENV", "test")
 	t.Setenv("CHAIN_ID", "1")
 	t.Setenv("DEX", "curve")
@@ -90,10 +83,10 @@ func TestRunIntegration_StartupAndShutdown(t *testing.T) {
 func runStartupAndShutdown(t *testing.T, dex string) {
 	ctx := context.Background()
 
-	// SetupTestSchema applies all migrations, which seed the Curve pools and the
-	// 18 Uniswap V3 pools on chain_id=1. run() calls LoadPools(chainID) and fails
-	// hard on zero pools, so CHAIN_ID must be "1" to match the seeded rows.
-	_, dbURL, dbCleanup := testutil.SetupTestSchema(t, sharedDSN)
+	// The template SetupTestDB clones carries every migration, so the Curve and
+	// Uniswap V3 pools are seeded on chain_id=1. run() fails hard on zero pools,
+	// so CHAIN_ID must be "1" to match the seeded rows.
+	_, dbURL, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer dbCleanup()
 
 	// After the capability-probe removal, startup makes no chain call, and with no
@@ -109,16 +102,9 @@ func runStartupAndShutdown(t *testing.T, dex string) {
 
 	s3Client := testutil.NewS3Client(t, ctx, sharedLocalStackCfg)
 
-	// Bucket name must satisfy the stl-sentinel{env}-{chain}-raw prefix convention;
-	// chainutil resolves chain 1 to "ethereum", so this is the only valid name.
-	const (
-		bucket    = "stl-sentineltest-ethereum-raw"
-		deployEnv = "test"
-	)
-
-	if _, err := s3Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
-		t.Fatalf("create S3 bucket: %v", err)
-	}
+	const deployEnv = "test"
+	bucket := testutil.S3TestBucketName(t, rawBucketPrefix)
+	testutil.EnsureBucket(t, ctx, s3Client, bucket)
 
 	t.Setenv("BUILD_GIT_HASH", "test")
 	t.Setenv("ALCHEMY_API_KEY", "test-api-key")
