@@ -549,9 +549,11 @@ endef
 
 # Generate .env files for all services (refreshes the secrets from AWS first).
 # Can be re-run independently to refresh secrets without restarting services.
-# -j must not overlap the halves: dev-env-files reads ../.env.secrets as dev-secrets rewrites it.
-.NOTPARALLEL: dev-env
-dev-env: dev-secrets dev-env-files
+# -j must not overlap the halves: dev-env-files reads ../.env.secrets as dev-secrets
+# rewrites it. Sequenced in the recipe rather than with .NOTPARALLEL, whose
+# prerequisite form serializes the WHOLE makefile before GNU Make 4.4 (3.81 here).
+dev-env:
+	@$(MAKE) --no-print-directory dev-secrets && $(MAKE) --no-print-directory dev-env-files
 
 # Refresh ../.env.secrets from AWS Secrets Manager, one key per secret.
 dev-secrets:
