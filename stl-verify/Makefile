@@ -2010,7 +2010,7 @@ build-cronjob-%:
 # keys rows by git hash, so "dev" collapses every local build into one build_id and the rows
 # a run wrote stop being attributable to the commit that wrote them. See run-allocation-tracker.
 run-cronjob-%:
-	@test -f cmd/cronjobs/$*/.env || { echo "ERROR: cmd/cronjobs/$*/.env is missing. Generate it with: make dev-env"; exit 1; }
+	@test -f cmd/cronjobs/$*/.env || { echo "ERROR: cmd/cronjobs/$*/.env is missing. 'make dev-env' writes only the jobs dev-env-files names; if $* is not one of them, copy a covered job's .env and edit the job-specific keys."; exit 1; }
 	@echo "==> Running $*..."
 	@set -a && . cmd/cronjobs/$*/.env && [ -f cmd/cronjobs/$*/.env.local ] && . cmd/cronjobs/$*/.env.local; set +a && BUILD_GIT_HASH=$$(git rev-parse HEAD 2>/dev/null || echo dev) go run ./cmd/cronjobs/$*
 
@@ -2049,7 +2049,7 @@ build-backfiller-%:
 # default chain — only because the .env leaves AWS_ACCESS_KEY_ID unset, and setting it
 # (as the LocalStack-backed services' .env files do) would pin static creds instead.
 run-backfiller-%:
-	@test -f cmd/backfillers/$*/.env || { echo "ERROR: cmd/backfillers/$*/.env is missing. Generate it with: make dev-env"; exit 1; }
+	@test -f cmd/backfillers/$*/.env || { echo "ERROR: cmd/backfillers/$*/.env is missing. 'make dev-env' writes only the jobs dev-env-files names; if $* is not one of them, copy a covered job's .env and edit the job-specific keys."; exit 1; }
 	@echo "==> Running $*..."
 	@set -a && . cmd/backfillers/$*/.env && [ -f cmd/backfillers/$*/.env.local ] && . cmd/backfillers/$*/.env.local; set +a && BUILD_GIT_HASH=$$(git rev-parse HEAD 2>/dev/null || echo dev) go run ./cmd/backfillers/$*
 
