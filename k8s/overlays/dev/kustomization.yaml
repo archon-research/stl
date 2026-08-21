@@ -38,6 +38,7 @@ images:
     newTag: local
   - name: reference-capital-indexer
     newName: localhost/stl-reference-capital-indexer
+    newTag: local
   # On-demand: registers no schedule and idles on its task queue until a run is
   # started, so having it in dev-up costs nothing but proves the wiring.
   - name: morpho-v2-bootstrap
