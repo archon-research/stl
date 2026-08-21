@@ -1,0 +1,33 @@
+{
+  "name": "@stl-verify/mocks",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./browser": "./src/browser.ts",
+    "./node": "./src/node.ts"
+  },
+  "scripts": {
+    "type:check": "tsc -p tsconfig.json --noEmit",
+    "format": "uikit-cli format --write \"src/**/*.ts\" \"scripts/**/*.mjs\" oxlint.config.ts .oxfmtrc.ts",
+    "format:check": "uikit-cli format --check \"src/**/*.ts\" \"scripts/**/*.mjs\" oxlint.config.ts .oxfmtrc.ts",
+    "lint": "uikit-cli lint src scripts oxlint.config.ts",
+    "test:mocks": "NODE_ENV=test node scripts/check-mock-api.mjs"
+  },
+  "dependencies": {
+    "@archon-research/http-client-msw": "0.10.0-rohit-pre-release-consumer-fixes.1"
+  },
+  "devDependencies": {
+    "@archon-research/http-client-core": "0.10.0-rohit-pre-release-consumer-fixes.1",
+    "@archon-research/oxfmt-config": "0.10.0-rohit-pre-release-consumer-fixes.1",
+    "@archon-research/oxlint-config": "0.10.0-rohit-pre-release-consumer-fixes.1",
+    "@archon-research/tsconfig": "0.10.0-rohit-pre-release-consumer-fixes.1",
+    "@stl-verify/ui": "*",
+    "@types/node": "26.1.2",
+    "msw": "2.15.0"
+  },
+  "peerDependencies": {
+    "msw": "2.15.0"
+  }
+}
