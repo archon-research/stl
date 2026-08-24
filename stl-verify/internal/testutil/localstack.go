@@ -98,18 +98,24 @@ func startLocalStackContainer(services string) (cfg LocalStackConfig, cleanup fu
 		return cfg, nil, fmt.Errorf("start LocalStack container: %w", err)
 	}
 
+	// The container is running by now, so every later failure has to take it
+	// down: the caller gets no cleanup callback to do it with.
+	terminate := func() { _ = container.Terminate(context.Background()) }
+
 	host, err := container.Host(ctx)
 	if err != nil {
+		terminate()
 		return cfg, nil, fmt.Errorf("get LocalStack host: %w", err)
 	}
 	port, err := container.MappedPort(ctx, "4566")
 	if err != nil {
+		terminate()
 		return cfg, nil, fmt.Errorf("get LocalStack port: %w", err)
 	}
 	cfg.Endpoint = fmt.Sprintf("http://%s:%s", host, port.Port())
 	allowDirectConnection(host)
 
-	return cfg, func() { _ = container.Terminate(context.Background()) }, nil
+	return cfg, terminate, nil
 }
 
 // allowDirectConnection adds host to both spellings of the no-proxy list, so an

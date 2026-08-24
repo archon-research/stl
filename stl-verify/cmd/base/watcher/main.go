@@ -70,9 +70,8 @@ func main() {
 		os.Exit(0)
 	}
 
-	// run owns every deferred cleanup (trace flush, pool/cache/sink close, OTEL
-	// shutdown); main only reports and sets the exit code, so no os.Exit can
-	// strand a pending defer.
+	// run owns every deferred cleanup; main only reports and sets the exit
+	// code, so no os.Exit can strand a pending defer.
 	if err := run(cliOptions{
 		enableTraces: *enableTraces,
 		enableBlobs:  *enableBlobs,
@@ -93,19 +92,23 @@ type cliOptions struct {
 	parallelRPC  bool
 }
 
-func run(opts cliOptions) error {
+func run(opts cliOptions) (err error) {
 	if opts.traceFile != "" {
-		f, err := os.Create(opts.traceFile)
-		if err != nil {
-			return fmt.Errorf("creating trace file: %w", err)
+		f, cerr := os.Create(opts.traceFile)
+		if cerr != nil {
+			return fmt.Errorf("creating trace file: %w", cerr)
 		}
-		if err := trace.Start(f); err != nil {
+		if cerr := trace.Start(f); cerr != nil {
 			_ = f.Close()
-			return fmt.Errorf("starting trace: %w", err)
+			return fmt.Errorf("starting trace: %w", cerr)
 		}
+		// Close reports the flush failure that would otherwise leave a
+		// silently truncated trace behind.
 		defer func() {
 			trace.Stop()
-			_ = f.Close()
+			if cerr := f.Close(); cerr != nil {
+				err = errors.Join(err, fmt.Errorf("closing trace file: %w", cerr))
+			}
 		}()
 	}
 

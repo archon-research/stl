@@ -77,17 +77,23 @@ func startTimescaleDBContainer() (dsn string, cleanup func(), err error) {
 		return "", nil, fmt.Errorf("start container: %w", err)
 	}
 
+	// The container is running by now, so every later failure has to take it
+	// down: the caller gets no cleanup callback to do it with.
+	terminate := func() { _ = container.Terminate(context.Background()) }
+
 	host, err := container.Host(ctx)
 	if err != nil {
+		terminate()
 		return "", nil, fmt.Errorf("get host: %w", err)
 	}
 	port, err := container.MappedPort(ctx, "5432")
 	if err != nil {
+		terminate()
 		return "", nil, fmt.Errorf("get port: %w", err)
 	}
 
 	return fmt.Sprintf("postgres://test:test@%s:%s/testdb?sslmode=disable", host, port.Port()),
-		func() { _ = container.Terminate(context.Background()) }, nil
+		terminate, nil
 }
 
 // createProcessDatabase gives this test binary its own database on a server it

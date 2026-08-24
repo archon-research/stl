@@ -46,15 +46,20 @@ func startRedisContainer() (addr string, cleanup func(), err error) {
 		return "", nil, fmt.Errorf("start Redis container: %w", err)
 	}
 
+	// The container is running by now, so every later failure has to take it
+	// down: the caller gets no cleanup callback to do it with.
+	terminate := func() { _ = container.Terminate(context.Background()) }
+
 	host, err := container.Host(ctx)
 	if err != nil {
+		terminate()
 		return "", nil, fmt.Errorf("get Redis host: %w", err)
 	}
 	port, err := container.MappedPort(ctx, "6379")
 	if err != nil {
+		terminate()
 		return "", nil, fmt.Errorf("get Redis port: %w", err)
 	}
 
-	return fmt.Sprintf("%s:%s", host, port.Port()),
-		func() { _ = container.Terminate(context.Background()) }, nil
+	return fmt.Sprintf("%s:%s", host, port.Port()), terminate, nil
 }
