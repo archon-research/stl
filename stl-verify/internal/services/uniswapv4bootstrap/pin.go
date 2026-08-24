@@ -3,13 +3,13 @@ package uniswapv4bootstrap
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/hexutil"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
 // pinnedBlock is the single block every read is pinned to and every row is
@@ -26,16 +26,13 @@ type pinnedBlock struct {
 // finalityDepth below the head. It reads the header so the run has the hash to
 // pin its state reads to and the timestamp to stamp its rows with.
 func pinBlock(ctx context.Context, client outbound.LogScanClient, finalityDepth, override int64) (pinnedBlock, error) {
-	number := override
-	if number == 0 {
-		head, err := client.GetCurrentBlockNumber(ctx)
-		if err != nil {
-			return pinnedBlock{}, fmt.Errorf("reading the chain head: %w", err)
-		}
-		number = head - finalityDepth
-		if number <= 0 {
-			return pinnedBlock{}, fmt.Errorf("chain head %d is not %d blocks past genesis: no finality-safe block to pin", head, finalityDepth)
-		}
+	head, err := client.GetCurrentBlockNumber(ctx)
+	if err != nil {
+		return pinnedBlock{}, fmt.Errorf("reading the chain head: %w", err)
+	}
+	number, err := finalitySafeHeight(head, finalityDepth, override)
+	if err != nil {
+		return pinnedBlock{}, err
 	}
 
 	header, err := client.GetBlockHeaderByNumber(ctx, number)
@@ -43,6 +40,26 @@ func pinBlock(ctx context.Context, client outbound.LogScanClient, finalityDepth,
 		return pinnedBlock{}, fmt.Errorf("reading the header of pinned block %d: %w", number, err)
 	}
 	return parsePinnedHeader(number, header)
+}
+
+// finalitySafeHeight resolves the height to pin and refuses one inside the
+// reorg window — an override included. Everything downstream is built on the
+// pin being unreorgable: rows are stamped block_version 0, and a redelivery of
+// a shallow pin's height would make the live indexer re-read every historical
+// position of that pool at once.
+func finalitySafeHeight(head, finalityDepth, override int64) (int64, error) {
+	deepest := head - finalityDepth
+	if deepest <= 0 {
+		return 0, fmt.Errorf("chain head %d is not %d blocks past genesis: no finality-safe block to pin", head, finalityDepth)
+	}
+	if override == 0 {
+		return deepest, nil
+	}
+	if override > deepest {
+		return 0, fmt.Errorf("pinned block %d is inside the reorg window: with chain head %d and a finality depth of %d blocks, the deepest finality-safe block is %d",
+			override, head, finalityDepth, deepest)
+	}
+	return override, nil
 }
 
 // parsePinnedHeader converts a header into the pin, rejecting every field the
@@ -54,7 +71,7 @@ func parsePinnedHeader(number int64, header *outbound.BlockHeader) (pinnedBlock,
 	if header == nil {
 		return pinnedBlock{}, fmt.Errorf("block %d: the node returned no header", number)
 	}
-	if !isHexWord(header.Hash) {
+	if !shared.IsHexWord(header.Hash) {
 		return pinnedBlock{}, fmt.Errorf("block %d: hash %q is not a 32-byte hex word", number, header.Hash)
 	}
 	got, err := hexutil.ParseInt64(header.Number)
@@ -98,11 +115,4 @@ func assertPinStable(ctx context.Context, client outbound.LogScanClient, pin pin
 			pin.number, pin.hash, current.hash)
 	}
 	return nil
-}
-
-// isHexWord mirrors the indexer's log guard: common.HexToHash left-pads a short
-// value and truncates at the first non-hex character, so a malformed hash
-// otherwise becomes a plausible-looking wrong one.
-func isHexWord(value string) bool {
-	return len(value) == 66 && strings.HasPrefix(value, "0x") && common.IsHexHash(value)
 }

@@ -75,7 +75,10 @@ func (s *logWindowScanner) scan(ctx context.Context, from, to int64, emit func(l
 		end := min(cursor+size-1, to)
 		logs, err := s.client.GetLogs(ctx, s.rangeFilter(cursor, end))
 		if err != nil {
-			narrowed, retryErr := s.narrow(size, cursor, end, err)
+			// Shrink from the span actually requested, not the nominal window:
+			// on the clamped last window the two differ, and halving the nominal
+			// one re-requests the identical range until it drops below the clamp.
+			narrowed, retryErr := s.narrow(end-cursor+1, cursor, end, err)
 			if retryErr != nil {
 				return stats, retryErr
 			}

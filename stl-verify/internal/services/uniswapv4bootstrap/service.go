@@ -15,6 +15,7 @@
 package uniswapv4bootstrap
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log/slog"
@@ -62,19 +63,43 @@ type Service struct {
 	cfg         Config
 }
 
-// Summary is what a finished run reports, so the operator can tell a genuinely
-// empty history from a scan that silently covered nothing.
+// Summary is what a run reports, so the operator can tell a genuinely empty
+// history from a scan that silently covered nothing, and a rerun over covered
+// history (PositionsWritten 0) from one that closed a real gap.
+//
+// Run returns it on failure too, carrying the stages that did complete — the
+// pin above all, which is what the operator must resume with.
 type Summary struct {
 	PinnedBlock     int64
 	PinnedHash      common.Hash
 	PinnedTimestamp time.Time
 	FromBlock       int64
 	Pools           int
-	Scan            scanStats
+	ScanWindows     int
+	ScanNarrowings  int
+	ScanLogs        int
 	Keys            int
 	KeysByPool      map[int64]int
 	PositionsRead   int
-	Batches         int
+	// PositionsWritten counts the rows the append-on-change writer actually
+	// inserted, which is below PositionsRead wherever the stored state already
+	// matched.
+	PositionsWritten int64
+	Batches          int
+}
+
+func (s *Summary) recordScan(stats scanStats) {
+	s.ScanWindows = stats.windows
+	s.ScanNarrowings = stats.narrowings
+	s.ScanLogs = stats.logs
+}
+
+func (s *Summary) recordKeys(keysByPool map[int64][]entity.UniswapV4PositionKey) {
+	s.KeysByPool = make(map[int64]int, len(keysByPool))
+	for poolID, keys := range keysByPool {
+		s.KeysByPool[poolID] = len(keys)
+		s.Keys += len(keys)
+	}
 }
 
 // New validates deps and resolves the log filter's fixed parts. It refuses a
@@ -143,7 +168,7 @@ func (d Deps) validate() error {
 func snapshottablePoolsByID(all []uniswapv4indexer.RegisteredPool) []uniswapv4indexer.RegisteredPool {
 	pools := uniswapv4indexer.SnapshottablePools(all)
 	slices.SortFunc(pools, func(a, b uniswapv4indexer.RegisteredPool) int {
-		return int(a.ID - b.ID)
+		return cmp.Compare(a.ID, b.ID)
 	})
 	return pools
 }
@@ -166,33 +191,46 @@ func (s *Service) Run(ctx context.Context) (Summary, error) {
 	if err != nil {
 		return Summary{}, err
 	}
+	summary := Summary{
+		PinnedBlock:     pin.number,
+		PinnedHash:      pin.hash,
+		PinnedTimestamp: pin.ts,
+		Pools:           len(s.pools),
+	}
+
 	from, err := s.scanStart(pin)
 	if err != nil {
-		return Summary{}, err
+		return summary, err
 	}
+	summary.FromBlock = from
 	s.logStart(pin, from)
 
 	keysByPool, stats, err := s.discoverPositionKeys(ctx, from, pin.number)
+	summary.recordScan(stats)
 	if err != nil {
-		return Summary{}, err
+		return summary, err
 	}
+	summary.recordKeys(keysByPool)
 
 	// Before any write: a pin that moved invalidates every key just discovered
 	// and every read about to be issued, so the cheap check goes first.
 	if err := assertPinStable(ctx, s.logScan, pin); err != nil {
-		return Summary{}, err
+		return summary, err
 	}
-
-	summary := s.newSummary(pin, from, stats, keysByPool)
 	if err := s.snapshotAndPersist(ctx, keysByPool, pin, &summary); err != nil {
-		return Summary{}, err
+		return summary, err
 	}
 
+	s.logComplete(summary)
+	return summary, nil
+}
+
+func (s *Service) logComplete(summary Summary) {
 	s.logger.Info("uniswap-v4 position bootstrap complete",
 		"chainId", s.cfg.ChainID, "pinnedBlock", summary.PinnedBlock, "pools", summary.Pools,
-		"keys", summary.Keys, "positionsRead", summary.PositionsRead, "batches", summary.Batches,
-		"scanWindows", summary.Scan.windows, "scanNarrowings", summary.Scan.narrowings, "scanLogs", summary.Scan.logs)
-	return summary, nil
+		"keys", summary.Keys, "positionsRead", summary.PositionsRead,
+		"positionsWritten", summary.PositionsWritten, "batches", summary.Batches,
+		"scanWindows", summary.ScanWindows, "scanNarrowings", summary.ScanNarrowings, "scanLogs", summary.ScanLogs)
 }
 
 func (s *Service) logStart(pin pinnedBlock, from int64) {
@@ -221,23 +259,6 @@ func (s *Service) scanStart(pin pinnedBlock) (int64, error) {
 		return 0, fmt.Errorf("scan start %d is above the pinned block %d: nothing to scan", from, pin.number)
 	}
 	return from, nil
-}
-
-func (s *Service) newSummary(pin pinnedBlock, from int64, stats scanStats, keysByPool map[int64][]entity.UniswapV4PositionKey) Summary {
-	summary := Summary{
-		PinnedBlock:     pin.number,
-		PinnedHash:      pin.hash,
-		PinnedTimestamp: pin.ts,
-		FromBlock:       from,
-		Pools:           len(s.pools),
-		Scan:            stats,
-		KeysByPool:      make(map[int64]int, len(keysByPool)),
-	}
-	for poolID, keys := range keysByPool {
-		summary.KeysByPool[poolID] = len(keys)
-		summary.Keys += len(keys)
-	}
-	return summary
 }
 
 // discoverPositionKeys replays [from, to]'s ModifyLiquidity logs and returns
@@ -340,7 +361,7 @@ func (s *Service) snapshotPool(
 	pin pinnedBlock,
 	summary *Summary,
 ) error {
-	batch := 0
+	batch, poolPositionsDone := 0, 0
 	for chunk := range slices.Chunk(keys, s.cfg.PositionBatch) {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -351,29 +372,38 @@ func (s *Service) snapshotPool(
 		if err != nil {
 			return fmt.Errorf("reading positions batch %d of pool %s at block %d: %w", batch, pool.PoolIDHash, pin.number, err)
 		}
-		if err := s.persist(ctx, rows); err != nil {
+		written, err := s.persist(ctx, rows)
+		if err != nil {
 			return fmt.Errorf("persisting positions batch %d of pool %s at block %d: %w", batch, pool.PoolIDHash, pin.number, err)
 		}
 
+		poolPositionsDone += len(rows)
 		summary.PositionsRead += len(rows)
+		summary.PositionsWritten += written
 		summary.Batches++
 		s.logger.Info("persisted uniswap-v4 position batch",
 			"chainId", s.cfg.ChainID, "poolRowId", pool.ID, "poolId", pool.PoolIDHash.Hex(),
-			"batch", batch, "positions", len(rows), "poolKeys", len(keys),
-			"poolPositionsDone", summary.PositionsRead, "pinnedBlock", pin.number)
+			"batch", batch, "positions", len(rows), "positionsWritten", written, "poolKeys", len(keys),
+			"poolPositionsDone", poolPositionsDone, "pinnedBlock", pin.number)
 	}
 	return nil
 }
 
 // persist writes one batch through the repository's append-on-change path,
 // which is what makes a rerun a no-op: it appends only where the stored value
-// for the slot differs.
-func (s *Service) persist(ctx context.Context, rows []*entity.UniswapV4Position) error {
+// for the slot differs, and reports how many rows that actually was.
+func (s *Service) persist(ctx context.Context, rows []*entity.UniswapV4Position) (int64, error) {
 	if len(rows) == 0 {
-		return nil
+		return 0, nil
 	}
-	return s.txMgr.WithTransaction(ctx, func(tx pgx.Tx) error {
-		_, err := s.repo.SaveBlock(ctx, tx, outbound.UniswapV4BlockWrites{Positions: rows})
-		return err
+	var written int64
+	err := s.txMgr.WithTransaction(ctx, func(tx pgx.Tx) error {
+		var saveErr error
+		written, saveErr = s.repo.SavePositions(ctx, tx, rows)
+		return saveErr
 	})
+	if err != nil {
+		return 0, err
+	}
+	return written, nil
 }

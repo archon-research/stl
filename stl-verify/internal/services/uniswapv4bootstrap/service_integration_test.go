@@ -100,6 +100,23 @@ func (f *v4BootstrapFixture) run(t *testing.T) Summary {
 	return summary
 }
 
+// seedPosition writes one uniswap_v4_position row for the (ownerA, -100, 200,
+// saltA) slot, standing in for the live indexer having already covered it at
+// blockNumber. Its fee-growth checkpoints are zero, matching what
+// positionReturningMulticaller answers with.
+func (f *v4BootstrapFixture) seedPosition(t *testing.T, poolID, blockNumber, liquidity int64) {
+	t.Helper()
+	_, err := f.db.Exec(context.Background(),
+		`INSERT INTO uniswap_v4_position
+		   (pool_id, owner, tick_lower, tick_upper, salt, block_number, block_version, block_timestamp,
+		    liquidity, fee_growth_inside0_last_x128, fee_growth_inside1_last_x128, build_id)
+		 VALUES ($1,$2,-100,200,$3,$4,0,now(),$5,0,0,1)`,
+		poolID, common.HexToAddress(ownerA).Bytes(), common.HexToHash(saltA).Bytes(), blockNumber, liquidity)
+	if err != nil {
+		t.Fatalf("seeding position for pool %d at block %d: %v", poolID, blockNumber, err)
+	}
+}
+
 // poolByHash returns the loaded registry entry for an on-chain PoolId.
 func (f *v4BootstrapFixture) poolByHash(t *testing.T, poolIDHash string) uniswapv4indexer.RegisteredPool {
 	t.Helper()
@@ -185,11 +202,14 @@ func TestIntegration_RerunWritesNoNewRows(t *testing.T) {
 	f := setupBootstrapIntegration(t, 5000)
 	f.client.GetLogsFn = f.twoPoolLogs(t)
 
-	f.run(t)
+	first := f.run(t)
 	after := countRows(t, f.db, `SELECT COUNT(*) FROM uniswap_v4_position`)
 
-	f.run(t)
+	second := f.run(t)
 
+	if first.PositionsWritten != 2 || second.PositionsWritten != 0 {
+		t.Errorf("PositionsWritten = %d then %d, want 2 then 0", first.PositionsWritten, second.PositionsWritten)
+	}
 	if got := countRows(t, f.db, `SELECT COUNT(*) FROM uniswap_v4_position`); got != after {
 		t.Errorf("rows after the rerun = %d, want %d: an unchanged position must not append", got, after)
 	}
@@ -206,6 +226,7 @@ func TestIntegration_ChangedStateOnARerunAppendsANewVersion(t *testing.T) {
 	// A later pin re-reads the same keys and finds a different liquidity, which
 	// is exactly the append-on-change case.
 	const laterPin = integrationPin + 1000
+	f.client.Head = laterPin + 64
 	f.client.HeaderByNumber[laterPin] = header(laterPin, pinHash)
 	f.deps.Config.PinBlock = laterPin
 	f.deps.Multicaller = positionReturningMulticaller(t, 9999)
@@ -284,24 +305,10 @@ func TestIntegration_BatchingSplitsOnePoolsKeysAcrossTransactions(t *testing.T) 
 	}
 }
 
-// TestIntegration_LivePositionRowIsUnaffectedByAnEarlierBootstrapRow pins the
-// interaction with the live indexer: the bootstrap writes at a lower height, so
-// the newest-row-wins read still returns the live value.
 func TestIntegration_BootstrapRowDoesNotSupersedeANewerLiveRow(t *testing.T) {
 	f := setupBootstrapIntegration(t, 5000)
 	poolA := f.poolByHash(t, poolAIDHash)
-
-	// Stand in for the live indexer having already written this position higher up.
-	const liveBlock = integrationPin + 5000
-	_, err := f.db.Exec(context.Background(),
-		`INSERT INTO uniswap_v4_position
-		   (pool_id, owner, tick_lower, tick_upper, salt, block_number, block_version, block_timestamp,
-		    liquidity, fee_growth_inside0_last_x128, fee_growth_inside1_last_x128, build_id)
-		 VALUES ($1,$2,-100,200,$3,$4,0,now(),777,0,0,1)`,
-		poolA.ID, common.HexToAddress(ownerA).Bytes(), common.HexToHash(saltA).Bytes(), liveBlock)
-	if err != nil {
-		t.Fatalf("seeding the live row: %v", err)
-	}
+	f.seedPosition(t, poolA.ID, integrationPin+5000, 777)
 
 	f.client.GetLogsFn = func(outbound.LogFilter) ([]outbound.FilteredLog, error) {
 		return []outbound.FilteredLog{modifyLiquidityFilteredLog(t, poolAIDHash, ownerA, -100, 200, saltA, 21_800_000, 0)}, nil
@@ -309,7 +316,7 @@ func TestIntegration_BootstrapRowDoesNotSupersedeANewerLiveRow(t *testing.T) {
 	f.run(t)
 
 	var latest string
-	err = f.db.QueryRow(context.Background(),
+	err := f.db.QueryRow(context.Background(),
 		`SELECT liquidity::text FROM uniswap_v4_position
 		 WHERE pool_id = $1
 		 ORDER BY block_number DESC, block_version DESC, processing_version DESC LIMIT 1`, poolA.ID).Scan(&latest)
@@ -324,8 +331,46 @@ func TestIntegration_BootstrapRowDoesNotSupersedeANewerLiveRow(t *testing.T) {
 	}
 }
 
-// TestIntegration_BigIntCheckpointsSurviveTheRoundTrip guards the NUMERIC
-// conversion on values above int64.
+func TestIntegration_APositionAlreadyCoveredBelowThePinIsNotReWritten(t *testing.T) {
+	f := setupBootstrapIntegration(t, 5000)
+	poolA := f.poolByHash(t, poolAIDHash)
+
+	// The live indexer already recorded this exact state lower down, which is
+	// what readLatestPositionsV4's height bound exists to find.
+	const coveredBlock = integrationPin - 100_000
+	f.seedPosition(t, poolA.ID, coveredBlock, 5000)
+
+	f.client.GetLogsFn = func(outbound.LogFilter) ([]outbound.FilteredLog, error) {
+		return []outbound.FilteredLog{modifyLiquidityFilteredLog(t, poolAIDHash, ownerA, -100, 200, saltA, 21_800_000, 0)}, nil
+	}
+	summary := f.run(t)
+
+	if summary.PositionsRead != 1 {
+		t.Fatalf("PositionsRead = %d, want 1", summary.PositionsRead)
+	}
+	if summary.PositionsWritten != 0 {
+		t.Errorf("PositionsWritten = %d, want 0: the covering row below the pin already holds this state", summary.PositionsWritten)
+	}
+	if got := countRows(t, f.db, `SELECT COUNT(*) FROM uniswap_v4_position WHERE pool_id = $1`, poolA.ID); got != 1 {
+		t.Errorf("rows = %d, want 1: an unchanged position must not append a redundant row", got)
+	}
+
+	var (
+		latestBlock     int64
+		latestLiquidity string
+	)
+	if err := f.db.QueryRow(context.Background(),
+		`SELECT block_number, liquidity::text FROM uniswap_v4_position
+		 WHERE pool_id = $1
+		 ORDER BY block_number DESC, block_version DESC, processing_version DESC LIMIT 1`, poolA.ID).
+		Scan(&latestBlock, &latestLiquidity); err != nil {
+		t.Fatalf("reading the latest row: %v", err)
+	}
+	if latestBlock != coveredBlock || latestLiquidity != "5000" {
+		t.Errorf("latest = (block %d, liquidity %s), want (%d, 5000)", latestBlock, latestLiquidity, coveredBlock)
+	}
+}
+
 func TestIntegration_LargeFeeGrowthCheckpointsRoundTrip(t *testing.T) {
 	f := setupBootstrapIntegration(t, 5000)
 	huge, ok := new(big.Int).SetString("340282366920938463463374607431768211455", 10) // 2^128 - 1

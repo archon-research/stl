@@ -9,10 +9,13 @@
 // append-on-change write path.
 //
 // Run it after the indexer's first deploy on a chain, and again after any
-// suspected gap (a long outage, a DLQ'd stretch, a newly registered pool). It
-// keeps no progress state and is idempotent: an interrupted run is resumed by
-// re-running the same command, and a run over already-covered history writes
-// nothing.
+// suspected gap (a long outage, a DLQ'd stretch, a newly registered pool). A
+// run over already-covered history writes nothing, so re-running is free.
+//
+// It keeps no progress state, so an interrupted run is resumed by re-running it
+// with -pin set to the pin the failed run logged. A bare rerun re-derives its
+// own head-64 pin and would stitch one snapshot across two heights, which is
+// exactly what pinning a single block exists to prevent.
 //
 // Usage:
 //
@@ -48,13 +51,18 @@ import (
 )
 
 func main() {
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-
-	if err := run(ctx, os.Args[1:]); err != nil {
+	if err := runWithSignals(os.Args[1:]); err != nil {
 		slog.Error("uniswap-v4 position bootstrap failed", "error", err)
 		os.Exit(1)
 	}
+}
+
+// runWithSignals owns the signal context so main holds no defer for os.Exit to skip.
+func runWithSignals(args []string) error {
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	return run(ctx, args)
 }
 
 func run(ctx context.Context, args []string) error {
@@ -97,15 +105,29 @@ func run(ctx context.Context, args []string) error {
 
 	summary, err := svc.Run(ctx)
 	if err != nil {
-		return err
+		return resumableError(summary, err)
 	}
 	logger.Info("uniswap-v4 position bootstrap finished",
 		"chainId", cfg.bootstrap.ChainID,
 		"pinnedBlock", summary.PinnedBlock, "pinnedHash", summary.PinnedHash,
 		"fromBlock", summary.FromBlock, "pools", summary.Pools,
 		"keys", summary.Keys, "keysByPool", summary.KeysByPool,
-		"positionsRead", summary.PositionsRead, "batches", summary.Batches)
+		"positionsRead", summary.PositionsRead, "positionsWritten", summary.PositionsWritten,
+		"batches", summary.Batches, "scanWindows", summary.ScanWindows,
+		"scanNarrowings", summary.ScanNarrowings, "scanLogs", summary.ScanLogs)
 	return nil
+}
+
+// resumableError names the pin the failed run was using, so the operator
+// resumes that same snapshot instead of re-deriving a fresh head-64 pin and
+// stitching one snapshot across two heights. A failure before the pin was
+// resolved has nothing to add.
+func resumableError(summary uniswapv4bootstrap.Summary, err error) error {
+	if summary.PinnedBlock == 0 {
+		return err
+	}
+	return fmt.Errorf("bootstrap pinned at block %d failed; resume this snapshot with -pin %d: %w",
+		summary.PinnedBlock, summary.PinnedBlock, err)
 }
 
 // newMulticaller dials the RPC endpoint and returns the hash-pinned state

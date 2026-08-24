@@ -95,9 +95,10 @@ func TestScan_WalksTheWholeRangeInInitialSizedWindows(t *testing.T) {
 	}
 }
 
-func TestScan_BisectsOnRangeRefusalAndRetriesTheSameStart(t *testing.T) {
+func TestScan_ClampsTheLastWindowToTheScanEnd(t *testing.T) {
 	client := newFakeLogScanClient(0, nil)
-	// Anything wider than 25 blocks is refused, so 100 must bisect to 25.
+	// Anything wider than 25 blocks is refused, so the 100-block window would be
+	// refused had the scan end not clamped it to the range's own 25.
 	client.GetLogsFn = func(f outbound.LogFilter) ([]outbound.FilteredLog, error) {
 		if f.ToBlock-f.FromBlock+1 > 25 {
 			return nil, fmt.Errorf("provider says no: %w", outbound.ErrLogRangeTooLarge)
@@ -117,6 +118,33 @@ func TestScan_BisectsOnRangeRefusalAndRetriesTheSameStart(t *testing.T) {
 	}
 	if stats.narrowings != 0 {
 		t.Errorf("stats.narrowings = %d, want 0: the range itself is already inside the ceiling", stats.narrowings)
+	}
+}
+
+func TestScan_ShrinksARefusedWindowFromItsClampedSpan(t *testing.T) {
+	client := newFakeLogScanClient(0, nil)
+	client.GetLogsFn = func(f outbound.LogFilter) ([]outbound.FilteredLog, error) {
+		if f.ToBlock-f.FromBlock+1 > 4 {
+			return nil, fmt.Errorf("provider says no: %w", outbound.ErrLogRangeTooLarge)
+		}
+		return nil, nil
+	}
+	// The nominal window is 20x the range left to scan, so every request is
+	// clamped to the same 5 blocks until the nominal size drops below the clamp.
+	scanner := testScanner(t, client, testWindowPolicy(100, 1, 100))
+
+	if _, err := scanner.scan(context.Background(), 1000, 1004, func(logWindow) error { return nil }); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+
+	seen := map[[2]int64]int{}
+	for _, f := range client.Filters {
+		seen[[2]int64{f.FromBlock, f.ToBlock}]++
+	}
+	for span, n := range seen {
+		if n > 1 {
+			t.Errorf("blocks %d-%d were requested %d times; a refused window must shrink from the span actually asked for", span[0], span[1], n)
+		}
 	}
 }
 
