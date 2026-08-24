@@ -67,6 +67,43 @@ async function checkPrimesList() {
   );
 }
 
+async function checkProvenanceAvailabilityCoversEveryPrime() {
+  const availability = await request(
+    '/v1/provenance/available',
+    {},
+    'GET /v1/provenance/available',
+  );
+  const primes = await request('/v1/primes', {}, 'GET /v1/primes');
+
+  const names = new Set(primes.map((prime) => prime.name));
+  assert.equal(
+    availability.primes.length,
+    names.size,
+    'one availability entry per prime, not per proxy',
+  );
+  for (const entry of availability.primes) {
+    assert.ok(names.has(entry.name), `not a listed prime: ${entry.name}`);
+    // The document's two invariants: `indexed` is always present (a prime is
+    // only listed because STL indexes it), and `reference`/`both` travel
+    // together (both exist exactly when Sky's monitor covers the prime).
+    assert.ok(
+      entry.available.includes('indexed'),
+      `${entry.name}: indexed missing`,
+    );
+    assert.equal(
+      entry.available.includes('reference'),
+      entry.available.includes('both'),
+      `${entry.name}: reference and both must appear together`,
+    );
+  }
+  // The fixture world serves `reference` everywhere, so advertising the
+  // upstream as down would have the UI hide sources the mocks answer.
+  assert.ok(
+    availability.reference_upstream_reachable,
+    'the fixture upstream is reachable',
+  );
+}
+
 async function checkRegistryLists() {
   const chains = await request('/v1/chains', {}, 'GET /v1/chains');
   const protocols = await request('/v1/protocols', {}, 'GET /v1/protocols');
@@ -1204,6 +1241,10 @@ const checks = [
   [
     'composite risk capital keeps both figures',
     checkCompositeRiskCapitalKeepsBothFigures,
+  ],
+  [
+    'availability covers every prime',
+    checkProvenanceAvailabilityCoversEveryPrime,
   ],
   [
     'a contradictory provenance pair is refused',
