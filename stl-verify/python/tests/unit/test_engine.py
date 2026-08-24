@@ -1,7 +1,12 @@
+from typing import cast
+
+import asyncpg
 import pytest
+from sqlalchemy import event
+from sqlalchemy.engine.interfaces import ExceptionContext
 from sqlalchemy.pool import QueuePool
 
-from app.adapters.postgres.engine import create_db_engine
+from app.adapters.postgres.engine import create_db_engine, mark_stale_transaction_state_as_disconnect
 from app.config import Settings
 
 
@@ -51,3 +56,113 @@ def test_create_db_engine_bounds_how_long_a_caller_queues_for_a_connection(
     # No public accessor for the queue wait; asserted so dropping the kwarg fails
     # back to SQLAlchemy's 30s silently.
     assert pool._timeout == 3
+
+
+def test_create_db_engine_recycles_connections_on_the_configured_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A poisoned connection that keeps passing the pre-ping must still die.
+
+    After a pooler incident a connection can fail every real query while still
+    answering the pre-ping (see ``mark_stale_transaction_state_as_disconnect``).
+    The recycle interval is the backstop that retires such a connection even
+    when the disconnect handling never sees it, so it has to be wired through
+    rather than left on SQLAlchemy's -1 (never recycle).
+    """
+    monkeypatch.setenv("DB_POOL_RECYCLE_SECONDS", "120")
+    settings = Settings.model_validate({})
+
+    engine = create_db_engine(settings)
+
+    pool = engine.pool
+    assert isinstance(pool, QueuePool)
+    # No public accessor; asserted because dropping the kwarg would silently
+    # fall back to "never".
+    assert pool._recycle == 120
+
+
+def test_create_db_engine_registers_the_stale_transaction_disconnect_listener() -> None:
+    """A tuned engine helper proves nothing unless engines actually go through
+    it, so the listener has to be asserted on the factory's output, not merely
+    defined next to it.
+    """
+    settings = Settings.model_validate({})
+
+    engine = create_db_engine(settings)
+
+    assert event.contains(engine.sync_engine, "handle_error", mark_stale_transaction_state_as_disconnect)
+
+
+class _FakeExceptionContext:
+    """Just the two ExceptionContext members the listener reads and writes."""
+
+    def __init__(self, exception: BaseException) -> None:
+        self.original_exception = exception
+        self.is_disconnect = False
+
+
+def _shim_wrapped(cause: BaseException) -> BaseException:
+    """Mimic the dialect's ``raise translated_error from error`` chaining."""
+    wrapper = Exception("<class 'asyncpg.exceptions...'>")
+    wrapper.__cause__ = cause
+    return wrapper
+
+
+@pytest.mark.parametrize(
+    ("exception", "expected"),
+    [
+        pytest.param(
+            asyncpg.exceptions.NoActiveSQLTransactionError("SAVEPOINT can only be used in transaction blocks"),
+            True,
+            id="stale-state-error-raised-directly",
+        ),
+        pytest.param(
+            _shim_wrapped(asyncpg.exceptions.NoActiveSQLTransactionError("SAVEPOINT ...")),
+            True,
+            id="stale-state-error-behind-the-dialect-shim",
+        ),
+        pytest.param(
+            _shim_wrapped(asyncpg.exceptions.IdleInTransactionSessionTimeoutError("terminating connection")),
+            True,
+            id="server-timed-out-backend-is-a-disconnect",
+        ),
+        pytest.param(
+            _shim_wrapped(asyncpg.exceptions.InFailedSQLTransactionError("current transaction is aborted")),
+            False,
+            id="aborted-transaction-is-an-app-error-on-a-healthy-connection",
+        ),
+        pytest.param(
+            _shim_wrapped(asyncpg.exceptions.ReadOnlySQLTransactionError("cannot execute UPDATE")),
+            False,
+            id="read-only-failover-state-must-not-thrash-the-pool",
+        ),
+        pytest.param(
+            _shim_wrapped(asyncpg.exceptions.UniqueViolationError("duplicate key")),
+            False,
+            id="ordinary-query-errors-stay-non-disconnect",
+        ),
+    ],
+)
+def test_stale_transaction_state_is_classified_as_disconnect(exception: BaseException, expected: bool) -> None:
+    """Only the class-25 errors that mean the backend is gone may invalidate.
+
+    A desynced or server-terminated connection is unusable and must be retired,
+    while errors that arise on a healthy connection (aborted transaction,
+    read-only replica, constraint violations) must never tear down the pool.
+    """
+    context = _FakeExceptionContext(exception)
+
+    mark_stale_transaction_state_as_disconnect(cast(ExceptionContext, context))
+
+    assert context.is_disconnect is expected
+
+
+def test_an_error_already_classified_as_disconnect_is_left_alone() -> None:
+    """The listener may only ever add a disconnect classification, never remove
+    one — pinned against a refactor that assigns the match result directly."""
+    context = _FakeExceptionContext(Exception("connection is closed"))
+    context.is_disconnect = True
+
+    mark_stale_transaction_state_as_disconnect(cast(ExceptionContext, context))
+
+    assert context.is_disconnect is True
