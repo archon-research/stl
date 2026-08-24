@@ -62,11 +62,21 @@
 -- sort orders are deliberately left alone for a one-shot backfill.
 SET LOCAL lock_timeout = '10s';
 
--- The backfills below must see S3-tiered history. The GUC defaults to off, so
--- without this a backfill silently computes "newest per key" over local chunks
--- only, and a key whose newest row has been tiered gets a stale row or none at
--- all — onchain_token_price is already tiering. Same reasoning as
--- cmd/backfillers/transform-bootstrap (which treats failure to set it as fatal).
+-- The backfills below must see S3-tiered history: without it a backfill computes
+-- "newest per key" over local chunks only, so a key whose newest row has already
+-- been tiered gets a stale row or none at all, silently. onchain_token_price has a
+-- 1-year tiering policy (20260206_100000_create_onchain_prices.sql), so a reserve
+-- or token whose last price predates that boundary is exposed.
+--
+-- Set explicitly rather than relying on the default, in EITHER direction. Measured
+-- at timescaledb 2.25.1: boot_val is `on`, so the widespread claim that this GUC
+-- "defaults to off" is wrong for this version — including the comment in
+-- cmd/backfillers/transform-bootstrap/main.go, which is where that claim in this
+-- repo comes from and which may simply have aged out of date. But a managed
+-- deployment can override it in postgresql.conf, and this backfill is exactly the
+-- kind of one-shot, unrepeatable read where inheriting the wrong value is worst, so
+-- it does not inherit anything. transform-bootstrap treats a failure to set it as
+-- fatal for the same reason.
 SET LOCAL timescaledb.enable_tiered_reads = 'on';
 
 -- ============================================================================
