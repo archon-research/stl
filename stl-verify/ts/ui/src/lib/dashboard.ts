@@ -483,27 +483,35 @@ export function formatPercentValue(
 // https://sky-atlas.io/#363e2bb5-47e2-4eb8-950d-eafd0f1392c7 (high)
 export const ENCUMBRANCE_LOW_SEVERITY_THRESHOLD = 1;
 export const ENCUMBRANCE_HIGH_SEVERITY_THRESHOLD = 1.03;
+// A product choice, not an Atlas figure: the pre-breach warning band starts
+// here so a ratio drifting toward 100% reads as "at risk" before it breaches.
+export const ENCUMBRANCE_AT_RISK_THRESHOLD = 0.8;
 
-export type EncumbranceSeverity = 'none' | 'low' | 'high';
+export type EncumbranceSeverity = 'healthy' | 'at-risk' | 'low' | 'high';
 
 /**
- * Classifies an encumbrance ratio against the Atlas thresholds.
+ * Classifies an encumbrance ratio against the Atlas breach thresholds, with a
+ * pre-breach warning band below them.
  *
  * Exactly 103% falls outside both written definitions — "below 103%" excludes
  * it and "above 103%" excludes it — so it is read as high here. On a risk
  * surface the conservative side of an ambiguity is the safe one, and a ratio at
- * the high boundary is plainly not the lesser breach.
+ * the high boundary is plainly not the lesser breach. An unknown ratio reads as
+ * healthy only in colour: callers gate on the value being present.
  */
 export function encumbranceSeverity(
   ratio: number | null | undefined,
 ): EncumbranceSeverity {
   if (ratio === null || ratio === undefined || !Number.isFinite(ratio)) {
-    return 'none';
+    return 'healthy';
   }
   if (ratio >= ENCUMBRANCE_HIGH_SEVERITY_THRESHOLD) {
     return 'high';
   }
-  return ratio >= ENCUMBRANCE_LOW_SEVERITY_THRESHOLD ? 'low' : 'none';
+  if (ratio >= ENCUMBRANCE_LOW_SEVERITY_THRESHOLD) {
+    return 'low';
+  }
+  return ratio >= ENCUMBRANCE_AT_RISK_THRESHOLD ? 'at-risk' : 'healthy';
 }
 
 /**

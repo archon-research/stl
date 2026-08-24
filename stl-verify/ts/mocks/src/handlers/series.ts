@@ -10,9 +10,13 @@
 import { mockDelay } from '@archon-research/http-client-msw';
 import type { MockHandler } from '@archon-research/http-client-msw';
 
-import { iso, mockNow } from '../clock.ts';
+import { DAY_MS, MINUTE_MS, iso, mockNow } from '../clock.ts';
 import { PRIMES } from '../fixtures/registry.ts';
 import type { PrimeName, SeededPrime } from '../fixtures/registry.ts';
+import {
+  PRIME_COLLATERAL_USD,
+  PRIME_MONITOR_ENCUMBRANCE,
+} from '../fixtures/risk.ts';
 import {
   EXPOSURE_USD,
   PRIME_DEBT_USDS,
@@ -196,6 +200,18 @@ export function seriesHandlers(): MockHandler[] {
           return response.untyped(problemResponse(request.problem));
         }
 
+        const proxy = findProxy(params.prime_id);
+        // Wherever the response holds Sky's figures the buckets also carry the
+        // upstream collateral and the monitor's ratio; self mode reports null.
+        const monitorFields =
+          request.value.source === 'indexed' || proxy === undefined
+            ? {}
+            : {
+                assets_usd: PRIME_COLLATERAL_USD[proxy.name],
+                assets_observed_at: iso(nowMs - DAY_MS),
+                encumbrance_ratio: PRIME_MONITOR_ENCUMBRANCE[proxy.name],
+                capital_observed_at: iso(nowMs - 11 * MINUTE_MS),
+              };
         return response(200).json({
           mode: 'aggregated',
           source: request.value.source,
@@ -207,6 +223,7 @@ export function seriesHandlers(): MockHandler[] {
           ).map((point): TotalCapitalBucket => ({
             bucket_start: iso(point.startMs),
             total_capital_usd: usdString(point.value),
+            ...monitorFields,
           })),
         });
       },

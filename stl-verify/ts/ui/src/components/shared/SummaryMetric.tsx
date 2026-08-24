@@ -1,4 +1,5 @@
-import { StatTile } from '@archon-research/design-system';
+import { InfoPopover, StatTile } from '@archon-research/design-system';
+import { Info } from 'lucide-react';
 import type { ReactNode } from 'react';
 
 import { css } from '#styled-system/css';
@@ -8,6 +9,12 @@ type SummaryMetricProps = {
   value: ReactNode;
   detail?: ReactNode;
   className?: string;
+  /** Opens a click-through explanation of the metric beside the label. */
+  info?: ReactNode;
+  /** Verified Sky Atlas anchor for the metric's definition, when one exists. */
+  infoHref?: string;
+  /** Link text for `infoHref`, e.g. the Atlas document number. */
+  infoLinkText?: string;
 };
 
 // The `statTile` value slot is a wrap-friendly inline-flex row now, so `value`
@@ -32,12 +39,48 @@ export function SummaryMetric({
   value,
   detail,
   className,
+  info,
+  infoHref,
+  infoLinkText,
 }: SummaryMetricProps) {
   return (
     <StatTile
       className={className}
       labelCase="upper"
-      label={label}
+      label={
+        info === undefined ? (
+          label
+        ) : (
+          // Full-width row so the glyph sits at the card's right edge, at
+          // label height, rather than trailing the text.
+          <span
+            className={css({
+              display: 'flex',
+              width: '100%',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: '2',
+            })}
+          >
+            {label}
+            <InfoPopover
+              label={`About ${label}`}
+              placement="top-end"
+              trigger={<Info size={14} aria-hidden />}
+              {...(infoHref === undefined
+                ? {}
+                : { href: infoHref, linkText: infoLinkText })}
+              className={css({
+                display: 'inline-flex',
+                color: 'text.muted',
+                _hover: { color: 'text.strong' },
+              })}
+            >
+              {info}
+            </InfoPopover>
+          </span>
+        )
+      }
       value={value}
       sub={
         // Falsy, not nullish: `''` and `0` must render nothing, or the tile gains

@@ -50,9 +50,7 @@ export type MetricChartSpec = {
   stroke: ChartColorToken;
   formatValue: (value: number) => string;
   kind: MetricChartKind;
-  // Ordered ascending. Each draws a dashed limit with the region past it shaded,
-  // so overlapping severities read as escalating shade.
-  //
+  // Ordered ascending. Each draws a dashed limit line with a labelled edge.
   thresholds?: { value: number; label?: string; stroke?: ChartColor }[];
   // The provenance not drawn as the primary series, for the same buckets, under
   // `source=both`. A second line rather than a second card: the point is the gap
@@ -441,20 +439,18 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
             fill: 'var(--colors-text-muted)',
           })}
         />
-        {/* No fill when a second series is present: it anchors the domain at
-            zero, which compresses both lines into a band at the plot top, and a
-            comparison does not need a filled magnitude anyway. */}
-        {chart.kind === 'fallback' || chart.comparison ? null : (
-          <AreaSeries
-            dataKey={`${chart.key}-area`}
-            data={chart.data as ChartDatum[]}
-            xAccessor={(d: ChartDatum) => d.label}
-            yAccessor={(d: ChartDatum) => d.value}
-            fill={strokeColor}
-            fillOpacity={0.18}
-            lineProps={{ stroke: 'none' }}
-          />
-        )}
+        {/* The same soft fill under every primary line, real series or flat
+            fallback — keying it on comparison presence or series kind made
+            sibling cards shade inconsistently across provenances/windows. */}
+        <AreaSeries
+          dataKey={`${chart.key}-area`}
+          data={chart.data as ChartDatum[]}
+          xAccessor={(d: ChartDatum) => d.label}
+          yAccessor={(d: ChartDatum) => d.value}
+          fill={strokeColor}
+          fillOpacity={0.18}
+          lineProps={{ stroke: 'none' }}
+        />
         <LineSeries
           dataKey={chart.key}
           data={chart.data as ChartDatum[]}
@@ -486,6 +482,9 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
             value={entry.value}
             breach="above"
             stroke={entry.stroke}
+            // No breach fill: shading everything past the limit made a small
+            // card read as mostly-in-breach even at a healthy ratio.
+            fill="transparent"
           />
         ))}
         <ThresholdLabels thresholds={thresholds} />

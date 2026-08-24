@@ -126,6 +126,71 @@ function ResultRow({
   );
 }
 
+const positionTilesClassName = css({
+  display: 'grid',
+  gridTemplateColumns: {
+    base: '1fr',
+    md: 'repeat(3, minmax(0, 1fr))',
+  },
+  gap: '3',
+});
+
+function PositionTiles({
+  allocation,
+  balanceLabel,
+}: {
+  allocation: Allocation;
+  balanceLabel: string;
+}) {
+  return (
+    <>
+      <SummaryMetric
+        // Sky reports USD exposure only, so a Sky-reported row has no token
+        // quantity to show — the USD figure stands in.
+        label={allocation.balance === null ? 'Position exposure' : balanceLabel}
+        value={
+          <>
+            <TokenLogo
+              address={allocation.receipt_token_address}
+              chainId={allocation.chain_id}
+              symbol={allocation.symbol}
+              size="7"
+            />
+            {allocation.balance === null
+              ? formatUsdValue(allocation.amount_usd)
+              : `${formatTokenAmount(allocation.balance)} ${allocation.symbol}`}
+          </>
+        }
+      />
+      <SummaryMetric
+        label="Underlying asset"
+        value={
+          <>
+            <TokenLogo
+              address={allocation.underlying_token_address}
+              chainId={allocation.chain_id}
+              symbol={allocation.underlying_symbol}
+              size="7"
+            />
+            {allocation.underlying_symbol}
+          </>
+        }
+      />
+      {allocation.protocol_name == null ? null : (
+        <SummaryMetric
+          label="Protocol"
+          value={
+            <>
+              <ProtocolLogo protocolName={allocation.protocol_name} size="5" />
+              {allocation.protocol_name}
+            </>
+          }
+        />
+      )}
+    </>
+  );
+}
+
 export function RrcTab({
   isEnabled,
   selectedReceiptToken,
@@ -146,7 +211,11 @@ export function RrcTab({
   // actually holds a position on — the prime's primary proxy's chain, today
   // always mainnet. A non-mainnet allocation would 503 (share_data_missing)
   // or hit an uncaught backend error rather than return a real breakdown.
+  // `receipt_token_id` gates this like the grid's own rule: a row with no
+  // receipt token (the off-chain custody leg, chain 0) can never resolve an
+  // RRC breakdown anywhere, so calling it "cross-chain" would be wrong.
   const isChainMismatch =
+    receiptTokenId !== null &&
     chainId !== null &&
     selectedPrime !== null &&
     chainId !== selectedPrime.chain_id;
@@ -155,6 +224,7 @@ export function RrcTab({
     if (
       !isEnabled ||
       chainId === null ||
+      receiptTokenId === null ||
       receiptTokenAddress === null ||
       primeAddress === null ||
       isChainMismatch
@@ -253,9 +323,66 @@ export function RrcTab({
     // FIX ME: add API to return applicable risk models per asset_id. SURAF
     // should eventually run on some direct-held assets (no receipt-token
     // wrapper), so this branch should query that registry instead of
-    // hard-coding "no risk model" for every direct holding.
+    // hard-coding "no STL model" for every direct holding.
+    if (reference === null) {
+      return (
+        <TabNotePanel message="Required risk capital is only computed for receipt-token positions. Direct asset holdings have no risk model." />
+      );
+    }
+    // No STL model runs here, but Sky prices the position — its published
+    // figure is what the grid's RRC column already shows for this row.
     return (
-      <TabNotePanel message="Required risk capital is only computed for receipt-token positions. Direct asset holdings have no risk model." />
+      <div className={css({ display: 'grid', gap: '4' })}>
+        <div className={positionTilesClassName}>
+          <PositionTiles
+            allocation={selectedReceiptToken}
+            balanceLabel="Position balance"
+          />
+        </div>
+        <div
+          className={css({
+            borderRadius: 'md',
+            borderStyle: 'solid',
+            borderWidth: '1px',
+            borderColor: 'border.subtle',
+            bg: 'surface.subtle',
+            p: '4',
+            display: 'grid',
+            gap: '3',
+          })}
+        >
+          <p
+            className={css({
+              m: 0,
+              fontSize: 'xs',
+              textTransform: 'uppercase',
+              letterSpacing: '0.16em',
+              color: 'text.muted',
+            })}
+          >
+            Per-model results
+          </p>
+          <ul
+            className={css({
+              listStyle: 'none',
+              m: 0,
+              p: 0,
+              display: 'grid',
+              gap: '2',
+            })}
+          >
+            <ResultRow
+              isSelected
+              label="Sky published figure"
+              value={`${formatUsdValue(reference.rrcUsd)} · CRR ${formatPercentValue(reference.crrPct, 2)}`}
+            />
+          </ul>
+          <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>
+            STL&apos;s models run on receipt-token positions only; this is
+            Sky&apos;s published requirement for the position.
+          </p>
+        </div>
+      </div>
     );
   }
 
@@ -277,55 +404,10 @@ export function RrcTab({
       ) : null}
 
       {!errorMessage ? (
-        <div
-          className={css({
-            display: 'grid',
-            gridTemplateColumns: {
-              base: '1fr',
-              md: 'repeat(3, minmax(0, 1fr))',
-            },
-            gap: '3',
-          })}
-        >
-          <SummaryMetric
-            label="Receipt token balance"
-            value={
-              <>
-                <TokenLogo
-                  address={selectedReceiptToken.receipt_token_address}
-                  chainId={selectedReceiptToken.chain_id}
-                  symbol={selectedReceiptToken.symbol}
-                  size="7"
-                />
-                {`${formatTokenAmount(selectedReceiptToken.balance)} ${selectedReceiptToken.symbol}`}
-              </>
-            }
-          />
-          <SummaryMetric
-            label="Underlying asset"
-            value={
-              <>
-                <TokenLogo
-                  address={selectedReceiptToken.underlying_token_address}
-                  chainId={selectedReceiptToken.chain_id}
-                  symbol={selectedReceiptToken.underlying_symbol}
-                  size="7"
-                />
-                {selectedReceiptToken.underlying_symbol}
-              </>
-            }
-          />
-          <SummaryMetric
-            label="Protocol"
-            value={
-              <>
-                <ProtocolLogo
-                  protocolName={selectedReceiptToken.protocol_name ?? ''}
-                  size="5"
-                />
-                {selectedReceiptToken.protocol_name}
-              </>
-            }
+        <div className={positionTilesClassName}>
+          <PositionTiles
+            allocation={selectedReceiptToken}
+            balanceLabel="Receipt token balance"
           />
         </div>
       ) : null}

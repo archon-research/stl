@@ -16,8 +16,6 @@ import { flex } from '#styled-system/patterns';
 
 import { getActionColorClass, getActionIcon } from '../../lib/activity';
 import {
-  type ChainLabelLookup,
-  ENCUMBRANCE_LOW_SEVERITY_THRESHOLD,
   encumbranceSeverity,
   formatDateTime,
   formatFreshnessLabel,
@@ -28,8 +26,10 @@ import {
   getAllocationKey,
   getCategoryLabel,
   getChainLabel,
+  getExplorerUrl,
   getProtocolLabel,
   parseNumericValue,
+  type ChainLabelLookup,
 } from '../../lib/dashboard';
 import { preferReference, useProvenanceView } from '../../lib/provenance';
 import type {
@@ -247,8 +247,16 @@ function AllocationUnderlyingCell({ allocation }: { allocation: Allocation }) {
   );
 }
 
-function AllocationExposureCell({ allocation }: { allocation: Allocation }) {
-  const amountUsd = allocation.amount_usd;
+function AllocationExposureCell({ row }: { row: AllocationGridRow }) {
+  const allocation = row;
+  // Sky's exposure where the row's risk figures are Sky's, so CRR reproduces
+  // from the numbers on the row; STL's own valuation moves to the title.
+  const exposureUsd = row.risk.exposureUsd;
+  const stlAmountUsd = parseNumericValue(allocation.amount_usd);
+  const valuationTitle =
+    row.risk.fromReference && stlAmountUsd !== null
+      ? `Sky's exposure; STL's own valuation is ${formatUsdValue(stlAmountUsd)}`
+      : undefined;
 
   return (
     <div
@@ -281,9 +289,11 @@ function AllocationExposureCell({ allocation }: { allocation: Allocation }) {
             m: 0,
           })}
         >
-          {amountUsd !== undefined && amountUsd !== null
-            ? formatUsdValue(amountUsd)
-            : `${formatTokenAmount(allocation.balance)} ${allocation.symbol}`}
+          <span title={valuationTitle}>
+            {exposureUsd !== null
+              ? formatUsdValue(exposureUsd)
+              : `${formatTokenAmount(allocation.balance)} ${allocation.symbol}`}
+          </span>
         </span>
       </div>
       <TokenAddress
@@ -533,6 +543,7 @@ function AllocationRiskCapitalCell({
 
   return (
     <p
+      title={riskProvenanceTitle(risk)}
       className={css({
         m: 0,
         fontSize: 'sm',
@@ -543,6 +554,16 @@ function AllocationRiskCapitalCell({
       {formatUsdValue(risk.riskCapitalUsd)}
     </p>
   );
+}
+
+/**
+ * A tooltip, not a chip: under the composite view Sky's figure wins wherever
+ * it reports one, so a visible marker would land on most rows and stop
+ * marking anything (the same reason the Asset column badges only Sky-only
+ * rows).
+ */
+function riskProvenanceTitle(risk: AllocationGridRow['risk']): string {
+  return risk.fromReference ? "Sky's published figure" : 'STL model figure';
 }
 
 /**
@@ -588,6 +609,9 @@ type AllocationGridRow = Allocation & {
     state: RiskFetchState;
     entry: AllocationRiskCapital | undefined;
     chainMismatch: boolean;
+    /** True when the figures shown are Sky's published values, not STL's model. */
+    fromReference: boolean;
+    exposureUsd: number | null;
     riskCapitalUsd: number | null;
     crrPct: number | null;
     sharePct: number | null;
@@ -608,6 +632,23 @@ function toAllocationGridRow(
       state: riskFetchState,
       entry,
       chainMismatch: isRiskCapitalChainMismatch(selectedPrime, allocation),
+      // Mirrors preferReference: Sky's figure is used when its side is
+      // populated (composite) or when the whole response is Sky's.
+      fromReference:
+        entry !== undefined &&
+        (entry.source === 'reference' ||
+          entry.reference_required_risk_capital_usd != null),
+      // The exposure the risk figures were computed against, so a row's CRR
+      // reproduces from the numbers beside it. On a reference-shaped entry the
+      // bare field is already Sky's (same rule as RrcTab's referenceFigures).
+      exposureUsd: parseNumericValue(
+        preferReference(
+          entry?.source === 'reference'
+            ? entry.exposure_usd
+            : entry?.reference_exposure_usd,
+          allocation.amount_usd,
+        ),
+      ),
       riskCapitalUsd: appliedRiskCapitalUsd(entry),
       crrPct: preferredCrrPct(entry),
       sharePct: rrcSharePct(entry, totalRequiredRiskCapitalUsd),
@@ -648,9 +689,8 @@ function createAllocationColumns(
       // order 4,722 BTC below 869M spUSDS while the column displays $250M above
       // $869M. An unpriced row has no exposure to sort by, so it sorts last
       // rather than tying with a genuine zero.
-      accessorFn: (allocation) =>
-        parseNumericValue(allocation.amount_usd) ?? -1,
-      cell: ({ row }) => <AllocationExposureCell allocation={row.original} />,
+      accessorFn: (allocation) => allocation.risk.exposureUsd ?? -1,
+      cell: ({ row }) => <AllocationExposureCell row={row.original} />,
       // Bar reflects USD value so magnitudes compare across heterogeneous
       // tokens; the cell text keeps the token holding. NaN (not null) suppresses
       // the bar for unpriced rows: a null here would fall back to the column
@@ -658,8 +698,7 @@ function createAllocationColumns(
       meta: {
         magnitude: {
           scale: 'linear',
-          getValue: (allocation) =>
-            parseNumericValue(allocation.amount_usd) ?? NaN,
+          getValue: (allocation) => allocation.risk.exposureUsd ?? NaN,
           getValueText: () => null,
         },
       },
@@ -720,6 +759,7 @@ function createAllocationColumns(
           }
           format={formatPercentValue}
           state={row.original.risk.state}
+          title={riskProvenanceTitle(row.original.risk)}
         />
       ),
       meta: {
@@ -750,6 +790,7 @@ function createAllocationColumns(
           }
           format={formatRatioPercent}
           state={row.original.risk.state}
+          title={riskProvenanceTitle(row.original.risk)}
         />
       ),
       meta: {
@@ -772,10 +813,12 @@ function AllocationRatioCell({
   value,
   format,
   state,
+  title,
 }: {
   value: number | null;
   format: (value: number | null) => string;
   state: RiskFetchState;
+  title?: string;
 }) {
   const unsettled = riskFetchPlaceholder(state);
   if (unsettled) {
@@ -791,6 +834,7 @@ function AllocationRatioCell({
 
   return (
     <p
+      title={value === null ? undefined : title}
       className={css({
         m: 0,
         fontSize: 'sm',
@@ -854,18 +898,24 @@ export function AllocationGrid({
     return () => window.clearTimeout(timeoutId);
   }, [localSearchValue, onSearchChange, searchValue]);
 
+  // What is on screen; narrowing can put a different provenance there than
+  // the one fetched (`source` stays 'both' after it).
+  const { provenance: shownProvenance } = useProvenanceView();
+
   const summary = useMemo(() => {
     if (topMetricsAllocations.length === 0) {
       return null;
     }
 
-    // Rows Sky alone reports are excluded from the total, not from the table.
-    // The two provenances sometimes describe the same money differently — a
-    // vault position against the asset underneath it — and those rows do not
-    // match on identity, so adding them counts it twice. Every other card keeps
-    // the provenances in separate figures for the same reason.
+    // Under the composite view, rows Sky alone reports are excluded from the
+    // total (not the table): the provenances sometimes describe the same money
+    // differently without matching on identity, so adding them counts it
+    // twice. Under the reference view every row is Sky's and there is nothing
+    // to double against — excluding them summed an empty set to $0.00.
+    const countsInTotal = (allocation: Allocation) =>
+      shownProvenance !== 'both' || allocation.source !== 'reference';
     const totalUsd = topMetricsAllocations
-      .filter((allocation) => allocation.source !== 'reference')
+      .filter(countsInTotal)
       .reduce(
         (sum, allocation) =>
           sum + (parseNumericValue(allocation.amount_usd) ?? 0),
@@ -890,37 +940,41 @@ export function AllocationGrid({
     );
 
     return {
-      allocationCount: topMetricsAllocations.filter(
-        (allocation) => allocation.source !== 'reference',
-      ).length,
-      referenceOnlyCount: topMetricsAllocations.filter(
-        (allocation) => allocation.source === 'reference',
-      ).length,
+      allocationCount: topMetricsAllocations.filter(countsInTotal).length,
+      // The split only says something against STL's rows, so the composite
+      // view alone reports it.
+      referenceOnlyCount:
+        shownProvenance === 'both'
+          ? topMetricsAllocations.filter(
+              (allocation) => allocation.source === 'reference',
+            ).length
+          : 0,
       latestActivityAt,
       totalUsd,
     };
-  }, [topMetricsAllocations]);
+  }, [shownProvenance, topMetricsAllocations]);
 
   const overallSummary = useMemo(() => {
     if (allocations.length === 0) {
       return null;
     }
 
-    const indexed = allocations.filter(
-      (allocation) => allocation.source !== 'reference',
-    );
-    const totalUsd = indexed.reduce(
+    const counted =
+      shownProvenance === 'both'
+        ? allocations.filter((allocation) => allocation.source !== 'reference')
+        : allocations;
+    const totalUsd = counted.reduce(
       (sum, allocation) =>
         sum + (parseNumericValue(allocation.amount_usd) ?? 0),
       0,
     );
 
     return {
-      allocationCount: indexed.length,
-      referenceOnlyCount: allocations.length - indexed.length,
+      allocationCount: counted.length,
+      referenceOnlyCount: allocations.length - counted.length,
       totalUsd,
     };
-  }, [allocations]);
+  }, [allocations, shownProvenance]);
 
   const debtWad = showsReferenceNow
     ? referenceDebt?.debt_wad
@@ -1069,22 +1123,17 @@ export function AllocationGrid({
   // capital, so it cannot be computed without a total. And where chains go
   // unserved the numerator is bounded, making the ratio a floor rather than a
   // measurement — on a risk surface that difference matters.
+  // The band itself renders as a chip beside the value; this line carries only
+  // what the chip cannot say — why a figure is absent, or that a bounded
+  // numerator makes the ratio a floor rather than a measurement.
   const encumbranceCaption = (() => {
     if (encumbranceRatio === null) {
       return 'Needs total risk capital, which is not yet observed';
     }
-    if (encumbranceBreach === 'high') {
-      return 'High severity breach';
-    }
-    if (encumbranceBreach === 'low') {
-      return 'Low severity breach';
-    }
-    // A bounded numerator understates the ratio, so "within" is a floor here
-    // rather than a measurement — worth saying on a surface read for breaches.
     if (unservedChains.length > 0) {
-      return `At least this, with ${unservedChains.length} chain${unservedChains.length === 1 ? '' : 's'} unserved`;
+      return `A floor: ${unservedChains.length} chain${unservedChains.length === 1 ? '' : 's'} unserved`;
     }
-    return `Within the ${formatRatioPercent(ENCUMBRANCE_LOW_SEVERITY_THRESHOLD, 0)} breach level`;
+    return null;
   })();
 
   return (
@@ -1246,6 +1295,13 @@ export function AllocationGrid({
             severity: encumbranceBreach,
           }}
           debt={{
+            explorerUrl: selectedPrime
+              ? getExplorerUrl(
+                  selectedPrime.chain_id,
+                  selectedPrime.address,
+                  'address',
+                )
+              : null,
             wad: debtWad,
             ilkLabel: debtIlkLabel,
             isLoading: isPrimeDebtLoading,
@@ -1269,13 +1325,24 @@ export function AllocationGrid({
               color: 'text.muted',
             })}
           >
-            {riskCapital.source === 'reference' ? (
+            {shownProvenance === 'reference' ? (
               // No model ran, so the coverage figure below would read as "STL
               // priced all of this" when nothing of STL's did. Attribute the
               // figures to their source instead.
               <>
                 Reported by Sky&apos;s Star Agents Risk Capital &amp;
                 Requirements Monitor · not STL&apos;s model
+              </>
+            ) : shownProvenance === 'both' ? (
+              // Sky's figure wins wherever it reports one, so a bare
+              // "model-derived" would claim numbers STL's model did not make.
+              <>
+                Sky&apos;s published figures where reported, else model-derived
+                ({riskCapital.model}, 15% stress) ·{' '}
+                {parseNumericValue(riskCapital.prime_modeled_pct) !== null
+                  ? formatRatioPercent(riskCapital.prime_modeled_pct)
+                  : 'partial'}{' '}
+                of exposure modeled by STL
               </>
             ) : (
               <>
