@@ -16,13 +16,13 @@
     "test:mocks": "NODE_ENV=test node scripts/check-mock-api.mjs"
   },
   "dependencies": {
-    "@archon-research/http-client-msw": "0.10.0-rohit-pre-release-consumer-fixes.3"
+    "@archon-research/http-client-msw": "0.10.0"
   },
   "devDependencies": {
-    "@archon-research/http-client-core": "0.10.0-rohit-pre-release-consumer-fixes.3",
-    "@archon-research/oxfmt-config": "0.10.0-rohit-pre-release-consumer-fixes.3",
-    "@archon-research/oxlint-config": "0.10.0-rohit-pre-release-consumer-fixes.3",
-    "@archon-research/tsconfig": "0.10.0-rohit-pre-release-consumer-fixes.3",
+    "@archon-research/http-client-core": "0.10.0",
+    "@archon-research/oxfmt-config": "0.10.0",
+    "@archon-research/oxlint-config": "0.10.0",
+    "@archon-research/tsconfig": "0.10.0",
     "@stl-verify/ui": "*",
     "@types/node": "26.1.2",
     "msw": "2.15.0"

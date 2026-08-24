@@ -15,7 +15,7 @@
     "uikit:unlink": "uikit-cli unlink"
   },
   "devDependencies": {
-    "@archon-research/uikit-cli": "0.10.0-rohit-pre-release-consumer-fixes.3",
+    "@archon-research/uikit-cli": "0.10.0",
     "typescript": "7.0.2"
   },
   "workspaces": [
