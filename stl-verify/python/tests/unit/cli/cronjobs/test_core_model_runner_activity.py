@@ -27,7 +27,7 @@ def wired(monkeypatch):
         captured["db_url"] = url
         return engine
 
-    monkeypatch.setattr(activity_module, "create_worker_db_engine", _fake_engine_factory)
+    monkeypatch.setattr(activity_module, "create_db_engine", _fake_engine_factory)
     monkeypatch.setattr(activity_module.RunnerConfig, "resolve", classmethod(lambda cls, key: [f"cfg-{key}"]))
 
     async def _fake_run_markets(configs, writer, make_data_reader):
@@ -45,7 +45,8 @@ async def test_run_tick_wires_the_resolved_configs_to_a_postgres_writer(wired):
     await activity_module.run_tick("sparklend_usdt")
     assert wired["captured"]["configs"] == ["cfg-sparklend_usdt"]
     assert wired["captured"]["writer"] == ("writer", wired["engine"])
-    assert wired["captured"]["db_url"] == "postgresql://u:p@host:5432/db"
+    # The entry point normalizes the bare DATABASE_URL to the asyncpg driver.
+    assert wired["captured"]["db_url"] == "postgresql+asyncpg://u:p@host:5432/db"
 
 
 async def test_run_tick_disposes_the_engine_on_success(wired):

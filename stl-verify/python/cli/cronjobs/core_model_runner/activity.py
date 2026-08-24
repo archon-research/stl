@@ -13,7 +13,8 @@ from temporalio import activity
 
 from app.adapters.parquet.core_model_data_reader import ParquetCoreModelDataReader
 from app.adapters.postgres.core_model_results_writer import PostgresCoreModelResultsWriter
-from app.adapters.postgres.engine import create_worker_db_engine
+from app.adapters.postgres.engine import create_db_engine
+from app.config import async_database_url
 from app.services.core_model_runner.config import RunnerConfig
 from app.services.core_model_runner.service import run_markets
 from app.services.core_model_runner.workflow import ACTIVITY_NAME
@@ -28,7 +29,9 @@ async def run_tick(market_key: str) -> None:
     break on the second tick.
     """
     configs = RunnerConfig.resolve(market_key)
-    engine = create_worker_db_engine(os.environ["DATABASE_URL"])
+    # os.environ, not Settings: a missing ExternalSecret must fail loudly, where
+    # Settings would silently fall back to .env.default's localhost URL.
+    engine = create_db_engine(async_database_url(os.environ["DATABASE_URL"]))
     try:
         await run_markets(
             configs,

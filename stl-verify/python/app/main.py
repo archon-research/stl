@@ -177,7 +177,12 @@ def create_app(settings: Settings, static_dir: Path | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        engine = create_db_engine(settings)
+        engine = create_db_engine(
+            settings.async_database_url,
+            pool_size=settings.db_pool_size,
+            max_overflow=settings.db_max_overflow,
+            pool_timeout=settings.db_pool_timeout,
+        )
         try:
             async with engine.connect() as conn:
                 await conn.execute(text("SELECT 1"))
