@@ -429,7 +429,10 @@ export function formatUsdValue(
     return '—';
   }
 
-  return Math.abs(numeric) >= 1_000_000
+  // Compact from a thousand up ($44.96K, $2.21M), not just from a million:
+  // four-digit-plus figures with cents ($44,956.75) read as more precision
+  // than these surfaces need and break column scanning.
+  return Math.abs(numeric) >= 1_000
     ? COMPACT_CURRENCY_FORMAT.format(numeric)
     : CURRENCY_FORMAT.format(numeric);
 }
