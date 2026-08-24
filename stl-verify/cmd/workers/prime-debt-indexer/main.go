@@ -47,7 +47,6 @@ func init() {
 
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -56,7 +55,9 @@ func main() {
 		cancel()
 	}()
 
-	if err := run(ctx, os.Args[1:]); err != nil {
+	err := run(ctx, os.Args[1:])
+	cancel()
+	if err != nil {
 		slog.Error("prime-debt-indexer exited with error", "error", err)
 		os.Exit(1)
 	}

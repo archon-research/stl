@@ -62,6 +62,14 @@ func StartLocalStackForMain(services string) (cfg LocalStackConfig, cleanup func
 		return cfg, noopCleanup
 	}
 
+	cfg, cleanup, err := startLocalStackContainer(services)
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+	return cfg, cleanup
+}
+
+func startLocalStackContainer(services string) (cfg LocalStackConfig, cleanup func(), err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
@@ -85,24 +93,23 @@ func StartLocalStackForMain(services string) (cfg LocalStackConfig, cleanup func
 	})
 	if err != nil {
 		if IsContainerRuntimeUnavailable(err) {
-			log.Fatalf("container runtime unavailable: %v", err)
+			return cfg, nil, fmt.Errorf("container runtime unavailable: %w", err)
 		}
-		log.Fatalf("start LocalStack container: %v", err)
+		return cfg, nil, fmt.Errorf("start LocalStack container: %w", err)
 	}
 
 	host, err := container.Host(ctx)
 	if err != nil {
-		log.Fatalf("get LocalStack host: %v", err)
+		return cfg, nil, fmt.Errorf("get LocalStack host: %w", err)
 	}
 	port, err := container.MappedPort(ctx, "4566")
 	if err != nil {
-		log.Fatalf("get LocalStack port: %v", err)
+		return cfg, nil, fmt.Errorf("get LocalStack port: %w", err)
 	}
 	cfg.Endpoint = fmt.Sprintf("http://%s:%s", host, port.Port())
 	allowDirectConnection(host)
 
-	cleanup = func() { _ = container.Terminate(context.Background()) }
-	return cfg, cleanup
+	return cfg, func() { _ = container.Terminate(context.Background()) }, nil
 }
 
 // allowDirectConnection adds host to both spellings of the no-proxy list, so an

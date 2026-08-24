@@ -68,9 +68,10 @@ func main() {
 
 	// Handle shutdown signals
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
 
-	if err := run(ctx, logger, *workers); err != nil && !errors.Is(err, context.Canceled) {
+	err := run(ctx, logger, *workers)
+	cancel()
+	if err != nil && !errors.Is(err, context.Canceled) {
 		logger.Error("backup service failed", "error", err)
 		os.Exit(1)
 	}

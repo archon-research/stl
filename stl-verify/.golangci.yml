@@ -8,6 +8,7 @@
 version: "2"
 linters:
   enable:
+    - gocritic
     - modernize
   settings:
     staticcheck:

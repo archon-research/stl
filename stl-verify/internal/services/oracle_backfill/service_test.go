@@ -600,9 +600,7 @@ func TestRun(t *testing.T) {
 				BatchSize:   100,
 				Logger:      testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return defaultRepoSetup()
-			},
+			setupRepo: defaultRepoSetup,
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
 					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
@@ -635,9 +633,7 @@ func TestRun(t *testing.T) {
 				BatchSize:   100,
 				Logger:      testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return defaultRepoSetup()
-			},
+			setupRepo: defaultRepoSetup,
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
 					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
@@ -670,9 +666,7 @@ func TestRun(t *testing.T) {
 				BatchSize:   100,
 				Logger:      testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return defaultRepoSetup()
-			},
+			setupRepo: defaultRepoSetup,
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
 					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
@@ -825,9 +819,7 @@ func TestRun(t *testing.T) {
 				BatchSize:   3, // small batch size forces flush during for loop
 				Logger:      testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return defaultRepoSetup()
-			},
+			setupRepo: defaultRepoSetup,
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
 					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
@@ -924,9 +916,7 @@ func TestRun(t *testing.T) {
 				BatchSize:   100,
 				Logger:      testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return defaultRepoSetup()
-			},
+			setupRepo:   defaultRepoSetup,
 			setupHeader: func() *mockHeaderFetcher { return &mockHeaderFetcher{} },
 			setupMC: func(t *testing.T) MulticallFactory {
 				return func(_ entity.OracleType) (outbound.Multicaller, error) {
@@ -951,9 +941,7 @@ func TestRun(t *testing.T) {
 				BatchSize:   100,
 				Logger:      testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return defaultRepoSetup()
-			},
+			setupRepo: defaultRepoSetup,
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
 					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
@@ -1004,9 +992,7 @@ func TestRun(t *testing.T) {
 				BatchSize:   100,
 				Logger:      testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return defaultRepoSetup()
-			},
+			setupRepo: defaultRepoSetup,
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
 					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
@@ -1048,9 +1034,7 @@ func TestRun(t *testing.T) {
 				BatchSize:   100,
 				Logger:      testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return defaultRepoSetup()
-			},
+			setupRepo: defaultRepoSetup,
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
 					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
@@ -1106,9 +1090,7 @@ func TestRun(t *testing.T) {
 				BatchSize:   100,
 				Logger:      testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return defaultRepoSetup()
-			},
+			setupRepo: defaultRepoSetup,
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
 					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
@@ -1163,9 +1145,7 @@ func TestRun(t *testing.T) {
 				BatchSize:   100,
 				Logger:      testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return defaultRepoSetup()
-			},
+			setupRepo: defaultRepoSetup,
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
 					headerByNumberFn: func(_ context.Context, _ *big.Int) (*ethtypes.Header, error) {
@@ -1201,9 +1181,7 @@ func TestRun(t *testing.T) {
 				BatchSize:   100,
 				Logger:      testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return defaultRepoSetup()
-			},
+			setupRepo: defaultRepoSetup,
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
 					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
@@ -1275,9 +1253,7 @@ func TestRun(t *testing.T) {
 				BatchSize:   100,
 				Logger:      testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return feedOracleRepoSetup()
-			},
+			setupRepo: feedOracleRepoSetup,
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
 					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
@@ -1308,9 +1284,7 @@ func TestRun(t *testing.T) {
 				BatchSize:   100,
 				Logger:      testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return feedOracleRepoSetup()
-			},
+			setupRepo: feedOracleRepoSetup,
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
 					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {
@@ -1430,9 +1404,7 @@ func TestRun(t *testing.T) {
 				BatchSize:   100,
 				Logger:      testutil.DiscardLogger(),
 			},
-			setupRepo: func() *mockRepo {
-				return feedOracleRepoSetup()
-			},
+			setupRepo: feedOracleRepoSetup,
 			setupHeader: func() *mockHeaderFetcher {
 				return &mockHeaderFetcher{
 					headerByNumberFn: func(_ context.Context, number *big.Int) (*ethtypes.Header, error) {

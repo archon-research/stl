@@ -258,7 +258,6 @@ func main() {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -268,8 +267,11 @@ func main() {
 		cancel()
 	}()
 
-	if err := run(ctx, cfg, logger); err != nil {
-		if ctx.Err() != nil {
+	err := run(ctx, cfg, logger)
+	shuttingDown := ctx.Err() != nil
+	cancel()
+	if err != nil {
+		if shuttingDown {
 			logger.Info("shutdown complete")
 			os.Exit(0)
 		}

@@ -23,18 +23,18 @@ import (
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
 
 	// Require DATABASE_URL rather than default to localhost: a deployed worker that
 	// silently connected to a local (empty) database would report healthy while
 	// materializing nothing.
 	dbURL, err := env.Require("DATABASE_URL")
 	if err != nil {
+		cancel()
 		slog.Error("transform-worker startup failed: missing configuration", "error", err)
 		os.Exit(1)
 	}
 
-	if err := temporal.RunCronjob(ctx, temporal.BuildMeta{
+	err = temporal.RunCronjob(ctx, temporal.BuildMeta{
 		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
 	}, temporal.CronjobConfig{
 		Name:              env.Get("SERVICE_NAME", "transform-worker"),
@@ -43,7 +43,9 @@ func main() {
 		IntervalOffsetEnv: "TRANSFORM_SCHEDULE_OFFSET",
 		OpenDatabase:      postgres.PoolOpener(postgres.DefaultDBConfig(dbURL)),
 		Setup:             setupRunner,
-	}); err != nil {
+	})
+	cancel()
+	if err != nil {
 		slog.Error("transform-worker cronjob exited with error", "error", err)
 		os.Exit(1)
 	}
