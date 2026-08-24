@@ -1,5 +1,5 @@
 import { Avatar } from '@archon-research/design-system';
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 
 import { logging } from '#src/lib/logging';
 import { css, cx } from '#styled-system/css';
@@ -10,6 +10,8 @@ type LogoAvatarBaseProps = {
   alt: string;
   fallbackText: string;
   imageUrl: string | null;
+  /** Tried when `imageUrl` is null or fails, before the text fallback. */
+  fallbackImageUrl?: string | null;
   isSelected?: boolean;
   fallbackColor?: 'text.default' | 'text.strong';
 };
@@ -37,51 +39,70 @@ const sizeClassNames: Record<PandaSizeToken, string> = {
   '11': css({ width: '11', height: '11' }),
 };
 
+/**
+ * Initials sized to the disc rather than a fixed step: a fixed `2xs` nearly
+ * touches the border of a 16px avatar, so the text fallback read as a smaller,
+ * cramped sibling of a resolved logo in the same column. The token path stays
+ * in rem via the size token's own variable, so a user-enlarged root font
+ * scales the initials with the disc.
+ */
+function fallbackFontSize(size: PandaSizeToken, sizePx?: number): string {
+  return sizePx !== undefined
+    ? `${Math.max(7, Math.round(sizePx * 0.4))}px`
+    : `max(7px, calc(var(--sizes-${size}) * 0.4))`;
+}
+
 export function LogoAvatar({
   alt,
   fallbackText,
   imageUrl,
+  fallbackImageUrl = null,
   isSelected = false,
   size = '5',
   sizePx,
   fallbackColor = 'text.default',
 }: LogoAvatarProps) {
-  const normalizedImageUrl = useMemo(() => imageUrl ?? null, [imageUrl]);
-  const [hasImageError, setHasImageError] = useState<boolean>(
-    normalizedImageUrl !== null && failedLogoUrls.has(normalizedImageUrl),
-  );
-
-  useEffect(() => {
-    if (!normalizedImageUrl) {
-      setHasImageError(true);
-      return;
-    }
-
-    setHasImageError(failedLogoUrls.has(normalizedImageUrl));
-  }, [normalizedImageUrl]);
+  // `failedLogoUrls` is a module-level cache, so mutations are invisible to
+  // React; this counter makes a load failure re-run the candidate pick.
+  const [failCount, setFailCount] = useState(0);
+  const activeImageUrl = useMemo(() => {
+    void failCount;
+    return (
+      [imageUrl, fallbackImageUrl].find(
+        (url): url is string => url != null && !failedLogoUrls.has(url),
+      ) ?? null
+    );
+  }, [imageUrl, fallbackImageUrl, failCount]);
 
   const sizingStyle = sizePx
     ? { width: `${sizePx}px`, height: `${sizePx}px` }
     : undefined;
 
-  const shouldRenderImage = normalizedImageUrl !== null && !hasImageError;
+  const shouldRenderImage = activeImageUrl !== null;
 
   return (
     <Avatar.Root
+      // The avatar machine arms its error tracking against the img element it
+      // starts with; keying on the URL pair restarts it when the pair changes
+      // (DataTable reuses row instances), so a swapped-in URL's failure is
+      // still seen, cached, and advanced past.
+      key={`${imageUrl ?? ''}|${fallbackImageUrl ?? ''}`}
       onStatusChange={(details: AvatarStatusChangeDetails) => {
-        if (details.status === 'error' && normalizedImageUrl) {
-          const isFirstFailure = !failedLogoUrls.has(normalizedImageUrl);
-          failedLogoUrls.add(normalizedImageUrl);
-          setHasImageError(true);
+        if (details.status === 'error' && activeImageUrl) {
+          const isFirstFailure = !failedLogoUrls.has(activeImageUrl);
+          failedLogoUrls.add(activeImageUrl);
+          setFailCount((count) => count + 1);
 
           if (!isFirstFailure) {
             return;
           }
 
           logging.warn('Logo image failed to load', {
-            imageUrl: normalizedImageUrl,
+            imageUrl: activeImageUrl,
             alt,
             fallbackText,
+            // True means the chain is exhausted and initials are terminal.
+            wasFallback: activeImageUrl === fallbackImageUrl,
           });
         }
       }}
@@ -110,19 +131,19 @@ export function LogoAvatar({
           alignItems: 'center',
           justifyContent: 'center',
           color: isSelected ? 'white' : fallbackColor,
-          fontSize: '2xs',
           fontWeight: 'semibold',
           lineHeight: '1',
           textAlign: 'center',
           userSelect: 'none',
         })}
+        style={{ fontSize: fallbackFontSize(size, sizePx) }}
       >
         {fallbackText}
       </Avatar.Fallback>
       {shouldRenderImage ? (
         <Avatar.Image
           alt={alt}
-          src={normalizedImageUrl}
+          src={activeImageUrl}
           className={css({
             width: 'full',
             height: 'full',

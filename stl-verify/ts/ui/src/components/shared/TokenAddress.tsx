@@ -19,7 +19,17 @@ type TokenAddressProps = {
   style?: React.CSSProperties;
   /** Optional custom className to override defaults */
   className?: string;
+  /**
+   * Sized to its text instead of a 44px tap target — for the second line of a
+   * dense table cell, where the full target doubles the apparent row gap.
+   */
+  compact?: boolean;
 };
+
+// Literal classes, not a token variable into css(): a computed value emits no
+// rule at all (see LogoAvatar's size map for the same trap).
+const compactHeightClassName = css({ minHeight: '6' });
+const tapTargetHeightClassName = css({ minHeight: '11' });
 
 /**
  * Truncates address with ellipsis in the middle for responsive layouts.
@@ -41,6 +51,7 @@ export function TokenAddress({
   type = 'address',
   style,
   className,
+  compact = false,
 }: TokenAddressProps) {
   const monoStyle: React.CSSProperties = {
     ...style,
@@ -56,7 +67,6 @@ export function TokenAddress({
   const triggerClassName = css({
     flex: '1 1 0',
     minWidth: '0',
-    minHeight: '11',
     fontFamily: 'mono',
     fontSize: type === 'tx' ? 'xs' : '2xs',
     color: 'text.link',
@@ -131,9 +141,13 @@ export function TokenAddress({
             type="button"
             title={address}
             style={monoStyle}
-            className={
-              className ? `${triggerClassName} ${className}` : triggerClassName
-            }
+            className={[
+              triggerClassName,
+              compact ? compactHeightClassName : tapTargetHeightClassName,
+              className,
+            ]
+              .filter(Boolean)
+              .join(' ')}
           >
             {truncateMiddle(address, 20)}
           </button>

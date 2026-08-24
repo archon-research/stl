@@ -20,6 +20,7 @@ import {
   formatMultiplier,
   formatPercentValue,
   formatRatioPercent,
+  formatUsdPrice,
   formatUsdValue,
   parseNumericValue,
 } from '../../../lib/dashboard';
@@ -119,7 +120,7 @@ function createRiskColumns(chainId: number | null): ColumnDef<RiskItem>[] {
       header: 'Price USD',
       accessorKey: 'price_usd',
       cell: (info: CellContext<RiskItem, unknown>) =>
-        formatUsdValue(info.getValue() as string | number | null | undefined),
+        formatUsdPrice(info.getValue() as string | number | null | undefined),
     },
     {
       id: 'amount_usd',
@@ -569,7 +570,7 @@ export function RiskBreakdownTab({
               isTokenMetaLoading
                 ? 'Loading...'
                 : tokenPrice
-                  ? formatUsdValue(tokenPrice.price_usd)
+                  ? formatUsdPrice(tokenPrice.price_usd)
                   : 'Unavailable'
             }
             detail={

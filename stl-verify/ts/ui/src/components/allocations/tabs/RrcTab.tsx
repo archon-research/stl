@@ -10,7 +10,6 @@ import { flex } from '#styled-system/patterns';
 
 import { getRrc } from '../../../lib/api';
 import {
-  type UsdTone,
   formatPercentValue,
   formatTokenAmount,
   formatUsdValue,
@@ -27,12 +26,7 @@ import type {
   Prime,
   Rrc,
 } from '../../../types/allocation';
-import {
-  ProtocolLogo,
-  StatusBadge,
-  SummaryMetric,
-  TokenLogo,
-} from '../../shared';
+import { ProtocolLogo, SummaryMetric, TokenLogo } from '../../shared';
 import { TabNotePanel, unindexedChainMessage } from './TabStatePanels';
 
 type RrcTabProps = {
@@ -48,15 +42,6 @@ const MODEL_LABELS: Record<string, string> = {
   suraf: 'SURAF',
   gap_sweep: 'Gap sweep',
   core_model: 'CORE',
-};
-
-// A map of finished class names rather than a tone-to-token-path helper: see
-// `lib/activity.tsx` for why Panda cannot extract the latter.
-const TONE_VALUE_COLOR_CLASS: Record<UsdTone, string> = {
-  green: css({ color: 'text.success' }),
-  yellow: css({ color: 'text.warning' }),
-  red: css({ color: 'text.critical' }),
-  neutral: css({ color: 'text.muted' }),
 };
 
 type ReferenceFigures = { crrPct: string | null; rrcUsd: string | null };
@@ -88,6 +73,175 @@ function referenceFigures(
     default:
       return null;
   }
+}
+
+/**
+ * Bands mirror `getUsdTone`'s thresholds — the meter is that function drawn
+ * out, so a reader sees what "Escalating" means: past the $1M band edge.
+ */
+const RRC_BAND_BOUNDS: readonly [number, number] = [1_000, 1_000_000];
+
+// The same role scale the old status pill drew from (`Badge`'s green/amber/red
+// palettes), so the meter and every other status hue in the app stay one
+// vocabulary: the value's band is `solid`, the others its `subtle` tint.
+const RRC_BANDS = [
+  {
+    tone: 'green',
+    label: 'Contained',
+    activeFill: css({ bg: 'green.solid.bg' }),
+    idleFill: css({ bg: 'green.subtle.bg' }),
+  },
+  {
+    tone: 'yellow',
+    label: 'Monitor',
+    activeFill: css({ bg: 'amber.solid.bg' }),
+    idleFill: css({ bg: 'amber.subtle.bg' }),
+  },
+  {
+    tone: 'red',
+    label: 'Escalating',
+    activeFill: css({ bg: 'red.solid.bg' }),
+    idleFill: css({ bg: 'red.subtle.bg' }),
+  },
+] as const;
+
+/**
+ * Each band spans a third of the track and the value falls within its band by
+ * orders of magnitude — a linear USD scale would flatten the first two bands
+ * into invisibility next to a $23M value. The red band caps at $1B.
+ */
+function rrcMeterFraction(value: number): number {
+  const [low, high] = RRC_BAND_BOUNDS;
+  if (value <= 0) {
+    return 0;
+  }
+  if (value <= low) {
+    return Math.log10(1 + value) / Math.log10(low + 1) / 3;
+  }
+  if (value <= high) {
+    return 1 / 3 + Math.log10(value / low) / Math.log10(high / low) / 3;
+  }
+  return Math.min(1, 2 / 3 + Math.log10(value / high) / 3 / 3);
+}
+
+const meterMarkerClassName = css({
+  position: 'absolute',
+  top: '100%',
+  transform: 'translateX(-50%)',
+  width: '0',
+  height: '0',
+  borderLeft: '5px solid transparent',
+  borderRight: '5px solid transparent',
+  borderBottom: '6px solid',
+  borderBottomColor: 'text.strong',
+});
+
+const meterTickClassName = css({
+  position: 'absolute',
+  bottom: '100%',
+  transform: 'translateX(-50%)',
+  display: 'grid',
+  justifyItems: 'center',
+  rowGap: '0.5',
+  pb: '0.5',
+  fontSize: '2xs',
+  color: 'text.muted',
+  whiteSpace: 'nowrap',
+});
+
+const meterTickLineClassName = css({
+  width: '1px',
+  height: '1.5',
+  bg: 'border.default',
+});
+
+function RrcBandMeter({ valueUsd }: { valueUsd: number }) {
+  const tone = getUsdTone(valueUsd);
+  const activeIndex = RRC_BANDS.findIndex((band) => band.tone === tone);
+  const valueText = formatUsdValue(valueUsd);
+
+  return (
+    <div
+      className={css({
+        borderRadius: 'md',
+        borderStyle: 'solid',
+        borderWidth: '1px',
+        borderColor: 'border.subtle',
+        p: '5',
+      })}
+    >
+      {/* The painted bands are decoration for the caption below, which carries
+          the value and (screen-reader-only) the band it falls in. */}
+      <div aria-hidden className={css({ position: 'relative', mt: '5' })}>
+        {/* Threshold ticks at the band edges, so the labels are calibrated. */}
+        {RRC_BAND_BOUNDS.map((bound, index) => (
+          <div
+            key={bound}
+            className={meterTickClassName}
+            style={{
+              insetInlineStart: `${((index + 1) / RRC_BANDS.length) * 100}%`,
+            }}
+          >
+            <span>{formatUsdValue(bound)}</span>
+            <span className={meterTickLineClassName} />
+          </div>
+        ))}
+        <div className={flex({ gap: '0.5' })}>
+          {RRC_BANDS.map((band, index) => (
+            <div
+              key={band.tone}
+              className={cx(
+                css({ height: '2.5', flex: '1' }),
+                index === 0 ? css({ borderLeftRadius: 'full' }) : undefined,
+                index === RRC_BANDS.length - 1
+                  ? css({ borderRightRadius: 'full' })
+                  : undefined,
+                index === activeIndex ? band.activeFill : band.idleFill,
+              )}
+            />
+          ))}
+        </div>
+        <div
+          className={meterMarkerClassName}
+          style={{ insetInlineStart: `${rrcMeterFraction(valueUsd) * 100}%` }}
+        />
+      </div>
+      <div aria-hidden className={flex({ mt: '2.5', gap: '0.5' })}>
+        {RRC_BANDS.map((band, index) => (
+          <span
+            key={band.tone}
+            className={cx(
+              css({
+                flex: '1',
+                textAlign: 'center',
+                fontSize: '2xs',
+                textTransform: 'uppercase',
+                letterSpacing: '0.08em',
+              }),
+              index === activeIndex
+                ? css({ color: 'text.strong', fontWeight: 'semibold' })
+                : css({ color: 'text.muted' }),
+            )}
+          >
+            {band.label}
+          </span>
+        ))}
+      </div>
+      <p
+        className={css({
+          m: 0,
+          mt: '1.5',
+          fontSize: 'sm',
+          color: 'text.muted',
+        })}
+      >
+        {valueText} max across models
+        <span className={css({ srOnly: true })}>
+          {` — ${RRC_BANDS[activeIndex]?.label ?? 'unbanded'}`}
+        </span>
+      </p>
+    </div>
+  );
 }
 
 function ResultRow({
@@ -245,23 +399,9 @@ export function RrcTab({
 
   const selectedModel = riskCapitalEntry?.model ?? null;
   const reference = showsReference ? referenceFigures(riskCapitalEntry) : null;
-
-  const tone = getUsdTone(rrc?.max_rrc_usd);
-  const maxRrcValue = parseNumericValue(rrc?.max_rrc_usd) ?? 0;
-  const hasRiskCapital = maxRrcValue > 0;
-
-  const statusLabel = useMemo(() => {
-    switch (tone) {
-      case 'green':
-        return 'Contained';
-      case 'yellow':
-        return 'Monitor';
-      case 'neutral':
-        return 'Unavailable';
-      default:
-        return 'Escalating';
-    }
-  }, [tone]);
+  // Sky's figure is the one every display prefers when it exists, so its row
+  // carries the badge; a model row is "selected" only when Sky reports nothing.
+  const skySelected = reference !== null;
 
   if (!selectedReceiptToken) {
     return (
@@ -298,49 +438,6 @@ export function RrcTab({
 
   return (
     <div className={css({ display: 'grid', gap: '4' })}>
-      <div
-        className={css({
-          borderRadius: 'md',
-          borderStyle: 'solid',
-          borderWidth: '1px',
-          borderColor: 'border.subtle',
-          bg: 'surface.subtle',
-          p: '4',
-        })}
-      >
-        <div
-          className={flex({
-            align: 'flex-start',
-            justify: 'space-between',
-            gap: '4',
-            wrap: 'wrap',
-          })}
-        >
-          <div className={css({ display: 'grid', gap: '2' })}>
-            <p
-              className={css({
-                m: 0,
-                fontSize: 'xs',
-                textTransform: 'uppercase',
-                letterSpacing: '0.16em',
-                color: 'text.muted',
-              })}
-            >
-              Required risk capital (RRC)
-            </p>
-            {isLoading ? (
-              <SkeletonStack
-                count={1}
-                itemHeight={16}
-                className={css({ width: '32' })}
-              />
-            ) : null}
-          </div>
-
-          <StatusBadge tone={tone} label={statusLabel} />
-        </div>
-      </div>
-
       {errorMessage ? (
         <ErrorState
           title="Unable to compute required risk capital."
@@ -404,62 +501,11 @@ export function RrcTab({
         </div>
       ) : null}
 
-      {!errorMessage ? (
-        <div
-          className={css({
-            borderRadius: 'md',
-            borderStyle: 'solid',
-            borderWidth: '1px',
-            borderColor: 'border.subtle',
-            bg: 'surface.default',
-            p: '5',
-          })}
-        >
-          <p
-            className={css({
-              m: 0,
-              fontSize: 'xs',
-              textTransform: 'uppercase',
-              letterSpacing: '0.16em',
-              color: 'text.muted',
-            })}
-          >
-            Max required risk capital across models
-          </p>
-          <p
-            className={cx(
-              css({
-                m: 0,
-                mt: '3',
-                fontSize: { base: '3xl', md: '4xl' },
-                fontWeight: 'semibold',
-              }),
-              TONE_VALUE_COLOR_CLASS[tone],
-            )}
-          >
-            {rrc ? formatUsdValue(rrc.max_rrc_usd) : '—'}
-          </p>
-          {isLoading && !rrc ? (
-            <div className={css({ mt: '3' })}>
-              <SkeletonStack count={2} itemHeight={14} />
-            </div>
-          ) : (
-            <p
-              className={css({
-                m: 0,
-                mt: '2',
-                fontSize: 'sm',
-                color: 'text.muted',
-              })}
-            >
-              {rrc
-                ? hasRiskCapital
-                  ? `Max comparable capital ratio: ${formatPercentValue(rrc.max_crr_pct, 2)}.`
-                  : 'Models report no required risk capital at default stress.'
-                : 'Pick a prime and receipt token to compute required risk capital.'}
-            </p>
-          )}
-        </div>
+      {!errorMessage && isLoading && !rrc ? (
+        <SkeletonStack count={2} itemHeight={12} />
+      ) : null}
+      {!errorMessage && rrc ? (
+        <RrcBandMeter valueUsd={parseNumericValue(rrc.max_rrc_usd) ?? 0} />
       ) : null}
 
       {!errorMessage && rrc && rrc.results.length > 0 ? (
@@ -498,7 +544,7 @@ export function RrcTab({
             {rrc.results.map((result) => (
               <ResultRow
                 key={result.risk_model}
-                isSelected={result.risk_model === selectedModel}
+                isSelected={!skySelected && result.risk_model === selectedModel}
                 label={MODEL_LABELS[result.risk_model] ?? result.risk_model}
                 value={`${formatUsdValue(result.rrc_usd)} · CRR ${formatPercentValue(result.comparable_crr_pct, 2)}`}
               />
@@ -507,6 +553,7 @@ export function RrcTab({
                 outputs, and Sky's figures disagree with STL's by design. */}
             {reference ? (
               <ResultRow
+                isSelected={skySelected}
                 label="Sky published figure"
                 value={`${formatUsdValue(reference.rrcUsd)} · CRR ${formatPercentValue(reference.crrPct, 2)}`}
               />

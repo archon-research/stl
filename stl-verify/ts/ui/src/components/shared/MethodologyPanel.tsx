@@ -20,7 +20,7 @@ import {
 import {
   formatDateTime,
   formatFreshnessLabel,
-  formatUsdValue,
+  formatUsdPrice,
 } from '../../lib/dashboard';
 import { isAbortError, toErrorMessage } from '../../lib/errors';
 import { logging } from '../../lib/logging';
@@ -390,7 +390,7 @@ export function MethodologyPanel({
                     <div>
                       {tokenPrice.is_stale || tokenPrice.price_usd == null
                         ? 'Price unavailable'
-                        : formatUsdValue(tokenPrice.price_usd)}
+                        : formatUsdPrice(tokenPrice.price_usd)}
                     </div>
                     {!tokenPrice.is_stale && (
                       <>
