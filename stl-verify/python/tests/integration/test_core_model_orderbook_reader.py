@@ -10,8 +10,6 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.adapters.postgres.core_model_orderbook_reader import PostgresOrderbookReader
 
-pytestmark = pytest.mark.anyio
-
 
 @pytest.fixture()
 async def engine(async_db_url: str):
