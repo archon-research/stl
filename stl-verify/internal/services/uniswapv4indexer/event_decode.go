@@ -321,23 +321,11 @@ func (d *receiptDecoder) buildSwap(data map[string]any, pool RegisteredPool, sit
 }
 
 func (d *receiptDecoder) buildLiquidityEvent(data map[string]any, pool RegisteredPool, site logSite) (*entity.UniswapV4LiquidityEvent, error) {
-	fields, err := bigIntFields(data, "tickLower", "tickUpper", "liquidityDelta")
+	key, err := modifyLiquidityKey(data)
 	if err != nil {
 		return nil, err
 	}
-	sender, err := shared.GetAddrField(data, "sender")
-	if err != nil {
-		return nil, err
-	}
-	salt, err := shared.GetHashField(data, "salt")
-	if err != nil {
-		return nil, err
-	}
-	tickLower, err := int24Value("tickLower", fields["tickLower"])
-	if err != nil {
-		return nil, err
-	}
-	tickUpper, err := int24Value("tickUpper", fields["tickUpper"])
+	liquidityDelta, err := shared.GetBigIntField(data, "liquidityDelta")
 	if err != nil {
 		return nil, err
 	}
@@ -349,11 +337,11 @@ func (d *receiptDecoder) buildLiquidityEvent(data map[string]any, pool Registere
 		BlockTimestamp: d.ts,
 		TxHash:         site.txHash,
 		LogIndex:       int(site.logIndex),
-		Sender:         sender,
-		TickLower:      tickLower,
-		TickUpper:      tickUpper,
-		LiquidityDelta: fields["liquidityDelta"],
-		Salt:           salt,
+		Sender:         key.Owner,
+		TickLower:      key.TickLower,
+		TickUpper:      key.TickUpper,
+		LiquidityDelta: liquidityDelta,
+		Salt:           key.Salt,
 	}
 	if err := e.Validate(); err != nil {
 		return nil, fmt.Errorf("validating ModifyLiquidity: %w", err)
