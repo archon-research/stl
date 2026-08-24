@@ -486,6 +486,10 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
             value={entry.value}
             breach="above"
             stroke={entry.stroke}
+            // The dashed line alone marks the limit: the default breach fill
+            // shaded everything above it, which on a small card read as the
+            // chart being mostly "in breach" even at a healthy ratio.
+            fill="transparent"
           />
         ))}
         <ThresholdLabels thresholds={thresholds} />

@@ -1,6 +1,7 @@
+import { ExternalLink } from 'lucide-react';
 import type { ReactNode } from 'react';
 
-import { css } from '#styled-system/css';
+import { css, cx } from '#styled-system/css';
 
 import {
   type EncumbranceSeverity,
@@ -72,6 +73,8 @@ type PrimeMetricsBandProps = {
     wad: string | null | undefined;
     ilkLabel: string | null;
     isLoading: boolean;
+    /** Explorer page of the proxy the debt is read for; null hides the link. */
+    explorerUrl: string | null;
   };
   charts: BandCharts;
   isChartsLoading: boolean;
@@ -304,12 +307,17 @@ function PrimeCollateralCard({
   );
 }
 
-// Low and high are distinct tones: the Atlas treats them as different breaches
-// with separately measured durations, so one colour for both would flatten that.
-const encumbranceCaptionTone: Record<EncumbranceSeverity, string> = {
-  none: 'text.muted',
-  low: 'text.warning',
-  high: 'text.critical',
+// Each band its own tone: the Atlas treats the two breaches as distinct, and
+// the pre-breach bands split into healthy and a warning approach to 100%.
+// `identity.8` is the chart set's orange, sitting between amber and red just
+// as the low breach sits between the warning band and the high breach.
+// Finished class names, not token paths through a variable: Panda cannot
+// extract a token handed to css() at runtime (see lib/activity.tsx).
+const encumbranceCaptionToneClass: Record<EncumbranceSeverity, string> = {
+  healthy: css({ color: 'text.success' }),
+  'at-risk': css({ color: 'text.warning' }),
+  low: css({ color: 'identity.8' }),
+  high: css({ color: 'text.critical' }),
 };
 
 function EncumbranceCard({
@@ -328,15 +336,15 @@ function EncumbranceCard({
   return (
     <SummaryMetric
       className={metricsCardClassName}
-      label="Encumbrance"
+      label="Encumbrance ratio"
       value={formatRatioPercent(ratio)}
       detail={
         <div className={metricDetailClassName}>
           <div
-            className={css({
-              fontSize: 'sm',
-              color: encumbranceCaptionTone[severity],
-            })}
+            className={cx(
+              css({ fontSize: 'sm' }),
+              encumbranceCaptionToneClass[severity],
+            )}
           >
             {caption}
           </div>
@@ -377,6 +385,7 @@ const debtCaptionClassName = css({
 function PrimeDebtCard({
   wad,
   ilkLabel,
+  explorerUrl,
   isLoading,
   chart,
   isChartsLoading,
@@ -384,6 +393,7 @@ function PrimeDebtCard({
 }: {
   wad: string | null | undefined;
   ilkLabel: string | null;
+  explorerUrl: string | null;
   isLoading: boolean;
   chart: MetricChartSpec | null;
   isChartsLoading: boolean;
@@ -423,6 +433,25 @@ function PrimeDebtCard({
                 }
                 content={wad ? `Exact raw WAD: ${wad}` : 'Raw WAD unavailable'}
               />
+              {explorerUrl === null ? null : (
+                // Beside the tooltip rather than inside it: hover content
+                // dismisses on pointer-leave, so a link there is unclickable.
+                <a
+                  href={explorerUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  aria-label="View the proxy wallet on the block explorer"
+                  title="View the proxy wallet on the block explorer"
+                  className={css({
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    color: 'text.link',
+                    _hover: { color: 'text.interactive' },
+                  })}
+                >
+                  <ExternalLink size={12} />
+                </a>
+              )}
             </div>
             <MetricCardTrend
               chart={chart}
@@ -549,6 +578,7 @@ export function PrimeMetricsBand({
         <PrimeDebtCard
           wad={debt.wad}
           ilkLabel={debt.ilkLabel}
+          explorerUrl={debt.explorerUrl}
           isLoading={debt.isLoading}
           chart={charts.debt}
           isChartsLoading={isChartsLoading}

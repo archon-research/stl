@@ -17,7 +17,6 @@ import { flex } from '#styled-system/patterns';
 import { getActionColorClass, getActionIcon } from '../../lib/activity';
 import {
   type ChainLabelLookup,
-  ENCUMBRANCE_LOW_SEVERITY_THRESHOLD,
   encumbranceSeverity,
   formatDateTime,
   formatFreshnessLabel,
@@ -27,6 +26,7 @@ import {
   formatUsdValue,
   getAllocationKey,
   getCategoryLabel,
+  getExplorerUrl,
   getChainLabel,
   getProtocolLabel,
   parseNumericValue,
@@ -533,6 +533,7 @@ function AllocationRiskCapitalCell({
 
   return (
     <p
+      title={riskProvenanceTitle(risk)}
       className={css({
         m: 0,
         fontSize: 'sm',
@@ -543,6 +544,24 @@ function AllocationRiskCapitalCell({
       {formatUsdValue(risk.riskCapitalUsd)}
     </p>
   );
+}
+
+/**
+ * A tooltip, not a chip: under the composite view Sky's figure wins wherever
+ * it reports one, so a visible marker would land on most rows and stop
+ * marking anything (the same reason the Asset column badges only Sky-only
+ * rows). Sky computes CRR against its own exposure figure, which is why it
+ * is spelled out — RRC over the Exposure column's (STL's) number will not
+ * reproduce the ratio when the two provenances price the position apart.
+ */
+function riskProvenanceTitle(risk: AllocationGridRow['risk']): string {
+  if (!risk.fromReference) {
+    return 'STL model figure';
+  }
+  const skyExposure = parseNumericValue(risk.entry?.exposure_usd);
+  return skyExposure === null
+    ? "Sky's published figure"
+    : `Sky's published figure, against Sky's exposure of ${formatUsdValue(skyExposure)}`;
 }
 
 /**
@@ -588,6 +607,8 @@ type AllocationGridRow = Allocation & {
     state: RiskFetchState;
     entry: AllocationRiskCapital | undefined;
     chainMismatch: boolean;
+    /** True when the figures shown are Sky's published values, not STL's model. */
+    fromReference: boolean;
     riskCapitalUsd: number | null;
     crrPct: number | null;
     sharePct: number | null;
@@ -608,6 +629,12 @@ function toAllocationGridRow(
       state: riskFetchState,
       entry,
       chainMismatch: isRiskCapitalChainMismatch(selectedPrime, allocation),
+      // Mirrors preferReference: Sky's figure is used when its side is
+      // populated (composite) or when the whole response is Sky's.
+      fromReference:
+        entry !== undefined &&
+        (entry.source === 'reference' ||
+          entry.reference_required_risk_capital_usd != null),
       riskCapitalUsd: appliedRiskCapitalUsd(entry),
       crrPct: preferredCrrPct(entry),
       sharePct: rrcSharePct(entry, totalRequiredRiskCapitalUsd),
@@ -720,6 +747,7 @@ function createAllocationColumns(
           }
           format={formatPercentValue}
           state={row.original.risk.state}
+          title={riskProvenanceTitle(row.original.risk)}
         />
       ),
       meta: {
@@ -750,6 +778,7 @@ function createAllocationColumns(
           }
           format={formatRatioPercent}
           state={row.original.risk.state}
+          title={riskProvenanceTitle(row.original.risk)}
         />
       ),
       meta: {
@@ -772,10 +801,12 @@ function AllocationRatioCell({
   value,
   format,
   state,
+  title,
 }: {
   value: number | null;
   format: (value: number | null) => string;
   state: RiskFetchState;
+  title?: string;
 }) {
   const unsettled = riskFetchPlaceholder(state);
   if (unsettled) {
@@ -791,6 +822,7 @@ function AllocationRatioCell({
 
   return (
     <p
+      title={title}
       className={css({
         m: 0,
         fontSize: 'sm',
@@ -1079,12 +1111,14 @@ export function AllocationGrid({
     if (encumbranceBreach === 'low') {
       return 'Low severity breach';
     }
-    // A bounded numerator understates the ratio, so "within" is a floor here
-    // rather than a measurement — worth saying on a surface read for breaches.
+    const label = encumbranceBreach === 'at-risk' ? 'At risk' : 'Healthy';
+    // A bounded numerator understates the ratio, so a non-breach read is a
+    // floor here rather than a measurement — worth saying on a surface read
+    // for breaches.
     if (unservedChains.length > 0) {
-      return `At least this, with ${unservedChains.length} chain${unservedChains.length === 1 ? '' : 's'} unserved`;
+      return `${label} — at least this, with ${unservedChains.length} chain${unservedChains.length === 1 ? '' : 's'} unserved`;
     }
-    return `Within the ${formatRatioPercent(ENCUMBRANCE_LOW_SEVERITY_THRESHOLD, 0)} breach level`;
+    return label;
   })();
 
   return (
@@ -1246,6 +1280,13 @@ export function AllocationGrid({
             severity: encumbranceBreach,
           }}
           debt={{
+            explorerUrl: selectedPrime
+              ? getExplorerUrl(
+                  selectedPrime.chain_id,
+                  selectedPrime.address,
+                  'address',
+                )
+              : null,
             wad: debtWad,
             ilkLabel: debtIlkLabel,
             isLoading: isPrimeDebtLoading,
@@ -1276,6 +1317,19 @@ export function AllocationGrid({
               <>
                 Reported by Sky&apos;s Star Agents Risk Capital &amp;
                 Requirements Monitor · not STL&apos;s model
+              </>
+            ) : riskCapital.source === 'both' ? (
+              // The displays prefer Sky's figure wherever it reports one, so a
+              // bare "model-derived" here would claim STL's model produced
+              // numbers it did not. The modeled share still describes STL's
+              // model alone.
+              <>
+                Sky&apos;s published figures where reported, else model-derived
+                ({riskCapital.model}, 15% stress) ·{' '}
+                {parseNumericValue(riskCapital.prime_modeled_pct) !== null
+                  ? formatRatioPercent(riskCapital.prime_modeled_pct)
+                  : 'partial'}{' '}
+                of exposure modeled by STL
               </>
             ) : (
               <>
