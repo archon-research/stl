@@ -261,6 +261,7 @@ function AllocationExposureCell({ allocation }: { allocation: Allocation }) {
         <TokenLogo
           address={allocation.receipt_token_address}
           chainId={allocation.chain_id}
+          protocolName={allocation.protocol_name}
           size="6"
           symbol={allocation.symbol}
         />
@@ -548,13 +549,52 @@ function AllocationRiskCapitalCell({
   );
 }
 
-function createAllocationColumns(
-  chainLabels: ChainLabelLookup,
-  localProtocols: LocalProtocolRow[],
+/**
+ * A grid row carries its risk figures as data rather than having the column
+ * accessors look them up: TanStack caches `row.getValue` per row for the
+ * lifetime of a `data` identity, so a lookup through a column closure freezes
+ * at whatever the map held when a value was first read — risk capital arrives
+ * after the allocations, and sorting by CRR ordered the stale nulls while the
+ * cells (re-rendered with the fresh closure) showed real figures. Deriving the
+ * figures into the rows makes risk arrival a `data` change, which is the one
+ * signal TanStack rebuilds its caches on.
+ */
+type AllocationGridRow = Allocation & {
+  risk: {
+    entry: AllocationRiskCapital | undefined;
+    chainMismatch: boolean;
+    riskCapitalUsd: number | null;
+    crrPct: number | null;
+    sharePct: number | null;
+  };
+};
+
+function toAllocationGridRow(
+  allocation: Allocation,
   riskByPositionKey: Map<string, AllocationRiskCapital>,
   selectedPrime: Prime | null,
   totalRequiredRiskCapitalUsd: number | null,
-): ColumnDef<Allocation>[] {
+): AllocationGridRow {
+  return {
+    ...allocation,
+    risk: {
+      entry: lookupAllocationRiskCapital(riskByPositionKey, allocation),
+      chainMismatch: isRiskCapitalChainMismatch(selectedPrime, allocation),
+      riskCapitalUsd: appliedRiskCapitalUsd(riskByPositionKey, allocation),
+      crrPct: preferredCrrPct(riskByPositionKey, allocation),
+      sharePct: rrcSharePct(
+        riskByPositionKey,
+        allocation,
+        totalRequiredRiskCapitalUsd,
+      ),
+    },
+  };
+}
+
+function createAllocationColumns(
+  chainLabels: ChainLabelLookup,
+  localProtocols: LocalProtocolRow[],
+): ColumnDef<AllocationGridRow>[] {
   return [
     {
       id: 'symbol',
@@ -623,16 +663,13 @@ function createAllocationColumns(
       // tying with them, since it isn't a real zero — it's a figure this
       // session never fetched.
       accessorFn: (allocation) =>
-        isRiskCapitalChainMismatch(selectedPrime, allocation)
+        allocation.risk.chainMismatch
           ? -1
-          : (appliedRiskCapitalUsd(riskByPositionKey, allocation) ?? 0),
+          : (allocation.risk.riskCapitalUsd ?? 0),
       cell: ({ row }) => (
         <AllocationRiskCapitalCell
-          entry={lookupAllocationRiskCapital(riskByPositionKey, row.original)}
-          isChainMismatch={isRiskCapitalChainMismatch(
-            selectedPrime,
-            row.original,
-          )}
+          entry={row.original.risk.entry}
+          isChainMismatch={row.original.risk.chainMismatch}
         />
       ),
       // No bar for n/a or chain-mismatched rows: NaN suppresses it (see
@@ -641,9 +678,9 @@ function createAllocationColumns(
         magnitude: {
           scale: 'linear',
           getValue: (allocation) =>
-            isRiskCapitalChainMismatch(selectedPrime, allocation)
+            allocation.risk.chainMismatch
               ? NaN
-              : (appliedRiskCapitalUsd(riskByPositionKey, allocation) ?? NaN),
+              : (allocation.risk.riskCapitalUsd ?? NaN),
           getValueText: () => null,
         },
         // Single-value USD cell, so the column can take mono + tabular figures
@@ -657,42 +694,37 @@ function createAllocationColumns(
       header: 'CRR',
       // A row with no ratio sorts below a genuine 0% rather than tying with it.
       accessorFn: (allocation) =>
-        isRiskCapitalChainMismatch(selectedPrime, allocation)
-          ? -1
-          : (preferredCrrPct(riskByPositionKey, allocation) ?? -1),
+        allocation.risk.chainMismatch ? -1 : (allocation.risk.crrPct ?? -1),
       cell: ({ row }) => (
         <AllocationRatioCell
           value={
-            isRiskCapitalChainMismatch(selectedPrime, row.original)
-              ? null
-              : preferredCrrPct(riskByPositionKey, row.original)
+            row.original.risk.chainMismatch ? null : row.original.risk.crrPct
           }
           format={formatPercentValue}
         />
       ),
-      meta: { mono: true, align: 'right' },
+      meta: {
+        magnitude: {
+          scale: 'linear',
+          getValue: (allocation) =>
+            allocation.risk.chainMismatch
+              ? NaN
+              : (allocation.risk.crrPct ?? NaN),
+          getValueText: () => null,
+        },
+        mono: true,
+        align: 'right',
+      },
     },
     {
       id: 'rrc_share',
       header: 'RRC share',
       accessorFn: (allocation) =>
-        isRiskCapitalChainMismatch(selectedPrime, allocation)
-          ? -1
-          : (rrcSharePct(
-              riskByPositionKey,
-              allocation,
-              totalRequiredRiskCapitalUsd,
-            ) ?? -1),
+        allocation.risk.chainMismatch ? -1 : (allocation.risk.sharePct ?? -1),
       cell: ({ row }) => (
         <AllocationRatioCell
           value={
-            isRiskCapitalChainMismatch(selectedPrime, row.original)
-              ? null
-              : rrcSharePct(
-                  riskByPositionKey,
-                  row.original,
-                  totalRequiredRiskCapitalUsd,
-                )
+            row.original.risk.chainMismatch ? null : row.original.risk.sharePct
           }
           format={formatRatioPercent}
         />
@@ -701,13 +733,9 @@ function createAllocationColumns(
         magnitude: {
           scale: 'linear',
           getValue: (allocation) =>
-            isRiskCapitalChainMismatch(selectedPrime, allocation)
+            allocation.risk.chainMismatch
               ? NaN
-              : (rrcSharePct(
-                  riskByPositionKey,
-                  allocation,
-                  totalRequiredRiskCapitalUsd,
-                ) ?? NaN),
+              : (allocation.risk.sharePct ?? NaN),
           getValueText: () => null,
         },
         mono: true,
@@ -912,22 +940,28 @@ export function AllocationGrid({
     [riskCapital],
   );
 
-  const columns = useMemo<ColumnDef<Allocation>[]>(
+  // A new array when risk data lands, deliberately: see AllocationGridRow.
+  const gridRows = useMemo<AllocationGridRow[]>(
     () =>
-      createAllocationColumns(
-        chainLabels,
-        localProtocols,
-        riskByPositionKey,
-        selectedPrime,
-        totalRequiredRiskCapitalUsd,
+      filteredAllocations.map((allocation) =>
+        toAllocationGridRow(
+          allocation,
+          riskByPositionKey,
+          selectedPrime,
+          totalRequiredRiskCapitalUsd,
+        ),
       ),
     [
-      chainLabels,
-      localProtocols,
+      filteredAllocations,
       riskByPositionKey,
       selectedPrime,
       totalRequiredRiskCapitalUsd,
     ],
+  );
+
+  const columns = useMemo<ColumnDef<AllocationGridRow>[]>(
+    () => createAllocationColumns(chainLabels, localProtocols),
+    [chainLabels, localProtocols],
   );
 
   // Explicit hints replace DataTable's meta-derived ones wholesale, so they are
@@ -944,7 +978,7 @@ export function AllocationGrid({
     [columns],
   );
 
-  const table = useDataTable(filteredAllocations, columns, {
+  const table = useDataTable(gridRows, columns, {
     enableSorting: true,
     onSortingChange,
     sorting,
