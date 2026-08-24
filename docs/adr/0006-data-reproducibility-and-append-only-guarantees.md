@@ -85,8 +85,52 @@ with approval fields, and `manifest_hash` is the hook for signing/anchoring.
 ### 1. Data and reference tables are append-only, and Postgres enforces it
 
 Applies to every table classified `raw_pipeline`, `dimension` or `config` in
-`data_quality/schemamaster/schema_master.json` (the latter two are reference tables, §4). Operational tables (`block_states`, queues,
-watermarks, transform queues) are exempt.
+`data_quality/schemamaster/schema_master.json` (the latter two are reference tables, §4).
+Operational tables (schemamaster type `infrastructure`: `block_states`, `backfill_watermark`,
+`reorg_events`, queues and transform queues) are exempt — criteria and rationale below.
+
+**Scope.** The disciplines in this ADR — append-only (§1), `run_id`/`ingest_xid` columns
+(§2/§5), caller-assigned `processing_version` (§3), recipe delivery (§8) — apply to every
+table whose content can affect a calculation output or a served data point, at write time or
+at replay. By class:
+
+- **Facts** (`raw_pipeline`): what happened on-chain, or what an off-chain source returned.
+- **Reference tables** (`dimension`, `config`, plus the enrichment and `ref_*` vocabulary
+  tables brought under governance below): content that decides which rows a reader uses (§4).
+- **Read models** (`transformed.*`): derived, but a calculation input surface once converted
+  to append-only (§1/§7) — derived data is governed whenever calculations read it instead of
+  the raw tables.
+- **Provenance** (`build_registry`, `writer_run`, `processing_version_log`, calculation
+  records): insert-only by design and governed regardless of schemamaster classification
+  (`build_registry` is typed `infrastructure` today) — a mutable provenance row would
+  silently change what a recipe or manifest resolves to (PRD PR-2.6).
+
+**Exemption criteria.** A table may be exempt from governance only if all three hold:
+
+1. **No calculation or served data point ever reads it.** Enforced by the schemamaster lint
+   on calculation SQL (Threats, first row), not by convention.
+2. **Its content is coordination state, not evidence.** It records where the machinery is —
+   a watermark, a queue entry, an orphan flag — and everything evidentiary that passes
+   through it lands in a governed table as rows. A reorg, for example, becomes
+   `block_version`'d corrective rows in the governed tables (VEC-553); no reader ever joins
+   to `block_states.is_orphaned` to decide canonicality.
+3. **Its state is derivable or disposable.** It could be reconstructed from governed data
+   (a watermark is in essence `MAX(block)` over what was ingested) or is worthless once
+   consumed (a queue entry), so retaining its history would add storage and write-path cost
+   with zero reproducibility gain.
+
+The third point is also *why* operational tables are exempt rather than governed defensively:
+they must mutate to function (a watermark advances in place, a queue deletes processed
+entries, `block_states.is_orphaned` flips on reorg and the table carries 30-day retention).
+Making them append-only would buy nothing — nothing downstream reads them at replay — while
+costing unbounded growth on the hottest small tables. The reproducibility claim never rests
+on them: it rests on governed rows plus the calculation record (§5/§6).
+
+Exemption is explicit, never a default: a table is exempt by being classified
+`infrastructure` in `schema_master.json`. An unclassified table is a governance gap to be
+closed (next paragraph), not an implicit exemption; and if a calculation path ever needs
+something an operational table knows, the fix is to write that fact into a governed table,
+never to read across the boundary.
 
 Governance must be **complete** to mean anything: the 36 tables currently in schemamaster's
 `ignore_tables` — the `curve_*` and `uniswap_v3_*` pipelines, the enrichment layer
