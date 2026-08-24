@@ -37,12 +37,14 @@ _DEFAULT_INTERVAL_HOURS = "24"
 
 
 def _configure_logging() -> None:
-    # The harness, service and model all log under app.* — setup_logging gives
-    # them the repo's JSON shape (logger name included) so Loki can tell a
-    # harness line from a model line. cli.* falls through to the root handler,
-    # which at minimum must carry %(name)s for the same reason.
-    setup_logging()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    # One config for both trees this process logs under (harness/service/model
+    # log under app.*, this entry point under cli.*), so every line in the pod
+    # has the repo's shape and LOG_LEVEL/LOG_FORMAT work like they do for the API.
+    setup_logging(
+        os.getenv("LOG_LEVEL", "INFO"),
+        os.getenv("LOG_FORMAT", "json"),
+        logger_names=("app", "cli"),
+    )
 
 
 def _market_key() -> str:

@@ -52,11 +52,18 @@ class TextFormatter(logging.Formatter):
         return base
 
 
-def setup_logging(log_level: str = "INFO", log_format: str = "json") -> None:
-    """Configure the application logger tree.
+def setup_logging(
+    log_level: str = "INFO",
+    log_format: str = "json",
+    logger_names: tuple[str, ...] = (_APP_LOGGER_NAME,),
+) -> None:
+    """Configure the given logger trees with one shared formatter.
 
-    Only touches the ``app`` logger — leaves the root logger (and any
-    Uvicorn/Gunicorn/platform handlers) untouched.
+    Never touches the root logger (Uvicorn/Gunicorn/platform handlers stay
+    theirs). The API configures the default ``app`` tree; a worker entry point
+    passes its own tree too (``("app", "cli")``) so every line in the pod
+    shares one format — two formats in one stdout stream is a Loki parsing
+    problem.
     """
     level = log_level.upper()
     level_names = logging.getLevelNamesMapping()
@@ -70,14 +77,14 @@ def setup_logging(log_level: str = "INFO", log_format: str = "json") -> None:
     else:
         formatter = JsonFormatter()
 
-    handler = logging.StreamHandler()
-    handler.setFormatter(formatter)
-
-    app_logger = logging.getLogger(_APP_LOGGER_NAME)
-    app_logger.setLevel(level)
-    app_logger.handlers.clear()
-    app_logger.addHandler(handler)
-    app_logger.propagate = False
+    for name in logger_names:
+        handler = logging.StreamHandler()
+        handler.setFormatter(formatter)
+        tree_logger = logging.getLogger(name)
+        tree_logger.setLevel(level)
+        tree_logger.handlers.clear()
+        tree_logger.addHandler(handler)
+        tree_logger.propagate = False
 
 
 def get_logger(name: str) -> logging.Logger:

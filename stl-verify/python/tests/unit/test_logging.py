@@ -130,6 +130,19 @@ class TestSetupLogging:
 
         assert root.handlers == original_handlers
 
+    def test_setup_logging_configures_every_requested_tree_identically(self) -> None:
+        # A worker process logs under app.* (harness/service/model) and cli.*
+        # (its entry point); both trees must share one format or the pod emits
+        # two shapes into one stdout stream.
+        setup_logging(log_level="DEBUG", log_format="json", logger_names=("app", "cli"))
+
+        for name in ("app", "cli"):
+            tree_logger = logging.getLogger(name)
+            assert tree_logger.level == logging.DEBUG
+            assert len(tree_logger.handlers) == 1
+            assert isinstance(tree_logger.handlers[0].formatter, JsonFormatter)
+            assert tree_logger.propagate is False
+
 
 class TestGetLogger:
     def test_get_logger_returns_named_logger(self) -> None:
