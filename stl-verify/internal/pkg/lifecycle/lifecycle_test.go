@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"slices"
 	"testing"
 	"time"
 )
@@ -36,6 +37,13 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+func assertCalls(t *testing.T, got, want []string) {
+	t.Helper()
+	if !slices.Equal(got, want) {
+		t.Fatalf("call order = %v, want %v", got, want)
+	}
+}
+
 func TestRun_StopsServicesInReverseStartOrder(t *testing.T) {
 	var calls []string
 	first := &fakeService{name: "first", calls: &calls}
@@ -49,14 +57,7 @@ func TestRun_StopsServicesInReverseStartOrder(t *testing.T) {
 	}
 
 	want := []string{"start:first", "start:second", "stop:second", "stop:first"}
-	if len(calls) != len(want) {
-		t.Fatalf("call order = %v, want %v", calls, want)
-	}
-	for i := range want {
-		if calls[i] != want[i] {
-			t.Fatalf("call order = %v, want %v", calls, want)
-		}
-	}
+	assertCalls(t, calls, want)
 }
 
 func TestRun_ReturnsStartErrorNamingTheService(t *testing.T) {
@@ -72,6 +73,20 @@ func TestRun_ReturnsStartErrorNamingTheService(t *testing.T) {
 	if got := err.Error(); got != "starting *lifecycle.fakeService: boom" {
 		t.Fatalf("error = %q, want the service type named", got)
 	}
+}
+
+func TestRun_StopsAlreadyStartedServicesWhenAStartFails(t *testing.T) {
+	var calls []string
+	boom := errors.New("boom")
+	started := &fakeService{name: "started", calls: &calls}
+	failing := &fakeService{name: "failing", calls: &calls, startErr: boom}
+
+	if err := Run(context.Background(), discardLogger(), started, failing); !errors.Is(err, boom) {
+		t.Fatalf("error = %v, want it to wrap %v", err, boom)
+	}
+
+	want := []string{"start:started", "start:failing", "stop:started"}
+	assertCalls(t, calls, want)
 }
 
 func TestRun_ReturnsErrShutdownTimedOutWhenStopHangs(t *testing.T) {

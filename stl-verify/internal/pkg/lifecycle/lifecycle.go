@@ -40,7 +40,7 @@ func Run(ctx context.Context, logger *slog.Logger, services ...Service) error {
 // run carries the timeout as a parameter so the tests do not have to wait
 // ShutdownTimeout to exercise the deadline branch.
 func run(ctx context.Context, logger *slog.Logger, timeout time.Duration, services []Service) error {
-	if err := start(ctx, services); err != nil {
+	if err := start(ctx, services, logger); err != nil {
 		return err
 	}
 
@@ -65,9 +65,13 @@ func run(ctx context.Context, logger *slog.Logger, timeout time.Duration, servic
 	}
 }
 
-func start(ctx context.Context, services []Service) error {
-	for _, service := range services {
+// start unwinds the services it already started when a later one fails: the
+// caller is about to close the pool, cache and event sink those services are
+// still reading and writing through.
+func start(ctx context.Context, services []Service, logger *slog.Logger) error {
+	for i, service := range services {
 		if err := service.Start(ctx); err != nil {
+			stopAll(services[:i], logger)
 			return fmt.Errorf("starting %T: %w", service, err)
 		}
 	}
