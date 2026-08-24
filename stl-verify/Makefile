@@ -804,6 +804,15 @@ dev-env-files:
 		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:$(KIND_HOST_PG_PORT)/stl_verify?sslmode=disable" \
 		"LOG_LEVEL=debug" \
 		> cmd/backfillers/oracle-pricing-backfill/.env
+	@set -a; . ../.env.secrets 2>/dev/null; set +a; \
+	printf '%s\n' \
+		"DATABASE_URL=postgres://postgres:postgres@127.0.0.1:$(KIND_HOST_PG_PORT)/stl_verify?sslmode=disable" \
+		"ALCHEMY_API_KEY=$$ALCHEMY_API_KEY" \
+		"ALCHEMY_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2" \
+		"CHAIN_ID=1" \
+		"BUILD_GIT_HASH=dev" \
+		"LOG_LEVEL=debug" \
+		> cmd/backfillers/uniswap-v4-position-bootstrap/.env
 	@set -a; . ../.env.secrets; set +a; \
 	printf '%s\n' \
 		"CHAIN_ID=1" \

@@ -1,6 +1,9 @@
 package uniswapv4indexer
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"math/big"
 	"slices"
 	"strings"
@@ -11,6 +14,7 @@ import (
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
+	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
 
 var (
@@ -317,6 +321,149 @@ func TestDecodePosition_FailureModes(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tt.wantSub) {
 				t.Errorf("error %q does not mention %q", err, tt.wantSub)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ReadPositions — the hash-pinned batched read shared by the per-block indexer
+// and the one-shot position bootstrap.
+// ---------------------------------------------------------------------------
+
+// positionKeysN builds n distinct keys, varying only the salt.
+func positionKeysN(n int) []entity.UniswapV4PositionKey {
+	keys := make([]entity.UniswapV4PositionKey, n)
+	for i := range keys {
+		keys[i] = positionKey(posmOwner, -60, 60, common.BigToHash(big.NewInt(int64(i))))
+	}
+	return keys
+}
+
+func TestReadPositions_NoKeysIssuesNoCall(t *testing.T) {
+	mc := testutil.NewMockMulticaller()
+
+	rows, err := ReadPositions(context.Background(), mc, positionTestPool(), nil,
+		common.HexToHash("0xabc1"), blockNumber, blockVer, blockTS)
+	if err != nil {
+		t.Fatalf("ReadPositions: %v", err)
+	}
+	if rows != nil {
+		t.Errorf("rows = %v, want nil", rows)
+	}
+	if mc.CallCount != 0 {
+		t.Errorf("multicall invocations = %d, want 0", mc.CallCount)
+	}
+}
+
+func TestReadPositions_PinsEveryBatchToTheBlockHashAndStampsTheBlock(t *testing.T) {
+	pool := positionTestPool()
+	blockHash := common.HexToHash("0xabc1")
+	keys := positionKeysN(2)
+
+	mc := testutil.NewMockMulticaller()
+	mc.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		results := make([]outbound.Result, len(calls))
+		for i := range results {
+			results[i] = outbound.Result{Success: true, ReturnData: packPositionInfoReturn(t, big.NewInt(11), big.NewInt(22), big.NewInt(33))}
+		}
+		return results, nil
+	}
+
+	rows, err := ReadPositions(context.Background(), mc, pool, keys, blockHash, blockNumber, blockVer, blockTS)
+	if err != nil {
+		t.Fatalf("ReadPositions: %v", err)
+	}
+	if len(rows) != len(keys) {
+		t.Fatalf("rows = %d, want %d", len(rows), len(keys))
+	}
+	for i, row := range rows {
+		if row.Key() != keys[i] {
+			t.Errorf("row %d key = %+v, want %+v", i, row.Key(), keys[i])
+		}
+		if row.BlockNumber != blockNumber || row.BlockVersion != blockVer || !row.BlockTimestamp.Equal(blockTS) {
+			t.Errorf("row %d block identity = (%d, %d, %s)", i, row.BlockNumber, row.BlockVersion, row.BlockTimestamp)
+		}
+		if row.PoolID != pool.ID {
+			t.Errorf("row %d poolID = %d, want %d", i, row.PoolID, pool.ID)
+		}
+	}
+	for i, inv := range mc.Invocations {
+		if !inv.ViaHash || inv.BlockHash != blockHash {
+			t.Errorf("invocation %d pinned to %s (viaHash=%v), want %s", i, inv.BlockHash, inv.ViaHash, blockHash)
+		}
+	}
+}
+
+func TestReadPositions_SplitsAboveTheBatchCapAndKeepsInputOrder(t *testing.T) {
+	keys := positionKeysN(positionsPerCall + 3)
+
+	mc := testutil.NewMockMulticaller()
+	mc.ExecuteAtHashFn = func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+		if len(calls) > positionsPerCall {
+			return nil, fmt.Errorf("batch of %d exceeds the %d cap", len(calls), positionsPerCall)
+		}
+		results := make([]outbound.Result, len(calls))
+		for i := range results {
+			results[i] = outbound.Result{Success: true, ReturnData: packPositionInfoReturn(t, big.NewInt(1), big.NewInt(0), big.NewInt(0))}
+		}
+		return results, nil
+	}
+
+	rows, err := ReadPositions(context.Background(), mc, positionTestPool(), keys,
+		common.HexToHash("0xabc1"), blockNumber, blockVer, blockTS)
+	if err != nil {
+		t.Fatalf("ReadPositions: %v", err)
+	}
+	if len(rows) != len(keys) {
+		t.Fatalf("rows = %d, want %d", len(rows), len(keys))
+	}
+	if mc.CallCount != 2 {
+		t.Errorf("multicall invocations = %d, want 2", mc.CallCount)
+	}
+	for i, row := range rows {
+		if row.Key() != keys[i] {
+			t.Fatalf("row %d key = %+v, want %+v: batches must concatenate in input order", i, row.Key(), keys[i])
+		}
+	}
+}
+
+func TestReadPositions_FailsOnEveryBrokenBatch(t *testing.T) {
+	tests := []struct {
+		name      string
+		executeFn func(context.Context, []outbound.Call, common.Hash) ([]outbound.Result, error)
+	}{
+		{
+			name: "multicall error",
+			executeFn: func(context.Context, []outbound.Call, common.Hash) ([]outbound.Result, error) {
+				return nil, errors.New("archive node unavailable")
+			},
+		},
+		{
+			name: "result count mismatch",
+			executeFn: func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+				return make([]outbound.Result, len(calls)-1), nil
+			},
+		},
+		{
+			name: "sub-call reverted",
+			executeFn: func(_ context.Context, calls []outbound.Call, _ common.Hash) ([]outbound.Result, error) {
+				results := make([]outbound.Result, len(calls))
+				for i := range results {
+					results[i] = outbound.Result{Success: false}
+				}
+				return results, nil
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mc := testutil.NewMockMulticaller()
+			mc.ExecuteAtHashFn = tt.executeFn
+
+			if _, err := ReadPositions(context.Background(), mc, positionTestPool(), positionKeysN(2),
+				common.HexToHash("0xabc1"), blockNumber, blockVer, blockTS); err == nil {
+				t.Fatal("expected an error")
 			}
 		})
 	}
