@@ -11,6 +11,10 @@ type SummaryMetricProps = {
   className?: string;
   /** Opens a click-through explanation of the metric beside the label. */
   info?: ReactNode;
+  /** Verified Sky Atlas anchor for the metric's definition, when one exists. */
+  infoHref?: string;
+  /** Link text for `infoHref`, e.g. the Atlas document number. */
+  infoLinkText?: string;
 };
 
 // The `statTile` value slot is a wrap-friendly inline-flex row now, so `value`
@@ -36,6 +40,8 @@ export function SummaryMetric({
   detail,
   className,
   info,
+  infoHref,
+  infoLinkText,
 }: SummaryMetricProps) {
   return (
     <StatTile
@@ -61,6 +67,9 @@ export function SummaryMetric({
               label={`About ${label}`}
               placement="top-end"
               trigger={<Info size={14} aria-hidden />}
+              {...(infoHref === undefined
+                ? {}
+                : { href: infoHref, linkText: infoLinkText })}
               className={css({
                 display: 'inline-flex',
                 color: 'text.muted',
