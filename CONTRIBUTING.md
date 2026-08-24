@@ -328,7 +328,7 @@ lifecycle:
 |---|---|---|
 | `cmd/base/` | The chain watcher — the **source of block events** | `watcher` |
 | `cmd/workers/` | Long-running SQS consumers — **one message per block** | `oracle-price-indexer`, `morpho-indexer`, `sparklend-indexer`, `raw-data-backup` |
-| `cmd/cronjobs/` | Long-running Temporal workers triggered on a **schedule** | `offchain-price-indexer`, `anchorage-indexer`, `watcher-data-validator` |
+| `cmd/cronjobs/` | Long-running Temporal workers run on a **schedule** (plus `morpho-v2-bootstrap`, which has none and is started by hand) | `offchain-price-indexer`, `anchorage-indexer`, `watcher-data-validator` |
 | `cmd/backfillers/` | **One-shot** jobs that fill historical gaps | `oracle-pricing-backfill`, `sparklend-backfill`, `raw-block-bulk-downloader` |
 | `cmd/util/` | Dev tooling (`migrate`, `generate-er`, stress-test helpers) | — |
 

@@ -316,16 +316,48 @@ data:
   CHAIN_ID: "1"
   OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector-opentelemetry-collector.observability.svc.cluster.local:4317"
 ---
+# On-demand one-shot VaultV2 repair worker (VEC-218) — see
+# docs/runbooks/vector-cronjobs.md. ALCHEMY_HTTP_URL is omitted: the binary
+# defaults to eth-mainnet, matching CHAIN_ID below.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: morpho-v2-bootstrap
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "1"
+---
+# On-demand Morpho vault backfill worker (VEC-218). ALCHEMY_HTTP_URL is omitted:
+# the binary defaults to eth-mainnet, matching CHAIN_ID below. The bucket is not
+# here — it carries a random suffix and so arrives via the ExternalSecret.
+#
+# OTEL_EXPORTER_OTLP_ENDPOINT is set explicitly. Without it telemetry silently
+# no-ops, which is exactly why offchain-price-indexer emits no cronjob metrics
+# despite running fine — do not drop it here.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: morpho-vault-backfill
+data:
+  TEMPORAL_HOST_PORT: "temporal-server.temporal:7233"
+  TEMPORAL_NAMESPACE: "vector"
+  CHAIN_ID: "1"
+  AWS_REGION: "eu-west-1"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector-opentelemetry-collector.observability.svc.cluster.local:4317"
+---
 # CEX order book indexer — Coinbase. OKX/Kraken get their own configmaps with the
 # venue-specific EXCHANGE and SYMBOLS (OKX uses dash pairs like BTC-USDT; Kraken
 # uses slash pairs with its own asset names like XBT/USD).
+# All six symbols verified online and tradeable against the Coinbase products API
+# on 2026-08-24; the model's other ten tokens are not listed on Coinbase at all.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: cex-orderbook-indexer-coinbase-config
 data:
   EXCHANGE: "coinbase"
-  SYMBOLS: "BTC-USD,ETH-USD"
+  SYMBOLS: "BTC-USD,ETH-USD,XRP-USD,SOL-USD,HYPE-USD,JITOSOL-USD"
   ORDERBOOK_DEPTH: "100"
   ORDERBOOK_INTERVAL: "5s"
   ENVIRONMENT: "sentinelstaging"
@@ -595,11 +627,18 @@ data:
   # caller fails fast instead of holding a worker for SQLAlchemy's unset 30s and
   # dragging down endpoints that never touch this pool. VEC-532 bounds the fan-out
   # itself.
-  # Held at 5 + 10 to match prod, where 10 + 20 exhausted the TigerData primary
-  # on 2026-08-13; staging runs the same image against the same ceiling.
+  # Pool size matches prod, where 10 + 20 exhausted the TigerData primary on
+  # 2026-08-13; overflow is held below prod's 10 because staging's pooler also
+  # OOMs intermittently on the source=both crypto-lending prefetch, and each
+  # such request holds two connections concurrently.
   DB_POOL_SIZE: "5"
-  DB_MAX_OVERFLOW: "10"
+  DB_MAX_OVERFLOW: "5"
   DB_POOL_TIMEOUT: "10"
+  # Recycle + statement-cache settings exist for the same pooler incidents: the
+  # recycle retires poisoned connections the disconnect handling misses, and the
+  # cache must stay 0 behind a transaction-mode pooler (see app/config.py).
+  DB_POOL_RECYCLE_SECONDS: "300"
+  DB_STATEMENT_CACHE_SIZE: "0"
 ---
 apiVersion: v1
 kind: ConfigMap

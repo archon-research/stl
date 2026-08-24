@@ -16,6 +16,8 @@ into TimescaleDB (or validates stored data). Current cronjobs:
 | `offchain-price-backfill` | `offchain-price-backfill` | **on demand** | Backfills CoinGecko price history for a range supplied at trigger time |
 | `reference-capital-indexer` | `reference-capital-indexer` | 15m | Sky Star-monitor reference risk capital; the only writer of forward reference history |
 | `reference-capital-backfill` | `reference-capital-backfill` | **on demand** | Seeds the reference balance-sheet history predating the syncer's first run |
+| `morpho-vault-backfill` | `morpho-vault-backfill` | **on demand** | Discovers Morpho vaults from the archived S3 receipts and replays their VaultV2 structured events, for a block range supplied at start time (VEC-218) |
+| `morpho-v2-bootstrap` | `morpho-v2-bootstrap` | **on demand** | One-shot repair of Morpho VaultV2 vaults discovered before atomic discovery (VEC-218) |
 | `core-model-runner` | `core-model-runner` | 24h | CORE model CRR per market → `core_model_results` (staging only; N_MC capped at 100 until live readers land) |
 
 > `maple-graphql-indexer` is also a cronjob but has its own richer rules — see
@@ -41,6 +43,29 @@ cronjob, `VectorOnDemandWorkerDown` for an on-demand worker.
 > `kube_deployment_spec_replicas > 0`, so a deliberately scaled-to-zero deployment
 > does not page (see that section).
 
+> `morpho-v2-bootstrap` carries **no schedule**: it produces nothing until an
+> operator starts a run on its task queue. Its worker idles ~100% of the time and
+> no data goes stale while it is down, so it is classed with the other on-demand
+> workers: `VectorOnDemandWorkerDown` (warning) covers its availability, and it is
+> excluded from `VectorCronjobAllRunsFailing` — a job that runs once on demand
+> produces only errors and no success from a single failed run (up to one error per
+> attempt, and it is allowed three), which would page critical for a run an
+> operator is already watching. That failure still fires `VectorCronjobRunFailing`
+> (warning), the right severity for it. If a run does not start, check the pod
+> first (`kubectl -n vector get pods -l app=morpho-v2-bootstrap`).
+
+> **A killed morpho-v2-bootstrap run resumes; a newly started one starts over.** The
+> sweep records its position in the activity's Temporal heartbeat details after
+> every completed block chunk, and the activity is allowed 3 attempts. A worker
+> killed mid-run — any deploy rolls this Deployment — is retried by Temporal and
+> the retry picks up at the next chunk, so an interrupted run costs minutes, not
+> the hours of `eth_getLogs` it had already done. Heartbeat details belong to one
+> workflow execution, so a run that goes red and is **started again by hand starts
+> from the factory deploy block**: that is a fresh execution with no heartbeat
+> history. It is safe (every write is idempotent), just slow. A run that is red
+> after its attempts is the operator signal — the cause is deterministic and no
+> further retry will clear it.
+
 General triage:
 
 ```bash
@@ -49,7 +74,8 @@ kubectl -n vector logs deploy/<deployment> --tail=200
 ```
 
 Temporal UI (vector namespace) → Schedules → `<cronjob>` shows recent runs and
-the failure stack for each.
+the failure stack for each. An on-demand job has no schedule; look under
+Workflows instead, filtered by its Workflow Type.
 
 ---
 
@@ -163,12 +189,14 @@ and a fresh `status="success"` run in `cronjob_runs_total`.
 
 ### What it means
 
-A `temporal.RunWorker` Deployment has had <1 available replica for >30m. These
-workers carry **no schedule**, so unlike `VectorCronjobWorkerDown` nothing is
-ticking into the void and no data is going stale. The only impact is that a new
-run cannot be started until the pod is back. Warning severity for that reason.
+A start-on-demand Deployment — a `temporal.RunWorker` job — has had <1 available
+replica for >30m. These workers carry **no schedule**, so unlike
+`VectorCronjobWorkerDown` nothing is ticking into the void and no data is going
+stale. The only impact is that a new run cannot be started until the pod is back.
+Warning severity for that reason.
 
-Currently matches: `offchain-price-backfill`, `reference-capital-backfill`.
+Currently matches: `offchain-price-backfill`, `reference-capital-backfill`,
+`morpho-vault-backfill`, `morpho-v2-bootstrap`.
 
 ### First checks
 
@@ -292,6 +320,137 @@ temporal workflow start --namespace vector \
 
 ---
 
+### Special case: `morpho-vault-backfill` (on-demand, no schedule)
+
+Another **on-demand** Temporal worker (`temporal.RunWorker`). Everything said
+about `offchain-price-backfill` above applies — nothing is missed while it is
+down, it emits one `cronjob_runs_total` record per *activity*, and it is excluded
+from `VectorCronjobAllRunsFailing` for the same reason.
+
+**How to start a run.** Temporal UI (namespace **`vector`**) →
+**Start Workflow**:
+
+| Field | Value |
+|---|---|
+| Task Queue | `morpho-vault-backfill` |
+| Workflow Type | `MorphoVaultBackfill` |
+| Workflow ID | descriptive and unique, e.g. `morpho-vault-backfill-24765588-24786366` |
+| Input | `{"from":24765588,"to":24786366}` |
+
+`from`/`to` are inclusive block numbers. To cover the whole VaultV2 era instead,
+supply `{"to":24786366,"fromV2Deploy":true}` — `from` then defaults to the
+chain's VaultV2 factory deploy block. An explicit `from` always wins. The
+equivalent CLI call:
+
+```bash
+temporal workflow start --namespace vector \
+  --task-queue morpho-vault-backfill --type MorphoVaultBackfill \
+  --workflow-id morpho-vault-backfill-24765588-24786366 \
+  --input '{"from":24765588,"to":24786366}'
+```
+
+**What a run does, and how long it takes.** One discovery activity over the whole
+range (scan S3 receipts → probe candidates on-chain → persist vaults), then one
+activity per 1000-block S3 partition replaying that partition's VaultV2
+structured events, sequentially and in ascending block order. Measured on
+mainnet: ~11.5 s per partition for discovery and ~20 s per partition for replay,
+so a whole-V2-era run is measured in hours. A range wider than 8000 partitions is
+rejected up front — that catches a mistyped `from` or a millisecond timestamp
+pasted into `to`, and keeps every accepted run inside Temporal's 51,200-event
+history limit (~6 events per activity), so none is terminated mid-flight.
+Note on dead-worker detection: the replay activity heartbeats on a 60 s ticker,
+but a typical partition finishes in 10-20 s, so in practice the heartbeat only
+fires on pathologically slow partitions — for ordinary ones the 30-minute
+StartToClose timeout is the real detector after a mid-partition rollout.
+
+**Reading progress and re-running.** The `progress` query (UI → Query tab) shows
+`partitionsDone` / `partitionsTotal` mid-run and survives a failed run, whose
+Result panel Temporal discards. A failed partition stops the run there, so the
+completed prefix is what the query reports. Re-running the same range is always
+safe: every write is an idempotent append, so a repeat costs wall clock, not
+correctness.
+
+The query, the Result panel and each partition's `replayed partition` log line
+also carry `rowsAppended`, split per table: `adapterStates`, `vaultCaps`,
+`vaultFees`, `membershipObservations`. It is a different quantity from
+`eventsReplayed` — events counts the logs driven through the handler path, rows
+counts the versioned snapshots those logs appended — and the two diverge for
+legitimate reasons as well as for bugs:
+
+- `ForceDeallocate` appends no snapshot at all; its paired `Deallocate` in the
+  same transaction carries the adapter-state row, so a partition holding only
+  those logs reports events with no rows.
+- `membershipObservations` counts appended observations only. An assertion that
+  the log already answers at that block position appends nothing, whatever the
+  build, so 0 is ordinary on a re-run.
+- The per-event `protocol_event` audit row is written but NOT counted here.
+
+What is worth investigating is `adapterStates` = 0 on a partition holding
+allocation, cap or fee events when the range is fresh, or when the same range is
+re-run from a NEW `build_id` (which must append a new `processing_version`). That
+is the shape of the compressed-chunk drop VEC-218 fixed for `morpho_adapter_state`
+— and the shape `protocol_event` still has, since its INSERT still leaves the
+version to its trigger.
+
+**Failure modes specific to this worker.**
+
+- `AccessDenied` listing or reading the raw bucket → the EKS Pod Identity
+  association granting this ServiceAccount S3 read on the per-chain raw bucket is
+  missing. It lives in the infra repo, not here.
+- `partition ... missing receipt block(s) ... (S3 gap)` → the archive is
+  genuinely incomplete for that partition. Replay hard-stops rather than replay
+  a thinned partition; repair S3 and re-run the same range.
+- An adapter-classification failure — same cause and same recovery as the
+  bootstrap's, below; the two share the VaultV2 replay path.
+
+---
+
+### Special case: `morpho-v2-bootstrap` (on-demand, no schedule)
+
+Both history jobs emit the same `morpho_v2_*` metrics as the live indexer (the
+replay path is metered since VEC-218), so the V2 volume alerts in
+`vector-indexers.yaml` can fire during a deliberate replay or bootstrap run —
+expected, not an incident; the run is operator-initiated and visible here.
+
+A third **on-demand** Temporal worker (`temporal.RunWorker`). Everything said
+about `offchain-price-backfill` above applies — nothing is missed while it is
+down, and it is excluded from `VectorCronjobAllRunsFailing` for the same reason.
+
+**How to start a run.** Temporal UI (namespace **`vector`**) →
+**Start Workflow**:
+
+| Field | Value |
+|---|---|
+| Task Queue | `morpho-v2-bootstrap` |
+| Workflow Type | `MorphoV2Bootstrap` |
+| Workflow ID | descriptive and unique, e.g. `morpho-v2-bootstrap-2026-08-20` |
+| Input | leave empty |
+
+There is nothing to supply: the run reads the chain from its ConfigMap, the V2
+vault set from the database, and pins its own finalized head. The equivalent CLI
+call, which is how the local `make run-cronjob-solo NAME=morpho-v2-bootstrap`
+worker is driven too:
+
+```bash
+temporal workflow start --namespace vector \
+  --task-queue morpho-v2-bootstrap --type MorphoV2Bootstrap \
+  --workflow-id morpho-v2-bootstrap-2026-08-20
+```
+
+**What a run does, and how long it takes.** One activity for the whole job: sweep
+`eth_getLogs` from the VaultV2 factory deploy block to a pinned finalized block
+for the 10 VaultV2 governance events, replay each through the live handler path,
+then enumerate every V2 vault's current adapter set and snapshot each adapter's
+`realAssets()`. A full mainnet sweep measures in **minutes** on today's V2 era
+(~15m end to end, measured 2026-08) — the 6h `StartToClose` / 12h `ScheduleToClose`
+bounds (3 attempts, 60 s heartbeat) are headroom for era growth and provider
+slowness, all compiled into the worker, so an operator supplies none of it. A run
+still going after an hour is a stall signal, not normal.
+Unlike the backfill, progress lives in the activity's heartbeat details rather
+than in workflow history; see the resume note at the top of this runbook.
+
+---
+
 ## VectorReferenceCapitalIndexerWritesZero
 
 **What it means.** Cycles are succeeding but `prime_capital_stack` received no
@@ -364,18 +523,78 @@ The alert exists precisely because a partially-covered cycle looks healthy.
 
 ---
 
+## morpho-v2-bootstrap run outcomes
+
+**Nothing here needs rows reconciling by hand.** Adapter membership is an
+append-only observation log, so a failed pass writes no lifecycle a later run has
+to walk back, and re-running is always safe. Three things can stop a run:
+
+**1. A chain or DB error.** `eth_getLogs` 401/429/5xx, an RPC timeout, a DB
+outage. Temporal retries the activity (3 attempts) and each retry resumes from the
+last fully replayed chunk. A wrong or expired RPC credential is the common
+non-clearing case — it retries identically until the secret is fixed.
+
+**2. `no adapter classification supplied to record an observation of membership`**
+(`ErrAdapterUnclassified`), wrapped as `adapter <addr> was a member before the
+transaction but is not at block <N> inside it, so no type was probed`. A replayed
+`Allocate` skips the on-chain type probe when committed state already places its
+adapter in the vault's set at that log's position; if the log stops answering that
+way inside the transaction — a concurrent live-indexer write landing between the
+two reads — the registry refuses to record membership with no classification
+rather than defaulting a type. It clears on retry: the retry re-reads and probes.
+
+**3. `N of M vaults could not be seeded`.** The seed pass deliberately does not
+stop at the first bad vault — a vault-shaped contract it cannot probe fails
+identically on every future run, so aborting there would leave every vault after
+it unhealed forever. So everything healable in that run was already attempted,
+and the joined error names each vault that was not. Work through those
+individually; re-running unchanged produces the same set. The run stays red until
+each one is fixed or explicitly written off, which is the point: a hole is
+reported, never hidden.
+
+**Not failures:**
+
+- A `RemoveAdapter` for an adapter the registry has never seen. It records one
+  untyped `is_member = false` observation, which is the truthful record of
+  learning about an adapter from its own de-registration.
+- A green run whose logs carry `deferredVaults=N`. A vault first SEEN above the
+  run's pinned finalized head is DEFERRED, not skipped: nothing proves it had
+  code at that head, and live indexing has owned it since its first event. Each
+  one is named in its own WARN, and the next run pins a later head that includes
+  it — so the scope heals itself once finality passes them, and there is nothing
+  to do. Evidence is log-only; no metric counts deferrals.
+
+  If EVERY known vault is deferred there is nothing left to work on, so the run
+  fails instead, with `all N known VaultV2 vaults of chain <id> were first seen
+  above the pinned head <block> — re-run once finality passes them`. That is the
+  same benign state: re-run later rather than checking `CHAIN_ID` and
+  `DATABASE_URL`, which this message deliberately does not blame.
+
+**Recovery.** Let Temporal's retries run; if the run is still red, start another
+one (see the section above — a fresh run starts from the factory deploy block,
+safe but slow). Escalate to the Vector team if the same non-transient error
+repeats across runs: that is a code defect, not an operational state.
+
+This is a property of the shared VaultV2 replay path, not of the bootstrap alone
+— `morpho-vault-backfill` replays through the same handlers and has the same
+exposure.
+
+---
+
 ## Adding a new cronjob
 
 Failure + all-failing alerts are automatic (they group by `service_name`).
-`VectorCronjobAllRunsFailing` excludes `maple-graphql-indexer` and
-`offchain-price-backfill`; `VectorCronjobRunFailing` excludes only maple. Two
-manual steps:
+`VectorCronjobAllRunsFailing` excludes `maple-graphql-indexer`,
+`offchain-price-backfill`, `morpho-vault-backfill` and `morpho-v2-bootstrap`;
+`VectorCronjobRunFailing` excludes only maple. Two manual steps:
 
 1. Add the new **Deployment name** to the `deployment=~"..."` regex in the
    availability rule that matches its lifecycle — `VectorCronjobWorkerDown` for
-   a scheduled cronjob, `VectorOnDemandWorkerDown` for a `temporal.RunWorker`
-   job. (The kube-state-metrics label is the Deployment name, which may differ
-   from `service_name` — e.g. `spark-anchorage-indexer`.) An on-demand worker
-   must ALSO be added to the `service_name!=` exclusions in
+   a scheduled cronjob, `VectorOnDemandWorkerDown` for anything that only runs
+   when a human starts it (any `temporal.RunWorker` job, whether it takes
+   parameters like `morpho-vault-backfill` or none like `morpho-v2-bootstrap`).
+   (The kube-state-metrics label is the Deployment name, which may differ from
+   `service_name` — e.g. `spark-anchorage-indexer`.) An on-demand worker must
+   ALSO be added to the `service_name!=` exclusions in
    `VectorCronjobAllRunsFailing`, or its idle state pages.
 2. Add a row to the table at the top of this runbook.

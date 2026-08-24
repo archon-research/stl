@@ -7,16 +7,14 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	ethtypes "github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/blocktime"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/partition"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -24,103 +22,56 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
-// replayV2StructuredEvents re-walks the S3 receipts over [from,to] and feeds
-// every VaultV2 structured event (adapter / cap / fee) from a persisted V2 vault
-// through the same handler path the live worker uses (via ReplayMetaMorphoLog).
-//
-// Every run replays the whole requested range. The backfiller keeps no progress
-// state, so an interrupted run is resumed by re-running the same command: the
-// replay writes go through the same idempotent repo methods as live indexing, so
-// re-replaying a range costs wall clock, not correctness.
-//
-// It runs after discovery/probe/persist so the vault registry, loaded here from
-// the DB, already contains this run's newly-persisted vaults alongside any from
-// earlier runs.
-func replayV2StructuredEvents(
-	ctx context.Context,
-	logger *slog.Logger,
-	s3Reader outbound.S3Reader,
-	ethClient *ethclient.Client,
-	multicaller outbound.Multicaller,
-	pool *pgxpool.Pool,
-	buildID buildregistry.BuildID,
-	cfg config,
-) error {
-	svc, err := buildReplayService(logger, multicaller, pool, buildID, cfg.chainID)
-	if err != nil {
-		return fmt.Errorf("building replay service: %w", err)
-	}
-	if err := svc.LoadVaultRegistry(ctx); err != nil {
-		return err
-	}
-
-	v2Vaults := svc.V2VaultAddresses()
-	if len(v2Vaults) == 0 {
-		logger.Info("no VaultV2 vaults known — skipping structured-event replay")
-		return nil
-	}
-
-	topics, err := morpho_indexer.VaultV2StructuredEventTopics()
-	if err != nil {
-		return fmt.Errorf("deriving VaultV2 structured topics: %w", err)
-	}
-
-	tsCache := newBlockTimestampCache(ethClient)
-
-	logger.Info("starting VaultV2 structured-event replay",
-		"v2Vaults", len(v2Vaults),
-		"from", cfg.from,
-		"to", cfg.to)
-
-	replayOne := func(part string) error {
-		return replayPartition(ctx, logger, s3Reader, svc, tsCache, cfg, part, v2Vaults, topics)
-	}
-	if err := runReplayPartitions(replayPartitionPrefixes(cfg.from, cfg.to), replayOne); err != nil {
-		return err
-	}
-
-	logger.Info("VaultV2 structured-event replay complete")
-	return nil
-}
-
-// runReplayPartitions replays every partition in parts, in order, and
-// hard-stops on the first failure.
-//
-// The hard stop is not about ordering — replaying out of order still reaches the
-// same answers (see replayPartition). It is the usual rule: a partition that
-// failed leaves a hole, and continuing past it would end the run reporting
-// success over incomplete data.
-func runReplayPartitions(parts []string, replay func(part string) error) error {
-	for _, part := range parts {
-		if err := replay(part); err != nil {
-			return fmt.Errorf("replaying partition %s: %w", part, err)
-		}
-	}
-	return nil
-}
-
 // buildReplayService constructs the morpho-indexer Service wired for replay
 // (no SQS consumer, no block cache) plus the repositories it needs.
-func buildReplayService(logger *slog.Logger, multicaller outbound.Multicaller, pool *pgxpool.Pool, buildID buildregistry.BuildID, chainID int64) (*morpho_indexer.Service, error) {
+//
+// Every failure here is structural, which is why each one is tagged: the pool
+// arrives already built, so all of it does is reject a nil port, resolve the
+// chain's name and telemetry instruments, validate the config and read the
+// embedded ABIs and the chain's deploy-block table. None of that dials anything,
+// so no attempt can reach a different verdict. Add a step that DOES touch the
+// network or the database and it must stay untagged — the retry envelope is what
+// carries a blip.
+func buildReplayService(logger *slog.Logger, multicaller outbound.Multicaller, pool *pgxpool.Pool, buildID buildregistry.BuildID, chainID int64) (*morpho_indexer.Service, *countingMorphoRepository, error) {
 	txManager, err := postgres.NewTxManager(pool, logger)
 	if err != nil {
-		return nil, fmt.Errorf("creating tx manager: %w", err)
+		return nil, nil, fmt.Errorf("creating tx manager: %w: %w", err, errStructuralData)
 	}
 	morphoRepo, err := postgres.NewMorphoRepository(pool, logger, buildID)
 	if err != nil {
-		return nil, fmt.Errorf("creating morpho repository: %w", err)
+		return nil, nil, fmt.Errorf("creating morpho repository: %w: %w", err, errStructuralData)
 	}
+	countingRepo := newCountingMorphoRepository(morphoRepo)
 	protocolRepo, err := postgres.NewProtocolRepository(pool, logger, buildID, 0)
 	if err != nil {
-		return nil, fmt.Errorf("creating protocol repository: %w", err)
+		return nil, nil, fmt.Errorf("creating protocol repository: %w: %w", err, errStructuralData)
 	}
 	eventRepo := postgres.NewEventRepository(logger, buildID)
 
-	svcConfig := morpho_indexer.ConfigDefaults()
-	svcConfig.ChainID = chainID
-	svcConfig.Logger = logger
+	svcConfig, err := morpho_indexer.NewReplayConfig(chainID, logger)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: %w", err, errStructuralData)
+	}
 
-	return morpho_indexer.NewReplayService(svcConfig, multicaller, txManager, protocolRepo, morphoRepo, eventRepo)
+	svc, err := morpho_indexer.NewReplayService(svcConfig, multicaller, txManager, protocolRepo, countingRepo, eventRepo)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: %w", err, errStructuralData)
+	}
+	return svc, countingRepo, nil
+}
+
+// knownV2VaultCount reports how many VaultV2 vaults the database holds, read
+// through the same registry load every replay activity performs — so a zero here
+// is exactly the answer each of them would reach on its own.
+func knownV2VaultCount(ctx context.Context, logger *slog.Logger, multicaller outbound.Multicaller, pool *pgxpool.Pool, buildID buildregistry.BuildID, chainID int64) (int, error) {
+	svc, _, err := buildReplayService(logger, multicaller, pool, buildID, chainID)
+	if err != nil {
+		return 0, fmt.Errorf("building replay service: %w", err)
+	}
+	if err := svc.LoadVaultRegistry(ctx); err != nil {
+		return 0, err
+	}
+	return len(svc.V2VaultAddresses()), nil
 }
 
 // replayPartition collects, orders, and replays every structured V2 log in one
@@ -140,33 +91,34 @@ func replayPartition(
 	logger *slog.Logger,
 	s3Reader outbound.S3Reader,
 	svc *morpho_indexer.Service,
-	tsCache *blockTimestampCache,
+	tsCache *blocktime.Cache,
 	cfg config,
+	rng blockRange,
 	part string,
 	v2Vaults map[common.Address]struct{},
 	topics map[common.Hash]struct{},
-) error {
-	entries, err := collectPartitionV2Logs(ctx, s3Reader, cfg.bucket, part, cfg.from, cfg.to, cfg.goroutines, v2Vaults, topics)
+) (int, error) {
+	entries, err := collectPartitionV2Logs(ctx, s3Reader, cfg.bucket, part, rng.From, rng.To, cfg.goroutines, v2Vaults, topics)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if len(entries) == 0 {
-		return nil
+		return 0, nil
 	}
 	sortV2LogEntries(entries)
 
 	for _, e := range entries {
-		blockTimestamp, err := tsCache.timestampAt(ctx, e.blockHash)
+		blockTimestamp, err := tsCache.TimestampAt(ctx, e.blockHash)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		if err := svc.ReplayMetaMorphoLog(ctx, e.log, e.blockNumber, e.blockHash, e.blockVersion, blockTimestamp); err != nil {
-			return fmt.Errorf("replaying log tx=%s index=%d block=%d: %w", e.log.TransactionHash, e.logIndex, e.blockNumber, err)
+			return 0, fmt.Errorf("replaying log tx=%s index=%d block=%d: %w", e.log.TransactionHash, e.logIndex, e.blockNumber, err)
 		}
 	}
 
-	logger.Info("replayed partition", "partition", part, "events", len(entries))
-	return nil
+	logger.Debug("replayed partition", "partition", part, "events", len(entries))
+	return len(entries), nil
 }
 
 // receiptFile is one block's highest-version receipt object in a partition.
@@ -272,7 +224,7 @@ func downloadV2LogsConcurrently(
 func requireCompletePartition(part string, presentBlocks []int64, from, to int64) error {
 	partStart, partEnd, ok := partitionBlockRange(part)
 	if !ok {
-		return fmt.Errorf("cannot parse partition range from prefix %q", part)
+		return fmt.Errorf("cannot parse partition range from prefix %q: %w", part, errStructuralData)
 	}
 	if partStart < from {
 		partStart = from
@@ -298,7 +250,7 @@ func requireCompletePartition(part string, presentBlocks []int64, from, to int64
 		}
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf("partition %s missing receipt block(s) in [%d,%d] (S3 gap): %v", part, partStart, partEnd, missing)
+		return fmt.Errorf("partition %s is missing receipt block(s) %v in [%d,%d] (S3 gap): %w", part, missing, partStart, partEnd, errStructuralData)
 	}
 	return nil
 }
@@ -321,7 +273,8 @@ func partitionBlockRange(part string) (start, end int64, ok bool) {
 // replayPartitionPrefixes returns the S3 partition prefixes covering [from,to]
 // in ascending start-block order, so an AddAdapter in an earlier partition lands
 // before a later partition's Allocate (desirable rather than required — see
-// replayPartition). partitionsForRange sorts lexicographically ("10000-10999" before
+// replayPartition). Pure and deterministic, so the workflow can call it to build
+// its activity list. partitionsForRange sorts lexicographically ("10000-10999" before
 // "2000-2999"), which is fine for the order-agnostic discovery scan but wrong
 // here; building the list from aligned block starts keeps it numeric-ascending.
 //
@@ -335,6 +288,17 @@ func replayPartitionPrefixes(from, to int64) []string {
 		parts = append(parts, partition.GetPartition(block))
 	}
 	return parts
+}
+
+// replayPartitionCount reports how many prefixes replayPartitionPrefixes would
+// return, without building any of them. The count is what the run's ceiling is
+// checked against, and `to` is operator-supplied: walking the range to measure it
+// allocates a string per 1000 blocks, so a pasted millisecond timestamp exhausts
+// the worker before the ceiling can reject it, and math.MaxInt64 overflows the
+// walk's cursor and never terminates at all. This measures width only;
+// maxPlausibleBlock is the companion guard on where the range sits.
+func replayPartitionCount(from, to int64) int64 {
+	return to/partition.BlockRangeSize - from/partition.BlockRangeSize + 1
 }
 
 // v2LogEntry is a single VaultV2 structured-event log queued for replay, carrying
@@ -365,11 +329,11 @@ func filterV2Logs(receipts []shared.TransactionReceipt, blockNumber int64, v2Vau
 				continue
 			}
 			if receipt.BlockHash == "" {
-				return nil, fmt.Errorf("receipt %s at block %d carries a V2 structured log with no block hash", receipt.TransactionHash, blockNumber)
+				return nil, fmt.Errorf("receipt %s at block %d carries a V2 structured log with no block hash: %w", receipt.TransactionHash, blockNumber, errStructuralData)
 			}
 			logIndex, err := strconv.ParseInt(log.LogIndex, 0, 64)
 			if err != nil {
-				return nil, fmt.Errorf("parsing log index %q (tx %s): %w", log.LogIndex, receipt.TransactionHash, err)
+				return nil, fmt.Errorf("parsing log index %q (tx %s): %w: %w", log.LogIndex, receipt.TransactionHash, err, errStructuralData)
 			}
 			entries = append(entries, v2LogEntry{
 				log:         log,
@@ -393,40 +357,4 @@ func sortV2LogEntries(entries []v2LogEntry) {
 		}
 		return entries[i].logIndex < entries[j].logIndex
 	})
-}
-
-// headerTimeFetcher is the subset of *ethclient.Client the timestamp cache
-// needs, narrowed so the cache can be tested with a fake.
-type headerTimeFetcher interface {
-	HeaderByHash(ctx context.Context, hash common.Hash) (*ethtypes.Header, error)
-}
-
-// blockTimestampCache memoizes block header timestamps for the replay run so a
-// block bearing several events is fetched from the node only once. Timestamps
-// are absent from S3 receipts, so they come from the header.
-//
-// Keyed and fetched by block HASH, not number: the replay pins every state read
-// to the log's block hash (the receipt's canonical block), so its timestamp must
-// come from that exact block. A number-pinned HeaderByNumber could return a
-// different block across a reorg, stamping snapshots with the wrong time.
-type blockTimestampCache struct {
-	fetcher headerTimeFetcher
-	cache   map[common.Hash]time.Time
-}
-
-func newBlockTimestampCache(fetcher headerTimeFetcher) *blockTimestampCache {
-	return &blockTimestampCache{fetcher: fetcher, cache: make(map[common.Hash]time.Time)}
-}
-
-func (c *blockTimestampCache) timestampAt(ctx context.Context, blockHash common.Hash) (time.Time, error) {
-	if ts, ok := c.cache[blockHash]; ok {
-		return ts, nil
-	}
-	header, err := c.fetcher.HeaderByHash(ctx, blockHash)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("fetching header for block %s: %w", blockHash.Hex(), err)
-	}
-	ts := time.Unix(int64(header.Time), 0).UTC()
-	c.cache[blockHash] = ts
-	return ts, nil
 }

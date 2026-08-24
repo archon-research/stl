@@ -1672,9 +1672,11 @@ over `morpho_adapter_membership`, and it is **NULL** for an adapter whose
   `observed_via` is how the membership was observed and takes the same five
   values as the DB column (`add_adapter_event` | `remove_adapter_event` |
   `allocation_event` | `vault_discovery` | `bootstrap_seed`), so the same
-  question can be asked in PromQL and in SQL. `bootstrap_seed` has no writer yet:
-  the Temporal bootstrap that emits it lands in the stacked #640, so the label is
-  absent from the metric until that merges.
+  question can be asked in PromQL and in SQL. `bootstrap_seed` is written by the
+  `morpho-v2-bootstrap` job, whose closing enumeration only *asserts* the membership
+  the same run's replay already recorded — so a healthy run appends ~nothing under
+  that label, and its absence is the expected reading rather than evidence the job
+  never ran.
 - `morpho_v2_snapshots_written_total{snapshot_type}` — one sample per **committed**
   event-driven snapshot (`adapter_state` | `vault_cap` | `vault_fee`).
   Discovery-seeded `adapter_state` rows are deliberately excluded: this counter is
@@ -1769,9 +1771,9 @@ vault is discovered at once. Acknowledge and curate.
 1. **Which provenance** — `sum by (observed_via) (increase(morpho_v2_adapter_registrations_total{adapter_type="unknown"}[24h]))`.
    All `vault_discovery` (or `bootstrap_seed`) means a bootstrap/backfill burst
    (benign, but still curate). Any meaningful `add_adapter_event` share means a
-   new family is shipping live. Until the stacked #640 merges, `bootstrap_seed`
-   never appears — its Temporal writer does not exist yet — so do not read its
-   absence as evidence about where a burst came from.
+   new family is shipping live. `bootstrap_seed` stays ~0 even while the bootstrap
+   runs — its enumeration only asserts what that run's own replay recorded — so
+   read a burst's provenance off `vault_discovery`, not off its absence.
 2. **Identify the adapters** (`db-query`):
 
    ```sql

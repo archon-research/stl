@@ -1,6 +1,6 @@
 //go:build integration
 
-package services
+package morpho_indexer
 
 import (
 	"context"
@@ -21,7 +21,6 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
-	"github.com/archon-research/stl/stl-verify/internal/services/morpho_indexer"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
@@ -256,10 +255,10 @@ func seedVaultRegistry(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fx
 }
 
 // buildReplayServiceForTest constructs the replay service the same way the
-// morpho-vault-indexer backfiller does (buildReplayService), with real Postgres
+// morpho-vault-backfill does (buildReplayService), with real Postgres
 // repositories and the fixture-backed fake multicaller, then loads the vault
 // registry from the seeded DB.
-func buildReplayServiceForTest(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fx *replayFixture) *morpho_indexer.Service {
+func buildReplayServiceForTest(t *testing.T, ctx context.Context, pool *pgxpool.Pool, fx *replayFixture) *Service {
 	t.Helper()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -279,11 +278,11 @@ func buildReplayServiceForTest(t *testing.T, ctx context.Context, pool *pgxpool.
 	}
 	eventRepo := postgres.NewEventRepository(logger, buildID)
 
-	cfg := morpho_indexer.ConfigDefaults()
+	cfg := ConfigDefaults()
 	cfg.ChainID = fx.ChainID
 	cfg.Logger = logger
 
-	svc, err := morpho_indexer.NewReplayService(cfg, newFixtureMulticaller(t, fx), txManager, protocolRepo, morphoRepo, eventRepo)
+	svc, err := NewReplayService(cfg, newFixtureMulticaller(t, fx), txManager, protocolRepo, morphoRepo, eventRepo)
 	if err != nil {
 		t.Fatalf("NewReplayService: %v", err)
 	}
@@ -427,7 +426,7 @@ func newFixtureMulticaller(t *testing.T, fx *replayFixture) *testutil.MockMultic
 // AddAdapter lands before the adapter's first allocation.
 // replayFixtureEvents replays every recorded event in strict (blockNumber, logIndex)
 // order, the order the backfiller produces.
-func replayFixtureEvents(t *testing.T, ctx context.Context, svc *morpho_indexer.Service, fx *replayFixture) {
+func replayFixtureEvents(t *testing.T, ctx context.Context, svc *Service, fx *replayFixture) {
 	t.Helper()
 	replayFixtureEventsOrdered(t, ctx, svc, fx, false)
 }
@@ -437,7 +436,7 @@ func replayFixtureEvents(t *testing.T, ctx context.Context, svc *morpho_indexer.
 // append-only log keyed on each observation's own position, replay order can no longer
 // change the final answers, so an out-of-order replay is a supported (if noisier) input
 // rather than a silent corruption.
-func replayFixtureEventsOrdered(t *testing.T, ctx context.Context, svc *morpho_indexer.Service, fx *replayFixture, descending bool) {
+func replayFixtureEventsOrdered(t *testing.T, ctx context.Context, svc *Service, fx *replayFixture, descending bool) {
 	t.Helper()
 
 	type queued struct {
