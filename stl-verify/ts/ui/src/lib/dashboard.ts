@@ -429,12 +429,22 @@ export function formatUsdValue(
     return '—';
   }
 
-  // Compact from a thousand up ($44.96K, $2.21M), not just from a million:
-  // four-digit-plus figures with cents ($44,956.75) read as more precision
-  // than these surfaces need and break column scanning.
+  // Cents on a four-digit figure read as more precision than a magnitude
+  // surface has, and break column scanning. Exact prices: formatUsdPrice.
   return Math.abs(numeric) >= 1_000
     ? COMPACT_CURRENCY_FORMAT.format(numeric)
     : CURRENCY_FORMAT.format(numeric);
+}
+
+/**
+ * Never compacts: a price display exists so a reader can check the exact
+ * figure a model priced off — $118,432.55 must not become $118.43K.
+ */
+export function formatUsdPrice(
+  value: number | string | null | undefined,
+): string {
+  const numeric = parseNumericValue(value);
+  return numeric === null ? '—' : CURRENCY_FORMAT.format(numeric);
 }
 
 // Compact, 2-significant-digit formatters for chart axes and tooltips.
