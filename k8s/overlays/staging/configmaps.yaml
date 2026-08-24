@@ -362,15 +362,18 @@ data:
   ORDERBOOK_INTERVAL: "5s"
   ENVIRONMENT: "sentinelstaging"
 ---
-# OKX uses dash-separated instrument ids with a USDT quote (no USD spot pairs);
-# BTC-USDT/ETH-USDT verified live against the OKX SPOT instruments API.
+# OKX uses dash-separated instrument ids. All six are quoted in USDT: JITOSOL has
+# no other book, so USDT keeps one quote across the set. Verified live against the
+# OKX SPOT instruments API on 2026-08-24; the model's other ten tokens are not
+# listed at all. Merging these USDT books into the model's USD depth curve ignores
+# the basis — VEC-458 owns that decision.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: cex-orderbook-indexer-okx-config
 data:
   EXCHANGE: "okx"
-  SYMBOLS: "BTC-USDT,ETH-USDT"
+  SYMBOLS: "BTC-USDT,ETH-USDT,XRP-USDT,SOL-USDT,HYPE-USDT,JITOSOL-USDT"
   ORDERBOOK_DEPTH: "100"
   ORDERBOOK_INTERVAL: "5s"
   ENVIRONMENT: "sentinelstaging"
