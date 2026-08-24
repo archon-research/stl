@@ -1,5 +1,5 @@
 import { Avatar } from '@archon-research/design-system';
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 
 import { logging } from '#src/lib/logging';
 import { css, cx } from '#styled-system/css';
@@ -10,6 +10,8 @@ type LogoAvatarBaseProps = {
   alt: string;
   fallbackText: string;
   imageUrl: string | null;
+  /** Tried when `imageUrl` is null or fails, before the text fallback. */
+  fallbackImageUrl?: string | null;
   isSelected?: boolean;
   fallbackColor?: 'text.default' | 'text.strong';
 };
@@ -37,49 +39,69 @@ const sizeClassNames: Record<PandaSizeToken, string> = {
   '11': css({ width: '11', height: '11' }),
 };
 
+const sizeTokenPx: Record<PandaSizeToken, number> = {
+  '4': 16,
+  '5': 20,
+  '6': 24,
+  '7': 28,
+  '8': 32,
+  '9': 36,
+  '10': 40,
+  '11': 44,
+};
+
+/**
+ * Initials sized to the disc rather than a fixed step: a fixed `2xs` nearly
+ * touches the border of a 16px avatar, so the text fallback read as a smaller,
+ * cramped sibling of a resolved logo in the same column.
+ */
+function fallbackFontSizePx(boxPx: number): number {
+  return Math.max(7, Math.round(boxPx * 0.4));
+}
+
 export function LogoAvatar({
   alt,
   fallbackText,
   imageUrl,
+  fallbackImageUrl = null,
   isSelected = false,
   size = '5',
   sizePx,
   fallbackColor = 'text.default',
 }: LogoAvatarProps) {
-  const normalizedImageUrl = useMemo(() => imageUrl ?? null, [imageUrl]);
-  const [hasImageError, setHasImageError] = useState<boolean>(
-    normalizedImageUrl !== null && failedLogoUrls.has(normalizedImageUrl),
-  );
+  // `failedLogoUrls` is a module-level cache, so mutations are invisible to
+  // React; this counter makes a load failure re-run the candidate pick.
+  const [failCount, setFailCount] = useState(0);
+  const activeImageUrl = useMemo(() => {
+    void failCount;
+    return (
+      [imageUrl, fallbackImageUrl].find(
+        (url): url is string => url != null && !failedLogoUrls.has(url),
+      ) ?? null
+    );
+  }, [imageUrl, fallbackImageUrl, failCount]);
 
-  useEffect(() => {
-    if (!normalizedImageUrl) {
-      setHasImageError(true);
-      return;
-    }
-
-    setHasImageError(failedLogoUrls.has(normalizedImageUrl));
-  }, [normalizedImageUrl]);
-
+  const boxPx = sizePx ?? sizeTokenPx[size];
   const sizingStyle = sizePx
     ? { width: `${sizePx}px`, height: `${sizePx}px` }
     : undefined;
 
-  const shouldRenderImage = normalizedImageUrl !== null && !hasImageError;
+  const shouldRenderImage = activeImageUrl !== null;
 
   return (
     <Avatar.Root
       onStatusChange={(details: AvatarStatusChangeDetails) => {
-        if (details.status === 'error' && normalizedImageUrl) {
-          const isFirstFailure = !failedLogoUrls.has(normalizedImageUrl);
-          failedLogoUrls.add(normalizedImageUrl);
-          setHasImageError(true);
+        if (details.status === 'error' && activeImageUrl) {
+          const isFirstFailure = !failedLogoUrls.has(activeImageUrl);
+          failedLogoUrls.add(activeImageUrl);
+          setFailCount((count) => count + 1);
 
           if (!isFirstFailure) {
             return;
           }
 
           logging.warn('Logo image failed to load', {
-            imageUrl: normalizedImageUrl,
+            imageUrl: activeImageUrl,
             alt,
             fallbackText,
           });
@@ -110,19 +132,19 @@ export function LogoAvatar({
           alignItems: 'center',
           justifyContent: 'center',
           color: isSelected ? 'white' : fallbackColor,
-          fontSize: '2xs',
           fontWeight: 'semibold',
           lineHeight: '1',
           textAlign: 'center',
           userSelect: 'none',
         })}
+        style={{ fontSize: `${fallbackFontSizePx(boxPx)}px` }}
       >
         {fallbackText}
       </Avatar.Fallback>
       {shouldRenderImage ? (
         <Avatar.Image
           alt={alt}
-          src={normalizedImageUrl}
+          src={activeImageUrl}
           className={css({
             width: 'full',
             height: 'full',
