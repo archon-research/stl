@@ -1002,10 +1002,19 @@ function App() {
       ),
     );
 
-    const primeDebtValue = wadToUnits(primeDebtSnapshot?.debt_wad);
+    // The same read the debt card's headline makes: a reference view holds its
+    // snapshot in `referenceDebt`, so reading only the indexed snapshot left
+    // the fallback null there — and with the series also empty, the whole
+    // chart vanished under a headline that had a figure.
+    const primeDebtValue = wadToUnits(
+      showsReferenceNow ? referenceDebt?.debt_wad : primeDebtSnapshot?.debt_wad,
+    );
 
     const encumbranceValue = parseNumericValue(
-      riskCapital?.prime_encumbrance_ratio,
+      preferReference(
+        riskCapital?.reference_prime_encumbrance_ratio,
+        riskCapital?.prime_encumbrance_ratio,
+      ),
     );
 
     // Sky's is the preferred model, so its series leads and STL's becomes the
@@ -1117,6 +1126,7 @@ function App() {
     allocationBalanceSeries,
     riskCapital?.prime_exposure_usd,
     riskCapital?.prime_encumbrance_ratio,
+    riskCapital?.reference_prime_encumbrance_ratio,
     riskCapital?.reference_prime_exposure_usd,
     riskCapital?.reference_total_risk_capital_usd,
     riskCapital?.total_risk_capital_usd,
@@ -1127,6 +1137,8 @@ function App() {
     exposureSeries,
     primeDebtSeries,
     primeDebtSnapshot?.debt_wad,
+    referenceDebt?.debt_wad,
+    showsReferenceNow,
     totalCapitalBuckets,
     totalCapitalSeries,
     collateralSeries,
