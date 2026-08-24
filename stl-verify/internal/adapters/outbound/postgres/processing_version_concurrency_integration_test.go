@@ -649,7 +649,7 @@ func TestProcessingVersionTrigger_NegativeControl_LocklessAdapterStateHelper(t *
 
 		errs := raceAdapterStateBuilds(t, ctx, key)
 		for i, err := range errs {
-			if err != nil && !isUniqueViolation(err) {
+			if err != nil && !testutil.IsUniqueViolation(err) {
 				t.Fatalf("attempt %d, worker %d: unexpected error: %v", attempt, i, err)
 			}
 		}
