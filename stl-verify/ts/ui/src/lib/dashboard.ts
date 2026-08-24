@@ -9,8 +9,6 @@ export type FilterOption = {
   count: number;
 };
 
-export type UsdTone = 'green' | 'yellow' | 'red' | 'neutral';
-
 export type ChainLabelLookup = ReadonlyMap<number, string>;
 
 // Sentinel filter value for allocations with no registered protocol wrapper
@@ -808,24 +806,6 @@ export function getCategoryLabel(
     custody: 'Custody',
   };
   return category ? (labels[category] ?? fallback) : fallback;
-}
-
-export function getUsdTone(value: number | string | null | undefined): UsdTone {
-  const numeric = parseNumericValue(value);
-
-  if (numeric === null) {
-    return 'neutral';
-  }
-
-  if (numeric <= 1_000) {
-    return 'green';
-  }
-
-  if (numeric <= 1_000_000) {
-    return 'yellow';
-  }
-
-  return 'red';
 }
 
 export function sortAllocations(allocations: Allocation[]): Allocation[] {
