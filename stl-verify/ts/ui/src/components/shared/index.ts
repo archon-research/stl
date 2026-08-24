@@ -31,7 +31,6 @@ export function defaultTimeRange(): _DesignSystemTimeRange {
 // override stays grep-traceable if/when the design-system bumps its default.
 void _designSystemDefaultTimeRange;
 
-export { StatusBadge } from './StatusBadge';
 export { tableHeaderTypographyClassName } from './tableStyles';
 export { SummaryMetric } from './SummaryMetric';
 export { TokenAddress } from './TokenAddress';
