@@ -59,15 +59,19 @@ PRD RP-4.4). The tolerance acknowledges the float paths in the risk models; the 
 is the exact path.
 
 **Point-in-time boundary.** "Point in time" here means *any recorded calculation*: the snapshot
-(§5) reproduces exactly what a calculation saw, at any later time. Arbitrary wall-clock as-of
-queries over the whole database are not a goal of this ADR; if they ever become one, the
-`ingested_at` watermark (Alternatives) is the designed upgrade path. PRD RP-4.1 is being
-aligned to this wording.
+(§5) reproduces exactly what a calculation saw, at any later time. An arbitrary wall-clock
+timestamp is served by lookup, not by database time travel: calculation records carry wall-clock
+UTC `created_at`, so for any timestamp T the most recent record with `created_at <= T` (per
+calculation type) is found and replayed exactly. Agreed as satisfying PRD RP-4.1 (2026-08-21).
+Arbitrary as-of queries over the whole database remain a non-goal; if they ever become one, the
+`ingested_at` watermark (Alternatives) is the designed upgrade path.
 
 **Cutover.** The guarantees in this ADR apply to rows and calculations from the cutover date
-(TBD) onward. Pre-tracking data (`build_id = 0`, `NULL ingest_xid`, reference-data history overwritten
-in place before §4, archive gaps) is explicitly out of scope and cannot be brought into scope
-retroactively.
+(TBD) onward. Pre-tracking data (`build_id = 0`, `NULL ingest_xid`, archive gaps) is out of
+scope for this ADR's guarantees. Information destroyed before §4 lands (reference-data history
+overwritten in place) is unrecoverable. Everything else historical — such as best-effort
+reproduction of older data points — is a separate, later task ("from now backwards",
+2026-08-21), not a claim this ADR makes.
 
 **Scope: reproducibility only.** Auditability controls are deliberately out of scope and are
 covered by a separate ADR: actor identity and per-service credentials, tamper-evident
@@ -271,13 +275,13 @@ none of these problems, so it is the mechanism:
   committed before the snapshot, and the snapshot before the record (same transaction, snapshot
   first), so **a node that can read the calculation record has already replayed every row the
   snapshot can see.**
-- **End-to-end self-check:** the manifest job recomputes the calculation from the manifest it
-  just wrote and compares with the recorded output; a mismatch (a read outside the transaction,
-  a non-governed input, nondeterminism) raises an alert. This guards the whole class, not just
-  the cases listed under Threats. A scheduled assurance job extends the same check backwards:
-  it samples historical calculation records, regenerates each manifest from the recorded
-  snapshot, re-runs the calculation at the recorded code identity, and alerts on drift
-  (PRD RP-4.8) — reproducibility is verified continuously, not only at write time.
+- **End-to-end self-check:** a scheduled assurance job samples calculation records — recent and
+  historical, weighted towards fresh records so a regression is caught close to when it ships —
+  generates each one's manifest from the recorded snapshot (§6, on demand), re-runs the
+  calculation at the recorded code identity, and compares with the recorded output; a mismatch
+  (a read outside the transaction, a non-governed input, nondeterminism) raises an alert
+  (PRD RP-4.8). This guards the whole class, not just the cases listed under Threats —
+  reproducibility is verified continuously.
 - **Replay is read-only by construction** (PRD RP-4.7): replay and manifest generation run
   under a read-only role on the production cluster or any physical replica. Where isolation
   from production is required, the environment is created by physical fork or physical
@@ -315,21 +319,24 @@ sees; the migration is "add the filter, stop recording the snapshot".
 ### 6. Calculation record and self-contained manifest
 
 Reproducibility must not be gated on access to our database. Every calculation (dry-run or not)
-therefore produces two artefacts:
+therefore has two artefacts: a **record**, written at calculation time, and a **manifest**,
+generated from the record on demand (see Generation):
 
 **a. Record** (insert-only, governed): `id, calculation_type, run_id (calc artefact + reference
 snapshot), schema_version (last applied migration), request/params including the effective
 "as of" time (`effective_at`, also used for every reference-table `valid_from` predicate),
 snapshot (§5), output, manifest_key, manifest_hash, is_dry_run, created_at`; `id` is returned in
-the response. Written in the same transaction as the reads. The Python API registers its
+the response. `created_at` is wall-clock UTC and indexed per `calculation_type`, so the nearest
+prior record to an arbitrary timestamp is a lookup (Point-in-time boundary). Written in the same
+transaction as the reads. The Python API registers its
 artefact and opens a `writer_run` at startup like the Go binaries (it does not today), and
 calculation logic
 never reads wall-clock time, environment/configmap values, caches, or external services — every
 input is either a governed row visible in the snapshot or a field of the recorded request.
 
-**b. Manifest** — one object in the archive bucket (`calc/<id>.jsonl.zst`, alongside the raw
-block and SC-call archives), containing everything a third party needs and nothing that requires
-our database:
+**b. Manifest** — one object (`calc/<id>.jsonl.zst`; when persisted it lands in the archive
+bucket alongside the raw block and SC-call archives), containing everything a third party needs
+and nothing that requires our database:
 
 - the record header (request, effective time, `ingested_at` label of the newest input as RFC 3339
   UTC, calc `git_hash`, `schema_version`);
@@ -343,7 +350,7 @@ our database:
   carry `archive_batch` (the 16-hex batch hash; constant across a batch, dictionary-compresses)
   and the key is fully derivable — `chain / block / block_version / source` alone is only a
   listing prefix. Referencing is sufficient (the archives are immutable and kept indefinitely);
-  the manifest job may additionally copy the referenced raw objects under `calc/<id>/raw/` when a
+  manifest generation may additionally copy the referenced raw objects under `calc/<id>/raw/` when a
   fully self-contained per-calculation folder is wanted, at the cost of duplicated storage.
   Off-chain rows are terminal facts and their values are taken as given;
 - the reference rows used (they are governed rows too);
@@ -364,17 +371,19 @@ is the "possible now, easy later" item, and a future "as-of block B" calculation
 positions evaluated at one block) would reduce it to a chain-state query. Only off-chain inputs
 are unverifiable to source, by the stated boundary.
 
-**Generation.** The manifest may be written inline when the calculation already holds its
-input rows, or — the default for protocol-wide models whose SQL aggregates tens of thousands of
-rows server-side — **asynchronously**, by a job that re-runs the calculation's input selection
-under `pg_visible_in_snapshot(ingest_xid, snapshot)` (exact by §5) and writes the object; the
-request path pays only for the record. Because governed rows are never removed, a manifest can be
-(re)generated at any later time; the record's snapshot is the fallback pointer, never the
-deliverable. The job runs on commit of the
-record (queue or poll on `manifest_key IS NULL`), is idempotent (same record → same key and
-hash), and an alert fires on records older than N minutes without a manifest. `manifest_key`/`manifest_hash` are filled by the job
-(insert-only: a second record row referencing the first, or a separate `calculation_manifest`
-table). Final shape and API surface are VEC-232's; this ADR fixes what the two artefacts must pin.
+**Generation.** The record is the durable artefact; the manifest is **generated on demand**
+from it (decided 2026-08-21; standards research confirms eager persistence is not required).
+Because governed rows are never removed, the same generation — re-running the calculation's
+input selection under `pg_visible_in_snapshot(ingest_xid, snapshot)`, exact by §5 — yields the
+identical manifest at any later time: for an auditor's request, for the assurance sampling job
+(§5), or inline when the calculation already holds its input rows and wants to hand the
+manifest back immediately. Generation is idempotent (same record → same key and hash); a
+manifest that *is* written goes to the archive bucket and fills `manifest_key`/`manifest_hash`
+insert-only (a second record row referencing the first, or a separate `calculation_manifest`
+table). Should a persisted-manifest obligation ever appear, the eager shape is the same
+generator triggered on commit of the record (queue or poll on `manifest_key IS NULL`) with an
+alert on records older than N minutes without a manifest — a deployment change, not a design
+change. Final shape and API surface are VEC-232's; this ADR fixes what the two artefacts must pin.
 
 ### 7. Canonical reads are structural, not conventional
 
@@ -427,7 +436,7 @@ prevents each. These are part of the decision, not commentary.
 | Threat | Prevention |
 |---|---|
 | A calculation reads a table that is not governed/append-only — an operational table such as `block_states.is_orphaned` (mutable, 30-day retention), a refreshed materialised view or continuous aggregate, an in-place "current state" read model | Calculation read paths may touch only governed tables (`raw_pipeline`/`dimension`/`config`) and governed, append-only read models carrying `ingested_at`. Reorg fixes (VEC-553) are corrective rows, never a join to operational state. Schemamaster lint on calculation SQL. |
-| Reads spread across several connections or transactions, or the record written best-effort/afterwards | §5/§6: one `REPEATABLE READ` transaction per calculation, snapshot taken first, record written in the same transaction; fan-out only via `pg_export_snapshot`. Without this the manifest job cannot know which rows the calculation actually saw. |
+| Reads spread across several connections or transactions, or the record written best-effort/afterwards | §5/§6: one `REPEATABLE READ` transaction per calculation, snapshot taken first, record written in the same transaction; fan-out only via `pg_export_snapshot`. Without this, manifest generation cannot know which rows the calculation actually saw. |
 | Wall-clock, environment, cache or external-service inputs inside the calculation | §6: forbidden; the effective time is a field of the recorded request. |
 | Calculation code without an identity (Python API today), or schema-resident logic (`_as_of` functions, tie-break rules) not pinned | §6: Python registers an artefact + run; the record carries `schema_version`. A third party rebuilds schema at that migration and code at that commit (or takes the retained image). |
 | A reference lookup uses `_current` (`valid_from <= now()`), so a future-dated reference row that is visible in the snapshot flips a later replay | §4: reference data is bitemporal; every calculation/writer reference read uses the recorded `effective_at`; `_current` views and `now()`/`CURRENT_DATE` are banned from calculation and writer SQL (schemamaster lint). |
@@ -440,14 +449,14 @@ prevents each. These are part of the decision, not commentary.
 | Cluster migration via dump/restore (logical) restarts `pg_current_xact_id()` low, so rows written afterwards look older than every stored snapshot | Prefer physical restore/fork (xids preserved — TigerData's backup/fork are physical). After any logical migration, `pg_resetwal -x` sets NextXID above the previous maximum before writes resume; the runbook records it. If sharding ever becomes a plan, switch §5 to the watermark alternative. |
 | A writer inserts `ingest_xid = NULL` explicitly and becomes "always visible" | No `INSERT` names `ingest_xid`; lint plus the conformance test. |
 | One of a calculation's queries runs outside the `REPEATABLE READ` transaction (another connection, autocommit) | Reads go through a helper bound to the calculation's transaction; lint; end-to-end self-check (§5) compares regenerated output to recorded output. |
-| The manifest job runs on a replica that has not replayed the calculation's inputs | Structurally impossible on a physical replica: the job starts from the calculation record, and a node that can read the record has replayed everything the snapshot can see (§5). Only a logical replica or a different cluster (see dump/restore row) can differ. |
+| Manifest generation runs on a replica that has not replayed the calculation's inputs | Structurally impossible on a physical replica: generation starts from the calculation record, and a node that can read the record has replayed everything the snapshot can see (§5). Only a logical replica or a different cluster (see dump/restore row) can differ. |
 | A calculation holds its snapshot for many minutes (vacuum lag on hot tables) | Calculations are request-scoped; a bound on calculation transaction duration; alert on old read-only transactions. |
 | `ingested_at`/other time columns rendered without an explicit zone (naive `timestamp`, session `TimeZone` other than UTC) confuse a human or a downstream consumer | `timestamptz` only on governed tables; `TimeZone = 'UTC'` everywhere; RFC 3339 UTC serialisation; schemamaster check for `timestamp without time zone`. |
 | `pg_visible_in_snapshot(ingest_xid, …)` gets no pruning on compressed chunks, so heavy manifest regeneration is slow | Performance, not correctness: latest-wins indexes drive the read; the job is off the request path; measure protocol-wide calculations. |
 | Under-specified ordering with real ties (`DISTINCT ON`, `last()`, `locf`, cross-table "latest price ≤ block") returns arbitrary rows; float/parallel/hash-order nondeterminism in code | Every canonical selection has a total order (VEC-549 tie-break pattern); calculation code is deterministic given its inputs. |
 | Retention or `drop_chunks` on a governed table; tiered data with a lifecycle rule | §1 conformance test; tiering means "kept indefinitely". |
 | The image that produced a row or calculation can no longer be rebuilt identically (toolchain/dependency drift, non-reproducible base layers) and the original was pruned from the registry | §2: production images retained indefinitely by digest, `docker_sha` recorded per build; a conformance check that every `build_registry.docker_sha` still resolves in the registry. |
-| Manifest never generated (job failure/lag), or generated with a different T than the calculation used | Manifest job is idempotent and retried; `manifest_hash` recorded; regeneration is always possible from the record's T (§5); an alert on records older than N minutes without a manifest. |
+| On-demand manifest generation fails, drifts, or uses a different snapshot than the calculation did | Generation is idempotent and driven solely by the record's snapshot (§5), so it is always repeatable; `manifest_hash` recorded when persisted; the assurance sampling job continuously generates and recomputes, alerting on drift. |
 | A data point is served without its recipe (API returns values but not `git_hash`/`source`/version identity), so a single-point reproduction needs our database | §8 delivery obligation; response-schema test that every data-point payload carries recipe fields or a resolvable provenance reference. |
 | Manifest lists the selected rows but not the selection rule or chain cutoff, so completeness/freshness of the input set can only be checked against our database | §6 selection statement + per-chain cutoff in every manifest; manifest schema check. |
 | Manifest omits values for off-chain rows or reference rows, forcing a third party back to our database | Manifest schema check: every input row carries identity **and** values; off-chain rows are terminal facts and must be complete in the manifest. |
@@ -461,7 +470,7 @@ Ordered by information lost per day of delay; 1–3 make reproducibility *possib
 
 1. **Reference-table append-on-change** (§4) with `_as_of(effective_at)` reads, starting with `oracle_asset`
    and `position_classification` — the only item where waiting destroys information.
-2. **`ingest_xid` + `ingested_at`** on governed tables (§5); `build_registry` widened to `(git_hash, service, image_digest)`, `writer_run`, `run_id` and `archive_batch` on governed rows (§2/§8); calculation record + manifest job, Python artefact/run, `schema_version` (§6).
+2. **`ingest_xid` + `ingested_at`** on governed tables (§5); `build_registry` widened to `(git_hash, service, image_digest)`, `writer_run`, `run_id` and `archive_batch` on governed rows (§2/§8); calculation record + on-demand manifest generation, Python artefact/run, `schema_version` (§6).
 3. **Append-only enforcement** (§1): app role, guard triggers, conformance test.
 4. **Trigger removal** (§3): one migration drops the 36 functions/triggers, creates and seeds
    `processing_version_log`; delete the plan-cache/lock/sort tests and `db/migrations/AGENTS.md`
@@ -496,14 +505,14 @@ auditability requirements are deferred to a separate ADR. Per-requirement mappin
 | CR-3.4 correction history | §1/§7 (raw tables keep every version) |
 | CR-3.5 restatement vs valid-time change | §4 (reference data); `block_version` (chain) vs `processing_version` (restatement) |
 | CR-3.6 original vs corrected at a past time | §5 snapshot + version filter |
-| RP-4.1 as-of queries | §5, bounded to recorded calculations (Point-in-time boundary) |
-| RP-4.2 reproduction manifest | §6 |
+| RP-4.1 as-of queries | §5 + §6 record `created_at` lookup — nearest prior calculation to an arbitrary timestamp (agreed 2026-08-21; Point-in-time boundary) |
+| RP-4.2 reproduction manifest | §6 (generated on demand from the record) |
 | RP-4.3 artifact retention | §2 (production images retained indefinitely) |
 | RP-4.4 re-execution fidelity | Goal and Boundaries (bit-for-bit via retained image; tolerance TBD otherwise) |
 | RP-4.5 determinism | §6 rules + Threats (total ordering; no wall-clock/env/cache) |
 | RP-4.6 output ↔ manifest link | §6 (record id in response; `manifest_key`/`manifest_hash`) |
 | RP-4.7 isolated re-execution | §5 (read-only replay; fork-not-dump) |
-| RP-4.8 periodic re-verification | §5 (self-check + historical sampling) |
+| RP-4.8 periodic re-verification | §5 (assurance sampling job, recent + historical) |
 | AR-1.2/1.3/1.5/1.6/1.7, PR-2.1/2.5, NFR-1..8, DP-1..10 | Auditability ADR (separate) |
 
 ## Alternatives Considered
@@ -549,7 +558,7 @@ manifest exactly and off the request path.
 
 **Manifest always built synchronously inside the request** — the "naive" shape from VEC-244;
 exact, but read amplification lands on the request path for protocol-wide models. Allowed where
-the calculation already holds its rows; otherwise asynchronous generation from the recorded
+the calculation already holds its rows; otherwise on-demand generation from the recorded
 snapshot, which is equally exact.
 
 **Archive raw off-chain responses** — not required; off-chain data points carry no reproduction
@@ -580,7 +589,8 @@ lower cost; `RULE … DO INSTEAD NOTHING` fails silently. Rejected.
 - Two more small columns on governed rows (`run_id`, `archive_batch`) and two small registry
   tables; every binary (including the Python API) opens a run at startup and snapshots its reference data.
 - Governed tables can never be retention-pruned; storage is bounded by compression + tiering only.
-- Manifests carry input values, so S3 grows with calculation volume; a background job and its
+- Manifests carry input values but are generated on demand, so archive storage grows with
+  audit/assurance demand rather than calculation volume; the assurance sampling job and its
   monitoring become part of the calculation path.
 - Container-registry storage grows without bound (one image per production build, ~1.6/day
   today); no lifecycle rules on the production repositories.
