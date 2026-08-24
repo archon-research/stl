@@ -56,6 +56,69 @@ func newTestBlockchainClient() *testutil.MockBlockchainClient {
 // Test Cases
 // =============================================================================
 
+// TestRun_ShutsDownCleanlyOnContextCancel drives run end to end against the
+// shared test services, then cancels its context and asserts it unwinds without
+// error. ALCHEMY_WS_URL points at a dead port on purpose: Subscribe hands the
+// connection to a background retry loop, so startup never waits on a live chain.
+func TestRun_ShutsDownCleanlyOnContextCancel(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	_, dsn, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
+	t.Cleanup(dbCleanup)
+
+	awsCfg, err := awsconfig.LoadDefaultConfig(ctx,
+		awsconfig.WithRegion(sharedLocalStackCfg.Region),
+		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "")),
+	)
+	if err != nil {
+		t.Fatalf("failed to load AWS config: %v", err)
+	}
+	snsClient := sns.NewFromConfig(awsCfg, func(o *sns.Options) {
+		o.BaseEndpoint = aws.String(sharedLocalStackCfg.Endpoint)
+	})
+	topics := createSNSTopics(t, ctx, snsClient, testutil.SanitizeTestName(t.Name()))
+
+	t.Setenv("CHAIN_ID", "1")
+	t.Setenv("DATABASE_URL", dsn)
+	t.Setenv("REDIS_ADDR", sharedRedisAddr)
+	t.Setenv("ALCHEMY_API_KEY", "test-key")
+	t.Setenv("ALCHEMY_WS_URL", "ws://127.0.0.1:1")
+	t.Setenv("ALCHEMY_HTTP_URL", "http://127.0.0.1:1")
+	t.Setenv("AWS_SNS_ENDPOINT", sharedLocalStackCfg.Endpoint)
+	t.Setenv("AWS_SNS_TOPIC_ARN", topics["blocks"])
+	t.Setenv("AWS_ACCESS_KEY_ID", "test")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
+	t.Setenv("AWS_REGION", sharedLocalStackCfg.Region)
+
+	runCtx, stopRun := context.WithCancel(ctx)
+	defer stopRun()
+
+	done := make(chan error, 1)
+	go func() { done <- run(runCtx, cliOptions{}) }()
+
+	const startupSettle = 5 * time.Second
+	select {
+	case err := <-done:
+		t.Fatalf("run returned during startup: %v", err)
+	case <-time.After(startupSettle):
+	}
+
+	stopRun()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run returned an error on graceful shutdown: %v", err)
+		}
+	case <-time.After(shutdownTimeout + cleanupTimeout):
+		t.Fatal("run did not return after its context was cancelled")
+	}
+}
+
 // TestLiveService_ProcessesNewBlock tests the full flow of processing a new block.
 func TestLiveService_ProcessesNewBlock(t *testing.T) {
 	if testing.Short() {
