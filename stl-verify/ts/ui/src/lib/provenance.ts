@@ -127,12 +127,19 @@ export function preferReference(
  *
  * Applied once where the response is held, so no view can disagree with another
  * about which provenance it is showing.
+ *
+ * Only a composite response has a half to clear. A single-provenance fetch
+ * already answers in the bare fields — under `source=reference` Sky's figures
+ * arrive there with `reference_*` null — so narrowing it again would clear the
+ * very fields carrying the chosen provenance and render every figure as n/a.
  */
 export function narrowRiskCapital(
   view: Provenance,
   response: PrimeRiskCapital | null,
 ): PrimeRiskCapital | null {
-  if (response === null || view === 'both') return response;
+  if (response === null || view === 'both' || PROVENANCE !== 'both') {
+    return response;
+  }
 
   const sky = view === 'reference';
   const drop = <T>(value: T, isSkys: boolean): T | null =>
