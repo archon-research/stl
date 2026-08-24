@@ -59,6 +59,14 @@ def test_env_var_can_override_protocol_from_market_config(market_configs_path, m
     assert cfg.params["PROTOCOL"] == "AAVE"
 
 
+def test_every_default_param_is_env_overridable(market_configs_path, monkeypatch):
+    # The env-var names are derived from DEFAULTS, so no param can be silently
+    # missing from a hand-kept map (TIME_INTERVAL was, before this derivation).
+    monkeypatch.setattr(os, "environ", _env({"CORE_MODEL_TIME_INTERVAL": "1h"}))
+    cfg = _one("sparklend_usdt", market_configs_path)
+    assert cfg.params["TIME_INTERVAL"] == "1h"
+
+
 def test_market_key_stored_on_config(market_configs_path, monkeypatch):
     monkeypatch.setattr(os, "environ", _env())
     cfg = _one("sparklend_usdt", market_configs_path)
