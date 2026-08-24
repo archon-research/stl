@@ -1,10 +1,12 @@
 package orderbook
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
@@ -25,6 +27,12 @@ const (
 	// below 30.
 	okxMaxSymbols   = 29
 	okxPingInterval = 20 * time.Second
+
+	okxRESTBase        = "https://www.okx.com"
+	okxInstrumentsPath = "/api/v5/public/instruments"
+	// okxStateLive is the only instrument state that accepts orders; everything
+	// else (suspend, preopen, expired, rebase) is listed but not tradeable.
+	okxStateLive = "live"
 )
 
 // NewOKXProvider creates a provider that streams L2 books from OKX. The books
@@ -37,10 +45,12 @@ const (
 //
 // Docs: https://www.okx.com/docs-v5/en/#order-book-trading-market-data-ws-order-book-channel
 func NewOKXProvider(cfg Config) (outbound.OrderbookProvider, error) {
-	return newFeedProvider(cfg, &okxExchange{}, okxMaxSymbols)
+	return newFeedProvider(cfg, &okxExchange{restBase: okxRESTBase}, okxMaxSymbols)
 }
 
-type okxExchange struct{}
+type okxExchange struct {
+	restBase string
+}
 
 // Compile-time check that okxExchange supplies an application-level keepalive.
 var _ appPinger = (*okxExchange)(nil)
@@ -51,6 +61,34 @@ func (e *okxExchange) endpoint() string { return okxWSBase }
 func (e *okxExchange) normalizeSymbol(s string) (string, error) {
 	return normalizeSeparatedPair(s, "-")
 }
+
+// instruments lists OKX spot instruments, keyed by instId. OKX reports
+// application errors with HTTP 200 and a non-zero code, so the body decides
+// success.
+func (e *okxExchange) instruments(ctx context.Context) (map[string]bool, error) {
+	var resp struct {
+		Code string `json:"code"`
+		Msg  string `json:"msg"`
+		Data []struct {
+			InstID string `json:"instId"`
+			State  string `json:"state"`
+		} `json:"data"`
+	}
+	if err := fetchJSON(ctx, e.restBase+okxInstrumentsPath+"?instType=SPOT", &resp); err != nil {
+		return nil, err
+	}
+	if resp.Code != "0" {
+		return nil, fmt.Errorf("okx instruments: code %s: %s", resp.Code, resp.Msg)
+	}
+	tradeable := make(map[string]bool, len(resp.Data))
+	for _, inst := range resp.Data {
+		if inst.State == okxStateLive {
+			tradeable[strings.ToUpper(inst.InstID)] = true
+		}
+	}
+	return tradeable, nil
+}
+
 func (e *okxExchange) newHandler(group []string, logger *slog.Logger) frameHandler {
 	return &okxHandler{
 		books:   newBookSet(exchangeOKX),

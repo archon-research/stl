@@ -20,14 +20,30 @@ import (
 // fakeExchange is a minimal exchangeFeed for feed tests. Frames are
 // {"symbol","snapshot","price","size"} JSON objects applied to the bid side.
 type fakeExchange struct {
-	url string
+	url      string
+	instrs   map[string]bool // tradeable set; nil means fakeInstruments
+	instrErr error
 
 	mu     sync.Mutex
 	groups [][]string // symbol groups passed to subscribeMessages
 }
 
+// fakeInstruments is the fake venue's tradeable set: the symbols the feed tests
+// subscribe to, so startup validation passes without each test declaring them.
+var fakeInstruments = symbolSet([]string{"X", "BTC-USD"})
+
 func (e *fakeExchange) name() string     { return "fake" }
 func (e *fakeExchange) endpoint() string { return e.url }
+
+func (e *fakeExchange) instruments(context.Context) (map[string]bool, error) {
+	if e.instrErr != nil {
+		return nil, e.instrErr
+	}
+	if e.instrs != nil {
+		return e.instrs, nil
+	}
+	return fakeInstruments, nil
+}
 
 // normalizeSymbol is permissive: it only upper-cases, so the feed test's "X"
 // symbol still passes.
@@ -280,6 +296,28 @@ func TestWatchDedupsNormalizedSymbols(t *testing.T) {
 	groups := ex.subscribedGroups()
 	if len(groups) != 1 || len(groups[0]) != 1 || groups[0][0] != "BTC-USD" {
 		t.Fatalf("subscribed groups = %v, want one group with the single deduped symbol BTC-USD", groups)
+	}
+}
+
+// TestWatchRejectsUnknownSymbolBeforeConnecting: a misspelled symbol must fail
+// the worker at startup rather than dial and then silently never sync.
+func TestWatchRejectsUnknownSymbolBeforeConnecting(t *testing.T) {
+	var conns atomic.Int32
+	srv := newWSTestServer(t, func(conn *websocket.Conn) {
+		conns.Add(1)
+		keepOpen(conn)
+	})
+	p := newTestFeedProvider(t, testConfig(), &fakeExchange{url: srv.url}, 10)
+
+	_, err := p.Watch(t.Context(), []string{"X", "NOPE"})
+	if err == nil {
+		t.Fatal("expected Watch to reject a symbol the venue does not trade")
+	}
+	if !strings.Contains(err.Error(), "NOPE") {
+		t.Errorf("error %q does not name the bad symbol", err)
+	}
+	if got := conns.Load(); got != 0 {
+		t.Errorf("connections opened = %d, want 0 before validation passes", got)
 	}
 }
 

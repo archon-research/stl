@@ -414,3 +414,36 @@ func TestKrakenProviderNameAndValidation(t *testing.T) {
 		t.Error("Watch with no symbols should error")
 	}
 }
+
+// TestKrakenInstrumentsKeysOnWSName: the book channel addresses pairs by wsname
+// ("XBT/USD"), not by the AssetPairs map key ("XXBTZUSD").
+func TestKrakenInstrumentsKeysOnWSName(t *testing.T) {
+	base := newRESTTestServer(t, map[string]restResponse{krakenAssetPairsPath: {body: `{"error":[],"result":{
+		"XXBTZUSD":{"wsname":"XBT/USD","status":"online"},
+		"XETHZUSD":{"wsname":"ETH/USD","status":"cancel_only"},
+		"OLDPAIR":{"wsname":"OLD/USD","status":"post_only"}
+	}}}`}})
+
+	got, err := (&krakenExchange{restBase: base}).instruments(t.Context())
+	if err != nil {
+		t.Fatalf("instruments: %v", err)
+	}
+	assertTradeable(t, got, map[string]bool{
+		"XBT/USD":  true,
+		"XXBTZUSD": false,
+		"ETH/USD":  false,
+		"OLD/USD":  false,
+	})
+}
+
+// TestKrakenInstrumentsFailsOnAPIError: Kraken reports failures in the error
+// array with HTTP 200.
+func TestKrakenInstrumentsFailsOnAPIError(t *testing.T) {
+	base := newRESTTestServer(t, map[string]restResponse{
+		krakenAssetPairsPath: {body: `{"error":["EGeneral:Invalid arguments"],"result":{}}`},
+	})
+
+	if _, err := (&krakenExchange{restBase: base}).instruments(t.Context()); err == nil {
+		t.Fatal("expected an error for a populated Kraken error array")
+	}
+}

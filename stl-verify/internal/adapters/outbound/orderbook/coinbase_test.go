@@ -155,6 +155,34 @@ func TestCoinbaseProviderNameAndValidation(t *testing.T) {
 	}
 }
 
+func TestCoinbaseInstrumentsHonoursDisabledFlags(t *testing.T) {
+	base := newRESTTestServer(t, map[string]restResponse{coinbaseProductsPath: {body: `{"products":[
+		{"product_id":"BTC-USD","status":"online","trading_disabled":false,"is_disabled":false},
+		{"product_id":"OLD-USD","status":"delisted","trading_disabled":true,"is_disabled":true},
+		{"product_id":"HALT-USD","status":"online","trading_disabled":true,"is_disabled":false},
+		{"product_id":"OFF-USD","status":"online","trading_disabled":false,"is_disabled":true}
+	]}`}})
+
+	got, err := (&coinbaseExchange{restBase: base}).instruments(t.Context())
+	if err != nil {
+		t.Fatalf("instruments: %v", err)
+	}
+	assertTradeable(t, got, map[string]bool{
+		"BTC-USD":  true,
+		"OLD-USD":  false,
+		"HALT-USD": false,
+		"OFF-USD":  false,
+	})
+}
+
+func TestCoinbaseInstrumentsFailsOnUnavailableEndpoint(t *testing.T) {
+	base := newRESTTestServer(t, map[string]restResponse{coinbaseProductsPath: {status: 503, body: `{}`}})
+
+	if _, err := (&coinbaseExchange{restBase: base}).instruments(t.Context()); err == nil {
+		t.Fatal("expected an error when the products endpoint is unavailable")
+	}
+}
+
 func TestParseRFC3339OrZero(t *testing.T) {
 	want := time.Date(2023, 2, 9, 20, 32, 50, 0, time.UTC)
 	if got := parseRFC3339OrZero("2023-02-09T20:32:50Z"); !got.Equal(want) {

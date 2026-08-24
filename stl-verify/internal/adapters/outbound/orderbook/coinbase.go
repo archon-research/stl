@@ -1,9 +1,11 @@
 package orderbook
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
@@ -22,6 +24,12 @@ const (
 	// response names intentionally differ, so they are pinned here together.
 	coinbaseSubscribeChannel = "level2"
 	coinbaseDataChannel      = "l2_data"
+
+	coinbaseRESTBase     = "https://api.coinbase.com"
+	coinbaseProductsPath = "/api/v3/brokerage/market/products"
+	// coinbaseStatusOnline is the only product status that trades; "delisted"
+	// products stay in the listing.
+	coinbaseStatusOnline = "online"
 )
 
 // NewCoinbaseProvider creates a provider that streams L2 books from Coinbase
@@ -36,10 +44,12 @@ const (
 //
 // Docs: https://docs.cdp.coinbase.com/coinbase-app/advanced-trade-apis/websocket/websocket-channels
 func NewCoinbaseProvider(cfg Config) (outbound.OrderbookProvider, error) {
-	return newFeedProvider(cfg, &coinbaseExchange{}, coinbaseMaxSymbols)
+	return newFeedProvider(cfg, &coinbaseExchange{restBase: coinbaseRESTBase}, coinbaseMaxSymbols)
 }
 
-type coinbaseExchange struct{}
+type coinbaseExchange struct {
+	restBase string
+}
 
 func (e *coinbaseExchange) name() string     { return exchangeCoinbase }
 func (e *coinbaseExchange) endpoint() string { return coinbaseWSBase }
@@ -47,6 +57,31 @@ func (e *coinbaseExchange) endpoint() string { return coinbaseWSBase }
 func (e *coinbaseExchange) normalizeSymbol(s string) (string, error) {
 	return normalizeSeparatedPair(s, "-")
 }
+
+// instruments lists Coinbase spot products by product_id. A product carries
+// three independent kill switches (status, trading_disabled, is_disabled), all
+// of which must be clear for it to trade.
+func (e *coinbaseExchange) instruments(ctx context.Context) (map[string]bool, error) {
+	var resp struct {
+		Products []struct {
+			ProductID       string `json:"product_id"`
+			Status          string `json:"status"`
+			TradingDisabled bool   `json:"trading_disabled"`
+			IsDisabled      bool   `json:"is_disabled"`
+		} `json:"products"`
+	}
+	if err := fetchJSON(ctx, e.restBase+coinbaseProductsPath+"?product_type=SPOT", &resp); err != nil {
+		return nil, err
+	}
+	tradeable := make(map[string]bool, len(resp.Products))
+	for _, p := range resp.Products {
+		if p.Status == coinbaseStatusOnline && !p.TradingDisabled && !p.IsDisabled {
+			tradeable[strings.ToUpper(p.ProductID)] = true
+		}
+	}
+	return tradeable, nil
+}
+
 func (e *coinbaseExchange) newHandler(group []string, logger *slog.Logger) frameHandler {
 	return &coinbaseHandler{
 		books:        newBookSet(exchangeCoinbase),

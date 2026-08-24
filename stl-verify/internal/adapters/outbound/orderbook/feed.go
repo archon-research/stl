@@ -69,6 +69,11 @@ type exchangeFeed interface {
 	normalizeSymbol(symbol string) (string, error)
 	// endpoint returns the WebSocket URL.
 	endpoint() string
+	// instruments returns the venue's currently tradeable symbols, in the same
+	// normalized form normalizeSymbol produces. Mandatory: every venue must be
+	// able to answer "is this symbol real", because a venue that cannot is one
+	// where a typo stays invisible.
+	instruments(ctx context.Context) (map[string]bool, error)
 	// subscribeMessages returns the frames to send after connecting.
 	subscribeMessages(group []string) []any
 	// newHandler creates a fresh frame handler for one connection, scoped to the
@@ -146,7 +151,8 @@ func newFeedProvider(cfg Config, exchange exchangeFeed, maxSymbols int) (*feedPr
 func (p *feedProvider) Name() string { return p.exchange.name() }
 
 // Watch subscribes to symbols and streams aggregated books, splitting symbols
-// across the fewest connections the exchange allows.
+// across the fewest connections the exchange allows. It errors before
+// connecting when the venue does not trade every configured symbol.
 func (p *feedProvider) Watch(ctx context.Context, symbols []string) (<-chan entity.OrderbookUpdate, error) {
 	if len(symbols) == 0 {
 		return nil, errors.New("at least one symbol is required")
@@ -155,7 +161,11 @@ func (p *feedProvider) Watch(ctx context.Context, symbols []string) (<-chan enti
 	if err != nil {
 		return nil, err
 	}
-	groups := chunkSymbols(dedupSymbols(symbols), p.maxSymbols)
+	symbols = dedupSymbols(symbols)
+	if err := validateSymbols(ctx, p.exchange, symbols); err != nil {
+		return nil, err
+	}
+	groups := chunkSymbols(symbols, p.maxSymbols)
 	out := runConnections(ctx, groups, p.cfg.OutputBuffer, func(ctx context.Context, group []string, out chan<- entity.OrderbookUpdate) {
 		reconnectLoop(ctx, p.cfg, p.logger, p.metrics, func(ctx context.Context, ready func()) error {
 			return p.runConnection(ctx, group, out, ready)
