@@ -1,0 +1,66 @@
+# One-off VEC-639 snapshot of every historical Uniswap V4 LP position. The live
+# indexer learns a position only from a ModifyLiquidity log, so one minted before
+# it went live and never touched since is invisible to it forever; this run
+# replays that whole history and reads each discovered key at one finality-safe
+# block.
+#
+# Deliberately NOT referenced by the staging/prod overlays and NOT an argocd
+# PreSync hook: it is expensive (an eth_getLogs sweep of all V4 history plus a
+# multicall per position) and runs on demand, so it must not fire on every sync.
+# Apply it per env by hand, after the indexer is deployed:
+#
+#   kustomize build k8s/base/uniswap-v4-position-bootstrap | kubectl -n vector apply -f -
+#   kubectl -n vector wait --for=condition=complete job/uniswap-v4-position-bootstrap --timeout=…
+#   kubectl -n vector delete job uniswap-v4-position-bootstrap   # when done
+#
+# Set the image to the uniswap-v4-position-bootstrap-<sha> tag in that env's
+# shared cronjob ECR repo (make docker-release-uniswap-v4-position-bootstrap).
+# Re-running is safe: the append-on-change writer inserts only where the stored
+# state for a slot differs.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: uniswap-v4-position-bootstrap
+spec:
+  # No auto-retry. A restart re-derives its own head-64 pin, which would stitch
+  # one snapshot across two heights; resume a failed run by hand with -pin, taking
+  # the block from the failure ("resume this snapshot with -pin ..."). See
+  # docs/runbooks/vector-indexers.md#uniswap-v4-indexer-vec-475.
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: uniswap-v4-position-bootstrap
+    spec:
+      # The indexer's ServiceAccount, ConfigMap and Secret: this run backfills the
+      # same table that indexer fills, off the same chain, endpoint and database.
+      # All three exist because the bootstrap is only ever run after it deploys,
+      # and splitting them would leave two copies of one DATABASE_URL to rotate.
+      serviceAccountName: uniswap-v4-indexer
+      restartPolicy: Never
+      containers:
+        - name: uniswap-v4-position-bootstrap
+          # Image name used as the Kustomize images transformer key; pin the tag
+          # when applying (this base is not in any overlay, so ArgoCD sets none).
+          image: uniswap-v4-position-bootstrap
+          # No args: the pin defaults to head - 64 and the scan start to the
+          # lowest registered deploy_block. Add -pin to resume an interrupted
+          # run, or -from to narrow a re-scan.
+          envFrom:
+            # CHAIN_ID + ALCHEMY_HTTP_URL.
+            - configMapRef:
+                name: uniswap-v4-indexer-config
+            # ALCHEMY_API_KEY + DATABASE_URL, populated by the indexer's
+            # ExternalSecret.
+            - secretRef:
+                name: uniswap-v4-indexer
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              # One multicall batch holds 500 getPositionInfo results and the
+              # scan holds one window's logs, so peak memory is bounded by the
+              # widest window rather than by history length.
+              cpu: "1000m"
+              memory: "512Mi"

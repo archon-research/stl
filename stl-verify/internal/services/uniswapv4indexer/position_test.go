@@ -326,11 +326,6 @@ func TestDecodePosition_FailureModes(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// ReadPositions — the hash-pinned batched read shared by the per-block indexer
-// and the one-shot position bootstrap.
-// ---------------------------------------------------------------------------
-
 // positionKeysN builds n distinct keys, varying only the salt.
 func positionKeysN(n int) []entity.UniswapV4PositionKey {
 	keys := make([]entity.UniswapV4PositionKey, n)

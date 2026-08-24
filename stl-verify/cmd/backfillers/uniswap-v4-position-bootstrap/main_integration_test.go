@@ -459,6 +459,19 @@ func TestRunIntegration_PropagatesAScanFailure(t *testing.T) {
 	}
 }
 
+func TestRunIntegration_AFailureAfterPinningNamesThePinToResumeWith(t *testing.T) {
+	_, args := setupRun(t, mockChainOptions{getLogsFatal: true})
+
+	err := run(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected an error: every log query failed")
+	}
+	want := "-pin " + strconv.FormatInt(pinnedBlock, 10)
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("error = %v, want it to carry %q so the same snapshot can be resumed", err, want)
+	}
+}
+
 func TestRunIntegration_RejectsAnUndialableRPCEndpoint(t *testing.T) {
 	_, dbURL, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	t.Cleanup(cleanup)

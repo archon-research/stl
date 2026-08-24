@@ -121,6 +121,13 @@ func (r *fakeUniswapRepo) SaveBlock(_ context.Context, _ pgx.Tx, w outbound.Unis
 	return counts, nil
 }
 
+func (r *fakeUniswapRepo) SavePositions(context.Context, pgx.Tx, []*entity.UniswapV4Position) (int64, error) {
+	return 0, fmt.Errorf("fake: SavePositions is the bootstrap's write path; the live indexer persists positions through SaveBlock")
+}
+
+// fakeEventRepo counts saved events, satisfying outbound.EventRepository. err,
+// when set, makes SaveBatch fail so tests can exercise the persist path where
+// the typed write succeeds but the captured-events write does not.
 type fakeEventRepo struct {
 	events []*entity.ProtocolEvent
 	err    error

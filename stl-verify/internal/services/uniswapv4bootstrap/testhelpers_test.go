@@ -147,6 +147,9 @@ type fakeLogScanClient struct {
 
 	Head    int64
 	HeadErr error
+	// HeadCalls counts head reads, which is how "an explicit pin is still
+	// checked against the head" is distinguished from "the head is skipped".
+	HeadCalls int
 	// HeaderByNumber answers GetBlockHeaderByNumber. A missing height is an
 	// error, so a test never silently pins a block it did not configure.
 	HeaderByNumber map[int64]*outbound.BlockHeader
@@ -164,6 +167,10 @@ func newFakeLogScanClient(head int64, headers map[int64]*outbound.BlockHeader) *
 }
 
 func (f *fakeLogScanClient) GetCurrentBlockNumber(_ context.Context) (int64, error) {
+	f.mu.Lock()
+	f.HeadCalls++
+	f.mu.Unlock()
+
 	if f.HeadErr != nil {
 		return 0, f.HeadErr
 	}
@@ -206,22 +213,26 @@ func header(blockNumber int64, hash string) *outbound.BlockHeader {
 	}
 }
 
-// fakeUniswapV4Repository records SaveBlock's writes. Every other port method
-// errors: the bootstrap must not reach for the per-block reorg helpers, and a
-// silent nil would hide it doing so.
+// fakeUniswapV4Repository records SavePositions' batches. Every other port
+// method errors: the bootstrap writes positions and nothing else, and must not
+// reach for the per-block reorg helpers — a silent nil would hide it doing so.
 type fakeUniswapV4Repository struct {
-	SaveBlockFn func(outbound.UniswapV4BlockWrites) error
-	Saved       []outbound.UniswapV4BlockWrites
+	// SavePositionsFn overrides one batch's outcome. The returned count stands in
+	// for the rows the append-on-change writer actually inserted.
+	SavePositionsFn func([]*entity.UniswapV4Position) (int64, error)
+	SavedBatches    [][]*entity.UniswapV4Position
 }
 
-func (f *fakeUniswapV4Repository) SaveBlock(_ context.Context, _ pgx.Tx, w outbound.UniswapV4BlockWrites) (int64, error) {
-	f.Saved = append(f.Saved, w)
-	if f.SaveBlockFn != nil {
-		if err := f.SaveBlockFn(w); err != nil {
-			return 0, err
-		}
+func (f *fakeUniswapV4Repository) SavePositions(_ context.Context, _ pgx.Tx, positions []*entity.UniswapV4Position) (int64, error) {
+	f.SavedBatches = append(f.SavedBatches, positions)
+	if f.SavePositionsFn != nil {
+		return f.SavePositionsFn(positions)
 	}
-	return 0, nil
+	return int64(len(positions)), nil
+}
+
+func (f *fakeUniswapV4Repository) SaveBlock(context.Context, pgx.Tx, outbound.UniswapV4BlockWrites) (outbound.StateRowCounts, error) {
+	return outbound.StateRowCounts{}, errors.New("fake: SaveBlock writes a whole block; the bootstrap owns positions only")
 }
 
 func (f *fakeUniswapV4Repository) LoadPools(context.Context, int64) ([]outbound.UniswapV4PoolRow, error) {
@@ -232,7 +243,7 @@ func (f *fakeUniswapV4Repository) PoolIDsWithStateAtBlock(context.Context, int64
 	return nil, errors.New("fake: PoolIDsWithStateAtBlock is a reorg-path read the bootstrap must not make")
 }
 
-func (f *fakeUniswapV4Repository) TicksForPoolAtBlock(context.Context, int64, int64) ([]int32, error) {
+func (f *fakeUniswapV4Repository) TicksForPoolAtBlock(context.Context, int64, int64, int64) ([]int32, error) {
 	return nil, errors.New("fake: TicksForPoolAtBlock is a reorg-path read the bootstrap must not make")
 }
 
@@ -244,13 +255,53 @@ func (f *fakeUniswapV4Repository) PoolIDsEverSnapshotted(context.Context, int64)
 	return nil, errors.New("fake: PoolIDsEverSnapshotted is a live-service read the bootstrap must not make")
 }
 
-// savedPositions flattens every SaveBlock's position rows in write order.
+// savedPositions flattens every batch's rows in write order.
 func (f *fakeUniswapV4Repository) savedPositions() []*entity.UniswapV4Position {
 	var all []*entity.UniswapV4Position
-	for _, w := range f.Saved {
-		all = append(all, w.Positions...)
+	for _, batch := range f.SavedBatches {
+		all = append(all, batch...)
 	}
 	return all
+}
+
+// capturedLogs is a slog.Handler that keeps every record, so a test can assert
+// on a per-batch log field the Summary deliberately does not carry.
+type capturedLogs struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (c *capturedLogs) Enabled(context.Context, slog.Level) bool { return true }
+
+func (c *capturedLogs) Handle(_ context.Context, record slog.Record) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.records = append(c.records, record.Clone())
+	return nil
+}
+
+func (c *capturedLogs) WithAttrs([]slog.Attr) slog.Handler { return c }
+func (c *capturedLogs) WithGroup(string) slog.Handler      { return c }
+
+// int64Field returns key's value from every record whose message is msg, in
+// emission order.
+func (c *capturedLogs) int64Field(msg, key string) []int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	var values []int64
+	for _, record := range c.records {
+		if record.Message != msg {
+			continue
+		}
+		record.Attrs(func(attr slog.Attr) bool {
+			if attr.Key == key {
+				values = append(values, attr.Value.Int64())
+			}
+			return true
+		})
+	}
+	return values
 }
 
 // positionReturningMulticaller answers every getPositionInfo sub-call with the

@@ -121,14 +121,16 @@ func TestLiveValidation_OversizedRangeIsClassifiedAsARangeRefusal(t *testing.T) 
 	t.Logf("provider refused %d blocks as expected: %v", filter.ToBlock-filter.FromBlock+1, err)
 }
 
-// liveScanBlocks is how much recent history the coverage test walks. It is
-// unfiltered by pool, so this is dense enough to force several bisects while
-// staying a bounded number of requests.
+// liveScanBlocks is how much recent history the coverage test walks: enough to
+// exercise several windows against the real provider, few enough to stay a
+// bounded number of requests.
 const liveScanBlocks = int64(100_000)
 
 // TestLiveValidation_AdaptiveScanCoversTheRangeAgainstTheRealProvider drives
-// the scanner end to end over a stretch dense enough to force at least one
-// bisect, and checks the windows tile the range with no gap.
+// the scanner end to end against the real provider and checks the windows tile
+// the range with no gap. It deliberately asserts nothing about narrowings: how
+// often the provider refuses depends on chain density in the fortnight it runs,
+// and the refusal wording has its own density-independent test above.
 func TestLiveValidation_AdaptiveScanCoversTheRangeAgainstTheRealProvider(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
@@ -160,9 +162,6 @@ func TestLiveValidation_AdaptiveScanCoversTheRangeAgainstTheRealProvider(t *test
 	}
 	if next != to+1 {
 		t.Errorf("scan stopped at %d, want %d", next-1, to)
-	}
-	if stats.narrowings == 0 {
-		t.Errorf("narrowings = 0: starting at the full %d-block range should have been refused at least once", liveScanBlocks)
 	}
 	t.Logf("scanned %d blocks in %d windows with %d narrowings, %d logs", to-from+1, stats.windows, stats.narrowings, stats.logs)
 }

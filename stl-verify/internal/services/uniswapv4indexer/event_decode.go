@@ -5,7 +5,6 @@ import (
 	"maps"
 	"math/big"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -213,21 +212,19 @@ func indexedPoolID(ev abi.Event, log shared.Log) (common.Hash, error) {
 // character, so one corrupted character would silently become a registry miss or
 // a wrong sender or transaction hash on a persisted row.
 func assertHexWords(log shared.Log) error {
-	if !isHexWord(log.TransactionHash) {
+	if !shared.IsHexWord(log.TransactionHash) {
 		return fmt.Errorf("log (index %s) transaction hash %q is not a 32-byte hex word", log.LogIndex, log.TransactionHash)
 	}
 	for i, topic := range log.Topics {
-		if !isHexWord(topic) {
+		if !shared.IsHexWord(topic) {
 			return fmt.Errorf("log (index %s) topic %d %q is not a 32-byte hex word", log.LogIndex, i, topic)
 		}
 	}
 	return nil
 }
 
-func isHexWord(value string) bool {
-	return len(value) == 66 && strings.HasPrefix(value, "0x") && common.IsHexHash(value)
-}
-
+// decodeAndCapture ABI-decodes a known event and mirrors it into the capture
+// net, returning the decoded fields for any typed entity built from them.
 func (d *receiptDecoder) decodeAndCapture(ev abi.Event, log shared.Log, site logSite) (map[string]any, error) {
 	data, err := shared.DecodeLog(ev, log)
 	if err != nil {

@@ -32,9 +32,8 @@ func TestPinBlock_PinsFinalityDepthBelowHead(t *testing.T) {
 	}
 }
 
-func TestPinBlock_ExplicitOverrideSkipsTheHeadRead(t *testing.T) {
-	client := newFakeLogScanClient(0, map[int64]*outbound.BlockHeader{500: header(500, pinHash)})
-	client.HeadErr = errors.New("head must not be read when the pin is given")
+func TestPinBlock_ExplicitOverrideIsStillCheckedAgainstTheHead(t *testing.T) {
+	client := newFakeLogScanClient(1000, map[int64]*outbound.BlockHeader{500: header(500, pinHash)})
 
 	pin, err := pinBlock(context.Background(), client, 64, 500)
 	if err != nil {
@@ -42,6 +41,26 @@ func TestPinBlock_ExplicitOverrideSkipsTheHeadRead(t *testing.T) {
 	}
 	if pin.number != 500 {
 		t.Errorf("number = %d, want 500", pin.number)
+	}
+	if client.HeadCalls != 1 {
+		t.Errorf("head reads = %d, want 1: an override must still be proven past finality", client.HeadCalls)
+	}
+}
+
+func TestPinBlock_RefusesAnOverrideInsideTheReorgWindow(t *testing.T) {
+	client := newFakeLogScanClient(1000, map[int64]*outbound.BlockHeader{990: header(990, pinHash)})
+
+	_, err := pinBlock(context.Background(), client, 64, 990)
+	if err == nil {
+		t.Fatal("expected an error: block 990 is inside the 64-block reorg window below head 1000")
+	}
+	for _, want := range []string{"990", "1000", "936"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %v, want it to name %s (the pin, the head and the deepest safe block)", err, want)
+		}
+	}
+	if client.HeaderCalls != 0 {
+		t.Errorf("header reads = %d, want 0: a refused pin must not be read", client.HeaderCalls)
 	}
 }
 

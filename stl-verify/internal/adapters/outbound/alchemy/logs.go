@@ -18,12 +18,13 @@ import (
 // Compile-time check that Client implements outbound.LogScanClient.
 var _ outbound.LogScanClient = (*Client)(nil)
 
-// rangeRefusalPhrases are the provider wordings that mean "this range yields
-// too much", across the endpoints this client is pointed at (Alchemy, Infura,
-// Erigon). Matching on prose is unavoidable: JSON-RPC error codes are reused
-// for unrelated failures (-32602 is also a malformed filter), so the code alone
-// cannot separate "narrow the range and retry" from "the request is wrong".
-// Matched lowercased, as a substring.
+// rangeRefusalPhrases are the wordings that mean "this range yields too much".
+// Only Alchemy's is verified against the live API (livevalidation gate in
+// uniswapv4bootstrap); the rest are extra nets, not a coverage claim for any
+// other provider. Matching on prose is unavoidable: JSON-RPC error codes are
+// reused for unrelated failures (-32602 is also a malformed filter), so the
+// code alone cannot separate "narrow the range and retry" from "the request is
+// wrong". Matched lowercased, as a substring.
 var rangeRefusalPhrases = []string{
 	"log response size exceeded",
 	"response size exceeded",

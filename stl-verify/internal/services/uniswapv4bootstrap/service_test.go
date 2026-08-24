@@ -3,6 +3,8 @@ package uniswapv4bootstrap
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"math/big"
 	"strings"
 	"testing"
@@ -68,10 +70,6 @@ func newFixture(t *testing.T, mutate func(*Deps)) *bootstrapFixture {
 	}
 	return &bootstrapFixture{svc: svc, client: client, repo: repo, mc: mc, txMgr: txMgr}
 }
-
-// ---------------------------------------------------------------------------
-// Construction
-// ---------------------------------------------------------------------------
 
 func TestNew_RejectsIncompleteDeps(t *testing.T) {
 	tests := []struct {
@@ -144,10 +142,6 @@ func TestNew_ScansOnlySnapshotSupportedPools(t *testing.T) {
 		t.Fatalf("scanned pools = %d, want 2: the registry's snapshot gate excludes the third", got)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Run
-// ---------------------------------------------------------------------------
 
 func TestRun_PersistsOnePositionPerDiscoveredKeyAtThePinnedBlock(t *testing.T) {
 	f := newFixture(t, nil)
@@ -312,8 +306,8 @@ func TestRun_ReorgedPinStopsBeforeAnyWrite(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error: the pinned block was reorged")
 	}
-	if len(f.repo.Saved) != 0 {
-		t.Errorf("SaveBlock calls = %d, want 0: nothing may be written against a moved pin", len(f.repo.Saved))
+	if len(f.repo.SavedBatches) != 0 {
+		t.Errorf("write batches = %d, want 0: nothing may be written against a moved pin", len(f.repo.SavedBatches))
 	}
 }
 
@@ -331,16 +325,11 @@ func TestRun_ChunksReadsAndWritesAtThePositionBatch(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	if len(f.repo.Saved) != 2 {
-		t.Fatalf("SaveBlock calls = %d, want 2 (batches of 2 and 1)", len(f.repo.Saved))
+	if len(f.repo.SavedBatches) != 2 {
+		t.Fatalf("write batches = %d, want 2 (batches of 2 and 1)", len(f.repo.SavedBatches))
 	}
-	if len(f.repo.Saved[0].Positions) != 2 || len(f.repo.Saved[1].Positions) != 1 {
-		t.Errorf("batch sizes = %d/%d, want 2/1", len(f.repo.Saved[0].Positions), len(f.repo.Saved[1].Positions))
-	}
-	for i, w := range f.repo.Saved {
-		if len(w.States)+len(w.Swaps)+len(w.LiquidityEvents)+len(w.Ticks)+len(w.PoolEvents) != 0 {
-			t.Errorf("batch %d writes tables other than uniswap_v4_position", i)
-		}
+	if len(f.repo.SavedBatches[0]) != 2 || len(f.repo.SavedBatches[1]) != 1 {
+		t.Errorf("batch sizes = %d/%d, want 2/1", len(f.repo.SavedBatches[0]), len(f.repo.SavedBatches[1]))
 	}
 }
 
@@ -351,8 +340,8 @@ func TestRun_NoDiscoveredKeysWritesNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if summary.Keys != 0 || len(f.repo.Saved) != 0 {
-		t.Errorf("keys = %d, SaveBlock calls = %d, want 0 and 0", summary.Keys, len(f.repo.Saved))
+	if summary.Keys != 0 || len(f.repo.SavedBatches) != 0 {
+		t.Errorf("keys = %d, write batches = %d, want 0 and 0", summary.Keys, len(f.repo.SavedBatches))
 	}
 	if f.mc.CallCount != 0 {
 		t.Errorf("multicall invocations = %d, want 0", f.mc.CallCount)
@@ -415,7 +404,7 @@ func TestRun_PropagatesEveryStageFailure(t *testing.T) {
 			name: "the write fails",
 			mutate: func(f *bootstrapFixture) {
 				f.client.GetLogsFn = oneLogFn(f)
-				f.repo.SaveBlockFn = func(outbound.UniswapV4BlockWrites) error { return boom }
+				f.repo.SavePositionsFn = func([]*entity.UniswapV4Position) (int64, error) { return 0, boom }
 			},
 		},
 		{
@@ -536,8 +525,90 @@ func TestRun_MergesKeysAcrossWindows(t *testing.T) {
 	if summary.Keys != 2 {
 		t.Errorf("keys = %d, want 2: the repeated key must collapse across windows", summary.Keys)
 	}
-	if summary.Scan.windows < 2 {
-		t.Errorf("scan windows = %d, want at least 2", summary.Scan.windows)
+	if summary.ScanWindows < 2 {
+		t.Errorf("scan windows = %d, want at least 2", summary.ScanWindows)
+	}
+}
+
+func TestRun_ReportsTheScanCounters(t *testing.T) {
+	f := newFixture(t, func(d *Deps) {
+		d.Config.InitialWindow = 500_000
+		d.Config.MaxWindow = 500_000
+		d.Config.MinWindow = 1
+	})
+	refused := false
+	f.client.GetLogsFn = func(filter outbound.LogFilter) ([]outbound.FilteredLog, error) {
+		if !refused {
+			refused = true
+			return nil, fmt.Errorf("too wide: %w", outbound.ErrLogRangeTooLarge)
+		}
+		return []outbound.FilteredLog{
+			modifyLiquidityFilteredLog(t, poolAIDHash, ownerA, -100, 200, saltA, 21_800_000, 0),
+		}, nil
+	}
+
+	summary, err := f.svc.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if summary.ScanNarrowings != 1 {
+		t.Errorf("ScanNarrowings = %d, want 1", summary.ScanNarrowings)
+	}
+	if summary.ScanWindows != len(f.client.Filters)-summary.ScanNarrowings {
+		t.Errorf("ScanWindows = %d, want one per accepted query (%d queries, %d refused)",
+			summary.ScanWindows, len(f.client.Filters), summary.ScanNarrowings)
+	}
+	if summary.ScanLogs != summary.ScanWindows {
+		t.Errorf("ScanLogs = %d, want %d: every accepted window answered one log", summary.ScanLogs, summary.ScanWindows)
+	}
+}
+
+func TestRun_ReportsThePositionRowsTheWriterInserted(t *testing.T) {
+	f := newFixture(t, nil)
+	f.repo.SavePositionsFn = func([]*entity.UniswapV4Position) (int64, error) { return 0, nil }
+	f.client.GetLogsFn = func(outbound.LogFilter) ([]outbound.FilteredLog, error) {
+		return []outbound.FilteredLog{
+			modifyLiquidityFilteredLog(t, poolAIDHash, ownerA, -100, 200, saltA, 21_800_000, 0),
+			modifyLiquidityFilteredLog(t, poolBIDHash, ownerB, -60, 60, saltB, 22_990_000, 1),
+		}, nil
+	}
+
+	summary, err := f.svc.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if summary.PositionsRead != 2 {
+		t.Errorf("PositionsRead = %d, want 2", summary.PositionsRead)
+	}
+	if summary.PositionsWritten != 0 {
+		t.Errorf("PositionsWritten = %d, want 0: an already-covered rerun appends nothing", summary.PositionsWritten)
+	}
+}
+
+func TestRun_BatchLogCountsPositionsWithinTheirOwnPool(t *testing.T) {
+	logs := &capturedLogs{}
+	f := newFixture(t, func(d *Deps) {
+		d.Logger = slog.New(logs)
+		d.Config.PositionBatch = 1
+	})
+	f.client.GetLogsFn = func(outbound.LogFilter) ([]outbound.FilteredLog, error) {
+		return []outbound.FilteredLog{
+			modifyLiquidityFilteredLog(t, poolAIDHash, ownerA, -100, 200, saltA, 21_800_000, 0),
+			modifyLiquidityFilteredLog(t, poolAIDHash, ownerB, -100, 200, saltA, 21_800_001, 1),
+			modifyLiquidityFilteredLog(t, poolBIDHash, ownerB, -60, 60, saltB, 22_990_000, 2),
+		}, nil
+	}
+
+	if _, err := f.svc.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	got := logs.int64Field("persisted uniswap-v4 position batch", "poolPositionsDone")
+	want := []int64{1, 2, 1}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("poolPositionsDone per batch = %v, want %v: the second pool's counter restarts at 1", got, want)
 	}
 }
 
@@ -559,10 +630,6 @@ func TestRun_ReportsPerPoolCounts(t *testing.T) {
 	}
 }
 
-// TestRun_PoolsBelowTheirDeployBlockContributeNothing guards the scan floor:
-// the global lowest deploy block is used for every pool, so a log for the later
-// pool below its own deploy height would be a chain impossibility, not a case
-// to tolerate.
 func TestRun_ReadsEachPoolAgainstItsOwnStateView(t *testing.T) {
 	f := newFixture(t, nil)
 	f.client.GetLogsFn = func(outbound.LogFilter) ([]outbound.FilteredLog, error) {
