@@ -56,7 +56,9 @@ export function TokenAddress({
   const triggerClassName = css({
     flex: '1 1 0',
     minWidth: '0',
-    minHeight: '11',
+    // Short of a tap target on purpose: this renders as the second line of
+    // dense table cells, where a 44px box doubled the apparent row gap.
+    minHeight: '6',
     fontFamily: 'mono',
     fontSize: type === 'tx' ? 'xs' : '2xs',
     color: 'text.link',
