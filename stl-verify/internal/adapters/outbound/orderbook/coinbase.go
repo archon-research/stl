@@ -63,8 +63,10 @@ func (e *coinbaseExchange) normalizeSymbol(s string) (string, error) {
 // pagination.next_cursor until has_next is false: the endpoint returns every
 // product in one page today, but the contract paginates, and a product dropped
 // off an unfetched page would falsely reject a valid config at startup. A
-// product carries three independent kill switches (status, trading_disabled,
-// is_disabled), all of which must be clear for it to trade.
+// product carries four independent kill switches (status, trading_disabled,
+// is_disabled, cancel_only), all of which must be clear for it to trade;
+// cancel_only forbids new orders (a halt/delisting state), unlike limit_only
+// and post_only, which restrict order types but keep the market trading.
 func (e *coinbaseExchange) instruments(ctx context.Context) (map[string]bool, error) {
 	tradeable := make(map[string]bool)
 	cursor := ""
@@ -75,6 +77,7 @@ func (e *coinbaseExchange) instruments(ctx context.Context) (map[string]bool, er
 				Status          string `json:"status"`
 				TradingDisabled bool   `json:"trading_disabled"`
 				IsDisabled      bool   `json:"is_disabled"`
+				CancelOnly      bool   `json:"cancel_only"`
 			} `json:"products"`
 			Pagination struct {
 				NextCursor string `json:"next_cursor"`
@@ -89,7 +92,7 @@ func (e *coinbaseExchange) instruments(ctx context.Context) (map[string]bool, er
 			return nil, err
 		}
 		for _, p := range resp.Products {
-			if p.Status == coinbaseStatusOnline && !p.TradingDisabled && !p.IsDisabled {
+			if p.Status == coinbaseStatusOnline && !p.TradingDisabled && !p.IsDisabled && !p.CancelOnly {
 				tradeable[strings.ToUpper(p.ProductID)] = true
 			}
 		}

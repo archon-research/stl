@@ -163,7 +163,9 @@ func TestCoinbaseInstrumentsHonoursDisabledFlags(t *testing.T) {
 		{"product_id":"BTC-USD","status":"online","trading_disabled":false,"is_disabled":false},
 		{"product_id":"OLD-USD","status":"delisted","trading_disabled":true,"is_disabled":true},
 		{"product_id":"HALT-USD","status":"online","trading_disabled":true,"is_disabled":false},
-		{"product_id":"OFF-USD","status":"online","trading_disabled":false,"is_disabled":true}
+		{"product_id":"OFF-USD","status":"online","trading_disabled":false,"is_disabled":true},
+		{"product_id":"CXL-USD","status":"online","trading_disabled":false,"is_disabled":false,"cancel_only":true},
+		{"product_id":"LIM-USD","status":"online","trading_disabled":false,"is_disabled":false,"limit_only":true}
 	]}`}})
 
 	got, err := (&coinbaseExchange{restBase: base}).instruments(t.Context())
@@ -175,6 +177,10 @@ func TestCoinbaseInstrumentsHonoursDisabledFlags(t *testing.T) {
 		"OLD-USD":  false,
 		"HALT-USD": false,
 		"OFF-USD":  false,
+		"CXL-USD":  false,
+		// limit_only still accepts new orders (35 online products carry it), so it
+		// stays tradeable; only cancel_only blocks the market.
+		"LIM-USD": true,
 	})
 }
 
