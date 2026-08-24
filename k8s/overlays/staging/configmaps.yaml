@@ -349,13 +349,15 @@ data:
 # CEX order book indexer — Coinbase. OKX/Kraken get their own configmaps with the
 # venue-specific EXCHANGE and SYMBOLS (OKX uses dash pairs like BTC-USDT; Kraken
 # uses slash pairs with its own asset names like XBT/USD).
+# All six symbols verified online and tradeable against the Coinbase products API
+# on 2026-08-24; the model's other ten tokens are not listed on Coinbase at all.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: cex-orderbook-indexer-coinbase-config
 data:
   EXCHANGE: "coinbase"
-  SYMBOLS: "BTC-USD,ETH-USD"
+  SYMBOLS: "BTC-USD,ETH-USD,XRP-USD,SOL-USD,HYPE-USD,JITOSOL-USD"
   ORDERBOOK_DEPTH: "100"
   ORDERBOOK_INTERVAL: "5s"
   ENVIRONMENT: "sentinelstaging"
