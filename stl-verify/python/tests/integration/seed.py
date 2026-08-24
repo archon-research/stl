@@ -41,6 +41,150 @@ async def insert_user(conn: asyncpg.Connection, address: bytes) -> int:
     )
 
 
+async def insert_protocol(
+    conn: asyncpg.Connection, name: str, address: bytes, *, protocol_type: str = "lending"
+) -> int:
+    """Insert a chain_id=1 protocol."""
+    return cast(
+        int,
+        await conn.fetchval(
+            "INSERT INTO protocol (chain_id, address, name, protocol_type) VALUES (1, $1, $2, $3) RETURNING id",
+            address,
+            name,
+            protocol_type,
+        ),
+    )
+
+
+async def insert_oracle(conn: asyncpg.Connection, name: str, address: bytes) -> int:
+    """Insert a chain_id=1 oracle."""
+    return cast(
+        int,
+        await conn.fetchval(
+            "INSERT INTO oracle (name, display_name, chain_id, address) VALUES ($1, $1, 1, $2) RETURNING id",
+            name,
+            address,
+        ),
+    )
+
+
+async def bind_protocol_oracle(
+    conn: asyncpg.Connection, protocol_id: int, oracle_id: int, *, from_block: int = 1
+) -> None:
+    """Bind a protocol to an oracle (idempotent), so the protocol's reads see its prices."""
+    await conn.execute(
+        """
+        INSERT INTO protocol_oracle (protocol_id, oracle_id, from_block)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (protocol_id, oracle_id, from_block) DO NOTHING
+        """,
+        protocol_id,
+        oracle_id,
+        from_block,
+    )
+
+
+async def insert_onchain_price(
+    conn: asyncpg.Connection,
+    *,
+    token_id: int,
+    oracle_id: int,
+    price: str | Decimal,
+    block: int,
+    time_offset: str = "0 seconds",
+) -> None:
+    """Insert an onchain_token_price row (no oracle_asset mapping — seed that separately).
+
+    ``time_offset`` is a Postgres interval added to the row's timestamp, for
+    scenarios that need to order rows by observation time rather than block.
+    """
+    await conn.execute(
+        """
+        INSERT INTO onchain_token_price
+            (token_id, oracle_id, block_number, block_version, timestamp, price_usd)
+        VALUES ($1, $2, $3, 0, NOW() + $4::text::interval, $5::numeric(30,18))
+        """,
+        token_id,
+        oracle_id,
+        block,
+        time_offset,
+        str(price),
+    )
+
+
+async def insert_borrower_debt(
+    conn: asyncpg.Connection, *, protocol_id: int, user_id: int, token_id: int, amount: int | str, block: int
+) -> None:
+    """Insert a borrower debt snapshot (raw on-chain amount, native decimals)."""
+    await conn.execute(
+        """
+        INSERT INTO borrower
+            (user_id, protocol_id, token_id, block_number, block_version,
+             amount, change, event_type, tx_hash)
+        VALUES ($1, $2, $3, $4, 0, $5, $5, 'borrow', $6)
+        """,
+        user_id,
+        protocol_id,
+        token_id,
+        block,
+        Decimal(amount),
+        b"\x00" * 32,
+    )
+
+
+async def insert_borrower_collateral(
+    conn: asyncpg.Connection,
+    *,
+    protocol_id: int,
+    user_id: int,
+    token_id: int,
+    amount: int | str,
+    block: int,
+    collateral_enabled: bool = True,
+) -> None:
+    """Insert a borrower_collateral snapshot (raw on-chain amount, native decimals)."""
+    await conn.execute(
+        """
+        INSERT INTO borrower_collateral
+            (user_id, protocol_id, token_id, block_number, block_version,
+             amount, change, event_type, tx_hash, collateral_enabled)
+        VALUES ($1, $2, $3, $4, 0, $5, $5, 'deposit', $6, $7)
+        """,
+        user_id,
+        protocol_id,
+        token_id,
+        block,
+        Decimal(amount),
+        b"\x00" * 32,
+        collateral_enabled,
+    )
+
+
+async def insert_reserve_data(
+    conn: asyncpg.Connection,
+    *,
+    protocol_id: int,
+    token_id: int,
+    block: int,
+    collateral_enabled: bool,
+    ltv: Decimal | None = None,
+) -> None:
+    """Insert a sparklend_reserve_data snapshot carrying the protocol-level collateral flag."""
+    await conn.execute(
+        """
+        INSERT INTO sparklend_reserve_data
+            (protocol_id, token_id, block_number, block_version,
+             usage_as_collateral_enabled, ltv)
+        VALUES ($1, $2, $3, 0, $4, $5)
+        """,
+        protocol_id,
+        token_id,
+        block,
+        collateral_enabled,
+        ltv,
+    )
+
+
 async def insert_receipt_token(
     db_url: str,
     chain_id: int,
