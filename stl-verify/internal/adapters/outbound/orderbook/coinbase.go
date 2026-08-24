@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strings"
 	"time"
 
@@ -58,28 +59,49 @@ func (e *coinbaseExchange) normalizeSymbol(s string) (string, error) {
 	return normalizeSeparatedPair(s, "-")
 }
 
-// instruments lists Coinbase spot products by product_id. A product carries
-// three independent kill switches (status, trading_disabled, is_disabled), all
-// of which must be clear for it to trade.
+// instruments lists Coinbase spot products by product_id, following
+// pagination.next_cursor until has_next is false: the endpoint returns every
+// product in one page today, but the contract paginates, and a product dropped
+// off an unfetched page would falsely reject a valid config at startup. A
+// product carries three independent kill switches (status, trading_disabled,
+// is_disabled), all of which must be clear for it to trade.
 func (e *coinbaseExchange) instruments(ctx context.Context) (map[string]bool, error) {
-	var resp struct {
-		Products []struct {
-			ProductID       string `json:"product_id"`
-			Status          string `json:"status"`
-			TradingDisabled bool   `json:"trading_disabled"`
-			IsDisabled      bool   `json:"is_disabled"`
-		} `json:"products"`
-	}
-	if err := fetchJSON(ctx, e.restBase+coinbaseProductsPath+"?product_type=SPOT", &resp); err != nil {
-		return nil, err
-	}
-	tradeable := make(map[string]bool, len(resp.Products))
-	for _, p := range resp.Products {
-		if p.Status == coinbaseStatusOnline && !p.TradingDisabled && !p.IsDisabled {
-			tradeable[strings.ToUpper(p.ProductID)] = true
+	tradeable := make(map[string]bool)
+	cursor := ""
+	for {
+		var resp struct {
+			Products []struct {
+				ProductID       string `json:"product_id"`
+				Status          string `json:"status"`
+				TradingDisabled bool   `json:"trading_disabled"`
+				IsDisabled      bool   `json:"is_disabled"`
+			} `json:"products"`
+			Pagination struct {
+				NextCursor string `json:"next_cursor"`
+				HasNext    bool   `json:"has_next"`
+			} `json:"pagination"`
 		}
+		reqURL := e.restBase + coinbaseProductsPath + "?product_type=SPOT"
+		if cursor != "" {
+			reqURL += "&cursor=" + url.QueryEscape(cursor)
+		}
+		if err := fetchJSON(ctx, reqURL, &resp); err != nil {
+			return nil, err
+		}
+		for _, p := range resp.Products {
+			if p.Status == coinbaseStatusOnline && !p.TradingDisabled && !p.IsDisabled {
+				tradeable[strings.ToUpper(p.ProductID)] = true
+			}
+		}
+		if !resp.Pagination.HasNext {
+			return tradeable, nil
+		}
+		// A cursor that does not advance would refetch the same page forever.
+		if resp.Pagination.NextCursor == "" || resp.Pagination.NextCursor == cursor {
+			return nil, fmt.Errorf("coinbase products: has_next with unusable cursor %q", resp.Pagination.NextCursor)
+		}
+		cursor = resp.Pagination.NextCursor
 	}
-	return tradeable, nil
 }
 
 func (e *coinbaseExchange) newHandler(group []string, logger *slog.Logger) frameHandler {

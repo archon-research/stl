@@ -3,6 +3,9 @@ package orderbook
 import (
 	"context"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -173,6 +176,54 @@ func TestCoinbaseInstrumentsHonoursDisabledFlags(t *testing.T) {
 		"HALT-USD": false,
 		"OFF-USD":  false,
 	})
+}
+
+// newCoinbasePagingServer serves one products page per cursor value ("" is the
+// first page); pages are `{cursor: body}`.
+func newCoinbasePagingServer(t *testing.T, pages map[string]string) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, ok := pages[r.URL.Query().Get("cursor")]
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		if _, err := io.WriteString(w, body); err != nil {
+			t.Errorf("server write: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+func TestCoinbaseInstrumentsFollowsPagination(t *testing.T) {
+	base := newCoinbasePagingServer(t, map[string]string{
+		"": `{"products":[{"product_id":"BTC-USD","status":"online","trading_disabled":false,"is_disabled":false}],
+			"pagination":{"next_cursor":"page-2","has_next":true}}`,
+		"page-2": `{"products":[{"product_id":"LATE-USD","status":"online","trading_disabled":false,"is_disabled":false}],
+			"pagination":{"next_cursor":"","has_next":false}}`,
+	})
+
+	got, err := (&coinbaseExchange{restBase: base}).instruments(t.Context())
+	if err != nil {
+		t.Fatalf("instruments: %v", err)
+	}
+	assertTradeable(t, got, map[string]bool{
+		"BTC-USD":  true,
+		"LATE-USD": true,
+	})
+}
+
+// TestCoinbaseInstrumentsFailsOnStuckPagination: has_next with no usable cursor
+// must error rather than refetch the same page forever.
+func TestCoinbaseInstrumentsFailsOnStuckPagination(t *testing.T) {
+	base := newCoinbasePagingServer(t, map[string]string{
+		"": `{"products":[],"pagination":{"next_cursor":"","has_next":true}}`,
+	})
+
+	if _, err := (&coinbaseExchange{restBase: base}).instruments(t.Context()); err == nil {
+		t.Fatal("expected an error for pagination that cannot advance")
+	}
 }
 
 func TestCoinbaseInstrumentsFailsOnUnavailableEndpoint(t *testing.T) {
