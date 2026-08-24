@@ -37,12 +37,20 @@ INPUTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "inputs")
 _DEFAULTS_PATH = os.path.join(INPUTS_DIR, "default_params.json")
 
 
-def _load_schema(path: str = _DEFAULTS_PATH) -> dict:
-    """Return the raw schema dict (each entry has 'value', 'description', …)."""
+def load_commented_json(path) -> dict:
+    """Load a JSON object, dropping documentation-only keys (leading underscore).
+
+    Both input files lean on this convention: default_params.json carries a
+    _comment entry, market_configs.json carries _comment and _galaxy_disabled.
+    """
     with open(path, "r") as f:
         raw = json.load(f)
-    # Drop the documentation-only _comment key if present
     return {k: v for k, v in raw.items() if not k.startswith("_")}
+
+
+def _load_schema(path: str = _DEFAULTS_PATH) -> dict:
+    """Return the raw schema dict (each entry has 'value', 'description', …)."""
+    return load_commented_json(path)
 
 
 def _flatten(schema: dict) -> dict[str, Any]:

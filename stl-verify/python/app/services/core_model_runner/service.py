@@ -8,13 +8,19 @@ data-reader factory — and passes it in, so swapping data sources
 
 import logging
 from collections.abc import Callable
+from pathlib import Path
 
 from app.ports.core_model_data_reader import CoreModelDataReader
 from app.ports.core_model_results_writer import CoreModelResultsWriter
+from app.risk_engine.core_model.config import INPUTS_DIR
 from app.risk_engine.core_model.runner import CoreModelConfig, CoreModelPipelineResult, run
 from app.services.core_model_runner.config import RunnerConfig
 
 logger = logging.getLogger(__name__)
+
+# The non-reader input files (protocol_defense.json) ship at a fixed path
+# inside the image; this is a packaging constant, not per-market config.
+_INPUTS = Path(INPUTS_DIR)
 
 
 async def _run_market(
@@ -23,7 +29,7 @@ async def _run_market(
     data_reader: CoreModelDataReader,
 ) -> CoreModelPipelineResult:
     config = CoreModelConfig(market_key=cfg.market_key, params=cfg.params)
-    result = await run(config, data_reader, cfg.inputs_dir)
+    result = await run(config, data_reader, _INPUTS)
     logger.info("pipeline complete market_key=%s crr_el_pct=%s", result.market_key, result.crr_el_pct)
     await writer.insert(result)
     logger.info("result written to core_model_results market_key=%s", result.market_key)

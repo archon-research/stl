@@ -12,7 +12,6 @@ from app.services.core_model_runner.service import run_markets
 
 def _cfg(market_key: str):
     class _Cfg:
-        inputs_dir = "/inputs"
         market_key: str = ""
         params: dict = {}
 

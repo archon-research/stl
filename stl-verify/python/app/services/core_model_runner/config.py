@@ -9,27 +9,18 @@ The entry point (cli/cronjobs/core_model_runner) owns DATABASE_URL and the
 market-key selection; this module only resolves model params.
 """
 
-import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from app.risk_engine.core_model.config import DEFAULTS, INPUTS_DIR, load_params
+from app.risk_engine.core_model.config import DEFAULTS, INPUTS_DIR, load_commented_json, load_params
 
-_INPUTS_DEFAULT = Path(INPUTS_DIR)
-_MARKET_CONFIGS_DEFAULT = _INPUTS_DEFAULT / "market_configs.json"
-
-
-def _load_market_configs(path: Path) -> dict[str, dict]:
-    with open(path) as f:
-        data = json.load(f)
-    return {k: v for k, v in data.items() if not k.startswith("_")}
+_MARKET_CONFIGS_DEFAULT = Path(INPUTS_DIR) / "market_configs.json"
 
 
 @dataclass(frozen=True)
 class RunnerConfig:
     market_key: str
-    inputs_dir: Path
     params: dict = field(default_factory=dict)
 
     @classmethod
@@ -44,7 +35,7 @@ class RunnerConfig:
         Both the one-shot CLI and the Temporal activity go through here so a
         scheduled run and a hand-run cover exactly the same ground.
         """
-        market_configs = _load_market_configs(market_configs_path)
+        market_configs = load_commented_json(market_configs_path)
         if market_key == "all":
             return [cls._build(key, market_configs) for key in market_configs]
         if market_key not in market_configs:
@@ -63,7 +54,7 @@ class RunnerConfig:
         # stray key in market_configs.json cannot leak into the audit trail
         # (params is recorded verbatim in the results table).
         params = load_params(overrides={**market_configs[market_key], **env_overrides})
-        return cls(market_key=market_key, inputs_dir=_INPUTS_DEFAULT, params=params)
+        return cls(market_key=market_key, params=params)
 
 
 def _coerce(param: str, raw: str) -> object:

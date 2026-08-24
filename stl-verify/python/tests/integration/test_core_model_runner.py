@@ -17,10 +17,11 @@ from pathlib import Path
 import pandas as pd
 
 from app.adapters.parquet.core_model_data_reader import ParquetCoreModelDataReader
+from app.risk_engine.core_model import config as core_model_config
 from app.risk_engine.core_model.config import load_params
 from app.risk_engine.core_model.runner import CoreModelConfig, run
 
-INPUTS_DIR = Path(__file__).resolve().parents[2] / "app" / "risk_engine" / "core_model" / "inputs"
+INPUTS_DIR = Path(core_model_config.INPUTS_DIR)
 
 _TRAIN_SIZE = 180
 _BACKTEST_ROWS = 20

@@ -8,6 +8,7 @@ only side of the pair that may import the model stack.
 
 import asyncio
 import os
+from pathlib import Path
 
 from temporalio import activity
 
@@ -15,9 +16,14 @@ from app.adapters.parquet.core_model_data_reader import ParquetCoreModelDataRead
 from app.adapters.postgres.core_model_results_writer import PostgresCoreModelResultsWriter
 from app.adapters.postgres.engine import create_db_engine
 from app.config import async_database_url
+from app.risk_engine.core_model.config import INPUTS_DIR
 from app.services.core_model_runner.config import RunnerConfig
 from app.services.core_model_runner.service import run_markets
 from app.services.core_model_runner.workflow import ACTIVITY_NAME
+
+# The parquet snapshots ship at a fixed path inside the image — a packaging
+# constant, so it lives here in the wiring rather than on RunnerConfig.
+_PARQUET_INPUTS = Path(INPUTS_DIR)
 
 
 async def run_tick(market_key: str) -> None:
@@ -36,7 +42,7 @@ async def run_tick(market_key: str) -> None:
         await run_markets(
             configs,
             PostgresCoreModelResultsWriter(engine),
-            lambda cfg: ParquetCoreModelDataReader(cfg.inputs_dir),
+            lambda _cfg: ParquetCoreModelDataReader(_PARQUET_INPUTS),
         )
     finally:
         await engine.dispose()
