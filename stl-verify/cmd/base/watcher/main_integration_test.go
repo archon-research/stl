@@ -22,6 +22,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	rediscache "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	snsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sns"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/backfill_gaps"
 	"github.com/archon-research/stl/stl-verify/internal/services/live_data"
@@ -81,7 +82,7 @@ func TestRun_ShutsDownCleanlyOnContextCancel(t *testing.T) {
 	snsClient := sns.NewFromConfig(awsCfg, func(o *sns.Options) {
 		o.BaseEndpoint = aws.String(sharedLocalStackCfg.Endpoint)
 	})
-	topics := createSNSTopics(t, ctx, snsClient, testutil.SanitizeTestName(t.Name()))
+	topicARN := createSNSTopic(t, ctx, snsClient, testutil.SanitizeTestName(t.Name())+"-blocks.fifo")
 
 	t.Setenv("CHAIN_ID", "1")
 	t.Setenv("DATABASE_URL", dsn)
@@ -90,7 +91,7 @@ func TestRun_ShutsDownCleanlyOnContextCancel(t *testing.T) {
 	t.Setenv("ALCHEMY_WS_URL", "ws://127.0.0.1:1")
 	t.Setenv("ALCHEMY_HTTP_URL", "http://127.0.0.1:1")
 	t.Setenv("AWS_SNS_ENDPOINT", sharedLocalStackCfg.Endpoint)
-	t.Setenv("AWS_SNS_TOPIC_ARN", topics["blocks"])
+	t.Setenv("AWS_SNS_TOPIC_ARN", topicARN)
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
 	t.Setenv("AWS_REGION", sharedLocalStackCfg.Region)
@@ -114,7 +115,7 @@ func TestRun_ShutsDownCleanlyOnContextCancel(t *testing.T) {
 		if err != nil {
 			t.Fatalf("run returned an error on graceful shutdown: %v", err)
 		}
-	case <-time.After(shutdownTimeout + cleanupTimeout):
+	case <-time.After(lifecycle.ShutdownTimeout + cleanupTimeout):
 		t.Fatal("run did not return after its context was cancelled")
 	}
 }
@@ -1400,22 +1401,28 @@ func (infra *TestInfrastructure) WaitForMessage(t *testing.T, queueURL string, t
 // SNS/SQS Setup
 // =============================================================================
 
+func createSNSTopic(t *testing.T, ctx context.Context, client *sns.Client, name string) string {
+	t.Helper()
+
+	result, err := client.CreateTopic(ctx, &sns.CreateTopicInput{
+		Name: aws.String(name),
+		Attributes: map[string]string{
+			"FifoTopic":                 "true",
+			"ContentBasedDeduplication": "false",
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create topic %s: %v", name, err)
+	}
+	return *result.TopicArn
+}
+
 func createSNSTopics(t *testing.T, ctx context.Context, client *sns.Client, prefix string) map[string]string {
 	t.Helper()
 	topics := make(map[string]string)
 
 	for _, name := range []string{"blocks", "receipts", "traces", "blobs"} {
-		result, err := client.CreateTopic(ctx, &sns.CreateTopicInput{
-			Name: aws.String(fmt.Sprintf("%s-%s.fifo", prefix, name)),
-			Attributes: map[string]string{
-				"FifoTopic":                 "true",
-				"ContentBasedDeduplication": "false",
-			},
-		})
-		if err != nil {
-			t.Fatalf("failed to create topic %s: %v", name, err)
-		}
-		topics[name] = *result.TopicArn
+		topics[name] = createSNSTopic(t, ctx, client, fmt.Sprintf("%s-%s.fifo", prefix, name))
 	}
 
 	return topics

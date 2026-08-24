@@ -10,12 +10,10 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
-	"os/signal"
 	"runtime"
 	"runtime/trace"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -31,6 +29,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"github.com/archon-research/stl/stl-verify/internal/services/backfill_gaps"
 	"github.com/archon-research/stl/stl-verify/internal/services/live_data"
@@ -71,16 +70,17 @@ func main() {
 		os.Exit(0)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	ctx, stop := lifecycle.SignalContext(context.Background())
 
 	// main holds no defers, so the os.Exit below cannot strand cleanup; every
 	// deferred close lives in run and has already unwound by this point.
 	err := run(ctx, cliOptions{
-		enableTraces: *enableTraces,
-		enableBlobs:  *enableBlobs,
-		parallelRPC:  *parallelRPC,
-		pprofAddr:    *pprofAddr,
-		traceFile:    *traceFile,
+		enableTraces:      *enableTraces,
+		enableBlobs:       *enableBlobs,
+		parallelRPC:       *parallelRPC,
+		pprofAddr:         *pprofAddr,
+		traceFile:         *traceFile,
+		onShutdownTimeout: lifecycle.ForceExitAfter(cleanupTimeout),
 	})
 	stop()
 	if err != nil {
@@ -89,22 +89,22 @@ func main() {
 	}
 }
 
-const (
-	// shutdownTimeout bounds how long the services get to stop once the context
-	// is cancelled. The pod allows 60s (terminationGracePeriodSeconds in
-	// k8s/base/watcher/deployment.yaml) before SIGKILL.
-	shutdownTimeout = 25 * time.Second
-
-	// cleanupTimeout bounds the deferred closes that run after
-	// serveUntilShutdown returns. pgxpool.Close blocks until every acquired
-	// connection is handed back, and the goroutines still holding them are the
-	// ones that just missed shutdownTimeout.
-	cleanupTimeout = 15 * time.Second
-)
+// cleanupTimeout bounds the deferred closes that run after a shutdown timeout.
+// pgxpool.Close blocks until every acquired connection is handed back, and the
+// goroutines still holding them are the ones that just missed
+// lifecycle.ShutdownTimeout. Together the two fit inside the pod's 60s
+// terminationGracePeriodSeconds (k8s/base/watcher/deployment.yaml).
+const cleanupTimeout = 15 * time.Second
 
 type cliOptions struct {
-	pprofAddr    string
-	traceFile    string
+	pprofAddr string
+	traceFile string
+
+	// onShutdownTimeout bounds the cleanup that follows a shutdown timeout.
+	// main supplies the process-killing one; tests leave it nil, so a timeout
+	// fails the test instead of taking the whole test binary down with it.
+	onShutdownTimeout func()
+
 	enableTraces bool
 	enableBlobs  bool
 	parallelRPC  bool
@@ -127,8 +127,9 @@ type watcherConfig struct {
 	enableBackfill bool
 }
 
-// dependencies are the outbound adapters the services are built from. Their
-// lifetimes are owned by run, which closes them in reverse order of opening.
+// dependencies are the outbound adapters the services are built from. The three
+// that need closing (cache, eventSink, and the pool behind blockState) are
+// opened and deferred by run; the rest hold no resource of their own.
 type dependencies struct {
 	subscriber *alchemy.Subscriber
 	client     *alchemy.Client
@@ -192,7 +193,7 @@ func run(ctx context.Context, opts cliOptions) (err error) {
 	defer pool.Close()
 	logger.Info("PostgreSQL connected, block state tracking enabled")
 
-	cache, err := openRedisCache(cfg, logger)
+	cache, err := openRedisCache(ctx, cfg, logger)
 	if err != nil {
 		return err
 	}
@@ -203,7 +204,7 @@ func run(ctx context.Context, opts cliOptions) (err error) {
 	}()
 	logger.Info("Redis cache connected", "addr", cfg.redisAddr)
 
-	eventSink, err := openEventSink(cfg, logger)
+	eventSink, err := openEventSink(ctx, cfg, logger)
 	if err != nil {
 		return err
 	}
@@ -224,7 +225,7 @@ func run(ctx context.Context, opts cliOptions) (err error) {
 		return err
 	}
 
-	return serveUntilShutdown(ctx, live, backfill, logger)
+	return serveUntilShutdown(ctx, live, backfill, opts.onShutdownTimeout, logger)
 }
 
 // startTrace begins an execution trace into path and returns the stop function
@@ -269,9 +270,9 @@ func startPprofServer(addr string, logger *slog.Logger) {
 }
 
 func loadWatcherConfig() (watcherConfig, error) {
-	apiKey := env.Get("ALCHEMY_API_KEY", "")
-	if apiKey == "" {
-		return watcherConfig{}, errors.New("ALCHEMY_API_KEY environment variable is required")
+	apiKey, err := env.Require("ALCHEMY_API_KEY")
+	if err != nil {
+		return watcherConfig{}, err
 	}
 	chainIDStr, err := env.Require("CHAIN_ID")
 	if err != nil {
@@ -307,7 +308,7 @@ func loadWatcherConfig() (watcherConfig, error) {
 	}, nil
 }
 
-func openRedisCache(cfg watcherConfig, logger *slog.Logger) (*rediscache.BlockCache, error) {
+func openRedisCache(ctx context.Context, cfg watcherConfig, logger *slog.Logger) (*rediscache.BlockCache, error) {
 	cache, err := rediscache.NewBlockCache(rediscache.Config{
 		Addr:      cfg.redisAddr,
 		Password:  cfg.redisPassword,
@@ -318,14 +319,14 @@ func openRedisCache(cfg watcherConfig, logger *slog.Logger) (*rediscache.BlockCa
 	if err != nil {
 		return nil, fmt.Errorf("creating Redis cache: %w", err)
 	}
-	if err := cache.Ping(context.Background()); err != nil {
+	if err := cache.Ping(ctx); err != nil {
 		return nil, fmt.Errorf("connecting to Redis at %s: %w", cfg.redisAddr, err)
 	}
 	return cache, nil
 }
 
-func openEventSink(cfg watcherConfig, logger *slog.Logger) (*snsadapter.EventSink, error) {
-	awsCfg, err := awsconfig.Load(context.Background(), awsconfig.Options{
+func openEventSink(ctx context.Context, cfg watcherConfig, logger *slog.Logger) (*snsadapter.EventSink, error) {
+	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{
 		StaticCredentialsFromEnv: true,
 	})
 	if err != nil {
@@ -379,9 +380,11 @@ func openDependencies(
 		return dependencies{}, fmt.Errorf("creating subscriber: %w", err)
 	}
 
+	// Instrument construction fails on a bad instrument definition, not on a
+	// transient condition, so continuing here would mean running blind forever.
 	alchemyTelemetry, err := alchemy.NewTelemetry(cfg.chainName)
 	if err != nil {
-		logger.Warn("failed to create alchemy telemetry, continuing without instrumentation", "error", err)
+		return dependencies{}, fmt.Errorf("creating alchemy telemetry: %w", err)
 	}
 
 	client, err := alchemy.NewClient(alchemy.ClientConfig{
@@ -469,65 +472,28 @@ func newServices(cfg watcherConfig, opts cliOptions, deps dependencies, logger *
 	return live, backfill, nil
 }
 
-// serveUntilShutdown starts both services, blocks until ctx is cancelled, then
-// stops them within shutdownTimeout.
+// serveUntilShutdown runs the services until ctx is cancelled. On a shutdown
+// timeout it calls onShutdownTimeout before returning, because run's deferred
+// closes wait on the same goroutines that just missed the deadline — returning
+// the error is not by itself enough to bound process exit.
 func serveUntilShutdown(
 	ctx context.Context,
 	live *live_data.LiveService,
 	backfill *backfill_gaps.BackfillService,
+	onShutdownTimeout func(),
 	logger *slog.Logger,
 ) error {
-	logger.Info("starting live service...")
-	if err := live.Start(ctx); err != nil {
-		return fmt.Errorf("starting live service: %w", err)
-	}
+	services := []lifecycle.Service{live}
 	if backfill != nil {
-		logger.Info("starting backfill service...")
-		if err := backfill.Start(ctx); err != nil {
-			return fmt.Errorf("starting backfill service: %w", err)
-		}
+		services = append(services, backfill)
 	}
-	logger.Info("services started, waiting for blocks...", "backfill", backfill != nil)
+	logger.Info("starting services...", "backfill", backfill != nil)
 
-	<-ctx.Done()
-	logger.Info("shutdown requested, stopping services...")
-
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-	defer cancel()
-
-	stopped := make(chan struct{})
-	go func() {
-		defer close(stopped)
-		if backfill != nil {
-			if err := backfill.Stop(); err != nil {
-				logger.Error("error stopping backfill service", "error", err)
-			}
-		}
-		if err := live.Stop(); err != nil {
-			logger.Error("error stopping live service", "error", err)
-		}
-	}()
-
-	select {
-	case <-stopped:
-		logger.Info("shutdown complete")
-		return nil
-	case <-shutdownCtx.Done():
-		// run's deferred closes wait on the same goroutines that just missed
-		// the deadline, so returning here is not enough to bound exit.
-		forceExitAfter(cleanupTimeout, logger)
-		return errors.New("shutdown timed out")
+	err := lifecycle.Run(ctx, logger, services...)
+	if errors.Is(err, lifecycle.ErrShutdownTimedOut) && onShutdownTimeout != nil {
+		onShutdownTimeout()
 	}
-}
-
-// forceExitAfter kills the process if cleanup has not finished within d. The
-// stranded defers are the point: the alternative is hanging until the pod's
-// grace period runs out and SIGKILL arrives with nothing logged.
-func forceExitAfter(d time.Duration, logger *slog.Logger) {
-	time.AfterFunc(d, func() {
-		logger.Error("cleanup did not finish, forcing exit", "timeout", d)
-		os.Exit(1)
-	})
+	return err
 }
 
 // resolveServiceName returns the OTEL service.name for this watcher process.
