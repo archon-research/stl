@@ -1236,6 +1236,14 @@
       "owner": "lending",
       "transform_defer": "VEC-491: bucket 2 (block-time dimension via block_states)"
     },
+    "borrower_collateral_current": {
+      "type": "derived",
+      "owner": "lending"
+    },
+    "borrower_current": {
+      "type": "derived",
+      "owner": "lending"
+    },
     "build_registry": {
       "type": "infrastructure",
       "owner": "infra"
@@ -1429,9 +1437,17 @@
       "owner": "lending",
       "transform_defer": "VEC-491: bucket 2 (block-time dimension via block_states)"
     },
+    "sparklend_reserve_data_current": {
+      "type": "derived",
+      "owner": "lending"
+    },
     "token": {
       "type": "dimension",
       "owner": "infra"
+    },
+    "token_price_current": {
+      "type": "derived",
+      "owner": "pricing"
     },
     "token_total_supply": {
       "type": "raw_pipeline",
