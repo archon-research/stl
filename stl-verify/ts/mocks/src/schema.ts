@@ -19,6 +19,7 @@ export type AllocationActivityBucket =
 export type AllocationActivityEnvelope = Schemas['AllocationActivityEnvelope'];
 export type AllocationRiskCapital = Schemas['AllocationRiskCapitalResponse'];
 export type CapitalMetrics = Schemas['CapitalMetricsResponse'];
+export type Provenance = Schemas['Provenance'];
 export type Chain = Schemas['ChainResponse'];
 export type ChainRiskCapital = Schemas['ChainRiskCapitalResponse'];
 export type DataSource = Schemas['DataSourceResponse'];

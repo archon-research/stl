@@ -6,12 +6,15 @@ import { Fragment } from 'react';
 import { css } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
 
-import { REFERENCE_MODE } from '../../lib/referenceMode';
+import { canRestateProvenance, useProvenanceView } from '../../lib/provenance';
+import type { Provenance } from '../../types/allocation';
 
 export type SettingsOption = {
   value: string;
   label: string;
   description?: string;
+  /** Offered but not selectable — this prime cannot be served that way. */
+  disabled?: boolean;
 };
 
 export type SettingsSection = {
@@ -134,6 +137,7 @@ export function SettingsMenu({ sections }: { sections: SettingsSection[] }) {
                     <Menu.RadioItem
                       key={option.value}
                       value={option.value}
+                      disabled={option.disabled ?? false}
                       className={radioItemClassName}
                     >
                       <span className={indicatorClassName}>
@@ -172,44 +176,72 @@ const DATA_SOURCE_SECTION_ID = 'data-source';
  * The href comes from the router so the param is spelled and ordered the way the
  * route tree would spell it, and the entry-time cleanup has nothing to rewrite.
  * It is then loaded as a document rather than navigated to: the flag is read
- * once per session on purpose (see `lib/referenceMode`), so a client-side flip
+ * once per session on purpose (see `lib/provenance`), so a client-side flip
  * would leave already-fetched series on the old provenance while new ones
  * arrive on the new one — a page mixing both, which is what `source` exists to
  * make impossible.
  */
-export function useDataSourceSection(): SettingsSection {
+export function useDataSourceSection(
+  available: readonly Provenance[] = ['indexed', 'reference', 'both'],
+): SettingsSection {
   const router = useRouter();
+  const { provenance: shown } = useProvenanceView();
+
+  // Shown disabled rather than hidden: a selector whose contents change with
+  // the prime reads as a bug, and "greyed out" says something the absence of an
+  // option does not.
+  const option = (
+    value: Provenance,
+    label: string,
+    description: string,
+  ): SettingsOption => ({
+    value,
+    label,
+    description,
+    disabled: !available.includes(value),
+  });
 
   return {
     id: DATA_SOURCE_SECTION_ID,
     label: 'Data source',
-    value: REFERENCE_MODE ? 'reference' : 'indexed',
+    value: shown,
     options: [
-      {
-        value: 'indexed',
-        label: 'STL indexed',
-        description: "Computed from STL's own on-chain data",
-      },
-      {
-        value: 'reference',
-        label: 'Sky reference',
-        description: 'As published by Sky, where available',
-      },
+      option(
+        'both',
+        'Composite',
+        'STL and Sky together, each position named once',
+      ),
+      option('indexed', 'STL indexed', "Computed from STL's own on-chain data"),
+      option('reference', 'Sky reference', 'As published by Sky'),
     ],
     onChange: (value) => {
-      const wantsReference = value === 'reference';
-      if (wantsReference === REFERENCE_MODE) {
+      if (value === shown) {
         return;
       }
 
-      const { href } = router.buildLocation({
-        to: '.',
-        search: (previous: Record<string, unknown>) => ({
-          ...previous,
-          reference: wantsReference ? true : undefined,
-        }),
+      const search = (previous: Record<string, unknown>) => ({
+        ...previous,
+        // The superseded spelling is dropped on the way out, so a link carrying
+        // both cannot arrive contradicting itself.
+        reference: undefined,
+        source: value === 'both' ? undefined : value,
       });
-      globalThis.location.assign(href);
+
+      // A composite response holds both provenances, so narrowing it is a
+      // projection of data already on the page: navigate and let the views
+      // re-read the URL. Reloading would re-fetch what we have, and the
+      // composite fetch is the slow one.
+      if (canRestateProvenance) {
+        void router.navigate({ to: '.', search });
+        return;
+      }
+
+      // Nothing held to narrow, so this needs a fresh session: `PROVENANCE` is
+      // fixed for the session on purpose, so that a cached series and the
+      // request refreshing it cannot disagree about what they contain.
+      globalThis.location.assign(
+        router.buildLocation({ to: '.', search }).href,
+      );
     },
   };
 }

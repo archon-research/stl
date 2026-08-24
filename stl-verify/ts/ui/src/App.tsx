@@ -9,9 +9,10 @@ import {
   useMatchRoute,
   useNavigate,
   useParams,
+  useRouter,
   useSearch,
 } from '@tanstack/react-router';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { css } from '#styled-system/css';
 
@@ -39,6 +40,7 @@ import { PrimeSidebar } from './components/shared/PrimeSidebar';
 import { TopBar } from './components/shared/TopBar';
 import { useUrlSyncedTableState } from './data-table/hooks';
 import { usePrimeChartData } from './hooks/usePrimeChartData';
+import { useProvenanceAvailability } from './hooks/useProvenanceAvailability';
 import {
   getAllocationsForProxies,
   getChains,
@@ -66,6 +68,7 @@ import {
   formatTokenAmount,
   formatUsdValue,
   getChainLabel,
+  allocationNetworkKey,
   getAllocationKey,
   getProtocolLabel,
   groupPrimesByVault,
@@ -76,7 +79,13 @@ import {
 } from './lib/dashboard';
 import { isAbortError, toErrorMessage } from './lib/errors';
 import { logging } from './lib/logging';
-import { REFERENCE_MODE } from './lib/referenceMode';
+import {
+  narrowAllocations,
+  narrowRiskCapital,
+  preferReference,
+  showsReference,
+  useProvenanceView,
+} from './lib/provenance';
 import { ACTIVITY_ACTIONS, type AppSearchPatch } from './router/search-params';
 import type {
   Allocation,
@@ -174,12 +183,16 @@ const PRIME_SCOPED_RESET: AppSearchPatch = {
 };
 
 function App() {
+  // What is on screen, which is not always what was fetched: narrowing a
+  // composite response changes this without a request.
+  const { provenance: shownProvenance, showsReference: showsReferenceNow } =
+    useProvenanceView();
   const [primes, setPrimes] = useState<Prime[]>([]);
   const [primesErrorMessage, setPrimesErrorMessage] = useState<string | null>(
     null,
   );
   const [isPrimesLoading, setIsPrimesLoading] = useState(true);
-  const [allocations, setAllocations] = useState<Allocation[]>([]);
+  const [fetchedAllocations, setAllocations] = useState<Allocation[]>([]);
   const [allocationsErrorMessage, setAllocationsErrorMessage] = useState<
     string | null
   >(null);
@@ -196,7 +209,21 @@ function App() {
   const [, setDataSources] = useState<DataSource[]>([]);
   const [localChains, setLocalChains] = useState<LocalChainRow[]>([]);
   const [localProtocols, setLocalProtocols] = useState<LocalProtocolRow[]>([]);
-  const [riskCapital, setRiskCapital] = useState<PrimeRiskCapital | null>(null);
+  const [fetchedRiskCapital, setRiskCapital] =
+    useState<PrimeRiskCapital | null>(null);
+
+  // What was fetched, narrowed to what is being shown. A composite response
+  // holds both provenances, so switching between them is this projection rather
+  // than a request — and doing it here, once, is what keeps the table, the
+  // cards, the charts and the drawer from disagreeing about which they show.
+  const allocations = useMemo(
+    () => narrowAllocations(shownProvenance, fetchedAllocations),
+    [shownProvenance, fetchedAllocations],
+  );
+  const riskCapital = useMemo(
+    () => narrowRiskCapital(shownProvenance, fetchedRiskCapital),
+    [shownProvenance, fetchedRiskCapital],
+  );
   const [referenceDebt, setReferenceDebt] = useState<PrimeDebtBucket | null>(
     null,
   );
@@ -547,11 +574,55 @@ function App() {
   // requests.
   const primaryProxyAddress = selectedPrimeGroup?.primaryProxyAddress ?? null;
 
+  const router = useRouter();
+  const provenanceAvailability = useProvenanceAvailability();
+
+  // A provenance this prime cannot be served from is rewritten to one it can,
+  // rather than left to fail request by request. A full document load, because
+  // `lib/provenance` reads the value once per session on purpose: a client-side
+  // switch would leave already-fetched series on the old provenance.
+  const provenanceFallback = provenanceAvailability.fallbackFor(
+    selectedPrimeGroup?.name,
+  );
+  const redirectedProvenance = useRef(false);
+
+  useEffect(() => {
+    if (provenanceFallback === null || redirectedProvenance.current) {
+      return;
+    }
+
+    redirectedProvenance.current = true;
+    const { href } = router.buildLocation({
+      to: '.',
+      search: (previous: Record<string, unknown>) => ({
+        ...previous,
+        reference: undefined,
+        source: provenanceFallback === 'both' ? undefined : provenanceFallback,
+      }),
+    });
+    globalThis.location.assign(href);
+  }, [provenanceFallback, router]);
+
+  // Any change to the selected range, as a primitive dependency: it is the
+  // retry signal for the snapshot fetches below, which take no range at all.
+  const retryKey = `${timeRange.from_timestamp}..${timeRange.to_timestamp}`;
+
+  // Risk capital is a snapshot with no range of its own, so it was fetched once
+  // per prime and a transient failure stuck for the session. The range selector
+  // is the retry gesture; this ref stops a fetch that already succeeded from
+  // repeating on every change.
+  const loadedRiskCapitalFor = useRef<string | null>(null);
+
   useEffect(() => {
     if (!primaryProxyAddress) {
+      loadedRiskCapitalFor.current = null;
       setRiskCapital(null);
       setIsRiskCapitalLoading(false);
       setRiskCapitalErrorMessage(null);
+      return;
+    }
+
+    if (loadedRiskCapitalFor.current === primaryProxyAddress) {
       return;
     }
 
@@ -564,6 +635,7 @@ function App() {
     void getPrimeRiskCapital(primaryProxyAddress, controller.signal)
       .then((response) => {
         if (!controller.signal.aborted) {
+          loadedRiskCapitalFor.current = primaryProxyAddress;
           setRiskCapital(response);
         }
       })
@@ -586,7 +658,7 @@ function App() {
       });
 
     return () => controller.abort();
-  }, [primaryProxyAddress]);
+  }, [primaryProxyAddress, retryKey]);
 
   useEffect(() => {
     if (!primaryProxyAddress) {
@@ -605,7 +677,7 @@ function App() {
     setPrimeDebtErrorMessage(null);
 
     void (
-      REFERENCE_MODE
+      showsReference
         ? getLatestReferenceDebtBucket(primaryProxyAddress, controller.signal)
         : getLatestPrimeDebtSnapshot(primaryProxyAddress, controller.signal)
     )
@@ -613,7 +685,7 @@ function App() {
         if (controller.signal.aborted) {
           return;
         }
-        if (REFERENCE_MODE) {
+        if (showsReference) {
           setReferenceDebt(latest as PrimeDebtBucket | null);
         } else {
           setPrimeDebtSnapshot(latest as PrimeDebtSnapshot | null);
@@ -738,7 +810,7 @@ function App() {
               localProtocols,
               allocation.chain_id,
             ),
-            getChainLabel(allocation.chain_id, chainLabels),
+            getChainLabel(allocation.chain_id, chainLabels, allocation.network),
             allocation.receipt_token_address,
             allocation.underlying_token_address,
           ]),
@@ -755,7 +827,7 @@ function App() {
       searchFilteredAllocations.filter((allocation) => {
         const matchesNetwork =
           selectedNetwork === null ||
-          String(allocation.chain_id) === selectedNetwork;
+          allocationNetworkKey(allocation) === selectedNetwork;
         const matchesProtocol =
           selectedProtocol === null ||
           (selectedProtocol === DIRECT_PROTOCOL_FILTER_VALUE
@@ -851,7 +923,7 @@ function App() {
   // When the reference collateral figure was observed, which is not the bucket
   // serving it: the feed is daily and the value is carried forward, so without
   // showing this a figure up to a day old is indistinguishable from a fresh one.
-  const primeCollateralObservedAt = REFERENCE_MODE
+  const primeCollateralObservedAt = showsReferenceNow
     ? (totalCapitalBuckets
         .filter((bucket) => bucket.assets_observed_at != null)
         .at(-1)?.assets_observed_at ?? null)
@@ -860,7 +932,7 @@ function App() {
   // The monitor's three figures share one stamp because they share one row. It
   // matters for the same reason the collateral one does, and more so since the
   // prior seeding reaches up to 90 days back.
-  const capitalObservedAt = REFERENCE_MODE
+  const capitalObservedAt = showsReferenceNow
     ? (totalCapitalBuckets
         .filter((bucket) => bucket.capital_observed_at != null)
         .at(-1)?.capital_observed_at ?? null)
@@ -870,7 +942,7 @@ function App() {
   // equivalent — STL does not index PSM3 and prices no Curve LP position — so
   // it shows what STL actually holds records for, captioned as such.
   // Buckets are oldest-first, so the newest observation is the last point.
-  const primeCollateralValue = REFERENCE_MODE
+  const primeCollateralValue = showsReferenceNow
     ? (collateralSeries.at(-1)?.value ?? null)
     : primeTotalAllocationUsd;
 
@@ -914,17 +986,21 @@ function App() {
         ? { data: series, kind: 'series' }
         : { data: fallbackChart(currentValue), kind: 'fallback' };
 
-    const exposureValue =
-      riskCapital?.prime_exposure_usd === undefined ||
-      riskCapital?.prime_exposure_usd === null
-        ? null
-        : parseNumericValue(riskCapital.prime_exposure_usd);
+    // Sky's figures where it reports them: these are the flat line a card falls
+    // back to, which must land on the same number the card's value shows.
+    const exposureValue = parseNumericValue(
+      preferReference(
+        riskCapital?.reference_prime_exposure_usd,
+        riskCapital?.prime_exposure_usd,
+      ),
+    );
 
-    const totalRiskCapitalValue =
-      riskCapital?.total_risk_capital_usd === undefined ||
-      riskCapital?.total_risk_capital_usd === null
-        ? null
-        : parseNumericValue(riskCapital.total_risk_capital_usd);
+    const totalRiskCapitalValue = parseNumericValue(
+      preferReference(
+        riskCapital?.reference_total_risk_capital_usd,
+        riskCapital?.total_risk_capital_usd,
+      ),
+    );
 
     const primeDebtValue = wadToUnits(primeDebtSnapshot?.debt_wad);
 
@@ -932,9 +1008,51 @@ function App() {
       riskCapital?.prime_encumbrance_ratio,
     );
 
+    // Sky's is the preferred model, so its series leads and STL's becomes the
+    // comparison. Whole series: a line drawn from both would trace neither.
+    const preferSkySeries = (
+      stl: ChartDatum[],
+      sky: ChartDatum[],
+    ): { primary: ChartDatum[]; comparison: ChartDatum[] } =>
+      sky.length > 0
+        ? { primary: sky, comparison: stl }
+        : { primary: stl, comparison: [] };
+
+    const exposure = preferSkySeries(
+      exposureSeries,
+      toChartSeries(exposureBuckets, (bucket) =>
+        parseNumericValue(bucket.reference_exposure_usd),
+      ),
+    );
+
+    const totalCapital = preferSkySeries(
+      totalCapitalSeries,
+      toChartSeries(totalCapitalBuckets, (bucket) =>
+        parseNumericValue(bucket.reference_total_capital_usd),
+      ),
+    );
+
+    const primeDebt = preferSkySeries(
+      primeDebtSeries,
+      toChartSeries(debtBuckets, (bucket) =>
+        wadToUnits(bucket.reference_debt_wad),
+      ),
+    );
+
     // One ordinal series token per card, named rather than written out as a
     // `var()` read: the token type is what catches a typo (and a repeat of the
     // collision where two of these cards named the same token unnoticed).
+    //
+    // The provenance not leading rides dashed beside the one that is, on the
+    // three charts where both describe the same quantity. Collateral and
+    // encumbrance are Sky's alone, so there is nothing to compare them with.
+    const comparisonSeries = (
+      points: ChartDatum[],
+    ): NonNullable<MetricChartSpec['comparison']> | null =>
+      points.length > 0
+        ? { data: points, stroke: 'var(--colors-text-muted)' }
+        : null;
+
     const charts: MetricChartSpec[] = [
       {
         // Balance reconstructed from signed USD net flows, anchored at the
@@ -950,19 +1068,22 @@ function App() {
         // Exposure trend from priced receipt-token balances over time; falls
         // back to the flat current value when no history is available.
         key: 'risk-capital',
-        ...seriesOrFallback(exposureSeries, exposureValue),
+        ...seriesOrFallback(exposure.primary, exposureValue),
+        comparison: comparisonSeries(exposure.comparison),
         stroke: 'chart.series.secondary',
         formatValue: formatCompactUsd,
       },
       {
         key: 'total-capital',
-        ...seriesOrFallback(totalCapitalSeries, totalRiskCapitalValue),
+        ...seriesOrFallback(totalCapital.primary, totalRiskCapitalValue),
+        comparison: comparisonSeries(totalCapital.comparison),
         stroke: 'chart.series.quaternary',
         formatValue: formatCompactUsd,
       },
       {
         key: 'prime-debt-exposure',
-        ...seriesOrFallback(primeDebtSeries, primeDebtValue),
+        ...seriesOrFallback(primeDebt.primary, primeDebtValue),
+        comparison: comparisonSeries(primeDebt.comparison),
         stroke: 'chart.series.quinary',
         formatValue: (value: number) => `${formatCompactNumber(value)} DAI`,
       },
@@ -996,12 +1117,17 @@ function App() {
     allocationBalanceSeries,
     riskCapital?.prime_exposure_usd,
     riskCapital?.prime_encumbrance_ratio,
+    riskCapital?.reference_prime_exposure_usd,
+    riskCapital?.reference_total_risk_capital_usd,
     riskCapital?.total_risk_capital_usd,
     chartFromLabel,
     chartToLabel,
+    debtBuckets,
+    exposureBuckets,
     exposureSeries,
     primeDebtSeries,
     primeDebtSnapshot?.debt_wad,
+    totalCapitalBuckets,
     totalCapitalSeries,
     collateralSeries,
     encumbranceSeries,
@@ -1039,7 +1165,11 @@ function App() {
     : null;
 
   const selectedChainLabel = selectedAllocation
-    ? getChainLabel(selectedAllocation.chain_id, chainLabels)
+    ? getChainLabel(
+        selectedAllocation.chain_id,
+        chainLabels,
+        selectedAllocation.network,
+      )
     : null;
 
   return (
@@ -1082,6 +1212,9 @@ function App() {
           }
           topBar={
             <TopBar
+              availableProvenances={provenanceAvailability.forPrime(
+                selectedPrimeGroup?.name,
+              )}
               hasSelectedPrime={selectedPrime !== null}
               networkOptions={networkOptions}
               onNetworkChange={(value) =>
@@ -1253,6 +1386,7 @@ function App() {
           isLoading={isAllocationsLoading}
           selectedAllocation={selectedAllocation}
           selectedPrime={selectedPrime}
+          riskCapital={riskCapital}
         />
       </RiskDetailDrawer>
     </div>

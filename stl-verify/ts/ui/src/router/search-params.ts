@@ -9,7 +9,7 @@ import {
 } from '@archon-research/router-kit';
 import { z } from 'zod';
 
-import type { AllocationCategory } from '../types/allocation';
+import type { AllocationCategory, Provenance } from '../types/allocation';
 
 export const ALLOCATION_CATEGORIES = [
   'allocation',
@@ -73,23 +73,55 @@ function normalizeRangeSelection<T extends RangeSelection>(selection: T): T {
 // drops a param whose validated value is undefined, which is what stops
 // `?reference=false` from sitting in a URL that reads as "on".
 //
-// Exported because `lib/referenceMode` applies the same rule to the entry URL
+// Exported because `lib/provenance` applies the same rule to the entry URL
 // before the router has validated anything; two spellings of "is it on" would be
 // one drift away from a page mixing both provenances.
-const REFERENCE_OFF_VALUES = new Set(['false', '0', 'no', 'off']);
+const PROVENANCES: readonly Provenance[] = ['indexed', 'reference', 'both'];
 
-export function toReferenceFlag(value: unknown): true | undefined {
+export function toProvenance(value: unknown): Provenance | undefined {
   if (value === undefined || value === null) {
     return undefined;
   }
 
-  return REFERENCE_OFF_VALUES.has(String(value).toLowerCase())
-    ? undefined
-    : true;
+  const candidate = String(value).toLowerCase();
+  return PROVENANCES.includes(candidate as Provenance)
+    ? (candidate as Provenance)
+    : undefined;
 }
 
-function referenceParam() {
-  return z.optional(z.unknown().transform(toReferenceFlag));
+function provenanceParam() {
+  return z.optional(z.unknown().transform(toProvenance));
+}
+
+const REFERENCE_OFF_VALUES = new Set(['false', '0', 'no', 'off']);
+
+function legacyReferenceParam() {
+  return z.optional(
+    z
+      .unknown()
+      .transform((value) =>
+        value === undefined || value === null
+          ? undefined
+          : !REFERENCE_OFF_VALUES.has(String(value).toLowerCase()),
+      ),
+  );
+}
+
+/**
+ * Fold the superseded boolean into `source` and drop it.
+ *
+ * `reference=false` asked for STL's own figures by name, so it becomes
+ * `indexed` rather than falling through to the default. An explicit `source`
+ * wins: it is the current spelling.
+ */
+function adoptLegacyReferenceFlag<
+  T extends { source?: Provenance; reference?: boolean },
+>({ reference, ...rest }: T): Omit<T, 'reference'> {
+  if (rest.source !== undefined || reference === undefined) {
+    return rest;
+  }
+
+  return { ...rest, source: reference ? 'reference' : 'indexed' };
 }
 
 /**
@@ -110,8 +142,14 @@ export const sharedSearchSchema = z
     // Selects the provenance every endpoint answers from. Declared here rather
     // than read loose from the URL so the router carries it across navigations
     // instead of stripping it as unvalidated.
-    reference: referenceParam(),
+    source: provenanceParam(),
+    // Declared only so the transform below can translate it. Undeclared, it
+    // would be stripped on entry and a shared link would land on the default
+    // while `lib/provenance` had already read it -- a URL disagreeing with the
+    // page it produced.
+    reference: legacyReferenceParam(),
   })
+  .transform(adoptLegacyReferenceFlag)
   .transform(normalizeRangeSelection);
 
 /**

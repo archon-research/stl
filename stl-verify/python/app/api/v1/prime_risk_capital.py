@@ -1,23 +1,31 @@
+import logging
 from collections.abc import Callable
 from decimal import Decimal
-from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
 from app.api._validators import ProxyAddressPathParam
 from app.api.deps import get_engine, get_model_registry, get_reference_risk_capital_service_factory
+from app.api.provenance import (
+    get_requested_provenance,
+    resolve_or_422,
+)
 from app.domain.entities.allocation import EthAddress
-from app.domain.entities.prime_risk_capital import PrimeRiskCapital, UnpricedReason
+from app.domain.entities.prime_risk_capital import AllocationRiskCapital, PrimeRiskCapital, UnpricedReason
 from app.domain.entities.reference_risk_capital import ReferenceAllocation, ReferencePrimeRiskCapital
 from app.domain.exceptions import ReferenceDataUnavailableError
+from app.domain.position_identity import PositionFacts, position_identities
 from app.domain.prime_registry import ProxyKind, alm_proxies_for_prime, classify_proxy
+from app.domain.provenance import Provenance
 from app.domain.serialization import PlainDecimal
 from app.services.model_registry import ModelRegistry
 from app.services.prime_risk_capital_service import PrimeRiskCapitalService
 from app.services.reference_risk_capital_service import ReferenceRiskCapitalService
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["primes", "capital"])
 
@@ -27,7 +35,7 @@ class AllocationRiskCapitalResponse(BaseModel):
 
     receipt_token_id: int | None = Field(
         description=(
-            "Surrogate id of the receipt token. Always set in self mode. Under `reference=true` it is "
+            "Surrogate id of the receipt token. Always set for an indexed row. For a Sky-reported one it is "
             "`null` when the upstream position does not join to STL's token registry — an unmapped "
             "network, a token STL does not index, or a Uniswap V4 position, which identifies itself by "
             "32-byte pool id where an address is expected and so can never resolve. `token_address` "
@@ -39,30 +47,76 @@ class AllocationRiskCapitalResponse(BaseModel):
     exposure_usd: PlainDecimal = Field(description="On-chain USD exposure of the allocation.")
     applied: bool = Field(
         description=(
-            "Whether the figure is priced. Always `true` under `reference=true`: the upstream monitor "
+            "Whether the figure is priced. Always `true` for a Sky-reported row: the upstream monitor "
             "reports only positions it has already priced."
         )
     )
     required_risk_capital_usd: PlainDecimal | None = Field(
         default=None, description="Per-allocation RRC (USD). `null` when the allocation is unpriced."
     )
+    source: Provenance = Field(
+        default=Provenance.INDEXED,
+        description=(
+            "Which provenance reported this position's figures. Under `source=both` a position both "
+            "report keeps STL's, with Sky's in `reference_*`."
+        ),
+    )
+    reference_exposure_usd: PlainDecimal | None = Field(
+        default=None,
+        description="Sky's exposure for this position. Populated only under `source=both`.",
+    )
+    reference_required_risk_capital_usd: PlainDecimal | None = Field(
+        default=None,
+        description="Sky's requirement for this position. Populated only under `source=both`.",
+    )
+    position_keys: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Keys this position answers to, strongest first, computed the same way as the allocations "
+            "endpoint's. Two rows describe the same position when they share any one of them, which is "
+            "how a client attaches this row's figures to an allocation: a position Sky reports and STL "
+            "does not index has no `receipt_token_id` to join by. Opaque — the spelling is not a "
+            "contract, only the equality is."
+        ),
+        examples=[["custody:anchorage"]],
+    )
+    reference_crr_pct: PlainDecimal | None = Field(
+        default=None,
+        description=(
+            "Sky's comparable capital-risk ratio for this position (0-100). Populated only under "
+            "`source=both`. Carried rather than derived from the two figures above: it is upstream's "
+            "own ratio, and a consumer dividing them would publish a number Sky does not."
+        ),
+    )
+    encumbrance_contribution: PlainDecimal | None = Field(
+        default=None,
+        description=(
+            "This position's share of the prime's encumbrance: its required risk capital over the "
+            "prime's *total* risk capital. Summing the column gives the prime's encumbrance ratio. "
+            "Attributed rather than decomposed — risk capital is held by the prime, not the "
+            "position, so only the numerator is per-position."
+        ),
+    )
     crr_pct: PlainDecimal | None = Field(
         default=None,
         description=(
             "Comparable capital-risk ratio (0-100). `null` when the allocation is unpriced. Under "
-            "`reference=true` this is upstream's `crr` rescaled from its native 0-1 fraction, so the "
+            "`source=reference` this is upstream's `crr` rescaled from its native 0-1 fraction, so the "
             "scale matches self mode."
         ),
     )
     model: str | None = Field(
         default=None,
-        description="Model that produced the figure. `null` when unpriced, and always `null` under `reference=true`.",
+        description=(
+            "Model that produced the figure. `null` when unpriced, and always `null` for a Sky-reported "
+            "row, which runs no model."
+        ),
     )
     chain: str | None = Field(
         default=None,
         description=(
             "Internal chain name the position sits on. Reference-only: `null` in self mode, and `null` "
-            "under `reference=true` for a network STL has no chain id for."
+            "for a Sky-reported row on a network STL has no chain id for."
         ),
         examples=["mainnet"],
     )
@@ -157,21 +211,26 @@ class PrimeRiskCapitalResponse(BaseModel):
         ),
         examples=["0x1601843c5e9bc251a3272907010afa41fa18347e"],
     )
-    source: Literal["self", "reference"] = Field(
-        default="self",
+    source: Provenance = Field(
+        default=Provenance.INDEXED,
         description=(
-            "Provenance of every figure in this response. `self` is STL's own on-chain model; "
-            "`reference` is Sky's Star Agents Risk Capital & Requirements Monitor, returned when "
-            "`reference=true`. Never mixed: one response is entirely one or the other."
+            "Provenance of the figures in this response. `indexed` is STL's own on-chain model; "
+            "`reference` is Sky's Star Agents Risk Capital & Requirements Monitor; `both` carries the "
+            "two side by side, STL's in the unprefixed fields and Sky's in the `reference_`-prefixed "
+            "ones. Never reconciled: no field holds a blend of the two, and `both` degrades to "
+            "`indexed` — reporting itself as such — when the monitor cannot be read."
         ),
     )
     model: str | None = Field(
-        description="Default RRC model used (e.g. `gap_sweep`). `null` under `reference=true`, which runs no model.",
+        description=(
+            "Default RRC model used (e.g. `gap_sweep`). `null` under `source=reference`, which runs no "
+            "model; under `source=both` it is STL's model, since the unprefixed figures are STL's."
+        ),
         examples=["gap_sweep"],
     )
     exposure_usd: PlainDecimal = Field(
         description=(
-            "Σ priced receipt-token allocation exposure (USD). Under `reference=true` this is upstream's "
+            "Σ priced receipt-token allocation exposure (USD). Under `source=reference` this is upstream's "
             "own total, which deliberately does not equal the sum of `per_allocation` — the two come "
             "from separately-computed snapshots and reconcile only to about 1e-6."
         )
@@ -179,13 +238,13 @@ class PrimeRiskCapitalResponse(BaseModel):
     total_risk_capital_usd: PlainDecimal | None = Field(
         default=None,
         description=(
-            "On-chain SubProxy treasury balance (USD). `null` when absent. Under `reference=true` this "
+            "On-chain SubProxy treasury balance (USD). `null` when absent. Under `source=reference` this "
             "is upstream's Total Risk Capital, which is neither on-chain nor a treasury balance."
         ),
     )
     required_risk_capital_usd: PlainDecimal = Field(
         description=(
-            "Σ per-allocation RRC from the default model (USD). Under `reference=true` this is upstream's "
+            "Σ per-allocation RRC from the default model (USD). Under `source=reference` this is upstream's "
             "own Required Risk Capital total; no model runs."
         )
     )
@@ -200,7 +259,7 @@ class PrimeRiskCapitalResponse(BaseModel):
     )
     modeled_exposure_usd: PlainDecimal = Field(
         description=(
-            "Exposure the default model could price (USD). Under `reference=true` it equals "
+            "Exposure the default model could price (USD). Under `source=reference` it equals "
             "`exposure_usd`: the monitor publishes only positions it has already priced."
         )
     )
@@ -208,12 +267,38 @@ class PrimeRiskCapitalResponse(BaseModel):
         default=None, description="`modeled_exposure_usd / exposure_usd` (0-1). `null` when exposure is zero."
     )
     per_allocation: list[AllocationRiskCapitalResponse] = Field(
-        description="Per-allocation breakdown, newest-exposure first."
+        description=(
+            "Per-allocation breakdown, largest exposure first. Under `source=both` the merged rows are "
+            "re-sorted, so a row's position reflects STL's exposure where it has one and Sky's otherwise."
+        )
     )
     prime_name: str | None = Field(
         default=None,
         description="Prime this proxy belongs to. `null` for a proxy absent from the axis-synome contract.",
         examples=["spark"],
+    )
+    reference_prime_exposure_usd: PlainDecimal | None = Field(
+        default=None,
+        description=(
+            "Sky's reported exposure for the prime, populated only under `source=both`. Beside "
+            "STL's rather than replacing it: STL prices only the chains it indexes, so the two "
+            "differ by that coverage and the gap is the point."
+        ),
+    )
+    reference_prime_required_risk_capital_usd: PlainDecimal | None = Field(
+        default=None,
+        description="Sky's reported required risk capital. Populated only under `source=both`.",
+    )
+    reference_total_risk_capital_usd: PlainDecimal | None = Field(
+        default=None,
+        description="Sky's reported total risk capital. Populated only under `source=both`.",
+    )
+    reference_prime_encumbrance_ratio: PlainDecimal | None = Field(
+        default=None,
+        description=(
+            "Sky's reported encumbrance, its own required over its own total. Populated only under "
+            "`source=both`; never a ratio built from one provenance over the other."
+        ),
     )
     prime_exposure_usd: PlainDecimal = Field(
         default=Decimal("0"),
@@ -261,7 +346,7 @@ class PrimeRiskCapitalResponse(BaseModel):
         description=(
             "Chains the prime has an ALM proxy on that no allocation tracker serves, so they contribute "
             "nothing to the `prime_*` totals and read `null` in `prime_per_chain`. Non-empty means the "
-            "totals are a lower bound. Always empty under `reference=true`: upstream's totals are not "
+            "totals are a lower bound. Always empty under `source=reference`: upstream's totals are not "
             "bounded by what STL indexes, so the caveat does not apply to them."
         ),
         examples=[["arbitrum", "optimism", "unichain"]],
@@ -269,7 +354,8 @@ class PrimeRiskCapitalResponse(BaseModel):
     junior_risk_capital_usd: PlainDecimal | None = Field(
         default=None,
         description=(
-            "Junior (first-loss) risk capital (USD). Reference-only — `null` unless `reference=true`. "
+            "Junior (first-loss) risk capital (USD). Reference-only — `null` unless the response carries "
+            "Sky's figures (`source=reference` or `source=both`). "
             "This is the measured junior/senior split, which self mode has no equivalent for: it can "
             "only approximate a buffer as `total_risk_capital_usd - required_risk_capital_usd`."
         ),
@@ -345,20 +431,7 @@ async def _get_service(
 )
 async def get_prime_risk_capital(
     prime_id: ProxyAddressPathParam,
-    reference: bool = Query(
-        False,
-        description=(
-            "Answer from Sky's upstream Star monitor instead of STL's own model. The response shape is "
-            "unchanged; `source` reports which provenance produced it, and the reference-only fields "
-            "(`junior_risk_capital_usd`, `senior_risk_capital_usd`, the internal/external/tokenized "
-            "splits, the utilization ratios and `exposure_share`) are populated only in this mode. "
-            "**Every figure becomes prime-scoped**, because the monitor reports per prime: the "
-            "unprefixed fields carry the same values as their `prime_` counterparts, so a client "
-            "fanning out across a prime's proxies must dedupe rather than sum. "
-            "Returns `404` when the monitor does not track the prime, and `502` when it cannot be read "
-            "— the two are held apart so an outage is never served as an absence of exposure."
-        ),
-    ),
+    requested_provenance: Provenance | None = Depends(get_requested_provenance),
     service: PrimeRiskCapitalService = Depends(_get_service),
     reference_services: Callable[[], ReferenceRiskCapitalService] = Depends(get_reference_risk_capital_service_factory),
 ) -> PrimeRiskCapitalResponse:
@@ -382,15 +455,152 @@ async def get_prime_risk_capital(
     if not await service.prime_exists(prime_address):
         raise HTTPException(status_code=404, detail="Prime not found")
 
-    if reference:
-        return await _reference_response(prime_address, reference_services())
-    return _self_response(await service.compute(prime_address))
+    source = resolve_or_422(requested_provenance, available=frozenset(Provenance), default=Provenance.INDEXED)
+
+    if source is Provenance.REFERENCE:
+        return _with_encumbrance_contributions(await _reference_response(prime_address, reference_services()))
+
+    indexed = _self_response(await service.compute(prime_address))
+    if source is Provenance.INDEXED:
+        return _with_encumbrance_contributions(indexed)
+
+    merged = await _with_reference_totals(prime_address, indexed, reference_services())
+    return _with_encumbrance_contributions(merged)
+
+
+def _with_encumbrance_contributions(
+    response: PrimeRiskCapitalResponse,
+) -> PrimeRiskCapitalResponse:
+    """Attribute each position a share of the prime's encumbrance.
+
+    The denominator is the prime's whole risk capital, the same for every row, so
+    the column sums to the prime's own ratio. A zero or absent total leaves the
+    column null rather than dividing by it.
+    """
+    total = response.total_risk_capital_usd
+    if total is None or total == 0:
+        return response
+
+    return response.model_copy(
+        update={
+            "per_allocation": [
+                allocation.model_copy(
+                    update={
+                        "encumbrance_contribution": (
+                            None
+                            # The denominator is this response's own total, so a
+                            # row Sky alone reports has no share of it — leaving
+                            # it in would stop the column summing to the ratio.
+                            if allocation.required_risk_capital_usd is None or allocation.source is Provenance.REFERENCE
+                            else allocation.required_risk_capital_usd / total
+                        )
+                    }
+                )
+                for allocation in response.per_allocation
+            ]
+        }
+    )
+
+
+def _merge_per_allocation(
+    indexed: PrimeRiskCapitalResponse, reference: PrimeRiskCapitalResponse
+) -> list[AllocationRiskCapitalResponse]:
+    """One row per position, from either provenance, keyed the same way the
+    allocation union is.
+
+    A position both report keeps STL's figures with Sky's beside them: STL's are
+    computed from the chain, and the two differ by STL's chain coverage.
+    """
+
+    def facts(row: AllocationRiskCapitalResponse) -> PositionFacts:
+        return PositionFacts(
+            chain_id=None,
+            network=row.chain,
+            position_address=row.token_address,
+            receipt_token_id=row.receipt_token_id,
+            protocol_name=row.protocol_name,
+            symbol=row.symbol,
+        )
+
+    by_identity: dict[str, AllocationRiskCapitalResponse] = {}
+    for row in indexed.per_allocation:
+        for key in position_identities(facts(row)):
+            by_identity.setdefault(key, row)
+
+    merged: list[AllocationRiskCapitalResponse] = []
+    matched: set[int] = set()
+    for row in reference.per_allocation:
+        counterpart = next(
+            (by_identity[key] for key in position_identities(facts(row)) if key in by_identity),
+            None,
+        )
+        if counterpart is None:
+            merged.append(row.model_copy(update={"source": Provenance.REFERENCE}))
+            continue
+        matched.add(id(counterpart))
+        merged.append(
+            counterpart.model_copy(
+                update={
+                    "source": Provenance.BOTH,
+                    "reference_exposure_usd": row.exposure_usd,
+                    "reference_required_risk_capital_usd": row.required_risk_capital_usd,
+                    "reference_crr_pct": row.crr_pct,
+                }
+            )
+        )
+
+    merged.extend(row for row in indexed.per_allocation if id(row) not in matched)
+    # Both halves arrive ordered by their own exposure, so concatenating them
+    # yields neither order. `per_allocation` is published as largest-exposure
+    # first and a consumer paginating or truncating it reads the wrong rows
+    # otherwise.
+    return sorted(merged, key=lambda row: row.exposure_usd, reverse=True)
+
+
+async def _with_reference_totals(
+    prime_address: EthAddress,
+    indexed: PrimeRiskCapitalResponse,
+    reference_service: ReferenceRiskCapitalService,
+) -> PrimeRiskCapitalResponse:
+    """STL's model, plus Sky's totals in their own fields.
+
+    The two cannot share a field: they populate disjoint sets — Sky's junior and
+    senior splits have no STL equivalent, STL's model name has no Sky one — and
+    the figures they do share disagree by STL's chain coverage. An unreadable
+    reference half leaves STL's own answer whole rather than failing it.
+    """
+    try:
+        reference = await _reference_response(prime_address, reference_service)
+    except HTTPException as exc:
+        if exc.status_code not in (404, 502):
+            raise
+        logger.warning(
+            "Serving STL's risk capital alone; the reference half is unavailable",
+            extra={"prime_address": str(prime_address), "status_code": exc.status_code},
+        )
+        return indexed
+
+    return indexed.model_copy(
+        update={
+            "source": Provenance.BOTH,
+            "per_allocation": _merge_per_allocation(indexed, reference),
+            "reference_prime_exposure_usd": reference.prime_exposure_usd,
+            "reference_prime_required_risk_capital_usd": reference.prime_required_risk_capital_usd,
+            "reference_total_risk_capital_usd": reference.total_risk_capital_usd,
+            "reference_prime_encumbrance_ratio": reference.prime_encumbrance_ratio,
+            # Sky reports these and STL models none of them, so they belong to
+            # the merged answer whole.
+            "junior_risk_capital_usd": reference.junior_risk_capital_usd,
+            "senior_risk_capital_usd": reference.senior_risk_capital_usd,
+            "exposure_share": reference.exposure_share,
+        }
+    )
 
 
 def _self_response(result: PrimeRiskCapital) -> PrimeRiskCapitalResponse:
     """Project STL's own model output onto the response."""
     return PrimeRiskCapitalResponse(
-        source="self",
+        source=Provenance.INDEXED,
         prime_id=result.proxy_address,
         proxy_address=result.proxy_address,
         model=result.model,
@@ -400,7 +610,7 @@ def _self_response(result: PrimeRiskCapital) -> PrimeRiskCapitalResponse:
         encumbrance_ratio=result.encumbrance_ratio,
         modeled_exposure_usd=result.modeled_exposure_usd,
         modeled_pct=result.modeled_pct,
-        per_allocation=[AllocationRiskCapitalResponse(**alloc.__dict__) for alloc in result.per_allocation],
+        per_allocation=[_indexed_allocation(alloc) for alloc in result.per_allocation],
         prime_name=result.prime_name,
         prime_exposure_usd=result.prime_exposure_usd,
         prime_required_risk_capital_usd=result.prime_required_risk_capital_usd,
@@ -443,7 +653,7 @@ def _project_reference(prime_address: EthAddress, snapshot: ReferencePrimeRiskCa
     # would land at ~1.0 with a ~1e-6 wobble that can exceed the documented
     # 0-1 range, and would read as "STL priced all of this" — which no model did.
     return PrimeRiskCapitalResponse(
-        source="reference",
+        source=Provenance.REFERENCE,
         prime_id=str(prime_address),
         proxy_address=str(prime_address),
         model=None,
@@ -476,8 +686,38 @@ def _project_reference(prime_address: EthAddress, snapshot: ReferencePrimeRiskCa
     )
 
 
+def _indexed_allocation(allocation: AllocationRiskCapital) -> AllocationRiskCapitalResponse:
+    """STL's own row, keyed by the registry id it always carries."""
+    return AllocationRiskCapitalResponse(
+        **allocation.__dict__,
+        position_keys=position_identities(
+            PositionFacts(
+                chain_id=None,
+                network=None,
+                position_address=None,
+                receipt_token_id=allocation.receipt_token_id,
+                protocol_name=allocation.protocol_name,
+                symbol=allocation.symbol,
+            )
+        ),
+    )
+
+
 def _reference_allocation(row: ReferenceAllocation) -> AllocationRiskCapitalResponse:
     return AllocationRiskCapitalResponse(
+        # From the entity, not the projected row: the response carries no chain
+        # id, and keying on the network name where the allocations endpoint keys
+        # on the number would put the same position under two keys.
+        position_keys=position_identities(
+            PositionFacts(
+                chain_id=row.chain_id,
+                network=row.network,
+                position_address=row.token_address,
+                receipt_token_id=row.receipt_token_id,
+                protocol_name=row.protocol_name,
+                symbol=row.symbol,
+            )
+        ),
         receipt_token_id=row.receipt_token_id,
         symbol=row.symbol,
         protocol_name=row.protocol_name,

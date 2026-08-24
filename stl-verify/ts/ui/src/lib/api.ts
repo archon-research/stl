@@ -14,6 +14,8 @@ import type {
   PrimeDebtSnapshot,
   PrimesResponse,
   ProtocolEventsResponse,
+  Provenance,
+  ProvenanceAvailability,
   RiskBreakdown,
   Rrc,
   Token,
@@ -24,7 +26,7 @@ import type {
 } from '../types/allocation';
 import type { LocalChainRow, LocalProtocolRow } from '../types/local-data';
 import { logging } from './logging';
-import { REFERENCE_MODE, referenceQuery } from './referenceMode';
+import { showsReference, sourceQuery } from './provenance';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '';
 const apiClient = createApiClient<paths>(API_BASE_URL);
@@ -131,7 +133,7 @@ export function getAllocations(
 ): Promise<AllocationsResponse> {
   return requestData(
     apiClient.GET('/v1/primes/{prime_id}/allocations', {
-      params: { path: { prime_id: primeId }, query: { ...referenceQuery } },
+      params: { path: { prime_id: primeId }, query: { ...sourceQuery } },
       signal,
     }),
     'GET /v1/primes/{prime_id}/allocations',
@@ -146,10 +148,11 @@ export async function getAllocationsForProxies(
   proxyAddresses: string[],
   signal?: AbortSignal,
 ): Promise<AllocationsResponse> {
-  // Reference rows are prime-scoped (`scope: "prime"`), so every proxy answers
-  // with the same list. Fanning out would show each position once per chain —
-  // exactly the double-count that field warns about.
-  if (REFERENCE_MODE) {
+  // One call for anything the server answers prime-wide: reference rows are
+  // prime-scoped, and the merged view resolves the prime's proxies itself.
+  // Fanning out either would show each position once per chain — exactly the
+  // double-count the `scope` field warns about.
+  if (showsReference) {
     const [first] = proxyAddresses;
     return first === undefined ? [] : getAllocations(first, signal);
   }
@@ -160,13 +163,22 @@ export async function getAllocationsForProxies(
   return perProxyAllocations.flat();
 }
 
+export function getProvenanceAvailability(
+  signal?: AbortSignal,
+): Promise<ProvenanceAvailability> {
+  return requestData(
+    apiClient.GET('/v1/provenance/available', { signal }),
+    'GET /v1/provenance/available',
+  );
+}
+
 export function getPrimeRiskCapital(
   primeId: string,
   signal?: AbortSignal,
 ): Promise<PrimeRiskCapital> {
   return requestData(
     apiClient.GET('/v1/primes/{prime_id}/risk-capital', {
-      params: { path: { prime_id: primeId }, query: { ...referenceQuery } },
+      params: { path: { prime_id: primeId }, query: { ...sourceQuery } },
       signal,
     }),
     'GET /v1/primes/{prime_id}/risk-capital',
@@ -186,7 +198,7 @@ export async function getExposureEnvelope(
 ): Promise<ExposureEnvelope> {
   const query = {
     ...(filters ?? {}),
-    ...referenceQuery,
+    ...sourceQuery,
   } as paths['/v1/primes/{prime_id}/exposure']['get']['parameters']['query'];
 
   const envelope = await requestData(
@@ -408,7 +420,7 @@ export async function getPrimeDebtSnapshots(
 
 export async function getPrimeDebtEnvelope(
   primeId: string,
-  filters?: TimeSeriesFilters & { reference?: boolean },
+  filters?: TimeSeriesFilters & { source?: Provenance },
   signal?: AbortSignal,
 ): Promise<PrimeDebtEnvelope> {
   const query = filters as
@@ -437,7 +449,7 @@ export async function getTotalCapitalEnvelope(
 ): Promise<TotalCapitalEnvelope> {
   const query = {
     ...(filters ?? {}),
-    ...referenceQuery,
+    ...sourceQuery,
   } as paths['/v1/primes/{prime_id}/total-capital']['get']['parameters']['query'];
 
   const envelope = await requestData(
@@ -475,7 +487,7 @@ export async function getLatestReferenceDebtBucket(
 
   const envelope = await getPrimeDebtEnvelope(
     primeId,
-    { aggregate: true, limit: 1, reference: true, from_timestamp: from },
+    { aggregate: true, limit: 1, source: 'reference', from_timestamp: from },
     signal,
   );
   return ((envelope.data ?? [])[0] as PrimeDebtBucket | undefined) ?? null;

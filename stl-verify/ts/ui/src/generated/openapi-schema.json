@@ -254,7 +254,7 @@
         "type": "string"
       },
       "AllocationResponse": {
-        "description": "Enriched allocation response with category and metadata.\n\nThree row shapes share this model:\n- Receipt-token positions (e.g. spUSDT wrapping USDT): all fields populated.\n- Direct asset holdings (e.g. PYUSD held in the proxy with no wrapper):\n  ``receipt_token_id`` / ``receipt_token_address`` / ``protocol_name`` are\n  null; ``symbol`` names the held asset. ``underlying_*`` usually point at\n  the held asset itself, except holdings valued on the underlying-value\n  basis (allowlisted, e.g. a Uni V3 pool position valued in USDC) with a\n  resolvable underlying, where they point at that underlying.\n  ``amount_usd`` is populated when an oracle price exists for the pricing\n  basis and null otherwise (e.g. LP/curve shares with no oracle feed).\n- Off-chain custody holdings (Anchorage BTC): ``chain_id`` is 0 (the\n  off-chain sentinel), ``protocol_name`` is ``anchorage``, ``symbol`` is the\n  custodied asset (BTC), and both ``underlying_token_id`` and\n  ``underlying_token_address`` are null (off-chain assets have no token-\n  registry row). ``amount_usd`` is the loan drawn against the collateral and\n  ``latest_activity_at`` is the snapshot time \u2014 surfaced verbatim even when\n  the upstream feed is frozen, so staleness is visible rather than hidden.",
+        "description": "Enriched allocation response with category and metadata.\n\nThree row shapes share this model:\n- Receipt-token positions (e.g. spUSDT wrapping USDT): all fields populated.\n- Direct asset holdings (e.g. PYUSD held in the proxy with no wrapper):\n  ``receipt_token_id`` / ``receipt_token_address`` / ``protocol_name`` are\n  null; ``symbol`` names the held asset. ``underlying_*`` usually point at\n  the held asset itself, except holdings valued on the underlying-value\n  basis (allowlisted, e.g. a Uni V3 pool position valued in USDC) with a\n  resolvable underlying, where they point at that underlying.\n  ``amount_usd`` is populated when an oracle price exists for the pricing\n  basis and null otherwise (e.g. LP/curve shares with no oracle feed).\n- Off-chain custody holdings (Anchorage BTC): ``chain_id`` is 0 (the\n  off-chain sentinel), ``protocol_name`` is ``anchorage``, ``symbol`` is the\n  custodied asset (BTC), and both ``underlying_token_id`` and\n  ``underlying_token_address`` are null (off-chain assets have no token-\n  registry row). ``amount_usd`` is the loan drawn against the collateral and\n  ``latest_activity_at`` is the snapshot time \u2014 surfaced verbatim even when\n  the upstream feed is frozen, so staleness is visible rather than hidden.\n\n``chain_id`` therefore has three states, and 0 is not one of the other two:\nan EVM chain id, 0 for off-chain custody, and null for a chain STL has no id\nfor (reference rows only, where ``network`` carries the upstream name).",
         "example": {
           "amount_usd": "1234567.89",
           "balance": "1234567.89",
@@ -299,7 +299,7 @@
                 "type": "null"
               }
             ],
-            "description": "Balance held by the prime, in token units. Decimal serialized as a JSON string. Always present in self mode. Always `null` under `reference=true`: the upstream Star monitor reports USD exposure only and never a token quantity, so there is no balance to report \u2014 read `amount_usd` instead.",
+            "description": "Balance held by the prime, in token units. Decimal serialized as a JSON string. Always present for an indexed row. Always `null` for a Sky-reported one: the upstream Star monitor reports USD exposure only and never a token quantity, so there is no balance to report \u2014 read `amount_usd` instead.",
             "examples": [
               "1234567.89"
             ],
@@ -310,12 +310,19 @@
             "description": "Allocation category derived from protocol/symbol (`allocation`, `pol`, `psm3`, `asset`, `custody`)."
           },
           "chain_id": {
-            "description": "EVM chain id of the position.",
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "EVM chain id of the position. `0` for off-chain custody. `null` when the position is on a chain STL has no id for, which only happens on reference rows \u2014 read `network` for the label in that case.",
             "examples": [
               1
             ],
-            "title": "Chain Id",
-            "type": "integer"
+            "title": "Chain Id"
           },
           "latest_activity_action": {
             "anyOf": [
@@ -362,6 +369,35 @@
               "2026-05-07T12:00:00Z"
             ],
             "title": "Latest Activity At"
+          },
+          "network": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The upstream feed's own name for the chain, e.g. `plume`. Populated on reference rows only, and the sole label available when `chain_id` is `null`.",
+            "examples": [
+              "ethereum"
+            ],
+            "title": "Network"
+          },
+          "position_keys": {
+            "description": "Keys this position answers to, strongest first. Two rows describe the same position when they share any one of them, which is how a client joins this row to its risk-capital counterpart: the two endpoints do not carry the same kind of identifier, so a position Sky reports and STL does not index has no `receipt_token_id` to join by. Opaque \u2014 the spelling is not a contract, only the equality is.",
+            "examples": [
+              [
+                "token:736",
+                "position:1:0xc02ab1a5eaa8d1b114ef786d9bde108cd4364359"
+              ]
+            ],
+            "items": {
+              "type": "string"
+            },
+            "title": "Position Keys",
+            "type": "array"
           },
           "protocol_name": {
             "anyOf": [
@@ -420,6 +456,11 @@
             ],
             "title": "Scope",
             "type": "string"
+          },
+          "source": {
+            "$ref": "#/components/schemas/Provenance",
+            "default": "indexed",
+            "description": "Which provenance reported this position. `both` means the two agreed it exists and the figures shown are STL's; `reference` means only Sky reports it, which is either a position STL does not index or one on a chain it does not serve."
           },
           "symbol": {
             "description": "Display symbol: receipt-token symbol for wrapped positions, asset symbol for direct holdings.",
@@ -482,7 +523,7 @@
         "description": "Per-allocation risk capital from the default model, or from the reference feed.",
         "properties": {
           "applied": {
-            "description": "Whether the figure is priced. Always `true` under `reference=true`: the upstream monitor reports only positions it has already priced.",
+            "description": "Whether the figure is priced. Always `true` for a Sky-reported row: the upstream monitor reports only positions it has already priced.",
             "title": "Applied",
             "type": "boolean"
           },
@@ -495,7 +536,7 @@
                 "type": "null"
               }
             ],
-            "description": "Internal chain name the position sits on. Reference-only: `null` in self mode, and `null` under `reference=true` for a network STL has no chain id for.",
+            "description": "Internal chain name the position sits on. Reference-only: `null` in self mode, and `null` for a Sky-reported row on a network STL has no chain id for.",
             "examples": [
               "mainnet"
             ],
@@ -511,8 +552,21 @@
                 "type": "null"
               }
             ],
-            "description": "Comparable capital-risk ratio (0-100). `null` when the allocation is unpriced. Under `reference=true` this is upstream's `crr` rescaled from its native 0-1 fraction, so the scale matches self mode.",
+            "description": "Comparable capital-risk ratio (0-100). `null` when the allocation is unpriced. Under `source=reference` this is upstream's `crr` rescaled from its native 0-1 fraction, so the scale matches self mode.",
             "title": "Crr Pct"
+          },
+          "encumbrance_contribution": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "This position's share of the prime's encumbrance: its required risk capital over the prime's *total* risk capital. Summing the column gives the prime's encumbrance ratio. Attributed rather than decomposed \u2014 risk capital is held by the prime, not the position, so only the numerator is per-position.",
+            "title": "Encumbrance Contribution"
           },
           "exposure_usd": {
             "description": "On-chain USD exposure of the allocation.",
@@ -544,8 +598,21 @@
                 "type": "null"
               }
             ],
-            "description": "Model that produced the figure. `null` when unpriced, and always `null` under `reference=true`.",
+            "description": "Model that produced the figure. `null` when unpriced, and always `null` for a Sky-reported row, which runs no model.",
             "title": "Model"
+          },
+          "position_keys": {
+            "description": "Keys this position answers to, strongest first, computed the same way as the allocations endpoint's. Two rows describe the same position when they share any one of them, which is how a client attaches this row's figures to an allocation: a position Sky reports and STL does not index has no `receipt_token_id` to join by. Opaque \u2014 the spelling is not a contract, only the equality is.",
+            "examples": [
+              [
+                "custody:anchorage"
+              ]
+            ],
+            "items": {
+              "type": "string"
+            },
+            "title": "Position Keys",
+            "type": "array"
           },
           "protocol_name": {
             "description": "Protocol the allocation sits in.",
@@ -561,8 +628,47 @@
                 "type": "null"
               }
             ],
-            "description": "Surrogate id of the receipt token. Always set in self mode. Under `reference=true` it is `null` when the upstream position does not join to STL's token registry \u2014 an unmapped network, a token STL does not index, or a Uniswap V4 position, which identifies itself by 32-byte pool id where an address is expected and so can never resolve. `token_address` carries the raw upstream value in that case.",
+            "description": "Surrogate id of the receipt token. Always set for an indexed row. For a Sky-reported one it is `null` when the upstream position does not join to STL's token registry \u2014 an unmapped network, a token STL does not index, or a Uniswap V4 position, which identifies itself by 32-byte pool id where an address is expected and so can never resolve. `token_address` carries the raw upstream value in that case.",
             "title": "Receipt Token Id"
+          },
+          "reference_crr_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Sky's comparable capital-risk ratio for this position (0-100). Populated only under `source=both`. Carried rather than derived from the two figures above: it is upstream's own ratio, and a consumer dividing them would publish a number Sky does not.",
+            "title": "Reference Crr Pct"
+          },
+          "reference_exposure_usd": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Sky's exposure for this position. Populated only under `source=both`.",
+            "title": "Reference Exposure Usd"
+          },
+          "reference_required_risk_capital_usd": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Sky's requirement for this position. Populated only under `source=both`.",
+            "title": "Reference Required Risk Capital Usd"
           },
           "required_risk_capital_usd": {
             "anyOf": [
@@ -576,6 +682,11 @@
             ],
             "description": "Per-allocation RRC (USD). `null` when the allocation is unpriced.",
             "title": "Required Risk Capital Usd"
+          },
+          "source": {
+            "$ref": "#/components/schemas/Provenance",
+            "default": "indexed",
+            "description": "Which provenance reported this position's figures. Under `source=both` a position both report keeps STL's, with Sky's in `reference_*`."
           },
           "symbol": {
             "description": "Receipt-token symbol.",
@@ -1221,6 +1332,22 @@
               "1459014561.88"
             ],
             "title": "Exposure Usd"
+          },
+          "reference_exposure_usd": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Sky's reported exposure for the same bucket, populated only under `source=both`. Carried beside STL's rather than replacing it: the two are computed differently and differ by around a percent, which a reader needs shown rather than reconciled.",
+            "examples": [
+              "1461200000.00"
+            ],
+            "title": "Reference Exposure Usd"
           }
         },
         "required": [
@@ -1247,14 +1374,9 @@
             "type": "string"
           },
           "source": {
-            "default": "self",
-            "description": "Provenance of the series. `self` is STL's priced receipt-token exposure; `reference` is Sky's Star monitor as observed by STL's syncer, returned when `reference=true`.",
-            "enum": [
-              "self",
-              "reference"
-            ],
-            "title": "Source",
-            "type": "string"
+            "$ref": "#/components/schemas/Provenance",
+            "default": "indexed",
+            "description": "Provenance the series was answered from. `indexed` is STL's priced receipt-token exposure; `reference` is Sky's Star monitor as observed by STL's syncer; `both` fills `exposure_usd` and `reference_exposure_usd` on every bucket."
           },
           "window": {
             "$ref": "#/components/schemas/TimeSeriesWindow",
@@ -1334,6 +1456,22 @@
               "1234567890000000000000"
             ],
             "title": "Debt Wad"
+          },
+          "reference_debt_wad": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Sky's reported debt for the same bucket in the same unit, populated only under `source=both`. Beside the on-chain figure rather than replacing it.",
+            "examples": [
+              "2645260280720000000000000000"
+            ],
+            "title": "Reference Debt Wad"
           }
         },
         "required": [
@@ -1373,14 +1511,9 @@
             "type": "string"
           },
           "source": {
-            "default": "self",
-            "description": "Provenance of the figures. `self` is the on-chain per-ilk debt; `reference` is Sky's own reported debt, returned when `reference=true`.",
-            "enum": [
-              "self",
-              "reference"
-            ],
-            "title": "Source",
-            "type": "string"
+            "$ref": "#/components/schemas/Provenance",
+            "default": "indexed",
+            "description": "Provenance the series was answered from. `indexed` is the on-chain per-ilk debt; `reference` is Sky's own reported figure; `both` fills `debt_wad` and `reference_debt_wad` on every bucket, leaving either null where that provenance reported nothing. Raw snapshots are always `indexed`."
           },
           "window": {
             "$ref": "#/components/schemas/TimeSeriesWindow",
@@ -1473,6 +1606,40 @@
           "synced_at"
         ],
         "title": "PrimeDebtSnapshotResponse",
+        "type": "object"
+      },
+      "PrimeProvenanceResponse": {
+        "description": "The provenances one prime can be answered from.",
+        "properties": {
+          "available": {
+            "description": "Provenances this prime can be served from. `indexed` is always present \u2014 a prime is only listed because STL indexes it. `reference` and `both` appear together, and only when Sky's monitor covers the prime.",
+            "examples": [
+              [
+                "indexed",
+                "reference",
+                "both"
+              ]
+            ],
+            "items": {
+              "$ref": "#/components/schemas/Provenance"
+            },
+            "title": "Available",
+            "type": "array"
+          },
+          "name": {
+            "description": "Prime name, as `/v1/primes` reports it.",
+            "examples": [
+              "spark"
+            ],
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "available"
+        ],
+        "title": "PrimeProvenanceResponse",
         "type": "object"
       },
       "PrimeResponse": {
@@ -1605,7 +1772,7 @@
             "title": "Exposure Share"
           },
           "exposure_usd": {
-            "description": "\u03a3 priced receipt-token allocation exposure (USD). Under `reference=true` this is upstream's own total, which deliberately does not equal the sum of `per_allocation` \u2014 the two come from separately-computed snapshots and reconcile only to about 1e-6.",
+            "description": "\u03a3 priced receipt-token allocation exposure (USD). Under `source=reference` this is upstream's own total, which deliberately does not equal the sum of `per_allocation` \u2014 the two come from separately-computed snapshots and reconcile only to about 1e-6.",
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Exposure Usd",
             "type": "string"
@@ -1672,7 +1839,7 @@
                 "type": "null"
               }
             ],
-            "description": "Junior (first-loss) risk capital (USD). Reference-only \u2014 `null` unless `reference=true`. This is the measured junior/senior split, which self mode has no equivalent for: it can only approximate a buffer as `total_risk_capital_usd - required_risk_capital_usd`.",
+            "description": "Junior (first-loss) risk capital (USD). Reference-only \u2014 `null` unless the response carries Sky's figures (`source=reference` or `source=both`). This is the measured junior/senior split, which self mode has no equivalent for: it can only approximate a buffer as `total_risk_capital_usd - required_risk_capital_usd`.",
             "title": "Junior Risk Capital Usd"
           },
           "model": {
@@ -1684,14 +1851,14 @@
                 "type": "null"
               }
             ],
-            "description": "Default RRC model used (e.g. `gap_sweep`). `null` under `reference=true`, which runs no model.",
+            "description": "Default RRC model used (e.g. `gap_sweep`). `null` under `source=reference`, which runs no model; under `source=both` it is STL's model, since the unprefixed figures are STL's.",
             "examples": [
               "gap_sweep"
             ],
             "title": "Model"
           },
           "modeled_exposure_usd": {
-            "description": "Exposure the default model could price (USD). Under `reference=true` it equals `exposure_usd`: the monitor publishes only positions it has already priced.",
+            "description": "Exposure the default model could price (USD). Under `source=reference` it equals `exposure_usd`: the monitor publishes only positions it has already priced.",
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Modeled Exposure Usd",
             "type": "string"
@@ -1710,7 +1877,7 @@
             "title": "Modeled Pct"
           },
           "per_allocation": {
-            "description": "Per-allocation breakdown, newest-exposure first.",
+            "description": "Per-allocation breakdown, largest exposure first. Under `source=both` the merged rows are re-sorted, so a row's position reflects STL's exposure where it has one and Sky's otherwise.",
             "items": {
               "$ref": "#/components/schemas/AllocationRiskCapitalResponse"
             },
@@ -1808,7 +1975,7 @@
             "type": "string"
           },
           "prime_unserved_chains": {
-            "description": "Chains the prime has an ALM proxy on that no allocation tracker serves, so they contribute nothing to the `prime_*` totals and read `null` in `prime_per_chain`. Non-empty means the totals are a lower bound. Always empty under `reference=true`: upstream's totals are not bounded by what STL indexes, so the caveat does not apply to them.",
+            "description": "Chains the prime has an ALM proxy on that no allocation tracker serves, so they contribute nothing to the `prime_*` totals and read `null` in `prime_per_chain`. Non-empty means the totals are a lower bound. Always empty under `source=reference`: upstream's totals are not bounded by what STL indexes, so the caveat does not apply to them.",
             "examples": [
               [
                 "arbitrum",
@@ -1830,8 +1997,60 @@
             "title": "Proxy Address",
             "type": "string"
           },
+          "reference_prime_encumbrance_ratio": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Sky's reported encumbrance, its own required over its own total. Populated only under `source=both`; never a ratio built from one provenance over the other.",
+            "title": "Reference Prime Encumbrance Ratio"
+          },
+          "reference_prime_exposure_usd": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Sky's reported exposure for the prime, populated only under `source=both`. Beside STL's rather than replacing it: STL prices only the chains it indexes, so the two differ by that coverage and the gap is the point.",
+            "title": "Reference Prime Exposure Usd"
+          },
+          "reference_prime_required_risk_capital_usd": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Sky's reported required risk capital. Populated only under `source=both`.",
+            "title": "Reference Prime Required Risk Capital Usd"
+          },
+          "reference_total_risk_capital_usd": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Sky's reported total risk capital. Populated only under `source=both`.",
+            "title": "Reference Total Risk Capital Usd"
+          },
           "required_risk_capital_usd": {
-            "description": "\u03a3 per-allocation RRC from the default model (USD). Under `reference=true` this is upstream's own Required Risk Capital total; no model runs.",
+            "description": "\u03a3 per-allocation RRC from the default model (USD). Under `source=reference` this is upstream's own Required Risk Capital total; no model runs.",
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Required Risk Capital Usd",
             "type": "string"
@@ -1850,14 +2069,9 @@
             "title": "Senior Risk Capital Usd"
           },
           "source": {
-            "default": "self",
-            "description": "Provenance of every figure in this response. `self` is STL's own on-chain model; `reference` is Sky's Star Agents Risk Capital & Requirements Monitor, returned when `reference=true`. Never mixed: one response is entirely one or the other.",
-            "enum": [
-              "self",
-              "reference"
-            ],
-            "title": "Source",
-            "type": "string"
+            "$ref": "#/components/schemas/Provenance",
+            "default": "indexed",
+            "description": "Provenance of the figures in this response. `indexed` is STL's own on-chain model; `reference` is Sky's Star Agents Risk Capital & Requirements Monitor; `both` carries the two side by side, STL's in the unprefixed fields and Sky's in the `reference_`-prefixed ones. Never reconciled: no field holds a blend of the two, and `both` degrades to `indexed` \u2014 reporting itself as such \u2014 when the monitor cannot be read."
           },
           "spj_utilization": {
             "anyOf": [
@@ -1895,7 +2109,7 @@
                 "type": "null"
               }
             ],
-            "description": "On-chain SubProxy treasury balance (USD). `null` when absent. Under `reference=true` this is upstream's Total Risk Capital, which is neither on-chain nor a treasury balance.",
+            "description": "On-chain SubProxy treasury balance (USD). `null` when absent. Under `source=reference` this is upstream's Total Risk Capital, which is neither on-chain nor a treasury balance.",
             "title": "Total Risk Capital Usd"
           }
         },
@@ -2139,6 +2353,40 @@
           "name"
         ],
         "title": "ProtocolResponse",
+        "type": "object"
+      },
+      "Provenance": {
+        "description": "A response's provenance.\n\n``str``-valued so it serialises as itself in a response model and parses\nfrom a query string without a converter.",
+        "enum": [
+          "indexed",
+          "reference",
+          "both"
+        ],
+        "title": "Provenance",
+        "type": "string"
+      },
+      "ProvenanceAvailabilityResponse": {
+        "description": "Per-prime provenance coverage.",
+        "properties": {
+          "primes": {
+            "description": "One entry per prime STL indexes.",
+            "items": {
+              "$ref": "#/components/schemas/PrimeProvenanceResponse"
+            },
+            "title": "Primes",
+            "type": "array"
+          },
+          "reference_upstream_reachable": {
+            "description": "Whether Sky's monitor answered. When `false` every prime reports `indexed` alone \u2014 unknown coverage is reported as no coverage, so a client is never told a provenance is available and then handed an error for it.",
+            "title": "Reference Upstream Reachable",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "primes",
+          "reference_upstream_reachable"
+        ],
+        "title": "ProvenanceAvailabilityResponse",
         "type": "object"
       },
       "RiskBreakdownItemResponse": {
@@ -2948,6 +3196,22 @@
             ],
             "title": "Encumbrance Ratio"
           },
+          "reference_total_capital_usd": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Sky's reported total risk capital for the same bucket, populated only under `source=both`. Beside STL's rather than replacing it: the two are computed differently, and a reader needs the gap shown rather than reconciled.",
+            "examples": [
+              "48142491.08"
+            ],
+            "title": "Reference Total Capital Usd"
+          },
           "total_capital_usd": {
             "anyOf": [
               {
@@ -2989,14 +3253,9 @@
             "type": "string"
           },
           "source": {
-            "default": "self",
-            "description": "Provenance of the series. `self` is the on-chain SubProxy treasury; `reference` is Sky's Star monitor as observed by STL's syncer, returned when `reference=true`.",
-            "enum": [
-              "self",
-              "reference"
-            ],
-            "title": "Source",
-            "type": "string"
+            "$ref": "#/components/schemas/Provenance",
+            "default": "indexed",
+            "description": "Provenance the series was answered from. `indexed` is the on-chain SubProxy treasury; `reference` is Sky's Star monitor as observed by STL's syncer; `both` fills `total_capital_usd` and `reference_total_capital_usd` on every bucket, leaving either null where that provenance reported nothing."
           },
           "window": {
             "$ref": "#/components/schemas/TimeSeriesWindow",
@@ -3420,15 +3679,41 @@
             }
           },
           {
-            "description": "List the positions Sky's Star monitor reports for this prime instead of the ones STL indexes on-chain. The row shape is unchanged, but every row is prime-scoped (`scope=\"prime\"`) because the monitor reports per prime, not per proxy \u2014 so a client fanning out across a prime's proxies must dedupe rather than sum. `balance` is `null` throughout: the monitor reports USD exposure only. Returns `404` when the monitor does not track the prime and `502` when it cannot be read.",
+            "description": "Which provenance to answer from. `indexed` is STL's own model computed from the chain it indexes; `reference` is Sky's published figures as observed by STL; `both` merges them, which is the default. An endpoint fed by a single provenance narrows `both` to that one and says so in the response's `source`, but naming a provenance it cannot serve is a `422`.",
+            "in": "query",
+            "name": "source",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/Provenance"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Which provenance to answer from. `indexed` is STL's own model computed from the chain it indexes; `reference` is Sky's published figures as observed by STL; `both` merges them, which is the default. An endpoint fed by a single provenance narrows `both` to that one and says so in the response's `source`, but naming a provenance it cannot serve is a `422`.",
+              "title": "Source"
+            }
+          },
+          {
+            "deprecated": true,
+            "description": "**Deprecated** \u2014 use `source`. `reference=true` means `source=reference` and `reference=false` means `source=indexed` (not the `both` default, since it asked for STL's own figures by name). Passing both parameters with conflicting values is a `422`.",
             "in": "query",
             "name": "reference",
             "required": false,
             "schema": {
-              "default": false,
-              "description": "List the positions Sky's Star monitor reports for this prime instead of the ones STL indexes on-chain. The row shape is unchanged, but every row is prime-scoped (`scope=\"prime\"`) because the monitor reports per prime, not per proxy \u2014 so a client fanning out across a prime's proxies must dedupe rather than sum. `balance` is `null` throughout: the monitor reports USD exposure only. Returns `404` when the monitor does not track the prime and `502` when it cannot be read.",
-              "title": "Reference",
-              "type": "boolean"
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "deprecated": true,
+              "description": "**Deprecated** \u2014 use `source`. `reference=true` means `source=reference` and `reference=false` means `source=indexed` (not the `both` default, since it asked for STL's own figures by name). Passing both parameters with conflicting values is a `422`.",
+              "title": "Reference"
             }
           }
         ],
@@ -3466,7 +3751,7 @@
     },
     "/v1/primes/{prime_id}/debt": {
       "get": {
-        "description": "Return debt snapshots for a prime, newest first, inside a `{mode, window, data}` envelope. Results are time-windowed (default last 24h). Returns `404` if the prime is unknown. Each snapshot carries the `block_number`/`block_version` it was observed at; consumers can use `block_version` to detect reorg-driven re-emissions. Set `aggregate=true` for the last debt value per time bucket (gap-filled). Pass `reference=true` (with `aggregate=true`) for Sky's own reported debt instead of the on-chain per-ilk figure; `source` reports which provenance answered.",
+        "description": "Return debt snapshots for a prime, newest first, inside a `{mode, window, data}` envelope. Results are time-windowed (default last 24h). Returns `404` if the prime is unknown. Each snapshot carries the `block_number`/`block_version` it was observed at; consumers can use `block_version` to detect reorg-driven re-emissions. Set `aggregate=true` for the last debt value per time bucket (gap-filled). Pass `source=reference` (with `aggregate=true`) for Sky's own reported debt instead of the on-chain per-ilk figure, or `source=both` to carry each in its own field on every bucket; `source` reports which provenance answered.",
         "operationId": "list_prime_debt_snapshots_v1_primes__prime_id__debt_get",
         "parameters": [
           {
@@ -3492,18 +3777,6 @@
               "minimum": 1,
               "title": "Limit",
               "type": "integer"
-            }
-          },
-          {
-            "description": "Serve Sky's own reported debt instead of the on-chain per-ilk debt. Requires `aggregate=true`: upstream publishes one figure per prime per day and carries no ilk, block number or block version, so it cannot fill a raw snapshot \u2014 asking for one returns `400` rather than inventing those fields. `debt_wad` keeps its unit in both modes, so dividing by 1e18 gives USDS units either way.",
-            "in": "query",
-            "name": "reference",
-            "required": false,
-            "schema": {
-              "default": false,
-              "description": "Serve Sky's own reported debt instead of the on-chain per-ilk debt. Requires `aggregate=true`: upstream publishes one figure per prime per day and carries no ilk, block number or block version, so it cannot fill a raw snapshot \u2014 asking for one returns `400` rather than inventing those fields. `debt_wad` keeps its unit in both modes, so dividing by 1e18 gives USDS units either way.",
-              "title": "Reference",
-              "type": "boolean"
             }
           },
           {
@@ -3572,6 +3845,44 @@
               "description": "When true, return time-bucketed aggregates instead of raw rows.",
               "title": "Aggregate",
               "type": "boolean"
+            }
+          },
+          {
+            "description": "Which provenance to answer from. `indexed` is STL's own model computed from the chain it indexes; `reference` is Sky's published figures as observed by STL; `both` merges them, which is the default. An endpoint fed by a single provenance narrows `both` to that one and says so in the response's `source`, but naming a provenance it cannot serve is a `422`.",
+            "in": "query",
+            "name": "source",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/Provenance"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Which provenance to answer from. `indexed` is STL's own model computed from the chain it indexes; `reference` is Sky's published figures as observed by STL; `both` merges them, which is the default. An endpoint fed by a single provenance narrows `both` to that one and says so in the response's `source`, but naming a provenance it cannot serve is a `422`.",
+              "title": "Source"
+            }
+          },
+          {
+            "deprecated": true,
+            "description": "**Deprecated** \u2014 use `source`. `reference=true` means `source=reference` and `reference=false` means `source=indexed` (not the `both` default, since it asked for STL's own figures by name). Passing both parameters with conflicting values is a `422`.",
+            "in": "query",
+            "name": "reference",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "deprecated": true,
+              "description": "**Deprecated** \u2014 use `source`. `reference=true` means `source=reference` and `reference=false` means `source=indexed` (not the `both` default, since it asked for STL's own figures by name). Passing both parameters with conflicting values is a `422`.",
+              "title": "Reference"
             }
           }
         ],
@@ -3634,18 +3945,6 @@
             }
           },
           {
-            "description": "Serve Sky's Star monitor exposure instead of STL's priced receipt-token exposure. The shape is unchanged; `source` reports the provenance. The reference series only extends back to when STL first observed the monitor \u2014 it publishes no history of its own \u2014 so earlier buckets are `null`, meaning not yet observed rather than zero.",
-            "in": "query",
-            "name": "reference",
-            "required": false,
-            "schema": {
-              "default": false,
-              "description": "Serve Sky's Star monitor exposure instead of STL's priced receipt-token exposure. The shape is unchanged; `source` reports the provenance. The reference series only extends back to when STL first observed the monitor \u2014 it publishes no history of its own \u2014 so earlier buckets are `null`, meaning not yet observed rather than zero.",
-              "title": "Reference",
-              "type": "boolean"
-            }
-          },
-          {
             "description": "Inclusive lower timestamp bound (ISO-8601). Defaults to 24h before `to_timestamp`.",
             "in": "query",
             "name": "from_timestamp",
@@ -3711,6 +4010,44 @@
               "description": "When true, return time-bucketed aggregates instead of raw rows.",
               "title": "Aggregate",
               "type": "boolean"
+            }
+          },
+          {
+            "description": "Which provenance to answer from. `indexed` is STL's own model computed from the chain it indexes; `reference` is Sky's published figures as observed by STL; `both` merges them, which is the default. An endpoint fed by a single provenance narrows `both` to that one and says so in the response's `source`, but naming a provenance it cannot serve is a `422`.",
+            "in": "query",
+            "name": "source",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/Provenance"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Which provenance to answer from. `indexed` is STL's own model computed from the chain it indexes; `reference` is Sky's published figures as observed by STL; `both` merges them, which is the default. An endpoint fed by a single provenance narrows `both` to that one and says so in the response's `source`, but naming a provenance it cannot serve is a `422`.",
+              "title": "Source"
+            }
+          },
+          {
+            "deprecated": true,
+            "description": "**Deprecated** \u2014 use `source`. `reference=true` means `source=reference` and `reference=false` means `source=indexed` (not the `both` default, since it asked for STL's own figures by name). Passing both parameters with conflicting values is a `422`.",
+            "in": "query",
+            "name": "reference",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "deprecated": true,
+              "description": "**Deprecated** \u2014 use `source`. `reference=true` means `source=reference` and `reference=false` means `source=indexed` (not the `both` default, since it asked for STL's own figures by name). Passing both parameters with conflicting values is a `422`.",
+              "title": "Reference"
             }
           }
         ],
@@ -3760,15 +4097,41 @@
             }
           },
           {
-            "description": "Answer from Sky's upstream Star monitor instead of STL's own model. The response shape is unchanged; `source` reports which provenance produced it, and the reference-only fields (`junior_risk_capital_usd`, `senior_risk_capital_usd`, the internal/external/tokenized splits, the utilization ratios and `exposure_share`) are populated only in this mode. **Every figure becomes prime-scoped**, because the monitor reports per prime: the unprefixed fields carry the same values as their `prime_` counterparts, so a client fanning out across a prime's proxies must dedupe rather than sum. Returns `404` when the monitor does not track the prime, and `502` when it cannot be read \u2014 the two are held apart so an outage is never served as an absence of exposure.",
+            "description": "Which provenance to answer from. `indexed` is STL's own model computed from the chain it indexes; `reference` is Sky's published figures as observed by STL; `both` merges them, which is the default. An endpoint fed by a single provenance narrows `both` to that one and says so in the response's `source`, but naming a provenance it cannot serve is a `422`.",
+            "in": "query",
+            "name": "source",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/Provenance"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Which provenance to answer from. `indexed` is STL's own model computed from the chain it indexes; `reference` is Sky's published figures as observed by STL; `both` merges them, which is the default. An endpoint fed by a single provenance narrows `both` to that one and says so in the response's `source`, but naming a provenance it cannot serve is a `422`.",
+              "title": "Source"
+            }
+          },
+          {
+            "deprecated": true,
+            "description": "**Deprecated** \u2014 use `source`. `reference=true` means `source=reference` and `reference=false` means `source=indexed` (not the `both` default, since it asked for STL's own figures by name). Passing both parameters with conflicting values is a `422`.",
             "in": "query",
             "name": "reference",
             "required": false,
             "schema": {
-              "default": false,
-              "description": "Answer from Sky's upstream Star monitor instead of STL's own model. The response shape is unchanged; `source` reports which provenance produced it, and the reference-only fields (`junior_risk_capital_usd`, `senior_risk_capital_usd`, the internal/external/tokenized splits, the utilization ratios and `exposure_share`) are populated only in this mode. **Every figure becomes prime-scoped**, because the monitor reports per prime: the unprefixed fields carry the same values as their `prime_` counterparts, so a client fanning out across a prime's proxies must dedupe rather than sum. Returns `404` when the monitor does not track the prime, and `502` when it cannot be read \u2014 the two are held apart so an outage is never served as an absence of exposure.",
-              "title": "Reference",
-              "type": "boolean"
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "deprecated": true,
+              "description": "**Deprecated** \u2014 use `source`. `reference=true` means `source=reference` and `reference=false` means `source=indexed` (not the `both` default, since it asked for STL's own figures by name). Passing both parameters with conflicting values is a `422`.",
+              "title": "Reference"
             }
           }
         ],
@@ -3805,7 +4168,7 @@
     },
     "/v1/primes/{prime_id}/total-capital": {
       "get": {
-        "description": "Return the prime's total capital over time, gap-filled (LOCF) into buckets. Total capital is the treasury USDS held in the prime's SubProxy wallet (USDS is dollar-pegged, so the balance is the USD figure); it matches the upstream Star `total_capital`. Under `reference=true` each bucket also carries `assets_usd` (the upstream PRIME COLLATERAL figure) and the monitor's `encumbrance_ratio`. Returns `404` if the prime is unknown. Defaults to the last 24h; pass a window and `resolution` for longer ranges.",
+        "description": "Return the prime's total capital over time, gap-filled (LOCF) into buckets. Total capital is the treasury USDS held in the prime's SubProxy wallet (USDS is dollar-pegged, so the balance is the USD figure); it matches the upstream Star `total_capital`. Wherever the response carries Sky's figures (`source=reference` or `source=both`) each bucket also carries `assets_usd` (the upstream PRIME COLLATERAL figure) and the monitor's `encumbrance_ratio`. Returns `404` if the prime is unknown. Defaults to the last 24h; pass a window and `resolution` for longer ranges.",
         "operationId": "list_prime_total_capital_v1_primes__prime_id__total_capital_get",
         "parameters": [
           {
@@ -3831,18 +4194,6 @@
               "minimum": 1,
               "title": "Limit",
               "type": "integer"
-            }
-          },
-          {
-            "description": "Serve Sky's Star monitor figures instead of the on-chain treasury. The shape is unchanged; `source` reports the provenance. The reference series only extends back to when STL first observed the monitor \u2014 it publishes no history of its own \u2014 so earlier buckets are `null`, meaning not yet observed rather than zero.",
-            "in": "query",
-            "name": "reference",
-            "required": false,
-            "schema": {
-              "default": false,
-              "description": "Serve Sky's Star monitor figures instead of the on-chain treasury. The shape is unchanged; `source` reports the provenance. The reference series only extends back to when STL first observed the monitor \u2014 it publishes no history of its own \u2014 so earlier buckets are `null`, meaning not yet observed rather than zero.",
-              "title": "Reference",
-              "type": "boolean"
             }
           },
           {
@@ -3911,6 +4262,44 @@
               "description": "When true, return time-bucketed aggregates instead of raw rows.",
               "title": "Aggregate",
               "type": "boolean"
+            }
+          },
+          {
+            "description": "Which provenance to answer from. `indexed` is STL's own model computed from the chain it indexes; `reference` is Sky's published figures as observed by STL; `both` merges them, which is the default. An endpoint fed by a single provenance narrows `both` to that one and says so in the response's `source`, but naming a provenance it cannot serve is a `422`.",
+            "in": "query",
+            "name": "source",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/Provenance"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Which provenance to answer from. `indexed` is STL's own model computed from the chain it indexes; `reference` is Sky's published figures as observed by STL; `both` merges them, which is the default. An endpoint fed by a single provenance narrows `both` to that one and says so in the response's `source`, but naming a provenance it cannot serve is a `422`.",
+              "title": "Source"
+            }
+          },
+          {
+            "deprecated": true,
+            "description": "**Deprecated** \u2014 use `source`. `reference=true` means `source=reference` and `reference=false` means `source=indexed` (not the `both` default, since it asked for STL's own figures by name). Passing both parameters with conflicting values is a `422`.",
+            "in": "query",
+            "name": "reference",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "deprecated": true,
+              "description": "**Deprecated** \u2014 use `source`. `reference=true` means `source=reference` and `reference=false` means `source=indexed` (not the `both` default, since it asked for STL's own figures by name). Passing both parameters with conflicting values is a `422`.",
+              "title": "Reference"
             }
           }
         ],
@@ -4118,6 +4507,28 @@
         "summary": "List supported protocols",
         "tags": [
           "metadata"
+        ]
+      }
+    },
+    "/v1/provenance/available": {
+      "get": {
+        "description": "List, for every prime STL indexes, which values of the `source` parameter it can be answered from. Intended to be read once before rendering, so a client can offer only the provenances that will work rather than discovering the rest by their errors.",
+        "operationId": "get_provenance_availability_v1_provenance_available_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProvenanceAvailabilityResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Provenance coverage per prime",
+        "tags": [
+          "primes"
         ]
       }
     },

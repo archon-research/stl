@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime
 from typing import Literal
 
@@ -8,8 +9,13 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.adapters.postgres.prime_debt_repository import PrimeDebtRepository
 from app.api._validators import PrimeOrProxyAddressPathParam
 from app.api.deps import get_engine
+from app.api.provenance import (
+    get_requested_provenance,
+    resolve_or_422,
+)
 from app.api.time_series import TimeSeriesWindow, build_window, get_time_series_query_params
 from app.domain.entities.allocation import EthAddress
+from app.domain.provenance import Provenance
 from app.domain.serialization import PlainDecimal
 from app.domain.time_series import TimeSeriesQuery
 from app.services.prime_debt_service import PrimeDebtService
@@ -73,17 +79,27 @@ class PrimeDebtBucketResponse(BaseModel):
         ),
         examples=["1234567890000000000000"],
     )
+    reference_debt_wad: PlainDecimal | None = Field(
+        default=None,
+        description=(
+            "Sky's reported debt for the same bucket in the same unit, populated only under "
+            "`source=both`. Beside the on-chain figure rather than replacing it."
+        ),
+        examples=["2645260280720000000000000000"],
+    )
 
 
 class PrimeDebtEnvelope(BaseModel):
     """Prime debt response: raw snapshots or aggregated time buckets."""
 
     mode: Literal["raw", "aggregated"] = Field(description="`raw` for snapshots, `aggregated` for time buckets.")
-    source: Literal["self", "reference"] = Field(
-        default="self",
+    source: Provenance = Field(
+        default=Provenance.INDEXED,
         description=(
-            "Provenance of the figures. `self` is the on-chain per-ilk debt; `reference` is Sky's "
-            "own reported debt, returned when `reference=true`."
+            "Provenance the series was answered from. `indexed` is the on-chain per-ilk debt; "
+            "`reference` is Sky's own reported figure; `both` fills `debt_wad` and `reference_debt_wad` "
+            "on every bucket, leaving either null where that provenance reported nothing. Raw "
+            "snapshots are always `indexed`."
         ),
     )
     window: TimeSeriesWindow = Field(description="The window and resolution applied to this response.")
@@ -106,31 +122,25 @@ async def _get_prime_debt_service(engine: AsyncEngine = Depends(get_engine)) -> 
         "is unknown. Each snapshot carries the `block_number`/`block_version` it was observed "
         "at; consumers can use `block_version` to detect reorg-driven re-emissions. Set "
         "`aggregate=true` for the last debt value per time bucket (gap-filled). Pass "
-        "`reference=true` (with `aggregate=true`) for Sky's own reported debt instead of the "
-        "on-chain per-ilk figure; `source` reports which provenance answered."
+        "`source=reference` (with `aggregate=true`) for Sky's own reported debt instead of the "
+        "on-chain per-ilk figure, or `source=both` to carry each in its own field on every "
+        "bucket; `source` reports which provenance answered."
     ),
 )
 async def list_prime_debt_snapshots(
     prime_id: PrimeOrProxyAddressPathParam,
     time_series: TimeSeriesQuery = Depends(get_time_series_query_params),
     limit: int = Query(100, ge=1, le=500, description="Max snapshots returned (default 100, max 500)."),
-    reference: bool = Query(
-        False,
-        description=(
-            "Serve Sky's own reported debt instead of the on-chain per-ilk debt. Requires "
-            "`aggregate=true`: upstream publishes one figure per prime per day and carries no ilk, "
-            "block number or block version, so it cannot fill a raw snapshot — asking for one "
-            "returns `400` rather than inventing those fields. `debt_wad` keeps its unit in both "
-            "modes, so dividing by 1e18 gives USDS units either way."
-        ),
-    ),
+    requested_provenance: Provenance | None = Depends(get_requested_provenance),
     service: PrimeDebtService = Depends(_get_prime_debt_service),
 ) -> PrimeDebtEnvelope:
     resolved_prime_id = await service.resolve_prime_id(EthAddress(prime_id))
     if resolved_prime_id is None:
         raise HTTPException(status_code=404, detail="Prime not found")
 
-    if reference and not time_series.aggregate:
+    source = resolve_or_422(requested_provenance, available=frozenset(Provenance), default=Provenance.INDEXED)
+
+    if source in (Provenance.REFERENCE, Provenance.BOTH) and not time_series.aggregate:
         raise HTTPException(
             status_code=400,
             detail=(
@@ -140,8 +150,44 @@ async def list_prime_debt_snapshots(
         )
 
     window = build_window(time_series)
+    if source is Provenance.BOTH and time_series.aggregate:
+        reference_buckets, buckets = await asyncio.gather(
+            service.list_reference_debt_buckets(
+                resolved_prime_id,
+                from_timestamp=time_series.from_timestamp,
+                to_timestamp=time_series.to_timestamp,
+                bucket_seconds=time_series.bucket.total_seconds(),
+                limit=limit,
+            ),
+            service.list_debt_buckets(
+                resolved_prime_id,
+                from_timestamp=time_series.from_timestamp,
+                to_timestamp=time_series.to_timestamp,
+                bucket_seconds=time_series.bucket.total_seconds(),
+                limit=limit,
+            ),
+        )
+        # Same window and resolution on both, so the bucket grids align.
+        reference_by_bucket = {bucket.bucket_start: bucket.debt_wad for bucket in reference_buckets}
+        indexed_by_bucket = {bucket.bucket_start: bucket.debt_wad for bucket in buckets}
+        return PrimeDebtEnvelope(
+            mode="aggregated",
+            source=source,
+            window=window,
+            data=[
+                PrimeDebtBucketResponse(
+                    bucket_start=start,
+                    debt_wad=indexed_by_bucket.get(start),
+                    reference_debt_wad=reference_by_bucket.get(start),
+                )
+                for start in sorted(set(indexed_by_bucket) | set(reference_by_bucket), reverse=True)
+            ],
+        )
+
     if time_series.aggregate:
-        read_buckets = service.list_reference_debt_buckets if reference else service.list_debt_buckets
+        read_buckets = (
+            service.list_reference_debt_buckets if source is Provenance.REFERENCE else service.list_debt_buckets
+        )
         buckets = await read_buckets(
             resolved_prime_id,
             from_timestamp=time_series.from_timestamp,
@@ -151,7 +197,7 @@ async def list_prime_debt_snapshots(
         )
         return PrimeDebtEnvelope(
             mode="aggregated",
-            source="reference" if reference else "self",
+            source=source,
             window=window,
             data=[PrimeDebtBucketResponse(**bucket.__dict__) for bucket in buckets],
         )
@@ -164,7 +210,7 @@ async def list_prime_debt_snapshots(
     )
     return PrimeDebtEnvelope(
         mode="raw",
-        source="self",
+        source=Provenance.INDEXED,
         window=window,
         data=[PrimeDebtSnapshotResponse(**snapshot.__dict__) for snapshot in snapshots],
     )

@@ -17,19 +17,28 @@ _ts_root: &ts_root 'stl-verify/ts/'
 # manifests, so keep the hook off them too.
 _oxfmt_exclude: &oxfmt_exclude ['stl-verify/ts/*/package.json']
 
+# `src/generated` belongs to its generators, not to the hooks. oxlint's own
+# config already ignores it, so handing it a commit whose only UI files are
+# generated leaves it nothing to lint and it exits non-zero -- which is every
+# commit that just re-runs `generate:openapi`. oxfmt is worse than useless
+# there: it reflows `openapi-schema.json`, and python CI regenerates that file
+# and diffs it byte-for-byte, so a reformat fails the build.
+_generated_exclude: &generated_exclude ['stl-verify/ts/*/src/generated/**']
+
 pre-commit:
   parallel: true
   commands:
     ui-oxlint:
       root: *ts_root
       glob: 'stl-verify/ts/ui/**.{ts,tsx}'
+      exclude: *generated_exclude
       run: npx --no-install oxlint -c ui/oxlint.config.ts --fix {staged_files}
       stage_fixed: true
 
     ui-oxfmt:
       root: *ts_root
       glob: 'stl-verify/ts/ui/**.{ts,tsx,css,html,json}'
-      exclude: *oxfmt_exclude
+      exclude: ['stl-verify/ts/*/package.json', 'stl-verify/ts/*/src/generated/**']
       run: npx --no-install oxfmt -c ui/.oxfmtrc.ts --write {staged_files}
       stage_fixed: true
 

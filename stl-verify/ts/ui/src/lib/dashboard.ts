@@ -172,7 +172,7 @@ export function groupPrimesByVault(primes: Prime[]): PrimeGroup[] {
 function getProtocolMatchScore(
   protocol: string,
   localProtocol: LocalProtocolRow,
-  chainId?: number,
+  chainId?: number | null,
 ): number {
   const normalizedProtocol = normalizeLabel(protocol);
   const normalizedName = normalizeLabel(localProtocol.name);
@@ -228,25 +228,46 @@ export function findProtocolMetadata(
 export const OFFCHAIN_CHAIN_ID = 0;
 
 export function getChainLabel(
-  chainId: number,
+  chainId: number | null | undefined,
   chainLabels?: ChainLabelLookup,
+  network?: string | null,
 ): string {
   if (chainId === OFFCHAIN_CHAIN_ID) return 'Off-chain';
+  // Title-cased so an upstream slug reads like a registry label.
+  if (chainId === null || chainId === undefined) {
+    return network === null || network === undefined || network.length === 0
+      ? 'Unknown chain'
+      : titleCase(network);
+  }
   return chainLabels?.get(chainId) ?? getChainName(chainId);
 }
 
 export function getProtocolLabel(
   protocol: string | null | undefined,
   localProtocols?: LocalProtocolRow[],
-  chainId?: number,
+  chainId?: number | null,
 ): string {
   if (!protocol || protocol === DIRECT_PROTOCOL_FILTER_VALUE) return 'Direct';
   const normalized = normalizeLabel(protocol);
   return (
-    findProtocolMetadata(protocol, localProtocols, chainId)?.name ??
+    findProtocolMetadata(protocol, localProtocols, chainId ?? undefined)
+      ?.name ??
     PROTOCOL_LABELS[normalized] ??
     titleCase(protocol)
   );
+}
+
+/**
+ * A row's network, as a filter/grouping key.
+ *
+ * Chain id where there is one, else the upstream network name: two rows on
+ * different unindexed chains would otherwise share the key `null` and be
+ * treated as one network.
+ */
+export function allocationNetworkKey(allocation: Allocation): string {
+  return allocation.chain_id === null
+    ? `net:${allocation.network ?? 'unknown'}`
+    : String(allocation.chain_id);
 }
 
 export function getAllocationKey(allocation: Allocation): string {
@@ -257,26 +278,52 @@ export function getAllocationKey(allocation: Allocation): string {
   // Off-chain custody rows (Anchorage BTC) carry a null underlying id, so fall
   // back to the symbol to keep the key unique and stable.
   const underlyingKey = allocation.underlying_token_id ?? allocation.symbol;
-  return `direct:${allocation.chain_id}:${underlyingKey}`;
+  return `direct:${allocationNetworkKey(allocation)}:${underlyingKey}`;
+}
+
+/**
+ * Chains STL indexes first, in chain-id order, then the rest by name.
+ *
+ * A chain with no id has no number to sort by, and sorting the whole list by
+ * label instead would stop mainnet leading for every prime.
+ */
+function compareNetworkOptions(
+  left: { label: string; chainId: number | null },
+  right: { label: string; chainId: number | null },
+): number {
+  if (left.chainId === null || right.chainId === null) {
+    return left.chainId === right.chainId
+      ? left.label.localeCompare(right.label)
+      : Number(left.chainId === null) - Number(right.chainId === null);
+  }
+  return left.chainId - right.chainId;
 }
 
 export function buildNetworkOptions(
   allocations: Allocation[],
   chainLabels?: ChainLabelLookup,
 ): FilterOption[] {
-  const counts = new Map<number, number>();
+  const counts = new Map<
+    string,
+    { count: number; label: string; chainId: number | null }
+  >();
 
   for (const allocation of allocations) {
-    counts.set(allocation.chain_id, (counts.get(allocation.chain_id) ?? 0) + 1);
+    const key = allocationNetworkKey(allocation);
+    const existing = counts.get(key);
+    counts.set(key, {
+      count: (existing?.count ?? 0) + 1,
+      chainId: existing?.chainId ?? allocation.chain_id,
+      label:
+        existing?.label ??
+        getChainLabel(allocation.chain_id, chainLabels, allocation.network),
+    });
   }
 
+  // The key is `allocationNetworkKey`, so it is the option value verbatim.
   return [...counts.entries()]
-    .sort((left, right) => left[0] - right[0])
-    .map(([chainId, count]) => ({
-      count,
-      label: getChainLabel(chainId, chainLabels),
-      value: String(chainId),
-    }));
+    .sort(([, left], [, right]) => compareNetworkOptions(left, right))
+    .map(([value, { count, label }]) => ({ count, label, value }));
 }
 
 export function buildProtocolOptions(
@@ -787,7 +834,7 @@ export function sortAllocations(allocations: Allocation[]): Allocation[] {
  * or null if the chain is not recognised.
  */
 export function getExplorerUrl(
-  chainId: number,
+  chainId: number | null | undefined,
   address: string,
   type: 'address' | 'tx' = 'address',
 ): string | null {

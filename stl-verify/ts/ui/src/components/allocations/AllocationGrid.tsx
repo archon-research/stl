@@ -21,6 +21,7 @@ import {
   encumbranceSeverity,
   formatDateTime,
   formatFreshnessLabel,
+  formatPercentValue,
   formatRatioPercent,
   formatTokenAmount,
   formatUsdValue,
@@ -30,7 +31,7 @@ import {
   getProtocolLabel,
   parseNumericValue,
 } from '../../lib/dashboard';
-import { REFERENCE_MODE } from '../../lib/referenceMode';
+import { preferReference, useProvenanceView } from '../../lib/provenance';
 import type {
   Allocation,
   AllocationCategory,
@@ -129,18 +130,36 @@ function AllocationAssetCell({
   localProtocols: LocalProtocolRow[];
   chainLabels: ChainLabelLookup;
 }) {
+  // The badge marks a row as Sky's *against* STL's rows, so it says nothing
+  // when STL's are not on screen.
+  const { showsIndexed: showsIndexedNow } = useProvenanceView();
+  const chainLabel = getChainLabel(
+    allocation.chain_id,
+    chainLabels,
+    allocation.network,
+  );
+
   return (
     <div className={css({ display: 'grid', gap: '1', minWidth: 0 })}>
-      <p
-        className={css({
-          m: 0,
-          fontSize: 'sm',
-          fontWeight: 'semibold',
-          color: 'text.strong',
-        })}
-      >
-        {allocation.symbol}
-      </p>
+      <div className={flex({ align: 'center', gap: '1.5', wrap: 'wrap' })}>
+        <p
+          className={css({
+            m: 0,
+            fontSize: 'sm',
+            fontWeight: 'semibold',
+            color: 'text.strong',
+          })}
+        >
+          {allocation.symbol}
+        </p>
+        {/* Only the odd ones out are marked. In a merged view most rows are
+            reported by both, so badging those would label almost everything. */}
+        {allocation.source === 'reference' && showsIndexedNow ? (
+          <Badge size="sm" variant="subtle">
+            Sky only
+          </Badge>
+        ) : null}
+      </div>
       <div className={flex({ gap: '1.5', wrap: 'wrap' })}>
         <span
           className={css({
@@ -178,10 +197,10 @@ function AllocationAssetCell({
         >
           <ChainLogo
             chainId={allocation.chain_id}
-            label={getChainLabel(allocation.chain_id, chainLabels)}
+            label={chainLabel}
             size="5"
           />
-          {getChainLabel(allocation.chain_id, chainLabels)}
+          {chainLabel}
         </span>
       </div>
     </div>
@@ -227,7 +246,7 @@ function AllocationUnderlyingCell({ allocation }: { allocation: Allocation }) {
   );
 }
 
-function AllocationBalanceCell({ allocation }: { allocation: Allocation }) {
+function AllocationExposureCell({ allocation }: { allocation: Allocation }) {
   const amountUsd = allocation.amount_usd;
 
   return (
@@ -376,33 +395,86 @@ function AllocationCategoryCell({ allocation }: { allocation: Allocation }) {
   );
 }
 
+// Joined on the keys both endpoints publish rather than on `receipt_token_id`,
+// which only STL's own rows carry: Sky prices off-chain custody and the Arkis
+// vault — its two largest requirements — and STL resolves no receipt token for
+// either, so an id join left them blank. The keys encode the rules that make
+// those pair up (custody by protocol, everything else by chain and address), so
+// the grid does not restate them.
 function lookupAllocationRiskCapital(
-  riskByReceiptTokenId: Map<number, AllocationRiskCapital>,
+  riskByPositionKey: Map<string, AllocationRiskCapital>,
   allocation: Allocation,
 ): AllocationRiskCapital | undefined {
-  if (
-    allocation.receipt_token_id === undefined ||
-    allocation.receipt_token_id === null
-  ) {
-    return undefined;
+  for (const key of allocation.position_keys ?? []) {
+    const entry = riskByPositionKey.get(key);
+    if (entry !== undefined) return entry;
   }
 
-  return riskByReceiptTokenId.get(allocation.receipt_token_id);
+  return undefined;
 }
 
 // Applied required risk capital in USD, or null when none applies. Shared by the
 // column accessor and the magnitude bar so the two cannot diverge on the rule.
+//
+// Sky's requirement wins where it has one: it is the preferred model in
+// composite mode, and it prices positions STL's models do not cover yet — so a
+// row `applied: false` under STL's model still has a figure to show. `applied`
+// therefore gates only the STL fallback.
 function appliedRiskCapitalUsd(
-  riskByReceiptTokenId: Map<number, AllocationRiskCapital>,
+  riskByPositionKey: Map<string, AllocationRiskCapital>,
   allocation: Allocation,
 ): number | null {
-  const entry = lookupAllocationRiskCapital(riskByReceiptTokenId, allocation);
-  return entry?.applied
-    ? parseNumericValue(entry.required_risk_capital_usd)
-    : null;
+  const entry = lookupAllocationRiskCapital(riskByPositionKey, allocation);
+  if (entry === undefined) {
+    return null;
+  }
+
+  return parseNumericValue(
+    preferReference(
+      entry.reference_required_risk_capital_usd,
+      entry.applied ? entry.required_risk_capital_usd : null,
+    ),
+  );
 }
 
-// riskByReceiptTokenId is built from a risk-capital call scoped to
+// Comparable capital-risk ratio (0-100), Sky's preferred over STL's.
+function preferredCrrPct(
+  riskByPositionKey: Map<string, AllocationRiskCapital>,
+  allocation: Allocation,
+): number | null {
+  const entry = lookupAllocationRiskCapital(riskByPositionKey, allocation);
+  if (entry === undefined) {
+    return null;
+  }
+
+  return parseNumericValue(
+    preferReference(entry.reference_crr_pct, entry.crr_pct),
+  );
+}
+
+// This position's share of the prime's whole requirement, 0-1.
+//
+// The denominator is Σ RRC, not the prime's available risk capital: the column
+// answers "how much of the requirement does this position account for", so it
+// sums to 1. `encumbrance_contribution` on the row divides by available capital
+// instead and sums to the encumbrance ratio, which is a different question.
+function rrcSharePct(
+  riskByPositionKey: Map<string, AllocationRiskCapital>,
+  allocation: Allocation,
+  totalRequiredRiskCapitalUsd: number | null,
+): number | null {
+  if (
+    totalRequiredRiskCapitalUsd === null ||
+    totalRequiredRiskCapitalUsd === 0
+  ) {
+    return null;
+  }
+
+  const rrc = appliedRiskCapitalUsd(riskByPositionKey, allocation);
+  return rrc === null ? null : rrc / totalRequiredRiskCapitalUsd;
+}
+
+// riskByPositionKey is built from a risk-capital call scoped to
 // selectedPrime's own chain, so an allocation on a different chain has no
 // entry there for the same reason a genuine non-applicable allocation
 // doesn't: the map simply has nothing for its receipt_token_id. Distinguish
@@ -412,7 +484,7 @@ function appliedRiskCapitalUsd(
 //
 // The receipt_token_id check gates this to rows that could ever carry a
 // figure. A null receipt_token_id (the Anchorage custody row, and every
-// direct/bare holding) can never key into riskByReceiptTokenId regardless of
+// direct/bare holding) can never key into riskByPositionKey regardless of
 // chain, so without this check a mainnet-primary prime would flag its own
 // off-chain custody row (chain_id 0) as a cross-chain mismatch and claim a
 // figure exists but merely wasn't fetched, when "n/a" is the correct read.
@@ -445,7 +517,18 @@ function AllocationRiskCapitalCell({
     );
   }
 
-  if (!entry?.applied) {
+  // The same preference the sort, the bar and the CRR column apply. Reading
+  // `required_risk_capital_usd` here instead showed STL's figure beside Sky's
+  // ratio: spUSDS rendered $25.34M at 0.00% CRR, which is neither provenance.
+  const requiredRiskCapitalUsd =
+    entry === undefined
+      ? null
+      : preferReference(
+          entry.reference_required_risk_capital_usd,
+          entry.applied ? entry.required_risk_capital_usd : null,
+        );
+
+  if (requiredRiskCapitalUsd === null) {
     return (
       <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>n/a</p>
     );
@@ -460,7 +543,7 @@ function AllocationRiskCapitalCell({
         color: 'text.strong',
       })}
     >
-      {formatUsdValue(entry.required_risk_capital_usd)}
+      {formatUsdValue(requiredRiskCapitalUsd)}
     </p>
   );
 }
@@ -468,8 +551,9 @@ function AllocationRiskCapitalCell({
 function createAllocationColumns(
   chainLabels: ChainLabelLookup,
   localProtocols: LocalProtocolRow[],
-  riskByReceiptTokenId: Map<number, AllocationRiskCapital>,
+  riskByPositionKey: Map<string, AllocationRiskCapital>,
   selectedPrime: Prime | null,
+  totalRequiredRiskCapitalUsd: number | null,
 ): ColumnDef<Allocation>[] {
   return [
     {
@@ -491,10 +575,18 @@ function createAllocationColumns(
       cell: ({ row }) => <AllocationUnderlyingCell allocation={row.original} />,
     },
     {
-      id: 'balance',
-      header: 'Balance',
-      accessorFn: (allocation) => Number(allocation.balance),
-      cell: ({ row }) => <AllocationBalanceCell allocation={row.original} />,
+      // Named for what it renders: `amount_usd`, the position's USD exposure —
+      // the same quantity Sky's monitor publishes as EXPOSURE. The token
+      // quantity appears only as the fallback for an unpriced row.
+      id: 'exposure',
+      header: 'Exposure',
+      // Sorts on what the cell shows. Sorting the token balance instead would
+      // order 4,722 BTC below 869M spUSDS while the column displays $250M above
+      // $869M. An unpriced row has no exposure to sort by, so it sorts last
+      // rather than tying with a genuine zero.
+      accessorFn: (allocation) =>
+        parseNumericValue(allocation.amount_usd) ?? -1,
+      cell: ({ row }) => <AllocationExposureCell allocation={row.original} />,
       // Bar reflects USD value so magnitudes compare across heterogeneous
       // tokens; the cell text keeps the token holding. NaN (not null) suppresses
       // the bar for unpriced rows: a null here would fall back to the column
@@ -525,20 +617,18 @@ function createAllocationColumns(
     },
     {
       id: 'risk_capital',
-      header: 'Risk capital',
+      // Named as Sky names it, since the two are compared side by side.
+      header: 'RRC',
       // A chain-mismatched row sorts below genuine zeroes (-1) rather than
       // tying with them, since it isn't a real zero — it's a figure this
       // session never fetched.
       accessorFn: (allocation) =>
         isRiskCapitalChainMismatch(selectedPrime, allocation)
           ? -1
-          : (appliedRiskCapitalUsd(riskByReceiptTokenId, allocation) ?? 0),
+          : (appliedRiskCapitalUsd(riskByPositionKey, allocation) ?? 0),
       cell: ({ row }) => (
         <AllocationRiskCapitalCell
-          entry={lookupAllocationRiskCapital(
-            riskByReceiptTokenId,
-            row.original,
-          )}
+          entry={lookupAllocationRiskCapital(riskByPositionKey, row.original)}
           isChainMismatch={isRiskCapitalChainMismatch(
             selectedPrime,
             row.original,
@@ -553,8 +643,7 @@ function createAllocationColumns(
           getValue: (allocation) =>
             isRiskCapitalChainMismatch(selectedPrime, allocation)
               ? NaN
-              : (appliedRiskCapitalUsd(riskByReceiptTokenId, allocation) ??
-                NaN),
+              : (appliedRiskCapitalUsd(riskByPositionKey, allocation) ?? NaN),
           getValueText: () => null,
         },
         // Single-value USD cell, so the column can take mono + tabular figures
@@ -563,7 +652,90 @@ function createAllocationColumns(
         align: 'right',
       },
     },
+    {
+      id: 'crr',
+      header: 'CRR',
+      // A row with no ratio sorts below a genuine 0% rather than tying with it.
+      accessorFn: (allocation) =>
+        isRiskCapitalChainMismatch(selectedPrime, allocation)
+          ? -1
+          : (preferredCrrPct(riskByPositionKey, allocation) ?? -1),
+      cell: ({ row }) => (
+        <AllocationRatioCell
+          value={
+            isRiskCapitalChainMismatch(selectedPrime, row.original)
+              ? null
+              : preferredCrrPct(riskByPositionKey, row.original)
+          }
+          format={formatPercentValue}
+        />
+      ),
+      meta: { mono: true, align: 'right' },
+    },
+    {
+      id: 'rrc_share',
+      header: 'RRC share',
+      accessorFn: (allocation) =>
+        isRiskCapitalChainMismatch(selectedPrime, allocation)
+          ? -1
+          : (rrcSharePct(
+              riskByPositionKey,
+              allocation,
+              totalRequiredRiskCapitalUsd,
+            ) ?? -1),
+      cell: ({ row }) => (
+        <AllocationRatioCell
+          value={
+            isRiskCapitalChainMismatch(selectedPrime, row.original)
+              ? null
+              : rrcSharePct(
+                  riskByPositionKey,
+                  row.original,
+                  totalRequiredRiskCapitalUsd,
+                )
+          }
+          format={formatRatioPercent}
+        />
+      ),
+      meta: {
+        magnitude: {
+          scale: 'linear',
+          getValue: (allocation) =>
+            isRiskCapitalChainMismatch(selectedPrime, allocation)
+              ? NaN
+              : (rrcSharePct(
+                  riskByPositionKey,
+                  allocation,
+                  totalRequiredRiskCapitalUsd,
+                ) ?? NaN),
+          getValueText: () => null,
+        },
+        mono: true,
+        align: 'right',
+      },
+    },
   ];
+}
+
+function AllocationRatioCell({
+  value,
+  format,
+}: {
+  value: number | null;
+  format: (value: number | null) => string;
+}) {
+  return (
+    <p
+      className={css({
+        m: 0,
+        fontSize: 'sm',
+        fontWeight: 'semibold',
+        color: value === null ? 'text.muted' : 'text.strong',
+      })}
+    >
+      {format(value)}
+    </p>
+  );
 }
 
 export function AllocationGrid({
@@ -596,6 +768,9 @@ export function AllocationGrid({
   primeCollateralObservedAt,
   capitalObservedAt,
 }: AllocationGridProps) {
+  // The provenance on screen, not the one fetched: narrowing a composite
+  // response changes what is shown without issuing a request.
+  const { showsReference: showsReferenceNow } = useProvenanceView();
   const [localSearchValue, setLocalSearchValue] = useState(searchValue);
 
   useEffect(() => {
@@ -619,11 +794,18 @@ export function AllocationGrid({
       return null;
     }
 
-    const totalUsd = topMetricsAllocations.reduce(
-      (sum, allocation) =>
-        sum + (parseNumericValue(allocation.amount_usd) ?? 0),
-      0,
-    );
+    // Rows Sky alone reports are excluded from the total, not from the table.
+    // The two provenances sometimes describe the same money differently — a
+    // vault position against the asset underneath it — and those rows do not
+    // match on identity, so adding them counts it twice. Every other card keeps
+    // the provenances in separate figures for the same reason.
+    const totalUsd = topMetricsAllocations
+      .filter((allocation) => allocation.source !== 'reference')
+      .reduce(
+        (sum, allocation) =>
+          sum + (parseNumericValue(allocation.amount_usd) ?? 0),
+        0,
+      );
 
     const latestActivityAt = topMetricsAllocations.reduce<string | null>(
       (latest, allocation) => {
@@ -643,7 +825,12 @@ export function AllocationGrid({
     );
 
     return {
-      allocationCount: topMetricsAllocations.length,
+      allocationCount: topMetricsAllocations.filter(
+        (allocation) => allocation.source !== 'reference',
+      ).length,
+      referenceOnlyCount: topMetricsAllocations.filter(
+        (allocation) => allocation.source === 'reference',
+      ).length,
       latestActivityAt,
       totalUsd,
     };
@@ -654,26 +841,30 @@ export function AllocationGrid({
       return null;
     }
 
-    const totalUsd = allocations.reduce(
+    const indexed = allocations.filter(
+      (allocation) => allocation.source !== 'reference',
+    );
+    const totalUsd = indexed.reduce(
       (sum, allocation) =>
         sum + (parseNumericValue(allocation.amount_usd) ?? 0),
       0,
     );
 
     return {
-      allocationCount: allocations.length,
+      allocationCount: indexed.length,
+      referenceOnlyCount: allocations.length - indexed.length,
       totalUsd,
     };
   }, [allocations]);
 
-  const debtWad = REFERENCE_MODE
+  const debtWad = showsReferenceNow
     ? referenceDebt?.debt_wad
     : primeDebtSnapshot?.debt_wad;
   // Reference mode has no observation time: upstream publishes one figure per
   // prime per day, so the closest thing is the bucket the figure falls in. The
   // label says "as of" rather than "sync" so a boundary is not read as a
   // moment we observed the value.
-  const debtObservedAt = REFERENCE_MODE
+  const debtObservedAt = showsReferenceNow
     ? referenceDebt?.bucket_start
     : primeDebtSnapshot?.synced_at;
   // "as of" either way: reference mode has only a daily bucket boundary, and
@@ -687,27 +878,56 @@ export function AllocationGrid({
 
   const hasSearchQuery = searchValue.trim().length > 0;
 
-  const riskByReceiptTokenId = useMemo(() => {
-    const map = new Map<number, AllocationRiskCapital>();
+  const riskByPositionKey = useMemo(() => {
+    const map = new Map<string, AllocationRiskCapital>();
     for (const entry of riskCapital?.per_allocation ?? []) {
-      // A reference-sourced row that did not resolve to a receipt token has
-      // nothing on this grid to attach to, and every such row shares the null
-      // key — so keying on it would collapse them onto one another.
-      if (entry.receipt_token_id === null) continue;
-      map.set(entry.receipt_token_id, entry);
+      // Under every key the row answers to, so a grid row matching on any one
+      // of its own finds it. First writer wins: the strongest key is listed
+      // first, so a weaker one cannot displace it.
+      for (const key of entry.position_keys ?? []) {
+        if (!map.has(key)) map.set(key, entry);
+      }
     }
     return map;
   }, [riskCapital]);
+
+  // The prime's whole requirement, from the same provenance the RRC column
+  // reads. Not Σ of the visible rows: Sky prices positions STL resolves no
+  // receipt token for — off-chain custody and the Arkis vault, its two largest
+  // — and those rows cannot join a grid row by id, so summing what is on screen
+  // divided by $2.8M where the prime's requirement is $19.1M and reported one
+  // position as 84% of a requirement Sky puts it at 12% of.
+  //
+  // The consequence is deliberate: the column no longer sums to 100% on screen,
+  // because the rows it can show do not account for the whole requirement. Each
+  // row's own share is right, which is the number a reader compares.
+  const totalRequiredRiskCapitalUsd = useMemo(
+    () =>
+      parseNumericValue(
+        preferReference(
+          riskCapital?.reference_prime_required_risk_capital_usd,
+          riskCapital?.prime_required_risk_capital_usd,
+        ),
+      ),
+    [riskCapital],
+  );
 
   const columns = useMemo<ColumnDef<Allocation>[]>(
     () =>
       createAllocationColumns(
         chainLabels,
         localProtocols,
-        riskByReceiptTokenId,
+        riskByPositionKey,
         selectedPrime,
+        totalRequiredRiskCapitalUsd,
       ),
-    [chainLabels, localProtocols, riskByReceiptTokenId, selectedPrime],
+    [
+      chainLabels,
+      localProtocols,
+      riskByPositionKey,
+      selectedPrime,
+      totalRequiredRiskCapitalUsd,
+    ],
   );
 
   // Explicit hints replace DataTable's meta-derived ones wholesale, so they are
@@ -748,21 +968,22 @@ export function AllocationGrid({
     'prime-collateral',
   );
   const encumbranceChart = findMetricChart(metricCharts, 'encumbrance-ratio');
+  // One call decides the ratio for the card, its severity, its caption and the
+  // chart's fallback value, so they cannot end up describing different
+  // provenances — a Sky figure over a breach threshold beside STL's "within the
+  // 100% breach level" would read as a bug in the threshold.
+  const skyEncumbranceRatio = riskCapital?.reference_prime_encumbrance_ratio;
   const encumbranceRatio = parseNumericValue(
-    riskCapital?.prime_encumbrance_ratio,
+    preferReference(skyEncumbranceRatio, riskCapital?.prime_encumbrance_ratio),
   );
   const encumbranceBreach = encumbranceSeverity(encumbranceRatio);
-  // Counted from the same conditions the cards below render under, so a card
-  // that does not appear does not leave a column reserved for it.
-  const visibleMetricCardCount = [
-    summary !== null,
-    riskCapital !== null,
-    riskCapital !== null,
-    selectedPrime !== null,
-    riskCapital !== null,
-    selectedPrime !== null,
-  ].filter(Boolean).length;
-  const unservedChains = riskCapital?.prime_unserved_chains ?? [];
+  // Only STL's ratio is bounded by the chains STL does not serve. Sky's covers
+  // whatever it covers, so the "at least this" caption below does not apply to
+  // it.
+  const unservedChains =
+    skyEncumbranceRatio == null
+      ? (riskCapital?.prime_unserved_chains ?? [])
+      : [];
   // Absence has a cause worth naming: the ratio is required-over-total risk
   // capital, so it cannot be computed without a total. And where chains go
   // unserved the numerator is bounded, making the ratio a floor rather than a
@@ -924,13 +1145,14 @@ export function AllocationGrid({
         <PrimeMetricsBand
           isSkeleton={showTopMetricsSkeleton}
           hasTopMetrics={hasTopMetrics}
-          visibleCardCount={visibleMetricCardCount}
           summary={summary}
           overallSummary={overallSummary}
           hasSearchQuery={hasSearchQuery}
           riskCapital={riskCapital}
           capitalObservedAt={capitalObservedAt}
           riskCapitalErrorMessage={riskCapitalErrorMessage}
+          summaryErrorMessage={errorMessage}
+          primeDebtErrorMessage={primeDebtErrorMessage}
           hasPrime={selectedPrime !== null}
           collateral={{
             usd: primeCollateralUsd,

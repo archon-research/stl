@@ -1,4 +1,4 @@
-import { ErrorState } from '@archon-research/design-system';
+import type { ReactNode } from 'react';
 
 import { css } from '#styled-system/css';
 
@@ -10,22 +10,29 @@ import {
   formatUsdValue,
   formatWadValue,
 } from '../../lib/dashboard';
+import { preferReference } from '../../lib/provenance';
 import type { PrimeRiskCapital } from '../../types/allocation';
 import { AppTooltip, SummaryMetric } from '../shared';
 import {
+  MetricCardError,
+  MetricCardSkeleton,
   MetricCardTrend,
   type MetricChartSpec,
   metricDetailClassName,
   metricsCardClassName,
   metricsGridClassName,
   metricsGridStyle,
+  TOP_METRIC_CARD_LABELS,
   TOP_METRIC_CARDS,
+  type TopMetricCard,
 } from './metricCards';
 
 // Only what the band reads. The caller's summary carries more (a latest-activity
 // timestamp), but asking for it here would couple this to a field it never uses.
 export type AllocationTotals = {
   allocationCount: number;
+  // Rows Sky alone reports, which the table shows and the total excludes.
+  referenceOnlyCount: number;
   totalUsd: number;
 };
 
@@ -41,7 +48,6 @@ type BandCharts = {
 type PrimeMetricsBandProps = {
   isSkeleton: boolean;
   hasTopMetrics: boolean;
-  visibleCardCount: number;
   summary: AllocationTotals | null;
   overallSummary: AllocationTotals | null;
   hasSearchQuery: boolean;
@@ -49,6 +55,8 @@ type PrimeMetricsBandProps = {
   // Shared by exposure, total risk capital and encumbrance.
   capitalObservedAt: string | null;
   riskCapitalErrorMessage: string | null;
+  summaryErrorMessage: string | null;
+  primeDebtErrorMessage: string | null;
   hasPrime: boolean;
   collateral: {
     usd: number | null;
@@ -72,14 +80,38 @@ type PrimeMetricsBandProps = {
 
 const captionClassName = css({ fontSize: 'sm', color: 'text.muted' });
 
-const skeletonCardClassName = css({
-  height: '88px',
-  borderRadius: 'md',
-  borderStyle: 'solid',
-  borderWidth: '1px',
-  borderColor: 'border.subtle',
-  bg: 'surface.subtle',
-});
+/**
+ * One metric's cell, whatever state it is in.
+ *
+ * The grid is always the full set of cards: a missing cell shifted every one
+ * after it, so a card that cannot render holds its place as an error or a
+ * placeholder instead of disappearing.
+ */
+function MetricCardCell({
+  card,
+  rendered,
+  errorMessage,
+}: {
+  card: TopMetricCard;
+  rendered: ReactNode;
+  errorMessage: string | null;
+}) {
+  if (rendered !== null) {
+    return rendered;
+  }
+
+  const label = TOP_METRIC_CARD_LABELS[card];
+  return errorMessage === null ? (
+    <MetricCardSkeleton label={label} />
+  ) : (
+    <MetricCardError
+      label={label}
+      title={`${label} is unavailable`}
+      description="Change the time range to retry."
+      errorMessage={errorMessage}
+    />
+  );
+}
 
 // chartsErrorMessage tracks the primary (prime-debt) series only; every
 // supplementary card degrades to its own fallback instead of reporting an error
@@ -114,6 +146,9 @@ function TotalAllocationCard({
             {isFiltered
               ? `${summary.allocationCount}/${overallSummary.allocationCount} allocations`
               : `${summary.allocationCount} allocations`}
+            {summary.referenceOnlyCount > 0
+              ? ` · ${summary.referenceOnlyCount} reported only by Sky`
+              : null}
           </div>
           <MetricCardTrend
             chart={chart}
@@ -134,6 +169,22 @@ function observedCaption(observedAt: string | null): string | null {
     : `Observed ${formatFreshnessLabel(observedAt)}`;
 }
 
+/**
+ * A headline figure, Sky's preferred, and which provenance it came from.
+ *
+ * Callers need the provenance as well as the number: the observation stamp is
+ * the reference feed's own, so it may only caption a figure from that feed.
+ */
+function preferredFigure(
+  skyValue: string | null | undefined,
+  stlValue: string | null | undefined,
+): { value: string | null; fromReference: boolean } {
+  return {
+    value: preferReference(skyValue, stlValue),
+    fromReference: skyValue != null,
+  };
+}
+
 function ExposureCard({
   riskCapital,
   observedAt,
@@ -145,14 +196,21 @@ function ExposureCard({
   chart: MetricChartSpec | null;
   isChartsLoading: boolean;
 }) {
+  const exposure = preferredFigure(
+    riskCapital.reference_prime_exposure_usd,
+    riskCapital.prime_exposure_usd,
+  );
+
   return (
     <SummaryMetric
       className={metricsCardClassName}
       label="Exposure"
-      value={formatUsdValue(riskCapital.prime_exposure_usd)}
+      value={formatUsdValue(exposure.value)}
       detail={
         <div className={metricDetailClassName}>
-          <div className={captionClassName}>{observedCaption(observedAt)}</div>
+          <div className={captionClassName}>
+            {observedCaption(exposure.fromReference ? observedAt : null)}
+          </div>
           <MetricCardTrend
             chart={chart}
             isLoading={isChartsLoading}
@@ -175,19 +233,31 @@ function TotalRiskCapitalCard({
   chart: MetricChartSpec | null;
   isChartsLoading: boolean;
 }) {
+  const total = preferredFigure(
+    riskCapital.reference_total_risk_capital_usd,
+    riskCapital.total_risk_capital_usd,
+  );
+  const required = preferredFigure(
+    riskCapital.reference_prime_required_risk_capital_usd,
+    riskCapital.prime_required_risk_capital_usd,
+  );
+  // The stamp is the reference feed's, and it sits on a line covering both
+  // figures, so it is withheld unless both came from that feed.
+  const capitalObservedAt =
+    total.fromReference && required.fromReference ? observedAt : null;
+
   return (
     <SummaryMetric
       className={metricsCardClassName}
       label="Total risk capital"
-      value={formatUsdValue(riskCapital.total_risk_capital_usd ?? '0')}
+      value={formatUsdValue(total.value ?? '0')}
       detail={
         <div className={metricDetailClassName}>
           <div className={captionClassName}>
-            Required{' '}
-            {formatUsdValue(riskCapital.prime_required_risk_capital_usd)}
-            {observedAt === null
+            Required {formatUsdValue(required.value)}
+            {capitalObservedAt === null
               ? null
-              : ` · observed ${formatFreshnessLabel(observedAt)}`}
+              : ` · observed ${formatFreshnessLabel(capitalObservedAt)}`}
           </div>
           <MetricCardTrend
             chart={chart}
@@ -283,7 +353,11 @@ function EncumbranceCard({
 
 const debtCaptionClassName = css({
   display: 'flex',
-  flexWrap: 'wrap',
+  // Wrapping this caption -- the longest of the six -- cost a second line and
+  // dropped the chart below its row-mates. Truncating hides nothing: the raw
+  // WAD is already abbreviated behind a tooltip.
+  flexWrap: 'nowrap',
+  minWidth: 0,
   alignItems: 'baseline',
   gap: '1',
   fontSize: 'sm',
@@ -292,6 +366,12 @@ const debtCaptionClassName = css({
   // the row and drop the text below the other cards' single-line subtitles.
   // Collapse it to the text line height so the baselines align.
   '& button': { minHeight: 'auto', py: '0' },
+  '& > *': {
+    minWidth: 0,
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  },
 });
 
 function PrimeDebtCard({
@@ -366,13 +446,14 @@ function PrimeDebtCard({
 export function PrimeMetricsBand({
   isSkeleton,
   hasTopMetrics,
-  visibleCardCount,
   summary,
   overallSummary,
   hasSearchQuery,
   riskCapital,
   capitalObservedAt,
   riskCapitalErrorMessage,
+  summaryErrorMessage,
+  primeDebtErrorMessage,
   hasPrime,
   collateral,
   encumbrance,
@@ -388,9 +469,9 @@ export function PrimeMetricsBand({
         style={metricsGridStyle(TOP_METRIC_CARDS.length)}
       >
         {TOP_METRIC_CARDS.map((card) => (
-          <div
+          <MetricCardSkeleton
             key={`metrics-skeleton-${card}`}
-            className={skeletonCardClassName}
+            label={TOP_METRIC_CARD_LABELS[card]}
           />
         ))}
       </div>
@@ -401,12 +482,20 @@ export function PrimeMetricsBand({
     return null;
   }
 
-  return (
-    <div
-      className={metricsGridClassName}
-      style={metricsGridStyle(visibleCardCount)}
-    >
-      {summary ? (
+  // Which fetch explains a card being absent. A card with no data and no
+  // explanation is still loading, not failed.
+  const CARD_ERROR_SOURCE: Record<TopMetricCard, string | null> = {
+    'total-allocation': summaryErrorMessage,
+    exposure: riskCapitalErrorMessage,
+    'total-risk-capital': riskCapitalErrorMessage,
+    'prime-collateral': null,
+    encumbrance: riskCapitalErrorMessage,
+    'prime-debt': primeDebtErrorMessage,
+  };
+
+  const renderedCards: Record<TopMetricCard, ReactNode> = {
+    'total-allocation':
+      summary === null ? null : (
         <TotalAllocationCard
           summary={summary}
           overallSummary={overallSummary}
@@ -414,52 +503,36 @@ export function PrimeMetricsBand({
           chart={charts.activity}
           isChartsLoading={isChartsLoading}
         />
-      ) : null}
-
-      {riskCapital ? (
+      ),
+    exposure:
+      riskCapital === null ? null : (
         <ExposureCard
           riskCapital={riskCapital}
           observedAt={capitalObservedAt}
           chart={charts.exposure}
           isChartsLoading={isChartsLoading}
         />
-      ) : null}
-
-      {/* Takes the place of the two cards risk capital feeds, so a failed metric
-          stays one cell wide in the rail instead of becoming a full-width banner
-          under it. `alignSelf` so the panel is only as tall as its message: a
-          grid item would otherwise stretch to the chart cards' height. */}
-      {!riskCapital && riskCapitalErrorMessage ? (
-        <ErrorState
-          className={css({ alignSelf: 'start' })}
-          tone="critical"
-          size="inline"
-          title="Risk capital is unavailable"
-          description="The risk capital endpoint failed for this session."
-          errorMessage={riskCapitalErrorMessage}
-        />
-      ) : null}
-
-      {riskCapital ? (
+      ),
+    'total-risk-capital':
+      riskCapital === null ? null : (
         <TotalRiskCapitalCard
           riskCapital={riskCapital}
           observedAt={capitalObservedAt}
           chart={charts.totalCapital}
           isChartsLoading={isChartsLoading}
         />
-      ) : null}
-
-      {hasPrime ? (
-        <PrimeCollateralCard
-          usd={collateral.usd}
-          observedAt={collateral.observedAt}
-          isLoading={collateral.isLoading}
-          chart={charts.collateral}
-          isChartsLoading={isChartsLoading}
-        />
-      ) : null}
-
-      {riskCapital ? (
+      ),
+    'prime-collateral': !hasPrime ? null : (
+      <PrimeCollateralCard
+        usd={collateral.usd}
+        observedAt={collateral.observedAt}
+        isLoading={collateral.isLoading}
+        chart={charts.collateral}
+        isChartsLoading={isChartsLoading}
+      />
+    ),
+    encumbrance:
+      riskCapital === null ? null : (
         <EncumbranceCard
           ratio={encumbrance.ratio}
           caption={encumbrance.caption}
@@ -467,9 +540,12 @@ export function PrimeMetricsBand({
           chart={charts.encumbrance}
           isChartsLoading={isChartsLoading}
         />
-      ) : null}
-
-      {hasPrime ? (
+      ),
+    // Withheld on a failed snapshot as well as with no prime: the cell falls
+    // through to the error box only when nothing is rendered, and a card showing
+    // an em dash reads as "no debt" rather than "we could not read it".
+    'prime-debt':
+      !hasPrime || primeDebtErrorMessage !== null ? null : (
         <PrimeDebtCard
           wad={debt.wad}
           ilkLabel={debt.ilkLabel}
@@ -478,7 +554,22 @@ export function PrimeMetricsBand({
           isChartsLoading={isChartsLoading}
           chartsErrorMessage={chartsErrorMessage}
         />
-      ) : null}
+      ),
+  };
+
+  return (
+    <div
+      className={metricsGridClassName}
+      style={metricsGridStyle(TOP_METRIC_CARDS.length)}
+    >
+      {TOP_METRIC_CARDS.map((card) => (
+        <MetricCardCell
+          key={`metric-card-${card}`}
+          card={card}
+          rendered={renderedCards[card]}
+          errorMessage={CARD_ERROR_SOURCE[card]}
+        />
+      ))}
     </div>
   );
 }

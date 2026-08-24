@@ -58,6 +58,7 @@ import {
   type TimeRange,
   TokenAddress,
 } from '../../shared';
+import { unindexedChainMessage } from './TabStatePanels';
 
 type ActivityFeedProps = {
   isEnabled: boolean;
@@ -146,15 +147,19 @@ function buildActivityEventKey(event: AllocationActivity): string {
 
 // Shared by requestFilters and the page-mode chain-mismatch guard so the two
 // cannot parse the network param differently.
+//
+// `null` is a filter this view cannot express, distinct from `undefined`, no
+// filter: reading an unindexed chain as unfiltered answers with every chain's
+// flows behind a visibly-active single-network chip.
 function parseNetworkChainId(
   selectedNetwork: string | null | undefined,
-): number | undefined {
+): number | undefined | null {
   if (!selectedNetwork || selectedNetwork.length === 0) {
     return undefined;
   }
 
   const parsed = Number(selectedNetwork);
-  return Number.isFinite(parsed) ? parsed : undefined;
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function ProtocolEventCard({ event }: { event: ProtocolEvent }) {
@@ -627,6 +632,10 @@ type ActivityFeedState = {
   hasActiveFilters: boolean;
   clearFilters: () => void;
   rowLimit: number;
+  // The network the filter names when STL has no chain id for it. Page mode has
+  // no receipt token to read the same fact off, so the empty state can only name
+  // the chain if the parse result is carried out here.
+  unindexedNetwork: string | null;
 };
 
 /**
@@ -655,6 +664,8 @@ function useAllocationActivity({
 }: ActivityFeedProps): ActivityFeedState {
   const isPageMode = mode === 'page';
   const networkChainId = parseNetworkChainId(selectedNetwork);
+  const unindexedNetwork =
+    networkChainId === null ? (selectedNetwork ?? null) : null;
   const [events, setEvents] = useState<AllocationActivityResponse>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -741,7 +752,7 @@ function useAllocationActivity({
     if (isPageMode) {
       return {
         prime_id: showAllPrimes ? undefined : (selectedPrime?.id ?? undefined),
-        chain_id: networkChainId,
+        chain_id: networkChainId ?? undefined,
         protocol_name:
           selectedProtocol && selectedProtocol !== DIRECT_PROTOCOL_FILTER_VALUE
             ? selectedProtocol
@@ -756,7 +767,7 @@ function useAllocationActivity({
 
     return {
       prime_id: selectedPrime?.id,
-      chain_id: selectedReceiptToken?.chain_id,
+      chain_id: selectedReceiptToken?.chain_id ?? undefined,
       token_symbol: selectedReceiptToken?.symbol,
       action_type: actionFilter,
       limit: filters.limit ?? 50,
@@ -778,10 +789,11 @@ function useAllocationActivity({
   useEffect(() => {
     // Don't fetch without a scope: drawer always needs a prime; page mode needs
     // one too unless "show all primes" is on (otherwise prime_id is undefined
-    // and we'd issue an unfiltered request the UI never asked for).
+    // and we'd issue an unfiltered request the UI never asked for). A row on a
+    // chain STL has no id for cannot be scoped at all.
     const missingScope = isPageMode
-      ? !showAllPrimes && !selectedPrime
-      : !selectedPrime;
+      ? (!showAllPrimes && !selectedPrime) || networkChainId === null
+      : !selectedPrime || selectedReceiptToken?.chain_id === null;
 
     if (!isEnabled || missingScope) {
       // Emptying the rows unmounts every open detail panel, and each one aborts
@@ -826,7 +838,15 @@ function useAllocationActivity({
     void fetchActivity();
 
     return () => abortController.abort();
-  }, [isEnabled, isPageMode, requestFilters, selectedPrime, showAllPrimes]);
+  }, [
+    isEnabled,
+    isPageMode,
+    networkChainId,
+    requestFilters,
+    selectedPrime,
+    selectedReceiptToken?.chain_id,
+    showAllPrimes,
+  ]);
 
   const filteredEvents = useMemo(() => {
     if (!searchQuery) {
@@ -856,6 +876,7 @@ function useAllocationActivity({
     hasActiveFilters,
     clearFilters,
     rowLimit: filters.limit ?? 50,
+    unindexedNetwork,
   };
 }
 
@@ -1060,6 +1081,7 @@ type ActivityTableProps = {
   isLoading: boolean;
   visibleEventCount: number;
   rowLimit: number;
+  emptyDescription: string;
 };
 
 function ActivityTable({
@@ -1067,13 +1089,14 @@ function ActivityTable({
   isLoading,
   visibleEventCount,
   rowLimit,
+  emptyDescription,
 }: ActivityTableProps) {
   return (
     <div className={css({ display: 'grid', gap: '2' })}>
       {visibleEventCount === 0 ? (
         <EmptyState
           title="No Activity Found"
-          description="No allocation activity events match your filters."
+          description={emptyDescription}
           stretch
         />
       ) : (
@@ -1119,6 +1142,7 @@ type ActivityResultsProps = ActivityTableProps & {
   // Rows fetched before the search filter narrows them: only a first load with
   // nothing on screen yet shows the skeleton, a refetch keeps the current rows.
   totalEventCount: number;
+  emptyDescription: string;
 };
 
 function ActivityResults({
@@ -1128,6 +1152,7 @@ function ActivityResults({
   totalEventCount,
   visibleEventCount,
   rowLimit,
+  emptyDescription,
 }: ActivityResultsProps) {
   return (
     <AsyncStateRenderer
@@ -1147,7 +1172,7 @@ function ActivityResults({
       emptyView={
         <EmptyState
           title="No Activity Found"
-          description="No allocation activity events match your filters."
+          description={emptyDescription}
           stretch
         />
       }
@@ -1157,6 +1182,7 @@ function ActivityResults({
         isLoading={isLoading}
         visibleEventCount={visibleEventCount}
         rowLimit={rowLimit}
+        emptyDescription={emptyDescription}
       />
     </AsyncStateRenderer>
   );
@@ -1172,6 +1198,7 @@ export function ActivityFeed(props: ActivityFeedProps) {
     selectedPrime,
     showAllPrimes = false,
     chainLabels,
+    selectedReceiptToken = null,
   } = props;
   const {
     isPageMode,
@@ -1186,6 +1213,7 @@ export function ActivityFeed(props: ActivityFeedProps) {
     hasActiveFilters,
     clearFilters,
     rowLimit,
+    unindexedNetwork,
   } = useAllocationActivity(props);
 
   const table = useActivityTable(filteredEvents, chainLabels);
@@ -1216,6 +1244,22 @@ export function ActivityFeed(props: ActivityFeedProps) {
 
   const latestActivityAt = events[0]?.created_at ?? null;
 
+  // A chain STL has no id for suppresses the request entirely, so "nothing
+  // matched your filters" would be the wrong reason. The drawer reads that off
+  // the selected receipt token; page mode has only the network filter.
+  // Wrapped, not a bare name: the chain being unindexed is known even when it
+  // cannot be named, and the message says "this chain" for that case.
+  const unindexedFilter =
+    selectedReceiptToken?.chain_id === null
+      ? { network: selectedReceiptToken.network }
+      : unindexedNetwork === null
+        ? null
+        : { network: unindexedNetwork };
+  const emptyDescription =
+    unindexedFilter === null
+      ? 'No allocation activity events match your filters.'
+      : unindexedChainMessage(unindexedFilter.network, 'activity');
+
   const activityResults = (
     <ActivityResults
       table={table}
@@ -1224,6 +1268,7 @@ export function ActivityFeed(props: ActivityFeedProps) {
       totalEventCount={events.length}
       visibleEventCount={filteredEvents.length}
       rowLimit={rowLimit}
+      emptyDescription={emptyDescription}
     />
   );
 

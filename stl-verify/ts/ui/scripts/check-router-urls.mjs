@@ -130,25 +130,65 @@ async function main() {
       '/allocation/0xAAA',
     );
 
-    // The reference flag survives validation and rides a prime switch. It is read
-    // once at entry by the comparison harness, so being stripped on arrival or on
-    // the first navigation would revert the page to STL's own model unannounced.
-    assert.equal((await applied('/allocation/0xAAA?reference=true')).reference, true);
-    assert.equal((await applied('/allocation/0xAAA?reference')).reference, true);
+    // The provenance survives validation and rides a prime switch. It is read
+    // once at entry, so being stripped on arrival or on the first navigation
+    // would revert the page to STL's own model unannounced.
     assert.equal(
-      await settledUrl('/allocation/0xAAA?reference&network=1'),
-      '/allocation/0xAAA?network=1&reference=true',
+      (await applied('/allocation/0xAAA?source=reference')).source,
+      'reference',
+    );
+    assert.equal(
+      (await applied('/allocation/0xAAA?source=indexed')).source,
+      'indexed',
+    );
+    assert.equal((await applied('/allocation/0xAAA?source=both')).source, 'both');
+    // Already canonical, so it is left exactly as it arrived -- no redirect to
+    // loop on.
+    assert.equal(
+      await settledUrl('/allocation/0xAAA?source=reference&network=1'),
+      '/allocation/0xAAA?source=reference&network=1',
     );
 
-    // Off is spelled by absence, so the address bar never reads "on" while the
-    // page is serving STL's own figures.
+    // A provenance the vocabulary does not know is dropped rather than carried,
+    // so the address bar cannot claim a mode the page is not in.
+    assert.equal((await applied('/allocation/0xAAA?source=sky')).source, undefined);
     assert.equal(
-      (await applied('/allocation/0xAAA?reference=false')).reference,
+      await settledUrl('/allocation/0xAAA?source=sky'),
+      '/allocation/0xAAA',
+    );
+
+    // The superseded spelling is translated on entry, not stripped: shared links
+    // carry it, and dropping it would leave the URL disagreeing with the page
+    // `lib/provenance` had already built from it.
+    assert.equal(
+      (await applied('/allocation/0xAAA?reference=true')).source,
+      'reference',
+    );
+    assert.equal((await applied('/allocation/0xAAA?reference')).source, 'reference');
+    assert.equal(
+      (await applied('/allocation/0xAAA?reference=true')).reference,
       undefined,
     );
     assert.equal(
+      await settledUrl('/allocation/0xAAA?reference=true'),
+      '/allocation/0xAAA?source=reference',
+    );
+
+    // `reference=false` asked for STL's own figures by name, so it is `indexed`
+    // rather than an absent param that would take whatever the default becomes.
+    assert.equal(
+      (await applied('/allocation/0xAAA?reference=false')).source,
+      'indexed',
+    );
+    assert.equal(
       await settledUrl('/allocation/0xAAA?reference=false'),
-      '/allocation/0xAAA',
+      '/allocation/0xAAA?source=indexed',
+    );
+
+    // The current spelling wins over the superseded one rather than merging.
+    assert.equal(
+      (await applied('/allocation/0xAAA?source=indexed&reference=true')).source,
+      'indexed',
     );
 
     // The drawer flag is a closed set of one, so only the spelling links use it.

@@ -18,7 +18,8 @@
  * are read off `TOKENS` by id, so a row cannot name one token and label itself
  * with another's symbol.
  */
-import { DAY_MS, MINUTE_MS, SECOND_MS, offsetIsoAgo } from '../clock.ts';
+import { DAY_MS, MINUTE_MS, SECOND_MS, iso, offsetIsoAgo } from '../clock.ts';
+import { positionKeys } from '../identity.ts';
 import type { Allocation, AllocationActivity } from '../schema.ts';
 import type { PrimeName } from './registry.ts';
 import {
@@ -43,6 +44,7 @@ type PositionSeed = Omit<
   Allocation,
   | 'chain_id'
   | 'receipt_token_address'
+  | 'source'
   | 'symbol'
   | 'underlying_symbol'
   | 'underlying_token_address'
@@ -50,17 +52,29 @@ type PositionSeed = Omit<
 > & {
   /** Required: a row's chain and its `underlying_symbol` are read off it. */
   underlying_token_id: NonNullable<Allocation['underlying_token_id']>;
+  /** Defaults to `indexed`: these are STL's own rows unless a case says otherwise. */
+  source?: Allocation['source'];
 };
 
 function position(seed: PositionSeed): Allocation {
   const underlying = tokenById(seed.underlying_token_id);
   const receiptTokenId = seed.receipt_token_id ?? null;
 
+  const receiptTokenAddress =
+    receiptTokenId === null ? null : tokenById(receiptTokenId).address;
+
   return {
     ...seed,
     chain_id: underlying.chain_id,
-    receipt_token_address:
-      receiptTokenId === null ? null : tokenById(receiptTokenId).address,
+    source: seed.source ?? 'indexed',
+    position_keys: positionKeys({
+      chain_id: underlying.chain_id,
+      position_address: receiptTokenAddress ?? underlying.address,
+      receipt_token_id: receiptTokenId,
+      protocol_name: seed.protocol_name,
+      symbol: tokenSymbol(receiptTokenId ?? seed.underlying_token_id),
+    }),
+    receipt_token_address: receiptTokenAddress,
     // A wrapped position is labelled by its receipt token, a direct holding by
     // the asset itself.
     symbol: tokenSymbol(receiptTokenId ?? seed.underlying_token_id),
@@ -208,6 +222,7 @@ function sparkMainnetAllocations(nowMs: number): Allocation[] {
     // to read a chain, an address or a symbol off.
     {
       chain_id: 0,
+      source: 'indexed',
       receipt_token_id: null,
       receipt_token_address: null,
       underlying_token_id: null,
@@ -215,6 +230,10 @@ function sparkMainnetAllocations(nowMs: number): Allocation[] {
       symbol: 'BTC',
       underlying_symbol: 'BTC',
       protocol_name: 'anchorage',
+      // Its protocol is the only thing the two provenances describe the same
+      // way: Sky reports the leg on ethereum under its own symbol, with an
+      // address.
+      position_keys: ['custody:anchorage'],
       balance: '4722.61',
       amount_usd: '250000000',
       latest_activity_at: offsetIsoAgo(nowMs, CUSTODY_SNAPSHOT_AGO),
@@ -326,13 +345,119 @@ export function seedReferenceAllocations(
       ? sparkMainnetAllocations(nowMs)
       : groveMainnetAllocations(nowMs);
 
-  return selfRows
-    .filter((allocation) => allocation.category === 'allocation')
-    .map((allocation): Allocation => ({
-      ...allocation,
+  return [
+    ...selfRows
+      .filter((allocation) => allocation.category === 'allocation')
+      .map((allocation): Allocation => ({
+        ...allocation,
+        balance: null,
+        scope: 'prime',
+        source: 'reference',
+      })),
+    ...skyOnlyAllocations(nowMs, primeName),
+  ];
+}
+
+/**
+ * Positions Sky reports and STL does not index at all.
+ *
+ * The union is only interesting if one side has rows the other lacks, and these
+ * carry the three properties that make them awkward: no receipt token (so no
+ * `receipt_token_id` to join a risk row by), no token quantity, and — for the
+ * Arkis vault — an exposure large enough to matter against STL's own totals.
+ */
+/** The Arkis vault Sky reports and STL does not index. */
+const ARKIS_VAULT = '0x38464507e02c983f20428a6e8566693fe9e422a9';
+
+function skyOnlyAllocations(nowMs: number, primeName: PrimeName): Allocation[] {
+  if (primeName !== 'spark') return [];
+
+  const observedAt = iso(nowMs - 13 * MINUTE_MS);
+  return [
+    {
+      chain_id: 1,
+      network: 'ethereum',
+      receipt_token_id: null,
+      receipt_token_address: null,
+      underlying_token_id: null,
+      underlying_token_address: null,
+      symbol: 'sparkPrimeUSDC1',
+      underlying_symbol: 'USDC',
+      protocol_name: 'Arkis',
+      position_keys: [`position:1:${ARKIS_VAULT}`],
       balance: null,
+      amount_usd: '20286862.977',
+      latest_activity_at: observedAt,
+      latest_activity_action: null,
+      latest_activity_amount: null,
+      category: 'allocation',
       scope: 'prime',
-    }));
+      source: 'reference',
+    },
+    {
+      chain_id: 1,
+      network: 'ethereum',
+      receipt_token_id: null,
+      receipt_token_address: null,
+      underlying_token_id: null,
+      underlying_token_address: null,
+      symbol: 'UNI-V4-PYUSD-USDS',
+      underlying_symbol: 'USDS',
+      protocol_name: 'uniswap',
+      // A pool id is not an address, so this one can only key on its symbol.
+      position_keys: ['symbol:1:uniswap:uni-v4-pyusd-usds'],
+      balance: null,
+      amount_usd: '100118500.444',
+      latest_activity_at: observedAt,
+      latest_activity_action: null,
+      latest_activity_amount: null,
+      category: 'allocation',
+      scope: 'prime',
+      source: 'reference',
+    },
+  ];
+}
+
+/**
+ * Every position either provenance reports, each named once.
+ *
+ * STL's row wins where both describe the same position — it is computed from the
+ * chain rather than reported — and says `both` so the reader knows the other
+ * agrees it exists. Rows only Sky reports keep their own provenance, which is
+ * what the grid badges.
+ */
+export function seedCompositeAllocations(
+  nowMs: number,
+  primeName: PrimeName,
+  proxyAddress: string,
+): Allocation[] {
+  const indexed = seedAllocations(nowMs)[proxyAddress] ?? [];
+  const referenceRows = seedReferenceAllocations(nowMs, primeName) ?? [];
+
+  const indexedIds = new Set(
+    indexed
+      .map((allocation) => allocation.receipt_token_id)
+      // `!= null` covers undefined too: the field is optional in the document,
+      // so a row that omits it reads as absent rather than as id 0.
+      .filter((id): id is number => id != null),
+  );
+
+  return [
+    ...indexed.map((allocation): Allocation => ({
+      ...allocation,
+      source:
+        allocation.receipt_token_id != null &&
+        referenceRows.some(
+          (row) => row.receipt_token_id === allocation.receipt_token_id,
+        )
+          ? 'both'
+          : 'indexed',
+    })),
+    ...referenceRows.filter(
+      (row) =>
+        row.receipt_token_id == null || !indexedIds.has(row.receipt_token_id),
+    ),
+  ];
 }
 
 /** Spread so 16 rows cover the whole default 24h window, newest first. */

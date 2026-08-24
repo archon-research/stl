@@ -344,11 +344,256 @@ async function checkDebtRawSnapshots() {
   );
 
   assert.equal(raw.mode, 'raw');
-  assert.equal(raw.source, 'self');
+  assert.equal(raw.source, 'indexed');
   assert.equal(raw.data.length, 1, 'limit=1 should return one snapshot');
   assert.equal(raw.data[0].ilk_name, 'ALLOCATOR-SPARK-A');
   assert.equal(raw.data[0].prime_address, SPARK_VAULT);
   assert.match(raw.data[0].debt_wad, /^\d+$/u, 'debt_wad is an integer string');
+}
+
+async function checkCompositeAllocationsAreAUnion() {
+  const indexed = await request(
+    '/v1/primes/{prime_id}/allocations',
+    {
+      params: {
+        path: { prime_id: SPARK_MAINNET_PROXY },
+        query: { source: 'indexed' },
+      },
+    },
+    'allocations (indexed)',
+  );
+  const reference = await request(
+    '/v1/primes/{prime_id}/allocations',
+    {
+      params: {
+        path: { prime_id: SPARK_MAINNET_PROXY },
+        query: { source: 'reference' },
+      },
+    },
+    'allocations (reference)',
+  );
+  const composite = await request(
+    '/v1/primes/{prime_id}/allocations',
+    {
+      params: {
+        path: { prime_id: SPARK_MAINNET_PROXY },
+        query: { source: 'both' },
+      },
+    },
+    'allocations (both)',
+  );
+
+  // Every position once: the union is larger than either half and smaller than
+  // their sum, because the halves overlap.
+  assert.ok(
+    composite.length > indexed.length,
+    'the union should carry rows the indexed half does not',
+  );
+  assert.ok(
+    composite.length < indexed.length + reference.length,
+    'the union should not be the two halves concatenated',
+  );
+
+  const keys = composite.map(
+    (row) => `${row.receipt_token_id ?? row.symbol}:${row.chain_id}`,
+  );
+  assert.equal(new Set(keys).size, keys.length, 'a position appears twice');
+
+  // A row only Sky reports keeps its own provenance, which is what the grid
+  // badges; a row both describe says so.
+  const sources = new Set(composite.map((row) => row.source));
+  assert.ok(sources.has('both'), 'no row reports both provenances');
+  assert.ok(sources.has('reference'), 'no row reports Sky alone');
+}
+
+async function checkCompositeRiskCapitalKeepsBothFigures() {
+  const composite = await request(
+    '/v1/primes/{prime_id}/risk-capital',
+    {
+      params: {
+        path: { prime_id: SPARK_MAINNET_PROXY },
+        query: { source: 'both' },
+      },
+    },
+    'risk-capital (both)',
+  );
+
+  assert.equal(composite.source, 'both');
+
+  const merged = composite.per_allocation.filter(
+    (row) => row.source === 'both',
+  );
+  assert.ok(merged.length > 0, 'no merged rows in the breakdown');
+
+  // The point of the fixture: the two provenances disagree, and neither figure
+  // is overwritten by the other.
+  const disagreeing = merged.find(
+    (row) =>
+      row.reference_required_risk_capital_usd !== null &&
+      Number(row.reference_required_risk_capital_usd) !==
+        Number(row.required_risk_capital_usd),
+  );
+  assert.ok(
+    disagreeing !== undefined,
+    'no row where the provenances disagree, so the merge is untested',
+  );
+  assert.ok(
+    disagreeing.reference_crr_pct !== null &&
+      disagreeing.reference_crr_pct !== undefined,
+    "Sky's own ratio should ride along, not be derived from its two figures",
+  );
+
+  // Sky prices positions STL resolves no receipt token for, so they cannot join
+  // a grid row by id. They must still be in the breakdown.
+  const skyOnly = composite.per_allocation.filter(
+    (row) => row.source === 'reference' && row.receipt_token_id == null,
+  );
+  assert.ok(
+    skyOnly.length > 0,
+    'no Sky-only rows, so the unjoinable case is untested',
+  );
+
+  // Largest exposure first, like the endpoint.
+  const exposures = composite.per_allocation.map((row) =>
+    Number(row.exposure_usd),
+  );
+  assert.deepEqual(
+    exposures,
+    [...exposures].sort((left, right) => right - left),
+    'the merged breakdown is not ordered by exposure',
+  );
+}
+
+async function checkPositionKeysJoinTheTwoEndpoints() {
+  const allocations = await request(
+    '/v1/primes/{prime_id}/allocations',
+    {
+      params: {
+        path: { prime_id: SPARK_MAINNET_PROXY },
+        query: { source: 'both' },
+      },
+    },
+    'allocations (both)',
+  );
+  const risk = await request(
+    '/v1/primes/{prime_id}/risk-capital',
+    {
+      params: {
+        path: { prime_id: SPARK_MAINNET_PROXY },
+        query: { source: 'both' },
+      },
+    },
+    'risk-capital (both)',
+  );
+
+  const byKey = new Map();
+  for (const row of risk.per_allocation) {
+    for (const key of row.position_keys ?? []) {
+      if (!byKey.has(key)) byKey.set(key, row);
+    }
+  }
+  assert.ok(byKey.size > 0, 'the risk breakdown publishes no position keys');
+
+  const attach = (allocation) =>
+    (allocation.position_keys ?? [])
+      .map((key) => byKey.get(key))
+      .find((row) => row !== undefined);
+
+  // The point of the keys: positions with no receipt_token_id still find their
+  // requirement. Off-chain custody pairs by protocol, the Arkis vault by
+  // address — the two rows Sky prices highest and STL resolves no token for.
+  const custody = allocations.find((row) => row.protocol_name === 'anchorage');
+  assert.ok(custody !== undefined, 'no custody row to join');
+  assert.equal(custody.receipt_token_id ?? null, null);
+  assert.ok(
+    attach(custody) !== undefined,
+    'the custody row found no requirement, so the protocol key is broken',
+  );
+
+  const arkis = allocations.find((row) => row.symbol === 'sparkPrimeUSDC1');
+  assert.ok(arkis !== undefined, 'no Arkis row to join');
+  assert.ok(
+    attach(arkis) !== undefined,
+    'the Arkis vault found no requirement, so the address key is broken',
+  );
+
+  // A key is a join key, so a row must never carry one that resolves to a
+  // position describing something else.
+  for (const allocation of allocations) {
+    const attached = attach(allocation);
+    if (attached === undefined) continue;
+    const sharesAKey = (allocation.position_keys ?? []).some((key) =>
+      (attached.position_keys ?? []).includes(key),
+    );
+    assert.ok(
+      sharesAKey,
+      `joined ${allocation.symbol} on a key it does not carry`,
+    );
+  }
+}
+
+async function checkProvenanceSelection() {
+  const window = { aggregate: true, limit: 3 };
+
+  for (const source of ['indexed', 'reference', 'both']) {
+    const envelope = await request(
+      '/v1/primes/{prime_id}/exposure',
+      {
+        params: {
+          path: { prime_id: SPARK_MAINNET_PROXY },
+          query: { ...window, source },
+        },
+      },
+      `exposure (source=${source})`,
+    );
+    assert.equal(
+      envelope.source,
+      source,
+      `source=${source} should answer as itself`,
+    );
+  }
+
+  // The superseded spelling still resolves, and `false` means STL's own figures
+  // by name rather than whatever the default is.
+  const byFlag = await request(
+    '/v1/primes/{prime_id}/exposure',
+    {
+      params: {
+        path: { prime_id: SPARK_MAINNET_PROXY },
+        query: { ...window, reference: true },
+      },
+    },
+    'exposure (reference=true)',
+  );
+  assert.equal(byFlag.source, 'reference');
+
+  const offByName = await request(
+    '/v1/primes/{prime_id}/exposure',
+    {
+      params: {
+        path: { prime_id: SPARK_MAINNET_PROXY },
+        query: { ...window, reference: false },
+      },
+    },
+    'exposure (reference=false)',
+  );
+  assert.equal(offByName.source, 'indexed');
+}
+
+async function checkProvenanceConflictRejected() {
+  // Preferring one silently would answer a different question than one of the
+  // two the caller asked, so the API refuses and the mock must too.
+  await expectStatus(
+    '/v1/primes/{prime_id}/exposure',
+    {
+      params: {
+        path: { prime_id: SPARK_MAINNET_PROXY },
+        query: { aggregate: true, source: 'indexed', reference: true },
+      },
+    },
+    422,
+    'source and reference disagreeing',
+  );
 }
 
 async function checkDebtAggregatedBuckets() {
@@ -950,6 +1195,20 @@ const checks = [
   ['aggregated flows are valued in USD', checkAggregatedFlowsAreValued],
   ['the raw feed honours limit', checkRawActivityHonoursLimit],
   ['debt raw snapshots', checkDebtRawSnapshots],
+  ['provenance selection', checkProvenanceSelection],
+  ['composite allocations are a union', checkCompositeAllocationsAreAUnion],
+  [
+    'position keys join the allocations and risk endpoints',
+    checkPositionKeysJoinTheTwoEndpoints,
+  ],
+  [
+    'composite risk capital keeps both figures',
+    checkCompositeRiskCapitalKeepsBothFigures,
+  ],
+  [
+    'a contradictory provenance pair is refused',
+    checkProvenanceConflictRejected,
+  ],
   ['debt aggregated buckets', checkDebtAggregatedBuckets],
   ['series values follow their instant', checkSeriesValuesFollowTheirInstant],
   ['repeated reads are stable', checkRepeatedReadsAreStable],

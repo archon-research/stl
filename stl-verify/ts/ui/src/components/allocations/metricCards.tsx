@@ -14,13 +14,14 @@ import {
   useContainerWidth,
 } from '@archon-research/charting';
 import { DataContext, ReferenceBand } from '@archon-research/charting';
-import { SkeletonStack } from '@archon-research/design-system';
+import { ErrorState, SkeletonStack } from '@archon-research/design-system';
 import type { CSSProperties } from 'react';
 import { useContext, useMemo } from 'react';
 
 import { css } from '#styled-system/css';
 
 import { balancedColumns } from '../../lib/dashboard';
+import { SummaryMetric } from '../shared';
 
 export type ChartDatum = {
   label: string;
@@ -53,6 +54,11 @@ export type MetricChartSpec = {
   // so overlapping severities read as escalating shade.
   //
   thresholds?: { value: number; label?: string; stroke?: ChartColor }[];
+  // The provenance not drawn as the primary series, for the same buckets, under
+  // `source=both`. A second line rather than a second card: the point is the gap
+  // between them. `ChartColor`, not a series token: it is deliberately not one of
+  // the series hues, so it cannot be mistaken for a quantity of its own.
+  comparison?: { data: ChartDatum[]; stroke: ChartColor } | null;
 };
 
 // Every card the metrics band can render. Its length drives both the loading
@@ -65,6 +71,19 @@ export const TOP_METRIC_CARDS = [
   'encumbrance',
   'prime-debt',
 ] as const;
+
+export type TopMetricCard = (typeof TOP_METRIC_CARDS)[number];
+
+// A card that is loading or unavailable still knows which metric it is, which
+// is the difference between "six grey boxes" and a page you can read early.
+export const TOP_METRIC_CARD_LABELS: Record<TopMetricCard, string> = {
+  'total-allocation': 'Total allocation',
+  exposure: 'Exposure',
+  'total-risk-capital': 'Total risk capital',
+  'prime-collateral': 'Prime collateral',
+  encumbrance: 'Encumbrance',
+  'prime-debt': 'Prime debt exposure',
+};
 
 export const metricsGridClassName = css({
   display: 'grid',
@@ -205,6 +224,90 @@ function ThresholdLabels({ thresholds }: { thresholds: ThresholdEntry[] }) {
   );
 }
 
+/**
+ * A card whose figure has not arrived yet.
+ *
+ * Built from the same frame as the real card rather than a single grey block:
+ * the label is known up front, so the page reads as itself while it loads and
+ * nothing moves when the figures land.
+ */
+// Not `SkeletonStack`: it fills its items with `surface.subtle`, which is this
+// card's own fill, and takes no tone — so its placeholders are invisible here
+// and neither a composed class nor a descendant override outranks the kit's own
+// layer.
+const placeholderClassName = css({
+  bg: 'border.subtle',
+  borderRadius: 'sm',
+  animation: 'pulse',
+});
+
+function Placeholder({ width, height }: { width: string; height: number }) {
+  return (
+    <div
+      className={placeholderClassName}
+      // Sizes vary per slot, so they ride the style attribute: Panda generates
+      // its classes at build time and cannot see a value passed in.
+      style={{ width, height: `${height}px` }}
+    />
+  );
+}
+
+export function MetricCardSkeleton({ label }: { label: string }) {
+  return (
+    <SummaryMetric
+      className={metricsCardClassName}
+      label={label}
+      // Widths are a typical figure and subtitle rather than the full column: a
+      // placeholder the width of the card reads as a filled card, not a loading
+      // one.
+      value={<Placeholder width="8rem" height={28} />}
+      detail={
+        <div className={metricDetailClassName}>
+          <Placeholder width="12rem" height={16} />
+          <Placeholder width="100%" height={CHART_HEIGHT} />
+        </div>
+      }
+    />
+  );
+}
+
+/**
+ * A card whose figure could not be fetched.
+ *
+ * Keeps the card's frame and height so a row does not reflow when a retry
+ * succeeds, and names the metric so which one failed is visible.
+ */
+export function MetricCardError({
+  label,
+  title,
+  description,
+  errorMessage,
+}: {
+  label: string;
+  title: string;
+  description: string;
+  errorMessage: string | null;
+}) {
+  return (
+    <SummaryMetric
+      className={metricsCardClassName}
+      label={label}
+      value="—"
+      detail={
+        <div className={metricDetailClassName}>
+          <ErrorState
+            tone="critical"
+            size="inline"
+            title={title}
+            description={description}
+            errorMessage={errorMessage ?? undefined}
+          />
+        </div>
+      }
+    />
+  );
+}
+
 export function MetricCardTrend({
   chart,
   isLoading,
@@ -269,7 +372,10 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
     [strokeColor],
   );
 
-  const values = chart.data.map((point) => point.value);
+  const values = [
+    ...chart.data.map((point) => point.value),
+    ...(chart.comparison?.data ?? []).map((point) => point.value),
+  ];
   const minValue = Math.min(...values);
   const maxValue = Math.max(...values);
 
@@ -335,7 +441,10 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
             fill: 'var(--colors-text-muted)',
           })}
         />
-        {chart.kind === 'fallback' ? null : (
+        {/* No fill when a second series is present: it anchors the domain at
+            zero, which compresses both lines into a band at the plot top, and a
+            comparison does not need a filled magnitude anyway. */}
+        {chart.kind === 'fallback' || chart.comparison ? null : (
           <AreaSeries
             dataKey={`${chart.key}-area`}
             data={chart.data as ChartDatum[]}
@@ -353,6 +462,23 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
           yAccessor={(d: ChartDatum) => d.value}
           stroke={strokeColor}
         />
+        {chart.comparison && chart.comparison.data.length > 0 ? (
+          // Dashed and unfilled: the same quantity as the primary series, from
+          // the other provenance, which should not read as a second quantity
+          // stacked on the first.
+          <LineSeries
+            dataKey={`${chart.key}-comparison`}
+            data={chart.comparison.data}
+            xAccessor={(d: ChartDatum) => d.label}
+            yAccessor={(d: ChartDatum) => d.value}
+            stroke={resolveChartColor(chart.comparison.stroke)}
+            // Heavier than a hairline: where the two provenances agree the
+            // lines coincide exactly, and the series colour showing through the
+            // gaps is what tells a reader that is what happened.
+            strokeWidth={1.5}
+            strokeDasharray="6 4"
+          />
+        ) : null}
         {thresholds.map((entry) => (
           <ReferenceBand
             key={`threshold-${entry.value}`}
@@ -418,4 +544,8 @@ export const metricDetailClassName = css({
   gridTemplateRows: 'auto 1fr',
   gap: '2',
   minHeight: '17rem',
+  // One line whether or not it has text, since only some cards carry an
+  // observation stamp and an empty row lifts the chart out of line with its
+  // row-mates. `1lh` resolves against the caption's own font, not the card's.
+  '& > :first-child': { minHeight: '1lh' },
 });

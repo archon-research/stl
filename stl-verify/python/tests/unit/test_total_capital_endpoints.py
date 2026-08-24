@@ -67,6 +67,7 @@ def test_list_prime_total_capital_returns_aggregated_buckets():
             {
                 "bucket_start": "2026-06-18T00:00:00Z",
                 "total_capital_usd": "36359440.25",
+                "reference_total_capital_usd": None,
                 "assets_usd": None,
                 "encumbrance_ratio": None,
                 "assets_observed_at": None,
@@ -75,6 +76,7 @@ def test_list_prime_total_capital_returns_aggregated_buckets():
             {
                 "bucket_start": "2026-06-17T18:00:00Z",
                 "total_capital_usd": None,
+                "reference_total_capital_usd": None,
                 "assets_usd": None,
                 "encumbrance_ratio": None,
                 "assets_observed_at": None,

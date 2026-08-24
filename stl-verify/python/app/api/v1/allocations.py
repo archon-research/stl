@@ -17,6 +17,10 @@ from app.api._validators import (
     ProxyAddressPathParam,
 )
 from app.api.deps import get_engine, get_reference_risk_capital_service_factory
+from app.api.provenance import (
+    get_requested_provenance,
+    resolve_or_422,
+)
 from app.api.time_series import TimeSeriesWindow, apply_cache_control, build_window, get_time_series_query_params
 from app.config import get_settings
 from app.domain.entities.allocation import (
@@ -29,6 +33,8 @@ from app.domain.entities.allocation import (
 from app.domain.entities.allocation_category import AllocationCategory
 from app.domain.entities.reference_risk_capital import ReferenceAllocation
 from app.domain.exceptions import ReferenceDataUnavailableError
+from app.domain.position_identity import PositionFacts, position_identities
+from app.domain.provenance import Provenance
 from app.domain.serialization import PlainDecimal
 from app.domain.time_series import TimeSeriesQuery, enforce_filter_for_window
 from app.services.allocation_category_service import AllocationCategoryService
@@ -125,9 +131,47 @@ class AllocationResponse(BaseModel):
       registry row). ``amount_usd`` is the loan drawn against the collateral and
       ``latest_activity_at`` is the snapshot time — surfaced verbatim even when
       the upstream feed is frozen, so staleness is visible rather than hidden.
+
+    ``chain_id`` therefore has three states, and 0 is not one of the other two:
+    an EVM chain id, 0 for off-chain custody, and null for a chain STL has no id
+    for (reference rows only, where ``network`` carries the upstream name).
     """
 
-    chain_id: int = Field(description="EVM chain id of the position.", examples=[1])
+    chain_id: int | None = Field(
+        description=(
+            "EVM chain id of the position. `0` for off-chain custody. `null` when the position "
+            "is on a chain STL has no id for, which only happens on reference rows — read "
+            "`network` for the label in that case."
+        ),
+        examples=[1],
+    )
+    position_keys: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Keys this position answers to, strongest first. Two rows describe the same position when "
+            "they share any one of them, which is how a client joins this row to its risk-capital "
+            "counterpart: the two endpoints do not carry the same kind of identifier, so a position "
+            "Sky reports and STL does not index has no `receipt_token_id` to join by. Opaque — the "
+            "spelling is not a contract, only the equality is."
+        ),
+        examples=[["token:736", "position:1:0xc02ab1a5eaa8d1b114ef786d9bde108cd4364359"]],
+    )
+    source: Provenance = Field(
+        default=Provenance.INDEXED,
+        description=(
+            "Which provenance reported this position. `both` means the two agreed it exists and "
+            "the figures shown are STL's; `reference` means only Sky reports it, which is either a "
+            "position STL does not index or one on a chain it does not serve."
+        ),
+    )
+    network: str | None = Field(
+        default=None,
+        description=(
+            "The upstream feed's own name for the chain, e.g. `plume`. Populated on reference "
+            "rows only, and the sole label available when `chain_id` is `null`."
+        ),
+        examples=["ethereum"],
+    )
     receipt_token_id: int | None = Field(
         default=None,
         description="Surrogate id of the receipt token. `null` for direct asset holdings.",
@@ -175,7 +219,7 @@ class AllocationResponse(BaseModel):
     balance: PlainDecimal | None = Field(
         description=(
             "Balance held by the prime, in token units. Decimal serialized as a JSON string. "
-            "Always present in self mode. Always `null` under `reference=true`: the upstream Star "
+            "Always present for an indexed row. Always `null` for a Sky-reported one: the upstream Star "
             "monitor reports USD exposure only and never a token quantity, so there is no balance "
             "to report — read `amount_usd` instead."
         ),
@@ -658,17 +702,7 @@ async def list_protocols(service: AllocationService = Depends(_get_service)):
 )
 async def list_allocations(
     prime_id: ProxyAddressPathParam,
-    reference: bool = Query(
-        False,
-        description=(
-            "List the positions Sky's Star monitor reports for this prime instead of the ones STL "
-            "indexes on-chain. The row shape is unchanged, but every row is prime-scoped "
-            '(`scope="prime"`) because the monitor reports per prime, not per proxy — so a client '
-            "fanning out across a prime's proxies must dedupe rather than sum. `balance` is `null` "
-            "throughout: the monitor reports USD exposure only. Returns `404` when the monitor does "
-            "not track the prime and `502` when it cannot be read."
-        ),
-    ),
+    requested_provenance: Provenance | None = Depends(get_requested_provenance),
     service: AllocationService = Depends(_get_service),
     reference_services: Callable[[], ReferenceRiskCapitalService] = Depends(get_reference_risk_capital_service_factory),
 ):
@@ -694,8 +728,13 @@ async def list_allocations(
     if not await service.prime_exists(prime_address):
         raise HTTPException(status_code=404, detail="Prime not found")
 
-    if reference:
-        return await _reference_allocations(prime_address, reference_services())
+    source = resolve_or_422(requested_provenance, available=frozenset(Provenance), default=Provenance.INDEXED)
+
+    if source is Provenance.REFERENCE:
+        return _with_position_keys(await _reference_allocations(prime_address, reference_services()))
+
+    if source is Provenance.BOTH:
+        return _with_position_keys(await _merged_allocations(prime_address, service, reference_services()))
 
     custody_applies = await _custody_applies(prime_address, service)
     positions, direct, custody = await asyncio.gather(
@@ -705,11 +744,22 @@ async def list_allocations(
     )
 
     category_service = AllocationCategoryService()
-    return [
-        *(_receipt_token_row(position, category_service) for position in positions),
-        *(_direct_asset_row(holding, category_service) for holding in direct),
-        *(_anchorage_custody_row(holding, category_service) for holding in custody),
-    ]
+    return _with_position_keys(
+        [
+            *(_receipt_token_row(position, category_service) for position in positions),
+            *(_direct_asset_row(holding, category_service) for holding in direct),
+            *(_anchorage_custody_row(holding, category_service) for holding in custody),
+        ]
+    )
+
+
+def _with_position_keys(rows: list[AllocationResponse]) -> list[AllocationResponse]:
+    """Publish each row's identity so a client can join it to its risk row.
+
+    Filled here rather than at the four projections, so a new source of rows
+    cannot ship without them.
+    """
+    return [row.model_copy(update={"position_keys": position_identities(_position_facts(row))}) for row in rows]
 
 
 async def _custody_applies(prime_address: EthAddress, service: AllocationService) -> bool:
@@ -738,6 +788,106 @@ async def _custody_applies(prime_address: EthAddress, service: AllocationService
     return primary.lower() == str(prime_address).lower()
 
 
+def _position_facts(row: AllocationResponse) -> PositionFacts:
+    """Read a projected row back as the facts that identify its position.
+
+    The receipt token where there is one, else the held asset itself — never the
+    underlying of a wrapped position, which two different vaults can share.
+    """
+    return PositionFacts(
+        chain_id=row.chain_id,
+        network=row.network,
+        position_address=row.receipt_token_address or row.underlying_token_address,
+        receipt_token_id=row.receipt_token_id,
+        protocol_name=row.protocol_name,
+        symbol=row.symbol,
+    )
+
+
+async def _merged_allocations(
+    prime_address: EthAddress,
+    service: AllocationService,
+    reference_service: ReferenceRiskCapitalService,
+) -> list[AllocationResponse]:
+    """Every position either provenance reports, each named once.
+
+    The indexed half is resolved prime-wide here, unlike the proxy-scoped
+    default: the reference half is reported per prime, and joining it against a
+    single proxy's rows matches whatever that one chain happens to hold — for
+    spark, 8 of 12 against its mainnet proxy and 0 against its Base one.
+
+    A reference half that cannot be read leaves the indexed rows as they are.
+    Every row states its own provenance, so an answer with nothing from Sky in
+    it says so without an envelope to carry the notice.
+    """
+    indexed = await _prime_wide_indexed_allocations(prime_address, service)
+
+    try:
+        reference = await _reference_allocations(prime_address, reference_service)
+    except HTTPException as exc:
+        if exc.status_code not in (404, 502):
+            raise
+        logger.warning(
+            "Serving indexed allocations alone; the reference half is unavailable",
+            extra={"prime_address": str(prime_address), "status_code": exc.status_code},
+        )
+        return indexed
+
+    # Indexed by every key each row answers to, so a match on any one counts.
+    by_identity: dict[str, AllocationResponse] = {}
+    for row in indexed:
+        for key in position_identities(_position_facts(row)):
+            by_identity.setdefault(key, row)
+
+    merged: list[AllocationResponse] = []
+    matched: set[int] = set()
+    for row in reference:
+        counterpart = next(
+            (by_identity[key] for key in position_identities(_position_facts(row)) if key in by_identity),
+            None,
+        )
+        if counterpart is not None:
+            matched.add(id(counterpart))
+        if counterpart is None:
+            merged.append(row.model_copy(update={"source": Provenance.REFERENCE}))
+            continue
+        # STL's own figures lead where both report a position: they are computed
+        # from the chain rather than reported. The two disagree by ~1% on
+        # exposure, which a consumer needs told rather than averaged away.
+        merged.append(counterpart.model_copy(update={"source": Provenance.BOTH}))
+
+    merged.extend(row for row in indexed if id(row) not in matched)
+    return merged
+
+
+async def _prime_wide_indexed_allocations(
+    prime_address: EthAddress, service: AllocationService
+) -> list[AllocationResponse]:
+    """STL's rows for every proxy of the prime, not just the queried one."""
+    proxies = await service.prime_proxy_addresses(prime_address)
+    category_service = AllocationCategoryService()
+
+    rows: list[AllocationResponse] = []
+    for proxy in proxies:
+        positions, direct = await asyncio.gather(
+            service.list_receipt_token_positions(proxy),
+            service.list_direct_asset_holdings(proxy),
+        )
+        rows.extend(_receipt_token_row(position, category_service) for position in positions)
+        rows.extend(_direct_asset_row(holding, category_service) for holding in direct)
+
+    # Prime-scoped, so it belongs to the union once however many proxies there
+    # are — and ungated, unlike the proxy-scoped default. `_custody_applies`
+    # answers "does *this* proxy carry the leg", which is the wrong question of a
+    # response that already spans every proxy: asking it drops the leg entirely
+    # whenever a non-primary proxy is the one queried. The read resolves the
+    # prime from whichever proxy it is given, so any of them returns the leg.
+    custody = await service.list_anchorage_custody_holdings(prime_address)
+    rows.extend(_anchorage_custody_row(holding, category_service) for holding in custody)
+
+    return rows
+
+
 async def _reference_allocations(
     prime_address: EthAddress, reference_service: ReferenceRiskCapitalService
 ) -> list[AllocationResponse]:
@@ -753,11 +903,11 @@ async def _reference_allocations(
                 detail="The upstream Star monitor does not track this prime, so it reports no allocations",
             )
 
-        # The projection stays inside the guard: _reference_allocation_row
-        # raises ReferenceDataUnavailableError for an unmappable network, which
-        # is still an upstream-data problem (502), not a server fault (500).
         category_service = AllocationCategoryService()
-        return [_reference_allocation_row(row, category_service) for row in snapshot.per_allocation]
+        return [
+            _reference_allocation_row(row, category_service).model_copy(update={"source": Provenance.REFERENCE})
+            for row in snapshot.per_allocation
+        ]
     except ReferenceDataUnavailableError as exc:
         raise HTTPException(status_code=502, detail=f"Reference allocations upstream unavailable: {exc}") from exc
 
@@ -765,17 +915,15 @@ async def _reference_allocations(
 def _reference_allocation_row(
     row: ReferenceAllocation, category_service: AllocationCategoryService
 ) -> AllocationResponse:
-    """Project an upstream position onto the allocation model."""
-    if row.chain_id is None:
-        # 0 is this endpoint's off-chain-custody sentinel, so a network STL
-        # cannot map has no representable id: serving one would file an EVM
-        # position as custodied BTC.
-        raise ReferenceDataUnavailableError(
-            f"Star monitor reported a position on network {row.network!r}, which maps to no known chain"
-        )
+    """Project an upstream position onto the allocation model.
 
+    A network STL has no chain id for yields a null ``chain_id``, with
+    ``network`` naming it: upstream adds chains before STL indexes them, and 0
+    is not available, since it already means off-chain custody.
+    """
     return AllocationResponse(
         chain_id=row.chain_id,
+        network=row.network,
         receipt_token_id=row.receipt_token_id,
         receipt_token_address=row.token_address if as_address(row.token_address) else None,
         # Both or neither, per the model's invariant. Upstream names the loan

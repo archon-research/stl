@@ -25,6 +25,7 @@
     "test:metrics-grid": "node scripts/check-metrics-grid.mjs",
     "test:mock-worker": "node scripts/check-mock-worker.mjs",
     "test:routes": "node scripts/check-router-urls.mjs",
+    "test:unindexed-chains": "node scripts/check-unindexed-chains.mjs",
     "generate:openapi-types": "uikit-openapi-generate --schema ./src/generated/openapi-schema.json --output ./src/generated/openapi-types.ts && uikit-cli format --write ./src/generated/openapi-types.ts",
     "lint": "uikit-cli lint src panda.config.ts vite.config.ts env.ts",
     "doctor": "uikit-cli doctor --codegen"

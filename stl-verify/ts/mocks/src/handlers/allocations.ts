@@ -18,6 +18,7 @@ import {
   receiptTokenUsdPerUnit,
   seedActivity,
   seedAllocations,
+  seedCompositeAllocations,
   seedReferenceAllocations,
 } from '../fixtures/allocations.ts';
 import { PRIMES } from '../fixtures/registry.ts';
@@ -30,6 +31,7 @@ import {
   includesInsensitive,
   readChainId,
   readFlag,
+  readProvenance,
   readLimit,
   resolveWindow,
   sameHex,
@@ -154,9 +156,12 @@ export function allocationHandlers(): MockHandler[] {
       async ({ params, query, response }) => {
         await mockDelay(LIST_DELAY_MS);
         const nowMs = mockNow();
-        const reference = readFlag('reference', query.get('reference'));
-        if (!reference.ok) {
-          return response.untyped(problemResponse(reference.problem));
+        const source = readProvenance(
+          query.get('source'),
+          query.get('reference'),
+        );
+        if (!source.ok) {
+          return response.untyped(problemResponse(source.problem));
         }
         const proxy = PRIMES.find((prime) =>
           sameHex(prime.address, params.prime_id),
@@ -170,7 +175,7 @@ export function allocationHandlers(): MockHandler[] {
           );
         }
 
-        if (reference.value) {
+        if (source.value === 'reference') {
           const referenceRows = seedReferenceAllocations(nowMs, proxy.name);
           return referenceRows === undefined
             ? response.untyped(
@@ -179,6 +184,12 @@ export function allocationHandlers(): MockHandler[] {
                 ),
               )
             : response(200).json(referenceRows);
+        }
+
+        if (source.value === 'both') {
+          return response(200).json(
+            seedCompositeAllocations(nowMs, proxy.name, proxy.address),
+          );
         }
 
         const rows = seedAllocations(nowMs)[proxy.address] ?? [];

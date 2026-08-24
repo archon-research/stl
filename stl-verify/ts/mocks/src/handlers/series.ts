@@ -2,7 +2,7 @@
  * The three per-prime time series: exposure, total capital, debt.
  *
  * Exposure and total capital are aggregate-only by contract (`mode` is the
- * constant `'aggregated'`). Debt has both modes, and `reference=true` is
+ * constant `'aggregated'`). Debt has both modes, and a reference provenance is
  * aggregate-only there because upstream publishes one figure per prime per day
  * with no ilk or block identity, so the API answers `400` rather than inventing
  * them.
@@ -29,12 +29,14 @@ import {
   bucketStarts,
   readFlag,
   readLimit,
+  readProvenance,
   resolveWindow,
   sameHex,
 } from '../query.ts';
 import type {
   ExposureBucket,
   PrimeDebtBucket,
+  Provenance,
   TimeSeriesWindow,
   TotalCapitalBucket,
 } from '../schema.ts';
@@ -72,7 +74,7 @@ type SeriesRequest = {
   window: TimeSeriesWindow;
   starts: number[];
   limit: number;
-  reference: boolean;
+  source: Provenance;
 };
 
 export type SeriesQuery = {
@@ -80,6 +82,7 @@ export type SeriesQuery = {
   toTimestamp: string | null;
   resolution: string | null;
   limit: string | null;
+  source: string | null;
   reference: string | null;
 };
 
@@ -96,8 +99,8 @@ function readSeriesRequest(
   if (!resolved.ok) return resolved;
   const limit = readLimit(raw.limit, BUCKET_LIMIT_DEFAULT, BUCKET_LIMIT_MAX);
   if (!limit.ok) return limit;
-  const reference = readFlag('reference', raw.reference);
-  if (!reference.ok) return reference;
+  const source = readProvenance(raw.source, raw.reference);
+  if (!source.ok) return source;
 
   const { window, fromMs, toMs } = resolved.value;
   return {
@@ -106,7 +109,7 @@ function readSeriesRequest(
       window,
       limit: limit.value,
       starts: bucketStarts(fromMs, toMs, window.interval_ms, limit.value),
-      reference: reference.value,
+      source: source.value,
     },
   };
 }
@@ -123,6 +126,7 @@ type SeriesQueryReader = {
       | 'to_timestamp'
       | 'resolution'
       | 'limit'
+      | 'source'
       | 'reference',
   ) => string | null;
 };
@@ -133,6 +137,7 @@ function seriesQuery(query: SeriesQueryReader): SeriesQuery {
     toTimestamp: query.get('to_timestamp'),
     resolution: query.get('resolution'),
     limit: query.get('limit'),
+    source: query.get('source'),
     reference: query.get('reference'),
   };
 }
@@ -160,7 +165,7 @@ export function seriesHandlers(): MockHandler[] {
 
         return response(200).json({
           mode: 'aggregated',
-          source: request.value.reference ? 'reference' : 'self',
+          source: request.value.source,
           window: request.value.window,
           // The return annotation is load-bearing, not decoration: a `.map()`
           // result is not a fresh object literal, so without it a bucket field
@@ -193,7 +198,7 @@ export function seriesHandlers(): MockHandler[] {
 
         return response(200).json({
           mode: 'aggregated',
-          source: request.value.reference ? 'reference' : 'self',
+          source: request.value.source,
           window: request.value.window,
           data: seriesPoints(
             TOTAL_CAPITAL_USD,
@@ -223,14 +228,14 @@ export function seriesHandlers(): MockHandler[] {
           return response.untyped(problemResponse(request.problem));
         }
 
-        const { window, starts, limit, reference } = request.value;
+        const { window, starts, limit, source } = request.value;
         const parsedAggregate = readFlag('aggregate', query.get('aggregate'));
         if (!parsedAggregate.ok) {
           return response.untyped(problemResponse(parsedAggregate.problem));
         }
         const aggregate = parsedAggregate.value;
 
-        if (reference && !aggregate) {
+        if (source !== 'indexed' && !aggregate) {
           return response.untyped(
             problemResponse(
               badRequest('reference debt requires aggregate=true'),
@@ -241,7 +246,7 @@ export function seriesHandlers(): MockHandler[] {
         if (aggregate) {
           return response(200).json({
             mode: 'aggregated',
-            source: reference ? 'reference' : 'self',
+            source,
             window,
             data: seriesPoints(PRIME_DEBT_USDS, starts, nowMs).map(
               (point): PrimeDebtBucket => ({
@@ -254,7 +259,7 @@ export function seriesHandlers(): MockHandler[] {
 
         return response(200).json({
           mode: 'raw',
-          source: 'self',
+          source: 'indexed',
           window,
           data: seedDebtSnapshots(
             nowMs,
