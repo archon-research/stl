@@ -997,6 +997,15 @@ Most of these are also spelled out in [CLAUDE.md](./CLAUDE.md) and
    - **PR 2** adds the `k8s/base/...` Deployment plus overlay wiring that
      references it.
 
+   The same race applies when a **new Deployment reuses an existing image**
+   whose *content* changes in the same PR (a new entry point added to
+   `python-api`, say): the stamp bot writes whichever build finished last, so
+   ArgoCD can start the new Deployment on an image built *before* the merge,
+   and it crash-loops on the missing module until the merge commit's own
+   build is stamped (VEC-272's core-model-runner hit exactly this). The
+   split is the same: land the image-content change first, register the
+   Deployment in a follow-up PR.
+
    This split is a recommendation, not an enforced rule. A combined PR still
    works: `build-push-staging` builds the new image in the same run before
    `update-staging` stamps it, and the 900s staging health wait tolerates the

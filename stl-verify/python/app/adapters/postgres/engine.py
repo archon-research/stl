@@ -27,7 +27,7 @@ def create_db_engine(
     max_overflow: int | None = None,
     pool_timeout: float | None = None,
     pool_recycle: int | None = None,
-    statement_cache_size: int | None = None,
+    statement_cache_size: int = 0,
 ) -> AsyncEngine:
     """The one engine factory for every process, keyed by an explicit URL.
 
@@ -37,7 +37,11 @@ def create_db_engine(
     silently fall back to .env.default's localhost URL) and keep SQLAlchemy's
     pool defaults — a tick holds few connections. pool_pre_ping is
     unconditional: worker ticks can be hours apart, far past the pooler's idle
-    timeout. The caller owns the engine's lifecycle.
+    timeout. Prepared-statement caching is off unless a caller opts in: every
+    staging/prod DATABASE_URL is the transaction-mode TigerData pooler, where
+    a cached statement can execute on a backend that never prepared it (why:
+    ``Settings.db_statement_cache_size``). The caller owns the engine's
+    lifecycle.
     """
     pool_kwargs: dict = {}
     if pool_size is not None:
@@ -48,13 +52,16 @@ def create_db_engine(
         pool_kwargs["pool_timeout"] = pool_timeout
     if pool_recycle is not None:
         pool_kwargs["pool_recycle"] = pool_recycle
-    if statement_cache_size is not None:
+    engine = create_async_engine(
+        url,
+        pool_pre_ping=True,
         # One value feeds both caches; see Settings.db_statement_cache_size.
-        pool_kwargs["connect_args"] = {
+        connect_args={
             "statement_cache_size": statement_cache_size,
             "prepared_statement_cache_size": statement_cache_size,
-        }
-    engine = create_async_engine(url, pool_pre_ping=True, **pool_kwargs)
+        },
+        **pool_kwargs,
+    )
     event.listen(engine.sync_engine, "handle_error", mark_stale_transaction_state_as_disconnect)
     return engine
 

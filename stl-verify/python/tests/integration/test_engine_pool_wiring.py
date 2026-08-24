@@ -87,13 +87,14 @@ def test_app_engine_invalidates_connections_with_stale_transaction_state(started
 
 
 async def test_engine_connections_carry_no_statement_cache(async_db_url: str) -> None:
-    """Both prepared-statement caches must be off on the wire, not just in config
-    (why: ``Settings.db_statement_cache_size``). Asserted against a live
-    connection because the two knobs are plain connect kwargs — a typo in
+    """Both prepared-statement caches must be off on the wire by default, not
+    just in config (why: ``Settings.db_statement_cache_size``). Pinned on the
+    bare factory call so a worker that passes only a URL — the CORE model
+    runner on the transaction-mode pooler — stays safe. Asserted against a
+    live connection because the two knobs are plain connect kwargs — a typo in
     either name would configure nothing and fail only in production.
     """
-    settings = Settings.model_validate({"database_url": SecretStr(async_db_url)})
-    engine = create_db_engine(settings.async_database_url, statement_cache_size=settings.db_statement_cache_size)
+    engine = create_db_engine(async_db_url)
     try:
         async with engine.connect() as connection:
             raw = await connection.get_raw_connection()
