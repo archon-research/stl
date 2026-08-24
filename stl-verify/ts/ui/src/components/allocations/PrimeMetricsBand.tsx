@@ -139,6 +139,7 @@ function TotalAllocationCard({
     <SummaryMetric
       className={metricsCardClassName}
       label="Total allocation"
+      info="The allocation rows below, added up: the USD value of every position the prime holds. In the composite view, rows only Sky reports are listed but not summed, since they can describe the same money as an STL row."
       value={
         isFiltered
           ? `${formatUsdValue(summary.totalUsd)} / ${formatUsdValue(overallSummary.totalUsd)}`
@@ -209,6 +210,7 @@ function ExposureCard({
     <SummaryMetric
       className={metricsCardClassName}
       label="Exposure"
+      info="The prime's total USD exposure as the risk framework reports it — one top-down figure, not a row sum. Sky's figure is preferred where reported, so it can differ from Total allocation in coverage and observation time."
       value={formatUsdValue(exposure.value)}
       detail={
         <div className={metricDetailClassName}>
@@ -254,6 +256,7 @@ function TotalRiskCapitalCard({
     <SummaryMetric
       className={metricsCardClassName}
       label="Total risk capital"
+      info="The treasury USDS held in the prime's SubProxy — the capital available to absorb losses. The dashed line marks the required risk capital it is measured against."
       value={formatUsdValue(total.value ?? '0')}
       detail={
         <div className={metricDetailClassName}>
@@ -291,6 +294,7 @@ function PrimeCollateralCard({
     <SummaryMetric
       className={metricsCardClassName}
       label="Prime collateral"
+      info="The asset value Sky's monitor reports standing behind the prime — the upstream PRIME COLLATERAL figure. A daily feed, carried forward between observations."
       // The value is a reduce from zero, so "not fetched yet" and "holds
       // nothing" are the same number until the fetch lands.
       value={isLoading ? 'Loading...' : formatUsdValue(usd)}
@@ -343,6 +347,7 @@ function EncumbranceCard({
     <SummaryMetric
       className={metricsCardClassName}
       label="Encumbrance ratio"
+      info="Required risk capital as a share of total risk capital. The Sky Atlas defines at or above 100% as a Low Severity Breach and above 103% as a High Severity Breach; 80–100% is flagged At risk here as an early warning."
       value={
         <>
           {formatRatioPercent(ratio)}
@@ -366,11 +371,11 @@ function EncumbranceCard({
       }
       detail={
         <div className={metricDetailClassName}>
-          {caption === null ? null : (
-            <div className={cx(css({ fontSize: 'sm', color: 'text.muted' }))}>
-              {caption}
-            </div>
-          )}
+          {/* Rendered even when empty: siblings all carry a caption line, and
+              dropping it floated this card's chart above their baseline. */}
+          <div className={css({ fontSize: 'sm', color: 'text.muted' })}>
+            {caption ?? '\u00A0'}
+          </div>
           <MetricCardTrend
             chart={chart}
             isLoading={isChartsLoading}
@@ -428,6 +433,7 @@ function PrimeDebtCard({
     <SummaryMetric
       className={metricsCardClassName}
       label="Prime debt exposure"
+      info="What the prime has drawn against its allocator vault: the minted debt for its ilk, in USDS terms. The indexed figure is read from chain state; the reference figure is Sky's own reported debt."
       value={isLoading ? 'Loading...' : formatWadValue(wad)}
       detail={
         isLoading ? (

@@ -1,4 +1,4 @@
-import { StatTile } from '@archon-research/design-system';
+import { InfoPopover, StatTile } from '@archon-research/design-system';
 import type { ReactNode } from 'react';
 
 import { css } from '#styled-system/css';
@@ -8,6 +8,8 @@ type SummaryMetricProps = {
   value: ReactNode;
   detail?: ReactNode;
   className?: string;
+  /** Opens a click-through explanation of the metric beside the label. */
+  info?: ReactNode;
 };
 
 // The `statTile` value slot is a wrap-friendly inline-flex row now, so `value`
@@ -32,12 +34,30 @@ export function SummaryMetric({
   value,
   detail,
   className,
+  info,
 }: SummaryMetricProps) {
   return (
     <StatTile
       className={className}
       labelCase="upper"
-      label={label}
+      label={
+        info === undefined ? (
+          label
+        ) : (
+          <span
+            className={css({
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '1',
+            })}
+          >
+            {label}
+            <InfoPopover label={`About ${label}`} placement="top">
+              {info}
+            </InfoPopover>
+          </span>
+        )
+      }
       value={value}
       sub={
         // Falsy, not nullish: `''` and `0` must render nothing, or the tile gains
