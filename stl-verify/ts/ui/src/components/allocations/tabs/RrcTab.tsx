@@ -81,10 +81,28 @@ function referenceFigures(
  */
 const RRC_BAND_BOUNDS: readonly [number, number] = [1_000, 1_000_000];
 
+// The same role scale the old status pill drew from (`Badge`'s green/amber/red
+// palettes), so the meter and every other status hue in the app stay one
+// vocabulary: the value's band is `solid`, the others its `subtle` tint.
 const RRC_BANDS = [
-  { tone: 'green', label: 'Contained', fill: css({ bg: 'green.500' }) },
-  { tone: 'yellow', label: 'Monitor', fill: css({ bg: 'amber.400' }) },
-  { tone: 'red', label: 'Escalating', fill: css({ bg: 'red.500' }) },
+  {
+    tone: 'green',
+    label: 'Contained',
+    activeFill: css({ bg: 'green.solid.bg' }),
+    idleFill: css({ bg: 'green.subtle.bg' }),
+  },
+  {
+    tone: 'yellow',
+    label: 'Monitor',
+    activeFill: css({ bg: 'amber.solid.bg' }),
+    idleFill: css({ bg: 'amber.subtle.bg' }),
+  },
+  {
+    tone: 'red',
+    label: 'Escalating',
+    activeFill: css({ bg: 'red.solid.bg' }),
+    idleFill: css({ bg: 'red.subtle.bg' }),
+  },
 ] as const;
 
 /**
@@ -118,16 +136,56 @@ const meterMarkerClassName = css({
   borderBottomColor: 'text.strong',
 });
 
+const meterTickClassName = css({
+  position: 'absolute',
+  bottom: '100%',
+  transform: 'translateX(-50%)',
+  display: 'grid',
+  justifyItems: 'center',
+  rowGap: '0.5',
+  pb: '0.5',
+  fontSize: '2xs',
+  color: 'text.muted',
+  whiteSpace: 'nowrap',
+});
+
+const meterTickLineClassName = css({
+  width: '1px',
+  height: '1.5',
+  bg: 'border.default',
+});
+
 function RrcBandMeter({ valueUsd }: { valueUsd: number }) {
   const tone = getUsdTone(valueUsd);
   const activeIndex = RRC_BANDS.findIndex((band) => band.tone === tone);
   const valueText = formatUsdValue(valueUsd);
 
   return (
-    <div>
+    <div
+      className={css({
+        borderRadius: 'md',
+        borderStyle: 'solid',
+        borderWidth: '1px',
+        borderColor: 'border.subtle',
+        p: '5',
+      })}
+    >
       {/* The painted bands are decoration for the caption below, which carries
           the value and (screen-reader-only) the band it falls in. */}
-      <div aria-hidden className={css({ position: 'relative' })}>
+      <div aria-hidden className={css({ position: 'relative', mt: '5' })}>
+        {/* Threshold ticks at the band edges, so the labels are calibrated. */}
+        {RRC_BAND_BOUNDS.map((bound, index) => (
+          <div
+            key={bound}
+            className={meterTickClassName}
+            style={{
+              insetInlineStart: `${((index + 1) / RRC_BANDS.length) * 100}%`,
+            }}
+          >
+            <span>{formatUsdValue(bound)}</span>
+            <span className={meterTickLineClassName} />
+          </div>
+        ))}
         <div className={flex({ gap: '0.5' })}>
           {RRC_BANDS.map((band, index) => (
             <div
@@ -138,8 +196,7 @@ function RrcBandMeter({ valueUsd }: { valueUsd: number }) {
                 index === RRC_BANDS.length - 1
                   ? css({ borderRightRadius: 'full' })
                   : undefined,
-                band.fill,
-                index === activeIndex ? undefined : css({ opacity: 0.3 }),
+                index === activeIndex ? band.activeFill : band.idleFill,
               )}
             />
           ))}
@@ -454,6 +511,12 @@ export function RrcTab({
       {!errorMessage && rrc && rrc.results.length > 0 ? (
         <div
           className={css({
+            borderRadius: 'md',
+            borderStyle: 'solid',
+            borderWidth: '1px',
+            borderColor: 'border.subtle',
+            bg: 'surface.subtle',
+            p: '4',
             display: 'grid',
             gap: '3',
           })}
