@@ -375,15 +375,19 @@ data:
   ORDERBOOK_INTERVAL: "5s"
   ENVIRONMENT: "sentinelstaging"
 ---
-# Kraken uses slash-separated pairs with its own asset names (XBT, not BTC);
-# XBT/USD and ETH/USD verified live against the Kraken AssetPairs "wsname" field.
+# Kraken uses slash-separated pairs with its own asset names (XBT, not BTC), so
+# each entry is the exact "wsname" string from the AssetPairs API rather than one
+# built by convention. All seven verified live on 2026-08-24 and USD-quoted, so
+# the books merge with Coinbase's without a basis adjustment. TBTC/USD is listed
+# but excluded: 621bps spread and no resting size within 2% of mid. The model's
+# remaining eight tokens are not listed on Kraken at all.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: cex-orderbook-indexer-kraken-config
 data:
   EXCHANGE: "kraken"
-  SYMBOLS: "XBT/USD,ETH/USD"
+  SYMBOLS: "XBT/USD,ETH/USD,XRP/USD,SOL/USD,HYPE/USD,JITOSOL/USD,WBTC/USD"
   ORDERBOOK_DEPTH: "100"
   ORDERBOOK_INTERVAL: "5s"
   ENVIRONMENT: "sentinelstaging"
