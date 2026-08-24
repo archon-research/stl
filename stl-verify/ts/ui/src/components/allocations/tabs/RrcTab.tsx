@@ -10,12 +10,10 @@ import { flex } from '#styled-system/patterns';
 
 import { getRrc } from '../../../lib/api';
 import {
-  type UsdTone,
   formatPercentValue,
   formatTokenAmount,
   formatUsdValue,
   getUsdTone,
-  parseNumericValue,
 } from '../../../lib/dashboard';
 import { isAbortError, toErrorMessage } from '../../../lib/errors';
 import { logging } from '../../../lib/logging';
@@ -48,15 +46,6 @@ const MODEL_LABELS: Record<string, string> = {
   suraf: 'SURAF',
   gap_sweep: 'Gap sweep',
   core_model: 'CORE',
-};
-
-// A map of finished class names rather than a tone-to-token-path helper: see
-// `lib/activity.tsx` for why Panda cannot extract the latter.
-const TONE_VALUE_COLOR_CLASS: Record<UsdTone, string> = {
-  green: css({ color: 'text.success' }),
-  yellow: css({ color: 'text.warning' }),
-  red: css({ color: 'text.critical' }),
-  neutral: css({ color: 'text.muted' }),
 };
 
 type ReferenceFigures = { crrPct: string | null; rrcUsd: string | null };
@@ -245,10 +234,11 @@ export function RrcTab({
 
   const selectedModel = riskCapitalEntry?.model ?? null;
   const reference = showsReference ? referenceFigures(riskCapitalEntry) : null;
+  // Sky's figure is the one every display prefers when it exists, so its row
+  // carries the badge; a model row is "selected" only when Sky reports nothing.
+  const skySelected = reference !== null;
 
   const tone = getUsdTone(rrc?.max_rrc_usd);
-  const maxRrcValue = parseNumericValue(rrc?.max_rrc_usd) ?? 0;
-  const hasRiskCapital = maxRrcValue > 0;
 
   const statusLabel = useMemo(() => {
     switch (tone) {
@@ -404,64 +394,6 @@ export function RrcTab({
         </div>
       ) : null}
 
-      {!errorMessage ? (
-        <div
-          className={css({
-            borderRadius: 'md',
-            borderStyle: 'solid',
-            borderWidth: '1px',
-            borderColor: 'border.subtle',
-            bg: 'surface.default',
-            p: '5',
-          })}
-        >
-          <p
-            className={css({
-              m: 0,
-              fontSize: 'xs',
-              textTransform: 'uppercase',
-              letterSpacing: '0.16em',
-              color: 'text.muted',
-            })}
-          >
-            Max required risk capital across models
-          </p>
-          <p
-            className={cx(
-              css({
-                m: 0,
-                mt: '3',
-                fontSize: { base: '3xl', md: '4xl' },
-                fontWeight: 'semibold',
-              }),
-              TONE_VALUE_COLOR_CLASS[tone],
-            )}
-          >
-            {rrc ? formatUsdValue(rrc.max_rrc_usd) : '—'}
-          </p>
-          {isLoading && !rrc ? (
-            <div className={css({ mt: '3' })}>
-              <SkeletonStack count={2} itemHeight={14} />
-            </div>
-          ) : (
-            <p
-              className={css({
-                m: 0,
-                mt: '2',
-                fontSize: 'sm',
-                color: 'text.muted',
-              })}
-            >
-              {rrc
-                ? hasRiskCapital
-                  ? `Max comparable capital ratio: ${formatPercentValue(rrc.max_crr_pct, 2)}.`
-                  : 'Models report no required risk capital at default stress.'
-                : 'Pick a prime and receipt token to compute required risk capital.'}
-            </p>
-          )}
-        </div>
-      ) : null}
-
       {!errorMessage && rrc && rrc.results.length > 0 ? (
         <div
           className={css({
@@ -498,7 +430,7 @@ export function RrcTab({
             {rrc.results.map((result) => (
               <ResultRow
                 key={result.risk_model}
-                isSelected={result.risk_model === selectedModel}
+                isSelected={!skySelected && result.risk_model === selectedModel}
                 label={MODEL_LABELS[result.risk_model] ?? result.risk_model}
                 value={`${formatUsdValue(result.rrc_usd)} · CRR ${formatPercentValue(result.comparable_crr_pct, 2)}`}
               />
@@ -507,6 +439,7 @@ export function RrcTab({
                 outputs, and Sky's figures disagree with STL's by design. */}
             {reference ? (
               <ResultRow
+                isSelected={skySelected}
                 label="Sky published figure"
                 value={`${formatUsdValue(reference.rrcUsd)} · CRR ${formatPercentValue(reference.crrPct, 2)}`}
               />
