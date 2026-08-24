@@ -2,9 +2,10 @@
 //
 // Two lifecycles are supported. Schedule-driven jobs use RunCronjob, which
 // creates a Temporal schedule and runs the generic cronjobWorkflow on it.
-// Hand-triggered jobs use RunWorker (see ondemand.go), which creates no schedule
-// and registers a workflow that accepts parameters — the shape a backfill needs,
-// because its range comes from whoever starts the run.
+// Hand-started jobs use RunWorker (see ondemand.go), which creates no schedule
+// and registers the caller's own workflow — with parameters, the shape a
+// backfill needs because its range comes from whoever starts the run, or without
+// any, via RegisterRunner, for a one-shot job that derives its own scope.
 //
 // To create a new cronjob, define a CronjobConfig and call RunCronjob.
 // Only Name, IntervalDefault, and Setup are required:
@@ -75,12 +76,22 @@ type CronjobConfig struct {
 	// external rate limit do not all fire at the same wall-clock instant.
 	IntervalOffsetEnv string
 
+	// ActivityTimeouts overrides how long one tick may run (see the type). The
+	// zero value keeps the defaults every existing cronjob uses.
+	ActivityTimeouts ActivityTimeouts
+
 	// OpenDatabase opens a database connection pool. Required.
 	OpenDatabase func(ctx context.Context) (*pgxpool.Pool, error)
 
 	// Setup returns a Runner (or RunnerFunc) for the cronjob's business logic.
 	// It will be wrapped in Temporal activities automatically.
 	Setup func(ctx context.Context, deps Dependencies) (Runner, error)
+
+	// Progress, when set, is the heartbeat-details store the runner records
+	// through — the SAME instance Setup hands the runner, because the liveness
+	// heartbeat re-sends what it holds rather than erasing it with a bare ping.
+	// Leave nil for a cronjob with no resumable progress.
+	Progress ProgressHeartbeater
 }
 
 func (c CronjobConfig) validate() error {
@@ -123,7 +134,7 @@ func RunCronjob(ctx context.Context, meta BuildMeta, cfg CronjobConfig) error {
 		return fmt.Errorf("creating cronjob metrics: %w", err)
 	}
 
-	activities, err := newCronjobActivities(runner, metrics)
+	activities, err := newCronjobActivities(runner, metrics, cfg.ActivityTimeouts.Heartbeat, cfg.Progress)
 	if err != nil {
 		return fmt.Errorf("creating cronjob activities: %w", err)
 	}
@@ -290,11 +301,11 @@ func waitForServer(ctx context.Context, c client.Client, logger *slog.Logger) er
 	}
 }
 
-// buildScheduleSpec resolves the interval and optional offset for a cronjob into
-// a Temporal schedule spec. getenv is injected so the resolution is unit-testable.
-// A non-empty interval env overrides IntervalDefault; an empty or unset offset env
-// leaves the offset at zero (fire on the interval boundary).
-func buildScheduleSpec(cfg CronjobConfig, getenv func(string) string) (client.ScheduleSpec, error) {
+// buildScheduleInterval resolves the interval and optional offset for a cronjob.
+// getenv is injected so the resolution is unit-testable. A non-empty interval env
+// overrides IntervalDefault; an empty or unset offset env leaves the offset at
+// zero (fire on the interval boundary).
+func buildScheduleInterval(cfg CronjobConfig, getenv func(string) string) (client.ScheduleIntervalSpec, error) {
 	interval := cfg.IntervalDefault
 	intervalSource := "IntervalDefault"
 	if cfg.IntervalEnv != "" {
@@ -305,7 +316,7 @@ func buildScheduleSpec(cfg CronjobConfig, getenv func(string) string) (client.Sc
 	}
 	every, err := time.ParseDuration(interval)
 	if err != nil {
-		return client.ScheduleSpec{}, fmt.Errorf("parsing interval from %s (%q): %w", intervalSource, interval, err)
+		return client.ScheduleIntervalSpec{}, fmt.Errorf("parsing interval from %s (%q): %w", intervalSource, interval, err)
 	}
 
 	var offset time.Duration
@@ -313,21 +324,20 @@ func buildScheduleSpec(cfg CronjobConfig, getenv func(string) string) (client.Sc
 		if v := getenv(cfg.IntervalOffsetEnv); v != "" {
 			offset, err = time.ParseDuration(v)
 			if err != nil {
-				return client.ScheduleSpec{}, fmt.Errorf("parsing %s %q: %w", cfg.IntervalOffsetEnv, v, err)
+				return client.ScheduleIntervalSpec{}, fmt.Errorf("parsing %s %q: %w", cfg.IntervalOffsetEnv, v, err)
 			}
 		}
 	}
 
-	return client.ScheduleSpec{
-		Intervals: []client.ScheduleIntervalSpec{{Every: every, Offset: offset}},
-	}, nil
+	return client.ScheduleIntervalSpec{Every: every, Offset: offset}, nil
 }
 
 func ensureSchedule(ctx context.Context, c client.Client, logger *slog.Logger, taskQueue string, cfg CronjobConfig) error {
-	spec, err := buildScheduleSpec(cfg, os.Getenv)
+	interval, err := buildScheduleInterval(cfg, os.Getenv)
 	if err != nil {
 		return fmt.Errorf("building schedule spec for %q: %w", cfg.Name, err)
 	}
+	spec := client.ScheduleSpec{Intervals: []client.ScheduleIntervalSpec{interval}}
 
 	scheduleID := cfg.Name
 	workflowID := "scheduled-" + cfg.Name
@@ -343,10 +353,11 @@ func ensureSchedule(ctx context.Context, c client.Client, logger *slog.Logger, t
 			Workflow:  cronjobWorkflow,
 			ID:        workflowID,
 			TaskQueue: taskQueue,
+			Args:      []any{cfg.ActivityTimeouts},
 		},
 	})
 	if err == nil {
-		logger.Info("schedule created", "scheduleID", scheduleID, "spec", spec.Intervals[0])
+		logger.Info("schedule created", "scheduleID", scheduleID, "interval", interval.Every, "offset", interval.Offset)
 		return nil
 	}
 
@@ -360,7 +371,7 @@ func ensureSchedule(ctx context.Context, c client.Client, logger *slog.Logger, t
 		// worker: log it and start against the existing schedule. The offset is
 		// best-effort defence in depth; the semantic skip fix is what actually
 		// stops the alert noise, and the next successful startup reconciles again.
-		if reconcileErr := reconcileScheduleSpec(ctx, c, logger, scheduleID, spec); reconcileErr != nil {
+		if reconcileErr := reconcileScheduleSpec(ctx, c, logger, scheduleID, interval); reconcileErr != nil {
 			logger.Warn("schedule reconcile failed; starting with the existing schedule",
 				"scheduleID", scheduleID, "error", reconcileErr)
 		}
@@ -371,17 +382,18 @@ func ensureSchedule(ctx context.Context, c client.Client, logger *slog.Logger, t
 
 // reconcileScheduleSpec updates an existing schedule's spec in place. The action
 // (workflow + task queue) is left untouched; only the timing spec is reconciled.
-func reconcileScheduleSpec(ctx context.Context, c client.Client, logger *slog.Logger, scheduleID string, want client.ScheduleSpec) error {
+func reconcileScheduleSpec(ctx context.Context, c client.Client, logger *slog.Logger, scheduleID string, want client.ScheduleIntervalSpec) error {
 	handle := c.ScheduleClient().GetHandle(ctx, scheduleID)
+	spec := client.ScheduleSpec{Intervals: []client.ScheduleIntervalSpec{want}}
 	err := handle.Update(ctx, client.ScheduleUpdateOptions{
 		DoUpdate: func(in client.ScheduleUpdateInput) (*client.ScheduleUpdate, error) {
-			return applyScheduleSpecUpdate(in, want), nil
+			return applyScheduleSpecUpdate(in, spec), nil
 		},
 	})
 	if err != nil {
 		return fmt.Errorf("reconciling schedule %q: %w", scheduleID, err)
 	}
-	logger.Info("schedule reconciled", "scheduleID", scheduleID, "spec", want.Intervals[0])
+	logger.Info("schedule reconciled", "scheduleID", scheduleID, "interval", want.Every, "offset", want.Offset)
 	return nil
 }
 

@@ -7,6 +7,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.temporal.io/sdk/interceptor"
 	"go.temporal.io/sdk/worker"
+	"go.temporal.io/sdk/workflow"
 )
 
 // WorkerConfig defines an on-demand Temporal worker: one that registers its
@@ -53,6 +54,64 @@ func (c WorkerConfig) validate() error {
 		return fmt.Errorf("WorkerConfig.Register is required")
 	}
 	return nil
+}
+
+// RunnerJob is an on-demand job that takes no parameters: a one-shot repair or
+// migration an operator starts by hand, whose scope the run derives for itself.
+//
+// Such a job needs less than WorkerConfig.Register's full freedom, and writing a
+// workflow per job would restate the retry policy, the timeouts and the
+// progress-preserving heartbeat at every site. RegisterRunner registers it
+// against the same activity a scheduled cronjob runs on.
+type RunnerJob struct {
+	// WorkflowType is the name an operator passes to `--type` (the UI's
+	// "Workflow Type" box). Explicit, so a Go rename cannot invalidate a runbook.
+	WorkflowType string
+
+	// Runner is the business logic — the same interface a cronjob implements.
+	Runner Runner
+
+	// Timeouts bounds one execution. Unlike a scheduled job's, these are bound
+	// at registration rather than travelling as workflow input: there is no
+	// schedule action to carry them, and an operator must not have to type them
+	// to start a run. A redeploy is then enough to change them, where a
+	// schedule's action bakes them in until the schedule is deleted.
+	Timeouts ActivityTimeouts
+
+	// Progress, when set, is the heartbeat-details store the runner records
+	// through — the SAME instance the runner holds, because the liveness
+	// heartbeat re-sends what it holds rather than erasing it with a bare ping.
+	Progress ProgressHeartbeater
+}
+
+// RegisterRunner registers job as a workflow that accepts no input, plus the
+// shared activity that executes its Runner. Call it from WorkerConfig.Register.
+//
+// The activity gets no metrics recorder on purpose: RunWorker's interceptor
+// already records one cronjob.runs.total per activity execution, so a second
+// recorder here would double every count.
+func RegisterRunner(r worker.Registry, job RunnerJob) error {
+	if job.WorkflowType == "" {
+		return fmt.Errorf("RunnerJob.WorkflowType is required")
+	}
+	// A job that bothers to record resumable progress runs long, and with no
+	// heartbeat timeout a dead worker goes undetected until StartToClose.
+	if job.Progress != nil && job.Timeouts.Heartbeat <= 0 {
+		return fmt.Errorf("RunnerJob.Progress needs a non-zero Timeouts.Heartbeat, or a worker that dies mid-run is only noticed when StartToClose expires")
+	}
+	activities, err := newCronjobActivities(job.Runner, nil, job.Timeouts.Heartbeat, job.Progress)
+	if err != nil {
+		return fmt.Errorf("creating the runner activity: %w", err)
+	}
+	r.RegisterWorkflowWithOptions(runnerWorkflow(job.Timeouts), workflow.RegisterOptions{Name: job.WorkflowType})
+	r.RegisterActivity(activities)
+	return nil
+}
+
+// runnerWorkflow is cronjobWorkflow with its bounds closed over instead of
+// arriving as an argument, so a run starts with no input payload at all.
+func runnerWorkflow(timeouts ActivityTimeouts) func(workflow.Context) error {
+	return func(ctx workflow.Context) error { return cronjobWorkflow(ctx, timeouts) }
 }
 
 // RunWorker runs an on-demand Temporal worker until ctx is cancelled. It shares

@@ -27,13 +27,14 @@
 # template's `Cluster:` header is populated. `namespace` is a static rule label
 # (mimir-rules-sync lint forbids `cluster`/`env` as static labels but allows it).
 #
-# Three services are EXCLUDED by service_name: maple-graphql-indexer, which has
-# richer dedicated rules in vector-indexers.yaml (VEC-320), and
-# offchain-price-backfill and reference-capital-backfill, which are on-demand —
-# see VectorCronjobAllRunsFailing
-# for why "no successes in an hour" is its healthy state. Every other cronjob,
-# including any added later, is covered automatically; on-demand workers are
-# covered by VectorCronjobRunFailing and VectorOnDemandWorkerDown instead.
+# Five services are EXCLUDED by service_name: maple-graphql-indexer, which has
+# richer dedicated rules in vector-indexers.yaml (VEC-320), and the four
+# on-demand jobs — offchain-price-backfill, reference-capital-backfill,
+# morpho-vault-backfill and morpho-v2-bootstrap, none of which carries a schedule — see
+# VectorCronjobAllRunsFailing for why "no successes in an hour" is their healthy
+# state. Every other cronjob, including any added later, is covered
+# automatically; on-demand workers are covered by VectorCronjobRunFailing and
+# VectorOnDemandWorkerDown instead.
 #
 # Severity → routing (per the alerting routing spec):
 #   critical       → pages, prod #at_stl_prod_alerts / staging
@@ -91,13 +92,15 @@ groups:
         # Errors > 0 AND zero successes over 1h => the job is consistently
         # failing, not flapping.
         #
-        # On-demand jobs (temporal.RunWorker — offchain-price-backfill,
-        # reference-capital-backfill) are excluded:
-        # they run only when a human triggers them, so "zero successes in the last
-        # hour" is their normal healthy state and this rule's premise does not hold.
-        # One deliberately-failed manual run would otherwise page the operator who
-        # just triggered it. They still emit cronjob_runs_total and are still covered
-        # by the VectorCronjobRunFailing warning above, plus VectorOnDemandWorkerDown.
+        # On-demand jobs (temporal.RunWorker: offchain-price-backfill,
+        # reference-capital-backfill, morpho-vault-backfill,
+        # morpho-v2-bootstrap) are excluded: they run only
+        # when a human starts them, so "zero successes in the last hour" is their
+        # healthy state and a single failed run is by definition
+        # errors=1/successes=0, which would page critical for a run the operator
+        # is already watching. They still emit
+        # cronjob_runs_total and are covered by the VectorCronjobRunFailing
+        # warning above (the right severity) plus VectorOnDemandWorkerDown.
         #
         # The 1h window spans >=1 cycle for even the
         # slowest cronjob (watcher-data-validator, 1h) and many cycles for the
@@ -111,6 +114,8 @@ groups:
                 service_name!="maple-graphql-indexer",
                 service_name!="offchain-price-backfill",
                 service_name!="reference-capital-backfill",
+                service_name!="morpho-v2-bootstrap",
+                service_name!="morpho-vault-backfill",
                 k8s_namespace_name="vector"
               }[1h])
             ) > 0
@@ -123,6 +128,8 @@ groups:
                 service_name!="maple-graphql-indexer",
                 service_name!="offchain-price-backfill",
                 service_name!="reference-capital-backfill",
+                service_name!="morpho-v2-bootstrap",
+                service_name!="morpho-vault-backfill",
                 k8s_namespace_name="vector"
               }[1h])
             ) == 0
@@ -164,11 +171,11 @@ groups:
         #
         # On-demand workers (temporal.RunWorker) are deliberately NOT listed here.
         # This rule pages because a dead scheduled worker means ticks are firing
-        # into the void and data is going stale. An on-demand worker has no
-        # schedule, so nothing is missed while it is down — only the ability to
-        # start a new run. Paging for that would invert the severity, since an
-        # actually-failing backfill reaches only VectorCronjobRunFailing (warning).
-        # They are covered by VectorOnDemandWorkerDown below instead.
+        # into the void and data is going stale. They carry no schedule, so
+        # nothing is missed while one is down — only the ability to start a new
+        # run. Paging for that would invert the severity, since an actually-failing
+        # run reaches only VectorCronjobRunFailing (warning). They are covered by
+        # VectorOnDemandWorkerDown below instead.
         expr: |
           (
             max by (cluster, deployment) (
@@ -209,8 +216,8 @@ groups:
         # The availability rule for temporal.RunWorker jobs, split from
         # VectorCronjobWorkerDown because the impact is categorically different:
         # these carry no schedule, so a dead pod misses no ticks and produces no
-        # stale data. The only consequence is that a backfill cannot be STARTED,
-        # which is worth a slack message and not a 3am page.
+        # stale data. The only consequence is that a run cannot be STARTED, which
+        # is worth a slack message and not a 3am page.
         #
         # Longer `for` than the scheduled rule for the same reason — a rollout or
         # a brief eviction on an idle worker is not worth waking anyone for.
@@ -219,7 +226,7 @@ groups:
             max by (cluster, deployment) (
               kube_deployment_status_replicas_available{
                 namespace="vector",
-                deployment=~"offchain-price-backfill|reference-capital-backfill"
+                deployment=~"offchain-price-backfill|reference-capital-backfill|morpho-v2-bootstrap|morpho-vault-backfill"
               }
             ) < 1
           )
@@ -227,7 +234,7 @@ groups:
             max by (cluster, deployment) (
               kube_deployment_spec_replicas{
                 namespace="vector",
-                deployment=~"offchain-price-backfill|reference-capital-backfill"
+                deployment=~"offchain-price-backfill|reference-capital-backfill|morpho-v2-bootstrap|morpho-vault-backfill"
               }
             ) > 0
           )

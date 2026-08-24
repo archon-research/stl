@@ -472,9 +472,9 @@ groups:
   #     vault_v1 | unknown = probed and unclassifiable | unprobed = no probe, the
   #     shape a de-registration takes); observed_via mirrors the DB column
   #     (add_adapter_event | remove_adapter_event | allocation_event |
-  #     vault_discovery | bootstrap_seed). bootstrap_seed has no writer yet — the
-  #     Temporal bootstrap that emits it lands in the stacked #640 — so that label
-  #     value is absent from these series until it merges.
+  #     vault_discovery | bootstrap_seed). bootstrap_seed is the morpho-v2-bootstrap
+  #     job's closing enumeration, which only ASSERTS what the same run's replay
+  #     already recorded, so a healthy run appends ~nothing under that label.
   #   morpho_v2_snapshots_written_total{snapshot_type}
   #     one sample per COMMITTED event-driven snapshot
   #     (adapter_state | vault_cap | vault_fee).
@@ -517,9 +517,9 @@ groups:
         # AddAdapter fired 5 times and RemoveAdapter 0 times across ALL adapter
         # types, so the live registration path cannot produce more than ~1/day
         # even if every single adapter were unclassifiable. The only bursty source
-        # is observed_via="vault_discovery" (and its bootstrap_seed twin, which
-        # arrives with the Temporal bootstrap in the stacked #640 and emits nothing
-        # until that merges), which seeds a newly found vault's whole set in one
+        # is observed_via="vault_discovery" (its bootstrap_seed twin appends only
+        # what the bootstrap's own replay did not already record, ~nothing on a
+        # healthy run), which seeds a newly found vault's whole set in one
         # transaction (the
         # 7+/8min above). 25 per 24h sits ~3x above that observed burst and ~25x
         # above the live path, so it can only mean Morpho shipped an adapter
