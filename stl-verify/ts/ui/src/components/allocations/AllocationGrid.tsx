@@ -16,7 +16,6 @@ import { flex } from '#styled-system/patterns';
 
 import { getActionColorClass, getActionIcon } from '../../lib/activity';
 import {
-  type ChainLabelLookup,
   encumbranceSeverity,
   formatDateTime,
   formatFreshnessLabel,
@@ -26,10 +25,11 @@ import {
   formatUsdValue,
   getAllocationKey,
   getCategoryLabel,
-  getExplorerUrl,
   getChainLabel,
+  getExplorerUrl,
   getProtocolLabel,
   parseNumericValue,
+  type ChainLabelLookup,
 } from '../../lib/dashboard';
 import { preferReference, useProvenanceView } from '../../lib/provenance';
 import type {
@@ -558,7 +558,12 @@ function riskProvenanceTitle(risk: AllocationGridRow['risk']): string {
   if (!risk.fromReference) {
     return 'STL model figure';
   }
-  const skyExposure = parseNumericValue(risk.entry?.exposure_usd);
+  const skyExposure = parseNumericValue(
+    preferReference(
+      risk.entry?.reference_exposure_usd,
+      risk.entry?.exposure_usd,
+    ),
+  );
   return skyExposure === null
     ? "Sky's published figure"
     : `Sky's published figure, against Sky's exposure of ${formatUsdValue(skyExposure)}`;
@@ -822,7 +827,7 @@ function AllocationRatioCell({
 
   return (
     <p
-      title={title}
+      title={value === null ? undefined : title}
       className={css({
         m: 0,
         fontSize: 'sm',
@@ -1085,6 +1090,9 @@ export function AllocationGrid({
   // chart's fallback value, so they cannot end up describing different
   // provenances — a Sky figure over a breach threshold beside STL's "within the
   // 100% breach level" would read as a bug in the threshold.
+  // The footnote describes what is on screen; narrowing can put a different
+  // provenance there than the one fetched (`source` stays 'both' after it).
+  const { provenance: shownProvenance } = useProvenanceView();
   const skyEncumbranceRatio = riskCapital?.reference_prime_encumbrance_ratio;
   const encumbranceRatio = parseNumericValue(
     preferReference(skyEncumbranceRatio, riskCapital?.prime_encumbrance_ratio),
@@ -1101,24 +1109,17 @@ export function AllocationGrid({
   // capital, so it cannot be computed without a total. And where chains go
   // unserved the numerator is bounded, making the ratio a floor rather than a
   // measurement — on a risk surface that difference matters.
+  // The band itself renders as a chip beside the value; this line carries only
+  // what the chip cannot say — why a figure is absent, or that a bounded
+  // numerator makes the ratio a floor rather than a measurement.
   const encumbranceCaption = (() => {
     if (encumbranceRatio === null) {
       return 'Needs total risk capital, which is not yet observed';
     }
-    if (encumbranceBreach === 'high') {
-      return 'High severity breach';
-    }
-    if (encumbranceBreach === 'low') {
-      return 'Low severity breach';
-    }
-    const label = encumbranceBreach === 'at-risk' ? 'At risk' : 'Healthy';
-    // A bounded numerator understates the ratio, so a non-breach read is a
-    // floor here rather than a measurement — worth saying on a surface read
-    // for breaches.
     if (unservedChains.length > 0) {
-      return `${label} — at least this, with ${unservedChains.length} chain${unservedChains.length === 1 ? '' : 's'} unserved`;
+      return `A floor: ${unservedChains.length} chain${unservedChains.length === 1 ? '' : 's'} unserved`;
     }
-    return label;
+    return null;
   })();
 
   return (
@@ -1310,7 +1311,7 @@ export function AllocationGrid({
               color: 'text.muted',
             })}
           >
-            {riskCapital.source === 'reference' ? (
+            {shownProvenance === 'reference' ? (
               // No model ran, so the coverage figure below would read as "STL
               // priced all of this" when nothing of STL's did. Attribute the
               // figures to their source instead.
@@ -1318,11 +1319,9 @@ export function AllocationGrid({
                 Reported by Sky&apos;s Star Agents Risk Capital &amp;
                 Requirements Monitor · not STL&apos;s model
               </>
-            ) : riskCapital.source === 'both' ? (
-              // The displays prefer Sky's figure wherever it reports one, so a
-              // bare "model-derived" here would claim STL's model produced
-              // numbers it did not. The modeled share still describes STL's
-              // model alone.
+            ) : shownProvenance === 'both' ? (
+              // Sky's figure wins wherever it reports one, so a bare
+              // "model-derived" would claim numbers STL's model did not make.
               <>
                 Sky&apos;s published figures where reported, else model-derived
                 ({riskCapital.model}, 15% stress) ·{' '}

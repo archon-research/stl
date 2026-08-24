@@ -63,10 +63,13 @@ async function main() {
       '/src/lib/dashboard.ts',
     );
 
-    // The Sky Atlas defines these, so they are pinned rather than left to a
-    // constant someone can nudge: at or above 100% is a Low Severity Breach,
-    // above 103% is a High Severity Breach.
-    assert.equal(encumbranceSeverity(0.99), 'none');
+    // The Sky Atlas defines the two breaches, so they are pinned rather than
+    // left to a constant someone can nudge: at or above 100% is a Low Severity
+    // Breach, above 103% a High Severity Breach. The 80% warning edge is a
+    // product choice, pinned so it cannot drift silently either.
+    assert.equal(encumbranceSeverity(0.7999), 'healthy');
+    assert.equal(encumbranceSeverity(0.8), 'at-risk');
+    assert.equal(encumbranceSeverity(0.99), 'at-risk');
     assert.equal(
       encumbranceSeverity(1),
       'low',
@@ -79,9 +82,9 @@ async function main() {
     // "above 103%" each exclude it); read as high, the conservative side.
     assert.equal(encumbranceSeverity(1.03), 'high');
 
-    // Absence is not a breach.
+    // Absence is not a breach; callers withhold the health tone themselves.
     for (const value of [null, undefined, Number.NaN]) {
-      assert.equal(encumbranceSeverity(value), 'none');
+      assert.equal(encumbranceSeverity(value), 'healthy');
     }
 
     console.log(

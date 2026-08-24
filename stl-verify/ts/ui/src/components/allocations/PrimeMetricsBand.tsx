@@ -1,3 +1,4 @@
+import { Badge, type BadgeColorPalette } from '@archon-research/design-system';
 import { ExternalLink } from 'lucide-react';
 import type { ReactNode } from 'react';
 
@@ -66,7 +67,7 @@ type PrimeMetricsBandProps = {
   };
   encumbrance: {
     ratio: number | null;
-    caption: string;
+    caption: string | null;
     severity: EncumbranceSeverity;
   };
   debt: {
@@ -307,17 +308,21 @@ function PrimeCollateralCard({
   );
 }
 
-// Each band its own tone: the Atlas treats the two breaches as distinct, and
-// the pre-breach bands split into healthy and a warning approach to 100%.
-// `identity.8` is the chart set's orange, sitting between amber and red just
-// as the low breach sits between the warning band and the high breach.
-// Finished class names, not token paths through a variable: Panda cannot
-// extract a token handed to css() at runtime (see lib/activity.tsx).
-const encumbranceCaptionToneClass: Record<EncumbranceSeverity, string> = {
-  healthy: css({ color: 'text.success' }),
-  'at-risk': css({ color: 'text.warning' }),
-  low: css({ color: 'identity.8' }),
-  high: css({ color: 'text.critical' }),
+// One chip per band, styled like the table's category chips. Badge has no
+// orange palette, so the low breach overrides its fill with the chart set's
+// orange (`identity.8`) — literal css(): see lib/activity.tsx for the trap.
+const ENCUMBRANCE_BAND_CHIP: Record<
+  EncumbranceSeverity,
+  { label: string; colorPalette: BadgeColorPalette; className?: string }
+> = {
+  healthy: { label: 'Healthy', colorPalette: 'green' },
+  'at-risk': { label: 'At risk', colorPalette: 'amber' },
+  low: {
+    label: 'Low severity breach',
+    colorPalette: 'red',
+    className: css({ bg: 'identity.8', color: 'white' }),
+  },
+  high: { label: 'High severity breach', colorPalette: 'red' },
 };
 
 function EncumbranceCard({
@@ -328,26 +333,39 @@ function EncumbranceCard({
   isChartsLoading,
 }: {
   ratio: number | null;
-  caption: string;
+  caption: string | null;
   severity: EncumbranceSeverity;
   chart: MetricChartSpec | null;
   isChartsLoading: boolean;
 }) {
+  const chip = ENCUMBRANCE_BAND_CHIP[severity];
   return (
     <SummaryMetric
       className={metricsCardClassName}
       label="Encumbrance ratio"
-      value={formatRatioPercent(ratio)}
+      value={
+        <>
+          {formatRatioPercent(ratio)}
+          {/* No figure, no health claim: absence is explained in the caption. */}
+          {ratio === null ? null : (
+            <Badge
+              size="sm"
+              variant={severity === 'high' ? 'solid' : 'subtle'}
+              colorPalette={chip.colorPalette}
+              className={chip.className}
+            >
+              {chip.label}
+            </Badge>
+          )}
+        </>
+      }
       detail={
         <div className={metricDetailClassName}>
-          <div
-            className={cx(
-              css({ fontSize: 'sm' }),
-              encumbranceCaptionToneClass[severity],
-            )}
-          >
-            {caption}
-          </div>
+          {caption === null ? null : (
+            <div className={cx(css({ fontSize: 'sm', color: 'text.muted' }))}>
+              {caption}
+            </div>
+          )}
           <MetricCardTrend
             chart={chart}
             isLoading={isChartsLoading}

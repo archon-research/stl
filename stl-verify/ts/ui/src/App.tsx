@@ -54,7 +54,7 @@ import {
   getTokens,
 } from './lib/api';
 import {
-  encumbranceSeverity,
+  allocationNetworkKey,
   buildChainLabelLookup,
   buildNetworkOptions,
   buildNetworkOptionsFromMetadata,
@@ -63,15 +63,15 @@ import {
   DIRECT_PROTOCOL_FILTER_VALUE,
   ENCUMBRANCE_HIGH_SEVERITY_THRESHOLD,
   ENCUMBRANCE_LOW_SEVERITY_THRESHOLD,
+  encumbranceSeverity,
   formatChartTimestampLabel,
   formatCompactNumber,
   formatCompactUsd,
   formatRatioPercent,
   formatTokenAmount,
   formatUsdValue,
-  getChainLabel,
-  allocationNetworkKey,
   getAllocationKey,
+  getChainLabel,
   getProtocolLabel,
   groupPrimesByVault,
   parseNumericValue,
@@ -1026,9 +1026,8 @@ function App() {
       ),
     );
 
-    // The line wears the band the current ratio sits in, so a healthy chart is
-    // not painted breach-red. Both a healthy hue and a warning hue exist in the
-    // chart token set; the two breach bands share the Atlas colour split.
+    // The line wears the band the current ratio sits in, so a healthy chart
+    // is not painted breach-red.
     const encumbranceStroke: ChartColorToken = {
       healthy: 'chart.series.positive' as const,
       'at-risk': 'chart.series.quaternary' as const,
@@ -1107,9 +1106,8 @@ function App() {
         comparison: comparisonSeries(totalCapital.comparison),
         stroke: 'chart.series.quaternary',
         formatValue: formatCompactUsd,
-        // The requirement the card's caption states, drawn where the total can
-        // be read against it. A single reference line, not a series: no
-        // endpoint serves the requirement over time.
+        // The requirement the caption states, drawn as one reference line —
+        // no endpoint serves the requirement over time.
         thresholds:
           requiredRiskCapitalValue === null
             ? undefined
@@ -1117,7 +1115,9 @@ function App() {
                 {
                   value: requiredRiskCapitalValue,
                   label: `Required ${formatCompactUsd(requiredRiskCapitalValue)}`,
-                  stroke: 'var(--colors-text-muted)',
+                  // Warning-hued so it cannot be mistaken for the muted
+                  // comparison series that shares this card.
+                  stroke: 'var(--colors-text-warning)',
                 },
               ],
       },

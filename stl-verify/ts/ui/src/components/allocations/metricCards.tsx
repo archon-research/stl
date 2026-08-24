@@ -50,9 +50,7 @@ export type MetricChartSpec = {
   stroke: ChartColorToken;
   formatValue: (value: number) => string;
   kind: MetricChartKind;
-  // Ordered ascending. Each draws a dashed limit with the region past it shaded,
-  // so overlapping severities read as escalating shade.
-  //
+  // Ordered ascending. Each draws a dashed limit line with a labelled edge.
   thresholds?: { value: number; label?: string; stroke?: ChartColor }[];
   // The provenance not drawn as the primary series, for the same buckets, under
   // `source=both`. A second line rather than a second card: the point is the gap
@@ -441,10 +439,11 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
             fill: 'var(--colors-text-muted)',
           })}
         />
-        {/* No fill when a second series is present: it anchors the domain at
-            zero, which compresses both lines into a band at the plot top, and a
-            comparison does not need a filled magnitude anyway. */}
-        {chart.kind === 'fallback' || chart.comparison ? null : (
+        {/* Every real series gets the same soft fill under the primary line —
+            presence of a comparison varies by provenance and data window, so
+            keying the fill on it made sibling cards shade inconsistently. The
+            domain already includes zero either way. */}
+        {chart.kind === 'fallback' ? null : (
           <AreaSeries
             dataKey={`${chart.key}-area`}
             data={chart.data as ChartDatum[]}
@@ -486,9 +485,8 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
             value={entry.value}
             breach="above"
             stroke={entry.stroke}
-            // The dashed line alone marks the limit: the default breach fill
-            // shaded everything above it, which on a small card read as the
-            // chart being mostly "in breach" even at a healthy ratio.
+            // No breach fill: shading everything past the limit made a small
+            // card read as mostly-in-breach even at a healthy ratio.
             fill="transparent"
           />
         ))}

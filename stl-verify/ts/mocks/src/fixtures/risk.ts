@@ -34,6 +34,7 @@ import {
   TOKENS,
   tokenSymbol,
 } from './registry.ts';
+import type { PrimeName } from './registry.ts';
 
 const SPARK_PROXIES = [
   SPARK_MAINNET_PROXY,
@@ -869,6 +870,21 @@ const GROVE_CAPITAL_FIGURES = {
   validation_note: null,
   scope: 'prime',
 } as const;
+
+/**
+ * The upstream PRIME COLLATERAL figure and the monitor's ratio, as the
+ * total-capital buckets carry them wherever the response holds Sky's figures.
+ * Constant over the window: the feed is daily and carried forward.
+ */
+export const PRIME_COLLATERAL_USD: Readonly<Record<PrimeName, string>> = {
+  spark: '3411854512.885084226570569021',
+  grove: '291455160.44',
+};
+
+export const PRIME_MONITOR_ENCUMBRANCE: Readonly<Record<PrimeName, string>> = {
+  spark: SPARK_CAPITAL_FIGURES.encumbrance_ratio,
+  grove: GROVE_CAPITAL_FIGURES.encumbrance_ratio,
+};
 
 /**
  * One row per ALM proxy carrying prime-level figures — the

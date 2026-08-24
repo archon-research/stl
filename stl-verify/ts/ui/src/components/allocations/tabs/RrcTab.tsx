@@ -145,7 +145,9 @@ function PositionTiles({
   return (
     <>
       <SummaryMetric
-        label={balanceLabel}
+        // Sky reports USD exposure only, so a Sky-reported row has no token
+        // quantity to show — the USD figure stands in.
+        label={allocation.balance === null ? 'Position exposure' : balanceLabel}
         value={
           <>
             <TokenLogo
@@ -154,7 +156,9 @@ function PositionTiles({
               symbol={allocation.symbol}
               size="7"
             />
-            {`${formatTokenAmount(allocation.balance)} ${allocation.symbol}`}
+            {allocation.balance === null
+              ? formatUsdValue(allocation.amount_usd)
+              : `${formatTokenAmount(allocation.balance)} ${allocation.symbol}`}
           </>
         }
       />
@@ -172,18 +176,17 @@ function PositionTiles({
           </>
         }
       />
-      <SummaryMetric
-        label="Protocol"
-        value={
-          <>
-            <ProtocolLogo
-              protocolName={allocation.protocol_name ?? ''}
-              size="5"
-            />
-            {allocation.protocol_name}
-          </>
-        }
-      />
+      {allocation.protocol_name == null ? null : (
+        <SummaryMetric
+          label="Protocol"
+          value={
+            <>
+              <ProtocolLogo protocolName={allocation.protocol_name} size="5" />
+              {allocation.protocol_name}
+            </>
+          }
+        />
+      )}
     </>
   );
 }
@@ -221,6 +224,7 @@ export function RrcTab({
     if (
       !isEnabled ||
       chainId === null ||
+      receiptTokenId === null ||
       receiptTokenAddress === null ||
       primeAddress === null ||
       isChainMismatch
