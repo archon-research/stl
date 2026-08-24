@@ -24,7 +24,7 @@
     "@archon-research/oxlint-config": "0.10.0",
     "@archon-research/tsconfig": "0.10.0",
     "@stl-verify/ui": "*",
-    "@types/node": "26.1.2",
+    "@types/node": "26.2.0",
     "msw": "2.15.0"
   },
   "peerDependencies": {
