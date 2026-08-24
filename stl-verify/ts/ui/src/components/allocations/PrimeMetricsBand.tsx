@@ -349,10 +349,15 @@ function EncumbranceCard({
           {/* No figure, no health claim: absence is explained in the caption. */}
           {ratio === null ? null : (
             <Badge
-              size="sm"
+              size="md"
               variant={severity === 'high' ? 'solid' : 'subtle'}
               colorPalette={chip.colorPalette}
-              className={chip.className}
+              // Sized against the 2xl figure beside it, which Badge's own
+              // steps stop short of.
+              className={cx(
+                css({ fontSize: 'md', px: '2.5', py: '1' }),
+                chip.className,
+              )}
             >
               {chip.label}
             </Badge>

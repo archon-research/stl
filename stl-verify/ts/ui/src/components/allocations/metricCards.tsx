@@ -439,21 +439,18 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
             fill: 'var(--colors-text-muted)',
           })}
         />
-        {/* Every real series gets the same soft fill under the primary line —
-            presence of a comparison varies by provenance and data window, so
-            keying the fill on it made sibling cards shade inconsistently. The
-            domain already includes zero either way. */}
-        {chart.kind === 'fallback' ? null : (
-          <AreaSeries
-            dataKey={`${chart.key}-area`}
-            data={chart.data as ChartDatum[]}
-            xAccessor={(d: ChartDatum) => d.label}
-            yAccessor={(d: ChartDatum) => d.value}
-            fill={strokeColor}
-            fillOpacity={0.18}
-            lineProps={{ stroke: 'none' }}
-          />
-        )}
+        {/* The same soft fill under every primary line, real series or flat
+            fallback — keying it on comparison presence or series kind made
+            sibling cards shade inconsistently across provenances/windows. */}
+        <AreaSeries
+          dataKey={`${chart.key}-area`}
+          data={chart.data as ChartDatum[]}
+          xAccessor={(d: ChartDatum) => d.label}
+          yAccessor={(d: ChartDatum) => d.value}
+          fill={strokeColor}
+          fillOpacity={0.18}
+          lineProps={{ stroke: 'none' }}
+        />
         <LineSeries
           dataKey={chart.key}
           data={chart.data as ChartDatum[]}

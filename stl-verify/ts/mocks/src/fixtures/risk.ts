@@ -421,23 +421,23 @@ function referenceRowsFor(
 function compositePerAllocation(
   self: PrimeRiskCapital,
 ): AllocationRiskCapital[] {
-  const skyById = new Map<number, ReferenceAllocationRow>();
-  const skyOnly: ReferenceAllocationRow[] = [];
+  // Joined on the published position keys, like the backend's merge — an
+  // id-only join left the custody leg unmerged, since Sky reports it with no
+  // registry id.
+  const skyByKey = new Map<string, ReferenceAllocationRow>();
+  const matchedSkyRows = new Set<ReferenceAllocationRow>();
   for (const row of referenceRowsFor(self)) {
-    const [receiptTokenId] = row;
-    if (receiptTokenId === null) {
-      skyOnly.push(row);
-    } else {
-      skyById.set(receiptTokenId, row);
+    for (const key of referenceAllocation(row).position_keys ?? []) {
+      if (!skyByKey.has(key)) skyByKey.set(key, row);
     }
   }
 
   const merged: AllocationRiskCapital[] = self.per_allocation.map((entry) => {
-    const sky =
-      entry.receipt_token_id === null
-        ? undefined
-        : skyById.get(entry.receipt_token_id);
+    const sky = (entry.position_keys ?? [])
+      .map((key) => skyByKey.get(key))
+      .find((row) => row !== undefined);
     if (sky === undefined) return entry;
+    matchedSkyRows.add(sky);
 
     const [, , , , rrcUsd, crrPct] = sky;
     return {
@@ -449,6 +449,9 @@ function compositePerAllocation(
     };
   });
 
+  const skyOnly = referenceRowsFor(self).filter(
+    (row) => !matchedSkyRows.has(row),
+  );
   return [...merged, ...skyOnly.map(referenceAllocation)].sort(
     (left, right) => Number(right.exposure_usd) - Number(left.exposure_usd),
   );
