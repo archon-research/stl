@@ -14,6 +14,7 @@ import {
   formatTokenAmount,
   formatUsdValue,
   getUsdTone,
+  parseNumericValue,
 } from '../../../lib/dashboard';
 import { isAbortError, toErrorMessage } from '../../../lib/errors';
 import { logging } from '../../../lib/logging';
@@ -25,12 +26,7 @@ import type {
   Prime,
   Rrc,
 } from '../../../types/allocation';
-import {
-  ProtocolLogo,
-  StatusBadge,
-  SummaryMetric,
-  TokenLogo,
-} from '../../shared';
+import { ProtocolLogo, SummaryMetric, TokenLogo } from '../../shared';
 import { TabNotePanel, unindexedChainMessage } from './TabStatePanels';
 
 type RrcTabProps = {
@@ -77,6 +73,118 @@ function referenceFigures(
     default:
       return null;
   }
+}
+
+/**
+ * Bands mirror `getUsdTone`'s thresholds — the meter is that function drawn
+ * out, so a reader sees what "Escalating" means: past the $1M band edge.
+ */
+const RRC_BAND_BOUNDS: readonly [number, number] = [1_000, 1_000_000];
+
+const RRC_BANDS = [
+  { tone: 'green', label: 'Contained', fill: css({ bg: 'green.500' }) },
+  { tone: 'yellow', label: 'Monitor', fill: css({ bg: 'amber.400' }) },
+  { tone: 'red', label: 'Escalating', fill: css({ bg: 'red.500' }) },
+] as const;
+
+/**
+ * Each band spans a third of the track and the value falls within its band by
+ * orders of magnitude — a linear USD scale would flatten the first two bands
+ * into invisibility next to a $23M value. The red band caps at $1B.
+ */
+function rrcMeterFraction(value: number): number {
+  const [low, high] = RRC_BAND_BOUNDS;
+  if (value <= 0) {
+    return 0;
+  }
+  if (value <= low) {
+    return Math.log10(1 + value) / Math.log10(low + 1) / 3;
+  }
+  if (value <= high) {
+    return 1 / 3 + Math.log10(value / low) / Math.log10(high / low) / 3;
+  }
+  return Math.min(1, 2 / 3 + Math.log10(value / high) / 3 / 3);
+}
+
+const meterMarkerClassName = css({
+  position: 'absolute',
+  top: '100%',
+  transform: 'translateX(-50%)',
+  width: '0',
+  height: '0',
+  borderLeft: '5px solid transparent',
+  borderRight: '5px solid transparent',
+  borderBottom: '6px solid',
+  borderBottomColor: 'text.strong',
+});
+
+function RrcBandMeter({ valueUsd }: { valueUsd: number }) {
+  const tone = getUsdTone(valueUsd);
+  const activeIndex = RRC_BANDS.findIndex((band) => band.tone === tone);
+  const valueText = formatUsdValue(valueUsd);
+
+  return (
+    <div>
+      {/* The painted bands are decoration for the caption below, which carries
+          the value and (screen-reader-only) the band it falls in. */}
+      <div aria-hidden className={css({ position: 'relative' })}>
+        <div className={flex({ gap: '0.5' })}>
+          {RRC_BANDS.map((band, index) => (
+            <div
+              key={band.tone}
+              className={cx(
+                css({ height: '2.5', flex: '1' }),
+                index === 0 ? css({ borderLeftRadius: 'full' }) : undefined,
+                index === RRC_BANDS.length - 1
+                  ? css({ borderRightRadius: 'full' })
+                  : undefined,
+                band.fill,
+                index === activeIndex ? undefined : css({ opacity: 0.3 }),
+              )}
+            />
+          ))}
+        </div>
+        <div
+          className={meterMarkerClassName}
+          style={{ insetInlineStart: `${rrcMeterFraction(valueUsd) * 100}%` }}
+        />
+      </div>
+      <div aria-hidden className={flex({ mt: '2.5', gap: '0.5' })}>
+        {RRC_BANDS.map((band, index) => (
+          <span
+            key={band.tone}
+            className={cx(
+              css({
+                flex: '1',
+                textAlign: 'center',
+                fontSize: '2xs',
+                textTransform: 'uppercase',
+                letterSpacing: '0.08em',
+              }),
+              index === activeIndex
+                ? css({ color: 'text.strong', fontWeight: 'semibold' })
+                : css({ color: 'text.muted' }),
+            )}
+          >
+            {band.label}
+          </span>
+        ))}
+      </div>
+      <p
+        className={css({
+          m: 0,
+          mt: '1.5',
+          fontSize: 'sm',
+          color: 'text.muted',
+        })}
+      >
+        {valueText} max across models
+        <span className={css({ srOnly: true })}>
+          {` — ${RRC_BANDS[activeIndex]?.label ?? 'unbanded'}`}
+        </span>
+      </p>
+    </div>
+  );
 }
 
 function ResultRow({
@@ -238,21 +346,6 @@ export function RrcTab({
   // carries the badge; a model row is "selected" only when Sky reports nothing.
   const skySelected = reference !== null;
 
-  const tone = getUsdTone(rrc?.max_rrc_usd);
-
-  const statusLabel = useMemo(() => {
-    switch (tone) {
-      case 'green':
-        return 'Contained';
-      case 'yellow':
-        return 'Monitor';
-      case 'neutral':
-        return 'Unavailable';
-      default:
-        return 'Escalating';
-    }
-  }, [tone]);
-
   if (!selectedReceiptToken) {
     return (
       <TabNotePanel message="Pick a receipt token to inspect required risk capital." />
@@ -288,49 +381,6 @@ export function RrcTab({
 
   return (
     <div className={css({ display: 'grid', gap: '4' })}>
-      <div
-        className={css({
-          borderRadius: 'md',
-          borderStyle: 'solid',
-          borderWidth: '1px',
-          borderColor: 'border.subtle',
-          bg: 'surface.subtle',
-          p: '4',
-        })}
-      >
-        <div
-          className={flex({
-            align: 'flex-start',
-            justify: 'space-between',
-            gap: '4',
-            wrap: 'wrap',
-          })}
-        >
-          <div className={css({ display: 'grid', gap: '2' })}>
-            <p
-              className={css({
-                m: 0,
-                fontSize: 'xs',
-                textTransform: 'uppercase',
-                letterSpacing: '0.16em',
-                color: 'text.muted',
-              })}
-            >
-              Required risk capital (RRC)
-            </p>
-            {isLoading ? (
-              <SkeletonStack
-                count={1}
-                itemHeight={16}
-                className={css({ width: '32' })}
-              />
-            ) : null}
-          </div>
-
-          <StatusBadge tone={tone} label={statusLabel} />
-        </div>
-      </div>
-
       {errorMessage ? (
         <ErrorState
           title="Unable to compute required risk capital."
@@ -394,15 +444,16 @@ export function RrcTab({
         </div>
       ) : null}
 
+      {!errorMessage && isLoading && !rrc ? (
+        <SkeletonStack count={2} itemHeight={12} />
+      ) : null}
+      {!errorMessage && rrc ? (
+        <RrcBandMeter valueUsd={parseNumericValue(rrc.max_rrc_usd) ?? 0} />
+      ) : null}
+
       {!errorMessage && rrc && rrc.results.length > 0 ? (
         <div
           className={css({
-            borderRadius: 'md',
-            borderStyle: 'solid',
-            borderWidth: '1px',
-            borderColor: 'border.subtle',
-            bg: 'surface.subtle',
-            p: '4',
             display: 'grid',
             gap: '3',
           })}
