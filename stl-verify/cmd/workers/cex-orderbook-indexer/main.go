@@ -37,9 +37,10 @@ func init() {
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
 
-	if err := run(ctx, newProvider); err != nil {
+	err := run(ctx, newProvider)
+	cancel()
+	if err != nil {
 		slog.Error("fatal", "error", err)
 		os.Exit(1)
 	}

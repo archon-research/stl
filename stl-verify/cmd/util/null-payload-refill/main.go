@@ -93,9 +93,9 @@ func main() {
 	slog.SetDefault(logger)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
 
 	exitCode, err := Run(ctx, opts, logger)
+	cancel()
 	if err != nil {
 		logger.Error("run failed", "error", err)
 		if exitCode == 0 {

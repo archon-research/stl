@@ -3,9 +3,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
-	"log"
 	"log/slog"
 	"net/http"
 	_ "net/http/pprof"
@@ -61,18 +61,6 @@ func main() {
 	showVersion := flag.Bool("version", false, "Show version information and exit")
 	flag.Parse()
 
-	if *traceFile != "" {
-		f, err := os.Create(*traceFile)
-		if err != nil {
-			log.Fatalf("failed to create trace file: %v", err)
-		}
-		defer f.Close()
-		if err := trace.Start(f); err != nil {
-			log.Fatalf("failed to start trace: %v", err)
-		}
-		defer trace.Stop()
-	}
-
 	// Show version if requested
 	if *showVersion {
 		fmt.Printf("stl-watcher\n")
@@ -80,6 +68,48 @@ func main() {
 		fmt.Printf("  Branch:     %s\n", GitBranch)
 		fmt.Printf("  Build Time: %s\n", BuildTime)
 		os.Exit(0)
+	}
+
+	// run owns every deferred cleanup; main only reports and sets the exit
+	// code, so no os.Exit can strand a pending defer.
+	if err := run(cliOptions{
+		enableTraces: *enableTraces,
+		enableBlobs:  *enableBlobs,
+		parallelRPC:  *parallelRPC,
+		pprofAddr:    *pprofAddr,
+		traceFile:    *traceFile,
+	}); err != nil {
+		slog.Error("stl-watcher exited with error", "error", err)
+		os.Exit(1)
+	}
+}
+
+type cliOptions struct {
+	pprofAddr    string
+	traceFile    string
+	enableTraces bool
+	enableBlobs  bool
+	parallelRPC  bool
+}
+
+func run(opts cliOptions) (err error) {
+	if opts.traceFile != "" {
+		f, cerr := os.Create(opts.traceFile)
+		if cerr != nil {
+			return fmt.Errorf("creating trace file: %w", cerr)
+		}
+		if cerr := trace.Start(f); cerr != nil {
+			_ = f.Close()
+			return fmt.Errorf("starting trace: %w", cerr)
+		}
+		// Close reports the flush failure that would otherwise leave a
+		// silently truncated trace behind.
+		defer func() {
+			trace.Stop()
+			if cerr := f.Close(); cerr != nil {
+				err = errors.Join(err, fmt.Errorf("closing trace file: %w", cerr))
+			}
+		}()
 	}
 
 	// Set up context with cancellation (created early for consistent use throughout init)
@@ -100,15 +130,15 @@ func main() {
 	)
 
 	// Start pprof server if enabled
-	if *pprofAddr != "" {
+	if opts.pprofAddr != "" {
 		// Enable block and mutex profiling
 		runtime.SetBlockProfileRate(1)
 		runtime.SetMutexProfileFraction(1)
 		runtime.SetCPUProfileRate(1)
 
 		go func() {
-			logger.Info("starting pprof server", "addr", *pprofAddr)
-			if err := http.ListenAndServe(*pprofAddr, nil); err != nil {
+			logger.Info("starting pprof server", "addr", opts.pprofAddr)
+			if err := http.ListenAndServe(opts.pprofAddr, nil); err != nil {
 				logger.Error("pprof server failed", "error", err)
 			}
 		}()
@@ -127,8 +157,7 @@ func main() {
 		Logger:         logger,
 	})
 	if err != nil {
-		logger.Error("failed to initialize telemetry", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("initializing telemetry: %w", err)
 	}
 	defer shutdownOTEL(context.Background())
 
@@ -137,13 +166,15 @@ func main() {
 	alchemyHTTPURL := env.Get("ALCHEMY_HTTP_URL", "https://eth-mainnet.g.alchemy.com/v2")
 	alchemyWSURL := env.Get("ALCHEMY_WS_URL", "wss://eth-mainnet.g.alchemy.com/v2")
 	if alchemyAPIKey == "" {
-		logger.Error("ALCHEMY_API_KEY environment variable is required")
-		os.Exit(1)
+		return errors.New("ALCHEMY_API_KEY environment variable is required")
 	}
-	chainID, err := strconv.ParseInt(requireEnv("CHAIN_ID"), 10, 64)
+	chainIDStr, err := requireEnv("CHAIN_ID")
 	if err != nil {
-		logger.Error("CHAIN_ID must be a valid integer", "error", err)
-		os.Exit(1)
+		return err
+	}
+	chainID, err := strconv.ParseInt(chainIDStr, 10, 64)
+	if err != nil {
+		return fmt.Errorf("CHAIN_ID must be a valid integer: %w", err)
 	}
 
 	postgresURL := env.Get("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable")
@@ -151,8 +182,7 @@ func main() {
 	// Set up PostgreSQL connection pool for block state tracking
 	pool, err := postgres.OpenPool(ctx, postgres.DefaultDBConfig(postgresURL))
 	if err != nil {
-		logger.Error("failed to connect to PostgreSQL", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("connecting to PostgreSQL: %w", err)
 	}
 	defer pool.Close()
 
@@ -174,8 +204,7 @@ func main() {
 	}
 	subscriber, err := alchemy.NewSubscriber(subscriberConfig)
 	if err != nil {
-		logger.Error("failed to create subscriber", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("creating subscriber: %w", err)
 	}
 
 	// Create OpenTelemetry instrumentation for Alchemy client. The chain name
@@ -183,8 +212,7 @@ func main() {
 	// that would silently emit an empty chain, so fail hard like the parse above.
 	chainName, err := entity.ChainName(chainID)
 	if err != nil {
-		logger.Error("resolving chain name for metrics", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("resolving chain name for metrics: %w", err)
 	}
 	alchemyTelemetry, err := alchemy.NewTelemetry(chainName)
 	if err != nil {
@@ -194,21 +222,20 @@ func main() {
 	// Create Alchemy HTTP client
 	client, err := alchemy.NewClient(alchemy.ClientConfig{
 		HTTPURL:      fmt.Sprintf("%s/%s", alchemyHTTPURL, alchemyAPIKey),
-		EnableTraces: *enableTraces,
-		EnableBlobs:  *enableBlobs,
-		ParallelRPC:  *parallelRPC,
+		EnableTraces: opts.enableTraces,
+		EnableBlobs:  opts.enableBlobs,
+		ParallelRPC:  opts.parallelRPC,
 		Logger:       logger,
 		Telemetry:    alchemyTelemetry,
 	})
 	if err != nil {
-		logger.Error("failed to create client", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("creating client: %w", err)
 	}
 
 	logger.Info("alchemy client configured",
-		"enableTraces", *enableTraces,
-		"enableBlobs", *enableBlobs,
-		"parallelRPC", *parallelRPC,
+		"enableTraces", opts.enableTraces,
+		"enableBlobs", opts.enableBlobs,
+		"parallelRPC", opts.parallelRPC,
 		"chainID", chainID,
 	)
 
@@ -222,12 +249,10 @@ func main() {
 		KeyPrefix: "stl",
 	}, logger)
 	if err != nil {
-		logger.Error("failed to create Redis cache", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("creating Redis cache: %w", err)
 	}
 	if err := cache.Ping(context.Background()); err != nil {
-		logger.Error("Redis not reachable", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("connecting to Redis at %s: %w", redisAddr, err)
 	}
 	logger.Info("Redis cache connected", "addr", redisAddr)
 	defer func() {
@@ -240,14 +265,16 @@ func main() {
 	snsEndpoint := env.Get("AWS_SNS_ENDPOINT", "http://localhost:4566")
 
 	// Single SNS FIFO topic for all event types
-	snsTopicARN := requireEnv("AWS_SNS_TOPIC_ARN")
+	snsTopicARN, err := requireEnv("AWS_SNS_TOPIC_ARN")
+	if err != nil {
+		return err
+	}
 
 	awsCfg, err := awsconfig.Load(context.Background(), awsconfig.Options{
 		StaticCredentialsFromEnv: true,
 	})
 	if err != nil {
-		logger.Error("failed to load AWS config", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("loading AWS config: %w", err)
 	}
 	if os.Getenv("AWS_ACCESS_KEY_ID") != "" {
 		logger.Info("using static AWS credentials from environment")
@@ -267,8 +294,7 @@ func main() {
 		Logger:   logger,
 	})
 	if err != nil {
-		logger.Error("failed to create SNS event sink", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("creating SNS event sink: %w", err)
 	}
 	defer func() {
 		if err := eventSink.Close(); err != nil {
@@ -287,16 +313,15 @@ func main() {
 	// onto the OTel global meter provider initialised above.
 	serviceTelemetry, err := shared.NewServiceTelemetry()
 	if err != nil {
-		logger.Error("failed to create service telemetry", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("creating service telemetry: %w", err)
 	}
 
 	// Create LiveService (handles WebSocket subscription and reorg detection)
 	config := live_data.LiveConfig{
 		ChainID:            chainID,
 		FinalityBlockCount: 64,
-		EnableTraces:       *enableTraces,
-		EnableBlobs:        *enableBlobs,
+		EnableTraces:       opts.enableTraces,
+		EnableBlobs:        opts.enableBlobs,
 		Logger:             logger,
 		Metrics:            serviceTelemetry,
 	}
@@ -310,18 +335,16 @@ func main() {
 		eventSink,
 	)
 	if err != nil {
-		logger.Error("failed to create live service", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("creating live service: %w", err)
 	}
 
 	// Create BackfillService (handles gap filling from DB state)
 	var backfillService *backfill_gaps.BackfillService
 	enableBackfill := env.Get("ENABLE_BACKFILL", "false") == "true"
 	if enableBackfill {
-		backfillConfig, err := loadBackfillConfig(chainID, *enableTraces, *enableBlobs, logger, serviceTelemetry)
+		backfillConfig, err := loadBackfillConfig(chainID, opts.enableTraces, opts.enableBlobs, logger, serviceTelemetry)
 		if err != nil {
-			logger.Error("invalid backfill config", "error", err)
-			os.Exit(1)
+			return fmt.Errorf("invalid backfill config: %w", err)
 		}
 
 		logger.Info("backfill config",
@@ -338,8 +361,7 @@ func main() {
 			eventSink,
 		)
 		if err != nil {
-			logger.Error("failed to create backfill service", "error", err)
-			os.Exit(1)
+			return fmt.Errorf("creating backfill service: %w", err)
 		}
 	}
 
@@ -350,15 +372,13 @@ func main() {
 	// Start both services
 	logger.Info("starting live service...")
 	if err := liveService.Start(ctx); err != nil {
-		logger.Error("failed to start live service", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("starting live service: %w", err)
 	}
 
 	if enableBackfill && backfillService != nil {
 		logger.Info("starting backfill service...")
 		if err := backfillService.Start(ctx); err != nil {
-			logger.Error("failed to start backfill service", "error", err)
-			os.Exit(1)
+			return fmt.Errorf("starting backfill service: %w", err)
 		}
 	}
 
@@ -393,9 +413,9 @@ func main() {
 	select {
 	case <-shutdownDone:
 		logger.Info("shutdown complete")
+		return nil
 	case <-shutdownCtx.Done():
-		logger.Error("shutdown timed out, forcing exit")
-		os.Exit(1)
+		return errors.New("shutdown timed out")
 	}
 }
 
@@ -420,14 +440,13 @@ func resolveServiceName(getenv func(string) string) string {
 	return defaultServiceName
 }
 
-// requireEnv returns the value of an environment variable or exits if not set.
-func requireEnv(key string) string {
+// requireEnv returns the value of an environment variable, or an error when unset.
+func requireEnv(key string) (string, error) {
 	value := os.Getenv(key)
 	if value == "" {
-		slog.Error("required environment variable not set", "key", key)
-		os.Exit(1)
+		return "", fmt.Errorf("required environment variable not set: %s", key)
 	}
-	return value
+	return value, nil
 }
 
 // loadBackfillConfig reads the env-driven backfill knobs. Defaults preserve the

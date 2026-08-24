@@ -88,9 +88,10 @@ import (
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
 
-	if err := run(ctx); err != nil {
+	err := run(ctx)
+	cancel()
+	if err != nil {
 		slog.Error("morpho-v2-bootstrap exited with error", "error", err)
 		os.Exit(1)
 	}

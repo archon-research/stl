@@ -38,6 +38,14 @@ func StartTimescaleDBForMain() (dsn string, cleanup func()) {
 		return createProcessDatabase(shared)
 	}
 
+	dsn, cleanup, err := startTimescaleDBContainer()
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+	return dsn, cleanup
+}
+
+func startTimescaleDBContainer() (dsn string, cleanup func(), err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
@@ -64,23 +72,28 @@ func StartTimescaleDBForMain() (dsn string, cleanup func()) {
 	})
 	if err != nil {
 		if IsContainerRuntimeUnavailable(err) {
-			log.Fatalf("container runtime unavailable (is Docker/Podman running?): %v", err)
+			return "", nil, fmt.Errorf("container runtime unavailable (is Docker/Podman running?): %w", err)
 		}
-		log.Fatalf("start container: %v", err)
+		return "", nil, fmt.Errorf("start container: %w", err)
 	}
+
+	// The container is running by now, so every later failure has to take it
+	// down: the caller gets no cleanup callback to do it with.
+	terminate := func() { _ = container.Terminate(context.Background()) }
 
 	host, err := container.Host(ctx)
 	if err != nil {
-		log.Fatalf("get host: %v", err)
+		terminate()
+		return "", nil, fmt.Errorf("get host: %w", err)
 	}
 	port, err := container.MappedPort(ctx, "5432")
 	if err != nil {
-		log.Fatalf("get port: %v", err)
+		terminate()
+		return "", nil, fmt.Errorf("get port: %w", err)
 	}
 
-	dsn = fmt.Sprintf("postgres://test:test@%s:%s/testdb?sslmode=disable", host, port.Port())
-	cleanup = func() { _ = container.Terminate(context.Background()) }
-	return dsn, cleanup
+	return fmt.Sprintf("postgres://test:test@%s:%s/testdb?sslmode=disable", host, port.Port()),
+		terminate, nil
 }
 
 // createProcessDatabase gives this test binary its own database on a server it
@@ -93,20 +106,9 @@ func createProcessDatabase(baseDSN string) (dsn string, cleanup func()) {
 	ctx := context.Background()
 	dbName := "stl_test_" + processTag()
 
-	adminPool := ConnectPoolForMain(baseDSN)
-	defer adminPool.Close()
-
-	// A database left behind by a killed run would silently supply its rows here.
-	if _, err := adminPool.Exec(ctx, dropDatabaseSQL(dbName)); err != nil {
-		log.Fatalf("drop stale database %s: %v", dbName, err)
-	}
-	if _, err := adminPool.Exec(ctx, fmt.Sprintf("CREATE DATABASE %s", dbName)); err != nil {
-		log.Fatalf("create database %s: %v", dbName, err)
-	}
-
-	dsn, err := replaceDatabase(baseDSN, dbName)
+	dsn, err := createDatabase(ctx, baseDSN, dbName)
 	if err != nil {
-		log.Fatalf("build DSN for %s: %v", dbName, err)
+		log.Fatalf("%v", err)
 	}
 
 	cleanup = func() {
@@ -115,6 +117,27 @@ func createProcessDatabase(baseDSN string) (dsn string, cleanup func()) {
 		}
 	}
 	return dsn, cleanup
+}
+
+// createDatabase drops any stale database of this name, recreates it, and
+// returns the DSN pointing at it.
+func createDatabase(ctx context.Context, baseDSN, dbName string) (string, error) {
+	adminPool := ConnectPoolForMain(baseDSN)
+	defer adminPool.Close()
+
+	// A database left behind by a killed run would silently supply its rows here.
+	if _, err := adminPool.Exec(ctx, dropDatabaseSQL(dbName)); err != nil {
+		return "", fmt.Errorf("drop stale database %s: %w", dbName, err)
+	}
+	if _, err := adminPool.Exec(ctx, fmt.Sprintf("CREATE DATABASE %s", dbName)); err != nil {
+		return "", fmt.Errorf("create database %s: %w", dbName, err)
+	}
+
+	dsn, err := replaceDatabase(baseDSN, dbName)
+	if err != nil {
+		return "", fmt.Errorf("build DSN for %s: %w", dbName, err)
+	}
+	return dsn, nil
 }
 
 // ConnectPoolForMain is ConnectPool for TestMain, where there is no *testing.T to

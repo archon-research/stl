@@ -36,7 +36,6 @@ func main() {
 	slog.SetDefault(logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	serverCfg := serverConfig{
 		addr:       *addr,
@@ -48,7 +47,9 @@ func main() {
 		region:     *region,
 	}
 
-	if err := run(ctx, logger, serverCfg); err != nil {
+	err := run(ctx, logger, serverCfg)
+	stop()
+	if err != nil {
 		logger.Error("mock-blockchain-server failed", "error", err)
 		os.Exit(1)
 	}

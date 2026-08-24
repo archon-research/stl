@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 
@@ -10,21 +11,28 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+
+	log.Println("✓ All migrations up to date")
+}
+
+func run() error {
 	connStr := requireEnv("DATABASE_URL")
 	ctx := context.Background()
 
 	pool, err := pgxpool.New(ctx, connStr)
 	if err != nil {
-		log.Fatal(err)
+		return fmt.Errorf("connecting to database: %w", err)
 	}
 	defer pool.Close()
 
 	m := migrator.New(pool, "./db/migrations")
 	if err := m.ApplyAll(ctx); err != nil {
-		log.Fatalf("Migration failed: %v", err)
+		return fmt.Errorf("migration failed: %w", err)
 	}
-
-	log.Println("✓ All migrations up to date")
+	return nil
 }
 
 func requireEnv(key string) string {
