@@ -16,6 +16,7 @@ resources:
   - ../../base/offchain-price-indexer
   - ../../base/reference-capital-indexer
   - ../../base/morpho-v2-bootstrap
+  - ../../base/core-model-runner
   - config.yaml
 
 components:
@@ -44,6 +45,10 @@ images:
   - name: morpho-v2-bootstrap
     newName: localhost/stl-morpho-v2-bootstrap
     newTag: local
+  # Not its own image: the runner is a Python entry point inside python-api.
+  - name: core-model-runner
+    newName: localhost/stl-python-api
+    newTag: local
 
 patches:
   # Default the watcher to the in-cluster mock blockchain server. Explicit env
@@ -68,3 +73,21 @@ patches:
       metadata:
         name: python-api
       $patch: delete
+  # Local kind runs the model on stale parquet snapshots, so the daily tick has
+  # no statistical value -- the N_MC=10000 default would grind for hours (and
+  # peak ~8 GiB) to produce numbers nobody reads. 100 scenarios keep the tick
+  # minutes-long and still exercise the whole pipeline. Staging pins the same
+  # cap in its ConfigMap until the live readers land (VEC-272 PR 3).
+  - patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: core-model-runner
+      spec:
+        template:
+          spec:
+            containers:
+              - name: core-model-runner
+                env:
+                  - name: CORE_MODEL_N_MC
+                    value: "100"

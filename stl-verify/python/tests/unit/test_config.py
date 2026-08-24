@@ -3,7 +3,7 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
-from app.config import Settings
+from app.config import Settings, async_database_url
 
 
 def test_settings_loads_with_defaults():
@@ -50,6 +50,13 @@ class TestAsyncDatabaseUrl:
     def test_preserves_asyncpg_scheme(self):
         settings = Settings.model_validate({"database_url": "postgresql+asyncpg://host:5432/db"})
         assert settings.async_database_url == "postgresql+asyncpg://host:5432/db"
+
+    def test_drops_sslmode(self):
+        # asyncpg takes `ssl`, not libpq's `sslmode`, so the parameter is dropped.
+        assert async_database_url("postgresql://u:p@h:5432/db?sslmode=require") == "postgresql+asyncpg://u:p@h:5432/db"
+
+    def test_keeps_the_password(self):
+        assert async_database_url("postgres://u:p@h:5432/db") == "postgresql+asyncpg://u:p@h:5432/db"
 
 
 class TestAllocationShareStaleness:

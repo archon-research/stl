@@ -92,7 +92,8 @@ async def test_engine_connections_carry_no_statement_cache(async_db_url: str) ->
     connection because the two knobs are plain connect kwargs — a typo in
     either name would configure nothing and fail only in production.
     """
-    engine = create_db_engine(Settings.model_validate({"database_url": SecretStr(async_db_url)}))
+    settings = Settings.model_validate({"database_url": SecretStr(async_db_url)})
+    engine = create_db_engine(settings.async_database_url, statement_cache_size=settings.db_statement_cache_size)
     try:
         async with engine.connect() as connection:
             raw = await connection.get_raw_connection()
@@ -116,7 +117,8 @@ async def test_a_stale_transaction_error_invalidates_the_connection(async_db_url
     resulting invalidation, so a dependency upgrade that changes either fails
     loudly instead of silently disarming the listener.
     """
-    engine = create_db_engine(Settings.model_validate({"database_url": SecretStr(async_db_url)}))
+    settings = Settings.model_validate({"database_url": SecretStr(async_db_url)})
+    engine = create_db_engine(settings.async_database_url)
     try:
         async with engine.connect() as connection:
             await connection.execute(text("SELECT 1"))  # autobegin: client holds an open transaction

@@ -24,7 +24,12 @@ def test_create_db_engine_sizes_the_connection_pool_from_settings(monkeypatch: p
     monkeypatch.setenv("DB_MAX_OVERFLOW", "13")
     settings = Settings.model_validate({})
 
-    engine = create_db_engine(settings)
+    engine = create_db_engine(
+        settings.async_database_url,
+        pool_size=settings.db_pool_size,
+        max_overflow=settings.db_max_overflow,
+        pool_timeout=settings.db_pool_timeout,
+    )
 
     # engine.pool is typed as the Pool base class; the sizing accessors live on
     # QueuePool, which the async engine's AsyncAdaptedQueuePool subclasses.
@@ -49,7 +54,7 @@ def test_create_db_engine_bounds_how_long_a_caller_queues_for_a_connection(
     monkeypatch.setenv("DB_POOL_TIMEOUT", "3")
     settings = Settings.model_validate({})
 
-    engine = create_db_engine(settings)
+    engine = create_db_engine(settings.async_database_url, pool_timeout=settings.db_pool_timeout)
 
     pool = engine.pool
     assert isinstance(pool, QueuePool)
@@ -72,7 +77,7 @@ def test_create_db_engine_recycles_connections_on_the_configured_interval(
     monkeypatch.setenv("DB_POOL_RECYCLE_SECONDS", "120")
     settings = Settings.model_validate({})
 
-    engine = create_db_engine(settings)
+    engine = create_db_engine(settings.async_database_url, pool_recycle=settings.db_pool_recycle_seconds)
 
     pool = engine.pool
     assert isinstance(pool, QueuePool)
@@ -88,7 +93,7 @@ def test_create_db_engine_registers_the_stale_transaction_disconnect_listener() 
     """
     settings = Settings.model_validate({})
 
-    engine = create_db_engine(settings)
+    engine = create_db_engine(settings.async_database_url)
 
     assert event.contains(engine.sync_engine, "handle_error", mark_stale_transaction_state_as_disconnect)
 

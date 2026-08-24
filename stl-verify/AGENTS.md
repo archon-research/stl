@@ -31,7 +31,7 @@ Follow [Effective Go](https://go.dev/doc/effective_go).
 
 - `cmd/base/watcher` — source of block events: WebSocket subscribe, reorg handling, Redis cache write, SNS publish.
 - `cmd/workers/` — long-running SQS FIFO consumers, one message per block (sparklend, morpho, curve, oracle-price, psm3, prime-*, raw-data-backup, ...).
-- `cmd/cronjobs/` — **Temporal**-scheduled (not k8s CronJobs): anchorage, maple-graphql, offchain-price, watcher-data-validator. Schedules live in Temporal state; changing an interval env var requires deleting the schedule in Temporal and restarting. Ticks must be idempotent (Temporal retries). `morpho-v2-bootstrap` sits here by neighbourhood only: it carries no schedule and is started by hand like a backfiller.
+- `cmd/cronjobs/` — **Temporal**-scheduled (not k8s CronJobs): anchorage, maple-graphql, offchain-price, watcher-data-validator. Schedules live in Temporal state; workers reconcile a changed interval env var into the existing schedule at startup (Go `reconcileScheduleSpec`, Python `ensure_schedule`), so a redeploy is enough. Ticks must be idempotent (Temporal retries). `morpho-v2-bootstrap` sits here by neighbourhood only: it carries no schedule and is started by hand like a backfiller.
 - `cmd/backfillers/` — historical gap fillers. Mostly one-shot CLI binaries (sparklend,
   oracle-pricing, aave-like-user-snapshot, raw-block-bulk-downloader), plus
   `offchain-price-backfill` and `morpho-vault-backfill`, which are long-running **on-demand

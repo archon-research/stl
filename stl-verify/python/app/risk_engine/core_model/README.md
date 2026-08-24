@@ -10,7 +10,7 @@ Note that CRR is an expected loss, not a tail loss by construction. However, the
 
 This directory contains the CORE model as integrated into the STL service. The original standalone version lives in [`core_model_copy/`](https://github.com/TWave-code/core_model_copy). The integration wires CORE as a first-class `RiskModel` backed by a pre-compute cronjob and a thin API service that reads the results.
 
-The model reads static parquet snapshots in this PR; the parquet-to-live-table swaps land later in the stack (see the PR description).
+The model reads static parquet snapshots in this PR; the parquet-to-live-table swaps land in the next PR of the stack (see the PR description).
 
 ---
 
@@ -22,13 +22,14 @@ The financial model logic (ARMA-GARCH calibration, copula simulation, liquidatio
 |---|---|
 | `main.py` replaced by `runner.py` | Original `main.py` printed results to stdout. `runner.py` is a pure function that accepts typed inputs and returns a typed `CoreModelPipelineResult` dataclass, making it testable and composable. |
 | Import paths updated (`from app.risk_engine.core_model.X import Y`) | Required for Python package structure; original used bare module imports only valid when run from the same directory. |
-| `Parallel(n_jobs=-1)` changed to `Parallel(n_jobs=4)` | `-1` consumed all available CPUs and caused OOM in constrained environments. |
+| `Parallel(n_jobs=-1)` changed: `n_jobs=4` in the calibrator backtest, `n_jobs=1` in the Monte Carlo | `-1` consumed all available CPUs and caused OOM in constrained environments. Note the MC has **always run sequentially**: the earlier `Parallel(jobs=4)` was a typo joblib silently swallowed (`Parallel.__init__` forwards unknown kwargs to the backend), leaving `n_jobs` at its default of 1. The explicit `n_jobs=1` changes nothing at runtime — it turns the accident into a decision. Do not "restore" parallelism: per-scenario tensors peak at ~8.0 GiB for the heaviest market (measured at N_MC=10000), and loky workers would multiply that past any pod memory limit. The backtest parallelises fine — its per-window state is small. |
 | `orderbook_data` lookup lowercased (`symbol.lower()`) | Original assumed the working directory was case-insensitive (macOS). Lowercase normalisation is required for Linux where the service runs. |
 | Bare `except:` changed to `except Exception:` | Required by the project linter (ruff). |
 | `importer.py` reduced to `change_user_ltvs` only | `load_protocol_data` and `load_price_data` were dead code replaced by the `CoreModelDataReader` port. `load_orderbook_data` moved to `ParquetCoreModelDataReader.get_orderbooks()` (also added to the port), so all I/O goes through the same abstraction. `Liquidator` now accepts pre-loaded orderbooks instead of loading them internally
 | Dead variable assignments removed (`slippage`, `P`, `new_supply_qty_df`) | Three variables were initialized then immediately overwritten before first use, producing no-op assignments. Removed to reduce noise. |
 | `JUMPS + HOURLY_CONV` raises `NotImplementedError` | The original code called `importer.load_data_yahoo()` which never existed in this codebase (yfinance is not a service dependency). The dead call is replaced with an explicit error so the combination is rejected at runtime rather than crashing with `AttributeError`. |
 | Three `# TODO` comments added | Document known bugs in the original code that were not fixed during integration (see **Known Issues** section). |
+| `default_params.json` `_comment` extended | States that the schema's min/max/choices are advisory and enforced nowhere — upstream's convention (a human editing overrides in `main.py` with the schema open), kept deliberately. |
 
 ---
 
@@ -123,7 +124,7 @@ runner.py             Service entry point — orchestrates the full pipeline
 | `LOAN_TOKEN` | `USDC` | Filter positions by loan token (`ALL` = no filter) |
 | `SEED` | `0` | Global random seed |
 
-All parameters can be overridden via `CORE_MODEL_*` environment variables when running the pre-compute pipeline (the runner entry point lands in the next PR of the stack).
+All parameters can be overridden via environment variables when running the cronjob — see `app/services/core_model_runner/config.py` for the full mapping.
 
 ---
 
@@ -201,14 +202,35 @@ references (`20260604_…_seed_sparklend_spusdt_receipt_token.sql` and
 that has migrations applied — `make dev-up`, integration test containers, a
 plain migrate run — resolves the mapping at startup.
 
-### Step 2 — Run the pre-compute pipeline
+### Step 2 — Run the pre-compute cronjob
 
-> This PR ships the model, its readers and the API; the scheduled Temporal
-> runner that populates `core_model_results` lands in the next PR of this
-> stack (see the PR description). Until then, results rows come from tests or
-> a manual `runner.run(...)` invocation.
+The runner has two modes. Market-specific params (`PROTOCOL`, `LOAN_TOKEN`, etc.) are loaded automatically from `inputs/market_configs.json` — only `CORE_MODEL_MARKET_KEY` is required in both.
 
-Market-specific params (`PROTOCOL`, `LOAN_TOKEN`, etc.) are loaded from `inputs/market_configs.json`.
+**One-shot** — computes, writes, exits. No Temporal. This is what `make dev-up` users want for a quick check, and what a hand-triggered run looks like:
+
+```bash
+# From stl-verify/ — defaults to every market against the dev-up database
+make run-core-model
+make run-core-model MARKET=sparklend_usdt N_MC=200
+
+# Or directly, from stl-verify/python/
+DATABASE_URL=postgresql://... \
+CORE_MODEL_MARKET_KEY=sparklend_usdt \
+uv run python -m cli.cronjobs.core_model_runner.main --once
+```
+
+**Scheduled worker** — the default mode, and what the `core-model-runner` Deployment runs. It registers a Temporal schedule on startup and then serves its task queue:
+
+```bash
+TEMPORAL_HOST_PORT=localhost:7233 \
+DATABASE_URL=postgresql://... \
+CORE_MODEL_MARKET_KEY=all \
+uv run python -m cli.cronjobs.core_model_runner.main
+```
+
+Scheduling follows the repo convention (`CONTRIBUTING.md` §9): Temporal owns the schedule, not Kubernetes. The interval defaults to 24h and is set by `CORE_MODEL_RUN_INTERVAL_HOURS`, but **changing that variable does not move an existing schedule** — delete the schedule in the Temporal UI or CLI and restart the worker.
+
+A tick runs as a single activity with a 4-hour timeout and no retries: the inputs do not change until the next window, and `core_model_results` is append-only, so retrying a partly-finished pass would duplicate rows for the markets that already succeeded. Overlapping runs are skipped for the same reason.
 
 Params are resolved in three layers (lowest wins):
 1. `inputs/default_params.json` — canonical defaults
@@ -274,16 +296,29 @@ app/risk_engine/core_model/
 
 app/ports/
 ├── core_model_data_reader.py     Port: get_protocol_data, get_prices
-└── core_model_results_reader.py  Port: get_latest(market_key)
+├── core_model_results_reader.py  Port: get_latest(market_key)
+└── core_model_results_writer.py  Port: insert(result) — the cronjob's write side
 
 app/adapters/
 ├── parquet/core_model_data_reader.py    Reads static parquet snapshots
-└── postgres/core_model_results_reader.py  Reads core_model_results table
+├── postgres/core_model_results_reader.py  Reads core_model_results table
+└── postgres/core_model_results_writer.py  Appends to core_model_results (no ON CONFLICT)
 
 app/services/core_model_risk_service.py  RiskModel implementation
-```
 
-(The Temporal runner and its CLI entry point land in the next PR of the stack.)
+app/services/core_model_runner/
+├── config.py    Param resolution (defaults -> market config -> env)
+├── service.py   The body of one tick: run each market, append via the writer port
+└── workflow.py  Temporal workflow; sandboxed, imports nothing from the model
+
+app/adapters/temporal/
+└── cronjob.py   Shared harness: connect, ensure/reconcile schedule, run worker
+
+cli/cronjobs/core_model_runner/
+├── main.py      Entry point: Temporal worker, or --once. No business logic.
+└── activity.py  The activity + tick wiring (engine, writer, reader); the only
+                 side of the workflow/activity pair that may import the model
+```
 
 ---
 

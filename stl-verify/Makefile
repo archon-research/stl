@@ -166,6 +166,19 @@ run-sparklend-position-tracker-avax:
 	@echo "==> Running Avalanche SparkLend position tracker (chain_id=43114)..."
 	@set -a && . cmd/workers/sparklend-indexer/.env.avax && [ -f cmd/workers/sparklend-indexer/.env.avax.local ] && . cmd/workers/sparklend-indexer/.env.avax.local; set +a && go run ./cmd/workers/sparklend-indexer
 
+# Run one CORE model pass on the host against the dev-up database (requires dev-up
+# first). This is the --once path: no Temporal, computes and writes, then exits.
+# The scheduled worker is the Deployment that dev-up rolls out.
+#   make run-core-model                              # every configured market
+#   make run-core-model MARKET=sparklend_usdt N_MC=200   # one market, quick
+CORE_MODEL_DB_URL ?= postgresql://postgres:postgres@127.0.0.1:5432/stl_verify
+MARKET ?= all
+run-core-model:
+	@echo "==> Running CORE model (market=$(MARKET), N_MC=$(if $(N_MC),$(N_MC),per-market config))..."
+	@cd python && DATABASE_URL="$(CORE_MODEL_DB_URL)" CORE_MODEL_MARKET_KEY="$(MARKET)" \
+		$(if $(N_MC),CORE_MODEL_N_MC="$(N_MC)",) \
+		uv run python -m cli.cronjobs.core_model_runner.main --once
+
 # Run tests with race detector
 test-race:
 	@echo "==> Running tests with race detector..."
@@ -2350,7 +2363,9 @@ kind-load-python-api:
 # `make kind-deploy-data-validator` (see k8s/overlays/dev/data-validator), not part of dev-up.
 
 CRONJOBS := $(sort $(notdir $(patsubst %/main.go,%,$(wildcard cmd/cronjobs/*/main.go))))
-CRONJOB_DEPLOYMENTS := spark-anchorage-indexer offchain-price-indexer reference-capital-indexer morpho-v2-bootstrap
+# core-model-runner has no image of its own — it is a Python entry point served
+# from the python-api image (see k8s/overlays/dev/kustomization.yaml).
+CRONJOB_DEPLOYMENTS := spark-anchorage-indexer offchain-price-indexer reference-capital-indexer morpho-v2-bootstrap core-model-runner
 
 # The Deployment behind one cmd/cronjobs package name — the same name, except for the
 # anchorage-indexer mismatch above. Targets that take NAME= take the package name.

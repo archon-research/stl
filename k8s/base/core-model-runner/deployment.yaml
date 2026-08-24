@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: core-model-runner
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: core-model-runner
+  template:
+    metadata:
+      labels:
+        app: core-model-runner
+    spec:
+      serviceAccountName: core-model-runner
+      containers:
+        - name: core-model-runner
+          # Runs out of the python-api image: the model, its parquet inputs and
+          # the runner entry point all ship inside stl-verify/python.
+          image: core-model-runner
+          command: ["python", "-m", "cli.cronjobs.core_model_runner.main"]
+          # No otel-config mount, unlike the sibling cronjobs: the Python
+          # cronjob harness emits no telemetry yet. This is the line that
+          # changes when run metrics (cronjob_runs_total) land.
+          envFrom:
+            - configMapRef:
+                name: core-model-runner
+            - secretRef:
+                name: core-model-runner
+          env:
+            - name: CORE_MODEL_MARKET_KEY
+              value: "all"
+          # Larger than the other cronjobs (50m/64Mi, IO against an external
+          # API): this tick is the GARCH fit and Monte Carlo itself,
+          # in-process and single-threaded (forecaster.py pins the MC to
+          # n_jobs=1 -- loky workers would multiply the per-scenario tensors;
+          # the calibrator backtest still runs 4 joblib workers, hence the cpu
+          # limit). Memory scales with N_MC and accumulates across the 9
+          # markets of one "all" tick -- measured at N_MC=100: ~0.97 GiB for
+          # the full pass (~0.4 GiB heaviest single market); the 10000 default
+          # peaks at ~8.0 GiB on one market alone. Sized for the capped runs
+          # (dev and staging both pin N_MC=100 in their overlays); raising the
+          # cap must raise this limit with it, from a fresh full-pass
+          # measurement.
+          resources:
+            requests:
+              cpu: "1"
+              memory: "1Gi"
+            limits:
+              cpu: "4"
+              memory: "2Gi"
+      terminationGracePeriodSeconds: 60

@@ -29,7 +29,10 @@ WORKDIR /app
 COPY python/pyproject.toml python/uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
-# Copy application code and install the project
+# Copy application code and install the project. cli/ is deliberately absent:
+# the wheel only packages `app` (pyproject [tool.hatch.build.targets.wheel]),
+# and the final stage copies cli/ from the build context, so copying it here
+# would only invalidate the uv sync layer on every cli/ edit.
 COPY python/.env.default ./.env.default
 COPY python/app/ app/
 COPY python/suraf/ suraf/
@@ -83,6 +86,7 @@ COPY --from=builder --chown=appuser:appuser /app/.venv /app/.venv
 COPY --from=builder --chown=appuser:appuser /app/app /app/app
 COPY --from=builder --chown=appuser:appuser /app/suraf /app/suraf
 COPY --from=builder --chown=appuser:appuser /app/.env.default /app/.env.default
+COPY --chown=appuser:appuser python/cli /app/cli
 
 # Copy built UI assets for static hosting
 COPY --from=ui-builder --chown=appuser:appuser /ui/ui/dist /app/app/static

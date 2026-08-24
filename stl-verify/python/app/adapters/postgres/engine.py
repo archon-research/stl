@@ -5,8 +5,6 @@ from sqlalchemy import event
 from sqlalchemy.engine.interfaces import ExceptionContext
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-from app.config import Settings
-
 logger = logging.getLogger(__name__)
 
 # The SQLSTATE class-25 errors that mean the server-side backend is gone
@@ -22,26 +20,41 @@ _STALE_TRANSACTION_STATE_ERRORS = (
 )
 
 
-def create_db_engine(settings: Settings) -> AsyncEngine:
-    """Create an async SQLAlchemy engine with the configured connection pool.
+def create_db_engine(
+    url: str,
+    *,
+    pool_size: int | None = None,
+    max_overflow: int | None = None,
+    pool_timeout: float | None = None,
+    pool_recycle: int | None = None,
+    statement_cache_size: int | None = None,
+) -> AsyncEngine:
+    """The one engine factory for every process, keyed by an explicit URL.
 
-    The caller owns the engine's lifecycle (the FastAPI lifespan disposes it on
-    shutdown), so this deliberately returns a fresh engine per call rather than
-    caching one for the process.
+    The API's composition root passes ``settings.async_database_url`` plus the
+    Settings-sized pool bounds; workers pass the URL straight from their entry
+    point's environment (a missing var must fail loudly, where Settings would
+    silently fall back to .env.default's localhost URL) and keep SQLAlchemy's
+    pool defaults — a tick holds few connections. pool_pre_ping is
+    unconditional: worker ticks can be hours apart, far past the pooler's idle
+    timeout. The caller owns the engine's lifecycle.
     """
-    engine = create_async_engine(
-        settings.async_database_url,
-        pool_pre_ping=True,
-        pool_size=settings.db_pool_size,
-        max_overflow=settings.db_max_overflow,
-        pool_timeout=settings.db_pool_timeout,
-        pool_recycle=settings.db_pool_recycle_seconds,
-        # One setting feeds both caches; see Settings.db_statement_cache_size.
-        connect_args={
-            "statement_cache_size": settings.db_statement_cache_size,
-            "prepared_statement_cache_size": settings.db_statement_cache_size,
-        },
-    )
+    pool_kwargs: dict = {}
+    if pool_size is not None:
+        pool_kwargs["pool_size"] = pool_size
+    if max_overflow is not None:
+        pool_kwargs["max_overflow"] = max_overflow
+    if pool_timeout is not None:
+        pool_kwargs["pool_timeout"] = pool_timeout
+    if pool_recycle is not None:
+        pool_kwargs["pool_recycle"] = pool_recycle
+    if statement_cache_size is not None:
+        # One value feeds both caches; see Settings.db_statement_cache_size.
+        pool_kwargs["connect_args"] = {
+            "statement_cache_size": statement_cache_size,
+            "prepared_statement_cache_size": statement_cache_size,
+        }
+    engine = create_async_engine(url, pool_pre_ping=True, **pool_kwargs)
     event.listen(engine.sync_engine, "handle_error", mark_stale_transaction_state_as_disconnect)
     return engine
 

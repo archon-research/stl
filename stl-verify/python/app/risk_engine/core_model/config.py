@@ -28,20 +28,29 @@ import json
 import os
 from typing import Any
 
+# The packaged input files (parquet snapshots, param/market configs). Exported
+# so callers resolve it here instead of hand-walking parents from their own
+# file depth.
+INPUTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "inputs")
+
 # Canonical defaults file — lives next to the other input files
-_DEFAULTS_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "inputs",
-    "default_params.json",
-)
+_DEFAULTS_PATH = os.path.join(INPUTS_DIR, "default_params.json")
+
+
+def load_commented_json(path) -> dict:
+    """Load a JSON object, dropping documentation-only keys (leading underscore).
+
+    Both input files lean on this convention: default_params.json carries a
+    _comment entry, market_configs.json carries _comment and _galaxy_disabled.
+    """
+    with open(path, "r") as f:
+        raw = json.load(f)
+    return {k: v for k, v in raw.items() if not k.startswith("_")}
 
 
 def _load_schema(path: str = _DEFAULTS_PATH) -> dict:
     """Return the raw schema dict (each entry has 'value', 'description', …)."""
-    with open(path, "r") as f:
-        raw = json.load(f)
-    # Drop the documentation-only _comment key if present
-    return {k: v for k, v in raw.items() if not k.startswith("_")}
+    return load_commented_json(path)
 
 
 def _flatten(schema: dict) -> dict[str, Any]:
