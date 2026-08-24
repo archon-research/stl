@@ -177,4 +177,23 @@ func IsUniqueViolation(err error) bool {
 	return strings.Contains(msg, uniqueViolationSQLState) || strings.Contains(msg, "unique constraint")
 }
 
+// IsDeadlock reports whether err is a Postgres deadlock. Matched the same way as
+// IsUniqueViolation above.
+func IsDeadlock(err error) bool {
+	if err == nil {
+		return false
+	}
+	type sqlStateProvider interface {
+		SQLState() string
+	}
+	var p sqlStateProvider
+	if errors.As(err, &p) {
+		return p.SQLState() == deadlockDetectedSQLState
+	}
+	msg := err.Error()
+	return strings.Contains(msg, deadlockDetectedSQLState) || strings.Contains(msg, "deadlock detected")
+}
+
 const uniqueViolationSQLState = "23505"
+
+const deadlockDetectedSQLState = "40P01"
