@@ -25,6 +25,9 @@ import (
 type ActivityProgress[T any] struct {
 	mu     sync.Mutex
 	latest []any
+	// absent records that LoadProgress saw the server holding no details for THIS
+	// attempt, which is what makes a bare liveness beat safe (see Beat).
+	absent bool
 	// record is activity.RecordHeartbeat, narrowed to a field so a test can read
 	// the details a heartbeat carries. The SDK batches heartbeats before they
 	// reach a test environment's listener, which is exactly where the details of
@@ -58,10 +61,14 @@ func (p *ActivityProgress[T]) SaveProgress(ctx context.Context, progress T) erro
 // A successful read also seeds what a liveness Beat re-sends: a resumed attempt
 // records nothing of its own until its first unit of work lands, and Temporal
 // keeps only the last heartbeat's details, so a bare ping in that window would
-// erase the record this attempt is resuming from.
+// erase the record this attempt is resuming from. An absent read arms the bare
+// beat instead, because then there is nothing to erase.
 func (p *ActivityProgress[T]) LoadProgress(ctx context.Context) (T, bool, error) {
 	var progress T
 	if !activity.HasHeartbeatDetails(ctx) {
+		p.mu.Lock()
+		p.absent = true
+		p.mu.Unlock()
 		return progress, false, nil
 	}
 	if err := activity.GetHeartbeatDetails(ctx, &progress); err != nil {
@@ -73,14 +80,17 @@ func (p *ActivityProgress[T]) LoadProgress(ctx context.Context) (T, bool, error)
 	return progress, true, nil
 }
 
-// Reset drops the record this store carries. The store lives for the worker
-// PROCESS while heartbeat details belong to one activity execution, so without
-// this a second run on the same pod would beat the first run's position at the
-// server and hand its own retry a resume point over blocks it never covered.
+// Reset drops the record this store carries, and with it what the store knows
+// about the server's details, so Beat falls silent until the next LoadProgress.
+// The store lives for the worker PROCESS while heartbeat details belong to one
+// activity execution, so without this a second run on the same pod would beat the
+// first run's position at the server and hand its own retry a resume point over
+// blocks it never covered.
 func (p *ActivityProgress[T]) Reset() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.latest = nil
+	p.absent = false
 }
 
 // Beat sends the liveness heartbeat, carrying the latest recorded progress.
@@ -89,17 +99,22 @@ func (p *ActivityProgress[T]) Reset() {
 // after a progress heartbeat would erase the resume point and silently send the
 // next attempt back to the start.
 //
-// While the store holds NO record it therefore sends nothing at all. An empty
-// store spans the window from Reset (the top of every execution) to the runner's
-// LoadProgress, and a bare ping there would wipe details the PREVIOUS attempt
-// wrote and this one has not read yet. The tradeoff is deliberate: an attempt
-// that stalls in that window is no longer reported alive, so it trips
-// HeartbeatTimeout instead — which is detection, and leaves the server-side
-// resume point untouched for the attempt that follows.
+// With no record it beats BARE once LoadProgress has established that the server
+// holds no details for this attempt: there is nothing left to erase, and an
+// attempt whose first chunk outlasts HeartbeatTimeout must not be killed before
+// it can record anything — no attempt would ever get further, since none of them
+// has details to resume from either.
+//
+// It is silent only between Reset (the top of every execution) and that
+// LoadProgress, where a bare ping would wipe details the PREVIOUS attempt wrote
+// and this one has not read yet.
 func (p *ActivityProgress[T]) Beat(ctx context.Context) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.latest == nil {
+		if p.absent {
+			p.record(ctx)
+		}
 		return
 	}
 	p.record(ctx, p.latest...)

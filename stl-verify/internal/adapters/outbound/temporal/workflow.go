@@ -115,8 +115,8 @@ func (a *cronjobActivities) Execute(ctx context.Context, scheduledAt time.Time) 
 // worker still alive", not "how far has it got". A runner that DOES record
 // progress supplies one, and the ping goes through it — Temporal keeps only the
 // last heartbeat's details, so a bare ping in between would erase them. Such a
-// store also swallows the ping entirely while it holds no record, which is a
-// liveness gap taken on purpose: see ActivityProgress.Beat.
+// store swallows the ping only until it has read this execution's details, a
+// window narrow by design: see ActivityProgress.Beat.
 //
 // Exported because activities outside this package (the morpho-vault-backfill's,
 // which register their own workflows through RunWorker rather than running as a

@@ -15,6 +15,14 @@
 -- backfill replay touches, and ADR-0002's corrections-as-new-rows model was inoperative
 -- for this table.
 --
+-- Only this table is fixed here because it is the one strictly-append-only table in this
+-- change that both carries a compression policy and receives correction replays; the
+-- siblings the same work adds (morpho_vault_cap, morpho_vault_fee,
+-- morpho_adapter_membership) have no compression policy, so their trigger-assigned
+-- versions reach the arbiter intact on rowstore chunks. The general case — every
+-- assign_processing_version_* table sitting on a compressed hypertable shares this defect
+-- — is tracked as VEC-615.
+--
 -- The rule therefore moves into next_processing_version_morpho_adapter_state, so the
 -- INSERT and the trigger share ONE definition of it — the advisory-lock key included,
 -- which has to match or the serialization ADR-0002 §3 requires is lost. A repository

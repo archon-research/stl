@@ -171,11 +171,71 @@ func TestActivityProgress_LivenessBeatCarriesTheLastRecordedProgress(t *testing.
 	}
 }
 
-// TestActivityProgress_BeatBeforeAnyRecordSendsNothing: an empty store cannot
-// tell "this attempt has genuinely made no progress" from "this attempt has not
-// read the previous one's resume point yet", so it sends no heartbeat at all
-// rather than a bare one that would erase whatever the server holds.
-func TestActivityProgress_BeatBeforeAnyRecordSendsNothing(t *testing.T) {
+// TestActivityProgress_BeatAfterAnEstablishedAbsenceSendsABareHeartbeat: an
+// attempt the server holds no details for has nothing to re-send, so staying
+// silent would leave everything before its first SaveProgress unheartbeated and
+// trip HeartbeatTimeout on a slow first chunk — on every attempt, since none of
+// them has details either. A bare ping there can erase nothing.
+func TestActivityProgress_BeatAfterAnEstablishedAbsenceSendsABareHeartbeat(t *testing.T) {
+	env := (&testsuite.WorkflowTestSuite{}).NewTestActivityEnvironment()
+	progress := NewActivityProgress[sweepPoint]()
+	var sent [][]any
+	progress.record = func(_ context.Context, details ...any) { sent = append(sent, details) }
+
+	loadThenBeat := func(ctx context.Context) error {
+		if _, _, err := progress.LoadProgress(ctx); err != nil {
+			return err
+		}
+		progress.Beat(ctx)
+		return nil
+	}
+	env.RegisterActivity(loadThenBeat)
+	if _, err := env.ExecuteActivity(loadThenBeat); err != nil {
+		t.Fatalf("ExecuteActivity: %v", err)
+	}
+
+	if len(sent) != 1 {
+		t.Fatalf("heartbeats sent = %d, want 1 (the bare liveness beat)", len(sent))
+	}
+	if len(sent[0]) != 0 {
+		t.Errorf("the beat after an established absence carried %v, want no details", sent[0])
+	}
+}
+
+// TestActivityProgress_ResetSilencesTheBeatAfterAnEstablishedAbsence: the store
+// outlives one activity execution, so an absence carried into the next one would
+// let it bare-beat away details that execution's own earlier attempt wrote, before
+// its LoadProgress has read them.
+func TestActivityProgress_ResetSilencesTheBeatAfterAnEstablishedAbsence(t *testing.T) {
+	env := (&testsuite.WorkflowTestSuite{}).NewTestActivityEnvironment()
+	progress := NewActivityProgress[sweepPoint]()
+	var sent [][]any
+	progress.record = func(_ context.Context, details ...any) { sent = append(sent, details) }
+
+	loadResetThenBeat := func(ctx context.Context) error {
+		if _, _, err := progress.LoadProgress(ctx); err != nil {
+			return err
+		}
+		progress.Reset()
+		progress.Beat(ctx)
+		return nil
+	}
+	env.RegisterActivity(loadResetThenBeat)
+	if _, err := env.ExecuteActivity(loadResetThenBeat); err != nil {
+		t.Fatalf("ExecuteActivity: %v", err)
+	}
+
+	if len(sent) != 0 {
+		t.Errorf("heartbeats sent = %d (%v), want none once a reset has dropped the absence", len(sent), sent)
+	}
+}
+
+// TestActivityProgress_BeatBeforeLoadOrRecordSendsNothing: until LoadProgress
+// has established what the server holds, the store cannot tell "this attempt has
+// genuinely made no progress" from "this attempt has not read the previous one's
+// resume point yet", so it sends no heartbeat rather than a bare one that would
+// erase whatever the server holds.
+func TestActivityProgress_BeatBeforeLoadOrRecordSendsNothing(t *testing.T) {
 	progress := NewActivityProgress[sweepPoint]()
 	var sent [][]any
 	progress.record = func(_ context.Context, details ...any) { sent = append(sent, details) }
@@ -183,6 +243,6 @@ func TestActivityProgress_BeatBeforeAnyRecordSendsNothing(t *testing.T) {
 	progress.Beat(context.Background())
 
 	if len(sent) != 0 {
-		t.Errorf("heartbeats sent = %d (%v), want none before the store holds a record", len(sent), sent)
+		t.Errorf("heartbeats sent = %d (%v), want none before a load or a record", len(sent), sent)
 	}
 }

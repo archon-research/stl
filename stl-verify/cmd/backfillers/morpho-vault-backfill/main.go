@@ -65,8 +65,6 @@ const (
 	// only way to see how far a long backfill has got without reading raw history.
 	progressQueryName = "progress"
 
-	defaultDatabaseURL = "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable"
-
 	// rpcConcurrency is the historical RPC budget for this pipeline, deliberately
 	// decoupled from config.goroutines (which sizes the S3 reader pool).
 	rpcConcurrency = 10
@@ -91,11 +89,19 @@ func main() {
 }
 
 func run(ctx context.Context) error {
+	// Require DATABASE_URL rather than default to localhost: a deployed worker
+	// that silently connected to a local (empty) database would look healthy
+	// while backfilling nothing.
+	dbURL, err := env.Require("DATABASE_URL")
+	if err != nil {
+		return fmt.Errorf("startup configuration: %w", err)
+	}
+
 	return temporal.RunWorker(ctx, temporal.BuildMeta{
 		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
 	}, temporal.WorkerConfig{
 		Name:         jobName,
-		OpenDatabase: postgres.PoolOpener(postgres.DefaultDBConfig(env.Get("DATABASE_URL", defaultDatabaseURL))),
+		OpenDatabase: postgres.PoolOpener(postgres.DefaultDBConfig(dbURL)),
 		Register:     register,
 	})
 }
