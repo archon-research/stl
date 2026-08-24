@@ -39,24 +39,17 @@ const sizeClassNames: Record<PandaSizeToken, string> = {
   '11': css({ width: '11', height: '11' }),
 };
 
-const sizeTokenPx: Record<PandaSizeToken, number> = {
-  '4': 16,
-  '5': 20,
-  '6': 24,
-  '7': 28,
-  '8': 32,
-  '9': 36,
-  '10': 40,
-  '11': 44,
-};
-
 /**
  * Initials sized to the disc rather than a fixed step: a fixed `2xs` nearly
  * touches the border of a 16px avatar, so the text fallback read as a smaller,
- * cramped sibling of a resolved logo in the same column.
+ * cramped sibling of a resolved logo in the same column. The token path stays
+ * in rem via the size token's own variable, so a user-enlarged root font
+ * scales the initials with the disc.
  */
-function fallbackFontSizePx(boxPx: number): number {
-  return Math.max(7, Math.round(boxPx * 0.4));
+function fallbackFontSize(size: PandaSizeToken, sizePx?: number): string {
+  return sizePx !== undefined
+    ? `${Math.max(7, Math.round(sizePx * 0.4))}px`
+    : `max(7px, calc(var(--sizes-${size}) * 0.4))`;
 }
 
 export function LogoAvatar({
@@ -81,7 +74,6 @@ export function LogoAvatar({
     );
   }, [imageUrl, fallbackImageUrl, failCount]);
 
-  const boxPx = sizePx ?? sizeTokenPx[size];
   const sizingStyle = sizePx
     ? { width: `${sizePx}px`, height: `${sizePx}px` }
     : undefined;
@@ -90,6 +82,11 @@ export function LogoAvatar({
 
   return (
     <Avatar.Root
+      // The avatar machine arms its error tracking against the img element it
+      // starts with; keying on the URL pair restarts it when the pair changes
+      // (DataTable reuses row instances), so a swapped-in URL's failure is
+      // still seen, cached, and advanced past.
+      key={`${imageUrl ?? ''}|${fallbackImageUrl ?? ''}`}
       onStatusChange={(details: AvatarStatusChangeDetails) => {
         if (details.status === 'error' && activeImageUrl) {
           const isFirstFailure = !failedLogoUrls.has(activeImageUrl);
@@ -104,6 +101,8 @@ export function LogoAvatar({
             imageUrl: activeImageUrl,
             alt,
             fallbackText,
+            // True means the chain is exhausted and initials are terminal.
+            wasFallback: activeImageUrl === fallbackImageUrl,
           });
         }
       }}
@@ -137,7 +136,7 @@ export function LogoAvatar({
           textAlign: 'center',
           userSelect: 'none',
         })}
-        style={{ fontSize: `${fallbackFontSizePx(boxPx)}px` }}
+        style={{ fontSize: fallbackFontSize(size, sizePx) }}
       >
         {fallbackText}
       </Avatar.Fallback>
