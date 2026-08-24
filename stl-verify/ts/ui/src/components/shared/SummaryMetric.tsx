@@ -1,4 +1,5 @@
 import { InfoPopover, StatTile } from '@archon-research/design-system';
+import { Info } from 'lucide-react';
 import type { ReactNode } from 'react';
 
 import { css } from '#styled-system/css';
@@ -44,15 +45,28 @@ export function SummaryMetric({
         info === undefined ? (
           label
         ) : (
+          // Full-width row so the glyph sits at the card's right edge, at
+          // label height, rather than trailing the text.
           <span
             className={css({
-              display: 'inline-flex',
+              display: 'flex',
+              width: '100%',
               alignItems: 'center',
-              gap: '1',
+              justifyContent: 'space-between',
+              gap: '2',
             })}
           >
             {label}
-            <InfoPopover label={`About ${label}`} placement="top">
+            <InfoPopover
+              label={`About ${label}`}
+              placement="top-end"
+              trigger={<Info size={14} aria-hidden />}
+              className={css({
+                display: 'inline-flex',
+                color: 'text.muted',
+                _hover: { color: 'text.strong' },
+              })}
+            >
               {info}
             </InfoPopover>
           </span>
