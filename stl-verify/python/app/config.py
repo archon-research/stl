@@ -57,6 +57,19 @@ class Settings(BaseSettings):
     # hundreds of milliseconds, so ten seconds of queueing means saturation, and
     # failing then keeps it legible instead of silently slow.
     db_pool_timeout: int = Field(default=10, ge=1)
+    # Ceiling on how long a pooled connection lives before it is re-opened.
+    # Bounds the blast radius of a connection the disconnect handling misses:
+    # after a pooler incident (see create_db_engine), a poisoned connection can
+    # keep answering the pre-ping while failing real queries, and this is the
+    # backstop that retires it.
+    db_pool_recycle_seconds: int = Field(default=300, ge=1)
+    # Per-connection prepared-statement caching assumes one server backend per
+    # client connection, which a transaction-mode pooler (the TigerData pooler
+    # in staging/prod) does not guarantee: a statement prepared on one backend
+    # can be executed on another. Governs both asyncpg's implicit cache and the
+    # SQLAlchemy dialect's own cache. 0 disables both; raise it only for a
+    # direct connection or a session-mode pooler.
+    db_statement_cache_size: int = Field(default=0, ge=0)
 
     @property
     def async_database_url(self) -> str:

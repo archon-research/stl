@@ -593,6 +593,12 @@ data:
   DB_POOL_SIZE: "5"
   DB_MAX_OVERFLOW: "10"
   DB_POOL_TIMEOUT: "10"
+  # Recycle retires connections poisoned by a pooler incident that the app's
+  # disconnect handling misses; the statement cache must stay 0 behind a
+  # transaction-mode pooler (see app/config.py). Declared here, like the pool
+  # values above, so an operator can tune them without a rebuild.
+  DB_POOL_RECYCLE_SECONDS: "300"
+  DB_STATEMENT_CACHE_SIZE: "0"
 ---
 apiVersion: v1
 kind: ConfigMap
