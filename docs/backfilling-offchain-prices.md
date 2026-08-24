@@ -186,11 +186,15 @@ a window returning 19 of 721 points passes as served.
 ```bash
 cd stl-verify
 make dev-up                                        # kind cluster incl. Temporal + TimescaleDB
-make dev-env                                       # writes cmd/backfillers/*/.env
+make dev-env                                       # writes the .env files dev-env-files names
 make run-backfiller-offchain-price-backfill        # run the worker on the host
 ```
 
 Local Temporal UI: `http://127.0.0.1:8233/namespaces/vector/workflows`.
+
+`dev-env` covers only the jobs the `dev-env-files` target names — `offchain-price-backfill`
+is one of them. For a backfiller it does not cover, copy a covered job's `.env` and edit
+the job-specific keys.
 
 Note `make dev-env` fetches the `coingecko_api_key` secret, which has been observed
 deactivated; if requests come back HTTP 401, put a working key in

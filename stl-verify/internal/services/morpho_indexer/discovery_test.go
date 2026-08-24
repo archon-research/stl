@@ -1308,7 +1308,7 @@ func TestProcessBlockEvent_VaultDiscovery_AlreadyKnownNotVault(t *testing.T) {
 // (VEC-198 PR feedback), V1/V1.1 vaults can no longer be discovered via
 // their own Deposit / Withdraw / V1 AccrueInterest logs.
 //
-// The morpho-vault-indexer backfiller already handles this via
+// The morpho-vault-backfill already handles this via
 // emitMorphoBlueCandidates, but the backfiller is recovery-only — operators
 // run it when they realise something was missed, not on a schedule. The
 // live indexer therefore has to cover V1/V1.1 discovery itself by mirroring
@@ -1635,7 +1635,7 @@ func TestProcessReceipt_VaultDiscovery_MorphoBluePath_DepositPlusSupplyInOnePass
 }
 
 // TestMorphoBlueVaultCandidates_TableDriven pins the contract that the live
-// indexer and the morpho-vault-indexer backfiller share via
+// indexer and the morpho-vault-backfill share via
 // MorphoBlueVaultCandidates. A future PR that, say, switches Liquidate to
 // return only {Caller} or replaces the type switch with reflection on field
 // names "Caller"+"OnBehalf" must fail this test rather than silently drift

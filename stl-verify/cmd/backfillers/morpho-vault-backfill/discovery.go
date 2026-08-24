@@ -1,20 +1,3 @@
-// Backfill discovers MetaMorpho vaults by scanning historical Ethereum receipt
-// files stored in S3 for Morpho Blue events. Candidate addresses (caller/onBehalf)
-// are collected, then probed on-chain via multicall (MORPHO() must return the
-// Morpho Blue singleton). Confirmed vaults are stored in the morpho_vault table.
-// A final phase replays the persisted VaultV2 vaults' structured events.
-//
-// A run keeps no progress state: every run redoes the full requested range, and
-// an interrupted run is resumed by re-running the same command.
-//
-// Usage:
-//
-//	go run ./cmd/backfillers/morpho-vault-indexer \
-//	  -from 18883124 -to 24600000 \
-//	  -bucket stl-sentinelstaging-ethereum-raw-89d540d0 \
-//	  -db "$DATABASE_URL" \
-//	  -rpc-url "$RPC_URL" \
-//	  -goroutines 64
 package main
 
 import (
@@ -23,187 +6,32 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
-	"net/http"
-	"os"
-	"os/signal"
 	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/ethclient"
-	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
-	s3adapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/s3"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/awsconfig"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving/archivingwire"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/multicall"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/env"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/partition"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/rpchttp"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/s3key"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/morpho_indexer"
 	"github.com/archon-research/stl/stl-verify/internal/services/shared"
 )
 
-func main() {
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-
-	if err := run(ctx, os.Args[1:]); err != nil {
-		slog.Error("fatal error", "error", err)
-		os.Exit(1)
-	}
-}
-
-func run(ctx context.Context, args []string) error {
-	cfg, err := parseConfig(args)
-	if err != nil {
-		return err
-	}
-
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: env.ParseLogLevel(slog.LevelInfo),
-	}))
-	slog.SetDefault(logger)
-
-	logger.Info("starting morpho vault backfill",
-		"from", cfg.from,
-		"to", cfg.to,
-		"bucket", cfg.bucket,
-		"chainID", cfg.chainID,
-		"goroutines", cfg.goroutines)
-
-	// AWS + S3
-	awsCfg, err := awsconfig.Load(ctx, awsconfig.Options{
-		StaticCredentialsFromEnv: true,
-	})
-	if err != nil {
-		return fmt.Errorf("loading AWS config: %w", err)
-	}
-	s3HTTPClient := &http.Client{
-		Transport: &http.Transport{
-			Proxy: http.ProxyFromEnvironment,
-			DialContext: (&net.Dialer{
-				Timeout:   30 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
-			MaxIdleConns:          cfg.goroutines + 64,
-			MaxIdleConnsPerHost:   cfg.goroutines + 64,
-			MaxConnsPerHost:       cfg.goroutines + 64,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ExpectContinueTimeout: 1 * time.Second,
-		},
-	}
-	s3Reader := s3adapter.NewReaderWithHTTPClient(awsCfg, s3HTTPClient, logger)
-
-	// PostgreSQL
-	pool, err := postgres.OpenPool(ctx, postgres.DefaultDBConfig(cfg.dbURL))
-	if err != nil {
-		return fmt.Errorf("opening database: %w", err)
-	}
-	defer pool.Close()
-	logger.Info("PostgreSQL connected")
-
-	buildReg, err := buildregistry.New(ctx, pool)
-	if err != nil {
-		return fmt.Errorf("registering build: %w", err)
-	}
-
-	// Ethereum RPC. Retry 429/5xx/network errors via rpchttp so transient
-	// RPC failures don't mark blocks bad. RPC-side concurrency is
-	// deliberately decoupled from cfg.goroutines (which sizes the S3
-	// reader pool above) — 10 is the historical RPC budget here.
-	rpcClient, err := rpc.DialOptions(ctx, cfg.rpcURL, rpc.WithHTTPClient(rpchttp.NewBackfillerClient(10)))
-	if err != nil {
-		return fmt.Errorf("connecting to RPC: %w", err)
-	}
-	defer rpcClient.Close()
-	ethClient := ethclient.NewClient(rpcClient)
-	logger.Info("Ethereum RPC connected")
-
-	rpcChainID, err := ethClient.ChainID(ctx)
-	if err != nil {
-		return fmt.Errorf("fetching RPC chain ID: %w", err)
-	}
-	if rpcChainID.Int64() != cfg.chainID {
-		return fmt.Errorf("RPC chain ID mismatch: RPC reports %d, config says %d", rpcChainID.Int64(), cfg.chainID)
-	}
-
-	multicaller, err := multicall.NewClient(ethClient, blockchain.Multicall3)
-	if err != nil {
-		return fmt.Errorf("creating multicall client: %w", err)
-	}
-
-	// Optional raw SC call archiving (VEC-81). Off unless ARCHIVE_SC_CALLS=true.
-	archiveWrap, archiveDrain, err := archivingwire.Bootstrap(ctx, logger, cfg.chainID, int64(buildReg.BuildID()), "morpho-vault")
-	if err != nil {
-		return err
-	}
-	defer archiveDrain()
-	multicaller = archiveWrap(multicaller)
-
-	// Shared vault prober (handles MetaMorpho ABI internally)
-	sharedProber, err := morpho_indexer.NewVaultProber()
-	if err != nil {
-		return fmt.Errorf("creating vault prober: %w", err)
-	}
-	erc20ABI, err := abis.GetERC20ABI()
-	if err != nil {
-		return fmt.Errorf("loading ERC20 ABI: %w", err)
-	}
-
-	// Event extractor (thread-safe, read-only after init)
-	extractor, err := morpho_indexer.NewEventExtractor()
-	if err != nil {
-		return fmt.Errorf("creating event extractor: %w", err)
-	}
-
-	prober := &vaultProber{
-		multicaller:  multicaller,
-		sharedProber: sharedProber,
-		erc20ABI:     erc20ABI,
-		logger:       logger,
-	}
-
-	// Phases 1–3: scan S3 receipts for candidates, probe them on-chain, persist
-	// confirmed vaults.
-	if err := discoverAndPersistVaults(ctx, logger, s3Reader, extractor, prober, pool, buildReg.BuildID(), cfg); err != nil {
-		return err
-	}
-
-	// Phase 4: replay VaultV2 structured (adapter / cap / fee) events for the
-	// persisted V2 vaults, driving each log through the same handler path the
-	// live worker uses. Runs off the vaults in the database (this run's plus
-	// earlier runs'), so it covers a range that only carries governance events
-	// for a pre-existing V2 vault — which produces no discovery candidate.
-	if err := replayV2StructuredEvents(ctx, logger, s3Reader, ethClient, multicaller, pool, buildReg.BuildID(), cfg); err != nil {
-		return fmt.Errorf("replaying VaultV2 structured events: %w", err)
-	}
-
-	logger.Info("backfill complete")
-	return nil
-}
-
 // discoverAndPersistVaults runs the discovery pipeline: scan S3 receipts for
 // candidate addresses (phase 1), probe them on-chain to confirm vaults (phase
-// 2), and persist the confirmed vaults (phase 3). It returns nil when a phase
-// has nothing to carry forward; the caller's V2 replay phase still runs off the
-// vaults already in the database.
+// 2), and persist the confirmed vaults (phase 3). A phase with nothing to carry
+// forward returns what it did reach rather than an error; the caller's V2 replay
+// phase still runs off the vaults already in the database.
 func discoverAndPersistVaults(
 	ctx context.Context,
 	logger *slog.Logger,
@@ -213,36 +41,39 @@ func discoverAndPersistVaults(
 	pool *pgxpool.Pool,
 	buildID buildregistry.BuildID,
 	cfg config,
-) error {
-	candidates, err := scanBlockRange(ctx, logger, s3Reader, extractor, cfg.bucket, cfg.from, cfg.to, cfg.goroutines)
+	rng blockRange,
+) (discoveryResult, error) {
+	candidates, err := scanBlockRange(ctx, logger, s3Reader, extractor, cfg.bucket, rng.From, rng.To, cfg.goroutines)
 	if err != nil {
-		return fmt.Errorf("scanning block range: %w", err)
+		return discoveryResult{}, fmt.Errorf("scanning block range: %w", err)
 	}
-	logger.Info("scan complete", "uniqueCandidates", len(candidates))
+	got := discoveryResult{Candidates: len(candidates)}
+	logger.Info("scan complete", "uniqueCandidates", got.Candidates)
 	if len(candidates) == 0 {
 		logger.Info("no candidates found, nothing to probe")
-		return nil
+		return got, nil
 	}
 
-	vaults, err := prober.probeAllCandidates(ctx, candidates, cfg.to, cfg.probeBatch)
+	vaults, err := prober.probeAllCandidates(ctx, candidates, rng.To, cfg.probeBatch)
 	if err != nil {
-		return fmt.Errorf("probing candidates: %w", err)
+		return discoveryResult{}, fmt.Errorf("probing candidates: %w", err)
 	}
-	logger.Info("probing complete", "confirmedVaults", len(vaults))
+	got.Vaults = len(vaults)
+	logger.Info("probing complete", "confirmedVaults", got.Vaults)
 	if len(vaults) == 0 {
 		logger.Info("no vaults confirmed")
-		return nil
+		return got, nil
 	}
 
 	deployBlock, err := morpho_indexer.MorphoBlueDeployBlock(cfg.chainID)
 	if err != nil {
-		return fmt.Errorf("getting deploy block: %w", err)
+		return discoveryResult{}, fmt.Errorf("getting deploy block: %w: %w", err, errStructuralData)
 	}
 	if err := persistVaults(ctx, pool, logger, vaults, cfg.chainID, deployBlock, buildID); err != nil {
-		return fmt.Errorf("persisting vaults: %w", err)
+		return discoveryResult{}, fmt.Errorf("persisting vaults: %w", err)
 	}
-	logger.Info("vaults persisted", "count", len(vaults))
-	return nil
+	logger.Info("vaults persisted", "count", got.Vaults)
+	return got, nil
 }
 
 // candidateEntry represents a candidate address and the earliest block it was seen.
@@ -347,6 +178,11 @@ func scanBlockRange(
 
 // listAllBlockKeys lists receipt keys from all partitions concurrently and
 // returns a flat list of block work items sorted by block number.
+//
+// Every send to the result channel watches ctx. The collector abandons the
+// channel at the first error it sees, so the workers still running are handing
+// results to nobody; scanBlockRange cancels as it returns, which is what retires
+// them, where a bare send would park one for the life of this always-on process.
 func listAllBlockKeys(
 	ctx context.Context,
 	logger *slog.Logger,
@@ -374,29 +210,20 @@ func listAllBlockKeys(
 				if ctx.Err() != nil {
 					return
 				}
-				listStart := time.Now()
-				receiptKeys, err := listHighestVersionReceipts(ctx, s3Reader, bucket, part)
-				prog.listDurationMs.Add(time.Since(listStart).Milliseconds())
-				prog.listCount.Add(1)
+				keys, err := listPartitionBlockKeys(ctx, logger, s3Reader, bucket, part, from, to, prog)
 				if err != nil {
-					resultCh <- listResult{err: fmt.Errorf("listing partition %s: %w", part, err)}
+					select {
+					case resultCh <- listResult{err: err}:
+					case <-ctx.Done():
+					}
 					return
 				}
-
-				var keys []blockWork
-				for _, key := range receiptKeys {
-					parsed, ok := s3key.Parse(key)
-					if !ok {
-						continue
-					}
-					if parsed.BlockNumber >= from && parsed.BlockNumber <= to {
-						keys = append(keys, blockWork{key: key, blockNumber: parsed.BlockNumber})
-					}
-				}
-
-				logBlockGapsFromKeys(logger, part, keys, from, to)
 				prog.partitionsDone.Add(1)
-				resultCh <- listResult{keys: keys}
+				select {
+				case resultCh <- listResult{keys: keys}:
+				case <-ctx.Done():
+					return
+				}
 			}
 		})
 	}
@@ -434,16 +261,60 @@ func listAllBlockKeys(
 	return allKeys, nil
 }
 
-// logBlockGapsFromKeys is like logBlockGaps but works with blockWork slices.
-func logBlockGapsFromKeys(logger *slog.Logger, partitionPrefix string, keys []blockWork, from, to int64) {
-	if len(keys) == 0 {
-		return
+// listPartitionBlockKeys returns one partition's highest-version receipt keys
+// inside [from,to], refusing a partition the archive has a hole in.
+//
+// That refusal is the run's ONLY hard archive-completeness check, which is why it
+// lives on the scan every run performs rather than on the replay phase: replay is
+// skipped whole when no VaultV2 vault is known, so a fresh database over an
+// unarchived range would otherwise report success having verified nothing. The
+// WARN goes out first because it maps every gap, where the error names a bounded
+// few.
+func listPartitionBlockKeys(
+	ctx context.Context,
+	logger *slog.Logger,
+	s3Reader outbound.S3Reader,
+	bucket, part string,
+	from, to int64,
+	prog *progress,
+) ([]blockWork, error) {
+	listStart := time.Now()
+	receiptKeys, err := listHighestVersionReceipts(ctx, s3Reader, bucket, part)
+	prog.listDurationMs.Add(time.Since(listStart).Milliseconds())
+	prog.listCount.Add(1)
+	if err != nil {
+		return nil, fmt.Errorf("listing partition %s: %w", part, err)
 	}
-	blockNums := make([]int64, len(keys))
+
+	var keys []blockWork
+	for _, key := range receiptKeys {
+		parsed, ok := s3key.Parse(key)
+		if !ok {
+			continue
+		}
+		if parsed.BlockNumber >= from && parsed.BlockNumber <= to {
+			keys = append(keys, blockWork{key: key, blockNumber: parsed.BlockNumber})
+		}
+	}
+
+	blocks := blockNumbersOf(keys)
+	logBlockGaps(logger, part, blocks, from, to)
+	if err := requireCompletePartition(part, blocks, from, to); err != nil {
+		return nil, err
+	}
+	// The strongest guarantee this run makes deserves a positive trace: silence
+	// here would leave "the archive was verified complete" unobservable.
+	logger.Info("partition archive complete", "partition", part, "blocks", len(blocks))
+	return keys, nil
+}
+
+// blockNumbersOf projects the block numbers out of a partition's key list.
+func blockNumbersOf(keys []blockWork) []int64 {
+	blocks := make([]int64, len(keys))
 	for i, k := range keys {
-		blockNums[i] = k.blockNumber
+		blocks[i] = k.blockNumber
 	}
-	logBlockGaps(logger, partitionPrefix, blockNums, from, to)
+	return blocks
 }
 
 // downloadWorker pulls block work items from workCh, downloads and processes each one.
@@ -778,7 +649,7 @@ func emitMorphoBlueCandidates(
 ) error {
 	event, err := extractor.ExtractMorphoBlueEvent(log)
 	if err != nil {
-		return fmt.Errorf("extracting Morpho Blue event (block %d, tx %s): %w", blockNumber, log.TransactionHash, err)
+		return fmt.Errorf("extracting Morpho Blue event (block %d, tx %s): %w: %w", blockNumber, log.TransactionHash, err, errStructuralData)
 	}
 
 	for _, addr := range morpho_indexer.MorphoBlueVaultCandidates(event) {

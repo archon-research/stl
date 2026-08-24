@@ -44,10 +44,10 @@ func MorphoBlueDeployBlock(chainID int64) (int64, error) {
 // vaultV2FactoryDeployBlocks maps chain IDs to the block at which the Morpho
 // VaultV2 factory (0xA1D94F746dEfa1928926b84fB2596c06926C0405) was deployed.
 // Verified on-chain: the factory has no code at 23375072 and code at 23375073.
-// Used by the morpho-vault-indexer backfiller's --from-v2-deploy flag to default
-// -from to the earliest block any VaultV2 could exist. That bounds the whole
-// backfill pipeline — phase-1 discovery included — not just the V2 replay, so a
-// V1/V1.1 vault whose only activity predates the factory is not discovered.
+// Used by the morpho-vault-backfill's fromV2Deploy parameter to default `from`
+// to the earliest block any VaultV2 could exist. That bounds the whole backfill
+// pipeline — phase-1 discovery included — not just the V2 replay, so a V1/V1.1
+// vault whose only activity predates the factory is not discovered.
 var vaultV2FactoryDeployBlocks = map[int64]int64{
 	1: 23_375_073, // Ethereum mainnet
 }
@@ -73,6 +73,34 @@ func ConfigDefaults() Config {
 	return Config{
 		SQSConsumerConfig: shared.SQSConsumerConfigDefaults(),
 	}
+}
+
+// NewReplayConfig builds the Config every replay composition root
+// (morpho-vault-backfill, morpho-v2-bootstrap) hands NewReplayService, telemetry
+// included. It exists so the wiring lives once: Config.Telemetry is nil-safe, so a
+// root that forgets it silently mutes every event and snapshot a run replays.
+//
+// Not among those signals, ordinarily, is
+// morpho_v2_adapter_registrations_total{observed_via="bootstrap_seed"}: the seed
+// only asserts what the replay already recorded, so a healthy run appends nothing
+// under that label and its absence is the expected reading.
+//
+// Nothing here dials: the chain name is a table lookup and the instruments come
+// from the global meter provider, which no-ops when no exporter is configured.
+func NewReplayConfig(chainID int64, logger *slog.Logger) (Config, error) {
+	chainName, err := entity.ChainName(chainID)
+	if err != nil {
+		return Config{}, fmt.Errorf("resolving the chain name for telemetry: %w", err)
+	}
+	replayTelemetry, err := NewTelemetry(chainName)
+	if err != nil {
+		return Config{}, fmt.Errorf("creating morpho telemetry: %w", err)
+	}
+	config := ConfigDefaults()
+	config.ChainID = chainID
+	config.Logger = logger
+	config.Telemetry = replayTelemetry
+	return config, nil
 }
 
 // Service is the Morpho indexer SQS consumer service.
@@ -128,7 +156,7 @@ func NewService(
 }
 
 // NewReplayService builds a Service wired only for offline replay of
-// already-persisted VaultV2 vaults' structured events — the morpho-vault-indexer
+// already-persisted VaultV2 vaults' structured events — the morpho-vault-backfill
 // backfiller's V2 replay phase. It shares NewService's internals but omits the
 // SQS consumer and block cache: replay reads receipts from S3 and drives logs
 // through ReplayMetaMorphoLog directly, never through the live SQS loop, so Start
@@ -450,7 +478,7 @@ func (s *Service) processReceipt(ctx context.Context, receipt shared.Transaction
 
 	// Pre-walk: probe Morpho Blue events' caller / onBehalf (or borrower
 	// for Liquidate) for V1/V1.1 vault discovery BEFORE the main loop
-	// processes any log. This mirrors the morpho-vault-indexer backfiller's
+	// processes any log. This mirrors the morpho-vault-backfill's
 	// V1/V1.1 path; it has to live in the live indexer because the
 	// backfiller is recovery-only and IsVaultActivityEvent is narrowed to
 	// the V2 4-field AccrueInterest topic, so V1/V1.1 vaults emitting their
@@ -526,8 +554,8 @@ func (s *Service) processReceipt(ctx context.Context, receipt shared.Transaction
 			// transport error — never reaches `ErrNotVault`, never enters
 			// the negative cache, retries forever.
 			//
-			// Same predicate is used by the morpho-vault-indexer backfiller
-			// (see cmd/backfillers/morpho-vault-indexer/main.go), so the
+			// Same predicate is used by the morpho-vault-backfill
+			// (see cmd/backfillers/morpho-vault-backfill/discovery.go), so the
 			// live and offline discovery contracts stay aligned.
 			if !s.eventExtractor.IsVaultActivityEvent(log) {
 				continue
