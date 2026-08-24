@@ -240,6 +240,7 @@ function AllocationUnderlyingCell({ allocation }: { allocation: Allocation }) {
       <TokenAddress
         address={allocation.underlying_token_address}
         chainId={allocation.chain_id}
+        compact
         style={{ fontSize: '0.8rem' }}
       />
     </div>
@@ -288,6 +289,7 @@ function AllocationExposureCell({ allocation }: { allocation: Allocation }) {
       <TokenAddress
         address={allocation.receipt_token_address}
         chainId={allocation.chain_id}
+        compact
         style={{ fontSize: '0.8rem' }}
       />
     </div>
@@ -422,10 +424,8 @@ function lookupAllocationRiskCapital(
 // row `applied: false` under STL's model still has a figure to show. `applied`
 // therefore gates only the STL fallback.
 function appliedRiskCapitalUsd(
-  riskByPositionKey: Map<string, AllocationRiskCapital>,
-  allocation: Allocation,
+  entry: AllocationRiskCapital | undefined,
 ): number | null {
-  const entry = lookupAllocationRiskCapital(riskByPositionKey, allocation);
   if (entry === undefined) {
     return null;
   }
@@ -440,10 +440,8 @@ function appliedRiskCapitalUsd(
 
 // Comparable capital-risk ratio (0-100), Sky's preferred over STL's.
 function preferredCrrPct(
-  riskByPositionKey: Map<string, AllocationRiskCapital>,
-  allocation: Allocation,
+  entry: AllocationRiskCapital | undefined,
 ): number | null {
-  const entry = lookupAllocationRiskCapital(riskByPositionKey, allocation);
   if (entry === undefined) {
     return null;
   }
@@ -460,8 +458,7 @@ function preferredCrrPct(
 // sums to 1. `encumbrance_contribution` on the row divides by available capital
 // instead and sums to the encumbrance ratio, which is a different question.
 function rrcSharePct(
-  riskByPositionKey: Map<string, AllocationRiskCapital>,
-  allocation: Allocation,
+  entry: AllocationRiskCapital | undefined,
   totalRequiredRiskCapitalUsd: number | null,
 ): number | null {
   if (
@@ -471,7 +468,7 @@ function rrcSharePct(
     return null;
   }
 
-  const rrc = appliedRiskCapitalUsd(riskByPositionKey, allocation);
+  const rrc = appliedRiskCapitalUsd(entry);
   return rrc === null ? null : rrc / totalRequiredRiskCapitalUsd;
 }
 
@@ -501,13 +498,11 @@ function isRiskCapitalChainMismatch(
 }
 
 function AllocationRiskCapitalCell({
-  entry,
-  isChainMismatch,
+  risk,
 }: {
-  entry: AllocationRiskCapital | undefined;
-  isChainMismatch: boolean;
+  risk: AllocationGridRow['risk'];
 }) {
-  if (isChainMismatch) {
+  if (risk.chainMismatch) {
     return (
       <p
         title="Risk capital is not yet available for non-mainnet allocations."
@@ -518,18 +513,19 @@ function AllocationRiskCapitalCell({
     );
   }
 
-  // The same preference the sort, the bar and the CRR column apply. Reading
-  // `required_risk_capital_usd` here instead showed STL's figure beside Sky's
-  // ratio: spUSDS rendered $25.34M at 0.00% CRR, which is neither provenance.
-  const requiredRiskCapitalUsd =
-    entry === undefined
-      ? null
-      : preferReference(
-          entry.reference_required_risk_capital_usd,
-          entry.applied ? entry.required_risk_capital_usd : null,
-        );
+  const unsettled = riskFetchPlaceholder(risk.state);
+  if (unsettled) {
+    return (
+      <p
+        title={unsettled.title}
+        className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}
+      >
+        {unsettled.label}
+      </p>
+    );
+  }
 
-  if (requiredRiskCapitalUsd === null) {
+  if (risk.riskCapitalUsd === null) {
     return (
       <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>n/a</p>
     );
@@ -544,9 +540,29 @@ function AllocationRiskCapitalCell({
         color: 'text.strong',
       })}
     >
-      {formatUsdValue(requiredRiskCapitalUsd)}
+      {formatUsdValue(risk.riskCapitalUsd)}
     </p>
   );
+}
+
+/**
+ * The muted stand-in for a risk cell whose figure is not settled, or null once
+ * it is. Distinct from `n/a`: that asserts no model applies, which only the
+ * settled state can claim.
+ */
+function riskFetchPlaceholder(
+  state: RiskFetchState,
+): { label: string; title: string } | null {
+  if (state === 'loading') {
+    return { label: '…', title: 'Loading risk capital' };
+  }
+  if (state === 'error') {
+    return {
+      label: 'unavailable',
+      title: 'The risk-capital request failed; retry from the metrics band.',
+    };
+  }
+  return null;
 }
 
 /**
@@ -559,8 +575,17 @@ function AllocationRiskCapitalCell({
  * figures into the rows makes risk arrival a `data` change, which is the one
  * signal TanStack rebuilds its caches on.
  */
+/**
+ * `state` keeps the risk columns honest while the risk-capital call is not
+ * settled: `n/a` claims no model applies, which is false both mid-flight and
+ * after a failed fetch — a staging outage once rendered a full column of
+ * `n/a` with the only error signal far away in the metrics band.
+ */
+type RiskFetchState = 'loading' | 'error' | 'ready';
+
 type AllocationGridRow = Allocation & {
   risk: {
+    state: RiskFetchState;
     entry: AllocationRiskCapital | undefined;
     chainMismatch: boolean;
     riskCapitalUsd: number | null;
@@ -572,21 +597,20 @@ type AllocationGridRow = Allocation & {
 function toAllocationGridRow(
   allocation: Allocation,
   riskByPositionKey: Map<string, AllocationRiskCapital>,
+  riskFetchState: RiskFetchState,
   selectedPrime: Prime | null,
   totalRequiredRiskCapitalUsd: number | null,
 ): AllocationGridRow {
+  const entry = lookupAllocationRiskCapital(riskByPositionKey, allocation);
   return {
     ...allocation,
     risk: {
-      entry: lookupAllocationRiskCapital(riskByPositionKey, allocation),
+      state: riskFetchState,
+      entry,
       chainMismatch: isRiskCapitalChainMismatch(selectedPrime, allocation),
-      riskCapitalUsd: appliedRiskCapitalUsd(riskByPositionKey, allocation),
-      crrPct: preferredCrrPct(riskByPositionKey, allocation),
-      sharePct: rrcSharePct(
-        riskByPositionKey,
-        allocation,
-        totalRequiredRiskCapitalUsd,
-      ),
+      riskCapitalUsd: appliedRiskCapitalUsd(entry),
+      crrPct: preferredCrrPct(entry),
+      sharePct: rrcSharePct(entry, totalRequiredRiskCapitalUsd),
     },
   };
 }
@@ -659,19 +683,13 @@ function createAllocationColumns(
       id: 'risk_capital',
       // Named as Sky names it, since the two are compared side by side.
       header: 'RRC',
-      // A chain-mismatched row sorts below genuine zeroes (-1) rather than
-      // tying with them, since it isn't a real zero — it's a figure this
-      // session never fetched.
+      // A row without a figure — chain-mismatched or no model — sorts below
+      // genuine zeroes (-1) rather than tying with them.
       accessorFn: (allocation) =>
         allocation.risk.chainMismatch
           ? -1
-          : (allocation.risk.riskCapitalUsd ?? 0),
-      cell: ({ row }) => (
-        <AllocationRiskCapitalCell
-          entry={row.original.risk.entry}
-          isChainMismatch={row.original.risk.chainMismatch}
-        />
-      ),
+          : (allocation.risk.riskCapitalUsd ?? -1),
+      cell: ({ row }) => <AllocationRiskCapitalCell risk={row.original.risk} />,
       // No bar for n/a or chain-mismatched rows: NaN suppresses it (see
       // Balance for why not null).
       meta: {
@@ -701,11 +719,15 @@ function createAllocationColumns(
             row.original.risk.chainMismatch ? null : row.original.risk.crrPct
           }
           format={formatPercentValue}
+          state={row.original.risk.state}
         />
       ),
       meta: {
         magnitude: {
           scale: 'linear',
+          // Pinned to the ratio's own scale: a column-relative domain would
+          // render 40/45/50% as empty→half→full, hiding the absolute level.
+          domain: { min: 0, max: 100 },
           getValue: (allocation) =>
             allocation.risk.chainMismatch
               ? NaN
@@ -727,6 +749,7 @@ function createAllocationColumns(
             row.original.risk.chainMismatch ? null : row.original.risk.sharePct
           }
           format={formatRatioPercent}
+          state={row.original.risk.state}
         />
       ),
       meta: {
@@ -748,10 +771,24 @@ function createAllocationColumns(
 function AllocationRatioCell({
   value,
   format,
+  state,
 }: {
   value: number | null;
   format: (value: number | null) => string;
+  state: RiskFetchState;
 }) {
+  const unsettled = riskFetchPlaceholder(state);
+  if (unsettled) {
+    return (
+      <p
+        title={unsettled.title}
+        className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}
+      >
+        {state === 'loading' ? unsettled.label : '—'}
+      </p>
+    );
+  }
+
   return (
     <p
       className={css({
@@ -941,12 +978,21 @@ export function AllocationGrid({
   );
 
   // A new array when risk data lands, deliberately: see AllocationGridRow.
+  const riskFetchState: RiskFetchState =
+    riskCapital !== null
+      ? 'ready'
+      : isRiskCapitalLoading
+        ? 'loading'
+        : riskCapitalErrorMessage !== null
+          ? 'error'
+          : 'ready';
   const gridRows = useMemo<AllocationGridRow[]>(
     () =>
       filteredAllocations.map((allocation) =>
         toAllocationGridRow(
           allocation,
           riskByPositionKey,
+          riskFetchState,
           selectedPrime,
           totalRequiredRiskCapitalUsd,
         ),
@@ -954,6 +1000,7 @@ export function AllocationGrid({
     [
       filteredAllocations,
       riskByPositionKey,
+      riskFetchState,
       selectedPrime,
       totalRequiredRiskCapitalUsd,
     ],
