@@ -29,6 +29,10 @@ const mainnetChainID = 1
 // v2DeployBlockMainnet is the VaultV2 factory deploy block on Ethereum mainnet.
 const v2DeployBlockMainnet = 23_375_073
 
+// discoverySubRangeBlocks is one discovery sub-range in blocks, so a case can
+// build a range spanning several of them without restating the dial.
+const discoverySubRangeBlocks = discoverySubRangePartitions * partition.BlockRangeSize
+
 // partitionsWide builds a request expanding to exactly n partitions, so the
 // ceiling cases stay pinned to maxPartitionsPerRun rather than to a hand-counted
 // block number.
@@ -39,32 +43,101 @@ func partitionsWide(n int) BackfillParams {
 	}
 }
 
-// registerActivityStubs stands in for both real activities, recording which
-// partitions were replayed and letting a case fail a chosen one.
+// activityCalls is what the stubs were asked to do: the sub-ranges discovery
+// scanned, and the partitions replay ran.
+type activityCalls struct {
+	discovered []blockRange
+	replayed   []string
+}
+
+// registerActivityStubs stands in for both real activities, recording what each
+// was called with and letting a case fail a chosen one.
 func registerActivityStubs(
 	env *testsuite.TestWorkflowEnvironment,
 	discover func(blockRange) (discoveryResult, error),
 	replay func(partitionWork) (partitionReplay, error),
-) *[]string {
-	var replayed []string
+) *activityCalls {
+	var calls activityCalls
 	env.RegisterActivityWithOptions(
-		func(_ context.Context, rng blockRange) (discoveryResult, error) { return discover(rng) },
+		func(_ context.Context, rng blockRange) (discoveryResult, error) {
+			calls.discovered = append(calls.discovered, rng)
+			return discover(rng)
+		},
 		activity.RegisterOptions{Name: "DiscoverVaults"},
 	)
 	env.RegisterActivityWithOptions(
 		func(_ context.Context, work partitionWork) (partitionReplay, error) {
-			replayed = append(replayed, work.Partition)
+			calls.replayed = append(calls.replayed, work.Partition)
 			return replay(work)
 		},
 		activity.RegisterOptions{Name: "ReplayPartition"},
 	)
-	return &replayed
+	return &calls
+}
+
+// subRangeRuns counts how many times a sub-range starting at `from` was scanned.
+func subRangeRuns(subRanges []blockRange, from int64) int {
+	runs := 0
+	for _, sub := range subRanges {
+		if sub.From == from {
+			runs++
+		}
+	}
+	return runs
+}
+
+// assertTilesOnPartitionEdges checks the sub-ranges cover [rng.From, rng.To]
+// exactly once in ascending order, none of them wider than the timeouts are
+// sized for, and every interior edge on a partition boundary.
+func assertTilesOnPartitionEdges(t *testing.T, subRanges []blockRange, rng blockRange) {
+	t.Helper()
+
+	if len(subRanges) == 0 {
+		t.Fatalf("discoverySubRanges(%+v) returned no sub-range", rng)
+	}
+	if first := subRanges[0]; first.From != rng.From {
+		t.Errorf("the first sub-range starts at %d, want the run's own %d", first.From, rng.From)
+	}
+	if last := subRanges[len(subRanges)-1]; last.To != rng.To {
+		t.Errorf("the last sub-range ends at %d, want the run's own %d", last.To, rng.To)
+	}
+	for i, sub := range subRanges {
+		if sub.From > sub.To {
+			t.Errorf("sub-range %d is empty: %+v", i, sub)
+		}
+		if n := replayPartitionCount(sub.From, sub.To); n > discoverySubRangePartitions {
+			t.Errorf("sub-range %d spans %d partitions, over the %d one attempt is sized for", i, n, discoverySubRangePartitions)
+		}
+		if i == 0 {
+			continue
+		}
+		if want := subRanges[i-1].To + 1; sub.From != want {
+			t.Errorf("sub-range %d starts at %d, want %d: a gap or an overlap against the one before it", i, sub.From, want)
+		}
+		if sub.From%partition.BlockRangeSize != 0 {
+			t.Errorf("sub-range %d starts at %d, mid-partition: that partition would be listed by two scans", i, sub.From)
+		}
+	}
 }
 
 // noNewVaultsDiscovered: the range added no vault, but the database already
 // holds one, so the replay phase still has something to run against.
 func noNewVaultsDiscovered(blockRange) (discoveryResult, error) {
 	return discoveryResult{KnownV2Vaults: 1}, nil
+}
+
+// noVaultsAnywhere: nothing found and nothing in the database, so the replay
+// phase is skipped and the case is about the discovery scan alone.
+func noVaultsAnywhere(blockRange) (discoveryResult, error) { return discoveryResult{}, nil }
+
+// twoSubRangeFinds stubs a two-sub-range run whose scans found distinct counts,
+// so a summed answer and a last-one-wins answer are told apart.
+func twoSubRangeFinds(from int64) func(blockRange) (discoveryResult, error) {
+	found := map[int64]discoveryResult{
+		from:                           {Candidates: 5, Vaults: 1, KnownV2Vaults: 3},
+		from + discoverySubRangeBlocks: {Candidates: 7, Vaults: 2, KnownV2Vaults: 5},
+	}
+	return func(rng blockRange) (discoveryResult, error) { return found[rng.From], nil }
 }
 
 func noEventsReplayed(partitionWork) (partitionReplay, error) { return partitionReplay{}, nil }
@@ -201,12 +274,165 @@ func TestBackfillParams_Resolve(t *testing.T) {
 	}
 }
 
+// Every discovery sub-range must be a partition-aligned slice of the run's
+// range: each block scanned exactly once, and no partition split across two
+// activities, which would list and re-probe it twice.
+func TestDiscoverySubRanges_TileTheRangeOnPartitionEdges(t *testing.T) {
+	tests := []struct {
+		name string
+		rng  blockRange
+	}{
+		{
+			name: "narrower than one sub-range",
+			rng:  blockRange{From: 2000, To: 4500},
+		},
+		// A single block must still produce a scan. Returning nothing here would
+		// discover nothing, leave KnownV2Vaults at 0, skip the whole replay phase
+		// and report the run a success over it.
+		{
+			name: "a single block",
+			rng:  blockRange{From: 2500, To: 2500},
+		},
+		{
+			name: "an exact multiple of the sub-range",
+			rng:  blockRange{From: partition.BlockRangeSize, To: partition.BlockRangeSize + 2*discoverySubRangeBlocks - 1},
+		},
+		{
+			name: "starting mid-partition",
+			rng:  blockRange{From: 1500, To: 1500 + 2*discoverySubRangeBlocks},
+		},
+		{
+			name: "the widest range a run accepts",
+			rng:  blockRange{From: partition.BlockRangeSize, To: int64(maxPartitionsPerRun) * partition.BlockRangeSize},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assertTilesOnPartitionEdges(t, discoverySubRanges(tc.rng), tc.rng)
+		})
+	}
+}
+
+// Discovery runs one activity per sub-range: a whole-era scan runs for hours
+// while deploys roll the pod, and only a completed activity is banked in the
+// event history for the retry to resume past.
+func TestBackfillWorkflow_ScansTheRangeInResumableSubRanges(t *testing.T) {
+	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+	from := int64(partition.BlockRangeSize)
+	to := from + 2*discoverySubRangeBlocks
+	calls := registerActivityStubs(env, noVaultsAnywhere, noEventsReplayed)
+
+	executeBackfill(env, BackfillParams{From: from, To: to})
+
+	if err := env.GetWorkflowError(); err != nil {
+		t.Fatalf("unexpected workflow error: %v", err)
+	}
+	want := []blockRange{
+		{From: from, To: from + discoverySubRangeBlocks - 1},
+		{From: from + discoverySubRangeBlocks, To: from + 2*discoverySubRangeBlocks - 1},
+		{From: to, To: to},
+	}
+	if !slices.Equal(calls.discovered, want) {
+		t.Fatalf("discovered %v, want %v", calls.discovered, want)
+	}
+}
+
+// What discovery found is the whole run's, not the last sub-range's: an operator
+// reads these to decide whether a range was worth scanning.
+func TestBackfillWorkflow_SumsWhatEverySubRangeFound(t *testing.T) {
+	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+	from := int64(partition.BlockRangeSize)
+	registerActivityStubs(env, twoSubRangeFinds(from), noEventsReplayed)
+
+	executeBackfill(env, BackfillParams{From: from, To: from + discoverySubRangeBlocks})
+
+	got := discoveredBy(t, env)
+	if got.Candidates != 12 {
+		t.Errorf("Candidates = %d, want 12 (5 + 7)", got.Candidates)
+	}
+	if got.Vaults != 3 {
+		t.Errorf("Vaults = %d, want 3 (1 + 2)", got.Vaults)
+	}
+}
+
+// KnownV2Vaults counts registry rows rather than a sub-range's own finds, so the
+// last sub-range's — read once every earlier one has persisted — already answers
+// for the run. Summing it would gate the replay phase on a number no registry
+// ever held.
+func TestBackfillWorkflow_KeepsTheLastSubRangesKnownV2VaultCount(t *testing.T) {
+	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+	from := int64(partition.BlockRangeSize)
+	registerActivityStubs(env, twoSubRangeFinds(from), noEventsReplayed)
+
+	executeBackfill(env, BackfillParams{From: from, To: from + discoverySubRangeBlocks})
+
+	if got := discoveredBy(t, env); got.KnownV2Vaults != 5 {
+		t.Errorf("KnownV2Vaults = %d, want the last sub-range's 5", got.KnownV2Vaults)
+	}
+}
+
+// A failing sub-range is retried on its own. Redoing the sub-ranges before it is
+// exactly what the split exists to prevent: a whole-era rescan runs longer than
+// the gap between deploys, so a run that restarts at block one never finishes.
+func TestBackfillWorkflow_RetriesOnlyTheFailingSubRange(t *testing.T) {
+	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+	from := int64(partition.BlockRangeSize)
+	failing := from + discoverySubRangeBlocks
+	calls := registerActivityStubs(env, func(rng blockRange) (discoveryResult, error) {
+		if rng.From == failing {
+			return discoveryResult{}, errors.New("s3 unreachable")
+		}
+		return discoveryResult{}, nil
+	}, noEventsReplayed)
+
+	executeBackfill(env, BackfillParams{From: from, To: from + 2*discoverySubRangeBlocks})
+
+	if env.GetWorkflowError() == nil {
+		t.Fatal("expected a failing sub-range to fail the run")
+	}
+	if runs := subRangeRuns(calls.discovered, from); runs != 1 {
+		t.Errorf("the completed sub-range ran %d times, want exactly 1: a retry must not rescan it", runs)
+	}
+	if runs := subRangeRuns(calls.discovered, from+2*discoverySubRangeBlocks); runs != 0 {
+		t.Errorf("the sub-range after the failure ran %d times, want none", runs)
+	}
+}
+
+// What the completed sub-ranges found must survive a failure in a later one:
+// Temporal discards the Result panel of a failing run, so the query is the only
+// place an operator sees how far the scan got.
+func TestBackfillWorkflow_ExposesDiscoveryCountsAfterASubRangeFails(t *testing.T) {
+	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+	from := int64(partition.BlockRangeSize)
+	failing := from + discoverySubRangeBlocks
+	registerActivityStubs(env, func(rng blockRange) (discoveryResult, error) {
+		if rng.From == failing {
+			return discoveryResult{}, errors.New("s3 unreachable")
+		}
+		return discoveryResult{Candidates: 6, Vaults: 1, KnownV2Vaults: 1}, nil
+	}, noEventsReplayed)
+
+	executeBackfill(env, BackfillParams{From: from, To: from + discoverySubRangeBlocks})
+
+	if env.GetWorkflowError() == nil {
+		t.Fatal("expected the run to fail")
+	}
+	got := queryProgress(t, env)
+	if got.Discovered == nil {
+		t.Fatal("Discovered = nil, want the counts of the sub-range that completed")
+	}
+	if got.Discovered.Candidates != 6 {
+		t.Errorf("Candidates = %d, want the completed sub-range's 6", got.Discovered.Candidates)
+	}
+}
+
 // A run replays the full requested range, one activity per partition, in
 // ascending block order — so an AddAdapter in an earlier partition always lands
 // before a later partition's Allocate.
 func TestBackfillWorkflow_ReplaysEveryPartitionInBlockOrder(t *testing.T) {
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
-	replayed := registerActivityStubs(env,
+	calls := registerActivityStubs(env,
 		func(blockRange) (discoveryResult, error) {
 			return discoveryResult{Candidates: 9, Vaults: 2, KnownV2Vaults: 2}, nil
 		},
@@ -218,8 +444,8 @@ func TestBackfillWorkflow_ReplaysEveryPartitionInBlockOrder(t *testing.T) {
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatalf("unexpected workflow error: %v", err)
 	}
-	if want := []string{"2000-2999", "3000-3999", "4000-4999"}; !slices.Equal(*replayed, want) {
-		t.Fatalf("replayed %v, want %v", *replayed, want)
+	if want := []string{"2000-2999", "3000-3999", "4000-4999"}; !slices.Equal(calls.replayed, want) {
+		t.Fatalf("replayed %v, want %v", calls.replayed, want)
 	}
 
 	var got BackfillResult
@@ -246,7 +472,7 @@ func TestBackfillWorkflow_ReplaysEveryPartitionInBlockOrder(t *testing.T) {
 // detect that hole.
 func TestBackfillWorkflow_StopsAtTheFirstFailingPartition(t *testing.T) {
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
-	replayed := registerActivityStubs(env, noNewVaultsDiscovered, func(work partitionWork) (partitionReplay, error) {
+	calls := registerActivityStubs(env, noNewVaultsDiscovered, func(work partitionWork) (partitionReplay, error) {
 		if work.Partition == "1000-1999" {
 			return partitionReplay{}, errors.New("boom")
 		}
@@ -260,8 +486,8 @@ func TestBackfillWorkflow_StopsAtTheFirstFailingPartition(t *testing.T) {
 	}
 	// The stub is retried, so the same partition can appear more than once;
 	// what must not appear is anything after it.
-	if slices.Contains(*replayed, "2000-2999") {
-		t.Errorf("replayed %v, want nothing after the failing partition", *replayed)
+	if slices.Contains(calls.replayed, "2000-2999") {
+		t.Errorf("replayed %v, want nothing after the failing partition", calls.replayed)
 	}
 }
 
@@ -270,7 +496,7 @@ func TestBackfillWorkflow_StopsAtTheFirstFailingPartition(t *testing.T) {
 // registry read per 1000 blocks before finding that out for itself.
 func TestBackfillWorkflow_SkipsReplayWhenNoV2VaultIsKnown(t *testing.T) {
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
-	replayed := registerActivityStubs(env,
+	calls := registerActivityStubs(env,
 		func(blockRange) (discoveryResult, error) { return discoveryResult{Candidates: 4}, nil },
 		noEventsReplayed,
 	)
@@ -280,8 +506,8 @@ func TestBackfillWorkflow_SkipsReplayWhenNoV2VaultIsKnown(t *testing.T) {
 	if err := env.GetWorkflowError(); err != nil {
 		t.Fatalf("unexpected workflow error: %v", err)
 	}
-	if len(*replayed) != 0 {
-		t.Errorf("replayed %v with no V2 vault known, want none", *replayed)
+	if len(calls.replayed) != 0 {
+		t.Errorf("replayed %v with no V2 vault known, want none", calls.replayed)
 	}
 }
 
@@ -289,7 +515,7 @@ func TestBackfillWorkflow_SkipsReplayWhenNoV2VaultIsKnown(t *testing.T) {
 // failed discovery must stop the run rather than replay against a stale set.
 func TestBackfillWorkflow_SkipsReplayWhenDiscoveryFails(t *testing.T) {
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
-	replayed := registerActivityStubs(env,
+	calls := registerActivityStubs(env,
 		func(blockRange) (discoveryResult, error) { return discoveryResult{}, errors.New("s3 unreachable") },
 		noEventsReplayed,
 	)
@@ -299,8 +525,8 @@ func TestBackfillWorkflow_SkipsReplayWhenDiscoveryFails(t *testing.T) {
 	if env.GetWorkflowError() == nil {
 		t.Fatal("expected the workflow to fail when discovery fails")
 	}
-	if len(*replayed) != 0 {
-		t.Errorf("replayed %v after a failed discovery, want none", *replayed)
+	if len(calls.replayed) != 0 {
+		t.Errorf("replayed %v after a failed discovery, want none", calls.replayed)
 	}
 }
 
@@ -309,7 +535,7 @@ func TestBackfillWorkflow_SkipsReplayWhenDiscoveryFails(t *testing.T) {
 // retry envelope instead of being reported back to them.
 func TestBackfillWorkflow_RejectsInvalidParams(t *testing.T) {
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
-	replayed := registerActivityStubs(env, noNewVaultsDiscovered, noEventsReplayed)
+	calls := registerActivityStubs(env, noNewVaultsDiscovered, noEventsReplayed)
 
 	executeBackfill(env, BackfillParams{To: 200})
 
@@ -324,8 +550,8 @@ func TestBackfillWorkflow_RejectsInvalidParams(t *testing.T) {
 	if !appErr.NonRetryable() {
 		t.Error("invalid parameters must be rejected non-retryably")
 	}
-	if len(*replayed) != 0 {
-		t.Errorf("replayed %v for invalid params, want none", *replayed)
+	if len(calls.replayed) != 0 {
+		t.Errorf("replayed %v for invalid params, want none", calls.replayed)
 	}
 }
 
@@ -335,7 +561,7 @@ func TestBackfillWorkflow_RejectsInvalidParams(t *testing.T) {
 // and CrashLoops the worker instead of returning this error.
 func TestBackfillWorkflow_RejectsAnAbsurdRangeBeforeBuildingItsPartitionList(t *testing.T) {
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
-	replayed := registerActivityStubs(env, noNewVaultsDiscovered, noEventsReplayed)
+	calls := registerActivityStubs(env, noNewVaultsDiscovered, noEventsReplayed)
 
 	executeBackfill(env, BackfillParams{From: 1, To: 1_750_000_000_000})
 
@@ -346,8 +572,8 @@ func TestBackfillWorkflow_RejectsAnAbsurdRangeBeforeBuildingItsPartitionList(t *
 	if !strings.Contains(err.Error(), "partitions, over the") {
 		t.Errorf("error = %v, want it to name the partition ceiling", err)
 	}
-	if len(*replayed) != 0 {
-		t.Errorf("replayed %v for a rejected range, want none", *replayed)
+	if len(calls.replayed) != 0 {
+		t.Errorf("replayed %v for a rejected range, want none", calls.replayed)
 	}
 }
 
@@ -358,7 +584,7 @@ func TestBackfillWorkflow_RejectsAnAbsurdRangeBeforeBuildingItsPartitionList(t *
 // than failing it.
 func TestBackfillWorkflow_RejectsATopOfInt64RangeBeforeWalkingIt(t *testing.T) {
 	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
-	replayed := registerActivityStubs(env, noNewVaultsDiscovered, noEventsReplayed)
+	calls := registerActivityStubs(env, noNewVaultsDiscovered, noEventsReplayed)
 
 	executeBackfill(env, BackfillParams{From: math.MaxInt64 - 9_999, To: math.MaxInt64})
 
@@ -370,8 +596,8 @@ func TestBackfillWorkflow_RejectsATopOfInt64RangeBeforeWalkingIt(t *testing.T) {
 	if !errors.As(err, &appErr) || !appErr.NonRetryable() {
 		t.Errorf("error = %v, want a non-retryable rejection: no attempt of this range can succeed", err)
 	}
-	if len(*replayed) != 0 {
-		t.Errorf("replayed %v for a rejected range, want none", *replayed)
+	if len(calls.replayed) != 0 {
+		t.Errorf("replayed %v for a rejected range, want none", calls.replayed)
 	}
 }
 
@@ -509,7 +735,7 @@ func unreachablePool(t *testing.T) *pgxpool.Pool {
 // Neither activity caps its attempts, so a deterministic defect that stays
 // retryable is redone at up to a minute's backoff until the ScheduleToClose
 // envelope runs out — surfacing a ~20s partition failure two hours late, and a
-// discovery failure a day late.
+// discovery sub-range's four hours late.
 func TestNonRetryableIfStructural_MarksDeterministicFailuresNonRetryable(t *testing.T) {
 	tests := []struct {
 		name string
@@ -558,7 +784,7 @@ func TestNonRetryableIfStructural_LeavesTransientFailuresRetryable(t *testing.T)
 
 // Both activities heartbeat, so both must declare a timeout: without one
 // Temporal notices a worker killed mid-activity only at StartToClose — 30
-// minutes for a partition, 30 hours for discovery.
+// minutes for a partition, 2 hours for a discovery sub-range.
 func TestActivityOptions_DeclareAHeartbeatTimeoutWithGraceOverTheTicker(t *testing.T) {
 	tests := []struct {
 		name string
@@ -581,26 +807,37 @@ func TestActivityOptions_DeclareAHeartbeatTimeoutWithGraceOverTheTicker(t *testi
 	}
 }
 
-// The partition ceiling and the discovery timeouts have to agree: the widest
-// range resolve ACCEPTS must be one a single attempt can finish. It cannot resume
-// — the scan keeps no progress state — so an attempt killed at StartToClose is
-// redone from block one, and a ceiling wider than the timeout covers turns every
-// such range into an envelope that expires having persisted nothing.
-func TestDiscoverActivityOptions_TimeoutsCoverTheWidestAcceptedRange(t *testing.T) {
+// The sub-range width and the discovery timeouts have to agree: one attempt
+// covers one sub-range, so a ceiling under what that scan costs kills every
+// attempt mid-window and the envelope expires having persisted nothing.
+func TestDiscoverActivityOptions_TimeoutsCoverOneSubRange(t *testing.T) {
 	opts := discoverActivityOptions()
-	widestScan := time.Duration(maxPartitionsPerRun) * discoveryScanPerPartition
+	subRangeScan := time.Duration(discoverySubRangePartitions) * discoveryScanPerPartition
 
-	if opts.StartToCloseTimeout < widestScan {
+	if opts.StartToCloseTimeout < subRangeScan {
 		t.Errorf("StartToCloseTimeout = %s, want at least %s (%d partitions x %s)",
-			opts.StartToCloseTimeout, widestScan, maxPartitionsPerRun, discoveryScanPerPartition)
+			opts.StartToCloseTimeout, subRangeScan, discoverySubRangePartitions, discoveryScanPerPartition)
 	}
 	// The envelope's claim is "one full redo", so an attempt that burns the whole
-	// StartToClose ceiling must still leave room for a second one — the case the
-	// widest accepted range is precisely about.
+	// StartToClose ceiling must still leave room for a second one.
 	if opts.ScheduleToCloseTimeout < 2*opts.StartToCloseTimeout {
 		t.Errorf("ScheduleToCloseTimeout = %s, want at least twice the %s a single attempt may take",
 			opts.ScheduleToCloseTimeout, opts.StartToCloseTimeout)
 	}
+}
+
+// discoveredBy reads the discovery counts off a completed run's result.
+func discoveredBy(t *testing.T, env *testsuite.TestWorkflowEnvironment) discoveryResult {
+	t.Helper()
+
+	var got BackfillResult
+	if err := env.GetWorkflowResult(&got); err != nil {
+		t.Fatalf("reading workflow result: %v", err)
+	}
+	if got.Discovered == nil {
+		t.Fatal("Discovered = nil, want the run's discovery counts")
+	}
+	return *got.Discovered
 }
 
 func queryProgress(t *testing.T, env *testsuite.TestWorkflowEnvironment) backfillProgress {

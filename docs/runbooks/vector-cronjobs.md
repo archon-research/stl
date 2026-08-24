@@ -349,10 +349,13 @@ temporal workflow start --namespace vector \
   --input '{"from":24765588,"to":24786366}'
 ```
 
-**What a run does, and how long it takes.** One discovery activity over the whole
-range (scan S3 receipts → probe candidates on-chain → persist vaults), then one
+**What a run does, and how long it takes.** One discovery activity per 250-partition
+sub-range (scan S3 receipts → probe candidates on-chain → persist vaults), then one
 activity per 1000-block S3 partition replaying that partition's VaultV2
-structured events, sequentially and in ascending block order. Measured on
+structured events, both sequentially and in ascending block order. Every completed
+activity is banked in the event history, so a rollout mid-run retries the
+sub-range or partition it was interrupted in and leaves the completed ones
+alone. Measured on
 mainnet: ~11.5 s per partition for discovery and ~20 s per partition for replay,
 so a whole-V2-era run is measured in hours. A range wider than 8000 partitions is
 rejected up front — that catches a mistyped `from` or a millisecond timestamp
@@ -363,12 +366,34 @@ but a typical partition finishes in 10-20 s, so in practice the heartbeat only
 fires on pathologically slow partitions — for ordinary ones the 30-minute
 StartToClose timeout is the real detector after a mid-partition rollout.
 
+**Deploying this worker while a run is in flight.** Terminate every running
+`MorphoVaultBackfill` execution before rolling the image, then start the range
+again once the new pods are up. A running execution is replayed against whatever
+code the new pod carries, and Temporal matches its history by activity ID and
+type only — never by the input the activity was given — so an execution started
+under the old image does not pick up a changed phase plan: one interrupted during
+discovery rescans from its original first block, and one already past discovery
+can hit an activity-type mismatch and hang instead of failing. Restarting costs
+only wall clock, since every write is an idempotent append.
+
+```bash
+temporal workflow list --namespace vector \
+  --query 'WorkflowType="MorphoVaultBackfill" AND ExecutionStatus="Running"'
+temporal workflow terminate --namespace vector --workflow-id <id> \
+  --reason 'rolling morpho-vault-backfill'
+```
+
 **Reading progress and re-running.** The `progress` query (UI → Query tab) shows
 `partitionsDone` / `partitionsTotal` mid-run and survives a failed run, whose
 Result panel Temporal discards. A failed partition stops the run there, so the
 completed prefix is what the query reports. Re-running the same range is always
 safe: every write is an idempotent append, so a repeat costs wall clock, not
 correctness.
+
+`candidates` and `vaults` — in the query, the Result panel and the completion log
+— are summed across the sub-ranges, so an address appearing in several is counted
+once per sub-range: they measure scan volume, not distinct addresses or vaults.
+`knownV2Vaults` is a registry count and is exact.
 
 The query, the Result panel and each partition's `replayed partition` log line
 also carry `rowsAppended`, split per table: `adapterStates`, `vaultCaps`,

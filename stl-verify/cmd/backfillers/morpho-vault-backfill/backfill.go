@@ -16,24 +16,27 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/temporal"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/blocktime"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/partition"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/morpho_indexer"
 )
 
 // maxPartitionsPerRun catches a mistyped range and keeps a run inside Temporal's
-// 51,200-event history (~6 events/activity caps it at ~8,500); 8M blocks reaches 2028.
+// 51,200-event history: 8000 replay activities plus the 32 discovery sub-ranges
+// spanning them is 8032 x ~6 events = ~48,200. 8M blocks reaches 2028.
 const maxPartitionsPerRun = 8_000
 
 // maxPlausibleBlock bounds where a range may SIT, where maxPartitionsPerRun
 // bounds how WIDE it may be. 1e11 is ~38,000 years of Ethereum blocks, while a
 // pasted millisecond timestamp is ~1.75e12 and so is rejected.
 //
-// It is what keeps both partition walks — replayPartitionPrefixes, run in
-// workflow code, and partitionsForRange, run inside the discovery activity —
-// from overflowing. Each steps a cursor from at most `from` by BlockRangeSize
-// while it is <= `to`, so with 0 < from <= to <= 1e11 the cursor tops out just
-// above 1e11: eight orders of magnitude below math.MaxInt64, past which the
-// cursor would wrap negative and the loop never terminate.
+// It is what keeps the block walks — replayPartitionPrefixes and
+// discoverySubRanges, run in workflow code, and partitionsForRange, run inside
+// the discovery activity — from overflowing. Each steps a cursor from at most
+// `from` by a whole number of partitions while it is <= `to`, so with
+// 0 < from <= to <= 1e11 the cursor tops out just above 1e11: eight orders of
+// magnitude below math.MaxInt64, past which the cursor would wrap negative and
+// the loop never terminate.
 const maxPlausibleBlock = 100_000_000_000
 
 // errStructuralData marks a failure that reproduces identically on every
@@ -47,6 +50,12 @@ var errStructuralData = errors.New("structural data defect")
 // scan in the VEC-218 E2E: 253s over 22 partitions. It is the rate the discovery
 // timeouts are sized from, so changing either moves the other.
 const discoveryScanPerPartition = 11500 * time.Millisecond
+
+// discoverySubRangePartitions is how many partitions one discovery activity
+// scans. It dials resume granularity — a killed attempt redoes at most this much
+// — against re-probing the candidates a sub-range shares with its neighbours,
+// which dedup only within a single scan.
+const discoverySubRangePartitions = 250
 
 // heartbeatInterval keeps the discovery scan visible to Temporal. Its
 // StartToClose ceiling is hours, so without a heartbeat a worker killed mid-scan
@@ -227,22 +236,52 @@ func (w *backfillWorkflows) Backfill(ctx workflow.Context, params BackfillParams
 	return resultOf(), nil
 }
 
-// discoverVaults runs phases 1-3 as ONE activity rather than one per partition.
-// The candidate set is deduplicated across the whole range before a single
-// on-chain probe at `to`, so splitting the scan would either push every Morpho
-// Blue caller/onBehalf address through workflow history or re-probe them once
-// per partition. Losing per-partition resume on this phase is the cheaper
-// trade: it measured 253s against the replay's 436s over the same 22 partitions.
+// discoverVaults runs phases 1-3 over the range, one activity per sub-range and
+// sequentially. A whole-era scan runs for hours while deploys roll this
+// Recreate-strategy pod, and an activity banks nothing until it returns, so only
+// a completed sub-range is progress a retry can resume past.
+//
+// A sub-range spans many partitions because a scan dedups its candidates and
+// probes them at its own end block: the wider it is, the fewer addresses it
+// re-probes. The summed Candidates and Vaults count an address once per
+// sub-range it appears in.
 func discoverVaults(ctx workflow.Context, rng blockRange, state *backfillProgress) error {
 	ctx = workflow.WithActivityOptions(ctx, discoverActivityOptions())
 
+	// Published before the first scan so a run that fails partway still reports
+	// what the sub-ranges before it found.
+	var found discoveryResult
+	state.Discovered = &found
+
 	var activities *backfillActivities
-	var got discoveryResult
-	if err := workflow.ExecuteActivity(ctx, activities.DiscoverVaults, rng).Get(ctx, &got); err != nil {
-		return err
+	for _, sub := range discoverySubRanges(rng) {
+		var got discoveryResult
+		if err := workflow.ExecuteActivity(ctx, activities.DiscoverVaults, sub).Get(ctx, &got); err != nil {
+			return err
+		}
+		found.Candidates += got.Candidates
+		found.Vaults += got.Vaults
+		// Last one wins: it is read after every earlier sub-range has persisted,
+		// so it already answers for all of them.
+		found.KnownV2Vaults = got.KnownV2Vaults
 	}
-	state.Discovered = &got
 	return nil
+}
+
+// discoverySubRanges splits the range into the sub-ranges discovery scans, in
+// ascending block order. Every edge but the range's own two sits on a partition
+// boundary, so no S3 partition is listed by two scans and none is skipped.
+func discoverySubRanges(rng blockRange) []blockRange {
+	const subRangeBlocks = discoverySubRangePartitions * partition.BlockRangeSize
+
+	var subRanges []blockRange
+	for start := rng.From - rng.From%partition.BlockRangeSize; start <= rng.To; start += subRangeBlocks {
+		subRanges = append(subRanges, blockRange{
+			From: max(start, rng.From),
+			To:   min(start+subRangeBlocks-1, rng.To),
+		})
+	}
+	return subRanges
 }
 
 // replayPartitions replays every partition in ascending block order and
@@ -281,21 +320,19 @@ func replayPartitions(ctx workflow.Context, rng blockRange, parts []string, stat
 
 func discoverActivityOptions() workflow.ActivityOptions {
 	return workflow.ActivityOptions{
-		// Sized to cover the widest range resolve accepts, not a typical one: at
-		// discoveryScanPerPartition, maxPartitionsPerRun is 8000 x 11.5s = 25.6h of
-		// scanning. Anything shorter would accept ranges it cannot finish — the
-		// scan keeps no progress state, so an attempt killed here is redone from
-		// block one and the envelope below expires having persisted nothing.
-		//
-		// A ceiling this high costs nothing on a dead worker: the 3-minute
-		// HeartbeatTimeout, not this timeout, is what detects one.
-		StartToCloseTimeout: 30 * time.Hour,
+		// One attempt covers ONE sub-range, not the run: at
+		// discoveryScanPerPartition, discoverySubRangePartitions is 250 x 11.5s =
+		// 48 minutes of scanning. The ceiling is ~2.5x that because a sub-range
+		// also pays for the candidates it finds, which its block count does not
+		// bound. The 3-minute HeartbeatTimeout, not this, is what detects a dead
+		// worker.
+		StartToCloseTimeout: 2 * time.Hour,
 
-		// Total time for the phase INCLUDING retries. An attempt has nothing to
-		// resume into (the scan keeps no progress state), so this envelope allows
-		// one full redo and no more: twice StartToClose, so the redo still exists
-		// for an attempt that burned the whole ceiling above.
-		ScheduleToCloseTimeout: 60 * time.Hour,
+		// Total time for ONE sub-range INCLUDING retries. A killed attempt redoes
+		// only its own sub-range, so this envelope allows one full redo and no
+		// more: twice StartToClose, so the redo still exists for an attempt that
+		// burned the whole ceiling above.
+		ScheduleToCloseTimeout: 4 * time.Hour,
 
 		HeartbeatTimeout: heartbeatTimeoutFactor * heartbeatInterval,
 
