@@ -32,6 +32,10 @@ import (
 // 2), and persist the confirmed vaults (phase 3). A phase with nothing to carry
 // forward returns what it did reach rather than an error; the caller's V2 replay
 // phase still runs off the vaults already in the database.
+//
+// probeBlock is separate from rng because a run scans in sub-ranges but probes
+// all of them at one block — the metadata it reads there is what gets persisted
+// (see discoveryWork.ProbeBlock).
 func discoverAndPersistVaults(
 	ctx context.Context,
 	logger *slog.Logger,
@@ -42,6 +46,7 @@ func discoverAndPersistVaults(
 	buildID buildregistry.BuildID,
 	cfg config,
 	rng blockRange,
+	probeBlock int64,
 ) (discoveryResult, error) {
 	candidates, err := scanBlockRange(ctx, logger, s3Reader, extractor, cfg.bucket, rng.From, rng.To, cfg.goroutines)
 	if err != nil {
@@ -54,7 +59,7 @@ func discoverAndPersistVaults(
 		return got, nil
 	}
 
-	vaults, err := prober.probeAllCandidates(ctx, candidates, rng.To, cfg.probeBatch)
+	vaults, err := prober.probeAllCandidates(ctx, candidates, probeBlock, cfg.probeBatch)
 	if err != nil {
 		return discoveryResult{}, fmt.Errorf("probing candidates: %w", err)
 	}

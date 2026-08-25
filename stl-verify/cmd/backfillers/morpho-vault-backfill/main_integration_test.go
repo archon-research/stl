@@ -306,7 +306,8 @@ func TestIntegration_DiscoverVaults_FailsOnAnUndecodableMorphoBlueLog(t *testing
 	env := newActivityEnv(t, ctx, pool)
 
 	var activities *backfillActivities
-	if _, err := env.ExecuteActivity(activities.DiscoverVaults, blockRange{From: 0, To: 999}); err == nil {
+	work := discoveryWork{Range: blockRange{From: 0, To: 999}, ProbeBlock: 999}
+	if _, err := env.ExecuteActivity(activities.DiscoverVaults, work); err == nil {
 		t.Fatal("expected an undecodable Morpho Blue log to fail the activity")
 	}
 }
@@ -368,6 +369,186 @@ func TestIntegration_Backfill_SucceedsWithNothingToReplayOverACompleteArchive(t 
 	if got.Discovered == nil || got.Discovered.KnownV2Vaults != 0 {
 		t.Errorf("Discovered = %+v, want a run that found no VaultV2 vault", got.Discovered)
 	}
+}
+
+// Splitting the scan is a resilience change, not a semantic one: a run cut into
+// sub-ranges must persist exactly the rows a whole-range run does. The vault here
+// is active on both sides of a partition edge — the shape the split puts at risk,
+// since it becomes a candidate of every sub-range that sees it and the metadata
+// the first probe reads is what the tables keep.
+func TestIntegration_DiscoverVaults_ASplitRunPersistsWhatAWholeRunDoes(t *testing.T) {
+	ctx := context.Background()
+	// Straddles the 0-999 / 1000-1999 partition edge, so the split falls exactly
+	// where the sub-range walk would put it.
+	const (
+		firstBlock    = int64(995)
+		partitionEdge = int64(999)
+		lastBlock     = int64(1004)
+	)
+	vault := common.HexToAddress("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	bucket := seedVaultActivity(t, ctx, vault, firstBlock, lastBlock, partitionEdge-2, partitionEdge+3)
+	setWorkerEnv(t, bucket, chainFixtureServer(t, "0x1").URL)
+
+	var whole, split persistedVault
+	t.Run("over the whole range", func(t *testing.T) {
+		whole = discoverInto(t, ctx, bucket, vault, lastBlock,
+			[]blockRange{{From: firstBlock, To: lastBlock}})
+	})
+	t.Run("over one sub-range per partition", func(t *testing.T) {
+		split = discoverInto(t, ctx, bucket, vault, lastBlock,
+			[]blockRange{{From: firstBlock, To: partitionEdge}, {From: partitionEdge + 1, To: lastBlock}})
+	})
+
+	if whole != split {
+		t.Errorf("a split run persisted %+v, want the whole run's %+v", split, whole)
+	}
+}
+
+// persistedVault is everything one discovered vault put in the database, across
+// the three tables discovery writes, plus those tables' row counts.
+type persistedVault struct {
+	VaultRows      int
+	TokenRows      int
+	ReceiptRows    int
+	Name           string
+	Symbol         string
+	Version        int
+	CreatedAtBlock int64
+	AssetSymbol    string
+	AssetDecimals  int
+	ReceiptSymbol  string
+}
+
+// discoverInto runs the discovery pipeline over each range in order against a
+// database of this subtest's own, exactly as the workflow drives it — every
+// sub-range probed at the run's own end block — and reads back what it wrote.
+func discoverInto(t *testing.T, ctx context.Context, bucket string, vault common.Address, probeBlock int64, ranges []blockRange) persistedVault {
+	t.Helper()
+
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	t.Cleanup(cleanup)
+
+	cfg, err := loadConfig()
+	if err != nil {
+		t.Fatalf("loading the worker configuration: %v", err)
+	}
+	logger := testutil.DiscardLogger()
+	s3Reader, err := newS3Reader(ctx, logger, cfg)
+	if err != nil {
+		t.Fatalf("building the S3 reader: %v", err)
+	}
+	extractor, err := morpho_indexer.NewEventExtractor()
+	if err != nil {
+		t.Fatalf("NewEventExtractor: %v", err)
+	}
+	prober, err := newVaultProber(logger, blockStampedVaultProbe(t))
+	if err != nil {
+		t.Fatalf("newVaultProber: %v", err)
+	}
+	buildReg, err := buildregistry.New(ctx, pool)
+	if err != nil {
+		t.Fatalf("registering the build: %v", err)
+	}
+
+	for _, rng := range ranges {
+		if _, err := discoverAndPersistVaults(ctx, logger, s3Reader, extractor, prober, pool,
+			buildReg.BuildID(), cfg, rng, probeBlock); err != nil {
+			t.Fatalf("discovering over blocks %d-%d: %v", rng.From, rng.To, err)
+		}
+	}
+	return readPersistedVault(t, ctx, pool, vault)
+}
+
+// blockStampedVaultProbe confirms every candidate as a VaultV2 whose name and
+// symbol carry the block the probe was pinned to. Real VaultV2 name/symbol are
+// mutable setters, so stamping them is what makes a sub-range probed at its own
+// end block persist different rows than a whole-range run.
+func blockStampedVaultProbe(t *testing.T) *testutil.MockMulticaller {
+	t.Helper()
+
+	sharedProber, err := morpho_indexer.NewVaultProber()
+	if err != nil {
+		t.Fatalf("NewVaultProber: %v", err)
+	}
+	probeCalls := sharedProber.NumProbeCalls()
+	metadataCalls := sharedProber.NumDetailsCalls() + numAssetExtensionCalls
+
+	asset := common.HexToAddress("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48")
+	mc := testutil.NewMockMulticaller()
+	mc.ExecuteFn = func(_ context.Context, calls []outbound.Call, blockNumber *big.Int) ([]outbound.Result, error) {
+		switch len(calls) {
+		case probeCalls:
+			return v2ProbeResults(t, asset,
+				common.HexToAddress("0xcccc000000000000000000000000000000000000"),
+				common.HexToAddress("0xdddd000000000000000000000000000000000000")), nil
+		case metadataCalls:
+			return concatResults(
+				vaultDetailsResults(t, fmt.Sprintf("Vault at %s", blockNumber), fmt.Sprintf("v%s", blockNumber), 18, false),
+				[]outbound.Result{okStringResult(t, "USDC"), okUint8Result(t, 6)},
+			), nil
+		}
+		return nil, fmt.Errorf("unexpected multicall of %d calls: this fixture probes exactly one candidate", len(calls))
+	}
+	return mc
+}
+
+// readPersistedVault joins the three tables discovery writes for one vault, and
+// counts their rows: both runs start from the same migrated template, so a count
+// that differs is a row the split run wrote and the whole run did not.
+func readPersistedVault(t *testing.T, ctx context.Context, pool *pgxpool.Pool, vault common.Address) persistedVault {
+	t.Helper()
+
+	var got persistedVault
+	err := pool.QueryRow(ctx,
+		`SELECT (SELECT count(*) FROM morpho_vault),
+		        (SELECT count(*) FROM token),
+		        (SELECT count(*) FROM receipt_token),
+		        v.name, v.symbol, v.vault_version, v.created_at_block,
+		        t.symbol, t.decimals, rt.symbol
+		 FROM morpho_vault v
+		 JOIN token t ON t.id = v.asset_token_id
+		 JOIN receipt_token rt ON rt.chain_id = v.chain_id AND rt.receipt_token_address = v.address
+		 WHERE v.chain_id = 1 AND v.address = $1`, vault.Bytes()).Scan(
+		&got.VaultRows, &got.TokenRows, &got.ReceiptRows,
+		&got.Name, &got.Symbol, &got.Version, &got.CreatedAtBlock,
+		&got.AssetSymbol, &got.AssetDecimals, &got.ReceiptSymbol)
+	if err != nil {
+		t.Fatalf("reading back the persisted vault: %v", err)
+	}
+	return got
+}
+
+// seedVaultActivity archives a receipt per block in [from,to], with the vault's
+// VaultV2 AccrueInterest — the log that makes an address a candidate — in the two
+// named blocks and unrelated ERC20 noise everywhere else.
+func seedVaultActivity(t *testing.T, ctx context.Context, vault common.Address, from, to int64, activeBlocks ...int64) string {
+	t.Helper()
+
+	v2ABI, err := abis.GetMetaMorphoV2AccrueInterestABI()
+	if err != nil {
+		t.Fatalf("GetMetaMorphoV2AccrueInterestABI: %v", err)
+	}
+	active := make(map[int64]bool, len(activeBlocks))
+	for _, block := range activeBlocks {
+		active[block] = true
+	}
+
+	bucket := seedBucket(t, ctx)
+	for block := from; block <= to; block++ {
+		log := shared.Log{
+			Address: "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+			Topics:  []string{"0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"},
+		}
+		if active[block] {
+			log = shared.Log{Address: vault.Hex(), Topics: []string{v2ABI.Events["AccrueInterest"].ID.Hex()}}
+		}
+		putReceipts(t, ctx, bucket, block, []shared.TransactionReceipt{{
+			TransactionHash: fmt.Sprintf("0x%064x", block),
+			BlockHash:       fmt.Sprintf("0x%064x", block),
+			Logs:            []shared.Log{log},
+		}})
+	}
+	return bucket
 }
 
 // seedQuietBlocks archives one unrelated-ERC20 receipt per block in [from,to],
@@ -631,7 +812,7 @@ func runDiscovery(t *testing.T, env *testsuite.TestActivityEnvironment, rng bloc
 	t.Helper()
 
 	var activities *backfillActivities
-	encoded, err := env.ExecuteActivity(activities.DiscoverVaults, rng)
+	encoded, err := env.ExecuteActivity(activities.DiscoverVaults, discoveryWork{Range: rng, ProbeBlock: rng.To})
 	if err != nil {
 		t.Fatalf("DiscoverVaults: %v", err)
 	}

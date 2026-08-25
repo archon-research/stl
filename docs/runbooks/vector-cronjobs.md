@@ -349,13 +349,14 @@ temporal workflow start --namespace vector \
   --input '{"from":24765588,"to":24786366}'
 ```
 
-**What a run does, and how long it takes.** One discovery activity per 250-partition
-sub-range (scan S3 receipts → probe candidates on-chain → persist vaults), then one
-activity per 1000-block S3 partition replaying that partition's VaultV2
-structured events, both sequentially and in ascending block order. Every completed
-activity is banked in the event history, so a rollout mid-run retries the
-sub-range or partition it was interrupted in and leaves the completed ones
-alone. Measured on
+**What a run does, and how long it takes.** One discovery activity per sub-range
+of a few dozen partitions (scan S3 receipts → probe candidates on-chain → persist
+vaults), then one activity per 1000-block S3 partition replaying that partition's
+VaultV2 structured events, both sequentially and in ascending block order. Every
+completed activity is banked in the event history, so a rollout mid-run retries
+the sub-range or partition it was interrupted in and leaves the completed ones
+alone — the sub-range is sized to finish inside the gap between two deploys, which
+is what lets a long run survive them. Measured on
 mainnet: ~11.5 s per partition for discovery and ~20 s per partition for replay,
 so a whole-V2-era run is measured in hours. A range wider than 8000 partitions is
 rejected up front — that catches a mistyped `from` or a millisecond timestamp
@@ -366,15 +367,36 @@ but a typical partition finishes in 10-20 s, so in practice the heartbeat only
 fires on pathologically slow partitions — for ordinary ones the 30-minute
 StartToClose timeout is the real detector after a mid-partition rollout.
 
-**Deploying this worker while a run is in flight.** Terminate every running
-`MorphoVaultBackfill` execution before rolling the image, then start the range
-again once the new pods are up. A running execution is replayed against whatever
-code the new pod carries, and Temporal matches its history by activity ID and
-type only — never by the input the activity was given — so an execution started
-under the old image does not pick up a changed phase plan: one interrupted during
-discovery rescans from its original first block, and one already past discovery
-can hit an activity-type mismatch and hang instead of failing. Restarting costs
-only wall clock, since every write is an idempotent append.
+**Deploying this worker while a run is in flight.** A routine deploy is fine: the
+run is replayed against the new code, reaches the same command sequence, and
+carries on from where it was. What an in-flight run cannot survive is an image
+that CHANGES that sequence — a different phase split (the sub-range width is one),
+a changed activity input shape, or activities reordered. Ship one of those and you
+must terminate every running `MorphoVaultBackfill` execution as part of the roll,
+then start the ranges again afterwards; restarting costs only wall clock, since
+every write is an idempotent append. A changed input shape is the one to be
+strictest about: an activity SCHEDULED under the old image and still in flight
+carries an old-shaped payload, which the new worker decodes with `encoding/json`
+— unknown fields ignored, missing ones zero-filled — so it can scan an empty
+range, probe at block 0, succeed, and be banked as a completed sub-range. That is
+a hole in the data reported as success, which nothing downstream detects.
+
+Why replay cannot absorb it: Temporal walks history and the scheduled commands in
+lockstep, comparing each activity's id and the last dot-separated segment of its
+type (`lastPartOfName`), positionally — the input is not among the fields
+compared, so a re-planned run is not corrected by it. Only a side running out
+short-circuits the walk (a missing or extra command); an inserted or reordered
+activity fails inside that id/type comparison (`go.temporal.io/sdk v1.45.0`,
+`internal/internal_task_handlers.go:1650-1662`). The failure is not a failed run:
+the workflow TASK fails with `NON_DETERMINISTIC_ERROR` and retries forever while
+the execution sits in Running, because the default `WorkflowPanicPolicy` is
+`BlockWorkflow` (`internal/worker.go:448-454`) and this worker never overrides it,
+and no run timeout is set. Look for
+`temporal_workflow_task_execution_failed{failure_reason="NonDeterminismError"}`
+(the SDK maps a history mismatch to that cause in
+`internal/internal_task_pollers.go:835-836`) and, in the pod log, the messages
+`Workflow panic` or `Failed to process workflow task.` — grep their structured
+`Error` field, not the message, for `[TMPRL1100] nondeterministic workflow`.
 
 ```bash
 temporal workflow list --namespace vector \
@@ -384,11 +406,32 @@ temporal workflow terminate --namespace vector --workflow-id <id> \
 ```
 
 **Reading progress and re-running.** The `progress` query (UI → Query tab) shows
-`partitionsDone` / `partitionsTotal` mid-run and survives a failed run, whose
-Result panel Temporal discards. A failed partition stops the run there, so the
-completed prefix is what the query reports. Re-running the same range is always
-safe: every write is an idempotent append, so a repeat costs wall clock, not
-correctness.
+`subRangesDone` / `subRangesTotal` for discovery and `partitionsDone` /
+`partitionsTotal` for replay mid-run, and survives a failed run, whose Result
+panel Temporal discards. A failed sub-range or partition stops the run there, so
+the completed prefix is what the query reports.
+
+To resume a FAILED execution, reset it rather than starting a new one — a fresh
+start has empty history and rescans from the run's own `from`, discarding every
+banked sub-range. Reset creates a new execution carrying history up to the reset
+point, so what completed before that point is not redone, while everything after
+it is dropped and re-run. Reset to a point BEFORE the failing activity was
+scheduled: activity results are never reapplied, only re-executed, so a reset to
+the last workflow task carries the recorded failure into the new execution and it
+stops at the same place. Read the history, find the `WorkflowTaskCompleted` just
+before the failing `ActivityTaskScheduled`, and reset to that event id:
+
+```bash
+temporal workflow show --namespace vector --workflow-id <id>
+temporal workflow reset --namespace vector --workflow-id <id> \
+  --event-id <the WorkflowTaskCompleted before the failing ActivityTaskScheduled> \
+  --reason 'resuming after a failed sub-range'
+```
+
+Check the new execution's `progress` query afterwards to confirm it resumed where
+you intended rather than earlier. Starting the same range fresh is always safe
+too, just slower: every write is an idempotent append, so a repeat costs wall
+clock, not correctness.
 
 `candidates` and `vaults` — in the query, the Result panel and the completion log
 — are summed across the sub-ranges, so an address appearing in several is counted

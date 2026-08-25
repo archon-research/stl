@@ -22,8 +22,8 @@ import (
 )
 
 // maxPartitionsPerRun catches a mistyped range and keeps a run inside Temporal's
-// 51,200-event history: 8000 replay activities plus the 32 discovery sub-ranges
-// spanning them is 8032 x ~6 events = ~48,200. 8M blocks reaches 2028.
+// 51,200-event history: 8000 replay activities plus the 250 discovery
+// sub-ranges spanning them is 8250 x ~6 events = ~49,500. 8M blocks reaches 2028.
 const maxPartitionsPerRun = 8_000
 
 // maxPlausibleBlock bounds where a range may SIT, where maxPartitionsPerRun
@@ -52,14 +52,23 @@ var errStructuralData = errors.New("structural data defect")
 const discoveryScanPerPartition = 11500 * time.Millisecond
 
 // discoverySubRangePartitions is how many partitions one discovery activity
-// scans. It dials resume granularity — a killed attempt redoes at most this much
-// — against re-probing the candidates a sub-range shares with its neighbours,
-// which dedup only within a single scan.
-const discoverySubRangePartitions = 250
+// scans. The rule that sizes it: a sub-range must finish inside the shortest gap
+// between deploys at the conservative discoveryScanPerPartition rate, because a
+// rolled pod costs the whole attempt. 32 x 11.5s = 6.1 min against a 25-minute
+// closest observed gap.
+//
+// It buys that with ~7.8x more re-probing over the real era — 77 sub-ranges
+// rather than 10, and a long-lived vault is a candidate in every one it appears
+// in — plus one knownV2VaultCount read per sub-range.
+//
+// The widest accepted run costs 250 of these on top of its 8000 replay
+// activities: 8250 x ~6 events = ~49,500, inside the 51,200 history ceiling. The
+// budget breaks even at 16, so going lower needs maxPartitionsPerRun cut too.
+const discoverySubRangePartitions = 32
 
 // heartbeatInterval keeps the discovery scan visible to Temporal. Its
-// StartToClose ceiling is hours, so without a heartbeat a worker killed mid-scan
-// would hold the activity open for that whole ceiling instead of minutes.
+// StartToClose ceiling is tens of minutes, so without a heartbeat a worker killed
+// mid-scan would hold the activity open for that whole ceiling instead of three.
 const heartbeatInterval = time.Minute
 
 // heartbeatTimeoutFactor is the grace Temporal allows between heartbeats,
@@ -125,6 +134,18 @@ type blockRange struct {
 	To   int64 `json:"to"`
 }
 
+// discoveryWork is one unit of discovery: the sub-range to scan, and the block
+// its candidates are probed at.
+//
+// ProbeBlock is the RUN's `to`, not the sub-range's: name and symbol are
+// mutable on a VaultV2 and are persisted first-write-wins, so probing each
+// sub-range at its own end would make a split run store different values than a
+// whole-range one.
+type discoveryWork struct {
+	Range      blockRange `json:"range"`
+	ProbeBlock int64      `json:"probeBlock"`
+}
+
 // partitionWork is one unit of replay: a single 1000-block S3 partition, clamped
 // to the run's range.
 type partitionWork struct {
@@ -165,6 +186,8 @@ type BackfillResult struct {
 type backfillProgress struct {
 	Range           blockRange       `json:"range"`
 	Discovered      *discoveryResult `json:"discovered,omitempty"`
+	SubRangesTotal  int              `json:"subRangesTotal"`
+	SubRangesDone   int              `json:"subRangesDone"`
 	PartitionsTotal int              `json:"partitionsTotal"`
 	PartitionsDone  int              `json:"partitionsDone"`
 	EventsReplayed  int              `json:"eventsReplayed"`
@@ -199,12 +222,14 @@ func (w *backfillWorkflows) Backfill(ctx workflow.Context, params BackfillParams
 	}
 
 	rng := blockRange{From: resolved.From, To: resolved.To}
+	subRanges := discoverySubRanges(rng)
 	parts := replayPartitionPrefixes(rng.From, rng.To)
 	state.Range = rng
+	state.SubRangesTotal = len(subRanges)
 	state.PartitionsTotal = len(parts)
 
 	logger.Info("starting morpho vault backfill",
-		"from", rng.From, "to", rng.To, "partitions", len(parts))
+		"from", rng.From, "to", rng.To, "subRanges", len(subRanges), "partitions", len(parts))
 
 	// Read from state at every return point, so the reported counts can never
 	// lag the work actually done. On a FAILING run they do not reach the Result
@@ -221,7 +246,7 @@ func (w *backfillWorkflows) Backfill(ctx workflow.Context, params BackfillParams
 		}
 	}
 
-	if err := discoverVaults(ctx, rng, &state); err != nil {
+	if err := discoverVaults(ctx, rng, subRanges, &state); err != nil {
 		return resultOf(), err
 	}
 	if err := replayPartitions(ctx, rng, parts, &state); err != nil {
@@ -241,11 +266,11 @@ func (w *backfillWorkflows) Backfill(ctx workflow.Context, params BackfillParams
 // Recreate-strategy pod, and an activity banks nothing until it returns, so only
 // a completed sub-range is progress a retry can resume past.
 //
-// A sub-range spans many partitions because a scan dedups its candidates and
-// probes them at its own end block: the wider it is, the fewer addresses it
-// re-probes. The summed Candidates and Vaults count an address once per
-// sub-range it appears in.
-func discoverVaults(ctx workflow.Context, rng blockRange, state *backfillProgress) error {
+// Only the SCAN is split: every sub-range still probes its candidates at the
+// run's own `to`, so a split run persists what a whole-range one would. Candidate
+// dedup does narrow to a sub-range, which is why the summed Candidates and Vaults
+// count an address once per sub-range it appears in.
+func discoverVaults(ctx workflow.Context, rng blockRange, subRanges []blockRange, state *backfillProgress) error {
 	ctx = workflow.WithActivityOptions(ctx, discoverActivityOptions())
 
 	// Published before the first scan so a run that fails partway still reports
@@ -254,9 +279,10 @@ func discoverVaults(ctx workflow.Context, rng blockRange, state *backfillProgres
 	state.Discovered = &found
 
 	var activities *backfillActivities
-	for _, sub := range discoverySubRanges(rng) {
+	for _, sub := range subRanges {
+		work := discoveryWork{Range: sub, ProbeBlock: rng.To}
 		var got discoveryResult
-		if err := workflow.ExecuteActivity(ctx, activities.DiscoverVaults, sub).Get(ctx, &got); err != nil {
+		if err := workflow.ExecuteActivity(ctx, activities.DiscoverVaults, work).Get(ctx, &got); err != nil {
 			return err
 		}
 		found.Candidates += got.Candidates
@@ -264,6 +290,7 @@ func discoverVaults(ctx workflow.Context, rng blockRange, state *backfillProgres
 		// Last one wins: it is read after every earlier sub-range has persisted,
 		// so it already answers for all of them.
 		found.KnownV2Vaults = got.KnownV2Vaults
+		state.SubRangesDone++
 	}
 	return nil
 }
@@ -321,18 +348,18 @@ func replayPartitions(ctx workflow.Context, rng blockRange, parts []string, stat
 func discoverActivityOptions() workflow.ActivityOptions {
 	return workflow.ActivityOptions{
 		// One attempt covers ONE sub-range, not the run: at
-		// discoveryScanPerPartition, discoverySubRangePartitions is 250 x 11.5s =
-		// 48 minutes of scanning. The ceiling is ~2.5x that because a sub-range
+		// discoveryScanPerPartition, discoverySubRangePartitions is 32 x 11.5s =
+		// 6.1 minutes of scanning. The ceiling is ~3x that because a sub-range
 		// also pays for the candidates it finds, which its block count does not
 		// bound. The 3-minute HeartbeatTimeout, not this, is what detects a dead
 		// worker.
-		StartToCloseTimeout: 2 * time.Hour,
+		StartToCloseTimeout: 20 * time.Minute,
 
 		// Total time for ONE sub-range INCLUDING retries. A killed attempt redoes
 		// only its own sub-range, so this envelope allows one full redo and no
 		// more: twice StartToClose, so the redo still exists for an attempt that
 		// burned the whole ceiling above.
-		ScheduleToCloseTimeout: 4 * time.Hour,
+		ScheduleToCloseTimeout: 40 * time.Minute,
 
 		HeartbeatTimeout: heartbeatTimeoutFactor * heartbeatInterval,
 
@@ -388,13 +415,14 @@ type backfillActivities struct {
 	archiveDrain func()
 }
 
-// DiscoverVaults scans the range's S3 receipts for candidate addresses, probes
-// them on-chain and persists the confirmed vaults (phases 1-3).
+// DiscoverVaults scans one sub-range's S3 receipts for candidate addresses,
+// probes them on-chain at the run's probe block and persists the confirmed
+// vaults (phases 1-3).
 //
 // Idempotent: every write goes through GetOrCreate, so a retry — or an operator
 // re-running an overlapping range — re-reaches the same rows rather than adding
 // any.
-func (a *backfillActivities) DiscoverVaults(ctx context.Context, rng blockRange) (result discoveryResult, err error) {
+func (a *backfillActivities) DiscoverVaults(ctx context.Context, work discoveryWork) (result discoveryResult, err error) {
 	defer func() { err = nonRetryableIfStructural(err) }()
 
 	// Deferred before the drain so it stops LAST: the drain blocks on in-flight
@@ -403,7 +431,8 @@ func (a *backfillActivities) DiscoverVaults(ctx context.Context, rng blockRange)
 	defer stopHeartbeat()
 	defer a.archiveDrain()
 
-	got, err := discoverAndPersistVaults(ctx, a.logger, a.s3Reader, a.extractor, a.prober, a.pool, a.buildID, a.cfg, rng)
+	rng := work.Range
+	got, err := discoverAndPersistVaults(ctx, a.logger, a.s3Reader, a.extractor, a.prober, a.pool, a.buildID, a.cfg, rng, work.ProbeBlock)
 	if err != nil {
 		return discoveryResult{}, fmt.Errorf("discovering vaults over blocks %d-%d: %w", rng.From, rng.To, err)
 	}
@@ -478,9 +507,9 @@ func (a *backfillActivities) ReplayPartition(ctx context.Context, work partition
 
 // nonRetryableIfStructural stops Temporal retrying a verdict that cannot change.
 // Neither activity caps its attempts, so an unclassified structural failure
-// burns its whole ScheduleToClose envelope (replayActivityOptions,
-// discoverActivityOptions — hours either way) before an operator sees a fault
-// only an S3 repair or a code change can clear. Both activities apply it in a
+// burns its whole ScheduleToClose envelope (two hours for a partition, forty
+// minutes for a sub-range) before an operator sees a fault only an S3 repair or
+// a code change can clear. Both activities apply it in a
 // deferred assignment to their named error result, so no return path can escape
 // it.
 func nonRetryableIfStructural(err error) error {
