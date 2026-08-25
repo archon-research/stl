@@ -327,6 +327,35 @@ about `offchain-price-backfill` above applies — nothing is missed while it is
 down, it emits one `cronjob_runs_total` record per *activity*, and it is excluded
 from `VectorCronjobAllRunsFailing` for the same reason.
 
+**Reaching Temporal before you run any of the commands below.** The server is
+in-cluster in every environment, in the `temporal` k8s namespace, at
+`temporal-server.temporal:7233` in Temporal namespace `vector` — that is what
+every worker is handed (`TEMPORAL_HOST_PORT` / `TEMPORAL_NAMESPACE` in
+`k8s/overlays/{staging,prod}/configmaps.yaml`). In EKS the server itself is owned
+by the infrastructure repo, not this one (`k8s/dev-infra/temporal.yaml` is local
+dev only and says so). The workers dial it with no TLS and no API key
+(`stl-verify/internal/adapters/outbound/temporal/temporal.go`), so access is a
+matter of reaching the cluster, not of holding a Temporal credential.
+
+The `temporal` CLI defaults to `127.0.0.1:7233`, so a bare invocation fails with
+connection refused. Port-forward the service and point the CLI at it:
+
+```bash
+kubectl --context <staging-or-prod-context> -n temporal port-forward svc/temporal-server 7233:7233
+```
+
+Every snippet below then works as written. The `temporal` snippets in this
+runbook's other sections omit `--address`; `export TEMPORAL_ADDRESS=127.0.0.1:7233`
+once in the same shell and they work too. Locally, `make temporal-cli` does the
+equivalent by exec-ing into the kind cluster's own server pod; it refuses any
+non-kind context on purpose, so it cannot be used for staging or prod.
+
+**Without CLI access**, use the Temporal UI (namespace `vector`) — starting a run,
+listing executions, terminating one and reading history are all buttons there.
+This repo does not carry the staging/prod UI URL; it is exposed by the
+infrastructure repo, so get it from there or from the team rather than guessing at
+a hostname.
+
 **How to start a run.** Temporal UI (namespace **`vector`**) →
 **Start Workflow**:
 
@@ -343,7 +372,7 @@ chain's VaultV2 factory deploy block. An explicit `from` always wins. The
 equivalent CLI call:
 
 ```bash
-temporal workflow start --namespace vector \
+temporal workflow start --address 127.0.0.1:7233 --namespace vector \
   --task-queue morpho-vault-backfill --type MorphoVaultBackfill \
   --workflow-id morpho-vault-backfill-24765588-24786366 \
   --input '{"from":24765588,"to":24786366}'
@@ -399,10 +428,10 @@ and no run timeout is set. Look for
 `Error` field, not the message, for `[TMPRL1100] nondeterministic workflow`.
 
 ```bash
-temporal workflow list --namespace vector \
+temporal workflow list --address 127.0.0.1:7233 --namespace vector \
   --query 'WorkflowType="MorphoVaultBackfill" AND ExecutionStatus="Running"'
-temporal workflow terminate --namespace vector --workflow-id <id> \
-  --reason 'rolling morpho-vault-backfill'
+temporal workflow terminate --address 127.0.0.1:7233 --namespace vector \
+  --workflow-id <id> --reason 'rolling morpho-vault-backfill'
 ```
 
 **Reading progress and re-running.** The `progress` query (UI → Query tab) shows
@@ -413,20 +442,28 @@ the completed prefix is what the query reports.
 
 To resume a FAILED execution, reset it rather than starting a new one — a fresh
 start has empty history and rescans from the run's own `from`, discarding every
-banked sub-range. Reset creates a new execution carrying history up to the reset
-point, so what completed before that point is not redone, while everything after
-it is dropped and re-run. Reset to a point BEFORE the failing activity was
-scheduled: activity results are never reapplied, only re-executed, so a reset to
-the last workflow task carries the recorded failure into the new execution and it
-stops at the same place. Read the history, find the `WorkflowTaskCompleted` just
-before the failing `ActivityTaskScheduled`, and reset to that event id:
+banked sub-range. Reset to a point BEFORE the failing activity was scheduled:
+activity results are never reapplied, only re-executed, so a reset to the last
+workflow task carries the recorded failure into the new execution and it stops at
+the same place. Read the history, find the `WorkflowTaskCompleted` just before the
+failing `ActivityTaskScheduled`, and reset to that event id. The reset point is
+EXCLUSIVE: that workflow task is not replayed, so the commands it issued — the
+failing activity among them — are re-issued, while every sub-range and partition
+completed before it stays banked.
 
 ```bash
-temporal workflow show --namespace vector --workflow-id <id>
-temporal workflow reset --namespace vector --workflow-id <id> \
+temporal workflow show --address 127.0.0.1:7233 --namespace vector --workflow-id <id>
+temporal workflow reset --address 127.0.0.1:7233 --namespace vector --workflow-id <id> \
   --event-id <the WorkflowTaskCompleted before the failing ActivityTaskScheduled> \
   --reason 'resuming after a failed sub-range'
 ```
+
+Two flag traps here. `--reason` is REQUIRED on `reset` (the command fails
+client-side without it), unlike on `terminate` above where it is optional. And do
+NOT add `--type` alongside `--event-id`: passing both raises no error, but
+`--type` silently wins and your event id is discarded — `--type LastWorkflowTask`
+gets you exactly the failure-carrying reset this paragraph is telling you to
+avoid.
 
 Check the new execution's `progress` query afterwards to confirm it resumed where
 you intended rather than earlier. Starting the same range fresh is always safe
