@@ -20,6 +20,11 @@ SELECT id FROM morpho_vault WHERE address = :addr AND chain_id = :chain_id
 """
 
 _MORPHO_BACKED_BREAKDOWN_SQL = f"""
+-- Reads the trigger-maintained *_current tables (newest row per key, see
+-- 20260825_140000_create_morpho_current_tables.sql) instead of recomputing
+-- latest-over-history per request: the Morpho histories are mostly-compressed
+-- 180-chunk hypertables, and the LATERALs this replaces repeated that scan once
+-- per market.
 WITH morpho_vaults AS (
       SELECT mv.id as vault_id
       FROM morpho_vault mv
@@ -32,58 +37,37 @@ WITH morpho_vaults AS (
       JOIN "user" u ON u.address = v.address AND u.chain_id = v.chain_id
   ),
   vault_states AS (
-      SELECT DISTINCT ON (vs.morpho_vault_id)
-          vs.morpho_vault_id as vault_id,
-          vs.total_assets / power(10, t.decimals) as total_assets,
-          t.id as loan_token_id,
-          t.symbol as loan_token
-      FROM morpho_vault_state vs
-      JOIN morpho_vault v ON v.id = vs.morpho_vault_id
+      SELECT vsc.morpho_vault_id as vault_id,
+             vsc.total_assets / power(10, t.decimals) as total_assets,
+             t.id as loan_token_id,
+             t.symbol as loan_token
+      FROM morpho_vault_state_current vsc
+      JOIN morpho_vaults mv ON mv.vault_id = vsc.morpho_vault_id
+      JOIN morpho_vault v ON v.id = vsc.morpho_vault_id
       JOIN token t ON t.id = v.asset_token_id
-      WHERE vs.morpho_vault_id IN (SELECT vault_id FROM morpho_vaults)
-      ORDER BY vs.morpho_vault_id, vs.block_number DESC, vs.block_version DESC, vs.processing_version DESC
   ),
-  vault_market_ids AS (
-      SELECT DISTINCT vu.vault_id, mp.morpho_market_id
-      FROM vault_users vu
-      JOIN LATERAL (
-          SELECT DISTINCT morpho_market_id
-          FROM morpho_market_position
-          WHERE user_id = vu.user_id
-      ) mp ON true
-  ),
+  -- The cache holds one row per (user, market), so the vault's market set is its
+  -- rows for that user — which is what the separate vault_market_ids CTE (an
+  -- unbounded SELECT DISTINCT over the whole position history) used to produce.
   market_allocs AS (
-      SELECT vmi.vault_id,
-             vmi.morpho_market_id,
+      SELECT vu.vault_id,
+             mpc.morpho_market_id,
              ct.id as collateral_token_id,
              ct.symbol as collateral,
-             pos.supply_assets / power(10, lt.decimals) as vault_supply
-      FROM vault_market_ids vmi
-      JOIN LATERAL (
-          SELECT supply_assets, morpho_market_id
-          FROM morpho_market_position
-          WHERE user_id = (SELECT user_id FROM vault_users WHERE vault_id = vmi.vault_id LIMIT 1)
-            AND morpho_market_id = vmi.morpho_market_id
-          ORDER BY block_number DESC, block_version DESC, processing_version DESC
-          LIMIT 1
-      ) pos ON true
-      JOIN morpho_market mm ON mm.id = vmi.morpho_market_id
+             mpc.supply_assets / power(10, lt.decimals) as vault_supply
+      FROM vault_users vu
+      JOIN morpho_market_position_current mpc ON mpc.user_id = vu.user_id
+      JOIN morpho_market mm ON mm.id = mpc.morpho_market_id
       JOIN token ct ON ct.id = mm.collateral_token_id
       JOIN token lt ON lt.id = mm.loan_token_id
   ),
   market_states AS (
-      SELECT ms.*
-      FROM (SELECT DISTINCT morpho_market_id FROM market_allocs) ma
-      JOIN LATERAL (
-          SELECT morpho_market_id,
-                 CASE WHEN total_supply_assets > 0
-                     THEN total_borrow_assets::numeric / total_supply_assets::numeric
-                     ELSE 0 END as utilization
-          FROM morpho_market_state
-          WHERE morpho_market_id = ma.morpho_market_id
-          ORDER BY block_number DESC, block_version DESC, processing_version DESC
-          LIMIT 1
-      ) ms ON true
+      SELECT msc.morpho_market_id,
+             CASE WHEN msc.total_supply_assets > 0
+                 THEN msc.total_borrow_assets::numeric / msc.total_supply_assets::numeric
+                 ELSE 0 END as utilization
+      FROM morpho_market_state_current msc
+      WHERE msc.morpho_market_id IN (SELECT morpho_market_id FROM market_allocs)
   ),
   breakdown AS (
       SELECT
