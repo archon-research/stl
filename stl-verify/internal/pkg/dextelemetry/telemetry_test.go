@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	metricsdk "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
@@ -386,6 +387,72 @@ func TestRecordPoolsTouched_AttachesChainLabel(t *testing.T) {
 	if got := readChainAttr(t, &rm, "uniswap_v3.pools.touched"); got != want {
 		t.Errorf("uniswap_v3.pools.touched chain attr = %q, want %q", got, want)
 	}
+}
+
+// A caller-supplied attribute has to reach the datapoint alongside `chain`,
+// never in place of it: uniswap-v4 splits its touches by snapshot_supported so
+// the not-writing-state alert can select one half, while the rules that want
+// both keep aggregating on chain.
+func TestRecordPoolsTouched_KeepsCallerAttributesAlongsideChain(t *testing.T) {
+	reader := metricsdk.NewManualReader()
+	mp := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
+	prev := otel.GetMeterProvider()
+	otel.SetMeterProvider(mp)
+	t.Cleanup(func() {
+		otel.SetMeterProvider(prev)
+		_ = mp.Shutdown(context.Background())
+	})
+
+	tel, err := NewTelemetry("uniswap_v4", 1)
+	if err != nil {
+		t.Fatalf("NewTelemetry: %v", err)
+	}
+
+	ctx := context.Background()
+	tel.RecordPoolsTouched(ctx, 1, attribute.String("snapshot_supported", "true"))
+	tel.RecordPoolsTouched(ctx, 2, attribute.String("snapshot_supported", "false"))
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+
+	if got := readChainAttr(t, &rm, "uniswap_v4.pools.touched"); got != "mainnet" {
+		t.Errorf("uniswap_v4.pools.touched chain attr = %q, want %q", got, "mainnet")
+	}
+	for value, want := range map[string]int64{"true": 1, "false": 2} {
+		got, ok := readSumFor(t, &rm, "uniswap_v4.pools.touched", "snapshot_supported", value)
+		if !ok || got != want {
+			t.Errorf("uniswap_v4.pools.touched{snapshot_supported=%s} = %d (present=%t), want %d", value, got, ok, want)
+		}
+	}
+}
+
+// readSumFor returns the counter total over the datapoints carrying key=value,
+// and whether any such series exists.
+func readSumFor(t *testing.T, rm *metricdata.ResourceMetrics, name, key, value string) (int64, bool) {
+	t.Helper()
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != name {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("metric %s is %T, want Sum[int64]", name, m.Data)
+			}
+			var total int64
+			present := false
+			for _, dp := range sum.DataPoints {
+				if got, ok := dp.Attributes.Value(attribute.Key(key)); ok && got.AsString() == value {
+					total += dp.Value
+					present = true
+				}
+			}
+			return total, present
+		}
+	}
+	return 0, false
 }
 
 // readBlockCounters returns the counter values for status=success and

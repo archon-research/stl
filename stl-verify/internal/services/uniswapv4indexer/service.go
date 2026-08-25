@@ -11,6 +11,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
+	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/dextelemetry"
@@ -102,6 +103,13 @@ func NewUniswapV4Service(ctx context.Context, deps UniswapV4ServiceDeps) (*Unisw
 		return nil, err
 	}
 	if err := ValidatePoolKeys(deps.Pools); err != nil {
+		return nil, err
+	}
+	// Defence in depth over TestPoolManagerABI_RoutesOnlyEventsItDefines, which
+	// already pins these compile-time constants: a broken routing table that
+	// only surfaced in DecodeEvents would fail every receipt of every block and
+	// wedge the queue instead of refusing to boot with the reason.
+	if _, err := eventsByID(); err != nil {
 		return nil, err
 	}
 	poolManager, err := poolManagerFor(deps.Pools)
@@ -277,10 +285,32 @@ func (s *UniswapV4Service) handleBlock(ctx context.Context, event outbound.Block
 	s.markIndexed(ctx, dueSet)
 	// Recorded only after a successful commit, so the alerts compare pools this
 	// block touched against the rows that same block persisted.
-	s.telemetry.RecordPoolsTouched(ctx, len(acc.touchedIDs))
+	s.recordPoolsTouched(ctx, acc.touchedIDs)
 	s.telemetry.RecordStateRows(ctx, int(stateRows))
 	return nil
 }
+
+// recordPoolsTouched splits the decode-stage touched set by the registry's
+// snapshot_supported flag. Only the supported half reaches the due set, so only
+// it may gate VectorUniswapV4IndexerNotWritingState, which would otherwise page
+// on a block whose sole touch was an excluded dynamic-fee pool. Both halves
+// stay on one metric because VectorUniswapV4IndexerNoPoolsTouched wants every
+// touch — an excluded pool's log still proves the PoolManager address and the
+// topics[1]/poolsByID routing work — and aggregates the label away.
+func (s *UniswapV4Service) recordPoolsTouched(ctx context.Context, touched map[int64]bool) {
+	supported := 0
+	for id := range touched {
+		if s.poolsByRow[id].SnapshotSupported {
+			supported++
+		}
+	}
+	s.telemetry.RecordPoolsTouched(ctx, supported, attribute.String(snapshotSupportedKey, "true"))
+	s.telemetry.RecordPoolsTouched(ctx, len(touched)-supported, attribute.String(snapshotSupportedKey, "false"))
+}
+
+// Spelt as literal "true"/"false" strings rather than attribute.Bool: this is
+// the label VectorUniswapV4IndexerNotWritingState selects on by value.
+const snapshotSupportedKey = "snapshot_supported"
 
 // markIndexed clears the pools this block snapshotted from the never-indexed
 // set and republishes the gauge when it shrank. Every due pool got a state row
