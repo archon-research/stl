@@ -19,12 +19,27 @@ from decimal import Decimal
 
 @dataclass(frozen=True)
 class ReferencePosition:
-    """A prime's holding in one token, on one chain, through one ALM proxy.
+    """A prime's holding in one token, on one chain.
 
     ``token_address`` is not always an address: Uniswap V4 positions carry a
     32-byte pool id (66 chars) in the same field, which by construction cannot
     resolve to a receipt token. Callers join on it defensively and tolerate a
     miss rather than treating it as an address.
+
+    Two fields upstream serves are deliberately absent here, dropped because
+    nothing read them rather than because they are uninteresting:
+
+    ``wallet_address`` is the ALM proxy holding the position — the grain Verify
+    stores positions at, and absent from the Star monitor's feed, which reports
+    per prime. It was carried as the enabler for a future merge keyed on
+    ``(chain, token, proxy)``. Reinstating it is one field here and one
+    ``required_text`` call in the adapter.
+
+    ``allocation_type`` is upstream's own category vocabulary (``allocation`` /
+    ``asset`` / ``pol`` / ``psm3``), which maps closely onto the ``category``
+    this codebase derives from protocol plus symbol. Serving upstream's answer
+    instead of the derived one would change what every consumer of that column
+    sees, so it is out of scope here rather than dismissed as an idea.
     """
 
     protocol_name: str
@@ -32,20 +47,12 @@ class ReferencePosition:
     symbol: str
     name: str
     token_address: str
-    # The ALM proxy holding the position. Absent from the Star monitor's feed,
-    # which reports per prime, and the reason this one can be joined to STL's
-    # rows at the grain they are actually stored: `(chain, token, proxy)`.
-    wallet_address: str
     # The full holding. `allocated` and `idle` decompose it — a position can be
     # deployed into a protocol or sitting in the proxy, and upstream reports
     # both legs rather than only the sum.
     assets_usd: Decimal
     allocated_assets_usd: Decimal | None
     idle_assets_usd: Decimal | None
-    # Upstream's own position taxonomy (`allocation`, `asset`, `pol`, `psm3`),
-    # which maps onto STL's category vocabulary. Kept verbatim rather than
-    # translated here so the adapter stays a transport boundary.
-    allocation_type: str
     # Resolved against STL's token registry by the service, not the adapter.
     # ``None`` whenever the join cannot be made — a pool id in place of an
     # address, an unmapped network, or a token STL does not index.

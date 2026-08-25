@@ -16,10 +16,10 @@ from app.domain.entities.reference_risk_capital import (
     ReferenceAllocation,
     ReferencePrimeRiskCapital,
 )
-from app.domain.prime_registry import prime_name_for
 from app.ports.prime_directory import PrimeDirectory
 from app.ports.receipt_token_lookup import ReceiptTokenLookup
 from app.ports.reference_risk_capital import ReferenceRiskCapitalProvider
+from app.services.star_resolution import star_for
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +45,7 @@ class ReferenceRiskCapitalService:
         prime. Both are real answers about coverage, not failures, and neither
         may be served as zeros.
         """
-        star = await self._star_for(proxy_address)
+        star = await star_for(proxy_address, self._primes)
         if star is None:
             return None
 
@@ -57,30 +57,6 @@ class ReferenceRiskCapitalService:
     async def tracked_stars(self) -> frozenset[str]:
         """Every prime the monitor covers, lowercased."""
         return await self._provider.tracked_stars()
-
-    async def _star_for(self, proxy_address: EthAddress) -> str | None:
-        """Name the prime ``proxy_address`` belongs to, or ``None`` if it names none.
-
-        The contract answers first: it is the tracked set and costs no I/O. An
-        address it does not index can still identify a prime — a vault address,
-        or an ALM proxy during a chain onboarding, which holds positions before
-        the contract is told about it. Self mode serves both, so reference mode
-        must too: the same URL differs only in which figures it returns, never
-        in which addresses it accepts.
-        """
-        star = prime_name_for(proxy_address)
-        if star is not None:
-            return star
-
-        for prime in await self._primes.list_primes():
-            if proxy_address in (prime.address, prime.prime_vault_address):
-                return prime.name
-
-        logger.info(
-            "Address names no prime STL knows; no star to ask the monitor for",
-            extra={"proxy_address": str(proxy_address)},
-        )
-        return None
 
     async def _resolve_allocations(self, snapshot: ReferencePrimeRiskCapital) -> ReferencePrimeRiskCapital:
         resolved = await asyncio.gather(*(self._resolve(row) for row in snapshot.per_allocation))
