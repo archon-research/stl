@@ -7,17 +7,16 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api.deps import get_reference_risk_capital_service_factory
+from app.api.deps import get_reference_positions_service_factory
 from app.api.v1 import allocations
 from app.domain.entities.allocation import AnchorageCustodyHolding, EthAddress
-from app.domain.entities.reference_risk_capital import ReferenceAllocation, ReferencePrimeRiskCapital
+from app.domain.entities.reference_position import ReferencePosition
 from app.domain.exceptions import ReferenceDataUnavailableError
 from app.main import app
 from app.services.allocation_service import AllocationService
 
 _VALID_ADDR = "0x" + "ab" * 20
 _TOKEN = "0x" + "cd" * 20
-_LOAN_TOKEN = "0x" + "12" * 20
 _V4_POOL_ID = "0x" + "ef" * 32
 _OTHER_PROXY = "0x" + "99" * 20
 
@@ -33,51 +32,33 @@ def _custody_holding() -> AnchorageCustodyHolding:
     )
 
 
-def _reference_allocation(
+def _reference_position(
     *,
     network: str = "ethereum",
     token_address: str = _TOKEN,
     receipt_token_id: int | None = 41,
     chain_id: int | None = 1,
     chain: str | None = "mainnet",
-) -> ReferenceAllocation:
-    return ReferenceAllocation(
+) -> ReferencePosition:
+    return ReferencePosition(
         protocol_name="sparklend",
         network=network,
         symbol="spUSDT",
         name="Spark USDT",
         token_address=token_address,
-        loan_token_address=_LOAN_TOKEN,
-        loan_token_symbol="USDT",
-        exposure_usd=Decimal("344187505.66"),
-        required_risk_capital_usd=Decimal("990048.94"),
-        crr_pct=Decimal("0.28764051"),
+        wallet_address=_VALID_ADDR,
+        assets_usd=Decimal("344187505.66"),
+        allocated_assets_usd=Decimal("344000000.00"),
+        idle_assets_usd=Decimal("187505.66"),
+        allocation_type="allocation",
         receipt_token_id=receipt_token_id,
         chain_id=chain_id,
         chain=chain,
     )
 
 
-def _snapshot(*rows: ReferenceAllocation) -> ReferencePrimeRiskCapital:
-    zero = Decimal("0")
-    return ReferencePrimeRiskCapital(
-        star="spark",
-        exposure_usd=zero,
-        required_risk_capital_usd=zero,
-        total_risk_capital_usd=zero,
-        encumbrance_ratio=None,
-        exposure_share=zero,
-        junior_risk_capital_usd=zero,
-        senior_risk_capital_usd=zero,
-        internal_junior_risk_capital_usd=zero,
-        external_junior_risk_capital_usd=zero,
-        tokenized_junior_risk_capital_usd=zero,
-        internal_senior_risk_capital_usd=zero,
-        external_senior_risk_capital_usd=zero,
-        epi_utilization=zero,
-        spj_utilization=zero,
-        per_allocation=rows or (_reference_allocation(),),
-    )
+def _positions(*rows: ReferencePosition) -> tuple[ReferencePosition, ...]:
+    return rows or (_reference_position(),)
 
 
 @pytest.fixture
@@ -97,14 +78,14 @@ def reference_client(request):
         yield service
 
     app.dependency_overrides[allocations._get_service] = _service_dep
-    app.dependency_overrides[get_reference_risk_capital_service_factory] = lambda: lambda: reference_service
+    app.dependency_overrides[get_reference_positions_service_factory] = lambda: lambda: reference_service
     try:
         yield TestClient(app), service
     finally:
         app.dependency_overrides.clear()
 
 
-@pytest.mark.parametrize("reference_client", [_snapshot()], indirect=True)
+@pytest.mark.parametrize("reference_client", [_positions()], indirect=True)
 def test_reference_mode_serves_upstream_positions_in_the_allocation_shape(reference_client):
     client, _ = reference_client
 
@@ -113,12 +94,12 @@ def test_reference_mode_serves_upstream_positions_in_the_allocation_shape(refere
     (row,) = body
     assert row["symbol"] == "spUSDT"
     assert row["protocol_name"] == "sparklend"
-    assert row["underlying_symbol"] == "USDT"
+    assert row["underlying_symbol"] == ""
     assert row["amount_usd"] == "344187505.66"
     assert row["chain_id"] == 1
 
 
-@pytest.mark.parametrize("reference_client", [_snapshot()], indirect=True)
+@pytest.mark.parametrize("reference_client", [_positions()], indirect=True)
 def test_reference_mode_reports_no_balance_because_upstream_has_no_token_quantity(reference_client):
     client, _ = reference_client
 
@@ -127,7 +108,7 @@ def test_reference_mode_reports_no_balance_because_upstream_has_no_token_quantit
     assert body[0]["balance"] is None
 
 
-@pytest.mark.parametrize("reference_client", [_snapshot()], indirect=True)
+@pytest.mark.parametrize("reference_client", [_positions()], indirect=True)
 def test_reference_mode_marks_every_row_prime_scoped(reference_client):
     # Upstream reports per prime, so a client unioning a prime's proxies would
     # multiply the position count without this.
@@ -140,7 +121,7 @@ def test_reference_mode_marks_every_row_prime_scoped(reference_client):
 
 @pytest.mark.parametrize(
     "reference_client",
-    [_snapshot(_reference_allocation(token_address=_V4_POOL_ID, receipt_token_id=None))],
+    [_positions(_reference_position(token_address=_V4_POOL_ID, receipt_token_id=None))],
     indirect=True,
 )
 def test_reference_mode_withholds_a_pool_id_from_the_address_field(reference_client):
@@ -152,7 +133,7 @@ def test_reference_mode_withholds_a_pool_id_from_the_address_field(reference_cli
     assert body[0]["receipt_token_id"] is None
 
 
-@pytest.mark.parametrize("reference_client", [_snapshot()], indirect=True)
+@pytest.mark.parametrize("reference_client", [_positions()], indirect=True)
 def test_reference_mode_never_reads_the_indexed_positions(reference_client):
     client, service = reference_client
 
@@ -182,7 +163,7 @@ def test_reference_mode_returns_502_when_the_monitor_cannot_be_read(reference_cl
 
 @pytest.mark.parametrize(
     "reference_client",
-    [_snapshot(_reference_allocation(network="plume", chain_id=None, chain=None))],
+    [_positions(_reference_position(network="plume", chain_id=None, chain=None))],
     indirect=True,
 )
 def test_reference_mode_serves_a_position_on_a_chain_it_has_no_id_for(reference_client):
@@ -201,9 +182,9 @@ def test_reference_mode_serves_a_position_on_a_chain_it_has_no_id_for(reference_
 @pytest.mark.parametrize(
     "reference_client",
     [
-        _snapshot(
-            _reference_allocation(network="plume", chain_id=None, chain=None),
-            _reference_allocation(network="ethereum", chain_id=1, chain="mainnet"),
+        _positions(
+            _reference_position(network="plume", chain_id=None, chain=None),
+            _reference_position(network="ethereum", chain_id=1, chain="mainnet"),
         )
     ],
     indirect=True,
@@ -222,7 +203,7 @@ def test_reference_mode_keeps_the_mappable_rows_alongside_the_unmapped_one(refer
 
 @pytest.mark.parametrize(
     "reference_client",
-    [_snapshot(_reference_allocation(network="ethereum", chain_id=1, chain="mainnet"))],
+    [_positions(_reference_position(network="ethereum", chain_id=1, chain="mainnet"))],
     indirect=True,
 )
 def test_source_reference_lists_the_monitor_positions(reference_client):
@@ -236,7 +217,7 @@ def test_source_reference_lists_the_monitor_positions(reference_client):
 
 @pytest.mark.parametrize(
     "reference_client",
-    [_snapshot(_reference_allocation(network="ethereum", chain_id=1, chain="mainnet"))],
+    [_positions(_reference_position(network="ethereum", chain_id=1, chain="mainnet"))],
     indirect=True,
 )
 def test_both_marks_a_position_only_sky_reports(reference_client):
@@ -254,7 +235,7 @@ def test_both_marks_a_position_only_sky_reports(reference_client):
 
 @pytest.mark.parametrize(
     "reference_client",
-    [_snapshot(_reference_allocation(network="ethereum", chain_id=1, chain="mainnet"))],
+    [_positions(_reference_position(network="ethereum", chain_id=1, chain="mainnet"))],
     indirect=True,
 )
 def test_both_serves_the_custody_leg_when_a_non_primary_proxy_is_queried(reference_client):
