@@ -175,7 +175,9 @@ def alm_proxies_for_prime(prime_name: str) -> tuple[ProxyEntry, ...]:
 
 
 # Which proxy of a prime carries its prime-scoped rows is deliberately NOT
-# answered here: the contract's mainnet ALM proxy may have no allocation_position
-# rows, and attributing a row to a proxy /v1/primes does not list would make it
-# unreachable. AllocationRepository.primary_proxy_address resolves it from the
-# same rows /v1/primes is built from, so server and client cannot disagree.
+# answered here. It is answered from the `prime_proxy` table, which holds the same
+# declared universe this module reads and is what /v1/primes is built from, so
+# server and client cannot disagree. That table is the source of truth for the
+# proxy set on the DB side; endpoints for a declared proxy may be empty until data
+# arrives, which is expected rather than an error.
+# See AllocationRepository.primary_proxy_address.

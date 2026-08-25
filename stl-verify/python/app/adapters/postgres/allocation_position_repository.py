@@ -184,24 +184,24 @@ class AllocationRepository:
                 result = await conn.execute(
                     text(
                         """
-                        -- One row per (proxy, chain), matching what this endpoint
-                        -- documents. chain_id belongs in the key because
-                        -- block_number is not comparable across chains: keyed on
-                        -- proxy_address alone, an address holding positions on two
-                        -- chains (a CREATE2 deployment at the same address) would
-                        -- report whichever chain happened to be further ahead, and
-                        -- the derived chain name and the UI's mainnet pick with it.
-                        -- Cardinality is unchanged while every proxy is
-                        -- single-chain, which prime_registry enforces for contract
-                        -- addresses by refusing to index a duplicate.
-                        SELECT DISTINCT ON (proxy_address, ap.chain_id)
+                        -- One row per (proxy, chain), which is prime_proxy's
+                        -- primary key — so this is the table read directly rather
+                        -- than a DISTINCT ON recovering the same set by sorting
+                        -- every allocation_position row.
+                        --
+                        -- prime_proxy is the declared proxy universe, so this
+                        -- lists a proxy from the moment it is onboarded. A proxy
+                        -- no tracker has indexed yet appears here with an empty
+                        -- series behind it, which is the intended behaviour: the
+                        -- listing follows the contract, not ingest.
+                        SELECT
                             p.name,
-                            encode(proxy_address, 'hex') AS address,
-                            ap.chain_id,
+                            encode(pp.proxy_address, 'hex') AS address,
+                            pp.chain_id,
                             encode(p.vault_address, 'hex') AS vault_address
-                        FROM allocation_position ap
-                        JOIN prime p ON p.id = ap.prime_id
-                        ORDER BY proxy_address, ap.chain_id, block_number DESC
+                        FROM prime_proxy pp
+                        JOIN prime p ON p.id = pp.prime_id
+                        ORDER BY pp.proxy_address, pp.chain_id
                         """
                     )
                 )
@@ -237,14 +237,16 @@ class AllocationRepository:
             raise ValueError(f"Database query failed while fetching primes: {exc}") from exc
 
     async def prime_exists(self, prime_address: EthAddress) -> bool:
-        # Match what list_receipt_token_positions / get_*_usd_exposure can actually
-        # answer: presence in allocation_position.proxy_address. /v1/primes also
-        # defines "prime" as "has any allocation_position row", so this is the
-        # same identity the public API exposes.
+        # "Is this a proxy STL knows about", answered from the declared list in
+        # prime_proxy — the same table /v1/primes is built from, so the two cannot
+        # disagree. It deliberately does NOT mean "has allocation_position rows":
+        # a declared proxy that no tracker has indexed yet is a real prime address
+        # whose series is simply empty, and 404 would be the wrong answer for it.
+        # An address absent from the declared list is still a 404.
         query = text(
             """
             SELECT 1
-            FROM allocation_position
+            FROM prime_proxy
             WHERE proxy_address = decode(:address_hex, 'hex')
             LIMIT 1
             """
@@ -780,7 +782,7 @@ class AllocationRepository:
             """
             WITH target AS (
                 SELECT prime_id
-                FROM allocation_position
+                FROM prime_proxy
                 WHERE proxy_address = decode(:address_hex, 'hex')
                 LIMIT 1
             )
@@ -853,10 +855,11 @@ class AllocationRepository:
     async def list_prime_proxy_addresses(self, prime_address: EthAddress) -> list[EthAddress]:
         """Return every allocation proxy of the prime that owns ``prime_address``.
 
-        Resolved from ``allocation_position``, not the axis-synome contract, for
-        the reason given below ``alm_proxies_for_prime``: ``/v1/primes`` is built
-        from these same rows, so a contract that has not yet been told about a
-        proxy would make server and client disagree about what a prime is.
+        Resolved from ``prime_proxy``, the declared proxy universe transcribed
+        from the axis-synome contract. ``/v1/primes`` is built from the same table,
+        so server and client cannot disagree about what a prime is. A proxy that is
+        declared but not yet indexed widens the set and contributes nothing, which
+        is correct: it is part of the prime.
 
         SubProxy treasury wallets are excluded — they hold total capital, not
         allocations. Returns ``[prime_address]`` for an address with no rows, so
@@ -864,14 +867,14 @@ class AllocationRepository:
         """
         subproxies = [bytes.fromhex(address[2:]) for address in subproxy_addresses()]
         query = text("""
-            SELECT DISTINCT encode(ap.proxy_address, 'hex') AS address
-            FROM allocation_position ap
-            WHERE ap.prime_id = (
-                SELECT prime_id FROM allocation_position
+            SELECT DISTINCT encode(pp.proxy_address, 'hex') AS address
+            FROM prime_proxy pp
+            WHERE pp.prime_id = (
+                SELECT prime_id FROM prime_proxy
                 WHERE proxy_address = decode(:address_hex, 'hex')
                 LIMIT 1
             )
-              AND ap.proxy_address NOT IN :subproxy_addrs
+              AND pp.proxy_address NOT IN :subproxy_addrs
             ORDER BY address
         """).bindparams(bindparam("subproxy_addrs", expanding=True))
 
@@ -895,14 +898,12 @@ class AllocationRepository:
         """Return the proxy that carries this prime's prime-scoped rows, or ``None``.
 
         Prime-scoped rows (the Anchorage custody leg) must be attributed to exactly
-        one of a prime's proxies, or a consumer unioning them double-counts. That
-        proxy is resolved from ``allocation_position`` rather than from the
-        axis-synome contract for two reasons: the contract's mainnet ALM proxy may
-        have no rows yet, in which case attributing to it would make the row
-        unreachable; and ``/v1/primes`` — which is what a client groups by — is
-        built from these same rows, so a DB-derived pick cannot disagree with the
-        client's. Mainnet wins when present, else the lowest address, so the pick is
-        deterministic and moves only when the prime's indexed proxy set changes.
+        one of a prime's proxies, or a consumer unioning them double-counts. The pick
+        comes from ``prime_proxy``, the declared proxy universe, which is also what
+        ``/v1/primes`` is built from — so it cannot name a proxy a client does not
+        group by. Mainnet wins when present, else the lowest address, so the pick is
+        deterministic and moves only when the prime's declared proxy set does. It
+        needs the proxy set and each proxy's chain, never a block ordering.
 
         SubProxy treasury wallets are excluded: they hold the denominator, not
         allocations, and must never carry an allocation row.
@@ -910,15 +911,15 @@ class AllocationRepository:
         subproxies = [bytes.fromhex(address[2:]) for address in subproxy_addresses()]
         query = text(
             """
-            SELECT encode(ap.proxy_address, 'hex') AS address
-            FROM allocation_position ap
-            WHERE ap.prime_id = (
-                SELECT prime_id FROM allocation_position
+            SELECT encode(pp.proxy_address, 'hex') AS address
+            FROM prime_proxy pp
+            WHERE pp.prime_id = (
+                SELECT prime_id FROM prime_proxy
                 WHERE proxy_address = decode(:address_hex, 'hex')
                 LIMIT 1
             )
-              AND ap.proxy_address NOT IN :subproxy_addrs
-            ORDER BY (ap.chain_id = :mainnet_chain_id) DESC, ap.proxy_address ASC
+              AND pp.proxy_address NOT IN :subproxy_addrs
+            ORDER BY (pp.chain_id = :mainnet_chain_id) DESC, pp.proxy_address ASC
             LIMIT 1
             """
         ).bindparams(bindparam("subproxy_addrs", expanding=True))
@@ -964,7 +965,7 @@ class AllocationRepository:
             FROM allocation_position ap
             JOIN token t ON t.id = ap.token_id
             WHERE ap.prime_id = (
-                SELECT prime_id FROM allocation_position
+                SELECT prime_id FROM prime_proxy
                 WHERE proxy_address = decode(:address_hex, 'hex')
                 LIMIT 1
             )
@@ -1423,7 +1424,7 @@ _DIRECT_ASSET_HOLDINGS_SQL = text("""
 _ANCHORAGE_CUSTODY_HOLDINGS_SQL = text("""
     WITH target_prime AS (
         SELECT prime_id
-        FROM allocation_position
+        FROM prime_proxy
         WHERE proxy_address = decode(:proxy_hex, 'hex')
         LIMIT 1
     ),
