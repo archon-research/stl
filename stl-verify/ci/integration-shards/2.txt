@@ -64,3 +64,5 @@
 ./internal/services/reference_capital_indexer
 ./cmd/cronjobs/reference-capital-indexer
 ./cmd/cronjobs/morpho-v2-bootstrap
+./cmd/cronjobs/position-materializer
+./internal/services/position_materializer
