@@ -240,7 +240,9 @@ correction, who, when, why — is exposed for any record (CR-3.2, CR-3.4).
 
 **Time: two clocks, bitemporal by contract** (RP-4.1, CR-3.5/3.6). Every row carries valid time
 (`valid_from`/`valid_to`) and knowledge time (`ingest_xid`, labelled by `ingested_at`, ordered
-within a logical record by `processing_version`). Wall clock is never the knowledge-time key —
+within a logical record by `processing_version`). The two answer different questions: when a
+fact was true in the world, and when we learned it — without the second, a backdated late
+discovery reads as if we had always known. Wall clock is never the knowledge-time key —
 a row stamps at transaction start but becomes visible at commit — so ADR-0006 §5's snapshot
 mechanism is the exact form. The read contract, for any past date:
 
