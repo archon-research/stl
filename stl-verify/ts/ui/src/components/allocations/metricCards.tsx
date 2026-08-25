@@ -160,6 +160,9 @@ export const chartEmptyMessageClassName = css({
 });
 
 const CHART_HEIGHT = 236;
+// Shared with the cursor tooltip, which positions itself inside these margins —
+// a second copy would drift and park the tooltip outside the plot.
+const CHART_MARGIN = { top: 8, right: 24, bottom: 76, left: 64 };
 
 type ThresholdEntry = NonNullable<MetricChartSpec['thresholds']>[number];
 
@@ -488,7 +491,7 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
         theme={chartTheme}
         width={chartWidth}
         height={CHART_HEIGHT}
-        margin={{ top: 8, right: 24, bottom: 76, left: 64 }}
+        margin={CHART_MARGIN}
         xScale={{ type: 'band', paddingInner: 0.2 }}
         yScale={{ type: 'linear', domain: yDomain, nice: !isFlat }}
         onPointerMove={cursorHandlers.onPointerMove}
@@ -603,11 +606,32 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
             cursor={hoveredTimestamp}
             series={cursorSeries}
           >
-            {({ x, points }) => {
+            {({ x, left, points }) => {
               const label = labelAt.get(x);
               if (label === undefined) return null;
+              // `left` is the crosshair's own SVG x; the overlay it lands in
+              // spans the whole plot, so without placing the card here every
+              // tooltip parks at the plot's origin instead of following the
+              // line. Flipped to the near side past halfway so it cannot run
+              // off the card's right edge.
+              //
+              // Pinned to the plot top rather than tracking the readout dot:
+              // the plot is 152px tall, so a card centred on a dot near either
+              // edge is clipped, and one that slides with a wiggling series is
+              // harder to read than one that stays put.
+              const flip = left > chartWidth / 2;
               return (
-                <div className={chartTooltipSurfaceClassName}>
+                <div
+                  className={chartTooltipSurfaceClassName}
+                  style={{
+                    position: 'absolute',
+                    left,
+                    top: CHART_MARGIN.top,
+                    transform: `translateX(${flip ? 'calc(-100% - 10px)' : '10px'})`,
+                    whiteSpace: 'nowrap',
+                    pointerEvents: 'none',
+                  }}
+                >
                   <div className={chartTooltipTitleClassName}>{label}</div>
                   {points.map((point) => (
                     <div
