@@ -10,8 +10,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres/buildregistry"
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
@@ -65,8 +67,10 @@ func withCurrentTablesPool(t *testing.T) {
 type currentTablesFixture struct {
 	positionRepo *PositionRepository
 	priceRepo    *OnchainPriceRepository
+	allocRepo    *AllocationRepository
 	protocolID   int64
 	userID       int64
+	primeID      int64
 	tokenIDs     [2]int64
 }
 
@@ -83,8 +87,17 @@ func setupCurrentTables(t *testing.T) *currentTablesFixture {
 	if err != nil {
 		t.Fatalf("new onchain price repository: %v", err)
 	}
+	tokenRepo, err := NewTokenRepository(currentTablesPool, nil, 0)
+	if err != nil {
+		t.Fatalf("new token repository: %v", err)
+	}
+	txm, err := NewTxManager(currentTablesPool, nil)
+	if err != nil {
+		t.Fatalf("new tx manager: %v", err)
+	}
+	allocRepo := NewAllocationRepository(currentTablesPool, txm, tokenRepo, nil, buildregistry.BuildID(1))
 
-	f := &currentTablesFixture{positionRepo: positionRepo, priceRepo: priceRepo}
+	f := &currentTablesFixture{positionRepo: positionRepo, priceRepo: priceRepo, allocRepo: allocRepo}
 	f.seedRegistries(t, ctx)
 	return f
 }
@@ -98,6 +111,7 @@ func resetCurrentTables(t *testing.T, ctx context.Context) {
 		"borrower", "borrower_current",
 		"borrower_collateral", "borrower_collateral_current",
 		"onchain_token_price", "token_price_current",
+		"allocation_position", "allocation_position_current",
 	} {
 		if _, err := currentTablesPool.Exec(ctx, `DELETE FROM `+table); err != nil {
 			t.Fatalf("clear %s: %v", table, err)
@@ -120,6 +134,14 @@ func (f *currentTablesFixture) seedRegistries(t *testing.T, ctx context.Context)
 		 ON CONFLICT (chain_id, address) DO UPDATE SET name = EXCLUDED.name
 		 RETURNING id`).Scan(&f.protocolID); err != nil {
 		t.Fatalf("seed protocol: %v", err)
+	}
+
+	if err := currentTablesPool.QueryRow(ctx,
+		`INSERT INTO prime (name, vault_address)
+		 VALUES ('CurrentTablesTest', '\x5151515151515151515151515151515151515151'::bytea)
+		 ON CONFLICT (name) DO UPDATE SET vault_address = EXCLUDED.vault_address
+		 RETURNING id`).Scan(&f.primeID); err != nil {
+		t.Fatalf("seed prime: %v", err)
 	}
 
 	if err := currentTablesPool.QueryRow(ctx,
@@ -235,6 +257,14 @@ func assertCachesMatchHistory(t *testing.T, ctx context.Context) {
 			FROM onchain_token_price
 			ORDER BY oracle_id, token_id,
 			         block_number DESC, block_version DESC, processing_version DESC`},
+		{"allocation_position_current", `
+			SELECT DISTINCT ON (chain_id, proxy_address, token_id)
+			       chain_id, proxy_address, token_id, balance, underlying_value, underlying_token_id,
+			       tx_amount, direction, created_at,
+			       block_number, block_version, processing_version, log_index
+			FROM allocation_position
+			ORDER BY chain_id, proxy_address, token_id,
+			         block_number DESC, block_version DESC, processing_version DESC, log_index DESC`},
 	}
 
 	for _, c := range checks {
@@ -438,6 +468,97 @@ func (f *currentTablesFixture) trySaveBorrowers(ctx context.Context, rows ...*en
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// allocationAt builds a position row for one of the fixture's tokens on the given
+// proxy. Token addresses are minted here rather than taken from seedRegistries:
+// SavePositions resolves them through GetOrCreateToken.
+func (f *currentTablesFixture) allocationAt(tokenIdx, proxyIdx int, block int64, logIndex int, balance int64) *entity.AllocationPosition {
+	proxy := common.BytesToAddress([]byte{0x55, byte(proxyIdx)})
+	counterparty := common.BytesToAddress([]byte{0x77, byte(proxyIdx)})
+	return &entity.AllocationPosition{
+		ChainID: 1, PrimeID: f.primeID, ProxyAddress: proxy,
+		FromAddress: &counterparty, ToAddress: &proxy,
+		TokenAddress: common.BytesToAddress([]byte{0x66, byte(tokenIdx)}),
+		TokenSymbol:  fmt.Sprintf("AP%d", tokenIdx), TokenDecimals: 18,
+		Balance: big.NewInt(balance), TxAmount: big.NewInt(balance),
+		BlockNumber: block, BlockVersion: 0, LogIndex: logIndex,
+		TxHash:         fmt.Sprintf("0x%064x", block),
+		Direction:      "in",
+		CreatedAtBlock: block,
+		CreatedAt:      time.Unix(1700000000, 0).UTC(),
+	}
+}
+
+func (f *currentTablesFixture) trySaveAllocations(ctx context.Context, rows ...*entity.AllocationPosition) error {
+	tx, err := currentTablesPool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if err := f.allocRepo.SavePositions(ctx, tx, rows); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// TestCurrentTables_ConcurrentOverlappingAllocationWritersDoNotDeadlock is the
+// borrower test's counterpart for allocation_position_current, and the reason its
+// migration calls SavePositions' natural-key sort load-bearing: the cache row lock
+// is keyed on (chain, proxy, token) alone, so a live tracker and a backfiller
+// writing the same proxy at different blocks now contend. Shuffled input per
+// writer, so the test fails if that sort is ever dropped.
+func TestCurrentTables_ConcurrentOverlappingAllocationWritersDoNotDeadlock(t *testing.T) {
+	withCurrentTablesPool(t)
+	ctx := context.Background()
+	f := setupCurrentTables(t)
+
+	// Register the tokens first: concurrent GetOrCreateToken of an absent token is
+	// its own (pre-existing) race, and this test is about the cache rows.
+	if err := f.trySaveAllocations(ctx,
+		f.allocationAt(0, 0, 2999, 0, 1),
+		f.allocationAt(1, 1, 2999, 1, 1),
+	); err != nil {
+		t.Fatalf("register tokens: %v", err)
+	}
+
+	const rounds = 20
+	for round := 0; round < rounds; round++ {
+		liveBlock := int64(3000 + round*2)
+		backfillBlock := int64(3001 + round*2)
+
+		var wg sync.WaitGroup
+		errs := make([]error, 2)
+		wg.Add(2)
+
+		go func() {
+			defer wg.Done()
+			errs[0] = f.trySaveAllocations(ctx,
+				f.allocationAt(0, 0, liveBlock, 0, 10),
+				f.allocationAt(1, 1, liveBlock, 1, 10),
+			)
+		}()
+		go func() {
+			defer wg.Done()
+			errs[1] = f.trySaveAllocations(ctx,
+				f.allocationAt(1, 1, backfillBlock, 1, 20),
+				f.allocationAt(0, 0, backfillBlock, 0, 20),
+			)
+		}()
+		wg.Wait()
+
+		for i, err := range errs {
+			if testutil.IsDeadlock(err) {
+				t.Fatalf("round %d, writer %d deadlocked: %v — SavePositions' natural-key sort is what keeps the cache row locks in a caller-stable order", round, i, err)
+			}
+			if err != nil {
+				t.Fatalf("round %d, writer %d: %v", round, i, err)
+			}
+		}
+	}
+
+	assertCachesMatchHistory(t, ctx)
 }
 
 // TestCurrentTables_NegativeControl_ReverseKeyOrderDeadlocks proves the test above
