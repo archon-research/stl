@@ -291,3 +291,14 @@ patches:
       - op: add
         path: /metadata/annotations/tailscale.com~1tags
         value: tag:k8s-external
+
+  - target:
+      kind: Service
+      name: python-api-verify
+    patch: |
+      - op: add
+        path: /metadata/annotations/tailscale.com~1hostname
+        value: verify
+      - op: add
+        path: /metadata/annotations/tailscale.com~1tags
+        value: tag:k8s-external

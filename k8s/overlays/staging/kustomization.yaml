@@ -299,3 +299,11 @@ patches:
       - op: add
         path: /metadata/annotations/tailscale.com~1hostname
         value: python-api-staging
+
+  - target:
+      kind: Service
+      name: python-api-verify
+    patch: |
+      - op: add
+        path: /metadata/annotations/tailscale.com~1hostname
+        value: verify-staging
