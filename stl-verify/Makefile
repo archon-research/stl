@@ -962,7 +962,9 @@ BUILD_TIME ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 # file is unreachable, but a stale value here silently builds images on an older
 # toolchain — 1.26.3 shipped the stdlib CVEs that vulncheck flags.
 GO_VERSION ?= $(shell cat ../.go-version 2>/dev/null || cat .go-version 2>/dev/null || echo "1.26.5")
-PYTHON_VERSION ?= $(shell cat ../.python-version 2>/dev/null || cat .python-version 2>/dev/null || echo "3.12")
+# Exact patch pin for the python-api image base (python/Dockerfile FROM), deliberately not
+# read from minor-only .python-version: dev toolchains lag same-day CPython releases.
+PYTHON_VERSION ?= 3.12.14
 
 # Image tag (default to git sha, can override)
 IMAGE_TAG ?= $(GIT_COMMIT)
