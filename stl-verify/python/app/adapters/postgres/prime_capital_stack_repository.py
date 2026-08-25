@@ -30,7 +30,7 @@ _REFERENCE_CAPITAL_BUCKETS_SQL = text(
     """
     WITH target AS (
         SELECT prime_id
-        FROM allocation_position
+        FROM prime_proxy
         WHERE proxy_address = decode(:address_hex, 'hex')
         LIMIT 1
     ), snapshots AS (
