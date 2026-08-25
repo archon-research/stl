@@ -799,10 +799,11 @@ export interface components {
      *     - Receipt-token positions (e.g. spUSDT wrapping USDT): all fields populated.
      *     - Direct asset holdings (e.g. PYUSD held in the proxy with no wrapper):
      *       ``receipt_token_id`` / ``receipt_token_address`` / ``protocol_name`` are
-     *       null; ``symbol`` names the held asset. ``underlying_*`` usually point at
-     *       the held asset itself, except holdings valued on the underlying-value
-     *       basis (allowlisted, e.g. a Uni V3 pool position valued in USDC) with a
-     *       resolvable underlying, where they point at that underlying.
+     *       null; ``symbol`` and ``held_token_address`` name the held asset.
+     *       ``underlying_*`` usually point at the held asset itself, except holdings
+     *       valued on the underlying-value basis (allowlisted, e.g. a Uni V3 pool
+     *       position valued in USDC) with a resolvable underlying, where they point
+     *       at that underlying.
      *       ``amount_usd`` is populated when an oracle price exists for the pricing
      *       basis and null otherwise (e.g. LP/curve shares with no oracle feed).
      *     - Off-chain custody holdings (Anchorage BTC): ``chain_id`` is 0 (the
@@ -855,6 +856,12 @@ export interface components {
        * @example 1
        */
       chain_id: number | null;
+      /**
+       * Held Token Address
+       * @description 0x-prefixed address of the token held in the proxy, on a direct asset holding. It names what the position *is*, unlike `underlying_token_address`, which names the token the holding is *priced* through — a different asset wherever a wrapper is valued through the token it wraps. `null` on receipt-token positions, where `receipt_token_address` already names the held token, and on off-chain custody holdings, which have no on-chain address.
+       * @example 0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
+       */
+      held_token_address?: string | null;
       /**
        * Latest Activity Action
        * @description Direction of the most recent activity (`in`, `out`, `sweep`), or `null`.

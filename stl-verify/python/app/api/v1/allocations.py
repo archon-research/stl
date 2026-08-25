@@ -118,10 +118,11 @@ class AllocationResponse(BaseModel):
     - Receipt-token positions (e.g. spUSDT wrapping USDT): all fields populated.
     - Direct asset holdings (e.g. PYUSD held in the proxy with no wrapper):
       ``receipt_token_id`` / ``receipt_token_address`` / ``protocol_name`` are
-      null; ``symbol`` names the held asset. ``underlying_*`` usually point at
-      the held asset itself, except holdings valued on the underlying-value
-      basis (allowlisted, e.g. a Uni V3 pool position valued in USDC) with a
-      resolvable underlying, where they point at that underlying.
+      null; ``symbol`` and ``held_token_address`` name the held asset.
+      ``underlying_*`` usually point at the held asset itself, except holdings
+      valued on the underlying-value basis (allowlisted, e.g. a Uni V3 pool
+      position valued in USDC) with a resolvable underlying, where they point
+      at that underlying.
       ``amount_usd`` is populated when an oracle price exists for the pricing
       basis and null otherwise (e.g. LP/curve shares with no oracle feed).
     - Off-chain custody holdings (Anchorage BTC): ``chain_id`` is 0 (the
@@ -180,6 +181,18 @@ class AllocationResponse(BaseModel):
     receipt_token_address: str | None = Field(
         default=None,
         description="0x-prefixed receipt-token contract address. `null` for direct asset holdings.",
+        examples=["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"],
+    )
+    held_token_address: str | None = Field(
+        default=None,
+        description=(
+            "0x-prefixed address of the token held in the proxy, on a direct asset holding. It names "
+            "what the position *is*, unlike `underlying_token_address`, which names the token the "
+            "holding is *priced* through — a different asset wherever a wrapper is valued through "
+            "the token it wraps. `null` on receipt-token positions, where `receipt_token_address` "
+            "already names the held token, and on off-chain custody holdings, which have no on-chain "
+            "address."
+        ),
         examples=["0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"],
     )
     underlying_token_id: int | None = Field(
@@ -810,39 +823,21 @@ async def _custody_applies(prime_address: EthAddress, service: AllocationService
 def _position_facts(row: AllocationResponse) -> PositionFacts:
     """Read a projected row back as the facts that identify its position.
 
-    The receipt token where there is one, else the held asset itself — never the
-    underlying of a wrapped position, which two different vaults can share.
+    The receipt token where there is one, else the token actually held — never
+    the underlying a position is priced through, which two different vaults can
+    share. `sparkPrimeUSDC1` is held directly and priced through USDC: keyed on
+    USDC's address it matched Sky's own plain-USDC row, which reports $0, so the
+    merged row claimed Sky valued a $20.3M position at nothing while Sky's real
+    row for it went unjoined.
     """
     return PositionFacts(
         chain_id=row.chain_id,
         network=row.network,
-        position_address=row.receipt_token_address or _held_asset_address(row),
+        position_address=row.receipt_token_address or row.held_token_address,
         receipt_token_id=row.receipt_token_id,
         protocol_name=row.protocol_name,
         symbol=row.symbol,
     )
-
-
-def _held_asset_address(row: AllocationResponse) -> str | None:
-    """``underlying_token_address`` only where it really is the position.
-
-    A direct holding *is* its underlying — STL holds the plain asset, and the
-    two symbols agree. A wrapper STL has no registry entry for is filed the same
-    way but is not: `sparkPrimeUSDC1` carries USDC's address with USDC as its
-    underlying symbol, and keying it there matched it to Sky's own plain-USDC
-    row, which reports $0. The merged row then claimed Sky valued a $20.3M
-    position at nothing, while Sky's real row for it went unjoined.
-
-    Differing symbols are what separates the two: the underlying's address
-    identifies the underlying, and only a row that *is* that asset may be
-    keyed on it.
-    """
-    if row.underlying_token_address is None:
-        return None
-
-    held = (row.symbol or "").strip().lower()
-    underlying = (row.underlying_symbol or "").strip().lower()
-    return row.underlying_token_address if held == underlying else None
 
 
 async def _merged_allocations(
@@ -1035,6 +1030,7 @@ def _direct_asset_row(holding: DirectAssetHolding, category_service: AllocationC
         chain_id=holding.chain_id,
         receipt_token_id=None,
         receipt_token_address=None,
+        held_token_address=holding.token_address,
         underlying_token_id=underlying_id,
         underlying_token_address=underlying_address,
         symbol=holding.symbol,

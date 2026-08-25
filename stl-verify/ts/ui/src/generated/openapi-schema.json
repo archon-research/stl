@@ -254,7 +254,7 @@
         "type": "string"
       },
       "AllocationResponse": {
-        "description": "Enriched allocation response with category and metadata.\n\nThree row shapes share this model:\n- Receipt-token positions (e.g. spUSDT wrapping USDT): all fields populated.\n- Direct asset holdings (e.g. PYUSD held in the proxy with no wrapper):\n  ``receipt_token_id`` / ``receipt_token_address`` / ``protocol_name`` are\n  null; ``symbol`` names the held asset. ``underlying_*`` usually point at\n  the held asset itself, except holdings valued on the underlying-value\n  basis (allowlisted, e.g. a Uni V3 pool position valued in USDC) with a\n  resolvable underlying, where they point at that underlying.\n  ``amount_usd`` is populated when an oracle price exists for the pricing\n  basis and null otherwise (e.g. LP/curve shares with no oracle feed).\n- Off-chain custody holdings (Anchorage BTC): ``chain_id`` is 0 (the\n  off-chain sentinel), ``protocol_name`` is ``anchorage``, ``symbol`` is the\n  custodied asset (BTC), and both ``underlying_token_id`` and\n  ``underlying_token_address`` are null (off-chain assets have no token-\n  registry row). ``amount_usd`` is the loan drawn against the collateral and\n  ``latest_activity_at`` is the snapshot time \u2014 surfaced verbatim even when\n  the upstream feed is frozen, so staleness is visible rather than hidden.\n\n``chain_id`` therefore has three states, and 0 is not one of the other two:\nan EVM chain id, 0 for off-chain custody, and null for a chain STL has no id\nfor (reference rows only, where ``network`` carries the upstream name).",
+        "description": "Enriched allocation response with category and metadata.\n\nThree row shapes share this model:\n- Receipt-token positions (e.g. spUSDT wrapping USDT): all fields populated.\n- Direct asset holdings (e.g. PYUSD held in the proxy with no wrapper):\n  ``receipt_token_id`` / ``receipt_token_address`` / ``protocol_name`` are\n  null; ``symbol`` and ``held_token_address`` name the held asset.\n  ``underlying_*`` usually point at the held asset itself, except holdings\n  valued on the underlying-value basis (allowlisted, e.g. a Uni V3 pool\n  position valued in USDC) with a resolvable underlying, where they point\n  at that underlying.\n  ``amount_usd`` is populated when an oracle price exists for the pricing\n  basis and null otherwise (e.g. LP/curve shares with no oracle feed).\n- Off-chain custody holdings (Anchorage BTC): ``chain_id`` is 0 (the\n  off-chain sentinel), ``protocol_name`` is ``anchorage``, ``symbol`` is the\n  custodied asset (BTC), and both ``underlying_token_id`` and\n  ``underlying_token_address`` are null (off-chain assets have no token-\n  registry row). ``amount_usd`` is the loan drawn against the collateral and\n  ``latest_activity_at`` is the snapshot time \u2014 surfaced verbatim even when\n  the upstream feed is frozen, so staleness is visible rather than hidden.\n\n``chain_id`` therefore has three states, and 0 is not one of the other two:\nan EVM chain id, 0 for off-chain custody, and null for a chain STL has no id\nfor (reference rows only, where ``network`` carries the upstream name).",
         "example": {
           "amount_usd": "1234567.89",
           "balance": "1234567.89",
@@ -323,6 +323,21 @@
               1
             ],
             "title": "Chain Id"
+          },
+          "held_token_address": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "0x-prefixed address of the token held in the proxy, on a direct asset holding. It names what the position *is*, unlike `underlying_token_address`, which names the token the holding is *priced* through \u2014 a different asset wherever a wrapper is valued through the token it wraps. `null` on receipt-token positions, where `receipt_token_address` already names the held token, and on off-chain custody holdings, which have no on-chain address.",
+            "examples": [
+              "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+            ],
+            "title": "Held Token Address"
           },
           "latest_activity_action": {
             "anyOf": [
