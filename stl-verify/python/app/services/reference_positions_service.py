@@ -21,11 +21,11 @@ import logging
 
 from app.domain.entities.allocation import EthAddress, as_address
 from app.domain.entities.reference_position import ReferencePosition
-from app.domain.prime_registry import prime_name_for
 from app.ports.prime_directory import PrimeDirectory
 from app.ports.receipt_token_lookup import ReceiptTokenLookup
 from app.ports.reference_positions import ReferencePositionProvider
 from app.ports.reference_risk_capital import ReferenceRiskCapitalProvider
+from app.services.star_resolution import star_for
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +59,7 @@ class ReferencePositionsService:
         may be served as an empty list: an empty list is a prime that holds
         nothing, which is a different claim.
         """
-        star = await self._star_for(proxy_address)
+        star = await star_for(proxy_address, self._primes)
         if star is None:
             return None
 
@@ -72,30 +72,6 @@ class ReferencePositionsService:
 
         positions = await self._positions.get_positions(star)
         return await self._resolve(positions)
-
-    async def _star_for(self, proxy_address: EthAddress) -> str | None:
-        """Name the prime ``proxy_address`` belongs to, or ``None`` if it names none.
-
-        The contract answers first: it is the tracked set and costs no I/O. An
-        address it does not index can still identify a prime — a vault address,
-        or an ALM proxy during a chain onboarding, which holds positions before
-        the contract is told about it. Self mode serves both, so reference mode
-        must too: the same URL differs only in which figures it returns, never
-        in which addresses it accepts.
-        """
-        star = prime_name_for(proxy_address)
-        if star is not None:
-            return star
-
-        for prime in await self._primes.list_primes():
-            if proxy_address in (prime.address, prime.prime_vault_address):
-                return prime.name
-
-        logger.info(
-            "Address names no prime STL knows; no star to ask upstream for",
-            extra={"proxy_address": str(proxy_address)},
-        )
-        return None
 
     async def _resolve(self, positions: tuple[ReferencePosition, ...]) -> tuple[ReferencePosition, ...]:
         # Bounded, because each resolution opens its own connection and this

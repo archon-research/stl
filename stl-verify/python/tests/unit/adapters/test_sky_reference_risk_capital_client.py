@@ -143,6 +143,15 @@ async def test_get_prime_raises_when_the_monitor_cannot_be_read(label, response)
         await client.get_prime("spark")
 
 
+async def test_get_prime_names_this_host_in_an_upstream_failure():
+    # Two Sky hosts share one envelope reader; a failure that did not name which
+    # of them answered would send an operator to the wrong place.
+    client = _client(responses={"/primes/spark/": httpx.Response(503, text="boom")})
+
+    with pytest.raises(ReferenceDataUnavailableError, match="Star monitor returned status 503"):
+        await client.get_prime("spark")
+
+
 async def test_get_prime_raises_when_a_required_total_is_absent():
     client = _client(detail={key: value for key, value in _DETAIL.items() if key != "total_rrc"})
 

@@ -9,7 +9,6 @@ from app.adapters.sky.internal_positions_client import SkyInternalPositionsClien
 from app.domain.exceptions import ReferenceDataUnavailableError
 
 _BASE = "https://sky.example/internal"
-_PROXY = "0x1601843c5e9bc251a3272907010afa41fa18347e"
 _TOKEN = "0x" + "cd" * 20
 _V4_POOL_ID = "0x" + "ef" * 32
 
@@ -17,7 +16,6 @@ _V4_POOL_ID = "0x" + "ef" * 32
 def _row(**overrides) -> dict:
     return {
         "address": _TOKEN,
-        "wallet_address": _PROXY,
         "assets": "787379142.914689187128954387",
         "allocated_assets": "700000000",
         "idle_assets": "87379142.914689187128954387",
@@ -25,7 +23,6 @@ def _row(**overrides) -> dict:
         "protocol": "sparklend",
         "token_symbol": "spUSDS",
         "token_name": "Spark USDS",
-        "allocation_type": "allocation",
         **overrides,
     }
 
@@ -92,17 +89,6 @@ async def test_rejects_a_page_shorter_than_the_reported_total():
 
     with pytest.raises(ReferenceDataUnavailableError, match="reported 59 rows but returned 1"):
         await _client(handler).get_positions("spark")
-
-
-@pytest.mark.asyncio
-async def test_carries_the_proxy_that_holds_the_position():
-    # Absent from the Star monitor's feed, and the reason this one can be joined
-    # to STL's rows at the grain they are stored.
-    handler = _Serving(_payload([_row()]))
-
-    (position,) = await _client(handler).get_positions("spark")
-
-    assert position.wallet_address == _PROXY
 
 
 @pytest.mark.asyncio
@@ -182,8 +168,10 @@ async def test_rejects_a_non_finite_figure():
 
 
 @pytest.mark.asyncio
-async def test_rejects_a_non_success_status():
+async def test_rejects_a_non_success_status_naming_this_host():
+    # Two Sky hosts share one envelope reader; a failure that did not name which
+    # of them answered would send an operator to the wrong place.
     handler = _Serving({"detail": "nope"}, status=503)
 
-    with pytest.raises(ReferenceDataUnavailableError, match="status 503"):
+    with pytest.raises(ReferenceDataUnavailableError, match="Sky internal feed returned status 503"):
         await _client(handler).get_positions("spark")

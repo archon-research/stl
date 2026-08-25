@@ -30,7 +30,6 @@ import {
   getAllocationKey,
   getCategoryLabel,
   getChainLabel,
-  getExplorerUrl,
   getProtocolLabel,
   parseNumericValue,
   type ChainLabelLookup,
@@ -1427,13 +1426,6 @@ export function AllocationGrid({
             severity: encumbranceBreach,
           }}
           debt={{
-            explorerUrl: selectedPrime
-              ? getExplorerUrl(
-                  selectedPrime.chain_id,
-                  selectedPrime.address,
-                  'address',
-                )
-              : null,
             wad: debtWad,
             ilkLabel: debtIlkLabel,
             isLoading: isPrimeDebtLoading,

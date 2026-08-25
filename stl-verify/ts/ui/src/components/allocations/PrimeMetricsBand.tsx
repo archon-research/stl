@@ -73,13 +73,6 @@ type PrimeMetricsBandProps = {
     wad: string | null | undefined;
     ilkLabel: string | null;
     isLoading: boolean;
-    /**
-     * Explorer page of the proxy the debt is read for. Currently unrendered:
-     * it hung off the raw-WAD caption, which was being read as an address when
-     * it is the unrounded debt figure, so the whole line came out. The prime's
-     * address is linked elsewhere on the page.
-     */
-    explorerUrl: string | null;
   };
   charts: BandCharts;
   isChartsLoading: boolean;
