@@ -6,8 +6,8 @@ decodes with ``DisallowUnknownFields`` (see
 *shape* — the nesting, the serialization aliases, and the exact field set of
 each entry — part of the cross-language contract, not an implementation detail.
 
-These tests pin that shape against whatever axis-synome version is installed, so
-a breaking change to ``export_entities`` (e.g. the ``spec.asc`` wrapper that was
+These tests pin that shape against the vendored axis-synome registry, so a
+breaking change to ``export_entities`` (e.g. the ``spec.asc`` wrapper that was
 silently dropped in 0.2.0) fails the Python sentinel compatibility gate instead
 of shipping and breaking the Go workers at runtime. Keep the expected field sets
 below in lockstep with the Go ``TokenEntry`` / ``ProxyConfig`` structs.
@@ -16,8 +16,8 @@ below in lockstep with the Go ``TokenEntry`` / ``ProxyConfig`` structs.
 import json
 from pathlib import Path
 
-from axis_synome.export_entities import build_axis_synome_contract
-from axis_synome.spec.entities.protocol_sets import AllocationType, TokenType
+from app.risk_engine._vendored_synome.export_entities import build_axis_synome_contract
+from app.risk_engine._vendored_synome.spec.entities.protocol_sets import AllocationType, TokenType
 
 # Mirror of the Go `TokenEntry` struct json tags in loader.go. Go decodes with
 # DisallowUnknownFields, so an added or renamed field breaks the workers.
@@ -130,26 +130,24 @@ def test_proxy_entries_carry_exactly_the_fields_go_decodes():
 
 
 def test_the_committed_contract_entities_match_this_packages_export():
-    """Ties the file Go reads to the package Python computes from.
+    """Ties the file Go reads to the registry Python computes from.
 
     Go loads ``contracts/axis-synome/axis_synome_entities.json`` at runtime while
-    the API recomputes the same topology in-process from the pinned
-    ``axis-synome`` package. Nothing else connects the two, so a package bump
-    that re-points a proxy — or a re-export nobody committed — would leave the
-    trackers indexing one address set while the API attributes figures to
-    another, silently and in opposite directions.
+    the API recomputes the same topology in-process from the vendored registry.
+    Nothing else connects the two, so a registry edit that re-points a proxy —
+    or a re-export nobody committed — would leave the trackers indexing one
+    address set while the API attributes figures to another, silently and in
+    opposite directions.
     """
     committed = json.loads(_COMMITTED_CONTRACT.read_text())
 
     assert committed["axis_synome"] == _export()["axis_synome"], (
-        "committed axis_synome_entities.json is stale against the installed "
-        "axis-synome package — run 'make export-axis-synome-contract' and commit the result"
+        "committed axis_synome_entities.json is stale against the vendored "
+        "registry — run 'make export-axis-synome-contract' and commit the result"
     )
 
 
-def test_the_committed_contract_version_matches_the_installed_package():
-    # The entities blob can be unchanged while the pin moves; the version is what
-    # makes a bump-without-re-export visible.
+def test_the_committed_contract_version_matches_the_vendored_baseline():
     committed = json.loads(_COMMITTED_CONTRACT.read_text())
 
     assert committed["version"] == _export()["version"]

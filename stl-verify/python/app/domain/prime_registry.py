@@ -5,7 +5,7 @@ SubProxy treasury wallets. Every proxy shares the prime's ``prime_id`` in
 ``allocation_position``, so proxy address alone is not a prime identity and prime
 name alone is not a proxy identity — consumers need both directions.
 
-The contract (``axis_synome.export_entities``) already carries
+The contract (``app.risk_engine._vendored_synome.export_entities``) already carries
 ``star -> chain -> [{address, role}]``, which is the same data the Go allocation
 tracker configures itself from (``internal/services/allocation_tracker/config.go``).
 Reading it here keeps the two languages on one source of truth.
@@ -20,7 +20,7 @@ Chain *ids* therefore come from ``allocation_position.chain_id``, not from here.
 from dataclasses import dataclass
 from enum import Enum
 
-from axis_synome.export_entities import (
+from app.risk_engine._vendored_synome.export_entities import (
     PROXY_ROLE_ALM,
     PROXY_ROLE_SUBPROXY,
     build_axis_synome_contract,
