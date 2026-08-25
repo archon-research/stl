@@ -477,6 +477,28 @@ async def store_test_ids(conn: asyncpg.Connection, ids: dict[str, int]) -> None:
         )
 
 
+async def declare_prime_proxy(
+    conn: asyncpg.Connection,
+    *,
+    prime_id: int,
+    proxy_hex: str,
+    chain_id: int = 1,
+) -> None:
+    """Declare a proxy as belonging to ``prime_id``, as the migration's list does.
+
+    ``prime_proxy`` is static reference data, so a scenario using a proxy address
+    the migration does not list has to declare it here. Positions alone do not
+    make a proxy resolvable — that is the point of the table.
+    """
+    await conn.execute(
+        "INSERT INTO prime_proxy (chain_id, proxy_address, prime_id) VALUES ($1, $2, $3) "
+        "ON CONFLICT (chain_id, proxy_address) DO NOTHING",
+        chain_id,
+        bytes.fromhex(proxy_hex),
+        prime_id,
+    )
+
+
 async def insert_allocation_position(
     conn: asyncpg.Connection,
     *,
@@ -609,6 +631,7 @@ async def _ghost_seed_closed_proxy(conn: asyncpg.Connection, prime_id: int, asyr
         (usds_id, [(1000, 75894, _GHOST_TXC, "in"), (2000, 0, _GHOST_TXD, "out")]),
     ]:
         for block, bal, tx, direction in rows:
+            await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=GHOST_CLOSED_PROXY_HEX)
             await insert_allocation_position(
                 conn,
                 token_id=token_id,
@@ -623,6 +646,7 @@ async def _ghost_seed_closed_proxy(conn: asyncpg.Connection, prime_id: int, asyr
 
 async def _ghost_seed_sweep_proxy(conn: asyncpg.Connection, prime_id: int, asyrup_id: int) -> None:
     """The production sweep shape: five zero-balance sweep rows newer than the non-zero row."""
+    await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=GHOST_SWEEP_PROXY_HEX)
     await insert_allocation_position(
         conn,
         token_id=asyrup_id,
@@ -649,6 +673,7 @@ async def _ghost_seed_sweep_proxy(conn: asyncpg.Connection, prime_id: int, asyru
 async def _ghost_seed_open_proxy(conn: asyncpg.Connection, prime_id: int, asyrup_id: int) -> None:
     """Open position with an older zero row; must still appear with balance=500."""
     for block, bal, tx, direction in [(999, 0, _GHOST_TXA, "out"), (1000, 500, _GHOST_TXB, "in")]:
+        await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=GHOST_OPEN_PROXY_HEX)
         await insert_allocation_position(
             conn,
             token_id=asyrup_id,
@@ -664,6 +689,7 @@ async def _ghost_seed_open_proxy(conn: asyncpg.Connection, prime_id: int, asyrup
 async def _ghost_seed_mixed_proxy(conn: asyncpg.Connection, prime_id: int, asyrup_id: int, usds_id: int) -> None:
     """One swept receipt token (250 then 0) and one open USDS holding (1000); only USDS may appear."""
     for block, bal, tx, direction in [(3000, 250, _GHOST_TXA, "in"), (3001, 0, _GHOST_TXB, "out")]:
+        await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=GHOST_MIXED_PROXY_HEX)
         await insert_allocation_position(
             conn,
             token_id=asyrup_id,
@@ -693,6 +719,7 @@ async def _ghost_seed_tiebreak_proxy(conn: asyncpg.Connection, prime_id: int, as
     appear; USDS is the mirror shape and ends the block at 400.
     """
     for log_index, bal, direction in [(0, 300, "in"), (1, 0, "out")]:
+        await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=GHOST_TIEBREAK_PROXY_HEX)
         await insert_allocation_position(
             conn,
             token_id=asyrup_id,
@@ -844,6 +871,16 @@ async def seed_underlying_value_direct_holdings(db_url: str) -> None:
 
             # Allowlisted + underlying_value + priced underlying -> underlying_value x USDC price.
             # (spark also has its own price above: the result must ignore it.)
+            for _proxy in (
+                UV_PROXY_PRICED,
+                UV_PROXY_UNDERLYING_UNPRICED,
+                UV_PROXY_NULL_VALUE,
+                UV_PROXY_NON_ALLOWLISTED,
+                UV_PROXY_PLAIN,
+                UV_PROXY_SYMBOLLESS_UNDERLYING,
+                UV_PROXY_UNIV3_POOL,
+            ):
+                await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=_proxy)
             await insert_allocation_position(
                 conn,
                 token_id=spark_id,
@@ -1045,6 +1082,7 @@ async def seed_price_tiebreak_positions(db_url: str) -> None:
                 )
                 await insert_oracle_asset(conn, oracle_id, underlying_id)
 
+            await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=TIE_PROXY_HEX)
             await insert_allocation_position(
                 conn,
                 token_id=receipt_token_id,
@@ -1179,6 +1217,8 @@ async def seed_disabled_source_positions(db_url: str) -> None:
                     disabled_oracle_id=disabled_oracle_id,
                 )
 
+            for _proxy in (DIS_DIRECT_PROXY_HEX, DIS_RECEIPT_PROXY_HEX):
+                await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=_proxy)
             await insert_allocation_position(
                 conn,
                 token_id=receipt_token_id,
@@ -1349,6 +1389,7 @@ async def seed_receipt_underlying_value_positions(db_url: str) -> None:
                 ("fullyRedeemed", RUV_ZERO_REDEEMED_BALANCE, RUV_ZERO_REDEEMED_UNDERLYING_VALUE, underlying_id),
             ]
             for index, (symbol, balance, underlying_value, underlying_token_id) in enumerate(positions):
+                await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=RUV_PROXY_HEX)
                 await insert_allocation_position(
                     conn,
                     token_id=receipt_token_ids[symbol],
@@ -1392,6 +1433,7 @@ async def _ruv_seed_locf_series(
         (RUV_LOCF_LATER_VALUE, dt.timedelta(hours=2, minutes=10), 1102),
     ]
     for index, (underlying_value, offset, block) in enumerate(observations):
+        await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=RUV_LOCF_PROXY_HEX)
         await insert_allocation_position(
             conn,
             token_id=locf_token_id,
@@ -1440,6 +1482,7 @@ async def _ruv_seed_morpho_like_position(conn: asyncpg.Connection, *, prime_id: 
         address=bytes.fromhex(_RUV_MORPHO_RECEIPT_HEX),
         symbol="sparkUSDCbcLike",
     )
+    await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=RUV_MORPHO_PROXY_HEX)
     await insert_allocation_position(
         conn,
         token_id=share_token_id,
@@ -1848,6 +1891,7 @@ async def seed_flow_share_ratio_activity(db_url: str) -> None:
                 underlying_token_id,
                 block,
             ) in enumerate(rows):
+                await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=proxy_hex)
                 await insert_allocation_position(
                     conn,
                     token_id=token_id,
@@ -1981,8 +2025,9 @@ async def seed_anchorage_custody(db_url: str) -> None:
                 bytes.fromhex(_ANCHORAGE_VAULT_HEX),
             )
             token_id = await insert_token(conn, "ACUSTODY", 18, bytes.fromhex(_ANCHORAGE_DUMMY_TOKEN_HEX))
-            # The API resolves proxy_address -> prime_id via allocation_position
-            # (the list_primes join precedent), so the prime needs one such row.
+            # The API resolves proxy_address -> prime_id through prime_proxy, so the
+            # scenario declares its proxies there as well as seeding a position.
+            await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=ANCHORAGE_CUSTODY_PROXY_HEX)
             await insert_allocation_position(
                 conn,
                 token_id=token_id,
@@ -2079,6 +2124,7 @@ async def seed_anchorage_custody(db_url: str) -> None:
                 "INSERT INTO prime (name, vault_address) VALUES ('anchorage_empty', $1) RETURNING id",
                 bytes.fromhex(_ANCHORAGE_EMPTY_VAULT_HEX),
             )
+            await declare_prime_proxy(conn, prime_id=empty_prime_id, proxy_hex=ANCHORAGE_EMPTY_PROXY_HEX)
             await insert_allocation_position(
                 conn,
                 token_id=token_id,
@@ -2118,6 +2164,7 @@ async def _seed_anchorage_multi_asset_prime(conn: asyncpg.Connection, token_id: 
         "INSERT INTO prime (name, vault_address) VALUES ('anchorage_multi', $1) RETURNING id",
         bytes.fromhex(_ANCHORAGE_MULTI_VAULT_HEX),
     )
+    await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=ANCHORAGE_MULTI_PROXY_HEX)
     await insert_allocation_position(
         conn,
         token_id=token_id,
@@ -2188,6 +2235,7 @@ async def _seed_anchorage_other_prime(conn: asyncpg.Connection, token_id: int) -
         "INSERT INTO prime (name, vault_address) VALUES ('anchorage_other', $1) RETURNING id",
         bytes.fromhex(_ANCHORAGE_OTHER_VAULT_HEX),
     )
+    await declare_prime_proxy(conn, prime_id=prime_id, proxy_hex=ANCHORAGE_OTHER_PROXY_HEX)
     await insert_allocation_position(
         conn,
         token_id=token_id,

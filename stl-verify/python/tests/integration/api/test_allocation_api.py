@@ -25,6 +25,7 @@ from tests.integration.seed import (
     GHOST_OPEN_PROXY_HEX,
     GHOST_SWEEP_PROXY_HEX,
     GHOST_TIEBREAK_PROXY_HEX,
+    declare_prime_proxy,
     insert_allocation_position,
     insert_oracle_asset,
     insert_token,
@@ -130,6 +131,15 @@ async def _seed(db_url: str) -> None:
                 weth_id,
                 bytes.fromhex(_AWETH_HEX),
             )
+
+            # prime_proxy is static reference data, so these scenario proxies are
+            # declared explicitly; positions alone do not make an address resolve.
+            for _prime_id, _proxy_hex in (
+                (spark_id, _SPARK_PROXY_HEX),
+                (grove_id, _GROVE_PROXY_HEX),
+                (obex_id, _OBEX_PROXY_HEX),
+            ):
+                await declare_prime_proxy(conn, prime_id=_prime_id, proxy_hex=_proxy_hex)
 
             # spark holds aUSDC: an earlier balance (block 1000) and the latest
             # (block 2000). A block_version=1 row at block 1000 simulates a
@@ -342,17 +352,18 @@ def test_list_primes_returns_seeded_primes(client: TestClient) -> None:
 
     assert response.status_code == 200
     data = response.json()
-    # Assert presence of the primes this test seeds rather than an exact global
-    # count: other scenarios in this module (ghost-balance) add their own ALM
-    # proxies to the same database, and a "list everything" endpoint returns
-    # them all.
-    by_name = {item["name"]: item for item in data}
-    assert by_name["spark"]["id"] == f"0x{_SPARK_PROXY_HEX}"
-    assert by_name["spark"]["address"] == f"0x{_SPARK_PROXY_HEX}"
-    assert by_name["grove"]["id"] == f"0x{_GROVE_PROXY_HEX}"
-    assert by_name["grove"]["address"] == f"0x{_GROVE_PROXY_HEX}"
-    assert by_name["obex"]["id"] == f"0x{_OBEX_PROXY_HEX}"
-    assert by_name["obex"]["address"] == f"0x{_OBEX_PROXY_HEX}"
+    # Keyed by address, not by name: the endpoint lists the whole declared proxy
+    # universe, so a prime legitimately appears once per proxy — the migration's
+    # real spark and grove proxies alongside this module's seeded ones.
+    by_address = {item["address"]: item for item in data}
+    for proxy_hex, name in (
+        (_SPARK_PROXY_HEX, "spark"),
+        (_GROVE_PROXY_HEX, "grove"),
+        (_OBEX_PROXY_HEX, "obex"),
+    ):
+        row = by_address[f"0x{proxy_hex}"]
+        assert row["name"] == name
+        assert row["id"] == f"0x{proxy_hex}"
     # SubProxy rows (e.g. _SPARK_SUB_PROXY_HEX) share spark_id and must be
     # filtered out — only the ALM proxy per prime should appear.
     addresses = {item["address"] for item in data}
