@@ -93,8 +93,7 @@
     },
     "as_of_date": {
       "type": "date",
-      "class": "A",
-      "semantics": "event_time"
+      "class": "S"
     },
     "asks": {
       "type": "jsonb",
