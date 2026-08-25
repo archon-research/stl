@@ -10,7 +10,7 @@ import (
 )
 
 // Shared, container-backed dependencies started once for the whole package. The
-// DB is isolated per test via testutil.SetupTestSchema; S3 buckets are named per
+// DB is isolated per test via testutil.SetupTestDB; S3 buckets are named per
 // test so a single LocalStack can back every subtest.
 var (
 	sharedDSN           string
