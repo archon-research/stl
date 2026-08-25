@@ -22,6 +22,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/adapters/outbound/postgres"
 	rediscache "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/redis"
 	snsadapter "github.com/archon-research/stl/stl-verify/internal/adapters/outbound/sns"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/lifecycle"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 	"github.com/archon-research/stl/stl-verify/internal/services/backfill_gaps"
 	"github.com/archon-research/stl/stl-verify/internal/services/live_data"
@@ -55,6 +56,69 @@ func newTestBlockchainClient() *testutil.MockBlockchainClient {
 // =============================================================================
 // Test Cases
 // =============================================================================
+
+// TestRun_ShutsDownCleanlyOnContextCancel drives run end to end against the
+// shared test services, then cancels its context and asserts it unwinds without
+// error. ALCHEMY_WS_URL points at a dead port on purpose: Subscribe hands the
+// connection to a background retry loop, so startup never waits on a live chain.
+func TestRun_ShutsDownCleanlyOnContextCancel(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	_, dsn, dbCleanup := testutil.SetupTestDB(t, sharedDSN)
+	t.Cleanup(dbCleanup)
+
+	awsCfg, err := awsconfig.LoadDefaultConfig(ctx,
+		awsconfig.WithRegion(sharedLocalStackCfg.Region),
+		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "")),
+	)
+	if err != nil {
+		t.Fatalf("failed to load AWS config: %v", err)
+	}
+	snsClient := sns.NewFromConfig(awsCfg, func(o *sns.Options) {
+		o.BaseEndpoint = aws.String(sharedLocalStackCfg.Endpoint)
+	})
+	topicARN := createSNSTopic(t, ctx, snsClient, testutil.SanitizeTestName(t.Name())+"-blocks.fifo")
+
+	t.Setenv("CHAIN_ID", "1")
+	t.Setenv("DATABASE_URL", dsn)
+	t.Setenv("REDIS_ADDR", sharedRedisAddr)
+	t.Setenv("ALCHEMY_API_KEY", "test-key")
+	t.Setenv("ALCHEMY_WS_URL", "ws://127.0.0.1:1")
+	t.Setenv("ALCHEMY_HTTP_URL", "http://127.0.0.1:1")
+	t.Setenv("AWS_SNS_ENDPOINT", sharedLocalStackCfg.Endpoint)
+	t.Setenv("AWS_SNS_TOPIC_ARN", topicARN)
+	t.Setenv("AWS_ACCESS_KEY_ID", "test")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
+	t.Setenv("AWS_REGION", sharedLocalStackCfg.Region)
+
+	runCtx, stopRun := context.WithCancel(ctx)
+	defer stopRun()
+
+	done := make(chan error, 1)
+	go func() { done <- run(runCtx, cliOptions{}) }()
+
+	const startupSettle = 5 * time.Second
+	select {
+	case err := <-done:
+		t.Fatalf("run returned during startup: %v", err)
+	case <-time.After(startupSettle):
+	}
+
+	stopRun()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run returned an error on graceful shutdown: %v", err)
+		}
+	case <-time.After(lifecycle.ShutdownTimeout + cleanupTimeout):
+		t.Fatal("run did not return after its context was cancelled")
+	}
+}
 
 // TestLiveService_ProcessesNewBlock tests the full flow of processing a new block.
 func TestLiveService_ProcessesNewBlock(t *testing.T) {
@@ -1337,22 +1401,28 @@ func (infra *TestInfrastructure) WaitForMessage(t *testing.T, queueURL string, t
 // SNS/SQS Setup
 // =============================================================================
 
+func createSNSTopic(t *testing.T, ctx context.Context, client *sns.Client, name string) string {
+	t.Helper()
+
+	result, err := client.CreateTopic(ctx, &sns.CreateTopicInput{
+		Name: aws.String(name),
+		Attributes: map[string]string{
+			"FifoTopic":                 "true",
+			"ContentBasedDeduplication": "false",
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create topic %s: %v", name, err)
+	}
+	return *result.TopicArn
+}
+
 func createSNSTopics(t *testing.T, ctx context.Context, client *sns.Client, prefix string) map[string]string {
 	t.Helper()
 	topics := make(map[string]string)
 
 	for _, name := range []string{"blocks", "receipts", "traces", "blobs"} {
-		result, err := client.CreateTopic(ctx, &sns.CreateTopicInput{
-			Name: aws.String(fmt.Sprintf("%s-%s.fifo", prefix, name)),
-			Attributes: map[string]string{
-				"FifoTopic":                 "true",
-				"ContentBasedDeduplication": "false",
-			},
-		})
-		if err != nil {
-			t.Fatalf("failed to create topic %s: %v", name, err)
-		}
-		topics[name] = *result.TopicArn
+		topics[name] = createSNSTopic(t, ctx, client, fmt.Sprintf("%s-%s.fifo", prefix, name))
 	}
 
 	return topics
