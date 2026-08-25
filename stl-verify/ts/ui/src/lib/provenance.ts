@@ -117,6 +117,27 @@ export function preferReference(
 }
 
 /**
+ * STL's figure for a merged row, or Sky's where STL has none.
+ *
+ * The mirror of `preferReference`, and the rule for anything measured rather
+ * than modelled: STL computes a position's value from the chain it indexes, so
+ * where it has a figure that figure is the more direct one. Sky's is the
+ * fallback rather than the lead — but not a rare one, since STL prices only the
+ * chains it indexes and a position on an unserved chain has a real balance and
+ * no value at all.
+ *
+ * Absence is what triggers the fallback, so a published zero is kept: both
+ * sides report real zeros, and coalescing one to the other's figure would
+ * invent a holding.
+ */
+export function preferIndexed(
+  stlValue: string | null | undefined,
+  skyValue: string | null | undefined,
+): string | null {
+  return stlValue ?? skyValue ?? null;
+}
+
+/**
  * A composite response as the chosen provenance alone would have answered it.
  *
  * Every display reads a figure as "Sky's, else STL's" (`preferReference`), so

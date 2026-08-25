@@ -116,6 +116,8 @@ export interface paths {
     /**
      * List a prime's current allocations
      * @description Return every current allocation held by the given prime — receipt-token positions (enriched with USD value when a price is available), direct asset holdings (tokens held in the proxy with no registered receipt-token wrapper, surfaced with `receipt_token_id`, `receipt_token_address` and `protocol_name` set to `null`, and `amount_usd` valued from the token's oracle price when one exists), and off-chain Anchorage BTC custody (chain_id 0, `protocol_name` `anchorage`, `amount_usd` the loan drawn against the collateral). Each row includes the latest activity timestamp and a derived `category` (`allocation` / `pol` / `psm3` / `asset` / `custody`). Rows are proxy-scoped except the Anchorage custody leg, which is prime-scoped and returned only under the one proxy of the prime that carries its prime-scoped rows (its mainnet proxy when indexed, else its lowest-addressed one) — see the `scope` field.
+     *
+     *     Under `source=reference` (and the reference half of `source=both`) the rows are Sky's published balance sheet instead: every position the prime holds, prime-scoped, with `amount_usd` carrying upstream's `assets`. That is the same measurement as the indexed rows' `amount_usd`, so the two halves of `both` are comparable — deliberately not the Star monitor's risk-capital breakdown, whose `exposure` covers only the priced subset and runs about a third smaller. These rows carry no `balance`, no `underlying_symbol` and no activity fields, which upstream does not publish.
      */
     get: operations['list_allocations_v1_primes__prime_id__allocations_get'];
     put?: never;
@@ -904,6 +906,12 @@ export interface components {
        * @example 42
        */
       receipt_token_id?: number | null;
+      /**
+       * Reference Amount Usd
+       * @description Sky's USD value for the same position, populated only under `source=both` on a row both provenances report. Carried beside `amount_usd` rather than replacing it: the two are computed differently and a consumer needs the gap shown rather than reconciled. It is also the only figure available where STL holds the position but prices none of it — an unindexed chain leaves `amount_usd` null against a real `balance`, and Sky's figure is what a total can fall back to.
+       * @example 1234567.89
+       */
+      reference_amount_usd?: string | null;
       /**
        * Scope
        * @description Whether the row belongs to the queried proxy (`proxy`) or to the prime as a whole (`prime`). A `prime`-scoped row is served under the prime's primary proxy only, so unioning a prime's proxies never double-counts it.

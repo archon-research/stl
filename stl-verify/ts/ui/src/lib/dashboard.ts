@@ -167,6 +167,36 @@ export function groupPrimesByVault(primes: Prime[]): PrimeGroup[] {
   });
 }
 
+/**
+ * The prime group a URL's prime segment names, or `null` if none does.
+ *
+ * The segment is a group key — `prime_vault_address` — but the addresses a
+ * reader has to hand are usually not that. `/v1/primes` keys its rows by ALM
+ * proxy, one per chain, and an explorer link names a proxy too, so a deep link
+ * built from either misses a key comparison while naming a prime the app holds.
+ * Matching those aliases resolves to the same prime the link meant, which is
+ * strictly better than falling back to the first prime in the list.
+ *
+ * Case-insensitive because a checksummed address is the form an explorer hands
+ * over, while `/v1/primes` reports addresses lowercased; the two denote the same
+ * account. Keys are matched before proxies so a group's own key always wins.
+ */
+export function findPrimeGroup(
+  groups: PrimeGroup[],
+  requested: string,
+): PrimeGroup | null {
+  const wanted = requested.toLowerCase();
+
+  return (
+    groups.find((group) => group.key === requested) ??
+    groups.find((group) => group.key.toLowerCase() === wanted) ??
+    groups.find((group) =>
+      group.proxyAddresses.some((address) => address.toLowerCase() === wanted),
+    ) ??
+    null
+  );
+}
+
 function getProtocolMatchScore(
   protocol: string,
   localProtocol: LocalProtocolRow,
@@ -532,16 +562,23 @@ export function encumbranceSeverity(
  * feed stopped, which the cronjob alerts already cover — but it is the reason
  * absence is dropped rather than plotted as zero.
  */
+// `timestamp` is what the synced cursor is keyed on, so it carries the bucket's
+// own instant rather than the formatted label: sibling cards bucket at different
+// resolutions, and only the instant means the same thing in all of them.
 export function toChartSeries<T extends { bucket_start: string }>(
   buckets: readonly T[],
   read: (bucket: T) => number | null,
-): { label: string; value: number }[] {
+): { label: string; value: number; timestamp: number }[] {
   return buckets
     .map((bucket) => ({
       label: formatChartTimestampLabel(bucket.bucket_start),
       value: read(bucket) ?? Number.NaN,
+      timestamp: Date.parse(bucket.bucket_start),
     }))
-    .filter((point) => Number.isFinite(point.value));
+    .filter(
+      (point) =>
+        Number.isFinite(point.value) && Number.isFinite(point.timestamp),
+    );
 }
 
 export function balancedColumns(count: number, maxColumns: number): number {
@@ -745,16 +782,6 @@ export function formatWadValue(
     });
     return '—';
   }
-}
-
-export function formatRawWadLabel(
-  value: number | string | null | undefined,
-): string {
-  if (value === null || value === undefined || value === '') {
-    return 'Raw WAD unavailable';
-  }
-
-  return `Raw WAD ${truncateMiddle(String(value))}`;
 }
 
 // Float conversion for charting only; use formatWadValue for displayed amounts,

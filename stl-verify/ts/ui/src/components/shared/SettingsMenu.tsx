@@ -209,10 +209,18 @@ export function useDataSourceSection(
       option(
         'both',
         'Composite',
-        'STL and Sky together, each position named once',
+        'Verify and Legacy together, each position named once',
       ),
-      option('indexed', 'STL indexed', "Computed from STL's own on-chain data"),
-      option('reference', 'Sky reference', 'As published by Sky'),
+      option(
+        'indexed',
+        'Verify indexed',
+        "Computed from Verify's own on-chain data",
+      ),
+      option(
+        'reference',
+        'Legacy reference',
+        'As published by the legacy feed',
+      ),
     ],
     onChange: (value) => {
       if (value === shown) {

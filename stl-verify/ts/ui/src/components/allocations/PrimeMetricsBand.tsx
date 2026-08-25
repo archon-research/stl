@@ -1,5 +1,5 @@
+import { SyncedChartGroup } from '@archon-research/charting';
 import { Badge, type BadgeColorPalette } from '@archon-research/design-system';
-import { ExternalLink } from 'lucide-react';
 import type { ReactNode } from 'react';
 
 import { css, cx } from '#styled-system/css';
@@ -8,33 +8,32 @@ import {
   type EncumbranceSeverity,
   formatFreshnessLabel,
   formatRatioPercent,
-  formatRawWadLabel,
   formatUsdValue,
   formatWadValue,
 } from '../../lib/dashboard';
-import { preferReference } from '../../lib/provenance';
 import type { PrimeRiskCapital } from '../../types/allocation';
-import { AppTooltip, SummaryMetric } from '../shared';
+import { ExposureCard, PrimeCollateralCard } from './HiddenMetricCards';
 import {
+  MetricCard,
   MetricCardError,
+  MetricCardLegend,
   MetricCardSkeleton,
   MetricCardTrend,
   type MetricChartSpec,
+  metricCaptionClassName,
   metricDetailClassName,
-  metricsCardClassName,
   metricsGridClassName,
   metricsGridStyle,
+  preferredFigure,
   TOP_METRIC_CARD_LABELS,
-  TOP_METRIC_CARDS,
   type TopMetricCard,
+  VISIBLE_TOP_METRIC_CARDS,
 } from './metricCards';
 
 // Only what the band reads. The caller's summary carries more (a latest-activity
 // timestamp), but asking for it here would couple this to a field it never uses.
 export type AllocationTotals = {
   allocationCount: number;
-  // Rows Sky alone reports, which the table shows and the total excludes.
-  referenceOnlyCount: number;
   totalUsd: number;
 };
 
@@ -74,15 +73,18 @@ type PrimeMetricsBandProps = {
     wad: string | null | undefined;
     ilkLabel: string | null;
     isLoading: boolean;
-    /** Explorer page of the proxy the debt is read for; null hides the link. */
+    /**
+     * Explorer page of the proxy the debt is read for. Currently unrendered:
+     * it hung off the raw-WAD caption, which was being read as an address when
+     * it is the unrounded debt figure, so the whole line came out. The prime's
+     * address is linked elsewhere on the page.
+     */
     explorerUrl: string | null;
   };
   charts: BandCharts;
   isChartsLoading: boolean;
   chartsErrorMessage: string | null;
 };
-
-const captionClassName = css({ fontSize: 'sm', color: 'text.muted' });
 
 /**
  * One metric's cell, whatever state it is in.
@@ -136,10 +138,16 @@ function TotalAllocationCard({
   const isFiltered = hasSearchQuery && overallSummary !== null;
 
   return (
-    <SummaryMetric
-      className={metricsCardClassName}
+    <MetricCard
       label="Total allocation"
-      info="The allocation rows below, added up: the USD value of every position the prime holds. In the composite view, rows only Sky reports are listed but not summed, since they can describe the same money as an STL row."
+      info="The allocation rows below, added up: the USD value of every position the prime holds — this is the sum of the Exposure column, so it always matches the table. Each row contributes Verify's value where it has one and Legacy's where it does not."
+      legend={
+        <MetricCardLegend
+          chart={chart}
+          seriesLabel="allocation"
+          isLoading={isChartsLoading}
+        />
+      }
       value={
         isFiltered
           ? `${formatUsdValue(summary.totalUsd)} / ${formatUsdValue(overallSummary.totalUsd)}`
@@ -147,75 +155,10 @@ function TotalAllocationCard({
       }
       detail={
         <div className={metricDetailClassName}>
-          <div className={captionClassName}>
+          <div className={metricCaptionClassName}>
             {isFiltered
               ? `${summary.allocationCount}/${overallSummary.allocationCount} allocations`
               : `${summary.allocationCount} allocations`}
-            {summary.referenceOnlyCount > 0
-              ? ` · ${summary.referenceOnlyCount} reported only by Sky`
-              : null}
-          </div>
-          <MetricCardTrend
-            chart={chart}
-            isLoading={isChartsLoading}
-            errorMessage={null}
-          />
-        </div>
-      }
-    />
-  );
-}
-
-// Absent when the figure is STL's own: only the reference feed carries an
-// observation instant, and the on-chain series is as current as its last block.
-function observedCaption(observedAt: string | null): string | null {
-  return observedAt === null
-    ? null
-    : `Observed ${formatFreshnessLabel(observedAt)}`;
-}
-
-/**
- * A headline figure, Sky's preferred, and which provenance it came from.
- *
- * Callers need the provenance as well as the number: the observation stamp is
- * the reference feed's own, so it may only caption a figure from that feed.
- */
-function preferredFigure(
-  skyValue: string | null | undefined,
-  stlValue: string | null | undefined,
-): { value: string | null; fromReference: boolean } {
-  return {
-    value: preferReference(skyValue, stlValue),
-    fromReference: skyValue != null,
-  };
-}
-
-function ExposureCard({
-  riskCapital,
-  observedAt,
-  chart,
-  isChartsLoading,
-}: {
-  riskCapital: PrimeRiskCapital;
-  observedAt: string | null;
-  chart: MetricChartSpec | null;
-  isChartsLoading: boolean;
-}) {
-  const exposure = preferredFigure(
-    riskCapital.reference_prime_exposure_usd,
-    riskCapital.prime_exposure_usd,
-  );
-
-  return (
-    <SummaryMetric
-      className={metricsCardClassName}
-      label="Exposure"
-      info="The prime's total USD exposure as the risk framework reports it — one top-down figure, not a row sum. Sky's figure is preferred where reported, so it can differ from Total allocation in coverage and observation time."
-      value={formatUsdValue(exposure.value)}
-      detail={
-        <div className={metricDetailClassName}>
-          <div className={captionClassName}>
-            {observedCaption(exposure.fromReference ? observedAt : null)}
           </div>
           <MetricCardTrend
             chart={chart}
@@ -253,56 +196,27 @@ function TotalRiskCapitalCard({
     total.fromReference && required.fromReference ? observedAt : null;
 
   return (
-    <SummaryMetric
-      className={metricsCardClassName}
+    <MetricCard
       label="Total risk capital"
       info="The treasury USDS held in the prime's SubProxy — the capital available to absorb losses. The dashed line marks the required risk capital it is measured against."
       infoHref="https://sky-atlas.io/#6f6b25d6-f73c-4733-ba37-12a0a411433c"
       infoLinkText="Sky Atlas A.3.2.1.2.1 →"
+      legend={
+        <MetricCardLegend
+          chart={chart}
+          seriesLabel="total capital"
+          isLoading={isChartsLoading}
+        />
+      }
       value={formatUsdValue(total.value ?? '0')}
       detail={
         <div className={metricDetailClassName}>
-          <div className={captionClassName}>
+          <div className={metricCaptionClassName}>
             Required {formatUsdValue(required.value)}
             {capitalObservedAt === null
               ? null
               : ` · observed ${formatFreshnessLabel(capitalObservedAt)}`}
           </div>
-          <MetricCardTrend
-            chart={chart}
-            isLoading={isChartsLoading}
-            errorMessage={null}
-          />
-        </div>
-      }
-    />
-  );
-}
-
-function PrimeCollateralCard({
-  usd,
-  observedAt,
-  isLoading,
-  chart,
-  isChartsLoading,
-}: {
-  usd: number | null;
-  observedAt: string | null;
-  isLoading: boolean;
-  chart: MetricChartSpec | null;
-  isChartsLoading: boolean;
-}) {
-  return (
-    <SummaryMetric
-      className={metricsCardClassName}
-      label="Prime collateral"
-      info="The asset value Sky's monitor reports standing behind the prime — the upstream PRIME COLLATERAL figure. A daily feed, carried forward between observations."
-      // The value is a reduce from zero, so "not fetched yet" and "holds
-      // nothing" are the same number until the fetch lands.
-      value={isLoading ? 'Loading...' : formatUsdValue(usd)}
-      detail={
-        <div className={metricDetailClassName}>
-          <div className={captionClassName}>{observedCaption(observedAt)}</div>
           <MetricCardTrend
             chart={chart}
             isLoading={isChartsLoading}
@@ -346,12 +260,18 @@ function EncumbranceCard({
 }) {
   const chip = ENCUMBRANCE_BAND_CHIP[severity];
   return (
-    <SummaryMetric
-      className={metricsCardClassName}
+    <MetricCard
       label="Encumbrance ratio"
       info="Required risk capital as a share of total risk capital. The Sky Atlas defines at or above 100% as a Low Severity Breach and above 103% as a High Severity Breach; 80–100% is flagged At risk here as an early warning."
       infoHref="https://sky-atlas.io/#5435f680-aaaa-461a-bcae-4056bb8964d9"
       infoLinkText="Sky Atlas A.3.2.2.7.2.1.1.1 →"
+      legend={
+        <MetricCardLegend
+          chart={chart}
+          seriesLabel="encumbrance"
+          isLoading={isChartsLoading}
+        />
+      }
       value={
         <>
           {formatRatioPercent(ratio)}
@@ -377,9 +297,7 @@ function EncumbranceCard({
         <div className={metricDetailClassName}>
           {/* Rendered even when empty: siblings all carry a caption line, and
               dropping it floated this card's chart above their baseline. */}
-          <div className={css({ fontSize: 'sm', color: 'text.muted' })}>
-            {caption ?? '\u00A0'}
-          </div>
+          <div className={metricCaptionClassName}>{caption ?? '\u00A0'}</div>
           <MetricCardTrend
             chart={chart}
             isLoading={isChartsLoading}
@@ -391,33 +309,9 @@ function EncumbranceCard({
   );
 }
 
-const debtCaptionClassName = css({
-  display: 'flex',
-  // Wrapping this caption -- the longest of the six -- cost a second line and
-  // dropped the chart below its row-mates. Truncating hides nothing: the raw
-  // WAD is already abbreviated behind a tooltip.
-  flexWrap: 'nowrap',
-  minWidth: 0,
-  alignItems: 'baseline',
-  gap: '1',
-  fontSize: 'sm',
-  color: 'text.muted',
-  // The tooltip trigger is a 44px-min tap target; inline here it would inflate
-  // the row and drop the text below the other cards' single-line subtitles.
-  // Collapse it to the text line height so the baselines align.
-  '& button': { minHeight: 'auto', py: '0' },
-  '& > *': {
-    minWidth: 0,
-    whiteSpace: 'nowrap',
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-  },
-});
-
 function PrimeDebtCard({
   wad,
   ilkLabel,
-  explorerUrl,
   isLoading,
   chart,
   isChartsLoading,
@@ -425,69 +319,35 @@ function PrimeDebtCard({
 }: {
   wad: string | null | undefined;
   ilkLabel: string | null;
-  explorerUrl: string | null;
   isLoading: boolean;
   chart: MetricChartSpec | null;
   isChartsLoading: boolean;
   chartsErrorMessage: string | null;
 }) {
-  const rawWadLabel = wad ? `Exact raw WAD ${wad}` : 'Raw WAD unavailable';
-
   return (
-    <SummaryMetric
-      className={metricsCardClassName}
+    <MetricCard
       label="Prime debt exposure"
-      info="What the prime has drawn against its allocator vault: the minted debt for its ilk, in USDS terms. The indexed figure is read from chain state; the reference figure is Sky's own reported debt."
+      info="What the prime has drawn against its allocator vault: the minted debt for its ilk, in USDS terms. The indexed figure is read from chain state; the reference figure is the legacy feed's own reported debt."
       infoHref="https://sky-atlas.io/#1c09308d-b7cd-495c-b547-baf628a6e323"
       infoLinkText="Sky Atlas A.3.7.1.2 →"
+      legend={
+        <MetricCardLegend
+          chart={chart}
+          seriesLabel="debt"
+          isLoading={isChartsLoading}
+          errorMessage={chartsErrorMessage}
+        />
+      }
       value={isLoading ? 'Loading...' : formatWadValue(wad)}
       detail={
         isLoading ? (
           'Fetching latest debt snapshot'
         ) : (
           <div className={metricDetailClassName}>
-            <div className={debtCaptionClassName}>
-              {ilkLabel === null ? null : (
-                <>
-                  <span>{ilkLabel}</span>
-                  <span aria-hidden="true">·</span>
-                </>
-              )}
-              <AppTooltip
-                ariaLabel={rawWadLabel}
-                trigger={
-                  <span
-                    className={css({
-                      textDecoration: 'underline',
-                      textDecorationStyle: 'dotted',
-                      textUnderlineOffset: '2px',
-                    })}
-                  >
-                    {formatRawWadLabel(wad)}
-                  </span>
-                }
-                content={wad ? `Exact raw WAD: ${wad}` : 'Raw WAD unavailable'}
-              />
-              {explorerUrl === null ? null : (
-                // Beside the tooltip rather than inside it: hover content
-                // dismisses on pointer-leave, so a link there is unclickable.
-                <a
-                  href={explorerUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  aria-label="View the proxy wallet on the block explorer"
-                  title="View the proxy wallet on the block explorer"
-                  className={css({
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    color: 'text.link',
-                    _hover: { color: 'text.interactive' },
-                  })}
-                >
-                  <ExternalLink size={12} />
-                </a>
-              )}
-            </div>
+            {/* The ilk alone. The raw WAD that used to sit beside it — with a
+                tooltip and an explorer link — was read as the prime's address
+                when it is the unrounded debt the headline already states. */}
+            <div className={metricCaptionClassName}>{ilkLabel ?? '\u00A0'}</div>
             <MetricCardTrend
               chart={chart}
               isLoading={isChartsLoading}
@@ -530,9 +390,9 @@ export function PrimeMetricsBand({
     return (
       <div
         className={metricsGridClassName}
-        style={metricsGridStyle(TOP_METRIC_CARDS.length)}
+        style={metricsGridStyle(VISIBLE_TOP_METRIC_CARDS.length)}
       >
-        {TOP_METRIC_CARDS.map((card) => (
+        {VISIBLE_TOP_METRIC_CARDS.map((card) => (
           <MetricCardSkeleton
             key={`metrics-skeleton-${card}`}
             label={TOP_METRIC_CARD_LABELS[card]}
@@ -557,6 +417,10 @@ export function PrimeMetricsBand({
     'prime-debt': primeDebtErrorMessage,
   };
 
+  // Every card the band knows how to build, including the two the grid does not
+  // place: keeping them in the record is what keeps them compiled and honest
+  // against the props around them, so turning one back on is one edit in
+  // `metricCards.tsx` rather than a rewrite here.
   const renderedCards: Record<TopMetricCard, ReactNode> = {
     'total-allocation':
       summary === null ? null : (
@@ -613,7 +477,6 @@ export function PrimeMetricsBand({
         <PrimeDebtCard
           wad={debt.wad}
           ilkLabel={debt.ilkLabel}
-          explorerUrl={debt.explorerUrl}
           isLoading={debt.isLoading}
           chart={charts.debt}
           isChartsLoading={isChartsLoading}
@@ -623,18 +486,23 @@ export function PrimeMetricsBand({
   };
 
   return (
-    <div
-      className={metricsGridClassName}
-      style={metricsGridStyle(TOP_METRIC_CARDS.length)}
-    >
-      {TOP_METRIC_CARDS.map((card) => (
-        <MetricCardCell
-          key={`metric-card-${card}`}
-          card={card}
-          rendered={renderedCards[card]}
-          errorMessage={CARD_ERROR_SOURCE[card]}
-        />
-      ))}
-    </div>
+    // One cursor across the band: the cards plot the same prime over the same
+    // window, so a reader comparing them is asking what every card said at one
+    // instant. Hovering each in turn to find it is the question asked badly.
+    <SyncedChartGroup>
+      <div
+        className={metricsGridClassName}
+        style={metricsGridStyle(VISIBLE_TOP_METRIC_CARDS.length)}
+      >
+        {VISIBLE_TOP_METRIC_CARDS.map((card) => (
+          <MetricCardCell
+            key={`metric-card-${card}`}
+            card={card}
+            rendered={renderedCards[card]}
+            errorMessage={CARD_ERROR_SOURCE[card]}
+          />
+        ))}
+      </div>
+    </SyncedChartGroup>
   );
 }

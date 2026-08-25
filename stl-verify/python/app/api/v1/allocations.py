@@ -16,7 +16,7 @@ from app.api._validators import (
     OptionalTxHashParam,
     ProxyAddressPathParam,
 )
-from app.api.deps import get_engine, get_reference_risk_capital_service_factory
+from app.api.deps import get_engine, get_reference_positions_service_factory
 from app.api.provenance import (
     get_requested_provenance,
     resolve_or_422,
@@ -31,7 +31,7 @@ from app.domain.entities.allocation import (
     as_address,
 )
 from app.domain.entities.allocation_category import AllocationCategory
-from app.domain.entities.reference_risk_capital import ReferenceAllocation
+from app.domain.entities.reference_position import ReferencePosition
 from app.domain.exceptions import ReferenceDataUnavailableError
 from app.domain.position_identity import PositionFacts, position_identities
 from app.domain.provenance import Provenance
@@ -39,7 +39,7 @@ from app.domain.serialization import PlainDecimal
 from app.domain.time_series import TimeSeriesQuery, enforce_filter_for_window
 from app.services.allocation_category_service import AllocationCategoryService
 from app.services.allocation_service import AllocationService
-from app.services.reference_risk_capital_service import ReferenceRiskCapitalService
+from app.services.reference_positions_service import ReferencePositionsService
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -228,6 +228,18 @@ class AllocationResponse(BaseModel):
     amount_usd: PlainDecimal | None = Field(
         default=None,
         description="USD value of the position when a price is available; `null` otherwise.",
+        examples=["1234567.89"],
+    )
+    reference_amount_usd: PlainDecimal | None = Field(
+        default=None,
+        description=(
+            "Sky's USD value for the same position, populated only under `source=both` on a row "
+            "both provenances report. Carried beside `amount_usd` rather than replacing it: the "
+            "two are computed differently and a consumer needs the gap shown rather than "
+            "reconciled. It is also the only figure available where STL holds the position but "
+            "prices none of it — an unindexed chain leaves `amount_usd` null against a real "
+            "`balance`, and Sky's figure is what a total can fall back to."
+        ),
         examples=["1234567.89"],
     )
     latest_activity_at: str | None = Field(
@@ -697,14 +709,21 @@ async def list_protocols(service: AllocationService = Depends(_get_service)):
         "(`allocation` / `pol` / `psm3` / `asset` / `custody`). Rows are proxy-scoped "
         "except the Anchorage custody leg, which is prime-scoped and returned only "
         "under the one proxy of the prime that carries its prime-scoped rows (its mainnet proxy when "
-        "indexed, else its lowest-addressed one) — see the `scope` field."
+        "indexed, else its lowest-addressed one) — see the `scope` field.\n\n"
+        "Under `source=reference` (and the reference half of `source=both`) the rows are Sky's "
+        "published balance sheet instead: every position the prime holds, prime-scoped, with "
+        "`amount_usd` carrying upstream's `assets`. That is the same measurement as the indexed "
+        "rows' `amount_usd`, so the two halves of `both` are comparable — deliberately not the Star "
+        "monitor's risk-capital breakdown, whose `exposure` covers only the priced subset and runs "
+        "about a third smaller. These rows carry no `balance`, no `underlying_symbol` and no "
+        "activity fields, which upstream does not publish."
     ),
 )
 async def list_allocations(
     prime_id: ProxyAddressPathParam,
     requested_provenance: Provenance | None = Depends(get_requested_provenance),
     service: AllocationService = Depends(_get_service),
-    reference_services: Callable[[], ReferenceRiskCapitalService] = Depends(get_reference_risk_capital_service_factory),
+    reference_services: Callable[[], ReferencePositionsService] = Depends(get_reference_positions_service_factory),
 ):
     """Return current allocations for ``prime_id``.
 
@@ -797,17 +816,39 @@ def _position_facts(row: AllocationResponse) -> PositionFacts:
     return PositionFacts(
         chain_id=row.chain_id,
         network=row.network,
-        position_address=row.receipt_token_address or row.underlying_token_address,
+        position_address=row.receipt_token_address or _held_asset_address(row),
         receipt_token_id=row.receipt_token_id,
         protocol_name=row.protocol_name,
         symbol=row.symbol,
     )
 
 
+def _held_asset_address(row: AllocationResponse) -> str | None:
+    """``underlying_token_address`` only where it really is the position.
+
+    A direct holding *is* its underlying — STL holds the plain asset, and the
+    two symbols agree. A wrapper STL has no registry entry for is filed the same
+    way but is not: `sparkPrimeUSDC1` carries USDC's address with USDC as its
+    underlying symbol, and keying it there matched it to Sky's own plain-USDC
+    row, which reports $0. The merged row then claimed Sky valued a $20.3M
+    position at nothing, while Sky's real row for it went unjoined.
+
+    Differing symbols are what separates the two: the underlying's address
+    identifies the underlying, and only a row that *is* that asset may be
+    keyed on it.
+    """
+    if row.underlying_token_address is None:
+        return None
+
+    held = (row.symbol or "").strip().lower()
+    underlying = (row.underlying_symbol or "").strip().lower()
+    return row.underlying_token_address if held == underlying else None
+
+
 async def _merged_allocations(
     prime_address: EthAddress,
     service: AllocationService,
-    reference_service: ReferenceRiskCapitalService,
+    reference_service: ReferencePositionsService,
 ) -> list[AllocationResponse]:
     """Every position either provenance reports, each named once.
 
@@ -854,7 +895,14 @@ async def _merged_allocations(
         # STL's own figures lead where both report a position: they are computed
         # from the chain rather than reported. The two disagree by ~1% on
         # exposure, which a consumer needs told rather than averaged away.
-        merged.append(counterpart.model_copy(update={"source": Provenance.BOTH}))
+        #
+        # Sky's value rides along rather than being dropped. STL prices only the
+        # chains it indexes, so a position it holds on an unserved chain carries
+        # a real balance and a null `amount_usd` — six of spark's rows, $423M —
+        # and discarding Sky's figure left a consumer nothing to fall back to.
+        merged.append(
+            counterpart.model_copy(update={"source": Provenance.BOTH, "reference_amount_usd": row.amount_usd})
+        )
 
     merged.extend(row for row in indexed if id(row) not in matched)
     return merged
@@ -889,13 +937,21 @@ async def _prime_wide_indexed_allocations(
 
 
 async def _reference_allocations(
-    prime_address: EthAddress, reference_service: ReferenceRiskCapitalService
+    prime_address: EthAddress, reference_service: ReferencePositionsService
 ) -> list[AllocationResponse]:
-    """List the positions the upstream monitor reports for this prime."""
-    try:
-        snapshot = await reference_service.get(prime_address)
+    """List the positions upstream reports this prime holds.
 
-        if snapshot is None:
+    Sourced from Sky's balance-sheet feed rather than the Star monitor's
+    risk-capital breakdown. The monitor answers a different question — the
+    priced, risk-bearing subset — so serving it here put 11 rows summing to
+    spark's `total_exposure` beside STL's 30 rows summing to its assets, two
+    figures 1.5x apart in one column. The balance sheet is the same measurement
+    STL's own rows carry, and reports every position rather than the priced ones.
+    """
+    try:
+        positions = await reference_service.get(prime_address)
+
+        if positions is None:
             # Not a ReferenceDataUnavailableError, so this propagates past the
             # handler below rather than being rewritten to a 502.
             raise HTTPException(
@@ -906,14 +962,14 @@ async def _reference_allocations(
         category_service = AllocationCategoryService()
         return [
             _reference_allocation_row(row, category_service).model_copy(update={"source": Provenance.REFERENCE})
-            for row in snapshot.per_allocation
+            for row in positions
         ]
     except ReferenceDataUnavailableError as exc:
         raise HTTPException(status_code=502, detail=f"Reference allocations upstream unavailable: {exc}") from exc
 
 
 def _reference_allocation_row(
-    row: ReferenceAllocation, category_service: AllocationCategoryService
+    row: ReferencePosition, category_service: AllocationCategoryService
 ) -> AllocationResponse:
     """Project an upstream position onto the allocation model.
 
@@ -926,16 +982,18 @@ def _reference_allocation_row(
         network=row.network,
         receipt_token_id=row.receipt_token_id,
         receipt_token_address=row.token_address if as_address(row.token_address) else None,
-        # Both or neither, per the model's invariant. Upstream names the loan
-        # token but carries no registry id for it, and resolving one here would
-        # be a second lookup for a field `underlying_symbol` already identifies.
+        # Both or neither, per the model's invariant. This feed names no loan
+        # token at all — unlike the Star monitor's breakdown, which carried a
+        # symbol for it.
         underlying_token_id=None,
         underlying_token_address=None,
         symbol=row.symbol,
-        underlying_symbol=row.loan_token_symbol,
+        underlying_symbol="",
         protocol_name=row.protocol_name,
         balance=None,
-        amount_usd=row.exposure_usd,
+        # `assets`, the whole holding — the same measurement STL's own rows
+        # carry, and the one the prime's `assets` total decomposes into.
+        amount_usd=row.assets_usd,
         latest_activity_at=None,
         latest_activity_action=None,
         latest_activity_amount=None,

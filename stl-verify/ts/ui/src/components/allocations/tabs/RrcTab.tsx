@@ -373,13 +373,13 @@ export function RrcTab({
           >
             <ResultRow
               isSelected
-              label="Sky published figure"
+              label="Legacy published figure"
               value={`${formatUsdValue(reference.rrcUsd)} · CRR ${formatPercentValue(reference.crrPct, 2)}`}
             />
           </ul>
           <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>
-            STL&apos;s models run on receipt-token positions only; this is
-            Sky&apos;s published requirement for the position.
+            Verify&apos;s models run on receipt-token positions only; this is
+            the legacy feed&apos;s published requirement for the position.
           </p>
         </div>
       </div>
@@ -462,7 +462,7 @@ export function RrcTab({
             {reference ? (
               <ResultRow
                 isSelected={skySelected}
-                label="Sky published figure"
+                label="Legacy published figure"
                 value={`${formatUsdValue(reference.rrcUsd)} · CRR ${formatPercentValue(reference.crrPct, 2)}`}
               />
             ) : null}

@@ -53,6 +53,14 @@ class Settings(BaseSettings):
     # treats it as stale and returns HTTP 503.
     allocation_share_max_stale_seconds: int = 1800
     star_risk_capital_upstream_url: str = "https://info-sky.blockanalitica.com/star-monitoring/risk-capital/primes/"
+    # A second Sky host, and deliberately not the one above. The Star monitor
+    # publishes a *risk-capital* breakdown — 11 priced positions for spark,
+    # summing to its own `total_exposure`. This host publishes the *balance
+    # sheet* — 59 positions summing to the prime's assets, which is the same
+    # measurement as STL's own allocation amounts. Only the allocation list
+    # reads from here; the risk-capital totals stay on the Star monitor, whose
+    # per-prime detail is far richer (14 fields against 5).
+    sky_internal_upstream_url: str = "https://sky.data.blockanalitica.com/internal/"
     # Connection-pool ceiling per replica. Set explicitly rather than left on
     # SQLAlchemy's 5 + 10, because a prime-scoped risk-capital request is a
     # concurrent fan-out rather than a single query: every repository read opens
@@ -100,6 +108,11 @@ class Settings(BaseSettings):
         surfaces as a prime the list reports but the detail route 500s on.
         """
         return self.star_risk_capital_upstream_url.rstrip("/").removesuffix("/primes")
+
+    @property
+    def sky_internal_base_url(self) -> str:
+        """Base for Sky's internal feed, without a trailing slash."""
+        return self.sky_internal_upstream_url.rstrip("/")
 
 
 @functools.lru_cache

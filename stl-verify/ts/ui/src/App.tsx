@@ -2,7 +2,6 @@ import type { ChartColorToken } from '@archon-research/charting';
 import {
   buildRowSearchString,
   matchesSearchQuery,
-  SidebarLayout,
   type SortingState,
 } from '@archon-research/design-system';
 import { toSearchOption } from '@archon-research/router-kit';
@@ -21,7 +20,6 @@ import { AllocationGrid } from './components/allocations/AllocationGrid';
 import { BottomPanel } from './components/allocations/BottomPanel';
 import type {
   ChartDatum,
-  MetricChartKind,
   MetricChartSpec,
 } from './components/allocations/metricCards';
 import { RiskDetailDrawer } from './components/allocations/RiskDetailDrawer';
@@ -37,6 +35,7 @@ import {
   type TimeRange,
   TokenLogo,
 } from './components/shared';
+import { CollapsibleSidebarLayout } from './components/shared/CollapsibleSidebarLayout';
 import { PrimeSidebar } from './components/shared/PrimeSidebar';
 import { TopBar } from './components/shared/TopBar';
 import { useUrlSyncedTableState } from './data-table/hooks';
@@ -61,6 +60,7 @@ import {
   buildProtocolOptions,
   buildProtocolOptionsFromMetadata,
   DIRECT_PROTOCOL_FILTER_VALUE,
+  ENCUMBRANCE_AT_RISK_THRESHOLD,
   ENCUMBRANCE_HIGH_SEVERITY_THRESHOLD,
   ENCUMBRANCE_LOW_SEVERITY_THRESHOLD,
   encumbranceSeverity,
@@ -70,6 +70,7 @@ import {
   formatRatioPercent,
   formatTokenAmount,
   formatUsdValue,
+  findPrimeGroup,
   getAllocationKey,
   getChainLabel,
   getProtocolLabel,
@@ -236,6 +237,9 @@ function App() {
     string | null
   >(null);
   const [tokenSymbolOptions, setTokenSymbolOptions] = useState<string[]>([]);
+  // View-local on purpose: collapsing the prime list is a momentary "give me the
+  // whole width" gesture, not a preference worth persisting across sessions.
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   // Not derived: the URL is replaced with the fallback prime, so afterwards
   // nothing but this still names the prime that was asked for.
   const [unknownPrimeMessage, setUnknownPrimeMessage] = useState<string | null>(
@@ -494,7 +498,22 @@ function App() {
       return;
     }
 
-    if (primeGroups.some((group) => group.key === selectedPrimeId)) {
+    const requestedGroup = findPrimeGroup(primeGroups, selectedPrimeId);
+
+    if (requestedGroup?.key === selectedPrimeId) {
+      return;
+    }
+
+    if (requestedGroup !== null) {
+      // The same prime under one of its other addresses — an ALM proxy, or the
+      // vault checksummed. Canonicalising the URL is not a prime swap, so it
+      // keeps the link's filters and raises no notice: the reader gets the
+      // prime they asked for, which is the one already on screen.
+      navigateToView({
+        view: selectedView,
+        primeKey: requestedGroup.key,
+        replace: true,
+      });
       return;
     }
 
@@ -767,6 +786,16 @@ function App() {
     [allocations, isActivitiesView, localProtocols],
   );
 
+  // Whether the rows on screen are this prime's, settled. `isAllocationsLoading`
+  // alone is false in two gaps — before the prime list resolves the prime the
+  // page auto-selects, and after a prime changes but before its fetch starts —
+  // and in both an empty `allocations` would otherwise be read as an answer.
+  const areAllocationsSettled =
+    !isPrimesLoading &&
+    selectedPrimeGroup !== null &&
+    !isAllocationsLoading &&
+    loadedAllocationsPrimeKey === selectedPrimeGroup.key;
+
   // Only rows loaded for this exact prime are an authoritative option list; []
   // or another prime's rows read as "no such option" and wipe ?network=.
   const allocationOptionsUnready =
@@ -882,6 +911,7 @@ function App() {
       series[index] = {
         label: formatChartTimestampLabel(bucket.bucket_start),
         value: Math.max(balance, 0),
+        timestamp: Date.parse(bucket.bucket_start),
       };
       balance -= parseNumericValue(bucket.net_flow_usd) ?? 0;
     }
@@ -971,22 +1001,23 @@ function App() {
       if (value === null) {
         return [];
       }
+      // No timestamps: these two points are the window's edges holding the
+      // current value flat, not observations. Leaving them null keeps the card
+      // out of the synced cursor, which is the honest outcome — there is no
+      // history here to line up with a sibling's.
       return [
-        { label: chartFromLabel, value },
-        { label: chartToLabel, value },
+        { label: chartFromLabel, value, timestamp: null },
+        { label: chartToLabel, value, timestamp: null },
       ];
     };
 
-    // Pick the real time series when present, else the flat current-value
-    // placeholder — returning data and kind together so the two can never
-    // disagree about whether the chart is real.
+    // The real time series when present, else the flat current-value
+    // placeholder, which the card renders identically.
     const seriesOrFallback = (
       series: ChartDatum[],
       currentValue: number | null,
-    ): { data: ChartDatum[]; kind: MetricChartKind } =>
-      series.length > 0
-        ? { data: series, kind: 'series' }
-        : { data: fallbackChart(currentValue), kind: 'fallback' };
+    ): ChartDatum[] =>
+      series.length > 0 ? series : fallbackChart(currentValue);
 
     // Sky's figures where it reports them: these are the flat line a card falls
     // back to, which must land on the same number the card's value shows.
@@ -1035,15 +1066,14 @@ function App() {
       high: 'chart.series.critical' as const,
     }[encumbranceSeverity(encumbranceValue)];
 
-    // Sky's is the preferred model, so its series leads and STL's becomes the
-    // comparison. Whole series: a line drawn from both would trace neither.
+    // Legacy's is the preferred model, so its series is the one drawn. Whole
+    // series: a line traced from both would trace neither. Verify's is not
+    // drawn beside it — a reader who wants that switches the view's provenance,
+    // which keeps every card the same shape whichever provenance is on screen.
     const preferSkySeries = (
       stl: ChartDatum[],
       sky: ChartDatum[],
-    ): { primary: ChartDatum[]; comparison: ChartDatum[] } =>
-      sky.length > 0
-        ? { primary: sky, comparison: stl }
-        : { primary: stl, comparison: [] };
+    ): ChartDatum[] => (sky.length > 0 ? sky : stl);
 
     const exposure = preferSkySeries(
       exposureSeries,
@@ -1071,15 +1101,6 @@ function App() {
     // collision where two of these cards named the same token unnoticed).
     //
     // The provenance not leading rides dashed beside the one that is, on the
-    // three charts where both describe the same quantity. Collateral and
-    // encumbrance are Sky's alone, so there is nothing to compare them with.
-    const comparisonSeries = (
-      points: ChartDatum[],
-    ): NonNullable<MetricChartSpec['comparison']> | null =>
-      points.length > 0
-        ? { data: points, stroke: 'var(--colors-text-muted)' }
-        : null;
-
     const charts: MetricChartSpec[] = [
       {
         // Balance reconstructed from signed USD net flows, anchored at the
@@ -1087,7 +1108,6 @@ function App() {
         // an empty state rather than a flat current-value line.
         key: 'allocation-activity-volume',
         data: allocationBalanceSeries,
-        kind: 'series',
         stroke: 'chart.series.primary',
         formatValue: formatCompactUsd,
       },
@@ -1095,15 +1115,13 @@ function App() {
         // Exposure trend from priced receipt-token balances over time; falls
         // back to the flat current value when no history is available.
         key: 'risk-capital',
-        ...seriesOrFallback(exposure.primary, exposureValue),
-        comparison: comparisonSeries(exposure.comparison),
+        data: seriesOrFallback(exposure, exposureValue),
         stroke: 'chart.series.secondary',
         formatValue: formatCompactUsd,
       },
       {
         key: 'total-capital',
-        ...seriesOrFallback(totalCapital.primary, totalRiskCapitalValue),
-        comparison: comparisonSeries(totalCapital.comparison),
+        data: seriesOrFallback(totalCapital, totalRiskCapitalValue),
         stroke: 'chart.series.quaternary',
         formatValue: formatCompactUsd,
         // The requirement the caption states, drawn as one reference line —
@@ -1114,32 +1132,47 @@ function App() {
             : [
                 {
                   value: requiredRiskCapitalValue,
-                  label: `Required ${formatCompactUsd(requiredRiskCapitalValue)}`,
-                  // Warning-hued so it cannot be mistaken for the muted
-                  // comparison series that shares this card.
-                  stroke: 'var(--colors-text-warning)',
+                  // Named only. The figure is on the axis the line sits
+                  // against, in the caption above, and in the cursor tooltip
+                  // at full precision — repeating a rounded copy on the plot
+                  // read as a fourth, slightly different number.
+                  label: 'Required',
+                  // Reported at the cursor too: the total is read directly
+                  // against this line, so the two figures belong side by side.
+                  showInTooltip: true,
+                  // Muted, matching the encumbrance card's own early-warning
+                  // line. A coloured limit competed with the series for the
+                  // eye and read as a second quantity rather than a bound.
+                  stroke: 'var(--colors-text-muted)',
                 },
               ],
       },
       {
         key: 'prime-debt-exposure',
-        ...seriesOrFallback(primeDebt.primary, primeDebtValue),
-        comparison: comparisonSeries(primeDebt.comparison),
+        data: seriesOrFallback(primeDebt, primeDebtValue),
         stroke: 'chart.series.quinary',
         formatValue: (value: number) => `${formatCompactNumber(value)} DAI`,
       },
       {
         key: 'prime-collateral',
-        ...seriesOrFallback(collateralSeries, primeCollateralValue),
+        data: seriesOrFallback(collateralSeries, primeCollateralValue),
         stroke: 'chart.series.tertiary',
         formatValue: formatCompactUsd,
       },
       {
         key: 'encumbrance-ratio',
-        ...seriesOrFallback(encumbranceSeries, encumbranceValue),
+        data: seriesOrFallback(encumbranceSeries, encumbranceValue),
         stroke: encumbranceStroke,
         formatValue: formatRatioPercent,
+        // Ascending, and all three bands the severity scale reads: the 80%
+        // edge is STL's own early warning rather than an Atlas level, so it is
+        // drawn in the muted hue the other two are deliberately not.
         thresholds: [
+          {
+            value: ENCUMBRANCE_AT_RISK_THRESHOLD,
+            label: formatRatioPercent(ENCUMBRANCE_AT_RISK_THRESHOLD, 0),
+            stroke: 'var(--colors-text-muted)',
+          },
           {
             value: ENCUMBRANCE_LOW_SEVERITY_THRESHOLD,
             label: formatRatioPercent(ENCUMBRANCE_LOW_SEVERITY_THRESHOLD, 0),
@@ -1232,8 +1265,8 @@ function App() {
       })}
     >
       <div data-sidebar-layout>
-        <SidebarLayout
-          collapseBelow={768}
+        <CollapsibleSidebarLayout
+          isSidebarCollapsed={isSidebarCollapsed}
           sidebar={
             <PrimeSidebar
               primeGroups={primeGroups}
@@ -1258,6 +1291,10 @@ function App() {
           }
           topBar={
             <TopBar
+              isSidebarCollapsed={isSidebarCollapsed}
+              onToggleSidebar={() =>
+                setIsSidebarCollapsed((collapsed) => !collapsed)
+              }
               availableProvenances={provenanceAvailability.forPrime(
                 selectedPrimeGroup?.name,
               )}
@@ -1291,6 +1328,7 @@ function App() {
                 filteredAllocations={filteredAllocations}
                 topMetricsAllocations={searchFilteredAllocations}
                 isLoading={isAllocationsLoading}
+                areAllocationsSettled={areAllocationsSettled}
                 isRiskCapitalLoading={isRiskCapitalLoading}
                 isPrimeDebtLoading={isPrimeDebtLoading}
                 localProtocols={localProtocols}

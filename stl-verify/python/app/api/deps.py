@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
 from app.adapters.postgres.prime_capital_stack_repository import PrimeCapitalStackRepository
 from app.adapters.postgres.receipt_token_repository import ReceiptTokenRepository
+from app.adapters.sky.internal_positions_client import SkyInternalPositionsClient
 from app.adapters.sky.reference_risk_capital_client import SkyReferenceRiskCapitalClient
 from app.config import get_settings
 from app.ports.receipt_token_lookup import ReceiptTokenLookup
@@ -14,6 +15,7 @@ from app.risk_engine.suraf.result import SurafResult
 from app.services.core_model_risk_service import CoreModelRiskService
 from app.services.crypto_lending_risk_service import CryptoLendingRiskService
 from app.services.model_registry import ModelRegistry
+from app.services.reference_positions_service import ReferencePositionsService
 from app.services.reference_risk_capital_service import ReferenceRiskCapitalService
 
 
@@ -65,6 +67,28 @@ def get_reference_risk_capital_service_factory(
     def build() -> ReferenceRiskCapitalService:
         return ReferenceRiskCapitalService(
             SkyReferenceRiskCapitalClient(get_settings().star_risk_capital_base_url),
+            ReceiptTokenRepository(request.app.state.engine),
+            AllocationRepository(request.app.state.engine),
+        )
+
+    return build
+
+
+def get_reference_positions_service_factory(
+    request: Request,
+) -> Callable[[], ReferencePositionsService]:
+    """Build the upstream balance-sheet service on demand, for the same reason.
+
+    Two upstream clients, because coverage and content come from different
+    hosts: the Star monitor decides whether a prime has reference data at all,
+    the internal feed says what it holds.
+    """
+
+    def build() -> ReferencePositionsService:
+        settings = get_settings()
+        return ReferencePositionsService(
+            SkyInternalPositionsClient(settings.sky_internal_base_url),
+            SkyReferenceRiskCapitalClient(settings.star_risk_capital_base_url),
             ReceiptTokenRepository(request.app.state.engine),
             AllocationRepository(request.app.state.engine),
         )
