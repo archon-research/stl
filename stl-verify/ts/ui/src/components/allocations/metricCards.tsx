@@ -6,9 +6,11 @@ import {
   Tooltip,
   Axis,
   ChartCursorLayer,
+  ChartLegend,
   buildChartTheme,
   type ChartColor,
   type ChartColorToken,
+  type ChartLegendItem,
   chartColorToken,
   chartTokens,
   resolveChartColor,
@@ -17,14 +19,20 @@ import {
   useSyncedCursorHandlers,
 } from '@archon-research/charting';
 import { DataContext, ReferenceBand } from '@archon-research/charting';
-import { ErrorState, SkeletonStack } from '@archon-research/design-system';
-import type { CSSProperties } from 'react';
+import {
+  ErrorState,
+  InfoPopover,
+  SkeletonStack,
+  StatTile,
+} from '@archon-research/design-system';
+import { Info } from 'lucide-react';
+import type { CSSProperties, ReactNode } from 'react';
 import { useContext, useMemo } from 'react';
 
 import { css } from '#styled-system/css';
 
-import { balancedColumns } from '../../lib/dashboard';
-import { SummaryMetric } from '../shared';
+import { balancedColumns, formatFreshnessLabel } from '../../lib/dashboard';
+import { preferReference } from '../../lib/provenance';
 
 export type ChartDatum = {
   label: string;
@@ -61,8 +69,8 @@ export type MetricChartSpec = {
   comparison?: { data: ChartDatum[]; stroke: ChartColor } | null;
 };
 
-// Every card the metrics band can render. Its length drives both the loading
-// placeholders and the column count, so neither can drift from the cards.
+// Every card the metrics band knows how to build. Not what it shows: see
+// `VISIBLE_TOP_METRIC_CARDS`, which is what drives the grid.
 export const TOP_METRIC_CARDS = [
   'total-allocation',
   'exposure',
@@ -84,6 +92,22 @@ export const TOP_METRIC_CARD_LABELS: Record<TopMetricCard, string> = {
   encumbrance: 'Encumbrance',
   'prime-debt': 'Prime debt exposure',
 };
+
+// The cards actually placed in the grid. Its length drives both the loading
+// placeholders and the column count, so neither can drift from what is shown.
+//
+// Exposure and Prime collateral are withheld for now: their figures duplicate
+// what Total allocation and the risk-capital cards already state, and six cards
+// crowded the band. Their bodies are intact in `HiddenMetricCards.tsx` and
+// `PrimeMetricsBand` still builds them, so switching one back on is a matter of
+// dropping it from the exclusion below.
+const HIDDEN_TOP_METRIC_CARDS: readonly TopMetricCard[] = [
+  'exposure',
+  'prime-collateral',
+];
+
+export const VISIBLE_TOP_METRIC_CARDS: readonly TopMetricCard[] =
+  TOP_METRIC_CARDS.filter((card) => !HIDDEN_TOP_METRIC_CARDS.includes(card));
 
 export const metricsGridClassName = css({
   display: 'grid',
@@ -110,6 +134,264 @@ export function findMetricChart(
 ): MetricChartSpec | null {
   return charts.find((chart) => chart.key === key) ?? null;
 }
+
+// Card header: the metric's name and its explainer on one line, the chart's
+// legend right-aligned on a second. Beside the explainer is where it belongs and
+// where it started, but at four columns a card is ~235px wide and a two-series
+// key with a threshold runs 200px on its own — "Total risk capital" came out as
+// "TOTA…". A line of its own is the same corner of the card with room to read.
+const cardHeaderClassName = css({
+  display: 'flex',
+  flexDirection: 'column',
+  width: '100%',
+  gap: '0.5',
+});
+
+const cardTitleRowClassName = css({
+  display: 'flex',
+  width: '100%',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  gap: '2',
+});
+
+// Truncation is the last resort, not the layout: with only the info glyph
+// beside it every card's title fits, and this is what keeps a longer one from
+// wrapping the header and dropping this card's chart below its row-mates'.
+const cardTitleClassName = css({
+  minWidth: 0,
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
+});
+
+const cardActionsClassName = css({
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: '2',
+  flexShrink: 0,
+});
+
+const cardLegendRowClassName = css({
+  display: 'flex',
+  justifyContent: 'flex-end',
+  // Held open on a card whose chart is loading, empty or failed, so the six
+  // headers stay the same height and their charts stay on one line.
+  minHeight: '14px',
+  // The StatTile label slot uppercases and letter-spaces everything inside it,
+  // which reads "indexed" as a second heading. A legend is a key, not a title.
+  textTransform: 'none',
+  letterSpacing: 'normal',
+  // The kit legend sizes its own container inline (13px), which no inherited
+  // rule can reach; `!important` from the stylesheet is what outranks a plain
+  // inline declaration, and brings it down to the card's micro type.
+  '& > div': { fontSize: 'var(--font-sizes-xs) !important' },
+});
+
+// Same slot contract as `SummaryMetric`'s: a block child of the StatTile `sub`
+// row is sized by its content, so the detail's chart column needs `flex` to
+// keep filling the tile.
+const cardDetailSlotClassName = css({
+  flex: '1',
+  minWidth: 0,
+  overflowWrap: 'anywhere',
+});
+
+/**
+ * The frame every metric card shares.
+ *
+ * The same `StatTile` the shared `SummaryMetric` wraps, with one addition: a
+ * header that carries the chart's legend under the metric's name. It lives here
+ * rather than as a new `SummaryMetric` prop because that component takes a
+ * plain-string label and the rest of the app uses it for figures with no chart
+ * at all — a legend has no meaning there.
+ */
+export function MetricCard({
+  label,
+  value,
+  detail,
+  legend,
+  info,
+  infoHref,
+  infoLinkText,
+}: {
+  label: string;
+  value: ReactNode;
+  detail?: ReactNode;
+  /** The chart's key, from `MetricCardLegend`. Its row is held open either way. */
+  legend?: ReactNode;
+  /** Opens a click-through explanation of the metric beside the label. */
+  info?: ReactNode;
+  /** Verified Sky Atlas anchor for the metric's definition, when one exists. */
+  infoHref?: string;
+  /** Link text for `infoHref`, e.g. the Atlas document number. */
+  infoLinkText?: string;
+}) {
+  return (
+    <StatTile
+      className={metricsCardClassName}
+      labelCase="upper"
+      label={
+        <span className={cardHeaderClassName}>
+          <span className={cardTitleRowClassName}>
+            <span className={cardTitleClassName}>{label}</span>
+            <span className={cardActionsClassName}>
+              {info === undefined ? null : (
+                <InfoPopover
+                  label={`About ${label}`}
+                  placement="top-end"
+                  trigger={<Info size={14} aria-hidden />}
+                  {...(infoHref === undefined
+                    ? {}
+                    : { href: infoHref, linkText: infoLinkText })}
+                  className={css({
+                    display: 'inline-flex',
+                    color: 'text.muted',
+                    _hover: { color: 'text.strong' },
+                  })}
+                >
+                  {info}
+                </InfoPopover>
+              )}
+            </span>
+          </span>
+          <span className={cardLegendRowClassName}>{legend}</span>
+        </span>
+      }
+      value={value}
+      sub={
+        // Falsy, not nullish: `''` and `0` must render nothing, or the tile
+        // gains an empty `sub` slot and the extra grid gap that comes with it.
+        !detail ? undefined : (
+          <span className={cardDetailSlotClassName}>{detail}</span>
+        )
+      }
+    />
+  );
+}
+
+// A dashed comparison is always the indexed series: the band draws one only
+// where Sky's series leads, and it is that same quantity from the other
+// provenance (see `MetricChartSpec.comparison`). Naming it here spares the
+// chart spec a provenance field it would otherwise carry for the legend alone.
+const COMPARISON_SERIES_LABEL = 'indexed';
+
+// A threshold that names no colour of its own is drawn in the axis hue, so its
+// key has to be too.
+const THRESHOLD_LEGEND_COLOR: ChartColorToken = 'chart.axis';
+
+/**
+ * Whether `MetricCardTrend` draws the chart rather than one of its three
+ * fallbacks. The legend hangs off the same answer: a key beside a skeleton, an
+ * error line, or "no trend data" names series that nothing drew.
+ */
+function drawsMetricChart(
+  chart: MetricChartSpec | null,
+  isLoading: boolean,
+  errorMessage: string | null,
+): chart is MetricChartSpec {
+  return (
+    !isLoading &&
+    errorMessage === null &&
+    chart !== null &&
+    chart.data.length > 0
+  );
+}
+
+/**
+ * One legend entry per mark the chart actually puts on the plot: the primary
+ * line, the dashed comparison where there is one, and each labelled threshold.
+ * Derived from the same spec the chart renders from, so a legend cannot name a
+ * series that is not there.
+ */
+function metricLegendItems(
+  chart: MetricChartSpec,
+  seriesLabel: string,
+): ChartLegendItem[] {
+  const items: ChartLegendItem[] = [
+    { id: chart.key, label: seriesLabel, color: chart.stroke },
+  ];
+
+  if (chart.comparison && chart.comparison.data.length > 0) {
+    items.push({
+      id: `${chart.key}-comparison`,
+      label: COMPARISON_SERIES_LABEL,
+      color: chart.comparison.stroke,
+      dash: true,
+    });
+  }
+
+  for (const entry of chart.thresholds ?? []) {
+    // An unlabelled limit has nothing to key; the line still draws.
+    if (entry.label === undefined) continue;
+    items.push({
+      id: `${chart.key}-threshold-${entry.value}`,
+      label: entry.label,
+      color: entry.stroke ?? THRESHOLD_LEGEND_COLOR,
+      dash: true,
+    });
+  }
+
+  return items;
+}
+
+/** The card header's chart key. Renders nothing when no chart is drawn. */
+export function MetricCardLegend({
+  chart,
+  seriesLabel,
+  isLoading,
+  errorMessage = null,
+}: {
+  chart: MetricChartSpec | null;
+  seriesLabel: string;
+  isLoading: boolean;
+  errorMessage?: string | null;
+}) {
+  if (!drawsMetricChart(chart, isLoading, errorMessage)) {
+    return null;
+  }
+
+  // `shape="line"` matches what the plot draws — every series here is a line —
+  // and `dash` carries the solid-primary vs dashed-comparison distinction the
+  // chart itself uses. Unwrapped: `MetricCard`'s legend row owns the styling,
+  // so the row still holds its height when this renders nothing.
+  return (
+    <ChartLegend
+      interactive={false}
+      shape="line"
+      items={metricLegendItems(chart, seriesLabel)}
+    />
+  );
+}
+
+// Absent when the figure is STL's own: only the reference feed carries an
+// observation instant, and the on-chain series is as current as its last block.
+export function observedCaption(observedAt: string | null): string | null {
+  return observedAt === null
+    ? null
+    : `Observed ${formatFreshnessLabel(observedAt)}`;
+}
+
+/**
+ * A headline figure, Sky's preferred, and which provenance it came from.
+ *
+ * Callers need the provenance as well as the number: the observation stamp is
+ * the reference feed's own, so it may only caption a figure from that feed.
+ */
+export function preferredFigure(
+  skyValue: string | null | undefined,
+  stlValue: string | null | undefined,
+): { value: string | null; fromReference: boolean } {
+  return {
+    value: preferReference(skyValue, stlValue),
+    fromReference: skyValue != null,
+  };
+}
+
+export const metricCaptionClassName = css({
+  fontSize: 'sm',
+  color: 'text.muted',
+});
 
 const chartTooltipSurfaceClassName = css({
   borderColor: 'border.subtle',
@@ -257,8 +539,7 @@ function Placeholder({ width, height }: { width: string; height: number }) {
 
 export function MetricCardSkeleton({ label }: { label: string }) {
   return (
-    <SummaryMetric
-      className={metricsCardClassName}
+    <MetricCard
       label={label}
       // Widths are a typical figure and subtitle rather than the full column: a
       // placeholder the width of the card reads as a filled card, not a loading
@@ -292,8 +573,7 @@ export function MetricCardError({
   errorMessage: string | null;
 }) {
   return (
-    <SummaryMetric
-      className={metricsCardClassName}
+    <MetricCard
       label={label}
       value="—"
       detail={

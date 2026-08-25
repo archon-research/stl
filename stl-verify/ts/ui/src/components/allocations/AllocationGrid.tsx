@@ -148,8 +148,8 @@ function soleReporterLabel(
   source: Allocation['source'],
   shown: { showsIndexed: boolean; showsReference: boolean },
 ): string | null {
-  if (source === 'reference') return shown.showsIndexed ? 'Sky only' : null;
-  if (source === 'indexed') return shown.showsReference ? 'STL only' : null;
+  if (source === 'reference') return shown.showsIndexed ? 'Legacy only' : null;
+  if (source === 'indexed') return shown.showsReference ? 'Verify only' : null;
   return null;
 }
 
@@ -287,14 +287,21 @@ function AllocationUnderlyingCell({ allocation }: { allocation: Allocation }) {
 
 function AllocationExposureCell({ row }: { row: AllocationGridRow }) {
   const allocation = row;
-  // Sky's exposure where the row's risk figures are Sky's, so CRR reproduces
-  // from the numbers on the row; STL's own valuation moves to the title.
+  // The column shows Verify's value and falls back to Legacy's, so the title
+  // names whichever side is not on display — including the case where Verify
+  // has no figure at all, which a bare number would otherwise pass off as its
+  // own valuation.
   const exposureUsd = row.risk.exposureUsd;
-  const stlAmountUsd = parseNumericValue(allocation.amount_usd);
+  const verifyUsd = parseNumericValue(allocation.amount_usd);
+  const legacyUsd = parseNumericValue(allocation.reference_amount_usd);
   const valuationTitle =
-    row.risk.fromReference && stlAmountUsd !== null
-      ? `Sky's exposure; STL's own valuation is ${formatUsdValue(stlAmountUsd)}`
-      : undefined;
+    verifyUsd === null
+      ? legacyUsd === null
+        ? undefined
+        : "Legacy's value; Verify prices none of this position"
+      : legacyUsd === null
+        ? undefined
+        : `Verify's value; Legacy reports ${formatUsdValue(legacyUsd)}`;
 
   return (
     <div
@@ -614,13 +621,12 @@ function AllocationRiskCapitalCell({
 }
 
 /**
- * A tooltip, not a chip: under the composite view Sky's figure wins wherever
- * it reports one, so a visible marker would land on most rows and stop
- * marking anything (the same reason the Asset column badges only Sky-only
- * rows).
+ * A tooltip, not a chip: under the composite view Legacy's ratio wins wherever
+ * it reports one, so a visible marker would land on most rows and stop marking
+ * anything (the same reason the Asset column badges only single-reporter rows).
  */
 function riskProvenanceTitle(risk: AllocationGridRow['risk']): string {
-  return risk.fromReference ? "Sky's published figure" : 'STL model figure';
+  return risk.fromReference ? 'Legacy published figure' : 'Verify model figure';
 }
 
 /**
@@ -666,7 +672,7 @@ type AllocationGridRow = Allocation & {
     state: RiskFetchState;
     entry: AllocationRiskCapital | undefined;
     chainMismatch: boolean;
-    /** True when the figures shown are Sky's published values, not STL's model. */
+    /** True when the figures shown lean on Legacy's published values. */
     fromReference: boolean;
     exposureUsd: number | null;
     riskCapitalUsd: number | null;
@@ -674,13 +680,6 @@ type AllocationGridRow = Allocation & {
     sharePct: number | null;
   };
 };
-
-// Rows only Sky reported. Counted, not excluded: every row is in the total now,
-// and this is reported for its own sake.
-function skyOnlyCount(allocations: Allocation[]): number {
-  return allocations.filter((allocation) => allocation.source === 'reference')
-    .length;
-}
 
 // The value the Exposure column shows, as a number.
 //
@@ -1008,10 +1007,6 @@ export function AllocationGrid({
     return () => window.clearTimeout(timeoutId);
   }, [localSearchValue, onSearchChange, searchValue]);
 
-  // What is on screen; narrowing can put a different provenance there than
-  // the one fetched (`source` stays 'both' after it).
-  const { provenance: shownProvenance } = useProvenanceView();
-
   const summary = useMemo(() => {
     if (topMetricsAllocations.length === 0) {
       return null;
@@ -1041,7 +1036,6 @@ export function AllocationGrid({
 
     return {
       allocationCount: topMetricsAllocations.length,
-      referenceOnlyCount: skyOnlyCount(topMetricsAllocations),
       latestActivityAt,
       totalUsd,
     };
@@ -1054,7 +1048,6 @@ export function AllocationGrid({
 
     return {
       allocationCount: allocations.length,
-      referenceOnlyCount: skyOnlyCount(allocations),
       totalUsd: allocations.reduce(
         (sum, allocation) => sum + (rowExposureUsd(allocation) ?? 0),
         0,
@@ -1400,44 +1393,9 @@ export function AllocationGrid({
           isChartsLoading={isChartsLoading}
           chartsErrorMessage={chartsErrorMessage}
         />
-        {!showTopMetricsSkeleton && riskCapital ? (
-          <p
-            className={css({
-              m: 0,
-              fontSize: 'xs',
-              color: 'text.muted',
-            })}
-          >
-            {shownProvenance === 'reference' ? (
-              // No model ran, so the coverage figure below would read as "STL
-              // priced all of this" when nothing of STL's did. Attribute the
-              // figures to their source instead.
-              <>
-                Reported by Sky&apos;s Star Agents Risk Capital &amp;
-                Requirements Monitor · not STL&apos;s model
-              </>
-            ) : shownProvenance === 'both' ? (
-              // Sky's figure wins wherever it reports one, so a bare
-              // "model-derived" would claim numbers STL's model did not make.
-              <>
-                Sky&apos;s published figures where reported, else model-derived
-                ({riskCapital.model}, 15% stress) ·{' '}
-                {parseNumericValue(riskCapital.prime_modeled_pct) !== null
-                  ? formatRatioPercent(riskCapital.prime_modeled_pct)
-                  : 'partial'}{' '}
-                of exposure modeled by STL
-              </>
-            ) : (
-              <>
-                Model-derived ({riskCapital.model}, 15% stress) ·{' '}
-                {parseNumericValue(riskCapital.prime_modeled_pct) !== null
-                  ? formatRatioPercent(riskCapital.prime_modeled_pct)
-                  : 'partial'}{' '}
-                of exposure modeled
-              </>
-            )}
-          </p>
-        ) : null}
+        {/* The provenance footnote lived here. Extracted whole to
+            `MetricsFootnote` and deliberately not rendered — see that file for
+            why, and for how to switch it back on. */}
         <div
           className={css({
             display: 'grid',
