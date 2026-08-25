@@ -273,6 +273,41 @@ def test_list_allocations_returns_200_with_enriched_holdings():
     service.list_receipt_token_positions.assert_awaited_once_with(EthAddress(_VALID_ADDR))
 
 
+def test_a_wrapper_priced_through_its_underlying_is_not_keyed_on_it():
+    """A wrapper STL has no registry entry for must not key on its underlying.
+
+    `sparkPrimeUSDC1` is held as a direct asset priced through USDC, so its row
+    carries USDC's address. Keying it there matched it to Sky's own plain-USDC
+    row — which reports $0 — so the merged row claimed Sky valued a $20.3M
+    position at nothing while Sky's real row for it went unjoined.
+
+    The symbols are what separate the two: a genuine direct holding *is* its
+    underlying and the two agree, so it keeps the address key (pinned by the
+    test below).
+    """
+    from app.api.v1 import allocations
+
+    holding = make_direct_asset_holding(
+        symbol="sparkPrimeUSDC1",
+        token_address="0x" + "d" * 40,
+        underlying_token_id=3,
+        underlying_token_address="0x" + "e" * 40,
+        underlying_symbol="USDC",
+    )
+    service = _make_service(direct_holdings=[holding])
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations")
+
+    assert response.status_code == 200
+    (row,) = response.json()
+    # Still reports the underlying it is priced through — only the key is
+    # withheld, leaving the symbol as the last resort rather than no key at all.
+    assert row["underlying_token_address"] == "0x" + "e" * 40
+    assert row["position_keys"] == ["symbol:1::sparkprimeusdc1"]
+
+
 def test_list_allocations_returns_direct_asset_rows_with_null_receipt_fields():
     """Direct holdings (e.g. raw PYUSD in a proxy) surface as their own rows.
     receipt_token_id / receipt_token_address / protocol_name are null; symbol

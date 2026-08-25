@@ -804,11 +804,33 @@ def _position_facts(row: AllocationResponse) -> PositionFacts:
     return PositionFacts(
         chain_id=row.chain_id,
         network=row.network,
-        position_address=row.receipt_token_address or row.underlying_token_address,
+        position_address=row.receipt_token_address or _held_asset_address(row),
         receipt_token_id=row.receipt_token_id,
         protocol_name=row.protocol_name,
         symbol=row.symbol,
     )
+
+
+def _held_asset_address(row: AllocationResponse) -> str | None:
+    """``underlying_token_address`` only where it really is the position.
+
+    A direct holding *is* its underlying — STL holds the plain asset, and the
+    two symbols agree. A wrapper STL has no registry entry for is filed the same
+    way but is not: `sparkPrimeUSDC1` carries USDC's address with USDC as its
+    underlying symbol, and keying it there matched it to Sky's own plain-USDC
+    row, which reports $0. The merged row then claimed Sky valued a $20.3M
+    position at nothing, while Sky's real row for it went unjoined.
+
+    Differing symbols are what separates the two: the underlying's address
+    identifies the underlying, and only a row that *is* that asset may be
+    keyed on it.
+    """
+    if row.underlying_token_address is None:
+        return None
+
+    held = (row.symbol or "").strip().lower()
+    underlying = (row.underlying_symbol or "").strip().lower()
+    return row.underlying_token_address if held == underlying else None
 
 
 async def _merged_allocations(
