@@ -30,8 +30,8 @@
 -- Why a table rather than deriving it on read. A recursive-CTE "loose index scan" over the history is an
 -- optimization FENCE, so a predicate cannot be pushed into it, and every enriched view built on this
 -- layer would inherit that: measured at 200,000 positions, a single-position lookup cost 624 ms through
--- such a view against 0.047 ms here. For a per-day series rather than "now", read position_daily
--- (VEC-636); for every observation of a position, read position_state directly.
+-- such a view against 0.047 ms here. For every observation of a position, read position_state
+-- directly.
 --
 -- as_of_date is derived in UTC, matching the repo's business-today rule (never CURRENT_DATE), and a
 -- CHECK pins it to that derivation so a direct INSERT cannot date an observation to any day it likes.
@@ -110,7 +110,7 @@ COMMENT ON COLUMN position_current.build_id IS 'Audit. Which build wrote the lat
 -- of history or has no history at all does not converge on its own (see 20260819_150100, which
 -- documents both classes and who can repair them). It therefore DOES take ON CONFLICT DO UPDATE and
 -- hold the UPDATE grant. The corollary is a hard limit on how it may be read: position_current answers
--- "now", never "as of block N". The per-day series lives in position_daily (VEC-636).
+-- "now", never "as of block N".
 --
 -- SELECT, INSERT and UPDATE, with DELETE revoked: the trigger and the backfill in 20260819_150100 only
 -- ever insert or overwrite, so a delete channel would be unused reach. TRUNCATE is not granted either, so the
