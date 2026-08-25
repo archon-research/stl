@@ -1,3 +1,4 @@
+import type { ChartColorToken } from '@archon-research/charting';
 import {
   buildRowSearchString,
   matchesSearchQuery,
@@ -53,6 +54,7 @@ import {
   getTokens,
 } from './lib/api';
 import {
+  allocationNetworkKey,
   buildChainLabelLookup,
   buildNetworkOptions,
   buildNetworkOptionsFromMetadata,
@@ -61,15 +63,15 @@ import {
   DIRECT_PROTOCOL_FILTER_VALUE,
   ENCUMBRANCE_HIGH_SEVERITY_THRESHOLD,
   ENCUMBRANCE_LOW_SEVERITY_THRESHOLD,
+  encumbranceSeverity,
   formatChartTimestampLabel,
   formatCompactNumber,
   formatCompactUsd,
   formatRatioPercent,
   formatTokenAmount,
   formatUsdValue,
-  getChainLabel,
-  allocationNetworkKey,
   getAllocationKey,
+  getChainLabel,
   getProtocolLabel,
   groupPrimesByVault,
   parseNumericValue,
@@ -995,6 +997,13 @@ function App() {
       ),
     );
 
+    const requiredRiskCapitalValue = parseNumericValue(
+      preferReference(
+        riskCapital?.reference_prime_required_risk_capital_usd,
+        riskCapital?.prime_required_risk_capital_usd,
+      ),
+    );
+
     const totalRiskCapitalValue = parseNumericValue(
       preferReference(
         riskCapital?.reference_total_risk_capital_usd,
@@ -1016,6 +1025,15 @@ function App() {
         riskCapital?.prime_encumbrance_ratio,
       ),
     );
+
+    // The line wears the band the current ratio sits in, so a healthy chart
+    // is not painted breach-red.
+    const encumbranceStroke: ChartColorToken = {
+      healthy: 'chart.series.positive' as const,
+      'at-risk': 'chart.series.quaternary' as const,
+      low: 'identity.8' as const,
+      high: 'chart.series.critical' as const,
+    }[encumbranceSeverity(encumbranceValue)];
 
     // Sky's is the preferred model, so its series leads and STL's becomes the
     // comparison. Whole series: a line drawn from both would trace neither.
@@ -1088,6 +1106,20 @@ function App() {
         comparison: comparisonSeries(totalCapital.comparison),
         stroke: 'chart.series.quaternary',
         formatValue: formatCompactUsd,
+        // The requirement the caption states, drawn as one reference line —
+        // no endpoint serves the requirement over time.
+        thresholds:
+          requiredRiskCapitalValue === null
+            ? undefined
+            : [
+                {
+                  value: requiredRiskCapitalValue,
+                  label: `Required ${formatCompactUsd(requiredRiskCapitalValue)}`,
+                  // Warning-hued so it cannot be mistaken for the muted
+                  // comparison series that shares this card.
+                  stroke: 'var(--colors-text-warning)',
+                },
+              ],
       },
       {
         key: 'prime-debt-exposure',
@@ -1105,7 +1137,7 @@ function App() {
       {
         key: 'encumbrance-ratio',
         ...seriesOrFallback(encumbranceSeries, encumbranceValue),
-        stroke: 'chart.series.critical',
+        stroke: encumbranceStroke,
         formatValue: formatRatioPercent,
         thresholds: [
           {
@@ -1128,6 +1160,8 @@ function App() {
     riskCapital?.prime_encumbrance_ratio,
     riskCapital?.reference_prime_encumbrance_ratio,
     riskCapital?.reference_prime_exposure_usd,
+    riskCapital?.reference_prime_required_risk_capital_usd,
+    riskCapital?.prime_required_risk_capital_usd,
     riskCapital?.reference_total_risk_capital_usd,
     riskCapital?.total_risk_capital_usd,
     chartFromLabel,

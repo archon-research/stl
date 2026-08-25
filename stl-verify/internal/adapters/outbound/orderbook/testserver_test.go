@@ -99,6 +99,47 @@ func newWSTestServer(t *testing.T, onConn func(conn *websocket.Conn)) *wsTestSer
 	return &wsTestServer{url: "ws" + strings.TrimPrefix(srv.URL, "http")}
 }
 
+// restResponse is one canned reply of a newRESTTestServer route. A zero status
+// means 200.
+type restResponse struct {
+	status int
+	body   string
+}
+
+// newRESTTestServer serves canned JSON per path and returns its base URL, for
+// the venues' instruments endpoints. An unrouted path answers 404.
+func newRESTTestServer(t *testing.T, routes map[string]restResponse) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp, ok := routes[r.URL.Path]
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		if resp.status != 0 {
+			w.WriteHeader(resp.status)
+		}
+		if _, err := io.WriteString(w, resp.body); err != nil {
+			t.Errorf("server write: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// assertTradeable runs one subtest per symbol, asserting its membership in a
+// venue's tradeable set.
+func assertTradeable(t *testing.T, set map[string]bool, want map[string]bool) {
+	t.Helper()
+	for symbol, tradeable := range want {
+		t.Run(symbol, func(t *testing.T) {
+			if set[symbol] != tradeable {
+				t.Errorf("tradeable[%s] = %v, want %v", symbol, set[symbol], tradeable)
+			}
+		})
+	}
+}
+
 // keepOpen blocks reading from conn until the client disconnects, so the server
 // side stays alive while the client reads pushed frames.
 func keepOpen(conn *websocket.Conn) {

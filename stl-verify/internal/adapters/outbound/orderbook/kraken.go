@@ -2,6 +2,7 @@ package orderbook
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"hash/crc32"
@@ -23,6 +24,13 @@ const (
 	krakenDepth      = 500
 	krakenMaxSymbols = 50
 	krakenPingPeriod = 20 * time.Second
+
+	krakenRESTBase       = "https://api.kraken.com"
+	krakenAssetPairsPath = "/0/public/AssetPairs"
+	// krakenStatusOnline is the only pair status that accepts new orders;
+	// cancel_only, post_only, limit_only and reduce_only are listed but
+	// restricted, so they are treated as not tradeable.
+	krakenStatusOnline = "online"
 )
 
 // NewKrakenProvider creates a provider that streams L2 books from Kraken
@@ -44,10 +52,12 @@ const (
 // Docs: https://docs.kraken.com/api/docs/guides/spot-ws-book-v1/ and
 // https://support.kraken.com/articles/360027821131
 func NewKrakenProvider(cfg Config) (outbound.OrderbookProvider, error) {
-	return newFeedProvider(cfg, &krakenExchange{}, krakenMaxSymbols)
+	return newFeedProvider(cfg, &krakenExchange{restBase: krakenRESTBase}, krakenMaxSymbols)
 }
 
-type krakenExchange struct{}
+type krakenExchange struct {
+	restBase string
+}
 
 // Compile-time check that krakenExchange supplies an application-level keepalive.
 var _ appPinger = (*krakenExchange)(nil)
@@ -58,6 +68,34 @@ func (e *krakenExchange) endpoint() string { return krakenWSBase }
 func (e *krakenExchange) normalizeSymbol(s string) (string, error) {
 	return normalizeSeparatedPair(s, "/")
 }
+
+// instruments lists Kraken asset pairs keyed by wsname ("XBT/USD"), the name
+// the WebSocket book channel uses; the map key ("XXBTZUSD") is a different
+// namespace and would never match a configured symbol. Kraken reports
+// application errors with HTTP 200 and a populated error array.
+func (e *krakenExchange) instruments(ctx context.Context) (map[string]bool, error) {
+	var resp struct {
+		Error  []string `json:"error"`
+		Result map[string]struct {
+			WSName string `json:"wsname"`
+			Status string `json:"status"`
+		} `json:"result"`
+	}
+	if err := fetchJSON(ctx, e.restBase+krakenAssetPairsPath, &resp); err != nil {
+		return nil, err
+	}
+	if len(resp.Error) > 0 {
+		return nil, fmt.Errorf("kraken asset pairs: %s", strings.Join(resp.Error, "; "))
+	}
+	tradeable := make(map[string]bool, len(resp.Result))
+	for _, pair := range resp.Result {
+		if pair.WSName != "" && pair.Status == krakenStatusOnline {
+			tradeable[strings.ToUpper(pair.WSName)] = true
+		}
+	}
+	return tradeable, nil
+}
+
 func (e *krakenExchange) newHandler(group []string, logger *slog.Logger) frameHandler {
 	return &krakenHandler{
 		books:   newBookSet(exchangeKraken),

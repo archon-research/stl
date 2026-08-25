@@ -1,6 +1,8 @@
+import { Badge, type BadgeColorPalette } from '@archon-research/design-system';
+import { ExternalLink } from 'lucide-react';
 import type { ReactNode } from 'react';
 
-import { css } from '#styled-system/css';
+import { css, cx } from '#styled-system/css';
 
 import {
   type EncumbranceSeverity,
@@ -65,13 +67,15 @@ type PrimeMetricsBandProps = {
   };
   encumbrance: {
     ratio: number | null;
-    caption: string;
+    caption: string | null;
     severity: EncumbranceSeverity;
   };
   debt: {
     wad: string | null | undefined;
     ilkLabel: string | null;
     isLoading: boolean;
+    /** Explorer page of the proxy the debt is read for; null hides the link. */
+    explorerUrl: string | null;
   };
   charts: BandCharts;
   isChartsLoading: boolean;
@@ -135,6 +139,7 @@ function TotalAllocationCard({
     <SummaryMetric
       className={metricsCardClassName}
       label="Total allocation"
+      info="The allocation rows below, added up: the USD value of every position the prime holds. In the composite view, rows only Sky reports are listed but not summed, since they can describe the same money as an STL row."
       value={
         isFiltered
           ? `${formatUsdValue(summary.totalUsd)} / ${formatUsdValue(overallSummary.totalUsd)}`
@@ -205,6 +210,7 @@ function ExposureCard({
     <SummaryMetric
       className={metricsCardClassName}
       label="Exposure"
+      info="The prime's total USD exposure as the risk framework reports it — one top-down figure, not a row sum. Sky's figure is preferred where reported, so it can differ from Total allocation in coverage and observation time."
       value={formatUsdValue(exposure.value)}
       detail={
         <div className={metricDetailClassName}>
@@ -250,6 +256,9 @@ function TotalRiskCapitalCard({
     <SummaryMetric
       className={metricsCardClassName}
       label="Total risk capital"
+      info="The treasury USDS held in the prime's SubProxy — the capital available to absorb losses. The dashed line marks the required risk capital it is measured against."
+      infoHref="https://sky-atlas.io/#6f6b25d6-f73c-4733-ba37-12a0a411433c"
+      infoLinkText="Sky Atlas A.3.2.1.2.1 →"
       value={formatUsdValue(total.value ?? '0')}
       detail={
         <div className={metricDetailClassName}>
@@ -287,6 +296,7 @@ function PrimeCollateralCard({
     <SummaryMetric
       className={metricsCardClassName}
       label="Prime collateral"
+      info="The asset value Sky's monitor reports standing behind the prime — the upstream PRIME COLLATERAL figure. A daily feed, carried forward between observations."
       // The value is a reduce from zero, so "not fetched yet" and "holds
       // nothing" are the same number until the fetch lands.
       value={isLoading ? 'Loading...' : formatUsdValue(usd)}
@@ -304,12 +314,21 @@ function PrimeCollateralCard({
   );
 }
 
-// Low and high are distinct tones: the Atlas treats them as different breaches
-// with separately measured durations, so one colour for both would flatten that.
-const encumbranceCaptionTone: Record<EncumbranceSeverity, string> = {
-  none: 'text.muted',
-  low: 'text.warning',
-  high: 'text.critical',
+// One chip per band, styled like the table's category chips. Badge has no
+// orange palette, so the low breach overrides its fill with the chart set's
+// orange (`identity.8`) — literal css(): see lib/activity.tsx for the trap.
+const ENCUMBRANCE_BAND_CHIP: Record<
+  EncumbranceSeverity,
+  { label: string; colorPalette: BadgeColorPalette; className?: string }
+> = {
+  healthy: { label: 'Healthy', colorPalette: 'green' },
+  'at-risk': { label: 'At risk', colorPalette: 'amber' },
+  low: {
+    label: 'Low severity breach',
+    colorPalette: 'red',
+    className: css({ bg: 'identity.8', color: 'white' }),
+  },
+  high: { label: 'High severity breach', colorPalette: 'red' },
 };
 
 function EncumbranceCard({
@@ -320,25 +339,46 @@ function EncumbranceCard({
   isChartsLoading,
 }: {
   ratio: number | null;
-  caption: string;
+  caption: string | null;
   severity: EncumbranceSeverity;
   chart: MetricChartSpec | null;
   isChartsLoading: boolean;
 }) {
+  const chip = ENCUMBRANCE_BAND_CHIP[severity];
   return (
     <SummaryMetric
       className={metricsCardClassName}
-      label="Encumbrance"
-      value={formatRatioPercent(ratio)}
+      label="Encumbrance ratio"
+      info="Required risk capital as a share of total risk capital. The Sky Atlas defines at or above 100% as a Low Severity Breach and above 103% as a High Severity Breach; 80–100% is flagged At risk here as an early warning."
+      infoHref="https://sky-atlas.io/#5435f680-aaaa-461a-bcae-4056bb8964d9"
+      infoLinkText="Sky Atlas A.3.2.2.7.2.1.1.1 →"
+      value={
+        <>
+          {formatRatioPercent(ratio)}
+          {/* No figure, no health claim: absence is explained in the caption. */}
+          {ratio === null ? null : (
+            <Badge
+              size="md"
+              variant={severity === 'high' ? 'solid' : 'subtle'}
+              colorPalette={chip.colorPalette}
+              // Sized against the 2xl figure beside it, which Badge's own
+              // steps stop short of.
+              className={cx(
+                css({ fontSize: 'md', px: '2.5', py: '1' }),
+                chip.className,
+              )}
+            >
+              {chip.label}
+            </Badge>
+          )}
+        </>
+      }
       detail={
         <div className={metricDetailClassName}>
-          <div
-            className={css({
-              fontSize: 'sm',
-              color: encumbranceCaptionTone[severity],
-            })}
-          >
-            {caption}
+          {/* Rendered even when empty: siblings all carry a caption line, and
+              dropping it floated this card's chart above their baseline. */}
+          <div className={css({ fontSize: 'sm', color: 'text.muted' })}>
+            {caption ?? '\u00A0'}
           </div>
           <MetricCardTrend
             chart={chart}
@@ -377,6 +417,7 @@ const debtCaptionClassName = css({
 function PrimeDebtCard({
   wad,
   ilkLabel,
+  explorerUrl,
   isLoading,
   chart,
   isChartsLoading,
@@ -384,6 +425,7 @@ function PrimeDebtCard({
 }: {
   wad: string | null | undefined;
   ilkLabel: string | null;
+  explorerUrl: string | null;
   isLoading: boolean;
   chart: MetricChartSpec | null;
   isChartsLoading: boolean;
@@ -395,6 +437,9 @@ function PrimeDebtCard({
     <SummaryMetric
       className={metricsCardClassName}
       label="Prime debt exposure"
+      info="What the prime has drawn against its allocator vault: the minted debt for its ilk, in USDS terms. The indexed figure is read from chain state; the reference figure is Sky's own reported debt."
+      infoHref="https://sky-atlas.io/#1c09308d-b7cd-495c-b547-baf628a6e323"
+      infoLinkText="Sky Atlas A.3.7.1.2 →"
       value={isLoading ? 'Loading...' : formatWadValue(wad)}
       detail={
         isLoading ? (
@@ -423,6 +468,25 @@ function PrimeDebtCard({
                 }
                 content={wad ? `Exact raw WAD: ${wad}` : 'Raw WAD unavailable'}
               />
+              {explorerUrl === null ? null : (
+                // Beside the tooltip rather than inside it: hover content
+                // dismisses on pointer-leave, so a link there is unclickable.
+                <a
+                  href={explorerUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  aria-label="View the proxy wallet on the block explorer"
+                  title="View the proxy wallet on the block explorer"
+                  className={css({
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    color: 'text.link',
+                    _hover: { color: 'text.interactive' },
+                  })}
+                >
+                  <ExternalLink size={12} />
+                </a>
+              )}
             </div>
             <MetricCardTrend
               chart={chart}
@@ -549,6 +613,7 @@ export function PrimeMetricsBand({
         <PrimeDebtCard
           wad={debt.wad}
           ilkLabel={debt.ilkLabel}
+          explorerUrl={debt.explorerUrl}
           isLoading={debt.isLoading}
           chart={charts.debt}
           isChartsLoading={isChartsLoading}

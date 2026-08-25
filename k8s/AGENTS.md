@@ -15,6 +15,22 @@ Root repo map and cross-cutting rules: [../AGENTS.md](../AGENTS.md).
 - The **dev** overlay is intentionally not annotated — no controller runs locally, so local config changes still need `kubectl rollout restart`.
 - Guard: `make check-reloader-opt-in` (in `stl-verify/`) asserts prod/staging are fully opted in and dev is not.
 
+## Rollout strategy
+
+- **Every Deployment under `k8s/base/` declares `spec.strategy` explicitly**, including
+  values that only restate the API-server default — not redundancy, do not delete it.
+  `RollingUpdate` must spell out `maxSurge` *and* `maxUnavailable`; `Recreate` must carry
+  no `rollingUpdate` key. `k8s/dev-infra/` is exempt (client-side applied, never synced).
+- Why: SSA prunes only fields ArgoCD already owns, so a strategy left to the API server's
+  defaults can never be changed later — the retrofit is rejected on every sync, blocking
+  every other resource in that Application while app health stays green (#640). Declaring
+  `type:` alone is not enough, and `rollingUpdate: null` is not a fix.
+- Recovery is a repo change, not a `kubectl` one, but takes two merges: restore an explicit
+  `RollingUpdate`, then change it once that is Synced.
+- Choose the value deliberately. `25%` rounds up to one extra pod at `replicas: 1`, so a
+  single-consumer workload (one pod on an SQS or Temporal task queue) wants `Recreate` —
+  `maxSurge: 0` is not equivalent, it only removes the *Ready*-pod overlap.
+
 ## Deploy
 
 - **Never hand-edit image tags** in `k8s/overlays/{staging,prod}/kustomization.yaml` — CI owns them (staging bumps on merge; prod via the gated `production` GitHub Environment approval).

@@ -17,20 +17,27 @@ func main() {
 	output := flag.String("output", "../docs/entity_relation.md", "Output file path for the Mermaid ER diagram")
 	flag.Parse()
 
+	if err := generate(*output); err != nil {
+		log.Fatal(err)
+	}
+
+	log.Printf("ER diagram written to %s", *output)
+}
+
+func generate(outputPath string) error {
 	connStr := requireEnv("DATABASE_URL")
 	ctx := context.Background()
 
 	pool, err := pgxpool.New(ctx, connStr)
 	if err != nil {
-		log.Fatalf("connecting to database: %v", err)
+		return fmt.Errorf("connecting to database: %w", err)
 	}
 	defer pool.Close()
 
-	if err := run(ctx, pool, *output); err != nil {
-		log.Fatalf("generating ER diagram: %v", err)
+	if err := run(ctx, pool, outputPath); err != nil {
+		return fmt.Errorf("generating ER diagram: %w", err)
 	}
-
-	log.Printf("ER diagram written to %s", *output)
+	return nil
 }
 
 func requireEnv(key string) string {

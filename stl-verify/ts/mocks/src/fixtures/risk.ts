@@ -34,6 +34,7 @@ import {
   TOKENS,
   tokenSymbol,
 } from './registry.ts';
+import type { PrimeName } from './registry.ts';
 
 const SPARK_PROXIES = [
   SPARK_MAINNET_PROXY,
@@ -420,23 +421,23 @@ function referenceRowsFor(
 function compositePerAllocation(
   self: PrimeRiskCapital,
 ): AllocationRiskCapital[] {
-  const skyById = new Map<number, ReferenceAllocationRow>();
-  const skyOnly: ReferenceAllocationRow[] = [];
+  // Joined on the published position keys, like the backend's merge — an
+  // id-only join left the custody leg unmerged, since Sky reports it with no
+  // registry id.
+  const skyByKey = new Map<string, ReferenceAllocationRow>();
+  const matchedSkyRows = new Set<ReferenceAllocationRow>();
   for (const row of referenceRowsFor(self)) {
-    const [receiptTokenId] = row;
-    if (receiptTokenId === null) {
-      skyOnly.push(row);
-    } else {
-      skyById.set(receiptTokenId, row);
+    for (const key of referenceAllocation(row).position_keys ?? []) {
+      if (!skyByKey.has(key)) skyByKey.set(key, row);
     }
   }
 
   const merged: AllocationRiskCapital[] = self.per_allocation.map((entry) => {
-    const sky =
-      entry.receipt_token_id === null
-        ? undefined
-        : skyById.get(entry.receipt_token_id);
+    const sky = (entry.position_keys ?? [])
+      .map((key) => skyByKey.get(key))
+      .find((row) => row !== undefined);
     if (sky === undefined) return entry;
+    matchedSkyRows.add(sky);
 
     const [, , , , rrcUsd, crrPct] = sky;
     return {
@@ -448,6 +449,9 @@ function compositePerAllocation(
     };
   });
 
+  const skyOnly = referenceRowsFor(self).filter(
+    (row) => !matchedSkyRows.has(row),
+  );
   return [...merged, ...skyOnly.map(referenceAllocation)].sort(
     (left, right) => Number(right.exposure_usd) - Number(left.exposure_usd),
   );
@@ -869,6 +873,21 @@ const GROVE_CAPITAL_FIGURES = {
   validation_note: null,
   scope: 'prime',
 } as const;
+
+/**
+ * The upstream PRIME COLLATERAL figure and the monitor's ratio, as the
+ * total-capital buckets carry them wherever the response holds Sky's figures.
+ * Constant over the window: the feed is daily and carried forward.
+ */
+export const PRIME_COLLATERAL_USD: Readonly<Record<PrimeName, string>> = {
+  spark: '3411854512.885084226570569021',
+  grove: '291455160.44',
+};
+
+export const PRIME_MONITOR_ENCUMBRANCE: Readonly<Record<PrimeName, string>> = {
+  spark: SPARK_CAPITAL_FIGURES.encumbrance_ratio,
+  grove: GROVE_CAPITAL_FIGURES.encumbrance_ratio,
+};
 
 /**
  * One row per ALM proxy carrying prime-level figures — the

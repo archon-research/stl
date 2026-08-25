@@ -10,6 +10,13 @@ spec:
   # validate parity/load -> bump to 1 in a separate change. VectorCronjobWorkerDown is
   # guarded on desired replicas > 0, so it does not page while this is intentionally 0.
   replicas: 0
+  # Explicit, matching the API-server default — ArgoCD must own spec.strategy or
+  # a later change to it cannot prune rollingUpdate. k8s/AGENTS.md, "Rollout strategy".
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
   selector:
     matchLabels:
       app: transform-worker

@@ -33,9 +33,8 @@ func init() {
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
 
-	if err := temporal.RunCronjob(ctx, temporal.BuildMeta{
+	err := temporal.RunCronjob(ctx, temporal.BuildMeta{
 		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
 	}, temporal.CronjobConfig{
 		Name:            "maple-graphql-indexer",
@@ -43,7 +42,9 @@ func main() {
 		IntervalDefault: "10m",
 		OpenDatabase:    postgres.PoolOpener(postgres.DefaultDBConfig(env.Get("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable"))),
 		Setup:           setupRunner,
-	}); err != nil {
+	})
+	cancel()
+	if err != nil {
 		slog.Error("fatal", "error", err)
 		os.Exit(1)
 	}

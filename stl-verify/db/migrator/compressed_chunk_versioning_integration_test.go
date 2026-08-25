@@ -50,6 +50,27 @@ func TestCompressedConvertedHypertablesHaveAVersionFunction(t *testing.T) {
 			if ticket, ok := versionFunctionPending[table]; ok {
 				t.Skipf("%s is on the %s sweep; corrections into its compressed chunks are dropped until then", table, ticket)
 			}
+			// Scope DERIVED, not listed. The defect needs a table that assigns its own
+			// processing_version: the arbiter resolves against the DEFAULT because the BEFORE INSERT
+			// trigger has not fired yet. A table with no such trigger cannot be in that shape -- its
+			// INSERT must name the column -- and a next_processing_version_<table> for it would have to
+			// invent a version its source never issued.
+			//
+			// Read from pg_trigger rather than kept as an exclusion list: a list is a fourth place a
+			// table name has to be maintained (after AGENTS.md, convertedAppendOnlyTables and
+			// schema_master), and it silently rots. This cannot: the moment such a table gains a
+			// trigger it re-enters scope and fails below for want of the function.
+			var userTriggers int
+			if err := pool.QueryRow(ctx, `
+				SELECT count(*) FROM pg_trigger
+				WHERE tgrelid = $1::regclass AND NOT tgisinternal`, table).Scan(&userTriggers); err != nil {
+				t.Fatalf("look up triggers on %s: %v", table, err)
+			}
+			if userTriggers == 0 {
+				t.Skipf("%s carries no trigger, so its INSERT supplies processing_version itself and no "+
+					"version function applies (behaviour covered by TestPositionState/\"a correction for "+
+					"a position an already-compressed chunk holds is stored, not dropped\")", table)
+			}
 			var exists bool
 			if err := pool.QueryRow(ctx, `
 				SELECT EXISTS (

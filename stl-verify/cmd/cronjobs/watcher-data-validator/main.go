@@ -32,9 +32,8 @@ func init() {
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
 
-	if err := temporal.RunCronjob(ctx, temporal.BuildMeta{
+	err := temporal.RunCronjob(ctx, temporal.BuildMeta{
 		Commit: GitCommit, Branch: GitBranch, BuildTime: BuildTime,
 	}, temporal.CronjobConfig{
 		// SERVICE_NAME is injected per deployment from the pod's app label so each
@@ -48,7 +47,9 @@ func main() {
 		IntervalOffsetEnv: "DATA_VALIDATION_SCHEDULE_OFFSET",
 		OpenDatabase:      postgres.PoolOpener(postgres.DefaultDBConfig(env.Get("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/stl_verify?sslmode=disable"))),
 		Setup:             setupRunner,
-	}); err != nil {
+	})
+	cancel()
+	if err != nil {
 		slog.Error("fatal", "error", err)
 		os.Exit(1)
 	}

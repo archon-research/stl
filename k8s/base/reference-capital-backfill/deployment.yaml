@@ -17,10 +17,32 @@ metadata:
   name: reference-capital-backfill
 spec:
   replicas: 1
-  # Recreate: the default RollingUpdate rounds maxSurge up to 1, so a rollout —
-  # including a Reloader-triggered one — would put two pods on this task queue.
+  # maxSurge: 0 — at replicas: 1 the default RollingUpdate rounds maxSurge up to
+  # 1, so a rollout (including a Reloader-triggered one) runs a second *Ready*
+  # pod against this task queue for the whole startup of the new one. maxSurge: 0
+  # closes that: the new pod is not created until the old one is scaled away.
+  #
+  # It is NOT equivalent to Recreate. maxSurge is evaluated against ReplicaSet
+  # .spec.replicas, not live pods, so the new pod starts the moment the old
+  # ReplicaSet is scaled to 0 — while the old pod is still Terminating through
+  # its grace period. Measured on a cluster: two pods coexist (old Terminating,
+  # new Running) about 2s into the rollout. Recreate blocks on oldPodsRunning()
+  # and never overlaps at all, which is why the sibling backfill workers use it.
+  #
+  # Recreate is what this workload wants, and it is unreachable in one step.
+  # #729 put this Deployment live before it declared any strategy, so the API
+  # server defaulted a rollingUpdate block onto it that ArgoCD does not own, and
+  # server-side apply only prunes fields its own field manager owns: an apply of
+  # `type: Recreate` leaves that block in place, the API server rejects the
+  # result, and every sync of the entire Application wedges (#640). Declaring the
+  # block explicitly hands ArgoCD ownership, which unwedges the sync *and* makes
+  # the follow-up flip to Recreate a clean one-line change.
+  # See k8s/AGENTS.md, "Rollout strategy".
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
   selector:
     matchLabels:
       app: reference-capital-backfill
