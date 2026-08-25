@@ -45,7 +45,7 @@
   "what was true" and "what did we know" (AR-1.1, RP-4.1, CR-3.5). Corrections reference what
   they supersede, with structured reason and approval (CR-3.1..3.4). Content hashing runs from
   the first append (AR-1.2).
-- Consumers never walk the graph: they read the **pivot** — materialized tables shaped like
+- Consumers read the **pivot** instead of walking the graph — materialized tables shaped like
   the old masters (`dim_security`, `dim_entity`, `dim_instrument`, look-through closure),
   regenerated when the graph changes, as-of-capable, joinable against the timeseries at block
   time.
@@ -155,8 +155,8 @@ promotion test — *does it carry attributes of its own, and do other things poi
 
 ### 3. The relationship contract
 
-Every link between nodes lives in one relationship store, one row per edge. Relationships are
-never columns on a node — the earlier `issuer_entity_id`, `parent_entity_id`, and
+Every link between nodes lives in one relationship store, one row per edge. Relationships do not
+live as columns on a node — the earlier `issuer_entity_id`, `parent_entity_id`, and
 `ultimate_parent_id` columns are replaced by edges.
 
 | field | meaning |
@@ -178,7 +178,7 @@ Semantics, independent of realization:
 
 - **Directed.** Each edge is `src_id → dst_id`. Inverses (`ISSUES` from `ISSUED_BY`,
   `UNDERLYING_OF` from `HAS_UNDERLYING`) and closures (ultimate parent, look-through) are
-  **derived, never stored** — every derived answer has exactly one source of truth.
+  **derived at read time and not stored**, so every derived answer has one source of truth.
 - **Weighted for look-through.** Exposure to a leaf is the sum over paths of the product of
   weights along each path, defined only within one `weight_basis`.
 - **Append-only, close-and-open** (AR-1.1, AR-1.4). A change closes the current row and opens a
@@ -273,7 +273,7 @@ into a governed set.
 | `ADMINISTERED_BY` | SEC / ACCT → ENT | — | 1 | draft | fund administrator or transfer agent |
 | `SERVICED_BY` | SEC → ENT | — | n | draft | legal or service provider — the SECstore PRD §1 look-through example |
 | `TRUSTEE_OF` | ENT → SEC | — | n | draft | the trustee is the actor, so it points the other way |
-| `SUBSIDIARY_OF` | ENT → ENT | OWNERSHIP_PCT | 1 current per parent | ratified | legal parent; the ultimate parent is derived by walking, never stored |
+| `SUBSIDIARY_OF` | ENT → ENT | OWNERSHIP_PCT | 1 current per parent | ratified | legal parent; the ultimate parent is derived by walking rather than stored |
 | `AFFILIATE_OF` | ENT → ENT | — | n | ratified | related, not owned; a spin-off is a close-and-open from `SUBSIDIARY_OF` |
 | `CONTROLS` | ENT → ENT | OWNERSHIP_PCT | n | draft | effective control where it diverges from legal ownership |
 
@@ -326,7 +326,7 @@ into a governed set.
 `ULTIMATE_UNDERLYING_CURRENCY`: every one is an inverse or a closure of something already
 stored. Storing them doubles the write path and creates a second, staler answer to the same
 question — the defect `ultimate_parent_id` had. Inverses are defined in resolution; closures
-are pivoted with the as-of they were built from, never written back as edges.
+are pivoted with the as-of they were built from and are not written back as edges.
 
 Boundary rules that keep the graph clean:
 
@@ -444,7 +444,7 @@ reference. They meet at three seams, and only these:
 
 ### 10. The pivot: the consumer read contract
 
-Consumers never traverse the graph. SECstore does not exist in isolation — its purpose is to
+Consumers read the pivot, not the graph. SECstore does not exist in isolation — its purpose is to
 feed operational engines, rule stores, and business logic (D-6), and the operational side links
 back to it by reference (D-5). The model's read surface is the **pivot** (IN-1): materialized
 tables, regenerated when the graph changes, not per query. "View" is the wrong word for them
