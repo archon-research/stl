@@ -2,7 +2,6 @@ import type { ChartColorToken } from '@archon-research/charting';
 import {
   buildRowSearchString,
   matchesSearchQuery,
-  SidebarLayout,
   type SortingState,
 } from '@archon-research/design-system';
 import { toSearchOption } from '@archon-research/router-kit';
@@ -36,6 +35,7 @@ import {
   type TimeRange,
   TokenLogo,
 } from './components/shared';
+import { CollapsibleSidebarLayout } from './components/shared/CollapsibleSidebarLayout';
 import { PrimeSidebar } from './components/shared/PrimeSidebar';
 import { TopBar } from './components/shared/TopBar';
 import { useUrlSyncedTableState } from './data-table/hooks';
@@ -236,6 +236,9 @@ function App() {
     string | null
   >(null);
   const [tokenSymbolOptions, setTokenSymbolOptions] = useState<string[]>([]);
+  // View-local on purpose: collapsing the prime list is a momentary "give me the
+  // whole width" gesture, not a preference worth persisting across sessions.
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   // Not derived: the URL is replaced with the fallback prime, so afterwards
   // nothing but this still names the prime that was asked for.
   const [unknownPrimeMessage, setUnknownPrimeMessage] = useState<string | null>(
@@ -1248,8 +1251,8 @@ function App() {
       })}
     >
       <div data-sidebar-layout>
-        <SidebarLayout
-          collapseBelow={768}
+        <CollapsibleSidebarLayout
+          isSidebarCollapsed={isSidebarCollapsed}
           sidebar={
             <PrimeSidebar
               primeGroups={primeGroups}
@@ -1274,6 +1277,10 @@ function App() {
           }
           topBar={
             <TopBar
+              isSidebarCollapsed={isSidebarCollapsed}
+              onToggleSidebar={() =>
+                setIsSidebarCollapsed((collapsed) => !collapsed)
+              }
               availableProvenances={provenanceAvailability.forPrime(
                 selectedPrimeGroup?.name,
               )}

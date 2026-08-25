@@ -6,6 +6,7 @@ import {
   Tabs,
   type TimeRange,
 } from '@archon-research/design-system';
+import { PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import type { ChangeEvent } from 'react';
 
 import { css } from '#styled-system/css';
@@ -13,10 +14,14 @@ import { flex } from '#styled-system/patterns';
 
 import type { FilterOption } from '../../lib/dashboard';
 import type { Provenance } from '../../types/allocation';
+import { SIDEBAR_TOGGLE_ID } from './CollapsibleSidebarLayout';
 import { SettingsMenu, useDataSourceSection } from './SettingsMenu';
 
 type TopBarProps = {
   hasSelectedPrime: boolean;
+  /** Whether the prime list is currently collapsed away. */
+  isSidebarCollapsed: boolean;
+  onToggleSidebar: () => void;
   onViewChange: (view: 'allocation' | 'activities') => void;
   networkOptions: FilterOption[];
   onNetworkChange: (value: string | null) => void;
@@ -64,6 +69,36 @@ const tabTriggerClassName = css({
     color: 'text.strong',
     fontWeight: 'semibold',
     borderBottomColor: 'text.strong',
+  },
+});
+
+// Square icon button matching the settings trigger on the far right of this
+// bar, so the two ends of the top bar read as the same control family. Height
+// is the `9` step (2.25rem), which lines the button up with the tab block.
+const sidebarToggleClassName = css({
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  appearance: 'none',
+  height: '9',
+  width: '9',
+  p: '0',
+  flexShrink: 0,
+  borderWidth: '1px',
+  borderStyle: 'solid',
+  borderColor: 'border.subtle',
+  borderRadius: 'md',
+  background: 'surface.default',
+  color: 'text.muted',
+  cursor: 'pointer',
+  transitionProperty: 'color, border-color',
+  transitionDuration: 'fast',
+  _hover: { color: 'text.strong', borderColor: 'border.default' },
+  _focusVisible: {
+    outlineWidth: '2px',
+    outlineStyle: 'solid',
+    outlineColor: 'interactive.accent',
+    outlineOffset: '2px',
   },
 });
 
@@ -117,6 +152,8 @@ function FilterField({
 
 export function TopBar({
   hasSelectedPrime,
+  isSidebarCollapsed,
+  onToggleSidebar,
   onViewChange,
   networkOptions,
   onNetworkChange,
@@ -138,47 +175,78 @@ export function TopBar({
 
   return (
     // Wrapped in the content shell so the tabs line up with the card beneath
-    // rather than sitting flush to the viewport. The shell in this slot already
-    // starts inset from the content one, so only the remainder is added here —
-    // repeating the content Panel's full padding overshoots it.
+    // rather than sitting flush to the viewport.
     <DesignSystemPageShell maxWidth="none">
       <div
         className={css({
-          width: '100%',
           display: 'flex',
           flexWrap: 'wrap',
           alignItems: 'flex-end',
           justifyContent: 'space-between',
           gap: '4',
-          // Asymmetric because the inset is: this slot already starts right of
-          // the content shell, so the left needs only the remainder, while the
-          // right needs the content Panel's padding in full.
-          paddingLeft: '1',
-          paddingRight: '5',
+          // Pulled back out to the content card's own bounds. The layout's top
+          // bar slot carries horizontal padding the content column does not, so
+          // this shell starts inset from that one and the row has to give it
+          // back — padding could only push it further in.
+          //
+          // Raw pixels, and no `width: 100%`: these cancel a measured layout
+          // inset rather than express a spacing choice, and a pinned width made
+          // the negative margins slide the row left instead of widening it,
+          // leaving the right edge 21px short of the card. The two differ
+          // because the content column and this slot resolve to different
+          // widths; measured against the card at 1680px, both edges land within
+          // a pixel.
+          marginLeft: '-16px',
+          marginRight: '-5px',
         })}
       >
-        <Tabs.Root
-          value={selectedView}
-          onValueChange={(details: { value: string }) => {
-            if (
-              details.value === 'allocation' ||
-              details.value === 'activities'
-            ) {
-              onViewChange(details.value);
+        <div className={flex({ align: 'center', gap: '4', flexShrink: 0 })}>
+          {/* Leads the navigation because it governs what sits to its left:
+              the prime list. The icon states the direction of travel — closing
+              chevron while open, opening chevron while collapsed. */}
+          <button
+            type="button"
+            id={SIDEBAR_TOGGLE_ID}
+            onClick={onToggleSidebar}
+            aria-expanded={!isSidebarCollapsed}
+            aria-label={
+              isSidebarCollapsed ? 'Expand prime list' : 'Collapse prime list'
             }
-          }}
-          aria-label="Core navigation"
-          className={css({ flexShrink: 0 })}
-        >
-          <Tabs.List className={tabsListClassName}>
-            <Tabs.Trigger value="allocation" className={tabTriggerClassName}>
-              Allocations
-            </Tabs.Trigger>
-            <Tabs.Trigger value="activities" className={tabTriggerClassName}>
-              Activities
-            </Tabs.Trigger>
-          </Tabs.List>
-        </Tabs.Root>
+            title={
+              isSidebarCollapsed ? 'Expand prime list' : 'Collapse prime list'
+            }
+            className={sidebarToggleClassName}
+          >
+            {isSidebarCollapsed ? (
+              <PanelLeftOpen size={18} aria-hidden="true" />
+            ) : (
+              <PanelLeftClose size={18} aria-hidden="true" />
+            )}
+          </button>
+
+          <Tabs.Root
+            value={selectedView}
+            onValueChange={(details: { value: string }) => {
+              if (
+                details.value === 'allocation' ||
+                details.value === 'activities'
+              ) {
+                onViewChange(details.value);
+              }
+            }}
+            aria-label="Core navigation"
+            className={css({ flexShrink: 0 })}
+          >
+            <Tabs.List className={tabsListClassName}>
+              <Tabs.Trigger value="allocation" className={tabTriggerClassName}>
+                Allocations
+              </Tabs.Trigger>
+              <Tabs.Trigger value="activities" className={tabTriggerClassName}>
+                Activities
+              </Tabs.Trigger>
+            </Tabs.List>
+          </Tabs.Root>
+        </div>
 
         <div
           className={flex({
