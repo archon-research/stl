@@ -455,7 +455,7 @@ than write surfaces:
 
 | view | key | what it serves |
 |---|---|---|
-| `dim_security` | `security_id, as_of_valid, as_of_system` | flattened classification — asset class, type, subtype, currency, status, issuer, ultimate parent, rating, jurisdiction; the old `security_master_current` shape (UI-3) |
+| `dim_security` | `security_id, as_of_valid, as_of_system` | flattened classification — asset class, type, subtype, currency, status, issuer, ultimate parent, rating, jurisdiction; the shape `security_master` promised and never populated (UI-3) |
 | `dim_entity` | `entity_id, as_of_valid, as_of_system` | entity attributes plus the resolved group: parent, ultimate parent, domicile, sector, internal flag (derived, not stored) |
 | `dim_instrument` | `instrument_key` | native-key resolution → `security_id`, one current row per key — the hot join for positions and the Time-Series API; carries the unique-current guarantee the old bridge held |
 | `fact_lookthrough` | `security_id, leaf_id, as_of_valid, as_of_system` | resolved weighted closure of `HAS_UNDERLYING` — exposure without recursive SQL downstream |
