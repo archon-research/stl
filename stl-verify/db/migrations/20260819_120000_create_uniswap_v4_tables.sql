@@ -235,6 +235,7 @@ CREATE TABLE IF NOT EXISTS uniswap_v4_pool_state
     liquidity               NUMERIC     NOT NULL,
     fee_growth_global0_x128 NUMERIC     NOT NULL,
     fee_growth_global1_x128 NUMERIC     NOT NULL,
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
     processing_version      INT         NOT NULL DEFAULT 0,
     build_id                INT         NOT NULL DEFAULT 0,
     -- A reorg that orphans a pool's Initialize makes StateView answer all zeros
@@ -336,6 +337,8 @@ COMMENT ON COLUMN uniswap_v4_pool_state.fee_growth_global0_x128 IS
   'StateView.getFeeGrowthGlobals().feeGrowthGlobal0: cumulative currency0 fees earned per unit of liquidity over the pool''s lifetime, Q128.128 fixed point.';
 COMMENT ON COLUMN uniswap_v4_pool_state.fee_growth_global1_x128 IS
   'StateView.getFeeGrowthGlobals().feeGrowthGlobal1: cumulative currency1 fees earned per unit of liquidity over the pool''s lifetime, Q128.128 fixed point.';
+COMMENT ON COLUMN uniswap_v4_pool_state.created_at IS
+  'Audit. Row insertion time as an instant (timestamptz, so it denotes the same moment under any session TimeZone, and stores UTC internally); bookkeeping only, not an on-chain value.';
 COMMENT ON COLUMN uniswap_v4_pool_state.processing_version IS
   'PK, Audit. Per-build reprocessing counter (ADR-0002): 0 for the first write of a key under a build_id, bumped only when a later build rewrites the same key; prior versions are retained.';
 COMMENT ON COLUMN uniswap_v4_pool_state.build_id IS
@@ -356,6 +359,7 @@ CREATE TABLE IF NOT EXISTS uniswap_v4_swap
     liquidity          NUMERIC     NOT NULL,
     tick               INT         NOT NULL CHECK (tick BETWEEN -887272 AND 887272),
     fee                INT         NOT NULL CHECK (fee BETWEEN 0 AND 1000000),
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     processing_version INT         NOT NULL DEFAULT 0,
     build_id           INT         NOT NULL DEFAULT 0,
     PRIMARY KEY (pool_id, block_timestamp, block_number, block_version, log_index, processing_version)
@@ -453,6 +457,8 @@ COMMENT ON COLUMN uniswap_v4_swap.tick IS
   'Pool tick immediately after the swap (plain integer; price = 1.0001^tick before decimal adjustment).';
 COMMENT ON COLUMN uniswap_v4_swap.fee IS
   'Event field `fee`: the swap fee actually charged on this swap, hundredths of a bip (<= 1000000). It is the LP fee in force combined with the direction''s protocol fee when one is set (protocolFee + lpFee - protocolFee*lpFee/1e6), so it is >= the LP fee in force for this swap. It is NOT comparable to uniswap_v4_pool_state.lp_fee: a hook can override the fee for a single swap, and a dynamic fee moves between snapshots.';
+COMMENT ON COLUMN uniswap_v4_swap.created_at IS
+  'Audit. Row insertion time as an instant (timestamptz, so it denotes the same moment under any session TimeZone, and stores UTC internally); bookkeeping only, not an on-chain value.';
 COMMENT ON COLUMN uniswap_v4_swap.processing_version IS
   'PK, Audit. Per-build reprocessing counter (ADR-0002): 0 for the first write of a key under a build_id, bumped only when a later build rewrites the same key; prior versions are retained.';
 COMMENT ON COLUMN uniswap_v4_swap.build_id IS
@@ -471,6 +477,7 @@ CREATE TABLE IF NOT EXISTS uniswap_v4_liquidity_event
     tick_upper         INT         NOT NULL CHECK (tick_upper BETWEEN -887272 AND 887272),
     liquidity_delta    NUMERIC     NOT NULL,
     salt               BYTEA       NOT NULL CHECK (octet_length(salt) = 32),
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     processing_version INT         NOT NULL DEFAULT 0,
     build_id           INT         NOT NULL DEFAULT 0,
     CHECK (tick_lower < tick_upper),
@@ -564,6 +571,8 @@ COMMENT ON COLUMN uniswap_v4_liquidity_event.liquidity_delta IS
   'Signed raw liquidity L added (positive) or removed (negative) from the range (see uniswap_v4_pool_state.liquidity for the scale). Legitimately 0 for a "poke": a call made only to settle accrued fees on an unchanged position.';
 COMMENT ON COLUMN uniswap_v4_liquidity_event.salt IS
   'Event field `salt`, 32 bytes: the caller-chosen discriminator that lets one sender hold several independent positions over the same tick range. All zeros when the caller supplied none.';
+COMMENT ON COLUMN uniswap_v4_liquidity_event.created_at IS
+  'Audit. Row insertion time as an instant (timestamptz, so it denotes the same moment under any session TimeZone, and stores UTC internally); bookkeeping only, not an on-chain value.';
 COMMENT ON COLUMN uniswap_v4_liquidity_event.processing_version IS
   'PK, Audit. Per-build reprocessing counter (ADR-0002): 0 for the first write of a key under a build_id, bumped only when a later build rewrites the same key; prior versions are retained.';
 COMMENT ON COLUMN uniswap_v4_liquidity_event.build_id IS
@@ -580,6 +589,7 @@ CREATE TABLE IF NOT EXISTS uniswap_v4_tick
     liquidity_net            NUMERIC     NOT NULL,
     fee_growth_outside0_x128 NUMERIC     NOT NULL,
     fee_growth_outside1_x128 NUMERIC     NOT NULL,
+    created_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
     processing_version       INT         NOT NULL DEFAULT 0,
     build_id                 INT         NOT NULL DEFAULT 0,
     PRIMARY KEY (pool_id, tick, block_number, block_version, processing_version)
@@ -649,6 +659,8 @@ COMMENT ON COLUMN uniswap_v4_tick.fee_growth_outside0_x128 IS
   'TickInfo.feeGrowthOutside0X128: currency0 fee growth on the outside of this tick at the time it was last crossed, Q128.128 fixed point. Only meaningful relative to fee_growth_global0_x128, never absolute. STALE after swap crossings: the row is refreshed only when a ModifyLiquidity touches this tick or on the pool''s first-seen baseline enumeration, never on a swap that crosses it, so do not derive feeGrowthInside from it without an independent read at the block of interest.';
 COMMENT ON COLUMN uniswap_v4_tick.fee_growth_outside1_x128 IS
   'TickInfo.feeGrowthOutside1X128: currency1 fee growth on the outside of this tick at the time it was last crossed, Q128.128 fixed point. STALE after swap crossings for the same reason as fee_growth_outside0_x128; do not derive feeGrowthInside from it without an independent read.';
+COMMENT ON COLUMN uniswap_v4_tick.created_at IS
+  'Audit. Row insertion time as an instant (timestamptz, so it denotes the same moment under any session TimeZone, and stores UTC internally); bookkeeping only, not an on-chain value.';
 COMMENT ON COLUMN uniswap_v4_tick.processing_version IS
   'PK, Audit. Per-build reprocessing counter (ADR-0002): 0 for the first write of a key under a build_id, bumped only when a later build rewrites the same key; prior versions are retained.';
 COMMENT ON COLUMN uniswap_v4_tick.build_id IS
@@ -666,6 +678,7 @@ CREATE TABLE IF NOT EXISTS uniswap_v4_pool_event
         'initialize', 'donate', 'protocol_fee_updated'
     )),
     params             JSONB       NOT NULL,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     processing_version INT         NOT NULL DEFAULT 0,
     build_id           INT         NOT NULL DEFAULT 0,
     PRIMARY KEY (pool_id, block_timestamp, block_number, block_version, log_index, processing_version)
@@ -752,6 +765,8 @@ COMMENT ON COLUMN uniswap_v4_pool_event.event_name IS
   'Decoded event type: one of initialize, donate, protocol_fee_updated.';
 COMMENT ON COLUMN uniswap_v4_pool_event.params IS
   'JSONB of decoded event fields keyed by name, indexed arguments included. Every key set starts with id, the 32-byte on-chain PoolId as lowercase 0x hex (joinable against uniswap_v4_pool.pool_id via decode(substring(params->>''id'' from 3), ''hex'')). Keys per event_name: initialize {id,currency0,currency1,fee,tickSpacing,hooks,sqrtPriceX96,tick} (addresses as lowercase 0x hex, fee in hundredths of a bip, sqrtPriceX96 Q64.96, tick a plain integer); donate {id,sender,amount0,amount1} (raw native decimals of the respective currency, always non-negative -- the pool receives them); protocol_fee_updated {id,protocolFee} (the packed uint24, see uniswap_v4_pool_state.protocol_fee for the bit layout).';
+COMMENT ON COLUMN uniswap_v4_pool_event.created_at IS
+  'Audit. Row insertion time as an instant (timestamptz, so it denotes the same moment under any session TimeZone, and stores UTC internally); bookkeeping only, not an on-chain value.';
 COMMENT ON COLUMN uniswap_v4_pool_event.processing_version IS
   'PK, Audit. Per-build reprocessing counter (ADR-0002): 0 for the first write of a key under a build_id, bumped only when a later build rewrites the same key; prior versions are retained.';
 COMMENT ON COLUMN uniswap_v4_pool_event.build_id IS
