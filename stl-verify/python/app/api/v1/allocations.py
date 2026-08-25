@@ -230,6 +230,18 @@ class AllocationResponse(BaseModel):
         description="USD value of the position when a price is available; `null` otherwise.",
         examples=["1234567.89"],
     )
+    reference_amount_usd: PlainDecimal | None = Field(
+        default=None,
+        description=(
+            "Sky's USD value for the same position, populated only under `source=both` on a row "
+            "both provenances report. Carried beside `amount_usd` rather than replacing it: the "
+            "two are computed differently and a consumer needs the gap shown rather than "
+            "reconciled. It is also the only figure available where STL holds the position but "
+            "prices none of it — an unindexed chain leaves `amount_usd` null against a real "
+            "`balance`, and Sky's figure is what a total can fall back to."
+        ),
+        examples=["1234567.89"],
+    )
     latest_activity_at: str | None = Field(
         default=None,
         description="ISO-8601 timestamp of the most recent on-chain activity for this position, or `null`.",
@@ -883,7 +895,14 @@ async def _merged_allocations(
         # STL's own figures lead where both report a position: they are computed
         # from the chain rather than reported. The two disagree by ~1% on
         # exposure, which a consumer needs told rather than averaged away.
-        merged.append(counterpart.model_copy(update={"source": Provenance.BOTH}))
+        #
+        # Sky's value rides along rather than being dropped. STL prices only the
+        # chains it indexes, so a position it holds on an unserved chain carries
+        # a real balance and a null `amount_usd` — six of spark's rows, $423M —
+        # and discarding Sky's figure left a consumer nothing to fall back to.
+        merged.append(
+            counterpart.model_copy(update={"source": Provenance.BOTH, "reference_amount_usd": row.amount_usd})
+        )
 
     merged.extend(row for row in indexed if id(row) not in matched)
     return merged

@@ -238,6 +238,53 @@ def test_both_marks_a_position_only_sky_reports(reference_client):
     [_positions(_reference_position(network="ethereum", chain_id=1, chain="mainnet"))],
     indirect=True,
 )
+def test_both_keeps_skys_value_beside_stls_on_a_matched_row(reference_client):
+    """A merged row carries both provenances' figures, not just STL's.
+
+    STL prices only the chains it indexes, so a position it holds on an unserved
+    chain has a real balance and a null `amount_usd`. Dropping Sky's figure on
+    the match left nothing for a total to fall back to — six of spark's rows,
+    $423M, priced by Sky alone.
+    """
+    from app.domain.entities.allocation import ReceiptTokenPosition
+
+    client, service = reference_client
+    service.prime_proxy_addresses.return_value = [EthAddress(_VALID_ADDR)]
+    service.list_direct_asset_holdings.return_value = []
+    service.primary_proxy_address.return_value = None
+    service.list_receipt_token_positions.return_value = [
+        ReceiptTokenPosition(
+            chain_id=1,
+            receipt_token_id=41,
+            receipt_token_address=_TOKEN,
+            underlying_token_id=7,
+            underlying_token_address="0x" + "77" * 20,
+            symbol="spUSDT",
+            underlying_symbol="USDT",
+            protocol_name="sparklend",
+            balance=Decimal("1"),
+            amount_usd=None,
+            latest_activity_at=None,
+            latest_activity_action=None,
+            latest_activity_amount=None,
+        )
+    ]
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations?source=both")
+
+    assert response.status_code == 200
+    (row,) = response.json()
+    assert row["source"] == "both"
+    # STL priced none of it; Sky's figure is the only one there is.
+    assert row["amount_usd"] is None
+    assert row["reference_amount_usd"] == "344187505.66"
+
+
+@pytest.mark.parametrize(
+    "reference_client",
+    [_positions(_reference_position(network="ethereum", chain_id=1, chain="mainnet"))],
+    indirect=True,
+)
 def test_both_serves_the_custody_leg_when_a_non_primary_proxy_is_queried(reference_client):
     # The merged view spans every proxy, so the prime-scoped leg belongs to it
     # whichever proxy was asked. Gating it on "is this the primary proxy" — right
