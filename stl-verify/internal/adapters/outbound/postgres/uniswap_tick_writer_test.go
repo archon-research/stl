@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"math"
 	"math/big"
 	"testing"
 )
@@ -128,5 +129,31 @@ func TestUniswapTickWriterUnchangedComparesInitialized(t *testing.T) {
 	}
 	if !uniswapV4TickWriter.unchanged(prior, next) {
 		t.Error("v4 unchanged = false, want true (the v4 table has no initialized column)")
+	}
+}
+
+// TestDistinctSortedUniswapTickKeysOrdersExtremePoolIDs documents the
+// comparator's contract, not a reachable scenario: pool_id is a BIGSERIAL, so
+// the database cannot produce a negative or near-MaxInt64 id. The lock order is
+// a deadlock invariant, so the comparator must be correct by construction
+// rather than by the range of its inputs.
+func TestDistinctSortedUniswapTickKeysOrdersExtremePoolIDs(t *testing.T) {
+	tick := func(poolID int64, tick int) uniswapTickRow {
+		return uniswapTickRow{poolID: poolID, tick: tick}
+	}
+
+	got := distinctSortedUniswapTickKeys([]uniswapTickRow{
+		tick(math.MaxInt64, 60),
+		tick(math.MinInt64, 60),
+	})
+
+	want := []uniswapTickKey{
+		{poolID: math.MinInt64, tick: 60},
+		{poolID: math.MaxInt64, tick: 60},
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("key %d = %+v, want %+v", i, got[i], want[i])
+		}
 	}
 }

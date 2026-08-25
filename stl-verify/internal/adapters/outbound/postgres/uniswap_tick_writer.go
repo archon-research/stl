@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -339,10 +340,10 @@ func distinctSortedUniswapTickKeys(ticks []uniswapTickRow) []uniswapTickKey {
 		keys = append(keys, k)
 	}
 	slices.SortFunc(keys, func(a, b uniswapTickKey) int {
-		if a.poolID != b.poolID {
-			return int(a.poolID - b.poolID)
-		}
-		return a.tick - b.tick
+		return cmp.Or(
+			cmp.Compare(a.poolID, b.poolID),
+			cmp.Compare(a.tick, b.tick),
+		)
 	})
 	return keys
 }

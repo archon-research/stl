@@ -124,6 +124,73 @@ func TestUniswapV4TickIsNotAHypertable(t *testing.T) {
 	}
 }
 
+// seedUniswapV4TickPlanHistory writes one pool's ticks over a run of blocks, so
+// the planner sees a pool whose entries far outnumber the ones any single block
+// wants; on a handful of rows either candidate index costs the same.
+func seedUniswapV4TickPlanHistory(t *testing.T, ctx context.Context, poolID, firstBlock int64, blocks int) {
+	t.Helper()
+	for i := range blocks {
+		blockNumber := firstBlock + int64(i)
+		if _, err := uniswapV4TestPool.Exec(ctx, `
+			INSERT INTO uniswap_v4_tick
+			    (pool_id, tick, block_number, block_version, block_timestamp,
+			     liquidity_gross, liquidity_net, fee_growth_outside0_x128,
+			     fee_growth_outside1_x128, build_id)
+			SELECT $1, g * 60, $2, 0, '2025-02-01T00:00:00Z'::timestamptz, 1, 1, 0, 0, 0
+			FROM generate_series(-10, 10) g`,
+			poolID, blockNumber); err != nil {
+			t.Fatalf("seeding tick history at block %d: %v", blockNumber, err)
+		}
+	}
+	// VACUUM populates the visibility map an index-only scan is costed against.
+	if _, err := uniswapV4TestPool.Exec(ctx, `VACUUM (ANALYZE) uniswap_v4_tick`); err != nil {
+		t.Fatalf("vacuum analyze uniswap_v4_tick: %v", err)
+	}
+}
+
+// explainUniswapV4Query returns the planner's text output for sql, bound to args.
+func explainUniswapV4Query(t *testing.T, ctx context.Context, sql string, args ...any) string {
+	t.Helper()
+	rows, err := uniswapV4TestPool.Query(ctx, "EXPLAIN "+sql, args...)
+	if err != nil {
+		t.Fatalf("explaining query: %v", err)
+	}
+	defer rows.Close()
+
+	var plan strings.Builder
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			t.Fatalf("scanning explain output: %v", err)
+		}
+		plan.WriteString(line)
+		plan.WriteString("\n")
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterating explain output: %v", err)
+	}
+	return plan.String()
+}
+
+// TestUniswapV4TickBlockLookupIndexServesReorgTickRead pins the plan of
+// TicksForPoolAtBlock, the reorg-path read. Both the PK and the pv-lookup index
+// put tick between the query's two filters, so only pool_id bounds the scan and
+// block_number is re-checked at every entry the pool has ever written; the read
+// then grows with the pool's whole tick history rather than with one block's.
+func TestUniswapV4TickBlockLookupIndexServesReorgTickRead(t *testing.T) {
+	ctx := context.Background()
+	poolID := insertTestUniswapV4Pool(t, ctx, "\\x1100000000000000000000000000000000000000000000000000000000000009")
+
+	const firstBlock = int64(22500000)
+	seedUniswapV4TickPlanHistory(t, ctx, poolID, firstBlock, 50)
+
+	plan := explainUniswapV4Query(t, ctx, ticksForPoolAtBlockSQL, poolID, firstBlock+7)
+
+	if !strings.Contains(plan, "idx_uniswap_v4_tick_block_lookup") {
+		t.Errorf("planner did not choose idx_uniswap_v4_tick_block_lookup for TicksForPoolAtBlock:\n%s", plan)
+	}
+}
+
 func TestUniswapV4ProcessingVersionTriggersExist(t *testing.T) {
 	ctx := context.Background()
 
@@ -955,7 +1022,7 @@ func TestUniswapV4PoolManagerHasOneIdentityPerChain(t *testing.T) {
 	if err := uniswapV4TestPool.QueryRow(ctx, `
 		SELECT count(DISTINCT (pr.address, m.state_view_address))
 		FROM uniswap_v4_pool_manager m
-		JOIN protocol pr ON pr.id = m.protocol_id
+		JOIN protocol pr ON pr.id = m.protocol_id AND pr.chain_id = m.chain_id
 		WHERE m.chain_id = 1`).Scan(&addresses); err != nil {
 		t.Fatalf("counting distinct pool manager identities: %v", err)
 	}
