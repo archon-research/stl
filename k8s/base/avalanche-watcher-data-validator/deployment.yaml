@@ -7,6 +7,13 @@ spec:
   # job is the Etherscan cross-check, which we cannot do for this chain yet. Set
   # to 1 to enable. Ingestion is a separate service and is unaffected.
   replicas: 0
+  # Explicit, matching the API-server default — ArgoCD must own spec.strategy or
+  # a later change to it cannot prune rollingUpdate. k8s/AGENTS.md, "Rollout strategy".
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
   selector:
     matchLabels:
       app: avalanche-watcher-data-validator
