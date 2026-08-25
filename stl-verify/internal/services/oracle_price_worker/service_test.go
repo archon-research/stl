@@ -110,6 +110,10 @@ func (m *mockConsumer) ChangeMessageVisibility(context.Context, string, time.Dur
 	return nil
 }
 
+func (m *mockConsumer) ChangeMessageVisibilityBatch(context.Context, []string, time.Duration) (map[string]error, error) {
+	return nil, nil
+}
+
 func (m *mockConsumer) VisibilityTimeout() time.Duration {
 	return 300 * time.Second
 }

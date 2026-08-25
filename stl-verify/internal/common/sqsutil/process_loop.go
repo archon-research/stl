@@ -160,11 +160,11 @@ func isShutdownCancellation(ctx context.Context, err error) bool {
 // Cancelling ctx (SIGTERM) never kills work in progress: the handler already
 // running keeps a context detached from the shutdown until the drain budget
 // expires, so its message can still be deleted. Every message the shutdown
-// leaves unfinished — drain expired, handler failed, never started, or arrived
-// in a poll that completed after the signal — is released back to the queue
-// immediately, because a message left in flight blocks its whole FIFO message
-// group (one chain's block stream) from the successor pod until the visibility
-// timeout expires.
+// leaves unfinished — drain expired, handler failed, body unparseable, never
+// started, or arrived in a poll that completed after the signal — is released
+// back to the queue, because a message left in flight blocks its whole FIFO
+// message group (one chain's block stream) from the successor pod until the
+// visibility timeout expires.
 //
 // Returns a joined error for any failures.
 func ProcessMessages(
@@ -188,20 +188,37 @@ func ProcessMessages(
 	cfg.Logger.Info("received messages", "count", len(messages))
 
 	var errs []error
+	var inFlight []outbound.SQSMessage
 	for i, msg := range messages {
-		// The single owner of "shutdown means hand the rest back": it covers a
-		// batch that landed after the signal (i == 0, because the consumer never
-		// abandons an in-flight poll) as well as one the signal interrupted.
+		// The shutdown guard covers a batch that landed after the signal (i == 0,
+		// because the consumer never abandons an in-flight poll) as well as one
+		// the signal interrupted.
 		if ctx.Err() != nil {
-			releaseMessages(ctx, cfg, messages[i:])
+			inFlight = append(inFlight, messages[i:]...)
 			break
 		}
 		if err := processMessage(ctx, cfg, msg, handler); err != nil {
 			errs = append(errs, err)
+			inFlight = append(inFlight, msg)
 		}
 	}
+	releaseUnsettledOnShutdown(ctx, cfg, inFlight)
 
 	return errors.Join(errs...)
+}
+
+// releaseUnsettledOnShutdown is the single owner of "shutdown means hand the
+// rest back": every message the batch still holds, whether the loop never
+// reached it or a failure left it undeleted while the context was still live.
+// Handing back a poison pill does not cost it its retry pacing — a visibility
+// change leaves ApproximateReceiveCount alone, so the redrive policy still
+// walks it to the DLQ — it only spares the successor the queue's whole
+// visibility timeout idling behind it.
+func releaseUnsettledOnShutdown(ctx context.Context, cfg Config, messages []outbound.SQSMessage) {
+	if ctx.Err() == nil {
+		return
+	}
+	releaseMessages(ctx, cfg, messages)
 }
 
 // processMessage parses one message, runs its handler within the handler
@@ -259,24 +276,21 @@ func runHandler(ctx context.Context, cfg Config, event outbound.BlockEvent, hand
 // unfinished one for redelivery.
 func settleMessage(ctx context.Context, cfg Config, msg outbound.SQSMessage, outcome DrainOutcome) error {
 	if outcome.Err != nil {
-		return keepMessageForRedelivery(ctx, cfg, msg, outcome)
+		return keepMessageForRedelivery(cfg, msg, outcome)
 	}
 	deleteProcessedMessage(ctx, cfg, msg, outcome)
 	return nil
 }
 
-// keepMessageForRedelivery leaves an unfinished message undeleted. Outside
-// shutdown that is deliberate retry pacing — the queue's visibility timeout is
-// the backoff a poison pill gets — but during shutdown the successor pod must
-// not wait it out, so the message is released instead.
-func keepMessageForRedelivery(ctx context.Context, cfg Config, msg outbound.SQSMessage, outcome DrainOutcome) error {
+// keepMessageForRedelivery leaves an unfinished message undeleted, returning
+// the failure that ProcessMessages tracks it by: a message that comes back with
+// an error is one releaseUnsettledOnShutdown must hand over if the shutdown has
+// begun by the time the batch ends.
+func keepMessageForRedelivery(cfg Config, msg outbound.SQSMessage, outcome DrainOutcome) error {
 	if !outcome.Abandoned {
 		cfg.Logger.Error("failed to process message",
 			"messageID", msg.MessageID,
 			"error", outcome.Err)
-	}
-	if ctx.Err() != nil {
-		releaseMessage(ctx, cfg, msg)
 	}
 	return outcome.Err
 }

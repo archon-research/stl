@@ -209,5 +209,8 @@ func (stubConsumer) DeleteMessage(_ context.Context, _ string) error { return ni
 func (stubConsumer) ChangeMessageVisibility(context.Context, string, time.Duration) error {
 	return nil
 }
+func (stubConsumer) ChangeMessageVisibilityBatch(context.Context, []string, time.Duration) (map[string]error, error) {
+	return nil, nil
+}
 func (stubConsumer) VisibilityTimeout() time.Duration { return 5 * time.Minute }
 func (stubConsumer) Close() error                     { return nil }

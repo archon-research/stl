@@ -660,10 +660,11 @@ func TestProcessMessages_ReleasesBatchThatArrivesDuringShutdown(t *testing.T) {
 	assertNoErrorLogs(t, recorder)
 }
 
-// TestProcessMessages_ReleasesWholeBatchWithinOneCleanupBudget pins the
-// shutdown budget: a cleanup context per message lets a full batch of 10 need
-// 10x ShutdownCleanupTimeout, which no longer fits lifecycle.ShutdownTimeout.
-func TestProcessMessages_ReleasesWholeBatchWithinOneCleanupBudget(t *testing.T) {
+// TestProcessMessages_ReleasesWholeBatchInOneQueueCall pins the shutdown
+// budget: a queue call per message lets a full batch of 10 share one
+// ShutdownCleanupTimeout between 10 retryable calls, so one throttled release
+// starves the rest and strands them for the visibility timeout.
+func TestProcessMessages_ReleasesWholeBatchInOneQueueCall(t *testing.T) {
 	const batchSize = 10
 	batch := make([]outbound.SQSMessage, 0, batchSize)
 	for i := range batchSize {
@@ -684,15 +685,12 @@ func TestProcessMessages_ReleasesWholeBatchWithinOneCleanupBudget(t *testing.T) 
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	deadlines := consumer.releaseDeadlines()
-	if len(deadlines) != batchSize {
-		t.Fatalf("expected %d releases, got %d", batchSize, len(deadlines))
+	calls := consumer.releaseCalls()
+	if len(calls) != 1 {
+		t.Fatalf("expected the batch released in one queue call, got %d", len(calls))
 	}
-	for i, deadline := range deadlines {
-		if !deadline.Equal(deadlines[0]) {
-			t.Errorf("release %d got its own cleanup budget (deadline %s, first %s); the batch must share one",
-				i, deadline, deadlines[0])
-		}
+	if got := len(calls[0].handles); got != batchSize {
+		t.Errorf("expected all %d messages in that call, got %d", batchSize, got)
 	}
 }
 
@@ -818,5 +816,37 @@ func TestRunLoop_LogsNestedDeadlineRacingShutdownAtError(t *testing.T) {
 
 	if logged := recorder.messagesAt(slog.LevelError); !slices.Contains(logged, "error processing messages") {
 		t.Fatalf("expected a nested deadline racing shutdown at ERROR, got %v", logged)
+	}
+}
+
+// TestProcessMessages_ReleasesAnUnsettledMessageWhenShutdownLandsLaterInTheBatch
+// covers the message the shutdown guard cannot see: one left in flight while
+// the context was still live, with SIGTERM landing during a later message's
+// handler. Only the messages the loop never reached were handed back, so the
+// earlier one stalled its FIFO group for the whole visibility timeout.
+func TestProcessMessages_ReleasesAnUnsettledMessageWhenShutdownLandsLaterInTheBatch(t *testing.T) {
+	malformed := outbound.SQSMessage{MessageID: "1", ReceiptHandle: "h1", Body: "{not json"}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	consumer := &mockConsumer{
+		batches: [][]outbound.SQSMessage{{malformed, makeMsg("2", "h2", blockEvent(101))}},
+	}
+	cfg, _ := recordingConfig(consumer)
+
+	handler := func(context.Context, outbound.BlockEvent) error {
+		cancel()
+		return nil
+	}
+
+	if err := ProcessMessages(ctx, cfg, handler); err == nil {
+		t.Fatal("expected the parse failure returned")
+	}
+	if got := consumer.deleted(); !slices.Equal(got, []string{"h2"}) {
+		t.Errorf("expected only the parsed message deleted, got %v", got)
+	}
+	want := []visibilityChange{{handle: "h1", visibility: 0}}
+	if got := consumer.released(); !slices.Equal(got, want) {
+		t.Errorf("expected the unparseable message released for the successor, got %v", got)
 	}
 }

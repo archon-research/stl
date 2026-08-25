@@ -12,22 +12,30 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-// visibilityChange records one ChangeMessageVisibility call.
+// visibilityChange records one message handed back to the queue.
 type visibilityChange struct {
 	handle     string
 	visibility time.Duration
 }
 
+// visibilityRelease records one release call: every handle it carried and the
+// cleanup deadline it ran under.
+type visibilityRelease struct {
+	handles    []string
+	visibility time.Duration
+	deadline   time.Time
+}
+
 // mockConsumer implements outbound.SQSConsumer for testing.
 type mockConsumer struct {
-	mu                  sync.Mutex
-	batches             [][]outbound.SQSMessage // each call to ReceiveMessages pops one batch
-	deletedHandles      []string
-	visibilityChanges   []visibilityChange
-	visibilityDeadlines []time.Time
-	deleteErr           error
-	visibilityErr       error
-	visibilityTimeout   time.Duration // 0 -> a safe default well above the handler budget
+	mu                 sync.Mutex
+	batches            [][]outbound.SQSMessage // each call to ReceiveMessages pops one batch
+	deletedHandles     []string
+	visibilityReleases []visibilityRelease
+	deleteErr          error
+	visibilityErr      error
+	visibilityRefusals map[string]error // per-handle refusals the batch call reports back
+	visibilityTimeout  time.Duration    // 0 -> a safe default well above the handler budget
 
 	// receive, when set, replaces the batch-popping behaviour so a test can
 	// drive ReceiveMessages failures.
@@ -36,6 +44,10 @@ type mockConsumer struct {
 	// beforeDelete, when set, runs at the start of DeleteMessage so a test can
 	// land a shutdown with the delete in flight.
 	beforeDelete func()
+
+	// onRelease, when set, runs inside a release call once its handles are
+	// recorded, so a test can burn the shared cleanup budget mid-release.
+	onRelease func()
 }
 
 func (m *mockConsumer) VisibilityTimeout() time.Duration {
@@ -75,15 +87,42 @@ func (m *mockConsumer) DeleteMessage(ctx context.Context, handle string) error {
 }
 
 func (m *mockConsumer) ChangeMessageVisibility(ctx context.Context, handle string, visibility time.Duration) error {
-	if err := ctx.Err(); err != nil {
+	refusals, err := m.ChangeMessageVisibilityBatch(ctx, []string{handle}, visibility)
+	if err != nil {
 		return err
 	}
+	return refusals[handle]
+}
+
+func (m *mockConsumer) ChangeMessageVisibilityBatch(ctx context.Context, handles []string, visibility time.Duration) (map[string]error, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	deadline, _ := ctx.Deadline()
+	m.recordRelease(visibilityRelease{handles: slices.Clone(handles), visibility: visibility, deadline: deadline})
+	if m.onRelease != nil {
+		m.onRelease()
+	}
+	if m.visibilityErr != nil {
+		return nil, m.visibilityErr
+	}
+	return m.refusalsFor(handles), nil
+}
+
+func (m *mockConsumer) recordRelease(release visibilityRelease) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.visibilityChanges = append(m.visibilityChanges, visibilityChange{handle: handle, visibility: visibility})
-	m.visibilityDeadlines = append(m.visibilityDeadlines, deadline)
-	return m.visibilityErr
+	m.visibilityReleases = append(m.visibilityReleases, release)
+}
+
+func (m *mockConsumer) refusalsFor(handles []string) map[string]error {
+	refusals := make(map[string]error)
+	for _, handle := range handles {
+		if err, ok := m.visibilityRefusals[handle]; ok {
+			refusals[handle] = err
+		}
+	}
+	return refusals
 }
 
 func (m *mockConsumer) Close() error { return nil }
@@ -94,16 +133,22 @@ func (m *mockConsumer) deleted() []string {
 	return slices.Clone(m.deletedHandles)
 }
 
+// released flattens the recorded release calls to one entry per message, for
+// the tests that care which messages went back rather than how they were sent.
 func (m *mockConsumer) released() []visibilityChange {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return slices.Clone(m.visibilityChanges)
+	var changes []visibilityChange
+	for _, release := range m.releaseCalls() {
+		for _, handle := range release.handles {
+			changes = append(changes, visibilityChange{handle: handle, visibility: release.visibility})
+		}
+	}
+	return changes
 }
 
-func (m *mockConsumer) releaseDeadlines() []time.Time {
+func (m *mockConsumer) releaseCalls() []visibilityRelease {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return slices.Clone(m.visibilityDeadlines)
+	return slices.Clone(m.visibilityReleases)
 }
 
 func makeMsg(id, handle string, event outbound.BlockEvent) outbound.SQSMessage {

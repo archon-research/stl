@@ -357,6 +357,10 @@ func (c *eventSinkConsumer) ChangeMessageVisibility(context.Context, string, tim
 	return nil
 }
 
+func (c *eventSinkConsumer) ChangeMessageVisibilityBatch(context.Context, []string, time.Duration) (map[string]error, error) {
+	return nil, nil
+}
+
 func (c *eventSinkConsumer) VisibilityTimeout() time.Duration {
 	return 300 * time.Second
 }

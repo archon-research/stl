@@ -19,11 +19,13 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
-// mockSQSAPI records the last ChangeMessageVisibility call; the other sqsAPI
-// methods exist only to satisfy the interface.
+// mockSQSAPI records the last visibility-change call of either shape; the
+// other sqsAPI methods exist only to satisfy the interface.
 type mockSQSAPI struct {
-	visibilityInput *sqs.ChangeMessageVisibilityInput
-	err             error
+	visibilityInput      *sqs.ChangeMessageVisibilityInput
+	visibilityBatchInput *sqs.ChangeMessageVisibilityBatchInput
+	batchFailed          []sqstypes.BatchResultErrorEntry
+	err                  error
 }
 
 func (m *mockSQSAPI) ReceiveMessage(context.Context, *sqs.ReceiveMessageInput, ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
@@ -40,6 +42,14 @@ func (m *mockSQSAPI) ChangeMessageVisibility(_ context.Context, params *sqs.Chan
 		return nil, m.err
 	}
 	return &sqs.ChangeMessageVisibilityOutput{}, nil
+}
+
+func (m *mockSQSAPI) ChangeMessageVisibilityBatch(_ context.Context, params *sqs.ChangeMessageVisibilityBatchInput, _ ...func(*sqs.Options)) (*sqs.ChangeMessageVisibilityBatchOutput, error) {
+	m.visibilityBatchInput = params
+	if m.err != nil {
+		return nil, m.err
+	}
+	return &sqs.ChangeMessageVisibilityBatchOutput{Failed: m.batchFailed}, nil
 }
 
 func newTestConsumer(client sqsAPI) *Consumer {
@@ -249,13 +259,15 @@ func TestConsumer_ReceiveMessages_BoundsThePollByWaitTimePlusSlack(t *testing.T)
 	}
 }
 
-// TestNewConsumer_RejectsAWaitTimeThatOutlastsTheShutdownWindow covers the
-// per-worker knob nothing validated: SQS_WAIT_TIME (e.g. morpho-indexer's
+// TestValidatePollBudget_RejectsAWaitTimeThatOutlastsTheShutdownWindow covers
+// the per-worker knob nothing validated: SQS_WAIT_TIME (e.g. morpho-indexer's
 // -wait) sizes pollBudget, and a poll that cannot finish inside
 // lifecycle.ShutdownTimeout means Stop() is abandoned mid-poll and the message
 // SQS handed to it is stranded for the visibility timeout on every rollout —
-// with no signal, because the guardrail test only ever sees the default.
-func TestNewConsumer_RejectsAWaitTimeThatOutlastsTheShutdownWindow(t *testing.T) {
+// with no signal, because the guardrail test only ever sees the default. It
+// drives the rule directly: every wait time NewConsumer still accepts fits the
+// window, so only ValidateWaitTime rejects at construction today.
+func TestValidatePollBudget_RejectsAWaitTimeThatOutlastsTheShutdownWindow(t *testing.T) {
 	tooLong := int32((lifecycle.ShutdownTimeout-sqsutil.ShutdownCleanupTimeout-receiveSlack)/time.Second) + 1
 
 	tests := []struct {
@@ -263,20 +275,28 @@ func TestNewConsumer_RejectsAWaitTimeThatOutlastsTheShutdownWindow(t *testing.T)
 		waitTimeSeconds int32
 		wantErr         bool
 	}{
-		{"the SQS long-poll maximum fits", 20, false},
-		{"unset falls back to the default and fits", 0, false},
+		{"the SQS long-poll maximum fits", maxLongPollSeconds, false},
 		{"a wait time that outlasts the shutdown window is rejected", tooLong, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := NewConsumer(aws.Config{}, Config{
-				QueueURL:        "https://sqs.test/queue.fifo",
-				WaitTimeSeconds: tt.waitTimeSeconds,
-			}, slog.Default())
+			err := ValidatePollBudget(tt.waitTimeSeconds)
 			if (err != nil) != tt.wantErr {
-				t.Fatalf("NewConsumer(WaitTimeSeconds=%d) error = %v, wantErr %v", tt.waitTimeSeconds, err, tt.wantErr)
+				t.Fatalf("ValidatePollBudget(%d) error = %v, wantErr %v", tt.waitTimeSeconds, err, tt.wantErr)
 			}
 		})
+	}
+}
+
+// TestNewConsumer_FallsBackToTheDefaultWaitTime pins that an unset knob still
+// reaches both budget checks as the default rather than as a rejected zero.
+func TestNewConsumer_FallsBackToTheDefaultWaitTime(t *testing.T) {
+	consumer, err := NewConsumer(aws.Config{}, Config{QueueURL: "https://sqs.test/queue.fifo"}, slog.Default())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := consumer.config.WaitTimeSeconds; got != ConfigDefaults().WaitTimeSeconds {
+		t.Errorf("expected the default wait time applied, got %d", got)
 	}
 }
 
@@ -317,5 +337,123 @@ func TestConsumer_ChangeMessageVisibility_PropagatesError(t *testing.T) {
 	err := consumer.ChangeMessageVisibility(context.Background(), "handle-1", 0)
 	if !errors.Is(err, apiErr) {
 		t.Fatalf("expected the SQS error wrapped, got %v", err)
+	}
+}
+
+func TestConsumer_ChangeMessageVisibilityBatch_SendsOneEntryPerHandle(t *testing.T) {
+	client := &mockSQSAPI{}
+	consumer := newTestConsumer(client)
+
+	refusals, err := consumer.ChangeMessageVisibilityBatch(context.Background(), []string{"handle-1", "handle-2"}, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(refusals) != 0 {
+		t.Errorf("expected no refusals, got %v", refusals)
+	}
+
+	entries := client.visibilityBatchInput.Entries
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(entries))
+	}
+	for i, want := range []string{"handle-1", "handle-2"} {
+		if got := *entries[i].ReceiptHandle; got != want {
+			t.Errorf("entry %d carries handle %s, want %s", i, got, want)
+		}
+		if got := entries[i].VisibilityTimeout; got != 0 {
+			t.Errorf("entry %d asks for %ds, want an immediate release", i, got)
+		}
+	}
+}
+
+// TestConsumer_ChangeMessageVisibilityBatch_ReportsPerEntryRefusals covers the
+// batch API's split outcome: a 200 response can still refuse individual
+// entries, and the caller counts and logs releases per message.
+func TestConsumer_ChangeMessageVisibilityBatch_ReportsPerEntryRefusals(t *testing.T) {
+	client := &mockSQSAPI{batchFailed: []sqstypes.BatchResultErrorEntry{{
+		Id:      aws.String("1"),
+		Code:    aws.String("ReceiptHandleIsInvalid"),
+		Message: aws.String("The receipt handle has expired"),
+	}}}
+	consumer := newTestConsumer(client)
+
+	refusals, err := consumer.ChangeMessageVisibilityBatch(context.Background(), []string{"handle-1", "handle-2"}, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if refusals["handle-1"] != nil {
+		t.Errorf("expected handle-1 released, got %v", refusals["handle-1"])
+	}
+	if refusals["handle-2"] == nil {
+		t.Fatal("expected the refusal attributed to handle-2")
+	}
+}
+
+// TestConsumer_ChangeMessageVisibilityBatch_RejectsAnUnattributableRefusal
+// pins the one refusal shape that must not degrade into a silent success: an
+// entry Id matching no handle in the request leaves the caller unable to say
+// which message stayed hidden.
+func TestConsumer_ChangeMessageVisibilityBatch_RejectsAnUnattributableRefusal(t *testing.T) {
+	client := &mockSQSAPI{batchFailed: []sqstypes.BatchResultErrorEntry{{
+		Id:   aws.String("99"),
+		Code: aws.String("ReceiptHandleIsInvalid"),
+	}}}
+	consumer := newTestConsumer(client)
+
+	if _, err := consumer.ChangeMessageVisibilityBatch(context.Background(), []string{"handle-1"}, 0); err == nil {
+		t.Fatal("expected an unattributable refusal to fail the call")
+	}
+}
+
+func TestConsumer_ChangeMessageVisibilityBatch_RejectsMoreHandlesThanSQSAccepts(t *testing.T) {
+	client := &mockSQSAPI{}
+	consumer := newTestConsumer(client)
+	handles := make([]string, outbound.MaxVisibilityBatchSize+1)
+
+	if _, err := consumer.ChangeMessageVisibilityBatch(context.Background(), handles, 0); err == nil {
+		t.Fatal("expected a batch above the SQS ceiling rejected before the call")
+	}
+	if client.visibilityBatchInput != nil {
+		t.Error("expected no SQS call for an oversized batch")
+	}
+}
+
+func TestConsumer_ChangeMessageVisibilityBatch_PropagatesError(t *testing.T) {
+	apiErr := errors.New("throttled")
+	consumer := newTestConsumer(&mockSQSAPI{err: apiErr})
+
+	_, err := consumer.ChangeMessageVisibilityBatch(context.Background(), []string{"handle-1"}, 0)
+	if !errors.Is(err, apiErr) {
+		t.Fatalf("expected the SQS error wrapped, got %v", err)
+	}
+}
+
+// TestNewConsumer_RejectsAWaitTimeOutsideTheSQSLongPollRange covers the band
+// the shutdown-window check waves through: 21-29 seconds fits the window but
+// SQS refuses it, so every ReceiveMessage fails InvalidParameterValue for the
+// life of the pod — and noRetryForPoll turns that into one ERROR line per tick
+// with no boot signal. Six workers parse SQS_WAIT_TIME with a bare Atoi, so the
+// range belongs here, where all of them reach the SDK.
+func TestNewConsumer_RejectsAWaitTimeOutsideTheSQSLongPollRange(t *testing.T) {
+	tests := []struct {
+		name            string
+		waitTimeSeconds int32
+		wantErr         bool
+	}{
+		{"the SQS long-poll maximum is accepted", 20, false},
+		{"one second past the maximum is rejected", 21, true},
+		{"a wait time SQS refuses but the shutdown window allows is rejected", 25, true},
+		{"a negative wait time is rejected", -1, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewConsumer(aws.Config{}, Config{
+				QueueURL:        "https://sqs.test/queue.fifo",
+				WaitTimeSeconds: tt.waitTimeSeconds,
+			}, slog.Default())
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("NewConsumer(WaitTimeSeconds=%d) error = %v, wantErr %v", tt.waitTimeSeconds, err, tt.wantErr)
+			}
+		})
 	}
 }

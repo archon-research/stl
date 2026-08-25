@@ -38,6 +38,7 @@ type mockSQSConsumer struct {
 	messages          []outbound.SQSMessage
 	deletedHandles    []string
 	visibilityChanges []visibilityChange
+	visibilityTimeout time.Duration // 0 -> a safe default well above the handler budget
 	receiveErr        error
 	deleteErr         error
 	receiveCount      int
@@ -116,16 +117,26 @@ func (m *mockSQSConsumer) DeleteMessage(ctx context.Context, receiptHandle strin
 }
 
 func (m *mockSQSConsumer) ChangeMessageVisibility(ctx context.Context, receiptHandle string, visibility time.Duration) error {
+	_, err := m.ChangeMessageVisibilityBatch(ctx, []string{receiptHandle}, visibility)
+	return err
+}
+
+func (m *mockSQSConsumer) ChangeMessageVisibilityBatch(ctx context.Context, receiptHandles []string, visibility time.Duration) (map[string]error, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return nil, err
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.visibilityChanges = append(m.visibilityChanges, visibilityChange{handle: receiptHandle, visibility: visibility})
-	return nil
+	for _, handle := range receiptHandles {
+		m.visibilityChanges = append(m.visibilityChanges, visibilityChange{handle: handle, visibility: visibility})
+	}
+	return nil, nil
 }
 
 func (m *mockSQSConsumer) VisibilityTimeout() time.Duration {
+	if m.visibilityTimeout > 0 {
+		return m.visibilityTimeout
+	}
 	return 300 * time.Second
 }
 
@@ -3550,6 +3561,10 @@ type mockMetrics struct {
 	mu        sync.Mutex
 	processed []string
 	latencies []string
+
+	// latencyRecorded, when set, receives each latency status as it is
+	// recorded, so a test can wait on the metric rather than on the run.
+	latencyRecorded chan<- string
 }
 
 var _ outbound.BackupMetricsRecorder = (*mockMetrics)(nil)
@@ -3558,6 +3573,12 @@ func (m *mockMetrics) RecordProcessingLatency(ctx context.Context, duration time
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.latencies = append(m.latencies, status)
+	if m.latencyRecorded != nil {
+		select {
+		case m.latencyRecorded <- status:
+		default:
+		}
+	}
 }
 
 func (m *mockMetrics) RecordBlockProcessed(ctx context.Context, status string) {
@@ -3739,5 +3760,70 @@ func TestRun_Metrics_DLQPublishFailedStatus(t *testing.T) {
 
 	if !slices.Contains(metrics.ProcessedStatuses(), "dlq_publish_failed") {
 		t.Errorf("expected a dlq_publish_failed processed metric, got %v", metrics.ProcessedStatuses())
+	}
+}
+
+// TestRun_BoundsAHandlerParkedOnADependency covers the worker slot nothing
+// bounded: of this worker's dependencies only the S3 leg carries no timeout of
+// its own, so a FileExists -> HeadObject on a half-open connection parked a
+// worker until SIGTERM. Outside shutdown nothing else ever ends that message.
+func TestRun_BoundsAHandlerParkedOnADependency(t *testing.T) {
+	consumer := newMockSQSConsumer()
+	cache := newMockBlockCache()
+	writer := newMockS3Writer()
+	latencies := make(chan string, 1)
+	svc, _ := shutdownTestService(t, Config{
+		Workers:        1,
+		BatchSize:      1,
+		HandlerTimeout: 50 * time.Millisecond,
+		Metrics:        &mockMetrics{latencyRecorded: latencies},
+	}, consumer, cache, writer)
+
+	_ = cache.SetBlock(context.Background(), 1, 100, 0, json.RawMessage(`{"number":100}`))
+	consumer.receiveCallback = deliverOnceThenIdle(createSQSMessage("msg1", createBlockEvent(1, 100, 0)))
+	cache.getBlockHook = func(readCtx context.Context) error {
+		<-readCtx.Done()
+		return readCtx.Err()
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runDone := make(chan error, 1)
+	go func() { runDone <- svc.Run(ctx) }()
+
+	select {
+	case status := <-latencies:
+		if status != latencyStatusError {
+			t.Errorf("expected the expired handler recorded as %q, got %q", latencyStatusError, status)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the handler outlived its budget: no processing-latency metric within 1s")
+	}
+
+	cancel()
+	select {
+	case <-runDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after cancellation")
+	}
+}
+
+// TestRun_ReportsAVisibilityTimeoutBelowTheHandlerBudget covers the pairing
+// the handler budget creates: a budget above the queue's visibility timeout
+// lets SQS redeliver a message while it is still being processed, and
+// duplicate work is not something the worker itself would ever report.
+func TestRun_ReportsAVisibilityTimeoutBelowTheHandlerBudget(t *testing.T) {
+	consumer := newMockSQSConsumer()
+	consumer.visibilityTimeout = 100 * time.Millisecond
+	svc, recorder := shutdownTestService(t,
+		Config{Workers: 1, BatchSize: 1, HandlerTimeout: time.Second},
+		consumer, newMockBlockCache(), newMockS3Writer())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_ = svc.Run(ctx)
+
+	if logged := recorder.MessagesAt(slog.LevelError); !slices.Contains(logged, "SQS visibility timeout is misconfigured") {
+		t.Errorf("expected the misconfigured visibility timeout reported at ERROR, got %v", logged)
 	}
 }

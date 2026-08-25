@@ -9,11 +9,12 @@ import (
 
 // MockSQSConsumer implements outbound.SQSConsumer for testing.
 type MockSQSConsumer struct {
-	ReceiveMessagesFn         func(ctx context.Context, maxMessages int) ([]outbound.SQSMessage, error)
-	DeleteMessageFn           func(ctx context.Context, receiptHandle string) error
-	ChangeMessageVisibilityFn func(ctx context.Context, receiptHandle string, visibility time.Duration) error
-	CloseFn                   func() error
-	VisibilityTimeoutFn       func() time.Duration
+	ReceiveMessagesFn              func(ctx context.Context, maxMessages int) ([]outbound.SQSMessage, error)
+	DeleteMessageFn                func(ctx context.Context, receiptHandle string) error
+	ChangeMessageVisibilityFn      func(ctx context.Context, receiptHandle string, visibility time.Duration) error
+	ChangeMessageVisibilityBatchFn func(ctx context.Context, receiptHandles []string, visibility time.Duration) (map[string]error, error)
+	CloseFn                        func() error
+	VisibilityTimeoutFn            func() time.Duration
 }
 
 func (m *MockSQSConsumer) VisibilityTimeout() time.Duration {
@@ -42,6 +43,19 @@ func (m *MockSQSConsumer) ChangeMessageVisibility(ctx context.Context, receiptHa
 		return m.ChangeMessageVisibilityFn(ctx, receiptHandle, visibility)
 	}
 	return nil
+}
+
+func (m *MockSQSConsumer) ChangeMessageVisibilityBatch(ctx context.Context, receiptHandles []string, visibility time.Duration) (map[string]error, error) {
+	if m.ChangeMessageVisibilityBatchFn != nil {
+		return m.ChangeMessageVisibilityBatchFn(ctx, receiptHandles, visibility)
+	}
+	refusals := make(map[string]error)
+	for _, handle := range receiptHandles {
+		if err := m.ChangeMessageVisibility(ctx, handle, visibility); err != nil {
+			refusals[handle] = err
+		}
+	}
+	return refusals, nil
 }
 
 func (m *MockSQSConsumer) Close() error {

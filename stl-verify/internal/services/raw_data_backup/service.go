@@ -109,6 +109,13 @@ type Config struct {
 	// when CACHE_MISS_MAX_RETRIES is unset in the environment.
 	CacheMissMaxRetries int
 
+	// HandlerTimeout bounds one message's processing, shutdown or not, so a
+	// dependency that hangs turns into a bounded, redeliverable failure instead
+	// of parking a worker slot for good. It MUST be less than the queue's
+	// visibility timeout so a message is not redelivered while it is still being
+	// processed; Run validates that. Zero uses sqsutil.DefaultHandlerTimeout.
+	HandlerTimeout time.Duration
+
 	// DrainTimeout bounds the grace a message already being processed when the
 	// context is cancelled (SIGTERM) gets to finish. Within it the work keeps a
 	// context detached from the shutdown, so the message can still be deleted;
@@ -245,6 +252,10 @@ func (s *Service) Run(ctx context.Context) error {
 		"workers", s.config.Workers,
 		"chainID", s.config.ChainID,
 	)
+
+	if err := sqsutil.ValidateVisibilityTimeout(s.consumer.VisibilityTimeout(), s.config.HandlerTimeout); err != nil {
+		s.logger.Error("SQS visibility timeout is misconfigured", "error", err)
+	}
 
 	// Create a channel for messages to process
 	msgCh := make(chan outbound.SQSMessage, s.config.Workers*2)
@@ -383,11 +394,19 @@ func (s *Service) worker(ctx context.Context, id int, msgCh <-chan outbound.SQSM
 // processAndSettle runs one message under the shared drain budget, then settles it.
 func (s *Service) processAndSettle(ctx context.Context, logger *slog.Logger, msg outbound.SQSMessage) {
 	start := time.Now()
-	status, outcome := sqsutil.RunDrainableValue(ctx, sqsutil.DrainBudget{Drain: s.drainTimeout()}, func(wctx context.Context) (string, error) {
+	budget := sqsutil.DrainBudget{Work: s.handlerTimeout(), Drain: s.drainTimeout()}
+	status, outcome := sqsutil.RunDrainableValue(ctx, budget, func(wctx context.Context) (string, error) {
 		return s.processMessage(wctx, msg)
 	})
 	s.recordLatency(ctx, start, outcome)
 	s.handleResult(ctx, logger, msg, status, outcome)
+}
+
+func (s *Service) handlerTimeout() time.Duration {
+	if s.config.HandlerTimeout > 0 {
+		return s.config.HandlerTimeout
+	}
+	return sqsutil.DefaultHandlerTimeout
 }
 
 func (s *Service) drainTimeout() time.Duration {

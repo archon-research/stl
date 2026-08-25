@@ -3,6 +3,7 @@ package sqsutil
 import (
 	"context"
 	"log/slog"
+	"slices"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -14,7 +15,7 @@ import (
 // ReleaseMessages hands received-but-unfinished messages straight back to the
 // queue, because a message left in flight blocks its whole FIFO message group
 // (one chain's block stream) from the successor pod until the visibility
-// timeout expires. The whole batch shares one cleanup budget: a budget per
+// timeout expires. The whole set shares one cleanup budget: a budget per
 // message would scale the shutdown tail with the batch size and no longer fit
 // lifecycle.ShutdownTimeout. A failed release only costs the successor the
 // visibility timeout it would have waited anyway, and the process is on its way
@@ -28,17 +29,50 @@ func ReleaseMessages(ctx context.Context, consumer outbound.SQSConsumer, logger 
 	defer cancel()
 	recorder := newReleaseRecorder(logger)
 
+	for chunk := range slices.Chunk(messages, outbound.MaxVisibilityBatchSize) {
+		releaseChunk(cleanupCtx, consumer, logger, recorder, chunk)
+	}
+}
+
+// releaseChunk hands one batch-sized chunk back in a single queue call. Sharing
+// the cleanup budget across per-message calls would let the first throttled one
+// burn it in the SDK's retry chain and strand every later message; one call per
+// chunk keeps that retry chain shared too.
+func releaseChunk(
+	ctx context.Context,
+	consumer outbound.SQSConsumer,
+	logger *slog.Logger,
+	recorder releaseRecorder,
+	messages []outbound.SQSMessage,
+) {
+	handles := make([]string, 0, len(messages))
 	for _, msg := range messages {
 		logger.Info("releasing in-flight message for successor", "messageID", msg.MessageID)
-		if err := consumer.ChangeMessageVisibility(cleanupCtx, msg.ReceiptHandle, 0); err != nil {
-			logger.Warn("failed to release in-flight message; it stays hidden until the visibility timeout expires",
-				"messageID", msg.MessageID,
-				"error", err)
-			recorder.record(cleanupCtx, releaseStatusFailed)
-			continue
-		}
-		recorder.record(cleanupCtx, releaseStatusReleased)
+		handles = append(handles, msg.ReceiptHandle)
 	}
+
+	refusals, err := consumer.ChangeMessageVisibilityBatch(ctx, handles, 0)
+	if err != nil {
+		// The call itself failed, so no message in the chunk was released.
+		refusals = make(map[string]error, len(handles))
+		for _, handle := range handles {
+			refusals[handle] = err
+		}
+	}
+
+	for _, msg := range messages {
+		recorder.record(ctx, releaseOutcome(logger, msg, refusals[msg.ReceiptHandle]))
+	}
+}
+
+func releaseOutcome(logger *slog.Logger, msg outbound.SQSMessage, err error) string {
+	if err == nil {
+		return releaseStatusReleased
+	}
+	logger.Warn("failed to release in-flight message; it stays hidden until the visibility timeout expires",
+		"messageID", msg.MessageID,
+		"error", err)
+	return releaseStatusFailed
 }
 
 func releaseMessages(ctx context.Context, cfg Config, messages []outbound.SQSMessage) {

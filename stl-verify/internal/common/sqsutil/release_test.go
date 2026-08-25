@@ -3,9 +3,14 @@ package sqsutil
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"maps"
+	"slices"
+	"strconv"
+	"sync"
 	"testing"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -62,6 +67,7 @@ func TestReleaseMessages_CountsEveryReleaseByOutcome(t *testing.T) {
 	tests := []struct {
 		name          string
 		visibilityErr error
+		refusals      map[string]error
 		want          map[string]int64
 	}{
 		{
@@ -73,11 +79,16 @@ func TestReleaseMessages_CountsEveryReleaseByOutcome(t *testing.T) {
 			visibilityErr: errors.New("AccessDenied: ChangeMessageVisibility"),
 			want:          map[string]int64{releaseStatusFailed: 2},
 		},
+		{
+			name:     "one entry of the batch refused",
+			refusals: map[string]error{"h2": errors.New("ReceiptHandleIsInvalid")},
+			want:     map[string]int64{releaseStatusReleased: 1, releaseStatusFailed: 1},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			reader := installManualMeterProvider(t)
-			consumer := &mockConsumer{visibilityErr: tt.visibilityErr}
+			consumer := &mockConsumer{visibilityErr: tt.visibilityErr, visibilityRefusals: tt.refusals}
 			messages := []outbound.SQSMessage{
 				makeMsg("1", "h1", blockEvent(100)),
 				makeMsg("2", "h2", blockEvent(101)),
@@ -90,4 +101,53 @@ func TestReleaseMessages_CountsEveryReleaseByOutcome(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestReleaseMessages_OneSlowReleaseCannotStrandTheRest pins the batching. The
+// release call keeps the SDK's default retryer, so one throttled release can
+// burn the whole shared cleanup budget in its own retry chain; per-message
+// calls would then leave the rest of the held set hidden for the queue's full
+// visibility timeout — the FIFO blackout the release exists to prevent.
+func TestReleaseMessages_OneSlowReleaseCannotStrandTheRest(t *testing.T) {
+	const held = 10
+	messages := heldMessages(held)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	var slowOnce sync.Once
+	consumer := &mockConsumer{onRelease: func() {
+		slowOnce.Do(func() { time.Sleep(80 * time.Millisecond) })
+	}}
+
+	ReleaseMessages(ctx, consumer, slog.Default(), messages)
+
+	if got := len(consumer.released()); got != held {
+		t.Fatalf("expected all %d held messages released, got %d", held, got)
+	}
+}
+
+// TestReleaseMessages_ChunksTheHeldSetToTheSQSBatchCeiling covers the held set
+// that outgrows one batch: the backup worker holds an undispatched tail plus
+// one message per worker, so 10 is not the ceiling on what a shutdown hands
+// back.
+func TestReleaseMessages_ChunksTheHeldSetToTheSQSBatchCeiling(t *testing.T) {
+	consumer := &mockConsumer{}
+
+	ReleaseMessages(context.Background(), consumer, slog.Default(), heldMessages(14))
+
+	calls := consumer.releaseCalls()
+	if len(calls) != 2 {
+		t.Fatalf("expected 14 held messages to need 2 calls, got %d", len(calls))
+	}
+	if got := []int{len(calls[0].handles), len(calls[1].handles)}; !slices.Equal(got, []int{10, 4}) {
+		t.Errorf("expected chunks of 10 and 4, got %v", got)
+	}
+}
+
+func heldMessages(count int) []outbound.SQSMessage {
+	messages := make([]outbound.SQSMessage, 0, count)
+	for i := range count {
+		messages = append(messages, makeMsg(strconv.Itoa(i), fmt.Sprintf("h%d", i), blockEvent(int64(100+i))))
+	}
+	return messages
 }

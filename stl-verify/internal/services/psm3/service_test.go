@@ -196,6 +196,10 @@ func (f *fakeSQSConsumer) ChangeMessageVisibility(context.Context, string, time.
 	return nil
 }
 
+func (f *fakeSQSConsumer) ChangeMessageVisibilityBatch(context.Context, []string, time.Duration) (map[string]error, error) {
+	return nil, nil
+}
+
 func (f *fakeSQSConsumer) Close() error { return nil }
 
 func (f *fakeSQSConsumer) VisibilityTimeout() time.Duration { return 30 * time.Second }

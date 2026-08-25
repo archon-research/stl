@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -21,11 +22,15 @@ type sqsAPI interface {
 	ReceiveMessage(ctx context.Context, params *sqs.ReceiveMessageInput, optFns ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error)
 	DeleteMessage(ctx context.Context, params *sqs.DeleteMessageInput, optFns ...func(*sqs.Options)) (*sqs.DeleteMessageOutput, error)
 	ChangeMessageVisibility(ctx context.Context, params *sqs.ChangeMessageVisibilityInput, optFns ...func(*sqs.Options)) (*sqs.ChangeMessageVisibilityOutput, error)
+	ChangeMessageVisibilityBatch(ctx context.Context, params *sqs.ChangeMessageVisibilityBatchInput, optFns ...func(*sqs.Options)) (*sqs.ChangeMessageVisibilityBatchOutput, error)
 }
 
 // maxVisibilityTimeoutSeconds is the SQS ceiling for a per-message visibility
 // timeout (12 hours).
 const maxVisibilityTimeoutSeconds = 43200
+
+// maxLongPollSeconds is the SQS ceiling on ReceiveMessage's WaitTimeSeconds.
+const maxLongPollSeconds = 20
 
 // receiveSlack is the headroom added to the configured long-poll wait when
 // bounding one poll. It covers connection setup and response teardown around
@@ -59,7 +64,7 @@ type Config struct {
 // ConfigDefaults returns sensible defaults for SQS consumer configuration.
 func ConfigDefaults() Config {
 	return Config{
-		WaitTimeSeconds: 20,
+		WaitTimeSeconds: maxLongPollSeconds,
 		// Must exceed the worker per-message handler budget
 		// (sqsutil.DefaultHandlerTimeout = 120s) so a message is not redelivered
 		// while its handler is still running.
@@ -100,6 +105,9 @@ func NewConsumerWithOptions(cfg aws.Config, sqsConfig Config, logger *slog.Logge
 		sqsConfig.VisibilityTimeout = defaults.VisibilityTimeout
 	}
 
+	if err := ValidateWaitTime(sqsConfig.WaitTimeSeconds); err != nil {
+		return nil, err
+	}
 	if err := ValidatePollBudget(sqsConfig.WaitTimeSeconds); err != nil {
 		return nil, err
 	}
@@ -164,9 +172,15 @@ func (c *Consumer) ReceiveMessages(ctx context.Context, maxMessages int) ([]outb
 	return messages, nil
 }
 
-// noRetryForPoll gives the long poll one attempt: each SDK retry waits the full
-// WaitTimeSeconds again, so a retry inside pollBudget is one the budget kills
-// mid-flight. The poll loop retries a failed receive on its next tick instead.
+// noRetryForPoll gives the long poll one attempt, for every receive error and
+// not just a timed-out one: retrying a poll that already waited out
+// WaitTimeSeconds costs that wait again, which pollBudget kills mid-flight —
+// abandoning a poll SQS may have assigned a message to. An error that fails in
+// milliseconds instead (throttle, connection reset, 5xx) loses the retry too,
+// but only costs one ERROR line and one PollInterval (100ms for the shared
+// default, 1s for the dex indexer) before the loop tries again. Deletes and
+// releases keep the SDK retryer: they settle a message the successor is
+// waiting on, which is worth far more than the milliseconds a retry adds.
 func noRetryForPoll(o *sqs.Options) { o.Retryer = aws.NopRetryer{} }
 
 // pollBudget bounds one detached long poll, so a hung request cannot outlive
@@ -194,6 +208,20 @@ func ValidatePollBudget(waitTimeSeconds int32) error {
 	if need >= lifecycle.ShutdownTimeout {
 		return fmt.Errorf("sqs: WaitTimeSeconds %d needs %s to finish one poll and release its batch, "+
 			"which does not fit the graceful-shutdown window %s", waitTimeSeconds, need, lifecycle.ShutdownTimeout)
+	}
+	return nil
+}
+
+// ValidateWaitTime returns an error if the configured long-poll wait is outside
+// the range SQS accepts. Out of range every ReceiveMessage fails
+// InvalidParameterValue for the life of the pod, and noRetryForPoll leaves that
+// as one ERROR line per tick with no boot signal. It runs here, at the one
+// place every worker's SQS_WAIT_TIME reaches the SDK, because most of them
+// parse that env var with a bare strconv.Atoi.
+func ValidateWaitTime(waitTimeSeconds int32) error {
+	if waitTimeSeconds < 0 || waitTimeSeconds > maxLongPollSeconds {
+		return fmt.Errorf("sqs: WaitTimeSeconds %d is outside the range SQS accepts [0,%d]",
+			waitTimeSeconds, maxLongPollSeconds)
 	}
 	return nil
 }
@@ -232,17 +260,78 @@ func (c *Consumer) DeleteMessage(ctx context.Context, receiptHandle string) erro
 // ChangeMessageVisibility resets the received message's visibility timeout,
 // counted from now and rounded to whole seconds (the SQS wire unit).
 func (c *Consumer) ChangeMessageVisibility(ctx context.Context, receiptHandle string, visibility time.Duration) error {
-	seconds := min(max(int64(visibility.Round(time.Second)/time.Second), 0), maxVisibilityTimeoutSeconds)
-
 	_, err := c.client.ChangeMessageVisibility(ctx, &sqs.ChangeMessageVisibilityInput{
 		QueueUrl:          aws.String(c.queueURL),
 		ReceiptHandle:     aws.String(receiptHandle),
-		VisibilityTimeout: int32(seconds),
+		VisibilityTimeout: visibilitySeconds(visibility),
 	})
 	if err != nil {
 		return fmt.Errorf("failed to change message visibility: %w", err)
 	}
 	return nil
+}
+
+// ChangeMessageVisibilityBatch resets the visibility of a whole batch in one
+// call. SQS reports the outcome per entry, so a 200 response can still carry
+// refusals; those come back keyed by receipt handle rather than collapsed into
+// the call's error.
+func (c *Consumer) ChangeMessageVisibilityBatch(ctx context.Context, receiptHandles []string, visibility time.Duration) (map[string]error, error) {
+	if len(receiptHandles) == 0 {
+		return nil, nil
+	}
+	if len(receiptHandles) > outbound.MaxVisibilityBatchSize {
+		return nil, fmt.Errorf("failed to change message visibility: %d handles exceeds the SQS batch ceiling of %d",
+			len(receiptHandles), outbound.MaxVisibilityBatchSize)
+	}
+
+	result, err := c.client.ChangeMessageVisibilityBatch(ctx, &sqs.ChangeMessageVisibilityBatchInput{
+		QueueUrl: aws.String(c.queueURL),
+		Entries:  visibilityBatchEntries(receiptHandles, visibility),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to change visibility of %d messages: %w", len(receiptHandles), err)
+	}
+	return refusalsByHandle(receiptHandles, result.Failed)
+}
+
+// visibilityBatchEntries labels each handle with its index in the request, the
+// Id SQS echoes back on a per-entry failure.
+func visibilityBatchEntries(receiptHandles []string, visibility time.Duration) []sqstypes.ChangeMessageVisibilityBatchRequestEntry {
+	entries := make([]sqstypes.ChangeMessageVisibilityBatchRequestEntry, 0, len(receiptHandles))
+	for i, handle := range receiptHandles {
+		entries = append(entries, sqstypes.ChangeMessageVisibilityBatchRequestEntry{
+			Id:                aws.String(strconv.Itoa(i)),
+			ReceiptHandle:     aws.String(handle),
+			VisibilityTimeout: visibilitySeconds(visibility),
+		})
+	}
+	return entries
+}
+
+// refusalsByHandle maps per-entry failures back onto the handles they were
+// requested for. An Id matching no handle fails the whole call rather than
+// being dropped: the caller counts and logs releases per message, so an
+// unattributable refusal would silently read as a success.
+func refusalsByHandle(receiptHandles []string, failed []sqstypes.BatchResultErrorEntry) (map[string]error, error) {
+	if len(failed) == 0 {
+		return nil, nil
+	}
+	refusals := make(map[string]error, len(failed))
+	for _, entry := range failed {
+		index, err := strconv.Atoi(aws.ToString(entry.Id))
+		if err != nil || index < 0 || index >= len(receiptHandles) {
+			return nil, fmt.Errorf("failed to change message visibility: SQS refused entry %q, which matches no handle in the request",
+				aws.ToString(entry.Id))
+		}
+		refusals[receiptHandles[index]] = fmt.Errorf("%s: %s", aws.ToString(entry.Code), aws.ToString(entry.Message))
+	}
+	return refusals, nil
+}
+
+// visibilitySeconds converts a visibility duration to the SQS wire unit: whole
+// seconds, clamped to the range the API accepts.
+func visibilitySeconds(visibility time.Duration) int32 {
+	return int32(min(max(int64(visibility.Round(time.Second)/time.Second), 0), maxVisibilityTimeoutSeconds))
 }
 
 // Close closes the consumer (no-op for SQS, but satisfies interface).
