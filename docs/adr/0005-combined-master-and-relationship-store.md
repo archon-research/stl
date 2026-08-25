@@ -95,10 +95,11 @@ never mixed:
 1. **Node ids** — `id` on every node: **opaque, stable, house-assigned, assigned once**. A node
    id is never derived from a public identifier, a symbol, or a name, because every public
    identifier eventually gets reused, corrected, or reassigned, and an id derived from one
-   breaks with it. Ids are kind-prefixed for legibility (`em-`, `sec-`, `concept-`, `inst-`,
-   `src-`), and a mnemonic fragment is allowed (`em-prime-1` derives from the registry id,
-   `em-issuer-circle` is readable) but carries no meaning the model relies on. The entity ids
-   already seeded (#611, VEC-525) conform and stand unchanged.
+   breaks with it. Ids are kind-prefixed for legibility (`em-`, `sec-`, `concept-`, `src-` —
+   one prefix per node kind; no `inst-` exists because the instrument is not a node), and a
+   mnemonic fragment is allowed (`em-prime-1` derives from the registry id, `em-issuer-circle`
+   is readable) but carries no meaning the model relies on. The entity ids already seeded
+   (#611, VEC-525) conform and stand unchanged.
 2. **Native instrument keys** — `instrument_key`: the instrument's native, globally unique,
    namespaced identifier (contract address, protocol-emitted market id, `registry:ilk`,
    `provider:package`). Never a house classifier — `position_id` hashes this key, so nothing
@@ -129,8 +130,10 @@ promotion test — *does it carry attributes of its own, and do other things poi
 - **Identity is the stable contract**: `id`, `record_type`, `chain_id`. These are what the
   relationship store and the timeseries join on.
 - **The instrument is a key, not a node — decided.** A native key resolves to a security
-  through the **instrument register**: `instrument_key → security_id`, append-only and
-  versioned like everything else, with exactly one current mapping per key — the
+  through the **instrument register**: `instrument_key → security_id`, where the destination
+  is an ordinary SECURITY node id (a soft reference resolved through the current view, like an
+  edge's `dst_id`) — the register has a dst, it just has a key instead of a src node.
+  Append-only and versioned like everything else, with exactly one current mapping per key — the
   unique-current guarantee the metric path's hottest join requires, which an append-only edge
   store cannot carry (no partial unique index survives append-only versioning). Instrument
   attributes (address, chain, decimals, venue, first-seen block) live on the register row or
