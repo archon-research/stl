@@ -150,6 +150,19 @@ pool). Live CRRs will not reconcile with parquet-era CRRs for these keys:
 different borrower universe, not a data bug. Modelling Base needs Base Morpho
 market indexing (we index Base Morpho *vault receipts*, not market positions).
 
+Measured (25 Aug 2026, N_MC=100, SEED=0, live vs parquet on identical code):
+cbBTC/USDC 0.398% → 0.010%, WETH/USDC 3.548% → 0.362%. The live CRRs are
+*lower* despite Base being the bigger market, and that is expected: CRR is
+expected loss **per borrowed dollar**, so market size alone does not raise it.
+Two drivers, both visible in the run's LTV-bucket printout: (1) the Ethereum
+borrowers run far lower LTVs — cbBTC/USDC has 89.6% of live borrow below 50%
+LTV and ~0% above 70%, where Base's parquet book has ~39% above 60% LTV — so
+the same price shock liquidates a much smaller share; (2) slippage is
+non-linear in liquidated size, so selling slices of a $1.0B book walks deeper
+into the order books than slices of a $275M one, raising the *percentage*
+loss too. Same-code parquet reruns reproduce the stored parquet CRRs, so the
+gap is entirely the borrower universe, not the code.
+
 Still parquet:
 
 | Market group | Live source | Notes |
