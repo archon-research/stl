@@ -18,6 +18,8 @@ spec:
           image: offchain-price-indexer
           envFrom:
             - configMapRef:
+                name: otel-config
+            - configMapRef:
                 name: offchain-price-indexer
             - secretRef:
                 name: offchain-price-indexer

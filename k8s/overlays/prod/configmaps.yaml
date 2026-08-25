@@ -305,9 +305,8 @@ data:
 # On-demand CoinGecko backfill worker (VEC-540). Same Temporal namespace and DB as
 # the 5-minute indexer; the difference is that this worker registers no schedule.
 #
-# OTEL_EXPORTER_OTLP_ENDPOINT is set explicitly. Without it telemetry silently
-# no-ops, which is exactly why offchain-price-indexer emits no cronjob metrics
-# despite running fine — do not drop it here.
+# OTEL_EXPORTER_OTLP_ENDPOINT is set explicitly: without it InitMetrics installs a
+# no-op provider and the job emits no metrics at all — do not drop it here.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -334,9 +333,8 @@ data:
 # the binary defaults to eth-mainnet, matching CHAIN_ID below. The bucket is not
 # here — it carries a random suffix and so arrives via the ExternalSecret.
 #
-# OTEL_EXPORTER_OTLP_ENDPOINT is set explicitly. Without it telemetry silently
-# no-ops, which is exactly why offchain-price-indexer emits no cronjob metrics
-# despite running fine — do not drop it here.
+# OTEL_EXPORTER_OTLP_ENDPOINT below only duplicates the value this Deployment
+# already gets from otel-config — it is redundant, not load-bearing.
 apiVersion: v1
 kind: ConfigMap
 metadata:
