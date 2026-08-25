@@ -375,18 +375,40 @@ not engine configuration:
 |---|---|
 | `applies_to` | a node kind, or membership of this concept (`BELONGS_TO` activates it) |
 | `required_fields` / `field_types` | attributes that must be populated, and their datatypes — a token cannot exist without address and chain (SE-1, SE-3) |
+| `field_constraints` | value rules per field: an enumeration, a format (ISO 4217 currency, lowercase hex address), a range |
+| `forbidden_fields` | attributes that must NOT be present — the person-entity shape forbids direct identifiers (DP-1) |
 | `required_edges` | `(rel_type, direction, min, max, target_kind)` — "exactly one `BELONGS_TO` → instrument subtype" |
 | `permitted_targets` | an enumerated concept list, or *anything `NARROWER_THAN` concept X* — the form that survives new members without an edit |
 | `severity` | `REQUIRED` rejects the write · `EXPECTED` records a validity gap and blocks metric publication · `ADVISORY` reports only (SE-2) |
 | `maturity_tier` | `DRAFT` (nothing enforced) · `GOVERNED` (enforced at declared severity) · `FROZEN` (changes need an ADR) — "loose where forming, strict where settled" (SE-4) |
 | `owner_role` | which role may edit this shape and the types it governs — the hook that makes access control type-scoped (AC-3) |
 
-Five rules bound the cascade: declarations are **local** (a concept never restates its
-parent's rules); inheritance is by **walking `NARROWER_THAN`**, never by copying; closed target
-sets are declared as a **subtree, not a list**, wherever possible; shape resolution has a
-**depth ceiling** and the full effective shape per type is a **generated, reviewable artifact**
-in the schema register, so the cascade is read in a diff, not discovered when a load breaks;
-and severity separates *cannot store* from *not yet complete*.
+**The rules that govern shapes themselves:**
+
+1. **Activation.** A shape applies by node kind, or by concept membership — `BELONGS_TO` a
+   concept activates that concept's shape on the member.
+2. **Locality.** A shape declares only its own constraints. A child concept adds; it does not
+   restate its parent's rules.
+3. **Inheritance.** The effective shape of a node is the union of the shapes along its
+   `NARROWER_THAN` ancestry, computed at validation time rather than copied downward.
+4. **Conflict resolution.** Where parent and child constrain the same thing, the stricter bound
+   wins: highest of the minimums, lowest of the maximums, highest severity. A contradiction
+   (a resolved `min` above a resolved `max`) fails the closure report at authoring time, not at
+   load time.
+5. **Subtree targets.** Closed target sets are declared as *anything narrower than X* wherever
+   possible; an enumerated list needs an edit every time a member is added.
+6. **Bounded resolution.** Shape resolution stops at a fixed depth and fails loud; the full
+   effective shape per type is a generated, reviewable artifact in the schema register, so the
+   cascade is read in a diff rather than discovered when a load breaks.
+7. **Severity separates "cannot store" from "not yet complete".** Structural rules (identity
+   fields, datatypes) are `REQUIRED` and reject the write; semantic completeness
+   (classification, underlying) is `EXPECTED` — stored, flagged in `node_validity`, excluded
+   from metrics; `ADVISORY` only reports.
+8. **Maturity gates enforcement.** `DRAFT` enforces nothing; `GOVERNED` enforces at the
+   declared severity; `FROZEN` requires an ADR to change. Promotion between tiers is a reviewed
+   change.
+9. **Shapes are rows.** A shape change is a versioned append with actor, reason, and approval
+   like every other row, editable only by its `owner_role` (AC-3).
 
 **The SE-2 split — reject structural, record semantic.** A structurally invalid record (a token
 with no address or chain) is rejected at write. A semantically incomplete one (a real holding
