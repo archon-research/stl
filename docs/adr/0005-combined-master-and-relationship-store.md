@@ -28,9 +28,9 @@
 ## In brief
 
 - One node store (the **SECs master**) holds the graph's nodes, discriminated by `record_type`.
-  Core kinds: `ENTITY`, `SECURITY`, `CONCEPT`, `INSTRUMENT`, `SOURCE`; `ACCOUNT` proposed,
-  `EVENT` deferred. Node ids are opaque and stable; native keys and public identifiers are
-  lookups, never ids.
+  Core kinds: `ENTITY`, `SECURITY`, `CONCEPT`, `SOURCE`; `ACCOUNT` proposed, `EVENT` deferred.
+  **The instrument is a key with a register, not a node.** Node ids are opaque and stable;
+  native keys and public identifiers are lookups, never ids.
 - A separate **relationship store** holds every link as a typed, directed, weighted edge with
   its own validity window, version, and provenance. Edge identity includes an `edge_seq` so
   deliberate twins coexist. Weights carry a mandatory basis and are exact decimals.
@@ -55,9 +55,9 @@
 
 We are building the master data that feeds enriched positions in `archon-research/stl`. The model
 has to hold entities (issuers, protocol operators, primes), securities (the tokens we hold),
-concepts (shared, fungible categories such as an asset class or an entity type), the instruments
-that resolve positions to securities, the sources data comes from, and the relationships between
-all of them — issuer, underlying, holder, parent/subsidiary, category membership, succession
+concepts (shared, fungible categories such as an asset class or an entity type), the sources
+data comes from, the instrument keys that resolve positions to securities, and the
+relationships between all of them — issuer, underlying, holder, parent/subsidiary, category membership, succession
 through corporate actions, and native-id resolution.
 
 Several requirements shaped the model:
@@ -122,13 +122,20 @@ promotion test — *does it carry attributes of its own, and do other things poi
 | `SECURITY` | core | the curated instrument-of-record: classification, currency, issuer, status |
 | `ENTITY` | core | legal persons and operators: type, domicile, LEI, roles |
 | `CONCEPT` | core | shared categories and rule pointers; carries edges and a shape of its own |
-| `INSTRUMENT` | core | the native on-chain key made addressable: it carries attributes (address, chain, decimals, venue, first-seen block) and two products point at it (positions and the Time-Series API), so by the promotion test it promotes. Keyed by `instrument_key`. |
 | `SOURCE` | core | a feed or dataset: reliability tier, licence, redistribution terms — required so per-series provenance and exposability are auditable |
 | `ACCOUNT` | proposed | a book that can hold things (prime, vault, custody account); what holdings-by-dimension groups on, and the source endpoint of `ALLOCATES`. Ratify when the first account-grained consumer lands. |
 | `EVENT` | deferred | dated corporate actions stay in an events table the graph references; an event promotes only when one event spans several securities and carries a ratio |
 
-- **Identity is the stable contract**: `id`, `record_type`, `chain_id` (plus `instrument_key`
-  on INSTRUMENT). These are what the relationship store and the timeseries join on.
+- **Identity is the stable contract**: `id`, `record_type`, `chain_id`. These are what the
+  relationship store and the timeseries join on.
+- **The instrument is a key, not a node — decided.** A native key resolves to a security
+  through the **instrument register**: `instrument_key → security_id`, append-only and
+  versioned like everything else, with exactly one current mapping per key — the
+  unique-current guarantee the metric path's hottest join requires, which an append-only edge
+  store cannot carry (no partial unique index survives append-only versioning). Instrument
+  attributes (address, chain, decimals, venue, first-seen block) live on the register row or
+  in the source token tables; the register surfaces as `dim_instrument` (§10). Resolution is
+  therefore a lookup, not an edge, and no `RESOLVES_TO` type exists in the vocabulary.
 - **Attributes belong to the node** and differ by kind; which attributes a kind requires is
   declared by its shape (§6). How attributes are physically stored (typed columns, a document
   payload, node properties) is a realization choice.
@@ -245,7 +252,6 @@ into a governed set.
 |---|---|---|---|---|---|
 | `ISSUED_BY` | SEC → ENT | — | 1 current | ratified | issuer of a security |
 | `HAS_UNDERLYING` | SEC → SEC | composition_share | n | ratified | what a token is built on; chained for token-of-token depth |
-| `RESOLVES_TO` | INST → SEC | — | many INST → 1 SEC | ratified | native key resolution: the position stream's entry point into the graph |
 | `BRIDGED_BY` | SEC → ENT | — | n | draft | which bridge a wrapped asset came through — the "uses a given bridge" look-through |
 
 **Holding and allocation**
@@ -299,6 +305,8 @@ Boundary rules that keep the graph clean:
   reflected externally in the operational store and read through the projection — never as a
   hand-curated append.
 - **Inverses are read-side names**, defined in the resolution layer, never in the vocabulary.
+- **Native-key resolution is not an edge.** It lives in the instrument register (§2) and
+  surfaces as `dim_instrument`; the vocabulary joins nodes only.
 
 ### 6. Concepts, shapes, and rules
 
@@ -379,10 +387,10 @@ is **not absorbed by this model and does not change**. Positions are quantities;
 reference. They meet at three seams, and only these:
 
 1. **Instrument.** A position carries `instrument_key` (hashed into `position_id`, so native
-   and classifier-free by construction). Enrichment resolves it through the INSTRUMENT node's
-   `RESOLVES_TO` edge to a security, then reads classification, issuer, and look-through from
-   the graph. Nothing is stamped onto the position row; resolution is live against the pivot,
-   so a reclassification never rewrites positions.
+   and classifier-free by construction). Enrichment resolves it through the instrument
+   register — surfaced as `dim_instrument` — to a security, then reads classification, issuer,
+   and look-through from the graph. Nothing is stamped onto the position row; resolution is
+   live against the pivot, so a reclassification never rewrites positions.
 2. **Holder.** A position's holder (wallet address or prime id) resolves to an ENTITY through
    the alias register (§1.3) — the successor of the frozen `entity_ref_codes` path.
 3. **Time.** Positions are block-height keyed; graph validity is calendar-dated. The only
@@ -469,8 +477,8 @@ The standalone-master build is superseded by this model:
 - **Ported:** the entity rows already seeded (the prime/protocol registry seed, #611, and the
   curated GLEIF issuers, VEC-525) become the first ENTITY nodes — their ids conform to §1 and
   stand unchanged. `entity_ref_codes`' resolution job moves to the alias register; the bridge's
-  job moves to INSTRUMENT + `RESOLVES_TO`, keeping its native-key rule and its unique-current
-  guarantee (now carried by `dim_instrument`).
+  job continues as the instrument register, keeping its native-key rule and its unique-current
+  guarantee (surfaced as `dim_instrument`).
 - **Reference vocabularies:** the 13 `ref_*` lists stay as governed sources; values promote to
   CONCEPT nodes per §6 as they need relationships.
 - **Tickets:** VEC-418, VEC-419, VEC-420, and VEC-524 were canceled against the frozen tables;
@@ -541,10 +549,13 @@ multi-attribute and multi-typing by duplicating the edge, and under a bare-tripl
 deliberate twin silently supersedes its sibling in the versioned store. `edge_seq` makes twins
 first-class.
 
-**Keeping the instrument key as a lookup-only bridge.** Set aside by the model's own promotion
-test: the instrument carries attributes (address, decimals, venue, first-seen block) and two
-products address it (positions, Time-Series API), so it is a node. The lookup's performance
-contract survives as `dim_instrument`.
+**Promoting the instrument to a node kind.** Considered — the promotion test rewards it: the
+key carries attributes and two products address it. Set aside: the key is already addressable
+as an identifier class without being a node; the resolution join is the hottest path in the
+metric chain and needs a unique-current guarantee an append-only edge store cannot carry; and
+node-hood would put a high-churn, mechanically derived population inside the curated master.
+The register keeps the lookup contract. Reopened only by evidence — curated attributes and
+inbound references accruing on the key itself — never by preference.
 
 **Valid time only, system time later.** Set aside: the Auditability PRD makes as-of-system
 reads and the restatement/valid-time distinction mandatory (RP-4.1, CR-3.5), and retrofitting a
@@ -554,9 +565,10 @@ moment this will ever have. The same argument starts the hash chain at the first
 ## Consequences
 
 **Positive:**
-- The graph carries the full inventory the requirements name — five node kinds now, two staged;
-  a governed edge vocabulary in six families; shapes as data — so "complete data model" is a
-  property of this document, not of tribal knowledge spread across artifacts.
+- The graph carries the full inventory the requirements name — four node kinds now, two staged,
+  plus the instrument and alias registers; a governed edge vocabulary in six families; shapes as
+  data — so "complete data model" is a property of this document, not of tribal knowledge
+  spread across artifacts.
 - Auditable by construction: every append carries who, what, when, why, and with which
   software; corrections chain by reference; both clocks are queryable; hashes run from row one.
 - Engine-portable by construction: contracts, vocabulary, and shapes are data; realizations are
