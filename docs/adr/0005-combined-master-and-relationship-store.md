@@ -18,6 +18,12 @@
 > document; ids of the form `DM-*`, `SE-*`, `IN-*`, `CH-*` reference the **SECstore PRD**
 > (v0.1, 18 Aug 2026). The Auditability conformance section maps the model to the former item
 > by item. Where this ADR and either PRD conflict, the PRD wins and this ADR is wrong.
+>
+> The model sits on the platform guarantees of **ADR-0006** (data reproducibility and
+> append-only guarantees, #689): governed-table enforcement, writer runs, caller-assigned
+> `processing_version`, and snapshot-exact reads. Where this ADR names those mechanisms it
+> defers to ADR-0006's definitions; the combined master's tables are governed tables under
+> ADR-0006 §1 from birth.
 
 ## In brief
 
@@ -34,10 +40,11 @@
   targets, severity, maturity) that members inherit along `NARROWER_THAN`. Structural
   violations are rejected at write; semantic gaps are recorded in `node_validity` and excluded
   from metrics.
-- Both stores are **append-only and bitemporal**: valid time plus system time on every row, so
-  the model answers "what was true" and "what did we know" for any date (AR-1.1, RP-4.1,
-  CR-3.5). Corrections reference what they supersede, with structured reason and approval
-  (CR-3.1..3.4). Content hashing runs from the first append (AR-1.2).
+- Both stores are **append-only and bitemporal**: valid time on every row, and knowledge time
+  pinned exactly by the platform's snapshot mechanism (ADR-0006 §5), so the model answers
+  "what was true" and "what did we know" (AR-1.1, RP-4.1, CR-3.5). Corrections reference what
+  they supersede, with structured reason and approval (CR-3.1..3.4). Content hashing runs from
+  the first append (AR-1.2).
 - Consumers never walk the graph: they read the **pivot** — generated tabular views shaped
   like the old masters (`dim_security`, `dim_entity`, `dim_instrument`, look-through closure),
   as-of-capable and joinable against the timeseries at block time.
@@ -152,7 +159,7 @@ never columns on a node — the earlier `issuer_entity_id`, `parent_entity_id`, 
 | `valid_from` / `valid_to` | valid time: when the link is true in the world (UTC dates, half-open); open `valid_to` means current |
 | `rel_weight` | nullable **exact decimal** (reference realization `numeric(30,18)`, never a binary float — a float weight cannot reproduce look-through bit-for-bit, RP-4.4) |
 | `weight_basis` | **mandatory whenever `rel_weight` is set**: `composition_share`, `ownership_fraction`, `conversion_ratio`, … — an unlabelled 0.6 is not addable, and unlike bases must never be summed (DM-5) |
-| provenance block | §4: system time, actor, software version, lineage, correction fields |
+| provenance block | §4: knowledge time, actor, software version, lineage, correction fields |
 
 Semantics, independent of realization:
 
@@ -184,21 +191,21 @@ provenance block, per the Auditability & Reproducibility PRD §5.2–5.3 and ADR
 | field | meaning | PRD |
 |---|---|---|
 | `record_id` | unique, stable id of this stored row | PR-2.1 |
-| `recorded_at` | system time (transaction time): when the platform recorded it, UTC, synchronised clock, platform-assigned, monotonic per logical record | PR-2.1, PR-2.7 |
-| `actor` | the authenticated principal (human or non-shared service account) that caused the append | PR-2.1, PR-2.5 |
-| `build_id` / software version | source commit, build/artifact version, image digest (per ADR-0002) | PR-2.2 |
+| `ingest_xid` + `ingested_at` | knowledge time, split per ADR-0006 §5: `ingest_xid` (platform-assigned transaction id, never writer-supplied) is the exact visibility and ordering key; `ingested_at` (`timestamptz`, UTC, RFC 3339) is the human label, never the audit key — wall clock cannot order commits | PR-2.1, PR-2.7 |
+| `actor` | the authenticated principal (human or non-shared service account) that caused the append; attaches to the writer run | PR-2.1, PR-2.5 |
+| `run_id` → software version | the writer run (ADR-0006 §2): resolves through `writer_run` to the build artefact — source commit, service, image digest — and the run's reference snapshot | PR-2.2 |
 | `source_system` + trigger | the triggering event or source; for automated loads, the pipeline/job run id and configuration version | PR-2.1, PR-2.4 |
 | input lineage | for derived rows: the record ids or source dataset + version it was computed from | PR-2.3 |
 | `supersedes_record_id` | for a correction: the record id(s) this append supersedes, forming an ordered supersession chain | CR-3.1, CR-3.2 |
 | `change_reason_code` + `change_reason` | structured reason code plus free-text justification — every append, mandatory | CR-3.3 |
 | `approved_by` | approval identity where the change class requires one (4-eyes, NFR-2) | CR-3.3 |
-| `processing_version` | ordering of versions per logical record, per ADR-0002 | — |
+| `processing_version` | ordering of versions per logical record; assignment per ADR-0006 §3: live loads write 0, a correction run allocates the next version once via the insert-only `processing_version_log` (ticket + reason). Composes with `supersedes_record_id`: the log names the correction run, the chain names the corrected records. | — |
 | content hash | per-record tamper evidence, **running from the first append** — a chain started later only proves integrity from activation onward, which is when auditors stop caring. The store is empty today; this is the cheapest moment it will ever have. | AR-1.2, NFR-5 |
 
 Correction semantics the model distinguishes (CR-3.5), using the two clocks:
 
 - A **valid-time change** — late-arriving or amended source data: new append with the corrected
-  valid window; `recorded_at` says when we learned it.
+  valid window; `ingest_xid` / `ingested_at` say when we learned it.
 - A **restatement** — an earlier record was wrong: new append with `supersedes_record_id`
   pointing at the wrong row, same valid window, a reason code that marks it a restatement.
 
@@ -206,18 +213,20 @@ Both leave the superseded record intact and retrievable, and the full chain — 
 correction, who, when, why — is exposed for any record (CR-3.2, CR-3.4).
 
 **Time: two clocks, bitemporal by contract** (RP-4.1, CR-3.5/3.6). Every row carries valid time
-(`valid_from`/`valid_to`) and system time (`recorded_at`, ordered by `processing_version`). The
-read contract, for any past date:
+(`valid_from`/`valid_to`) and knowledge time (`ingest_xid`, labelled by `ingested_at`, ordered
+within a logical record by `processing_version`). Wall clock is never the knowledge-time key —
+a row stamps at transaction start but becomes visible at commit — so ADR-0006 §5's snapshot
+mechanism is the exact form. The read contract, for any past date:
 
 | question | read |
 |---|---|
-| What is true now? | current view: latest version per logical record, valid window over today |
-| What was true on date D? | as-of-valid: latest version, valid window over D |
-| What did we know at system time T? | as-of-system: versions with `recorded_at ≤ T`, then the valid window (RP-4.1) |
-| Original vs corrected value? | as-of-system at the original time vs current (CR-3.6) |
+| What is true now? | current view: latest version per logical record, valid window over today — operational reads only (see the `_current` rule, §10) |
+| What was true on date D? | as-of-valid: latest version, valid window over D, with D an explicit recorded parameter, never `now()`/`CURRENT_DATE` (ADR-0006 §4) |
+| What did we know? | exact for any consumer that recorded a snapshot (a calculation, a writer run): replay via `pg_visible_in_snapshot(ingest_xid, snapshot)`, then the valid window. An arbitrary wall-clock T is served by nearest-prior-record lookup and exact replay — the form agreed to satisfy RP-4.1 (ADR-0006). |
+| Original vs corrected value? | the supersession chain gives the original and each correction; a recorded snapshot replays exactly what a past reader saw (CR-3.6) |
 
-Every consumer that pins a number references the graph by as-of times and record ids, so the
-exact input state is reconstructable (RP-4.2, RP-4.6).
+Every consumer that pins a number references the graph by snapshot, effective time, and record
+ids, so the exact input state is reconstructable (RP-4.2, RP-4.6).
 
 ### 5. The governed relationship vocabulary
 
@@ -403,12 +412,17 @@ old separate masters again, as regenerable read models rather than write surface
 | alias lookup | `(id_scheme, id_value)` → node | public-identifier and holder-address resolution |
 
 Contract properties: every view is keyed on the identity contract (§1), every view has an as-of
-form (valid time, and system time where auditability requires it), all views are **regenerable
-projections** — dropping and rebuilding them loses nothing — and view rows carry the graph
-version / record ids they were resolved from, so a manifest can pin them (RP-4.2, RP-4.6). The
-views join TigerData hypertables on stable keys at the block's UTC date (§9.3). Materialization
-mechanics (tables vs views, refresh, distribution across nodes) are realization; the view set,
-grains, keys, and as-of semantics are model.
+form, and all views are **regenerable projections** — dropping and rebuilding them loses
+nothing — whose rows carry the graph version / record ids they were resolved from, so a
+manifest can pin them (RP-4.2, RP-4.6). Per ADR-0006 §4, `_current` forms are **operational
+reads only**: anything a calculation or writer reads uses the `as_of(effective_at)` form with
+an explicit recorded parameter, never `now()`/`CURRENT_DATE` — a future-dated row visible in a
+snapshot would otherwise flip a later replay. The views join TigerData hypertables on stable
+keys at the block's UTC date (§9.3). The combined master's tables are classified in
+`schema_master.json` from birth, so ADR-0006 §1's governance and conformance tests apply to
+them like every governed table. Materialization mechanics (tables vs views, refresh,
+distribution across nodes) are realization; the view set, grains, keys, and as-of semantics
+are model.
 
 ## Auditability conformance
 
@@ -418,9 +432,9 @@ technology must enforce it; "platform" means it lives outside this store.
 
 | PRD | requirement | where it lands |
 |---|---|---|
-| AR-1.1 | append-only, no in-place update/delete | model: both stores append-only by contract |
+| AR-1.1 | append-only, no in-place update/delete | model: both stores append-only by contract; enforced on Postgres per ADR-0006 §1 |
 | AR-1.2 | immutable records, tamper-evident | model: per-record content hash **from the first append**; chaining/anchoring mechanism is a realization choice |
-| AR-1.3 | storage-level deletion prevention | realization: privilege revocation or storage immutability, independent of application logic |
+| AR-1.3 | storage-level deletion prevention | realization: ADR-0006 §1 — INSERT-only application role, statement-level guard trigger, no-retention conformance test driven by `schema_master.json` |
 | AR-1.4 | retraction as tombstone append | model: tombstone supersession, §3 |
 | AR-1.5 | retention per data class | platform/realization; the model never deletes; derived pivot rows are regenerable and need only live while manifests cite them |
 | AR-1.7 | exceptional hard deletion | platform: out-of-band, dual-authorised; interacts with DP-2 crypto-shredding |
@@ -430,14 +444,14 @@ technology must enforce it; "platform" means it lives outside this store.
 | PR-2.4 | run id / config version for automated appends | model: `source_system` + trigger, §4 |
 | PR-2.5 | attributable principals | platform (identity system); the model stores the resolved actor |
 | PR-2.6 | provenance as immutable and queryable as the data | model: provenance is part of the appended row |
-| PR-2.7 | UTC, synchronised time | model: all timestamps UTC; synchronisation is platform (NFR-4) |
+| PR-2.7 | UTC, synchronised time | model: `timestamptz`, UTC sessions, RFC 3339 serialisation per ADR-0006 §5; ordering never rests on clocks (`ingest_xid`); synchronisation is platform (NFR-4) |
 | CR-3.1 | correction references superseded record ids | model: `supersedes_record_id`, §4 |
 | CR-3.2 | superseded records intact; ordered chain | model: append-only + supersession chain |
 | CR-3.3 | reason code, corrector identity, approval | model: `change_reason_code` + text, `actor`, `approved_by`, §4 |
 | CR-3.4 | full correction history exposed | model: read contract over the chain |
 | CR-3.5 | restatement vs valid-time change | model: two clocks + reason code, §4 |
 | CR-3.6 | original or latest value for any past time | model: as-of-system vs current reads, §4 |
-| RP-4.1 | as-of (time-travel) queries | model: as-of-system read contract, §4; pivot as-of views, §10 |
+| RP-4.1 | as-of (time-travel) queries | model + platform: snapshot-exact replay via `ingest_xid` (ADR-0006 §5); arbitrary wall-clock T by nearest-record lookup — the agreed RP-4.1 form; pivot as-of views, §10 |
 | RP-4.2–4.8 | reproduction manifests, artifact retention, re-execution | platform: manifests reference this store by as-of times and record ids; §3's exact-decimal weights keep graph closures bit-for-bit reproducible (RP-4.4) |
 | NFR-1..8 | audit log, least privilege, change control, clocks, hashing, availability, evidence export, performance | platform/realization; the model contributes stable ids, provenance, type-scoped `owner_role` (AC-3 hook), and the pivot the evidence package (NFR-7) reads |
 | DP-1..10 | personal data separation, crypto-shredding, rectification, access logging | model: no direct identifiers in the master, shape-enforced; ciphertext hashing preserves chains (§8); the PII store design is a follow-up |
@@ -485,9 +499,10 @@ separately and on evidence, and none of them may change the model:
    over projected atoms. The edge store and its resolution reads have been verified on
    Postgres; a synlang expression of the same reads is the planned trial. Selection criteria,
    not afterthoughts: append-only enforcement independent of application logic (AR-1.3), tamper
-   evidence (AR-1.2), the as-of-system read (RP-4.1), shape validation (§6), type-scoped access
-   control (AC-3), and round-trip export — the model serialises to JSON and must translate
-   between realizations losslessly.
+   evidence (AR-1.2), snapshot-exact knowledge-time reads (RP-4.1 — ADR-0006 §5 on Postgres,
+   an equivalent mechanism anywhere else), shape validation (§6), type-scoped access control
+   (AC-3), and round-trip export — the model serialises to JSON and must translate between
+   realizations losslessly.
 
 3. **Validator generation.** Shapes are data (§6); each realization generates its enforcement —
    SHACL for an RDF store, constraint DDL + loader checks for Postgres, per-shape validation
@@ -571,7 +586,7 @@ moment this will ever have. The same argument starts the hash chain at the first
 | New relationship type | a row in the governed vocabulary + endpoint rule | one reviewed change |
 | New or changed relationship | insert an edge / close-and-open | data only |
 | A recorded value was wrong | restatement append, `supersedes_record_id` + reason code | data only |
-| Late-arriving fact | valid-time append, backdated window, honest `recorded_at` | data only |
+| Late-arriving fact | valid-time append, backdated window, honest `ingest_xid`/`ingested_at` | data only |
 | Corporate action | status version on the node + a succession edge | data only |
 | New concept / category | CONCEPT node + `NARROWER_THAN` placement | data only |
 | Tighter validation on a settled type | shape version: severity or tier raised | data + review |
