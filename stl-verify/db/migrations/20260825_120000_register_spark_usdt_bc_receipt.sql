@@ -17,8 +17,11 @@
 -- -> Morpho VaultV2 -> vault_version 3 (entity.MorphoVaultV2, the same
 -- discriminator as steakUSDC in 20260721_140000). created_at_block 24794487 =
 -- the on-chain creation block, bisected via archive eth_getCode (empty at
--- 24794486, code at 24794487); the indexer's LEAST(created_at_block) receipt
--- upsert and DO UPDATE vault upsert both converge to it.
+-- 24794486, code at 24794487); the indexer's LEAST(created_at_block) upserts
+-- only converge downward — where the vault was already discovered organically
+-- with a later first-seen block (prod), this INSERT ... DO NOTHING no-ops and
+-- the later block stays; the allocation tracker takes 24794487 from
+-- created_at_blocks.go regardless.
 --
 -- Everything below resolves the vault STRICTLY by address, never by symbol
 -- (labels are not authoritative; the registries key on (chain_id, address)).
