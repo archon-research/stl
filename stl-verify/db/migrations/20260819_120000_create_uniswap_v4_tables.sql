@@ -598,6 +598,15 @@ CREATE TABLE IF NOT EXISTS uniswap_v4_tick
 CREATE INDEX IF NOT EXISTS idx_uniswap_v4_tick_pv_lookup
     ON uniswap_v4_tick (pool_id, tick, block_number, block_version, build_id);
 
+-- Serves the reorg-path read of every tick a pool has at one height
+-- (TicksForPoolAtBlock). The PK and the pv-lookup index both put tick between
+-- the two filtered columns, leaving pool_id the only boundary qual and
+-- block_number a per-entry recheck over the pool's whole tick history. This is
+-- the set's heaviest-written table, so the trade is one more index maintained
+-- on every insert for a bounded read cost on a path only reorgs take.
+CREATE INDEX IF NOT EXISTS idx_uniswap_v4_tick_block_lookup
+    ON uniswap_v4_tick (pool_id, block_number, tick);
+
 -- Prefix 'u4t' for uniswap_v4_tick. force_custom_plan per VEC-541.
 CREATE OR REPLACE FUNCTION assign_processing_version_uniswap_v4_tick()
 RETURNS TRIGGER

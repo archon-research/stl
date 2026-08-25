@@ -44,6 +44,8 @@ const (
 	uniswapV4RepoEverIndexedFwdChID = 490017
 	uniswapV4RepoEverIndexedNbrChID = 490018
 	uniswapV4RepoEverIndexedFgnChID = 490019
+	uniswapV4RepoXChainMgrChainID   = 490020
+	uniswapV4RepoXChainMgrDonorChID = 490021
 )
 
 // testUniswapV4BuildID / testUniswapV4RebuildID are two distinct build ids so a
@@ -127,11 +129,15 @@ func seedUniswapV4RepoToken(t *testing.T, ctx context.Context, chainID int, addr
 // row's processing_version and is a no-op, a new buildID appends the next
 // version, which is the one LoadPools must pick up.
 type uniswapV4RepoManagerFixture struct {
-	chainID     int
-	manager     common.Address
-	stateView   common.Address
-	deployBlock int64
-	buildID     int
+	chainID int
+	// protocolChainID is the chain the FK'd protocol row is seeded on; 0 means
+	// chainID, the only coherent registry. Setting it elsewhere seeds the
+	// cross-chain PoolManager defect.
+	protocolChainID int
+	manager         common.Address
+	stateView       common.Address
+	deployBlock     int64
+	buildID         int
 }
 
 func newUniswapV4RepoManagerFixture(chainID int) uniswapV4RepoManagerFixture {
@@ -148,20 +154,25 @@ func newUniswapV4RepoManagerFixture(chainID int) uniswapV4RepoManagerFixture {
 func seedUniswapV4RepoPoolManager(t *testing.T, ctx context.Context, f uniswapV4RepoManagerFixture) {
 	t.Helper()
 	seedUniswapV4RepoChain(t, ctx, f.chainID)
+	protocolChainID := f.protocolChainID
+	if protocolChainID == 0 {
+		protocolChainID = f.chainID
+	}
+	seedUniswapV4RepoChain(t, ctx, protocolChainID)
 	if _, err := uniswapV4TestPool.Exec(ctx,
 		`INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block)
 		 VALUES ($1, $2, 'UniswapV4', 'dex', $3)
 		 ON CONFLICT (chain_id, address) DO NOTHING`,
-		f.chainID, f.manager.Bytes(), f.deployBlock,
+		protocolChainID, f.manager.Bytes(), f.deployBlock,
 	); err != nil {
-		t.Fatalf("seed protocol on chain %d: %v", f.chainID, err)
+		t.Fatalf("seed protocol on chain %d: %v", protocolChainID, err)
 	}
 	var protocolID int64
 	if err := uniswapV4TestPool.QueryRow(ctx,
 		`SELECT id FROM protocol WHERE chain_id = $1 AND address = $2`,
-		f.chainID, f.manager.Bytes(),
+		protocolChainID, f.manager.Bytes(),
 	).Scan(&protocolID); err != nil {
-		t.Fatalf("read back protocol on chain %d: %v", f.chainID, err)
+		t.Fatalf("read back protocol on chain %d: %v", protocolChainID, err)
 	}
 
 	if _, err := uniswapV4TestPool.Exec(ctx,
@@ -1343,6 +1354,31 @@ func TestUniswapV4Repository_LoadPools_RejectsCrossChainCurrencyToken(t *testing
 	}
 	if !containsPoolID(err.Error(), poolID) {
 		t.Errorf("error %q does not name the offending pool id %d", err, poolID)
+	}
+}
+
+// TestUniswapV4Repository_LoadPools_RejectsCrossChainPoolManagerProtocol pins
+// the chain predicate on the PoolManager join. uniswap_v4_pool_manager.protocol_id
+// is a surrogate-id FK with nothing tying it to the row's own chain, so an
+// unscoped join hands back another chain's PoolManager address: state_view stays
+// right, the pod boots clean, and every log is then dropped by the address filter
+// with no error and no metric while all five fact tables stay empty.
+func TestUniswapV4Repository_LoadPools_RejectsCrossChainPoolManagerProtocol(t *testing.T) {
+	ctx := context.Background()
+
+	manager := newUniswapV4RepoManagerFixture(uniswapV4RepoXChainMgrChainID)
+	manager.protocolChainID = uniswapV4RepoXChainMgrDonorChID
+	seedUniswapV4RepoPoolManager(t, ctx, manager)
+	poolID := seedUniswapV4RepoPool(t, ctx,
+		newUniswapV4RepoPoolFixture(t, ctx, uniswapV4RepoXChainMgrChainID, 0x41))
+
+	repo := newUniswapV4Repo(t)
+	pools, err := repo.LoadPools(ctx, uniswapV4RepoXChainMgrChainID)
+	if err == nil {
+		t.Fatalf("LoadPools with pool id=%d whose pool manager protocol row lives on another chain: want error, got %d pools", poolID, len(pools))
+	}
+	if !strings.Contains(err.Error(), "uniswap_v4_pool_manager") {
+		t.Errorf("error %q does not name the offending uniswap_v4_pool_manager row", err)
 	}
 }
 
