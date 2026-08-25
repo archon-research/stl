@@ -328,6 +328,37 @@ none of these problems, so it is the mechanism:
   committed before the snapshot, and the snapshot before the record (same transaction, snapshot
   first), so **a node that can read the calculation record has already replayed every row the
   snapshot can see.**
+- **xid monotonicity guard.** Everything above assumes `pg_current_xact_id()` only ever moves
+  forward for the life of the data. `ingest_xid` is `xid8` (64-bit, epoch-qualified), so the
+  32-bit wraparound that autovacuum manages never touches it. NextXID and the epoch live in
+  `pg_control` and travel with the data directory, which sorts operations into two kinds:
+  - *Safe (physical, counter carried forward):* base backup + WAL replay, streaming-replica
+    promotion, `pg_upgrade` (source-verified: copies `pg_xact`, then `pg_resetwal -x/-e` with
+    the *old* values). On TigerData every documented lifecycle operation is one of these:
+    compute resize (restart on the same volume, or HA switchover), storage autoscale (volume
+    grow), HA failover (standby promotion), fork and PITR (pgBackRest physical restore),
+    extension upgrade (`ALTER EXTENSION`).
+  - *Unsafe (new installation, counter restarts low):* logical dump/restore, logical
+    replication or live-migration into a fresh service, `pg_resetwal` without `-x`.
+  - *Caveats:* the cloud docs do not state the mechanism for compute resize (blogs do) or for
+    major PostgreSQL upgrades (the ~20-minute window fits `pg_upgrade`). A PITR fork is a *new
+    installation* whose counter resumes from the recovery target; rows written on the abandoned
+    original after that point carry xids the fork will reissue, so nothing may ever be copied
+    logically from the original into the fork (see Threats).
+  - *The check:* rather than rely on documentation and runbook alone, every governed writer and
+    the calculation API assert on startup, and the assurance job asserts on each run, that
+
+    ```sql
+    pg_current_xact_id() > (SELECT max(pg_snapshot_xmax(snapshot::pg_snapshot)) FROM <§6 record table>)
+    ```
+
+    and likewise above `max(ingest_xid)` over governed tables where cheap to compute. On failure
+    writers refuse to write governed rows and the API refuses to record calculations, alerting
+    with the runbook step (`pg_resetwal -x <max+margin>`; on a managed service, restore from a
+    physical backup instead).
+  - *Failure mode it prevents:* a low counter does not damage existing records — it makes *new*
+    rows carry xids below old snapshots' `xmin`, so old replays wrongly include them. The guard
+    stops the first such write.
 - **End-to-end self-check:** a scheduled assurance job samples calculation records — recent and
   historical, weighted towards fresh records so a regression is caught close to when it ships —
   generates each one's manifest from the recorded snapshot (§6, on demand), re-runs the
@@ -499,7 +530,8 @@ prevents each. These are part of the decision, not commentary.
 | Two concurrent corrections allocate the same `processing_version`, or a retried correction cannot find its earlier allocation | §3: per-table advisory lock around allocation; `UNIQUE (table_name, ticket)`; allocate-or-return-existing by ticket. |
 | A sanctioned in-place rewrite (`DISABLE TRIGGER` + `UPDATE`, as `20260306`, `20260410_125000`, `20260707` did) changes rows that earlier snapshots point at | Data fixes are new rows at a new `processing_version`. An in-place rewrite of a governed table is exceptional, requires an ADR-referenced migration, and is logged in `processing_version_log` with `reason` naming the calculations it invalidates. |
 | Destructive schema migration on a governed table (drop/rename/retype) makes old code unrunnable against a later export | Governed tables are additive-only; deprecations keep the old column/view until no recorded calculation's `build_id` depends on it. |
-| Cluster migration via dump/restore (logical) restarts `pg_current_xact_id()` low, so rows written afterwards look older than every stored snapshot | Prefer physical restore/fork (xids preserved — TigerData's backup/fork are physical). After any logical migration, `pg_resetwal -x` sets NextXID above the previous maximum before writes resume; the runbook records it. If sharding ever becomes a plan, switch §5 to the watermark alternative. |
+| Cluster migration via dump/restore (logical), logical replication into a new service, or `pg_resetwal` without `-x` restarts `pg_current_xact_id()` low, so rows written afterwards look older than every stored snapshot | Prefer physical restore/fork (xids preserved — TigerData's backup/fork are pgBackRest physical restores; resizes, HA failover and `pg_upgrade` carry `pg_control` forward — §5 lists what is documented versus inferred). After any logical migration, `pg_resetwal -x` sets NextXID above the previous maximum before writes resume; the runbook records it. Enforced, not just documented: the §5 xid monotonicity guard blocks governed writes and calculation records while `pg_current_xact_id()` is below the maximum recorded snapshot. If sharding ever becomes a plan, switch §5 to the watermark alternative. |
+| After a PITR fork/restore, rows or calculation records written on the abandoned original after the recovery target are salvaged into the fork (logical copy), colliding with xids the fork has since reissued | Never copy governed rows between installations; a fork is cut over whole or not at all. Salvage, if unavoidable, re-ingests from chain/archive as new rows (fresh `ingest_xid`, new `run_id`) and drops the original's post-target calculation records. |
 | A writer inserts `ingest_xid = NULL` explicitly and becomes "always visible" | No `INSERT` names `ingest_xid`; lint plus the conformance test. |
 | One of a calculation's queries runs outside the `REPEATABLE READ` transaction (another connection, autocommit) | Reads go through a helper bound to the calculation's transaction; lint; end-to-end self-check (§5) compares regenerated output to recorded output. |
 | Manifest generation runs on a replica that has not replayed the calculation's inputs | Structurally impossible on a physical replica: generation starts from the calculation record, and a node that can read the record has replayed everything the snapshot can see (§5). Only a logical replica or a different cluster (see dump/restore row) can differ. |
@@ -523,7 +555,7 @@ Ordered by information lost per day of delay; 1–3 make reproducibility *possib
 
 1. **Reference-table append-on-change** (§4) with `_as_of(effective_at)` reads, starting with `oracle_asset`
    and `position_classification` — the only item where waiting destroys information.
-2. **`ingest_xid` + `ingested_at`** on governed tables (§5); `build_registry` widened to `(git_hash, service, image_digest)`, `writer_run`, `run_id` and `archive_batch` on governed rows (§2/§8); calculation record + on-demand manifest generation, Python artefact/run, `schema_version` (§6).
+2. **`ingest_xid` + `ingested_at`** on governed tables (§5) with the xid monotonicity guard in writer/API startup and the assurance job; `build_registry` widened to `(git_hash, service, image_digest)`, `writer_run`, `run_id` and `archive_batch` on governed rows (§2/§8); calculation record + on-demand manifest generation, Python artefact/run, `schema_version` (§6).
 3. **Append-only enforcement** (§1): app role, guard triggers, conformance test.
 4. **Trigger removal** (§3): one migration drops the 36 functions/triggers, creates and seeds
    `processing_version_log`; delete the plan-cache/lock/sort tests and `db/migrations/AGENTS.md`
