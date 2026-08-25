@@ -168,7 +168,9 @@ never columns on a node — the earlier `issuer_entity_id`, `parent_entity_id`, 
 | `rel_type` | the kind of link, from the governed vocabulary (§5) |
 | `valid_from` / `valid_to` | valid time: when the link is true in the world (UTC dates, half-open); open `valid_to` means current |
 | `rel_weight` | nullable **exact decimal** (reference realization `numeric(30,18)`, never a binary float — a float weight cannot reproduce look-through bit-for-bit, RP-4.4) |
-| `weight_basis` | **mandatory whenever `rel_weight` is set**: `composition_share`, `ownership_fraction`, `conversion_ratio`, … — an unlabelled 0.6 is not addable, and unlike bases must never be summed (DM-5) |
+| `weight_basis` | **mandatory whenever `rel_weight` is set**: `VALUE`, `NOTIONAL`, `UNITS`, `OWNERSHIP_PCT` — an unlabelled 0.6 is not addable, and unlike bases must never be summed (DM-5). Conversion ratios are edge payload, not weights. |
+| `weight_asof_block` | only for market-derived weights (`ALLOCATES`): the block the mix was computed from — the CH-3 resolution |
+| `payload` | the type-specific attribute cluster (DM-6): a ratio and event date, a rating and outlook, a lien seniority, a counterparty role |
 | provenance block | §4: knowledge time, actor, software version, lineage, correction fields |
 
 Semantics, independent of realization:
@@ -249,52 +251,81 @@ Each type carries endpoint kinds, cardinality, weight basis, and a maturity tier
 concept ids are `snake_case` with display labels as attributes, so near-duplicates cannot creep
 into a governed set.
 
-**Issuance and composition**
+**Composition**
 
 | rel_type | src → dst | weight basis | card. | maturity | meaning |
 |---|---|---|---|---|---|
-| `ISSUED_BY` | SEC → ENT | — | 1 current | ratified | issuer of a security |
-| `HAS_UNDERLYING` | SEC → SEC | composition_share | n | ratified | what a token is built on; chained for token-of-token depth |
-| `BRIDGED_BY` | SEC → ENT | — | n | draft | which bridge a wrapped asset came through — the "uses a given bridge" look-through |
+| `HAS_UNDERLYING` | SEC → SEC | VALUE | n | ratified | what a token or wrapper is built on — the look-through spine, chained for token-of-token depth |
+| `COLLATERALISED_BY` | SEC → SEC | VALUE | n | draft | backing rather than contents; payload carries lien seniority |
+| `TRANCHE_OF` | SEC → SEC | — | 1 | draft | structured-credit seniority |
+| `REFERENCES` | SEC → SEC | — | n | draft | synthetic / derivative reference asset — exposure without composition; **never walked by look-through** |
+| `CONSTITUENT_OF` | SEC → CONCEPT | NOTIONAL | n | draft | index and benchmark membership |
+
+**Issuance, ownership, control**
+
+| rel_type | src → dst | weight basis | card. | maturity | meaning |
+|---|---|---|---|---|---|
+| `ISSUED_BY` | SEC → ENT | — | 1 current | ratified | the issuer — replaces `issuer_entity_id` as the authority |
+| `GUARANTEED_BY` | SEC → ENT | — | n | draft | credit support beyond the issuer; changes who concentration accrues to |
+| `MANAGED_BY` | SEC / ACCT → ENT | — | 1 | draft | investment manager or protocol operator |
+| `CUSTODIED_BY` | SEC / ACCT → ENT | — | n | draft | custodian or depositary (the Anchorage case) |
+| `ADMINISTERED_BY` | SEC / ACCT → ENT | — | 1 | draft | fund administrator or transfer agent |
+| `SERVICED_BY` | SEC → ENT | — | n | draft | legal or service provider — the SECstore PRD §1 look-through example |
+| `TRUSTEE_OF` | ENT → SEC | — | n | draft | the trustee is the actor, so it points the other way |
+| `SUBSIDIARY_OF` | ENT → ENT | OWNERSHIP_PCT | 1 current per parent | ratified | legal parent; the ultimate parent is derived by walking, never stored |
+| `AFFILIATE_OF` | ENT → ENT | — | n | ratified | related, not owned; a spin-off is a close-and-open from `SUBSIDIARY_OF` |
+| `CONTROLS` | ENT → ENT | OWNERSHIP_PCT | n | draft | effective control where it diverges from legal ownership |
 
 **Holding and allocation**
 
 | rel_type | src → dst | weight basis | card. | maturity | meaning |
 |---|---|---|---|---|---|
 | `HELD_BY` | SEC → ENT | — | n | ratified | a holder of record, where holding is a reference fact; balances stay in the timeseries layer |
-| `ALLOCATES` | ACCT → SEC | value_share | n | draft, **derived-only** | block-stamped projection of `allocation_position`; never curated, never appended by hand (see boundary rules) |
-| `COUNTERPARTY_OF` | ACCT → ENT | — | n | draft | standing bilateral relationship; role in the edge's attribute cluster |
+| `ALLOCATES` | ACCT → SEC | VALUE | n | draft, **derived-only** | block-stamped projection of `allocation_position` (carries `weight_asof_block` + lineage); never curated |
+| `COUNTERPARTY_OF` | ACCT → ENT | — | n | draft | standing bilateral relationship; role in the edge payload, checked against the role vocabulary |
 | `OPERATED_BY` | ACCT → ENT | — | 1 | draft | whose book this is |
-
-**Corporate structure**
-
-| rel_type | src → dst | weight basis | card. | maturity | meaning |
-|---|---|---|---|---|---|
-| `SUBSIDIARY_OF` | ENT → ENT | ownership_fraction | 1 current per parent | ratified | corporate parent; the ultimate parent is the top of the chain, derived by walking, never stored |
-| `AFFILIATE_OF` | ENT → ENT | — | n | ratified | affiliation short of control |
+| `BRIDGED_BY` | SEC → ENT | — | n | draft | which bridge a wrapped asset came through — the "uses a given bridge" look-through |
 
 **Classification and governance**
 
 | rel_type | src → dst | weight basis | card. | maturity | meaning |
 |---|---|---|---|---|---|
-| `BELONGS_TO` | SEC / ENT / ACCT → CONCEPT | — | 1 per concept class | ratified | category membership: asset class, entity type, security type |
+| `BELONGS_TO` | SEC / ENT / ACCT → CONCEPT | — | 1 per concept class | ratified | category membership: instrument type and subtype, entity type |
 | `NARROWER_THAN` | CONCEPT → CONCEPT | — | 1 | ratified | taxonomy hierarchy; also how a concept **inherits its parent's shape** instead of re-declaring it (§6) |
-| `GOVERNED_BY` | ENT / ACCT → CONCEPT | — | n | ratified | which rule set applies |
+| `GOVERNED_BY` | ENT / ACCT → CONCEPT | — | n | ratified | which rule set applies — regulated-issuer status, a mandate, a limit set |
 | `SCORED_BY` | CONCEPT → CONCEPT | — | n | ratified | concept-to-concept pivot: an asset class to its risk model |
 | `OWNED_BY` | CONCEPT → ENT | — | 1 | ratified | stewardship of a rule set |
-| `RATED_BY` | SEC / ENT → CONCEPT | — | n | draft | an external rating attribution |
+| `RATED_BY` | SEC / ENT → CONCEPT | — | n | draft | rating as of a date; payload carries agency, rating, outlook; agency preference is a resolution rule |
+| `DOMICILED_IN` | ENT → CONCEPT | — | 1 | draft | jurisdiction as a concept, so jurisdiction rules hang off one node |
+| `DENOMINATED_IN` | SEC → CONCEPT | — | 1 | draft | currency of denomination, once currency is a concept node |
+| `PEGGED_TO` | SEC → CONCEPT | — | n | draft | a stablecoin's peg target — **intrinsic, not a closure**: an ETH-backed USD stablecoin pegs to USD while its underlying walk ends at ETH |
+| `PRICED_BY` | SEC → ENT / CONCEPT | — | n | draft | which oracle or source is authoritative; payload carries precedence rank |
 | `SOURCED_FROM` | any → SOURCE | — | n | ratified | which feed/dataset a curated fact came from, where lineage points at a source rather than records |
 
-**Succession (corporate actions)**
+**Identity and resolution** (native-key resolution is the instrument register, §2 — not an edge)
 
 | rel_type | src → dst | weight basis | card. | maturity | meaning |
 |---|---|---|---|---|---|
-| `SUCCEEDED_BY` | SEC → SEC | conversion_ratio | 1 | ratified | merger, redenomination (MKR → SKY at 1 : 24000); the old node takes a status version |
-| `SPLIT_FROM` | SEC → SEC | conversion_ratio | 1 | ratified | stock split / reverse split |
-| `SPUN_OFF_FROM` | SEC → SEC | conversion_ratio | 1 | draft | spin-off |
-| `DISTRIBUTED_FROM` | SEC → SEC | conversion_ratio | n | draft | rights issue, airdrop |
-| `CONVERTS_TO` | SEC → SEC | conversion_ratio | 1 | draft | convertible conversion |
-| `FORKED_FROM` | SEC → SEC | — | 1 | draft | chain/token fork |
+| `SAME_AS` | ENT → ENT, SEC → SEC | — | n | draft | an entity-resolution claim; always carries confidence + source; non-authoritative — the store records the claim, resolution decides the merge |
+| `SUPERSEDES` | any → any (same kind) | — | 1 | draft | a record replaced after deduplication, without deleting the old id external systems may hold |
+
+**Lifecycle (corporate actions)** — the ratio and event date ride in the edge payload, not the weight
+
+| rel_type | src → dst | payload | card. | maturity | meaning |
+|---|---|---|---|---|---|
+| `SUCCEEDED_BY` | SEC → SEC | ratio, event_date | 1 | ratified | merger, redenomination (MKR → SKY at 1 : 24000); the old node's status goes to MERGED and the instrument register re-points |
+| `SPLIT_FROM` | SEC → SEC | ratio, ex_date | 1 | ratified | split / reverse split; historical unit series need the ratio to stay comparable |
+| `SPUN_OFF_FROM` | SEC → SEC | ratio, event_date | 1 | draft | new security retaining provenance to its origin |
+| `DISTRIBUTED_FROM` | SEC → SEC | ratio, event_date | n | draft | rights issue, airdrop |
+| `CONVERTS_TO` | SEC → SEC | ratio, conversion_date | n | draft | convertibles, and redemption into an underlying |
+| `FORKED_FROM` | SEC → SEC | fork_block | 1 | draft | chain / token fork lineage |
+
+**Never stored — always resolved.** `ISSUES`, `UNDERLYING_OF`, `HOLDS`, `PARENT_OF`,
+`ULTIMATE_PARENT_OF`, `EFFECTIVE_ISSUER`, `LOOKTHROUGH_TO`, `ASSET_CLASS_OF`, `RISK_MODEL_OF`,
+`ULTIMATE_UNDERLYING_CURRENCY`: every one is an inverse or a closure of something already
+stored. Storing them doubles the write path and creates a second, staler answer to the same
+question — the defect `ultimate_parent_id` had. Inverses are defined in resolution; closures
+are pivoted with the as-of they were built from, never written back as edges.
 
 Boundary rules that keep the graph clean:
 
