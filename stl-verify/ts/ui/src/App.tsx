@@ -60,6 +60,7 @@ import {
   buildProtocolOptions,
   buildProtocolOptionsFromMetadata,
   DIRECT_PROTOCOL_FILTER_VALUE,
+  ENCUMBRANCE_AT_RISK_THRESHOLD,
   ENCUMBRANCE_HIGH_SEVERITY_THRESHOLD,
   ENCUMBRANCE_LOW_SEVERITY_THRESHOLD,
   encumbranceSeverity,
@@ -1131,7 +1132,11 @@ function App() {
             : [
                 {
                   value: requiredRiskCapitalValue,
-                  label: `Required ${formatCompactUsd(requiredRiskCapitalValue)}`,
+                  // Named only. The figure is on the axis the line sits
+                  // against, in the caption above, and in the cursor tooltip
+                  // at full precision — repeating a rounded copy on the plot
+                  // read as a fourth, slightly different number.
+                  label: 'Required',
                   // Named, so the cursor tooltip can report the limit beside
                   // the value being read against it.
                   name: 'required',
@@ -1158,7 +1163,15 @@ function App() {
         data: seriesOrFallback(encumbranceSeries, encumbranceValue),
         stroke: encumbranceStroke,
         formatValue: formatRatioPercent,
+        // Ascending, and all three bands the severity scale reads: the 80%
+        // edge is STL's own early warning rather than an Atlas level, so it is
+        // drawn in the muted hue the other two are deliberately not.
         thresholds: [
+          {
+            value: ENCUMBRANCE_AT_RISK_THRESHOLD,
+            label: formatRatioPercent(ENCUMBRANCE_AT_RISK_THRESHOLD, 0),
+            stroke: 'var(--colors-text-muted)',
+          },
           {
             value: ENCUMBRANCE_LOW_SEVERITY_THRESHOLD,
             label: formatRatioPercent(ENCUMBRANCE_LOW_SEVERITY_THRESHOLD, 0),

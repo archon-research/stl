@@ -144,13 +144,6 @@ export function findMetricChart(
 // "TOTA…". A line of its own is the same corner of the card with room to read.
 const cardHeaderClassName = css({
   display: 'flex',
-  flexDirection: 'column',
-  width: '100%',
-  gap: '0.5',
-});
-
-const cardTitleRowClassName = css({
-  display: 'flex',
   width: '100%',
   alignItems: 'center',
   justifyContent: 'space-between',
@@ -176,10 +169,12 @@ const cardActionsClassName = css({
 
 const cardLegendRowClassName = css({
   display: 'flex',
-  justifyContent: 'flex-end',
-  // Held open on a card whose chart is loading, empty or failed, so the six
-  // headers stay the same height and their charts stay on one line.
-  minHeight: '14px',
+  alignItems: 'center',
+  // Never wraps to a line of its own: the key is one short entry now that the
+  // limits label themselves on the plot, and a wrapped header drops this card's
+  // chart below its row-mates'.
+  flexShrink: 0,
+  whiteSpace: 'nowrap',
   // The StatTile label slot uppercases and letter-spaces everything inside it,
   // which reads "indexed" as a second heading. A legend is a key, not a title.
   textTransform: 'none',
@@ -235,29 +230,27 @@ export function MetricCard({
       labelCase="upper"
       label={
         <span className={cardHeaderClassName}>
-          <span className={cardTitleRowClassName}>
-            <span className={cardTitleClassName}>{label}</span>
-            <span className={cardActionsClassName}>
-              {info === undefined ? null : (
-                <InfoPopover
-                  label={`About ${label}`}
-                  placement="top-end"
-                  trigger={<Info size={14} aria-hidden />}
-                  {...(infoHref === undefined
-                    ? {}
-                    : { href: infoHref, linkText: infoLinkText })}
-                  className={css({
-                    display: 'inline-flex',
-                    color: 'text.muted',
-                    _hover: { color: 'text.strong' },
-                  })}
-                >
-                  {info}
-                </InfoPopover>
-              )}
-            </span>
+          <span className={cardTitleClassName}>{label}</span>
+          <span className={cardActionsClassName}>
+            <span className={cardLegendRowClassName}>{legend}</span>
+            {info === undefined ? null : (
+              <InfoPopover
+                label={`About ${label}`}
+                placement="top-end"
+                trigger={<Info size={14} aria-hidden />}
+                {...(infoHref === undefined
+                  ? {}
+                  : { href: infoHref, linkText: infoLinkText })}
+                className={css({
+                  display: 'inline-flex',
+                  color: 'text.muted',
+                  _hover: { color: 'text.strong' },
+                })}
+              >
+                {info}
+              </InfoPopover>
+            )}
           </span>
-          <span className={cardLegendRowClassName}>{legend}</span>
         </span>
       }
       value={value}
@@ -295,30 +288,18 @@ function drawsMetricChart(
 }
 
 /**
- * One legend entry per mark the chart actually puts on the plot: the series
- * line and each labelled threshold. Derived from the same spec the chart
- * renders from, so a legend cannot name a mark that is not there.
+ * The chart's key: its series, and nothing else.
+ *
+ * Limits are deliberately absent. Each already draws its own label against its
+ * line, where the value it marks is legible, and a named one repeats in the
+ * cursor tooltip — a third copy in the header only crowded the row and pushed
+ * the key off the title line.
  */
 function metricLegendItems(
   chart: MetricChartSpec,
   seriesLabel: string,
 ): ChartLegendItem[] {
-  const items: ChartLegendItem[] = [
-    { id: chart.key, label: seriesLabel, color: chart.stroke },
-  ];
-
-  for (const entry of chart.thresholds ?? []) {
-    // An unlabelled limit has nothing to key; the line still draws.
-    if (entry.label === undefined) continue;
-    items.push({
-      id: `${chart.key}-threshold-${entry.value}`,
-      label: entry.label,
-      color: entry.stroke ?? THRESHOLD_LEGEND_COLOR,
-      dash: true,
-    });
-  }
-
-  return items;
+  return [{ id: chart.key, label: seriesLabel, color: chart.stroke }];
 }
 
 /** The card header's chart key. Renders nothing when no chart is drawn. */
