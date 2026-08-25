@@ -252,6 +252,15 @@ builds) and cannot fire on the right one (same-build re-run after a reference-da
 "enforced regardless of code path" is exactly the behaviour live writers should have anyway
 (write at 0); only the one correction tool needs version logic.
 
+This mechanism was stress-tested as candidate A1 against five alternatives in the
+`stl-row-version` spike (Appendix B: problem statement; Appendix C: verified comparison). It is
+the only candidate that passes every hard requirement and the per-table cutover gate without key
+surgery. The spike also names two compositions this section must not omit: a **run-status flip**
+on `processing_version_log` so a correction's rows across sibling tables become canonical in one
+commit (Appendix C, aux 2), and a **payload-hash divergence check** after `ON CONFLICT DO NOTHING`
+so two writers producing *different* payloads for one key outside a correction are surfaced,
+never silently dropped (aux 5).
+
 ### 4. Reference tables are append-on-change
 
 Tables whose content decides which rows a reader uses (`oracle_asset`, protocol/contract
@@ -611,6 +620,14 @@ claim (Boundaries).
 **Row-level immutability trigger / rules** — statement-level trigger has the same guarantee at
 lower cost; `RULE … DO INSTEAD NOTHING` fails silently. Rejected.
 
+**Other row-versioning mechanisms (spike candidates A2–A6)** — single-axis SCD2 everywhere,
+an observation log with derived read models, range keys with overlap exclusion,
+content-addressed idempotency, and no correction column at all. Assessed against verified
+environment facts in Appendix C: A4 and A6 are dead on arrival (tiered chunks forbid the
+range-closing `UPDATE`; a late live retry outranks a correction and commit timestamps are
+vacuumed), A2 fits reference tables only, A5 survives as the payload-hash check, and A3 is the
+one alternative worth a toy comparison.
+
 ## Consequences
 
 **Positive**
@@ -639,7 +656,7 @@ lower cost; `RULE … DO INSTEAD NOTHING` fails silently. Rejected.
 - Container-registry storage grows without bound (one image per production build, ~1.6/day
   today); no lifecycle rules on the production repositories.
 
-## Appendix: ADR-0002 §3 mechanism (2026-04-08, replaced by §3 above)
+## Appendix A: ADR-0002 §3 mechanism (2026-04-08, replaced by §3 above)
 
 ADR-0002 assigned `processing_version` in a per-table `BEFORE INSERT` trigger: advisory-lock the
 natural key, look up an existing row with the same key **and** `build_id` (retry → reuse its
@@ -649,3 +666,962 @@ inserts by natural key to avoid deadlocks, every function needed
 4,410 ms vs 148 ms per 721-row batch at ~2,000 chunks, VEC-541), and VEC-185 added covering
 indexes. The migration files (`20260410_*`, `20260424_120000`, `20260428_120000`,
 `20260806_1[23]0000`) remain the authoritative record of what ran.
+
+## Appendix B: Spike — replacing `processing_version`, portable problem statement (2026-08-24)
+
+The following two appendices are the `stl-row-version` spike, reproduced verbatim apart from
+heading levels and cross-references. The spike deliberately reopened the row-versioning design
+space with §3's mechanism as *one* candidate (A1) among six, stated the problem
+solution-neutrally (requirements R1–R14, incumbent failure modes P1–P8, stress scenarios S/C/Q),
+and researched each candidate against verified PostgreSQL 17 / TimescaleDB 2.29 / TigerData
+behaviour. Outcome: A1 — caller-assigned versions plus the insert-only allocation log — is the
+only candidate passing every hard requirement and every migration gate, provided it is composed
+with the auxiliary mechanisms (run-status flip for sibling atomicity, payload-hash divergence
+detection, stored `xid8` + recorded snapshot for replay — the last is §5). A3 (observation log +
+derived read models) is the one architecture worth a toy comparison; A2/A4/A5/A6 are ruled out
+with the fact that kills each. Two findings correct assumptions elsewhere: exclusion constraints
+*are* supported on hypertables (partition column included), and partial unique indexes cannot be
+added while chunks are compressed. Section numbers inside these appendices (§1–§8) refer to the
+spike document, not to this ADR's Decision sections.
+
+**Status**: Spike input, 2026-08-24
+**Audience**: a new, empty repository. This document is self-contained: it assumes no access
+to the stl codebase. Names, tables and domains in the toy may differ freely from stl's — what
+must be preserved is the *pattern*, the invariants, and the failure modes, so that a candidate
+mechanism proven in the toy transfers back.
+
+### 1. Purpose
+
+stl versions database rows with a `processing_version` column assigned by per-table
+`BEFORE INSERT` triggers (ADR-0002, April 2026). Four months of production use showed the
+write-side machinery is the dominant cost: escalating fixes (covering indexes, advisory locks,
+plan-cache pinning), 36+ near-identical trigger functions rewritten wholesale twice, and — the
+decisive datum — **the trigger never produced a deliberate correction**. Every
+`processing_version > 0` row in production (~880) is a payload-identical duplicate minted at a
+deploy boundary; in one case an *older* build's row became canonical over a newer build's.
+
+A successor design exists as a proposed (not accepted) ADR-0006. **This spike deliberately
+reopens the design space**: ADR-0006's row-versioning mechanism is one candidate among several
+(candidate list below), not the presumed answer. The toy repo's job is to implement the problem below,
+reproduce the incumbent's failure modes as baselines, and stress candidates against them.
+
+The spike evaluates **destinations only**. Migration from the incumbent is out of scope, except
+for the constraints in §8 that make some destinations unreachable.
+
+### 2. The system being modeled
+
+stl ingests state from an external system (a blockchain) and sells conclusions drawn from it
+(risk calculations). Three properties shape everything:
+
+1. **The source restates its own history.** A chain reorg rewrites recent blocks. This is an
+   *external* mutation: the source changed, our code was fine.
+2. **Our code has bugs.** A broken indexer writes wrong rows for a range; after a fix, the range
+   is reprocessed. This is an *internal* mutation: the source was fine, our reading of it wasn't.
+3. **Nothing may be destroyed.** Results are audited. "What did we believe at the time, and why"
+   must remain answerable forever — a correction must never make the original unreachable.
+
+So every time-varying value is stored append-only under a three-part version key:
+
+- a **source position** (`block_number` — where in the source's own order),
+- a **source restatement counter** (`block_version` — bumped when the source rewrites that position),
+- a **correction counter** (`processing_version` — bumped when *we* rewrite our reading of it).
+
+"Current" is never a column; it is the query
+`ORDER BY block_number DESC, block_version DESC, processing_version DESC LIMIT 1` per natural key.
+
+Two table families share the column today:
+
+- **Family A — pipeline snapshots** (~45 TimescaleDB hypertables): high-volume, block-keyed
+  observations written by workers, cronjobs and backfillers. `processing_version` is
+  trigger-assigned (the mechanism under replacement).
+- **Family B — curated masters** (securities/entities reference data): low-volume, human/loader-
+  curated. Rows carry `valid_from` (effective date) as the primary ordering axis;
+  `processing_version` is loader-assigned and breaks same-day ties; `_current` and `_versions`
+  views derive `valid_to` via `lead()`.
+
+Around them sit **reference tables** (which oracles/tokens/contracts to poll, classifications,
+enabled flags) whose content decides what writers write and readers read — today partly
+update-in-place, which destroys history — and **calculations**, readers whose input set must be
+reproducible later, exactly.
+
+#### Writer population (fixed operational facts)
+
+- Live **workers** run continuously; **cronjobs** run on schedules; **backfillers** re-cover
+  historical ranges, sometimes while the live worker is running.
+- Kubernetes rolling deploys mean two instances of the same writer briefly overlap.
+- Pods crash and message queues redeliver: the same logical write arrives more than once.
+- Deploys happen ~1.6×/day; deliberate corrections are **rare** (months apart) and always
+  operator-initiated.
+- **Concurrency assumption the spike may rely on**: at most one *correction run* per table at a
+  time (operationally enforced). Live-path collisions — deploy overlap, retry storms, a
+  backfiller running beside a worker — are normal and must be harmless. Do not design for
+  concurrent correction runs; do not assume away live-path collisions.
+
+### 3. The problem, solution-neutral
+
+A candidate mechanism must deliver all of the following. Phrase is behavioral; any mechanism
+that produces the behavior qualifies.
+
+- **R1 — Append-only.** Originals are never destroyed or made unreachable. Corrections are
+  additive. Enforced by the database (privileges/guards verifiable from the catalog), not by
+  convention (**R13**).
+- **R2 — Idempotent live writes.** Replaying the same logical write — crash retry, queue
+  redelivery, deploy overlap, backfiller re-covering an already-ingested range — leaves the
+  database byte-identical. No phantom versions, ever. If two *different* payloads collide on the
+  same identity outside a correction, that is surfaced (error or alert), never silently resolved.
+- **R3 — Deliberate corrections.** A correction run supersedes prior generations for the keys it
+  covers; it is attributable (ticket, reason, code identity), idempotently re-runnable after a
+  crash, and its rows win over all prior generations for those keys. Per-key gaps in the version
+  sequence are acceptable.
+- **R4 — Two mutation axes stay distinct.** Source restatement (external) and correction
+  (internal) are separately recorded and separately queryable: "what did the source say at
+  position N, before and after its restatement" and "what did our code conclude, before and
+  after our fix" are both plain queries.
+- **R5 — Current is structural and cheap.** One named object per table answers latest-per-key;
+  the ordering/tie-break logic exists in exactly one place, not at every call site.
+- **R6 — Reproducible reads.** A calculation can record what it read such that the identical row
+  set (and thus output) is recoverable later, exactly — after corrections, backfills and
+  restatements have landed, and without the recording having raced an in-flight backfill.
+- **R7 — Reference data is historized and bitemporal.** Rows whose content steers reads/writes
+  (enabled flags, classifications, rosters) keep history. Two time axes are pinned explicitly:
+  *knowledge time* (which rows existed when the reader ran) and *effective time* (which rows
+  applied, `valid_from <= :effective_at` with `effective_at` an explicit recorded parameter,
+  never `now()`).
+- **R8 — Cohort correctness is expressible.** Entities that silently stop being observed (no
+  tombstones) must not pollute "current" aggregates forever. The mechanism must give readers a
+  structural way to scope, or make tombstoning cheap.
+- **R9 — Sibling consistency.** Tables written together for one key read back consistently:
+  a reader never sees a torn key (one sibling at the old generation, another at the new).
+- **R10 — New tables are cheap.** Adding a versioned table requires declarative artifacts only
+  (DDL, maybe a view). No per-table procedural code, no hand-maintained conformance constants.
+- **R11 — Humans can reason about it.** The standard questions (§6, Q3) are answerable with
+  plain SQL against documented objects.
+- **R12 — Insert cost is flat in table age.** Write cost must not grow with chunk/partition
+  count or total history size.
+- **R14 — Works compressed.** All of the above holds with columnstore compression enabled on
+  old chunks, and nothing relies on features unavailable on TigerData (§7).
+
+**Non-goals**: multi-node sharding; survival of logical dump/restore (physical fork/restore is
+the assumed path — but a candidate that *also* survives logical restore should say so, it's
+worth points); arbitrary wall-clock time travel over the whole database; tamper evidence;
+concurrent correction runs per table.
+
+**Open question the spike may answer**: is build/deploy identity a sound primitive at all?
+The incumbent infers intent (retry vs. correction) from build identity and got it wrong both
+ways — it fired on deploy boundaries (wrong) and cannot fire on a same-build re-run after a
+reference-data fix (also wrong). Candidates may replace it with explicit operator intent,
+content hashing, transaction identity, or anything else that satisfies R2/R3.
+
+### 4. The incumbent, and its measured failure modes
+
+The mechanism being replaced (reproduce this in the toy as the baseline):
+
+Every versioned table has a `BEFORE INSERT` trigger that (1) takes
+`pg_advisory_xact_lock(hash(natural key))`, (2) looks up an existing row with the same natural
+key *and the same build identity* — if found, this is a retry: reuse its `processing_version`;
+(3) else assigns `MAX(processing_version)+1` over the natural key. The insert then runs with
+`ON CONFLICT DO NOTHING` on a PK that includes `processing_version`. Batch writers must sort
+rows by natural key to avoid deadlocks. On TimescaleDB, every trigger function must carry
+`SET plan_cache_mode = 'force_custom_plan'` or its `MAX()` lookup stops pruning chunks.
+
+Measured failure modes — the toy must be able to reproduce P1–P3; P4–P8 inform the tests in §6:
+
+| # | Failure mode | Measurement in stl |
+|---|---|---|
+| P1 | Insert cost grows with chunk count: plpgsql switches to a generic plan after ~5 calls; generic plans can't prune hypertable chunks, so the per-row `MAX()` fans out over all of them. Fires even for rows `ON CONFLICT` then discards. | 4,410 ms vs 148 ms per 721-row batch at ~2,000 chunks (30×); 143× in a clean repro; worst batch 464 s; leaked into workflow-engine activity timeouts. The fix (`SET plan_cache_mode`) is silently reset by any `CREATE OR REPLACE FUNCTION` and guarded only by a catalog test with a hand-bumped floor constant. |
+| P2 | Phantom versions: every deploy boundary makes the next payload-identical write look like a correction. | ~880 phantom rows across 6+ tables in 4 months; zero deliberate corrections; one case where an older build's row became canonical over a newer build's. |
+| P3 | Write-race version loss: without the advisory lock, two same-key writers with different builds both compute the same next version; `ON CONFLICT DO NOTHING` silently drops the loser. | A real production bug (VEC-194), now a regression test plus sort discipline in every batch writer. |
+| P4 | Per-table procedural boilerplate: ~45 near-identical trigger functions, differing only in table name and key columns. | Rewritten wholesale twice (adding locks; plan-cache fix); each new table adds a function, a trigger, an index and a test-floor bump. |
+| P5 | Read-side leakage: the ordering tuple is hand-written at every call site. | ~29 `DISTINCT ON` sites plus dozens of lateral joins across two languages; one file repeats the tuple ~14 times; a forgotten tie-breaker "gets a wrong answer silently". |
+| P6 | Cohort trap: latest-per-key over an append-only snapshot keeps decommissioned entities current forever. | A $521M vs $310M aggregate discrepancy (closed packages' stale last rows, still flagged active); a second case where repaid loans linger in a `_current` view indefinitely. |
+| P7 | Lockstep fragility: sibling tables version independently; readers join on version equality, guarded only by a comment saying the writers stay in lockstep. | Comment-guarded assumption, no enforcement. |
+| P8 | Family B backdated-correction hazard: with `valid_from` as the primary ordering axis, a correction with a higher version but an earlier `valid_from` never becomes current in any view. | Documented invariant enforced only by loader convention. Also: 0-based and 1-based version numbering coexist under one column name. |
+
+### 5. The toy model
+
+Recreate the *pattern* with a small neutral domain. Suggested shape (rename freely) — a fleet of
+metering devices reporting through a feed that occasionally restates its recent history:
+
+**Tables**
+
+- `meter_state(meter_id, seq, source_version, <correction axis>, payload…, writer identity…)` —
+  Family A analogue. TimescaleDB hypertable partitioned on `seq` (or a timestamp derived from
+  it), small chunk interval so hundreds of chunks are cheap to create. Natural key
+  `(meter_id, seq, source_version)`.
+- `meter_register(meter_id, seq, source_version, <correction axis>, …)` — sibling written in the
+  same cycle as `meter_state` (exercises R9/P7).
+- `meter_master(meter_id, <correction axis>, valid_from, change_reason, attrs…)` — Family B
+  analogue: loader-curated, effective-dated, with derived current/versions objects (exercises P8).
+- `poll_roster(meter_id, enabled, valid_from, …)` — reference table steering both the writer
+  (which meters to poll) and readers (which meters count) (exercises R7).
+- `billing_run(id, params incl. effective_at, <whatever the candidate records>, output, created_at)`
+  — the calculation: reads current states and the roster, produces an aggregate, and must satisfy
+  R6 (exercises reproducible reads).
+
+**Mapping to stl** (for the reader coming from either side):
+
+| stl | toy |
+|---|---|
+| `block_number` | `seq` |
+| `block_version` (reorg counter) | `source_version` (feed restatement counter) |
+| `processing_version` | the correction axis under design |
+| `build_id` / `build_registry` | writer build identity (a counter bumped per simulated deploy) |
+| worker / cronjob / backfiller | live writer / periodic writer / range re-writer |
+| `oracle_asset.enabled` | `poll_roster.enabled` |
+| risk calculation | `billing_run` |
+
+**Workload generator** — a driver that emits these events, individually scriptable and
+composable into the scenarios of §6:
+
+- **E1 live tick**: a batch of new `(meter_id, seq)` observations for enabled meters.
+- **E2 retry**: re-deliver the last batch unchanged (crash/redelivery).
+- **E3 deploy overlap**: two writer instances with different build identities ingest the same
+  batch concurrently.
+- **E4 backfill re-cover**: re-ingest an old, already-ingested range with the *same* code.
+- **E5 correction**: re-ingest a range with *fixed* code producing different payloads, as a
+  deliberate, ticketed correction run; must be crash-resumable (kill it halfway, re-run).
+- **E6 source restatement**: the feed rewrites positions `[a,b]`; re-ingest at `source_version+1`.
+- **E7 silent decommission**: a meter stops appearing in the feed; no tombstone is emitted.
+- **E8 roster toggle**: disable a meter in `poll_roster` (as a new effective-dated row).
+- **E9 backdated master fix**: a `meter_master` correction with earlier `valid_from` than the
+  row it supersedes.
+- **E10 concurrent reader**: a loop polling "current" state and aggregates while other events run.
+- **E11 calculation + replay**: run `billing_run`, persist what the candidate needs; later —
+  after E4/E5/E6 have landed — reproduce its exact input row set and output.
+- **E12 payload-divergent collision**: two writers with different builds write *different*
+  payloads for the same natural key outside any correction (a genuine bug in one of them).
+  The right behavior is an open design question, but silence is a wrong answer (R2).
+
+### 6. Verification — what "the new solution works" means
+
+#### Stress scenarios (run against both the incumbent baseline and each candidate)
+
+- **S1 — flat inserts (P1/R12)**: grow the `meter_state` hypertable to 300+ chunks (compress the
+  older ones), inserting fixed-size batches (~700 rows) throughout. Baseline must reproduce the
+  slope (insert latency growing with chunk count). Candidate passes if batch latency at 300+
+  chunks is within ~2× of its 10-chunk latency.
+- **S2 — phantom-version storm (P2/R2)**: 50 simulated deploy boundaries interleaved with E1/E2/
+  E3/E4 over a fixed range. Candidate passes if the versioned tables are byte-identical to a
+  single clean ingest of the same data — zero new versions/generations — and E12 within the storm
+  is detected, not absorbed.
+- **S3 — correction under live read (R3/R9)**: E5 over ~10k keys (both siblings) while E10 polls.
+  Candidate passes if every polled result shows, for every key, one whole generation across both
+  siblings (no torn keys); the correction, killed at 50% and re-run, converges to the same final
+  state; and the candidate *states and demonstrates* its cross-key atomicity guarantee (per-key
+  flip at commit boundaries is acceptable if declared; a whole-run atomic flip earns points).
+
+#### Correctness cases (pass/fail tests)
+
+- **C1 — cohort trap (P6/R8)**: after E7, a naive latest-per-key aggregate over-counts. The
+  candidate must offer a structural fix (scoping object, cheap tombstones, whatever) and the test
+  asserts the correct aggregate through it.
+- **C2 — sibling consistency (P7/R9)**: readers joining `meter_state` × `meter_register` never
+  mix generations for a key, under E5 and under a partial-failure injection (correction writes
+  one sibling, crashes, resumes).
+- **C3 — backdated master fix (P8)**: after E9, the corrected row either *becomes current* or
+  the write is *rejected loudly*. Silently-never-current is a fail.
+- **C4 — replay exactness (R6)**: E11's replay returns the identical input row set and output
+  after corrections, backfills and restatements have landed — including the case where a backfill
+  was in flight (uncommitted) when the calculation ran.
+- **C5 — bitemporal reference reads (R7)**: E8 after a `billing_run` does not change that run's
+  replay; a *future-dated* roster row present at run time does not flip a later replay; and a
+  new run with the same `effective_at` sees the pre-toggle roster.
+- **C6 — restatement vs correction (R4)**: after E6 then E5 over overlapping ranges, all four
+  readings are one query each: (source before/after restatement) × (our code before/after fix).
+
+#### Quality metrics (the softer goals, made checkable)
+
+- **Q1 — new-table cost (R10)**: add a fourth versioned table to the finished toy. Count
+  artifacts. Pass: declarative DDL (+ optionally one view) only; no per-table functions,
+  triggers-with-logic, or test constants. Record the line count; compare to the baseline's
+  (~35-line function + trigger + index + test bump).
+- **Q2 — single ordering definition (R5)**: `grep` the finished toy for the ordering/tie-break
+  expression. Pass: it appears in exactly one place per table family (the view/function that
+  defines it), and no application query restates it.
+- **Q3 — human reasoning (R11)**: five questions, each answerable with a short documented SELECT:
+  (1) what is the current value for key K? (2) what was it before correction T? (3) why does this
+  row exist — which run/ticket produced it? (4) what did billing run B read? (5) which keys did
+  correction T change?
+- **Q4 — enforcement is inspectable (R13)**: a single catalog query (grants, triggers, jobs)
+  proves append-only holds for every versioned table; the test fails when a new table is added
+  without protection (i.e., protection must be structural or self-enumerating, not a
+  hand-maintained list).
+
+### 7. Environment
+
+- **Toy runs**: TimescaleDB (current `timescaledb-ha` Docker image), single node,
+  `TimeZone='UTC'`. Columnstore compression enabled and actually exercised: S1–S3 and C-cases
+  run with older chunks compressed.
+- **Destination is TigerData** (managed; formerly Timescale Cloud). Constraints the toy cannot
+  fully simulate — record each candidate's answer as a checklist instead:
+  - Tiered (S3) chunks: `SET NOT NULL` needs a validating scan that is blocked on tiered
+    chunks — columns must be born with their constraints; plan for additive-only schema change.
+  - `drop_chunks`/retention bypass row/statement triggers: any trigger-based guard needs a
+    policy-level conformance check too; "no retention on versioned tables" must be verifiable.
+  - Unique constraints on hypertables must include the partition column; anything the candidate
+    needs in a PK/UNIQUE must be compatible with segment-by/order-by compression settings.
+  - Exclusion constraints and some index types are unavailable on hypertables — candidates built
+    on range-overlap exclusion must state their fallback.
+  - Role separation (SELECT/INSERT-only app roles) and advisory locks are available; extensions
+    beyond TimescaleDB's bundle are not guaranteed.
+  - Physical fork/replica is the supported clone path; anything relying on xid stability must
+    document behavior under logical dump/restore (see non-goals).
+
+### 8. Migration constraints (destination gates only)
+
+Not a migration plan — just the facts that make some destinations unreachable from stl:
+
+Cutover must be possible **one table at a time**, with old-style and new-style tables coexisting;
+readers are spread over ~29+ hand-written sites in two languages and cannot flip atomically, so
+the read surface of a candidate must be introducible per table. Reshaping the PK of a large
+compressed hypertable is prohibitively expensive — candidates that keep the existing key shape
+(or only add columns/objects additively) are strongly preferred over ones requiring key surgery.
+Existing history (including ~880 phantom version rows and pre-tracking rows with null
+provenance) must remain in place and remain harmless under the new read rules; applied
+migrations are immutable, so every change is a new forward migration.
+
+### Candidate mechanisms A1–A6 (spike “Appendix A”, non-binding)
+
+Each candidate is listed with the stress most likely to kill it. The toy should implement at
+least the incumbent baseline plus two candidates, one of which should be A1 (it is the proposed
+successor in stl and carries four months of analysis).
+
+- **A1 — Caller-assigned versions + insert-only allocation log** (ADR-0006 §3 shape): live
+  writers always write version 0 with first-write-wins dedup; a correction run allocates the next
+  per-table version once, in an insert-only log keyed `(table, ticket)` under a per-table
+  advisory lock, then writes every row at that version. *Killer stresses*: E12 — first-write-wins
+  silently drops a divergent second payload unless the writer checks insert counts; C1 (the
+  mechanism itself doesn't address cohorts); S3 cross-key atomicity.
+- **A2 — Single-axis SCD2 everywhere** (generalize Family B): every versioned table gets
+  `valid_from`/derived-`valid_to`; corrections are new effective rows. *Killer stresses*: C3
+  (backdating is structural here); C6 (mapping two mutation axes onto one temporal axis); R2
+  (what dedupes a retry?).
+- **A3 — Observation log + derived read models**: one append-only log of raw observations
+  (identity + payload + provenance); per-table "current" is a derived, rebuildable, append-only
+  read model. *Killer stresses*: S1 on the refresh path; C4 (snapshot exactness of a derived
+  model); R10 (does each table need bespoke refresh logic?).
+- **A4 — Range/temporal keys**: system-period or `tstzrange`-style keys with overlap exclusion.
+  *Killer stresses*: §7 (exclusion constraints on hypertables); R1 (closing a range without
+  UPDATE); compression compatibility.
+- **A5 — Content-addressed idempotency**: dedupe by payload hash instead of build identity or
+  version counters; a "version" is any new distinct payload for a key. *Killer stresses*: R3
+  (corrections aren't distinguishable from bugs — E12 vs E5 look identical); a correction that
+  reproduces the original payload for some keys; float serialization stability.
+- **A6 — No correction column**: corrections are just new rows; ordering by ingestion
+  (transaction id or DB-assigned timestamp) decides current. *Killer stresses*: R2 (a late live
+  retry after a correction becomes newest and wins — the exact objection that rejected this in
+  stl's ADR-0006 Alternatives; the toy may re-test it rather than take it on faith); logical
+  restore; clock behavior.
+
+### Glossary (spike “Appendix B”)
+
+- **Observation**: one append-only row: "at source position N (restatement V), our code
+  (identity B) concluded X about key K".
+- **Source restatement**: the external system rewriting its own history (stl: chain reorg;
+  toy: feed restatement). Recorded on its own axis, never by overwriting.
+- **Correction**: a deliberate, attributable re-derivation of a range after an internal bug fix.
+  Recorded on its own axis. Rare, operator-initiated, at most one per table at a time.
+- **Retry**: re-delivery of the same logical write (crash, redelivery, deploy overlap, backfill
+  re-cover with unchanged code). Must be invisible (R2).
+- **Phantom version**: a new version minted by a retry that the mechanism mistook for a
+  correction. The incumbent's signature failure.
+- **Generation**: all rows a single correction run wrote (one value on the correction axis).
+- **Current / canonical**: latest generation per natural key under the documented ordering.
+  Always a query or view, never a flag column.
+- **Governed table**: a table under the append-only regime, database-enforced.
+- **Reference table**: a table whose content steers writers/readers (rosters, flags,
+  classifications). Must be historized (R7).
+- **Effective time vs knowledge time**: when a fact applied, vs when the database knew it.
+  Reference reads pin both explicitly.
+- **Cohort**: the set of keys that should participate in an aggregate *now* — membership is
+  time-varying and ends silently (E7).
+- **Lockstep siblings**: tables written together per cycle whose rows for one key must be read
+  at one generation together.
+
+## Appendix C: Spike — candidate comparison and environment facts (2026-08-24)
+
+**Status**: research notes for the spike, 2026-08-24
+**Inputs**: Appendix B (problem statement). All R/P/S/C/Q/E numbers and
+candidate ids (A1–A6) refer to that document.
+
+**Method**: environment claims were verified against (a) primary documentation
+(postgresql.org/docs, tigerdata.com/docs — the former docs.timescale.com), (b) the
+timescale/timescaledb GitHub repo (source, changelog, release notes), and (c) **empirical tests
+against a live instance**: `timescale/timescaledb:latest-pg17` Docker image, PostgreSQL 17.11,
+TimescaleDB **2.29.2** (current as of this writing). Note the toy spec (§7) names the
+`timescaledb-ha` image; the extension version is the same, but the empirical results below
+should be re-run once on `timescaledb-ha` when the toy stands up. Claims are marked
+**VERIFIED** (primary source read and/or reproduced live) or **UNVERIFIED/ASSUMED**.
+
+---
+
+### Part 1 — Environment facts
+
+#### 1. Unique constraints / PKs on hypertables must include the partition column — VERIFIED
+
+- Docs: "Unique indexes must include all columns that are partitioning dimensions."
+  — [Hypertable limitations](https://www.tigerdata.com/docs/use-timescale/latest/limitations).
+- Empirical (2.29.2): `create_hypertable` on a table whose PK omits the partition column, and
+  `CREATE UNIQUE INDEX` omitting it later, both fail with:
+  `ERROR: cannot create a unique index without the column "seq" (used in partitioning)`
+  (HINT: ensure the partitioning column is part of the primary or composite key).
+- Empirical bonus: **partial** unique indexes that include the partition column are accepted and
+  enforced (`CREATE UNIQUE INDEX ... ON t(meter_id, seq) WHERE ver = 0` worked) — but see fact 3
+  for a compressed-chunk caveat.
+- Consequence: any dedup-by-constraint design must carry `seq` (the partition column) in the
+  arbiter key. All A1/A5/A6 shapes do naturally (the natural key contains `seq`).
+
+#### 2. Exclusion constraints on hypertables: SUPPORTED (with the same partition-column rule) — VERIFIED empirically; docs are silent
+
+This contradicts §7's assumption ("Exclusion constraints … are unavailable on hypertables").
+
+- Current docs do **not** list exclusion constraints as unsupported
+  ([Hypertable limitations](https://www.tigerdata.com/docs/use-timescale/latest/limitations)
+  mentions only unique indexes, NULLs in time dimensions, cross-partition UPDATE, hypertable→hypertable FKs).
+- Source: [`src/indexing.c`](https://github.com/timescale/timescaledb/blob/main/src/indexing.c)
+  — "A UNIQUE, PRIMARY KEY or EXCLUSION index on a chunk must cover all partitioning dimensions
+  to guarantee uniqueness (or exclusion) across the entire hypertable";
+  [`src/chunk_constraint.c`](https://github.com/timescale/timescaledb/blob/main/src/chunk_constraint.c)
+  copies EXCLUSION constraints to every chunk. The
+  [2.29.0 changelog](https://github.com/timescale/timescaledb/blob/main/CHANGELOG.md)
+  (#10281 "Disable direct compress when the destination table has an exclusion constraint so the
+  constraint is still enforced") confirms they are a supported, maintained case.
+- Empirical (2.29.2, `btree_gist` loaded):
+  - `EXCLUDE USING gist (meter_id WITH =, vr WITH &&)` **rejected** (same "cannot create a unique
+    index without the column seq" error) — the partition column must appear.
+  - `EXCLUDE USING gist (meter_id WITH =, seq WITH =, vr WITH &&)` **accepted and enforced**:
+    an overlapping range for the same `(meter_id, seq)` raised
+    `conflicting key value violates exclusion constraint "1_e2_meter_id_seq_vr_excl"`.
+- Semantics caveat: enforcement is per-chunk (the constraint is copied to each chunk), so it is
+  only globally correct when the partition column participates with `=` — which forces
+  conflicting rows into the same chunk. A range **over the partition axis itself** (rows whose
+  validity range spans chunks) cannot be enforced this way.
+- `btree_gist` is available on Tiger Cloud (not enabled by default) —
+  [Extensions list](https://www.tigerdata.com/docs/use-timescale/latest/extensions).
+- Consequence: A4 is **not** killed by exclusion-constraint availability. It dies elsewhere (see
+  Part 2).
+
+#### 3. Columnstore compression: full DML incl. ON CONFLICT works on compressed chunks — VERIFIED
+
+The problem statement's compression fears are largely stale; since TimescaleDB 2.11 (2023) the
+situation is:
+
+- [Release 2.11.0](https://github.com/timescale/timescaledb/releases/tag/2.11.0): "Support for
+  DML operations on compressed chunks: UPDATE/DELETE support", "Support for unique constraints
+  on compressed chunks", "Support for ON CONFLICT DO UPDATE", "Support for ON CONFLICT DO NOTHING".
+- Docs: [Inserting or modifying data in the columnstore](https://docs.tigerdata.com/use-timescale/latest/compression/modify-compressed-data/)
+  — on INSERT with unique constraints TimescaleDB "decompresses relevant data during the insert
+  to check if the new data breaks unique checks"; UPDATE/DELETE "only attempts to decompress data
+  where it is necessary". Performance improvements landed steadily
+  ([PR #7108](https://github.com/timescale/timescaledb/pull/7108): conflict check without
+  decompression when no ON CONFLICT clause and one unique constraint; 2.26/2.27 bloom filters for
+  UPSERT/UPDATE/DELETE per the [CHANGELOG](https://github.com/timescale/timescaledb/blob/main/CHANGELOG.md)).
+- Empirical (2.29.2), on a hypertable with PK `(meter_id, seq, ver)`,
+  `segmentby='meter_id'`, `orderby='seq, ver'`, chunks compressed:
+  - plain INSERT into a compressed chunk: **works**;
+  - duplicate insert: **unique violation raised** (`duplicate key value violates unique
+    constraint "2_c1_pkey"`) — dedup constraints are enforced on compressed chunks;
+  - `ON CONFLICT DO NOTHING`: **works** (0 rows, no error);
+  - `ON CONFLICT (cols) DO UPDATE`: **works**;
+  - `ON CONFLICT ON CONSTRAINT <name> DO NOTHING`: **works** on 2.29.2 (the old
+    [issue #1094](https://github.com/timescale/timescaledb/issues/1094) limitation was not
+    reproducible; docs are silent — treat named-constraint arbiters as usable but prefer
+    column-inference form);
+  - UPDATE and DELETE against compressed chunks: **work**.
+- segmentby/orderby vs unique constraints: not a hard rule, a warning. Declaring
+  `segmentby=''`, `orderby='seq'` with PK `(meter_id, seq, ver)` produced
+  `WARNING: column "meter_id" should be used for segmenting or ordering` (and same for `ver`)
+  but succeeded. Keeping unique-key columns inside segmentby ∪ orderby is what keeps the
+  conflict check cheap (sparse/bloom indexes over those columns).
+- **Empirical caveat found**: adding a **partial** unique index to a hypertable *while chunks
+  are compressed* failed with a spurious
+  `ERROR: 23505 duplicate key value violates unique constraint` from TimescaleDB's
+  `validate_index_constraints` (no actual duplicates; the same statement succeeded after
+  `decompress_chunk`). A *full* unique index on the same data succeeded while compressed.
+  No doc or issue found for this — treat as: **partial unique indexes must be born before
+  compression** (worth filing upstream).
+- Remaining hard limits: "UPDATE statements that move values between partitions (chunks) are not
+  supported. This includes upserts (INSERT ... ON CONFLICT UPDATE)"
+  ([limitations](https://www.tigerdata.com/docs/use-timescale/latest/limitations)) — irrelevant
+  for append-only designs whose ON CONFLICT never changes the partition key.
+- Consequence for R2/R14: **dedup via unique constraints works on compressed chunks**, at a
+  decompression-probe cost on conflict-checking inserts. A1-style designs are viable compressed.
+
+#### 4. plan_cache_mode / generic plans defeat chunk pruning (P1's mechanism) — VERIFIED
+
+- [PREPARE docs](https://www.postgresql.org/docs/current/sql-prepare.html): "the first five
+  executions are done with custom plans and the average estimated cost of those plans is
+  calculated. Then a generic plan is created and its estimated cost is compared … Subsequent
+  executions use the generic plan if its cost is not so much higher …". Overridable via
+  `plan_cache_mode = force_generic_plan | force_custom_plan`.
+- [PL/pgSQL implementation docs](https://www.postgresql.org/docs/current/plpgsql-implementation.html):
+  PL/pgSQL statements are prepared statements under SPI and follow the same plan-caching rule —
+  so a trigger-body `MAX()` flips to a generic plan after ~5 calls.
+- Empirical (2.29.2, 51 chunks): `PREPARE q AS SELECT max(ver) FROM p1 WHERE meter_id=$1 AND
+  seq=$2`; under `force_custom_plan` the plan touches **one** chunk index; under
+  `force_generic_plan` it is a MergeAppend over **all 51 chunks** — no plan-time pruning, and no
+  runtime exclusion for this shape. P1's mechanism is exactly as the incumbent describes; the
+  per-function `SET plan_cache_mode = force_custom_plan` fix (and its silent reset on
+  `CREATE OR REPLACE FUNCTION`) is real.
+- Consequence: any candidate whose **hot write path** runs a parameterized per-row lookup over
+  the hypertable inherits P1. Candidates that make the hot path a plain constraint-arbitered
+  INSERT (values known at parse time → pruning by value) do not.
+
+#### 5. drop_chunks / retention bypass row and statement triggers — VERIFIED empirically; docs describe the mechanism
+
+- [About data retention](https://www.tigerdata.com/docs/use-timescale/latest/data-retention/about-data-retention):
+  "Deleting data row-by-row … can be slow. But dropping data by the chunk is faster, because it
+  deletes an entire file from disk." (i.e. DDL, not DML — no DELETE ever runs).
+- Empirical (2.29.2): hypertable with BEFORE DELETE/UPDATE row trigger **and** BEFORE DELETE
+  statement trigger; `drop_chunks()` removed a 99-row chunk with **zero trigger firings**.
+- Consequence for R13/Q4: trigger-based append-only guards do not see chunk drops. Enforcement
+  needs (a) grants (see fact 9) **and** (b) a policy-level conformance check that no retention
+  policy / manual drop_chunks touches governed tables (`timescaledb_information.jobs` is
+  queryable for that).
+
+#### 6. Tiered (S3) chunks: columns must be born with their constraints — VERIFIED
+
+- [About tiered storage](https://www.tigerdata.com/docs/use-timescale/latest/data-tiering/about-data-tiering):
+  disallowed on hypertables with tiered chunks: "adding a column with any default value
+  (including NULL), renaming a column, changing the data type of a column, and adding a NOT NULL
+  constraint to the column". Allowed: renaming the hypertable, **adding columns without
+  defaults**, adding indexes, schema rename, CHECK constraints (untiered data only), deleting
+  columns (which then cannot be re-added under the same name).
+- Also: "You cannot insert data into, update, or delete a tiered chunk. These limitations take
+  effect as soon as the chunk is scheduled for tiering."
+- Consequence: (a) the §7 "born with their constraints" claim is confirmed and is actually
+  broader (no defaults on added columns at all); (b) **any candidate that must touch old rows
+  during a correction (A4's range-closing) is impossible once those rows are tiered**;
+  append-only candidates that only add *new* rows in *new* chunks are unaffected.
+
+#### 7. xid8 / pg_current_xact_id, wraparound, commit timestamps — VERIFIED
+
+- [Transactions and Identifiers](https://www.postgresql.org/docs/current/transaction-id.html):
+  "The internal transaction ID type xid is 32 bits wide and wraps around every 4 billion
+  transactions. A 32-bit epoch is incremented during each wraparound. There is also a 64-bit type
+  xid8 which includes this epoch and therefore does not wrap around during the life of an
+  installation."
+- [System information functions](https://www.postgresql.org/docs/current/functions-info.html):
+  `pg_current_xact_id() → xid8` (assigns one if none yet; returns top-level id in subxacts).
+- Dump/restore vs fork: the docs scope xid8 uniqueness to "the life of an installation". A
+  logical dump/restore is a **new installation**: stored xid8 *column values* survive (they are
+  ordinary data, and comparisons **among stored values** stay valid), but comparisons against the
+  new cluster's live xid counter are meaningless — the new counter restarts low, so new writes
+  can sort *below* old data. A physical replica/fork preserves the counter; TigerData forks are
+  physical ([Fork services](https://www.tigerdata.com/docs/use-timescale/latest/fork-services),
+  [Replicas and forks with tiered data](https://www.tigerdata.com/docs/build/data-management/storage/tiered-data-replicas-forks)),
+  so xid-based ordering survives the supported clone path and dies under logical restore
+  (explicitly a non-goal, but must be documented per §7).
+- Commit timestamps: `pg_xact_commit_timestamp(xid)` "only provide[s] useful data when the
+  track_commit_timestamp configuration option is enabled, and only for transactions that were
+  committed after it was enabled. **Commit timestamp information is routinely removed during
+  vacuum.**" ([functions-info](https://www.postgresql.org/docs/current/functions-info.html)).
+  That retention clause makes commit timestamps **unusable as a durable ordering axis** for A6
+  regardless of whether Tiger Cloud exposes the GUC (whether it does is UNVERIFIED — the
+  [advanced parameters](https://docs.tigerdata.com/use-timescale/latest/configuration/advanced-parameters/)
+  page describes a searchable list but I could not confirm this specific GUC).
+
+#### 8. Snapshots and reproducible reads (R6/C4 primitives) — VERIFIED
+
+- [Snapshot synchronization functions](https://www.postgresql.org/docs/current/functions-admin.html):
+  `pg_export_snapshot()` — "The snapshot is available for import only until the end of the
+  transaction that exported it." So **snapshot export is a same-instant coordination tool, not a
+  later-replay primitive**. Exact replay later via MVCC machinery is off the table (as the task
+  brief anticipated).
+- [Transaction isolation](https://www.postgresql.org/docs/current/transaction-iso.html):
+  REPEATABLE READ "sees a snapshot as of the start of the first non-transaction-control
+  statement in the transaction" and "never sees either uncommitted data or changes committed by
+  concurrent transactions during the transaction's execution."
+- `pg_current_snapshot() → pg_snapshot` returns the current snapshot as a **value**
+  (`xmin:xmax:xip_list`), and `pg_visible_in_snapshot(xid8, pg_snapshot) → boolean` evaluates
+  visibility of a *stored* xid8 against a *stored* snapshot
+  ([functions-info](https://www.postgresql.org/docs/current/functions-info.html)).
+- **The composable primitive that works** (evaluated against the C4 in-flight-backfill trap):
+  stamp every governed row with `written_xid xid8 DEFAULT pg_current_xact_id()`; a calculation
+  runs in REPEATABLE READ and records its `pg_current_snapshot()` text as data. Replay =
+  `WHERE pg_visible_in_snapshot(written_xid, :recorded_snapshot)`. Because both sides are stored
+  **data** (not tuple headers), vacuum/freezing cannot erase them; an in-flight backfill's xid
+  was in the snapshot's `xip_list` at run time, so its later-committed rows are correctly
+  excluded from replay; aborted writers never produced rows at all. Survives physical fork;
+  survives logical restore for *historical* replays (stored-vs-stored comparisons), degrades
+  only for snapshots recorded *after* a logical restore against pre-restore rows. Row `xmin`
+  itself is 32-bit and not durable — only the explicit stored column works.
+- Caveat vs fact 6: `DEFAULT pg_current_xact_id()` on a **new** column cannot be added to an
+  already-tiered hypertable ("adding a column with any default value (including NULL)" is
+  blocked). New tables: born with it. Existing stl tables: add the column without default before
+  tiering, or treat NULL as "pre-tracking, always visible" (stl already has null-provenance
+  rows; §8 requires they stay harmless anyway).
+
+#### 9. Grants-based append-only enforcement coexists with compression — VERIFIED
+
+- [Privileges](https://www.postgresql.org/docs/current/ddl-priv.html): UPDATE, DELETE and
+  TRUNCATE are independently grantable/revocable table privileges; "these default privilege
+  settings can be overridden using the ALTER DEFAULT PRIVILEGES command" (future objects).
+- Empirical (2.29.2): role with only `SELECT, INSERT`:
+  - INSERT works; UPDATE and DELETE fail with `permission denied for table` — catalog-inspectable
+    via `information_schema.role_table_grants` (Q4);
+  - `INSERT ... ON CONFLICT DO NOTHING` works **without** UPDATE privilege, including against a
+    compressed chunk (DO NOTHING requires no UPDATE privilege; DO UPDATE would);
+  - the table owner can still `compress_chunk()` while the app role is INSERT-only — compression
+    is an owner-side chunk rewrite, orthogonal to app-role grants.
+- Background jobs run with owner permissions: "Background workers for commands that start with
+  add_job will run with the permissions of the table owner"
+  ([issue #1662](https://github.com/timescale/timescaledb/issues/1662) /
+  [PR #1709](https://github.com/timescale/timescaledb/pull/1709));
+  `compress_chunk` requires ownership-level rights
+  ([compress_chunk API](https://docs.timescale.com/api/latest/compression/compress_chunk/)).
+  PARTIALLY VERIFIED (issue/PR text + empirical owner test; current docs phrase it thinly).
+- Note: TimescaleDB ≥ 2.23 removed the legacy `insert_blocker` trigger
+  ([CHANGELOG](https://github.com/timescale/timescaledb/blob/main/CHANGELOG.md) #8804) — one less
+  hidden trigger interaction.
+
+#### 10. TigerData managed-service model — VERIFIED (with gaps)
+
+- **No superuser**: "Tiger Cloud does not provide superuser access. tsdbadmin is not a
+  superuser. … you can use standard PostgreSQL means to create other roles or assign individual
+  permissions." ([Manage data security](https://www.tigerdata.com/docs/use-timescale/latest/security/read-only-role)).
+  Role separation for R1/R13 is therefore available.
+- **Extensions**: fixed allowlist of ~60+ ("The following PostgreSQL extensions are available in
+  every Tiger Cloud service") — includes `timescaledb`, `timescaledb_toolkit`, `postgres_fdw`
+  (default-on) and `pgcrypto`, `btree_gist` (enable-able)
+  ([Extensions](https://www.tigerdata.com/docs/use-timescale/latest/extensions)). Nothing beyond
+  the list — candidates must not require exotic extensions.
+- **Physical fork**: supported first-class ("fork an existing service into a new, independent
+  copy"; data written after fork time not included)
+  ([Fork services](https://www.tigerdata.com/docs/use-timescale/latest/fork-services)) —
+  consistent with fact 7's xid-stability analysis.
+- **Advisory locks**: core PostgreSQL, no extension required; no TigerData doc found restricting
+  them. UNVERIFIED as an explicit TigerData statement; §7 asserts availability and nothing found
+  contradicts it.
+- **GUC surface**: many parameters settable per service via console
+  ([Advanced parameters](https://docs.tigerdata.com/use-timescale/latest/configuration/advanced-parameters/));
+  whether `track_commit_timestamp` specifically is exposed: UNVERIFIED (moot per fact 7).
+
+---
+
+### Part 2 — Candidate assessment
+
+Scorecard legend: ✔ pass, ✘ fail, ◐ conditional (condition stated). "Aux" = requires one of the
+cross-cutting auxiliary mechanisms (next section) — every candidate needs *some* of them; a ◐
+that names an aux is not a demerit unless the aux fights the candidate's own mechanics.
+
+#### Incumbent baseline (reference)
+
+Trigger-assigned `MAX()+1` with build-identity retry detection, advisory per-key lock,
+`ON CONFLICT DO NOTHING`. Failure modes P1–P8 as measured; P1's plan-cache mechanism and the
+grants/trigger environment facts above are all confirmed. It fails R2 (P2 phantom storms), R10
+(P4), R12 (P1), and R13 only holds by trigger discipline that drop_chunks bypasses (fact 5).
+Reproduce as baseline; nothing new.
+
+#### A1 — Caller-assigned versions + insert-only allocation log (ADR-0006 shape)
+
+**Mechanism.** Live writers always write correction-axis `ver = 0`; the PK
+`(meter_id, seq, source_version, ver)` (partition column included — fact 1) plus
+`ON CONFLICT DO NOTHING` makes every replay a byte-level no-op. A correction run first INSERTs a
+row into a global insert-only `correction_run(table_name, ticket, ver, reason, code_id, status,
+created_at)` log — uniqueness on `(table_name, ticket)` makes allocation idempotent; a per-table
+advisory lock serializes allocation (one correction per table, per §2) — then writes all its rows
+at that `ver`. No triggers, no per-table functions.
+
+**Scorecard.**
+
+| Req | Verdict | Why |
+|---|---|---|
+| R1/R13 | ✔ | INSERT-only grants; ON CONFLICT DO NOTHING needs no UPDATE priv (fact 9); Q4 = grants query + "no retention job on governed tables" check (fact 5) |
+| R2 | ◐ | identical replays: structurally byte-identical (PK dedup). Divergent payload (E12): silently dropped **unless** composed with the payload-hash check (aux 5) — the named killer, must be built in |
+| R3 | ✔ | ticket-keyed allocation is attributable and idempotent; crash-resume = re-run same ticket, DO NOTHING skips done rows |
+| R4 | ✔ | `source_version` and `ver` are separate columns; all four C6 readings are one predicate each |
+| R5 | ✔ | one `_current` view per table owns the ORDER BY tuple |
+| R6 | ◐ | aux 3 (xid8 + snapshot recording) — composes cleanly, additive column |
+| R7 | ◐ | orthogonal; aux 4 (SCD2 reference tables) required, as for every candidate |
+| R8 | ◐ | aux 1 (roster-scoped current views) |
+| R9 | ◐ | aux 2: shared run id + status flip in the allocation log gives whole-run atomic flip (S3 bonus points) |
+| R10 | ✔ | DDL + one view; allocation log is global, not per-table |
+| R11 | ✔ | Q3's five questions are one SELECT each (run log answers "why does this row exist" / "which keys did T change" via `WHERE ver = :v`) |
+| R12 | ✔ | hot path is a plain INSERT — values known at parse time, chunk pruning by value; no per-row MAX() (fact 4 avoided by construction) |
+| R14 | ✔ | verified: unique enforcement + DO NOTHING on compressed chunks (fact 3); keep PK columns ⊆ segmentby ∪ orderby to keep the conflict probe cheap |
+
+**Killer stresses.** E12: an insert that conflicts on identity but differs in payload vanishes
+under DO NOTHING — the writer must compare inserted-count vs batch-size and, on shortfall, join
+its candidate hashes against stored hashes; alert on mismatch (aux 5). C1: not addressed by the
+mechanism — aux 1. S3 cross-key atomicity: rows at `ver = V` are written invisible (current view
+requires the run's `status = 'complete'`); flipping status is one row UPDATE-free event (insert a
+`correction_run_status` row or write status as a new log row) → whole-run atomic flip at one
+commit, crash-safe. Other danger: none of S1 (no lookup on hot path).
+
+**Environment verdict.** Everything it needs is verified available: PK-with-partition-column,
+compressed-chunk conflict handling, INSERT-only grants, advisory locks (assumed per §7/fact 10).
+Nothing conflicts with tiered chunks (never touches old rows).
+
+**Migration gate (§8).** Strongest of all candidates: the PK shape `(natural key, ver)` is what
+stl already has — no key surgery; cutover per table = drop trigger, revoke UPDATE/DELETE, add
+`_current` view; existing phantom rows (`ver > 0`) remain valid history and remain canonical
+where they already were; the allocation log is a new table.
+
+**Q1 cost.** Table DDL + 1 view (+ grants inherited via `ALTER DEFAULT PRIVILEGES`). Zero
+procedural artifacts. Estimated ~15 lines vs the baseline's ~35-line function + trigger + index +
+test bump.
+
+#### A2 — Single-axis SCD2 everywhere
+
+**Mechanism.** Every table gets `valid_from` with derived `valid_to` (lead() views); a correction
+is a new effective row. Family B already is this.
+
+**Scorecard.** R1 ✔ (rows only added); **R2 ✘** — nothing dedups a retry: `valid_from` is
+loader-assigned wall-clock, so a redelivered batch mints new effective rows (P2 reborn) unless
+you add content hashing, at which point you've built A5-on-A2; R3 ◐ (a correction is just
+another row; attribution needs an extra column, fine); **R4 ✘ structurally** — source
+restatement and correction are forced onto one temporal axis; C6's four readings are not
+expressible without re-adding a second axis, at which point it is no longer "single-axis";
+R5 ✔ (views); R6/R7/R8 ◐ (same auxes); R9 ◐; R10 ✔; R11 ◐ (temporal-interval reasoning is
+harder than generation reasoning); R12 ✔; R14 ✔ (nothing exotic). **C3/P8 is structural**: a
+backdated correction (higher knowledge, earlier `valid_from`) silently never becomes current
+unless the view orders by (valid_from, knowledge-axis) *and* the reader pins knowledge time —
+i.e. correctness requires the bitemporal machinery everywhere, for tables that have no natural
+effective-time axis at all.
+
+**Environment verdict.** No conflicts — it needs nothing the environment lacks.
+
+**Migration gate.** ✘ Family A tables would need `valid_from` added into the uniqueness/PK shape
+of large compressed hypertables → exactly the key surgery §8 prohibits.
+
+**Q1 cost.** DDL + 2 views. Cheap.
+
+**Verdict.** Wrong shape for Family A (fails R2/R4 by design, gated by §8 anyway). But it *is*
+the right shape for Family B and the reference tables — keep it there (see aux 4); every
+candidate inherits it for R7 regardless.
+
+#### A3 — Observation log + derived read models
+
+**Mechanism.** One append-only hypertable per table-family stream (or one log with a
+`stream` discriminator): `(stream, natural key, seq, source_version, payload, provenance,
+payload_hash, run_id, written_xid)`, deduped by unique `(stream, key, seq, source_version,
+payload_hash)`-style arbiter. Per-table "current" is a derived, rebuildable read model refreshed
+transactionally by a generic procedure driven by catalog metadata (stream → target table + key
+columns), or consumed directly through views.
+
+**Scorecard.** R1 ✔ (log is INSERT-only; read models are caches — rewriting them destroys
+nothing); R2 ◐ (hash-arbitered dedup is exact; E12 = same identity, new hash → new log row,
+**visible** — detection is structural, better than A1's); R3 ✔ (run_id on correction rows);
+R4 ✔; R5 ✔ (the read model *is* the single ordering definition); **R6 ✔/strong** — the log plus
+aux 3 gives exact replay, and sibling read models derive from one log so C2 is easy; R7 ◐ (aux
+4); R8 ◐ (aux 1); **R9 ✔** — siblings are one stream or two streams written in one transaction,
+and the read-model refresh applies them atomically; **R10 ◐** — the killer: each new table needs
+read-model DDL *plus registration in the refresh machinery*; if refresh is one generic
+metadata-driven procedure this stays declarative-ish, if it drifts into per-table refresh logic
+it re-creates P4; R11 ◐ (two-layer indirection: "why is current X" = log query + refresh
+watermark); **R12/S1 ◐** — the log insert is flat, but the *refresh path* must be incremental
+(track a log high-water mark) or it degrades with history size — S1 must be run against the
+refresh, as the candidate list in Appendix B says; R14 ◐ (log compresses well; typed payloads per stream, or jsonb
+with the storage/segmentby costs that implies).
+
+**Environment verdict.** Nothing it needs is missing. Watch: read models rebuilt in place are
+tables that get UPDATEd/rewritten — they must be exempt from the append-only grant regime
+(they are derived caches, document that in Q4's conformance query), and they should stay
+uncompressed/small (latest-only), which they naturally are.
+
+**Migration gate.** ◐ Per-table cutover is possible (one stream per legacy table; readers move
+to the read model view one table at a time — the read surface is introducible per table). But
+writers must be repointed to the log, and the log is a genuinely new architecture: biggest lift
+of the viable candidates. Existing history can be back-loaded into the log or left as a frozen
+pre-log epoch under the read model — harmless either way.
+
+**Q1 cost.** Read-model DDL + one registration row (+ shared generic refresh proc). ~20 lines if
+the genericity holds — measuring exactly this is why it belongs in the toy.
+
+#### A4 — Range/temporal keys with overlap exclusion
+
+**Mechanism.** Rows carry a system-validity range (`sys_period tstzrange`/`int8range`);
+superseding a row **closes** its range and inserts the successor; overlap exclusion
+(`EXCLUDE (key WITH =, seq WITH =, sys_period WITH &&)`) guarantees at most one current row.
+
+**Environment verdict — dies, but not where §7 expected.** Exclusion constraints are *available*
+(fact 2, contra §7). What kills it:
+
+1. **R1/R13 ✘ structurally**: closing a range is an UPDATE of the superseded row. Append-only
+   INSERT-only grants are impossible; the writer role must hold UPDATE on all history — the
+   exact privilege R13 exists to revoke. The audit property ("original unreachable? never")
+   now depends on convention, which R1 forbids.
+2. **Tiered chunks ✘ (verified fact 6)**: "You cannot insert data into, update, or delete a
+   tiered chunk." A correction over a tiered range cannot close the old rows. Dead on TigerData
+   at exactly the moment (old data) corrections target.
+3. Compression friction: closing ranges UPDATEs compressed batches (works — fact 3 — but is a
+   rewrite of old cold data on every correction, the worst-case DML pattern), and 2.29's #10281
+   shows exclusion constraints already disable compression fast paths.
+4. Migration gate ✘: the range column must join the key/constraint shape of large compressed
+   hypertables — key surgery.
+
+The "insert-only ranges" repair (never close; current = latest lower bound) discards the
+exclusion constraint's value entirely and collapses into A6-with-extra-steps. **DOA.**
+
+**Q1 cost** (moot): DDL + exclusion constraint + btree_gist; no procedural code.
+
+#### A5 — Content-addressed idempotency
+
+**Mechanism.** Identity = (natural key, payload_hash); unique arbiter on
+`(key, seq, source_version, payload_hash)`; a "version" is any new distinct payload.
+
+**Scorecard highlights.** R2 (retry) ✔ — replays are hash-identical, structurally deduped; but
+**E12 ✘ silently absorbed**: a divergent payload is *by definition* a new version, so the bug
+case and the correction case are indistinguishable (the named killer — it fails R2's "surfaced,
+never silently resolved" and R3's attributability in one stroke). **R3 ✘** also on the
+reproduced-original trap: a correction that re-derives the *original* payload for some keys
+cannot insert (hash exists) — if a buggy intermediate payload is current, the key is **stuck
+wrong forever**; and hash gives no order, so "current" needs an ingestion-order axis anyway →
+inherits A6's problems. Float/serialization stability is a real operational hazard on ~45
+tables of numeric payloads. R14 ✔ (hash column compresses; arbiter works compressed — fact 3).
+
+**Environment verdict.** Nothing missing (`pgcrypto`/`sha256` available — fact 10; or use
+`hashtextextended` built-ins). It dies on requirements, not environment.
+
+**Migration gate.** ◐ hash column is additive, but the *arbiter* uniqueness including hash is a
+new unique index on large compressed hypertables (full unique indexes on compressed chunks did
+create in the live test — fact 3 caveat applies only to partial ones), so feasible-but-heavy.
+
+**Verdict.** Not viable as the identity mechanism. **Adopt as the auxiliary** (aux 5): a
+payload-hash column + count/hash divergence check is precisely what plugs A1's and A6's E12
+hole and cheapens A3's dedup. This is where its value survives.
+
+#### A6 — No correction column; ordering by ingestion
+
+**Mechanism.** Rows carry `written_xid xid8 DEFAULT pg_current_xact_id()` (or a timestamp);
+current = latest by ingestion order per key. No version column at all.
+
+**Scorecard highlights.** **R2 ✘ structurally** — the dilemma: (a) if the PK is the bare natural
+key `(key, seq, source_version)` + DO NOTHING, retries dedup but corrections *cannot insert at
+all* (identity collides; DO UPDATE would violate R1); (b) if the PK includes the ordering column,
+every retry is a distinct row → phantom versions worse than P2, and a late live retry (queue
+redelivery hours later, after a correction) inserts with a *newer* xid and **wins over the
+correction** — the exact objection in stl's ADR-0006 Alternatives; the toy can re-test it but
+the structure is visible from here. R3 ✘ (no attributable generation; "which rows did T write"
+requires joining on xid ranges); R4 ◐ (source axis survives; correction axis is smeared into
+ingestion order). Clock variant: `now()` is not monotonic across writers, ties under deploy
+overlap. Commit-timestamp variant: **dead by verified fact 7** — "Commit timestamp information
+is routinely removed during vacuum". xid variant: verified durable per-installation and across
+physical forks, dead across logical restore (documented non-goal).
+
+**Environment verdict.** The primitives exist (fact 7); the design fails on R2/R3 regardless.
+**DOA** as the primary mechanism. Its one durable idea — stored xid8 as a *knowledge-time
+stamp* — survives as aux 3 (reproducible reads), where it is genuinely excellent.
+
+**Q1 cost** (moot): DDL only. Cheapest — which is why it keeps getting re-proposed.
+
+---
+
+### Cross-cutting auxiliary mechanisms
+
+These are the sub-problems Appendix B candidates don't individually solve. Every viable
+composition = one primary candidate + auxes 1–5.
+
+**Aux 1 — Cohort correctness (C1/R8).** Three options: (a) *scoping views* — `_current` joins
+`poll_roster` at an explicit effective/knowledge time, so decommission = roster row, and E7
+(silent disappearance, no one writes anything) is handled by (b) *recency scoping* — cohort =
+keys observed within a window — which is a heuristic, not a fact; or (c) *cheap tombstones* —
+operator/detector inserts an explicit end-of-cohort row. Judgment: roster-driven scoping is the
+only structural answer consistent with R7 (the roster is already the thing that decides who is
+polled; make it also decide who counts), with tombstones as the escape hatch for entities that
+end outside the roster's knowledge. Composes identically with A1 and A3. The C1 test should
+assert through the roster-scoped view.
+
+**Aux 2 — Sibling consistency (C2/R9).** Options: (a) *shared generation/run id* — both siblings
+write the same `ver`/`run_id`, readers join on it (still torn mid-write); (b) *transactional
+flip* — rows at the new generation are invisible until one commit flips the run's status in the
+allocation/run log, and `_current` views filter to completed runs. Judgment: (b), because it also
+answers S3's crash-resume (a half-written run is invisible, the re-run completes it, one commit
+flips both siblings) and earns S3's "whole-run atomic flip" points. A1's allocation log already
+has the row to hang status on; A3 gets it for free (single log, refresh applies atomically).
+
+**Aux 3 — Reproducible reads (R6/C4).** Evaluated options: (a) *max-visible-version watermarks
+per table* — fails the C4 trap: an in-flight (uncommitted) backfill's rows carry values below the
+recorded watermark and enter later replays; (b) *snapshot export* — verified unusable later
+(fact 8: import only until exporting txn ends); (c) *logging exact row keys* — bulletproof,
+expensive, and the fallback if (d) is judged too clever; (d) *stored xid8 + stored
+pg_current_snapshot()* — verified sound (fact 8): vacuum-proof (both sides are data),
+in-flight-backfill-proof (xip_list), fork-proof, and one additive column + one text column on
+`billing_run`. Judgment: implement (d) in the toy, keep (c) as the comparison baseline in the C4
+test. Tiered-chunk caveat: the xid8 column must be *born* with its DEFAULT (fact 6); NULL = pre-
+tracking = always-visible.
+
+**Aux 4 — Bitemporal reference data (C5/R7).** Largely orthogonal to A1–A6, and **every candidate
+must add it**: reference tables (`poll_roster`, `meter_master`) become SCD2 (`valid_from`,
+derived `valid_to`) **plus** a knowledge axis (aux 3's xid8 stamp, or an insert timestamp) so a
+read pins both `effective_at` (explicit parameter, never now() — R7) and knowledge time (the
+recorded snapshot). C5's three assertions all reduce to: replay filters roster rows by
+`pg_visible_in_snapshot(written_xid, run_snapshot) AND valid_from <= run.effective_at`. C3/P8:
+the `_current` view orders by `(valid_from, correction-axis)` *within* pinned knowledge — a
+backdated fix becomes current for its effective window; additionally a loud guard (constraint or
+loader check) should reject a correction whose `valid_from` regresses without an explicit
+backdate flag, satisfying "becomes current or rejected loudly".
+
+**Aux 5 — Payload-divergence detection (E12).** A `payload_hash` column (deterministic
+serialization: fixed column order, canonical float encoding — test this, it is A5's named
+hazard) + a statement-level check: after `INSERT ... ON CONFLICT DO NOTHING`, if inserted-count
+< batch-count, join the shortfall's identities against stored hashes; identity-equal +
+hash-different outside a correction → alert/error, never absorb. Composes with A1 (mandatory —
+plugs its named killer), A3 (structural — divergence is already a visible new log row; the check
+degenerates to a query), and A6 (moot). Hashing is a *check*, not identity — A5's failure modes
+(reproduced-original, un-orderable versions) don't apply to it in this role.
+
+---
+
+### Comparison matrix
+
+| Criterion | Incumbent | A1 +auxes | A2 | A3 +auxes | A4 | A5 | A6 |
+|---|---|---|---|---|---|---|---|
+| R1/R13 enforceable by grants | ✘ (trigger-guard; fact 5) | ✔ | ✔ | ✔ (log) | ✘ needs UPDATE | ✔ | ✔ |
+| R2 identical retry | ◐ (P2!) | ✔ | ✘ | ✔ | ✔ | ✔ | ✘ |
+| E12 surfaced | ✘ | ◐ aux 5 | ✘ | ✔ | ◐ | ✘ absorbed | ✘ |
+| R3 corrections | ◐ (P2 both ways) | ✔ | ◐ | ✔ | ◐ | ✘ | ✘ |
+| R4 two axes | ✔ | ✔ | ✘ | ✔ | ◐ | ◐ | ◐ |
+| R5/Q2 one ordering | ✘ (P5) | ✔ | ✔ | ✔ | ✔ | ✘ | ✔ |
+| R6/C4 (with aux 3) | ✘ | ✔ | ✔ | ✔✔ | ✔ | ✔ | ✔ |
+| R9/S3 atomic flip | ✘ (P7) | ✔ aux 2 | ◐ | ✔ | ◐ | ◐ | ◐ |
+| R10/Q1 new-table cost | ✘ (P4) | ✔ DDL+view | ✔ | ◐ +registration | ✔ | ✔ | ✔ |
+| R12/S1 flat inserts | ✘ (P1, verified) | ✔ | ✔ | ◐ refresh path | ◐ | ✔ | ✔ |
+| R14 compressed | ◐ | ✔ (fact 3) | ✔ | ◐ | ◐ | ✔ | ✔ |
+| Tiered chunks (fact 6) | ✔ | ✔ | ✔ | ✔ | ✘ **fatal** | ✔ | ✔ |
+| Migration gates §8 | — | ✔ same key shape | ✘ key surgery | ◐ big lift, per-table OK | ✘ key surgery | ◐ | ✔ |
+| Overall | baseline | **strongest** | Family B only | **strong, costlier** | DOA | aux only | DOA |
+
+---
+
+### Recommendation
+
+**Implement in the toy: A1 (mandated), A3, and A5-as-auxiliary folded into both.**
+
+- **A1** is the only candidate that passes every hard requirement *and* every migration gate
+  with verified environment facts behind each pass (facts 1, 3, 9). Its two named killers are
+  both closed by cheap composition: E12 by aux 5, S3/R9 by aux 2's status-flip on the allocation
+  log it already owns. The toy must prove the composed shape, not bare A1: PK dedup + allocation
+  log + run-status-filtered views + payload-hash divergence check + xid8/snapshot replay.
+- **A3** is the one genuinely different architecture worth the toy's time: it is structurally
+  better than A1 exactly where A1 is conditional (E12 visible by construction, R9 free, R6
+  strongest) and structurally worse exactly where the toy can measure it (R10 registration
+  cost — Q1; S1 on the refresh path). If the generic metadata-driven refresh survives Q1 and S1,
+  A3 is the better long-term destination; if it doesn't, the toy has demonstrated why A1 wins.
+  That is a real experiment; A2/A4/A6 would not be.
+- **A5** should not be implemented as a standalone candidate — implement its hash as aux 5
+  inside both A1 and A3, plus the float-serialization stability test it drags in.
+- **A2** for Family B/reference tables only: it is the existing Family B shape and aux 4's
+  substrate; as a Family A candidate it is dead on R2/R4 and §8's key-surgery gate.
+
+**Dead on arrival, with the verified fact that kills each:**
+
+- **A4** — killed by *"You cannot insert data into, update, or delete a tiered chunk"*
+  ([verified, About tiered storage](https://www.tigerdata.com/docs/use-timescale/latest/data-tiering/about-data-tiering)):
+  range-closing UPDATEs are impossible on exactly the old data corrections target — plus the
+  structural R1/R13 conflict (closing ranges requires the UPDATE privilege append-only exists to
+  revoke). Notably it is *not* killed by exclusion-constraint availability: fact 2 shows those
+  now work on hypertables (§7 should be corrected).
+- **A6** — killed twice: structurally by R2 (the PK dilemma: dedup-PK blocks corrections,
+  ordering-PK re-mints phantoms and lets a late retry outrank a correction), and its
+  commit-timestamp variant by the verified *"Commit timestamp information is routinely removed
+  during vacuum"* ([functions-info](https://www.postgresql.org/docs/current/functions-info.html)).
+  Its xid8 idea survives — demoted to aux 3, where it is the best available primitive for R6/C4.
+
+**Corrections the toy should feed back into the problem statement (§7):** exclusion constraints
+*are* supported on hypertables (partition column included, per-chunk semantics); compressed
+chunks accept INSERT/UPDATE/DELETE/ON CONFLICT with enforced unique constraints since 2.11;
+partial unique indexes cannot be added while chunks are compressed (empirical, 2.29.2 —
+born-before-compression applies); drop_chunks bypassing triggers is empirically confirmed (zero
+firings), so Q4 must pair grants with a no-retention-policy conformance query.
