@@ -1651,7 +1651,7 @@
     {
       "table": "prime_debt",
       "column": "synced_at",
-      "canonical": "block_timestamp",
+      "canonical": "snapshot_time",
       "action": "rename"
     },
     {
