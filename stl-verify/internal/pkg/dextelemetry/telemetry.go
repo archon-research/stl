@@ -179,11 +179,20 @@ func (t *Telemetry) RecordStateRows(ctx context.Context, n int) {
 // DueSet would zero both sides of the comparison and go blind. The sweep (curve)
 // also puts untouched pools in the due set, which would make it a false activity
 // signal.
-func (t *Telemetry) RecordPoolsTouched(ctx context.Context, n int) {
+//
+// attrs partition the count into series a rule can select one of, on top of the
+// chain attribute every datapoint carries; a rule that wants the whole count
+// aggregates them away with `sum by (chain, cluster)`. uniswap-v4 splits on
+// snapshot_supported, because only the supported half can ever produce a state
+// row and only that half may gate its not-writing-state rule.
+func (t *Telemetry) RecordPoolsTouched(ctx context.Context, n int, attrs ...attribute.KeyValue) {
 	if t == nil || n <= 0 {
 		return
 	}
-	t.poolsTouched.Add(ctx, int64(n), metric.WithAttributes(t.chainAttr))
+	all := make([]attribute.KeyValue, 0, len(attrs)+1)
+	all = append(all, t.chainAttr)
+	all = append(all, attrs...)
+	t.poolsTouched.Add(ctx, int64(n), metric.WithAttributes(all...))
 }
 
 // RecordPoolsNeverIndexed sets pools_never_indexed to n. Unlike the counters

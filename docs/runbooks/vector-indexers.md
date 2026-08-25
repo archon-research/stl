@@ -1419,9 +1419,16 @@ it and the worker would crash-loop forever on a legal pool. See VEC-573 for the
 `lp_fee` refresh path that would let the gate be flipped back on.
 
 Consequences worth remembering while triaging: an excluded pool contributes to
-`uniswap_v4_pools_touched_total` but never to
+`uniswap_v4_pools_touched_total{snapshot_supported="false"}` but never to
 `uniswap_v4_state_rows_written_total`, and it is deliberately not counted by
-`uniswap_v4_pools_never_indexed`. To change a pool's gate, append a superseding
+`uniswap_v4_pools_never_indexed`. That label is what keeps
+[`VectorUniswapV4IndexerNotWritingState`](#vectoruniswapv4indexernotwritingstate)
+— which selects `snapshot_supported="true"` — from paging on a window whose only
+touches were excluded pools, while
+[`VectorUniswapV4IndexerNoPoolsTouched`](#vectoruniswapv4indexernopoolstouched)
+sums the label away and still counts them as proof the routing works.
+
+To change a pool's gate, append a superseding
 registry row with the new `snapshot_supported` value — the same append-only
 correction as any other registry fix
 ([Fixing a bad registry row](#fixing-a-bad-registry-row)) — and restart the
@@ -1859,11 +1866,20 @@ for the affected chain.
 ## VectorUniswapV4IndexerNotWritingState
 
 **Severity:** warning · **For:** 10m
-Gated on `uniswap_v4_pools_touched_total`, not on blocks processed. uniswap-v4
-runs `SnapshotTracker(0)` — no sweep — so it writes state rows only for pools a
-PoolManager log touched in that block, and a quiet market legitimately writes
-nothing. The gate means a quiet window can no longer fire this alert: it fires
-only when pools WERE touched and rows still did not come out.
+Gated on `uniswap_v4_pools_touched_total{snapshot_supported="true"}`, not on
+blocks processed. uniswap-v4 runs `SnapshotTracker(0)` — no sweep — so it writes
+state rows only for pools a PoolManager log touched in that block, and a quiet
+market legitimately writes nothing. The gate means a quiet window can no longer
+fire this alert: it fires only when pools WERE touched and rows still did not
+come out.
+
+The `snapshot_supported="true"` selector matters. `handleBlock` splits the
+touched set by the registry's `snapshot_supported` flag and records both halves
+on this counter; only the supported half reaches the due set, so a pool the
+registry excludes (a dynamic-fee pool, whose `lp_fee` has no log to snapshot on)
+indexes events and never produces a `uniswap_v4_pool_state` row, by design.
+Without the selector, a window whose only touches were excluded pools would page
+with nothing to fix.
 
 This is **one half** of the silent-empty guard. It cannot fire when the touched
 set is always empty (that zeroes its own left side) —
@@ -1872,11 +1888,12 @@ is the other half and covers that class. Neither alone is the whole guard.
 
 ### What it means
 
-Decoded PoolManager events touched registered PoolIds
-(`uniswap_v4_pools_touched_total` is non-zero) but no pool-state snapshot rows
-were written for 30 minutes. `uniswap_v4_state_rows_written_total` counts
-`uniswap_v4_pool_state` inserts only — never `uniswap_v4_tick` rows — so this
-alert is about the state snapshot, not the tick writer.
+Decoded PoolManager events touched registered, snapshot-supported PoolIds
+(`uniswap_v4_pools_touched_total{snapshot_supported="true"}` is non-zero) but no
+pool-state snapshot rows were written for 30 minutes.
+`uniswap_v4_state_rows_written_total` counts `uniswap_v4_pool_state` inserts
+only — never `uniswap_v4_tick` rows — so this alert is about the state snapshot,
+not the tick writer.
 
 The error path will NOT catch this: `snapshotDueSet` silently no-opping, or
 every state `INSERT` hitting `ON CONFLICT DO NOTHING`, produces no error — just
@@ -1896,9 +1913,12 @@ cannot see.
 1. **SQS replay / redrive** — the most common benign cause (see below). Check
    the queue for a redrive before assuming a logic stall.
 2. **Snapshot path** — `pools.touched` is recorded from `handleBlock`'s
-   decode-stage `touchedIDs`, upstream of `DueSet`, so a non-zero gate with zero
+   decode-stage `touchedIDs`, upstream of `DueSet`, split by `snapshot_supported`
+   and labelled with it, so a non-zero `snapshot_supported="true"` gate with zero
    state rows points at everything after it: `snapshotDueSet` no-opping,
-   `buildBlockWrites` dropping the states, or the insert conflicting away.
+   `buildBlockWrites` dropping the states, or the insert conflicting away. To see
+   the split for yourself:
+   `sum by (chain, snapshot_supported) (rate(uniswap_v4_pools_touched_total[30m]))`.
 3. **Not the deploy gate** — a `deploy_block` seeded above the blocks being
    processed cannot cause this alert. `DueSet` hard-errors on that pool
    (`... touched at block B but registry deploy block is D: registry bug`), the
@@ -1931,6 +1951,13 @@ cannot see.
 - Mis-seeded pool key in the registry -> note this suppresses touches too, so it
   shows up as a flat-zero `pools_touched` and fires the *other* alert, not this
   one.
+- **Not** a pool the registry excludes from snapshots
+  (`uniswap_v4_pool.snapshot_supported = false`). Its touches are recorded under
+  `snapshot_supported="false"`, which this alert's gate does not select, so a
+  window whose only activity is a dynamic-fee pool cannot fire it. If you see
+  this alert alongside a registry full of excluded pools, the firing chain still
+  has a genuinely snapshot-supported pool being touched with no rows landing —
+  chase that, not the exclusion.
 
 ### Verify recovery
 

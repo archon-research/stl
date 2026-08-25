@@ -14,6 +14,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	metricsdk "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
@@ -1462,6 +1463,35 @@ func sumCounter(t *testing.T, rm *metricdata.ResourceMetrics, name string) (int6
 	return 0, false
 }
 
+// sumCounterFor is sumCounter narrowed to the datapoints carrying key=value,
+// and whether any such series exists at all. The not-writing-state alert
+// selects on snapshot_supported, so "only excluded pools were touched" has to
+// be observable as an absent series rather than a zero.
+func sumCounterFor(t *testing.T, rm *metricdata.ResourceMetrics, name, key, value string) (int64, bool) {
+	t.Helper()
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != name {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("metric %s is %T, want Sum[int64]", name, m.Data)
+			}
+			var total int64
+			present := false
+			for _, dp := range sum.DataPoints {
+				if got, ok := dp.Attributes.Value(attribute.Key(key)); ok && got.AsString() == value {
+					total += dp.Value
+					present = true
+				}
+			}
+			return total, present
+		}
+	}
+	return 0, false
+}
+
 func collect(t *testing.T, reader *metricsdk.ManualReader) *metricdata.ResourceMetrics {
 	t.Helper()
 	var rm metricdata.ResourceMetrics
@@ -1541,6 +1571,51 @@ func TestBlockHandler_PoolsTouchedCountsTouchedNotDue(t *testing.T) {
 
 	if touched, _ := sumCounter(t, collect(t, reader), "uniswap_v4.pools.touched"); touched != 1 {
 		t.Errorf("uniswap_v4.pools.touched = %d, want 1 (the reorg block touched nothing)", touched)
+	}
+}
+
+// A pool the registry excludes from snapshots writes no state row by design, so
+// a block whose only touch is one of them must record under
+// snapshot_supported="false" alone: the absent "true" series is what keeps
+// VectorUniswapV4IndexerNotWritingState un-fireable, and the present "false"
+// one is what still feeds VectorUniswapV4IndexerNoPoolsTouched, which
+// aggregates the label away.
+func TestBlockHandler_ExcludedPoolTouchRecordsOnlyTheUnsupportedSeries(t *testing.T) {
+	pool := dynamicFeeServicePool(t)
+	svc, _, reader := newTelemetryService(t, []RegisteredPool{pool})
+
+	receipt := shared.TransactionReceipt{Logs: []shared.Log{swapLog(t, pool, "0x0")}}
+	if err := svc.BlockHandler()(context.Background(), blockEvent(200), []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("BlockHandler: %v", err)
+	}
+
+	rm := collect(t, reader)
+	if touched, ok := sumCounterFor(t, rm, "uniswap_v4.pools.touched", "snapshot_supported", "true"); ok {
+		t.Errorf("uniswap_v4.pools.touched{snapshot_supported=true} = %d, want the series absent (no snapshottable pool was touched)", touched)
+	}
+	if touched, ok := sumCounterFor(t, rm, "uniswap_v4.pools.touched", "snapshot_supported", "false"); !ok || touched != 1 {
+		t.Errorf("uniswap_v4.pools.touched{snapshot_supported=false} = %d (present=%t), want 1", touched, ok)
+	}
+}
+
+func TestBlockHandler_SplitsPoolsTouchedBySnapshotSupport(t *testing.T) {
+	snapshottable, excluded := servicePool(), dynamicFeeServicePool(t)
+	svc, _, reader := newTelemetryService(t, []RegisteredPool{snapshottable, excluded})
+
+	receipt := shared.TransactionReceipt{Logs: []shared.Log{
+		swapLog(t, snapshottable, "0x0"),
+		swapLog(t, excluded, "0x1"),
+	}}
+	if err := svc.BlockHandler()(context.Background(), blockEvent(200), []shared.TransactionReceipt{receipt}); err != nil {
+		t.Fatalf("BlockHandler: %v", err)
+	}
+
+	rm := collect(t, reader)
+	if touched, ok := sumCounterFor(t, rm, "uniswap_v4.pools.touched", "snapshot_supported", "true"); !ok || touched != 1 {
+		t.Errorf("uniswap_v4.pools.touched{snapshot_supported=true} = %d (present=%t), want 1", touched, ok)
+	}
+	if touched, ok := sumCounterFor(t, rm, "uniswap_v4.pools.touched", "snapshot_supported", "false"); !ok || touched != 1 {
+		t.Errorf("uniswap_v4.pools.touched{snapshot_supported=false} = %d (present=%t), want 1", touched, ok)
 	}
 }
 
