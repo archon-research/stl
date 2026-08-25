@@ -123,6 +123,19 @@ validated against staging: the per-user borrow sum matches the reserve-level
 total debt within 0.6% (interest accrual since each user's last event), and a
 full CRR computed end to end on the live frame.
 
+**Valuation oracle (25 Aug 2026):** positions are valued with the protocol's
+own oracle, resolved through `protocol_oracle` and read from
+`token_price_current` by token id — SparkLend with `sparklend` (the Aave-style
+oracle that triggers its liquidations), Morpho with `chainlink`, because Blue's
+per-market oracle contracts are not indexed (a small deviation: Chainlink USD
+feeds instead of each market's own oracle). Before this the reader took the
+newest row across *every* oracle, so the price source of a run was arbitrary
+(staging: WBTC via Chainlink at 79037 while SparkLend's oracle said 79012).
+Freshness is checked per feed, not per token: the oracle worker writes a row
+only when a price changes, so SparkLend's fixed $1 stables last wrote at the
+worker's restart 42 days earlier while the feed as a whole ticks every block.
+A per-token age bound would fail every SparkLend run on those tokens.
+
 Known deviations from BA's snapshot semantics (all conservative or negligible;
 also documented in the reader module):
 

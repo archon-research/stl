@@ -10,7 +10,7 @@ Note that CRR is an expected loss, not a tail loss by construction. However, the
 
 This directory contains the CORE model as integrated into the STL service. The original standalone version lives in [`core_model_copy/`](https://github.com/TWave-code/core_model_copy). The integration wires CORE as a first-class `RiskModel` backed by a pre-compute cronjob and a thin API service that reads the results.
 
-Each market picks its data sources per input via the `*_SOURCE` flags in `inputs/market_configs.json` — `postgres` reads the live tables, `parquet` the static snapshots (6 of 9 markets run fully live; `CORE_MODEL_*_SOURCE` env vars override globally, e.g. the dev overlay pins local kind back to parquet). [`DATA_GAPS.md`](DATA_GAPS.md) tracks what keeps the rest on parquet, and what brings each one back.
+Each market picks its data sources per input via the `*_SOURCE` flags in `inputs/market_configs.json` — `postgres` reads the live tables, `parquet` the static snapshots (that file is the list of which markets run live; `CORE_MODEL_*_SOURCE` env vars override globally, e.g. the dev overlay pins local kind back to parquet). [`DATA_GAPS.md`](DATA_GAPS.md) tracks what keeps the rest on parquet, and what brings each one back.
 
 ---
 

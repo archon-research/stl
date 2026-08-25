@@ -5,7 +5,13 @@ model consumes a wide per-user frame (per-asset ``<sym>_supply``,
 ``<sym>_supply_usd``, ``<sym>_borrow``, ``<sym>_borrow_usd`` plus aggregate
 columns) and a market frame of oracle prices for the simulated collaterals;
 this adapter reproduces both shapes from ``borrower`` /
-``borrower_collateral`` / ``sparklend_reserve_data`` / ``onchain_token_price``.
+``borrower_collateral`` / ``sparklend_reserve_data`` / ``token_price_current``.
+
+Positions are valued with the protocol's own oracle (``_PROTOCOL_ORACLE``,
+checked against ``protocol_oracle``), joined by token id — never by symbol.
+Freshness is a property of the feed, not of a token: the oracle worker writes
+a row only when a price changes, so a fixed $1 feed legitimately stays silent
+for weeks while the feed as a whole ticks every block.
 
 Aggregate semantics were reverse-engineered from BA's parquet rows and
 reproduce them exactly:
@@ -34,7 +40,7 @@ from typing import Any
 
 import pandas as pd
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from app.adapters.postgres.core_model_orderbook_reader import BTC_GROUP, ETH_GROUP
 
@@ -44,8 +50,38 @@ logger = logging.getLogger(__name__)
 # supplies is carried at constant USD (the model's "unmodeled" bucket).
 MODELED_COLLATERALS = frozenset(ETH_GROUP | BTC_GROUP | {"XRP", "SOL", "JITOSOL", "HYPE"})
 
+# The oracle each protocol's positions are valued with. Explicit on purpose:
+# protocol_oracle binds SparkLend to two oracles, and "newest row across every
+# oracle" made the price source of each run arbitrary.
+_PROTOCOL_ORACLE: dict[str, tuple[str, str]] = {
+    "SPARKLEND": ("SparkLend", "sparklend"),
+    # Blue markets carry per-market oracle contracts we do not index; the
+    # registered Chainlink feeds stand in (DATA_GAPS.md §3).
+    "MORPHO": ("Morpho Blue", "chainlink"),
+}
+
+_ORACLE_ID = text("""
+    SELECT o.id
+    FROM protocol_oracle po
+    JOIN protocol p ON p.id = po.protocol_id
+    JOIN oracle o ON o.id = po.oracle_id
+    WHERE p.chain_id = :chain_id AND p.name = :protocol_name AND o.name = :oracle_name
+    ORDER BY po.from_block DESC
+    LIMIT 1
+""")
+
+# A feed that wrote nothing at all in the window is the dead-indexer case; a
+# single token's old row is not (rows are written only when a price changes).
+_FEED_ALIVE = text("""
+    SELECT 1
+    FROM onchain_token_price
+    WHERE oracle_id = :oracle_id AND "timestamp" > now() - CAST(:max_age AS interval)
+    LIMIT 1
+""")
+
 # Latest state per (user, token) per side, snapshot-read per db/migrations
 # AGENTS: order by the snapshot-time key then processing_version, never build_id.
+# Priced by token id from the oracle's current-price cache; NULL = unpriced.
 _POSITIONS = text("""
     WITH latest_borrow AS (
         SELECT DISTINCT ON (b.user_id, b.token_id) b.user_id, b.token_id, b.amount
@@ -61,16 +97,19 @@ _POSITIONS = text("""
         WHERE p.chain_id = :chain_id AND p.name = :protocol_name
         ORDER BY c.user_id, c.token_id, c.block_number DESC, c.block_version DESC, c.processing_version DESC
     )
-    SELECT 'borrow' AS side, u.address AS user_address, t.symbol, t.decimals, lb.amount, true AS collateral_enabled
+    SELECT 'borrow' AS side, u.address AS user_address, t.id AS token_id, t.symbol, t.decimals,
+           lb.amount, true AS collateral_enabled, pr.price_usd
     FROM latest_borrow lb
     JOIN "user" u ON u.id = lb.user_id
     JOIN token t ON t.id = lb.token_id
+    LEFT JOIN token_price_current pr ON pr.oracle_id = :oracle_id AND pr.token_id = lb.token_id
     WHERE lb.amount > 0
     UNION ALL
-    SELECT 'supply', u.address, t.symbol, t.decimals, ls.amount, ls.collateral_enabled
+    SELECT 'supply', u.address, t.id, t.symbol, t.decimals, ls.amount, ls.collateral_enabled, pr.price_usd
     FROM latest_supply ls
     JOIN "user" u ON u.id = ls.user_id
     JOIN token t ON t.id = ls.token_id
+    LEFT JOIN token_price_current pr ON pr.oracle_id = :oracle_id AND pr.token_id = ls.token_id
     WHERE ls.amount > 0
 """)
 
@@ -83,57 +122,27 @@ _RESERVE_PARAMS = text("""
     JOIN protocol p ON p.id = srd.protocol_id
     JOIN token t ON t.id = srd.token_id
     WHERE p.chain_id = :chain_id AND p.name = :protocol_name
-      -- The only writer always sets the threshold from getReserveConfigurationData
-      -- (decode fails loudly on a missing field), so this filter can never mask a
-      -- newer NULL row; it only skips historical rows written before that path.
+      -- The only writer always sets it (decode fails on a missing field); this
+      -- filter only skips historical rows written before that path existed.
       AND srd.liquidation_threshold IS NOT NULL
     ORDER BY srd.token_id, srd.block_number DESC, srd.block_version DESC, srd.processing_version DESC
 """)
-
-# Freshness-bounded like the orderbook reader: a "latest" price older than the
-# bound disappears here, so the frame builders' unpriced-token check fails the
-# run instead of valuing live positions at an arbitrarily old price.
-_ORACLE_PRICES = text("""
-    SELECT DISTINCT ON (otp.token_id) t.symbol, otp.price_usd
-    FROM onchain_token_price otp
-    JOIN token t ON t.id = otp.token_id
-    WHERE t.chain_id = :chain_id
-      AND otp."timestamp" > now() - CAST(:max_age AS interval)
-    ORDER BY otp.token_id, otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC
-""")
-
-
-def build_price_map(price_rows: Sequence[Any], used_symbols: set[str]) -> dict[str, float]:
-    """``{SYMBOL: price}`` from per-token rows, refusing symbol collisions.
-
-    Token symbols are display labels, not identifiers (chain 1 holds several
-    distinct "USDC" rows). Two priced tokens sharing a symbol the frames
-    consume would let an arbitrary token's price win silently, so that is an
-    error; collisions on symbols nothing here reads are ignored.
-    """
-    prices: dict[str, float] = {}
-    collisions: set[str] = set()
-    for row in price_rows:
-        symbol = row.symbol.upper()
-        if symbol in prices:
-            collisions.add(symbol)
-        prices[symbol] = float(row.price_usd)
-    ambiguous = sorted(collisions & used_symbols)
-    if ambiguous:
-        raise ValueError(
-            f"ambiguous token symbol(s) {ambiguous}: multiple token rows on this chain carry "
-            "oracle prices under the same symbol; refusing a symbol-keyed price lookup"
-        )
-    return prices
 
 
 @dataclass(frozen=True)
 class PositionRow:
     side: str  # "borrow" | "supply"
     user_address: str
+    token_id: int
     symbol: str
     amount: float  # token units, decimals already applied
     collateral_enabled: bool
+    price: float | None  # USD per token from the protocol oracle; None = unpriced
+
+
+def supply_prices(positions: Sequence[PositionRow]) -> dict[str, float]:
+    """``{SYMBOL: price}`` of the priced supplied tokens — the market frame's input."""
+    return {p.symbol.upper(): p.price for p in positions if p.side == "supply" and p.price is not None}
 
 
 def build_market_frame(supplied_symbols: set[str], prices: dict[str, float]) -> pd.DataFrame:
@@ -148,7 +157,6 @@ def build_market_frame(supplied_symbols: set[str], prices: dict[str, float]) -> 
 def build_users_frame(
     positions: list[PositionRow],
     reserve_params: dict[str, tuple[float, float]],  # symbol -> (LT, bonus), both fractions
-    prices: dict[str, float],
     loan_token: str,
 ) -> pd.DataFrame:
     """Assemble the wide per-user frame the model consumes.
@@ -158,14 +166,27 @@ def build_users_frame(
     """
     users: dict[str, dict[str, float]] = {}
     enabled: dict[tuple[str, str], bool] = {}
+    prices: dict[str, float | None] = {}
+    tokens_by_symbol: dict[str, set[int]] = {}
     for row in positions:
         cols = users.setdefault(row.user_address, {})
         sym = row.symbol.lower()
+        prices[row.symbol.upper()] = row.price
+        tokens_by_symbol.setdefault(row.symbol.upper(), set()).add(row.token_id)
         if row.side == "borrow":
             cols[f"{sym}_borrow"] = cols.get(f"{sym}_borrow", 0.0) + row.amount
         else:
             cols[f"{sym}_supply"] = cols.get(f"{sym}_supply", 0.0) + row.amount
             enabled[(row.user_address, row.symbol.upper())] = row.collateral_enabled
+
+    # The wide frame keys columns by symbol, so two distinct tokens sharing one
+    # cannot be represented — refuse rather than merge a spoof into the real one.
+    ambiguous = sorted(s for s, ids in tokens_by_symbol.items() if len(ids) > 1)
+    if ambiguous:
+        raise ValueError(
+            f"symbol(s) {ambiguous} are held as more than one distinct token (ids "
+            f"{[sorted(tokens_by_symbol[s]) for s in ambiguous]}); refusing a symbol-keyed frame"
+        )
 
     unpriced: set[str] = set()
     dropped_no_collateral: list[tuple[str, float]] = []
@@ -215,8 +236,7 @@ def build_users_frame(
 
     if unpriced:
         raise ValueError(
-            f"no fresh oracle price for supplied/borrowed token(s) {sorted(unpriced)} "
-            "(missing feed, or older than the reader's freshness bound); "
+            f"no protocol-oracle price for supplied/borrowed token(s) {sorted(unpriced)}; "
             "refusing to build users with silent USD holes"
         )
     if dropped_no_collateral:
@@ -244,12 +264,14 @@ _MORPHO_POSITIONS = text("""
     WITH markets AS (
         SELECT mm.id, mm.lltv / 1e18 AS lltv,
                ct.symbol AS collateral_symbol, ct.decimals AS collateral_decimals,
-               ct.address AS collateral_address,
+               ct.address AS collateral_address, cp.price_usd AS collateral_price,
                lt.symbol AS loan_symbol, lt.decimals AS loan_decimals,
-               lt.address AS loan_address
+               lt.address AS loan_address, lp.price_usd AS loan_price
         FROM morpho_market mm
         JOIN token ct ON ct.id = mm.collateral_token_id
         JOIN token lt ON lt.id = mm.loan_token_id
+        LEFT JOIN token_price_current cp ON cp.oracle_id = :oracle_id AND cp.token_id = mm.collateral_token_id
+        LEFT JOIN token_price_current lp ON lp.oracle_id = :oracle_id AND lp.token_id = mm.loan_token_id
         WHERE mm.chain_id = :chain_id
           AND upper(ct.symbol) = :collateral AND upper(lt.symbol) = :loan
     ),
@@ -262,8 +284,8 @@ _MORPHO_POSITIONS = text("""
                  mp.block_number DESC, mp.block_version DESC, mp.processing_version DESC
     )
     SELECT u.address AS user_address, m.lltv,
-           m.collateral_symbol, m.collateral_decimals, m.collateral_address,
-           m.loan_symbol, m.loan_decimals, m.loan_address,
+           m.collateral_symbol, m.collateral_decimals, m.collateral_address, m.collateral_price,
+           m.loan_symbol, m.loan_decimals, m.loan_address, m.loan_price,
            l.collateral, l.borrow_assets
     FROM latest l
     JOIN markets m ON m.id = l.morpho_market_id
@@ -276,7 +298,7 @@ def morpho_liquidation_incentive(lltv: float) -> float:
     return min(_MORPHO_LIF_CAP, 1.0 / (_MORPHO_BETA * lltv + (1.0 - _MORPHO_BETA)))
 
 
-def build_morpho_users_frame(rows: Sequence[Any], prices: dict[str, float]) -> pd.DataFrame:
+def build_morpho_users_frame(rows: Sequence[Any]) -> pd.DataFrame:
     """Assemble the Morpho users frame: one row per borrower of the pair.
 
     A wallet borrowing across several LLTV tranches of the same pair collapses
@@ -289,8 +311,8 @@ def build_morpho_users_frame(rows: Sequence[Any], prices: dict[str, float]) -> p
     dropped_no_collateral: list[tuple[str, float]] = []
     for r in rows:
         collat_sym, loan_sym = r.collateral_symbol.upper(), r.loan_symbol.upper()
-        if collat_sym not in prices or loan_sym not in prices:
-            unpriced.update({s for s in (collat_sym, loan_sym) if s not in prices})
+        if r.collateral_price is None or r.loan_price is None:
+            unpriced.update(s for s, p in ((collat_sym, r.collateral_price), (loan_sym, r.loan_price)) if p is None)
             continue
         address = "0x" + bytes(r.user_address).hex()
         collateral_qty = float(Decimal(str(r.collateral)) / (Decimal(10) ** int(r.collateral_decimals)))
@@ -299,19 +321,17 @@ def build_morpho_users_frame(rows: Sequence[Any], prices: dict[str, float]) -> p
             address,
             {"collateral_qty": 0.0, "collateral_usd": 0.0, "borrow_qty": 0.0, "borrow_usd": 0.0, "lltv_weighted": 0.0},
         )
-        collateral_usd = collateral_qty * prices[collat_sym]
+        collateral_usd = collateral_qty * float(r.collateral_price)
         agg["collateral_qty"] += collateral_qty
         agg["collateral_usd"] += collateral_usd
         agg["borrow_qty"] += borrow_qty
-        agg["borrow_usd"] += borrow_qty * prices[loan_sym]
+        agg["borrow_usd"] += borrow_qty * float(r.loan_price)
         agg["lltv_weighted"] += float(r.lltv) * collateral_usd
         agg["symbols"] = (collat_sym, loan_sym)
 
     if unpriced:
         raise ValueError(
-            f"no fresh oracle price for token(s) {sorted(unpriced)} "
-            "(missing feed, or older than the reader's freshness bound); "
-            "refusing to build users with silent USD holes"
+            f"no protocol-oracle price for token(s) {sorted(unpriced)}; refusing to build users with silent USD holes"
         )
 
     records = []
@@ -349,22 +369,34 @@ def build_morpho_users_frame(rows: Sequence[Any], prices: dict[str, float]) -> p
 
 
 class PostgresPositionsReader:
-    """``get_protocol_data`` from the live tables. SparkLend and Morpho on Ethereum."""
+    """``get_protocol_data`` from the live tables. SparkLend and Morpho on Ethereum.
 
-    def __init__(
-        self,
-        engine: AsyncEngine,
-        chain_id: int = 1,
-        protocol_name: str = "SparkLend",
-        max_price_age: timedelta = timedelta(days=2),
-    ) -> None:
+    ``max_feed_age`` bounds how long the protocol's oracle feed may have been
+    silent as a whole; single tokens carry no age bound (see module docstring).
+    """
+
+    def __init__(self, engine: AsyncEngine, chain_id: int = 1, max_feed_age: timedelta = timedelta(days=2)) -> None:
         self._engine = engine
         self._chain_id = chain_id
-        self._protocol_name = protocol_name
-        # Bounds how old a "latest" valuation price may be, mirroring the
-        # orderbook reader's freshness rule; the daily oracle cadence makes
-        # anything past ~2 days a dead feed, not a quiet market.
-        self._max_price_age = max_price_age
+        self._max_feed_age = max_feed_age
+
+    async def _live_oracle_id(self, conn: AsyncConnection, protocol_key: str) -> int:
+        """Id of the protocol's valuation oracle, refusing a binding that is missing or a feed that is silent."""
+        protocol_name, oracle_name = _PROTOCOL_ORACLE[protocol_key]
+        params = {"chain_id": self._chain_id, "protocol_name": protocol_name, "oracle_name": oracle_name}
+        oracle_id = (await conn.execute(_ORACLE_ID, params)).scalar_one_or_none()
+        if oracle_id is None:
+            raise ValueError(
+                f"oracle {oracle_name!r} is not bound to protocol {protocol_name!r} on chain {self._chain_id} "
+                "in protocol_oracle; refusing to value positions with an unregistered oracle"
+            )
+        alive = await conn.execute(_FEED_ALIVE, {"oracle_id": oracle_id, "max_age": self._max_feed_age})
+        if alive.scalar_one_or_none() is None:
+            raise ValueError(
+                f"oracle feed {oracle_name!r} wrote no price in the last {self._max_feed_age}; "
+                "refusing to value positions on a dead feed — is oracle-price-worker running?"
+            )
+        return int(oracle_id)
 
     async def get_protocol_data(
         self,
@@ -383,32 +415,32 @@ class PostgresPositionsReader:
                 f"live positions are only implemented for SPARKLEND and MORPHO, got {protocol}. "
                 "See app/risk_engine/core_model/DATA_GAPS.md."
             )
-        params = {"chain_id": self._chain_id, "protocol_name": self._protocol_name}
+        protocol_name, _ = _PROTOCOL_ORACLE["SPARKLEND"]
+        params = {"chain_id": self._chain_id, "protocol_name": protocol_name}
         async with self._engine.connect() as conn:
-            position_rows = (await conn.execute(_POSITIONS, params)).fetchall()
+            oracle_id = await self._live_oracle_id(conn, "SPARKLEND")
+            position_rows = (await conn.execute(_POSITIONS, {**params, "oracle_id": oracle_id})).fetchall()
             reserve_rows = (await conn.execute(_RESERVE_PARAMS, params)).fetchall()
-            price_rows = (
-                await conn.execute(_ORACLE_PRICES, {"chain_id": self._chain_id, "max_age": self._max_price_age})
-            ).fetchall()
 
         positions = [
             PositionRow(
                 side=r.side,
                 user_address="0x" + bytes(r.user_address).hex(),
+                token_id=int(r.token_id),
                 symbol=r.symbol,
                 amount=float(Decimal(str(r.amount)) / (Decimal(10) ** int(r.decimals))),
                 collateral_enabled=bool(r.collateral_enabled),
+                price=None if r.price_usd is None else float(r.price_usd),
             )
             for r in position_rows
         ]
         reserve_params = {
             r.symbol.upper(): (float(r.liquidation_threshold), float(r.liquidation_bonus)) for r in reserve_rows
         }
-        prices = build_price_map(price_rows, used_symbols={p.symbol.upper() for p in positions})
 
-        users_df = build_users_frame(positions, reserve_params, prices, loan_token)
+        users_df = build_users_frame(positions, reserve_params, loan_token)
         supplied = {c.rsplit("_", 1)[0].upper() for c in users_df.columns if c.endswith("_supply")}
-        market_df = build_market_frame(supplied, prices)
+        market_df = build_market_frame(supplied, supply_prices(positions))
         logger.info(
             "positions loaded from live tables: %d borrowers, %d modeled collaterals (loan_token=%s)",
             len(users_df),
@@ -419,23 +451,20 @@ class PostgresPositionsReader:
 
     async def _get_morpho_data(self, collateral: str, loan_token: str) -> tuple[pd.DataFrame, pd.DataFrame]:
         async with self._engine.connect() as conn:
+            oracle_id = await self._live_oracle_id(conn, "MORPHO")
             rows = (
                 await conn.execute(
                     _MORPHO_POSITIONS,
-                    {"chain_id": self._chain_id, "collateral": collateral, "loan": loan_token},
+                    {"chain_id": self._chain_id, "collateral": collateral, "loan": loan_token, "oracle_id": oracle_id},
                 )
-            ).fetchall()
-            price_rows = (
-                await conn.execute(_ORACLE_PRICES, {"chain_id": self._chain_id, "max_age": self._max_price_age})
             ).fetchall()
         if not rows:
             raise ValueError(
                 f"no morpho_market rows (or no borrowers) for {collateral}/{loan_token} on chain "
                 f"{self._chain_id} — is the morpho indexer running?"
             )
-        # Blue is permissionless and markets were matched by display symbol, so
-        # a spoofed token named like the real one would sweep its borrowers in
-        # here — refuse unless every matched market agrees on the addresses.
+        # Blue is permissionless and markets are matched by display symbol: refuse
+        # unless every matched market (only those with borrowers) agrees on addresses.
         for side, addresses in (
             ("collateral", {bytes(r.collateral_address) for r in rows}),
             ("loan", {bytes(r.loan_address) for r in rows}),
@@ -446,9 +475,10 @@ class PostgresPositionsReader:
                     f"{len(addresses)} distinct addresses ({sorted('0x' + a.hex() for a in addresses)}); "
                     "refusing a symbol-keyed market selection"
                 )
-        prices = build_price_map(price_rows, used_symbols={collateral, loan_token})
-        users_df = build_morpho_users_frame(rows, prices)
-        market_df = build_market_frame({collateral}, prices)
+        users_df = build_morpho_users_frame(rows)
+        market_df = build_market_frame(
+            {collateral}, {collateral: float(r.collateral_price) for r in rows if r.collateral_price is not None}
+        )
         logger.info(
             "morpho positions loaded from live tables: %d borrowers of %s/%s across %d tranche row(s)",
             len(users_df),

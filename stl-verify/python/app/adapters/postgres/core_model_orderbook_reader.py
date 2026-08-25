@@ -36,15 +36,14 @@ _BOOK_SYMBOLS: dict[str, list[str]] = {
 ETH_GROUP = frozenset({"ETH", "WETH", "STETH", "WSTETH", "WEETH", "RETH", "RSETH", "EZETH"})
 BTC_GROUP = frozenset({"BTC", "WBTC", "LBTC", "TBTC", "CBBTC"})
 
-# One snapshot per venue, not per (venue, symbol): a venue listing two symbols
-# from the same book list (BTC-USD and BTC-USDT, say) must not count its depth
-# twice.
+# One snapshot per venue, not per (venue, symbol), so a venue listing two book
+# symbols never counts its depth twice; the list order breaks the tie, not recency.
 _LATEST_FRESH_PER_VENUE = text("""
     SELECT DISTINCT ON (exchange) exchange, symbol, persisted_at, asks
     FROM cex_orderbook_snapshots
     WHERE symbol = ANY(:symbols)
       AND persisted_at > now() - CAST(:max_age AS interval)
-    ORDER BY exchange, persisted_at DESC
+    ORDER BY exchange, array_position(CAST(:symbols AS text[]), symbol), persisted_at DESC
 """)
 
 

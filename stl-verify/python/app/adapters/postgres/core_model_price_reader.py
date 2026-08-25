@@ -44,12 +44,12 @@ _DAILY_CLOSES = text("""
 # Symbols are display labels, not identifiers: two priced tokens sharing one
 # would interleave into a single series above, so that is refused up front.
 _AMBIGUOUS_SYMBOLS = text("""
-    SELECT upper(t.symbol) AS symbol, count(DISTINCT t.id) AS token_count
-    FROM onchain_token_price p
-    JOIN token t ON t.id = p.token_id
+    SELECT upper(t.symbol) AS symbol, count(*) AS token_count
+    FROM token t
     WHERE t.chain_id = :chain_id AND upper(t.symbol) = ANY(:symbols)
+      AND EXISTS (SELECT 1 FROM onchain_token_price p WHERE p.token_id = t.id)
     GROUP BY upper(t.symbol)
-    HAVING count(DISTINCT t.id) > 1
+    HAVING count(*) > 1
 """)
 
 

@@ -51,12 +51,14 @@ async def test_only_the_newest_snapshot_per_venue_is_used(engine):
     assert list(books["WETH"]["price"]) == [2000.0]
 
 
-async def test_one_venue_listing_two_book_symbols_counts_once(engine):
-    await _seed(engine, "coinbase", "BTC-USDT", [["59000.0", "9.0"]], age=timedelta(minutes=5))
-    await _seed(engine, "coinbase", "BTC-USD", [["60000.0", "1.0"]], age=timedelta(seconds=1))
+async def test_one_venue_listing_two_book_symbols_counts_once_in_list_order(engine):
+    await _seed(engine, "coinbase", "BTC-USD", [["60000.0", "1.0"]], age=timedelta(minutes=5))
+    await _seed(engine, "coinbase", "BTC-USDT", [["59000.0", "9.0"]], age=timedelta(seconds=1))
 
     books = await PostgresOrderbookReader(engine).get_orderbooks(["WBTC"])
-    assert list(books["WBTC"]["price"]) == [60000.0]  # newest snapshot only; depth never counted twice
+    # BTC-USD is listed first for the BTC book, so it wins over the newer USDT
+    # snapshot; either way the venue's depth is counted once.
+    assert list(books["WBTC"]["price"]) == [60000.0]
 
 
 async def test_every_token_of_a_group_gets_the_shared_book_without_aliasing(engine):

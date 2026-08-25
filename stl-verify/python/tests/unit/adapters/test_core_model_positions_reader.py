@@ -8,24 +8,30 @@ from app.adapters.postgres.core_model_positions_reader import (
     PositionRow,
     build_market_frame,
     build_morpho_users_frame,
-    build_price_map,
     build_users_frame,
     morpho_liquidation_incentive,
+    supply_prices,
 )
 
 _PRICES = {"WETH": 2000.0, "WSTETH": 2400.0, "USDT": 1.0, "USDS": 1.0, "DAI": 1.0}
+_TOKEN_IDS = {"WETH": 1, "WSTETH": 2, "USDT": 3, "USDS": 4, "DAI": 5, "EXOTIC": 6}
 _RESERVES = {"WETH": (0.86, 1.05), "WSTETH": (0.84, 1.07), "USDS": (0.0, 0.0)}
 
 
+def _row(side, address, sym, qty, enabled, token_id=None):
+    """A position row as the SQL returns it: priced by token id, or None when the oracle has no row."""
+    return PositionRow(side, address, token_id or _TOKEN_IDS[sym], sym, qty, enabled, _PRICES.get(sym))
+
+
 def _user(address="0xaaa", supplies=(), borrows=()):
-    rows = [PositionRow("supply", address, sym, qty, enabled) for sym, qty, enabled in supplies]
-    rows += [PositionRow("borrow", address, sym, qty, True) for sym, qty in borrows]
+    rows = [_row("supply", address, sym, qty, enabled) for sym, qty, enabled in supplies]
+    rows += [_row("borrow", address, sym, qty, True) for sym, qty in borrows]
     return rows
 
 
 def test_wide_columns_match_the_parquet_shape():
     rows = _user(supplies=[("WETH", 10.0, True)], borrows=[("USDT", 5000.0)])
-    df = build_users_frame(rows, _RESERVES, _PRICES, "USDT")
+    df = build_users_frame(rows, _RESERVES, "USDT")
     row = df.iloc[0]
     assert row["weth_supply"] == 10.0
     assert row["weth_supply_usd"] == 20000.0
@@ -43,7 +49,7 @@ def test_aggregates_reproduce_ba_semantics():
         supplies=[("WETH", 10.0, True), ("WSTETH", 5.0, True), ("USDS", 1000.0, True)],
         borrows=[("USDT", 10000.0)],
     )
-    df = build_users_frame(rows, _RESERVES, _PRICES, "USDT")
+    df = build_users_frame(rows, _RESERVES, "USDT")
     row = df.iloc[0]
     total = 20000.0 + 12000.0 + 1000.0
     lt = 20000.0 * 0.86 + 12000.0 * 0.84
@@ -57,10 +63,10 @@ def test_aggregates_reproduce_ba_semantics():
 
 def test_disabled_collateral_keeps_its_supply_but_protects_nothing():
     enabled = build_users_frame(
-        _user(supplies=[("WETH", 10.0, True)], borrows=[("USDT", 1000.0)]), _RESERVES, _PRICES, "USDT"
+        _user(supplies=[("WETH", 10.0, True)], borrows=[("USDT", 1000.0)]), _RESERVES, "USDT"
     ).iloc[0]
     disabled = build_users_frame(
-        _user(supplies=[("WETH", 10.0, False)], borrows=[("USDT", 1000.0)]), _RESERVES, _PRICES, "USDT"
+        _user(supplies=[("WETH", 10.0, False)], borrows=[("USDT", 1000.0)]), _RESERVES, "USDT"
     ).iloc[0]
     assert disabled["weth_supply_usd"] == enabled["weth_supply_usd"] == 20000.0
     assert enabled["health_factor"] > 0
@@ -70,21 +76,30 @@ def test_disabled_collateral_keeps_its_supply_but_protects_nothing():
 def test_users_not_borrowing_the_loan_token_are_excluded():
     rows = _user("0xaaa", supplies=[("WETH", 1.0, True)], borrows=[("USDT", 100.0)])
     rows += _user("0xbbb", supplies=[("WETH", 1.0, True)], borrows=[("DAI", 100.0)])
-    df = build_users_frame(rows, _RESERVES, _PRICES, "USDT")
+    df = build_users_frame(rows, _RESERVES, "USDT")
     assert list(df["wallet_address"]) == ["0xaaa"]
 
 
 def test_loan_token_all_keeps_every_borrower():
     rows = _user("0xaaa", supplies=[("WETH", 1.0, True)], borrows=[("USDT", 100.0)])
     rows += _user("0xbbb", supplies=[("WETH", 1.0, True)], borrows=[("DAI", 100.0)])
-    df = build_users_frame(rows, _RESERVES, _PRICES, "ALL")
+    df = build_users_frame(rows, _RESERVES, "ALL")
     assert len(df) == 2
 
 
 def test_an_unpriced_token_fails_the_build():
     rows = _user(supplies=[("WETH", 1.0, True), ("EXOTIC", 5.0, True)], borrows=[("USDT", 100.0)])
     with pytest.raises(ValueError, match="EXOTIC"):
-        build_users_frame(rows, _RESERVES, _PRICES, "USDT")
+        build_users_frame(rows, _RESERVES, "USDT")
+
+
+def test_two_distinct_tokens_sharing_a_held_symbol_are_refused():
+    # The wide frame keys columns by symbol; a spoofed second "WETH" would
+    # silently merge into the real one's column, so it is refused instead.
+    rows = _user(supplies=[("WETH", 1.0, True)], borrows=[("USDT", 100.0)])
+    rows.append(_row("supply", "0xbbb", "WETH", 1.0, True, token_id=42))
+    with pytest.raises(ValueError, match=r"WETH.*more than one distinct token"):
+        build_users_frame(rows, _RESERVES, "USDT")
 
 
 def test_zero_collateral_borrowers_are_excluded_not_nan_poison():
@@ -93,7 +108,7 @@ def test_zero_collateral_borrowers_are_excluded_not_nan_poison():
     # (found running against real staging data).
     rows = _user("0xaaa", supplies=[("WETH", 1.0, True)], borrows=[("USDT", 100.0)])
     rows += _user("0xdust", supplies=[], borrows=[("USDT", 2.63)])
-    df = build_users_frame(rows, _RESERVES, _PRICES, "USDT")
+    df = build_users_frame(rows, _RESERVES, "USDT")
     assert list(df["wallet_address"]) == ["0xaaa"]
     assert not df.isin([float("inf")]).any().any()
 
@@ -101,7 +116,12 @@ def test_zero_collateral_borrowers_are_excluded_not_nan_poison():
 def test_no_borrowers_fails_rather_than_returning_an_empty_market():
     rows = _user(supplies=[("WETH", 1.0, True)], borrows=[("DAI", 100.0)])
     with pytest.raises(ValueError, match="no active borrowers"):
-        build_users_frame(rows, _RESERVES, _PRICES, "USDT")
+        build_users_frame(rows, _RESERVES, "USDT")
+
+
+def test_supply_prices_cover_only_the_priced_supplied_tokens():
+    rows = _user(supplies=[("WETH", 1.0, True), ("EXOTIC", 1.0, True)], borrows=[("USDT", 5.0)])
+    assert supply_prices(rows) == {"WETH": 2000.0}
 
 
 def test_market_frame_contains_only_modeled_collaterals():
@@ -118,21 +138,27 @@ def test_market_frame_fails_on_a_modeled_collateral_without_a_price():
 # Morpho Blue
 
 
-def _morpho_row(address_bytes=b"\xaa" * 20, lltv=0.86, collateral=430_000, borrow_assets=260_000_000):
-    """One (user, tranche) row as the SQL returns it: raw units, cbBTC 8 dp, USDC 6 dp."""
+def _morpho_row(
+    address_bytes=b"\xaa" * 20,
+    lltv=0.86,
+    collateral=430_000,
+    borrow_assets=260_000_000,
+    collateral_price=70000.0,
+    loan_price=1.0,
+):
+    """One (user, tranche) row as the SQL returns it: raw units, cbBTC 8 dp, USDC 6 dp, prices by token id."""
     return SimpleNamespace(
         user_address=address_bytes,
         lltv=lltv,
         collateral_symbol="cbBTC",
         collateral_decimals=8,
+        collateral_price=collateral_price,
         loan_symbol="USDC",
         loan_decimals=6,
+        loan_price=loan_price,
         collateral=collateral,
         borrow_assets=borrow_assets,
     )
-
-
-_MORPHO_PRICES = {"CBBTC": 70000.0, "USDC": 1.0}
 
 
 def test_morpho_lif_matches_ba_parquet_value():
@@ -142,7 +168,7 @@ def test_morpho_lif_matches_ba_parquet_value():
 
 
 def test_morpho_frame_scales_decimals_and_prices():
-    df = build_morpho_users_frame([_morpho_row()], _MORPHO_PRICES)
+    df = build_morpho_users_frame([_morpho_row()])
     row = df.iloc[0]
     assert row["cbbtc_supply"] == pytest.approx(0.0043)  # 430_000 / 1e8
     assert row["cbbtc_supply_usd"] == pytest.approx(301.0)
@@ -157,7 +183,7 @@ def test_morpho_wallet_across_two_tranches_collapses_to_one_weighted_row():
         _morpho_row(lltv=0.86, collateral=100_000_000, borrow_assets=10_000_000),  # 1 cbBTC
         _morpho_row(lltv=0.945, collateral=300_000_000, borrow_assets=30_000_000),  # 3 cbBTC
     ]
-    df = build_morpho_users_frame(rows, _MORPHO_PRICES)
+    df = build_morpho_users_frame(rows)
     assert len(df) == 1
     row = df.iloc[0]
     assert row["cbbtc_supply"] == pytest.approx(4.0)
@@ -166,25 +192,10 @@ def test_morpho_wallet_across_two_tranches_collapses_to_one_weighted_row():
 
 def test_morpho_zero_collateral_borrowers_are_excluded():
     rows = [_morpho_row(), _morpho_row(address_bytes=b"\xbb" * 20, collateral=0)]
-    df = build_morpho_users_frame(rows, _MORPHO_PRICES)
+    df = build_morpho_users_frame(rows)
     assert list(df["wallet_address"]) == ["0x" + "aa" * 20]
 
 
 def test_morpho_unpriced_token_fails_the_build():
     with pytest.raises(ValueError, match="CBBTC"):
-        build_morpho_users_frame([_morpho_row()], {"USDC": 1.0})
-
-
-def _price_row(symbol: str, price: float):
-    return SimpleNamespace(symbol=symbol, price_usd=price)
-
-
-def test_price_map_refuses_a_symbol_collision_on_a_consumed_symbol():
-    rows = [_price_row("USDC", 1.0), _price_row("usdc", 0.5), _price_row("WETH", 2000.0)]
-    with pytest.raises(ValueError, match="ambiguous token symbol.*USDC"):
-        build_price_map(rows, used_symbols={"USDC", "WETH"})
-
-
-def test_price_map_ignores_collisions_on_symbols_nothing_consumes():
-    rows = [_price_row("USDC", 1.0), _price_row("usdc", 0.5), _price_row("WETH", 2000.0)]
-    assert build_price_map(rows, used_symbols={"WETH"}) == {"USDC": 0.5, "WETH": 2000.0}
+        build_morpho_users_frame([_morpho_row(collateral_price=None)])
