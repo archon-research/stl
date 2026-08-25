@@ -119,19 +119,23 @@ WITH morpho_vaults AS (
   -- Latest USD price per token from the vault's Morpho Blue protocol_oracle
   -- binding, mirroring the Aave repo's token_prices CTE (same enabled-oracle_asset
   -- gate + snapshot order). Each row exposes its OWN token's price so amount/price
-  -- stay denominated in the row's symbol, as Aave does.
+  -- stay denominated in the row's symbol, as Aave does. The source is
+  -- token_price_current (20260820_120000_create_current_position_tables.sql), so the
+  -- ranking runs over one row per (oracle, token) rather than the whole
+  -- onchain_token_price hypertable; which protocols an oracle serves and whether its
+  -- mapping is enabled stay read-time questions, exactly as before.
   token_prices AS (
-      SELECT DISTINCT ON (otp.token_id)
-          otp.token_id,
-          otp.price_usd
-      FROM onchain_token_price otp
-      JOIN protocol_oracle po ON po.oracle_id = otp.oracle_id
+      SELECT DISTINCT ON (tpc.token_id)
+          tpc.token_id,
+          tpc.price_usd
+      FROM token_price_current tpc
+      JOIN protocol_oracle po ON po.oracle_id = tpc.oracle_id
       JOIN morpho_vault v ON v.id = :backed_asset_id AND po.protocol_id = v.protocol_id
       WHERE EXISTS (
           SELECT 1 FROM oracle_asset oa
-          WHERE oa.oracle_id = otp.oracle_id AND oa.token_id = otp.token_id AND oa.enabled
+          WHERE oa.oracle_id = tpc.oracle_id AND oa.token_id = tpc.token_id AND oa.enabled
       )
-      ORDER BY otp.token_id, otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC, otp.oracle_id DESC
+      ORDER BY tpc.token_id, tpc.block_number DESC, tpc.block_version DESC, tpc.processing_version DESC, tpc.oracle_id DESC
   ),
   -- The vault's loan token converts every (loan-token-denominated) backing amount
   -- to USD, so it is pulled out separately as the scaling factor for backed_amount.
