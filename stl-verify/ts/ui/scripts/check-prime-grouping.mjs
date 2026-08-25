@@ -30,7 +30,7 @@ async function main() {
   });
 
   try {
-    const { groupPrimesByVault } = await vite.ssrLoadModule(
+    const { groupPrimesByVault, findPrimeGroup } = await vite.ssrLoadModule(
       '/src/lib/dashboard.ts',
     );
 
@@ -134,6 +134,60 @@ async function main() {
       const [group] = groupPrimesByVault([sparkBase, sparkAvalanche]);
       const expected = [sparkBase.address, sparkAvalanche.address].sort()[0];
       assert.equal(group.primaryProxyAddress, expected);
+    }
+
+    // A URL's prime segment resolves through every address that denotes the
+    // prime, so a deep link built from `/v1/primes` or an explorer lands on it
+    // instead of falling back to the first prime in the list.
+    {
+      const groups = groupPrimesByVault([
+        sparkMainnet,
+        sparkAvalanche,
+        sparkBase,
+      ]);
+      const [spark] = groups;
+
+      // The group key itself.
+      assert.equal(findPrimeGroup(groups, spark.key), spark);
+
+      // Any of the prime's ALM proxies, not only the mainnet one: a link may
+      // name whichever chain the reader was looking at.
+      for (const proxy of [sparkMainnet, sparkAvalanche, sparkBase]) {
+        assert.equal(findPrimeGroup(groups, proxy.address), spark);
+      }
+
+      // Checksummed, as an explorer hands it over. `/v1/primes` reports these
+      // lowercased, so an exact comparison would miss.
+      assert.equal(findPrimeGroup(groups, spark.key.toUpperCase()), spark);
+      assert.equal(
+        findPrimeGroup(groups, sparkBase.address.toUpperCase()),
+        spark,
+      );
+
+      // An address the prime list does not hold stays unresolved, so the caller
+      // still falls back and still says so.
+      assert.equal(
+        findPrimeGroup(groups, '0x1234000000000000000000000000000000001234'),
+        null,
+      );
+    }
+
+    // A group's own key wins over another group's proxy address, so resolving
+    // an alias can never displace an exact match.
+    {
+      const collidingKey = '0xeeee000000000000000000000000000000000e';
+      const groveProxy = buildPrimeRow({
+        address: collidingKey,
+        name: 'grove',
+        prime_vault_address: '0x9999000000000000000000000000000000000009',
+      });
+      const keyedOnCollision = buildPrimeRow({
+        address: '0x1111000000000000000000000000000000000001',
+        name: 'nova',
+        prime_vault_address: collidingKey,
+      });
+      const groups = groupPrimesByVault([groveProxy, keyedOnCollision]);
+      assert.equal(findPrimeGroup(groups, collidingKey).name, 'nova');
     }
   } finally {
     await vite.close();

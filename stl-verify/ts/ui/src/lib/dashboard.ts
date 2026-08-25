@@ -167,6 +167,36 @@ export function groupPrimesByVault(primes: Prime[]): PrimeGroup[] {
   });
 }
 
+/**
+ * The prime group a URL's prime segment names, or `null` if none does.
+ *
+ * The segment is a group key — `prime_vault_address` — but the addresses a
+ * reader has to hand are usually not that. `/v1/primes` keys its rows by ALM
+ * proxy, one per chain, and an explorer link names a proxy too, so a deep link
+ * built from either misses a key comparison while naming a prime the app holds.
+ * Matching those aliases resolves to the same prime the link meant, which is
+ * strictly better than falling back to the first prime in the list.
+ *
+ * Case-insensitive because a checksummed address is the form an explorer hands
+ * over, while `/v1/primes` reports addresses lowercased; the two denote the same
+ * account. Keys are matched before proxies so a group's own key always wins.
+ */
+export function findPrimeGroup(
+  groups: PrimeGroup[],
+  requested: string,
+): PrimeGroup | null {
+  const wanted = requested.toLowerCase();
+
+  return (
+    groups.find((group) => group.key === requested) ??
+    groups.find((group) => group.key.toLowerCase() === wanted) ??
+    groups.find((group) =>
+      group.proxyAddresses.some((address) => address.toLowerCase() === wanted),
+    ) ??
+    null
+  );
+}
+
 function getProtocolMatchScore(
   protocol: string,
   localProtocol: LocalProtocolRow,

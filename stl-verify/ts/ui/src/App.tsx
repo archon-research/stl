@@ -69,6 +69,7 @@ import {
   formatRatioPercent,
   formatTokenAmount,
   formatUsdValue,
+  findPrimeGroup,
   getAllocationKey,
   getChainLabel,
   getProtocolLabel,
@@ -493,7 +494,22 @@ function App() {
       return;
     }
 
-    if (primeGroups.some((group) => group.key === selectedPrimeId)) {
+    const requestedGroup = findPrimeGroup(primeGroups, selectedPrimeId);
+
+    if (requestedGroup?.key === selectedPrimeId) {
+      return;
+    }
+
+    if (requestedGroup !== null) {
+      // The same prime under one of its other addresses — an ALM proxy, or the
+      // vault checksummed. Canonicalising the URL is not a prime swap, so it
+      // keeps the link's filters and raises no notice: the reader gets the
+      // prime they asked for, which is the one already on screen.
+      navigateToView({
+        view: selectedView,
+        primeKey: requestedGroup.key,
+        replace: true,
+      });
       return;
     }
 
