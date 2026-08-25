@@ -1352,8 +1352,16 @@
       "type": "raw_pipeline",
       "owner": "morpho"
     },
+    "morpho_market_position_current": {
+      "type": "derived",
+      "owner": "morpho"
+    },
     "morpho_market_state": {
       "type": "raw_pipeline",
+      "owner": "morpho"
+    },
+    "morpho_market_state_current": {
+      "type": "derived",
       "owner": "morpho"
     },
     "morpho_vault": {
@@ -1376,6 +1384,10 @@
     },
     "morpho_vault_state": {
       "type": "raw_pipeline",
+      "owner": "morpho"
+    },
+    "morpho_vault_state_current": {
+      "type": "derived",
       "owner": "morpho"
     },
     "offchain_price_asset": {
