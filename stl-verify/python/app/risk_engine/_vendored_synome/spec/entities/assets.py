@@ -878,6 +878,22 @@ SPARK_USDC_BC: Final[Asset] = Asset(
 """
 
 
+SPARK_USDT_BC: Final[Asset] = Asset(
+    token=Token.SPARK_USDT_BC,
+    network=Network.ETHEREUM_MAINNET,
+    protocol=Protocol.MORPHO,
+    address=EvmAddress("0xb0c424116172B55CbB6dD3136F5989F7959e5B91"),
+    underlying_assets=(Token.USDT,),
+    underlying_asset_address=EvmAddress("0xdAC17F958D2ee523a2206206994597C13D831ec7"),
+    categories={AssetCategory.LENDING_MARKET},
+)
+"""SPARK_USDT_BC via Morpho on Ethereum Mainnet.
+
+:source_uuid: 0830d4af-65df-489c-9402-99696215f667
+:source_uuid: 65ac69fd-913a-44cd-bb38-c93ef3726dbe
+"""
+
+
 SPARK_USDS: Final[Asset] = Asset(
     token=Token.SPARK_USDS,
     network=Network.ETHEREUM_MAINNET,
