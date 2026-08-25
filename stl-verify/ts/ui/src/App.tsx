@@ -1137,12 +1137,13 @@ function App() {
                   // at full precision — repeating a rounded copy on the plot
                   // read as a fourth, slightly different number.
                   label: 'Required',
-                  // Named, so the cursor tooltip can report the limit beside
-                  // the value being read against it.
-                  name: 'required',
-                  // Warning-hued so it reads as a limit rather than a second
-                  // quantity.
-                  stroke: 'var(--colors-text-warning)',
+                  // Reported at the cursor too: the total is read directly
+                  // against this line, so the two figures belong side by side.
+                  showInTooltip: true,
+                  // Muted, matching the encumbrance card's own early-warning
+                  // line. A coloured limit competed with the series for the
+                  // eye and read as a second quantity rather than a bound.
+                  stroke: 'var(--colors-text-muted)',
                 },
               ],
       },

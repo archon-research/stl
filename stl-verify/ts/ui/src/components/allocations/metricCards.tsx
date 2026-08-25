@@ -61,12 +61,13 @@ export type MetricChartSpec = {
   stroke: ChartColorToken;
   formatValue: (value: number) => string;
   // Ordered ascending. Each draws a dashed limit line with a labelled edge.
-  // `name` opts the limit into the cursor tooltip, where it is reported beside
-  // the value being read against it; a limit without one stays on the plot.
+  // `showInTooltip` also reports it at the cursor, in its own stroke — for a
+  // limit the series is read directly against. Off by default: a limit the
+  // reader is not comparing against only crowds the readout.
   thresholds?: {
     value: number;
     label?: string;
-    name?: string;
+    showInTooltip?: boolean;
     stroke?: ChartColor;
   }[];
 };
@@ -385,21 +386,6 @@ const chartTooltipValueClassName = css({
   fontWeight: 'medium',
 });
 
-// Two columns so a named row's label and figure line up down the card, and the
-// figures stay readable against each other rather than against the labels.
-const chartTooltipRowClassName = css({
-  display: 'flex',
-  alignItems: 'baseline',
-  justifyContent: 'space-between',
-  gap: '3',
-  fontSize: 'sm',
-});
-
-const chartTooltipRowLabelClassName = css({
-  color: 'text.muted',
-  fontSize: 'xs',
-});
-
 function buildSingleSeriesTheme(stroke: string) {
   return buildChartTheme({
     backgroundColor: 'transparent',
@@ -653,10 +639,7 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
     : [minValue, maxValue];
 
   const thresholds = chart.thresholds ?? [];
-  const namedThresholds = thresholds.filter(
-    (entry): entry is (typeof thresholds)[number] & { name: string } =>
-      entry.name !== undefined,
-  );
+  const tooltipThresholds = thresholds.filter((entry) => entry.showInTooltip);
   const yDomain: [number, number] = (() => {
     if (thresholds.length === 0) {
       return [domainMin, domainMax];
@@ -866,26 +849,22 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
                       {chart.formatValue(point.value)}
                     </div>
                   ))}
-                  {/* A named limit is reported here because the value above is
-                      read against it — the plot's own label states it once, at
-                      the line, which is easy to miss on a small card. */}
-                  {namedThresholds.map((entry) => (
+                  {/* Unlabelled, like the series rows above it: each figure
+                      wears its own mark's colour, which is what says whether it
+                      is the line or the limit. A word here would have labelled
+                      one row out of two and read as a table with a missing
+                      header. The plot names the limit at its own line. */}
+                  {tooltipThresholds.map((entry) => (
                     <div
                       key={`tooltip-threshold-${entry.value}`}
-                      className={chartTooltipRowClassName}
+                      className={chartTooltipValueClassName}
+                      style={{
+                        color: resolveChartColor(
+                          entry.stroke ?? THRESHOLD_LEGEND_COLOR,
+                        ),
+                      }}
                     >
-                      <span className={chartTooltipRowLabelClassName}>
-                        {entry.name}
-                      </span>
-                      <span
-                        style={{
-                          color: resolveChartColor(
-                            entry.stroke ?? THRESHOLD_LEGEND_COLOR,
-                          ),
-                        }}
-                      >
-                        {chart.formatValue(entry.value)}
-                      </span>
+                      {chart.formatValue(entry.value)}
                     </div>
                   ))}
                 </div>
