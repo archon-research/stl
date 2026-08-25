@@ -125,6 +125,11 @@ promotion test — *does it carry attributes of its own, and do other things poi
 - **Attributes belong to the node** and differ by kind; which attributes a kind requires is
   declared by its shape (§6). How attributes are physically stored (typed columns, a document
   payload, node properties) is a realization choice.
+- **Nodes are editable.** Any attribute of any node may be changed at any time by an authorised
+  curator — and, in future, through the UI (UI-5) — gated by the type-scoped `owner_role` of the
+  governing shape (AC-3). Editability and immutability coexist because an edit *lands* as a new
+  version: the row is appended, the history is never mutated, and the pivot picks the change up
+  on its next resolution.
 - **Versioning is by row, append-only** (AR-1.1), carrying the provenance block of §4.
 - **Natural persons carry no direct identifiers here** (DP-1): an individual is an ENTITY node
   keyed by a pseudonymous surrogate; identifying attributes live in a dedicated PII store under
