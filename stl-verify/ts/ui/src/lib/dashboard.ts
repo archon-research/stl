@@ -562,16 +562,23 @@ export function encumbranceSeverity(
  * feed stopped, which the cronjob alerts already cover — but it is the reason
  * absence is dropped rather than plotted as zero.
  */
+// `timestamp` is what the synced cursor is keyed on, so it carries the bucket's
+// own instant rather than the formatted label: sibling cards bucket at different
+// resolutions, and only the instant means the same thing in all of them.
 export function toChartSeries<T extends { bucket_start: string }>(
   buckets: readonly T[],
   read: (bucket: T) => number | null,
-): { label: string; value: number }[] {
+): { label: string; value: number; timestamp: number }[] {
   return buckets
     .map((bucket) => ({
       label: formatChartTimestampLabel(bucket.bucket_start),
       value: read(bucket) ?? Number.NaN,
+      timestamp: Date.parse(bucket.bucket_start),
     }))
-    .filter((point) => Number.isFinite(point.value));
+    .filter(
+      (point) =>
+        Number.isFinite(point.value) && Number.isFinite(point.timestamp),
+    );
 }
 
 export function balancedColumns(count: number, maxColumns: number): number {

@@ -5,6 +5,7 @@ import {
   AreaSeries,
   Tooltip,
   Axis,
+  ChartCursorLayer,
   buildChartTheme,
   type ChartColor,
   type ChartColorToken,
@@ -12,6 +13,8 @@ import {
   chartTokens,
   resolveChartColor,
   useContainerWidth,
+  useHoveredTimestamp,
+  useSyncedCursorHandlers,
 } from '@archon-research/charting';
 import { DataContext, ReferenceBand } from '@archon-research/charting';
 import { ErrorState, SkeletonStack } from '@archon-research/design-system';
@@ -26,6 +29,12 @@ import { SummaryMetric } from '../shared';
 export type ChartDatum = {
   label: string;
   value: number;
+  // The instant the point describes, or `null` for a synthetic placeholder
+  // point that stands in for absent history. Only a series whose points all
+  // carry one joins the synced cursor — a placeholder has no instant to snap
+  // to, and reading one off it would date a figure that was never observed
+  // then.
+  timestamp: number | null;
 };
 
 export type MetricChartKey =
@@ -400,6 +409,71 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
     return [low, high === highest ? high + headroom : high];
   })();
 
+  // A series joins the synced cursor only if every point is a real observation.
+  // The placeholder a card falls back to has no instants, so it plots against
+  // its labels and shows no crosshair rather than inventing a time to snap to.
+  const stops = useMemo(() => {
+    const timestamps = chart.data.map((point) => point.timestamp);
+    return timestamps.every((value): value is number => value !== null)
+      ? [...timestamps].sort((left, right) => left - right)
+      : null;
+  }, [chart.data]);
+
+  // The band domain is the instant, so the axis needs the label back. Built
+  // from the same points the scale was, so a tick can never label the wrong
+  // bucket.
+  const labelAt = useMemo(
+    () =>
+      new Map(
+        chart.data.flatMap((point) =>
+          point.timestamp === null ? [] : [[point.timestamp, point.label]],
+        ),
+      ),
+    [chart.data],
+  );
+
+  const valueAt = useMemo(() => {
+    const byTimestamp = new Map(
+      chart.data.flatMap((point) =>
+        point.timestamp === null ? [] : [[point.timestamp, point.value]],
+      ),
+    );
+    return (x: number) => byTimestamp.get(x) ?? null;
+  }, [chart.data]);
+
+  const comparisonValueAt = useMemo(() => {
+    const byTimestamp = new Map(
+      (chart.comparison?.data ?? []).flatMap((point) =>
+        point.timestamp === null ? [] : [[point.timestamp, point.value]],
+      ),
+    );
+    return (x: number) => byTimestamp.get(x) ?? null;
+  }, [chart.comparison]);
+
+  const [hoveredTimestamp] = useHoveredTimestamp();
+  // Reads the instant off the hovered datum rather than inverting a pixel, so
+  // sibling cards line up on the bucket a reader is actually over even though
+  // they bucket at different resolutions and start at different points.
+  const cursorHandlers = useSyncedCursorHandlers<ChartDatum>(
+    (point) => point.timestamp ?? Number.NaN,
+  );
+
+  const xAccessor = (point: ChartDatum): string | number =>
+    stops === null ? point.label : (point.timestamp as number);
+
+  const cursorSeries = [
+    { id: chart.key, color: chart.stroke, valueAt },
+    ...(chart.comparison && chart.comparison.data.length > 0
+      ? [
+          {
+            id: `${chart.key}-comparison`,
+            color: chart.comparison.stroke,
+            valueAt: comparisonValueAt,
+          },
+        ]
+      : []),
+  ];
+
   return (
     <div
       ref={measureRef}
@@ -417,12 +491,17 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
         margin={{ top: 8, right: 24, bottom: 76, left: 64 }}
         xScale={{ type: 'band', paddingInner: 0.2 }}
         yScale={{ type: 'linear', domain: yDomain, nice: !isFlat }}
+        onPointerMove={cursorHandlers.onPointerMove}
+        onPointerOut={cursorHandlers.onPointerOut}
       >
         <Grid columns={false} numTicks={3} />
         <Axis
           orientation="bottom"
           numTicks={4}
           hideTicks
+          tickFormat={(value: string | number) =>
+            typeof value === 'number' ? (labelAt.get(value) ?? '') : value
+          }
           tickLabelProps={() => ({
             fontSize: 10,
             textAnchor: 'end',
@@ -439,7 +518,7 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
         <AreaSeries
           dataKey={`${chart.key}-area`}
           data={chart.data as ChartDatum[]}
-          xAccessor={(d: ChartDatum) => d.label}
+          xAccessor={xAccessor}
           yAccessor={(d: ChartDatum) => d.value}
           fill={strokeColor}
           fillOpacity={0.18}
@@ -448,7 +527,7 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
         <LineSeries
           dataKey={chart.key}
           data={chart.data as ChartDatum[]}
-          xAccessor={(d: ChartDatum) => d.label}
+          xAccessor={xAccessor}
           yAccessor={(d: ChartDatum) => d.value}
           stroke={strokeColor}
         />
@@ -459,7 +538,7 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
           <LineSeries
             dataKey={`${chart.key}-comparison`}
             data={chart.comparison.data}
-            xAccessor={(d: ChartDatum) => d.label}
+            xAccessor={xAccessor}
             yAccessor={(d: ChartDatum) => d.value}
             stroke={resolveChartColor(chart.comparison.stroke)}
             // Heavier than a hairline: where the two provenances agree the
@@ -482,33 +561,68 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
           />
         ))}
         <ThresholdLabels thresholds={thresholds} />
-        <Tooltip
-          snapTooltipToDatumX
-          snapTooltipToDatumY
-          showVerticalCrosshair
-          showSeriesGlyphs
-          renderTooltip={({
-            tooltipData,
-          }: {
-            tooltipData?: { nearestDatum?: { datum: unknown } };
-          }) => {
-            const datum = tooltipData?.nearestDatum?.datum as
-              | ChartDatum
-              | undefined;
-            if (!datum) return null;
-            return (
-              <div className={chartTooltipSurfaceClassName}>
-                <div className={chartTooltipTitleClassName}>{datum.label}</div>
-                <div
-                  className={chartTooltipValueClassName}
-                  style={{ color: strokeColor }}
-                >
-                  {chart.formatValue(datum.value)}
+        {stops === null ? (
+          // No shared cursor without instants to share, so the placeholder
+          // keeps visx's own tooltip and its local crosshair.
+          <Tooltip
+            snapTooltipToDatumX
+            snapTooltipToDatumY
+            showVerticalCrosshair
+            showSeriesGlyphs
+            renderTooltip={({
+              tooltipData,
+            }: {
+              tooltipData?: { nearestDatum?: { datum: unknown } };
+            }) => {
+              const datum = tooltipData?.nearestDatum?.datum as
+                | ChartDatum
+                | undefined;
+              if (!datum) return null;
+              return (
+                <div className={chartTooltipSurfaceClassName}>
+                  <div className={chartTooltipTitleClassName}>
+                    {datum.label}
+                  </div>
+                  <div
+                    className={chartTooltipValueClassName}
+                    style={{ color: strokeColor }}
+                  >
+                    {chart.formatValue(datum.value)}
+                  </div>
                 </div>
-              </div>
-            );
-          }}
-        />
+              );
+            }}
+          />
+        ) : (
+          // Driven by the shared timestamp rather than this chart's own pointer
+          // state, so hovering any card moves the crosshair in all of them. It
+          // replaces the visx tooltip's crosshair rather than joining it — two
+          // would draw two lines at the same instant.
+          <ChartCursorLayer
+            stops={stops}
+            cursor={hoveredTimestamp}
+            series={cursorSeries}
+          >
+            {({ x, points }) => {
+              const label = labelAt.get(x);
+              if (label === undefined) return null;
+              return (
+                <div className={chartTooltipSurfaceClassName}>
+                  <div className={chartTooltipTitleClassName}>{label}</div>
+                  {points.map((point) => (
+                    <div
+                      key={point.id}
+                      className={chartTooltipValueClassName}
+                      style={{ color: point.color }}
+                    >
+                      {chart.formatValue(point.value)}
+                    </div>
+                  ))}
+                </div>
+              );
+            }}
+          </ChartCursorLayer>
+        )}
       </XYChart>
     </div>
   );

@@ -897,6 +897,7 @@ function App() {
       series[index] = {
         label: formatChartTimestampLabel(bucket.bucket_start),
         value: Math.max(balance, 0),
+        timestamp: Date.parse(bucket.bucket_start),
       };
       balance -= parseNumericValue(bucket.net_flow_usd) ?? 0;
     }
@@ -986,9 +987,13 @@ function App() {
       if (value === null) {
         return [];
       }
+      // No timestamps: these two points are the window's edges holding the
+      // current value flat, not observations. Leaving them null keeps the card
+      // out of the synced cursor, which is the honest outcome — there is no
+      // history here to line up with a sibling's.
       return [
-        { label: chartFromLabel, value },
-        { label: chartToLabel, value },
+        { label: chartFromLabel, value, timestamp: null },
+        { label: chartToLabel, value, timestamp: null },
       ];
     };
 

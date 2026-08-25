@@ -1,3 +1,4 @@
+import { SyncedChartGroup } from '@archon-research/charting';
 import { Badge, type BadgeColorPalette } from '@archon-research/design-system';
 import { ExternalLink } from 'lucide-react';
 import type { ReactNode } from 'react';
@@ -623,18 +624,23 @@ export function PrimeMetricsBand({
   };
 
   return (
-    <div
-      className={metricsGridClassName}
-      style={metricsGridStyle(TOP_METRIC_CARDS.length)}
-    >
-      {TOP_METRIC_CARDS.map((card) => (
-        <MetricCardCell
-          key={`metric-card-${card}`}
-          card={card}
-          rendered={renderedCards[card]}
-          errorMessage={CARD_ERROR_SOURCE[card]}
-        />
-      ))}
-    </div>
+    // One cursor across the band: the cards plot the same prime over the same
+    // window, so a reader comparing them is asking what every card said at one
+    // instant. Hovering each in turn to find it is the question asked badly.
+    <SyncedChartGroup>
+      <div
+        className={metricsGridClassName}
+        style={metricsGridStyle(TOP_METRIC_CARDS.length)}
+      >
+        {TOP_METRIC_CARDS.map((card) => (
+          <MetricCardCell
+            key={`metric-card-${card}`}
+            card={card}
+            rendered={renderedCards[card]}
+            errorMessage={CARD_ERROR_SOURCE[card]}
+          />
+        ))}
+      </div>
+    </SyncedChartGroup>
   );
 }
