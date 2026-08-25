@@ -18,17 +18,41 @@
 -- block_version is in the PK because a reorg replaces the block at a height with a different block, with
 -- its own header timestamp; the S3 archive is likewise keyed by (block_number, version).
 --
--- SCOPE (this migration assumes it): block_meta holds only the blocks the observation tables
--- REFERENCE — the VEC-491 loader's work-list is that referenced set, per chain — NOT every backed-up
--- block on every chain. At that scope (tens of millions backfilled once, then a few million rows/month)
--- a PLAIN table is correct: point lookups by (chain_id, block_number, block_version), no time predicate,
--- no retention. If the scope ever widens to every backed-up block on all chains (block_states' rate,
--- ~19M rows/month, largest table in the DB within a year), revisit this as an INTEGER hypertable
--- partitioned by block_number — never by block_timestamp, which would force the timestamp into the PK
--- and lose the lookup-key uniqueness and never get chunk exclusion (the join carries no timestamp) —
--- with manual per-chain columnstore compression (there is no single integer_now across chains for an
--- add_columnstore_policy). create_hypertable on the empty table is free; migrate_data on a populated
--- one is not, hence deciding now.
+-- SCOPE: block_meta holds only the blocks the observation tables REFERENCE — the VEC-491 loader's
+-- work-list is that referenced set, per chain — NOT every backed-up block on every chain.
+--
+-- MEASURED against prod on 2026-08-25, not estimated. An earlier version of this header guessed "tens
+-- of millions backfilled once, then a few million rows/month"; both terms were wrong by more than an
+-- order of magnitude. The referenced set is 1,192,342 rows across 6 chains, of which 1,325 carry
+-- block_version > 0 (reorgs, ~0.1%) — roughly 68 MB of heap. Per table before dedup: protocol_event
+-- 1,093,915, sparklend_reserve_data 801,593, borrower_collateral 760,210, borrower 295,038,
+-- allocation_position 147,347, prime_debt 15,484. They sum to 3.1M and dedup to 1.2M, because the six
+-- tables observe heavily overlapping blocks. Re-run to re-check before any decision that depends on it:
+--
+--   WITH referenced AS (
+--       SELECT p.chain_id, b.block_number, b.block_version
+--         FROM borrower b JOIN protocol p ON p.id = b.protocol_id
+--       UNION SELECT p.chain_id, bc.block_number, bc.block_version
+--         FROM borrower_collateral bc JOIN protocol p ON p.id = bc.protocol_id
+--       UNION SELECT chain_id, block_number, block_version FROM allocation_position
+--       UNION SELECT chain_id, block_number, block_version FROM protocol_event
+--       UNION SELECT p.chain_id, sr.block_number, sr.block_version
+--         FROM sparklend_reserve_data sr JOIN protocol p ON p.id = sr.protocol_id
+--       UNION SELECT 1::int, block_number, block_version FROM prime_debt)
+--   SELECT count(*) FROM referenced;
+--
+-- At 1.2M rows a PLAIN table is correct, and not marginally: point lookups by
+-- (chain_id, block_number, block_version), no time predicate, no retention. Compression would save
+-- megabytes, against a standing manual compress_chunk chore — an integer dimension gets one
+-- integer_now_func for the whole table and there is no single "now" across six chains, so no
+-- add_columnstore_policy is possible and something would have to compress bands by hand, forever.
+--
+-- If the scope ever widens to every backed-up block on all chains (block_states' rate, ~19M rows/month,
+-- largest table in the DB within a year), revisit as an INTEGER hypertable partitioned by block_number
+-- — never by block_timestamp, which would force the timestamp into the PK, lose the lookup-key
+-- uniqueness, and never get chunk exclusion since the join carries no timestamp. create_hypertable on
+-- an empty table is free and migrate_data on a populated one is not, so re-run the count above before
+-- the table grows rather than after.
 --
 -- Plain table (point lookups by PK): a curated dimension populated out of band by an append-only loader
 -- (a block's metadata is immutable once known; a reorg appends a new block_version, it never rewrites an
