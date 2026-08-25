@@ -21,7 +21,6 @@ import { AllocationGrid } from './components/allocations/AllocationGrid';
 import { BottomPanel } from './components/allocations/BottomPanel';
 import type {
   ChartDatum,
-  MetricChartKind,
   MetricChartSpec,
 } from './components/allocations/metricCards';
 import { RiskDetailDrawer } from './components/allocations/RiskDetailDrawer';
@@ -977,16 +976,13 @@ function App() {
       ];
     };
 
-    // Pick the real time series when present, else the flat current-value
-    // placeholder — returning data and kind together so the two can never
-    // disagree about whether the chart is real.
+    // The real time series when present, else the flat current-value
+    // placeholder, which the card renders identically.
     const seriesOrFallback = (
       series: ChartDatum[],
       currentValue: number | null,
-    ): { data: ChartDatum[]; kind: MetricChartKind } =>
-      series.length > 0
-        ? { data: series, kind: 'series' }
-        : { data: fallbackChart(currentValue), kind: 'fallback' };
+    ): ChartDatum[] =>
+      series.length > 0 ? series : fallbackChart(currentValue);
 
     // Sky's figures where it reports them: these are the flat line a card falls
     // back to, which must land on the same number the card's value shows.
@@ -1087,7 +1083,6 @@ function App() {
         // an empty state rather than a flat current-value line.
         key: 'allocation-activity-volume',
         data: allocationBalanceSeries,
-        kind: 'series',
         stroke: 'chart.series.primary',
         formatValue: formatCompactUsd,
       },
@@ -1095,14 +1090,14 @@ function App() {
         // Exposure trend from priced receipt-token balances over time; falls
         // back to the flat current value when no history is available.
         key: 'risk-capital',
-        ...seriesOrFallback(exposure.primary, exposureValue),
+        data: seriesOrFallback(exposure.primary, exposureValue),
         comparison: comparisonSeries(exposure.comparison),
         stroke: 'chart.series.secondary',
         formatValue: formatCompactUsd,
       },
       {
         key: 'total-capital',
-        ...seriesOrFallback(totalCapital.primary, totalRiskCapitalValue),
+        data: seriesOrFallback(totalCapital.primary, totalRiskCapitalValue),
         comparison: comparisonSeries(totalCapital.comparison),
         stroke: 'chart.series.quaternary',
         formatValue: formatCompactUsd,
@@ -1123,20 +1118,20 @@ function App() {
       },
       {
         key: 'prime-debt-exposure',
-        ...seriesOrFallback(primeDebt.primary, primeDebtValue),
+        data: seriesOrFallback(primeDebt.primary, primeDebtValue),
         comparison: comparisonSeries(primeDebt.comparison),
         stroke: 'chart.series.quinary',
         formatValue: (value: number) => `${formatCompactNumber(value)} DAI`,
       },
       {
         key: 'prime-collateral',
-        ...seriesOrFallback(collateralSeries, primeCollateralValue),
+        data: seriesOrFallback(collateralSeries, primeCollateralValue),
         stroke: 'chart.series.tertiary',
         formatValue: formatCompactUsd,
       },
       {
         key: 'encumbrance-ratio',
-        ...seriesOrFallback(encumbranceSeries, encumbranceValue),
+        data: seriesOrFallback(encumbranceSeries, encumbranceValue),
         stroke: encumbranceStroke,
         formatValue: formatRatioPercent,
         thresholds: [

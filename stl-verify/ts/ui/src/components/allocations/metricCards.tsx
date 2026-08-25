@@ -36,12 +36,6 @@ export type MetricChartKey =
   | 'prime-collateral'
   | 'encumbrance-ratio';
 
-// 'fallback' is a synthetic constant placeholder (current value repeated)
-// shown when no real history is available; 'series' is a real time series.
-// The card drops the area fill for fallbacks so they read as a flat baseline
-// rather than a filled block.
-export type MetricChartKind = 'series' | 'fallback';
-
 export type MetricChartSpec = {
   key: MetricChartKey;
   data: ChartDatum[];
@@ -49,7 +43,6 @@ export type MetricChartSpec = {
   // prop or a `style` object needs the CSS value.
   stroke: ChartColorToken;
   formatValue: (value: number) => string;
-  kind: MetricChartKind;
   // Ordered ascending. Each draws a dashed limit line with a labelled edge.
   thresholds?: { value: number; label?: string; stroke?: ChartColor }[];
   // The provenance not drawn as the primary series, for the same buckets, under
@@ -377,9 +370,9 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
   const minValue = Math.min(...values);
   const maxValue = Math.max(...values);
 
-  // A constant series (the current-value fallback) has a degenerate [v, v]
-  // domain whose area would fill the whole plot as a solid block; pad it so the
-  // line sits centered, and drop the area fill so it reads as a flat baseline.
+  // A constant series (the current-value placeholder shown when no history is
+  // available) has a degenerate [v, v] domain whose area would fill the whole
+  // plot as a solid block; pad it so the line sits centered in the plot.
   const isFlat = minValue === maxValue;
   // Proportional, so a 0-1 ratio does not get a whole unit of padding; the
   // literal is only reached when the value is exactly zero.
@@ -439,9 +432,10 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
             fill: 'var(--colors-text-muted)',
           })}
         />
-        {/* The same soft fill under every primary line, real series or flat
-            fallback — keying it on comparison presence or series kind made
-            sibling cards shade inconsistently across provenances/windows. */}
+        {/* The same soft fill under every primary line. Gating it on whether a
+            comparison was present made sibling cards shade inconsistently, since
+            that varies by provenance and data window; the explicit `yDomain`
+            above means the fill never moves the scale either way. */}
         <AreaSeries
           dataKey={`${chart.key}-area`}
           data={chart.data as ChartDatum[]}
