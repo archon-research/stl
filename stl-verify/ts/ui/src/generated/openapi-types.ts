@@ -907,6 +907,12 @@ export interface components {
        */
       receipt_token_id?: number | null;
       /**
+       * Reference Amount Usd
+       * @description Sky's USD value for the same position, populated only under `source=both` on a row both provenances report. Carried beside `amount_usd` rather than replacing it: the two are computed differently and a consumer needs the gap shown rather than reconciled. It is also the only figure available where STL holds the position but prices none of it — an unindexed chain leaves `amount_usd` null against a real `balance`, and Sky's figure is what a total can fall back to.
+       * @example 1234567.89
+       */
+      reference_amount_usd?: string | null;
+      /**
        * Scope
        * @description Whether the row belongs to the queried proxy (`proxy`) or to the prime as a whole (`prime`). A `prime`-scoped row is served under the prime's primary proxy only, so unioning a prime's proxies never double-counts it.
        * @default proxy

@@ -7,9 +7,12 @@ import {
   SearchInput,
   type SkeletonColumnHint,
   type SortingState,
+  StyledSelect,
   useDataTable,
 } from '@archon-research/design-system';
-import { useEffect, useMemo, useState } from 'react';
+import { toSearchOption } from '@archon-research/router-kit';
+import { useNavigate, useSearch } from '@tanstack/react-router';
+import { useEffect, useMemo, useState, type ChangeEvent } from 'react';
 
 import { css, cx } from '#styled-system/css';
 import { flex } from '#styled-system/patterns';
@@ -31,7 +34,12 @@ import {
   parseNumericValue,
   type ChainLabelLookup,
 } from '../../lib/dashboard';
-import { preferReference, useProvenanceView } from '../../lib/provenance';
+import {
+  preferIndexed,
+  preferReference,
+  useProvenanceView,
+} from '../../lib/provenance';
+import { ALLOCATION_CATEGORIES } from '../../router/search-params';
 import type {
   Allocation,
   AllocationCategory,
@@ -456,26 +464,26 @@ function lookupAllocationRiskCapital(
   return undefined;
 }
 
-// Applied required risk capital in USD, or null when none applies. Shared by the
-// column accessor and the magnitude bar so the two cannot diverge on the rule.
+// Required risk capital in USD, derived rather than carried: `crr x exposure`,
+// against the two figures shown beside it in the same row.
 //
-// Sky's requirement wins where it has one: it is the preferred model in
-// composite mode, and it prices positions STL's models do not cover yet — so a
-// row `applied: false` under STL's model still has a figure to show. `applied`
-// therefore gates only the STL fallback.
-function appliedRiskCapitalUsd(
-  entry: AllocationRiskCapital | undefined,
+// Neither provenance's published RRC is used. Under `both` the ratio is Sky's
+// and the exposure is STL's, so upstream's own requirement was computed against
+// a different exposure than the one on screen and the three columns did not
+// reconcile. Deriving costs provenance purity — the product of two sources is a
+// figure neither published — and buys a row a reader can check by eye, which is
+// the trade this table is for.
+function derivedRiskCapitalUsd(
+  crrPct: number | null,
+  exposureUsd: number | null,
 ): number | null {
-  if (entry === undefined) {
+  if (crrPct === null || exposureUsd === null) {
     return null;
   }
 
-  return parseNumericValue(
-    preferReference(
-      entry.reference_required_risk_capital_usd,
-      entry.applied ? entry.required_risk_capital_usd : null,
-    ),
-  );
+  // `crrPct` is a 0-100 percentage at every boundary in this codebase; upstream
+  // reports a 0-1 fraction and the adapter rescales once.
+  return (exposureUsd * crrPct) / 100;
 }
 
 // Comparable capital-risk ratio (0-100), Sky's preferred over STL's.
@@ -491,25 +499,44 @@ function preferredCrrPct(
   );
 }
 
-// This position's share of the prime's whole requirement, 0-1.
+// Each row's share of the requirement the table itself accounts for, 0-1.
 //
-// The denominator is Σ RRC, not the prime's available risk capital: the column
-// answers "how much of the requirement does this position account for", so it
-// sums to 1. `encumbrance_contribution` on the row divides by available capital
-// instead and sums to the encumbrance ratio, which is a different question.
-function rrcSharePct(
-  entry: AllocationRiskCapital | undefined,
-  totalRequiredRiskCapitalUsd: number | null,
-): number | null {
-  if (
-    totalRequiredRiskCapitalUsd === null ||
-    totalRequiredRiskCapitalUsd === 0
-  ) {
-    return null;
+// The denominator is Σ of the RRC column over the rows on screen, not the
+// prime's published total: the RRC column is derived per row, so dividing by a
+// total computed some other way would not sum to 1 and a reader adding the
+// column up would find it short. `encumbrance_contribution` on the row divides
+// by available capital instead and sums to the encumbrance ratio, which is a
+// different question.
+//
+// Filtering therefore rebases the column — it answers "of what is shown" — and
+// rows with no RRC are absent from both the numerator and the sum.
+//
+// Summing the visible rows was tried before and abandoned, when the RRC column
+// was carried from the risk-capital response: Sky priced positions STL resolved
+// no receipt token for — off-chain custody and the Arkis vault, its two largest
+// — so they never reached a grid row and the denominator collapsed to $2.8M
+// against a real $19.1M. Deriving each row's RRC from the CRR and exposure it
+// already shows is what makes this safe now, because both of those positions do
+// carry a CRR: measured against spark, they are the two largest contributors to
+// a $22.9M sum. Check that before carrying the column back to a published
+// total — the failure was a join gap, not the arithmetic.
+function withRrcShare(rows: AllocationGridRow[]): AllocationGridRow[] {
+  const total = rows.reduce(
+    (sum, row) => sum + (row.risk.riskCapitalUsd ?? 0),
+    0,
+  );
+  if (total === 0) {
+    return rows;
   }
 
-  const rrc = appliedRiskCapitalUsd(entry);
-  return rrc === null ? null : rrc / totalRequiredRiskCapitalUsd;
+  return rows.map((row) =>
+    row.risk.riskCapitalUsd === null
+      ? row
+      : {
+          ...row,
+          risk: { ...row.risk, sharePct: row.risk.riskCapitalUsd / total },
+        },
+  );
 }
 
 // riskByPositionKey is built from a risk-capital call scoped to
@@ -648,40 +675,57 @@ type AllocationGridRow = Allocation & {
   };
 };
 
+// Rows only Sky reported. Counted, not excluded: every row is in the total now,
+// and this is reported for its own sake.
+function skyOnlyCount(allocations: Allocation[]): number {
+  return allocations.filter((allocation) => allocation.source === 'reference')
+    .length;
+}
+
+// The value the Exposure column shows, as a number.
+//
+// The headline total is the sum of this over every row, so the two are the same
+// rule read twice rather than two rules that happen to agree. Sky-only rows are
+// included: after the merge each position appears once whichever side reported
+// it, so summing them all counts the money once — and excluding them made the
+// headline unable to match the table it sits above by construction.
+function rowExposureUsd(allocation: Allocation): number | null {
+  return parseNumericValue(
+    preferIndexed(allocation.amount_usd, allocation.reference_amount_usd),
+  );
+}
+
 function toAllocationGridRow(
   allocation: Allocation,
   riskByPositionKey: Map<string, AllocationRiskCapital>,
   riskFetchState: RiskFetchState,
   selectedPrime: Prime | null,
-  totalRequiredRiskCapitalUsd: number | null,
 ): AllocationGridRow {
   const entry = lookupAllocationRiskCapital(riskByPositionKey, allocation);
+  // The row's own value, which is the same measurement in both provenances —
+  // not the risk-capital breakdown's `exposure`, which covers only the priced
+  // subset and runs about a third smaller.
+  const exposureUsd = rowExposureUsd(allocation);
+  const crrPct = preferredCrrPct(entry);
   return {
     ...allocation,
     risk: {
       state: riskFetchState,
       entry,
       chainMismatch: isRiskCapitalChainMismatch(selectedPrime, allocation),
-      // Mirrors preferReference: Sky's figure is used when its side is
-      // populated (composite) or when the whole response is Sky's.
+      // Whether the figures shown lean on Sky. The ratio prefers Sky's and the
+      // value prefers STL's, so a row is Sky-flavoured when either side of that
+      // actually fell to Sky.
       fromReference:
-        entry !== undefined &&
-        (entry.source === 'reference' ||
-          entry.reference_required_risk_capital_usd != null),
-      // The exposure the risk figures were computed against, so a row's CRR
-      // reproduces from the numbers beside it. On a reference-shaped entry the
-      // bare field is already Sky's (same rule as RrcTab's referenceFigures).
-      exposureUsd: parseNumericValue(
-        preferReference(
-          entry?.source === 'reference'
-            ? entry.exposure_usd
-            : entry?.reference_exposure_usd,
-          allocation.amount_usd,
-        ),
-      ),
-      riskCapitalUsd: appliedRiskCapitalUsd(entry),
-      crrPct: preferredCrrPct(entry),
-      sharePct: rrcSharePct(entry, totalRequiredRiskCapitalUsd),
+        allocation.amount_usd == null ||
+        (entry !== undefined &&
+          (entry.source === 'reference' || entry.reference_crr_pct != null)),
+      exposureUsd,
+      riskCapitalUsd: derivedRiskCapitalUsd(crrPct, exposureUsd),
+      crrPct,
+      // Filled by `withRrcShare` once every row is known: the denominator is
+      // the column's own sum, which no single row can see.
+      sharePct: null,
     },
   };
 }
@@ -912,6 +956,42 @@ export function AllocationGrid({
   const { showsReference: showsReferenceNow } = useProvenanceView();
   const [localSearchValue, setLocalSearchValue] = useState(searchValue);
 
+  // The category filter lives in the URL rather than in local state so it is
+  // shareable alongside the other grid filters, and so the shell's per-prime
+  // reset clears it with `network`/`protocol`. Not strict, matching the drawer:
+  // the shell renders this from the root route, so the match is not guaranteed.
+  const allocationSearch = useSearch({
+    from: '/allocation',
+    shouldThrow: false,
+  });
+  const navigate = useNavigate();
+  const categoryFilter: AllocationCategory | '' =
+    allocationSearch?.category ?? '';
+
+  const handleCategoryChange = (value: string) => {
+    void navigate({
+      to: '.',
+      search: (previous) => ({
+        ...previous,
+        category: toSearchOption(value, ALLOCATION_CATEGORIES),
+      }),
+      replace: true,
+    });
+  };
+
+  // Composes with — never replaces — the search box and the top bar's
+  // network/protocol filters: those are already applied upstream in
+  // `filteredAllocations`, and this narrows what survives them.
+  const visibleAllocations = useMemo(
+    () =>
+      categoryFilter === ''
+        ? filteredAllocations
+        : filteredAllocations.filter(
+            (allocation) => allocation.category === categoryFilter,
+          ),
+    [categoryFilter, filteredAllocations],
+  );
+
   useEffect(() => {
     setLocalSearchValue(searchValue);
   }, [searchValue]);
@@ -937,20 +1017,10 @@ export function AllocationGrid({
       return null;
     }
 
-    // Under the composite view, rows Sky alone reports are excluded from the
-    // total (not the table): the provenances sometimes describe the same money
-    // differently without matching on identity, so adding them counts it
-    // twice. Under the reference view every row is Sky's and there is nothing
-    // to double against — excluding them summed an empty set to $0.00.
-    const countsInTotal = (allocation: Allocation) =>
-      shownProvenance !== 'both' || allocation.source !== 'reference';
-    const totalUsd = topMetricsAllocations
-      .filter(countsInTotal)
-      .reduce(
-        (sum, allocation) =>
-          sum + (parseNumericValue(allocation.amount_usd) ?? 0),
-        0,
-      );
+    const totalUsd = topMetricsAllocations.reduce(
+      (sum, allocation) => sum + (rowExposureUsd(allocation) ?? 0),
+      0,
+    );
 
     const latestActivityAt = topMetricsAllocations.reduce<string | null>(
       (latest, allocation) => {
@@ -970,41 +1040,27 @@ export function AllocationGrid({
     );
 
     return {
-      allocationCount: topMetricsAllocations.filter(countsInTotal).length,
-      // The split only says something against STL's rows, so the composite
-      // view alone reports it.
-      referenceOnlyCount:
-        shownProvenance === 'both'
-          ? topMetricsAllocations.filter(
-              (allocation) => allocation.source === 'reference',
-            ).length
-          : 0,
+      allocationCount: topMetricsAllocations.length,
+      referenceOnlyCount: skyOnlyCount(topMetricsAllocations),
       latestActivityAt,
       totalUsd,
     };
-  }, [shownProvenance, topMetricsAllocations]);
+  }, [topMetricsAllocations]);
 
   const overallSummary = useMemo(() => {
     if (allocations.length === 0) {
       return null;
     }
 
-    const counted =
-      shownProvenance === 'both'
-        ? allocations.filter((allocation) => allocation.source !== 'reference')
-        : allocations;
-    const totalUsd = counted.reduce(
-      (sum, allocation) =>
-        sum + (parseNumericValue(allocation.amount_usd) ?? 0),
-      0,
-    );
-
     return {
-      allocationCount: counted.length,
-      referenceOnlyCount: allocations.length - counted.length,
-      totalUsd,
+      allocationCount: allocations.length,
+      referenceOnlyCount: skyOnlyCount(allocations),
+      totalUsd: allocations.reduce(
+        (sum, allocation) => sum + (rowExposureUsd(allocation) ?? 0),
+        0,
+      ),
     };
-  }, [allocations, shownProvenance]);
+  }, [allocations]);
 
   const debtWad = showsReferenceNow
     ? referenceDebt?.debt_wad
@@ -1040,27 +1096,6 @@ export function AllocationGrid({
     return map;
   }, [riskCapital]);
 
-  // The prime's whole requirement, from the same provenance the RRC column
-  // reads. Not Σ of the visible rows: Sky prices positions STL resolves no
-  // receipt token for — off-chain custody and the Arkis vault, its two largest
-  // — and those rows cannot join a grid row by id, so summing what is on screen
-  // divided by $2.8M where the prime's requirement is $19.1M and reported one
-  // position as 84% of a requirement Sky puts it at 12% of.
-  //
-  // The consequence is deliberate: the column no longer sums to 100% on screen,
-  // because the rows it can show do not account for the whole requirement. Each
-  // row's own share is right, which is the number a reader compares.
-  const totalRequiredRiskCapitalUsd = useMemo(
-    () =>
-      parseNumericValue(
-        preferReference(
-          riskCapital?.reference_prime_required_risk_capital_usd,
-          riskCapital?.prime_required_risk_capital_usd,
-        ),
-      ),
-    [riskCapital],
-  );
-
   // A new array when risk data lands, deliberately: see AllocationGridRow.
   const riskFetchState: RiskFetchState =
     riskCapital !== null
@@ -1072,22 +1107,17 @@ export function AllocationGrid({
           : 'ready';
   const gridRows = useMemo<AllocationGridRow[]>(
     () =>
-      filteredAllocations.map((allocation) =>
-        toAllocationGridRow(
-          allocation,
-          riskByPositionKey,
-          riskFetchState,
-          selectedPrime,
-          totalRequiredRiskCapitalUsd,
+      withRrcShare(
+        visibleAllocations.map((allocation) =>
+          toAllocationGridRow(
+            allocation,
+            riskByPositionKey,
+            riskFetchState,
+            selectedPrime,
+          ),
         ),
       ),
-    [
-      filteredAllocations,
-      riskByPositionKey,
-      riskFetchState,
-      selectedPrime,
-      totalRequiredRiskCapitalUsd,
-    ],
+    [visibleAllocations, riskByPositionKey, riskFetchState, selectedPrime],
   );
 
   const columns = useMemo<ColumnDef<AllocationGridRow>[]>(
@@ -1205,7 +1235,30 @@ export function AllocationGrid({
                 {selectedPrime ? selectedPrime.name : 'Select a prime'}
               </h1>
             </div>
-            {selectedPrime ? <TokenAddress address={selectedPrime.id} /> : null}
+            {/* The label ships with the address, never on its own: this is the
+                one place the prime's wallet address is named, and an unlabelled
+                hex string here was read as a balance. */}
+            {selectedPrime ? (
+              <div
+                className={flex({
+                  align: 'center',
+                  gap: '1.5',
+                  wrap: 'wrap',
+                  rowGap: '0',
+                })}
+              >
+                <span
+                  className={css({
+                    fontSize: 'xs',
+                    color: 'text.muted',
+                    whiteSpace: 'nowrap',
+                  })}
+                >
+                  Raw wallet address:
+                </span>
+                <TokenAddress address={selectedPrime.id} />
+              </div>
+            ) : null}
           </div>
           {!showTopMetricsSkeleton ? (
             <div
@@ -1390,7 +1443,7 @@ export function AllocationGrid({
             display: 'grid',
             gridTemplateColumns: {
               base: '1fr',
-              lg: 'auto minmax(20rem, 24rem)',
+              lg: 'auto minmax(28rem, 36rem)',
             },
             gap: { base: '3', md: '4', lg: '5' },
             alignItems: 'end',
@@ -1414,20 +1467,57 @@ export function AllocationGrid({
           >
             Allocations
           </span>
+          {/* Same shape as the top bar's network/protocol filters — a
+              `StyledSelect` in an 11rem cell whose placeholder option is the
+              cleared state — so the three read as one filter family even though
+              this one is scoped to the grid rather than the page. */}
           <div
             className={css({
+              display: 'flex',
+              flexWrap: 'wrap',
+              alignItems: 'end',
+              gap: '3',
               minWidth: '0',
               width: '100%',
               justifySelf: { lg: 'end' },
             })}
           >
-            <SearchInput
-              aria-label="Search allocations"
-              disabled={!selectedPrime}
-              onValueChange={setLocalSearchValue}
-              placeholder="Search assets, protocols, chains"
-              value={localSearchValue}
-            />
+            <div
+              className={css({
+                width: { base: '100%', sm: '11rem' },
+                flexShrink: 0,
+              })}
+            >
+              <StyledSelect
+                aria-label="Filter by category"
+                value={categoryFilter}
+                onChange={(event: ChangeEvent<HTMLSelectElement>) =>
+                  handleCategoryChange(event.target.value)
+                }
+                disabled={!selectedPrime}
+              >
+                <option value="">All categories</option>
+                {ALLOCATION_CATEGORIES.map((category) => (
+                  <option key={category} value={category}>
+                    {getCategoryLabel(category)}
+                  </option>
+                ))}
+              </StyledSelect>
+            </div>
+            <div
+              className={css({
+                flex: '1 1 16rem',
+                minWidth: '0',
+              })}
+            >
+              <SearchInput
+                aria-label="Search allocations"
+                disabled={!selectedPrime}
+                onValueChange={setLocalSearchValue}
+                placeholder="Search assets, protocols, chains"
+                value={localSearchValue}
+              />
+            </div>
           </div>
         </div>
       </div>
@@ -1466,17 +1556,17 @@ export function AllocationGrid({
         !errorMessage &&
         !isLoading &&
         allocations.length > 0 &&
-        filteredAllocations.length === 0 ? (
+        visibleAllocations.length === 0 ? (
           <EmptyState
             title="No rows match the active filters"
-            description="Clear one of the filters in the top bar to restore the allocation grid."
+            description="Clear the category or search filter above the grid, or one of the filters in the top bar, to restore the allocation grid."
             stretch
           />
         ) : null}
 
         {selectedPrime &&
         !errorMessage &&
-        (isLoading || filteredAllocations.length > 0) ? (
+        (isLoading || visibleAllocations.length > 0) ? (
           <div className={tableHeaderTypographyClassName}>
             <DataTable
               table={table}

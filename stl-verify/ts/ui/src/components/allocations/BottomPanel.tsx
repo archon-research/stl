@@ -19,21 +19,18 @@ import { segmentedControl } from '#styled-system/recipes';
 import {
   type ChainLabelLookup,
   getAllocationKey,
-  getCategoryLabel,
   getPrimeGroupKey,
   sortAllocations,
 } from '../../lib/dashboard';
 import {
   ACTIVITY_ACTIONS,
   type ActivityAction,
-  ALLOCATION_CATEGORIES,
   DRAWER_TABS,
   type DrawerTab,
 } from '../../router/search-params';
 import type {
   Allocation,
   PrimeRiskCapital,
-  AllocationCategory,
   Prime,
 } from '../../types/allocation';
 import { ActivityFeed } from './tabs/ActivityFeed';
@@ -53,7 +50,6 @@ type BottomPanelProps = {
 
 type DrawerSearchPatch = {
   tab?: DrawerTab | undefined;
-  category?: AllocationCategory | undefined;
   daa?: ActivityAction | undefined;
 };
 
@@ -83,7 +79,6 @@ export function BottomPanel({
   const [riskSearchValue, setRiskSearchValue] = useState('');
 
   const activeTab: DrawerTab = search?.tab ?? 'risk';
-  const categoryFilter: AllocationCategory | '' = search?.category ?? '';
   const activityActionFilter = search?.daa ?? '';
 
   const updateDrawerSearch = (patch: DrawerSearchPatch) => {
@@ -99,49 +94,25 @@ export function BottomPanel({
     [allocations],
   );
 
-  // Filter allocations by selected category
-  const filteredAllocations = useMemo(() => {
-    if (!categoryFilter) {
-      return sortedAllocations;
-    }
-    return sortedAllocations.filter((a) => a.category === categoryFilter);
-  }, [sortedAllocations, categoryFilter]);
-
-  // The drawer follows the clicked allocation. When the category filter excludes
-  // it (or nothing is selected), fall back to the first allocation in view so a
-  // tab always has something to render.
+  // The drawer follows the clicked allocation. When nothing is selected, fall
+  // back to the first allocation the prime returned so a tab always has
+  // something to render.
   const focusedAllocation = useMemo(() => {
     if (
       selectedAllocation &&
-      filteredAllocations.some(
+      sortedAllocations.some(
         (allocation) =>
           getAllocationKey(allocation) === getAllocationKey(selectedAllocation),
       )
     ) {
       return selectedAllocation;
     }
-    return filteredAllocations[0] ?? null;
-  }, [selectedAllocation, filteredAllocations]);
+    return sortedAllocations[0] ?? null;
+  }, [selectedAllocation, sortedAllocations]);
 
   const focusedAllocationKey = focusedAllocation
     ? getAllocationKey(focusedAllocation)
     : null;
-
-  const categoryEmptyDescription = `No allocations found in the "${getCategoryLabel(categoryFilter, 'All Categories')}" category.`;
-
-  const emptyStateView =
-    sortedAllocations.length === 0 ? (
-      <EmptyState
-        title="No receipt tokens returned"
-        description="The selected prime did not return any receipt token holdings from the API."
-      />
-    ) : (
-      <EmptyState
-        title="No receipt tokens in category"
-        description={categoryEmptyDescription}
-        stretch
-      />
-    );
 
   useEffect(() => {
     if (activeTab === 'rrc') {
@@ -255,99 +226,54 @@ export function BottomPanel({
         ) : null}
       </div>
 
-      <div
-        className={css({
-          display: 'flex',
-          flexWrap: 'wrap',
-          gap: '4',
-          alignItems: 'end',
-        })}
-      >
-        <label
-          htmlFor="category-select"
+      {activeTab === 'risk' || activeTab === 'activity' ? (
+        <div
           className={css({
-            display: 'grid',
-            gap: '1',
-            flex: '1 1 12rem',
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: '4',
+            alignItems: 'end',
           })}
         >
-          <span
-            className={css({
-              fontSize: 'xs',
-              textTransform: 'uppercase',
-              letterSpacing: '0.1em',
-              color: 'text.muted',
-            })}
-          >
-            Category
-          </span>
-          <StyledSelect
-            id="category-select"
-            value={categoryFilter}
-            onChange={(event: ChangeEvent<HTMLSelectElement>) =>
-              updateDrawerSearch({
-                category: toSearchOption(
-                  event.target.value,
-                  ALLOCATION_CATEGORIES,
-                ),
-              })
-            }
-            disabled={
-              !selectedPrime ||
-              isLoading ||
-              errorMessage !== null ||
-              sortedAllocations.length === 0
-            }
-          >
-            <option value="">All Categories</option>
-            <option value="allocation">Allocation</option>
-            <option value="pol">Protocol Owned Liquidity</option>
-            <option value="psm3">PSM3</option>
-            <option value="asset">Asset</option>
-            <option value="custody">Custody</option>
-          </StyledSelect>
-        </label>
-
-        {activeTab === 'activity' ? (
-          <label
-            htmlFor="activity-action-filter"
-            className={css({
-              display: 'grid',
-              gap: '1',
-              flex: '1 1 12rem',
-            })}
-          >
-            <span
+          {activeTab === 'activity' ? (
+            <label
+              htmlFor="activity-action-filter"
               className={css({
-                fontSize: 'xs',
-                textTransform: 'uppercase',
-                letterSpacing: '0.1em',
-                color: 'text.muted',
+                display: 'grid',
+                gap: '1',
+                flex: '1 1 12rem',
               })}
             >
-              Action
-            </span>
-            <StyledSelect
-              id="activity-action-filter"
-              value={activityActionFilter}
-              onChange={(event: ChangeEvent<HTMLSelectElement>) =>
-                updateDrawerSearch({
-                  daa: toSearchOption(event.target.value, ACTIVITY_ACTIONS),
-                })
-              }
-              disabled={
-                !focusedAllocation || isLoading || errorMessage !== null
-              }
-            >
-              <option value="">All actions</option>
-              <option value="in">In</option>
-              <option value="out">Out</option>
-              <option value="sweep">Sweep</option>
-            </StyledSelect>
-          </label>
-        ) : null}
+              <span
+                className={css({
+                  fontSize: 'xs',
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.1em',
+                  color: 'text.muted',
+                })}
+              >
+                Action
+              </span>
+              <StyledSelect
+                id="activity-action-filter"
+                value={activityActionFilter}
+                onChange={(event: ChangeEvent<HTMLSelectElement>) =>
+                  updateDrawerSearch({
+                    daa: toSearchOption(event.target.value, ACTIVITY_ACTIONS),
+                  })
+                }
+                disabled={
+                  !focusedAllocation || isLoading || errorMessage !== null
+                }
+              >
+                <option value="">All actions</option>
+                <option value="in">In</option>
+                <option value="out">Out</option>
+                <option value="sweep">Sweep</option>
+              </StyledSelect>
+            </label>
+          ) : null}
 
-        {activeTab === 'risk' || activeTab === 'activity' ? (
           <div
             className={css({
               flex: '2 1 18rem',
@@ -371,8 +297,8 @@ export function BottomPanel({
               value={localRiskSearchValue}
             />
           </div>
-        ) : null}
-      </div>
+        </div>
+      ) : null}
 
       <div
         className={css({ display: 'grid', gap: '4', alignContent: 'start' })}
@@ -386,7 +312,7 @@ export function BottomPanel({
           <AsyncStateRenderer
             isLoading={isLoading}
             error={errorMessage}
-            isEmpty={filteredAllocations.length === 0}
+            isEmpty={sortedAllocations.length === 0}
             // A skeleton, not an EmptyState: this is the shape of the tab body
             // that is coming, and an "empty" panel titled "Loading" reads as a
             // terminal state rather than a pending one.
@@ -400,7 +326,12 @@ export function BottomPanel({
                 size="inline"
               />
             }
-            emptyView={emptyStateView}
+            emptyView={
+              <EmptyState
+                title="No receipt tokens returned"
+                description="The selected prime did not return any receipt token holdings from the API."
+              />
+            }
           >
             {activeTab === 'risk' ? (
               <RiskBreakdownTab
