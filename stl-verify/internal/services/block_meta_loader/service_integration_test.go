@@ -28,19 +28,59 @@ import (
 // createBlockMetaTable creates the block_meta dimension in the test schema. The
 // authoritative DDL ships in migration 20260818_120000_create_block_meta_dimension.sql
 // (schema PR #695), which is not on this branch, so the loader's target table is
-// created inline here to keep the test self-contained. The PK matches the upsert's
-// ON CONFLICT target exactly.
+// created inline here to keep the test self-contained.
+//
+// It MIRRORS THE MIGRATION, not the query under test. The previous version defined a
+// three-column PK because that is what the upsert's ON CONFLICT named -- so the test
+// validated the loader against its own assumption and passed, while the real table has
+// a four-column PK and the upsert failed 42P10 against it. A fixture shaped to match
+// the code it is testing cannot detect a disagreement with production.
+//
+// Delete this once #695 merges and this branch rebases: apply the real migration instead.
 func createBlockMetaTable(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
 	t.Helper()
 	if _, err := pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS block_meta (
-		chain_id        integer     NOT NULL,
-		block_number    bigint      NOT NULL,
-		block_version   integer     NOT NULL DEFAULT 0,
-		block_timestamp timestamptz NOT NULL,
-		created_at      timestamptz NOT NULL DEFAULT now(),
-		CONSTRAINT block_meta_pkey PRIMARY KEY (chain_id, block_number, block_version)
+		chain_id           integer     NOT NULL,
+		block_number       bigint      NOT NULL,
+		block_version      integer     NOT NULL DEFAULT 0,
+		block_timestamp    timestamptz NOT NULL,
+		metadata           jsonb,
+		processing_version integer     NOT NULL DEFAULT 0,
+		build_id           integer     NOT NULL DEFAULT 0,
+		created_at         timestamptz NOT NULL DEFAULT now(),
+		CONSTRAINT block_meta_pkey PRIMARY KEY (chain_id, block_number, block_version, processing_version)
 	)`); err != nil {
 		t.Fatalf("create block_meta table: %v", err)
+	}
+	// The trigger is part of the shape too: without it processing_version is never assigned and the
+	// four-column arbiter would be exercised against a column that is always its default.
+	if _, err := pool.Exec(ctx, `
+CREATE OR REPLACE FUNCTION assign_processing_version_block_meta()
+RETURNS TRIGGER LANGUAGE plpgsql SET plan_cache_mode = 'force_custom_plan' AS $$
+DECLARE existing_ver INT; max_ver INT;
+BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        format('bm|%s|%s|%s', NEW.chain_id, NEW.block_number, NEW.block_version), 0));
+    SELECT processing_version INTO existing_ver FROM block_meta
+     WHERE chain_id = NEW.chain_id AND block_number = NEW.block_number
+       AND block_version = NEW.block_version AND build_id = NEW.build_id LIMIT 1;
+    IF FOUND THEN
+        NEW.processing_version := existing_ver;
+    ELSE
+        SELECT COALESCE(MAX(processing_version), -1) INTO max_ver FROM block_meta
+         WHERE chain_id = NEW.chain_id AND block_number = NEW.block_number
+           AND block_version = NEW.block_version;
+        NEW.processing_version := max_ver + 1;
+    END IF;
+    RETURN NEW;
+END $$;`); err != nil {
+		t.Fatalf("create processing_version trigger function: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+DROP TRIGGER IF EXISTS trigger_assign_processing_version ON block_meta;
+CREATE TRIGGER trigger_assign_processing_version BEFORE INSERT ON block_meta
+FOR EACH ROW EXECUTE FUNCTION assign_processing_version_block_meta();`); err != nil {
+		t.Fatalf("create processing_version trigger: %v", err)
 	}
 }
 
