@@ -784,16 +784,6 @@ export function formatWadValue(
   }
 }
 
-export function formatRawWadLabel(
-  value: number | string | null | undefined,
-): string {
-  if (value === null || value === undefined || value === '') {
-    return 'Raw WAD unavailable';
-  }
-
-  return `Raw WAD ${truncateMiddle(String(value))}`;
-}
-
 // Float conversion for charting only; use formatWadValue for displayed amounts,
 // which keeps full precision via BigInt.
 export function wadToUnits(

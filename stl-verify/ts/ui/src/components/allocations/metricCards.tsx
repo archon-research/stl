@@ -61,12 +61,14 @@ export type MetricChartSpec = {
   stroke: ChartColorToken;
   formatValue: (value: number) => string;
   // Ordered ascending. Each draws a dashed limit line with a labelled edge.
-  thresholds?: { value: number; label?: string; stroke?: ChartColor }[];
-  // The provenance not drawn as the primary series, for the same buckets, under
-  // `source=both`. A second line rather than a second card: the point is the gap
-  // between them. `ChartColor`, not a series token: it is deliberately not one of
-  // the series hues, so it cannot be mistaken for a quantity of its own.
-  comparison?: { data: ChartDatum[]; stroke: ChartColor } | null;
+  // `name` opts the limit into the cursor tooltip, where it is reported beside
+  // the value being read against it; a limit without one stays on the plot.
+  thresholds?: {
+    value: number;
+    label?: string;
+    name?: string;
+    stroke?: ChartColor;
+  }[];
 };
 
 // Every card the metrics band knows how to build. Not what it shows: see
@@ -270,12 +272,6 @@ export function MetricCard({
   );
 }
 
-// A dashed comparison is always the indexed series: the band draws one only
-// where Sky's series leads, and it is that same quantity from the other
-// provenance (see `MetricChartSpec.comparison`). Naming it here spares the
-// chart spec a provenance field it would otherwise carry for the legend alone.
-const COMPARISON_SERIES_LABEL = 'indexed';
-
 // A threshold that names no colour of its own is drawn in the axis hue, so its
 // key has to be too.
 const THRESHOLD_LEGEND_COLOR: ChartColorToken = 'chart.axis';
@@ -299,10 +295,9 @@ function drawsMetricChart(
 }
 
 /**
- * One legend entry per mark the chart actually puts on the plot: the primary
- * line, the dashed comparison where there is one, and each labelled threshold.
- * Derived from the same spec the chart renders from, so a legend cannot name a
- * series that is not there.
+ * One legend entry per mark the chart actually puts on the plot: the series
+ * line and each labelled threshold. Derived from the same spec the chart
+ * renders from, so a legend cannot name a mark that is not there.
  */
 function metricLegendItems(
   chart: MetricChartSpec,
@@ -311,15 +306,6 @@ function metricLegendItems(
   const items: ChartLegendItem[] = [
     { id: chart.key, label: seriesLabel, color: chart.stroke },
   ];
-
-  if (chart.comparison && chart.comparison.data.length > 0) {
-    items.push({
-      id: `${chart.key}-comparison`,
-      label: COMPARISON_SERIES_LABEL,
-      color: chart.comparison.stroke,
-      dash: true,
-    });
-  }
 
   for (const entry of chart.thresholds ?? []) {
     // An unlabelled limit has nothing to key; the line still draws.
@@ -352,7 +338,7 @@ export function MetricCardLegend({
   }
 
   // `shape="line"` matches what the plot draws — every series here is a line —
-  // and `dash` carries the solid-primary vs dashed-comparison distinction the
+  // and `dash` carries the solid-series vs dashed-limit distinction the
   // chart itself uses. Unwrapped: `MetricCard`'s legend row owns the styling,
   // so the row still holds its height when this renders nothing.
   return (
@@ -416,6 +402,21 @@ const chartTooltipTitleClassName = css({
 const chartTooltipValueClassName = css({
   fontSize: 'sm',
   fontWeight: 'medium',
+});
+
+// Two columns so a named row's label and figure line up down the card, and the
+// figures stay readable against each other rather than against the labels.
+const chartTooltipRowClassName = css({
+  display: 'flex',
+  alignItems: 'baseline',
+  justifyContent: 'space-between',
+  gap: '3',
+  fontSize: 'sm',
+});
+
+const chartTooltipRowLabelClassName = css({
+  color: 'text.muted',
+  fontSize: 'xs',
 });
 
 function buildSingleSeriesTheme(stroke: string) {
@@ -655,10 +656,7 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
     [strokeColor],
   );
 
-  const values = [
-    ...chart.data.map((point) => point.value),
-    ...(chart.comparison?.data ?? []).map((point) => point.value),
-  ];
+  const values = [...chart.data.map((point) => point.value)];
   const minValue = Math.min(...values);
   const maxValue = Math.max(...values);
 
@@ -674,6 +672,10 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
     : [minValue, maxValue];
 
   const thresholds = chart.thresholds ?? [];
+  const namedThresholds = thresholds.filter(
+    (entry): entry is (typeof thresholds)[number] & { name: string } =>
+      entry.name !== undefined,
+  );
   const yDomain: [number, number] = (() => {
     if (thresholds.length === 0) {
       return [domainMin, domainMax];
@@ -724,15 +726,6 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
     return (x: number) => byTimestamp.get(x) ?? null;
   }, [chart.data]);
 
-  const comparisonValueAt = useMemo(() => {
-    const byTimestamp = new Map(
-      (chart.comparison?.data ?? []).flatMap((point) =>
-        point.timestamp === null ? [] : [[point.timestamp, point.value]],
-      ),
-    );
-    return (x: number) => byTimestamp.get(x) ?? null;
-  }, [chart.comparison]);
-
   const [hoveredTimestamp] = useHoveredTimestamp();
   // Reads the instant off the hovered datum rather than inverting a pixel, so
   // sibling cards line up on the bucket a reader is actually over even though
@@ -744,18 +737,7 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
   const xAccessor = (point: ChartDatum): string | number =>
     stops === null ? point.label : (point.timestamp as number);
 
-  const cursorSeries = [
-    { id: chart.key, color: chart.stroke, valueAt },
-    ...(chart.comparison && chart.comparison.data.length > 0
-      ? [
-          {
-            id: `${chart.key}-comparison`,
-            color: chart.comparison.stroke,
-            valueAt: comparisonValueAt,
-          },
-        ]
-      : []),
-  ];
+  const cursorSeries = [{ id: chart.key, color: chart.stroke, valueAt }];
 
   return (
     <div
@@ -794,10 +776,8 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
             fill: 'var(--colors-text-muted)',
           })}
         />
-        {/* The same soft fill under every primary line. Gating it on whether a
-            comparison was present made sibling cards shade inconsistently, since
-            that varies by provenance and data window; the explicit `yDomain`
-            above means the fill never moves the scale either way. */}
+        {/* The same soft fill under every line. The explicit `yDomain` above
+            means the fill never moves the scale. */}
         <AreaSeries
           dataKey={`${chart.key}-area`}
           data={chart.data as ChartDatum[]}
@@ -814,23 +794,6 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
           yAccessor={(d: ChartDatum) => d.value}
           stroke={strokeColor}
         />
-        {chart.comparison && chart.comparison.data.length > 0 ? (
-          // Dashed and unfilled: the same quantity as the primary series, from
-          // the other provenance, which should not read as a second quantity
-          // stacked on the first.
-          <LineSeries
-            dataKey={`${chart.key}-comparison`}
-            data={chart.comparison.data}
-            xAccessor={xAccessor}
-            yAccessor={(d: ChartDatum) => d.value}
-            stroke={resolveChartColor(chart.comparison.stroke)}
-            // Heavier than a hairline: where the two provenances agree the
-            // lines coincide exactly, and the series colour showing through the
-            // gaps is what tells a reader that is what happened.
-            strokeWidth={1.5}
-            strokeDasharray="6 4"
-          />
-        ) : null}
         {thresholds.map((entry) => (
           <ReferenceBand
             key={`threshold-${entry.value}`}
@@ -920,6 +883,28 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
                       style={{ color: point.color }}
                     >
                       {chart.formatValue(point.value)}
+                    </div>
+                  ))}
+                  {/* A named limit is reported here because the value above is
+                      read against it — the plot's own label states it once, at
+                      the line, which is easy to miss on a small card. */}
+                  {namedThresholds.map((entry) => (
+                    <div
+                      key={`tooltip-threshold-${entry.value}`}
+                      className={chartTooltipRowClassName}
+                    >
+                      <span className={chartTooltipRowLabelClassName}>
+                        {entry.name}
+                      </span>
+                      <span
+                        style={{
+                          color: resolveChartColor(
+                            entry.stroke ?? THRESHOLD_LEGEND_COLOR,
+                          ),
+                        }}
+                      >
+                        {chart.formatValue(entry.value)}
+                      </span>
                     </div>
                   ))}
                 </div>

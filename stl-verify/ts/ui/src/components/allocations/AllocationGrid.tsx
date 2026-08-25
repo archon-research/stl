@@ -6,6 +6,7 @@ import {
   ErrorState,
   SearchInput,
   type SkeletonColumnHint,
+  SkeletonStack,
   type SortingState,
   StyledSelect,
   useDataTable,
@@ -70,6 +71,9 @@ type AllocationGridProps = {
   filteredAllocations: Allocation[];
   topMetricsAllocations: Allocation[];
   isLoading: boolean;
+  // The rows are this prime's and the fetch has finished. Narrower than
+  // `!isLoading`, which is also false before a fetch starts.
+  areAllocationsSettled: boolean;
   isRiskCapitalLoading: boolean;
   isPrimeDebtLoading: boolean;
   localProtocols: LocalProtocolRow[];
@@ -246,6 +250,17 @@ function AllocationAssetCell({
 }
 
 function AllocationUnderlyingCell({ allocation }: { allocation: Allocation }) {
+  // Legacy's balance-sheet rows name no loan token at all, so both the symbol
+  // and the address are absent. Rendering the cell anyway drew an empty avatar
+  // above a dash — two placeholders for one missing value, and the avatar read
+  // as a token whose logo had failed to load. One dash, as every other column
+  // does for an absent value.
+  if (!allocation.underlying_symbol && !allocation.underlying_token_address) {
+    return (
+      <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>—</p>
+    );
+  }
+
   return (
     <div
       className={css({
@@ -928,6 +943,7 @@ export function AllocationGrid({
   filteredAllocations,
   topMetricsAllocations,
   isLoading,
+  areAllocationsSettled,
   isRiskCapitalLoading,
   isPrimeDebtLoading,
   localProtocols,
@@ -1138,11 +1154,16 @@ export function AllocationGrid({
     sorting,
   });
 
-  const showTopMetricsSkeleton =
-    selectedPrime !== null && (isLoading || isRiskCapitalLoading);
+  // Includes the window before a prime is resolved: the page always picks one,
+  // so an empty band there is the same "still arriving" state as a prime whose
+  // figures are in flight, not a page waiting on the reader.
+  const showTopMetricsSkeleton = !areAllocationsSettled || isRiskCapitalLoading;
 
   const hasTopMetrics =
-    riskCapital !== null || summary !== null || selectedPrime !== null;
+    riskCapital !== null ||
+    summary !== null ||
+    selectedPrime !== null ||
+    !areAllocationsSettled;
 
   const allocationActivityChart = findMetricChart(
     metricCharts,
@@ -1215,18 +1236,30 @@ export function AllocationGrid({
           >
             <div className={flex({ align: 'center', gap: '2.5' })}>
               {selectedPrime ? (
-                <ProtocolLogo protocolName={selectedPrime.name} size="8" />
-              ) : null}
-              <h1
-                className={css({
-                  m: 0,
-                  fontSize: { base: '3xl', md: '4xl' },
-                  lineHeight: 'tight',
-                  color: 'text.strong',
-                })}
-              >
-                {selectedPrime ? selectedPrime.name : 'Select a prime'}
-              </h1>
+                <>
+                  <ProtocolLogo protocolName={selectedPrime.name} size="8" />
+                  <h1
+                    className={css({
+                      m: 0,
+                      fontSize: { base: '3xl', md: '4xl' },
+                      lineHeight: 'tight',
+                      color: 'text.strong',
+                    })}
+                  >
+                    {selectedPrime.name}
+                  </h1>
+                </>
+              ) : (
+                // Never "Select a prime": the page resolves one itself, so the
+                // only time this is empty is before that has happened, and
+                // naming an action the reader does not have to take reads as a
+                // page that has given up.
+                <SkeletonStack
+                  count={1}
+                  itemHeight={40}
+                  style={{ width: '12rem' }}
+                />
+              )}
             </div>
             {/* The label ships with the address, never on its own: this is the
                 one place the prime's wallet address is named, and an unlabelled
@@ -1481,14 +1514,6 @@ export function AllocationGrid({
       </div>
 
       <div className={css({ mt: '6' })}>
-        {!selectedPrime && !isLoading ? (
-          <EmptyState
-            title="Choose a prime to load positions"
-            description="The main grid activates once a prime is selected from the sidebar."
-            stretch
-          />
-        ) : null}
-
         {selectedPrime && errorMessage ? (
           <ErrorState
             title="Unable to load allocations"
@@ -1499,10 +1524,7 @@ export function AllocationGrid({
           />
         ) : null}
 
-        {selectedPrime &&
-        !errorMessage &&
-        !isLoading &&
-        allocations.length === 0 ? (
+        {areAllocationsSettled && !errorMessage && allocations.length === 0 ? (
           <EmptyState
             title="No allocations returned"
             description="The selected prime did not return any allocation rows from the API."
@@ -1510,9 +1532,8 @@ export function AllocationGrid({
           />
         ) : null}
 
-        {selectedPrime &&
+        {areAllocationsSettled &&
         !errorMessage &&
-        !isLoading &&
         allocations.length > 0 &&
         visibleAllocations.length === 0 ? (
           <EmptyState
@@ -1522,13 +1543,12 @@ export function AllocationGrid({
           />
         ) : null}
 
-        {selectedPrime &&
-        !errorMessage &&
-        (isLoading || visibleAllocations.length > 0) ? (
+        {!errorMessage &&
+        (!areAllocationsSettled || visibleAllocations.length > 0) ? (
           <div className={tableHeaderTypographyClassName}>
             <DataTable
               table={table}
-              isLoading={isLoading}
+              isLoading={!areAllocationsSettled}
               onRowClick={(allocation) =>
                 onSelectAllocation(getAllocationKey(allocation))
               }

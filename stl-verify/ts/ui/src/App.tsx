@@ -785,6 +785,16 @@ function App() {
     [allocations, isActivitiesView, localProtocols],
   );
 
+  // Whether the rows on screen are this prime's, settled. `isAllocationsLoading`
+  // alone is false in two gaps — before the prime list resolves the prime the
+  // page auto-selects, and after a prime changes but before its fetch starts —
+  // and in both an empty `allocations` would otherwise be read as an answer.
+  const areAllocationsSettled =
+    !isPrimesLoading &&
+    selectedPrimeGroup !== null &&
+    !isAllocationsLoading &&
+    loadedAllocationsPrimeKey === selectedPrimeGroup.key;
+
   // Only rows loaded for this exact prime are an authoritative option list; []
   // or another prime's rows read as "no such option" and wipe ?network=.
   const allocationOptionsUnready =
@@ -1055,15 +1065,14 @@ function App() {
       high: 'chart.series.critical' as const,
     }[encumbranceSeverity(encumbranceValue)];
 
-    // Sky's is the preferred model, so its series leads and STL's becomes the
-    // comparison. Whole series: a line drawn from both would trace neither.
+    // Legacy's is the preferred model, so its series is the one drawn. Whole
+    // series: a line traced from both would trace neither. Verify's is not
+    // drawn beside it — a reader who wants that switches the view's provenance,
+    // which keeps every card the same shape whichever provenance is on screen.
     const preferSkySeries = (
       stl: ChartDatum[],
       sky: ChartDatum[],
-    ): { primary: ChartDatum[]; comparison: ChartDatum[] } =>
-      sky.length > 0
-        ? { primary: sky, comparison: stl }
-        : { primary: stl, comparison: [] };
+    ): ChartDatum[] => (sky.length > 0 ? sky : stl);
 
     const exposure = preferSkySeries(
       exposureSeries,
@@ -1091,15 +1100,6 @@ function App() {
     // collision where two of these cards named the same token unnoticed).
     //
     // The provenance not leading rides dashed beside the one that is, on the
-    // three charts where both describe the same quantity. Collateral and
-    // encumbrance are Sky's alone, so there is nothing to compare them with.
-    const comparisonSeries = (
-      points: ChartDatum[],
-    ): NonNullable<MetricChartSpec['comparison']> | null =>
-      points.length > 0
-        ? { data: points, stroke: 'var(--colors-text-muted)' }
-        : null;
-
     const charts: MetricChartSpec[] = [
       {
         // Balance reconstructed from signed USD net flows, anchored at the
@@ -1114,15 +1114,13 @@ function App() {
         // Exposure trend from priced receipt-token balances over time; falls
         // back to the flat current value when no history is available.
         key: 'risk-capital',
-        data: seriesOrFallback(exposure.primary, exposureValue),
-        comparison: comparisonSeries(exposure.comparison),
+        data: seriesOrFallback(exposure, exposureValue),
         stroke: 'chart.series.secondary',
         formatValue: formatCompactUsd,
       },
       {
         key: 'total-capital',
-        data: seriesOrFallback(totalCapital.primary, totalRiskCapitalValue),
-        comparison: comparisonSeries(totalCapital.comparison),
+        data: seriesOrFallback(totalCapital, totalRiskCapitalValue),
         stroke: 'chart.series.quaternary',
         formatValue: formatCompactUsd,
         // The requirement the caption states, drawn as one reference line —
@@ -1134,16 +1132,18 @@ function App() {
                 {
                   value: requiredRiskCapitalValue,
                   label: `Required ${formatCompactUsd(requiredRiskCapitalValue)}`,
-                  // Warning-hued so it cannot be mistaken for the muted
-                  // comparison series that shares this card.
+                  // Named, so the cursor tooltip can report the limit beside
+                  // the value being read against it.
+                  name: 'required',
+                  // Warning-hued so it reads as a limit rather than a second
+                  // quantity.
                   stroke: 'var(--colors-text-warning)',
                 },
               ],
       },
       {
         key: 'prime-debt-exposure',
-        data: seriesOrFallback(primeDebt.primary, primeDebtValue),
-        comparison: comparisonSeries(primeDebt.comparison),
+        data: seriesOrFallback(primeDebt, primeDebtValue),
         stroke: 'chart.series.quinary',
         formatValue: (value: number) => `${formatCompactNumber(value)} DAI`,
       },
@@ -1314,6 +1314,7 @@ function App() {
                 filteredAllocations={filteredAllocations}
                 topMetricsAllocations={searchFilteredAllocations}
                 isLoading={isAllocationsLoading}
+                areAllocationsSettled={areAllocationsSettled}
                 isRiskCapitalLoading={isRiskCapitalLoading}
                 isPrimeDebtLoading={isPrimeDebtLoading}
                 localProtocols={localProtocols}
