@@ -31,13 +31,16 @@ spec:
                 name: cex-orderbook-indexer-kraken
           resources:
             requests:
-              cpu: "50m"
+              # 250m, not the fleet's 50m: measured demand is ~1.3 cores, so a 50m
+              # request had the scheduler place this pod as if it were idle.
+              cpu: "250m"
               memory: "64Mi"
             limits:
-              # 500m, not the fleet's usual 200m: the staging headroom test (VEC-380)
-              # showed this pod CPU-throttled at 200m (per-frame sorts).
+              # 1500m, not the fleet's usual 200m: the per-frame sorts make this the
+              # most expensive of the three venues, and at 500m staging was denied
+              # 0.24-0.82 CPU seconds per second (ARCT-321) on two symbols alone.
               # okx stays at 200m — it idles at single-digit millicores.
-              cpu: "500m"
+              cpu: "1500m"
               memory: "256Mi"
           livenessProbe:
             exec:
