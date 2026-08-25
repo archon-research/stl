@@ -327,6 +327,35 @@ about `offchain-price-backfill` above applies — nothing is missed while it is
 down, it emits one `cronjob_runs_total` record per *activity*, and it is excluded
 from `VectorCronjobAllRunsFailing` for the same reason.
 
+**Reaching Temporal before you run any of the commands below.** The server is
+in-cluster in every environment, in the `temporal` k8s namespace, at
+`temporal-server.temporal:7233` in Temporal namespace `vector` — that is what
+every worker is handed (`TEMPORAL_HOST_PORT` / `TEMPORAL_NAMESPACE` in
+`k8s/overlays/{staging,prod}/configmaps.yaml`). In EKS the server itself is owned
+by the infrastructure repo, not this one (`k8s/dev-infra/temporal.yaml` is local
+dev only and says so). The workers dial it with no TLS and no API key
+(`stl-verify/internal/adapters/outbound/temporal/temporal.go`), so access is a
+matter of reaching the cluster, not of holding a Temporal credential.
+
+The `temporal` CLI defaults to `127.0.0.1:7233`, so a bare invocation fails with
+connection refused. Port-forward the service and point the CLI at it:
+
+```bash
+kubectl --context <staging-or-prod-context> -n temporal port-forward svc/temporal-server 7233:7233
+```
+
+Every snippet below then works as written. The `temporal` snippets in this
+runbook's other sections omit `--address`; `export TEMPORAL_ADDRESS=127.0.0.1:7233`
+once in the same shell and they work too. Locally, `make temporal-cli` does the
+equivalent by exec-ing into the kind cluster's own server pod; it refuses any
+non-kind context on purpose, so it cannot be used for staging or prod.
+
+**Without CLI access**, use the Temporal UI (namespace `vector`) — starting a run,
+listing executions, terminating one and reading history are all buttons there.
+This repo does not carry the staging/prod UI URL; it is exposed by the
+infrastructure repo, so get it from there or from the team rather than guessing at
+a hostname.
+
 **How to start a run.** Temporal UI (namespace **`vector`**) →
 **Start Workflow**:
 
@@ -343,16 +372,20 @@ chain's VaultV2 factory deploy block. An explicit `from` always wins. The
 equivalent CLI call:
 
 ```bash
-temporal workflow start --namespace vector \
+temporal workflow start --address 127.0.0.1:7233 --namespace vector \
   --task-queue morpho-vault-backfill --type MorphoVaultBackfill \
   --workflow-id morpho-vault-backfill-24765588-24786366 \
   --input '{"from":24765588,"to":24786366}'
 ```
 
-**What a run does, and how long it takes.** One discovery activity over the whole
-range (scan S3 receipts → probe candidates on-chain → persist vaults), then one
-activity per 1000-block S3 partition replaying that partition's VaultV2
-structured events, sequentially and in ascending block order. Measured on
+**What a run does, and how long it takes.** One discovery activity per sub-range
+of a few dozen partitions (scan S3 receipts → probe candidates on-chain → persist
+vaults), then one activity per 1000-block S3 partition replaying that partition's
+VaultV2 structured events, both sequentially and in ascending block order. Every
+completed activity is banked in the event history, so a rollout mid-run retries
+the sub-range or partition it was interrupted in and leaves the completed ones
+alone — the sub-range is sized to finish inside the gap between two deploys, which
+is what lets a long run survive them. Measured on
 mainnet: ~11.5 s per partition for discovery and ~20 s per partition for replay,
 so a whole-V2-era run is measured in hours. A range wider than 8000 partitions is
 rejected up front — that catches a mistyped `from` or a millisecond timestamp
@@ -363,12 +396,84 @@ but a typical partition finishes in 10-20 s, so in practice the heartbeat only
 fires on pathologically slow partitions — for ordinary ones the 30-minute
 StartToClose timeout is the real detector after a mid-partition rollout.
 
+**Deploying this worker while a run is in flight.** A routine deploy is fine: the
+run is replayed against the new code, reaches the same command sequence, and
+carries on from where it was. What an in-flight run cannot survive is an image
+that CHANGES that sequence — a different phase split (the sub-range width is one),
+a changed activity input shape, or activities reordered. Ship one of those and you
+must terminate every running `MorphoVaultBackfill` execution as part of the roll,
+then start the ranges again afterwards; restarting costs only wall clock, since
+every write is an idempotent append. A changed input shape is the one to be
+strictest about: an activity SCHEDULED under the old image and still in flight
+carries an old-shaped payload, which the new worker decodes with `encoding/json`
+— unknown fields ignored, missing ones zero-filled — so it can scan an empty
+range, probe at block 0, succeed, and be banked as a completed sub-range. That is
+a hole in the data reported as success, which nothing downstream detects.
+
+Why replay cannot absorb it: Temporal walks history and the scheduled commands in
+lockstep, comparing each activity's id and the last dot-separated segment of its
+type (`lastPartOfName`), positionally — the input is not among the fields
+compared, so a re-planned run is not corrected by it. Only a side running out
+short-circuits the walk (a missing or extra command); an inserted or reordered
+activity fails inside that id/type comparison (`go.temporal.io/sdk v1.45.0`,
+`internal/internal_task_handlers.go:1650-1662`). The failure is not a failed run:
+the workflow TASK fails with `NON_DETERMINISTIC_ERROR` and retries forever while
+the execution sits in Running, because the default `WorkflowPanicPolicy` is
+`BlockWorkflow` (`internal/worker.go:448-454`) and this worker never overrides it,
+and no run timeout is set. Look for
+`temporal_workflow_task_execution_failed{failure_reason="NonDeterminismError"}`
+(the SDK maps a history mismatch to that cause in
+`internal/internal_task_pollers.go:835-836`) and, in the pod log, the messages
+`Workflow panic` or `Failed to process workflow task.` — grep their structured
+`Error` field, not the message, for `[TMPRL1100] nondeterministic workflow`.
+
+```bash
+temporal workflow list --address 127.0.0.1:7233 --namespace vector \
+  --query 'WorkflowType="MorphoVaultBackfill" AND ExecutionStatus="Running"'
+temporal workflow terminate --address 127.0.0.1:7233 --namespace vector \
+  --workflow-id <id> --reason 'rolling morpho-vault-backfill'
+```
+
 **Reading progress and re-running.** The `progress` query (UI → Query tab) shows
-`partitionsDone` / `partitionsTotal` mid-run and survives a failed run, whose
-Result panel Temporal discards. A failed partition stops the run there, so the
-completed prefix is what the query reports. Re-running the same range is always
-safe: every write is an idempotent append, so a repeat costs wall clock, not
-correctness.
+`subRangesDone` / `subRangesTotal` for discovery and `partitionsDone` /
+`partitionsTotal` for replay mid-run, and survives a failed run, whose Result
+panel Temporal discards. A failed sub-range or partition stops the run there, so
+the completed prefix is what the query reports.
+
+To resume a FAILED execution, reset it rather than starting a new one — a fresh
+start has empty history and rescans from the run's own `from`, discarding every
+banked sub-range. Reset to a point BEFORE the failing activity was scheduled:
+activity results are never reapplied, only re-executed, so a reset to the last
+workflow task carries the recorded failure into the new execution and it stops at
+the same place. Read the history, find the `WorkflowTaskCompleted` just before the
+failing `ActivityTaskScheduled`, and reset to that event id. The reset point is
+EXCLUSIVE: that workflow task is not replayed, so the commands it issued — the
+failing activity among them — are re-issued, while every sub-range and partition
+completed before it stays banked.
+
+```bash
+temporal workflow show --address 127.0.0.1:7233 --namespace vector --workflow-id <id>
+temporal workflow reset --address 127.0.0.1:7233 --namespace vector --workflow-id <id> \
+  --event-id <the WorkflowTaskCompleted before the failing ActivityTaskScheduled> \
+  --reason 'resuming after a failed sub-range'
+```
+
+Two flag traps here. `--reason` is REQUIRED on `reset` (the command fails
+client-side without it), unlike on `terminate` above where it is optional. And do
+NOT add `--type` alongside `--event-id`: passing both raises no error, but
+`--type` silently wins and your event id is discarded — `--type LastWorkflowTask`
+gets you exactly the failure-carrying reset this paragraph is telling you to
+avoid.
+
+Check the new execution's `progress` query afterwards to confirm it resumed where
+you intended rather than earlier. Starting the same range fresh is always safe
+too, just slower: every write is an idempotent append, so a repeat costs wall
+clock, not correctness.
+
+`candidates` and `vaults` — in the query, the Result panel and the completion log
+— are summed across the sub-ranges, so an address appearing in several is counted
+once per sub-range: they measure scan volume, not distinct addresses or vaults.
+`knownV2Vaults` is a registry count and is exact.
 
 The query, the Result panel and each partition's `replayed partition` log line
 also carry `rowsAppended`, split per table: `adapterStates`, `vaultCaps`,

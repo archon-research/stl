@@ -15,9 +15,10 @@
 // start`. That is the whole reason it is not a cronjob: a backfill's window is
 // an argument, and cronjobWorkflow accepts none.
 //
-// A run keeps no progress state of its own. Every completed partition is in the
-// workflow's event history, so a retry resumes there; everything a run writes is
-// an idempotent append, so redoing one costs wall clock, not correctness.
+// A run keeps no progress state of its own. Every completed discovery sub-range
+// and replay partition is in the workflow's event history, so a retry resumes
+// there; everything a run writes is an idempotent append, so redoing one costs
+// wall clock, not correctness.
 package main
 
 import (
