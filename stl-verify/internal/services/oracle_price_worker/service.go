@@ -5,7 +5,6 @@ package oracle_price_worker
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -22,7 +21,7 @@ import (
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/abis"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/blockchain/archiving"
-	"github.com/archon-research/stl/stl-verify/internal/pkg/hexutil"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/blockheader"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/rpcutil"
 	"github.com/archon-research/stl/stl-verify/internal/pkg/telemetry"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
@@ -379,19 +378,11 @@ func (s *Service) resolveBlockTimestamp(ctx context.Context, event outbound.Bloc
 		return time.Time{}, fmt.Errorf("block %d (version %d, chain %d) not found in cache or s3 (or cached value is null)", event.BlockNumber, event.Version, event.ChainID)
 	}
 
-	var block struct {
-		Timestamp string `json:"timestamp"`
-	}
-	if err := json.Unmarshal(data, &block); err != nil {
-		return time.Time{}, fmt.Errorf("unmarshalling block %d: %w", event.BlockNumber, err)
-	}
-
-	ts, err := hexutil.ParseInt64(block.Timestamp)
+	ts, err := blockheader.ParseTimestamp(data)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("parsing block %d timestamp %q: %w", event.BlockNumber, block.Timestamp, err)
+		return time.Time{}, fmt.Errorf("parsing block %d (version %d) timestamp: %w", event.BlockNumber, event.Version, err)
 	}
-
-	return time.Unix(ts, 0).UTC(), nil
+	return ts, nil
 }
 
 func (s *Service) processBlockForOracle(ctx context.Context, event outbound.BlockEvent, blockTimestamp time.Time, unit *oracleUnit) (retErr error) {

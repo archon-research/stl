@@ -54,3 +54,6 @@
 ./cmd/backfillers/reference-capital-backfill
 ./internal/services/morpho_v2_bootstrap
 ./internal/pkg/blockchain/blocktime
+./internal/pkg/blockheader
+./internal/services/block_meta_loader
+./cmd/backfillers/block-meta-loader
