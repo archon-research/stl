@@ -2,9 +2,10 @@
 -- versions resolved. A derived cache of the position_state history and nothing more -- it answers
 -- "now", never "as of block N".
 --
--- Shape follows the current-position caches in #733 (VEC-577) exactly: a PLAIN table, one row per key,
--- no time dimension and therefore no hypertable, no compression policy and no tiering policy -- the
--- hypertable rule is about time-series tables and this is not one. The history stays append-only and
+-- SHAPE follows the current-position caches in #733 (VEC-577): a PLAIN table, one row per key, no time
+-- dimension and therefore no hypertable, no compression policy and no tiering policy -- the hypertable
+-- rule is about time-series tables and this is not one. The GRANTS deliberately differ; see the REVOKE
+-- below. The history stays append-only and
 -- untouched, and an AFTER INSERT trigger on position_state keeps this fresh.
 --
 -- This file creates the table and its maintainer only. The initial backfill is a SEPARATE migration,
@@ -111,8 +112,8 @@ COMMENT ON COLUMN position_current.build_id IS 'Audit. Which build wrote the lat
 -- hold the UPDATE grant. The corollary is a hard limit on how it may be read: position_current answers
 -- "now", never "as of block N". The per-day series lives in position_daily (VEC-636).
 --
--- SELECT, INSERT and UPDATE, with DELETE revoked: the trigger and the backfill only ever insert or
--- overwrite, so a delete channel would be unused reach. TRUNCATE is not granted either, so the
+-- SELECT, INSERT and UPDATE, with DELETE revoked: the trigger and the backfill in 20260819_150100 only
+-- ever insert or overwrite, so a delete channel would be unused reach. TRUNCATE is not granted either, so the
 -- remove-rows path is owner-only by construction. This is deliberately STRICTER than the
 -- current-position caches in #733, which take the same DO UPDATE arm but keep the DELETE they arrive
 -- with (see the REVOKE below).
@@ -124,17 +125,17 @@ COMMENT ON COLUMN position_current.build_id IS 'Audit. Which build wrote the lat
 -- position_state but lacks UPDATE here therefore cannot write history at all: every materializer
 -- statement fails at executor start, not on conflict. Any narrower materializer role (VEC-562) must be
 -- granted UPDATE on this table in the same migration that grants it INSERT on position_state.
--- TestPositionStateWritersHoldUpdateOnCurrent asserts that coupling from the catalogue.
+-- TestPositionStateWritersHoldUpdateOnPositionCurrent asserts that coupling from the catalogue.
 
 GRANT SELECT ON position_current TO stl_readonly;
 GRANT SELECT, INSERT, UPDATE ON position_current TO stl_readwrite;
 -- The GRANT above does NOT remove DELETE, and withholding it is not the same as revoking it:
 -- 20260122_140100 uses ALTER DEFAULT PRIVILEGES to grant SELECT, INSERT, UPDATE, DELETE on every new
 -- public table to stl_readwrite, so this table arrives with DELETE already held and the narrowed GRANT
--- is a no-op. Only the explicit REVOKE closes it. (Caught by the integration suite asserting the ACL
--- from the catalogue rather than trusting the GRANT list -- the comment above claimed "no DELETE" while
--- has_table_privilege said otherwise. #733's caches have the same latent gap and do not revoke it.)
--- TRUNCATE is not in the default grant, so it needs no REVOKE and stays owner-only.
+-- is a no-op. Only the explicit REVOKE closes it, and the integration suite asserts the resulting ACL
+-- from the catalogue rather than from the GRANT list, because the two disagree. #733's caches have the
+-- same latent gap and do not revoke it. TRUNCATE is not in the default grant, so it needs no REVOKE and
+-- stays owner-only.
 REVOKE DELETE ON position_current FROM stl_readwrite;
 
 CREATE OR REPLACE FUNCTION upsert_position_current() RETURNS trigger
@@ -154,16 +155,17 @@ BEGIN
     --
     -- Lock ORDER is why, and a row trigger could not deliver it. A row trigger fires in the writer's
     -- insertion order, which the spine pins to (block_timestamp, position_id) to keep ITS chunk locks
-    -- aligned with the compression and tiering jobs. The rebuild picks each position's newest row and can
-    -- only order by the STORED timestamp. Those orders coincide only when a batch re-observes its
-    -- positions in the same relative time order as their previous observations -- and live ingest is
-    -- typically the opposite, because every row in one block shares a block_timestamp, collapsing the
-    -- writer's order to position_id while the rebuild sorts by differing stored timestamps.
+    -- aligned with the compression and tiering jobs. The rebuild in 20260819_150100 picks each position's
+    -- newest row and can only order by the STORED timestamp. Those orders coincide only when a batch
+    -- re-observes its positions in the same relative time order as their previous observations -- and
+    -- live ingest is typically the opposite, because every row in one block shares a block_timestamp,
+    -- collapsing the writer's order to position_id while the rebuild sorts by differing stored timestamps.
     --
-    -- position_id is a sha256, so ordering BOTH writers by it is a total order no timestamp can permute.
-    -- Verified 0/20 on both batch shapes at 210,000 cached positions. It also collapses a 10,000-row
-    -- batch from 10,000 invocations to one, removing a measured 6.7x per-row upsert cost. Residual: the
-    -- total order is per STATEMENT, so a writer splitting one batch across several statements in a
+    -- position_id is a sha256, so ordering BOTH writers by it is a total order no timestamp can permute;
+    -- 20260819_150100 carries the deadlock measurement. It also collapses an N-row batch to one
+    -- invocation, which is the cheaper shape: at 200,000 rows in one statement a FOR EACH ROW equivalent
+    -- of this function cost 3.6x as much trigger-attributable time (2.2x the whole statement). Residual:
+    -- the total order is per STATEMENT, so a writer splitting one batch across several statements in a
     -- transaction can still cross, and the 40P01 retry the spine documents stays necessary.
     --
     -- Cost of a FIRST whole-history materialization: the transition table holds the rows actually
