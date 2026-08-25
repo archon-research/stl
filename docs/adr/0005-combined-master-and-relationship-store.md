@@ -400,16 +400,18 @@ views** — the pivot (IN-1) — resolved once per graph change, not per query, 
 downstream SQL treats reference data as ordinary dimensions (deliberately: they look like the
 old separate masters again, as regenerable read models rather than write surfaces):
 
-| view | grain | what it serves |
+| view | key | what it serves |
 |---|---|---|
-| `dim_security` | one row per security, current + as-of variants | classification, issuer, status — the old `security_master_current` shape |
-| `dim_entity` | one row per entity, current + as-of | the old `entity_master_current` shape, with resolved corporate-structure fields (derived, not stored) |
-| `dim_instrument` | one row per instrument key → security | the resolution join for positions and the Time-Series API; carries the unique-current guarantee the old bridge held |
-| `dim_concept` | one row per concept, with taxonomy path | cluster/grouping dimensions (UI-3/UI-4) |
-| `edges_current` (+ as-of) | one row per resolved current edge | the general relationship read |
-| `fact_lookthrough` | security → leaf, with resolved weight product, per graph version | look-through exposure without recursive SQL downstream |
-| `node_validity` | node × unmet shape requirement | the SE-2 semantic-gap surface; what metrics exclude |
-| alias lookup | `(id_scheme, id_value)` → node | public-identifier and holder-address resolution |
+| `dim_security` | `security_id, as_of_valid, as_of_system` | flattened classification — asset class, type, subtype, currency, status, issuer, ultimate parent, rating, jurisdiction; the old `security_master_current` shape (UI-3) |
+| `dim_entity` | `entity_id, as_of_valid, as_of_system` | entity attributes plus the resolved group: parent, ultimate parent, domicile, sector, internal flag (derived, not stored) |
+| `dim_instrument` | `instrument_key` | native-key resolution → `security_id`, one current row per key — the hot join for positions and the Time-Series API; carries the unique-current guarantee the old bridge held |
+| `fact_lookthrough` | `security_id, leaf_id, as_of_valid, as_of_system` | resolved weighted closure of `HAS_UNDERLYING` — exposure without recursive SQL downstream |
+| `dim_cluster` | `concept_id, member_id` | concept membership expanded through `NARROWER_THAN` — the groups that feed pricing, risk and ML (UI-4) |
+| `edge_current` / `edge_asof` | `src, rel_type, dst` | the graph itself, tabular, for consumers that traverse in SQL |
+| `node_validity` | `node_id, shape_id` | unmet required fields/edges per node, at severity — the SE-2 semantic-gap surface, what metrics exclude, and the UI's editing worklist |
+| `dim_source` | `source_id` | feed, licence terms, redistributability — what the Time-Series API needs for LC-1/LC-4 |
+| `evidence_package` | `record_id, as_of` | version history, provenance, correction chain, manifest, access/change logs for one record (NFR-7) |
+| alias lookup | `id_scheme, id_value` | public-identifier and holder-address resolution → node id |
 
 Contract properties: every view is keyed on the identity contract (§1), every view has an as-of
 form, and all views are **regenerable projections** — dropping and rebuilding them loses
