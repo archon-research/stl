@@ -148,11 +148,19 @@ promotion test — *does it carry attributes of its own, and do other things poi
   governing shape (AC-3). Editability and immutability coexist because an edit *lands* as a new
   version: the row is appended, the history is never mutated, and the pivot picks the change up
   on its next resolution.
-- **Status is a per-kind governed vocabulary**, not free text: each kind has its own status
-  set with a terminal flag, and lifecycle statuses pair with their edges (`MERGED` with
-  `SUCCEEDED_BY`, `CONVERTED` with `CONVERTS_TO`, `SUPERSEDED` with `SUPERSEDES`). A status
-  change is a node version; terminal statuses retire nothing — history, edges, and register
-  rows stay readable.
+- **Status is a per-kind governed vocabulary**, not free text. A status change is a node
+  version; terminal statuses (†) mean no further lifecycle is expected and the node leaves the
+  active universe, but nothing is retired — history, edges, and register rows stay readable.
+  Where a status pairs with an edge type, the transition and the edge land together. The
+  ratification snapshot (the governed list is the source of truth, same pattern as §5):
+
+  | kind | statuses |
+  |---|---|
+  | SECURITY | `ACTIVE` · `SUSPENDED` (halted/paused, expected to resolve) · `DELISTED` (off its venue; may persist OTC) · `DEFAULTED` (may restructure, so not terminal) · `MATURED`† · `REDEEMED`† (includes calls; details in payload) · `CONVERTED`† (pairs with `CONVERTS_TO`) · `MERGED`† (pairs with `SUCCEEDED_BY`; the instrument register re-points) · `EXPIRED`† (lapsed unexercised) · `RETIRED`† (wound down, no successor) |
+  | ENTITY | `ACTIVE` · `INACTIVE` (dormant per registry — GLEIF's term) · `IN_LIQUIDATION` · `DISSOLVED`† · `MERGED`† · `SUPERSEDED`† (dedup outcome; pairs with `SUPERSEDES`) |
+  | CONCEPT | `ACTIVE` · `DEPRECATED` (no new memberships; existing ones stand) · `RETIRED`† (memberships must move; the validator flags stragglers) · `SUPERSEDED`† |
+  | SOURCE | `ACTIVE` · `SUSPENDED` (e.g. licence lapsed; exposability off) · `DECOMMISSIONED`† (provenance references stay valid) · `SUPERSEDED`† |
+  | ACCOUNT (staged) | `ACTIVE` · `FROZEN` (no movements; still reportable) · `CLOSED`† |
 - **Versioning is by row, append-only** (AR-1.1), carrying the provenance block of §4.
 - **Natural persons carry no direct identifiers here** (DP-1): an individual is an ENTITY node
   keyed by a pseudonymous surrogate; identifying attributes live in a dedicated PII store under
