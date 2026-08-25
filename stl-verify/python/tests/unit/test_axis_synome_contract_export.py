@@ -16,7 +16,11 @@ below in lockstep with the Go ``TokenEntry`` / ``ProxyConfig`` structs.
 import json
 from pathlib import Path
 
-from app.risk_engine._vendored_synome.export_entities import build_axis_synome_contract
+import pytest
+
+from app.risk_engine._vendored_synome.export_entities import _prime_to_star, build_axis_synome_contract
+from app.risk_engine._vendored_synome.spec.entities.assets_by_prime import PrimeName
+from app.risk_engine._vendored_synome.spec.entities.primes import PrimeAgent
 from app.risk_engine._vendored_synome.spec.entities.protocol_sets import AllocationType, TokenType
 
 # Mirror of the Go `TokenEntry` struct json tags in loader.go. Go decodes with
@@ -145,6 +149,18 @@ def test_the_committed_contract_entities_match_this_packages_export():
         "committed axis_synome_entities.json is stale against the vendored "
         "registry — run 'make export-axis-synome-contract' and commit the result"
     )
+
+
+@pytest.mark.parametrize("agent", list(PrimeAgent), ids=lambda a: a.name)
+def test_proxy_and_asset_paths_derive_the_same_star_slug(agent):
+    # Proxy entries slug PrimeAgent, token entries slug the PrimeName key of
+    # ASSETS_BY_PRIME; a mismatch would export proxies under a star no token
+    # entry references (e.g. "launch_agent_7" vs "launch-agent-7").
+    assert _prime_to_star(agent) == _prime_to_star(PrimeName(str(agent.value.name)))
+
+
+def test_multi_word_prime_slugs_the_value_not_the_member_name():
+    assert _prime_to_star(PrimeAgent.LAUNCH_AGENT_7) == "launch-agent-7"
 
 
 def test_the_committed_contract_version_matches_the_vendored_baseline():
