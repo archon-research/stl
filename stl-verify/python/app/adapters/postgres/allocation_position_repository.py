@@ -1119,6 +1119,13 @@ class AllocationRepository:
         ]
 
 
+# Reads the two trigger-maintained caches rather than the histories behind them:
+# allocation_position_current is already one row per (chain, proxy, token), so the
+# newest-per-receipt-token DISTINCT ON is gone rather than moved (receipt_token is
+# unique on (chain_id, receipt_token_address), so one cache row still yields one
+# rt.id); token_price_current is the same substitution the aave-like breakdown
+# makes, with the enabled-mapping and cross-oracle ranking still resolved here.
+#
 # Match positions to receipt tokens only by receipt_token_address: a prime's
 # direct holding of an underlying asset (e.g. raw USDT in the proxy wallet)
 # is not a position in any receipt token that wraps it, and attributing it to
@@ -1148,7 +1155,7 @@ class AllocationRepository:
 # last pre-divergence value (stale but unit-correct) without telemetry.
 _RECEIPT_TOKEN_POSITIONS_SQL = text("""
     WITH latest_receipt_positions AS (
-        SELECT DISTINCT ON (rt.id)
+        SELECT
             rt.id                                    AS receipt_token_id,
             rt.symbol                                AS symbol,
             encode(rt.receipt_token_address, 'hex')  AS receipt_token_address,
@@ -1164,15 +1171,12 @@ _RECEIPT_TOKEN_POSITIONS_SQL = text("""
             ap.created_at                            AS latest_activity_at,
             ap.direction                             AS latest_activity_action,
             ap.tx_amount                             AS latest_activity_amount
-        FROM allocation_position ap
+        FROM allocation_position_current ap
         JOIN token t          ON t.id = ap.token_id
         JOIN receipt_token rt ON rt.receipt_token_address = t.address AND rt.chain_id = ap.chain_id
         JOIN token ut         ON ut.id = rt.underlying_token_id
         JOIN protocol pr      ON pr.id = rt.protocol_id AND pr.chain_id = ap.chain_id
         WHERE ap.proxy_address = decode(:proxy_hex, 'hex')
-        ORDER BY rt.id,
-                 ap.block_number DESC, ap.block_version DESC,
-                 ap.processing_version DESC, ap.log_index DESC
     )
     SELECT
         p.chain_id,
@@ -1196,20 +1200,20 @@ _RECEIPT_TOKEN_POSITIONS_SQL = text("""
         p.latest_activity_amount
     FROM latest_receipt_positions p
     LEFT JOIN LATERAL (
-        SELECT otp.price_usd
-        FROM onchain_token_price otp
-        JOIN protocol_oracle po ON po.oracle_id = otp.oracle_id
+        SELECT tpc.price_usd
+        FROM token_price_current tpc
+        JOIN protocol_oracle po ON po.oracle_id = tpc.oracle_id
             AND po.protocol_id = p.protocol_id
-        WHERE otp.token_id = p.underlying_token_id
+        WHERE tpc.token_id = p.underlying_token_id
         -- enabled-mapping filter + oracle_id tiebreak (rationale on _DIRECT_ASSET_HOLDINGS_SQL).
           AND EXISTS (
               SELECT 1 FROM oracle_asset oa
-              WHERE oa.oracle_id = otp.oracle_id
-                AND oa.token_id = otp.token_id
+              WHERE oa.oracle_id = tpc.oracle_id
+                AND oa.token_id = tpc.token_id
                 AND oa.enabled
           )
-        ORDER BY otp.block_number DESC, otp.block_version DESC,
-                 otp.processing_version DESC, otp.oracle_id DESC
+        ORDER BY tpc.block_number DESC, tpc.block_version DESC,
+                 tpc.processing_version DESC, tpc.oracle_id DESC
         LIMIT 1
     ) lp ON TRUE
     WHERE p.balance > 0
