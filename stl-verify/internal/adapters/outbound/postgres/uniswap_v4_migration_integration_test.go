@@ -5,6 +5,7 @@ package postgres
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"math/big"
 	"slices"
 	"strings"
@@ -1501,25 +1502,120 @@ func TestUniswapV4HypertablesCompressAfterTwoDays(t *testing.T) {
 	}
 }
 
+// Every table records its own write time: build_registry.built_at is when the
+// build registered, so build_id alone only bounds when a row was written.
 func TestUniswapV4CreatedAtIsTimestamptz(t *testing.T) {
 	ctx := context.Background()
 
-	for _, table := range []string{"uniswap_v4_pool_manager", "uniswap_v4_pool"} {
-		var dataType, columnDefault string
-		if err := uniswapV4TestPool.QueryRow(ctx, `
-			SELECT data_type, column_default
-			FROM information_schema.columns
-			WHERE table_schema = 'public' AND table_name = $1 AND column_name = 'created_at'`,
-			table).Scan(&dataType, &columnDefault); err != nil {
-			t.Fatalf("reading %s.created_at definition: %v", table, err)
-		}
-		if want := "timestamp with time zone"; dataType != want {
-			t.Errorf("%s.created_at data_type = %q, want %q", table, dataType, want)
-		}
-		if want := "now()"; columnDefault != want {
-			t.Errorf("%s.created_at column_default = %q, want %q", table, columnDefault, want)
-		}
+	for _, table := range uniswapV4Tables {
+		t.Run(table, func(t *testing.T) {
+			var dataType, columnDefault, isNullable string
+			if err := uniswapV4TestPool.QueryRow(ctx, `
+				SELECT data_type, column_default, is_nullable
+				FROM information_schema.columns
+				WHERE table_schema = 'public' AND table_name = $1 AND column_name = 'created_at'`,
+				table).Scan(&dataType, &columnDefault, &isNullable); err != nil {
+				t.Fatalf("reading %s.created_at definition: %v", table, err)
+			}
+			if want := "timestamp with time zone"; dataType != want {
+				t.Errorf("%s.created_at data_type = %q, want %q", table, dataType, want)
+			}
+			if want := "now()"; columnDefault != want {
+				t.Errorf("%s.created_at column_default = %q, want %q", table, columnDefault, want)
+			}
+			if want := "NO"; isNullable != want {
+				t.Errorf("%s.created_at is_nullable = %q, want %q", table, isNullable, want)
+			}
+		})
 	}
+}
+
+// uniswapV4CreatedAtChainID keeps the pool-manager row this test appends off
+// chain 1, whose single manager identity a sibling test asserts on.
+const uniswapV4CreatedAtChainID = 475002
+
+// uniswapV4CreatedAtCase is one table's minimal INSERT plus the values it binds,
+// so a single non-UTC session can exercise created_at on every table.
+type uniswapV4CreatedAtCase struct {
+	table  string
+	insert string
+	args   []any
+}
+
+// uniswapV4CreatedAtCases seeds what each INSERT references and returns one case
+// per table in the migration. Each case gets its own chain or pool, so the block
+// and log_index values the fact fixtures share cannot collide with a sibling
+// test's rows.
+func uniswapV4CreatedAtCases(t *testing.T, ctx context.Context) []uniswapV4CreatedAtCase {
+	t.Helper()
+
+	wstETH := seedUniswapV4Token(t, ctx, "\\x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0", "wstETH", 18)
+	usdc := seedUniswapV4Token(t, ctx, "\\xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", "USDC", 6)
+
+	cases := []uniswapV4CreatedAtCase{
+		{
+			table: "uniswap_v4_pool_manager",
+			insert: `
+				INSERT INTO uniswap_v4_pool_manager
+				    (chain_id, protocol_id, state_view_address, deploy_block, build_id)
+				VALUES ($1, $2, $3::bytea, $4, 0)`,
+			args: []any{
+				uniswapV4CreatedAtChainID, seedUniswapV4CreatedAtProtocol(t, ctx),
+				uniswapV4StateViewHex, uniswapV4DeployBlock,
+			},
+		},
+		{
+			table: "uniswap_v4_pool",
+			insert: `
+				INSERT INTO uniswap_v4_pool
+				    (chain_id, pool_id, currency0, currency1,
+				     currency0_token_id, currency1_token_id, fee, tick_spacing, hooks, deploy_block)
+				VALUES (1, $1::bytea,
+				        '\x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0'::bytea,
+				        '\xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'::bytea,
+				        $2, $3, 3000, 60, '\x0000000000000000000000000000000000000000'::bytea, 21743144)`,
+			args: []any{
+				"\\x1600000000000000000000000000000000000000000000000000000000000001",
+				wstETH, usdc,
+			},
+		},
+	}
+
+	for i, row := range uniswapV4ValidFactRows {
+		poolID := insertTestUniswapV4Pool(t, ctx, fmt.Sprintf("\\x19%062d", i))
+		cases = append(cases, uniswapV4CreatedAtCase{
+			table:  row.table,
+			insert: row.insert,
+			args:   uniswapV4FactInsertArgs(poolID, row.args, 0),
+		})
+	}
+	return cases
+}
+
+func seedUniswapV4CreatedAtProtocol(t *testing.T, ctx context.Context) int64 {
+	t.Helper()
+
+	if _, err := uniswapV4TestPool.Exec(ctx,
+		`INSERT INTO chain (chain_id, name) VALUES ($1, 'uniswap_v4_created_at_test')
+		 ON CONFLICT (chain_id) DO NOTHING`,
+		uniswapV4CreatedAtChainID); err != nil {
+		t.Fatalf("seeding created_at-test chain: %v", err)
+	}
+	if _, err := uniswapV4TestPool.Exec(ctx, `
+		INSERT INTO protocol (chain_id, address, name, protocol_type, created_at_block)
+		VALUES ($1, $2::bytea, 'UniswapV4', 'dex', $3)
+		ON CONFLICT (chain_id, address) DO NOTHING`,
+		uniswapV4CreatedAtChainID, uniswapV4PoolManagerHex, uniswapV4DeployBlock); err != nil {
+		t.Fatalf("seeding created_at-test protocol: %v", err)
+	}
+
+	var protocolID int64
+	if err := uniswapV4TestPool.QueryRow(ctx,
+		`SELECT id FROM protocol WHERE chain_id = $1 AND address = $2::bytea`,
+		uniswapV4CreatedAtChainID, uniswapV4PoolManagerHex).Scan(&protocolID); err != nil {
+		t.Fatalf("reading created_at-test protocol id: %v", err)
+	}
+	return protocolID
 }
 
 // created_at holds an instant, so a row written under a non-UTC session still
@@ -1527,11 +1623,7 @@ func TestUniswapV4CreatedAtIsTimestamptz(t *testing.T) {
 // the session's local time and drift by that session's UTC offset.
 func TestUniswapV4CreatedAtIgnoresSessionTimeZone(t *testing.T) {
 	ctx := context.Background()
-
-	const poolIDHex = "\\x1600000000000000000000000000000000000000000000000000000000000001"
-	seedUniswapV4PoolManager(t, ctx)
-	wstETH := seedUniswapV4Token(t, ctx, "\\x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0", "wstETH", 18)
-	usdc := seedUniswapV4Token(t, ctx, "\\xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", "USDC", 6)
+	cases := uniswapV4CreatedAtCases(t, ctx)
 
 	// The migrated tables live in this file's cloned database, not the base
 	// sharedDSN server, so the dedicated session must dial the pool's own DSN.
@@ -1545,23 +1637,19 @@ func TestUniswapV4CreatedAtIgnoresSessionTimeZone(t *testing.T) {
 		t.Fatalf("setting the session TimeZone: %v", err)
 	}
 
-	var createdAt time.Time
-	var driftSeconds float64
-	if err := conn.QueryRow(ctx, `
-		INSERT INTO uniswap_v4_pool
-		    (chain_id, pool_id, currency0, currency1,
-		     currency0_token_id, currency1_token_id, fee, tick_spacing, hooks, deploy_block)
-		VALUES (1, $1::bytea,
-		        '\x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0'::bytea,
-		        '\xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'::bytea,
-		        $2, $3, 3000, 60, '\x0000000000000000000000000000000000000000'::bytea, 21743144)
-		RETURNING created_at, EXTRACT(EPOCH FROM (now() - created_at))::double precision`,
-		poolIDHex, wstETH, usdc).Scan(&createdAt, &driftSeconds); err != nil {
-		t.Fatalf("inserting under a non-UTC session TimeZone: %v", err)
-	}
-
-	if driftSeconds < -10 || driftSeconds > 10 {
-		t.Errorf("created_at = %s, %.0fs away from now() under a non-UTC session; it is not stored as an instant",
-			createdAt, driftSeconds)
+	for _, tc := range cases {
+		t.Run(tc.table, func(t *testing.T) {
+			var createdAt time.Time
+			var driftSeconds float64
+			if err := conn.QueryRow(ctx, tc.insert+`
+				RETURNING created_at, EXTRACT(EPOCH FROM (now() - created_at))::double precision`,
+				tc.args...).Scan(&createdAt, &driftSeconds); err != nil {
+				t.Fatalf("inserting into %s under a non-UTC session TimeZone: %v", tc.table, err)
+			}
+			if driftSeconds < -10 || driftSeconds > 10 {
+				t.Errorf("%s.created_at = %s, %.0fs away from now() under a non-UTC session; it is not stored as an instant",
+					tc.table, createdAt, driftSeconds)
+			}
+		})
 	}
 }
