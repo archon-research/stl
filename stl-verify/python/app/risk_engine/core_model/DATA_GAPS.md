@@ -86,23 +86,28 @@ BTC-group (BTC, WBTC, LBTC, TBTC, CBBTC) → BTC book; everything else direct.
 |---|---|---|
 | ETH | WETH + 5 LSTs | live in staging AND prod (Coinbase, OKX, Kraken) |
 | BTC | BTC + 4 wrappers | live in staging AND prod (Coinbase, OKX, Kraken) |
-| XRP | syrup_usdc, syrup_usdt | **not tracked** — deliberately deferred (Pablo, 14 Aug 2026: "no xrp for now") |
-| HYPE | syrup_usdc | **not trackable on our venues** — BA sourced it from HyperLiquid's native book |
+| XRP | syrup_usdc, syrup_usdt | **live in staging** since ARCT-316/319/321 (25 Aug 2026); prod still BTC/ETH only |
+| HYPE | syrup_usdc | **live in staging** — the venues list HYPE spot now, contrary to the 14 Aug note; prod still BTC/ETH only |
 
-So order books fully cover 7 of 9 enabled markets (4 SparkLend, 2 Morpho,
-Anchorage). The 2 Syrup markets stay on parquet books until XRP/HYPE exist.
+**UPDATE (25 Aug 2026):** the staging venue configs were expanded after the
+14 Aug snapshot — Coinbase to six products (ARCT-316, #750), OKX to six
+instruments (ARCT-319, #767), Kraken to seven pairs (ARCT-321, #769), each
+symbol verified against the live venue API first (unknown symbols are skipped
+silently; ARCT-240). Verified against staging on 25 Aug: XRP, HYPE, SOL and
+JITOSOL snapshots flowing from all three venues, latest under a minute old.
+**Prod configmaps still index only BTC/ETH** — mirror the staging expansion
+before flipping any of these markets live in prod.
+
+So order books now cover **all 9 enabled markets in staging**. The 2 Syrup
+markets remain on parquet only because of positions + prices (see §1 and §3),
+no longer because of books.
 
 Note: prod has all six venue books flowing (verified on the replica,
 14 Aug 2026) even though [VEC-455](https://linear.app/archontech/issue/VEC-455)
 (deploy to prod) is still marked Backlog — the ticket lags reality.
 
-**What brings it back:**
-- XRP → add the pair to the three venue configmaps
-  (`k8s/overlays/{staging,prod}/configmaps.yaml`, `SYMBOLS`). Tracked as
-  [VEC-458](https://linear.app/archontech/issue/VEC-458). Coinbase/Kraken/OKX
-  all carry XRP spot.
-- HYPE → needs a HyperLiquid source (new feed adapter), or accept a thinner
-  proxy. Separate decision.
+**Remaining:**
+- Prod symbol expansion (see the update above).
 - Venue depth: we aggregate 3 venues vs BA's 11 → thinner books → higher
   modelled slippage → conservative CRR bias. Acceptable to start; revisit if
   CRR reconciliation against BA's dashboards shows material divergence.
@@ -149,7 +154,7 @@ Still parquet:
 
 | Market group | Live source | Notes |
 |---|---|---|
-| Syrup (2) | maple-graphql-indexer tables | indexed; also blocked on XRP/HYPE books + offchain prices |
+| Syrup (2) | maple-graphql-indexer tables | indexed, reader not written; also blocked on XRP/HYPE offchain prices (books solved in staging, 25 Aug 2026 — see §2) |
 | Anchorage | anchorage-indexer tables | indexed; blocked on native-BTC price (no on-chain oracle) |
 
 ---
@@ -167,10 +172,11 @@ investigation is still open.
 To re-enable, Galaxy needs all of:
 - **Positions**: an ingestion pipeline (VEC-79 proper). Off-chain CLO data,
   so it needs the maintainer-approval step from CONTRIBUTING §5.
-- **Order books**: BTC and ETH are already covered by our live books; XRP is
-  deferred (see §2); SOL needs a `SYMBOLS` addition on our venues; JITOSOL
-  needs a DEX source. BA never shipped the ETH/SOL/JITOSOL parquet books, so
-  there is no parquet fallback either — the market cannot run at all today.
+- **Order books**: covered in staging as of 25 Aug 2026 — BTC/ETH were
+  already live, and XRP, SOL and JITOSOL now flow from all three venues
+  (see the §2 update; prod still needs the symbol expansion). BA never
+  shipped the ETH/SOL/JITOSOL parquet books, so before this there was no
+  parquet fallback either.
 - **Prices**: SOL/JITOSOL/XRP rows in `offchain_price_asset` plus backfill.
 
 ---
@@ -200,6 +206,9 @@ everywhere; the daily "all" tick keeps succeeding.
 3. Orderbook adapter switch for the 7 covered markets — **done**: set
    `CORE_MODEL_ORDERBOOK_SOURCE=postgres` (default stays `parquet`). The
    stored `params.ORDERBOOK_SOURCE` says which books produced each row.
-4. XRP orderbook symbol (config PR — deferred by decision, see above).
-5. Positions adapters per protocol (code, largest piece).
-6. HYPE book, Galaxy inputs (new sources — separate decisions).
+4. XRP/HYPE/SOL/JITOSOL orderbook symbols — **done in staging** (25 Aug 2026,
+   ARCT-316/319/321); prod configmaps still need the same expansion.
+5. Positions adapters per protocol (code, largest piece). SparkLend and
+   Morpho are done; Syrup (the `maple_*` tables — indexed, reader not
+   written) is the remaining one.
+6. Galaxy inputs (new sources — separate decision).
