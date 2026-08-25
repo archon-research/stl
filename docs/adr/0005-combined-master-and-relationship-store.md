@@ -169,7 +169,10 @@ Semantics, independent of realization:
   matters — filtering on validity first resurrects superseded edges.
 - **Cardinality is validated over current state, not at write** (a re-point always
   time-overlaps the edge it supersedes); single-valued types are checked by a data-quality
-  view over the resolved current state.
+  rule over the resolved current state. Per D-5's separation, such data-quality validation
+  rules live in OpenMetadata with pointers from the store (AU-4): schemata (§6) govern at the
+  write boundary and live with the store; DQ rules observe the resolved state and live in
+  OpenMetadata.
 - **Endpoint-kind and vocabulary rules are enforced on write** by the loader/validator, since
   they are cross-row.
 
@@ -282,8 +285,10 @@ Boundary rules that keep the graph clean:
   timeseries layer, referenced from the graph, never modelled as edge versions.
 - **Derived weights are projections, not curated facts.** `ALLOCATES` — a market-determined
   mix — exists only as a block-stamped projection of the position data, carrying its input
-  lineage (PR-2.3). It resolves the SECstore PRD's CH-3-versus-Boundary tension: the movement
-  is reflected, but as a derived, regenerable read artifact, never as a hand-curated append.
+  lineage (PR-2.3). This is the split CH-3 (as revised) asks for: the graph provides the
+  *links*, while frequent(ish) weight movements from price and composition changes are
+  reflected externally in the operational store and read through the projection — never as a
+  hand-curated append.
 - **Inverses are read-side names**, defined in the resolution layer, never in the vocabulary.
 
 ### 6. Concepts, shapes, and rules
@@ -326,7 +331,9 @@ of the model, not a side report.
 
 **Rules: what a concept's pointer resolves to.** A concept that stands for a rule set (a risk
 model, a policy, a mandate) does not store the rules; per D-5 they live in the rules system
-(Synome / Synlang, in whatever final form that takes). The model's contract is that the pointer
+(Synome / Synlang / code), "with pointers to them in SECstore" — while the schemata that govern
+the store itself (shapes, the vocabulary) live in or adjacent to the store, per the same
+decision. The model's contract is that the pointer
 terminates somewhere real: a rule-class concept **must carry an external reference** —
 `(ref_system, ref_address, ref_version)` — enforced by the rule-concept shape, so resolving
 "syrupUSDC's risk model" yields the concept, its owner (`OWNED_BY`), *and* a versioned address
@@ -377,7 +384,9 @@ reference. They meet at three seams, and only these:
 
 ### 10. The pivot: the consumer read contract
 
-Consumers never traverse the graph. The model's read surface is a set of **generated tabular
+Consumers never traverse the graph. SECstore does not exist in isolation — its purpose is to
+feed operational engines, rule stores, and business logic (D-6), and the operational side links
+back to it by reference (D-5). The model's read surface is a set of **generated tabular
 views** — the pivot (IN-1) — resolved once per graph change, not per query, and shaped so
 downstream SQL treats reference data as ordinary dimensions (deliberately: they look like the
 old separate masters again, as regenerable read models rather than write surfaces):
