@@ -720,8 +720,15 @@ function MetricCardChart({ chart }: { chart: MetricChartSpec }) {
         margin={CHART_MARGIN}
         xScale={{ type: 'band', paddingInner: 0.2 }}
         yScale={{ type: 'linear', domain: yDomain, nice: !isFlat }}
-        onPointerMove={cursorHandlers.onPointerMove}
-        onPointerOut={cursorHandlers.onPointerOut}
+        // Withheld from a placeholder: its points carry no instant, so the
+        // accessor would publish NaN to the shared cursor. `nearestStop`
+        // compares against NaN, every comparison is false, and it returns the
+        // upper stop rather than clearing — so hovering a card with no history
+        // jumped every other card's crosshair to an arbitrary bucket.
+        onPointerMove={
+          stops === null ? undefined : cursorHandlers.onPointerMove
+        }
+        onPointerOut={stops === null ? undefined : cursorHandlers.onPointerOut}
       >
         <Grid columns={false} numTicks={3} />
         <Axis

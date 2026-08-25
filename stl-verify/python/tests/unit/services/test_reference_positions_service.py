@@ -1,5 +1,6 @@
 """Coverage gating and registry resolution for the upstream balance sheet."""
 
+import asyncio
 from decimal import Decimal
 from unittest.mock import AsyncMock
 
@@ -7,7 +8,10 @@ import pytest
 
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.reference_position import ReferencePosition
-from app.services.reference_positions_service import ReferencePositionsService
+from app.services.reference_positions_service import (
+    _RESOLVE_CONCURRENCY,
+    ReferencePositionsService,
+)
 
 _PROXY = EthAddress("0x1601843c5e9bc251a3272907010afa41fa18347e")
 _TOKEN = "0x" + "cd" * 20
@@ -135,3 +139,38 @@ async def test_skips_the_registry_lookup_where_it_cannot_succeed(monkeypatch):
 
     assert [row.receipt_token_id for row in rows] == [None, None]
     receipt_tokens.get_by_chain_and_address.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_registry_lookups_stay_inside_the_connection_pool(monkeypatch):
+    """The enrichment fan-out is capped, not left to the row count.
+
+    Each lookup opens its own connection, and this feed carries an order of
+    magnitude more rows than the breakdown it replaced. Unbounded, one request
+    can queue for more connections than the pool holds and then time out on a
+    queue it created itself.
+    """
+    monkeypatch.setattr("app.services.reference_positions_service.prime_name_for", lambda _: "spark")
+    service, _, receipt_tokens = _service(
+        positions=tuple(_position() for _ in range(_RESOLVE_CONCURRENCY * 4)),
+    )
+
+    live = 0
+    peak = 0
+
+    async def counting_lookup(*_args, **_kwargs):
+        nonlocal live, peak
+        live += 1
+        peak = max(peak, live)
+        # Yields, so every task that is allowed to start has started before any
+        # finishes — without this the peak reads 1 whatever the limit is.
+        await asyncio.sleep(0)
+        live -= 1
+        return None
+
+    receipt_tokens.get_by_chain_and_address.side_effect = counting_lookup
+
+    rows = await service.get(_PROXY)
+
+    assert len(rows) == _RESOLVE_CONCURRENCY * 4
+    assert peak <= _RESOLVE_CONCURRENCY

@@ -378,8 +378,8 @@ export function RrcTab({
             />
           </ul>
           <p className={css({ m: 0, fontSize: 'sm', color: 'text.muted' })}>
-            STL&apos;s models run on receipt-token positions only; this is The
-            legacy feed&apos;s published requirement for the position.
+            Verify&apos;s models run on receipt-token positions only; this is
+            the legacy feed&apos;s published requirement for the position.
           </p>
         </div>
       </div>

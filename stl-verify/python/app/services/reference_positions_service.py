@@ -29,6 +29,11 @@ from app.ports.reference_risk_capital import ReferenceRiskCapitalProvider
 
 logger = logging.getLogger(__name__)
 
+# Well inside `db_pool_size` (10), so a request's enrichment cannot starve the
+# reads around it — the fan-out is latency-bound on a point lookup, and the
+# queue drains faster than the extra connections would have paid for themselves.
+_RESOLVE_CONCURRENCY = 8
+
 
 class ReferencePositionsService:
     """Fetches and resolves a prime's upstream balance sheet."""
@@ -93,7 +98,21 @@ class ReferencePositionsService:
         return None
 
     async def _resolve(self, positions: tuple[ReferencePosition, ...]) -> tuple[ReferencePosition, ...]:
-        return tuple(await asyncio.gather(*(self._resolve_one(row) for row in positions)))
+        # Bounded, because each resolution opens its own connection and this
+        # feed is an order of magnitude wider than the risk-capital breakdown it
+        # replaced — spark alone is 59 positions against that one's 11, and the
+        # adapter will accept up to a thousand. Unbounded, a single request can
+        # ask for more connections than the pool holds; the surplus then waits
+        # out `db_pool_timeout` and the request fails on a queue it created
+        # itself. Pool exhaustion under request fan-out is a repeat incident
+        # here (#678, #753), so the ceiling is set rather than inherited.
+        limit = asyncio.Semaphore(_RESOLVE_CONCURRENCY)
+
+        async def resolve(row: ReferencePosition) -> ReferencePosition:
+            async with limit:
+                return await self._resolve_one(row)
+
+        return tuple(await asyncio.gather(*(resolve(row) for row in positions)))
 
     async def _resolve_one(self, row: ReferencePosition) -> ReferencePosition:
         """Attach STL's receipt-token id to an upstream row.

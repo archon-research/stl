@@ -543,8 +543,17 @@ function preferredCrrPct(
 // a $22.9M sum. Check that before carrying the column back to a published
 // total — the failure was a join gap, not the arithmetic.
 function withRrcShare(rows: AllocationGridRow[]): AllocationGridRow[] {
+  // A chain-mismatched row is withheld from the RRC and share cells, so it is
+  // withheld from the sum too. It cannot reach here with a figure today — the
+  // risk fetch is scoped to the prime's own chain, so such a row has no entry
+  // and no CRR to derive from — but the column's promise is that what is shown
+  // adds to 100%, and that should not rest on a scoping decision made in
+  // another file.
+  const contributes = (row: AllocationGridRow) =>
+    !row.risk.chainMismatch && row.risk.riskCapitalUsd !== null;
+
   const total = rows.reduce(
-    (sum, row) => sum + (row.risk.riskCapitalUsd ?? 0),
+    (sum, row) => sum + (contributes(row) ? (row.risk.riskCapitalUsd ?? 0) : 0),
     0,
   );
   if (total === 0) {
@@ -552,12 +561,15 @@ function withRrcShare(rows: AllocationGridRow[]): AllocationGridRow[] {
   }
 
   return rows.map((row) =>
-    row.risk.riskCapitalUsd === null
-      ? row
-      : {
+    contributes(row)
+      ? {
           ...row,
-          risk: { ...row.risk, sharePct: row.risk.riskCapitalUsd / total },
-        },
+          risk: {
+            ...row.risk,
+            sharePct: (row.risk.riskCapitalUsd ?? 0) / total,
+          },
+        }
+      : row,
   );
 }
 
@@ -622,7 +634,7 @@ function AllocationRiskCapitalCell({
 
   return (
     <p
-      title={riskProvenanceTitle(risk)}
+      title={derivedRiskTitle(risk)}
       className={css({
         m: 0,
         fontSize: 'sm',
@@ -642,6 +654,17 @@ function AllocationRiskCapitalCell({
  */
 function riskProvenanceTitle(risk: AllocationGridRow['risk']): string {
   return risk.fromReference ? 'Legacy published figure' : 'Verify model figure';
+}
+
+/**
+ * RRC and its share are computed in this file, so neither is anyone's published
+ * figure — `riskProvenanceTitle` would claim upstream stands behind a number it
+ * never issued. It names the ratio's source and the arithmetic instead, which is
+ * what a reader checking the row against its neighbours needs.
+ */
+function derivedRiskTitle(risk: AllocationGridRow['risk']): string {
+  const ratio = risk.fromReference ? "Legacy's CRR" : "Verify's CRR";
+  return `Derived: ${ratio} x the exposure shown`;
 }
 
 /**
@@ -878,7 +901,7 @@ function createAllocationColumns(
           }
           format={formatRatioPercent}
           state={row.original.risk.state}
-          title={riskProvenanceTitle(row.original.risk)}
+          title={derivedRiskTitle(row.original.risk)}
         />
       ),
       meta: {
