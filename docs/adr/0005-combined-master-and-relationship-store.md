@@ -148,6 +148,11 @@ promotion test — *does it carry attributes of its own, and do other things poi
   governing shape (AC-3). Editability and immutability coexist because an edit *lands* as a new
   version: the row is appended, the history is never mutated, and the pivot picks the change up
   on its next resolution.
+- **Status is a per-kind governed vocabulary**, not free text: each kind has its own status
+  set with a terminal flag, and lifecycle statuses pair with their edges (`MERGED` with
+  `SUCCEEDED_BY`, `CONVERTED` with `CONVERTS_TO`, `SUPERSEDED` with `SUPERSEDES`). A status
+  change is a node version; terminal statuses retire nothing — history, edges, and register
+  rows stay readable.
 - **Versioning is by row, append-only** (AR-1.1), carrying the provenance block of §4.
 - **Natural persons carry no direct identifiers here** (DP-1): an individual is an ENTITY node
   keyed by a pseudonymous surrogate; identifying attributes live in a dedicated PII store under
@@ -432,8 +437,11 @@ reference. They meet at three seams, and only these:
 1. **Instrument.** A position carries `instrument_key` (hashed into `position_id`, so it must stay
    native and classifier-free). Enrichment resolves it through the instrument
    register — surfaced as `dim_instrument` — to a security, then reads classification, issuer,
-   and look-through from the graph. Nothing is stamped onto the position row; resolution is
-   live against the pivot, so a reclassification never rewrites positions.
+   and look-through from the graph. Nothing is stamped onto `position_state` itself, so a
+   reclassification never rewrites positions; the join's result may be materialized as a
+   derived read model (a `position_enriched` table alongside the pivot) — a regenerable
+   projection, governed like every derived read surface under ADR-0006 §1/§7, refreshed when
+   either side changes, and rebuildable from scratch at any time.
 2. **Holder.** A position's holder (wallet address or prime id) resolves to an ENTITY through
    the alias register (§1.3) — the successor of the frozen `entity_ref_codes` path.
 3. **Time.** Positions are block-height keyed; graph validity is calendar-dated. The only
