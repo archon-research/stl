@@ -45,9 +45,10 @@
   "what was true" and "what did we know" (AR-1.1, RP-4.1, CR-3.5). Corrections reference what
   they supersede, with structured reason and approval (CR-3.1..3.4). Content hashing runs from
   the first append (AR-1.2).
-- Consumers never walk the graph: they read the **pivot** — generated tabular views shaped
-  like the old masters (`dim_security`, `dim_entity`, `dim_instrument`, look-through closure),
-  as-of-capable and joinable against the timeseries at block time.
+- Consumers never walk the graph: they read the **pivot** — materialized tables shaped like
+  the old masters (`dim_security`, `dim_entity`, `dim_instrument`, look-through closure),
+  regenerated when the graph changes, as-of-capable, joinable against the timeseries at block
+  time.
 - The standalone masters (`entity_master`, `security_master`, `security_instrument_bridge`,
   `entity_ref_codes`, `position_entity_link`) are **superseded and frozen** — see Deprecations.
 
@@ -87,7 +88,7 @@ superseded.
 
 ## Decision: the data model
 
-### 1. Identity: three identifier classes, never conflated
+### 1. Identity: three identifier classes, kept separate
 
 Every thing in the model is addressed by exactly one of three identifier classes, and they are
 never mixed:
@@ -212,7 +213,7 @@ provenance block, per the Auditability & Reproducibility PRD §5.2–5.3 and ADR
 | `change_reason_code` + `change_reason` | structured reason code plus free-text justification — every append, mandatory | CR-3.3 |
 | `approved_by` | approval identity where the change class requires one (4-eyes, NFR-2) | CR-3.3 |
 | `processing_version` | ordering of versions per logical record; assignment per ADR-0006 §3: live loads write 0, a correction run allocates the next version once via the insert-only `processing_version_log` (ticket + reason). Composes with `supersedes_record_id`: the log names the correction run, the chain names the corrected records. | — |
-| content hash | per-record tamper evidence, **running from the first append** — a chain started later only proves integrity from activation onward, which is when auditors stop caring. The store is empty today; this is the cheapest moment it will ever have. | AR-1.2, NFR-5 |
+| content hash | per-record tamper evidence, **running from the first append** — a chain started later only proves integrity from activation onward, The store is empty today, so the chain starts at row one at no migration cost. | AR-1.2, NFR-5 |
 
 Correction semantics the model distinguishes (CR-3.5), using the two clocks:
 
@@ -380,6 +381,14 @@ primary source that does not ask permission before emitting new instruments (CH-
 `node_validity` — per node: which shape requirements are unmet — is a first-class read artifact
 of the model, not a side report.
 
+**Where bad data is rejected**, in order: (1) table constraints and vocabulary references reject
+malformed rows at the database boundary — unknown `rel_type`, a weight without a basis, a
+malformed id or hex value; (2) REQUIRED shape failures reject at the validator's write boundary;
+(3) EXPECTED failures store the row, flag it in `node_validity`, and block metric publication;
+(4) DQ rules in OpenMetadata catch cross-row breaches — single-valued cardinality, dangling soft
+references, coverage — over the resolved current state; (5) whatever still gets through is
+corrected by restatement or tombstone, never by editing.
+
 **Rules: what a concept's pointer resolves to.** A concept that stands for a rule set (a risk
 model, a policy, a mandate) does not store the rules; per D-5 they live in the rules system
 (Synome / Synlang / code), "with pointers to them in SECstore" — while the schemata that govern
@@ -420,8 +429,8 @@ The position work (`position_id`, the `position_state` spine, the per-protocol m
 is **not absorbed by this model and does not change**. Positions are quantities; this store is
 reference. They meet at three seams, and only these:
 
-1. **Instrument.** A position carries `instrument_key` (hashed into `position_id`, so native
-   and classifier-free by construction). Enrichment resolves it through the instrument
+1. **Instrument.** A position carries `instrument_key` (hashed into `position_id`, so it must stay
+   native and classifier-free). Enrichment resolves it through the instrument
    register — surfaced as `dim_instrument` — to a security, then reads classification, issuer,
    and look-through from the graph. Nothing is stamped onto the position row; resolution is
    live against the pivot, so a reclassification never rewrites positions.
@@ -437,10 +446,12 @@ reference. They meet at three seams, and only these:
 
 Consumers never traverse the graph. SECstore does not exist in isolation — its purpose is to
 feed operational engines, rule stores, and business logic (D-6), and the operational side links
-back to it by reference (D-5). The model's read surface is a set of **generated tabular
-views** — the pivot (IN-1) — resolved once per graph change, not per query, and shaped so
-downstream SQL treats reference data as ordinary dimensions (deliberately: they look like the
-old separate masters again, as regenerable read models rather than write surfaces):
+back to it by reference (D-5). The model's read surface is the **pivot** (IN-1): materialized
+tables, regenerated when the graph changes, not per query. "View" is the wrong word for them
+— they are tables a refresh step rewrites, which makes staleness a property to monitor and
+makes them shaped so downstream SQL treats reference data as ordinary
+dimensions — they look like the old separate masters again, as regenerable read models rather
+than write surfaces:
 
 | view | key | what it serves |
 |---|---|---|
@@ -465,8 +476,17 @@ snapshot would otherwise flip a later replay. The views join TigerData hypertabl
 keys at the block's UTC date (§9.3). The combined master's tables are classified in
 `schema_master.json` from birth, so ADR-0006 §1's governance and conformance tests apply to
 them like every governed table. Materialization mechanics (tables vs views, refresh,
-distribution across nodes) are realization; the view set, grains, keys, and as-of semantics
+distribution across nodes) are realization; the table set, grains, keys, and as-of semantics
 are model.
+
+**Fast and slow data are different stores.** Slow-moving, curated facts — nodes, edges, shapes,
+registers — live here and change by versioned append at curation cadence. Fast-moving data —
+balances, prices, market-determined mixes — lives in the operational/timeseries store and never
+becomes node or edge versions; it reaches the graph's read surface only as block-stamped derived
+projections (`ALLOCATES`, with `weight_asof_block` and lineage) or stays outside entirely and is
+joined at read time through `block_meta`. Refresh cadence follows the split: `dim_*` regenerate
+on graph change (rare), `fact_lookthrough` per graph version, allocation projections per block
+batch.
 
 ## Auditability conformance
 
@@ -593,8 +613,8 @@ inbound references accruing on the key itself — never by preference.
 
 **Valid time only, system time later.** Set aside: the Auditability PRD makes as-of-system
 reads and the restatement/valid-time distinction mandatory (RP-4.1, CR-3.5), and retrofitting a
-clock onto loaded data is a silent history rewrite. The store is empty today — the cheapest
-moment this will ever have. The same argument starts the hash chain at the first append.
+clock onto loaded data is a silent history rewrite. The store is empty today, which is when
+the second clock and the hash chain are free to add.
 
 ## Consequences
 
@@ -603,9 +623,9 @@ moment this will ever have. The same argument starts the hash chain at the first
   plus the instrument and alias registers; a governed edge vocabulary in six families; shapes as
   data — so "complete data model" is a property of this document, not of tribal knowledge
   spread across artifacts.
-- Auditable by construction: every append carries who, what, when, why, and with which
+- Auditable by contract: every append carries who, what, when, why, and with which
   software; corrections chain by reference; both clocks are queryable; hashes run from row one.
-- Engine-portable by construction: contracts, vocabulary, and shapes are data; realizations are
+- Engine-portable: contracts, vocabulary, and shapes are data; realizations are
   swappable; consumers read only the pivot, which survives an engine change.
 - The position stream integrates through three narrow seams (instrument key, holder alias,
   block time) with nothing stamped onto position rows — reclassification never rewrites
@@ -634,7 +654,7 @@ moment this will ever have. The same argument starts the hash chain at the first
 | New relationship type | a row in the governed vocabulary + endpoint rule | one reviewed change |
 | New or changed relationship | insert an edge / close-and-open | data only |
 | A recorded value was wrong | restatement append, `supersedes_record_id` + reason code | data only |
-| Late-arriving fact | valid-time append, backdated window, honest `ingest_xid`/`ingested_at` | data only |
+| Late-arriving fact | valid-time append, backdated window; `ingest_xid`/`ingested_at` record when we learned it | data only |
 | Corporate action | status version on the node + a succession edge | data only |
 | New concept / category | CONCEPT node + `NARROWER_THAN` placement | data only |
 | Tighter validation on a settled type | shape version: severity or tier raised | data + review |
