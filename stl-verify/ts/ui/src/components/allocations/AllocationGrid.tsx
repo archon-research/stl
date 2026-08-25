@@ -121,6 +121,30 @@ function getCategoryChipClass(
     : CATEGORY_CHIP_CLASS.unknown;
 }
 
+/**
+ * The badge text for a row only one provenance reported, or `null`.
+ *
+ * Both provenances get a badge, not just Sky's: under `source=both` the API
+ * carries a row whichever side reported it, so an STL-only row is as much a
+ * single-sourced figure as a Sky-only one — and it can be a large one. The
+ * merged mainnet spark response puts a $57M `spWETH` position in that bucket,
+ * well above several rows that do carry the Sky-only mark.
+ *
+ * This marks most of the table rather than a handful, and that is the honest
+ * reading: Sky's monitor covers mainnet spark far more than the other chains,
+ * so across a vault's primes a corroborated row is the exception. Spark's vault
+ * view badges 25 of 33 rows. A bare row means both sides reported the position,
+ * which is the claim worth being able to trust on sight.
+ */
+function soleReporterLabel(
+  source: Allocation['source'],
+  shown: { showsIndexed: boolean; showsReference: boolean },
+): string | null {
+  if (source === 'reference') return shown.showsIndexed ? 'Sky only' : null;
+  if (source === 'indexed') return shown.showsReference ? 'STL only' : null;
+  return null;
+}
+
 function AllocationAssetCell({
   allocation,
   localProtocols,
@@ -130,9 +154,15 @@ function AllocationAssetCell({
   localProtocols: LocalProtocolRow[];
   chainLabels: ChainLabelLookup;
 }) {
-  // The badge marks a row as Sky's *against* STL's rows, so it says nothing
-  // when STL's are not on screen.
-  const { showsIndexed: showsIndexedNow } = useProvenanceView();
+  // A badge marks a row against the other provenance's rows, so it says nothing
+  // unless those are on screen too — which is only the merged view, since a
+  // single-provenance response holds nothing to stand out from.
+  const { showsIndexed: showsIndexedNow, showsReference: showsReferenceNow } =
+    useProvenanceView();
+  const soleReporter = soleReporterLabel(allocation.source, {
+    showsIndexed: showsIndexedNow,
+    showsReference: showsReferenceNow,
+  });
   const chainLabel = getChainLabel(
     allocation.chain_id,
     chainLabels,
@@ -152,13 +182,13 @@ function AllocationAssetCell({
         >
           {allocation.symbol}
         </p>
-        {/* Only the odd ones out are marked. In a merged view most rows are
-            reported by both, so badging those would label almost everything. */}
-        {allocation.source === 'reference' && showsIndexedNow ? (
+        {/* Absent exactly when both provenances reported the row — see
+            `soleReporterLabel` for why that, and not scarcity, is the rule. */}
+        {soleReporter === null ? null : (
           <Badge size="sm" variant="subtle">
-            Sky only
+            {soleReporter}
           </Badge>
-        ) : null}
+        )}
       </div>
       <div className={flex({ gap: '1.5', wrap: 'wrap' })}>
         <span
