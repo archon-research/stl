@@ -26,9 +26,11 @@ async def engine(async_db_url: str):
             "borrower_collateral",
             "sparklend_reserve_data",
             "onchain_token_price",
-            "morpho_market_position",
         ):
             await conn.execute(text(f"TRUNCATE {table}"))
+        # Markets and their positions together: two tests seed the same
+        # market_id, and the spoofed-collateral market must not leak.
+        await conn.execute(text("TRUNCATE morpho_market CASCADE"))
     yield eng
     await eng.dispose()
 
@@ -59,8 +61,8 @@ async def _seed_user(conn, address_hex: str) -> int:
     ).scalar_one()
 
 
-async def _seed_market(conn, ids: dict) -> None:
-    now = dt.datetime.now(dt.UTC)
+async def _seed_market(conn, ids: dict, price_age: dt.timedelta = dt.timedelta(0)) -> None:
+    now = dt.datetime.now(dt.UTC) - price_age
     await conn.execute(
         text("""
             INSERT INTO sparklend_reserve_data
@@ -116,6 +118,77 @@ async def test_latest_row_per_user_token_wins(engine):
     assert list(market["oracle_price"]) == [2000.0]
 
 
+async def test_stale_valuation_prices_fail_the_run(engine):
+    async with engine.begin() as conn:
+        ids = await _ids(conn)
+        user_id = await _seed_user(conn, "dd" * 20)
+        await _seed_market(conn, ids, price_age=dt.timedelta(days=3))  # beyond the 2-day bound
+        await conn.execute(
+            text("""
+                INSERT INTO borrower
+                    (user_id, protocol_id, token_id, block_number, amount, change, event_type, tx_hash)
+                VALUES (:u, :p, :t, 100, :a, 0, 'borrow', '\\x00')
+            """),
+            {"u": user_id, "p": ids["protocol_id"], "t": ids["usdt"], "a": 1000 * 10**6},
+        )
+
+    with pytest.raises(ValueError, match="no fresh oracle price"):
+        await PostgresPositionsReader(engine).get_protocol_data(
+            protocol="SPARKLEND", network="ETHEREUM", morpho_market="", loan_token="USDT", galaxy_type=""
+        )
+
+
+async def _seed_spoof_token(conn, symbol: str) -> int:
+    return (
+        await conn.execute(
+            text("""
+                INSERT INTO token (chain_id, address, symbol, decimals)
+                VALUES (1, decode(repeat('5e', 20), 'hex'), :symbol, 18)
+                ON CONFLICT (chain_id, address) DO UPDATE SET symbol = EXCLUDED.symbol
+                RETURNING id
+            """),
+            {"symbol": symbol},
+        )
+    ).scalar_one()
+
+
+async def test_a_priced_symbol_collision_fails_the_sparklend_run(engine):
+    async with engine.begin() as conn:
+        ids = await _ids(conn)
+        user_id = await _seed_user(conn, "ee" * 20)
+        await _seed_market(conn, ids)
+        spoof_id = await _seed_spoof_token(conn, "WETH")  # second priced token named WETH
+        await conn.execute(
+            text("""
+                INSERT INTO onchain_token_price (token_id, oracle_id, block_number, "timestamp", price_usd)
+                VALUES (:t, 1, 100, now(), 1.0)
+            """),
+            {"t": spoof_id},
+        )
+        await conn.execute(
+            text("""
+                INSERT INTO borrower_collateral
+                    (user_id, protocol_id, token_id, block_number, amount, change, event_type,
+                     tx_hash, collateral_enabled)
+                VALUES (:u, :p, :t, 100, :a, 0, 'supply', '\\x00', true)
+            """),
+            {"u": user_id, "p": ids["protocol_id"], "t": ids["weth"], "a": 10**18},
+        )
+        await conn.execute(
+            text("""
+                INSERT INTO borrower
+                    (user_id, protocol_id, token_id, block_number, amount, change, event_type, tx_hash)
+                VALUES (:u, :p, :t, 100, :a, 0, 'borrow', '\\x00')
+            """),
+            {"u": user_id, "p": ids["protocol_id"], "t": ids["usdt"], "a": 1000 * 10**6},
+        )
+
+    with pytest.raises(ValueError, match="ambiguous token symbol.*WETH"):
+        await PostgresPositionsReader(engine).get_protocol_data(
+            protocol="SPARKLEND", network="ETHEREUM", morpho_market="", loan_token="USDT", galaxy_type=""
+        )
+
+
 async def test_unsupported_protocol_fails_with_the_data_gaps_pointer(engine):
     with pytest.raises(ValueError, match="DATA_GAPS"):
         await PostgresPositionsReader(engine).get_protocol_data(
@@ -123,7 +196,9 @@ async def test_unsupported_protocol_fails_with_the_data_gaps_pointer(engine):
         )
 
 
-async def _seed_morpho_market(conn, ids: dict, lltv_1e18: int, market_id_byte: str) -> int:
+async def _seed_morpho_market(
+    conn, ids: dict, lltv_1e18: int, market_id_byte: str, collateral_id: int | None = None
+) -> int:
     return (
         await conn.execute(
             text("""
@@ -135,9 +210,21 @@ async def _seed_morpho_market(conn, ids: dict, lltv_1e18: int, market_id_byte: s
                         decode(repeat('11', 20), 'hex'), decode(repeat('22', 20), 'hex'), :lltv, 1)
                 RETURNING id
             """),
-            {"mb": market_id_byte, "loan": ids["usdt"], "collateral": ids["weth"], "lltv": lltv_1e18},
+            {"mb": market_id_byte, "loan": ids["usdt"], "collateral": collateral_id or ids["weth"], "lltv": lltv_1e18},
         )
     ).scalar_one()
+
+
+async def _seed_morpho_position(conn, user_id: int, market: int, collateral: int, borrow: int) -> None:
+    await conn.execute(
+        text("""
+            INSERT INTO morpho_market_position
+                (user_id, morpho_market_id, block_number, "timestamp",
+                 supply_shares, borrow_shares, collateral, supply_assets, borrow_assets)
+            VALUES (:u, :m, 100, now(), 0, 0, :c, 0, :bor)
+        """),
+        {"u": user_id, "m": market, "c": collateral, "bor": borrow},
+    )
 
 
 async def test_morpho_latest_row_decimals_and_lif(engine):
@@ -166,6 +253,23 @@ async def test_morpho_latest_row_decimals_and_lif(engine):
     assert row["lltv"] == pytest.approx(0.86)
     assert row["liquidation_incentive"] == pytest.approx(1.04384134, abs=1e-8)
     assert list(market_df["token_symbol"]) == ["WETH"]
+
+
+async def test_morpho_two_tokens_sharing_the_collateral_symbol_are_refused(engine):
+    async with engine.begin() as conn:
+        ids = await _ids(conn)
+        user_id = await _seed_user(conn, "ff" * 20)
+        await _seed_market(conn, ids)  # prices for the real WETH/USDT
+        spoof_id = await _seed_spoof_token(conn, "WETH")  # permissionless market on a spoofed token
+        real = await _seed_morpho_market(conn, ids, 860000000000000000, "ab")
+        spoofed = await _seed_morpho_market(conn, ids, 860000000000000000, "cd", collateral_id=spoof_id)
+        await _seed_morpho_position(conn, user_id, real, 2 * 10**18, 500 * 10**6)
+        await _seed_morpho_position(conn, user_id, spoofed, 9 * 10**18, 900 * 10**6)
+
+    with pytest.raises(ValueError, match="ambiguous collateral token"):
+        await PostgresPositionsReader(engine).get_protocol_data(
+            protocol="MORPHO", network="ETHEREUM", morpho_market="WETH", loan_token="USDT", galaxy_type=""
+        )
 
 
 async def test_morpho_unknown_pair_fails_loudly(engine):

@@ -35,8 +35,6 @@ _PARQUET_INPUTS = Path(INPUTS_DIR)
 def _make_data_reader(engine: AsyncEngine, cfg: RunnerConfig) -> CoreModelDataReader:
     """Compose each market's reader from its per-market source flags."""
     parquet = ParquetCoreModelDataReader(_PARQUET_INPUTS)
-    if cfg.orderbook_source == cfg.price_source == cfg.position_source == "parquet":
-        return parquet
     return CompositeCoreModelDataReader(
         parquet=parquet,
         orderbooks=PostgresOrderbookReader(engine) if cfg.orderbook_source == "postgres" else None,

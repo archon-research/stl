@@ -8,6 +8,7 @@ from app.adapters.postgres.core_model_positions_reader import (
     PositionRow,
     build_market_frame,
     build_morpho_users_frame,
+    build_price_map,
     build_users_frame,
     morpho_liquidation_incentive,
 )
@@ -172,3 +173,18 @@ def test_morpho_zero_collateral_borrowers_are_excluded():
 def test_morpho_unpriced_token_fails_the_build():
     with pytest.raises(ValueError, match="CBBTC"):
         build_morpho_users_frame([_morpho_row()], {"USDC": 1.0})
+
+
+def _price_row(symbol: str, price: float):
+    return SimpleNamespace(symbol=symbol, price_usd=price)
+
+
+def test_price_map_refuses_a_symbol_collision_on_a_consumed_symbol():
+    rows = [_price_row("USDC", 1.0), _price_row("usdc", 0.5), _price_row("WETH", 2000.0)]
+    with pytest.raises(ValueError, match="ambiguous token symbol.*USDC"):
+        build_price_map(rows, used_symbols={"USDC", "WETH"})
+
+
+def test_price_map_ignores_collisions_on_symbols_nothing_consumes():
+    rows = [_price_row("USDC", 1.0), _price_row("usdc", 0.5), _price_row("WETH", 2000.0)]
+    assert build_price_map(rows, used_symbols={"WETH"}) == {"USDC": 0.5, "WETH": 2000.0}

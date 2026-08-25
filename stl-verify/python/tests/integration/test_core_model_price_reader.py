@@ -16,6 +16,9 @@ async def engine(async_db_url: str):
     eng = create_async_engine(async_db_url, pool_pre_ping=True)
     async with eng.begin() as conn:
         await conn.execute(text("TRUNCATE onchain_token_price"))
+        # The symbol-collision test seeds a second "WETH" token; _token_id
+        # resolves by symbol, so a leaked spoof row would break sibling tests.
+        await conn.execute(text("DELETE FROM token WHERE chain_id = 1 AND address = decode(repeat('5e', 20), 'hex')"))
     yield eng
     await eng.dispose()
 
@@ -62,6 +65,26 @@ async def test_symbols_resolve_case_insensitively(engine):
 
     prices = await PostgresPriceReader(engine, min_days=_MIN_DAYS).get_prices(["CBBTC"])
     assert list(prices.columns) == ["CBBTC"]
+
+
+async def test_two_priced_tokens_sharing_a_symbol_are_refused(engine):
+    token_id = await _token_id(engine, "WETH")
+    await _seed_days(engine, token_id, {d: 2000.0 for d in _last_days(_MIN_DAYS)})
+    async with engine.begin() as conn:
+        spoof_id = (
+            await conn.execute(
+                text("""
+                    INSERT INTO token (chain_id, address, symbol, decimals)
+                    VALUES (1, decode(repeat('5e', 20), 'hex'), 'WETH', 18)
+                    ON CONFLICT (chain_id, address) DO UPDATE SET symbol = EXCLUDED.symbol
+                    RETURNING id
+                """)
+            )
+        ).scalar_one()
+    await _seed_days(engine, spoof_id, {_last_days(1)[0]: 1.0})  # one priced day is enough to poison
+
+    with pytest.raises(ValueError, match="ambiguous token symbol.*WETH"):
+        await PostgresPriceReader(engine, min_days=_MIN_DAYS).get_prices(["WETH"])
 
 
 async def test_a_gap_inside_the_window_fails_the_run(engine):

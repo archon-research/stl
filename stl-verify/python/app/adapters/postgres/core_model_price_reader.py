@@ -41,6 +41,17 @@ _DAILY_CLOSES = text("""
              p.block_number DESC, p.block_version DESC, p.processing_version DESC
 """)
 
+# Symbols are display labels, not identifiers: two priced tokens sharing one
+# would interleave into a single series above, so that is refused up front.
+_AMBIGUOUS_SYMBOLS = text("""
+    SELECT upper(t.symbol) AS symbol, count(DISTINCT t.id) AS token_count
+    FROM onchain_token_price p
+    JOIN token t ON t.id = p.token_id
+    WHERE t.chain_id = :chain_id AND upper(t.symbol) = ANY(:symbols)
+    GROUP BY upper(t.symbol)
+    HAVING count(DISTINCT t.id) > 1
+""")
+
 
 class PostgresPriceReader:
     def __init__(self, engine: AsyncEngine, min_days: int = 180, chain_id: int = 1) -> None:
@@ -51,8 +62,15 @@ class PostgresPriceReader:
     async def get_prices(self, collateral_list: list[str]) -> pd.DataFrame:
         symbols = sorted({token.upper() for token in collateral_list})
         async with self._engine.connect() as conn:
-            result = await conn.execute(_DAILY_CLOSES, {"symbols": symbols, "chain_id": self._chain_id})
-            rows = result.fetchall()
+            params = {"symbols": symbols, "chain_id": self._chain_id}
+            ambiguous = (await conn.execute(_AMBIGUOUS_SYMBOLS, params)).fetchall()
+            if ambiguous:
+                raise ValueError(
+                    "ambiguous token symbol(s) "
+                    f"{[f'{r.symbol} ({r.token_count} tokens)' for r in ambiguous]}: multiple token rows "
+                    "on this chain carry oracle prices under the same symbol; refusing a mixed price series"
+                )
+            rows = (await conn.execute(_DAILY_CLOSES, params)).fetchall()
 
         frame = pd.DataFrame(rows, columns=["symbol", "day", "close"])
         if not frame.empty:
@@ -70,8 +88,7 @@ class PostgresPriceReader:
             prices.index.min().date(),
             prices.index.max().date(),
         )
-        # The model addresses columns by the original collateral spelling.
-        return prices.rename(columns={s: s for s in symbols})[[token.upper() for token in collateral_list]]
+        return prices[[token.upper() for token in collateral_list]]
 
     def _validate(self, prices: pd.DataFrame, symbols: list[str]) -> None:
         problems: list[str] = []

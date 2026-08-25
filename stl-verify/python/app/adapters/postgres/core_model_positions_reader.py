@@ -28,6 +28,7 @@ Deliberate deviations, documented in DATA_GAPS.md:
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -35,13 +36,13 @@ import pandas as pd
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.adapters.postgres.core_model_orderbook_reader import _BTC_GROUP, _ETH_GROUP
+from app.adapters.postgres.core_model_orderbook_reader import BTC_GROUP, ETH_GROUP
 
 logger = logging.getLogger(__name__)
 
 # Collaterals whose price paths the model simulates. Everything else a user
 # supplies is carried at constant USD (the model's "unmodeled" bucket).
-MODELED_COLLATERALS = frozenset(_ETH_GROUP | _BTC_GROUP | {"XRP", "SOL", "JITOSOL", "HYPE"})
+MODELED_COLLATERALS = frozenset(ETH_GROUP | BTC_GROUP | {"XRP", "SOL", "JITOSOL", "HYPE"})
 
 # Latest state per (user, token) per side, snapshot-read per db/migrations
 # AGENTS: order by the snapshot-time key then processing_version, never build_id.
@@ -82,17 +83,48 @@ _RESERVE_PARAMS = text("""
     JOIN protocol p ON p.id = srd.protocol_id
     JOIN token t ON t.id = srd.token_id
     WHERE p.chain_id = :chain_id AND p.name = :protocol_name
+      -- The only writer always sets the threshold from getReserveConfigurationData
+      -- (decode fails loudly on a missing field), so this filter can never mask a
+      -- newer NULL row; it only skips historical rows written before that path.
       AND srd.liquidation_threshold IS NOT NULL
     ORDER BY srd.token_id, srd.block_number DESC, srd.block_version DESC, srd.processing_version DESC
 """)
 
+# Freshness-bounded like the orderbook reader: a "latest" price older than the
+# bound disappears here, so the frame builders' unpriced-token check fails the
+# run instead of valuing live positions at an arbitrarily old price.
 _ORACLE_PRICES = text("""
     SELECT DISTINCT ON (otp.token_id) t.symbol, otp.price_usd
     FROM onchain_token_price otp
     JOIN token t ON t.id = otp.token_id
     WHERE t.chain_id = :chain_id
+      AND otp."timestamp" > now() - CAST(:max_age AS interval)
     ORDER BY otp.token_id, otp.block_number DESC, otp.block_version DESC, otp.processing_version DESC
 """)
+
+
+def build_price_map(price_rows: Sequence[Any], used_symbols: set[str]) -> dict[str, float]:
+    """``{SYMBOL: price}`` from per-token rows, refusing symbol collisions.
+
+    Token symbols are display labels, not identifiers (chain 1 holds several
+    distinct "USDC" rows). Two priced tokens sharing a symbol the frames
+    consume would let an arbitrary token's price win silently, so that is an
+    error; collisions on symbols nothing here reads are ignored.
+    """
+    prices: dict[str, float] = {}
+    collisions: set[str] = set()
+    for row in price_rows:
+        symbol = row.symbol.upper()
+        if symbol in prices:
+            collisions.add(symbol)
+        prices[symbol] = float(row.price_usd)
+    ambiguous = sorted(collisions & used_symbols)
+    if ambiguous:
+        raise ValueError(
+            f"ambiguous token symbol(s) {ambiguous}: multiple token rows on this chain carry "
+            "oracle prices under the same symbol; refusing a symbol-keyed price lookup"
+        )
+    return prices
 
 
 @dataclass(frozen=True)
@@ -183,7 +215,8 @@ def build_users_frame(
 
     if unpriced:
         raise ValueError(
-            f"no oracle price for supplied/borrowed token(s) {sorted(unpriced)}; "
+            f"no fresh oracle price for supplied/borrowed token(s) {sorted(unpriced)} "
+            "(missing feed, or older than the reader's freshness bound); "
             "refusing to build users with silent USD holes"
         )
     if dropped_no_collateral:
@@ -211,7 +244,9 @@ _MORPHO_POSITIONS = text("""
     WITH markets AS (
         SELECT mm.id, mm.lltv / 1e18 AS lltv,
                ct.symbol AS collateral_symbol, ct.decimals AS collateral_decimals,
-               lt.symbol AS loan_symbol, lt.decimals AS loan_decimals
+               ct.address AS collateral_address,
+               lt.symbol AS loan_symbol, lt.decimals AS loan_decimals,
+               lt.address AS loan_address
         FROM morpho_market mm
         JOIN token ct ON ct.id = mm.collateral_token_id
         JOIN token lt ON lt.id = mm.loan_token_id
@@ -227,7 +262,8 @@ _MORPHO_POSITIONS = text("""
                  mp.block_number DESC, mp.block_version DESC, mp.processing_version DESC
     )
     SELECT u.address AS user_address, m.lltv,
-           m.collateral_symbol, m.collateral_decimals, m.loan_symbol, m.loan_decimals,
+           m.collateral_symbol, m.collateral_decimals, m.collateral_address,
+           m.loan_symbol, m.loan_decimals, m.loan_address,
            l.collateral, l.borrow_assets
     FROM latest l
     JOIN markets m ON m.id = l.morpho_market_id
@@ -273,7 +309,9 @@ def build_morpho_users_frame(rows: Sequence[Any], prices: dict[str, float]) -> p
 
     if unpriced:
         raise ValueError(
-            f"no oracle price for token(s) {sorted(unpriced)}; refusing to build users with silent USD holes"
+            f"no fresh oracle price for token(s) {sorted(unpriced)} "
+            "(missing feed, or older than the reader's freshness bound); "
+            "refusing to build users with silent USD holes"
         )
 
     records = []
@@ -313,10 +351,20 @@ def build_morpho_users_frame(rows: Sequence[Any], prices: dict[str, float]) -> p
 class PostgresPositionsReader:
     """``get_protocol_data`` from the live tables. SparkLend and Morpho on Ethereum."""
 
-    def __init__(self, engine: AsyncEngine, chain_id: int = 1, protocol_name: str = "SparkLend") -> None:
+    def __init__(
+        self,
+        engine: AsyncEngine,
+        chain_id: int = 1,
+        protocol_name: str = "SparkLend",
+        max_price_age: timedelta = timedelta(days=2),
+    ) -> None:
         self._engine = engine
         self._chain_id = chain_id
         self._protocol_name = protocol_name
+        # Bounds how old a "latest" valuation price may be, mirroring the
+        # orderbook reader's freshness rule; the daily oracle cadence makes
+        # anything past ~2 days a dead feed, not a quiet market.
+        self._max_price_age = max_price_age
 
     async def get_protocol_data(
         self,
@@ -339,7 +387,9 @@ class PostgresPositionsReader:
         async with self._engine.connect() as conn:
             position_rows = (await conn.execute(_POSITIONS, params)).fetchall()
             reserve_rows = (await conn.execute(_RESERVE_PARAMS, params)).fetchall()
-            price_rows = (await conn.execute(_ORACLE_PRICES, {"chain_id": self._chain_id})).fetchall()
+            price_rows = (
+                await conn.execute(_ORACLE_PRICES, {"chain_id": self._chain_id, "max_age": self._max_price_age})
+            ).fetchall()
 
         positions = [
             PositionRow(
@@ -354,7 +404,7 @@ class PostgresPositionsReader:
         reserve_params = {
             r.symbol.upper(): (float(r.liquidation_threshold), float(r.liquidation_bonus)) for r in reserve_rows
         }
-        prices = {r.symbol.upper(): float(r.price_usd) for r in price_rows}
+        prices = build_price_map(price_rows, used_symbols={p.symbol.upper() for p in positions})
 
         users_df = build_users_frame(positions, reserve_params, prices, loan_token)
         supplied = {c.rsplit("_", 1)[0].upper() for c in users_df.columns if c.endswith("_supply")}
@@ -375,13 +425,28 @@ class PostgresPositionsReader:
                     {"chain_id": self._chain_id, "collateral": collateral, "loan": loan_token},
                 )
             ).fetchall()
-            price_rows = (await conn.execute(_ORACLE_PRICES, {"chain_id": self._chain_id})).fetchall()
+            price_rows = (
+                await conn.execute(_ORACLE_PRICES, {"chain_id": self._chain_id, "max_age": self._max_price_age})
+            ).fetchall()
         if not rows:
             raise ValueError(
                 f"no morpho_market rows (or no borrowers) for {collateral}/{loan_token} on chain "
                 f"{self._chain_id} — is the morpho indexer running?"
             )
-        prices = {r.symbol.upper(): float(r.price_usd) for r in price_rows}
+        # Blue is permissionless and markets were matched by display symbol, so
+        # a spoofed token named like the real one would sweep its borrowers in
+        # here — refuse unless every matched market agrees on the addresses.
+        for side, addresses in (
+            ("collateral", {bytes(r.collateral_address) for r in rows}),
+            ("loan", {bytes(r.loan_address) for r in rows}),
+        ):
+            if len(addresses) > 1:
+                raise ValueError(
+                    f"ambiguous {side} token for {collateral}/{loan_token}: symbol resolves to "
+                    f"{len(addresses)} distinct addresses ({sorted('0x' + a.hex() for a in addresses)}); "
+                    "refusing a symbol-keyed market selection"
+                )
+        prices = build_price_map(price_rows, used_symbols={collateral, loan_token})
         users_df = build_morpho_users_frame(rows, prices)
         market_df = build_market_frame({collateral}, prices)
         logger.info(

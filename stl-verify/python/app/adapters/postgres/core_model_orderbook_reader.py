@@ -33,24 +33,27 @@ _BOOK_SYMBOLS: dict[str, list[str]] = {
 
 # Token -> canonical book, matching the routing table in the model README:
 # ETH LSTs are proxied via the ETH spot book, BTC wrappers via the BTC book.
-_ETH_GROUP = frozenset({"ETH", "WETH", "STETH", "WSTETH", "WEETH", "RETH", "RSETH", "EZETH"})
-_BTC_GROUP = frozenset({"BTC", "WBTC", "LBTC", "TBTC", "CBBTC"})
+ETH_GROUP = frozenset({"ETH", "WETH", "STETH", "WSTETH", "WEETH", "RETH", "RSETH", "EZETH"})
+BTC_GROUP = frozenset({"BTC", "WBTC", "LBTC", "TBTC", "CBBTC"})
 
+# One snapshot per venue, not per (venue, symbol): a venue listing two symbols
+# from the same book list (BTC-USD and BTC-USDT, say) must not count its depth
+# twice.
 _LATEST_FRESH_PER_VENUE = text("""
-    SELECT DISTINCT ON (exchange, symbol) exchange, symbol, persisted_at, asks
+    SELECT DISTINCT ON (exchange) exchange, symbol, persisted_at, asks
     FROM cex_orderbook_snapshots
     WHERE symbol = ANY(:symbols)
       AND persisted_at > now() - CAST(:max_age AS interval)
-    ORDER BY exchange, symbol, persisted_at DESC
+    ORDER BY exchange, persisted_at DESC
 """)
 
 
 def book_for(token: str) -> str:
     """Canonical book symbol a collateral token's liquidity is read from."""
     upper = token.upper()
-    if upper in _ETH_GROUP:
+    if upper in ETH_GROUP:
         return "ETH"
-    if upper in _BTC_GROUP:
+    if upper in BTC_GROUP:
         return "BTC"
     return upper
 
