@@ -390,6 +390,15 @@ task queue to receive a hand-started run. Model it on
 `k8s/base/offchain-price-backfill/` — including its `strategy: {type: Recreate}`, so a
 rollout never runs two pods against the same task queue.
 
+Declare that strategy in the *same* commit that first adds the Deployment. Retrofitting it
+onto a workload already running in staging or prod cannot be applied: the API server has
+since defaulted a `rollingUpdate` block that ArgoCD does not own, server-side apply only
+prunes what it owns, and every sync of the whole Application then fails — indefinitely,
+with app health still green. That is what `reference-capital-backfill` hit in #640; undoing
+it took two merges (restore an explicit `RollingUpdate`, then change it once that is
+Synced). Declaring it up front is the only point at which it costs nothing; see
+`k8s/AGENTS.md`, "Rollout strategy".
+
 Backfillers are **not** auto-discovered like cronjobs, so the release needs wiring in
 three places. Miss any of them and the tag is promoted without an image ever being
 built, which surfaces as `ImagePullBackOff`:
