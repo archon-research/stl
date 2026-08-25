@@ -256,6 +256,7 @@ def test_list_allocations_returns_200_with_enriched_holdings():
             "network": None,
             "receipt_token_id": 1,
             "receipt_token_address": "0x" + "a" * 40,
+            "held_token_address": None,
             "underlying_token_id": 10,
             "underlying_token_address": "0x" + "b" * 40,
             "symbol": "aUSDC",
@@ -275,16 +276,16 @@ def test_list_allocations_returns_200_with_enriched_holdings():
 
 
 def test_a_wrapper_priced_through_its_underlying_is_not_keyed_on_it():
-    """A wrapper STL has no registry entry for must not key on its underlying.
+    """A wrapper STL has no registry entry for keys on itself, not its underlying.
 
     `sparkPrimeUSDC1` is held as a direct asset priced through USDC, so its row
-    carries USDC's address. Keying it there matched it to Sky's own plain-USDC
-    row — which reports $0 — so the merged row claimed Sky valued a $20.3M
-    position at nothing while Sky's real row for it went unjoined.
+    reports USDC as its underlying. Keying it there matched it to Sky's own
+    plain-USDC row — which reports $0 — so the merged row claimed Sky valued a
+    $20.3M position at nothing while Sky's real row for it went unjoined.
 
-    The symbols are what separate the two: a genuine direct holding *is* its
-    underlying and the two agree, so it keeps the address key (pinned by the
-    test below).
+    Its own address is what it answers to, whether or not an underlying is
+    projected: a genuine direct holding *is* the token it holds too (pinned by
+    the test below), so both shapes key the same way.
     """
     from app.api.v1 import allocations
 
@@ -303,10 +304,42 @@ def test_a_wrapper_priced_through_its_underlying_is_not_keyed_on_it():
 
     assert response.status_code == 200
     (row,) = response.json()
-    # Still reports the underlying it is priced through — only the key is
-    # withheld, leaving the symbol as the last resort rather than no key at all.
+    # Still reports the underlying it is priced through; only the key ignores it.
     assert row["underlying_token_address"] == "0x" + "e" * 40
-    assert row["position_keys"] == ["symbol:1::sparkprimeusdc1"]
+    assert row["held_token_address"] == "0x" + "d" * 40
+    assert row["position_keys"] == ["position:1:0x" + "d" * 40]
+
+
+def test_a_wrapper_and_the_asset_it_is_priced_through_never_share_a_key():
+    """The wrapper and a plain holding of its underlying are two positions.
+
+    Both are direct holdings on the same chain naming USDC as their underlying,
+    which is exactly the pair that collapsed into one when the underlying's
+    address keyed both.
+    """
+    from app.api.v1 import allocations
+
+    usdc_address = "0x" + "e" * 40
+    wrapper = make_direct_asset_holding(
+        symbol="sparkPrimeUSDC1",
+        token_id=3,
+        token_address="0x" + "d" * 40,
+        underlying_token_id=4,
+        underlying_token_address=usdc_address,
+        underlying_symbol="USDC",
+    )
+    plain_usdc = make_direct_asset_holding(symbol="USDC", token_id=4, token_address=usdc_address)
+    service = _make_service(direct_holdings=[wrapper, plain_usdc])
+    app.dependency_overrides[allocations._get_service] = _override_service(service)
+    client = TestClient(app)
+
+    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations")
+
+    assert response.status_code == 200
+    wrapper_row, plain_row = response.json()
+    assert wrapper_row["position_keys"] == ["position:1:0x" + "d" * 40]
+    assert plain_row["position_keys"] == [f"position:1:{usdc_address}"]
+    assert not set(wrapper_row["position_keys"]) & set(plain_row["position_keys"])
 
 
 def test_list_allocations_returns_direct_asset_rows_with_null_receipt_fields():
@@ -334,6 +367,7 @@ def test_list_allocations_returns_direct_asset_rows_with_null_receipt_fields():
             "network": None,
             "receipt_token_id": None,
             "receipt_token_address": None,
+            "held_token_address": "0x" + "c" * 40,
             "underlying_token_id": 99,
             "underlying_token_address": "0x" + "c" * 40,
             "symbol": "PYUSD",
@@ -510,6 +544,7 @@ def test_list_allocations_surfaces_anchorage_custody_row():
             "network": None,
             "receipt_token_id": None,
             "receipt_token_address": None,
+            "held_token_address": None,
             "underlying_token_id": None,
             "underlying_token_address": None,
             "symbol": "BTC",
