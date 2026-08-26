@@ -26,10 +26,9 @@ spec:
           # the runner entry point all ship inside stl-verify/python.
           image: core-model-runner
           command: ["python", "-m", "cli.cronjobs.core_model_runner.main"]
-          # No otel-config mount, unlike the sibling cronjobs: the Python
-          # cronjob harness emits no telemetry yet. This is the line that
-          # changes when run metrics (cronjob_runs_total) land.
           envFrom:
+            - configMapRef:
+                name: otel-config
             - configMapRef:
                 name: core-model-runner
             - secretRef:

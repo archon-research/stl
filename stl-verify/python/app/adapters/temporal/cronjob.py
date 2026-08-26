@@ -29,6 +29,9 @@ from temporalio.client import (
 )
 from temporalio.worker import Worker
 
+from app.adapters.temporal.interceptor import RunMetricsInterceptor
+from app.adapters.temporal.metrics import CronjobMetrics, init_metrics_provider
+
 logger = logging.getLogger(__name__)
 
 TEMPORAL_HOST_PORT_ENV = "TEMPORAL_HOST_PORT"
@@ -114,20 +117,42 @@ async def _reconcile_schedule(client: Client, spec: CronjobSpec) -> None:
         )
 
 
+def _build_worker(
+    client: Client, spec: CronjobSpec, executor: ThreadPoolExecutor, run_metrics: CronjobMetrics
+) -> Worker:
+    # One activity slot, hardcoded: every cronjob tick is one CPU-bound pass,
+    # and overlap-SKIP already guarantees a schedule never queues a second
+    # one. RunMetricsInterceptor is this harness's single recording site
+    # (see interceptor.py) -- every activity registered here gets metered
+    # for free, so an individual cronjob never wires its own.
+    return Worker(
+        client,
+        task_queue=spec.name,
+        workflows=[spec.workflow],
+        activities=spec.activities,
+        activity_executor=executor,
+        max_concurrent_activities=1,
+        interceptors=[RunMetricsInterceptor(run_metrics)],
+    )
+
+
 async def run_cronjob(spec: CronjobSpec) -> None:
     """Connect, ensure the schedule, then serve the task queue until stopped.
 
     Activities run on a thread pool because these ticks are CPU-bound rather
     than IO-bound; leaving them on the event loop would stall heartbeats and
-    schedule polling for the duration of a run. One activity slot, hardcoded:
-    every cronjob tick is one CPU-bound pass, and overlap-SKIP already
-    guarantees a schedule never queues a second one.
+    schedule polling for the duration of a run.
 
     SIGTERM/SIGINT stop the worker gracefully (the Go runner's
     signal.NotifyContext equivalent): the worker stops polling and tells the
     server, instead of dying mid-poll and leaving the tick to surface as a
     timeout hours later.
     """
+    # Must run before CronjobMetrics(): instrument creation binds to
+    # whichever MeterProvider is global at that moment (see
+    # init_metrics_provider's docstring).
+    shutdown_metrics = init_metrics_provider(spec.name)
+    run_metrics = CronjobMetrics()
     client = await connect()
     await ensure_schedule(client, spec)
     stop = asyncio.Event()
@@ -136,14 +161,7 @@ async def run_cronjob(spec: CronjobSpec) -> None:
         loop.add_signal_handler(sig, stop.set)
     try:
         with ThreadPoolExecutor(max_workers=1) as executor:
-            worker = Worker(
-                client,
-                task_queue=spec.name,
-                workflows=[spec.workflow],
-                activities=spec.activities,
-                activity_executor=executor,
-                max_concurrent_activities=1,
-            )
+            worker = _build_worker(client, spec, executor, run_metrics)
             async with worker:
                 logger.info("worker running task_queue=%s", spec.name)
                 await stop.wait()
@@ -151,3 +169,4 @@ async def run_cronjob(spec: CronjobSpec) -> None:
     finally:
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.remove_signal_handler(sig)
+        shutdown_metrics()
