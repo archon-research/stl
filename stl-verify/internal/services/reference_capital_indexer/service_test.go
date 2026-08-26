@@ -3,6 +3,8 @@ package reference_capital_indexer
 import (
 	"context"
 	"errors"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -950,52 +952,95 @@ func TestRunFailsOnAnUnparseableExposure(t *testing.T) {
 	}
 }
 
-// uncoveredTrackedStars is the pure computation shared by reportUncovered and
-// reportBalanceSheetUncovered; exercised directly for edge cases (normalization,
-// nothing/everything covered) that the end-to-end telemetry test above only
-// spot-checks with one scenario.
-func TestUncoveredTrackedStars(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		tracked []string
-		covered map[string]bool
-		want    []string
-	}{
-		{
-			name:    "every tracked star covered",
-			tracked: []string{"spark", "grove"},
-			covered: map[string]bool{"spark": true, "grove": true},
-			want:    []string{},
-		},
-		{
-			name:    "one tracked star uncovered",
-			tracked: []string{"spark", "grove"},
-			covered: map[string]bool{"spark": true},
-			want:    []string{"grove"},
-		},
-		{
-			name:    "none covered",
-			tracked: []string{"spark", "grove"},
-			covered: map[string]bool{},
-			want:    []string{"spark", "grove"},
-		},
-		{
-			name:    "tracked star normalized before comparison",
-			tracked: []string{" Spark "},
-			covered: map[string]bool{"spark": true},
-			want:    []string{},
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got := uncoveredTrackedStars(tc.tracked, tc.covered)
-			if len(got) != len(tc.want) {
-				t.Fatalf("uncoveredTrackedStars() = %v, want %v", got, tc.want)
+// uncoveredBalanceSheetStars collects every star attribute recorded on the
+// balance-sheet-uncovered counter from a collected snapshot.
+func uncoveredBalanceSheetStars(t *testing.T, rm metricdata.ResourceMetrics) []string {
+	t.Helper()
+	var stars []string
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "reference_capital.sync.balance_sheet.primes.uncovered.total" {
+				continue
 			}
-			for i := range got {
-				if got[i] != tc.want[i] {
-					t.Errorf("uncoveredTrackedStars()[%d] = %q, want %q", i, got[i], tc.want[i])
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("primes.uncovered.total = %#v, want a Sum[int64]", m.Data)
+			}
+			for _, dp := range sum.DataPoints {
+				star, ok := dp.Attributes.Value("star")
+				if !ok {
+					t.Fatal("primes.uncovered.total data point missing star attribute")
 				}
+				stars = append(stars, star.AsString())
 			}
-		})
+		}
+	}
+	sort.Strings(stars)
+	return stars
+}
+
+// The nothing-covered edge of the same normalization+diff the telemetry test
+// above spot-checks with one uncovered star: neither tracked star appears in
+// the feed's fetch window.
+func TestRunReportsEveryTrackedStarUncoveredWhenTheBalanceSheetFeedCoversNone(t *testing.T) {
+	reader := metric.NewManualReader()
+	tel, err := NewTelemetryWithProvider(metric.NewMeterProvider(metric.WithReader(reader)))
+	if err != nil {
+		t.Fatalf("NewTelemetryWithProvider() = %v", err)
+	}
+
+	primes := &mockPrimeRepo{primes: []entity.Prime{{ID: 1, Name: "spark"}, {ID: 2, Name: "grove"}}}
+	provider := &mockRiskProvider{rows: []outbound.RiskCapitalPrimeSnapshot{upstreamRow("spark"), upstreamRow("grove")}}
+	deps := defaultDeps(primes, &mockCapitalRepo{}, provider)
+	deps.SheetProvider = &mockSheetProvider{} // covers no star
+
+	service, err := NewService(deps, trackedStars, 7, func() time.Time { return syncedAt }, tel, nil)
+	if err != nil {
+		t.Fatalf("NewService() = %v", err)
+	}
+	if err := service.Run(context.Background()); err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("Collect() = %v", err)
+	}
+	if got, want := uncoveredBalanceSheetStars(t, rm), []string{"grove", "spark"}; !slices.Equal(got, want) {
+		t.Errorf("uncovered stars = %v, want %v", got, want)
+	}
+}
+
+// The normalization edge: a tracked star configured with padding/casing must
+// still match the feed's plain-lowercase row, so it is not reported uncovered.
+func TestRunNormalizesATrackedStarBeforeComparingBalanceSheetCoverage(t *testing.T) {
+	reader := metric.NewManualReader()
+	tel, err := NewTelemetryWithProvider(metric.NewMeterProvider(metric.WithReader(reader)))
+	if err != nil {
+		t.Fatalf("NewTelemetryWithProvider() = %v", err)
+	}
+
+	primes := &mockPrimeRepo{primes: []entity.Prime{{ID: 1, Name: "spark"}}}
+	provider := &mockRiskProvider{rows: []outbound.RiskCapitalPrimeSnapshot{upstreamRow("spark")}}
+	deps := defaultDeps(primes, &mockCapitalRepo{}, provider)
+	deps.SheetProvider = &mockSheetProvider{days: []outbound.BalanceSheetDay{{
+		Star: "spark", Date: "2026-08-19", TreasuryBalance: "1", Assets: "2",
+		AllocatedAssets: "3", IdleAssets: "4", Debt: "5", BackstopCapital: "6",
+	}}}
+
+	service, err := NewService(deps, []string{" Spark "}, 7, func() time.Time { return syncedAt }, tel, nil)
+	if err != nil {
+		t.Fatalf("NewService() = %v", err)
+	}
+	if err := service.Run(context.Background()); err != nil {
+		t.Fatalf("Run() = %v", err)
+	}
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("Collect() = %v", err)
+	}
+	if got := uncoveredBalanceSheetStars(t, rm); len(got) != 0 {
+		t.Errorf("uncovered stars = %v, want none — padding/casing must not split the star from its feed row", got)
 	}
 }
