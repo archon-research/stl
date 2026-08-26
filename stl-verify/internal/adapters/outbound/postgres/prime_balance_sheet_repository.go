@@ -37,16 +37,19 @@ func NewPrimeBalanceSheetRepository(pool *pgxpool.Pool, txm *TxManager, logger *
 //
 // Insert-only, like every reference table: the trigger assigns
 // processing_version, so re-running under the same build conflicts away rather
-// than rewriting history.
+// than rewriting history. Returns the summed RowsAffected() across the batch —
+// the rows actually inserted — not len(snapshots): a conflicted-away row still
+// counts as an attempted Exec but affects zero rows.
 func (r *PrimeBalanceSheetRepository) SaveBalanceSheetSnapshots(
 	ctx context.Context,
 	snapshots []entity.PrimeBalanceSheetSnapshot,
-) error {
+) (int, error) {
 	if len(snapshots) == 0 {
-		return nil
+		return 0, nil
 	}
 
-	return r.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
+	var inserted int
+	err := r.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
 		const q = `
 			INSERT INTO prime_reference_balance_sheet (
 				prime_id,
@@ -83,16 +86,22 @@ func (r *PrimeBalanceSheetRepository) SaveBalanceSheetSnapshots(
 
 		results := tx.SendBatch(ctx, batch)
 		for i, s := range snapshots {
-			if _, err := results.Exec(); err != nil {
+			tag, err := results.Exec()
+			if err != nil {
 				_ = results.Close()
 				return fmt.Errorf("insert balance sheet snapshot %d (prime_id=%d): %w", i, s.PrimeID, err)
 			}
+			inserted += int(tag.RowsAffected())
 		}
 		if err := results.Close(); err != nil {
 			return fmt.Errorf("close batch: %w", err)
 		}
 
-		r.logger.Info("saved prime balance sheet snapshots", "count", len(snapshots))
+		r.logger.Info("saved prime balance sheet snapshots", "inserted", inserted, "attempted", len(snapshots))
 		return nil
 	})
+	if err != nil {
+		return 0, err
+	}
+	return inserted, nil
 }

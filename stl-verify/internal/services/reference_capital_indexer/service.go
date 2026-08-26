@@ -220,6 +220,7 @@ func (s *Service) observeUpstream(ctx context.Context) (cycleObservation, error)
 	if err != nil {
 		return cycleObservation{}, fmt.Errorf("fetching balance-sheet history: %w", err)
 	}
+	s.reportBalanceSheetUncovered(ctx, days)
 
 	return cycleObservation{
 		snapshots:        snapshots,
@@ -261,13 +262,26 @@ func (s *Service) persistCycle(
 	s.telemetry.RecordAllocationsWritten(ctx, len(allocations))
 	s.telemetry.RecordPositionsWritten(ctx, len(positions))
 
+	return s.persistBalanceSheet(ctx, sheets)
+}
+
+// persistBalanceSheet saves the cycle's balance-sheet days, if the window held
+// any, and records how many were actually inserted. The common no-new-day
+// cycle already reports 0 through the branch below — the lookback re-sends
+// already-persisted days, which conflict away — so recording 0 on the rarer
+// empty-window path too, rather than special-casing it away, keeps every
+// cycle's metric emission uniform for callers to reason about.
+func (s *Service) persistBalanceSheet(ctx context.Context, sheets []entity.PrimeBalanceSheetSnapshot) error {
 	if len(sheets) == 0 {
+		s.telemetry.RecordBalanceSheetDaysInserted(ctx, 0)
 		return nil
 	}
-	if err := s.deps.SheetRepo.SaveBalanceSheetSnapshots(ctx, sheets); err != nil {
+	inserted, err := s.deps.SheetRepo.SaveBalanceSheetSnapshots(ctx, sheets)
+	if err != nil {
 		return fmt.Errorf("saving balance sheet snapshots: %w", err)
 	}
-	s.logger.Info("balance sheet advanced", "days", len(sheets))
+	s.telemetry.RecordBalanceSheetDaysInserted(ctx, inserted)
+	s.logger.Info("balance sheet advanced", "inserted", inserted, "fetched", len(sheets))
 	return nil
 }
 
@@ -422,15 +436,44 @@ func (s *Service) reportUncovered(ctx context.Context, rows []outbound.RiskCapit
 		covered[normalizedStar(row.Star)] = true
 	}
 
-	for _, star := range s.trackedStars {
-		normalized := normalizedStar(star)
-		if covered[normalized] {
-			continue
-		}
-		s.telemetry.RecordPrimeUncovered(ctx, normalized)
+	for _, star := range uncoveredTrackedStars(s.trackedStars, covered) {
+		s.telemetry.RecordPrimeUncovered(ctx, star)
 		s.logger.Warn("tracked prime not covered by the upstream monitor; its series will not advance",
-			"star", normalized)
+			"star", star)
 	}
+}
+
+// reportBalanceSheetUncovered surfaces tracked primes absent from every day
+// this cycle's short lookback window fetched, before any row is persisted.
+//
+// The balance-sheet analogue of reportUncovered: a single tracked prime
+// silently dropping out of this feed otherwise has no signal at all — its
+// /debt and /total-capital series freeze via locf, and neither the error path
+// nor the inserted-count counter (other primes keep advancing it) notices.
+func (s *Service) reportBalanceSheetUncovered(ctx context.Context, days []outbound.BalanceSheetDay) {
+	covered := make(map[string]bool, len(days))
+	for _, day := range days {
+		covered[normalizedStar(day.Star)] = true
+	}
+
+	for _, star := range uncoveredTrackedStars(s.trackedStars, covered) {
+		s.telemetry.RecordBalanceSheetPrimeUncovered(ctx, star)
+		s.logger.Warn("tracked prime not covered by the balance-sheet feed; its balance sheet will not advance",
+			"star", star)
+	}
+}
+
+// uncoveredTrackedStars returns the normalized tracked stars absent from
+// covered, in tracked order.
+func uncoveredTrackedStars(trackedStars []string, covered map[string]bool) []string {
+	uncovered := make([]string, 0, len(trackedStars))
+	for _, star := range trackedStars {
+		normalized := normalizedStar(star)
+		if !covered[normalized] {
+			uncovered = append(uncovered, normalized)
+		}
+	}
+	return uncovered
 }
 
 func (s *Service) primeIDsByName(ctx context.Context) (map[string]int64, error) {

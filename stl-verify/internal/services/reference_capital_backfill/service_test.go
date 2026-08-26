@@ -40,12 +40,12 @@ type mockSheetRepo struct {
 	err       error
 }
 
-func (m *mockSheetRepo) SaveBalanceSheetSnapshots(_ context.Context, s []entity.PrimeBalanceSheetSnapshot) error {
+func (m *mockSheetRepo) SaveBalanceSheetSnapshots(_ context.Context, s []entity.PrimeBalanceSheetSnapshot) (int, error) {
 	if m.err != nil {
-		return m.err
+		return 0, m.err
 	}
 	m.snapshots = append(m.snapshots, s...)
-	return nil
+	return len(s), nil
 }
 
 type mockProvider struct {
