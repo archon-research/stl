@@ -124,15 +124,6 @@ jobs:
           set -euo pipefail
           BASE_SHA="$(git merge-base "origin/${BASE_REF}" "${HEAD_SHA}")"
 
-          # Web search stays enabled: checking a CVE on a dependency bump, or what an
-          # external API actually does, is where this pass earns its keep. It runs
-          # server-side, so it is an outbound channel that neither the sandbox nor the
-          # leak check below can see. Accepted, because reaching it needs the label —
-          # i.e. write access — and anyone with write access can read an Actions secret
-          # directly, so it grants an attacker nothing they did not already have. That
-          # reasoning does not survive a move to a private repo, where a search query
-          # could carry proprietary code off the runner.
-          #
           # The prompt file carries the standing review instructions; only the
           # per-run scope is appended here. The title and body are quoted as data:
           # the reviewer needs them to judge intent, but their author is the person
