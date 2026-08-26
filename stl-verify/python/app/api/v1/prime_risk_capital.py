@@ -223,10 +223,12 @@ class PrimeRiskCapitalResponse(BaseModel):
     )
     model: str | None = Field(
         description=(
-            "Default RRC model used (e.g. `gap_sweep`). `null` under `source=reference`, which runs no "
-            "model; under `source=both` it is STL's model, since the unprefixed figures are STL's."
+            "The default RRC model this view prefers (`core_model`). `null` under `source=reference`, "
+            "which runs no model; under `source=both` it is STL's preference, since the unprefixed "
+            "figures are STL's. A given `per_allocation` row can still carry a different model: "
+            "`indexed` falls back to `gap_sweep` for a position `core_model` has no data for."
         ),
-        examples=["gap_sweep"],
+        examples=["core_model"],
     )
     exposure_usd: PlainDecimal = Field(
         description=(
@@ -404,7 +406,8 @@ async def _get_service(
     summary="Self-computed prime risk capital",
     description=(
         "Compute the prime's capital metrics from on-chain data and the default RRC model "
-        "(`gap_sweep`), with no dependency on the upstream Star feed. Returns exposure (priced "
+        "(`core_model`, falling back to `gap_sweep` under `source=indexed` where core has no data), "
+        "with no dependency on the upstream Star feed. Returns exposure (priced "
         "receipt-token allocations), Total Risk Capital (on-chain treasury), Required Risk Capital "
         "(sum of per-allocation model RRC), encumbrance, a `modeled_pct` coverage figure, and a "
         "per-allocation breakdown. The figures are model-derived and partial (only allocations the "
@@ -460,7 +463,7 @@ async def get_prime_risk_capital(
     if source is Provenance.REFERENCE:
         return _with_encumbrance_contributions(await _reference_response(prime_address, reference_services()))
 
-    indexed = _self_response(await service.compute(prime_address))
+    indexed = _self_response(await service.compute(prime_address, source))
     if source is Provenance.INDEXED:
         return _with_encumbrance_contributions(indexed)
 
