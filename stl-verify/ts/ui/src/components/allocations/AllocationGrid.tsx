@@ -652,7 +652,7 @@ function AllocationRiskCapitalCell({
  * anything (the same reason the Asset column badges only single-reporter rows).
  */
 function riskProvenanceTitle(risk: AllocationGridRow['risk']): string {
-  return risk.fromReference ? 'Legacy published figure' : 'Verify model figure';
+  return risk.fromReference ? 'Legacy figure' : 'Verify model figure';
 }
 
 /**
