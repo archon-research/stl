@@ -164,7 +164,7 @@ export function BottomPanel({
           className={toggleGroupClassName}
         >
           <ToggleGroup.Item value="risk" className={toggleClassName}>
-            Risk breakdown
+            Collateral Backing
           </ToggleGroup.Item>
           <ToggleGroup.Item value="rrc" className={toggleClassName}>
             Required risk capital
@@ -282,7 +282,7 @@ export function BottomPanel({
             <SearchInput
               aria-label={
                 activeTab === 'risk'
-                  ? 'Search risk breakdown'
+                  ? 'Search collateral backing'
                   : 'Search activity feed'
               }
               disabled={
