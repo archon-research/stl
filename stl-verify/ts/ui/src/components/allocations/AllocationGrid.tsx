@@ -36,6 +36,7 @@ import {
 } from '../../lib/dashboard';
 import {
   preferIndexed,
+  preferModelRiskFigure,
   preferReference,
   useProvenanceView,
 } from '../../lib/provenance';
@@ -507,7 +508,9 @@ function derivedRiskCapitalUsd(
   return (exposureUsd * crrPct) / 100;
 }
 
-// Comparable capital-risk ratio (0-100), Sky's preferred over STL's.
+// Comparable capital-risk ratio (0-100), the row's own model preferred over
+// Sky's — see `preferModelRiskFigure` for why this is the opposite of the
+// exposure column's rule.
 function preferredCrrPct(
   entry: AllocationRiskCapital | undefined,
 ): number | null {
@@ -516,7 +519,7 @@ function preferredCrrPct(
   }
 
   return parseNumericValue(
-    preferReference(entry.reference_crr_pct, entry.crr_pct),
+    preferModelRiskFigure(entry.crr_pct, entry.reference_crr_pct),
   );
 }
 
@@ -647,9 +650,10 @@ function AllocationRiskCapitalCell({
 }
 
 /**
- * A tooltip, not a chip: under the composite view Legacy's ratio wins wherever
- * it reports one, so a visible marker would land on most rows and stop marking
- * anything (the same reason the Asset column badges only single-reporter rows).
+ * A tooltip, not a chip: under the composite view most rows carry the
+ * model's own ratio (`preferModelRiskFigure`), so a marker here is the
+ * exception rather than the rule — unlike the Asset column's sole-reporter
+ * badge, which is why that one *is* a chip.
  */
 function riskProvenanceTitle(risk: AllocationGridRow['risk']): string {
   return risk.fromReference ? 'Legacy figure' : 'Verify model figure';
@@ -749,13 +753,17 @@ function toAllocationGridRow(
       state: riskFetchState,
       entry,
       chainMismatch: isRiskCapitalChainMismatch(selectedPrime, allocation),
-      // Whether the figures shown lean on Sky. The ratio prefers Sky's and the
-      // value prefers STL's, so a row is Sky-flavoured when either side of that
-      // actually fell to Sky.
+      // Whether the figures shown lean on Sky. Both the exposure and the ratio
+      // now prefer STL's own figure (see `preferModelRiskFigure`), so a row is
+      // Sky-flavoured only when one of them actually fell back: the exposure
+      // has none of STL's, the row is wholly Sky-reported (`source ===
+      // 'reference'`, e.g. a position STL never joined to), or the model
+      // reported no ratio and Sky's filled in for it.
       fromReference:
         allocation.amount_usd == null ||
         (entry !== undefined &&
-          (entry.source === 'reference' || entry.reference_crr_pct != null)),
+          (entry.source === 'reference' ||
+            (entry.crr_pct == null && entry.reference_crr_pct != null))),
       exposureUsd,
       riskCapitalUsd: derivedRiskCapitalUsd(crrPct, exposureUsd),
       crrPct,
