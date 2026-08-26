@@ -460,6 +460,49 @@ Realization note, from running the reads on Postgres: a recursive CTE over `nume
 weights needs the non-recursive term cast explicitly, or the closure query fails to parse —
 the generated pivot SQL carries the cast.
 
+**The data-quality rule set, in full.** Every rule the model enforces or observes, with a stable
+id. GQ-0x run in the engine and reject the statement; GQ-1x run in the validator at the write
+boundary (REQUIRED rejects, EXPECTED stores + flags in `node_validity` + blocks metrics); GQ-2x
+are OpenMetadata rules over resolved current state (per D-5: defined there, pointed to from the
+store, alert-only, tier DQ3 in the platform's DQ taxonomy). The rule set is itself governed:
+adding or changing a rule is a reviewed change, and rule ids are stable references.
+
+| id | rule | layer | outcome |
+|---|---|---|---|
+| GQ-01 | `rel_type` exists in the governed vocabulary | engine (FK) | reject |
+| GQ-02 | `rel_weight` requires `weight_basis` | engine (CHECK) | reject |
+| GQ-03 | `status` legal for the node's kind | engine (FK on record_type, status) | reject |
+| GQ-04 | node id prefix matches its kind | engine (CHECK) | reject |
+| GQ-05 | address values are lowercase hex, no 0x | engine (CHECK) | reject |
+| GQ-06 | `valid_from < valid_to` | engine (CHECK) | reject |
+| GQ-07 | spine completeness: actor, reason code + text, source_system present | engine (NOT NULL) | reject |
+| GQ-10 | structural identity per kind (a token has address + chain) | validator, REQUIRED | reject write |
+| GQ-11 | endpoint kinds legal for the rel_type triple | validator, write-time | reject write |
+| GQ-12 | edge targets within the shape's permitted set (subtree lookup against `dim_cluster`) | validator, REQUIRED | reject write |
+| GQ-13 | exactly one `BELONGS_TO` per concept class per node | validator, EXPECTED | flag + block metrics |
+| GQ-14 | required edges per effective shape (`ISSUED_BY`, `PEGGED_TO`, `HAS_UNDERLYING` by subtype) | validator, EXPECTED | flag + block metrics |
+| GQ-15 | forbidden fields absent (person identifiers, DP-1) | validator, REQUIRED | reject write |
+| GQ-16 | concept carries a definition | validator, EXPECTED | flag |
+| GQ-17 | rule-class concept's `external_ref` present and well-formed | validator, REQUIRED | reject write |
+| GQ-18 | shape-closure contradictions (resolved min > max) | authoring-time closure report | reject the shape version |
+| GQ-20 | single-valued cardinality over current state (one current `ISSUED_BY` per security, one register mapping per key) | OpenMetadata | alert |
+| GQ-21 | dangling soft references: edge endpoints, `instrument_register.security_id`, `alias_register.node_id` with no current node | OpenMetadata | alert |
+| GQ-22 | taxonomy orphans: non-root taxonomy concepts without a `NARROWER_THAN` parent | OpenMetadata | alert |
+| GQ-23 | cycles in `NARROWER_THAN` / `HAS_UNDERLYING` (post-hoc sweep behind the write guard) | OpenMetadata | alert |
+| GQ-24 | coverage: held instruments without a register mapping; position holders without an alias resolution; `entity_type = UNKNOWN` count | OpenMetadata | alert |
+| GQ-25 | edge-budget envelopes per shape (a stablecoin with two current issuers, a wrapper with two underlyings) | OpenMetadata | alert |
+| GQ-26 | duplicate suspicion: distinct nodes sharing an alias value or exact legal name without a `SAME_AS` claim | OpenMetadata | alert |
+| GQ-27 | derived-only discipline: every `ALLOCATES` row carries `weight_asof_block` + input lineage; none is hand-written | OpenMetadata | alert |
+| GQ-28 | VALUE-basis composition shares per source sum to ≤ 1 (+ tolerance); over 1 is a breach, under 1 is advisory (partial recording is legitimate) | OpenMetadata | alert |
+| GQ-29 | pivot staleness: each pivot table's `generated_at` vs the latest governed write | OpenMetadata | alert |
+| GQ-30 | `node_validity` backlog trend: the EXPECTED gap count per shape must not grow unbounded (day-one baseline: 15 UNKNOWN entities, 2 unclassified held securities) | OpenMetadata | alert |
+
+Platform-level integrity checks — the xid monotonicity guard, content-hash verification, the
+assurance replay sample — are ADR-0006's and are referenced, not duplicated, here. Breach
+handling is uniform: engine and validator failures never land; EXPECTED gaps land and are worked
+off through `node_validity`; OpenMetadata alerts are corrected by append (restatement, re-point,
+tombstone) with reason and approval — the correction path in the process above.
+
 **The SE-2 split — reject structural, record semantic.** A structurally invalid record (a token
 with no address or chain) is rejected at write. A semantically incomplete one (a real holding
 whose subtype nobody has curated yet) is **stored, flagged in `node_validity`, and excluded
