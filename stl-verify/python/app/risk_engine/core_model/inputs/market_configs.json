@@ -31,7 +31,8 @@
     "ORDERBOOK_SOURCE": "postgres"
   },
   "_comment_morpho_scope": "Live Morpho positions are Ethereum-mainnet Blue markets (contract-total-verified). BA's parquet snapshots for these keys were built from Base's much larger markets (their README routes cbBTC liquidity via a Base pool), so live CRRs will NOT reconcile with parquet-era CRRs: different borrower universe, not a data bug.",
-  "morpho_cbbtc-usdc": {
+  "_morpho_cbbtc-usdc_disabled": {
+    "_comment": "Exceeds a 21 GiB watchdog cap without finishing, even at its own reduced N_MC=5000 override below -- a memory pathology (suspected liquidator/orderbook path), not a sizing problem; every other market is well-behaved at N_MC=10000 (see PR #800's 'N_MC sizing measurement' section). Underscore prefix excludes it from the loader, same as _galaxy_disabled. Re-enable by renaming back to 'morpho_cbbtc-usdc' once VEC-662 is resolved.",
     "PROTOCOL": "MORPHO",
     "MORPHO_MARKET": "CBBTC",
     "LOAN_TOKEN": "USDC",
