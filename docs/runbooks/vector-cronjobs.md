@@ -841,6 +841,101 @@ or accepted gap applies here, unlike `WritesZero`/`AllocationsZero`.
 
 ---
 
+## VectorReferenceCapitalIndexerBalanceSheetPrimeUncovered
+
+**What it means.** A prime STL tracks was absent from every day the
+balance-sheet feed's fetch window held for an hour. That prime's balance
+sheet is frozen while every other tracked prime keeps advancing, and because
+the read path gap-fills with `locf`, its `/debt` and `/total-capital` series
+keep serving the last observed value as if it were current.
+
+**Why it is not caught by the generic rules.** The cycle succeeds and still
+inserts rows for every other covered prime, so neither the error rules nor
+`VectorReferenceCapitalIndexerBalanceSheetStalled` fire — this is the single
+tracked-prime version of that gap, the balance-sheet analogue of
+`VectorReferenceCapitalIndexerPrimeUncovered`.
+
+**Triage.**
+
+1. `{{ $labels.star }}` names the prime. Ask the feed directly for its recent
+   days:
+   `curl -s "$SKY_DATA_URL/primes/historic/?days_ago=3" | jq -r '.data[].star' | sort -u`.
+   If the star is absent from that list, the feed dropped it; a
+   similar-but-different name present instead means the vocabulary drifted.
+2. Compare against the table for when the prime last landed a row:
+   `SELECT max(observed_at) FROM prime_reference_balance_sheet WHERE prime_id =
+   (SELECT id FROM prime WHERE name = '<star>');`
+3. Compare against what STL tracks — the same axis-synome contract the
+   snapshot-level `PrimeUncovered` triage uses. Note the `prime` table is
+   **not** the tracked set.
+
+**Resolution.**
+
+- *Feed dropped the prime.* Nothing to fix in the service; the balance sheet
+  is correctly frozen. Decide with the team whether the prime should still be
+  tracked, and silence the alert while that is open.
+- *Name drifted.* Fix it in the axis-synome contract, not by mapping the name
+  in the indexer — a local alias would hide the next drift.
+
+Do not "fix" this by relaxing the indexer to accept partial balance-sheet
+coverage silently. The alert exists precisely because a partially-covered
+cycle looks healthy.
+
+---
+
+## VectorReferenceCapitalIndexerBalanceSheetStalled
+
+**What it means.** Cycles are succeeding but `prime_reference_balance_sheet`
+has had zero newly-inserted rows for 36h. The daily balance-sheet write path
+has stopped advancing for every tracked prime at once, and via `locf` every
+prime's `/debt` and `/total-capital` series is now frozen on its last value.
+
+**Why it is not caught by the generic rules, and why the window is 36h.** The
+run returns no error, so `VectorCronjobRunFailing` stays quiet. Unlike
+`WritesZero`/`AllocationsZero`/`PositionsZero`, which use a 1h window, this
+feed publishes one day per prime per UTC day and the client deliberately drops
+the current in-progress day — so on most cycles the insert count is
+legitimately zero, and a 1h window would false-positive on every run that
+happens to land between upstream publish times. `[36h]` on the `increase()`,
+with a matching `for: 2h`, gives the daily cadence room to land at least once
+(verified: inserts happen ~once/day per prime) before this fires.
+
+**Triage.**
+
+1. Confirm the worker is cycling:
+   `kubectl -n vector logs deploy/reference-capital-indexer --tail=100`. Most
+   cycles log `balance sheet advanced inserted=0 fetched=<n>` — the lookback
+   window re-sends already-persisted days, which conflict away, so
+   `inserted=0` on its own is normal. `inserted` goes non-zero roughly once
+   per day per prime, when that prime's newly-completed day lands for the
+   first time; if you never see a non-zero `inserted` across a full day, that
+   itself corroborates the alert.
+2. Ask the feed directly whether it has published recent days at all:
+   `curl -s "$SKY_DATA_URL/primes/historic/?days_ago=3" | jq '.data | group_by(.star) | map({star: .[0].star, dates: map(.date)})'`.
+3. Compare against the table:
+   `SELECT prime_id, max(observed_at) FROM prime_reference_balance_sheet GROUP
+   BY prime_id;` — if every prime's `max(observed_at)` is stuck more than a day
+   or two in the past while the feed above shows fresh dates, the client is
+   failing to parse or persist rather than the feed being empty; check the pod
+   logs for parse failures.
+4. If only one prime is affected rather than the whole feed, that is
+   `VectorReferenceCapitalIndexerBalanceSheetPrimeUncovered` instead — treat
+   that as the primary signal.
+
+**Resolution.** If the feed itself has gone stale (step 2 shows no dates newer
+than the last insert), this is upstream — confirm with the team and wait. If
+the feed has fresh data but the client is not persisting it, this is a service
+bug: fix the parse/insert path, not the alert's window. The gap in the series
+stays regardless — say so rather than backfilling from a different feed, which
+would splice a different measurement.
+
+**First-deploy note.** The counter series starts younger than the 36h window
+on a fresh rollout, so this can fire once before the first day lands even on a
+healthy worker. Check the deployment timestamp before treating a very-recent
+first firing as a real stall.
+
+---
+
 ## morpho-v2-bootstrap run outcomes
 
 **Nothing here needs rows reconciling by hand.** Adapter membership is an

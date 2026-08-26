@@ -577,3 +577,67 @@ groups:
             metric rename, missed recording call) — confirm against
             `prime_reference_position` before assuming the series stalled.
           runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorreferencecapitalindexerpositionszero
+
+      # -----------------------------------------------------------------------
+      # WARNING — a prime dropped out of the balance-sheet feed (B6 gap)
+      # -----------------------------------------------------------------------
+      - alert: VectorReferenceCapitalIndexerBalanceSheetPrimeUncovered
+        # Like PrimeUncovered above, but for the balance-sheet feed the indexer
+        # reads independently of the Star monitor: a cycle still succeeds and
+        # still advances every other prime's balance sheet, so nothing else
+        # catches this one prime's /debt and /total-capital series freezing.
+        expr: |
+          sum by (star, cluster) (
+            increase(reference_capital_sync_balance_sheet_primes_uncovered_total{k8s_namespace_name="vector"}[1h])
+          ) > 0
+        for: 30m
+        labels:
+          team: vector
+          severity: warning
+          component: reference-capital-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector reference-capital-indexer: prime `{{ $labels.star }}` not covered by the balance-sheet feed"
+          description: |
+            The balance-sheet feed reported no day for `{{ $labels.star }}` in any
+            cycle's fetch window over the last hour, so its /debt and
+            /total-capital series are frozen while every other prime advances.
+            Confirm against the feed directly before assuming an outage.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorreferencecapitalindexerbalancesheetprimeuncovered
+
+      # -----------------------------------------------------------------------
+      # WARNING — the balance-sheet write path stalled (B6 gap)
+      # -----------------------------------------------------------------------
+      - alert: VectorReferenceCapitalIndexerBalanceSheetStalled
+        # Cycles succeeding but zero balance-sheet days actually inserted.
+        # Unlike WritesZero/AllocationsZero/PositionsZero above, this feed
+        # publishes one day per prime per day and the client drops the
+        # in-progress day, so most cycles legitimately insert nothing — a 1h
+        # window on the inserted counter would false-positive constantly.
+        # [36h] on the increase, with a matching `for`, gives the daily cadence
+        # room to land at least once before this fires (verified: inserts
+        # happen ~once/day per prime). `unless` (not `== 0`) also fires when the
+        # counter series is entirely absent, which `== 0` cannot.
+        expr: |
+          sum by (cluster) (
+            rate(cronjob_runs_total{service_name="reference-capital-indexer", status="success", k8s_namespace_name="vector"}[1h])
+          ) > 0
+          unless
+          sum by (cluster) (
+            increase(reference_capital_sync_balance_sheet_days_inserted_total{k8s_namespace_name="vector"}[36h])
+          ) > 0
+        for: 2h
+        labels:
+          team: vector
+          severity: warning
+          component: reference-capital-indexer
+          namespace: vector
+        annotations:
+          summary: "Vector reference-capital-indexer inserted 0 balance-sheet days in 36h"
+          description: |
+            `prime_reference_balance_sheet` received 0 newly-inserted rows over
+            36h while cycles kept succeeding. The daily balance-sheet write path
+            has stopped advancing for every tracked prime, and each prime's
+            /debt and /total-capital series is now frozen on its last value via
+            locf.
+          runbook_url: https://github.com/archon-research/stl/blob/main/docs/runbooks/vector-cronjobs.md#vectorreferencecapitalindexerbalancesheetstalled
