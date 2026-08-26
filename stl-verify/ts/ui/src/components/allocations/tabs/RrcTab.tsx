@@ -37,7 +37,7 @@ type RrcTabProps = {
 };
 
 const MODEL_LABELS: Record<string, string> = {
-  suraf: 'SURAF',
+  suraf: 'SURAF (alpha)',
   gap_sweep: 'Gap sweep',
   core_model: 'CORE (alpha)',
 };
