@@ -99,8 +99,10 @@ never mixed:
    breaks with it. Ids are kind-prefixed for legibility (`em-`, `sec-`, `concept-`, `src-` —
    one prefix per node kind; no `inst-` exists because the instrument is not a node), and a
    mnemonic fragment is allowed (`em-prime-1` derives from the registry id, `em-issuer-circle`
-   is readable) but carries no meaning the model relies on. The entity ids already seeded
-   (#611, VEC-525) conform and stand unchanged.
+   is readable) but carries no meaning the model relies on. A node id exists only inside the
+   graph: no position row and no hash carries one — `position_id` hashes the native
+   `instrument_key` and holder id, and many keys resolve to one node id through the register.
+   The entity ids already seeded (#611, VEC-525) conform and stand unchanged.
 2. **Native instrument keys** — `instrument_key`: the instrument's native, globally unique,
    namespaced identifier (contract address, protocol-emitted market id, `registry:ilk`,
    `provider:package`). Never a house classifier — `position_id` hashes this key, so nothing
