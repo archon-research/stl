@@ -477,7 +477,7 @@ adding or changing a rule is a reviewed change, and rule ids are stable referenc
 | GQ-06 | `valid_from < valid_to` | engine (CHECK) | reject |
 | GQ-07 | spine completeness: actor, reason code + text, source_system present | engine (NOT NULL) | reject |
 | GQ-10 | structural identity per kind (a token has address + chain) | validator, REQUIRED | reject write |
-| GQ-11 | endpoint kinds legal for the rel_type triple | validator, write-time | reject write |
+| GQ-11 | endpoint existence and kind: each endpoint names a current node and its kind matches the stored src/dst_kind and the rel_type triple | validator, write-time | reject write |
 | GQ-12 | edge targets within the shape's permitted set (subtree lookup against `dim_cluster`) | validator, REQUIRED | reject write |
 | GQ-13 | exactly one `BELONGS_TO` per concept class per node | validator, EXPECTED | flag + block metrics |
 | GQ-14 | required edges per effective shape (`ISSUED_BY`, `PEGGED_TO`, `HAS_UNDERLYING` by subtype) | validator, EXPECTED | flag + block metrics |
@@ -485,6 +485,7 @@ adding or changing a rule is a reviewed change, and rule ids are stable referenc
 | GQ-16 | concept carries a definition | validator, EXPECTED | flag |
 | GQ-17 | rule-class concept's `external_ref` present and well-formed | validator, REQUIRED | reject write |
 | GQ-18 | shape-closure contradictions (resolved min > max) | authoring-time closure report | reject the shape version |
+| GQ-19 | duplicate-edge discipline: two edges sharing a triple AND an identical payload are an accidental duplicate, not DM-6 multi-typing | validator, write-time | reject write |
 | GQ-20 | single-valued cardinality over current state (one current `ISSUED_BY` per security, one register mapping per key) | OpenMetadata | alert |
 | GQ-21 | dangling soft references: edge endpoints, `instrument_register.security_id`, `alias_register.node_id` with no current node | OpenMetadata | alert |
 | GQ-22 | taxonomy orphans: non-root taxonomy concepts without a `NARROWER_THAN` parent | OpenMetadata | alert |
@@ -493,12 +494,21 @@ adding or changing a rule is a reviewed change, and rule ids are stable referenc
 | GQ-25 | edge-budget envelopes per shape (a stablecoin with two current issuers, a wrapper with two underlyings) | OpenMetadata | alert |
 | GQ-26 | duplicate suspicion: distinct nodes sharing an alias value or exact legal name without a `SAME_AS` claim | OpenMetadata | alert |
 | GQ-27 | derived-only discipline: every `ALLOCATES` row carries `weight_asof_block` + input lineage; none is hand-written | OpenMetadata | alert |
-| GQ-28 | VALUE-basis composition shares per source sum to ≤ 1 (+ tolerance); over 1 is a breach, under 1 is advisory (partial recording is legitimate) | OpenMetadata | alert |
+| GQ-28 | weight closure: weights per (src, rel_type) in one basis departing from 1.0 beyond tolerance | OpenMetadata | blocks metrics for the node; under 1 advisory (partial recording is legitimate) |
 | GQ-29 | pivot staleness: each pivot table's `generated_at` vs the latest governed write | OpenMetadata | alert |
 | GQ-30 | `node_validity` backlog trend: the EXPECTED gap count per shape must not grow unbounded (day-one baseline: 15 UNKNOWN entities, 2 unclassified held securities) | OpenMetadata | alert |
+| GQ-31 | look-through coverage: a held instrument resolving to no leaf set (26 of 70 held tokens today) | OpenMetadata | published control total |
+| GQ-32 | peg versus resolved backing: `PEGGED_TO` disagreeing with the underlying walk's terminal currency | OpenMetadata | risk signal, not an error |
+| GQ-33 | approval coverage: a curated record whose change class requires approval with no approver | OpenMetadata | blocks publish |
+| GQ-34 | vocabulary and shape drift: a type or shape in the store the schema register does not know | CI conformance | CI failure |
 
-Platform-level integrity checks — the xid monotonicity guard, content-hash verification, the
-assurance replay sample — are ADR-0006's and are referenced, not duplicated, here. Breach
+The reference-graph proposal's validity-and-quality suite is fully absorbed into this set
+(shape conformance → GQ-10..18; weight closure/basis → GQ-02/GQ-28; look-through coverage →
+GQ-31; peg vs backing → GQ-32; endpoint existence/kind → GQ-11; cycles → GQ-23; duplicate-edge
+discipline → GQ-19; approval coverage → GQ-33; drift → GQ-34; reproducibility replay →
+ADR-0006's assurance job). Platform-level integrity checks — the xid monotonicity guard,
+content-hash verification, the assurance replay sample — are ADR-0006's and are referenced,
+not duplicated, here. Breach
 handling is uniform: engine and validator failures never land; EXPECTED gaps land and are worked
 off through `node_validity`; OpenMetadata alerts are corrected by append (restatement, re-point,
 tombstone) with reason and approval — the correction path in the process above.
