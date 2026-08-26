@@ -45,6 +45,7 @@ resources:
   - ../../base/offchain-price-backfill
   - ../../base/reference-capital-indexer
   - ../../base/reference-capital-backfill
+  - ../../base/core-model-runner
   - ../../base/maple-graphql-indexer
   # On-demand one-shot VaultV2 repair worker (VEC-218). No Temporal schedule:
   # idles on its task queue until a run is started by hand from the Temporal UI.
@@ -239,6 +240,11 @@ images:
     newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-migrate
     newTag: "97c83b05dd7cf23543e0e89124ab090d454b27ab"
   - name: python-api
+    newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-python-api
+    newTag: "97c83b05dd7cf23543e0e89124ab090d454b27ab"
+  - name: core-model-runner
+    # Shares the python-api image — the model, its parquet inputs and the
+    # runner entry point all ship inside stl-verify/python.
     newName: 030797368798.dkr.ecr.eu-west-1.amazonaws.com/stl-sentinelprod-python-api
     newTag: "97c83b05dd7cf23543e0e89124ab090d454b27ab"
 
