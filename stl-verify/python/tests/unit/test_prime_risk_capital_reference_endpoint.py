@@ -111,6 +111,17 @@ def test_reference_mode_serves_the_upstream_totals_in_the_existing_fields(refere
 
 
 @pytest.mark.parametrize("reference_client", [_snapshot()], indirect=True)
+def test_reference_mode_stamps_the_cycle_the_figures_were_observed_at(reference_client):
+    # The figures are STL's record of the monitor rather than a live read, so
+    # serving them without a stamp would imply they are current.
+    client, _ = reference_client
+
+    body = client.get(f"/v1/primes/{_VALID_ADDR}/risk-capital?reference=true").json()
+
+    assert body["reference_synced_at"] == "2026-08-26T09:15:00Z"
+
+
+@pytest.mark.parametrize("reference_client", [_snapshot()], indirect=True)
 def test_reference_mode_populates_the_junior_senior_split_self_mode_cannot(reference_client):
     client, _ = reference_client
 
@@ -271,6 +282,7 @@ def test_both_keeps_each_provenance_in_its_own_fields(reference_client):
     assert body["reference_total_risk_capital_usd"] == "48142491.08"
     # Sky reports these and STL models none of them.
     assert body["junior_risk_capital_usd"] is not None
+    assert body["reference_synced_at"] == "2026-08-26T09:15:00Z"
 
 
 @pytest.mark.parametrize(
@@ -332,6 +344,7 @@ def test_both_serves_stl_own_model_for_a_prime_with_no_reference_data(reference_
 
     assert body["source"] == "indexed"
     assert body["reference_prime_exposure_usd"] is None
+    assert body["reference_synced_at"] is None
 
 
 @pytest.mark.parametrize("reference_client", [_snapshot()], indirect=True)

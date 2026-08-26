@@ -32,6 +32,16 @@ import {
 } from './registry.ts';
 
 const LAST_SWEEP_AGO = 5 * MINUTE_MS + 13 * SECOND_MS;
+
+/**
+ * How stale the reference rows are, inside the indexer's 15m cadence.
+ *
+ * The API serves STL's record of Sky rather than a live read, so a
+ * reference row carries the cycle it was observed at. Non-zero on purpose:
+ * a fixture stamped `now` would never exercise the staleness the field exists
+ * to make visible.
+ */
+const REFERENCE_SYNCED_AGO = 11 * MINUTE_MS;
 const LAST_TRANSFER_AGO = 85 * SECOND_MS;
 /** The custody snapshot is two months stale on purpose; see DATA_SOURCES. */
 const CUSTODY_SNAPSHOT_AGO = 63 * DAY_MS;
@@ -359,6 +369,7 @@ export function seedReferenceAllocations(
         balance: null,
         scope: 'prime',
         source: 'reference',
+        reference_synced_at: iso(nowMs - REFERENCE_SYNCED_AGO),
       })),
     ...skyOnlyAllocations(nowMs, primeName),
   ];
@@ -381,6 +392,7 @@ function skyOnlyAllocations(nowMs: number, primeName: PrimeName): Allocation[] {
   if (primeName !== 'spark') return [];
 
   const observedAt = iso(nowMs - 13 * MINUTE_MS);
+  const syncedAt = iso(nowMs - REFERENCE_SYNCED_AGO);
   return [
     {
       chain_id: 1,
@@ -401,6 +413,7 @@ function skyOnlyAllocations(nowMs: number, primeName: PrimeName): Allocation[] {
       category: 'allocation',
       scope: 'prime',
       source: 'reference',
+      reference_synced_at: syncedAt,
     },
     {
       chain_id: 1,
@@ -422,6 +435,7 @@ function skyOnlyAllocations(nowMs: number, primeName: PrimeName): Allocation[] {
       category: 'allocation',
       scope: 'prime',
       source: 'reference',
+      reference_synced_at: syncedAt,
     },
   ];
 }
@@ -451,16 +465,22 @@ export function seedCompositeAllocations(
   );
 
   return [
-    ...indexed.map((allocation): Allocation => ({
-      ...allocation,
-      source:
+    ...indexed.map((allocation): Allocation => {
+      const alsoReported =
         allocation.receipt_token_id != null &&
         referenceRows.some(
           (row) => row.receipt_token_id === allocation.receipt_token_id,
-        )
-          ? 'both'
-          : 'indexed',
-    })),
+        );
+      return {
+        ...allocation,
+        source: alsoReported ? 'both' : 'indexed',
+        // Only a merged row carries Sky's figures, so only it carries the
+        // cycle they were observed at.
+        reference_synced_at: alsoReported
+          ? iso(nowMs - REFERENCE_SYNCED_AGO)
+          : null,
+      };
+    }),
     ...referenceRows.filter(
       (row) =>
         row.receipt_token_id == null || !indexedIds.has(row.receipt_token_id),

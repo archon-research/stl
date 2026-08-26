@@ -254,6 +254,17 @@ class AllocationResponse(BaseModel):
         ),
         examples=["1234567.89"],
     )
+    reference_synced_at: datetime | None = Field(
+        default=None,
+        description=(
+            "When Sky's figures for this row were observed. Populated on any row carrying them — "
+            "a `reference` row, or a `both` row's `reference_amount_usd` — and `null` on an "
+            "indexed-only row. STL reads them from its own record of the feed rather than the feed "
+            "itself, so they are as of the last sync cycle, up to 15 minutes old. Consumers should "
+            "show this rather than implying the figures are current."
+        ),
+        examples=["2026-08-26T09:15:00Z"],
+    )
     latest_activity_at: str | None = Field(
         default=None,
         description="ISO-8601 timestamp of the most recent on-chain activity for this position, or `null`.",
@@ -449,9 +460,10 @@ async def list_protocols(service: AllocationService = Depends(_get_service)):
         "rows' `amount_usd`, so the two halves of `both` are comparable — deliberately not the Star "
         "monitor's risk-capital breakdown, whose `exposure` covers only the priced subset and runs "
         "about a third smaller. These rows carry no `balance` and no activity fields, which "
-        "upstream does not publish. `underlying_token_id`, `underlying_token_address` and "
-        "`underlying_symbol` are populated when the position resolves to STL's registry, null "
-        "otherwise — upstream names no loan token of its own."
+        "upstream does not publish, and a `reference_synced_at` naming the sync cycle they were "
+        "observed at rather than implying they are current. `underlying_token_id`, "
+        "`underlying_token_address` and `underlying_symbol` are populated when the position "
+        "resolves to STL's registry, null otherwise — upstream names no loan token of its own."
     ),
 )
 async def list_allocations(
@@ -619,7 +631,13 @@ async def _merged_allocations(
         # a real balance and a null `amount_usd` — six of spark's rows, $423M —
         # and discarding Sky's figure left a consumer nothing to fall back to.
         merged.append(
-            counterpart.model_copy(update={"source": Provenance.BOTH, "reference_amount_usd": row.amount_usd})
+            counterpart.model_copy(
+                update={
+                    "source": Provenance.BOTH,
+                    "reference_amount_usd": row.amount_usd,
+                    "reference_synced_at": row.reference_synced_at,
+                }
+            )
         )
 
     merged.extend(row for row in indexed if id(row) not in matched)
@@ -675,13 +693,15 @@ async def _reference_allocations(
 
     category_service = AllocationCategoryService()
     return [
-        _reference_allocation_row(row, category_service).model_copy(update={"source": Provenance.REFERENCE})
+        _reference_allocation_row(row, snapshot.synced_at, category_service).model_copy(
+            update={"source": Provenance.REFERENCE}
+        )
         for row in snapshot.positions
     ]
 
 
 def _reference_allocation_row(
-    row: ReferencePosition, category_service: AllocationCategoryService
+    row: ReferencePosition, synced_at: datetime, category_service: AllocationCategoryService
 ) -> AllocationResponse:
     """Project an observed upstream position onto the allocation model.
 
@@ -707,6 +727,7 @@ def _reference_allocation_row(
         # `assets`, the whole holding — the same measurement STL's own rows
         # carry, and the one the prime's `assets` total decomposes into.
         amount_usd=row.assets_usd,
+        reference_synced_at=synced_at,
         latest_activity_at=None,
         latest_activity_action=None,
         latest_activity_amount=None,

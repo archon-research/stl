@@ -9,6 +9,7 @@
  * has whenever a chain is unindexed, which is what `prime_unserved_chains` is
  * for.
  */
+import { MINUTE_MS, iso, mockNow } from '../clock.ts';
 import { positionKeys } from '../identity.ts';
 import { ownEntry } from '../lookup.ts';
 import type {
@@ -476,8 +477,19 @@ export function toCompositeRiskCapital(
     junior_risk_capital_usd: reference.junior_risk_capital_usd,
     senior_risk_capital_usd: reference.senior_risk_capital_usd,
     exposure_share: reference.exposure_share,
+    reference_synced_at: reference.reference_synced_at,
   };
 }
+
+/**
+ * How stale Sky's figures are, inside the indexer's 15m cadence.
+ *
+ * The API serves STL's record of the monitor rather than a live read, so the
+ * response carries the cycle it was observed at. Non-zero on purpose: a
+ * fixture stamped `now` would never exercise the staleness the field exists to
+ * make visible.
+ */
+const REFERENCE_SYNCED_AGO = 11 * MINUTE_MS;
 
 /** Sky's answer alone: its own totals, and its own breakdown. */
 export function toReferenceRiskCapital(
@@ -525,6 +537,7 @@ export function toReferenceRiskCapital(
     epi_utilization: '0.8712',
     spj_utilization: '0.6431',
     exposure_share: '0.9302',
+    reference_synced_at: iso(mockNow() - REFERENCE_SYNCED_AGO),
   };
 }
 

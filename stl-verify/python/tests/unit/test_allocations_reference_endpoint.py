@@ -19,6 +19,7 @@ _TOKEN = "0x" + "cd" * 20
 _V4_POOL_ID = "0x" + "ef" * 32
 _OTHER_PROXY = "0x" + "99" * 20
 _SYNCED_AT = datetime(2026, 8, 26, 9, 15, tzinfo=UTC)
+_SYNCED_AT_ISO = "2026-08-26T09:15:00Z"
 
 
 def _custody_holding() -> AnchorageCustodyHolding:
@@ -133,6 +134,17 @@ def test_reference_mode_leaves_underlying_null_when_the_position_is_unresolved(r
     assert body[0]["underlying_token_id"] is None
     assert body[0]["underlying_token_address"] is None
     assert body[0]["underlying_symbol"] == ""
+
+
+@pytest.mark.parametrize("reference_client", [_positions()], indirect=True)
+def test_reference_mode_stamps_each_row_with_the_cycle_it_was_observed_at(reference_client):
+    # The rows are STL's record of the feed rather than a live read, so serving
+    # them without a stamp would imply they are current.
+    client, _ = reference_client
+
+    body = client.get(f"/v1/primes/{_VALID_ADDR}/allocations?reference=true").json()
+
+    assert [row["reference_synced_at"] for row in body] == [_SYNCED_AT_ISO]
 
 
 @pytest.mark.parametrize("reference_client", [_positions()], indirect=True)
@@ -328,6 +340,7 @@ def test_both_keeps_skys_value_beside_stls_on_a_matched_row(reference_client):
     # STL priced none of it; Sky's figure is the only one there is.
     assert row["amount_usd"] is None
     assert row["reference_amount_usd"] == "344187505.66"
+    assert row["reference_synced_at"] == _SYNCED_AT_ISO
 
 
 @pytest.mark.parametrize(

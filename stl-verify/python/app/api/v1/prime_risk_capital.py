@@ -1,5 +1,6 @@
 import logging
 from collections.abc import Callable
+from datetime import datetime
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -302,6 +303,17 @@ class PrimeRiskCapitalResponse(BaseModel):
             "`source=both`; never a ratio built from one provenance over the other."
         ),
     )
+    reference_synced_at: datetime | None = Field(
+        default=None,
+        description=(
+            "When the Sky figures in this response were observed. Populated wherever the response "
+            "carries them (`source=reference` or `source=both`), and `null` under `source=indexed`. "
+            "STL reads them from its own record of the monitor rather than the monitor itself, so "
+            "they are as of the last sync cycle — up to 15 minutes old. Consumers should show this "
+            "rather than implying the figures are current."
+        ),
+        examples=["2026-08-26T09:15:00Z"],
+    )
     prime_exposure_usd: PlainDecimal = Field(
         default=Decimal("0"),
         description=(
@@ -597,6 +609,7 @@ async def _with_reference_totals(
             "reference_prime_required_risk_capital_usd": reference.prime_required_risk_capital_usd,
             "reference_total_risk_capital_usd": reference.total_risk_capital_usd,
             "reference_prime_encumbrance_ratio": reference.prime_encumbrance_ratio,
+            "reference_synced_at": reference.reference_synced_at,
             # Sky reports these and STL models none of them, so they belong to
             # the merged answer whole.
             "junior_risk_capital_usd": reference.junior_risk_capital_usd,
@@ -688,6 +701,7 @@ def _project_reference(prime_address: EthAddress, snapshot: ReferencePrimeRiskCa
         epi_utilization=snapshot.epi_utilization,
         spj_utilization=snapshot.spj_utilization,
         exposure_share=snapshot.exposure_share,
+        reference_synced_at=snapshot.synced_at,
     )
 
 
