@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"strings"
 	"time"
 
@@ -26,16 +27,26 @@ type Clock func() time.Time
 
 // Service fetches reference risk-capital snapshots and persists them.
 type Service struct {
-	primeRepo     outbound.PrimeRepository
-	capitalRepo   outbound.PrimeCapitalStackRepository
-	riskProvider  outbound.RiskCapitalProvider
-	sheetRepo     outbound.PrimeBalanceSheetRepository
-	sheetProvider outbound.BalanceSheetProvider
-	trackedStars  []string
-	buildID       int
-	now           Clock
-	telemetry     *Telemetry
-	logger        *slog.Logger
+	deps         Deps
+	trackedStars []string
+	buildID      int
+	now          Clock
+	telemetry    *Telemetry
+	logger       *slog.Logger
+}
+
+// Deps holds the service's ports. A struct rather than positional arguments:
+// several ports share a shape, and named fields block a silent swap.
+type Deps struct {
+	PrimeRepo          outbound.PrimeRepository
+	CapitalRepo        outbound.PrimeCapitalStackRepository
+	RiskProvider       outbound.RiskCapitalProvider
+	AllocationProvider outbound.RiskCapitalAllocationProvider
+	AllocationRepo     outbound.PrimeCapitalStackAllocationRepository
+	SheetRepo          outbound.PrimeBalanceSheetRepository
+	SheetProvider      outbound.BalanceSheetProvider
+	PositionProvider   outbound.ReferencePositionProvider
+	PositionRepo       outbound.PrimeReferencePositionRepository
 }
 
 // NewService creates a capital stack sync service.
@@ -44,11 +55,7 @@ type Service struct {
 // contract rather than the prime table: the table still carries rows for primes
 // STL has stopped tracking, so using it would accumulate snapshots nobody reads.
 func NewService(
-	primeRepo outbound.PrimeRepository,
-	capitalRepo outbound.PrimeCapitalStackRepository,
-	riskProvider outbound.RiskCapitalProvider,
-	sheetRepo outbound.PrimeBalanceSheetRepository,
-	sheetProvider outbound.BalanceSheetProvider,
+	deps Deps,
 	trackedStars []string,
 	buildID int,
 	now Clock,
@@ -62,16 +69,12 @@ func NewService(
 		now = time.Now
 	}
 	return &Service{
-		primeRepo:     primeRepo,
-		capitalRepo:   capitalRepo,
-		riskProvider:  riskProvider,
-		sheetRepo:     sheetRepo,
-		sheetProvider: sheetProvider,
-		trackedStars:  trackedStars,
-		buildID:       buildID,
-		now:           now,
-		telemetry:     telemetry,
-		logger:        logger.With("component", "reference-capital-indexer"),
+		deps:         deps,
+		trackedStars: trackedStars,
+		buildID:      buildID,
+		now:          now,
+		telemetry:    telemetry,
+		logger:       logger.With("component", "reference-capital-indexer"),
 	}
 }
 
@@ -86,7 +89,7 @@ func (s *Service) Run(ctx context.Context) error {
 		return err
 	}
 
-	rows, err := s.riskProvider.FetchPrimeSnapshots(ctx, s.trackedStars)
+	rows, err := s.deps.RiskProvider.FetchPrimeSnapshots(ctx, s.trackedStars)
 	if err != nil {
 		return fmt.Errorf("fetching prime snapshots: %w", err)
 	}
@@ -99,16 +102,28 @@ func (s *Service) Run(ctx context.Context) error {
 
 	s.reportUncovered(ctx, rows)
 
-	snapshots, err := s.toSnapshots(rows, primeIDs, s.now().UTC())
+	// One timestamp per cycle, shared by every table it writes, so the
+	// prime-level totals and their breakdowns join exactly on synced_at.
+	syncedAt := s.now().UTC()
+
+	snapshots, err := s.toSnapshots(rows, primeIDs, syncedAt)
 	if err != nil {
 		return err
 	}
 
-	if err := s.capitalRepo.SavePrimeCapitalSnapshots(ctx, snapshots); err != nil {
+	if err := s.deps.CapitalRepo.SavePrimeCapitalSnapshots(ctx, snapshots); err != nil {
 		return fmt.Errorf("saving capital stack snapshots: %w", err)
 	}
 
 	s.telemetry.RecordSnapshotsWritten(ctx, len(snapshots))
+
+	if err := s.recordAllocations(ctx, rows, primeIDs, syncedAt); err != nil {
+		return err
+	}
+
+	if err := s.recordPositions(ctx, rows, primeIDs, syncedAt); err != nil {
+		return err
+	}
 
 	if err := s.recordBalanceSheet(ctx, primeIDs); err != nil {
 		return err
@@ -116,6 +131,172 @@ func (s *Service) Run(ctx context.Context) error {
 
 	s.logger.Info("capital stack sync complete", "snapshots", len(snapshots))
 	return nil
+}
+
+// recordAllocations persists the per-allocation breakdown behind the cycle's
+// snapshots. Fetched only for the stars this cycle's snapshots cover: the
+// breakdown route answers an unknown star with a 500 indistinguishable from a
+// genuine fault.
+func (s *Service) recordAllocations(
+	ctx context.Context,
+	snapshots []outbound.RiskCapitalPrimeSnapshot,
+	primeIDs map[string]int64,
+	syncedAt time.Time,
+) error {
+	rows, err := s.deps.AllocationProvider.FetchPrimeAllocations(ctx, coveredStars(snapshots))
+	if err != nil {
+		return fmt.Errorf("fetching prime allocations: %w", err)
+	}
+
+	if err := requireBreakdownCoverage(snapshots, rows); err != nil {
+		return err
+	}
+
+	allocations, err := s.toAllocations(rows, primeIDs, syncedAt)
+	if err != nil {
+		return err
+	}
+
+	if err := s.deps.AllocationRepo.SaveCapitalStackAllocations(ctx, allocations); err != nil {
+		return fmt.Errorf("saving capital stack allocations: %w", err)
+	}
+
+	s.telemetry.RecordAllocationsWritten(ctx, len(allocations))
+	return nil
+}
+
+// recordPositions persists the cycle's balance-sheet positions. Fetched only
+// for the stars this cycle's snapshots cover: the feed answers an unknown star
+// with an empty list, so coverage must be established before asking.
+func (s *Service) recordPositions(
+	ctx context.Context,
+	snapshots []outbound.RiskCapitalPrimeSnapshot,
+	primeIDs map[string]int64,
+	syncedAt time.Time,
+) error {
+	rows, err := s.deps.PositionProvider.FetchPositions(ctx, coveredStars(snapshots))
+	if err != nil {
+		return fmt.Errorf("fetching reference positions: %w", err)
+	}
+
+	positions, err := s.toPositions(rows, primeIDs, syncedAt)
+	if err != nil {
+		return err
+	}
+
+	if err := s.deps.PositionRepo.SaveReferencePositions(ctx, positions); err != nil {
+		return fmt.Errorf("saving reference positions: %w", err)
+	}
+
+	s.telemetry.RecordPositionsWritten(ctx, len(positions))
+	return nil
+}
+
+// coveredStars names the stars a cycle's snapshots cover, in snapshot order.
+func coveredStars(snapshots []outbound.RiskCapitalPrimeSnapshot) []string {
+	stars := make([]string, 0, len(snapshots))
+	for _, snap := range snapshots {
+		stars = append(stars, normalizedStar(snap.Star))
+	}
+	return stars
+}
+
+// requireBreakdownCoverage rejects a cycle where the monitor reports exposure
+// for a star but an empty breakdown. The totals and breakdown routes are two
+// separately-computed snapshots, so that combination is upstream disagreeing
+// with itself — and persisting it would publish "this prime holds nothing"
+// against real exposure.
+func requireBreakdownCoverage(
+	snapshots []outbound.RiskCapitalPrimeSnapshot,
+	allocations []outbound.RiskCapitalAllocationRow,
+) error {
+	counts := make(map[string]int, len(snapshots))
+	for _, row := range allocations {
+		counts[normalizedStar(row.Star)]++
+	}
+
+	for _, snap := range snapshots {
+		if counts[normalizedStar(snap.Star)] > 0 {
+			continue
+		}
+		exposure, ok := new(big.Rat).SetString(snap.Exposure)
+		if !ok {
+			return fmt.Errorf("unparseable exposure %q for prime %q", snap.Exposure, snap.Star)
+		}
+		if exposure.Sign() != 0 {
+			return fmt.Errorf(
+				"upstream monitor reported exposure %s for prime %q but an empty breakdown", snap.Exposure, snap.Star)
+		}
+	}
+	return nil
+}
+
+func (s *Service) toAllocations(
+	rows []outbound.RiskCapitalAllocationRow,
+	primeIDs map[string]int64,
+	syncedAt time.Time,
+) ([]entity.PrimeCapitalStackAllocation, error) {
+	allocations := make([]entity.PrimeCapitalStackAllocation, 0, len(rows))
+	for _, row := range rows {
+		primeID, ok := primeIDs[normalizedStar(row.Star)]
+		if !ok {
+			return nil, fmt.Errorf("upstream monitor reported unknown prime %q", row.Star)
+		}
+		allocations = append(allocations, entity.PrimeCapitalStackAllocation{
+			PrimeID:                primeID,
+			SyncedAt:               syncedAt,
+			ProtocolName:           row.Protocol,
+			Network:                row.Network,
+			ChainID:                row.ChainID,
+			Symbol:                 row.Symbol,
+			Name:                   row.Name,
+			TokenAddress:           row.TokenAddress,
+			LoanTokenAddress:       row.LoanTokenAddress,
+			LoanTokenSymbol:        row.LoanTokenSymbol,
+			ExposureUSD:            row.Exposure,
+			RequiredRiskCapitalUSD: row.RequiredRiskCapital,
+			CRR:                    row.CRR,
+			Source:                 entity.ReferenceDataSource,
+			BuildID:                s.buildID,
+		})
+	}
+	return allocations, nil
+}
+
+func (s *Service) toPositions(
+	rows []outbound.ReferencePositionRow,
+	primeIDs map[string]int64,
+	syncedAt time.Time,
+) ([]entity.PrimeReferencePosition, error) {
+	positions := make([]entity.PrimeReferencePosition, 0, len(rows))
+	for _, row := range rows {
+		primeID, ok := primeIDs[normalizedStar(row.Star)]
+		if !ok {
+			return nil, fmt.Errorf("positions feed reported unknown prime %q", row.Star)
+		}
+		positions = append(positions, entity.PrimeReferencePosition{
+			PrimeID:            primeID,
+			SyncedAt:           syncedAt,
+			ProtocolName:       row.Protocol,
+			Network:            row.Network,
+			ChainID:            row.ChainID,
+			TokenSymbol:        row.TokenSymbol,
+			TokenName:          row.TokenName,
+			TokenAddress:       row.TokenAddress,
+			AssetsUSD:          row.Assets,
+			AllocatedAssetsUSD: row.AllocatedAssets,
+			IdleAssetsUSD:      row.IdleAssets,
+			Source:             entity.ReferenceDataSource,
+			BuildID:            s.buildID,
+		})
+	}
+	return positions, nil
+}
+
+// normalizedStar folds a star name for comparison, matching the clients'
+// normalization so a case or padding difference cannot split one prime in two.
+func normalizedStar(star string) string {
+	return strings.ToLower(strings.TrimSpace(star))
 }
 
 // recordBalanceSheet advances the daily balance sheet, whose figures the monitor
@@ -126,7 +307,7 @@ func (s *Service) Run(ctx context.Context) error {
 // not run. The provider drops the current UTC day, so a run before upstream has
 // published yesterday finds nothing new, which is not an error.
 func (s *Service) recordBalanceSheet(ctx context.Context, primeIDs map[string]int64) error {
-	days, err := s.sheetProvider.FetchHistory(ctx, s.trackedStars, balanceSheetLookbackDays)
+	days, err := s.deps.SheetProvider.FetchHistory(ctx, s.trackedStars, balanceSheetLookbackDays)
 	if err != nil {
 		return fmt.Errorf("fetching balance-sheet history: %w", err)
 	}
@@ -139,7 +320,7 @@ func (s *Service) recordBalanceSheet(ctx context.Context, primeIDs map[string]in
 		return nil
 	}
 
-	if err := s.sheetRepo.SaveBalanceSheetSnapshots(ctx, sheets); err != nil {
+	if err := s.deps.SheetRepo.SaveBalanceSheetSnapshots(ctx, sheets); err != nil {
 		return fmt.Errorf("saving balance sheet snapshots: %w", err)
 	}
 
@@ -203,7 +384,7 @@ func (s *Service) reportUncovered(ctx context.Context, rows []outbound.RiskCapit
 }
 
 func (s *Service) primeIDsByName(ctx context.Context) (map[string]int64, error) {
-	primes, err := s.primeRepo.ListPrimes(ctx)
+	primes, err := s.deps.PrimeRepo.ListPrimes(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("listing primes: %w", err)
 	}

@@ -24,8 +24,10 @@ const instrumentationName = "github.com/archon-research/stl/stl-verify/internal/
 type Telemetry struct {
 	meter metric.Meter
 
-	snapshotsWritten metric.Int64Counter
-	primesUncovered  metric.Int64Counter
+	snapshotsWritten   metric.Int64Counter
+	allocationsWritten metric.Int64Counter
+	positionsWritten   metric.Int64Counter
+	primesUncovered    metric.Int64Counter
 }
 
 // NewTelemetry creates a Telemetry instance using the global meter provider.
@@ -46,6 +48,22 @@ func NewTelemetryWithProvider(mp metric.MeterProvider) (*Telemetry, error) {
 		return nil, fmt.Errorf("creating snapshotsWritten counter: %w", err)
 	}
 
+	t.allocationsWritten, err = t.meter.Int64Counter(
+		"reference_capital.sync.allocations.written.total",
+		metric.WithDescription("Per-allocation breakdown rows persisted, per cycle"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating allocationsWritten counter: %w", err)
+	}
+
+	t.positionsWritten, err = t.meter.Int64Counter(
+		"reference_capital.sync.positions.written.total",
+		metric.WithDescription("Balance-sheet position rows persisted, per cycle"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating positionsWritten counter: %w", err)
+	}
+
 	t.primesUncovered, err = t.meter.Int64Counter(
 		"reference_capital.sync.primes.uncovered.total",
 		metric.WithDescription("Tracked primes the upstream monitor did not cover, per cycle"),
@@ -63,6 +81,22 @@ func (t *Telemetry) RecordSnapshotsWritten(ctx context.Context, count int) {
 		return
 	}
 	t.snapshotsWritten.Add(ctx, int64(count))
+}
+
+// RecordAllocationsWritten records how many breakdown rows a cycle persisted.
+func (t *Telemetry) RecordAllocationsWritten(ctx context.Context, count int) {
+	if t == nil || t.allocationsWritten == nil {
+		return
+	}
+	t.allocationsWritten.Add(ctx, int64(count))
+}
+
+// RecordPositionsWritten records how many position rows a cycle persisted.
+func (t *Telemetry) RecordPositionsWritten(ctx context.Context, count int) {
+	if t == nil || t.positionsWritten == nil {
+		return
+	}
+	t.positionsWritten.Add(ctx, int64(count))
 }
 
 // RecordPrimeUncovered records one tracked prime the monitor did not cover.

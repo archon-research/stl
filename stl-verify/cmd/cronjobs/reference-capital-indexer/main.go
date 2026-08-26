@@ -93,11 +93,17 @@ func setupRunner(ctx context.Context, deps temporal.Dependencies) (temporal.Runn
 	}
 
 	service := reference_capital_indexer.NewService(
-		postgres.NewPrimeRepository(deps.Pool),
-		postgres.NewPrimeCapitalStackRepository(deps.Pool, txm, deps.Logger),
-		skyClient,
-		postgres.NewPrimeBalanceSheetRepository(deps.Pool, txm, deps.Logger),
-		sheetClient,
+		reference_capital_indexer.Deps{
+			PrimeRepo:          postgres.NewPrimeRepository(deps.Pool),
+			CapitalRepo:        postgres.NewPrimeCapitalStackRepository(deps.Pool, txm, deps.Logger),
+			RiskProvider:       skyClient,
+			AllocationProvider: skyClient,
+			AllocationRepo:     postgres.NewPrimeCapitalStackAllocationRepository(deps.Pool, txm, deps.Logger),
+			SheetRepo:          postgres.NewPrimeBalanceSheetRepository(deps.Pool, txm, deps.Logger),
+			SheetProvider:      sheetClient,
+			PositionProvider:   sheetClient,
+			PositionRepo:       postgres.NewPrimeReferencePositionRepository(deps.Pool, txm, deps.Logger),
+		},
 		trackedStars,
 		int(buildReg.BuildID()),
 		time.Now,
