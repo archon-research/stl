@@ -47,15 +47,18 @@ SET LOCAL timescaledb.enable_tiered_reads = 'on';
 -- it a hand-run rebuild under a search_path with a shadowing schema ahead of public silently upserts
 -- into the shadow table and reports INSERT 0 0 -- byte-identical to a healthy converged run (measured).
 SET LOCAL search_path = public;
--- Stamp the LIVE transaction id into a transaction-local setting. The guard below re-reads it in a
--- SEPARATE statement, so the pair proves the region is running inside ONE transaction -- and it cannot
--- be satisfied by a pre-seeded default, which is why it is an xid rather than a fixed sentinel value.
--- Measured on 2.25.1-pg17: inside BEGIN/COMMIT the stamp equals the live xid and the guard passes; with
--- no transaction block the stamp is rolled back with its own implicit transaction and reads NULL, so the
--- guard fires; and `ALTER ROLE ... SET position_current.rebuild_xid` pre-seeds a value that can never
--- equal the live xid, so the guard still fires. A fixed sentinel fails that third case -- ALTER ROLE
--- accepts a custom GUC and current_setting then returns it with every SET LOCAL inert (measured).
+-- Stamp the LIVE transaction id, which the guard below compares against its own statement's xid: the
+-- pair is what proves the region is running inside ONE transaction. Why an xid and not a sentinel, and
+-- the three measured cases, are in 20260819_150000 where the guard is defined.
 SELECT set_config('position_current.rebuild_xid', pg_current_xact_id()::text, true);
+
+-- Standalone, and AGAIN inside the INSERT below. Neither placement alone is sufficient: a check in its
+-- own statement is stepped over by a client running the file one statement at a time, and a check in the
+-- INSERT's WHERE is dropped when TimescaleDB excludes every chunk at plan time -- a zero-chunk or fully
+-- tiered position_state plans to One-Time Filter: false and reports INSERT 0 0 with the guard never
+-- evaluated (measured on 2.25.1-pg17; an empty PLAIN table does still evaluate it). Together they cover
+-- both, and they do not overlap wastefully: where the qual is dropped there is nothing to write.
+SELECT public.position_current_rebuild_guard();
 
 INSERT INTO public.position_current
     (position_id, as_of_date, chain_id, protocol_id, instrument_key, holder_id, quantity,
@@ -65,11 +68,8 @@ SELECT DISTINCT ON (p.position_id)
        p.instrument_key, p.holder_id, p.quantity, p.block_number, p.block_version,
        p.processing_version, p.block_timestamp, p.projection, p.build_id
 FROM public.position_state p
--- The precondition check, evaluated INSIDE the statement that depends on it. As a preceding DO block it
--- was steppable: psql without ON_ERROR_STOP raised and then ran this INSERT anyway, writing every row
--- after reporting the error (measured -- 12 rows written on a fixture that should have written none).
--- The subquery is uncorrelated, so it is an InitPlan/One-Time Filter evaluated once per statement, not
--- once per row; the check and the write now stand or fall together. Defined in 20260819_150000.
+-- The same check, inside the statement that depends on it, so a stepped apply cannot write these rows.
+-- Uncorrelated, so it is an InitPlan/One-Time Filter evaluated once per statement, not once per row.
 WHERE (SELECT public.position_current_rebuild_guard())
 -- position_id FIRST, which is both the DISTINCT ON key and the lock order. The statement trigger orders
 -- its upsert the same way, so the two writers sweep position_current's PK in one key-derived total order.

@@ -202,34 +202,29 @@ $fn$;
 
 COMMENT ON FUNCTION upsert_position_current() IS '[Operational] Keeps position_current at the latest observation per position (VEC-409), by (block_number, block_version, processing_version, block_timestamp). AFTER INSERT on position_state, once per STATEMENT over its transition table and ordered by position_id so the rebuild cannot cross it; an out-of-order insert cannot regress a position.';
 
--- Guarded like every other DDL statement in this file, so a re-run -- a manual apply, a restore, a
--- The precondition check for the rebuild region in 20260819_150100. It lives here, as a callable, so the
--- rebuild can evaluate it from INSIDE its INSERT rather than in a preceding statement. A preceding DO
--- block is steppable: psql without ON_ERROR_STOP, and any driver that submits a file statement-at-a-time,
--- reports the EXCEPTION and then runs the INSERT anyway -- measured, the ERROR is followed by a healthy
--- INSERT 0 N and the operator has no reason to think the cache is now partial. As a scalar subquery in
--- the INSERT's WHERE there is no statement boundary to step over: the check and the write stand or fall
--- together. It is uncorrelated, so the planner evaluates it once per statement as an InitPlan/One-Time
--- Filter, not once per row.
+-- Precondition for the REBUILD region in 20260819_150100, callable so the region can evaluate it from
+-- INSIDE its INSERT: a check in a preceding statement is stepped over by any client running the file one
+-- statement at a time, which then writes every row after reporting the error. The region ALSO calls it as
+-- a standalone statement, because a qual is dropped when TimescaleDB excludes every chunk at plan time
+-- (zero-chunk or fully-tiered position_state) and the INSERT then reports 0 rows with the check never
+-- evaluated. The two placements are complementary: where the qual is dropped there is nothing to write.
 --
--- Two distinct failures, both of which otherwise report a byte-identical INSERT 0 N with no error.
+-- Branch 1, the transaction stamp. Outside a transaction block every SET LOCAL in the region is an inert
+-- warning, so the rebuild runs with no tiered-read guarantee and no lock bound and still reports
+-- INSERT 0 N. An xid rather than a fixed sentinel because ALTER ROLE ... SET pre-seeds a placeholder
+-- custom GUC, which a sentinel cannot tell from a live SET LOCAL; an xid can never be pre-seeded.
 --
--- (1) The copy-paste path, where every SET LOCAL in the region degrades to a warning the driver discards:
--- outside a transaction block none of them applies, so the rebuild would run with no tiered-read
--- guarantee and no lock bound. The xid comparison is what detects it -- and it cannot be satisfied by a
--- pre-seeded default, which is why it is an xid rather than a fixed sentinel. Measured on 2.25.1-pg17:
--- inside BEGIN/COMMIT the stamp equals the live xid and the check passes; with no transaction block the
--- stamp is rolled back with its own implicit transaction and reads NULL, so it fires; and
--- `ALTER ROLE ... SET position_current.rebuild_xid` pre-seeds a value that can never equal the live xid,
--- so it still fires. A fixed sentinel fails that third case (measured).
+-- Branch 2, tiered reads. A rebuild over local chunks only computes "newest per key" across a PARTIAL
+-- table. Checked by name rather than inferred from the SET having run. Both reads take the missing_ok
+-- form so an engine without the extension loaded gets this guard's own message rather than an unrelated
+-- "unrecognized configuration parameter".
 --
--- (2) Tiered reads actually off, whatever set it: a rebuild over local chunks only computes "newest per
--- key" across a PARTIAL table. That is the setting this exists to protect, so it is checked by name
--- rather than inferred from the SET having run. Read with the missing_ok form: on an engine without the
--- extension loaded current_setting() would otherwise raise an unrelated "unrecognized configuration
--- parameter" from inside a guard whose whole job is to report precisely why a rebuild is unsafe.
-CREATE OR REPLACE FUNCTION position_current_rebuild_guard()
-RETURNS boolean LANGUAGE plpgsql STABLE
+-- VOLATILE, not STABLE: the body calls pg_current_xact_id(), which assigns an xid when the transaction
+-- has none, so STABLE's side-effect-free claim is false. It costs nothing -- once-per-statement
+-- evaluation comes from the sublink being uncorrelated, and the plan is InitPlan/One-Time Filter either
+-- way (measured on 2.25.1-pg17: identical plan, one invocation across 5,000 rows).
+CREATE OR REPLACE FUNCTION public.position_current_rebuild_guard()
+RETURNS boolean LANGUAGE plpgsql VOLATILE
 SET search_path = pg_catalog, public
 AS $guard$
 BEGIN
@@ -237,18 +232,17 @@ BEGIN
         RAISE EXCEPTION 'run the REBUILD region inside ONE transaction (BEGIN; ... COMMIT;): the transaction stamp does not match this statement''s transaction, so every SET LOCAL in the region is an inert warning -- no tiered-read guarantee and no lock bound';
     END IF;
     IF current_setting('timescaledb.enable_tiered_reads', true) IS DISTINCT FROM 'on' THEN
-        RAISE EXCEPTION 'timescaledb.enable_tiered_reads is %, not on: this would compute "newest per key" over local chunks only and report a byte-identical INSERT 0 N', coalesce(current_setting('timescaledb.enable_tiered_reads', true), '(unset)');
+        RAISE EXCEPTION 'timescaledb.enable_tiered_reads is %, not on: this would compute "newest per key" over local chunks only and report a byte-identical INSERT 0 N ((unset) means the timescaledb extension is not loaded on this database)', coalesce(current_setting('timescaledb.enable_tiered_reads', true), '(unset)');
     END IF;
     RETURN true;
 END
 $guard$;
 
-COMMENT ON FUNCTION position_current_rebuild_guard() IS
-    'Precondition check for the REBUILD region of 20260819_150100. Called from inside that INSERT so it cannot be stepped over; raises unless the region is running in one transaction with tiered reads on.';
+COMMENT ON FUNCTION public.position_current_rebuild_guard() IS
+    '[Operational] Precondition for the REBUILD region of 20260819_150100 (VEC-409). Called both standalone and from inside that INSERT, so neither a stepped apply nor plan-time chunk exclusion can skip it; raises unless the region runs in one transaction with tiered reads on.';
 
--- Trigger creation. The rebuild guard above is created first only so the whole precondition lives in one
--- place; it is called from the other file.
 
+-- Guarded like every other DDL statement in this file, so a re-run -- a manual apply, a restore, a
 -- partial-apply recovery -- does not fail with "trigger already exists".
 DROP TRIGGER IF EXISTS trigger_upsert_position_current ON position_state;
 CREATE TRIGGER trigger_upsert_position_current

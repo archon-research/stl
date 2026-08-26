@@ -12,7 +12,14 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/archon-research/stl/stl-verify/db/migrator"
 )
+
+// positionStateCols is the insert column list for position_state, shared so a schema change lands in one
+// place rather than in every test that writes history.
+const positionStateCols = "position_id, chain_id, protocol_id, instrument_key, holder_id, quantity, " +
+	"block_number, block_version, processing_version, block_timestamp, projection, build_id"
 
 const (
 	// positionCurrentDDL creates the table, the grants and the maintainer; positionCurrentBackfill
@@ -141,12 +148,21 @@ func rebuildRegion(t *testing.T) string {
 // ON_ERROR_STOP off.
 func rebuildGuard(t *testing.T) string {
 	t.Helper()
-	if src := migrationSource(t, positionCurrentDDL); !strings.Contains(src, "FUNCTION position_current_rebuild_guard()") {
+	// Comment text is STRIPPED first, per this file's convention: without that, commenting out the
+	// statement while leaving the literal in a comment satisfies every check here. The DDL carries the
+	// name twice -- the CREATE and its COMMENT ON -- so the CREATE is matched in full.
+	ddl := lineCommentRE.ReplaceAllString(migrationSource(t, positionCurrentDDL), "")
+	if !strings.Contains(ddl, "CREATE OR REPLACE FUNCTION public.position_current_rebuild_guard()") {
 		t.Fatalf("%s does not create position_current_rebuild_guard; the rebuild has no enforceable guard", positionCurrentDDL)
 	}
-	if region := rebuildRegion(t); !strings.Contains(region, "position_current_rebuild_guard()") {
-		t.Fatal("the REBUILD region does not call the guard inside its statement, so a client with " +
+	region := lineCommentRE.ReplaceAllString(rebuildRegion(t), "")
+	if !strings.Contains(region, "WHERE (SELECT public.position_current_rebuild_guard())") {
+		t.Fatal("the REBUILD region does not call the guard from inside its INSERT, so a client with " +
 			"ON_ERROR_STOP off would step over it and rebuild anyway")
+	}
+	if !strings.Contains(region, "\nSELECT public.position_current_rebuild_guard();") {
+		t.Fatal("the REBUILD region does not call the guard as a standalone statement, so a zero-chunk " +
+			"or fully tiered position_state plans the in-INSERT call away and never evaluates it")
 	}
 	return "SELECT public.position_current_rebuild_guard();"
 }
@@ -537,7 +553,7 @@ func TestPositionCurrentRebuildNewerWinsPerKeyColumn(t *testing.T) {
 	}
 }
 
-// The guard the rebuild region opens with, executed on its own so the transaction shape is the test's to
+// The guard the rebuild region calls, executed here on its own so the transaction shape is the test's to
 // choose. Outside one transaction every SET LOCAL in the region is an inert warning, which would run the
 // statement with no tiered-read guarantee and no lock bound while reporting a healthy INSERT 0 N.
 func TestPositionCurrentRebuildGuardRequiresOneTransaction(t *testing.T) {
@@ -678,6 +694,26 @@ func TestPositionCurrentMigrationPinsItsLoadBearingInvariants(t *testing.T) {
 		}
 	})
 
+	t.Run("the rebuild orders by the whole version tuple", func(t *testing.T) {
+		// block_timestamp is pinned HERE rather than behaviourally because deleting it from the ORDER BY
+		// kills no test and cannot be made to: rows tied on the first three legs have no other
+		// discriminator, so DISTINCT ON falls back to an order Postgres does not promise, and it returns
+		// the wanted row anyway (measured with the winner inserted first, with eight tied losers after
+		// it, with seqscan disabled, and on a hypertable with the pair in two 1-day chunks). An assertion
+		// over data would pass whatever the migration said. The leg is not decoration: the 5-column PK
+		// admits a pair tied on the first three, and the materializer's anti-join is on the 4-column
+		// logical key while its ON CONFLICT is on the 5-column PK with no lock across the read, so two
+		// views emitting one logical key with drifted timestamps can both insert. This is exactly what
+		// this test exists for -- an invariant no behavioural case inside one transaction can reach.
+		const want = "ORDER BY p.position_id,\n         p.block_number DESC, p.block_version DESC, " +
+			"p.processing_version DESC, p.block_timestamp DESC"
+		if !strings.Contains(backfill, want) {
+			t.Errorf("the rebuild's DISTINCT ON ordering is not %q; a dropped or reordered leg seats the "+
+				"wrong observation as current, and after a TRUNCATE-first rebuild the newer-wins arm "+
+				"never runs to repair it", want)
+		}
+	})
+
 	t.Run("both writers sweep the PK in position_id order", func(t *testing.T) {
 		region := lineCommentRE.ReplaceAllString(rebuildRegion(t), "")
 		if !orderByPositionIDRE.MatchString(region) {
@@ -801,10 +837,19 @@ func TestPositionCurrentTriggerFunctionPinsSearchPath(t *testing.T) {
 	// body is what defends the writes; this pin defends everything else. Asserted from pg_proc because
 	// dropping the SET has no reachable behavioural consequence in this suite.
 	f := newPositionCurrentFixture(t)
+	// Both permanent functions this pair of migrations installs, not just the trigger's: the guard
+	// carries the same pin and dropping it has no reachable behavioural consequence here either.
+	for _, fn := range []string{"upsert_position_current", "position_current_rebuild_guard"} {
+		t.Run(fn, func(t *testing.T) { assertSearchPathPinned(t, f, fn) })
+	}
+}
+
+func assertSearchPathPinned(t *testing.T, f *positionCurrentFixture, fn string) {
+	t.Helper()
 	var cfg []string
 	if err := f.pool.QueryRow(f.ctx,
 		`SELECT coalesce(proconfig, '{}') FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-		  WHERE n.nspname = 'public' AND p.proname = 'upsert_position_current'`).Scan(&cfg); err != nil {
+		  WHERE n.nspname = 'public' AND p.proname = $1::name`, fn).Scan(&cfg); err != nil {
 		t.Fatal(err)
 	}
 	var got string
@@ -814,8 +859,8 @@ func TestPositionCurrentTriggerFunctionPinsSearchPath(t *testing.T) {
 		}
 	}
 	if got == "" {
-		t.Fatalf("upsert_position_current has no search_path in proconfig (%v); a caller's path would "+
-			"then resolve anything the body leaves unqualified", cfg)
+		t.Fatalf("%s has no search_path in proconfig (%v); a caller's path would "+
+			"then resolve anything the body leaves unqualified", fn, cfg)
 	}
 	if strings.Contains(got, `"$user"`) {
 		t.Errorf("search_path = %q includes \"$user\", which resolves per CALLER for a SECURITY "+
@@ -999,34 +1044,9 @@ func TestPositionCurrentRebuildOverwritesARowLandedInTheWindow(t *testing.T) {
 	}
 }
 
-// The property the guard exists for, which no test asserted: not that it raises, but that the rebuild
-// does NOT run when it does. Measured on the pre-fix shape, where the guard was a preceding DO block: the
-// region run statement-at-a-time raised and then wrote every row, leaving an ERROR followed by a healthy
-// INSERT 0 N. Executing the region as separate statements is what a client with ON_ERROR_STOP off does,
-// and it is the copy-paste path the backfill file documents.
-// splitStatements cuts SQL at its statement boundaries the way a client submitting a file one statement
-// at a time does. Comment tails are stripped BEFORE splitting: a bare strings.Split on ";" also cuts at
-// semicolons inside -- comments, which no real client does, and the resulting fragments are not the
-// statements under test -- it silently turned the rebuild INSERT into a headless one with its WHERE
-// sheared off, which then wrote rows and made the test look like it had caught something. The region
-// holds no string literal containing ";" or "--", which is what makes this simple form sufficient.
-func splitStatements(sql string) []string {
-	var bare strings.Builder
-	for _, line := range strings.Split(sql, "\n") {
-		if i := strings.Index(line, "--"); i >= 0 {
-			line = line[:i]
-		}
-		bare.WriteString(line)
-		bare.WriteByte('\n')
-	}
-	var out []string
-	for _, stmt := range strings.Split(bare.String(), ";") {
-		if strings.TrimSpace(stmt) != "" {
-			out = append(out, stmt)
-		}
-	}
-	return out
-}
+// Asserts the row count after the guard raises, not just that it raises: a check in its own statement is
+// stepped over by a client with ON_ERROR_STOP off, which then writes every row and leaves an ERROR
+// followed by a healthy INSERT 0 N. Statement-at-a-time is the copy-paste path the backfill documents.
 
 func TestPositionCurrentRebuildWritesNothingWhenItsGuardFires(t *testing.T) {
 	f := newPositionCurrentFixture(t)
@@ -1038,7 +1058,7 @@ func TestPositionCurrentRebuildWritesNothingWhenItsGuardFires(t *testing.T) {
 	// Statement-at-a-time: each Exec is its own implicit transaction, so the region's stamp never
 	// survives to the INSERT -- exactly the shape psql -f produces.
 	var lastErr error
-	for _, stmt := range splitStatements(rebuildRegion(t)) {
+	for _, stmt := range migrator.SplitStatements(rebuildRegion(t)) {
 		if _, err := f.pool.Exec(f.ctx, stmt); err != nil {
 			lastErr = err
 		}
@@ -1060,11 +1080,10 @@ func TestPositionCurrentRebuildWritesNothingWhenItsGuardFires(t *testing.T) {
 	}
 }
 
-// The backfill's DISTINCT ON pick, which is a different comparison from the newer-wins WHERE that
-// RebuildNewerWinsPerKeyColumn covers. Deleting any leg from the ORDER BY, or reversing the precedence,
-// previously left the whole package green: the rebuild fixtures move two legs at once, so every leg is
-// redundant with another. Coordinates here are ANTI-correlated -- the winner is behind on every leg
-// except the one under test -- and the cache is emptied first so no ON CONFLICT guard can mask the pick.
+// The backfill's DISTINCT ON pick, a different comparison from the newer-wins WHERE that
+// RebuildNewerWinsPerKeyColumn covers. Coordinates are ANTI-correlated -- the winner is behind on every
+// leg except the one under test -- so no leg is redundant with another, and the cache is emptied first so
+// no ON CONFLICT guard can mask the pick. Deleting each leg in turn kills its own case and no other.
 func TestPositionCurrentRebuildPickPerKeyColumn(t *testing.T) {
 	type coords struct {
 		block, bv, pv int
@@ -1101,17 +1120,8 @@ func TestPositionCurrentRebuildPickPerKeyColumn(t *testing.T) {
 			winner: coords{950, 1, 0, "2026-07-01T00:00:00Z"},
 			loser:  coords{950, 0, 0, "2026-07-09T00:00:00Z"},
 		},
-		// There is deliberately no block_timestamp case. Measured: deleting `p.block_timestamp DESC` from
-		// the ORDER BY kills nothing, and it cannot be made to -- rows tied on the first three legs are
-		// separated by nothing else, so DISTINCT ON falls back to an unspecified order that in practice
-		// returns the wanted row anyway (checked with the winner inserted first, with eight tied losers
-		// after it, and with seqscan disabled: the winner survives every time). Any assertion here would
-		// be pinning tie-break behaviour Postgres does not promise, so it would pass whatever the
-		// migration says. The leg is unreachable defence by design as well: position_state documents
-		// block_timestamp as invariant per logical key, so in valid data a tie on the first three implies
-		// an equal timestamp. Where the timestamp IS load-bearing -- the newer-wins WHERE, comparing a
-		// candidate against a stored cache row -- RebuildNewerWinsPerKeyColumn covers it, verified by
-		// deleting that leg from the tuple and watching it fail.
+		// No block_timestamp case: the leg cannot be made to fail behaviourally, so pinning it is left to
+		// TestPositionCurrentMigrationPinsItsLoadBearingInvariants, which asserts the ORDER BY text.
 	}
 	const winnerQty, loserQty = 41, 77
 	f := newPositionCurrentFixture(t)
@@ -1131,10 +1141,9 @@ func TestPositionCurrentRebuildPickPerKeyColumn(t *testing.T) {
 	}
 }
 
-// A batch spanning several positions, which nothing exercised: every other test writes one position per
-// statement, and the intra-batch cases put their rows on a single position_id. The statement trigger, its
-// transition table and the position_id lock ordering all exist for this shape. Mutating the trigger to
-// process only the lowest position_id of its transition table previously left the suite green.
+// A batch spanning several positions: the intra-batch cases put their rows on a single position_id, so
+// nothing else exercises the transition table's partitioning. Narrowing the trigger to the lowest
+// position_id of its transition table kills this and nothing else.
 func TestPositionCurrentMultiPositionBatch(t *testing.T) {
 	f := newPositionCurrentFixture(t)
 	const n = 25
@@ -1186,35 +1195,20 @@ func TestPositionCurrentReplicaRoleGapIsRepairedByRebuild(t *testing.T) {
 		t.Fatal(err)
 	}
 	if enabled != "O" {
-		t.Errorf("tgenabled = %q, not the ORIGIN default -- if this became \"A\" the gap below is closed "+
-			"and the migration comment claiming TimescaleDB forbids it is now stale", enabled)
+		// The gap being CLOSED is good news, not a regression: it would mean TimescaleDB lifted the
+		// restriction or someone made ENABLE ALWAYS stick. Skip rather than fail, and say the migration
+		// comment is now stale.
+		t.Skipf("tgenabled = %q, not the ORIGIN default -- the documented gap no longer applies and the "+
+			"comment in %s claiming TimescaleDB forbids ENABLE ALWAYS should be revisited", enabled, positionCurrentDDL)
 	}
 
-	conn, err := f.pool.Acquire(f.ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Release()
-	if _, err := conn.Exec(f.ctx, `SET session_replication_role = 'replica'`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := conn.Exec(f.ctx, `
-		INSERT INTO position_state
-		    (position_id, chain_id, protocol_id, instrument_key, holder_id, quantity,
-		     block_number, block_version, processing_version, block_timestamp, projection, build_id)
-		VALUES (sha256('replica-write'::bytea), 1, 1, 'inst-r', repeat('a', 40), 9, 100, 0, 0,
-		        '2026-01-01T00:00:00Z'::timestamptz, 'public.proj-0', 0)`); err != nil {
-		t.Fatalf("replica-role insert: %v", err)
-	}
-	if _, err := conn.Exec(f.ctx, `RESET session_replication_role`); err != nil {
-		t.Fatal(err)
-	}
+	f.observeUnderReplicaRole("replica-write", 9, 100, "2026-01-01T00:00:00Z")
 
 	var history, cached int
 	if err := f.pool.QueryRow(f.ctx, `
-		SELECT (SELECT count(*) FROM position_state   WHERE position_id = sha256('replica-write'::bytea)),
-		       (SELECT count(*) FROM position_current WHERE position_id = sha256('replica-write'::bytea))`).
-		Scan(&history, &cached); err != nil {
+		SELECT (SELECT count(*) FROM position_state   WHERE position_id = sha256($1::bytea)),
+		       (SELECT count(*) FROM position_current WHERE position_id = sha256($1::bytea))`,
+		"replica-write").Scan(&history, &cached); err != nil {
 		t.Fatal(err)
 	}
 	if history != 1 {
@@ -1222,14 +1216,91 @@ func TestPositionCurrentReplicaRoleGapIsRepairedByRebuild(t *testing.T) {
 			"the wrong thing", history)
 	}
 	if cached != 0 {
-		t.Logf("the trigger fired under the replica role (cache rows = %d); the documented gap no longer "+
-			"reproduces on this engine and the migration comment should be revisited", cached)
+		t.Skipf("the trigger fired under the replica role (cache rows = %d); the gap does not reproduce "+
+			"on this engine, so the recovery below would assert nothing", cached)
 	}
 
-	// The recovery path, which is the part that has to hold whatever the trigger does.
+	// Only reached with the cache genuinely empty, so the row asserted after this is one the rebuild
+	// wrote -- not one that was already there.
 	f.rebuild()
 	if qty, block, _ := f.current("replica-write"); qty != 9 || block != 100 {
 		t.Errorf("after the rebuild the cache holds quantity %d at block %d; want 9 at 100 -- the "+
 			"documented recovery for a replica-role bulk load does not recover it", qty, block)
+	}
+}
+
+// observeUnderReplicaRole appends one observation with session_replication_role = 'replica', the setting
+// pg_restore --disable-triggers uses. The reset is deferred: the pool has no AfterRelease hook, so an
+// early exit here would return a triggers-disabled connection to it and silently skip the cache for
+// whichever test picked it up next.
+func (f *positionCurrentFixture) observeUnderReplicaRole(id string, qty, block int, ts string) {
+	f.t.Helper()
+	conn, err := f.pool.Acquire(f.ctx)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	defer conn.Release()
+	if _, err := conn.Exec(f.ctx, `SET session_replication_role = 'replica'`); err != nil {
+		f.t.Fatal(err)
+	}
+	defer func() {
+		if _, err := conn.Exec(f.ctx, `RESET session_replication_role`); err != nil {
+			f.t.Errorf("resetting session_replication_role: %v", err)
+		}
+	}()
+	if _, err := conn.Exec(f.ctx, `
+		INSERT INTO position_state
+		    (`+positionStateCols+`)
+		VALUES (sha256($1::bytea), 1, 1, 'inst-' || $1, substr(md5($1) || md5($1), 1, 40), $2, $3, 0, 0,
+		        $4, 'public.proj-0', 0)`, id, qty, block, ts); err != nil {
+		f.t.Fatalf("replica-role insert: %v", err)
+	}
+}
+
+// The state the migration actually ships in. position_state is a hypertable, and with no chunks -- a
+// first apply, and every CI run -- TimescaleDB marks the relation dummy at plan time, so the guard call
+// in the INSERT's WHERE collapses to "One-Time Filter: false" and is never evaluated. Measured on
+// 2.25.1-pg17: the region run statement-at-a-time reported INSERT 0 0 with no error, while the same shape
+// over an empty PLAIN table raised. The standalone call in the region is what covers this; without it the
+// guard is absent from precisely the state it ships in.
+func TestPositionCurrentRebuildGuardFiresWithNoChunks(t *testing.T) {
+	f := newPositionCurrentFixture(t)
+
+	var chunks int
+	if err := f.pool.QueryRow(f.ctx,
+		`SELECT count(*) FROM timescaledb_information.chunks WHERE hypertable_name = 'position_state'`).
+		Scan(&chunks); err != nil {
+		t.Fatal(err)
+	}
+	if chunks != 0 {
+		t.Fatalf("position_state already has %d chunk(s); this test needs the zero-chunk shape", chunks)
+	}
+
+	var lastErr error
+	for _, stmt := range migrator.SplitStatements(rebuildRegion(t)) {
+		if _, err := f.pool.Exec(f.ctx, stmt); err != nil {
+			lastErr = err
+		}
+	}
+	if lastErr == nil {
+		t.Fatal("the region ran statement-at-a-time against a zero-chunk position_state without raising; " +
+			"the in-INSERT guard is planned away in this shape, so only a standalone call catches it")
+	}
+	if !strings.Contains(lastErr.Error(), "inside ONE transaction") {
+		t.Errorf("region raised %v; want the one-transaction message", lastErr)
+	}
+}
+
+// The other half: with no chunks the region must still SUCCEED on the correct path. A guard that fired
+// here would make every first apply fail, since the migrator backfills before any history exists.
+func TestPositionCurrentRebuildSucceedsWithNoChunks(t *testing.T) {
+	f := newPositionCurrentFixture(t)
+	f.rebuild()
+	var cached int
+	if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM position_current`).Scan(&cached); err != nil {
+		t.Fatal(err)
+	}
+	if cached != 0 {
+		t.Errorf("rebuild over an empty history cached %d rows; want 0", cached)
 	}
 }
