@@ -30,7 +30,16 @@ permissions: {}
 jobs:
   review:
     name: Codex Review
-    if: github.event.label.name == 'Ready for Codex review'
+    # Two conditions, both load-bearing on a PUBLIC repo:
+    #   - the label gate: adding a label needs triage or write access, so only a
+    #     trusted actor can spend the seat or point the agent at a diff.
+    #   - the same-repo gate: a fork PR must never reach the seeding step. GitHub
+    #     already withholds secrets from fork-PR runs, so this is belt-and-braces —
+    #     but relying on that alone leaves the safety property invisible in the
+    #     file, and one switch to `pull_request_target` would silently remove it.
+    if: >-
+      github.event.label.name == 'Ready for Codex review' &&
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -112,6 +121,40 @@ jobs:
             echo "::error::Codex produced no final message."
             exit 1
           fi
+
+      # The reviewer reads the diff and PR body — text the PR author controls — while
+      # auth.json sits on disk, and `--sandbox read-only` stops writes, not reads.
+      # Its final message is posted to the API, where GitHub's log masking does NOT
+      # apply. So check the report against the actual token material before it leaves
+      # the runner. This catches a naive "print the token" injection; it cannot catch
+      # a determined obfuscated one, which is why the label gate above (write access
+      # required) is the real boundary, not this step.
+      - name: Refuse to post anything containing token material
+        env:
+          SEEDED_AUTH: ${{ secrets.CODEX_AUTH_JSON }}
+        run: |
+          set -euo pipefail
+          # Both the token we seeded and the possibly-refreshed one now on disk: the
+          # agent may have read either during the run.
+          printf '%s' "${SEEDED_AUTH}" > "${RUNNER_TEMP}/seeded.json"
+          if ! jq -r '[..|strings]|.[]' "${RUNNER_TEMP}/seeded.json" "${CODEX_HOME}/auth.json" \
+               | awk 'length($0) >= 20' | sort -u > "${RUNNER_TEMP}/needles"; then
+            echo "::error::Could not parse auth.json to build the leak check. Refusing to post."
+            exit 1
+          fi
+          rm -f "${RUNNER_TEMP}/seeded.json"
+
+          if [ ! -s "${RUNNER_TEMP}/needles" ]; then
+            echo "::error::Leak check found no token strings to test against — refusing to post blind."
+            exit 1
+          fi
+
+          # -F: fixed strings, never treat token bytes as a regex.
+          if grep -qFf "${RUNNER_TEMP}/needles" "${RUNNER_TEMP}/review.md"; then
+            echo "::error::The review output contains credential material. Not posting. Treat the seat's token as compromised and re-run 'codex login'."
+            exit 1
+          fi
+          rm -f "${RUNNER_TEMP}/needles"
 
       - name: Post findings
         env:
