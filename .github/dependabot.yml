@@ -15,3 +15,8 @@ updates:
     ignore:
       # uikit versions move only through deliberate adoption PRs, never bot PRs
       - dependency-name: "@archon-research/*"
+    env:
+      # Bypass engine-strict check: dependabot doesn't yet support npm 12, but our
+      # packages require npm >=12.0.0. This env var suppresses the error and allows
+      # dependabot to generate PRs. Once dependabot supports npm 12, this can be removed.
+      npm_config_engine_strict: "false"
