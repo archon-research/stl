@@ -1,0 +1,136 @@
+# Codex PR review, triggered by adding the "Ready for Codex review" label.
+#
+# Why a label and not `pull_request: [opened, synchronize]`: a review costs real
+# usage against the service seat's ChatGPT quota, and most pushes don't want one.
+# The label makes asking explicit and re-askable — the last step removes it, so
+# adding it again re-runs the review on the new head.
+#
+# Why raw `codex exec` and not openai/codex-action: the official action takes only
+# `openai-api-key` and proxies the Responses API, which is metered billing. We pay
+# for ChatGPT Business seats, so this seeds the seat's own auth.json instead. See
+# https://learn.chatgpt.com/docs/auth/ci-cd-auth
+#
+# Actions are pinned to commit SHAs for supply-chain security.
+name: Codex Review
+
+on:
+  pull_request:
+    types: [labeled]
+
+# Repo-wide group, not per-ref: every run shares one auth.json copy, and OpenAI's
+# CI guide requires one auth.json per serialized job stream. Two concurrent reviews
+# would race on the token refresh. cancel-in-progress stays false so labelling a
+# second PR queues behind the first instead of killing its review.
+concurrency:
+  group: codex-review-auth
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  review:
+    name: Codex Review
+    if: github.event.label.name == 'Ready for Codex review'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0  # merge-base against the base branch needs full history
+
+      # Fresh CODEX_HOME per run: holds only the seeded auth.json, so no stray
+      # config.toml or session history from the runner image can affect the review.
+      # Exported through GITHUB_ENV because `runner.*` is out of scope in job-level env.
+      - name: Seed Codex auth from the service seat
+        env:
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+        run: |
+          set -euo pipefail
+          CODEX_HOME="${RUNNER_TEMP}/codex"
+          echo "CODEX_HOME=${CODEX_HOME}" >> "${GITHUB_ENV}"
+          if [ -z "${CODEX_AUTH_JSON}" ]; then
+            echo "::error::CODEX_AUTH_JSON is unset. Run 'codex login' on the service seat and store ~/.codex/auth.json as that secret."
+            exit 1
+          fi
+          mkdir -p "${CODEX_HOME}"
+          chmod 700 "${CODEX_HOME}"
+          printf '%s' "${CODEX_AUTH_JSON}" > "${CODEX_HOME}/auth.json"
+          chmod 600 "${CODEX_HOME}/auth.json"
+
+      - name: Install Codex CLI
+        run: |
+          set -euo pipefail
+          # Pinned: both vendors change agent behaviour silently, and an unpinned
+          # reviewer makes "did quality drop?" unanswerable across runs.
+          npm install --global --no-fund --no-audit @openai/codex@0.149.1
+          codex --version
+
+      - name: Review the diff
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          BASE_SHA="$(git merge-base "origin/${BASE_REF}" "${HEAD_SHA}")"
+
+          # The prompt file carries the standing review instructions; only the
+          # per-run scope is appended here.
+          {
+            cat .github/codex/prompts/review.md
+            printf '\n## This run\n\n'
+            printf 'Pull request: #%s\n' "${PR_NUMBER}"
+            printf 'Diff under review: `git diff %s..%s`\n' "${BASE_SHA}" "${HEAD_SHA}"
+          } > "${RUNNER_TEMP}/prompt.md"
+
+          # read-only sandbox: the reviewer needs to read the tree and run git, and
+          # must not be able to write to it. --ephemeral keeps session files out of
+          # CODEX_HOME so nothing but auth.json is written back in the next step.
+          codex exec \
+            --sandbox read-only \
+            --ephemeral \
+            -c model_reasoning_effort="high" \
+            --output-last-message "${RUNNER_TEMP}/review.md" \
+            - < "${RUNNER_TEMP}/prompt.md"
+
+          if [ ! -s "${RUNNER_TEMP}/review.md" ]; then
+            echo "::error::Codex produced no final message."
+            exit 1
+          fi
+
+      - name: Post findings
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: gh pr comment "${PR_NUMBER}" --body-file "${RUNNER_TEMP}/review.md"
+
+      # Codex refreshes the token bundle when it is older than ~8 days, and the
+      # refresh may invalidate the copy we seeded from. Persisting the refreshed
+      # file back is what OpenAI's CI guide requires. Runs after the comment on
+      # purpose: a rotation failure must not cost us the review we already paid for.
+      # Skipped (with a warning) until the rotation token exists, so the first runs
+      # can prove whether rotation is actually needed.
+      - name: Persist refreshed auth
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.CODEX_AUTH_ROTATE_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::warning::CODEX_AUTH_ROTATE_TOKEN unset — refreshed auth.json not persisted. Re-seed CODEX_AUTH_JSON by hand when reviews start failing to authenticate."
+            exit 0
+          fi
+          gh secret set CODEX_AUTH_JSON --body "$(cat "${CODEX_HOME}/auth.json")"
+
+      # Makes the label re-usable: adding it again is how you ask for a re-review
+      # of a new head, and `labeled` only fires on a label that isn't already there.
+      - name: Release the label
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: gh pr edit "${PR_NUMBER}" --remove-label "Ready for Codex review"
