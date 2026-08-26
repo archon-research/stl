@@ -1413,3 +1413,25 @@ func TestPositionCurrentTriggerRepairsAnOrphanAtEqualCoordinates(t *testing.T) {
 			"want 500 at 100 -- the trigger left a wrong payload standing with no error", qty, block)
 	}
 }
+
+// Volatility is load-bearing for both functions and neither is reachable behaviourally, so it is asserted
+// from pg_proc, following TestProcessingVersionHelpersAreVolatile. The guard calls pg_current_xact_id(),
+// which assigns an xid when the transaction has none, so STABLE would be a false side-effect-free claim;
+// the trigger function writes. Marking either non-volatile survives every other test in this package.
+func TestPositionCurrentFunctionsAreVolatile(t *testing.T) {
+	f := newPositionCurrentFixture(t)
+	for _, fn := range []string{"upsert_position_current", "position_current_rebuild_guard"} {
+		t.Run(fn, func(t *testing.T) {
+			var vol string
+			if err := f.pool.QueryRow(f.ctx,
+				`SELECT provolatile FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+				  WHERE n.nspname = 'public' AND p.proname = $1::name`, fn).Scan(&vol); err != nil {
+				t.Fatal(err)
+			}
+			if vol != "v" {
+				t.Errorf("%s is provolatile %q, want \"v\" (VOLATILE); a non-volatile label asserts the "+
+					"body has no side effects, which is false for both of these", fn, vol)
+			}
+		})
+	}
+}

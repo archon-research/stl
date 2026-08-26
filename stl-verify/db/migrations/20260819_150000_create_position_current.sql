@@ -208,27 +208,15 @@ $fn$;
 
 COMMENT ON FUNCTION upsert_position_current() IS '[Operational] Keeps position_current at the latest observation per position (VEC-409), by (block_number, block_version, processing_version, block_timestamp). AFTER INSERT on position_state, once per STATEMENT over its transition table and ordered by position_id so the rebuild cannot cross it; an out-of-order insert cannot regress a position.';
 
--- Precondition for the REBUILD region in 20260819_150100, callable so the region can evaluate it from
--- INSIDE its INSERT: a check in a preceding statement is stepped over by any client running the file one
--- statement at a time, which then writes every row after reporting the error. The region ALSO calls it as
--- a standalone statement, because a qual is dropped when TimescaleDB excludes every chunk at plan time
--- (zero-chunk or fully-tiered position_state) and the INSERT then reports 0 rows with the check never
--- evaluated. The two placements are complementary: where the qual is dropped there is nothing to write.
---
--- Branch 1, the transaction stamp. Outside a transaction block every SET LOCAL in the region is an inert
--- warning, so the rebuild runs with no tiered-read guarantee and no lock bound and still reports
--- INSERT 0 N. An xid rather than a fixed sentinel because ALTER ROLE ... SET pre-seeds a placeholder
--- custom GUC, which a sentinel cannot tell from a live SET LOCAL; an xid can never be pre-seeded.
---
--- Branch 2, tiered reads. A rebuild over local chunks only computes "newest per key" across a PARTIAL
--- table. Checked by name rather than inferred from the SET having run. Both reads take the missing_ok
--- form so an engine without the extension loaded gets this guard's own message rather than an unrelated
--- "unrecognized configuration parameter".
---
--- VOLATILE, not STABLE: the body calls pg_current_xact_id(), which assigns an xid when the transaction
--- has none, so STABLE's side-effect-free claim is false. It costs nothing -- once-per-statement
--- evaluation comes from the sublink being uncorrelated, and the plan is InitPlan/One-Time Filter either
--- way (measured on 2.25.1-pg17: identical plan, one invocation across 5,000 rows).
+-- Precondition for the REBUILD region in 20260819_150100. Called from inside that INSERT so a stepped
+-- apply cannot write past it, and standalone as well because a qual is dropped when TimescaleDB excludes
+-- every chunk at plan time; where the qual is dropped there is nothing to write.
+-- Branch 1 proves the region is in one transaction -- outside one every SET LOCAL is an inert warning.
+-- An xid, not a sentinel: ALTER ROLE ... SET can pre-seed a custom GUC, an xid it cannot.
+-- Branch 2 checks the setting the guard exists to protect, by name. Both reads use missing_ok so an
+-- engine without the extension gets this message, not "unrecognized configuration parameter".
+-- VOLATILE because the body calls pg_current_xact_id(), which assigns an xid when there is none; it is
+-- free, since the once-per-statement plan comes from the sublink being uncorrelated. Measurements in #644.
 CREATE OR REPLACE FUNCTION public.position_current_rebuild_guard()
 RETURNS boolean LANGUAGE plpgsql VOLATILE
 SET search_path = pg_catalog, public
@@ -257,25 +245,15 @@ CREATE TRIGGER trigger_upsert_position_current
     FOR EACH STATEMENT
 EXECUTE FUNCTION upsert_position_current();
 
--- KNOWN GAP, no DDL fix available. This trigger is left at the ORIGIN default because TimescaleDB
--- refuses to change it: `ALTER TABLE position_state ENABLE ALWAYS TRIGGER ...` fails with "hypertables
--- do not support  enabling or disabling triggers", and once columnstore is on -- which it is here --
--- with "operation not supported on hypertables that have columnstore enabled". Both measured on
--- 2.25.1-pg17 against a minimal hypertable, so it is a blanket restriction, not something about this
--- schema. Enabling it before compression is not an option either: position_state and its columnstore
--- settings are created in earlier, already-applied migrations.
---
--- The consequence, also measured: at ORIGIN the trigger does not fire under
--- session_replication_role = 'replica'. A plain INSERT and a COPY both land their rows in the
--- hypertable and skip the trigger entirely, with no error -- so history advances and position_current
--- does not. That is what pg_restore --disable-triggers sets, and what anyone setting the role by hand
--- gets. (Logical replication is not in scope here for a different reason: its apply worker applies row
--- changes and never fires statement-level triggers at all, whatever tgenabled says.)
---
--- Nothing downstream repairs this on its own. upsert_position_current reads a transition table, which is
--- empty for rows that already committed, and the materializer's arm is NOT EXISTS + ON CONFLICT DO
--- NOTHING, so a stored row is never re-derived. The recovery is the REBUILD region in
--- 20260819_150100 -- run it after any restore or any bulk load done under the replica role. The
--- integration test asserts that the region does repair exactly this case.
+-- KNOWN GAP, no DDL fix. This trigger stays at the ORIGIN default because TimescaleDB refuses to enable
+-- or disable a trigger on a hypertable at all, and enabling it before compression is not open either --
+-- position_state and its columnstore settings come from earlier, applied migrations.
+-- The consequence: at ORIGIN the trigger does not fire under session_replication_role = 'replica', which
+-- pg_restore --disable-triggers sets. A plain INSERT and a COPY both land rows and skip it, with no
+-- error, so history advances and this cache does not. (Logical replication is out of scope for another
+-- reason: its apply worker never fires statement-level triggers, whatever tgenabled says.)
+-- Nothing repairs it downstream -- the transition table is empty for committed rows and the materializer
+-- is NOT EXISTS + DO NOTHING. Recovery is the REBUILD region in 20260819_150100, asserted by its test.
+-- Both TimescaleDB errors and the skip are measured in #644.
 
 INSERT INTO migrations (filename) VALUES ('20260819_150000_create_position_current.sql') ON CONFLICT (filename) DO NOTHING;
