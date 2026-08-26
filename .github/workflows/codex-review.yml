@@ -81,10 +81,25 @@ jobs:
       # substitutes whatever it can still reach and reviews that instead. A confident
       # review of the wrong bytes is worse than no review, so prove the sandbox works
       # before spending a token on it.
+      # Grant the permission to bwrap alone, via the AppArmor profile shape Ubuntu
+      # itself ships for flatpak and chrome. The blunt alternative — flipping the
+      # kernel.apparmor_restrict_unprivileged_userns sysctl to 0 — hands unprivileged
+      # user namespaces to every binary on the box, and userns has a long history of
+      # local-privesc CVEs. Scope it to the one program that needs it.
       - name: Enable the sandbox the reviewer runs in
         run: |
           set -euo pipefail
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo tee /etc/apparmor.d/bwrap >/dev/null <<'PROFILE'
+          abi <abi/4.0>,
+          include <tunables/global>
+
+          profile bwrap /usr/bin/bwrap flags=(unconfined) {
+            userns,
+            include if exists <local/bwrap>
+          }
+          PROFILE
+          sudo systemctl reload apparmor
+
           if ! bwrap --unshare-all --dev-bind / / /bin/true; then
             echo "::error::bubblewrap cannot create a sandbox on this runner. Codex would fall back to reviewing whatever it can still reach instead of the checkout. Refusing to run."
             exit 1
