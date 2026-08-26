@@ -138,6 +138,18 @@ def test_reference_mode_serves_the_upstream_breakdown_as_per_allocation(referenc
     assert row["model"] is None
 
 
+@pytest.mark.parametrize("reference_client", [_snapshot()], indirect=True)
+def test_reference_mode_stamps_reference_provenance_on_each_row(reference_client):
+    # The row's own source, not just the response-level one: a consumer reading
+    # per_allocation in isolation must still see who reported the position.
+    client, _ = reference_client
+
+    body = client.get(f"/v1/primes/{_VALID_ADDR}/risk-capital?reference=true").json()
+
+    (row,) = body["per_allocation"]
+    assert row["source"] == "reference"
+
+
 @pytest.mark.parametrize(
     "reference_client",
     [_snapshot(per_allocation=(_reference_allocation(receipt_token_id=None, token_address="0x" + "ef" * 32),))],
@@ -375,3 +387,18 @@ def test_no_contribution_is_attributed_without_a_total_to_divide_by(reference_cl
     body = client.get(f"/v1/primes/{_VALID_ADDR}/risk-capital?source=indexed").json()
 
     assert all(row["encumbrance_contribution"] is None for row in body["per_allocation"])
+
+
+@pytest.mark.parametrize("reference_client", [_snapshot()], indirect=True)
+def test_both_attributes_no_contribution_to_a_sky_only_row(reference_client):
+    # Under `both` the denominator is STL's own total; a row Sky alone reports
+    # is not comparable to it, so it stays excluded even though its own
+    # `source` is `reference` — unlike a pure `source=reference` response,
+    # where that same field value means every row is fair game.
+    client, self_service = reference_client
+    self_service.compute.return_value = _self_result(total_risk_capital_usd=Decimal("100"))
+
+    body = client.get(f"/v1/primes/{_VALID_ADDR}/risk-capital?source=both").json()
+
+    (row,) = [row for row in body["per_allocation"] if row["source"] == "reference"]
+    assert row["encumbrance_contribution"] is None

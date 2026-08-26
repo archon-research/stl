@@ -491,10 +491,15 @@ def _with_encumbrance_contributions(
                     update={
                         "encumbrance_contribution": (
                             None
-                            # The denominator is this response's own total, so a
-                            # row Sky alone reports has no share of it — leaving
-                            # it in would stop the column summing to the ratio.
-                            if allocation.required_risk_capital_usd is None or allocation.source is Provenance.REFERENCE
+                            # Under `both` the denominator is STL's own total, so a
+                            # row Sky alone reports (source=reference there) has no
+                            # comparable share of it — leaving it in would stop the
+                            # column summing to the ratio. A pure `source=reference`
+                            # response has no STL half to be incomparable with: every
+                            # row is `reference` there, against Sky's own total, so
+                            # the exclusion does not apply.
+                            if allocation.required_risk_capital_usd is None
+                            or (response.source is Provenance.BOTH and allocation.source is Provenance.REFERENCE)
                             else allocation.required_risk_capital_usd / total
                         )
                     }
@@ -727,6 +732,7 @@ def _reference_allocation(row: ReferenceAllocation) -> AllocationRiskCapitalResp
         exposure_usd=row.exposure_usd,
         applied=True,
         required_risk_capital_usd=row.required_risk_capital_usd,
+        source=Provenance.REFERENCE,
         crr_pct=row.crr_pct,
         model=None,
         unpriced_reason=None,

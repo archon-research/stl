@@ -107,6 +107,15 @@ def test_reference_mode_reports_no_balance_because_upstream_has_no_token_quantit
 
 
 @pytest.mark.parametrize("reference_client", [_positions()], indirect=True)
+def test_reference_mode_stamps_reference_provenance_on_each_row(reference_client):
+    client, _ = reference_client
+
+    body = client.get(f"/v1/primes/{_VALID_ADDR}/allocations?reference=true").json()
+
+    assert body[0]["source"] == "reference"
+
+
+@pytest.mark.parametrize("reference_client", [_positions()], indirect=True)
 def test_reference_mode_marks_every_row_prime_scoped(reference_client):
     # Upstream reports per prime, so a client unioning a prime's proxies would
     # multiply the position count without this.
