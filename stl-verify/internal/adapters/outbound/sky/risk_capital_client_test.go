@@ -45,13 +45,14 @@ func listPayload(stars ...string) map[string]any {
 }
 
 // newTestClient serves `routes` keyed by exact request path, recording the order
-// paths were requested so a test can assert a route was never reached.
+// full request targets (path+query) were requested so a test can assert a route
+// was never reached, or assert the query string a route was reached with.
 func newTestClient(t *testing.T, routes map[string]any) (*Client, *[]string) {
 	t.Helper()
 	var requested []string
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requested = append(requested, r.URL.Path)
+		requested = append(requested, r.URL.String())
 		payload, ok := routes[r.URL.Path]
 		if !ok {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -244,7 +245,7 @@ func allocationsPayload(rows ...map[string]any) map[string]any {
 }
 
 func TestFetchPrimeAllocationsCarriesEveryFieldUnrounded(t *testing.T) {
-	client, _ := newTestClient(t, map[string]any{
+	client, requested := newTestClient(t, map[string]any{
 		"/primes/spark/allocations/": allocationsPayload(map[string]any{}),
 	})
 
@@ -255,6 +256,9 @@ func TestFetchPrimeAllocationsCarriesEveryFieldUnrounded(t *testing.T) {
 
 	if len(rows) != 1 {
 		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	if len(*requested) != 1 || !strings.Contains((*requested)[0], "limit=500") {
+		t.Errorf("requested = %v, want the page fetched with limit=500", *requested)
 	}
 	got := rows[0]
 	if got.Exposure != "782710914.129541047405509005" {

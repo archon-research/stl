@@ -228,9 +228,19 @@ func positionRow(overrides map[string]any) map[string]any {
 
 // newPositionsTestClient serves the positions envelope at /allocations/,
 // which wraps results and pagination unlike the historic route's bare list.
-func newPositionsTestClient(t *testing.T, rows []map[string]any, total int) *Client {
+// The returned accessor reads the recorded request target under the same lock
+// the handler writes it with, mirroring newTestClient above.
+func newPositionsTestClient(t *testing.T, rows []map[string]any, total int) (*Client, func() string) {
 	t.Helper()
+	var (
+		mu       sync.Mutex
+		lastPath string
+	)
+
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		lastPath = r.URL.RequestURI()
+		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		payload := map[string]any{
 			"data": map[string]any{"results": rows, "pagination": map[string]any{"total": total}},
@@ -245,11 +255,15 @@ func newPositionsTestClient(t *testing.T, rows []map[string]any, total int) *Cli
 	if err != nil {
 		t.Fatalf("NewClient() = %v", err)
 	}
-	return client
+	return client, func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return lastPath
+	}
 }
 
 func TestFetchPositionsCarriesEveryFieldUnrounded(t *testing.T) {
-	client := newPositionsTestClient(t, []map[string]any{positionRow(nil)}, 1)
+	client, requestURI := newPositionsTestClient(t, []map[string]any{positionRow(nil)}, 1)
 
 	rows, err := client.FetchPositions(context.Background(), []string{"spark"})
 	if err != nil {
@@ -258,6 +272,9 @@ func TestFetchPositionsCarriesEveryFieldUnrounded(t *testing.T) {
 
 	if len(rows) != 1 {
 		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	if got := requestURI(); got != "/allocations/?prime=spark&limit=1000" {
+		t.Errorf("request = %q, want GET /allocations/ with prime=spark and limit=1000", got)
 	}
 	got := rows[0]
 	if got.Assets != "782710914.129541047405509005" {
@@ -275,7 +292,7 @@ func TestFetchPositionsCarriesEveryFieldUnrounded(t *testing.T) {
 }
 
 func TestFetchPositionsKeepsOmittedOptionalFieldsNil(t *testing.T) {
-	client := newPositionsTestClient(t, []map[string]any{positionRow(map[string]any{
+	client, _ := newPositionsTestClient(t, []map[string]any{positionRow(map[string]any{
 		"token_name": nil, "allocated_assets": nil, "idle_assets": nil,
 	})}, 1)
 
@@ -294,7 +311,7 @@ func TestFetchPositionsKeepsOmittedOptionalFieldsNil(t *testing.T) {
 func TestFetchPositionsRejectsAnyAbsentRequiredField(t *testing.T) {
 	for _, field := range []string{"protocol", "network", "token_symbol", "address", "assets"} {
 		t.Run(field, func(t *testing.T) {
-			client := newPositionsTestClient(t, []map[string]any{positionRow(map[string]any{field: nil})}, 1)
+			client, _ := newPositionsTestClient(t, []map[string]any{positionRow(map[string]any{field: nil})}, 1)
 
 			_, err := client.FetchPositions(context.Background(), []string{"spark"})
 
@@ -311,7 +328,7 @@ func TestFetchPositionsRejectsAnyAbsentRequiredField(t *testing.T) {
 func TestFetchPositionsRejectsAnEmptyResult(t *testing.T) {
 	// The route answers an unknown star with 200 and an empty list, so an empty
 	// result for a covered star cannot be told from a broken feed.
-	client := newPositionsTestClient(t, []map[string]any{}, 0)
+	client, _ := newPositionsTestClient(t, []map[string]any{}, 0)
 
 	if _, err := client.FetchPositions(context.Background(), []string{"spark"}); err == nil {
 		t.Fatal("FetchPositions() = nil, want an error")
@@ -319,7 +336,7 @@ func TestFetchPositionsRejectsAnEmptyResult(t *testing.T) {
 }
 
 func TestFetchPositionsRejectsADuplicateRowIdentity(t *testing.T) {
-	client := newPositionsTestClient(t, []map[string]any{positionRow(nil), positionRow(nil)}, 2)
+	client, _ := newPositionsTestClient(t, []map[string]any{positionRow(nil), positionRow(nil)}, 2)
 
 	if _, err := client.FetchPositions(context.Background(), []string{"spark"}); err == nil {
 		t.Fatal("FetchPositions() = nil, want an error — a duplicate identity would silently conflict away at insert")
@@ -327,7 +344,7 @@ func TestFetchPositionsRejectsADuplicateRowIdentity(t *testing.T) {
 }
 
 func TestFetchPositionsRejectsATruncatedPage(t *testing.T) {
-	client := newPositionsTestClient(t, []map[string]any{positionRow(nil)}, 59)
+	client, _ := newPositionsTestClient(t, []map[string]any{positionRow(nil)}, 59)
 
 	if _, err := client.FetchPositions(context.Background(), []string{"spark"}); err == nil {
 		t.Fatal("FetchPositions() = nil, want an error — a short page reads as rows that do not exist")

@@ -4,22 +4,22 @@ package postgres
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
-	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // seedReferencePrime inserts (or reuses) a prime row keyed by name and returns
-// its id. The vault address is derived from name — mirroring the Python tests'
-// _vault_address_for — so distinctly-named primes never collide on the
-// vault_address unique constraint.
+// its id. The vault address is derived from name by hashing rather than
+// truncating, so two names sharing a long common prefix still resolve to
+// distinct vault_address values and never collide on the unique constraint.
 func seedReferencePrime(t *testing.T, ctx context.Context, pool *pgxpool.Pool, name string) int64 {
 	t.Helper()
 
-	vaultHex := hex.EncodeToString([]byte(name))
-	vaultHex = (vaultHex + strings.Repeat("0", 40))[:40]
+	hash := sha256.Sum256([]byte(name))
+	vaultHex := hex.EncodeToString(hash[:20])
 
 	var primeID int64
 	if err := pool.QueryRow(ctx, `
