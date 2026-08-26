@@ -26,8 +26,31 @@ import (
 
 const defaultBaseURL = "https://info-sky.blockanalitica.com/star-monitoring/risk-capital"
 
-// Compile-time check that Client implements outbound.RiskCapitalProvider.
-var _ outbound.RiskCapitalProvider = (*Client)(nil)
+// Upstream paginates at 20 by default. Asked for explicitly, and the reported
+// total is checked against what arrives, so a set outgrowing the page fails
+// rather than silently losing rows.
+const allocationsPageLimit = 500
+
+// The monitor spells networks its own way — "ethereum" where the axis-synome
+// contract and the allocation trackers say "mainnet". Translated here with the
+// other upstream encodings so no consumer has to know the vendor's vocabulary.
+// The skydata client repeats this map rather than sharing it: they are two
+// vendors' vocabularies that happen to agree today, and a change to one must
+// not silently move the other.
+var networkToChainID = map[string]int64{
+	"ethereum":  1,
+	"optimism":  10,
+	"unichain":  130,
+	"base":      8453,
+	"arbitrum":  42161,
+	"avalanche": 43114,
+}
+
+// Compile-time checks that Client implements both monitor ports.
+var (
+	_ outbound.RiskCapitalProvider           = (*Client)(nil)
+	_ outbound.RiskCapitalAllocationProvider = (*Client)(nil)
+)
 
 // ClientConfig holds configuration for the Sky risk-capital client.
 type ClientConfig struct {
@@ -223,6 +246,133 @@ func requireAmounts(star string, s outbound.RiskCapitalPrimeSnapshot) error {
 	return nil
 }
 
+// FetchPrimeAllocations returns the per-allocation breakdown for each star.
+// Callers pass only stars the monitor covers (from the same cycle's
+// snapshots): the route answers an unknown star with a 500 indistinguishable
+// from a fault.
+func (c *Client) FetchPrimeAllocations(
+	ctx context.Context,
+	stars []string,
+) ([]outbound.RiskCapitalAllocationRow, error) {
+	rows := make([]outbound.RiskCapitalAllocationRow, 0, len(stars)*16)
+	for _, star := range stars {
+		starRows, err := c.fetchStarAllocations(ctx, star)
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, starRows...)
+	}
+	return rows, nil
+}
+
+func (c *Client) fetchStarAllocations(ctx context.Context, star string) ([]outbound.RiskCapitalAllocationRow, error) {
+	var payload allocationsResponse
+	requestURL := fmt.Sprintf("%s/primes/%s/allocations/?limit=%d", c.baseURL, url.PathEscape(star), allocationsPageLimit)
+	if err := c.httpClient.DoRequest(ctx, httpclient.RequestConfig{URL: requestURL}, &payload); err != nil {
+		return nil, fmt.Errorf("fetching sky risk-capital allocations for prime %q: %w", star, err)
+	}
+
+	results := payload.Data.Results
+	if err := requireFullPage(payload.Data.Pagination, len(results), allocationsPageLimit, requestURL); err != nil {
+		return nil, err
+	}
+
+	// Row identity is (network, token_address) — the table's key. A duplicate
+	// in one fetch would silently conflict away at insert, so it fails here.
+	seen := make(map[string]bool, len(results))
+	rows := make([]outbound.RiskCapitalAllocationRow, 0, len(results))
+	for i, row := range results {
+		parsed, err := toAllocationRow(star, row, i)
+		if err != nil {
+			return nil, err
+		}
+		key := parsed.Network + "|" + parsed.TokenAddress
+		if seen[key] {
+			return nil, fmt.Errorf(
+				"sky risk-capital allocations for prime %q repeat identity %s on %s; the row identity assumption no longer holds",
+				star, parsed.TokenAddress, parsed.Network)
+		}
+		seen[key] = true
+		rows = append(rows, parsed)
+	}
+	return rows, nil
+}
+
+// toAllocationRow rejects a row missing any identifying or numeric field the
+// monitor is expected to report; persisting a blank in their place would read
+// as a real answer. name and the loan-token pair are the fields the monitor
+// may omit.
+func toAllocationRow(star string, row allocationPayloadRow, index int) (outbound.RiskCapitalAllocationRow, error) {
+	// Ordered, not a map: which field a broken payload is blamed on must be
+	// reproducible across runs, or the same fault reads as a different bug.
+	required := []struct{ field, value string }{
+		{"protocol", row.Protocol},
+		{"network", row.Network},
+		{"symbol", row.Symbol},
+		{"token_address", row.TokenAddress},
+		{"exposure", row.Exposure.String()},
+		{"rrc", row.RRC.String()},
+		{"crr", row.CRR.String()},
+	}
+	for _, r := range required {
+		if strings.TrimSpace(r.value) == "" {
+			return outbound.RiskCapitalAllocationRow{}, fmt.Errorf(
+				"sky risk-capital allocation row %d for prime %q is missing field %q", index, star, r.field)
+		}
+	}
+
+	network := strings.TrimSpace(row.Network)
+	return outbound.RiskCapitalAllocationRow{
+		Star:                star,
+		Protocol:            strings.TrimSpace(row.Protocol),
+		Network:             network,
+		ChainID:             chainIDFor(network),
+		Symbol:              strings.TrimSpace(row.Symbol),
+		Name:                optionalText(row.Name),
+		TokenAddress:        strings.TrimSpace(row.TokenAddress),
+		LoanTokenAddress:    optionalText(row.LoanTokenAddress),
+		LoanTokenSymbol:     optionalText(row.LoanTokenSymbol),
+		Exposure:            row.Exposure.String(),
+		RequiredRiskCapital: row.RRC.String(),
+		CRR:                 row.CRR.String(),
+	}, nil
+}
+
+func chainIDFor(network string) *int64 {
+	id, ok := networkToChainID[network]
+	if !ok {
+		return nil
+	}
+	return &id
+}
+
+// requireFullPage rejects a page that may be truncated, which would read as
+// rows that do not exist. With a usable total, a short page means the set
+// outgrew the limit; without one, a page at the limit cannot be told from a
+// cut-off one, so it is refused rather than served as a silent partial set.
+func requireFullPage(p *pagination, received, limit int, requestURL string) error {
+	if p != nil && p.Total != nil {
+		if *p.Total > received {
+			return fmt.Errorf(
+				"sky reported %d rows but returned %d; the page limit is too low: %s", *p.Total, received, requestURL)
+		}
+		return nil
+	}
+	if received >= limit {
+		return fmt.Errorf(
+			"sky returned a full page of %d rows with no usable total; the set may be truncated: %s", received, requestURL)
+	}
+	return nil
+}
+
+func optionalText(value string) *string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return nil
+	}
+	return &trimmed
+}
+
 func optionalNumber(value json.Number) *string {
 	raw := strings.TrimSpace(value.String())
 	if raw == "" {
@@ -243,6 +393,30 @@ type primeRow struct {
 
 type primeDetailResponse struct {
 	Data primeDetail `json:"data"`
+}
+
+type allocationsResponse struct {
+	Data struct {
+		Results    []allocationPayloadRow `json:"results"`
+		Pagination *pagination            `json:"pagination"`
+	} `json:"data"`
+}
+
+type pagination struct {
+	Total *int `json:"total"`
+}
+
+type allocationPayloadRow struct {
+	Protocol         string      `json:"protocol"`
+	Network          string      `json:"network"`
+	Symbol           string      `json:"symbol"`
+	Name             string      `json:"name"`
+	TokenAddress     string      `json:"token_address"`
+	LoanTokenAddress string      `json:"loan_token_address"`
+	LoanTokenSymbol  string      `json:"loan_token_symbol"`
+	Exposure         json.Number `json:"exposure"`
+	RRC              json.Number `json:"rrc"`
+	CRR              json.Number `json:"crr"`
 }
 
 type primeDetail struct {
