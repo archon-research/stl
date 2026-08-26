@@ -12,7 +12,7 @@ from temporalio.client import Client, ScheduleAlreadyRunningError, ScheduleOverl
 from temporalio.service import RPCError, RPCStatusCode
 
 from app.adapters.temporal import cronjob as cronjob_module
-from app.adapters.temporal.cronjob import CronjobSpec, connect, ensure_schedule
+from app.adapters.temporal.cronjob import CronjobSpec, connect, ensure_schedule, run_cronjob
 from app.adapters.temporal.interceptor import RunMetricsInterceptor
 from app.adapters.temporal.metrics import CronjobMetrics
 
@@ -173,3 +173,23 @@ def test_build_worker_installs_the_run_metrics_interceptor(monkeypatch):
     assert len(interceptors) == 1
     assert isinstance(interceptors[0], RunMetricsInterceptor)
     assert interceptors[0]._metrics is metrics
+
+
+async def test_run_cronjob_shuts_down_metrics_when_connect_fails(monkeypatch):
+    # A connect()/ensure_schedule() failure happens before the worker's own
+    # try/finally. Without shutting the provider down here too, an
+    # in-process retry finds the global MeterProvider already taken (see
+    # metrics.py's set_meter_provider note) and the failed attempt's
+    # periodic reader keeps running.
+    shutdown = MagicMock()
+    monkeypatch.setattr(cronjob_module, "init_metrics_provider", lambda _name: shutdown)
+
+    async def _failing_connect():
+        raise RPCError("connection refused", RPCStatusCode.UNAVAILABLE, b"")
+
+    monkeypatch.setattr(cronjob_module, "connect", _failing_connect)
+
+    with pytest.raises(RPCError):
+        await run_cronjob(_spec())
+
+    shutdown.assert_called_once()

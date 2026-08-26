@@ -150,23 +150,29 @@ async def run_cronjob(spec: CronjobSpec) -> None:
     """
     # Must run before CronjobMetrics(): instrument creation binds to
     # whichever MeterProvider is global at that moment (see
-    # init_metrics_provider's docstring).
+    # init_metrics_provider's docstring). Wrapped in try/finally from here on
+    # -- a connect()/ensure_schedule() failure must still shut the provider
+    # down, or an in-process retry finds the global MeterProvider already
+    # taken and set_meter_provider silently no-ops, leaving the failed
+    # attempt's periodic reader running forever.
     shutdown_metrics = init_metrics_provider(spec.name)
-    run_metrics = CronjobMetrics()
-    client = await connect()
-    await ensure_schedule(client, spec)
-    stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, stop.set)
     try:
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            worker = _build_worker(client, spec, executor, run_metrics)
-            async with worker:
-                logger.info("worker running task_queue=%s", spec.name)
-                await stop.wait()
-            logger.info("worker stopped task_queue=%s", spec.name)
-    finally:
+        run_metrics = CronjobMetrics()
+        client = await connect()
+        await ensure_schedule(client, spec)
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.remove_signal_handler(sig)
+            loop.add_signal_handler(sig, stop.set)
+        try:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                worker = _build_worker(client, spec, executor, run_metrics)
+                async with worker:
+                    logger.info("worker running task_queue=%s", spec.name)
+                    await stop.wait()
+                logger.info("worker stopped task_queue=%s", spec.name)
+        finally:
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.remove_signal_handler(sig)
+    finally:
         shutdown_metrics()
