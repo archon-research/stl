@@ -265,23 +265,16 @@ func (s *Service) persistCycle(
 	return s.persistBalanceSheet(ctx, sheets)
 }
 
-// persistBalanceSheet saves the cycle's balance-sheet days, if the window held
-// any, and records how many were actually inserted. The common no-new-day
-// cycle already reports 0 through the branch below — the lookback re-sends
-// already-persisted days, which conflict away — so recording 0 on the rarer
-// empty-window path too, rather than special-casing it away, keeps every
-// cycle's metric emission uniform for callers to reason about.
+// persistBalanceSheet saves the cycle's balance-sheet days and records how
+// many were actually inserted; the common no-new-day cycle re-sends
+// already-persisted days, which conflict away and report 0.
 func (s *Service) persistBalanceSheet(ctx context.Context, sheets []entity.PrimeBalanceSheetSnapshot) error {
-	if len(sheets) == 0 {
-		s.telemetry.RecordBalanceSheetDaysInserted(ctx, 0)
-		return nil
-	}
-	inserted, err := s.deps.SheetRepo.SaveBalanceSheetSnapshots(ctx, sheets)
+	inserted, newDays, err := s.deps.SheetRepo.SaveBalanceSheetSnapshots(ctx, sheets)
 	if err != nil {
 		return fmt.Errorf("saving balance sheet snapshots: %w", err)
 	}
-	s.telemetry.RecordBalanceSheetDaysInserted(ctx, inserted)
-	s.logger.Info("balance sheet advanced", "inserted", inserted, "fetched", len(sheets))
+	s.telemetry.RecordBalanceSheetDaysInserted(ctx, newDays)
+	s.logger.Info("balance sheet advanced", "inserted", inserted, "new_days", newDays, "fetched", len(sheets))
 	return nil
 }
 

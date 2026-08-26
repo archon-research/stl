@@ -898,18 +898,21 @@ the current in-progress day — so on most cycles the insert count is
 legitimately zero, and a 1h window would false-positive on every run that
 happens to land between upstream publish times. `[36h]` on the `increase()`,
 with a matching `for: 2h`, gives the daily cadence room to land at least once
-(verified: inserts happen ~once/day per prime) before this fires.
+before this fires. The underlying counter only counts a day's first-ever
+insert (`processing_version=0`), not a build's correction to an
+already-stored day, so a deploy replaying the lookback cannot silence it.
 
 **Triage.**
 
 1. Confirm the worker is cycling:
-   `kubectl -n vector logs deploy/reference-capital-indexer --tail=100`. Most
-   cycles log `balance sheet advanced inserted=0 fetched=<n>` — the lookback
-   window re-sends already-persisted days, which conflict away, so
-   `inserted=0` on its own is normal. `inserted` goes non-zero roughly once
-   per day per prime, when that prime's newly-completed day lands for the
-   first time; if you never see a non-zero `inserted` across a full day, that
-   itself corroborates the alert.
+   `kubectl -n vector logs deploy/reference-capital-indexer --tail=100`. Each
+   cycle logs `balance sheet advanced inserted=<n> new_days=<n> fetched=<n>`.
+   `inserted` includes build corrections to already-stored days and goes
+   non-zero on almost every cycle after a deploy — it is not the alert's
+   signal. `new_days` is: it only goes non-zero roughly once per day per
+   prime, when that prime's newly-completed day lands for the first time. If
+   you never see a non-zero `new_days` across a full day, that corroborates
+   the alert.
 2. Ask the feed directly whether it has published recent days at all:
    `curl -s "$SKY_DATA_URL/primes/historic/?days_ago=3" | jq '.data | group_by(.star) | map({star: .[0].star, dates: map(.date)})'`.
 3. Compare against the table:

@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -37,19 +38,21 @@ func NewPrimeBalanceSheetRepository(pool *pgxpool.Pool, txm *TxManager, logger *
 //
 // Insert-only, like every reference table: the trigger assigns
 // processing_version, so re-running under the same build conflicts away rather
-// than rewriting history. Returns the summed RowsAffected() across the batch —
-// the rows actually inserted — not len(snapshots): a conflicted-away row still
-// counts as an attempted Exec but affects zero rows.
+// than rewriting history. Returns the rows actually inserted (not
+// len(snapshots): a conflicted-away row counts as attempted but not inserted)
+// alongside how many of those started a prime's day fresh (processing_version
+// 0) rather than correcting an already-stored one — a deploy's build_id change
+// makes every row in the lookback insert as a correction, so only the fresh
+// count is safe for an alert to key on.
 func (r *PrimeBalanceSheetRepository) SaveBalanceSheetSnapshots(
 	ctx context.Context,
 	snapshots []entity.PrimeBalanceSheetSnapshot,
-) (int, error) {
+) (inserted int, newDays int, err error) {
 	if len(snapshots) == 0 {
-		return 0, nil
+		return 0, 0, nil
 	}
 
-	var inserted int
-	err := r.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
+	err = r.txm.WithTransaction(ctx, func(tx pgx.Tx) error {
 		const q = `
 			INSERT INTO prime_reference_balance_sheet (
 				prime_id,
@@ -65,6 +68,7 @@ func (r *PrimeBalanceSheetRepository) SaveBalanceSheetSnapshots(
 			)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 			ON CONFLICT (prime_id, observed_at, processing_version) DO NOTHING
+			RETURNING processing_version
 		`
 
 		batch := &pgx.Batch{}
@@ -86,22 +90,30 @@ func (r *PrimeBalanceSheetRepository) SaveBalanceSheetSnapshots(
 
 		results := tx.SendBatch(ctx, batch)
 		for i, s := range snapshots {
-			tag, err := results.Exec()
-			if err != nil {
+			var processingVersion int
+			scanErr := results.QueryRow().Scan(&processingVersion)
+			if scanErr != nil {
+				if errors.Is(scanErr, pgx.ErrNoRows) {
+					continue // conflicted away: not inserted
+				}
 				_ = results.Close()
-				return fmt.Errorf("insert balance sheet snapshot %d (prime_id=%d): %w", i, s.PrimeID, err)
+				return fmt.Errorf("insert balance sheet snapshot %d (prime_id=%d): %w", i, s.PrimeID, scanErr)
 			}
-			inserted += int(tag.RowsAffected())
+			inserted++
+			if processingVersion == 0 {
+				newDays++
+			}
 		}
-		if err := results.Close(); err != nil {
-			return fmt.Errorf("close batch: %w", err)
+		if closeErr := results.Close(); closeErr != nil {
+			return fmt.Errorf("close batch: %w", closeErr)
 		}
 
-		r.logger.Info("saved prime balance sheet snapshots", "inserted", inserted, "attempted", len(snapshots))
+		r.logger.Info("saved prime balance sheet snapshots",
+			"inserted", inserted, "new_days", newDays, "attempted", len(snapshots))
 		return nil
 	})
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	return inserted, nil
+	return inserted, newDays, nil
 }

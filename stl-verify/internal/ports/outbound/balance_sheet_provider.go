@@ -33,8 +33,9 @@ type BalanceSheetProvider interface {
 
 // PrimeBalanceSheetRepository persists per-prime daily balance sheets.
 type PrimeBalanceSheetRepository interface {
-	// SaveBalanceSheetSnapshots returns the count of rows actually inserted, not
-	// len(snapshots): a day already persisted is not counted again, so the
-	// caller cannot infer inserts from the batch size.
-	SaveBalanceSheetSnapshots(ctx context.Context, snapshots []entity.PrimeBalanceSheetSnapshot) (int, error)
+	// SaveBalanceSheetSnapshots returns rows actually inserted (not
+	// len(snapshots): an already-persisted day is not counted again) and, of
+	// those, how many started a prime's day fresh rather than correcting one a
+	// prior build already stored.
+	SaveBalanceSheetSnapshots(ctx context.Context, snapshots []entity.PrimeBalanceSheetSnapshot) (inserted, newDays int, err error)
 }

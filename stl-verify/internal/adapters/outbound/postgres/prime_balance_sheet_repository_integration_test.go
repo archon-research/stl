@@ -35,7 +35,7 @@ func TestPrimeBalanceSheetRepositoryPreservesEighteenDecimalPrecision(t *testing
 	repo := NewPrimeBalanceSheetRepository(pool, newReferenceRepoTxm(t, pool), nil)
 	observedAt := time.Date(2026, 8, 19, 0, 0, 0, 0, time.UTC)
 
-	inserted, err := repo.SaveBalanceSheetSnapshots(ctx, []entity.PrimeBalanceSheetSnapshot{
+	inserted, newDays, err := repo.SaveBalanceSheetSnapshots(ctx, []entity.PrimeBalanceSheetSnapshot{
 		balanceSheetSnapshot(primeID, observedAt, 1),
 	})
 	if err != nil {
@@ -43,6 +43,9 @@ func TestPrimeBalanceSheetRepositoryPreservesEighteenDecimalPrecision(t *testing
 	}
 	if inserted != 1 {
 		t.Fatalf("inserted = %d, want 1", inserted)
+	}
+	if newDays != 1 {
+		t.Fatalf("newDays = %d, want 1 — the day's first-ever insert", newDays)
 	}
 
 	var treasury string
@@ -67,7 +70,7 @@ func TestPrimeBalanceSheetRepositoryReportsZeroInsertedOnAReplayedSave(t *testin
 	repo := NewPrimeBalanceSheetRepository(pool, newReferenceRepoTxm(t, pool), nil)
 	snapshot := balanceSheetSnapshot(primeID, time.Date(2026, 8, 19, 0, 0, 0, 0, time.UTC), 1)
 
-	first, err := repo.SaveBalanceSheetSnapshots(ctx, []entity.PrimeBalanceSheetSnapshot{snapshot})
+	first, _, err := repo.SaveBalanceSheetSnapshots(ctx, []entity.PrimeBalanceSheetSnapshot{snapshot})
 	if err != nil {
 		t.Fatalf("SaveBalanceSheetSnapshots() = %v", err)
 	}
@@ -75,12 +78,15 @@ func TestPrimeBalanceSheetRepositoryReportsZeroInsertedOnAReplayedSave(t *testin
 		t.Fatalf("first save inserted = %d, want 1", first)
 	}
 
-	second, err := repo.SaveBalanceSheetSnapshots(ctx, []entity.PrimeBalanceSheetSnapshot{snapshot})
+	second, secondNewDays, err := repo.SaveBalanceSheetSnapshots(ctx, []entity.PrimeBalanceSheetSnapshot{snapshot})
 	if err != nil {
 		t.Fatalf("SaveBalanceSheetSnapshots() = %v", err)
 	}
 	if second != 0 {
 		t.Errorf("replayed save inserted = %d, want 0 — the row conflicted away, not landed twice", second)
+	}
+	if secondNewDays != 0 {
+		t.Errorf("replayed save newDays = %d, want 0", secondNewDays)
 	}
 
 	var rows int
@@ -104,22 +110,27 @@ func TestPrimeBalanceSheetRepositoryCountsOnlyTheNewRowsInAMixedBatch(t *testing
 	day1 := balanceSheetSnapshot(primeID, time.Date(2026, 8, 18, 0, 0, 0, 0, time.UTC), 1)
 	day2 := balanceSheetSnapshot(primeID, time.Date(2026, 8, 19, 0, 0, 0, 0, time.UTC), 1)
 
-	if _, err := repo.SaveBalanceSheetSnapshots(ctx, []entity.PrimeBalanceSheetSnapshot{day1}); err != nil {
+	if _, _, err := repo.SaveBalanceSheetSnapshots(ctx, []entity.PrimeBalanceSheetSnapshot{day1}); err != nil {
 		t.Fatalf("seeding day1: %v", err)
 	}
 
-	inserted, err := repo.SaveBalanceSheetSnapshots(ctx, []entity.PrimeBalanceSheetSnapshot{day1, day2})
+	inserted, newDays, err := repo.SaveBalanceSheetSnapshots(ctx, []entity.PrimeBalanceSheetSnapshot{day1, day2})
 	if err != nil {
 		t.Fatalf("SaveBalanceSheetSnapshots() = %v", err)
 	}
 	if inserted != 1 {
 		t.Errorf("inserted = %d, want 1 — day1 conflicts away, only day2 is new", inserted)
 	}
+	if newDays != 1 {
+		t.Errorf("newDays = %d, want 1 — day2 is a fresh day", newDays)
+	}
 }
 
 // A new build reprocessing the same day appends a correction rather than
-// overwriting (ADR-0002), and that correction row still counts as an insert.
-func TestPrimeBalanceSheetRepositoryCountsACorrectionForANewBuildAsInserted(t *testing.T) {
+// overwriting (ADR-0002); that correction row still counts as inserted, but
+// must not count as a newDays — a deploy replaying the lookback must not be
+// able to mask a genuine write-path stall.
+func TestPrimeBalanceSheetRepositoryCountsACorrectionForANewBuildAsInsertedButNotNew(t *testing.T) {
 	ctx := context.Background()
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
@@ -128,8 +139,12 @@ func TestPrimeBalanceSheetRepositoryCountsACorrectionForANewBuildAsInserted(t *t
 	repo := NewPrimeBalanceSheetRepository(pool, newReferenceRepoTxm(t, pool), nil)
 	observedAt := time.Date(2026, 8, 19, 0, 0, 0, 0, time.UTC)
 
-	for _, buildID := range []int{1, 2} {
-		inserted, err := repo.SaveBalanceSheetSnapshots(ctx, []entity.PrimeBalanceSheetSnapshot{
+	for i, buildID := range []int{1, 2} {
+		wantNewDays := 0
+		if i == 0 {
+			wantNewDays = 1
+		}
+		inserted, newDays, err := repo.SaveBalanceSheetSnapshots(ctx, []entity.PrimeBalanceSheetSnapshot{
 			balanceSheetSnapshot(primeID, observedAt, buildID),
 		})
 		if err != nil {
@@ -137,6 +152,9 @@ func TestPrimeBalanceSheetRepositoryCountsACorrectionForANewBuildAsInserted(t *t
 		}
 		if inserted != 1 {
 			t.Errorf("build=%d inserted = %d, want 1", buildID, inserted)
+		}
+		if newDays != wantNewDays {
+			t.Errorf("build=%d newDays = %d, want %d", buildID, newDays, wantNewDays)
 		}
 	}
 
@@ -162,12 +180,15 @@ func TestPrimeBalanceSheetRepositoryRollsBackWholeBatchOnAForeignKeyViolation(t 
 	valid := balanceSheetSnapshot(primeID, time.Date(2026, 8, 18, 0, 0, 0, 0, time.UTC), 1)
 	invalid := balanceSheetSnapshot(999999999, time.Date(2026, 8, 19, 0, 0, 0, 0, time.UTC), 1)
 
-	inserted, err := repo.SaveBalanceSheetSnapshots(ctx, []entity.PrimeBalanceSheetSnapshot{valid, invalid})
+	inserted, newDays, err := repo.SaveBalanceSheetSnapshots(ctx, []entity.PrimeBalanceSheetSnapshot{valid, invalid})
 	if err == nil {
 		t.Fatal("SaveBalanceSheetSnapshots() = nil, want a foreign key violation error")
 	}
 	if inserted != 0 {
 		t.Errorf("inserted = %d, want 0 — a batch error must report nothing landed", inserted)
+	}
+	if newDays != 0 {
+		t.Errorf("newDays = %d, want 0 — a batch error must report nothing landed", newDays)
 	}
 
 	var rows int

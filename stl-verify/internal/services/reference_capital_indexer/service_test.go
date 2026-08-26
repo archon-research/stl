@@ -104,12 +104,15 @@ type mockSheetRepo struct {
 func (m *mockSheetRepo) SaveBalanceSheetSnapshots(
 	_ context.Context,
 	snapshots []entity.PrimeBalanceSheetSnapshot,
-) (int, error) {
+) (inserted, newDays int, err error) {
+	if len(snapshots) == 0 {
+		return 0, 0, nil // matches the real repo: an empty batch never touches the DB
+	}
 	if m.err != nil {
-		return 0, m.err
+		return 0, 0, m.err
 	}
 	m.sheets = append(m.sheets, snapshots...)
-	return len(snapshots), nil
+	return len(snapshots), len(snapshots), nil
 }
 
 type mockSheetProvider struct {
@@ -676,7 +679,8 @@ func TestRunAsksOnlyForEnoughDaysToCloseTheGap(t *testing.T) {
 func TestRunTreatsNoNewCompletedDayAsSuccess(t *testing.T) {
 	// The provider withholds the in-progress day, so a cycle running before
 	// upstream publishes yesterday legitimately finds nothing to add. The repo
-	// is rigged to fail, which proves it is never reached.
+	// is rigged to fail on a non-empty batch, which proves the empty one never
+	// reaches that branch.
 	primes := &mockPrimeRepo{primes: []entity.Prime{{ID: 1, Name: "spark"}}}
 	provider := &mockRiskProvider{rows: []outbound.RiskCapitalPrimeSnapshot{upstreamRow("spark")}}
 

@@ -76,7 +76,7 @@ func NewTelemetryWithProvider(mp metric.MeterProvider) (*Telemetry, error) {
 
 	t.balanceSheetDaysInserted, err = t.meter.Int64Counter(
 		"reference_capital.sync.balance_sheet.days.inserted.total",
-		metric.WithDescription("Balance-sheet day rows actually inserted, per cycle"),
+		metric.WithDescription("Balance-sheet days that started fresh (not a build correction), per cycle"),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("creating balanceSheetDaysInserted counter: %w", err)
@@ -125,8 +125,8 @@ func (t *Telemetry) RecordPrimeUncovered(ctx context.Context, star string) {
 	t.primesUncovered.Add(ctx, 1, metric.WithAttributes(attribute.String("star", star)))
 }
 
-// RecordBalanceSheetDaysInserted records how many balance-sheet day rows a
-// cycle actually inserted.
+// RecordBalanceSheetDaysInserted records how many balance-sheet days a cycle
+// started fresh, excluding rows that corrected an already-stored day.
 func (t *Telemetry) RecordBalanceSheetDaysInserted(ctx context.Context, count int) {
 	if t == nil || t.balanceSheetDaysInserted == nil {
 		return

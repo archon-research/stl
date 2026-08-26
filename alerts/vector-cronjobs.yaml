@@ -609,15 +609,12 @@ groups:
       # WARNING — the balance-sheet write path stalled (B6 gap)
       # -----------------------------------------------------------------------
       - alert: VectorReferenceCapitalIndexerBalanceSheetStalled
-        # Cycles succeeding but zero balance-sheet days actually inserted.
-        # Unlike WritesZero/AllocationsZero/PositionsZero above, this feed
-        # publishes one day per prime per day and the client drops the
-        # in-progress day, so most cycles legitimately insert nothing — a 1h
-        # window on the inserted counter would false-positive constantly.
-        # [36h] on the increase, with a matching `for`, gives the daily cadence
-        # room to land at least once before this fires (verified: inserts
-        # happen ~once/day per prime). `unless` (not `== 0`) also fires when the
-        # counter series is entirely absent, which `== 0` cannot.
+        # Zero balance-sheet days inserted while cycles keep succeeding.
+        # [36h]: the feed publishes at most one new day per prime per day, so
+        # a shorter window false-positives on every normal no-new-day cycle.
+        # The counter only counts a day's first-ever insert, not a build's
+        # correction to one already stored, so a deploy cannot silence this.
+        # `unless` (not `== 0`) also fires when the series is absent.
         expr: |
           sum by (cluster) (
             rate(cronjob_runs_total{service_name="reference-capital-indexer", status="success", k8s_namespace_name="vector"}[1h])
