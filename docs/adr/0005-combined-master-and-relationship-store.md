@@ -429,6 +429,37 @@ traversal, and EXPECTED checks run as set-based queries over the same closures a
 Live traversal happens in exactly two places: closure regeneration itself (depth-capped,
 cycle-guarded, failing loud) and ad-hoc exploration reads.
 
+**The validation process, end to end.** Every write passes the same sequence, and each stage has
+one owner and one outcome:
+
+1. **Database constraints** (the engine): vocabulary references, weight-basis pairing, id
+   prefixes, status legality, value forms. Failure rejects the statement.
+2. **REQUIRED shape checks** (the validator, at the write boundary, reading the precomputed
+   effective-shape closure): structural identity — a token without address and chain does not
+   land. Failure rejects the write.
+3. **EXPECTED shape checks** (the validator, same closure): semantic completeness — missing
+   classification, missing required edge. Failure stores the row, records the gap in
+   `node_validity`, and blocks metric publication for that node.
+4. **DQ rules** (OpenMetadata, over resolved current state, at its own cadence): single-valued
+   cardinality, dangling soft references, coverage, edge-budget envelopes, pivot staleness.
+   Failure alerts; it never mutates.
+5. **Correction** (a curator, by append): restatement or tombstone with reason and approval
+   clears what the earlier stages caught.
+
+**The traversal inventory.** Every walk the model performs, where it runs, and its bounds:
+
+| walk | over | runs at | bounds |
+|---|---|---|---|
+| look-through closure | `HAS_UNDERLYING` | pivot regeneration (`fact_lookthrough`) | depth cap 16 · cycle guard by path · `REFERENCES` excluded · exact-decimal weight products |
+| shape ancestry | `NARROWER_THAN` | closure regeneration → the effective-shape artifact | depth cap · contradiction check (stricter-bound merge) fails loud at authoring |
+| subtree membership | `NARROWER_THAN` | closure regeneration → `dim_cluster` | same cap; write-time permitted-target checks are lookups against it |
+| ultimate parent | `SUBSIDIARY_OF` | pivot regeneration (`dim_entity`) | walk to the top; derived, not stored |
+| exploration | any | ad-hoc reads (UI) | explicit depth ceiling; the only per-query traversal |
+
+Realization note, from running the reads on Postgres: a recursive CTE over `numeric(30,18)`
+weights needs the non-recursive term cast explicitly, or the closure query fails to parse —
+the generated pivot SQL carries the cast.
+
 **The SE-2 split — reject structural, record semantic.** A structurally invalid record (a token
 with no address or chain) is rejected at write. A semantically incomplete one (a real holding
 whose subtype nobody has curated yet) is **stored, flagged in `node_validity`, and excluded
