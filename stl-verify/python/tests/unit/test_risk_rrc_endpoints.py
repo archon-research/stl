@@ -710,8 +710,7 @@ def test_post_legacy_alias_is_hidden_from_openapi_schema() -> None:
     assert "post" not in paths["/v1/risk/rrc"]
 
 
-def test_hidden_endpoints_absent_from_openapi_schema() -> None:
+def test_internal_tagged_endpoints_are_stripped_from_the_public_schema() -> None:
     schema = app.openapi()
     paths = schema["paths"]
-    assert "/v1/capital-metrics" not in paths
     assert "/v1/risk/{receipt_token_id}/bad-debt" not in paths

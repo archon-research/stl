@@ -64,40 +64,6 @@ def _grove_rows(client: TestClient) -> list[dict]:
     return [row for row in client.get("/v1/primes").json() if row["name"] == "grove"]
 
 
-def _stub_star_payload(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stand in for the third-party Star risk-capital fetch with a fixed spark row.
-
-    ``/v1/capital-metrics`` awaits a real ``httpx`` call to Blockanalitica
-    (``_fetch_star_risk_capital_payload``); AGENTS.md only allows integration
-    tests to mock data sources we do not control, and a third party is exactly
-    that. Stubbing only this half keeps the rest of the request (list_primes,
-    the real seeded database) exercising the genuine path.
-    """
-    from app.api.v1 import allocations
-
-    async def _fake_payload() -> allocations.StarRiskCapitalResponse:
-        return allocations.StarRiskCapitalResponse.model_validate(
-            {
-                "status": 200,
-                "success": True,
-                "data": {
-                    "results": [
-                        {
-                            "star": "spark",
-                            "exposure": "100.00",
-                            "total_rc": "50.00",
-                            "financial_rrc": "20.00",
-                            "exposure_share": "10.00%",
-                            "risk_tolerance_ratio": "2.00",
-                        }
-                    ]
-                },
-            }
-        )
-
-    monkeypatch.setattr(allocations, "_fetch_star_risk_capital_payload", _fake_payload)
-
-
 def test_primes_lists_both_of_sparks_alm_proxies(client: TestClient) -> None:
     assert len(_spark_rows(client)) == 2
 
@@ -133,24 +99,6 @@ def test_primes_excludes_the_subproxy_treasury_wallet(client: TestClient) -> Non
     addresses = {row["address"] for row in _spark_rows(client)}
 
     assert addresses == {_SPARK_MAINNET_ALM, _SPARK_AVALANCHE_ALM}
-
-
-def test_backwards_compat_capital_metrics_still_returns_one_row_per_proxy(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _stub_star_payload(monkeypatch)
-
-    rows = [row for row in client.get("/v1/capital-metrics").json() if row["prime_name"] == "spark"]
-
-    assert len(rows) == 2
-
-
-def test_capital_metrics_rows_carry_a_shared_dedupe_key(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    _stub_star_payload(monkeypatch)
-
-    rows = [row for row in client.get("/v1/capital-metrics").json() if row["prime_name"] == "spark"]
-
-    assert {row["prime_vault_address"] for row in rows} == {_SPARK_VAULT}
 
 
 def test_backwards_compat_risk_capital_exposure_stays_proxy_scoped(client: TestClient) -> None:

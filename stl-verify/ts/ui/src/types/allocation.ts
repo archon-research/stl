@@ -5,7 +5,6 @@ export type Allocation = components['schemas']['AllocationResponse'];
 export type AllocationActivity =
   components['schemas']['AllocationActivityResponse'];
 export type ProtocolEvent = components['schemas']['ProtocolEventResponse'];
-export type CapitalMetrics = components['schemas']['CapitalMetricsResponse'];
 export type PrimeRiskCapital =
   components['schemas']['PrimeRiskCapitalResponse'];
 export type AllocationRiskCapital =
@@ -46,12 +45,6 @@ export type AllocationActivityBucket =
 
 // The activity feed consumes the raw rows; the API client unwraps `data`.
 export type AllocationActivityResponse = AllocationActivity[];
-
-export type CapitalMetricsListResponse = NonNullable<
-  paths['/v1/capital-metrics']['get']['responses']['200']['content']['application/json']
->;
-
-export type CapitalMetricsResponse = CapitalMetricsListResponse[number];
 
 export type DataSourcesResponse = NonNullable<
   paths['/v1/data-sources']['get']['responses']['200']['content']['application/json']

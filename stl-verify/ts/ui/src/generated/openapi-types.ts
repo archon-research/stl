@@ -24,28 +24,6 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
-  '/v1/capital-metrics': {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    /**
-     * List per-prime capital metrics
-     * @description Join each tracked prime with the latest row from the upstream Star risk-capital monitor and return derived capital metrics: risk capital, first-loss capital, total capital, and the buffer between them. Primes without a matching upstream row are still returned, with zeroed metrics and a `validation_note` explaining why. A `502` is returned only when the upstream call itself fails.
-     *
-     *     Returns one row per ALM proxy, but every metric on a row is **prime-level** — the upstream Star monitor reports per prime, so a prime's rows carry identical figures and are not additive. Dedupe by `prime_vault_address` before aggregating. `prime_id` is deprecated: it holds a proxy address despite its name.
-     */
-    get: operations['list_capital_metrics_v1_capital_metrics_get'];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
   '/v1/chains': {
     parameters: {
       query?: never;
@@ -1090,106 +1068,6 @@ export interface components {
        * @example 42
        */
       receipt_token_id: number;
-    };
-    /**
-     * CapitalMetricsResponse
-     * @description Prime-level capital metrics for risk and alert management.
-     * @example {
-     *       "benchmark_source": "https://example.com/star-rrc",
-     *       "capital_buffer": "2500000",
-     *       "encumbrance_ratio": "0.85",
-     *       "exposure": "1900000000",
-     *       "is_validated": false,
-     *       "prime_id": "0x1601843c5e9bc251a3272907010afa41fa18347e",
-     *       "prime_name": "spark",
-     *       "prime_vault_address": "0x691a6c29e9e96dd897718305427ad5d534db16ba",
-     *       "required_risk_capital": "7500000",
-     *       "scope": "prime",
-     *       "timestamp": "2026-05-07T12:00:00Z",
-     *       "total_risk_capital": "10000000",
-     *       "validation_note": "Sourced from Star Agents Risk Capital & Requirements Monitor."
-     *     }
-     */
-    CapitalMetricsResponse: {
-      /**
-       * Benchmark Source
-       * @description URL of the upstream benchmark source used to populate the row.
-       */
-      benchmark_source?: string | null;
-      /**
-       * Capital Buffer
-       * @description `max(total_risk_capital - required_risk_capital, 0)` — unencumbered risk capital (USD).
-       * @example 2500000
-       */
-      capital_buffer: string;
-      /**
-       * Encumbrance Ratio
-       * @description Required Risk Capital as a share of Total Risk Capital (upstream `risk_tolerance_ratio`). `null` when not validated.
-       * @example 0.85
-       */
-      encumbrance_ratio?: string | null;
-      /**
-       * Exposure
-       * @description Total USD exposure across the prime's allocations (upstream `exposure`).
-       * @example 1900000000
-       */
-      exposure: string;
-      /**
-       * Is Validated
-       * @description Whether the row was validated against on-chain state.
-       * @default false
-       */
-      is_validated: boolean;
-      /**
-       * Prime Id
-       * @deprecated
-       * @description DEPRECATED — despite the name this is one of the prime's ALM **proxy** addresses, not a prime identifier, and this endpoint returns one row per proxy. Its value is unchanged for backwards compatibility. Use `prime_vault_address` or `prime_name` to identify the prime.
-       * @example 0x1601843c5e9bc251a3272907010afa41fa18347e
-       */
-      prime_id: string;
-      /**
-       * Prime Name
-       * @description Human-readable prime name.
-       * @example Acme Prime
-       */
-      prime_name: string;
-      /**
-       * Prime Vault Address
-       * @description The prime's on-chain vault address — identical across the prime's rows. Dedupe on this before aggregating.
-       * @example 0x691a6c29e9e96dd897718305427ad5d534db16ba
-       */
-      prime_vault_address?: string | null;
-      /**
-       * Required Risk Capital
-       * @description Required Risk Capital (RRC) reported by upstream `financial_rrc` (USD).
-       * @example 7500000
-       */
-      required_risk_capital: string;
-      /**
-       * Scope
-       * @description Always `prime`: every metric on this row describes the whole prime, not the proxy in `prime_id`. The row repeats once per ALM proxy, so summing rows triple-counts. Dedupe by `prime_vault_address` first.
-       * @default prime
-       * @example prime
-       * @constant
-       */
-      scope: 'prime';
-      /**
-       * Timestamp
-       * @description ISO-8601 timestamp the snapshot was assembled.
-       * @example 2026-05-07T12:00:00Z
-       */
-      timestamp: string;
-      /**
-       * Total Risk Capital
-       * @description Total Risk Capital reported by upstream `total_rc` (USD).
-       * @example 10000000
-       */
-      total_risk_capital: string;
-      /**
-       * Validation Note
-       * @description Human-readable note about validation, e.g. why a row is missing or unmatched.
-       */
-      validation_note?: string | null;
     };
     /**
      * ChainResponse
@@ -2635,26 +2513,6 @@ export interface operations {
         };
         content: {
           'application/json': components['schemas']['HTTPValidationError'];
-        };
-      };
-    };
-  };
-  list_capital_metrics_v1_capital_metrics_get: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Successful Response */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          'application/json': components['schemas']['CapitalMetricsResponse'][];
         };
       };
     };

@@ -9,12 +9,10 @@
  * has whenever a chain is unindexed, which is what `prime_unserved_chains` is
  * for.
  */
-import { MINUTE_MS, isoAgo } from '../clock.ts';
 import { positionKeys } from '../identity.ts';
 import { ownEntry } from '../lookup.ts';
 import type {
   AllocationRiskCapital,
-  CapitalMetrics,
   ChainRiskCapital,
   PrimeRiskCapital,
   RiskBreakdown,
@@ -25,11 +23,9 @@ import {
   GROVE_AVALANCHE_PROXY,
   GROVE_BASE_PROXY,
   GROVE_MAINNET_PROXY,
-  GROVE_VAULT,
   SPARK_AVALANCHE_PROXY,
   SPARK_BASE_PROXY,
   SPARK_MAINNET_PROXY,
-  SPARK_VAULT,
   SPUSDS,
   TOKENS,
   tokenSymbol,
@@ -842,38 +838,6 @@ export function rrcEnvelope(
   };
 }
 
-const BENCHMARK_SOURCE = 'https://info.skyeco.com/required-risk-capital';
-/** The upstream monitor is polled every 15 minutes. */
-const CAPITAL_SNAPSHOT_AGO = 11 * MINUTE_MS;
-
-const SPARK_CAPITAL_FIGURES = {
-  prime_name: 'spark',
-  prime_vault_address: SPARK_VAULT,
-  exposure: '1656538061.997601317473783974',
-  total_risk_capital: '48142491.085806286854722044',
-  required_risk_capital: '44692696.19',
-  capital_buffer: '3449794.895806286854722044',
-  encumbrance_ratio: '0.9283',
-  is_validated: true,
-  benchmark_source: BENCHMARK_SOURCE,
-  validation_note: null,
-  scope: 'prime',
-} as const;
-
-const GROVE_CAPITAL_FIGURES = {
-  prime_name: 'grove',
-  prime_vault_address: GROVE_VAULT,
-  exposure: '124481521.310000000000000000',
-  total_risk_capital: '9204118.400000000000000000',
-  required_risk_capital: '5564324.20',
-  capital_buffer: '3639794.200000000000000000',
-  encumbrance_ratio: '0.6045',
-  is_validated: true,
-  benchmark_source: BENCHMARK_SOURCE,
-  validation_note: null,
-  scope: 'prime',
-} as const;
-
 /**
  * The upstream PRIME COLLATERAL figure and the monitor's ratio, as the
  * total-capital buckets carry them wherever the response holds Sky's figures.
@@ -885,40 +849,6 @@ export const PRIME_COLLATERAL_USD: Readonly<Record<PrimeName, string>> = {
 };
 
 export const PRIME_MONITOR_ENCUMBRANCE: Readonly<Record<PrimeName, string>> = {
-  spark: SPARK_CAPITAL_FIGURES.encumbrance_ratio,
-  grove: GROVE_CAPITAL_FIGURES.encumbrance_ratio,
+  spark: '0.9283',
+  grove: '0.6045',
 };
-
-/**
- * One row per ALM proxy carrying prime-level figures — the
- * `prime_id`-is-really-a-proxy trap the endpoint's own description warns about,
- * reproduced rather than tidied up so the UI's dedupe-by-vault is exercised.
- */
-export function seedCapitalMetrics(nowMs: number): CapitalMetrics[] {
-  const timestamp = isoAgo(nowMs, CAPITAL_SNAPSHOT_AGO);
-
-  return [
-    { ...SPARK_CAPITAL_FIGURES, prime_id: SPARK_MAINNET_PROXY, timestamp },
-    { ...SPARK_CAPITAL_FIGURES, prime_id: SPARK_BASE_PROXY, timestamp },
-    { ...SPARK_CAPITAL_FIGURES, prime_id: SPARK_AVALANCHE_PROXY, timestamp },
-    { ...GROVE_CAPITAL_FIGURES, prime_id: GROVE_MAINNET_PROXY, timestamp },
-    { ...GROVE_CAPITAL_FIGURES, prime_id: GROVE_BASE_PROXY, timestamp },
-    // The unvalidated branch: no upstream row, so zeroed figures and a note.
-    {
-      prime_id: GROVE_AVALANCHE_PROXY,
-      prime_name: 'grove',
-      prime_vault_address: GROVE_VAULT,
-      scope: 'prime',
-      exposure: '0',
-      total_risk_capital: '0',
-      required_risk_capital: '0',
-      capital_buffer: '0',
-      encumbrance_ratio: null,
-      is_validated: false,
-      benchmark_source: null,
-      validation_note:
-        'No matching row in the Star Agents monitor for this prime.',
-      timestamp,
-    },
-  ];
-}
