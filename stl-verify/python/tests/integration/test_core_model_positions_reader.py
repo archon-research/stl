@@ -32,9 +32,11 @@ async def engine(async_db_url: str):
             "borrower_collateral",
             "sparklend_reserve_data",
             "onchain_token_price",
-            # The current-price cache is trigger-fed and its upsert only takes
+            # The *_current caches are trigger-fed and their upserts only take
             # newer rows, so a leaked row would outlive a re-seed at the same block.
             "token_price_current",
+            "borrower_current",
+            "borrower_collateral_current",
         ):
             await conn.execute(text(f"TRUNCATE {table}"))
         # Markets and their positions together: two tests seed the same

@@ -4,8 +4,9 @@ Replaces ``users_sparklend_*.parquet`` / ``market_sparklend_*.parquet``. The
 model consumes a wide per-user frame (per-asset ``<sym>_supply``,
 ``<sym>_supply_usd``, ``<sym>_borrow``, ``<sym>_borrow_usd`` plus aggregate
 columns) and a market frame of oracle prices for the simulated collaterals;
-this adapter reproduces both shapes from ``borrower`` /
-``borrower_collateral`` / ``sparklend_reserve_data`` / ``token_price_current``.
+this adapter reproduces both shapes from ``borrower_current`` /
+``borrower_collateral_current`` / ``sparklend_reserve_data`` /
+``token_price_current``.
 
 Positions are valued with the protocol's own oracle (``_PROTOCOL_ORACLE``,
 checked against ``protocol_oracle``), joined by token id — never by symbol.
@@ -85,40 +86,38 @@ _FEED_ALIVE = text("""
     LIMIT 1
 """)
 
-# Latest state per (user, token) per side, snapshot-read per db/migrations
-# AGENTS: order by the snapshot-time key then processing_version, never build_id.
-# Priced by token id from the oracle's current-price cache; NULL = unpriced.
+# Newest state per (user, token) per side from the trigger-fed *_current caches,
+# not DISTINCT ON over the histories: those hypertables tier chunks older than a
+# year to S3, where a plain session cannot see them, so a borrower idle for a year
+# would silently drop out or reappear with an old amount. Priced by token id from
+# the oracle's current-price cache; NULL = unpriced.
 _POSITIONS = text("""
-    WITH latest_borrow AS (
-        SELECT DISTINCT ON (b.user_id, b.token_id) b.user_id, b.token_id, b.amount
-        FROM borrower b
-        JOIN protocol p ON p.id = b.protocol_id
-        WHERE p.chain_id = :chain_id AND p.name = :protocol_name
-        ORDER BY b.user_id, b.token_id, b.block_number DESC, b.block_version DESC, b.processing_version DESC
-    ),
-    latest_supply AS (
-        SELECT DISTINCT ON (c.user_id, c.token_id) c.user_id, c.token_id, c.amount, c.collateral_enabled
-        FROM borrower_collateral c
-        JOIN protocol p ON p.id = c.protocol_id
-        WHERE p.chain_id = :chain_id AND p.name = :protocol_name
-        ORDER BY c.user_id, c.token_id, c.block_number DESC, c.block_version DESC, c.processing_version DESC
-    )
     SELECT 'borrow' AS side, u.address AS user_address, t.id AS token_id, t.symbol, t.decimals,
-           lb.amount, true AS collateral_enabled, pr.price_usd
-    FROM latest_borrow lb
-    JOIN "user" u ON u.id = lb.user_id
-    JOIN token t ON t.id = lb.token_id
-    LEFT JOIN token_price_current pr ON pr.oracle_id = :oracle_id AND pr.token_id = lb.token_id
-    WHERE lb.amount > 0
+           b.amount, true AS collateral_enabled, pr.price_usd
+    FROM borrower_current b
+    JOIN protocol p ON p.id = b.protocol_id
+    JOIN "user" u ON u.id = b.user_id
+    JOIN token t ON t.id = b.token_id
+    LEFT JOIN token_price_current pr ON pr.oracle_id = :oracle_id AND pr.token_id = b.token_id
+    WHERE p.chain_id = :chain_id AND p.name = :protocol_name AND b.amount > 0
     UNION ALL
-    SELECT 'supply', u.address, t.id, t.symbol, t.decimals, ls.amount, ls.collateral_enabled, pr.price_usd
-    FROM latest_supply ls
-    JOIN "user" u ON u.id = ls.user_id
-    JOIN token t ON t.id = ls.token_id
-    LEFT JOIN token_price_current pr ON pr.oracle_id = :oracle_id AND pr.token_id = ls.token_id
-    WHERE ls.amount > 0
+    SELECT 'supply', u.address, t.id, t.symbol, t.decimals, c.amount, c.collateral_enabled, pr.price_usd
+    FROM borrower_collateral_current c
+    JOIN protocol p ON p.id = c.protocol_id
+    JOIN "user" u ON u.id = c.user_id
+    JOIN token t ON t.id = c.token_id
+    LEFT JOIN token_price_current pr ON pr.oracle_id = :oracle_id AND pr.token_id = c.token_id
+    WHERE p.chain_id = :chain_id AND p.name = :protocol_name AND c.amount > 0
 """)
 
+# Morpho has no *_current cache yet, so its newest-per-key read must be able to
+# see S3-tiered chunks. The GUC exists only where tiering does (Timescale Cloud);
+# without it there is no tiered history to miss.
+_TIERED_READS_GUC = text("SELECT 1 FROM pg_settings WHERE name = 'timescaledb.enable_tiered_reads'")
+_ENABLE_TIERED_READS = text("SET LOCAL timescaledb.enable_tiered_reads = 'on'")
+
+# sparklend_reserve_data is partitioned by block_number and has no tiering
+# policy, and every reserve is rewritten constantly, so its newest row is local.
 _RESERVE_PARAMS = text("""
     SELECT DISTINCT ON (srd.token_id)
            t.symbol,
@@ -259,8 +258,14 @@ def build_users_frame(
 
 
 # Morpho Blue's liquidation incentive factor is a pure function of the
-# market's LLTV: LIF = min(M, 1 / (beta * LLTV + (1 - beta))) with M = 1.15,
-# beta = 0.3 (whitepaper constants). BA's parquet carries exactly this value.
+# market's LLTV: LIF = min(M, 1 / (beta * LLTV + (1 - beta))). M and beta are
+# `constant`s in the non-upgradeable Blue singleton (ConstantsLib.sol:
+# MAX_LIQUIDATION_INCENTIVE_FACTOR, LIQUIDATION_CURSOR), so they cannot change
+# for this deployment and are hardcoded rather than configured. To check them
+# against reality: on indexed `Liquidate` events, seizedAssets × collateral
+# price / (repaidAssets × loan price) equals this formula for the market's LLTV
+# (staging, 26 Aug 2026: LLTVs 0.77–0.945 all within oracle noise). BA's
+# parquet carries the same value for LLTV 0.86.
 _MORPHO_LIF_CAP = 1.15
 _MORPHO_BETA = 0.3
 
@@ -457,7 +462,9 @@ class PostgresPositionsReader:
         return users_df, market_df
 
     async def _get_morpho_data(self, collateral: str, loan_token: str) -> tuple[pd.DataFrame, pd.DataFrame]:
-        async with self._engine.connect() as conn:
+        async with self._engine.begin() as conn:
+            if (await conn.execute(_TIERED_READS_GUC)).scalar_one_or_none() is not None:
+                await conn.execute(_ENABLE_TIERED_READS)
             oracle_id = await self._live_oracle_id(conn, "MORPHO")
             rows = (
                 await conn.execute(

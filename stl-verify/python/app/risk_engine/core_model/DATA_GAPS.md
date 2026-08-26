@@ -123,7 +123,10 @@ Note: prod has all six venue books flowing (verified on the replica,
 
 **SparkLend (4 markets): done** behind `CORE_MODEL_POSITION_SOURCE=postgres`.
 The reader builds the wide users frame from `borrower` /
-`borrower_collateral` / `sparklend_reserve_data` / `token_price_current`,
+`borrower_collateral` / `sparklend_reserve_data` / `token_price_current`
+(positions via the trigger-fed `borrower_current` / `borrower_collateral_current`
+caches, because the histories tier year-old chunks to S3 that a plain session
+cannot see; Morpho has no such cache yet and enables tiered reads instead),
 validated against staging: the per-user borrow sum matches the reserve-level
 total debt within 0.6% (interest accrual since each user's last event), and a
 full CRR computed end to end on the live frame.
