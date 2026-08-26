@@ -216,8 +216,9 @@ async def test_get_liquidation_params_uses_aave_like_repository(
 
     result = await reader.get_liquidation_params(info, backed_asset_id=42, token_ids=[1, 2])
 
-    aave_liq_repo.get_params.assert_awaited_once_with(info.protocol_id, [1, 2])
-    assert result == aave_liq_repo.get_params.return_value
+    # The repository read is protocol-wide; the reader slices it to the caller's tokens.
+    aave_liq_repo.get_params.assert_awaited_once_with(info.protocol_id)
+    assert result == {1: aave_liq_repo.get_params.return_value[1]}
 
 
 @pytest.mark.asyncio

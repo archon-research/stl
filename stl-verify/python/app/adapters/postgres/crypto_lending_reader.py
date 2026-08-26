@@ -189,7 +189,8 @@ class PostgresCryptoLendingReader:
         normalized = _normalize_protocol_name(info.protocol_name)
 
         if normalized in _AAVE_LIKE:
-            return await self._aave_liq_repo.get_params(info.protocol_id, token_ids)
+            params = await self._aave_liq_repo.get_params(info.protocol_id)
+            return {tid: params[tid] for tid in token_ids if tid in params}
 
         if normalized in _MORPHO:
             return await self._morpho_liq_repo.get_params(backed_asset_id, token_ids)
