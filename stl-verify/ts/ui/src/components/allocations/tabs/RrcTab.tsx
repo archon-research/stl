@@ -23,6 +23,7 @@ import type {
   PrimeRiskCapital,
   Prime,
   Rrc,
+  RrcResult,
 } from '../../../types/allocation';
 import { ProtocolLogo, SummaryMetric, TokenLogo } from '../../shared';
 import { TabNotePanel, unindexedChainMessage } from './TabStatePanels';
@@ -41,6 +42,25 @@ const MODEL_LABELS: Record<string, string> = {
   gap_sweep: 'Gap sweep',
   core_model: 'CORE (alpha)',
 };
+
+// The table's own preference chain (PrimeRiskCapitalService._model_preference):
+// core_model first, gap_sweep second. suraf never appears there, so it's never
+// a fallback candidate even if the drawer's own dispatch priced it.
+const MODEL_PREFERENCE_FALLBACK = ['core_model', 'gap_sweep'] as const;
+
+// Which model the table would have used for this position, when the table
+// itself carries no model for it (unpriced there, or the row didn't join).
+// Picked from what the drawer actually priced, so the badge never lands on a
+// model that produced no result.
+function fallbackSelectedModel(
+  results: RrcResult[] | undefined,
+): string | null {
+  return (
+    MODEL_PREFERENCE_FALLBACK.find((model) =>
+      results?.some((result) => result.risk_model === model),
+    ) ?? null
+  );
+}
 
 type ReferenceFigures = { crrPct: string | null; rrcUsd: string | null };
 
@@ -296,11 +316,17 @@ export function RrcTab({
     );
   }, [isChainMismatch, isEnabled, riskCapital, selectedReceiptToken]);
 
-  const selectedModel = riskCapitalEntry?.model ?? null;
   const reference = showsReference ? referenceFigures(riskCapitalEntry) : null;
   // Sky's figure is the one every display prefers when it exists, so its row
   // carries the badge; a model row is "selected" only when Sky reports nothing.
   const skySelected = reference !== null;
+  // The row's own model is the ground truth for what the table used. When the
+  // table has no model for this position (unpriced there, or the position
+  // didn't join), fall back to the same preference chain the backend tries so
+  // the badge still lands on the model the table would have used.
+  const selectedModel = skySelected
+    ? null
+    : (riskCapitalEntry?.model ?? fallbackSelectedModel(rrc?.results));
 
   if (!selectedReceiptToken) {
     return (
