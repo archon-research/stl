@@ -57,25 +57,6 @@ SET LOCAL search_path = public;
 -- accepts a custom GUC and current_setting then returns it with every SET LOCAL inert (measured).
 SELECT set_config('position_current.rebuild_xid', pg_current_xact_id()::text, true);
 
--- Two distinct failures, both of which otherwise report a byte-identical INSERT 0 N with no error.
---
--- (1) The copy-paste path, where every SET LOCAL above degrades to a warning the driver discards:
--- outside a transaction block none of them applies, so this would run with no tiered-read guarantee and
--- no lock bound. The xid comparison is what detects it.
---
--- (2) Tiered reads actually off, whatever set it: a rebuild over local chunks only computes "newest per
--- key" across a PARTIAL table. That is the setting this guard exists to protect, so it is checked by
--- name rather than inferred from the SET having run.
-DO $rebuild_guard$
-BEGIN
-    IF current_setting('position_current.rebuild_xid', true) IS DISTINCT FROM pg_current_xact_id()::text THEN
-        RAISE EXCEPTION 'run the REBUILD region inside ONE transaction (BEGIN; ... COMMIT;): the transaction stamp does not match this statement''s transaction, so every SET LOCAL above is an inert warning -- no tiered-read guarantee and no lock bound';
-    END IF;
-    IF current_setting('timescaledb.enable_tiered_reads') <> 'on' THEN
-        RAISE EXCEPTION 'timescaledb.enable_tiered_reads is %, not on: this would compute "newest per key" over local chunks only and report a byte-identical INSERT 0 N', current_setting('timescaledb.enable_tiered_reads');
-    END IF;
-END
-$rebuild_guard$;
 INSERT INTO public.position_current
     (position_id, as_of_date, chain_id, protocol_id, instrument_key, holder_id, quantity,
      block_number, block_version, processing_version, block_timestamp, projection, build_id)
@@ -84,6 +65,12 @@ SELECT DISTINCT ON (p.position_id)
        p.instrument_key, p.holder_id, p.quantity, p.block_number, p.block_version,
        p.processing_version, p.block_timestamp, p.projection, p.build_id
 FROM public.position_state p
+-- The precondition check, evaluated INSIDE the statement that depends on it. As a preceding DO block it
+-- was steppable: psql without ON_ERROR_STOP raised and then ran this INSERT anyway, writing every row
+-- after reporting the error (measured -- 12 rows written on a fixture that should have written none).
+-- The subquery is uncorrelated, so it is an InitPlan/One-Time Filter evaluated once per statement, not
+-- once per row; the check and the write now stand or fall together. Defined in 20260819_150000.
+WHERE (SELECT public.position_current_rebuild_guard())
 -- position_id FIRST, which is both the DISTINCT ON key and the lock order. The statement trigger orders
 -- its upsert the same way, so the two writers sweep position_current's PK in one key-derived total order.
 ORDER BY p.position_id,

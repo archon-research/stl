@@ -203,6 +203,52 @@ $fn$;
 COMMENT ON FUNCTION upsert_position_current() IS '[Operational] Keeps position_current at the latest observation per position (VEC-409), by (block_number, block_version, processing_version, block_timestamp). AFTER INSERT on position_state, once per STATEMENT over its transition table and ordered by position_id so the rebuild cannot cross it; an out-of-order insert cannot regress a position.';
 
 -- Guarded like every other DDL statement in this file, so a re-run -- a manual apply, a restore, a
+-- The precondition check for the rebuild region in 20260819_150100. It lives here, as a callable, so the
+-- rebuild can evaluate it from INSIDE its INSERT rather than in a preceding statement. A preceding DO
+-- block is steppable: psql without ON_ERROR_STOP, and any driver that submits a file statement-at-a-time,
+-- reports the EXCEPTION and then runs the INSERT anyway -- measured, the ERROR is followed by a healthy
+-- INSERT 0 N and the operator has no reason to think the cache is now partial. As a scalar subquery in
+-- the INSERT's WHERE there is no statement boundary to step over: the check and the write stand or fall
+-- together. It is uncorrelated, so the planner evaluates it once per statement as an InitPlan/One-Time
+-- Filter, not once per row.
+--
+-- Two distinct failures, both of which otherwise report a byte-identical INSERT 0 N with no error.
+--
+-- (1) The copy-paste path, where every SET LOCAL in the region degrades to a warning the driver discards:
+-- outside a transaction block none of them applies, so the rebuild would run with no tiered-read
+-- guarantee and no lock bound. The xid comparison is what detects it -- and it cannot be satisfied by a
+-- pre-seeded default, which is why it is an xid rather than a fixed sentinel. Measured on 2.25.1-pg17:
+-- inside BEGIN/COMMIT the stamp equals the live xid and the check passes; with no transaction block the
+-- stamp is rolled back with its own implicit transaction and reads NULL, so it fires; and
+-- `ALTER ROLE ... SET position_current.rebuild_xid` pre-seeds a value that can never equal the live xid,
+-- so it still fires. A fixed sentinel fails that third case (measured).
+--
+-- (2) Tiered reads actually off, whatever set it: a rebuild over local chunks only computes "newest per
+-- key" across a PARTIAL table. That is the setting this exists to protect, so it is checked by name
+-- rather than inferred from the SET having run. Read with the missing_ok form: on an engine without the
+-- extension loaded current_setting() would otherwise raise an unrelated "unrecognized configuration
+-- parameter" from inside a guard whose whole job is to report precisely why a rebuild is unsafe.
+CREATE OR REPLACE FUNCTION position_current_rebuild_guard()
+RETURNS boolean LANGUAGE plpgsql STABLE
+SET search_path = pg_catalog, public
+AS $guard$
+BEGIN
+    IF current_setting('position_current.rebuild_xid', true) IS DISTINCT FROM pg_current_xact_id()::text THEN
+        RAISE EXCEPTION 'run the REBUILD region inside ONE transaction (BEGIN; ... COMMIT;): the transaction stamp does not match this statement''s transaction, so every SET LOCAL in the region is an inert warning -- no tiered-read guarantee and no lock bound';
+    END IF;
+    IF current_setting('timescaledb.enable_tiered_reads', true) IS DISTINCT FROM 'on' THEN
+        RAISE EXCEPTION 'timescaledb.enable_tiered_reads is %, not on: this would compute "newest per key" over local chunks only and report a byte-identical INSERT 0 N', coalesce(current_setting('timescaledb.enable_tiered_reads', true), '(unset)');
+    END IF;
+    RETURN true;
+END
+$guard$;
+
+COMMENT ON FUNCTION position_current_rebuild_guard() IS
+    'Precondition check for the REBUILD region of 20260819_150100. Called from inside that INSERT so it cannot be stepped over; raises unless the region is running in one transaction with tiered reads on.';
+
+-- Trigger creation. The rebuild guard above is created first only so the whole precondition lives in one
+-- place; it is called from the other file.
+
 -- partial-apply recovery -- does not fail with "trigger already exists".
 DROP TRIGGER IF EXISTS trigger_upsert_position_current ON position_state;
 CREATE TRIGGER trigger_upsert_position_current
@@ -210,5 +256,26 @@ CREATE TRIGGER trigger_upsert_position_current
     REFERENCING NEW TABLE AS newrows
     FOR EACH STATEMENT
 EXECUTE FUNCTION upsert_position_current();
+
+-- KNOWN GAP, no DDL fix available. This trigger is left at the ORIGIN default because TimescaleDB
+-- refuses to change it: `ALTER TABLE position_state ENABLE ALWAYS TRIGGER ...` fails with "hypertables
+-- do not support  enabling or disabling triggers", and once columnstore is on -- which it is here --
+-- with "operation not supported on hypertables that have columnstore enabled". Both measured on
+-- 2.25.1-pg17 against a minimal hypertable, so it is a blanket restriction, not something about this
+-- schema. Enabling it before compression is not an option either: position_state and its columnstore
+-- settings are created in earlier, already-applied migrations.
+--
+-- The consequence, also measured: at ORIGIN the trigger does not fire under
+-- session_replication_role = 'replica'. A plain INSERT and a COPY both land their rows in the
+-- hypertable and skip the trigger entirely, with no error -- so history advances and position_current
+-- does not. That is what pg_restore --disable-triggers sets, and what anyone setting the role by hand
+-- gets. (Logical replication is not in scope here for a different reason: its apply worker applies row
+-- changes and never fires statement-level triggers at all, whatever tgenabled says.)
+--
+-- Nothing downstream repairs this on its own. upsert_position_current reads a transition table, which is
+-- empty for rows that already committed, and the materializer's arm is NOT EXISTS + ON CONFLICT DO
+-- NOTHING, so a stored row is never re-derived. The recovery is the REBUILD region in
+-- 20260819_150100 -- run it after any restore or any bulk load done under the replica role. The
+-- integration test asserts that the region does repair exactly this case.
 
 INSERT INTO migrations (filename) VALUES ('20260819_150000_create_position_current.sql') ON CONFLICT (filename) DO NOTHING;
