@@ -505,6 +505,22 @@ export function formatPercentValue(
   return `${numeric.toFixed(digits)}%`;
 }
 
+// Trailing methodology tag for a "Model-derived (<model>...)" caption.
+// gap_sweep is a fixed 15% collateral-price stress; core_model charges
+// capital off a Monte Carlo expected loss instead (app/risk_engine/core_model
+// README, CoreModelDetails.crr_el_pct), so the same "stress" wording would
+// misdescribe it. An unrecognized model gets no suffix — just its bare name.
+export function riskModelCaptionSuffix(model: string | null): string {
+  switch (model) {
+    case 'gap_sweep':
+      return ', 15% stress';
+    case 'core_model':
+      return ', expected-loss based';
+    default:
+      return '';
+  }
+}
+
 // Encumbrance breach thresholds, as the Sky Atlas defines them rather than as a
 // number chosen here: a Low Severity Breach is a ratio at or above 100% and
 // below 103%, a High Severity Breach is above 103%.
