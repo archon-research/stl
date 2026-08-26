@@ -335,6 +335,12 @@ export function seedAllocations(
  * make the comparison the flag exists for silently compare two different primes.
  * `undefined` is "the monitor does not track this prime", which the endpoint
  * answers as a 404.
+ *
+ * `selfRows` echo STL's own indexed positions, so their `underlying_*` already
+ * matches what the real API resolves through its registry for a row it
+ * indexes — no separate enrichment needed here. `skyOnlyAllocations` carries
+ * the other half of the contract: rows STL does not index at all, whose
+ * `underlying_*` stay null/`''`.
  */
 export function seedReferenceAllocations(
   nowMs: number,
@@ -365,6 +371,8 @@ export function seedReferenceAllocations(
  * carry the three properties that make them awkward: no receipt token (so no
  * `receipt_token_id` to join a risk row by), no token quantity, and — for the
  * Arkis vault — an exposure large enough to matter against STL's own totals.
+ * `underlying_symbol` stays `''` here, matching the real API: these positions
+ * do not resolve against STL's registry, so nothing is there to name them with.
  */
 /** The Arkis vault Sky reports and STL does not index. */
 const ARKIS_VAULT = '0x38464507e02c983f20428a6e8566693fe9e422a9';
@@ -382,7 +390,7 @@ function skyOnlyAllocations(nowMs: number, primeName: PrimeName): Allocation[] {
       underlying_token_id: null,
       underlying_token_address: null,
       symbol: 'sparkPrimeUSDC1',
-      underlying_symbol: 'USDC',
+      underlying_symbol: '',
       protocol_name: 'Arkis',
       position_keys: [`position:1:${ARKIS_VAULT}`],
       balance: null,
@@ -402,7 +410,7 @@ function skyOnlyAllocations(nowMs: number, primeName: PrimeName): Allocation[] {
       underlying_token_id: null,
       underlying_token_address: null,
       symbol: 'UNI-V4-PYUSD-USDS',
-      underlying_symbol: 'USDS',
+      underlying_symbol: '',
       protocol_name: 'uniswap',
       // A pool id is not an address, so this one can only key on its symbol.
       position_keys: ['symbol:1:uniswap:uni-v4-pyusd-usds'],

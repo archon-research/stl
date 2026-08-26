@@ -197,7 +197,8 @@ class AllocationResponse(BaseModel):
         description=(
             "Surrogate id of the underlying token. For direct holdings, this is the held asset itself, "
             "unless the holding is valued on the underlying-value basis (allowlisted). `null` for off-chain "
-            "custody holdings (e.g. Anchorage BTC), which have no token-registry row."
+            "custody holdings (e.g. Anchorage BTC), which have no token-registry row. On a reference row, "
+            "populated when the position resolves to STL's registry, null otherwise."
         ),
         examples=[1],
     )
@@ -206,7 +207,8 @@ class AllocationResponse(BaseModel):
         description=(
             "0x-prefixed underlying-token contract address. For direct holdings, this is the held asset itself, "
             "unless the holding is valued on the underlying-value basis (allowlisted). `null` for off-chain "
-            "custody holdings (e.g. Anchorage BTC), which have no on-chain address."
+            "custody holdings (e.g. Anchorage BTC), which have no on-chain address. On a reference row, "
+            "populated when the position resolves to STL's registry, null otherwise."
         ),
         examples=["0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"],
     )
@@ -217,7 +219,8 @@ class AllocationResponse(BaseModel):
     underlying_symbol: str = Field(
         description=(
             "Underlying-token symbol. For direct holdings, same as ``symbol``, "
-            "unless the holding is valued on the underlying-value basis (allowlisted)."
+            "unless the holding is valued on the underlying-value basis (allowlisted). On a reference row, "
+            "populated when the position resolves to STL's registry, empty otherwise."
         ),
         examples=["USDC"],
     )
@@ -446,8 +449,10 @@ async def list_protocols(service: AllocationService = Depends(_get_service)):
         "`amount_usd` carrying upstream's `assets`. That is the same measurement as the indexed "
         "rows' `amount_usd`, so the two halves of `both` are comparable — deliberately not the Star "
         "monitor's risk-capital breakdown, whose `exposure` covers only the priced subset and runs "
-        "about a third smaller. These rows carry no `balance`, no `underlying_symbol` and no "
-        "activity fields, which upstream does not publish."
+        "about a third smaller. These rows carry no `balance` and no activity fields, which "
+        "upstream does not publish. `underlying_token_id`, `underlying_token_address` and "
+        "`underlying_symbol` are populated when the position resolves to STL's registry, null "
+        "otherwise — upstream names no loan token of its own."
     ),
 )
 async def list_allocations(
@@ -695,13 +700,14 @@ def _reference_allocation_row(
         network=row.network,
         receipt_token_id=row.receipt_token_id,
         receipt_token_address=row.token_address if as_address(row.token_address) else None,
-        # Both or neither, per the model's invariant. This feed names no loan
-        # token at all — unlike the Star monitor's breakdown, which carried a
-        # symbol for it.
-        underlying_token_id=None,
-        underlying_token_address=None,
+        # Both or neither, per the model's invariant — true here because the
+        # service sets them from the same registry lookup as `receipt_token_id`.
+        # This feed names no loan token of its own; populated when the position
+        # resolves to STL's registry, null otherwise.
+        underlying_token_id=row.underlying_token_id,
+        underlying_token_address=row.underlying_token_address,
         symbol=row.symbol,
-        underlying_symbol="",
+        underlying_symbol=row.underlying_symbol,
         protocol_name=row.protocol_name,
         balance=None,
         # `assets`, the whole holding — the same measurement STL's own rows

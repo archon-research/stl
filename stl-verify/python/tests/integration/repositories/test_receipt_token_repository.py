@@ -78,6 +78,7 @@ async def _seed_data(db_url: str) -> None:
             {
                 "receipt_token_id": indexed_rt_id,
                 "missing_token_row_receipt_token_id": missing_token_row_rt_id,
+                "underlying_token_id": token_id,
             },
         )
     finally:
@@ -127,6 +128,25 @@ async def test_returns_receipt_token_info_when_receipt_token_address_token_row_i
 
 
 @pytest.mark.asyncio(loop_scope="module")
+async def test_returns_receipt_token_info_includes_the_underlying_identity(repository, test_ids, db_url) -> None:
+    # The receipt-token query joins the underlying `token` row (NOT NULL FK, so
+    # it always resolves), and the reference-allocation enrichment reads it off
+    # this same lookup rather than issuing a second one.
+    conn = await asyncpg.connect(db_url)
+    try:
+        weth = await conn.fetchrow("SELECT symbol, address FROM token WHERE id = $1", test_ids["underlying_token_id"])
+    finally:
+        await conn.close()
+
+    result = await repository.get(test_ids["receipt_token_id"])
+
+    assert result is not None
+    assert result.underlying_token_id == test_ids["underlying_token_id"]
+    assert result.underlying_symbol == weth["symbol"]
+    assert result.underlying_token_address == bytes(weth["address"])
+
+
+@pytest.mark.asyncio(loop_scope="module")
 async def test_returns_none_for_unknown_id(repository) -> None:
     result = await repository.get(99999)
     assert result is None
@@ -140,6 +160,8 @@ async def test_get_by_chain_and_address_returns_info(repository, test_ids) -> No
     assert result is not None
     assert result.receipt_token_id == test_ids["receipt_token_id"]
     assert result.protocol_name == "SparkLend"
+    assert result.underlying_token_id == test_ids["underlying_token_id"]
+    assert result.underlying_symbol == "WETH"
 
 
 @pytest.mark.asyncio(loop_scope="module")

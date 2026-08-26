@@ -91,15 +91,26 @@ class ReferencePositionsService:
         return tuple(await asyncio.gather(*(resolve(row) for row in positions)))
 
     async def _resolve_one(self, row: ReferencePosition) -> ReferencePosition:
-        """Attach STL's receipt-token id to an upstream row.
+        """Attach STL's receipt-token id and underlying identity to an upstream row.
 
         The chain is already resolved at the adapter boundary; only the registry
         join is left, and it is skipped structurally where it cannot succeed
-        rather than issued and allowed to miss.
+        rather than issued and allowed to miss. One lookup carries both: the
+        adapter's query already joins the underlying `token` row, so resolving
+        the underlying here costs no second round trip per row.
         """
         address = as_address(row.token_address)
         if row.chain_id is None or address is None:
             return row
 
         info = await self._receipt_tokens.get_by_chain_and_address(row.chain_id, address)
-        return dataclasses.replace(row, receipt_token_id=info.receipt_token_id if info else None)
+        if info is None:
+            return dataclasses.replace(row, receipt_token_id=None)
+
+        return dataclasses.replace(
+            row,
+            receipt_token_id=info.receipt_token_id,
+            underlying_token_id=info.underlying_token_id,
+            underlying_token_address=info.underlying_token_address_hex,
+            underlying_symbol=info.underlying_symbol,
+        )
