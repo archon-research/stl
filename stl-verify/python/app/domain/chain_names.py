@@ -51,3 +51,15 @@ def chain_is_served(chain: str | None) -> bool:
     asserted about data STL does not collect.
     """
     return chain in SERVED_TRACKER_CHAINS
+
+
+def chain_id_for(name: str) -> int | None:
+    """Return the EVM chain id for an internal chain ``name``, or ``None``.
+
+    Reverse of :func:`chain_name_for`; ``CHAIN_ID_TO_NAME`` values are unique, so
+    the mapping is unambiguous.
+    """
+    for chain_id, chain_name in CHAIN_ID_TO_NAME.items():
+        if chain_name == name:
+            return chain_id
+    return None
