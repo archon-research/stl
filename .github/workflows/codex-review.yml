@@ -70,41 +70,6 @@ jobs:
           printf '%s' "${CODEX_AUTH_JSON}" > "${CODEX_HOME}/auth.json"
           chmod 600 "${CODEX_HOME}/auth.json"
 
-      # ubuntu-latest is Ubuntu 24.04, which restricts unprivileged user namespaces
-      # by default. Codex sandboxes every command it runs with bubblewrap, which needs
-      # such a namespace to bring up loopback, so with the restriction in place every
-      # command the reviewer runs dies with "bwrap: loopback: Failed RTM_NEWADDR".
-      # See openai/codex#15057.
-      #
-      # The preflight is the important half. Without it a broken sandbox is not a
-      # failure but a silent downgrade: the agent cannot read the checkout, so it
-      # substitutes whatever it can still reach and reviews that instead. A confident
-      # review of the wrong bytes is worse than no review, so prove the sandbox works
-      # before spending a token on it.
-      # Grant the permission to bwrap alone, via the AppArmor profile shape Ubuntu
-      # itself ships for flatpak and chrome. The blunt alternative — flipping the
-      # kernel.apparmor_restrict_unprivileged_userns sysctl to 0 — hands unprivileged
-      # user namespaces to every binary on the box, and userns has a long history of
-      # local-privesc CVEs. Scope it to the one program that needs it.
-      - name: Enable the sandbox the reviewer runs in
-        run: |
-          set -euo pipefail
-          sudo tee /etc/apparmor.d/bwrap >/dev/null <<'PROFILE'
-          abi <abi/4.0>,
-          include <tunables/global>
-
-          profile bwrap /usr/bin/bwrap flags=(unconfined) {
-            userns,
-            include if exists <local/bwrap>
-          }
-          PROFILE
-          sudo systemctl reload apparmor
-
-          if ! bwrap --unshare-all --dev-bind / / /bin/true; then
-            echo "::error::bubblewrap cannot create a sandbox on this runner. Codex would fall back to reviewing whatever it can still reach instead of the checkout. Refusing to run."
-            exit 1
-          fi
-
       - name: Install Codex CLI
         run: |
           set -euo pipefail
@@ -112,6 +77,30 @@ jobs:
           # reviewer makes "did quality drop?" unanswerable across runs.
           npm install --global --no-fund --no-audit @openai/codex@0.149.1
           codex --version
+
+      # ubuntu-latest is Ubuntu 24.04, which restricts unprivileged user namespaces by
+      # default. Codex sandboxes every command the reviewer runs with bubblewrap, which
+      # needs such a namespace to bring up loopback, so with the restriction in place
+      # every one of those commands dies with "bwrap: loopback: Failed RTM_NEWADDR" —
+      # openai/codex#15057. An AppArmor profile would scope the grant to bwrap alone,
+      # but Codex ships its own bwrap at a path that moves between releases, and a
+      # profile naming the wrong path silently governs nothing. The runner is a
+      # single-tenant VM that already hands this job passwordless sudo, so the
+      # host-wide knob gives up nothing here that we do not already have.
+      #
+      # Then prove it: `codex sandbox` exercises the real sandbox stack, whatever
+      # binary that turns out to be, and costs no model tokens. Without this check a
+      # broken sandbox is not a failure but a silent downgrade — the agent cannot read
+      # the checkout, so it reviews whatever it can still reach, and a confident review
+      # of the wrong bytes is worse than no review.
+      - name: Enable and verify the sandbox the reviewer runs in
+        run: |
+          set -euo pipefail
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          if ! codex sandbox -- /bin/true; then
+            echo "::error::Codex cannot create a sandbox on this runner, and would fall back to reviewing whatever it can still reach instead of the checkout. Refusing to run."
+            exit 1
+          fi
 
       - name: Review the diff
         env:
