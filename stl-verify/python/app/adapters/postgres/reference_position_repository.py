@@ -5,50 +5,48 @@ for a prime in ``prime_reference_position`` each cycle. This reads the newest
 cycle back, so the allocation list serves observations instead of fetching the
 feed per request.
 
-Coverage is still decided by the risk-capital table, not by this one — as it was
-decided by the Star monitor's tracked set and not by this feed. A covered prime
-holding nothing writes no position rows, which is indistinguishable here from a
-prime never reported on, and the two are different answers: an empty list versus
-a ``404``. Reading coverage from the table that carries a row per covered prime
-per cycle keeps them apart, and keeps the allocation list and the risk-capital
-card from disagreeing about whether a prime has reference data.
+The indexer fetches positions only for the stars a cycle's risk-capital
+snapshots cover, so "this prime has position rows" implies "this prime has a
+coverage row". That invariant lives in the Go service and is what lets the
+coverage gate below be a cheap AND rather than a decision about precedence.
 """
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.adapters.postgres._reading import reading
 from app.adapters.postgres._reference_rows import (
     PRIME_BY_STAR_CTE,
-    RECEIPT_TOKEN_JOIN,
     optional_decimal,
-    optional_text,
-    reading,
+    receipt_token_join,
     required_decimal,
+    text_or_empty,
     token_address_bytes,
 )
-from app.domain.chain_names import CHAIN_ID_TO_NAME
+from app.domain.chain_names import chain_name_for
 from app.domain.entities.reference_position import ReferencePosition, ReferencePositionSnapshot
 
-# One statement, because coverage and content are two questions of two tables
-# and splitting them would let a cycle land between the answers. The coverage row
-# drives the join, so an uncovered prime yields no rows at all while a covered
-# prime with no positions yields one null-padded row — the distinction the
-# service turns into `404` versus an empty list.
+# One statement, because coverage and content are two questions of two tables and
+# splitting them would let a cycle land between the answers.
+#
+# Both tables must have a row: the monitor must cover the prime, and this feed
+# must have reported on it. Requiring only the former serves an empty balance
+# sheet -- "Sky reports this prime holds nothing" -- for a prime whose positions
+# have simply never landed, which is every prime in the window before the feed's
+# first cycle. Requiring only the latter would let this endpoint and the
+# risk-capital card disagree about whether a prime is covered at all.
 _POSITIONS_SQL = text(
-    "WITH"
-    + PRIME_BY_STAR_CTE
+    PRIME_BY_STAR_CTE
     + """,
-    covered AS (
-        SELECT pcs.synced_at
-        FROM prime_capital_stack pcs
-        WHERE pcs.prime_id = (SELECT id FROM target)
-        ORDER BY pcs.synced_at DESC, pcs.processing_version DESC
-        LIMIT 1
-    ),
+    -- Its own newest cycle, not the coverage row's: the indexer saves the
+    -- capital stack before the positions and not in one transaction, so pinning
+    -- to coverage blanks the sheet for the window between the two saves.
     cycle AS (
-        SELECT MAX(p.synced_at) AS synced_at
+        SELECT p.synced_at
         FROM prime_reference_position p
         WHERE p.prime_id = (SELECT id FROM target)
+        ORDER BY p.synced_at DESC, p.processing_version DESC
+        LIMIT 1
     ),
     latest AS (
         SELECT DISTINCT ON (p.network, p.token_address)
@@ -71,7 +69,7 @@ _POSITIONS_SQL = text(
         ORDER BY p.network, p.token_address, p.processing_version DESC
     )
     SELECT
-        COALESCE(r.synced_at, covered.synced_at) AS synced_at,
+        r.synced_at,
         r.network,
         r.chain_id,
         r.protocol_name,
@@ -82,12 +80,14 @@ _POSITIONS_SQL = text(
         r.allocated_assets_usd,
         r.idle_assets_usd,
         rt.id AS receipt_token_id
-    FROM covered
-    LEFT JOIN latest r ON TRUE
+    FROM latest r
     """
-    + RECEIPT_TOKEN_JOIN
+    + receipt_token_join("r")
     + """
-    ORDER BY r.assets_usd DESC NULLS LAST
+    WHERE EXISTS (
+        SELECT 1 FROM prime_capital_stack pcs WHERE pcs.prime_id = (SELECT id FROM target)
+    )
+    ORDER BY r.assets_usd DESC, r.network, r.token_address
     """
 )
 
@@ -99,7 +99,13 @@ class ReferencePositionRepository:
         self._engine = engine
 
     async def get_positions(self, star: str) -> ReferencePositionSnapshot | None:
-        """Return ``star``'s newest observed positions, or ``None`` if it has none."""
+        """Return ``star``'s newest observed positions, or ``None`` if it has none.
+
+        ``None`` is "no reference data for this prime", which the API serves as a
+        ``404``. It is never an empty snapshot: the indexer refuses to persist an
+        empty balance sheet for a covered prime, so zero rows here means nothing
+        has been observed rather than that the prime holds nothing.
+        """
         async with reading(self._engine, what=f"reading the reference positions for '{star}'") as conn:
             rows = (await conn.execute(_POSITIONS_SQL, {"star": star})).fetchall()
 
@@ -107,24 +113,21 @@ class ReferencePositionRepository:
             return None
         return ReferencePositionSnapshot(
             synced_at=rows[0].synced_at,
-            # A single null-padded row is the coverage row alone: the prime is
-            # covered and upstream reported it holding nothing.
-            positions=tuple(_position(row) for row in rows if row.token_address is not None),
+            positions=tuple(_position(row) for row in rows),
         )
 
 
 def _position(row) -> ReferencePosition:
-    chain_id: int | None = row.chain_id
     return ReferencePosition(
         protocol_name=row.protocol_name,
         network=row.network,
         symbol=row.token_symbol,
-        name=optional_text(row.token_name),
+        name=text_or_empty(row.token_name),
         token_address=row.token_address,
         assets_usd=required_decimal(row.assets_usd, "assets_usd"),
         allocated_assets_usd=optional_decimal(row.allocated_assets_usd, "allocated_assets_usd"),
         idle_assets_usd=optional_decimal(row.idle_assets_usd, "idle_assets_usd"),
         receipt_token_id=row.receipt_token_id,
-        chain_id=chain_id,
-        chain=CHAIN_ID_TO_NAME.get(chain_id) if chain_id is not None else None,
+        chain_id=row.chain_id,
+        chain=chain_name_for(row.chain_id),
     )

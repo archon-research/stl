@@ -12,10 +12,9 @@ class ReferenceRiskCapitalProvider(Protocol):
         """Return every star reference figures have been observed for, lowercased.
 
         Answers "can this prime be served from reference at all" without reading
-        a snapshot per prime. A prime the indexer has never landed a cycle for
-        has no reference figures, which is the same answer the monitor's own
-        tracked set used to give — the indexer writes a row per prime the
-        monitor covers, per cycle.
+        a snapshot per prime. The indexer writes a row per prime the monitor
+        covers, per cycle, so a prime it has never landed a cycle for has no
+        reference figures.
         """
         ...
 

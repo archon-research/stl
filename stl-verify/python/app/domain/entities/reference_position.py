@@ -79,9 +79,7 @@ class ReferencePositionSnapshot:
 
     The positions ride a stamp rather than carrying one each: an indexer cycle
     writes the whole balance sheet under a single ``synced_at``, so a stamp per
-    row would be one instant repeated. An empty ``positions`` is a prime that
-    upstream reported as holding nothing — a claim, and not the same as no
-    snapshot at all, which callers signal with ``None``.
+    row would be one instant repeated.
     """
 
     synced_at: datetime

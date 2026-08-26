@@ -10,6 +10,7 @@ from decimal import Decimal
 from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app.api.deps import get_reference_risk_capital_service_factory
@@ -20,6 +21,11 @@ from app.services.prime_risk_capital_service import PrimeRiskCapitalService
 
 _VALID_ADDR = "0x" + "ab" * 20
 _SYNCED_AT = datetime(2026, 8, 26, 9, 15, tzinfo=UTC)
+
+
+def _failing_read() -> Exception:
+    """What the reader raises when the query fails."""
+    return ValueError("Database query failed while reading the snapshot: boom")
 
 
 def _reference_allocation(
@@ -69,12 +75,16 @@ def _snapshot(*, per_allocation: tuple[ReferenceAllocation, ...] | None = None) 
 
 @pytest.fixture
 def reference_client(request):
-    """A TestClient whose reference reader returns ``request.param``.
+    """A TestClient whose reference reader answers ``request.param``.
 
-    ``param`` is a snapshot, or ``None`` for a prime no cycle has reported on.
+    ``param`` is a snapshot, ``None`` for a prime no cycle has reported on, or
+    an exception the reader raises.
     """
     reference_service = AsyncMock()
-    reference_service.get.return_value = request.param
+    if isinstance(request.param, Exception):
+        reference_service.get.side_effect = request.param
+    else:
+        reference_service.get.return_value = request.param
 
     self_service = AsyncMock(spec=PrimeRiskCapitalService)
     self_service.prime_exists.return_value = True
@@ -347,21 +357,35 @@ def test_both_serves_stl_own_model_for_a_prime_with_no_reference_data(reference_
     assert body["reference_synced_at"] is None
 
 
-@pytest.mark.parametrize("reference_client", [_snapshot()], indirect=True)
-def test_a_database_failure_is_not_rewritten_into_an_absence_of_reference_data(reference_client):
+@pytest.mark.parametrize("reference_client", [_failing_read()], indirect=True)
+def test_a_read_failure_is_not_rewritten_into_an_absence_of_reference_data(reference_client):
     # A read that failed says nothing about coverage, so it must not be served
     # as "this prime has none" -- which reads identically to a real answer.
     client, _ = reference_client
-    app.dependency_overrides[get_reference_risk_capital_service_factory] = lambda: lambda: _failing_reader()
 
     with pytest.raises(ValueError, match="boom"):
         client.get(f"/v1/primes/{_VALID_ADDR}/risk-capital?source=reference")
 
 
-def _failing_reader():
-    reader = AsyncMock()
-    reader.get.side_effect = ValueError("Database query failed: boom")
-    return reader
+@pytest.mark.parametrize("reference_client", [_failing_read()], indirect=True)
+def test_both_propagates_a_read_failure_rather_than_degrading_to_indexed(reference_client):
+    # The merged view swallows a 404 by design. A failure is not a 404, and
+    # degrading on one would publish STL's half as the whole answer.
+    client, self_service = reference_client
+    self_service.compute.return_value = _self_result()
+
+    with pytest.raises(ValueError, match="boom"):
+        client.get(f"/v1/primes/{_VALID_ADDR}/risk-capital?source=both")
+
+
+@pytest.mark.parametrize("reference_client", [HTTPException(status_code=503, detail="warming up")], indirect=True)
+def test_both_does_not_degrade_on_a_non_404_http_error(reference_client):
+    # The guard that re-raises anything but a 404 exists for this; without a
+    # test it is unreachable code that a refactor could widen unnoticed.
+    client, self_service = reference_client
+    self_service.compute.return_value = _self_result()
+
+    assert client.get(f"/v1/primes/{_VALID_ADDR}/risk-capital?source=both").status_code == 503
 
 
 @pytest.mark.parametrize(

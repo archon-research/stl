@@ -5,6 +5,7 @@ from decimal import Decimal
 from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app.api.deps import get_reference_positions_service_factory
@@ -209,18 +210,52 @@ def test_reference_mode_returns_404_when_no_cycle_has_reported_on_the_prime(refe
     assert response.status_code == 404
 
 
-@pytest.mark.parametrize(
-    "reference_client", [ReferencePositionSnapshot(synced_at=_SYNCED_AT, positions=())], indirect=True
-)
-def test_reference_mode_serves_an_empty_snapshot_as_an_empty_list(reference_client):
-    # A covered prime holding nothing is a claim, and a different answer from
-    # a prime no cycle has reported on, which is the 404 above.
+@pytest.mark.parametrize("reference_client", [_positions()], indirect=True)
+def test_reference_mode_propagates_a_read_failure_rather_than_reporting_no_data(reference_client):
+    # A read that failed says nothing about coverage, so it must not be served
+    # as "Sky reports nothing here", which reads identically to a real answer.
     client, _ = reference_client
+    app.dependency_overrides[get_reference_positions_service_factory] = lambda: lambda: _failing_reader()
 
-    response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations?reference=true")
+    with pytest.raises(ValueError, match="boom"):
+        client.get(f"/v1/primes/{_VALID_ADDR}/allocations?source=reference")
 
-    assert response.status_code == 200
-    assert response.json() == []
+
+@pytest.mark.parametrize("reference_client", [_positions()], indirect=True)
+def test_both_propagates_a_read_failure_rather_than_degrading_to_indexed(reference_client):
+    # The merged view swallows a 404 by design. A failure is not a 404, and
+    # degrading on one would publish the indexed half as the whole answer.
+    client, service = reference_client
+    service.prime_proxy_addresses.return_value = [EthAddress(_VALID_ADDR)]
+    service.list_receipt_token_positions.return_value = []
+    service.list_direct_asset_holdings.return_value = []
+    service.primary_proxy_address.return_value = None
+    app.dependency_overrides[get_reference_positions_service_factory] = lambda: lambda: _failing_reader()
+
+    with pytest.raises(ValueError, match="boom"):
+        client.get(f"/v1/primes/{_VALID_ADDR}/allocations?source=both")
+
+
+@pytest.mark.parametrize("reference_client", [_positions()], indirect=True)
+def test_both_does_not_degrade_on_a_non_404_http_error(reference_client):
+    # The guard that re-raises anything but a 404 exists for this; without a
+    # test it is unreachable code that a refactor could widen unnoticed.
+    client, service = reference_client
+    service.prime_proxy_addresses.return_value = [EthAddress(_VALID_ADDR)]
+    service.list_receipt_token_positions.return_value = []
+    service.list_direct_asset_holdings.return_value = []
+    service.primary_proxy_address.return_value = None
+    reader = AsyncMock()
+    reader.get.side_effect = HTTPException(status_code=503, detail="warming up")
+    app.dependency_overrides[get_reference_positions_service_factory] = lambda: lambda: reader
+
+    assert client.get(f"/v1/primes/{_VALID_ADDR}/allocations?source=both").status_code == 503
+
+
+def _failing_reader():
+    reader = AsyncMock()
+    reader.get.side_effect = ValueError("Database query failed: boom")
+    return reader
 
 
 @pytest.mark.parametrize(

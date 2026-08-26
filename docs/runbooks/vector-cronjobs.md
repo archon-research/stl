@@ -807,9 +807,9 @@ wearing its shape.
 `per_allocation` breakdown from this table, pinned to the same cycle its totals
 came from so the two cannot be mixed. If cycles keep landing prime-level rows
 while the breakdown does not — a save that failed between the two tables, which
-also fails the run — the endpoint serves live totals with an **empty**
-`per_allocation`. One successful cycle repairs it; until then treat
-`VectorCronjobRunFailing` as the primary signal.
+also fails the run — the endpoint returns **500** rather than publishing real
+exposure against an empty breakdown. One successful cycle repairs it; until then
+treat `VectorCronjobRunFailing` as the primary signal.
 
 **Resolution.** Same posture as `WritesZero`: upstream coverage is upstream's.
 Confirm what the monitor reports and reconcile; the gap in the series stays.
@@ -852,11 +852,12 @@ coverage — a code change, never a silent skip.
    positions client's empty-result guard, not a routine data gap.
 
 **Serving impact.** `/v1/primes/{id}/allocations?source=reference` reads this
-table, taking the newest cycle that has rows, so a stall serves a frozen
-balance sheet rather than an empty list — `reference_synced_at` on each row is
-what says how old it is. A prime that has *never* had rows here still answers
-`404` on that endpoint while `/v1/provenance/available` offers `reference` for
-it, because coverage comes from `prime_capital_stack`.
+table, taking the newest cycle that has rows, so a stall serves a frozen balance
+sheet rather than an empty list — `reference_synced_at` on each row is what says
+how old it is. A prime that has *never* had rows here answers `404` on that
+endpoint, deliberately: an empty list would claim the prime holds nothing.
+`/v1/provenance/available` may still offer `reference` for it, since coverage
+there comes from `prime_capital_stack`.
 
 **Resolution.** A telemetry fix ships as a normal PR; no upstream reconciliation
 or accepted gap applies here, unlike `WritesZero`/`AllocationsZero`.

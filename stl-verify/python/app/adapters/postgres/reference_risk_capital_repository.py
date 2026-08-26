@@ -8,22 +8,21 @@ observations ``/total-capital`` already does instead of fetching the monitor
 per request.
 """
 
-from collections.abc import Sequence
 from decimal import Decimal
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.adapters.postgres._reading import reading
 from app.adapters.postgres._reference_rows import (
     PRIME_BY_STAR_CTE,
-    RECEIPT_TOKEN_JOIN,
     optional_decimal,
-    optional_text,
-    reading,
+    receipt_token_join,
     required_decimal,
+    text_or_empty,
     token_address_bytes,
 )
-from app.domain.chain_names import CHAIN_ID_TO_NAME
+from app.domain.chain_names import chain_name_for
 from app.domain.entities.reference_risk_capital import (
     ReferenceAllocation,
     ReferencePrimeRiskCapital,
@@ -44,13 +43,11 @@ _COVERED_STARS_SQL = text(
     WHERE EXISTS (
         SELECT 1 FROM prime_capital_stack pcs WHERE pcs.prime_id = p.id
     )
-    ORDER BY star
     """
 )
 
 _TOTALS_SQL = text(
-    "WITH"
-    + PRIME_BY_STAR_CTE
+    PRIME_BY_STAR_CTE
     + """
     SELECT
         pcs.synced_at,
@@ -77,10 +74,11 @@ _TOTALS_SQL = text(
 
 # Pinned to the totals row's own cycle rather than re-deriving "latest": a cycle
 # landing between the two statements would otherwise pair one instant's totals
-# with another's breakdown.
+# with another's breakdown. Sharing a connection does not do this for us — each
+# statement gets its own READ COMMITTED snapshot — so the instant is bound
+# explicitly.
 _ALLOCATIONS_SQL = text(
-    "WITH"
-    + PRIME_BY_STAR_CTE
+    PRIME_BY_STAR_CTE
     + """,
     latest AS (
         SELECT DISTINCT ON (a.network, a.token_address)
@@ -103,12 +101,24 @@ _ALLOCATIONS_SQL = text(
           AND a.synced_at = CAST(:synced_at AS TIMESTAMPTZ)
         ORDER BY a.network, a.token_address, a.processing_version DESC
     )
-    SELECT r.*, rt.id AS receipt_token_id
+    SELECT
+        r.network,
+        r.chain_id,
+        r.protocol_name,
+        r.symbol,
+        r.name,
+        r.token_address,
+        r.loan_token_address,
+        r.loan_token_symbol,
+        r.exposure_usd,
+        r.required_risk_capital_usd,
+        r.crr,
+        rt.id AS receipt_token_id
     FROM latest r
     """
-    + RECEIPT_TOKEN_JOIN
+    + receipt_token_join("r")
     + """
-    ORDER BY r.exposure_usd DESC
+    ORDER BY r.exposure_usd DESC, r.network, r.token_address
     """
 )
 
@@ -130,7 +140,7 @@ class ReferenceRiskCapitalRepository:
 
         Coverage is the existence of a totals row: the indexer writes one per
         prime the monitor covers, per cycle, so a prime with none has never been
-        reported on — the answer the monitor's list route used to give.
+        reported on.
         """
         async with reading(self._engine, what=f"reading the reference risk-capital snapshot for '{star}'") as conn:
             totals = (await conn.execute(_TOTALS_SQL, {"star": star})).fetchone()
@@ -141,11 +151,14 @@ class ReferenceRiskCapitalRepository:
         return _snapshot(star, totals, rows)
 
 
-def _snapshot(star: str, totals, rows: Sequence) -> ReferencePrimeRiskCapital:
+def _snapshot(star: str, totals, rows) -> ReferencePrimeRiskCapital:
+    exposure = required_decimal(totals.exposure_usd, "exposure_usd")
+    _require_breakdown(star, totals.synced_at, exposure, rows)
+
     return ReferencePrimeRiskCapital(
         star=star,
         synced_at=totals.synced_at,
-        exposure_usd=required_decimal(totals.exposure_usd, "exposure_usd"),
+        exposure_usd=exposure,
         required_risk_capital_usd=required_decimal(totals.required_risk_capital_usd, "required_risk_capital_usd"),
         total_risk_capital_usd=required_decimal(totals.total_risk_capital_usd, "total_risk_capital_usd"),
         encumbrance_ratio=optional_decimal(totals.encumbrance_ratio, "encumbrance_ratio"),
@@ -173,20 +186,38 @@ def _snapshot(star: str, totals, rows: Sequence) -> ReferencePrimeRiskCapital:
     )
 
 
+def _require_breakdown(star: str, synced_at, exposure: Decimal, rows) -> None:
+    """Refuse a cycle whose totals report exposure that no row accounts for.
+
+    The indexer writes the totals before the breakdown and not in one
+    transaction, so a cycle can be readable with its rows missing — and the
+    totals table predates the breakdown table, so every cycle written before it
+    existed is in exactly that state. Serving it would publish "this prime holds
+    nothing" against real exposure, which reads like a real answer. The writer
+    refuses the same combination when upstream reports it; this refuses it when
+    only half a cycle landed.
+    """
+    if rows or exposure == 0:
+        return
+    raise ValueError(
+        f"Reference cycle {synced_at.isoformat()} for '{star}' reports exposure {exposure} "
+        "but landed no per-allocation rows; the cycle is incomplete"
+    )
+
+
 def _allocation(row) -> ReferenceAllocation:
-    chain_id: int | None = row.chain_id
     return ReferenceAllocation(
         protocol_name=row.protocol_name,
         network=row.network,
         symbol=row.symbol,
-        name=optional_text(row.name),
+        name=text_or_empty(row.name),
         token_address=row.token_address,
-        loan_token_address=optional_text(row.loan_token_address),
-        loan_token_symbol=optional_text(row.loan_token_symbol),
+        loan_token_address=text_or_empty(row.loan_token_address),
+        loan_token_symbol=text_or_empty(row.loan_token_symbol),
         exposure_usd=required_decimal(row.exposure_usd, "exposure_usd"),
         required_risk_capital_usd=required_decimal(row.required_risk_capital_usd, "required_risk_capital_usd"),
         crr_pct=required_decimal(row.crr, "crr") * _FRACTION_TO_PCT,
         receipt_token_id=row.receipt_token_id,
-        chain_id=chain_id,
-        chain=CHAIN_ID_TO_NAME.get(chain_id) if chain_id is not None else None,
+        chain_id=row.chain_id,
+        chain=chain_name_for(row.chain_id),
     )

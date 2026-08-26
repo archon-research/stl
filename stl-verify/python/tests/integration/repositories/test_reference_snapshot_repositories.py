@@ -220,17 +220,84 @@ async def test_covered_stars_lists_a_prime_only_once_a_cycle_has_landed(seeded, 
 
 
 @pytest.mark.asyncio(loop_scope="module")
-async def test_a_covered_prime_with_no_positions_reports_an_empty_balance_sheet(seeded, async_db_url: str):
-    # The distinction the coverage row exists for: "holds nothing" is a claim
-    # the API serves as an empty list, not as a 404.
+async def test_a_covered_prime_whose_positions_never_landed_has_no_snapshot(seeded, async_db_url: str):
+    # The window this PR's readers had to get right: prime_capital_stack
+    # predates the positions table, so coverage rows exist for cycles that have
+    # no positions. Serving those as an empty list would publish "Sky reports
+    # this prime holds nothing".
     conn, prime_id, _ = seeded
     await _insert_stack(conn, prime_id, _CYCLE)
 
-    snapshot = await _positions(async_db_url)
+    assert await _positions(async_db_url) is None
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_positions_without_a_coverage_row_are_not_served(seeded, async_db_url: str):
+    # Coverage is the risk-capital table's answer for both endpoints, so the
+    # allocation list cannot claim a prime the risk-capital card calls uncovered.
+    conn, prime_id, _ = seeded
+    await _insert_position(conn, prime_id, _CYCLE, token_address=_UNINDEXED_TOKEN)
+
+    assert await _positions(async_db_url) is None
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_a_cycle_reporting_exposure_with_no_breakdown_is_refused(seeded, async_db_url: str):
+    # Same window on the risk-capital side, where the totals are readable and
+    # real. A 500 is correct; serving real exposure against an empty breakdown
+    # is not.
+    conn, prime_id, _ = seeded
+    await _insert_stack(conn, prime_id, _CYCLE, exposure_usd=Decimal("2098090654.81"))
+
+    with pytest.raises(ValueError, match="landed no per-allocation rows"):
+        await _risk_capital(async_db_url)
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_a_cycle_with_no_exposure_and_no_breakdown_is_served(seeded, async_db_url: str):
+    # The permitted half: at zero exposure no row is owed, and the indexer
+    # writes exactly this for a prime the monitor covers but prices nothing for.
+    conn, prime_id, _ = seeded
+    await _insert_stack(conn, prime_id, _CYCLE, exposure_usd=Decimal("0"))
+
+    snapshot = await _risk_capital(async_db_url)
 
     assert snapshot is not None
-    assert snapshot.positions == ()
-    assert snapshot.synced_at == _CYCLE
+    assert snapshot.per_allocation == ()
+
+
+@pytest.mark.parametrize("queried", ["SPARK", "Spark"])
+@pytest.mark.asyncio(loop_scope="module")
+async def test_a_star_resolves_whatever_case_it_arrives_in(seeded, async_db_url: str, queried: str):
+    # The registry does not promise a case; `prime.name` does. Without the
+    # fold, every reference request for a capitalised star 404s while its rows
+    # sit in the table.
+    conn, prime_id, _ = seeded
+    await _insert_stack(conn, prime_id, _CYCLE)
+    await _insert_allocation(conn, prime_id, _CYCLE, token_address=_UNINDEXED_TOKEN)
+    await _insert_position(conn, prime_id, _CYCLE, token_address=_UNINDEXED_TOKEN)
+
+    engine = create_async_engine(async_db_url)
+    try:
+        assert await ReferenceRiskCapitalRepository(engine).get_prime(queried) is not None
+        assert await ReferencePositionRepository(engine).get_positions(queried) is not None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_a_star_that_names_no_prime_reads_as_uncovered(seeded, async_db_url: str):
+    # The `target` CTE matches nothing, so `prime_id = NULL` is never true.
+    # Pinning this stops a broadened predicate silently picking some other row.
+    conn, prime_id, _ = seeded
+    await _insert_stack(conn, prime_id, _CYCLE)
+
+    engine = create_async_engine(async_db_url)
+    try:
+        assert await ReferenceRiskCapitalRepository(engine).get_prime("zzznotastar") is None
+        assert await ReferencePositionRepository(engine).get_positions("zzznotastar") is None
+    finally:
+        await engine.dispose()
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +312,7 @@ async def test_risk_capital_prefers_a_correction_over_the_original_it_supersedes
     conn, prime_id, _ = seeded
     await _insert_stack(conn, prime_id, _CYCLE, total_risk_capital_usd=Decimal("1"), build_id=1)
     await _insert_stack(conn, prime_id, _CYCLE, total_risk_capital_usd=Decimal("999"), build_id=2)
+    await _insert_allocation(conn, prime_id, _CYCLE, token_address=_UNINDEXED_TOKEN)
 
     snapshot = await _risk_capital(async_db_url)
 
@@ -257,6 +325,8 @@ async def test_risk_capital_serves_the_newest_cycle_not_an_earlier_one(seeded, a
     conn, prime_id, _ = seeded
     await _insert_stack(conn, prime_id, _EARLIER_CYCLE, exposure_usd=Decimal("1"))
     await _insert_stack(conn, prime_id, _CYCLE, exposure_usd=Decimal("2"))
+    await _insert_allocation(conn, prime_id, _EARLIER_CYCLE, token_address=_UNINDEXED_TOKEN)
+    await _insert_allocation(conn, prime_id, _CYCLE, token_address=_UNINDEXED_TOKEN)
 
     snapshot = await _risk_capital(async_db_url)
 

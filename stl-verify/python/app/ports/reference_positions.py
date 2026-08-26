@@ -11,9 +11,8 @@ class ReferencePositionProvider(Protocol):
     async def get_positions(self, star: str) -> ReferencePositionSnapshot | None:
         """Return ``star``'s latest observed balance sheet, or ``None`` if none exists.
 
-        ``None`` means no reference data has been observed for the prime at all.
-        A snapshot with no positions is a different claim — upstream reported a
-        prime holding nothing — and the two must not be collapsed: one is a 404,
-        the other an empty list.
+        ``None`` means no reference data has been observed for the prime, which
+        is a real answer about coverage rather than a failure, and must not be
+        served as a prime holding nothing.
         """
         ...

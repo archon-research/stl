@@ -18,7 +18,14 @@
  * are read off `TOKENS` by id, so a row cannot name one token and label itself
  * with another's symbol.
  */
-import { DAY_MS, MINUTE_MS, SECOND_MS, iso, offsetIsoAgo } from '../clock.ts';
+import {
+  DAY_MS,
+  MINUTE_MS,
+  REFERENCE_SYNCED_AGO_MS,
+  SECOND_MS,
+  iso,
+  offsetIsoAgo,
+} from '../clock.ts';
 import { positionKeys } from '../identity.ts';
 import type { Allocation, AllocationActivity } from '../schema.ts';
 import type { PrimeName } from './registry.ts';
@@ -33,15 +40,6 @@ import {
 
 const LAST_SWEEP_AGO = 5 * MINUTE_MS + 13 * SECOND_MS;
 
-/**
- * How stale the reference rows are, inside the indexer's 15m cadence.
- *
- * The API serves STL's record of Sky rather than a live read, so a
- * reference row carries the cycle it was observed at. Non-zero on purpose:
- * a fixture stamped `now` would never exercise the staleness the field exists
- * to make visible.
- */
-const REFERENCE_SYNCED_AGO = 11 * MINUTE_MS;
 const LAST_TRANSFER_AGO = 85 * SECOND_MS;
 /** The custody snapshot is two months stale on purpose; see DATA_SOURCES. */
 const CUSTODY_SNAPSHOT_AGO = 63 * DAY_MS;
@@ -369,7 +367,7 @@ export function seedReferenceAllocations(
         balance: null,
         scope: 'prime',
         source: 'reference',
-        reference_synced_at: iso(nowMs - REFERENCE_SYNCED_AGO),
+        reference_synced_at: iso(nowMs - REFERENCE_SYNCED_AGO_MS),
       })),
     ...skyOnlyAllocations(nowMs, primeName),
   ];
@@ -392,7 +390,7 @@ function skyOnlyAllocations(nowMs: number, primeName: PrimeName): Allocation[] {
   if (primeName !== 'spark') return [];
 
   const observedAt = iso(nowMs - 13 * MINUTE_MS);
-  const syncedAt = iso(nowMs - REFERENCE_SYNCED_AGO);
+  const syncedAt = iso(nowMs - REFERENCE_SYNCED_AGO_MS);
   return [
     {
       chain_id: 1,
@@ -471,14 +469,19 @@ export function seedCompositeAllocations(
         referenceRows.some(
           (row) => row.receipt_token_id === allocation.receipt_token_id,
         );
+      const reported = alsoReported
+        ? referenceRows.find(
+            (row) => row.receipt_token_id === allocation.receipt_token_id,
+          )
+        : undefined;
       return {
         ...allocation,
-        source: alsoReported ? 'both' : 'indexed',
-        // Only a merged row carries Sky's figures, so only it carries the
-        // cycle they were observed at.
-        reference_synced_at: alsoReported
-          ? iso(nowMs - REFERENCE_SYNCED_AGO)
-          : null,
+        source: reported ? 'both' : 'indexed',
+        // Sky's figure and the cycle it was observed at travel together: the
+        // API sets both in one copy, so a stamp beside an empty comparison
+        // cell is a state staging cannot produce.
+        reference_amount_usd: reported?.amount_usd ?? null,
+        reference_synced_at: reported?.reference_synced_at ?? null,
       };
     }),
     ...referenceRows.filter(

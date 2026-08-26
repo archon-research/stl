@@ -312,7 +312,7 @@ class PrimeRiskCapitalResponse(BaseModel):
             "they are as of the last sync cycle — up to 15 minutes old. Consumers should show this "
             "rather than implying the figures are current."
         ),
-        examples=["2026-08-26T09:15:00Z"],
+        examples=["2026-08-26T09:15:00+00:00"],
     )
     prime_exposure_usd: PlainDecimal = Field(
         default=Decimal("0"),

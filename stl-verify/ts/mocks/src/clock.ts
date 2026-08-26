@@ -19,6 +19,15 @@ export const MINUTE_MS = 60 * SECOND_MS;
 export const HOUR_MS = 60 * MINUTE_MS;
 export const DAY_MS = 24 * HOUR_MS;
 
+/**
+ * How stale Sky's figures are, inside the reference indexer's 15m cadence.
+ *
+ * The API serves STL's record of Sky rather than a live read, so a reference
+ * figure carries the cycle it was observed at. Non-zero on purpose: a fixture
+ * stamped `now` would never exercise the staleness the stamp exists to show.
+ */
+export const REFERENCE_SYNCED_AGO_MS = 11 * MINUTE_MS;
+
 /** The instant a handler renders its fixtures against. */
 export function mockNow(): number {
   return Date.now();

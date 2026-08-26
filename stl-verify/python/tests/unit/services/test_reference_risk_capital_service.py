@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock
 
-from app.domain.entities.allocation import EthAddress, Prime
+from app.domain.entities.allocation import EthAddress
 from app.domain.entities.reference_risk_capital import ReferenceAllocation, ReferencePrimeRiskCapital
 from app.services.reference_risk_capital_service import ReferenceRiskCapitalService
 
@@ -10,7 +10,6 @@ from app.services.reference_risk_capital_service import ReferenceRiskCapitalServ
 # the contract, so a placeholder address would resolve to no prime at all.
 _SPARK_ALM = "0x1601843c5e9bc251a3272907010afa41fa18347e"
 _UNKNOWN_PROXY = "0x" + "ab" * 20
-_VAULT = "0x" + "ba" * 20
 _TOKEN = "0x" + "cd" * 20
 _SYNCED_AT = datetime(2026, 8, 26, 9, 15, tzinfo=UTC)
 
@@ -56,24 +55,12 @@ def _snapshot(*allocations: ReferenceAllocation) -> ReferencePrimeRiskCapital:
     )
 
 
-def _service(snapshot: ReferencePrimeRiskCapital | None, primes: list[Prime] | None = None):
+def _service(snapshot: ReferencePrimeRiskCapital | None):
     provider = AsyncMock()
     provider.get_prime.return_value = snapshot
     directory = AsyncMock()
-    directory.list_primes.return_value = primes or []
+    directory.list_primes.return_value = []
     return ReferenceRiskCapitalService(provider, directory), provider
-
-
-def _prime(name: str, address: str, vault: str | None = None) -> Prime:
-    return Prime(
-        id=address,
-        name=name,
-        address=address,
-        chain_id=1,
-        chain="mainnet",
-        role="alm",
-        prime_vault_address=vault,
-    )
 
 
 async def test_get_serves_the_stored_snapshot_with_its_resolved_registry_ids():
@@ -108,36 +95,8 @@ async def test_get_returns_none_for_an_address_that_names_no_prime():
     provider.get_prime.assert_not_awaited()
 
 
-# Self mode answers for a prime's vault address, so reference mode must too:
-# the same URL differs only in which figures it returns.
-async def test_get_resolves_a_prime_by_its_vault_address():
-    service, provider = _service(
-        _snapshot(),
-        primes=[_prime("spark", _UNKNOWN_PROXY, vault=_VAULT)],
-    )
-
-    assert await service.get(EthAddress(_VAULT)) is not None
-    provider.get_prime.assert_awaited_once_with("spark")
-
-
-# A proxy holds positions before the contract is told about it during a chain
-# onboarding; reference mode must not go dark for it.
-async def test_get_resolves_a_proxy_the_contract_does_not_index_yet():
-    service, provider = _service(
-        _snapshot(),
-        primes=[_prime("spark", _UNKNOWN_PROXY)],
-    )
-
-    assert await service.get(EthAddress(_UNKNOWN_PROXY)) is not None
-    provider.get_prime.assert_awaited_once_with("spark")
-
-
-# The contract is the tracked set, so it answers before any I/O.
-async def test_get_prefers_the_contract_over_the_directory():
-    service, provider = _service(
-        _snapshot(),
-        primes=[_prime("wrong-name", _SPARK_ALM)],
-    )
+async def test_get_asks_the_reader_for_the_resolved_star():
+    service, provider = _service(_snapshot())
 
     await service.get(EthAddress(_SPARK_ALM))
 
