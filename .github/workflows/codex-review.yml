@@ -70,6 +70,26 @@ jobs:
           printf '%s' "${CODEX_AUTH_JSON}" > "${CODEX_HOME}/auth.json"
           chmod 600 "${CODEX_HOME}/auth.json"
 
+      # ubuntu-latest is Ubuntu 24.04, which restricts unprivileged user namespaces
+      # by default. Codex sandboxes every command it runs with bubblewrap, which needs
+      # such a namespace to bring up loopback, so with the restriction in place every
+      # command the reviewer runs dies with "bwrap: loopback: Failed RTM_NEWADDR".
+      # See openai/codex#15057.
+      #
+      # The preflight is the important half. Without it a broken sandbox is not a
+      # failure but a silent downgrade: the agent cannot read the checkout, so it
+      # substitutes whatever it can still reach and reviews that instead. A confident
+      # review of the wrong bytes is worse than no review, so prove the sandbox works
+      # before spending a token on it.
+      - name: Enable the sandbox the reviewer runs in
+        run: |
+          set -euo pipefail
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          if ! bwrap --unshare-all --dev-bind / / /bin/true; then
+            echo "::error::bubblewrap cannot create a sandbox on this runner. Codex would fall back to reviewing whatever it can still reach instead of the checkout. Refusing to run."
+            exit 1
+          fi
+
       - name: Install Codex CLI
         run: |
           set -euo pipefail
@@ -114,6 +134,7 @@ jobs:
             --sandbox read-only \
             --ephemeral \
             -c model_reasoning_effort="high" \
+            -c web_search="disabled" \
             --output-last-message "${RUNNER_TEMP}/review.md" \
             - < "${RUNNER_TEMP}/prompt.md"
 
