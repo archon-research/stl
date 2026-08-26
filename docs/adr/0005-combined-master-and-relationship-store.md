@@ -631,6 +631,55 @@ joined at read time through `block_meta`. Refresh cadence follows the split: `di
 on graph change (rare), `fact_lookthrough` per graph version, allocation projections per block
 batch.
 
+**Materialization, seeding, and staying current.** The graph stores are seeded once
+(vocabularies → shapes → concepts → entity port → securities → registers → derivable edges) and
+thereafter change only by append. The pivot tables are never seeded: they are regenerated
+projections, rebuilt from the graph by the refresh step (reference realization:
+`refresh_pivot(effective_at, pin)`). The currency contract is that every governed write is
+reflected in the pivot within each consumer's declared staleness budget; whether the refresh
+fires on commit of a governed write or as a scheduled sweep is a realization choice, and GQ-29
+monitors the gap between the latest governed write and each table's `generated_at`. Any pivot
+table can be dropped and rebuilt with no information loss.
+
+### 11. Operating the store: cadence, resolution, and external practice
+
+**Update cadence, per layer:**
+
+| layer | changes | how often |
+|---|---|---|
+| vocabularies, shapes, statuses | reviewed migration | rare, deliberate |
+| curated nodes and edges | append with reason/approval; `node_validity` backlog worked as a stewardship queue | event-driven; periodic sweep |
+| derivable edges, registers | pipeline runs as new instruments appear on-chain (CH-1: they arrive unasked) | per run |
+| `ALLOCATES` projections | block-stamped derivation | per block batch |
+| pivot tables | regeneration per the currency contract (§10) | on graph change |
+| external anchors | vendor cadence: GLEIF daily, GICS ~annual, ISO occasional; ratings event-driven | per source |
+
+**Resolution today** is four deterministic paths and one human one: instrument keys through the
+instrument register; holder addresses, pipeline ids and public identifiers through the alias
+register; classification values to concept ids by deterministic slug; all reads through
+`_current`/`_as_of` or the pivot. Entity matching — issuer to registry entry to LEI — is the
+human path: a `SAME_AS` claim with confidence and source, merged only by a reviewed
+`SUPERSEDES`.
+
+**Maintenance follows financial reference-data (MDM / golden-copy) practice**, and each practice
+has a named mechanism here: maker-checker dual control (`approved_by`, approval-required reason
+codes); exception-queue stewardship instead of blocked ingestion (`node_validity`); bitemporal
+history; identifier anchoring to external standards (ISO 6166/17442/4217/3166, GICS, ISO 20022
+CAEV — already in the seeds); documented survivorship for merges (`SAME_AS`/`SUPERSEDES`);
+ownership by domain (`owner_role`). Structurally, the `NARROWER_THAN`/`BELONGS_TO` taxonomy is
+SKOS, and concepts carrying definitions with sources is how FIBO-style financial ontologies are
+maintained.
+
+**Against graph-database practice**, the model agrees where it matters: the
+properties-vs-relationships guidance of property-graph vendors is this ADR's promotion test;
+labelled-property-graph labels map to `record_type` + `BELONGS_TO`; and the standard
+graph-vs-relational decision rule matches the split here — curation and look-through are
+connection-shaped (the graph), consumption is attribute-shaped (the pivot). The native-engine
+properties (index-free adjacency, a graph query language) are deliberately not required by the
+model: traversals are bounded and precomputed. They are engine-gate selection criteria, and the
+honest trigger for revisiting them is the UI's interactive exploration — the one per-query
+traversal the model allows — becoming a real load.
+
 ## Auditability conformance
 
 How the model answers the Auditability & Reproducibility PRD. "Model" means the contracts above
