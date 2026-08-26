@@ -3,6 +3,8 @@ package outbound
 import (
 	"context"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 )
 
@@ -85,5 +87,7 @@ type RiskCapitalAllocationProvider interface {
 
 // PrimeCapitalStackAllocationRepository persists per-allocation breakdown rows.
 type PrimeCapitalStackAllocationRepository interface {
-	SaveCapitalStackAllocations(ctx context.Context, allocations []entity.PrimeCapitalStackAllocation) error
+	// SaveCapitalStackAllocations writes within the caller's transaction, so the
+	// caller controls what else commits or rolls back with it.
+	SaveCapitalStackAllocations(ctx context.Context, tx pgx.Tx, allocations []entity.PrimeCapitalStackAllocation) error
 }

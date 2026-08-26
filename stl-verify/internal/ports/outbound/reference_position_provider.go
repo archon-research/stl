@@ -3,6 +3,8 @@ package outbound
 import (
 	"context"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 )
 
@@ -44,5 +46,7 @@ type ReferencePositionProvider interface {
 
 // PrimeReferencePositionRepository persists per-prime balance-sheet positions.
 type PrimeReferencePositionRepository interface {
-	SaveReferencePositions(ctx context.Context, positions []entity.PrimeReferencePosition) error
+	// SaveReferencePositions writes within the caller's transaction, so the
+	// caller controls what else commits or rolls back with it.
+	SaveReferencePositions(ctx context.Context, tx pgx.Tx, positions []entity.PrimeReferencePosition) error
 }

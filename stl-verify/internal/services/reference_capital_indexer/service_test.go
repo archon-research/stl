@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -41,12 +43,20 @@ type mockCapitalRepo struct {
 	err       error
 }
 
-func (m *mockCapitalRepo) SavePrimeCapitalSnapshots(_ context.Context, snapshots []entity.PrimeCapitalStackSnapshot) error {
+func (m *mockCapitalRepo) SavePrimeCapitalSnapshots(_ context.Context, _ pgx.Tx, snapshots []entity.PrimeCapitalStackSnapshot) error {
 	if m.err != nil {
 		return m.err
 	}
 	m.snapshots = append(m.snapshots, snapshots...)
 	return nil
+}
+
+// fakeTxManager calls fn with a nil pgx.Tx; sufficient since the mock repos
+// above ignore the tx argument.
+type fakeTxManager struct{}
+
+func (m *fakeTxManager) WithTransaction(_ context.Context, fn func(pgx.Tx) error) error {
+	return fn(nil)
 }
 
 type mockRiskProvider struct {
@@ -173,6 +183,7 @@ type mockAllocationRepo struct {
 
 func (m *mockAllocationRepo) SaveCapitalStackAllocations(
 	_ context.Context,
+	_ pgx.Tx,
 	allocations []entity.PrimeCapitalStackAllocation,
 ) error {
 	if m.err != nil {
@@ -230,6 +241,7 @@ type mockPositionRepo struct {
 
 func (m *mockPositionRepo) SaveReferencePositions(
 	_ context.Context,
+	_ pgx.Tx,
 	positions []entity.PrimeReferencePosition,
 ) error {
 	if m.err != nil {
@@ -250,6 +262,7 @@ func defaultDeps(primes *mockPrimeRepo, capital *mockCapitalRepo, provider *mock
 		SheetProvider:      &mockSheetProvider{},
 		PositionProvider:   &mockPositionProvider{},
 		PositionRepo:       &mockPositionRepo{},
+		TxManager:          &fakeTxManager{},
 	}
 }
 

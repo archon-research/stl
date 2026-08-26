@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
@@ -33,16 +35,32 @@ func referencePosition(primeID int64, syncedAt time.Time, buildID int) entity.Pr
 	}
 }
 
+// savePositions wraps SaveReferencePositions in a transaction, matching how
+// the service calls it in production.
+func savePositions(
+	t *testing.T,
+	ctx context.Context,
+	txm *TxManager,
+	repo *PrimeReferencePositionRepository,
+	positions []entity.PrimeReferencePosition,
+) error {
+	t.Helper()
+	return txm.WithTransaction(ctx, func(tx pgx.Tx) error {
+		return repo.SaveReferencePositions(ctx, tx, positions)
+	})
+}
+
 func TestPrimeReferencePositionRepositoryPreservesEighteenDecimalPrecision(t *testing.T) {
 	ctx := context.Background()
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 
 	primeID := seedReferencePrime(t, ctx, pool, "spark-prp-precision")
-	repo := NewPrimeReferencePositionRepository(pool, newReferenceRepoTxm(t, pool), nil)
+	txm := newReferenceRepoTxm(t, pool)
+	repo := NewPrimeReferencePositionRepository(pool, nil)
 	syncedAt := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 
-	if err := repo.SaveReferencePositions(ctx, []entity.PrimeReferencePosition{
+	if err := savePositions(t, ctx, txm, repo, []entity.PrimeReferencePosition{
 		referencePosition(primeID, syncedAt, 1),
 	}); err != nil {
 		t.Fatalf("SaveReferencePositions() = %v", err)
@@ -64,14 +82,15 @@ func TestPrimeReferencePositionRepositoryKeepsOptionalFieldsNull(t *testing.T) {
 	defer cleanup()
 
 	primeID := seedReferencePrime(t, ctx, pool, "spark-prp-null")
-	repo := NewPrimeReferencePositionRepository(pool, newReferenceRepoTxm(t, pool), nil)
+	txm := newReferenceRepoTxm(t, pool)
+	repo := NewPrimeReferencePositionRepository(pool, nil)
 	position := referencePosition(primeID, time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC), 1)
 	position.ChainID = nil
 	position.TokenName = nil
 	position.AllocatedAssetsUSD = nil
 	position.IdleAssetsUSD = nil
 
-	if err := repo.SaveReferencePositions(ctx, []entity.PrimeReferencePosition{position}); err != nil {
+	if err := savePositions(t, ctx, txm, repo, []entity.PrimeReferencePosition{position}); err != nil {
 		t.Fatalf("SaveReferencePositions() = %v", err)
 	}
 
@@ -95,11 +114,12 @@ func TestPrimeReferencePositionRepositoryIsIdempotentWithinABuild(t *testing.T) 
 	defer cleanup()
 
 	primeID := seedReferencePrime(t, ctx, pool, "spark-prp-idem")
-	repo := NewPrimeReferencePositionRepository(pool, newReferenceRepoTxm(t, pool), nil)
+	txm := newReferenceRepoTxm(t, pool)
+	repo := NewPrimeReferencePositionRepository(pool, nil)
 	position := referencePosition(primeID, time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC), 1)
 
 	for range 2 {
-		if err := repo.SaveReferencePositions(ctx, []entity.PrimeReferencePosition{position}); err != nil {
+		if err := savePositions(t, ctx, txm, repo, []entity.PrimeReferencePosition{position}); err != nil {
 			t.Fatalf("SaveReferencePositions() = %v", err)
 		}
 	}
@@ -121,11 +141,12 @@ func TestPrimeReferencePositionRepositoryAppendsACorrectionForANewBuild(t *testi
 	defer cleanup()
 
 	primeID := seedReferencePrime(t, ctx, pool, "spark-prp-correction")
-	repo := NewPrimeReferencePositionRepository(pool, newReferenceRepoTxm(t, pool), nil)
+	txm := newReferenceRepoTxm(t, pool)
+	repo := NewPrimeReferencePositionRepository(pool, nil)
 	syncedAt := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 
 	for _, buildID := range []int{1, 2} {
-		if err := repo.SaveReferencePositions(ctx, []entity.PrimeReferencePosition{
+		if err := savePositions(t, ctx, txm, repo, []entity.PrimeReferencePosition{
 			referencePosition(primeID, syncedAt, buildID),
 		}); err != nil {
 			t.Fatalf("SaveReferencePositions(build=%d) = %v", buildID, err)

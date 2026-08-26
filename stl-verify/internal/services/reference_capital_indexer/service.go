@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
@@ -36,7 +38,7 @@ type Service struct {
 }
 
 // Deps holds the service's ports. A struct rather than positional arguments:
-// nine ports is past the arity where call sites stay legible, and the same
+// ten ports is past the arity where call sites stay legible, and the same
 // client legitimately fills two slots — named fields keep that intent visible.
 type Deps struct {
 	PrimeRepo          outbound.PrimeRepository
@@ -48,6 +50,11 @@ type Deps struct {
 	SheetProvider      outbound.BalanceSheetProvider
 	PositionProvider   outbound.ReferencePositionProvider
 	PositionRepo       outbound.PrimeReferencePositionRepository
+	// TxManager coordinates snapshots, allocations and positions in one
+	// transaction (persistCycle): the three join exactly on synced_at, so they
+	// must land together or not at all. Balance sheets key on observed_at
+	// instead and save outside it.
+	TxManager outbound.TxManager
 }
 
 // NewService creates a capital stack sync service.
@@ -99,6 +106,7 @@ func (d Deps) validate() error {
 		{"SheetProvider", d.SheetProvider != nil},
 		{"PositionProvider", d.PositionProvider != nil},
 		{"PositionRepo", d.PositionRepo != nil},
+		{"TxManager", d.TxManager != nil},
 	} {
 		if !port.set {
 			missing = append(missing, port.name)
@@ -221,10 +229,12 @@ func (s *Service) observeUpstream(ctx context.Context) (cycleObservation, error)
 	}, nil
 }
 
-// persistCycle saves what the cycle observed, counting each table as it lands.
-// A save failure still strands the earlier tables' rows at this synced_at —
-// narrower than a fetch failure would have been, and bounded by the database
-// being down rather than by either upstream.
+// persistCycle saves what the cycle observed. Snapshots, allocations and
+// positions share one transaction because they promise to join exactly on
+// synced_at; every table is append-only and a retry stamps a fresh synced_at,
+// so a partial commit would strand a permanent half-cycle no retry repairs.
+// Balance sheets key on observed_at, a different axis with no such join, so
+// they save after, once the shared transaction has committed.
 func (s *Service) persistCycle(
 	ctx context.Context,
 	snapshots []entity.PrimeCapitalStackSnapshot,
@@ -232,19 +242,23 @@ func (s *Service) persistCycle(
 	positions []entity.PrimeReferencePosition,
 	sheets []entity.PrimeBalanceSheetSnapshot,
 ) error {
-	if err := s.deps.CapitalRepo.SavePrimeCapitalSnapshots(ctx, snapshots); err != nil {
-		return fmt.Errorf("saving capital stack snapshots: %w", err)
+	err := s.deps.TxManager.WithTransaction(ctx, func(tx pgx.Tx) error {
+		if err := s.deps.CapitalRepo.SavePrimeCapitalSnapshots(ctx, tx, snapshots); err != nil {
+			return fmt.Errorf("saving capital stack snapshots: %w", err)
+		}
+		if err := s.deps.AllocationRepo.SaveCapitalStackAllocations(ctx, tx, allocations); err != nil {
+			return fmt.Errorf("saving capital stack allocations: %w", err)
+		}
+		if err := s.deps.PositionRepo.SaveReferencePositions(ctx, tx, positions); err != nil {
+			return fmt.Errorf("saving reference positions: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 	s.telemetry.RecordSnapshotsWritten(ctx, len(snapshots))
-
-	if err := s.deps.AllocationRepo.SaveCapitalStackAllocations(ctx, allocations); err != nil {
-		return fmt.Errorf("saving capital stack allocations: %w", err)
-	}
 	s.telemetry.RecordAllocationsWritten(ctx, len(allocations))
-
-	if err := s.deps.PositionRepo.SaveReferencePositions(ctx, positions); err != nil {
-		return fmt.Errorf("saving reference positions: %w", err)
-	}
 	s.telemetry.RecordPositionsWritten(ctx, len(positions))
 
 	if len(sheets) == 0 {

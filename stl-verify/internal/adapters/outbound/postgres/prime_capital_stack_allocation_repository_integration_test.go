@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
 	"github.com/archon-research/stl/stl-verify/internal/testutil"
 )
@@ -35,16 +37,32 @@ func capitalStackAllocation(primeID int64, syncedAt time.Time, buildID int) enti
 	}
 }
 
+// saveAllocations wraps SaveCapitalStackAllocations in a transaction, matching
+// how the service calls it in production.
+func saveAllocations(
+	t *testing.T,
+	ctx context.Context,
+	txm *TxManager,
+	repo *PrimeCapitalStackAllocationRepository,
+	allocations []entity.PrimeCapitalStackAllocation,
+) error {
+	t.Helper()
+	return txm.WithTransaction(ctx, func(tx pgx.Tx) error {
+		return repo.SaveCapitalStackAllocations(ctx, tx, allocations)
+	})
+}
+
 func TestPrimeCapitalStackAllocationRepositoryPreservesEighteenDecimalPrecision(t *testing.T) {
 	ctx := context.Background()
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 
 	primeID := seedReferencePrime(t, ctx, pool, "spark-pcsa-precision")
-	repo := NewPrimeCapitalStackAllocationRepository(pool, newReferenceRepoTxm(t, pool), nil)
+	txm := newReferenceRepoTxm(t, pool)
+	repo := NewPrimeCapitalStackAllocationRepository(pool, nil)
 	syncedAt := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 
-	if err := repo.SaveCapitalStackAllocations(ctx, []entity.PrimeCapitalStackAllocation{
+	if err := saveAllocations(t, ctx, txm, repo, []entity.PrimeCapitalStackAllocation{
 		capitalStackAllocation(primeID, syncedAt, 1),
 	}); err != nil {
 		t.Fatalf("SaveCapitalStackAllocations() = %v", err)
@@ -74,14 +92,15 @@ func TestPrimeCapitalStackAllocationRepositoryKeepsOptionalFieldsNull(t *testing
 	defer cleanup()
 
 	primeID := seedReferencePrime(t, ctx, pool, "spark-pcsa-null")
-	repo := NewPrimeCapitalStackAllocationRepository(pool, newReferenceRepoTxm(t, pool), nil)
+	txm := newReferenceRepoTxm(t, pool)
+	repo := NewPrimeCapitalStackAllocationRepository(pool, nil)
 	allocation := capitalStackAllocation(primeID, time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC), 1)
 	allocation.ChainID = nil
 	allocation.Name = nil
 	allocation.LoanTokenAddress = nil
 	allocation.LoanTokenSymbol = nil
 
-	if err := repo.SaveCapitalStackAllocations(ctx, []entity.PrimeCapitalStackAllocation{allocation}); err != nil {
+	if err := saveAllocations(t, ctx, txm, repo, []entity.PrimeCapitalStackAllocation{allocation}); err != nil {
 		t.Fatalf("SaveCapitalStackAllocations() = %v", err)
 	}
 
@@ -105,11 +124,12 @@ func TestPrimeCapitalStackAllocationRepositoryIsIdempotentWithinABuild(t *testin
 	defer cleanup()
 
 	primeID := seedReferencePrime(t, ctx, pool, "spark-pcsa-idem")
-	repo := NewPrimeCapitalStackAllocationRepository(pool, newReferenceRepoTxm(t, pool), nil)
+	txm := newReferenceRepoTxm(t, pool)
+	repo := NewPrimeCapitalStackAllocationRepository(pool, nil)
 	allocation := capitalStackAllocation(primeID, time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC), 1)
 
 	for range 2 {
-		if err := repo.SaveCapitalStackAllocations(ctx, []entity.PrimeCapitalStackAllocation{allocation}); err != nil {
+		if err := saveAllocations(t, ctx, txm, repo, []entity.PrimeCapitalStackAllocation{allocation}); err != nil {
 			t.Fatalf("SaveCapitalStackAllocations() = %v", err)
 		}
 	}
@@ -131,11 +151,12 @@ func TestPrimeCapitalStackAllocationRepositoryAppendsACorrectionForANewBuild(t *
 	defer cleanup()
 
 	primeID := seedReferencePrime(t, ctx, pool, "spark-pcsa-correction")
-	repo := NewPrimeCapitalStackAllocationRepository(pool, newReferenceRepoTxm(t, pool), nil)
+	txm := newReferenceRepoTxm(t, pool)
+	repo := NewPrimeCapitalStackAllocationRepository(pool, nil)
 	syncedAt := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 
 	for _, buildID := range []int{1, 2} {
-		if err := repo.SaveCapitalStackAllocations(ctx, []entity.PrimeCapitalStackAllocation{
+		if err := saveAllocations(t, ctx, txm, repo, []entity.PrimeCapitalStackAllocation{
 			capitalStackAllocation(primeID, syncedAt, buildID),
 		}); err != nil {
 			t.Fatalf("SaveCapitalStackAllocations(build=%d) = %v", buildID, err)
@@ -171,14 +192,15 @@ func TestPrimeCapitalStackAllocationRepositoryKeepsSameTokenOnTwoNetworksDistinc
 	defer cleanup()
 
 	primeID := seedReferencePrime(t, ctx, pool, "spark-pcsa-two-networks")
-	repo := NewPrimeCapitalStackAllocationRepository(pool, newReferenceRepoTxm(t, pool), nil)
+	txm := newReferenceRepoTxm(t, pool)
+	repo := NewPrimeCapitalStackAllocationRepository(pool, nil)
 	syncedAt := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 
 	ethereum := capitalStackAllocation(primeID, syncedAt, 1)
 	base := capitalStackAllocation(primeID, syncedAt, 1)
 	base.Network = "base"
 
-	if err := repo.SaveCapitalStackAllocations(ctx, []entity.PrimeCapitalStackAllocation{ethereum, base}); err != nil {
+	if err := saveAllocations(t, ctx, txm, repo, []entity.PrimeCapitalStackAllocation{ethereum, base}); err != nil {
 		t.Fatalf("SaveCapitalStackAllocations() = %v", err)
 	}
 
