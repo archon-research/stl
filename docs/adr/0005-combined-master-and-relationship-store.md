@@ -365,7 +365,14 @@ Boundary rules that keep the graph clean:
 **Concepts.** A concept is the fungible, shared part of the model: defined once, attributed to
 many nodes through `BELONGS_TO`, arranged in a taxonomy by `NARROWER_THAN`. It stores almost
 nothing itself — a `concept_class` (asset class, entity type, capability, benchmark, …), an id,
-a label. The existing `ref_*` vocabularies are the seed content: values that need relationships
+a label, and a **`definition`**: one or two sentences stating what qualifies for membership,
+with `vocabulary_source` / `external_uri` where the definition is anchored externally (ISO,
+GICS, GLEIF). The `definition` is required by `concept_base` (EXPECTED) — a concept without one
+is a label, not a category — and the `ref_*` rows' description texts port in as the seed
+definitions. This completes the description discipline: every vocabulary row carries a
+`description`, every schema object carries a `COMMENT`, every concept carries a `definition`;
+securities and entities are described by their classification edges and attributes rather than
+free text. The existing `ref_*` vocabularies are the seed content: values that need relationships
 of their own become concept nodes; values that remain terminal labels stay node attributes. The
 `ref_*` tables remain the governed source until that port happens.
 
