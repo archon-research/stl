@@ -134,26 +134,33 @@ jobs:
           # read-only sandbox: the reviewer needs to read the tree and run git, and
           # must not be able to write to it. --ephemeral keeps session files out of
           # CODEX_HOME so nothing but auth.json is written back in the next step.
+          #
+          # Captured to a file rather than streamed: the transcript is a public
+          # Actions log on this repo, and it carries every tool result the agent saw.
+          # It gets published a step later, once the leak check has cleared it. Codex
+          # failures are held over the same way, so a crash still shows its output.
+          set +e
           codex exec \
             --sandbox read-only \
             --ephemeral \
             -c model_reasoning_effort="high" \
             --output-last-message "${RUNNER_TEMP}/review.md" \
-            - < "${RUNNER_TEMP}/prompt.md"
-
-          if [ ! -s "${RUNNER_TEMP}/review.md" ]; then
-            echo "::error::Codex produced no final message."
-            exit 1
-          fi
+            - < "${RUNNER_TEMP}/prompt.md" > "${RUNNER_TEMP}/transcript.log" 2>&1
+          echo "CODEX_RC=$?" >> "${GITHUB_ENV}"
+          set -e
 
       # The reviewer reads the diff and PR body — text the PR author controls — while
-      # auth.json sits on disk, and `--sandbox read-only` stops writes, not reads.
-      # Its final message is posted to the API, where GitHub's log masking does NOT
-      # apply. So check the report against the actual token material before it leaves
-      # the runner. This catches a naive "print the token" injection; it cannot catch
-      # a determined obfuscated one, which is why the label gate above (write access
-      # required) is the real boundary, not this step.
-      - name: Refuse to post anything containing token material
+      # auth.json sits on disk, and `--sandbox read-only` stops writes, not reads. Two
+      # ways out of the runner have to be checked, because GitHub's masking covers
+      # neither: the report is posted through the API, which masking does not touch at
+      # all, and the transcript lands in a public Actions log where masking only knows
+      # the seeded secret as one whole JSON blob — an individual token printed alone,
+      # or a refreshed one that was never a secret, passes straight through.
+      #
+      # This catches a naive "print the token" injection, not a determined obfuscated
+      # one, which is why the label gate above (write access required) is the real
+      # boundary and this step is defence in depth.
+      - name: Refuse to publish anything containing token material
         env:
           SEEDED_AUTH: ${{ secrets.CODEX_AUTH_JSON }}
         run: |
@@ -174,11 +181,29 @@ jobs:
           fi
 
           # -F: fixed strings, never treat token bytes as a regex.
-          if grep -qFf "${RUNNER_TEMP}/needles" "${RUNNER_TEMP}/review.md"; then
-            echo "::error::The review output contains credential material. Not posting. Treat the seat's token as compromised and re-run 'codex login'."
+          for f in review.md transcript.log; do
+            if [ -f "${RUNNER_TEMP}/${f}" ] && grep -qFf "${RUNNER_TEMP}/needles" "${RUNNER_TEMP}/${f}"; then
+              echo "::error::${f} contains credential material. Publishing nothing. Treat the seat's token as compromised and re-run 'codex login' to invalidate it."
+              exit 1
+            fi
+          done
+          rm -f "${RUNNER_TEMP}/needles"
+
+      # Held back until the check above cleared it. Also where a Codex failure
+      # surfaces: the run needs its output to be debuggable, just not before the
+      # transcript has been screened.
+      - name: Publish the transcript and surface any Codex failure
+        run: |
+          set -euo pipefail
+          cat "${RUNNER_TEMP}/transcript.log"
+          if [ "${CODEX_RC}" -ne 0 ]; then
+            echo "::error::codex exec exited ${CODEX_RC}."
             exit 1
           fi
-          rm -f "${RUNNER_TEMP}/needles"
+          if [ ! -s "${RUNNER_TEMP}/review.md" ]; then
+            echo "::error::Codex produced no final message."
+            exit 1
+          fi
 
       - name: Post findings
         env:
