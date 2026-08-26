@@ -21,8 +21,8 @@
 --
 -- Encoding: every *_usd amount is an already-normalized USD decimal, NOT a raw
 -- native-decimal integer. crr is a plain 0-1 fraction, not a percentage —
--- upstream's crr vocabulary is fractional throughout (confirmed:
--- crr == rrc / exposure); consumers that need percent rescale at their boundary.
+-- upstream's crr vocabulary is fractional throughout (crr == rrc / exposure
+-- by definition); consumers that need percent rescale at their boundary.
 --
 -- Compression strategy:
 -- - Segment by entity FK (prime_id), order by synced_at DESC

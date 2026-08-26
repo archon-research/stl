@@ -6,9 +6,8 @@ import "time"
 // reported by Sky's internal feed at a single sync cycle.
 //
 // A different question from PrimeCapitalStackAllocation: that is the
-// risk-capital breakdown (11 priced positions for spark, summing to its
-// total_exposure), this is the balance sheet (59 positions summing to the
-// prime's assets). The two are not interchangeable.
+// risk-capital breakdown, this is the balance sheet. The two are not
+// interchangeable.
 //
 // Amounts are decimal strings, not float64: they are USD figures carried to 18
 // decimal places upstream, and a float would silently round them. They are

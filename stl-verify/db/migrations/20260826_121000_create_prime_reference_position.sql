@@ -8,16 +8,14 @@
 -- figure can never be reconstructed for a past instant, only observed forward.
 --
 -- This is a different question from prime_capital_stack_allocation: that table
--- carries the risk-capital breakdown (11 priced positions for spark, summing to
--- its total_exposure), this one the balance sheet (59 positions summing to the
--- prime's assets). The two are not interchangeable.
+-- carries the risk-capital breakdown, this one the balance sheet. The two are
+-- not interchangeable.
 --
--- Row identity is (prime, cycle, network, token_address): verified live to be
--- unique per fetch, and the client rejects a fetch containing duplicate
--- identities, so a conflicting insert is a replay rather than a lost row. The
--- feed also serves wallet_address and allocation_type; both are deliberately
--- not recorded, mirroring the serving layer's decision — each is one field to
--- reinstate if a consumer appears.
+-- Row identity is (prime, cycle, network, token_address): the client rejects a
+-- fetch containing duplicate identities, so a conflicting insert is a replay
+-- rather than a lost row. The feed also serves wallet_address and
+-- allocation_type; both are deliberately not recorded, mirroring the serving
+-- layer's decision — each is one field to reinstate if a consumer appears.
 --
 -- Identity fields (protocol, symbol, name, address) are upstream's claims
 -- recorded verbatim, deliberately NOT foreign keys into STL's registries:
