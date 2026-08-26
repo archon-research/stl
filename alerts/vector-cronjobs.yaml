@@ -27,14 +27,17 @@
 # template's `Cluster:` header is populated. `namespace` is a static rule label
 # (mimir-rules-sync lint forbids `cluster`/`env` as static labels but allows it).
 #
-# Five services are EXCLUDED by service_name: maple-graphql-indexer, which has
-# richer dedicated rules in vector-indexers.yaml (VEC-320), and the four
-# on-demand jobs — offchain-price-backfill, reference-capital-backfill,
-# morpho-vault-backfill and morpho-v2-bootstrap, none of which carries a schedule — see
-# VectorCronjobAllRunsFailing for why "no successes in an hour" is their healthy
-# state. Every other cronjob, including any added later, is covered
-# automatically; on-demand workers are covered by VectorCronjobRunFailing and
-# VectorOnDemandWorkerDown instead.
+# Six services are EXCLUDED from VectorCronjobAllRunsFailing by service_name:
+# maple-graphql-indexer, which has richer dedicated rules in
+# vector-indexers.yaml (VEC-320); the four on-demand jobs —
+# offchain-price-backfill, reference-capital-backfill, morpho-vault-backfill
+# and morpho-v2-bootstrap, none of which carries a schedule; and
+# core-model-runner, which does carry a schedule but ticks only every 24h with
+# no retry (RetryPolicy.maximum_attempts=1) — see VectorCronjobAllRunsFailing
+# for why "no successes in an hour" is their healthy state. Every other
+# cronjob, including any added later, is covered automatically; the excluded
+# ones are covered by VectorCronjobRunFailing (and VectorOnDemandWorkerDown /
+# VectorCronjobWorkerDown for availability) instead.
 #
 # Severity → routing (per the alerting routing spec):
 #   critical       → pages, prod #at_stl_prod_alerts / staging
@@ -102,10 +105,22 @@ groups:
         # cronjob_runs_total and are covered by the VectorCronjobRunFailing
         # warning above (the right severity) plus VectorOnDemandWorkerDown.
         #
-        # The 1h window spans >=1 cycle for even the
-        # slowest cronjob (watcher-data-validator, 1h) and many cycles for the
-        # faster ones. Distinct from VectorCronjobWorkerDown: here the worker
-        # IS running and emitting metrics, every run just errors.
+        # core-model-runner is excluded for the same reason despite being
+        # scheduled: it ticks every 24h with no retry
+        # (RetryPolicy.maximum_attempts=1, app/services/core_model_runner/
+        # workflow.py), so a single failed tick is errors=1/successes=0 with no
+        # recovery possible inside this rule's 1h window — the same shape as an
+        # on-demand job's one-off failure, just on a schedule. Without this
+        # exclusion this rule would page critical on any single bad tick and
+        # stay paged for up to 24h, the same false-positive
+        # VectorCronjobAllRunsFailing already avoids for morpho-v2-bootstrap
+        # (see docs/runbooks/vector-cronjobs.md). VectorCronjobRunFailing
+        # (warning) still covers a failed core-model-runner tick.
+        #
+        # The 1h window spans >=1 cycle for every OTHER covered cronjob — even
+        # the slowest of them, watcher-data-validator (1h), and many cycles for
+        # the faster ones. Distinct from VectorCronjobWorkerDown: here the
+        # worker IS running and emitting metrics, every run just errors.
         expr: |
           (
             sum by (service_name, cluster) (
@@ -116,6 +131,7 @@ groups:
                 service_name!="reference-capital-backfill",
                 service_name!="morpho-v2-bootstrap",
                 service_name!="morpho-vault-backfill",
+                service_name!="core-model-runner",
                 k8s_namespace_name="vector"
               }[1h])
             ) > 0
@@ -130,6 +146,7 @@ groups:
                 service_name!="reference-capital-backfill",
                 service_name!="morpho-v2-bootstrap",
                 service_name!="morpho-vault-backfill",
+                service_name!="core-model-runner",
                 k8s_namespace_name="vector"
               }[1h])
             ) == 0
