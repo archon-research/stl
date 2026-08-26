@@ -234,8 +234,11 @@ func (c *Client) fetchStarPositions(ctx context.Context, star string) ([]outboun
 		return nil, err
 	}
 
-	// Row identity is (network, token_address) — the table's key. A duplicate
-	// in one fetch would silently conflict away at insert, so it fails here.
+	// Row identity is (network, token_address) — the table's key. Case-folded
+	// here because the two are otherwise stored verbatim: a casing change on
+	// either would silently mint a second identity for the same position. A
+	// duplicate in one fetch would silently conflict away at insert, so it
+	// fails here instead.
 	seen := make(map[string]bool, len(results))
 	rows := make([]outbound.ReferencePositionRow, 0, len(results))
 	for i, row := range results {
@@ -243,7 +246,7 @@ func (c *Client) fetchStarPositions(ctx context.Context, star string) ([]outboun
 		if err != nil {
 			return nil, err
 		}
-		key := parsed.Network + "|" + parsed.TokenAddress
+		key := strings.ToLower(parsed.Network) + "|" + strings.ToLower(parsed.TokenAddress)
 		if seen[key] {
 			return nil, fmt.Errorf(
 				"sky positions for prime %q repeat identity %s on %s; the row identity assumption no longer holds",
@@ -290,8 +293,10 @@ func toPositionRow(star string, row positionPayloadRow, index int) (outbound.Ref
 	}, nil
 }
 
+// chainIDFor looks up by a case-folded network, since the vendor vocabulary
+// this map encodes is lowercase and upstream's own casing is not trustworthy.
 func chainIDFor(network string) *int64 {
-	id, ok := networkToChainID[network]
+	id, ok := networkToChainID[strings.ToLower(network)]
 	if !ok {
 		return nil
 	}

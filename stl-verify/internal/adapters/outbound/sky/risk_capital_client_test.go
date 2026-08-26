@@ -344,6 +344,41 @@ func TestFetchPrimeAllocationsRejectsADuplicateRowIdentity(t *testing.T) {
 	}
 }
 
+// A casing difference must not hide a duplicate identity: (network,
+// token_address) is the table's key, and upstream's casing is not
+// trustworthy (see chainIDFor).
+func TestFetchPrimeAllocationsRejectsADuplicateRowIdentityAcrossCasing(t *testing.T) {
+	client, _ := newTestClient(t, map[string]any{
+		"/primes/spark/allocations/": allocationsPayload(
+			map[string]any{"network": "ethereum"},
+			map[string]any{"network": "Ethereum"},
+		),
+	})
+
+	_, err := client.FetchPrimeAllocations(context.Background(), []string{"spark"})
+
+	if err == nil {
+		t.Fatal("FetchPrimeAllocations() = nil, want an error — a casing-only difference is still the same identity")
+	}
+}
+
+// The monitor's own vocabulary is lowercase; a casing difference upstream
+// must still resolve rather than silently reading as an unmapped network.
+func TestFetchPrimeAllocationsMapsChainIDCaseInsensitively(t *testing.T) {
+	client, _ := newTestClient(t, map[string]any{
+		"/primes/spark/allocations/": allocationsPayload(map[string]any{"network": "Ethereum"}),
+	})
+
+	rows, err := client.FetchPrimeAllocations(context.Background(), []string{"spark"})
+	if err != nil {
+		t.Fatalf("FetchPrimeAllocations() = %v", err)
+	}
+
+	if rows[0].ChainID == nil || *rows[0].ChainID != 1 {
+		t.Errorf("ChainID = %v, want 1 for network \"Ethereum\"", rows[0].ChainID)
+	}
+}
+
 func TestFetchPrimeAllocationsRejectsATruncatedPage(t *testing.T) {
 	payload := allocationsPayload(map[string]any{})
 	payload["data"].(map[string]any)["pagination"] = map[string]any{"total": 40}

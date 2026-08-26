@@ -343,6 +343,35 @@ func TestFetchPositionsRejectsADuplicateRowIdentity(t *testing.T) {
 	}
 }
 
+// A casing difference must not hide a duplicate identity: (network,
+// token_address) is the table's key, and upstream's casing is not
+// trustworthy (see chainIDFor).
+func TestFetchPositionsRejectsADuplicateRowIdentityAcrossCasing(t *testing.T) {
+	client, _ := newPositionsTestClient(t, []map[string]any{
+		positionRow(map[string]any{"network": "ethereum"}),
+		positionRow(map[string]any{"network": "Ethereum"}),
+	}, 2)
+
+	if _, err := client.FetchPositions(context.Background(), []string{"spark"}); err == nil {
+		t.Fatal("FetchPositions() = nil, want an error — a casing-only difference is still the same identity")
+	}
+}
+
+// The feed's own vocabulary is lowercase; a casing difference upstream must
+// still resolve rather than silently reading as an unmapped network.
+func TestFetchPositionsMapsChainIDCaseInsensitively(t *testing.T) {
+	client, _ := newPositionsTestClient(t, []map[string]any{positionRow(map[string]any{"network": "Ethereum"})}, 1)
+
+	rows, err := client.FetchPositions(context.Background(), []string{"spark"})
+	if err != nil {
+		t.Fatalf("FetchPositions() = %v", err)
+	}
+
+	if rows[0].ChainID == nil || *rows[0].ChainID != 1 {
+		t.Errorf("ChainID = %v, want 1 for network \"Ethereum\"", rows[0].ChainID)
+	}
+}
+
 func TestFetchPositionsRejectsATruncatedPage(t *testing.T) {
 	client, _ := newPositionsTestClient(t, []map[string]any{positionRow(nil)}, 59)
 
