@@ -15,3 +15,10 @@ func ParseInt64(hexNum string) (int64, error) {
 	hexNum = strings.TrimPrefix(hexNum, "0x")
 	return strconv.ParseInt(hexNum, 16, 64)
 }
+
+// ParseUint64 parses a hex-encoded string to uint64.
+// Handles both "0x" prefixed and non-prefixed hex strings.
+func ParseUint64(hexNum string) (uint64, error) {
+	hexNum = strings.TrimPrefix(hexNum, "0x")
+	return strconv.ParseUint(hexNum, 16, 64)
+}
