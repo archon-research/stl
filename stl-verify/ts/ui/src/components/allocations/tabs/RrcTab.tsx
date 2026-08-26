@@ -22,6 +22,7 @@ import type {
   AllocationRiskCapital,
   PrimeRiskCapital,
   Prime,
+  Provenance,
   Rrc,
   RrcResult,
 } from '../../../types/allocation';
@@ -44,9 +45,13 @@ const MODEL_LABELS: Record<string, string> = {
 };
 
 // The table's own preference chain (PrimeRiskCapitalService._model_preference):
-// core_model first, gap_sweep second. suraf never appears there, so it's never
-// a fallback candidate even if the drawer's own dispatch priced it.
-const MODEL_PREFERENCE_FALLBACK = ['core_model', 'gap_sweep'] as const;
+// under `source=both` it tries core_model alone — a position core_model can't
+// price there falls back to Sky's reference figure, not gap_sweep; every other
+// source (`indexed`, `reference`) also tries gap_sweep. suraf never appears
+// there, so it's never a fallback candidate even if the drawer's own dispatch
+// priced it.
+const MODEL_PREFERENCE_BOTH = ['core_model'] as const;
+const MODEL_PREFERENCE_DEFAULT = ['core_model', 'gap_sweep'] as const;
 
 // Which model the table would have used for this position, when the table
 // itself carries no model for it (unpriced there, or the row didn't join).
@@ -54,9 +59,12 @@ const MODEL_PREFERENCE_FALLBACK = ['core_model', 'gap_sweep'] as const;
 // model that produced no result.
 function fallbackSelectedModel(
   results: RrcResult[] | undefined,
+  source: Provenance | undefined,
 ): string | null {
+  const preference =
+    source === 'both' ? MODEL_PREFERENCE_BOTH : MODEL_PREFERENCE_DEFAULT;
   return (
-    MODEL_PREFERENCE_FALLBACK.find((model) =>
+    preference.find((model) =>
       results?.some((result) => result.risk_model === model),
     ) ?? null
   );
@@ -326,7 +334,8 @@ export function RrcTab({
   // the badge still lands on the model the table would have used.
   const selectedModel = skySelected
     ? null
-    : (riskCapitalEntry?.model ?? fallbackSelectedModel(rrc?.results));
+    : (riskCapitalEntry?.model ??
+      fallbackSelectedModel(rrc?.results, riskCapital?.source));
 
   if (!selectedReceiptToken) {
     return (
