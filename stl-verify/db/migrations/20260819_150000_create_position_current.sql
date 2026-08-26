@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS position_current (
     CONSTRAINT position_current_as_of_date_chk CHECK (as_of_date = (block_timestamp AT TIME ZONE 'utc')::date)
 );
 
-COMMENT ON TABLE position_current IS '[Operational] One row per position: its newest observation by (block_number, block_version, processing_version, block_timestamp) (VEC-409). Derived cache of the position_state history, maintained by trigger_upsert_position_current. Deliberately a PLAIN table, no hypertable/compression/tiering: it carries one row per position and no time dimension, so chunking buys nothing -- history lives in position_state. Ordering is block_number FIRST, so a reorg replacement landing at a LOWER block does NOT win: the orphaned observation stays current until a higher block supersedes it. Re-running the statement between the REBUILD-BEGIN/END position_current markers in 20260819_150100 is a FORWARD-ONLY merge -- it raises rows, never lowers or removes them, so it cannot repair a row ahead of history or an orphan; a true rebuild is TRUNCATE first, and TRUNCATE is owner-only. Re-running the marked statement against live ingest measured 0 deadlocks over 120 rounds and 952 batches, because the trigger and this statement both sweep this table''s PK in position_id order; the residual is a writer that splits one batch across several statements in one transaction, which measured 6/20 with the REBUILD as the victim, so the 40P01 retry the spine documents still applies. Every point-in-time question (what was X at block N) is answered from position_state, never from here. A zero quantity is a real observation of an emptied position as of as_of_date, not a gap and not a lifecycle close.';
+COMMENT ON TABLE position_current IS '[Operational] One row per position: its newest observation by (block_number, block_version, processing_version, block_timestamp) (VEC-409). Derived cache of the position_state history, maintained by trigger_upsert_position_current. Deliberately a PLAIN table, no hypertable/compression/tiering: it carries one row per position and no time dimension, so chunking buys nothing -- history lives in position_state. Ordering is block_number FIRST, so a reorg replacement landing at a LOWER block does NOT win: the orphaned observation stays current until a higher block supersedes it. Re-running the statement between the REBUILD-BEGIN/END position_current markers in 20260819_150100 is a FORWARD-ONLY merge -- it raises rows and converges a payload that drifted at equal coordinates, but never lowers or removes them, so it cannot repair a row ahead of history or an orphan; a true rebuild is TRUNCATE first, and TRUNCATE is owner-only. Re-running the marked statement against live ingest measured 0 deadlocks over 120 rounds and 952 batches, because the trigger and this statement both sweep this table''s PK in position_id order; the residual is a writer that splits one batch across several statements in one transaction, which measured 6/20 with the REBUILD as the victim, so the 40P01 retry the spine documents still applies. Every point-in-time question (what was X at block N) is answered from position_state, never from here. A zero quantity is a real observation of an emptied position as of as_of_date, not a gap and not a lifecycle close.';
 COMMENT ON COLUMN position_current.position_id IS 'PK. The bytea(32) native position identity from position_id() (VEC-400).';
 COMMENT ON COLUMN position_current.as_of_date IS 'Derived. UTC date of the latest observation''s block_timestamp — which day this state is as of. Business today is UTC, never CURRENT_DATE.';
 COMMENT ON COLUMN position_current.chain_id IS 'Derived (copy of position_state.chain_id). Native chain id; nullable per the position_id convention.';
@@ -106,9 +106,10 @@ COMMENT ON COLUMN position_current.build_id IS 'Audit. Which build wrote the lat
 -- observations, where "current" must stay a query so reorgs roll back and replays are order-independent.
 -- This is a derived cache of exactly that query: position_state stays append-only and untouched, and
 -- nothing here is a source of truth. What the maintainer provides is an idempotent FORWARD-ONLY merge:
--- it raises a cached row to a newer observation and never lowers or removes one, so a row that is ahead
--- of history or has no history at all does not converge on its own (see 20260819_150100, which
--- documents both classes and who can repair them). It therefore DOES take ON CONFLICT DO UPDATE and
+-- it raises a cached row to a newer observation, converges one whose payload drifted at equal
+-- coordinates, and never lowers or removes one -- so a row that is ahead of history or has no history at
+-- all does not converge on its own (see 20260819_150100, which documents both classes and who can
+-- repair them). It therefore DOES take ON CONFLICT DO UPDATE and
 -- hold the UPDATE grant. The corollary is a hard limit on how it may be read: position_current answers
 -- "now", never "as of block N".
 --
@@ -195,7 +196,12 @@ BEGIN
         projection         = EXCLUDED.projection,
         build_id           = EXCLUDED.build_id
     WHERE (EXCLUDED.block_number, EXCLUDED.block_version, EXCLUDED.processing_version, EXCLUDED.block_timestamp)
-        > (cur.block_number, cur.block_version, cur.processing_version, cur.block_timestamp);
+        > (cur.block_number, cur.block_version, cur.processing_version, cur.block_timestamp)
+       OR ((EXCLUDED.block_number, EXCLUDED.block_version, EXCLUDED.processing_version, EXCLUDED.block_timestamp)
+            = (cur.block_number, cur.block_version, cur.processing_version, cur.block_timestamp)
+           AND (EXCLUDED.quantity, EXCLUDED.as_of_date, EXCLUDED.chain_id, EXCLUDED.protocol_id, EXCLUDED.instrument_key, EXCLUDED.holder_id, EXCLUDED.projection, EXCLUDED.build_id)
+               IS DISTINCT FROM
+               (cur.quantity, cur.as_of_date, cur.chain_id, cur.protocol_id, cur.instrument_key, cur.holder_id, cur.projection, cur.build_id));
     RETURN NULL;
 END;
 $fn$;

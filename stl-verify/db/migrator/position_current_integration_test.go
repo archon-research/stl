@@ -1304,3 +1304,112 @@ func TestPositionCurrentRebuildSucceedsWithNoChunks(t *testing.T) {
 		t.Errorf("rebuild over an empty history cached %d rows; want 0", cached)
 	}
 }
+
+// The third drift class. The newer-wins arm compares coordinates with a strict >, so a cache row sitting
+// at the SAME coordinates as history with a different payload is left alone and the rebuild reports
+// INSERT 0 0 -- byte-identical to a healthy converged run, which is the signature this whole migration is
+// built to avoid. It is reachable through the sanctioned grants: stl_readwrite holds UPDATE here, and the
+// table takes direct writes by design. Both files enumerate the unrepairable classes as exactly two,
+// ahead-of-history and orphan, so this one has to be repairable for that enumeration to be true.
+func TestPositionCurrentRebuildRepairsDriftAtEqualCoordinates(t *testing.T) {
+	f := newPositionCurrentFixture(t)
+	f.observe("equal-coords", 500, 100, 0, 0, "2026-01-01T00:00:00Z")
+	// Same coordinates as history, wrong payload -- what a direct UPDATE in role produces.
+	f.setCache("equal-coords", 999999, 100, 0, 0, "2026-01-01T00:00:00Z")
+
+	f.rebuild()
+
+	if qty, block, _ := f.current("equal-coords"); qty != 500 || block != 100 {
+		t.Errorf("after the rebuild the cache holds quantity %d at block %d; want 500 at 100 -- a payload "+
+			"that drifted at equal coordinates is not repaired, and the rebuild reported no error", qty, block)
+	}
+}
+
+// The other half, and the reason the arm stays forward-only: converging equal coordinates must not become
+// a licence to lower them. A cache row AHEAD of history keeps its own coordinates and payload.
+func TestPositionCurrentRebuildStillWillNotLowerACacheRowAheadOfHistory(t *testing.T) {
+	f := newPositionCurrentFixture(t)
+	f.observe("ahead", 500, 100, 0, 0, "2026-01-01T00:00:00Z")
+	f.setCache("ahead", 777, 900, 0, 0, "2026-09-01T00:00:00Z")
+
+	f.rebuild()
+
+	if qty, block, _ := f.current("ahead"); qty != 777 || block != 900 {
+		t.Errorf("the rebuild lowered a cache row ahead of history to quantity %d at block %d; the arm "+
+			"must raise rows and converge equal coordinates, never lower", qty, block)
+	}
+}
+
+// A converged rebuild must still touch nothing. The equal-coordinates arm fires only on an actual payload
+// difference, so the "re-running is a no-op" property the table COMMENT and the trigger both rely on has
+// to survive it -- otherwise every rebuild rewrites every row and takes a row lock on each.
+func TestPositionCurrentConvergedRebuildUpdatesNothing(t *testing.T) {
+	f := newPositionCurrentFixture(t)
+	for i, id := range []string{"conv-a", "conv-b", "conv-c"} {
+		f.observe(id, 10+i, 100+i, 0, 0, "2026-01-01T00:00:00Z")
+	}
+	before := f.snapshot()
+
+	var xminBefore, xminAfter []uint32
+	rows, err := f.pool.Query(f.ctx, `SELECT xmin::text::bigint FROM position_current ORDER BY position_id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var x uint32
+		if err := rows.Scan(&x); err != nil {
+			t.Fatal(err)
+		}
+		xminBefore = append(xminBefore, x)
+	}
+	rows.Close()
+
+	f.rebuild()
+
+	rows, err = f.pool.Query(f.ctx, `SELECT xmin::text::bigint FROM position_current ORDER BY position_id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var x uint32
+		if err := rows.Scan(&x); err != nil {
+			t.Fatal(err)
+		}
+		xminAfter = append(xminAfter, x)
+	}
+	rows.Close()
+
+	if fmt.Sprint(before) != fmt.Sprint(f.snapshot()) {
+		t.Errorf("a converged rebuild changed the cache contents: %v -> %v", before, f.snapshot())
+	}
+	if fmt.Sprint(xminBefore) != fmt.Sprint(xminAfter) {
+		t.Errorf("a converged rebuild rewrote rows (xmin %v -> %v); the equal-coordinates arm is firing "+
+			"on rows that do not differ, so every rebuild takes a row lock on every position",
+			xminBefore, xminAfter)
+	}
+}
+
+// The trigger carries the same equal-coordinates arm, and it is reachable without a rebuild: a row written
+// straight into the cache with no history behind it is an orphan, and the moment real history arrives at
+// the coordinates that orphan claims, the trigger is the only thing that can correct it. With a strict >
+// the wrong payload survives an ingest that knows better, silently.
+func TestPositionCurrentTriggerRepairsAnOrphanAtEqualCoordinates(t *testing.T) {
+	f := newPositionCurrentFixture(t)
+	if _, err := f.pool.Exec(f.ctx, `
+		INSERT INTO position_current
+		    (position_id, as_of_date, chain_id, protocol_id, instrument_key, holder_id, quantity,
+		     block_number, block_version, processing_version, block_timestamp, projection, build_id)
+		VALUES (sha256($1::bytea), '2026-01-01', 1, 1, 'inst-' || $1,
+		        substr(md5($1) || md5($1), 1, 40), 999999, 100, 0, 0,
+		        '2026-01-01T00:00:00Z'::timestamptz, 'public.proj-0', 0)`, "orphan-eq"); err != nil {
+		t.Fatalf("seeding the orphan: %v", err)
+	}
+
+	// History arrives at exactly the coordinates the orphan claims.
+	f.observe("orphan-eq", 500, 100, 0, 0, "2026-01-01T00:00:00Z")
+
+	if qty, block, _ := f.current("orphan-eq"); qty != 500 || block != 100 {
+		t.Errorf("the cache holds quantity %d at block %d after history arrived at the same coordinates; "+
+			"want 500 at 100 -- the trigger left a wrong payload standing with no error", qty, block)
+	}
+}

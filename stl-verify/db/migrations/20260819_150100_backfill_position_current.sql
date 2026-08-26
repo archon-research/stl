@@ -11,10 +11,13 @@
 -- trigger is live for the whole of this scan. Where the two overlap, whichever resolves second is a
 -- guarded no-op, which is the same idempotency that makes re-running this statement safe.
 --
--- Re-running this statement is a FORWARD-ONLY MERGE, not a full rebuild. The newer-wins guard only
--- raises a cached row; it never lowers one and never removes one, so it cannot repair a row that is
--- AHEAD of history (a wrong direct INSERT, or a restore whose cache backup is newer than its history
--- backup) nor an orphan row whose position has no history at all. Both were reproduced. A true rebuild
+-- Re-running this statement is a FORWARD-ONLY MERGE, not a full rebuild. The newer-wins guard raises a
+-- cached row, and converges one sitting at coordinates EQUAL to history whose payload has drifted; it
+-- never lowers one and never removes one, so it cannot repair a row that is AHEAD of history (a wrong
+-- direct INSERT, or a restore whose cache backup is newer than its history backup) nor an orphan row
+-- whose position has no history at all. Those two are the whole list, and they are only two because the
+-- equal-coordinates case converges -- with a strict > it was a silent third, reachable in role and
+-- reporting INSERT 0 0. All three were reproduced. A true rebuild
 -- is TRUNCATE then this statement, and TRUNCATE is owner-only -- stl_readwrite holds neither DELETE nor
 -- TRUNCATE. The ORPHAN class therefore needs the owner; the ahead-of-history class does NOT -- a plain
 -- UPDATE repairs it, because UPDATE is unguarded in both directions, so the same grant that creates that
@@ -88,8 +91,21 @@ ON CONFLICT (position_id) DO UPDATE SET
     block_timestamp    = EXCLUDED.block_timestamp,
     projection         = EXCLUDED.projection,
     build_id           = EXCLUDED.build_id
+-- Raise on a newer observation, and CONVERGE on an equal one whose payload differs. Without the
+-- second arm a cache row at the SAME coordinates as history with a drifted payload is left alone
+-- and the rebuild reports INSERT 0 0 -- byte-identical to a healthy converged run. It is reachable
+-- in role: stl_readwrite holds UPDATE here and the table takes direct writes by design, so the two
+-- classes this file calls unrepairable (ahead-of-history, orphan) are only exactly two BECAUSE this
+-- third one converges. Still forward-only: coordinates are never lowered, only equalled. IS DISTINCT
+-- FROM, not <>, because chain_id and protocol_id are nullable -- <> yields NULL and skips the repair.
+-- A converged re-run still updates nothing, so the no-deadlock and no-op properties are unchanged.
 WHERE (EXCLUDED.block_number, EXCLUDED.block_version, EXCLUDED.processing_version, EXCLUDED.block_timestamp)
-    > (position_current.block_number, position_current.block_version, position_current.processing_version, position_current.block_timestamp);
+    > (position_current.block_number, position_current.block_version, position_current.processing_version, position_current.block_timestamp)
+   OR ((EXCLUDED.block_number, EXCLUDED.block_version, EXCLUDED.processing_version, EXCLUDED.block_timestamp)
+        = (position_current.block_number, position_current.block_version, position_current.processing_version, position_current.block_timestamp)
+       AND (EXCLUDED.quantity, EXCLUDED.as_of_date, EXCLUDED.chain_id, EXCLUDED.protocol_id, EXCLUDED.instrument_key, EXCLUDED.holder_id, EXCLUDED.projection, EXCLUDED.build_id)
+           IS DISTINCT FROM
+           (position_current.quantity, position_current.as_of_date, position_current.chain_id, position_current.protocol_id, position_current.instrument_key, position_current.holder_id, position_current.projection, position_current.build_id));
 -- REBUILD-END position_current
 
 -- SET LOCAL lives until the transaction ends, not until the marker, so without this the statements below
