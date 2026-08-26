@@ -984,25 +984,6 @@ async function checkReferenceTranchesSplitTotalCapital() {
   }
 }
 
-async function checkCapitalMetricsDedupeByVault() {
-  const rows = await request('/v1/capital-metrics', {}, 'capital-metrics');
-
-  assert.equal(rows.length, 6, 'one row per ALM proxy');
-  assert.ok(
-    rows.every((row) => row.scope === 'prime'),
-    'every metric on a capital-metrics row is prime-level',
-  );
-  assert.equal(
-    new Set(rows.map((row) => row.prime_vault_address)).size,
-    2,
-    'the rows should dedupe to two primes',
-  );
-  assert.ok(
-    rows.some((row) => !row.is_validated),
-    'the unvalidated branch needs a fixture',
-  );
-}
-
 async function checkEmptyProxyIsNotAnError() {
   const allocations = await request(
     '/v1/primes/{prime_id}/allocations',
@@ -1270,7 +1251,6 @@ const checks = [
     'the reference tranches split total capital',
     checkReferenceTranchesSplitTotalCapital,
   ],
-  ['capital metrics dedupe by vault', checkCapitalMetricsDedupeByVault],
   ['an empty proxy is not an error', checkEmptyProxyIsNotAnError],
   ['an unknown prime is a 404', checkUnknownPrimeIsNotFound],
   ['an unknown asset is a 404', checkUnknownAssetIsNotFound],

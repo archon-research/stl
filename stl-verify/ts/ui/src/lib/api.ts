@@ -5,7 +5,6 @@ import type {
   AllocationActivityEnvelope,
   AllocationActivityResponse,
   AllocationsResponse,
-  CapitalMetricsListResponse,
   DataSourcesResponse,
   ExposureEnvelope,
   PrimeDebtBucket,
@@ -292,15 +291,6 @@ export async function getAllocationActivityEnvelope(
     'GET /v1/allocations/activity',
   );
   return envelope as AllocationActivityEnvelope;
-}
-
-export function getCapitalMetrics(
-  signal?: AbortSignal,
-): Promise<CapitalMetricsListResponse> {
-  return requestData(
-    apiClient.GET('/v1/capital-metrics', { signal }),
-    'GET /v1/capital-metrics',
-  );
 }
 
 export function getDataSources(

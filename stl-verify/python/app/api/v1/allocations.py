@@ -1,13 +1,11 @@
 import asyncio
 import logging
 from collections.abc import Callable
-from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from datetime import datetime
 from typing import Annotated, Literal
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.adapters.postgres.allocation_position_repository import AllocationRepository
@@ -22,7 +20,6 @@ from app.api.provenance import (
     resolve_or_422,
 )
 from app.api.time_series import TimeSeriesWindow, apply_cache_control, build_window, get_time_series_query_params
-from app.config import get_settings
 from app.domain.entities.allocation import (
     AnchorageCustodyHolding,
     DirectAssetHolding,
@@ -328,95 +325,6 @@ class AllocationResponse(BaseModel):
         return self
 
 
-class CapitalMetricsResponse(BaseModel):
-    """Prime-level capital metrics for risk and alert management."""
-
-    prime_id: str = Field(
-        deprecated=True,
-        description=(
-            "DEPRECATED — despite the name this is one of the prime's ALM **proxy** addresses, "
-            "not a prime identifier, and this endpoint returns one row per proxy. Its value is "
-            "unchanged for backwards compatibility. Use `prime_vault_address` or `prime_name` "
-            "to identify the prime."
-        ),
-        examples=["0x1601843c5e9bc251a3272907010afa41fa18347e"],
-    )
-    prime_name: str = Field(description="Human-readable prime name.", examples=["Acme Prime"])
-    exposure: PlainDecimal = Field(
-        description="Total USD exposure across the prime's allocations (upstream `exposure`).",
-        examples=["1900000000"],
-    )
-    capital_buffer: PlainDecimal = Field(
-        description="`max(total_risk_capital - required_risk_capital, 0)` — unencumbered risk capital (USD).",
-        examples=["2500000"],
-    )
-    required_risk_capital: PlainDecimal = Field(
-        description="Required Risk Capital (RRC) reported by upstream `financial_rrc` (USD).",
-        examples=["7500000"],
-    )
-    total_risk_capital: PlainDecimal = Field(
-        description="Total Risk Capital reported by upstream `total_rc` (USD).",
-        examples=["10000000"],
-    )
-    encumbrance_ratio: PlainDecimal | None = Field(
-        default=None,
-        description=(
-            "Required Risk Capital as a share of Total Risk Capital "
-            "(upstream `risk_tolerance_ratio`). `null` when not validated."
-        ),
-        examples=["0.85"],
-    )
-    timestamp: str = Field(
-        description="ISO-8601 timestamp the snapshot was assembled.",
-        examples=["2026-05-07T12:00:00Z"],
-    )
-    benchmark_source: str | None = Field(
-        default=None,
-        description="URL of the upstream benchmark source used to populate the row.",
-    )
-    is_validated: bool = Field(default=False, description="Whether the row was validated against on-chain state.")
-    validation_note: str | None = Field(
-        default=None,
-        description="Human-readable note about validation, e.g. why a row is missing or unmatched.",
-    )
-    prime_vault_address: str | None = Field(
-        default=None,
-        description=(
-            "The prime's on-chain vault address — identical across the prime's rows. Dedupe on this before aggregating."
-        ),
-        examples=["0x691a6c29e9e96dd897718305427ad5d534db16ba"],
-    )
-    scope: Literal["prime"] = Field(
-        default="prime",
-        description=(
-            "Always `prime`: every metric on this row describes the whole prime, not the proxy in "
-            "`prime_id`. The row repeats once per ALM proxy, so summing rows triple-counts. "
-            "Dedupe by `prime_vault_address` first."
-        ),
-        examples=["prime"],
-    )
-
-    model_config = {
-        "json_schema_extra": {
-            "example": {
-                "prime_id": "0x1601843c5e9bc251a3272907010afa41fa18347e",
-                "prime_name": "spark",
-                "exposure": "1900000000",
-                "capital_buffer": "2500000",
-                "required_risk_capital": "7500000",
-                "total_risk_capital": "10000000",
-                "encumbrance_ratio": "0.85",
-                "timestamp": "2026-05-07T12:00:00Z",
-                "benchmark_source": "https://example.com/star-rrc",
-                "is_validated": False,
-                "validation_note": "Sourced from Star Agents Risk Capital & Requirements Monitor.",
-                "prime_vault_address": "0x691a6c29e9e96dd897718305427ad5d534db16ba",
-                "scope": "prime",
-            }
-        }
-    }
-
-
 class AllocationActivityResponse(BaseModel):
     """Allocation activity event record for timeline feeds."""
 
@@ -451,112 +359,8 @@ class AllocationActivityResponse(BaseModel):
     created_at: str = Field(description="ISO-8601 timestamp the event row was persisted.")
 
 
-class StarRiskCapitalRowResponse(BaseModel):
-    """Internal upstream payload row from the Star risk-capital monitor."""
-
-    star: str
-    exposure: str
-    total_rc: str
-    financial_rrc: str
-    exposure_share: str
-    risk_tolerance_ratio: str
-
-
-class StarRiskCapitalDataResponse(BaseModel):
-    results: list[StarRiskCapitalRowResponse] = []
-
-
-class StarRiskCapitalResponse(BaseModel):
-    data: StarRiskCapitalDataResponse | None = None
-    status: int | None = None
-    success: bool | None = None
-
-
 async def _get_service(engine: AsyncEngine = Depends(get_engine)) -> AllocationService:
     return AllocationService(AllocationRepository(engine))
-
-
-async def _fetch_star_risk_capital_payload() -> StarRiskCapitalResponse:
-    settings = get_settings()
-    timeout = httpx.Timeout(connect=5.0, read=15.0, write=10.0, pool=5.0)
-
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.get(settings.star_risk_capital_upstream_url)
-    except httpx.HTTPError as exc:
-        logger.exception(
-            "Failed to fetch Star risk capital upstream",
-            extra={"upstream_url": settings.star_risk_capital_upstream_url},
-        )
-        raise HTTPException(status_code=502, detail="Risk capital upstream request failed") from exc
-
-    if not response.is_success:
-        logger.error(
-            "Star risk capital upstream returned non-success status",
-            extra={
-                "upstream_url": settings.star_risk_capital_upstream_url,
-                "status_code": response.status_code,
-                "response_preview": response.text[:500],
-            },
-        )
-        raise HTTPException(
-            status_code=502,
-            detail=f"Risk capital upstream returned status {response.status_code}",
-        )
-
-    try:
-        payload = response.json()
-    except ValueError as exc:
-        logger.exception(
-            "Star risk capital upstream returned invalid JSON",
-            extra={"upstream_url": settings.star_risk_capital_upstream_url},
-        )
-        raise HTTPException(status_code=502, detail="Risk capital upstream returned invalid JSON") from exc
-
-    try:
-        parsed = StarRiskCapitalResponse.model_validate(payload)
-    except ValidationError as exc:
-        logger.exception(
-            "Star risk capital upstream response had unexpected shape",
-            extra={
-                "upstream_url": settings.star_risk_capital_upstream_url,
-                "validation_errors": exc.errors(),
-            },
-        )
-        raise HTTPException(status_code=502, detail="Risk capital upstream response shape mismatch") from exc
-
-    if parsed.success is False or (parsed.status is not None and parsed.status >= 400):
-        logger.error(
-            "Star risk capital upstream reported failure",
-            extra={
-                "upstream_url": settings.star_risk_capital_upstream_url,
-                "upstream_status": parsed.status,
-                "upstream_success": parsed.success,
-            },
-        )
-        raise HTTPException(status_code=502, detail="Risk capital upstream reported failure")
-
-    return parsed
-
-
-def _to_decimal(value: str, *, field: str, prime_name: str) -> Decimal:
-    try:
-        return Decimal(value)
-    except (InvalidOperation, TypeError, ValueError) as exc:
-        logger.error(
-            "Invalid numeric value in Star risk capital payload",
-            extra={
-                "field": field,
-                "prime_name": prime_name,
-                "value": value,
-            },
-        )
-        raise HTTPException(
-            status_code=502,
-            detail=(
-                f"Risk capital upstream returned invalid numeric value for field '{field}' and prime '{prime_name}'"
-            ),
-        ) from exc
 
 
 @router.get(
@@ -585,92 +389,6 @@ async def list_primes(service: AllocationService = Depends(_get_service)):
         )
         for p in primes
     ]
-
-
-@router.get(
-    "/capital-metrics",
-    response_model=list[CapitalMetricsResponse],
-    tags=["capital", "internal"],
-    summary="List per-prime capital metrics",
-    description=(
-        "Join each tracked prime with the latest row from the upstream Star risk-capital monitor "
-        "and return derived capital metrics: risk capital, first-loss capital, total capital, "
-        "and the buffer between them. Primes without a matching upstream row are still returned, "
-        "with zeroed metrics and a `validation_note` explaining why. A `502` is returned only when "
-        "the upstream call itself fails.\n\n"
-        "Returns one row per ALM proxy, but every metric on a row is **prime-level** — the upstream Star "
-        "monitor reports per prime, so a prime's rows carry identical figures and are not additive. Dedupe "
-        "by `prime_vault_address` before aggregating. `prime_id` is deprecated: it holds a proxy address "
-        "despite its name."
-    ),
-)
-async def list_capital_metrics(
-    service: AllocationService = Depends(_get_service),
-) -> list[CapitalMetricsResponse]:
-    primes = await service.list_primes()
-    star_payload = await _fetch_star_risk_capital_payload()
-    rows = star_payload.data.results if star_payload.data else []
-
-    settings = get_settings()
-    metrics = []
-    for prime in primes:
-        row = next(
-            (r for r in rows if r.star.strip().lower() == prime.name.strip().lower()),
-            None,
-        )
-        if not row:
-            logger.warning(
-                "No upstream risk capital data found for prime",
-                extra={
-                    "prime_id": prime.id,
-                    "prime_name": prime.name,
-                    "upstream_url": settings.star_risk_capital_upstream_url,
-                },
-            )
-            metrics.append(
-                CapitalMetricsResponse(
-                    prime_id=prime.id,
-                    prime_name=prime.name,
-                    exposure=Decimal("0"),
-                    capital_buffer=Decimal("0"),
-                    required_risk_capital=Decimal("0"),
-                    total_risk_capital=Decimal("0"),
-                    encumbrance_ratio=None,
-                    timestamp=datetime.now(timezone.utc).isoformat(),
-                    benchmark_source=settings.star_risk_capital_upstream_url,
-                    is_validated=False,
-                    validation_note="No upstream Star risk-capital row matched this prime.",
-                    prime_vault_address=prime.prime_vault_address,
-                )
-            )
-            continue
-
-        total_rc = _to_decimal(row.total_rc, field="total_rc", prime_name=prime.name)
-        financial_rrc = _to_decimal(row.financial_rrc, field="financial_rrc", prime_name=prime.name)
-        capital_buffer = max(total_rc - financial_rrc, Decimal("0"))
-
-        metrics.append(
-            CapitalMetricsResponse(
-                prime_id=prime.id,
-                prime_name=prime.name,
-                exposure=_to_decimal(row.exposure, field="exposure", prime_name=prime.name),
-                capital_buffer=capital_buffer,
-                required_risk_capital=financial_rrc,
-                total_risk_capital=total_rc,
-                encumbrance_ratio=_to_decimal(
-                    row.risk_tolerance_ratio,
-                    field="risk_tolerance_ratio",
-                    prime_name=prime.name,
-                ),
-                timestamp=datetime.now(timezone.utc).isoformat(),
-                benchmark_source=settings.star_risk_capital_upstream_url,
-                is_validated=False,
-                validation_note="Sourced from Star Agents Risk Capital & Requirements Monitor.",
-                prime_vault_address=prime.prime_vault_address,
-            )
-        )
-
-    return metrics
 
 
 @router.get(
