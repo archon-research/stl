@@ -419,6 +419,16 @@ not engine configuration:
 9. **Shapes are rows.** A shape change is a versioned append with actor, reason, and approval
    like every other row, editable only by its `owner_role` (AC-3).
 
+**Validation is itself a graph read, and it must not traverse per write.** Three validity checks
+walk the graph: effective-shape resolution (the `NARROWER_THAN` ancestry), permitted-target
+subtree membership ("anything narrower than X"), and cycle detection on `NARROWER_THAN` and
+`HAS_UNDERLYING`. All three resolve against **precomputed closures** — the effective-shape
+artifact in the schema register and the `dim_cluster` expansion — which regenerate when a shape
+or taxonomy edge changes (rare), so a write-time REQUIRED check is a lookup, not a live
+traversal, and EXPECTED checks run as set-based queries over the same closures at DQ cadence.
+Live traversal happens in exactly two places: closure regeneration itself (depth-capped,
+cycle-guarded, failing loud) and ad-hoc exploration reads.
+
 **The SE-2 split — reject structural, record semantic.** A structurally invalid record (a token
 with no address or chain) is rejected at write. A semantically incomplete one (a real holding
 whose subtype nobody has curated yet) is **stored, flagged in `node_validity`, and excluded
