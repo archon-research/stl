@@ -373,7 +373,7 @@ export function RrcTab({
           >
             <ResultRow
               isSelected
-              label="Legacy published figure"
+              label="Legacy figure"
               value={`${formatUsdValue(reference.rrcUsd)} · CRR ${formatPercentValue(reference.crrPct, 2)}`}
             />
           </ul>
@@ -462,7 +462,7 @@ export function RrcTab({
             {reference ? (
               <ResultRow
                 isSelected={skySelected}
-                label="Legacy published figure"
+                label="Legacy figure"
                 value={`${formatUsdValue(reference.rrcUsd)} · CRR ${formatPercentValue(reference.crrPct, 2)}`}
               />
             ) : null}
