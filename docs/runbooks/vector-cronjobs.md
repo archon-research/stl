@@ -23,20 +23,31 @@ into TimescaleDB (or validates stored data). Current cronjobs:
 > `maple-graphql-indexer` is also a cronjob but has its own richer rules — see
 > [vector-indexers.md](vector-indexers.md), not this runbook.
 
-The shared activity records `cronjob_runs_total{status="success"|"error"}` and
-`cronjob_run_duration_seconds` per run, labelled `service_name=<cronjob>`. New
-cronjobs are covered automatically; only the availability rule needs the new
-Deployment name added to its regex — `VectorCronjobWorkerDown` for a scheduled
-cronjob, `VectorOnDemandWorkerDown` for an on-demand worker.
+The shared activity records `cronjob_runs_total{status="success"|"error"|"canceled"}`
+and `cronjob_run_duration_seconds` per run, labelled `service_name=<cronjob>`.
+New cronjobs are covered automatically; only the availability rule needs the
+new Deployment name added to its regex — `VectorCronjobWorkerDown` for a
+scheduled cronjob, `VectorOnDemandWorkerDown` for an on-demand worker.
 
-> `core-model-runner` is the first **Python** Temporal cronjob and its harness
-> does not emit `cronjob_runs_total` yet, so the metric-based rules above do not
-> cover it — `VectorCronjobWorkerDown` is its only alert. A failed tick shows up
-> in the Temporal UI (vector namespace → Schedules → `core-model-runner`) and in
-> the pod logs, not in Grafana. Closing that gap is
-> [VEC-638](https://linear.app/archontech/issue/VEC-638), and it is a **prod
-> blocker**: the runner stays out of the prod overlay until the Python harness
-> emits run metrics and the stall/silent-empty rules cover it.
+> `core-model-runner` is the first **Python** Temporal cronjob. Its harness
+> (`stl-verify/python/app/adapters/temporal/`) now emits the same
+> `cronjob_runs_total{status}` / `cronjob_run_duration_seconds` series from a
+> single site every Python cronjob shares — a `RunMetricsInterceptor` wrapping
+> every activity execution, mirroring the Go shared activity's `RecordRun`,
+> including the `status="canceled"` split for a run interrupted by activity
+> cancellation (worker shutdown during a deploy, or a schedule cancel) — so the
+> metric-based rules above cover it like any other cronjob, with no per-job
+> wiring ([VEC-638](https://linear.app/archontech/issue/VEC-638), closing the
+> prod-blocker gap raised in the review of #705).
+>
+> `core-model-runner` is still excluded from `VectorCronjobAllRunsFailing` (see
+> that rule and "Adding a new cronjob" below): it ticks every 24h with no retry,
+> so a single failed tick would otherwise page critical and stay paged for up
+> to 24h — the same shape `VectorCronjobAllRunsFailing` already avoids for the
+> on-demand jobs, just reached by a long interval instead of no schedule.
+> `VectorCronjobRunFailing` (warning) still covers a failed tick.
+> The runner still ships staging-only — N_MC stays capped at 100 until live
+> readers land, unrelated to this gap.
 
 > `transform-worker` ships at `replicas: 0` and is enabled (scaled to 1) only after
 > the one-off bootstrap has run. `VectorCronjobWorkerDown` is guarded on
@@ -689,8 +700,9 @@ exposure.
 ## Adding a new cronjob
 
 Failure + all-failing alerts are automatic (they group by `service_name`).
-`VectorCronjobAllRunsFailing` excludes `maple-graphql-indexer`,
-`offchain-price-backfill`, `morpho-vault-backfill` and `morpho-v2-bootstrap`;
+`VectorCronjobAllRunsFailing` excludes `maple-graphql-indexer`, the four
+on-demand jobs (`offchain-price-backfill`, `reference-capital-backfill`,
+`morpho-vault-backfill`, `morpho-v2-bootstrap`), and `core-model-runner`;
 `VectorCronjobRunFailing` excludes only maple. Two manual steps:
 
 1. Add the new **Deployment name** to the `deployment=~"..."` regex in the
@@ -703,3 +715,9 @@ Failure + all-failing alerts are automatic (they group by `service_name`).
    ALSO be added to the `service_name!=` exclusions in
    `VectorCronjobAllRunsFailing`, or its idle state pages.
 2. Add a row to the table at the top of this runbook.
+
+A **scheduled** cronjob that ticks too infrequently or retries too little for
+`VectorCronjobAllRunsFailing`'s 1h window to span a likely recovery needs the
+same `service_name!=` exclusion as an on-demand job — `core-model-runner`
+(24h interval, `RetryPolicy.maximum_attempts=1`) is the first example; see the
+alert's own comment in `alerts/vector-cronjobs.yaml` for the reasoning.
