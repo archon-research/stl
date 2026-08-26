@@ -5,6 +5,7 @@ package migrator_test
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -35,6 +36,17 @@ const (
 // cannot permute, and ordering either writer by time reopens the deadlock class.
 var orderByPositionIDRE = regexp.MustCompile(`(?i)ORDER\s+BY\s+(?:[a-z_]+\.)?position_id\b`)
 
+// rebuildOrderByRE matches the rebuild's DISTINCT ON ordering with all four legs in precedence order,
+// tolerant of whitespace so reformatting the migration does not read as a behaviour change.
+// triggerOrderByRE is the same ordering inside upsert_position_current, over its transition table.
+var triggerOrderByRE = regexp.MustCompile(`(?i)ORDER\s+BY\s+n\.position_id\s*,\s*` +
+	`n\.block_number\s+DESC\s*,\s*n\.block_version\s+DESC\s*,\s*` +
+	`n\.processing_version\s+DESC\s*,\s*n\.block_timestamp\s+DESC`)
+
+var rebuildOrderByRE = regexp.MustCompile(`(?i)ORDER\s+BY\s+p\.position_id\s*,\s*` +
+	`p\.block_number\s+DESC\s*,\s*p\.block_version\s+DESC\s*,\s*` +
+	`p\.processing_version\s+DESC\s*,\s*p\.block_timestamp\s+DESC`)
+
 // positionCurrentFixture is one migrated database plus the seeding and reading each position_current
 // case needs. Every test takes its own, so no case can observe another's rows and no whole-table
 // assertion depends on declaration order.
@@ -60,8 +72,7 @@ func (f *positionCurrentFixture) observe(id string, qty, block, bv, pv int, ts s
 	f.t.Helper()
 	if _, err := f.pool.Exec(f.ctx, `
 		INSERT INTO position_state
-		    (position_id, chain_id, protocol_id, instrument_key, holder_id, quantity,
-		     block_number, block_version, processing_version, block_timestamp, projection, build_id)
+		    (`+positionStateCols+`)
 		VALUES (sha256($1::bytea), 1, 1, 'inst-' || $1, substr(md5($1) || md5($1), 1, 40), $2, $3, $4, $5::int, $6,
 		        'public.proj-' || ($5::int)::text, $5::int)`,
 		id, qty, block, bv, pv, ts); err != nil {
@@ -144,8 +155,9 @@ func rebuildRegion(t *testing.T) string {
 
 // rebuildGuard returns a statement calling the shipped precondition check on its own, so a test can run
 // it in a transaction of its own choosing. The check lives in the DDL migration as a function and the
-// rebuild calls it from INSIDE its INSERT -- a preceding DO block was steppable by any client with
-// ON_ERROR_STOP off.
+// rebuild calls it BOTH standalone and from INSIDE its INSERT: a preceding statement alone is steppable
+// by any client with ON_ERROR_STOP off, and an in-INSERT qual alone is planned away when every chunk is
+// excluded at plan time.
 func rebuildGuard(t *testing.T) string {
 	t.Helper()
 	// Comment text is STRIPPED first, per this file's convention: without that, commenting out the
@@ -469,7 +481,8 @@ func TestPositionCurrentUTCDerivationIgnoresSessionTimeZone(t *testing.T) {
 
 func TestPositionCurrentRebuildDoesNotRegressARowAheadOfHistory(t *testing.T) {
 	// The state the backfill's own newer-wins WHERE exists for: a cached row NEWER than anything history
-	// holds. It must survive the rebuild, because no role can repair it by any other means.
+	// holds. It must survive the rebuild: the merge is forward-only, and lowering a cached row on the
+	// strength of older history is the one write it must never make. Repairing it is a plain in-role UPDATE.
 	f := newPositionCurrentFixture(t)
 	f.observe("ahead", 10, 100, 0, 0, "2026-01-01T00:00:00Z")
 	f.setCache("ahead", 77, 5000, 0, 0, "2026-02-01T00:00:00Z")
@@ -695,22 +708,17 @@ func TestPositionCurrentMigrationPinsItsLoadBearingInvariants(t *testing.T) {
 	})
 
 	t.Run("the rebuild orders by the whole version tuple", func(t *testing.T) {
-		// block_timestamp is pinned HERE rather than behaviourally because deleting it from the ORDER BY
-		// kills no test and cannot be made to: rows tied on the first three legs have no other
-		// discriminator, so DISTINCT ON falls back to an order Postgres does not promise, and it returns
-		// the wanted row anyway (measured with the winner inserted first, with eight tied losers after
-		// it, with seqscan disabled, and on a hypertable with the pair in two 1-day chunks). An assertion
-		// over data would pass whatever the migration said. The leg is not decoration: the 5-column PK
-		// admits a pair tied on the first three, and the materializer's anti-join is on the 4-column
-		// logical key while its ON CONFLICT is on the 5-column PK with no lock across the read, so two
-		// views emitting one logical key with drifted timestamps can both insert. This is exactly what
-		// this test exists for -- an invariant no behavioural case inside one transaction can reach.
-		const want = "ORDER BY p.position_id,\n         p.block_number DESC, p.block_version DESC, " +
-			"p.processing_version DESC, p.block_timestamp DESC"
-		if !strings.Contains(backfill, want) {
-			t.Errorf("the rebuild's DISTINCT ON ordering is not %q; a dropped or reordered leg seats the "+
-				"wrong observation as current, and after a TRUNCATE-first rebuild the newer-wins arm "+
-				"never runs to repair it", want)
+		// Pinned as text because deleting this leg kills no behavioural case and cannot be made to; it is
+		// still load-bearing, since the PK admits a tie on the first three. Measurements in #644.
+		if !triggerOrderByRE.MatchString(ddl) {
+			t.Errorf("the trigger's DISTINCT ON ordering does not match %v; promoting block_timestamp "+
+				"ahead of block_number reinstates the lower-block reorg win the table COMMENT calls the "+
+				"load-bearing rule, and every behavioural case still passes", triggerOrderByRE)
+		}
+		if !rebuildOrderByRE.MatchString(backfill) {
+			t.Errorf("the rebuild's DISTINCT ON ordering does not match %v; a dropped or reordered leg "+
+				"seats the wrong observation as current, and after a TRUNCATE-first rebuild the "+
+				"newer-wins arm never runs to repair it", rebuildOrderByRE)
 		}
 	})
 
@@ -1231,8 +1239,8 @@ func TestPositionCurrentReplicaRoleGapIsRepairedByRebuild(t *testing.T) {
 
 // observeUnderReplicaRole appends one observation with session_replication_role = 'replica', the setting
 // pg_restore --disable-triggers uses. The reset is deferred: the pool has no AfterRelease hook, so an
-// early exit here would return a triggers-disabled connection to it and silently skip the cache for
-// whichever test picked it up next.
+// early exit here would return a triggers-disabled connection to this test's own pool and silently
+// skip the cache for whatever ran next in it.
 func (f *positionCurrentFixture) observeUnderReplicaRole(id string, qty, block int, ts string) {
 	f.t.Helper()
 	conn, err := f.pool.Acquire(f.ctx)
@@ -1305,10 +1313,10 @@ func TestPositionCurrentRebuildSucceedsWithNoChunks(t *testing.T) {
 	}
 }
 
-// The third drift class. The newer-wins arm compares coordinates with a strict >, so a cache row sitting
-// at the SAME coordinates as history with a different payload is left alone and the rebuild reports
-// INSERT 0 0 -- byte-identical to a healthy converged run, which is the signature this whole migration is
-// built to avoid. It is reachable through the sanctioned grants: stl_readwrite holds UPDATE here, and the
+// The third drift class. With a strict > alone, a cache row at the SAME coordinates as history with a
+// different payload would be left alone and the rebuild would report INSERT 0 0 -- byte-identical to a
+// healthy converged run, the signature this migration is built to avoid. The shipped arm adds an
+// equal-coordinates branch; this pins it. It is reachable through the sanctioned grants: stl_readwrite holds UPDATE here, and the
 // table takes direct writes by design. Both files enumerate the unrepairable classes as exactly two,
 // ahead-of-history and orphan, so this one has to be repairable for that enumeration to be true.
 func TestPositionCurrentRebuildRepairsDriftAtEqualCoordinates(t *testing.T) {
@@ -1325,18 +1333,70 @@ func TestPositionCurrentRebuildRepairsDriftAtEqualCoordinates(t *testing.T) {
 	}
 }
 
-// The other half, and the reason the arm stays forward-only: converging equal coordinates must not become
-// a licence to lower them. A cache row AHEAD of history keeps its own coordinates and payload.
-func TestPositionCurrentRebuildStillWillNotLowerACacheRowAheadOfHistory(t *testing.T) {
+// The equal-coordinates arm compares the WHOLE tuple. Each leg is checked on its own because a leg
+// dropped from the `=` turns the convergence branch into a partial match, and a partial match LOWERS:
+// it treats a cache row that is ahead on that leg as equal and overwrites it from older history. Every
+// other "must not lower" fixture in this file moves two or more legs at once, so none of them can see it.
+// Fixtures here are ahead on exactly one leg with the other three equal and the payload differing.
+func TestPositionCurrentRebuildWillNotConvergeOnAPartialCoordinateMatch(t *testing.T) {
+	cases := []struct {
+		leg           string
+		block, bv, pv int
+		ts            string
+	}{
+		{"block_number", 200, 0, 0, "2026-01-01T00:00:00Z"},
+		{"block_version", 100, 1, 0, "2026-01-01T00:00:00Z"},
+		{"processing_version", 100, 0, 1, "2026-01-01T00:00:00Z"},
+		{"block_timestamp", 100, 0, 0, "2026-09-01T00:00:00Z"},
+	}
+	const cachedQty, historyQty = 777, 500
 	f := newPositionCurrentFixture(t)
-	f.observe("ahead", 500, 100, 0, 0, "2026-01-01T00:00:00Z")
-	f.setCache("ahead", 777, 900, 0, 0, "2026-09-01T00:00:00Z")
+	for _, tc := range cases {
+		t.Run(tc.leg, func(t *testing.T) {
+			id := "partial-" + tc.leg
+			f.observe(id, historyQty, 100, 0, 0, "2026-01-01T00:00:00Z")
+			f.setCache(id, cachedQty, tc.block, tc.bv, tc.pv, tc.ts)
 
-	f.rebuild()
+			f.rebuild()
 
-	if qty, block, _ := f.current("ahead"); qty != 777 || block != 900 {
-		t.Errorf("the rebuild lowered a cache row ahead of history to quantity %d at block %d; the arm "+
-			"must raise rows and converge equal coordinates, never lower", qty, block)
+			if qty, _, _ := f.current(id); qty != cachedQty {
+				t.Errorf("the rebuild overwrote a cache row that is ahead on %s alone (quantity %d, want "+
+					"%d); the arm's equality is matching a prefix of the tuple, so it lowered the row",
+					tc.leg, qty, cachedQty)
+			}
+		})
+	}
+}
+
+// The trigger's copy of the arm, same per-leg reasoning in the other direction: an observation arriving
+// OLDER on exactly one leg, with the other three equal and a differing payload, must not displace the
+// cached row. A leg missing from the trigger's `=` regresses the cache on ordinary ingest.
+func TestPositionCurrentTriggerWillNotConvergeOnAPartialCoordinateMatch(t *testing.T) {
+	cases := []struct {
+		leg           string
+		block, bv, pv int
+		ts            string
+	}{
+		{"block_number", 200, 0, 0, "2026-01-01T00:00:00Z"},
+		{"block_version", 100, 1, 0, "2026-01-01T00:00:00Z"},
+		{"processing_version", 100, 0, 1, "2026-01-01T00:00:00Z"},
+		{"block_timestamp", 100, 0, 0, "2026-09-01T00:00:00Z"},
+	}
+	const winnerQty, olderQty = 777, 500
+	f := newPositionCurrentFixture(t)
+	for _, tc := range cases {
+		t.Run(tc.leg, func(t *testing.T) {
+			id := "trig-partial-" + tc.leg
+			// The newer observation lands first and seats the cache.
+			f.observe(id, winnerQty, tc.block, tc.bv, tc.pv, tc.ts)
+			// Then one older on exactly this leg, differing only in payload otherwise.
+			f.observe(id, olderQty, 100, 0, 0, "2026-01-01T00:00:00Z")
+
+			if qty, _, _ := f.current(id); qty != winnerQty {
+				t.Errorf("an observation older on %s alone displaced the cached row (quantity %d, want "+
+					"%d); the trigger's equality is matching a prefix of the tuple", tc.leg, qty, winnerQty)
+			}
+		})
 	}
 }
 
@@ -1348,45 +1408,75 @@ func TestPositionCurrentConvergedRebuildUpdatesNothing(t *testing.T) {
 	for i, id := range []string{"conv-a", "conv-b", "conv-c"} {
 		f.observe(id, 10+i, 100+i, 0, 0, "2026-01-01T00:00:00Z")
 	}
-	before := f.snapshot()
+	// A fourth position whose payload is drifted, as the positive control: it proves xmin is sensitive in
+	// this fixture, so "the other three did not change" means the arm declined rather than that nothing ran.
+	f.observe("conv-drifted", 42, 200, 0, 0, "2026-01-01T00:00:00Z")
+	f.setCache("conv-drifted", 99999, 200, 0, 0, "2026-01-01T00:00:00Z")
 
-	var xminBefore, xminAfter []uint32
-	rows, err := f.pool.Query(f.ctx, `SELECT xmin::text::bigint FROM position_current ORDER BY position_id`)
-	if err != nil {
-		t.Fatal(err)
+	before, xminBefore := f.snapshot(), f.rowVersions()
+	if len(xminBefore) != 4 {
+		t.Fatalf("read %d row versions, want 4; the comparison below would pass on an empty read",
+			len(xminBefore))
 	}
-	for rows.Next() {
-		var x uint32
-		if err := rows.Scan(&x); err != nil {
-			t.Fatal(err)
-		}
-		xminBefore = append(xminBefore, x)
-	}
-	rows.Close()
+	control := f.hexID("conv-drifted")
+	delete(before, control)
 
 	f.rebuild()
 
-	rows, err = f.pool.Query(f.ctx, `SELECT xmin::text::bigint FROM position_current ORDER BY position_id`)
-	if err != nil {
-		t.Fatal(err)
+	after := f.snapshot()
+	if qty := after[control]; qty != 42 {
+		t.Fatalf("the drifted control row is %d, want 42; the rebuild did not run, so the assertions "+
+			"below prove nothing", qty)
 	}
+	delete(after, control)
+	if !maps.Equal(before, after) {
+		t.Errorf("a converged rebuild changed the cache contents: %v -> %v", before, after)
+	}
+	xminAfter := f.rowVersions()
+	same := 0
+	for i := range xminBefore {
+		if i < len(xminAfter) && xminBefore[i] == xminAfter[i] {
+			same++
+		}
+	}
+	if same != 3 {
+		t.Errorf("%d of 4 rows kept their xmin, want exactly 3 (the drifted control rewritten, the three "+
+			"converged rows untouched): %v -> %v", same, xminBefore, xminAfter)
+	}
+}
+
+// hexID is the snapshot map's key for a fixture label: snapshot is keyed by the hex position_id.
+func (f *positionCurrentFixture) hexID(id string) string {
+	f.t.Helper()
+	var hex string
+	if err := f.pool.QueryRow(f.ctx, `SELECT encode(sha256($1::bytea), 'hex')`, id).Scan(&hex); err != nil {
+		f.t.Fatalf("hexID(%s): %v", id, err)
+	}
+	return hex
+}
+
+// rowVersions returns each cached row's xmin in position_id order, so a caller can tell a row that was
+// rewritten from one that was left alone. Errors are fatal: a silent read failure would make any
+// before/after comparison over the result pass on two empty slices.
+func (f *positionCurrentFixture) rowVersions() []uint32 {
+	f.t.Helper()
+	rows, err := f.pool.Query(f.ctx, `SELECT xmin::text::bigint FROM position_current ORDER BY position_id`)
+	if err != nil {
+		f.t.Fatalf("reading row versions: %v", err)
+	}
+	defer rows.Close()
+	var out []uint32
 	for rows.Next() {
 		var x uint32
 		if err := rows.Scan(&x); err != nil {
-			t.Fatal(err)
+			f.t.Fatalf("scanning a row version: %v", err)
 		}
-		xminAfter = append(xminAfter, x)
+		out = append(out, x)
 	}
-	rows.Close()
-
-	if fmt.Sprint(before) != fmt.Sprint(f.snapshot()) {
-		t.Errorf("a converged rebuild changed the cache contents: %v -> %v", before, f.snapshot())
+	if err := rows.Err(); err != nil {
+		f.t.Fatalf("iterating row versions: %v", err)
 	}
-	if fmt.Sprint(xminBefore) != fmt.Sprint(xminAfter) {
-		t.Errorf("a converged rebuild rewrote rows (xmin %v -> %v); the equal-coordinates arm is firing "+
-			"on rows that do not differ, so every rebuild takes a row lock on every position",
-			xminBefore, xminAfter)
-	}
+	return out
 }
 
 // The trigger carries the same equal-coordinates arm, and it is reachable without a rebuild: a row written
@@ -1433,5 +1523,127 @@ func TestPositionCurrentFunctionsAreVolatile(t *testing.T) {
 					"body has no side effects, which is false for both of these", fn, vol)
 			}
 		})
+	}
+}
+
+// Per-column coverage of the arm's payload tuple, and of IS DISTINCT FROM over <>. Both fixtures that
+// drift a payload drift quantity, so six of the eight terms can be deleted with the suite green; and
+// because a row-wise <> returns TRUE whenever any non-null pair differs, quantity-drift also hides the
+// operator choice. chain_id is nullable, so drifting it to NULL and nothing else is the one shape where
+// <> yields NULL, the arm declines, and the repair silently does not happen.
+func TestPositionCurrentRebuildRepairsEachDriftedPayloadColumn(t *testing.T) {
+	cases := []struct {
+		column string
+		drift  string // SQL setting the cache column to a wrong value at unchanged coordinates
+		want   string // SQL reading it back; must equal history's value
+	}{
+		{"chain_id", "chain_id = NULL", "chain_id::text"},
+		{"protocol_id", "protocol_id = NULL", "protocol_id::text"},
+		{"build_id", "build_id = 99", "build_id::text"},
+		{"projection", "projection = 'public.wrong'", "projection"},
+		{"instrument_key", "instrument_key = 'wrong'", "instrument_key"},
+		{"holder_id", "holder_id = " + "repeat('b', 40)", "holder_id"},
+		{"quantity", "quantity = 99999", "quantity::text"},
+	}
+	f := newPositionCurrentFixture(t)
+	for _, tc := range cases {
+		t.Run(tc.column, func(t *testing.T) {
+			id := "payload-" + tc.column
+			f.observe(id, 500, 100, 0, 0, "2026-01-01T00:00:00Z")
+			var want string
+			if err := f.pool.QueryRow(f.ctx,
+				`SELECT `+tc.want+` FROM position_state WHERE position_id = sha256($1::bytea)`, id).
+				Scan(&want); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.pool.Exec(f.ctx,
+				`UPDATE position_current SET `+tc.drift+` WHERE position_id = sha256($1::bytea)`, id); err != nil {
+				t.Fatal(err)
+			}
+
+			f.rebuild()
+
+			var got *string
+			if err := f.pool.QueryRow(f.ctx,
+				`SELECT `+tc.want+` FROM position_current WHERE position_id = sha256($1::bytea)`, id).
+				Scan(&got); err != nil {
+				t.Fatal(err)
+			}
+			if got == nil || *got != want {
+				t.Errorf("after the rebuild %s is %v, want %q -- this column is missing from the arm's "+
+					"payload tuple, or the comparison is <> rather than IS DISTINCT FROM", tc.column, got, want)
+			}
+		})
+	}
+}
+
+// The statements after RESET search_path must be schema-qualified. RESET restores the applying session's
+// path, so an unqualified position_current there resolves under whatever that path names: with a schema
+// ahead of public that shadows the table, CREATE INDEX IF NOT EXISTS builds the holder index on the
+// shadow and reports success, leaving the real table with only its PK and the file's own 4,652-buffer seq
+// scan intact. Executed against the shipped text, not a copy.
+func TestPositionCurrentBackfillTailResolvesUnderAShadowingSearchPath(t *testing.T) {
+	f := newPositionCurrentFixture(t)
+	src := migrationSource(t, positionCurrentBackfill)
+	tail := src[strings.Index(src, "RESET search_path;"):]
+	if !strings.Contains(tail, "CREATE INDEX") {
+		t.Fatalf("no tail after RESET search_path in %s", positionCurrentBackfill)
+	}
+
+	// The shadow has to be reachable through the ROLE default, not a session SET: the tail's first
+	// statement is RESET search_path, which discards anything set on the session and restores the role
+	// default. That is the same property the migration comment records.
+	var role string
+	if err := f.pool.QueryRow(f.ctx, `SELECT current_user`).Scan(&role); err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`CREATE SCHEMA IF NOT EXISTS shadow`,
+		`CREATE TABLE IF NOT EXISTS shadow.position_current (LIKE public.position_current)`,
+		`CREATE TABLE IF NOT EXISTS shadow.migrations (LIKE public.migrations)`,
+		`ALTER ROLE ` + role + ` SET search_path = shadow, public`,
+		// so IF NOT EXISTS cannot mask where the tail actually builds it
+		`DROP INDEX IF EXISTS public.position_current_holder_idx`,
+	} {
+		if _, err := f.pool.Exec(f.ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	t.Cleanup(func() {
+		if _, err := f.pool.Exec(f.ctx, `ALTER ROLE `+role+` RESET search_path`); err != nil {
+			t.Errorf("restoring the role search_path: %v", err)
+		}
+	})
+
+	// A brand-new pool, so the connection reads the role default at connect time. DISCARD ALL on a pooled
+	// connection restores the path captured when IT connected, which predates the ALTER ROLE above.
+	fresh, err := pgxpool.New(f.ctx, f.pool.Config().ConnString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fresh.Close()
+	var path string
+	if err := fresh.QueryRow(f.ctx, `SHOW search_path`).Scan(&path); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(path, "shadow") {
+		t.Fatalf("the fresh connection resolves %q, which does not shadow public; this test cannot "+
+			"reproduce the hazard it exists for", path)
+	}
+	for _, stmt := range migrator.SplitStatements(tail) {
+		if _, err := fresh.Exec(f.ctx, stmt); err != nil {
+			t.Fatalf("executing the shipped tail: %v", err)
+		}
+	}
+
+	var schema string
+	if err := f.pool.QueryRow(f.ctx, `
+		SELECT n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+		 WHERE c.relname = 'position_current_holder_idx'`).Scan(&schema); err != nil {
+		t.Fatalf("the holder index was not created at all: %v", err)
+	}
+	if schema != "public" {
+		t.Errorf("the holder index landed in %q, not public; a statement after RESET search_path is "+
+			"unqualified, so it resolved against the shadowing schema and reported success", schema)
 	}
 }

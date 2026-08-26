@@ -22,7 +22,8 @@
 -- defensive: it keeps the pick total even for a pair the PK admits.
 --
 -- Ordering is block_number first, per the house rule for selecting the latest row. One consequence is
--- worth stating because the COMMENT below says "reorg resolved": a reorg whose replacement lands at a
+-- worth stating because this file opens by calling reorg and reprocess versions "resolved": a reorg
+-- whose replacement lands at a
 -- LOWER block number than the cached row does NOT win, so an orphaned-branch observation can stay
 -- current. Same-block reorgs resolve correctly on block_version. Changing that needs a house-level
 -- decision about the ordering, not a local deviation here.
@@ -253,7 +254,9 @@ EXECUTE FUNCTION upsert_position_current();
 -- error, so history advances and this cache does not. (Logical replication is out of scope for another
 -- reason: its apply worker never fires statement-level triggers, whatever tgenabled says.)
 -- Nothing repairs it downstream -- the transition table is empty for committed rows and the materializer
--- is NOT EXISTS + DO NOTHING. Recovery is the REBUILD region in 20260819_150100, asserted by its test.
--- Both TimescaleDB errors and the skip are measured in #644.
+-- is NOT EXISTS + DO NOTHING. Recovery is the REBUILD region in 20260819_150100 -- run it after any
+-- restore, and after any bulk load done under the replica role.
+-- The two refusals -- on a plain hypertable and on one with columnstore enabled -- and the replica-role
+-- skip are measured in #644.
 
 INSERT INTO migrations (filename) VALUES ('20260819_150000_create_position_current.sql') ON CONFLICT (filename) DO NOTHING;

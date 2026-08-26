@@ -17,7 +17,9 @@
 -- direct INSERT, or a restore whose cache backup is newer than its history backup) nor an orphan row
 -- whose position has no history at all. Those two are the whole list, and they are only two because the
 -- equal-coordinates case converges -- with a strict > it was a silent third, reachable in role and
--- reporting INSERT 0 0. All three were reproduced. A true rebuild
+-- reporting INSERT 0 0. All three were reproduced. The enumeration holds up to numeric equality:
+-- 500 and 500.00 are IS DISTINCT FROM-equal, so a scale-only drift in quantity is not repaired
+-- (numerically harmless, visible only through quantity::text or scale()). A true rebuild
 -- is TRUNCATE then this statement, and TRUNCATE is owner-only -- stl_readwrite holds neither DELETE nor
 -- TRUNCATE. The ORPHAN class therefore needs the owner; the ahead-of-history class does NOT -- a plain
 -- UPDATE repairs it, because UPDATE is unguarded in both directions, so the same grant that creates that
@@ -111,14 +113,20 @@ WHERE (EXCLUDED.block_number, EXCLUDED.block_version, EXCLUDED.processing_versio
 -- SET LOCAL lives until the transaction ends, not until the marker, so without this the statements below
 -- would resolve under a hardcoded `public` instead of the applying session's own search_path.
 RESET search_path;
+-- Everything below is schema-qualified BECAUSE of the RESET above, not in spite of it. Once the path is
+-- restored, an unqualified position_current resolves under the applying session's path: measured with a
+-- shadowing schema ahead of public, CREATE INDEX IF NOT EXISTS built the holder index on the shadow table
+-- and reported success, leaving the real table with the PK alone and the file's own 4,652-buffer seq scan
+-- intact. RESET is also not transaction-scoped and restores the ROLE default rather than the client's
+-- value, so nothing here may depend on what it leaves behind.
 
 -- Holder access path, built AFTER the backfill: created first, every backfilled row would pay a random
 -- btree insert with its own WAL instead of one bulk build, and no read inside this file needs it. The PK
 -- serves position_id lookups; the enriched views planned on this layer filter by holder, which the PK
 -- cannot serve. Measured at 200,000 positions: a holder's current positions went from 4,652 buffers and
 -- 8.9 ms (seq scan) to 1 buffer and 0.046 ms, for 2.8 MB.
-CREATE INDEX IF NOT EXISTS position_current_holder_idx ON position_current (holder_id);
+CREATE INDEX IF NOT EXISTS position_current_holder_idx ON public.position_current (holder_id);
 
-ANALYZE position_current;
+ANALYZE public.position_current;
 
-INSERT INTO migrations (filename) VALUES ('20260819_150100_backfill_position_current.sql') ON CONFLICT (filename) DO NOTHING;
+INSERT INTO public.migrations (filename) VALUES ('20260819_150100_backfill_position_current.sql') ON CONFLICT (filename) DO NOTHING;
