@@ -14,6 +14,7 @@ is expected puts figures 1.5x apart in the same column.
 """
 
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 
 
@@ -32,8 +33,8 @@ class ReferencePosition:
     ``wallet_address`` is the ALM proxy holding the position — the grain Verify
     stores positions at, and absent from the Star monitor's feed, which reports
     per prime. It was carried as the enabler for a future merge keyed on
-    ``(chain, token, proxy)``. Reinstating it is one field here and one
-    ``required_text`` call in the adapter.
+    ``(chain, token, proxy)``. Reinstating it is one field here, one column in
+    ``prime_reference_position`` and one parse in the Go client.
 
     ``allocation_type`` is upstream's own category vocabulary (``allocation`` /
     ``asset`` / ``pol`` / ``psm3``), which maps closely onto the ``category``
@@ -53,7 +54,7 @@ class ReferencePosition:
     assets_usd: Decimal
     allocated_assets_usd: Decimal | None
     idle_assets_usd: Decimal | None
-    # Resolved against STL's token registry by the service, not the adapter.
+    # Resolved against STL's token registry in the repository's SQL.
     # ``None`` whenever the join cannot be made — a pool id in place of an
     # address, an unmapped network, or a token STL does not index.
     receipt_token_id: int | None = None
@@ -70,3 +71,18 @@ class ReferencePosition:
     underlying_token_id: int | None = None
     underlying_token_address: str | None = None
     underlying_symbol: str = ""
+
+
+@dataclass(frozen=True)
+class ReferencePositionSnapshot:
+    """Every position a prime held at one observed instant.
+
+    The positions ride a stamp rather than carrying one each: an indexer cycle
+    writes the whole balance sheet under a single ``synced_at``, so a stamp per
+    row would be one instant repeated. An empty ``positions`` is a prime that
+    upstream reported as holding nothing — a claim, and not the same as no
+    snapshot at all, which callers signal with ``None``.
+    """
+
+    synced_at: datetime
+    positions: tuple[ReferencePosition, ...]

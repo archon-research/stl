@@ -29,7 +29,6 @@ from app.domain.entities.allocation import (
 )
 from app.domain.entities.allocation_category import AllocationCategory
 from app.domain.entities.reference_position import ReferencePosition
-from app.domain.exceptions import ReferenceDataUnavailableError
 from app.domain.position_identity import PositionFacts, position_identities
 from app.domain.provenance import Provenance
 from app.domain.serialization import PlainDecimal
@@ -575,20 +574,21 @@ async def _merged_allocations(
     single proxy's rows matches whatever that one chain happens to hold — for
     spark, 8 of 12 against its mainnet proxy and 0 against its Base one.
 
-    A reference half that cannot be read leaves the indexed rows as they are.
+    A prime with no reference data at all leaves the indexed rows as they are.
     Every row states its own provenance, so an answer with nothing from Sky in
-    it says so without an envelope to carry the notice.
+    it says so without an envelope to carry the notice. Every other outcome is
+    an error, and surfaces as one.
     """
     indexed = await _prime_wide_indexed_allocations(prime_address, service)
 
     try:
         reference = await _reference_allocations(prime_address, reference_service)
     except HTTPException as exc:
-        if exc.status_code not in (404, 502):
+        if exc.status_code != 404:
             raise
-        logger.warning(
-            "Serving indexed allocations alone; the reference half is unavailable",
-            extra={"prime_address": str(prime_address), "status_code": exc.status_code},
+        logger.info(
+            "Serving indexed allocations alone; no reference cycle has reported on this prime",
+            extra={"prime_address": str(prime_address)},
         )
         return indexed
 
@@ -657,7 +657,7 @@ async def _prime_wide_indexed_allocations(
 async def _reference_allocations(
     prime_address: EthAddress, reference_service: ReferencePositionsService
 ) -> list[AllocationResponse]:
-    """List the positions upstream reports this prime holds.
+    """List the positions upstream reported this prime holds.
 
     Sourced from Sky's balance-sheet feed rather than the Star monitor's
     risk-capital breakdown. The monitor answers a different question — the
@@ -666,30 +666,24 @@ async def _reference_allocations(
     figures 1.5x apart in one column. The balance sheet is the same measurement
     STL's own rows carry, and reports every position rather than the priced ones.
     """
-    try:
-        positions = await reference_service.get(prime_address)
+    snapshot = await reference_service.get(prime_address)
+    if snapshot is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No reference allocations have been observed for this prime",
+        )
 
-        if positions is None:
-            # Not a ReferenceDataUnavailableError, so this propagates past the
-            # handler below rather than being rewritten to a 502.
-            raise HTTPException(
-                status_code=404,
-                detail="The upstream Star monitor does not track this prime, so it reports no allocations",
-            )
-
-        category_service = AllocationCategoryService()
-        return [
-            _reference_allocation_row(row, category_service).model_copy(update={"source": Provenance.REFERENCE})
-            for row in positions
-        ]
-    except ReferenceDataUnavailableError as exc:
-        raise HTTPException(status_code=502, detail=f"Reference allocations upstream unavailable: {exc}") from exc
+    category_service = AllocationCategoryService()
+    return [
+        _reference_allocation_row(row, category_service).model_copy(update={"source": Provenance.REFERENCE})
+        for row in snapshot.positions
+    ]
 
 
 def _reference_allocation_row(
     row: ReferencePosition, category_service: AllocationCategoryService
 ) -> AllocationResponse:
-    """Project an upstream position onto the allocation model.
+    """Project an observed upstream position onto the allocation model.
 
     A network STL has no chain id for yields a null ``chain_id``, with
     ``network`` naming it: upstream adds chains before STL indexes them, and 0

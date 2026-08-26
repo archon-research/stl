@@ -16,7 +16,6 @@ from app.api.provenance import (
 from app.domain.entities.allocation import EthAddress
 from app.domain.entities.prime_risk_capital import AllocationRiskCapital, PrimeRiskCapital, UnpricedReason
 from app.domain.entities.reference_risk_capital import ReferenceAllocation, ReferencePrimeRiskCapital
-from app.domain.exceptions import ReferenceDataUnavailableError
 from app.domain.position_identity import PositionFacts, position_identities
 from app.domain.prime_registry import ProxyKind, alm_proxies_for_prime, classify_proxy
 from app.domain.provenance import Provenance
@@ -215,10 +214,11 @@ class PrimeRiskCapitalResponse(BaseModel):
         default=Provenance.INDEXED,
         description=(
             "Provenance of the figures in this response. `indexed` is STL's own on-chain model; "
-            "`reference` is Sky's Star Agents Risk Capital & Requirements Monitor; `both` carries the "
-            "two side by side, STL's in the unprefixed fields and Sky's in the `reference_`-prefixed "
-            "ones. Never reconciled: no field holds a blend of the two, and `both` degrades to "
-            "`indexed` — reporting itself as such — when the monitor cannot be read."
+            "`reference` is Sky's Star Agents Risk Capital & Requirements Monitor as STL observed "
+            "it; `both` carries the two side by side, STL's in the unprefixed fields and Sky's in "
+            "the `reference_`-prefixed ones. Never reconciled: no field holds a blend of the two, "
+            "and `both` degrades to `indexed` — reporting itself as such — for a prime no reference "
+            "cycle has ever reported on."
         ),
     )
     model: str | None = Field(
@@ -574,17 +574,18 @@ async def _with_reference_totals(
 
     The two cannot share a field: they populate disjoint sets — Sky's junior and
     senior splits have no STL equivalent, STL's model name has no Sky one — and
-    the figures they do share disagree by STL's chain coverage. An unreadable
-    reference half leaves STL's own answer whole rather than failing it.
+    the figures they do share disagree by STL's chain coverage. A prime with no
+    reference figures at all leaves STL's own answer whole rather than failing
+    it; every other outcome is an error, and surfaces as one.
     """
     try:
         reference = await _reference_response(prime_address, reference_service)
     except HTTPException as exc:
-        if exc.status_code not in (404, 502):
+        if exc.status_code != 404:
             raise
-        logger.warning(
-            "Serving STL's risk capital alone; the reference half is unavailable",
-            extra={"prime_address": str(prime_address), "status_code": exc.status_code},
+        logger.info(
+            "Serving STL's risk capital alone; no reference cycle has reported on this prime",
+            extra={"prime_address": str(prime_address)},
         )
         return indexed
 
@@ -634,22 +635,18 @@ def _self_response(result: PrimeRiskCapital) -> PrimeRiskCapitalResponse:
 async def _reference_response(
     prime_address: EthAddress, reference_service: ReferenceRiskCapitalService
 ) -> PrimeRiskCapitalResponse:
-    """Project the upstream Star monitor's snapshot onto the same response."""
-    try:
-        snapshot = await reference_service.get(prime_address)
-    except ReferenceDataUnavailableError as exc:
-        raise HTTPException(status_code=502, detail=f"Reference risk-capital upstream unavailable: {exc}") from exc
-
+    """Project STL's stored Star-monitor snapshot onto the same response."""
+    snapshot = await reference_service.get(prime_address)
     if snapshot is None:
         raise HTTPException(
             status_code=404,
-            detail="The upstream Star monitor does not track this prime, so it has no reference risk capital",
+            detail="No reference risk capital has been observed for this prime",
         )
     return _project_reference(prime_address, snapshot)
 
 
 def _project_reference(prime_address: EthAddress, snapshot: ReferencePrimeRiskCapital) -> PrimeRiskCapitalResponse:
-    """Map an upstream snapshot onto the response, prime-scoped fields included.
+    """Map an observed snapshot onto the response, prime-scoped fields included.
 
     Upstream reports per prime, so the proxy-scoped and `prime_`-scoped figures
     carry the same values here — unlike self mode, where they genuinely differ.

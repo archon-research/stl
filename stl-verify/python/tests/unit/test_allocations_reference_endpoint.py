@@ -1,4 +1,4 @@
-"""The ``reference=true`` branch of ``/v1/primes/{id}/allocations``."""
+"""The reference branch of ``/v1/primes/{id}/allocations``."""
 
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -10,8 +10,7 @@ from fastapi.testclient import TestClient
 from app.api.deps import get_reference_positions_service_factory
 from app.api.v1 import allocations
 from app.domain.entities.allocation import AnchorageCustodyHolding, EthAddress
-from app.domain.entities.reference_position import ReferencePosition
-from app.domain.exceptions import ReferenceDataUnavailableError
+from app.domain.entities.reference_position import ReferencePosition, ReferencePositionSnapshot
 from app.main import app
 from app.services.allocation_service import AllocationService
 
@@ -19,6 +18,7 @@ _VALID_ADDR = "0x" + "ab" * 20
 _TOKEN = "0x" + "cd" * 20
 _V4_POOL_ID = "0x" + "ef" * 32
 _OTHER_PROXY = "0x" + "99" * 20
+_SYNCED_AT = datetime(2026, 8, 26, 9, 15, tzinfo=UTC)
 
 
 def _custody_holding() -> AnchorageCustodyHolding:
@@ -61,18 +61,14 @@ def _reference_position(
     )
 
 
-def _positions(*rows: ReferencePosition) -> tuple[ReferencePosition, ...]:
-    return rows or (_reference_position(),)
+def _positions(*rows: ReferencePosition) -> ReferencePositionSnapshot:
+    return ReferencePositionSnapshot(synced_at=_SYNCED_AT, positions=rows or (_reference_position(),))
 
 
 @pytest.fixture
 def reference_client(request):
-    outcome = request.param
     reference_service = AsyncMock()
-    if isinstance(outcome, Exception):
-        reference_service.get.side_effect = outcome
-    else:
-        reference_service.get.return_value = outcome
+    reference_service.get.return_value = request.param
 
     service = AsyncMock(spec=AllocationService)
     service.prime_exists.return_value = True
@@ -193,7 +189,7 @@ def test_reference_mode_never_reads_the_indexed_positions(reference_client):
 
 
 @pytest.mark.parametrize("reference_client", [None], indirect=True)
-def test_reference_mode_returns_404_when_the_monitor_does_not_track_the_prime(reference_client):
+def test_reference_mode_returns_404_when_no_cycle_has_reported_on_the_prime(reference_client):
     client, _ = reference_client
 
     response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations?reference=true")
@@ -201,13 +197,18 @@ def test_reference_mode_returns_404_when_the_monitor_does_not_track_the_prime(re
     assert response.status_code == 404
 
 
-@pytest.mark.parametrize("reference_client", [ReferenceDataUnavailableError("boom")], indirect=True)
-def test_reference_mode_returns_502_when_the_monitor_cannot_be_read(reference_client):
+@pytest.mark.parametrize(
+    "reference_client", [ReferencePositionSnapshot(synced_at=_SYNCED_AT, positions=())], indirect=True
+)
+def test_reference_mode_serves_an_empty_snapshot_as_an_empty_list(reference_client):
+    # A covered prime holding nothing is a claim, and a different answer from
+    # a prime no cycle has reported on, which is the 404 above.
     client, _ = reference_client
 
     response = client.get(f"/v1/primes/{_VALID_ADDR}/allocations?reference=true")
 
-    assert response.status_code == 502
+    assert response.status_code == 200
+    assert response.json() == []
 
 
 @pytest.mark.parametrize(
@@ -351,10 +352,10 @@ def test_both_serves_the_custody_leg_when_a_non_primary_proxy_is_queried(referen
     assert [row["symbol"] for row in response.json() if row["protocol_name"] == "anchorage"] == ["BTC"]
 
 
-@pytest.mark.parametrize("reference_client", [ReferenceDataUnavailableError("boom")], indirect=True)
-def test_both_serves_the_indexed_half_when_sky_cannot_be_read(reference_client):
-    # Never a 502 for the merged view: the indexed rows are still true, and every
-    # row carrying its own provenance is what says Sky contributed nothing.
+@pytest.mark.parametrize("reference_client", [None], indirect=True)
+def test_both_serves_the_indexed_half_for_a_prime_with_no_reference_data(reference_client):
+    # The indexed rows are still true, and every row carrying its own provenance
+    # is what says Sky contributed nothing.
     client, service = reference_client
     service.prime_proxy_addresses.return_value = [EthAddress(_VALID_ADDR)]
     service.list_receipt_token_positions.return_value = []

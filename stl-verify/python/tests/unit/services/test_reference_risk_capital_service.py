@@ -1,8 +1,8 @@
+from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock
 
 from app.domain.entities.allocation import EthAddress, Prime
-from app.domain.entities.receipt_token import ReceiptTokenInfo
 from app.domain.entities.reference_risk_capital import ReferenceAllocation, ReferencePrimeRiskCapital
 from app.services.reference_risk_capital_service import ReferenceRiskCapitalService
 
@@ -12,26 +12,24 @@ _SPARK_ALM = "0x1601843c5e9bc251a3272907010afa41fa18347e"
 _UNKNOWN_PROXY = "0x" + "ab" * 20
 _VAULT = "0x" + "ba" * 20
 _TOKEN = "0x" + "cd" * 20
-# Uniswap V4 identifies a position by 32-byte pool id, which is not an address.
-_V4_POOL_ID = "0x" + "ef" * 32
+_SYNCED_AT = datetime(2026, 8, 26, 9, 15, tzinfo=UTC)
 
 
-def _allocation(
-    *, network: str = "ethereum", token_address: str = _TOKEN, chain_id: int | None = 1
-) -> ReferenceAllocation:
+def _allocation(*, receipt_token_id: int | None = 41) -> ReferenceAllocation:
     return ReferenceAllocation(
         protocol_name="sparklend",
-        network=network,
+        network="ethereum",
         symbol="spUSDT",
         name="Spark USDT",
-        token_address=token_address,
+        token_address=_TOKEN,
         loan_token_address="0x" + "12" * 20,
         loan_token_symbol="USDS",
         exposure_usd=Decimal("100"),
         required_risk_capital_usd=Decimal("1"),
         crr_pct=Decimal("1"),
-        chain_id=chain_id,
-        chain="mainnet" if chain_id == 1 else None,
+        receipt_token_id=receipt_token_id,
+        chain_id=1,
+        chain="mainnet",
     )
 
 
@@ -39,6 +37,7 @@ def _snapshot(*allocations: ReferenceAllocation) -> ReferencePrimeRiskCapital:
     zero = Decimal("0")
     return ReferencePrimeRiskCapital(
         star="spark",
+        synced_at=_SYNCED_AT,
         exposure_usd=Decimal("100"),
         required_risk_capital_usd=Decimal("1"),
         total_risk_capital_usd=Decimal("10"),
@@ -57,29 +56,12 @@ def _snapshot(*allocations: ReferenceAllocation) -> ReferencePrimeRiskCapital:
     )
 
 
-def _token_info(receipt_token_id: int) -> ReceiptTokenInfo:
-    return ReceiptTokenInfo(
-        receipt_token_id=receipt_token_id,
-        protocol_id=1,
-        underlying_token_id=2,
-        receipt_token_address=b"\xcd" * 20,
-        chain_id=1,
-        protocol_name="sparklend",
-        receipt_token_token_id=None,
-    )
-
-
-def _service(
-    snapshot: ReferencePrimeRiskCapital | None,
-    lookup: AsyncMock | None = None,
-    primes: list[Prime] | None = None,
-):
+def _service(snapshot: ReferencePrimeRiskCapital | None, primes: list[Prime] | None = None):
     provider = AsyncMock()
     provider.get_prime.return_value = snapshot
-    receipt_tokens = lookup or AsyncMock()
     directory = AsyncMock()
     directory.list_primes.return_value = primes or []
-    return ReferenceRiskCapitalService(provider, receipt_tokens, directory), provider, receipt_tokens
+    return ReferenceRiskCapitalService(provider, directory), provider
 
 
 def _prime(name: str, address: str, vault: str | None = None) -> Prime:
@@ -94,55 +76,33 @@ def _prime(name: str, address: str, vault: str | None = None) -> Prime:
     )
 
 
-async def test_get_resolves_an_upstream_row_to_stls_receipt_token_id():
-    lookup = AsyncMock()
-    lookup.get_by_chain_and_address.return_value = _token_info(41)
-    service, _, _ = _service(_snapshot(_allocation()), lookup)
+async def test_get_serves_the_stored_snapshot_with_its_resolved_registry_ids():
+    # The registry join is the reader's SQL now, so the service must pass rows
+    # through untouched rather than re-resolving them per row.
+    service, _ = _service(_snapshot(_allocation()))
 
     result = await service.get(EthAddress(_SPARK_ALM))
 
     assert result is not None
+    assert result.synced_at == _SYNCED_AT
     assert result.per_allocation[0].receipt_token_id == 41
     assert result.per_allocation[0].chain == "mainnet"
 
 
-async def test_get_leaves_a_uniswap_v4_pool_id_unresolved_without_querying_the_registry():
-    lookup = AsyncMock()
-    service, _, _ = _service(_snapshot(_allocation(token_address=_V4_POOL_ID)), lookup)
+async def test_get_keeps_a_row_stl_does_not_index():
+    # Most of the breakdown can be positions STL has no registry entry for; an
+    # unresolved id must not drop the row.
+    service, _ = _service(_snapshot(_allocation(receipt_token_id=None)))
 
     result = await service.get(EthAddress(_SPARK_ALM))
 
     assert result is not None
     assert result.per_allocation[0].receipt_token_id is None
-    assert result.per_allocation[0].chain == "mainnet"
-    lookup.get_by_chain_and_address.assert_not_awaited()
-
-
-async def test_get_leaves_a_row_on_an_unmapped_network_unresolved():
-    lookup = AsyncMock()
-    service, _, _ = _service(_snapshot(_allocation(network="solana", chain_id=None)), lookup)
-
-    result = await service.get(EthAddress(_SPARK_ALM))
-
-    assert result is not None
-    assert result.per_allocation[0].receipt_token_id is None
-    assert result.per_allocation[0].chain is None
-    lookup.get_by_chain_and_address.assert_not_awaited()
-
-
-async def test_get_leaves_a_token_stl_does_not_index_unresolved():
-    lookup = AsyncMock()
-    lookup.get_by_chain_and_address.return_value = None
-    service, _, _ = _service(_snapshot(_allocation()), lookup)
-
-    result = await service.get(EthAddress(_SPARK_ALM))
-
-    assert result is not None
-    assert result.per_allocation[0].receipt_token_id is None
+    assert result.per_allocation[0].symbol == "spUSDT"
 
 
 async def test_get_returns_none_for_an_address_that_names_no_prime():
-    service, provider, _ = _service(_snapshot())
+    service, provider = _service(_snapshot())
 
     assert await service.get(EthAddress(_UNKNOWN_PROXY)) is None
     provider.get_prime.assert_not_awaited()
@@ -151,7 +111,7 @@ async def test_get_returns_none_for_an_address_that_names_no_prime():
 # Self mode answers for a prime's vault address, so reference mode must too:
 # the same URL differs only in which figures it returns.
 async def test_get_resolves_a_prime_by_its_vault_address():
-    service, provider, _ = _service(
+    service, provider = _service(
         _snapshot(),
         primes=[_prime("spark", _UNKNOWN_PROXY, vault=_VAULT)],
     )
@@ -163,7 +123,7 @@ async def test_get_resolves_a_prime_by_its_vault_address():
 # A proxy holds positions before the contract is told about it during a chain
 # onboarding; reference mode must not go dark for it.
 async def test_get_resolves_a_proxy_the_contract_does_not_index_yet():
-    service, provider, _ = _service(
+    service, provider = _service(
         _snapshot(),
         primes=[_prime("spark", _UNKNOWN_PROXY)],
     )
@@ -174,7 +134,7 @@ async def test_get_resolves_a_proxy_the_contract_does_not_index_yet():
 
 # The contract is the tracked set, so it answers before any I/O.
 async def test_get_prefers_the_contract_over_the_directory():
-    service, provider, _ = _service(
+    service, provider = _service(
         _snapshot(),
         primes=[_prime("wrong-name", _SPARK_ALM)],
     )
@@ -184,7 +144,14 @@ async def test_get_prefers_the_contract_over_the_directory():
     provider.get_prime.assert_awaited_once_with("spark")
 
 
-async def test_get_returns_none_when_the_monitor_does_not_track_the_prime():
-    service, _, _ = _service(None)
+async def test_get_returns_none_when_no_cycle_has_reported_on_the_prime():
+    service, _ = _service(None)
 
     assert await service.get(EthAddress(_SPARK_ALM)) is None
+
+
+async def test_covered_stars_is_the_readers_answer():
+    service, provider = _service(_snapshot())
+    provider.covered_stars.return_value = frozenset({"spark"})
+
+    assert await service.covered_stars() == frozenset({"spark"})

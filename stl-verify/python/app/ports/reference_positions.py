@@ -1,19 +1,19 @@
-"""Outbound port for Sky's upstream balance-sheet feed."""
+"""Outbound port for STL's stored reference balance-sheet positions."""
 
 from typing import Protocol
 
-from app.domain.entities.reference_position import ReferencePosition
+from app.domain.entities.reference_position import ReferencePositionSnapshot
 
 
 class ReferencePositionProvider(Protocol):
-    """Fetch every position a star holds, as upstream reports its balance sheet."""
+    """Read every position a star held at its most recently observed cycle."""
 
-    async def get_positions(self, star: str) -> tuple[ReferencePosition, ...]:
-        """Return ``star``'s positions.
+    async def get_positions(self, star: str) -> ReferencePositionSnapshot | None:
+        """Return ``star``'s latest observed balance sheet, or ``None`` if none exists.
 
-        An empty tuple means upstream reported a prime holding nothing, which
-        only the caller can judge: this feed answers an unknown star with ``200``
-        and an empty list, so a caller that has not already established the star
-        is covered must not read the result as "holds nothing".
+        ``None`` means no reference data has been observed for the prime at all.
+        A snapshot with no positions is a different claim — upstream reported a
+        prime holding nothing — and the two must not be collapsed: one is a 404,
+        the other an empty list.
         """
         ...

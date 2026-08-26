@@ -1,10 +1,11 @@
-"""The ``reference=true`` branch of ``/v1/primes/{id}/risk-capital``.
+"""The reference branch of ``/v1/primes/{id}/risk-capital``.
 
 Kept apart from the self-mode suite because the two share only the route: this
 branch runs no model and touches no allocation data, so its fixtures and its
 failure modes have nothing in common with those.
 """
 
+from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock
 
@@ -14,11 +15,11 @@ from fastapi.testclient import TestClient
 from app.api.deps import get_reference_risk_capital_service_factory
 from app.api.v1 import prime_risk_capital
 from app.domain.entities.reference_risk_capital import ReferenceAllocation, ReferencePrimeRiskCapital
-from app.domain.exceptions import ReferenceDataUnavailableError
 from app.main import app
 from app.services.prime_risk_capital_service import PrimeRiskCapitalService
 
 _VALID_ADDR = "0x" + "ab" * 20
+_SYNCED_AT = datetime(2026, 8, 26, 9, 15, tzinfo=UTC)
 
 
 def _reference_allocation(
@@ -47,6 +48,7 @@ def _snapshot(*, per_allocation: tuple[ReferenceAllocation, ...] | None = None) 
     zero = Decimal("0")
     return ReferencePrimeRiskCapital(
         star="spark",
+        synced_at=_SYNCED_AT,
         exposure_usd=Decimal("2098090654.81"),
         required_risk_capital_usd=Decimal("17837860.43"),
         total_risk_capital_usd=Decimal("48142491.08"),
@@ -67,17 +69,12 @@ def _snapshot(*, per_allocation: tuple[ReferenceAllocation, ...] | None = None) 
 
 @pytest.fixture
 def reference_client(request):
-    """A TestClient whose reference service returns ``request.param``.
+    """A TestClient whose reference reader returns ``request.param``.
 
-    ``param`` is either a snapshot (or ``None``) to return, or an exception
-    instance to raise.
+    ``param`` is a snapshot, or ``None`` for a prime no cycle has reported on.
     """
-    outcome = request.param
     reference_service = AsyncMock()
-    if isinstance(outcome, Exception):
-        reference_service.get.side_effect = outcome
-    else:
-        reference_service.get.return_value = outcome
+    reference_service.get.return_value = request.param
 
     self_service = AsyncMock(spec=PrimeRiskCapitalService)
     self_service.prime_exists.return_value = True
@@ -188,24 +185,13 @@ def test_reference_mode_never_runs_the_self_model(reference_client):
 
 
 @pytest.mark.parametrize("reference_client", [None], indirect=True)
-def test_reference_mode_returns_404_when_the_monitor_does_not_track_the_prime(reference_client):
+def test_reference_mode_returns_404_when_no_cycle_has_reported_on_the_prime(reference_client):
     client, _ = reference_client
 
     response = client.get(f"/v1/primes/{_VALID_ADDR}/risk-capital?reference=true")
 
     assert response.status_code == 404
-    assert "does not track" in response.json()["detail"]
-
-
-@pytest.mark.parametrize("reference_client", [ReferenceDataUnavailableError("boom")], indirect=True)
-def test_reference_mode_returns_502_when_the_monitor_cannot_be_read(reference_client):
-    # Held apart from the 404 above so an upstream outage is never served as an
-    # absence of exposure, which reads as a real answer.
-    client, _ = reference_client
-
-    response = client.get(f"/v1/primes/{_VALID_ADDR}/risk-capital?reference=true")
-
-    assert response.status_code == 502
+    assert "No reference risk capital" in response.json()["detail"]
 
 
 @pytest.mark.parametrize("reference_client", [_snapshot()], indirect=True)
@@ -337,8 +323,8 @@ def test_both_carries_skys_own_ratio_rather_than_deriving_one(reference_client):
     assert row["reference_crr_pct"] == "0.28764051"
 
 
-@pytest.mark.parametrize("reference_client", [ReferenceDataUnavailableError("boom")], indirect=True)
-def test_both_serves_stl_own_model_when_sky_cannot_be_read(reference_client):
+@pytest.mark.parametrize("reference_client", [None], indirect=True)
+def test_both_serves_stl_own_model_for_a_prime_with_no_reference_data(reference_client):
     client, self_service = reference_client
     self_service.compute.return_value = _self_result()
 
@@ -346,6 +332,23 @@ def test_both_serves_stl_own_model_when_sky_cannot_be_read(reference_client):
 
     assert body["source"] == "indexed"
     assert body["reference_prime_exposure_usd"] is None
+
+
+@pytest.mark.parametrize("reference_client", [_snapshot()], indirect=True)
+def test_a_database_failure_is_not_rewritten_into_an_absence_of_reference_data(reference_client):
+    # A read that failed says nothing about coverage, so it must not be served
+    # as "this prime has none" -- which reads identically to a real answer.
+    client, _ = reference_client
+    app.dependency_overrides[get_reference_risk_capital_service_factory] = lambda: lambda: _failing_reader()
+
+    with pytest.raises(ValueError, match="boom"):
+        client.get(f"/v1/primes/{_VALID_ADDR}/risk-capital?source=reference")
+
+
+def _failing_reader():
+    reader = AsyncMock()
+    reader.get.side_effect = ValueError("Database query failed: boom")
+    return reader
 
 
 @pytest.mark.parametrize(
