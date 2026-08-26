@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import replace
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -219,6 +220,44 @@ async def test_get_liquidation_params_uses_aave_like_repository(
     # The repository read is protocol-wide; the reader slices it to the caller's tokens.
     aave_liq_repo.get_params.assert_awaited_once_with(info.protocol_id)
     assert result == {1: aave_liq_repo.get_params.return_value[1]}
+
+
+@pytest.mark.asyncio
+async def test_overlapping_aave_lookups_for_one_protocol_share_one_read(
+    reader: PostgresCryptoLendingReader,
+    aave_liq_repo: MagicMock,
+) -> None:
+    """Allocations of one protocol computed together must cost one read, not one each.
+
+    They are computed inside a single ``asyncio.gather``, so their lookups overlap.
+    The second and third join the first's in-flight read instead of repeating it.
+    """
+    params = {1: LiquidationParams(1, Decimal("0.8"), Decimal("1.05"))}
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _blocking_read(protocol_id: int) -> dict[int, LiquidationParams]:
+        started.set()
+        await release.wait()
+        return params
+
+    aave_liq_repo.get_params = AsyncMock(side_effect=_blocking_read)
+    info = _aave_like_info()
+
+    lookups = [
+        asyncio.create_task(reader.get_liquidation_params(info, backed_asset_id=42, token_ids=[1])) for _ in range(3)
+    ]
+    await started.wait()
+    release.set()
+    results = await asyncio.gather(*lookups)
+
+    assert aave_liq_repo.get_params.await_count == 1
+    assert results == [params, params, params]
+
+    # And the window closes: a later lookup re-reads rather than serving a cached
+    # result, so a reserve change between requests is picked up.
+    await reader.get_liquidation_params(info, backed_asset_id=42, token_ids=[1])
+    assert aave_liq_repo.get_params.await_count == 2
 
 
 @pytest.mark.asyncio
