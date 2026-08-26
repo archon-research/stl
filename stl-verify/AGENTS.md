@@ -153,7 +153,6 @@ These apply to every language in the service (Go, Python, TS). Go-specific rules
     - **DO comment** the non-recoverable why: non-obvious invariant, workaround plus the bug it dodges, deliberate convention break, safety/ordering/locking constraint, units/scale the type can't express.
     - **Tests get no exemption** — don't narrate setup. Banner and numbered-step comments (`// 1. …`) are extraction signals, not comments; see Function composition.
     - **No history** — git tracks it, and no ticket archaeology. Describe current code, not what it replaced.
-    - **Nothing absent** — never explain what the code does *not* do: a flag left unpassed, an alternative rejected, a default deliberately untouched. No line anchors such a comment, so nothing prompts anyone to revisit it when the reason expires. That reasoning goes in the commit message or the PR.
     - When unsure, leave it out. Enforced in the Review phase: deleting is the reviewer's default for a comment that restates code or repeats a rationale.
 - **Libraries**:
     - Use the standard library as much as possible.
