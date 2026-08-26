@@ -596,7 +596,7 @@ makes them shaped so downstream SQL treats reference data as ordinary
 dimensions — they look like the old separate masters again, as regenerable read models rather
 than write surfaces:
 
-| view | key | what it serves |
+| table | key | what it serves |
 |---|---|---|
 | `dim_security` | `security_id, as_of_valid, as_of_system` | flattened classification — asset class, type, subtype, currency, status, issuer, ultimate parent, rating, jurisdiction; the shape `security_master` promised and never populated (UI-3) |
 | `dim_entity` | `entity_id, as_of_valid, as_of_system` | entity attributes plus the resolved group: parent, ultimate parent, domicile, sector, internal flag (derived, not stored) |
@@ -609,13 +609,13 @@ than write surfaces:
 | `evidence_package` | `record_id, as_of` | version history, provenance, correction chain, manifest, access/change logs for one record (NFR-7) |
 | alias lookup | `id_scheme, id_value` | public-identifier and holder-address resolution → node id |
 
-Contract properties: every view is keyed on the identity contract (§1), every view has an as-of
-form, and all views are **regenerable projections** — dropping and rebuilding them loses
+Contract properties: every table is keyed on the identity contract (§1), every table has an
+as-of form, and all of them are **regenerable projections** — dropping and rebuilding them loses
 nothing — whose rows carry the graph version / record ids they were resolved from, so a
 manifest can pin them (RP-4.2, RP-4.6). Per ADR-0006 §4, `_current` forms are **operational
 reads only**: anything a calculation or writer reads uses the `as_of(effective_at)` form with
 an explicit recorded parameter, never `now()`/`CURRENT_DATE` — a future-dated row visible in a
-snapshot would otherwise flip a later replay. The views join TigerData hypertables on stable
+snapshot would otherwise flip a later replay. The tables join TigerData hypertables on stable
 keys at the block's UTC date (§9.3). The combined master's tables are classified in
 `schema_master.json` from birth, so ADR-0006 §1's governance and conformance tests apply to
 them like every governed table. Materialization mechanics (tables vs views, refresh,
