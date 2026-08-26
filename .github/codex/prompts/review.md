@@ -80,10 +80,11 @@ Your final message must be exactly this markdown, and nothing else. Findings sor
 severe first. If you found nothing, keep the table header and write one row saying so.
 
 Severity: `B` blocking · `S` should-fix · `N` nit · `P` pre-existing. IDs are prefixed
-`L2-` so a later Claude pass (`L1-`) can never collide with them.
+`L3-` so the locally-run review passes (`L1-` Claude, `L2-` Codex via the stl-review
+skill) can never collide with them.
 
 ```markdown
-## L2 review — Codex
+## L3 review — Codex CI
 
 | | |
 |---|---|
@@ -95,8 +96,8 @@ Severity: `B` blocking · `S` should-fix · `N` nit · `P` pre-existing. IDs are
 ### Findings
 | ID | sev | where | claim | evidence |
 |----|-----|-------|-------|----------|
-| L2-B1 | blocking | migrations/0142.sql:1 | no self-registering INSERT — migration re-runs every invocation | file has no `INSERT INTO migrations`; 0141:88 has one |
-| L2-S1 | should-fix | price_backfill/main.go:40 | business logic in main() | main() is 140 lines, includes the clamp calculation |
+| L3-B1 | blocking | migrations/0142.sql:1 | no self-registering INSERT — migration re-runs every invocation | file has no `INSERT INTO migrations`; 0141:88 has one |
+| L3-S1 | should-fix | price_backfill/main.go:40 | business logic in main() | main() is 140 lines, includes the clamp calculation |
 ```
 
 Fill `engine` from `codex --version`, `model` and `reasoning` from your own run
