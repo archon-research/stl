@@ -46,9 +46,8 @@ resources:
   - ../../base/offchain-price-backfill
   - ../../base/reference-capital-indexer
   - ../../base/reference-capital-backfill
-  # CORE model runner (VEC-272). Staging-only for now: computes from the parquet
-  # snapshots baked into the python-api image, so its CRRs reflect the snapshot
-  # vintage, not live positions, until the live readers land (VEC-272 PR 3).
+  # CORE model runner (VEC-272). Now also deployed to prod (k8s/overlays/prod) —
+  # the live readers this waited on landed in VEC-272 PR 3.
   - ../../base/core-model-runner
   - ../../base/maple-graphql-indexer
   # On-demand one-shot VaultV2 repair worker (VEC-218). No Temporal schedule:
