@@ -521,18 +521,16 @@ groups:
         # healthy cycle always writes: the service fails a cycle whose covered
         # primes report exposure with no breakdown. Zero therefore means every
         # covered prime reported zero exposure — worth eyes either way.
+        # `unless` (not `== 0`) also fires when the counter series is entirely
+        # absent — a collector drop or metric rename — which `== 0` cannot.
         expr: |
-          (
-            sum by (cluster) (
-              rate(cronjob_runs_total{service_name="reference-capital-indexer", status="success", k8s_namespace_name="vector"}[1h])
-            ) > 0
-          )
-          and
-          (
-            sum by (cluster) (
-              increase(reference_capital_sync_allocations_written_total{k8s_namespace_name="vector"}[1h])
-            ) == 0
-          )
+          sum by (cluster) (
+            rate(cronjob_runs_total{service_name="reference-capital-indexer", status="success", k8s_namespace_name="vector"}[1h])
+          ) > 0
+          unless
+          sum by (cluster) (
+            increase(reference_capital_sync_allocations_written_total{k8s_namespace_name="vector"}[1h])
+          ) > 0
         for: 30m
         labels:
           team: vector
@@ -553,18 +551,16 @@ groups:
         # cycle always writes: the positions client fails on an empty result for
         # a covered prime, so zero here means the covered set itself was empty —
         # which WritesZero also catches — or the counter stopped moving.
+        # `unless` (not `== 0`) also fires when the counter series is entirely
+        # absent — a collector drop or metric rename — which `== 0` cannot.
         expr: |
-          (
-            sum by (cluster) (
-              rate(cronjob_runs_total{service_name="reference-capital-indexer", status="success", k8s_namespace_name="vector"}[1h])
-            ) > 0
-          )
-          and
-          (
-            sum by (cluster) (
-              increase(reference_capital_sync_positions_written_total{k8s_namespace_name="vector"}[1h])
-            ) == 0
-          )
+          sum by (cluster) (
+            rate(cronjob_runs_total{service_name="reference-capital-indexer", status="success", k8s_namespace_name="vector"}[1h])
+          ) > 0
+          unless
+          sum by (cluster) (
+            increase(reference_capital_sync_positions_written_total{k8s_namespace_name="vector"}[1h])
+          ) > 0
         for: 30m
         labels:
           team: vector

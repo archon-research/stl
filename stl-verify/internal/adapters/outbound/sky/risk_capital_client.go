@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/httpclient"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/skyenvelope"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -205,7 +206,7 @@ func (c *Client) fetchPrimeDetail(ctx context.Context, star string) (outbound.Ri
 		TokenizedJuniorRiskCapital: detail.TokenizedJRC.String(),
 		InternalSeniorRiskCapital:  detail.InternalSRC.String(),
 		ExternalSeniorRiskCapital:  detail.ExternalSRC.String(),
-		EncumbranceRatio:           optionalNumber(detail.EncumbranceRatio),
+		EncumbranceRatio:           skyenvelope.OptionalNumber(detail.EncumbranceRatio),
 		ExposureShare:              detail.TotalExposureShare.String(),
 		EPIUtilization:             detail.EPIUtilization.String(),
 		SPJUtilization:             detail.SPJUtilization.String(),
@@ -273,7 +274,7 @@ func (c *Client) fetchStarAllocations(ctx context.Context, star string) ([]outbo
 	}
 
 	results := payload.Data.Results
-	if err := requireFullPage(payload.Data.Pagination, len(results), allocationsPageLimit, requestURL); err != nil {
+	if err := skyenvelope.RequireFullPage(payload.Data.Pagination, len(results), allocationsPageLimit, requestURL); err != nil {
 		return nil, err
 	}
 
@@ -328,10 +329,10 @@ func toAllocationRow(star string, row allocationPayloadRow, index int) (outbound
 		Network:             network,
 		ChainID:             chainIDFor(network),
 		Symbol:              strings.TrimSpace(row.Symbol),
-		Name:                optionalText(row.Name),
+		Name:                skyenvelope.OptionalText(row.Name),
 		TokenAddress:        strings.TrimSpace(row.TokenAddress),
-		LoanTokenAddress:    optionalText(row.LoanTokenAddress),
-		LoanTokenSymbol:     optionalText(row.LoanTokenSymbol),
+		LoanTokenAddress:    skyenvelope.OptionalText(row.LoanTokenAddress),
+		LoanTokenSymbol:     skyenvelope.OptionalText(row.LoanTokenSymbol),
 		Exposure:            row.Exposure.String(),
 		RequiredRiskCapital: row.RRC.String(),
 		CRR:                 row.CRR.String(),
@@ -344,41 +345,6 @@ func chainIDFor(network string) *int64 {
 		return nil
 	}
 	return &id
-}
-
-// requireFullPage rejects a page that may be truncated, which would read as
-// rows that do not exist. With a usable total, a short page means the set
-// outgrew the limit; without one, a page at the limit cannot be told from a
-// cut-off one, so it is refused rather than served as a silent partial set.
-func requireFullPage(p *pagination, received, limit int, requestURL string) error {
-	if p != nil && p.Total != nil {
-		if *p.Total > received {
-			return fmt.Errorf(
-				"sky reported %d rows but returned %d; the page limit is too low: %s", *p.Total, received, requestURL)
-		}
-		return nil
-	}
-	if received >= limit {
-		return fmt.Errorf(
-			"sky returned a full page of %d rows with no usable total; the set may be truncated: %s", received, requestURL)
-	}
-	return nil
-}
-
-func optionalText(value string) *string {
-	trimmed := strings.TrimSpace(value)
-	if trimmed == "" {
-		return nil
-	}
-	return &trimmed
-}
-
-func optionalNumber(value json.Number) *string {
-	raw := strings.TrimSpace(value.String())
-	if raw == "" {
-		return nil
-	}
-	return &raw
 }
 
 type primesResponse struct {
@@ -397,13 +363,9 @@ type primeDetailResponse struct {
 
 type allocationsResponse struct {
 	Data struct {
-		Results    []allocationPayloadRow `json:"results"`
-		Pagination *pagination            `json:"pagination"`
+		Results    []allocationPayloadRow  `json:"results"`
+		Pagination *skyenvelope.Pagination `json:"pagination"`
 	} `json:"data"`
-}
-
-type pagination struct {
-	Total *int `json:"total"`
 }
 
 type allocationPayloadRow struct {

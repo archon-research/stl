@@ -3,6 +3,7 @@ package reference_capital_indexer
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -270,7 +271,11 @@ func newServiceWithSheets(
 }
 
 func newServiceWithDeps(deps Deps) *Service {
-	return NewService(deps, trackedStars, 7, func() time.Time { return syncedAt }, nil, nil)
+	service, err := NewService(deps, trackedStars, 7, func() time.Time { return syncedAt }, nil, nil)
+	if err != nil {
+		panic(err)
+	}
+	return service
 }
 
 func TestRunPersistsASnapshotPerUpstreamPrime(t *testing.T) {
@@ -423,7 +428,7 @@ func TestRunRecordsTheTrackedPrimesTheMonitorDoesCover(t *testing.T) {
 
 func TestRunFailsWhenNoPrimesAreTracked(t *testing.T) {
 	provider := &mockRiskProvider{rows: []outbound.RiskCapitalPrimeSnapshot{upstreamRow("spark")}}
-	service := NewService(
+	service, err := NewService(
 		defaultDeps(&mockPrimeRepo{primes: []entity.Prime{{ID: 1, Name: "spark"}}}, &mockCapitalRepo{}, provider),
 		nil,
 		7,
@@ -431,9 +436,28 @@ func TestRunFailsWhenNoPrimesAreTracked(t *testing.T) {
 		nil,
 		nil,
 	)
+	if err != nil {
+		t.Fatalf("NewService() = %v", err)
+	}
 
 	if err := service.Run(context.Background()); err == nil {
 		t.Fatal("Run() = nil, want an error")
+	}
+}
+
+// A forgotten Deps field must die at wiring time, not nil-deref mid-cycle
+// after rows were already persisted.
+func TestNewServiceRejectsAMissingPort(t *testing.T) {
+	deps := defaultDeps(&mockPrimeRepo{}, &mockCapitalRepo{}, &mockRiskProvider{})
+	deps.PositionRepo = nil
+
+	_, err := NewService(deps, trackedStars, 7, nil, nil, nil)
+
+	if err == nil {
+		t.Fatal("NewService() = nil, want an error naming the missing port")
+	}
+	if !strings.Contains(err.Error(), "PositionRepo") {
+		t.Errorf("error = %v, want it to name PositionRepo", err)
 	}
 }
 
@@ -761,5 +785,33 @@ func TestRunPropagatesAPositionPersistenceFailure(t *testing.T) {
 
 	if err := newServiceWithDeps(deps).Run(context.Background()); !errors.Is(err, errRepo) {
 		t.Fatalf("Run() = %v, want it to wrap %v", err, errRepo)
+	}
+}
+
+func TestRunFailsOnAPositionForAPrimeTheRegistryDoesNotKnow(t *testing.T) {
+	primes := &mockPrimeRepo{primes: []entity.Prime{{ID: 1, Name: "spark"}}}
+	provider := &mockRiskProvider{rows: []outbound.RiskCapitalPrimeSnapshot{upstreamRow("spark")}}
+	deps := defaultDeps(primes, &mockCapitalRepo{}, provider)
+	deps.PositionProvider = &mockPositionProvider{rows: []outbound.ReferencePositionRow{positionRow("newstar")}}
+
+	err := newServiceWithDeps(deps).Run(context.Background())
+
+	if err == nil {
+		t.Fatal("Run() = nil, want an error naming the unknown prime")
+	}
+}
+
+func TestRunFailsOnAnUnparseableExposure(t *testing.T) {
+	row := upstreamRow("spark")
+	row.Exposure = "n/a"
+	primes := &mockPrimeRepo{primes: []entity.Prime{{ID: 1, Name: "spark"}}}
+	provider := &mockRiskProvider{rows: []outbound.RiskCapitalPrimeSnapshot{row}}
+	deps := defaultDeps(primes, &mockCapitalRepo{}, provider)
+	deps.AllocationProvider = &mockAllocationProvider{rows: []outbound.RiskCapitalAllocationRow{}}
+
+	err := newServiceWithDeps(deps).Run(context.Background())
+
+	if err == nil {
+		t.Fatal("Run() = nil, want an error — an unparseable exposure must fail, not panic")
 	}
 }

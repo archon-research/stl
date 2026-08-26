@@ -38,18 +38,8 @@ func TestPrimeReferencePositionRepositoryPreservesEighteenDecimalPrecision(t *te
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 
-	var primeID int64
-	if err := pool.QueryRow(ctx, `
-		INSERT INTO prime (name, vault_address) VALUES ('spark-prp-precision', decode('aabbccddeeff00112233445566778899aabbcc05','hex'))
-		ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id`).Scan(&primeID); err != nil {
-		t.Fatalf("seeding prime: %v", err)
-	}
-
-	txm, err := NewTxManager(pool, nil)
-	if err != nil {
-		t.Fatalf("tx manager: %v", err)
-	}
-	repo := NewPrimeReferencePositionRepository(pool, txm, nil)
+	primeID := seedReferencePrime(t, ctx, pool, "spark-prp-precision")
+	repo := NewPrimeReferencePositionRepository(pool, newReferenceRepoTxm(t, pool), nil)
 	syncedAt := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 
 	if err := repo.SaveReferencePositions(ctx, []entity.PrimeReferencePosition{
@@ -73,18 +63,8 @@ func TestPrimeReferencePositionRepositoryKeepsOptionalFieldsNull(t *testing.T) {
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 
-	var primeID int64
-	if err := pool.QueryRow(ctx, `
-		INSERT INTO prime (name, vault_address) VALUES ('spark-prp-null', decode('aabbccddeeff00112233445566778899aabbcc06','hex'))
-		ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id`).Scan(&primeID); err != nil {
-		t.Fatalf("seeding prime: %v", err)
-	}
-
-	txm, err := NewTxManager(pool, nil)
-	if err != nil {
-		t.Fatalf("tx manager: %v", err)
-	}
-	repo := NewPrimeReferencePositionRepository(pool, txm, nil)
+	primeID := seedReferencePrime(t, ctx, pool, "spark-prp-null")
+	repo := NewPrimeReferencePositionRepository(pool, newReferenceRepoTxm(t, pool), nil)
 	position := referencePosition(primeID, time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC), 1)
 	position.ChainID = nil
 	position.TokenName = nil
@@ -114,18 +94,8 @@ func TestPrimeReferencePositionRepositoryIsIdempotentWithinABuild(t *testing.T) 
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 
-	var primeID int64
-	if err := pool.QueryRow(ctx, `
-		INSERT INTO prime (name, vault_address) VALUES ('spark-prp-idem', decode('aabbccddeeff00112233445566778899aabbcc07','hex'))
-		ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id`).Scan(&primeID); err != nil {
-		t.Fatalf("seeding prime: %v", err)
-	}
-
-	txm, err := NewTxManager(pool, nil)
-	if err != nil {
-		t.Fatalf("tx manager: %v", err)
-	}
-	repo := NewPrimeReferencePositionRepository(pool, txm, nil)
+	primeID := seedReferencePrime(t, ctx, pool, "spark-prp-idem")
+	repo := NewPrimeReferencePositionRepository(pool, newReferenceRepoTxm(t, pool), nil)
 	position := referencePosition(primeID, time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC), 1)
 
 	for range 2 {
@@ -150,18 +120,8 @@ func TestPrimeReferencePositionRepositoryAppendsACorrectionForANewBuild(t *testi
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 
-	var primeID int64
-	if err := pool.QueryRow(ctx, `
-		INSERT INTO prime (name, vault_address) VALUES ('spark-prp-correction', decode('aabbccddeeff00112233445566778899aabbcc08','hex'))
-		ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id`).Scan(&primeID); err != nil {
-		t.Fatalf("seeding prime: %v", err)
-	}
-
-	txm, err := NewTxManager(pool, nil)
-	if err != nil {
-		t.Fatalf("tx manager: %v", err)
-	}
-	repo := NewPrimeReferencePositionRepository(pool, txm, nil)
+	primeID := seedReferencePrime(t, ctx, pool, "spark-prp-correction")
+	repo := NewPrimeReferencePositionRepository(pool, newReferenceRepoTxm(t, pool), nil)
 	syncedAt := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 
 	for _, buildID := range []int{1, 2} {

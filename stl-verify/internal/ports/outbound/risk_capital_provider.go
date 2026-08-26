@@ -1,6 +1,10 @@
 package outbound
 
-import "context"
+import (
+	"context"
+
+	"github.com/archon-research/stl/stl-verify/internal/domain/entity"
+)
 
 // RiskCapitalPrimeSnapshot is one prime's risk-capital figures from an upstream
 // monitor, as decimal strings exactly as reported.
@@ -77,4 +81,9 @@ type RiskCapitalAllocationProvider interface {
 	// is zero; the caller owns that cross-check because exposure arrives on the
 	// snapshot, not here.
 	FetchPrimeAllocations(ctx context.Context, stars []string) ([]RiskCapitalAllocationRow, error)
+}
+
+// PrimeCapitalStackAllocationRepository persists per-allocation breakdown rows.
+type PrimeCapitalStackAllocationRepository interface {
+	SaveCapitalStackAllocations(ctx context.Context, allocations []entity.PrimeCapitalStackAllocation) error
 }

@@ -34,7 +34,7 @@ type PrimeCapitalStackAllocation struct {
 
 	ExposureUSD            string
 	RequiredRiskCapitalUSD string
-	CRR                    string
+	CRR                    string // 0-1 fraction, not percent
 
 	Source  string
 	BuildID int

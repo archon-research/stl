@@ -10,8 +10,3 @@ import (
 type PrimeCapitalStackRepository interface {
 	SavePrimeCapitalSnapshots(ctx context.Context, snapshots []entity.PrimeCapitalStackSnapshot) error
 }
-
-// PrimeCapitalStackAllocationRepository persists per-allocation breakdown rows.
-type PrimeCapitalStackAllocationRepository interface {
-	SaveCapitalStackAllocations(ctx context.Context, allocations []entity.PrimeCapitalStackAllocation) error
-}

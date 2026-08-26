@@ -36,7 +36,8 @@ type Service struct {
 }
 
 // Deps holds the service's ports. A struct rather than positional arguments:
-// several ports share a shape, and named fields block a silent swap.
+// nine ports is past the arity where call sites stay legible, and the same
+// client legitimately fills two slots — named fields keep that intent visible.
 type Deps struct {
 	PrimeRepo          outbound.PrimeRepository
 	CapitalRepo        outbound.PrimeCapitalStackRepository
@@ -61,7 +62,12 @@ func NewService(
 	now Clock,
 	telemetry *Telemetry,
 	logger *slog.Logger,
-) *Service {
+) (*Service, error) {
+	// A forgotten Deps field would otherwise nil-deref mid-cycle, after rows
+	// were already persisted; misconstruction must die at wiring time instead.
+	if err := deps.validate(); err != nil {
+		return nil, err
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -75,7 +81,33 @@ func NewService(
 		now:          now,
 		telemetry:    telemetry,
 		logger:       logger.With("component", "reference-capital-indexer"),
+	}, nil
+}
+
+func (d Deps) validate() error {
+	missing := []string{}
+	for _, port := range []struct {
+		name string
+		set  bool
+	}{
+		{"PrimeRepo", d.PrimeRepo != nil},
+		{"CapitalRepo", d.CapitalRepo != nil},
+		{"RiskProvider", d.RiskProvider != nil},
+		{"AllocationProvider", d.AllocationProvider != nil},
+		{"AllocationRepo", d.AllocationRepo != nil},
+		{"SheetRepo", d.SheetRepo != nil},
+		{"SheetProvider", d.SheetProvider != nil},
+		{"PositionProvider", d.PositionProvider != nil},
+		{"PositionRepo", d.PositionRepo != nil},
+	} {
+		if !port.set {
+			missing = append(missing, port.name)
+		}
 	}
+	if len(missing) > 0 {
+		return fmt.Errorf("reference capital indexer wired without: %s", strings.Join(missing, ", "))
+	}
+	return nil
 }
 
 // Run observes the upstream monitor once and appends what it reported.
@@ -89,106 +121,139 @@ func (s *Service) Run(ctx context.Context) error {
 		return err
 	}
 
-	rows, err := s.deps.RiskProvider.FetchPrimeSnapshots(ctx, s.trackedStars)
+	obs, err := s.observeUpstream(ctx)
 	if err != nil {
-		return fmt.Errorf("fetching prime snapshots: %w", err)
+		return err
 	}
-	if len(rows) == 0 {
-		// The monitor covers every prime STL tracks today, so covering none means
-		// the feed broke or its vocabulary drifted. That must not read as
-		// "nothing to do", which would leave a silent hole in the series.
-		return fmt.Errorf("upstream monitor covered none of the %d tracked primes", len(s.trackedStars))
-	}
-
-	s.reportUncovered(ctx, rows)
 
 	// One timestamp per cycle, shared by every table it writes, so the
 	// prime-level totals and their breakdowns join exactly on synced_at.
 	syncedAt := s.now().UTC()
 
-	snapshots, err := s.toSnapshots(rows, primeIDs, syncedAt)
+	snapshots, err := s.toSnapshots(obs.snapshots, primeIDs, syncedAt)
+	if err != nil {
+		return err
+	}
+	allocations, err := s.toAllocations(obs.allocations, primeIDs, syncedAt)
+	if err != nil {
+		return err
+	}
+	positions, err := s.toPositions(obs.positions, primeIDs, syncedAt)
+	if err != nil {
+		return err
+	}
+	sheets, err := s.toBalanceSheets(obs.balanceSheetDays, primeIDs)
 	if err != nil {
 		return err
 	}
 
-	if err := s.deps.CapitalRepo.SavePrimeCapitalSnapshots(ctx, snapshots); err != nil {
-		return fmt.Errorf("saving capital stack snapshots: %w", err)
-	}
-
-	s.telemetry.RecordSnapshotsWritten(ctx, len(snapshots))
-
-	if err := s.recordAllocations(ctx, rows, primeIDs, syncedAt); err != nil {
+	if err := s.persistCycle(ctx, snapshots, allocations, positions, sheets); err != nil {
 		return err
 	}
 
-	if err := s.recordPositions(ctx, rows, primeIDs, syncedAt); err != nil {
-		return err
-	}
-
-	if err := s.recordBalanceSheet(ctx, primeIDs); err != nil {
-		return err
-	}
-
-	s.logger.Info("capital stack sync complete", "snapshots", len(snapshots))
+	s.logger.Info("capital stack sync complete",
+		"snapshots", len(snapshots), "allocations", len(allocations),
+		"positions", len(positions), "balance_sheet_days", len(sheets))
 	return nil
 }
 
-// recordAllocations persists the per-allocation breakdown behind the cycle's
-// snapshots. Fetched only for the stars this cycle's snapshots cover: the
-// breakdown route answers an unknown star with a 500 indistinguishable from a
-// genuine fault.
-func (s *Service) recordAllocations(
+// cycleObservation is everything one cycle read from upstream, gathered before
+// anything is persisted.
+type cycleObservation struct {
+	snapshots        []outbound.RiskCapitalPrimeSnapshot
+	allocations      []outbound.RiskCapitalAllocationRow
+	positions        []outbound.ReferencePositionRow
+	balanceSheetDays []outbound.BalanceSheetDay
+}
+
+// observeUpstream completes every upstream read before the first save: the
+// tables are append-only and each attempt stamps a fresh synced_at, so a cycle
+// failing after a partial persist would strand healthy-looking rows that no
+// retry can repair or join.
+//
+// The breakdown and positions are fetched only for the stars this cycle's
+// snapshots cover: the breakdown route answers an unknown star with a 500
+// indistinguishable from a fault, and the positions feed answers one with an
+// empty list indistinguishable from a prime holding nothing.
+//
+// The balance-sheet window is short because the backfill seeded the year: it
+// only closes the gap since the last cycle, plus a day's slack for one that
+// did not run. The provider drops the current UTC day, so a run before
+// upstream has published yesterday finds nothing new, which is not an error.
+func (s *Service) observeUpstream(ctx context.Context) (cycleObservation, error) {
+	snapshots, err := s.deps.RiskProvider.FetchPrimeSnapshots(ctx, s.trackedStars)
+	if err != nil {
+		return cycleObservation{}, fmt.Errorf("fetching prime snapshots: %w", err)
+	}
+	if len(snapshots) == 0 {
+		// The monitor covers every prime STL tracks today, so covering none means
+		// the feed broke or its vocabulary drifted. That must not read as
+		// "nothing to do", which would leave a silent hole in the series.
+		return cycleObservation{}, fmt.Errorf("upstream monitor covered none of the %d tracked primes", len(s.trackedStars))
+	}
+
+	s.reportUncovered(ctx, snapshots)
+	stars := coveredStars(snapshots)
+
+	allocations, err := s.deps.AllocationProvider.FetchPrimeAllocations(ctx, stars)
+	if err != nil {
+		return cycleObservation{}, fmt.Errorf("fetching prime allocations: %w", err)
+	}
+	if err := requireBreakdownCoverage(snapshots, allocations); err != nil {
+		return cycleObservation{}, err
+	}
+
+	positions, err := s.deps.PositionProvider.FetchPositions(ctx, stars)
+	if err != nil {
+		return cycleObservation{}, fmt.Errorf("fetching reference positions: %w", err)
+	}
+
+	days, err := s.deps.SheetProvider.FetchHistory(ctx, s.trackedStars, balanceSheetLookbackDays)
+	if err != nil {
+		return cycleObservation{}, fmt.Errorf("fetching balance-sheet history: %w", err)
+	}
+
+	return cycleObservation{
+		snapshots:        snapshots,
+		allocations:      allocations,
+		positions:        positions,
+		balanceSheetDays: days,
+	}, nil
+}
+
+// persistCycle saves what the cycle observed, counting each table as it lands.
+// A save failure still strands the earlier tables' rows at this synced_at —
+// narrower than a fetch failure would have been, and bounded by the database
+// being down rather than by either upstream.
+func (s *Service) persistCycle(
 	ctx context.Context,
-	snapshots []outbound.RiskCapitalPrimeSnapshot,
-	primeIDs map[string]int64,
-	syncedAt time.Time,
+	snapshots []entity.PrimeCapitalStackSnapshot,
+	allocations []entity.PrimeCapitalStackAllocation,
+	positions []entity.PrimeReferencePosition,
+	sheets []entity.PrimeBalanceSheetSnapshot,
 ) error {
-	rows, err := s.deps.AllocationProvider.FetchPrimeAllocations(ctx, coveredStars(snapshots))
-	if err != nil {
-		return fmt.Errorf("fetching prime allocations: %w", err)
+	if err := s.deps.CapitalRepo.SavePrimeCapitalSnapshots(ctx, snapshots); err != nil {
+		return fmt.Errorf("saving capital stack snapshots: %w", err)
 	}
-
-	if err := requireBreakdownCoverage(snapshots, rows); err != nil {
-		return err
-	}
-
-	allocations, err := s.toAllocations(rows, primeIDs, syncedAt)
-	if err != nil {
-		return err
-	}
+	s.telemetry.RecordSnapshotsWritten(ctx, len(snapshots))
 
 	if err := s.deps.AllocationRepo.SaveCapitalStackAllocations(ctx, allocations); err != nil {
 		return fmt.Errorf("saving capital stack allocations: %w", err)
 	}
-
 	s.telemetry.RecordAllocationsWritten(ctx, len(allocations))
-	return nil
-}
-
-// recordPositions persists the cycle's balance-sheet positions. Fetched only
-// for the stars this cycle's snapshots cover: the feed answers an unknown star
-// with an empty list, so coverage must be established before asking.
-func (s *Service) recordPositions(
-	ctx context.Context,
-	snapshots []outbound.RiskCapitalPrimeSnapshot,
-	primeIDs map[string]int64,
-	syncedAt time.Time,
-) error {
-	rows, err := s.deps.PositionProvider.FetchPositions(ctx, coveredStars(snapshots))
-	if err != nil {
-		return fmt.Errorf("fetching reference positions: %w", err)
-	}
-
-	positions, err := s.toPositions(rows, primeIDs, syncedAt)
-	if err != nil {
-		return err
-	}
 
 	if err := s.deps.PositionRepo.SaveReferencePositions(ctx, positions); err != nil {
 		return fmt.Errorf("saving reference positions: %w", err)
 	}
-
 	s.telemetry.RecordPositionsWritten(ctx, len(positions))
+
+	if len(sheets) == 0 {
+		return nil
+	}
+	if err := s.deps.SheetRepo.SaveBalanceSheetSnapshots(ctx, sheets); err != nil {
+		return fmt.Errorf("saving balance sheet snapshots: %w", err)
+	}
+	s.logger.Info("balance sheet advanced", "days", len(sheets))
 	return nil
 }
 
@@ -299,42 +364,13 @@ func normalizedStar(star string) string {
 	return strings.ToLower(strings.TrimSpace(star))
 }
 
-// recordBalanceSheet advances the daily balance sheet, whose figures the monitor
-// does not carry — assets_usd among them.
-//
-// The window is short because the backfill seeded the year: this only has to
-// close the gap since the last cycle, plus a day's slack for a cycle that did
-// not run. The provider drops the current UTC day, so a run before upstream has
-// published yesterday finds nothing new, which is not an error.
-func (s *Service) recordBalanceSheet(ctx context.Context, primeIDs map[string]int64) error {
-	days, err := s.deps.SheetProvider.FetchHistory(ctx, s.trackedStars, balanceSheetLookbackDays)
-	if err != nil {
-		return fmt.Errorf("fetching balance-sheet history: %w", err)
-	}
-
-	sheets, err := s.toBalanceSheets(days, primeIDs)
-	if err != nil {
-		return err
-	}
-	if len(sheets) == 0 {
-		return nil
-	}
-
-	if err := s.deps.SheetRepo.SaveBalanceSheetSnapshots(ctx, sheets); err != nil {
-		return fmt.Errorf("saving balance sheet snapshots: %w", err)
-	}
-
-	s.logger.Info("balance sheet advanced", "days", len(sheets))
-	return nil
-}
-
 func (s *Service) toBalanceSheets(
 	days []outbound.BalanceSheetDay,
 	primeIDs map[string]int64,
 ) ([]entity.PrimeBalanceSheetSnapshot, error) {
 	sheets := make([]entity.PrimeBalanceSheetSnapshot, 0, len(days))
 	for _, day := range days {
-		primeID, ok := primeIDs[strings.ToLower(strings.TrimSpace(day.Star))]
+		primeID, ok := primeIDs[normalizedStar(day.Star)]
 		if !ok {
 			return nil, fmt.Errorf("balance-sheet feed reported unknown prime %q", day.Star)
 		}
@@ -369,11 +405,11 @@ func (s *Service) toBalanceSheets(
 func (s *Service) reportUncovered(ctx context.Context, rows []outbound.RiskCapitalPrimeSnapshot) {
 	covered := make(map[string]bool, len(rows))
 	for _, row := range rows {
-		covered[strings.ToLower(strings.TrimSpace(row.Star))] = true
+		covered[normalizedStar(row.Star)] = true
 	}
 
 	for _, star := range s.trackedStars {
-		normalized := strings.ToLower(strings.TrimSpace(star))
+		normalized := normalizedStar(star)
 		if covered[normalized] {
 			continue
 		}
@@ -394,7 +430,7 @@ func (s *Service) primeIDsByName(ctx context.Context) (map[string]int64, error) 
 
 	byName := make(map[string]int64, len(primes))
 	for _, p := range primes {
-		byName[strings.ToLower(strings.TrimSpace(p.Name))] = p.ID
+		byName[normalizedStar(p.Name)] = p.ID
 	}
 	return byName, nil
 }
@@ -409,7 +445,7 @@ func (s *Service) toSnapshots(
 		// A star the prime registry does not know is a naming drift or a prime
 		// added upstream. Skipping it would leave a hole that looks identical to
 		// a prime the monitor stopped covering, so the cycle fails and retries.
-		primeID, ok := primeIDs[strings.ToLower(strings.TrimSpace(row.Star))]
+		primeID, ok := primeIDs[normalizedStar(row.Star)]
 		if !ok {
 			return nil, fmt.Errorf("upstream monitor reported unknown prime %q", row.Star)
 		}

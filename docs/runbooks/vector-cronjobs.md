@@ -809,6 +809,12 @@ successful cycle writing zero rows therefore means the covered set itself was
 empty (which `WritesZero` also catches) or the counter stopped moving while
 writes continue, which points at telemetry wiring rather than data.
 
+**A third failure mode this alert cannot catch.** A prime the Star monitor
+covers but this positions feed does not carry makes every cycle fail loudly
+instead — `VectorCronjobRunFailing` fires, not this alert. The escape hatch is
+a deliberate team decision to gate positions on the positions feed's own
+coverage — a code change, never a silent skip.
+
 **Triage.**
 
 1. Confirm the worker is cycling:

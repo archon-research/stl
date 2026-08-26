@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/archon-research/stl/stl-verify/internal/pkg/httpclient"
+	"github.com/archon-research/stl/stl-verify/internal/pkg/skyenvelope"
 	"github.com/archon-research/stl/stl-verify/internal/ports/outbound"
 )
 
@@ -229,7 +230,7 @@ func (c *Client) fetchStarPositions(ctx context.Context, star string) ([]outboun
 		return nil, fmt.Errorf(
 			"sky positions feed returned no rows for prime %q; an untracked star and an empty holder are indistinguishable, so this fails rather than recording an empty balance sheet", star)
 	}
-	if err := requireFullPage(payload.Data.Pagination, len(results), positionsPageLimit, requestURL); err != nil {
+	if err := skyenvelope.RequireFullPage(payload.Data.Pagination, len(results), positionsPageLimit, requestURL); err != nil {
 		return nil, err
 	}
 
@@ -281,11 +282,11 @@ func toPositionRow(star string, row positionPayloadRow, index int) (outbound.Ref
 		Network:         network,
 		ChainID:         chainIDFor(network),
 		TokenSymbol:     strings.TrimSpace(row.TokenSymbol),
-		TokenName:       optionalText(row.TokenName),
+		TokenName:       skyenvelope.OptionalText(row.TokenName),
 		TokenAddress:    strings.TrimSpace(row.Address),
 		Assets:          row.Assets.String(),
-		AllocatedAssets: optionalNumberText(row.AllocatedAssets),
-		IdleAssets:      optionalNumberText(row.IdleAssets),
+		AllocatedAssets: skyenvelope.OptionalNumber(row.AllocatedAssets),
+		IdleAssets:      skyenvelope.OptionalNumber(row.IdleAssets),
 	}, nil
 }
 
@@ -295,41 +296,6 @@ func chainIDFor(network string) *int64 {
 		return nil
 	}
 	return &id
-}
-
-// requireFullPage rejects a page that may be truncated, which would read as
-// rows that do not exist. With a usable total, a short page means the set
-// outgrew the limit; without one, a page at the limit cannot be told from a
-// cut-off one, so it is refused rather than served as a silent partial set.
-func requireFullPage(p *pagination, received, limit int, requestURL string) error {
-	if p != nil && p.Total != nil {
-		if *p.Total > received {
-			return fmt.Errorf(
-				"sky reported %d rows but returned %d; the page limit is too low: %s", *p.Total, received, requestURL)
-		}
-		return nil
-	}
-	if received >= limit {
-		return fmt.Errorf(
-			"sky returned a full page of %d rows with no usable total; the set may be truncated: %s", received, requestURL)
-	}
-	return nil
-}
-
-func optionalText(value string) *string {
-	trimmed := strings.TrimSpace(value)
-	if trimmed == "" {
-		return nil
-	}
-	return &trimmed
-}
-
-func optionalNumberText(value json.Number) *string {
-	raw := strings.TrimSpace(value.String())
-	if raw == "" {
-		return nil
-	}
-	return &raw
 }
 
 type historicResponse struct {
@@ -349,13 +315,9 @@ type historicRow struct {
 
 type positionsResponse struct {
 	Data struct {
-		Results    []positionPayloadRow `json:"results"`
-		Pagination *pagination          `json:"pagination"`
+		Results    []positionPayloadRow    `json:"results"`
+		Pagination *skyenvelope.Pagination `json:"pagination"`
 	} `json:"data"`
-}
-
-type pagination struct {
-	Total *int `json:"total"`
 }
 
 type positionPayloadRow struct {

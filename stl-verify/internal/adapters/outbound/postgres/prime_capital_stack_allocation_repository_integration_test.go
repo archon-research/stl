@@ -40,18 +40,8 @@ func TestPrimeCapitalStackAllocationRepositoryPreservesEighteenDecimalPrecision(
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 
-	var primeID int64
-	if err := pool.QueryRow(ctx, `
-		INSERT INTO prime (name, vault_address) VALUES ('spark-pcsa-precision', decode('aabbccddeeff00112233445566778899aabbcc01','hex'))
-		ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id`).Scan(&primeID); err != nil {
-		t.Fatalf("seeding prime: %v", err)
-	}
-
-	txm, err := NewTxManager(pool, nil)
-	if err != nil {
-		t.Fatalf("tx manager: %v", err)
-	}
-	repo := NewPrimeCapitalStackAllocationRepository(pool, txm, nil)
+	primeID := seedReferencePrime(t, ctx, pool, "spark-pcsa-precision")
+	repo := NewPrimeCapitalStackAllocationRepository(pool, newReferenceRepoTxm(t, pool), nil)
 	syncedAt := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 
 	if err := repo.SaveCapitalStackAllocations(ctx, []entity.PrimeCapitalStackAllocation{
@@ -83,18 +73,8 @@ func TestPrimeCapitalStackAllocationRepositoryKeepsOptionalFieldsNull(t *testing
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 
-	var primeID int64
-	if err := pool.QueryRow(ctx, `
-		INSERT INTO prime (name, vault_address) VALUES ('spark-pcsa-null', decode('aabbccddeeff00112233445566778899aabbcc02','hex'))
-		ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id`).Scan(&primeID); err != nil {
-		t.Fatalf("seeding prime: %v", err)
-	}
-
-	txm, err := NewTxManager(pool, nil)
-	if err != nil {
-		t.Fatalf("tx manager: %v", err)
-	}
-	repo := NewPrimeCapitalStackAllocationRepository(pool, txm, nil)
+	primeID := seedReferencePrime(t, ctx, pool, "spark-pcsa-null")
+	repo := NewPrimeCapitalStackAllocationRepository(pool, newReferenceRepoTxm(t, pool), nil)
 	allocation := capitalStackAllocation(primeID, time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC), 1)
 	allocation.ChainID = nil
 	allocation.Name = nil
@@ -124,18 +104,8 @@ func TestPrimeCapitalStackAllocationRepositoryIsIdempotentWithinABuild(t *testin
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 
-	var primeID int64
-	if err := pool.QueryRow(ctx, `
-		INSERT INTO prime (name, vault_address) VALUES ('spark-pcsa-idem', decode('aabbccddeeff00112233445566778899aabbcc03','hex'))
-		ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id`).Scan(&primeID); err != nil {
-		t.Fatalf("seeding prime: %v", err)
-	}
-
-	txm, err := NewTxManager(pool, nil)
-	if err != nil {
-		t.Fatalf("tx manager: %v", err)
-	}
-	repo := NewPrimeCapitalStackAllocationRepository(pool, txm, nil)
+	primeID := seedReferencePrime(t, ctx, pool, "spark-pcsa-idem")
+	repo := NewPrimeCapitalStackAllocationRepository(pool, newReferenceRepoTxm(t, pool), nil)
 	allocation := capitalStackAllocation(primeID, time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC), 1)
 
 	for range 2 {
@@ -160,18 +130,8 @@ func TestPrimeCapitalStackAllocationRepositoryAppendsACorrectionForANewBuild(t *
 	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
 	defer cleanup()
 
-	var primeID int64
-	if err := pool.QueryRow(ctx, `
-		INSERT INTO prime (name, vault_address) VALUES ('spark-pcsa-correction', decode('aabbccddeeff00112233445566778899aabbcc04','hex'))
-		ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id`).Scan(&primeID); err != nil {
-		t.Fatalf("seeding prime: %v", err)
-	}
-
-	txm, err := NewTxManager(pool, nil)
-	if err != nil {
-		t.Fatalf("tx manager: %v", err)
-	}
-	repo := NewPrimeCapitalStackAllocationRepository(pool, txm, nil)
+	primeID := seedReferencePrime(t, ctx, pool, "spark-pcsa-correction")
+	repo := NewPrimeCapitalStackAllocationRepository(pool, newReferenceRepoTxm(t, pool), nil)
 	syncedAt := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 
 	for _, buildID := range []int{1, 2} {
@@ -199,5 +159,34 @@ func TestPrimeCapitalStackAllocationRepositoryAppendsACorrectionForANewBuild(t *
 	}
 	if len(versions) != 2 || versions[0] != 0 || versions[1] != 1 {
 		t.Errorf("processing_versions = %v, want [0 1]", versions)
+	}
+}
+
+// network is a PK component alongside token_address, unlike the sibling
+// prime_capital_stack table — a key regression collapsing to token_address
+// would still pass every single-row test above.
+func TestPrimeCapitalStackAllocationRepositoryKeepsSameTokenOnTwoNetworksDistinct(t *testing.T) {
+	ctx := context.Background()
+	pool, _, cleanup := testutil.SetupTestDB(t, sharedDSN)
+	defer cleanup()
+
+	primeID := seedReferencePrime(t, ctx, pool, "spark-pcsa-two-networks")
+	repo := NewPrimeCapitalStackAllocationRepository(pool, newReferenceRepoTxm(t, pool), nil)
+	syncedAt := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+
+	ethereum := capitalStackAllocation(primeID, syncedAt, 1)
+	base := capitalStackAllocation(primeID, syncedAt, 1)
+	base.Network = "base"
+
+	if err := repo.SaveCapitalStackAllocations(ctx, []entity.PrimeCapitalStackAllocation{ethereum, base}); err != nil {
+		t.Fatalf("SaveCapitalStackAllocations() = %v", err)
+	}
+
+	var rows int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM prime_capital_stack_allocation WHERE prime_id = $1`, primeID).Scan(&rows); err != nil {
+		t.Fatalf("counting: %v", err)
+	}
+	if rows != 2 {
+		t.Errorf("wrote %d rows for the same token on two networks, want 2", rows)
 	}
 }

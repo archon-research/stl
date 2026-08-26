@@ -33,10 +33,12 @@ type ReferencePositionRow struct {
 // upstream feed.
 type ReferencePositionProvider interface {
 	// FetchPositions returns every position the feed holds for each of `stars`.
-	// The caller must pass only stars whose coverage is already established
-	// (the feed answers an unknown star with 200 and an empty list, so an empty
-	// result cannot be told apart from a prime that holds nothing); a passed
-	// star returning zero rows therefore fails rather than reading as empty.
+	// The feed answers an unknown star with 200 and an empty list, so a passed
+	// star returning zero rows fails the fetch rather than reading as empty.
+	// Callers pass stars the Star risk monitor covers — a different feed — so a
+	// prime the monitor covers but this feed does not carry will fail every
+	// cycle loudly until someone decides otherwise (see the PositionsZero
+	// runbook).
 	FetchPositions(ctx context.Context, stars []string) ([]ReferencePositionRow, error)
 }
 
